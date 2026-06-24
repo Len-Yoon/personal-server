@@ -1,0 +1,61 @@
+
+# Python
+
+.venv/
+
+venv/
+
+__pycache__/
+
+*.pyc
+
+*.pyo
+
+*.pyd
+
+.Python
+
+.pytest_cache/
+
+.mypy_cache/
+
+# Env / Secrets
+
+.env
+
+.env.*
+
+*.key
+
+*.pem
+
+# Docker / Runtime data
+
+data/
+
+logs/
+
+*.log
+
+# OS / IDE
+
+.DS_Store
+
+.idea/
+
+.vscode/
+
+# Node / frontend future
+
+node_modules/
+
+dist/
+
+build/
+
+# Local database future
+
+*.sqlite3
+
+*.db
+

@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ title }}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div class="background-orb orb-one"></div>
+<div class="background-orb orb-two"></div>
+<div class="background-orb orb-three"></div>
+
+<main class="container">
+    {% block content %}{% endblock %}
+</main>
+
+<footer class="footer">
+    <span>personal-server</span>
+    <span>Len Private Workspace</span>
+</footer>
+</body>
+</html>

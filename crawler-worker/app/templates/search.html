@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="hero compact">
+    <div class="hero-badge">{{ result.category }}</div>
+
+    <h1>{{ result.label }}</h1>
+
+    <p>{{ result.description }}</p>
+</section>
+
+<section class="service-section">
+    <div class="section-header">
+        <div>
+            <h2>수집 결과</h2>
+            <p>{{ result.count }}개의 뉴스를 가져왔습니다.</p>
+        </div>
+
+        <a class="text-link" href="/">카테고리로 돌아가기</a>
+    </div>
+
+    <div class="category-tabs">
+        {% for category in categories %}
+            <a
+                class="{% if category.code == result.category %}active{% endif %}"
+                href="/category?category={{ category.code }}"
+            >
+                {{ category.label }}
+            </a>
+        {% endfor %}
+    </div>
+
+    <section class="news-list">
+        {% for article in result.articles %}
+            <article class="news-card">
+                <div class="news-meta-row">
+                    <span class="status-badge">{{ article.provider }}</span>
+                    <span>{{ article.source }}</span>
+                </div>
+
+                <h3>{{ article.title }}</h3>
+
+                {% if article.published_at %}
+                    <p class="published-at">{{ article.published_at }}</p>
+                {% endif %}
+
+                {% if article.summary %}
+                    <p class="summary">{{ article.summary }}</p>
+                {% endif %}
+
+                {% if article.url %}
+                    <a class="article-link" href="{{ article.url }}" target="_blank">
+                        원문 보기 →
+                    </a>
+                {% endif %}
+            </article>
+        {% endfor %}
+    </section>
+</section>
+{% endblock %}

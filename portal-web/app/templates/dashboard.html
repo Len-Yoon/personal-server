@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="hero">
+    <div class="hero-badge">PERSONAL SERVER</div>
+
+    <h1>Len의 개인서버</h1>
+
+    <p>
+        뉴스 수집, 유튜브 메모, 자동매매 기록을 관리하는
+        개인용 서비스 허브입니다.
+    </p>
+</section>
+
+<section class="service-section">
+    <div class="section-header">
+        <div>
+            <h2>서비스 목록</h2>
+            <p>필요한 서비스를 선택해 이동합니다.</p>
+        </div>
+
+        <span class="server-status">LOCAL RUNNING</span>
+    </div>
+
+    <div class="service-grid three">
+        {% for service in services %}
+            <a class="service-card {% if service.status != '운영중' %}disabled{% endif %}" href="{{ service.url }}">
+                <div class="card-top">
+                    <div class="service-icon">
+                        {{ service.icon }}
+                    </div>
+
+                    <span class="status-badge">
+                        {{ service.status }}
+                    </span>
+                </div>
+
+                <div class="card-body">
+                    <span class="service-meta">{{ service.meta }}</span>
+                    <h3>{{ service.name }}</h3>
+                    <p>{{ service.description }}</p>
+                </div>
+
+                <div class="card-footer">
+                    <span>서비스 열기</span>
+                    <span class="arrow">→</span>
+                </div>
+            </a>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}

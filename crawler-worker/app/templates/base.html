@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ title }}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div class="background-orb orb-one"></div>
+<div class="background-orb orb-two"></div>
+<div class="background-orb orb-three"></div>
+
+<header class="app-header">
+    <a class="home-pill" href="http://lenserver.com" aria-label="메인으로 이동">
+        <span class="home-icon">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 10.8L12 3l9 7.8v9.7a.5.5 0 0 1-.5.5h-5.2a.5.5 0 0 1-.5-.5v-5.4H9.2v5.4a.5.5 0 0 1-.5.5H3.5a.5.5 0 0 1-.5-.5v-9.7z"/>
+            </svg>
+        </span>
+        <span>Home</span>
+    </a>
+
+    <div class="app-brand">
+        <span class="brand-dot"></span>
+        <span>Global Market News Hub</span>
+    </div>
+</header>
+
+<main class="container">
+    {% block content %}{% endblock %}
+</main>
+
+<footer class="footer">
+    <span>crawler-worker</span>
+    <span>Global Market News Hub</span>
+</footer>
+</body>
+</html>

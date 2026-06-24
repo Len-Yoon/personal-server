@@ -1,0 +1,41 @@
+services:
+  nginx-proxy-manager:
+    image: jc21/nginx-proxy-manager:latest
+    container_name: nginx-proxy-manager
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "81:81"
+      - "443:443"
+    volumes:
+      - ./data/npm/data:/data
+      - ./data/npm/letsencrypt:/etc/letsencrypt
+
+  portal-web:
+    build: ./portal-web
+    container_name: portal-web
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./portal-web:/app
+
+  crawler-worker:
+    build: ./crawler-worker
+    container_name: crawler-worker
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./crawler-worker:/app
+      - ./data/logs:/app/data/logs
+
+  youtube-memo:
+    build: ./youtube-memo
+    container_name: youtube-memo
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./youtube-memo:/app
+      - ./data/logs:/app/data/logs
