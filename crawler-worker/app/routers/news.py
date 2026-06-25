@@ -37,8 +37,13 @@ def home(request: Request):
 def category_page(
     request: Request,
     category: str = Query(default="WORLD"),
+    refresh: bool = Query(default=False),
 ):
-    result = collect_market_news(category=category, limit=24)
+    result = collect_market_news(
+        category=category,
+        limit=24,
+        force_refresh=refresh,
+    )
 
     return templates.TemplateResponse(
         "search.html",
@@ -54,8 +59,13 @@ def category_page(
 @router.get("/api/category")
 def category_api(
     category: str = Query(default="WORLD"),
+    refresh: bool = Query(default=False),
 ):
-    return collect_market_news(category=category, limit=24)
+    return collect_market_news(
+        category=category,
+        limit=24,
+        force_refresh=refresh,
+    )
 
 
 @router.post("/api/summarize")

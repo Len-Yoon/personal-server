@@ -1,5 +1,11 @@
-from app.crawlers.gdelt_client import search_gdelt_articles
+import time
+
 from app.crawlers.google_news_rss import search_google_news_rss
+
+
+CACHE_TTL_SECONDS = 300
+
+_news_cache = {}
 
 
 CATEGORY_CONFIG = {
@@ -37,37 +43,64 @@ def get_categories():
     ]
 
 
-def collect_market_news(category: str, limit: int = 20):
+def collect_market_news(
+    category: str,
+    limit: int = 24,
+    force_refresh: bool = False,
+):
     category = category.upper()
 
     if category not in CATEGORY_CONFIG:
         category = "WORLD"
 
+    cache_key = f"{category}:{limit}"
+    now = time.time()
+
+    cached = _news_cache.get(cache_key)
+
+    if cached and not force_refresh:
+        age = now - cached["created_at"]
+
+        if age < CACHE_TTL_SECONDS:
+            result = cached["data"].copy()
+            result["cache"] = {
+                "hit": True,
+                "age_seconds": int(age),
+                "ttl_seconds": CACHE_TTL_SECONDS,
+            }
+            return result
+
     config = CATEGORY_CONFIG[category]
     query = config["query"]
 
-    gdelt_articles = search_gdelt_articles(
+    articles = search_google_news_rss(
         query=query,
         category=category,
         limit=limit,
     )
 
-    rss_articles = search_google_news_rss(
-        query=query,
-        category=category,
-        limit=limit,
-    )
+    merged = _merge_articles(articles)
 
-    merged = _merge_articles(gdelt_articles + rss_articles)
-
-    return {
+    result = {
         "category": category,
         "label": config["label"],
         "description": config["description"],
         "query": query,
         "count": len(merged[:limit]),
         "articles": merged[:limit],
+        "cache": {
+            "hit": False,
+            "age_seconds": 0,
+            "ttl_seconds": CACHE_TTL_SECONDS,
+        },
     }
+
+    _news_cache[cache_key] = {
+        "created_at": now,
+        "data": result,
+    }
+
+    return result
 
 
 def _merge_articles(articles):

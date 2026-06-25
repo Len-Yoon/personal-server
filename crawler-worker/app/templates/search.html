@@ -13,11 +13,21 @@
     <div class="section-header">
         <div>
             <h2>수집 결과</h2>
-            <p>{{ result.count }}개의 뉴스를 가져왔습니다.</p>
+
+            <p>
+                {{ result.count }}개의 뉴스를 가져왔습니다.
+
+                {% if result.cache.hit %}
+                    캐시 사용 중 · {{ result.cache.age_seconds }}초 전 수집
+                {% else %}
+                    방금 새로 수집
+                {% endif %}
+            </p>
         </div>
 
         <div class="header-actions">
             <a class="text-link" href="/">뉴스 홈</a>
+            <a class="text-link" href="/category?category={{ result.category }}&refresh=true">새로 수집</a>
             <a class="text-link" href="http://lenserver.com">메인 포털</a>
         </div>
     </div>
@@ -111,7 +121,7 @@ document.querySelectorAll(".summary-button").forEach((button) => {
                 return;
             }
 
-            const summary = data.summary;
+            const summary = data.summary || {};
 
             summaryBox.innerHTML = `
                 <div class="summary-result">
