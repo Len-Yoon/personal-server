@@ -534,4 +534,99 @@ a {
         width: min(100% - 32px, 1180px);
         flex-direction: column;
     }
+
+    .news-actions {
+    margin-top: 16px;
+    }
+
+    .summary-button {
+        height: 38px;
+        padding: 0 14px;
+        border: 1px solid rgba(96, 165, 250, 0.34);
+        border-radius: 999px;
+        color: #dbeafe;
+        background: rgba(96, 165, 250, 0.14);
+        font-size: 13px;
+        font-weight: 900;
+        cursor: pointer;
+        transition:
+            transform 0.18s ease,
+            background 0.18s ease,
+            border-color 0.18s ease;
+    }
+
+    .summary-button:hover {
+        transform: translateY(-2px);
+        background: rgba(96, 165, 250, 0.22);
+        border-color: rgba(96, 165, 250, 0.54);
+    }
+
+    .summary-button:disabled {
+        cursor: wait;
+        opacity: 0.62;
+        transform: none;
+    }
+
+    .summary-box {
+        margin-top: 16px;
+        padding: 18px;
+        border-radius: 18px;
+        border: 1px solid rgba(96, 165, 250, 0.22);
+        background:
+            linear-gradient(180deg, rgba(15, 23, 42, 0.78), rgba(15, 23, 42, 0.58));
+    }
+
+    .summary-box p {
+        margin: 10px 0 0;
+        color: var(--text-secondary);
+        line-height: 1.65;
+        font-size: 14px;
+    }
+
+    .summary-result p:first-of-type {
+        margin-top: 14px;
+    }
+
+    .summary-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 9px 0;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+        color: var(--text-muted);
+        font-size: 13px;
+    }
+
+    .summary-row strong {
+        color: #dbeafe;
+    }
+
+    .trading-note {
+        color: #bfdbfe !important;
+    }
+
+    .caution {
+        color: #fecaca !important;
+    }
+
+    .keyword-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 14px;
+    }
+
+    .keyword-list span {
+        padding: 6px 9px;
+        border-radius: 999px;
+        color: #bfdbfe;
+        background: rgba(96, 165, 250, 0.12);
+        border: 1px solid rgba(96, 165, 250, 0.18);
+        font-size: 12px;
+        font-weight: 800;
+    }
+
+    .summary-error {
+        color: #fecaca !important;
+    }
 }
