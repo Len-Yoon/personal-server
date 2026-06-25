@@ -16,7 +16,10 @@
             <p>{{ result.count }}개의 뉴스를 가져왔습니다.</p>
         </div>
 
-        <a class="text-link" href="/">카테고리로 돌아가기</a>
+        <div class="header-actions">
+            <a class="text-link" href="/">뉴스 홈</a>
+            <a class="text-link" href="http://lenserver.com">메인 포털</a>
+        </div>
     </div>
 
     <div class="category-tabs">
@@ -32,7 +35,15 @@
 
     <section class="news-list">
         {% for article in result.articles %}
-            <article class="news-card">
+            <article
+                class="news-card"
+                data-category="{{ article.category }}"
+                data-title="{{ article.title }}"
+                data-url="{{ article.url }}"
+                data-source="{{ article.source }}"
+                data-published-at="{{ article.published_at }}"
+                data-provider="{{ article.provider }}"
+            >
                 <div class="news-meta-row">
                     <span class="status-badge">{{ article.provider }}</span>
                     <span>{{ article.source }}</span>
@@ -44,17 +55,100 @@
                     <p class="published-at">{{ article.published_at }}</p>
                 {% endif %}
 
-                {% if article.summary %}
-                    <p class="summary">{{ article.summary }}</p>
-                {% endif %}
-
                 {% if article.url %}
                     <a class="article-link" href="{{ article.url }}" target="_blank">
                         원문 보기 →
                     </a>
                 {% endif %}
+
+                <div class="news-actions">
+                    <button class="summary-button" type="button">
+                        AI 요약
+                    </button>
+                </div>
+
+                <div class="summary-box" hidden></div>
             </article>
         {% endfor %}
     </section>
 </section>
+
+<script>
+document.querySelectorAll(".summary-button").forEach((button) => {
+    button.addEventListener("click", async () => {
+        const card = button.closest(".news-card");
+        const summaryBox = card.querySelector(".summary-box");
+
+        button.disabled = true;
+        button.textContent = "요약 중...";
+        summaryBox.hidden = false;
+        summaryBox.innerHTML = "<p>AI가 뉴스 영향을 분석 중입니다.</p>";
+
+        const payload = {
+            category: card.dataset.category,
+            title: card.dataset.title,
+            url: card.dataset.url,
+            source: card.dataset.source,
+            published_at: card.dataset.publishedAt,
+            provider: card.dataset.provider
+        };
+
+        try {
+            const response = await fetch("/api/summarize", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(payload)
+            });
+
+            const data = await response.json();
+
+            if (!data.ok) {
+                summaryBox.innerHTML = `
+                    <p class="summary-error">요약 실패: ${data.error}</p>
+                `;
+                return;
+            }
+
+            const summary = data.summary;
+
+            summaryBox.innerHTML = `
+                <div class="summary-result">
+                    <div class="summary-row">
+                        <span>중요도</span>
+                        <strong>${summary.importance || "UNKNOWN"}</strong>
+                    </div>
+
+                    <div class="summary-row">
+                        <span>시장 영향</span>
+                        <strong>${summary.market_impact || "UNCERTAIN"}</strong>
+                    </div>
+
+                    <p>${summary.summary || ""}</p>
+
+                    <p class="trading-note">
+                        <strong>매매 참고:</strong> ${summary.trading_note || ""}
+                    </p>
+
+                    <p class="caution">
+                        <strong>주의:</strong> ${summary.caution || ""}
+                    </p>
+
+                    <div class="keyword-list">
+                        ${(summary.keywords || []).map(keyword => `<span>${keyword}</span>`).join("")}
+                    </div>
+                </div>
+            `;
+        } catch (error) {
+            summaryBox.innerHTML = `
+                <p class="summary-error">요약 요청 중 오류가 발생했습니다: ${error}</p>
+            `;
+        } finally {
+            button.disabled = false;
+            button.textContent = "다시 요약";
+        }
+    });
+});
+</script>
 {% endblock %}
