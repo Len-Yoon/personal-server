@@ -25,6 +25,14 @@ def dashboard(request: Request):
             "meta": "YouTube / Memo / Timestamp",
         },
         {
+            "icon": "B",
+            "name": "책 메모장",
+            "description": "읽은 책을 저장하고 목차별 진행률과 독서 메모를 관리합니다.",
+            "url": "http://book.lenserver.com",
+            "status": "준비중",
+            "meta": "Book / Reading / Memo",
+        },
+        {
             "icon": "T",
             "name": "자동매매 결과지",
             "description": "매매 결과, 수익률, 전략별 복기 내용을 관리합니다.",

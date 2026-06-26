@@ -47,3 +47,16 @@ services:
       - ./youtube-memo:/app
       - ./data/youtube-memo:/data/youtube-memo
       - ./data/logs:/app/data/logs
+
+  book-memo:
+    build: ./book-memo
+    container_name: book-memo
+    restart: unless-stopped
+    ports:
+      - "8003:8003"
+    environment:
+      - BOOK_MEMO_DB_PATH=/data/book-memo/book_memo.sqlite3
+    volumes:
+      - ./book-memo:/app
+      - ./data/book-memo:/data/book-memo
+      - ./data/logs:/app/data/logs
