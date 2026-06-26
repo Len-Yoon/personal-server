@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ title }}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260626-book-8">
+</head>
+<body>
+<header class="app-header">
+    <a class="home-pill" href="http://lenserver.com" aria-label="메인으로 이동">
+        <span class="home-icon">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 10.8L12 3l9 7.8v9.7a.5.5 0 0 1-.5.5h-5.2a.5.5 0 0 1-.5-.5v-5.4H9.2v5.4a.5.5 0 0 1-.5.5H3.5a.5.5 0 0 1-.5-.5v-9.7z"/>
+            </svg>
+        </span>
+        <span>Home</span>
+    </a>
+
+    <div class="app-brand">
+        <span class="brand-dot"></span>
+        <span>Book Memo</span>
+    </div>
+</header>
+
+<main class="container">
+    <section class="book-hero">
+        <div class="book-cover">
+            {% if book.thumbnail %}
+                <img src="{{ book.thumbnail }}" alt="">
+            {% else %}
+                <span>No Cover</span>
+            {% endif %}
+        </div>
+
+        <div class="book-info">
+            <div class="hero-badge">BOOK</div>
+            <h1>{{ book.title }}</h1>
+            <p>{{ book.authors }}</p>
+            <p>{{ book.publisher }} {{ book.published_date }}</p>
+            <p>{{ book.description }}</p>
+            {% if book.preview_url %}
+                <a class="text-link" href="{{ book.preview_url }}" target="_blank">책 정보 열기</a>
+            {% endif %}
+            <form class="book-delete-form protected-delete-form" action="/books/{{ book.id }}/delete" method="post" data-confirm-message="연결된 목차와 메모까지 삭제됩니다. 계속할까요?">
+                <input type="hidden" name="delete_password">
+                <button class="danger-button" type="submit">책 삭제</button>
+            </form>
+        </div>
+    </section>
+
+    <section class="panel">
+        <div class="section-header">
+            <div>
+                <h2>읽기 진행</h2>
+                <p>{{ book.reading_status }} · {{ book.progress_percent }}%</p>
+            </div>
+        </div>
+
+        <form class="progress-form" action="/books/{{ book.id }}/progress" method="post">
+            <select name="reading_status">
+                {% for status in statuses %}
+                    <option value="{{ status }}" {% if status == book.reading_status %}selected{% endif %}>{{ status }}</option>
+                {% endfor %}
+            </select>
+            <input type="number" name="current_page" min="0" value="{{ book.current_page }}" placeholder="페이지">
+            <input type="text" name="current_chapter" value="{{ book.current_chapter }}" placeholder="현재 읽는 장">
+            <input type="number" name="progress_percent" min="0" max="100" value="{{ book.progress_percent }}" placeholder="%">
+            <button type="submit">저장</button>
+        </form>
+    </section>
+
+    <section class="panel">
+        <details class="editor" open>
+            <summary>목차 추가</summary>
+            <form action="/books/{{ book.id }}/chapters" method="post">
+                <input type="text" name="title" placeholder="예: 1장 시작하기" required autocomplete="off">
+                <button type="submit">추가</button>
+            </form>
+
+            <div class="toc-builder">
+                <textarea id="toc-source" rows="8" placeholder="목차를 여러 줄로 붙여넣으세요. 한 줄이 하나의 후보가 됩니다."></textarea>
+                <div class="toc-actions">
+                    <button type="button" id="toc-fetch-button">목차 자동 찾기</button>
+                    <button type="button" id="toc-build-button">후보 만들기</button>
+                    <span id="toc-count" aria-live="polite"></span>
+                </div>
+                <p id="toc-status" class="toc-status" aria-live="polite"></p>
+                <form id="toc-candidate-form" action="/books/{{ book.id }}/chapters/bulk" method="post" hidden>
+                    <div id="toc-candidates" class="toc-candidates"></div>
+                    <button type="submit">선택한 목차 추가</button>
+                </form>
+            </div>
+        </details>
+
+        <div class="chapter-list">
+            {% for chapter in chapters %}
+                <article class="chapter-card">
+                    <form action="/chapters/{{ chapter.id }}" method="post">
+                        <input type="hidden" name="is_done" value="0">
+                        <label>
+                            <input
+                                type="checkbox"
+                                name="is_done"
+                                value="1"
+                                {% if chapter.is_done %}checked{% endif %}
+                            >
+                            <strong>{{ chapter.position }}. {{ chapter.title }}</strong>
+                        </label>
+                        <textarea name="comment" rows="3" placeholder="이 장에 대한 코멘트">{{ chapter.comment }}</textarea>
+                        <button type="submit">저장</button>
+                    </form>
+                    <form class="protected-delete-form" action="/chapters/{{ chapter.id }}/delete" method="post" data-confirm-message="이 목차를 삭제할까요?">
+                        <input type="hidden" name="delete_password">
+                        <button class="danger-button" type="submit">삭제</button>
+                    </form>
+                </article>
+            {% else %}
+                <article class="empty-card">
+                    <h3>목차가 없습니다.</h3>
+                    <p>책의 장이나 섹션을 직접 추가해서 읽은 곳을 체크해보세요.</p>
+                </article>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section class="panel">
+        <details class="editor">
+            <summary>메모 작성</summary>
+            <form action="/books/{{ book.id }}/memos" method="post">
+                <input type="text" name="memo_title" placeholder="메모 제목" autocomplete="off">
+                <div class="memo-meta-grid">
+                    <select name="chapter_id">
+                        <option value="0">목차 선택 없음</option>
+                        {% for chapter in chapters %}
+                            <option value="{{ chapter.id }}">{{ chapter.position }}. {{ chapter.title }}</option>
+                        {% endfor %}
+                    </select>
+                    <input type="number" name="page" min="0" placeholder="페이지">
+                </div>
+                <textarea name="content" rows="8" placeholder="책을 읽으며 남길 생각을 적어두세요." required></textarea>
+                <button type="submit">저장</button>
+            </form>
+        </details>
+
+        <div class="memo-list">
+            {% for memo in memos %}
+                <article class="memo-card">
+                    <details>
+                        <summary>
+                            <span>
+                                <strong>{{ memo.title }}</strong>
+                                <small>
+                                    {% if memo.chapter_title %}{{ memo.chapter_title }} · {% endif %}
+                                    {% if memo.page %}p.{{ memo.page }} · {% endif %}
+                                    {{ memo.created_at }}
+                                </small>
+                            </span>
+                        </summary>
+                        <p>{{ memo.content }}</p>
+                    </details>
+                    <form class="protected-delete-form" action="/memos/{{ memo.id }}/delete" method="post" data-confirm-message="이 메모를 삭제할까요?">
+                        <input type="hidden" name="delete_password">
+                        <button class="danger-button" type="submit">삭제</button>
+                    </form>
+                </article>
+            {% else %}
+                <article class="empty-card">
+                    <h3>아직 메모가 없습니다.</h3>
+                    <p>메모 작성 영역을 펼쳐 첫 기록을 남겨보세요.</p>
+                </article>
+            {% endfor %}
+        </div>
+    </section>
+</main>
+
+<footer class="footer">
+    <span>book-memo</span>
+    <span>Len Private Workspace</span>
+</footer>
+<script>
+    const tocSource = document.querySelector("#toc-source");
+    const tocFetchButton = document.querySelector("#toc-fetch-button");
+    const tocBuildButton = document.querySelector("#toc-build-button");
+    const tocCount = document.querySelector("#toc-count");
+    const tocStatus = document.querySelector("#toc-status");
+    const tocCandidateForm = document.querySelector("#toc-candidate-form");
+    const tocCandidates = document.querySelector("#toc-candidates");
+
+    const normalizeTocLine = (line) => line
+        .replace(/^\s*[-*•]\s*/, "")
+        .replace(/^\s*\d+[\).\s]+/, "")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    const renderTocCandidates = (lines, source = "") => {
+        tocCandidates.innerHTML = "";
+        tocCount.textContent = lines.length ? `${lines.length}개 후보` : "후보 없음";
+        tocCandidateForm.hidden = lines.length === 0;
+
+        if (tocStatus) {
+            tocStatus.textContent = lines.length && source ? `${source}에서 목차 후보를 가져왔습니다.` : "";
+        }
+
+        lines.forEach((line, index) => {
+            const row = document.createElement("label");
+            row.className = "toc-candidate";
+
+            const checkbox = document.createElement("input");
+            checkbox.type = "checkbox";
+            checkbox.name = "titles";
+            checkbox.value = line;
+
+            const text = document.createElement("span");
+            text.textContent = `${index + 1}. ${line}`;
+
+            row.append(checkbox, text);
+            tocCandidates.append(row);
+        });
+    };
+
+    tocBuildButton?.addEventListener("click", () => {
+        const seen = new Set();
+        const lines = tocSource.value
+            .split(/\r?\n/)
+            .map(normalizeTocLine)
+            .filter((line) => {
+                if (!line || seen.has(line)) {
+                    return false;
+                }
+
+                seen.add(line);
+                return true;
+            });
+
+        renderTocCandidates(lines);
+    });
+
+    tocFetchButton?.addEventListener("click", async () => {
+        tocFetchButton.disabled = true;
+        tocStatus.textContent = "목차 후보를 찾는 중입니다.";
+
+        try {
+            const response = await fetch("/books/{{ book.id }}/toc-candidates");
+
+            if (!response.ok) {
+                throw new Error("목차 후보를 가져오지 못했습니다.");
+            }
+
+            const data = await response.json();
+            const lines = data.candidates || [];
+
+            if (!lines.length) {
+                tocStatus.textContent = "자동으로 찾은 목차가 없습니다. 아래 칸에 목차를 붙여넣어 후보를 만들어주세요.";
+                renderTocCandidates([]);
+                return;
+            }
+
+            tocSource.value = lines.join("\n");
+            renderTocCandidates(lines, data.source || "외부 서점");
+        } catch (error) {
+            tocStatus.textContent = "목차 후보를 가져오지 못했습니다. 잠시 후 다시 시도하거나 직접 붙여넣어주세요.";
+        } finally {
+            tocFetchButton.disabled = false;
+        }
+    });
+
+    document.querySelectorAll(".protected-delete-form").forEach((form) => {
+        form.addEventListener("submit", (event) => {
+            const password = window.prompt("삭제 비밀번호를 입력해주세요.");
+
+            if (!password) {
+                event.preventDefault();
+                return;
+            }
+
+            const confirmed = window.confirm(form.dataset.confirmMessage || "삭제할까요?");
+
+            if (!confirmed) {
+                event.preventDefault();
+                return;
+            }
+
+            form.querySelector("input[name='delete_password']").value = password;
+        });
+    });
+</script>
+</body>
+</html>

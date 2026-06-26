@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ title }}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260627-book-1">
+</head>
+<body>
+<header class="app-header">
+    <a class="home-pill" href="http://lenserver.com" aria-label="메인으로 이동">
+        <span class="home-icon">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 10.8L12 3l9 7.8v9.7a.5.5 0 0 1-.5.5h-5.2a.5.5 0 0 1-.5-.5v-5.4H9.2v5.4a.5.5 0 0 1-.5.5H3.5a.5.5 0 0 1-.5-.5v-9.7z"/>
+            </svg>
+        </span>
+        <span>Home</span>
+    </a>
+
+    <div class="app-brand">
+        <span class="brand-dot"></span>
+        <span>Book Memo</span>
+    </div>
+</header>
+
+<main class="container">
+    <section class="hero">
+        <div class="hero-badge">BOOK MEMO</div>
+        <h1>책 메모장</h1>
+        <p>책을 검색해 내 책장에 추가하고, 읽은 위치와 장별 코멘트를 남깁니다.</p>
+    </section>
+
+    <section class="panel">
+        <div class="section-header">
+            <div>
+                <h2>책 검색</h2>
+                <p>제목, 저자, ISBN으로 검색합니다.</p>
+            </div>
+        </div>
+
+        <form class="search-form" action="/" method="get">
+            <input
+                type="search"
+                name="q"
+                value="{{ query }}"
+                placeholder="예: 데미안, 클린 코드, 투자에 대한 생각"
+                autocomplete="off"
+                required
+            >
+            <button type="submit">검색</button>
+        </form>
+
+        {% if error %}
+            <p class="error-text">검색 실패: {{ error }}</p>
+        {% endif %}
+
+        {% if query and not has_aladin_key %}
+            <p class="notice-text">
+                국내 도서 검색 품질을 높이려면 .env에 ALADIN_TTB_KEY를 추가해주세요.
+                현재는 Google Books와 Open Library fallback만 사용합니다.
+            </p>
+        {% endif %}
+
+        {% if query %}
+            <div class="result-grid">
+                {% for book in results %}
+                    <article class="result-card">
+                        <div class="cover">
+                            {% if book.thumbnail %}
+                                <img src="{{ book.thumbnail }}" alt="">
+                            {% else %}
+                                <span>No Cover</span>
+                            {% endif %}
+                        </div>
+                        <div class="result-body">
+                            <span>{{ book.publisher }} {{ book.published_date }}</span>
+                            <h3>{{ book.title }}</h3>
+                            <p>{{ book.authors }}</p>
+                            <p>{{ book.description }}</p>
+                            <form class="book-with-toc-form" action="/books" method="post">
+                                {% for key, value in book.items() %}
+                                    <input type="hidden" name="{{ key }}" value="{{ value }}">
+                                {% endfor %}
+                                <div class="toc-actions">
+                                    <button class="load-result-toc" type="button">목차 불러오기</button>
+                                    <button type="submit">선택 목차와 저장</button>
+                                </div>
+                                <p class="toc-status" aria-live="polite"></p>
+                                <div class="toc-candidates compact" hidden></div>
+                            </form>
+                        </div>
+                    </article>
+                {% else %}
+                    <article class="empty-card">
+                        <h3>검색 결과가 없습니다.</h3>
+                        <p>다른 키워드나 ISBN으로 다시 검색해보세요. 국내 책은 알라딘 API 키가 있으면 더 잘 검색됩니다.</p>
+                    </article>
+                {% endfor %}
+            </div>
+        {% endif %}
+    </section>
+
+    <section class="panel">
+        <div class="section-header">
+            <div>
+                <h2>내 책장</h2>
+                <p>{{ books|length }}권의 책이 저장되어 있습니다.</p>
+            </div>
+        </div>
+
+        <div class="library-grid">
+            {% for book in books %}
+                <article class="library-card">
+                    <a class="library-link" href="/books/{{ book.id }}">
+                        <div class="cover">
+                            {% if book.thumbnail %}
+                                <img src="{{ book.thumbnail }}" alt="">
+                            {% else %}
+                                <span>No Cover</span>
+                            {% endif %}
+                        </div>
+                        <div class="library-body">
+                            <span>{{ book.reading_status }} · {{ book.progress_percent }}%</span>
+                            <h3>{{ book.title }}</h3>
+                            <p>{{ book.authors }}</p>
+                            <p>{{ book.done_chapter_count }}/{{ book.chapter_count }} 목차 완료 · {{ book.memo_count }}개 메모</p>
+                        </div>
+                    </a>
+                    <form class="library-progress-form" action="/books/{{ book.id }}/progress" method="post">
+                        <input type="hidden" name="redirect_to" value="/">
+                        <select name="reading_status">
+                            {% for status in statuses %}
+                                <option value="{{ status }}" {% if status == book.reading_status %}selected{% endif %}>{{ status }}</option>
+                            {% endfor %}
+                        </select>
+                        <input type="number" name="current_page" min="0" value="{{ book.current_page }}" placeholder="페이지">
+                        <input type="text" name="current_chapter" value="{{ book.current_chapter }}" placeholder="현재 목차">
+                        <input type="number" name="progress_percent" min="0" max="100" value="{{ book.progress_percent }}" placeholder="%">
+                        <button type="submit">진행 저장</button>
+                    </form>
+                    {% set chapters = chapters_by_book.get(book.id, []) %}
+                    {% if chapters %}
+                        <details class="library-chapters" open>
+                            <summary>목차 체크와 코멘트</summary>
+                            <form class="library-check-form" action="/books/{{ book.id }}/chapter-statuses" method="post">
+                                <input type="hidden" name="redirect_to" value="/">
+                                <div class="library-chapter-list">
+                                    {% for chapter in chapters %}
+                                        <label>
+                                            <input
+                                                type="checkbox"
+                                                name="done_chapter_ids"
+                                                value="{{ chapter.id }}"
+                                                {% if chapter.is_done %}checked{% endif %}
+                                            >
+                                            <span>
+                                                <strong>{{ chapter.position }}. {{ chapter.title }}</strong>
+                                                {% if chapter.comment %}
+                                                    <small>{{ chapter.comment }}</small>
+                                                {% endif %}
+                                            </span>
+                                        </label>
+                                    {% endfor %}
+                                </div>
+                                <button type="submit">체크 저장</button>
+                            </form>
+
+                            <form class="library-comment-form" method="post">
+                                <select class="chapter-comment-target" required>
+                                    <option value="">코멘트 남길 목차 선택</option>
+                                    {% for chapter in chapters %}
+                                        <option
+                                            value="{{ chapter.id }}"
+                                            data-comment="{{ chapter.comment }}"
+                                        >
+                                            {{ chapter.position }}. {{ chapter.title }}
+                                        </option>
+                                    {% endfor %}
+                                </select>
+                                <input type="hidden" name="redirect_to" value="/">
+                                <textarea name="comment" rows="3" placeholder="선택한 목차에 남길 코멘트"></textarea>
+                                <button type="submit">코멘트 저장</button>
+                            </form>
+                        </details>
+                    {% endif %}
+                    <form class="protected-delete-form" action="/books/{{ book.id }}/delete" method="post">
+                        <input type="hidden" name="delete_password">
+                        <button class="danger-button" type="submit">책 삭제</button>
+                    </form>
+                </article>
+            {% else %}
+                <article class="empty-card">
+                    <h3>아직 저장한 책이 없습니다.</h3>
+                    <p>책을 검색해서 내 책장에 추가해보세요.</p>
+                </article>
+            {% endfor %}
+        </div>
+    </section>
+</main>
+
+<footer class="footer">
+    <span>book-memo</span>
+    <span>Len Private Workspace</span>
+</footer>
+<script>
+    const renderCandidates = (container, candidates) => {
+        container.innerHTML = "";
+        container.hidden = candidates.length === 0;
+
+        candidates.forEach((title, index) => {
+            const row = document.createElement("label");
+            row.className = "toc-candidate";
+
+            const checkbox = document.createElement("input");
+            checkbox.type = "checkbox";
+            checkbox.name = "titles";
+            checkbox.value = title;
+
+            const text = document.createElement("span");
+            text.textContent = `${index + 1}. ${title}`;
+
+            row.append(checkbox, text);
+            container.append(row);
+        });
+    };
+
+    document.querySelectorAll(".book-with-toc-form").forEach((form) => {
+        const loadButton = form.querySelector(".load-result-toc");
+        const status = form.querySelector(".toc-status");
+        const candidates = form.querySelector(".toc-candidates");
+
+        loadButton?.addEventListener("click", async () => {
+            loadButton.disabled = true;
+            status.textContent = "목차를 찾는 중입니다.";
+
+            const body = new URLSearchParams();
+            body.set("isbn", form.querySelector("input[name='isbn']")?.value || "");
+            body.set("title", form.querySelector("input[name='title']")?.value || "");
+
+            try {
+                const response = await fetch("/toc-candidates", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                    body,
+                });
+
+                if (!response.ok) {
+                    throw new Error("목차를 가져오지 못했습니다.");
+                }
+
+                const data = await response.json();
+                const lines = data.candidates || [];
+                renderCandidates(candidates, lines);
+                status.textContent = lines.length
+                    ? `${data.source || "외부 서점"}에서 ${lines.length}개 목차 후보를 가져왔습니다.`
+                    : "자동으로 찾은 목차가 없습니다. 책 상세에서 직접 추가할 수 있습니다.";
+            } catch (error) {
+                status.textContent = "목차를 가져오지 못했습니다. 책은 저장한 뒤 직접 목차를 추가할 수 있습니다.";
+                renderCandidates(candidates, []);
+            } finally {
+                loadButton.disabled = false;
+            }
+        });
+    });
+
+    document.querySelectorAll(".library-comment-form").forEach((form) => {
+        const select = form.querySelector(".chapter-comment-target");
+        const textarea = form.querySelector("textarea[name='comment']");
+
+        select?.addEventListener("change", () => {
+            const chapterId = select.value;
+            form.action = chapterId ? `/chapters/${chapterId}/comment` : "";
+            textarea.value = select.selectedOptions[0]?.dataset.comment || "";
+        });
+
+        form.addEventListener("submit", (event) => {
+            if (!select.value) {
+                event.preventDefault();
+            }
+        });
+    });
+
+    document.querySelectorAll(".protected-delete-form").forEach((form) => {
+        form.addEventListener("submit", (event) => {
+            const password = window.prompt("삭제 비밀번호를 입력해주세요.");
+
+            if (!password) {
+                event.preventDefault();
+                return;
+            }
+
+            const confirmed = window.confirm("연결된 목차와 메모까지 삭제됩니다. 계속할까요?");
+
+            if (!confirmed) {
+                event.preventDefault();
+                return;
+            }
+
+            form.querySelector("input[name='delete_password']").value = password;
+        });
+    });
+</script>
+</body>
+</html>
