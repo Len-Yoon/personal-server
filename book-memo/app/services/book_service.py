@@ -84,18 +84,28 @@ def list_books() -> list[dict[str, Any]]:
             """
             SELECT
                 books.*,
-                COUNT(DISTINCT book_memos.id) AS memo_count,
-                COUNT(DISTINCT book_chapters.id) AS chapter_count,
-                COALESCE(SUM(book_chapters.is_done), 0) AS done_chapter_count
+                COALESCE(memo_counts.memo_count, 0) AS memo_count,
+                COALESCE(chapter_counts.chapter_count, 0) AS chapter_count,
+                COALESCE(chapter_counts.done_chapter_count, 0) AS done_chapter_count
             FROM books
-            LEFT JOIN book_memos ON book_memos.book_id = books.id
-            LEFT JOIN book_chapters ON book_chapters.book_id = books.id
-            GROUP BY books.id
+            LEFT JOIN (
+                SELECT book_id, COUNT(*) AS memo_count
+                FROM book_memos
+                GROUP BY book_id
+            ) AS memo_counts ON memo_counts.book_id = books.id
+            LEFT JOIN (
+                SELECT
+                    book_id,
+                    COUNT(*) AS chapter_count,
+                    COALESCE(SUM(is_done), 0) AS done_chapter_count
+                FROM book_chapters
+                GROUP BY book_id
+            ) AS chapter_counts ON chapter_counts.book_id = books.id
             ORDER BY books.updated_at DESC, books.id DESC
             """
         ).fetchall()
 
-    return [_row_to_dict(row) for row in rows]
+    return [_with_computed_progress(_row_to_dict(row)) for row in rows]
 
 
 def create_or_get_book(payload: dict[str, Any]) -> dict[str, Any]:
@@ -159,6 +169,7 @@ def get_book(book_id: int) -> dict[str, Any] | None:
     init_db()
 
     with _connect() as connection:
+        _sync_book_progress(connection, book_id)
         row = connection.execute(
             "SELECT * FROM books WHERE id = ?",
             (book_id,),
@@ -243,7 +254,7 @@ def create_chapter(book_id: int, title: str) -> None:
             """,
             (book_id, title, row["next_position"]),
         )
-        _touch_book(connection, book_id)
+        _sync_book_progress(connection, book_id)
 
 
 def create_chapters(book_id: int, titles: list[str]) -> int:
@@ -289,7 +300,7 @@ def create_chapters(book_id: int, titles: list[str]) -> int:
                 for index, title in enumerate(cleaned_titles)
             ],
         )
-        _touch_book(connection, book_id)
+        _sync_book_progress(connection, book_id)
 
     return len(cleaned_titles)
 
@@ -315,7 +326,7 @@ def update_chapter(chapter_id: int, is_done: bool, comment: str) -> int | None:
             """,
             (1 if is_done else 0, comment.strip(), chapter_id),
         )
-        _touch_book(connection, book_id)
+        _sync_book_progress(connection, book_id)
 
     return book_id
 
@@ -340,7 +351,7 @@ def update_chapter_statuses(book_id: int, done_chapter_ids: list[int]) -> None:
                 (1 if row["id"] in done_ids else 0, row["id"]),
             )
 
-        _touch_book(connection, book_id)
+        _sync_book_progress(connection, book_id)
 
 
 def update_chapter_comment(chapter_id: int, comment: str) -> int | None:
@@ -383,7 +394,7 @@ def delete_chapter(chapter_id: int) -> int | None:
 
         book_id = row["book_id"]
         connection.execute("DELETE FROM book_chapters WHERE id = ?", (chapter_id,))
-        _touch_book(connection, book_id)
+        _sync_book_progress(connection, book_id)
 
     return book_id
 
@@ -457,6 +468,65 @@ def _touch_book(connection: sqlite3.Connection, book_id: int) -> None:
         "UPDATE books SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         (book_id,),
     )
+
+
+def _sync_book_progress(connection: sqlite3.Connection, book_id: int) -> None:
+    row = connection.execute(
+        """
+        SELECT
+            COUNT(*) AS chapter_count,
+            COALESCE(SUM(is_done), 0) AS done_chapter_count
+        FROM book_chapters
+        WHERE book_id = ?
+        """,
+        (book_id,),
+    ).fetchone()
+
+    chapter_count = row["chapter_count"] if row else 0
+    done_chapter_count = row["done_chapter_count"] if row else 0
+    progress_percent = _calculate_progress_percent(done_chapter_count, chapter_count)
+
+    if chapter_count and done_chapter_count == chapter_count:
+        reading_status = "완료"
+    elif done_chapter_count:
+        reading_status = "읽는 중"
+    else:
+        reading_status = "읽을 예정"
+
+    connection.execute(
+        """
+        UPDATE books
+        SET
+            reading_status = ?,
+            progress_percent = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (reading_status, progress_percent, book_id),
+    )
+
+
+def _with_computed_progress(book: dict[str, Any]) -> dict[str, Any]:
+    chapter_count = book.get("chapter_count", 0)
+    done_chapter_count = book.get("done_chapter_count", 0)
+
+    book["progress_percent"] = _calculate_progress_percent(done_chapter_count, chapter_count)
+
+    if chapter_count and done_chapter_count == chapter_count:
+        book["reading_status"] = "완료"
+    elif done_chapter_count:
+        book["reading_status"] = "읽는 중"
+    else:
+        book["reading_status"] = "읽을 예정"
+
+    return book
+
+
+def _calculate_progress_percent(done_chapter_count: int, chapter_count: int) -> int:
+    if not chapter_count:
+        return 0
+
+    return round((done_chapter_count / chapter_count) * 100)
 
 
 def _connect() -> sqlite3.Connection:

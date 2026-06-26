@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <title>{{ title }}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=20260627-book-1">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260627-book-2">
 </head>
 <body>
 <header class="app-header">
@@ -126,18 +126,6 @@
                             <p>{{ book.done_chapter_count }}/{{ book.chapter_count }} 목차 완료 · {{ book.memo_count }}개 메모</p>
                         </div>
                     </a>
-                    <form class="library-progress-form" action="/books/{{ book.id }}/progress" method="post">
-                        <input type="hidden" name="redirect_to" value="/">
-                        <select name="reading_status">
-                            {% for status in statuses %}
-                                <option value="{{ status }}" {% if status == book.reading_status %}selected{% endif %}>{{ status }}</option>
-                            {% endfor %}
-                        </select>
-                        <input type="number" name="current_page" min="0" value="{{ book.current_page }}" placeholder="페이지">
-                        <input type="text" name="current_chapter" value="{{ book.current_chapter }}" placeholder="현재 목차">
-                        <input type="number" name="progress_percent" min="0" max="100" value="{{ book.progress_percent }}" placeholder="%">
-                        <button type="submit">진행 저장</button>
-                    </form>
                     {% set chapters = chapters_by_book.get(book.id, []) %}
                     {% if chapters %}
                         <details class="library-chapters" open>
