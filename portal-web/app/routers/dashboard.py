@@ -28,7 +28,7 @@ def dashboard(request: Request):
             "icon": "B",
             "name": "책 메모장",
             "description": "읽은 책을 저장하고 목차별 진행률과 독서 메모를 관리합니다.",
-            "url": "http://localhost:8003",
+            "url": "http://book.lenserver.com",
             "status": "운영중",
             "meta": "Book / Reading / Memo",
         },
