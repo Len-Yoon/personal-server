@@ -3,9 +3,90 @@
 <head>
     <meta charset="UTF-8">
     <title>{{ title }}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260626-youtube-2">
 </head>
 <body>
-    <h1>유튜브 메모장</h1>
-    <p>youtube-memo 서비스 실행 성공</p>
+<header class="app-header">
+    <a class="home-pill" href="http://lenserver.com" aria-label="메인으로 이동">
+        <span class="home-icon">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 10.8L12 3l9 7.8v9.7a.5.5 0 0 1-.5.5h-5.2a.5.5 0 0 1-.5-.5v-5.4H9.2v5.4a.5.5 0 0 1-.5.5H3.5a.5.5 0 0 1-.5-.5v-9.7z"/>
+            </svg>
+        </span>
+        <span>Home</span>
+    </a>
+
+    <div class="app-brand">
+        <span class="brand-dot"></span>
+        <span>YouTube Memo</span>
+    </div>
+</header>
+
+<main class="container">
+    <section class="hero">
+        <div class="hero-badge">YOUTUBE MEMO</div>
+        <h1>유튜브 메모장</h1>
+        <p>유튜브 링크를 등록하고 영상별로 메모를 남깁니다.</p>
+    </section>
+
+    <section class="panel">
+        <div class="section-header">
+            <div>
+                <h2>영상 등록</h2>
+                <p>링크를 넣으면 영상 화면과 메모장이 열립니다.</p>
+            </div>
+        </div>
+
+        <form class="url-form" action="/videos" method="post">
+            <input
+                type="url"
+                name="url"
+                placeholder="https://www.youtube.com/watch?v=..."
+                required
+                autocomplete="off"
+            >
+            <button type="submit">열기</button>
+        </form>
+    </section>
+
+    <section class="panel">
+        <div class="section-header">
+            <div>
+                <h2>저장한 영상</h2>
+                <p>{{ videos|length }}개의 영상이 저장되어 있습니다.</p>
+            </div>
+        </div>
+
+        <div class="video-grid">
+            {% for video in videos %}
+                <a class="video-card" href="/videos/{{ video.id }}">
+                    <div class="thumbnail">
+                        <img
+                            src="https://img.youtube.com/vi/{{ video.youtube_id }}/hqdefault.jpg"
+                            alt=""
+                            loading="lazy"
+                        >
+                    </div>
+                    <div class="video-card-body">
+                        <span>{{ video.memo_count }}개 메모</span>
+                        <h3>{{ video.title }}</h3>
+                        <p>{{ video.url }}</p>
+                    </div>
+                </a>
+            {% else %}
+                <article class="empty-card">
+                    <h3>아직 저장한 영상이 없습니다.</h3>
+                    <p>위 입력창에 YouTube 링크를 넣어 첫 메모장을 열어보세요.</p>
+                </article>
+            {% endfor %}
+        </div>
+    </section>
+</main>
+
+<footer class="footer">
+    <span>youtube-memo</span>
+    <span>Len Private Workspace</span>
+</footer>
 </body>
 </html>
