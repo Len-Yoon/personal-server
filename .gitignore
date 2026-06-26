@@ -25,6 +25,8 @@ __pycache__/
 
 .env.*
 
+!.env.example
+
 *.key
 
 *.pem
@@ -58,4 +60,3 @@ build/
 *.sqlite3
 
 *.db
-

@@ -28,8 +28,11 @@ services:
       - "8001:8001"
     env_file:
       - .env
+    environment:
+      - NEWS_DB_PATH=/data/crawler-worker/news_summaries.sqlite3
     volumes:
       - ./crawler-worker:/app
+      - ./data/crawler-worker:/data/crawler-worker
       - ./data/logs:/app/data/logs
 
   youtube-memo:
@@ -38,6 +41,9 @@ services:
     restart: unless-stopped
     ports:
       - "8002:8002"
+    environment:
+      - YOUTUBE_MEMO_DB_PATH=/data/youtube-memo/youtube_memo.sqlite3
     volumes:
       - ./youtube-memo:/app
+      - ./data/youtube-memo:/data/youtube-memo
       - ./data/logs:/app/data/logs
