@@ -54,6 +54,8 @@ services:
     restart: unless-stopped
     ports:
       - "8003:8003"
+    env_file:
+      - .env
     environment:
       - BOOK_MEMO_DB_PATH=/data/book-memo/book_memo.sqlite3
     volumes:
