@@ -1,9 +1,15 @@
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from app.services.news_service import collect_market_news, get_categories
 from app.services.openai_summary_service import summarize_market_news
+from app.services.saved_news_service import (
+    delete_saved_news,
+    get_saved_news_by_url,
+    save_news_summary,
+    search_saved_news,
+)
 
 
 router = APIRouter()
@@ -14,6 +20,8 @@ class ArticleSummaryRequest(BaseModel):
     category: str
     title: str
     url: str
+    title_ko: str = ""
+    title_original: str = ""
     source: str = ""
     published_at: str = ""
     provider: str = ""
@@ -29,6 +37,24 @@ def home(request: Request):
             "request": request,
             "title": "글로벌 뉴스 허브",
             "categories": categories,
+        },
+    )
+
+
+@router.get("/saved")
+def saved_news_page(
+    request: Request,
+    q: str = Query(default=""),
+):
+    saved_news = search_saved_news(query=q)
+
+    return templates.TemplateResponse(
+        "saved.html",
+        {
+            "request": request,
+            "title": "저장한 뉴스",
+            "saved_news": saved_news,
+            "query": q,
         },
     )
 
@@ -71,4 +97,40 @@ def category_api(
 @router.post("/api/summarize")
 def summarize_article(payload: ArticleSummaryRequest):
     article = payload.model_dump()
-    return summarize_market_news(article)
+    saved_news = get_saved_news_by_url(article.get("url", ""))
+
+    if saved_news:
+        return {
+            "ok": True,
+            "cached": True,
+            "model": saved_news.get("model", ""),
+            "article": article,
+            "summary": saved_news.get("summary", {}),
+            "save": {
+                "saved": True,
+                "id": saved_news.get("id"),
+                "created_at": saved_news.get("created_at"),
+                "updated_at": saved_news.get("updated_at"),
+            },
+        }
+
+    result = summarize_market_news(article)
+
+    if result.get("ok"):
+        result["save"] = save_news_summary(result)
+
+    return result
+
+
+@router.delete("/api/saved/{saved_news_id}")
+def delete_saved_news_api(saved_news_id: int):
+    deleted = delete_saved_news(saved_news_id)
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Saved news not found")
+
+    return {
+        "ok": True,
+        "deleted": True,
+        "id": saved_news_id,
+    }

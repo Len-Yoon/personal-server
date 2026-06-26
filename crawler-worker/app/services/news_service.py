@@ -4,6 +4,8 @@ from app.crawlers.google_news_rss import search_google_news_rss
 
 
 CACHE_TTL_SECONDS = 300
+RSS_FETCH_LIMIT = 80
+RSS_FRESHNESS = "1d"
 
 _news_cache = {}
 
@@ -12,22 +14,22 @@ CATEGORY_CONFIG = {
     "WORLD": {
         "label": "세계 뉴스",
         "description": "전쟁, 금리, 달러, 원자재, 주요국 경제 이슈",
-        "query": '("global economy" OR "central bank" OR inflation OR "interest rates" OR dollar OR geopolitics OR war)',
+        "query": "세계 경제 OR 미국 금리 OR 연준 OR 인플레이션 OR 달러 OR 환율 OR 원자재 OR 전쟁",
     },
     "NASDAQ": {
         "label": "나스닥 선물",
         "description": "NASDAQ, 미국 기술주, 반도체, AI, 미국 금리 이슈",
-        "query": '("Nasdaq futures" OR "Nasdaq 100" OR "US tech stocks" OR Nvidia OR "AI stocks" OR "Fed rate")',
+        "query": "나스닥 선물 OR 나스닥100 OR 미국 증시 OR 기술주 OR 엔비디아 OR AI 반도체 OR 연준 금리",
     },
     "GOLD": {
         "label": "금 선물",
         "description": "Gold futures, 달러, 금리, 안전자산, 인플레이션",
-        "query": '("gold futures" OR "gold price" OR XAUUSD OR "safe haven" OR "US dollar" OR "Treasury yields")',
+        "query": "금 선물 OR 금값 OR 국제 금값 OR 달러 OR 미국 국채금리 OR 안전자산 OR 인플레이션",
     },
     "HK50": {
         "label": "홍콩50",
         "description": "Hang Seng, Hong Kong 50, 중국 증시, 중국 경기 이슈",
-        "query": '("Hang Seng" OR "Hong Kong stocks" OR "Hong Kong 50" OR "China stocks" OR "HSI futures")',
+        "query": "항셍지수 OR 홍콩 증시 OR 홍콩H지수 OR 중국 증시 OR 중국 경기 OR 홍콩50",
     },
 }
 
@@ -76,7 +78,8 @@ def collect_market_news(
     articles = search_google_news_rss(
         query=query,
         category=category,
-        limit=limit,
+        limit=RSS_FETCH_LIMIT,
+        freshness=RSS_FRESHNESS,
     )
 
     merged = _merge_articles(articles)
