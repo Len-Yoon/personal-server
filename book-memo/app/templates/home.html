@@ -275,22 +275,38 @@
     });
 
     document.querySelectorAll(".protected-delete-form").forEach((form) => {
-        form.addEventListener("submit", (event) => {
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+
             const password = window.prompt("삭제 비밀번호를 입력해주세요.");
 
             if (!password) {
-                event.preventDefault();
                 return;
             }
 
             const confirmed = window.confirm("연결된 목차와 메모까지 삭제됩니다. 계속할까요?");
 
             if (!confirmed) {
-                event.preventDefault();
                 return;
             }
 
             form.querySelector("input[name='delete_password']").value = password;
+
+            try {
+                const response = await fetch(form.action, {
+                    method: "POST",
+                    body: new FormData(form),
+                });
+
+                if (!response.ok) {
+                    window.alert("삭제에 실패했습니다.");
+                    return;
+                }
+
+                window.location.href = response.url || "/";
+            } catch (error) {
+                window.alert("삭제에 실패했습니다.");
+            }
         });
     });
 </script>

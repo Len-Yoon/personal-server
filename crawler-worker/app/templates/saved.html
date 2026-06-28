@@ -129,7 +129,7 @@ document.querySelectorAll(".delete-saved-button").forEach((button) => {
         } catch (error) {
             button.disabled = false;
             button.textContent = "삭제";
-            window.alert(`삭제하지 못했습니다: ${error}`);
+            window.alert("삭제에 실패했습니다.");
         }
     });
 });
