@@ -1,0 +1,93 @@
+services:
+  nginx-proxy-manager:
+    profiles:
+      - edge
+    cpus: "0.50"
+    mem_limit: 384m
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  portal-web:
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "1"
+      - --no-access-log
+    cpus: "0.25"
+    mem_limit: 160m
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  crawler-worker:
+    profiles:
+      - worker
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+      - --workers
+      - "1"
+      - --no-access-log
+    cpus: "0.50"
+    mem_limit: 320m
+    pids_limit: 160
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  youtube-memo:
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8002"
+      - --workers
+      - "1"
+      - --no-access-log
+    cpus: "0.25"
+    mem_limit: 160m
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  book-memo:
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8003"
+      - --workers
+      - "1"
+      - --no-access-log
+    cpus: "0.35"
+    mem_limit: 192m
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

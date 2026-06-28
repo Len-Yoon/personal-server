@@ -1,0 +1,218 @@
+# Windows N100 + MT4 lightweight setup
+
+This setup assumes the N100 PC runs Windows and MetaTrader 4 stays native on
+Windows for stability. The personal server apps run inside WSL2 with Docker,
+using `docker-compose.n100.yml` to keep CPU and memory usage low.
+
+## Recommended layout
+
+- Windows 11 Pro or Home on the N100 PC.
+- MT4 installed directly on Windows.
+- Ubuntu 24.04 in WSL2 for this repo.
+- Docker Engine inside WSL2, or Docker Desktop if you prefer GUI management.
+- Tailscale for private remote access.
+- Nginx Proxy Manager only when you need public domains and HTTPS proxying.
+
+The lightest practical path is:
+
+```text
+Windows
+  MT4 native
+  WSL2 Ubuntu
+    Docker Compose
+      portal-web
+      book-memo
+      youtube-memo
+```
+
+## Windows prep
+
+Open PowerShell as Administrator:
+
+```powershell
+wsl --install -d Ubuntu-24.04
+```
+
+Reboot if Windows asks for it. Then open Ubuntu from the Start menu and create
+the Linux username.
+
+Optional but recommended: cap WSL2 so MT4 always has room. Create this file on
+Windows:
+
+```text
+C:\Users\<your-windows-user>\.wslconfig
+```
+
+Suggested N100 values for an 8 GB machine:
+
+```ini
+[wsl2]
+memory=3GB
+processors=2
+swap=1GB
+localhostForwarding=true
+```
+
+Suggested values for a 16 GB machine:
+
+```ini
+[wsl2]
+memory=5GB
+processors=3
+swap=2GB
+localhostForwarding=true
+```
+
+Apply the WSL limit:
+
+```powershell
+wsl --shutdown
+```
+
+Then reopen Ubuntu.
+
+## Install Docker inside WSL2
+
+Inside Ubuntu:
+
+```bash
+sudo apt update
+sudo apt install -y git docker.io docker-compose-plugin htop
+sudo usermod -aG docker "$USER"
+```
+
+Close Ubuntu and reopen it so the Docker group is applied.
+
+Start Docker:
+
+```bash
+sudo service docker start
+```
+
+If you do not want to start Docker manually after every reboot, add this near the
+end of `~/.profile` inside Ubuntu:
+
+```bash
+if ! service docker status >/dev/null 2>&1; then
+  sudo service docker start >/dev/null 2>&1
+fi
+```
+
+## Clone and configure the repo
+
+Inside Ubuntu:
+
+```bash
+git clone <repo-url> personal-server
+cd personal-server
+cp .env.example .env
+nano .env
+```
+
+Minimum environment values:
+
+```text
+OPENAI_API_KEY=
+OPENAI_SUMMARY_MODEL=gpt-5-mini
+ALADIN_TTB_KEY=
+```
+
+If you are moving data from another machine, copy the `data/` folder into:
+
+```text
+~/personal-server/data/
+```
+
+## Start the lightweight default stack
+
+This starts only:
+
+- `portal-web`
+- `book-memo`
+- `youtube-memo`
+
+`crawler-worker` and `nginx-proxy-manager` are behind Compose profiles so they do
+not consume resources by default.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build
+```
+
+Open from Windows:
+
+```text
+http://localhost:8000
+http://localhost:8002
+http://localhost:8003
+```
+
+## Optional services
+
+Start the news crawler only when you need it:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.n100.yml --profile worker up -d crawler-worker
+```
+
+Stop it during trading hours if MT4 needs every bit of headroom:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.n100.yml stop crawler-worker
+```
+
+Start Nginx Proxy Manager only when exposing services with public domains:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.n100.yml --profile edge up -d nginx-proxy-manager
+```
+
+## MT4 operating notes
+
+- Keep MT4 installed and running on Windows, not inside WSL2.
+- Put the MT4 data folder and this repo on the internal SSD, not a USB drive.
+- Avoid unnecessary indicators and high-frequency EA logging.
+- Keep Windows power mode on balanced or best performance.
+- Disable Windows sleep while trading.
+- Leave `crawler-worker` off during trading hours unless it is needed.
+- Use the N100 Compose file so the web apps run without `--reload`.
+
+## Useful commands
+
+Check Docker resource use inside Ubuntu:
+
+```bash
+docker stats
+htop
+```
+
+Stop all personal server apps:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.n100.yml down
+```
+
+Update the apps:
+
+```bash
+git pull
+docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build
+```
+
+Restart WSL from Windows PowerShell:
+
+```powershell
+wsl --shutdown
+```
+
+## Expected resource shape
+
+The default stack is designed to stay small:
+
+- `portal-web`: 1 worker, no reload, 160 MB cap
+- `book-memo`: 1 worker, no reload, 192 MB cap
+- `youtube-memo`: 1 worker, no reload, 160 MB cap
+- `crawler-worker`: optional, 320 MB cap
+- `nginx-proxy-manager`: optional, 384 MB cap
+
+With WSL2 capped, Windows and MT4 keep the majority of the machine while the
+personal server apps stay predictable in the background.
