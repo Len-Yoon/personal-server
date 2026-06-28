@@ -1,7 +1,7 @@
 :root {
-    --bg-primary: #071019;
-    --surface: rgba(10, 18, 32, 0.78);
-    --surface-soft: rgba(15, 23, 42, 0.64);
+    --bg-primary: #070b14;
+    --surface: rgba(2, 6, 23, 0.34);
+    --surface-soft: rgba(15, 23, 42, 0.58);
     --border: rgba(148, 163, 184, 0.20);
     --border-strong: rgba(96, 165, 250, 0.42);
     --text-primary: #f8fafc;
@@ -22,9 +22,9 @@ body {
     min-height: 100vh;
     color: var(--text-primary);
     background:
-        radial-gradient(circle at 14% 16%, rgba(56, 189, 248, 0.12), transparent 32%),
-        radial-gradient(circle at 88% 10%, rgba(34, 197, 94, 0.11), transparent 30%),
-        linear-gradient(135deg, #050816 0%, #08111f 48%, #0c1820 100%);
+        radial-gradient(circle at top left, rgba(59, 130, 246, 0.18), transparent 34%),
+        radial-gradient(circle at 86% 12%, rgba(16, 185, 129, 0.11), transparent 30%),
+        linear-gradient(135deg, #050816 0%, #0f172a 46%, #111827 100%);
     font-family:
         -apple-system,
         BlinkMacSystemFont,
@@ -32,10 +32,44 @@ body {
         "Pretendard",
         "Apple SD Gothic Neo",
         sans-serif;
+    overflow-x: hidden;
 }
 
 a {
     color: inherit;
+}
+
+.background-orb {
+    position: fixed;
+    z-index: -1;
+    border-radius: 999px;
+    filter: blur(12px);
+    opacity: 0.58;
+    pointer-events: none;
+}
+
+.orb-one {
+    top: 90px;
+    left: -80px;
+    width: 280px;
+    height: 280px;
+    background: rgba(37, 99, 235, 0.28);
+}
+
+.orb-two {
+    right: -120px;
+    top: 180px;
+    width: 340px;
+    height: 340px;
+    background: rgba(14, 165, 233, 0.18);
+}
+
+.orb-three {
+    left: 48%;
+    bottom: -180px;
+    width: 420px;
+    height: 420px;
+    background: rgba(34, 197, 94, 0.10);
 }
 
 .app-header,
@@ -148,7 +182,8 @@ a {
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     background: var(--surface);
-    box-shadow: 0 20px 70px rgba(0, 0, 0, 0.22);
+    box-shadow: 0 20px 70px rgba(0, 0, 0, 0.20);
+    backdrop-filter: blur(18px);
 }
 
 .hero {
