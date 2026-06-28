@@ -101,6 +101,11 @@ document.querySelectorAll(".delete-saved-button").forEach((button) => {
         const card = button.closest(".saved-news-card");
         const savedId = card.dataset.savedId;
 
+        const password = window.prompt("삭제 비밀번호를 입력해주세요.");
+        if (!password) {
+            return;
+        }
+
         if (!window.confirm("이 저장 뉴스를 삭제할까요?")) {
             return;
         }
@@ -110,7 +115,10 @@ document.querySelectorAll(".delete-saved-button").forEach((button) => {
 
         try {
             const response = await fetch(`/api/saved/${savedId}`, {
-                method: "DELETE"
+                method: "DELETE",
+                headers: {
+                    "X-Delete-Password": password,
+                },
             });
 
             if (!response.ok) {

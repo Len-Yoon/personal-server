@@ -1,3 +1,6 @@
+import os
+import secrets
+
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -84,7 +87,12 @@ def create_video_memo(
 
 
 @app.post("/memos/{memo_id}/delete")
-def delete_video_memo(memo_id: int):
+def delete_video_memo(
+    memo_id: int,
+    delete_password: str = Form(default=""),
+):
+    _require_delete_password(delete_password)
+
     video_id = delete_memo(memo_id)
 
     if not video_id:
@@ -102,3 +110,13 @@ def health():
         "service": "youtube-memo",
         "status": "ok",
     }
+
+
+def _require_delete_password(password: str) -> None:
+    configured_password = os.getenv("DELETE_PASSWORD", "").strip()
+
+    if not configured_password:
+        raise HTTPException(status_code=403, detail="삭제 비밀번호가 설정되지 않았습니다.")
+
+    if not secrets.compare_digest(password, configured_password):
+        raise HTTPException(status_code=403, detail="삭제 비밀번호가 올바르지 않습니다.")

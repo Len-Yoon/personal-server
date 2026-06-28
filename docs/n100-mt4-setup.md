@@ -115,11 +115,15 @@ Minimum environment values:
 OPENAI_API_KEY=
 OPENAI_SUMMARY_MODEL=gpt-5-mini
 ALADIN_TTB_KEY=
+DELETE_PASSWORD=
 FILE_MANAGER_PASSWORD=
 ```
 
 If `FILE_MANAGER_PASSWORD` is set, `/files` uses browser Basic Auth. The username
 is `len`.
+
+`DELETE_PASSWORD` is required for destructive actions such as deleting files,
+saved news, YouTube memos, books, chapters, and book memos.
 
 If you are moving data from another machine, copy the `data/` folder into:
 

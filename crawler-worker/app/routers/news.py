@@ -1,4 +1,7 @@
-from fastapi import APIRouter, HTTPException, Query, Request
+import os
+import secrets
+
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
@@ -123,7 +126,12 @@ def summarize_article(payload: ArticleSummaryRequest):
 
 
 @router.delete("/api/saved/{saved_news_id}")
-def delete_saved_news_api(saved_news_id: int):
+def delete_saved_news_api(
+    saved_news_id: int,
+    x_delete_password: str = Header(default=""),
+):
+    _require_delete_password(x_delete_password)
+
     deleted = delete_saved_news(saved_news_id)
 
     if not deleted:
@@ -134,3 +142,13 @@ def delete_saved_news_api(saved_news_id: int):
         "deleted": True,
         "id": saved_news_id,
     }
+
+
+def _require_delete_password(password: str) -> None:
+    configured_password = os.getenv("DELETE_PASSWORD", "").strip()
+
+    if not configured_password:
+        raise HTTPException(status_code=403, detail="삭제 비밀번호가 설정되지 않았습니다.")
+
+    if not secrets.compare_digest(password, configured_password):
+        raise HTTPException(status_code=403, detail="삭제 비밀번호가 올바르지 않습니다.")

@@ -30,6 +30,7 @@
 OPENAI_API_KEY=
 OPENAI_SUMMARY_MODEL=gpt-5-mini
 ALADIN_TTB_KEY=
+DELETE_PASSWORD=
 FILE_STORAGE_PATH=/data/files
 FILE_MANAGER_PASSWORD=
 ```
@@ -49,6 +50,7 @@ docker compose up -d --build youtube-memo
 
 ## Notes
 
+- 삭제 기능은 `.env`의 `DELETE_PASSWORD`를 확인합니다.
 - 현재 Compose는 개발 편의상 서비스 디렉터리를 `/app`에 bind mount합니다.
 - 운영 안정성을 더 높일 때는 `--reload` 없는 운영용 Compose 파일을 분리하는 것을 권장합니다.
 - SQLite 스키마가 커지면 간단한 migration/version 테이블을 추가하는 것이 좋습니다.

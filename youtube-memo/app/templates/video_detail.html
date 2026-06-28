@@ -87,7 +87,8 @@
                         </summary>
                         <p>{{ memo.content }}</p>
                     </details>
-                    <form action="/memos/{{ memo.id }}/delete" method="post" onsubmit="return confirm('이 메모를 삭제할까요?');">
+                    <form class="protected-delete-form" action="/memos/{{ memo.id }}/delete" method="post">
+                        <input type="hidden" name="delete_password">
                         <button class="danger-button" type="submit">삭제</button>
                     </form>
                 </article>
@@ -105,5 +106,23 @@
     <span>youtube-memo</span>
     <span>Len Private Workspace</span>
 </footer>
+<script>
+document.querySelectorAll(".protected-delete-form").forEach((form) => {
+    form.addEventListener("submit", (event) => {
+        const password = window.prompt("삭제 비밀번호를 입력해주세요.");
+        if (!password) {
+            event.preventDefault();
+            return;
+        }
+
+        if (!window.confirm("이 메모를 삭제할까요?")) {
+            event.preventDefault();
+            return;
+        }
+
+        form.querySelector("input[name='delete_password']").value = password;
+    });
+});
+</script>
 </body>
 </html>

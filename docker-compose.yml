@@ -46,6 +46,8 @@ services:
     restart: unless-stopped
     ports:
       - "8002:8002"
+    env_file:
+      - .env
     environment:
       - YOUTUBE_MEMO_DB_PATH=/data/youtube-memo/youtube_memo.sqlite3
     volumes:

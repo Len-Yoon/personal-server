@@ -322,7 +322,7 @@ def health():
 
 
 def _require_delete_password(password: str) -> None:
-    configured_password = os.getenv("BOOK_DELETE_PASSWORD", "").strip()
+    configured_password = os.getenv("DELETE_PASSWORD", "").strip()
 
     if not configured_password:
         raise HTTPException(status_code=403, detail="삭제 비밀번호가 설정되지 않았습니다.")
