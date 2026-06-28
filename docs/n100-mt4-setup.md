@@ -115,7 +115,11 @@ Minimum environment values:
 OPENAI_API_KEY=
 OPENAI_SUMMARY_MODEL=gpt-5-mini
 ALADIN_TTB_KEY=
+FILE_MANAGER_PASSWORD=
 ```
+
+If `FILE_MANAGER_PASSWORD` is set, `/files` uses browser Basic Auth. The username
+is `len`.
 
 If you are moving data from another machine, copy the `data/` folder into:
 

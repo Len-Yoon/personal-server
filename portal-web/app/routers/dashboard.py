@@ -33,6 +33,14 @@ def dashboard(request: Request):
             "meta": "Book / Reading / Memo",
         },
         {
+            "icon": "F",
+            "name": "파일함",
+            "description": "개인 서버에 파일을 올리고 내려받는 가벼운 웹 파일 관리자입니다.",
+            "url": "/files",
+            "status": "운영중",
+            "meta": "Files / Upload / Download",
+        },
+        {
             "icon": "T",
             "name": "자동매매 결과지",
             "description": "매매 결과, 수익률, 전략별 복기 내용을 관리합니다.",

@@ -21,6 +21,8 @@ services:
       - --workers
       - "1"
       - --no-access-log
+    environment:
+      - FILE_STORAGE_PATH=/data/files
     cpus: "0.25"
     mem_limit: 160m
     pids_limit: 128

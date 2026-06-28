@@ -5,6 +5,7 @@
 ## Services
 
 - `portal-web` (`8000`): 개인 서버 메인 포털
+- `portal-web /files` (`8000`): 웹 파일 업로드/다운로드 파일함
 - `crawler-worker` (`8001`): Google News RSS 수집, AI 요약, 저장 뉴스 관리
 - `youtube-memo` (`8002`): YouTube 링크별 메모장
 - `book-memo` (`8003`): 책 검색, 독서 진행률, 목차별 코멘트, 독서 메모
@@ -17,6 +18,7 @@
 - `data/crawler-worker/news_summaries.sqlite3`: 저장 뉴스/요약 DB
 - `data/youtube-memo/youtube_memo.sqlite3`: YouTube 영상/메모 DB
 - `data/book-memo/book_memo.sqlite3`: 책장/목차/독서 메모 DB
+- `data/files/`: 웹 파일함 업로드 파일
 - `data/npm/`: Nginx Proxy Manager 데이터
 - `data/logs/`: 서비스 로그용 공유 디렉터리
 
@@ -28,6 +30,8 @@
 OPENAI_API_KEY=
 OPENAI_SUMMARY_MODEL=gpt-5-mini
 ALADIN_TTB_KEY=
+FILE_STORAGE_PATH=/data/files
+FILE_MANAGER_PASSWORD=
 ```
 
 ## Run

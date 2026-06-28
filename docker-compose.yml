@@ -17,8 +17,13 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - FILE_STORAGE_PATH=/data/files
     volumes:
       - ./portal-web:/app
+      - ./data/files:/data/files
 
   crawler-worker:
     build: ./crawler-worker
