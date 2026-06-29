@@ -539,7 +539,11 @@ a {
     font-weight: 800;
     text-decoration: none;
     cursor: pointer;
-    transition: border-color 0.18s ease, background 0.18s ease;
+    transition:
+        border-color 0.18s ease,
+        background 0.18s ease,
+        filter 0.18s ease,
+        opacity 0.18s ease;
 }
 
 .text-button {
@@ -600,7 +604,8 @@ a {
 }
 
 .drop-zone.uploading {
-    opacity: 0.72;
+    opacity: 0.68;
+    filter: blur(0.7px);
     pointer-events: none;
 }
 
