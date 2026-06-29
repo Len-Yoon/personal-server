@@ -19,7 +19,12 @@
             <p>필요한 서비스를 선택해 이동합니다.</p>
         </div>
 
-        <span class="server-status">LOCAL RUNNING</span>
+        <div class="header-actions">
+            <button class="security-button" type="button" data-open-security-modal>
+                보안 상태
+            </button>
+            <span class="server-status">LOCAL RUNNING</span>
+        </div>
     </div>
 
     <div class="service-grid three">
@@ -49,4 +54,179 @@
         {% endfor %}
     </div>
 </section>
+
+<div class="modal-backdrop" data-security-modal hidden>
+    <section class="security-modal" role="dialog" aria-modal="true" aria-labelledby="security-modal-title">
+        <div class="modal-header">
+            <div>
+                <span class="modal-kicker">ADMIN SECURITY</span>
+                <h2 id="security-modal-title">보안 대시보드</h2>
+            </div>
+            <button class="modal-close" type="button" aria-label="닫기" data-close-security-modal>×</button>
+        </div>
+
+        <div class="security-summary">
+            <div>
+                <span>로그 파일</span>
+                <strong data-security-log-path>인증 후 표시</strong>
+            </div>
+            <div>
+                <span>업로드 제한</span>
+                <strong data-security-upload-limit>인증 후 표시</strong>
+            </div>
+            <div>
+                <span>보안 헤더</span>
+                <strong data-security-header-count>인증 후 표시</strong>
+            </div>
+        </div>
+
+        <div class="policy-list">
+            <h3>파일 업로드 정책</h3>
+            <p data-security-blocked-extensions>차단 확장자: 인증 후 표시</p>
+            <p data-security-allowed-extensions>허용 확장자: 인증 후 표시</p>
+        </div>
+
+        <div class="policy-list">
+            <h3>최근 로그 파일</h3>
+            <div data-security-log-files>
+                <p class="empty-log">관리자 인증 후 표시합니다.</p>
+            </div>
+        </div>
+
+        <div class="event-list">
+            <h3>최근 보안 이벤트</h3>
+            <div data-security-events>
+                <p class="empty-log">관리자 인증 후 최근 이벤트를 불러옵니다.</p>
+            </div>
+        </div>
+    </section>
+</div>
+
+<script>
+const securityModal = document.querySelector("[data-security-modal]");
+const openSecurityModal = document.querySelector("[data-open-security-modal]");
+const closeSecurityModal = document.querySelector("[data-close-security-modal]");
+const securityEvents = document.querySelector("[data-security-events]");
+const securityLogFiles = document.querySelector("[data-security-log-files]");
+let securityPassword = null;
+
+openSecurityModal?.addEventListener("click", () => {
+    securityModal.hidden = false;
+    loadSecurityStatus();
+});
+
+closeSecurityModal?.addEventListener("click", () => {
+    securityModal.hidden = true;
+});
+
+securityModal?.addEventListener("click", (event) => {
+    if (event.target === securityModal) {
+        securityModal.hidden = true;
+    }
+});
+
+document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && securityModal && !securityModal.hidden) {
+        securityModal.hidden = true;
+    }
+});
+
+async function loadSecurityStatus() {
+    setSecurityMessage("관리자 보안 정보를 불러오는 중입니다.");
+
+    if (!securityPassword) {
+        securityPassword = prompt("기존 관리자 패스워드를 입력해주세요.");
+        if (!securityPassword) {
+            setSecurityMessage("관리자 인증이 필요합니다.");
+            return;
+        }
+    }
+
+    let response = await fetchSecurityStatus();
+    if (response.status === 401) {
+        securityPassword = null;
+        securityPassword = prompt("기존 관리자 패스워드를 입력해주세요.");
+        if (!securityPassword) {
+            setSecurityMessage("관리자 인증이 필요합니다.");
+            return;
+        }
+        response = await fetchSecurityStatus();
+    }
+
+    if (!response.ok) {
+        setSecurityMessage("보안 정보를 불러오지 못했습니다.");
+        return;
+    }
+
+    renderSecurityStatus(await response.json());
+}
+
+function fetchSecurityStatus() {
+    const headers = {};
+    if (securityPassword) {
+        headers["X-Security-Password"] = securityPassword;
+    }
+    return fetch("/admin/security", { headers });
+}
+
+function renderSecurityStatus(status) {
+    document.querySelector("[data-security-log-path]").textContent = status.log_path;
+    document.querySelector("[data-security-upload-limit]").textContent = `${status.file_policy.max_upload_mb}MB`;
+    document.querySelector("[data-security-header-count]").textContent = `${status.headers.length}개 적용`;
+    document.querySelector("[data-security-blocked-extensions]").textContent =
+        `차단 확장자: ${status.file_policy.blocked_extensions.join(", ") || "없음"}`;
+    document.querySelector("[data-security-allowed-extensions]").textContent =
+        `허용 확장자: ${status.file_policy.allowed_extensions.join(", ") || "별도 제한 없음"}`;
+    renderSecurityLogFiles(status.log_files);
+
+    securityEvents.replaceChildren();
+    if (!status.recent_events.length) {
+        setSecurityMessage("아직 기록된 보안 이벤트가 없습니다.");
+        return;
+    }
+
+    status.recent_events.forEach((event) => {
+        const row = document.createElement("article");
+        const meta = document.createElement("div");
+        const name = document.createElement("strong");
+        const timestamp = document.createElement("span");
+        const details = document.createElement("code");
+
+        row.className = "event-row";
+        name.textContent = event.event;
+        timestamp.textContent = event.timestamp;
+        details.textContent = JSON.stringify(event.details);
+
+        meta.append(name, timestamp);
+        row.append(meta, details);
+        securityEvents.append(row);
+    });
+}
+
+function renderSecurityLogFiles(logFiles) {
+    securityLogFiles.replaceChildren();
+    if (!logFiles.length) {
+        const empty = document.createElement("p");
+        empty.className = "empty-log";
+        empty.textContent = "아직 생성된 일별 로그 파일이 없습니다.";
+        securityLogFiles.append(empty);
+        return;
+    }
+
+    logFiles.forEach((logFile) => {
+        const item = document.createElement("code");
+        item.className = "log-file-row";
+        item.textContent = logFile;
+        securityLogFiles.append(item);
+    });
+}
+
+function setSecurityMessage(message) {
+    securityEvents.replaceChildren();
+    const empty = document.createElement("p");
+    empty.className = "empty-log";
+    empty.textContent = message;
+    securityEvents.append(empty);
+}
+</script>
 {% endblock %}

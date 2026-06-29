@@ -1,5 +1,10 @@
-from fastapi import APIRouter, Request
+import os
+import secrets
+
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.templating import Jinja2Templates
+
+from app.services.security import append_security_event, security_status
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -58,3 +63,25 @@ def dashboard(request: Request):
             "services": services,
         },
     )
+
+
+@router.get("/admin/security")
+def admin_security_status(x_security_password: str = Header(default="")):
+    _require_security_password(x_security_password)
+    append_security_event("security_dashboard_viewed")
+    return security_status()
+
+
+def _require_security_password(password: str) -> None:
+    configured_password = (
+        os.getenv("FILE_MANAGER_PASSWORD", "").strip()
+        or os.getenv("DELETE_PASSWORD", "").strip()
+    )
+
+    if not configured_password:
+        append_security_event("security_dashboard_blocked", reason="password_not_configured")
+        raise HTTPException(status_code=403, detail="관리자 비밀번호가 설정되지 않았습니다.")
+
+    if not secrets.compare_digest(password, configured_password):
+        append_security_event("security_dashboard_auth_failed")
+        raise HTTPException(status_code=401, detail="관리자 비밀번호가 올바르지 않습니다.")

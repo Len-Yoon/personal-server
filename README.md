@@ -28,11 +28,16 @@
 
 ```text
 OPENAI_API_KEY=
-OPENAI_SUMMARY_MODEL=gpt-5-mini
+OPENAI_SUMMARY_MODEL=
 ALADIN_TTB_KEY=
 DELETE_PASSWORD=
-FILE_STORAGE_PATH=/data/files
+FILE_STORAGE_PATH=
 FILE_MANAGER_PASSWORD=
+SECURITY_LOG_PATH=
+SECURITY_LOG_TIMEZONE=
+FILE_MAX_UPLOAD_MB=
+FILE_BLOCKED_EXTENSIONS=
+FILE_ALLOWED_EXTENSIONS=
 ```
 
 ## Run
@@ -51,6 +56,9 @@ docker compose up -d --build youtube-memo
 ## Notes
 
 - 삭제 기능은 `.env`의 `DELETE_PASSWORD`를 확인합니다.
+- `portal-web`은 보안 헤더를 응답에 추가하고, 파일함 인증 실패/업로드/다운로드/삭제 이벤트를 `SECURITY_LOG_PATH` 기준의 일별 텍스트 로그로 기록합니다.
+- 파일함 업로드는 최대 용량, 차단 확장자, 확장자 없는 파일, 기존 파일 덮어쓰기를 제한합니다.
+- 포털의 `보안 상태` 버튼은 관리자 인증 후 최근 보안 이벤트와 업로드 정책을 모달로 보여줍니다.
 - 현재 Compose는 개발 편의상 서비스 디렉터리를 `/app`에 bind mount합니다.
 - 운영 안정성을 더 높일 때는 `--reload` 없는 운영용 Compose 파일을 분리하는 것을 권장합니다.
 - SQLite 스키마가 커지면 간단한 migration/version 테이블을 추가하는 것이 좋습니다.

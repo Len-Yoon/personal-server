@@ -24,6 +24,7 @@ services:
     volumes:
       - ./portal-web:/app
       - ./data/files:/data/files
+      - ./data/logs:/app/data/logs
 
   crawler-worker:
     build: ./crawler-worker
