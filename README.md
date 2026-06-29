@@ -96,3 +96,7 @@ docker compose up -d --build youtube-memo
 - 운영 안정성을 더 높일 때는 `--reload` 없는 운영용 Compose 파일을 분리하는 것을 권장합니다.
 - SQLite 스키마가 커지면 간단한 migration/version 테이블을 추가하는 것이 좋습니다.
 - `book-memo` 책 검색은 `ALADIN_TTB_KEY`가 있으면 알라딘을 우선 사용하고, 실패하면 Google Books, Open Library 순서로 fallback합니다.
+
+## Agent Handoff
+
+새 채팅에서 프로젝트 맥락을 빠르게 넘길 때는 [Agent Handoff](docs/agent-handoff.md)를 참고합니다.
