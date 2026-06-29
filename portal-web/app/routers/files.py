@@ -1,0 +1,163 @@
+import os
+import secrets
+from urllib.parse import urlencode
+
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, status
+from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.templating import Jinja2Templates
+
+from app.services import file_store
+from app.services.security import append_security_event
+
+
+security = HTTPBasic(auto_error=False)
+
+
+def require_file_auth(credentials: HTTPBasicCredentials | None = Depends(security)) -> None:
+    password = os.getenv("FILE_MANAGER_PASSWORD", "")
+    if not password:
+        return
+
+    is_valid = (
+        credentials is not None
+        and secrets.compare_digest(credentials.username, "len")
+        and secrets.compare_digest(credentials.password, password)
+    )
+    if not is_valid:
+        append_security_event("file_auth_failed", username=credentials.username if credentials else "")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="파일함 로그인이 필요합니다.",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+
+
+router = APIRouter(prefix="/files", dependencies=[Depends(require_file_auth)])
+templates = Jinja2Templates(directory="app/templates")
+templates.env.filters["filesize"] = file_store.format_size
+
+
+@router.get("")
+def files_home(request: Request, path: str = ""):
+    try:
+        directory = file_store.get_directory(path)
+    except (ValueError, FileNotFoundError, NotADirectoryError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return templates.TemplateResponse(
+        "files.html",
+        {
+            "request": request,
+            "title": "파일함",
+            "directory": directory,
+        },
+    )
+
+
+@router.post("/upload")
+def upload_file(path: str = Form(""), upload: UploadFile = File(...)):
+    try:
+        file_store.save_upload(path, upload)
+    except FileExistsError as exc:
+        append_security_event("file_upload_blocked", path=path, reason=str(exc))
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ValueError, FileNotFoundError, NotADirectoryError) as exc:
+        append_security_event("file_upload_blocked", path=path, reason=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return _redirect_to_directory(path)
+
+
+@router.post("/uploads")
+def upload_files(path: str = Form(""), uploads: list[UploadFile] = File(...)):
+    try:
+        file_store.save_uploads(path, uploads)
+    except FileExistsError as exc:
+        append_security_event("file_upload_blocked", path=path, reason=str(exc))
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ValueError, FileNotFoundError, NotADirectoryError) as exc:
+        append_security_event("file_upload_blocked", path=path, reason=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return _redirect_to_directory(path)
+
+
+@router.post("/folders")
+def create_folder(path: str = Form(""), name: str = Form("")):
+    try:
+        file_store.create_directory(path, name)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=400, detail="이미 같은 이름의 폴더가 있습니다.") from exc
+    except (ValueError, FileNotFoundError, NotADirectoryError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return _redirect_to_directory(path)
+
+
+@router.get("/download")
+def download_file(path: str):
+    try:
+        file_path = file_store.get_download_path(path)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    append_security_event("file_downloaded", path=path)
+    return FileResponse(file_path, filename=file_path.name)
+
+
+@router.post("/delete")
+def delete_item(path: str = Form(""), delete_password: str = Form("")):
+    _require_delete_password(delete_password)
+
+    try:
+        file_store.delete_item(path)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    parent = "/".join(path.strip("/").split("/")[:-1])
+    return _redirect_to_directory(parent)
+
+
+@router.post("/delete-bulk")
+def delete_items(
+    current_path: str = Form(""),
+    paths: list[str] = Form(...),
+    delete_password: str = Form(""),
+):
+    _require_delete_password(delete_password)
+
+    try:
+        for path in paths:
+            file_store.delete_item(path)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {"ok": True, "redirect": _directory_url(current_path)}
+
+
+def _redirect_to_directory(path: str) -> RedirectResponse:
+    return RedirectResponse(url=_directory_url(path), status_code=303)
+
+
+def _directory_url(path: str) -> str:
+    url = "/files"
+    if path:
+        url = f"{url}?{urlencode({'path': path})}"
+    return url
+
+
+def _require_delete_password(password: str) -> None:
+    configured_password = (
+        os.getenv("DELETE_PASSWORD", "").strip()
+        or os.getenv("FILE_MANAGER_PASSWORD", "").strip()
+    )
+
+    if not configured_password:
+        append_security_event("delete_password_missing_config")
+        raise HTTPException(status_code=403, detail="삭제 비밀번호가 설정되지 않았습니다.")
+
+    if not secrets.compare_digest(password, configured_password):
+        append_security_event("delete_password_failed")
+        raise HTTPException(status_code=403, detail="삭제 비밀번호가 올바르지 않습니다.")

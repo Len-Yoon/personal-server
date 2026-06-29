@@ -1,0 +1,315 @@
+{% extends "base.html" %}
+
+{% block content %}
+<header class="app-header">
+    <a class="home-pill" href="/" aria-label="메인으로 이동">
+        <span class="home-icon">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 10.8L12 3l9 7.8v9.7a.5.5 0 0 1-.5.5h-5.2a.5.5 0 0 1-.5-.5v-5.4H9.2v5.4a.5.5 0 0 1-.5.5H3.5a.5.5 0 0 1-.5-.5v-9.7z"/>
+            </svg>
+        </span>
+        <span>홈</span>
+    </a>
+
+    <div class="app-brand">
+        <span class="brand-dot"></span>
+        <span>FILE VAULT</span>
+    </div>
+</header>
+
+<section class="hero compact-hero">
+    <div class="hero-badge">FILE VAULT</div>
+
+    <h1>파일함</h1>
+
+    <p>
+        개인 서버에 파일을 올리고 내려받는 가벼운 웹 파일 관리자입니다.
+    </p>
+</section>
+
+<section class="file-section">
+    <div class="section-header">
+        <div>
+            <h2>저장소</h2>
+            {% if directory.breadcrumbs %}
+                <p>
+                    <a class="breadcrumb-link" href="/files">파일함</a>
+                    {% for crumb in directory.breadcrumbs %}
+                        <span class="breadcrumb-separator">/</span>
+                        <a class="breadcrumb-link" href="/files?path={{ crumb.path|urlencode }}">{{ crumb.name }}</a>
+                    {% endfor %}
+                </p>
+            {% else %}
+                <p>파일을 끌어놓거나 폴더를 만들어 정리합니다.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="desktop-toolbar">
+        <button id="new-folder" type="button">새 폴더</button>
+        <button id="pick-files" type="button">업로드</button>
+        <button id="delete-selection" type="button">삭제</button>
+        <button id="clear-selection" type="button">선택 해제</button>
+        <span><strong id="selected-count">0</strong>개 선택됨</span>
+        <input id="file-upload-input" type="file" multiple hidden>
+    </div>
+
+    {% if directory.parent_path is not none %}
+        <a class="up-link" href="/files{% if directory.parent_path %}?path={{ directory.parent_path|urlencode }}{% endif %}">상위 폴더로</a>
+    {% endif %}
+
+    <div
+        class="file-grid drop-zone"
+        data-current-path="{{ directory.current_path }}"
+        data-upload-url="/files/uploads"
+    >
+        <div class="drop-overlay">
+            <strong>여기에 놓으면 현재 폴더로 업로드됩니다.</strong>
+        </div>
+
+        {% for folder in directory.directories %}
+            <article
+                class="file-tile folder-tile folder-row"
+                tabindex="0"
+                data-folder-path="{{ folder.path }}"
+                data-open-url="/files?path={{ folder.path|urlencode }}"
+                data-item-path="{{ folder.path }}"
+            >
+                <div class="tile-icon folder-icon" aria-hidden="true"></div>
+
+                <div class="tile-body">
+                    <strong title="{{ folder.name }}">{{ folder.name }}</strong>
+                </div>
+            </article>
+        {% endfor %}
+
+        {% for file in directory.files %}
+            <article
+                class="file-tile"
+                tabindex="0"
+                data-open-url="/files/download?path={{ file.path|urlencode }}"
+                data-item-path="{{ file.path }}"
+            >
+                <div class="tile-icon document-icon" aria-hidden="true"></div>
+
+                <div class="tile-body">
+                    <strong title="{{ file.name }}">{{ file.name }}</strong>
+                </div>
+            </article>
+        {% endfor %}
+
+        {% if not directory.directories and not directory.files %}
+            <div class="empty-state">
+                <h3>아직 파일이 없습니다.</h3>
+                <p>파일을 이 영역에 끌어놓으면 바로 올라갑니다.</p>
+            </div>
+        {% endif %}
+    </div>
+</section>
+
+<script>
+const dropZone = document.querySelector(".drop-zone");
+const fileInput = document.querySelector("#file-upload-input");
+
+if (dropZone) {
+    const currentPath = dropZone.dataset.currentPath || "";
+    const uploadUrl = dropZone.dataset.uploadUrl;
+    let dragDepth = 0;
+
+    const showDrop = () => dropZone.classList.add("drag-over");
+    const hideDrop = () => {
+        dropZone.classList.remove("drag-over");
+        dropZone.classList.remove("folder-target-over");
+        document.querySelectorAll(".folder-row.folder-drag-over").forEach((row) => {
+            row.classList.remove("folder-drag-over");
+        });
+    };
+
+    ["dragenter", "dragover"].forEach((eventName) => {
+        dropZone.addEventListener(eventName, (event) => {
+            event.preventDefault();
+            if (eventName === "dragenter") {
+                dragDepth += 1;
+            }
+            showDrop();
+            const folderRow = event.target.closest(".folder-row");
+            document.querySelectorAll(".folder-row.folder-drag-over").forEach((row) => {
+                if (row !== folderRow) {
+                    row.classList.remove("folder-drag-over");
+                }
+            });
+            if (folderRow) {
+                dropZone.classList.add("folder-target-over");
+                folderRow.classList.add("folder-drag-over");
+            } else {
+                dropZone.classList.remove("folder-target-over");
+            }
+        });
+    });
+
+    dropZone.addEventListener("dragleave", (event) => {
+        event.preventDefault();
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0) {
+            hideDrop();
+        }
+    });
+
+    dropZone.addEventListener("drop", async (event) => {
+        event.preventDefault();
+        dragDepth = 0;
+        hideDrop();
+
+        const files = Array.from(event.dataTransfer.files || []);
+        if (!files.length) {
+            return;
+        }
+
+        const targetFolder = event.target.closest(".folder-row");
+        const targetPath = targetFolder?.dataset.folderPath || currentPath;
+        await uploadFiles(files, targetPath);
+    });
+}
+
+document.querySelectorAll(".file-tile").forEach((tile) => {
+    tile.addEventListener("click", (event) => {
+        event.stopPropagation();
+        tile.classList.toggle("selected");
+        updateSelectionToolbar();
+    });
+
+    tile.addEventListener("dblclick", (event) => {
+        event.stopPropagation();
+        window.location.href = tile.dataset.openUrl;
+    });
+
+    tile.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") {
+            return;
+        }
+
+        window.location.href = tile.dataset.openUrl;
+    });
+});
+
+const selectedCount = document.querySelector("#selected-count");
+const clearSelection = document.querySelector("#clear-selection");
+const deleteSelection = document.querySelector("#delete-selection");
+const newFolder = document.querySelector("#new-folder");
+const pickFiles = document.querySelector("#pick-files");
+
+function selectedTiles() {
+    return Array.from(document.querySelectorAll(".file-tile.selected"));
+}
+
+function updateSelectionToolbar() {
+    const count = selectedTiles().length;
+    selectedCount.textContent = count;
+    deleteSelection.disabled = count === 0;
+    clearSelection.disabled = count === 0;
+}
+
+clearSelection?.addEventListener("click", () => {
+    selectedTiles().forEach((tile) => tile.classList.remove("selected"));
+    updateSelectionToolbar();
+});
+
+dropZone?.addEventListener("click", (event) => {
+    if (event.target.closest(".file-tile")) {
+        return;
+    }
+    selectedTiles().forEach((tile) => tile.classList.remove("selected"));
+    updateSelectionToolbar();
+});
+
+newFolder?.addEventListener("click", async () => {
+    const name = prompt("새 폴더 이름");
+    if (!name) {
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append("path", dropZone?.dataset.currentPath || "");
+    formData.append("name", name);
+
+    const response = await fetch("/files/folders", {
+        method: "POST",
+        body: formData,
+    });
+
+    if (!response.ok) {
+        alert("폴더를 만들지 못했습니다.");
+        return;
+    }
+
+    window.location.reload();
+});
+
+pickFiles?.addEventListener("click", () => fileInput?.click());
+
+fileInput?.addEventListener("change", async () => {
+    const files = Array.from(fileInput.files || []);
+    if (!files.length) {
+        return;
+    }
+    await uploadFiles(files, dropZone?.dataset.currentPath || "");
+});
+
+deleteSelection?.addEventListener("click", async () => {
+    const tiles = selectedTiles();
+    if (!tiles.length) {
+        return;
+    }
+    const password = prompt("삭제 비밀번호를 입력해주세요.");
+    if (!password) {
+        return;
+    }
+    if (!confirm(`${tiles.length}개 항목을 삭제할까요?`)) {
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append("current_path", dropZone?.dataset.currentPath || "");
+    formData.append("delete_password", password);
+    tiles.forEach((tile) => formData.append("paths", tile.dataset.itemPath));
+
+    const response = await fetch("/files/delete-bulk", {
+        method: "POST",
+        body: formData,
+    });
+
+    if (!response.ok) {
+        alert("삭제에 실패했습니다.");
+        return;
+    }
+
+    const result = await response.json();
+    window.location.href = result.redirect || window.location.href;
+});
+
+async function uploadFiles(files, targetPath) {
+    const formData = new FormData();
+    formData.append("path", targetPath);
+    files.forEach((file) => formData.append("uploads", file));
+    dropZone?.classList.add("uploading");
+
+    try {
+        const response = await fetch("/files/uploads", {
+            method: "POST",
+            body: formData,
+        });
+
+        if (!response.ok) {
+            throw new Error("upload failed");
+        }
+
+        window.location.reload();
+    } catch (error) {
+        alert("업로드에 실패했습니다.");
+        dropZone?.classList.remove("uploading");
+    }
+}
+
+updateSelectionToolbar();
+</script>
+{% endblock %}
