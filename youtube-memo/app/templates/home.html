@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <title>{{ title }}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=20260628-shared-bg-2">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260630-memo-spacing-1">
 </head>
 <body>
 <div class="background-orb orb-one"></div>
@@ -64,20 +64,32 @@
 
         <div class="video-grid">
             {% for video in videos %}
-                <a class="video-card" href="/videos/{{ video.id }}">
-                    <div class="thumbnail">
-                        <img
-                            src="https://img.youtube.com/vi/{{ video.youtube_id }}/hqdefault.jpg"
-                            alt=""
-                            loading="lazy"
-                        >
-                    </div>
-                    <div class="video-card-body">
-                        <span>{{ video.memo_count }}개 메모</span>
-                        <h3>{{ video.title }}</h3>
-                        <p>{{ video.url }}</p>
-                    </div>
-                </a>
+                <article class="video-card">
+                    <a class="video-card-link" href="/videos/{{ video.id }}">
+                        <div class="thumbnail">
+                            <img
+                                src="https://img.youtube.com/vi/{{ video.youtube_id }}/hqdefault.jpg"
+                                alt=""
+                                loading="lazy"
+                            >
+                        </div>
+                        <div class="video-card-body">
+                            <span>{{ video.memo_count }}개 메모</span>
+                            <h3>{{ video.title }}</h3>
+                            <p>{{ video.url }}</p>
+                        </div>
+                    </a>
+                    <form
+                        class="protected-delete-form video-card-delete-form"
+                        action="/videos/{{ video.id }}/delete"
+                        method="post"
+                        data-confirm-message="이 영상과 메모를 모두 삭제할까요?"
+                        data-error-message="영상 삭제에 실패했습니다."
+                    >
+                        <input type="hidden" name="delete_password">
+                        <button class="danger-button" type="submit">삭제</button>
+                    </form>
+                </article>
             {% else %}
                 <article class="empty-card">
                     <h3>아직 저장한 영상이 없습니다.</h3>
@@ -92,5 +104,39 @@
     <span>youtube-memo</span>
     <span>Len Private Workspace</span>
 </footer>
+<script>
+document.querySelectorAll(".protected-delete-form").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+
+        const password = window.prompt("삭제 비밀번호를 입력해주세요.");
+        if (!password) {
+            return;
+        }
+
+        if (!window.confirm(form.dataset.confirmMessage || "삭제할까요?")) {
+            return;
+        }
+
+        form.querySelector("input[name='delete_password']").value = password;
+
+        try {
+            const response = await fetch(form.action, {
+                method: "POST",
+                body: new FormData(form),
+            });
+
+            if (!response.ok) {
+                window.alert(form.dataset.errorMessage || "삭제에 실패했습니다.");
+                return;
+            }
+
+            window.location.href = response.url || window.location.href;
+        } catch (error) {
+            window.alert(form.dataset.errorMessage || "삭제에 실패했습니다.");
+        }
+    });
+});
+</script>
 </body>
 </html>

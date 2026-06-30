@@ -10,6 +10,7 @@ from app.services.memo_service import (
     create_memo,
     create_or_get_video,
     delete_memo,
+    delete_video,
     embed_url,
     get_video,
     list_memos,
@@ -82,6 +83,24 @@ def create_video_memo(
 
     return RedirectResponse(
         url=f"/videos/{video_id}",
+        status_code=303,
+    )
+
+
+@app.post("/videos/{video_id}/delete")
+def delete_saved_video(
+    video_id: int,
+    delete_password: str = Form(default=""),
+):
+    _require_delete_password(delete_password)
+
+    deleted = delete_video(video_id)
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    return RedirectResponse(
+        url="/",
         status_code=303,
     )
 

@@ -106,6 +106,26 @@ def get_video(video_id: int) -> dict[str, Any] | None:
     return _row_to_dict(row)
 
 
+def delete_video(video_id: int) -> bool:
+    init_db()
+
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT id FROM videos WHERE id = ?",
+            (video_id,),
+        ).fetchone()
+
+        if not row:
+            return False
+
+        connection.execute(
+            "DELETE FROM videos WHERE id = ?",
+            (video_id,),
+        )
+
+    return True
+
+
 def create_memo(video_id: int, title: str, content: str) -> dict[str, Any]:
     init_db()
 

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <title>{{ title }}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=20260628-shared-bg-2">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260630-memo-spacing-1">
 </head>
 <body>
 <div class="background-orb orb-one"></div>
@@ -42,7 +42,19 @@
             <div class="hero-badge">VIDEO</div>
             <h1>{{ video.title }}</h1>
             <p>{{ video.url }}</p>
-            <a class="text-link" href="{{ video.url }}" target="_blank">YouTube에서 열기</a>
+            <div class="video-actions">
+                <a class="text-link" href="{{ video.url }}" target="_blank">YouTube에서 열기</a>
+                <form
+                    class="protected-delete-form"
+                    action="/videos/{{ video.id }}/delete"
+                    method="post"
+                    data-confirm-message="이 영상과 메모를 모두 삭제할까요?"
+                    data-error-message="영상 삭제에 실패했습니다."
+                >
+                    <input type="hidden" name="delete_password">
+                    <button class="danger-button compact-danger-button" type="submit">영상 삭제</button>
+                </form>
+            </div>
         </aside>
     </section>
 
@@ -87,7 +99,13 @@
                         </summary>
                         <p>{{ memo.content }}</p>
                     </details>
-                    <form class="protected-delete-form" action="/memos/{{ memo.id }}/delete" method="post">
+                    <form
+                        class="protected-delete-form"
+                        action="/memos/{{ memo.id }}/delete"
+                        method="post"
+                        data-confirm-message="이 메모를 삭제할까요?"
+                        data-error-message="메모 삭제에 실패했습니다."
+                    >
                         <input type="hidden" name="delete_password">
                         <button class="danger-button" type="submit">삭제</button>
                     </form>
@@ -116,7 +134,7 @@ document.querySelectorAll(".protected-delete-form").forEach((form) => {
             return;
         }
 
-        if (!window.confirm("이 메모를 삭제할까요?")) {
+        if (!window.confirm(form.dataset.confirmMessage || "삭제할까요?")) {
             return;
         }
 
@@ -129,13 +147,13 @@ document.querySelectorAll(".protected-delete-form").forEach((form) => {
             });
 
             if (!response.ok) {
-                window.alert("삭제에 실패했습니다.");
+                window.alert(form.dataset.errorMessage || "삭제에 실패했습니다.");
                 return;
             }
 
             window.location.href = response.url || window.location.href;
         } catch (error) {
-            window.alert("삭제에 실패했습니다.");
+            window.alert(form.dataset.errorMessage || "삭제에 실패했습니다.");
         }
     });
 });
