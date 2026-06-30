@@ -117,10 +117,21 @@ OPENAI_SUMMARY_MODEL=gpt-5-mini
 ALADIN_TTB_KEY=
 DELETE_PASSWORD=
 FILE_MANAGER_PASSWORD=
+SECURITY_LOG_PATH=/app/data/logs/security-events.txt
+SECURITY_LOG_TIMEZONE=Asia/Seoul
+FILE_MAX_UPLOAD_MB=50
+FILE_BLOCKED_EXTENSIONS=app,bat,cmd,com,dll,dmg,exe,jar,js,msi,php,ps1,sh,vbs
+FILE_ALLOWED_EXTENSIONS=
+FILE_MANAGER_AUTH_REQUIRED=true
+APP_ENV=production
 ```
 
 If `FILE_MANAGER_PASSWORD` is set, `/files` uses browser Basic Auth. The username
 is `len`.
+
+For a 24/7 N100 box, keep `FILE_MANAGER_AUTH_REQUIRED=true` or
+`APP_ENV=production` so `/files` does not open accidentally when the password is
+missing.
 
 `DELETE_PASSWORD` is required for destructive actions such as deleting files,
 saved news, YouTube memos, books, chapters, and book memos.
@@ -183,6 +194,10 @@ docker compose -f docker-compose.yml -f docker-compose.n100.yml --profile edge u
 - Disable Windows sleep while trading.
 - Leave `crawler-worker` off during trading hours unless it is needed.
 - Use the N100 Compose file so the web apps run without `--reload`.
+- Keep `FILE_MAX_UPLOAD_MB` conservative so large browser uploads do not compete
+  with MT4.
+- Prune security logs and backups on a schedule so the SSD does not fill up
+  silently.
 
 ## Useful commands
 
@@ -210,6 +225,21 @@ Restart WSL from Windows PowerShell:
 
 ```powershell
 wsl --shutdown
+```
+
+Back up SQLite data and prune old security logs:
+
+```bash
+python3 scripts/maintenance.py backup
+python3 scripts/maintenance.py prune-logs
+```
+
+If file uploads should be included in backups, set:
+
+```text
+BACKUP_INCLUDE_FILES=true
+BACKUP_RETENTION_DAYS=14
+SECURITY_LOG_RETENTION_DAYS=30
 ```
 
 ## Expected resource shape

@@ -17,12 +17,15 @@
 - `README.md`: 포트폴리오용 설명과 서비스별 스크린샷
 - `.env.example`: 빈 값 예시만 유지
 - `docker-compose.yml`: 로컬/운영 compose
+- `docker-compose.n100.yml`: N100/MT4 동시 운영용 경량 compose override
 - `docs/images/`: README 스크린샷
-- `docs/portfolio-release-guidelines.md`: 공개 전 체크리스트
+- `docs/n100-mt4-setup.md`: Windows N100 + MT4 + WSL2 운영 지침
 - `portal-web/app/services/security.py`: 보안 헤더, 일별 보안 로그, 보안 상태 데이터
 - `portal-web/app/services/file_store.py`: 파일함 저장소, 업로드 정책, 경로 안전 처리
 - `portal-web/app/routers/dashboard.py`: 포털 대시보드, `/admin/security`
 - `portal-web/app/routers/files.py`: 파일함 라우터와 인증/삭제 보호
+- `scripts/maintenance.py`: SQLite 백업, 파일함 선택 백업, 보안 로그 정리
+- `tests/test_portal_security.py`: 파일함/보안 로그 핵심 unittest
 
 ## Current Security Work
 
@@ -47,6 +50,22 @@
 - 보안 상태 모달은 기존 관리자 패스워드 필요:
   - 우선 `FILE_MANAGER_PASSWORD`
   - 없으면 `DELETE_PASSWORD`
+- 포털 서비스 링크는 env 기반:
+  - `NEWS_SERVICE_URL`
+  - `YOUTUBE_MEMO_URL`
+  - `BOOK_MEMO_URL`
+- 운영 모드 파일함 보호:
+  - `APP_ENV=production` 또는 `FILE_MANAGER_AUTH_REQUIRED=true`이면 `FILE_MANAGER_PASSWORD` 없을 때 `/files` 접근 차단
+
+## Maintenance Work
+
+- `scripts/maintenance.py backup`
+  - `data/*/*.sqlite3`를 `BACKUP_PATH` 아래 타임스탬프 폴더로 백업
+  - `BACKUP_INCLUDE_FILES=true`일 때 `data/files/`를 zip 백업
+- `scripts/maintenance.py prune-logs`
+  - `SECURITY_LOG_RETENTION_DAYS`보다 오래된 일별 보안 로그 삭제
+- `scripts/maintenance.py all`
+  - 백업과 로그 정리를 함께 실행
 
 ## README / Screenshots
 
@@ -71,11 +90,11 @@ README에 서비스별 스크린샷과 설명을 추가했습니다.
 
 추천 우선순위:
 
-1. 실제 도메인 하드코딩 env화 또는 예시 도메인으로 변경.
-2. 운영 모드에서 `FILE_MANAGER_PASSWORD` 없으면 `/files` 차단.
-3. 포트폴리오용 `DEMO_MODE` 추가.
-4. 파일 경로 탈출, 확장자 차단, 일별 로그, 관리자 인증 테스트 추가.
-5. GitHub 공개 전 secret scan.
+1. 포트폴리오용 `DEMO_MODE` 추가.
+2. 백업/로그 정리를 N100 cron 또는 Windows 작업 스케줄러에 연결.
+3. GitHub 공개 전 secret scan.
+4. 서비스 헬스/리소스 대시보드 추가.
+5. Telegram 등으로 백업 실패/디스크 부족 알림 추가.
 
 ## Verification Already Done
 
@@ -83,3 +102,4 @@ README에 서비스별 스크린샷과 설명을 추가했습니다.
 - Docker 서비스가 떠 있는 상태에서 Playwright + 로컬 Chrome로 README 스크린샷 캡처 완료.
 - 일별 로그 파일명 생성 확인.
 - 파일함 업로드 차단 확장자 검사 확인.
+- `PYTHONPATH=portal-web python3 -m unittest discover -s tests`로 핵심 테스트 실행 가능.

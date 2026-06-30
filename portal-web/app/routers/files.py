@@ -18,6 +18,12 @@ security = HTTPBasic(auto_error=False)
 def require_file_auth(credentials: HTTPBasicCredentials | None = Depends(security)) -> None:
     password = os.getenv("FILE_MANAGER_PASSWORD", "")
     if not password:
+        if _file_auth_required():
+            append_security_event("file_auth_blocked", reason="password_not_configured")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="파일함 관리자 비밀번호가 설정되지 않았습니다.",
+            )
         return
 
     is_valid = (
@@ -161,3 +167,13 @@ def _require_delete_password(password: str) -> None:
     if not secrets.compare_digest(password, configured_password):
         append_security_event("delete_password_failed")
         raise HTTPException(status_code=403, detail="삭제 비밀번호가 올바르지 않습니다.")
+
+
+def _file_auth_required() -> bool:
+    if _truthy(os.getenv("FILE_MANAGER_AUTH_REQUIRED", "")):
+        return True
+    return os.getenv("APP_ENV", "").strip().lower() in {"prod", "production"}
+
+
+def _truthy(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
