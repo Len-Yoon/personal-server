@@ -11,6 +11,12 @@
     --shadow-card: 0 18px 50px rgba(0, 0, 0, 0.24);
     --radius-lg: 28px;
     --radius-md: 22px;
+    --space-page-x: 48px;
+    --space-page-x-sm: 32px;
+    --space-section: 32px;
+    --space-section-sm: 24px;
+    --space-card: 24px;
+    --space-card-sm: 18px;
 }
 
 * {
@@ -75,7 +81,7 @@ a {
 /* 상단 홈 버튼 */
 
 .app-header {
-    width: min(1180px, calc(100% - 48px));
+    width: min(1180px, calc(100% - var(--space-page-x)));
     margin: 0 auto;
     padding: 28px 0 0;
     display: flex;
@@ -157,15 +163,15 @@ a {
 /* 레이아웃 */
 
 .container {
-    width: min(1180px, calc(100% - 48px));
+    width: min(1180px, calc(100% - var(--space-page-x)));
     margin: 0 auto;
-    padding: 42px 0 42px;
+    padding: 48px 0 48px;
 }
 
 .hero {
     position: relative;
     margin-bottom: 34px;
-    padding: 46px 48px;
+    padding: 48px 50px;
     border: 1px solid rgba(148, 163, 184, 0.20);
     border-radius: var(--radius-lg);
     background:
@@ -177,7 +183,7 @@ a {
 }
 
 .hero.compact {
-    padding: 34px 40px;
+    padding: 38px 42px;
 }
 
 .hero-badge {
@@ -223,7 +229,7 @@ a {
 /* 서비스 영역 */
 
 .service-section {
-    padding: 30px;
+    padding: var(--space-section);
     border: 1px solid rgba(148, 163, 184, 0.18);
     border-radius: var(--radius-lg);
     background: rgba(2, 6, 23, 0.34);
@@ -277,13 +283,13 @@ a {
 .service-grid {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 18px;
+    gap: 22px;
 }
 
 .service-card {
     position: relative;
     min-height: 230px;
-    padding: 24px;
+    padding: var(--space-card);
     display: flex;
     flex-direction: column;
     justify-content: space-between;
@@ -422,11 +428,11 @@ a {
 
 .news-list {
     display: grid;
-    gap: 14px;
+    gap: 16px;
 }
 
 .news-card {
-    padding: 22px;
+    padding: var(--space-card);
     border: 1px solid rgba(148, 163, 184, 0.18);
     border-radius: 20px;
     background: rgba(15, 23, 42, 0.68);
@@ -557,7 +563,7 @@ a {
 .summary-box,
 .saved-summary {
     margin-top: 16px;
-    padding: 18px;
+    padding: 20px;
     border-radius: 18px;
     border: 1px solid rgba(96, 165, 250, 0.22);
     background:
@@ -673,7 +679,7 @@ a {
 }
 
 .saved-search-form {
-    padding: 14px;
+    padding: 16px;
     border: 1px solid rgba(148, 163, 184, 0.14);
     border-radius: 22px;
     background: rgba(15, 23, 42, 0.38);
@@ -681,12 +687,13 @@ a {
 
 .empty-card {
     min-height: 140px;
+    padding: var(--space-card);
 }
 
 /* 푸터 */
 
 .footer {
-    width: min(1180px, calc(100% - 48px));
+    width: min(1180px, calc(100% - var(--space-page-x)));
     margin: 0 auto;
     padding: 24px 0 42px;
     display: flex;
@@ -706,7 +713,7 @@ a {
 
 @media (max-width: 720px) {
     .app-header {
-        width: min(100% - 32px, 1180px);
+        width: min(100% - var(--space-page-x-sm), 1180px);
         padding-top: 22px;
     }
 
@@ -720,16 +727,16 @@ a {
     }
 
     .container {
-        width: min(100% - 32px, 1180px);
+        width: min(100% - var(--space-page-x-sm), 1180px);
         padding-top: 32px;
     }
 
     .hero {
-        padding: 34px 26px;
+        padding: 34px var(--space-section-sm);
     }
 
     .service-section {
-        padding: 22px;
+        padding: var(--space-section-sm);
     }
 
     .section-header {
@@ -753,7 +760,7 @@ a {
     }
 
     .footer {
-        width: min(100% - 32px, 1180px);
+        width: min(100% - var(--space-page-x-sm), 1180px);
         flex-direction: column;
     }
 
@@ -791,7 +798,7 @@ a {
 
     .summary-box {
         margin-top: 16px;
-        padding: 18px;
+        padding: var(--space-card-sm);
         border-radius: 18px;
         border: 1px solid rgba(96, 165, 250, 0.22);
         background:

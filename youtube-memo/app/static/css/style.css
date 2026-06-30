@@ -236,7 +236,7 @@ a {
 .section-header {
     display: flex;
     justify-content: space-between;
-    gap: 18px;
+    gap: 24px;
     margin-bottom: 24px;
 }
 

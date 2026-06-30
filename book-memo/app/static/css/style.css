@@ -10,6 +10,12 @@
     --danger: #fecaca;
     --radius-lg: 22px;
     --radius-md: 16px;
+    --space-page-x: 48px;
+    --space-page-x-sm: 32px;
+    --space-panel: 32px;
+    --space-panel-sm: 24px;
+    --space-card: 24px;
+    --space-card-sm: 18px;
 }
 
 * {
@@ -74,7 +80,7 @@ a {
 .app-header,
 .footer,
 .container {
-    width: min(1180px, calc(100% - 48px));
+    width: min(1180px, calc(100% - var(--space-page-x)));
     margin: 0 auto;
 }
 
@@ -142,7 +148,7 @@ a {
 }
 
 .container {
-    padding: 42px 0;
+    padding: 48px 0;
 }
 
 .hero,
@@ -156,8 +162,8 @@ a {
 }
 
 .hero {
-    padding: 44px 46px;
-    margin-bottom: 28px;
+    padding: 46px 48px;
+    margin-bottom: 30px;
 }
 
 .hero-badge {
@@ -193,15 +199,15 @@ a {
 }
 
 .panel {
-    padding: 28px;
+    padding: var(--space-panel);
     margin-bottom: 24px;
 }
 
 .section-header {
     display: flex;
     justify-content: space-between;
-    gap: 18px;
-    margin-bottom: 20px;
+    gap: 24px;
+    margin-bottom: 24px;
 }
 
 .section-header h2 {
@@ -290,7 +296,7 @@ button:disabled {
 .result-grid,
 .library-grid {
     display: grid;
-    gap: 18px;
+    gap: 22px;
 }
 
 .result-grid {
@@ -315,8 +321,8 @@ button:disabled {
 .library-link {
     display: grid;
     grid-template-columns: 110px minmax(0, 1fr);
-    gap: 18px;
-    padding: 16px;
+    gap: 20px;
+    padding: var(--space-card-sm);
     text-decoration: none;
 }
 
@@ -325,7 +331,7 @@ button:disabled {
 }
 
 .library-card form {
-    padding: 0 16px 16px;
+    padding: 0 var(--space-card-sm) var(--space-card-sm);
 }
 
 .library-card .danger-button {
@@ -389,8 +395,8 @@ button:disabled {
 .book-hero {
     display: grid;
     grid-template-columns: 220px minmax(0, 1fr);
-    gap: 28px;
-    padding: 30px;
+    gap: 32px;
+    padding: var(--space-panel);
     margin-bottom: 24px;
 }
 
@@ -450,10 +456,10 @@ button:disabled {
 
 .toc-candidates {
     display: grid;
-    gap: 8px;
+    gap: 10px;
     max-height: 280px;
     overflow: auto;
-    padding: 10px;
+    padding: 12px;
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: rgba(2, 6, 23, 0.30);
@@ -469,7 +475,7 @@ button:disabled {
     grid-template-columns: 22px minmax(0, 1fr);
     gap: 10px;
     align-items: start;
-    padding: 10px;
+    padding: 12px;
     border-radius: 12px;
     color: var(--text-secondary);
     background: rgba(15, 23, 42, 0.56);
@@ -499,8 +505,8 @@ button:disabled {
 }
 
 .library-chapters {
-    margin: 0 16px 16px;
-    padding: 14px;
+    margin: 0 var(--space-card-sm) var(--space-card-sm);
+    padding: 16px;
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: rgba(2, 6, 23, 0.22);
@@ -522,9 +528,9 @@ button:disabled {
 .library-check-form,
 .library-comment-form {
     display: grid;
-    gap: 10px;
+    gap: 12px;
     margin-top: 12px;
-    padding: 12px;
+    padding: 14px;
     border-radius: 12px;
     background: rgba(15, 23, 42, 0.48);
 }
@@ -563,7 +569,7 @@ button:disabled {
 .chapter-card,
 .memo-card,
 .empty-card {
-    padding: 18px;
+    padding: var(--space-card);
 }
 
 .chapter-card form:first-child {
@@ -646,7 +652,7 @@ button:disabled {
     .app-header,
     .footer,
     .container {
-        width: min(100% - 32px, 1180px);
+        width: min(100% - var(--space-page-x-sm), 1180px);
     }
 
     .app-brand {
@@ -656,7 +662,7 @@ button:disabled {
     .hero,
     .panel,
     .book-hero {
-        padding: 22px;
+        padding: var(--space-panel-sm);
     }
 
     .search-form,
@@ -674,6 +680,18 @@ button:disabled {
     .cover {
         width: 100%;
         max-width: 150px;
+    }
+
+    .result-card,
+    .library-link,
+    .chapter-card,
+    .memo-card,
+    .empty-card {
+        padding: var(--space-card-sm);
+    }
+
+    .library-card form {
+        padding: 0 var(--space-card-sm) var(--space-card-sm);
     }
 
     .footer {

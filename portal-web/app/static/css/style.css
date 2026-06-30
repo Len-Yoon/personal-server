@@ -17,6 +17,12 @@
 
     --radius-lg: 28px;
     --radius-md: 22px;
+    --space-page-x: 48px;
+    --space-page-x-sm: 32px;
+    --space-section: 32px;
+    --space-section-sm: 24px;
+    --space-card: 24px;
+    --space-card-sm: 18px;
 }
 
 * {
@@ -83,7 +89,7 @@ a {
 }
 
 .container {
-    width: min(1180px, calc(100% - 48px));
+    width: min(1180px, calc(100% - var(--space-page-x)));
     margin: 0 auto;
     padding: 88px 0 42px;
 }
@@ -175,7 +181,7 @@ a {
 .hero {
     position: relative;
     margin-bottom: 34px;
-    padding: 46px 48px;
+    padding: 48px 50px;
     border: 1px solid rgba(148, 163, 184, 0.20);
     border-radius: var(--radius-lg);
     background:
@@ -247,7 +253,7 @@ a {
 }
 
 .service-section {
-    padding: 30px;
+    padding: var(--space-section);
     border: 1px solid rgba(148, 163, 184, 0.18);
     border-radius: var(--radius-lg);
     background: rgba(2, 6, 23, 0.34);
@@ -328,7 +334,7 @@ a {
 
 .service-grid {
     display: grid;
-    gap: 18px;
+    gap: 22px;
 }
 
 .service-grid.three {
@@ -338,7 +344,7 @@ a {
 .service-card {
     position: relative;
     min-height: 236px;
-    padding: 24px;
+    padding: var(--space-card);
     display: flex;
     flex-direction: column;
     justify-content: space-between;
@@ -505,7 +511,7 @@ a {
 }
 
 .file-section {
-    padding: 30px;
+    padding: var(--space-section);
     border: 1px solid rgba(148, 163, 184, 0.18);
     border-radius: var(--radius-lg);
     background: rgba(2, 6, 23, 0.34);
@@ -590,9 +596,9 @@ a {
     display: grid;
     grid-template-columns: repeat(auto-fill, 112px);
     align-items: start;
-    gap: 24px 20px;
+    gap: 26px 22px;
     min-height: 260px;
-    padding: 22px;
+    padding: var(--space-card);
     border: 1px dashed transparent;
     border-radius: 18px;
     transition: border-color 0.18s ease, background 0.18s ease;
@@ -760,7 +766,7 @@ a {
 }
 
 .empty-state {
-    padding: 36px 18px;
+    padding: 36px 22px;
     border: 1px dashed rgba(148, 163, 184, 0.22);
     border-radius: 16px;
     text-align: center;
@@ -783,7 +789,7 @@ a {
     z-index: 20;
     display: grid;
     place-items: center;
-    padding: 28px;
+    padding: 32px;
     background: rgba(2, 6, 23, 0.76);
     backdrop-filter: blur(14px);
 }
@@ -796,7 +802,7 @@ a {
     width: min(840px, 100%);
     max-height: min(760px, calc(100vh - 56px));
     overflow: auto;
-    padding: 28px;
+    padding: var(--space-section);
     border: 1px solid rgba(148, 163, 184, 0.24);
     border-radius: 18px;
     background:
@@ -808,7 +814,7 @@ a {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 18px;
+    gap: 24px;
     margin-bottom: 22px;
 }
 
@@ -860,7 +866,7 @@ a {
 
 .security-summary div {
     min-width: 0;
-    padding: 14px;
+    padding: 16px;
 }
 
 .security-summary span,
@@ -879,7 +885,7 @@ a {
 }
 
 .policy-list {
-    padding: 18px;
+    padding: 20px;
     margin-bottom: 18px;
 }
 
@@ -920,8 +926,8 @@ a {
 .event-row {
     display: grid;
     grid-template-columns: minmax(0, 0.65fr) minmax(0, 1fr);
-    gap: 14px;
-    padding: 14px;
+    gap: 16px;
+    padding: 16px;
 }
 
 .event-row strong {
@@ -939,12 +945,12 @@ a {
 
 .empty-log {
     margin: 0;
-    padding: 18px;
+    padding: 20px;
     color: var(--text-muted);
 }
 
 .footer {
-    width: min(1180px, calc(100% - 48px));
+    width: min(1180px, calc(100% - var(--space-page-x)));
     margin: 0 auto;
     padding: 24px 0 42px;
     display: flex;
@@ -971,19 +977,19 @@ a {
 
 @media (max-width: 720px) {
     .app-header {
-        width: min(100% - 32px, 1180px);
+        width: min(100% - var(--space-page-x-sm), 1180px);
         flex-direction: column;
         align-items: flex-start;
         gap: 14px;
     }
 
     .container {
-        width: min(100% - 32px, 1180px);
+        width: min(100% - var(--space-page-x-sm), 1180px);
         padding-top: 40px;
     }
 
     .hero {
-        padding: 34px 26px;
+        padding: 34px var(--space-section-sm);
     }
 
     .hero::after {
@@ -991,7 +997,7 @@ a {
     }
 
     .service-section {
-        padding: 22px;
+        padding: var(--space-section-sm);
     }
 
     .section-header {
@@ -1003,7 +1009,7 @@ a {
     }
 
     .security-modal {
-        padding: 22px;
+        padding: var(--space-section-sm);
     }
 
     .desktop-toolbar button {
@@ -1013,7 +1019,7 @@ a {
     .file-grid {
         grid-template-columns: repeat(auto-fill, 102px);
         gap: 20px 12px;
-        padding: 12px;
+        padding: 16px;
     }
 
     .file-tile {
@@ -1021,7 +1027,7 @@ a {
     }
 
     .footer {
-        width: min(100% - 32px, 1180px);
+        width: min(100% - var(--space-page-x-sm), 1180px);
         flex-direction: column;
     }
 }
