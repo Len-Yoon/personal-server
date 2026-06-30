@@ -71,9 +71,9 @@ DELETE_PASSWORD=
 FILE_MANAGER_PASSWORD=
 
 # Portal links
-NEWS_SERVICE_URL=https://news.lenserver.com
-YOUTUBE_MEMO_URL=https://memo.lenserver.com
-BOOK_MEMO_URL=https://book.lenserver.com
+NEWS_SERVICE_URL=http://news.lenserver.com
+YOUTUBE_MEMO_URL=http://memo.lenserver.com
+BOOK_MEMO_URL=http://book.lenserver.com
 
 # File manager
 FILE_STORAGE_PATH=
@@ -136,7 +136,7 @@ PYTHONPATH=portal-web python3 -m unittest discover -s tests
 - `portal-web`은 보안 헤더를 응답에 추가하고, 파일함 인증 실패/업로드/다운로드/삭제 이벤트를 `SECURITY_LOG_PATH` 기준의 일별 텍스트 로그로 기록합니다.
 - 파일함 업로드는 최대 용량, 차단 확장자, 확장자 없는 파일, 기존 파일 덮어쓰기를 제한합니다.
 - 포털의 `보안 상태` 버튼은 관리자 인증 후 최근 보안 이벤트와 업로드 정책을 모달로 보여줍니다.
-- 포털 서비스 링크는 기본적으로 `news.lenserver.com`, `memo.lenserver.com`, `book.lenserver.com`으로 열리며, `NEWS_SERVICE_URL`, `YOUTUBE_MEMO_URL`, `BOOK_MEMO_URL` 환경변수로 바꿀 수 있습니다.
+- 포털 서비스 링크는 기본적으로 `http://news.lenserver.com`, `http://memo.lenserver.com`, `http://book.lenserver.com`으로 열리며, `NEWS_SERVICE_URL`, `YOUTUBE_MEMO_URL`, `BOOK_MEMO_URL` 환경변수로 바꿀 수 있습니다.
 - 운영 모드에서는 `APP_ENV=production` 또는 `FILE_MANAGER_AUTH_REQUIRED=true`로 파일함 비밀번호 설정을 강제할 수 있습니다.
 - 현재 Compose는 개발 편의상 서비스 디렉터리를 `/app`에 bind mount합니다.
 - 운영 안정성을 더 높일 때는 `--reload` 없는 운영용 Compose 파일을 분리하는 것을 권장합니다.

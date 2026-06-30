@@ -10,9 +10,9 @@ router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 
 DEFAULT_SERVICE_URLS = {
-    "NEWS_SERVICE_URL": "https://news.lenserver.com",
-    "YOUTUBE_MEMO_URL": "https://memo.lenserver.com",
-    "BOOK_MEMO_URL": "https://book.lenserver.com",
+    "NEWS_SERVICE_URL": "http://news.lenserver.com",
+    "YOUTUBE_MEMO_URL": "http://memo.lenserver.com",
+    "BOOK_MEMO_URL": "http://book.lenserver.com",
 }
 
 
@@ -64,7 +64,7 @@ def dashboard(request: Request):
             "icon": "F",
             "name": "파일함",
             "description": "개인 서버에 파일을 올리고 내려받는 가벼운 웹 파일 관리자입니다.",
-            "url": "https://lenserver.com/files",
+            "url": "http://lenserver.com/files",
             "status": "운영중",
             "meta": "Files / Upload / Download",
         },
