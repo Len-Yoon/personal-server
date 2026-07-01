@@ -172,9 +172,57 @@
 
     const normalizeTocLine = (line) => line
         .replace(/^\s*[-*•]\s*/, "")
-        .replace(/^\s*\d+[\).\s]+/, "")
         .replace(/\s+/g, " ")
         .trim();
+
+    const shouldSelectTocByDefault = (title) => {
+        const line = title.trim().replace(/\s+/g, " ");
+
+        if (!line) {
+            return false;
+        }
+
+        if (/^(?:[-*•·]|[①-⑳]|\(\d+\)|[a-z]\)|[가-힣]\))/i.test(line)) {
+            return false;
+        }
+
+        if (/^\d+(?:\.\d+){1,}\s+/.test(line)) {
+            return false;
+        }
+
+        return /^(?:(?:제\s*)?\d+\s*(?:부|편|장)(?=\s|$)|(?:part|chapter)\s+\d+\b|\d{1,2}\s*[.)]\s+\S|[IVXLCDM]+\.\s+\S|프롤로그|에필로그|서문|들어가며|마치며|부록)/i.test(line);
+    };
+
+    const setTocSelection = (mode) => {
+        tocCandidates.querySelectorAll("input[name='titles']").forEach((checkbox) => {
+            if (mode === "all") {
+                checkbox.checked = true;
+            } else if (mode === "none") {
+                checkbox.checked = false;
+            } else {
+                checkbox.checked = shouldSelectTocByDefault(checkbox.value);
+            }
+        });
+    };
+
+    const appendTocSelectionControls = () => {
+        const controls = document.createElement("div");
+        controls.className = "toc-selection-controls";
+
+        [
+            ["major", "대/중목록만 선택"],
+            ["all", "전체 선택"],
+            ["none", "전체 해제"],
+        ].forEach(([mode, label]) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.textContent = label;
+            button.addEventListener("click", () => setTocSelection(mode));
+            controls.append(button);
+        });
+
+        tocCandidates.append(controls);
+    };
 
     const renderTocCandidates = (lines, source = "") => {
         tocCandidates.innerHTML = "";
@@ -185,6 +233,10 @@
             tocStatus.textContent = lines.length && source ? `${source}에서 목차 후보를 가져왔습니다.` : "";
         }
 
+        if (lines.length) {
+            appendTocSelectionControls();
+        }
+
         lines.forEach((line, index) => {
             const row = document.createElement("label");
             row.className = "toc-candidate";
@@ -193,6 +245,7 @@
             checkbox.type = "checkbox";
             checkbox.name = "titles";
             checkbox.value = line;
+            checkbox.checked = shouldSelectTocByDefault(line);
 
             const text = document.createElement("span");
             text.textContent = `${index + 1}. ${line}`;

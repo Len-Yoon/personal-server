@@ -195,9 +195,62 @@
     <span>Len Private Workspace</span>
 </footer>
 <script>
+    const shouldSelectTocByDefault = (title) => {
+        const line = title.trim().replace(/\s+/g, " ");
+
+        if (!line) {
+            return false;
+        }
+
+        if (/^(?:[-*•·]|[①-⑳]|\(\d+\)|[a-z]\)|[가-힣]\))/i.test(line)) {
+            return false;
+        }
+
+        if (/^\d+(?:\.\d+){1,}\s+/.test(line)) {
+            return false;
+        }
+
+        return /^(?:(?:제\s*)?\d+\s*(?:부|편|장)(?=\s|$)|(?:part|chapter)\s+\d+\b|\d{1,2}\s*[.)]\s+\S|[IVXLCDM]+\.\s+\S|프롤로그|에필로그|서문|들어가며|마치며|부록)/i.test(line);
+    };
+
+    const setTocSelection = (container, mode) => {
+        container.querySelectorAll("input[name='titles']").forEach((checkbox) => {
+            if (mode === "all") {
+                checkbox.checked = true;
+            } else if (mode === "none") {
+                checkbox.checked = false;
+            } else {
+                checkbox.checked = shouldSelectTocByDefault(checkbox.value);
+            }
+        });
+    };
+
+    const appendTocSelectionControls = (container) => {
+        const controls = document.createElement("div");
+        controls.className = "toc-selection-controls";
+
+        [
+            ["major", "대/중목록만 선택"],
+            ["all", "전체 선택"],
+            ["none", "전체 해제"],
+        ].forEach(([mode, label]) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.textContent = label;
+            button.addEventListener("click", () => setTocSelection(container, mode));
+            controls.append(button);
+        });
+
+        container.append(controls);
+    };
+
     const renderCandidates = (container, candidates) => {
         container.innerHTML = "";
         container.hidden = candidates.length === 0;
+
+        if (candidates.length) {
+            appendTocSelectionControls(container);
+        }
 
         candidates.forEach((title, index) => {
             const row = document.createElement("label");
@@ -207,6 +260,7 @@
             checkbox.type = "checkbox";
             checkbox.name = "titles";
             checkbox.value = title;
+            checkbox.checked = shouldSelectTocByDefault(title);
 
             const text = document.createElement("span");
             text.textContent = `${index + 1}. ${title}`;
