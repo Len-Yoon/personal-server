@@ -21,10 +21,25 @@ services:
       - .env
     environment:
       - FILE_STORAGE_PATH=/data/files
+      - SYSTEM_AGENT_URL=http://system-agent:8010
     volumes:
       - ./portal-web:/app
       - ./data/files:/data/files
       - ./data/logs:/app/data/logs
+
+  system-agent:
+    build: ./system-agent
+    container_name: system-agent
+    restart: unless-stopped
+    ports:
+      - "8010:8010"
+    env_file:
+      - .env
+    environment:
+      - DATA_ROOT=/data
+      - HOST_METRICS_PATH=/data/system/host-metrics.json
+    volumes:
+      - ./data:/data:ro
 
   crawler-worker:
     build: ./crawler-worker
