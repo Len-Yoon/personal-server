@@ -2,7 +2,7 @@
 
 {% block content %}
 <section class="hero">
-    <div class="hero-badge">PERSONAL SERVER</div>
+    <div class="hero-badge">PERSONAL SERVER{% if system_status.demo_mode %} · DEMO{% endif %}</div>
 
     <h1>Len의 개인서버</h1>
 
@@ -10,6 +10,95 @@
         뉴스 수집, 유튜브 메모, 자동매매 기록을 관리하는
         개인용 서비스 허브입니다.
     </p>
+</section>
+
+<section class="ops-section">
+    <div class="section-header">
+        <div>
+            <h2>미니 PC 상태</h2>
+            <p>Windows N100과 Docker 서비스 상태를 함께 확인합니다.</p>
+        </div>
+        <span class="ops-status {{ system_status.overall_status }}">
+            {{ system_status.overall_status | upper }}
+        </span>
+    </div>
+
+    <div class="metric-grid">
+        <div class="metric-tile">
+            <span>CPU</span>
+            <strong>{{ system_status.host.cpu_percent if system_status.host.cpu_percent is not none else "-" }}%</strong>
+        </div>
+        <div class="metric-tile">
+            <span>메모리</span>
+            <strong>{{ system_status.host.memory_percent if system_status.host.memory_percent is not none else "-" }}%</strong>
+        </div>
+        <div class="metric-tile">
+            <span>디스크</span>
+            <strong>{{ system_status.host.disk_percent if system_status.host.disk_percent is not none else system_status.disk.percent if system_status.disk.percent is not none else "-" }}%</strong>
+        </div>
+        <div class="metric-tile">
+            <span>파일함</span>
+            <strong>{{ system_status.files.file_count }}개</strong>
+        </div>
+        <div class="metric-tile">
+            <span>최근 백업</span>
+            <strong>{{ system_status.backup.latest_name or "없음" }}</strong>
+        </div>
+    </div>
+
+    <div class="ops-detail-grid">
+        <div class="ops-panel">
+            <h3>컨테이너</h3>
+            <div class="container-list">
+                {% for container in system_status.containers %}
+                    <span>{{ container.name }} · {{ container.status }}</span>
+                {% else %}
+                    <span>system-agent 연결 후 표시됩니다.</span>
+                {% endfor %}
+            </div>
+        </div>
+        <div class="ops-panel">
+            <h3>경고</h3>
+            <div class="warning-list">
+                {% for warning in system_status.warnings %}
+                    <span>{{ warning }}</span>
+                {% else %}
+                    <span>현재 경고가 없습니다.</span>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="search-section">
+    <div class="section-header">
+        <div>
+            <h2>전체 검색</h2>
+            <p>저장 뉴스, 유튜브 메모, 책 메모를 한 번에 찾습니다.</p>
+        </div>
+    </div>
+    <form class="global-search" method="get" action="/">
+        <input type="search" name="q" value="{{ query }}" placeholder="검색어 입력">
+        <button type="submit">검색</button>
+    </form>
+
+    {% if search_results %}
+        <div class="search-results-grid">
+            {% for group, items in search_results.items() %}
+                <section class="search-group">
+                    <h3>{{ {"news": "뉴스", "youtube": "유튜브", "books": "책"}[group] }}</h3>
+                    {% for item in items %}
+                        <a href="{{ item.url }}">
+                            <strong>{{ item.title }}</strong>
+                            <span>{{ item.description }}</span>
+                        </a>
+                    {% else %}
+                        <p>검색 결과가 없습니다.</p>
+                    {% endfor %}
+                </section>
+            {% endfor %}
+        </div>
+    {% endif %}
 </section>
 
 <section class="service-section">
