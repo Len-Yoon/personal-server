@@ -19,6 +19,7 @@ from app.services.book_service import (
     list_books,
     list_chapters,
     list_memos,
+    search_books_and_memos,
     update_chapter,
     update_chapter_comment,
     update_chapter_statuses,
@@ -318,6 +319,14 @@ def health():
     return {
         "service": "book-memo",
         "status": "ok",
+    }
+
+
+@app.get("/api/search")
+def search_api(q: str = "", limit: int = 5):
+    limit = max(1, min(limit, 20))
+    return {
+        "results": search_books_and_memos(q, limit=limit),
     }
 
 

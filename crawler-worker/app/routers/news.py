@@ -97,6 +97,21 @@ def category_api(
     )
 
 
+@router.get("/api/search")
+def search_api(q: str = Query(default=""), limit: int = Query(default=5, ge=1, le=20)):
+    saved_news = search_saved_news(query=q, limit=limit)
+    return {
+        "results": [
+            {
+                "title": item.get("title_ko") or item.get("title", "저장 뉴스"),
+                "description": item.get("summary", {}).get("brief") or item.get("source", ""),
+                "url": item.get("url", "#"),
+            }
+            for item in saved_news
+        ]
+    }
+
+
 @router.post("/api/summarize")
 def summarize_article(payload: ArticleSummaryRequest):
     article = payload.model_dump()

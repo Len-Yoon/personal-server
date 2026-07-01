@@ -179,6 +179,44 @@ def list_memos(video_id: int) -> list[dict[str, Any]]:
     return [_row_to_dict(row) for row in rows]
 
 
+def search_videos_and_memos(query: str, limit: int = 5) -> list[dict[str, Any]]:
+    init_db()
+    query = query.strip()
+    if not query:
+        return []
+
+    keyword = f"%{query}%"
+    with _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                videos.id AS video_id,
+                videos.title AS video_title,
+                videos.url AS video_url,
+                memos.title AS memo_title,
+                memos.content AS memo_content
+            FROM videos
+            LEFT JOIN memos ON memos.video_id = videos.id
+            WHERE videos.title LIKE ?
+               OR videos.youtube_id LIKE ?
+               OR memos.title LIKE ?
+               OR memos.content LIKE ?
+            ORDER BY videos.updated_at DESC, memos.created_at DESC
+            LIMIT ?
+            """,
+            (keyword, keyword, keyword, keyword, limit),
+        ).fetchall()
+
+    return [
+        {
+            "title": row["memo_title"] or row["video_title"],
+            "description": row["memo_content"] or row["video_url"],
+            "url": f"/videos/{row['video_id']}",
+        }
+        for row in rows
+    ]
+
+
 def delete_memo(memo_id: int) -> int | None:
     init_db()
 

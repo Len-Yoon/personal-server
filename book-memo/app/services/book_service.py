@@ -419,6 +419,45 @@ def list_memos(book_id: int) -> list[dict[str, Any]]:
     return [_row_to_dict(row) for row in rows]
 
 
+def search_books_and_memos(query: str, limit: int = 5) -> list[dict[str, Any]]:
+    init_db()
+    query = query.strip()
+    if not query:
+        return []
+
+    keyword = f"%{query}%"
+    with _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                books.id AS book_id,
+                books.title AS book_title,
+                books.authors AS authors,
+                books.progress_percent AS progress_percent,
+                book_memos.title AS memo_title,
+                book_memos.content AS memo_content
+            FROM books
+            LEFT JOIN book_memos ON book_memos.book_id = books.id
+            WHERE books.title LIKE ?
+               OR books.authors LIKE ?
+               OR book_memos.title LIKE ?
+               OR book_memos.content LIKE ?
+            ORDER BY books.updated_at DESC, book_memos.created_at DESC
+            LIMIT ?
+            """,
+            (keyword, keyword, keyword, keyword, limit),
+        ).fetchall()
+
+    return [
+        {
+            "title": row["memo_title"] or row["book_title"],
+            "description": row["memo_content"] or f"{row['authors']} · 진행률 {row['progress_percent']}%",
+            "url": f"/books/{row['book_id']}",
+        }
+        for row in rows
+    ]
+
+
 def create_memo(
     book_id: int,
     chapter_id: int | None,

@@ -15,6 +15,7 @@ from app.services.memo_service import (
     get_video,
     list_memos,
     list_videos,
+    search_videos_and_memos,
 )
 
 app = FastAPI(title="Youtube Memo")
@@ -128,6 +129,14 @@ def health():
     return {
         "service": "youtube-memo",
         "status": "ok",
+    }
+
+
+@app.get("/api/search")
+def search_api(q: str = "", limit: int = 5):
+    limit = max(1, min(limit, 20))
+    return {
+        "results": search_videos_and_memos(q, limit=limit),
     }
 
 
