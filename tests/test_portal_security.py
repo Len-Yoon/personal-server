@@ -66,6 +66,32 @@ class PortalSecurityTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 file_store.save_upload("", upload)
 
+    def test_auth_rate_limit_blocks_repeated_failures(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            security = self.reload_security(tempdir)
+
+            for _ in range(5):
+                self.assertFalse(security.auth_rate_limited("files", "127.0.0.1"))
+                security.record_auth_failure("files", "127.0.0.1")
+
+            self.assertTrue(security.auth_rate_limited("files", "127.0.0.1"))
+
+    def test_append_user_event_allows_known_click_events(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            security = self.reload_security(tempdir)
+
+            security.append_user_event(
+                "service_opened",
+                path="/",
+                target="유튜브 메모장",
+                href="http://memo.lenserver.com",
+                client="127.0.0.1",
+            )
+
+            events = security.read_recent_events()
+            self.assertEqual(events[0]["event"], "user_service_opened")
+            self.assertEqual(events[0]["details"]["target"], "유튜브 메모장")
+
 
 if __name__ == "__main__":
     unittest.main()

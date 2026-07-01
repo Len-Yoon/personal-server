@@ -9,14 +9,31 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 
 from app.services import file_store
-from app.services.security import append_security_event
+from app.services.security import (
+    append_security_event,
+    auth_rate_limited,
+    clear_auth_failures,
+    record_auth_failure,
+)
 
 
 security = HTTPBasic(auto_error=False)
 
 
-def require_file_auth(credentials: HTTPBasicCredentials | None = Depends(security)) -> None:
+def require_file_auth(
+    request: Request,
+    credentials: HTTPBasicCredentials | None = Depends(security),
+) -> None:
     password = os.getenv("FILE_MANAGER_PASSWORD", "")
+    client = _client_id(request)
+
+    if auth_rate_limited("file_auth", client):
+        append_security_event("file_auth_rate_limited", client=client)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="로그인 실패가 반복되어 잠시 후 다시 시도해주세요.",
+        )
+
     if not password:
         if _file_auth_required():
             append_security_event("file_auth_blocked", reason="password_not_configured")
@@ -32,12 +49,14 @@ def require_file_auth(credentials: HTTPBasicCredentials | None = Depends(securit
         and secrets.compare_digest(credentials.password, password)
     )
     if not is_valid:
+        record_auth_failure("file_auth", client)
         append_security_event("file_auth_failed", username=credentials.username if credentials else "")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="파일함 로그인이 필요합니다.",
             headers={"WWW-Authenticate": "Basic"},
         )
+    clear_auth_failures("file_auth", client)
 
 
 router = APIRouter(prefix="/files", dependencies=[Depends(require_file_auth)])
@@ -114,8 +133,8 @@ def download_file(path: str):
 
 
 @router.post("/delete")
-def delete_item(path: str = Form(""), delete_password: str = Form("")):
-    _require_delete_password(delete_password)
+def delete_item(request: Request, path: str = Form(""), delete_password: str = Form("")):
+    _require_delete_password(request, delete_password)
 
     try:
         file_store.delete_item(path)
@@ -128,11 +147,12 @@ def delete_item(path: str = Form(""), delete_password: str = Form("")):
 
 @router.post("/delete-bulk")
 def delete_items(
+    request: Request,
     current_path: str = Form(""),
     paths: list[str] = Form(...),
     delete_password: str = Form(""),
 ):
-    _require_delete_password(delete_password)
+    _require_delete_password(request, delete_password)
 
     try:
         for path in paths:
@@ -154,19 +174,26 @@ def _directory_url(path: str) -> str:
     return url
 
 
-def _require_delete_password(password: str) -> None:
+def _require_delete_password(request: Request, password: str) -> None:
     configured_password = (
         os.getenv("DELETE_PASSWORD", "").strip()
         or os.getenv("FILE_MANAGER_PASSWORD", "").strip()
     )
+    client = _client_id(request)
+
+    if auth_rate_limited("file_delete", client):
+        append_security_event("delete_password_rate_limited", client=client)
+        raise HTTPException(status_code=429, detail="삭제 비밀번호 실패가 반복되어 잠시 후 다시 시도해주세요.")
 
     if not configured_password:
         append_security_event("delete_password_missing_config")
         raise HTTPException(status_code=403, detail="삭제 비밀번호가 설정되지 않았습니다.")
 
     if not secrets.compare_digest(password, configured_password):
+        record_auth_failure("file_delete", client)
         append_security_event("delete_password_failed")
         raise HTTPException(status_code=403, detail="삭제 비밀번호가 올바르지 않습니다.")
+    clear_auth_failures("file_delete", client)
 
 
 def _file_auth_required() -> bool:
@@ -177,3 +204,10 @@ def _file_auth_required() -> bool:
 
 def _truthy(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _client_id(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    if forwarded_for:
+        return forwarded_for
+    return request.client.host if request.client else "unknown"

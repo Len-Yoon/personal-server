@@ -261,12 +261,19 @@ python3 scripts/maintenance.py backup
 python3 scripts/maintenance.py prune-logs
 ```
 
+Or run the Windows wrapper from Task Scheduler:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows-maintenance.ps1
+```
+
 If file uploads should be included in backups, set:
 
 ```text
 BACKUP_INCLUDE_FILES=true
 BACKUP_RETENTION_DAYS=14
 SECURITY_LOG_RETENTION_DAYS=30
+BACKUP_STALE_SECONDS=172800
 ```
 
 ## Expected resource shape

@@ -1,11 +1,18 @@
 import os
 import secrets
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Body, Header, HTTPException, Request
 from fastapi.templating import Jinja2Templates
 
 from app.services.global_search import search_all
-from app.services.security import append_security_event, security_status
+from app.services.security import (
+    append_security_event,
+    append_user_event,
+    auth_rate_limited,
+    clear_auth_failures,
+    record_auth_failure,
+    security_status,
+)
 from app.services.system_status import get_dashboard_status, get_service_health
 
 router = APIRouter()
@@ -95,22 +102,50 @@ def dashboard(request: Request, q: str = ""):
 
 
 @router.get("/admin/security")
-def admin_security_status(x_security_password: str = Header(default="")):
-    _require_security_password(x_security_password)
+def admin_security_status(request: Request, x_security_password: str = Header(default="")):
+    _require_security_password(request, x_security_password)
     append_security_event("security_dashboard_viewed")
     return security_status()
 
 
-def _require_security_password(password: str) -> None:
+@router.post("/admin/events")
+async def admin_user_event(request: Request, payload: dict = Body(default_factory=dict)):
+    event = str(payload.get("event", ""))
+    append_user_event(
+        event,
+        path=str(payload.get("path", "")),
+        target=str(payload.get("target", "")),
+        href=str(payload.get("href", "")),
+        query=str(payload.get("query", "")),
+        client=_client_id(request),
+    )
+    return {"ok": True}
+
+
+def _require_security_password(request: Request, password: str) -> None:
     configured_password = (
         os.getenv("FILE_MANAGER_PASSWORD", "").strip()
         or os.getenv("DELETE_PASSWORD", "").strip()
     )
+    client = _client_id(request)
+
+    if auth_rate_limited("security_dashboard", client):
+        append_security_event("security_dashboard_rate_limited", client=client)
+        raise HTTPException(status_code=429, detail="관리자 인증 실패가 반복되어 잠시 후 다시 시도해주세요.")
 
     if not configured_password:
         append_security_event("security_dashboard_blocked", reason="password_not_configured")
         raise HTTPException(status_code=403, detail="관리자 비밀번호가 설정되지 않았습니다.")
 
     if not secrets.compare_digest(password, configured_password):
+        record_auth_failure("security_dashboard", client)
         append_security_event("security_dashboard_auth_failed")
         raise HTTPException(status_code=401, detail="관리자 비밀번호가 올바르지 않습니다.")
+    clear_auth_failures("security_dashboard", client)
+
+
+def _client_id(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    if forwarded_for:
+        return forwarded_for
+    return request.client.host if request.client else "unknown"

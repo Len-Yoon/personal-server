@@ -1,6 +1,6 @@
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -16,6 +16,17 @@ PROJECT_DATA_ROOT = next(
 )
 LOG_PATH = Path(os.getenv("SECURITY_LOG_PATH", PROJECT_DATA_ROOT / "logs" / "security-events.txt"))
 LOG_TIMEZONE = ZoneInfo(os.getenv("SECURITY_LOG_TIMEZONE", "Asia/Seoul"))
+AUTH_RATE_LIMIT_MAX_FAILURES = int(os.getenv("AUTH_RATE_LIMIT_MAX_FAILURES", "5"))
+AUTH_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("AUTH_RATE_LIMIT_WINDOW_SECONDS", "300"))
+
+_AUTH_FAILURES: dict[tuple[str, str], list[datetime]] = {}
+_ALLOWED_USER_EVENTS = {
+    "global_search_submitted",
+    "search_result_opened",
+    "security_modal_closed",
+    "security_modal_opened",
+    "service_opened",
+}
 
 
 SECURITY_HEADERS = {
@@ -48,6 +59,37 @@ def append_security_event(event: str, **details: Any) -> None:
     }
     with log_path.open("a", encoding="utf-8") as log_file:
         log_file.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+
+
+def append_user_event(event: str, **details: Any) -> None:
+    if event not in _ALLOWED_USER_EVENTS:
+        append_security_event("user_event_blocked", reason="event_not_allowed", event=event)
+        return
+
+    append_security_event(
+        f"user_{event}",
+        **{
+            key: _clean_detail(value)
+            for key, value in details.items()
+            if key in {"path", "target", "href", "client", "query"}
+        },
+    )
+
+
+def auth_rate_limited(scope: str, identifier: str) -> bool:
+    failures = _active_auth_failures(scope, identifier)
+    return len(failures) >= AUTH_RATE_LIMIT_MAX_FAILURES
+
+
+def record_auth_failure(scope: str, identifier: str) -> None:
+    key = (scope, identifier)
+    failures = _active_auth_failures(scope, identifier)
+    failures.append(datetime.now(LOG_TIMEZONE))
+    _AUTH_FAILURES[key] = failures
+
+
+def clear_auth_failures(scope: str, identifier: str) -> None:
+    _AUTH_FAILURES.pop((scope, identifier), None)
 
 
 def read_recent_events(limit: int = 8) -> list[dict[str, Any]]:
@@ -92,6 +134,19 @@ def _blocked_extensions() -> set[str]:
         "app,bat,cmd,com,dll,dmg,exe,jar,js,msi,php,ps1,sh,vbs",
     )
     return {extension.strip().lower().lstrip(".") for extension in raw.split(",") if extension.strip()}
+
+
+def _active_auth_failures(scope: str, identifier: str) -> list[datetime]:
+    key = (scope, identifier)
+    cutoff = datetime.now(LOG_TIMEZONE) - timedelta(seconds=AUTH_RATE_LIMIT_WINDOW_SECONDS)
+    failures = [failed_at for failed_at in _AUTH_FAILURES.get(key, []) if failed_at >= cutoff]
+    _AUTH_FAILURES[key] = failures
+    return failures
+
+
+def _clean_detail(value: Any) -> str:
+    cleaned = str(value).replace("\n", " ").replace("\r", " ").strip()
+    return cleaned[:300]
 
 
 def _daily_log_path(target: datetime) -> Path:

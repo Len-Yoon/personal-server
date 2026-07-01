@@ -61,6 +61,21 @@ class SystemAgentMetricsTests(unittest.TestCase):
             self.assertTrue(metrics["backup"]["exists"])
             self.assertEqual(metrics["backup"]["latest_name"], "20260701-030000")
 
+    def test_collect_metrics_warns_when_latest_backup_is_old(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            backup = root / "backups" / "20260601-030000"
+            backup.mkdir(parents=True)
+            old_time = (datetime.now(timezone.utc) - timedelta(days=3)).timestamp()
+            os.utime(backup, (old_time, old_time))
+
+            from app.services.metrics import collect_metrics
+
+            metrics = collect_metrics(data_root=root, backup_stale_after_seconds=86400)
+
+            self.assertTrue(metrics["backup"]["exists"])
+            self.assertIn("backup_stale", metrics["warnings"])
+
     def test_collect_metrics_reports_file_usage(self):
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

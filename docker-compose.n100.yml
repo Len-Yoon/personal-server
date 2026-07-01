@@ -11,6 +11,7 @@ services:
         max-file: "2"
 
   portal-web:
+    ports: !reset []
     command:
       - uvicorn
       - app.main:app
@@ -23,9 +24,17 @@ services:
       - --no-access-log
     environment:
       - FILE_STORAGE_PATH=/data/files
+      - PYTHONDONTWRITEBYTECODE=1
     cpus: "0.25"
     mem_limit: 160m
     pids_limit: 128
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
     logging:
       driver: json-file
       options:
@@ -33,6 +42,7 @@ services:
         max-file: "2"
 
   system-agent:
+    ports: !reset []
     command:
       - uvicorn
       - app.main:app
@@ -43,9 +53,18 @@ services:
       - --workers
       - "1"
       - --no-access-log
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
     cpus: "0.15"
     mem_limit: 96m
     pids_limit: 96
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
     logging:
       driver: json-file
       options:
@@ -53,6 +72,7 @@ services:
         max-file: "2"
 
   crawler-worker:
+    ports: !reset []
     profiles:
       - worker
     command:
@@ -65,9 +85,18 @@ services:
       - --workers
       - "1"
       - --no-access-log
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
     cpus: "0.50"
     mem_limit: 320m
     pids_limit: 160
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
     logging:
       driver: json-file
       options:
@@ -75,6 +104,7 @@ services:
         max-file: "2"
 
   youtube-memo:
+    ports: !reset []
     command:
       - uvicorn
       - app.main:app
@@ -85,9 +115,18 @@ services:
       - --workers
       - "1"
       - --no-access-log
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
     cpus: "0.25"
     mem_limit: 160m
     pids_limit: 128
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
     logging:
       driver: json-file
       options:
@@ -95,6 +134,7 @@ services:
         max-file: "2"
 
   book-memo:
+    ports: !reset []
     command:
       - uvicorn
       - app.main:app
@@ -105,9 +145,18 @@ services:
       - --workers
       - "1"
       - --no-access-log
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
     cpus: "0.35"
     mem_limit: 192m
     pids_limit: 128
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
     logging:
       driver: json-file
       options:

@@ -87,7 +87,7 @@
             <p>저장 뉴스, 유튜브 메모, 책 메모를 한 번에 찾습니다.</p>
         </div>
     </div>
-    <form class="global-search" method="get" action="/">
+    <form class="global-search" method="get" action="/" data-track-event="global_search_submitted">
         <input type="search" name="q" value="{{ query }}" placeholder="검색어 입력">
         <button type="submit">검색</button>
     </form>
@@ -98,7 +98,7 @@
                 <section class="search-group">
                     <h3>{{ {"news": "뉴스", "youtube": "유튜브", "books": "책"}[group] }}</h3>
                     {% for item in items %}
-                        <a href="{{ item.url }}">
+                        <a href="{{ item.url }}" data-track-event="search_result_opened" data-track-target="{{ item.title }}">
                             <small>{{ item.meta or {"news": "뉴스", "youtube": "유튜브", "books": "책"}[group] }}</small>
                             <strong>{{ item.title }}</strong>
                             <span>{{ item.description }}</span>
@@ -123,7 +123,7 @@
         </div>
 
         <div class="header-actions">
-            <button class="security-button" type="button" data-open-security-modal>
+            <button class="security-button" type="button" data-open-security-modal data-track-event="security_modal_opened" data-track-target="보안 상태">
                 보안 상태
             </button>
             <span class="server-status">LOCAL RUNNING</span>
@@ -132,7 +132,7 @@
 
     <div class="service-grid three">
         {% for service in services %}
-            <a class="service-card {% if service.status != '운영중' %}disabled{% endif %}" href="{{ service.url }}">
+            <a class="service-card {% if service.status != '운영중' %}disabled{% endif %}" href="{{ service.url }}" data-track-event="service_opened" data-track-target="{{ service.name }}">
                 <div class="card-top">
                     <div class="service-icon">
                         {{ service.icon }}
@@ -165,7 +165,7 @@
                 <span class="modal-kicker">ADMIN SECURITY</span>
                 <h2 id="security-modal-title">보안 대시보드</h2>
             </div>
-            <button class="modal-close" type="button" aria-label="닫기" data-close-security-modal>×</button>
+            <button class="modal-close" type="button" aria-label="닫기" data-close-security-modal data-track-event="security_modal_closed" data-track-target="보안 상태">×</button>
         </div>
 
         <div class="security-summary">
@@ -330,6 +330,45 @@ function setSecurityMessage(message) {
     empty.className = "empty-log";
     empty.textContent = message;
     securityEvents.append(empty);
+}
+
+document.querySelectorAll("a[data-track-event], button[data-track-event]").forEach((element) => {
+    element.addEventListener("click", () => {
+        trackUserEvent(element.dataset.trackEvent, {
+            target: element.dataset.trackTarget || element.textContent.trim(),
+            href: element.href || "",
+        });
+    });
+});
+
+document.querySelector(".global-search")?.addEventListener("submit", (event) => {
+    const form = event.currentTarget;
+    const query = new FormData(form).get("q") || "";
+    trackUserEvent(form.dataset.trackEvent, { query });
+});
+
+function trackUserEvent(event, details = {}) {
+    if (!event) {
+        return;
+    }
+
+    const payload = JSON.stringify({
+        event,
+        path: window.location.pathname,
+        ...details,
+    });
+
+    if (navigator.sendBeacon) {
+        navigator.sendBeacon("/admin/events", new Blob([payload], { type: "application/json" }));
+        return;
+    }
+
+    fetch("/admin/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload,
+        keepalive: true,
+    }).catch(() => {});
 }
 </script>
 {% endblock %}

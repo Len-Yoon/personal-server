@@ -21,17 +21,21 @@ def collect_metrics(
     data_root: Path | None = None,
     host_metrics_path: Path | None = None,
     stale_after_seconds: int | None = None,
+    backup_stale_after_seconds: int | None = None,
 ) -> dict[str, Any]:
     data_root = data_root or Path(os.getenv("DATA_ROOT", PROJECT_DATA_ROOT))
     host_metrics_path = host_metrics_path or Path(
         os.getenv("HOST_METRICS_PATH", DEFAULT_HOST_METRICS_PATH)
     )
     stale_after_seconds = stale_after_seconds or int(os.getenv("HOST_METRICS_STALE_SECONDS", "900"))
+    backup_stale_after_seconds = backup_stale_after_seconds or int(
+        os.getenv("BACKUP_STALE_SECONDS", "172800")
+    )
 
     warnings: list[str] = []
     host = _read_host_metrics(host_metrics_path, stale_after_seconds, warnings)
     files = _files_status(data_root / "files")
-    backup = _backup_status(data_root / "backups", warnings)
+    backup = _backup_status(data_root / "backups", warnings, backup_stale_after_seconds)
     disk = _disk_status(data_root, warnings)
 
     overall_status = "warning" if warnings else "ok"
@@ -128,7 +132,11 @@ def _read_host_metrics(
     }
 
 
-def _backup_status(backup_root: Path, warnings: list[str]) -> dict[str, Any]:
+def _backup_status(
+    backup_root: Path,
+    warnings: list[str],
+    stale_after_seconds: int,
+) -> dict[str, Any]:
     backups = sorted(
         [path for path in backup_root.iterdir() if path.is_dir()],
         key=lambda path: path.stat().st_mtime,
@@ -144,13 +152,17 @@ def _backup_status(backup_root: Path, warnings: list[str]) -> dict[str, Any]:
         }
 
     latest = backups[0]
+    latest_modified_at = datetime.fromtimestamp(
+        latest.stat().st_mtime,
+        timezone.utc,
+    )
+    if (datetime.now(timezone.utc) - latest_modified_at).total_seconds() > stale_after_seconds:
+        warnings.append("backup_stale")
+
     return {
         "exists": True,
         "latest_name": latest.name,
-        "latest_modified_at": datetime.fromtimestamp(
-            latest.stat().st_mtime,
-            timezone.utc,
-        ).isoformat(),
+        "latest_modified_at": latest_modified_at.isoformat(),
     }
 
 

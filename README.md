@@ -92,12 +92,15 @@ FILE_ALLOWED_EXTENSIONS=
 SECURITY_LOG_PATH=
 SECURITY_LOG_TIMEZONE=
 SECURITY_LOG_RETENTION_DAYS=
+AUTH_RATE_LIMIT_MAX_FAILURES=
+AUTH_RATE_LIMIT_WINDOW_SECONDS=
 
 # Maintenance
 DATA_ROOT=
 BACKUP_PATH=
 BACKUP_RETENTION_DAYS=
 BACKUP_INCLUDE_FILES=
+BACKUP_STALE_SECONDS=
 HOST_METRICS_PATH=
 HOST_METRICS_STALE_SECONDS=
 ```
@@ -106,6 +109,12 @@ HOST_METRICS_STALE_SECONDS=
 
 ```bash
 docker compose up -d --build
+```
+
+N100 운영 배포는 리소스 제한과 보안 옵션이 들어간 override를 함께 사용합니다. 이 구성에서는 Nginx Proxy Manager만 외부 포트를 열고, 앱 컨테이너 포트는 호스트에 직접 공개하지 않습니다.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.n100.yml --profile edge up -d --build
 ```
 
 개별 서비스만 다시 빌드할 수도 있습니다.
@@ -145,6 +154,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows-host-metrics.ps1 -Out
 
 운영에서는 Windows 작업 스케줄러로 5분마다 실행하는 것을 권장합니다. 기본 설정에서는 collector가 약 15분 이상 갱신되지 않으면 포털에 `host_metrics_stale` 경고가 표시됩니다.
 
+SQLite 백업과 보안 로그 정리는 작업 스케줄러로 하루 1회 실행하는 것을 권장합니다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows-maintenance.ps1
+```
+
+파일함까지 백업하려면 `BACKUP_INCLUDE_FILES=true` 또는 `-IncludeFiles` 옵션을 사용합니다. 기본 설정에서는 최신 백업이 약 2일 이상 갱신되지 않으면 포털에 `backup_stale` 경고가 표시됩니다.
+
 `DEMO_MODE=true`이면 포털은 실제 host 경로와 민감한 운영 상태 대신 샘플 서버 상태와 샘플 검색 결과를 표시합니다.
 
 ## Tests
@@ -174,15 +191,15 @@ AI는 다음 작업에 사용했습니다.
 ## Notes
 
 - 삭제 기능은 `.env`의 `DELETE_PASSWORD`를 확인합니다.
-- `portal-web`은 보안 헤더를 응답에 추가하고, 파일함 인증 실패/업로드/다운로드/삭제 이벤트를 `SECURITY_LOG_PATH` 기준의 일별 텍스트 로그로 기록합니다.
+- `portal-web`은 보안 헤더를 응답에 추가하고, 파일함 인증 실패/업로드/다운로드/삭제 이벤트와 포털 주요 클릭 이벤트를 `SECURITY_LOG_PATH` 기준의 일별 텍스트 로그로 기록합니다.
+- 관리자 인증/삭제 비밀번호 실패는 `AUTH_RATE_LIMIT_MAX_FAILURES`, `AUTH_RATE_LIMIT_WINDOW_SECONDS` 기준으로 IP별 일시 차단합니다.
 - 파일함 업로드는 최대 용량, 차단 확장자, 확장자 없는 파일, 기존 파일 덮어쓰기를 제한합니다.
 - 포털의 `보안 상태` 버튼은 관리자 인증 후 최근 보안 이벤트와 업로드 정책을 모달로 보여줍니다.
 - 포털 첫 화면은 `system-agent`를 통해 미니 PC/Docker/백업 상태를 표시하고, agent 연결 실패 시 포털 자체는 계속 동작합니다.
 - 포털 전체 검색은 저장 뉴스, YouTube 메모, 책 메모의 read-only 검색 API를 모아 보여줍니다.
 - 포털 서비스 링크는 기본적으로 `http://news.lenserver.com`, `http://memo.lenserver.com`, `http://book.lenserver.com`으로 열리며, `NEWS_SERVICE_URL`, `YOUTUBE_MEMO_URL`, `BOOK_MEMO_URL` 환경변수로 바꿀 수 있습니다.
 - 운영 모드에서는 `APP_ENV=production` 또는 `FILE_MANAGER_AUTH_REQUIRED=true`로 파일함 비밀번호 설정을 강제할 수 있습니다.
-- 현재 Compose는 개발 편의상 서비스 디렉터리를 `/app`에 bind mount합니다.
-- 운영 안정성을 더 높일 때는 `--reload` 없는 운영용 Compose 파일을 분리하는 것을 권장합니다.
+- 기본 Compose는 개발 편의상 서비스 디렉터리를 `/app`에 bind mount하고 앱 포트를 로컬에 엽니다. 운영에서는 `docker-compose.n100.yml` override를 함께 사용합니다.
 - SQLite 스키마가 커지면 간단한 migration/version 테이블을 추가하는 것이 좋습니다.
 - `book-memo` 책 검색은 `ALADIN_TTB_KEY`가 있으면 알라딘을 우선 사용하고, 실패하면 Google Books, Open Library 순서로 fallback합니다.
 
