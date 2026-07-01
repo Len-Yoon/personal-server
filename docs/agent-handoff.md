@@ -7,6 +7,7 @@
 `personal-server`는 Docker Compose로 묶은 개인 서버 포트폴리오 프로젝트입니다.
 
 - `portal-web`: 메인 포털, 파일함, 보안 상태 모달
+- `system-agent`: 미니 PC/Windows host metrics, 백업/파일함/컨테이너 상태 API
 - `crawler-worker`: Google News RSS 수집, 저장 뉴스, OpenAI 요약
 - `youtube-memo`: YouTube 링크별 메모
 - `book-memo`: 책 검색, 독서 진행률, 목차/메모 관리
@@ -25,6 +26,10 @@
 - `portal-web/app/routers/dashboard.py`: 포털 대시보드, `/admin/security`
 - `portal-web/app/routers/files.py`: 파일함 라우터와 인증/삭제 보호
 - `scripts/maintenance.py`: SQLite 백업, 파일함 선택 백업, 보안 로그 정리
+- `scripts/windows-host-metrics.ps1`: Windows N100 host 상태를 `data/system/host-metrics.json`으로 기록
+- `system-agent/app/services/metrics.py`: system-agent metrics 수집/정규화
+- `portal-web/app/services/system_status.py`: 포털 dashboard용 agent fetch, demo/fallback 처리
+- `portal-web/app/services/global_search.py`: 서비스별 검색 API 집계
 - `tests/test_portal_security.py`: 파일함/보안 로그 핵심 unittest
 
 ## Current Security Work
@@ -67,6 +72,23 @@
 - `scripts/maintenance.py all`
   - 백업과 로그 정리를 함께 실행
 
+## Mini PC Dashboard Work
+
+- `system-agent` 서비스 추가:
+  - `/health`
+  - `/metrics`
+  - `/metrics/demo`
+- 포털 첫 화면에 미니 PC 상태 섹션 추가:
+  - CPU, 메모리, 디스크, 파일함 개수, 최근 백업
+  - 컨테이너 상태 목록
+  - `host_metrics_missing`, `host_metrics_stale`, `backup_missing`, `system_agent_unavailable` 같은 경고
+- Windows 전체 host 상태는 Docker 컨테이너가 직접 보지 않고 PowerShell collector가 JSON으로 넘김.
+- `DEMO_MODE=true`이면 샘플 서버 상태와 샘플 검색 결과를 표시.
+- 포털 전체 검색 추가:
+  - `crawler-worker /api/search`
+  - `youtube-memo /api/search`
+  - `book-memo /api/search`
+
 ## README / Screenshots
 
 README에 서비스별 스크린샷과 설명을 추가했습니다.
@@ -90,15 +112,16 @@ README에 서비스별 스크린샷과 설명을 추가했습니다.
 
 추천 우선순위:
 
-1. 포트폴리오용 `DEMO_MODE` 추가.
+1. Windows 작업 스케줄러에 `scripts/windows-host-metrics.ps1` 연결.
 2. 백업/로그 정리를 N100 cron 또는 Windows 작업 스케줄러에 연결.
 3. GitHub 공개 전 secret scan.
-4. 서비스 헬스/리소스 대시보드 추가.
-5. Telegram 등으로 백업 실패/디스크 부족 알림 추가.
+4. Telegram 등으로 백업 실패/디스크 부족 알림 추가.
+5. Docker socket 기반 실제 컨테이너 상태 수집은 필요할 때만 신중히 추가.
 
 ## Verification Already Done
 
 - `python3 -m compileall portal-web/app` 통과.
+- `PYTHONPATH=system-agent python3 -m unittest tests.system_agent.test_metrics`로 system-agent metrics 테스트 가능.
 - Docker 서비스가 떠 있는 상태에서 Playwright + 로컬 Chrome로 README 스크린샷 캡처 완료.
 - 일별 로그 파일명 생성 확인.
 - 파일함 업로드 차단 확장자 검사 확인.

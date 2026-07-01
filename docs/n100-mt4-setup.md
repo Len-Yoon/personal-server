@@ -21,6 +21,7 @@ Windows
   WSL2 Ubuntu
     Docker Compose
       portal-web
+      system-agent
       book-memo
       youtube-memo
 ```
@@ -124,6 +125,9 @@ FILE_BLOCKED_EXTENSIONS=app,bat,cmd,com,dll,dmg,exe,jar,js,msi,php,ps1,sh,vbs
 FILE_ALLOWED_EXTENSIONS=
 FILE_MANAGER_AUTH_REQUIRED=true
 APP_ENV=production
+SYSTEM_AGENT_URL=http://system-agent:8010
+HOST_METRICS_PATH=/data/system/host-metrics.json
+HOST_METRICS_STALE_SECONDS=300
 ```
 
 If `FILE_MANAGER_PASSWORD` is set, `/files` uses browser Basic Auth. The username
@@ -147,6 +151,7 @@ If you are moving data from another machine, copy the `data/` folder into:
 This starts only:
 
 - `portal-web`
+- `system-agent`
 - `book-memo`
 - `youtube-memo`
 
@@ -163,7 +168,29 @@ Open from Windows:
 http://localhost:8000
 http://localhost:8002
 http://localhost:8003
+http://localhost:8010/health
 ```
+
+## Windows host metrics
+
+The web apps run in Docker/WSL2, so they cannot perfectly observe the Windows
+host by themselves. Use the included PowerShell collector to write Windows CPU,
+memory, disk, and uptime metrics into the shared data folder:
+
+```powershell
+cd <repo-path>
+powershell -ExecutionPolicy Bypass -File .\scripts\windows-host-metrics.ps1 -OutputPath .\data\system\host-metrics.json
+```
+
+Recommended Task Scheduler setup:
+
+- Program: `powershell.exe`
+- Arguments: `-ExecutionPolicy Bypass -File C:\path\to\personal-server\scripts\windows-host-metrics.ps1 -OutputPath C:\path\to\personal-server\data\system\host-metrics.json`
+- Trigger: every 1 minute
+- Run whether user is logged on or not: optional, depending on your Windows account policy
+
+If the collector stops, the portal dashboard keeps working and shows a
+`host_metrics_stale` or `host_metrics_missing` warning.
 
 ## Optional services
 
@@ -247,6 +274,7 @@ SECURITY_LOG_RETENTION_DAYS=30
 The default stack is designed to stay small:
 
 - `portal-web`: 1 worker, no reload, 160 MB cap
+- `system-agent`: 1 worker, no reload, 96 MB cap
 - `book-memo`: 1 worker, no reload, 192 MB cap
 - `youtube-memo`: 1 worker, no reload, 160 MB cap
 - `crawler-worker`: optional, 320 MB cap
