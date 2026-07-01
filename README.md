@@ -143,7 +143,7 @@ Windows N100의 실제 host 상태는 PowerShell collector가 기록합니다.
 powershell -ExecutionPolicy Bypass -File .\scripts\windows-host-metrics.ps1 -OutputPath .\data\system\host-metrics.json
 ```
 
-운영에서는 Windows 작업 스케줄러로 1분마다 실행하는 것을 권장합니다. collector가 오래 실행되지 않으면 포털에 `host_metrics_stale` 경고가 표시됩니다.
+운영에서는 Windows 작업 스케줄러로 5분마다 실행하는 것을 권장합니다. 기본 설정에서는 collector가 약 15분 이상 갱신되지 않으면 포털에 `host_metrics_stale` 경고가 표시됩니다.
 
 `DEMO_MODE=true`이면 포털은 실제 host 경로와 민감한 운영 상태 대신 샘플 서버 상태와 샘플 검색 결과를 표시합니다.
 

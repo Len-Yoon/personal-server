@@ -26,7 +26,7 @@ def collect_metrics(
     host_metrics_path = host_metrics_path or Path(
         os.getenv("HOST_METRICS_PATH", DEFAULT_HOST_METRICS_PATH)
     )
-    stale_after_seconds = stale_after_seconds or int(os.getenv("HOST_METRICS_STALE_SECONDS", "300"))
+    stale_after_seconds = stale_after_seconds or int(os.getenv("HOST_METRICS_STALE_SECONDS", "900"))
 
     warnings: list[str] = []
     host = _read_host_metrics(host_metrics_path, stale_after_seconds, warnings)

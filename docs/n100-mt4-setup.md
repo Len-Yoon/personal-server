@@ -127,7 +127,7 @@ FILE_MANAGER_AUTH_REQUIRED=true
 APP_ENV=production
 SYSTEM_AGENT_URL=http://system-agent:8010
 HOST_METRICS_PATH=/data/system/host-metrics.json
-HOST_METRICS_STALE_SECONDS=300
+HOST_METRICS_STALE_SECONDS=900
 ```
 
 If `FILE_MANAGER_PASSWORD` is set, `/files` uses browser Basic Auth. The username
@@ -186,11 +186,11 @@ Recommended Task Scheduler setup:
 
 - Program: `powershell.exe`
 - Arguments: `-ExecutionPolicy Bypass -File C:\path\to\personal-server\scripts\windows-host-metrics.ps1 -OutputPath C:\path\to\personal-server\data\system\host-metrics.json`
-- Trigger: every 1 minute
+- Trigger: every 5 minutes
 - Run whether user is logged on or not: optional, depending on your Windows account policy
 
-If the collector stops, the portal dashboard keeps working and shows a
-`host_metrics_stale` or `host_metrics_missing` warning.
+If the collector stops for about 15 minutes, the portal dashboard keeps working
+and shows a `host_metrics_stale` or `host_metrics_missing` warning.
 
 ## Optional services
 
