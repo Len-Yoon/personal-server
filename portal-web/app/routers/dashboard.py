@@ -6,7 +6,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.services.global_search import search_all
 from app.services.security import append_security_event, security_status
-from app.services.system_status import get_dashboard_status
+from app.services.system_status import get_dashboard_status, get_service_health
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -87,6 +87,7 @@ def dashboard(request: Request, q: str = ""):
             "title": "Len의 개인서버",
             "services": services,
             "system_status": get_dashboard_status(),
+            "service_health": get_service_health(),
             "query": q.strip(),
             "search_results": search_all(q) if q.strip() else None,
         },

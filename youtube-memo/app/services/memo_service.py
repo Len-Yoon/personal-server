@@ -230,7 +230,9 @@ def search_videos_and_memos(query: str, limit: int = 5) -> list[dict[str, Any]]:
     return [
         {
             "title": row["memo_title"] or row["video_title"],
-            "description": row["memo_content"] or row["video_url"],
+            "description": row["video_title"] or row["video_url"],
+            "snippet": _snippet(row["memo_content"] or ""),
+            "meta": "YouTube 메모",
             "url": f"/videos/{row['video_id']}",
         }
         for row in rows
@@ -253,6 +255,44 @@ def delete_memo(memo_id: int) -> int | None:
         connection.execute(
             "DELETE FROM memos WHERE id = ?",
             (memo_id,),
+        )
+        connection.execute(
+            """
+            UPDATE videos
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (video_id,),
+        )
+
+    return video_id
+
+
+def update_memo(memo_id: int, title: str, content: str) -> int | None:
+    init_db()
+    title = title.strip() or "제목 없는 메모"
+    content = content.strip()
+
+    if not content:
+        raise ValueError("메모 내용을 입력해주세요.")
+
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT video_id FROM memos WHERE id = ?",
+            (memo_id,),
+        ).fetchone()
+
+        if not row:
+            return None
+
+        video_id = row["video_id"]
+        connection.execute(
+            """
+            UPDATE memos
+            SET title = ?, content = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (title, content, memo_id),
         )
         connection.execute(
             """
@@ -294,6 +334,13 @@ def extract_youtube_id(url: str) -> str:
 
 def embed_url(youtube_id: str) -> str:
     return f"https://www.youtube.com/embed/{youtube_id}"
+
+
+def _snippet(value: str, limit: int = 140) -> str:
+    cleaned = " ".join(value.strip().split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[:limit].rstrip()}..."
 
 
 def _connect() -> sqlite3.Connection:

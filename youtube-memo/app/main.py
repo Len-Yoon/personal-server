@@ -16,6 +16,7 @@ from app.services.memo_service import (
     list_memos,
     list_videos,
     search_videos_and_memos,
+    update_memo,
 )
 
 app = FastAPI(title="Youtube Memo")
@@ -114,6 +115,29 @@ def delete_video_memo(
     _require_delete_password(delete_password)
 
     video_id = delete_memo(memo_id)
+
+    if not video_id:
+        raise HTTPException(status_code=404, detail="Memo not found")
+
+    return RedirectResponse(
+        url=f"/videos/{video_id}",
+        status_code=303,
+    )
+
+
+@app.post("/memos/{memo_id}")
+def update_video_memo(
+    memo_id: int,
+    memo_title: str = Form(default=""),
+    content: str = Form(...),
+    edit_password: str = Form(default=""),
+):
+    _require_delete_password(edit_password)
+
+    try:
+        video_id = update_memo(memo_id=memo_id, title=memo_title, content=content)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
     if not video_id:
         raise HTTPException(status_code=404, detail="Memo not found")

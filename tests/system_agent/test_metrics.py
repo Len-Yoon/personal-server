@@ -75,6 +75,13 @@ class SystemAgentMetricsTests(unittest.TestCase):
             self.assertEqual(metrics["files"]["file_count"], 1)
             self.assertGreaterEqual(metrics["files"]["total_bytes"], 5)
 
+    def test_disk_level_thresholds(self):
+        from app.services.metrics import disk_level
+
+        self.assertEqual(disk_level(79.9), "ok")
+        self.assertEqual(disk_level(80.0), "warning")
+        self.assertEqual(disk_level(90.0), "critical")
+
 
 if __name__ == "__main__":
     unittest.main()

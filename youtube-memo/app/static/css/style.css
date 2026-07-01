@@ -263,7 +263,9 @@ a {
 
 .url-form input,
 .memo-editor input,
-.memo-editor textarea {
+.memo-editor textarea,
+.memo-edit-panel input,
+.memo-edit-panel textarea {
     width: 100%;
     border: 1px solid rgba(147, 197, 253, 0.24);
     border-radius: var(--radius-md);
@@ -275,12 +277,14 @@ a {
 }
 
 .url-form input,
-.memo-editor input {
+.memo-editor input,
+.memo-edit-panel input {
     height: 52px;
     padding: 0 18px;
 }
 
-.memo-editor textarea {
+.memo-editor textarea,
+.memo-edit-panel textarea {
     min-height: 180px;
     padding: 16px 18px;
     resize: vertical;
@@ -429,10 +433,36 @@ a {
     font-weight: 900;
 }
 
-.memo-editor form {
+.memo-editor form,
+.memo-edit-panel form {
     display: grid;
     gap: 12px;
     margin-top: 18px;
+}
+
+.memo-edit-panel {
+    margin: 0 var(--space-card) 0 calc(var(--space-card) + 31px);
+    padding: 18px 0 0;
+    border-top: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.memo-edit-panel summary {
+    cursor: pointer;
+    color: #bae6fd;
+    font-size: 14px;
+    font-weight: 900;
+}
+
+.memo-edit-panel button {
+    height: 44px;
+    padding: 0 18px;
+    border: 1px solid rgba(56, 189, 248, 0.38);
+    border-radius: var(--radius-md);
+    color: #e0f2fe;
+    background: rgba(14, 165, 233, 0.18);
+    font-size: 14px;
+    font-weight: 900;
+    cursor: pointer;
 }
 
 .memo-list {
@@ -564,6 +594,10 @@ a {
 
     .memo-card .protected-delete-form {
         margin: 22px var(--space-card-sm) var(--space-card-sm) calc(var(--space-card-sm) + 31px);
+    }
+
+    .memo-edit-panel {
+        margin: 0 var(--space-card-sm) 0 calc(var(--space-card-sm) + 31px);
     }
 
     .url-form {

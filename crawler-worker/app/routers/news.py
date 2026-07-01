@@ -105,6 +105,11 @@ def search_api(q: str = Query(default=""), limit: int = Query(default=5, ge=1, l
             {
                 "title": item.get("title_ko") or item.get("title", "저장 뉴스"),
                 "description": item.get("summary", {}).get("brief") or item.get("source", ""),
+                "snippet": item.get("summary", {}).get("why_it_matters", ""),
+                "meta": " · ".join(
+                    part for part in [item.get("category", ""), item.get("source", ""), item.get("updated_at", "")]
+                    if part
+                ),
                 "url": item.get("url", "#"),
             }
             for item in saved_news

@@ -99,6 +99,26 @@
                         </summary>
                         <p>{{ memo.content }}</p>
                     </details>
+                    <details class="memo-edit-panel">
+                        <summary>수정</summary>
+                        <form
+                            class="protected-edit-form"
+                            action="/memos/{{ memo.id }}"
+                            method="post"
+                            data-confirm-message="이 메모를 수정할까요?"
+                            data-error-message="메모 수정에 실패했습니다."
+                        >
+                            <input
+                                type="text"
+                                name="memo_title"
+                                value="{{ memo.title }}"
+                                autocomplete="off"
+                            >
+                            <textarea name="content" rows="7" required>{{ memo.content }}</textarea>
+                            <input type="hidden" name="edit_password">
+                            <button type="submit">수정 저장</button>
+                        </form>
+                    </details>
                     <form
                         class="protected-delete-form"
                         action="/memos/{{ memo.id }}/delete"
@@ -154,6 +174,39 @@ document.querySelectorAll(".protected-delete-form").forEach((form) => {
             window.location.href = response.url || window.location.href;
         } catch (error) {
             window.alert(form.dataset.errorMessage || "삭제에 실패했습니다.");
+        }
+    });
+});
+
+document.querySelectorAll(".protected-edit-form").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+
+        const password = window.prompt("수정 비밀번호를 입력해주세요.");
+        if (!password) {
+            return;
+        }
+
+        if (!window.confirm(form.dataset.confirmMessage || "수정할까요?")) {
+            return;
+        }
+
+        form.querySelector("input[name='edit_password']").value = password;
+
+        try {
+            const response = await fetch(form.action, {
+                method: "POST",
+                body: new FormData(form),
+            });
+
+            if (!response.ok) {
+                window.alert(form.dataset.errorMessage || "수정에 실패했습니다.");
+                return;
+            }
+
+            window.location.href = response.url || window.location.href;
+        } catch (error) {
+            window.alert(form.dataset.errorMessage || "수정에 실패했습니다.");
         }
     });
 });

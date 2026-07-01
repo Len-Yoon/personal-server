@@ -35,6 +35,7 @@
         <div class="metric-tile">
             <span>디스크</span>
             <strong>{{ system_status.host.disk_percent if system_status.host.disk_percent is not none else system_status.disk.percent if system_status.disk.percent is not none else "-" }}%</strong>
+            <em>{{ system_status.disk.level or "unknown" }}</em>
         </div>
         <div class="metric-tile">
             <span>파일함</span>
@@ -47,6 +48,16 @@
     </div>
 
     <div class="ops-detail-grid">
+        <div class="ops-panel">
+            <h3>서비스 상태</h3>
+            <div class="container-list">
+                {% for service in service_health %}
+                    <span>{{ service.name }} · {{ service.status }}</span>
+                {% else %}
+                    <span>서비스 상태를 불러오지 못했습니다.</span>
+                {% endfor %}
+            </div>
+        </div>
         <div class="ops-panel">
             <h3>컨테이너</h3>
             <div class="container-list">
@@ -89,8 +100,12 @@
                     <h3>{{ {"news": "뉴스", "youtube": "유튜브", "books": "책"}[group] }}</h3>
                     {% for item in items %}
                         <a href="{{ item.url }}">
+                            <small>{{ item.meta or {"news": "뉴스", "youtube": "유튜브", "books": "책"}[group] }}</small>
                             <strong>{{ item.title }}</strong>
                             <span>{{ item.description }}</span>
+                            {% if item.snippet %}
+                                <p>{{ item.snippet }}</p>
+                            {% endif %}
                         </a>
                     {% else %}
                         <p>검색 결과가 없습니다.</p>

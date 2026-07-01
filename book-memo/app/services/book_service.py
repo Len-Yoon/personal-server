@@ -451,7 +451,9 @@ def search_books_and_memos(query: str, limit: int = 5) -> list[dict[str, Any]]:
     return [
         {
             "title": row["memo_title"] or row["book_title"],
-            "description": row["memo_content"] or f"{row['authors']} · 진행률 {row['progress_percent']}%",
+            "description": row["book_title"] or f"{row['authors']} · 진행률 {row['progress_percent']}%",
+            "snippet": _snippet(row["memo_content"] or ""),
+            "meta": f"책 · {row['authors']} · 진행률 {row['progress_percent']}%",
             "url": f"/books/{row['book_id']}",
         }
         for row in rows
@@ -566,6 +568,13 @@ def _calculate_progress_percent(done_chapter_count: int, chapter_count: int) -> 
         return 0
 
     return round((done_chapter_count / chapter_count) * 100)
+
+
+def _snippet(value: str, limit: int = 140) -> str:
+    cleaned = " ".join(value.strip().split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[:limit].rstrip()}..."
 
 
 def _connect() -> sqlite3.Connection:

@@ -174,13 +174,25 @@ def _disk_status(data_root: Path, warnings: list[str]) -> dict[str, Any]:
     target = data_root if data_root.exists() else data_root.parent
     usage = shutil.disk_usage(target)
     percent = round((usage.used / usage.total) * 100, 1) if usage.total else 0.0
-    if percent >= 85:
-        warnings.append("disk_usage_high")
+    level = disk_level(percent)
+    if level == "warning":
+        warnings.append("disk_usage_warning")
+    elif level == "critical":
+        warnings.append("disk_usage_critical")
     return {
         "total_bytes": usage.total,
         "used_bytes": usage.used,
         "percent": percent,
+        "level": level,
     }
+
+
+def disk_level(percent: float) -> str:
+    if percent >= 90:
+        return "critical"
+    if percent >= 80:
+        return "warning"
+    return "ok"
 
 
 def _container_status() -> list[dict[str, str]]:

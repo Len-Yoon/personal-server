@@ -49,6 +49,22 @@ class YoutubeVideoTitleTests(unittest.TestCase):
 
             self.assertEqual(video["title"], "나중에 가져온 실제 제목")
 
+    def test_update_memo_changes_title_and_content(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            memo_service = self.reload_memo_service(tempdir)
+            video = memo_service.create_or_get_video(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                title_fetcher=lambda youtube_id, url: "영상 제목",
+            )
+            memo = memo_service.create_memo(video["id"], "처음 제목", "처음 내용")
+
+            video_id = memo_service.update_memo(memo["id"], "수정 제목", "수정 내용")
+            memos = memo_service.list_memos(video["id"])
+
+            self.assertEqual(video_id, video["id"])
+            self.assertEqual(memos[0]["title"], "수정 제목")
+            self.assertEqual(memos[0]["content"], "수정 내용")
+
 
 if __name__ == "__main__":
     unittest.main()

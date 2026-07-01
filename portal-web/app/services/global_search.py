@@ -69,6 +69,8 @@ def _demo_results(query: str) -> dict[str, list[dict[str, Any]]]:
             {
                 "title": f"{query} 관련 저장 뉴스",
                 "description": "DEMO_MODE 샘플 뉴스 요약입니다.",
+                "snippet": "시장 흐름과 주요 이슈를 짧게 정리한 공개용 샘플입니다.",
+                "meta": "뉴스 · 샘플 · 오늘",
                 "url": "#",
             }
         ],
@@ -76,6 +78,8 @@ def _demo_results(query: str) -> dict[str, list[dict[str, Any]]]:
             {
                 "title": f"{query} 학습 영상",
                 "description": "샘플 유튜브 메모 2개",
+                "snippet": "영상에서 다시 볼 부분과 핵심 메모를 함께 보여주는 예시입니다.",
+                "meta": "유튜브 · 메모 2개 · 샘플",
                 "url": "#",
             }
         ],
@@ -83,6 +87,8 @@ def _demo_results(query: str) -> dict[str, list[dict[str, Any]]]:
             {
                 "title": f"{query} 독서 메모",
                 "description": "샘플 책 진행률 64%",
+                "snippet": "목차별 진행률과 독서 메모 일부를 보여주는 공개용 샘플입니다.",
+                "meta": "책 · 진행률 64% · 샘플",
                 "url": "#",
             }
         ],

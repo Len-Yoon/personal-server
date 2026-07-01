@@ -37,6 +37,35 @@ class PortalDashboardTests(unittest.TestCase):
 
         self.assertEqual(result["url"], "http://memo.lenserver.com/videos/1")
 
+    def test_demo_mode_returns_service_health_samples(self):
+        system_status = self.reload_system_status("true")
+
+        services = system_status.get_service_health()
+
+        self.assertTrue(services)
+        self.assertTrue(all(service["status"] == "ok" for service in services))
+        self.assertTrue(all(service["demo_mode"] for service in services))
+
+    def test_service_health_failure_is_unavailable(self):
+        system_status = self.reload_system_status("")
+
+        with patch("app.services.system_status.urlopen", side_effect=OSError("down")):
+            services = system_status.get_service_health(timeout=0.01)
+
+        self.assertIn(
+            {"name": "뉴스 허브", "status": "unavailable", "url": "http://crawler-worker:8001/health"},
+            services,
+        )
+
+    def test_demo_search_results_include_metadata(self):
+        os.environ["DEMO_MODE"] = "true"
+        from app.services import global_search
+
+        results = global_search.search_all("테스트")
+
+        self.assertIn("meta", results["youtube"][0])
+        self.assertIn("snippet", results["youtube"][0])
+
 
 if __name__ == "__main__":
     unittest.main()
