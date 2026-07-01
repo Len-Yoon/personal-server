@@ -1,9 +1,11 @@
 import os
 import re
 import sqlite3
+import json
 from pathlib import Path
-from typing import Any
-from urllib.parse import parse_qs, urlparse
+from typing import Any, Callable
+from urllib.parse import parse_qs, quote, urlparse
+from urllib.request import urlopen
 
 
 PROJECT_DATA_ROOT = Path(__file__).resolve().parents[3] / "data"
@@ -42,7 +44,10 @@ def init_db() -> None:
         )
 
 
-def create_or_get_video(url: str) -> dict[str, Any]:
+def create_or_get_video(
+    url: str,
+    title_fetcher: Callable[[str, str], str] | None = None,
+) -> dict[str, Any]:
     init_db()
 
     youtube_id = extract_youtube_id(url)
@@ -51,7 +56,8 @@ def create_or_get_video(url: str) -> dict[str, Any]:
         raise ValueError("유효한 YouTube 링크를 입력해주세요.")
 
     normalized_url = f"https://www.youtube.com/watch?v={youtube_id}"
-    title = f"YouTube 영상 {youtube_id}"
+    title_fetcher = title_fetcher or fetch_youtube_title
+    title = title_fetcher(youtube_id, normalized_url).strip() or f"YouTube 영상 {youtube_id}"
 
     with _connect() as connection:
         connection.execute(
@@ -60,6 +66,10 @@ def create_or_get_video(url: str) -> dict[str, Any]:
             VALUES (?, ?, ?)
             ON CONFLICT(youtube_id) DO UPDATE SET
                 url = excluded.url,
+                title = CASE
+                    WHEN excluded.title NOT LIKE 'YouTube 영상 %' THEN excluded.title
+                    ELSE videos.title
+                END,
                 updated_at = CURRENT_TIMESTAMP
             """,
             (youtube_id, normalized_url, title),
@@ -70,6 +80,16 @@ def create_or_get_video(url: str) -> dict[str, Any]:
         ).fetchone()
 
     return _row_to_dict(row)
+
+
+def fetch_youtube_title(youtube_id: str, url: str) -> str:
+    oembed_url = f"https://www.youtube.com/oembed?url={quote(url, safe='')}&format=json"
+    try:
+        with urlopen(oembed_url, timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return ""
+    return str(payload.get("title", "")).strip()
 
 
 def list_videos() -> list[dict[str, Any]]:
