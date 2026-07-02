@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="admin-status-page">
+    <div class="section-header admin-status-header">
+        <div>
+            <span class="modal-kicker">ADMIN STATUS</span>
+            <h1>관리자 상태</h1>
+            <p>서버 상태와 보안 상태를 한 화면에서 확인합니다.</p>
+        </div>
+        <a class="security-button" href="/">포털로 돌아가기</a>
+    </div>
+
+    {% if not authenticated %}
+        <form class="admin-login" action="/admin/status" method="post">
+            <h2>관리자 상태 인증</h2>
+            <p>서버 상태와 보안 상태를 확인하려면 비밀번호를 입력합니다.</p>
+            {% if error %}
+                <p class="auth-error">{{ error }}</p>
+            {% endif %}
+            <label for="admin-status-password">관리자 비밀번호</label>
+            <div class="security-auth-row">
+                <input id="admin-status-password" name="password" type="password" autocomplete="current-password" autofocus>
+                <button type="submit">인증</button>
+            </div>
+        </form>
+    {% else %}
+        <section class="ops-section admin-section">
+            <div class="section-header">
+                <div>
+                    <h2>서버 상태</h2>
+                    <p>미니 PC, 디스크, 파일함, 백업 상태를 표시합니다.</p>
+                </div>
+                <span class="ops-status {{ system_status.overall_status }}">
+                    {{ system_status.overall_status | upper }}
+                </span>
+            </div>
+
+            <div class="metric-grid">
+                <div class="metric-tile">
+                    <span>CPU</span>
+                    <strong>{{ system_status.host.cpu_percent if system_status.host.cpu_percent is not none else "-" }}%</strong>
+                    <em>{{ system_status.host.source or "unknown" }}</em>
+                </div>
+                <div class="metric-tile">
+                    <span>메모리</span>
+                    <strong>{{ system_status.host.memory_percent if system_status.host.memory_percent is not none else "-" }}%</strong>
+                </div>
+                <div class="metric-tile">
+                    <span>디스크</span>
+                    <strong>{{ system_status.host.disk_percent if system_status.host.disk_percent is not none else system_status.disk.percent if system_status.disk.percent is not none else "-" }}%</strong>
+                    <em>{{ system_status.disk.level or "unknown" }}</em>
+                </div>
+                <div class="metric-tile">
+                    <span>파일함</span>
+                    <strong>{{ system_status.files.file_count }}개</strong>
+                    <em>{{ system_status.files.total_bytes }} bytes</em>
+                </div>
+                <div class="metric-tile">
+                    <span>최근 백업</span>
+                    <strong>{{ system_status.backup.latest_name or "없음" }}</strong>
+                </div>
+            </div>
+
+            <div class="ops-detail-grid">
+                <div class="ops-panel">
+                    <h3>서비스 Health</h3>
+                    <div class="container-list">
+                        {% for service in service_health %}
+                            <span>{{ service.name }} · {{ service.status }}</span>
+                        {% else %}
+                            <span>서비스 상태를 불러오지 못했습니다.</span>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="ops-panel">
+                    <h3>컨테이너</h3>
+                    <div class="container-list">
+                        {% for container in system_status.containers %}
+                            <span>{{ container.name }} · {{ container.status }}</span>
+                        {% else %}
+                            <span>system-agent 연결 후 표시됩니다.</span>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="ops-panel">
+                    <h3>경고</h3>
+                    <div class="warning-list">
+                        {% for warning in system_status.warnings %}
+                            <span>{{ warning }}</span>
+                        {% else %}
+                            <span>현재 경고가 없습니다.</span>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="ops-section admin-section">
+            <div class="section-header">
+                <div>
+                    <h2>보안 상태</h2>
+                    <p>로그, 업로드 정책, 보안 헤더, 최근 이벤트를 표시합니다.</p>
+                </div>
+            </div>
+
+            <div class="security-summary">
+                <div>
+                    <span>로그 파일</span>
+                    <strong>{{ security_status.log_path }}</strong>
+                </div>
+                <div>
+                    <span>업로드 제한</span>
+                    <strong>{{ security_status.file_policy.max_upload_mb }}MB</strong>
+                </div>
+                <div>
+                    <span>보안 헤더</span>
+                    <strong>{{ security_status.headers | length }}개 적용</strong>
+                </div>
+            </div>
+
+            <div class="policy-list">
+                <h3>파일 업로드 정책</h3>
+                <p>차단 확장자: {{ security_status.file_policy.blocked_extensions | join(", ") or "없음" }}</p>
+                <p>허용 확장자: {{ security_status.file_policy.allowed_extensions | join(", ") or "별도 제한 없음" }}</p>
+            </div>
+
+            <div class="policy-list">
+                <h3>최근 로그 파일</h3>
+                {% for log_file in security_status.log_files %}
+                    <code class="log-file-row">{{ log_file }}</code>
+                {% else %}
+                    <p class="empty-log">아직 생성된 일별 로그 파일이 없습니다.</p>
+                {% endfor %}
+            </div>
+
+            <div class="event-list">
+                <h3>최근 보안 이벤트</h3>
+                <div>
+                    {% for event in security_status.recent_events %}
+                        <article class="event-row">
+                            <div>
+                                <strong>{{ event.event }}</strong>
+                                <span>{{ event.timestamp }}</span>
+                            </div>
+                            <code>{{ event.details }}</code>
+                        </article>
+                    {% else %}
+                        <p class="empty-log">아직 기록된 보안 이벤트가 없습니다.</p>
+                    {% endfor %}
+                </div>
+            </div>
+        </section>
+    {% endif %}
+</section>
+{% endblock %}
