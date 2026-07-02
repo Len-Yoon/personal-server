@@ -511,6 +511,8 @@ a {
 }
 
 .security-button {
+    display: inline-grid;
+    place-items: center;
     min-height: 36px;
     padding: 0 13px;
     border: 1px solid rgba(125, 211, 252, 0.32);
@@ -520,6 +522,7 @@ a {
     font: inherit;
     font-size: 13px;
     font-weight: 900;
+    text-decoration: none;
     cursor: pointer;
     transition: border-color 0.18s ease, background 0.18s ease, transform 0.18s ease;
 }
@@ -981,41 +984,6 @@ a {
     color: var(--text-muted);
 }
 
-.modal-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 20;
-    display: grid;
-    place-items: center;
-    padding: 32px;
-    background: rgba(2, 6, 23, 0.76);
-    backdrop-filter: blur(14px);
-}
-
-.modal-backdrop[hidden] {
-    display: none;
-}
-
-.security-modal {
-    width: min(840px, 100%);
-    max-height: min(760px, calc(100vh - 56px));
-    overflow: auto;
-    padding: var(--space-section);
-    border: 1px solid rgba(148, 163, 184, 0.24);
-    border-radius: 18px;
-    background:
-        linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(2, 6, 23, 0.96));
-    box-shadow: 0 28px 90px rgba(0, 0, 0, 0.52);
-}
-
-.modal-header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 24px;
-    margin-bottom: 22px;
-}
-
 .modal-kicker {
     display: block;
     margin-bottom: 8px;
@@ -1025,25 +993,89 @@ a {
     letter-spacing: 0.10em;
 }
 
-.modal-header h2 {
+.admin-status-page {
+    display: grid;
+    gap: 24px;
+}
+
+.admin-status-header h1 {
     margin: 0;
-    font-size: 30px;
+    font-size: clamp(34px, 4vw, 56px);
     letter-spacing: -0.04em;
 }
 
-.modal-close {
-    width: 38px;
-    height: 38px;
+.admin-status-header p {
+    margin: 10px 0 0;
+    color: var(--text-secondary);
+}
+
+.admin-login {
     display: grid;
-    place-items: center;
-    flex-shrink: 0;
-    border: 1px solid rgba(148, 163, 184, 0.24);
-    border-radius: 999px;
+    gap: 14px;
+    max-width: 560px;
+    padding: 24px;
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.68);
+}
+
+.admin-login h2 {
+    margin: 0;
+    font-size: 24px;
+}
+
+.admin-login p {
+    margin: 0;
+    color: var(--text-muted);
+    line-height: 1.6;
+}
+
+.admin-login label {
     color: #e2e8f0;
-    background: rgba(15, 23, 42, 0.72);
-    font-size: 25px;
-    line-height: 1;
+    font-size: 14px;
+    font-weight: 900;
+}
+
+.admin-login input {
+    min-width: 0;
+    height: 42px;
+    padding: 0 14px;
+    border: 1px solid rgba(148, 163, 184, 0.24);
+    border-radius: 8px;
+    color: var(--text-primary);
+    background: rgba(2, 6, 23, 0.52);
+    font: inherit;
+    outline: none;
+}
+
+.admin-login input:focus {
+    border-color: rgba(103, 232, 249, 0.72);
+    box-shadow: 0 0 0 3px rgba(103, 232, 249, 0.14);
+}
+
+.admin-login button {
+    height: 42px;
+    padding: 0 18px;
+    border: 0;
+    border-radius: 8px;
+    color: #082f49;
+    background: #67e8f9;
+    font-weight: 900;
     cursor: pointer;
+}
+
+.admin-login .auth-error {
+    color: #fca5a5;
+}
+
+.admin-section {
+    margin-top: 0;
+}
+
+.security-auth-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
 }
 
 .security-summary {
@@ -1173,6 +1205,7 @@ a {
     }
 
     .security-summary,
+    .security-auth-row,
     .event-row {
         grid-template-columns: 1fr;
     }
@@ -1224,10 +1257,6 @@ a {
 
     .header-actions {
         justify-content: flex-start;
-    }
-
-    .security-modal {
-        padding: var(--space-section-sm);
     }
 
     .desktop-toolbar button {

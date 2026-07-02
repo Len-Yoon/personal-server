@@ -66,6 +66,20 @@ class PortalDashboardTests(unittest.TestCase):
         self.assertIn("meta", results["youtube"][0])
         self.assertIn("snippet", results["youtube"][0])
 
+    def test_admin_status_context_combines_server_and_security_data(self):
+        from app.services.admin_status import build_admin_status_context
+
+        context = build_admin_status_context(
+            system_status={"overall_status": "warning", "warnings": ["backup_missing"]},
+            service_health=[{"name": "뉴스 허브", "status": "ok"}],
+            security={"headers": ["X-Frame-Options"], "recent_events": []},
+        )
+
+        self.assertEqual(context["system_status"]["overall_status"], "warning")
+        self.assertEqual(context["service_health"][0]["name"], "뉴스 허브")
+        self.assertEqual(context["security_status"]["headers"], ["X-Frame-Options"])
+        self.assertTrue(context["has_warnings"])
+
 
 if __name__ == "__main__":
     unittest.main()

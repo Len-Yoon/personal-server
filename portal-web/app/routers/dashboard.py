@@ -1,9 +1,10 @@
 import os
 import secrets
 
-from fastapi import APIRouter, Body, Header, HTTPException, Request
+from fastapi import APIRouter, Body, Form, Header, HTTPException, Request
 from fastapi.templating import Jinja2Templates
 
+from app.services.admin_status import build_admin_status_context
 from app.services.global_search import search_all
 from app.services.security import (
     append_security_event,
@@ -78,6 +79,14 @@ def dashboard(request: Request, q: str = ""):
             "meta": "Files / Upload / Download",
         },
         {
+            "icon": "A",
+            "name": "관리자 상태",
+            "description": "비밀번호 인증 후 서버 상태와 보안 상태를 한 화면에서 확인합니다.",
+            "url": "/admin/status",
+            "status": "운영중",
+            "meta": "Admin / Server / Security",
+        },
+        {
             "icon": "T",
             "name": "자동매매 결과지",
             "description": "매매 결과, 수익률, 전략별 복기 내용을 관리합니다.",
@@ -93,8 +102,7 @@ def dashboard(request: Request, q: str = ""):
             "request": request,
             "title": "Len의 개인서버",
             "services": services,
-            "system_status": get_dashboard_status(),
-            "service_health": get_service_health(),
+            "demo_mode": os.getenv("DEMO_MODE", "").lower() in {"1", "true", "yes", "on"},
             "query": q.strip(),
             "search_results": search_all(q) if q.strip() else None,
         },
@@ -106,6 +114,58 @@ def admin_security_status(request: Request, x_security_password: str = Header(de
     _require_security_password(request, x_security_password)
     append_security_event("security_dashboard_viewed")
     return security_status()
+
+
+@router.get("/admin/status")
+def admin_status_login(request: Request):
+    return templates.TemplateResponse(
+        "admin_status.html",
+        {
+            "request": request,
+            "title": "관리자 상태",
+            "authenticated": False,
+            "error": "",
+        },
+    )
+
+
+@router.post("/admin/status")
+def admin_status_page(request: Request, password: str = Form(default="")):
+    try:
+        _require_security_password(request, password)
+    except HTTPException as exc:
+        message = "관리자 비밀번호가 올바르지 않습니다."
+        if exc.status_code == 429:
+            message = "인증 실패가 반복되어 잠시 후 다시 시도해주세요."
+        elif exc.status_code == 403:
+            message = "관리자 비밀번호가 설정되지 않았습니다."
+        return templates.TemplateResponse(
+            "admin_status.html",
+            {
+                "request": request,
+                "title": "관리자 상태",
+                "authenticated": False,
+                "error": message,
+            },
+            status_code=exc.status_code,
+        )
+
+    append_security_event("admin_status_viewed")
+    context = build_admin_status_context(
+        system_status=get_dashboard_status(),
+        service_health=get_service_health(),
+        security=security_status(),
+    )
+    return templates.TemplateResponse(
+        "admin_status.html",
+        {
+            "request": request,
+            "title": "관리자 상태",
+            "authenticated": True,
+            "error": "",
+            **context,
+        },
+    )
 
 
 @router.post("/admin/events")
