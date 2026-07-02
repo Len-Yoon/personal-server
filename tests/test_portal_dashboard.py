@@ -3,9 +3,12 @@ import os
 import unittest
 from unittest.mock import patch
 
+from tests._test_support import prepare_service_import
+
 
 class PortalDashboardTests(unittest.TestCase):
     def reload_system_status(self, demo_mode: str = ""):
+        prepare_service_import("portal-web")
         os.environ["DEMO_MODE"] = demo_mode
         import app.services.system_status as system_status
 
@@ -31,6 +34,7 @@ class PortalDashboardTests(unittest.TestCase):
         self.assertIn("system_agent_unavailable", status["warnings"])
 
     def test_search_result_relative_urls_are_prefixed(self):
+        prepare_service_import("portal-web")
         from app.services.global_search import _normalize_result_url
 
         result = _normalize_result_url("youtube", {"title": "memo", "url": "/videos/1"})
@@ -58,6 +62,7 @@ class PortalDashboardTests(unittest.TestCase):
         )
 
     def test_demo_search_results_include_metadata(self):
+        prepare_service_import("portal-web")
         os.environ["DEMO_MODE"] = "true"
         from app.services import global_search
 
@@ -67,6 +72,7 @@ class PortalDashboardTests(unittest.TestCase):
         self.assertIn("snippet", results["youtube"][0])
 
     def test_admin_status_context_combines_server_and_security_data(self):
+        prepare_service_import("portal-web")
         from app.services.admin_status import build_admin_status_context
 
         context = build_admin_status_context(

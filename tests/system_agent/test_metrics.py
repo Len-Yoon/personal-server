@@ -5,9 +5,12 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from tests._test_support import prepare_service_import
+
 
 class SystemAgentMetricsTests(unittest.TestCase):
     def test_demo_metrics_are_safe_and_ok(self):
+        prepare_service_import("system-agent")
         from app.services.metrics import demo_metrics
 
         metrics = demo_metrics()
@@ -19,6 +22,7 @@ class SystemAgentMetricsTests(unittest.TestCase):
 
     def test_collect_metrics_marks_stale_windows_host_file(self):
         with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("system-agent")
             root = Path(tempdir)
             host_file = root / "system" / "host-metrics.json"
             host_file.parent.mkdir(parents=True)
@@ -50,6 +54,7 @@ class SystemAgentMetricsTests(unittest.TestCase):
 
     def test_collect_metrics_reports_recent_backup(self):
         with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("system-agent")
             root = Path(tempdir)
             backup = root / "backups" / "20260701-030000"
             backup.mkdir(parents=True)
@@ -63,6 +68,7 @@ class SystemAgentMetricsTests(unittest.TestCase):
 
     def test_collect_metrics_warns_when_latest_backup_is_old(self):
         with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("system-agent")
             root = Path(tempdir)
             backup = root / "backups" / "20260601-030000"
             backup.mkdir(parents=True)
@@ -78,6 +84,7 @@ class SystemAgentMetricsTests(unittest.TestCase):
 
     def test_collect_metrics_reports_file_usage(self):
         with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("system-agent")
             root = Path(tempdir)
             files = root / "files"
             files.mkdir(parents=True)
@@ -91,6 +98,7 @@ class SystemAgentMetricsTests(unittest.TestCase):
             self.assertGreaterEqual(metrics["files"]["total_bytes"], 5)
 
     def test_disk_level_thresholds(self):
+        prepare_service_import("system-agent")
         from app.services.metrics import disk_level
 
         self.assertEqual(disk_level(79.9), "ok")

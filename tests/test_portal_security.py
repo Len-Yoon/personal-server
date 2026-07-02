@@ -6,9 +6,12 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+from tests._test_support import prepare_service_import
+
 
 class PortalSecurityTests(unittest.TestCase):
     def reload_security(self, tempdir: str):
+        prepare_service_import("portal-web")
         os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security-events.txt")
         os.environ["SECURITY_LOG_TIMEZONE"] = "Asia/Seoul"
         import app.services.security as security
@@ -16,6 +19,7 @@ class PortalSecurityTests(unittest.TestCase):
         return importlib.reload(security)
 
     def reload_file_store(self, tempdir: str):
+        prepare_service_import("portal-web")
         os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
         os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security-events.txt")
         os.environ["FILE_MAX_UPLOAD_MB"] = "1"

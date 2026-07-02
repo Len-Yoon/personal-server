@@ -4,9 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests._test_support import prepare_service_import
+
 
 class YoutubeVideoTitleTests(unittest.TestCase):
     def reload_memo_service(self, tempdir: str):
+        prepare_service_import("youtube-memo")
         os.environ["YOUTUBE_MEMO_DB_PATH"] = str(Path(tempdir) / "youtube_memo.sqlite3")
         import app.services.memo_service as memo_service
 
