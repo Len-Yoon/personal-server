@@ -74,7 +74,7 @@ def dashboard(request: Request, q: str = ""):
             "icon": "F",
             "name": "파일함",
             "description": "개인 서버에 파일을 올리고 내려받는 가벼운 웹 파일 관리자입니다.",
-            "url": "http://lenserver.com/files",
+            "url": "/files",
             "status": "운영중",
             "meta": "Files / Upload / Download",
         },
