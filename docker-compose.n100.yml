@@ -1,3 +1,4 @@
+# 운영 override: 포트 공개를 줄이고 컨테이너 자원을 제한함
 services:
   nginx-proxy-manager:
     profiles:
