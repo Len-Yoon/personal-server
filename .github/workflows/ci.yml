@@ -15,6 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # 서비스마다 의존성을 따로 설치해 충돌을 줄임
           # 포털 계열: 화면/보안 회귀를 함께 확인함
           - name: portal
             requirements: portal-web/requirements.txt
