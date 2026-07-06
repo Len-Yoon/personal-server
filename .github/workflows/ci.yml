@@ -17,30 +17,25 @@ jobs:
         include:
           # 포털 계열: 화면/보안 회귀를 함께 확인함
           - name: portal
-            service_dir: portal-web
             requirements: portal-web/requirements.txt
             pythonpath: portal-web
             test_command: python3 -m unittest tests.test_portal_dashboard tests.test_portal_security
           # 운영 상태 수집: host metrics와 백업 경고를 분리 검증함
           - name: system-agent
-            service_dir: system-agent
             requirements: system-agent/requirements.txt
             pythonpath: system-agent
             test_command: python3 -m unittest tests.system_agent.test_metrics
           # 뉴스 수집: 캐시와 기사 정규화를 별도로 확인함
           - name: crawler-worker
-            service_dir: crawler-worker
             requirements: crawler-worker/requirements.txt
             pythonpath: crawler-worker
             test_command: python3 -m unittest tests.crawler_worker.test_news_service
           # 메모 서비스: 영상/책 메모의 핵심 CRUD를 검증함
           - name: youtube-memo
-            service_dir: youtube-memo
             requirements: youtube-memo/requirements.txt
             pythonpath: youtube-memo
             test_command: python3 -m unittest tests.youtube_memo.test_video_titles
           - name: book-memo
-            service_dir: book-memo
             requirements: book-memo/requirements.txt
             pythonpath: book-memo
             test_command: python3 -m unittest tests.book_memo.test_book_service

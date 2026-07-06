@@ -1,3 +1,4 @@
+# 기본 Compose는 개발용이며, 운영은 docker-compose.n100.yml override로 덮어씀
 services:
   nginx-proxy-manager:
     image: jc21/nginx-proxy-manager:v2.15.1
@@ -15,7 +16,6 @@ services:
     build: ./portal-web
     container_name: portal-web
     restart: unless-stopped
-    # 개발 환경에서는 소스 수정 시 자동 반영되도록 reload를 켬
     command:
       - uvicorn
       - app.main:app
@@ -54,7 +54,6 @@ services:
     build: ./crawler-worker
     container_name: crawler-worker
     restart: unless-stopped
-    # 개발 환경에서만 자동 재시작을 사용함
     command:
       - uvicorn
       - app.main:app
@@ -78,7 +77,6 @@ services:
     build: ./youtube-memo
     container_name: youtube-memo
     restart: unless-stopped
-    # 개발 중 입력 변경을 바로 확인하기 위한 reload 설정임
     command:
       - uvicorn
       - app.main:app
@@ -102,7 +100,6 @@ services:
     build: ./book-memo
     container_name: book-memo
     restart: unless-stopped
-    # 개발용 기본 실행 명령이며 운영에서는 override가 이를 대체함
     command:
       - uvicorn
       - app.main:app
