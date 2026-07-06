@@ -2,6 +2,7 @@ import os
 import secrets
 
 from fastapi import APIRouter, Body, Form, Header, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.services.admin_status import build_admin_status_context
@@ -20,9 +21,9 @@ router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 
 DEFAULT_SERVICE_URLS = {
-    "NEWS_SERVICE_URL": "http://news.lenserver.com",
-    "YOUTUBE_MEMO_URL": "http://memo.lenserver.com",
-    "BOOK_MEMO_URL": "http://book.lenserver.com",
+    "NEWS_SERVICE_URL": "https://news.example.com",
+    "YOUTUBE_MEMO_URL": "https://memo.example.com",
+    "BOOK_MEMO_URL": "https://books.example.com",
 }
 
 
@@ -45,6 +46,12 @@ def _service_url(env_name: str) -> str:
 
 @router.get("/")
 def dashboard(request: Request, q: str = ""):
+    host = _request_host(request)
+    if host == _configured_host("FILES_HOSTNAME") or host.startswith("file."):
+        return RedirectResponse(url="/files", status_code=302)
+    if host == _configured_host("ADMIN_HOSTNAME") or host.startswith("admin."):
+        return RedirectResponse(url="/admin/status", status_code=302)
+
     services = [
         {
             "icon": "N",
@@ -209,3 +216,19 @@ def _client_id(request: Request) -> str:
     if forwarded_for:
         return forwarded_for
     return request.client.host if request.client else "unknown"
+
+
+def _request_host(request: Request) -> str:
+    forwarded_host = request.headers.get("x-forwarded-host", "").strip()
+    if forwarded_host:
+        return forwarded_host.split(",")[0].strip().lower()
+
+    host = request.headers.get("host", "").strip()
+    if host:
+        return host.split(":")[0].strip().lower()
+
+    return ""
+
+
+def _configured_host(env_name: str) -> str:
+    return os.getenv(env_name, "").strip().lower()
