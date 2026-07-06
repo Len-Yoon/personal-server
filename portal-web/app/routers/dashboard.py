@@ -21,9 +21,9 @@ router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 
 DEFAULT_SERVICE_URLS = {
-    "NEWS_SERVICE_URL": "https://news.example.com",
-    "YOUTUBE_MEMO_URL": "https://memo.example.com",
-    "BOOK_MEMO_URL": "https://books.example.com",
+    "NEWS_SERVICE_URL": "https://news.len.pe.kr",
+    "YOUTUBE_MEMO_URL": "https://memo.len.pe.kr",
+    "BOOK_MEMO_URL": "https://books.len.pe.kr",
 }
 
 

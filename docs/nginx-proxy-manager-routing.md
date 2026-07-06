@@ -9,7 +9,7 @@
 | 작성자 | Codex |
 | 기준 자료 | `docker-compose.yml`, `docker-compose.n100.yml`, `README.md`, 서비스 라우트 코드 |
 | 목적 | 미니PC에서 기능별 서브도메인으로 개인 서버 서비스를 분리 운영하기 위함 |
-| 비고 | 실제 도메인명은 `example.com` 자리에 교체 필요 |
+| 비고 | 실제 도메인명은 `len.pe.kr` 기준으로 작성함 |
 
 ## 핵심 요약
 
@@ -24,13 +24,13 @@
 
 | 서비스 | 권장 서브도메인 | 업스트림 | 경로 비고 |
 |---|---|---|---|
-| 메인 포털 | `portal.example.com` | `http://portal-web:8000` | 루트(`/`) 연결 |
-| 파일함 | `file.example.com` | `http://portal-web:8000` | 루트(`/`) 접속 시 `/files`로 자동 전환함 |
-| 관리자 상태 | `admin.example.com` | `http://portal-web:8000` | 루트(`/`) 접속 시 `/admin/status`로 자동 전환함 |
-| 뉴스 허브 | `news.example.com` | `http://crawler-worker:8001` | 루트(`/`) 연결 |
-| 유튜브 메모 | `memo.example.com` | `http://youtube-memo:8002` | 루트(`/`) 연결 |
-| 책 메모 | `books.example.com` | `http://book-memo:8003` | 루트(`/`) 연결 |
-| 시스템 상태 | `system.example.com` | `http://system-agent:8010` | 공개 비권장, 내부 확인용 권장 |
+| 메인 포털 | `portal.len.pe.kr` | `http://portal-web:8000` | 루트(`/`) 연결 |
+| 파일함 | `file.len.pe.kr` | `http://portal-web:8000` | 루트(`/`) 접속 시 `/files`로 자동 전환함 |
+| 관리자 상태 | `admin.len.pe.kr` | `http://portal-web:8000` | 루트(`/`) 접속 시 `/admin/status`로 자동 전환함 |
+| 뉴스 허브 | `news.len.pe.kr` | `http://crawler-worker:8001` | 루트(`/`) 연결 |
+| 유튜브 메모 | `memo.len.pe.kr` | `http://youtube-memo:8002` | 루트(`/`) 연결 |
+| 책 메모 | `books.len.pe.kr` | `http://book-memo:8003` | 루트(`/`) 연결 |
+| 시스템 상태 | `system.len.pe.kr` | `http://system-agent:8010` | 공개 비권장, 내부 확인용 권장 |
 
 ### 2. NPM 생성 순서
 
@@ -57,11 +57,11 @@
 
 `portal-web`은 하나의 앱에서 메인 화면과 파일함, 관리자 상태 화면을 함께 제공함.
 
-- `https://portal.example.com/`
-- `https://file.example.com/` -> 앱에서 자동으로 `/files`로 전환함
-- `https://admin.example.com/` -> 앱에서 자동으로 `/admin/status`로 전환함
+- `https://portal.len.pe.kr/`
+- `https://file.len.pe.kr/` -> 앱에서 자동으로 `/files`로 전환함
+- `https://admin.len.pe.kr/` -> 앱에서 자동으로 `/admin/status`로 전환함
 
-기능별로 완전히 분리된 느낌을 원하면 NPM에서 `portal.example.com`, `file.example.com`, `admin.example.com`을 모두 `portal-web:8000`으로 연결하고, 앱이 호스트명에 따라 진입 경로를 분기하도록 두는 방식이 적합함.
+기능별로 완전히 분리된 느낌을 원하면 NPM에서 `portal.len.pe.kr`, `file.len.pe.kr`, `admin.len.pe.kr`을 모두 `portal-web:8000`으로 연결하고, 앱이 호스트명에 따라 진입 경로를 분기하도록 두는 방식이 적합함.
 
 ### 5. 공개 범위 권장
 
@@ -86,4 +86,4 @@
 
 - `.env`의 `NEWS_SERVICE_URL`, `YOUTUBE_MEMO_URL`, `BOOK_MEMO_URL`를 실제 서브도메인으로 변경 필요
 - NPM에서 Proxy Host를 생성한 뒤 인증서 발급 필요
-- 설정 완료 후 `https://portal.example.com`과 각 서브도메인 접속 확인 필요
+- 설정 완료 후 `https://portal.len.pe.kr`과 각 서브도메인 접속 확인 필요

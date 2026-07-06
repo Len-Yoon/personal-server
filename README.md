@@ -91,15 +91,15 @@ DELETE_PASSWORD=
 FILE_MANAGER_PASSWORD=
 
 # Portal links
-NEWS_SERVICE_URL=https://news.example.com
-YOUTUBE_MEMO_URL=https://memo.example.com
-BOOK_MEMO_URL=https://books.example.com
+NEWS_SERVICE_URL=https://news.len.pe.kr
+YOUTUBE_MEMO_URL=https://memo.len.pe.kr
+BOOK_MEMO_URL=https://books.len.pe.kr
 SYSTEM_AGENT_URL=http://system-agent:8010
 DEMO_MODE=
 
 # Portal hostnames
-FILES_HOSTNAME=file.example.com
-ADMIN_HOSTNAME=admin.example.com
+FILES_HOSTNAME=file.len.pe.kr
+ADMIN_HOSTNAME=admin.len.pe.kr
 
 # File manager
 FILE_STORAGE_PATH=
@@ -142,7 +142,7 @@ N100 운영 배포는 리소스 제한과 보안 옵션이 들어간 override를
 docker compose -f docker-compose.yml -f docker-compose.n100.yml --profile edge up -d --build
 ```
 
-서브도메인 기반 공개 운영을 하려면 [Nginx Proxy Manager 도메인 라우팅 설정](docs/nginx-proxy-manager-routing.md)을 참고해 `portal.example.com`, `file.example.com`, `admin.example.com`, `news.example.com`, `memo.example.com`, `books.example.com`으로 분리 등록하면 됩니다. `system-agent`는 기본적으로 비공개 운영을 권장합니다.
+서브도메인 기반 공개 운영을 하려면 [Nginx Proxy Manager 도메인 라우팅 설정](docs/nginx-proxy-manager-routing.md)을 참고해 `portal.len.pe.kr`, `file.len.pe.kr`, `admin.len.pe.kr`, `news.len.pe.kr`, `memo.len.pe.kr`, `books.len.pe.kr`으로 분리 등록하면 됩니다. `system-agent`는 기본적으로 비공개 운영을 권장합니다.
 
 개별 서비스만 다시 빌드할 수도 있습니다.
 
@@ -226,7 +226,7 @@ AI는 다음 작업에 사용했습니다.
 - 포털의 `관리자 상태` 서비스 카드는 `/admin/status`로 이동하며, 관리자 인증 후 서버 상태와 보안 상태를 함께 보여줍니다.
 - 서버 상태는 `system-agent`를 통해 미니 PC/Docker/백업 상태를 표시하고, agent 연결 실패 시 포털 자체는 계속 동작합니다.
 - 포털 전체 검색은 저장 뉴스, YouTube 메모, 책 메모의 read-only 검색 API를 모아 보여줍니다.
-- 포털 서비스 링크는 기본적으로 `https://news.example.com`, `https://memo.example.com`, `https://books.example.com`으로 열리며, `NEWS_SERVICE_URL`, `YOUTUBE_MEMO_URL`, `BOOK_MEMO_URL` 환경변수로 바꿀 수 있습니다.
+- 포털 서비스 링크는 기본적으로 `https://news.len.pe.kr`, `https://memo.len.pe.kr`, `https://books.len.pe.kr`으로 열리며, `NEWS_SERVICE_URL`, `YOUTUBE_MEMO_URL`, `BOOK_MEMO_URL` 환경변수로 바꿀 수 있습니다.
 - 운영 모드에서는 `APP_ENV=production` 또는 `FILE_MANAGER_AUTH_REQUIRED=true`로 파일함 비밀번호 설정을 강제할 수 있습니다.
 - 기본 Compose는 개발 편의상 서비스 디렉터리를 `/app`에 bind mount하고 앱 포트를 로컬에 엽니다. 운영에서는 `docker-compose.n100.yml` override를 함께 사용합니다.
 - `docker-compose.n100.yml`은 외부 노출 포트, 자원 제한, read-only, cap drop 같은 운영 하드닝만 덮어씌우는 용도입니다.
