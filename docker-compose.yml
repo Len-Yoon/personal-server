@@ -1,6 +1,6 @@
 services:
   nginx-proxy-manager:
-    image: jc21/nginx-proxy-manager:latest
+    image: jc21/nginx-proxy-manager:v2.15.1
     container_name: nginx-proxy-manager
     restart: unless-stopped
     ports:
@@ -15,6 +15,15 @@ services:
     build: ./portal-web
     container_name: portal-web
     restart: unless-stopped
+    # 개발 환경에서는 소스 수정 시 자동 반영되도록 reload를 켬
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
     ports:
       - "8000:8000"
     env_file:
@@ -45,6 +54,15 @@ services:
     build: ./crawler-worker
     container_name: crawler-worker
     restart: unless-stopped
+    # 개발 환경에서만 자동 재시작을 사용함
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+      - --reload
     ports:
       - "8001:8001"
     env_file:
@@ -60,6 +78,15 @@ services:
     build: ./youtube-memo
     container_name: youtube-memo
     restart: unless-stopped
+    # 개발 중 입력 변경을 바로 확인하기 위한 reload 설정임
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8002"
+      - --reload
     ports:
       - "8002:8002"
     env_file:
@@ -75,6 +102,15 @@ services:
     build: ./book-memo
     container_name: book-memo
     restart: unless-stopped
+    # 개발용 기본 실행 명령이며 운영에서는 override가 이를 대체함
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8003"
+      - --reload
     ports:
       - "8003:8003"
     env_file:

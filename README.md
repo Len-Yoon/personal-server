@@ -129,6 +129,7 @@ HOST_METRICS_STALE_SECONDS=
 ## Run
 
 기본 Compose는 로컬 개발용입니다. 앱 포트 `8000`, `8010`, `8001`, `8002`, `8003`을 호스트에 직접 공개하고 서비스 디렉터리를 `/app`에 bind mount합니다.
+개발용 서비스는 compose에서만 `--reload`를 사용하고, Dockerfile 기본 실행 명령은 운영 기준으로 유지합니다.
 
 ```bash
 docker compose up -d --build
