@@ -12,7 +12,6 @@ using `docker-compose.n100.yml` to keep CPU and memory usage low.
 - Docker Engine inside WSL2, or Docker Desktop if you prefer GUI management.
 - Tailscale for private remote access.
 - Cloudflare Tunnel for public access when you do not want port forwarding.
-- Caddy only when you want direct ingress and HTTPS proxying on your own ports.
 
 The lightest practical path is:
 
@@ -156,8 +155,8 @@ This starts only:
 - `book-memo`
 - `youtube-memo`
 
-`crawler-worker` and `caddy` are behind Compose profiles so they do not consume
-resources by default.
+`crawler-worker` is behind a Compose profile so it does not consume resources
+by default.
 
 Even in the N100 stack, the app ports are bound to `127.0.0.1`, so you can
 still open the apps locally from the machine itself:
@@ -216,13 +215,7 @@ Stop it during trading hours if MT4 needs every bit of headroom:
 docker compose -f docker-compose.yml -f docker-compose.n100.yml stop crawler-worker
 ```
 
-Start Caddy only when exposing services with public domains:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.n100.yml --profile edge up -d caddy
-```
-
-If you are using Cloudflare Tunnel instead of direct port forwarding, keep the edge profile off and follow `docs/cloudflare-tunnel.md` for the tunnel setup. In that mode, the apps stay on localhost and `cloudflared` handles public ingress.
+If you are using Cloudflare Tunnel for public access, keep the apps on localhost and follow `docs/cloudflare-tunnel.md` for the tunnel setup. In that mode, `cloudflared` handles public ingress and no reverse proxy container is required.
 
 ## MT4 operating notes
 
@@ -297,9 +290,8 @@ The default stack is designed to stay small:
 - `book-memo`: 1 worker, no reload, 192 MB cap
 - `youtube-memo`: 1 worker, no reload, 160 MB cap
 - `crawler-worker`: optional, 320 MB cap
-- `caddy`: optional, 128 MB cap
 
-For a Cloudflare Tunnel setup, the `caddy` service becomes optional and you can leave it stopped unless you still want local reverse proxy behavior on the machine itself.
+For a Cloudflare Tunnel setup, the apps stay bound to localhost and `cloudflared` handles public ingress.
 
 With WSL2 capped, Windows and MT4 keep the majority of the machine while the
 personal server apps stay predictable in the background.
