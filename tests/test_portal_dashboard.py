@@ -109,24 +109,26 @@ class PortalDashboardTests(unittest.TestCase):
 
     def test_portal_home_url_uses_local_address_on_localhost(self):
         prepare_service_import("book-memo")
-        from shared.host_urls import portal_home_url
+        from app.services.host_urls import portal_home_url
 
         self.assertEqual(portal_home_url("127.0.0.1"), "http://127.0.0.1:8000/")
 
     def test_portal_home_url_uses_public_address_outside_local(self):
         prepare_service_import("youtube-memo")
-        from shared.host_urls import portal_home_url
+        from app.services.host_urls import portal_home_url
 
         self.assertEqual(portal_home_url("memo.len.pe.kr"), "https://portal.len.pe.kr/")
 
-    def test_file_and_admin_entry_urls_follow_host_mode(self):
+    def test_dashboard_service_urls_follow_host_mode(self):
         prepare_service_import("portal-web")
-        from shared.host_urls import admin_entry_url, file_entry_url
+        from app.services.host_urls import service_url
 
-        self.assertEqual(file_entry_url("127.0.0.1"), "http://127.0.0.1:8000/files")
-        self.assertEqual(admin_entry_url("127.0.0.1"), "http://127.0.0.1:8000/admin/status")
-        self.assertEqual(file_entry_url("portal.len.pe.kr"), "https://file.len.pe.kr/")
-        self.assertEqual(admin_entry_url("portal.len.pe.kr"), "https://admin.len.pe.kr/")
+        self.assertEqual(service_url("NEWS_SERVICE_URL", "127.0.0.1", ""), "http://127.0.0.1:8001")
+        self.assertEqual(service_url("YOUTUBE_MEMO_URL", "127.0.0.1", ""), "http://127.0.0.1:8002")
+        self.assertEqual(service_url("BOOK_MEMO_URL", "127.0.0.1", ""), "http://127.0.0.1:8003")
+        self.assertEqual(service_url("NEWS_SERVICE_URL", "portal.len.pe.kr", ""), "https://news.len.pe.kr")
+        self.assertEqual(service_url("YOUTUBE_MEMO_URL", "portal.len.pe.kr", ""), "https://memo.len.pe.kr")
+        self.assertEqual(service_url("BOOK_MEMO_URL", "portal.len.pe.kr", ""), "https://books.len.pe.kr")
 
     def test_admin_status_context_combines_server_and_security_data(self):
         prepare_service_import("portal-web")

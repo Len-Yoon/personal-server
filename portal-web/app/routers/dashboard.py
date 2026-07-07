@@ -8,7 +8,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.services.admin_status import build_admin_status_context
 from app.services.global_search import search_all
-from app.services.host_urls import admin_entry_url, file_entry_url, portal_home_url, service_base_urls, service_url
+from app.services.host_urls import portal_home_url, service_base_urls, service_url
 from app.services.security import (
     append_security_event,
     append_user_event,
@@ -38,7 +38,7 @@ def dashboard(request: Request, q: str = ""):
             "icon": "N",
             "name": "뉴스 허브",
             "description": "일반 뉴스와 주식 뉴스를 수집하고, 나중에 AI 요약까지 연결합니다.",
-            "url": service_url("NEWS_SERVICE_URL", host, os.getenv("NEWS_SERVICE_URL", "")),
+            "url": "/news",
             "status": "운영중",
             "meta": "News / Stock / Summary",
         },
@@ -46,7 +46,7 @@ def dashboard(request: Request, q: str = ""):
             "icon": "Y",
             "name": "유튜브 메모장",
             "description": "유튜브 영상별 학습 메모와 타임스탬프를 기록합니다.",
-            "url": service_url("YOUTUBE_MEMO_URL", host, os.getenv("YOUTUBE_MEMO_URL", "")),
+            "url": "/memo",
             "status": "운영중",
             "meta": "YouTube / Memo / Timestamp",
         },
@@ -54,7 +54,7 @@ def dashboard(request: Request, q: str = ""):
             "icon": "B",
             "name": "책 메모장",
             "description": "읽은 책을 저장하고 목차별 진행률과 독서 메모를 관리합니다.",
-            "url": service_url("BOOK_MEMO_URL", host, os.getenv("BOOK_MEMO_URL", "")),
+            "url": "/books",
             "status": "운영중",
             "meta": "Book / Reading / Memo",
         },
@@ -62,7 +62,7 @@ def dashboard(request: Request, q: str = ""):
             "icon": "F",
             "name": "파일함",
             "description": "개인 서버에 파일을 올리고 내려받는 가벼운 웹 파일 관리자입니다.",
-            "url": file_entry_url(host),
+            "url": "/files",
             "status": "운영중",
             "meta": "Files / Upload / Download",
         },
@@ -70,7 +70,7 @@ def dashboard(request: Request, q: str = ""):
             "icon": "A",
             "name": "관리자 상태",
             "description": "비밀번호 인증 후 서버 상태와 보안 상태를 한 화면에서 확인합니다.",
-            "url": admin_entry_url(host),
+            "url": "/admin/status",
             "status": "운영중",
             "meta": "Admin / Server / Security",
         },
@@ -105,6 +105,24 @@ def dashboard(request: Request, q: str = ""):
     )
 
 
+@router.get("/news")
+def news_entry(request: Request):
+    host = _request_host(request)
+    return RedirectResponse(url=service_url("NEWS_SERVICE_URL", host, os.getenv("NEWS_SERVICE_URL", "")), status_code=302)
+
+
+@router.get("/memo")
+def memo_entry(request: Request):
+    host = _request_host(request)
+    return RedirectResponse(url=service_url("YOUTUBE_MEMO_URL", host, os.getenv("YOUTUBE_MEMO_URL", "")), status_code=302)
+
+
+@router.get("/books")
+def books_entry(request: Request):
+    host = _request_host(request)
+    return RedirectResponse(url=service_url("BOOK_MEMO_URL", host, os.getenv("BOOK_MEMO_URL", "")), status_code=302)
+
+
 @router.get("/admin/security")
 def admin_security_status(request: Request, x_security_password: str = Header(default="")):
     _require_security_password(request, x_security_password)
@@ -114,6 +132,7 @@ def admin_security_status(request: Request, x_security_password: str = Header(de
 
 @router.get("/admin/status")
 def admin_status_login(request: Request):
+    host = _request_host(request)
     return templates.TemplateResponse(
         "admin_status.html",
         {

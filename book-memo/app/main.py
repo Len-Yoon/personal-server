@@ -27,7 +27,7 @@ from app.services.book_service import (
     update_progress,
 )
 from app.services.toc_service import fetch_toc_candidates
-from shared.host_urls import portal_home_url, request_host_from_headers
+from app.services.host_urls import portal_home_url, request_host_from_headers
 
 
 app = FastAPI(title="Book Memo")

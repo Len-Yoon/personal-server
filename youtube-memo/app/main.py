@@ -19,7 +19,7 @@ from app.services.memo_service import (
     search_videos_and_memos,
     update_memo,
 )
-from shared.host_urls import portal_home_url, request_host_from_headers
+from app.services.host_urls import portal_home_url, request_host_from_headers
 
 app = FastAPI(title="Youtube Memo")
 

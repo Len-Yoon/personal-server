@@ -9,13 +9,13 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 
 from app.services import file_store
+from app.services.host_urls import portal_home_url, request_host_from_headers
 from app.services.security import (
     append_security_event,
     auth_rate_limited,
     clear_auth_failures,
     record_auth_failure,
 )
-from shared.host_urls import portal_home_url, request_host_from_headers
 
 
 security = HTTPBasic(auto_error=False)
