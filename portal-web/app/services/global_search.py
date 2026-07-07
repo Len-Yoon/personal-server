@@ -10,19 +10,13 @@ DEFAULT_ENDPOINTS = {
     "youtube": "http://youtube-memo:8002/api/search",
     "books": "http://book-memo:8003/api/search",
 }
-DEFAULT_PUBLIC_URLS = {
-    "news": "https://news.len.pe.kr",
-    "youtube": "https://memo.len.pe.kr",
-    "books": "https://books.len.pe.kr",
-}
-PUBLIC_URL_ENVS = {
-    "news": "NEWS_SERVICE_URL",
-    "youtube": "YOUTUBE_MEMO_URL",
-    "books": "BOOK_MEMO_URL",
-}
-
-
-def search_all(query: str, limit: int = 5) -> dict[str, list[dict[str, Any]]]:
+def search_all(
+    query: str,
+    limit: int = 5,
+    public_base_urls: dict[str, str] | None = None,
+    local_base_urls: dict[str, str] | None = None,
+    prefer_local: bool = False,
+) -> dict[str, list[dict[str, Any]]]:
     query = query.strip()
     if not query:
         return {"news": [], "youtube": [], "books": []}
@@ -31,7 +25,15 @@ def search_all(query: str, limit: int = 5) -> dict[str, list[dict[str, Any]]]:
         return _demo_results(query)
 
     return {
-        name: _fetch_results(name, _endpoint(name), query, limit)
+        name: _fetch_results(
+            name,
+            _endpoint(name),
+            query,
+            limit,
+            public_base_urls=public_base_urls,
+            local_base_urls=local_base_urls,
+            prefer_local=prefer_local,
+        )
         for name in ("news", "youtube", "books")
     }
 
@@ -41,7 +43,15 @@ def _endpoint(name: str) -> str:
     return os.getenv(env_name, DEFAULT_ENDPOINTS[name])
 
 
-def _fetch_results(name: str, endpoint: str, query: str, limit: int) -> list[dict[str, Any]]:
+def _fetch_results(
+    name: str,
+    endpoint: str,
+    query: str,
+    limit: int,
+    public_base_urls: dict[str, str] | None = None,
+    local_base_urls: dict[str, str] | None = None,
+    prefer_local: bool = False,
+) -> list[dict[str, Any]]:
     url = f"{endpoint}?{urlencode({'q': query, 'limit': limit})}"
     try:
         with urlopen(url, timeout=1.5) as response:
@@ -51,13 +61,36 @@ def _fetch_results(name: str, endpoint: str, query: str, limit: int) -> list[dic
     results = payload.get("results", [])
     if not isinstance(results, list):
         return []
-    return [_normalize_result_url(name, item) for item in results if isinstance(item, dict)]
+    return [
+        _normalize_result_url(
+            name,
+            item,
+            public_base_urls=public_base_urls,
+            local_base_urls=local_base_urls,
+            prefer_local=prefer_local,
+        )
+        for item in results
+        if isinstance(item, dict)
+    ]
 
 
-def _normalize_result_url(name: str, item: dict[str, Any]) -> dict[str, Any]:
+def _normalize_result_url(
+    name: str,
+    item: dict[str, Any],
+    public_base_urls: dict[str, str] | None = None,
+    local_base_urls: dict[str, str] | None = None,
+    prefer_local: bool = False,
+) -> dict[str, Any]:
     url = str(item.get("url", "#"))
     if url.startswith("/"):
-        base_url = os.getenv(PUBLIC_URL_ENVS[name], DEFAULT_PUBLIC_URLS[name]).rstrip("/")
+        base_urls = local_base_urls if prefer_local and local_base_urls else public_base_urls
+        if not base_urls:
+            base_urls = {
+                "news": "https://news.len.pe.kr",
+                "youtube": "https://memo.len.pe.kr",
+                "books": "https://books.len.pe.kr",
+            }
+        base_url = base_urls[name].rstrip("/")
         item = dict(item)
         item["url"] = f"{base_url}{url}"
     return item

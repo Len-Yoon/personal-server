@@ -37,9 +37,45 @@ class PortalDashboardTests(unittest.TestCase):
         prepare_service_import("portal-web")
         from app.services.global_search import _normalize_result_url
 
-        result = _normalize_result_url("youtube", {"title": "memo", "url": "/videos/1"})
+        result = _normalize_result_url(
+            "youtube",
+            {"title": "memo", "url": "/videos/1"},
+            public_base_urls={
+                "news": "https://news.len.pe.kr",
+                "youtube": "https://memo.len.pe.kr",
+                "books": "https://books.len.pe.kr",
+            },
+            local_base_urls={
+                "news": "http://127.0.0.1:8001",
+                "youtube": "http://127.0.0.1:8002",
+                "books": "http://127.0.0.1:8003",
+            },
+            prefer_local=True,
+        )
 
-        self.assertEqual(result["url"], "https://memo.len.pe.kr/videos/1")
+        self.assertEqual(result["url"], "http://127.0.0.1:8002/videos/1")
+
+    def test_search_result_relative_urls_use_public_domain_outside_local(self):
+        prepare_service_import("portal-web")
+        from app.services.global_search import _normalize_result_url
+
+        result = _normalize_result_url(
+            "books",
+            {"title": "memo", "url": "/books/1"},
+            public_base_urls={
+                "news": "https://news.len.pe.kr",
+                "youtube": "https://memo.len.pe.kr",
+                "books": "https://books.len.pe.kr",
+            },
+            local_base_urls={
+                "news": "http://127.0.0.1:8001",
+                "youtube": "http://127.0.0.1:8002",
+                "books": "http://127.0.0.1:8003",
+            },
+            prefer_local=False,
+        )
+
+        self.assertEqual(result["url"], "https://books.len.pe.kr/books/1")
 
     def test_demo_mode_returns_service_health_samples(self):
         system_status = self.reload_system_status("true")
@@ -70,6 +106,18 @@ class PortalDashboardTests(unittest.TestCase):
 
         self.assertIn("meta", results["youtube"][0])
         self.assertIn("snippet", results["youtube"][0])
+
+    def test_portal_home_url_uses_local_address_on_localhost(self):
+        prepare_service_import("book-memo")
+        from shared.host_urls import portal_home_url
+
+        self.assertEqual(portal_home_url("127.0.0.1"), "http://127.0.0.1:8000/")
+
+    def test_portal_home_url_uses_public_address_outside_local(self):
+        prepare_service_import("youtube-memo")
+        from shared.host_urls import portal_home_url
+
+        self.assertEqual(portal_home_url("memo.len.pe.kr"), "https://portal.len.pe.kr/")
 
     def test_admin_status_context_combines_server_and_security_data(self):
         prepare_service_import("portal-web")

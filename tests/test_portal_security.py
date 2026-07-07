@@ -88,7 +88,7 @@ class PortalSecurityTests(unittest.TestCase):
                 "service_opened",
                 path="/",
                 target="유튜브 메모장",
-                href="https://memo.len.pe.kr",
+                href="http://127.0.0.1:8002",
                 client="127.0.0.1",
             )
 

@@ -1,5 +1,6 @@
 import os
 import secrets
+import ipaddress
 
 from fastapi import APIRouter, Body, Form, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -7,6 +8,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.services.admin_status import build_admin_status_context
 from app.services.global_search import search_all
+from app.services.host_urls import portal_home_url, service_base_urls, service_url
 from app.services.security import (
     append_security_event,
     append_user_event,
@@ -20,33 +22,12 @@ from app.services.system_status import get_dashboard_status, get_service_health
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 
-DEFAULT_SERVICE_URLS = {
-    "NEWS_SERVICE_URL": "https://news.len.pe.kr",
-    "YOUTUBE_MEMO_URL": "https://memo.len.pe.kr",
-    "BOOK_MEMO_URL": "https://books.len.pe.kr",
-}
-
-
-def _service_url(env_name: str) -> str:
-    configured_url = os.getenv(env_name, "").strip()
-    if not configured_url:
-        return DEFAULT_SERVICE_URLS[env_name]
-
-    local_hosts = (
-        "localhost",
-        "127.0.0.1",
-        "0.0.0.0",
-        "host.docker.internal",
-    )
-    if any(host in configured_url for host in local_hosts):
-        return DEFAULT_SERVICE_URLS[env_name]
-
-    return configured_url
-
 
 @router.get("/")
 def dashboard(request: Request, q: str = ""):
     host = _request_host(request)
+    local_mode = _is_local_host(host)
+    base_urls = service_base_urls(host)
     if host == _configured_host("FILES_HOSTNAME") or host.startswith("file."):
         return RedirectResponse(url="/files", status_code=302)
     if host == _configured_host("ADMIN_HOSTNAME") or host.startswith("admin."):
@@ -57,7 +38,7 @@ def dashboard(request: Request, q: str = ""):
             "icon": "N",
             "name": "뉴스 허브",
             "description": "일반 뉴스와 주식 뉴스를 수집하고, 나중에 AI 요약까지 연결합니다.",
-            "url": _service_url("NEWS_SERVICE_URL"),
+            "url": service_url("NEWS_SERVICE_URL", host, os.getenv("NEWS_SERVICE_URL", "")),
             "status": "운영중",
             "meta": "News / Stock / Summary",
         },
@@ -65,7 +46,7 @@ def dashboard(request: Request, q: str = ""):
             "icon": "Y",
             "name": "유튜브 메모장",
             "description": "유튜브 영상별 학습 메모와 타임스탬프를 기록합니다.",
-            "url": _service_url("YOUTUBE_MEMO_URL"),
+            "url": service_url("YOUTUBE_MEMO_URL", host, os.getenv("YOUTUBE_MEMO_URL", "")),
             "status": "운영중",
             "meta": "YouTube / Memo / Timestamp",
         },
@@ -73,7 +54,7 @@ def dashboard(request: Request, q: str = ""):
             "icon": "B",
             "name": "책 메모장",
             "description": "읽은 책을 저장하고 목차별 진행률과 독서 메모를 관리합니다.",
-            "url": _service_url("BOOK_MEMO_URL"),
+            "url": service_url("BOOK_MEMO_URL", host, os.getenv("BOOK_MEMO_URL", "")),
             "status": "운영중",
             "meta": "Book / Reading / Memo",
         },
@@ -111,7 +92,15 @@ def dashboard(request: Request, q: str = ""):
             "services": services,
             "demo_mode": os.getenv("DEMO_MODE", "").lower() in {"1", "true", "yes", "on"},
             "query": q.strip(),
-            "search_results": search_all(q) if q.strip() else None,
+            "search_results": search_all(
+                q,
+                public_base_urls=base_urls,
+                local_base_urls=base_urls,
+                prefer_local=local_mode,
+            )
+            if q.strip()
+            else None,
+            "portal_home_url": portal_home_url(host),
         },
     )
 
@@ -232,3 +221,16 @@ def _request_host(request: Request) -> str:
 
 def _configured_host(env_name: str) -> str:
     return os.getenv(env_name, "").strip().lower()
+
+
+def _is_local_host(host: str) -> bool:
+    host = host.split(":")[0]
+    if host in {"localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal"}:
+        return True
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+
+    return ip.is_private or ip.is_loopback or ip.is_link_local
