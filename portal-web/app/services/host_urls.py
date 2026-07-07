@@ -1,12 +1,17 @@
 from shared.host_urls import (
     LOCAL_HOSTS,
+    LOCAL_ADMIN_URL,
+    LOCAL_FILE_URL,
     LOCAL_SERVICE_URLS,
+    PUBLIC_ADMIN_URL,
+    PUBLIC_FILE_URL,
     PUBLIC_PORTAL_URL,
     PUBLIC_SERVICE_URLS,
+    admin_entry_url,
     is_local_host,
+    file_entry_url,
     portal_home_url,
     request_host_from_headers,
     service_base_urls,
     service_url,
 )
-

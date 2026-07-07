@@ -16,6 +16,10 @@ LOCAL_SERVICE_URLS = {
     "YOUTUBE_MEMO_URL": "http://127.0.0.1:8002",
     "BOOK_MEMO_URL": "http://127.0.0.1:8003",
 }
+LOCAL_FILE_URL = "http://127.0.0.1:8000/files"
+LOCAL_ADMIN_URL = "http://127.0.0.1:8000/admin/status"
+PUBLIC_FILE_URL = "https://file.len.pe.kr/"
+PUBLIC_ADMIN_URL = "https://admin.len.pe.kr/"
 
 
 def request_host_from_headers(headers: Mapping[str, str]) -> str:
@@ -66,3 +70,11 @@ def service_url(env_name: str, host: str, fallback: str | None = None) -> str:
 
 def service_base_urls(host: str) -> dict[str, str]:
     return LOCAL_SERVICE_URLS if is_local_host(host) else PUBLIC_SERVICE_URLS
+
+
+def file_entry_url(host: str) -> str:
+    return LOCAL_FILE_URL if is_local_host(host) else PUBLIC_FILE_URL
+
+
+def admin_entry_url(host: str) -> str:
+    return LOCAL_ADMIN_URL if is_local_host(host) else PUBLIC_ADMIN_URL

@@ -15,6 +15,7 @@ from app.services.security import (
     clear_auth_failures,
     record_auth_failure,
 )
+from shared.host_urls import portal_home_url, request_host_from_headers
 
 
 security = HTTPBasic(auto_error=False)
@@ -77,6 +78,7 @@ def files_home(request: Request, path: str = ""):
             "request": request,
             "title": "파일함",
             "directory": directory,
+            "portal_home_url": portal_home_url(request_host_from_headers(request.headers)),
         },
     )
 

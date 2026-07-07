@@ -8,7 +8,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.services.admin_status import build_admin_status_context
 from app.services.global_search import search_all
-from app.services.host_urls import portal_home_url, service_base_urls, service_url
+from app.services.host_urls import admin_entry_url, file_entry_url, portal_home_url, service_base_urls, service_url
 from app.services.security import (
     append_security_event,
     append_user_event,
@@ -62,7 +62,7 @@ def dashboard(request: Request, q: str = ""):
             "icon": "F",
             "name": "파일함",
             "description": "개인 서버에 파일을 올리고 내려받는 가벼운 웹 파일 관리자입니다.",
-            "url": "/files",
+            "url": file_entry_url(host),
             "status": "운영중",
             "meta": "Files / Upload / Download",
         },
@@ -70,7 +70,7 @@ def dashboard(request: Request, q: str = ""):
             "icon": "A",
             "name": "관리자 상태",
             "description": "비밀번호 인증 후 서버 상태와 보안 상태를 한 화면에서 확인합니다.",
-            "url": "/admin/status",
+            "url": admin_entry_url(host),
             "status": "운영중",
             "meta": "Admin / Server / Security",
         },
@@ -121,6 +121,7 @@ def admin_status_login(request: Request):
             "title": "관리자 상태",
             "authenticated": False,
             "error": "",
+            "portal_home_url": portal_home_url(host),
         },
     )
 
@@ -142,6 +143,7 @@ def admin_status_page(request: Request, password: str = Form(default="")):
                 "title": "관리자 상태",
                 "authenticated": False,
                 "error": message,
+                "portal_home_url": portal_home_url(_request_host(request)),
             },
             status_code=exc.status_code,
         )
@@ -159,6 +161,7 @@ def admin_status_page(request: Request, password: str = Form(default="")):
             "title": "관리자 상태",
             "authenticated": True,
             "error": "",
+            "portal_home_url": portal_home_url(_request_host(request)),
             **context,
         },
     )

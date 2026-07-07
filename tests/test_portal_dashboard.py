@@ -119,6 +119,15 @@ class PortalDashboardTests(unittest.TestCase):
 
         self.assertEqual(portal_home_url("memo.len.pe.kr"), "https://portal.len.pe.kr/")
 
+    def test_file_and_admin_entry_urls_follow_host_mode(self):
+        prepare_service_import("portal-web")
+        from shared.host_urls import admin_entry_url, file_entry_url
+
+        self.assertEqual(file_entry_url("127.0.0.1"), "http://127.0.0.1:8000/files")
+        self.assertEqual(admin_entry_url("127.0.0.1"), "http://127.0.0.1:8000/admin/status")
+        self.assertEqual(file_entry_url("portal.len.pe.kr"), "https://file.len.pe.kr/")
+        self.assertEqual(admin_entry_url("portal.len.pe.kr"), "https://admin.len.pe.kr/")
+
     def test_admin_status_context_combines_server_and_security_data(self):
         prepare_service_import("portal-web")
         from app.services.admin_status import build_admin_status_context
