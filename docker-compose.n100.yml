@@ -1,20 +1,5 @@
-# 운영 override: 외부 공개 범위를 줄이고 컨테이너 자원을 제한함
+﻿# ?댁쁺 override: ?몃? 怨듦컻 踰붿쐞瑜?以꾩씠怨?而⑦뀒?대꼫 ?먯썝???쒗븳??
 services:
-  caddy:
-    cpus: "0.25"
-    mem_limit: 128m
-    pids_limit: 96
-    read_only: true
-    security_opt:
-      - no-new-privileges:true
-    tmpfs:
-      - /tmp:size=16m,mode=1777
-    logging:
-      driver: json-file
-      options:
-        max-size: "5m"
-        max-file: "2"
-
   portal-web:
     ports: !override
       - "127.0.0.1:8000:8000"
