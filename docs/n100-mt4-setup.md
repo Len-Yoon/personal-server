@@ -158,6 +158,15 @@ This starts only:
 `crawler-worker` and `caddy` are behind Compose profiles so they do not consume
 resources by default.
 
+Even in the N100 stack, the app ports are bound to `127.0.0.1`, so you can
+still open the apps locally from the machine itself:
+
+- `http://127.0.0.1:8000`
+- `http://127.0.0.1:8001`
+- `http://127.0.0.1:8002`
+- `http://127.0.0.1:8003`
+- `http://127.0.0.1:18010/health`
+
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build
 ```
@@ -165,10 +174,10 @@ docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build
 Open from Windows:
 
 ```text
-http://localhost:8000
-http://localhost:8002
-http://localhost:8003
-http://localhost:8010/health
+http://127.0.0.1:8000
+http://127.0.0.1:8002
+http://127.0.0.1:8003
+http://127.0.0.1:18010/health
 ```
 
 ## Windows host metrics
