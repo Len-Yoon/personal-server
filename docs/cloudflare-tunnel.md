@@ -9,7 +9,7 @@
 - `len.pe.kr` 도메인의 네임서버가 Cloudflare로 이전되어 있어야 합니다.
 - `cloudflared tunnel login`이 WSL/Linux 환경에서 성공해 `~/.cloudflared/cert.pem`이 생성되어 있어야 합니다.
 - Docker Compose로 앱 컨테이너가 먼저 떠 있어야 합니다.
-- Tunnel은 로컬 포트로 직접 붙으므로, Caddy의 외부 공개용 `80`/`443` 포트포워딩은 필요하지 않습니다.
+- Tunnel은 로컬 포트로 직접 붙으므로, 외부 공개용 `80`/`443` 포트포워딩은 필요하지 않습니다.
 
 ## 서비스 포트
 
@@ -94,4 +94,3 @@ https://books.len.pe.kr
 - 앱 컨테이너는 계속 `127.0.0.1` 바인드로 두어도 됩니다.
 - `cloudflared tunnel login` 후 `~/.cloudflared`가 비어 있으면, 같은 WSL 세션에서 다시 로그인해야 할 수 있습니다.
 - `len.pe.kr` 네임서버가 아직 Cloudflare에 위임되지 않았다면 Tunnel 생성이나 DNS 연결이 제대로 진행되지 않습니다.
-
