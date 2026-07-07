@@ -11,7 +11,8 @@ using `docker-compose.n100.yml` to keep CPU and memory usage low.
 - Ubuntu 24.04 in WSL2 for this repo.
 - Docker Engine inside WSL2, or Docker Desktop if you prefer GUI management.
 - Tailscale for private remote access.
-- Caddy only when you need public domains and HTTPS proxying.
+- Cloudflare Tunnel for public access when you do not want port forwarding.
+- Caddy only when you want direct ingress and HTTPS proxying on your own ports.
 
 The lightest practical path is:
 
@@ -221,6 +222,8 @@ Start Caddy only when exposing services with public domains:
 docker compose -f docker-compose.yml -f docker-compose.n100.yml --profile edge up -d caddy
 ```
 
+If you are using Cloudflare Tunnel instead of direct port forwarding, keep the edge profile off and follow `docs/cloudflare-tunnel.md` for the tunnel setup. In that mode, the apps stay on localhost and `cloudflared` handles public ingress.
+
 ## MT4 operating notes
 
 - Keep MT4 installed and running on Windows, not inside WSL2.
@@ -295,6 +298,8 @@ The default stack is designed to stay small:
 - `youtube-memo`: 1 worker, no reload, 160 MB cap
 - `crawler-worker`: optional, 320 MB cap
 - `caddy`: optional, 128 MB cap
+
+For a Cloudflare Tunnel setup, the `caddy` service becomes optional and you can leave it stopped unless you still want local reverse proxy behavior on the machine itself.
 
 With WSL2 capped, Windows and MT4 keep the majority of the machine while the
 personal server apps stay predictable in the background.
