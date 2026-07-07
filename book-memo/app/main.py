@@ -27,6 +27,7 @@ from app.services.book_service import (
     update_progress,
 )
 from app.services.toc_service import fetch_toc_candidates
+from shared.host_urls import portal_home_url, request_host_from_headers
 
 
 app = FastAPI(title="Book Memo")
@@ -134,6 +135,7 @@ def book_detail(request: Request, book_id: int):
             "chapters": list_chapters(book_id),
             "memos": list_memos(book_id),
             "statuses": ["읽을 예정", "읽는 중", "완료", "보류"],
+            "portal_home_url": portal_home_url(request_host_from_headers(request.headers)),
         },
     )
 
