@@ -136,7 +136,7 @@ docker compose up -d --build
 ```
 
 N100 운영 배포는 리소스 제한과 보안 옵션이 들어간 override를 함께 사용합니다. 이 구성에서는 Caddy만 외부 포트를 열고, 앱 포트는 `127.0.0.1`에만 바인드합니다.
-`edge` 프로필은 외부 도메인/SSL 프록시가 필요할 때만, `worker` 프로필은 뉴스 수집 작업을 별도 운영할 때만 사용합니다.
+`edge` 프로필은 외부 도메인/SSL 프록시가 필요할 때 사용합니다. 뉴스 수집 서비스는 기본 구성에서도 함께 올라옵니다.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.n100.yml --profile edge up -d --build

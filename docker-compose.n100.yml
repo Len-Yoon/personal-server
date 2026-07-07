@@ -81,9 +81,6 @@ services:
   crawler-worker:
     ports: !override
       - "127.0.0.1:8001:8001"
-    # worker 프로필은 뉴스 수집 작업을 별도 운영할 때만 사용함
-    profiles:
-      - worker
     command:
       - uvicorn
       - app.main:app
