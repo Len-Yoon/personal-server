@@ -11,7 +11,7 @@
 - `crawler-worker` (`8001`): Google News RSS 수집, AI 요약, 저장 뉴스 관리
 - `youtube-memo` (`8002`): YouTube 링크별 메모장
 - `book-memo` (`8003`): 책 검색, 독서 진행률, 목차별 코멘트, 독서 메모
-- `caddy` (`80`, `443`): 외부 도메인/SSL 프록시 및 자동 HTTPS
+- `caddy` (`80`, `443`): 선택적 로컬 reverse proxy 및 직접 HTTPS 운영용
 
 ## 화면 예시
 
@@ -142,7 +142,7 @@ N100 운영 배포는 리소스 제한과 보안 옵션이 들어간 override를
 docker compose -f docker-compose.yml -f docker-compose.n100.yml --profile edge up -d --build
 ```
 
-서브도메인 기반 공개 운영을 하려면 [Caddy 도메인 라우팅 설정](docs/caddy-routing.md)을 참고해 `portal.len.pe.kr`, `file.len.pe.kr`, `admin.len.pe.kr`, `news.len.pe.kr`, `memo.len.pe.kr`, `books.len.pe.kr`으로 분리 등록하면 됩니다. `system-agent`는 기본적으로 비공개 운영을 권장합니다.
+서브도메인 기반 공개 운영은 이제 [Cloudflare Tunnel 운영 가이드](docs/cloudflare-tunnel.md)를 기본으로 보고, direct ingress가 필요할 때만 [Caddy 도메인 라우팅 설정](docs/caddy-routing.md)을 참고해 `portal.len.pe.kr`, `file.len.pe.kr`, `admin.len.pe.kr`, `news.len.pe.kr`, `memo.len.pe.kr`, `books.len.pe.kr`으로 분리 등록하면 됩니다. `system-agent`는 기본적으로 비공개 운영을 권장합니다.
 
 개별 서비스만 다시 빌드할 수도 있습니다.
 
