@@ -1,5 +1,7 @@
 # Caddy 도메인 라우팅 설정
 
+> This document describes the direct Caddy ingress path. For the current default external-access setup, prefer [Cloudflare Tunnel](docs/cloudflare-tunnel.md).
+
 ## 문서 정보
 
 | 항목 | 내용 |
