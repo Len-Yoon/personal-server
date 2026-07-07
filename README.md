@@ -11,7 +11,7 @@
 - `crawler-worker` (`8001`): Google News RSS 수집, AI 요약, 저장 뉴스 관리
 - `youtube-memo` (`8002`): YouTube 링크별 메모장
 - `book-memo` (`8003`): 책 검색, 독서 진행률, 목차별 코멘트, 독서 메모
-- `caddy` (`80`, `443`): 선택적 로컬 reverse proxy 및 직접 HTTPS 운영용
+- `caddy` (`80`, `443`): 선택적 로컬 reverse proxy
 
 ## 화면 예시
 
@@ -135,14 +135,14 @@ HOST_METRICS_STALE_SECONDS=
 docker compose up -d --build
 ```
 
-N100 운영 배포는 리소스 제한과 보안 옵션이 들어간 override를 함께 사용합니다. 이 구성에서는 Caddy만 외부 포트를 열고, 앱 포트는 `127.0.0.1`에만 바인드합니다.
+N100 운영 배포는 리소스 제한과 보안 옵션이 들어간 override를 함께 사용합니다. 이 구성에서는 앱 포트가 `127.0.0.1`에만 바인드됩니다.
 `edge` 프로필은 외부 도메인/SSL 프록시가 필요할 때 사용합니다. 뉴스 수집 서비스는 기본 구성에서도 함께 올라옵니다.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.n100.yml --profile edge up -d --build
 ```
 
-서브도메인 기반 공개 운영은 이제 [Cloudflare Tunnel 운영 가이드](docs/cloudflare-tunnel.md)를 기본으로 보고, direct ingress가 필요할 때만 [Caddy 도메인 라우팅 설정](docs/caddy-routing.md)을 참고해 `portal.len.pe.kr`, `file.len.pe.kr`, `admin.len.pe.kr`, `news.len.pe.kr`, `memo.len.pe.kr`, `books.len.pe.kr`으로 분리 등록하면 됩니다. `system-agent`는 기본적으로 비공개 운영을 권장합니다.
+서브도메인 기반 공개 운영은 [Cloudflare Tunnel 운영 가이드](docs/cloudflare-tunnel.md)를 기본으로 보고 `portal.len.pe.kr`, `file.len.pe.kr`, `admin.len.pe.kr`, `news.len.pe.kr`, `memo.len.pe.kr`, `books.len.pe.kr`으로 분리 등록하면 됩니다. `system-agent`는 기본적으로 비공개 운영을 권장합니다.
 
 개별 서비스만 다시 빌드할 수도 있습니다.
 
@@ -222,7 +222,7 @@ AI는 다음 작업에 사용했습니다.
 - 관리자 인증/삭제 비밀번호 실패는 `AUTH_RATE_LIMIT_MAX_FAILURES`, `AUTH_RATE_LIMIT_WINDOW_SECONDS` 기준으로 IP별 일시 차단합니다.
 - 파일함 업로드는 최대 용량, 차단 확장자, 확장자 없는 파일, 기존 파일 덮어쓰기를 제한합니다.
 - 파일함은 운영에서 `FILE_MANAGER_PASSWORD`와 `APP_ENV=production` 또는 `FILE_MANAGER_AUTH_REQUIRED=true`가 설정되어야 인증 없이 열리지 않습니다.
-- 뉴스 AI 요약 API와 메모 생성/수정 라우트는 개인 서버 전제의 내부 기능입니다. 외부 도메인에 공개할 경우 Caddy 접근 제어 또는 애플리케이션 인증을 추가해야 합니다.
+- 뉴스 AI 요약 API와 메모 생성/수정 라우트는 개인 서버 전제의 내부 기능입니다. 외부 도메인에 공개할 경우 애플리케이션 인증을 추가해야 합니다.
 - 포털의 `관리자 상태` 서비스 카드는 `/admin/status`로 이동하며, 관리자 인증 후 서버 상태와 보안 상태를 함께 보여줍니다.
 - 서버 상태는 `system-agent`를 통해 미니 PC/Docker/백업 상태를 표시하고, agent 연결 실패 시 포털 자체는 계속 동작합니다.
 - 포털 전체 검색은 저장 뉴스, YouTube 메모, 책 메모의 read-only 검색 API를 모아 보여줍니다.
