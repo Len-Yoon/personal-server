@@ -11,7 +11,7 @@ using `docker-compose.n100.yml` to keep CPU and memory usage low.
 - Ubuntu 24.04 in WSL2 for this repo.
 - Docker Engine inside WSL2, or Docker Desktop if you prefer GUI management.
 - Tailscale for private remote access.
-- Nginx Proxy Manager only when you need public domains and HTTPS proxying.
+- Caddy only when you need public domains and HTTPS proxying.
 
 The lightest practical path is:
 
@@ -155,8 +155,8 @@ This starts only:
 - `book-memo`
 - `youtube-memo`
 
-`crawler-worker` and `nginx-proxy-manager` are behind Compose profiles so they do
-not consume resources by default.
+`crawler-worker` and `caddy` are behind Compose profiles so they do not consume
+resources by default.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build
@@ -206,10 +206,10 @@ Stop it during trading hours if MT4 needs every bit of headroom:
 docker compose -f docker-compose.yml -f docker-compose.n100.yml stop crawler-worker
 ```
 
-Start Nginx Proxy Manager only when exposing services with public domains:
+Start Caddy only when exposing services with public domains:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.n100.yml --profile edge up -d nginx-proxy-manager
+docker compose -f docker-compose.yml -f docker-compose.n100.yml --profile edge up -d caddy
 ```
 
 ## MT4 operating notes
@@ -285,7 +285,7 @@ The default stack is designed to stay small:
 - `book-memo`: 1 worker, no reload, 192 MB cap
 - `youtube-memo`: 1 worker, no reload, 160 MB cap
 - `crawler-worker`: optional, 320 MB cap
-- `nginx-proxy-manager`: optional, 384 MB cap
+- `caddy`: optional, 128 MB cap
 
 With WSL2 capped, Windows and MT4 keep the majority of the machine while the
 personal server apps stay predictable in the background.

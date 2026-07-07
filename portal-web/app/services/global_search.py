@@ -11,9 +11,9 @@ DEFAULT_ENDPOINTS = {
     "books": "http://book-memo:8003/api/search",
 }
 DEFAULT_PUBLIC_URLS = {
-    "news": "http://news.lenserver.com",
-    "youtube": "http://memo.lenserver.com",
-    "books": "http://book.lenserver.com",
+    "news": "https://news.len.pe.kr",
+    "youtube": "https://memo.len.pe.kr",
+    "books": "https://books.len.pe.kr",
 }
 PUBLIC_URL_ENVS = {
     "news": "NEWS_SERVICE_URL",

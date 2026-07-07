@@ -1,11 +1,11 @@
-# Nginx Proxy Manager 도메인 라우팅 설정
+# Caddy 도메인 라우팅 설정
 
 ## 문서 정보
 
 | 항목 | 내용 |
 |---|---|
-| 문서명 | Nginx Proxy Manager 도메인 라우팅 설정 |
-| 작성일 | 2026-07-06 |
+| 문서명 | Caddy 도메인 라우팅 설정 |
+| 작성일 | 2026-07-07 |
 | 작성자 | Codex |
 | 기준 자료 | `docker-compose.yml`, `docker-compose.n100.yml`, `README.md`, 서비스 라우트 코드 |
 | 목적 | 미니PC에서 기능별 서브도메인으로 개인 서버 서비스를 분리 운영하기 위함 |
@@ -13,10 +13,10 @@
 
 ## 핵심 요약
 
+- Caddy는 도메인별로 reverse proxy를 두고 자동 HTTPS를 처리함
 - `portal-web`은 메인 포털과 `/files`, `/admin/status`를 함께 제공함
 - `youtube-memo`, `book-memo`, `crawler-worker`는 별도 서비스로 서브도메인 분리가 가능함
 - `system-agent`는 운영용 내부 API 성격이므로 기본적으로 외부 공개를 권장하지 않음
-- Nginx Proxy Manager는 같은 Docker Compose 네트워크 안에서 서비스명으로 프록시하면 됨
 
 ## 상세 내용
 
@@ -32,28 +32,54 @@
 | 책 메모 | `books.len.pe.kr` | `http://book-memo:8003` | 루트(`/`) 연결 |
 | 시스템 상태 | `system.len.pe.kr` | `http://system-agent:8010` | 공개 비권장, 내부 확인용 권장 |
 
-### 2. NPM 생성 순서
+### 2. Caddyfile 예시
 
-1. `docker compose -f docker-compose.yml -f docker-compose.n100.yml --profile edge up -d` 실행함
-2. 브라우저에서 `http://<미니PC IP>:81`로 Nginx Proxy Manager 접속함
-3. `Proxy Hosts`에서 위 서브도메인별 항목을 1개씩 생성함
-4. 각 항목의 `Forward Hostname / IP`에 Docker 서비스명 입력함
-5. 각 항목의 `Forward Port`에 서비스 포트 입력함
-6. `SSL` 탭에서 Let's Encrypt 인증서 발급 후 `Force SSL` 활성화함
+저장소 루트의 `Caddyfile`에서 도메인별 reverse proxy를 정의함.
 
-### 3. 세부 설정 권장값
+```caddyfile
+portal.len.pe.kr {
+	reverse_proxy portal-web:8000
+}
+
+file.len.pe.kr {
+	reverse_proxy portal-web:8000
+}
+
+admin.len.pe.kr {
+	reverse_proxy portal-web:8000
+}
+
+news.len.pe.kr {
+	reverse_proxy crawler-worker:8001
+}
+
+memo.len.pe.kr {
+	reverse_proxy youtube-memo:8002
+}
+
+books.len.pe.kr {
+	reverse_proxy book-memo:8003
+}
+```
+
+### 3. 실행 순서
+
+1. `docker compose -f docker-compose.yml -f docker-compose.n100.yml --profile edge up -d --build` 실행함
+2. `Caddyfile`의 도메인과 실제 DNS A 레코드를 일치시킴
+3. `80`, `443` 포트가 Caddy로 전달되도록 공유기 또는 방화벽 설정을 확인함
+4. Caddy가 Let's Encrypt 인증서를 자동 발급하고 갱신하는지 확인함
+
+### 4. 세부 설정 권장값
 
 | 항목 | 권장값 | 비고 |
 |---|---|---|
-| Scheme | `http` | 컨테이너 간 통신은 HTTP로 충분함 |
-| Forward Hostname | `portal-web`, `crawler-worker`, `youtube-memo`, `book-memo`, `system-agent` | Docker 서비스명 사용함 |
-| Forward Port | `8000`, `8001`, `8002`, `8003`, `8010` | 서비스별 포트와 일치시킴 |
-| Websockets Support | 필요 시 활성화 | 현재 주요 화면은 필수 아님 |
-| Block Common Exploits | 활성화 권장 | 기본 보안 강화 목적 |
-| Force SSL | 활성화 권장 | HTTPS 강제용 |
-| HTTP/2 Support | 활성화 권장 | 일반적인 HTTPS 성능 향상 목적 |
+| reverse_proxy 대상 | `portal-web`, `crawler-worker`, `youtube-memo`, `book-memo`, `system-agent` | Docker 서비스명 사용함 |
+| 포트 | `8000`, `8001`, `8002`, `8003`, `8010` | 서비스별 포트와 일치시킴 |
+| 공개 범위 | `portal`, `news`, `memo`, `books`는 공개 가능 | 사용 목적에 따라 제한 가능 |
+| 내부 전용 | `system-agent` | 기본적으로 외부 공개 비권장 |
+| 인증서 | Caddy 자동 HTTPS | 별도 Certbot 설정이 필요 없음 |
 
-### 4. `portal-web` 하위 경로 처리
+### 5. `portal-web` 하위 경로 처리
 
 `portal-web`은 하나의 앱에서 메인 화면과 파일함, 관리자 상태 화면을 함께 제공함.
 
@@ -61,17 +87,17 @@
 - `https://file.len.pe.kr/` -> 앱에서 자동으로 `/files`로 전환함
 - `https://admin.len.pe.kr/` -> 앱에서 자동으로 `/admin/status`로 전환함
 
-기능별로 완전히 분리된 느낌을 원하면 NPM에서 `portal.len.pe.kr`, `file.len.pe.kr`, `admin.len.pe.kr`을 모두 `portal-web:8000`으로 연결하고, 앱이 호스트명에 따라 진입 경로를 분기하도록 두는 방식이 적합함.
+기능별로 완전히 분리된 느낌을 원하면 `portal.len.pe.kr`, `file.len.pe.kr`, `admin.len.pe.kr`을 모두 `portal-web:8000`으로 연결하고, 앱이 호스트명에 따라 진입 경로를 분기하도록 두는 방식이 적합함.
 
-### 5. 공개 범위 권장
+### 6. 공개 범위 권장
 
 - `portal-web`, `news`, `memo`, `books`는 일반 공개 또는 제한 공개 둘 다 가능함
 - `system-agent`는 시스템 메트릭과 운영 상태가 포함되므로 기본적으로 비공개 또는 내부망 제한을 권장함
-- NPM 관리자 페이지 `:81`은 외부 공개하지 않는 구성이 안전함
+- Caddy의 `Caddyfile`은 저장소에 두되, 실제 DNS와 포트포워딩은 운영 환경에서 별도로 맞춰야 함
 
 ## 검토 결과
 
-- 현재 저장소는 Docker Compose 기반이므로 NPM 도메인 분리와 구조적으로 잘 맞음
+- 현재 저장소는 Docker Compose 기반이므로 Caddy 도메인 분리와 구조적으로 잘 맞음
 - 서비스별 포트와 라우트가 확인되어 서브도메인 분리 기준을 설정할 수 있음
 - `portal-web` 내부 경로는 같은 업스트림에 대해 경로 기반 분리가 가능함
 
@@ -85,5 +111,5 @@
 ## 후속 조치
 
 - `.env`의 `NEWS_SERVICE_URL`, `YOUTUBE_MEMO_URL`, `BOOK_MEMO_URL`를 실제 서브도메인으로 변경 필요
-- NPM에서 Proxy Host를 생성한 뒤 인증서 발급 필요
+- `Caddyfile`에서 실제 공개 도메인과 업스트림을 다시 확인 필요
 - 설정 완료 후 `https://portal.len.pe.kr`과 각 서브도메인 접속 확인 필요

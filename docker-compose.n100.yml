@@ -1,11 +1,14 @@
 # 운영 override: 외부 공개 범위를 줄이고 컨테이너 자원을 제한함
 services:
-  nginx-proxy-manager:
-    # edge 프로필은 외부 도메인/SSL 프록시를 띄울 때만 사용함
-    profiles:
-      - edge
-    cpus: "0.50"
-    mem_limit: 384m
+  caddy:
+    cpus: "0.25"
+    mem_limit: 128m
+    pids_limit: 96
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
     logging:
       driver: json-file
       options:

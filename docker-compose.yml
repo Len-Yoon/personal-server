@@ -1,16 +1,25 @@
 # 기본 Compose는 개발용이며, 운영은 docker-compose.n100.yml override로 덮어씀
 services:
-  nginx-proxy-manager:
-    image: jc21/nginx-proxy-manager:v2.15.1
-    container_name: nginx-proxy-manager
+  caddy:
+    image: caddy:2.8.4-alpine
+    container_name: caddy
     restart: unless-stopped
+    profiles:
+      - edge
     ports:
       - "80:80"
-      - "81:81"
       - "443:443"
+    command:
+      - caddy
+      - run
+      - --config
+      - /etc/caddy/Caddyfile
+      - --adapter
+      - caddyfile
     volumes:
-      - ./data/npm/data:/data
-      - ./data/npm/letsencrypt:/etc/letsencrypt
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy/data:/data
+      - ./data/caddy/config:/config
 
   portal-web:
     build: ./portal-web

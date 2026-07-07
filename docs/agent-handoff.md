@@ -11,12 +11,13 @@
 - `crawler-worker`: Google News RSS 수집, 저장 뉴스, OpenAI 요약
 - `youtube-memo`: YouTube 링크별 메모
 - `book-memo`: 책 검색, 독서 진행률, 목차/메모 관리
-- `nginx-proxy-manager`: 외부 도메인/SSL 프록시
+- `caddy`: 외부 도메인/SSL 프록시 및 자동 HTTPS
 
 ## Important Files
 
 - `README.md`: 포트폴리오용 설명과 서비스별 스크린샷
 - `.env.example`: 빈 값 예시만 유지
+- `Caddyfile`: 서브도메인별 reverse proxy와 자동 HTTPS 설정
 - `docker-compose.yml`: 로컬/운영 compose
 - `docker-compose.n100.yml`: N100/MT4 동시 운영용 경량 compose override
 - `docs/images/`: README 스크린샷
@@ -105,7 +106,7 @@ README에 서비스별 스크린샷과 설명을 추가했습니다.
 
 - 실제 `.env`는 커밋 금지.
 - `.env.example`은 빈 값 예시만 둠.
-- `data/`, SQLite DB, 로그, Nginx Proxy Manager 데이터는 커밋 금지.
+- `data/`, SQLite DB, 로그, Caddy 데이터는 커밋 금지.
 - `.gitignore`가 `.env`, `data/`, `*.sqlite3`, `*.db`, 로그, IDE 파일을 무시함.
 
 ## Open Items

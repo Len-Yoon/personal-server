@@ -39,7 +39,7 @@ class PortalDashboardTests(unittest.TestCase):
 
         result = _normalize_result_url("youtube", {"title": "memo", "url": "/videos/1"})
 
-        self.assertEqual(result["url"], "http://memo.lenserver.com/videos/1")
+        self.assertEqual(result["url"], "https://memo.len.pe.kr/videos/1")
 
     def test_demo_mode_returns_service_health_samples(self):
         system_status = self.reload_system_status("true")
