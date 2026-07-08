@@ -44,6 +44,40 @@ class InvestingNewsAggregatorTests(unittest.TestCase):
         mocked_browser.assert_called_once()
         mocked_html.assert_called_once()
 
+    def test_rendered_parser_handles_split_byline_lines(self):
+        prepare_service_import("crawler-worker")
+        import app.crawlers.investing_news_browser as investing_news_browser
+
+        crawler = importlib.reload(investing_news_browser)
+        body_text = """
+        광고
+        상품과 선물 뉴스
+        호르무즈 해협 충돌에 유럽 가스 가격 급등, LNG 공급 우려 증폭
+        Investing.com — 수요일(현지시간) 유럽 도매 천연가스 가격이 급등했습니다. 미국과 이란 간의 새로운 군사...
+        By
+        Investing.com
+        •
+        29분 전
+        """
+        cards = [
+            {
+                "title": "호르무즈 해협 충돌에 유럽 가스 가격 급등, LNG 공급 우려 증폭",
+                "href": "https://kr.investing.com/news/commodities-news/article-2008593",
+            }
+        ]
+
+        articles = crawler._parse_rendered_articles(
+            body_text=body_text,
+            cards=cards,
+            category="GOLD",
+            page_url="https://kr.investing.com/news/commodities-news",
+        )
+
+        self.assertEqual(len(articles), 1)
+        self.assertEqual(articles[0]["source"], "Investing.com")
+        self.assertEqual(articles[0]["published_at"], "29분 전")
+        self.assertEqual(articles[0]["summary"], "Investing.com — 수요일(현지시간) 유럽 도매 천연가스 가격이 급등했습니다. 미국과 이란 간의 새로운 군사...")
+
 
 if __name__ == "__main__":
     unittest.main()
