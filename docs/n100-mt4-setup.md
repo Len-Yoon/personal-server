@@ -202,6 +202,33 @@ Recommended Task Scheduler setup:
 If the collector stops for about 15 minutes, the portal dashboard keeps working
 and shows a `host_metrics_stale` or `host_metrics_missing` warning.
 
+## Auto start
+
+To make the stack come back after Windows boots, use Windows Task Scheduler to
+run `scripts/windows-autostart.ps1`.
+
+Recommended setup:
+
+- Program: `powershell.exe`
+- Arguments: `-ExecutionPolicy Bypass -File C:\path\to\personal-server\scripts\windows-autostart.ps1`
+- Trigger: At startup and repeat every 5 minutes
+- If the task is already running, do not start a new instance
+
+What this does:
+
+- Starts the N100 compose stack inside WSL2
+- Restarts the containers if they were stopped
+- Starts `cloudflared tunnel run personal-server` if the tunnel is not running
+
+Why this works:
+
+- The compose services already use `restart: unless-stopped`, so they come
+  back when the Docker daemon comes back.
+- Re-running the autostart script is safe because it only starts missing parts.
+
+If you use Docker Engine inside WSL2 instead of Docker Desktop, make sure Docker
+starts automatically in your Ubuntu session too.
+
 ## Resource Notes
 
 Stop the news crawler during trading hours if MT4 needs every bit of headroom:
