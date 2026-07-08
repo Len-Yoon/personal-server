@@ -2,7 +2,7 @@
 
 이 문서는 Cloudflare DNS를 유지하면서 Caddy가 공개 HTTPS와 리버스 프록시를 담당하는 운영 구성을 정리합니다.
 
-이 구성은 `len.pe.kr`, `file.len.pe.kr`, `admin.len.pe.kr`, `news.len.pe.kr`, `memo.len.pe.kr`, `books.len.pe.kr`을 Caddy가 받아서 각 서비스로 분기하는 방식입니다.
+이 구성은 `len.pe.kr`을 메인 진입점으로 두고, `portal.len.pe.kr`은 호환용 별칭으로 유지하면서 `file.len.pe.kr`, `admin.len.pe.kr`, `news.len.pe.kr`, `memo.len.pe.kr`, `books.len.pe.kr`을 Caddy가 받아 각 서비스로 분기하는 방식입니다.
 
 ## 전제
 
@@ -36,7 +36,7 @@ CLOUDFLARE_API_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxx
 Cloudflare에서 공개할 호스트명을 준비합니다.
 
 - `len.pe.kr`
-- `portal.len.pe.kr`
+- `portal.len.pe.kr`(호환용 별칭, 선택)
 - `file.len.pe.kr`
 - `admin.len.pe.kr`
 - `news.len.pe.kr`

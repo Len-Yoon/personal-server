@@ -2,7 +2,7 @@
 
 이 저장소는 집 안/밖 모두에서 `len.pe.kr` 계열 서비스를 열 수 있지만, 현재 회선처럼 공유기 포트포워딩이 막히는 환경에서는 Cloudflare Tunnel이 가장 단순합니다.
 
-이 문서는 `len.pe.kr`, `portal.len.pe.kr`, `file.len.pe.kr`, `admin.len.pe.kr`, `news.len.pe.kr`, `memo.len.pe.kr`, `books.len.pe.kr`을 Cloudflare Tunnel로 연결하는 기준 운영 절차를 정리합니다.
+이 문서는 `len.pe.kr`을 메인 진입점으로 두고, `portal.len.pe.kr`은 호환용 별칭으로 유지하면서 `file.len.pe.kr`, `admin.len.pe.kr`, `news.len.pe.kr`, `memo.len.pe.kr`, `books.len.pe.kr`을 Cloudflare Tunnel로 연결하는 기준 운영 절차를 정리합니다.
 
 ## 전제
 
@@ -43,7 +43,7 @@ credentials-file: /home/<your-linux-user>/.cloudflared/<Tunnel-UUID>.json
 ingress:
   - hostname: len.pe.kr
     service: http://localhost:8000
-  - hostname: portal.len.pe.kr
+  - hostname: portal.len.pe.kr # 호환용 별칭
     service: http://localhost:8000
   - hostname: file.len.pe.kr
     service: http://localhost:8000

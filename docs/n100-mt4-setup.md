@@ -147,18 +147,17 @@ If you are moving data from another machine, copy the `data/` folder into:
 ~/personal-server/data/
 ```
 
-## Start the lightweight default stack
+## Start the N100 stack
 
-This starts the core app containers:
+This starts the app containers used by the personal server:
 
 - `portal-web`
 - `system-agent`
+- `crawler-worker`
 - `book-memo`
 - `youtube-memo`
 
 If you enable public HTTPS, the N100 override also starts `caddy`.
-
-`crawler-worker` can be started separately when you need it.
 
 Even in the N100 stack, the app ports are bound to `127.0.0.1`, so you can
 still open the apps locally from the machine itself:
@@ -203,15 +202,9 @@ Recommended Task Scheduler setup:
 If the collector stops for about 15 minutes, the portal dashboard keeps working
 and shows a `host_metrics_stale` or `host_metrics_missing` warning.
 
-## Optional services
+## Resource Notes
 
-Start the news crawler only when you need it:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.n100.yml --profile worker up -d crawler-worker
-```
-
-Stop it during trading hours if MT4 needs every bit of headroom:
+Stop the news crawler during trading hours if MT4 needs every bit of headroom:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.n100.yml stop crawler-worker
