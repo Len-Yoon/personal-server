@@ -3,9 +3,7 @@ import secrets
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from fastapi import Depends, status
 from fastapi.responses import FileResponse, RedirectResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 
 from app.services import file_store
@@ -18,49 +16,7 @@ from app.services.security import (
 )
 
 
-security = HTTPBasic(auto_error=False)
-
-
-def require_file_auth(
-    request: Request,
-    credentials: HTTPBasicCredentials | None = Depends(security),
-) -> None:
-    password = os.getenv("FILE_MANAGER_PASSWORD", "")
-    client = _client_id(request)
-
-    if auth_rate_limited("file_auth", client):
-        append_security_event("file_auth_rate_limited", client=client)
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="로그인 실패가 반복되어 잠시 후 다시 시도해주세요.",
-        )
-
-    if not password:
-        if _file_auth_required():
-            append_security_event("file_auth_blocked", reason="password_not_configured")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="파일함 관리자 비밀번호가 설정되지 않았습니다.",
-            )
-        return
-
-    is_valid = (
-        credentials is not None
-        and secrets.compare_digest(credentials.username, "len")
-        and secrets.compare_digest(credentials.password, password)
-    )
-    if not is_valid:
-        record_auth_failure("file_auth", client)
-        append_security_event("file_auth_failed", username=credentials.username if credentials else "")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="파일함 로그인이 필요합니다.",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    clear_auth_failures("file_auth", client)
-
-
-router = APIRouter(prefix="/files", dependencies=[Depends(require_file_auth)])
+router = APIRouter(prefix="/files")
 templates = Jinja2Templates(directory="app/templates")
 templates.env.filters["filesize"] = file_store.format_size
 
@@ -196,16 +152,6 @@ def _require_delete_password(request: Request, password: str) -> None:
         append_security_event("delete_password_failed")
         raise HTTPException(status_code=403, detail="삭제 비밀번호가 올바르지 않습니다.")
     clear_auth_failures("file_delete", client)
-
-
-def _file_auth_required() -> bool:
-    if _truthy(os.getenv("FILE_MANAGER_AUTH_REQUIRED", "")):
-        return True
-    return os.getenv("APP_ENV", "").strip().lower() in {"prod", "production"}
-
-
-def _truthy(value: str) -> bool:
-    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _client_id(request: Request) -> str:
