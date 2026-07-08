@@ -5,7 +5,7 @@ from typing import Mapping
 
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal"}
-PUBLIC_PORTAL_URL = "https://portal.len.pe.kr"
+PUBLIC_PORTAL_URL = "https://len.pe.kr"
 PUBLIC_SERVICE_URLS = {
     "NEWS_SERVICE_URL": "https://news.len.pe.kr",
     "YOUTUBE_MEMO_URL": "https://memo.len.pe.kr",
@@ -66,4 +66,3 @@ def service_url(env_name: str, host: str, fallback: str | None = None) -> str:
 
 def service_base_urls(host: str) -> dict[str, str]:
     return LOCAL_SERVICE_URLS if is_local_host(host) else PUBLIC_SERVICE_URLS
-

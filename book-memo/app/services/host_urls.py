@@ -5,7 +5,7 @@ from typing import Mapping
 
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal"}
-PUBLIC_PORTAL_URL = "https://portal.len.pe.kr"
+PUBLIC_PORTAL_URL = "https://len.pe.kr"
 
 
 def request_host_from_headers(headers: Mapping[str, str]) -> str:
@@ -39,4 +39,3 @@ def is_local_host(host: str) -> bool:
 
 def portal_home_url(host: str) -> str:
     return "http://127.0.0.1:8000/" if is_local_host(host) else f"{PUBLIC_PORTAL_URL}/"
-
