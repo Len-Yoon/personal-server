@@ -11,6 +11,7 @@ using `docker-compose.n100.yml` to keep CPU and memory usage low.
 - Ubuntu 24.04 in WSL2 for this repo.
 - Docker Engine inside WSL2, or Docker Desktop if you prefer GUI management.
 - Tailscale for private remote access.
+- Caddy + Cloudflare DNS challenge for public access when you can forward `80`/`443`.
 - Cloudflare Tunnel for public access when you do not want port forwarding.
 
 The lightest practical path is:
@@ -148,15 +149,16 @@ If you are moving data from another machine, copy the `data/` folder into:
 
 ## Start the lightweight default stack
 
-This starts only:
+This starts the core app containers:
 
 - `portal-web`
 - `system-agent`
 - `book-memo`
 - `youtube-memo`
 
-`crawler-worker` is behind a Compose profile so it does not consume resources
-by default.
+If you enable public HTTPS, the N100 override also starts `caddy`.
+
+`crawler-worker` can be started separately when you need it.
 
 Even in the N100 stack, the app ports are bound to `127.0.0.1`, so you can
 still open the apps locally from the machine itself:
@@ -214,6 +216,8 @@ Stop it during trading hours if MT4 needs every bit of headroom:
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.n100.yml stop crawler-worker
 ```
+
+If you are using Caddy for public access, keep the apps on localhost and follow `docs/caddy-cloudflare.md` for the proxy setup. In that mode, Caddy handles public HTTPS and reverse proxying.
 
 If you are using Cloudflare Tunnel for public access, keep the apps on localhost and follow `docs/cloudflare-tunnel.md` for the tunnel setup. In that mode, `cloudflared` handles public ingress and no reverse proxy container is required.
 
@@ -290,6 +294,9 @@ The default stack is designed to stay small:
 - `book-memo`: 1 worker, no reload, 192 MB cap
 - `youtube-memo`: 1 worker, no reload, 160 MB cap
 - `crawler-worker`: optional, 320 MB cap
+- `caddy`: optional for public HTTPS, 80/443 exposure
+
+For a Caddy + Cloudflare setup, the apps stay bound to localhost and Caddy handles public HTTPS.
 
 For a Cloudflare Tunnel setup, the apps stay bound to localhost and `cloudflared` handles public ingress.
 

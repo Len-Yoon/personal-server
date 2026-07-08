@@ -1,4 +1,4 @@
-﻿# ?댁쁺 override: ?몃? 怨듦컻 踰붿쐞瑜?以꾩씠怨?而⑦뀒?대꼫 ?먯썝???쒗븳??
+# N100 override: binds app ports to localhost and adds Caddy for public HTTPS.
 services:
   portal-web:
     ports: !override
@@ -155,3 +155,26 @@ services:
       options:
         max-size: "5m"
         max-file: "2"
+
+  caddy:
+    build:
+      context: ./caddy
+    restart: unless-stopped
+    environment:
+      CADDY_EMAIL: ${CADDY_EMAIL:-}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
+    depends_on:
+      - portal-web
+      - crawler-worker
+      - youtube-memo
+      - book-memo
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
