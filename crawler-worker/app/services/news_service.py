@@ -1,11 +1,13 @@
 import time
 
-from app.crawlers.google_news_rss import search_google_news_rss
+# from app.crawlers.google_news_rss import search_google_news_rss
+from app.crawlers.investing_news import search_investing_news
 
 
 CACHE_TTL_SECONDS = 300
 RSS_FETCH_LIMIT = 80
 RSS_FRESHNESS = "1d"
+INVESTING_SOURCE_FILTER = "Investing.com"
 
 _news_cache = {}
 
@@ -75,11 +77,17 @@ def collect_market_news(
     config = CATEGORY_CONFIG[category]
     query = config["query"]
 
-    articles = search_google_news_rss(
-        query=query,
+    # Google News RSS는 Investing.com 단독 수집을 시험하기 위해 비활성화함.
+    # articles = search_google_news_rss(
+    #     query=query,
+    #     category=category,
+    #     limit=RSS_FETCH_LIMIT,
+    #     freshness=RSS_FRESHNESS,
+    # )
+    articles = search_investing_news(
         category=category,
         limit=RSS_FETCH_LIMIT,
-        freshness=RSS_FRESHNESS,
+        source_filter=INVESTING_SOURCE_FILTER,
     )
 
     merged = _merge_articles(articles)

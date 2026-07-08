@@ -37,7 +37,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         news_service._news_cache.clear()
 
         with patch(
-            "app.services.news_service.search_google_news_rss",
+            "app.services.news_service.search_investing_news",
             return_value=[{"url": "https://example.com/a", "title": "A"}],
         ) as mocked_search:
             first = news_service.collect_market_news("world", limit=1)
@@ -46,6 +46,29 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         self.assertFalse(first["cache"]["hit"])
         self.assertTrue(second["cache"]["hit"])
         self.assertEqual(mocked_search.call_count, 1)
+
+    def test_collect_market_news_uses_investing_news(self):
+        news_service = self.reload_news_service()
+        news_service._news_cache.clear()
+
+        with patch(
+            "app.services.news_service.search_investing_news",
+            return_value=[
+                {
+                    "url": "https://kr.investing.com/news/commodities-news/gold-1",
+                    "title": "금 가격, 연준 의사록 앞두고 보합세",
+                    "title_ko": "금 가격, 연준 의사록 앞두고 보합세",
+                    "title_original": "금 가격, 연준 의사록 앞두고 보합세",
+                    "source": "Investing.com",
+                    "published_at": "2시간 전",
+                    "provider": "Investing.com KR",
+                }
+            ],
+        ) as mocked_search:
+            result = news_service.collect_market_news("gold", limit=1, force_refresh=True)
+
+        self.assertEqual(result["articles"][0]["provider"], "Investing.com KR")
+        mocked_search.assert_called_once()
 
 
 if __name__ == "__main__":
