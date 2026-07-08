@@ -14,6 +14,7 @@ from app.services.saved_news_service import (
     save_news_summary,
     search_saved_news,
 )
+from app.services.host_urls import portal_home_url, request_host_from_headers
 
 
 router = APIRouter()
@@ -21,6 +22,13 @@ templates = Jinja2Templates(directory="app/templates")
 AUTH_RATE_LIMIT_MAX_FAILURES = int(os.getenv("AUTH_RATE_LIMIT_MAX_FAILURES", "5"))
 AUTH_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("AUTH_RATE_LIMIT_WINDOW_SECONDS", "300"))
 _AUTH_FAILURES: dict[str, list[datetime]] = {}
+
+
+def _portal_home_url(request: Request) -> str:
+    return portal_home_url(request_host_from_headers(request.headers))
+
+
+templates.env.globals["portal_home_url"] = _portal_home_url
 
 
 class ArticleSummaryRequest(BaseModel):

@@ -109,15 +109,27 @@ class PortalDashboardTests(unittest.TestCase):
 
     def test_portal_home_url_uses_local_address_on_localhost(self):
         prepare_service_import("book-memo")
+        os.environ.pop("PORTAL_HOME_URL", None)
         from app.services.host_urls import portal_home_url
 
         self.assertEqual(portal_home_url("127.0.0.1"), "http://127.0.0.1:8000/")
 
     def test_portal_home_url_uses_public_address_outside_local(self):
         prepare_service_import("youtube-memo")
+        os.environ.pop("PORTAL_HOME_URL", None)
         from app.services.host_urls import portal_home_url
 
-        self.assertEqual(portal_home_url("memo.len.pe.kr"), "https://portal.len.pe.kr/")
+        self.assertEqual(portal_home_url("memo.len.pe.kr"), "https://len.pe.kr/")
+
+    def test_portal_home_url_uses_env_public_address(self):
+        prepare_service_import("youtube-memo")
+        os.environ["PORTAL_HOME_URL"] = "https://example.com/"
+        from app.services.host_urls import portal_home_url
+
+        try:
+            self.assertEqual(portal_home_url("memo.len.pe.kr"), "https://example.com/")
+        finally:
+            os.environ.pop("PORTAL_HOME_URL", None)
 
     def test_dashboard_service_urls_follow_host_mode(self):
         prepare_service_import("portal-web")

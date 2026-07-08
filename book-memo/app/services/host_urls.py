@@ -1,11 +1,29 @@
 from __future__ import annotations
 
 import ipaddress
+import os
 from typing import Mapping
 
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal"}
-PUBLIC_PORTAL_URL = "https://len.pe.kr"
+SECOND_LEVEL_KR_DOMAINS = {"co", "or", "go", "ac", "ne", "re", "pe"}
+
+
+def public_portal_url(host: str) -> str:
+    configured = os.getenv("PORTAL_HOME_URL", "").strip().rstrip("/")
+
+    if configured:
+        return configured
+
+    labels = host.strip().lower().split(".")
+
+    if len(labels) >= 3 and labels[-1] == "kr" and labels[-2] in SECOND_LEVEL_KR_DOMAINS:
+        return f"https://{'.'.join(labels[-3:])}"
+
+    if len(labels) >= 2:
+        return f"https://{'.'.join(labels[-2:])}"
+
+    return "/"
 
 
 def request_host_from_headers(headers: Mapping[str, str]) -> str:
@@ -38,4 +56,8 @@ def is_local_host(host: str) -> bool:
 
 
 def portal_home_url(host: str) -> str:
-    return "http://127.0.0.1:8000/" if is_local_host(host) else f"{PUBLIC_PORTAL_URL}/"
+    if is_local_host(host):
+        return "http://127.0.0.1:8000/"
+
+    base_url = public_portal_url(host)
+    return "/" if base_url == "/" else f"{base_url}/"

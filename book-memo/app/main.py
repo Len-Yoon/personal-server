@@ -39,6 +39,13 @@ AUTH_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("AUTH_RATE_LIMIT_WINDOW_SECONDS",
 _AUTH_FAILURES: dict[str, list[datetime]] = {}
 
 
+def _portal_home_url(request: Request) -> str:
+    return portal_home_url(request_host_from_headers(request.headers))
+
+
+templates.env.globals["portal_home_url_for_request"] = _portal_home_url
+
+
 @app.get("/")
 def home(
     request: Request,
@@ -67,6 +74,7 @@ def home(
             "error": error,
             "has_aladin_key": bool(os.getenv("ALADIN_TTB_KEY", "").strip()),
             "statuses": ["읽을 예정", "읽는 중", "완료", "보류"],
+            "portal_home_url": portal_home_url(request_host_from_headers(request.headers)),
         },
     )
 

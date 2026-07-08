@@ -30,6 +30,13 @@ AUTH_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("AUTH_RATE_LIMIT_WINDOW_SECONDS",
 _AUTH_FAILURES: dict[str, list[datetime]] = {}
 
 
+def _portal_home_url(request: Request) -> str:
+    return portal_home_url(request_host_from_headers(request.headers))
+
+
+templates.env.globals["portal_home_url_for_request"] = _portal_home_url
+
+
 @app.get("/")
 def home(request: Request):
     return templates.TemplateResponse(
@@ -38,6 +45,7 @@ def home(request: Request):
             "request": request,
             "title": "유튜브 메모장",
             "videos": list_videos(),
+            "portal_home_url": portal_home_url(request_host_from_headers(request.headers)),
         },
     )
 

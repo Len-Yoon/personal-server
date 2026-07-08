@@ -26,7 +26,7 @@
         </div>
 
         <div class="header-actions">
-            <a class="text-link" href="/">뉴스 홈</a>
+            <a class="text-link" href="{{ portal_home_url(request) }}">메인 홈</a>
             <a class="text-link" href="/saved">저장한 뉴스</a>
             <a class="text-link" href="/category?category={{ result.category }}&refresh=true">새로 수집</a>
         </div>
@@ -83,6 +83,23 @@
                 </div>
 
                 <div class="summary-box" hidden></div>
+            </article>
+        {% else %}
+            <article class="news-card empty-card">
+                <div class="news-meta-row">
+                    <span class="status-badge">Investing.com KR</span>
+                    <span>수집 결과 없음</span>
+                </div>
+
+                <h3>Investing.com 뉴스가 수집되지 않았습니다.</h3>
+                <p class="summary">
+                    현재 기존 RSS 수집은 비활성화되어 있으며, Investing.com HTML 수집만 시도합니다.
+                    Investing.com이 Cloudflare 확인 페이지를 반환하면 기사 목록이 0건으로 표시될 수 있습니다.
+                </p>
+
+                <a class="article-link" href="https://kr.investing.com/news/" target="_blank">
+                    Investing.com 뉴스 직접 열기 →
+                </a>
             </article>
         {% endfor %}
     </section>

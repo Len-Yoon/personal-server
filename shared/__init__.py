@@ -1,7 +1,6 @@
 from shared.host_urls import (
     LOCAL_HOSTS,
     LOCAL_SERVICE_URLS,
-    PUBLIC_PORTAL_URL,
     PUBLIC_SERVICE_URLS,
     is_local_host,
     portal_home_url,
@@ -9,4 +8,3 @@ from shared.host_urls import (
     service_base_urls,
     service_url,
 )
-
