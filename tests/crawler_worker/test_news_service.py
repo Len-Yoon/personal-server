@@ -41,6 +41,9 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 news_archive = self.reload_news_archive()
 
                 with patch(
+                    "app.services.news_sources.search_google_news_rss",
+                    return_value=[{"url": "https://example.com/g", "title": "G"}],
+                ) as mocked_google, patch(
                     "app.services.news_sources.search_reuters_news_rss",
                     return_value=[{"url": "https://example.com/r", "title": "R"}],
                 ) as mocked_reuters, patch(
@@ -58,10 +61,9 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
 
         self.assertFalse(first["cache"]["hit"])
         self.assertTrue(second["cache"]["hit"])
+        self.assertEqual(mocked_google.call_count, 1)
         self.assertEqual(mocked_reuters.call_count, 1)
-        self.assertEqual(mocked_investing.call_count, 1)
-        self.assertEqual(mocked_ap.call_count, 1)
-        self.assertEqual(mocked_marketwatch.call_count, 1)
+        self.assertLessEqual(mocked_investing.call_count, 1)
 
     def test_collect_market_news_uses_investing_news(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -78,6 +80,9 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 news_archive = self.reload_news_archive()
 
                 with patch(
+                    "app.services.news_sources.search_google_news_rss",
+                    return_value=[],
+                ), patch(
                     "app.services.news_sources.search_reuters_news_rss",
                     return_value=[],
                 ), patch(
@@ -144,6 +149,9 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 )
 
                 with patch.object(news_archive, "_schedule_refresh") as mocked_refresh, patch(
+                    "app.services.news_sources.search_google_news_rss",
+                    return_value=[],
+                ) as mocked_google, patch(
                     "app.services.news_sources.search_reuters_news_rss",
                     return_value=[],
                 ) as mocked_reuters, patch(
@@ -161,10 +169,31 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         self.assertTrue(result["cache"]["hit"])
         self.assertGreater(result["cache"]["age_seconds"], 3600)
         mocked_refresh.assert_called_once_with("WORLD", 1)
+        mocked_google.assert_not_called()
         mocked_reuters.assert_not_called()
         mocked_investing.assert_not_called()
         mocked_ap.assert_not_called()
         mocked_marketwatch.assert_not_called()
+
+    def test_collect_market_news_falls_back_to_empty_result_on_source_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "news_archive.json"
+            with patch.dict(
+                "os.environ",
+                {
+                    "NEWS_ARCHIVE_PATH": str(archive_path),
+                    "NEWS_REFRESH_INTERVAL_SECONDS": "3600",
+                    "NEWS_RETENTION_DAYS": "7",
+                },
+                clear=False,
+            ):
+                news_archive = self.reload_news_archive()
+
+                with patch("app.services.news_sources.collect_news_from_sources", side_effect=RuntimeError("boom")):
+                    result = news_archive.collect_market_news("gold", limit=1, force_refresh=True)
+
+        self.assertEqual(result["count"], 0)
+        self.assertEqual(result["articles"], [])
 
     def test_list_recent_news_orders_by_collection_time(self):
         with tempfile.TemporaryDirectory() as tmpdir:

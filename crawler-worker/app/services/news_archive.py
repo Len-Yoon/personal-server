@@ -68,10 +68,13 @@ def collect_market_news(
             else 0,
         )
 
-    fresh_articles = collect_news_from_sources(
-        category=category,
-        limit=limit,
-    )
+    try:
+        fresh_articles = collect_news_from_sources(
+            category=category,
+            limit=limit,
+        )
+    except Exception:
+        fresh_articles = category_articles
     stored_articles = [
         _attach_archive_metadata(article, category=category, now=now)
         for article in fresh_articles
@@ -211,10 +214,13 @@ def _refresh_category(category: str, limit: int) -> None:
     if purged:
         archive["updated_at"] = _iso(now)
 
-    fresh_articles = collect_news_from_sources(
-        category=category,
-        limit=limit,
-    )
+    try:
+        fresh_articles = collect_news_from_sources(
+            category=category,
+            limit=limit,
+        )
+    except Exception:
+        fresh_articles = []
     stored_articles = [
         _attach_archive_metadata(article, category=category, now=now)
         for article in fresh_articles

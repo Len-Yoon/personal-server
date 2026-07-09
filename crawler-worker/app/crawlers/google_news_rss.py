@@ -1,77 +1,30 @@
-from datetime import timezone
-from email.utils import parsedate_to_datetime
-from urllib.parse import quote_plus
+from __future__ import annotations
 
-import feedparser
+from app.crawlers.rss_news import build_google_news_rss_url, search_rss_news
+
+
+GOOGLE_NEWS_QUERIES = {
+    "WORLD": "world markets OR global markets OR inflation OR rates",
+    "NASDAQ": "nasdaq OR semiconductors OR artificial intelligence OR tech stocks",
+    "GOLD": "gold prices OR gold futures OR dollar OR inflation",
+    "HK50": "hang seng OR hong kong stocks OR china markets",
+}
 
 
 def search_google_news_rss(
-    query: str,
     category: str,
     limit: int = 20,
-    freshness: str = "1d",
-):
-    query_with_freshness = f"({query}) when:{freshness}" if freshness else query
-    encoded_query = quote_plus(query_with_freshness)
+    source_filter: str = "",
+) -> list[dict]:
+    category = category.upper()
+    query = GOOGLE_NEWS_QUERIES.get(category, GOOGLE_NEWS_QUERIES["WORLD"])
+    feed_url = build_google_news_rss_url(query, freshness="1d")
 
-    rss_url = (
-        "https://news.google.com/rss/search?"
-        f"q={encoded_query}"
-        "&hl=ko"
-        "&gl=KR"
-        "&ceid=KR:ko"
+    return search_rss_news(
+        feed_urls=[feed_url],
+        category=category,
+        source_name="Google News",
+        provider_name="Google News RSS",
+        limit=limit,
+        source_filter=source_filter,
     )
-
-    feed = feedparser.parse(rss_url)
-
-    articles = []
-
-    for entry in feed.entries:
-        title = getattr(entry, "title", "")
-        link = getattr(entry, "link", "")
-        published = getattr(entry, "published", "")
-        published_at_sort = _parse_published_at(published)
-        source = "Google News RSS"
-
-        if hasattr(entry, "source") and hasattr(entry.source, "title"):
-            source = entry.source.title
-
-        if not title or not link:
-            continue
-
-        articles.append(
-            {
-                "category": category,
-                "title": title,
-                "title_ko": title,
-                "title_original": title,
-                "url": link,
-                "source": source,
-                "published_at": published,
-                "published_at_sort": published_at_sort,
-                "summary": "",
-                "provider": "Google News RSS KR",
-            }
-        )
-
-    articles.sort(
-        key=lambda article: article.get("published_at_sort") or "",
-        reverse=True,
-    )
-
-    return articles[:limit]
-
-
-def _parse_published_at(value: str) -> str:
-    if not value:
-        return ""
-
-    try:
-        parsed = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
-        return ""
-
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-
-    return parsed.astimezone(timezone.utc).isoformat()

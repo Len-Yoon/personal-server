@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote_plus
+
+
+REQUEST_TIMEOUT_SECONDS = 8
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
 
 
 def search_rss_news(
@@ -22,8 +32,10 @@ def search_rss_news(
 
     for feed_url in feed_urls:
         try:
-            feed = feedparser.parse(feed_url)
-        except Exception:
+            request = Request(feed_url, headers={"User-Agent": USER_AGENT, "Accept": "application/rss+xml,application/xml,text/xml,*/*"})
+            with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                feed = feedparser.parse(response)
+        except (OSError, TimeoutError, URLError, ValueError, Exception):
             continue
 
         for entry in getattr(feed, "entries", []):
