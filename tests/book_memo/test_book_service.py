@@ -42,6 +42,40 @@ class BookMemoServiceTests(unittest.TestCase):
             self.assertEqual(added, 2)
             self.assertEqual([chapter["title"] for chapter in chapters], ["개요", "요약"])
 
+    def test_list_books_prioritizes_reading_books_then_planned_then_completed(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            book_service = self.reload_book_service(tempdir)
+
+            reading_book = book_service.create_or_get_book({"isbn": "9780000000003", "title": "읽는 중 책"})
+            planned_book = book_service.create_or_get_book({"isbn": "9780000000004", "title": "읽을 예정 책"})
+            finished_book = book_service.create_or_get_book({"isbn": "9780000000005", "title": "완료 책"})
+
+            book_service.update_progress(
+                reading_book["id"],
+                reading_status="읽는 중",
+                current_page=120,
+                current_chapter="3장",
+                progress_percent=45,
+            )
+            book_service.update_progress(
+                planned_book["id"],
+                reading_status="읽을 예정",
+                current_page=0,
+                current_chapter="",
+                progress_percent=0,
+            )
+            book_service.update_progress(
+                finished_book["id"],
+                reading_status="완료",
+                current_page=300,
+                current_chapter="",
+                progress_percent=100,
+            )
+
+            books = book_service.list_books()
+
+            self.assertEqual([book["title"] for book in books], ["읽는 중 책", "읽을 예정 책", "완료 책"])
+
     def test_search_books_falls_back_to_google_books(self):
         os.environ.pop("ALADIN_TTB_KEY", None)
         book_search = self.reload_book_search()
