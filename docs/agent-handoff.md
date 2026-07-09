@@ -30,7 +30,6 @@
 - [`portal-web/app/services/global_search.py`](/Users/len/PycharmProjects/personal-server/portal-web/app/services/global_search.py): 서비스 통합 검색
 - [`system-agent/app/services/metrics.py`](/Users/len/PycharmProjects/personal-server/system-agent/app/services/metrics.py): host metrics 집계
 - [`scripts/maintenance.py`](/Users/len/PycharmProjects/personal-server/scripts/maintenance.py): SQLite 백업, 로그 정리
-- [`scripts/windows-host-metrics.ps1`](/Users/len/PycharmProjects/personal-server/scripts/windows-host-metrics.ps1): Windows host 상태 수집
 
 ## 4. 현재 운영 기준
 

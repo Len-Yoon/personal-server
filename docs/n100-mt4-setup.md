@@ -183,51 +183,23 @@ http://127.0.0.1:18010/health
 
 ## Windows host metrics
 
-The web apps run in Docker/WSL2, so they cannot perfectly observe the Windows
-host by themselves. Use the included PowerShell collector to write Windows CPU,
-memory, disk, and uptime metrics into the shared data folder:
+`system-agent` reads `data/system/host-metrics.json` when it exists. If the
+file is missing or stale, the admin page still works and simply shows a
+warning.
+
+The included Windows bootstrap script installs a user-level startup entry that
+waits 1 minute after login, starts the Docker stack, and connects the Cloudflare
+Tunnel. It then repeats the same recovery check every 10 minutes with very low
+overhead.
+
+Install it with:
 
 ```powershell
-cd <repo-path>
-powershell -ExecutionPolicy Bypass -File .\scripts\windows-host-metrics.ps1 -OutputPath .\data\system\host-metrics.json
+powershell -ExecutionPolicy Bypass -File C:\personal-server\scripts\windows-bootstrap.ps1 -InstallTask
 ```
 
-Recommended Task Scheduler setup:
-
-- Program: `powershell.exe`
-- Arguments: `-ExecutionPolicy Bypass -File C:\path\to\personal-server\scripts\windows-host-metrics.ps1 -OutputPath C:\path\to\personal-server\data\system\host-metrics.json`
-- Trigger: every 5 minutes
-- Run whether user is logged on or not: optional, depending on your Windows account policy
-
-If the collector stops for about 15 minutes, the portal dashboard keeps working
-and shows a `host_metrics_stale` or `host_metrics_missing` warning.
-
-## Auto start
-
-To make the stack come back after Windows boots, use Windows Task Scheduler to
-run `scripts/windows-autostart.ps1`.
-
-Recommended setup:
-
-- Program: `powershell.exe`
-- Arguments: `-ExecutionPolicy Bypass -File C:\path\to\personal-server\scripts\windows-autostart.ps1`
-- Trigger: At startup and repeat every 5 minutes
-- If the task is already running, do not start a new instance
-
-What this does:
-
-- Starts the N100 compose stack inside WSL2
-- Restarts the containers if they were stopped
-- Starts `cloudflared tunnel run personal-server` if the tunnel is not running
-
-Why this works:
-
-- The compose services already use `restart: unless-stopped`, so they come
-  back when the Docker daemon comes back.
-- Re-running the autostart script is safe because it only starts missing parts.
-
-If you use Docker Engine inside WSL2 instead of Docker Desktop, make sure Docker
-starts automatically in your Ubuntu session too.
+The same script can be run manually with `-Start` to bring the stack up once
+right away, or with `-Daemon` to run the always-on lightweight recovery loop.
 
 ## Resource Notes
 
@@ -290,10 +262,10 @@ python3 scripts/maintenance.py backup
 python3 scripts/maintenance.py prune-logs
 ```
 
-Or run the Windows wrapper from Task Scheduler:
+Install and run the lightweight Windows bootstrap from the Windows startup entry:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\windows-maintenance.ps1
+powershell -ExecutionPolicy Bypass -File C:\personal-server\scripts\windows-bootstrap.ps1 -InstallTask
 ```
 
 If file uploads should be included in backups, set:

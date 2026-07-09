@@ -30,12 +30,11 @@
 - Modify: `docker-compose.yml`
 - Modify: `docker-compose.n100.yml`
 - Modify: `.env.example`
-- Create: `scripts/windows-host-metrics.ps1`
 
 - [ ] Add `system-agent` to compose with shared read-only data mounts.
 - [ ] Add N100 CPU and memory limits.
 - [ ] Add environment variables for agent URL, host metrics path, and demo mode.
-- [ ] Add a PowerShell collector that writes `data/system/host-metrics.json`.
+- [ ] Add a Windows bootstrap script that starts Docker and Cloudflare Tunnel at boot.
 
 ### Task 3: Portal Status And Search
 
@@ -72,7 +71,7 @@
 - Modify: `docs/agent-handoff.md`
 - Modify: `docs/n100-mt4-setup.md`
 
-- [ ] Document `system-agent`, `DEMO_MODE`, global search, and Windows Task Scheduler setup.
+- [ ] Document `system-agent`, `DEMO_MODE`, global search, and the Windows startup entry bootstrap.
 - [ ] Run `PYTHONPATH=portal-web python3 -m unittest discover -s tests`.
 - [ ] Run `PYTHONPATH=system-agent python3 -m unittest tests.system_agent.test_metrics`.
 - [ ] Run `python3 -m compileall portal-web/app system-agent/app youtube-memo/app book-memo/app crawler-worker/app`.
