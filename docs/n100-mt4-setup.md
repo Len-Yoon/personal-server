@@ -189,7 +189,7 @@ warning.
 
 The included Windows bootstrap script installs a user-level startup entry that
 waits 1 minute after login, starts the Docker stack, and connects the Cloudflare
-Tunnel. It then repeats the same recovery check every 10 minutes with very low
+Tunnel. It then repeats the same recovery check every 30 minutes with very low
 overhead.
 
 Install it with:

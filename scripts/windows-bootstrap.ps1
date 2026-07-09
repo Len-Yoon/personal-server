@@ -21,6 +21,35 @@ function Invoke-WslCommand([string]$Command) {
     }
 }
 
+function Update-HostMetrics {
+    $systemDir = Join-Path $ProjectRoot "data\system"
+    $metricsPath = Join-Path $systemDir "host-metrics.json"
+
+    New-Item -ItemType Directory -Path $systemDir -Force | Out-Null
+
+    $os = Get-CimInstance Win32_OperatingSystem
+    $cpu = Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average
+    $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+
+    $totalMemory = [double]$os.TotalVisibleMemorySize * 1KB
+    $freeMemory = [double]$os.FreePhysicalMemory * 1KB
+    $usedMemory = [Math]::Max(0, $totalMemory - $freeMemory)
+    $memoryPercent = if ($totalMemory -gt 0) { [Math]::Round(($usedMemory / $totalMemory) * 100, 1) } else { 0 }
+    $diskPercent = if ($disk.Size -gt 0) { [Math]::Round((($disk.Size - $disk.FreeSpace) / $disk.Size) * 100, 1) } else { 0 }
+    $cpuPercent = if ($null -ne $cpu.Average) { [Math]::Round([double]$cpu.Average, 1) } else { 0 }
+
+    $payload = [ordered]@{
+        captured_at = (Get-Date).ToUniversalTime().ToString("o")
+        cpu_percent = $cpuPercent
+        memory_percent = $memoryPercent
+        disk_percent = $diskPercent
+        uptime_seconds = [Math]::Round(((Get-Date) - $os.LastBootUpTime).TotalSeconds)
+    }
+
+    $payload | ConvertTo-Json -Depth 3 | Set-Content -Path $metricsPath -Encoding utf8
+    Write-Info "Updated host metrics at $metricsPath"
+}
+
 function Start-PersonalServerStack {
     Invoke-WslCommand ""
     Write-Info "Ensured Docker stack is up and Cloudflare Tunnel is running."
@@ -40,13 +69,15 @@ function Install-ScheduledTask {
 }
 
 function Start-Daemon {
+    Update-HostMetrics
     Write-Info "Waiting 60 seconds before the first startup sync."
     Start-Sleep -Seconds 60
 
     while ($true) {
+        Update-HostMetrics
         Start-PersonalServerStack
-        Write-Info "Sleeping 10 minutes before the next recovery check."
-        Start-Sleep -Seconds 600
+        Write-Info "Sleeping 30 minutes before the next recovery check."
+        Start-Sleep -Seconds 1800
     }
 }
 
@@ -61,11 +92,13 @@ if ($Daemon) {
 }
 
 if ($Start) {
+    Update-HostMetrics
     Start-PersonalServerStack
     exit 0
 }
 
 if ($Watchdog) {
+    Update-HostMetrics
     Start-PersonalServerStack
     exit 0
 }
