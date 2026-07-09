@@ -81,51 +81,70 @@ def _fetch_rendered_page_data(url: str) -> dict:
         return {"html": "", "body_text": "", "cards": []}
 
     with _BROWSER_LOCK:
-        PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
-        with sync_playwright() as playwright:
-            context = playwright.chromium.launch_persistent_context(
-                user_data_dir=str(PROFILE_DIR),
-                headless=True,
-                viewport={"width": 1440, "height": 2200},
-                locale="ko-KR",
-                user_agent=USER_AGENT,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage",
-                ],
-            )
-
-            try:
-                page = context.pages[0] if context.pages else context.new_page()
-                page.goto(url, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT_MS)
+            with sync_playwright() as playwright:
+                context = playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(PROFILE_DIR),
+                    headless=True,
+                    viewport={"width": 1440, "height": 2200},
+                    locale="ko-KR",
+                    user_agent=USER_AGENT,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-dev-shm-usage",
+                    ],
+                )
 
                 try:
-                    page.wait_for_load_state("networkidle", timeout=5000)
-                except PlaywrightTimeoutError:
-                    pass
+                    page = context.pages[0] if context.pages else context.new_page()
+                    page.goto(url, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT_MS)
 
-                html = page.content()
-                body_text = page.locator("body").inner_text()
-                cards = _extract_article_cards(page)
-
-                if _is_cloudflare_challenge(html):
                     try:
-                        page.wait_for_timeout(4000)
-                        page.reload(wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT_MS)
-                        html = page.content()
-                        body_text = page.locator("body").inner_text()
-                        cards = _extract_article_cards(page)
+                        page.wait_for_load_state("networkidle", timeout=5000)
                     except PlaywrightTimeoutError:
                         pass
 
-                return {
-                    "html": html,
-                    "body_text": body_text,
-                    "cards": cards,
-                }
-            finally:
-                context.close()
+                    html = page.content()
+                    body_text = ""
+                    cards: list[dict] = []
+
+                    try:
+                        body_text = page.locator("body").inner_text()
+                    except Exception:
+                        body_text = ""
+
+                    try:
+                        cards = _extract_article_cards(page)
+                    except Exception:
+                        cards = []
+
+                    if _is_cloudflare_challenge(html):
+                        try:
+                            page.wait_for_timeout(4000)
+                            page.reload(wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT_MS)
+                            html = page.content()
+                            try:
+                                body_text = page.locator("body").inner_text()
+                            except Exception:
+                                body_text = ""
+                            try:
+                                cards = _extract_article_cards(page)
+                            except Exception:
+                                cards = []
+                        except PlaywrightTimeoutError:
+                            pass
+
+                    return {
+                        "html": html,
+                        "body_text": body_text,
+                        "cards": cards,
+                    }
+                finally:
+                    context.close()
+        except Exception:
+            return {"html": "", "body_text": "", "cards": []}
 
 
 def _extract_article_cards(page) -> list[dict]:
