@@ -1,4 +1,5 @@
 import importlib
+import json
 import sys
 import tempfile
 import types
@@ -193,6 +194,52 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
 
         self.assertEqual(result["count"], 0)
         self.assertEqual(result["articles"], [])
+
+    def test_load_archive_sanitizes_existing_html_content(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "news_archive.json"
+            with patch.dict(
+                "os.environ",
+                {
+                    "NEWS_ARCHIVE_PATH": str(archive_path),
+                    "NEWS_REFRESH_INTERVAL_SECONDS": "3600",
+                    "NEWS_RETENTION_DAYS": "7",
+                },
+                clear=False,
+            ):
+                news_archive = self.reload_news_archive()
+                archive_path.parent.mkdir(parents=True, exist_ok=True)
+                archive_path.write_text(
+                    """
+                    {
+                      "updated_at": "2026-07-09T00:00:00+00:00",
+                      "articles": [
+                        {
+                          "category": "WORLD",
+                          "title": "<a href=\\"https://example.com/a\\">시장 뉴스</a>",
+                          "title_ko": "<a href=\\"https://example.com/a\\">시장 뉴스</a>",
+                          "title_original": "<a href=\\"https://example.com/a\\">시장 뉴스</a>",
+                          "url": "https://example.com/a",
+                          "source": "<font>Reuters</font>",
+                          "published_at": "",
+                          "summary": "<a href=\\"https://example.com/a\\">내용</a>",
+                          "provider": "<font>Reuters RSS</font>",
+                          "collected_at": "2026-07-09T00:00:00+00:00",
+                          "expires_at": "2026-07-16T00:00:00+00:00"
+                        }
+                      ]
+                    }
+                    """.strip(),
+                    encoding="utf-8",
+                )
+
+                recent = news_archive.list_recent_news(limit=1)
+                stored = json.loads(archive_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(recent[0]["summary"], "내용")
+        self.assertEqual(recent[0]["title_ko"], "시장 뉴스")
+        self.assertEqual(stored["articles"][0]["summary"], "내용")
+        self.assertEqual(stored["articles"][0]["title"], "시장 뉴스")
 
     def test_list_recent_news_orders_by_collection_time(self):
         with tempfile.TemporaryDirectory() as tmpdir:

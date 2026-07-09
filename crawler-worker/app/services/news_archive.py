@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from app.crawlers.rss_news import _html_to_text
 from app.services.news_sources import collect_news_from_sources
 
 
@@ -167,10 +168,30 @@ def _load_archive() -> dict[str, Any]:
     if not isinstance(articles, list):
         articles = []
 
-    return {
+    normalized_articles = []
+    changed = False
+
+    for article in articles:
+        if not isinstance(article, dict):
+            continue
+
+        normalized = _sanitize_article(article)
+        if normalized != article:
+            changed = True
+        normalized_articles.append(normalized)
+
+    archive = {
         "updated_at": str(data.get("updated_at", "")),
-        "articles": [article for article in articles if isinstance(article, dict)],
+        "articles": normalized_articles,
     }
+
+    if changed:
+        try:
+            _save_archive(archive)
+        except OSError:
+            pass
+
+    return archive
 
 
 def _save_archive(archive: dict[str, Any]) -> None:
@@ -320,11 +341,22 @@ def _attach_archive_metadata(
     category: str,
     now: datetime,
 ) -> dict[str, Any]:
-    stored = dict(article)
+    stored = _sanitize_article(article)
     stored["category"] = category
     stored["collected_at"] = _iso(now)
     stored["expires_at"] = _iso(now + timedelta(days=RETENTION_DAYS))
     return stored
+
+
+def _sanitize_article(article: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(article)
+
+    for field in ("title", "title_ko", "title_original", "summary", "source", "provider"):
+        value = sanitized.get(field, "")
+        if isinstance(value, str):
+            sanitized[field] = _html_to_text(value)
+
+    return sanitized
 
 
 def _latest_collected_at(articles: list[dict[str, Any]]) -> datetime | None:
