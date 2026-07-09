@@ -1,8 +1,8 @@
 import importlib
 import sys
+import tempfile
 import types
 import unittest
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -42,19 +42,23 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
 
                 with patch(
                     "app.services.news_sources.search_google_news_rss",
-                    return_value=[{"url": "https://example.com/g", "title": "G"}],
+                    return_value=[
+                        {
+                            "url": "https://example.com/a",
+                            "title": "세계 시장, 미국 금리 인하 기대에 안정세 유지",
+                            "summary": "미국 금리 인하 기대와 달러 약세가 겹치며 글로벌 금융시장이 안정적인 흐름을 보였다.",
+                            "source": "Reuters",
+                        }
+                    ],
                 ) as mocked_google, patch(
                     "app.services.news_sources.search_reuters_news_rss",
-                    return_value=[{"url": "https://example.com/r", "title": "R"}],
+                    return_value=[],
                 ) as mocked_reuters, patch(
-                    "app.services.news_sources.search_investing_news",
-                    return_value=[{"url": "https://example.com/a", "title": "A"}],
-                ) as mocked_investing, patch(
                     "app.services.news_sources.search_ap_news_rss",
-                    return_value=[{"url": "https://example.com/b", "title": "B"}],
+                    return_value=[],
                 ) as mocked_ap, patch(
                     "app.services.news_sources.search_marketwatch_news_rss",
-                    return_value=[{"url": "https://example.com/c", "title": "C"}],
+                    return_value=[],
                 ) as mocked_marketwatch:
                     first = news_archive.collect_market_news("world", limit=1)
                     second = news_archive.collect_market_news("world", limit=1)
@@ -62,10 +66,11 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         self.assertFalse(first["cache"]["hit"])
         self.assertTrue(second["cache"]["hit"])
         self.assertEqual(mocked_google.call_count, 1)
-        self.assertEqual(mocked_reuters.call_count, 1)
-        self.assertLessEqual(mocked_investing.call_count, 1)
+        self.assertEqual(mocked_reuters.call_count, 0)
+        self.assertEqual(mocked_ap.call_count, 0)
+        self.assertEqual(mocked_marketwatch.call_count, 0)
 
-    def test_collect_market_news_uses_investing_news(self):
+    def test_collect_market_news_uses_reuters_when_google_empty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             archive_path = Path(tmpdir) / "news_archive.json"
             with patch.dict(
@@ -84,21 +89,16 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                     return_value=[],
                 ), patch(
                     "app.services.news_sources.search_reuters_news_rss",
-                    return_value=[],
-                ), patch(
-                    "app.services.news_sources.search_investing_news",
                     return_value=[
                         {
-                            "url": "https://kr.investing.com/news/commodities-news/gold-1",
-                            "title": "금 가격, 연준 의사록 앞두고 보합세",
-                            "title_ko": "금 가격, 연준 의사록 앞두고 보합세",
-                            "title_original": "금 가격, 연준 의사록 앞두고 보합세",
-                            "source": "Investing.com",
-                            "published_at": "2시간 전",
-                            "provider": "Investing.com KR",
+                            "url": "https://example.com/r",
+                            "title": "금 가격, 미국 금리 전망 변화에 소폭 상승",
+                            "summary": "금 가격은 미국 금리 인하 기대와 안전자산 선호가 맞물리며 소폭 상승했다.",
+                            "source": "Reuters",
+                            "provider": "Reuters RSS",
                         }
                     ],
-                ) as mocked_search, patch(
+                ) as mocked_reuters, patch(
                     "app.services.news_sources.search_ap_news_rss",
                     return_value=[],
                 ), patch(
@@ -107,8 +107,8 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 ):
                     result = news_archive.collect_market_news("gold", limit=1, force_refresh=True)
 
-        self.assertEqual(result["articles"][0]["provider"], "Investing.com KR")
-        mocked_search.assert_called_once()
+        self.assertEqual(result["articles"][0]["provider"], "Reuters RSS")
+        mocked_reuters.assert_called_once()
 
     def test_collect_market_news_returns_stale_cache_and_refreshes_in_background(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -135,10 +135,10 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                           "title_ko": "A",
                           "title_original": "A",
                           "url": "https://example.com/a",
-                          "source": "Investing.com",
+                          "source": "Reuters",
                           "published_at": "",
                           "summary": "",
-                          "provider": "Investing.com KR",
+                          "provider": "Reuters RSS",
                           "collected_at": "2026-07-08T00:00:00+00:00",
                           "expires_at": "2026-07-15T00:00:00+00:00"
                         }
@@ -155,9 +155,6 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                     "app.services.news_sources.search_reuters_news_rss",
                     return_value=[],
                 ) as mocked_reuters, patch(
-                    "app.services.news_sources.search_investing_news",
-                    return_value=[],
-                ) as mocked_investing, patch(
                     "app.services.news_sources.search_ap_news_rss",
                     return_value=[],
                 ) as mocked_ap, patch(
@@ -171,7 +168,6 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         mocked_refresh.assert_called_once_with("WORLD", 1)
         mocked_google.assert_not_called()
         mocked_reuters.assert_not_called()
-        mocked_investing.assert_not_called()
         mocked_ap.assert_not_called()
         mocked_marketwatch.assert_not_called()
 
@@ -189,7 +185,10 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
             ):
                 news_archive = self.reload_news_archive()
 
-                with patch("app.services.news_sources.collect_news_from_sources", side_effect=RuntimeError("boom")):
+                with patch(
+                    "app.services.news_sources.collect_news_from_sources",
+                    side_effect=RuntimeError("boom"),
+                ):
                     result = news_archive.collect_market_news("gold", limit=1, force_refresh=True)
 
         self.assertEqual(result["count"], 0)
@@ -213,30 +212,30 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                     """
                     {
                       "updated_at": "2026-07-09T00:00:00+00:00",
-                      "articles": [
+                          "articles": [
                         {
                           "category": "WORLD",
-                          "title": "A",
-                          "title_ko": "A",
-                          "title_original": "A",
+                          "title": "세계 시장, 미국 금리 인하 기대에 안정세 유지",
+                          "title_ko": "세계 시장, 미국 금리 인하 기대에 안정세 유지",
+                          "title_original": "세계 시장, 미국 금리 인하 기대에 안정세 유지",
                           "url": "https://example.com/a",
-                          "source": "Investing.com",
+                          "source": "Reuters",
                           "published_at": "",
                           "summary": "",
-                          "provider": "Investing.com KR",
+                          "provider": "Reuters RSS",
                           "collected_at": "2026-07-09T00:00:00+00:00",
                           "expires_at": "2026-07-16T00:00:00+00:00"
                         },
                         {
                           "category": "GOLD",
-                          "title": "B",
-                          "title_ko": "B",
-                          "title_original": "B",
+                          "title": "금 가격, 미국 금리 전망 변화에 소폭 상승",
+                          "title_ko": "금 가격, 미국 금리 전망 변화에 소폭 상승",
+                          "title_original": "금 가격, 미국 금리 전망 변화에 소폭 상승",
                           "url": "https://example.com/b",
-                          "source": "Investing.com",
+                          "source": "AP News",
                           "published_at": "",
                           "summary": "",
-                          "provider": "Investing.com KR",
+                          "provider": "AP News RSS",
                           "collected_at": "2026-07-09T01:00:00+00:00",
                           "expires_at": "2026-07-16T01:00:00+00:00"
                         }

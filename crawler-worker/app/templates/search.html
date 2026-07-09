@@ -78,19 +78,15 @@
         {% else %}
             <article class="news-card empty-card">
                 <div class="news-meta-row">
-                    <span class="status-badge">Investing.com KR</span>
+                    <span class="status-badge">NEWS</span>
                     <span>수집 결과 없음</span>
                 </div>
 
-                <h3>Investing.com 뉴스가 수집되지 않았습니다.</h3>
+                <h3>현재 표시할 뉴스가 없습니다.</h3>
                 <p class="summary">
-                    현재 기존 RSS 수집은 비활성화되어 있으며, Investing.com HTML 수집만 시도합니다.
-                    Investing.com이 Cloudflare 확인 페이지를 반환하면 기사 목록이 0건으로 표시될 수 있습니다.
+                    RSS와 정적 소스에서 유효한 기사만 남기도록 필터링합니다.
+                    잠시 후 새로 수집을 시도해보세요.
                 </p>
-
-                <a class="article-link" href="https://kr.investing.com/news/" target="_blank">
-                    Investing.com 뉴스 직접 열기 →
-                </a>
             </article>
         {% endfor %}
     </section>
