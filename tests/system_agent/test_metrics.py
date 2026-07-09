@@ -52,6 +52,36 @@ class SystemAgentMetricsTests(unittest.TestCase):
             self.assertIn("host_metrics_stale", metrics["warnings"])
             self.assertEqual(metrics["overall_status"], "warning")
 
+    def test_collect_metrics_accepts_utf8_bom_host_file(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("system-agent")
+            root = Path(tempdir)
+            host_file = root / "system" / "host-metrics.json"
+            host_file.parent.mkdir(parents=True)
+            host_file.write_bytes(
+                b"\xef\xbb\xbf"
+                + json.dumps(
+                    {
+                        "captured_at": datetime.now(timezone.utc).isoformat(),
+                        "cpu_percent": 21.5,
+                        "memory_percent": 37.2,
+                        "disk_percent": 48.1,
+                        "uptime_seconds": 5432,
+                    }
+                ).encode("utf-8")
+            )
+
+            from app.services.metrics import collect_metrics
+
+            metrics = collect_metrics(
+                data_root=root,
+                host_metrics_path=host_file,
+                stale_after_seconds=300,
+            )
+
+            self.assertEqual(metrics["host"]["source"], "windows")
+            self.assertEqual(metrics["host"]["cpu_percent"], 21.5)
+
     def test_collect_metrics_reports_recent_backup(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("system-agent")

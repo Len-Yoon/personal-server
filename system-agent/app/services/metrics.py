@@ -105,7 +105,7 @@ def _read_host_metrics(
         }
 
     try:
-        payload = json.loads(host_metrics_path.read_text(encoding="utf-8"))
+        payload = json.loads(host_metrics_path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
         warnings.append("host_metrics_invalid")
         return {
