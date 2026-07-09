@@ -1,6 +1,7 @@
 import os
 import secrets
 import ipaddress
+from datetime import datetime
 
 from fastapi import APIRouter, Body, Form, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -170,11 +171,13 @@ def admin_status_page(request: Request, password: str = Form(default="")):
         return _disable_cache(response)
 
     append_security_event("admin_status_viewed")
+    system_status = get_dashboard_status()
     context = build_admin_status_context(
-        system_status=get_dashboard_status(),
+        system_status=system_status,
         service_health=get_service_health(),
         security=security_status(),
     )
+    status_checked_at = _format_status_time(system_status.get("captured_at", ""))
     response = templates.TemplateResponse(
         "admin_status.html",
         {
@@ -182,6 +185,7 @@ def admin_status_page(request: Request, password: str = Form(default="")):
             "title": "관리자 상태",
             "authenticated": True,
             "error": "",
+            "status_checked_at": status_checked_at,
             "portal_home_url": portal_home_url(_request_host(request)),
             **context,
         },
@@ -266,3 +270,15 @@ def _disable_cache(response):
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
     return response
+
+
+def _format_status_time(value: str) -> str:
+    if not value:
+        return "unknown"
+
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S")

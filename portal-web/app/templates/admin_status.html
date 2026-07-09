@@ -1,6 +1,22 @@
 {% extends "base.html" %}
 
 {% block content %}
+<header class="app-header">
+    <a class="home-pill" href="{{ portal_home_url }}" target="_top" aria-label="메인으로 이동">
+        <span class="home-icon">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 10.8L12 3l9 7.8v9.7a.5.5 0 0 1-.5.5h-5.2a.5.5 0 0 1-.5-.5v-5.4H9.2v5.4a.5.5 0 0 1-.5.5H3.5a.5.5 0 0 1-.5-.5v-9.7z"/>
+            </svg>
+        </span>
+        <span>홈</span>
+    </a>
+
+    <div class="app-brand">
+        <span class="brand-dot"></span>
+        <span>ADMIN STATUS</span>
+    </div>
+</header>
+
 <section class="admin-status-page">
     <div class="section-header admin-status-header">
         <div>
@@ -8,7 +24,6 @@
             <h1>관리자 상태</h1>
             <p>서버 상태와 보안 상태를 한 화면에서 확인합니다.</p>
         </div>
-        <a class="security-button" href="{{ portal_home_url }}" target="_top">포털로 돌아가기</a>
     </div>
 
     {% if not authenticated %}
@@ -30,6 +45,7 @@
                 <div>
                     <h2>서버 상태</h2>
                     <p>미니 PC, 디스크, 파일함, 백업 상태를 표시합니다.</p>
+                    <p>마지막 수집: {{ status_checked_at }}</p>
                 </div>
                 <span class="ops-status {{ system_status.overall_status }}">
                     {{ system_status.overall_status | upper }}
