@@ -2,18 +2,18 @@
 
 {% block content %}
 <section class="hero compact">
-    <div class="hero-badge">SAVED NEWS</div>
+    <div class="hero-badge">NEWS ARCHIVE</div>
 
-    <h1>저장한 뉴스</h1>
+    <h1>보관 뉴스</h1>
 
-    <p>AI 요약을 완료한 뉴스를 모아두고 검색합니다.</p>
+    <p>최근에 수집한 뉴스를 최대 7일 동안 보관하고, 최신 수집 순서로 보여줍니다.</p>
 </section>
 
 <section class="service-section">
     <div class="section-header">
         <div>
-            <h2>요약 보관함</h2>
-            <p>{{ saved_news|length }}개의 저장된 뉴스를 표시합니다.</p>
+            <h2>최근 보관함</h2>
+            <p>{{ recent_news|length }}개의 보관 뉴스를 표시합니다.</p>
         </div>
 
         <div class="header-actions">
@@ -26,19 +26,19 @@
             type="search"
             name="q"
             value="{{ query }}"
-            placeholder="제목, 출처, 키워드 검색"
+            placeholder="제목, 출처, 카테고리 검색"
             autocomplete="off"
         >
         <button type="submit">검색</button>
     </form>
 
     <section class="news-list saved-list">
-        {% for item in saved_news %}
-            <article class="news-card saved-news-card" data-saved-id="{{ item.id }}">
+        {% for item in recent_news %}
+            <article class="news-card">
                 <div class="news-meta-row">
                     <span class="status-badge">{{ item.category }}</span>
                     <span>{{ item.source }}</span>
-                    <span>{{ item.updated_at }}</span>
+                    <span>{{ item.collected_at }}</span>
                 </div>
 
                 <h3>{{ item.title_ko }}</h3>
@@ -47,91 +47,26 @@
                     <p class="original-title">{{ item.title }}</p>
                 {% endif %}
 
-                <div class="summary-result saved-summary">
-                    <div class="summary-row">
-                        <span>중요도</span>
-                        <strong>{{ item.summary.importance or "UNKNOWN" }}</strong>
-                    </div>
+                {% if item.summary %}
+                    <p class="summary news-summary">{{ item.summary }}</p>
+                {% endif %}
 
-                    <div class="summary-row">
-                        <span>시장 영향</span>
-                        <strong>{{ item.summary.market_impact or "UNCERTAIN" }}</strong>
-                    </div>
-
-                    <p>{{ item.summary.summary }}</p>
-
-                    <p class="trading-note">
-                        <strong>매매 참고:</strong> {{ item.summary.trading_note }}
-                    </p>
-
-                    <p class="caution">
-                        <strong>주의:</strong> {{ item.summary.caution }}
-                    </p>
-
-                    {% if item.summary.keywords %}
-                        <div class="keyword-list">
-                            {% for keyword in item.summary.keywords %}
-                                <span>{{ keyword }}</span>
-                            {% endfor %}
-                        </div>
-                    {% endif %}
-                </div>
+                {% if item.published_at %}
+                    <p class="published-at">{{ item.published_at }}</p>
+                {% endif %}
 
                 <div class="saved-card-actions">
                     <a class="article-link" href="{{ item.url }}" target="_blank">
                         원문 보기 →
                     </a>
-                    <button class="delete-saved-button" type="button">
-                        삭제
-                    </button>
                 </div>
             </article>
         {% else %}
             <article class="news-card empty-card">
-                <h3>저장된 뉴스가 없습니다.</h3>
-                <p class="summary">뉴스 목록에서 AI 요약을 누르면 이곳에 저장됩니다.</p>
+                <h3>보관된 뉴스가 없습니다.</h3>
+                <p class="summary">아직 수집된 뉴스가 없거나, 보관 기간이 지나 자동 삭제된 상태입니다.</p>
             </article>
         {% endfor %}
     </section>
 </section>
-
-<script>
-document.querySelectorAll(".delete-saved-button").forEach((button) => {
-    button.addEventListener("click", async () => {
-        const card = button.closest(".saved-news-card");
-        const savedId = card.dataset.savedId;
-
-        const password = window.prompt("삭제 비밀번호를 입력해주세요.");
-        if (!password) {
-            return;
-        }
-
-        if (!window.confirm("이 저장 뉴스를 삭제할까요?")) {
-            return;
-        }
-
-        button.disabled = true;
-        button.textContent = "삭제 중";
-
-        try {
-            const response = await fetch(`/api/saved/${savedId}`, {
-                method: "DELETE",
-                headers: {
-                    "X-Delete-Password": password,
-                },
-            });
-
-            if (!response.ok) {
-                throw new Error("삭제 요청 실패");
-            }
-
-            card.remove();
-        } catch (error) {
-            button.disabled = false;
-            button.textContent = "삭제";
-            window.alert("삭제에 실패했습니다.");
-        }
-    });
-});
-</script>
 {% endblock %}

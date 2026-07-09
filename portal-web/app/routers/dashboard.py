@@ -37,10 +37,10 @@ def dashboard(request: Request, q: str = ""):
         {
             "icon": "N",
             "name": "뉴스 허브",
-            "description": "일반 뉴스와 주식 뉴스를 수집하고, 나중에 AI 요약까지 연결합니다.",
+            "description": "일반 뉴스와 주식 뉴스를 수집하고, 최근 보관 뉴스와 원문을 빠르게 확인합니다.",
             "url": "/news",
             "status": "운영중",
-            "meta": "News / Stock / Summary",
+            "meta": "News / Stock / Archive",
         },
         {
             "icon": "Y",

@@ -1369,7 +1369,7 @@ body::before {
     opacity: 0.55;
 }
 
-:where(.home-pill, .text-link, .summary-button, .search-form button, .global-search button, .danger-button, .security-button, .category-tabs a) {
+:where(.home-pill, .text-link, .search-form button, .global-search button, .danger-button, .security-button, .category-tabs a) {
     box-shadow:
         0 16px 40px rgba(37, 99, 235, 0.16),
         inset 0 1px 0 rgba(255, 255, 255, 0.06);
@@ -1381,7 +1381,7 @@ body::before {
         color 0.2s ease;
 }
 
-:where(.home-pill:hover, .text-link:hover, .summary-button:hover, .search-form button:hover, .global-search button:hover, .danger-button:hover, .security-button:hover, .category-tabs a:hover) {
+:where(.home-pill:hover, .text-link:hover, .search-form button:hover, .global-search button:hover, .danger-button:hover, .security-button:hover, .category-tabs a:hover) {
     transform: translateY(-2px);
 }
 
