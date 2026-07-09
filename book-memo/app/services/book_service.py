@@ -101,7 +101,15 @@ def list_books() -> list[dict[str, Any]]:
                 FROM book_chapters
                 GROUP BY book_id
             ) AS chapter_counts ON chapter_counts.book_id = books.id
-            ORDER BY books.updated_at DESC, books.id DESC
+            ORDER BY
+                CASE
+                    WHEN books.reading_status = '읽는 중' THEN 0
+                    WHEN books.reading_status = '읽을 예정' THEN 1
+                    WHEN books.progress_percent >= 100 OR books.reading_status = '완료' THEN 2
+                    ELSE 3
+                END,
+                books.updated_at DESC,
+                books.id DESC
             """
         ).fetchall()
 
