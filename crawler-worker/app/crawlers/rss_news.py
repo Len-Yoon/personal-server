@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from html import unescape
+from html.parser import HTMLParser
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 from datetime import timezone
@@ -69,7 +71,7 @@ def search_rss_news(
                     "source": entry_source,
                     "published_at": published,
                     "published_at_sort": _parse_published_at(published),
-                    "summary": summary,
+                    "summary": _html_to_text(summary),
                     "provider": provider_name,
                 }
             )
@@ -128,3 +130,34 @@ def _dedupe_articles(articles: list[dict]) -> list[dict]:
         deduped.append(article)
 
     return deduped
+
+
+def _html_to_text(value: str) -> str:
+    value = value or ""
+
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return _strip_html_with_fallback(value)
+
+    text = BeautifulSoup(value, "html.parser").get_text(" ", strip=True)
+    return _cleanup_text(text)
+
+
+def _strip_html_with_fallback(value: str) -> str:
+    class _TextExtractor(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.parts: list[str] = []
+
+        def handle_data(self, data: str) -> None:
+            if data:
+                self.parts.append(data)
+
+    parser = _TextExtractor()
+    parser.feed(value)
+    return _cleanup_text(" ".join(parser.parts))
+
+
+def _cleanup_text(value: str) -> str:
+    return " ".join(unescape(value).split())
