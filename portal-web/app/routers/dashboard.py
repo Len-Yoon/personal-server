@@ -127,13 +127,13 @@ def books_entry(request: Request):
 def admin_security_status(request: Request, x_security_password: str = Header(default="")):
     _require_security_password(request, x_security_password)
     append_security_event("security_dashboard_viewed")
-    return security_status()
+    return _disable_cache(security_status())
 
 
 @router.get("/admin/status")
 def admin_status_login(request: Request):
     host = _request_host(request)
-    return templates.TemplateResponse(
+    response = templates.TemplateResponse(
         "admin_status.html",
         {
             "request": request,
@@ -143,6 +143,7 @@ def admin_status_login(request: Request):
             "portal_home_url": portal_home_url(host),
         },
     )
+    return _disable_cache(response)
 
 
 @router.post("/admin/status")
@@ -155,7 +156,7 @@ def admin_status_page(request: Request, password: str = Form(default="")):
             message = "인증 실패가 반복되어 잠시 후 다시 시도해주세요."
         elif exc.status_code == 403:
             message = "관리자 비밀번호가 설정되지 않았습니다."
-        return templates.TemplateResponse(
+        response = templates.TemplateResponse(
             "admin_status.html",
             {
                 "request": request,
@@ -166,6 +167,7 @@ def admin_status_page(request: Request, password: str = Form(default="")):
             },
             status_code=exc.status_code,
         )
+        return _disable_cache(response)
 
     append_security_event("admin_status_viewed")
     context = build_admin_status_context(
@@ -173,7 +175,7 @@ def admin_status_page(request: Request, password: str = Form(default="")):
         service_health=get_service_health(),
         security=security_status(),
     )
-    return templates.TemplateResponse(
+    response = templates.TemplateResponse(
         "admin_status.html",
         {
             "request": request,
@@ -184,6 +186,7 @@ def admin_status_page(request: Request, password: str = Form(default="")):
             **context,
         },
     )
+    return _disable_cache(response)
 
 
 @router.post("/admin/events")
@@ -256,3 +259,10 @@ def _is_local_host(host: str) -> bool:
         return False
 
     return ip.is_private or ip.is_loopback or ip.is_link_local
+
+
+def _disable_cache(response):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response

@@ -3,6 +3,8 @@ import os
 import unittest
 from unittest.mock import patch
 
+from fastapi.testclient import TestClient
+
 from tests._test_support import prepare_service_import
 
 
@@ -13,6 +15,12 @@ class PortalDashboardTests(unittest.TestCase):
         import app.services.system_status as system_status
 
         return importlib.reload(system_status)
+
+    def load_app(self):
+        prepare_service_import("portal-web")
+        import app.main as main
+
+        return importlib.reload(main).app
 
     def test_demo_mode_returns_sample_status(self):
         system_status = self.reload_system_status("true")
@@ -156,6 +164,32 @@ class PortalDashboardTests(unittest.TestCase):
         self.assertEqual(context["service_health"][0]["name"], "뉴스 허브")
         self.assertEqual(context["security_status"]["headers"], ["X-Frame-Options"])
         self.assertTrue(context["has_warnings"])
+
+    def test_admin_status_login_disables_cache(self):
+        app = self.load_app()
+
+        with TestClient(app) as client:
+            response = client.get("/admin/status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["cache-control"], "no-store, no-cache, must-revalidate, max-age=0")
+        self.assertEqual(response.headers["pragma"], "no-cache")
+        self.assertEqual(response.headers["expires"], "0")
+
+    def test_admin_status_failure_disables_cache(self):
+        os.environ["FILE_MANAGER_PASSWORD"] = "secret"
+        try:
+            app = self.load_app()
+
+            with TestClient(app) as client:
+                response = client.post("/admin/status", data={"password": "wrong"})
+
+            self.assertIn(response.status_code, {401, 403, 429})
+            self.assertEqual(response.headers["cache-control"], "no-store, no-cache, must-revalidate, max-age=0")
+            self.assertEqual(response.headers["pragma"], "no-cache")
+            self.assertEqual(response.headers["expires"], "0")
+        finally:
+            os.environ.pop("FILE_MANAGER_PASSWORD", None)
 
 
 if __name__ == "__main__":
