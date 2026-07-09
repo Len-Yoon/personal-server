@@ -33,7 +33,7 @@ function Update-HostMetrics {
 
     $totalMemory = [double]$os.TotalVisibleMemorySize * 1KB
     $freeMemory = [double]$os.FreePhysicalMemory * 1KB
-    $usedMemory = [Math]::Max(0, $totalMemory - $freeMemory)
+    $usedMemory = [Math]::Max([double]0, $totalMemory - $freeMemory)
     $memoryPercent = if ($totalMemory -gt 0) { [Math]::Round(($usedMemory / $totalMemory) * 100, 1) } else { 0 }
     $diskPercent = if ($disk.Size -gt 0) { [Math]::Round((($disk.Size - $disk.FreeSpace) / $disk.Size) * 100, 1) } else { 0 }
     $cpuPercent = if ($null -ne $cpu.Average) { [Math]::Round([double]$cpu.Average, 1) } else { 0 }
@@ -56,16 +56,34 @@ function Start-PersonalServerStack {
 }
 
 function Install-ScheduledTask {
-    $startupAction = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -Daemon"
-    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -Daemon"
-    $trigger = New-ScheduledTaskTrigger -AtLogOn
-    $trigger.Delay = "PT1M"
-    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
+    try {
+        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -Daemon"
+        $trigger = New-ScheduledTaskTrigger -AtLogOn
+        $trigger.Delay = "PT1M"
+        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
 
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+        Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+        Write-Info "Registered scheduled task '$TaskName' to start at logon with a 1-minute delay."
+        return
+    } catch {
+        Write-Info "Scheduled task registration failed, using Startup folder fallback."
+    }
 
-    Write-Info "Registered scheduled task '$TaskName' to start at logon with a 1-minute delay."
+    Install-StartupEntry
+}
+
+function Install-StartupEntry {
+    $startupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
+    $startupScript = Join-Path $startupDir "personal-server-bootstrap.cmd"
+    $content = @"
+@echo off
+powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File "$ScriptPath" -Daemon
+"@
+
+    New-Item -ItemType Directory -Path $startupDir -Force | Out-Null
+    Set-Content -Path $startupScript -Value $content -Encoding ASCII
+    Write-Info "Installed Startup folder entry at $startupScript."
 }
 
 function Start-Daemon {
