@@ -41,6 +41,9 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 news_archive = self.reload_news_archive()
 
                 with patch(
+                    "app.services.news_sources.search_reuters_news_rss",
+                    return_value=[{"url": "https://example.com/r", "title": "R"}],
+                ) as mocked_reuters, patch(
                     "app.services.news_sources.search_investing_news",
                     return_value=[{"url": "https://example.com/a", "title": "A"}],
                 ) as mocked_investing, patch(
@@ -55,6 +58,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
 
         self.assertFalse(first["cache"]["hit"])
         self.assertTrue(second["cache"]["hit"])
+        self.assertEqual(mocked_reuters.call_count, 1)
         self.assertEqual(mocked_investing.call_count, 1)
         self.assertEqual(mocked_ap.call_count, 1)
         self.assertEqual(mocked_marketwatch.call_count, 1)
@@ -74,6 +78,9 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 news_archive = self.reload_news_archive()
 
                 with patch(
+                    "app.services.news_sources.search_reuters_news_rss",
+                    return_value=[],
+                ), patch(
                     "app.services.news_sources.search_investing_news",
                     return_value=[
                         {
@@ -137,6 +144,9 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 )
 
                 with patch.object(news_archive, "_schedule_refresh") as mocked_refresh, patch(
+                    "app.services.news_sources.search_reuters_news_rss",
+                    return_value=[],
+                ) as mocked_reuters, patch(
                     "app.services.news_sources.search_investing_news",
                     return_value=[],
                 ) as mocked_investing, patch(
@@ -151,6 +161,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         self.assertTrue(result["cache"]["hit"])
         self.assertGreater(result["cache"]["age_seconds"], 3600)
         mocked_refresh.assert_called_once_with("WORLD", 1)
+        mocked_reuters.assert_not_called()
         mocked_investing.assert_not_called()
         mocked_ap.assert_not_called()
         mocked_marketwatch.assert_not_called()

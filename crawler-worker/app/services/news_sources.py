@@ -5,13 +5,14 @@ from concurrent.futures import as_completed, ThreadPoolExecutor
 from app.crawlers.ap_news_rss import search_ap_news_rss
 from app.crawlers.investing_news import search_investing_news
 from app.crawlers.marketwatch_news_rss import search_marketwatch_news_rss
+from app.crawlers.reuters_news_rss import search_reuters_news_rss
 
 
 SOURCE_LIMIT_RATIO = {
-    "WORLD": ("investing", "ap", "marketwatch"),
-    "NASDAQ": ("marketwatch", "investing", "ap"),
-    "GOLD": ("marketwatch", "investing", "ap"),
-    "HK50": ("ap", "marketwatch", "investing"),
+    "WORLD": ("reuters", "investing", "ap", "marketwatch"),
+    "NASDAQ": ("reuters", "marketwatch", "investing", "ap"),
+    "GOLD": ("reuters", "marketwatch", "investing", "ap"),
+    "HK50": ("reuters", "ap", "marketwatch", "investing"),
 }
 
 
@@ -34,12 +35,18 @@ def collect_news_from_sources(category: str, limit: int = 24) -> list[dict]:
 
 
 def _collect_from_source(source_name: str, category: str, limit: int) -> list[dict]:
-    if source_name == "investing":
-        return search_investing_news(category=category, limit=limit)
-    if source_name == "ap":
-        return search_ap_news_rss(category=category, limit=limit)
-    if source_name == "marketwatch":
-        return search_marketwatch_news_rss(category=category, limit=limit)
+    try:
+        if source_name == "reuters":
+            return search_reuters_news_rss(category=category, limit=limit)
+        if source_name == "investing":
+            return search_investing_news(category=category, limit=limit)
+        if source_name == "ap":
+            return search_ap_news_rss(category=category, limit=limit)
+        if source_name == "marketwatch":
+            return search_marketwatch_news_rss(category=category, limit=limit)
+    except Exception:
+        return []
+
     return []
 
 

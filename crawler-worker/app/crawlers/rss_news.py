@@ -21,9 +21,12 @@ def search_rss_news(
     articles: list[dict] = []
 
     for feed_url in feed_urls:
-        feed = feedparser.parse(feed_url)
+        try:
+            feed = feedparser.parse(feed_url)
+        except Exception:
+            continue
 
-        for entry in feed.entries:
+        for entry in getattr(feed, "entries", []):
             title = getattr(entry, "title", "")
             link = getattr(entry, "link", "")
 
