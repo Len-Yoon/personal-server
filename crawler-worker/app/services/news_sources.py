@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from app.crawlers.ap_news_rss import search_ap_news_rss
 from app.crawlers.google_news_rss import search_google_news_rss
+from app.crawlers.investing_news_rss import search_investing_news_rss
 from app.crawlers.marketwatch_news_rss import search_marketwatch_news_rss
 from app.crawlers.reuters_news_rss import search_reuters_news_rss
 from app.crawlers.news_quality import filter_high_quality_articles
 
 
 SOURCE_LIMIT_RATIO = {
+    "INVESTING": ("investing",),
     "WORLD": ("google", "reuters", "ap", "marketwatch"),
     "NASDAQ": ("google", "reuters", "ap", "marketwatch"),
     "GOLD": ("google", "reuters", "ap", "marketwatch"),
@@ -17,6 +19,10 @@ SOURCE_LIMIT_RATIO = {
 
 def collect_news_from_sources(category: str, limit: int = 24) -> list[dict]:
     category = category.upper()
+    if category == "INVESTING":
+        return _dedupe_articles(
+            _collect_from_source("investing", category, max(limit, 8))
+        )[:limit]
     source_order = SOURCE_LIMIT_RATIO.get(category, SOURCE_LIMIT_RATIO["WORLD"])
     collected: list[dict] = []
     per_source_limit = max(limit, 8)
@@ -43,6 +49,8 @@ def _collect_from_source(source_name: str, category: str, limit: int) -> list[di
     try:
         if source_name == "google":
             return search_google_news_rss(category=category, limit=limit)
+        if source_name == "investing":
+            return search_investing_news_rss(limit=limit)
         if source_name == "reuters":
             return search_reuters_news_rss(category=category, limit=limit)
         if source_name == "ap":

@@ -71,6 +71,13 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         self.assertEqual(mocked_ap.call_count, 0)
         self.assertEqual(mocked_marketwatch.call_count, 0)
 
+    def test_news_hub_exposes_only_the_unified_investing_category(self):
+        news_archive = self.reload_news_archive()
+
+        categories = news_archive.get_categories()
+
+        self.assertEqual([item["code"] for item in categories], ["INVESTING"])
+
     def test_collect_market_news_uses_reuters_when_google_empty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             archive_path = Path(tmpdir) / "news_archive.json"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query, Request
 from fastapi.templating import Jinja2Templates
+from starlette.responses import RedirectResponse
 
 from app.services.host_urls import portal_home_url, request_host_from_headers
 from app.services.news_archive import list_recent_news
@@ -21,6 +22,8 @@ templates.env.globals["portal_home_url"] = _portal_home_url
 
 @router.get("/")
 def home(request: Request):
+    return RedirectResponse(url="/category?category=INVESTING", status_code=302)
+
     categories = get_categories()
 
     return templates.TemplateResponse(
@@ -54,7 +57,7 @@ def recent_news_page(
 @router.get("/category")
 def category_page(
     request: Request,
-    category: str = Query(default="WORLD"),
+    category: str = Query(default="INVESTING"),
     refresh: bool = Query(default=False),
 ):
     result = collect_market_news(
@@ -76,7 +79,7 @@ def category_page(
 
 @router.get("/api/category")
 def category_api(
-    category: str = Query(default="WORLD"),
+    category: str = Query(default="INVESTING"),
     refresh: bool = Query(default=False),
 ):
     return collect_market_news(

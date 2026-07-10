@@ -124,6 +124,7 @@ def get_categories() -> list[dict[str, str]]:
             "description": details["description"],
         }
         for code, details in _category_map().items()
+        if code == "INVESTING"
     ]
 
 
@@ -399,6 +400,10 @@ def _category_description(category: str) -> str:
 
 def _category_map() -> dict[str, dict[str, str]]:
     return {
+        "INVESTING": {
+            "label": "Investing.com 한국어 뉴스",
+            "description": "Google News RSS에서 수집한 Investing.com 한국어 최신 뉴스 전체",
+        },
         "WORLD": {
             "label": "세계 뉴스",
             "description": "전쟁, 금리, 달러, 원자재, 주요국 경제 이슈",
