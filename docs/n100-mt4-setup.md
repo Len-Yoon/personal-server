@@ -198,6 +198,10 @@ Install it with:
 powershell -ExecutionPolicy Bypass -File C:\personal-server\scripts\windows-bootstrap.ps1 -InstallTask
 ```
 
+Run the registration once from an elevated PowerShell window if Windows reports
+`Access is denied`. After that, the task runs the daemon at each user logon and
+recovers the WSL Docker services, including `crawler-worker`, after reboot.
+
 The same script can be run manually with `-Start` to bring the stack up once
 right away, or with `-Daemon` to run the always-on lightweight recovery loop.
 

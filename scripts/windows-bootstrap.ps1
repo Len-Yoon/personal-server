@@ -14,12 +14,13 @@ function Write-Info([string]$Message) {
 }
 
 function Invoke-WslCommand {
-    $wslProjectRoot = (& wsl.exe wslpath -a $ProjectRoot | Select-Object -First 1).Trim()
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($wslProjectRoot)) {
-        throw "Failed to convert project path '$ProjectRoot' to a WSL path."
+    if ($ProjectRoot -match "^(?<drive>[A-Za-z]):[\\/](?<rest>.*)$") {
+        $wslProjectRoot = "/mnt/$($Matches.drive.ToLower())/$($Matches.rest -replace '\\', '/')"
+    } else {
+        throw "Project path '$ProjectRoot' must be a Windows drive path such as C:\\personal-server."
     }
 
-    & wsl.exe bash -lc "cd '$wslProjectRoot' && bash scripts/windows-bootstrap.sh"
+    & wsl.exe bash -lc "cd '$wslProjectRoot' && bash scripts/windows-bootstrap.sh '$wslProjectRoot'"
     if ($LASTEXITCODE -ne 0) {
         throw "WSL command failed with exit code $LASTEXITCODE"
     }
@@ -55,49 +56,57 @@ function Update-HostMetrics {
 }
 
 function Start-PersonalServerStack {
-    Invoke-WslCommand
-    Write-Info "Ensured Docker stack is up and Cloudflare Tunnel is running."
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+        try {
+            Invoke-WslCommand
+            Write-Info "Ensured Docker stack is up and Cloudflare Tunnel is running."
+            return
+        } catch {
+            if ($attempt -eq 10) {
+                throw
+            }
+            Write-Info "Startup attempt $attempt failed; retrying in 30 seconds."
+            Start-Sleep -Seconds 30
+        }
+    }
 }
 
 function Install-ScheduledTask {
+    $taskAction = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -Daemon"
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     try {
-        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -Daemon"
-        $trigger = New-ScheduledTaskTrigger -AtLogOn
-        $trigger.Delay = "PT1M"
-        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
-
-        Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-        Write-Info "Registered scheduled task '$TaskName' to start at logon with a 1-minute delay."
-        return
-    } catch {
-        Write-Info "Scheduled task registration failed, using Startup folder fallback."
+        $createOutput = (& schtasks.exe /Create /TN $TaskName /SC ONLOGON /TR $taskAction /RL LIMITED /F 2>&1 | Out-String)
+        $createExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
     }
-
-    Install-StartupEntry
-}
-
-function Install-StartupEntry {
-    $startupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
-    $startupScript = Join-Path $startupDir "personal-server-bootstrap.cmd"
-    $content = @"
-@echo off
-powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File "$ScriptPath" -Daemon
-"@
-
-    New-Item -ItemType Directory -Path $startupDir -Force | Out-Null
-    Set-Content -Path $startupScript -Value $content -Encoding ASCII
-    Write-Info "Installed Startup folder entry at $startupScript."
+    if ($createExitCode -ne 0) {
+        $existingTask = (& schtasks.exe /Query /TN $TaskName /FO LIST /V 2>&1 | Out-String)
+        if ($existingTask -match [regex]::Escape($ScriptPath)) {
+            Write-Info "Scheduled task '$TaskName' already points to $ScriptPath."
+            return
+        }
+        throw "Failed to register scheduled task '$TaskName' with schtasks.exe (exit code $createExitCode)."
+    }
+    if ($createOutput.Trim()) {
+        Write-Info $createOutput.Trim()
+    }
+    Write-Info "Registered scheduled task '$TaskName' to start at user logon."
 }
 
 function Start-Daemon {
     Update-HostMetrics
-    Write-Info "Waiting 60 seconds before the first startup sync."
-    Start-Sleep -Seconds 60
+    Write-Info "Waiting 120 seconds for WSL and Docker after logon."
+    Start-Sleep -Seconds 120
 
     while ($true) {
-        Update-HostMetrics
-        Start-PersonalServerStack
+        try {
+            Update-HostMetrics
+            Start-PersonalServerStack
+        } catch {
+            Write-Info "Recovery check failed: $($_.Exception.Message)"
+        }
         Write-Info "Sleeping 30 minutes before the next recovery check."
         Start-Sleep -Seconds 1800
     }
