@@ -49,20 +49,6 @@
                 </div>
             </div>
 
-            <div class="status-summary-list">
-                {% for check in system_status.status_checks %}
-                    <div class="status-summary-item">
-                        <strong>{{ check.label }}</strong>
-                        <span>{{ check.detail }}</span>
-                    </div>
-                {% else %}
-                    <div class="status-summary-item">
-                        <strong>상태 기준</strong>
-                        <span>불러오지 못했습니다.</span>
-                    </div>
-                {% endfor %}
-            </div>
-
             <div class="metric-grid">
                 <div class="metric-tile">
                     <span>CPU</span>

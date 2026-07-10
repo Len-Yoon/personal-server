@@ -232,13 +232,13 @@ class PortalDashboardTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertIn("2026-07-09 01:02:03 UTC", response.text)
-            self.assertIn("호스트 수집", response.text)
-            self.assertIn("백업", response.text)
-            self.assertIn("디스크", response.text)
-            self.assertIn("파일함", response.text)
             self.assertNotIn("WARNING", response.text)
             self.assertNotIn("OK", response.text)
             self.assertNotIn("UNAVAILABLE", response.text)
+            self.assertNotIn("호스트 수집", response.text)
+            self.assertNotIn("백업", response.text)
+            self.assertNotIn("디스크", response.text)
+            self.assertNotIn("파일함", response.text)
         finally:
             os.environ.pop("FILE_MANAGER_PASSWORD", None)
 
