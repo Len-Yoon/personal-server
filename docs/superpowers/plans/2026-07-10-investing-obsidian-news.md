@@ -4,9 +4,11 @@
 
 **Goal:** Playwright Chromium으로 한국어 Investing.com 뉴스 목록의 제목·시간·링크·출처만 하루 한 번 수집해 Obsidian Vault의 날짜별 Markdown 파일로 저장한다.
 
-**Architecture:** 기존 `crawler-worker` API와 분리된 `investing-crawler` 일회성 컨테이너를 추가한다. 순수 HTML 파서와 Markdown 저장기를 먼저 테스트하고, Playwright 실행기는 목록 페이지 하나만 열어 파서에 HTML을 전달한다. N100에서는 Windows 작업 스케줄러가 `docker compose run --rm investing-crawler`를 하루 한 번 실행한다.
+**Architecture:** 기존 `crawler-worker` API와 분리된 `investing-crawler` 일회성 컨테이너를 추가한다. Python 소스 디렉터리는 `investing_crawler`로 두고, 순수 HTML 파서와 Markdown 저장기를 먼저 테스트한다. Playwright 실행기는 목록 페이지 하나만 열어 파서에 HTML을 전달한다. N100에서는 Windows 작업 스케줄러가 `docker compose run --rm investing-crawler`를 하루 한 번 실행한다.
 
 **Tech Stack:** Python 3.11, Playwright Python, BeautifulSoup4, Docker Compose, unittest.
+
+> **Implementation amendment (2026-07-11):** Cloudflare 보안 확인으로 Playwright 직접 수집이 운영 불가함을 확인하여, 구현은 Google News RSS의 `site:kr.investing.com/news` 검색과 `Investing.com 한국어` 출처 필터 방식으로 전환했다. 아래 브라우저 관련 초기 단계는 전환 기록 문서(`docs/superpowers/specs/2026-07-11-investing-google-news-rss-amendment.md`)로 대체한다.
 
 ## Global Constraints
 
@@ -22,9 +24,9 @@
 ### Task 1: 순수 Investing 뉴스 파서와 Markdown 저장기 테스트 작성
 
 **Files:**
-- Create: `investing-crawler/app/__init__.py`
-- Create: `investing-crawler/app/news_parser.py`
-- Create: `investing-crawler/app/obsidian_writer.py`
+- Create: `investing_crawler/app/__init__.py`
+- Create: `investing_crawler/app/news_parser.py`
+- Create: `investing_crawler/app/obsidian_writer.py`
 - Test: `tests/investing_crawler/test_news_parser.py`
 - Test: `tests/investing_crawler/test_obsidian_writer.py`
 
@@ -97,13 +99,13 @@ Expected: FAIL because the writer functions are not implemented.
 
 - [ ] **Step 5: Commit the red tests**
 
-Run: `git add investing-crawler tests/investing_crawler && git commit -m "test: Investing 뉴스 파서와 옵시디언 출력 테스트 추가"`
+Run: `git add investing_crawler tests/investing_crawler && git commit -m "test: Investing 뉴스 파서와 옵시디언 출력 테스트 추가"`
 
 ### Task 2: 파서·Markdown 저장기 최소 구현
 
 **Files:**
-- Modify: `investing-crawler/app/news_parser.py`
-- Modify: `investing-crawler/app/obsidian_writer.py`
+- Modify: `investing_crawler/app/news_parser.py`
+- Modify: `investing_crawler/app/obsidian_writer.py`
 - Test: `tests/investing_crawler/test_news_parser.py`
 - Test: `tests/investing_crawler/test_obsidian_writer.py`
 
@@ -132,15 +134,15 @@ Expected: PASS.
 
 - [ ] **Step 5: Commit the pure implementation**
 
-Run: `git add investing-crawler/app tests/investing_crawler && git commit -m "feat: Investing 뉴스 메타데이터 파서와 마크다운 저장 추가"`
+Run: `git add investing_crawler/app tests/investing_crawler && git commit -m "feat: Investing 뉴스 메타데이터 파서와 마크다운 저장 추가"`
 
 ### Task 3: Playwright 일회성 수집 명령과 오류 처리
 
 **Files:**
-- Create: `investing-crawler/app/browser_collector.py`
-- Create: `investing-crawler/app/main.py`
+- Create: `investing_crawler/app/browser_collector.py`
+- Create: `investing_crawler/app/main.py`
 - Create: `tests/investing_crawler/test_main.py`
-- Modify: `investing-crawler/app/__init__.py`
+- Modify: `investing_crawler/app/__init__.py`
 
 **Interfaces:**
 - `async collect_news_page(url: str, limit: int) -> list[dict[str, str]]`
@@ -170,13 +172,13 @@ Expected: PASS.
 
 - [ ] **Step 6: Commit the collector command**
 
-Run: `git add investing-crawler/app tests/investing_crawler && git commit -m "feat: Playwright 기반 Investing 뉴스 일회성 수집 명령 추가"`
+Run: `git add investing_crawler/app tests/investing_crawler && git commit -m "feat: Playwright 기반 Investing 뉴스 일회성 수집 명령 추가"`
 
 ### Task 4: Docker와 N100 실행 경로 추가
 
 **Files:**
-- Create: `investing-crawler/requirements.txt`
-- Create: `investing-crawler/Dockerfile`
+- Create: `investing_crawler/requirements.txt`
+- Create: `investing_crawler/Dockerfile`
 - Modify: `docker-compose.yml`
 - Modify: `docker-compose.n100.yml`
 - Modify: `.env.example`
@@ -211,7 +213,7 @@ Expected: PASS.
 
 - [ ] **Step 6: Commit runtime configuration**
 
-Run: `git add investing-crawler docker-compose.yml docker-compose.n100.yml .env.example tests/test_investing_crawler_config.py && git commit -m "feat: Investing 뉴스 크롤러 일회성 Docker 실행 추가"`
+Run: `git add investing_crawler docker-compose.yml docker-compose.n100.yml .env.example tests/test_investing_crawler_config.py && git commit -m "feat: Investing 뉴스 크롤러 일회성 Docker 실행 추가"`
 
 ### Task 5: 통합 검증과 운영 문서
 

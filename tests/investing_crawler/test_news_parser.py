@@ -26,15 +26,28 @@ class NewsParserTests(unittest.TestCase):
 
     def test_parse_news_html_deduplicates_urls_and_honors_limit(self):
         html = (
-            '<a href="/news/a">A</a>'
-            '<a href="/news/a">A again</a>'
-            '<a href="/news/b">B</a>'
+            '<a href="/news/most-popular-news">많이 본 뉴스</a>'
+            '<a href="/news/stock-market-news/article-10">A</a>'
+            '<a href="/news/stock-market-news/article-10">A again</a>'
+            '<a href="/news/stock-market-news/article-11">B</a>'
         )
 
         self.assertEqual(
             [item["title"] for item in parse_news_html(html, limit=1)],
             ["A"],
         )
+
+    def test_parse_news_html_extracts_time_from_an_ancestor_card(self):
+        html = """
+        <div class="card">
+          <div><a href="/news/stock-market-news/article-2">전망이 바뀐 뉴스</a></div>
+          <div>By Reuters • 23분 전</div>
+        </div>
+        """
+
+        item = parse_news_html(html)[0]
+        self.assertEqual(item["published_label"], "23분 전")
+        self.assertEqual(item["source"], "Reuters")
 
 
 if __name__ == "__main__":

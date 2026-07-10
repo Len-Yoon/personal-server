@@ -94,6 +94,16 @@ services:
         max-size: "5m"
         max-file: "2"
 
+  investing-crawler:
+    cpus: "0.50"
+    mem_limit: 128m
+    pids_limit: 96
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+
   youtube-memo:
     ports: !override
       - "127.0.0.1:8002:8002"

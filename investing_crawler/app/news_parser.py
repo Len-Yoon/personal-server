@@ -7,7 +7,8 @@ from bs4 import BeautifulSoup, Tag
 
 
 BASE_URL = "https://kr.investing.com"
-TIME_PATTERN = re.compile(r"(?:전|분|시간|일|주|개월|년)\s*(?:전)?|\d{4}[./-]\d{1,2}[./-]\d{1,2}")
+TIME_PATTERN = re.compile(r"\d+\s*(?:분|시간|일|주|개월|년)\s*전|오늘|어제")
+ARTICLE_PATH_PATTERN = re.compile(r"/news/(?:[^/]+/)?article-\d+")
 
 
 def parse_news_html(html: str, limit: int = 50) -> list[dict[str, str]]:
@@ -20,7 +21,7 @@ def parse_news_html(html: str, limit: int = 50) -> list[dict[str, str]]:
             continue
         title = _clean_text(anchor.get_text(" ", strip=True))
         url = _normalize_url(anchor.get("href", ""))
-        if not title or not url or url in seen_urls:
+        if not title or not url or not ARTICLE_PATH_PATTERN.search(url) or url in seen_urls:
             continue
 
         container = _find_container(anchor)
@@ -66,7 +67,7 @@ def _find_container(anchor: Tag) -> Tag:
     for _ in range(6):
         if isinstance(current, Tag):
             text = current.get_text(" ", strip=True)
-            if "By " in text or "전" in text or current.select_one("time"):
+            if "By " in text or _find_time_label(text) or current.select_one("time"):
                 return current
             current = current.parent
     return anchor.parent if isinstance(anchor.parent, Tag) else anchor
