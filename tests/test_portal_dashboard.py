@@ -171,7 +171,7 @@ class PortalDashboardTests(unittest.TestCase):
 
         self.assertEqual(
             format_status_checked_at("2026-07-09T01:02:03+00:00"),
-            "2026-07-09 01:02:03 UTC",
+            "2026-07-09 10:02:03 KST",
         )
         self.assertEqual(format_status_checked_at(""), "unknown")
 
@@ -231,7 +231,7 @@ class PortalDashboardTests(unittest.TestCase):
                     response = client.post("/admin/status", data={"password": "secret"})
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn("2026-07-09 01:02:03 UTC", response.text)
+            self.assertIn("2026-07-09 10:02:03 KST", response.text)
             self.assertNotIn("WARNING", response.text)
             self.assertNotIn("OK", response.text)
             self.assertNotIn("UNAVAILABLE", response.text)

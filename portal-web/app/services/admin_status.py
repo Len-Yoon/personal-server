@@ -1,5 +1,9 @@
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
+
+
+SEOUL_TIMEZONE = ZoneInfo("Asia/Seoul")
 
 
 def format_status_checked_at(value: str) -> str:
@@ -12,7 +16,7 @@ def format_status_checked_at(value: str) -> str:
     except ValueError:
         return raw_value
 
-    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return parsed.astimezone(SEOUL_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S KST")
 
 
 def build_admin_status_context(
