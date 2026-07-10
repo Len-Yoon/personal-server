@@ -19,6 +19,8 @@ class SystemAgentMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["overall_status"], "ok")
         self.assertEqual(metrics["host"]["source"], "demo")
         self.assertGreater(metrics["host"]["cpu_percent"], 0)
+        self.assertIn("status_checks", metrics)
+        self.assertTrue(all(check["status"] == "ok" for check in metrics["status_checks"]))
 
     def test_collect_metrics_marks_stale_windows_host_file(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -51,6 +53,8 @@ class SystemAgentMetricsTests(unittest.TestCase):
             self.assertEqual(metrics["host"]["cpu_percent"], 17.5)
             self.assertIn("host_metrics_stale", metrics["warnings"])
             self.assertEqual(metrics["overall_status"], "warning")
+            self.assertEqual(metrics["host"]["status"], "warning")
+            self.assertTrue(any(check["key"] == "host" and check["status"] == "warning" for check in metrics["status_checks"]))
 
     def test_collect_metrics_accepts_utf8_bom_host_file(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -134,6 +138,48 @@ class SystemAgentMetricsTests(unittest.TestCase):
         self.assertEqual(disk_level(79.9), "ok")
         self.assertEqual(disk_level(80.0), "warning")
         self.assertEqual(disk_level(90.0), "critical")
+
+    def test_collect_metrics_marks_critical_disk_usage(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("system-agent")
+            root = Path(tempdir)
+            (root / "system").mkdir(parents=True, exist_ok=True)
+            host_file = root / "system" / "host-metrics.json"
+            host_file.write_text(
+                json.dumps(
+                    {
+                        "captured_at": datetime.now(timezone.utc).isoformat(),
+                        "cpu_percent": 10.0,
+                        "memory_percent": 20.0,
+                        "disk_percent": 30.0,
+                        "uptime_seconds": 123,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            from app.services import metrics as metrics_module
+
+            original_disk_usage = metrics_module.shutil.disk_usage
+
+            class FakeUsage:
+                total = 100
+                used = 95
+                free = 5
+
+            try:
+                metrics_module.shutil.disk_usage = lambda target: FakeUsage()
+                metrics = metrics_module.collect_metrics(
+                    data_root=root,
+                    host_metrics_path=host_file,
+                    stale_after_seconds=300,
+                )
+            finally:
+                metrics_module.shutil.disk_usage = original_disk_usage
+
+            self.assertEqual(metrics["disk"]["level"], "critical")
+            self.assertEqual(metrics["overall_status"], "critical")
+            self.assertTrue(any(check["key"] == "disk" and check["status"] == "critical" for check in metrics["status_checks"]))
 
 
 if __name__ == "__main__":

@@ -47,6 +47,12 @@ def _demo_status() -> dict[str, Any]:
             {"name": "book-memo", "status": "running"},
             {"name": "system-agent", "status": "running"},
         ],
+        "status_checks": [
+            {"key": "host", "label": "호스트 수집", "status": "ok", "detail": "정상 수집 중"},
+            {"key": "backup", "label": "백업", "status": "ok", "detail": "최근 백업 확인됨"},
+            {"key": "disk", "label": "디스크", "status": "ok", "detail": "사용률 61.0%"},
+            {"key": "files", "label": "파일함", "status": "ok", "detail": "12개, 734003200 bytes"},
+        ],
         "warnings": [],
     }
 
@@ -98,6 +104,9 @@ def _unavailable_status() -> dict[str, Any]:
         "files": {"file_count": 0, "total_bytes": 0},
         "backup": {"exists": False, "latest_name": ""},
         "containers": [],
+        "status_checks": [
+            {"key": "system-agent", "label": "시스템 에이전트", "status": "unavailable", "detail": "시스템 에이전트에 연결할 수 없습니다."},
+        ],
         "warnings": ["system_agent_unavailable"],
     }
 

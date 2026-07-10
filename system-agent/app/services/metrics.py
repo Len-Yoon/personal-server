@@ -15,6 +15,11 @@ PROJECT_DATA_ROOT = next(
     Path("/data"),
 )
 DEFAULT_HOST_METRICS_PATH = PROJECT_DATA_ROOT / "system" / "host-metrics.json"
+STATUS_ORDER = {
+    "ok": 0,
+    "warning": 1,
+    "critical": 2,
+}
 
 
 def collect_metrics(
@@ -38,7 +43,33 @@ def collect_metrics(
     backup = _backup_status(data_root / "backups", warnings, backup_stale_after_seconds)
     disk = _disk_status(data_root, warnings)
 
-    overall_status = "warning" if warnings else "ok"
+    status_checks = [
+        {
+            "key": "host",
+            "label": "호스트 수집",
+            "status": host["status"],
+            "detail": _host_status_detail(host),
+        },
+        {
+            "key": "backup",
+            "label": "백업",
+            "status": backup["status"],
+            "detail": _backup_status_detail(backup),
+        },
+        {
+            "key": "disk",
+            "label": "디스크",
+            "status": disk["status"],
+            "detail": _disk_status_detail(disk),
+        },
+        {
+            "key": "files",
+            "label": "파일함",
+            "status": "ok",
+            "detail": f"{files['file_count']}개, {files['total_bytes']} bytes",
+        },
+    ]
+    overall_status = _highest_status(check["status"] for check in status_checks)
 
     return {
         "demo_mode": False,
@@ -49,6 +80,7 @@ def collect_metrics(
         "files": files,
         "backup": backup,
         "containers": _container_status(),
+        "status_checks": status_checks,
         "warnings": warnings,
     }
 
@@ -78,12 +110,20 @@ def demo_metrics() -> dict[str, Any]:
             "exists": True,
             "latest_name": "20260701-030000",
             "latest_modified_at": "2026-07-01T03:00:00+09:00",
+            "status": "ok",
+            "status_reason": "backup_recent",
         },
         "containers": [
             {"name": "portal-web", "status": "running"},
             {"name": "youtube-memo", "status": "running"},
             {"name": "book-memo", "status": "running"},
             {"name": "system-agent", "status": "running"},
+        ],
+        "status_checks": [
+            {"key": "host", "label": "호스트 수집", "status": "ok", "detail": "정상 수집 중"},
+            {"key": "backup", "label": "백업", "status": "ok", "detail": "최근 백업 확인됨"},
+            {"key": "disk", "label": "디스크", "status": "ok", "detail": "사용률 61.0%"},
+            {"key": "files", "label": "파일함", "status": "ok", "detail": "12개, 734003200 bytes"},
         ],
         "warnings": [],
     }
@@ -98,6 +138,8 @@ def _read_host_metrics(
         warnings.append("host_metrics_missing")
         return {
             "source": "missing",
+            "status": "warning",
+            "status_reason": "host_metrics_missing",
             "cpu_percent": None,
             "memory_percent": None,
             "disk_percent": None,
@@ -110,6 +152,8 @@ def _read_host_metrics(
         warnings.append("host_metrics_invalid")
         return {
             "source": "invalid",
+            "status": "warning",
+            "status_reason": "host_metrics_invalid",
             "cpu_percent": None,
             "memory_percent": None,
             "disk_percent": None,
@@ -119,12 +163,21 @@ def _read_host_metrics(
     captured_at = _parse_datetime(str(payload.get("captured_at", "")))
     if not captured_at:
         warnings.append("host_metrics_invalid_timestamp")
+        status = "warning"
+        status_reason = "host_metrics_invalid_timestamp"
     elif (datetime.now(timezone.utc) - captured_at).total_seconds() > stale_after_seconds:
         warnings.append("host_metrics_stale")
+        status = "warning"
+        status_reason = "host_metrics_stale"
+    else:
+        status = "ok"
+        status_reason = "host_metrics_ok"
 
     return {
         "source": "windows",
         "captured_at": payload.get("captured_at", ""),
+        "status": status,
+        "status_reason": status_reason,
         "cpu_percent": payload.get("cpu_percent"),
         "memory_percent": payload.get("memory_percent"),
         "disk_percent": payload.get("disk_percent"),
@@ -149,6 +202,8 @@ def _backup_status(
             "exists": False,
             "latest_name": "",
             "latest_modified_at": "",
+            "status": "warning",
+            "status_reason": "backup_missing",
         }
 
     latest = backups[0]
@@ -158,11 +213,18 @@ def _backup_status(
     )
     if (datetime.now(timezone.utc) - latest_modified_at).total_seconds() > stale_after_seconds:
         warnings.append("backup_stale")
+        status = "warning"
+        status_reason = "backup_stale"
+    else:
+        status = "ok"
+        status_reason = "backup_recent"
 
     return {
         "exists": True,
         "latest_name": latest.name,
         "latest_modified_at": latest_modified_at.isoformat(),
+        "status": status,
+        "status_reason": status_reason,
     }
 
 
@@ -196,6 +258,8 @@ def _disk_status(data_root: Path, warnings: list[str]) -> dict[str, Any]:
         "used_bytes": usage.used,
         "percent": percent,
         "level": level,
+        "status": "ok" if level == "ok" else level,
+        "status_reason": "disk_usage_ok" if level == "ok" else f"disk_usage_{level}",
     }
 
 
@@ -205,6 +269,43 @@ def disk_level(percent: float) -> str:
     if percent >= 80:
         return "warning"
     return "ok"
+
+
+def _highest_status(statuses: Any) -> str:
+    winner = "ok"
+    for status in statuses:
+        if STATUS_ORDER.get(str(status), -1) > STATUS_ORDER.get(winner, -1):
+            winner = str(status)
+    return winner
+
+
+def _host_status_detail(host: dict[str, Any]) -> str:
+    if host.get("status_reason") == "host_metrics_missing":
+        return "호스트 메트릭 파일이 없습니다."
+    if host.get("status_reason") == "host_metrics_invalid":
+        return "호스트 메트릭 파일 형식이 올바르지 않습니다."
+    if host.get("status_reason") == "host_metrics_invalid_timestamp":
+        return "호스트 메트릭 수집 시각을 읽을 수 없습니다."
+    if host.get("status_reason") == "host_metrics_stale":
+        return f"수집 시각이 오래되었습니다: {host.get('captured_at', '')}"
+    return f"CPU {host.get('cpu_percent')}%, 메모리 {host.get('memory_percent')}%, 디스크 {host.get('disk_percent')}%"
+
+
+def _backup_status_detail(backup: dict[str, Any]) -> str:
+    if backup.get("status_reason") == "backup_missing":
+        return "최근 백업 디렉터리가 없습니다."
+    if backup.get("status_reason") == "backup_stale":
+        return f"최근 백업이 오래되었습니다: {backup.get('latest_name', '')}"
+    return f"최근 백업 확인됨: {backup.get('latest_name', '')}"
+
+
+def _disk_status_detail(disk: dict[str, Any]) -> str:
+    level = disk.get("level", "ok")
+    if level == "critical":
+        return f"디스크 사용률이 매우 높습니다: {disk.get('percent', 0)}%"
+    if level == "warning":
+        return f"디스크 사용률이 높습니다: {disk.get('percent', 0)}%"
+    return f"디스크 사용률 {disk.get('percent', 0)}%"
 
 
 def _container_status() -> list[dict[str, str]]:

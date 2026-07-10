@@ -216,8 +216,14 @@ class PortalDashboardTests(unittest.TestCase):
                     "host": {"cpu_percent": None, "memory_percent": None, "disk_percent": None, "source": "demo"},
                     "disk": {"percent": None, "level": "unknown"},
                     "files": {"file_count": 0, "total_bytes": 0},
-                    "backup": {"latest_name": ""},
+                    "backup": {"latest_name": "", "status": "ok", "status_reason": "backup_recent"},
                     "containers": [],
+                    "status_checks": [
+                        {"key": "host", "label": "호스트 수집", "status": "ok", "detail": "정상 수집 중"},
+                        {"key": "backup", "label": "백업", "status": "ok", "detail": "최근 백업 확인됨"},
+                        {"key": "disk", "label": "디스크", "status": "ok", "detail": "디스크 사용률 0%"},
+                        {"key": "files", "label": "파일함", "status": "ok", "detail": "0개, 0 bytes"},
+                    ],
                     "warnings": [],
                 }
 
@@ -226,6 +232,10 @@ class PortalDashboardTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertIn("2026-07-09 01:02:03 UTC", response.text)
+            self.assertIn("호스트 수집", response.text)
+            self.assertIn("백업", response.text)
+            self.assertIn("디스크", response.text)
+            self.assertIn("파일함", response.text)
         finally:
             os.environ.pop("FILE_MANAGER_PASSWORD", None)
 

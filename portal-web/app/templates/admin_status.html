@@ -52,6 +52,26 @@
                 </span>
             </div>
 
+            <div class="status-check-grid">
+                {% for check in system_status.status_checks %}
+                    <article class="status-check-card">
+                        <div class="status-check-head">
+                            <h3>{{ check.label }}</h3>
+                            <span class="ops-status {{ check.status }}">{{ check.status | upper }}</span>
+                        </div>
+                        <p>{{ check.detail }}</p>
+                    </article>
+                {% else %}
+                    <article class="status-check-card">
+                        <div class="status-check-head">
+                            <h3>상태 기준</h3>
+                            <span class="ops-status unavailable">UNAVAILABLE</span>
+                        </div>
+                        <p>상태 기준을 불러오지 못했습니다.</p>
+                    </article>
+                {% endfor %}
+            </div>
+
             <div class="metric-grid">
                 <div class="metric-tile">
                     <span>CPU</span>
