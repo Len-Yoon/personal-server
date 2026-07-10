@@ -44,7 +44,7 @@
             <div class="section-header">
                 <div>
                     <h2>서버 상태</h2>
-                    <p>미니 PC 상태를 표시합니다.</p>
+                    <p>미니 PC, 디스크, 파일함 상태를 표시합니다.</p>
                     <p>수집 시각(KST): {{ status_checked_at }}</p>
                 </div>
             </div>
@@ -57,6 +57,14 @@
                 <div class="metric-tile">
                     <span>메모리</span>
                     <strong>{{ system_status.host.memory_percent if system_status.host.memory_percent is not none else "-" }}%</strong>
+                </div>
+                <div class="metric-tile">
+                    <span>디스크</span>
+                    <strong>{{ system_status.host.disk_percent if system_status.host.disk_percent is not none else system_status.disk.percent if system_status.disk.percent is not none else "-" }}%</strong>
+                </div>
+                <div class="metric-tile">
+                    <span>파일함</span>
+                    <strong>{{ system_status.files.file_count }}개</strong>
                 </div>
             </div>
 

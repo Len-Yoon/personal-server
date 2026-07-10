@@ -237,8 +237,8 @@ class PortalDashboardTests(unittest.TestCase):
             self.assertNotIn("UNAVAILABLE", response.text)
             self.assertNotIn("호스트 수집", response.text)
             self.assertNotIn("백업", response.text)
-            self.assertNotIn("디스크", response.text)
-            self.assertNotIn("파일함", response.text)
+            self.assertIn("디스크", response.text)
+            self.assertIn("파일함", response.text)
         finally:
             os.environ.pop("FILE_MANAGER_PASSWORD", None)
 
