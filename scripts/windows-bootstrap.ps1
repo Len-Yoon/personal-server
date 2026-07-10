@@ -1,7 +1,6 @@
 param(
     [switch]$InstallTask,
     [switch]$Start,
-    [switch]$Watchdog,
     [switch]$Daemon,
     [string]$ProjectRoot = "C:\personal-server"
 )
@@ -14,8 +13,13 @@ function Write-Info([string]$Message) {
     Write-Host $Message
 }
 
-function Invoke-WslCommand([string]$Command) {
-    & wsl.exe bash /mnt/c/personal-server/scripts/windows-bootstrap.sh
+function Invoke-WslCommand {
+    $wslProjectRoot = (& wsl.exe wslpath -a $ProjectRoot | Select-Object -First 1).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($wslProjectRoot)) {
+        throw "Failed to convert project path '$ProjectRoot' to a WSL path."
+    }
+
+    & wsl.exe bash -lc "cd '$wslProjectRoot' && bash scripts/windows-bootstrap.sh"
     if ($LASTEXITCODE -ne 0) {
         throw "WSL command failed with exit code $LASTEXITCODE"
     }
@@ -51,7 +55,7 @@ function Update-HostMetrics {
 }
 
 function Start-PersonalServerStack {
-    Invoke-WslCommand ""
+    Invoke-WslCommand
     Write-Info "Ensured Docker stack is up and Cloudflare Tunnel is running."
 }
 
@@ -115,10 +119,4 @@ if ($Start) {
     exit 0
 }
 
-if ($Watchdog) {
-    Update-HostMetrics
-    Start-PersonalServerStack
-    exit 0
-}
-
-throw "Use -InstallTask, -Start, or -Watchdog."
+throw "Use -InstallTask, -Start, or -Daemon."
