@@ -120,10 +120,10 @@ def demo_metrics() -> dict[str, Any]:
             {"name": "system-agent", "status": "running"},
         ],
         "status_checks": [
-            {"key": "host", "label": "호스트 수집", "status": "ok", "detail": "정상 수집 중"},
-            {"key": "backup", "label": "백업", "status": "ok", "detail": "최근 백업 확인됨"},
+            {"key": "host", "label": "호스트 수집", "status": "ok", "detail": "정상"},
+            {"key": "backup", "label": "백업", "status": "ok", "detail": "최근 백업"},
             {"key": "disk", "label": "디스크", "status": "ok", "detail": "사용률 61.0%"},
-            {"key": "files", "label": "파일함", "status": "ok", "detail": "12개, 734003200 bytes"},
+            {"key": "files", "label": "파일함", "status": "ok", "detail": "12개"},
         ],
         "warnings": [],
     }
@@ -281,31 +281,31 @@ def _highest_status(statuses: Any) -> str:
 
 def _host_status_detail(host: dict[str, Any]) -> str:
     if host.get("status_reason") == "host_metrics_missing":
-        return "호스트 메트릭 파일이 없습니다."
+        return "메트릭 없음"
     if host.get("status_reason") == "host_metrics_invalid":
-        return "호스트 메트릭 파일 형식이 올바르지 않습니다."
+        return "형식 오류"
     if host.get("status_reason") == "host_metrics_invalid_timestamp":
-        return "호스트 메트릭 수집 시각을 읽을 수 없습니다."
+        return "시각 오류"
     if host.get("status_reason") == "host_metrics_stale":
-        return f"수집 시각이 오래되었습니다: {host.get('captured_at', '')}"
-    return f"CPU {host.get('cpu_percent')}%, 메모리 {host.get('memory_percent')}%, 디스크 {host.get('disk_percent')}%"
+        return "오래됨"
+    return "정상"
 
 
 def _backup_status_detail(backup: dict[str, Any]) -> str:
     if backup.get("status_reason") == "backup_missing":
-        return "최근 백업 디렉터리가 없습니다."
+        return "백업 없음"
     if backup.get("status_reason") == "backup_stale":
-        return f"최근 백업이 오래되었습니다: {backup.get('latest_name', '')}"
-    return f"최근 백업 확인됨: {backup.get('latest_name', '')}"
+        return "오래됨"
+    return "정상"
 
 
 def _disk_status_detail(disk: dict[str, Any]) -> str:
     level = disk.get("level", "ok")
     if level == "critical":
-        return f"디스크 사용률이 매우 높습니다: {disk.get('percent', 0)}%"
+        return "매우 높음"
     if level == "warning":
-        return f"디스크 사용률이 높습니다: {disk.get('percent', 0)}%"
-    return f"디스크 사용률 {disk.get('percent', 0)}%"
+        return "높음"
+    return "정상"
 
 
 def _container_status() -> list[dict[str, str]]:

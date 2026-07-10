@@ -47,28 +47,19 @@
                     <p>미니 PC, 디스크, 파일함, 백업 상태를 표시합니다.</p>
                     <p>수집 시각(UTC): {{ status_checked_at }}</p>
                 </div>
-                <span class="ops-status {{ system_status.overall_status }}">
-                    {{ system_status.overall_status | upper }}
-                </span>
             </div>
 
-            <div class="status-check-grid">
+            <div class="status-summary-list">
                 {% for check in system_status.status_checks %}
-                    <article class="status-check-card">
-                        <div class="status-check-head">
-                            <h3>{{ check.label }}</h3>
-                            <span class="ops-status {{ check.status }}">{{ check.status | upper }}</span>
-                        </div>
-                        <p>{{ check.detail }}</p>
-                    </article>
+                    <div class="status-summary-item">
+                        <strong>{{ check.label }}</strong>
+                        <span>{{ check.detail }}</span>
+                    </div>
                 {% else %}
-                    <article class="status-check-card">
-                        <div class="status-check-head">
-                            <h3>상태 기준</h3>
-                            <span class="ops-status unavailable">UNAVAILABLE</span>
-                        </div>
-                        <p>상태 기준을 불러오지 못했습니다.</p>
-                    </article>
+                    <div class="status-summary-item">
+                        <strong>상태 기준</strong>
+                        <span>불러오지 못했습니다.</span>
+                    </div>
                 {% endfor %}
             </div>
 
@@ -103,7 +94,7 @@
                     <h3>서비스 Health</h3>
                     <div class="container-list">
                         {% for service in service_health %}
-                            <span>{{ service.name }} · {{ service.status }}</span>
+                            <span>{{ service.name }}</span>
                         {% else %}
                             <span>서비스 상태를 불러오지 못했습니다.</span>
                         {% endfor %}
@@ -113,19 +104,9 @@
                     <h3>컨테이너</h3>
                     <div class="container-list">
                         {% for container in system_status.containers %}
-                            <span>{{ container.name }} · {{ container.status }}</span>
+                            <span>{{ container.name }}</span>
                         {% else %}
                             <span>system-agent 연결 후 표시됩니다.</span>
-                        {% endfor %}
-                    </div>
-                </div>
-                <div class="ops-panel">
-                    <h3>경고</h3>
-                    <div class="warning-list">
-                        {% for warning in system_status.warnings %}
-                            <span>{{ warning }}</span>
-                        {% else %}
-                            <span>현재 경고가 없습니다.</span>
                         {% endfor %}
                     </div>
                 </div>

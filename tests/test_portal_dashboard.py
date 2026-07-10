@@ -236,6 +236,9 @@ class PortalDashboardTests(unittest.TestCase):
             self.assertIn("백업", response.text)
             self.assertIn("디스크", response.text)
             self.assertIn("파일함", response.text)
+            self.assertNotIn("WARNING", response.text)
+            self.assertNotIn("OK", response.text)
+            self.assertNotIn("UNAVAILABLE", response.text)
         finally:
             os.environ.pop("FILE_MANAGER_PASSWORD", None)
 
