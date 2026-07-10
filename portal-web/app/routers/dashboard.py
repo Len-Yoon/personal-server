@@ -6,7 +6,7 @@ from fastapi import APIRouter, Body, Form, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from app.services.admin_status import build_admin_status_context
+from app.services.admin_status import build_admin_status_context, format_status_checked_at
 from app.services.global_search import search_all
 from app.services.host_urls import portal_home_url, service_base_urls, service_url
 from app.services.security import (
@@ -183,7 +183,7 @@ def admin_status_page(request: Request, password: str = Form(default="")):
             "title": "관리자 상태",
             "authenticated": True,
             "error": "",
-            "status_checked_at": system_status.get("captured_at", "") or "unknown",
+            "status_checked_at": format_status_checked_at(system_status.get("captured_at", "")),
             "portal_home_url": portal_home_url(_request_host(request)),
             **context,
         },

@@ -165,6 +165,16 @@ class PortalDashboardTests(unittest.TestCase):
         self.assertEqual(context["security_status"]["headers"], ["X-Frame-Options"])
         self.assertTrue(context["has_warnings"])
 
+    def test_admin_status_checked_at_is_formatted_for_display(self):
+        prepare_service_import("portal-web")
+        from app.services.admin_status import format_status_checked_at
+
+        self.assertEqual(
+            format_status_checked_at("2026-07-09T01:02:03+00:00"),
+            "2026-07-09 01:02:03 UTC",
+        )
+        self.assertEqual(format_status_checked_at(""), "unknown")
+
     def test_admin_status_login_disables_cache(self):
         app = self.load_app()
 
@@ -188,6 +198,34 @@ class PortalDashboardTests(unittest.TestCase):
             self.assertEqual(response.headers["cache-control"], "no-store, no-cache, must-revalidate, max-age=0")
             self.assertEqual(response.headers["pragma"], "no-cache")
             self.assertEqual(response.headers["expires"], "0")
+        finally:
+            os.environ.pop("FILE_MANAGER_PASSWORD", None)
+
+    def test_admin_status_page_renders_formatted_collection_time(self):
+        os.environ["FILE_MANAGER_PASSWORD"] = "secret"
+        try:
+            app = self.load_app()
+
+            with patch("app.routers.dashboard.get_dashboard_status") as get_dashboard_status, patch(
+                "app.routers.dashboard.get_service_health",
+                return_value=[],
+            ), patch("app.routers.dashboard.security_status", return_value={"headers": [], "file_policy": {"max_upload_mb": 50, "blocked_extensions": [], "allowed_extensions": []}, "log_files": [], "recent_events": [], "log_path": "/tmp/security.log"}):
+                get_dashboard_status.return_value = {
+                    "captured_at": "2026-07-09T01:02:03+00:00",
+                    "overall_status": "ok",
+                    "host": {"cpu_percent": None, "memory_percent": None, "disk_percent": None, "source": "demo"},
+                    "disk": {"percent": None, "level": "unknown"},
+                    "files": {"file_count": 0, "total_bytes": 0},
+                    "backup": {"latest_name": ""},
+                    "containers": [],
+                    "warnings": [],
+                }
+
+                with TestClient(app) as client:
+                    response = client.post("/admin/status", data={"password": "secret"})
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("2026-07-09 01:02:03 UTC", response.text)
         finally:
             os.environ.pop("FILE_MANAGER_PASSWORD", None)
 

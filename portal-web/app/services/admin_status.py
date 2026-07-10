@@ -1,4 +1,18 @@
+from datetime import datetime, timezone
 from typing import Any
+
+
+def format_status_checked_at(value: str) -> str:
+    raw_value = value.strip()
+    if not raw_value:
+        return "unknown"
+
+    try:
+        parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        return raw_value
+
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def build_admin_status_context(
