@@ -13,12 +13,6 @@ from app.services.news_sources import collect_news_from_sources
 
 
 PROJECT_DATA_ROOT = Path(__file__).resolve().parents[3] / "data"
-ARCHIVE_PATH = Path(
-    os.getenv(
-        "NEWS_ARCHIVE_PATH",
-        PROJECT_DATA_ROOT / "crawler-worker" / "news_archive.json",
-    )
-)
 CACHE_TTL_SECONDS = int(os.getenv("NEWS_REFRESH_INTERVAL_SECONDS", "3600"))
 RETENTION_DAYS = int(os.getenv("NEWS_RETENTION_DAYS", "7"))
 
@@ -156,11 +150,12 @@ def _build_result(
 
 
 def _load_archive() -> dict[str, Any]:
-    if not ARCHIVE_PATH.exists():
+    archive_path = _archive_path()
+    if not archive_path.exists():
         return {"updated_at": "", "articles": []}
 
     try:
-        with ARCHIVE_PATH.open("r", encoding="utf-8") as handle:
+        with archive_path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
     except (OSError, json.JSONDecodeError):
         return {"updated_at": "", "articles": []}
@@ -196,21 +191,31 @@ def _load_archive() -> dict[str, Any]:
 
 
 def _save_archive(archive: dict[str, Any]) -> None:
+    archive_path = _archive_path()
     with _ARCHIVE_WRITE_LOCK:
-        ARCHIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
 
         with tempfile.NamedTemporaryFile(
             "w",
             encoding="utf-8",
             delete=False,
-            dir=str(ARCHIVE_PATH.parent),
-            prefix=f".{ARCHIVE_PATH.name}.",
+            dir=str(archive_path.parent),
+            prefix=f".{archive_path.name}.",
             suffix=".tmp",
         ) as handle:
             json.dump(archive, handle, ensure_ascii=False, indent=2)
             temp_path = Path(handle.name)
 
-        temp_path.replace(ARCHIVE_PATH)
+        temp_path.replace(archive_path)
+
+
+def _archive_path() -> Path:
+    return Path(
+        os.getenv(
+            "NEWS_ARCHIVE_PATH",
+            PROJECT_DATA_ROOT / "crawler-worker" / "news_archive.json",
+        )
+    )
 
 
 def _schedule_refresh(category: str, limit: int) -> None:
