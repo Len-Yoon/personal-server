@@ -24,6 +24,37 @@ load_project_env_value() {
 
 load_project_env_value OBSIDIAN_VAULT_PATH
 load_project_env_value OBSIDIAN_NEWS_DIR
+load_project_env_value DATA_ROOT
+load_project_env_value BACKUP_PATH
+load_project_env_value BACKUP_RETENTION_DAYS
+load_project_env_value BACKUP_INCLUDE_FILES
+load_project_env_value BACKUP_STALE_SECONDS
+load_project_env_value SECURITY_LOG_PATH
+load_project_env_value SECURITY_LOG_TIMEZONE
+load_project_env_value SECURITY_LOG_RETENTION_DAYS
+load_project_env_value NEWS_ARCHIVE_PATH
+load_project_env_value NEWS_RETENTION_DAYS
+load_project_env_value HOST_METRICS_PATH
+load_project_env_value HOST_METRICS_STALE_SECONDS
+
+normalize_project_path() {
+  local key="$1"
+  local value="${!key:-}"
+  case "$value" in
+    /data/*)
+      export "$key=$PROJECT_ROOT/data/${value#/data/}"
+      ;;
+    /app/data/*)
+      export "$key=$PROJECT_ROOT/data/${value#/app/data/}"
+      ;;
+  esac
+}
+
+normalize_project_path DATA_ROOT
+normalize_project_path BACKUP_PATH
+normalize_project_path SECURITY_LOG_PATH
+normalize_project_path NEWS_ARCHIVE_PATH
+normalize_project_path HOST_METRICS_PATH
 
 run_daily_maintenance() {
   local marker=/tmp/personal-server-maintenance.last

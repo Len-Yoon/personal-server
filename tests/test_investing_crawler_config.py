@@ -25,6 +25,11 @@ class InvestingCrawlerConfigTests(unittest.TestCase):
         self.assertIn("python -m app.main", content)
         self.assertNotIn("restart: unless-stopped\n    investing-crawler", content)
 
+    def test_manual_script_can_load_vault_path_from_dotenv(self):
+        content = (ROOT / "scripts" / "investing-news-once.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn(".env", content)
+        self.assertIn("OBSIDIAN_VAULT_PATH", content)
+
 
 if __name__ == "__main__":
     unittest.main()

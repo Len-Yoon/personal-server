@@ -30,6 +30,22 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("OBSIDIAN_VAULT_PATH", WSL_SCRIPT)
         self.assertIn(".env", WSL_SCRIPT)
 
+    def test_loads_maintenance_settings_from_project_env(self):
+        for key in (
+            "DATA_ROOT",
+            "BACKUP_PATH",
+            "SECURITY_LOG_PATH",
+            "NEWS_ARCHIVE_PATH",
+            "BACKUP_RETENTION_DAYS",
+            "SECURITY_LOG_RETENTION_DAYS",
+            "NEWS_RETENTION_DAYS",
+        ):
+            self.assertIn(f"load_project_env_value {key}", WSL_SCRIPT)
+
+    def test_normalizes_container_data_paths_for_wsl_maintenance(self):
+        self.assertIn("normalize_project_path DATA_ROOT", WSL_SCRIPT)
+        self.assertIn("normalize_project_path SECURITY_LOG_PATH", WSL_SCRIPT)
+
     def test_runs_investing_news_collection_once_per_day(self):
         self.assertIn("run_daily_investing_news", WSL_SCRIPT)
         self.assertIn("investing-crawler", WSL_SCRIPT)
