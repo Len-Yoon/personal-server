@@ -23,7 +23,6 @@ router = APIRouter(prefix="/files")
 templates = Jinja2Templates(directory=Path(__file__).resolve().parents[1] / "templates")
 templates.env.filters["filesize"] = file_store.format_size
 FILE_ACCESS_COOKIE = "file_manager_access"
-FILE_ACCESS_PASSWORD = "111816"
 
 
 @router.post("/login")
@@ -192,7 +191,7 @@ def _directory_url(path: str) -> str:
 
 
 def _file_access_password() -> str:
-    return os.getenv("FILE_MANAGER_ACCESS_PASSWORD", FILE_ACCESS_PASSWORD).strip()
+    return os.getenv("FILE_MANAGER_ACCESS_PASSWORD", "").strip()
 
 
 def _file_access_cookie_value(password: str) -> str:

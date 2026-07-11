@@ -117,7 +117,7 @@ Minimum environment values:
 ALADIN_TTB_KEY=
 DELETE_PASSWORD=
 FILE_MANAGER_PASSWORD=
-FILE_MANAGER_ACCESS_PASSWORD=111816
+FILE_MANAGER_ACCESS_PASSWORD=
 SECURITY_LOG_PATH=/app/data/logs/security-events.txt
 SECURITY_LOG_TIMEZONE=Asia/Seoul
 FILE_MAX_UPLOAD_MB=50
@@ -131,7 +131,7 @@ HOST_METRICS_STALE_SECONDS=900
 ```
 
 `/files`는 파일함 전용 비밀번호로 먼저 인증해야 합니다. 기본 파일함 비밀번호는
-`111816`이며, 운영 환경에서는 `.env`의 `FILE_MANAGER_ACCESS_PASSWORD`로 변경할
+운영 환경에서는 `.env`의 `FILE_MANAGER_ACCESS_PASSWORD`에 사용할 비밀번호를 직접 설정할
 수 있습니다. 파일 삭제에는 별도로 `DELETE_PASSWORD`가 필요합니다.
 
 For a 24/7 N100 box, keep `FILE_MANAGER_AUTH_REQUIRED=true` or

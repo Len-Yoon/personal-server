@@ -11,7 +11,7 @@ class FileAccessTests(unittest.TestCase):
     def test_file_area_requires_separate_password_and_sets_session_cookie(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ["FILE_MANAGER_ACCESS_PASSWORD"] = "111816"
+            os.environ["FILE_MANAGER_ACCESS_PASSWORD"] = "test-file-password"
             os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
             import app.main as main
             from fastapi.testclient import TestClient
@@ -31,7 +31,7 @@ class FileAccessTests(unittest.TestCase):
 
                 logged_in = client.post(
                     "/files/login",
-                    data={"password": "111816", "next_path": ""},
+                    data={"password": "test-file-password", "next_path": ""},
                     follow_redirects=False,
                 )
                 self.assertEqual(logged_in.status_code, 303)
