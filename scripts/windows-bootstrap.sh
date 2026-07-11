@@ -40,10 +40,27 @@ run_daily_maintenance() {
   fi
 }
 
+run_daily_investing_news() {
+  local marker=/tmp/personal-server-investing-news.last
+  local today
+  today="$(date +%F)"
+  if [ -f "$marker" ] && [ "$(cat "$marker")" = "$today" ]; then
+    return 0
+  fi
+
+  if docker compose -f docker-compose.yml -f docker-compose.n100.yml run --rm investing-crawler \
+    >>/tmp/personal-server-investing-news.log 2>&1; then
+    printf '%s\n' "$today" > "$marker"
+  else
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Investing news collection failed" >> /tmp/windows-bootstrap-trace.log
+  fi
+}
+
 docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d \
   portal-web system-agent crawler-worker youtube-memo book-memo caddy
 
 run_daily_maintenance
+run_daily_investing_news
 
 if pgrep -af "cloudflared tunnel run" >/dev/null 2>&1; then
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] cloudflared already running" >> /tmp/windows-bootstrap-trace.log
