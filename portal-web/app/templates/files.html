@@ -208,7 +208,7 @@ function updateSelectionToolbar() {
     const count = selectedTiles().length;
     selectedCount.textContent = count;
     const selectedFiles = selectedTiles().filter((tile) => !tile.classList.contains("folder-tile"));
-    downloadSelection.disabled = selectedFiles.length !== 1;
+    downloadSelection.disabled = selectedFiles.length === 0;
     deleteSelection.disabled = count === 0;
     clearSelection.disabled = count === 0;
 }
@@ -259,10 +259,30 @@ fileInput?.addEventListener("change", async () => {
     await uploadFiles(files, dropZone?.dataset.currentPath || "");
 });
 
-downloadSelection?.addEventListener("click", () => {
+downloadSelection?.addEventListener("click", async () => {
     const selectedFiles = selectedTiles().filter((tile) => !tile.classList.contains("folder-tile"));
     if (selectedFiles.length === 1) {
         window.location.href = selectedFiles[0].dataset.openUrl;
+        return;
+    }
+    if (selectedFiles.length > 1) {
+        const formData = new FormData();
+        selectedFiles.forEach((tile) => formData.append("paths", tile.dataset.itemPath));
+        const response = await fetch("/files/download-bulk", {
+            method: "POST",
+            body: formData,
+        });
+        if (!response.ok) {
+            alert("파일 다운로드에 실패했습니다.");
+            return;
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = "files.zip";
+        anchor.click();
+        URL.revokeObjectURL(url);
     }
 });
 

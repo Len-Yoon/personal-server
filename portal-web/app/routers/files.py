@@ -2,11 +2,14 @@ import os
 import secrets
 import hashlib
 import hmac
+import tempfile
+import zipfile
 from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
+from starlette.background import BackgroundTask
 from fastapi.templating import Jinja2Templates
 
 from app.services import file_store
@@ -144,6 +147,39 @@ def download_file(request: Request, path: str):
 
     append_security_event("file_downloaded", path=path)
     return FileResponse(file_path, filename=file_path.name)
+
+
+@router.post("/download-bulk")
+def download_files(request: Request, paths: list[str] = Form(...)):
+    _require_file_access(request)
+    requested_paths = list(dict.fromkeys(path for path in paths if path.strip()))
+    if not requested_paths:
+        raise HTTPException(status_code=400, detail="다운로드할 파일이 없습니다.")
+
+    archive_file = tempfile.NamedTemporaryFile(prefix="file-vault-", suffix=".zip", delete=False)
+    archive_path = Path(archive_file.name)
+    archive_file.close()
+
+    try:
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for path in requested_paths:
+                file_path = file_store.get_download_path(path)
+                archive.write(file_path, arcname=Path(path).as_posix().lstrip("/"))
+    except (ValueError, FileNotFoundError, IsADirectoryError) as exc:
+        archive_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    append_security_event("files_downloaded", count=len(requested_paths))
+    return FileResponse(
+        archive_path,
+        filename="files.zip",
+        media_type="application/zip",
+        background=BackgroundTask(_remove_temporary_file, archive_path),
+    )
+
+
+def _remove_temporary_file(path: Path) -> None:
+    path.unlink(missing_ok=True)
 
 
 @router.post("/delete")
