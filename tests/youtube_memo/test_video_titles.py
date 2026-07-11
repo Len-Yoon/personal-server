@@ -1,5 +1,6 @@
 import importlib
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,16 @@ class YoutubeVideoTitleTests(unittest.TestCase):
         import app.services.memo_service as memo_service
 
         return importlib.reload(memo_service)
+
+    def test_database_context_closes_connection_after_use(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            memo_service = self.reload_memo_service(tempdir)
+            connection = memo_service._connect()
+            with connection as open_connection:
+                open_connection.execute("SELECT 1")
+
+            with self.assertRaises(sqlite3.ProgrammingError):
+                open_connection.execute("SELECT 1")
 
     def test_create_video_stores_fetched_youtube_title(self):
         with tempfile.TemporaryDirectory() as tempdir:

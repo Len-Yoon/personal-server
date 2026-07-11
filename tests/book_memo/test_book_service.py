@@ -1,5 +1,6 @@
 import importlib
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -17,6 +18,16 @@ class BookMemoServiceTests(unittest.TestCase):
         import app.services.book_service as book_service
 
         return importlib.reload(book_service)
+
+    def test_database_context_closes_connection_after_use(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            book_service = self.reload_book_service(tempdir)
+            connection = book_service._connect()
+            with connection as open_connection:
+                open_connection.execute("SELECT 1")
+
+            with self.assertRaises(sqlite3.ProgrammingError):
+                open_connection.execute("SELECT 1")
 
     def reload_book_search(self):
         prepare_service_import("book-memo")

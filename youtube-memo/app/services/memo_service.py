@@ -2,8 +2,9 @@ import os
 import re
 import sqlite3
 import json
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import urlopen
 
@@ -343,11 +344,19 @@ def _snippet(value: str, limit: int = 140) -> str:
     return f"{cleaned[:limit].rstrip()}..."
 
 
-def _connect() -> sqlite3.Connection:
+@contextmanager
+def _connect() -> Iterator[sqlite3.Connection]:
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
-    return connection
+    try:
+        yield connection
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
