@@ -15,23 +15,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 서비스마다 의존성을 따로 설치해 충돌을 줄임
-          # 포털 계열: 화면/보안 회귀를 함께 확인함
           - name: portal
             requirements: portal-web/requirements.txt
             pythonpath: portal-web
             test_command: python3 -m unittest tests.test_portal_dashboard tests.test_portal_security
-          # 운영 상태 수집: host metrics와 백업 경고를 분리 검증함
           - name: system-agent
             requirements: system-agent/requirements.txt
             pythonpath: system-agent
             test_command: python3 -m unittest tests.system_agent.test_metrics
-          # 뉴스 수집: 캐시와 기사 정규화를 별도로 확인함
           - name: crawler-worker
             requirements: crawler-worker/requirements.txt
             pythonpath: crawler-worker
-            test_command: python3 -m unittest tests.crawler_worker.test_news_service
-          # 메모 서비스: 영상/책 메모의 핵심 CRUD를 검증함
+            test_command: python3 -m unittest tests.crawler_worker.test_datetime_format tests.crawler_worker.test_investing_news_rss tests.crawler_worker.test_news_service tests.crawler_worker.test_rss_news
           - name: youtube-memo
             requirements: youtube-memo/requirements.txt
             pythonpath: youtube-memo
@@ -40,6 +35,14 @@ jobs:
             requirements: book-memo/requirements.txt
             pythonpath: book-memo
             test_command: python3 -m unittest tests.book_memo.test_book_service
+          - name: investing-crawler
+            requirements: investing_crawler/requirements.txt
+            pythonpath: .
+            test_command: python3 -m unittest tests.test_investing_crawler_config tests.investing_crawler.test_main tests.investing_crawler.test_news_parser tests.investing_crawler.test_obsidian_writer tests.investing_crawler.test_rss_collector
+          - name: maintenance
+            requirements: ""
+            pythonpath: .
+            test_command: python3 -m unittest tests.test_maintenance tests.test_windows_bootstrap
 
     steps:
       - name: Check out repository
@@ -51,6 +54,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
+        if: matrix.requirements != ''
         run: python3 -m pip install -r ${{ matrix.requirements }}
 
       - name: Run unit tests
