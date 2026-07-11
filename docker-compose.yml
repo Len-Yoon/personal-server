@@ -19,6 +19,12 @@ services:
     environment:
       - FILE_STORAGE_PATH=/data/files
       - SYSTEM_AGENT_URL=http://system-agent:8010
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     volumes:
       - ./portal-web:/app
       - ./data/files:/data/files
@@ -35,6 +41,12 @@ services:
     environment:
       - DATA_ROOT=/data
       - HOST_METRICS_PATH=/data/system/host-metrics.json
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     volumes:
       - ./data:/data:ro
 
@@ -56,6 +68,12 @@ services:
       - .env
     environment:
       - NEWS_DB_PATH=/data/crawler-worker/news_summaries.sqlite3
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     volumes:
       - ./crawler-worker:/app
       - ./data/crawler-worker:/data/crawler-worker
@@ -91,6 +109,12 @@ services:
       - .env
     environment:
       - YOUTUBE_MEMO_DB_PATH=/data/youtube-memo/youtube_memo.sqlite3
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     volumes:
       - ./youtube-memo:/app
       - ./data/youtube-memo:/data/youtube-memo
@@ -114,6 +138,12 @@ services:
       - .env
     environment:
       - BOOK_MEMO_DB_PATH=/data/book-memo/book_memo.sqlite3
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     volumes:
       - ./book-memo:/app
       - ./data/book-memo:/data/book-memo

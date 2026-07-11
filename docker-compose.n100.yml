@@ -174,10 +174,14 @@ services:
       CADDY_EMAIL: ${CADDY_EMAIL:-}
       CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
     depends_on:
-      - portal-web
-      - crawler-worker
-      - youtube-memo
-      - book-memo
+      portal-web:
+        condition: service_healthy
+      crawler-worker:
+        condition: service_healthy
+      youtube-memo:
+        condition: service_healthy
+      book-memo:
+        condition: service_healthy
     ports:
       - "80:80"
       - "443:443"
