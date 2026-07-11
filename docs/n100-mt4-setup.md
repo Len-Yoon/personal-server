@@ -264,6 +264,8 @@ Back up SQLite data and prune old security logs:
 ```bash
 python3 scripts/maintenance.py backup
 python3 scripts/maintenance.py prune-logs
+python3 scripts/maintenance.py prune-obsidian-news
+python3 scripts/maintenance.py all
 ```
 
 Install and run the lightweight Windows bootstrap from the Windows startup entry:
@@ -278,8 +280,15 @@ If file uploads should be included in backups, set:
 BACKUP_INCLUDE_FILES=true
 BACKUP_RETENTION_DAYS=14
 SECURITY_LOG_RETENTION_DAYS=30
+OBSIDIAN_NEWS_RETENTION_DAYS=30
 BACKUP_STALE_SECONDS=172800
 ```
+
+Windows 부트스트랩은 로그인 후 복구 루프에서 하루에 한 번 `maintenance.py all`을
+자동 실행합니다. 이 작업은 뉴스 캐시, Obsidian의 날짜별 Investing 뉴스, 보안
+로그, 백업을 각 보존기간에 맞춰 정리하며, Obsidian 뉴스는 `YYYY-MM-DD.md`
+형식의 파일만 삭제합니다. 보존기간을 지난 파일은 복구할 수 없으므로 필요한
+자료는 별도 보관해야 합니다.
 
 ## Expected resource shape
 
