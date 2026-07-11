@@ -194,7 +194,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 news_archive = self.reload_news_archive()
 
                 with patch(
-                    "app.services.news_sources.collect_news_from_sources",
+                    "app.services.news_archive.collect_news_from_sources",
                     side_effect=RuntimeError("boom"),
                 ):
                     result = news_archive.collect_market_news("gold", limit=1, force_refresh=True)
