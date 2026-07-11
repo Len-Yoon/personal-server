@@ -137,6 +137,13 @@ def get_download_path(relative_path: str) -> Path:
     return path
 
 
+def get_download_item_path(relative_path: str) -> Path:
+    path = _safe_path(relative_path)
+    if not path.exists():
+        raise FileNotFoundError("다운로드할 파일 또는 폴더를 찾을 수 없습니다.")
+    return path
+
+
 def delete_item(relative_path: str) -> None:
     path = _safe_path(relative_path)
     if path == STORAGE_PATH.resolve():

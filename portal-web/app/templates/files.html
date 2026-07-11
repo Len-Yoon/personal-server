@@ -207,8 +207,8 @@ function selectedTiles() {
 function updateSelectionToolbar() {
     const count = selectedTiles().length;
     selectedCount.textContent = count;
-    const selectedFiles = selectedTiles().filter((tile) => !tile.classList.contains("folder-tile"));
-    downloadSelection.disabled = selectedFiles.length === 0;
+    const selectedDownloadItems = selectedTiles();
+    downloadSelection.disabled = selectedDownloadItems.length === 0;
     deleteSelection.disabled = count === 0;
     clearSelection.disabled = count === 0;
 }
@@ -260,14 +260,14 @@ fileInput?.addEventListener("change", async () => {
 });
 
 downloadSelection?.addEventListener("click", async () => {
-    const selectedFiles = selectedTiles().filter((tile) => !tile.classList.contains("folder-tile"));
-    if (selectedFiles.length === 1) {
-        window.location.href = selectedFiles[0].dataset.openUrl;
+    const selectedItems = selectedTiles();
+    if (selectedItems.length === 1 && !selectedItems[0].classList.contains("folder-tile")) {
+        window.location.href = selectedItems[0].dataset.openUrl;
         return;
     }
-    if (selectedFiles.length > 1) {
+    if (selectedItems.length > 0) {
         const formData = new FormData();
-        selectedFiles.forEach((tile) => formData.append("paths", tile.dataset.itemPath));
+        selectedItems.forEach((tile) => formData.append("paths", tile.dataset.itemPath));
         const response = await fetch("/files/download-bulk", {
             method: "POST",
             body: formData,
