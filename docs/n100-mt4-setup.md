@@ -291,6 +291,11 @@ Windows 부트스트랩은 로그인 후 복구 루프에서 하루에 한 번 `
 형식의 파일만 삭제합니다. 보존기간을 지난 파일은 복구할 수 없으므로 필요한
 자료는 별도 보관해야 합니다.
 
+같은 부트스트랩은 하루에 한 번 `investing-crawler` 일회성 컨테이너도 실행해
+Google News RSS에서 Investing.com 한국어 뉴스 목록을 Obsidian에 저장합니다.
+수집 실패는 복구 루프를 중단하지 않으며 `/tmp/personal-server-investing-news.log`
+와 부트스트랩 trace 로그에서 확인할 수 있습니다.
+
 ## Expected resource shape
 
 The default stack is designed to stay small:
