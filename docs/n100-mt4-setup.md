@@ -264,6 +264,7 @@ Back up SQLite data and prune old security logs:
 ```bash
 python3 scripts/maintenance.py backup
 python3 scripts/maintenance.py prune-logs
+python3 scripts/maintenance.py prune-news
 python3 scripts/maintenance.py prune-obsidian-news
 python3 scripts/maintenance.py all
 ```
