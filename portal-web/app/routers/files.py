@@ -1,5 +1,6 @@
 import os
 import secrets
+from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
@@ -17,7 +18,7 @@ from app.services.security import (
 
 
 router = APIRouter(prefix="/files")
-templates = Jinja2Templates(directory="app/templates")
+templates = Jinja2Templates(directory=Path(__file__).resolve().parents[1] / "templates")
 templates.env.filters["filesize"] = file_store.format_size
 
 

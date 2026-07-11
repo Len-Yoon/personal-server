@@ -1,6 +1,7 @@
 import os
 import secrets
 import ipaddress
+from pathlib import Path
 
 from fastapi import APIRouter, Body, Form, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -20,7 +21,7 @@ from app.services.security import (
 from app.services.system_status import get_dashboard_status, get_service_health
 
 router = APIRouter()
-templates = Jinja2Templates(directory="app/templates")
+templates = Jinja2Templates(directory=Path(__file__).resolve().parents[1] / "templates")
 
 
 @router.get("/")
