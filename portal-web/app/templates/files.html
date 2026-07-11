@@ -46,6 +46,7 @@
     </div>
 
     <div class="desktop-toolbar">
+        <button id="download-selection" type="button" disabled>다운로드</button>
         <button id="new-folder" type="button">새 폴더</button>
         <button id="pick-files" type="button">업로드</button>
         <button id="delete-selection" type="button">삭제</button>
@@ -194,6 +195,7 @@ document.querySelectorAll(".file-tile").forEach((tile) => {
 
 const selectedCount = document.querySelector("#selected-count");
 const clearSelection = document.querySelector("#clear-selection");
+const downloadSelection = document.querySelector("#download-selection");
 const deleteSelection = document.querySelector("#delete-selection");
 const newFolder = document.querySelector("#new-folder");
 const pickFiles = document.querySelector("#pick-files");
@@ -205,6 +207,8 @@ function selectedTiles() {
 function updateSelectionToolbar() {
     const count = selectedTiles().length;
     selectedCount.textContent = count;
+    const selectedFiles = selectedTiles().filter((tile) => !tile.classList.contains("folder-tile"));
+    downloadSelection.disabled = selectedFiles.length !== 1;
     deleteSelection.disabled = count === 0;
     clearSelection.disabled = count === 0;
 }
@@ -253,6 +257,13 @@ fileInput?.addEventListener("change", async () => {
         return;
     }
     await uploadFiles(files, dropZone?.dataset.currentPath || "");
+});
+
+downloadSelection?.addEventListener("click", () => {
+    const selectedFiles = selectedTiles().filter((tile) => !tile.classList.contains("folder-tile"));
+    if (selectedFiles.length === 1) {
+        window.location.href = selectedFiles[0].dataset.openUrl;
+    }
 });
 
 deleteSelection?.addEventListener("click", async () => {
