@@ -26,6 +26,10 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("scripts/maintenance.py all", WSL_SCRIPT)
         self.assertIn("personal-server-maintenance.last", WSL_SCRIPT)
 
+    def test_loads_obsidian_settings_from_project_env_for_maintenance(self):
+        self.assertIn("OBSIDIAN_VAULT_PATH", WSL_SCRIPT)
+        self.assertIn(".env", WSL_SCRIPT)
+
     def test_powershell_daemon_isolates_maintenance_failure(self):
         self.assertIn("bash scripts/windows-bootstrap.sh", SCRIPT)
         self.assertIn("Recovery check failed", SCRIPT)

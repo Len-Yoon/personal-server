@@ -10,6 +10,21 @@ cd "$PROJECT_ROOT"
   echo "config_exists=$([ -f ~/.cloudflared/config.yml ] && echo yes || echo no)"
 } >> /tmp/windows-bootstrap-trace.log
 
+load_project_env_value() {
+  local key="$1"
+  local value
+  if [ -n "${!key:-}" ] || [ ! -f .env ]; then
+    return 0
+  fi
+  value="$(sed -n "s/^${key}=//p" .env | head -n 1)"
+  if [ -n "$value" ]; then
+    export "$key=$value"
+  fi
+}
+
+load_project_env_value OBSIDIAN_VAULT_PATH
+load_project_env_value OBSIDIAN_NEWS_DIR
+
 run_daily_maintenance() {
   local marker=/tmp/personal-server-maintenance.last
   local today
