@@ -52,7 +52,7 @@
 ## 5. 보안 및 운영 포인트
 
 - `.env`에는 비밀값만 저장하고 문서에는 남기지 않음
-- `DELETE_PASSWORD`, `FILE_MANAGER_PASSWORD`는 운영에서 필수 검토 항목임
+- `FILE_MANAGER_ACCESS_PASSWORD`는 파일함 진입, `DELETE_PASSWORD`는 파일 삭제에 사용함
 - `APP_ENV=production` 또는 `FILE_MANAGER_AUTH_REQUIRED=true`로 파일함 인증을 강제해야 함
 - `BACKUP_INCLUDE_FILES=true`는 파일함 백업이 필요할 때만 사용함
 - `system-agent`는 기본적으로 비공개 운영을 권장함

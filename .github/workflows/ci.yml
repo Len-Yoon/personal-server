@@ -18,7 +18,7 @@ jobs:
           - name: portal
             requirements: portal-web/requirements.txt
             pythonpath: portal-web
-            test_command: python3 -m unittest tests.test_portal_dashboard tests.test_portal_security
+            test_command: python3 -m unittest tests.test_file_access tests.test_portal_dashboard tests.test_portal_security
           - name: system-agent
             requirements: system-agent/requirements.txt
             pythonpath: system-agent

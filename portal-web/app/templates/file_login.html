@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="hero compact-hero">
+    <div class="hero-badge">FILE VAULT</div>
+    <h1>파일함 인증</h1>
+    <p>파일함에 들어가려면 전용 비밀번호를 입력해주세요.</p>
+</section>
+
+<section class="service-section admin-login">
+    <form method="post" action="/files/login" class="auth-form">
+        <input type="hidden" name="next_path" value="{{ next_path }}">
+        {% if error %}
+            <p class="auth-error">{{ error }}</p>
+        {% endif %}
+        <label for="file-manager-password">파일함 비밀번호</label>
+        <input id="file-manager-password" name="password" type="password" autocomplete="current-password" autofocus required>
+        <button type="submit">파일함 들어가기</button>
+    </form>
+</section>
+{% endblock %}
