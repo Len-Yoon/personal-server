@@ -50,7 +50,7 @@
                     <span class="status-badge">{{ article.provider }}</span>
                     <span>{{ article.source }}</span>
                     {% if article.collected_at %}
-                        <span>{{ article.collected_at }}</span>
+                        <span>{{ article.collected_at|news_datetime }}</span>
                     {% endif %}
                 </div>
 
@@ -66,7 +66,7 @@
                 {% endif %}
 
                 {% if article.published_at %}
-                    <p class="published-at">{{ article.published_at }}</p>
+                    <p class="published-at">{{ article.published_at|news_datetime }}</p>
                 {% endif %}
 
                 {% if article.url %}

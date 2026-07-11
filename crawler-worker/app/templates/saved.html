@@ -38,7 +38,7 @@
                 <div class="news-meta-row">
                     <span class="status-badge">{{ item.category }}</span>
                     <span>{{ item.source }}</span>
-                    <span>{{ item.collected_at }}</span>
+                    <span>{{ item.collected_at|news_datetime }}</span>
                 </div>
 
                 <h3>{{ item.title_ko }}</h3>
@@ -52,7 +52,7 @@
                 {% endif %}
 
                 {% if item.published_at %}
-                    <p class="published-at">{{ item.published_at }}</p>
+                    <p class="published-at">{{ item.published_at|news_datetime }}</p>
                 {% endif %}
 
                 <div class="saved-card-actions">

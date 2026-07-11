@@ -5,12 +5,14 @@ from fastapi.templating import Jinja2Templates
 from starlette.responses import RedirectResponse
 
 from app.services.host_urls import portal_home_url, request_host_from_headers
+from app.services.datetime_format import format_news_datetime
 from app.services.news_archive import list_recent_news
 from app.services.news_service import collect_market_news, get_categories
 
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
+templates.env.filters["news_datetime"] = format_news_datetime
 
 
 def _portal_home_url(request: Request) -> str:
