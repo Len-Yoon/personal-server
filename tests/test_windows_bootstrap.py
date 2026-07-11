@@ -21,6 +21,15 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertNotIn("investing-crawler", WSL_SCRIPT)
         self.assertNotIn("up -d --build portal-web system-agent", WSL_SCRIPT)
 
+    def test_runs_daily_maintenance_once_after_stack_start(self):
+        self.assertIn("run_daily_maintenance", WSL_SCRIPT)
+        self.assertIn("scripts/maintenance.py all", WSL_SCRIPT)
+        self.assertIn("personal-server-maintenance.last", WSL_SCRIPT)
+
+    def test_powershell_daemon_isolates_maintenance_failure(self):
+        self.assertIn("bash scripts/windows-bootstrap.sh", SCRIPT)
+        self.assertIn("Recovery check failed", SCRIPT)
+
 
 if __name__ == "__main__":
     unittest.main()
