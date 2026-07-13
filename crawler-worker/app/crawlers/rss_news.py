@@ -4,7 +4,7 @@ from html import unescape
 from html.parser import HTMLParser
 from urllib.error import URLError
 from urllib.request import Request, urlopen
-from datetime import timezone
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote_plus
 
@@ -107,9 +107,12 @@ def _parse_published_at(value: str) -> str:
         return ""
 
     try:
-        parsed = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
-        return ""
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(value)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return ""
 
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
