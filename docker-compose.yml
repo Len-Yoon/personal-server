@@ -89,7 +89,7 @@ services:
     environment:
       - OBSIDIAN_VAULT_PATH=/vault
     volumes:
-      - ${OBSIDIAN_VAULT_PATH}:/vault
+      - ${OBSIDIAN_VAULT_PATH:-./data/obsidian/vault}:/vault
 
   youtube-memo:
     build: ./youtube-memo

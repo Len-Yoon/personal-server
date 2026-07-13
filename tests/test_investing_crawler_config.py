@@ -21,7 +21,7 @@ class InvestingCrawlerConfigTests(unittest.TestCase):
         content = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         self.assertIn("investing-crawler:", content)
         self.assertIn("dockerfile: investing_crawler/Dockerfile", content)
-        self.assertIn("${OBSIDIAN_VAULT_PATH}:/vault", content)
+        self.assertIn("${OBSIDIAN_VAULT_PATH:-./data/obsidian/vault}:/vault", content)
         self.assertIn("python -m app.main", content)
         self.assertNotIn("restart: unless-stopped\n    investing-crawler", content)
 
