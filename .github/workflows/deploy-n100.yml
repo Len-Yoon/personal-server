@@ -1,5 +1,8 @@
 name: Deploy N100
 
+permissions:
+  contents: read
+
 on:
   push:
     branches:
@@ -7,28 +10,39 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Windows, X64]
+    concurrency:
+      group: deploy-n100-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Start SSH agent
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.N100_SSH_KEY }}
-
-      - name: Add known hosts
+      - name: Verify N100 deployment directory
+        shell: pwsh
         run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "${{ secrets.N100_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          $ErrorActionPreference = 'Stop'
+          $projectRoot = 'C:\personal-server'
+          $requiredPaths = @(
+            "$projectRoot\.git",
+            "$projectRoot\.env",
+            "$projectRoot\data",
+            "$projectRoot\docker-compose.yml",
+            "$projectRoot\docker-compose.n100.yml"
+          )
+          foreach ($path in $requiredPaths) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Required N100 deployment path is missing: $path"
+            }
+          }
 
       - name: Run deployment script
-        env:
-          N100_SSH_HOST: ${{ secrets.N100_SSH_HOST }}
-          N100_SSH_PORT: ${{ secrets.N100_SSH_PORT }}
-          N100_SSH_USER: ${{ secrets.N100_SSH_USER }}
-          N100_APP_DIR: ${{ secrets.N100_APP_DIR }}
+        shell: pwsh
         run: |
-          ssh -p "${N100_SSH_PORT:-22}" "${N100_SSH_USER}@${N100_SSH_HOST}" \
-            "cd '${N100_APP_DIR}' && bash scripts/deploy-n100.sh"
+          $ErrorActionPreference = 'Stop'
+          $bash = 'C:\Program Files\Git\bin\bash.exe'
+          if (-not (Test-Path -LiteralPath $bash)) {
+            throw "Git Bash was not found: $bash"
+          }
+          & $bash -lc 'cd /c/personal-server && bash ./scripts/deploy-n100.sh'
+          if ($LASTEXITCODE -ne 0) {
+            throw "N100 deployment script failed with exit code $LASTEXITCODE"
+          }

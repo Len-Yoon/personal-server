@@ -11,18 +11,33 @@ GUIDE = (ROOT / "docs" / "n100-github-auto-deploy.md").read_text(encoding="utf-8
 
 
 class DeployN100Tests(unittest.TestCase):
-    def test_workflow_triggers_on_main_push_and_uses_ssh_secrets(self):
+    def test_workflow_triggers_on_main_push_and_uses_n100_runner(self):
         self.assertIn("push:", WORKFLOW)
         self.assertIn("branches:", WORKFLOW)
         self.assertIn("- main", WORKFLOW)
-        self.assertIn("N100_SSH_HOST", WORKFLOW)
-        self.assertIn("N100_SSH_USER", WORKFLOW)
-        self.assertIn("N100_SSH_KEY", WORKFLOW)
-        self.assertIn("N100_SSH_KNOWN_HOSTS", WORKFLOW)
-        self.assertIn("N100_APP_DIR", WORKFLOW)
-        self.assertIn("bash scripts/deploy-n100.sh", WORKFLOW)
+        self.assertIn("runs-on: [self-hosted, Windows, X64]", WORKFLOW)
+        self.assertIn("C:\\personal-server", WORKFLOW)
+        self.assertIn("C:\\Program Files\\Git\\bin\\bash.exe", WORKFLOW)
+        self.assertIn("bash ./scripts/deploy-n100.sh", WORKFLOW)
+        self.assertNotIn("N100_SSH_KEY", WORKFLOW)
+
+    def test_workflows_limit_token_permissions_and_serialize_deployments(self):
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn("permissions:\n  contents: read", ci)
+        self.assertIn("concurrency:", WORKFLOW)
+        self.assertIn("group: deploy-n100-${{ github.ref }}", WORKFLOW)
+        self.assertIn("cancel-in-progress: false", WORKFLOW)
+
+    def test_deploy_workflow_validates_local_n100_directory(self):
+        self.assertIn("Verify N100 deployment directory", WORKFLOW)
+        self.assertIn("Test-Path", WORKFLOW)
 
     def test_deploy_script_resets_and_restarts_compose_stack(self):
+        self.assertIn('test -d "$PROJECT_ROOT/.git"', SCRIPT)
+        self.assertIn('test -f "$PROJECT_ROOT/.env"', SCRIPT)
+        self.assertIn('test -d "$PROJECT_ROOT/data"', SCRIPT)
+        self.assertIn("docker compose -f docker-compose.yml -f docker-compose.n100.yml config", SCRIPT)
         self.assertIn("git fetch --prune origin", SCRIPT)
         self.assertIn("git reset --hard origin/main", SCRIPT)
         self.assertIn("docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build", SCRIPT)
@@ -31,7 +46,9 @@ class DeployN100Tests(unittest.TestCase):
     def test_documentation_mentions_auto_deploy_flow(self):
         self.assertIn("docs/n100-github-auto-deploy.md", README)
         self.assertIn("main", README)
-        self.assertIn("N100_SSH_HOST", GUIDE)
+        self.assertIn("self-hosted", GUIDE)
+        self.assertIn("runs-on: [self-hosted, Windows, X64]", GUIDE)
+        self.assertNotIn("N100_SSH_HOST", GUIDE)
         self.assertIn("git fetch --prune origin", GUIDE)
         self.assertIn("docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build", GUIDE)
         self.assertIn("push", HANDOFF)
