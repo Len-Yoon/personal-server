@@ -37,6 +37,7 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("if not exist", WORKFLOW)
 
     def test_deploy_script_resets_and_restarts_compose_stack(self):
+        self.assertNotIn(b"\r\n", (ROOT / "scripts" / "deploy-n100.sh").read_bytes())
         self.assertIn('test -d "$PROJECT_ROOT/.git"', SCRIPT)
         self.assertIn('test -f "$PROJECT_ROOT/.env"', SCRIPT)
         self.assertIn('test -d "$PROJECT_ROOT/data"', SCRIPT)
