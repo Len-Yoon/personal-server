@@ -22,5 +22,5 @@ docker compose version >/dev/null
 git fetch --prune origin
 git reset --hard origin/main
 docker compose -f docker-compose.yml -f docker-compose.n100.yml config --quiet
-docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web system-agent crawler-worker youtube-memo book-memo caddy
 docker compose -f docker-compose.yml -f docker-compose.n100.yml ps

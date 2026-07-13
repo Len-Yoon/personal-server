@@ -40,7 +40,14 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("docker compose -f docker-compose.yml -f docker-compose.n100.yml config", SCRIPT)
         self.assertIn("git fetch --prune origin", SCRIPT)
         self.assertIn("git reset --hard origin/main", SCRIPT)
-        self.assertIn("docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build", SCRIPT)
+        self.assertIn(
+            "docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web system-agent crawler-worker youtube-memo book-memo caddy",
+            SCRIPT,
+        )
+        self.assertNotIn(
+            "docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build\n",
+            SCRIPT,
+        )
         self.assertIn("docker compose -f docker-compose.yml -f docker-compose.n100.yml ps", SCRIPT)
 
     def test_documentation_mentions_auto_deploy_flow(self):
@@ -50,7 +57,10 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("runs-on: [self-hosted, Windows, X64]", GUIDE)
         self.assertNotIn("N100_SSH_HOST", GUIDE)
         self.assertIn("git fetch --prune origin", GUIDE)
-        self.assertIn("docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build", GUIDE)
+        self.assertIn(
+            "docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web system-agent crawler-worker youtube-memo book-memo caddy",
+            GUIDE,
+        )
         self.assertIn("push", HANDOFF)
 
 
