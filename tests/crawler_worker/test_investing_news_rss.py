@@ -2,6 +2,7 @@ import importlib
 import sys
 import types
 import unittest
+from datetime import date
 from unittest.mock import patch
 
 from tests._test_support import prepare_service_import
@@ -18,6 +19,12 @@ class InvestingNewsRssTests(unittest.TestCase):
     def tearDown(self):
         sys.modules.pop("feedparser", None)
 
+    def test_today_filter_uses_korean_date(self):
+        module = self.reload_module()
+
+        self.assertTrue(module._is_today("2026-07-13 03:59:20", today=date(2026, 7, 13)))
+        self.assertFalse(module._is_today("2026-07-12 12:00:00", today=date(2026, 7, 13)))
+
     def test_search_investing_news_rss_keeps_only_investing_korean_source(self):
         module = self.reload_module()
         direct_articles = [
@@ -26,6 +33,7 @@ class InvestingNewsRssTests(unittest.TestCase):
                 "url": "https://kr.investing.com/news/articles/1",
                 "source": "Investing.com 한국어",
                 "provider": "Investing.com RSS",
+                "published_at": "2026-07-13 03:59:20",
             },
             {
                 "title": "By Investing.com",
@@ -39,6 +47,7 @@ class InvestingNewsRssTests(unittest.TestCase):
                 "url": "https://news.google.com/rss/articles/4",
                 "source": "Investing.com 한국어",
                 "provider": "Google News RSS",
+                "published_at": "2026-07-13 04:10:20",
             },
         ]
         with patch.object(

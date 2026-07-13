@@ -15,7 +15,7 @@ RSS = """<?xml version='1.0'?>
   <item>
     <title>나스닥 최신 Investing 뉴스</title>
     <link>https://news.google.com/rss/articles/latest</link>
-    <pubDate>Fri, 10 Jul 2026 15:02:00 GMT</pubDate>
+    <pubDate>Mon, 13 Jul 2026 03:02:00 GMT</pubDate>
     <source url='https://kr.investing.com'>Investing.com 한국어</source>
   </item>
   <item>
@@ -65,17 +65,17 @@ class RssCollectorTests(unittest.TestCase):
         self.assertEqual(items[0]["title"], "나스닥 최신 Investing 뉴스")
         self.assertEqual(items[0]["source"], INVESTING_SOURCE)
         self.assertEqual(items[0]["url"], "https://news.google.com/rss/articles/latest")
-        self.assertEqual(items[0]["published_at"], "2026-07-10T15:02:00+00:00")
+        self.assertEqual(items[0]["published_at"], "2026-07-13T03:02:00+00:00")
 
     @patch("investing_crawler.app.rss_collector.urlopen")
     def test_collect_keeps_only_target_market_topics(self, urlopen):
         rss = """<?xml version='1.0'?>
         <rss version='2.0'><channel>
-          <item><title>나스닥 선물 상승</title><link>https://kr.investing.com/nasdaq</link><source url='https://kr.investing.com'>Investing.com</source></item>
-          <item><title>일본 증시 닛케이 동향</title><link>https://kr.investing.com/japan</link><source url='https://kr.investing.com'>Investing.com</source></item>
-          <item><title>국제유가 WTI 급등</title><link>https://kr.investing.com/oil</link><source url='https://kr.investing.com'>Investing.com</source></item>
-          <item><title>금값 상승, 골드 가격 주목</title><link>https://kr.investing.com/gold</link><source url='https://kr.investing.com'>Investing.com</source></item>
-          <item><title>유럽 증시 마감</title><link>https://kr.investing.com/europe</link><source url='https://kr.investing.com'>Investing.com</source></item>
+          <item><title>나스닥 선물 상승</title><link>https://kr.investing.com/nasdaq</link><pubDate>Mon, 13 Jul 2026 03:02:00 GMT</pubDate><source url='https://kr.investing.com'>Investing.com</source></item>
+          <item><title>일본 증시 닛케이 동향</title><link>https://kr.investing.com/japan</link><pubDate>Mon, 13 Jul 2026 03:02:00 GMT</pubDate><source url='https://kr.investing.com'>Investing.com</source></item>
+          <item><title>국제유가 WTI 급등</title><link>https://kr.investing.com/oil</link><pubDate>Mon, 13 Jul 2026 03:02:00 GMT</pubDate><source url='https://kr.investing.com'>Investing.com</source></item>
+          <item><title>금값 상승, 골드 가격 주목</title><link>https://kr.investing.com/gold</link><pubDate>Mon, 13 Jul 2026 03:02:00 GMT</pubDate><source url='https://kr.investing.com'>Investing.com</source></item>
+          <item><title>유럽 증시 마감</title><link>https://kr.investing.com/europe</link><pubDate>Mon, 13 Jul 2026 03:02:00 GMT</pubDate><source url='https://kr.investing.com'>Investing.com</source></item>
         </channel></rss>""".encode("utf-8")
         response = io.BytesIO(rss)
         response.__enter__ = lambda: response
@@ -89,7 +89,13 @@ class RssCollectorTests(unittest.TestCase):
 
         self.assertEqual(
             [item["title"] for item in items],
-            ["나스닥 선물 상승", "일본 증시 닛케이 동향", "국제유가 WTI 급등", "금값 상승, 골드 가격 주목"],
+            [
+                "나스닥 선물 상승",
+                "일본 증시 닛케이 동향",
+                "국제유가 WTI 급등",
+                "금값 상승, 골드 가격 주목",
+                "유럽 증시 마감",
+            ],
         )
 
 

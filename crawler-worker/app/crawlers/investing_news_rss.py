@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import re
+from datetime import date, datetime, timezone
+from email.utils import parsedate_to_datetime
+from zoneinfo import ZoneInfo
 
 from app.crawlers.rss_news import build_google_news_rss_url, search_rss_news
 
@@ -12,27 +15,6 @@ INVESTING_FEED_URLS = [
     "https://kr.investing.com/rss/news_1.rss",
     "https://kr.investing.com/rss/news_11.rss",
 ]
-TARGET_TOPIC_KEYWORDS = (
-    "나스닥",
-    "nasdaq",
-    "일본",
-    "닛케이",
-    "니케이",
-    "nikkei",
-    "topix",
-    "엔화",
-    "원유",
-    "유가",
-    "wti",
-    "브렌트",
-    "brent",
-    "opec",
-    "금값",
-    "골드",
-    "gold",
-    "xau",
-)
-MIN_DIRECT_ARTICLES = 12
 
 
 def search_investing_news_rss(limit: int = 50) -> list[dict]:
@@ -44,29 +26,28 @@ def search_investing_news_rss(limit: int = 50) -> list[dict]:
         limit=max(limit, 8),
         source_filter=INVESTING_SOURCE,
     )
-    cleaned_articles = _clean_target_articles(direct_articles)
+    cleaned_articles = _clean_articles(direct_articles)
 
-    if len(cleaned_articles) < MIN_DIRECT_ARTICLES:
-        fallback_articles = search_rss_news(
-            feed_urls=[build_google_news_rss_url("site:kr.investing.com/news", freshness="")],
-            category="INVESTING",
-            source_name=INVESTING_SOURCE,
-            provider_name="Google News RSS",
-            limit=max(limit, 8),
-            source_filter=INVESTING_SOURCE,
-        )
-        cleaned_articles.extend(_clean_target_articles(fallback_articles))
+    fallback_articles = search_rss_news(
+        feed_urls=[build_google_news_rss_url("site:kr.investing.com/news", freshness="1d")],
+        category="INVESTING",
+        source_name=INVESTING_SOURCE,
+        provider_name="Google News RSS",
+        limit=max(limit, 8),
+        source_filter=INVESTING_SOURCE,
+    )
+    cleaned_articles.extend(_clean_articles(fallback_articles))
 
     return _dedupe_articles(cleaned_articles)[:limit]
 
 
-def _clean_target_articles(articles: list[dict]) -> list[dict]:
+def _clean_articles(articles: list[dict]) -> list[dict]:
     cleaned_articles: list[dict] = []
     for article in articles:
         if article.get("source") != INVESTING_SOURCE:
             continue
         title = _clean_title(article.get("title", ""))
-        if not title or _is_malformed_title(title) or not _is_target_topic(title):
+        if not title or _is_malformed_title(title) or not _is_today(article.get("published_at", "")):
             continue
         cleaned = dict(article)
         cleaned["title"] = title
@@ -91,9 +72,23 @@ def _dedupe_articles(articles: list[dict]) -> list[dict]:
     return deduped
 
 
-def _is_target_topic(title: str) -> bool:
-    normalized = title.casefold()
-    return any(keyword in normalized for keyword in TARGET_TOPIC_KEYWORDS)
+def _is_today(value: str, today: date | None = None) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(raw)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return False
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    korea_date = parsed.astimezone(ZoneInfo("Asia/Seoul")).date()
+    return korea_date == (today or datetime.now(ZoneInfo("Asia/Seoul")).date())
 
 
 def _clean_title(value: str) -> str:

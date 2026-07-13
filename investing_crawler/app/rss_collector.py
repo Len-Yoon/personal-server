@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import timezone
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
@@ -17,26 +17,6 @@ OFFICIAL_INVESTING_RSS_URLS = (
     "https://kr.investing.com/rss/news_11.rss",
 )
 GOOGLE_NEWS_BASE = "https://news.google.com/rss/search?"
-MIN_DIRECT_ARTICLES = 12
-TARGET_TOPIC_KEYWORDS = (
-    "나스닥",
-    "nasdaq",
-    "일본",
-    "닛케이",
-    "니케이",
-    "nikkei",
-    "topix",
-    "원유",
-    "유가",
-    "wti",
-    "브렌트",
-    "brent",
-    "opec",
-    "금값",
-    "골드",
-    "gold",
-    "xau",
-)
 REQUEST_TIMEOUT_SECONDS = 20
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36"
 
@@ -46,7 +26,7 @@ def build_investing_google_news_rss_url(freshness: str = "") -> str:
 
 
 def build_google_fallback_rss_url() -> str:
-    query = quote_plus("site:kr.investing.com/news")
+    query = quote_plus("site:kr.investing.com/news when:1d")
     return f"{GOOGLE_NEWS_BASE}q={query}&hl=ko&gl=KR&ceid=KR:ko"
 
 
@@ -81,7 +61,7 @@ def collect_investing_news(limit: int = 50, feed_url: str = "") -> list[dict[str
             if (
                 source not in {INVESTING_SOURCE, "Investing.com"}
                 and not direct_feed_without_source
-            ) or not title or _is_malformed_title(title) or not _is_target_topic(title) or not url:
+            ) or not title or _is_malformed_title(title) or not url:
                 continue
             if url in seen_urls:
                 continue
@@ -89,6 +69,8 @@ def collect_investing_news(limit: int = 50, feed_url: str = "") -> list[dict[str
             published_at = _parse_published_at(
                 getattr(entry, "published", "") or getattr(entry, "updated", "")
             )
+            if not _is_today(published_at):
+                continue
             articles.append(
                 {
                     "title": title,
@@ -101,9 +83,7 @@ def collect_investing_news(limit: int = 50, feed_url: str = "") -> list[dict[str
             seen_urls.add(url)
             if len(articles) >= limit:
                 return articles
-    if len(articles) < MIN_DIRECT_ARTICLES and any(
-        current_url in OFFICIAL_INVESTING_RSS_URLS for current_url in feed_urls
-    ):
+    if any(current_url in OFFICIAL_INVESTING_RSS_URLS for current_url in feed_urls):
         fallback_articles = collect_investing_news(
             limit=limit,
             feed_url=build_google_fallback_rss_url(),
@@ -113,9 +93,15 @@ def collect_investing_news(limit: int = 50, feed_url: str = "") -> list[dict[str
     return articles
 
 
-def _is_target_topic(title: str) -> bool:
-    normalized = title.casefold()
-    return any(keyword in normalized for keyword in TARGET_TOPIC_KEYWORDS)
+def _is_today(value: str) -> bool:
+    if not value:
+        return False
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(ZoneInfo("Asia/Seoul")).date() == datetime.now(
+        ZoneInfo("Asia/Seoul")
+    ).date()
 
 
 def _merge_articles(

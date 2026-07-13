@@ -19,6 +19,10 @@ def _portal_home_url(request: Request) -> str:
     return portal_home_url(request_host_from_headers(request.headers))
 
 
+def _category_limit(category: str) -> int:
+    return 50 if category.upper() == "INVESTING" else 24
+
+
 templates.env.globals["portal_home_url"] = _portal_home_url
 
 
@@ -64,7 +68,7 @@ def category_page(
 ):
     result = collect_market_news(
         category=category,
-        limit=24,
+        limit=_category_limit(category),
         force_refresh=refresh,
     )
 
@@ -86,7 +90,7 @@ def category_api(
 ):
     return collect_market_news(
         category=category,
-        limit=24,
+        limit=_category_limit(category),
         force_refresh=refresh,
     )
 
