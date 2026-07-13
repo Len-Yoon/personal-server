@@ -18,7 +18,8 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("runs-on: [self-hosted, Windows, X64]", WORKFLOW)
         self.assertIn("C:\\personal-server", WORKFLOW)
         self.assertIn("C:\\Program Files\\Git\\bin\\bash.exe", WORKFLOW)
-        self.assertIn("shell: powershell", WORKFLOW)
+        self.assertIn("shell: cmd", WORKFLOW)
+        self.assertNotIn("shell: powershell", WORKFLOW)
         self.assertNotIn("shell: pwsh", WORKFLOW)
         self.assertIn("bash ./scripts/deploy-n100.sh", WORKFLOW)
         self.assertNotIn("N100_SSH_KEY", WORKFLOW)
@@ -33,7 +34,7 @@ class DeployN100Tests(unittest.TestCase):
 
     def test_deploy_workflow_validates_local_n100_directory(self):
         self.assertIn("Verify N100 deployment directory", WORKFLOW)
-        self.assertIn("Test-Path", WORKFLOW)
+        self.assertIn("if not exist", WORKFLOW)
 
     def test_deploy_script_resets_and_restarts_compose_stack(self):
         self.assertIn('test -d "$PROJECT_ROOT/.git"', SCRIPT)
