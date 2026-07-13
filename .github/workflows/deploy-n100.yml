@@ -32,6 +32,6 @@ jobs:
         shell: cmd
         run: |
           @echo off
-          if not exist "C:\Program Files\Git\bin\bash.exe" exit /b 1
-          "C:\Program Files\Git\bin\bash.exe" -lc "cd /c/personal-server && bash ./scripts/deploy-n100.sh"
+          if not exist "%SystemRoot%\System32\wsl.exe" exit /b 1
+          wsl.exe -d Ubuntu-24.04 -- bash -lc "cd /mnt/c/personal-server && bash ./scripts/deploy-n100.sh"
           if errorlevel 1 exit /b 1

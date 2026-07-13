@@ -23,6 +23,8 @@ cd C:\actions-runner
 
 등록 질문에는 Runner 이름을 `N100`으로 지정하고, 작업 폴더는 기본값 `_work`를 사용합니다. 서비스 설치 질문에는 `Y`를 선택합니다. GitHub Runner 서비스가 `Running`이고 시작 유형이 `Automatic`인지 확인합니다.
 
+WSL2 배포를 사용하는 경우 Runner Windows 서비스의 로그온 계정은 WSL 배포판을 설치한 Windows 사용자(`.\window`)로 설정해야 합니다. `NETWORK SERVICE` 계정은 해당 사용자의 WSL 배포판이나 Docker 소켓을 사용할 수 없습니다.
+
 Runner 토큰은 채팅, 저장소, 문서에 기록하지 않습니다. 토큰이 노출되면 GitHub에서 즉시 새 토큰을 발급합니다.
 
 ## N100 전제조건
@@ -37,13 +39,12 @@ C:\personal-server\docker-compose.yml
 C:\personal-server\docker-compose.n100.yml
 ```
 
-또한 N100에서 다음 명령이 동작해야 합니다.
+또한 N100에서 WSL2와 Docker가 다음처럼 동작해야 합니다.
 
 ```powershell
 Get-Command docker
-Get-Command git
-Test-Path 'C:\Program Files\Git\bin\bash.exe'
-docker compose version
+wsl -l -v
+wsl.exe -d Ubuntu-24.04 -- bash -lc "docker version && docker compose version"
 ```
 
 `.env`와 `data`는 운영 데이터이므로 GitHub에 올리지 않고 N100에만 보관합니다.
@@ -58,7 +59,7 @@ runs-on: [self-hosted, Windows, X64]
 
 1. N100 Runner 서비스가 작업을 받습니다.
 2. `C:\personal-server`의 존재와 `.env`, `data`, Compose 파일을 확인합니다.
-3. Git Bash로 `scripts/deploy-n100.sh`를 실행합니다.
+3. Ubuntu-24.04 WSL에서 `scripts/deploy-n100.sh`를 실행합니다.
 4. 스크립트가 `git fetch --prune origin`과 `git reset --hard origin/main`으로 코드만 최신 main에 맞춥니다.
 5. Compose 설정을 검증한 뒤 `docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web system-agent crawler-worker youtube-memo book-memo caddy`를 실행합니다. 일회성 `investing-crawler`는 시작하지 않습니다.
 6. 마지막에 Compose 서비스 상태를 출력합니다.

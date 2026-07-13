@@ -17,7 +17,7 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("- main", WORKFLOW)
         self.assertIn("runs-on: [self-hosted, Windows, X64]", WORKFLOW)
         self.assertIn("C:\\personal-server", WORKFLOW)
-        self.assertIn("C:\\Program Files\\Git\\bin\\bash.exe", WORKFLOW)
+        self.assertIn("wsl.exe -d Ubuntu-24.04 -- bash -lc", WORKFLOW)
         self.assertIn("shell: cmd", WORKFLOW)
         self.assertNotIn("shell: powershell", WORKFLOW)
         self.assertNotIn("shell: pwsh", WORKFLOW)
