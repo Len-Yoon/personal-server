@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from investing_crawler.app.rss_collector import (
     INVESTING_SOURCE,
+    build_google_fallback_rss_url,
     collect_investing_news,
     build_investing_google_news_rss_url,
 )
@@ -39,6 +40,11 @@ class RssCollectorTests(unittest.TestCase):
         self.assertIn("https://kr.investing.com/rss/news_1.rss", url)
         self.assertIn("https://kr.investing.com/rss/news_11.rss", url)
 
+    def test_google_fallback_is_restricted_to_investing_domain(self):
+        url = build_google_fallback_rss_url()
+        self.assertIn("site%3Akr.investing.com%2Fnews", url)
+        self.assertIn("hl=ko", url)
+
     def test_build_url_targets_korean_investing_news(self):
         url = build_investing_google_news_rss_url()
         self.assertIn("https://kr.investing.com/rss/news.rss", url)
@@ -52,7 +58,7 @@ class RssCollectorTests(unittest.TestCase):
 
         items = collect_investing_news(
             limit=10,
-            feed_url="https://kr.investing.com/rss/news.rss",
+            feed_url="https://example.com/test.rss",
         )
 
         self.assertEqual(len(items), 1)
@@ -78,7 +84,7 @@ class RssCollectorTests(unittest.TestCase):
 
         items = collect_investing_news(
             limit=10,
-            feed_url="https://kr.investing.com/rss/news.rss",
+            feed_url="https://example.com/test.rss",
         )
 
         self.assertEqual(

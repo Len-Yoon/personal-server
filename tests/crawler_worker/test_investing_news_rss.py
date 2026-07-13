@@ -20,38 +20,44 @@ class InvestingNewsRssTests(unittest.TestCase):
 
     def test_search_investing_news_rss_keeps_only_investing_korean_source(self):
         module = self.reload_module()
+        direct_articles = [
+            {
+                "title": "나스닥 최신 Investing 뉴스 - Investing.com 한국어",
+                "url": "https://kr.investing.com/news/articles/1",
+                "source": "Investing.com 한국어",
+                "provider": "Investing.com RSS",
+            },
+            {
+                "title": "By Investing.com",
+                "url": "https://kr.investing.com/news/articles/3",
+                "source": "Investing.com 한국어",
+            },
+        ]
+        fallback_articles = [
+            {
+                "title": "일본 증시 보충 뉴스 - Investing.com 한국어",
+                "url": "https://news.google.com/rss/articles/4",
+                "source": "Investing.com 한국어",
+                "provider": "Google News RSS",
+            },
+        ]
         with patch.object(
             module,
             "search_rss_news",
-            return_value=[
-                {
-                    "title": "나스닥 최신 Investing 뉴스 - Investing.com 한국어",
-                    "url": "https://news.google.com/rss/articles/1",
-                    "source": "Investing.com 한국어",
-                },
-                {
-                    "title": "다른 출처 뉴스",
-                    "url": "https://example.com/2",
-                    "source": "Reuters",
-                },
-                {
-                    "title": "By Investing.com",
-                    "url": "https://news.google.com/rss/articles/3",
-                    "source": "Investing.com 한국어",
-                },
-            ]
+            side_effect=[direct_articles, fallback_articles],
         ) as mocked_search:
             articles = module.search_investing_news_rss(limit=10)
 
-        self.assertEqual(len(articles), 1)
+        self.assertEqual(len(articles), 2)
         self.assertEqual(articles[0]["title"], "나스닥 최신 Investing 뉴스")
         self.assertEqual(articles[0]["title_ko"], "나스닥 최신 Investing 뉴스")
-        mocked_search.assert_called_once()
-        feed_urls = mocked_search.call_args.kwargs["feed_urls"]
-        self.assertIn("https://kr.investing.com/rss/news.rss", feed_urls)
-        self.assertIn("https://kr.investing.com/rss/news_25.rss", feed_urls)
-        self.assertIn("https://kr.investing.com/rss/news_1.rss", feed_urls)
-        self.assertIn("https://kr.investing.com/rss/news_11.rss", feed_urls)
+        self.assertEqual(articles[1]["provider"], "Google News RSS")
+        self.assertEqual(mocked_search.call_count, 2)
+        direct_call = mocked_search.call_args_list[0].kwargs
+        fallback_call = mocked_search.call_args_list[1].kwargs
+        self.assertIn("https://kr.investing.com/rss/news.rss", direct_call["feed_urls"])
+        self.assertIn("https://news.google.com/rss/search?", fallback_call["feed_urls"][0])
+        self.assertIn("site%3Akr.investing.com", fallback_call["feed_urls"][0])
 
 
 if __name__ == "__main__":

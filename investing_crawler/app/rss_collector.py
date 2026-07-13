@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from datetime import timezone
 from email.utils import parsedate_to_datetime
+from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
@@ -15,6 +16,8 @@ OFFICIAL_INVESTING_RSS_URLS = (
     "https://kr.investing.com/rss/news_1.rss",
     "https://kr.investing.com/rss/news_11.rss",
 )
+GOOGLE_NEWS_BASE = "https://news.google.com/rss/search?"
+MIN_DIRECT_ARTICLES = 12
 TARGET_TOPIC_KEYWORDS = (
     "나스닥",
     "nasdaq",
@@ -40,6 +43,11 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrom
 
 def build_investing_google_news_rss_url(freshness: str = "") -> str:
     return ",".join(OFFICIAL_INVESTING_RSS_URLS)
+
+
+def build_google_fallback_rss_url() -> str:
+    query = quote_plus("site:kr.investing.com/news")
+    return f"{GOOGLE_NEWS_BASE}q={query}&hl=ko&gl=KR&ceid=KR:ko"
 
 
 def collect_investing_news(limit: int = 50, feed_url: str = "") -> list[dict[str, str]]:
@@ -93,12 +101,42 @@ def collect_investing_news(limit: int = 50, feed_url: str = "") -> list[dict[str
             seen_urls.add(url)
             if len(articles) >= limit:
                 return articles
+    if len(articles) < MIN_DIRECT_ARTICLES and any(
+        current_url in OFFICIAL_INVESTING_RSS_URLS for current_url in feed_urls
+    ):
+        fallback_articles = collect_investing_news(
+            limit=limit,
+            feed_url=build_google_fallback_rss_url(),
+        )
+        return _merge_articles(articles, fallback_articles, limit)
+
     return articles
 
 
 def _is_target_topic(title: str) -> bool:
     normalized = title.casefold()
     return any(keyword in normalized for keyword in TARGET_TOPIC_KEYWORDS)
+
+
+def _merge_articles(
+    primary: list[dict[str, str]],
+    fallback: list[dict[str, str]],
+    limit: int,
+) -> list[dict[str, str]]:
+    seen_urls: set[str] = set()
+    seen_titles: set[str] = set()
+    merged: list[dict[str, str]] = []
+    for article in [*primary, *fallback]:
+        url = str(article.get("url", "")).strip()
+        title = str(article.get("title", "")).strip().casefold()
+        if not url or url in seen_urls or title in seen_titles:
+            continue
+        seen_urls.add(url)
+        seen_titles.add(title)
+        merged.append(article)
+        if len(merged) >= limit:
+            break
+    return merged
 
 
 def _source_title(entry) -> str:

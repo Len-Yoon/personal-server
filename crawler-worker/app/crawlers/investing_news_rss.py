@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from app.crawlers.rss_news import search_rss_news
+from app.crawlers.rss_news import build_google_news_rss_url, search_rss_news
 
 
 INVESTING_SOURCE = "Investing.com 한국어"
@@ -32,10 +32,11 @@ TARGET_TOPIC_KEYWORDS = (
     "gold",
     "xau",
 )
+MIN_DIRECT_ARTICLES = 12
 
 
 def search_investing_news_rss(limit: int = 50) -> list[dict]:
-    articles = search_rss_news(
+    direct_articles = search_rss_news(
         feed_urls=INVESTING_FEED_URLS,
         category="INVESTING",
         source_name=INVESTING_SOURCE,
@@ -43,6 +44,23 @@ def search_investing_news_rss(limit: int = 50) -> list[dict]:
         limit=max(limit, 8),
         source_filter=INVESTING_SOURCE,
     )
+    cleaned_articles = _clean_target_articles(direct_articles)
+
+    if len(cleaned_articles) < MIN_DIRECT_ARTICLES:
+        fallback_articles = search_rss_news(
+            feed_urls=[build_google_news_rss_url("site:kr.investing.com/news", freshness="")],
+            category="INVESTING",
+            source_name=INVESTING_SOURCE,
+            provider_name="Google News RSS",
+            limit=max(limit, 8),
+            source_filter=INVESTING_SOURCE,
+        )
+        cleaned_articles.extend(_clean_target_articles(fallback_articles))
+
+    return _dedupe_articles(cleaned_articles)[:limit]
+
+
+def _clean_target_articles(articles: list[dict]) -> list[dict]:
     cleaned_articles: list[dict] = []
     for article in articles:
         if article.get("source") != INVESTING_SOURCE:
@@ -55,7 +73,22 @@ def search_investing_news_rss(limit: int = 50) -> list[dict]:
         cleaned["title_ko"] = title
         cleaned["title_original"] = title
         cleaned_articles.append(cleaned)
-    return cleaned_articles[:limit]
+    return cleaned_articles
+
+
+def _dedupe_articles(articles: list[dict]) -> list[dict]:
+    seen_urls: set[str] = set()
+    seen_titles: set[str] = set()
+    deduped: list[dict] = []
+    for article in articles:
+        url = str(article.get("url", "")).strip()
+        title = str(article.get("title", "")).strip().casefold()
+        if not url or url in seen_urls or title in seen_titles:
+            continue
+        seen_urls.add(url)
+        seen_titles.add(title)
+        deduped.append(article)
+    return deduped
 
 
 def _is_target_topic(title: str) -> bool:
