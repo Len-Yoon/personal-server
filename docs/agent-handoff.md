@@ -69,3 +69,4 @@
 - N100 PC에서 최신 커밋 pull 후 `docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build` 실행 필요함
 - Caddy 로그를 확인해 인증서 발급 여부를 점검해야 함
 - 외부 포트포워딩이 불가하면 Cloudflare Tunnel 구성으로 전환 필요함
+- GitHub push 기반 자동배포를 쓰려면 [`docs/n100-github-auto-deploy.md`](/Users/len/PycharmProjects/personal-server/docs/n100-github-auto-deploy.md)를 참고해야 함

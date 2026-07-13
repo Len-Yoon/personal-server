@@ -147,6 +147,9 @@ N100 운영 배포는 리소스 제한과 보안 옵션이 들어간 override를
 docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build
 ```
 
+`main` push 후 자동 반영을 쓰려면 [N100 GitHub 자동배포 안내](docs/n100-github-auto-deploy.md)를 참고합니다.
+이 방식은 GitHub Actions가 SSH로 N100에 접속해 `scripts/deploy-n100.sh`를 실행하는 구성입니다.
+
 서브도메인 기반 공개 운영은 [Caddy + Cloudflare 운영 가이드](docs/caddy-cloudflare.md)를 기본으로 보고, 외부 포트포워딩이 막힌 환경에서는 [Cloudflare Tunnel 운영 가이드](docs/cloudflare-tunnel.md)를 대안으로 사용하면 됩니다. `system-agent`는 기본적으로 비공개 운영을 권장합니다.
 
 개별 서비스만 다시 빌드할 수도 있습니다.
