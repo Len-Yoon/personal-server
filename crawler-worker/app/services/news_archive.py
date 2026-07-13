@@ -407,7 +407,7 @@ def _category_map() -> dict[str, dict[str, str]]:
     return {
         "INVESTING": {
             "label": "Investing.com 한국어 뉴스",
-            "description": "Google News RSS에서 수집한 Investing.com 한국어 최신 뉴스 전체",
+            "description": "Investing.com 공식 RSS에서 수집한 나스닥·일본·원유·골드 관련 뉴스",
         },
         "WORLD": {
             "label": "세계 뉴스",

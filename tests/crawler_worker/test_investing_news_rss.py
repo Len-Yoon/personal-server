@@ -25,7 +25,7 @@ class InvestingNewsRssTests(unittest.TestCase):
             "search_rss_news",
             return_value=[
                 {
-                    "title": "최신 Investing 뉴스 - Investing.com 한국어",
+                    "title": "나스닥 최신 Investing 뉴스 - Investing.com 한국어",
                     "url": "https://news.google.com/rss/articles/1",
                     "source": "Investing.com 한국어",
                 },
@@ -44,10 +44,14 @@ class InvestingNewsRssTests(unittest.TestCase):
             articles = module.search_investing_news_rss(limit=10)
 
         self.assertEqual(len(articles), 1)
-        self.assertEqual(articles[0]["title"], "최신 Investing 뉴스")
-        self.assertEqual(articles[0]["title_ko"], "최신 Investing 뉴스")
+        self.assertEqual(articles[0]["title"], "나스닥 최신 Investing 뉴스")
+        self.assertEqual(articles[0]["title_ko"], "나스닥 최신 Investing 뉴스")
         mocked_search.assert_called_once()
-        self.assertIn("site%3Akr.investing.com%2Fnews", mocked_search.call_args.kwargs["feed_urls"][0])
+        feed_urls = mocked_search.call_args.kwargs["feed_urls"]
+        self.assertIn("https://kr.investing.com/rss/news.rss", feed_urls)
+        self.assertIn("https://kr.investing.com/rss/news_25.rss", feed_urls)
+        self.assertIn("https://kr.investing.com/rss/news_1.rss", feed_urls)
+        self.assertIn("https://kr.investing.com/rss/news_11.rss", feed_urls)
 
 
 if __name__ == "__main__":

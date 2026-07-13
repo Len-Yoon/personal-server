@@ -2,18 +2,44 @@ from __future__ import annotations
 
 import re
 
-from app.crawlers.rss_news import build_google_news_rss_url, search_rss_news
+from app.crawlers.rss_news import search_rss_news
 
 
 INVESTING_SOURCE = "Investing.com 한국어"
+INVESTING_FEED_URLS = [
+    "https://kr.investing.com/rss/news.rss",
+    "https://kr.investing.com/rss/news_25.rss",
+    "https://kr.investing.com/rss/news_1.rss",
+    "https://kr.investing.com/rss/news_11.rss",
+]
+TARGET_TOPIC_KEYWORDS = (
+    "나스닥",
+    "nasdaq",
+    "일본",
+    "닛케이",
+    "니케이",
+    "nikkei",
+    "topix",
+    "엔화",
+    "원유",
+    "유가",
+    "wti",
+    "브렌트",
+    "brent",
+    "opec",
+    "금값",
+    "골드",
+    "gold",
+    "xau",
+)
 
 
 def search_investing_news_rss(limit: int = 50) -> list[dict]:
     articles = search_rss_news(
-        feed_urls=[build_google_news_rss_url("site:kr.investing.com/news", freshness="")],
+        feed_urls=INVESTING_FEED_URLS,
         category="INVESTING",
         source_name=INVESTING_SOURCE,
-        provider_name="Google News RSS",
+        provider_name="Investing.com RSS",
         limit=max(limit, 8),
         source_filter=INVESTING_SOURCE,
     )
@@ -22,7 +48,7 @@ def search_investing_news_rss(limit: int = 50) -> list[dict]:
         if article.get("source") != INVESTING_SOURCE:
             continue
         title = _clean_title(article.get("title", ""))
-        if not title or _is_malformed_title(title):
+        if not title or _is_malformed_title(title) or not _is_target_topic(title):
             continue
         cleaned = dict(article)
         cleaned["title"] = title
@@ -30,6 +56,11 @@ def search_investing_news_rss(limit: int = 50) -> list[dict]:
         cleaned["title_original"] = title
         cleaned_articles.append(cleaned)
     return cleaned_articles[:limit]
+
+
+def _is_target_topic(title: str) -> bool:
+    normalized = title.casefold()
+    return any(keyword in normalized for keyword in TARGET_TOPIC_KEYWORDS)
 
 
 def _clean_title(value: str) -> str:
