@@ -249,11 +249,24 @@ Stop all personal server apps:
 docker compose -f docker-compose.yml -f docker-compose.n100.yml down
 ```
 
-Update the apps:
+Update the apps manually only when GitHub Actions automatic deployment is unavailable:
 
 ```bash
 git pull
 docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build
+```
+
+정상 운영에서는 Mac 등 개발 PC에서 `main`으로 push하면
+[`N100 GitHub 자동배포 안내`](n100-github-auto-deploy.md)에 따라 N100의 self-hosted
+Runner가 WSL2 Docker에서 상시 서비스만 자동으로 재배포합니다. 이때
+`investing-crawler`는 실행하지 않으므로 Windows 작업 스케줄러의 일회성 수집에는
+영향이 없습니다.
+
+수동으로 일회성 Investing 뉴스 수집만 실행하려면 Windows 작업 스케줄러에서
+`scripts/investing-news-once.ps1`를 실행하거나 다음 명령을 사용합니다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\personal-server\scripts\investing-news-once.ps1
 ```
 
 Restart WSL from Windows PowerShell:
