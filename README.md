@@ -140,6 +140,7 @@ docker compose up -d --build
 
 N100 운영 배포는 리소스 제한과 보안 옵션이 들어간 override를 함께 사용합니다. 이 구성에서는 앱 포트가 `127.0.0.1`에만 바인드되고, `caddy`가 `80`/`443`을 받아 Cloudflare DNS challenge로 인증서를 발급한 뒤 서브도메인별로 역프록시합니다.
 공개 운영을 쓰려면 `.env`에 `CADDY_EMAIL`과 `CLOUDFLARE_API_TOKEN`을 채워야 합니다.
+운영 진입점은 `https://len.pe.kr`이고, `127.0.0.1`은 N100 내부에서 서비스가 듣는 로컬 바인드 주소임.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build

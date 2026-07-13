@@ -161,6 +161,7 @@ If you enable public HTTPS, the N100 override also starts `caddy`.
 
 Even in the N100 stack, the app ports are bound to `127.0.0.1`, so you can
 still open the apps locally from the machine itself:
+Operational entry point is `https://len.pe.kr`, while `127.0.0.1` is only the local bind address inside the N100 machine.
 
 - `http://127.0.0.1:8000`
 - `http://127.0.0.1:8001`
