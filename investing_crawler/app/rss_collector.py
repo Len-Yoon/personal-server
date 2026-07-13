@@ -3,25 +3,43 @@ from __future__ import annotations
 import re
 from datetime import timezone
 from email.utils import parsedate_to_datetime
-from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 
 INVESTING_SOURCE = "Investing.com 한국어"
-GOOGLE_NEWS_BASE = "https://news.google.com/rss/search?"
+OFFICIAL_INVESTING_RSS_URL = "https://kr.investing.com/rss/news.rss"
+OFFICIAL_INVESTING_RSS_URLS = (
+    "https://kr.investing.com/rss/news.rss",
+    "https://kr.investing.com/rss/news_25.rss",
+    "https://kr.investing.com/rss/news_1.rss",
+    "https://kr.investing.com/rss/news_11.rss",
+)
+TARGET_TOPIC_KEYWORDS = (
+    "나스닥",
+    "nasdaq",
+    "일본",
+    "닛케이",
+    "니케이",
+    "nikkei",
+    "topix",
+    "원유",
+    "유가",
+    "wti",
+    "브렌트",
+    "brent",
+    "opec",
+    "금값",
+    "골드",
+    "gold",
+    "xau",
+)
 REQUEST_TIMEOUT_SECONDS = 20
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36"
 
 
 def build_investing_google_news_rss_url(freshness: str = "") -> str:
-    query = "(site:kr.investing.com/news OR site:kr.investing.com)"
-    if freshness:
-        query = f"({query}) when:{freshness}"
-    return (
-        f"{GOOGLE_NEWS_BASE}q={quote_plus(query)}"
-        "&hl=ko&gl=KR&ceid=KR:ko"
-    )
+    return ",".join(OFFICIAL_INVESTING_RSS_URLS)
 
 
 def collect_investing_news(limit: int = 50, feed_url: str = "") -> list[dict[str, str]]:
@@ -30,40 +48,57 @@ def collect_investing_news(limit: int = 50, feed_url: str = "") -> list[dict[str
     except ImportError:
         return []
 
-    request = Request(
-        feed_url or build_investing_google_news_rss_url(),
-        headers={"User-Agent": USER_AGENT, "Accept": "application/rss+xml,application/xml,text/xml"},
-    )
-    with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-        feed = feedparser.parse(response)
-
     articles: list[dict[str, str]] = []
     seen_urls: set[str] = set()
-    for entry in getattr(feed, "entries", []):
-        source = _source_title(entry)
-        title = _clean_title(getattr(entry, "title", ""))
-        url = getattr(entry, "link", "")
-        if source != INVESTING_SOURCE or not title or _is_malformed_title(title) or not url:
-            continue
-        if url in seen_urls:
-            continue
+    feed_urls = [
+        value.strip()
+        for value in (feed_url or build_investing_google_news_rss_url()).split(",")
+        if value.strip()
+    ]
+    for current_feed_url in feed_urls:
+        request = Request(
+            current_feed_url,
+            headers={"User-Agent": USER_AGENT, "Accept": "application/rss+xml,application/xml,text/xml"},
+        )
+        with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            feed = feedparser.parse(response)
 
-        published_at = _parse_published_at(
-            getattr(entry, "published", "") or getattr(entry, "updated", "")
-        )
-        articles.append(
-            {
-                "title": title,
-                "url": url,
-                "published_label": _format_published_label(published_at),
-                "published_at": published_at,
-                "source": source,
-            }
-        )
-        seen_urls.add(url)
-        if len(articles) >= limit:
-            break
+        for entry in getattr(feed, "entries", []):
+            source = _source_title(entry)
+            title = _clean_title(getattr(entry, "title", ""))
+            url = getattr(entry, "link", "")
+            direct_feed_without_source = (
+                not source and current_feed_url.startswith("https://kr.investing.com/rss/")
+            )
+            if (
+                source not in {INVESTING_SOURCE, "Investing.com"}
+                and not direct_feed_without_source
+            ) or not title or _is_malformed_title(title) or not _is_target_topic(title) or not url:
+                continue
+            if url in seen_urls:
+                continue
+
+            published_at = _parse_published_at(
+                getattr(entry, "published", "") or getattr(entry, "updated", "")
+            )
+            articles.append(
+                {
+                    "title": title,
+                    "url": url,
+                    "published_label": _format_published_label(published_at),
+                    "published_at": published_at,
+                    "source": source or INVESTING_SOURCE,
+                }
+            )
+            seen_urls.add(url)
+            if len(articles) >= limit:
+                return articles
     return articles
+
+
+def _is_target_topic(title: str) -> bool:
+    normalized = title.casefold()
+    return any(keyword in normalized for keyword in TARGET_TOPIC_KEYWORDS)
 
 
 def _source_title(entry) -> str:
