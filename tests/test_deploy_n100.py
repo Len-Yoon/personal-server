@@ -18,6 +18,8 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("runs-on: [self-hosted, Windows, X64]", WORKFLOW)
         self.assertIn("C:\\personal-server", WORKFLOW)
         self.assertIn("C:\\Program Files\\Git\\bin\\bash.exe", WORKFLOW)
+        self.assertIn("shell: powershell", WORKFLOW)
+        self.assertNotIn("shell: pwsh", WORKFLOW)
         self.assertIn("bash ./scripts/deploy-n100.sh", WORKFLOW)
         self.assertNotIn("N100_SSH_KEY", WORKFLOW)
 

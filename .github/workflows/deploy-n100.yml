@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - name: Verify N100 deployment directory
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $projectRoot = 'C:\personal-server'
@@ -35,7 +35,7 @@ jobs:
           }
 
       - name: Run deployment script
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $bash = 'C:\Program Files\Git\bin\bash.exe'
