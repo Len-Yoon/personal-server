@@ -13,7 +13,7 @@ from app.services.news_sources import collect_news_from_sources
 
 
 PROJECT_DATA_ROOT = Path(__file__).resolve().parents[3] / "data"
-CACHE_TTL_SECONDS = int(os.getenv("NEWS_REFRESH_INTERVAL_SECONDS", "3600"))
+CACHE_TTL_SECONDS = int(os.getenv("NEWS_REFRESH_INTERVAL_SECONDS", "300"))
 RETENTION_DAYS = int(os.getenv("NEWS_RETENTION_DAYS", "7"))
 
 _ARCHIVE_WRITE_LOCK = Lock()
