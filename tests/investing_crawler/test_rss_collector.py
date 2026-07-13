@@ -35,6 +35,7 @@ class RssCollectorTests(unittest.TestCase):
     def test_build_url_targets_korean_investing_news(self):
         url = build_investing_google_news_rss_url()
         self.assertIn("site%3Akr.investing.com%2Fnews", url)
+        self.assertIn("site%3Akr.investing.com", url)
         self.assertIn("hl=ko", url)
         self.assertIn("gl=KR", url)
 

@@ -15,7 +15,7 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrom
 
 
 def build_investing_google_news_rss_url(freshness: str = "") -> str:
-    query = "site:kr.investing.com/news"
+    query = "(site:kr.investing.com/news OR site:kr.investing.com)"
     if freshness:
         query = f"({query}) when:{freshness}"
     return (
