@@ -159,6 +159,8 @@ This starts the app containers used by the personal server:
 
 If you enable public HTTPS, the N100 override also starts `caddy`.
 
+`OBSIDIAN_VAULT_PATH` defaults to the project-relative path `./data/obsidian/vault`, so Mac and N100 can use the same `.env` value. Set an absolute path only when an external Vault is required.
+
 Even in the N100 stack, the app ports are bound to `127.0.0.1`, so you can
 still open the apps locally from the machine itself:
 Operational entry point is `https://len.pe.kr`, while `127.0.0.1` is only the local bind address inside the N100 machine.
