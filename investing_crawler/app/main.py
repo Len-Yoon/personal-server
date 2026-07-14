@@ -8,7 +8,7 @@ from tempfile import NamedTemporaryFile
 from zoneinfo import ZoneInfo
 
 from .obsidian_writer import merge_daily_markdown
-from .rss_collector import build_investing_google_news_rss_url, collect_investing_news
+from .rss_collector import build_investing_rss_feed_urls, collect_investing_news
 
 
 def run() -> int:
@@ -18,7 +18,7 @@ def run() -> int:
         return 1
 
     news_dir = os.getenv("OBSIDIAN_NEWS_DIR", "뉴스/Investing").strip()
-    source_url = os.getenv("INVESTING_NEWS_URL", build_investing_google_news_rss_url()).strip()
+    source_url = os.getenv("INVESTING_NEWS_URL", build_investing_rss_feed_urls()).strip()
     limit = int(os.getenv("INVESTING_NEWS_LIMIT", "50"))
     timezone_name = os.getenv("INVESTING_NEWS_TIMEZONE", "Asia/Seoul").strip()
     collected_at = datetime.now(ZoneInfo(timezone_name))

@@ -9,20 +9,37 @@ from zoneinfo import ZoneInfo
 
 
 INVESTING_SOURCE = "Investing.com 한국어"
-OFFICIAL_INVESTING_RSS_URL = "https://kr.investing.com/rss/news.rss"
 OFFICIAL_INVESTING_RSS_URLS = (
     "https://kr.investing.com/rss/news.rss",
     "https://kr.investing.com/rss/news_25.rss",
     "https://kr.investing.com/rss/news_1.rss",
     "https://kr.investing.com/rss/news_11.rss",
+    "https://kr.investing.com/rss/news_95.rss",
+    "https://kr.investing.com/rss/news_14.rss",
+    "https://kr.investing.com/rss/news_477.rss",
+    "https://kr.investing.com/rss/news_462.rss",
+    "https://kr.investing.com/rss/news_450.rss",
+    "https://kr.investing.com/rss/news_357.rss",
+    "https://kr.investing.com/rss/news_1065.rss",
+    "https://kr.investing.com/rss/news_1064.rss",
+    "https://kr.investing.com/rss/news_1063.rss",
+    "https://kr.investing.com/rss/news_1062.rss",
+    "https://kr.investing.com/rss/news_1061.rss",
 )
 GOOGLE_NEWS_BASE = "https://news.google.com/rss/search?"
 REQUEST_TIMEOUT_SECONDS = 20
+RSS_ACCEPT_HEADER = "application/rss+xml,application/xml,text/xml"
+SEOUL_TZ = ZoneInfo("Asia/Seoul")
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36"
 
 
-def build_investing_google_news_rss_url(freshness: str = "") -> str:
+def build_investing_rss_feed_urls() -> str:
     return ",".join(OFFICIAL_INVESTING_RSS_URLS)
+
+
+def build_investing_google_news_rss_url() -> str:
+    # Backward-compatible alias for existing callers.
+    return build_investing_rss_feed_urls()
 
 
 def build_google_fallback_rss_url() -> str:
@@ -40,16 +57,22 @@ def collect_investing_news(limit: int = 50, feed_url: str = "") -> list[dict[str
     seen_urls: set[str] = set()
     feed_urls = [
         value.strip()
-        for value in (feed_url or build_investing_google_news_rss_url()).split(",")
+        for value in (feed_url or build_investing_rss_feed_urls()).split(",")
         if value.strip()
     ]
     for current_feed_url in feed_urls:
-        request = Request(
-            current_feed_url,
-            headers={"User-Agent": USER_AGENT, "Accept": "application/rss+xml,application/xml,text/xml"},
-        )
-        with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-            feed = feedparser.parse(response)
+        try:
+            request = Request(
+                current_feed_url,
+                headers={
+                    "User-Agent": USER_AGENT,
+                    "Accept": RSS_ACCEPT_HEADER,
+                },
+            )
+            with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                feed = feedparser.parse(response)
+        except Exception:
+            continue
 
         for entry in getattr(feed, "entries", []):
             source = _source_title(entry)
@@ -99,9 +122,7 @@ def _is_today(value: str) -> bool:
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(ZoneInfo("Asia/Seoul")).date() == datetime.now(
-        ZoneInfo("Asia/Seoul")
-    ).date()
+    return parsed.astimezone(SEOUL_TZ).date() == datetime.now(SEOUL_TZ).date()
 
 
 def _merge_articles(
@@ -158,4 +179,4 @@ def _format_published_label(value: str) -> str:
     from datetime import datetime
 
     parsed = datetime.fromisoformat(value)
-    return parsed.astimezone(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M KST")
+    return parsed.astimezone(SEOUL_TZ).strftime("%Y-%m-%d %H:%M KST")
