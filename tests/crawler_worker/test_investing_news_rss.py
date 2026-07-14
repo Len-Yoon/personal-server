@@ -26,6 +26,22 @@ class InvestingNewsRssTests(unittest.TestCase):
         self.assertTrue(module._is_today("2026-07-13 03:59:20", today=date(2026, 7, 13)))
         self.assertFalse(module._is_today("2026-07-12 12:00:00", today=date(2026, 7, 13)))
 
+    def test_classifies_investing_topics_from_title_without_mixing_interest_rate_with_gold(self):
+        module = self.reload_module()
+
+        self.assertEqual(
+            module._classify_topics("금 가격, 미국 금리 인하 기대에 상승", ""),
+            ["금"],
+        )
+        self.assertEqual(
+            module._classify_topics("국제유가 WTI와 일본 엔화 동향", ""),
+            ["원유", "일본"],
+        )
+        self.assertEqual(
+            module._classify_topics("미국 증시와 유럽 경제 동향", ""),
+            ["세계동향"],
+        )
+
     def test_search_investing_news_rss_keeps_only_investing_korean_source(self):
         module = self.reload_module()
         today_kst = datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
@@ -53,6 +69,7 @@ class InvestingNewsRssTests(unittest.TestCase):
         self.assertEqual(len(articles), 1)
         self.assertEqual(articles[0]["title"], "나스닥 최신 Investing 뉴스")
         self.assertEqual(articles[0]["title_ko"], "나스닥 최신 Investing 뉴스")
+        self.assertEqual(articles[0]["topics"], ["세계동향"])
         self.assertEqual(mocked_search.call_count, 1)
         direct_call = mocked_search.call_args_list[0].kwargs
         self.assertEqual(

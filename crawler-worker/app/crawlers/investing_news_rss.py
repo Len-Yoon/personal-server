@@ -16,6 +16,14 @@ INVESTING_FEED_URLS = [
     "https://kr.investing.com/rss/news_11.rss",
     "https://kr.investing.com/rss/news_14.rss",
 ]
+TOPIC_PATTERNS = {
+    "금": re.compile(r"금\s*(?:값|가격|선물|시세|시장)|골드|gold|xau", re.IGNORECASE),
+    "원유": re.compile(
+        r"원유|유가|국제유가|wti|브렌트|brent|opec|crude(?:\s+oil)?|oil prices?",
+        re.IGNORECASE,
+    ),
+    "일본": re.compile(r"일본|닛케이|도쿄|엔화|boj|topix", re.IGNORECASE),
+}
 
 
 def search_investing_news_rss(limit: int = 50) -> list[dict]:
@@ -43,8 +51,22 @@ def _clean_articles(articles: list[dict]) -> list[dict]:
         cleaned["title"] = title
         cleaned["title_ko"] = title
         cleaned["title_original"] = title
+        cleaned["topics"] = _classify_topics(
+            title,
+            str(cleaned.get("summary", "")),
+        )
         cleaned_articles.append(cleaned)
     return cleaned_articles
+
+
+def _classify_topics(title: str, summary: str) -> list[str]:
+    searchable_text = f"{title} {summary}".strip()
+    topics = [
+        topic
+        for topic, pattern in TOPIC_PATTERNS.items()
+        if pattern.search(searchable_text)
+    ]
+    return topics or ["세계동향"]
 
 
 def _dedupe_articles(articles: list[dict]) -> list[dict]:

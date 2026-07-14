@@ -48,6 +48,9 @@
             <article class="news-card">
                 <div class="news-meta-row">
                     <span class="status-badge">{{ article.provider }}</span>
+                    {% for topic in article.topics or ["세계동향"] %}
+                        <span class="status-badge">{{ topic }}</span>
+                    {% endfor %}
                     <span>{{ article.source }}</span>
                     {% if article.collected_at %}
                         <span>{{ article.collected_at|news_datetime }}</span>

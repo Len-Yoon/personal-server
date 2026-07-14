@@ -37,6 +37,9 @@
             <article class="news-card">
                 <div class="news-meta-row">
                     <span class="status-badge">{{ item.category }}</span>
+                    {% for topic in item.topics or ["세계동향"] %}
+                        <span class="status-badge">{{ topic }}</span>
+                    {% endfor %}
                     <span>{{ item.source }}</span>
                     <span>{{ item.collected_at|news_datetime }}</span>
                 </div>
