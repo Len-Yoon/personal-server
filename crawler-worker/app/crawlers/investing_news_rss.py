@@ -11,6 +11,10 @@ from app.crawlers.rss_news import search_rss_news
 INVESTING_SOURCE = "Investing.com 한국어"
 INVESTING_FEED_URLS = [
     "https://kr.investing.com/rss/news.rss",
+    "https://kr.investing.com/rss/news_25.rss",
+    "https://kr.investing.com/rss/news_1.rss",
+    "https://kr.investing.com/rss/news_11.rss",
+    "https://kr.investing.com/rss/news_14.rss",
 ]
 
 
