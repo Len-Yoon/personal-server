@@ -5,19 +5,12 @@ from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
-from app.crawlers.rss_news import build_google_news_rss_url, search_rss_news
+from app.crawlers.rss_news import search_rss_news
 
 
 INVESTING_SOURCE = "Investing.com 한국어"
 INVESTING_FEED_URLS = [
     "https://kr.investing.com/rss/news.rss",
-    "https://kr.investing.com/rss/news_25.rss",
-    "https://kr.investing.com/rss/news_1.rss",
-    "https://kr.investing.com/rss/news_11.rss",
-]
-INVESTING_FALLBACK_FEED_URLS = [
-    build_google_news_rss_url("site:kr.investing.com/news", freshness="1d"),
-    build_google_news_rss_url("site:kr.investing.com/news/cryptocurrency-news", freshness="1d"),
 ]
 
 
@@ -31,17 +24,6 @@ def search_investing_news_rss(limit: int = 50) -> list[dict]:
         source_filter=INVESTING_SOURCE,
     )
     cleaned_articles = _clean_articles(direct_articles)
-
-    fallback_articles = search_rss_news(
-        feed_urls=INVESTING_FALLBACK_FEED_URLS,
-        category="INVESTING",
-        source_name=INVESTING_SOURCE,
-        provider_name="Google News RSS",
-        limit=max(limit, 8),
-        source_filter=INVESTING_SOURCE,
-    )
-    cleaned_articles.extend(_clean_articles(fallback_articles))
-
     return _dedupe_articles(cleaned_articles)[:limit]
 
 

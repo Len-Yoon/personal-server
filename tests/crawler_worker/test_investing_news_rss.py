@@ -43,33 +43,22 @@ class InvestingNewsRssTests(unittest.TestCase):
                 "source": "Investing.com 한국어",
             },
         ]
-        fallback_articles = [
-            {
-                "title": "일본 증시 보충 뉴스 - Investing.com 한국어",
-                "url": "https://news.google.com/rss/articles/4",
-                "source": "Investing.com 한국어",
-                "provider": "Google News RSS",
-                "published_at": f"{today_kst} 13:10:20",
-            },
-        ]
         with patch.object(
             module,
             "search_rss_news",
-            side_effect=[direct_articles, fallback_articles],
+            return_value=direct_articles,
         ) as mocked_search:
             articles = module.search_investing_news_rss(limit=10)
 
-        self.assertEqual(len(articles), 2)
+        self.assertEqual(len(articles), 1)
         self.assertEqual(articles[0]["title"], "나스닥 최신 Investing 뉴스")
         self.assertEqual(articles[0]["title_ko"], "나스닥 최신 Investing 뉴스")
-        self.assertEqual(articles[1]["provider"], "Google News RSS")
-        self.assertEqual(mocked_search.call_count, 2)
+        self.assertEqual(mocked_search.call_count, 1)
         direct_call = mocked_search.call_args_list[0].kwargs
-        fallback_call = mocked_search.call_args_list[1].kwargs
-        self.assertIn("https://kr.investing.com/rss/news.rss", direct_call["feed_urls"])
-        self.assertIn("https://news.google.com/rss/search?", fallback_call["feed_urls"][0])
-        self.assertIn("site%3Akr.investing.com", fallback_call["feed_urls"][0])
-        self.assertIn("site%3Akr.investing.com%2Fnews%2Fcryptocurrency-news", fallback_call["feed_urls"][1])
+        self.assertEqual(
+            direct_call["feed_urls"],
+            ["https://kr.investing.com/rss/news.rss"],
+        )
 
 
 if __name__ == "__main__":
