@@ -2,8 +2,9 @@ import importlib
 import sys
 import types
 import unittest
-from datetime import date
+from datetime import date, datetime
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from tests._test_support import prepare_service_import
 
@@ -27,13 +28,14 @@ class InvestingNewsRssTests(unittest.TestCase):
 
     def test_search_investing_news_rss_keeps_only_investing_korean_source(self):
         module = self.reload_module()
+        today_kst = datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
         direct_articles = [
             {
                 "title": "나스닥 최신 Investing 뉴스 - Investing.com 한국어",
                 "url": "https://kr.investing.com/news/articles/1",
                 "source": "Investing.com 한국어",
                 "provider": "Investing.com RSS",
-                "published_at": "2026-07-13 03:59:20",
+                "published_at": f"{today_kst} 12:00:00",
             },
             {
                 "title": "By Investing.com",
@@ -47,7 +49,7 @@ class InvestingNewsRssTests(unittest.TestCase):
                 "url": "https://news.google.com/rss/articles/4",
                 "source": "Investing.com 한국어",
                 "provider": "Google News RSS",
-                "published_at": "2026-07-13 04:10:20",
+                "published_at": f"{today_kst} 13:10:20",
             },
         ]
         with patch.object(
