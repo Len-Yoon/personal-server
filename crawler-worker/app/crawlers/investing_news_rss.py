@@ -15,6 +15,10 @@ INVESTING_FEED_URLS = [
     "https://kr.investing.com/rss/news_1.rss",
     "https://kr.investing.com/rss/news_11.rss",
 ]
+INVESTING_FALLBACK_FEED_URLS = [
+    build_google_news_rss_url("site:kr.investing.com/news", freshness="1d"),
+    build_google_news_rss_url("site:kr.investing.com/news/cryptocurrency-news", freshness="1d"),
+]
 
 
 def search_investing_news_rss(limit: int = 50) -> list[dict]:
@@ -29,7 +33,7 @@ def search_investing_news_rss(limit: int = 50) -> list[dict]:
     cleaned_articles = _clean_articles(direct_articles)
 
     fallback_articles = search_rss_news(
-        feed_urls=[build_google_news_rss_url("site:kr.investing.com/news", freshness="1d")],
+        feed_urls=INVESTING_FALLBACK_FEED_URLS,
         category="INVESTING",
         source_name=INVESTING_SOURCE,
         provider_name="Google News RSS",

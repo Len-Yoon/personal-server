@@ -69,6 +69,7 @@ class InvestingNewsRssTests(unittest.TestCase):
         self.assertIn("https://kr.investing.com/rss/news.rss", direct_call["feed_urls"])
         self.assertIn("https://news.google.com/rss/search?", fallback_call["feed_urls"][0])
         self.assertIn("site%3Akr.investing.com", fallback_call["feed_urls"][0])
+        self.assertIn("site%3Akr.investing.com%2Fnews%2Fcryptocurrency-news", fallback_call["feed_urls"][1])
 
 
 if __name__ == "__main__":
