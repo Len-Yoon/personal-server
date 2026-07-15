@@ -48,6 +48,18 @@ class RssNewsTests(unittest.TestCase):
         self.assertIn("gl=KR", url)
         self.assertIn("ceid=KR:ko", url)
 
+    def test_korean_it_query_keeps_broad_it_news_terms(self):
+        self.reload_rss_news()
+
+        from app.crawlers.google_news_rss import GOOGLE_NEWS_QUERIES
+
+        query = GOOGLE_NEWS_QUERIES["KR_IT"]
+
+        self.assertIn("IT 동향", query)
+        self.assertIn("클라우드", query)
+        self.assertIn("소프트웨어", query)
+        self.assertNotIn("-React", query)
+
     def test_filters_korean_articles_only(self):
         rss_news = self.reload_rss_news()
 
