@@ -3,6 +3,7 @@ import sys
 import types
 import unittest
 from datetime import date
+from unittest.mock import patch
 
 from tests._test_support import prepare_service_import
 
@@ -59,6 +60,20 @@ class RssNewsTests(unittest.TestCase):
         self.assertIn("클라우드", query)
         self.assertIn("소프트웨어", query)
         self.assertNotIn("-React", query)
+
+    def test_google_news_uses_rss_freshness_instead_of_calendar_day_filter(self):
+        self.reload_rss_news()
+
+        from app.crawlers.google_news_rss import search_google_news_rss
+
+        with patch(
+            "app.crawlers.google_news_rss.search_rss_news",
+            return_value=[{"url": "https://example.com/it"}],
+        ) as mocked_search:
+            result = search_google_news_rss("KR_IT", limit=1)
+
+        self.assertEqual(result, [{"url": "https://example.com/it"}])
+        self.assertFalse(mocked_search.call_args.kwargs["today_only"])
 
     def test_filters_korean_articles_only(self):
         rss_news = self.reload_rss_news()
