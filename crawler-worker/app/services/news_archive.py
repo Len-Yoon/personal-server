@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from app.crawlers.rss_news import _html_to_text
-from app.services.news_sources import collect_news_from_sources
+from app.services.news_sources import collect_korean_news_from_sources, collect_news_from_sources
 
 
 PROJECT_DATA_ROOT = Path(__file__).resolve().parents[3] / "data"
@@ -90,6 +90,81 @@ def collect_market_news(
     )
 
 
+def collect_korean_news(
+    category: str,
+    limit: int = 24,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    category = _normalize_korean_category(category)
+    now = _now()
+    archive = _load_archive()
+    archive, purged = _purge_archive(archive, now)
+    if purged:
+        archive["updated_at"] = _iso(now)
+        _save_archive(archive)
+
+    category_articles = _get_category_articles(archive["articles"], category)
+    latest_collected_at = _latest_collected_at(category_articles)
+
+    if (
+        category_articles
+        and not force_refresh
+        and latest_collected_at
+        and (now - latest_collected_at).total_seconds() < CACHE_TTL_SECONDS
+    ):
+        return _build_result(
+            category=category,
+            articles=category_articles,
+            limit=limit,
+            cached=True,
+            age_seconds=int((now - latest_collected_at).total_seconds()),
+            label_resolver=_korean_category_label,
+            description_resolver=_korean_category_description,
+        )
+
+    if category_articles and not force_refresh:
+        _schedule_refresh(category, limit, korean=True)
+        return _build_result(
+            category=category,
+            articles=category_articles,
+            limit=limit,
+            cached=True,
+            age_seconds=int((now - latest_collected_at).total_seconds())
+            if latest_collected_at
+            else 0,
+            label_resolver=_korean_category_label,
+            description_resolver=_korean_category_description,
+        )
+
+    try:
+        fresh_articles = collect_korean_news_from_sources(
+            category=category,
+            limit=limit,
+        )
+    except Exception:
+        fresh_articles = category_articles
+    stored_articles = [
+        _attach_archive_metadata(article, category=category, now=now)
+        for article in fresh_articles
+    ]
+
+    archive["articles"] = _merge_articles(archive["articles"], stored_articles)
+    archive["updated_at"] = _iso(now)
+    _save_archive(archive)
+
+    category_articles = _get_category_articles(archive["articles"], category)
+
+    return _build_result(
+        category=category,
+        articles=category_articles,
+        limit=limit,
+        cached=False,
+        age_seconds=0,
+        label_resolver=_korean_category_label,
+        description_resolver=_korean_category_description,
+    )
+
+
 def list_recent_news(query: str = "", limit: int = 50) -> list[dict[str, Any]]:
     archive = _load_archive()
     archive, purged = _purge_archive(archive, _now())
@@ -118,7 +193,17 @@ def get_categories() -> list[dict[str, str]]:
             "description": details["description"],
         }
         for code, details in _category_map().items()
-        if code == "INVESTING"
+    ]
+
+
+def get_korean_categories() -> list[dict[str, str]]:
+    return [
+        {
+            "code": code,
+            "label": details["label"],
+            "description": details["description"],
+        }
+        for code, details in _korean_category_map().items()
     ]
 
 
@@ -128,7 +213,11 @@ def _build_result(
     limit: int,
     cached: bool,
     age_seconds: int,
+    label_resolver=None,
+    description_resolver=None,
 ) -> dict[str, Any]:
+    label_resolver = label_resolver or _category_label
+    description_resolver = description_resolver or _category_description
     sorted_articles = sorted(
         articles,
         key=_sort_key,
@@ -137,8 +226,8 @@ def _build_result(
 
     return {
         "category": category,
-        "label": _category_label(category),
-        "description": _category_description(category),
+        "label": label_resolver(category),
+        "description": description_resolver(category),
         "count": len(sorted_articles[:limit]),
         "articles": sorted_articles[:limit],
         "cache": {
@@ -218,7 +307,7 @@ def _archive_path() -> Path:
     )
 
 
-def _schedule_refresh(category: str, limit: int) -> None:
+def _schedule_refresh(category: str, limit: int, korean: bool = False) -> None:
     with _REFRESH_LOCK:
         if category in _REFRESHING_CATEGORIES:
             return
@@ -226,7 +315,7 @@ def _schedule_refresh(category: str, limit: int) -> None:
 
     def _run() -> None:
         try:
-            _refresh_category(category=category, limit=limit)
+            _refresh_category(category=category, limit=limit, korean=korean)
         finally:
             with _REFRESH_LOCK:
                 _REFRESHING_CATEGORIES.discard(category)
@@ -234,7 +323,7 @@ def _schedule_refresh(category: str, limit: int) -> None:
     Thread(target=_run, daemon=True).start()
 
 
-def _refresh_category(category: str, limit: int) -> None:
+def _refresh_category(category: str, limit: int, korean: bool = False) -> None:
     now = _now()
     archive = _load_archive()
     archive, purged = _purge_archive(archive, now)
@@ -242,9 +331,10 @@ def _refresh_category(category: str, limit: int) -> None:
         archive["updated_at"] = _iso(now)
 
     try:
-        fresh_articles = collect_news_from_sources(
-            category=category,
-            limit=limit,
+        fresh_articles = (
+            collect_korean_news_from_sources(category=category, limit=limit)
+            if korean
+            else collect_news_from_sources(category=category, limit=limit)
         )
     except Exception:
         fresh_articles = []
@@ -395,6 +485,11 @@ def _normalize_category(category: str) -> str:
     return category if category in _category_map() else "WORLD"
 
 
+def _normalize_korean_category(category: str) -> str:
+    category = (category or "KR_WORLD").upper()
+    return category if category in _korean_category_map() else "KR_WORLD"
+
+
 def _category_label(category: str) -> str:
     return _category_map()[category]["label"]
 
@@ -426,6 +521,35 @@ def _category_map() -> dict[str, dict[str, str]]:
             "description": "Hang Seng, Hong Kong 50, 중국 증시, 중국 경기 이슈",
         },
     }
+
+
+def _korean_category_map() -> dict[str, dict[str, str]]:
+    return {
+        "KR_WORLD": {
+            "label": "세계 뉴스",
+            "description": "국내 기사로 확인하는 세계 경제, 금리, 환율, 원자재 이슈",
+        },
+        "KR_IT": {
+            "label": "IT 동향",
+            "description": "클라우드, 개발자 도구, 플랫폼 엔지니어링, 소프트웨어 업계 동향",
+        },
+        "KR_AI": {
+            "label": "AI 뉴스",
+            "description": "LLM, 생성형 AI, 에이전트, 모델, 오픈AI 이슈",
+        },
+        "KR_STACK": {
+            "label": "인기 스택",
+            "description": "React, Next.js, FastAPI, Spring Boot, TypeScript, Kubernetes",
+        },
+    }
+
+
+def _korean_category_label(category: str) -> str:
+    return _korean_category_map()[category]["label"]
+
+
+def _korean_category_description(category: str) -> str:
+    return _korean_category_map()[category]["description"]
 
 
 def _now() -> datetime:

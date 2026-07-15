@@ -71,12 +71,75 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         self.assertEqual(mocked_ap.call_count, 0)
         self.assertEqual(mocked_marketwatch.call_count, 0)
 
-    def test_news_hub_exposes_only_the_unified_investing_category(self):
+    def test_news_hub_exposes_market_topic_categories(self):
         news_archive = self.reload_news_archive()
 
         categories = news_archive.get_categories()
 
-        self.assertEqual([item["code"] for item in categories], ["INVESTING"])
+        self.assertEqual(
+            [item["code"] for item in categories],
+            ["INVESTING", "WORLD", "NASDAQ", "GOLD", "HK50"],
+        )
+
+    def test_korean_news_hub_exposes_korean_topic_categories(self):
+        news_archive = self.reload_news_archive()
+
+        categories = news_archive.get_korean_categories()
+
+        self.assertEqual(
+            [item["code"] for item in categories],
+            ["KR_WORLD", "KR_IT", "KR_AI", "KR_STACK"],
+        )
+
+    def test_collect_korean_news_uses_google_only_and_filters_english_items(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "news_archive.json"
+            with patch.dict(
+                "os.environ",
+                {
+                    "NEWS_ARCHIVE_PATH": str(archive_path),
+                    "NEWS_REFRESH_INTERVAL_SECONDS": "3600",
+                    "NEWS_RETENTION_DAYS": "7",
+                },
+                clear=False,
+            ):
+                news_archive = self.reload_news_archive()
+
+                with patch(
+                    "app.services.news_sources.search_google_news_rss",
+                    return_value=[
+                        {
+                            "url": "https://example.com/kr",
+                            "title": "클라우드 도입이 빠르게 늘고 있다",
+                            "summary": "국내 기업의 클라우드 전환이 늘면서 개발자 도구 수요도 함께 증가했다.",
+                            "source": "Google News",
+                        },
+                        {
+                            "url": "https://example.com/en",
+                            "title": "English headline",
+                            "summary": "No Korean content",
+                            "source": "Google News",
+                        },
+                    ],
+                ) as mocked_google, patch(
+                    "app.services.news_sources.search_reuters_news_rss",
+                    return_value=[],
+                ) as mocked_reuters, patch(
+                    "app.services.news_sources.search_ap_news_rss",
+                    return_value=[],
+                ) as mocked_ap, patch(
+                    "app.services.news_sources.search_marketwatch_news_rss",
+                    return_value=[],
+                ) as mocked_marketwatch:
+                    result = news_archive.collect_korean_news("kr_it", limit=1, force_refresh=True)
+
+        self.assertEqual(result["category"], "KR_IT")
+        self.assertEqual(len(result["articles"]), 1)
+        self.assertEqual(result["articles"][0]["title"], "클라우드 도입이 빠르게 늘고 있다")
+        mocked_google.assert_called_once()
+        mocked_reuters.assert_not_called()
+        mocked_ap.assert_not_called()
+        mocked_marketwatch.assert_not_called()
 
     def test_collect_market_news_uses_reuters_when_google_empty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -148,7 +211,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                           "summary": "",
                           "provider": "Reuters RSS",
                           "collected_at": "2026-07-08T00:00:00+00:00",
-                          "expires_at": "2026-07-15T00:00:00+00:00"
+                          "expires_at": "2026-07-16T00:00:00+00:00"
                         }
                       ]
                     }
