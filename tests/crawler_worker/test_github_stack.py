@@ -1,5 +1,6 @@
 import importlib
 import unittest
+from datetime import date
 
 from tests._test_support import prepare_service_import
 
@@ -28,6 +29,28 @@ class GithubStackTests(unittest.TestCase):
         self.assertEqual(article["category"], "KR_STACK")
         self.assertEqual(article["source"], "GitHub")
         self.assertIn("stars 130,000", article["summary"])
+
+    def test_builds_recent_activity_query_for_stack_repositories(self):
+        module = self.load_module()
+
+        query = module._build_query(date(2026, 7, 8))
+
+        self.assertIn("pushed:>=2026-07-08", query)
+        self.assertIn("in:name,description,readme", query)
+
+    def test_uses_topics_when_repository_description_is_generic(self):
+        module = self.load_module()
+
+        self.assertTrue(
+            module._is_stack_repository(
+                {
+                    "full_name": "example/project",
+                    "description": "A useful developer project",
+                    "language": "Python",
+                    "topics": ["fastapi"],
+                }
+            )
+        )
 
 
 if __name__ == "__main__":

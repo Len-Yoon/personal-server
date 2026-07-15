@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -24,11 +24,29 @@ STACK_KEYWORDS = (
 
 
 def search_github_stack_repositories(limit: int = 20) -> list[dict]:
-    today = datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
-    query = (
+    today = datetime.now(ZoneInfo("Asia/Seoul")).date()
+    for days in (7, 30):
+        query = _build_query(today - timedelta(days=days))
+        payload = _request_repositories(query, limit)
+        repositories = [
+            _to_article(repository)
+            for repository in payload.get("items", [])
+            if _is_stack_repository(repository)
+        ]
+        if repositories:
+            return repositories[:limit]
+
+    return []
+
+
+def _build_query(start_date) -> str:
+    return (
         "(react OR nextjs OR typescript OR fastapi OR spring-boot OR "
-        f"kubernetes OR rust OR golang) in:name,description,readme pushed:>={today}"
+        f"kubernetes OR rust OR golang) in:name,description,readme pushed:>={start_date}"
     )
+
+
+def _request_repositories(query: str, limit: int) -> dict:
     url = f"{GITHUB_API_URL}?q={quote_plus(query)}&sort=stars&order=desc&per_page={min(limit, 50)}"
     request = Request(
         url,
@@ -40,23 +58,15 @@ def search_github_stack_repositories(limit: int = 20) -> list[dict]:
 
     try:
         with urlopen(request, timeout=8) as response:
-            payload = json.load(response)
+            return json.load(response)
     except Exception:
-        return []
-
-    repositories = []
-    for repository in payload.get("items", []):
-        if not _is_stack_repository(repository):
-            continue
-        repositories.append(_to_article(repository))
-
-    return repositories[:limit]
+        return {}
 
 
 def _is_stack_repository(repository: dict) -> bool:
     searchable = " ".join(
         str(repository.get(field, ""))
-        for field in ("full_name", "name", "description", "language")
+        for field in ("full_name", "name", "description", "language", "topics")
     ).casefold()
     return any(keyword in searchable for keyword in STACK_KEYWORDS)
 
