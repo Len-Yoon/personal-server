@@ -10,7 +10,6 @@ _JUNK_TEXTS = {
     "많이 본",
     "뉴스 속보",
     "warrenai",
-    "ai",
 }
 
 
