@@ -16,7 +16,7 @@ from app.services.news_sources import collect_korean_news_from_sources, collect_
 PROJECT_DATA_ROOT = Path(__file__).resolve().parents[3] / "data"
 CACHE_TTL_SECONDS = int(os.getenv("NEWS_REFRESH_INTERVAL_SECONDS", "300"))
 RETENTION_DAYS = int(os.getenv("NEWS_RETENTION_DAYS", "7"))
-ARCHIVE_SCHEMA_VERSION = "2026-07-15-korean-news"
+ARCHIVE_SCHEMA_VERSION = "2026-07-15-velog-only"
 
 _ARCHIVE_WRITE_LOCK = Lock()
 _REFRESH_LOCK = Lock()
