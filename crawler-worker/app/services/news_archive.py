@@ -577,8 +577,8 @@ def _category_map() -> dict[str, dict[str, str]]:
 def _korean_category_map() -> dict[str, dict[str, str]]:
     return {
         "KR_WORLD": {
-            "label": "세계 뉴스",
-            "description": "국내 기사로 확인하는 세계 경제, 금리, 환율, 원자재 이슈",
+            "label": "Investing.com 뉴스",
+            "description": "Investing.com 한국어 RSS에서 오늘 수집한 세계 경제·금리·환율 뉴스",
         },
         "KR_IT": {
             "label": "IT 동향",

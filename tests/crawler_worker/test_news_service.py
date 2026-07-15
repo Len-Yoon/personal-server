@@ -90,6 +90,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
             [item["code"] for item in categories],
             ["KR_WORLD", "KR_IT", "KR_AI", "KR_STACK"],
         )
+        self.assertEqual(categories[0]["label"], "Investing.com 뉴스")
 
     def test_collect_korean_news_uses_google_only_and_filters_english_items(self):
         with tempfile.TemporaryDirectory() as tmpdir:
