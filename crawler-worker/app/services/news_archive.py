@@ -16,6 +16,7 @@ from app.services.news_sources import collect_korean_news_from_sources, collect_
 PROJECT_DATA_ROOT = Path(__file__).resolve().parents[3] / "data"
 CACHE_TTL_SECONDS = int(os.getenv("NEWS_REFRESH_INTERVAL_SECONDS", "300"))
 RETENTION_DAYS = int(os.getenv("NEWS_RETENTION_DAYS", "7"))
+ARCHIVE_SCHEMA_VERSION = "2026-07-15-korean-news"
 
 _ARCHIVE_WRITE_LOCK = Lock()
 _REFRESH_LOCK = Lock()
@@ -268,6 +269,18 @@ def _load_archive() -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {"updated_at": "", "articles": []}
 
+    # The production archive is outside Git and needs a one-time reset after
+    # changing the news source rules.
+    if (
+        str(archive_path) == "/data/crawler-worker/news_archive.json"
+        and data.get("schema_version") != ARCHIVE_SCHEMA_VERSION
+    ):
+        return {
+            "schema_version": ARCHIVE_SCHEMA_VERSION,
+            "updated_at": "",
+            "articles": [],
+        }
+
     articles = data.get("articles", [])
     if not isinstance(articles, list):
         articles = []
@@ -285,6 +298,7 @@ def _load_archive() -> dict[str, Any]:
         normalized_articles.append(normalized)
 
     archive = {
+        "schema_version": str(data.get("schema_version", ARCHIVE_SCHEMA_VERSION)),
         "updated_at": str(data.get("updated_at", "")),
         "articles": normalized_articles,
     }
@@ -299,6 +313,7 @@ def _load_archive() -> dict[str, Any]:
 
 
 def _save_archive(archive: dict[str, Any]) -> None:
+    archive["schema_version"] = ARCHIVE_SCHEMA_VERSION
     archive_path = _archive_path()
     with _ARCHIVE_WRITE_LOCK:
         archive_path.parent.mkdir(parents=True, exist_ok=True)
