@@ -280,12 +280,8 @@ def _load_archive() -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {"updated_at": "", "articles": []}
 
-    # The production archive is outside Git and needs a one-time reset after
-    # changing the news source rules.
-    if (
-        str(archive_path) == "/data/crawler-worker/news_archive.json"
-        and data.get("schema_version") != ARCHIVE_SCHEMA_VERSION
-    ):
+    # Source changes must invalidate both the production and local archives.
+    if data.get("schema_version") and data.get("schema_version") != ARCHIVE_SCHEMA_VERSION:
         return {
             "schema_version": ARCHIVE_SCHEMA_VERSION,
             "updated_at": "",
