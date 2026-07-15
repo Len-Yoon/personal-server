@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query, Request
 from fastapi.templating import Jinja2Templates
-from starlette.responses import RedirectResponse
 
-from app.services.host_urls import portal_home_url, request_host_from_headers
 from app.services.datetime_format import format_news_datetime
-from app.services.news_archive import list_recent_news
-from app.services.news_service import collect_market_news, get_categories
+from app.services.host_urls import portal_home_url, request_host_from_headers
+from app.services.news_archive import (
+    collect_korean_news,
+    collect_market_news,
+    get_categories,
+    get_korean_categories,
+    list_recent_news,
+)
 
 
 router = APIRouter()
@@ -23,21 +27,27 @@ def _category_limit(category: str) -> int:
     return 50 if category.upper() == "INVESTING" else 24
 
 
+def _korean_category_limit(category: str) -> int:
+    return 24
+
+
 templates.env.globals["portal_home_url"] = _portal_home_url
 
 
 @router.get("/")
 def home(request: Request):
-    return RedirectResponse(url="/category?category=INVESTING", status_code=302)
-
-    categories = get_categories()
+    market_categories = [
+        category
+        for category in get_categories()
+        if category["code"] != "INVESTING"
+    ]
 
     return templates.TemplateResponse(
         "home.html",
         {
             "request": request,
             "title": "글로벌 뉴스 허브",
-            "categories": categories,
+            "categories": market_categories,
         },
     )
 
@@ -79,6 +89,45 @@ def category_page(
             "title": result["label"],
             "result": result,
             "categories": get_categories(),
+            "category_path": "/category",
+            "refresh_url": f"/category?category={result['category']}&refresh=true",
+        },
+    )
+
+
+@router.get("/news")
+def korean_news_home(request: Request):
+    return templates.TemplateResponse(
+        "news_home.html",
+        {
+            "request": request,
+            "title": "한국어 뉴스 허브",
+            "categories": get_korean_categories(),
+        },
+    )
+
+
+@router.get("/news/category")
+def korean_category_page(
+    request: Request,
+    category: str = Query(default="KR_WORLD"),
+    refresh: bool = Query(default=False),
+):
+    result = collect_korean_news(
+        category=category,
+        limit=_korean_category_limit(category),
+        force_refresh=refresh,
+    )
+
+    return templates.TemplateResponse(
+        "search.html",
+        {
+            "request": request,
+            "title": result["label"],
+            "result": result,
+            "categories": get_korean_categories(),
+            "category_path": "/news/category",
+            "refresh_url": f"/news/category?category={result['category']}&refresh=true",
         },
     )
 
@@ -91,6 +140,18 @@ def category_api(
     return collect_market_news(
         category=category,
         limit=_category_limit(category),
+        force_refresh=refresh,
+    )
+
+
+@router.get("/news/api/category")
+def korean_category_api(
+    category: str = Query(default="KR_WORLD"),
+    refresh: bool = Query(default=False),
+):
+    return collect_korean_news(
+        category=category,
+        limit=_korean_category_limit(category),
         force_refresh=refresh,
     )
 
