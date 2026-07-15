@@ -251,8 +251,6 @@ def _build_result(
         }
         if "velog" in source_statuses:
             source_status = "velog"
-        elif "reddit" in source_statuses:
-            source_status = "reddit"
         else:
             source_status = "unavailable"
 
@@ -603,7 +601,7 @@ def _korean_category_map() -> dict[str, dict[str, str]]:
         },
         "KR_STACK": {
             "label": "최신 인기동향",
-            "description": "벨로그 트렌딩 글과 Reddit hot 글로 보는 최신 개발 동향",
+            "description": "벨로그 주간 트렌딩 글로 보는 최신 개발 동향",
         },
     }
 
