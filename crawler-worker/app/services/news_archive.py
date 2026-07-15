@@ -249,7 +249,9 @@ def _build_result(
             str(article.get("source_status", "")).strip()
             for article in sorted_articles[:limit]
         }
-        if "github" in source_statuses:
+        if "velog" in source_statuses:
+            source_status = "velog"
+        elif "github" in source_statuses:
             source_status = "github"
         elif "fallback" in source_statuses:
             source_status = "fallback"
@@ -602,8 +604,8 @@ def _korean_category_map() -> dict[str, dict[str, str]]:
             "description": "LLM, 생성형 AI, 에이전트, 모델, 오픈AI 이슈",
         },
         "KR_STACK": {
-            "label": "인기 스택",
-            "description": "React, Next.js, FastAPI, Spring Boot, TypeScript, Kubernetes",
+            "label": "최신 인기동향",
+            "description": "벨로그 트렌딩 글과 GitHub 활동으로 보는 최신 개발 동향",
         },
     }
 

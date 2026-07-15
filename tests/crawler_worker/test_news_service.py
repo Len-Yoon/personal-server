@@ -91,6 +91,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
             ["KR_WORLD", "KR_IT", "KR_AI", "KR_STACK"],
         )
         self.assertEqual(categories[0]["label"], "Investing.com 뉴스")
+        self.assertEqual(categories[3]["label"], "최신 인기동향")
 
     def test_collect_korean_news_uses_google_only_and_filters_english_items(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -191,6 +192,9 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 news_archive = self.reload_news_archive()
 
                 with patch(
+                    "app.services.news_sources.search_velog_trending",
+                    return_value=[],
+                ), patch(
                     "app.services.news_sources.search_github_stack_repositories",
                     return_value=[
                         {
@@ -215,6 +219,43 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         self.assertEqual(result["source_status"], "github")
         mocked_github.assert_called_once_with(limit=8)
         mocked_google.assert_not_called()
+
+    def test_collect_korean_trend_prefers_velog_over_github(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "news_archive.json"
+            with patch.dict(
+                "os.environ",
+                {"NEWS_ARCHIVE_PATH": str(archive_path)},
+                clear=False,
+            ):
+                news_archive = self.reload_news_archive()
+
+                with patch(
+                    "app.services.news_sources.search_velog_trending",
+                    return_value=[
+                        {
+                            "category": "KR_STACK",
+                            "url": "https://velog.io/@dev/ai-agent",
+                            "title": "AI Agent 만들기",
+                            "title_ko": "AI Agent 만들기",
+                            "summary": "벨로그 트렌딩 개발 글",
+                            "source": "Velog",
+                            "provider": "Velog Trending",
+                            "source_status": "velog",
+                        }
+                    ],
+                ) as mocked_velog, patch(
+                    "app.services.news_sources.search_github_stack_repositories",
+                    return_value=[],
+                ) as mocked_github:
+                    result = news_archive.collect_korean_news(
+                        "kr_stack", limit=1, force_refresh=True
+                    )
+
+        self.assertEqual(result["source_status"], "velog")
+        self.assertEqual(result["articles"][0]["source"], "Velog")
+        mocked_velog.assert_called_once_with(limit=8)
+        mocked_github.assert_not_called()
 
     def test_collect_korean_world_news_keeps_investing_items_without_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
