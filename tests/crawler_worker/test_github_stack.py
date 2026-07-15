@@ -1,6 +1,7 @@
 import importlib
 import unittest
 from datetime import date
+from unittest.mock import patch
 
 from tests._test_support import prepare_service_import
 
@@ -51,6 +52,16 @@ class GithubStackTests(unittest.TestCase):
                 }
             )
         )
+
+    def test_returns_default_stack_catalog_when_github_is_unavailable(self):
+        module = self.load_module()
+
+        with patch.object(module, "_request_repositories", return_value={}):
+            articles = module.search_github_stack_repositories(limit=3)
+
+        self.assertEqual(len(articles), 3)
+        self.assertEqual(articles[0]["source_status"], "fallback")
+        self.assertEqual(articles[0]["source"], "기본 스택 목록")
 
 
 if __name__ == "__main__":

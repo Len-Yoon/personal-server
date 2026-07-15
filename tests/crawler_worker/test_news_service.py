@@ -199,6 +199,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                             "title": "vercel/next.js",
                             "summary": "React Framework · TypeScript · stars 130,000",
                             "source": "GitHub",
+                            "source_status": "github",
                         }
                     ],
                 ) as mocked_github, patch(
@@ -211,6 +212,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
 
         self.assertEqual(result["category"], "KR_STACK")
         self.assertEqual(result["articles"][0]["source"], "GitHub")
+        self.assertEqual(result["source_status"], "github")
         mocked_github.assert_called_once_with(limit=8)
         mocked_google.assert_not_called()
 

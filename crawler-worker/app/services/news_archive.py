@@ -243,6 +243,18 @@ def _build_result(
         key=_sort_key,
         reverse=True,
     )
+    source_status = ""
+    if category == "KR_STACK":
+        source_statuses = {
+            str(article.get("source_status", "")).strip()
+            for article in sorted_articles[:limit]
+        }
+        if "github" in source_statuses:
+            source_status = "github"
+        elif "fallback" in source_statuses:
+            source_status = "fallback"
+        else:
+            source_status = "unavailable"
 
     return {
         "category": category,
@@ -250,6 +262,7 @@ def _build_result(
         "description": description_resolver(category),
         "count": len(sorted_articles[:limit]),
         "articles": sorted_articles[:limit],
+        "source_status": source_status,
         "cache": {
             "hit": cached,
             "age_seconds": age_seconds,
