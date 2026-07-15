@@ -25,7 +25,6 @@ class CrawlerWorkerNewsRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("IT 동향", response.text)
         self.assertIn("AI 뉴스", response.text)
-        self.assertIn("최신 인기동향", response.text)
 
     def test_news_alias_redirects_to_main_news_page(self):
         app = self.load_app()

@@ -16,7 +16,7 @@ from app.services.news_sources import collect_korean_news_from_sources, collect_
 PROJECT_DATA_ROOT = Path(__file__).resolve().parents[3] / "data"
 CACHE_TTL_SECONDS = int(os.getenv("NEWS_REFRESH_INTERVAL_SECONDS", "300"))
 RETENTION_DAYS = int(os.getenv("NEWS_RETENTION_DAYS", "7"))
-ARCHIVE_SCHEMA_VERSION = "2026-07-15-velog-only"
+ARCHIVE_SCHEMA_VERSION = "2026-07-15-korean-news-v2"
 
 _ARCHIVE_WRITE_LOCK = Lock()
 _REFRESH_LOCK = Lock()
@@ -243,24 +243,12 @@ def _build_result(
         key=_sort_key,
         reverse=True,
     )
-    source_status = ""
-    if category == "KR_STACK":
-        source_statuses = {
-            str(article.get("source_status", "")).strip()
-            for article in sorted_articles[:limit]
-        }
-        if "velog" in source_statuses:
-            source_status = "velog"
-        else:
-            source_status = "unavailable"
-
     return {
         "category": category,
         "label": label_resolver(category),
         "description": description_resolver(category),
         "count": len(sorted_articles[:limit]),
         "articles": sorted_articles[:limit],
-        "source_status": source_status,
         "cache": {
             "hit": cached,
             "age_seconds": age_seconds,
@@ -594,10 +582,6 @@ def _korean_category_map() -> dict[str, dict[str, str]]:
         "KR_AI": {
             "label": "AI 뉴스",
             "description": "LLM, 생성형 AI, 에이전트, 모델, 오픈AI 이슈",
-        },
-        "KR_STACK": {
-            "label": "최신 인기동향",
-            "description": "벨로그 주간 트렌딩 순위로 보는 인기 개발·기술 글",
         },
     }
 
