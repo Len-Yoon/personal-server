@@ -32,11 +32,21 @@ class VelogTrendingTests(unittest.TestCase):
         self.assertEqual(article["url"], "https://velog.io/@dev-user/react-server-components")
         self.assertIn("좋아요 42", article["summary"])
 
-    def test_filters_trending_posts_to_stack_related_titles(self):
+    def test_keeps_all_posts_from_trending_api(self):
         module = self.load_module()
 
-        self.assertTrue(module._is_stack_related({"title": "FastAPI 배포 방법"}))
-        self.assertFalse(module._is_stack_related({"title": "개발자의 이직 회고"}))
+        posts = [
+            {"title": "FastAPI 배포 방법", "urlSlug": "fastapi", "user": {"username": "dev"}},
+            {"title": "개발자의 이직 회고", "urlSlug": "career", "user": {"username": "dev"}},
+        ]
+
+        with patch.object(module, "_fetch_trending_posts", return_value=posts):
+            articles = module.search_velog_trending(limit=5)
+
+        self.assertEqual([article["title"] for article in articles], [
+            "FastAPI 배포 방법",
+            "개발자의 이직 회고",
+        ])
 
     def test_fetches_weekly_trending_api_and_returns_stack_posts(self):
         module = self.load_module()
@@ -48,8 +58,11 @@ class VelogTrendingTests(unittest.TestCase):
         with patch.object(module, "_fetch_trending_posts", return_value=posts) as mocked_fetch:
             articles = module.search_velog_trending(limit=5)
 
-        self.assertEqual(len(articles), 1)
-        self.assertEqual(articles[0]["title"], "Next.js 캐싱 전략")
+        self.assertEqual(len(articles), 2)
+        self.assertEqual(
+            [article["title"] for article in articles],
+            ["Next.js 캐싱 전략", "일상 회고"],
+        )
         mocked_fetch.assert_called_once_with(limit=30)
 
 

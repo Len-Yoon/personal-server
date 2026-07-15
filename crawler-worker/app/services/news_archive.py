@@ -597,7 +597,7 @@ def _korean_category_map() -> dict[str, dict[str, str]]:
         },
         "KR_STACK": {
             "label": "최신 인기동향",
-            "description": "벨로그 주간 트렌딩 글로 보는 최신 개발 동향",
+            "description": "벨로그 주간 트렌딩 순위로 보는 인기 개발·기술 글",
         },
     }
 

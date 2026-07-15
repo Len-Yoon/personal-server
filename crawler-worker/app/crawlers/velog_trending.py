@@ -8,39 +8,9 @@ from urllib.request import Request, urlopen
 
 VELOG_TRENDING_API = "https://cache.velcdn.com/api/trending-posts"
 REQUEST_TIMEOUT_SECONDS = 20
-STACK_KEYWORDS = (
-    "react",
-    "next.js",
-    "nextjs",
-    "typescript",
-    "javascript",
-    "python",
-    "fastapi",
-    "django",
-    "spring",
-    "java",
-    "kotlin",
-    "kubernetes",
-    "docker",
-    "aws",
-    "클라우드",
-    "프론트",
-    "백엔드",
-    "api",
-    "서버",
-    "웹 개발",
-    "데이터베이스",
-    "개발자 도구",
-)
-
-
 def search_velog_trending(limit: int = 20) -> list[dict]:
     payload = _fetch_trending_posts(limit=max(limit * 3, 30))
-    articles = [
-        _to_article(post)
-        for post in payload
-        if _is_stack_related(post)
-    ]
+    articles = [_to_article(post) for post in payload]
     return articles[:limit]
 
 
@@ -73,14 +43,6 @@ def _ssl_context() -> ssl.SSLContext:
     return ssl.create_default_context(cafile=certifi.where())
 
 
-def _is_stack_related(post: dict) -> bool:
-    searchable = " ".join(
-        str(post.get(field, ""))
-        for field in ("title", "shortDescription")
-    ).casefold()
-    return any(keyword in searchable for keyword in STACK_KEYWORDS)
-
-
 def _to_article(post: dict) -> dict:
     user = post.get("user") or {}
     username = str(user.get("username") or "velog")
@@ -103,6 +65,6 @@ def _to_article(post: dict) -> dict:
         "published_at": published_at,
         "published_at_sort": published_at,
         "summary": f"{description} · 좋아요 {likes} · 댓글 {comments}",
-        "topics": ["개발 트렌드"],
+        "topics": ["Velog 주간 인기글"],
         "source_status": "velog",
     }
