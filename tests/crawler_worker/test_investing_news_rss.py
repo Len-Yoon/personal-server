@@ -76,10 +76,6 @@ class InvestingNewsRssTests(unittest.TestCase):
             direct_call["feed_urls"],
             [
                 "https://kr.investing.com/rss/news.rss",
-                "https://kr.investing.com/rss/news_25.rss",
-                "https://kr.investing.com/rss/news_1.rss",
-                "https://kr.investing.com/rss/news_11.rss",
-                "https://kr.investing.com/rss/news_14.rss",
             ],
         )
 
