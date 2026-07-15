@@ -79,18 +79,6 @@ services:
       - ./data/crawler-worker:/data/crawler-worker
       - ./data/logs:/app/data/logs
 
-  investing-crawler:
-    build:
-      context: .
-      dockerfile: investing_crawler/Dockerfile
-    command: python -m app.main
-    env_file:
-      - .env
-    environment:
-      - OBSIDIAN_VAULT_PATH=/vault
-    volumes:
-      - ${OBSIDIAN_VAULT_PATH:-./data/obsidian/vault}:/vault
-
   youtube-memo:
     build: ./youtube-memo
     container_name: youtube-memo

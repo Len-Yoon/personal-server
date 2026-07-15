@@ -18,17 +18,12 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("docker-compose.yml", WSL_SCRIPT)
         self.assertIn("up -d", WSL_SCRIPT)
         self.assertIn("crawler-worker", WSL_SCRIPT)
-        self.assertIn("investing-crawler", WSL_SCRIPT)
         self.assertNotIn("up -d --build portal-web system-agent", WSL_SCRIPT)
 
     def test_runs_daily_maintenance_once_after_stack_start(self):
         self.assertIn("run_daily_maintenance", WSL_SCRIPT)
         self.assertIn("scripts/maintenance.py all", WSL_SCRIPT)
         self.assertIn("personal-server-maintenance.last", WSL_SCRIPT)
-
-    def test_loads_obsidian_settings_from_project_env_for_maintenance(self):
-        self.assertIn("OBSIDIAN_VAULT_PATH", WSL_SCRIPT)
-        self.assertIn(".env", WSL_SCRIPT)
 
     def test_loads_maintenance_settings_from_project_env(self):
         for key in (
@@ -45,11 +40,6 @@ class WindowsBootstrapTests(unittest.TestCase):
     def test_normalizes_container_data_paths_for_wsl_maintenance(self):
         self.assertIn("normalize_project_path DATA_ROOT", WSL_SCRIPT)
         self.assertIn("normalize_project_path SECURITY_LOG_PATH", WSL_SCRIPT)
-
-    def test_runs_investing_news_collection_once_per_day(self):
-        self.assertIn("run_daily_investing_news", WSL_SCRIPT)
-        self.assertIn("investing-crawler", WSL_SCRIPT)
-        self.assertIn("personal-server-investing-news.last", WSL_SCRIPT)
 
     def test_powershell_daemon_isolates_maintenance_failure(self):
         self.assertIn("bash scripts/windows-bootstrap.sh", SCRIPT)

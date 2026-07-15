@@ -66,7 +66,7 @@ runs-on: [self-hosted, Windows, X64]
 2. `C:\personal-server`의 존재와 `.env`, `data`, Compose 파일을 확인합니다.
 3. Ubuntu-24.04 WSL에서 `scripts/deploy-n100.sh`를 실행합니다.
 4. 스크립트가 `git fetch --prune origin`과 `git reset --hard origin/main`으로 코드만 최신 main에 맞춥니다.
-5. Compose 설정을 검증한 뒤 `docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web system-agent crawler-worker youtube-memo book-memo caddy`를 실행합니다. 일회성 `investing-crawler`는 시작하지 않습니다.
+5. Compose 설정을 검증한 뒤 `docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web system-agent crawler-worker youtube-memo book-memo caddy`를 실행합니다.
 6. 마지막에 Compose 서비스 상태를 출력합니다.
 
 같은 브랜치의 배포가 겹치면 기존 배포가 끝난 뒤 다음 배포가 실행됩니다.
@@ -85,7 +85,7 @@ wsl.exe -d Ubuntu-24.04 -- bash -lc "cd /mnt/c/personal-server && docker compose
 wsl.exe -d Ubuntu-24.04 -- bash -lc "cd /mnt/c/personal-server && docker compose -f docker-compose.yml -f docker-compose.n100.yml logs --tail=100"
 ```
 
-Windows 작업 스케줄러와 `investing-crawler` 일회성 작업은 별도 경로이므로 이 workflow가 상시 서비스 배포를 수행해도 스케줄러 설정은 변경하지 않습니다.
+Windows 작업 스케줄러 설정은 이 workflow의 상시 서비스 배포와 별개로 유지됩니다.
 
 자동배포가 아닌 수동 배포가 필요할 때는 다음 명령을 사용합니다.
 

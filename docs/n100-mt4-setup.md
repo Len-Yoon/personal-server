@@ -159,7 +159,6 @@ This starts the app containers used by the personal server:
 
 If you enable public HTTPS, the N100 override also starts `caddy`.
 
-`OBSIDIAN_VAULT_PATH` defaults to the project-relative path `./data/obsidian/vault`, so Mac and N100 can use the same `.env` value. Set an absolute path only when an external Vault is required.
 
 Even in the N100 stack, the app ports are bound to `127.0.0.1`, so you can
 still open the apps locally from the machine itself:
@@ -259,8 +258,6 @@ docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build
 정상 운영에서는 Mac 등 개발 PC에서 `main`으로 push하면
 [`N100 GitHub 자동배포 안내`](n100-github-auto-deploy.md)에 따라 N100의 self-hosted
 Runner가 WSL2 Docker에서 상시 서비스만 자동으로 재배포합니다. 이때
-`investing-crawler`는 실행하지 않으므로 Windows 작업 스케줄러의 일회성 수집에는
-영향이 없습니다.
 
 수동으로 일회성 Investing 뉴스 수집만 실행하려면 Windows 작업 스케줄러에서
 `scripts/investing-news-once.ps1`를 실행하거나 다음 명령을 사용합니다.
@@ -281,7 +278,6 @@ Back up SQLite data and prune old security logs:
 python3 scripts/maintenance.py backup
 python3 scripts/maintenance.py prune-logs
 python3 scripts/maintenance.py prune-news
-python3 scripts/maintenance.py prune-obsidian-news
 python3 scripts/maintenance.py all
 ```
 
@@ -299,7 +295,6 @@ BACKUP_RETENTION_DAYS=14
 SECURITY_LOG_RETENTION_DAYS=30
 NEWS_ARCHIVE_PATH=/data/crawler-worker/news_archive.json
 NEWS_RETENTION_DAYS=7
-OBSIDIAN_NEWS_RETENTION_DAYS=30
 BACKUP_STALE_SECONDS=172800
 ```
 
@@ -309,10 +304,6 @@ Windows 부트스트랩은 로그인 후 복구 루프에서 하루에 한 번 `
 형식의 파일만 삭제합니다. 보존기간을 지난 파일은 복구할 수 없으므로 필요한
 자료는 별도 보관해야 합니다.
 
-같은 부트스트랩은 하루에 한 번 `investing-crawler` 일회성 컨테이너도 실행해
-Google News RSS에서 Investing.com 한국어 뉴스 목록을 Obsidian에 저장합니다.
-수집 실패는 복구 루프를 중단하지 않으며 `/tmp/personal-server-investing-news.log`
-와 부트스트랩 trace 로그에서 확인할 수 있습니다.
 
 ## Expected resource shape
 

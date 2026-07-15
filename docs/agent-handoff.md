@@ -49,8 +49,6 @@
 - N100 override에서는 앱 포트를 `127.0.0.1`에만 바인드함
 - `caddy`는 `80`/`443`을 받아 리버스 프록시와 인증서를 담당함
 - `crawler-worker`는 기본 운영 스택에 포함함
-- `investing-crawler`는 Windows 작업 스케줄러가 필요할 때만 실행하는 일회성 컨테이너임
-- `main` push는 상시 서비스만 재배포하며 `investing-crawler`는 실행하지 않음
 
 ## 5. 보안 및 운영 포인트
 
@@ -65,7 +63,6 @@
 - GitHub Actions의 `Deploy N100`이 성공하면 `portal-web`, `system-agent`, `crawler-worker`, `youtube-memo`, `book-memo`, `caddy`만 재빌드·재기동함.
 - N100 배포는 Windows Runner 서비스가 `.\window` 계정으로 실행되고, WSL2의 `Ubuntu-24.04`에서 Docker를 사용할 수 있어야 함.
 - 수동 배포가 필요하면 `docs/n100-github-auto-deploy.md`의 WSL 명령을 사용함. Windows PowerShell에서 `docker`를 직접 실행하는 방식은 현재 운영 경로가 아님.
-- `investing-crawler`는 자동배포로 시작하지 않으며 Windows 작업 스케줄러 또는 `scripts/investing-news-once.ps1`에서 별도로 실행함.
 
 ## 7. 확인 필요 사항
 

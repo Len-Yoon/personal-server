@@ -38,10 +38,6 @@ jobs:
             requirements: book-memo/requirements.txt
             pythonpath: book-memo
             test_command: python3 -m unittest tests.book_memo.test_book_service
-          - name: investing-crawler
-            requirements: investing_crawler/requirements.txt
-            pythonpath: .
-            test_command: python3 -m unittest tests.test_investing_crawler_config tests.investing_crawler.test_main tests.investing_crawler.test_news_parser tests.investing_crawler.test_obsidian_writer tests.investing_crawler.test_rss_collector
           - name: maintenance
             requirements: ""
             pythonpath: .

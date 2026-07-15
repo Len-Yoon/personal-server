@@ -27,8 +27,6 @@
 - Test: `tests/test_maintenance.py`
 
 **Interfaces:**
-- `prune_obsidian_news()` reads `OBSIDIAN_VAULT_PATH`, `OBSIDIAN_NEWS_DIR`, and `OBSIDIAN_NEWS_RETENTION_DAYS`.
-- CLI accepts `prune-obsidian-news` and includes it in `all`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -41,7 +39,6 @@ Expected: FAIL because `prune_obsidian_news` and the CLI behavior do not exist.
 
 - [ ] **Step 3: Implement the minimal cleanup behavior**
 
-Add a strict `YYYY-MM-DD.md` matcher, validate non-negative retention, resolve the configured vault/news directory, compare the date in the filename with `datetime.now() - timedelta(days=retention)`, unlink only expired matching files, and add the CLI command.
 
 - [ ] **Step 4: Run focused tests and the maintenance tests again**
 
@@ -50,7 +47,6 @@ Expected: PASS.
 
 - [ ] **Step 5: Update environment documentation**
 
-Add `OBSIDIAN_NEWS_RETENTION_DAYS=30` to `.env.example` and document the new maintenance command in `README.md` without changing unrelated sections.
 
 - [ ] **Step 6: Commit the topic**
 

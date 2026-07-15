@@ -2,7 +2,6 @@
 import argparse
 import json
 import os
-import re
 import shutil
 import sqlite3
 from datetime import datetime, timedelta
@@ -15,10 +14,7 @@ BACKUP_ROOT = Path(os.getenv("BACKUP_PATH", DATA_ROOT / "backups"))
 BACKUP_RETENTION_DAYS = int(os.getenv("BACKUP_RETENTION_DAYS", "14"))
 SECURITY_LOG_PATH = Path(os.getenv("SECURITY_LOG_PATH", DATA_ROOT / "logs" / "security-events.txt"))
 SECURITY_LOG_RETENTION_DAYS = int(os.getenv("SECURITY_LOG_RETENTION_DAYS", "30"))
-OBSIDIAN_NEWS_RETENTION_DAYS = int(os.getenv("OBSIDIAN_NEWS_RETENTION_DAYS", "30"))
 NEWS_RETENTION_DAYS = int(os.getenv("NEWS_RETENTION_DAYS", "7"))
-
-OBSIDIAN_NEWS_FILENAME = re.compile(r"^(\d{4}-\d{2}-\d{2})\.md$")
 
 
 def backup() -> None:
@@ -114,36 +110,6 @@ def _parse_archive_datetime(value: object) -> datetime | None:
         return None
 
 
-def prune_obsidian_news() -> list[Path]:
-    retention_days = int(
-        os.getenv("OBSIDIAN_NEWS_RETENTION_DAYS", str(OBSIDIAN_NEWS_RETENTION_DAYS))
-    )
-    if retention_days < 0:
-        raise ValueError("OBSIDIAN_NEWS_RETENTION_DAYS must be non-negative")
-
-    vault_path = os.getenv("OBSIDIAN_VAULT_PATH", "").strip()
-    news_dir = os.getenv("OBSIDIAN_NEWS_DIR", "뉴스/Investing").strip()
-    if not vault_path:
-        return []
-
-    target_dir = Path(vault_path) / Path(news_dir)
-    if not target_dir.is_dir():
-        return []
-
-    cutoff = datetime.now().date() - timedelta(days=retention_days)
-    removed: list[Path] = []
-    for path in target_dir.iterdir():
-        match = OBSIDIAN_NEWS_FILENAME.fullmatch(path.name)
-        if not match or not path.is_file():
-            continue
-        file_date = datetime.strptime(match.group(1), "%Y-%m-%d").date()
-        if file_date < cutoff:
-            path.unlink()
-            removed.append(path)
-            print(f"removed old Obsidian news: {path}")
-    return removed
-
-
 def _backup_sqlite(source: Path, destination: Path) -> None:
     source_uri = f"file:{source}?mode=ro"
     with sqlite3.connect(source_uri, uri=True) as source_db:
@@ -183,7 +149,6 @@ def main() -> None:
             "backup",
             "prune-logs",
             "prune-news",
-            "prune-obsidian-news",
             "all",
         ],
     )
@@ -195,8 +160,6 @@ def main() -> None:
         prune_logs()
     if args.command in {"prune-news", "all"}:
         prune_news_archive()
-    if args.command in {"prune-obsidian-news", "all"}:
-        prune_obsidian_news()
 
 
 if __name__ == "__main__":
