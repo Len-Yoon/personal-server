@@ -10,7 +10,7 @@ from app.crawlers.news_quality import filter_high_quality_articles
 
 SOURCE_LIMIT_RATIO = {
     "INVESTING": ("investing",),
-    "WORLD": ("google", "reuters", "ap", "marketwatch"),
+    "WORLD": ("investing",),
     "NASDAQ": ("google", "reuters", "ap", "marketwatch"),
     "GOLD": ("google", "reuters", "ap", "marketwatch"),
     "HK50": ("google", "reuters", "ap", "marketwatch"),
@@ -26,7 +26,7 @@ KOREAN_SOURCE_LIMIT_RATIO = {
 
 def collect_news_from_sources(category: str, limit: int = 24) -> list[dict]:
     category = category.upper()
-    if category == "INVESTING":
+    if category in {"INVESTING", "WORLD"}:
         return _dedupe_articles(
             _collect_from_source("investing", category, max(limit, 8))
         )[:limit]

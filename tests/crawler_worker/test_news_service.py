@@ -42,7 +42,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 news_archive = self.reload_news_archive()
 
                 with patch(
-                    "app.services.news_sources.search_google_news_rss",
+                    "app.services.news_sources.search_investing_news_rss",
                     return_value=[
                         {
                             "url": "https://example.com/a",
@@ -51,7 +51,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                             "source": "Reuters",
                         }
                     ],
-                ) as mocked_google, patch(
+                ) as mocked_investing, patch(
                     "app.services.news_sources.search_reuters_news_rss",
                     return_value=[],
                 ) as mocked_reuters, patch(
@@ -66,7 +66,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
 
         self.assertFalse(first["cache"]["hit"])
         self.assertTrue(second["cache"]["hit"])
-        self.assertEqual(mocked_google.call_count, 1)
+        self.assertEqual(mocked_investing.call_count, 1)
         self.assertEqual(mocked_reuters.call_count, 0)
         self.assertEqual(mocked_ap.call_count, 0)
         self.assertEqual(mocked_marketwatch.call_count, 0)
