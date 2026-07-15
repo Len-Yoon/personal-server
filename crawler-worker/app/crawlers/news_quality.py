@@ -38,6 +38,9 @@ def filter_high_quality_articles(
         seen_urls.add(url)
         seen_titles.add(title_key)
 
+        if not _is_category_relevant(title, summary, category):
+            continue
+
         score = _score_article(title=title, summary=summary, source=source, category=category)
 
         if score < 3:
@@ -111,6 +114,29 @@ def _matches_category(title: str, summary: str, category: str) -> bool:
             return True
 
     return False
+
+
+def _is_category_relevant(title: str, summary: str, category: str) -> bool:
+    category = category.upper()
+    if category not in {"KR_IT", "KR_AI", "KR_STACK"}:
+        return True
+
+    haystack = f"{title} {summary}".casefold()
+    if category == "KR_IT":
+        overlap_keywords = (
+            "ai",
+            "인공지능",
+            "llm",
+            "생성형",
+            "react",
+            "next.js",
+            "fastapi",
+            "kubernetes",
+        )
+        if any(keyword in haystack for keyword in overlap_keywords):
+            return False
+
+    return _matches_category(title, summary, category)
 
 
 def _contains_junk(text: str) -> bool:

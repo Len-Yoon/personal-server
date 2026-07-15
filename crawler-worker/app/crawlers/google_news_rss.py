@@ -9,9 +9,9 @@ GOOGLE_NEWS_QUERIES = {
     "GOLD": "gold prices OR gold futures OR dollar OR inflation",
     "HK50": "hang seng OR hong kong stocks OR china markets",
     "KR_WORLD": "세계 뉴스 OR 글로벌 경제 OR 금리 OR 환율 OR 인플레이션",
-    "KR_IT": "IT 동향 OR 클라우드 OR 개발자 도구 OR 플랫폼 엔지니어링 OR 소프트웨어",
-    "KR_AI": "AI 뉴스 OR 인공지능 OR LLM OR 생성형 AI OR AI 에이전트",
-    "KR_STACK": "React OR Next.js OR FastAPI OR Spring Boot OR TypeScript OR Kubernetes",
+    "KR_IT": "(클라우드 OR 플랫폼 엔지니어링 OR 개발자 도구 OR 소프트웨어 OR DevOps OR 데이터센터 OR 사이버보안) -AI -인공지능 -LLM -생성형 -React -Next.js -FastAPI -Kubernetes",
+    "KR_AI": "(AI OR 인공지능 OR LLM OR 생성형 AI OR AI 에이전트 OR 멀티모달 OR 머신러닝) -React -Next.js -FastAPI -Kubernetes",
+    "KR_STACK": "(React OR Next.js OR TypeScript OR FastAPI OR Spring Boot OR Kubernetes OR Rust OR Go) (릴리즈 OR 버전 OR 업데이트 OR 프레임워크 OR 라이브러리 OR 개발자)",
 }
 
 
