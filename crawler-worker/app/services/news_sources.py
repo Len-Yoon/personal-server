@@ -61,6 +61,9 @@ def collect_korean_news_from_sources(category: str, limit: int = 24) -> list[dic
     for source_name in source_order:
         collected.extend(_collect_korean_source(source_name, category, per_source_limit))
 
+        if category == "KR_WORLD":
+            return _dedupe_articles(collected)[:limit]
+
         filtered = filter_high_quality_articles(
             _dedupe_articles(collected),
             category=category,

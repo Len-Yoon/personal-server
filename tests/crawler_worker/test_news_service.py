@@ -180,6 +180,35 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         mocked_investing.assert_called_once_with(limit=8)
         mocked_google.assert_not_called()
 
+    def test_collect_korean_world_news_keeps_investing_items_without_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "news_archive.json"
+            with patch.dict(
+                "os.environ",
+                {"NEWS_ARCHIVE_PATH": str(archive_path)},
+                clear=False,
+            ):
+                news_archive = self.reload_news_archive()
+
+                with patch(
+                    "app.services.news_sources.search_investing_news_rss",
+                    return_value=[
+                        {
+                            "url": "https://example.com/investing-stock",
+                            "title": "타슬리 제약 주가, 오늘 급등 이유는?",
+                            "title_ko": "타슬리 제약 주가, 오늘 급등 이유는?",
+                            "summary": "",
+                            "source": "Investing.com 한국어",
+                        }
+                    ],
+                ):
+                    result = news_archive.collect_korean_news(
+                        "kr_world", limit=1, force_refresh=True
+                    )
+
+        self.assertEqual(len(result["articles"]), 1)
+        self.assertEqual(result["articles"][0]["title"], "타슬리 제약 주가, 오늘 급등 이유는?")
+
     def test_collect_market_news_uses_reuters_when_google_empty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             archive_path = Path(tmpdir) / "news_archive.json"
