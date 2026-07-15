@@ -1,100 +1,108 @@
 from __future__ import annotations
 
-import re
-from html.parser import HTMLParser
+import json
+import ssl
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
-VELOG_TRENDING_URLS = (
-    "https://velog.io/trending/week",
-    "https://beta.velog.io/trending/week",
+VELOG_TRENDING_API = "https://cache.velcdn.com/api/trending-posts"
+REQUEST_TIMEOUT_SECONDS = 20
+STACK_KEYWORDS = (
+    "react",
+    "next.js",
+    "nextjs",
+    "typescript",
+    "javascript",
+    "python",
+    "fastapi",
+    "django",
+    "spring",
+    "java",
+    "kotlin",
+    "kubernetes",
+    "docker",
+    "aws",
+    "클라우드",
+    "프론트",
+    "백엔드",
+    "api",
+    "서버",
+    "웹 개발",
+    "데이터베이스",
+    "개발자 도구",
 )
-POST_URL_PATTERN = re.compile(r"^https?://(?:www\.)?velog\.io/@[^/]+/[^/?#]+$")
-
-
-class _VelogLinkParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.posts: list[tuple[str, str]] = []
-        self._current_url = ""
-        self._current_text: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag != "a" or self._current_url:
-            return
-        attributes = dict(attrs)
-        url = str(attributes.get("href") or "")
-        if url.startswith("/"):
-            url = f"https://velog.io{url}"
-        if POST_URL_PATTERN.match(url):
-            self._current_url = url
-            self._current_text = []
-
-    def handle_data(self, data: str) -> None:
-        if self._current_url:
-            self._current_text.append(data)
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag != "a" or not self._current_url:
-            return
-        title = " ".join("".join(self._current_text).split())
-        if title:
-            self.posts.append((self._current_url, title))
-        self._current_url = ""
-        self._current_text = []
 
 
 def search_velog_trending(limit: int = 20) -> list[dict]:
-    for url in VELOG_TRENDING_URLS:
-        html = _fetch(url)
-        if not html:
-            continue
-        posts = _VelogLinkParser()
-        posts.feed(html)
-        articles = _to_articles(posts.posts, limit)
-        if articles:
-            return articles
-    return []
+    payload = _fetch_trending_posts(limit=max(limit * 3, 30))
+    articles = [
+        _to_article(post)
+        for post in payload
+        if _is_stack_related(post)
+    ]
+    return articles[:limit]
 
 
-def _fetch(url: str) -> str:
+def _fetch_trending_posts(limit: int) -> list[dict]:
+    url = f"{VELOG_TRENDING_API}?timeframe=week&limit={min(limit, 50)}&offset=0"
     request = Request(
         url,
         headers={
-            "Accept": "text/html,application/xhtml+xml",
+            "Accept": "application/json",
             "User-Agent": "personal-server-news/1.0",
         },
     )
     try:
-        with urlopen(request, timeout=8) as response:
-            return response.read().decode("utf-8", errors="replace")
+        with urlopen(
+            request,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+            context=_ssl_context(),
+        ) as response:
+            payload = json.load(response)
     except Exception:
-        return ""
+        return []
+    return payload if isinstance(payload, list) else []
 
 
-def _to_articles(posts: list[tuple[str, str]], limit: int) -> list[dict]:
-    articles: list[dict] = []
-    seen: set[str] = set()
-    for url, title in posts:
-        if url in seen:
-            continue
-        seen.add(url)
-        articles.append(
-            {
-                "category": "KR_STACK",
-                "title": title,
-                "title_ko": title,
-                "title_original": title,
-                "url": url,
-                "source": "Velog",
-                "provider": "Velog Trending",
-                "published_at": "",
-                "published_at_sort": "",
-                "summary": "벨로그 주간 트렌딩 개발 글",
-                "topics": ["개발 트렌드"],
-                "source_status": "velog",
-            }
-        )
-        if len(articles) >= limit:
-            break
-    return articles
+def _ssl_context() -> ssl.SSLContext:
+    try:
+        import certifi
+    except ImportError:
+        return ssl.create_default_context()
+    return ssl.create_default_context(cafile=certifi.where())
+
+
+def _is_stack_related(post: dict) -> bool:
+    searchable = " ".join(
+        str(post.get(field, ""))
+        for field in ("title", "shortDescription")
+    ).casefold()
+    return any(keyword in searchable for keyword in STACK_KEYWORDS)
+
+
+def _to_article(post: dict) -> dict:
+    user = post.get("user") or {}
+    username = str(user.get("username") or "velog")
+    slug = str(post.get("urlSlug") or post.get("id") or "post")
+    url = f"https://velog.io/@{quote(username)}/{quote(slug)}"
+    title = str(post.get("title") or "벨로그 트렌딩 글")
+    description = str(post.get("shortDescription") or "벨로그 주간 트렌딩 개발 글")
+    likes = int(post.get("likes") or 0)
+    comments = int(post.get("comments") or 0)
+    published_at = str(post.get("releasedAt") or post.get("updatedAt") or "")
+
+    return {
+        "category": "KR_STACK",
+        "title": title,
+        "title_ko": title,
+        "title_original": title,
+        "url": url,
+        "source": "Velog",
+        "provider": "Velog Trending API",
+        "published_at": published_at,
+        "published_at_sort": published_at,
+        "summary": f"{description} · 좋아요 {likes} · 댓글 {comments}",
+        "topics": ["개발 트렌드"],
+        "source_status": "velog",
+    }

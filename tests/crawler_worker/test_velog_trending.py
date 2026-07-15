@@ -1,5 +1,6 @@
 import importlib
 import unittest
+from unittest.mock import patch
 
 from tests._test_support import prepare_service_import
 
@@ -11,35 +12,45 @@ class VelogTrendingTests(unittest.TestCase):
 
         return importlib.reload(velog_trending)
 
-    def test_extracts_velog_post_links_and_titles(self):
-        module = self.load_module()
-        html = """
-        <a href="/@dev/react-server">React 서버 컴포넌트 정리</a>
-        <a href="https://velog.io/@dev/ai-agent">AI Agent 만들기</a>
-        <a href="/about">소개</a>
-        """
-
-        parser = module._VelogLinkParser()
-        parser.feed(html)
-        articles = module._to_articles(parser.posts, limit=10)
-
-        self.assertEqual(len(articles), 2)
-        self.assertEqual(articles[0]["source"], "Velog")
-        self.assertEqual(articles[0]["source_status"], "velog")
-        self.assertEqual(articles[0]["title"], "React 서버 컴포넌트 정리")
-
-    def test_deduplicates_trending_posts(self):
+    def test_converts_api_post_to_stack_article(self):
         module = self.load_module()
 
-        articles = module._to_articles(
-            [
-                ("https://velog.io/@dev/post", "첫 번째 제목"),
-                ("https://velog.io/@dev/post", "중복 제목"),
-            ],
-            limit=10,
+        article = module._to_article(
+            {
+                "title": "React 서버 컴포넌트 정리",
+                "urlSlug": "react-server-components",
+                "shortDescription": "React와 서버 컴포넌트 핵심 정리",
+                "releasedAt": "2026-07-15T01:00:00.000Z",
+                "likes": 42,
+                "comments": 7,
+                "user": {"username": "dev-user"},
+            }
         )
 
+        self.assertEqual(article["source"], "Velog")
+        self.assertEqual(article["source_status"], "velog")
+        self.assertEqual(article["url"], "https://velog.io/@dev-user/react-server-components")
+        self.assertIn("좋아요 42", article["summary"])
+
+    def test_filters_trending_posts_to_stack_related_titles(self):
+        module = self.load_module()
+
+        self.assertTrue(module._is_stack_related({"title": "FastAPI 배포 방법"}))
+        self.assertFalse(module._is_stack_related({"title": "개발자의 이직 회고"}))
+
+    def test_fetches_weekly_trending_api_and_returns_stack_posts(self):
+        module = self.load_module()
+        posts = [
+            {"title": "Next.js 캐싱 전략", "urlSlug": "next-cache", "user": {"username": "dev"}},
+            {"title": "일상 회고", "urlSlug": "daily", "user": {"username": "dev"}},
+        ]
+
+        with patch.object(module, "_fetch_trending_posts", return_value=posts) as mocked_fetch:
+            articles = module.search_velog_trending(limit=5)
+
         self.assertEqual(len(articles), 1)
+        self.assertEqual(articles[0]["title"], "Next.js 캐싱 전략")
+        mocked_fetch.assert_called_once_with(limit=30)
 
 
 if __name__ == "__main__":
