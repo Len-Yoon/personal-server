@@ -181,7 +181,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         mocked_investing.assert_called_once_with(limit=8)
         mocked_google.assert_not_called()
 
-    def test_collect_korean_stack_news_prefers_github_over_google(self):
+    def test_collect_korean_stack_news_prefers_reddit_over_google(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             archive_path = Path(tmpdir) / "news_archive.json"
             with patch.dict(
@@ -195,18 +195,18 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                     "app.services.news_sources.search_velog_trending",
                     return_value=[],
                 ), patch(
-                    "app.services.news_sources.search_github_stack_repositories",
+                    "app.services.news_sources.search_reddit_stack_posts",
                     return_value=[
                         {
                             "category": "KR_STACK",
-                            "url": "https://github.com/vercel/next.js",
-                            "title": "vercel/next.js",
-                            "summary": "React Framework · TypeScript · stars 130,000",
-                            "source": "GitHub",
-                            "source_status": "github",
+                            "url": "https://www.reddit.com/r/reactjs/comments/abc/post/",
+                            "title": "React Server Components discussion",
+                            "summary": "Reddit hot post",
+                            "source": "Reddit",
+                            "source_status": "reddit",
                         }
                     ],
-                ) as mocked_github, patch(
+                ) as mocked_reddit, patch(
                     "app.services.news_sources.search_google_news_rss",
                     return_value=[],
                 ) as mocked_google:
@@ -215,12 +215,12 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                     )
 
         self.assertEqual(result["category"], "KR_STACK")
-        self.assertEqual(result["articles"][0]["source"], "GitHub")
-        self.assertEqual(result["source_status"], "github")
-        mocked_github.assert_called_once_with(limit=8)
+        self.assertEqual(result["articles"][0]["source"], "Reddit")
+        self.assertEqual(result["source_status"], "reddit")
+        mocked_reddit.assert_called_once_with(limit=8)
         mocked_google.assert_not_called()
 
-    def test_collect_korean_trend_prefers_velog_over_github(self):
+    def test_collect_korean_trend_prefers_velog_over_reddit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             archive_path = Path(tmpdir) / "news_archive.json"
             with patch.dict(
@@ -245,9 +245,9 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                         }
                     ],
                 ) as mocked_velog, patch(
-                    "app.services.news_sources.search_github_stack_repositories",
+                    "app.services.news_sources.search_reddit_stack_posts",
                     return_value=[],
-                ) as mocked_github:
+                ) as mocked_reddit:
                     result = news_archive.collect_korean_news(
                         "kr_stack", limit=1, force_refresh=True
                     )
@@ -255,7 +255,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         self.assertEqual(result["source_status"], "velog")
         self.assertEqual(result["articles"][0]["source"], "Velog")
         mocked_velog.assert_called_once_with(limit=8)
-        mocked_github.assert_not_called()
+        mocked_reddit.assert_not_called()
 
     def test_collect_korean_world_news_keeps_investing_items_without_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:

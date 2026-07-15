@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from app.crawlers.ap_news_rss import search_ap_news_rss
 from app.crawlers.google_news_rss import filter_korean_articles, search_google_news_rss
-from app.crawlers.github_stack import search_github_stack_repositories
 from app.crawlers.investing_news_rss import search_investing_news_rss
 from app.crawlers.marketwatch_news_rss import search_marketwatch_news_rss
+from app.crawlers.reddit_stack import search_reddit_stack_posts
 from app.crawlers.reuters_news_rss import search_reuters_news_rss
 from app.crawlers.velog_trending import search_velog_trending
 from app.crawlers.news_quality import filter_high_quality_articles
@@ -22,7 +22,7 @@ KOREAN_SOURCE_LIMIT_RATIO = {
     "KR_WORLD": ("investing",),
     "KR_IT": ("google",),
     "KR_AI": ("google",),
-    "KR_STACK": ("velog", "github", "google"),
+    "KR_STACK": ("velog", "reddit", "google"),
 }
 
 
@@ -65,7 +65,7 @@ def collect_korean_news_from_sources(category: str, limit: int = 24) -> list[dic
 
         if category == "KR_WORLD":
             return _dedupe_articles(collected)[:limit]
-        if category == "KR_STACK" and source_name in {"velog", "github"} and collected:
+        if category == "KR_STACK" and source_name in {"velog", "reddit"} and collected:
             return _dedupe_articles(collected)[:limit]
 
         filtered = filter_high_quality_articles(
@@ -104,8 +104,8 @@ def _collect_from_source(source_name: str, category: str, limit: int) -> list[di
 def _collect_korean_source(source_name: str, category: str, limit: int) -> list[dict]:
     if source_name == "velog":
         return search_velog_trending(limit=limit)
-    if source_name == "github":
-        return search_github_stack_repositories(limit=limit)
+    if source_name == "reddit":
+        return search_reddit_stack_posts(limit=limit)
     if source_name == "google":
         articles = search_google_news_rss(category=category, limit=limit)
         return filter_korean_articles(articles)
