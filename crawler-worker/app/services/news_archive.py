@@ -7,6 +7,7 @@ from threading import Lock, Thread
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.crawlers.rss_news import _html_to_text
 from app.services.news_sources import collect_korean_news_from_sources, collect_news_from_sources
@@ -18,6 +19,7 @@ RETENTION_DAYS = int(os.getenv("NEWS_RETENTION_DAYS", "7"))
 
 _ARCHIVE_WRITE_LOCK = Lock()
 _REFRESH_LOCK = Lock()
+_REFRESH_WORK_LOCK = Lock()
 _REFRESHING_CATEGORIES: set[str] = set()
 
 
@@ -79,7 +81,9 @@ def collect_market_news(
     archive["updated_at"] = _iso(now)
     _save_archive(archive)
 
-    category_articles = _get_category_articles(archive["articles"], category)
+    category_articles = _get_category_articles(
+        archive["articles"], category, today_only=True
+    )
 
     return _build_result(
         category=category,
@@ -103,7 +107,9 @@ def collect_korean_news(
         archive["updated_at"] = _iso(now)
         _save_archive(archive)
 
-    category_articles = _get_category_articles(archive["articles"], category)
+    category_articles = _get_category_articles(
+        archive["articles"], category, today_only=True
+    )
     latest_collected_at = _latest_collected_at(category_articles)
 
     if (
@@ -165,13 +171,26 @@ def collect_korean_news(
     )
 
 
-def list_recent_news(query: str = "", limit: int = 50) -> list[dict[str, Any]]:
+def list_recent_news(
+    query: str = "",
+    limit: int = 50,
+    korean_only: bool = False,
+    today_only: bool = False,
+) -> list[dict[str, Any]]:
     archive = _load_archive()
     archive, purged = _purge_archive(archive, _now())
     if purged:
         archive["updated_at"] = _iso(_now())
         _save_archive(archive)
     articles = _dedupe_by_url(archive["articles"])
+    if korean_only:
+        articles = [
+            article
+            for article in articles
+            if str(article.get("category", "")).upper().startswith("KR_")
+        ]
+    if today_only:
+        articles = [article for article in articles if _is_today_article(article)]
 
     if query.strip():
         keyword = query.strip().casefold()
@@ -309,13 +328,14 @@ def _archive_path() -> Path:
 
 def _schedule_refresh(category: str, limit: int, korean: bool = False) -> None:
     with _REFRESH_LOCK:
-        if category in _REFRESHING_CATEGORIES:
+        if category in _REFRESHING_CATEGORIES or _REFRESH_WORK_LOCK.locked():
             return
         _REFRESHING_CATEGORIES.add(category)
 
     def _run() -> None:
         try:
-            _refresh_category(category=category, limit=limit, korean=korean)
+            with _REFRESH_WORK_LOCK:
+                _refresh_category(category=category, limit=limit, korean=korean)
         finally:
             with _REFRESH_LOCK:
                 _REFRESHING_CATEGORIES.discard(category)
@@ -423,13 +443,29 @@ def _dedupe_by_url(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _get_category_articles(
     articles: list[dict[str, Any]],
     category: str,
+    today_only: bool = False,
 ) -> list[dict[str, Any]]:
     category_articles = [
         article
         for article in articles
         if str(article.get("category", "")).upper() == category
+        and (not today_only or _is_today_article(article))
     ]
     return _dedupe_by_url(category_articles)
+
+
+def _is_today_article(article: dict[str, Any]) -> bool:
+    value = (
+        article.get("published_at_sort")
+        or article.get("published_at")
+        or article.get("collected_at")
+    )
+    parsed = _parse_dt(str(value or ""))
+    if parsed is None:
+        return False
+    korea_now = _now().astimezone(ZoneInfo("Asia/Seoul"))
+    korea_date = parsed.astimezone(ZoneInfo("Asia/Seoul")).date()
+    return korea_date == korea_now.date()
 
 
 def _attach_archive_metadata(

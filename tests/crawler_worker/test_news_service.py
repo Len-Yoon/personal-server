@@ -141,6 +141,44 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         mocked_ap.assert_not_called()
         mocked_marketwatch.assert_not_called()
 
+    def test_collect_korean_world_news_uses_investing_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "news_archive.json"
+            with patch.dict(
+                "os.environ",
+                {
+                    "NEWS_ARCHIVE_PATH": str(archive_path),
+                    "NEWS_REFRESH_INTERVAL_SECONDS": "3600",
+                    "NEWS_RETENTION_DAYS": "7",
+                },
+                clear=False,
+            ):
+                news_archive = self.reload_news_archive()
+
+                with patch(
+                    "app.services.news_sources.search_investing_news_rss",
+                    return_value=[
+                        {
+                            "url": "https://example.com/world",
+                            "title": "미국 금리와 세계 경제 동향",
+                            "title_ko": "미국 금리와 세계 경제 동향",
+                            "summary": "세계 경제 뉴스",
+                            "source": "Investing.com 한국어",
+                        }
+                    ],
+                ) as mocked_investing, patch(
+                    "app.services.news_sources.search_google_news_rss",
+                    return_value=[],
+                ) as mocked_google:
+                    result = news_archive.collect_korean_news(
+                        "kr_world", limit=1, force_refresh=True
+                    )
+
+        self.assertEqual(result["category"], "KR_WORLD")
+        self.assertEqual(len(result["articles"]), 1)
+        mocked_investing.assert_called_once_with(limit=8)
+        mocked_google.assert_not_called()
+
     def test_collect_market_news_uses_reuters_when_google_empty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             archive_path = Path(tmpdir) / "news_archive.json"
@@ -365,6 +403,33 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 recent = news_archive.list_recent_news(limit=10)
 
         self.assertEqual([item["url"] for item in recent], ["https://example.com/b", "https://example.com/a"])
+
+    def test_list_recent_news_can_filter_to_korean_categories(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "news_archive.json"
+            with patch.dict(
+                "os.environ",
+                {"NEWS_ARCHIVE_PATH": str(archive_path)},
+                clear=False,
+            ):
+                news_archive = self.reload_news_archive()
+                archive_path.parent.mkdir(parents=True, exist_ok=True)
+                archive_path.write_text(
+                    """
+                    {
+                      "updated_at": "2026-07-09T00:00:00+00:00",
+                      "articles": [
+                        {"category": "KR_IT", "url": "https://example.com/kr", "collected_at": "2026-07-09T00:00:00+00:00"},
+                        {"category": "NASDAQ", "url": "https://example.com/market", "collected_at": "2026-07-09T01:00:00+00:00"}
+                      ]
+                    }
+                    """.strip(),
+                    encoding="utf-8",
+                )
+
+                recent = news_archive.list_recent_news(korean_only=True)
+
+        self.assertEqual([item["category"] for item in recent], ["KR_IT"])
 
 
 if __name__ == "__main__":

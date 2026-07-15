@@ -17,7 +17,7 @@ SOURCE_LIMIT_RATIO = {
 }
 
 KOREAN_SOURCE_LIMIT_RATIO = {
-    "KR_WORLD": ("google",),
+    "KR_WORLD": ("investing",),
     "KR_IT": ("google",),
     "KR_AI": ("google",),
     "KR_STACK": ("google",),
@@ -98,6 +98,8 @@ def _collect_korean_source(source_name: str, category: str, limit: int) -> list[
     if source_name == "google":
         articles = search_google_news_rss(category=category, limit=limit)
         return filter_korean_articles(articles)
+    if source_name == "investing":
+        return search_investing_news_rss(limit=limit)
     return []
 
 

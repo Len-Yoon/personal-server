@@ -15,7 +15,7 @@ class CrawlerWorkerNewsRouteTests(unittest.TestCase):
 
         return importlib.reload(main).app
 
-    def test_home_page_includes_korean_news_entry(self):
+    def test_home_page_renders_korean_topic_cards(self):
         app = self.load_app()
         from fastapi.testclient import TestClient
 
@@ -23,22 +23,21 @@ class CrawlerWorkerNewsRouteTests(unittest.TestCase):
             response = client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("한국어 뉴스", response.text)
-        self.assertIn("/news", response.text)
-
-    def test_korean_news_home_renders_topic_cards(self):
-        app = self.load_app()
-        from fastapi.testclient import TestClient
-
-        with TestClient(app) as client:
-            response = client.get("/news")
-
-        self.assertEqual(response.status_code, 200)
         self.assertIn("IT 동향", response.text)
         self.assertIn("AI 뉴스", response.text)
         self.assertIn("인기 스택", response.text)
 
-    def test_korean_category_route_uses_korean_collector(self):
+    def test_news_alias_redirects_to_main_news_page(self):
+        app = self.load_app()
+        from fastapi.testclient import TestClient
+
+        with TestClient(app) as client:
+            response = client.get("/news", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 307)
+        self.assertEqual(response.headers["location"], "/")
+
+    def test_category_route_uses_korean_collector(self):
         app = self.load_app()
         from fastapi.testclient import TestClient
 
@@ -53,7 +52,7 @@ class CrawlerWorkerNewsRouteTests(unittest.TestCase):
             }
 
             with TestClient(app) as client:
-                response = client.get("/news/category?category=KR_IT")
+                response = client.get("/category?category=KR_IT")
 
         self.assertEqual(response.status_code, 200)
         mocked_collect.assert_called_once_with(category="KR_IT", limit=24, force_refresh=False)

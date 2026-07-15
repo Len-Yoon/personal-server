@@ -2,6 +2,7 @@ import importlib
 import sys
 import types
 import unittest
+from datetime import date
 
 from tests._test_support import prepare_service_import
 
@@ -61,6 +62,16 @@ class RssNewsTests(unittest.TestCase):
 
         self.assertEqual(len(filtered), 1)
         self.assertEqual(filtered[0]["title"], "AI 업계, 한국어 기사")
+
+    def test_identifies_articles_published_today_in_korea(self):
+        rss_news = self.reload_rss_news()
+
+        self.assertTrue(
+            rss_news._is_today("2026-07-15T00:30:00+00:00", today=date(2026, 7, 15))
+        )
+        self.assertFalse(
+            rss_news._is_today("2026-07-14T14:59:59+00:00", today=date(2026, 7, 15))
+        )
 
 
 if __name__ == "__main__":

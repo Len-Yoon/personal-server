@@ -7,6 +7,7 @@ from urllib.request import Request, urlopen
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote_plus
+from zoneinfo import ZoneInfo
 
 
 REQUEST_TIMEOUT_SECONDS = 8
@@ -24,6 +25,7 @@ def search_rss_news(
     provider_name: str,
     limit: int = 20,
     source_filter: str = "",
+    today_only: bool = False,
 ) -> list[dict]:
     try:
         import feedparser
@@ -57,6 +59,8 @@ def search_rss_news(
                 or getattr(entry, "description", "")
                 or ""
             )
+            if today_only and not _is_today(published):
+                continue
             entry_source = source_name
             if hasattr(entry, "source") and hasattr(entry.source, "title"):
                 entry_source = entry.source.title
@@ -118,6 +122,34 @@ def _parse_published_at(value: str) -> str:
         parsed = parsed.replace(tzinfo=timezone.utc)
 
     return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _is_today(value: str, today=None) -> bool:
+    parsed_value = _parse_published_datetime(value)
+    if parsed_value is None:
+        return False
+
+    korea_date = parsed_value.astimezone(ZoneInfo("Asia/Seoul")).date()
+    if today is None:
+        today = datetime.now(ZoneInfo("Asia/Seoul")).date()
+    return korea_date == today
+
+
+def _parse_published_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(value)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _dedupe_articles(articles: list[dict]) -> list[dict]:

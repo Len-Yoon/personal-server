@@ -31,6 +31,7 @@ def search_google_news_rss(
         provider_name="Google News RSS",
         limit=limit,
         source_filter=source_filter,
+        today_only=True,
     )[:limit]
 
 
