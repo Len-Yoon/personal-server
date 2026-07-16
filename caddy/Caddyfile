@@ -19,6 +19,11 @@ len.pe.kr {
     reverse_proxy portal-web:8000
 }
 
+portfolio.len.pe.kr {
+    import common_tls
+    reverse_proxy portal-web:8000
+}
+
 file.len.pe.kr {
     import common_tls
     reverse_proxy portal-web:8000

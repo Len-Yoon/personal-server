@@ -1,0 +1,5 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>{{ title }}</title><link rel="stylesheet" href="/static/css/portfolio.css"></head>
+<body><main class="admin-shell"><section class="admin-card"><p class="eyebrow">PRIVATE</p><h1>포트폴리오 관리자</h1><p>이력과 프로젝트 내용을 수정하려면 인증이 필요합니다.</p>{% if error %}<p class="form-error">{{ error }}</p>{% endif %}<form method="post" action="/admin/login"><label for="password">관리자 비밀번호</label><input id="password" name="password" type="password" autocomplete="current-password" required autofocus><button type="submit">로그인</button></form></section></main></body>
+</html>

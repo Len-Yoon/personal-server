@@ -1,0 +1,5 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>{{ title }}</title><link rel="stylesheet" href="/static/css/portfolio.css"></head>
+<body><main class="editor-shell"><header><p class="eyebrow">PRIVATE ADMIN</p><h1>포트폴리오 편집</h1><p>Markdown으로 작성한 뒤 저장하면 공개 페이지에 반영됩니다.</p></header><form method="post" action="/admin/save"><label for="content">포트폴리오 Markdown</label><textarea id="content" name="content" rows="24" spellcheck="false">{{ content }}</textarea><button type="submit">저장</button></form><section class="preview"><h2>현재 미리보기</h2><article class="portfolio-content">{{ preview }}</article></section></main></body>
+</html>

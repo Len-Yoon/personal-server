@@ -19,6 +19,7 @@ from app.services.security import (
     security_status,
 )
 from app.services.system_status import get_dashboard_status, get_service_health
+from app.routers.portfolio import is_portfolio_host, render_public_portfolio
 
 router = APIRouter()
 templates = Jinja2Templates(directory=Path(__file__).resolve().parents[1] / "templates")
@@ -27,6 +28,8 @@ templates = Jinja2Templates(directory=Path(__file__).resolve().parents[1] / "tem
 @router.get("/")
 def dashboard(request: Request, q: str = ""):
     host = _request_host(request)
+    if is_portfolio_host(request):
+        return render_public_portfolio(request)
     local_mode = _is_local_host(host)
     base_urls = service_base_urls(host)
     if host == _configured_host("FILES_HOSTNAME") or host.startswith("file."):

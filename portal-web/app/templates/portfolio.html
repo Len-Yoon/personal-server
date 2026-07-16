@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="경력과 개인 프로젝트를 정리한 포트폴리오">
+    <title>{{ title }}</title>
+    <link rel="stylesheet" href="/static/css/portfolio.css">
+</head>
+<body>
+<main class="portfolio-shell">
+    {% if has_content %}
+    <article class="portfolio-content">{{ content }}</article>
+    {% else %}
+    <section class="portfolio-empty">
+        <p class="eyebrow">PORTFOLIO</p>
+        <h1>포트폴리오를 준비하고 있습니다.</h1>
+        <p>경력과 개인 프로젝트 정보를 곧 공개합니다.</p>
+    </section>
+    {% endif %}
+</main>
+</body>
+</html>

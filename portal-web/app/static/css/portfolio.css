@@ -1,0 +1,26 @@
+:root { --ink: #172033; --muted: #64748b; --line: #dbe4ef; --accent: #2563eb; --paper: #fff; --wash: #f7f9fc; }
+* { box-sizing: border-box; }
+body { margin: 0; color: var(--ink); background: var(--wash); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Pretendard", sans-serif; line-height: 1.72; }
+.portfolio-shell, .editor-shell { width: min(920px, calc(100% - 40px)); margin: 0 auto; padding: 80px 0; }
+.portfolio-content, .portfolio-empty, .admin-card, .editor-shell form, .preview { background: var(--paper); border: 1px solid var(--line); border-radius: 18px; box-shadow: 0 14px 38px rgba(15, 23, 42, .06); }
+.portfolio-content { padding: clamp(30px, 6vw, 70px); }
+.portfolio-content h1 { font-size: clamp(2rem, 6vw, 3.5rem); line-height: 1.15; margin: 0 0 20px; letter-spacing: -.04em; }
+.portfolio-content h2 { margin-top: 54px; padding-top: 20px; border-top: 1px solid var(--line); font-size: 1.5rem; }
+.portfolio-content h3 { margin-top: 30px; font-size: 1.15rem; }
+.portfolio-content a { color: var(--accent); font-weight: 700; text-underline-offset: 3px; }
+.portfolio-content code { padding: 2px 6px; border-radius: 5px; background: #eef4ff; }
+.portfolio-empty { padding: 72px 44px; text-align: center; }
+.eyebrow { margin: 0 0 8px; color: var(--accent); font-size: .78rem; font-weight: 800; letter-spacing: .12em; }
+.admin-shell { display: grid; min-height: 100vh; place-items: center; padding: 20px; }
+.admin-card { width: min(430px, 100%); padding: 38px; }
+.admin-card h1, .editor-shell h1 { margin: 0; line-height: 1.25; }
+form { display: grid; gap: 10px; margin-top: 26px; }
+label { font-weight: 700; }
+input, textarea { width: 100%; padding: 12px; border: 1px solid #b8c5d5; border-radius: 8px; color: var(--ink); font: inherit; }
+textarea { resize: vertical; line-height: 1.55; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+button { width: fit-content; padding: 11px 18px; border: 0; border-radius: 8px; color: white; background: var(--accent); font: inherit; font-weight: 800; cursor: pointer; }
+.form-error { color: #b91c1c; font-weight: 700; }
+.preview { margin-top: 32px; padding: 28px; }
+.preview h2 { margin-top: 0; }
+.preview .portfolio-content { padding: 0; border: 0; box-shadow: none; }
+@media (max-width: 600px) { .portfolio-shell, .editor-shell { width: min(100% - 24px, 920px); padding: 32px 0; } .portfolio-content, .portfolio-empty, .admin-card { padding: 26px; } }
