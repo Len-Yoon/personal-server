@@ -3,6 +3,7 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +11,10 @@ from tests._test_support import prepare_service_import
 
 
 class CrawlerWorkerNewsServiceTests(unittest.TestCase):
+    @staticmethod
+    def timestamp(**delta):
+        return (datetime.now(timezone.utc) + timedelta(**delta)).isoformat()
+
     def reload_news_archive(self):
         prepare_service_import("crawler-worker")
         import app.services.news_archive as news_archive
@@ -255,6 +260,8 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
             ):
                 news_archive = self.reload_news_archive()
                 archive_path.parent.mkdir(parents=True, exist_ok=True)
+                collected_at = self.timestamp(days=-2)
+                expires_at = self.timestamp(days=1)
                 archive_path.write_text(
                     """
                     {
@@ -270,12 +277,14 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                           "published_at": "",
                           "summary": "",
                           "provider": "Reuters RSS",
-                          "collected_at": "2026-07-08T00:00:00+00:00",
-                          "expires_at": "2026-07-16T00:00:00+00:00"
+                          "collected_at": "{collected_at}",
+                          "expires_at": "{expires_at}"
                         }
                       ]
                     }
-                    """.strip(),
+                    """.replace("{collected_at}", collected_at)
+                    .replace("{expires_at}", expires_at)
+                    .strip(),
                     encoding="utf-8",
                 )
 
@@ -339,6 +348,8 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
             ):
                 news_archive = self.reload_news_archive()
                 archive_path.parent.mkdir(parents=True, exist_ok=True)
+                collected_at = self.timestamp(hours=-1)
+                expires_at = self.timestamp(days=1)
                 archive_path.write_text(
                     """
                     {
@@ -354,12 +365,14 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                           "published_at": "",
                           "summary": "<a href=\\"https://example.com/a\\">내용</a>",
                           "provider": "<font>Reuters RSS</font>",
-                          "collected_at": "2026-07-09T00:00:00+00:00",
-                          "expires_at": "2026-07-16T00:00:00+00:00"
+                          "collected_at": "{collected_at}",
+                          "expires_at": "{expires_at}"
                         }
                       ]
                     }
-                    """.strip(),
+                    """.replace("{collected_at}", collected_at)
+                    .replace("{expires_at}", expires_at)
+                    .strip(),
                     encoding="utf-8",
                 )
 
@@ -385,6 +398,9 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
             ):
                 news_archive = self.reload_news_archive()
                 archive_path.parent.mkdir(parents=True, exist_ok=True)
+                first_collected_at = self.timestamp(hours=-2)
+                second_collected_at = self.timestamp(hours=-1)
+                expires_at = self.timestamp(days=1)
                 archive_path.write_text(
                     """
                     {
@@ -400,8 +416,8 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                           "published_at": "",
                           "summary": "",
                           "provider": "Reuters RSS",
-                          "collected_at": "2026-07-09T00:00:00+00:00",
-                          "expires_at": "2026-07-16T00:00:00+00:00"
+                          "collected_at": "{first_collected_at}",
+                          "expires_at": "{expires_at}"
                         },
                         {
                           "category": "GOLD",
@@ -413,12 +429,15 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                           "published_at": "",
                           "summary": "",
                           "provider": "AP News RSS",
-                          "collected_at": "2026-07-09T01:00:00+00:00",
-                          "expires_at": "2026-07-16T01:00:00+00:00"
+                          "collected_at": "{second_collected_at}",
+                          "expires_at": "{expires_at}"
                         }
                       ]
                     }
-                    """.strip(),
+                    """.replace("{first_collected_at}", first_collected_at)
+                    .replace("{second_collected_at}", second_collected_at)
+                    .replace("{expires_at}", expires_at)
+                    .strip(),
                     encoding="utf-8",
                 )
 
@@ -436,16 +455,17 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
             ):
                 news_archive = self.reload_news_archive()
                 archive_path.parent.mkdir(parents=True, exist_ok=True)
+                collected_at = self.timestamp(hours=-1)
                 archive_path.write_text(
                     """
                     {
                       "updated_at": "2026-07-09T00:00:00+00:00",
                       "articles": [
-                        {"category": "KR_IT", "url": "https://example.com/kr", "collected_at": "2026-07-09T00:00:00+00:00"},
-                        {"category": "NASDAQ", "url": "https://example.com/market", "collected_at": "2026-07-09T01:00:00+00:00"}
+                        {"category": "KR_IT", "url": "https://example.com/kr", "collected_at": "{collected_at}"},
+                        {"category": "NASDAQ", "url": "https://example.com/market", "collected_at": "{collected_at}"}
                       ]
                     }
-                    """.strip(),
+                    """.replace("{collected_at}", collected_at).strip(),
                     encoding="utf-8",
                 )
 
