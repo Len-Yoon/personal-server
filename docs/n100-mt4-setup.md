@@ -259,12 +259,8 @@ docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build
 [`N100 GitHub 자동배포 안내`](n100-github-auto-deploy.md)에 따라 N100의 self-hosted
 Runner가 WSL2 Docker에서 상시 서비스만 자동으로 재배포합니다. 이때
 
-수동으로 일회성 Investing 뉴스 수집만 실행하려면 Windows 작업 스케줄러에서
-`scripts/investing-news-once.ps1`를 실행하거나 다음 명령을 사용합니다.
-
-```powershell
-powershell -ExecutionPolicy Bypass -File C:\personal-server\scripts\investing-news-once.ps1
-```
+뉴스는 `NEWS_REFRESH_INTERVAL_SECONDS` 주기에 따라 뉴스 화면 요청 시 캐시를 갱신합니다.
+기본값은 300초(5분)이며, 뉴스 화면을 열어 둔 경우 브라우저가 60초마다 변경 여부를 확인합니다.
 
 Restart WSL from Windows PowerShell:
 
@@ -294,6 +290,7 @@ BACKUP_INCLUDE_FILES=true
 BACKUP_RETENTION_DAYS=14
 SECURITY_LOG_RETENTION_DAYS=30
 NEWS_ARCHIVE_PATH=/data/crawler-worker/news_archive.json
+NEWS_REFRESH_INTERVAL_SECONDS=300
 NEWS_RETENTION_DAYS=7
 BACKUP_STALE_SECONDS=172800
 ```
