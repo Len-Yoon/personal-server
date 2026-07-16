@@ -35,7 +35,7 @@ def home(request: Request):
         "home.html",
         {
             "request": request,
-            "title": "한국어 뉴스 허브",
+            "title": "뉴스 허브",
             "categories": get_korean_categories(),
         },
     )

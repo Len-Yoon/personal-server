@@ -9,14 +9,17 @@
     <p>{{ result.description }}</p>
 </section>
 
-<section class="service-section">
+<section
+    class="service-section"
+    data-auto-refresh-seconds="60"
+    data-category="{{ result.category }}"
+>
     <div class="section-header">
         <div>
             <h2>수집 결과</h2>
 
-            <p>
-                {{ result.count }}개의 뉴스를 가져왔습니다.
-
+            <p data-refresh-status>
+                {{ result.count }}개의 뉴스를 가져왔습니다. ·
                 {% if result.cache.hit %}
                     캐시 사용 중 · {{ result.cache.age_seconds }}초 전 수집
                 {% else %}
@@ -43,7 +46,7 @@
         {% endfor %}
     </div>
 
-    <section class="news-list">
+    <section class="news-list" data-news-list>
         {% for article in result.articles %}
             <article class="news-card">
                 <div class="news-meta-row">
@@ -94,4 +97,166 @@
         {% endfor %}
     </section>
 </section>
+
+<script id="news-auto-refresh">
+(() => {
+    const container = document.querySelector("[data-auto-refresh-seconds]");
+    const newsList = document.querySelector("[data-news-list]");
+    const status = document.querySelector("[data-refresh-status]");
+
+    if (!container || !newsList || !status) {
+        return;
+    }
+
+    const category = container.dataset.category;
+    const intervalSeconds = Number(container.dataset.autoRefreshSeconds) || 60;
+    let currentUrls = getArticleUrls();
+    let requestInFlight = false;
+
+    function normalizeUrl(value) {
+        try {
+            return new URL(value, window.location.origin).href;
+        } catch {
+            return "";
+        }
+    }
+
+    function getArticleUrls() {
+        return Array.from(newsList.querySelectorAll("a.article-link"))
+            .map((link) => normalizeUrl(link.href))
+            .filter(Boolean);
+    }
+
+    function safeArticleUrl(value) {
+        try {
+            const url = new URL(value, window.location.origin);
+            return ["http:", "https:"].includes(url.protocol) ? url.href : "#";
+        } catch {
+            return "#";
+        }
+    }
+
+    function formatNewsDate(value) {
+        if (!value) {
+            return "";
+        }
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+            return value;
+        }
+        const parts = new Intl.DateTimeFormat("ko-KR", {
+            timeZone: "Asia/Seoul",
+            year: "numeric",
+            month: "numeric",
+            day: "numeric",
+            weekday: "long",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false,
+        }).formatToParts(date).reduce((result, part) => {
+            result[part.type] = part.value;
+            return result;
+        }, {});
+        return `${parts.year}년 ${parts.month}월 ${parts.day}일 ${parts.weekday} ${parts.hour}:${parts.minute}:${parts.second}`;
+    }
+
+    function appendText(parent, tagName, className, value) {
+        if (!value) {
+            return;
+        }
+        const element = document.createElement(tagName);
+        if (className) {
+            element.className = className;
+        }
+        element.textContent = value;
+        parent.append(element);
+    }
+
+    function renderArticles(articles) {
+        const fragment = document.createDocumentFragment();
+
+        if (!articles.length) {
+            const emptyCard = document.createElement("article");
+            emptyCard.className = "news-card empty-card";
+            appendText(emptyCard, "h3", "", "현재 표시할 뉴스가 없습니다.");
+            appendText(emptyCard, "p", "summary", "RSS와 정적 소스에서 유효한 기사만 남기도록 필터링합니다.");
+            fragment.append(emptyCard);
+        }
+
+        articles.forEach((article) => {
+            const card = document.createElement("article");
+            card.className = "news-card";
+            const meta = document.createElement("div");
+            meta.className = "news-meta-row";
+            appendText(meta, "span", "status-badge", article.provider || "NEWS");
+            (article.topics || ["세계동향"]).forEach((topic) => {
+                appendText(meta, "span", "status-badge", topic);
+            });
+            appendText(meta, "span", "", article.source);
+            appendText(meta, "span", "", formatNewsDate(article.collected_at));
+            card.append(meta);
+
+            appendText(card, "h3", "", article.title_ko || article.title || "뉴스");
+            if (article.title_original && article.title_original !== article.title_ko) {
+                appendText(card, "p", "original-title", article.title_original);
+            }
+            appendText(card, "p", "summary news-summary", article.summary || "요약 정보가 없는 기사입니다.");
+            appendText(card, "p", "published-at", formatNewsDate(article.published_at));
+
+            if (article.url) {
+                const link = document.createElement("a");
+                link.className = "article-link";
+                link.href = safeArticleUrl(article.url);
+                link.target = "_blank";
+                link.rel = "noopener noreferrer";
+                link.textContent = "원문 보기 →";
+                card.append(link);
+            }
+            fragment.append(card);
+        });
+
+        newsList.replaceChildren(fragment);
+    }
+
+    function updateStatus(result) {
+        const cache = result.cache || {};
+        const freshness = cache.hit
+            ? `캐시 사용 중 · ${cache.age_seconds || 0}초 전 수집`
+            : "방금 새로 수집";
+        status.textContent = `${result.count || 0}개의 뉴스를 가져왔습니다. · ${freshness}`;
+    }
+
+    async function refreshNews() {
+        if (document.hidden || requestInFlight) {
+            return;
+        }
+        requestInFlight = true;
+        try {
+            const response = await fetch(
+                `/api/category?category=${encodeURIComponent(category)}&_=${Date.now()}`,
+                { headers: { Accept: "application/json" }, cache: "no-store" },
+            );
+            if (!response.ok) {
+                return;
+            }
+            const result = await response.json();
+            const nextUrls = (result.articles || [])
+                .map((article) => normalizeUrl(article.url))
+                .filter(Boolean);
+            updateStatus(result);
+            if (JSON.stringify(nextUrls) !== JSON.stringify(currentUrls)) {
+                renderArticles(result.articles || []);
+                currentUrls = getArticleUrls();
+            }
+        } catch {
+            // Keep the current article list when a background request fails.
+        } finally {
+            requestInFlight = false;
+        }
+    }
+
+    window.setInterval(refreshNews, intervalSeconds * 1000);
+})();
+</script>
 {% endblock %}

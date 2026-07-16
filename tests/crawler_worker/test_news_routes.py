@@ -23,6 +23,7 @@ class CrawlerWorkerNewsRouteTests(unittest.TestCase):
             response = client.get("/")
 
         self.assertEqual(response.status_code, 200)
+        self.assertIn("뉴스 허브", response.text)
         self.assertIn("IT 동향", response.text)
         self.assertIn("AI 뉴스", response.text)
 
@@ -56,6 +57,31 @@ class CrawlerWorkerNewsRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         mocked_collect.assert_called_once_with(category="KR_IT", limit=24, force_refresh=False)
         self.assertIn("IT 동향", response.text)
+
+    def test_category_page_exposes_auto_refresh_contract(self):
+        app = self.load_app()
+
+        with patch("app.routers.news.collect_korean_news") as mocked_collect:
+            mocked_collect.return_value = {
+                "category": "KR_IT",
+                "label": "IT 동향",
+                "description": "설명",
+                "count": 0,
+                "articles": [],
+                "cache": {"hit": True, "age_seconds": 12, "ttl_seconds": 300},
+            }
+
+            from fastapi.testclient import TestClient
+
+            with TestClient(app) as client:
+                response = client.get("/category?category=KR_IT")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('data-auto-refresh-seconds="60"', response.text)
+        self.assertIn('data-category="KR_IT"', response.text)
+        self.assertIn('data-news-list', response.text)
+        self.assertIn("news-auto-refresh", response.text)
+        self.assertIn('data-refresh-status', response.text)
 
 
 if __name__ == "__main__":
