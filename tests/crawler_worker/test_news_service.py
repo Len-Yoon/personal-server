@@ -2,7 +2,6 @@ import importlib
 import json
 import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,13 +10,6 @@ from tests._test_support import prepare_service_import
 
 
 class CrawlerWorkerNewsServiceTests(unittest.TestCase):
-    def reload_news_service(self):
-        prepare_service_import("crawler-worker")
-        sys.modules.setdefault("feedparser", types.ModuleType("feedparser"))
-        import app.services.news_service as news_service
-
-        return importlib.reload(news_service)
-
     def reload_news_archive(self):
         prepare_service_import("crawler-worker")
         import app.services.news_archive as news_archive
