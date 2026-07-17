@@ -49,6 +49,8 @@ ingress:
     service: http://localhost:8000
   - hostname: admin.len.pe.kr
     service: http://localhost:8000
+  - hostname: portfolio.len.pe.kr
+    service: http://localhost:8000
   - hostname: news.len.pe.kr
     service: http://localhost:8001
   - hostname: memo.len.pe.kr
@@ -67,6 +69,7 @@ cloudflared tunnel route dns personal-server len.pe.kr
 cloudflared tunnel route dns personal-server portal.len.pe.kr
 cloudflared tunnel route dns personal-server file.len.pe.kr
 cloudflared tunnel route dns personal-server admin.len.pe.kr
+cloudflared tunnel route dns personal-server portfolio.len.pe.kr
 cloudflared tunnel route dns personal-server news.len.pe.kr
 cloudflared tunnel route dns personal-server memo.len.pe.kr
 cloudflared tunnel route dns personal-server books.len.pe.kr

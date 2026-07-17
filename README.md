@@ -124,6 +124,7 @@ SYSTEM_AGENT_URL=http://system-agent:8010
 DEMO_MODE=
 
 # Portal hostnames
+PORTFOLIO_HOSTNAME=portfolio.len.pe.kr
 FILES_HOSTNAME=file.len.pe.kr
 ADMIN_HOSTNAME=admin.len.pe.kr
 
