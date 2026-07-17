@@ -10,7 +10,8 @@ WSL_SCRIPT = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf
 class WindowsBootstrapTests(unittest.TestCase):
     def test_uses_schtasks_when_scheduled_task_cmdlets_are_unavailable(self):
         self.assertIn("schtasks.exe /Create", SCRIPT)
-        self.assertIn("/SC ONLOGON", SCRIPT)
+        self.assertIn("/SC ONSTART", SCRIPT)
+        self.assertIn("/RP *", SCRIPT)
         self.assertIn("/F", SCRIPT)
         self.assertIn("schtasks.exe /Query", SCRIPT)
 
@@ -44,6 +45,11 @@ class WindowsBootstrapTests(unittest.TestCase):
     def test_powershell_daemon_isolates_maintenance_failure(self):
         self.assertIn("bash scripts/windows-bootstrap.sh", SCRIPT)
         self.assertIn("Recovery check failed", SCRIPT)
+
+    def test_powershell_daemon_keeps_cloudflare_tunnel_in_wsl_process(self):
+        self.assertIn("Start-Process -FilePath 'wsl.exe'", SCRIPT)
+        self.assertIn("cloudflared tunnel run", SCRIPT)
+        self.assertNotIn("nohup cloudflared tunnel run", WSL_SCRIPT)
 
 
 if __name__ == "__main__":

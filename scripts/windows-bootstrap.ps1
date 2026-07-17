@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 
 $ScriptPath = Join-Path $ProjectRoot "scripts\windows-bootstrap.ps1"
 $TaskName = "personal-server-autostart"
+$WslDistribution = "Ubuntu-24.04"
 function Write-Info([string]$Message) {
     Write-Host $Message
 }
@@ -20,10 +21,22 @@ function Invoke-WslCommand {
         throw "Project path '$ProjectRoot' must be a Windows drive path such as C:\\personal-server."
     }
 
-    & wsl.exe bash -lc "cd '$wslProjectRoot' && bash scripts/windows-bootstrap.sh '$wslProjectRoot'"
+    & wsl.exe -d $WslDistribution bash -lc "cd '$wslProjectRoot' && bash scripts/windows-bootstrap.sh '$wslProjectRoot'"
     if ($LASTEXITCODE -ne 0) {
         throw "WSL command failed with exit code $LASTEXITCODE"
     }
+}
+
+function Start-CloudflareTunnel {
+    & wsl.exe -d $WslDistribution bash -lc "pgrep -af '[c]loudflared.*tunnel run' >/dev/null"
+    if ($LASTEXITCODE -eq 0) {
+        return
+    }
+
+    Start-Process -FilePath 'wsl.exe' -WindowStyle Hidden -ArgumentList @(
+        '-d', $WslDistribution,
+        '--', 'cloudflared', 'tunnel', 'run'
+    ) | Out-Null
 }
 
 function Update-HostMetrics {
@@ -59,6 +72,7 @@ function Start-PersonalServerStack {
     for ($attempt = 1; $attempt -le 10; $attempt++) {
         try {
             Invoke-WslCommand
+            Start-CloudflareTunnel
             Write-Info "Ensured Docker stack is up and Cloudflare Tunnel is running."
             return
         } catch {
@@ -73,14 +87,10 @@ function Start-PersonalServerStack {
 
 function Install-ScheduledTask {
     $taskAction = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -Daemon"
-    $previousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-        $createOutput = (& schtasks.exe /Create /TN $TaskName /SC ONLOGON /TR $taskAction /RL LIMITED /F 2>&1 | Out-String)
-        $createExitCode = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
+    $runAsUser = "$env:USERDOMAIN\$env:USERNAME"
+    Write-Info "Registering startup task for $runAsUser. Windows will prompt for the account password."
+    & schtasks.exe /Create /TN $TaskName /SC ONSTART /RU $runAsUser /RP * /TR $taskAction /RL LIMITED /F
+    $createExitCode = $LASTEXITCODE
     if ($createExitCode -ne 0) {
         $existingTask = (& schtasks.exe /Query /TN $TaskName /FO LIST /V 2>&1 | Out-String)
         if ($existingTask -match [regex]::Escape($ScriptPath)) {
@@ -92,7 +102,7 @@ function Install-ScheduledTask {
     if ($createOutput.Trim()) {
         Write-Info $createOutput.Trim()
     }
-    Write-Info "Registered scheduled task '$TaskName' to start at user logon."
+    Write-Info "Registered scheduled task '$TaskName' to start with Windows."
 }
 
 function Start-Daemon {
