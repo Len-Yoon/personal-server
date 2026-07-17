@@ -89,7 +89,7 @@ function Install-ScheduledTask {
     $taskAction = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -Daemon"
     $runAsUser = "$env:USERDOMAIN\$env:USERNAME"
     Write-Info "Registering startup task for $runAsUser. Windows will prompt for the account password."
-    & schtasks.exe /Create /TN $TaskName /SC ONSTART /RU $runAsUser /RP * /TR $taskAction /RL LIMITED /F
+    $createOutput = (& schtasks.exe /Create /TN $TaskName /SC ONSTART /RU $runAsUser /RP * /TR $taskAction /RL LIMITED /F 2>&1 | Out-String)
     $createExitCode = $LASTEXITCODE
     if ($createExitCode -ne 0) {
         $existingTask = (& schtasks.exe /Query /TN $TaskName /FO LIST /V 2>&1 | Out-String)

@@ -48,7 +48,7 @@ class WindowsBootstrapTests(unittest.TestCase):
 
     def test_powershell_daemon_keeps_cloudflare_tunnel_in_wsl_process(self):
         self.assertIn("Start-Process -FilePath 'wsl.exe'", SCRIPT)
-        self.assertIn("cloudflared tunnel run", SCRIPT)
+        self.assertIn("'cloudflared', 'tunnel', 'run'", SCRIPT)
         self.assertNotIn("nohup cloudflared tunnel run", WSL_SCRIPT)
 
 
