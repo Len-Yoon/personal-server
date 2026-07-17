@@ -44,6 +44,9 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("docker compose -f docker-compose.yml -f docker-compose.n100.yml config", SCRIPT)
         self.assertIn("git fetch --prune origin", SCRIPT)
         self.assertIn("git reset --hard origin/main", SCRIPT)
+        self.assertIn("wait_for_docker", SCRIPT)
+        self.assertIn("docker info", SCRIPT)
+        self.assertIn("DOCKER_WAIT_ATTEMPTS", SCRIPT)
         self.assertIn(
             "docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web system-agent crawler-worker youtube-memo book-memo caddy",
             SCRIPT,

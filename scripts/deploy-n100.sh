@@ -17,6 +17,24 @@ command -v docker >/dev/null 2>&1 || { echo "docker 명령을 찾을 수 없습�
 
 cd "$PROJECT_ROOT"
 
+DOCKER_WAIT_ATTEMPTS="${DOCKER_WAIT_ATTEMPTS:-18}"
+DOCKER_WAIT_SECONDS="${DOCKER_WAIT_SECONDS:-10}"
+
+wait_for_docker() {
+  local attempt
+  for ((attempt = 1; attempt <= DOCKER_WAIT_ATTEMPTS; attempt++)); do
+    if docker info >/dev/null 2>&1; then
+      return 0
+    fi
+    echo "Docker daemon is not ready; waiting ${DOCKER_WAIT_SECONDS}s (attempt ${attempt}/${DOCKER_WAIT_ATTEMPTS})" >&2
+    sleep "$DOCKER_WAIT_SECONDS"
+  done
+
+  echo "Docker daemon did not become ready after ${DOCKER_WAIT_ATTEMPTS} attempts" >&2
+  return 1
+}
+
+wait_for_docker
 docker compose version >/dev/null
 
 git fetch --prune origin
