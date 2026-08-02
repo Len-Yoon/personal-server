@@ -1,9 +1,23 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.routers import news
+from app.services.news_scheduler import InvestingNewsScheduler
 
-app = FastAPI(title="Global Market News Hub")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    scheduler = InvestingNewsScheduler()
+    scheduler.start()
+    try:
+        yield
+    finally:
+        scheduler.stop()
+
+
+app = FastAPI(title="Global Market News Hub", lifespan=lifespan)
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
