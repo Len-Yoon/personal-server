@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from app.crawlers.rss_news import _html_to_text
 from app.services.news_sources import collect_korean_news_from_sources, collect_news_from_sources
+from app.services.telegram_notifier import notify_new_investing_articles
 
 
 PROJECT_DATA_ROOT = Path(__file__).resolve().parents[3] / "data"
@@ -77,7 +78,6 @@ def collect_market_news(
         _attach_archive_metadata(article, category=category, now=now)
         for article in fresh_articles
     ]
-
     archive["articles"] = _merge_articles(archive["articles"], stored_articles)
     archive["updated_at"] = _iso(now)
     _save_archive(archive)
@@ -154,10 +154,14 @@ def collect_korean_news(
         _attach_archive_metadata(article, category=category, now=now)
         for article in fresh_articles
     ]
+    new_articles = _new_articles(archive["articles"], stored_articles)
+    should_notify = _should_notify_new_investing_articles(archive, category, korean=True)
 
     archive["articles"] = _merge_articles(archive["articles"], stored_articles)
     archive["updated_at"] = _iso(now)
     _save_archive(archive)
+    if should_notify and new_articles:
+        notify_new_investing_articles(new_articles)
 
     category_articles = _get_category_articles(archive["articles"], category)
 
@@ -260,13 +264,13 @@ def _build_result(
 def _load_archive() -> dict[str, Any]:
     archive_path = _archive_path()
     if not archive_path.exists():
-        return {"updated_at": "", "articles": []}
+        return {"updated_at": "", "articles": [], "telegram_notifications_initialized": False}
 
     try:
         with archive_path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
     except (OSError, json.JSONDecodeError):
-        return {"updated_at": "", "articles": []}
+        return {"updated_at": "", "articles": [], "telegram_notifications_initialized": False}
 
     # Source changes must invalidate both the production and local archives.
     if data.get("schema_version") and data.get("schema_version") != ARCHIVE_SCHEMA_VERSION:
@@ -274,6 +278,7 @@ def _load_archive() -> dict[str, Any]:
             "schema_version": ARCHIVE_SCHEMA_VERSION,
             "updated_at": "",
             "articles": [],
+            "telegram_notifications_initialized": False,
         }
 
     articles = data.get("articles", [])
@@ -296,6 +301,9 @@ def _load_archive() -> dict[str, Any]:
         "schema_version": str(data.get("schema_version", ARCHIVE_SCHEMA_VERSION)),
         "updated_at": str(data.get("updated_at", "")),
         "articles": normalized_articles,
+        "telegram_notifications_initialized": bool(
+            data.get("telegram_notifications_initialized", False)
+        ),
     }
 
     if changed:
@@ -372,10 +380,14 @@ def _refresh_category(category: str, limit: int, korean: bool = False) -> None:
         _attach_archive_metadata(article, category=category, now=now)
         for article in fresh_articles
     ]
+    new_articles = _new_articles(archive["articles"], stored_articles)
+    should_notify = _should_notify_new_investing_articles(archive, category, korean=korean)
 
     archive["articles"] = _merge_articles(archive["articles"], stored_articles)
     archive["updated_at"] = _iso(now)
     _save_archive(archive)
+    if should_notify and new_articles:
+        notify_new_investing_articles(new_articles)
 
 
 def _purge_archive(archive: dict[str, Any], now: datetime) -> tuple[dict[str, Any], bool]:
@@ -429,6 +441,32 @@ def _merge_articles(
     merged = list(merged_by_url.values())
     merged.sort(key=_sort_key, reverse=True)
     return merged
+
+
+def _new_articles(existing_articles: list[dict[str, Any]], incoming_articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    existing_urls = {
+        str(article.get("url", "")).strip()
+        for article in existing_articles
+        if str(article.get("url", "")).strip()
+    }
+    return [
+        article
+        for article in incoming_articles
+        if str(article.get("url", "")).strip() not in existing_urls
+    ]
+
+
+def _should_notify_new_investing_articles(
+    archive: dict[str, Any],
+    category: str,
+    korean: bool,
+) -> bool:
+    if not korean or category != "KR_WORLD":
+        return False
+    if not archive.get("telegram_notifications_initialized", False):
+        archive["telegram_notifications_initialized"] = True
+        return False
+    return True
 
 
 def _dedupe_by_url(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:

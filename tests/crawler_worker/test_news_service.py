@@ -206,6 +206,75 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         self.assertEqual(len(result["articles"]), 1)
         self.assertEqual(result["articles"][0]["title"], "타슬리 제약 주가, 오늘 급등 이유는?")
 
+    def test_background_korean_world_refresh_notifies_only_new_investing_articles(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "news_archive.json"
+            with patch.dict(
+                "os.environ",
+                {"NEWS_ARCHIVE_PATH": str(archive_path)},
+                clear=False,
+            ):
+                news_archive = self.reload_news_archive()
+                news_archive._save_archive(
+                    {
+                        "updated_at": "",
+                        "articles": [],
+                        "telegram_notifications_initialized": True,
+                    }
+                )
+                article = {
+                    "url": "https://example.com/new-investing-news",
+                    "title": "새 주식 시장 뉴스",
+                    "title_ko": "새 주식 시장 뉴스",
+                    "source": "Investing.com 한국어",
+                }
+                with patch.object(
+                    news_archive,
+                    "collect_korean_news_from_sources",
+                    return_value=[article],
+                ), patch.object(
+                    news_archive,
+                    "notify_new_investing_articles",
+                ) as mocked_notify:
+                    news_archive._refresh_category("KR_WORLD", limit=1, korean=True)
+
+                    self.assertEqual(
+                        news_archive.list_recent_news(korean_only=True)[0]["url"],
+                        article["url"],
+                    )
+                    mocked_notify.assert_called_once()
+                    self.assertEqual(mocked_notify.call_args.args[0][0]["url"], article["url"])
+
+                    news_archive._refresh_category("KR_WORLD", limit=1, korean=True)
+
+        mocked_notify.assert_called_once()
+
+    def test_first_korean_world_refresh_sets_notification_baseline_without_sending(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "news_archive.json"
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(archive_path)}, clear=False):
+                news_archive = self.reload_news_archive()
+                with patch.object(
+                    news_archive,
+                    "collect_korean_news_from_sources",
+                    return_value=[
+                        {
+                            "url": "https://example.com/initial-investing-news",
+                            "title": "기준선 기사",
+                            "source": "Investing.com 한국어",
+                        }
+                    ],
+                ), patch.object(
+                    news_archive,
+                    "notify_new_investing_articles",
+                ) as mocked_notify:
+                    news_archive._refresh_category("KR_WORLD", limit=1, korean=True)
+
+                self.assertTrue(
+                    news_archive._load_archive()["telegram_notifications_initialized"]
+                )
+                mocked_notify.assert_not_called()
+
     def test_collect_market_news_uses_reuters_when_google_empty(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             archive_path = Path(tmpdir) / "news_archive.json"
