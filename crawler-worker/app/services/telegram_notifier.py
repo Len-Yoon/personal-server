@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
 TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 REQUEST_TIMEOUT_SECONDS = 8
+NASDAQ_RELEVANCE_PATTERN = re.compile(
+    r"나스닥|nasdaq|미국\s*증시|연준|\bfed\b|\bfomc\b|"
+    r"미국\s*(?:cpi|고용|물가|금리)|비농업|pce",
+    re.IGNORECASE,
+)
 
 
 def notify_new_investing_articles(articles: list[dict]) -> int:
@@ -18,9 +24,19 @@ def notify_new_investing_articles(articles: list[dict]) -> int:
 
     sent_count = 0
     for article in articles:
+        if not _is_nasdaq_relevant(article):
+            continue
         if _send_article(token, chat_id, article):
             sent_count += 1
     return sent_count
+
+
+def _is_nasdaq_relevant(article: dict) -> bool:
+    searchable_text = " ".join(
+        str(article.get(field) or "")
+        for field in ("title_ko", "title", "summary")
+    )
+    return bool(NASDAQ_RELEVANCE_PATTERN.search(searchable_text))
 
 
 def _send_article(token: str, chat_id: str, article: dict) -> bool:

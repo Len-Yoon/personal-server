@@ -30,7 +30,7 @@ class TelegramNotifierTests(unittest.TestCase):
             sent_count = module.notify_new_investing_articles(
                 [
                     {
-                        "title_ko": "미국 증시 상승",
+                        "title_ko": "나스닥 상승",
                         "url": "https://kr.investing.com/news/stock-market-news/article-1",
                     }
                 ]
@@ -41,7 +41,7 @@ class TelegramNotifierTests(unittest.TestCase):
         self.assertEqual(request.full_url, "https://api.telegram.org/bottest-token/sendMessage")
         self.assertEqual(json.loads(request.data), {
             "chat_id": "123456",
-            "text": "[Investing.com 새 뉴스]\n미국 증시 상승\nhttps://kr.investing.com/news/stock-market-news/article-1",
+            "text": "[Investing.com 새 뉴스]\n나스닥 상승\nhttps://kr.investing.com/news/stock-market-news/article-1",
             "disable_web_page_preview": True,
         })
 
@@ -55,6 +55,30 @@ class TelegramNotifierTests(unittest.TestCase):
         ), patch.object(module, "urlopen") as mocked_urlopen:
             sent_count = module.notify_new_investing_articles(
                 [{"title_ko": "미국 증시 상승", "url": "https://example.com/news"}]
+            )
+
+        self.assertEqual(sent_count, 0)
+        mocked_urlopen.assert_not_called()
+
+    def test_does_not_send_articles_unrelated_to_nasdaq(self):
+        module = self.reload_module()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "TELEGRAM_BOT_TOKEN": "test-token",
+                "TELEGRAM_CHAT_ID": "123456",
+            },
+            clear=False,
+        ), patch.object(module, "urlopen") as mocked_urlopen:
+            sent_count = module.notify_new_investing_articles(
+                [
+                    {
+                        "title_ko": "엔비디아 주가 상승",
+                        "summary": "반도체 AI 기업 실적 발표.",
+                        "url": "https://example.com/nvidia",
+                    }
+                ]
             )
 
         self.assertEqual(sent_count, 0)
