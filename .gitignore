@@ -55,6 +55,7 @@ node_modules/
 dist/
 
 build/
+.superpowers/
 
 # Local database future
 
