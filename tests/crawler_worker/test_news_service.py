@@ -224,8 +224,8 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                 )
                 article = {
                     "url": "https://example.com/new-investing-news",
-                    "title": "새 주식 시장 뉴스",
-                    "title_ko": "새 주식 시장 뉴스",
+                    "title": "미 연준, 기준금리 동결 결정",
+                    "title_ko": "미 연준, 기준금리 동결 결정",
                     "source": "Investing.com 한국어",
                 }
                 with patch.object(
@@ -244,6 +244,10 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                     )
                     mocked_notify.assert_called_once()
                     self.assertEqual(mocked_notify.call_args.args[0][0]["url"], article["url"])
+                    self.assertEqual(
+                        mocked_notify.call_args.args[0][0]["nasdaq_relevance"],
+                        {"level": "alert", "reasons": ["연준·금리"]},
+                    )
 
                     news_archive._refresh_category("KR_WORLD", limit=1, korean=True)
 
@@ -272,6 +276,45 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
 
                 self.assertTrue(
                     news_archive._load_archive()["telegram_notifications_initialized"]
+                )
+                mocked_notify.assert_not_called()
+
+    def test_background_korean_world_refresh_archives_non_alert_article_without_notifying(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "news_archive.json"
+            with patch.dict(
+                "os.environ",
+                {"NEWS_ARCHIVE_PATH": str(archive_path)},
+                clear=False,
+            ):
+                news_archive = self.reload_news_archive()
+                news_archive._save_archive(
+                    {
+                        "updated_at": "",
+                        "articles": [],
+                        "telegram_notifications_initialized": True,
+                    }
+                )
+                article = {
+                    "url": "https://example.com/nvidia-price-target",
+                    "title": "엔비디아 목표주가 상향",
+                    "title_ko": "엔비디아 목표주가 상향",
+                    "source": "Investing.com 한국어",
+                }
+                with patch.object(
+                    news_archive,
+                    "collect_korean_news_from_sources",
+                    return_value=[article],
+                ), patch.object(
+                    news_archive,
+                    "notify_new_investing_articles",
+                ) as mocked_notify:
+                    news_archive._refresh_category("KR_WORLD", limit=1, korean=True)
+
+                stored_article = news_archive.list_recent_news(korean_only=True)[0]
+                self.assertEqual(
+                    stored_article["nasdaq_relevance"],
+                    {"level": "archive", "reasons": []},
                 )
                 mocked_notify.assert_not_called()
 

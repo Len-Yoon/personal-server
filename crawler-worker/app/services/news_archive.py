@@ -10,6 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.crawlers.rss_news import _html_to_text
+from app.services.nasdaq_relevance import classify_nasdaq_relevance
 from app.services.news_sources import collect_korean_news_from_sources, collect_news_from_sources
 from app.services.telegram_notifier import notify_new_investing_articles
 
@@ -160,8 +161,9 @@ def collect_korean_news(
     archive["articles"] = _merge_articles(archive["articles"], stored_articles)
     archive["updated_at"] = _iso(now)
     _save_archive(archive)
-    if should_notify and new_articles:
-        notify_new_investing_articles(new_articles)
+    alert_articles = _alert_articles(new_articles)
+    if should_notify and alert_articles:
+        notify_new_investing_articles(alert_articles)
 
     category_articles = _get_category_articles(archive["articles"], category)
 
@@ -386,8 +388,9 @@ def _refresh_category(category: str, limit: int, korean: bool = False) -> None:
     archive["articles"] = _merge_articles(archive["articles"], stored_articles)
     archive["updated_at"] = _iso(now)
     _save_archive(archive)
-    if should_notify and new_articles:
-        notify_new_investing_articles(new_articles)
+    alert_articles = _alert_articles(new_articles)
+    if should_notify and alert_articles:
+        notify_new_investing_articles(alert_articles)
 
 
 def _purge_archive(archive: dict[str, Any], now: datetime) -> tuple[dict[str, Any], bool]:
@@ -523,9 +526,19 @@ def _attach_archive_metadata(
 ) -> dict[str, Any]:
     stored = _sanitize_article(article)
     stored["category"] = category
+    stored["nasdaq_relevance"] = classify_nasdaq_relevance(stored)
     stored["collected_at"] = _iso(now)
     stored["expires_at"] = _iso(now + timedelta(days=RETENTION_DAYS))
     return stored
+
+
+def _alert_articles(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        article
+        for article in articles
+        if article.get("nasdaq_relevance", {}).get("level") == "alert"
+        and article.get("nasdaq_relevance", {}).get("reasons")
+    ]
 
 
 def _sanitize_article(article: dict[str, Any]) -> dict[str, Any]:
