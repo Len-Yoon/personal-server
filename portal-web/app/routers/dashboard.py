@@ -187,7 +187,9 @@ def admin_status_page(request: Request, password: str = Form(default="")):
             "title": "관리자 상태",
             "authenticated": True,
             "error": "",
-            "status_checked_at": format_status_checked_at(system_status.get("captured_at", "")),
+            "status_checked_at": format_status_checked_at(
+                str((system_status.get("host") or {}).get("captured_at", ""))
+            ),
             "portal_home_url": portal_home_url(_request_host(request)),
             **context,
         },

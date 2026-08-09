@@ -201,7 +201,7 @@ class PortalDashboardTests(unittest.TestCase):
         finally:
             os.environ.pop("FILE_MANAGER_PASSWORD", None)
 
-    def test_admin_status_page_renders_formatted_collection_time(self):
+    def test_admin_status_page_renders_host_collection_time(self):
         os.environ["FILE_MANAGER_PASSWORD"] = "secret"
         try:
             app = self.load_app()
@@ -213,7 +213,13 @@ class PortalDashboardTests(unittest.TestCase):
                 get_dashboard_status.return_value = {
                     "captured_at": "2026-07-09T01:02:03+00:00",
                     "overall_status": "ok",
-                    "host": {"cpu_percent": None, "memory_percent": None, "disk_percent": None, "source": "demo"},
+                    "host": {
+                        "captured_at": "2026-07-09T00:40:00+00:00",
+                        "cpu_percent": None,
+                        "memory_percent": None,
+                        "disk_percent": None,
+                        "source": "demo",
+                    },
                     "disk": {"percent": None, "level": "unknown"},
                     "files": {"file_count": 0, "total_bytes": 0},
                     "backup": {"latest_name": "", "status": "ok", "status_reason": "backup_recent"},
@@ -231,14 +237,44 @@ class PortalDashboardTests(unittest.TestCase):
                     response = client.post("/admin/status", data={"password": "secret"})
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn("2026-07-09 10:02:03 KST", response.text)
+            self.assertIn("호스트 수집 시각: 2026-07-09 09:40:00 KST", response.text)
+            self.assertNotIn("2026-07-09 10:02:03 KST", response.text)
             self.assertNotIn("WARNING", response.text)
             self.assertNotIn("OK", response.text)
             self.assertNotIn("UNAVAILABLE", response.text)
-            self.assertNotIn("호스트 수집", response.text)
             self.assertNotIn("백업", response.text)
             self.assertIn("디스크", response.text)
             self.assertIn("파일함", response.text)
+        finally:
+            os.environ.pop("FILE_MANAGER_PASSWORD", None)
+
+    def test_admin_status_page_shows_unknown_without_host_collection_time(self):
+        os.environ["FILE_MANAGER_PASSWORD"] = "secret"
+        try:
+            app = self.load_app()
+
+            with patch("app.routers.dashboard.get_dashboard_status") as get_dashboard_status, patch(
+                "app.routers.dashboard.get_service_health",
+                return_value=[],
+            ), patch("app.routers.dashboard.security_status", return_value={"headers": [], "file_policy": {"max_upload_mb": 50, "blocked_extensions": [], "allowed_extensions": []}, "log_files": [], "recent_events": [], "log_path": "/tmp/security.log"}):
+                get_dashboard_status.return_value = {
+                    "captured_at": "2026-07-09T01:02:03+00:00",
+                    "overall_status": "ok",
+                    "host": {"cpu_percent": None, "memory_percent": None, "disk_percent": None, "source": "demo"},
+                    "disk": {"percent": None, "level": "unknown"},
+                    "files": {"file_count": 0, "total_bytes": 0},
+                    "backup": {"latest_name": "", "status": "ok", "status_reason": "backup_recent"},
+                    "containers": [],
+                    "status_checks": [],
+                    "warnings": [],
+                }
+
+                with TestClient(app) as client:
+                    response = client.post("/admin/status", data={"password": "secret"})
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("호스트 수집 시각: unknown", response.text)
+            self.assertNotIn("2026-07-09 10:02:03 KST", response.text)
         finally:
             os.environ.pop("FILE_MANAGER_PASSWORD", None)
 
