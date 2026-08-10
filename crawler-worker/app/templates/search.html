@@ -48,7 +48,9 @@
 
     <section class="news-list" data-news-list>
         {% for article in result.articles %}
-            {% set relevance = article.nasdaq_relevance if result.category == "KR_WORLD" else none %}
+            {% set stored_relevance = article.nasdaq_relevance if result.category == "KR_WORLD" else none %}
+            {% set relevance = stored_relevance if stored_relevance is mapping and stored_relevance.level in ["alert", "archive"] else none %}
+            {% set relevance_reasons = relevance.reasons if relevance and relevance.reasons is sequence and relevance.reasons is not string and relevance.reasons is not mapping else [] %}
             <article
                 class="news-card{% if relevance %} nasdaq-{{ relevance.level }}{% endif %}"
                 {% if relevance %}data-news-alert-status="{{ relevance.level }}"{% endif %}
@@ -72,10 +74,10 @@
                             <span class="nasdaq-status nasdaq-status-archive">보관 전용</span>
                         {% endif %}
 
-                        {% if relevance.reasons %}
+                        {% if relevance_reasons %}
                             <div class="nasdaq-reason-row" aria-label="알림 분류 사유">
                                 <span class="nasdaq-reason-label">분류 사유</span>
-                                {% for reason in relevance.reasons %}
+                                {% for reason in relevance_reasons %}
                                     <span class="nasdaq-reason">{{ reason }}</span>
                                 {% endfor %}
                             </div>

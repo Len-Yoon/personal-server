@@ -23,6 +23,8 @@
 |---|---|---|
 | RED | KR_WORLD의 alert/archive 표시 및 보관함의 KR_WORLD 한정 표시 테스트 2건 추가 | 기능 미구현 상태에서 2건 실패 확인 |
 | GREEN | Jinja 템플릿 및 자동 새로고침 렌더러에 분류 상태·사유 표시 추가 | 대상 테스트 2건 통과 |
+| 검토 보완 RED | 독립 검토에서 확인된 손상된 `reasons` 정수값의 화면 500 회귀 테스트 2건 추가 | 기능 보완 전 2건이 500으로 실패 확인 |
+| 검토 보완 GREEN | 허용 등급의 mapping과 비문자열 sequence 사유만 템플릿에서 렌더링하도록 제한 | 관련 테스트 4건 통과 |
 | 회귀 | `PYTHONPATH=.. python3 -m unittest discover -s ../tests/crawler_worker -p 'test_*.py'` | 48건 통과 |
 
 ## 상세 변경
@@ -36,7 +38,13 @@
 
 ## 검토 결과
 
-독립 코드 검토 요청 예정. 검토 완료 후 최종 판정과 조치 내역을 갱신 필요.
+1차 독립 코드 검토에서 다음 Important 항목을 확인함.
+
+| 등급 | 검토 항목 | 조치 |
+|---|---|---|
+| Important | 손상된 보관 JSON의 `nasdaq_relevance.reasons`가 정수인 경우 Jinja 반복 처리로 두 화면이 500을 반환할 수 있음 | `nasdaq_relevance`를 mapping 및 `alert`/`archive` 허용 등급으로 제한하고, 사유는 mapping·문자열이 아닌 sequence일 때만 반복하도록 보완함. KR_WORLD와 보관함의 500 방지 회귀 테스트 2건을 추가함. |
+
+1차 판정은 보완 전 `Ready-to-merge 아님`이었음. 보완 커밋 후 동일 검토자에게 재검토 요청 예정.
 
 ## 확인 필요 사항
 

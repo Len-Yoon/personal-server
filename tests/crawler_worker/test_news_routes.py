@@ -158,6 +158,56 @@ class CrawlerWorkerNewsRouteTests(unittest.TestCase):
         self.assertIn('data-news-alert-status="alert"', response.text)
         self.assertIn("반도체 영향", response.text)
 
+    def test_korean_world_page_ignores_malformed_stored_alert_reasons(self):
+        """Fails if one corrupt archive row can make the KR_WORLD page return 500."""
+        app = self.load_app()
+
+        with patch("app.routers.news.collect_korean_news") as mocked_collect:
+            mocked_collect.return_value = {
+                "category": "KR_WORLD",
+                "label": "Investing.com 뉴스",
+                "description": "설명",
+                "count": 1,
+                "articles": [
+                    {
+                        "title_ko": "손상된 분류 기사",
+                        "nasdaq_relevance": {"level": "alert", "reasons": 1},
+                    }
+                ],
+                "cache": {"hit": True, "age_seconds": 12, "ttl_seconds": 300},
+            }
+
+            from fastapi.testclient import TestClient
+
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.get("/category?category=KR_WORLD")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("텔레그램 알림 대상", response.text)
+        self.assertNotIn('aria-label="알림 분류 사유"', response.text)
+
+    def test_saved_page_ignores_malformed_stored_alert_reasons(self):
+        """Fails if one corrupt archive row can make the saved-news page return 500."""
+        app = self.load_app()
+
+        with patch("app.routers.news.list_recent_news") as mocked_recent_news:
+            mocked_recent_news.return_value = [
+                {
+                    "category": "KR_WORLD",
+                    "title_ko": "손상된 보관 분류 기사",
+                    "nasdaq_relevance": {"level": "alert", "reasons": 1},
+                }
+            ]
+
+            from fastapi.testclient import TestClient
+
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.get("/saved")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("텔레그램 알림 대상", response.text)
+        self.assertNotIn('aria-label="알림 분류 사유"', response.text)
+
 
 if __name__ == "__main__":
     unittest.main()
