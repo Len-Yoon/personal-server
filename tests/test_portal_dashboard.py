@@ -189,6 +189,22 @@ class PortalDashboardTests(unittest.TestCase):
         self.assertIn(".atlas-service-card", stylesheet)
         self.assertIn("@media (max-width: 980px)", stylesheet)
 
+    def test_admin_status_styles_are_scoped_and_responsive(self):
+        """Fails if the admin status interface loses its scoped responsive treatment."""
+        stylesheet = (
+            Path(__file__).resolve().parents[1]
+            / "portal-web"
+            / "app"
+            / "static"
+            / "css"
+            / "style.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(".admin-status-page .admin-overview", stylesheet)
+        self.assertIn(".admin-status-page .admin-severity", stylesheet)
+        self.assertIn(".admin-status-page .admin-status-checks", stylesheet)
+        self.assertIn("@media (max-width: 720px)", stylesheet)
+
     def test_admin_status_context_combines_server_and_security_data(self):
         prepare_service_import("portal-web")
         from app.services.admin_status import build_admin_status_context
@@ -276,12 +292,18 @@ class PortalDashboardTests(unittest.TestCase):
                     response = client.post("/admin/status", data={"password": "secret"})
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn("호스트 수집 시각: 2026-07-09 09:40:00 KST", response.text)
+            self.assertIn("호스트 수집 시각:", response.text)
+            self.assertIn("<time>2026-07-09 09:40:00 KST</time>", response.text)
             self.assertNotIn("2026-07-09 10:02:03 KST", response.text)
+            self.assertIn('class="admin-overview"', response.text)
+            self.assertIn('class="admin-severity admin-severity--ok"', response.text)
+            self.assertIn('class="admin-status-checks"', response.text)
+            self.assertIn('aria-label="호스트 수집 상태: 정상 수집 중"', response.text)
+            self.assertIn('admin-metric admin-metric--missing', response.text)
             self.assertNotIn("WARNING", response.text)
             self.assertNotIn("OK", response.text)
             self.assertNotIn("UNAVAILABLE", response.text)
-            self.assertNotIn("백업", response.text)
+            self.assertIn("백업", response.text)
             self.assertIn("디스크", response.text)
             self.assertIn("파일함", response.text)
         finally:
@@ -312,7 +334,8 @@ class PortalDashboardTests(unittest.TestCase):
                     response = client.post("/admin/status", data={"password": "secret"})
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn("호스트 수집 시각: unknown", response.text)
+            self.assertIn("호스트 수집 시각:", response.text)
+            self.assertIn("<time>unknown</time>", response.text)
             self.assertNotIn("2026-07-09 10:02:03 KST", response.text)
         finally:
             os.environ.pop("FILE_MANAGER_PASSWORD", None)

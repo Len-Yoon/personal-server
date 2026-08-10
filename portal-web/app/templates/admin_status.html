@@ -40,33 +40,61 @@
             </div>
         </form>
     {% else %}
+        {% set overall_status = system_status.overall_status | default('unknown') %}
+        {% set overall_label = '정상' if overall_status == 'ok' else '주의' if overall_status == 'warning' else '수집 불가' if overall_status == 'unavailable' else '확인 필요' %}
+        <section class="admin-overview" aria-labelledby="admin-overview-title">
+            <div>
+                <span class="modal-kicker">CURRENT SIGNAL</span>
+                <h2 id="admin-overview-title">운영 상태 요약</h2>
+                <p>수집된 상태를 기준으로 현재 확인이 필요한 항목을 우선 표시합니다.</p>
+            </div>
+            <div class="admin-overview-meta">
+                <span class="admin-severity admin-severity--{{ overall_status }}" role="status">{{ overall_label }}</span>
+                <span class="admin-collected-at">호스트 수집 시각: <time>{{ status_checked_at }}</time></span>
+            </div>
+        </section>
+
         <section class="ops-section admin-section">
             <div class="section-header">
                 <div>
                     <h2>서버 상태</h2>
                     <p>미니 PC, 디스크, 파일함 상태를 표시합니다.</p>
-                    <p>호스트 수집 시각: {{ status_checked_at }}</p>
                 </div>
             </div>
 
-            <div class="metric-grid">
-                <div class="metric-tile">
+            <div class="metric-grid admin-metric-grid">
+                <div class="metric-tile admin-metric{% if system_status.host.cpu_percent is none %} admin-metric--missing{% endif %}">
                     <span>CPU</span>
-                    <strong>{{ system_status.host.cpu_percent if system_status.host.cpu_percent is not none else "-" }}%</strong>
+                    <strong>{{ system_status.host.cpu_percent ~ '%' if system_status.host.cpu_percent is not none else '수집 불가' }}</strong>
                 </div>
-                <div class="metric-tile">
+                <div class="metric-tile admin-metric{% if system_status.host.memory_percent is none %} admin-metric--missing{% endif %}">
                     <span>메모리</span>
-                    <strong>{{ system_status.host.memory_percent if system_status.host.memory_percent is not none else "-" }}%</strong>
+                    <strong>{{ system_status.host.memory_percent ~ '%' if system_status.host.memory_percent is not none else '수집 불가' }}</strong>
                 </div>
-                <div class="metric-tile">
+                {% set disk_percent = system_status.host.disk_percent if system_status.host.disk_percent is not none else system_status.disk.percent %}
+                <div class="metric-tile admin-metric{% if disk_percent is none %} admin-metric--missing{% endif %}">
                     <span>디스크</span>
-                    <strong>{{ system_status.host.disk_percent if system_status.host.disk_percent is not none else system_status.disk.percent if system_status.disk.percent is not none else "-" }}%</strong>
+                    <strong>{{ disk_percent ~ '%' if disk_percent is not none else '수집 불가' }}</strong>
                 </div>
-                <div class="metric-tile">
+                <div class="metric-tile admin-metric">
                     <span>파일함</span>
                     <strong>{{ system_status.files.file_count }}개</strong>
                 </div>
             </div>
+
+            <section class="admin-status-checks" aria-labelledby="admin-status-checks-title">
+                <h3 id="admin-status-checks-title">상태 점검</h3>
+                <div class="admin-status-check-list">
+                    {% for check in system_status.status_checks %}
+                        <article class="admin-status-check admin-status-check--{{ check.status }}" aria-label="{{ check.label }} 상태: {{ check.detail }}">
+                            <span class="admin-status-check-label">{{ check.label }}</span>
+                            <strong>{{ check.detail }}</strong>
+                        </article>
+                    {% else %}
+                        <p class="empty-log">상태 점검 데이터를 불러오지 못했습니다.</p>
+                    {% endfor %}
+                </div>
+            </section>
 
             <div class="ops-detail-grid">
                 <div class="ops-panel">
@@ -100,7 +128,7 @@
                 </div>
             </div>
 
-            <div class="security-summary">
+            <div class="security-summary admin-security-summary">
                 <div>
                     <span>로그 파일</span>
                     <strong>{{ security_status.log_path }}</strong>
