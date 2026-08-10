@@ -2,6 +2,7 @@ import importlib
 import os
 import unittest
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -171,6 +172,22 @@ class PortalDashboardTests(unittest.TestCase):
         self.assertIn('class="atlas-service-grid"', response.text)
         self.assertIn('class="atlas-service-card"', response.text)
         self.assertIn('data-track-event="service_opened"', response.text)
+
+    def test_editorial_atlas_styles_are_scoped_to_the_dashboard(self):
+        """Fails if responsive Atlas styling is removed or leaks into shared selectors."""
+        stylesheet = (
+            Path(__file__).resolve().parents[1]
+            / "portal-web"
+            / "app"
+            / "static"
+            / "css"
+            / "style.css"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(".atlas-body", stylesheet)
+        self.assertIn(".atlas-service-grid", stylesheet)
+        self.assertIn(".atlas-service-card", stylesheet)
+        self.assertIn("@media (max-width: 980px)", stylesheet)
 
     def test_admin_status_context_combines_server_and_security_data(self):
         prepare_service_import("portal-web")
