@@ -41,7 +41,7 @@
         </form>
     {% else %}
         {% set overall_status = system_status.overall_status | default('unknown') %}
-        {% set overall_label = '정상' if overall_status == 'ok' else '주의' if overall_status == 'warning' else '수집 불가' if overall_status == 'unavailable' else '확인 필요' %}
+        {% set overall_label = '정상' if overall_status == 'ok' else '주의' if overall_status == 'warning' else '긴급' if overall_status == 'critical' else '수집 불가' if overall_status == 'unavailable' else '확인 필요' %}
         <section class="admin-overview" aria-labelledby="admin-overview-title">
             <div>
                 <span class="modal-kicker">CURRENT SIGNAL</span>
@@ -50,7 +50,7 @@
             </div>
             <div class="admin-overview-meta">
                 <span class="admin-severity admin-severity--{{ overall_status }}" role="status">{{ overall_label }}</span>
-                <span class="admin-collected-at">호스트 수집 시각: <time>{{ status_checked_at }}</time></span>
+                <span class="admin-collected-at">호스트 수집 시각: <time{% if system_status.host.captured_at %} datetime="{{ system_status.host.captured_at }}"{% endif %}>{{ status_checked_at }}</time></span>
             </div>
         </section>
 

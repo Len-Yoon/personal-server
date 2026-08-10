@@ -267,7 +267,7 @@ class PortalDashboardTests(unittest.TestCase):
             ), patch("app.routers.dashboard.security_status", return_value={"headers": [], "file_policy": {"max_upload_mb": 50, "blocked_extensions": [], "allowed_extensions": []}, "log_files": [], "recent_events": [], "log_path": "/tmp/security.log"}):
                 get_dashboard_status.return_value = {
                     "captured_at": "2026-07-09T01:02:03+00:00",
-                    "overall_status": "ok",
+                    "overall_status": "critical",
                     "host": {
                         "captured_at": "2026-07-09T00:40:00+00:00",
                         "cpu_percent": None,
@@ -293,10 +293,14 @@ class PortalDashboardTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertIn("호스트 수집 시각:", response.text)
-            self.assertIn("<time>2026-07-09 09:40:00 KST</time>", response.text)
+            self.assertIn(
+                '<time datetime="2026-07-09T00:40:00+00:00">2026-07-09 09:40:00 KST</time>',
+                response.text,
+            )
             self.assertNotIn("2026-07-09 10:02:03 KST", response.text)
             self.assertIn('class="admin-overview"', response.text)
-            self.assertIn('class="admin-severity admin-severity--ok"', response.text)
+            self.assertIn('class="admin-severity admin-severity--critical"', response.text)
+            self.assertIn(">긴급</span>", response.text)
             self.assertIn('class="admin-status-checks"', response.text)
             self.assertIn('aria-label="호스트 수집 상태: 정상 수집 중"', response.text)
             self.assertIn('admin-metric admin-metric--missing', response.text)

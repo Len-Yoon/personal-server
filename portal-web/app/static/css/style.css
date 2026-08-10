@@ -1257,6 +1257,14 @@ a {
     background: rgba(245, 158, 11, 0.13);
 }
 
+.admin-status-page .admin-severity--critical,
+.admin-status-page .admin-status-check--critical {
+    color: #fecaca;
+    border-color: rgba(248, 113, 113, 0.72);
+    background: rgba(185, 28, 28, 0.38);
+    box-shadow: 0 0 0 1px rgba(254, 202, 202, 0.14), 0 0 28px rgba(248, 113, 113, 0.18);
+}
+
 .admin-status-page .admin-severity--unavailable,
 .admin-status-page .admin-status-check--unavailable {
     color: #fecaca;
