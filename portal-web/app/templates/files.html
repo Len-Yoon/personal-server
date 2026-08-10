@@ -45,59 +45,92 @@
         </div>
     </div>
 
-    <div class="desktop-toolbar">
-        <button id="download-selection" type="button" disabled>다운로드</button>
-        <button id="new-folder" type="button">새 폴더</button>
-        <button id="pick-files" type="button">업로드</button>
-        <button id="delete-selection" type="button">삭제</button>
-        <button id="clear-selection" type="button">선택 해제</button>
-        <span><strong id="selected-count">0</strong>개 선택됨</span>
+    <div class="desktop-toolbar file-command-bar" role="toolbar" aria-label="파일 명령">
+        <div class="command-actions" role="group" aria-label="선택 항목 작업">
+            <button id="download-selection" type="button" disabled>다운로드</button>
+            <button id="new-folder" type="button">새 폴더</button>
+            <button id="pick-files" type="button">업로드</button>
+            <button id="delete-selection" type="button">삭제</button>
+            <button id="clear-selection" type="button">선택 해제</button>
+        </div>
+        <label class="file-search-control" for="file-search">
+            <span class="sr-only">파일 또는 폴더 검색</span>
+            <input id="file-search" type="search" placeholder="파일 또는 폴더 검색" autocomplete="off">
+        </label>
+        <label class="file-sort-control" for="file-sort">
+            <span>정렬</span>
+            <select id="file-sort">
+                <option value="name">이름</option>
+                <option value="modified">수정한 날짜</option>
+            </select>
+        </label>
+        <div class="view-toggle" role="group" aria-label="보기 방식">
+            <button type="button" data-view-mode="icons" aria-pressed="true">아이콘</button>
+            <button type="button" data-view-mode="list" aria-pressed="false">목록</button>
+        </div>
+        <span class="selection-summary"><strong id="selected-count">0</strong>개 선택됨</span>
         <input id="file-upload-input" type="file" multiple hidden>
     </div>
+    <p id="file-search-status" class="file-search-status" role="status" aria-live="polite"></p>
 
     {% if directory.parent_path is not none %}
         <a class="up-link" href="/files{% if directory.parent_path %}?path={{ directory.parent_path|urlencode }}{% endif %}">상위 폴더로</a>
     {% endif %}
 
-    <div
-        class="file-grid drop-zone"
-        data-current-path="{{ directory.current_path }}"
-        data-upload-url="/files/uploads"
-    >
-        <div class="drop-overlay">
-            <strong>여기에 놓으면 현재 폴더로 업로드됩니다.</strong>
+    <div class="file-browser">
+        <div
+            class="file-grid drop-zone"
+            data-current-path="{{ directory.current_path }}"
+            data-upload-url="/files/uploads"
+            role="listbox"
+            aria-label="파일과 폴더"
+            aria-multiselectable="true"
+        >
+            {% for folder in directory.directories %}
+                <article
+                    class="file-tile folder-tile folder-row"
+                    tabindex="0"
+                    role="option"
+                    aria-selected="false"
+                    data-folder-path="{{ folder.path }}"
+                    data-open-url="/files?path={{ folder.path|urlencode }}"
+                    data-item-path="{{ folder.path }}"
+                    data-name="{{ folder.name }}"
+                    data-modified="{{ folder.modified_at }}"
+                >
+                    <div class="tile-icon folder-icon" aria-hidden="true"></div>
+
+                    <div class="tile-body">
+                        <strong title="{{ folder.name }}">{{ folder.name }}</strong>
+                        <span>폴더</span>
+                    </div>
+                </article>
+            {% endfor %}
+
+            {% for file in directory.files %}
+                <article
+                    class="file-tile"
+                    tabindex="0"
+                    role="option"
+                    aria-selected="false"
+                    data-open-url="/files/download?path={{ file.path|urlencode }}"
+                    data-item-path="{{ file.path }}"
+                    data-name="{{ file.name }}"
+                    data-modified="{{ file.modified_at }}"
+                >
+                    <div class="tile-icon document-icon" aria-hidden="true"></div>
+
+                    <div class="tile-body">
+                        <strong title="{{ file.name }}">{{ file.name }}</strong>
+                        <span>파일</span>
+                    </div>
+                </article>
+            {% endfor %}
         </div>
 
-        {% for folder in directory.directories %}
-            <article
-                class="file-tile folder-tile folder-row"
-                tabindex="0"
-                data-folder-path="{{ folder.path }}"
-                data-open-url="/files?path={{ folder.path|urlencode }}"
-                data-item-path="{{ folder.path }}"
-            >
-                <div class="tile-icon folder-icon" aria-hidden="true"></div>
-
-                <div class="tile-body">
-                    <strong title="{{ folder.name }}">{{ folder.name }}</strong>
-                </div>
-            </article>
-        {% endfor %}
-
-        {% for file in directory.files %}
-            <article
-                class="file-tile"
-                tabindex="0"
-                data-open-url="/files/download?path={{ file.path|urlencode }}"
-                data-item-path="{{ file.path }}"
-            >
-                <div class="tile-icon document-icon" aria-hidden="true"></div>
-
-                <div class="tile-body">
-                    <strong title="{{ file.name }}">{{ file.name }}</strong>
-                </div>
-            </article>
-        {% endfor %}
+        <div class="drop-overlay" aria-hidden="true">
+            <strong>여기에 놓으면 현재 폴더로 업로드됩니다.</strong>
+        </div>
 
         {% if not directory.directories and not directory.files %}
             <div class="empty-state">
@@ -110,6 +143,7 @@
 
 <script>
 const dropZone = document.querySelector(".drop-zone");
+const fileBrowser = document.querySelector(".file-browser");
 const fileInput = document.querySelector("#file-upload-input");
 
 if (dropZone) {
@@ -117,10 +151,10 @@ if (dropZone) {
     const uploadUrl = dropZone.dataset.uploadUrl;
     let dragDepth = 0;
 
-    const showDrop = () => dropZone.classList.add("drag-over");
+    const showDrop = () => fileBrowser?.classList.add("drag-over");
     const hideDrop = () => {
-        dropZone.classList.remove("drag-over");
-        dropZone.classList.remove("folder-target-over");
+        fileBrowser?.classList.remove("drag-over");
+        fileBrowser?.classList.remove("folder-target-over");
         document.querySelectorAll(".folder-row.folder-drag-over").forEach((row) => {
             row.classList.remove("folder-drag-over");
         });
@@ -140,10 +174,10 @@ if (dropZone) {
                 }
             });
             if (folderRow) {
-                dropZone.classList.add("folder-target-over");
+                fileBrowser?.classList.add("folder-target-over");
                 folderRow.classList.add("folder-drag-over");
             } else {
-                dropZone.classList.remove("folder-target-over");
+                fileBrowser?.classList.remove("folder-target-over");
             }
         });
     });
@@ -172,10 +206,58 @@ if (dropZone) {
     });
 }
 
-document.querySelectorAll(".file-tile").forEach((tile) => {
+const selectedCount = document.querySelector("#selected-count");
+const clearSelection = document.querySelector("#clear-selection");
+const downloadSelection = document.querySelector("#download-selection");
+const deleteSelection = document.querySelector("#delete-selection");
+const newFolder = document.querySelector("#new-folder");
+const pickFiles = document.querySelector("#pick-files");
+const fileSearch = document.querySelector("#file-search");
+const fileSort = document.querySelector("#file-sort");
+const fileSearchStatus = document.querySelector("#file-search-status");
+const viewButtons = Array.from(document.querySelectorAll("[data-view-mode]"));
+const viewPreferenceKey = "file-vault-view-mode";
+
+function fileTiles() {
+    return Array.from(document.querySelectorAll(".file-tile"));
+}
+
+function selectedTiles() {
+    return fileTiles().filter((tile) => tile.classList.contains("selected"));
+}
+
+function setTileSelected(tile, selected) {
+    tile.classList.toggle("selected", selected);
+    tile.setAttribute("aria-selected", String(selected));
+}
+
+function updateSelectionToolbar() {
+    const count = selectedTiles().length;
+    selectedCount.textContent = count;
+    downloadSelection.disabled = count === 0;
+    deleteSelection.disabled = count === 0;
+    clearSelection.disabled = count === 0;
+}
+
+function clearSelectedTiles() {
+    selectedTiles().forEach((tile) => setTileSelected(tile, false));
+    updateSelectionToolbar();
+}
+
+function focusRelativeTile(tile, direction) {
+    const visibleTiles = fileTiles().filter((item) => !item.hidden);
+    const currentIndex = visibleTiles.indexOf(tile);
+    if (currentIndex === -1 || !visibleTiles.length) {
+        return;
+    }
+    const nextIndex = Math.max(0, Math.min(visibleTiles.length - 1, currentIndex + direction));
+    visibleTiles[nextIndex].focus();
+}
+
+fileTiles().forEach((tile) => {
     tile.addEventListener("click", (event) => {
         event.stopPropagation();
-        tile.classList.toggle("selected");
+        setTileSelected(tile, !tile.classList.contains("selected"));
         updateSelectionToolbar();
     });
 
@@ -185,46 +267,116 @@ document.querySelectorAll(".file-tile").forEach((tile) => {
     });
 
     tile.addEventListener("keydown", (event) => {
-        if (event.key !== "Enter") {
+        if (event.key === "Enter") {
+            window.location.href = tile.dataset.openUrl;
             return;
         }
 
-        window.location.href = tile.dataset.openUrl;
+        if (event.key === " " || event.key === "Spacebar") {
+            event.preventDefault();
+            setTileSelected(tile, !tile.classList.contains("selected"));
+            updateSelectionToolbar();
+            return;
+        }
+
+        if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+            event.preventDefault();
+            focusRelativeTile(tile, 1);
+            return;
+        }
+
+        if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+            event.preventDefault();
+            focusRelativeTile(tile, -1);
+            return;
+        }
+
+        if (event.key === "Escape") {
+            clearSelectedTiles();
+            return;
+        }
+
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+            event.preventDefault();
+            fileTiles().filter((item) => !item.hidden).forEach((item) => setTileSelected(item, true));
+            updateSelectionToolbar();
+        }
     });
 });
 
-const selectedCount = document.querySelector("#selected-count");
-const clearSelection = document.querySelector("#clear-selection");
-const downloadSelection = document.querySelector("#download-selection");
-const deleteSelection = document.querySelector("#delete-selection");
-const newFolder = document.querySelector("#new-folder");
-const pickFiles = document.querySelector("#pick-files");
-
-function selectedTiles() {
-    return Array.from(document.querySelectorAll(".file-tile.selected"));
-}
-
-function updateSelectionToolbar() {
-    const count = selectedTiles().length;
-    selectedCount.textContent = count;
-    const selectedDownloadItems = selectedTiles();
-    downloadSelection.disabled = selectedDownloadItems.length === 0;
-    deleteSelection.disabled = count === 0;
-    clearSelection.disabled = count === 0;
-}
-
 clearSelection?.addEventListener("click", () => {
-    selectedTiles().forEach((tile) => tile.classList.remove("selected"));
-    updateSelectionToolbar();
+    clearSelectedTiles();
 });
 
 dropZone?.addEventListener("click", (event) => {
     if (event.target.closest(".file-tile")) {
         return;
     }
-    selectedTiles().forEach((tile) => tile.classList.remove("selected"));
-    updateSelectionToolbar();
+    clearSelectedTiles();
 });
+
+function updateSearch() {
+    const searchTerm = (fileSearch?.value || "").trim().toLocaleLowerCase();
+    const visibleCount = fileTiles().reduce((count, tile) => {
+        const matches = !searchTerm || tile.dataset.name.toLocaleLowerCase().includes(searchTerm);
+        tile.hidden = !matches;
+        if (!matches && tile.classList.contains("selected")) {
+            setTileSelected(tile, false);
+        }
+        return count + Number(matches);
+    }, 0);
+    fileSearchStatus.textContent = searchTerm ? `${visibleCount}개 항목 표시` : "";
+    updateSelectionToolbar();
+}
+
+function sortTiles() {
+    const sortBy = fileSort?.value || "name";
+    const sortedTiles = fileTiles().sort((left, right) => {
+        if (sortBy === "modified") {
+            const modifiedDifference = Number(right.dataset.modified) - Number(left.dataset.modified);
+            if (modifiedDifference) {
+                return modifiedDifference;
+            }
+        }
+        return left.dataset.name.localeCompare(right.dataset.name, "ko");
+    });
+    sortedTiles.forEach((tile) => dropZone?.append(tile));
+}
+
+function setViewMode(mode) {
+    const normalizedMode = mode === "list" ? "list" : "icons";
+    const isListView = normalizedMode === "list";
+    dropZone?.classList.toggle("list-view", isListView);
+    viewButtons.forEach((button) => {
+        const isActive = button.dataset.viewMode === normalizedMode;
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-pressed", String(isActive));
+    });
+    try {
+        localStorage.setItem(viewPreferenceKey, normalizedMode);
+    } catch (error) {
+        // 보기 방식은 저장하지 못해도 현재 화면에서 계속 적용됩니다.
+    }
+}
+
+fileSearch?.addEventListener("input", updateSearch);
+fileSearch?.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+        fileSearch.value = "";
+        updateSearch();
+        fileSearch.blur();
+    }
+});
+fileSort?.addEventListener("change", sortTiles);
+viewButtons.forEach((button) => {
+    button.addEventListener("click", () => setViewMode(button.dataset.viewMode));
+});
+
+try {
+    setViewMode(localStorage.getItem(viewPreferenceKey) || "icons");
+} catch (error) {
+    setViewMode("icons");
+}
 
 newFolder?.addEventListener("click", async () => {
     const name = prompt("새 폴더 이름");
