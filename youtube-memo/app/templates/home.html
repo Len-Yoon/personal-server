@@ -4,62 +4,46 @@
     <meta charset="UTF-8">
     <title>{{ title }}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=20260706-premium-ui-1">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260810-atlas-ui-1">
 </head>
-<body>
-<div class="background-orb orb-one"></div>
-<div class="background-orb orb-two"></div>
-<div class="background-orb orb-three"></div>
+<body class="memo-atlas home-page">
+<a class="skip-link" href="#main-content">본문으로 건너뛰기</a>
 
-<header class="app-header">
-    <a class="home-pill" href="{{ portal_home_url_for_request(request) }}" target="_top" aria-label="메인으로 이동">
-        <span class="home-icon">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M3 10.8L12 3l9 7.8v9.7a.5.5 0 0 1-.5.5h-5.2a.5.5 0 0 1-.5-.5v-5.4H9.2v5.4a.5.5 0 0 1-.5.5H3.5a.5.5 0 0 1-.5-.5v-9.7z"/>
-            </svg>
-        </span>
-        <span>홈</span>
-    </a>
-
-    <div class="app-brand">
-        <span class="brand-dot"></span>
-        <span>YouTube Memo</span>
-    </div>
+<header class="site-header" aria-label="유튜브 메모장 상단 메뉴">
+    <a class="portal-link" href="{{ portal_home_url_for_request(request) }}" target="_top" aria-label="개인 작업공간 홈으로 이동">← WORKSPACE</a>
+    <a class="wordmark" href="/" aria-label="유튜브 메모장 홈">YOUTUBE <span>MEMO</span></a>
+    <span class="issue-mark" aria-label="개인 아카이브">PRIVATE ARCHIVE</span>
 </header>
 
-<main class="container">
-    <section class="hero">
-        <div class="hero-badge">YOUTUBE MEMO</div>
-        <h1>유튜브 메모장</h1>
-        <p>유튜브 링크를 등록하고 영상별로 메모를 남깁니다.</p>
+<main id="main-content" class="page-shell" tabindex="-1">
+    <section class="masthead" aria-labelledby="page-title">
+        <p class="eyebrow">WATCH · NOTE · RETURN</p>
+        <h1 id="page-title">영상에서 건져 올린<br><em>생각의 좌표.</em></h1>
+        <p class="masthead-copy">보고 있는 장면에 머무르며, 나중에 다시 찾을 수 있는 기록을 남깁니다.</p>
     </section>
 
-    <section class="panel">
-        <div class="section-header">
-            <div>
-                <h2>영상 등록</h2>
-                <p>링크를 넣으면 영상 화면과 메모장이 열립니다.</p>
-            </div>
+    <section class="capture-panel" aria-labelledby="capture-heading">
+        <div class="panel-index" aria-hidden="true">01</div>
+        <div>
+            <p class="eyebrow">NEW REFERENCE</p>
+            <h2 id="capture-heading">영상 추가</h2>
         </div>
-
         <form class="url-form" action="/videos" method="post">
-            <input
-                type="url"
-                name="url"
-                placeholder="https://www.youtube.com/watch?v=..."
-                required
-                autocomplete="off"
-            >
-            <button type="submit">열기</button>
+            <label for="video-url">YouTube 영상 링크</label>
+            <div class="url-control">
+                <input id="video-url" type="url" name="url" placeholder="https://www.youtube.com/watch?v=..." required autocomplete="off">
+                <button type="submit">메모 시작 <span aria-hidden="true">↗</span></button>
+            </div>
         </form>
     </section>
 
-    <section class="panel">
-        <div class="section-header">
+    <section class="collection" aria-labelledby="collection-heading">
+        <div class="collection-header">
             <div>
-                <h2>저장한 영상</h2>
-                <p>{{ videos|length }}개의 영상이 저장되어 있습니다.</p>
+                <p class="eyebrow">YOUR LIBRARY</p>
+                <h2 id="collection-heading">저장한 영상</h2>
             </div>
+            <p class="collection-count"><strong>{{ videos|length }}</strong> ARCHIVED</p>
         </div>
 
         <div class="video-grid">
@@ -67,74 +51,47 @@
                 <article class="video-card">
                     <a class="video-card-link" href="/videos/{{ video.id }}">
                         <div class="thumbnail">
-                            <img
-                                src="https://img.youtube.com/vi/{{ video.youtube_id }}/hqdefault.jpg"
-                                alt=""
-                                loading="lazy"
-                            >
+                            <img src="https://img.youtube.com/vi/{{ video.youtube_id }}/hqdefault.jpg" alt="{{ video.title }} 영상 썸네일" loading="lazy">
+                            <span class="memo-count">{{ video.memo_count }} NOTES</span>
                         </div>
                         <div class="video-card-body">
-                            <span>{{ video.memo_count }}개 메모</span>
                             <h3>{{ video.title }}</h3>
                             <p>{{ video.url }}</p>
+                            <span class="card-link-label">기록 열기 <span aria-hidden="true">→</span></span>
                         </div>
                     </a>
-                    <form
-                        class="protected-delete-form video-card-delete-form"
-                        action="/videos/{{ video.id }}/delete"
-                        method="post"
-                        data-confirm-message="이 영상과 메모를 모두 삭제할까요?"
-                        data-error-message="영상 삭제에 실패했습니다."
-                    >
+                    <form class="protected-delete-form video-card-delete-form" action="/videos/{{ video.id }}/delete" method="post" data-confirm-message="이 영상과 메모를 모두 삭제할까요?" data-error-message="영상 삭제에 실패했습니다.">
                         <input type="hidden" name="delete_password">
                         <button class="danger-button" type="submit">삭제</button>
                     </form>
                 </article>
             {% else %}
                 <article class="empty-card">
+                    <p class="eyebrow">EMPTY SHELF</p>
                     <h3>아직 저장한 영상이 없습니다.</h3>
-                    <p>위 입력창에 YouTube 링크를 넣어 첫 메모장을 열어보세요.</p>
+                    <p>위 입력창에 YouTube 링크를 넣어 첫 번째 기록을 시작하세요.</p>
                 </article>
             {% endfor %}
         </div>
     </section>
 </main>
 
-<footer class="footer">
-    <span>youtube-memo</span>
-    <span>Len Private Workspace</span>
+<footer class="site-footer">
+    <span>YOUTUBE MEMO / PRIVATE ARCHIVE</span>
+    <span>{{ videos|length }} VIDEO{{ '' if videos|length == 1 else 'S' }}</span>
 </footer>
 <script>
 document.querySelectorAll(".protected-delete-form").forEach((form) => {
     form.addEventListener("submit", async (event) => {
         event.preventDefault();
-
         const password = window.prompt("삭제 비밀번호를 입력해주세요.");
-        if (!password) {
-            return;
-        }
-
-        if (!window.confirm(form.dataset.confirmMessage || "삭제할까요?")) {
-            return;
-        }
-
+        if (!password || !window.confirm(form.dataset.confirmMessage || "삭제할까요?")) return;
         form.querySelector("input[name='delete_password']").value = password;
-
         try {
-            const response = await fetch(form.action, {
-                method: "POST",
-                body: new FormData(form),
-            });
-
-            if (!response.ok) {
-                window.alert(form.dataset.errorMessage || "삭제에 실패했습니다.");
-                return;
-            }
-
+            const response = await fetch(form.action, { method: "POST", body: new FormData(form) });
+            if (!response.ok) throw new Error("delete failed");
             window.location.href = response.url || window.location.href;
-        } catch (error) {
-            window.alert(form.dataset.errorMessage || "삭제에 실패했습니다.");
-        }
+        } catch (error) { window.alert(form.dataset.errorMessage || "삭제에 실패했습니다."); }
     });
 });
 </script>
