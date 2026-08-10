@@ -1,6 +1,7 @@
 import importlib
 import os
 import unittest
+from datetime import datetime
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -149,6 +150,27 @@ class PortalDashboardTests(unittest.TestCase):
         self.assertEqual(service_url("NEWS_SERVICE_URL", "portal.len.pe.kr", ""), "https://news.len.pe.kr")
         self.assertEqual(service_url("YOUTUBE_MEMO_URL", "portal.len.pe.kr", ""), "https://memo.len.pe.kr")
         self.assertEqual(service_url("BOOK_MEMO_URL", "portal.len.pe.kr", ""), "https://books.len.pe.kr")
+
+    def test_dashboard_renders_editorial_atlas_with_existing_entry_points(self):
+        """Fails if the dashboard stops exposing its Atlas entry-point contract."""
+        app = self.load_app()
+
+        with TestClient(app) as client:
+            response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('class="atlas-body"', response.text)
+        self.assertIn(f"PRIVATE WORKSPACE · {datetime.now().year}", response.text)
+        for url in ("/news", "/memo", "/books", "/files", "/admin/status"):
+            self.assertIn(f'href="{url}"', response.text)
+        self.assertIn('data-service-status="나중에"', response.text)
+        self.assertIn('aria-disabled="true"', response.text)
+        self.assertIn('class="atlas-search global-search"', response.text)
+        self.assertIn('name="q"', response.text)
+        self.assertIn('data-track-event="global_search_submitted"', response.text)
+        self.assertIn('class="atlas-service-grid"', response.text)
+        self.assertIn('class="atlas-service-card"', response.text)
+        self.assertIn('data-track-event="service_opened"', response.text)
 
     def test_admin_status_context_combines_server_and_security_data(self):
         prepare_service_import("portal-web")

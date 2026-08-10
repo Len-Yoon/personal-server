@@ -7,18 +7,23 @@
 
     <link rel="stylesheet" href="/static/css/style.css?v=20260706-premium-ui-1">
 </head>
-<body>
+<body class="{{ body_class|default('') }}">
 <div class="background-orb orb-one"></div>
 <div class="background-orb orb-two"></div>
 <div class="background-orb orb-three"></div>
 
-<main class="container">
+<main class="container {{ main_class|default('') }}">
     {% block content %}{% endblock %}
 </main>
 
-<footer class="footer">
-    <span>personal-server</span>
-    <span>Len Private Workspace</span>
+<footer class="footer{% if body_class|default('') == 'atlas-body' %} atlas-footer{% endif %}">
+    {% if body_class|default('') == "atlas-body" %}
+        <span>LOCAL · PRIVATE · FOCUSED</span>
+        <span>PERSONAL SERVER</span>
+    {% else %}
+        <span>personal-server</span>
+        <span>Len Private Workspace</span>
+    {% endif %}
 </footer>
 </body>
 </html>

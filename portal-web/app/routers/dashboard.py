@@ -1,6 +1,7 @@
 import os
 import secrets
 import ipaddress
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Body, Form, Header, HTTPException, Request
@@ -93,6 +94,9 @@ def dashboard(request: Request, q: str = ""):
         {
             "request": request,
             "title": "Len의 개인서버",
+            "body_class": "atlas-body",
+            "main_class": "atlas-main",
+            "current_year": datetime.now().year,
             "services": services,
             "demo_mode": os.getenv("DEMO_MODE", "").lower() in {"1", "true", "yes", "on"},
             "query": q.strip(),
