@@ -24,4 +24,16 @@
 
 ## 독립 검토
 
-- 검토 요청 완료. 검토 결과 및 중요도별 조치 사항은 수신 후 본 문서에 추가 예정.
+| 구분 | 검토 결과 | 조치 |
+|---|---|---|
+| Critical | 없음 | 해당 없음 |
+| Important | 포커스 윤곽 대비 부족 | 잉크색 고대비 이중 윤곽으로 변경함 |
+| Important | 도서 검색 입력의 프로그래밍 방식 레이블 누락 | `label[for]` 및 입력 `id` 추가, 계약 테스트로 보호함 |
+| Minor | 820px 이하 상세 헤더의 3개 항목 배치 불안정 | 상세 페이지 헤더에 3열 그리드 적용함 |
+
+## 최종 검증
+
+| 항목 | 결과 |
+|---|---|
+| UI 계약 및 서비스 테스트 | `python3 -m unittest tests.book_memo.test_ui_contract tests.book_memo.test_book_service -v` — 7건 통과 |
+| 공백 오류 검사 | `git diff --check` — 오류 없음 |

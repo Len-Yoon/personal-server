@@ -32,7 +32,9 @@
         </div>
 
         <form class="search-form" action="/" method="get">
+            <label class="sr-only" for="book-query">책 검색어</label>
             <input
+                id="book-query"
                 type="search"
                 name="q"
                 value="{{ query }}"

@@ -42,6 +42,8 @@ class BookMemoUiContractTests(unittest.TestCase):
         self.assertIn('href="#main-content"', response.text)
         self.assertIn('<main id="main-content"', response.text)
         self.assertIn('href="https://len.pe.kr/"', response.text)
+        self.assertIn('<label class="sr-only" for="book-query">책 검색어</label>', response.text)
+        self.assertIn('id="book-query"', response.text)
         self.assertIn('action="/" method="get"', response.text)
         self.assertIn('name="q"', response.text)
         self.assertIn('class="collection-header"', response.text)
