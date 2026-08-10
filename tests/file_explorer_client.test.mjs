@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import test from "node:test";
 
 const template = readFileSync(resolve("portal-web/app/templates/files.html"), "utf8");
+const stylesheet = readFileSync(resolve("portal-web/app/static/css/style.css"), "utf8");
 const clientScript = template.match(/<script>([\s\S]*?)<\/script>/)?.[1];
 
 if (!clientScript) {
@@ -85,11 +86,11 @@ class SetClassList {
 function bootFileExplorer(savedView = "list") {
     const folder = new TestElement({
         classes: ["file-tile", "folder-tile", "folder-row"],
-        dataset: { name: "자료", modified: "1" },
+        dataset: { name: "A자료", modified: "1" },
     });
     const report = new TestElement({
         classes: ["file-tile"],
-        dataset: { name: "보고서.txt", modified: "2" },
+        dataset: { name: "B보고서.txt", modified: "2" },
     });
     const dropZone = new TestElement({ classes: ["drop-zone"] });
     dropZone.children = [folder, report];
@@ -139,11 +140,21 @@ function bootFileExplorer(savedView = "list") {
     return { dropZone, elements, folder, icons, list, report };
 }
 
-test("파일 탐색기 클라이언트 동작은 검색·정렬·보기 복원·키보드 선택을 유지한다", () => {
-    const { dropZone, elements, folder, list, report } = bootFileExplorer();
+test("파일 탐색기 클라이언트 동작은 검색·정렬·보기 전환·키보드 선택을 유지한다", () => {
+    const { dropZone, elements, folder, icons, list, report } = bootFileExplorer();
 
     assert.equal(dropZone.classList.contains("list-view"), true);
     assert.equal(list.getAttribute("aria-pressed"), "true");
+
+    icons.dispatch("click");
+    assert.equal(dropZone.classList.contains("list-view"), false);
+    assert.equal(icons.getAttribute("aria-pressed"), "true");
+    assert.equal(globalThis.localStorage.value, "icons");
+
+    list.dispatch("click");
+    assert.equal(dropZone.classList.contains("list-view"), true);
+    assert.equal(list.getAttribute("aria-pressed"), "true");
+    assert.equal(globalThis.localStorage.value, "list");
 
     elements["#file-search"].value = "보고";
     elements["#file-search"].dispatch("input");
@@ -167,4 +178,19 @@ test("파일 탐색기 클라이언트 동작은 검색·정렬·보기 복원·
     elements["#file-search"].dispatch("input");
     report.dispatch("keydown", { key: "ArrowDown" });
     assert.equal(globalThis.document.activeElement, folder);
+
+    elements["#file-sort"].value = "name";
+    elements["#file-sort"].dispatch("change");
+    assert.deepEqual(dropZone.children, [folder, report]);
+});
+
+test("파일 탐색기 목록 보기는 기존 파일 타일을 행 형태로 표시한다", () => {
+    const listGridRule = stylesheet.match(/\.file-grid\.list-view\s*\{([^}]*)\}/)?.[1] || "";
+    const listTileRule = stylesheet.match(/\.file-grid\.list-view \.file-tile\s*\{([^}]*)\}/)?.[1] || "";
+    const listTypeRule = stylesheet.match(/\.file-grid\.list-view \.tile-body span\s*\{([^}]*)\}/)?.[1] || "";
+
+    assert.match(listGridRule, /display:\s*flex/);
+    assert.match(listTileRule, /width:\s*100%/);
+    assert.match(listTileRule, /flex-direction:\s*row/);
+    assert.match(listTypeRule, /display:\s*inline/);
 });

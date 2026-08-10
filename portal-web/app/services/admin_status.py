@@ -14,7 +14,7 @@ def format_status_checked_at(value: str) -> str:
     try:
         parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
     except ValueError:
-        return raw_value
+        return "unknown"
 
     return parsed.astimezone(SEOUL_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S KST")
 

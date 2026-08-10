@@ -34,7 +34,10 @@
 
     <section class="news-list saved-list">
         {% for item in recent_news %}
-            <article class="news-card">
+            {% set stored_relevance = item.nasdaq_relevance if item.category == "KR_WORLD" else none %}
+            {% set relevance = stored_relevance if stored_relevance is mapping and stored_relevance.level in ["alert", "archive"] else none %}
+            {% set relevance_reasons = relevance.reasons if relevance and relevance.reasons is sequence and relevance.reasons is not string and relevance.reasons is not mapping else [] %}
+            <article class="news-card"{% if relevance %} data-news-alert-status="{{ relevance.level }}"{% endif %}>
                 <div class="news-meta-row">
                     <span class="status-badge">{{ item.category }}</span>
                     {% for topic in item.topics or ["세계동향"] %}
@@ -43,6 +46,17 @@
                     <span>{{ item.source }}</span>
                     <span>{{ item.collected_at|news_datetime }}</span>
                 </div>
+
+                {% if relevance %}
+                    <div class="news-meta-row" aria-label="알림 분류">
+                        <span class="status-badge">
+                            {{ "텔레그램 알림 대상" if relevance.level == "alert" else "보관 전용" }}
+                        </span>
+                        {% for reason in relevance_reasons %}
+                            <span>분류 사유: {{ reason }}</span>
+                        {% endfor %}
+                    </div>
+                {% endif %}
 
                 <h3>{{ item.title_ko }}</h3>
 
@@ -59,7 +73,9 @@
                 {% endif %}
 
                 <div class="saved-card-actions">
-                    <a class="article-link" href="{{ item.url }}" target="_blank">
+                    {% set article_url = item.url|string %}
+                    {% set safe_article_url = article_url if article_url[:7]|lower == "http://" or article_url[:8]|lower == "https://" else "#" %}
+                    <a class="article-link" href="{{ safe_article_url }}" target="_blank" rel="noopener noreferrer">
                         원문 보기 →
                     </a>
                 </div>

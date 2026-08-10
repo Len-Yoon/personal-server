@@ -192,7 +192,7 @@ def admin_status_page(request: Request, password: str = Form(default="")):
             "authenticated": True,
             "error": "",
             "status_checked_at": format_status_checked_at(
-                str((system_status.get("host") or {}).get("captured_at", ""))
+                str((system_status.get("host") or {}).get("captured_at") or "")
             ),
             "portal_home_url": portal_home_url(_request_host(request)),
             **context,

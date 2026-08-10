@@ -204,6 +204,7 @@ class PortalDashboardTests(unittest.TestCase):
             "2026-07-09 10:02:03 KST",
         )
         self.assertEqual(format_status_checked_at(""), "unknown")
+        self.assertEqual(format_status_checked_at("not-a-timestamp"), "unknown")
 
     def test_admin_status_login_disables_cache(self):
         app = self.load_app()
@@ -228,6 +229,115 @@ class PortalDashboardTests(unittest.TestCase):
             self.assertEqual(response.headers["cache-control"], "no-store, no-cache, must-revalidate, max-age=0")
             self.assertEqual(response.headers["pragma"], "no-cache")
             self.assertEqual(response.headers["expires"], "0")
+        finally:
+            os.environ.pop("FILE_MANAGER_PASSWORD", None)
+
+    def test_admin_status_page_renders_actual_host_collection_time(self):
+        """Fails if the page substitutes the dashboard request time for the host sample time."""
+        os.environ["FILE_MANAGER_PASSWORD"] = "secret"
+        try:
+            app = self.load_app()
+            system_status = {
+                "captured_at": "2026-07-09T01:02:03+00:00",
+                "overall_status": "ok",
+                "host": {
+                    "captured_at": "2026-07-09T00:40:00+00:00",
+                    "cpu_percent": 12,
+                    "memory_percent": 34,
+                    "disk_percent": 56,
+                    "source": "agent",
+                },
+                "disk": {"percent": 56, "level": "ok"},
+                "files": {"file_count": 2, "total_bytes": 100},
+                "backup": {"latest_name": "", "status": "ok", "status_reason": "backup_recent"},
+                "containers": [],
+                "status_checks": [],
+                "warnings": [],
+            }
+            security = {
+                "headers": [],
+                "file_policy": {
+                    "max_upload_mb": 50,
+                    "blocked_extensions": [],
+                    "allowed_extensions": [],
+                },
+                "log_files": [],
+                "recent_events": [],
+                "log_path": "/tmp/security.log",
+            }
+
+            with patch(
+                "app.routers.dashboard.get_dashboard_status",
+                return_value=system_status,
+            ), patch("app.routers.dashboard.get_service_health", return_value=[]), patch(
+                "app.routers.dashboard.security_status",
+                return_value=security,
+            ):
+                with TestClient(app) as client:
+                    response = client.post("/admin/status", data={"password": "secret"})
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("호스트 수집 시각:", response.text)
+            self.assertIn(
+                '<time datetime="2026-07-09T00:40:00+00:00">2026-07-09 09:40:00 KST</time>',
+                response.text,
+            )
+            self.assertNotIn("2026-07-09 10:02:03 KST", response.text)
+        finally:
+            os.environ.pop("FILE_MANAGER_PASSWORD", None)
+
+    def test_admin_status_page_shows_unknown_without_host_collection_time(self):
+        """Fails if missing host timestamps are presented as a misleading request timestamp."""
+        os.environ["FILE_MANAGER_PASSWORD"] = "secret"
+        try:
+            app = self.load_app()
+            system_status = {
+                "captured_at": "2026-07-09T01:02:03+00:00",
+                "overall_status": "unavailable",
+                "host": {
+                    "captured_at": None,
+                    "cpu_percent": None,
+                    "memory_percent": None,
+                    "disk_percent": None,
+                    "source": "unavailable",
+                },
+                "disk": {"percent": None, "level": "unknown"},
+                "files": {"file_count": 0, "total_bytes": 0},
+                "backup": {"latest_name": "", "status": "ok", "status_reason": "backup_recent"},
+                "containers": [],
+                "status_checks": [],
+                "warnings": ["system_agent_unavailable"],
+            }
+            security = {
+                "headers": [],
+                "file_policy": {
+                    "max_upload_mb": 50,
+                    "blocked_extensions": [],
+                    "allowed_extensions": [],
+                },
+                "log_files": [],
+                "recent_events": [],
+                "log_path": "/tmp/security.log",
+            }
+
+            with patch(
+                "app.routers.dashboard.get_dashboard_status",
+                return_value=system_status,
+            ), patch("app.routers.dashboard.get_service_health", return_value=[]), patch(
+                "app.routers.dashboard.security_status",
+                return_value=security,
+            ):
+                with TestClient(app) as client:
+                    response = client.post("/admin/status", data={"password": "secret"})
+                    system_status["host"]["captured_at"] = "not-a-timestamp"
+                    invalid_response = client.post("/admin/status", data={"password": "secret"})
+
+            for status_response in (response, invalid_response):
+                self.assertEqual(status_response.status_code, 200)
+                self.assertIn("호스트 수집 시각:", status_response.text)
+                self.assertIn("<time>unknown</time>", status_response.text)
+                self.assertNotIn("datetime=", status_response.text)
+                self.assertNotIn("2026-07-09 10:02:03 KST", status_response.text)
         finally:
             os.environ.pop("FILE_MANAGER_PASSWORD", None)
 
