@@ -73,6 +73,26 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
         self.assertIn('name="delete_password"', response.text)
         self.assertIn('class="memo-timeline"', response.text)
 
+    def test_search_api_keeps_saved_video_and_memo_results_available(self):
+        """Fails if a UI-only change accidentally removes the public search contract."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            import app.services.memo_service as memo_service
+
+            video = memo_service.create_or_get_video(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                title_fetcher=lambda _youtube_id, _url: "검색 대상 영상",
+            )
+            memo_service.create_memo(video["id"], "검색 제목", "검색 가능한 고유 메모 내용")
+
+            with TestClient(app) as client:
+                response = client.get("/api/search", params={"q": "고유 메모"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            {"title": "검색 제목", "description": "검색 대상 영상", "snippet": "검색 가능한 고유 메모 내용", "meta": "YouTube 메모", "url": f"/videos/{video['id']}"},
+            response.json()["results"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
