@@ -92,11 +92,12 @@ function bootFileExplorer(savedView = "list") {
         classes: ["file-tile"],
         dataset: { name: "B보고서.txt", modified: "2" },
     });
+    const fileGrid = new TestElement({ classes: ["file-grid"] });
+    fileGrid.children = [folder, report];
     const dropZone = new TestElement({ classes: ["drop-zone"] });
-    dropZone.children = [folder, report];
     const elements = {
         ".drop-zone": dropZone,
-        ".file-browser": new TestElement({ classes: ["file-browser"] }),
+        ".file-grid": fileGrid,
         "#file-upload-input": new TestElement(),
         "#selected-count": new TestElement(),
         "#clear-selection": new TestElement(),
@@ -117,7 +118,7 @@ function bootFileExplorer(savedView = "list") {
         },
         querySelectorAll(selector) {
             if (selector === ".file-tile") {
-                return dropZone.children;
+                return fileGrid.children;
             }
             if (selector === "[data-view-mode]") {
                 return [icons, list];
@@ -137,22 +138,34 @@ function bootFileExplorer(savedView = "list") {
     globalThis.window = { location: { href: "" } };
 
     eval(clientScript);
-    return { dropZone, elements, folder, icons, list, report };
+    return { dropZone, elements, fileGrid, folder, icons, list, report };
 }
 
-test("파일 탐색기 클라이언트 동작은 검색·정렬·보기 전환·키보드 선택을 유지한다", () => {
-    const { dropZone, elements, folder, icons, list, report } = bootFileExplorer();
+test("드롭 상태는 이벤트 대상인 드롭 존 자체에 표시된다", () => {
+    const { dropZone, fileGrid } = bootFileExplorer();
 
-    assert.equal(dropZone.classList.contains("list-view"), true);
+    dropZone.dispatch("dragenter", { target: { closest: () => null } });
+
+    assert.equal(dropZone.classList.contains("drag-over"), true);
+    assert.equal(fileGrid.classList.contains("drag-over"), false);
+
+    dropZone.dispatch("dragleave", { target: { closest: () => null } });
+    assert.equal(dropZone.classList.contains("drag-over"), false);
+});
+
+test("파일 탐색기 클라이언트 동작은 검색·정렬·보기 전환·키보드 선택을 유지한다", () => {
+    const { elements, fileGrid, folder, icons, list, report } = bootFileExplorer();
+
+    assert.equal(fileGrid.classList.contains("list-view"), true);
     assert.equal(list.getAttribute("aria-pressed"), "true");
 
     icons.dispatch("click");
-    assert.equal(dropZone.classList.contains("list-view"), false);
+    assert.equal(fileGrid.classList.contains("list-view"), false);
     assert.equal(icons.getAttribute("aria-pressed"), "true");
     assert.equal(globalThis.localStorage.value, "icons");
 
     list.dispatch("click");
-    assert.equal(dropZone.classList.contains("list-view"), true);
+    assert.equal(fileGrid.classList.contains("list-view"), true);
     assert.equal(list.getAttribute("aria-pressed"), "true");
     assert.equal(globalThis.localStorage.value, "list");
 
@@ -164,7 +177,7 @@ test("파일 탐색기 클라이언트 동작은 검색·정렬·보기 전환·
 
     elements["#file-sort"].value = "modified";
     elements["#file-sort"].dispatch("change");
-    assert.deepEqual(dropZone.children, [report, folder]);
+    assert.deepEqual(fileGrid.children, [report, folder]);
 
     report.dispatch("keydown", { key: " " });
     assert.equal(report.getAttribute("aria-selected"), "true");
@@ -181,7 +194,7 @@ test("파일 탐색기 클라이언트 동작은 검색·정렬·보기 전환·
 
     elements["#file-sort"].value = "name";
     elements["#file-sort"].dispatch("change");
-    assert.deepEqual(dropZone.children, [folder, report]);
+    assert.deepEqual(fileGrid.children, [folder, report]);
 });
 
 test("파일 탐색기 목록 보기는 기존 파일 타일을 행 형태로 표시한다", () => {

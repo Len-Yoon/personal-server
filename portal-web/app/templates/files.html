@@ -77,11 +77,13 @@
         <a class="up-link" href="/files{% if directory.parent_path %}?path={{ directory.parent_path|urlencode }}{% endif %}">상위 폴더로</a>
     {% endif %}
 
-    <div class="file-browser">
+    <div
+        class="file-browser drop-zone"
+        data-current-path="{{ directory.current_path }}"
+        data-upload-url="/files/uploads"
+    >
         <div
-            class="file-grid drop-zone"
-            data-current-path="{{ directory.current_path }}"
-            data-upload-url="/files/uploads"
+            class="file-grid"
             role="listbox"
             aria-label="파일과 폴더"
             aria-multiselectable="true"
@@ -143,7 +145,7 @@
 
 <script>
 const dropZone = document.querySelector(".drop-zone");
-const fileBrowser = document.querySelector(".file-browser");
+const fileGrid = document.querySelector(".file-grid");
 const fileInput = document.querySelector("#file-upload-input");
 
 if (dropZone) {
@@ -151,10 +153,10 @@ if (dropZone) {
     const uploadUrl = dropZone.dataset.uploadUrl;
     let dragDepth = 0;
 
-    const showDrop = () => fileBrowser?.classList.add("drag-over");
+    const showDrop = () => dropZone.classList.add("drag-over");
     const hideDrop = () => {
-        fileBrowser?.classList.remove("drag-over");
-        fileBrowser?.classList.remove("folder-target-over");
+        dropZone.classList.remove("drag-over");
+        dropZone.classList.remove("folder-target-over");
         document.querySelectorAll(".folder-row.folder-drag-over").forEach((row) => {
             row.classList.remove("folder-drag-over");
         });
@@ -174,10 +176,10 @@ if (dropZone) {
                 }
             });
             if (folderRow) {
-                fileBrowser?.classList.add("folder-target-over");
+                dropZone.classList.add("folder-target-over");
                 folderRow.classList.add("folder-drag-over");
             } else {
-                fileBrowser?.classList.remove("folder-target-over");
+                dropZone.classList.remove("folder-target-over");
             }
         });
     });
@@ -340,13 +342,13 @@ function sortTiles() {
         }
         return left.dataset.name.localeCompare(right.dataset.name, "ko");
     });
-    sortedTiles.forEach((tile) => dropZone?.append(tile));
+    sortedTiles.forEach((tile) => fileGrid?.append(tile));
 }
 
 function setViewMode(mode) {
     const normalizedMode = mode === "list" ? "list" : "icons";
     const isListView = normalizedMode === "list";
-    dropZone?.classList.toggle("list-view", isListView);
+    fileGrid?.classList.toggle("list-view", isListView);
     viewButtons.forEach((button) => {
         const isActive = button.dataset.viewMode === normalizedMode;
         button.classList.toggle("is-active", isActive);

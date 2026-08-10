@@ -53,9 +53,57 @@ class NasdaqRelevanceTests(unittest.TestCase):
 
         self.assertEqual(result["level"], "archive")
 
-    def test_classifies_semiconductor_export_restriction_as_alert(self):
-        """Fails if a semiconductor supply-shock event is not alerted."""
+    def test_classifies_possible_semiconductor_export_restriction_as_archive(self):
+        """Fails if a possible export restriction is treated as a confirmed event."""
         result = classify_nasdaq_relevance({"title": "반도체 수출 제한 확대 가능성"})
+
+        self.assertEqual(result["level"], "archive")
+
+    def test_classifies_semiconductor_shock_outlook_as_archive(self):
+        """Fails if forecasts or commentary trigger semiconductor alerts."""
+        for title in (
+            "반도체 공급 중단 전망",
+            "미국, 칩 수출 통제 가능성 언급",
+            "반도체 수출 제한 강화 검토",
+            "전문가 전망: 반도체 수출 제한 확대",
+            "검토 중인 반도체 수출 제한",
+            "반도체 수출 제한 시행을 검토",
+            "반도체 수출 제한 관련 언급",
+            "반도체 수출 제한에 대한 전망",
+            "반도체 수출 제한 분석",
+            "전망: 미국 반도체 수출 제한 확대",
+            "반도체 공급이 중단될 것으로 예상",
+            "미국, 반도체 수출이 제한될 것으로 전망",
+            "칩 수출 통제가 강화될 것으로 관측",
+            "반도체 공급 중단될 것이라는 우려",
+        ):
+            with self.subTest(title=title):
+                result = classify_nasdaq_relevance({"title": title})
+
+                self.assertEqual(result["level"], "archive")
+
+    def test_classifies_confirmed_semiconductor_shocks_as_alert(self):
+        """Fails if confirmed export restrictions or supply stops are not alerted."""
+        for title in (
+            "미국, 반도체 수출 제한 시행",
+            "공장 화재로 칩 공급 중단",
+            "미국이 반도체 수출을 제한했다",
+            "화재로 반도체 공급이 중단됐다",
+        ):
+            with self.subTest(title=title):
+                result = classify_nasdaq_relevance({"title": title})
+
+                self.assertEqual(result["level"], "alert")
+                self.assertIn("반도체 영향", result["reasons"])
+
+    def test_classifies_confirmed_semiconductor_shock_with_unrelated_outlook_as_alert(self):
+        """Fails if unrelated outlook wording hides a confirmed semiconductor event."""
+        result = classify_nasdaq_relevance(
+            {
+                "title": "미국, 반도체 수출 제한 시행",
+                "summary": "향후 기술주 시장 전망은 불투명하다.",
+            }
+        )
 
         self.assertEqual(result["level"], "alert")
         self.assertIn("반도체 영향", result["reasons"])

@@ -31,15 +31,30 @@ MACRO_OUTLOOK_PATTERNS = (
 MACRO_SCHEDULE_PATTERNS = (
     re.compile(r"발표\s*(?:예정|전|대기|일정)|발표를?\s*앞두고|예정", re.IGNORECASE),
 )
-SEMICONDUCTOR_SHOCK_PATTERNS = (
-    re.compile(
-        r"(?:반도체|칩).{0,40}(?:수출\s*제한|수출\s*통제|제재|공급\s*중단)",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?:수출\s*제한|수출\s*통제|제재|공급\s*중단).{0,40}(?:반도체|칩)",
-        re.IGNORECASE,
-    ),
+SEMICONDUCTOR_SHOCK_SUBJECT_PATTERN = re.compile(
+    r"(?:반도체|칩)", re.IGNORECASE
+)
+SEMICONDUCTOR_SHOCK_EVENT_PATTERN = re.compile(
+    r"(?:수출\s*(?:을|를|이|가)?\s*(?:제한|통제)|제재|공급\s*(?:을|를|이|가)?\s*중단)",
+    re.IGNORECASE,
+)
+SEMICONDUCTOR_SHOCK_OUTLOOK_TERMS = (
+    r"(?:가능성|전망|관측|언급|검토|우려|예상|예측|시사|추진|계획|분석)"
+)
+SEMICONDUCTOR_SHOCK_OUTLOOK_PATTERN = re.compile(
+    r"\s*(?:의|을|를|이|가|은|는|에)?\s*"
+    r"(?:(?:대한|관한|관련(?:한)?)\s*)?"
+    r"(?:(?:확대|강화|도입|시행|추가|재개|장기화)(?:되|될|할)?"
+    r"(?:을|를|이|가|은|는)?\s*)?"
+    r"(?:될|할)?(?:\s*수\s*있다는?)?"
+    r"(?:\s*것(?:으로|이라는?))?\s*"
+    + SEMICONDUCTOR_SHOCK_OUTLOOK_TERMS,
+    re.IGNORECASE,
+)
+SEMICONDUCTOR_SHOCK_LEADING_OUTLOOK_PATTERN = re.compile(
+    SEMICONDUCTOR_SHOCK_OUTLOOK_TERMS
+    + r"(?:\s*중인)?\s*(?:(?::|[-–—])\s*[^,.!?]{0,24})?$",
+    re.IGNORECASE,
 )
 MARKET_SHOCK_PATTERNS = (
     re.compile(
@@ -64,13 +79,9 @@ MARKET_SHOCK_OUTLOOK_PATTERN = re.compile(
 
 def classify_nasdaq_relevance(article: dict) -> dict[str, object]:
     """Classify a news article for alert delivery without mutating the article."""
-    text = " ".join(
-        str(article.get(key) or "")
-        for key in ("title_ko", "title", "summary")
-    ).casefold()
     if _has_confirmed_macro_result(article):
         return {"level": "alert", "reasons": ["연준·금리"]}
-    if _matches(text, SEMICONDUCTOR_SHOCK_PATTERNS):
+    if _has_confirmed_semiconductor_shock(article):
         return {"level": "alert", "reasons": ["반도체 영향"]}
     if _has_confirmed_market_shock(article):
         return {"level": "alert", "reasons": ["미국 기술주 시장 영향"]}
@@ -89,6 +100,31 @@ def _has_confirmed_macro_result(article: dict) -> bool:
             and not _matches(text, MACRO_OUTLOOK_PATTERNS)
             and not _matches(text, MACRO_SCHEDULE_PATTERNS)
         ):
+            return True
+    return False
+
+
+def _has_confirmed_semiconductor_shock(article: dict) -> bool:
+    for field in ("title_ko", "title", "summary"):
+        text = str(article.get(field) or "").casefold()
+        for event_match in SEMICONDUCTOR_SHOCK_EVENT_PATTERN.finditer(text):
+            before_event = text[max(0, event_match.start() - 40) : event_match.start()]
+            after_event = text[event_match.end() : event_match.end() + 40]
+            subject_before = SEMICONDUCTOR_SHOCK_SUBJECT_PATTERN.search(before_event)
+            subject_after = SEMICONDUCTOR_SHOCK_SUBJECT_PATTERN.search(after_event)
+            if not (subject_before or subject_after):
+                continue
+            before_subject = (
+                before_event[: subject_before.start()]
+                if subject_before
+                else before_event
+            )
+            if (
+                SEMICONDUCTOR_SHOCK_OUTLOOK_PATTERN.match(after_event)
+                or SEMICONDUCTOR_SHOCK_LEADING_OUTLOOK_PATTERN.search(before_event)
+                or SEMICONDUCTOR_SHOCK_LEADING_OUTLOOK_PATTERN.search(before_subject)
+            ):
+                continue
             return True
     return False
 

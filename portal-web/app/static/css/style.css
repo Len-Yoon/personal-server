@@ -912,7 +912,11 @@ a {
     transition: border-color 0.18s ease, background 0.18s ease;
 }
 
-.drop-zone.drag-over {
+.drop-zone {
+    position: relative;
+}
+
+.drop-zone.drag-over .file-grid {
     border-color: rgba(147, 197, 253, 0.72);
     background: rgba(96, 165, 250, 0.10);
 }
