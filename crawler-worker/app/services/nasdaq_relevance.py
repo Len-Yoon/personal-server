@@ -51,6 +51,15 @@ MARKET_SHOCK_PATTERNS = (
         re.IGNORECASE,
     ),
 )
+MARKET_SHOCK_SUBJECT_PATTERN = re.compile(
+    r"(?:나스닥|미국\s*기술주)", re.IGNORECASE
+)
+MARKET_SHOCK_EVENT_PATTERN = re.compile(
+    r"(?:거래\s*중단|서킷브레이커|폭락|급락)", re.IGNORECASE
+)
+MARKET_SHOCK_OUTLOOK_PATTERN = re.compile(
+    r"\s*(?:발동\s*)?(?:할\s*)?(?:가능성|전망)", re.IGNORECASE
+)
 
 
 def classify_nasdaq_relevance(article: dict) -> dict[str, object]:
@@ -63,7 +72,7 @@ def classify_nasdaq_relevance(article: dict) -> dict[str, object]:
         return {"level": "alert", "reasons": ["연준·금리"]}
     if _matches(text, SEMICONDUCTOR_SHOCK_PATTERNS):
         return {"level": "alert", "reasons": ["반도체 영향"]}
-    if _matches(text, MARKET_SHOCK_PATTERNS):
+    if _has_confirmed_market_shock(article):
         return {"level": "alert", "reasons": ["미국 기술주 시장 영향"]}
     return {"level": "archive", "reasons": []}
 
@@ -81,4 +90,29 @@ def _has_confirmed_macro_result(article: dict) -> bool:
             and not _matches(text, MACRO_SCHEDULE_PATTERNS)
         ):
             return True
+    return False
+
+
+def _has_confirmed_market_shock(article: dict) -> bool:
+    for field in ("title_ko", "title", "summary"):
+        text = str(article.get(field) or "").casefold()
+        if not _matches(text, MARKET_SHOCK_PATTERNS):
+            continue
+        for event_match in MARKET_SHOCK_EVENT_PATTERN.finditer(text):
+            before_event = text[max(0, event_match.start() - 40) : event_match.start()]
+            after_event = text[event_match.end() : event_match.end() + 40]
+            subject_before = MARKET_SHOCK_SUBJECT_PATTERN.search(before_event)
+            event_can_precede_subject = event_match.group(0).replace(" ", "") in {
+                "거래중단",
+                "서킷브레이커",
+            }
+            subject_after = (
+                event_can_precede_subject
+                and MARKET_SHOCK_SUBJECT_PATTERN.search(after_event)
+            )
+            if (
+                (subject_before or subject_after)
+                and not MARKET_SHOCK_OUTLOOK_PATTERN.match(after_event)
+            ):
+                return True
     return False

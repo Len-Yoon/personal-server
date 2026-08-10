@@ -60,6 +60,75 @@ class NasdaqRelevanceTests(unittest.TestCase):
         self.assertEqual(result["level"], "alert")
         self.assertIn("반도체 영향", result["reasons"])
 
+    def test_classifies_nasdaq_crash_possibility_as_archive(self):
+        """Fails if possible Nasdaq declines are mistaken for confirmed events."""
+        result = classify_nasdaq_relevance({"title": "나스닥 급락 가능성 커져"})
+
+        self.assertEqual(result["level"], "archive")
+
+    def test_classifies_us_tech_crash_outlook_as_archive(self):
+        """Fails if a US tech crash outlook is mistaken for a confirmed event."""
+        result = classify_nasdaq_relevance({"title": "미국 기술주 폭락 전망"})
+
+        self.assertEqual(result["level"], "archive")
+
+    def test_classifies_circuit_breaker_activation_outlook_as_archive(self):
+        """Fails if activation wording separates a circuit breaker from its qualifier."""
+        for title in (
+            "나스닥 서킷브레이커 발동 가능성",
+            "나스닥 서킷브레이커 발동 전망",
+        ):
+            with self.subTest(title=title):
+                result = classify_nasdaq_relevance({"title": title})
+
+                self.assertEqual(result["level"], "archive")
+
+    def test_classifies_confirmed_market_shocks_as_alert(self):
+        """Fails if confirmed crashes or circuit breakers stop producing alerts."""
+        for title in (
+            "나스닥 급락",
+            "미국 기술주 폭락",
+            "나스닥 서킷브레이커 발동",
+        ):
+            with self.subTest(title=title):
+                result = classify_nasdaq_relevance({"title": title})
+
+                self.assertEqual(result["level"], "alert")
+                self.assertIn("미국 기술주 시장 영향", result["reasons"])
+
+    def test_classifies_confirmed_market_shock_with_unrelated_outlook_as_alert(self):
+        """Fails if unrelated outlook wording hides a confirmed market shock."""
+        for title in (
+            "나스닥 서킷브레이커 발동, 향후 시장 전망은 불투명",
+            "나스닥 급락, 연준 금리 인하 가능성 고조",
+        ):
+            with self.subTest(title=title):
+                result = classify_nasdaq_relevance({"title": title})
+
+                self.assertEqual(result["level"], "alert")
+                self.assertIn("미국 기술주 시장 영향", result["reasons"])
+
+    def test_classifies_confirmed_title_when_summary_only_has_outlook_as_alert(self):
+        """Fails if outlook in another field hides a confirmed market shock."""
+        result = classify_nasdaq_relevance(
+            {
+                "title": "나스닥 서킷브레이커 발동",
+                "summary": "향후 시장 전망은 여전히 불투명하다.",
+            }
+        )
+
+        self.assertEqual(result["level"], "alert")
+        self.assertIn("미국 기술주 시장 영향", result["reasons"])
+
+    def test_classifies_confirmed_shock_after_outlook_shock_as_alert(self):
+        """Fails if one qualified shock hides a later confirmed occurrence."""
+        result = classify_nasdaq_relevance(
+            {"title": "나스닥 급락 가능성 경고 뒤 실제 급락"}
+        )
+
+        self.assertEqual(result["level"], "alert")
+        self.assertIn("미국 기술주 시장 영향", result["reasons"])
+
     def test_classifies_macro_result_in_summary_as_alert(self):
         """Fails if classification ignores an article summary."""
         result = classify_nasdaq_relevance(
