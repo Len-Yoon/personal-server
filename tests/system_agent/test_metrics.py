@@ -56,6 +56,58 @@ class SystemAgentMetricsTests(unittest.TestCase):
             self.assertEqual(metrics["host"]["status"], "warning")
             self.assertTrue(any(check["key"] == "host" and check["status"] == "warning" for check in metrics["status_checks"]))
 
+    def test_collect_metrics_uses_default_when_host_stale_setting_is_blank(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("system-agent")
+            root = Path(tempdir)
+            host_file = root / "system" / "host-metrics.json"
+            host_file.parent.mkdir(parents=True)
+            host_file.write_text(
+                json.dumps(
+                    {
+                        "captured_at": datetime.now(timezone.utc).isoformat(),
+                        "cpu_percent": 20.0,
+                        "memory_percent": 40.0,
+                        "disk_percent": 30.0,
+                        "uptime_seconds": 123,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            from app.services.metrics import collect_metrics
+
+            original_value = os.environ.get("HOST_METRICS_STALE_SECONDS")
+            try:
+                os.environ["HOST_METRICS_STALE_SECONDS"] = ""
+                metrics = collect_metrics(data_root=root, host_metrics_path=host_file)
+            finally:
+                if original_value is None:
+                    os.environ.pop("HOST_METRICS_STALE_SECONDS", None)
+                else:
+                    os.environ["HOST_METRICS_STALE_SECONDS"] = original_value
+
+            self.assertEqual(metrics["host"]["status"], "ok")
+
+    def test_collect_metrics_uses_default_when_backup_stale_setting_is_blank(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("system-agent")
+            root = Path(tempdir)
+
+            from app.services.metrics import collect_metrics
+
+            original_value = os.environ.get("BACKUP_STALE_SECONDS")
+            try:
+                os.environ["BACKUP_STALE_SECONDS"] = ""
+                metrics = collect_metrics(data_root=root)
+            finally:
+                if original_value is None:
+                    os.environ.pop("BACKUP_STALE_SECONDS", None)
+                else:
+                    os.environ["BACKUP_STALE_SECONDS"] = original_value
+
+            self.assertFalse(metrics["backup"]["exists"])
+
     def test_collect_metrics_accepts_utf8_bom_host_file(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("system-agent")

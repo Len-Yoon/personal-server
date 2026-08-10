@@ -15,11 +15,22 @@ PROJECT_DATA_ROOT = next(
     Path("/data"),
 )
 DEFAULT_HOST_METRICS_PATH = PROJECT_DATA_ROOT / "system" / "host-metrics.json"
+DEFAULT_HOST_METRICS_STALE_SECONDS = 2100
+DEFAULT_BACKUP_STALE_SECONDS = 172800
 STATUS_ORDER = {
     "ok": 0,
     "warning": 1,
     "critical": 2,
 }
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name, "").strip()
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 
 def collect_metrics(
@@ -32,9 +43,11 @@ def collect_metrics(
     host_metrics_path = host_metrics_path or Path(
         os.getenv("HOST_METRICS_PATH", DEFAULT_HOST_METRICS_PATH)
     )
-    stale_after_seconds = stale_after_seconds or int(os.getenv("HOST_METRICS_STALE_SECONDS", "900"))
-    backup_stale_after_seconds = backup_stale_after_seconds or int(
-        os.getenv("BACKUP_STALE_SECONDS", "172800")
+    stale_after_seconds = stale_after_seconds or _positive_env_int(
+        "HOST_METRICS_STALE_SECONDS", DEFAULT_HOST_METRICS_STALE_SECONDS
+    )
+    backup_stale_after_seconds = backup_stale_after_seconds or _positive_env_int(
+        "BACKUP_STALE_SECONDS", DEFAULT_BACKUP_STALE_SECONDS
     )
 
     warnings: list[str] = []
