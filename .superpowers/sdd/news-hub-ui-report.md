@@ -15,7 +15,7 @@
 - `alert` 기사는 `텔레그램 알림 대상`, `archive` 기사는 `보관 전용`으로 시각 구분함.
 - 저장 뉴스 화면에서도 `KR_WORLD` 기사만 분류 상태를 표시하며, IT·AI 기사는 표시 대상에서 제외함.
 - 자동 새로고침으로 목록이 갱신되는 경우에도 동일한 상태·사유 표시가 유지되도록 클라이언트 렌더링을 반영함.
-- crawler-worker 전체 회귀 48건을 통과함.
+- crawler-worker 전체 회귀 50건을 통과함.
 
 ## TDD 결과
 
@@ -25,7 +25,7 @@
 | GREEN | Jinja 템플릿 및 자동 새로고침 렌더러에 분류 상태·사유 표시 추가 | 대상 테스트 2건 통과 |
 | 검토 보완 RED | 독립 검토에서 확인된 손상된 `reasons` 정수값의 화면 500 회귀 테스트 2건 추가 | 기능 보완 전 2건이 500으로 실패 확인 |
 | 검토 보완 GREEN | 허용 등급의 mapping과 비문자열 sequence 사유만 템플릿에서 렌더링하도록 제한 | 관련 테스트 4건 통과 |
-| 회귀 | `PYTHONPATH=.. python3 -m unittest discover -s ../tests/crawler_worker -p 'test_*.py'` | 48건 통과 |
+| 회귀 | `PYTHONPATH=.. python3 -m unittest discover -s ../tests/crawler_worker -p 'test_*.py'` | 50건 통과 |
 
 ## 상세 변경
 
@@ -44,7 +44,7 @@
 |---|---|---|
 | Important | 손상된 보관 JSON의 `nasdaq_relevance.reasons`가 정수인 경우 Jinja 반복 처리로 두 화면이 500을 반환할 수 있음 | `nasdaq_relevance`를 mapping 및 `alert`/`archive` 허용 등급으로 제한하고, 사유는 mapping·문자열이 아닌 sequence일 때만 반복하도록 보완함. KR_WORLD와 보관함의 500 방지 회귀 테스트 2건을 추가함. |
 
-1차 판정은 보완 전 `Ready-to-merge 아님`이었음. 보완 커밋 후 동일 검토자에게 재검토 요청 예정.
+1차 판정은 보완 전 `Ready-to-merge 아님`이었음. 보완 후 동일 검토자가 재검토하여, 손상된 사유값이 있는 KR_WORLD·보관함 응답의 500 방지 테스트와 템플릿 검증을 확인함. 최종 판정은 `Ready-to-merge`임.
 
 ## 확인 필요 사항
 
