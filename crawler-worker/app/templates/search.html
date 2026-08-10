@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block content %}
-<section class="hero compact news-atlas-hero">
+<section class="hero compact">
     <div class="hero-badge">{{ result.category }}</div>
 
     <h1>{{ result.label }}</h1>
@@ -10,7 +10,7 @@
 </section>
 
 <section
-    class="service-section news-atlas-section"
+    class="service-section"
     data-auto-refresh-seconds="60"
     data-category="{{ result.category }}"
 >
@@ -48,13 +48,7 @@
 
     <section class="news-list" data-news-list>
         {% for article in result.articles %}
-            {% set stored_relevance = article.nasdaq_relevance if result.category == "KR_WORLD" else none %}
-            {% set relevance = stored_relevance if stored_relevance is mapping and stored_relevance.level in ["alert", "archive"] else none %}
-            {% set relevance_reasons = relevance.reasons if relevance and relevance.reasons is sequence and relevance.reasons is not string and relevance.reasons is not mapping else [] %}
-            <article
-                class="news-card{% if relevance %} nasdaq-{{ relevance.level }}{% endif %}"
-                {% if relevance %}data-news-alert-status="{{ relevance.level }}"{% endif %}
-            >
+            <article class="news-card">
                 <div class="news-meta-row">
                     <span class="status-badge">{{ article.provider }}</span>
                     {% for topic in article.topics or ["세계동향"] %}
@@ -65,25 +59,6 @@
                         <span>{{ article.collected_at|news_datetime }}</span>
                     {% endif %}
                 </div>
-
-                {% if relevance %}
-                    <div class="news-classification">
-                        {% if relevance.level == "alert" %}
-                            <span class="nasdaq-status nasdaq-status-alert">텔레그램 알림 대상</span>
-                        {% else %}
-                            <span class="nasdaq-status nasdaq-status-archive">보관 전용</span>
-                        {% endif %}
-
-                        {% if relevance_reasons %}
-                            <div class="nasdaq-reason-row" aria-label="알림 분류 사유">
-                                <span class="nasdaq-reason-label">분류 사유</span>
-                                {% for reason in relevance_reasons %}
-                                    <span class="nasdaq-reason">{{ reason }}</span>
-                                {% endfor %}
-                            </div>
-                        {% endif %}
-                    </div>
-                {% endif %}
 
                 <h3>{{ article.title_ko }}</h3>
                 {% if article.title_original and article.title_original != article.title_ko %}
@@ -198,36 +173,6 @@
         parent.append(element);
     }
 
-    function appendNasdaqClassification(card, relevance) {
-        if (!relevance || !["alert", "archive"].includes(relevance.level)) {
-            return;
-        }
-
-        card.classList.add(`nasdaq-${relevance.level}`);
-        card.dataset.newsAlertStatus = relevance.level;
-
-        const classification = document.createElement("div");
-        classification.className = "news-classification";
-        appendText(
-            classification,
-            "span",
-            `nasdaq-status nasdaq-status-${relevance.level}`,
-            relevance.level === "alert" ? "텔레그램 알림 대상" : "보관 전용",
-        );
-
-        const reasons = Array.isArray(relevance.reasons) ? relevance.reasons.filter(Boolean) : [];
-        if (reasons.length) {
-            const reasonRow = document.createElement("div");
-            reasonRow.className = "nasdaq-reason-row";
-            reasonRow.setAttribute("aria-label", "알림 분류 사유");
-            appendText(reasonRow, "span", "nasdaq-reason-label", "분류 사유");
-            reasons.forEach((reason) => appendText(reasonRow, "span", "nasdaq-reason", reason));
-            classification.append(reasonRow);
-        }
-
-        card.append(classification);
-    }
-
     function renderArticles(articles) {
         const fragment = document.createDocumentFragment();
 
@@ -251,10 +196,6 @@
             appendText(meta, "span", "", article.source);
             appendText(meta, "span", "", formatNewsDate(article.collected_at));
             card.append(meta);
-            appendNasdaqClassification(
-                card,
-                category === "KR_WORLD" ? article.nasdaq_relevance : null,
-            );
 
             appendText(card, "h3", "", article.title_ko || article.title || "뉴스");
             if (article.title_original && article.title_original !== article.title_ko) {

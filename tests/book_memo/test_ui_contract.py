@@ -31,25 +31,23 @@ class BookMemoUiContractTests(unittest.TestCase):
             else:
                 os.environ["BOOK_MEMO_DB_PATH"] = previous_db_path
 
-    def test_home_keeps_book_search_and_portal_return_in_accessible_atlas_layout(self):
-        """Fails when a visual refactor disconnects search or keyboard landmarks."""
+    def test_home_keeps_original_title_book_search_and_portal_return(self):
+        """Fails when the original home layout or search route is disconnected."""
         with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
             with TestClient(app, base_url="https://memo.len.pe.kr") as client:
                 response = client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn('class="book-atlas home-page"', response.text)
-        self.assertIn('href="#main-content"', response.text)
-        self.assertIn('<main id="main-content"', response.text)
+        self.assertIn('class="app-header"', response.text)
+        self.assertIn("<h1>책 메모장</h1>", response.text)
+        self.assertIn('<main class="container">', response.text)
         self.assertIn('href="https://len.pe.kr/"', response.text)
-        self.assertIn('<label class="sr-only" for="book-query">책 검색어</label>', response.text)
-        self.assertIn('id="book-query"', response.text)
         self.assertIn('action="/" method="get"', response.text)
         self.assertIn('name="q"', response.text)
-        self.assertIn('class="collection-header"', response.text)
+        self.assertIn('class="library-grid"', response.text)
 
-    def test_detail_keeps_chapter_memo_and_password_forms_in_accessible_atlas_layout(self):
-        """Fails when an atlas redesign drops existing book CRUD form contracts."""
+    def test_detail_keeps_original_layout_chapter_memo_and_password_forms(self):
+        """Fails when the original detail layout or book CRUD routes are disconnected."""
         with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
             import app.services.book_service as book_service
 
@@ -63,8 +61,8 @@ class BookMemoUiContractTests(unittest.TestCase):
                 response = client.get(f"/books/{book['id']}")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn('class="book-atlas detail-page"', response.text)
-        self.assertIn('<main id="main-content"', response.text)
+        self.assertIn('class="app-header"', response.text)
+        self.assertIn('<main class="container">', response.text)
         self.assertIn(f'action="/books/{book["id"]}/chapters"', response.text)
         self.assertIn(f'action="/books/{book["id"]}/chapters/bulk"', response.text)
         self.assertIn(f'action="/books/{book["id"]}/memos"', response.text)
@@ -74,7 +72,8 @@ class BookMemoUiContractTests(unittest.TestCase):
         self.assertIn(f'action="/memos/{memo["id"]}/delete"', response.text)
         self.assertIn('name="delete_password"', response.text)
         self.assertIn('id="toc-fetch-button"', response.text)
-        self.assertIn('class="reading-timeline"', response.text)
+        self.assertIn('class="chapter-list"', response.text)
+        self.assertIn('class="memo-list"', response.text)
 
     def test_search_api_keeps_saved_book_and_memo_results_available(self):
         """Fails if a presentation-only change accidentally removes search results."""

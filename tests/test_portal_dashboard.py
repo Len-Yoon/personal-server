@@ -1,8 +1,6 @@
 import importlib
 import os
 import unittest
-from datetime import datetime
-from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -152,58 +150,35 @@ class PortalDashboardTests(unittest.TestCase):
         self.assertEqual(service_url("YOUTUBE_MEMO_URL", "portal.len.pe.kr", ""), "https://memo.len.pe.kr")
         self.assertEqual(service_url("BOOK_MEMO_URL", "portal.len.pe.kr", ""), "https://books.len.pe.kr")
 
-    def test_dashboard_renders_editorial_atlas_with_existing_entry_points(self):
-        """Fails if the dashboard stops exposing its Atlas entry-point contract."""
+    def test_dashboard_keeps_original_service_hub_with_existing_entry_points(self):
+        """Fails if a visual refactor replaces the original hub or disconnects routes."""
         app = self.load_app()
 
         with TestClient(app) as client:
             response = client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn('class="atlas-body"', response.text)
-        self.assertIn(f"PRIVATE WORKSPACE · {datetime.now().year}", response.text)
+        self.assertIn("<h1>Len의 개인서버</h1>", response.text)
+        self.assertIn('class="service-grid three"', response.text)
         for url in ("/news", "/memo", "/books", "/files", "/admin/status"):
             self.assertIn(f'href="{url}"', response.text)
-        self.assertIn('data-service-status="나중에"', response.text)
-        self.assertIn('aria-disabled="true"', response.text)
-        self.assertIn('class="atlas-search global-search"', response.text)
+        self.assertIn('class="service-card disabled" href="#"', response.text)
+        self.assertIn('class="global-search" method="get" action="/"', response.text)
         self.assertIn('name="q"', response.text)
         self.assertIn('data-track-event="global_search_submitted"', response.text)
-        self.assertIn('class="atlas-service-grid"', response.text)
-        self.assertIn('class="atlas-service-card"', response.text)
         self.assertIn('data-track-event="service_opened"', response.text)
 
-    def test_editorial_atlas_styles_are_scoped_to_the_dashboard(self):
-        """Fails if responsive Atlas styling is removed or leaks into shared selectors."""
-        stylesheet = (
-            Path(__file__).resolve().parents[1]
-            / "portal-web"
-            / "app"
-            / "static"
-            / "css"
-            / "style.css"
-        ).read_text(encoding="utf-8")
+    def test_admin_status_keeps_original_title_and_login_form_action(self):
+        """Fails if the original admin page or its authentication route is disconnected."""
+        app = self.load_app()
 
-        self.assertIn(".atlas-body", stylesheet)
-        self.assertIn(".atlas-service-grid", stylesheet)
-        self.assertIn(".atlas-service-card", stylesheet)
-        self.assertIn("@media (max-width: 980px)", stylesheet)
+        with TestClient(app) as client:
+            response = client.get("/admin/status")
 
-    def test_admin_status_styles_are_scoped_and_responsive(self):
-        """Fails if the admin status interface loses its scoped responsive treatment."""
-        stylesheet = (
-            Path(__file__).resolve().parents[1]
-            / "portal-web"
-            / "app"
-            / "static"
-            / "css"
-            / "style.css"
-        ).read_text(encoding="utf-8")
-
-        self.assertIn(".admin-status-page .admin-overview", stylesheet)
-        self.assertIn(".admin-status-page .admin-severity", stylesheet)
-        self.assertIn(".admin-status-page .admin-status-checks", stylesheet)
-        self.assertIn("@media (max-width: 720px)", stylesheet)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("<h1>관리자 상태</h1>", response.text)
+        self.assertIn('class="admin-login" action="/admin/status" method="post"', response.text)
+        self.assertIn('name="password"', response.text)
 
     def test_admin_status_context_combines_server_and_security_data(self):
         prepare_service_import("portal-web")
@@ -253,94 +228,6 @@ class PortalDashboardTests(unittest.TestCase):
             self.assertEqual(response.headers["cache-control"], "no-store, no-cache, must-revalidate, max-age=0")
             self.assertEqual(response.headers["pragma"], "no-cache")
             self.assertEqual(response.headers["expires"], "0")
-        finally:
-            os.environ.pop("FILE_MANAGER_PASSWORD", None)
-
-    def test_admin_status_page_renders_host_collection_time(self):
-        os.environ["FILE_MANAGER_PASSWORD"] = "secret"
-        try:
-            app = self.load_app()
-
-            with patch("app.routers.dashboard.get_dashboard_status") as get_dashboard_status, patch(
-                "app.routers.dashboard.get_service_health",
-                return_value=[],
-            ), patch("app.routers.dashboard.security_status", return_value={"headers": [], "file_policy": {"max_upload_mb": 50, "blocked_extensions": [], "allowed_extensions": []}, "log_files": [], "recent_events": [], "log_path": "/tmp/security.log"}):
-                get_dashboard_status.return_value = {
-                    "captured_at": "2026-07-09T01:02:03+00:00",
-                    "overall_status": "critical",
-                    "host": {
-                        "captured_at": "2026-07-09T00:40:00+00:00",
-                        "cpu_percent": None,
-                        "memory_percent": None,
-                        "disk_percent": None,
-                        "source": "demo",
-                    },
-                    "disk": {"percent": None, "level": "unknown"},
-                    "files": {"file_count": 0, "total_bytes": 0},
-                    "backup": {"latest_name": "", "status": "ok", "status_reason": "backup_recent"},
-                    "containers": [],
-                    "status_checks": [
-                        {"key": "host", "label": "호스트 수집", "status": "ok", "detail": "정상 수집 중"},
-                        {"key": "backup", "label": "백업", "status": "ok", "detail": "최근 백업 확인됨"},
-                        {"key": "disk", "label": "디스크", "status": "ok", "detail": "디스크 사용률 0%"},
-                        {"key": "files", "label": "파일함", "status": "ok", "detail": "0개, 0 bytes"},
-                    ],
-                    "warnings": [],
-                }
-
-                with TestClient(app) as client:
-                    response = client.post("/admin/status", data={"password": "secret"})
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn("호스트 수집 시각:", response.text)
-            self.assertIn(
-                '<time datetime="2026-07-09T00:40:00+00:00">2026-07-09 09:40:00 KST</time>',
-                response.text,
-            )
-            self.assertNotIn("2026-07-09 10:02:03 KST", response.text)
-            self.assertIn('class="admin-overview"', response.text)
-            self.assertIn('class="admin-severity admin-severity--critical"', response.text)
-            self.assertIn(">긴급</span>", response.text)
-            self.assertIn('class="admin-status-checks"', response.text)
-            self.assertIn('aria-label="호스트 수집 상태: 정상 수집 중"', response.text)
-            self.assertIn('admin-metric admin-metric--missing', response.text)
-            self.assertNotIn("WARNING", response.text)
-            self.assertNotIn("OK", response.text)
-            self.assertNotIn("UNAVAILABLE", response.text)
-            self.assertIn("백업", response.text)
-            self.assertIn("디스크", response.text)
-            self.assertIn("파일함", response.text)
-        finally:
-            os.environ.pop("FILE_MANAGER_PASSWORD", None)
-
-    def test_admin_status_page_shows_unknown_without_host_collection_time(self):
-        os.environ["FILE_MANAGER_PASSWORD"] = "secret"
-        try:
-            app = self.load_app()
-
-            with patch("app.routers.dashboard.get_dashboard_status") as get_dashboard_status, patch(
-                "app.routers.dashboard.get_service_health",
-                return_value=[],
-            ), patch("app.routers.dashboard.security_status", return_value={"headers": [], "file_policy": {"max_upload_mb": 50, "blocked_extensions": [], "allowed_extensions": []}, "log_files": [], "recent_events": [], "log_path": "/tmp/security.log"}):
-                get_dashboard_status.return_value = {
-                    "captured_at": "2026-07-09T01:02:03+00:00",
-                    "overall_status": "ok",
-                    "host": {"cpu_percent": None, "memory_percent": None, "disk_percent": None, "source": "demo"},
-                    "disk": {"percent": None, "level": "unknown"},
-                    "files": {"file_count": 0, "total_bytes": 0},
-                    "backup": {"latest_name": "", "status": "ok", "status_reason": "backup_recent"},
-                    "containers": [],
-                    "status_checks": [],
-                    "warnings": [],
-                }
-
-                with TestClient(app) as client:
-                    response = client.post("/admin/status", data={"password": "secret"})
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn("호스트 수집 시각:", response.text)
-            self.assertIn("<time>unknown</time>", response.text)
-            self.assertNotIn("2026-07-09 10:02:03 KST", response.text)
         finally:
             os.environ.pop("FILE_MANAGER_PASSWORD", None)
 

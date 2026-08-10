@@ -31,24 +31,23 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
             else:
                 os.environ["YOUTUBE_MEMO_DB_PATH"] = previous_db_path
 
-    def test_home_keeps_video_creation_and_portal_return_inside_accessible_atlas_layout(self):
-        """Fails if the modernized home loses its real route or keyboard landmarks."""
+    def test_home_keeps_original_title_video_creation_and_portal_return(self):
+        """Fails if the original home layout or its real routes are disconnected."""
         with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
             with TestClient(app, base_url="https://memo.len.pe.kr") as client:
                 response = client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn('class="memo-atlas home-page"', response.text)
+        self.assertIn('class="app-header"', response.text)
+        self.assertIn("<h1>유튜브 메모장</h1>", response.text)
         self.assertIn('href="https://len.pe.kr/"', response.text)
-        self.assertIn('href="#main-content"', response.text)
-        self.assertIn('<main id="main-content"', response.text)
-        self.assertIn('<label for="video-url">YouTube 영상 링크</label>', response.text)
+        self.assertIn('<main class="container">', response.text)
         self.assertIn('action="/videos"', response.text)
         self.assertIn('name="url"', response.text)
-        self.assertIn('class="collection-header"', response.text)
+        self.assertIn('class="video-grid"', response.text)
 
-    def test_detail_keeps_memo_crud_and_password_forms_inside_accessible_atlas_layout(self):
-        """Fails if a layout edit disconnects the existing memo and protected-delete routes."""
+    def test_detail_keeps_original_layout_memo_crud_and_password_forms(self):
+        """Fails if the original detail layout or protected memo routes are disconnected."""
         with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
             import app.services.memo_service as memo_service
 
@@ -62,16 +61,15 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
                 response = client.get(f"/videos/{video['id']}")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn('class="memo-atlas detail-page"', response.text)
-        self.assertIn('<main id="main-content"', response.text)
-        self.assertIn('title="YouTube video player"', response.text)
+        self.assertIn('class="app-header"', response.text)
+        self.assertIn('<main class="container">', response.text)
         self.assertIn(f'action="/videos/{video["id"]}/memos"', response.text)
         self.assertIn(f'action="/videos/{video["id"]}/delete"', response.text)
         self.assertIn(f'action="/memos/{memo["id"]}"', response.text)
         self.assertIn(f'action="/memos/{memo["id"]}/delete"', response.text)
         self.assertIn('name="edit_password"', response.text)
         self.assertIn('name="delete_password"', response.text)
-        self.assertIn('class="memo-timeline"', response.text)
+        self.assertIn('class="memo-list"', response.text)
 
     def test_search_api_keeps_saved_video_and_memo_results_available(self):
         """Fails if a UI-only change accidentally removes the public search contract."""

@@ -4,37 +4,46 @@
     <meta charset="UTF-8">
     <title>{{ title }}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=20260810-atlas-ui-1">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260810-legacy-ui-1">
 </head>
-<body class="book-atlas home-page">
-<a class="skip-link" href="#main-content">본문으로 건너뛰기</a>
+<body>
+<div class="background-orb orb-one"></div>
+<div class="background-orb orb-two"></div>
+<div class="background-orb orb-three"></div>
 
-<header class="site-header" aria-label="책 메모장 상단 메뉴">
-    <a class="portal-link" href="{{ portal_home_url_for_request(request) }}" target="_top" aria-label="개인 작업공간 홈으로 이동">← WORKSPACE</a>
-    <a class="wordmark" href="/" aria-label="책 메모장 홈">BOOK <span>MEMO</span></a>
-    <span class="issue-mark">PRIVATE ARCHIVE</span>
+<header class="app-header">
+    <a class="home-pill" href="{{ portal_home_url_for_request(request) }}" target="_top" aria-label="메인으로 이동">
+        <span class="home-icon">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 10.8L12 3l9 7.8v9.7a.5.5 0 0 1-.5.5h-5.2a.5.5 0 0 1-.5-.5v-5.4H9.2v5.4a.5.5 0 0 1-.5.5H3.5a.5.5 0 0 1-.5-.5v-9.7z"/>
+            </svg>
+        </span>
+        <span>홈</span>
+    </a>
+
+    <div class="app-brand">
+        <span class="brand-dot"></span>
+        <span>Book Memo</span>
+    </div>
 </header>
 
-<main id="main-content" class="page-shell" tabindex="-1">
-    <section class="hero masthead" aria-labelledby="page-title">
-        <div class="hero-badge eyebrow">READ · NOTE · RETURN</div>
-        <h1 id="page-title">책에서 건져 올린<br><em>생각의 좌표.</em></h1>
+<main class="container">
+    <section class="hero">
+        <div class="hero-badge">BOOK MEMO</div>
+        <h1>책 메모장</h1>
         <p>책을 검색해 내 책장에 추가하고, 읽은 위치와 장별 코멘트를 남깁니다.</p>
     </section>
 
-    <section class="panel search-panel" aria-labelledby="search-heading">
-        <div class="collection-header">
+    <section class="panel">
+        <div class="section-header">
             <div>
-                <p class="eyebrow">NEW REFERENCE</p>
-                <h2 id="search-heading">책 검색</h2>
+                <h2>책 검색</h2>
                 <p>제목, 저자, ISBN으로 검색합니다.</p>
             </div>
         </div>
 
         <form class="search-form" action="/" method="get">
-            <label class="sr-only" for="book-query">책 검색어</label>
             <input
-                id="book-query"
                 type="search"
                 name="q"
                 value="{{ query }}"
@@ -95,11 +104,10 @@
         {% endif %}
     </section>
 
-    <section class="panel collection" aria-labelledby="library-heading">
-        <div class="collection-header">
+    <section class="panel">
+        <div class="section-header">
             <div>
-                <p class="eyebrow">YOUR LIBRARY</p>
-                <h2 id="library-heading">내 책장</h2>
+                <h2>내 책장</h2>
                 <p>{{ books|length }}권의 책이 저장되어 있습니다.</p>
             </div>
         </div>
@@ -182,9 +190,9 @@
     </section>
 </main>
 
-<footer class="site-footer">
-    <span>BOOK MEMO / PRIVATE ARCHIVE</span>
-    <span>{{ books|length }} BOOK{{ '' if books|length == 1 else 'S' }}</span>
+<footer class="footer">
+    <span>book-memo</span>
+    <span>Len Private Workspace</span>
 </footer>
 <script>
     const shouldSelectTocByDefault = (title) => {

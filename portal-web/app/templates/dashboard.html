@@ -1,90 +1,87 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="atlas-page">
-    <header class="atlas-topbar">
-        <span class="atlas-brand">LEN / PERSONAL SERVER</span>
-        <span>PRIVATE WORKSPACE · {{ current_year }}</span>
-    </header>
+<section class="hero">
+    <div class="hero-badge">PERSONAL SERVER{% if demo_mode %} · DEMO{% endif %}</div>
 
-    <section class="atlas-hero" aria-labelledby="atlas-title">
-        <p class="atlas-kicker">PERSONAL SERVICE HUB{% if demo_mode %} · DEMO{% endif %}</p>
-        <h1 id="atlas-title">모으고, 기록하고,<br>다시 꺼내는 곳.</h1>
-        <p>개인 서버에서 필요한 서비스를 한 곳에서 정리하고 이어갑니다.</p>
-    </section>
+    <h1>Len의 개인서버</h1>
 
-    <section class="atlas-services" aria-labelledby="atlas-services-title">
-        <div class="atlas-section-heading">
-            <div>
-                <p class="atlas-kicker">SERVICES / 06</p>
-                <h2 id="atlas-services-title">서비스 목록</h2>
-            </div>
+    <p>
+        뉴스 수집, 유튜브 메모, 자동매매 기록을 관리하는
+        개인용 서비스 허브입니다.
+    </p>
+</section>
+
+<section class="service-section">
+    <div class="section-header">
+        <div>
+            <h2>서비스 목록</h2>
             <p>필요한 서비스를 선택해 이동합니다.</p>
         </div>
+    </div>
 
-        <div class="atlas-service-grid">
-            {% for service in services %}
-                {% if service.status == "운영중" %}
-                    <a class="atlas-service-card" href="{{ service.url }}" data-track-event="service_opened" data-track-target="{{ service.name }}">
-                {% else %}
-                    <div class="atlas-service-card is-planned" data-service-status="{{ service.status }}" aria-disabled="true" role="group" aria-label="{{ service.name }}, {{ service.status }} 제공 예정">
-                {% endif %}
-                    <div class="atlas-card-top">
-                        <span class="atlas-card-number">0{{ loop.index }}</span>
-                        <span class="atlas-status">{{ service.status }}</span>
+    <div class="service-grid three">
+        {% for service in services %}
+            <a class="service-card {% if service.status != '운영중' %}disabled{% endif %}" href="{{ service.url }}" data-track-event="service_opened" data-track-target="{{ service.name }}">
+                <div class="card-top">
+                    <div class="service-icon">
+                        {{ service.icon }}
                     </div>
-                    <div class="atlas-card-body">
-                        <span class="atlas-service-icon" aria-hidden="true">{{ service.icon }}</span>
-                        <span class="atlas-service-meta">{{ service.meta }}</span>
-                        <h3>{{ service.name }}</h3>
-                        <p>{{ service.description }}</p>
-                    </div>
-                    <div class="atlas-card-footer" aria-hidden="true">
-                        <span>{% if service.status == "운영중" %}서비스 열기{% else %}제공 예정{% endif %}</span>
-                        <span>↗</span>
-                    </div>
-                {% if service.status == "운영중" %}</a>{% else %}</div>{% endif %}
-            {% endfor %}
-        </div>
-    </section>
 
-    <section class="atlas-search-section" aria-labelledby="atlas-search-title">
-        <div class="atlas-section-heading">
-            <div>
-                <p class="atlas-kicker">ONE PLACE / SEARCH</p>
-                <h2 id="atlas-search-title">통합 검색</h2>
-            </div>
+                    <span class="status-badge">
+                        {{ service.status }}
+                    </span>
+                </div>
+
+                <div class="card-body">
+                    <span class="service-meta">{{ service.meta }}</span>
+                    <h3>{{ service.name }}</h3>
+                    <p>{{ service.description }}</p>
+                </div>
+
+                <div class="card-footer">
+                    <span>서비스 열기</span>
+                    <span class="arrow">→</span>
+                </div>
+            </a>
+        {% endfor %}
+    </div>
+</section>
+
+<section class="search-section">
+    <div class="section-header">
+        <div>
+            <h2>전체 검색</h2>
             <p>저장 뉴스, 유튜브 메모, 책 메모를 한 번에 찾습니다.</p>
         </div>
-        <form class="atlas-search global-search" method="get" action="/" data-track-event="global_search_submitted">
-            <label class="sr-only" for="atlas-search-input">통합 검색</label>
-            <input id="atlas-search-input" type="search" name="q" value="{{ query }}" placeholder="제목, 메모, 키워드로 검색" aria-label="통합 검색">
-            <button type="submit">통합 검색 <span aria-hidden="true">↗</span></button>
-        </form>
+    </div>
+    <form class="global-search" method="get" action="/" data-track-event="global_search_submitted">
+        <input type="search" name="q" value="{{ query }}" placeholder="검색어 입력">
+        <button type="submit">검색</button>
+    </form>
 
-        {% if search_results %}
-            <div class="atlas-search-results search-results-grid">
-                {% for group, items in search_results.items() %}
-                    <section class="atlas-search-group search-group">
-                        <h3>{{ {"news": "뉴스", "youtube": "유튜브", "books": "책"}[group] }}</h3>
-                        {% for item in items %}
-                            <a href="{{ item.url }}" data-track-event="search_result_opened" data-track-target="{{ item.title }}">
-                                <small>{{ item.meta or {"news": "뉴스", "youtube": "유튜브", "books": "책"}[group] }}</small>
-                                <strong>{{ item.title }}</strong>
-                                <span>{{ item.description }}</span>
-                                {% if item.snippet %}
-                                    <p>{{ item.snippet }}</p>
-                                {% endif %}
-                            </a>
-                        {% else %}
-                            <p>검색 결과가 없습니다.</p>
-                        {% endfor %}
-                    </section>
-                {% endfor %}
-            </div>
-        {% endif %}
-    </section>
-</div>
+    {% if search_results %}
+        <div class="search-results-grid">
+            {% for group, items in search_results.items() %}
+                <section class="search-group">
+                    <h3>{{ {"news": "뉴스", "youtube": "유튜브", "books": "책"}[group] }}</h3>
+                    {% for item in items %}
+                        <a href="{{ item.url }}" data-track-event="search_result_opened" data-track-target="{{ item.title }}">
+                            <small>{{ item.meta or {"news": "뉴스", "youtube": "유튜브", "books": "책"}[group] }}</small>
+                            <strong>{{ item.title }}</strong>
+                            <span>{{ item.description }}</span>
+                            {% if item.snippet %}
+                                <p>{{ item.snippet }}</p>
+                            {% endif %}
+                        </a>
+                    {% else %}
+                        <p>검색 결과가 없습니다.</p>
+                    {% endfor %}
+                </section>
+            {% endfor %}
+        </div>
+    {% endif %}
+</section>
 
 <script>
 document.querySelectorAll("a[data-track-event], button[data-track-event]").forEach((element) => {
