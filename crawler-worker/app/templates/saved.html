@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% block content %}
-<section class="hero compact">
+<section class="hero compact news-atlas-hero">
     <div class="hero-badge">NEWS ARCHIVE</div>
 
     <h1>보관 뉴스</h1>
@@ -9,7 +9,7 @@
     <p>최근에 수집한 뉴스를 최대 7일 동안 보관하고, 최신 수집 순서로 보여줍니다.</p>
 </section>
 
-<section class="service-section">
+<section class="service-section news-atlas-section">
     <div class="section-header">
         <div>
             <h2>최근 보관함</h2>
@@ -34,7 +34,11 @@
 
     <section class="news-list saved-list">
         {% for item in recent_news %}
-            <article class="news-card">
+            {% set relevance = item.nasdaq_relevance if item.category == "KR_WORLD" else none %}
+            <article
+                class="news-card{% if relevance %} nasdaq-{{ relevance.level }}{% endif %}"
+                {% if relevance %}data-news-alert-status="{{ relevance.level }}"{% endif %}
+            >
                 <div class="news-meta-row">
                     <span class="status-badge">{{ item.category }}</span>
                     {% for topic in item.topics or ["세계동향"] %}
@@ -43,6 +47,25 @@
                     <span>{{ item.source }}</span>
                     <span>{{ item.collected_at|news_datetime }}</span>
                 </div>
+
+                {% if relevance %}
+                    <div class="news-classification">
+                        {% if relevance.level == "alert" %}
+                            <span class="nasdaq-status nasdaq-status-alert">텔레그램 알림 대상</span>
+                        {% else %}
+                            <span class="nasdaq-status nasdaq-status-archive">보관 전용</span>
+                        {% endif %}
+
+                        {% if relevance.reasons %}
+                            <div class="nasdaq-reason-row" aria-label="알림 분류 사유">
+                                <span class="nasdaq-reason-label">분류 사유</span>
+                                {% for reason in relevance.reasons %}
+                                    <span class="nasdaq-reason">{{ reason }}</span>
+                                {% endfor %}
+                            </div>
+                        {% endif %}
+                    </div>
+                {% endif %}
 
                 <h3>{{ item.title_ko }}</h3>
 

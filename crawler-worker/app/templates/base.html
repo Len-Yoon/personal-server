@@ -7,12 +7,12 @@
 
     <link rel="stylesheet" href="/static/css/style.css?v=20260715-grid-3">
 </head>
-<body>
+<body class="news-hub-body">
 <div class="background-orb orb-one"></div>
 <div class="background-orb orb-two"></div>
 <div class="background-orb orb-three"></div>
 
-<header class="app-header">
+<header class="app-header news-atlas-topbar">
     <a class="home-pill" href="{{ portal_home_url(request) }}" target="_top" aria-label="메인으로 이동">
         <span class="home-icon">
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -28,11 +28,11 @@
     </div>
 </header>
 
-<main class="container">
+<main class="container news-atlas-main">
     {% block content %}{% endblock %}
 </main>
 
-<footer class="footer">
+<footer class="footer news-atlas-footer">
     <span>crawler-worker</span>
     <span>Global Market News Hub</span>
 </footer>
