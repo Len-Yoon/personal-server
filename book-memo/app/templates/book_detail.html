@@ -25,6 +25,15 @@
         <span class="brand-dot"></span>
         <span>Book Memo</span>
     </div>
+
+    {% if write_authenticated %}
+        <form class="write-auth-form" action="/auth/logout" method="post">
+            <input type="hidden" name="next_path" value="{{ request.url.path }}">
+            <button class="home-pill" type="submit">쓰기 로그아웃</button>
+        </form>
+    {% else %}
+        <a class="home-pill" href="/auth/login?next_path={{ request.url.path }}">쓰기 로그인</a>
+    {% endif %}
 </header>
 
 <main class="container">

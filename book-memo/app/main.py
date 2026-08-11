@@ -1,6 +1,7 @@
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
+from threading import RLock
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -79,6 +80,11 @@ templates = Jinja2Templates(directory="app/templates")
 AUTH_RATE_LIMIT_MAX_FAILURES = int(os.getenv("AUTH_RATE_LIMIT_MAX_FAILURES", "5"))
 AUTH_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("AUTH_RATE_LIMIT_WINDOW_SECONDS", "300"))
 _AUTH_FAILURES: dict[str, list[datetime]] = {}
+WRITE_AUTH_COOKIE = "book_memo_write_session"
+WRITE_AUTH_MAX_AGE = int(os.getenv("MEMO_WRITE_SESSION_MAX_AGE", str(8 * 60 * 60)))
+AUTH_SESSION_MAX_ENTRIES = max(1, int(os.getenv("AUTH_SESSION_MAX_ENTRIES", "1024")))
+_WRITE_SESSIONS: dict[str, datetime] = {}
+_WRITE_SESSIONS_LOCK = RLock()
 
 
 def _portal_home_url(request: Request) -> str:
@@ -117,12 +123,14 @@ def home(
             "has_aladin_key": bool(os.getenv("ALADIN_TTB_KEY", "").strip()),
             "statuses": ["읽을 예정", "읽는 중", "완료", "보류"],
             "portal_home_url": portal_home_url(request_host_from_headers(request.headers)),
+            "write_authenticated": _has_write_session(request),
         },
     )
 
 
 @app.post("/books")
 def create_book(
+    request: Request,
     isbn: str = Form(...),
     external_id: str = Form(default=""),
     title: str = Form(...),
@@ -135,6 +143,7 @@ def create_book(
     source: str = Form(default="google_books"),
     titles: list[str] = Form(default=[]),
 ):
+    _require_write_session(request)
     book = create_or_get_book(
         {
             "isbn": isbn,
@@ -186,6 +195,7 @@ def book_detail(request: Request, book_id: int):
             "memos": list_memos(book_id),
             "statuses": ["읽을 예정", "읽는 중", "완료", "보류"],
             "portal_home_url": portal_home_url(request_host_from_headers(request.headers)),
+            "write_authenticated": _has_write_session(request),
         },
     )
 
@@ -196,6 +206,7 @@ def delete_saved_book(
     book_id: int,
     delete_password: str = Form(default=""),
 ):
+    _require_write_session(request)
     _require_delete_password(request, delete_password)
 
     if not delete_book(book_id):
@@ -206,6 +217,7 @@ def delete_saved_book(
 
 @app.post("/books/{book_id}/progress")
 def update_book_progress(
+    request: Request,
     book_id: int,
     reading_status: str = Form(...),
     current_page: int = Form(default=0),
@@ -213,6 +225,7 @@ def update_book_progress(
     progress_percent: int = Form(default=0),
     redirect_to: str = Form(default=""),
 ):
+    _require_write_session(request)
     if not get_book(book_id):
         raise HTTPException(status_code=404, detail="Book not found")
 
@@ -229,9 +242,11 @@ def update_book_progress(
 
 @app.post("/books/{book_id}/chapters")
 def create_book_chapter(
+    request: Request,
     book_id: int,
     title: str = Form(...),
 ):
+    _require_write_session(request)
     if not get_book(book_id):
         raise HTTPException(status_code=404, detail="Book not found")
 
@@ -245,9 +260,11 @@ def create_book_chapter(
 
 @app.post("/books/{book_id}/chapters/bulk")
 def create_book_chapters_bulk(
+    request: Request,
     book_id: int,
     titles: list[str] = Form(default=[]),
 ):
+    _require_write_session(request)
     if not get_book(book_id):
         raise HTTPException(status_code=404, detail="Book not found")
 
@@ -261,10 +278,12 @@ def create_book_chapters_bulk(
 
 @app.post("/books/{book_id}/chapter-statuses")
 def update_book_chapter_statuses(
+    request: Request,
     book_id: int,
     done_chapter_ids: list[int] = Form(default=[]),
     redirect_to: str = Form(default=""),
 ):
+    _require_write_session(request)
     if not get_book(book_id):
         raise HTTPException(status_code=404, detail="Book not found")
 
@@ -285,11 +304,13 @@ def get_book_toc_candidates(book_id: int):
 
 @app.post("/chapters/{chapter_id}")
 def update_book_chapter(
+    request: Request,
     chapter_id: int,
     is_done: str = Form(default="0"),
     comment: str = Form(default=""),
     redirect_to: str = Form(default=""),
 ):
+    _require_write_session(request)
     book_id = update_chapter(
         chapter_id=chapter_id,
         is_done=is_done == "1",
@@ -304,10 +325,12 @@ def update_book_chapter(
 
 @app.post("/chapters/{chapter_id}/comment")
 def update_book_chapter_comment(
+    request: Request,
     chapter_id: int,
     comment: str = Form(default=""),
     redirect_to: str = Form(default=""),
 ):
+    _require_write_session(request)
     book_id = update_chapter_comment(chapter_id=chapter_id, comment=comment)
 
     if not book_id:
@@ -322,6 +345,7 @@ def delete_book_chapter(
     chapter_id: int,
     delete_password: str = Form(default=""),
 ):
+    _require_write_session(request)
     _require_delete_password(request, delete_password)
 
     book_id = delete_chapter(chapter_id)
@@ -334,12 +358,14 @@ def delete_book_chapter(
 
 @app.post("/books/{book_id}/memos")
 def create_book_memo(
+    request: Request,
     book_id: int,
     chapter_id: int = Form(default=0),
     memo_title: str = Form(default=""),
     content: str = Form(...),
     page: int = Form(default=0),
 ):
+    _require_write_session(request)
     if not get_book(book_id):
         raise HTTPException(status_code=404, detail="Book not found")
 
@@ -363,6 +389,7 @@ def delete_book_memo(
     memo_id: int,
     delete_password: str = Form(default=""),
 ):
+    _require_write_session(request)
     _require_delete_password(request, delete_password)
 
     book_id = delete_memo(memo_id)
@@ -389,6 +416,48 @@ def search_api(q: str = "", limit: int = 5):
     }
 
 
+@app.get("/auth/login")
+def write_login_page(request: Request, next_path: str = ""):
+    return _write_login_response(request, next_path=_safe_redirect(next_path))
+
+
+@app.post("/auth/login")
+def write_login(request: Request, password: str = Form(default=""), next_path: str = Form(default="")):
+    client = _client_id(request)
+    safe_next_path = _safe_redirect(next_path)
+    if _auth_rate_limited(client):
+        return _write_login_response(request, "비밀번호 실패가 반복되어 잠시 후 다시 시도해주세요.", 429, safe_next_path)
+
+    configured_password = os.getenv("DELETE_PASSWORD", "").strip()
+    if not configured_password:
+        return _write_login_response(request, "쓰기 비밀번호가 설정되지 않았습니다.", 403, safe_next_path)
+
+    if not secrets.compare_digest(password, configured_password):
+        _record_auth_failure(client)
+        return _write_login_response(request, "비밀번호가 올바르지 않습니다.", 403, safe_next_path)
+
+    _clear_auth_failures(client)
+    response = RedirectResponse(url=safe_next_path or "/", status_code=303)
+    response.set_cookie(
+        WRITE_AUTH_COOKIE,
+        _create_write_session(),
+        httponly=True,
+        secure=os.getenv("APP_ENV", "").strip().lower() == "production",
+        samesite="lax",
+        path="/",
+        max_age=WRITE_AUTH_MAX_AGE,
+    )
+    return response
+
+
+@app.post("/auth/logout")
+def write_logout(request: Request, next_path: str = Form(default="")):
+    _revoke_write_session(request.cookies.get(WRITE_AUTH_COOKIE, ""))
+    response = RedirectResponse(url=_safe_redirect(next_path) or "/", status_code=303)
+    response.delete_cookie(WRITE_AUTH_COOKIE, path="/")
+    return response
+
+
 def _require_delete_password(request: Request, password: str) -> None:
     configured_password = os.getenv("DELETE_PASSWORD", "").strip()
     client = _client_id(request)
@@ -403,6 +472,59 @@ def _require_delete_password(request: Request, password: str) -> None:
         _record_auth_failure(client)
         raise HTTPException(status_code=403, detail="삭제 비밀번호가 올바르지 않습니다.")
     _clear_auth_failures(client)
+
+
+def _require_write_session(request: Request) -> None:
+    if not _has_write_session(request):
+        raise HTTPException(status_code=401, detail="메모 쓰기 인증이 필요합니다.")
+
+
+def _has_write_session(request: Request) -> bool:
+    token = request.cookies.get(WRITE_AUTH_COOKIE, "")
+    if not token:
+        return False
+    with _WRITE_SESSIONS_LOCK:
+        _prune_write_sessions()
+        return token in _WRITE_SESSIONS
+
+
+def _create_write_session() -> str:
+    with _WRITE_SESSIONS_LOCK:
+        _prune_write_sessions()
+        while len(_WRITE_SESSIONS) >= AUTH_SESSION_MAX_ENTRIES:
+            oldest_token = min(_WRITE_SESSIONS, key=_WRITE_SESSIONS.get)
+            _WRITE_SESSIONS.pop(oldest_token, None)
+        token = secrets.token_urlsafe(32)
+        while token in _WRITE_SESSIONS:
+            token = secrets.token_urlsafe(32)
+        _WRITE_SESSIONS[token] = datetime.now(timezone.utc) + timedelta(seconds=WRITE_AUTH_MAX_AGE)
+        return token
+
+
+def _revoke_write_session(token: str) -> None:
+    if not token:
+        return
+    with _WRITE_SESSIONS_LOCK:
+        _WRITE_SESSIONS.pop(token, None)
+
+
+def _prune_write_sessions() -> None:
+    now = datetime.now(timezone.utc)
+    for token in [token for token, expires_at in _WRITE_SESSIONS.items() if expires_at <= now]:
+        _WRITE_SESSIONS.pop(token, None)
+
+
+def _write_login_response(request: Request, error: str = "", status_code: int = 200, next_path: str = ""):
+    return templates.TemplateResponse(
+        "auth_login.html",
+        {
+            "request": request,
+            "title": "책 메모 쓰기 로그인",
+            "error": error,
+            "next_path": next_path,
+        },
+        status_code=status_code,
+    )
 
 
 def _auth_rate_limited(client: str) -> bool:

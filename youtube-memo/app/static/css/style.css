@@ -170,6 +170,14 @@ a {
     text-transform: uppercase;
 }
 
+.write-auth-form {
+    margin: 0;
+}
+
+.write-auth-form .home-pill {
+    cursor: pointer;
+}
+
 .brand-dot {
     width: 7px;
     height: 7px;

@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ title }}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260811-write-auth-1">
+</head>
+<body>
+<div class="background-orb orb-one"></div>
+<div class="background-orb orb-two"></div>
+<main class="container">
+    <section class="panel">
+        <div class="section-header">
+            <div>
+                <h1>메모 쓰기 로그인</h1>
+                <p>책, 목차, 진행률, 메모를 변경하려면 DELETE_PASSWORD 인증이 필요합니다.</p>
+            </div>
+        </div>
+        {% if error %}<p class="error-text">{{ error }}</p>{% endif %}
+        <form class="search-form" action="/auth/login" method="post">
+            <input type="hidden" name="next_path" value="{{ next_path }}">
+            <input name="password" type="password" autocomplete="current-password" placeholder="쓰기 비밀번호" required autofocus>
+            <button type="submit">로그인</button>
+        </form>
+    </section>
+</main>
+</body>
+</html>

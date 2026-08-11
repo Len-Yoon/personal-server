@@ -97,6 +97,67 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
 
+    def test_every_youtube_write_route_rejects_a_request_without_a_login_session(self):
+        """Fails if any video or memo mutation can bypass the write-login session."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            import app.services.memo_service as memo_service
+
+            video = memo_service.create_or_get_video(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                title_fetcher=lambda _youtube_id, _url: "쓰기 인증 테스트 영상",
+            )
+            memo = memo_service.create_memo(video["id"], "기존 메모", "기존 내용")
+            with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                headers = {"Origin": "https://memo.len.pe.kr"}
+                responses = (
+                    client.post("/videos", data={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}, headers=headers),
+                    client.post(f"/videos/{video['id']}/memos", data={"content": "새 메모"}, headers=headers),
+                    client.post(f"/memos/{memo['id']}", data={"content": "수정 메모"}, headers=headers),
+                    client.post(f"/videos/{video['id']}/delete", data={"delete_password": "secret"}, headers=headers),
+                    client.post(f"/memos/{memo['id']}/delete", data={"delete_password": "secret"}, headers=headers),
+                )
+
+        self.assertEqual([response.status_code for response in responses], [401, 401, 401, 401, 401])
+
+    def test_youtube_login_session_allows_writes_until_logout(self):
+        """Fails if the DELETE_PASSWORD login does not grant and revoke a write session."""
+        previous_password = os.environ.get("DELETE_PASSWORD")
+        os.environ["DELETE_PASSWORD"] = "session-password"
+        try:
+            with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+                import app.services.memo_service as memo_service
+
+                video = memo_service.create_or_get_video(
+                    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                    title_fetcher=lambda _youtube_id, _url: "세션 인증 테스트 영상",
+                )
+                with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                    headers = {"Origin": "https://memo.len.pe.kr"}
+                    login = client.post("/auth/login", data={"password": "session-password"}, headers=headers, follow_redirects=False)
+                    created = client.post(
+                        f"/videos/{video['id']}/memos",
+                        data={"memo_title": "세션 메모", "content": "로그인 후 작성"},
+                        headers=headers,
+                        follow_redirects=False,
+                    )
+                    logout = client.post("/auth/logout", headers=headers, follow_redirects=False)
+                    rejected = client.post(
+                        f"/videos/{video['id']}/memos",
+                        data={"content": "로그아웃 후 작성"},
+                        headers=headers,
+                    )
+        finally:
+            if previous_password is None:
+                os.environ.pop("DELETE_PASSWORD", None)
+            else:
+                os.environ["DELETE_PASSWORD"] = previous_password
+
+        self.assertEqual(login.status_code, 303)
+        self.assertIn("youtube_memo_write_session", login.headers["set-cookie"])
+        self.assertEqual(created.status_code, 303)
+        self.assertEqual(logout.status_code, 303)
+        self.assertEqual(rejected.status_code, 401)
+
     def test_untrusted_forwarded_headers_do_not_change_expected_origin(self):
         """Fails if a direct request can spoof forwarded headers to pass the Origin guard."""
         with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:

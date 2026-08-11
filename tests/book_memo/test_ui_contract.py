@@ -98,6 +98,70 @@ class BookMemoUiContractTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
 
+    def test_every_book_write_route_rejects_a_request_without_a_login_session(self):
+        """Fails if any book, progress, chapter, or memo mutation bypasses the write-login session."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            import app.services.book_service as book_service
+
+            book = book_service.create_or_get_book({"isbn": "9780000000018", "title": "쓰기 인증 테스트 책"})
+            book_service.create_chapter(book["id"], "기존 장")
+            chapter = book_service.list_chapters(book["id"])[0]
+            book_service.create_memo(book["id"], chapter_id=chapter["id"], title="기존 메모", content="기존 내용", page=1)
+            memo = book_service.list_memos(book["id"])[0]
+            with TestClient(app, base_url="https://books.len.pe.kr") as client:
+                headers = {"Origin": "https://books.len.pe.kr"}
+                responses = (
+                    client.post("/books", data={"isbn": "9780000000019", "title": "새 책"}, headers=headers),
+                    client.post(f"/books/{book['id']}/progress", data={"reading_status": "읽는 중"}, headers=headers),
+                    client.post(f"/books/{book['id']}/chapters", data={"title": "새 장"}, headers=headers),
+                    client.post(f"/books/{book['id']}/chapters/bulk", data={"titles": "여러 장"}, headers=headers),
+                    client.post(f"/books/{book['id']}/chapter-statuses", data={"done_chapter_ids": str(chapter['id'])}, headers=headers),
+                    client.post(f"/chapters/{chapter['id']}", data={"is_done": "1"}, headers=headers),
+                    client.post(f"/chapters/{chapter['id']}/comment", data={"comment": "코멘트"}, headers=headers),
+                    client.post(f"/books/{book['id']}/memos", data={"content": "새 메모"}, headers=headers),
+                    client.post(f"/books/{book['id']}/delete", data={"delete_password": "secret"}, headers=headers),
+                    client.post(f"/chapters/{chapter['id']}/delete", data={"delete_password": "secret"}, headers=headers),
+                    client.post(f"/memos/{memo['id']}/delete", data={"delete_password": "secret"}, headers=headers),
+                )
+
+        self.assertEqual([response.status_code for response in responses], [401] * 11)
+
+    def test_book_login_session_allows_writes_until_logout(self):
+        """Fails if the DELETE_PASSWORD login does not grant and revoke a book write session."""
+        previous_password = os.environ.get("DELETE_PASSWORD")
+        os.environ["DELETE_PASSWORD"] = "session-password"
+        try:
+            with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+                import app.services.book_service as book_service
+
+                book = book_service.create_or_get_book({"isbn": "9780000000018", "title": "세션 인증 테스트 책"})
+                with TestClient(app, base_url="https://books.len.pe.kr") as client:
+                    headers = {"Origin": "https://books.len.pe.kr"}
+                    login = client.post("/auth/login", data={"password": "session-password"}, headers=headers, follow_redirects=False)
+                    created = client.post(
+                        f"/books/{book['id']}/memos",
+                        data={"memo_title": "세션 메모", "content": "로그인 후 작성"},
+                        headers=headers,
+                        follow_redirects=False,
+                    )
+                    logout = client.post("/auth/logout", headers=headers, follow_redirects=False)
+                    rejected = client.post(
+                        f"/books/{book['id']}/memos",
+                        data={"content": "로그아웃 후 작성"},
+                        headers=headers,
+                    )
+        finally:
+            if previous_password is None:
+                os.environ.pop("DELETE_PASSWORD", None)
+            else:
+                os.environ["DELETE_PASSWORD"] = previous_password
+
+        self.assertEqual(login.status_code, 303)
+        self.assertIn("book_memo_write_session", login.headers["set-cookie"])
+        self.assertEqual(created.status_code, 303)
+        self.assertEqual(logout.status_code, 303)
+        self.assertEqual(rejected.status_code, 401)
+
     def test_untrusted_forwarded_headers_do_not_change_expected_origin(self):
         """Fails if a direct request can spoof forwarded headers to pass the Origin guard."""
         with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
