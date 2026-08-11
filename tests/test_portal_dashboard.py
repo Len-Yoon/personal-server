@@ -1,6 +1,8 @@
 import importlib
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -231,6 +233,47 @@ class PortalDashboardTests(unittest.TestCase):
             self.assertEqual(response.headers["expires"], "0")
         finally:
             os.environ.pop("FILE_MANAGER_PASSWORD", None)
+
+    def test_admin_status_uses_dedicated_password_when_configured(self):
+        environment_keys = (
+            "ADMIN_STATUS_PASSWORD",
+            "AUTH_RATE_LIMIT_STATE_PATH",
+            "DELETE_PASSWORD",
+            "DEMO_MODE",
+            "FILE_MANAGER_PASSWORD",
+            "SECURITY_LOG_PATH",
+        )
+        original_environment = {key: os.environ.get(key) for key in environment_keys}
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                os.environ["ADMIN_STATUS_PASSWORD"] = "dedicated-admin-password"
+                os.environ["FILE_MANAGER_PASSWORD"] = "file-manager-password"
+                os.environ["DELETE_PASSWORD"] = "delete-password"
+                os.environ["AUTH_RATE_LIMIT_STATE_PATH"] = str(Path(tempdir) / "auth-rate-limit.json")
+                os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security-events.txt")
+                os.environ["DEMO_MODE"] = "true"
+                app = self.load_app()
+
+                with TestClient(app) as client:
+                    delete_password = client.post("/admin/status", data={"password": "delete-password"})
+                    file_manager_password = client.post(
+                        "/admin/status",
+                        data={"password": "file-manager-password"},
+                    )
+                    dedicated_password = client.post(
+                        "/admin/status",
+                        data={"password": "dedicated-admin-password"},
+                    )
+
+            self.assertEqual(delete_password.status_code, 401)
+            self.assertEqual(file_manager_password.status_code, 401)
+            self.assertEqual(dedicated_password.status_code, 200)
+        finally:
+            for key, value in original_environment.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
     def test_admin_status_page_renders_actual_host_collection_time(self):
         """Fails if the page substitutes the dashboard request time for the host sample time."""

@@ -117,6 +117,7 @@ Minimum environment values:
 ALADIN_TTB_KEY=
 DELETE_PASSWORD=
 FILE_MANAGER_PASSWORD=
+ADMIN_STATUS_PASSWORD=
 FILE_MANAGER_ACCESS_PASSWORD=
 SECURITY_LOG_PATH=/app/data/logs/security-events.txt
 SECURITY_LOG_TIMEZONE=Asia/Seoul
@@ -140,6 +141,10 @@ missing.
 
 `DELETE_PASSWORD` is required for destructive actions such as deleting files,
 saved news, YouTube memos, books, chapters, and book memos.
+
+`ADMIN_STATUS_PASSWORD` is the dedicated password for `/admin/status`. When it is
+not configured, the portal keeps backward compatibility by using
+`FILE_MANAGER_PASSWORD`, then `DELETE_PASSWORD`.
 
 If you are moving data from another machine, copy the `data/` folder into:
 

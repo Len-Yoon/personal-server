@@ -217,7 +217,8 @@ async def admin_user_event(request: Request, payload: dict = Body(default_factor
 
 def _require_security_password(request: Request, password: str) -> None:
     configured_password = (
-        os.getenv("FILE_MANAGER_PASSWORD", "").strip()
+        os.getenv("ADMIN_STATUS_PASSWORD", "").strip()
+        or os.getenv("FILE_MANAGER_PASSWORD", "").strip()
         or os.getenv("DELETE_PASSWORD", "").strip()
     )
     client = _client_id(request)

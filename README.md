@@ -73,12 +73,13 @@ Google News RSS 기반으로 글로벌 뉴스와 시장 뉴스를 수집합니�
 
 - `DELETE_PASSWORD`: 뉴스/메모/파일 삭제 보호에 사용합니다.
 - `FILE_MANAGER_ACCESS_PASSWORD`: 파일함 진입 인증에 사용합니다.
-- `FILE_MANAGER_PASSWORD`: 관리자 상태 인증과 삭제 비밀번호 fallback에 사용합니다.
+- `ADMIN_STATUS_PASSWORD`: `/admin/status` 관리자 상태 인증에 우선 사용합니다. 미설정 시 기존 `FILE_MANAGER_PASSWORD`, `DELETE_PASSWORD` 순서로 fallback 합니다.
+- `FILE_MANAGER_PASSWORD`: 파일 삭제 비밀번호 fallback에 사용합니다.
 - `APP_ENV=production` 또는 `FILE_MANAGER_AUTH_REQUIRED=true`: 파일함 비밀번호 설정을 강제합니다.
 - `BACKUP_INCLUDE_FILES=true`: 파일함 업로드 파일까지 백업해야 하는 경우 설정합니다.
 - `CADDY_EMAIL`, `CLOUDFLARE_API_TOKEN`: Cloudflare + Caddy로 공개 HTTPS를 쓸 때 필요합니다.
 
-`DELETE_PASSWORD`, `FILE_MANAGER_PASSWORD`, `FILE_MANAGER_ACCESS_PASSWORD`, `PORTFOLIO_ADMIN_PASSWORD`, `ALADIN_TTB_KEY`는 `.env`에만 저장하고 README, 로그, 이슈, 커밋 메시지에 남기지 않습니다.
+`DELETE_PASSWORD`, `FILE_MANAGER_PASSWORD`, `ADMIN_STATUS_PASSWORD`, `FILE_MANAGER_ACCESS_PASSWORD`, `PORTFOLIO_ADMIN_PASSWORD`, `ALADIN_TTB_KEY`는 `.env`에만 저장하고 README, 로그, 이슈, 커밋 메시지에 남기지 않습니다.
 
 ## 포트폴리오
 
@@ -114,6 +115,7 @@ CLOUDFLARE_API_TOKEN=
 # Admin passwords
 DELETE_PASSWORD=
 FILE_MANAGER_PASSWORD=
+ADMIN_STATUS_PASSWORD=
 FILE_MANAGER_ACCESS_PASSWORD=
 
 # Portal links
@@ -252,7 +254,7 @@ AI는 다음 작업에 사용했습니다.
 - 파일함 업로드는 최대 용량, 차단 확장자, 확장자 없는 파일, 기존 파일 덮어쓰기를 제한합니다.
 - 파일함은 운영에서 `FILE_MANAGER_ACCESS_PASSWORD`와 `APP_ENV=production` 또는 `FILE_MANAGER_AUTH_REQUIRED=true`가 설정되어야 인증 없이 열리지 않습니다.
 - 뉴스 AI 요약 API와 메모 생성/수정 라우트는 개인 서버 전제의 내부 기능입니다. 외부 도메인에 공개할 경우 애플리케이션 인증을 추가해야 합니다.
-- 포털의 `관리자 상태` 서비스 카드는 `/admin/status`로 이동하며, 관리자 인증 후 서버 상태와 보안 상태를 함께 보여줍니다.
+- 포털의 `관리자 상태` 서비스 카드는 `/admin/status`로 이동하며, `ADMIN_STATUS_PASSWORD` 인증 후 서버 상태와 보안 상태를 함께 보여줍니다. 전용 값이 없을 때만 기존 `FILE_MANAGER_PASSWORD`, `DELETE_PASSWORD`를 순서대로 사용합니다.
 - 서버 상태는 `system-agent`를 통해 미니 PC/Docker/백업 상태를 표시하고, agent 연결 실패 시 포털 자체는 계속 동작합니다.
 - 포털 전체 검색은 저장 뉴스, YouTube 메모, 책 메모의 read-only 검색 API를 모아 보여줍니다.
 - 포털 서비스 링크는 기본적으로 `https://news.len.pe.kr`, `https://memo.len.pe.kr`, `https://books.len.pe.kr`으로 열리며, `NEWS_SERVICE_URL`, `YOUTUBE_MEMO_URL`, `BOOK_MEMO_URL` 환경변수로 바꿀 수 있습니다.

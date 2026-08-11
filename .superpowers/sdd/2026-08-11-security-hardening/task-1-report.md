@@ -143,3 +143,27 @@ $ PYTHONPATH=portal-web python3 -m unittest tests.test_portal_dashboard tests.te
 Ran 48 tests in 0.849s
 OK
 ```
+
+## 9. 관리자 상태 전용 인증 환경변수
+
+| 항목 | 내용 | 검증 결과 |
+|---|---|---|
+| 전용 변수 | `/admin/status`는 `ADMIN_STATUS_PASSWORD`를 최우선으로 사용하도록 변경함 | 일치 |
+| 하위 호환 | 전용 값이 비어 있을 때만 기존 `FILE_MANAGER_PASSWORD`, `DELETE_PASSWORD` 순서로 fallback 하도록 유지함 | 일치 |
+| 비밀값 관리 | 실제 운영 비밀번호 값은 코드·테스트·문서·커밋에 기록하지 않음 | 일치 |
+| 문서화 | `.env.example`, `README.md`, `docs/n100-mt4-setup.md`에 빈 예시와 우선순위를 반영함 | 일치 |
+
+### 9.1 TDD 기록
+
+```text
+# RED
+$ PYTHONPATH=portal-web python3 -m unittest tests.test_portal_dashboard.PortalDashboardTests.test_admin_status_uses_dedicated_password_when_configured
+Ran 1 test in 0.057s
+FAILED (failures=1)
+# FILE_MANAGER_PASSWORD가 전용 변수 설정 상태에서도 200을 반환함
+
+# GREEN
+$ PYTHONPATH=portal-web python3 -m unittest tests.test_portal_dashboard.PortalDashboardTests.test_admin_status_uses_dedicated_password_when_configured
+Ran 1 test in 0.044s
+OK
+```
