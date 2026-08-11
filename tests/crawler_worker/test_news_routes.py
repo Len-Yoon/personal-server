@@ -34,6 +34,54 @@ class CrawlerWorkerNewsRouteTests(unittest.TestCase):
         self.assertIn("IT 동향", response.text)
         self.assertIn("AI 뉴스", response.text)
 
+    def test_health_response_has_browser_security_headers(self):
+        """Fails if the news service stops applying its common browser protections."""
+        app = self.load_app()
+        from fastapi.testclient import TestClient
+
+        with TestClient(app) as client:
+            response = client.get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["content-security-policy"],
+            "default-src 'self'; base-uri 'self'; object-src 'none'; "
+            "frame-ancestors 'none'; script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
+            "frame-src https://www.youtube.com https://www.youtube-nocookie.com; "
+            "connect-src 'self'",
+        )
+        self.assertEqual(response.headers["x-frame-options"], "DENY")
+        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(response.headers["referrer-policy"], "strict-origin-when-cross-origin")
+        self.assertEqual(response.headers["permissions-policy"], "geolocation=(), microphone=(), camera=()")
+
+    def test_cross_origin_unsafe_request_is_rejected_before_route_handling(self):
+        """Fails if a future news write route can be reached from another origin."""
+        app = self.load_app()
+        from fastapi.testclient import TestClient
+
+        with TestClient(app) as client:
+            response = client.post("/health", headers={"Origin": "https://attacker.example"})
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_https_origin_forwarded_by_proxy_is_accepted(self):
+        """Fails if Caddy's internal HTTP hop rejects a browser's same-origin HTTPS form."""
+        app = self.load_app()
+        from fastapi.testclient import TestClient
+
+        with TestClient(app, base_url="http://news.len.pe.kr") as client:
+            response = client.post(
+                "/health",
+                headers={
+                    "Origin": "https://news.len.pe.kr",
+                    "X-Forwarded-Proto": "https",
+                },
+            )
+
+        self.assertEqual(response.status_code, 405)
+
     def test_news_alias_redirects_to_main_news_page(self):
         app = self.load_app()
         from fastapi.testclient import TestClient

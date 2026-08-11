@@ -46,6 +46,52 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
         self.assertIn('name="url"', response.text)
         self.assertIn('class="video-grid"', response.text)
 
+    def test_health_response_has_browser_security_headers(self):
+        """Fails if the YouTube service stops applying its common browser protections."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            with TestClient(app) as client:
+                response = client.get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["content-security-policy"],
+            "default-src 'self'; base-uri 'self'; object-src 'none'; "
+            "frame-ancestors 'none'; script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
+            "frame-src https://www.youtube.com https://www.youtube-nocookie.com; "
+            "connect-src 'self'",
+        )
+        self.assertEqual(response.headers["x-frame-options"], "DENY")
+        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(response.headers["referrer-policy"], "strict-origin-when-cross-origin")
+        self.assertEqual(response.headers["permissions-policy"], "geolocation=(), microphone=(), camera=()")
+
+    def test_cross_origin_video_creation_is_rejected(self):
+        """Fails if another site can submit the video creation form."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            with TestClient(app) as client:
+                response = client.post(
+                    "/videos",
+                    data={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+                    headers={"Origin": "https://attacker.example"},
+                )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_https_origin_forwarded_by_proxy_is_accepted(self):
+        """Fails if Caddy's internal HTTP hop rejects a browser's same-origin HTTPS form."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            with TestClient(app, base_url="http://memo.len.pe.kr") as client:
+                response = client.post(
+                    "/health",
+                    headers={
+                        "Origin": "https://memo.len.pe.kr",
+                        "X-Forwarded-Proto": "https",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 405)
+
     def test_detail_keeps_original_layout_memo_crud_and_password_forms(self):
         """Fails if the original detail layout or protected memo routes are disconnected."""
         with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:

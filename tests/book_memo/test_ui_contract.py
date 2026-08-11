@@ -46,6 +46,52 @@ class BookMemoUiContractTests(unittest.TestCase):
         self.assertIn('name="q"', response.text)
         self.assertIn('class="library-grid"', response.text)
 
+    def test_health_response_has_browser_security_headers(self):
+        """Fails if the book service stops applying its common browser protections."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            with TestClient(app) as client:
+                response = client.get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["content-security-policy"],
+            "default-src 'self'; base-uri 'self'; object-src 'none'; "
+            "frame-ancestors 'none'; script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
+            "frame-src https://www.youtube.com https://www.youtube-nocookie.com; "
+            "connect-src 'self'",
+        )
+        self.assertEqual(response.headers["x-frame-options"], "DENY")
+        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(response.headers["referrer-policy"], "strict-origin-when-cross-origin")
+        self.assertEqual(response.headers["permissions-policy"], "geolocation=(), microphone=(), camera=()")
+
+    def test_cross_origin_book_creation_is_rejected(self):
+        """Fails if another site can submit the book creation form."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            with TestClient(app) as client:
+                response = client.post(
+                    "/books",
+                    data={"isbn": "9780000000018", "title": "교차 출처 테스트"},
+                    headers={"Origin": "https://attacker.example"},
+                )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_https_origin_forwarded_by_proxy_is_accepted(self):
+        """Fails if Caddy's internal HTTP hop rejects a browser's same-origin HTTPS form."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            with TestClient(app, base_url="http://books.len.pe.kr") as client:
+                response = client.post(
+                    "/health",
+                    headers={
+                        "Origin": "https://books.len.pe.kr",
+                        "X-Forwarded-Proto": "https",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 405)
+
     def test_detail_keeps_original_layout_chapter_memo_and_password_forms(self):
         """Fails when the original detail layout or book CRUD routes are disconnected."""
         with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
