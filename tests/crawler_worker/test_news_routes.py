@@ -8,7 +8,25 @@ from unittest.mock import patch
 from tests._test_support import prepare_service_import
 
 
+PORTAL_SECURITY_HEADERS = {
+    "content-security-policy": (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
+        "base-uri 'self'; form-action 'self'"
+    ),
+    "x-frame-options": "DENY",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "strict-origin-when-cross-origin",
+    "permissions-policy": "camera=(), microphone=(), geolocation=()",
+}
+
+
 class CrawlerWorkerNewsRouteTests(unittest.TestCase):
+    def assert_portal_security_headers(self, response):
+        for name, value in PORTAL_SECURITY_HEADERS.items():
+            self.assertEqual(response.headers[name], value)
+
     def load_app(self):
         if importlib.util.find_spec("fastapi") is None:
             self.skipTest("fastapi not available in this Python environment")
@@ -43,18 +61,7 @@ class CrawlerWorkerNewsRouteTests(unittest.TestCase):
             response = client.get("/health")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.headers["content-security-policy"],
-            "default-src 'self'; base-uri 'self'; object-src 'none'; "
-            "frame-ancestors 'none'; script-src 'self' 'unsafe-inline'; "
-            "style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
-            "frame-src https://www.youtube.com https://www.youtube-nocookie.com; "
-            "connect-src 'self'",
-        )
-        self.assertEqual(response.headers["x-frame-options"], "DENY")
-        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
-        self.assertEqual(response.headers["referrer-policy"], "strict-origin-when-cross-origin")
-        self.assertEqual(response.headers["permissions-policy"], "geolocation=(), microphone=(), camera=()")
+        self.assert_portal_security_headers(response)
 
     def test_cross_origin_unsafe_request_is_rejected_before_route_handling(self):
         """Fails if a future news write route can be reached from another origin."""
@@ -66,21 +73,48 @@ class CrawlerWorkerNewsRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
 
-    def test_https_origin_forwarded_by_proxy_is_accepted(self):
+    def test_untrusted_forwarded_headers_do_not_change_expected_origin(self):
+        """Fails if a direct request can spoof forwarded headers to pass the Origin guard."""
+        app = self.load_app()
+        from fastapi.testclient import TestClient
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/health",
+                headers={
+                    "Origin": "https://attacker.example",
+                    "X-Forwarded-Proto": "https",
+                    "X-Forwarded-Host": "attacker.example",
+                },
+            )
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_caddy_public_host_accepts_https_same_origin(self):
         """Fails if Caddy's internal HTTP hop rejects a browser's same-origin HTTPS form."""
         app = self.load_app()
         from fastapi.testclient import TestClient
 
         with TestClient(app, base_url="http://news.len.pe.kr") as client:
-            response = client.post(
-                "/health",
-                headers={
-                    "Origin": "https://news.len.pe.kr",
-                    "X-Forwarded-Proto": "https",
-                },
-            )
+            response = client.post("/health", headers={"Origin": "https://news.len.pe.kr"})
 
         self.assertEqual(response.status_code, 405)
+
+    def test_security_headers_are_applied_to_forbidden_not_found_and_static_responses(self):
+        """Fails if middleware protections are skipped for non-success or static responses."""
+        app = self.load_app()
+        from fastapi.testclient import TestClient
+
+        with TestClient(app) as client:
+            responses = (
+                client.post("/health", headers={"Origin": "https://attacker.example"}),
+                client.get("/does-not-exist"),
+                client.get("/static/css/style.css"),
+            )
+
+        self.assertEqual([response.status_code for response in responses], [403, 404, 200])
+        for response in responses:
+            self.assert_portal_security_headers(response)
 
     def test_news_alias_redirects_to_main_news_page(self):
         app = self.load_app()

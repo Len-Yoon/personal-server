@@ -10,7 +10,25 @@ from fastapi.testclient import TestClient
 from tests._test_support import prepare_service_import
 
 
+PORTAL_SECURITY_HEADERS = {
+    "content-security-policy": (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
+        "base-uri 'self'; form-action 'self'"
+    ),
+    "x-frame-options": "DENY",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "strict-origin-when-cross-origin",
+    "permissions-policy": "camera=(), microphone=(), geolocation=()",
+}
+
+
 class BookMemoUiContractTests(unittest.TestCase):
+    def assert_portal_security_headers(self, response):
+        for name, value in PORTAL_SECURITY_HEADERS.items():
+            self.assertEqual(response.headers[name], value)
+
     @contextmanager
     def loaded_app(self, tempdir: str):
         """Load the real app with an isolated library database."""
@@ -53,18 +71,7 @@ class BookMemoUiContractTests(unittest.TestCase):
                 response = client.get("/health")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.headers["content-security-policy"],
-            "default-src 'self'; base-uri 'self'; object-src 'none'; "
-            "frame-ancestors 'none'; script-src 'self' 'unsafe-inline'; "
-            "style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
-            "frame-src https://www.youtube.com https://www.youtube-nocookie.com; "
-            "connect-src 'self'",
-        )
-        self.assertEqual(response.headers["x-frame-options"], "DENY")
-        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
-        self.assertEqual(response.headers["referrer-policy"], "strict-origin-when-cross-origin")
-        self.assertEqual(response.headers["permissions-policy"], "geolocation=(), microphone=(), camera=()")
+        self.assert_portal_security_headers(response)
 
     def test_cross_origin_book_creation_is_rejected(self):
         """Fails if another site can submit the book creation form."""
@@ -78,19 +85,42 @@ class BookMemoUiContractTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
 
-    def test_https_origin_forwarded_by_proxy_is_accepted(self):
-        """Fails if Caddy's internal HTTP hop rejects a browser's same-origin HTTPS form."""
+    def test_untrusted_forwarded_headers_do_not_change_expected_origin(self):
+        """Fails if a direct request can spoof forwarded headers to pass the Origin guard."""
         with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
-            with TestClient(app, base_url="http://books.len.pe.kr") as client:
+            with TestClient(app) as client:
                 response = client.post(
                     "/health",
                     headers={
-                        "Origin": "https://books.len.pe.kr",
+                        "Origin": "https://attacker.example",
                         "X-Forwarded-Proto": "https",
+                        "X-Forwarded-Host": "attacker.example",
                     },
                 )
 
+        self.assertEqual(response.status_code, 403)
+
+    def test_caddy_public_host_accepts_https_same_origin(self):
+        """Fails if Caddy's internal HTTP hop rejects a browser's same-origin HTTPS form."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            with TestClient(app, base_url="http://books.len.pe.kr") as client:
+                response = client.post("/health", headers={"Origin": "https://books.len.pe.kr"})
+
         self.assertEqual(response.status_code, 405)
+
+    def test_security_headers_are_applied_to_forbidden_not_found_and_static_responses(self):
+        """Fails if middleware protections are skipped for non-success or static responses."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            with TestClient(app) as client:
+                responses = (
+                    client.post("/health", headers={"Origin": "https://attacker.example"}),
+                    client.get("/does-not-exist"),
+                    client.get("/static/css/style.css"),
+                )
+
+        self.assertEqual([response.status_code for response in responses], [403, 404, 200])
+        for response in responses:
+            self.assert_portal_security_headers(response)
 
     def test_detail_keeps_original_layout_chapter_memo_and_password_forms(self):
         """Fails when the original detail layout or book CRUD routes are disconnected."""

@@ -33,27 +33,25 @@ from app.services.host_urls import portal_home_url, request_host_from_headers
 app = FastAPI(title="Book Memo")
 
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
+_PUBLIC_ORIGIN = "https://books.len.pe.kr"
 _SECURITY_HEADERS = {
     "Content-Security-Policy": (
-        "default-src 'self'; base-uri 'self'; object-src 'none'; "
-        "frame-ancestors 'none'; script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
-        "frame-src https://www.youtube.com https://www.youtube-nocookie.com; "
-        "connect-src 'self'"
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
+        "base-uri 'self'; form-action 'self'"
     ),
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "strict-origin-when-cross-origin",
-    "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
 }
 
 
 def _request_origin(request: Request) -> str:
-    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
-    scheme = forwarded_proto or request.url.scheme
-    forwarded_host = request.headers.get("x-forwarded-host", "").split(",")[0].strip()
-    host = forwarded_host or request.headers.get("host", "")
-    return f"{scheme}://{host}"
+    if request.url.hostname == "books.len.pe.kr":
+        return _PUBLIC_ORIGIN
+    return str(request.base_url).rstrip("/")
 
 
 @app.middleware("http")
