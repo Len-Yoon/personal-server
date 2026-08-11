@@ -96,15 +96,19 @@ def auth_rate_limited(scope: str, identifier: str) -> bool:
         return len(_AUTH_FAILURES.get((scope, identifier), [])) >= AUTH_RATE_LIMIT_MAX_FAILURES
 
 
-def record_auth_failure(scope: str, identifier: str) -> None:
+def record_auth_failure(scope: str, identifier: str) -> bool:
+    """Record one failed attempt and return whether it was already rate-limited."""
     with _auth_rate_limit_lock():
         _reload_auth_failures()
         _prune_expired_auth_failures()
         key = (scope, identifier)
         failures = _AUTH_FAILURES.get(key, [])
+        if len(failures) >= AUTH_RATE_LIMIT_MAX_FAILURES:
+            return True
         failures.append(datetime.now(LOG_TIMEZONE))
         _AUTH_FAILURES[key] = failures
         _persist_auth_failures()
+        return False
 
 
 def clear_auth_failures(scope: str, identifier: str) -> None:

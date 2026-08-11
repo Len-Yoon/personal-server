@@ -56,7 +56,14 @@ def file_login(request: Request, password: str = Form(""), next_path: str = Form
         )
 
     if not secrets.compare_digest(password, configured_password):
-        record_auth_failure("file_access", client)
+        if record_auth_failure("file_access", client):
+            append_security_event("file_access_rate_limited", client=client)
+            return _file_login_response(
+                request,
+                "잠시 후 다시 시도해주세요.",
+                status_code=429,
+                next_path=next_path,
+            )
         append_security_event("file_access_password_failed", client=client)
         return _file_login_response(
             request,
@@ -305,7 +312,9 @@ def _require_delete_password(request: Request, password: str) -> None:
         raise HTTPException(status_code=403, detail="삭제 비밀번호가 설정되지 않았습니다.")
 
     if not secrets.compare_digest(password, configured_password):
-        record_auth_failure("file_delete", client)
+        if record_auth_failure("file_delete", client):
+            append_security_event("delete_password_rate_limited", client=client)
+            raise HTTPException(status_code=429, detail="삭제 비밀번호 실패가 반복되어 잠시 후 다시 시도해주세요.")
         append_security_event("delete_password_failed")
         raise HTTPException(status_code=403, detail="삭제 비밀번호가 올바르지 않습니다.")
     clear_auth_failures("file_delete", client)

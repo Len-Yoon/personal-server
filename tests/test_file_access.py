@@ -1,9 +1,11 @@
 import importlib
 import os
 import tempfile
+import threading
 import unittest
 from html.parser import HTMLParser
 from pathlib import Path
+from unittest.mock import patch
 
 from tests._test_support import prepare_service_import
 
@@ -51,6 +53,8 @@ class FileAccessTests(unittest.TestCase):
         "FILE_MANAGER_ACCESS_PASSWORD",
         "FILE_MANAGER_AUTH_REQUIRED",
         "FILE_STORAGE_PATH",
+        "AUTH_RATE_LIMIT_STATE_PATH",
+        "SECURITY_LOG_PATH",
     )
 
     def setUp(self):
@@ -247,6 +251,52 @@ class FileAccessTests(unittest.TestCase):
             self.assertIn("저장소", local_response.text)
             self.assertEqual(production_response.status_code, 403)
             self.assertIn("파일함 비밀번호가 설정되지 않았습니다.", production_response.text)
+
+    def test_concurrent_failed_logins_reject_attempts_after_rate_limit(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ["FILE_MANAGER_ACCESS_PASSWORD"] = "test-file-password"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "true"
+            os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
+            os.environ["AUTH_RATE_LIMIT_STATE_PATH"] = str(Path(tempdir) / "auth-rate-limit.json")
+            os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security-events.txt")
+
+            import app.main as main
+            import app.routers.files as files
+            from fastapi.testclient import TestClient
+
+            app = importlib.reload(main).app
+            concurrent_attempts = 6
+            simultaneous_precheck = threading.Barrier(concurrent_attempts)
+            response_codes: list[int] = []
+            response_lock = threading.Lock()
+            original_rate_limited = files.auth_rate_limited
+
+            def delayed_rate_limited(scope: str, identifier: str) -> bool:
+                simultaneous_precheck.wait(timeout=5)
+                return original_rate_limited(scope, identifier)
+
+            def submit_wrong_password() -> None:
+                with TestClient(app) as client:
+                    response = client.post(
+                        "/files/login",
+                        data={"password": "wrong", "next_path": ""},
+                        headers={"x-forwarded-for": "203.0.113.7"},
+                        follow_redirects=False,
+                    )
+                with response_lock:
+                    response_codes.append(response.status_code)
+
+            with patch.object(files, "auth_rate_limited", side_effect=delayed_rate_limited):
+                attempts = [threading.Thread(target=submit_wrong_password) for _ in range(concurrent_attempts)]
+                for attempt in attempts:
+                    attempt.start()
+                for attempt in attempts:
+                    attempt.join(timeout=10)
+
+            self.assertTrue(all(not attempt.is_alive() for attempt in attempts))
+            self.assertEqual(response_codes.count(403), 5)
+            self.assertEqual(response_codes.count(429), 1)
 
 
 if __name__ == "__main__":

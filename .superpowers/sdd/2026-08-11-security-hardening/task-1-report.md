@@ -117,3 +117,29 @@ $ PYTHONPATH=portal-web python3 -m unittest tests.test_portal_dashboard tests.te
 Ran 47 tests in 0.934s
 OK
 ```
+
+## 8. 재검토 보완 사항
+
+| 검토 항목 | 원인 | 보완 내용 | 검증 결과 |
+|---|---|---|---|
+| 동시 로그인 사전 제한 우회 | 라우터가 `auth_rate_limited()`와 `record_auth_failure()`를 별도 잠금 트랜잭션으로 호출하여, 여러 요청이 모두 제한 전 상태를 확인할 수 있었음 | `record_auth_failure()`가 동일 잠금 안에서 최신 상태를 재확인하고 이미 제한된 경우 `True`를 반환하도록 변경함. 파일함 로그인·삭제, 포트폴리오 로그인, 관리자 상태 인증이 해당 결과를 즉시 429로 처리하도록 반영함 | 동일 IP 6개 동시 파일함 잘못된 로그인에서 403 5건, 429 1건을 확인함 |
+
+### 8.1 재검토 TDD 기록
+
+```text
+# RED
+$ PYTHONPATH=portal-web python3 -m unittest tests.test_file_access.FileAccessTests.test_concurrent_failed_logins_reject_attempts_after_rate_limit
+Ran 1 test in 0.144s
+FAILED (failures=1)
+# 실제 결과: 403 6건, 429 0건
+
+# GREEN
+$ PYTHONPATH=portal-web python3 -m unittest tests.test_file_access.FileAccessTests.test_concurrent_failed_logins_reject_attempts_after_rate_limit
+Ran 1 test in 0.146s
+OK
+
+# Portal regression
+$ PYTHONPATH=portal-web python3 -m unittest tests.test_portal_dashboard tests.test_file_access tests.test_portal_security tests.test_portfolio && git diff --check
+Ran 48 tests in 0.849s
+OK
+```

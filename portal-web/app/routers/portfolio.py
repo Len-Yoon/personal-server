@@ -58,7 +58,9 @@ def portfolio_admin_login(request: Request, password: str = Form(default="")):
         return _disable_cache(_admin_login_response(request, "관리자 비밀번호가 설정되지 않았습니다.", 403))
 
     if not secrets.compare_digest(password, configured_password):
-        record_auth_failure("portfolio_admin", client)
+        if record_auth_failure("portfolio_admin", client):
+            append_security_event("portfolio_admin_rate_limited", client=client)
+            return _disable_cache(_admin_login_response(request, "인증 실패가 반복되어 잠시 후 다시 시도해주세요.", 429))
         append_security_event("portfolio_admin_login_failed", client=client)
         return _disable_cache(_admin_login_response(request, "비밀번호가 올바르지 않습니다.", 403))
 

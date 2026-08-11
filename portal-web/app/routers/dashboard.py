@@ -231,7 +231,9 @@ def _require_security_password(request: Request, password: str) -> None:
         raise HTTPException(status_code=403, detail="관리자 비밀번호가 설정되지 않았습니다.")
 
     if not secrets.compare_digest(password, configured_password):
-        record_auth_failure("security_dashboard", client)
+        if record_auth_failure("security_dashboard", client):
+            append_security_event("security_dashboard_rate_limited", client=client)
+            raise HTTPException(status_code=429, detail="관리자 인증 실패가 반복되어 잠시 후 다시 시도해주세요.")
         append_security_event("security_dashboard_auth_failed")
         raise HTTPException(status_code=401, detail="관리자 비밀번호가 올바르지 않습니다.")
     clear_auth_failures("security_dashboard", client)
