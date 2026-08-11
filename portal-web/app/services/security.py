@@ -46,12 +46,14 @@ SECURITY_HEADERS = {
         "default-src 'self'; "
         "script-src 'self' 'unsafe-inline'; "
         "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data:; "
+        "img-src 'self' data: https://img.youtube.com https://image.aladin.co.kr "
+        "https://books.google.com https://covers.openlibrary.org; "
         "font-src 'self'; "
         "connect-src 'self'; "
         "frame-ancestors 'none'; "
         "base-uri 'self'; "
-        "form-action 'self'"
+        "form-action 'self'; "
+        "frame-src 'self' https://www.youtube.com"
     ),
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",

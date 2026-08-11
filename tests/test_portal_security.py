@@ -85,6 +85,20 @@ class PortalSecurityTests(unittest.TestCase):
 
             self.assertEqual(target.name, "security-events-2026-06-30.txt")
 
+    def test_security_headers_allow_only_known_external_media_hosts(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            security = self.reload_security(tempdir)
+
+        self.assertEqual(
+            security.SECURITY_HEADERS["Content-Security-Policy"],
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: https://img.youtube.com https://image.aladin.co.kr "
+            "https://books.google.com https://covers.openlibrary.org; "
+            "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
+            "base-uri 'self'; form-action 'self'; frame-src 'self' https://www.youtube.com",
+        )
+
     def test_upload_extension_policy_blocks_script(self):
         with tempfile.TemporaryDirectory() as tempdir:
             file_store = self.reload_file_store(tempdir)

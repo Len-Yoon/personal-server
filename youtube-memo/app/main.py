@@ -28,9 +28,11 @@ _PUBLIC_ORIGIN = "https://memo.len.pe.kr"
 _SECURITY_HEADERS = {
     "Content-Security-Policy": (
         "default-src 'self'; script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https://img.youtube.com https://image.aladin.co.kr "
+        "https://books.google.com https://covers.openlibrary.org; "
         "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
-        "base-uri 'self'; form-action 'self'"
+        "base-uri 'self'; form-action 'self'; frame-src 'self' https://www.youtube.com"
     ),
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",

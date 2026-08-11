@@ -13,9 +13,11 @@ from tests._test_support import prepare_service_import
 PORTAL_SECURITY_HEADERS = {
     "content-security-policy": (
         "default-src 'self'; script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https://img.youtube.com https://image.aladin.co.kr "
+        "https://books.google.com https://covers.openlibrary.org; "
         "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
-        "base-uri 'self'; form-action 'self'"
+        "base-uri 'self'; form-action 'self'; frame-src 'self' https://www.youtube.com"
     ),
     "x-frame-options": "DENY",
     "x-content-type-options": "nosniff",
@@ -72,6 +74,16 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assert_portal_security_headers(response)
+
+    def test_csp_allows_youtube_embed_and_thumbnail_sources(self):
+        """Fails if CSP blocks the iframe or thumbnail rendered by the YouTube UI."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            with TestClient(app) as client:
+                response = client.get("/health")
+
+        policy = response.headers["content-security-policy"]
+        self.assertIn("img-src 'self' data: https://img.youtube.com", policy)
+        self.assertIn("frame-src 'self' https://www.youtube.com", policy)
 
     def test_cross_origin_video_creation_is_rejected(self):
         """Fails if another site can submit the video creation form."""

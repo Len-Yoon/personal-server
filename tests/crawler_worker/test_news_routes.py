@@ -11,9 +11,11 @@ from tests._test_support import prepare_service_import
 PORTAL_SECURITY_HEADERS = {
     "content-security-policy": (
         "default-src 'self'; script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https://img.youtube.com https://image.aladin.co.kr "
+        "https://books.google.com https://covers.openlibrary.org; "
         "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
-        "base-uri 'self'; form-action 'self'"
+        "base-uri 'self'; form-action 'self'; frame-src 'self' https://www.youtube.com"
     ),
     "x-frame-options": "DENY",
     "x-content-type-options": "nosniff",
@@ -62,6 +64,22 @@ class CrawlerWorkerNewsRouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assert_portal_security_headers(response)
+
+    def test_csp_keeps_explicit_shared_media_allowlist(self):
+        """Fails if the shared CSP drops the explicit external media sources."""
+        app = self.load_app()
+        from fastapi.testclient import TestClient
+
+        with TestClient(app) as client:
+            response = client.get("/health")
+
+        policy = response.headers["content-security-policy"]
+        self.assertIn(
+            "img-src 'self' data: https://img.youtube.com https://image.aladin.co.kr "
+            "https://books.google.com https://covers.openlibrary.org",
+            policy,
+        )
+        self.assertIn("frame-src 'self' https://www.youtube.com", policy)
 
     def test_cross_origin_unsafe_request_is_rejected_before_route_handling(self):
         """Fails if a future news write route can be reached from another origin."""
