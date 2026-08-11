@@ -1,6 +1,9 @@
 import importlib
+import json
+import multiprocessing
 import os
 import tempfile
+import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,6 +27,38 @@ PORTAL_SECURITY_HEADERS = {
     "referrer-policy": "strict-origin-when-cross-origin",
     "permissions-policy": "camera=(), microphone=(), geolocation=()",
 }
+
+
+def _record_youtube_auth_failure_in_process(
+    state_path: str,
+    ready,
+    write_started,
+    release_write,
+) -> None:
+    """Exercise the real rate-limit mutation from a separate interpreter."""
+    service_dir = Path(__file__).resolve().parents[2] / "youtube-memo"
+    previous_cwd = Path.cwd()
+    prepare_service_import("youtube-memo")
+    os.environ["AUTH_RATE_LIMIT_STATE_PATH"] = state_path
+    os.chdir(service_dir)
+    try:
+        import app.main as main
+
+        main = importlib.reload(main)
+        if hasattr(main, "_persist_auth_failures"):
+            persist = main._persist_auth_failures
+
+            def delayed_persist() -> None:
+                write_started.set()
+                release_write.wait(timeout=5)
+                persist()
+
+            main._persist_auth_failures = delayed_persist
+
+        ready.wait(timeout=5)
+        main._record_auth_failure("203.0.113.17")
+    finally:
+        os.chdir(previous_cwd)
 
 
 class YoutubeMemoUiContractTests(unittest.TestCase):
@@ -157,6 +192,83 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
         self.assertEqual(created.status_code, 303)
         self.assertEqual(logout.status_code, 303)
         self.assertEqual(rejected.status_code, 401)
+
+    def test_write_auth_failures_survive_service_restart(self):
+        """Fails if failed write-password attempts are retained only in process memory."""
+        previous_password = os.environ.get("DELETE_PASSWORD")
+        previous_state_path = os.environ.get("AUTH_RATE_LIMIT_STATE_PATH")
+        os.environ["DELETE_PASSWORD"] = "rate-limit-password"
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                state_path = Path(tempdir) / "youtube-rate-limit.json"
+                os.environ["AUTH_RATE_LIMIT_STATE_PATH"] = str(state_path)
+                with self.loaded_app(tempdir) as app:
+                    with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                        headers = {"Origin": "https://memo.len.pe.kr", "X-Forwarded-For": "203.0.113.17"}
+                        responses = [
+                            client.post("/auth/login", data={"password": "wrong"}, headers=headers)
+                            for _ in range(6)
+                        ]
+
+                with self.loaded_app(tempdir) as restarted_app:
+                    with TestClient(restarted_app, base_url="https://memo.len.pe.kr") as client:
+                        blocked_after_restart = client.post(
+                            "/auth/login",
+                            data={"password": "wrong"},
+                            headers={"Origin": "https://memo.len.pe.kr", "X-Forwarded-For": "203.0.113.17"},
+                        )
+                state_exists = state_path.exists()
+        finally:
+            if previous_password is None:
+                os.environ.pop("DELETE_PASSWORD", None)
+            else:
+                os.environ["DELETE_PASSWORD"] = previous_password
+            if previous_state_path is None:
+                os.environ.pop("AUTH_RATE_LIMIT_STATE_PATH", None)
+            else:
+                os.environ["AUTH_RATE_LIMIT_STATE_PATH"] = previous_state_path
+
+        self.assertEqual([response.status_code for response in responses], [403, 403, 403, 403, 403, 429])
+        self.assertTrue(state_exists)
+        self.assertEqual(blocked_after_restart.status_code, 429)
+
+    def test_concurrent_processes_keep_all_write_auth_failures(self):
+        """Fails if concurrent processes overwrite one another's persisted failures."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            state_path = Path(tempdir) / "youtube-rate-limit.json"
+            context = multiprocessing.get_context("spawn")
+            ready = context.Event()
+            write_started = context.Event()
+            release_write = context.Event()
+            process_count = 4
+            workers = [
+                context.Process(
+                    target=_record_youtube_auth_failure_in_process,
+                    args=(str(state_path), ready, write_started, release_write),
+                )
+                for _ in range(process_count)
+            ]
+
+            for worker in workers:
+                worker.start()
+            try:
+                ready.set()
+                self.assertTrue(write_started.wait(timeout=10))
+                time.sleep(0.2)
+                release_write.set()
+                for worker in workers:
+                    worker.join(timeout=10)
+                self.assertEqual([worker.exitcode for worker in workers], [0] * process_count)
+            finally:
+                release_write.set()
+                for worker in workers:
+                    if worker.is_alive():
+                        worker.terminate()
+                    worker.join()
+
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(state["203.0.113.17"]), process_count)
 
     def test_untrusted_forwarded_headers_do_not_change_expected_origin(self):
         """Fails if a direct request can spoof forwarded headers to pass the Origin guard."""

@@ -225,7 +225,11 @@ class PortalDashboardTests(unittest.TestCase):
             app = self.load_app()
 
             with TestClient(app) as client:
-                response = client.post("/admin/status", data={"password": "wrong"})
+                response = client.post(
+                    "/admin/status",
+                    data={"password": "wrong"},
+                    headers={"Origin": "http://testserver"},
+                )
 
             self.assertIn(response.status_code, {401, 403, 429})
             self.assertEqual(response.headers["cache-control"], "no-store, no-cache, must-revalidate, max-age=0")
@@ -255,14 +259,20 @@ class PortalDashboardTests(unittest.TestCase):
                 app = self.load_app()
 
                 with TestClient(app) as client:
-                    delete_password = client.post("/admin/status", data={"password": "delete-password"})
+                    delete_password = client.post(
+                        "/admin/status",
+                        data={"password": "delete-password"},
+                        headers={"Origin": "http://testserver"},
+                    )
                     file_manager_password = client.post(
                         "/admin/status",
                         data={"password": "file-manager-password"},
+                        headers={"Origin": "http://testserver"},
                     )
                     dedicated_password = client.post(
                         "/admin/status",
                         data={"password": "dedicated-admin-password"},
+                        headers={"Origin": "http://testserver"},
                     )
 
             self.assertEqual(delete_password.status_code, 401)
@@ -317,7 +327,11 @@ class PortalDashboardTests(unittest.TestCase):
                 return_value=security,
             ):
                 with TestClient(app) as client:
-                    response = client.post("/admin/status", data={"password": "secret"})
+                    response = client.post(
+                        "/admin/status",
+                        data={"password": "secret"},
+                        headers={"Origin": "http://testserver"},
+                    )
 
             self.assertEqual(response.status_code, 200)
             self.assertIn("호스트 수집 시각:", response.text)
@@ -371,9 +385,17 @@ class PortalDashboardTests(unittest.TestCase):
                 return_value=security,
             ):
                 with TestClient(app) as client:
-                    response = client.post("/admin/status", data={"password": "secret"})
+                    response = client.post(
+                        "/admin/status",
+                        data={"password": "secret"},
+                        headers={"Origin": "http://testserver"},
+                    )
                     system_status["host"]["captured_at"] = "not-a-timestamp"
-                    invalid_response = client.post("/admin/status", data={"password": "secret"})
+                    invalid_response = client.post(
+                        "/admin/status",
+                        data={"password": "secret"},
+                        headers={"Origin": "http://testserver"},
+                    )
 
             for status_response in (response, invalid_response):
                 self.assertEqual(status_response.status_code, 200)

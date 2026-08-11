@@ -84,6 +84,7 @@ class FileAccessTests(unittest.TestCase):
                 client.post(
                     "/files/login",
                     data={"password": "test-file-password", "next_path": ""},
+                    headers={"Origin": "http://testserver"},
                     follow_redirects=False,
                 )
                 files_page = client.get("/files")
@@ -116,6 +117,7 @@ class FileAccessTests(unittest.TestCase):
                 client.post(
                     "/files/login",
                     data={"password": "test-file-password", "next_path": ""},
+                    headers={"Origin": "http://testserver"},
                     follow_redirects=False,
                 )
 
@@ -154,6 +156,7 @@ class FileAccessTests(unittest.TestCase):
                 failed = client.post(
                     "/files/login",
                     data={"password": "wrong", "next_path": ""},
+                    headers={"Origin": "http://testserver"},
                     follow_redirects=False,
                 )
                 self.assertEqual(failed.status_code, 403)
@@ -161,6 +164,7 @@ class FileAccessTests(unittest.TestCase):
                 logged_in = client.post(
                     "/files/login",
                     data={"password": "test-file-password", "next_path": ""},
+                    headers={"Origin": "http://testserver"},
                     follow_redirects=False,
                 )
                 self.assertEqual(logged_in.status_code, 303)
@@ -185,11 +189,13 @@ class FileAccessTests(unittest.TestCase):
                 first_login = client.post(
                     "/files/login",
                     data={"password": "test-file-password", "next_path": ""},
+                    headers={"Origin": "https://len.pe.kr"},
                     follow_redirects=False,
                 )
                 second_login = client.post(
                     "/files/login",
                     data={"password": "test-file-password", "next_path": ""},
+                    headers={"Origin": "https://len.pe.kr"},
                     follow_redirects=False,
                 )
 
@@ -218,6 +224,7 @@ class FileAccessTests(unittest.TestCase):
                 client.post(
                     "/files/login",
                     data={"password": "test-file-password", "next_path": ""},
+                    headers={"Origin": "http://testserver"},
                     follow_redirects=False,
                 )
                 self.assertEqual(client.get("/files").status_code, 200)
@@ -281,7 +288,7 @@ class FileAccessTests(unittest.TestCase):
                     response = client.post(
                         "/files/login",
                         data={"password": "wrong", "next_path": ""},
-                        headers={"x-forwarded-for": "203.0.113.7"},
+                        headers={"Origin": "http://testserver", "x-forwarded-for": "203.0.113.7"},
                         follow_redirects=False,
                     )
                 with response_lock:
@@ -297,6 +304,48 @@ class FileAccessTests(unittest.TestCase):
             self.assertTrue(all(not attempt.is_alive() for attempt in attempts))
             self.assertEqual(response_codes.count(403), 5)
             self.assertEqual(response_codes.count(429), 1)
+
+    def test_file_mutation_rejects_cross_origin_session_request_and_accepts_same_origin_form(self):
+        """Fails if a session cookie can authorize a file mutation from another origin."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ["FILE_MANAGER_ACCESS_PASSWORD"] = "test-file-password"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "true"
+            storage_path = Path(tempdir) / "files"
+            storage_path.mkdir()
+            os.environ["FILE_STORAGE_PATH"] = str(storage_path)
+            import app.main as main
+            from fastapi.testclient import TestClient
+
+            app = importlib.reload(main).app
+            with TestClient(app, base_url="https://file.len.pe.kr") as client:
+                same_origin = {"Origin": "https://file.len.pe.kr"}
+                login = client.post(
+                    "/files/login",
+                    data={"password": "test-file-password", "next_path": ""},
+                    headers=same_origin,
+                    follow_redirects=False,
+                )
+                rejected = client.post(
+                    "/files/folders",
+                    data={"path": "", "name": "cross-origin"},
+                    headers={"Origin": "https://attacker.example"},
+                )
+                accepted = client.post(
+                    "/files/folders",
+                    data={"path": "", "name": "same-origin"},
+                    headers=same_origin,
+                    follow_redirects=False,
+                )
+
+                same_origin_created = (storage_path / "same-origin").is_dir()
+                cross_origin_created = (storage_path / "cross-origin").exists()
+
+        self.assertEqual(login.status_code, 303)
+        self.assertEqual(rejected.status_code, 403)
+        self.assertEqual(accepted.status_code, 303)
+        self.assertTrue(same_origin_created)
+        self.assertFalse(cross_origin_created)
 
 
 if __name__ == "__main__":

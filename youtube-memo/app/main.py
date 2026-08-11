@@ -1,7 +1,12 @@
+import json
 import os
 import secrets
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from threading import RLock
+
+import fcntl
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -9,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.services.memo_service import (
+    DB_PATH,
     create_memo,
     create_or_get_video,
     delete_memo,
@@ -70,6 +76,10 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
 AUTH_RATE_LIMIT_MAX_FAILURES = int(os.getenv("AUTH_RATE_LIMIT_MAX_FAILURES", "5"))
 AUTH_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("AUTH_RATE_LIMIT_WINDOW_SECONDS", "300"))
+AUTH_RATE_LIMIT_STATE_PATH = Path(
+    os.getenv("AUTH_RATE_LIMIT_STATE_PATH", "").strip()
+    or DB_PATH.parent / "auth-rate-limit-state.json"
+)
 _AUTH_FAILURES: dict[str, list[datetime]] = {}
 WRITE_AUTH_COOKIE = "youtube_memo_write_session"
 WRITE_AUTH_MAX_AGE = int(os.getenv("MEMO_WRITE_SESSION_MAX_AGE", str(8 * 60 * 60)))
@@ -254,7 +264,8 @@ def write_login(request: Request, password: str = Form(default=""), next_path: s
         return _write_login_response(request, "쓰기 비밀번호가 설정되지 않았습니다.", 403, safe_next_path)
 
     if not secrets.compare_digest(password, configured_password):
-        _record_auth_failure(client)
+        if _record_auth_failure(client):
+            return _write_login_response(request, "비밀번호 실패가 반복되어 잠시 후 다시 시도해주세요.", 429, safe_next_path)
         return _write_login_response(request, "비밀번호가 올바르지 않습니다.", 403, safe_next_path)
 
     _clear_auth_failures(client)
@@ -290,7 +301,8 @@ def _require_delete_password(request: Request, password: str) -> None:
         raise HTTPException(status_code=403, detail="삭제 비밀번호가 설정되지 않았습니다.")
 
     if not secrets.compare_digest(password, configured_password):
-        _record_auth_failure(client)
+        if _record_auth_failure(client):
+            raise HTTPException(status_code=429, detail="비밀번호 실패가 반복되어 잠시 후 다시 시도해주세요.")
         raise HTTPException(status_code=403, detail="삭제 비밀번호가 올바르지 않습니다.")
     _clear_auth_failures(client)
 
@@ -355,24 +367,110 @@ def _safe_redirect(path: str) -> str:
 
 
 def _auth_rate_limited(client: str) -> bool:
-    return len(_active_auth_failures(client)) >= AUTH_RATE_LIMIT_MAX_FAILURES
+    with _auth_rate_limit_lock():
+        _reload_auth_failures()
+        if _prune_expired_auth_failures():
+            _persist_auth_failures()
+        return len(_AUTH_FAILURES.get(client, [])) >= AUTH_RATE_LIMIT_MAX_FAILURES
 
 
-def _record_auth_failure(client: str) -> None:
-    failures = _active_auth_failures(client)
-    failures.append(datetime.now(timezone.utc))
-    _AUTH_FAILURES[client] = failures
+def _record_auth_failure(client: str) -> bool:
+    """Record a failed attempt and report whether the client was already limited."""
+    with _auth_rate_limit_lock():
+        _reload_auth_failures()
+        _prune_expired_auth_failures()
+        failures = _AUTH_FAILURES.get(client, [])
+        if len(failures) >= AUTH_RATE_LIMIT_MAX_FAILURES:
+            return True
+        failures.append(datetime.now(timezone.utc))
+        _AUTH_FAILURES[client] = failures
+        _persist_auth_failures()
+        return False
 
 
 def _clear_auth_failures(client: str) -> None:
-    _AUTH_FAILURES.pop(client, None)
+    with _auth_rate_limit_lock():
+        _reload_auth_failures()
+        changed = _prune_expired_auth_failures()
+        if _AUTH_FAILURES.pop(client, None) is not None:
+            changed = True
+        if changed:
+            _persist_auth_failures()
 
 
-def _active_auth_failures(client: str) -> list[datetime]:
+@contextmanager
+def _auth_rate_limit_lock():
+    lock_path = AUTH_RATE_LIMIT_STATE_PATH.with_name(f".{AUTH_RATE_LIMIT_STATE_PATH.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _reload_auth_failures() -> None:
+    _AUTH_FAILURES.clear()
+    try:
+        raw_state = json.loads(AUTH_RATE_LIMIT_STATE_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return
+
+    if not isinstance(raw_state, dict):
+        return
+    for client, timestamps in raw_state.items():
+        if not isinstance(client, str) or not isinstance(timestamps, list):
+            continue
+        failures = [_parse_auth_failure_timestamp(timestamp) for timestamp in timestamps]
+        active_failures = [failure for failure in failures if failure is not None]
+        if active_failures:
+            _AUTH_FAILURES[client] = active_failures
+
+
+def _parse_auth_failure_timestamp(timestamp: object) -> datetime | None:
+    if not isinstance(timestamp, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _prune_expired_auth_failures() -> bool:
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=AUTH_RATE_LIMIT_WINDOW_SECONDS)
-    failures = [failed_at for failed_at in _AUTH_FAILURES.get(client, []) if failed_at >= cutoff]
-    _AUTH_FAILURES[client] = failures
-    return failures
+    active = {
+        client: [failed_at for failed_at in failures if failed_at >= cutoff]
+        for client, failures in _AUTH_FAILURES.items()
+    }
+    active = {client: failures for client, failures in active.items() if failures}
+    if active != _AUTH_FAILURES:
+        _AUTH_FAILURES.clear()
+        _AUTH_FAILURES.update(active)
+        return True
+    return False
+
+
+def _persist_auth_failures() -> None:
+    state = {
+        client: [failed_at.isoformat() for failed_at in failures]
+        for client, failures in _AUTH_FAILURES.items()
+    }
+    temporary_path = AUTH_RATE_LIMIT_STATE_PATH.with_name(
+        f".{AUTH_RATE_LIMIT_STATE_PATH.name}.{secrets.token_hex(8)}.tmp"
+    )
+    try:
+        AUTH_RATE_LIMIT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with temporary_path.open("w", encoding="utf-8") as state_file:
+            json.dump(state, state_file, ensure_ascii=False, separators=(",", ":"))
+            state_file.flush()
+            os.fsync(state_file.fileno())
+        os.replace(temporary_path, AUTH_RATE_LIMIT_STATE_PATH)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 def _client_id(request: Request) -> str:

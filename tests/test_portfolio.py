@@ -111,16 +111,19 @@ class PortfolioRoutesTests(unittest.TestCase):
             login = client.post(
                 "/admin/login",
                 data={"password": "test-portfolio-password"},
+                headers={"Origin": "https://portfolio.len.pe.kr"},
                 follow_redirects=False,
             )
             second_login = client.post(
                 "/admin/login",
                 data={"password": "test-portfolio-password"},
+                headers={"Origin": "https://portfolio.len.pe.kr"},
                 follow_redirects=False,
             )
             save = client.post(
                 "/admin/save",
                 data={"content": "# 김길동\n\n개인 프로젝트"},
+                headers={"Origin": "https://portfolio.len.pe.kr"},
                 follow_redirects=False,
             )
             public = client.get("/")
@@ -145,6 +148,7 @@ class PortfolioRoutesTests(unittest.TestCase):
             client.post(
                 "/admin/login",
                 data={"password": "test-portfolio-password"},
+                headers={"Origin": "https://portfolio.len.pe.kr"},
                 follow_redirects=False,
             )
             self.assertIn("포트폴리오 편집", client.get("/admin").text)
@@ -159,9 +163,42 @@ class PortfolioRoutesTests(unittest.TestCase):
         from fastapi.testclient import TestClient
 
         with TestClient(self.app, base_url="https://portfolio.len.pe.kr") as client:
-            response = client.post("/admin/save", data={"content": "# 변경 시도"})
+            response = client.post(
+                "/admin/save",
+                data={"content": "# 변경 시도"},
+                headers={"Origin": "https://portfolio.len.pe.kr"},
+            )
 
         self.assertEqual(response.status_code, 401)
+
+    def test_admin_save_rejects_cross_origin_session_request_and_accepts_same_origin_form(self):
+        """Fails if a portfolio admin session can be used by a foreign-origin form."""
+        from fastapi.testclient import TestClient
+
+        with TestClient(self.app, base_url="https://portfolio.len.pe.kr") as client:
+            same_origin = {"Origin": "https://portfolio.len.pe.kr"}
+            login = client.post(
+                "/admin/login",
+                data={"password": "test-portfolio-password"},
+                headers=same_origin,
+                follow_redirects=False,
+            )
+            rejected = client.post(
+                "/admin/save",
+                data={"content": "# 공격 시도"},
+                headers={"Origin": "https://attacker.example"},
+                follow_redirects=False,
+            )
+            accepted = client.post(
+                "/admin/save",
+                data={"content": "# 동일 출처 저장"},
+                headers=same_origin,
+                follow_redirects=False,
+            )
+
+        self.assertEqual(login.status_code, 303)
+        self.assertEqual(rejected.status_code, 403)
+        self.assertEqual(accepted.status_code, 303)
 
     def test_admin_routes_are_not_available_from_personal_server_host(self):
         from fastapi.testclient import TestClient
