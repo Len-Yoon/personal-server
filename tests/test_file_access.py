@@ -195,6 +195,7 @@ class FileAccessTests(unittest.TestCase):
             self.assertIn("httponly", first_cookie)
             self.assertIn("secure", first_cookie)
             self.assertIn("samesite=lax", first_cookie)
+            self.assertIn("path=/files", first_cookie)
             self.assertNotEqual(first_cookie.split(";", 1)[0], second_cookie.split(";", 1)[0])
 
     def test_file_session_is_rejected_after_security_service_restart(self):

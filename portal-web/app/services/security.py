@@ -1,10 +1,14 @@
 import json
 import os
 import secrets
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+from threading import RLock
 from typing import Any
 from zoneinfo import ZoneInfo
+
+import fcntl
 
 
 PROJECT_DATA_ROOT = next(
@@ -26,8 +30,8 @@ AUTH_RATE_LIMIT_STATE_PATH = Path(
 AUTH_SESSION_MAX_ENTRIES = max(1, int(os.getenv("AUTH_SESSION_MAX_ENTRIES", "1024")))
 
 _AUTH_FAILURES: dict[tuple[str, str], list[datetime]] = {}
-_AUTH_FAILURES_LOADED = False
 _AUTH_SESSIONS: dict[str, tuple[str, datetime]] = {}
+_AUTH_SESSIONS_LOCK = RLock()
 _ALLOWED_USER_EVENTS = {
     "global_search_submitted",
     "search_result_opened",
@@ -85,45 +89,56 @@ def append_user_event(event: str, **details: Any) -> None:
 
 
 def auth_rate_limited(scope: str, identifier: str) -> bool:
-    failures = _active_auth_failures(scope, identifier)
-    return len(failures) >= AUTH_RATE_LIMIT_MAX_FAILURES
+    with _auth_rate_limit_lock():
+        _reload_auth_failures()
+        if _prune_expired_auth_failures():
+            _persist_auth_failures()
+        return len(_AUTH_FAILURES.get((scope, identifier), [])) >= AUTH_RATE_LIMIT_MAX_FAILURES
 
 
 def record_auth_failure(scope: str, identifier: str) -> None:
-    key = (scope, identifier)
-    failures = _active_auth_failures(scope, identifier)
-    failures.append(datetime.now(LOG_TIMEZONE))
-    _AUTH_FAILURES[key] = failures
-    _persist_auth_failures()
-
-
-def clear_auth_failures(scope: str, identifier: str) -> None:
-    _ensure_auth_failures_loaded()
-    _prune_expired_auth_failures()
-    if _AUTH_FAILURES.pop((scope, identifier), None) is not None:
+    with _auth_rate_limit_lock():
+        _reload_auth_failures()
+        _prune_expired_auth_failures()
+        key = (scope, identifier)
+        failures = _AUTH_FAILURES.get(key, [])
+        failures.append(datetime.now(LOG_TIMEZONE))
+        _AUTH_FAILURES[key] = failures
         _persist_auth_failures()
 
 
-def create_auth_session(scope: str, max_age_seconds: int) -> str:
-    _prune_expired_auth_sessions()
-    while len(_AUTH_SESSIONS) >= AUTH_SESSION_MAX_ENTRIES:
-        oldest_token = min(_AUTH_SESSIONS, key=lambda token: _AUTH_SESSIONS[token][1])
-        _AUTH_SESSIONS.pop(oldest_token)
+def clear_auth_failures(scope: str, identifier: str) -> None:
+    with _auth_rate_limit_lock():
+        _reload_auth_failures()
+        changed = _prune_expired_auth_failures()
+        if _AUTH_FAILURES.pop((scope, identifier), None) is not None:
+            changed = True
+        if changed:
+            _persist_auth_failures()
 
-    token = secrets.token_urlsafe(32)
-    while token in _AUTH_SESSIONS:
+
+def create_auth_session(scope: str, max_age_seconds: int) -> str:
+    with _AUTH_SESSIONS_LOCK:
+        _prune_expired_auth_sessions()
+        while len(_AUTH_SESSIONS) >= AUTH_SESSION_MAX_ENTRIES:
+            oldest_token = min(_AUTH_SESSIONS, key=lambda token: _AUTH_SESSIONS[token][1])
+            _AUTH_SESSIONS.pop(oldest_token)
+
         token = secrets.token_urlsafe(32)
-    _AUTH_SESSIONS[token] = (
-        scope,
-        datetime.now(LOG_TIMEZONE) + timedelta(seconds=max_age_seconds),
-    )
+        while token in _AUTH_SESSIONS:
+            token = secrets.token_urlsafe(32)
+        _AUTH_SESSIONS[token] = (
+            scope,
+            datetime.now(LOG_TIMEZONE) + timedelta(seconds=max_age_seconds),
+        )
     return token
 
 
 def has_auth_session(scope: str, token: str) -> bool:
-    _prune_expired_auth_sessions()
-    session = _AUTH_SESSIONS.get(token)
-    return bool(session and session[0] == scope)
+    with _AUTH_SESSIONS_LOCK:
+        _prune_expired_auth_sessions()
+        session = _AUTH_SESSIONS.get(token)
+        return bool(session and session[0] == scope)
 
 
 def is_production_environment() -> bool:
@@ -174,20 +189,21 @@ def _blocked_extensions() -> set[str]:
     return {extension.strip().lower().lstrip(".") for extension in raw.split(",") if extension.strip()}
 
 
-def _active_auth_failures(scope: str, identifier: str) -> list[datetime]:
-    _ensure_auth_failures_loaded()
-    _prune_expired_auth_failures()
-    key = (scope, identifier)
-    return _AUTH_FAILURES.get(key, [])
+@contextmanager
+def _auth_rate_limit_lock():
+    lock_path = AUTH_RATE_LIMIT_STATE_PATH.with_name(f".{AUTH_RATE_LIMIT_STATE_PATH.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-def _ensure_auth_failures_loaded() -> None:
-    global _AUTH_FAILURES_LOADED
-    if _AUTH_FAILURES_LOADED:
-        return
-
+def _reload_auth_failures() -> None:
+    _AUTH_FAILURES.clear()
     _AUTH_FAILURES.update(_read_auth_failures())
-    _AUTH_FAILURES_LOADED = True
 
 
 def _read_auth_failures() -> dict[tuple[str, str], list[datetime]]:
@@ -225,7 +241,7 @@ def _parse_auth_failure_timestamp(timestamp: object) -> datetime | None:
     return parsed.astimezone(LOG_TIMEZONE)
 
 
-def _prune_expired_auth_failures() -> None:
+def _prune_expired_auth_failures() -> bool:
     cutoff = datetime.now(LOG_TIMEZONE) - timedelta(seconds=AUTH_RATE_LIMIT_WINDOW_SECONDS)
     pruned = {
         key: [failed_at for failed_at in failures if failed_at >= cutoff]
@@ -235,7 +251,8 @@ def _prune_expired_auth_failures() -> None:
     if active != _AUTH_FAILURES:
         _AUTH_FAILURES.clear()
         _AUTH_FAILURES.update(active)
-        _persist_auth_failures()
+        return True
+    return False
 
 
 def _persist_auth_failures() -> None:

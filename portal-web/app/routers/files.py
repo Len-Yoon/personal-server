@@ -74,6 +74,7 @@ def file_login(request: Request, password: str = Form(""), next_path: str = Form
         httponly=True,
         samesite="lax",
         secure=is_production_environment(),
+        path="/files",
         max_age=FILE_ACCESS_MAX_AGE,
     )
     return response

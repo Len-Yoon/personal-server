@@ -84,3 +84,36 @@ OK
 
 - Task 2~4에서 공통 보안 헤더, CSRF, 메모 쓰기 인증 및 환경 문서화를 별도 수행 필요함.
 - `AUTH_RATE_LIMIT_STATE_PATH` 운영 경로 설정 여부는 Task 4 문서화 시 확인 필요함.
+
+## 7. 검토 보완 사항
+
+| 검토 항목 | 원인 | 보완 내용 | 검증 결과 |
+|---|---|---|---|
+| 세션 최대 개수 동시 초과 | 세션 정리·상한 확인·토큰 삽입이 잠금 없이 수행됨 | 프로세스 내 `RLock`으로 전체 발급 및 조회 구간을 직렬화함 | 최대 1개 설정에서 동시 발급 후 유효 세션이 1개임을 확인함 |
+| 인증 실패 제한 동시 기록 유실 | 각 인스턴스가 상태를 읽은 뒤 독립적으로 JSON을 교체하여 마지막 기록만 남을 수 있음 | Linux `fcntl.flock` 잠금 파일로 상태 재적재·만료 정리·기록·원자 교체를 하나의 임계 구간으로 처리함 | 5개 별도 프로세스 동시 기록 후 5개 기록이 모두 보존됨을 확인함 |
+| 파일함 쿠키 범위 | 기본 쿠키 경로가 포털 전체(`/`)였음 | 파일함 세션 쿠키의 `Path`를 `/files`로 제한함 | 운영 쿠키 속성 테스트로 확인함 |
+
+### 7.1 검토 보완 TDD 기록
+
+```text
+# RED
+$ PYTHONPATH=portal-web python3 -m unittest \
+  tests.test_file_access.FileAccessTests.test_production_file_login_uses_secure_server_side_session_cookie \
+  tests.test_portal_security.PortalSecurityTests.test_auth_session_cap_holds_during_concurrent_session_creation \
+  tests.test_portal_security.PortalSecurityTests.test_auth_rate_limit_keeps_all_concurrent_process_failures
+Ran 3 tests in 0.638s
+FAILED (failures=3)
+
+# GREEN
+$ PYTHONPATH=portal-web python3 -m unittest \
+  tests.test_file_access.FileAccessTests.test_production_file_login_uses_secure_server_side_session_cookie \
+  tests.test_portal_security.PortalSecurityTests.test_auth_session_cap_holds_during_concurrent_session_creation \
+  tests.test_portal_security.PortalSecurityTests.test_auth_rate_limit_keeps_all_concurrent_process_failures
+Ran 3 tests in 0.605s
+OK
+
+# Portal regression
+$ PYTHONPATH=portal-web python3 -m unittest tests.test_portal_dashboard tests.test_file_access tests.test_portal_security tests.test_portfolio && git diff --check
+Ran 47 tests in 0.934s
+OK
+```
