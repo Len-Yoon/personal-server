@@ -46,10 +46,28 @@ class _FileAreaStructureParser(HTMLParser):
 
 
 class FileAccessTests(unittest.TestCase):
+    _ENV_KEYS = (
+        "APP_ENV",
+        "FILE_MANAGER_ACCESS_PASSWORD",
+        "FILE_MANAGER_AUTH_REQUIRED",
+        "FILE_STORAGE_PATH",
+    )
+
+    def setUp(self):
+        self._environment = {key: os.environ.get(key) for key in self._ENV_KEYS}
+
+    def tearDown(self):
+        for key, value in self._environment.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
     def test_empty_file_area_keeps_drop_message_inside_event_zone(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
             os.environ["FILE_MANAGER_ACCESS_PASSWORD"] = "test-file-password"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "true"
             storage_path = Path(tempdir) / "files"
             os.environ["FILE_STORAGE_PATH"] = str(storage_path)
             storage_path.mkdir()
@@ -79,6 +97,7 @@ class FileAccessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
             os.environ["FILE_MANAGER_ACCESS_PASSWORD"] = "test-file-password"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "true"
             storage_path = Path(tempdir) / "files"
             os.environ["FILE_STORAGE_PATH"] = str(storage_path)
             storage_path.mkdir()
@@ -117,6 +136,7 @@ class FileAccessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
             os.environ["FILE_MANAGER_ACCESS_PASSWORD"] = "test-file-password"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "true"
             os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
             import app.main as main
             from fastapi.testclient import TestClient
@@ -145,6 +165,87 @@ class FileAccessTests(unittest.TestCase):
                 files_page = client.get("/files")
                 self.assertEqual(files_page.status_code, 200)
                 self.assertIn("저장소", files_page.text)
+
+    def test_production_file_login_uses_secure_server_side_session_cookie(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ["APP_ENV"] = "production"
+            os.environ["FILE_MANAGER_ACCESS_PASSWORD"] = "test-file-password"
+            os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
+
+            import app.main as main
+            from fastapi.testclient import TestClient
+
+            app = importlib.reload(main).app
+            with TestClient(app, base_url="https://len.pe.kr") as client:
+                first_login = client.post(
+                    "/files/login",
+                    data={"password": "test-file-password", "next_path": ""},
+                    follow_redirects=False,
+                )
+                second_login = client.post(
+                    "/files/login",
+                    data={"password": "test-file-password", "next_path": ""},
+                    follow_redirects=False,
+                )
+
+            first_cookie = first_login.headers["set-cookie"].lower()
+            second_cookie = second_login.headers["set-cookie"].lower()
+            self.assertIn("file_manager_access=", first_cookie)
+            self.assertIn("httponly", first_cookie)
+            self.assertIn("secure", first_cookie)
+            self.assertIn("samesite=lax", first_cookie)
+            self.assertNotEqual(first_cookie.split(";", 1)[0], second_cookie.split(";", 1)[0])
+
+    def test_file_session_is_rejected_after_security_service_restart(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ["FILE_MANAGER_ACCESS_PASSWORD"] = "test-file-password"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "true"
+            os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
+
+            import app.main as main
+            import app.services.security as security
+            from fastapi.testclient import TestClient
+
+            app = importlib.reload(main).app
+            with TestClient(app) as client:
+                client.post(
+                    "/files/login",
+                    data={"password": "test-file-password", "next_path": ""},
+                    follow_redirects=False,
+                )
+                self.assertEqual(client.get("/files").status_code, 200)
+
+                importlib.reload(security)
+                after_restart = client.get("/files")
+
+            self.assertEqual(after_restart.status_code, 200)
+            self.assertIn("FILE VAULT", after_restart.text)
+
+    def test_file_manager_policy_allows_passwordless_local_development_only(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ.pop("APP_ENV", None)
+            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
+
+            import app.main as main
+            from fastapi.testclient import TestClient
+
+            app = importlib.reload(main).app
+            with TestClient(app) as client:
+                local_response = client.get("/files")
+
+            os.environ["APP_ENV"] = "production"
+            app = importlib.reload(main).app
+            with TestClient(app) as client:
+                production_response = client.get("/files")
+
+            self.assertEqual(local_response.status_code, 200)
+            self.assertIn("저장소", local_response.text)
+            self.assertEqual(production_response.status_code, 403)
+            self.assertIn("파일함 비밀번호가 설정되지 않았습니다.", production_response.text)
 
 
 if __name__ == "__main__":

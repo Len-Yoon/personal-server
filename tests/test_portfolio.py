@@ -48,7 +48,12 @@ class PortfolioStoreTests(unittest.TestCase):
 class PortfolioRoutesTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
+        self._environment = {
+            key: os.environ.get(key)
+            for key in ("APP_ENV", "PORTFOLIO_CONTENT_PATH", "PORTFOLIO_ADMIN_PASSWORD", "SECURITY_LOG_PATH")
+        }
         prepare_service_import("portal-web")
+        os.environ["APP_ENV"] = "production"
         os.environ["PORTFOLIO_CONTENT_PATH"] = str(Path(self.tempdir.name) / "portfolio.md")
         os.environ["PORTFOLIO_ADMIN_PASSWORD"] = "test-portfolio-password"
         os.environ["SECURITY_LOG_PATH"] = str(Path(self.tempdir.name) / "security-events.txt")
@@ -63,8 +68,11 @@ class PortfolioRoutesTests(unittest.TestCase):
 
     def tearDown(self):
         self.tempdir.cleanup()
-        for key in ("PORTFOLIO_CONTENT_PATH", "PORTFOLIO_ADMIN_PASSWORD", "SECURITY_LOG_PATH"):
-            os.environ.pop(key, None)
+        for key, value in self._environment.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
     def test_portfolio_host_renders_public_content_without_dashboard_links(self):
         from fastapi.testclient import TestClient
@@ -96,11 +104,16 @@ class PortfolioRoutesTests(unittest.TestCase):
         self.assertIn("포트폴리오 관리자", response.text)
         self.assertEqual(response.headers["cache-control"], "no-store, no-cache, must-revalidate, max-age=0")
 
-    def test_login_sets_scoped_secure_hmac_cookie_and_allows_save(self):
+    def test_production_login_sets_random_scoped_session_cookie_and_allows_save(self):
         from fastapi.testclient import TestClient
 
         with TestClient(self.app, base_url="https://portfolio.len.pe.kr") as client:
             login = client.post(
+                "/admin/login",
+                data={"password": "test-portfolio-password"},
+                follow_redirects=False,
+            )
+            second_login = client.post(
                 "/admin/login",
                 data={"password": "test-portfolio-password"},
                 follow_redirects=False,
@@ -120,8 +133,27 @@ class PortfolioRoutesTests(unittest.TestCase):
         self.assertIn("samesite=lax", cookie)
         self.assertIn("path=/admin", cookie)
         self.assertIn("max-age=28800", cookie)
+        self.assertNotEqual(cookie.split(";", 1)[0], second_login.headers["set-cookie"].lower().split(";", 1)[0])
         self.assertEqual(save.status_code, 303)
         self.assertIn("김길동", public.text)
+
+    def test_portfolio_session_is_rejected_after_security_service_restart(self):
+        import app.services.security as security
+        from fastapi.testclient import TestClient
+
+        with TestClient(self.app, base_url="https://portfolio.len.pe.kr") as client:
+            client.post(
+                "/admin/login",
+                data={"password": "test-portfolio-password"},
+                follow_redirects=False,
+            )
+            self.assertIn("포트폴리오 편집", client.get("/admin").text)
+
+            importlib.reload(security)
+            after_restart = client.get("/admin")
+
+        self.assertEqual(after_restart.status_code, 200)
+        self.assertIn("포트폴리오 관리자", after_restart.text)
 
     def test_save_rejects_unauthenticated_requests(self):
         from fastapi.testclient import TestClient

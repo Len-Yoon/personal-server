@@ -1,7 +1,5 @@
 import os
 import secrets
-import hashlib
-import hmac
 import tempfile
 import zipfile
 from pathlib import Path
@@ -18,6 +16,9 @@ from app.services.security import (
     append_security_event,
     auth_rate_limited,
     clear_auth_failures,
+    create_auth_session,
+    has_auth_session,
+    is_production_environment,
     record_auth_failure,
 )
 
@@ -26,10 +27,14 @@ router = APIRouter(prefix="/files")
 templates = Jinja2Templates(directory=Path(__file__).resolve().parents[1] / "templates")
 templates.env.filters["filesize"] = file_store.format_size
 FILE_ACCESS_COOKIE = "file_manager_access"
+FILE_ACCESS_MAX_AGE = 8 * 60 * 60
 
 
 @router.post("/login")
 def file_login(request: Request, password: str = Form(""), next_path: str = Form("")):
+    if not _file_access_required():
+        return RedirectResponse(url=_directory_url(next_path), status_code=303)
+
     client = _client_id(request)
     if auth_rate_limited("file_access", client):
         append_security_event("file_access_rate_limited", client=client)
@@ -65,10 +70,11 @@ def file_login(request: Request, password: str = Form(""), next_path: str = Form
     response = RedirectResponse(url=_directory_url(next_path), status_code=303)
     response.set_cookie(
         FILE_ACCESS_COOKIE,
-        _file_access_cookie_value(configured_password),
+        create_auth_session("file_access", FILE_ACCESS_MAX_AGE),
         httponly=True,
         samesite="lax",
-        max_age=8 * 60 * 60,
+        secure=is_production_environment(),
+        max_age=FILE_ACCESS_MAX_AGE,
     )
     return response
 
@@ -76,6 +82,13 @@ def file_login(request: Request, password: str = Form(""), next_path: str = Form
 @router.get("")
 def files_home(request: Request, path: str = ""):
     if not _has_file_access(request):
+        if _file_access_required() and not _file_access_password():
+            return _file_login_response(
+                request,
+                "파일함 비밀번호가 설정되지 않았습니다.",
+                status_code=403,
+                next_path=path,
+            )
         return _file_login_response(request, next_path=path)
 
     try:
@@ -237,22 +250,22 @@ def _file_access_password() -> str:
     return os.getenv("FILE_MANAGER_ACCESS_PASSWORD", "").strip()
 
 
-def _file_access_cookie_value(password: str) -> str:
-    return hmac.new(
-        password.encode("utf-8"),
-        b"personal-server-file-manager",
-        hashlib.sha256,
-    ).hexdigest()
+def _file_access_required() -> bool:
+    configured = os.getenv("FILE_MANAGER_AUTH_REQUIRED", "").strip().lower()
+    return is_production_environment() or configured in {"1", "true", "yes", "on"}
 
 
 def _has_file_access(request: Request) -> bool:
+    if not _file_access_required():
+        return True
     cookie = request.cookies.get(FILE_ACCESS_COOKIE, "")
-    expected = _file_access_cookie_value(_file_access_password())
-    return bool(cookie) and hmac.compare_digest(cookie, expected)
+    return bool(cookie) and has_auth_session("file_access", cookie)
 
 
 def _require_file_access(request: Request) -> None:
     if not _has_file_access(request):
+        if _file_access_required() and not _file_access_password():
+            raise HTTPException(status_code=403, detail="파일함 비밀번호가 설정되지 않았습니다.")
         raise HTTPException(status_code=401, detail="파일함 인증이 필요합니다.")
 
 

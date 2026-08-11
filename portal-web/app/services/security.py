@@ -1,5 +1,6 @@
 import json
 import os
+import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -18,8 +19,15 @@ LOG_PATH = Path(os.getenv("SECURITY_LOG_PATH", PROJECT_DATA_ROOT / "logs" / "sec
 LOG_TIMEZONE = ZoneInfo(os.getenv("SECURITY_LOG_TIMEZONE", "Asia/Seoul"))
 AUTH_RATE_LIMIT_MAX_FAILURES = int(os.getenv("AUTH_RATE_LIMIT_MAX_FAILURES", "5"))
 AUTH_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("AUTH_RATE_LIMIT_WINDOW_SECONDS", "300"))
+AUTH_RATE_LIMIT_STATE_PATH = Path(
+    os.getenv("AUTH_RATE_LIMIT_STATE_PATH", "").strip()
+    or LOG_PATH.parent / "auth-rate-limit-state.json"
+)
+AUTH_SESSION_MAX_ENTRIES = max(1, int(os.getenv("AUTH_SESSION_MAX_ENTRIES", "1024")))
 
 _AUTH_FAILURES: dict[tuple[str, str], list[datetime]] = {}
+_AUTH_FAILURES_LOADED = False
+_AUTH_SESSIONS: dict[str, tuple[str, datetime]] = {}
 _ALLOWED_USER_EVENTS = {
     "global_search_submitted",
     "search_result_opened",
@@ -86,10 +94,40 @@ def record_auth_failure(scope: str, identifier: str) -> None:
     failures = _active_auth_failures(scope, identifier)
     failures.append(datetime.now(LOG_TIMEZONE))
     _AUTH_FAILURES[key] = failures
+    _persist_auth_failures()
 
 
 def clear_auth_failures(scope: str, identifier: str) -> None:
-    _AUTH_FAILURES.pop((scope, identifier), None)
+    _ensure_auth_failures_loaded()
+    _prune_expired_auth_failures()
+    if _AUTH_FAILURES.pop((scope, identifier), None) is not None:
+        _persist_auth_failures()
+
+
+def create_auth_session(scope: str, max_age_seconds: int) -> str:
+    _prune_expired_auth_sessions()
+    while len(_AUTH_SESSIONS) >= AUTH_SESSION_MAX_ENTRIES:
+        oldest_token = min(_AUTH_SESSIONS, key=lambda token: _AUTH_SESSIONS[token][1])
+        _AUTH_SESSIONS.pop(oldest_token)
+
+    token = secrets.token_urlsafe(32)
+    while token in _AUTH_SESSIONS:
+        token = secrets.token_urlsafe(32)
+    _AUTH_SESSIONS[token] = (
+        scope,
+        datetime.now(LOG_TIMEZONE) + timedelta(seconds=max_age_seconds),
+    )
+    return token
+
+
+def has_auth_session(scope: str, token: str) -> bool:
+    _prune_expired_auth_sessions()
+    session = _AUTH_SESSIONS.get(token)
+    return bool(session and session[0] == scope)
+
+
+def is_production_environment() -> bool:
+    return os.getenv("APP_ENV", "").strip().lower() == "production"
 
 
 def read_recent_events(limit: int = 8) -> list[dict[str, Any]]:
@@ -137,11 +175,97 @@ def _blocked_extensions() -> set[str]:
 
 
 def _active_auth_failures(scope: str, identifier: str) -> list[datetime]:
+    _ensure_auth_failures_loaded()
+    _prune_expired_auth_failures()
     key = (scope, identifier)
-    cutoff = datetime.now(LOG_TIMEZONE) - timedelta(seconds=AUTH_RATE_LIMIT_WINDOW_SECONDS)
-    failures = [failed_at for failed_at in _AUTH_FAILURES.get(key, []) if failed_at >= cutoff]
-    _AUTH_FAILURES[key] = failures
+    return _AUTH_FAILURES.get(key, [])
+
+
+def _ensure_auth_failures_loaded() -> None:
+    global _AUTH_FAILURES_LOADED
+    if _AUTH_FAILURES_LOADED:
+        return
+
+    _AUTH_FAILURES.update(_read_auth_failures())
+    _AUTH_FAILURES_LOADED = True
+
+
+def _read_auth_failures() -> dict[tuple[str, str], list[datetime]]:
+    try:
+        raw_state = json.loads(AUTH_RATE_LIMIT_STATE_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
+
+    if not isinstance(raw_state, dict):
+        return {}
+
+    failures: dict[tuple[str, str], list[datetime]] = {}
+    for scope, identifiers in raw_state.items():
+        if not isinstance(scope, str) or not isinstance(identifiers, dict):
+            continue
+        for identifier, timestamps in identifiers.items():
+            if not isinstance(identifier, str) or not isinstance(timestamps, list):
+                continue
+            parsed_timestamps = [_parse_auth_failure_timestamp(timestamp) for timestamp in timestamps]
+            valid_timestamps = [timestamp for timestamp in parsed_timestamps if timestamp is not None]
+            if valid_timestamps:
+                failures[(scope, identifier)] = valid_timestamps
     return failures
+
+
+def _parse_auth_failure_timestamp(timestamp: object) -> datetime | None:
+    if not isinstance(timestamp, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=LOG_TIMEZONE)
+    return parsed.astimezone(LOG_TIMEZONE)
+
+
+def _prune_expired_auth_failures() -> None:
+    cutoff = datetime.now(LOG_TIMEZONE) - timedelta(seconds=AUTH_RATE_LIMIT_WINDOW_SECONDS)
+    pruned = {
+        key: [failed_at for failed_at in failures if failed_at >= cutoff]
+        for key, failures in _AUTH_FAILURES.items()
+    }
+    active = {key: failures for key, failures in pruned.items() if failures}
+    if active != _AUTH_FAILURES:
+        _AUTH_FAILURES.clear()
+        _AUTH_FAILURES.update(active)
+        _persist_auth_failures()
+
+
+def _persist_auth_failures() -> None:
+    state: dict[str, dict[str, list[str]]] = {}
+    for (scope, identifier), failures in _AUTH_FAILURES.items():
+        state.setdefault(scope, {})[identifier] = [failed_at.isoformat() for failed_at in failures]
+
+    temporary_path = AUTH_RATE_LIMIT_STATE_PATH.with_name(
+        f".{AUTH_RATE_LIMIT_STATE_PATH.name}.{secrets.token_hex(8)}.tmp"
+    )
+    try:
+        AUTH_RATE_LIMIT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with temporary_path.open("w", encoding="utf-8") as state_file:
+            json.dump(state, state_file, ensure_ascii=False, separators=(",", ":"))
+            state_file.flush()
+            os.fsync(state_file.fileno())
+        os.replace(temporary_path, AUTH_RATE_LIMIT_STATE_PATH)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _prune_expired_auth_sessions() -> None:
+    now = datetime.now(LOG_TIMEZONE)
+    expired_tokens = [
+        token
+        for token, (_, expires_at) in _AUTH_SESSIONS.items()
+        if expires_at < now
+    ]
+    for token in expired_tokens:
+        _AUTH_SESSIONS.pop(token, None)
 
 
 def _clean_detail(value: Any) -> str:

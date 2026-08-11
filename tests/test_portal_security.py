@@ -10,6 +10,23 @@ from tests._test_support import prepare_service_import
 
 
 class PortalSecurityTests(unittest.TestCase):
+    _ENV_KEYS = (
+        "AUTH_RATE_LIMIT_STATE_PATH",
+        "FILE_STORAGE_PATH",
+        "SECURITY_LOG_PATH",
+        "SECURITY_LOG_TIMEZONE",
+    )
+
+    def setUp(self):
+        self._environment = {key: os.environ.get(key) for key in self._ENV_KEYS}
+
+    def tearDown(self):
+        for key, value in self._environment.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
     def reload_security(self, tempdir: str):
         prepare_service_import("portal-web")
         os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security-events.txt")
@@ -79,6 +96,31 @@ class PortalSecurityTests(unittest.TestCase):
                 security.record_auth_failure("files", "127.0.0.1")
 
             self.assertTrue(security.auth_rate_limited("files", "127.0.0.1"))
+
+    def test_auth_rate_limit_records_survive_security_service_restart(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            state_path = Path(tempdir) / "auth-rate-limit.json"
+            os.environ["AUTH_RATE_LIMIT_STATE_PATH"] = str(state_path)
+            security = self.reload_security(tempdir)
+
+            for _ in range(5):
+                security.record_auth_failure("files", "127.0.0.1")
+
+            self.assertTrue(state_path.exists())
+            restarted_security = importlib.reload(security)
+            self.assertTrue(restarted_security.auth_rate_limited("files", "127.0.0.1"))
+
+    def test_auth_sessions_evict_oldest_entry_at_configured_bound(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            os.environ["AUTH_SESSION_MAX_ENTRIES"] = "1"
+            self.addCleanup(os.environ.pop, "AUTH_SESSION_MAX_ENTRIES", None)
+            security = self.reload_security(tempdir)
+
+            first_session = security.create_auth_session("files", 60)
+            second_session = security.create_auth_session("files", 60)
+
+            self.assertFalse(security.has_auth_session("files", first_session))
+            self.assertTrue(security.has_auth_session("files", second_session))
 
     def test_append_user_event_allows_known_click_events(self):
         with tempfile.TemporaryDirectory() as tempdir:

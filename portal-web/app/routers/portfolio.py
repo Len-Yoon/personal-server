@@ -1,5 +1,3 @@
-import hashlib
-import hmac
 import os
 import secrets
 from pathlib import Path
@@ -14,6 +12,9 @@ from app.services.security import (
     append_security_event,
     auth_rate_limited,
     clear_auth_failures,
+    create_auth_session,
+    has_auth_session,
+    is_production_environment,
     record_auth_failure,
 )
 
@@ -66,9 +67,9 @@ def portfolio_admin_login(request: Request, password: str = Form(default="")):
     response = RedirectResponse(url="/admin", status_code=303)
     response.set_cookie(
         PORTFOLIO_ADMIN_COOKIE,
-        _admin_cookie_value(configured_password),
+        create_auth_session("portfolio_admin", PORTFOLIO_ADMIN_MAX_AGE),
         httponly=True,
-        secure=True,
+        secure=is_production_environment(),
         samesite="lax",
         path="/admin",
         max_age=PORTFOLIO_ADMIN_MAX_AGE,
@@ -111,18 +112,9 @@ def _admin_password() -> str:
     return os.getenv("PORTFOLIO_ADMIN_PASSWORD", "").strip()
 
 
-def _admin_cookie_value(password: str) -> str:
-    return hmac.new(
-        password.encode("utf-8"),
-        b"personal-server-portfolio-admin",
-        hashlib.sha256,
-    ).hexdigest()
-
-
 def _has_admin_access(request: Request) -> bool:
-    password = _admin_password()
     cookie = request.cookies.get(PORTFOLIO_ADMIN_COOKIE, "")
-    return bool(password and cookie) and hmac.compare_digest(cookie, _admin_cookie_value(password))
+    return bool(cookie) and has_auth_session("portfolio_admin", cookie)
 
 
 def _require_admin_access(request: Request) -> None:
