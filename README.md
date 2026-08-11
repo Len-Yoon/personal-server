@@ -104,6 +104,21 @@ N100 운영 상세는 아래 문서를 기준으로 함.
 - [Cloudflare Tunnel 대안](docs/cloudflare-tunnel.md)
 - [GitHub Actions N100 자동 배포](docs/n100-github-auto-deploy.md)
 
+### 4.1 GitHub Actions 자동 배포
+
+`main` 브랜치에 push하면 GitHub Actions의 `Deploy N100` workflow가 실행됨. N100에 설치된 self-hosted runner가 `C:\personal-server`의 코드를 원격 `origin/main` 기준으로 갱신하고, 아래 서비스를 재빌드·재기동함.
+
+- `portal-web`
+- `system-agent`
+- `crawler-worker`
+- `youtube-memo`
+- `book-memo`
+- `caddy`
+
+`.env`와 `data/`는 N100에만 남는 운영 데이터이며 GitHub push로 덮어쓰지 않음. 배포 결과는 GitHub 저장소의 **Actions → Deploy N100**에서 확인함.
+
+자동 배포가 실패했거나 Runner가 오프라인인 경우에만 [자동 배포 운영 문서](docs/n100-github-auto-deploy.md)의 WSL 수동 배포 명령을 사용함.
+
 ## 5. 인증과 보안 정책
 
 | 대상 | 인증 방식 | 환경변수 |
