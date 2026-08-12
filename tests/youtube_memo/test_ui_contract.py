@@ -175,6 +175,12 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
                         headers=headers,
                         follow_redirects=False,
                     )
+                    memo = memo_service.list_memos(video["id"])[0]
+                    deleted = client.post(
+                        f"/memos/{memo['id']}/delete",
+                        headers=headers,
+                        follow_redirects=False,
+                    )
                     logout = client.post("/auth/logout", headers=headers, follow_redirects=False)
                     rejected = client.post(
                         f"/videos/{video['id']}/memos",
@@ -190,6 +196,7 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
         self.assertEqual(login.status_code, 303)
         self.assertIn("youtube_memo_write_session", login.headers["set-cookie"])
         self.assertEqual(created.status_code, 303)
+        self.assertEqual(deleted.status_code, 303)
         self.assertEqual(logout.status_code, 303)
         self.assertEqual(rejected.status_code, 401)
 
@@ -307,8 +314,8 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
         for response in responses:
             self.assert_portal_security_headers(response)
 
-    def test_detail_keeps_original_layout_memo_crud_and_password_forms(self):
-        """Fails if the original detail layout or protected memo routes are disconnected."""
+    def test_detail_keeps_original_layout_and_session_guarded_memo_crud(self):
+        """Fails if the detail layout keeps obsolete per-delete password prompts."""
         with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
             import app.services.memo_service as memo_service
 
@@ -329,7 +336,8 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
         self.assertIn(f'action="/memos/{memo["id"]}"', response.text)
         self.assertIn(f'action="/memos/{memo["id"]}/delete"', response.text)
         self.assertIn('name="edit_password"', response.text)
-        self.assertIn('name="delete_password"', response.text)
+        self.assertNotIn('name="delete_password"', response.text)
+        self.assertNotIn("삭제 비밀번호를 입력해주세요.", response.text)
         self.assertIn('class="memo-list"', response.text)
 
     def test_search_api_keeps_saved_video_and_memo_results_available(self):

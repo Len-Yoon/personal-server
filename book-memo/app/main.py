@@ -214,10 +214,8 @@ def book_detail(request: Request, book_id: int):
 def delete_saved_book(
     request: Request,
     book_id: int,
-    delete_password: str = Form(default=""),
 ):
     _require_write_session(request)
-    _require_delete_password(request, delete_password)
 
     if not delete_book(book_id):
         raise HTTPException(status_code=404, detail="Book not found")
@@ -353,10 +351,8 @@ def update_book_chapter_comment(
 def delete_book_chapter(
     request: Request,
     chapter_id: int,
-    delete_password: str = Form(default=""),
 ):
     _require_write_session(request)
-    _require_delete_password(request, delete_password)
 
     book_id = delete_chapter(chapter_id)
 
@@ -397,10 +393,8 @@ def create_book_memo(
 def delete_book_memo(
     request: Request,
     memo_id: int,
-    delete_password: str = Form(default=""),
 ):
     _require_write_session(request)
-    _require_delete_password(request, delete_password)
 
     book_id = delete_memo(memo_id)
 

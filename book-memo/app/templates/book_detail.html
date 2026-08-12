@@ -56,7 +56,6 @@
                 <a class="text-link" href="{{ book.preview_url }}" target="_blank">책 정보 열기</a>
             {% endif %}
             <form class="book-delete-form protected-delete-form" action="/books/{{ book.id }}/delete" method="post" data-confirm-message="연결된 목차와 메모까지 삭제됩니다. 계속할까요?">
-                <input type="hidden" name="delete_password">
                 <button class="danger-button" type="submit">책 삭제</button>
             </form>
         </div>
@@ -103,7 +102,6 @@
                         <button type="submit">저장</button>
                     </form>
                     <form class="protected-delete-form" action="/chapters/{{ chapter.id }}/delete" method="post" data-confirm-message="이 목차를 삭제할까요?">
-                        <input type="hidden" name="delete_password">
                         <button class="danger-button" type="submit">삭제</button>
                     </form>
                 </article>
@@ -152,7 +150,6 @@
                         <p>{{ memo.content }}</p>
                     </details>
                     <form class="protected-delete-form" action="/memos/{{ memo.id }}/delete" method="post" data-confirm-message="이 메모를 삭제할까요?">
-                        <input type="hidden" name="delete_password">
                         <button class="danger-button" type="submit">삭제</button>
                     </form>
                 </article>
@@ -314,19 +311,11 @@
         form.addEventListener("submit", async (event) => {
             event.preventDefault();
 
-            const password = window.prompt("삭제 비밀번호를 입력해주세요.");
-
-            if (!password) {
-                return;
-            }
-
             const confirmed = window.confirm(form.dataset.confirmMessage || "삭제할까요?");
 
             if (!confirmed) {
                 return;
             }
-
-            form.querySelector("input[name='delete_password']").value = password;
 
             try {
                 const response = await fetch(form.action, {
