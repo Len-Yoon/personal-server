@@ -1,79 +1,54 @@
-# Agent Handoff
+# 작업 인수인계
 
-이 문서는 다음 작업자가 이 저장소를 빠르게 이해하고 이어서 작업할 수 있도록 정리한 인수인계 문서임.
+이 문서는 현재 저장소를 이어서 개발·운영할 작업자를 위한 빠른 참조임. 서비스·포트·도메인·운영 명령의 최신 기준은 [운영 참조](operations-reference.md)를 우선함.
 
-## 1. 프로젝트 개요
+## 1. 서비스 구성
 
-`personal-server`는 Docker Compose로 묶은 개인용 서비스 모음임.
+| 서비스 | 책임 | 주요 코드 |
+|---|---|---|
+| `portal-web` | 포털, 파일함, 관리자 상태, 포트폴리오 | `portal-web/app/routers/`, `portal-web/app/services/` |
+| `system-agent` | Docker·백업·host metrics 상태 API | `system-agent/app/services/metrics.py` |
+| `crawler-worker` | Investing.com 한국어 RSS 보관, 나스닥 관련성 분류, Telegram 중요 알림 | `crawler-worker/app/services/news_archive.py`, `nasdaq_relevance.py` |
+| `youtube-memo` | YouTube 영상·타임스탬프 메모 | `youtube-memo/app/main.py` |
+| `book-memo` | 책·목차·독서 메모 | `book-memo/app/main.py` |
+| `caddy` | 외부 `80`·`443`을 여는 경우의 대체 HTTPS 프록시 | `caddy/Caddyfile` |
 
-- `portal-web`: 메인 포털, 파일함, 관리자 상태 화면
-- `system-agent`: N100/Windows host metrics, 백업/파일함/컨테이너 상태 API
-- `crawler-worker`: Google News RSS 수집, AI 요약, 저장 뉴스 관리
-- `youtube-memo`: YouTube 링크별 메모
-- `book-memo`: 책 검색, 독서 진행률, 목차별 코멘트, 독서 메모
+## 2. 운영 구조
 
-## 2. 핵심 문서
+- N100 override는 앱 포트를 `127.0.0.1`에만 바인드함.
+- Windows bootstrap은 host metrics를 기록하고, Docker 스택과 Cloudflare Tunnel 프로세스를 확인함.
+- `main` push는 GitHub Actions `Deploy N100` workflow를 통해 Windows self-hosted runner에서 배포됨.
+- `scripts/deploy-n100.sh`는 원격 `origin/main`으로 코드 추적 파일을 맞추므로 N100 작업 디렉터리에서 추적 파일을 직접 수정하지 않음.
 
-- [`README.md`](../README.md): 프로젝트 개요, 실행 방법, 운영 기준
-- [`.env.example`](../.env.example): 환경 변수 예시
-- [`docs/caddy-cloudflare.md`](caddy-cloudflare.md): Caddy + Cloudflare 공개 HTTPS 운영
-- [`docs/cloudflare-tunnel.md`](cloudflare-tunnel.md): Cloudflare Tunnel 운영
-- [`docs/n100-mt4-setup.md`](n100-mt4-setup.md): Windows N100 + MT4 + WSL2 운영
-- [`docs/n100-github-auto-deploy.md`](n100-github-auto-deploy.md): GitHub Actions 자동배포와 Runner 운영
-- [`docs/20260702_운영보안QA_점검보고서.md`](20260702_운영보안QA_점검보고서.md): 운영보안 QA 점검 보고서
+## 3. 인증 경계
 
-## 3. 핵심 코드 위치
+- `ADMIN_STATUS_PASSWORD`: 관리자 상태의 우선 비밀번호임. 없으면 이전 환경변수 순서로 대체함.
+- `FILE_MANAGER_ACCESS_PASSWORD`: 파일함 진입 세션용 비밀번호임.
+- `DELETE_PASSWORD`: 파일함 삭제와 책·YouTube 메모 쓰기 로그인에 사용함.
+- `PORTFOLIO_ADMIN_PASSWORD`: 포트폴리오 편집 전용 비밀번호임.
+- 책·YouTube 메모 삭제는 유효한 쓰기 로그인 세션과 삭제 확인을 요구하며, 삭제 시 비밀번호를 재입력하지 않음.
 
-- [`portal-web/app/services/security.py`](../portal-web/app/services/security.py): 보안 헤더, 인증 실패 기록, 보안 상태
-- [`portal-web/app/services/file_store.py`](../portal-web/app/services/file_store.py): 파일 저장, 업로드 제한, 경로 안전 처리
-- [`portal-web/app/routers/dashboard.py`](../portal-web/app/routers/dashboard.py): 포털 메인, `/admin/status`
-- [`portal-web/app/routers/files.py`](../portal-web/app/routers/files.py): 파일함 라우트와 다운로드/삭제 보호
-- [`portal-web/app/services/global_search.py`](../portal-web/app/services/global_search.py): 서비스 통합 검색
-- [`system-agent/app/services/metrics.py`](../system-agent/app/services/metrics.py): host metrics 집계
-- [`scripts/maintenance.py`](../scripts/maintenance.py): SQLite 백업, 로그 정리
+## 4. 변경 시 확인할 계약
 
-## 4. 현재 운영 기준
+| 변경 영역 | 반드시 유지할 계약 |
+|---|---|
+| 파일함 | 접근 인증, 업로드 확장자·용량 제한, 경로 안전성, 업로드·다운로드·삭제 흐름 |
+| 관리자 상태 | Windows host가 기록한 `captured_at`과 화면 조회 시각을 혼동하지 않음 |
+| 뉴스 | 전망성 기사는 archive, 확정된 시장 충격만 Telegram alert 정책 유지 |
+| 메모 | 공개 읽기와 세션 기반 쓰기 분리, unsafe 요청 Origin 검증 유지 |
+| 공개 서비스 | CSP·보안 헤더·정적 파일 응답 정책 유지 |
 
-### 4.1 메인 도메인
+## 5. 검증과 배포
 
-- 메인 진입점은 `https://len.pe.kr` 기준으로 정리함
-- `portal.len.pe.kr`은 호환용 별칭으로 유지 가능함
+- 단위 테스트는 `.github/workflows/ci.yml`의 서비스별 명령을 기준으로 실행함.
+- 변경 범위가 넓으면 포털·system-agent·crawler-worker·YouTube·책 테스트를 모두 실행하고 `git diff --check`를 확인함.
+- 배포 실패나 N100 상태 확인은 [N100 GitHub 자동배포 안내](n100-github-auto-deploy.md)의 WSL 명령을 사용함.
+- 서버 기동과 스케줄러 영역은 기능 변경 작업에서 수정하지 않음.
 
-### 4.2 공개 HTTPS
+## 6. 관련 문서
 
-- 공개 HTTPS는 Caddy + Cloudflare DNS challenge 방식 사용
-- 외부 포트포워딩이 어렵다면 Cloudflare Tunnel 사용
-
-### 4.3 N100 운영
-
-- N100 override에서는 앱 포트를 `127.0.0.1`에만 바인드함
-- `caddy`는 `80`/`443`을 받아 리버스 프록시와 인증서를 담당함
-- `crawler-worker`는 기본 운영 스택에 포함함
-
-## 5. 보안 및 운영 포인트
-
-- `.env`에는 비밀값만 저장하고 문서에는 남기지 않음
-- `FILE_MANAGER_ACCESS_PASSWORD`는 파일함 진입, `DELETE_PASSWORD`는 파일 삭제에 사용함
-- `APP_ENV=production` 또는 `FILE_MANAGER_AUTH_REQUIRED=true`로 파일함 인증을 강제해야 함
-- `BACKUP_INCLUDE_FILES=true`는 파일함 백업이 필요할 때만 사용함
-- `system-agent`는 기본적으로 비공개 운영을 권장함
-
-## 6. 배포 및 장애 대응
-
-- GitHub Actions의 `Deploy N100`이 성공하면 `portal-web`, `system-agent`, `crawler-worker`, `youtube-memo`, `book-memo`, `caddy`만 재빌드·재기동함.
-- N100 배포는 Windows Runner 서비스가 `.\window` 계정으로 실행되고, WSL2의 `Ubuntu-24.04`에서 Docker를 사용할 수 있어야 함.
-- 수동 배포가 필요하면 `docs/n100-github-auto-deploy.md`의 WSL 명령을 사용함. Windows PowerShell에서 `docker`를 직접 실행하는 방식은 현재 운영 경로가 아님.
-
-## 7. 확인 필요 사항
-
-- N100 PC에서 `80`/`443` 인바운드가 실제로 열려 있는지 확인 필요함
-- Cloudflare DNS의 `len.pe.kr` A 레코드가 N100 공인 IP를 가리키는지 확인 필요함
-- `.env`의 `CADDY_EMAIL`, `CLOUDFLARE_API_TOKEN` 값이 정상인지 확인 필요함
-- `portal.len.pe.kr` 별칭을 계속 유지할지 최종 결정 필요함
-
-## 8. 후속 조치
-
-- 자동배포가 중단된 경우에만 N100에서 `wsl.exe -d Ubuntu-24.04 -- bash -lc "cd /mnt/c/personal-server && bash ./scripts/deploy-n100.sh"`를 수동 실행함
-- Caddy 로그를 확인해 인증서 발급 여부를 점검해야 함
-- 외부 포트포워딩이 불가하면 Cloudflare Tunnel 구성으로 전환 필요함
-- GitHub push 기반 자동배포의 Runner 설치·서비스 계정·장애 대응은 [`docs/n100-github-auto-deploy.md`](n100-github-auto-deploy.md)를 참고함
+- [운영 문서 색인](README.md)
+- [N100 운영 환경](n100-mt4-setup.md)
+- [Cloudflare Tunnel](cloudflare-tunnel.md)
+- [Caddy + Cloudflare](caddy-cloudflare.md)
+- [자동 배포](n100-github-auto-deploy.md)

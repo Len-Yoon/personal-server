@@ -1,5 +1,7 @@
 # N100 GitHub 자동배포 안내
 
+> 서비스·도메인·환경변수의 최신 기준은 [운영 참조](operations-reference.md)를 우선함. 이 문서는 N100 self-hosted runner 배포 절차와 장애 대응만 다룸.
+
 ## 현재 방식
 
 N100 자체에 GitHub Actions self-hosted runner를 설치합니다. `main` 브랜치에 push되면 GitHub Actions가 N100에서 직접 실행되고, `C:\personal-server`의 `scripts/deploy-n100.sh`가 Docker Compose 서비스를 재빌드·재기동합니다.
@@ -48,9 +50,9 @@ wsl.exe -d Ubuntu-24.04 -- bash -lc "docker version && docker compose version"
 ```
 
 Runner Windows 서비스도 WSL2를 설치한 Windows 사용자 계정으로 실행해야 합니다.
-현재 N100 기준 서비스 계정은 `.\window`이며, `services.msc`의 해당 Runner 서비스
-속성 `로그온` 탭에서 설정합니다. 계정에 Windows 로그인 비밀번호가 없으면 서비스가
-로그온 오류 1069로 시작하지 않을 수 있습니다.
+`services.msc`에서 해당 Runner 서비스의 `로그온` 계정은 WSL 배포판을 설치한 Windows
+사용자로 설정합니다. 계정에 Windows 로그인 비밀번호가 없으면 서비스가 로그온 오류
+1069로 시작하지 않을 수 있습니다.
 
 `.env`와 `data`는 운영 데이터이므로 GitHub에 올리지 않고 N100에만 보관합니다.
 
@@ -76,7 +78,8 @@ runs-on: [self-hosted, Windows, X64]
 
 ## 확인과 장애 대응
 
-GitHub 저장소의 `Actions → Deploy N100`에서 실행 결과를 확인합니다. N100에서 Runner가 `Offline`이면 `services.msc`에서 `actions.runner.Len-Yoon-personal-server.DESKTOP-UTU2QAT` 서비스를 확인합니다.
+GitHub 저장소의 `Actions → Deploy N100`에서 실행 결과를 확인합니다. N100에서 Runner가
+`Offline`이면 `services.msc`에서 저장소에 연결된 Actions Runner 서비스를 확인합니다.
 
 Docker 또는 배포 실패 시 N100에서 다음 명령을 실행합니다.
 

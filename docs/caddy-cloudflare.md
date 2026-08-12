@@ -2,7 +2,7 @@
 
 이 문서는 Cloudflare DNS를 유지하면서 Caddy가 공개 HTTPS와 리버스 프록시를 담당하는 운영 구성을 정리합니다.
 
-이 구성은 `len.pe.kr`을 메인 진입점으로 두고, `portal.len.pe.kr`은 호환용 별칭으로 유지하면서 `file.len.pe.kr`, `admin.len.pe.kr`, `news.len.pe.kr`, `memo.len.pe.kr`, `books.len.pe.kr`을 Caddy가 받아 각 서비스로 분기하는 방식입니다.
+이 구성은 `len.pe.kr`을 메인 진입점으로 두고, `portal.len.pe.kr`은 호환용 별칭으로 유지하면서 `file.len.pe.kr`, `admin.len.pe.kr`, `portfolio.len.pe.kr`, `news.len.pe.kr`, `memo.len.pe.kr`, `books.len.pe.kr`을 Caddy가 받아 각 서비스로 분기하는 방식입니다.
 
 ## 전제
 
@@ -40,6 +40,7 @@ Cloudflare에서 공개할 호스트명을 준비합니다.
 - `portal.len.pe.kr`(호환용 별칭, 선택)
 - `file.len.pe.kr`
 - `admin.len.pe.kr`
+- `portfolio.len.pe.kr`
 - `news.len.pe.kr`
 - `memo.len.pe.kr`
 - `books.len.pe.kr`
@@ -66,6 +67,7 @@ https://len.pe.kr
 https://portal.len.pe.kr
 https://file.len.pe.kr
 https://admin.len.pe.kr
+https://portfolio.len.pe.kr
 https://news.len.pe.kr
 https://memo.len.pe.kr
 https://books.len.pe.kr
@@ -76,3 +78,4 @@ https://books.len.pe.kr
 - 공유기 또는 방화벽에서 `80`/`443` 인바운드가 막혀 있으면 이 구성은 동작하지 않습니다.
 - 외부 포트포워딩이 어려우면 `docs/cloudflare-tunnel.md`의 Tunnel 구성을 사용해야 합니다.
 - `news.len.pe.kr`은 `crawler-worker`가 실행 중이어야 응답합니다.
+- 공유기 포트포워딩을 사용하지 않는 운영 환경은 [Cloudflare Tunnel 운영 가이드](cloudflare-tunnel.md)를 우선 사용합니다.
