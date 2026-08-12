@@ -27,11 +27,12 @@
 
 ```text
 Internet
-  └─ Cloudflare + Caddy (HTTPS)
-       ├─ portal-web      : 포털, 파일함, 관리자 상태, 포트폴리오
-       ├─ crawler-worker  : Investing.com RSS, 뉴스 보관, 텔레그램 알림
-       ├─ youtube-memo    : 영상·학습 메모
-       └─ book-memo       : 책·목차·독서 메모
+  └─ Cloudflare DNS / Tunnel
+       └─ N100 Windows의 WSL cloudflared
+            ├─ portal-web      : 포털, 파일함, 관리자 상태, 포트폴리오
+            ├─ crawler-worker  : Investing.com RSS, 뉴스 보관, 텔레그램 알림
+            ├─ youtube-memo    : 영상·학습 메모
+            └─ book-memo       : 책·목차·독서 메모
 
 N100 Windows host
   └─ host-metrics.json → system-agent → 관리자 상태 화면
@@ -39,6 +40,34 @@ N100 Windows host
 GitHub main push
   └─ GitHub Actions self-hosted runner → N100 Docker Compose 재배포
 ```
+
+## 도메인 연결 구조
+
+`len.pe.kr`의 네임서버를 Cloudflare로 위임하고, 각 호스트명을 Cloudflare Tunnel에 연결함. N100 Windows 시작 작업은 WSL에서 `cloudflared tunnel run`을 실행하며, Tunnel은 Docker Compose 서비스의 localhost 포트로 전달함. 따라서 공유기에서 외부 `80`·`443` 포트를 직접 열지 않아도 공개 HTTPS 주소를 제공할 수 있음.
+
+```text
+브라우저
+  → Cloudflare DNS / Edge
+  → Cloudflare Tunnel
+  → N100 WSL의 cloudflared
+  → 127.0.0.1 서비스 포트
+  → Docker 컨테이너
+```
+
+| 도메인 | 연결 대상 | 용도 |
+|---|---:|---|
+| `len.pe.kr` | `portal-web:8000` | 메인 포털 |
+| `portal.len.pe.kr` | `portal-web:8000` | 기존 주소 호환 |
+| `file.len.pe.kr` | `portal-web:8000` | 파일함 |
+| `admin.len.pe.kr` | `portal-web:8000` | 관리자 상태 |
+| `portfolio.len.pe.kr` | `portal-web:8000` | 공개 포트폴리오 |
+| `news.len.pe.kr` | `crawler-worker:8001` | 나스닥 뉴스 허브 |
+| `memo.len.pe.kr` | `youtube-memo:8002` | YouTube 메모 |
+| `books.len.pe.kr` | `book-memo:8003` | 책 메모 |
+
+Cloudflare Tunnel 사용 시 호스트명별 DNS는 `cloudflared tunnel route dns`로 Tunnel에 연결하며, 동일 이름의 이전 `A` 레코드는 제거함. 서비스 컨테이너는 `127.0.0.1`에만 바인드되어 외부에서 직접 접근되지 않음.
+
+외부 `80`·`443` 포트가 열리는 환경에서는 Caddy 컨테이너를 대안으로 사용할 수 있음. 이 경우 Caddy가 Cloudflare DNS-01 인증으로 인증서를 발급하고, 동일한 도메인별 규칙을 각 Docker 서비스로 리버스 프록시함. 운영 절차는 [Cloudflare Tunnel 가이드](docs/cloudflare-tunnel.md)와 [Caddy + Cloudflare HTTPS 가이드](docs/caddy-cloudflare.md)에 분리해 정리함.
 
 ## 주요 기능
 
