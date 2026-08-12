@@ -170,10 +170,8 @@ def create_video_memo(
 def delete_saved_video(
     request: Request,
     video_id: int,
-    delete_password: str = Form(default=""),
 ):
     _require_write_session(request)
-    _require_delete_password(request, delete_password)
 
     deleted = delete_video(video_id)
 
@@ -190,10 +188,8 @@ def delete_saved_video(
 def delete_video_memo(
     request: Request,
     memo_id: int,
-    delete_password: str = Form(default=""),
 ):
     _require_write_session(request)
-    _require_delete_password(request, delete_password)
 
     video_id = delete_memo(memo_id)
 

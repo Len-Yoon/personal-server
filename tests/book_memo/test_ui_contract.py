@@ -179,6 +179,12 @@ class BookMemoUiContractTests(unittest.TestCase):
                         headers=headers,
                         follow_redirects=False,
                     )
+                    memo = book_service.list_memos(book["id"])[0]
+                    deleted = client.post(
+                        f"/memos/{memo['id']}/delete",
+                        headers=headers,
+                        follow_redirects=False,
+                    )
                     logout = client.post("/auth/logout", headers=headers, follow_redirects=False)
                     rejected = client.post(
                         f"/books/{book['id']}/memos",
@@ -194,6 +200,7 @@ class BookMemoUiContractTests(unittest.TestCase):
         self.assertEqual(login.status_code, 303)
         self.assertIn("book_memo_write_session", login.headers["set-cookie"])
         self.assertEqual(created.status_code, 303)
+        self.assertEqual(deleted.status_code, 303)
         self.assertEqual(logout.status_code, 303)
         self.assertEqual(rejected.status_code, 401)
 
@@ -311,8 +318,8 @@ class BookMemoUiContractTests(unittest.TestCase):
         for response in responses:
             self.assert_portal_security_headers(response)
 
-    def test_detail_keeps_original_layout_chapter_memo_and_password_forms(self):
-        """Fails when the original detail layout or book CRUD routes are disconnected."""
+    def test_detail_keeps_original_layout_and_session_guarded_book_crud(self):
+        """Fails if the detail layout keeps obsolete per-delete password prompts."""
         with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
             import app.services.book_service as book_service
 
@@ -335,7 +342,8 @@ class BookMemoUiContractTests(unittest.TestCase):
         self.assertIn(f'action="/chapters/{chapter["id"]}"', response.text)
         self.assertIn(f'action="/chapters/{chapter["id"]}/delete"', response.text)
         self.assertIn(f'action="/memos/{memo["id"]}/delete"', response.text)
-        self.assertIn('name="delete_password"', response.text)
+        self.assertNotIn('name="delete_password"', response.text)
+        self.assertNotIn("삭제 비밀번호를 입력해주세요.", response.text)
         self.assertIn('id="toc-fetch-button"', response.text)
         self.assertIn('class="chapter-list"', response.text)
         self.assertIn('class="memo-list"', response.text)

@@ -185,7 +185,6 @@
                         </details>
                     {% endif %}
                     <form class="protected-delete-form" action="/books/{{ book.id }}/delete" method="post">
-                        <input type="hidden" name="delete_password">
                         <button class="danger-button" type="submit">책 삭제</button>
                     </form>
                 </article>
@@ -341,19 +340,11 @@
         form.addEventListener("submit", async (event) => {
             event.preventDefault();
 
-            const password = window.prompt("삭제 비밀번호를 입력해주세요.");
-
-            if (!password) {
-                return;
-            }
-
             const confirmed = window.confirm("연결된 목차와 메모까지 삭제됩니다. 계속할까요?");
 
             if (!confirmed) {
                 return;
             }
-
-            form.querySelector("input[name='delete_password']").value = password;
 
             try {
                 const response = await fetch(form.action, {

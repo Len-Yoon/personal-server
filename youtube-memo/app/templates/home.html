@@ -95,7 +95,6 @@
                         data-confirm-message="이 영상과 메모를 모두 삭제할까요?"
                         data-error-message="영상 삭제에 실패했습니다."
                     >
-                        <input type="hidden" name="delete_password">
                         <button class="danger-button" type="submit">삭제</button>
                     </form>
                 </article>
@@ -118,16 +117,9 @@ document.querySelectorAll(".protected-delete-form").forEach((form) => {
     form.addEventListener("submit", async (event) => {
         event.preventDefault();
 
-        const password = window.prompt("삭제 비밀번호를 입력해주세요.");
-        if (!password) {
-            return;
-        }
-
         if (!window.confirm(form.dataset.confirmMessage || "삭제할까요?")) {
             return;
         }
-
-        form.querySelector("input[name='delete_password']").value = password;
 
         try {
             const response = await fetch(form.action, {
