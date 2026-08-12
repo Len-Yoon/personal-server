@@ -79,9 +79,6 @@ def _score_article(title: str, summary: str, source: str, category: str) -> int:
     if source:
         score += 1
 
-    if source.casefold() in {"ap news", "marketwatch", "reuters", "ft"}:
-        score += 1
-
     if category and _matches_category(title, summary, category):
         score += 1
 
@@ -99,13 +96,8 @@ def _matches_category(title: str, summary: str, category: str) -> bool:
     category = category.upper()
 
     keyword_sets = {
-        "WORLD": ("미국", "유럽", "중국", "전쟁", "연준", "달러", "금리", "인플레이션"),
-        "NASDAQ": ("나스닥", "반도체", "엔비디아", "테크", "AI", "미국 증시", "연준"),
-        "KR_WORLD": ("미국", "유럽", "중국", "전쟁", "연준", "달러", "금리", "인플레이션"),
         "KR_IT": ("기술", "클라우드", "플랫폼", "개발자", "소프트웨어", "반도체", "테크"),
         "KR_AI": ("AI", "인공지능", "LLM", "모델", "에이전트", "OpenAI", "생성형"),
-        "GOLD": ("금", "달러", "금리", "인플레이션", "안전자산", "국채"),
-        "HK50": ("홍콩", "항셍", "중국", "부동산", "위안", "증시"),
     }
 
     for keyword in keyword_sets.get(category, ()):

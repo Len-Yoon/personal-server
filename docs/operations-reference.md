@@ -33,14 +33,12 @@ Windows bootstrap은 Docker 스택을 확인한 뒤 `cloudflared tunnel run` 프
 | 공개 경로 | `NEWS_SERVICE_URL`, `YOUTUBE_MEMO_URL`, `BOOK_MEMO_URL`, `*_HOSTNAME` | 포털 링크와 호스트별 라우팅 |
 | HTTPS | `CADDY_EMAIL`, `CLOUDFLARE_API_TOKEN` | Caddy DNS-01을 선택한 경우에만 필요 |
 | 인증 | `ADMIN_STATUS_PASSWORD`, `FILE_MANAGER_ACCESS_PASSWORD`, `DELETE_PASSWORD`, `PORTFOLIO_ADMIN_PASSWORD` | 관리자·파일함·메모 쓰기·포트폴리오 편집 경계 |
-| 뉴스 | `NEWS_REFRESH_INTERVAL_SECONDS`, `NEWS_RETENTION_DAYS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Investing.com 수집 주기·보관·중요 알림 |
+| 뉴스 | `NEWS_REFRESH_INTERVAL_SECONDS`, `NEWS_RETENTION_DAYS`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Investing.com 시장 뉴스와 Google News IT·AI 수집 주기·보관·중요 알림 |
 | 도서 검색 | `ALADIN_TTB_KEY` | 책 메모의 Aladin 검색 연동 |
 | 호스트 상태 | `HOST_METRICS_PATH`, `HOST_METRICS_STALE_SECONDS` | Windows host metrics 파일과 오래됨 판단 |
 | 백업·보안 | `BACKUP_*`, `SECURITY_LOG_*`, `AUTH_RATE_LIMIT_*`, `AUTH_SESSION_MAX_ENTRIES` | 보존 기간, 인증 실패 제한, 세션 상한 |
 
 `ADMIN_STATUS_PASSWORD`가 설정되면 관리자 상태는 이 값을 우선 사용함. 파일함 삭제는 파일함 접근 세션과 삭제 비밀번호를 모두 요구함. 책·YouTube 메모는 쓰기 로그인 세션 중 삭제 시 비밀번호를 다시 입력하지 않으며, YouTube 메모 수정은 별도 확인을 유지함.
-
-`.env.example`의 `OPENAI_API_KEY`, `OPENAI_SUMMARY_MODEL`은 현재 서비스 코드에서 읽지 않는 예비 항목임. 운영 기능에 필요한 값으로 간주하지 않으며, 실제 연동을 추가할 때만 해당 서비스와 문서를 함께 갱신함.
 
 ## 4. 운영 확인 명령
 

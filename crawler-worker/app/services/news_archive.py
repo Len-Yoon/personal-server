@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from app.crawlers.rss_news import _html_to_text
 from app.services.nasdaq_relevance import classify_nasdaq_relevance
-from app.services.news_sources import collect_korean_news_from_sources, collect_news_from_sources
+from app.services.news_sources import collect_korean_news_from_sources
 from app.services.telegram_notifier import notify_new_investing_articles
 
 
@@ -24,76 +24,6 @@ _ARCHIVE_WRITE_LOCK = Lock()
 _REFRESH_LOCK = Lock()
 _REFRESH_WORK_LOCK = Lock()
 _REFRESHING_CATEGORIES: set[str] = set()
-
-
-def collect_market_news(
-    category: str,
-    limit: int = 24,
-    force_refresh: bool = False,
-) -> dict[str, Any]:
-    category = _normalize_category(category)
-    now = _now()
-    archive = _load_archive()
-    archive, purged = _purge_archive(archive, now)
-    if purged:
-        archive["updated_at"] = _iso(now)
-        _save_archive(archive)
-
-    category_articles = _get_category_articles(archive["articles"], category)
-    latest_collected_at = _latest_collected_at(category_articles)
-
-    if (
-        category_articles
-        and not force_refresh
-        and latest_collected_at
-        and (now - latest_collected_at).total_seconds() < CACHE_TTL_SECONDS
-    ):
-        return _build_result(
-            category=category,
-            articles=category_articles,
-            limit=limit,
-            cached=True,
-            age_seconds=int((now - latest_collected_at).total_seconds()),
-        )
-
-    if category_articles and not force_refresh:
-        _schedule_refresh(category, limit)
-        return _build_result(
-            category=category,
-            articles=category_articles,
-            limit=limit,
-            cached=True,
-            age_seconds=int((now - latest_collected_at).total_seconds())
-            if latest_collected_at
-            else 0,
-        )
-
-    try:
-        fresh_articles = collect_news_from_sources(
-            category=category,
-            limit=limit,
-        )
-    except Exception:
-        fresh_articles = category_articles
-    stored_articles = [
-        _attach_archive_metadata(article, category=category, now=now)
-        for article in fresh_articles
-    ]
-    archive["articles"] = _merge_articles(archive["articles"], stored_articles)
-    archive["updated_at"] = _iso(now)
-    _save_archive(archive)
-
-    category_articles = _get_category_articles(
-        archive["articles"], category, today_only=True
-    )
-
-    return _build_result(
-        category=category,
-        articles=category_articles,
-        limit=limit,
-        cached=False,
-        age_seconds=0,
-    )
 
 
 def collect_korean_news(
@@ -131,7 +61,7 @@ def collect_korean_news(
         )
 
     if category_articles and not force_refresh:
-        _schedule_refresh(category, limit, korean=True)
+        _schedule_refresh(category, limit)
         return _build_result(
             category=category,
             articles=category_articles,
@@ -209,17 +139,6 @@ def list_recent_news(
 
     articles.sort(key=_sort_key, reverse=True)
     return articles[:limit]
-
-
-def get_categories() -> list[dict[str, str]]:
-    return [
-        {
-            "code": code,
-            "label": details["label"],
-            "description": details["description"],
-        }
-        for code, details in _category_map().items()
-    ]
 
 
 def get_korean_categories() -> list[dict[str, str]]:
@@ -346,7 +265,7 @@ def _archive_path() -> Path:
     )
 
 
-def _schedule_refresh(category: str, limit: int, korean: bool = False) -> None:
+def _schedule_refresh(category: str, limit: int) -> None:
     with _REFRESH_LOCK:
         if category in _REFRESHING_CATEGORIES or _REFRESH_WORK_LOCK.locked():
             return
@@ -355,7 +274,7 @@ def _schedule_refresh(category: str, limit: int, korean: bool = False) -> None:
     def _run() -> None:
         try:
             with _REFRESH_WORK_LOCK:
-                _refresh_category(category=category, limit=limit, korean=korean)
+                _refresh_category(category=category, limit=limit)
         finally:
             with _REFRESH_LOCK:
                 _REFRESHING_CATEGORIES.discard(category)
@@ -363,7 +282,7 @@ def _schedule_refresh(category: str, limit: int, korean: bool = False) -> None:
     Thread(target=_run, daemon=True).start()
 
 
-def _refresh_category(category: str, limit: int, korean: bool = False) -> None:
+def _refresh_category(category: str, limit: int) -> None:
     now = _now()
     archive = _load_archive()
     archive, purged = _purge_archive(archive, now)
@@ -371,11 +290,7 @@ def _refresh_category(category: str, limit: int, korean: bool = False) -> None:
         archive["updated_at"] = _iso(now)
 
     try:
-        fresh_articles = (
-            collect_korean_news_from_sources(category=category, limit=limit)
-            if korean
-            else collect_news_from_sources(category=category, limit=limit)
-        )
+        fresh_articles = collect_korean_news_from_sources(category=category, limit=limit)
     except Exception:
         fresh_articles = []
     stored_articles = [
@@ -383,7 +298,7 @@ def _refresh_category(category: str, limit: int, korean: bool = False) -> None:
         for article in fresh_articles
     ]
     new_articles = _new_articles(archive["articles"], stored_articles)
-    should_notify = _should_notify_new_investing_articles(archive, category, korean=korean)
+    should_notify = _should_notify_new_investing_articles(archive, category, korean=True)
 
     archive["articles"] = _merge_articles(archive["articles"], stored_articles)
     archive["updated_at"] = _iso(now)
@@ -577,47 +492,9 @@ def _matches_query(article: dict[str, Any], keyword: str) -> bool:
     return keyword in haystack
 
 
-def _normalize_category(category: str) -> str:
-    category = (category or "WORLD").upper()
-    return category if category in _category_map() else "WORLD"
-
-
 def _normalize_korean_category(category: str) -> str:
     category = (category or "KR_WORLD").upper()
     return category if category in _korean_category_map() else "KR_WORLD"
-
-
-def _category_label(category: str) -> str:
-    return _category_map()[category]["label"]
-
-
-def _category_description(category: str) -> str:
-    return _category_map()[category]["description"]
-
-
-def _category_map() -> dict[str, dict[str, str]]:
-    return {
-        "INVESTING": {
-            "label": "Investing.com 한국어 뉴스",
-            "description": "오늘 날짜의 Investing.com 한국어 뉴스 전체",
-        },
-        "WORLD": {
-            "label": "세계 뉴스",
-            "description": "전쟁, 금리, 달러, 원자재, 주요국 경제 이슈",
-        },
-        "NASDAQ": {
-            "label": "나스닥 선물",
-            "description": "NASDAQ, 미국 기술주, 반도체, AI, 미국 금리 이슈",
-        },
-        "GOLD": {
-            "label": "금 선물",
-            "description": "Gold futures, 달러, 금리, 안전자산, 인플레이션",
-        },
-        "HK50": {
-            "label": "홍콩50",
-            "description": "Hang Seng, Hong Kong 50, 중국 증시, 중국 경기 이슈",
-        },
-    }
 
 
 def _korean_category_map() -> dict[str, dict[str, str]]:
