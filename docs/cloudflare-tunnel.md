@@ -2,7 +2,7 @@
 
 이 저장소는 집 안/밖 모두에서 `len.pe.kr` 계열 서비스를 열 수 있지만, 현재 회선처럼 공유기 포트포워딩이 막히는 환경에서는 Cloudflare Tunnel이 가장 단순합니다.
 
-이 문서는 `len.pe.kr`을 메인 진입점으로 두고, `portal.len.pe.kr`은 호환용 별칭으로 유지하면서 `file.len.pe.kr`, `admin.len.pe.kr`, `news.len.pe.kr`, `memo.len.pe.kr`, `books.len.pe.kr`을 Cloudflare Tunnel로 연결하는 기준 운영 절차를 정리합니다.
+이 문서는 `len.pe.kr`을 메인 진입점으로 두고, `portal.len.pe.kr`은 호환용 별칭으로 유지하면서 `file.len.pe.kr`, `admin.len.pe.kr`, `portfolio.len.pe.kr`, `news.len.pe.kr`, `memo.len.pe.kr`, `books.len.pe.kr`을 Cloudflare Tunnel로 연결하는 기준 운영 절차를 정리합니다.
 
 ## 전제
 
@@ -90,6 +90,7 @@ https://len.pe.kr
 https://portal.len.pe.kr
 https://file.len.pe.kr
 https://admin.len.pe.kr
+https://portfolio.len.pe.kr
 https://news.len.pe.kr
 https://memo.len.pe.kr
 https://books.len.pe.kr
@@ -101,3 +102,4 @@ https://books.len.pe.kr
 - 앱 컨테이너는 계속 `127.0.0.1` 바인드로 두어도 됩니다.
 - `cloudflared tunnel login` 후 `~/.cloudflared`가 비어 있으면, 같은 WSL 세션에서 다시 로그인해야 할 수 있습니다.
 - `len.pe.kr` 네임서버가 아직 Cloudflare에 위임되지 않았다면 Tunnel 생성이나 DNS 연결이 제대로 진행되지 않습니다.
+- N100 Windows bootstrap은 Docker 스택 확인 후 `cloudflared tunnel run` 프로세스가 없을 때만 시작합니다.

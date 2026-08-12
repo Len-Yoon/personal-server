@@ -128,7 +128,7 @@ FILE_MANAGER_AUTH_REQUIRED=true
 APP_ENV=production
 SYSTEM_AGENT_URL=http://system-agent:8010
 HOST_METRICS_PATH=/data/system/host-metrics.json
-HOST_METRICS_STALE_SECONDS=900
+HOST_METRICS_STALE_SECONDS=2100
 ```
 
 `/files`는 파일함 전용 비밀번호로 먼저 인증해야 합니다. 기본 파일함 비밀번호는
@@ -139,8 +139,10 @@ For a 24/7 N100 box, keep `FILE_MANAGER_AUTH_REQUIRED=true` or
 `APP_ENV=production` so `/files` does not open accidentally when the password is
 missing.
 
-`DELETE_PASSWORD` is required for destructive actions such as deleting files,
-saved news, YouTube memos, books, chapters, and book memos.
+`DELETE_PASSWORD` is required for file deletion and the book/YouTube memo write
+login. After a valid memo write login, book and YouTube memo deletion requires a
+browser confirmation but does not ask for the password again. YouTube memo edits
+keep an additional password confirmation.
 
 `ADMIN_STATUS_PASSWORD` is the dedicated password for `/admin/status`. When it is
 not configured, the portal keeps backward compatibility by using
@@ -162,7 +164,9 @@ This starts the app containers used by the personal server:
 - `book-memo`
 - `youtube-memo`
 
-If you enable public HTTPS, the N100 override also starts `caddy`.
+The N100 override includes `caddy`. Use it as the public HTTPS entry only when
+you expose `80`/`443`; when Cloudflare Tunnel is the public entry, `cloudflared`
+forwards to the localhost service ports instead.
 
 
 Even in the N100 stack, the app ports are bound to `127.0.0.1`, so you can
@@ -195,9 +199,9 @@ file is missing or stale, the admin page still works and simply shows a
 warning.
 
 The included Windows bootstrap script installs a user-level startup entry that
-waits 1 minute after login, starts the Docker stack, and connects the Cloudflare
-Tunnel. It then repeats the same recovery check every 30 minutes with very low
-overhead.
+records host metrics immediately, waits 120 seconds after login for WSL and
+Docker, then starts the Docker stack and checks Cloudflare Tunnel. It repeats
+the host metrics and recovery check every 30 minutes.
 
 Install it with:
 
@@ -264,8 +268,10 @@ docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build
 [`N100 GitHub 자동배포 안내`](n100-github-auto-deploy.md)에 따라 N100의 self-hosted
 Runner가 WSL2 Docker에서 상시 서비스만 자동으로 재배포합니다. 이때
 
-뉴스는 `NEWS_REFRESH_INTERVAL_SECONDS` 주기에 따라 뉴스 화면 요청 시 캐시를 갱신합니다.
-기본값은 300초(5분)이며, 뉴스 화면을 열어 둔 경우 브라우저가 60초마다 변경 여부를 확인합니다.
+`crawler-worker`는 `NEWS_REFRESH_INTERVAL_SECONDS` 주기마다 Investing.com
+한국어 RSS를 수집합니다. 기본값은 300초(5분)이며, 운영 `.env`에서 주기를
+조정할 수 있습니다. 뉴스 화면을 열어 둔 경우 브라우저는 60초마다 변경 여부를
+확인합니다.
 
 Restart WSL from Windows PowerShell:
 
@@ -301,10 +307,9 @@ BACKUP_STALE_SECONDS=172800
 ```
 
 Windows 부트스트랩은 로그인 후 복구 루프에서 하루에 한 번 `maintenance.py all`을
-자동 실행합니다. 이 작업은 뉴스 캐시, Obsidian의 날짜별 Investing 뉴스, 보안
-로그, 백업을 각 보존기간에 맞춰 정리하며, Obsidian 뉴스는 `YYYY-MM-DD.md`
-형식의 파일만 삭제합니다. 보존기간을 지난 파일은 복구할 수 없으므로 필요한
-자료는 별도 보관해야 합니다.
+자동 실행합니다. 이 작업은 SQLite 백업, 보존기간이 지난 보안 로그, 뉴스 archive를
+정리합니다. 보존기간을 지난 백업·로그·뉴스는 복구할 수 없으므로 필요한 자료는
+별도 보관해야 합니다.
 
 
 ## Expected resource shape
