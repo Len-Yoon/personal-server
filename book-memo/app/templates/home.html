@@ -203,6 +203,12 @@
     <span>Len Private Workspace</span>
 </footer>
 <script>
+const redirectToWriteLogin = () => {
+    const currentPath = `${window.location.pathname}${window.location.search}`;
+    const loginUrl = `/auth/login?next_path=${encodeURIComponent(currentPath)}`;
+    window.location.assign(loginUrl);
+};
+
     const shouldSelectTocByDefault = (title) => {
         const line = title.trim().replace(/\s+/g, " ");
 
@@ -300,6 +306,11 @@
                     body,
                 });
 
+                if (response.status === 401) {
+                    redirectToWriteLogin();
+                    return;
+                }
+
                 if (!response.ok) {
                     throw new Error("목차를 가져오지 못했습니다.");
                 }
@@ -351,6 +362,11 @@
                     method: "POST",
                     body: new FormData(form),
                 });
+
+                if (response.status === 401) {
+                    redirectToWriteLogin();
+                    return;
+                }
 
                 if (!response.ok) {
                     window.alert("삭제에 실패했습니다.");

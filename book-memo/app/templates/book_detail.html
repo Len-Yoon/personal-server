@@ -168,6 +168,12 @@
     <span>Len Private Workspace</span>
 </footer>
 <script>
+const redirectToWriteLogin = () => {
+    const currentPath = `${window.location.pathname}${window.location.search}`;
+    const loginUrl = `/auth/login?next_path=${encodeURIComponent(currentPath)}`;
+    window.location.assign(loginUrl);
+};
+
     const tocSource = document.querySelector("#toc-source");
     const tocFetchButton = document.querySelector("#toc-fetch-button");
     const tocBuildButton = document.querySelector("#toc-build-button");
@@ -322,6 +328,11 @@
                     method: "POST",
                     body: new FormData(form),
                 });
+
+                if (response.status === 401) {
+                    redirectToWriteLogin();
+                    return;
+                }
 
                 if (!response.ok) {
                     window.alert("삭제에 실패했습니다.");
