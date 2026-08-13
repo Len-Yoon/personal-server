@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
+from urllib.parse import quote, urlsplit
 
 import fcntl
 
@@ -482,7 +483,22 @@ def _require_delete_password(request: Request, password: str) -> None:
 
 def _require_write_session(request: Request) -> None:
     if not _has_write_session(request):
+        if "text/html" in request.headers.get("accept", ""):
+            login_path = f"/auth/login?next_path={quote(_browser_return_path(request), safe='')}"
+            raise HTTPException(status_code=303, headers={"Location": login_path})
         raise HTTPException(status_code=401, detail="메모 쓰기 인증이 필요합니다.")
+
+
+def _browser_return_path(request: Request) -> str:
+    referer = urlsplit(request.headers.get("referer", ""))
+    expected_origin = urlsplit(_request_origin(request))
+    if (referer.scheme, referer.netloc) != (expected_origin.scheme, expected_origin.netloc):
+        return "/"
+
+    path = referer.path or "/"
+    if referer.query:
+        path = f"{path}?{referer.query}"
+    return _safe_redirect(path) or "/"
 
 
 def _has_write_session(request: Request) -> bool:

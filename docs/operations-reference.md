@@ -38,7 +38,7 @@ Windows bootstrap은 Docker 스택을 확인한 뒤 `cloudflared tunnel run` 프
 | 호스트 상태 | `HOST_METRICS_PATH`, `HOST_METRICS_STALE_SECONDS` | Windows host metrics 파일과 오래됨 판단 |
 | 백업·보안 | `BACKUP_*`, `SECURITY_LOG_*`, `AUTH_RATE_LIMIT_*`, `AUTH_SESSION_MAX_ENTRIES` | 보존 기간, 인증 실패 제한, 세션 상한 |
 
-`ADMIN_STATUS_PASSWORD`가 설정되면 관리자 상태는 이 값을 우선 사용함. 파일함 삭제는 파일함 접근 세션과 삭제 비밀번호를 모두 요구함. 책·YouTube 메모는 쓰기 로그인 세션 중 삭제 시 비밀번호를 다시 입력하지 않으며, YouTube 메모 수정은 별도 확인을 유지함.
+`ADMIN_STATUS_PASSWORD`가 설정되면 관리자 상태는 이 값을 우선 사용함. 파일함 삭제는 파일함 접근 세션과 삭제 비밀번호를 모두 요구함. 책·YouTube 메모는 쓰기 로그인 세션을 요구하며, 로그인되지 않은 브라우저의 쓰기 폼은 현재 페이지를 보존한 로그인 화면으로 이동함. 삭제 시 비밀번호를 다시 입력하지 않으며, YouTube 메모 수정은 별도 확인을 유지함.
 
 ## 4. 운영 확인 명령
 

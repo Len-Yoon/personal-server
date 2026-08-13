@@ -113,6 +113,12 @@
     <span>Len Private Workspace</span>
 </footer>
 <script>
+const redirectToWriteLogin = () => {
+    const currentPath = `${window.location.pathname}${window.location.search}`;
+    const loginUrl = `/auth/login?next_path=${encodeURIComponent(currentPath)}`;
+    window.location.assign(loginUrl);
+};
+
 document.querySelectorAll(".protected-delete-form").forEach((form) => {
     form.addEventListener("submit", async (event) => {
         event.preventDefault();
@@ -126,6 +132,11 @@ document.querySelectorAll(".protected-delete-form").forEach((form) => {
                 method: "POST",
                 body: new FormData(form),
             });
+
+            if (response.status === 401) {
+                redirectToWriteLogin();
+                return;
+            }
 
             if (!response.ok) {
                 window.alert(form.dataset.errorMessage || "삭제에 실패했습니다.");

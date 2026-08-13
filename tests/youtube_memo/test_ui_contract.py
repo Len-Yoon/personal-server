@@ -7,6 +7,7 @@ import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi.testclient import TestClient
 
@@ -101,6 +102,62 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
         self.assertIn('name="url"', response.text)
         self.assertIn('class="video-grid"', response.text)
 
+    def test_unauthenticated_write_forms_redirect_to_login_before_submitting(self):
+        """Fails if browser form submissions still end on a raw 401 response."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            import app.services.memo_service as memo_service
+
+            video = memo_service.create_or_get_video(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                title_fetcher=lambda _youtube_id, _url: "로그인 이동 테스트 영상",
+            )
+            with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                home = client.get("/")
+                detail = client.get(f"/videos/{video['id']}")
+                login = client.get("/auth/login")
+
+        for response, expected_redirects in ((home, 1), (detail, 2)):
+            self.assertIn('const redirectToWriteLogin = () =>', response.text)
+            self.assertGreaterEqual(response.text.count('if (response.status === 401)'), expected_redirects)
+            self.assertIn('next_path=${encodeURIComponent(currentPath)}', response.text)
+        self.assertNotIn('const redirectToWriteLogin = () =>', login.text)
+
+    def test_unauthenticated_browser_write_redirects_to_login_with_current_path(self):
+        """Fails if an expired session can still leave a browser on a raw 401 page."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                response = client.post(
+                    "/videos",
+                    data={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+                    headers={
+                        "Accept": "text/html",
+                        "Origin": "https://memo.len.pe.kr",
+                        "Referer": "https://memo.len.pe.kr/?view=grid",
+                    },
+                    follow_redirects=False,
+                )
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], f"/auth/login?{urlencode({'next_path': '/?view=grid'})}")
+
+    def test_browser_write_redirect_rejects_cross_origin_referer(self):
+        """Fails if a hostile Referer can choose the post-login destination."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                response = client.post(
+                    "/videos",
+                    data={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+                    headers={
+                        "Accept": "text/html",
+                        "Origin": "https://memo.len.pe.kr",
+                        "Referer": "https://attacker.example/redirect",
+                    },
+                    follow_redirects=False,
+                )
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/auth/login?next_path=%2F")
+
     def test_health_response_has_browser_security_headers(self):
         """Fails if the YouTube service stops applying its common browser protections."""
         with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
@@ -168,7 +225,12 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
                 )
                 with TestClient(app, base_url="https://memo.len.pe.kr") as client:
                     headers = {"Origin": "https://memo.len.pe.kr"}
-                    login = client.post("/auth/login", data={"password": "session-password"}, headers=headers, follow_redirects=False)
+                    login = client.post(
+                        "/auth/login",
+                        data={"password": "session-password", "next_path": f"/videos/{video['id']}?view=grid"},
+                        headers=headers,
+                        follow_redirects=False,
+                    )
                     created = client.post(
                         f"/videos/{video['id']}/memos",
                         data={"memo_title": "세션 메모", "content": "로그인 후 작성"},
@@ -195,6 +257,7 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
 
         self.assertEqual(login.status_code, 303)
         self.assertIn("youtube_memo_write_session", login.headers["set-cookie"])
+        self.assertEqual(login.headers["location"], f"/videos/{video['id']}?view=grid")
         self.assertEqual(created.status_code, 303)
         self.assertEqual(deleted.status_code, 303)
         self.assertEqual(logout.status_code, 303)
