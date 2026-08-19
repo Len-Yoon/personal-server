@@ -436,6 +436,35 @@ class PortalDashboardTests(unittest.TestCase):
         self.assertIn(".homeops-diagnosis-controls {", stylesheet)
         self.assertIn("align-items:end;", stylesheet)
 
+    def test_admin_login_issues_homeops_session_that_allows_diagnosis_without_reentering_password(self):
+        """A successful administrator login is the sole point that creates the HomeOps session."""
+        os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
+        try:
+            app = self.load_app()
+
+            with TestClient(app) as client:
+                login_page = client.get("/admin/status")
+                authenticated_page = client.post(
+                    "/admin/status",
+                    data={"password": "secret"},
+                    headers={"Origin": "http://testserver"},
+                )
+                diagnosis = client.post(
+                    "/admin/homeops/diagnose",
+                    data={"service": "crawler-worker"},
+                    headers={"Origin": "http://testserver"},
+                    follow_redirects=False,
+                )
+                redirected_page = client.get(diagnosis.headers["location"])
+
+            self.assertNotIn("homeops_admin_session=", login_page.headers.get("set-cookie", ""))
+            self.assertIn("homeops_admin_session=", authenticated_page.headers.get("set-cookie", ""))
+            self.assertEqual(diagnosis.status_code, 303)
+            self.assertIn("HomeOps 운영 보조", redirected_page.text)
+            self.assertNotIn('class="admin-login"', redirected_page.text)
+        finally:
+            os.environ.pop("ADMIN_STATUS_PASSWORD", None)
+
 
 if __name__ == "__main__":
     unittest.main()

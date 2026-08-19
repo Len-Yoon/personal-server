@@ -144,6 +144,8 @@ def admin_security_status(request: Request, x_security_password: str = Header(de
 
 @router.get("/admin/status")
 def admin_status_login(request: Request):
+    if has_auth_session("homeops_admin", request.cookies.get("homeops_admin_session", "")):
+        return _render_authenticated_admin_status(request)
     host = _request_host(request)
     response = templates.TemplateResponse(
         "admin_status.html",
@@ -155,7 +157,6 @@ def admin_status_login(request: Request):
             "portal_home_url": portal_home_url(host),
         },
     )
-    response.set_cookie("homeops_admin_session", create_auth_session("homeops_admin", 900), max_age=900, httponly=True, samesite="lax", secure=is_production_environment())
     return _disable_cache(response)
 
 
@@ -182,6 +183,10 @@ def admin_status_page(request: Request, password: str = Form(default="")):
         )
         return _disable_cache(response)
 
+    return _render_authenticated_admin_status(request, issue_homeops_session=True)
+
+
+def _render_authenticated_admin_status(request: Request, issue_homeops_session: bool = False):
     append_security_event("admin_status_viewed")
     system_status = get_dashboard_status()
     context = build_admin_status_context(
@@ -204,6 +209,15 @@ def admin_status_page(request: Request, password: str = Form(default="")):
             **context,
         },
     )
+    if issue_homeops_session:
+        response.set_cookie(
+            "homeops_admin_session",
+            create_auth_session("homeops_admin", 900),
+            max_age=900,
+            httponly=True,
+            samesite="lax",
+            secure=is_production_environment(),
+        )
     return _disable_cache(response)
 
 
