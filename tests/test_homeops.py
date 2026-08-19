@@ -202,6 +202,30 @@ class HomeOpsTests(unittest.TestCase):
         self.assertIn('action="/admin/homeops/diagnose"', page.text)
         self.assertEqual(blocked.status_code, 403)
 
+    def test_diagnosis_redirect_shows_a_result_notice(self):
+        from fastapi.testclient import TestClient
+
+        original = os.environ.get("ADMIN_STATUS_PASSWORD")
+        os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
+        try:
+            app = self._portal_app()
+            with patch("app.routers.dashboard.get_homeops_service", return_value=self.service):
+                with TestClient(app) as client:
+                    client.post("/admin/status", data={"password": "secret"}, headers={"Origin": "http://testserver"})
+                    response = client.post(
+                        "/admin/homeops/diagnose",
+                        data={"service": "crawler-worker"},
+                        headers={"Origin": "http://testserver"},
+                    )
+        finally:
+            if original is None:
+                os.environ.pop("ADMIN_STATUS_PASSWORD", None)
+            else:
+                os.environ["ADMIN_STATUS_PASSWORD"] = original
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("1개 서비스 진단을 기록했습니다.", response.text)
+
     def _portal_app(self):
         prepare_service_import("portal-web")
         import app.main as main

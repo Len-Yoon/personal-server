@@ -1365,6 +1365,7 @@ a {
 }
 
 .homeops-workbench { max-width:1160px; }
+.homeops-result-notice { max-width:1160px; margin:0 0 12px; padding:11px 13px; border:1px solid rgba(52,211,153,.32); border-radius:10px; color:#bbf7d0; background:rgba(6,78,59,.24); font-size:14px; font-weight:700; }
 .homeops-guardrails { display:flex; align-items:center; justify-content:space-between; gap:18px; margin:0 0 12px; padding:12px 14px; border:1px solid rgba(56,189,248,.2); border-radius:12px; background:rgba(14,165,233,.07); }
 .homeops-guardrail-title { display:grid; gap:3px; flex:0 0 auto; }
 .homeops-guardrail-title strong { color:#bae6fd; font-size:14px; }
