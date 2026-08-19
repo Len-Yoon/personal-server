@@ -406,6 +406,28 @@ class PortalDashboardTests(unittest.TestCase):
         finally:
             os.environ.pop("FILE_MANAGER_PASSWORD", None)
 
+    def test_admin_status_renders_homeops_diagnosis_controls_as_an_operation_panel(self):
+        """Fails if the HomeOps form falls back to an unstyled browser-default control."""
+        os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
+        try:
+            app = self.load_app()
+
+            with TestClient(app) as client:
+                response = client.post(
+                    "/admin/status",
+                    data={"password": "secret"},
+                    headers={"Origin": "http://testserver"},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("homeops-diagnosis-controls", response.text)
+            self.assertIn('class="homeops-service-select"', response.text)
+            self.assertIn('class="homeops-diagnose-button"', response.text)
+            self.assertIn('class="homeops-policy-grid"', response.text)
+            self.assertIn("전체 서비스 스캔", response.text)
+        finally:
+            os.environ.pop("ADMIN_STATUS_PASSWORD", None)
+
 
 if __name__ == "__main__":
     unittest.main()

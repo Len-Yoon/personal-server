@@ -96,10 +96,66 @@
         </section>
 
         <section class="ops-section admin-section">
-            <div class="section-header"><div><span class="modal-kicker">APPROVED OPERATIONS</span><h2>HomeOps 운영 보조</h2><p>personal-server Compose 서비스의 진단과 승인 재시작을 관리합니다.</p></div></div>
-            <div class="homeops-policy"><strong>제한 자동 복구</strong><span>3회 연속 비정상 또는 CPU 85%·메모리 90% 이상과 치명 로그가 함께 감지될 때 해당 컨테이너만 재시작합니다.</span></div>
-            <form class="homeops-action-form" action="/admin/homeops/diagnose" method="post"><select name="service"><option value="all">전체 서비스 진단</option><option value="crawler-worker">crawler-worker</option><option value="portal-web">portal-web</option><option value="system-agent">system-agent</option><option value="youtube-memo">youtube-memo</option><option value="book-memo">book-memo</option><option value="caddy">caddy</option><option value="homeops-executor">homeops-executor</option></select><button type="submit">상태 진단</button></form>
-            <div class="event-list homeops-history"><h3>최근 조치 이력</h3>{% for incident in homeops_incidents %}<article class="event-row homeops-row" data-homeops-status="{{ incident.status }}"><div><span class="homeops-status">{{ incident.status }}</span><strong>{{ incident.service }}</strong><span>{{ incident.created_at }}</span></div><div><strong>{{ incident.proposal.summary }}</strong><span>허용 조치: {{ incident.proposal.action }}</span>{% if incident.status == "proposed" %}<form class="homeops-action-form" action="/admin/homeops/{{ incident.incident_id }}/approve" method="post"><button type="submit">승인</button></form>{% endif %}{% if incident.status == "approved" %}<form class="homeops-action-form" action="/admin/homeops/{{ incident.incident_id }}/execute" method="post"><button type="submit">재시작 실행</button></form>{% endif %}</div></article>{% else %}<p class="empty-log">아직 HomeOps 진단 또는 조치 이력이 없습니다.</p>{% endfor %}</div>
+            <div class="section-header">
+                <div>
+                    <span class="modal-kicker">APPROVED OPERATIONS</span>
+                    <h2>HomeOps 운영 보조</h2>
+                    <p>Compose 서비스의 상태를 확인하고, 필요한 경우에만 승인된 재시작을 수행합니다.</p>
+                </div>
+            </div>
+
+            <div class="homeops-policy-grid" aria-label="HomeOps 자동 복구 정책">
+                <div><span>자동 복구 기준</span><strong>3회 연속 비정상</strong></div>
+                <div><span>CPU 임계값</span><strong>85% 이상</strong></div>
+                <div><span>메모리 임계값</span><strong>90% 이상</strong></div>
+                <div><span>조치 범위</span><strong>컨테이너만</strong></div>
+            </div>
+
+            <form class="homeops-action-form homeops-diagnosis-controls" action="/admin/homeops/diagnose" method="post">
+                <label class="homeops-service-picker">
+                    <span>진단 대상</span>
+                    <select class="homeops-service-select" name="service" aria-label="진단할 서비스 선택">
+                        <option value="all">전체 서비스 스캔</option>
+                        <option value="crawler-worker">crawler-worker</option>
+                        <option value="portal-web">portal-web</option>
+                        <option value="system-agent">system-agent</option>
+                        <option value="youtube-memo">youtube-memo</option>
+                        <option value="book-memo">book-memo</option>
+                        <option value="caddy">caddy</option>
+                        <option value="homeops-executor">homeops-executor</option>
+                    </select>
+                </label>
+                <button class="homeops-diagnose-button" type="submit">
+                    <span aria-hidden="true">⌁</span>
+                    상태 진단 시작
+                </button>
+            </form>
+            <p class="homeops-control-hint">진단은 읽기 전용입니다. 재시작은 결과 확인 후 별도 승인해야 합니다.</p>
+
+            <div class="event-list homeops-history">
+                <h3>최근 조치 이력</h3>
+                {% for incident in homeops_incidents %}
+                    <article class="event-row homeops-row" data-homeops-status="{{ incident.status }}">
+                        <div>
+                            <span class="homeops-status">{{ incident.status }}</span>
+                            <strong>{{ incident.service }}</strong>
+                            <span>{{ incident.created_at }}</span>
+                        </div>
+                        <div>
+                            <strong>{{ incident.proposal.summary }}</strong>
+                            <span>허용 조치: {{ incident.proposal.action }}</span>
+                            {% if incident.status == "proposed" %}
+                                <form class="homeops-action-form" action="/admin/homeops/{{ incident.incident_id }}/approve" method="post"><button type="submit">승인</button></form>
+                            {% endif %}
+                            {% if incident.status == "approved" %}
+                                <form class="homeops-action-form" action="/admin/homeops/{{ incident.incident_id }}/execute" method="post"><button type="submit">재시작 실행</button></form>
+                            {% endif %}
+                        </div>
+                    </article>
+                {% else %}
+                    <p class="empty-log">아직 HomeOps 진단 또는 조치 이력이 없습니다.</p>
+                {% endfor %}
+            </div>
         </section>
 
         <section class="ops-section admin-section">
