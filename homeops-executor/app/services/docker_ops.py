@@ -27,7 +27,12 @@ def restart_service(service: str, client: Any | None = None) -> dict[str, object
 
 def _get_container(service: str, client: Any | None) -> Any:
     _require_allowed_service(service)
-    return (client or _docker_client()).containers.get(service)
+    containers = (client or _docker_client()).containers.list(
+        filters={"label": f"com.docker.compose.service={service}"}
+    )
+    if len(containers) != 1:
+        raise ValueError("service_container_not_found")
+    return containers[0]
 
 
 def _docker_client() -> Any:

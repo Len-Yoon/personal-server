@@ -35,12 +35,12 @@ class FakeContainer:
 
 class FakeContainers:
     def __init__(self):
-        self.requested: list[str] = []
+        self.filters: list[dict[str, str]] = []
         self.container = FakeContainer()
 
-    def get(self, name: str):
-        self.requested.append(name)
-        return self.container
+    def list(self, filters: dict[str, str]):
+        self.filters.append(filters)
+        return [self.container]
 
 
 class FakeDockerClient:
@@ -68,10 +68,42 @@ class DockerOpsTests(unittest.TestCase):
 
         result = docker_ops.restart_service("crawler-worker", client=client)
 
-        self.assertEqual(client.containers.requested, ["crawler-worker"])
+        self.assertEqual(
+            client.containers.filters,
+            [{"label": "com.docker.compose.service=crawler-worker"}],
+        )
         self.assertEqual(client.containers.container.restart_calls, [10])
         self.assertEqual(result["service"], "crawler-worker")
         self.assertEqual(result["status"], "running")
+
+    def test_diagnostics_finds_a_compose_service_when_container_name_is_generated(self):
+        from app.services import docker_ops
+
+        class ComposeServiceContainers:
+            def __init__(self):
+                self.filters = []
+                self.container = FakeContainer(name="personal-server-caddy-1")
+
+            def get(self, _name):
+                raise AssertionError("generated Compose names must not be used as a fixed lookup")
+
+            def list(self, filters):
+                self.filters.append(filters)
+                return [self.container]
+
+        class ComposeServiceClient:
+            def __init__(self):
+                self.containers = ComposeServiceContainers()
+
+        client = ComposeServiceClient()
+
+        result = docker_ops.collect_diagnostics("caddy", client=client)
+
+        self.assertEqual(result["service"], "caddy")
+        self.assertEqual(
+            client.containers.filters,
+            [{"label": "com.docker.compose.service=caddy"}],
+        )
 
     def test_diagnostics_limits_log_tail_and_size(self):
         from app.services import docker_ops
