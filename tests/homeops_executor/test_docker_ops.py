@@ -25,6 +25,13 @@ class FakeContainer:
     def logs(self, **kwargs):
         return b"worker ready\nAuthorization: Bearer should-not-be-masked-here\n"
 
+    def stats(self, stream=False):
+        return {
+            "memory_stats": {"usage": 45, "limit": 100},
+            "cpu_stats": {"cpu_usage": {"total_usage": 200, "percpu_usage": [50, 50]}, "system_cpu_usage": 2_000},
+            "precpu_stats": {"cpu_usage": {"total_usage": 100}, "system_cpu_usage": 1_000},
+        }
+
 
 class FakeContainers:
     def __init__(self):
@@ -74,6 +81,8 @@ class DockerOpsTests(unittest.TestCase):
         self.assertEqual(result["service"], "crawler-worker")
         self.assertEqual(result["logs"], ["worker ready", "Authorization: Bearer should-not-be-masked-here"])
         self.assertEqual(result["container"]["health"], "healthy")
+        self.assertEqual(result["container"]["cpu_percent"], 20.0)
+        self.assertEqual(result["container"]["memory_percent"], 45.0)
 
     def test_executor_rejects_missing_shared_secret(self):
         from fastapi.testclient import TestClient

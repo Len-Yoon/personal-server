@@ -34,6 +34,7 @@ load_project_env_value NEWS_ARCHIVE_PATH
 load_project_env_value NEWS_RETENTION_DAYS
 load_project_env_value HOST_METRICS_PATH
 load_project_env_value HOST_METRICS_STALE_SECONDS
+load_project_env_value HOMEOPS_SCHEDULER_SECRET
 
 normalize_project_path() {
   local key="$1"
@@ -71,6 +72,13 @@ run_daily_maintenance() {
 
 docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d \
   portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo caddy
+
+if [ -n "${HOMEOPS_SCHEDULER_SECRET:-}" ]; then
+  curl --fail --silent --show-error --max-time 20 \
+    -X POST http://127.0.0.1:8000/internal/homeops/scan \
+    -H "X-HomeOps-Scheduler-Secret: ${HOMEOPS_SCHEDULER_SECRET}" \
+    >> /tmp/homeops-scheduled-scan.log 2>&1 || echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] HomeOps scheduled scan failed" >> /tmp/windows-bootstrap-trace.log
+fi
 
 run_daily_maintenance
 

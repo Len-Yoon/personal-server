@@ -233,6 +233,23 @@ def homeops_execute(incident_id: str, request: Request, password: str = Form(def
     return RedirectResponse(url="/admin/status", status_code=303)
 
 
+@router.post("/internal/homeops/scan")
+def homeops_scheduled_scan(x_homeops_scheduler_secret: str = Header(default="")):
+    configured = os.getenv("HOMEOPS_SCHEDULER_SECRET", "")
+    if not configured or not secrets.compare_digest(x_homeops_scheduler_secret, configured):
+        raise HTTPException(status_code=403, detail="scheduler_access_denied")
+    homeops = get_homeops_service()
+    host = get_dashboard_status().get("host") or {}
+    homeops.observe_host_memory(host.get("memory_percent"))
+    results = []
+    for service in sorted(ALLOWED_SERVICES):
+        try:
+            results.append(homeops.create_diagnosis(service, record_healthy=False))
+        except OSError:
+            append_security_event("homeops_scheduled_diagnosis_unavailable", service=service)
+    return {"status": "ok", "diagnosed": len(results)}
+
+
 @router.post("/admin/events")
 async def admin_user_event(request: Request, payload: dict = Body(default_factory=dict)):
     event = str(payload.get("event", ""))

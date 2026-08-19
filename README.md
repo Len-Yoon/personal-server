@@ -14,6 +14,7 @@
 - N100 Windows host의 실제 수집 시각을 기반으로 서버·백업·컨테이너 상태를 시각화함.
 - 공개 서비스의 쓰기 경로에 세션 인증, CSRF Origin 검증, CSP, 영속형 인증 실패 제한을 적용함.
 - `main` push부터 N100 반영까지 GitHub Actions self-hosted runner 기반 자동 배포를 구성함.
+- 관리자 상태에 HomeOps 운영 보조를 통합해 Compose 서비스 진단, 제한 재시작, 복구 검증, 장애 이력 및 Telegram 상태 변화 알림을 구현함.
 
 ## 문제 해결 사례
 
@@ -41,6 +42,7 @@ Internet
   └─ Cloudflare DNS / Tunnel
        └─ N100 Windows의 WSL cloudflared
             ├─ portal-web      : 포털, 파일함, 관리자 상태, 포트폴리오
+            ├─ homeops-executor: 제한된 Docker 진단·컨테이너 재시작
             ├─ crawler-worker  : Investing.com RSS, 뉴스 보관, 텔레그램 알림
             ├─ youtube-memo    : 영상·학습 메모
             └─ book-memo       : 책·목차·독서 메모
@@ -96,6 +98,7 @@ Cloudflare Tunnel 사용 시 호스트명별 DNS는 `cloudflared tunnel route dn
 | 포털 | 서비스 허브, 뉴스·YouTube·책 메모 통합 검색, 관리자 상태 진입 |
 | 파일함 | 다중 업로드, 드래그 앤 드롭, 폴더 생성, 검색·정렬, 아이콘/목록 보기, ZIP 일괄 다운로드 |
 | 관리자 상태 | CPU·메모리·디스크, 실제 host 수집 시각, 백업, Docker, 서비스 health, 보안 이벤트 |
+| HomeOps | Compose 서비스 진단, 정책 기반 재시작, health 복구 검증, SQLite 이력 |
 | 뉴스 | 나스닥 관련 중요도 분류, 보관 검색, 중요 기사 텔레그램 알림 |
 | 메모 | YouTube·책 데이터 관리, 읽기 공개와 쓰기 인증 분리 |
 | 포트폴리오 | Markdown 기반 공개 포트폴리오와 인증된 편집 화면 |
@@ -109,6 +112,9 @@ Cloudflare Tunnel 사용 시 호스트명별 DNS는 `cloudflared tunnel route dn
 - JSON 상태 파일과 파일 잠금을 사용한 재시작·동시 요청 내성 인증 실패 제한
 - 파일 경로 이탈, 위험 확장자, 업로드 용량, 덮어쓰기 방지
 - 서비스별 health check, 컨테이너 자원 제한, read-only filesystem, capability drop 적용
+- Docker 소켓은 `homeops-executor`에만 부여하며 Windows·WSL·Docker 엔진 재시작, 임의 셸, 다른 프로젝트 컨테이너 제어는 제외
+- HomeOps Telegram은 재시작 시작·성공·실패 및 호스트 메모리 90% 3회 연속 경고/해제에만 발송하며, 토큰은 `HOMEOPS_TELEGRAM_*` 환경변수로만 관리
+- 컨테이너 자동 재시작은 `unhealthy` 3회 연속 또는 CPU 85%/메모리 90% 이상과 치명 로그가 3회 연속 함께 관측된 경우로 제한
 
 ## AI Engineering 적용 방식
 
@@ -129,6 +135,7 @@ OpenAI Codex를 개발 파트너로 사용함. 여기서 하네스 엔지니어�
 - 파일함 UX 개선 시 기존 업로드·다운로드·삭제 계약을 유지함.
 - 공개 쓰기 경로의 인증·CSRF·CSP·동시성 제한을 독립 검토 후 보강함.
 - 코드, 운영 문서, 환경변수 예시를 함께 갱신해 배포 가능한 상태를 유지함.
+- HomeOps에 관측→정책→승인/제한 자동 실행→복구 검증→이력의 운영 하네스 루프를 적용함. 외부 AI API 연동은 미구현이며 규칙 기반 판단을 사용함.
 
 ## CI/CD와 검증
 

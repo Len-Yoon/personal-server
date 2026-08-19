@@ -26,6 +26,14 @@ class FakeExecutor:
         return self.health_ok
 
 
+class FakeNotifier:
+    def __init__(self):
+        self.events = []
+
+    def send(self, event_type, details):
+        self.events.append((event_type, details))
+
+
 class HomeOpsTests(unittest.TestCase):
     def setUp(self):
         prepare_service_import("portal-web")
@@ -33,7 +41,13 @@ class HomeOpsTests(unittest.TestCase):
 
         self.tempdir = tempfile.TemporaryDirectory()
         self.executor = FakeExecutor()
-        self.service = HomeOpsService(Path(self.tempdir.name) / "homeops.sqlite3", self.executor, verification_interval_seconds=0)
+        self.notifier = FakeNotifier()
+        self.service = HomeOpsService(
+            Path(self.tempdir.name) / "homeops.sqlite3",
+            self.executor,
+            notifier=self.notifier,
+            verification_interval_seconds=0,
+        )
 
     def tearDown(self):
         self.tempdir.cleanup()
@@ -82,6 +96,66 @@ class HomeOpsTests(unittest.TestCase):
         self.service.create_diagnosis("crawler-worker")
 
         self.assertEqual(len(self.executor.restart_calls), 1)
+
+    def test_three_resource_pressure_diagnoses_with_fatal_log_restart_once(self):
+        self.executor.diagnostics = lambda service: {
+            "service": service,
+            "container": {"status": "running", "health": "healthy", "cpu_percent": 86.0, "memory_percent": 45.0},
+            "logs": ["FATAL worker cannot accept connections"],
+        }
+
+        self.service.create_diagnosis("crawler-worker")
+        self.service.create_diagnosis("crawler-worker")
+        self.service.create_diagnosis("crawler-worker")
+
+        self.assertEqual(len(self.executor.restart_calls), 1)
+
+    def test_high_resource_usage_without_error_signal_does_not_restart(self):
+        self.executor.diagnostics = lambda service: {
+            "service": service,
+            "container": {"status": "running", "health": "healthy", "cpu_percent": 96.0, "memory_percent": 92.0},
+            "logs": ["worker processing scheduled items"],
+        }
+
+        for _ in range(3):
+            self.service.create_diagnosis("crawler-worker")
+
+        self.assertEqual(self.executor.restart_calls, [])
+
+    def test_scheduled_healthy_diagnosis_does_not_store_normal_history(self):
+        self.executor.diagnostics = lambda service: {
+            "service": service,
+            "container": {"status": "running", "health": "healthy", "cpu_percent": 1.0, "memory_percent": 1.0},
+            "logs": ["ready"],
+        }
+
+        result = self.service.create_diagnosis("crawler-worker", record_healthy=False)
+
+        self.assertEqual(result["proposal"]["action"], "no_action")
+        self.assertEqual(self.service.list_incidents(), [])
+
+    def test_restart_lifecycle_sends_started_and_verified_notifications(self):
+        incident = self.service.create_diagnosis("crawler-worker")
+        self.service.approve_incident(incident["incident_id"], "admin")
+
+        self.service.execute_approved_incident(incident["incident_id"])
+
+        self.assertEqual(
+            [event_type for event_type, _ in self.notifier.events],
+            ["container_restart_started", "container_recovery_verified"],
+        )
+
+    def test_host_memory_alert_is_sent_once_after_three_consecutive_samples(self):
+        self.service.observe_host_memory(90.0)
+        self.service.observe_host_memory(91.2)
+        self.service.observe_host_memory(92.8)
+        self.service.observe_host_memory(93.1)
+        self.service.observe_host_memory(72.0)
+
+        self.assertEqual(
+            [event_type for event_type, _ in self.notifier.events],
+            ["host_memory_high", "host_memory_recovered"],
+        )
 
     def test_secret_is_masked_before_persistence(self):
         self.executor.diagnostics = lambda service: {"service": service, "container": {}, "logs": ["Authorization: Bearer secret-value"]}

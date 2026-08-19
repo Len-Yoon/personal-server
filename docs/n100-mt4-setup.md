@@ -201,7 +201,7 @@ warning.
 The included Windows bootstrap script installs a user-level startup entry that
 records host metrics immediately, waits 120 seconds after login for WSL and
 Docker, then starts the Docker stack and checks Cloudflare Tunnel. It repeats
-the host metrics and recovery check every 30 minutes.
+the host metrics and recovery check every 5 minutes.
 
 Install it with:
 

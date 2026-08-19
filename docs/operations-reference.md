@@ -14,6 +14,7 @@
 | `books.len.pe.kr` | `book-memo` | 8003 | 책 메모 |
 
 N100 override는 애플리케이션 포트를 `127.0.0.1`에만 바인드함. `system-agent`는 `127.0.0.1:18010`으로만 노출되며, 포털이 Docker 네트워크의 `system-agent:8010`으로 상태를 조회함.
+`homeops-executor`는 포트를 공개하지 않고 Docker 내부 네트워크에서만 `portal-web`의 요청을 받음.
 
 ## 2. 공개 HTTPS 선택 기준
 
@@ -37,10 +38,23 @@ Windows bootstrap은 Docker 스택을 확인한 뒤 `cloudflared tunnel run` 프
 | 도서 검색 | `ALADIN_TTB_KEY` | 책 메모의 Aladin 검색 연동 |
 | 호스트 상태 | `HOST_METRICS_PATH`, `HOST_METRICS_STALE_SECONDS` | Windows host metrics 파일과 오래됨 판단 |
 | 백업·보안 | `BACKUP_*`, `SECURITY_LOG_*`, `AUTH_RATE_LIMIT_*`, `AUTH_SESSION_MAX_ENTRIES` | 보존 기간, 인증 실패 제한, 세션 상한 |
+| HomeOps | `HOMEOPS_EXECUTOR_SHARED_SECRET`, `HOMEOPS_DB_PATH`, `HOMEOPS_APPROVAL_TTL_SECONDS` | 내부 실행기 인증, 장애 이력, 승인 만료 |
+| HomeOps 알림 | `HOMEOPS_TELEGRAM_BOT_TOKEN`, `HOMEOPS_TELEGRAM_CHAT_ID`, `HOMEOPS_ADMIN_URL` | HomeOps 전용 Telegram 수신처와 관리자 상태 URL |
 
 `ADMIN_STATUS_PASSWORD`가 설정되면 관리자 상태는 이 값을 우선 사용함. 파일함 삭제는 파일함 접근 세션과 삭제 비밀번호를 모두 요구함. 책·YouTube 메모는 쓰기 로그인 세션을 요구하며, 로그인되지 않은 브라우저의 쓰기 폼은 현재 페이지를 보존한 로그인 화면으로 이동함. 삭제 시 비밀번호를 다시 입력하지 않으며, YouTube 메모 수정은 별도 확인을 유지함.
 
-## 4. 운영 확인 명령
+## 4. HomeOps 운영 정책
+
+HomeOps는 personal-server Compose 서비스만 진단하며 Docker 소켓은 `homeops-executor`에만 마운트됨. 임의 명령·파일 삭제·Windows/WSL/Docker 엔진 재시작·네트워크 변경은 수행하지 않음.
+
+Telegram 알림은 정상 점검마다 발송하지 않음. 컨테이너 재시작 시작·복구 확인·복구 실패와 Windows host metrics의 메모리 사용률이 90% 이상으로 3회 연속 관측되거나 정상화된 경우에만 발송함. 알림 전송 실패는 복구 흐름을 중단하지 않음.
+
+- 정상 서비스는 `no_action` 이력으로 저장함.
+- 동일 서비스가 `unhealthy`로 3회 연속 진단되면 컨테이너만 재시작함.
+- CPU 85% 이상 또는 컨테이너 메모리 제한의 90% 이상은 치명 로그(`fatal`, `panic`, `OOM`, `out of memory` 등)가 같은 진단에 함께 있을 때만 비정상으로 판정함. 단순한 정상 작업 부하는 재시작하지 않음.
+- 재시작 뒤 health를 확인해 `verified` 또는 `failed`로 저장하며, 자동 재시작 뒤 10분 쿨다운을 적용함.
+
+## 5. 운영 확인 명령
 
 N100 Windows PowerShell에서는 WSL을 통해 실행함.
 
