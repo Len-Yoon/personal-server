@@ -20,6 +20,7 @@ from app.services.security import (
     security_status,
 )
 from app.services.system_status import get_dashboard_status, get_service_health
+from app.services.homeops import get_homeops_service
 from app.routers.portfolio import is_portfolio_host, render_public_portfolio
 
 router = APIRouter()
@@ -184,6 +185,7 @@ def admin_status_page(request: Request, password: str = Form(default="")):
         service_health=get_service_health(),
         security=security_status(),
     )
+    context["homeops_incidents"] = get_homeops_service().list_incidents()
     response = templates.TemplateResponse(
         "admin_status.html",
         {
@@ -199,6 +201,27 @@ def admin_status_page(request: Request, password: str = Form(default="")):
         },
     )
     return _disable_cache(response)
+
+
+@router.post("/admin/homeops/diagnose")
+def homeops_diagnose(request: Request, password: str = Form(default=""), x_homeops_password: str = Header(default="")):
+    _require_security_password(request, password or x_homeops_password)
+    get_homeops_service().create_diagnosis("crawler-worker")
+    return RedirectResponse(url="/admin/status", status_code=303)
+
+
+@router.post("/admin/homeops/{incident_id}/approve")
+def homeops_approve(incident_id: str, request: Request, password: str = Form(default=""), x_homeops_password: str = Header(default="")):
+    _require_security_password(request, password or x_homeops_password)
+    get_homeops_service().approve_incident(incident_id, _client_id(request))
+    return RedirectResponse(url="/admin/status", status_code=303)
+
+
+@router.post("/admin/homeops/{incident_id}/execute")
+def homeops_execute(incident_id: str, request: Request, password: str = Form(default=""), x_homeops_password: str = Header(default="")):
+    _require_security_password(request, password or x_homeops_password)
+    get_homeops_service().execute_approved_incident(incident_id)
+    return RedirectResponse(url="/admin/status", status_code=303)
 
 
 @router.post("/admin/events")

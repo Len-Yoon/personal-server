@@ -150,6 +150,12 @@
                 </div>
             </div>
         </section>
+
+        <section class="ops-section admin-section">
+            <div class="section-header"><div><h2>HomeOps 승인 운영</h2><p>진단 후 승인된 crawler-worker 재시작만 실행합니다.</p></div></div>
+            <form action="/admin/homeops/diagnose" method="post"><input name="password" type="password" autocomplete="current-password" placeholder="관리자 비밀번호" required><button type="submit">crawler-worker 진단</button></form>
+            <div class="event-list"><h3>최근 장애 이력</h3>{% for incident in homeops_incidents %}<article class="event-row" data-homeops-status="{{ incident.status }}"><strong>{{ incident.service }} · {{ incident.status }}</strong><span>{{ incident.proposal.summary }}</span>{% if incident.status == "proposed" %}<form action="/admin/homeops/{{ incident.incident_id }}/approve" method="post"><input name="password" type="password" autocomplete="current-password" placeholder="관리자 비밀번호" required><button type="submit">승인</button></form>{% endif %}{% if incident.status == "approved" %}<form action="/admin/homeops/{{ incident.incident_id }}/execute" method="post"><input name="password" type="password" autocomplete="current-password" placeholder="관리자 비밀번호" required><button type="submit">실행</button></form>{% endif %}</article>{% else %}<p class="empty-log">아직 HomeOps 이력이 없습니다.</p>{% endfor %}</div>
+        </section>
     {% endif %}
 </section>
 {% endblock %}

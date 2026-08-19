@@ -6,6 +6,8 @@ import re
 import secrets
 import sqlite3
 import uuid
+import os
+from urllib.request import Request, urlopen
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,7 @@ from typing import Any
 ALLOWED_SERVICE = "crawler-worker"
 ALLOWED_ACTION = "restart_container"
 _SECRET_PATTERN = re.compile(r"(?i)(authorization:\s*bearer\s+|api[-_ ]?key[=:]\s*|password[=:]\s*|token[=:]\s*)\S+")
+PROJECT_DATA_ROOT = next((parent / "data" for parent in Path(__file__).resolve().parents if (parent / "docker-compose.yml").exists()), Path("/app/data"))
 
 
 class HomeOpsService:
@@ -89,3 +92,29 @@ class HomeOpsService:
     @staticmethod
     def _require_service(service: str) -> None:
         if service != ALLOWED_SERVICE: raise ValueError("service_not_allowed")
+
+
+class ExecutorClient:
+    def __init__(self):
+        self.url = os.getenv("HOMEOPS_EXECUTOR_URL", "http://homeops-executor:8011").rstrip("/")
+        self.secret = os.getenv("HOMEOPS_EXECUTOR_SHARED_SECRET", "")
+
+    def diagnostics(self, service: str) -> dict[str, Any]:
+        return self._request(f"/v1/diagnostics/{service}")
+
+    def restart(self, incident_id: str, approval_token: str, service: str) -> dict[str, Any]:
+        return self._request("/v1/restarts", {"incident_id": incident_id, "approval_token": approval_token, "action": ALLOWED_ACTION, "service": service})
+
+    def health(self, service: str) -> bool:
+        return bool(self.diagnostics(service).get("container", {}).get("health") == "healthy")
+
+    def _request(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        data = json.dumps(payload).encode() if payload else None
+        request = Request(self.url + path, data=data, headers={"X-HomeOps-Executor-Secret": self.secret, "Content-Type": "application/json"})
+        with urlopen(request, timeout=5) as response:
+            return json.loads(response.read().decode())
+
+
+def get_homeops_service() -> HomeOpsService:
+    data_root = Path(os.getenv("HOMEOPS_DB_PATH", str(PROJECT_DATA_ROOT / "logs" / "homeops.sqlite3")))
+    return HomeOpsService(data_root, ExecutorClient())

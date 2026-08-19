@@ -1,6 +1,8 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+import os
 
 from tests._test_support import prepare_service_import
 
@@ -68,6 +70,32 @@ class HomeOpsTests(unittest.TestCase):
         incident = self.service.create_diagnosis("crawler-worker")
 
         self.assertNotIn("secret-value", str(incident))
+
+    def test_admin_page_renders_homeops_and_execute_requires_same_origin(self):
+        from fastapi.testclient import TestClient
+        original = os.environ.get("ADMIN_STATUS_PASSWORD")
+        os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
+        try:
+            app = self._portal_app()
+            with patch("app.routers.dashboard.get_homeops_service", return_value=self.service):
+                with TestClient(app) as client:
+                    page = client.post("/admin/status", data={"password": "secret"}, headers={"Origin": "http://testserver"})
+                    blocked = client.post("/admin/homeops/one/execute", headers={"Origin": "https://evil.example", "X-HomeOps-Password": "secret"})
+        finally:
+            if original is None:
+                os.environ.pop("ADMIN_STATUS_PASSWORD", None)
+            else:
+                os.environ["ADMIN_STATUS_PASSWORD"] = original
+
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("HomeOps 승인 운영", page.text)
+        self.assertIn('action="/admin/homeops/diagnose"', page.text)
+        self.assertEqual(blocked.status_code, 403)
+
+    def _portal_app(self):
+        prepare_service_import("portal-web")
+        import app.main as main
+        return main.app
 
 
 if __name__ == "__main__":
