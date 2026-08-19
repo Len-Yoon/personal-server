@@ -423,7 +423,8 @@ class PortalDashboardTests(unittest.TestCase):
             self.assertIn("homeops-diagnosis-controls", response.text)
             self.assertIn('class="homeops-service-select"', response.text)
             self.assertIn('class="homeops-diagnose-button"', response.text)
-            self.assertIn('class="homeops-policy-grid"', response.text)
+            self.assertIn('class="homeops-guardrails"', response.text)
+            self.assertNotIn('class="homeops-policy-grid"', response.text)
             self.assertIn("전체 서비스 스캔", response.text)
         finally:
             os.environ.pop("ADMIN_STATUS_PASSWORD", None)
