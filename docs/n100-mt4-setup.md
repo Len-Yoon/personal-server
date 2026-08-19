@@ -23,6 +23,7 @@ Windows
     Docker Compose
       portal-web
       system-agent
+      homeops-executor
       book-memo
       youtube-memo
 ```
@@ -129,6 +130,10 @@ APP_ENV=production
 SYSTEM_AGENT_URL=http://system-agent:8010
 HOST_METRICS_PATH=/data/system/host-metrics.json
 HOST_METRICS_STALE_SECONDS=2100
+HOMEOPS_EXECUTOR_SHARED_SECRET=<openssl-rand-hex-32>
+HOMEOPS_SCHEDULER_SECRET=<openssl-rand-hex-32>
+HOMEOPS_TELEGRAM_BOT_TOKEN=
+HOMEOPS_TELEGRAM_CHAT_ID=
 ```
 
 `/files`는 파일함 전용 비밀번호로 먼저 인증해야 합니다. 기본 파일함 비밀번호는
@@ -163,6 +168,7 @@ This starts the app containers used by the personal server:
 - `crawler-worker`
 - `book-memo`
 - `youtube-memo`
+- `homeops-executor`
 
 The N100 override includes `caddy`. Use it as the public HTTPS entry only when
 you expose `80`/`443`; when Cloudflare Tunnel is the public entry, `cloudflared`
@@ -179,6 +185,8 @@ Operational entry point is `https://len.pe.kr`, while `127.0.0.1` is only the lo
 - `http://127.0.0.1:8003`
 - `http://127.0.0.1:18010/health`
 
+`homeops-executor`는 외부 포트를 열지 않음. `portal-web`만 Docker 내부 네트워크에서 진단·제한 재시작을 요청함.
+
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build
 ```
@@ -192,6 +200,12 @@ http://127.0.0.1:8003
 http://127.0.0.1:18010/health
 ```
 
+## HomeOps 정기 점검
+
+Windows bootstrap은 5분마다 Docker 스택·Cloudflare Tunnel·host metrics를 확인한 뒤 HomeOps 내부 점검 API를 호출함. 이 점검은 컨테이너 상태와 제한 로그를 평가하며, 연속 3회 비정상일 때만 해당 컨테이너를 재시작할 수 있음. Windows, WSL, Docker 엔진, 전체 Docker 스택은 재시작하지 않음.
+
+`HOMEOPS_EXECUTOR_SHARED_SECRET`과 `HOMEOPS_SCHEDULER_SECRET`은 서로 다른 임의 문자열로 설정 필요함. 예시는 값의 형식만 나타내며 실제 비밀값·Telegram 토큰·chat ID는 저장소에 커밋하지 않음.
+
 ## Windows host metrics
 
 `system-agent` reads `data/system/host-metrics.json` when it exists. If the
@@ -201,7 +215,7 @@ warning.
 The included Windows bootstrap script installs a user-level startup entry that
 records host metrics immediately, waits 120 seconds after login for WSL and
 Docker, then starts the Docker stack and checks Cloudflare Tunnel. It repeats
-the host metrics and recovery check every 5 minutes.
+the host metrics, stack/Tunnel check, and HomeOps internal scan every 5 minutes.
 
 Install it with:
 
@@ -211,7 +225,7 @@ powershell -ExecutionPolicy Bypass -File C:\personal-server\scripts\windows-boot
 
 Run the registration once from an elevated PowerShell window if Windows reports
 `Access is denied`. After that, the task runs the daemon at each user logon and
-recovers the WSL Docker services, including `crawler-worker`, after reboot.
+starts the configured Docker services after reboot.
 
 The same script can be run manually with `-Start` to bring the stack up once
 right away, or with `-Daemon` to run the always-on lightweight recovery loop.
@@ -321,6 +335,7 @@ The default stack is designed to stay small:
 - `book-memo`: 1 worker, no reload, 192 MB cap
 - `youtube-memo`: 1 worker, no reload, 160 MB cap
 - `crawler-worker`: optional, 320 MB cap
+- `homeops-executor`: no public port, 64 MB cap
 - `caddy`: optional for public HTTPS, 80/443 exposure
 
 For a Caddy + Cloudflare setup, the apps stay bound to localhost and Caddy handles public HTTPS.

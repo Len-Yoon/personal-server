@@ -38,7 +38,7 @@ Windows bootstrap은 Docker 스택을 확인한 뒤 `cloudflared tunnel run` 프
 | 도서 검색 | `ALADIN_TTB_KEY` | 책 메모의 Aladin 검색 연동 |
 | 호스트 상태 | `HOST_METRICS_PATH`, `HOST_METRICS_STALE_SECONDS` | Windows host metrics 파일과 오래됨 판단 |
 | 백업·보안 | `BACKUP_*`, `SECURITY_LOG_*`, `AUTH_RATE_LIMIT_*`, `AUTH_SESSION_MAX_ENTRIES` | 보존 기간, 인증 실패 제한, 세션 상한 |
-| HomeOps | `HOMEOPS_EXECUTOR_SHARED_SECRET`, `HOMEOPS_DB_PATH`, `HOMEOPS_APPROVAL_TTL_SECONDS` | 내부 실행기 인증, 장애 이력, 승인 만료 |
+| HomeOps | `HOMEOPS_EXECUTOR_SHARED_SECRET`, `HOMEOPS_SCHEDULER_SECRET`, `HOMEOPS_DB_PATH`, `HOMEOPS_APPROVAL_TTL_SECONDS` | 내부 실행기 인증, 정기 점검 인증, 장애 이력, 승인 만료 |
 | HomeOps 알림 | `HOMEOPS_TELEGRAM_BOT_TOKEN`, `HOMEOPS_TELEGRAM_CHAT_ID`, `HOMEOPS_ADMIN_URL` | HomeOps 전용 Telegram 수신처와 관리자 상태 URL |
 
 `ADMIN_STATUS_PASSWORD`가 설정되면 관리자 상태는 이 값을 우선 사용함. 파일함 삭제는 파일함 접근 세션과 삭제 비밀번호를 모두 요구함. 책·YouTube 메모는 쓰기 로그인 세션을 요구하며, 로그인되지 않은 브라우저의 쓰기 폼은 현재 페이지를 보존한 로그인 화면으로 이동함. 삭제 시 비밀번호를 다시 입력하지 않으며, YouTube 메모 수정은 별도 확인을 유지함.
@@ -49,7 +49,7 @@ HomeOps는 personal-server Compose 서비스만 진단하며 Docker 소켓은 `h
 
 Telegram 알림은 정상 점검마다 발송하지 않음. 컨테이너 재시작 시작·복구 확인·복구 실패와 Windows host metrics의 메모리 사용률이 90% 이상으로 3회 연속 관측되거나 정상화된 경우에만 발송함. 알림 전송 실패는 복구 흐름을 중단하지 않음.
 
-- 정상 서비스는 `no_action` 이력으로 저장함.
+- 관리자 수동 진단은 정상 결과도 `no_action` 이력으로 저장할 수 있음. 정기 점검의 정상 결과는 이력을 저장하지 않음.
 - 동일 서비스가 `unhealthy`로 3회 연속 진단되면 컨테이너만 재시작함.
 - CPU 85% 이상 또는 컨테이너 메모리 제한의 90% 이상은 치명 로그(`fatal`, `panic`, `OOM`, `out of memory` 등)가 같은 진단에 함께 있을 때만 비정상으로 판정함. 단순한 정상 작업 부하는 재시작하지 않음.
 - 재시작 뒤 health를 확인해 `verified` 또는 `failed`로 저장하며, 자동 재시작 뒤 10분 쿨다운과 서비스별 최근 1시간 최대 2회 제한을 적용함. 제한 도달 시 재시작하지 않고 Telegram 알림 및 이력만 남김.

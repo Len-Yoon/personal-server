@@ -12,7 +12,7 @@
 | [Cloudflare Tunnel](cloudflare-tunnel.md) | 포트포워딩 없이 공개 도메인을 연결하는 방법 | `cloudflared` ingress |
 | [Caddy + Cloudflare](caddy-cloudflare.md) | 외부 `80`·`443`을 직접 여는 대체 HTTPS 구성 | Caddy DNS-01 |
 | [작업 인수인계](agent-handoff.md) | 후속 개발·운영 작업자가 확인할 코드 위치와 규칙 | 현재 저장소 구조 |
-| [HomeOps 설계](superpowers/specs/2026-08-19-homeops-approved-operations-design.md) | 승인 기반 운영 보조의 권한·정책 경계 | HomeOps 현재 구현 기준 |
+| [HomeOps 설계](superpowers/specs/2026-08-19-homeops-approved-operations-design.md) | 정책 기반 운영 보조의 권한·정책·제한 사항 | HomeOps 현재 구현 기준 |
 
 ## 과거 기록
 

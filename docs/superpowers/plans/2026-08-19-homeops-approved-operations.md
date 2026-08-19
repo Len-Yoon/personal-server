@@ -1,5 +1,7 @@
 # HomeOps 승인 기반 AI 운영 보조 시스템 Implementation Plan
 
+> **문서 상태: 과거 구현 계획.** 이 문서는 착수 시점의 범위와 작업 순서를 보존함. 현재 구현 범위·정책·제한 사항은 [HomeOps 현재 설계](../specs/2026-08-19-homeops-approved-operations-design.md)를 우선함.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** `crawler-worker`를 읽기 전용으로 진단하고 관리자 승인 뒤에만 재시작하며 복구 결과를 이력화함.

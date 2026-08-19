@@ -8,7 +8,7 @@
 |---|---|---|
 | `portal-web` | 포털, 파일함, 관리자 상태, 포트폴리오 | `portal-web/app/routers/`, `portal-web/app/services/` |
 | `system-agent` | Docker·백업·host metrics 상태 API | `system-agent/app/services/metrics.py` |
-| `homeops-executor` | HomeOps의 제한된 컨테이너 진단·승인 재시작 실행 | `homeops-executor/app/` |
+| `homeops-executor` | HomeOps의 제한된 컨테이너 진단·allowlist 재시작 실행 | `homeops-executor/app/` |
 | `crawler-worker` | Investing.com 시장 뉴스·Google News IT·AI 보관, 나스닥 관련성 분류, Telegram 중요 알림 | `crawler-worker/app/services/news_archive.py`, `nasdaq_relevance.py` |
 | `youtube-memo` | YouTube 영상·타임스탬프 메모 | `youtube-memo/app/main.py` |
 | `book-memo` | 책·목차·독서 메모 | `book-memo/app/main.py` |
@@ -17,7 +17,7 @@
 ## 2. 운영 구조
 
 - N100 override는 앱 포트를 `127.0.0.1`에만 바인드함.
-- Windows bootstrap은 host metrics를 기록하고, Docker 스택과 Cloudflare Tunnel 프로세스를 확인함.
+- Windows bootstrap은 host metrics를 기록하고, Docker 스택과 Cloudflare Tunnel 프로세스를 확인한 뒤 5분 주기의 내부 HomeOps 점검을 호출함.
 - `main` push는 GitHub Actions `Deploy N100` workflow를 통해 Windows self-hosted runner에서 배포됨.
 - `scripts/deploy-n100.sh`는 원격 `origin/main`으로 코드 추적 파일을 맞추므로 N100 작업 디렉터리에서 추적 파일을 직접 수정하지 않음.
 
@@ -38,13 +38,14 @@
 | 뉴스 | 전망성 기사는 archive, 확정된 시장 충격만 Telegram alert 정책 유지 |
 | 메모 | 공개 읽기와 세션 기반 쓰기 분리, unsafe 요청 Origin 검증 유지 |
 | 공개 서비스 | CSP·보안 헤더·정적 파일 응답 정책 유지 |
+| HomeOps | executor 공유 비밀값, allowlist·`restart_container` 제한, 승인·검증·쿨다운·시간당 한도 유지 |
 
 ## 5. 검증과 배포
 
 - 단위 테스트는 `.github/workflows/ci.yml`의 서비스별 명령을 기준으로 실행함.
 - 변경 범위가 넓으면 포털·system-agent·crawler-worker·YouTube·책 테스트를 모두 실행하고 `git diff --check`를 확인함.
 - 배포 실패나 N100 상태 확인은 [N100 GitHub 자동배포 안내](n100-github-auto-deploy.md)의 WSL 명령을 사용함.
-- 서버 기동과 스케줄러 영역은 기능 변경 작업에서 수정하지 않음.
+- 서버 기동·스케줄러 변경은 운영 영향이 있으므로 HomeOps 정책·N100 문서·자동 테스트를 함께 갱신하고 검토함.
 
 ## 6. 관련 문서
 
