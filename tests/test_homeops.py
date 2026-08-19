@@ -226,6 +226,26 @@ class HomeOpsTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("1개 서비스 진단을 기록했습니다.", response.text)
 
+    def test_admin_page_formats_homeops_incident_timestamp_in_kst(self):
+        from fastapi.testclient import TestClient
+
+        self.service.create_diagnosis("crawler-worker")
+        original = os.environ.get("ADMIN_STATUS_PASSWORD")
+        os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
+        try:
+            app = self._portal_app()
+            with patch("app.routers.dashboard.get_homeops_service", return_value=self.service):
+                with TestClient(app) as client:
+                    page = client.post("/admin/status", data={"password": "secret"}, headers={"Origin": "http://testserver"})
+        finally:
+            if original is None:
+                os.environ.pop("ADMIN_STATUS_PASSWORD", None)
+            else:
+                os.environ["ADMIN_STATUS_PASSWORD"] = original
+
+        self.assertIn("KST", page.text)
+        self.assertNotIn("+00:00", page.text)
+
     def _portal_app(self):
         prepare_service_import("portal-web")
         import app.main as main

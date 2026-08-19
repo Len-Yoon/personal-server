@@ -195,7 +195,10 @@ def _render_authenticated_admin_status(request: Request, issue_homeops_session: 
         service_health=get_service_health(),
         security=security_status(),
     )
-    context["homeops_incidents"] = get_homeops_service().list_incidents()
+    context["homeops_incidents"] = [
+        {**incident, "created_at": format_status_checked_at(str(incident.get("created_at") or ""))}
+        for incident in get_homeops_service().list_incidents()
+    ]
     context["homeops_notice"] = _homeops_diagnosis_notice(request)
     response = templates.TemplateResponse(
         "admin_status.html",
