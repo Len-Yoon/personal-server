@@ -17,6 +17,7 @@ from typing import Any
 ALLOWED_SERVICES = frozenset({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
 ALLOWED_ACTION = "restart_container"
 AUTO_RESTART_COOLDOWN_SECONDS = 600
+AUTO_RESTART_MAX_PER_HOUR = 2
 HOST_MEMORY_ALERT_PERCENT = 90.0
 HOST_MEMORY_ALERT_CONSECUTIVE_SAMPLES = 3
 CONTAINER_CPU_RESTART_PERCENT = 85.0
@@ -47,8 +48,11 @@ class HomeOpsService:
             conn.execute("INSERT INTO incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                          (incident_id, service, "proposed", self._now(), json.dumps(diagnostics), json.dumps(proposal), None, None))
         if unhealthy and self._consecutive_unhealthy(service) >= 3:
-            self.approve_incident(incident_id, "homeops-policy")
-            self.execute_approved_incident(incident_id)
+            if self._auto_restart_allowed(service):
+                self.approve_incident(incident_id, "homeops-policy")
+                self.execute_approved_incident(incident_id)
+            else:
+                self._notify("auto_restart_limit_reached", {"service": service, "reason": "최근 1시간 자동 재시작 2회 제한 도달"})
         return {"incident_id": incident_id, "status": "proposed", "diagnostics": diagnostics, "proposal": proposal}
 
     def _consecutive_unhealthy(self, service: str) -> int:
@@ -58,6 +62,15 @@ class HomeOpsService:
         if last_recovery and datetime.fromisoformat(last_recovery[0]) + timedelta(seconds=AUTO_RESTART_COOLDOWN_SECONDS) > datetime.now(timezone.utc):
             return 0
         return len(rows) if len(rows) == 3 and all(json.loads(row[0]).get("action") == ALLOWED_ACTION for row in rows) else 0
+
+    def _auto_restart_allowed(self, service: str) -> bool:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        with self._connect() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM incidents WHERE service=? AND approved_by='homeops-policy' AND created_at>=? AND status IN ('executing', 'verified', 'failed')",
+                (service, cutoff),
+            ).fetchone()[0]
+        return count < AUTO_RESTART_MAX_PER_HOUR
 
     @staticmethod
     def _needs_recovery(diagnostics: dict[str, Any]) -> bool:

@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 import os
+from datetime import datetime, timedelta, timezone
 
 from tests._test_support import prepare_service_import
 
@@ -133,6 +134,22 @@ class HomeOpsTests(unittest.TestCase):
 
         self.assertEqual(result["proposal"]["action"], "no_action")
         self.assertEqual(self.service.list_incidents(), [])
+
+    def test_auto_restart_stops_after_two_policy_restarts_in_one_hour(self):
+        completed_at = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
+        with self.service._connect() as conn:
+            for index in range(2):
+                conn.execute(
+                    "INSERT INTO incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (f"prior-{index}", "crawler-worker", "verified", completed_at, "{}", "{}", "homeops-policy", completed_at),
+                )
+
+        self.service.create_diagnosis("crawler-worker")
+        self.service.create_diagnosis("crawler-worker")
+        self.service.create_diagnosis("crawler-worker")
+
+        self.assertEqual(self.executor.restart_calls, [])
+        self.assertIn("auto_restart_limit_reached", [event_type for event_type, _ in self.notifier.events])
 
     def test_restart_lifecycle_sends_started_and_verified_notifications(self):
         incident = self.service.create_diagnosis("crawler-worker")

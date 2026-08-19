@@ -115,6 +115,7 @@ Cloudflare Tunnel 사용 시 호스트명별 DNS는 `cloudflared tunnel route dn
 - Docker 소켓은 `homeops-executor`에만 부여하며 Windows·WSL·Docker 엔진 재시작, 임의 셸, 다른 프로젝트 컨테이너 제어는 제외
 - HomeOps Telegram은 재시작 시작·성공·실패 및 호스트 메모리 90% 3회 연속 경고/해제에만 발송하며, 토큰은 `HOMEOPS_TELEGRAM_*` 환경변수로만 관리
 - 컨테이너 자동 재시작은 `unhealthy` 3회 연속 또는 CPU 85%/메모리 90% 이상과 치명 로그가 3회 연속 함께 관측된 경우로 제한
+- 자동 재시작은 서비스별 10분 쿨다운과 최근 1시간 최대 2회 제한을 적용하며, 제한 도달 시 알림만 발송
 
 ## AI Engineering 적용 방식
 

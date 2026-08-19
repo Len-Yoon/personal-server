@@ -42,6 +42,7 @@ class HomeOpsTelegramNotifier:
             "container_restart_started": "컨테이너 재시작 시작",
             "container_recovery_verified": "컨테이너 복구 확인",
             "container_recovery_failed": "컨테이너 복구 실패",
+            "auto_restart_limit_reached": "자동 재시작 제한 도달",
             "host_memory_high": "호스트 메모리 경고",
             "host_memory_recovered": "호스트 메모리 정상화",
         }
