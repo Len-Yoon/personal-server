@@ -8,6 +8,7 @@
 |---|---|---|
 | `portal-web` | 포털, 파일함, 관리자 상태, 포트폴리오 | `portal-web/app/routers/`, `portal-web/app/services/` |
 | `system-agent` | Docker·백업·host metrics 상태 API | `system-agent/app/services/metrics.py` |
+| `homeops-executor` | HomeOps의 제한된 컨테이너 진단·승인 재시작 실행 | `homeops-executor/app/` |
 | `crawler-worker` | Investing.com 시장 뉴스·Google News IT·AI 보관, 나스닥 관련성 분류, Telegram 중요 알림 | `crawler-worker/app/services/news_archive.py`, `nasdaq_relevance.py` |
 | `youtube-memo` | YouTube 영상·타임스탬프 메모 | `youtube-memo/app/main.py` |
 | `book-memo` | 책·목차·독서 메모 | `book-memo/app/main.py` |

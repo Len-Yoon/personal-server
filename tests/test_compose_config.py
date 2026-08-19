@@ -12,6 +12,12 @@ class ComposeConfigTests(unittest.TestCase):
             self.assertIn("healthcheck:", compose)
             self.assertIn(f"127.0.0.1:{port}", compose)
 
+    def test_homeops_executor_is_internal_and_owns_docker_socket(self):
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        self.assertIn("homeops-executor:", compose)
+        self.assertIn("/var/run/docker.sock:/var/run/docker.sock", compose)
+        self.assertNotIn("ports:\n      - \"8011:8011\"", compose)
+
     def test_caddy_waits_for_runtime_services_to_be_healthy(self):
         compose = (ROOT / "docker-compose.n100.yml").read_text(encoding="utf-8")
         self.assertIn("condition: service_healthy", compose)

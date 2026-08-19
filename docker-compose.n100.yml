@@ -1,5 +1,22 @@
 # N100 override: binds app ports to localhost and adds Caddy for public HTTPS.
 services:
+  homeops-executor:
+    cpus: "0.10"
+    mem_limit: 64m
+    pids_limit: 64
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
   portal-web:
     ports: !override
       - "127.0.0.1:8000:8000"

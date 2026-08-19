@@ -19,6 +19,10 @@ services:
     environment:
       - FILE_STORAGE_PATH=/data/files
       - SYSTEM_AGENT_URL=http://system-agent:8010
+      - HOMEOPS_EXECUTOR_URL=http://homeops-executor:8011
+      - HOMEOPS_EXECUTOR_SHARED_SECRET=${HOMEOPS_EXECUTOR_SHARED_SECRET:-}
+      - HOMEOPS_SCHEDULER_SECRET=${HOMEOPS_SCHEDULER_SECRET:-}
+      - HOMEOPS_DB_PATH=/app/data/logs/homeops.sqlite3
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 30s
@@ -29,6 +33,23 @@ services:
       - ./portal-web:/app
       - ./data/files:/data/files
       - ./data/logs:/app/data/logs
+
+  homeops-executor:
+    build: ./homeops-executor
+    container_name: homeops-executor
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - HOMEOPS_EXECUTOR_SHARED_SECRET=${HOMEOPS_EXECUTOR_SHARED_SECRET:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8011/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
   system-agent:
     build: ./system-agent

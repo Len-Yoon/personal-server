@@ -117,8 +117,8 @@ function Start-Daemon {
         } catch {
             Write-Info "Recovery check failed: $($_.Exception.Message)"
         }
-        Write-Info "Sleeping 30 minutes before the next recovery check."
-        Start-Sleep -Seconds 1800
+        Write-Info "Sleeping 5 minutes before the next recovery check."
+        Start-Sleep -Seconds 300
     }
 }
 
