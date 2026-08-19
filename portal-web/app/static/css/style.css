@@ -1375,7 +1375,7 @@ a {
 .homeops-action-form { display:flex; gap:10px; align-items:center; margin:12px 0; }
 .homeops-action-form input { min-width:180px; padding:10px 12px; border:1px solid rgba(148,163,184,.3); border-radius:8px; color:#e2e8f0; background:#0f172a; }
 .homeops-action-form button { padding:10px 14px; border:0; border-radius:8px; color:#082f49; background:#67e8f9; font-weight:800; cursor:pointer; }
-.homeops-diagnosis-controls { display:grid; grid-template-columns:minmax(240px, 1fr) auto; gap:14px; margin:0; padding:15px; border:1px solid rgba(96,165,250,.25); border-radius:16px; background:linear-gradient(130deg, rgba(30,41,59,.72), rgba(8,47,73,.32)); }
+.homeops-diagnosis-controls { display:grid; grid-template-columns:minmax(240px, 1fr) auto; align-items:end; gap:14px; margin:0; padding:15px; border:1px solid rgba(96,165,250,.25); border-radius:16px; background:linear-gradient(130deg, rgba(30,41,59,.72), rgba(8,47,73,.32)); }
 .homeops-service-picker { min-width:0; }
 .homeops-service-select { width:100%; min-height:46px; padding:0 42px 0 14px; border:1px solid rgba(125,211,252,.34); border-radius:11px; color:#f8fafc; font:inherit; font-weight:700; background-color:#0f172a; cursor:pointer; }
 .homeops-diagnose-button { display:inline-flex; align-items:center; justify-content:center; gap:9px; min-height:46px; padding:0 18px !important; border:1px solid rgba(103,232,249,.5) !important; border-radius:11px !important; color:#082f49 !important; background:linear-gradient(135deg, #67e8f9, #38bdf8) !important; box-shadow:0 10px 24px rgba(14,165,233,.24); transition:transform .18s ease, box-shadow .18s ease, filter .18s ease; }

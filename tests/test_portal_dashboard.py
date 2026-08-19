@@ -429,6 +429,13 @@ class PortalDashboardTests(unittest.TestCase):
         finally:
             os.environ.pop("ADMIN_STATUS_PASSWORD", None)
 
+    def test_homeops_diagnosis_button_aligns_with_the_service_select_bottom_edge(self):
+        """Fails if the shared form centering rule offsets the action button from the select."""
+        stylesheet = (Path(__file__).parents[1] / "portal-web/app/static/css/style.css").read_text(encoding="utf-8")
+
+        self.assertIn(".homeops-diagnosis-controls {", stylesheet)
+        self.assertIn("align-items:end;", stylesheet)
+
 
 if __name__ == "__main__":
     unittest.main()
