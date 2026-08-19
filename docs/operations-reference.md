@@ -53,6 +53,7 @@ Telegram 알림은 정상 점검마다 발송하지 않음. 컨테이너 재시�
 - 동일 서비스가 `unhealthy`로 3회 연속 진단되면 컨테이너만 재시작함.
 - CPU 85% 이상 또는 컨테이너 메모리 제한의 90% 이상은 치명 로그(`fatal`, `panic`, `OOM`, `out of memory` 등)가 같은 진단에 함께 있을 때만 비정상으로 판정함. 단순한 정상 작업 부하는 재시작하지 않음.
 - 재시작 뒤 health를 확인해 `verified` 또는 `failed`로 저장하며, 자동 재시작 뒤 10분 쿨다운과 서비스별 최근 1시간 최대 2회 제한을 적용함. 제한 도달 시 재시작하지 않고 Telegram 알림 및 이력만 남김.
+- SQLite에는 UTC 기준 시각을 저장하고, 관리자 상태의 HomeOps 이력과 보안 이벤트는 `Asia/Seoul` 기준 `KST`로 표시함.
 
 ## 5. 운영 확인 명령
 
@@ -62,6 +63,18 @@ N100 Windows PowerShell에서는 WSL을 통해 실행함.
 wsl.exe -d Ubuntu-24.04 -- bash -lc "cd /mnt/c/personal-server && docker compose -f docker-compose.yml -f docker-compose.n100.yml ps"
 wsl.exe -d Ubuntu-24.04 -- bash -lc "cd /mnt/c/personal-server && docker compose -f docker-compose.yml -f docker-compose.n100.yml logs --tail=100"
 ```
+
+HomeOps 진단 결과가 `응답 없음`으로 표시되면 먼저 두 컨테이너가 같은 실행기 공유 비밀값을 받았는지 확인함. 실제 값은 출력하지 않음.
+
+```bash
+cd /mnt/c/personal-server
+PORTAL_SECRET=$(docker compose -f docker-compose.yml -f docker-compose.n100.yml exec -T portal-web sh -c 'printf %s "$HOMEOPS_EXECUTOR_SHARED_SECRET"')
+EXECUTOR_SECRET=$(docker compose -f docker-compose.yml -f docker-compose.n100.yml exec -T homeops-executor sh -c 'printf %s "$HOMEOPS_EXECUTOR_SHARED_SECRET"')
+if [ -n "$PORTAL_SECRET" ] && [ "$PORTAL_SECRET" = "$EXECUTOR_SECRET" ]; then echo MATCH; else echo MISMATCH; fi
+unset PORTAL_SECRET EXECUTOR_SECRET
+```
+
+`MISMATCH`이면 `.env`의 `HOMEOPS_EXECUTOR_SHARED_SECRET`을 한 줄의 임의 문자열로 설정한 뒤 `portal-web`, `homeops-executor`를 함께 재생성해야 함. 자세한 배포 절차는 [N100 GitHub 자동 배포](n100-github-auto-deploy.md)를 따름.
 
 host metrics가 오래되었다면 Windows PowerShell에서 파일의 갱신 시각과 내용을 확인함.
 

@@ -2,6 +2,8 @@
 
 이 디렉터리는 개인 서버의 현재 운영 기준과 과거 설계·점검 기록을 함께 보관함. 운영 작업은 먼저 **현재 운영 문서**를 기준으로 판단하고, 과거 문서는 변경 배경을 확인하는 용도로만 사용함.
 
+> 마지막 정합성 점검: 2026-08-19. 서비스·환경변수·배포 명령은 코드와 Compose 설정을 기준으로 확인함.
+
 ## 현재 운영 문서
 
 | 문서 | 용도 | 기준 구성 |
@@ -12,13 +14,12 @@
 | [Cloudflare Tunnel](cloudflare-tunnel.md) | 포트포워딩 없이 공개 도메인을 연결하는 방법 | `cloudflared` ingress |
 | [Caddy + Cloudflare](caddy-cloudflare.md) | 외부 `80`·`443`을 직접 여는 대체 HTTPS 구성 | Caddy DNS-01 |
 | [작업 인수인계](agent-handoff.md) | 후속 개발·운영 작업자가 확인할 코드 위치와 규칙 | 현재 저장소 구조 |
-| [HomeOps 설계](superpowers/specs/2026-08-19-homeops-approved-operations-design.md) | 정책 기반 운영 보조의 권한·정책·제한 사항 | HomeOps 현재 구현 기준 |
+| [HomeOps 설계](superpowers/specs/2026-08-19-homeops-approved-operations-design.md) | 정책 기반 운영 보조의 권한·정책·제한 사항 | HomeOps 현재 구현 기준, 이력 화면은 KST 표기 |
 
 ## 과거 기록
 
 - [운영보안 QA 보고서](20260702_운영보안QA_점검보고서.md): 2026-07-02 기준의 점검 결과임. 현재 운영값은 위 현재 운영 문서를 우선함.
-- [`superpowers/specs/`](superpowers/specs/): 기능 설계 기록임.
-- [`superpowers/plans/`](superpowers/plans/): 기능 구현 계획과 검토 이력임.
+- [`superpowers/`](superpowers/README.md): 기능 설계·구현 계획의 이력 보관함. 현재 운영 절차로 사용하지 않음.
 
 ## 문서 갱신 원칙
 

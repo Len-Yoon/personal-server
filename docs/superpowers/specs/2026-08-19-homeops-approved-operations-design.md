@@ -96,6 +96,7 @@
 | 정책 승인 표시 | 자동복구는 승인 주체를 `homeops-policy`로 기록함 |
 | Telegram | `HOMEOPS_TELEGRAM_BOT_TOKEN`, `HOMEOPS_TELEGRAM_CHAT_ID`가 설정된 경우에만 전송함 |
 | 알림 실패 | 알림 전송 실패는 진단·복구 흐름을 중단하지 않음 |
+| 화면 시각 | SQLite에는 UTC로 저장하고, 관리자 화면 이력에는 KST로 표시함 |
 
 ## 8. 보안 통제와 현재 제한
 

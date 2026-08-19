@@ -14,7 +14,7 @@
 - N100 Windows host의 실제 수집 시각을 기반으로 서버·백업·컨테이너 상태를 시각화함.
 - 공개 서비스의 쓰기 경로에 세션 인증, CSRF Origin 검증, CSP, 영속형 인증 실패 제한을 적용함.
 - `main` push부터 N100 반영까지 GitHub Actions self-hosted runner 기반 자동 배포를 구성함.
-- 관리자 상태에 HomeOps 운영 보조를 통합해 Compose 서비스 진단, 제한 재시작, 복구 검증, 장애 이력 및 Telegram 상태 변화 알림을 구현함.
+- 관리자 상태에 HomeOps 운영 보조를 통합해 Compose 서비스 진단, 제한 재시작, 복구 검증, KST 기준 장애 이력 및 Telegram 상태 변화 알림을 구현함.
 
 ## 문제 해결 사례
 
@@ -98,7 +98,7 @@ Cloudflare Tunnel 사용 시 호스트명별 DNS는 `cloudflared tunnel route dn
 | 포털 | 서비스 허브, 뉴스·YouTube·책 메모 통합 검색, 관리자 상태 진입 |
 | 파일함 | 다중 업로드, 드래그 앤 드롭, 폴더 생성, 검색·정렬, 아이콘/목록 보기, ZIP 일괄 다운로드 |
 | 관리자 상태 | CPU·메모리·디스크, 실제 host 수집 시각, 백업, Docker, 서비스 health, 보안 이벤트 |
-| HomeOps | Compose 서비스 진단, 정책 기반 재시작, health 복구 검증, SQLite 이력 |
+| HomeOps | Compose 서비스 진단, 정책 기반 재시작, health 복구 검증, SQLite 이력(KST 화면 표기) |
 | 뉴스 | 나스닥 관련 중요도 분류, 보관 검색, 중요 기사 텔레그램 알림 |
 | 메모 | YouTube·책 데이터 관리, 읽기 공개와 쓰기 인증 분리 |
 | 포트폴리오 | Markdown 기반 공개 포트폴리오와 인증된 편집 화면 |

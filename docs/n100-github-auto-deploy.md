@@ -6,7 +6,7 @@
 
 N100 자체에 GitHub Actions self-hosted runner를 설치합니다. `main` 브랜치에 push되면 GitHub Actions가 N100에서 직접 실행되고, `C:\personal-server`의 `scripts/deploy-n100.sh`가 Docker Compose 서비스를 재빌드·재기동합니다.
 
-N100은 사설 주소(`192.168.45.32`)를 사용하므로 GitHub-hosted runner에서 SSH로 접근하지 않습니다. SSH 포트포워딩이나 개인키도 필요하지 않습니다.
+N100은 Windows self-hosted runner가 로컬에서 배포를 실행하므로 GitHub-hosted runner의 SSH 접근, 포트포워딩, 배포용 개인키가 필요하지 않음.
 
 ## Runner 최초 등록
 
@@ -67,13 +67,13 @@ runs-on: [self-hosted, Windows, X64]
 1. N100 Runner 서비스가 작업을 받습니다.
 2. `C:\personal-server`의 존재와 `.env`, `data`, Compose 파일을 확인합니다.
 3. Ubuntu-24.04 WSL에서 `scripts/deploy-n100.sh`를 실행합니다.
-4. 스크립트가 `git fetch --prune origin`과 `git reset --hard origin/main`으로 코드만 최신 main에 맞춥니다.
+4. 스크립트가 `git fetch --prune origin`과 `git reset --hard origin/main`으로 **추적되는 코드 파일만** 최신 main에 맞춤.
 5. Compose 설정을 검증한 뒤 `docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo caddy`를 실행합니다.
 6. 마지막에 Compose 서비스 상태를 출력합니다.
 
 같은 브랜치의 배포가 겹치면 기존 배포가 끝난 뒤 다음 배포가 실행됩니다.
 배포 스크립트는 원격 `main`을 기준으로 `git reset --hard`를 수행하므로
-`C:\personal-server`에서 수동으로 수정한 추적 파일은 보존되지 않습니다.
+`C:\personal-server`에서 수동으로 수정한 추적 파일은 보존되지 않음.
 운영 데이터인 `.env`와 `data/`는 별도 경로라 유지됩니다.
 
 ## 확인과 장애 대응
@@ -89,6 +89,7 @@ wsl.exe -d Ubuntu-24.04 -- bash -lc "cd /mnt/c/personal-server && docker compose
 ```
 
 Windows 작업 스케줄러 설정은 이 workflow의 상시 서비스 배포와 별개로 유지됩니다.
+HomeOps 정기 점검은 Windows bootstrap이 5분마다 호출하며, 이 workflow가 그 주기를 변경하지 않음.
 
 자동배포가 아닌 수동 배포가 필요할 때는 다음 명령을 사용합니다.
 

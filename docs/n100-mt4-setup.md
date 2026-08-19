@@ -1,52 +1,54 @@
-# Windows N100 + MT4 lightweight setup
+# N100 Windows·WSL2 운영 환경
 
-This setup assumes the N100 PC runs Windows and MetaTrader 4 stays native on
-Windows for stability. The personal server apps run inside WSL2 with Docker,
-using `docker-compose.n100.yml` to keep CPU and memory usage low.
+> 서비스·도메인·환경변수의 최신 목록은 [운영 참조](operations-reference.md)를 우선함. 이 문서는 N100의 최초 준비, 자원 한도, 자동 시작과 점검 절차만 다룸.
 
-## Recommended layout
+## 1. 문서 정보
 
-- Windows 11 Pro or Home on the N100 PC.
-- MT4 installed directly on Windows.
-- Ubuntu 24.04 in WSL2 for this repo.
-- Docker Engine inside WSL2, or Docker Desktop if you prefer GUI management.
-- Tailscale for private remote access.
-- Caddy + Cloudflare DNS challenge for public access when you can forward `80`/`443`.
-- Cloudflare Tunnel for public access when you do not want port forwarding.
+| 항목 | 내용 |
+|---|---|
+| 대상 | Windows 기반 N100 개인 서버 |
+| 실행 구조 | Windows + Ubuntu-24.04 WSL2 + Docker Compose |
+| 저장소 위치 | `C:\personal-server` / WSL `/mnt/c/personal-server` |
+| 운영 원칙 | MT4는 Windows에서 실행하고 웹 서비스는 WSL2 Docker에서 실행 |
+| 자동화 | Windows bootstrap, GitHub Actions self-hosted runner |
 
-The lightest practical path is:
+## 2. 구성과 자원 기준
 
 ```text
-Windows
-  MT4 native
-  WSL2 Ubuntu
-    Docker Compose
-      portal-web
-      system-agent
-      homeops-executor
-      book-memo
-      youtube-memo
+Windows N100
+├─ MT4 (Windows 네이티브)
+├─ Windows bootstrap (host metrics, Compose·Tunnel 확인, 5분 HomeOps 점검)
+├─ GitHub Actions self-hosted runner (main push 배포)
+└─ Ubuntu-24.04 WSL2
+   └─ Docker Compose
+      ├─ portal-web / system-agent / homeops-executor
+      ├─ crawler-worker / youtube-memo / book-memo
+      └─ caddy
 ```
 
-## Windows prep
+N100 override의 컨테이너 자원 한도는 다음과 같음. 이는 Docker가 사용할 수 있는 상한이며 Windows 전체 메모리 사용량과 동일하지 않음.
 
-Open PowerShell as Administrator:
+| 서비스 | CPU 한도 | 메모리 한도 |
+|---|---:|---:|
+| `portal-web` | 0.25 | 160 MB |
+| `system-agent` | 0.15 | 96 MB |
+| `homeops-executor` | 0.10 | 64 MB |
+| `crawler-worker` | 0.50 | 320 MB |
+| `youtube-memo` | 0.25 | 160 MB |
+| `book-memo` | 0.35 | 192 MB |
+| `caddy` | 별도 Compose 제한 없음 | 별도 Compose 제한 없음 |
+
+## 3. 최초 준비
+
+### 3.1 Windows와 WSL2
+
+관리자 PowerShell에서 Ubuntu-24.04를 설치함.
 
 ```powershell
 wsl --install -d Ubuntu-24.04
 ```
 
-Reboot if Windows asks for it. Then open Ubuntu from the Start menu and create
-the Linux username.
-
-Optional but recommended: cap WSL2 so MT4 always has room. Create this file on
-Windows:
-
-```text
-C:\Users\<your-windows-user>\.wslconfig
-```
-
-Suggested N100 values for an 8 GB machine:
+MT4와 Windows 여유 자원을 우선하려면 `C:\Users\<Windows사용자>\.wslconfig`에 WSL2 한도를 설정함. 아래 값은 권장 예시이며 실제 메모리 용량에 맞춰 조정 필요함.
 
 ```ini
 [wsl2]
@@ -56,291 +58,144 @@ swap=1GB
 localhostForwarding=true
 ```
 
-Suggested values for a 16 GB machine:
-
-```ini
-[wsl2]
-memory=5GB
-processors=3
-swap=2GB
-localhostForwarding=true
-```
-
-Apply the WSL limit:
+설정 변경 후 PowerShell에서 WSL을 재시작함.
 
 ```powershell
 wsl --shutdown
 ```
 
-Then reopen Ubuntu.
+### 3.2 Docker와 저장소
 
-## Install Docker inside WSL2
-
-Inside Ubuntu:
+Ubuntu에서 Docker를 설치하고 사용자를 Docker 그룹에 추가함.
 
 ```bash
 sudo apt update
-sudo apt install -y git docker.io docker-compose-plugin htop
+sudo apt install -y git docker.io docker-compose-plugin
 sudo usermod -aG docker "$USER"
 ```
 
-Close Ubuntu and reopen it so the Docker group is applied.
-
-Start Docker:
+Ubuntu를 다시 연 뒤 Docker가 동작하는지 확인함.
 
 ```bash
-sudo service docker start
+docker version
+docker compose version
 ```
 
-If you do not want to start Docker manually after every reboot, add this near the
-end of `~/.profile` inside Ubuntu:
+저장소는 배포 workflow와 Windows bootstrap이 사용하는 경로인 `C:\personal-server`에 둠. WSL에서는 `/mnt/c/personal-server`로 접근함. `.env`와 `data/`는 Git 추적 대상이 아니므로 운영 PC에서만 생성·보관함.
 
 ```bash
-if ! service docker status >/dev/null 2>&1; then
-  sudo service docker start >/dev/null 2>&1
-fi
-```
-
-## Clone and configure the repo
-
-Inside Ubuntu:
-
-```bash
-git clone <repo-url> personal-server
-cd personal-server
+cd /mnt/c
+git clone <저장소 URL> personal-server
+cd /mnt/c/personal-server
 cp .env.example .env
-nano .env
+mkdir -p data/system data/logs
 ```
 
-Minimum environment values:
+## 4. 운영 환경변수
 
-```text
-ALADIN_TTB_KEY=
-DELETE_PASSWORD=
-FILE_MANAGER_PASSWORD=
-ADMIN_STATUS_PASSWORD=
-FILE_MANAGER_ACCESS_PASSWORD=
-SECURITY_LOG_PATH=/app/data/logs/security-events.txt
-SECURITY_LOG_TIMEZONE=Asia/Seoul
-FILE_MAX_UPLOAD_MB=50
-FILE_BLOCKED_EXTENSIONS=app,bat,cmd,com,dll,dmg,exe,jar,js,msi,php,ps1,sh,vbs
-FILE_ALLOWED_EXTENSIONS=
-FILE_MANAGER_AUTH_REQUIRED=true
-APP_ENV=production
-SYSTEM_AGENT_URL=http://system-agent:8010
-HOST_METRICS_PATH=/data/system/host-metrics.json
-HOST_METRICS_STALE_SECONDS=2100
-HOMEOPS_EXECUTOR_SHARED_SECRET=<openssl-rand-hex-32>
-HOMEOPS_SCHEDULER_SECRET=<openssl-rand-hex-32>
-HOMEOPS_TELEGRAM_BOT_TOKEN=
-HOMEOPS_TELEGRAM_CHAT_ID=
-```
+`.env.example`을 기준으로 `.env`를 작성함. 실제 토큰·비밀번호·chat ID·공유 비밀값은 문서와 Git에 기록하지 않음.
 
-`/files`는 파일함 전용 비밀번호로 먼저 인증해야 합니다. 기본 파일함 비밀번호는
-운영 환경에서는 `.env`의 `FILE_MANAGER_ACCESS_PASSWORD`에 사용할 비밀번호를 직접 설정할
-수 있습니다. 파일 삭제에는 별도로 `DELETE_PASSWORD`가 필요합니다.
+| 범주 | 필수 또는 권장 변수 | 비고 |
+|---|---|---|
+| 관리자 인증 | `ADMIN_STATUS_PASSWORD`, `FILE_MANAGER_ACCESS_PASSWORD`, `DELETE_PASSWORD` | 서로 다른 충분히 긴 값 권장 |
+| HomeOps | `HOMEOPS_EXECUTOR_SHARED_SECRET`, `HOMEOPS_SCHEDULER_SECRET` | 서로 다른 임의 문자열, 비어 있으면 해당 기능이 동작하지 않음 |
+| 뉴스 알림 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | 기존 뉴스 전용 채팅방 값 |
+| HomeOps 알림 | `HOMEOPS_TELEGRAM_BOT_TOKEN`, `HOMEOPS_TELEGRAM_CHAT_ID`, `HOMEOPS_ADMIN_URL` | 서버 상태 전용 채팅방 값 |
+| 공개 경로 | `NEWS_SERVICE_URL`, `YOUTUBE_MEMO_URL`, `BOOK_MEMO_URL`, `*_HOSTNAME` | 포털 링크 및 호스트 라우팅 |
+| Cloudflare | `CADDY_EMAIL`, `CLOUDFLARE_API_TOKEN` | Caddy를 공개 HTTPS 진입점으로 사용할 때만 필요 |
 
-For a 24/7 N100 box, keep `FILE_MANAGER_AUTH_REQUIRED=true` or
-`APP_ENV=production` so `/files` does not open accidentally when the password is
-missing.
-
-`DELETE_PASSWORD` is required for file deletion and the book/YouTube memo write
-login. After a valid memo write login, book and YouTube memo deletion requires a
-browser confirmation but does not ask for the password again. YouTube memo edits
-keep an additional password confirmation.
-
-`ADMIN_STATUS_PASSWORD` is the dedicated password for `/admin/status`. When it is
-not configured, the portal keeps backward compatibility by using
-`FILE_MANAGER_PASSWORD`, then `DELETE_PASSWORD`.
-
-If you are moving data from another machine, copy the `data/` folder into:
-
-```text
-~/personal-server/data/
-```
-
-## Start the N100 stack
-
-This starts the app containers used by the personal server:
-
-- `portal-web`
-- `system-agent`
-- `crawler-worker`
-- `book-memo`
-- `youtube-memo`
-- `homeops-executor`
-
-The N100 override includes `caddy`. Use it as the public HTTPS entry only when
-you expose `80`/`443`; when Cloudflare Tunnel is the public entry, `cloudflared`
-forwards to the localhost service ports instead.
-
-
-Even in the N100 stack, the app ports are bound to `127.0.0.1`, so you can
-still open the apps locally from the machine itself:
-Operational entry point is `https://len.pe.kr`, while `127.0.0.1` is only the local bind address inside the N100 machine.
-
-- `http://127.0.0.1:8000`
-- `http://127.0.0.1:8001`
-- `http://127.0.0.1:8002`
-- `http://127.0.0.1:8003`
-- `http://127.0.0.1:18010/health`
-
-`homeops-executor`는 외부 포트를 열지 않음. `portal-web`만 Docker 내부 네트워크에서 진단·제한 재시작을 요청함.
+HomeOps 두 공유 비밀값은 안전한 임의 문자열을 생성해 입력함.
 
 ```bash
+openssl rand -hex 32
+```
+
+`HOMEOPS_EXECUTOR_SHARED_SECRET`은 `portal-web`과 `homeops-executor`가 동일한 값을 사용해야 함. 컨테이너 재생성 뒤에도 `.env`가 유지되면 같은 값으로 다시 주입됨.
+
+## 5. 시작·자동 시작
+
+### 5.1 최초 수동 시작
+
+```bash
+cd /mnt/c/personal-server
 docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.n100.yml ps
 ```
 
-Open from Windows:
+서비스 포트는 N100에서 `127.0.0.1`에만 바인드됨. `homeops-executor`는 외부 포트를 열지 않음.
 
-```text
-http://127.0.0.1:8000
-http://127.0.0.1:8002
-http://127.0.0.1:8003
-http://127.0.0.1:18010/health
-```
+| 로컬 확인 주소 | 서비스 |
+|---|---|
+| `http://127.0.0.1:8000` | 포털·파일함·관리자 상태 |
+| `http://127.0.0.1:8001` | 뉴스 허브 |
+| `http://127.0.0.1:8002` | YouTube 메모 |
+| `http://127.0.0.1:8003` | 책 메모 |
+| `http://127.0.0.1:18010/health` | system-agent health |
 
-## HomeOps 정기 점검
+### 5.2 Windows bootstrap 등록
 
-Windows bootstrap은 5분마다 Docker 스택·Cloudflare Tunnel·host metrics를 확인한 뒤 HomeOps 내부 점검 API를 호출함. 이 점검은 컨테이너 상태와 제한 로그를 평가하며, 연속 3회 비정상일 때만 해당 컨테이너를 재시작할 수 있음. Windows, WSL, Docker 엔진, 전체 Docker 스택은 재시작하지 않음.
-
-`HOMEOPS_EXECUTOR_SHARED_SECRET`과 `HOMEOPS_SCHEDULER_SECRET`은 서로 다른 임의 문자열로 설정 필요함. 예시는 값의 형식만 나타내며 실제 비밀값·Telegram 토큰·chat ID는 저장소에 커밋하지 않음.
-
-## Windows host metrics
-
-`system-agent` reads `data/system/host-metrics.json` when it exists. If the
-file is missing or stale, the admin page still works and simply shows a
-warning.
-
-The included Windows bootstrap script installs a user-level startup entry that
-records host metrics immediately, waits 120 seconds after login for WSL and
-Docker, then starts the Docker stack and checks Cloudflare Tunnel. It repeats
-the host metrics, stack/Tunnel check, and HomeOps internal scan every 5 minutes.
-
-Install it with:
+Windows PowerShell에서 다음 명령을 한 번 실행함. 작업 등록 시 Windows 계정 비밀번호 입력이 필요할 수 있음.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File C:\personal-server\scripts\windows-bootstrap.ps1 -InstallTask
 ```
 
-Run the registration once from an elevated PowerShell window if Windows reports
-`Access is denied`. After that, the task runs the daemon at each user logon and
-starts the configured Docker services after reboot.
+bootstrap 동작은 다음과 같음.
 
-The same script can be run manually with `-Start` to bring the stack up once
-right away, or with `-Daemon` to run the always-on lightweight recovery loop.
+1. 로그인 후 120초 동안 WSL과 Docker 준비를 기다림.
+2. Windows CPU·메모리·디스크·uptime을 `data/system/host-metrics.json`에 기록함.
+3. Docker Compose 서비스를 실행 상태로 맞추고 Cloudflare Tunnel 프로세스가 없으면 시작함.
+4. 5분마다 host metrics·Compose·Tunnel을 다시 확인하고 HomeOps 내부 정기 점검을 호출함.
+5. 하루 한 번 SQLite 백업, 보존기간 경과 보안 로그·뉴스 archive 정리를 실행함.
 
-## Resource Notes
+이 bootstrap은 Windows·WSL·Docker 엔진·전체 Docker 스택을 재시작하지 않음.
 
-Stop the news crawler during trading hours if MT4 needs every bit of headroom:
+## 6. HomeOps 운영
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.n100.yml stop crawler-worker
+- 수동 진단: `admin.len.pe.kr/admin/status` 로그인 → HomeOps에서 대상 선택 → 상태 진단 시작 → 필요한 이력만 승인·실행함.
+- 정기 점검: 5분마다 실행되며 정상 결과는 이력에 저장하지 않음.
+- 자동 조치: 동일 컨테이너 비정상이 3회 연속 확인된 경우에만 해당 컨테이너를 재시작함.
+- 자원 조건: CPU 85% 또는 컨테이너 메모리 90% 이상만으로는 재시작하지 않으며, 같은 진단의 치명 로그가 함께 필요함.
+- 제한: 서비스별 10분 쿨다운, 최근 1시간 최대 2회 자동 재시작임.
+- Windows 전체 메모리 90% 이상 3회 연속은 Telegram 경고만 전송하며 Windows를 재부팅하지 않음.
+- 관리자 화면의 HomeOps 이력 시각은 KST로 표시됨. SQLite 저장값은 UTC로 유지됨.
+
+자세한 권한 경계와 제한은 [HomeOps 설계](superpowers/specs/2026-08-19-homeops-approved-operations-design.md)를 참고함.
+
+## 7. 공개 HTTPS
+
+Cloudflare Tunnel을 기본 공개 경로로 사용하면 포트포워딩 없이 WSL `cloudflared`가 localhost 포트로 전달함. 설정 절차는 [Cloudflare Tunnel 운영 가이드](cloudflare-tunnel.md)를 참고함.
+
+외부 `80`·`443` 인바운드가 가능한 경우에는 Caddy를 공개 HTTPS 진입점으로 선택할 수 있음. 설정 절차는 [Caddy + Cloudflare 운영 가이드](caddy-cloudflare.md)를 참고함.
+
+N100 Compose에는 `caddy` 서비스가 포함되어 있으나, 실제 공개 유입 경로는 Tunnel 또는 Caddy 중 하나로 정해 운영함.
+
+## 8. 일상 점검과 장애 확인
+
+### 상태와 로그
+
+```powershell
+wsl.exe -d Ubuntu-24.04 -- bash -lc "cd /mnt/c/personal-server && docker compose -f docker-compose.yml -f docker-compose.n100.yml ps"
+wsl.exe -d Ubuntu-24.04 -- bash -lc "cd /mnt/c/personal-server && docker compose -f docker-compose.yml -f docker-compose.n100.yml logs --tail=100"
+Get-Item C:\personal-server\data\system\host-metrics.json | Select-Object LastWriteTime, Length
 ```
 
-If you are using Caddy for public access, keep the apps on localhost and follow `docs/caddy-cloudflare.md` for the proxy setup. In that mode, Caddy handles public HTTPS and reverse proxying.
+### 자동 배포
 
-If you are using Cloudflare Tunnel for public access, keep the apps on localhost and follow `docs/cloudflare-tunnel.md` for the tunnel setup. In that mode, `cloudflared` handles public ingress and no reverse proxy container is required.
+정상 운영에서는 개발 PC에서 `main`으로 push한 뒤 GitHub Actions `Deploy N100` 성공 여부를 확인함. N100 작업 디렉터리의 추적 파일을 직접 수정하지 않음. 수동 배포와 Runner 장애 대응은 [N100 GitHub 자동 배포](n100-github-auto-deploy.md)를 참고함.
 
-## MT4 operating notes
-
-- Keep MT4 installed and running on Windows, not inside WSL2.
-- Put the MT4 data folder and this repo on the internal SSD, not a USB drive.
-- Avoid unnecessary indicators and high-frequency EA logging.
-- Keep Windows power mode on balanced or best performance.
-- Disable Windows sleep while trading.
-- Leave `crawler-worker` off during trading hours unless it is needed.
-- Use the N100 Compose file so the web apps run without `--reload`.
-- Keep `FILE_MAX_UPLOAD_MB` conservative so large browser uploads do not compete
-  with MT4.
-- Prune security logs and backups on a schedule so the SSD does not fill up
-  silently.
-
-## Useful commands
-
-Check Docker resource use inside Ubuntu:
+### 자원 확인
 
 ```bash
+cd /mnt/c/personal-server
 docker stats
-htop
 ```
 
-Stop all personal server apps:
+MT4 자원이 부족할 때 `crawler-worker` 중지는 운영자가 명시적으로 결정할 사항임. `docker compose stop`, `down`, Windows 재부팅은 HomeOps 자동 조치 범위가 아님.
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.n100.yml down
-```
+## 9. 확인 필요 사항
 
-Update the apps manually only when GitHub Actions automatic deployment is unavailable:
-
-```bash
-git pull
-docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build
-```
-
-정상 운영에서는 Mac 등 개발 PC에서 `main`으로 push하면
-[`N100 GitHub 자동배포 안내`](n100-github-auto-deploy.md)에 따라 N100의 self-hosted
-Runner가 WSL2 Docker에서 상시 서비스만 자동으로 재배포합니다. 이때
-
-`crawler-worker`는 `NEWS_REFRESH_INTERVAL_SECONDS` 주기마다 Investing.com
-한국어 RSS를 수집합니다. 기본값은 300초(5분)이며, 운영 `.env`에서 주기를
-조정할 수 있습니다. 뉴스 화면을 열어 둔 경우 브라우저는 60초마다 변경 여부를
-확인합니다.
-
-Restart WSL from Windows PowerShell:
-
-```powershell
-wsl --shutdown
-```
-
-Back up SQLite data and prune old security logs:
-
-```bash
-python3 scripts/maintenance.py backup
-python3 scripts/maintenance.py prune-logs
-python3 scripts/maintenance.py prune-news
-python3 scripts/maintenance.py all
-```
-
-Install and run the lightweight Windows bootstrap from the Windows startup entry:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File C:\personal-server\scripts\windows-bootstrap.ps1 -InstallTask
-```
-
-If file uploads should be included in backups, set:
-
-```text
-BACKUP_INCLUDE_FILES=true
-BACKUP_RETENTION_DAYS=14
-SECURITY_LOG_RETENTION_DAYS=30
-NEWS_ARCHIVE_PATH=/data/crawler-worker/news_archive.json
-NEWS_REFRESH_INTERVAL_SECONDS=300
-NEWS_RETENTION_DAYS=7
-BACKUP_STALE_SECONDS=172800
-```
-
-Windows 부트스트랩은 로그인 후 복구 루프에서 하루에 한 번 `maintenance.py all`을
-자동 실행합니다. 이 작업은 SQLite 백업, 보존기간이 지난 보안 로그, 뉴스 archive를
-정리합니다. 보존기간을 지난 백업·로그·뉴스는 복구할 수 없으므로 필요한 자료는
-별도 보관해야 합니다.
-
-
-## Expected resource shape
-
-The default stack is designed to stay small:
-
-- `portal-web`: 1 worker, no reload, 160 MB cap
-- `system-agent`: 1 worker, no reload, 96 MB cap
-- `book-memo`: 1 worker, no reload, 192 MB cap
-- `youtube-memo`: 1 worker, no reload, 160 MB cap
-- `crawler-worker`: optional, 320 MB cap
-- `homeops-executor`: no public port, 64 MB cap
-- `caddy`: optional for public HTTPS, 80/443 exposure
-
-For a Caddy + Cloudflare setup, the apps stay bound to localhost and Caddy handles public HTTPS.
-
-For a Cloudflare Tunnel setup, the apps stay bound to localhost and `cloudflared` handles public ingress.
-
-With WSL2 capped, Windows and MT4 keep the majority of the machine while the
-personal server apps stay predictable in the background.
+- N100의 실제 메모리 용량에 맞는 `.wslconfig` 상한 확인 필요함.
+- Cloudflare Tunnel 또는 Caddy 중 현재 공개 유입 경로 확인 필요함.
+- GitHub Actions Runner 서비스가 WSL2와 Docker에 접근 가능한 Windows 사용자 계정으로 실행되는지 확인 필요함.
+- HomeOps와 뉴스 Telegram 채팅방이 분리되어 있는지, 각 `.env` 변수가 올바른 채팅 ID를 가리키는지 확인 필요함.
