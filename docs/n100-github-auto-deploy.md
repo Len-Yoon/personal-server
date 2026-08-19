@@ -68,7 +68,7 @@ runs-on: [self-hosted, Windows, X64]
 2. `C:\personal-server`의 존재와 `.env`, `data`, Compose 파일을 확인합니다.
 3. Ubuntu-24.04 WSL에서 `scripts/deploy-n100.sh`를 실행합니다.
 4. 스크립트가 `git fetch --prune origin`과 `git reset --hard origin/main`으로 코드만 최신 main에 맞춥니다.
-5. Compose 설정을 검증한 뒤 `docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web system-agent crawler-worker youtube-memo book-memo caddy`를 실행합니다.
+5. Compose 설정을 검증한 뒤 `docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo caddy`를 실행합니다.
 6. 마지막에 Compose 서비스 상태를 출력합니다.
 
 같은 브랜치의 배포가 겹치면 기존 배포가 끝난 뒤 다음 배포가 실행됩니다.

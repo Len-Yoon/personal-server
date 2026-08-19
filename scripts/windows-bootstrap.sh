@@ -70,7 +70,7 @@ run_daily_maintenance() {
 }
 
 docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d \
-  portal-web system-agent crawler-worker youtube-memo book-memo caddy
+  portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo caddy
 
 run_daily_maintenance
 

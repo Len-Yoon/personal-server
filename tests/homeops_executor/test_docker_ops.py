@@ -46,7 +46,13 @@ class DockerOpsTests(unittest.TestCase):
         from app.services import docker_ops
 
         with self.assertRaises(ValueError):
-            docker_ops.collect_diagnostics("portal-web", client=FakeDockerClient())
+            docker_ops.collect_diagnostics("mysql-test", client=FakeDockerClient())
+
+    def test_diagnostics_allows_every_personal_server_service(self):
+        from app.services import docker_ops
+
+        self.assertIn("portal-web", docker_ops.ALLOWED_SERVICES)
+        self.assertIn("caddy", docker_ops.ALLOWED_SERVICES)
 
     def test_restart_uses_allowed_service_and_docker_restart(self):
         from app.services import docker_ops

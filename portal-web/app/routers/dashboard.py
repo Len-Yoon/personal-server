@@ -18,9 +18,12 @@ from app.services.security import (
     clear_auth_failures,
     record_auth_failure,
     security_status,
+    create_auth_session,
+    has_auth_session,
+    is_production_environment,
 )
 from app.services.system_status import get_dashboard_status, get_service_health
-from app.services.homeops import get_homeops_service
+from app.services.homeops import ALLOWED_SERVICES, get_homeops_service
 from app.routers.portfolio import is_portfolio_host, render_public_portfolio
 
 router = APIRouter()
@@ -152,6 +155,7 @@ def admin_status_login(request: Request):
             "portal_home_url": portal_home_url(host),
         },
     )
+    response.set_cookie("homeops_admin_session", create_auth_session("homeops_admin", 900), max_age=900, httponly=True, samesite="lax", secure=is_production_environment())
     return _disable_cache(response)
 
 
@@ -204,22 +208,27 @@ def admin_status_page(request: Request, password: str = Form(default="")):
 
 
 @router.post("/admin/homeops/diagnose")
-def homeops_diagnose(request: Request, password: str = Form(default=""), x_homeops_password: str = Header(default="")):
-    _require_security_password(request, password or x_homeops_password)
-    get_homeops_service().create_diagnosis("crawler-worker")
+def homeops_diagnose(request: Request, service: str = Form(default="crawler-worker"), password: str = Form(default=""), x_homeops_password: str = Header(default="")):
+    _require_homeops_authorization(request, password or x_homeops_password)
+    homeops = get_homeops_service()
+    for target in sorted(ALLOWED_SERVICES) if service == "all" else [service]:
+        try:
+            homeops.create_diagnosis(target)
+        except OSError:
+            append_security_event("homeops_diagnosis_unavailable", service=target)
     return RedirectResponse(url="/admin/status", status_code=303)
 
 
 @router.post("/admin/homeops/{incident_id}/approve")
 def homeops_approve(incident_id: str, request: Request, password: str = Form(default=""), x_homeops_password: str = Header(default="")):
-    _require_security_password(request, password or x_homeops_password)
+    _require_homeops_authorization(request, password or x_homeops_password)
     get_homeops_service().approve_incident(incident_id, _client_id(request))
     return RedirectResponse(url="/admin/status", status_code=303)
 
 
 @router.post("/admin/homeops/{incident_id}/execute")
 def homeops_execute(incident_id: str, request: Request, password: str = Form(default=""), x_homeops_password: str = Header(default="")):
-    _require_security_password(request, password or x_homeops_password)
+    _require_homeops_authorization(request, password or x_homeops_password)
     get_homeops_service().execute_approved_incident(incident_id)
     return RedirectResponse(url="/admin/status", status_code=303)
 
@@ -261,6 +270,12 @@ def _require_security_password(request: Request, password: str) -> None:
         append_security_event("security_dashboard_auth_failed")
         raise HTTPException(status_code=401, detail="관리자 비밀번호가 올바르지 않습니다.")
     clear_auth_failures("security_dashboard", client)
+
+
+def _require_homeops_authorization(request: Request, password: str) -> None:
+    if has_auth_session("homeops_admin", request.cookies.get("homeops_admin_session", "")):
+        return
+    _require_security_password(request, password)
 
 
 def _client_id(request: Request) -> str:

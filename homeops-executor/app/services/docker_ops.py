@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 
-ALLOWED_SERVICES = frozenset({"crawler-worker"})
+ALLOWED_SERVICES = frozenset({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
 MAX_LOG_BYTES = 32 * 1024
 
 

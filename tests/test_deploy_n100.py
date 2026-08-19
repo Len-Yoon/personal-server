@@ -48,7 +48,7 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("docker info", SCRIPT)
         self.assertIn("DOCKER_WAIT_ATTEMPTS", SCRIPT)
         self.assertIn(
-            "docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web system-agent crawler-worker youtube-memo book-memo caddy",
+            "docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo caddy",
             SCRIPT,
         )
         self.assertNotIn(
@@ -65,7 +65,7 @@ class DeployN100Tests(unittest.TestCase):
         self.assertNotIn("N100_SSH_HOST", GUIDE)
         self.assertIn("git fetch --prune origin", GUIDE)
         self.assertIn(
-            "docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web system-agent crawler-worker youtube-memo book-memo caddy",
+            "docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo caddy",
             GUIDE,
         )
         self.assertIn("push", HANDOFF)

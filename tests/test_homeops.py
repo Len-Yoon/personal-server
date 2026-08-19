@@ -11,6 +11,7 @@ class FakeExecutor:
     def __init__(self):
         self.restart_calls = []
         self.health_ok = True
+        self.health_results = None
 
     def diagnostics(self, service):
         return {"service": service, "container": {"status": "running", "health": "unhealthy"}, "logs": ["error"]}
@@ -20,6 +21,8 @@ class FakeExecutor:
         return {"service": service, "status": "running", "container": {"status": "running", "health": "healthy"}}
 
     def health(self, service):
+        if self.health_results:
+            return self.health_results.pop(0)
         return self.health_ok
 
 
@@ -30,7 +33,7 @@ class HomeOpsTests(unittest.TestCase):
 
         self.tempdir = tempfile.TemporaryDirectory()
         self.executor = FakeExecutor()
-        self.service = HomeOpsService(Path(self.tempdir.name) / "homeops.sqlite3", self.executor)
+        self.service = HomeOpsService(Path(self.tempdir.name) / "homeops.sqlite3", self.executor, verification_interval_seconds=0)
 
     def tearDown(self):
         self.tempdir.cleanup()
@@ -64,6 +67,22 @@ class HomeOpsTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(len(self.executor.restart_calls), 1)
 
+    def test_recovery_waits_until_health_becomes_ready(self):
+        self.executor.health_results = [False, True]
+        incident = self.service.create_diagnosis("crawler-worker")
+        self.service.approve_incident(incident["incident_id"], "admin")
+
+        result = self.service.execute_approved_incident(incident["incident_id"])
+
+        self.assertEqual(result["status"], "verified")
+
+    def test_three_consecutive_unhealthy_diagnoses_restart_once(self):
+        self.service.create_diagnosis("crawler-worker")
+        self.service.create_diagnosis("crawler-worker")
+        self.service.create_diagnosis("crawler-worker")
+
+        self.assertEqual(len(self.executor.restart_calls), 1)
+
     def test_secret_is_masked_before_persistence(self):
         self.executor.diagnostics = lambda service: {"service": service, "container": {}, "logs": ["Authorization: Bearer secret-value"]}
 
@@ -88,7 +107,7 @@ class HomeOpsTests(unittest.TestCase):
                 os.environ["ADMIN_STATUS_PASSWORD"] = original
 
         self.assertEqual(page.status_code, 200)
-        self.assertIn("HomeOps 승인 운영", page.text)
+        self.assertIn("HomeOps 운영 보조", page.text)
         self.assertIn('action="/admin/homeops/diagnose"', page.text)
         self.assertEqual(blocked.status_code, 403)
 
