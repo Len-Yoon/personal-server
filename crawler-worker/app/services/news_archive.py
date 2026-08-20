@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from threading import Lock, Thread
 from datetime import datetime, timedelta, timezone
@@ -12,13 +13,23 @@ from zoneinfo import ZoneInfo
 from app.crawlers.rss_news import _html_to_text
 from app.services.nasdaq_relevance import classify_nasdaq_relevance
 from app.services.news_sources import collect_korean_news_from_sources
-from app.services.telegram_notifier import notify_new_investing_articles
+from app.services.telegram_notifier import (
+    notify_market_news_digest,
+    notify_new_investing_articles,
+)
 
 
 PROJECT_DATA_ROOT = Path(__file__).resolve().parents[3] / "data"
 CACHE_TTL_SECONDS = int(os.getenv("NEWS_REFRESH_INTERVAL_SECONDS", "300"))
 RETENTION_DAYS = int(os.getenv("NEWS_RETENTION_DAYS", "7"))
 ARCHIVE_SCHEMA_VERSION = "2026-08-20-market-focus-v3"
+DIGEST_INTERVAL = timedelta(hours=1)
+TOPIC_COOLDOWN = timedelta(minutes=30)
+DEDUPLICATION_WINDOW = timedelta(hours=6)
+EVENT_MARKER_PATTERN = re.compile(
+    r"cpi|pce|fomc|fed|연준|고용|실업률|gdp|wti|브렌트|opec|나스닥|nasdaq",
+    re.IGNORECASE,
+)
 
 _ARCHIVE_WRITE_LOCK = Lock()
 _REFRESH_LOCK = Lock()
@@ -86,14 +97,16 @@ def collect_korean_news(
         for article in fresh_articles
     ]
     new_articles = _new_articles(archive["articles"], stored_articles)
-    should_notify = _should_notify_new_investing_articles(archive, category, korean=True)
+    should_notify = _should_notify_new_investing_articles(archive, category, korean=True, now=now)
 
     archive["articles"] = _merge_articles(archive["articles"], stored_articles)
     archive["updated_at"] = _iso(now)
-    _save_archive(archive)
     alert_articles = _alert_articles(new_articles)
     if should_notify and alert_articles:
         notify_new_investing_articles(alert_articles)
+    if should_notify:
+        _queue_and_send_general_digest(archive, new_articles, now)
+    _save_archive(archive)
 
     category_articles = _get_category_articles(
         archive["articles"], category, today_only=True
@@ -244,6 +257,16 @@ def _load_archive() -> dict[str, Any]:
         "telegram_notifications_initialized": bool(
             data.get("telegram_notifications_initialized", False)
         ),
+        "telegram_last_digest_at": str(data.get("telegram_last_digest_at", "")),
+        "telegram_pending_articles": _notification_articles(
+            data.get("telegram_pending_articles", [])
+        ),
+        "telegram_recent_articles": _notification_articles(
+            data.get("telegram_recent_articles", [])
+        ),
+        "telegram_topic_last_sent_at": _notification_times(
+            data.get("telegram_topic_last_sent_at", {})
+        ),
     }
 
     if changed:
@@ -317,14 +340,16 @@ def _refresh_category(category: str, limit: int) -> None:
         for article in fresh_articles
     ]
     new_articles = _new_articles(archive["articles"], stored_articles)
-    should_notify = _should_notify_new_investing_articles(archive, category, korean=True)
+    should_notify = _should_notify_new_investing_articles(archive, category, korean=True, now=now)
 
     archive["articles"] = _merge_articles(archive["articles"], stored_articles)
     archive["updated_at"] = _iso(now)
-    _save_archive(archive)
     alert_articles = _alert_articles(new_articles)
     if should_notify and alert_articles:
         notify_new_investing_articles(alert_articles)
+    if should_notify:
+        _queue_and_send_general_digest(archive, new_articles, now)
+    _save_archive(archive)
 
 
 def _purge_archive(archive: dict[str, Any], now: datetime) -> tuple[dict[str, Any], bool]:
@@ -397,13 +422,132 @@ def _should_notify_new_investing_articles(
     archive: dict[str, Any],
     category: str,
     korean: bool,
+    now: datetime,
 ) -> bool:
     if not korean or category != "KR_WORLD":
         return False
     if not archive.get("telegram_notifications_initialized", False):
         archive["telegram_notifications_initialized"] = True
+        archive["telegram_last_digest_at"] = _iso(now)
         return False
     return True
+
+
+def _notification_articles(value: Any) -> list[dict[str, Any]]:
+    return [dict(article) for article in value if isinstance(article, dict)] if isinstance(value, list) else []
+
+
+def _notification_times(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): str(timestamp) for key, timestamp in value.items()}
+
+
+def _queue_and_send_general_digest(
+    archive: dict[str, Any], new_articles: list[dict[str, Any]], now: datetime
+) -> None:
+    pending = _notification_articles(archive.get("telegram_pending_articles", []))
+    pending.extend(article for article in new_articles if not _alert_articles([article]))
+
+    last_digest_at = _parse_dt(str(archive.get("telegram_last_digest_at", "")))
+    if last_digest_at and now - last_digest_at < DIGEST_INTERVAL:
+        archive["telegram_pending_articles"] = pending
+        return
+
+    selected, remaining = _select_general_digest_articles(
+        pending,
+        now=now,
+        topic_last_sent_at=_notification_times(archive.get("telegram_topic_last_sent_at", {})),
+        recent_sent_articles=_notification_articles(archive.get("telegram_recent_articles", [])),
+    )
+    if not selected:
+        archive["telegram_pending_articles"] = remaining
+        return
+    if not notify_market_news_digest(selected):
+        archive["telegram_pending_articles"] = selected + remaining
+        return
+
+    topic_times = _notification_times(archive.get("telegram_topic_last_sent_at", {}))
+    for article in selected:
+        topic_times[str(article["market_topic"])] = _iso(now)
+    recent = _notification_articles(archive.get("telegram_recent_articles", [])) + [
+        dict(article, sent_at=_iso(now)) for article in selected
+    ]
+    archive["telegram_pending_articles"] = remaining
+    archive["telegram_recent_articles"] = [
+        article
+        for article in recent
+        if (sent_at := _parse_dt(str(article.get("sent_at", ""))))
+        and now - sent_at <= DEDUPLICATION_WINDOW
+    ]
+    archive["telegram_topic_last_sent_at"] = topic_times
+    archive["telegram_last_digest_at"] = _iso(now)
+
+
+def _select_general_digest_articles(
+    pending: list[dict[str, Any]],
+    now: datetime,
+    topic_last_sent_at: dict[str, str],
+    recent_sent_articles: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    selected: list[dict[str, Any]] = []
+    remaining: list[dict[str, Any]] = []
+    selected_topics: set[str] = set()
+    seen: list[dict[str, Any]] = list(recent_sent_articles)
+    for article in pending:
+        topic = _market_topic(article)
+        candidate = dict(article, market_topic=topic)
+        last_sent = _parse_dt(topic_last_sent_at.get(topic, ""))
+        if len(selected) >= 3 or (last_sent and now - last_sent < TOPIC_COOLDOWN):
+            remaining.append(article)
+            continue
+        if topic in selected_topics or any(_same_market_event(candidate, prior) for prior in seen):
+            continue
+        selected.append(candidate)
+        selected_topics.add(topic)
+        seen.append(candidate)
+    return selected, remaining
+
+
+def _market_topic(article: dict[str, Any]) -> str:
+    text = f"{article.get('title_ko') or article.get('title') or ''} {article.get('summary') or ''}".casefold()
+    if re.search(r"나스닥|nasdaq", text):
+        return "나스닥"
+    if re.search(r"원유|유가|국제유가|wti|브렌트|brent|opec", text):
+        return "원유"
+    if re.search(r"금\s*(?:값|가격|선물|시세|시장)|골드|gold|xau", text):
+        return "금"
+    return "미국"
+
+
+def _same_market_event(current: dict[str, Any], previous: dict[str, Any]) -> bool:
+    if _market_topic(current) != _market_topic(previous):
+        return False
+    current_key = _headline_key(current)
+    previous_key = _headline_key(previous)
+    if not current_key or not previous_key:
+        return False
+    if current_key == previous_key or current_key in previous_key or previous_key in current_key:
+        return True
+
+    similarity = _headline_bigram_similarity(current_key, previous_key)
+    shared_markers = set(EVENT_MARKER_PATTERN.findall(current_key)) & set(
+        EVENT_MARKER_PATTERN.findall(previous_key)
+    )
+    return similarity >= 0.6 or (bool(shared_markers) and similarity >= 0.25)
+
+
+def _headline_key(article: dict[str, Any]) -> str:
+    title = str(article.get("title_ko") or article.get("title") or "").casefold()
+    return re.sub(r"(?:발표|결과|시장|뉴스|속보|동향|마감)|[^0-9a-z가-힣]", "", title)
+
+
+def _headline_bigram_similarity(left: str, right: str) -> float:
+    left_bigrams = {left[index : index + 2] for index in range(len(left) - 1)}
+    right_bigrams = {right[index : index + 2] for index in range(len(right) - 1)}
+    if not left_bigrams or not right_bigrams:
+        return 0.0
+    return len(left_bigrams & right_bigrams) / len(left_bigrams | right_bigrams)
 
 
 def _dedupe_by_url(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:

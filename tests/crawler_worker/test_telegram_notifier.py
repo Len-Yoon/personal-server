@@ -93,6 +93,38 @@ class TelegramNotifierTests(unittest.TestCase):
         self.assertEqual(sent_count, 0)
         mocked_urlopen.assert_not_called()
 
+    def test_sends_general_market_articles_as_one_digest(self):
+        """Fails if non-urgent market news must be sent one article at a time."""
+        module = self.reload_module()
+        response = MagicMock()
+        response.__enter__.return_value = response
+
+        with patch.dict(
+            "os.environ",
+            {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "123456"},
+            clear=False,
+        ), patch.object(module, "urlopen", return_value=response) as mocked_urlopen:
+            sent = module.notify_market_news_digest(
+                [
+                    {
+                        "title": "미국 CPI 발표 결과",
+                        "url": "https://example.com/cpi",
+                        "market_topic": "미국",
+                    },
+                    {
+                        "title": "국제유가 WTI 상승",
+                        "url": "https://example.com/oil",
+                        "market_topic": "원유",
+                    },
+                ]
+            )
+
+        self.assertTrue(sent)
+        payload = json.loads(mocked_urlopen.call_args.args[0].data)
+        self.assertIn("[시장 뉴스 요약]", payload["text"])
+        self.assertIn("미국 CPI 발표 결과", payload["text"])
+        self.assertIn("국제유가 WTI 상승", payload["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

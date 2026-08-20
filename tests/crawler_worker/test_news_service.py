@@ -237,6 +237,81 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         self.assertEqual(archive["schema_version"], news_archive.ARCHIVE_SCHEMA_VERSION)
         self.assertEqual(archive["articles"], [])
 
+    def test_selects_one_article_per_topic_and_skips_similar_headlines(self):
+        """Fails if a digest repeats the same topic or the same event."""
+        news_archive = self.reload_news_archive()
+        now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+
+        selected, remaining = news_archive._select_general_digest_articles(
+            [
+                {"title": "미국 CPI 발표 결과", "url": "https://example.com/cpi-1"},
+                {"title": "미국 CPI 결과 발표", "url": "https://example.com/cpi-2"},
+                {"title": "국제유가 WTI 상승", "url": "https://example.com/oil"},
+                {"title": "나스닥 마감 상승", "url": "https://example.com/nasdaq"},
+            ],
+            now=now,
+            topic_last_sent_at={},
+            recent_sent_articles=[],
+        )
+
+        self.assertEqual(
+            [article["url"] for article in selected],
+            ["https://example.com/cpi-1", "https://example.com/oil", "https://example.com/nasdaq"],
+        )
+        self.assertEqual(remaining, [])
+
+    def test_recognizes_differently_worded_headlines_for_the_same_event(self):
+        """Fails if word-order changes bypass the non-AI duplicate check."""
+        news_archive = self.reload_news_archive()
+
+        self.assertTrue(
+            news_archive._same_market_event(
+                {"title": "미국 CPI 발표 결과"},
+                {"title": "미 CPI 결과 공개"},
+            )
+        )
+        self.assertFalse(
+            news_archive._same_market_event(
+                {"title": "미국 CPI 발표 결과"},
+                {"title": "미국 고용 증가"},
+            )
+        )
+
+    def test_background_refresh_sends_non_urgent_market_news_as_digest_after_interval(self):
+        """Fails if ordinary market news is never delivered after the digest interval."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(
+                "os.environ",
+                {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")},
+                clear=False,
+            ):
+                news_archive = self.reload_news_archive()
+                now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+                news_archive._save_archive(
+                    {
+                        "updated_at": "",
+                        "articles": [],
+                        "telegram_notifications_initialized": True,
+                        "telegram_last_digest_at": (now - timedelta(hours=1)).isoformat(),
+                    }
+                )
+                with patch.object(news_archive, "_now", return_value=now), patch.object(
+                    news_archive,
+                    "collect_korean_news_from_sources",
+                    return_value=[
+                        {
+                            "url": "https://example.com/oil",
+                            "title": "국제유가 WTI 상승",
+                            "title_ko": "국제유가 WTI 상승",
+                            "source": "Investing.com 한국어",
+                        }
+                    ],
+                ), patch.object(news_archive, "notify_market_news_digest", return_value=True) as notify:
+                    news_archive._refresh_category("KR_WORLD", limit=1)
+
+        notify.assert_called_once()
+        self.assertEqual(notify.call_args.args[0][0]["market_topic"], "원유")
+
 
 if __name__ == "__main__":
     unittest.main()
