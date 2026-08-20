@@ -1,27 +1,42 @@
 # Personal Server
 
-> 개인 생산성과 홈 서버 운영에 필요한 기능을 하나의 웹 플랫폼으로 통합한 프로젝트입니다.
+N100과 WSL2에 올려서 쓰는 개인용 홈 서버입니다.
 
-Windows N100과 WSL2 환경에서 Docker Compose로 운영하며, 포털·파일함·서버 상태·뉴스·메모·포트폴리오를 서비스별로 분리했습니다.
+여러 서비스 링크, 파일 업로드, 서버 상태 확인, 뉴스, 유튜브·독서 메모를 한곳에서 관리하려고 만들었습니다. Docker Compose로 서비스별 컨테이너를 나눠 운영하고 있습니다.
 
-## Features
+단순히 화면만 모아둔 포털이 아니라, 파일·메모처럼 직접 수정하는 데이터와 서버 운영 기능을 분리해두는 쪽을 기준으로 잡았습니다. 평소에는 포털에서 필요한 화면으로 들어가고, 문제가 생기면 관리자 상태와 HomeOps 이력에서 먼저 확인하는 방식으로 사용합니다.
 
-| 영역 | 주요 기능 |
+## 구성
+
+| 서비스 | 하는 일 |
 |---|---|
-| Portal | 서비스 허브, 뉴스·YouTube·책 메모 통합 검색, 관리자 상태 진입 |
-| File Manager | 다중 업로드, 드래그 앤 드롭, 폴더 생성, 검색·정렬, 아이콘/목록 보기, ZIP 일괄 다운로드 |
-| System Status | Windows host의 실제 수집 시각을 기준으로 CPU·메모리·디스크·백업·컨테이너 상태 표시 |
-| HomeOps | Compose 서비스 진단, 정책 기반 재시작, health 검증, SQLite 이력, Telegram 상태 알림 |
-| News Hub | Investing.com·Google News RSS 수집, 나스닥 관련성 분류, 중요 기사 Telegram 알림 |
-| Memos | YouTube 영상·타임스탬프 메모, 책·목차·독서 메모 |
-| Portfolio | Markdown 기반 공개 포트폴리오와 인증된 편집 화면 |
+| Portal | 자주 쓰는 서비스 링크와 뉴스·YouTube·책 메모를 모아 보는 시작 화면 |
+| File Manager | 파일 여러 개 업로드, 폴더 생성, 검색·정렬, 보기 방식 변경, ZIP 다운로드 |
+| System Status | N100 호스트의 CPU·메모리·디스크·백업·컨테이너 상태 확인 |
+| HomeOps | Compose 서비스 상태 확인, 필요한 서비스 재시작, health check 결과와 실행 이력 관리 |
+| News Hub | Investing.com·Google News RSS를 모으고, 나스닥 관련 기사를 분류해 중요한 내용만 Telegram 알림 |
+| Memos | YouTube 영상의 타임스탬프 메모와 책·목차·독서 메모 관리 |
+| Portfolio | Markdown으로 작성한 포트폴리오 공개 및 로그인 후 편집 |
 
-## Highlights
+## 서비스 연결 방식
 
-- 시장 충격 기사와 전망성 기사를 분리해 중요한 뉴스만 알림 처리
-- 화면 조회 시각이 아닌 Windows host의 실제 수집 시각으로 상태 판단 기준 통일
-- 읽기 공개와 쓰기 권한을 분리하고 세션 인증·Origin 검증·인증 실패 제한 적용
-- `main` CI 성공 뒤 Windows self-hosted runner가 N100 배포와 health check 실행
+`portal-web`은 메인 화면, 파일함, 관리자 상태, 포트폴리오를 제공합니다. 나머지 서비스는 각자 SQLite 또는 파일 저장소를 사용하고, 포털은 링크와 검색 진입점 역할을 합니다. 따라서 뉴스 수집이나 메모 서비스에 문제가 생겨도 포털·파일함까지 같이 멈추지 않도록 구성했습니다.
+
+운영 환경에서는 외부에 필요한 서비스만 HTTPS로 공개합니다. `system-agent`는 호스트 상태를 읽는 용도라 포털 컨테이너에서만 접근하고, `homeops-executor`는 Docker 내부 네트워크에서만 요청을 받습니다. 공개 HTTPS는 Cloudflare Tunnel 또는 Caddy + Cloudflare DNS-01 중 하나를 사용합니다.
+
+## 운영 방식
+
+- 뉴스는 시장 충격 가능성이 있는 기사와 전망성 기사를 구분해 알림 수를 줄였습니다.
+- 상태 화면은 브라우저를 연 시간이 아니라 Windows 호스트에서 실제로 수집한 시각을 기준으로 표시합니다.
+- 공개로 볼 수 있는 화면과 수정 권한이 필요한 화면을 분리했습니다. 수정 기능에는 세션 인증과 Origin 검증을 적용했습니다.
+- `main` 브랜치 CI가 통과하면 Windows self-hosted runner가 N100에 배포하고 health check를 실행합니다.
+
+### 데이터와 보안
+
+- 파일은 `data/files`에, 뉴스·YouTube 메모·책 메모·HomeOps 이력은 서비스별 데이터 경로에 보관합니다. 운영 데이터와 `.env`는 저장소에 올리지 않습니다.
+- 관리자 상태, 파일함 접근·삭제, 메모 작성, 포트폴리오 편집은 각각 필요한 인증 경계를 둡니다. 인증 실패 제한은 재시작 후에도 유지되도록 관리합니다.
+- HomeOps는 이 Compose 프로젝트의 컨테이너만 진단·재시작할 수 있습니다. 임의 명령 실행, 파일 삭제, Windows·WSL·Docker 엔진 재시작은 하지 않습니다.
+- 재시작은 연속 health 실패 같은 조건에서만 시도하고, 재시작 후 health 확인·쿨다운·시간당 횟수 제한을 남깁니다. 필요한 상황만 Telegram으로 알립니다.
 
 ## Architecture
 
@@ -49,14 +64,28 @@ main push → GitHub Actions CI → Windows self-hosted runner → Docker Compos
 | YouTube Memo | Book Memo |
 | ![YouTube memo](docs/images/youtube-memo.png) | ![Book memo](docs/images/book-memo.png) |
 
-## Tech Stack
+## 사용 기술
 
 - Backend: Python, FastAPI, Jinja2
 - Storage: SQLite, JSON file storage
 - Infrastructure: Docker Compose, Cloudflare, Caddy, Windows/WSL2
 - CI/CD: GitHub Actions, Windows self-hosted runner
 
-## Getting Started
+## 디렉터리 구조
+
+```text
+portal-web/         메인 포털, 파일함, 관리자 상태, 포트폴리오
+system-agent/       Windows 호스트 상태 조회 API
+homeops-executor/   제한된 Docker 진단·재시작 실행기
+crawler-worker/     RSS 수집, 분류, 뉴스 알림
+youtube-memo/       YouTube 타임스탬프 메모
+book-memo/          책·독서 메모
+scripts/            N100 배포와 운영 보조 스크립트
+docs/               운영 기준과 배포 문서
+data/               운영 중 생성되는 파일·SQLite 데이터 (Git 제외)
+```
+
+## 로컬 실행
 
 ```bash
 cp .env.example .env
@@ -64,13 +93,15 @@ docker compose up -d --build
 docker compose ps
 ```
 
-운영 환경, 환경변수, N100 배포 절차는 [운영 문서](docs/README.md)를 참고하세요.
+환경변수와 N100 배포 절차는 [운영 문서](docs/README.md)에 정리했습니다.
 
-## Testing
+운영 배포는 `docker-compose.yml`에 N100용 override를 함께 적용합니다. N100에서는 서비스 포트를 localhost에만 바인드하고, CI 성공 후 self-hosted runner가 필요한 컨테이너를 재빌드·재기동합니다.
 
-GitHub Actions CI는 포털, 시스템 상태, 뉴스, HomeOps 실행기, 메모, Compose 및 운영 스크립트의 서비스별 테스트를 실행합니다. 로컬 테스트 명령은 [CI workflow](.github/workflows/ci.yml)를 기준으로 확인할 수 있습니다.
+## 테스트
 
-## Documentation
+GitHub Actions CI에서 포털, 시스템 상태, 뉴스, HomeOps, 메모, Compose와 운영 스크립트의 서비스별 테스트를 돌립니다. 로컬에서 실행할 테스트는 [CI workflow](.github/workflows/ci.yml)를 보면 됩니다.
+
+## 문서
 
 - [프로젝트 포트폴리오 원문](docs/portfolio-content.md)
 - [운영 문서 색인](docs/README.md)
@@ -78,6 +109,6 @@ GitHub Actions CI는 포털, 시스템 상태, 뉴스, HomeOps 실행기, 메모
 - [N100 운영 환경](docs/n100-mt4-setup.md)
 - [N100 자동 배포](docs/n100-github-auto-deploy.md)
 
-## AI-assisted Development
+## 참고
 
-OpenAI Codex를 요구사항 분해, 테스트 작성, 구현 보조, 코드 검토 및 변경 검증에 활용했습니다. 서비스 공개 범위, 보안·운영 정책, 배포 여부와 최종 변경 판단은 작성자가 담당했습니다.
+구현·테스트·코드 검토 과정에서 OpenAI Codex를 보조 도구로 사용했습니다. 공개 범위, 보안·운영 정책, 배포 여부와 최종 변경은 직접 확인하고 결정했습니다.
