@@ -18,7 +18,7 @@
 Windows N100
 ├─ MT4 (Windows 네이티브)
 ├─ Windows bootstrap (host metrics, Compose·Tunnel 확인, 5분 HomeOps 점검)
-├─ GitHub Actions self-hosted runner (main push 배포)
+├─ GitHub Actions self-hosted runner (main push CI 성공 후 배포)
 └─ Ubuntu-24.04 WSL2
    └─ Docker Compose
       ├─ portal-web / system-agent / homeops-executor
@@ -182,7 +182,7 @@ Get-Item C:\personal-server\data\system\host-metrics.json | Select-Object LastWr
 
 ### 자동 배포
 
-정상 운영에서는 개발 PC에서 `main`으로 push한 뒤 GitHub Actions `Deploy N100` 성공 여부를 확인함. N100 작업 디렉터리의 추적 파일을 직접 수정하지 않음. 수동 배포와 Runner 장애 대응은 [N100 GitHub 자동 배포](n100-github-auto-deploy.md)를 참고함.
+정상 운영에서는 개발 PC에서 `main`으로 직접 push한 뒤 CI 성공 및 GitHub Actions `Deploy N100` 성공 여부를 확인함. PR은 선택 사항임. N100 작업 디렉터리의 추적 파일을 직접 수정하지 않음. 수동 배포와 Runner 장애 대응은 [N100 GitHub 자동 배포](n100-github-auto-deploy.md)를 참고함.
 
 ### 자원 확인
 

@@ -96,6 +96,8 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("main", GUIDE)
         self.assertIn("health", GUIDE)
         self.assertNotIn("main push에만 반응", GUIDE)
+        self.assertIn("직접 push", GUIDE)
+        self.assertIn("PR은 선택", GUIDE)
 
 
 if __name__ == "__main__":

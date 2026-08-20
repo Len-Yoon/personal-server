@@ -18,6 +18,7 @@
 
 - N100 override는 앱 포트를 `127.0.0.1`에만 바인드함.
 - Windows bootstrap은 host metrics를 기록하고, Docker 스택과 Cloudflare Tunnel 프로세스를 확인한 뒤 5분 주기의 내부 HomeOps 점검을 호출함.
+- 기본 변경 흐름은 `main` 직접 push임. PR은 선택 사항이며 CI가 실패하면 N100 배포는 시작하지 않음.
 - `main`에서 실행된 CI가 성공하면 GitHub Actions `Deploy N100` workflow가 Windows self-hosted runner에서 배포하고 서비스 health를 확인함.
 - `scripts/deploy-n100.sh`는 원격 `origin/main`으로 코드 추적 파일을 맞추므로 N100 작업 디렉터리에서 추적 파일을 직접 수정하지 않음.
 

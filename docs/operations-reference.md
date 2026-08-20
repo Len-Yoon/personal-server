@@ -83,4 +83,4 @@ Get-Item C:\personal-server\data\system\host-metrics.json | Select-Object LastWr
 Get-Content C:\personal-server\data\system\host-metrics.json
 ```
 
-정상 자동배포는 개발 PC에서 `main`으로 push한 뒤 GitHub Actions의 `Deploy N100` 결과를 확인하는 방식임. 수동 배포와 장애 대응은 [N100 GitHub 자동배포 안내](n100-github-auto-deploy.md)를 참고함.
+정상 자동배포는 개발 PC에서 `main`으로 직접 push한 뒤 CI 성공 및 GitHub Actions의 `Deploy N100` 결과를 확인하는 방식임. PR은 선택 사항이며, CI가 실패하거나 취소되면 N100 배포는 시작하지 않음. 수동 배포와 장애 대응은 [N100 GitHub 자동배포 안내](n100-github-auto-deploy.md)를 참고함.
