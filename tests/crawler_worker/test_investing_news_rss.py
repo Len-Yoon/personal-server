@@ -75,6 +75,7 @@ class InvestingNewsRssTests(unittest.TestCase):
         self.assertEqual(
             direct_call["feed_urls"],
             [
+                "https://kr.investing.com/rss/news.rss",
                 "https://kr.investing.com/rss/news_11.rss",
                 "https://kr.investing.com/rss/news_25.rss",
             ],

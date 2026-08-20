@@ -75,6 +75,23 @@ MARKET_SHOCK_EVENT_PATTERN = re.compile(
 MARKET_SHOCK_OUTLOOK_PATTERN = re.compile(
     r"\s*(?:발동\s*)?(?:할\s*)?(?:가능성|전망)", re.IGNORECASE
 )
+MARKET_OUTLOOK_PATTERN = re.compile(
+    r"가능성|전망|관측|예상|예측|목표주가|의견", re.IGNORECASE
+)
+US_MARKET_CLOSE_SUBJECT_PATTERN = re.compile(
+    r"(?:뉴욕\s*증시|미국\s*증시|나스닥|s&p\s*500|다우)", re.IGNORECASE
+)
+MARKET_CLOSE_EVENT_PATTERN = re.compile(r"(?:마감|종가)", re.IGNORECASE)
+EXCHANGE_RATE_SUBJECT_PATTERN = re.compile(
+    r"(?:원\s*/\s*달러|달러\s*/\s*원|환율)", re.IGNORECASE
+)
+OIL_SUBJECT_PATTERN = re.compile(
+    r"(?:국제\s*유가|\bwti\b|브렌트|유가)", re.IGNORECASE
+)
+MAJOR_SEMICONDUCTOR_STOCK_PATTERN = re.compile(
+    r"(?:엔비디아|nvidia|tsmc|amd|인텔|브로드컴|퀄컴|마이크론)", re.IGNORECASE
+)
+MARKET_MOVE_PATTERN = re.compile(r"(?:상승|하락|급등|급락|올라|내려)", re.IGNORECASE)
 
 
 def classify_nasdaq_relevance(article: dict) -> dict[str, object]:
@@ -85,6 +102,9 @@ def classify_nasdaq_relevance(article: dict) -> dict[str, object]:
         return {"level": "alert", "reasons": ["반도체 영향"]}
     if _has_confirmed_market_shock(article):
         return {"level": "alert", "reasons": ["미국 기술주 시장 영향"]}
+    market_update_reason = _confirmed_market_update_reason(article)
+    if market_update_reason:
+        return {"level": "alert", "reasons": [market_update_reason]}
     return {"level": "archive", "reasons": []}
 
 
@@ -152,3 +172,33 @@ def _has_confirmed_market_shock(article: dict) -> bool:
             ):
                 return True
     return False
+
+
+def _confirmed_market_update_reason(article: dict) -> str | None:
+    for field in ("title_ko", "title", "summary"):
+        text = str(article.get(field) or "").casefold()
+        if not text or MARKET_OUTLOOK_PATTERN.search(text):
+            continue
+        if (
+            US_MARKET_CLOSE_SUBJECT_PATTERN.search(text)
+            and MARKET_CLOSE_EVENT_PATTERN.search(text)
+        ):
+            return "미국 증시 마감"
+        if (
+            EXCHANGE_RATE_SUBJECT_PATTERN.search(text)
+            and MARKET_CLOSE_EVENT_PATTERN.search(text)
+        ):
+            return "환율"
+        if (
+            OIL_SUBJECT_PATTERN.search(text)
+            and MARKET_CLOSE_EVENT_PATTERN.search(text)
+            and MARKET_MOVE_PATTERN.search(text)
+        ):
+            return "유가"
+        if (
+            MAJOR_SEMICONDUCTOR_STOCK_PATTERN.search(text)
+            and MARKET_MOVE_PATTERN.search(text)
+            and re.search(r"(?:실적|주가)", text, re.IGNORECASE)
+        ):
+            return "반도체 대형주"
+    return None

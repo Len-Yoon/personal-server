@@ -186,6 +186,49 @@ class NasdaqRelevanceTests(unittest.TestCase):
         self.assertEqual(result["level"], "alert")
         self.assertIn("연준·금리", result["reasons"])
 
+    def test_classifies_confirmed_market_close_as_alert(self):
+        """Fails if completed US market closes stop reaching Telegram."""
+        result = classify_nasdaq_relevance(
+            {"title": "뉴욕증시 마감, 나스닥 1.2% 상승"}
+        )
+
+        self.assertEqual(result["level"], "alert")
+        self.assertIn("미국 증시 마감", result["reasons"])
+
+    def test_classifies_confirmed_exchange_rate_and_oil_moves_as_alert(self):
+        """Fails if completed FX and oil market moves remain archive-only."""
+        for title, reason in (
+            ("원/달러 환율 1,380원에 마감", "환율"),
+            ("국제유가 상승 마감, WTI 2% 올라", "유가"),
+        ):
+            with self.subTest(title=title):
+                result = classify_nasdaq_relevance({"title": title})
+
+                self.assertEqual(result["level"], "alert")
+                self.assertIn(reason, result["reasons"])
+
+    def test_classifies_confirmed_major_semiconductor_stock_move_as_alert(self):
+        """Fails if completed major semiconductor stock moves remain archive-only."""
+        result = classify_nasdaq_relevance(
+            {"title": "엔비디아 실적 발표 후 주가 8% 급등"}
+        )
+
+        self.assertEqual(result["level"], "alert")
+        self.assertIn("반도체 대형주", result["reasons"])
+
+    def test_keeps_market_outlooks_and_routine_stock_opinions_as_archive(self):
+        """Fails if forecasts or target-price opinions create routine alerts."""
+        for title in (
+            "뉴욕증시 상승 전망",
+            "원/달러 환율 상승 가능성",
+            "국제유가 추가 상승 전망",
+            "엔비디아 목표주가 상향",
+        ):
+            with self.subTest(title=title):
+                result = classify_nasdaq_relevance({"title": title})
+
+                self.assertEqual(result["level"], "archive")
+
 
 if __name__ == "__main__":
     unittest.main()
