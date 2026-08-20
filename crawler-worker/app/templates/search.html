@@ -108,8 +108,6 @@
 
                 {% if article.summary %}
                     <p class="summary news-summary">{{ article.summary }}</p>
-                {% else %}
-                    <p class="summary news-summary">요약 정보가 없는 기사입니다.</p>
                 {% endif %}
 
                 {% if article.published_at %}
@@ -259,7 +257,7 @@
             if (article.title_original && article.title_original !== article.title_ko) {
                 appendText(card, "p", "original-title", article.title_original);
             }
-            appendText(card, "p", "summary news-summary", article.summary || "요약 정보가 없는 기사입니다.");
+            appendText(card, "p", "summary news-summary", article.summary);
             appendText(card, "p", "published-at", formatNewsDate(article.published_at));
 
             if (article.url) {

@@ -226,6 +226,35 @@ class CrawlerWorkerNewsRouteTests(unittest.TestCase):
         self.assertIn("<h1>Investing.com 뉴스</h1>", response.text)
         self.assertIn('class="article-link" href="https://example.com/fed-rates"', response.text)
 
+    def test_category_page_omits_placeholder_when_article_has_no_summary(self):
+        app = self.load_app()
+
+        with patch("app.routers.news.collect_korean_news") as mocked_collect:
+            mocked_collect.return_value = {
+                "category": "KR_IT",
+                "label": "IT 동향",
+                "description": "설명",
+                "count": 1,
+                "articles": [
+                    {
+                        "title_ko": "요약 없는 기사",
+                        "provider": "Google News",
+                        "source": "Google News",
+                        "summary": "",
+                        "url": "https://example.com/no-summary",
+                    },
+                ],
+                "cache": {"hit": True, "age_seconds": 12, "ttl_seconds": 300},
+            }
+
+            from fastapi.testclient import TestClient
+
+            with TestClient(app) as client:
+                response = client.get("/category?category=KR_IT")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("요약 정보가 없는 기사입니다.", response.text)
+
     def test_investing_page_shows_alert_archive_status_and_classification_reasons(self):
         """Fails if Nasdaq classification is collected but no longer visible to the user."""
         app = self.load_app()

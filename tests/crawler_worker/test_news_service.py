@@ -91,6 +91,40 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         self.assertEqual(result["articles"][0]["nasdaq_relevance"]["level"], "alert")
         mocked_investing.assert_called_once_with(limit=8)
 
+    def test_collect_korean_news_displays_only_articles_published_today_in_korea(self):
+        """Fresh collections must not reintroduce yesterday's article into the category page."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(
+                "os.environ",
+                {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")},
+                clear=False,
+            ):
+                news_archive = self.reload_news_archive()
+                now = datetime(2026, 8, 20, 1, 0, tzinfo=timezone.utc)
+                with patch.object(news_archive, "_now", return_value=now), patch.object(
+                    news_archive,
+                    "collect_korean_news_from_sources",
+                    return_value=[
+                        {
+                            "url": "https://example.com/today",
+                            "title": "오늘의 IT 뉴스",
+                            "title_ko": "오늘의 IT 뉴스",
+                            "source": "Google News",
+                            "published_at": "2026-08-20T00:30:00+00:00",
+                        },
+                        {
+                            "url": "https://example.com/yesterday",
+                            "title": "어제의 IT 뉴스",
+                            "title_ko": "어제의 IT 뉴스",
+                            "source": "Google News",
+                            "published_at": "2026-08-19T14:00:00+00:00",
+                        },
+                    ],
+                ):
+                    result = news_archive.collect_korean_news("KR_IT", limit=5, force_refresh=True)
+
+        self.assertEqual([article["url"] for article in result["articles"]], ["https://example.com/today"])
+
     def test_world_news_result_exposes_alert_and_archive_counts(self):
         news_archive = self.reload_news_archive()
 

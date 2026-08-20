@@ -95,7 +95,9 @@ def collect_korean_news(
     if should_notify and alert_articles:
         notify_new_investing_articles(alert_articles)
 
-    category_articles = _get_category_articles(archive["articles"], category)
+    category_articles = _get_category_articles(
+        archive["articles"], category, today_only=True
+    )
 
     return _build_result(
         category=category,
