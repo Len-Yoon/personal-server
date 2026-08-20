@@ -277,6 +277,30 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
             )
         )
 
+    def test_keeps_follow_up_with_new_market_number_or_decision(self):
+        """Fails if meaningful updates are discarded as duplicates."""
+        news_archive = self.reload_news_archive()
+
+        self.assertFalse(
+            news_archive._same_market_event(
+                {"title": "미국 CPI 발표 결과 3.0%"},
+                {"title": "미국 CPI 발표 결과 3.2%"},
+            )
+        )
+        self.assertFalse(
+            news_archive._same_market_event(
+                {"title": "연준 금리 동결 결정"},
+                {"title": "연준 금리 발표"},
+            )
+        )
+
+    def test_uses_fifteen_minute_digest_and_two_hour_deduplication_windows(self):
+        """Fails if the alert policy becomes too slow or suppresses updates too long."""
+        news_archive = self.reload_news_archive()
+
+        self.assertEqual(news_archive.DIGEST_INTERVAL, timedelta(minutes=15))
+        self.assertEqual(news_archive.DEDUPLICATION_WINDOW, timedelta(hours=2))
+
     def test_background_refresh_sends_non_urgent_market_news_as_digest_after_interval(self):
         """Fails if ordinary market news is never delivered after the digest interval."""
         with tempfile.TemporaryDirectory() as tmpdir:
