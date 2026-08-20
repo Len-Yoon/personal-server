@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = (ROOT / ".github" / "workflows" / "deploy-n100.yml").read_text(encoding="utf-8")
+CI_WORKFLOW = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 SCRIPT = (ROOT / "scripts" / "deploy-n100.sh").read_text(encoding="utf-8")
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 HANDOFF = (ROOT / "docs" / "agent-handoff.md").read_text(encoding="utf-8")
@@ -11,10 +12,12 @@ GUIDE = (ROOT / "docs" / "n100-github-auto-deploy.md").read_text(encoding="utf-8
 
 
 class DeployN100Tests(unittest.TestCase):
-    def test_workflow_triggers_on_main_push_and_uses_n100_runner(self):
-        self.assertIn("push:", WORKFLOW)
-        self.assertIn("branches:", WORKFLOW)
-        self.assertIn("- main", WORKFLOW)
+    def test_workflow_waits_for_successful_main_ci_and_uses_n100_runner(self):
+        self.assertIn("workflow_run:", WORKFLOW)
+        self.assertIn("workflows: [CI]", WORKFLOW)
+        self.assertIn("types: [completed]", WORKFLOW)
+        self.assertIn("github.event.workflow_run.conclusion == 'success'", WORKFLOW)
+        self.assertIn("github.event.workflow_run.head_branch == 'main'", WORKFLOW)
         self.assertIn("runs-on: [self-hosted, Windows, X64]", WORKFLOW)
         self.assertIn("C:\\personal-server", WORKFLOW)
         self.assertIn("wsl.exe -d Ubuntu-24.04 -- bash -lc", WORKFLOW)
@@ -23,6 +26,26 @@ class DeployN100Tests(unittest.TestCase):
         self.assertNotIn("shell: pwsh", WORKFLOW)
         self.assertIn("bash ./scripts/deploy-n100.sh", WORKFLOW)
         self.assertNotIn("N100_SSH_KEY", WORKFLOW)
+
+    def test_ci_covers_homeops_news_routes_and_deploy_script(self):
+        self.assertIn("tests.test_homeops tests.test_homeops_notifier", CI_WORKFLOW)
+        self.assertIn("tests.homeops_executor.test_docker_ops", CI_WORKFLOW)
+        self.assertIn("tests.crawler_worker.test_news_routes", CI_WORKFLOW)
+        self.assertIn("tests.test_deploy_n100", CI_WORKFLOW)
+
+    def test_deploy_workflow_checks_services_after_deployment(self):
+        self.assertIn("Verify deployed service health", WORKFLOW)
+        self.assertIn("docker compose -f docker-compose.yml -f docker-compose.n100.yml ps", WORKFLOW)
+        self.assertIn("http://127.0.0.1:8000/health", WORKFLOW)
+        self.assertIn("http://127.0.0.1:18010/health", WORKFLOW)
+        self.assertIn("http://127.0.0.1:8001/health", WORKFLOW)
+        self.assertIn("http://127.0.0.1:8002/health", WORKFLOW)
+        self.assertIn("http://127.0.0.1:8003/health", WORKFLOW)
+        self.assertIn("homeops-executor", WORKFLOW)
+        self.assertIn("grep -Fx $service", WORKFLOW)
+        self.assertIn("curl --fail --silent --show-error --retry 6 --retry-delay 5 $url", WORKFLOW)
+        self.assertNotIn('\\"$service\\"', WORKFLOW)
+        self.assertNotIn('\\"$url\\"', WORKFLOW)
 
     def test_workflows_limit_token_permissions_and_serialize_deployments(self):
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
@@ -68,7 +91,11 @@ class DeployN100Tests(unittest.TestCase):
             "docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo caddy",
             GUIDE,
         )
-        self.assertIn("push", HANDOFF)
+        self.assertIn("CI가 성공", HANDOFF)
+        self.assertIn("CI가 성공", GUIDE)
+        self.assertIn("main", GUIDE)
+        self.assertIn("health", GUIDE)
+        self.assertNotIn("main push에만 반응", GUIDE)
 
 
 if __name__ == "__main__":

@@ -140,9 +140,9 @@ OpenAI Codex를 개발 파트너로 사용함. 여기서 하네스 엔지니어�
 
 ## CI/CD와 검증
 
-GitHub Actions CI는 pull request와 `main` push에서 포털, 시스템 상태, 크롤러, YouTube·책 메모, 운영 설정의 서비스별 단위 테스트를 실행함. 변경 범위가 넓은 경우에는 병합 전에 추가 회귀 테스트와 `git diff --check`를 로컬에서 실행함.
+GitHub Actions CI는 pull request와 `main` push에서 포털·HomeOps, 시스템 상태, 크롤러·뉴스 화면, HomeOps 실행기, YouTube·책 메모, 운영·배포 설정의 서비스별 단위 테스트를 실행함. 변경 범위가 넓은 경우에는 병합 전에 추가 회귀 테스트와 `git diff --check`를 로컬에서 실행함.
 
-`main` 브랜치에 push하면 별도의 `Deploy N100` workflow가 N100의 Windows self-hosted runner에서 실행됨. runner는 WSL의 배포 스크립트를 통해 원격 `main`을 갱신하고 Docker Compose 서비스를 재빌드·재기동함. 운영 비밀값과 데이터는 N100에만 보관하며 배포 과정에서 덮어쓰지 않음.
+`main` 브랜치에서 CI가 성공한 경우에만 별도의 `Deploy N100` workflow가 N100의 Windows self-hosted runner에서 실행됨. runner는 WSL의 배포 스크립트를 통해 원격 `main`을 갱신하고 Docker Compose 서비스를 재빌드·재기동한 뒤 서비스 health 상태를 확인함. 운영 비밀값과 데이터는 N100에만 보관하며 배포 과정에서 덮어쓰지 않음.
 
 ## 기술 스택
 

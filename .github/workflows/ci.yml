@@ -21,7 +21,7 @@ jobs:
           - name: portal
             requirements: portal-web/requirements.txt
             pythonpath: portal-web
-            test_command: python3 -m unittest tests.test_file_access tests.test_portal_dashboard tests.test_portal_security
+            test_command: python3 -m unittest tests.test_file_access tests.test_portal_dashboard tests.test_portal_security tests.test_homeops tests.test_homeops_notifier
           - name: system-agent
             requirements: system-agent/requirements.txt
             pythonpath: system-agent
@@ -29,7 +29,11 @@ jobs:
           - name: crawler-worker
             requirements: crawler-worker/requirements.txt
             pythonpath: crawler-worker
-            test_command: python3 -m unittest tests.crawler_worker.test_datetime_format tests.crawler_worker.test_investing_news_rss tests.crawler_worker.test_news_service tests.crawler_worker.test_rss_news
+            test_command: python3 -m unittest tests.crawler_worker.test_datetime_format tests.crawler_worker.test_investing_news_rss tests.crawler_worker.test_news_service tests.crawler_worker.test_news_routes tests.crawler_worker.test_rss_news
+          - name: homeops-executor
+            requirements: homeops-executor/requirements.txt
+            pythonpath: homeops-executor
+            test_command: python3 -m unittest tests.homeops_executor.test_docker_ops
           - name: youtube-memo
             requirements: youtube-memo/requirements.txt
             pythonpath: youtube-memo
@@ -41,7 +45,7 @@ jobs:
           - name: maintenance
             requirements: ""
             pythonpath: .
-            test_command: python3 -m unittest tests.test_compose_config tests.test_maintenance tests.test_windows_bootstrap
+            test_command: python3 -m unittest tests.test_compose_config tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100
 
     steps:
       - name: Check out repository
