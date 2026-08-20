@@ -51,6 +51,8 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("http://127.0.0.1:8002/health", WORKFLOW)
         self.assertIn("http://127.0.0.1:8003/health", WORKFLOW)
         self.assertIn("homeops-executor", WORKFLOW)
+        self.assertIn("--retry-all", health_check)
+        self.assertIn("--retry-connrefused", health_check)
         self.assertNotIn("$service", health_check)
         self.assertNotIn("$url", health_check)
         self.assertIn("for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18", health_check)
