@@ -53,6 +53,7 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("homeops-executor", WORKFLOW)
         self.assertNotIn("$service", health_check)
         self.assertNotIn("$url", health_check)
+        self.assertIn("for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18", health_check)
         self.assertIn("sleep 5", health_check)
         for service in (
             "portal-web",
