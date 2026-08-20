@@ -9,7 +9,7 @@
 | 문서 | 용도 | 비고 |
 |---|---|---|
 | [프로젝트 README](../README.md) | 채용·이력서용 프로젝트 요약 | 구현 범위, 의사결정, 검증 근거 중심 |
-| [공개 포트폴리오 Markdown 초안](portfolio-content.md) | `portfolio.len.pe.kr`에 게시할 원문 | 관리자 편집 화면에 복사해 사용 가능 |
+| [공개 포트폴리오 Markdown 초안](portfolio-content.md) | 공개 포트폴리오에 게시할 원문 | 관리자 편집 화면에 복사해 사용 가능 |
 
 ## 현재 운영 문서
 
