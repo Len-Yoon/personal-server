@@ -42,6 +42,7 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("httpx==0.28.1", CRAWLER_REQUIREMENTS)
 
     def test_deploy_workflow_checks_services_after_deployment(self):
+        health_check = WORKFLOW.split("- name: Verify deployed service health", maxsplit=1)[1]
         self.assertIn("Verify deployed service health", WORKFLOW)
         self.assertIn("docker compose -f docker-compose.yml -f docker-compose.n100.yml ps", WORKFLOW)
         self.assertIn("http://127.0.0.1:8000/health", WORKFLOW)
@@ -50,10 +51,19 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("http://127.0.0.1:8002/health", WORKFLOW)
         self.assertIn("http://127.0.0.1:8003/health", WORKFLOW)
         self.assertIn("homeops-executor", WORKFLOW)
-        self.assertIn("grep -Fx $service", WORKFLOW)
-        self.assertIn("curl --fail --silent --show-error --retry 6 --retry-delay 5 $url", WORKFLOW)
-        self.assertNotIn('\\"$service\\"', WORKFLOW)
-        self.assertNotIn('\\"$url\\"', WORKFLOW)
+        self.assertNotIn("$service", health_check)
+        self.assertNotIn("$url", health_check)
+        self.assertIn("sleep 5", health_check)
+        for service in (
+            "portal-web",
+            "system-agent",
+            "crawler-worker",
+            "youtube-memo",
+            "book-memo",
+            "caddy",
+            "homeops-executor",
+        ):
+            self.assertIn(f"grep -Fx -- {service}", health_check)
 
     def test_workflows_limit_token_permissions_and_serialize_deployments(self):
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
