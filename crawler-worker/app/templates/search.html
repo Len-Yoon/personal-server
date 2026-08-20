@@ -46,6 +46,33 @@
         {% endfor %}
     </div>
 
+    {% if result.category == "KR_WORLD" and result.relevance_summary %}
+        <section class="relevance-summary" data-relevance-summary="true" aria-label="나스닥 알림 분류 집계">
+            <article class="relevance-summary-card">
+                <span>수집 기사</span>
+                <strong data-relevance-summary-total>{{ result.relevance_summary.total }}</strong>
+                <small>현재 화면에 표시된 기사</small>
+            </article>
+            <article class="relevance-summary-card relevance-summary-alert">
+                <span>텔레그램 알림</span>
+                <strong data-relevance-summary-alert>{{ result.relevance_summary.alert }}</strong>
+                <small>알림 기준을 통과한 기사</small>
+            </article>
+            <article class="relevance-summary-card relevance-summary-archive">
+                <span>보관 전용</span>
+                <strong data-relevance-summary-archive>{{ result.relevance_summary.archive }}</strong>
+                <small>수집됐지만 알림은 보내지 않음</small>
+            </article>
+        </section>
+        <p class="relevance-summary-note" data-relevance-summary-note>
+            {% if result.relevance_summary.unclassified %}
+                분류 대기 {{ result.relevance_summary.unclassified }}건이 있습니다. 알림은 ‘텔레그램 알림’으로 분류된 기사만 전송됩니다.
+            {% else %}
+                알림은 ‘텔레그램 알림’으로 분류된 기사만 전송됩니다.
+            {% endif %}
+        </p>
+    {% endif %}
+
     <section class="news-list" data-news-list>
         {% for article in result.articles %}
             {% set stored_relevance = article.nasdaq_relevance if result.category == "KR_WORLD" else none %}
@@ -119,6 +146,8 @@
     const container = document.querySelector("[data-auto-refresh-seconds]");
     const newsList = document.querySelector("[data-news-list]");
     const status = document.querySelector("[data-refresh-status]");
+    const relevanceSummary = document.querySelector("[data-relevance-summary]");
+    const relevanceSummaryNote = document.querySelector("[data-relevance-summary-note]");
 
     if (!container || !newsList || !status) {
         return;
@@ -256,6 +285,32 @@
         status.textContent = `${result.count || 0}개의 뉴스를 가져왔습니다. · ${freshness}`;
     }
 
+    function updateRelevanceSummary(result) {
+        if (!relevanceSummary || category !== "KR_WORLD") {
+            return;
+        }
+
+        const summary = result.relevance_summary || {};
+        const values = {
+            "[data-relevance-summary-total]": summary.total,
+            "[data-relevance-summary-alert]": summary.alert,
+            "[data-relevance-summary-archive]": summary.archive,
+        };
+        Object.entries(values).forEach(([selector, value]) => {
+            const element = relevanceSummary.querySelector(selector);
+            if (element) {
+                element.textContent = String(value || 0);
+            }
+        });
+
+        if (relevanceSummaryNote) {
+            const unclassified = Number(summary.unclassified) || 0;
+            relevanceSummaryNote.textContent = unclassified
+                ? `분류 대기 ${unclassified}건이 있습니다. 알림은 ‘텔레그램 알림’으로 분류된 기사만 전송됩니다.`
+                : "알림은 ‘텔레그램 알림’으로 분류된 기사만 전송됩니다.";
+        }
+    }
+
     async function refreshNews() {
         if (document.hidden || requestInFlight) {
             return;
@@ -271,6 +326,7 @@
             }
             const result = await response.json();
             updateStatus(result);
+            updateRelevanceSummary(result);
             renderArticles(result.articles || []);
         } catch {
             // Keep the current article list when a background request fails.

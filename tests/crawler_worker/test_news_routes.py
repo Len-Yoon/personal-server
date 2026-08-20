@@ -273,6 +273,34 @@ class CrawlerWorkerNewsRouteTests(unittest.TestCase):
         rendered_markup = response.text.split('<script id="news-auto-refresh">', 1)[0]
         self.assertEqual(rendered_markup.count("분류 사유:"), 1)
 
+    def test_investing_page_shows_collection_and_alert_summary(self):
+        app = self.load_app()
+
+        with patch("app.routers.news.collect_korean_news") as mocked_collect:
+            mocked_collect.return_value = {
+                "category": "KR_WORLD",
+                "label": "Investing.com 뉴스",
+                "description": "설명",
+                "count": 24,
+                "articles": [],
+                "relevance_summary": {"total": 24, "alert": 2, "archive": 21, "unclassified": 1},
+                "cache": {"hit": True, "age_seconds": 12, "ttl_seconds": 300},
+            }
+
+            from fastapi.testclient import TestClient
+
+            with TestClient(app) as client:
+                response = client.get("/category?category=KR_WORLD")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('data-relevance-summary="true"', response.text)
+        self.assertIn("수집 기사", response.text)
+        self.assertIn("텔레그램 알림", response.text)
+        self.assertIn("보관 전용", response.text)
+        self.assertIn(">24<", response.text)
+        self.assertIn(">2<", response.text)
+        self.assertIn(">21<", response.text)
+
     def test_saved_page_keeps_original_layout_search_form_and_article_link(self):
         """Fails if the original archive layout, search action, or article URL is lost."""
         app = self.load_app()

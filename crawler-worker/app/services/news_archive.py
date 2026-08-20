@@ -168,18 +168,35 @@ def _build_result(
         key=_sort_key,
         reverse=True,
     )
+    displayed_articles = sorted_articles[:limit]
+    relevance_summary = _relevance_summary(displayed_articles) if category == "KR_WORLD" else None
     return {
         "category": category,
         "label": label_resolver(category),
         "description": description_resolver(category),
-        "count": len(sorted_articles[:limit]),
-        "articles": sorted_articles[:limit],
+        "count": len(displayed_articles),
+        "articles": displayed_articles,
+        "relevance_summary": relevance_summary,
         "cache": {
             "hit": cached,
             "age_seconds": age_seconds,
             "ttl_seconds": CACHE_TTL_SECONDS,
         },
     }
+
+
+def _relevance_summary(articles: list[dict[str, Any]]) -> dict[str, int]:
+    summary = {"total": len(articles), "alert": 0, "archive": 0, "unclassified": 0}
+    for article in articles:
+        relevance = article.get("nasdaq_relevance")
+        level = relevance.get("level") if isinstance(relevance, dict) else None
+        if level == "alert":
+            summary["alert"] += 1
+        elif level == "archive":
+            summary["archive"] += 1
+        else:
+            summary["unclassified"] += 1
+    return summary
 
 
 def _load_archive() -> dict[str, Any]:

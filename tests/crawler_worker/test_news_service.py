@@ -91,6 +91,34 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         self.assertEqual(result["articles"][0]["nasdaq_relevance"]["level"], "alert")
         mocked_investing.assert_called_once_with(limit=8)
 
+    def test_world_news_result_exposes_alert_and_archive_counts(self):
+        news_archive = self.reload_news_archive()
+
+        result = news_archive._build_result(
+            "KR_WORLD",
+            [
+                {
+                    "title": "연준 금리 결정",
+                    "nasdaq_relevance": {"level": "alert", "reasons": ["연준·금리"]},
+                },
+                {
+                    "title": "일반 시장 기사",
+                    "nasdaq_relevance": {"level": "archive", "reasons": []},
+                },
+                {"title": "분류 정보 없는 기사"},
+            ],
+            limit=24,
+            cached=True,
+            age_seconds=12,
+            label_resolver=lambda category: category,
+            description_resolver=lambda category: category,
+        )
+
+        self.assertEqual(
+            result["relevance_summary"],
+            {"total": 3, "alert": 1, "archive": 1, "unclassified": 1},
+        )
+
     def test_background_korean_world_refresh_notifies_only_alert_articles(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch.dict(
