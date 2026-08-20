@@ -75,10 +75,41 @@ class InvestingNewsRssTests(unittest.TestCase):
         self.assertEqual(
             direct_call["feed_urls"],
             [
-                "https://kr.investing.com/rss/news.rss",
+                "https://kr.investing.com/rss/news_14.rss",
+                "https://kr.investing.com/rss/news_95.rss",
                 "https://kr.investing.com/rss/news_11.rss",
-                "https://kr.investing.com/rss/news_25.rss",
             ],
+        )
+
+    def test_search_investing_news_rss_keeps_only_requested_market_topics(self):
+        """Fails if unrelated articles return to the personal news page."""
+        module = self.reload_module()
+        today_kst = datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
+        direct_articles = [
+            {
+                "title": title,
+                "summary": "시장 요약",
+                "url": f"https://kr.investing.com/news/articles/{index}",
+                "source": "Investing.com 한국어",
+                "published_at": f"{today_kst} 12:00:00",
+            }
+            for index, title in enumerate(
+                (
+                    "미국 CPI 발표 결과",
+                    "국제유가 WTI 상승",
+                    "나스닥 마감 동향",
+                    "금 가격 상승",
+                    "국내 부동산 청약 일정",
+                ),
+                start=1,
+            )
+        ]
+        with patch.object(module, "search_rss_news", return_value=direct_articles):
+            articles = module.search_investing_news_rss(limit=10)
+
+        self.assertEqual(
+            [article["title"] for article in articles],
+            ["미국 CPI 발표 결과", "국제유가 WTI 상승", "나스닥 마감 동향", "금 가격 상승"],
         )
 
 

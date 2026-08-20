@@ -10,9 +10,9 @@ from app.crawlers.rss_news import search_rss_news
 
 INVESTING_SOURCE = "Investing.com 한국어"
 INVESTING_FEED_URLS = [
-    "https://kr.investing.com/rss/news.rss",
+    "https://kr.investing.com/rss/news_14.rss",
+    "https://kr.investing.com/rss/news_95.rss",
     "https://kr.investing.com/rss/news_11.rss",
-    "https://kr.investing.com/rss/news_25.rss",
 ]
 TOPIC_PATTERNS = {
     "금": re.compile(r"금\s*(?:값|가격|선물|시세|시장)|골드|gold|xau", re.IGNORECASE),
@@ -22,6 +22,12 @@ TOPIC_PATTERNS = {
     ),
     "일본": re.compile(r"일본|닛케이|도쿄|엔화|boj|topix", re.IGNORECASE),
 }
+MARKET_FOCUS_PATTERNS = (
+    re.compile(r"미국|뉴욕|연준|\bfed\b|\bfomc\b", re.IGNORECASE),
+    re.compile(r"나스닥|nasdaq", re.IGNORECASE),
+    TOPIC_PATTERNS["원유"],
+    TOPIC_PATTERNS["금"],
+)
 
 
 def search_investing_news_rss(limit: int = 50) -> list[dict]:
@@ -45,6 +51,9 @@ def _clean_articles(articles: list[dict]) -> list[dict]:
         title = _clean_title(article.get("title", ""))
         if not title or _is_malformed_title(title) or not _is_today(article.get("published_at", "")):
             continue
+        summary = str(article.get("summary", ""))
+        if not _is_market_focus_article(title, summary):
+            continue
         cleaned = dict(article)
         cleaned["title"] = title
         cleaned["title_ko"] = title
@@ -65,6 +74,11 @@ def _classify_topics(title: str, summary: str) -> list[str]:
         if pattern.search(searchable_text)
     ]
     return topics or ["세계동향"]
+
+
+def _is_market_focus_article(title: str, summary: str) -> bool:
+    searchable_text = f"{title} {summary}".strip()
+    return any(pattern.search(searchable_text) for pattern in MARKET_FOCUS_PATTERNS)
 
 
 def _dedupe_articles(articles: list[dict]) -> list[dict]:

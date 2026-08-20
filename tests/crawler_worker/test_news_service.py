@@ -213,6 +213,30 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         self.assertEqual(recent[0]["summary"], "내용")
         self.assertEqual(recent[0]["title_ko"], "시장 뉴스")
 
+    def test_load_archive_invalidates_previous_broad_investing_cache(self):
+        """Fails if articles collected under the broad RSS policy remain visible."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "news_archive.json"
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(archive_path)}, clear=False):
+                news_archive = self.reload_news_archive()
+                archive_path.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": "2026-07-15-korean-news-v2",
+                            "updated_at": "",
+                            "articles": [{"url": "https://example.com/unrelated"}],
+                            "telegram_notifications_initialized": True,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                archive = news_archive._load_archive()
+
+        self.assertEqual(archive["schema_version"], news_archive.ARCHIVE_SCHEMA_VERSION)
+        self.assertEqual(archive["articles"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
