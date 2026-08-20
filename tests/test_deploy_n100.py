@@ -9,6 +9,7 @@ SCRIPT = (ROOT / "scripts" / "deploy-n100.sh").read_text(encoding="utf-8")
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 HANDOFF = (ROOT / "docs" / "agent-handoff.md").read_text(encoding="utf-8")
 GUIDE = (ROOT / "docs" / "n100-github-auto-deploy.md").read_text(encoding="utf-8") if (ROOT / "docs" / "n100-github-auto-deploy.md").exists() else ""
+HOMEOPS_REQUIREMENTS = (ROOT / "homeops-executor" / "requirements.txt").read_text(encoding="utf-8")
 
 
 class DeployN100Tests(unittest.TestCase):
@@ -32,6 +33,9 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("tests.homeops_executor.test_docker_ops", CI_WORKFLOW)
         self.assertIn("tests.crawler_worker.test_news_routes", CI_WORKFLOW)
         self.assertIn("tests.test_deploy_n100", CI_WORKFLOW)
+
+    def test_homeops_executor_test_client_dependency_is_pinned(self):
+        self.assertIn("httpx==0.28.1", HOMEOPS_REQUIREMENTS)
 
     def test_deploy_workflow_checks_services_after_deployment(self):
         self.assertIn("Verify deployed service health", WORKFLOW)
