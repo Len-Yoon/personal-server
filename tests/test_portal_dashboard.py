@@ -11,6 +11,24 @@ from tests._test_support import prepare_service_import
 
 
 class PortalDashboardTests(unittest.TestCase):
+    def test_admin_router_owns_administrator_and_homeops_paths(self):
+        prepare_service_import("portal-web")
+        from app.routers import admin
+
+        paths = {route.path for route in admin.router.routes}
+
+        self.assertTrue(
+            {
+                "/admin/security",
+                "/admin/status",
+                "/admin/homeops/diagnose",
+                "/admin/homeops/{incident_id}/approve",
+                "/admin/homeops/{incident_id}/execute",
+                "/internal/homeops/scan",
+                "/admin/events",
+            }.issubset(paths)
+        )
+
     def reload_system_status(self, demo_mode: str = ""):
         prepare_service_import("portal-web")
         os.environ["DEMO_MODE"] = demo_mode
@@ -320,10 +338,10 @@ class PortalDashboardTests(unittest.TestCase):
             }
 
             with patch(
-                "app.routers.dashboard.get_dashboard_status",
+                "app.routers.admin.get_dashboard_status",
                 return_value=system_status,
-            ), patch("app.routers.dashboard.get_service_health", return_value=[]), patch(
-                "app.routers.dashboard.security_status",
+            ), patch("app.routers.admin.get_service_health", return_value=[]), patch(
+                "app.routers.admin.security_status",
                 return_value=security,
             ):
                 with TestClient(app) as client:
@@ -378,10 +396,10 @@ class PortalDashboardTests(unittest.TestCase):
             }
 
             with patch(
-                "app.routers.dashboard.get_dashboard_status",
+                "app.routers.admin.get_dashboard_status",
                 return_value=system_status,
-            ), patch("app.routers.dashboard.get_service_health", return_value=[]), patch(
-                "app.routers.dashboard.security_status",
+            ), patch("app.routers.admin.get_service_health", return_value=[]), patch(
+                "app.routers.admin.security_status",
                 return_value=security,
             ):
                 with TestClient(app) as client:

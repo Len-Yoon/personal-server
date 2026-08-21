@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import json
 import os
 import re
-import tempfile
 from threading import Lock, Thread
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +10,23 @@ from zoneinfo import ZoneInfo
 
 from app.crawlers.rss_news import _html_to_text
 from app.services.nasdaq_relevance import classify_nasdaq_relevance
+from app.services.news_archive_notifications import (
+    notification_articles as _notification_articles,
+    notification_times as _notification_times,
+)
+from app.services.news_archive_processing import (
+    EVENT_MARKER_PATTERN,
+    headline_bigram_similarity as _headline_bigram_similarity,
+    headline_key as _headline_key,
+    has_new_market_detail as _has_new_market_detail,
+    market_topic as _market_topic,
+    same_market_event as _same_market_event,
+)
+from app.services.news_archive_storage import (
+    archive_path as _archive_path,
+    load_archive as _load_archive_from_storage,
+    save_archive as _save_archive_to_storage,
+)
 from app.services.news_sources import collect_korean_news_from_sources
 from app.services.telegram_notifier import (
     notify_market_news_digest,
@@ -19,17 +34,12 @@ from app.services.telegram_notifier import (
 )
 
 
-PROJECT_DATA_ROOT = Path(__file__).resolve().parents[3] / "data"
 CACHE_TTL_SECONDS = int(os.getenv("NEWS_REFRESH_INTERVAL_SECONDS", "300"))
 RETENTION_DAYS = int(os.getenv("NEWS_RETENTION_DAYS", "7"))
 ARCHIVE_SCHEMA_VERSION = "2026-08-20-market-focus-v3"
 DIGEST_INTERVAL = timedelta(minutes=15)
 TOPIC_COOLDOWN = timedelta(minutes=30)
 DEDUPLICATION_WINDOW = timedelta(hours=2)
-EVENT_MARKER_PATTERN = re.compile(
-    r"cpi|pce|fomc|fed|연준|고용|실업률|gdp|wti|브렌트|opec|나스닥|nasdaq",
-    re.IGNORECASE,
-)
 
 _ARCHIVE_WRITE_LOCK = Lock()
 _REFRESH_LOCK = Lock()
@@ -215,95 +225,22 @@ def _relevance_summary(articles: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def _load_archive() -> dict[str, Any]:
-    archive_path = _archive_path()
-    if not archive_path.exists():
-        return {"updated_at": "", "articles": [], "telegram_notifications_initialized": False}
-
-    try:
-        with archive_path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        return {"updated_at": "", "articles": [], "telegram_notifications_initialized": False}
-
-    # Source changes must invalidate both the production and local archives.
-    if data.get("schema_version") and data.get("schema_version") != ARCHIVE_SCHEMA_VERSION:
-        return {
-            "schema_version": ARCHIVE_SCHEMA_VERSION,
-            "updated_at": "",
-            "articles": [],
-            "telegram_notifications_initialized": False,
-        }
-
-    articles = data.get("articles", [])
-    if not isinstance(articles, list):
-        articles = []
-
-    normalized_articles = []
-    changed = False
-
-    for article in articles:
-        if not isinstance(article, dict):
-            continue
-
-        normalized = _sanitize_article(article)
-        if normalized != article:
-            changed = True
-        normalized_articles.append(normalized)
-
-    archive = {
-        "schema_version": str(data.get("schema_version", ARCHIVE_SCHEMA_VERSION)),
-        "updated_at": str(data.get("updated_at", "")),
-        "articles": normalized_articles,
-        "telegram_notifications_initialized": bool(
-            data.get("telegram_notifications_initialized", False)
-        ),
-        "telegram_last_digest_at": str(data.get("telegram_last_digest_at", "")),
-        "telegram_pending_articles": _notification_articles(
-            data.get("telegram_pending_articles", [])
-        ),
-        "telegram_recent_articles": _notification_articles(
-            data.get("telegram_recent_articles", [])
-        ),
-        "telegram_topic_last_sent_at": _notification_times(
-            data.get("telegram_topic_last_sent_at", {})
-        ),
-    }
-
-    if changed:
-        try:
-            _save_archive(archive)
-        except OSError:
-            pass
-
-    return archive
+    return _load_archive_from_storage(
+        _archive_path(),
+        ARCHIVE_SCHEMA_VERSION,
+        _sanitize_article,
+        _notification_articles,
+        _notification_times,
+        _save_archive,
+    )
 
 
 def _save_archive(archive: dict[str, Any]) -> None:
-    archive["schema_version"] = ARCHIVE_SCHEMA_VERSION
-    archive_path = _archive_path()
-    with _ARCHIVE_WRITE_LOCK:
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            delete=False,
-            dir=str(archive_path.parent),
-            prefix=f".{archive_path.name}.",
-            suffix=".tmp",
-        ) as handle:
-            json.dump(archive, handle, ensure_ascii=False, indent=2)
-            temp_path = Path(handle.name)
-
-        temp_path.replace(archive_path)
-
-
-def _archive_path() -> Path:
-    return Path(
-        os.getenv(
-            "NEWS_ARCHIVE_PATH",
-            PROJECT_DATA_ROOT / "crawler-worker" / "news_archive.json",
-        )
+    _save_archive_to_storage(
+        archive,
+        _archive_path(),
+        ARCHIVE_SCHEMA_VERSION,
+        _ARCHIVE_WRITE_LOCK,
     )
 
 
@@ -433,16 +370,6 @@ def _should_notify_new_investing_articles(
     return True
 
 
-def _notification_articles(value: Any) -> list[dict[str, Any]]:
-    return [dict(article) for article in value if isinstance(article, dict)] if isinstance(value, list) else []
-
-
-def _notification_times(value: Any) -> dict[str, str]:
-    if not isinstance(value, dict):
-        return {}
-    return {str(key): str(timestamp) for key, timestamp in value.items()}
-
-
 def _queue_and_send_general_digest(
     archive: dict[str, Any], new_articles: list[dict[str, Any]], now: datetime
 ) -> None:
@@ -507,61 +434,6 @@ def _select_general_digest_articles(
         selected_topics.add(topic)
         seen.append(candidate)
     return selected, remaining
-
-
-def _market_topic(article: dict[str, Any]) -> str:
-    text = f"{article.get('title_ko') or article.get('title') or ''} {article.get('summary') or ''}".casefold()
-    if re.search(r"나스닥|nasdaq", text):
-        return "나스닥"
-    if re.search(r"원유|유가|국제유가|wti|브렌트|brent|opec", text):
-        return "원유"
-    if re.search(r"금\s*(?:값|가격|선물|시세|시장)|골드|gold|xau", text):
-        return "금"
-    return "미국"
-
-
-def _same_market_event(current: dict[str, Any], previous: dict[str, Any]) -> bool:
-    if _market_topic(current) != _market_topic(previous):
-        return False
-    if _has_new_market_detail(current, previous):
-        return False
-    current_key = _headline_key(current)
-    previous_key = _headline_key(previous)
-    if not current_key or not previous_key:
-        return False
-    if current_key == previous_key or current_key in previous_key or previous_key in current_key:
-        return True
-
-    similarity = _headline_bigram_similarity(current_key, previous_key)
-    shared_markers = set(EVENT_MARKER_PATTERN.findall(current_key)) & set(
-        EVENT_MARKER_PATTERN.findall(previous_key)
-    )
-    return similarity >= 0.6 or (bool(shared_markers) and similarity >= 0.25)
-
-
-def _has_new_market_detail(current: dict[str, Any], previous: dict[str, Any]) -> bool:
-    current_title = str(current.get("title_ko") or current.get("title") or "").casefold()
-    previous_title = str(previous.get("title_ko") or previous.get("title") or "").casefold()
-    current_numbers = set(re.findall(r"\d+(?:[.,]\d+)?%?", current_title))
-    previous_numbers = set(re.findall(r"\d+(?:[.,]\d+)?%?", previous_title))
-    if current_numbers - previous_numbers:
-        return True
-
-    decision_terms = {"결정", "동결", "인상", "인하", "확정", "실제"}
-    return any(term in current_title and term not in previous_title for term in decision_terms)
-
-
-def _headline_key(article: dict[str, Any]) -> str:
-    title = str(article.get("title_ko") or article.get("title") or "").casefold()
-    return re.sub(r"(?:발표|결과|시장|뉴스|속보|동향|마감)|[^0-9a-z가-힣]", "", title)
-
-
-def _headline_bigram_similarity(left: str, right: str) -> float:
-    left_bigrams = {left[index : index + 2] for index in range(len(left) - 1)}
-    right_bigrams = {right[index : index + 2] for index in range(len(right) - 1)}
-    if not left_bigrams or not right_bigrams:
-        return 0.0
-    return len(left_bigrams & right_bigrams) / len(left_bigrams | right_bigrams)
 
 
 def _dedupe_by_url(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
