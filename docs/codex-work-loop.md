@@ -1,5 +1,7 @@
 # Codex 작업 완료 루프
 
+CI artifact 확인·보존·결과 분류는 [작업 루프 증거 운영](agent-loop-evidence.md)을 따름.
+
 ## 1. 적용 범위
 
 | 구분 | 내용 | 비고 |
