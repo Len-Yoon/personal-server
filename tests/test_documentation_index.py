@@ -3,6 +3,13 @@ import unittest
 
 
 class DocumentationIndexTests(unittest.TestCase):
+    def test_project_readme_exposes_quick_start_verification_and_next_steps(self):
+        content = Path("README.md").read_text(encoding="utf-8")
+
+        self.assertIn("## 🚀 빠른 시작", content)
+        self.assertIn("## ✅ 검증", content)
+        self.assertIn("## 🔎 더 알아보기", content)
+
     def test_document_index_separates_current_operations_and_history(self):
         content = Path("docs/README.md").read_text(encoding="utf-8")
 
