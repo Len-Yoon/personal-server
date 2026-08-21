@@ -4,7 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.routers import dashboard, files, portfolio
+from app.routers import admin, dashboard, files, portfolio
 from app.services.security import SECURITY_HEADERS
 
 app = FastAPI(title="Personal Server Portal")
@@ -58,6 +58,7 @@ async def reject_cross_origin_unsafe_requests(request: Request, call_next):
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 app.include_router(dashboard.router)
+app.include_router(admin.router)
 app.include_router(files.router)
 app.include_router(portfolio.router)
 

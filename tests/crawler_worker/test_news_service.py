@@ -30,6 +30,29 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         self.assertFalse(hasattr(news_archive, "collect_market_news"))
         self.assertFalse(hasattr(news_archive, "get_categories"))
 
+    def test_archive_internal_modules_keep_storage_processing_and_notification_helpers(self):
+        prepare_service_import("crawler-worker")
+        from app.services import (
+            news_archive_notifications,
+            news_archive_processing,
+            news_archive_storage,
+        )
+
+        self.assertEqual(
+            news_archive_storage.empty_archive()["articles"],
+            [],
+        )
+        self.assertEqual(
+            news_archive_notifications.notification_articles([{"title": "기사"}, "invalid"]),
+            [{"title": "기사"}],
+        )
+        self.assertTrue(
+            news_archive_processing.same_market_event(
+                {"title": "미국 CPI 발표 결과"},
+                {"title": "미 CPI 결과 공개"},
+            )
+        )
+
     def test_korean_news_hub_exposes_current_categories(self):
         news_archive = self.reload_news_archive()
 

@@ -187,7 +187,7 @@ class HomeOpsTests(unittest.TestCase):
         os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
         try:
             app = self._portal_app()
-            with patch("app.routers.dashboard.get_homeops_service", return_value=self.service):
+            with patch("app.routers.admin.get_homeops_service", return_value=self.service):
                 with TestClient(app) as client:
                     page = client.post("/admin/status", data={"password": "secret"}, headers={"Origin": "http://testserver"})
                     blocked = client.post("/admin/homeops/one/execute", headers={"Origin": "https://evil.example", "X-HomeOps-Password": "secret"})
@@ -209,7 +209,7 @@ class HomeOpsTests(unittest.TestCase):
         os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
         try:
             app = self._portal_app()
-            with patch("app.routers.dashboard.get_homeops_service", return_value=self.service):
+            with patch("app.routers.admin.get_homeops_service", return_value=self.service):
                 with TestClient(app) as client:
                     client.post("/admin/status", data={"password": "secret"}, headers={"Origin": "http://testserver"})
                     response = client.post(
@@ -234,7 +234,7 @@ class HomeOpsTests(unittest.TestCase):
         os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
         try:
             app = self._portal_app()
-            with patch("app.routers.dashboard.get_homeops_service", return_value=self.service):
+            with patch("app.routers.admin.get_homeops_service", return_value=self.service):
                 with TestClient(app) as client:
                     page = client.post("/admin/status", data={"password": "secret"}, headers={"Origin": "http://testserver"})
         finally:
