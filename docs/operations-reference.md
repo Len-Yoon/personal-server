@@ -1,5 +1,7 @@
 # 운영 참조
 
+이 문서는 공개 도메인·로컬 포트·환경변수·일상 확인 명령의 기준 문서임. 공개 HTTPS의 상세 설정은 [Cloudflare Tunnel](cloudflare-tunnel.md) 또는 [Caddy + Cloudflare](caddy-cloudflare.md) 중 실제로 선택한 방식의 문서를 따름.
+
 ## 1. 공개 경로와 서비스
 
 | 공개 도메인 | Docker 서비스 | N100 로컬 포트 | 비고 |

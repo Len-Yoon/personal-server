@@ -18,7 +18,7 @@
 
 - N100 override는 앱 포트를 `127.0.0.1`에만 바인드함.
 - Windows bootstrap은 host metrics를 기록하고, Docker 스택과 Cloudflare Tunnel 프로세스를 확인한 뒤 5분 주기의 내부 HomeOps 점검을 호출함.
-- 기본 변경 흐름은 `main` 직접 push임. PR은 선택 사항이며 CI가 실패하면 N100 배포는 시작하지 않음.
+- 기본 변경 흐름은 작업 브랜치 → PR → CI·Agent Review → 병합임. 병합 뒤 main CI와 N100 배포가 성공하고 작업공간이 깨끗한 경우에만 브랜치와 분리 작업공간을 정리함. 상세 절차는 [Codex 작업 완료 루프](codex-work-loop.md)를 따름.
 - `main`에서 실행된 CI가 성공하면 GitHub Actions `Deploy N100` workflow가 Windows self-hosted runner에서 배포하고 서비스 health를 확인함.
 - `scripts/deploy-n100.sh`는 원격 `origin/main`으로 코드 추적 파일을 맞추므로 N100 작업 디렉터리에서 추적 파일을 직접 수정하지 않음.
 
@@ -47,6 +47,7 @@
 - 변경 범위가 넓으면 포털·system-agent·crawler-worker·YouTube·책 테스트를 모두 실행하고 `git diff --check`를 확인함.
 - 배포 실패나 N100 상태 확인은 [N100 GitHub 자동배포 안내](n100-github-auto-deploy.md)의 WSL 명령을 사용함.
 - 서버 기동·스케줄러 변경은 운영 영향이 있으므로 HomeOps 정책·N100 문서·자동 테스트를 함께 갱신하고 검토함.
+- CI artifact 확인과 90일 보존 한계는 [작업 루프 증거 운영](agent-loop-evidence.md)을 따름.
 
 ## 6. 관련 문서
 
@@ -55,3 +56,5 @@
 - [Cloudflare Tunnel](cloudflare-tunnel.md)
 - [Caddy + Cloudflare](caddy-cloudflare.md)
 - [자동 배포](n100-github-auto-deploy.md)
+- [Codex 작업 완료 루프](codex-work-loop.md)
+- [작업 루프 증거 운영](agent-loop-evidence.md)

@@ -2,6 +2,8 @@
 
 이 문서는 Cloudflare DNS를 유지하면서 Caddy가 공개 HTTPS와 리버스 프록시를 담당하는 운영 구성을 정리합니다.
 
+> 공개 도메인과 로컬 포트의 기준은 [운영 참조](operations-reference.md)임. 이 문서는 외부 `80`·`443`을 직접 공개하는 Caddy 방식을 선택한 경우에만 사용하며, Tunnel 방식과 동시에 공개 경로로 운영하지 않음.
+
 이 구성은 `len.pe.kr`을 메인 진입점으로 두고, `portal.len.pe.kr`은 호환용 별칭으로 유지하면서 `file.len.pe.kr`, `admin.len.pe.kr`, `portfolio.len.pe.kr`, `news.len.pe.kr`, `memo.len.pe.kr`, `books.len.pe.kr`을 Caddy가 받아 각 서비스로 분기하는 방식입니다.
 
 ## 전제
