@@ -142,6 +142,19 @@ class VerifyChangeScopeTests(unittest.TestCase):
         self.assertEqual(evidence["required_checks"], ["maintenance"])
         self.assertEqual(evidence["unclassified_files"], [])
 
+    def test_agent_loop_policy_files_are_maintainable_with_maintenance_check(self):
+        paths = (
+            "scripts/verify_change_scope.py",
+            "tests/test_verify_change_scope.py",
+        )
+
+        code, evidence = run_scope(*paths, executed_checks=("maintenance",))
+
+        self.assertEqual(code, 0)
+        self.assertEqual(evidence["automation_files"], list(paths))
+        self.assertEqual(evidence["blocked_files"], [])
+        self.assertEqual(evidence["required_checks"], ["maintenance"])
+
     def test_server_startup_paths_are_blocked(self):
         paths = (
             "docker-compose.yml",
@@ -157,6 +170,7 @@ class VerifyChangeScopeTests(unittest.TestCase):
 
     def test_blocked_changes_stop_review(self):
         for path in (
+            "scripts/maintenance.py",
             "scripts/deploy-n100.sh",
             "crawler-worker/app/services/news_scheduler.py",
         ):

@@ -6,6 +6,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ComposeConfigTests(unittest.TestCase):
+    def test_claude_instructions_reference_the_codex_work_loop(self):
+        instructions = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+
+        self.assertIn("## Codex 작업 완료 루프", instructions)
+        self.assertIn("docs/codex-work-loop.md", instructions)
+        self.assertIn("## Skill routing", instructions)
+
     def test_agent_review_workflow_enforces_pull_request_policy(self):
         workflow = (ROOT / ".github" / "workflows" / "agent-review.yml").read_text(encoding="utf-8")
 

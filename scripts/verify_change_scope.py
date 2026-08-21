@@ -25,6 +25,7 @@ BLOCKED_FILES = {
     "scripts/deploy-n100.sh",
     "crawler-worker/app/services/news_scheduler.py",
 }
+POLICY_MAINTENANCE_FILES = {"scripts/verify_change_scope.py"}
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -62,6 +63,11 @@ def classify_paths(paths: list[str]) -> dict[str, object]:
     }
 
     for path in changed_files:
+        if path in POLICY_MAINTENANCE_FILES:
+            evidence["automation_files"].append(path)
+            _append_required_check(evidence, "maintenance")
+            continue
+
         if (
             path in BLOCKED_FILES
             or path in BLOCKED_INFRASTRUCTURE_FILES
