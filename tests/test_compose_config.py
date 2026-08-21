@@ -6,6 +6,51 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ComposeConfigTests(unittest.TestCase):
+    def test_agent_review_workflow_enforces_pull_request_policy(self):
+        workflow = (ROOT / ".github" / "workflows" / "agent-review.yml").read_text(encoding="utf-8")
+
+        self.assertIn("pull_request:", workflow)
+        self.assertIn("fetch-depth: 0", workflow)
+        self.assertIn("git diff --name-status -z --find-renames", workflow)
+        self.assertNotIn("git diff --name-only", workflow)
+        self.assertIn("--input-format git-name-status-z", workflow)
+        self.assertIn("--executed-checks", workflow)
+        self.assertIn("portal system-agent crawler-worker homeops-executor youtube-memo book-memo maintenance", workflow)
+        self.assertIn("agent-review-scope", workflow)
+        self.assertIn("policy_status", workflow)
+
+    def test_ci_collects_and_enforces_agent_loop_evidence(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn("  scope:\n", workflow)
+        self.assertIn("fetch-depth: 0", workflow)
+        self.assertIn("git diff --name-status -z --find-renames", workflow)
+        self.assertIn("git diff-tree --no-commit-id --name-status -z --find-renames", workflow)
+        self.assertNotIn("git diff --name-only", workflow)
+        self.assertIn("--input-format git-name-status-z", workflow)
+        self.assertIn("agent-loop-evidence", workflow)
+        self.assertIn("  summary:\n", workflow)
+        self.assertIn("needs: [scope, test]", workflow)
+        self.assertIn("  test:\n    needs: scope\n    if: always()", workflow)
+        self.assertIn("  summary:\n    needs: [scope, test]\n    if: always()", workflow)
+        self.assertIn("--test-result \"${{ needs.test.result }}\"", workflow)
+        self.assertIn("--executed-checks", workflow)
+        self.assertIn("portal system-agent crawler-worker homeops-executor youtube-memo book-memo maintenance", workflow)
+        self.assertIn("Missing checks", workflow)
+
+        expected_matrix_entries = {
+            "portal": "python3 -m unittest tests.test_file_access tests.test_portal_dashboard tests.test_portal_security tests.test_homeops tests.test_homeops_notifier",
+            "system-agent": "python3 -m unittest tests.system_agent.test_metrics",
+            "crawler-worker": "python3 -m unittest tests.crawler_worker.test_datetime_format tests.crawler_worker.test_investing_news_rss tests.crawler_worker.test_news_service tests.crawler_worker.test_news_routes tests.crawler_worker.test_rss_news",
+            "homeops-executor": "python3 -m unittest tests.homeops_executor.test_docker_ops",
+            "youtube-memo": "python3 -m unittest tests.youtube_memo.test_video_titles",
+            "book-memo": "python3 -m unittest tests.book_memo.test_book_service",
+            "maintenance": "python3 -m unittest tests.test_compose_config tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100",
+        }
+        for service_name, test_command in expected_matrix_entries.items():
+            self.assertIn(f"- name: {service_name}", workflow)
+            self.assertIn(f"test_command: {test_command}", workflow)
+
     def test_runtime_services_define_healthchecks(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         for port in (8000, 8010, 8001, 8002, 8003):
