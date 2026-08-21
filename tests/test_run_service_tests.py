@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNNER = ROOT / "scripts" / "run_service_tests.py"
+RUNNER = ROOT / "tests" / "run_service_tests.py"
 
 
 class ServiceTestRunnerTests(unittest.TestCase):
