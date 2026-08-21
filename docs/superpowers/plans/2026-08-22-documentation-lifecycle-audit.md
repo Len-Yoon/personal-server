@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 현재 운영 문서를 단일 진입점으로 정리하고, 과거 설계·계획 이력은 보존하면서 명백한 중복 본문만 제거함.
+**Goal:** 현재 운영 문서를 단일 진입점으로 정리하고, 과거 설계·계획 이력은 보존하면서 Markdown 예시를 실제 문서와 혼동하지 않도록 검증함.
 
 **Architecture:** `docs/README.md`가 현재 운영 문서, 참고 자료, 과거 이력을 구분하는 색인 역할을 담당함. 운영 문서는 서로 기준 문서를 연결하고, `superpowers`는 완료된 작업의 설계·계획 이력만 보관함. 문서 링크와 plan 최상위 제목 수를 자동 검증함.
 
@@ -82,52 +82,47 @@ Expected: PASS.
 
 Run: `git add tests/test_documentation_index.py docs/README.md docs/agent-handoff.md docs/operations-reference.md docs/cloudflare-tunnel.md docs/caddy-cloudflare.md docs/codex-work-loop.md docs/agent-loop-evidence.md docs/superpowers/README.md && git commit -m "docs: 현재 운영 문서 색인 정리"`
 
-### Task 2: 계획 이력의 중복 본문 제거
+### Task 2: 계획 이력의 Markdown 예시 검증
 
 **Files:**
 - Modify: `tests/test_documentation_index.py`
-- Modify: `docs/superpowers/plans/2026-08-21-agent-loop-ci-gate.md`
-- Modify: `docs/superpowers/plans/2026-08-21-codex-work-completion-loop.md`
 
 **Interfaces:**
-- Consumes: 별도 현재 문서 `docs/agent-loop-evidence.md`, `docs/codex-work-loop.md`.
-- Produces: 각 plan이 하나의 최상위 제목만 가지며, 현재 문서의 사본을 포함하지 않는 이력 파일.
+- Consumes: fenced Markdown 예시를 포함한 두 이력 plan.
+- Produces: fenced block을 제외한 실제 최상위 제목 수를 검증하는 테스트.
 
 - [ ] **Step 1: 중복 본문 방지 테스트를 작성함**
 
 `tests/test_documentation_index.py`에 아래 테스트를 추가함.
 
 ```python
-    def test_history_plans_do_not_embed_current_document_copies(self):
+    def test_history_plans_keep_examples_inside_fenced_blocks(self):
         plan_paths = [
             "docs/superpowers/plans/2026-08-21-agent-loop-ci-gate.md",
             "docs/superpowers/plans/2026-08-21-codex-work-completion-loop.md",
         ]
 
         for path in plan_paths:
-            headings = [
-                line for line in Path(path).read_text(encoding="utf-8").splitlines()
-                if line.startswith("# ")
-            ]
+            in_fence = False
+            headings = []
+            for line in Path(path).read_text(encoding="utf-8").splitlines():
+                if line.startswith("```"):
+                    in_fence = not in_fence
+                    continue
+                if not in_fence and line.startswith("# "):
+                    headings.append(line)
             self.assertEqual(len(headings), 1, path)
 ```
 
-- [ ] **Step 2: 테스트가 두 번째 최상위 제목 때문에 실패하는지 확인함**
+- [ ] **Step 2: 단순 제목 수 검사가 fenced 예시를 오인하는지 확인함**
 
 Run: `python3 -m unittest tests.test_documentation_index.DocumentationIndexTests.test_history_plans_do_not_embed_current_document_copies -v`
 
-Expected: 두 대상 plan의 최상위 제목 수가 2개여서 실패함.
+Expected: fenced code block 내부 제목까지 세어 실패함.
 
-- [ ] **Step 3: 현재 문서 사본만 제거함**
+- [ ] **Step 3: fenced code block을 제외하도록 제목 검사 방식을 수정함**
 
-각 plan에서 아래 최상위 제목부터 파일 끝까지 제거함.
-
-```text
-2026-08-21-agent-loop-ci-gate.md: # 에이전트 작업 루프 검증 증거
-2026-08-21-codex-work-completion-loop.md: # Codex 작업 완료 루프
-```
-
-Task 본문과 구현·검증 이력은 유지하며, 별도 현재 문서는 삭제하지 않음.
+코드 펜스 시작·종료를 추적하고 fence 밖의 `# ` 제목만 세도록 테스트를 수정함. plan 내용과 별도 현재 문서는 변경하지 않음.
 
 - [ ] **Step 4: 이력 파일 계약 테스트를 실행함**
 
@@ -137,7 +132,7 @@ Expected: PASS.
 
 - [ ] **Step 5: 작업 파일을 명시적으로 stage하고 커밋함**
 
-Run: `git add tests/test_documentation_index.py docs/superpowers/plans/2026-08-21-agent-loop-ci-gate.md docs/superpowers/plans/2026-08-21-codex-work-completion-loop.md && git commit -m "docs: 계획 이력 중복 본문 제거"`
+Run: `git add tests/test_documentation_index.py docs/superpowers/specs/2026-08-22-documentation-lifecycle-audit-design.md docs/superpowers/plans/2026-08-22-documentation-lifecycle-audit.md && git commit -m "test: 문서 이력 Markdown 예시 검증"`
 
 ### Task 3: 전체 문서 검증과 완료 보고
 
