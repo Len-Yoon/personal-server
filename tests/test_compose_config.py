@@ -6,6 +6,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ComposeConfigTests(unittest.TestCase):
+    def test_agent_loop_documents_require_branch_cleanup_after_merge(self):
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        work_loop = (ROOT / "docs" / "codex-work-loop.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        for document in (agents, claude, work_loop, readme):
+            self.assertIn("브랜치", document)
+            self.assertIn("병합", document)
+
     def test_agent_loop_documents_state_artifact_retention_and_archive_policy(self):
         evidence = (ROOT / "docs" / "agent-loop-evidence.md").read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
