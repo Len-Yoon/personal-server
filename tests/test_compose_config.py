@@ -6,6 +6,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ComposeConfigTests(unittest.TestCase):
+    def test_agent_loop_documents_state_artifact_retention_and_archive_policy(self):
+        evidence = (ROOT / "docs" / "agent-loop-evidence.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("90일", evidence)
+        self.assertIn("별도 증적 저장소", evidence)
+        self.assertIn("90일", readme)
+        self.assertIn("장기 보관", readme)
+
     def test_claude_instructions_reference_the_codex_work_loop(self):
         instructions = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
 
