@@ -112,6 +112,14 @@ docker compose ps
 
 GitHub Actions CI에서 포털, 시스템 상태, 뉴스, HomeOps, 메모, Compose와 운영 스크립트의 서비스별 테스트를 돌립니다. 로컬에서 실행할 테스트는 [CI workflow](.github/workflows/ci.yml)를 보면 됩니다.
 
+서비스마다 `app` 패키지명을 사용하므로 전체 테스트는 아래 실행기로 실행합니다. 각 스위트에 CI와 같은 `PYTHONPATH`를 적용하여 import 충돌을 방지합니다.
+
+```bash
+python3 scripts/run_service_tests.py
+```
+
+특정 서비스만 확인하려면 `--suite`를 사용합니다. 사용할 수 있는 이름은 `python3 scripts/run_service_tests.py --list`로 확인합니다.
+
 ## 📚 문서
 
 - [프로젝트 포트폴리오 원문](docs/portfolio-content.md)
