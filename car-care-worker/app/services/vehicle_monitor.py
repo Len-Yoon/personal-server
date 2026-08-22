@@ -41,7 +41,7 @@ class VehicleMonitor:
         return alerts
 
     def acknowledge(self, alert: Alert) -> None:
-        if alert.kind in {"warning", "maintenance"}:
+        if alert.kind in {"warning", "maintenance", "seasonal"}:
             self._store.set_alert_state(alert.key, "active")
         elif alert.kind == "trip":
             self._store.set_alert_state("trip:status", "emitted")
@@ -51,6 +51,22 @@ class VehicleMonitor:
 
     def acknowledge_hyundai_error(self, today: date) -> None:
         self._store.set_alert_state("hyundai:error_notified_on", today.isoformat())
+
+    def observe_seasonal_reminders(self, today: date) -> list[Alert]:
+        reminders = (
+            ("winter_tires", today >= date(today.year, 11, 15), "윈터타이어로 교체할 시기입니다."),
+            (
+                "all_season_tires",
+                date(today.year, 4, 1) <= today < date(today.year, 11, 15),
+                "사계절타이어로 교체할 시기입니다.",
+            ),
+        )
+        alerts: list[Alert] = []
+        for name, is_due, message in reminders:
+            key = f"seasonal:{name}:{today.year}"
+            if is_due and self._store.get_alert_state(key) != "active":
+                alerts.append(Alert("seasonal", key, f"계절 타이어 알림: {message}"))
+        return alerts
 
     def _observe_trip(
         self, snapshot: VehicleSnapshot, previous: VehicleSnapshot | None

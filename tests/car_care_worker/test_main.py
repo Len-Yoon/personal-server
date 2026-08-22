@@ -52,6 +52,9 @@ class _MonitorFake:
         self.snapshots.append(_snapshot)
         return [Alert("trip", "trip:summary", "[운행 결과]")]
 
+    def observe_seasonal_reminders(self, _today: date) -> list[Alert]:
+        return []
+
     def acknowledge(self, _alert: Alert) -> None:
         return None
 
@@ -72,6 +75,18 @@ class _StoppingHandler(_HandlerFake):
 
 
 class RunOnceTests(unittest.TestCase):
+    def test_run_once_sends_seasonal_alert_without_waiting_for_hyundai_data(self) -> None:
+        class SeasonalMonitor(_MonitorFake):
+            def observe_seasonal_reminders(self, _today: date) -> list[Alert]:
+                return [Alert("seasonal", "seasonal:winter_tires:2026", "[타이어 교체]")]
+
+        telegram = _TelegramFake()
+        monitor = SeasonalMonitor()
+
+        run_once(_HandlerFake(), telegram, _HyundaiFake(), monitor)
+
+        self.assertEqual(telegram.sent, ["[차량 상태]", "[타이어 교체]", "[운행 결과]"])
+
     def test_hyundai_vehicle_observation_runs_every_ten_minutes(self) -> None:
         self.assertEqual(HYUNDAI_INTERVAL_SECONDS, 10 * 60)
 
@@ -156,7 +171,10 @@ class RunOnceTests(unittest.TestCase):
             run_once(_HandlerFake(), telegram, ErrorHyundai(), monitor)
             run_once(_HandlerFake(), telegram, ErrorHyundai(), monitor)
 
-        self.assertEqual(telegram.sent, ["Hyundai 차량 상태 조회 오류: API 연결 또는 응답을 확인하세요."])
+        self.assertEqual(
+            telegram.sent.count("Hyundai 차량 상태 조회 오류: API 연결 또는 응답을 확인하세요."),
+            1,
+        )
 
     def test_failed_manual_odometer_response_keeps_update_pending_for_retry(self) -> None:
         class RetryingTelegram:

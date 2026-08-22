@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 import os
 from pathlib import Path
 import signal
 from threading import Event
 import time
 from typing import Protocol
+from zoneinfo import ZoneInfo
 
 from app.services.hyundai import HyundaiClient, HyundaiFetchResult
 from app.services.oauth_callback import HyundaiOAuthCallbackServer
@@ -20,6 +21,7 @@ from app.services.vehicle_monitor import VehicleMonitor
 POLL_INTERVAL_SECONDS = 5
 HYUNDAI_INTERVAL_SECONDS = 10 * 60
 DEFAULT_DATABASE_PATH = "/data/car-care/car-care.sqlite3"
+KOREA_TIMEZONE = ZoneInfo("Asia/Seoul")
 
 
 class _TelegramGateway(Protocol):
@@ -38,6 +40,8 @@ class _HyundaiGateway(Protocol):
 
 class _VehicleMonitor(Protocol):
     def observe(self, snapshot: object) -> list[object]: ...
+
+    def observe_seasonal_reminders(self, today: date) -> list[object]: ...
 
     def acknowledge(self, alert: object) -> None: ...
 
@@ -84,6 +88,9 @@ def _handle_updates(
 def _observe_vehicle(
     telegram: _TelegramGateway, hyundai: _HyundaiGateway, monitor: _VehicleMonitor
 ) -> None:
+    for alert in monitor.observe_seasonal_reminders(_today_in_korea()):
+        if telegram.send(alert.text):
+            monitor.acknowledge(alert)
     result = hyundai.fetch_snapshot()
     if result.status == "disabled":
         return
@@ -99,6 +106,10 @@ def _observe_vehicle(
     for alert in monitor.observe(result.snapshot):
         if telegram.send(alert.text):
             monitor.acknowledge(alert)
+
+
+def _today_in_korea() -> date:
+    return datetime.now(KOREA_TIMEZONE).date()
 
 
 def main() -> None:

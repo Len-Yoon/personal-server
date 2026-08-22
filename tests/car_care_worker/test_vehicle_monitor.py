@@ -135,6 +135,18 @@ class VehicleMonitorTest(unittest.TestCase):
 
         self.assertIn("엔진오일 잔여: 7,660km", alerts[0].text)
 
+    def test_seasonal_tire_alerts_are_emitted_once_per_year_after_their_dates(self) -> None:
+        winter = self.monitor.observe_seasonal_reminders(date(2026, 11, 15))
+        self.monitor.acknowledge(winter[0])
+        all_season = self.monitor.observe_seasonal_reminders(date(2027, 4, 2))
+        self.monitor.acknowledge(all_season[0])
+
+        self.assertEqual([alert.key for alert in winter], ["seasonal:winter_tires:2026"])
+        self.assertEqual(winter[0].text, "계절 타이어 알림: 윈터타이어로 교체할 시기입니다.")
+        self.assertEqual([alert.key for alert in all_season], ["seasonal:all_season_tires:2027"])
+        self.assertEqual(all_season[0].text, "계절 타이어 알림: 사계절타이어로 교체할 시기입니다.")
+        self.assertEqual(self.monitor.observe_seasonal_reminders(date(2027, 4, 3)), [])
+
 
 if __name__ == "__main__":
     unittest.main()
