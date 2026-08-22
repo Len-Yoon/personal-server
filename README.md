@@ -1,4 +1,4 @@
-# 🏠    Personal Server
+# 🏠 Personal Server
 
 > Windows N100 + WSL2에서 운영하는 개인용 홈 서버
 
