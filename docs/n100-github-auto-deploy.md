@@ -4,7 +4,7 @@
 
 ## 현재 방식
 
-N100 자체에 GitHub Actions self-hosted runner를 설치합니다. 개발 PC에서 `main`에 직접 push하거나 PR을 병합하면 CI가 실행됩니다. 해당 CI가 성공하면 GitHub Actions가 N100에서 직접 실행되고, `C:\personal-server`의 `scripts/deploy-n100.sh`가 Docker Compose 서비스를 재빌드·재기동합니다.
+N100 자체에 GitHub Actions self-hosted runner를 설치합니다. 기능 브랜치 PR을 병합해 `main`이 변경되면 CI가 실행됩니다. 해당 CI가 성공하면 GitHub Actions가 N100에서 직접 실행되고, `C:\personal-server`의 `scripts/deploy-n100.sh`가 Docker Compose 서비스를 재빌드·재기동합니다.
 
 N100은 Windows self-hosted runner가 로컬에서 배포를 실행하므로 GitHub-hosted runner의 SSH 접근, 포트포워딩, 배포용 개인키가 필요하지 않음.
 
@@ -58,13 +58,13 @@ Runner Windows 서비스도 WSL2를 설치한 Windows 사용자 계정으로 실
 
 ## 자동배포 흐름
 
-`.github/workflows/deploy-n100.yml`은 `main`에서 완료된 `CI` workflow가 성공한 경우에만 반응하며 다음 Runner 라벨을 요구합니다. PR은 선택 사항이고 `main` 직접 push를 허용함.
+`.github/workflows/deploy-n100.yml`은 `main`에서 완료된 `CI` workflow가 성공한 경우에만 반응하며 다음 Runner 라벨을 요구합니다. 기본 변경 경로는 기능 브랜치 PR 병합이며, 긴급 복구를 제외한 `main` 직접 push는 사용하지 않음.
 
 ```yaml
 runs-on: [self-hosted, Windows, X64]
 ```
 
-1. 개발 PC에서 `main`에 직접 push하거나 PR을 병합합니다. CI가 실패하거나 취소되면 N100에 배포하지 않습니다.
+1. 개발 PC에서 기능 브랜치를 push하고 PR CI·Agent Review를 통과시킨 뒤, 사용자 승인으로 PR을 `main`에 병합합니다. `main` CI가 실패하거나 취소되면 N100에 배포하지 않습니다.
 2. N100 Runner 서비스가 배포 작업을 받습니다.
 3. `C:\personal-server`의 존재와 `.env`, `data`, Compose 파일을 확인합니다.
 4. Ubuntu-24.04 WSL에서 `scripts/deploy-n100.sh`를 실행합니다.
