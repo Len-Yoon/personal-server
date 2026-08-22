@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -5,7 +6,56 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _service_block(compose: str, service_name: str) -> str:
+    match = re.search(
+        rf"^  {re.escape(service_name)}:\n(?P<body>.*?)(?=^  \S|\Z)",
+        compose,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        raise AssertionError(f"Missing service: {service_name}")
+    return match.group("body")
+
+
 class ComposeConfigTests(unittest.TestCase):
+    def test_compose_defines_isolated_car_care_worker(self):
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        worker = _service_block(compose, "car-care-worker")
+        volumes = re.search(r"^    volumes:\n(?P<items>(?:      - .+\n?)*)", worker, re.MULTILINE)
+        environment = re.search(
+            r"^    environment:\n(?P<items>(?:      - .+\n?)*)", worker, re.MULTILINE
+        )
+
+        self.assertIn("build: ./car-care-worker", worker)
+        self.assertIn("restart: unless-stopped", worker)
+        self.assertIn("stop_grace_period: 15s", worker)
+        self.assertNotIn("env_file:", worker)
+        self.assertIsNotNone(environment)
+        self.assertEqual(
+            environment.group("items").splitlines(),
+            [
+                "      - CAR_CARE_TELEGRAM_BOT_TOKEN=${CAR_CARE_TELEGRAM_BOT_TOKEN:-}",
+                "      - CAR_CARE_TELEGRAM_CHAT_ID=${CAR_CARE_TELEGRAM_CHAT_ID:-}",
+                "      - CAR_CARE_DB_PATH=/data/car-care/car-care.sqlite3",
+                "      - HYUNDAI_CLIENT_ID=${HYUNDAI_CLIENT_ID:-}",
+                "      - HYUNDAI_CLIENT_SECRET=${HYUNDAI_CLIENT_SECRET:-}",
+                "      - HYUNDAI_VEHICLE_ID=${HYUNDAI_VEHICLE_ID:-}",
+                "      - HYUNDAI_REDIRECT_URI=${HYUNDAI_REDIRECT_URI:-}",
+                "      - HYUNDAI_TOKEN_STORE_PATH=/data/car-care/hyundai-token.json",
+            ],
+        )
+        self.assertIn("      - \"127.0.0.1:8015:8015\"", worker)
+        self.assertIsNotNone(volumes)
+        self.assertEqual(volumes.group("items").splitlines(), ["      - ./data/car-care:/data/car-care"])
+
+    def test_n100_car_care_worker_remains_read_only_with_loopback_callback_port(self):
+        compose = (ROOT / "docker-compose.n100.yml").read_text(encoding="utf-8")
+        worker = _service_block(compose, "car-care-worker")
+
+        self.assertIn("read_only: true", worker)
+        self.assertIn("      - \"127.0.0.1:8015:8015\"", worker)
+        self.assertIn("http://127.0.0.1:8015/health", worker)
+
     def test_agent_loop_documents_require_branch_cleanup_after_merge(self):
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")

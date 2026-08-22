@@ -14,6 +14,7 @@
 | `news.len.pe.kr` | `crawler-worker` | 8001 | Investing.com 뉴스 허브 |
 | `memo.len.pe.kr` | `youtube-memo` | 8002 | YouTube 메모 |
 | `books.len.pe.kr` | `book-memo` | 8003 | 책 메모 |
+| `car.len.pe.kr` | `car-care-worker` | 8015 | Hyundai OAuth callback 전용, Cloudflare Tunnel → loopback |
 
 N100 override는 애플리케이션 포트를 `127.0.0.1`에만 바인드함. `system-agent`는 `127.0.0.1:18010`으로만 노출되며, 포털이 Docker 네트워크의 `system-agent:8010`으로 상태를 조회함.
 `homeops-executor`는 포트를 공개하지 않고 Docker 내부 네트워크에서만 `portal-web`의 요청을 받음.
@@ -42,10 +43,24 @@ Windows bootstrap은 Docker 스택을 확인한 뒤 `cloudflared tunnel run` 프
 | 백업·보안 | `BACKUP_*`, `SECURITY_LOG_*`, `AUTH_RATE_LIMIT_*`, `AUTH_SESSION_MAX_ENTRIES` | 보존 기간, 인증 실패 제한, 세션 상한 |
 | HomeOps | `HOMEOPS_EXECUTOR_SHARED_SECRET`, `HOMEOPS_SCHEDULER_SECRET`, `HOMEOPS_DB_PATH`, `HOMEOPS_APPROVAL_TTL_SECONDS` | 내부 실행기 인증, 정기 점검 인증, 장애 이력, 승인 만료 |
 | HomeOps 알림 | `HOMEOPS_TELEGRAM_BOT_TOKEN`, `HOMEOPS_TELEGRAM_CHAT_ID`, `HOMEOPS_ADMIN_URL` | HomeOps 전용 Telegram 수신처와 관리자 상태 URL |
+| 차량관리 Telegram | `CAR_CARE_TELEGRAM_BOT_TOKEN`, `CAR_CARE_TELEGRAM_CHAT_ID`, `CAR_CARE_DB_PATH` | 차량관리 워커의 Bot 인증, 허용 채팅, SQLite 경로 |
+| 차량관리 Hyundai(선택) | `HYUNDAI_CLIENT_ID`, `HYUNDAI_CLIENT_SECRET`, `HYUNDAI_ACCESS_TOKEN`, `HYUNDAI_VEHICLE_ID`, `HYUNDAI_API_URL` | Hyundai API 사용 승인과 실제 차량 응답 필드가 확인된 경우에만 설정 |
 
 `ADMIN_STATUS_PASSWORD`가 설정되면 관리자 상태는 이 값을 우선 사용함. 파일함 삭제는 파일함 접근 세션과 삭제 비밀번호를 모두 요구함. 책·YouTube 메모는 쓰기 로그인 세션을 요구하며, 로그인되지 않은 브라우저의 쓰기 폼은 현재 페이지를 보존한 로그인 화면으로 이동함. 삭제 시 비밀번호를 다시 입력하지 않으며, YouTube 메모 수정은 별도 확인을 유지함.
 
-## 4. HomeOps 운영 정책
+## 4. 차량관리 워커 운영 정책
+
+`car-care-worker`는 `data/car-care`만 쓰기 상태로 사용함. Telegram Bot long polling으로 명령과 알림을 처리하며, `car.len.pe.kr`은 Hyundai OAuth callback과 `/health`만 처리하도록 Cloudflare Tunnel에서 N100 loopback `8015`로 전달함. Caddy에는 이 호스트를 추가하지 않음.
+
+| 구분 | 내용 |
+|---|---|
+| 필수 설정 | `.env`의 `CAR_CARE_TELEGRAM_BOT_TOKEN`, `CAR_CARE_TELEGRAM_CHAT_ID` 설정 필요 |
+| 수동 초기화 | 최초 정비 이력은 `/정비완료 엔진오일 [km]` 또는 `/정비완료 미션오일 [km]`로 등록 |
+| 지원 명령 | `/차량`, `/주행거리 <km>`, `/정비완료`, `/정비목록`, `/알림테스트`, `/현대연결` |
+| Hyundai 연동 | `.env`에 Client ID·Secret·Redirect URI를 설정하고, Hyundai 콘솔 Account Redirect URL에 `https://car.len.pe.kr/oauth/hyundai/callback`을 등록함. `/현대연결`로 사용자 동의를 완료함 |
+| 비밀값 | Bot token, chat ID, Hyundai 인증정보를 명령 출력·문서·로그에 포함하지 않음 |
+
+## 5. HomeOps 운영 정책
 
 HomeOps는 personal-server Compose 서비스만 진단하며 Docker 소켓은 `homeops-executor`에만 마운트됨. 임의 명령·파일 삭제·Windows/WSL/Docker 엔진 재시작·네트워크 변경은 수행하지 않음.
 
@@ -57,13 +72,19 @@ Telegram 알림은 정상 점검마다 발송하지 않음. 컨테이너 재시�
 - 재시작 뒤 health를 확인해 `verified` 또는 `failed`로 저장하며, 자동 재시작 뒤 10분 쿨다운과 서비스별 최근 1시간 최대 2회 제한을 적용함. 제한 도달 시 재시작하지 않고 Telegram 알림 및 이력만 남김.
 - SQLite에는 UTC 기준 시각을 저장하고, 관리자 상태의 HomeOps 이력과 보안 이벤트는 `Asia/Seoul` 기준 `KST`로 표시함.
 
-## 5. 운영 확인 명령
+## 6. 운영 확인 명령
 
 N100 Windows PowerShell에서는 WSL을 통해 실행함.
 
 ```powershell
 wsl.exe -d Ubuntu-24.04 -- bash -lc "cd /mnt/c/personal-server && docker compose -f docker-compose.yml -f docker-compose.n100.yml ps"
 wsl.exe -d Ubuntu-24.04 -- bash -lc "cd /mnt/c/personal-server && docker compose -f docker-compose.yml -f docker-compose.n100.yml logs --tail=100"
+```
+
+차량관리 워커만 확인할 때는 다음 명령을 사용함.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.n100.yml logs --tail=100 car-care-worker
 ```
 
 HomeOps 진단 결과가 `응답 없음`으로 표시되면 먼저 두 컨테이너가 같은 실행기 공유 비밀값을 받았는지 확인함. 실제 값은 출력하지 않음.

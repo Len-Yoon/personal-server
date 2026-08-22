@@ -71,7 +71,7 @@ run_daily_maintenance() {
 }
 
 docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d \
-  portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo caddy
+  portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker caddy
 
 if [ -n "${HOMEOPS_SCHEDULER_SECRET:-}" ]; then
   curl --fail --silent --show-error --max-time 20 \

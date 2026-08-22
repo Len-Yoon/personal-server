@@ -50,6 +50,7 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("http://127.0.0.1:8001/health", WORKFLOW)
         self.assertIn("http://127.0.0.1:8002/health", WORKFLOW)
         self.assertIn("http://127.0.0.1:8003/health", WORKFLOW)
+        self.assertIn("http://127.0.0.1:8015/health", WORKFLOW)
         self.assertIn("homeops-executor", WORKFLOW)
         self.assertIn("--retry-all", health_check)
         self.assertIn("--retry-connrefused", health_check)
@@ -65,6 +66,7 @@ class DeployN100Tests(unittest.TestCase):
             "book-memo",
             "caddy",
             "homeops-executor",
+            "car-care-worker",
         ):
             self.assertIn(f"grep -Fx -- {service}", health_check)
 
@@ -92,7 +94,7 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("docker info", SCRIPT)
         self.assertIn("DOCKER_WAIT_ATTEMPTS", SCRIPT)
         self.assertIn(
-            "docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo caddy",
+            "docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker caddy",
             SCRIPT,
         )
         self.assertNotIn(

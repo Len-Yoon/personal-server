@@ -18,6 +18,7 @@
 - Hyundai Developers API가 미연결 상태여도 Telegram 명령을 통한 수동 주행거리 갱신과 정비 알림은 동작함.
 - API 권한이 승인되면 누적 주행거리·주행 가능 거리·경고등을 조회하여 운행 종료 요약과 경고 알림을 자동화함.
 - 엔진오일, 브레이크오일, 타이어 공기압, 워셔액, 주유 경고등을 즉시 알림 대상으로 관리함.
+- Hyundai OAuth 사용자 인증·동의와 콜백 수신을 통해 실제 차량 데이터를 사용함. 이전의 정적 access token 입력 방식은 사용하지 않음.
 
 ## 3. 아키텍처
 
@@ -28,17 +29,22 @@ Telegram Bot API
 car-care-worker
   ├─ 명령 처리: 상태 조회·주행거리 갱신·정비 완료 기록
   ├─ 알림 판정: 정비 임박·초과, 경고등 상태, 운행 종료
-  ├─ Hyundai API 어댑터: 초기 비활성, 승인 후 활성화
+  ├─ Hyundai OAuth: authorization code·refresh token·필수 동의 관리
+  ├─ Hyundai API 어댑터: 차량 목록·주행거리·DTE·경고등 조회
+  ├─ OAuth callback: `https://car.len.pe.kr/oauth/hyundai/callback`
   └─ SQLite: 차량 상태·정비 이력·알림 발송 상태
 ```
 
 ### 3.1 데이터 흐름
 
-1. Telegram에서 명령을 수신하거나 차량 상태를 주기적으로 조회함.
-2. 누적 주행거리와 주행 가능 거리, 경고등 상태를 전용 DB에 저장함.
-3. 엔진오일·미션오일의 마지막 교환 기준과 현재 누적 주행거리를 비교함.
-4. 알림 조건이 충족되면 중복 발송 여부를 확인한 뒤 Telegram으로 전송함.
-5. 주행거리 증가 후 일정 시간 동안 변동이 없으면 운행 종료로 판단하여 운행 결과를 발송함.
+1. 사용자가 Telegram의 `/현대연결`에서 인증 URL을 받고 Hyundai 로그인·동의를 완료함.
+2. Hyundai가 `https://car.len.pe.kr/oauth/hyundai/callback`으로 authorization code를 전달함.
+3. callback은 code를 access/refresh token으로 교환하고, refresh token만 SQLite에 보관함.
+4. Telegram에서 명령을 수신하거나 차량 상태를 주기적으로 조회함.
+5. 누적 주행거리와 주행 가능 거리, 경고등 상태를 전용 DB에 저장함.
+6. 엔진오일·미션오일의 마지막 교환 기준과 현재 누적 주행거리를 비교함.
+7. 알림 조건이 충족되면 중복 발송 여부를 확인한 뒤 Telegram으로 전송함.
+8. 주행거리 증가 후 일정 시간 동안 변동이 없으면 운행 종료로 판단하여 운행 결과를 발송함.
 
 ## 4. 기능 상세
 
@@ -52,6 +58,8 @@ car-care-worker
 | `/정비완료 미션오일 [km]` | 미션오일 교환일·교환 주행거리를 기록함 |
 | `/정비목록` | 관리 항목과 적용 주기를 표시함 |
 | `/알림테스트` | Bot 설정 및 수신 가능 여부를 확인함 |
+| `/현대연결` | Hyundai 로그인·동의용 1회 URL을 발급함 |
+| `/현대연결상태` | Hyundai OAuth 연결 및 선택 차량 상태를 표시함 |
 
 ### 4.2 정기 정비 기준
 
@@ -93,7 +101,9 @@ car-care-worker
 | 구분 | 내용 |
 |---|---|
 | Telegram | `CAR_CARE_TELEGRAM_BOT_TOKEN`, `CAR_CARE_TELEGRAM_CHAT_ID`만 허용함 |
-| Hyundai API | Hyundai Developers 상용 권한 및 사용자 데이터 제공 동의 후 활성화함 |
+| Hyundai API | Hyundai Developers OAuth authorization code 및 refresh token을 사용함. 사용자 데이터 제공 동의 후 활성화함 |
+| OAuth callback | `car.len.pe.kr` 전용 HTTPS 호스트만 사용하고, callback에는 10분 유효·1회 사용 state 검증을 적용함 |
+| 토큰 보관 | access token은 메모리에만 유지함. refresh token은 전용 상태 파일에 소유자 읽기·쓰기 권한(0600)으로 보관함. 운영 키 기반 암호화는 별도 보안 개선 항목으로 관리함 |
 | API 미연결 | 수동 주행거리 입력 기능만 제공함 |
 | 비밀값 | `.env`에만 저장하며 로그·Telegram 메시지·저장소에 기록하지 않음 |
 | 개인정보 | 차량 번호, 차대번호, 위치, 현대 계정 정보는 Telegram에 표시하지 않음 |
@@ -118,5 +128,6 @@ car-care-worker
 ## 8. 확인 필요 사항
 
 - Hyundai Developers 상용화 승인 및 더 뉴 그랜저 3.0 LPi의 실제 데이터 응답 범위 확인 필요.
+- N100의 `~/.cloudflared/config.yml`에 `car.len.pe.kr → http://localhost:8015` ingress 추가 필요. Cloudflare DNS CNAME은 생성 완료됨.
 - 시동 OFF 이벤트 미제공 시 운행 종료는 유휴 시간 기반 추정으로 처리 필요.
 - 엔진오일·미션오일의 실제 마지막 교환 주행거리 입력 필요.

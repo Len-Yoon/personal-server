@@ -10,6 +10,23 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-22-car-care-telegram-design.md`
 
+## OAuth 실연동 보완 계획 (2026-08-22)
+
+**목표:** Hyundai Developers API의 실제 OAuth 사용자 인증·동의·차량 데이터 호출을 통해 BlueLink 차량 상태를 수집함.
+
+**공개 주소:** `https://car.len.pe.kr/oauth/hyundai/callback` (Cloudflare DNS CNAME 생성 완료)
+
+**변경 범위:** `car-care-worker` 내부 OAuth·callback 서버·테스트, Compose localhost 포트, N100 Cloudflare Tunnel ingress 운영 설정. 기존 뉴스 및 스케줄러는 변경하지 않음.
+
+**성공 기준:**
+
+1. OAuth state가 일회성·만료 검증되고 authorization code를 refresh token으로 교환함.
+2. refresh token 갱신, 필수 사용자 동의, 차량 목록 선택, 주행거리·DTE·경고등 호출이 모두 모킹 테스트로 검증됨.
+3. callback은 localhost `8015`에만 노출하고, N100 Tunnel이 `car.len.pe.kr`을 그 포트로 전달함.
+4. Hyundai 콘솔 Redirect URL·Callback URL에 위 HTTPS 주소를 등록한 후 `/현대연결`로 실차 인증을 완료할 수 있음.
+
+**확인 필요:** Cloudflare API token은 DNS 권한만 있어 기존 N100의 locally-managed Tunnel ingress는 API로 수정할 수 없음. N100에서 `~/.cloudflared/config.yml` 한 줄을 반영하고 터널을 재시작해야 함.
+
 ## Global Constraints
 
 - `crawler-worker`와 `crawler-worker/app/services/news_scheduler.py`는 수정하지 않음.
