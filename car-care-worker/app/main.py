@@ -70,8 +70,8 @@ def _handle_updates(
     next_offset = offset
     for update in telegram.poll(offset):
         response = handler.handle_update(update)
-        if response:
-            telegram.send(response)
+        if response and not telegram.send(response):
+            break
         if update.update_id is not None:
             candidate = update.update_id + 1
             next_offset = candidate if next_offset is None else max(next_offset, candidate)

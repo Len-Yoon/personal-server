@@ -160,7 +160,7 @@ class CommandHandler:
     def _next_maintenance_status(self, snapshot: VehicleSnapshot) -> list[str]:
         alerts = {
             alert.key: alert.text
-            for alert in self._maintenance_alerts(snapshot.odometer_km, snapshot.observed_at.date())
+            for alert in self._maintenance_alerts(snapshot.odometer_km, date.today())
         }
         details = ["다음 정비:"]
         for item, name in (("engine_oil", "엔진오일"), ("transmission_oil", "미션오일")):

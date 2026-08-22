@@ -58,6 +58,27 @@ class CommandHandlerTests(unittest.TestCase):
         self.assertIn("다음 정비", response)
         self.assertIn("엔진오일", response)
 
+    def test_vehicle_status_evaluates_engine_oil_time_from_today_not_snapshot_time(self) -> None:
+        self.store.complete_maintenance("engine_oil", 52340, date(2025, 8, 22))
+        self.store.save_snapshot(
+            VehicleSnapshot(
+                observed_at=datetime(2025, 8, 22, tzinfo=timezone.utc),
+                odometer_km=52340,
+                dte_km=None,
+                warnings=frozenset(),
+            )
+        )
+
+        class Today(date):
+            @classmethod
+            def today(cls):
+                return cls(2026, 8, 22)
+
+        with patch("app.services.telegram.date", Today):
+            response = self.handler.handle_update(TelegramUpdate("123", "/차량"))
+
+        self.assertIn("엔진오일 정비 알림", response)
+
     def test_vehicle_status_marks_manual_mode_without_snapshot(self) -> None:
         response = self.handler.handle_update(TelegramUpdate("123", "/차량"))
 

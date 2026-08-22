@@ -112,3 +112,19 @@
 | 변경 영역 | `car-care-worker`, 신규 워커 Compose 환경변수, 관련 차량관리·Compose 테스트, Task 4 보고서로 한정됨 |
 | 미변경 영역 | crawler/news, 기존 서비스 command, Caddy, 배포·부트스트랩 스크립트 미변경 |
 | 비밀값 | 실제 Telegram·Hyundai 값 미생성·미기록 |
+
+---
+
+## 9. 최종 재검토 보완 2차
+
+| 검토 항목 | 조치 내용 | 검증 결과 |
+|---|---|---|
+| 수동 주행거리 전송 실패 | `_handle_updates()`가 응답 전송 성공 후에만 Telegram update offset을 증가시키도록 변경함. `/주행거리` 정비 결과 전송 실패 시 기존 offset·maintenance alert state를 유지해 동일 update 재시도 가능함 | 첫 전송 실패 시 offset `None`, maintenance state `inactive`, 재전송 성공 시 offset `8` 확인 |
+| `/차량` 엔진오일 기간 기준 | 다음 정비 상태 계산에서 snapshot 시각 대신 `date.today()`를 사용하도록 변경함 | 주행거리 변화 없이 12개월 경과한 engine oil record가 정비 알림으로 표시됨을 확인 |
+
+### 9.1 TDD 증적
+
+| 단계 | 실행 명령 | 결과 |
+|---|---|---|
+| RED | `PYTHONPATH=car-care-worker python3 -m unittest tests.car_care_worker.test_main tests.car_care_worker.test_telegram -v` | 19개 실행 중 2개 실패. 전송 실패 후 offset 진행 및 snapshot 기준 기간 판정 확인. |
+| GREEN | 동일 명령 재실행 | 19개 테스트 통과. |

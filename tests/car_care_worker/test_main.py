@@ -10,7 +10,7 @@ from app.main import DEFAULT_DATABASE_PATH, _database_path, run_once
 from app.models import VehicleSnapshot
 from app.services.hyundai import HyundaiFetchResult
 from app.services.store import CarCareStore
-from app.services.telegram import TelegramUpdate
+from app.services.telegram import CommandHandler, TelegramUpdate
 from app.services.maintenance import Alert
 from app.services.vehicle_monitor import VehicleMonitor
 
@@ -154,6 +154,40 @@ class RunOnceTests(unittest.TestCase):
             run_once(_HandlerFake(), telegram, ErrorHyundai(), monitor)
 
         self.assertEqual(telegram.sent, ["Hyundai 차량 상태 조회 오류: API 연결 또는 응답을 확인하세요."])
+
+    def test_failed_manual_odometer_response_keeps_update_pending_for_retry(self) -> None:
+        class RetryingTelegram:
+            def __init__(self) -> None:
+                self.should_send = False
+                self.attempts: list[str] = []
+
+            def poll(self, _offset=None) -> list[TelegramUpdate]:
+                return [TelegramUpdate("123", "/주행거리 59000", update_id=7)]
+
+            def send(self, text: str) -> bool:
+                self.attempts.append(text)
+                return self.should_send
+
+        class DisabledHyundai:
+            def fetch_snapshot(self) -> HyundaiFetchResult:
+                return HyundaiFetchResult.disabled()
+
+        with TemporaryDirectory() as directory:
+            store = CarCareStore(Path(directory) / "car-care.sqlite3")
+            store.initialize()
+            store.complete_maintenance("engine_oil", 50000, date.today())
+            store.complete_maintenance("transmission_oil", 0, date.today())
+            handler = CommandHandler(store, allowed_chat_id="123")
+            telegram = RetryingTelegram()
+
+            failed_offset = run_once(handler, telegram, DisabledHyundai(), _MonitorFake())
+            telegram.should_send = True
+            successful_offset = run_once(handler, telegram, DisabledHyundai(), _MonitorFake())
+
+            self.assertIsNone(failed_offset)
+            self.assertEqual(store.get_alert_state("maintenance:engine_oil"), "inactive")
+            self.assertEqual(successful_offset, 8)
+            self.assertEqual(len(telegram.attempts), 2)
 
 
 if __name__ == "__main__":
