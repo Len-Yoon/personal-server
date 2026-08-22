@@ -8,6 +8,8 @@
 
 평소에는 포털에서 필요한 서비스로 이동하고, 상태 문제는 관리자 화면과 HomeOps 이력에서 먼저 확인합니다.
 
+<br>
+
 ## ✨ 프로젝트 개요
 
 | 구분 | 내용 |
@@ -18,6 +20,8 @@
 | 개발 방식 | Harness / Loop Engineering 기반 검증·CI·PR 배포 루프 |
 | 주요 기능 | 포털, 파일 관리, 시스템 상태, HomeOps, 뉴스, 메모, 차량관리, 포트폴리오 |
 
+<br>
+
 ## 🚀 빠른 시작
 
 ```bash
@@ -27,6 +31,8 @@ docker compose ps
 ```
 
 N100 운영 환경, 환경변수, 배포 절차는 [운영 문서 색인](docs/README.md)을 기준으로 확인합니다.
+
+<br>
 
 ## 🧩 서비스 구성
 
@@ -52,6 +58,8 @@ N100 운영 환경, 환경변수, 배포 절차는 [운영 문서 색인](docs/R
 
 뉴스와 메모 서비스는 각자 SQLite 또는 파일 저장소를 사용하며, 포털은 링크와 검색 진입점 역할을 합니다.
 
+<br>
+
 ## 🔐 운영과 보안
 
 ### 접근 제어
@@ -64,6 +72,8 @@ N100 운영 환경, 환경변수, 배포 절차는 [운영 문서 색인](docs/R
 
 - 파일은 `data/files`에, 뉴스·메모·HomeOps 이력은 서비스별 데이터 경로에 보관합니다. 운영 데이터와 `.env`는 저장소에 올리지 않습니다.
 - 뉴스는 시장 충격 가능성이 있는 기사와 전망성 기사를 구분해 알림 수를 줄입니다.
+
+<br>
 
 ## 🏗️ 아키텍처와 배포
 
@@ -83,6 +93,8 @@ feature branch → PR CI · Agent Review → main CI → N100 Docker Compose dep
 ```
 
 공개 HTTPS는 Cloudflare Tunnel 또는 Caddy + Cloudflare DNS-01 중 실제 환경에 맞는 한 가지 방식만 사용합니다.
+
+<br>
 
 ## 🚗 차량관리 Telegram
 
@@ -121,6 +133,8 @@ Hyundai 연동은 선택 사항이며, 미설정 시 `/주행거리 <km>`로 수
   <img src="docs/images/car-care-telegram-status.png" alt="Telegram 차량관리 봇의 차량 상태와 정비 잔여 거리 예시" width="360">
 </p>
 
+<br>
+
 ## 🖼️ 주요 화면
 
 ### Portal · System Status
@@ -141,6 +155,8 @@ Hyundai 연동은 선택 사항이며, 미설정 시 `/주행거리 <km>`로 수
 |---|---|
 | ![YouTube memo](docs/images/youtube-memo.png) | ![Book memo](docs/images/book-memo.png) |
 
+<br>
+
 ## ✅ 검증
 
 GitHub Actions CI에서 포털, 시스템 상태, 뉴스, HomeOps, 메모, 차량관리, Compose와 운영 스크립트의 서비스별 테스트를 실행합니다.
@@ -151,6 +167,8 @@ python3 tests/run_service_tests.py --list
 ```
 
 특정 서비스만 확인하려면 `--suite`를 사용합니다. 사용할 수 있는 이름은 `--list`로 확인합니다.
+
+<br>
 
 ## 🤖 Harness / Loop Engineering
 
@@ -166,6 +184,8 @@ AI 보조 개발에서도 코드 생성에만 의존하지 않고, 요구사항�
 
 자세한 작업 절차는 [Codex 작업 완료 루프](docs/codex-work-loop.md), artifact 확인은 [작업 루프 증거 운영](docs/agent-loop-evidence.md)을 참고합니다.
 
+<br>
+
 ## 🛠️ 사용 기술
 
 | 영역 | 기술 |
@@ -174,6 +194,8 @@ AI 보조 개발에서도 코드 생성에만 의존하지 않고, 요구사항�
 | Storage | SQLite, JSON file storage |
 | Infrastructure | Docker Compose, Cloudflare, Caddy, Windows/WSL2 |
 | CI/CD | GitHub Actions, Windows self-hosted runner |
+
+<br>
 
 ## 🔎 운영 문서
 
