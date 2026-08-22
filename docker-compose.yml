@@ -162,6 +162,7 @@ services:
     build: ./car-care-worker
     container_name: car-care-worker
     restart: unless-stopped
+    stop_grace_period: 15s
     env_file:
       - .env
     environment:

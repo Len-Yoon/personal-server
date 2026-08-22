@@ -44,15 +44,21 @@ def run_once(
     hyundai: _HyundaiGateway,
     monitor: _VehicleMonitor,
     offset: int | None = None,
+    stopped: Event | None = None,
 ) -> int | None:
     """Process received commands and one Hyundai vehicle observation."""
-    next_offset = _handle_updates(handler, telegram, offset)
+    next_offset = _handle_updates(handler, telegram, offset, stopped)
+    if stopped is not None and stopped.is_set():
+        return next_offset
     _observe_vehicle(telegram, hyundai, monitor)
     return next_offset
 
 
 def _handle_updates(
-    handler: _CommandHandler, telegram: _TelegramGateway, offset: int | None
+    handler: _CommandHandler,
+    telegram: _TelegramGateway,
+    offset: int | None,
+    stopped: Event | None = None,
 ) -> int | None:
     next_offset = offset
     for update in telegram.poll(offset):
@@ -62,6 +68,8 @@ def _handle_updates(
         if update.update_id is not None:
             candidate = update.update_id + 1
             next_offset = candidate if next_offset is None else max(next_offset, candidate)
+        if stopped is not None and stopped.is_set():
+            break
     return next_offset
 
 
@@ -76,7 +84,7 @@ def _observe_vehicle(
 
 
 def main() -> None:
-    database_path = Path(os.getenv("CAR_CARE_DB_PATH", DEFAULT_DATABASE_PATH))
+    database_path = _database_path()
     database_path.parent.mkdir(parents=True, exist_ok=True)
     store = CarCareStore(database_path)
     store.initialize()
@@ -94,11 +102,18 @@ def main() -> None:
     offset: int | None = None
     next_hyundai_at = time.monotonic()
     while not stopped.is_set():
-        offset = _handle_updates(handler, telegram, offset)
+        offset = _handle_updates(handler, telegram, offset, stopped)
+        if stopped.is_set():
+            break
         if time.monotonic() >= next_hyundai_at:
             _observe_vehicle(telegram, hyundai, monitor)
             next_hyundai_at = time.monotonic() + HYUNDAI_INTERVAL_SECONDS
         stopped.wait(POLL_INTERVAL_SECONDS)
+
+
+def _database_path() -> Path:
+    configured_path = os.getenv("CAR_CARE_DB_PATH", "").strip()
+    return Path(configured_path or DEFAULT_DATABASE_PATH)
 
 
 def _install_signal_handlers(stopped: Event) -> None:

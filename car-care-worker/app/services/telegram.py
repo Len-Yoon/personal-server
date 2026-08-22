@@ -11,6 +11,8 @@ from app.services.store import CarCareStore
 
 
 TELEGRAM_API_BASE_URL = "https://api.telegram.org"
+POLL_TIMEOUT_SECONDS = 5
+REQUEST_TIMEOUT_SECONDS = 10
 
 
 @dataclass(frozen=True)
@@ -32,10 +34,10 @@ class TelegramClient:
         return cls(token, chat_id) if token and chat_id else None
 
     def poll(self, offset: int | None) -> list[TelegramUpdate]:
-        payload: dict[str, int] = {"timeout": 25}
+        payload: dict[str, int] = {"timeout": POLL_TIMEOUT_SECONDS}
         if offset is not None:
             payload["offset"] = offset
-        data = self._post("getUpdates", payload, timeout=30)
+        data = self._post("getUpdates", payload, timeout=REQUEST_TIMEOUT_SECONDS)
         if not data or not data.get("ok"):
             return []
         result = data.get("result")

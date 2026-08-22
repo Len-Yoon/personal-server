@@ -52,3 +52,33 @@
 1. 운영 환경 `.env`에 차량관리 Telegram 필수 값을 설정함.
 2. 최초 정비 이력을 `/정비완료 엔진오일 [km]`, `/정비완료 미션오일 [km]`로 등록함.
 3. Hyundai 연동 승인·응답 필드 검증 후 선택 환경변수를 설정함.
+
+---
+
+## 7. 검토 보완 1차
+
+### 7.1 원인 및 조치
+
+| 검토 항목 | 확인된 원인 | 보완 조치 |
+|---|---|---|
+| 배포·부트스트랩 누락 | `deploy-n100.sh`, `windows-bootstrap.sh`의 명시 서비스 목록에 `car-care-worker`가 없음 | 두 기존 목록에 신규 워커만 추가함. 기존 서비스 순서·명령과 Caddy 설정은 변경하지 않음. |
+| SIGTERM 종료 지연 | Telegram getUpdates가 25초 long polling·30초 요청 timeout을 사용하고, 업데이트 처리 후 종료 상태를 확인하지 않음 | Telegram long polling을 5초, 요청 timeout을 10초로 제한함. 업데이트 처리 뒤 stop event를 확인하고 차량 관측을 생략함. Compose `stop_grace_period: 15s`로 요청 timeout보다 긴 종료 유예를 설정함. |
+| 빈 DB 경로 | 빈 `CAR_CARE_DB_PATH`가 `Path(\"\")`로 해석됨 | 공백을 제거한 값이 비어 있으면 `/data/car-care/car-care.sqlite3` 기본 경로를 사용하도록 수정함. |
+| Compose 테스트 범위 | 워커 뒤의 Compose 전체를 검사해 서비스 범위가 정확히 분리되지 않음 | 서비스 블록을 분리해 public port 없음, 정확히 하나의 `./data/car-care:/data/car-care` 볼륨, N100 `read_only: true`를 확인하도록 보완함. |
+
+### 7.2 TDD 및 검증 증적
+
+| 단계 | 실행 명령 | 결과 |
+|---|---|---|
+| RED | `PYTHONPATH=car-care-worker python3 -m unittest tests.car_care_worker.test_main tests.car_care_worker.test_telegram tests.test_compose_config tests.test_deploy_n100 tests.test_windows_bootstrap -v` | 37개 실행 중 1개 import 오류와 4개 실패 확인. `_database_path` 부재, Telegram timeout 25/30초, `stop_grace_period` 부재, deploy/bootstrap 서비스 목록 누락이 원인으로 확인됨. |
+| GREEN | 동일 명령 재실행 | 39개 테스트 통과. stop event 처리, 빈 DB 경로 기본값, 요청 경계 timeout, Compose 격리, deploy/bootstrap 등록 확인됨. |
+
+### 7.3 보완 범위
+
+| 구분 | 변경 여부 |
+|---|---|
+| `car-care-worker` lifecycle·Telegram client | 변경함 |
+| Compose 신규 워커 설정 | 변경함 |
+| `scripts/deploy-n100.sh`, `scripts/windows-bootstrap.sh` 신규 워커 등록 | 변경함 |
+| 기존 서비스 command, crawler/news scheduler, Caddy | 변경하지 않음 |
+| 비밀값 | 생성·기록하지 않음 |

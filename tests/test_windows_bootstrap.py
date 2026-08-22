@@ -15,10 +15,11 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("/F", SCRIPT)
         self.assertIn("schtasks.exe /Query", SCRIPT)
 
-    def test_recovery_starts_the_news_crawler_and_other_services(self):
+    def test_recovery_starts_the_car_care_worker_and_other_services(self):
         self.assertIn("docker-compose.yml", WSL_SCRIPT)
         self.assertIn("up -d", WSL_SCRIPT)
         self.assertIn("crawler-worker", WSL_SCRIPT)
+        self.assertIn("car-care-worker", WSL_SCRIPT)
         self.assertNotIn("up -d --build portal-web system-agent", WSL_SCRIPT)
 
     def test_runs_daily_maintenance_once_after_stack_start(self):

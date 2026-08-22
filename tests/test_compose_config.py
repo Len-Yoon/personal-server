@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -5,17 +6,37 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _service_block(compose: str, service_name: str) -> str:
+    match = re.search(
+        rf"^  {re.escape(service_name)}:\n(?P<body>.*?)(?=^  \S|\Z)",
+        compose,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        raise AssertionError(f"Missing service: {service_name}")
+    return match.group("body")
+
+
 class ComposeConfigTests(unittest.TestCase):
     def test_compose_defines_isolated_car_care_worker(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-        worker = compose.split("  car-care-worker:\n", 1)[1]
+        worker = _service_block(compose, "car-care-worker")
+        volumes = re.search(r"^    volumes:\n(?P<items>(?:      - .+\n?)*)", worker, re.MULTILINE)
 
         self.assertIn("build: ./car-care-worker", worker)
         self.assertIn("restart: unless-stopped", worker)
+        self.assertIn("stop_grace_period: 15s", worker)
         self.assertIn("env_file:\n      - .env", worker)
-        self.assertNotIn("ports:", worker)
-        self.assertIn("./data/car-care:/data/car-care", worker)
-        self.assertNotIn("./car-care-worker:/app", worker)
+        self.assertNotIn("\n    ports:", worker)
+        self.assertIsNotNone(volumes)
+        self.assertEqual(volumes.group("items").splitlines(), ["      - ./data/car-care:/data/car-care"])
+
+    def test_n100_car_care_worker_remains_read_only_without_ports(self):
+        compose = (ROOT / "docker-compose.n100.yml").read_text(encoding="utf-8")
+        worker = _service_block(compose, "car-care-worker")
+
+        self.assertIn("read_only: true", worker)
+        self.assertNotIn("\n    ports:", worker)
 
     def test_agent_loop_documents_require_branch_cleanup_after_merge(self):
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")

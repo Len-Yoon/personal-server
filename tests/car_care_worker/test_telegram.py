@@ -79,8 +79,8 @@ class TelegramClientTests(unittest.TestCase):
         self.assertEqual(updates, [TelegramUpdate("123", "/차량", update_id=7)])
         request = mocked_urlopen.call_args.args[0]
         self.assertIn("getUpdates", request.full_url)
-        self.assertEqual(json.loads(request.data), {"offset": 7, "timeout": 25})
-        self.assertEqual(mocked_urlopen.call_args.kwargs["timeout"], 30)
+        self.assertEqual(json.loads(request.data), {"offset": 7, "timeout": 5})
+        self.assertEqual(mocked_urlopen.call_args.kwargs["timeout"], 10)
 
     def test_poll_ignores_malformed_results_and_keeps_valid_updates(self) -> None:
         payloads = [
