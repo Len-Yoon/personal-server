@@ -41,12 +41,15 @@ class ComposeConfigTests(unittest.TestCase):
                 "      - HYUNDAI_CLIENT_SECRET=${HYUNDAI_CLIENT_SECRET:-}",
                 "      - HYUNDAI_VEHICLE_ID=${HYUNDAI_VEHICLE_ID:-}",
                 "      - HYUNDAI_REDIRECT_URI=${HYUNDAI_REDIRECT_URI:-}",
-                "      - HYUNDAI_TOKEN_STORE_PATH=/data/car-care/hyundai-token.json",
+                "      - HYUNDAI_TOKEN_STORE_PATH=/data/oauth/hyundai-token.json",
             ],
         )
         self.assertIn("      - \"127.0.0.1:8015:8015\"", worker)
         self.assertIsNotNone(volumes)
-        self.assertEqual(volumes.group("items").splitlines(), ["      - ./data/car-care:/data/car-care"])
+        self.assertEqual(
+            volumes.group("items").splitlines(),
+            ["      - ./data/car-care:/data/car-care", "      - car-care-oauth:/data/oauth"],
+        )
 
     def test_n100_car_care_worker_remains_read_only_with_loopback_callback_port(self):
         compose = (ROOT / "docker-compose.n100.yml").read_text(encoding="utf-8")

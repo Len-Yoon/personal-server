@@ -171,11 +171,12 @@ services:
       - HYUNDAI_CLIENT_SECRET=${HYUNDAI_CLIENT_SECRET:-}
       - HYUNDAI_VEHICLE_ID=${HYUNDAI_VEHICLE_ID:-}
       - HYUNDAI_REDIRECT_URI=${HYUNDAI_REDIRECT_URI:-}
-      - HYUNDAI_TOKEN_STORE_PATH=/data/car-care/hyundai-token.json
+      - HYUNDAI_TOKEN_STORE_PATH=/data/oauth/hyundai-token.json
     ports:
       - "127.0.0.1:8015:8015"
     volumes:
       - ./data/car-care:/data/car-care
+      - car-care-oauth:/data/oauth
     networks:
       car-care-net:
         ipv4_address: 172.30.0.10
@@ -185,3 +186,6 @@ networks:
     ipam:
       config:
         - subnet: 172.30.0.0/24
+
+volumes:
+  car-care-oauth:
