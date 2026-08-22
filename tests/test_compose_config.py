@@ -94,7 +94,7 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertNotIn("git diff --name-only", workflow)
         self.assertIn("--input-format git-name-status-z", workflow)
         self.assertIn("--executed-checks", workflow)
-        self.assertIn("portal system-agent crawler-worker homeops-executor youtube-memo book-memo maintenance", workflow)
+        self.assertIn("portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance", workflow)
         self.assertIn("agent-review-scope", workflow)
         self.assertIn("policy_status", workflow)
 
@@ -114,7 +114,7 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn("  summary:\n    needs: [scope, test]\n    if: always()", workflow)
         self.assertIn("--test-result \"${{ needs.test.result }}\"", workflow)
         self.assertIn("--executed-checks", workflow)
-        self.assertIn("portal system-agent crawler-worker homeops-executor youtube-memo book-memo maintenance", workflow)
+        self.assertIn("portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance", workflow)
         self.assertIn("Missing checks", workflow)
 
         expected_matrix_entries = {
@@ -124,6 +124,7 @@ class ComposeConfigTests(unittest.TestCase):
             "homeops-executor": "python3 -m unittest tests.homeops_executor.test_docker_ops",
             "youtube-memo": "python3 -m unittest tests.youtube_memo.test_video_titles",
             "book-memo": "python3 -m unittest tests.book_memo.test_book_service",
+            "car-care-worker": "python3 -m unittest discover -s tests/car_care_worker",
             "maintenance": "python3 -m unittest tests.test_compose_config tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100",
         }
         for service_name, test_command in expected_matrix_entries.items():

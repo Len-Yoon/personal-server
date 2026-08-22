@@ -80,10 +80,10 @@ class VehicleMonitorTest(unittest.TestCase):
     def test_due_maintenance_remains_suppressed_after_corrected_odometer(self) -> None:
         self.store.complete_maintenance("engine_oil", 50000, date(2026, 1, 1))
 
-        due = self.monitor.observe(self.snapshot(59000, frozenset()))
+        due = self.monitor.observe(self.snapshot(59500, frozenset()))
         self.monitor.acknowledge(due[0])
         corrected = self.monitor.observe(self.snapshot(58000, frozenset(), minutes=1))
-        due_again = self.monitor.observe(self.snapshot(59000, frozenset(), minutes=2))
+        due_again = self.monitor.observe(self.snapshot(59500, frozenset(), minutes=2))
 
         self.assertEqual([alert.key for alert in due], ["maintenance:engine_oil"])
         self.assertEqual(corrected, [])
@@ -91,11 +91,11 @@ class VehicleMonitorTest(unittest.TestCase):
 
     def test_completed_maintenance_allows_the_next_due_cycle_to_alert(self) -> None:
         self.store.complete_maintenance("engine_oil", 50000, date(2026, 1, 1))
-        due = self.monitor.observe(self.snapshot(59000, frozenset()))
+        due = self.monitor.observe(self.snapshot(59500, frozenset()))
         self.monitor.acknowledge(due[0])
-        self.store.complete_maintenance("engine_oil", 59000, date(2026, 8, 22))
+        self.store.complete_maintenance("engine_oil", 59500, date(2026, 8, 22))
 
-        alerts = self.monitor.observe(self.snapshot(68000, frozenset(), minutes=1))
+        alerts = self.monitor.observe(self.snapshot(69000, frozenset(), minutes=1))
 
         self.assertEqual([alert.key for alert in alerts], ["maintenance:engine_oil"])
 

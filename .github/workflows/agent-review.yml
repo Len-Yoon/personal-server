@@ -27,7 +27,7 @@ jobs:
             --input changed-files.nul \
             --input-format git-name-status-z \
             --executed-checks \
-            portal system-agent crawler-worker homeops-executor youtube-memo book-memo maintenance \
+            portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance \
             > agent-review-scope.json
           status=$?
           echo "policy_status=$status" >> "$GITHUB_OUTPUT"

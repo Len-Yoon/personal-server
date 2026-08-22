@@ -92,6 +92,10 @@ jobs:
             requirements: book-memo/requirements.txt
             pythonpath: book-memo
             test_command: python3 -m unittest tests.book_memo.test_book_service
+          - name: car-care-worker
+            requirements: car-care-worker/requirements.txt
+            pythonpath: car-care-worker
+            test_command: python3 -m unittest discover -s tests/car_care_worker
           - name: maintenance
             requirements: ""
             pythonpath: .
@@ -140,7 +144,7 @@ jobs:
             --input-format git-name-status-z \
             --test-result "${{ needs.test.result }}" \
             --executed-checks \
-            portal system-agent crawler-worker homeops-executor youtube-memo book-memo maintenance \
+            portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance \
             > agent-loop-evidence.json
           policy_status=$?
           echo "policy_status=$policy_status" >> "$GITHUB_OUTPUT"
