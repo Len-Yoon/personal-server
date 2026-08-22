@@ -176,3 +176,12 @@ services:
       - "127.0.0.1:8015:8015"
     volumes:
       - ./data/car-care:/data/car-care
+    networks:
+      car-care-net:
+        ipv4_address: 172.30.0.10
+
+networks:
+  car-care-net:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

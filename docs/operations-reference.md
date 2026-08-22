@@ -50,7 +50,7 @@ Windows bootstrap은 Docker 스택을 확인한 뒤 `cloudflared tunnel run` 프
 
 ## 4. 차량관리 워커 운영 정책
 
-`car-care-worker`는 `data/car-care`만 쓰기 상태로 사용함. Telegram Bot long polling으로 명령과 알림을 처리하며, `car.len.pe.kr`은 Hyundai OAuth callback과 `/health`만 처리하도록 Cloudflare Tunnel에서 N100 loopback `8015`로 전달함. Caddy에는 이 호스트를 추가하지 않음.
+`car-care-worker`는 `data/car-care`만 쓰기 상태로 사용함. Telegram Bot long polling으로 명령과 알림을 처리하며, `car.len.pe.kr`은 Hyundai OAuth callback과 `/health`만 처리하도록 Cloudflare Tunnel에서 고정 Docker 주소 `172.30.0.10:8015`로 전달함. Caddy에는 이 호스트를 추가하지 않음.
 
 | 구분 | 내용 |
 |---|---|
