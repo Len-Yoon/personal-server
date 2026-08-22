@@ -88,6 +88,7 @@ class CommandHandlerTests(unittest.TestCase):
 
         self.assertIn("다음 정비", response)
         self.assertIn("엔진오일", response)
+        self.assertNotIn("상태 입력:", response)
 
     def test_vehicle_status_evaluates_engine_oil_time_from_today_not_snapshot_time(self) -> None:
         self.store.complete_maintenance("engine_oil", 52340, date(2025, 8, 22))

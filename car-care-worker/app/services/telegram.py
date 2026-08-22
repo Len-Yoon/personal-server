@@ -130,7 +130,6 @@ class CommandHandler:
             details.append(f"주행 가능 거리: {snapshot.dte_km:,}km")
         else:
             details.append("주행 가능 거리: 확인 필요")
-        details.append("상태 입력: 수동 모드")
         tire_change = self.store.get_latest_tire_change()
         if tire_change is not None:
             tire_name = {"winter_tires": "윈터타이어", "all_season_tires": "사계절타이어"}[tire_change.tire_type]
