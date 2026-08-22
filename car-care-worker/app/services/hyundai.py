@@ -165,8 +165,12 @@ class HyundaiClient:
         active: set[str] = set()
         for warning, path in paths.items():
             payload = self._get_json(f"/car/status/warning/{car_id}/{path}", access_token)
-            if not isinstance(payload, dict) or not isinstance(payload.get("status"), bool):
-                return None
+            if not isinstance(payload, dict):
+                continue
+            # Some vehicle models return only msgId for an unavailable warning.
+            # That must not discard an otherwise valid odometer/DTE observation.
+            if not isinstance(payload.get("status"), bool):
+                continue
             if payload["status"] and warning in SUPPORTED_WARNINGS:
                 active.add(warning)
         return active
