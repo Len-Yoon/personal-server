@@ -40,17 +40,17 @@ class MaintenanceRulesTest(unittest.TestCase):
         self.assertEqual(alerts[0].key, "maintenance:engine_oil")
         self.assertIn("30일", alerts[0].text)
 
-    def test_transmission_oil_prealert_starts_with_5000km_remaining(self) -> None:
+    def test_transmission_oil_prealert_starts_with_500km_remaining(self) -> None:
         record = MaintenanceRecord("transmission_oil", 0, date(2025, 1, 1))
 
         alerts = evaluate_maintenance(
-            55000,
+            59500,
             date(2026, 8, 22),
             {"engine_oil": None, "transmission_oil": record},
         )
 
         self.assertEqual(alerts[0].key, "maintenance:transmission_oil")
-        self.assertIn("5,000km", alerts[0].text)
+        self.assertIn("500km", alerts[0].text)
 
 
 if __name__ == "__main__":

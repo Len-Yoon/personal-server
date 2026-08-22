@@ -22,8 +22,8 @@ class MaintenanceRule:
 
 MAINTENANCE_RULES = {
     "engine_oil": MaintenanceRule(10_000, 12, 500, 30),
-    "transmission_oil": MaintenanceRule(60_000, None, 5_000, None),
-    "fuel_filter": MaintenanceRule(60_000, None, 5_000, None),
+    "transmission_oil": MaintenanceRule(60_000, None, 500, None),
+    "fuel_filter": MaintenanceRule(60_000, None, 500, None),
 }
 
 
