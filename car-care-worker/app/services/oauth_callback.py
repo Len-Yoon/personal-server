@@ -52,6 +52,9 @@ class HyundaiOAuthCallbackServer:
                 if parsed.path == "/health":
                     self._respond(HTTPStatus.OK, "ok")
                     return
+                if parsed.path == "/oauth/hyundai/data-redirect":
+                    self._respond(HTTPStatus.OK, "현대 차량 데이터 제공 동의가 완료되었습니다.")
+                    return
                 if parsed.path != "/oauth/hyundai/callback":
                     self._respond(HTTPStatus.NOT_FOUND, "not found")
                     return
@@ -71,6 +74,12 @@ class HyundaiOAuthCallbackServer:
                     return
                 message = result if isinstance(result, str) else "현대 차량 연결이 완료되었습니다. Telegram으로 돌아가세요."
                 self._respond(HTTPStatus.OK, message)
+
+            def do_POST(self) -> None:  # noqa: N802
+                if urlparse(self.path).path == "/oauth/hyundai/data-redirect":
+                    self._respond(HTTPStatus.OK, "ok")
+                    return
+                self._respond(HTTPStatus.NOT_FOUND, "not found")
 
             def log_message(self, _format: str, *_args: object) -> None:
                 """Do not log OAuth code or state from request paths."""

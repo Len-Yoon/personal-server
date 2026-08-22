@@ -106,6 +106,8 @@ class HyundaiClient:
         self._consume_authorization_state(state)
         if not self.exchange_authorization_code(code):
             raise OSError("Hyundai token exchange failed")
+        if not self._access_token or not self._request_data_agreement(self._access_token, state):
+            raise OSError("Hyundai data agreement failed")
         return "현대 차량 연결이 완료되었습니다. Telegram으로 돌아가세요."
 
     def exchange_authorization_code(self, code: str) -> bool:
@@ -188,6 +190,21 @@ class HyundaiClient:
                 return json.loads(response.read().decode("utf-8"))
         except (OSError, URLError, HTTPError, ValueError, json.JSONDecodeError):
             return None
+
+    def _request_data_agreement(self, access_token: str, state: str | None) -> bool:
+        if not state:
+            return False
+        request = Request(
+            f"{self._api_base_url}/car-service/terms/agreement",
+            data=urlencode({"token": f"Bearer {access_token}", "state": state}).encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=8):
+                return True
+        except (OSError, URLError, HTTPError):
+            return False
 
     def _save_tokens_from_payload(self, payload: object | None) -> bool:
         if not isinstance(payload, dict):
