@@ -58,6 +58,17 @@ class CarCareStoreTest(unittest.TestCase):
                 )
             )
 
+    def test_rejects_snapshot_with_timezone_naive_observed_at(self) -> None:
+        with self.assertRaises(ValueError):
+            self.store.save_snapshot(
+                VehicleSnapshot(
+                    observed_at=datetime(2026, 8, 22, 1, 30),
+                    odometer_km=52340,
+                    dte_km=401,
+                    warnings=frozenset(),
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

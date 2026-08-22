@@ -54,6 +54,8 @@ class CarCareStore:
 
     def save_snapshot(self, snapshot: VehicleSnapshot) -> None:
         self._validate_odometer(snapshot.odometer_km)
+        if snapshot.observed_at.tzinfo is None or snapshot.observed_at.utcoffset() is None:
+            raise ValueError("Observed timestamp must include a timezone")
         observed_at = snapshot.observed_at.astimezone(timezone.utc).isoformat()
         with self._connect() as db:
             db.execute(
