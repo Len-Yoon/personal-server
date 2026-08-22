@@ -94,6 +94,7 @@ class VerifyChangeScopeTests(unittest.TestCase):
             "homeops-executor/app/main.py": "homeops-executor",
             "youtube-memo/app/main.py": "youtube-memo",
             "book-memo/app/main.py": "book-memo",
+            "car-care-worker/app/main.py": "car-care-worker",
         }
         for path, service in expected.items():
             with self.subTest(path=path):

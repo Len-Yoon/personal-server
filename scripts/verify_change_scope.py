@@ -14,6 +14,7 @@ SERVICE_PREFIXES = {
     "homeops-executor/": "homeops-executor",
     "youtube-memo/": "youtube-memo",
     "book-memo/": "book-memo",
+    "car-care-worker/": "car-care-worker",
 }
 DOCUMENTATION_PREFIXES = ("docs/",)
 DOCUMENTATION_FILES = {"README.md", "AGENTS.md", "CLAUDE.md"}
