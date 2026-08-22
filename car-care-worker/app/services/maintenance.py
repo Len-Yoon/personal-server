@@ -21,8 +21,9 @@ class MaintenanceRule:
 
 
 MAINTENANCE_RULES = {
-    "engine_oil": MaintenanceRule(10_000, 12, 1_000, 30),
+    "engine_oil": MaintenanceRule(10_000, 12, 500, 30),
     "transmission_oil": MaintenanceRule(60_000, None, 5_000, None),
+    "fuel_filter": MaintenanceRule(60_000, None, 5_000, None),
 }
 
 
@@ -91,4 +92,4 @@ def _alert_detail(
 
 
 def _item_name(item: str) -> str:
-    return {"engine_oil": "엔진오일", "transmission_oil": "미션오일"}[item]
+    return {"engine_oil": "엔진오일", "transmission_oil": "미션오일", "fuel_filter": "연료필터"}[item]

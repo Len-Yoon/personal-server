@@ -7,7 +7,7 @@ from app.models import MaintenanceRecord, VehicleSnapshot
 
 
 class CarCareStore:
-    _MAINTENANCE_ITEMS = frozenset({"engine_oil", "transmission_oil"})
+    _MAINTENANCE_ITEMS = frozenset({"engine_oil", "transmission_oil", "fuel_filter"})
 
     def __init__(self, path: Path) -> None:
         self._path = path

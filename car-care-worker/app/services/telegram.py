@@ -84,7 +84,7 @@ class TelegramClient:
 
 
 class CommandHandler:
-    _ITEM_ALIASES = {"엔진오일": "engine_oil", "미션오일": "transmission_oil"}
+    _ITEM_ALIASES = {"엔진오일": "engine_oil", "미션오일": "transmission_oil", "연료필터": "fuel_filter"}
 
     def __init__(
         self,
@@ -176,7 +176,7 @@ class CommandHandler:
             for alert in self._maintenance_alerts(snapshot.odometer_km, date.today())
         }
         details = ["다음 정비:"]
-        for item, name in (("engine_oil", "엔진오일"), ("transmission_oil", "미션오일")):
+        for item, name in (("engine_oil", "엔진오일"), ("transmission_oil", "미션오일"), ("fuel_filter", "연료필터")):
             alert = alerts.get(f"maintenance:{item}")
             if alert:
                 details.append(alert)
@@ -212,16 +212,19 @@ class CommandHandler:
     def _maintenance_list() -> str:
         engine = MAINTENANCE_RULES["engine_oil"]
         transmission = MAINTENANCE_RULES["transmission_oil"]
+        fuel_filter = MAINTENANCE_RULES["fuel_filter"]
         return (
             f"엔진오일: {engine.interval_km:,}km 또는 {engine.interval_months}개월 "
             f"(사전 알림 {engine.warning_km:,}km/{engine.warning_days}일)\n"
             f"미션오일: {transmission.interval_km:,}km "
-            f"(사전 알림 {transmission.warning_km:,}km)"
+            f"(사전 알림 {transmission.warning_km:,}km)\n"
+            f"연료필터: {fuel_filter.interval_km:,}km "
+            f"(사전 알림 {fuel_filter.warning_km:,}km)"
         )
 
     @staticmethod
     def _usage() -> str:
         return (
             "사용법:\n/차량\n/주행거리 <km>\n"
-            "/정비완료 엔진오일 [km]\n/정비완료 미션오일 [km]\n/정비목록\n/알림테스트\n/현대연결"
+            "/정비완료 엔진오일 [km]\n/정비완료 미션오일 [km]\n/정비완료 연료필터 [km]\n/정비목록\n/알림테스트\n/현대연결"
         )

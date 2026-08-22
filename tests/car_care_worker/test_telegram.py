@@ -58,7 +58,7 @@ class CommandHandlerTests(unittest.TestCase):
         self.store.complete_maintenance("engine_oil", 50000, date.today())
         self.store.complete_maintenance("transmission_oil", 0, date.today())
 
-        response = self.handler.handle_update(TelegramUpdate("123", "/주행거리 59000"))
+        response = self.handler.handle_update(TelegramUpdate("123", "/주행거리 59500"))
 
         self.assertIn("엔진오일 정비 알림", response)
         self.assertIn("미션오일 정비 알림", response)
