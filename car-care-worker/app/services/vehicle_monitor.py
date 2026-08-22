@@ -1,0 +1,91 @@
+from app.models import VehicleSnapshot
+from app.services.maintenance import Alert, MAINTENANCE_RULES, evaluate_maintenance
+from app.services.store import CarCareStore
+
+
+SUPPORTED_WARNINGS = {"engine_oil", "brake_oil", "tire_pressure", "washer_fluid", "fuel"}
+
+
+class VehicleMonitor:
+    def __init__(self, store: CarCareStore) -> None:
+        self._store = store
+
+    def observe(self, snapshot: VehicleSnapshot) -> list[Alert]:
+        previous = self._store.load_last_snapshot()
+        alerts = self._observe_warnings(snapshot)
+        alerts.extend(self._observe_maintenance(snapshot))
+        alerts.extend(self._observe_trip(snapshot, previous))
+        self._store.save_snapshot(snapshot)
+        return alerts
+
+    def _observe_warnings(self, snapshot: VehicleSnapshot) -> list[Alert]:
+        alerts: list[Alert] = []
+        for warning in sorted(SUPPORTED_WARNINGS):
+            key = f"warning:{warning}"
+            active = warning in snapshot.warnings
+            if active and self._store.get_alert_state(key) != "active":
+                alerts.append(Alert("warning", key, f"경고등 점등: {_warning_name(warning)}"))
+            self._store.set_alert_state(key, "active" if active else "inactive")
+        return alerts
+
+    def _observe_maintenance(self, snapshot: VehicleSnapshot) -> list[Alert]:
+        records = {item: self._store.get_maintenance(item) for item in MAINTENANCE_RULES}
+        due_alerts = evaluate_maintenance(snapshot.odometer_km, snapshot.observed_at.date(), records)
+        due_keys = {alert.key for alert in due_alerts}
+        alerts: list[Alert] = []
+        for alert in due_alerts:
+            if self._store.get_alert_state(alert.key) != "active":
+                alerts.append(alert)
+            self._store.set_alert_state(alert.key, "active")
+        for item in MAINTENANCE_RULES:
+            key = f"maintenance:{item}"
+            if key not in due_keys:
+                self._store.set_alert_state(key, "inactive")
+        return alerts
+
+    def _observe_trip(
+        self, snapshot: VehicleSnapshot, previous: VehicleSnapshot | None
+    ) -> list[Alert]:
+        if previous is None:
+            return []
+        if snapshot.odometer_km > previous.odometer_km:
+            self._begin_or_continue_trip(previous.odometer_km)
+            return []
+        if (
+            snapshot.odometer_km == previous.odometer_km
+            and self._store.get_alert_state("trip:status") == "pending"
+            and (snapshot.observed_at - previous.observed_at).total_seconds() >= 15 * 60
+        ):
+            return [self._complete_trip(snapshot)]
+        return []
+
+    def _begin_or_continue_trip(self, previous_odometer_km: int) -> None:
+        if self._store.get_alert_state("trip:status") != "pending":
+            self._store.set_alert_state("trip:start_odometer", str(previous_odometer_km))
+        self._store.set_alert_state("trip:status", "pending")
+
+    def _complete_trip(self, snapshot: VehicleSnapshot) -> Alert:
+        start_odometer = int(self._store.get_alert_state("trip:start_odometer") or snapshot.odometer_km)
+        trip_distance = snapshot.odometer_km - start_odometer
+        details = [
+            f"이번 운행: {trip_distance:,}km",
+            f"주행거리: {snapshot.odometer_km:,}km",
+        ]
+        if snapshot.dte_km is not None:
+            details.append(f"주행 가능 거리: {snapshot.dte_km:,}km")
+        engine_oil = self._store.get_maintenance("engine_oil")
+        if engine_oil is not None and engine_oil.odometer_km is not None:
+            remaining_km = 10_000 - (snapshot.odometer_km - engine_oil.odometer_km)
+            details.append(f"엔진오일 잔여: {remaining_km:,}km")
+        self._store.set_alert_state("trip:status", "emitted")
+        return Alert("trip", "trip:summary", " / ".join(details))
+
+
+def _warning_name(warning: str) -> str:
+    return {
+        "engine_oil": "엔진오일",
+        "brake_oil": "브레이크 오일",
+        "tire_pressure": "타이어 공기압",
+        "washer_fluid": "워셔액",
+        "fuel": "연료",
+    }[warning]
