@@ -82,6 +82,36 @@ class TelegramClientTests(unittest.TestCase):
         self.assertEqual(json.loads(request.data), {"offset": 7, "timeout": 25})
         self.assertEqual(mocked_urlopen.call_args.kwargs["timeout"], 30)
 
+    def test_poll_ignores_malformed_results_and_keeps_valid_updates(self) -> None:
+        payloads = [
+            json.dumps({"ok": True, "result": {"unexpected": "object"}}).encode(),
+            json.dumps({"ok": True, "result": [
+                "unexpected entry",
+                {"update_id": 1, "message": "unexpected message"},
+                {"update_id": 2, "message": {"chat": {"id": 123}, "text": "/차량"}},
+            ]}).encode(),
+        ]
+
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def read(self):
+                return self.payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+        with patch("app.services.telegram.urlopen", side_effect=[Response(payload) for payload in payloads]):
+            client = TelegramClient("bot-token", "123")
+            self.assertEqual(client.poll(offset=None), [])
+            updates = client.poll(offset=None)
+
+        self.assertEqual(updates, [TelegramUpdate("123", "/차량", update_id=2)])
+
     def test_send_posts_to_configured_chat_with_eight_second_timeout(self) -> None:
         class Response:
             def read(self):

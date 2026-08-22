@@ -38,11 +38,21 @@ class TelegramClient:
         data = self._post("getUpdates", payload, timeout=30)
         if not data or not data.get("ok"):
             return []
+        result = data.get("result")
+        if not isinstance(result, list):
+            return []
         updates: list[TelegramUpdate] = []
-        for item in data.get("result", []):
+        for item in result:
+            if not isinstance(item, dict):
+                continue
             message = item.get("message", {})
+            if not isinstance(message, dict):
+                continue
             text = message.get("text")
-            chat_id = message.get("chat", {}).get("id")
+            chat = message.get("chat", {})
+            if not isinstance(chat, dict):
+                continue
+            chat_id = chat.get("id")
             if isinstance(text, str) and chat_id is not None:
                 updates.append(TelegramUpdate(str(chat_id), text, item.get("update_id")))
         return updates

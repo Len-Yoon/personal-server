@@ -54,3 +54,12 @@ PYTHONPATH=car-care-worker python3 -m unittest tests.car_care_worker.test_telegr
 ## 6. 후속 조치
 
 - Task 4에서 실행 루프가 `TelegramClient`와 `HyundaiClient`를 연결하고 polling offset·주기 관리를 구현 필요.
+
+## 7. Round 1 보완 결과
+
+| 항목 | 내용 |
+|---|---|
+| 원인 | `TelegramClient.poll()`이 `result`가 list이고 각 update·`message`·`chat`이 dict라는 외부 응답 형식을 검증하지 않아 `.get()` 호출 시 예외가 발생함 |
+| RED | `result`가 object인 응답과 문자열 update·문자열 message가 섞인 응답을 추가하여 `AttributeError` 재현함 |
+| 수정 | `result`는 list만 처리하고, 비정상 update·message·chat은 무시하도록 타입 검증 추가함 |
+| GREEN | 유효 update는 계속 반환하고 비정상 항목은 예외 없이 무시함. `test_telegram`, `test_hyundai` 11건 통과함 |
