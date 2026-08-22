@@ -113,7 +113,9 @@ def main() -> None:
 
     hyundai = HyundaiClient.from_environment()
     handler = CommandHandler(store, os.environ["CAR_CARE_TELEGRAM_CHAT_ID"], hyundai)
-    callback_server = HyundaiOAuthCallbackServer(hyundai)
+    # Docker forwards N100 loopback 8015 to the container network interface.
+    # External exposure remains restricted by the Compose host binding.
+    callback_server = HyundaiOAuthCallbackServer(hyundai, host="0.0.0.0")
     callback_server.start()
     monitor = VehicleMonitor(store)
     stopped = Event()
