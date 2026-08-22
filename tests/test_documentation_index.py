@@ -8,7 +8,7 @@ class DocumentationIndexTests(unittest.TestCase):
 
         self.assertIn("## 🚀 빠른 시작", content)
         self.assertIn("## ✅ 검증", content)
-        self.assertIn("## 🔎 더 알아보기", content)
+        self.assertIn("## 🔎 운영 문서", content)
 
     def test_document_index_separates_current_operations_and_history(self):
         content = Path("docs/README.md").read_text(encoding="utf-8")
