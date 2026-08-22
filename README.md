@@ -105,7 +105,7 @@ python3 tests/run_service_tests.py --list
 
 ### 차량관리 Telegram 설정
 
-`car-care-worker`는 Telegram long polling으로 동작하며, Hyundai OAuth 완료를 위해 `car.len.pe.kr`의 콜백 경로만 Cloudflare Tunnel에서 로컬 `8015` 포트로 전달합니다. Caddy 경로는 사용하지 않습니다. `.env`에는 `CAR_CARE_TELEGRAM_BOT_TOKEN`, `CAR_CARE_TELEGRAM_CHAT_ID`, `HYUNDAI_CLIENT_ID`, `HYUNDAI_CLIENT_SECRET`, `HYUNDAI_REDIRECT_URI=https://car.len.pe.kr/oauth/hyundai/callback`을 설정합니다. SQLite 상태와 OAuth 토큰은 `data/car-care`에만 저장됩니다.
+`car-care-worker`는 Telegram long polling으로 동작하며, Hyundai OAuth 완료를 위해 `car.len.pe.kr`의 콜백 경로만 Cloudflare Tunnel에서 로컬 `8015` 포트로 전달합니다. Caddy 경로는 사용하지 않습니다. `.env`에는 `CAR_CARE_TELEGRAM_BOT_TOKEN`, `CAR_CARE_TELEGRAM_CHAT_ID`, `HYUNDAI_CLIENT_ID`, `HYUNDAI_CLIENT_SECRET`, `HYUNDAI_REDIRECT_URI=https://car.len.pe.kr/oauth/hyundai/callback`을 설정합니다. SQLite 상태는 `data/car-care`에, OAuth 토큰은 별도 Docker named volume `car-care-oauth`의 `/data/oauth`에 분리 저장됩니다.
 
 지원 명령은 `/차량`, `/주행거리 <km>`, `/정비완료 엔진오일 [km]`, `/정비완료 미션오일 [km]`, `/정비완료 연료필터 [km]`, `/타이어교체 윈터`, `/타이어교체 사계절`, `/정비목록`, `/알림테스트`, `/현대연결`입니다. 최초 정비 이력은 `/정비완료` 명령으로 등록합니다.
 
