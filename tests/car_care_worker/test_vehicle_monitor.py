@@ -40,6 +40,42 @@ class VehicleMonitorTest(unittest.TestCase):
             self.monitor.observe(self.snapshot(52340, frozenset({"tire_pressure"}))), []
         )
 
+    def test_warning_reemits_once_after_it_is_cleared_then_reactivates(self) -> None:
+        self.monitor.observe(self.snapshot(52340, frozenset({"tire_pressure"})))
+        self.monitor.observe(self.snapshot(52340, frozenset(), minutes=1))
+
+        reactivated = self.monitor.observe(
+            self.snapshot(52340, frozenset({"tire_pressure"}), minutes=2)
+        )
+
+        self.assertEqual([alert.key for alert in reactivated], ["warning:tire_pressure"])
+        self.assertEqual(
+            self.monitor.observe(
+                self.snapshot(52340, frozenset({"tire_pressure"}), minutes=3)
+            ),
+            [],
+        )
+
+    def test_due_maintenance_remains_suppressed_after_corrected_odometer(self) -> None:
+        self.store.complete_maintenance("engine_oil", 50000, date(2026, 1, 1))
+
+        due = self.monitor.observe(self.snapshot(59000, frozenset()))
+        corrected = self.monitor.observe(self.snapshot(58000, frozenset(), minutes=1))
+        due_again = self.monitor.observe(self.snapshot(59000, frozenset(), minutes=2))
+
+        self.assertEqual([alert.key for alert in due], ["maintenance:engine_oil"])
+        self.assertEqual(corrected, [])
+        self.assertEqual(due_again, [])
+
+    def test_completed_maintenance_allows_the_next_due_cycle_to_alert(self) -> None:
+        self.store.complete_maintenance("engine_oil", 50000, date(2026, 1, 1))
+        self.monitor.observe(self.snapshot(59000, frozenset()))
+        self.store.complete_maintenance("engine_oil", 59000, date(2026, 8, 22))
+
+        alerts = self.monitor.observe(self.snapshot(68000, frozenset(), minutes=1))
+
+        self.assertEqual([alert.key for alert in alerts], ["maintenance:engine_oil"])
+
     def test_idle_after_distance_increase_emits_one_trip_summary(self) -> None:
         self.monitor.observe(self.snapshot(52320, frozenset()))
         self.monitor.observe(self.snapshot(52340, frozenset(), minutes=1))
@@ -53,6 +89,17 @@ class VehicleMonitorTest(unittest.TestCase):
         self.assertEqual(
             self.monitor.observe(self.snapshot(52340, frozenset(), minutes=31)), []
         )
+
+    def test_idle_summary_waits_15_minutes_across_five_minute_polls(self) -> None:
+        self.monitor.observe(self.snapshot(52320, frozenset()))
+        self.monitor.observe(self.snapshot(52340, frozenset(), minutes=1))
+        self.assertEqual(self.monitor.observe(self.snapshot(52340, frozenset(), minutes=6)), [])
+        self.assertEqual(self.monitor.observe(self.snapshot(52340, frozenset(), minutes=11)), [])
+
+        alerts = self.monitor.observe(self.snapshot(52340, frozenset(), minutes=16))
+
+        self.assertEqual([alert.key for alert in alerts], ["trip:summary"])
+        self.assertEqual(self.monitor.observe(self.snapshot(52340, frozenset(), minutes=21)), [])
 
     def test_trip_summary_includes_engine_oil_remaining_distance_when_recorded(self) -> None:
         self.store.complete_maintenance("engine_oil", 50000, date(2026, 8, 1))

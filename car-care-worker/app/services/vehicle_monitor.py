@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from app.models import VehicleSnapshot
 from app.services.maintenance import Alert, MAINTENANCE_RULES, evaluate_maintenance
 from app.services.store import CarCareStore
@@ -31,16 +33,11 @@ class VehicleMonitor:
     def _observe_maintenance(self, snapshot: VehicleSnapshot) -> list[Alert]:
         records = {item: self._store.get_maintenance(item) for item in MAINTENANCE_RULES}
         due_alerts = evaluate_maintenance(snapshot.odometer_km, snapshot.observed_at.date(), records)
-        due_keys = {alert.key for alert in due_alerts}
         alerts: list[Alert] = []
         for alert in due_alerts:
             if self._store.get_alert_state(alert.key) != "active":
                 alerts.append(alert)
             self._store.set_alert_state(alert.key, "active")
-        for item in MAINTENANCE_RULES:
-            key = f"maintenance:{item}"
-            if key not in due_keys:
-                self._store.set_alert_state(key, "inactive")
         return alerts
 
     def _observe_trip(
@@ -49,20 +46,27 @@ class VehicleMonitor:
         if previous is None:
             return []
         if snapshot.odometer_km > previous.odometer_km:
-            self._begin_or_continue_trip(previous.odometer_km)
+            self._begin_or_continue_trip(previous.odometer_km, snapshot.observed_at)
             return []
+        last_movement_at = self._last_movement_at()
         if (
             snapshot.odometer_km == previous.odometer_km
             and self._store.get_alert_state("trip:status") == "pending"
-            and (snapshot.observed_at - previous.observed_at).total_seconds() >= 15 * 60
+            and last_movement_at is not None
+            and (snapshot.observed_at - last_movement_at).total_seconds() >= 15 * 60
         ):
             return [self._complete_trip(snapshot)]
         return []
 
-    def _begin_or_continue_trip(self, previous_odometer_km: int) -> None:
+    def _begin_or_continue_trip(self, previous_odometer_km: int, observed_at: datetime) -> None:
         if self._store.get_alert_state("trip:status") != "pending":
             self._store.set_alert_state("trip:start_odometer", str(previous_odometer_km))
         self._store.set_alert_state("trip:status", "pending")
+        self._store.set_alert_state("trip:last_movement_at", observed_at.isoformat())
+
+    def _last_movement_at(self) -> datetime | None:
+        value = self._store.get_alert_state("trip:last_movement_at")
+        return None if value is None else datetime.fromisoformat(value)
 
     def _complete_trip(self, snapshot: VehicleSnapshot) -> Alert:
         start_odometer = int(self._store.get_alert_state("trip:start_odometer") or snapshot.odometer_km)

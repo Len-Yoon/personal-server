@@ -18,12 +18,15 @@ class CarCareStoreTest(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_completion_persists_engine_oil_distance_and_date(self) -> None:
+        self.store.set_alert_state("maintenance:engine_oil", "active")
+
         self.store.complete_maintenance("engine_oil", 52340, date(2026, 8, 22))
 
         self.assertEqual(
             self.store.get_maintenance("engine_oil"),
             MaintenanceRecord("engine_oil", 52340, date(2026, 8, 22)),
         )
+        self.assertEqual(self.store.get_alert_state("maintenance:engine_oil"), "inactive")
 
     def test_snapshot_and_alert_state_survive_new_store_instance(self) -> None:
         snapshot = VehicleSnapshot(

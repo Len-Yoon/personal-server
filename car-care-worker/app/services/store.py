@@ -40,6 +40,11 @@ class CarCareStore:
                 "odometer_km = excluded.odometer_km, completed_at = excluded.completed_at",
                 (item, odometer_km, completed_at.isoformat()),
             )
+            db.execute(
+                "INSERT INTO alert_states (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (f"maintenance:{item}", "inactive"),
+            )
 
     def get_maintenance(self, item: str) -> MaintenanceRecord | None:
         self._validate_item(item)
