@@ -157,3 +157,14 @@ services:
       - ./book-memo:/app
       - ./data/book-memo:/data/book-memo
       - ./data/logs:/app/data/logs
+
+  car-care-worker:
+    build: ./car-care-worker
+    container_name: car-care-worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - CAR_CARE_DB_PATH=/data/car-care/car-care.sqlite3
+    volumes:
+      - ./data/car-care:/data/car-care

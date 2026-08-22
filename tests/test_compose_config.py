@@ -6,6 +6,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ComposeConfigTests(unittest.TestCase):
+    def test_compose_defines_isolated_car_care_worker(self):
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        worker = compose.split("  car-care-worker:\n", 1)[1]
+
+        self.assertIn("build: ./car-care-worker", worker)
+        self.assertIn("restart: unless-stopped", worker)
+        self.assertIn("env_file:\n      - .env", worker)
+        self.assertNotIn("ports:", worker)
+        self.assertIn("./data/car-care:/data/car-care", worker)
+        self.assertNotIn("./car-care-worker:/app", worker)
+
     def test_agent_loop_documents_require_branch_cleanup_after_merge(self):
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")

@@ -173,6 +173,21 @@ services:
         max-size: "5m"
         max-file: "2"
 
+  car-care-worker:
+    cpus: "0.10"
+    mem_limit: 96m
+    pids_limit: 64
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
   caddy:
     build:
       context: ./caddy

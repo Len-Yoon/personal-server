@@ -64,6 +64,20 @@ SUITES = (
         "book-memo",
     ),
     TestSuite(
+        "car-care-worker",
+        (
+            "-m",
+            "unittest",
+            "tests.car_care_worker.test_store",
+            "tests.car_care_worker.test_maintenance",
+            "tests.car_care_worker.test_vehicle_monitor",
+            "tests.car_care_worker.test_telegram",
+            "tests.car_care_worker.test_hyundai",
+            "tests.car_care_worker.test_main",
+        ),
+        "car-care-worker",
+    ),
+    TestSuite(
         "maintenance",
         (
             "-m",
