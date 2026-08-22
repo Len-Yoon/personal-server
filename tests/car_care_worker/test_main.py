@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from app.main import DEFAULT_DATABASE_PATH, _database_path, run_once
+from app.main import DEFAULT_DATABASE_PATH, HYUNDAI_INTERVAL_SECONDS, _database_path, run_once
 from app.models import VehicleSnapshot
 from app.services.hyundai import HyundaiFetchResult
 from app.services.store import CarCareStore
@@ -72,6 +72,9 @@ class _StoppingHandler(_HandlerFake):
 
 
 class RunOnceTests(unittest.TestCase):
+    def test_hyundai_vehicle_observation_runs_every_ten_minutes(self) -> None:
+        self.assertEqual(HYUNDAI_INTERVAL_SECONDS, 10 * 60)
+
     def test_run_once_sends_command_response_and_monitor_alerts(self) -> None:
         telegram = _TelegramFake()
 

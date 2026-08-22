@@ -18,7 +18,7 @@ from app.services.vehicle_monitor import VehicleMonitor
 
 
 POLL_INTERVAL_SECONDS = 5
-HYUNDAI_INTERVAL_SECONDS = 5 * 60
+HYUNDAI_INTERVAL_SECONDS = 10 * 60
 DEFAULT_DATABASE_PATH = "/data/car-care/car-care.sqlite3"
 
 
