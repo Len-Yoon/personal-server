@@ -36,6 +36,15 @@ class DocumentationIndexTests(unittest.TestCase):
                     headings.append(line)
             self.assertEqual(len(headings), 1, path)
 
+    def test_subagent_workflow_defines_mandatory_routes(self):
+        project_rules = Path("AGENTS.md").read_text(encoding="utf-8")
+        workflow = Path("docs/codex-work-loop.md").read_text(encoding="utf-8")
+
+        self.assertIn("기능 구현·테스트·설정 파일", project_rules)
+        self.assertIn("전문 검토 에이전트를 필수로 포함해 최대 4명", project_rules)
+        self.assertIn("에이전트 운영 기록", workflow)
+        self.assertIn("전문 검토를 필수로 적용함", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
