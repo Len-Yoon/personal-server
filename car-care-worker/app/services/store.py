@@ -3,7 +3,7 @@ import sqlite3
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from app.models import MaintenanceRecord, VehicleSnapshot
+from app.models import MaintenanceRecord, TireChangeRecord, VehicleSnapshot
 
 
 class CarCareStore:
@@ -25,6 +25,9 @@ class CarCareStore:
                 "odometer_km INTEGER NOT NULL, dte_km INTEGER, warnings_json TEXT NOT NULL);"
                 "CREATE TABLE IF NOT EXISTS alert_states ("
                 "key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+                "CREATE TABLE IF NOT EXISTS tire_changes ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, tire_type TEXT NOT NULL, "
+                "odometer_km INTEGER, completed_at TEXT NOT NULL);"
             )
 
     def complete_maintenance(
@@ -56,6 +59,28 @@ class CarCareStore:
         if row is None:
             return None
         return MaintenanceRecord(row[0], row[1], date.fromisoformat(row[2]))
+
+    def record_tire_change(
+        self, tire_type: str, odometer_km: int | None, completed_at: date
+    ) -> None:
+        if tire_type not in {"winter_tires", "all_season_tires"}:
+            raise ValueError(f"Unsupported tire type: {tire_type}")
+        self._validate_odometer(odometer_km)
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO tire_changes (tire_type, odometer_km, completed_at) VALUES (?, ?, ?)",
+                (tire_type, odometer_km, completed_at.isoformat()),
+            )
+
+    def get_latest_tire_change(self) -> TireChangeRecord | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT tire_type, odometer_km, completed_at FROM tire_changes "
+                "ORDER BY completed_at DESC, id DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        return TireChangeRecord(row[0], row[1], date.fromisoformat(row[2]))
 
     def save_snapshot(self, snapshot: VehicleSnapshot) -> None:
         self._validate_odometer(snapshot.odometer_km)

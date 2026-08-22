@@ -85,6 +85,7 @@ class TelegramClient:
 
 class CommandHandler:
     _ITEM_ALIASES = {"엔진오일": "engine_oil", "미션오일": "transmission_oil", "연료필터": "fuel_filter"}
+    _TIRE_ALIASES = {"윈터": "winter_tires", "사계절": "all_season_tires"}
 
     def __init__(
         self,
@@ -109,6 +110,8 @@ class CommandHandler:
             return self._set_odometer(parts)
         if command == "/정비완료":
             return self._complete_maintenance(parts)
+        if command == "/타이어교체":
+            return self._complete_tire_change(parts)
         if command == "/정비목록" and len(parts) == 1:
             return self._maintenance_list()
         if command == "/알림테스트" and len(parts) == 1:
@@ -127,6 +130,11 @@ class CommandHandler:
         else:
             details.append("주행 가능 거리: 확인 필요")
         details.append("상태 입력: 수동 모드")
+        tire_change = self.store.get_latest_tire_change()
+        if tire_change is not None:
+            tire_name = {"winter_tires": "윈터타이어", "all_season_tires": "사계절타이어"}[tire_change.tire_type]
+            odometer_text = "주행거리 미입력" if tire_change.odometer_km is None else f"{tire_change.odometer_km:,}km"
+            details.append(f"최근 타이어 교체: {tire_name} ({odometer_text})")
         details.extend(self._next_maintenance_status(snapshot))
         return "\n".join(details)
 
@@ -161,6 +169,19 @@ class CommandHandler:
         item_name = parts[1]
         odometer_text = "주행거리 미입력" if odometer_km is None else f"{odometer_km:,}km"
         return f"{item_name} 정비 완료: {odometer_text}"
+
+    def _complete_tire_change(self, parts: list[str]) -> str:
+        if len(parts) != 2:
+            return self._usage()
+        tire_type = self._TIRE_ALIASES.get(parts[1])
+        if tire_type is None:
+            return self._usage()
+        today = date.today()
+        odometer_km = self._current_odometer()
+        self.store.record_tire_change(tire_type, odometer_km, today)
+        self.store.set_alert_state(f"seasonal:{tire_type}:{today.year}", "active")
+        odometer_text = "주행거리 미입력" if odometer_km is None else f"{odometer_km:,}km"
+        return f"{parts[1]}타이어 교체 완료: {odometer_text}"
 
     def _current_odometer(self) -> int | None:
         snapshot = self.store.load_last_snapshot()
@@ -227,4 +248,5 @@ class CommandHandler:
         return (
             "사용법:\n/차량\n/주행거리 <km>\n"
             "/정비완료 엔진오일 [km]\n/정비완료 미션오일 [km]\n/정비완료 연료필터 [km]\n/정비목록\n/알림테스트\n/현대연결"
+            "\n/타이어교체 윈터\n/타이어교체 사계절"
         )

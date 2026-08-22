@@ -48,6 +48,21 @@ class CommandHandlerTests(unittest.TestCase):
 
         self.assertEqual(self.store.get_maintenance("engine_oil").odometer_km, 52340)
 
+    def test_tire_change_records_current_odometer_and_suppresses_its_seasonal_alert(self) -> None:
+        self.handler.handle_update(TelegramUpdate("123", "/주행거리 52340"))
+
+        response = self.handler.handle_update(TelegramUpdate("123", "/타이어교체 윈터"))
+        record = self.store.get_latest_tire_change()
+        status = self.handler.handle_update(TelegramUpdate("123", "/차량"))
+
+        self.assertEqual(response, "윈터타이어 교체 완료: 52,340km")
+        self.assertEqual(record.tire_type, "winter_tires")
+        self.assertEqual(record.odometer_km, 52340)
+        self.assertEqual(
+            self.store.get_alert_state(f"seasonal:winter_tires:{date.today().year}"), "active"
+        )
+        self.assertIn("최근 타이어 교체: 윈터타이어 (52,340km)", status)
+
     def test_manual_odometer_updates_snapshot(self) -> None:
         response = self.handler.handle_update(TelegramUpdate("123", "/주행거리 52340"))
 

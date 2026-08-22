@@ -15,3 +15,10 @@ class MaintenanceRecord:
     item: str
     odometer_km: int | None
     completed_at: date
+
+
+@dataclass(frozen=True)
+class TireChangeRecord:
+    tire_type: str
+    odometer_km: int | None
+    completed_at: date
