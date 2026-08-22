@@ -5,6 +5,7 @@ import os
 from typing import Protocol
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 from app.models import VehicleSnapshot
 from app.services.maintenance import MAINTENANCE_RULES, evaluate_maintenance
@@ -176,7 +177,7 @@ class CommandHandler:
         tire_type = self._TIRE_ALIASES.get(parts[1])
         if tire_type is None:
             return self._usage()
-        today = date.today()
+        today = _today_in_korea()
         odometer_km = self._current_odometer()
         self.store.record_tire_change(tire_type, odometer_km, today)
         self.store.set_alert_state(f"seasonal:{tire_type}:{today.year}", "active")
@@ -250,3 +251,7 @@ class CommandHandler:
             "/정비완료 엔진오일 [km]\n/정비완료 미션오일 [km]\n/정비완료 연료필터 [km]\n/정비목록\n/알림테스트\n/현대연결"
             "\n/타이어교체 윈터\n/타이어교체 사계절"
         )
+
+
+def _today_in_korea() -> date:
+    return datetime.now(ZoneInfo("Asia/Seoul")).date()
