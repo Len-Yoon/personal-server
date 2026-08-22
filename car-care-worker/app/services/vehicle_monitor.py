@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from app.models import VehicleSnapshot
 from app.services.maintenance import Alert, MAINTENANCE_RULES, evaluate_maintenance
@@ -27,7 +27,8 @@ class VehicleMonitor:
             active = warning in snapshot.warnings
             if active and self._store.get_alert_state(key) != "active":
                 alerts.append(Alert("warning", key, f"경고등 점등: {_warning_name(warning)}"))
-            self._store.set_alert_state(key, "active" if active else "inactive")
+            if not active:
+                self._store.set_alert_state(key, "inactive")
         return alerts
 
     def _observe_maintenance(self, snapshot: VehicleSnapshot) -> list[Alert]:
@@ -37,8 +38,19 @@ class VehicleMonitor:
         for alert in due_alerts:
             if self._store.get_alert_state(alert.key) != "active":
                 alerts.append(alert)
-            self._store.set_alert_state(alert.key, "active")
         return alerts
+
+    def acknowledge(self, alert: Alert) -> None:
+        if alert.kind in {"warning", "maintenance"}:
+            self._store.set_alert_state(alert.key, "active")
+        elif alert.kind == "trip":
+            self._store.set_alert_state("trip:status", "emitted")
+
+    def should_notify_hyundai_error(self, today: date) -> bool:
+        return self._store.get_alert_state("hyundai:error_notified_on") != today.isoformat()
+
+    def acknowledge_hyundai_error(self, today: date) -> None:
+        self._store.set_alert_state("hyundai:error_notified_on", today.isoformat())
 
     def _observe_trip(
         self, snapshot: VehicleSnapshot, previous: VehicleSnapshot | None
@@ -81,7 +93,6 @@ class VehicleMonitor:
         if engine_oil is not None and engine_oil.odometer_km is not None:
             remaining_km = 10_000 - (snapshot.odometer_km - engine_oil.odometer_km)
             details.append(f"엔진오일 잔여: {remaining_km:,}km")
-        self._store.set_alert_state("trip:status", "emitted")
         return Alert("trip", "trip:summary", " / ".join(details))
 
 

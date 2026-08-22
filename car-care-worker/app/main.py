@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 import os
 from pathlib import Path
 import signal
@@ -9,7 +10,7 @@ from threading import Event
 import time
 from typing import Protocol
 
-from app.services.hyundai import HyundaiClient
+from app.services.hyundai import HyundaiClient, HyundaiFetchResult
 from app.services.store import CarCareStore
 from app.services.telegram import CommandHandler, TelegramClient, TelegramUpdate
 from app.services.vehicle_monitor import VehicleMonitor
@@ -31,11 +32,17 @@ class _CommandHandler(Protocol):
 
 
 class _HyundaiGateway(Protocol):
-    def fetch_snapshot(self) -> object | None: ...
+    def fetch_snapshot(self) -> HyundaiFetchResult: ...
 
 
 class _VehicleMonitor(Protocol):
     def observe(self, snapshot: object) -> list[object]: ...
+
+    def acknowledge(self, alert: object) -> None: ...
+
+    def should_notify_hyundai_error(self, today: date) -> bool: ...
+
+    def acknowledge_hyundai_error(self, today: date) -> None: ...
 
 
 def run_once(
@@ -76,11 +83,21 @@ def _handle_updates(
 def _observe_vehicle(
     telegram: _TelegramGateway, hyundai: _HyundaiGateway, monitor: _VehicleMonitor
 ) -> None:
-    snapshot = hyundai.fetch_snapshot()
-    if snapshot is None:
+    result = hyundai.fetch_snapshot()
+    if result.status == "disabled":
         return
-    for alert in monitor.observe(snapshot):
-        telegram.send(alert.text)
+    if result.status == "error":
+        today = date.today()
+        if monitor.should_notify_hyundai_error(today) and telegram.send(
+            "Hyundai 차량 상태 조회 오류: API 연결 또는 응답을 확인하세요."
+        ):
+            monitor.acknowledge_hyundai_error(today)
+        return
+    if result.snapshot is None:
+        return
+    for alert in monitor.observe(result.snapshot):
+        if telegram.send(alert.text):
+            monitor.acknowledge(alert)
 
 
 def main() -> None:

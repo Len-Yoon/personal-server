@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
@@ -6,6 +7,25 @@ from urllib.request import Request, urlopen
 
 from app.models import VehicleSnapshot
 from app.services.vehicle_monitor import SUPPORTED_WARNINGS
+
+
+@dataclass(frozen=True)
+class HyundaiFetchResult:
+    status: str
+    snapshot: VehicleSnapshot | None = None
+    error: str | None = None
+
+    @classmethod
+    def disabled(cls) -> "HyundaiFetchResult":
+        return cls("disabled")
+
+    @classmethod
+    def success(cls, snapshot: VehicleSnapshot) -> "HyundaiFetchResult":
+        return cls("success", snapshot=snapshot)
+
+    @classmethod
+    def failure(cls, error: str) -> "HyundaiFetchResult":
+        return cls("error", error=error)
 
 
 class HyundaiClient:
@@ -35,9 +55,9 @@ class HyundaiClient:
     def from_environment(cls) -> "HyundaiClient":
         return cls(*(os.getenv(name) for name in cls._REQUIRED_ENVIRONMENT))
 
-    def fetch_snapshot(self) -> VehicleSnapshot | None:
+    def fetch_snapshot(self) -> HyundaiFetchResult:
         if not all((self._client_id, self._client_secret, self._access_token, self._vehicle_id, self._api_url)):
-            return None
+            return HyundaiFetchResult.disabled()
         request = Request(
             self._api_url,
             headers={
@@ -51,9 +71,14 @@ class HyundaiClient:
         try:
             with urlopen(request, timeout=8) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-        except (OSError, URLError, ValueError, json.JSONDecodeError):
-            return None
-        return self._to_snapshot(payload)
+        except (OSError, URLError):
+            return HyundaiFetchResult.failure("request")
+        except (ValueError, json.JSONDecodeError):
+            return HyundaiFetchResult.failure("parse")
+        snapshot = self._to_snapshot(payload)
+        if snapshot is None:
+            return HyundaiFetchResult.failure("response")
+        return HyundaiFetchResult.success(snapshot)
 
     @staticmethod
     def _to_snapshot(payload: object) -> VehicleSnapshot | None:

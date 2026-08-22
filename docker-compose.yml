@@ -163,9 +163,14 @@ services:
     container_name: car-care-worker
     restart: unless-stopped
     stop_grace_period: 15s
-    env_file:
-      - .env
     environment:
+      - CAR_CARE_TELEGRAM_BOT_TOKEN=${CAR_CARE_TELEGRAM_BOT_TOKEN:-}
+      - CAR_CARE_TELEGRAM_CHAT_ID=${CAR_CARE_TELEGRAM_CHAT_ID:-}
       - CAR_CARE_DB_PATH=/data/car-care/car-care.sqlite3
+      - HYUNDAI_CLIENT_ID=${HYUNDAI_CLIENT_ID:-}
+      - HYUNDAI_CLIENT_SECRET=${HYUNDAI_CLIENT_SECRET:-}
+      - HYUNDAI_ACCESS_TOKEN=${HYUNDAI_ACCESS_TOKEN:-}
+      - HYUNDAI_VEHICLE_ID=${HYUNDAI_VEHICLE_ID:-}
+      - HYUNDAI_API_URL=${HYUNDAI_API_URL:-}
     volumes:
       - ./data/car-care:/data/car-care

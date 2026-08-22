@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -39,6 +39,24 @@ class CommandHandlerTests(unittest.TestCase):
 
         self.assertIn("52,340km", response)
         self.assertEqual(self.store.load_last_snapshot().odometer_km, 52340)
+
+    def test_manual_odometer_returns_due_engine_and_transmission_maintenance(self) -> None:
+        self.store.complete_maintenance("engine_oil", 50000, date.today())
+        self.store.complete_maintenance("transmission_oil", 0, date.today())
+
+        response = self.handler.handle_update(TelegramUpdate("123", "/주행거리 59000"))
+
+        self.assertIn("엔진오일 정비 알림", response)
+        self.assertIn("미션오일 정비 알림", response)
+
+    def test_vehicle_status_includes_next_maintenance_status(self) -> None:
+        self.handler.handle_update(TelegramUpdate("123", "/주행거리 52340"))
+        self.store.complete_maintenance("engine_oil", 50000, date.today())
+
+        response = self.handler.handle_update(TelegramUpdate("123", "/차량"))
+
+        self.assertIn("다음 정비", response)
+        self.assertIn("엔진오일", response)
 
     def test_vehicle_status_marks_manual_mode_without_snapshot(self) -> None:
         response = self.handler.handle_update(TelegramUpdate("123", "/차량"))

@@ -1,12 +1,18 @@
+from datetime import date, datetime, timezone
 import os
 from pathlib import Path
 from threading import Event
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
 from app.main import DEFAULT_DATABASE_PATH, _database_path, run_once
+from app.models import VehicleSnapshot
+from app.services.hyundai import HyundaiFetchResult
+from app.services.store import CarCareStore
 from app.services.telegram import TelegramUpdate
 from app.services.maintenance import Alert
+from app.services.vehicle_monitor import VehicleMonitor
 
 
 class _TelegramFake:
@@ -27,8 +33,15 @@ class _HandlerFake:
 
 
 class _HyundaiFake:
-    def fetch_snapshot(self) -> object:
-        return object()
+    def fetch_snapshot(self) -> HyundaiFetchResult:
+        return HyundaiFetchResult.success(
+            VehicleSnapshot(
+                observed_at=datetime.now(timezone.utc),
+                odometer_km=52340,
+                dte_km=401,
+                warnings=frozenset(),
+            )
+        )
 
 
 class _MonitorFake:
@@ -38,6 +51,15 @@ class _MonitorFake:
     def observe(self, _snapshot: object) -> list[Alert]:
         self.snapshots.append(_snapshot)
         return [Alert("trip", "trip:summary", "[운행 결과]")]
+
+    def acknowledge(self, _alert: Alert) -> None:
+        return None
+
+    def should_notify_hyundai_error(self, _today: date) -> bool:
+        return True
+
+    def acknowledge_hyundai_error(self, _today: date) -> None:
+        return None
 
 
 class _StoppingHandler(_HandlerFake):
@@ -73,6 +95,65 @@ class RunOnceTests(unittest.TestCase):
             database_path = _database_path()
 
         self.assertEqual(database_path, Path(DEFAULT_DATABASE_PATH))
+
+    def test_failed_alert_delivery_is_retried_before_alert_state_is_acknowledged(self) -> None:
+        class EmptyTelegram:
+            def __init__(self) -> None:
+                self.attempts: list[str] = []
+
+            def poll(self, _offset=None) -> list[TelegramUpdate]:
+                return []
+
+            def send(self, text: str) -> bool:
+                self.attempts.append(text)
+                return len(self.attempts) > 1
+
+        class RetryMonitor(_MonitorFake):
+            def __init__(self) -> None:
+                super().__init__()
+                self.acknowledged = False
+
+            def observe(self, _snapshot: object) -> list[Alert]:
+                return [] if self.acknowledged else [Alert("warning", "warning:fuel", "연료 경고")]
+
+            def acknowledge(self, _alert: Alert) -> None:
+                self.acknowledged = True
+
+        telegram = EmptyTelegram()
+        monitor = RetryMonitor()
+
+        run_once(_HandlerFake(), telegram, _HyundaiFake(), monitor)
+        run_once(_HandlerFake(), telegram, _HyundaiFake(), monitor)
+
+        self.assertEqual(telegram.attempts, ["연료 경고", "연료 경고"])
+        self.assertTrue(monitor.acknowledged)
+
+    def test_hyundai_error_is_sent_once_per_day_after_successful_delivery(self) -> None:
+        class EmptyTelegram:
+            def __init__(self) -> None:
+                self.sent: list[str] = []
+
+            def poll(self, _offset=None) -> list[TelegramUpdate]:
+                return []
+
+            def send(self, text: str) -> bool:
+                self.sent.append(text)
+                return True
+
+        class ErrorHyundai:
+            def fetch_snapshot(self) -> HyundaiFetchResult:
+                return HyundaiFetchResult.failure("request")
+
+        with TemporaryDirectory() as directory:
+            store = CarCareStore(Path(directory) / "car-care.sqlite3")
+            store.initialize()
+            monitor = VehicleMonitor(store)
+            telegram = EmptyTelegram()
+
+            run_once(_HandlerFake(), telegram, ErrorHyundai(), monitor)
+            run_once(_HandlerFake(), telegram, ErrorHyundai(), monitor)
+
+        self.assertEqual(telegram.sent, ["Hyundai 차량 상태 조회 오류: API 연결 또는 응답을 확인하세요."])
 
 
 if __name__ == "__main__":

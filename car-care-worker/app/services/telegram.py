@@ -6,7 +6,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from app.models import VehicleSnapshot
-from app.services.maintenance import MAINTENANCE_RULES
+from app.services.maintenance import MAINTENANCE_RULES, evaluate_maintenance
 from app.services.store import CarCareStore
 
 
@@ -114,6 +114,7 @@ class CommandHandler:
         else:
             details.append("주행 가능 거리: 확인 필요")
         details.append("상태 입력: 수동 모드")
+        details.extend(self._next_maintenance_status(snapshot))
         return "\n".join(details)
 
     def _set_odometer(self, parts: list[str]) -> str:
@@ -131,7 +132,8 @@ class CommandHandler:
                 warnings=frozenset() if previous is None else previous.warnings,
             )
         )
-        return f"주행거리 등록 완료: {odometer_km:,}km"
+        alerts = self._maintenance_alerts(odometer_km, date.today())
+        return "\n".join([f"주행거리 등록 완료: {odometer_km:,}km", *(alert.text for alert in alerts)])
 
     def _complete_maintenance(self, parts: list[str]) -> str:
         if len(parts) not in (2, 3):
@@ -150,6 +152,31 @@ class CommandHandler:
     def _current_odometer(self) -> int | None:
         snapshot = self.store.load_last_snapshot()
         return None if snapshot is None else snapshot.odometer_km
+
+    def _maintenance_alerts(self, odometer_km: int, today: date):
+        records = {item: self.store.get_maintenance(item) for item in MAINTENANCE_RULES}
+        return evaluate_maintenance(odometer_km, today, records)
+
+    def _next_maintenance_status(self, snapshot: VehicleSnapshot) -> list[str]:
+        alerts = {
+            alert.key: alert.text
+            for alert in self._maintenance_alerts(snapshot.odometer_km, snapshot.observed_at.date())
+        }
+        details = ["다음 정비:"]
+        for item, name in (("engine_oil", "엔진오일"), ("transmission_oil", "미션오일")):
+            alert = alerts.get(f"maintenance:{item}")
+            if alert:
+                details.append(alert)
+                continue
+            record = self.store.get_maintenance(item)
+            if record is None or record.odometer_km is None:
+                details.append(f"{name}: 정비 이력 확인 필요")
+                continue
+            remaining_km = MAINTENANCE_RULES[item].interval_km - (
+                snapshot.odometer_km - record.odometer_km
+            )
+            details.append(f"{name}: {remaining_km:,}km 후")
+        return details
 
     @staticmethod
     def _parse_odometer(value: str) -> int | None:

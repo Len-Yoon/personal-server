@@ -82,3 +82,33 @@
 | `scripts/deploy-n100.sh`, `scripts/windows-bootstrap.sh` 신규 워커 등록 | 변경함 |
 | 기존 서비스 command, crawler/news scheduler, Caddy | 변경하지 않음 |
 | 비밀값 | 생성·기록하지 않음 |
+
+---
+
+## 8. 최종 검토 보완
+
+### 8.1 중요 지적 조치 결과
+
+| 검토 항목 | 조치 내용 | 검증 결과 |
+|---|---|---|
+| 전송 실패 시 alert suppression | `VehicleMonitor.observe()`는 알림 후보만 생성하고, Telegram `send()` 성공 뒤에만 `acknowledge()`로 warning·maintenance·trip 상태를 저장하도록 변경함 | 전송 실패 뒤 다음 관측에서 동일 경고가 재생성되고, 성공 ACK 뒤에만 억제됨을 확인함 |
+| 수동 모드 정비 결과 | `/주행거리 <km>`가 엔진오일·미션오일 정비 규칙을 즉시 평가하여 명령 응답에 포함하도록 변경함. `/차량`에는 다음 정비 상태를 표시하도록 변경함 | 두 정비 항목의 사전 알림 및 다음 정비 상태 표시 테스트 통과 |
+| Hyundai 비활성·오류 구분 | `HyundaiFetchResult`로 `disabled`, `success`, `error` 상태를 구분함. 요청 오류와 JSON 파싱 오류를 별도 분류하고, 실제 오류 알림은 성공 전송 후에만 날짜 상태를 저장해 하루 1회로 제한함 | 자격 증명 미설정은 외부 호출 없이 disabled, 요청·파싱 오류는 error, 같은 날 오류 알림 1회 전송 확인 |
+| Compose 환경변수 최소화 | `car-care-worker`의 `env_file: .env`를 제거하고 Telegram·DB 및 Hyundai 필요 변수 8개만 명시 주입함 | service scope 테스트로 env_file 부재와 정확한 환경변수 목록 확인 |
+
+### 8.2 TDD 증적
+
+| 단계 | 실행 명령 | 결과 |
+|---|---|---|
+| RED | `PYTHONPATH=car-care-worker python3 -m unittest tests.car_care_worker.test_main tests.car_care_worker.test_telegram tests.car_care_worker.test_hyundai tests.car_care_worker.test_vehicle_monitor tests.test_compose_config -v` | 33개 실행 중 3개 실패·8개 오류 확인. suppression ACK 부재, 수동 정비 결과·다음 정비 상태 부재, Hyundai 결과 객체 부재, broad env_file 사용이 원인으로 확인됨. |
+| RED(파싱 구분) | `PYTHONPATH=car-care-worker python3 -m unittest tests.car_care_worker.test_hyundai -v` | JSON 파싱 오류가 request로 분류되는 실패 확인. |
+| GREEN | `PYTHONPATH=car-care-worker python3 -m unittest discover -s tests/car_care_worker -v` | 차량관리 36개 테스트 통과. |
+| GREEN(등록 스위트) | `python3 tests/run_service_tests.py --suite car-care-worker --suite maintenance` | car-care-worker 36개, maintenance 44개 테스트 통과. |
+
+### 8.3 범위 확인
+
+| 항목 | 결과 |
+|---|---|
+| 변경 영역 | `car-care-worker`, 신규 워커 Compose 환경변수, 관련 차량관리·Compose 테스트, Task 4 보고서로 한정됨 |
+| 미변경 영역 | crawler/news, 기존 서비스 command, Caddy, 배포·부트스트랩 스크립트 미변경 |
+| 비밀값 | 실제 Telegram·Hyundai 값 미생성·미기록 |

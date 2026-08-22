@@ -34,19 +34,40 @@ class VehicleMonitorTest(unittest.TestCase):
         self.monitor.observe(self.snapshot(52340, frozenset()))
 
         activated = self.monitor.observe(self.snapshot(52340, frozenset({"tire_pressure"})))
+        self.monitor.acknowledge(activated[0])
 
         self.assertEqual([alert.key for alert in activated], ["warning:tire_pressure"])
         self.assertEqual(
             self.monitor.observe(self.snapshot(52340, frozenset({"tire_pressure"}))), []
         )
 
+    def test_failed_warning_delivery_is_retried_until_the_alert_is_acknowledged(self) -> None:
+        self.monitor.observe(self.snapshot(52340, frozenset()))
+
+        failed_delivery = self.monitor.observe(
+            self.snapshot(52340, frozenset({"tire_pressure"}))
+        )
+        retry = self.monitor.observe(
+            self.snapshot(52340, frozenset({"tire_pressure"}), minutes=1)
+        )
+        self.monitor.acknowledge(retry[0])
+
+        self.assertEqual([alert.key for alert in failed_delivery], ["warning:tire_pressure"])
+        self.assertEqual([alert.key for alert in retry], ["warning:tire_pressure"])
+        self.assertEqual(
+            self.monitor.observe(self.snapshot(52340, frozenset({"tire_pressure"}), minutes=2)),
+            [],
+        )
+
     def test_warning_reemits_once_after_it_is_cleared_then_reactivates(self) -> None:
-        self.monitor.observe(self.snapshot(52340, frozenset({"tire_pressure"})))
+        first_alert = self.monitor.observe(self.snapshot(52340, frozenset({"tire_pressure"})))
+        self.monitor.acknowledge(first_alert[0])
         self.monitor.observe(self.snapshot(52340, frozenset(), minutes=1))
 
         reactivated = self.monitor.observe(
             self.snapshot(52340, frozenset({"tire_pressure"}), minutes=2)
         )
+        self.monitor.acknowledge(reactivated[0])
 
         self.assertEqual([alert.key for alert in reactivated], ["warning:tire_pressure"])
         self.assertEqual(
@@ -60,6 +81,7 @@ class VehicleMonitorTest(unittest.TestCase):
         self.store.complete_maintenance("engine_oil", 50000, date(2026, 1, 1))
 
         due = self.monitor.observe(self.snapshot(59000, frozenset()))
+        self.monitor.acknowledge(due[0])
         corrected = self.monitor.observe(self.snapshot(58000, frozenset(), minutes=1))
         due_again = self.monitor.observe(self.snapshot(59000, frozenset(), minutes=2))
 
@@ -69,7 +91,8 @@ class VehicleMonitorTest(unittest.TestCase):
 
     def test_completed_maintenance_allows_the_next_due_cycle_to_alert(self) -> None:
         self.store.complete_maintenance("engine_oil", 50000, date(2026, 1, 1))
-        self.monitor.observe(self.snapshot(59000, frozenset()))
+        due = self.monitor.observe(self.snapshot(59000, frozenset()))
+        self.monitor.acknowledge(due[0])
         self.store.complete_maintenance("engine_oil", 59000, date(2026, 8, 22))
 
         alerts = self.monitor.observe(self.snapshot(68000, frozenset(), minutes=1))
@@ -86,6 +109,7 @@ class VehicleMonitorTest(unittest.TestCase):
         self.assertIn("이번 운행: 20km", alerts[0].text)
         self.assertIn("주행거리: 52,340km", alerts[0].text)
         self.assertIn("주행 가능 거리: 401km", alerts[0].text)
+        self.monitor.acknowledge(alerts[0])
         self.assertEqual(
             self.monitor.observe(self.snapshot(52340, frozenset(), minutes=31)), []
         )
@@ -99,6 +123,7 @@ class VehicleMonitorTest(unittest.TestCase):
         alerts = self.monitor.observe(self.snapshot(52340, frozenset(), minutes=16))
 
         self.assertEqual([alert.key for alert in alerts], ["trip:summary"])
+        self.monitor.acknowledge(alerts[0])
         self.assertEqual(self.monitor.observe(self.snapshot(52340, frozenset(), minutes=21)), [])
 
     def test_trip_summary_includes_engine_oil_remaining_distance_when_recorded(self) -> None:

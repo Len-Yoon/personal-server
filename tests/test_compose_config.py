@@ -22,11 +22,28 @@ class ComposeConfigTests(unittest.TestCase):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         worker = _service_block(compose, "car-care-worker")
         volumes = re.search(r"^    volumes:\n(?P<items>(?:      - .+\n?)*)", worker, re.MULTILINE)
+        environment = re.search(
+            r"^    environment:\n(?P<items>(?:      - .+\n?)*)", worker, re.MULTILINE
+        )
 
         self.assertIn("build: ./car-care-worker", worker)
         self.assertIn("restart: unless-stopped", worker)
         self.assertIn("stop_grace_period: 15s", worker)
-        self.assertIn("env_file:\n      - .env", worker)
+        self.assertNotIn("env_file:", worker)
+        self.assertIsNotNone(environment)
+        self.assertEqual(
+            environment.group("items").splitlines(),
+            [
+                "      - CAR_CARE_TELEGRAM_BOT_TOKEN=${CAR_CARE_TELEGRAM_BOT_TOKEN:-}",
+                "      - CAR_CARE_TELEGRAM_CHAT_ID=${CAR_CARE_TELEGRAM_CHAT_ID:-}",
+                "      - CAR_CARE_DB_PATH=/data/car-care/car-care.sqlite3",
+                "      - HYUNDAI_CLIENT_ID=${HYUNDAI_CLIENT_ID:-}",
+                "      - HYUNDAI_CLIENT_SECRET=${HYUNDAI_CLIENT_SECRET:-}",
+                "      - HYUNDAI_ACCESS_TOKEN=${HYUNDAI_ACCESS_TOKEN:-}",
+                "      - HYUNDAI_VEHICLE_ID=${HYUNDAI_VEHICLE_ID:-}",
+                "      - HYUNDAI_API_URL=${HYUNDAI_API_URL:-}",
+            ],
+        )
         self.assertNotIn("\n    ports:", worker)
         self.assertIsNotNone(volumes)
         self.assertEqual(volumes.group("items").splitlines(), ["      - ./data/car-care:/data/car-care"])
