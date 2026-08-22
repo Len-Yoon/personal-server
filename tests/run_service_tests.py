@@ -73,6 +73,7 @@ SUITES = (
             "tests.car_care_worker.test_vehicle_monitor",
             "tests.car_care_worker.test_telegram",
             "tests.car_care_worker.test_hyundai",
+            "tests.car_care_worker.test_oauth_callback",
             "tests.car_care_worker.test_main",
         ),
         "car-care-worker",

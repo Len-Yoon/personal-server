@@ -50,6 +50,7 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("http://127.0.0.1:8001/health", WORKFLOW)
         self.assertIn("http://127.0.0.1:8002/health", WORKFLOW)
         self.assertIn("http://127.0.0.1:8003/health", WORKFLOW)
+        self.assertIn("http://127.0.0.1:8015/health", WORKFLOW)
         self.assertIn("homeops-executor", WORKFLOW)
         self.assertIn("--retry-all", health_check)
         self.assertIn("--retry-connrefused", health_check)
@@ -65,6 +66,7 @@ class DeployN100Tests(unittest.TestCase):
             "book-memo",
             "caddy",
             "homeops-executor",
+            "car-care-worker",
         ):
             self.assertIn(f"grep -Fx -- {service}", health_check)
 

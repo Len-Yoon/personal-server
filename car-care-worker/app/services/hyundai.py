@@ -73,6 +73,8 @@ class HyundaiClient:
         self._token_store_path = Path(token_store_path or DEFAULT_TOKEN_STORE_PATH)
         self._oauth_base_url = oauth_base_url.rstrip("/")
         self._api_base_url = api_base_url.rstrip("/")
+        self._access_token: str | None = None
+        self._access_token_expires_at = 0.0
 
     @classmethod
     def from_environment(cls) -> "HyundaiClient":
@@ -140,15 +142,14 @@ class HyundaiClient:
         )
 
     def _valid_access_token(self) -> str | None:
-        tokens = self._load_tokens()
-        if tokens is None:
+        if self._access_token and self._access_token_expires_at > time.time() + 60:
+            return self._access_token
+        refresh_token = self._load_refresh_token()
+        if refresh_token is None or not self._save_tokens_from_payload(
+            self._token_request({"grant_type": "refresh_token", "refresh_token": refresh_token})
+        ):
             return None
-        if tokens.expires_at > time.time() + 60:
-            return tokens.access_token
-        if not self._save_tokens_from_payload(self._token_request({"grant_type": "refresh_token", "refresh_token": tokens.refresh_token})):
-            return None
-        refreshed = self._load_tokens()
-        return None if refreshed is None else refreshed.access_token
+        return self._access_token
 
     def _resolve_single_car(self, access_token: str) -> str | None:
         payload = self._get_json("/car/profile/carlist", access_token)
@@ -198,20 +199,25 @@ class HyundaiClient:
             expires_at = time.time() + float(expires_in)
         except ValueError:
             return False
-        self._save_tokens(_Tokens(access_token, refresh_token, expires_at))
+        self._access_token = access_token
+        self._access_token_expires_at = expires_at
+        self._save_refresh_token(refresh_token)
         return True
 
-    def _save_tokens(self, tokens: _Tokens) -> None:
+    def _save_refresh_token(self, refresh_token: str) -> None:
         payload = self._load_token_file()
-        payload.update({"access_token": tokens.access_token, "refresh_token": tokens.refresh_token, "expires_at": tokens.expires_at})
+        payload["refresh_token"] = refresh_token
         self._write_token_file(payload)
 
     def _load_tokens(self) -> _Tokens | None:
         payload = self._load_token_file()
-        access_token, refresh_token, expires_at = _clean(payload.get("access_token")), _clean(payload.get("refresh_token")), payload.get("expires_at")
-        if not access_token or not refresh_token or not isinstance(expires_at, (int, float)):
+        refresh_token = _clean(payload.get("refresh_token"))
+        if not self._access_token or not refresh_token:
             return None
-        return _Tokens(access_token, refresh_token, float(expires_at))
+        return _Tokens(self._access_token, refresh_token, self._access_token_expires_at)
+
+    def _load_refresh_token(self) -> str | None:
+        return _clean(self._load_token_file().get("refresh_token"))
 
     def _save_authorization_state(self, state: str) -> None:
         payload = self._load_token_file()

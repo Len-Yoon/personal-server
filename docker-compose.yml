@@ -169,8 +169,10 @@ services:
       - CAR_CARE_DB_PATH=/data/car-care/car-care.sqlite3
       - HYUNDAI_CLIENT_ID=${HYUNDAI_CLIENT_ID:-}
       - HYUNDAI_CLIENT_SECRET=${HYUNDAI_CLIENT_SECRET:-}
-      - HYUNDAI_ACCESS_TOKEN=${HYUNDAI_ACCESS_TOKEN:-}
       - HYUNDAI_VEHICLE_ID=${HYUNDAI_VEHICLE_ID:-}
-      - HYUNDAI_API_URL=${HYUNDAI_API_URL:-}
+      - HYUNDAI_REDIRECT_URI=${HYUNDAI_REDIRECT_URI:-}
+      - HYUNDAI_TOKEN_STORE_PATH=/data/car-care/hyundai-token.json
+    ports:
+      - "127.0.0.1:8015:8015"
     volumes:
       - ./data/car-care:/data/car-care

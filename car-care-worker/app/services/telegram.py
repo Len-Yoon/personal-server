@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import json
 import os
+from typing import Protocol
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -20,6 +21,10 @@ class TelegramUpdate:
     chat_id: str
     text: str
     update_id: int | None = None
+
+
+class HyundaiOAuthStarter(Protocol):
+    def begin_authorization(self) -> str: ...
 
 
 class TelegramClient:
@@ -81,9 +86,15 @@ class TelegramClient:
 class CommandHandler:
     _ITEM_ALIASES = {"엔진오일": "engine_oil", "미션오일": "transmission_oil"}
 
-    def __init__(self, store: CarCareStore, allowed_chat_id: str) -> None:
+    def __init__(
+        self,
+        store: CarCareStore,
+        allowed_chat_id: str,
+        hyundai_oauth: HyundaiOAuthStarter | None = None,
+    ) -> None:
         self.store = store
         self._allowed_chat_id = str(allowed_chat_id)
+        self._hyundai_oauth = hyundai_oauth
 
     def handle_update(self, update: TelegramUpdate) -> str | None:
         if update.chat_id != self._allowed_chat_id:
@@ -102,6 +113,8 @@ class CommandHandler:
             return self._maintenance_list()
         if command == "/알림테스트" and len(parts) == 1:
             return "알림 테스트: 차량관리 Bot 명령 수신이 정상입니다."
+        if command == "/현대연결" and len(parts) == 1:
+            return self._hyundai_connect()
         return self._usage()
 
     def _vehicle_status(self) -> str:
@@ -178,6 +191,15 @@ class CommandHandler:
             details.append(f"{name}: {remaining_km:,}km 후")
         return details
 
+    def _hyundai_connect(self) -> str:
+        if self._hyundai_oauth is None:
+            return "Hyundai 연결을 사용할 수 없습니다. 서버 설정을 확인하세요."
+        try:
+            url = self._hyundai_oauth.begin_authorization()
+        except ValueError:
+            return "Hyundai 연결 설정이 완료되지 않았습니다. 관리자에게 문의하세요."
+        return f"Hyundai 연결 링크:\n{url}"
+
     @staticmethod
     def _parse_odometer(value: str) -> int | None:
         try:
@@ -201,5 +223,5 @@ class CommandHandler:
     def _usage() -> str:
         return (
             "사용법:\n/차량\n/주행거리 <km>\n"
-            "/정비완료 엔진오일 [km]\n/정비완료 미션오일 [km]\n/정비목록\n/알림테스트"
+            "/정비완료 엔진오일 [km]\n/정비완료 미션오일 [km]\n/정비목록\n/알림테스트\n/현대연결"
         )

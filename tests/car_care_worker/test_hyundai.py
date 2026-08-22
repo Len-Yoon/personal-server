@@ -67,6 +67,7 @@ class HyundaiClientTests(unittest.TestCase):
             self.assertTrue(result)
             self.assertTrue(token_path.exists())
             self.assertEqual(client._load_tokens().refresh_token, "refresh-token")
+            self.assertNotIn("access_token", token_path.read_text(encoding="utf-8"))
 
     def test_fetch_snapshot_uses_registered_vehicle_endpoints(self) -> None:
         """Changing documented endpoint paths or response parsing must not silently disable alerts."""

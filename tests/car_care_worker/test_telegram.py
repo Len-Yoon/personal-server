@@ -23,6 +23,20 @@ class CommandHandlerTests(unittest.TestCase):
     def test_rejects_update_from_unconfigured_chat_id(self) -> None:
         self.assertIsNone(self.handler.handle_update(TelegramUpdate("999", "/차량")))
 
+    def test_hyundai_connect_command_returns_one_time_authorization_url(self) -> None:
+        class OAuthStarter:
+            def begin_authorization(self) -> str:
+                return "https://prd.kr-ccapi.hyundai.com/api/v1/user/oauth2/authorize?state=one-time"
+
+        handler = CommandHandler(self.store, allowed_chat_id="123", hyundai_oauth=OAuthStarter())
+
+        response = handler.handle_update(TelegramUpdate("123", "/현대연결"))
+
+        self.assertEqual(
+            response,
+            "Hyundai 연결 링크:\nhttps://prd.kr-ccapi.hyundai.com/api/v1/user/oauth2/authorize?state=one-time",
+        )
+
     def test_complete_transmission_oil_records_command_odometer(self) -> None:
         response = self.handler.handle_update(TelegramUpdate("123", "/정비완료 미션오일 52340"))
 

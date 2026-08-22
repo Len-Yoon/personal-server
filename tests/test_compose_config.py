@@ -39,21 +39,22 @@ class ComposeConfigTests(unittest.TestCase):
                 "      - CAR_CARE_DB_PATH=/data/car-care/car-care.sqlite3",
                 "      - HYUNDAI_CLIENT_ID=${HYUNDAI_CLIENT_ID:-}",
                 "      - HYUNDAI_CLIENT_SECRET=${HYUNDAI_CLIENT_SECRET:-}",
-                "      - HYUNDAI_ACCESS_TOKEN=${HYUNDAI_ACCESS_TOKEN:-}",
                 "      - HYUNDAI_VEHICLE_ID=${HYUNDAI_VEHICLE_ID:-}",
-                "      - HYUNDAI_API_URL=${HYUNDAI_API_URL:-}",
+                "      - HYUNDAI_REDIRECT_URI=${HYUNDAI_REDIRECT_URI:-}",
+                "      - HYUNDAI_TOKEN_STORE_PATH=/data/car-care/hyundai-token.json",
             ],
         )
-        self.assertNotIn("\n    ports:", worker)
+        self.assertIn("      - \"127.0.0.1:8015:8015\"", worker)
         self.assertIsNotNone(volumes)
         self.assertEqual(volumes.group("items").splitlines(), ["      - ./data/car-care:/data/car-care"])
 
-    def test_n100_car_care_worker_remains_read_only_without_ports(self):
+    def test_n100_car_care_worker_remains_read_only_with_loopback_callback_port(self):
         compose = (ROOT / "docker-compose.n100.yml").read_text(encoding="utf-8")
         worker = _service_block(compose, "car-care-worker")
 
         self.assertIn("read_only: true", worker)
-        self.assertNotIn("\n    ports:", worker)
+        self.assertIn("      - \"127.0.0.1:8015:8015\"", worker)
+        self.assertIn("http://127.0.0.1:8015/health", worker)
 
     def test_agent_loop_documents_require_branch_cleanup_after_merge(self):
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")

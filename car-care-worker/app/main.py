@@ -11,6 +11,7 @@ import time
 from typing import Protocol
 
 from app.services.hyundai import HyundaiClient, HyundaiFetchResult
+from app.services.oauth_callback import HyundaiOAuthCallbackServer
 from app.services.store import CarCareStore
 from app.services.telegram import CommandHandler, TelegramClient, TelegramUpdate
 from app.services.vehicle_monitor import VehicleMonitor
@@ -110,22 +111,27 @@ def main() -> None:
     if telegram is None:
         raise RuntimeError("CAR_CARE_TELEGRAM_BOT_TOKEN and CAR_CARE_TELEGRAM_CHAT_ID are required")
 
-    handler = CommandHandler(store, os.environ["CAR_CARE_TELEGRAM_CHAT_ID"])
     hyundai = HyundaiClient.from_environment()
+    handler = CommandHandler(store, os.environ["CAR_CARE_TELEGRAM_CHAT_ID"], hyundai)
+    callback_server = HyundaiOAuthCallbackServer(hyundai)
+    callback_server.start()
     monitor = VehicleMonitor(store)
     stopped = Event()
     _install_signal_handlers(stopped)
 
     offset: int | None = None
     next_hyundai_at = time.monotonic()
-    while not stopped.is_set():
-        offset = _handle_updates(handler, telegram, offset, stopped)
-        if stopped.is_set():
-            break
-        if time.monotonic() >= next_hyundai_at:
-            _observe_vehicle(telegram, hyundai, monitor)
-            next_hyundai_at = time.monotonic() + HYUNDAI_INTERVAL_SECONDS
-        stopped.wait(POLL_INTERVAL_SECONDS)
+    try:
+        while not stopped.is_set():
+            offset = _handle_updates(handler, telegram, offset, stopped)
+            if stopped.is_set():
+                break
+            if time.monotonic() >= next_hyundai_at:
+                _observe_vehicle(telegram, hyundai, monitor)
+                next_hyundai_at = time.monotonic() + HYUNDAI_INTERVAL_SECONDS
+            stopped.wait(POLL_INTERVAL_SECONDS)
+    finally:
+        callback_server.stop()
 
 
 def _database_path() -> Path:
