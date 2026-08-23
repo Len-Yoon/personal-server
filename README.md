@@ -6,9 +6,10 @@
 
 단순히 서비스를 모아 둔 것이 아니라, 기능 변경을 PR·CI·독립 검토·N100 자동배포까지 연결한 운영 프로젝트입니다.
 
-| 개인 데이터와 운영 | 실제 차량관리 자동화 |
-|---|---|
-| ![Portal dashboard](docs/images/portal-dashboard.png) | ![Telegram 차량관리 봇의 차량 상태와 정비 잔여 거리 예시](docs/images/car-care-telegram-status.png) |
+<p align="center">
+  <img src="docs/images/portal-dashboard.png" alt="Personal Server Portal dashboard" width="360">
+  <img src="docs/images/car-care-telegram-status.png" alt="Telegram 차량관리 봇의 운행 종료 알림 예시" width="360">
+</p>
 
 ## ✨ 한눈에 보기
 
