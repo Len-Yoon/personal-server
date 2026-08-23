@@ -6,11 +6,6 @@
 
 단순히 서비스를 모아 둔 것이 아니라, 기능 변경을 PR·CI·독립 검토·N100 자동배포까지 연결한 운영 프로젝트입니다.
 
-<p align="center">
-  <img src="docs/images/portal-dashboard.png" alt="Personal Server Portal dashboard" width="360">
-  <img src="docs/images/car-care-telegram-status.png" alt="Telegram 차량관리 봇의 운행 종료 알림 예시" width="360">
-</p>
-
 ## ✨ 한눈에 보기
 
 | 항목 | 내용 |
@@ -90,6 +85,10 @@ Hyundai OAuth 콜백은 `car.len.pe.kr`에서 Cloudflare Tunnel을 통해 로컬
 
 </details>
 
+<p align="center">
+  <img src="docs/images/car-care-telegram-status.png" alt="Telegram 차량관리 봇의 운행 종료 알림 예시" width="360">
+</p>
+
 ### 🛠️ 운영과 안전성
 
 - **System Status**: N100 호스트의 CPU·메모리·디스크·백업·컨테이너 상태 확인
@@ -160,20 +159,25 @@ Internet
 
 </details>
 
-<details>
-<summary><strong>추가 서비스 화면 보기</strong></summary>
+## 🖼️ 주요 화면
 
-<br>
+### Portal · System Status
+
+| Portal | System Status |
+|---|---|
+| ![Portal dashboard](docs/images/portal-dashboard.png) | ![Admin status](docs/images/admin-status.png) |
+
+### File Manager · News Hub
 
 | File Manager | News Hub |
 |---|---|
 | ![File manager](docs/images/file-manager.png) | ![News hub](docs/images/news-hub.png) |
 
+### Memos
+
 | YouTube Memo | Book Memo |
 |---|---|
 | ![YouTube memo](docs/images/youtube-memo.png) | ![Book memo](docs/images/book-memo.png) |
-
-</details>
 
 ### 기술 스택
 
