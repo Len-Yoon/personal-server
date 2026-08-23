@@ -8,7 +8,6 @@
 
 <p align="center">
   <img src="docs/images/portal-dashboard.png" alt="Personal Server Portal dashboard" width="360">
-  <img src="docs/images/car-care-telegram-status.png" alt="Telegram 차량관리 봇의 운행 종료 알림 예시" width="360">
 </p>
 
 ## ✨ 한눈에 보기
@@ -66,6 +65,8 @@ N100 운영 환경, 환경변수, 배포 절차는 [운영 문서 색인](docs/R
 | 계절 타이어 | 매년 11월 15일 윈터타이어, 4월 1일 사계절타이어 교체 알림 |
 | 운행 요약 | 주행거리 변화가 멈춘 뒤 운행 거리·주행 가능 거리·엔진오일 잔여 거리 알림 |
 | 수동 관리 | Hyundai 연동이 없을 때 `/주행거리 <km>`로 관리 |
+
+ <img src="docs/images/car-care-telegram-status.png" alt="Telegram 차량관리 봇의 운행 종료 알림 예시" width="360">
 
 <details>
 <summary><strong>Telegram 명령어와 Hyundai 설정 보기</strong></summary>
