@@ -10,6 +10,8 @@
   <img src="docs/images/portal-dashboard.png" alt="Personal Server Portal dashboard" width="360">
 </p>
 
+<br>
+
 ## ✨ 한눈에 보기
 
 | 항목 | 내용 |
@@ -36,6 +38,8 @@ docker compose ps
 ```
 
 N100 운영 환경, 환경변수, 배포 절차는 [운영 문서 색인](docs/README.md)에서 확인합니다.
+
+<br>
 
 ---
 
@@ -98,6 +102,8 @@ Hyundai OAuth 콜백은 `car.len.pe.kr`에서 Cloudflare Tunnel을 통해 로컬
 - **접근 제어**: 수정 기능에 세션 인증과 Origin 검증 적용
 - **데이터 분리**: 운영 데이터와 `.env`는 저장소에 올리지 않으며, 서비스별 경로에 보관
 
+<br>
+
 ---
 
 ## 🤖 Harness / Loop Engineering
@@ -122,6 +128,8 @@ main CI · N100 자동배포 · health 검증
 
 세부 절차는 [Codex 작업 완료 루프](docs/codex-work-loop.md), 증거 운영은 [작업 루프 증거 운영](docs/agent-loop-evidence.md)을 참고합니다.
 
+<br>
+
 ---
 
 ## ✅ 검증
@@ -134,6 +142,8 @@ python3 tests/run_service_tests.py --list
 ```
 
 특정 서비스만 확인하려면 `--suite`를 사용합니다.
+
+<br>
 
 ---
 
@@ -184,6 +194,8 @@ Internet
 | Storage | SQLite, JSON file storage |
 | Infrastructure | Docker Compose, Cloudflare, Caddy, Windows/WSL2 |
 | CI/CD | GitHub Actions, Windows self-hosted runner |
+
+<br>
 
 ## 🔎 운영 문서
 
