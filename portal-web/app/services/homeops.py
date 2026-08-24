@@ -8,6 +8,7 @@ import sqlite3
 import uuid
 import os
 import time
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -34,6 +35,29 @@ class HomeOpsService:
         self.verification_attempts, self.verification_interval_seconds = verification_attempts, verification_interval_seconds
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
+
+    def diagnose_all(self) -> dict[str, Any]:
+        try:
+            diagnostics = self._mask(self.executor.all_diagnostics())
+        except OSError:
+            diagnostics = None
+        summary = self._diagnosis_summary(diagnostics)
+        self._save_latest_summary(summary)
+        return summary
+
+    def restart_all(self) -> dict[str, Any]:
+        try:
+            diagnostics = self._mask(self.executor.restart_all())
+        except OSError as exc:
+            diagnostics = self._poll_all_diagnostics() if self._is_expected_restart_disconnect(exc) else None
+        summary = self._restart_summary(diagnostics)
+        self._save_latest_summary(summary)
+        return summary
+
+    def latest_summary(self) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT summary FROM latest_homeops_summary WHERE singleton_id=1").fetchone()
+        return json.loads(row[0]) if row else None
 
     def create_diagnosis(self, service: str, record_healthy: bool = True) -> dict[str, Any]:
         self._require_service(service)
@@ -148,11 +172,88 @@ class HomeOpsService:
             rows = conn.execute("SELECT incident_id,service,status,created_at,proposal FROM incidents ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         return [{"incident_id": row[0], "service": row[1], "status": row[2], "created_at": row[3], "proposal": json.loads(row[4])} for row in rows]
 
+    def _poll_all_diagnostics(self) -> list[dict[str, Any]] | None:
+        last_diagnostics = None
+        for attempt in range(self.verification_attempts):
+            try:
+                last_diagnostics = self._mask(self.executor.all_diagnostics())
+                if self._all_services_healthy(last_diagnostics):
+                    return last_diagnostics
+            except HTTPError:
+                return None
+            except OSError:
+                pass
+            if attempt < self.verification_attempts - 1:
+                time.sleep(self.verification_interval_seconds)
+        return last_diagnostics
+
+    @staticmethod
+    def _is_expected_restart_disconnect(exc: OSError) -> bool:
+        if isinstance(exc, HTTPError):
+            return False
+        cause = exc.reason if isinstance(exc, URLError) else exc
+        return isinstance(cause, (ConnectionResetError, BrokenPipeError))
+
+    def _all_services_healthy(self, diagnostics: list[dict[str, Any]]) -> bool:
+        by_service = {str(item.get("service", "")): item for item in diagnostics}
+        return all(service in by_service and self._unhealthy_reason(by_service[service]) is None for service in ALLOWED_SERVICES)
+
+    def _diagnosis_summary(self, diagnostics: list[dict[str, Any]] | None) -> dict[str, Any]:
+        healthy: list[str] = []
+        unhealthy: list[dict[str, str]] = []
+        if diagnostics is None:
+            unhealthy = [{"service": service, "reason": "실행기 응답 없음"} for service in sorted(ALLOWED_SERVICES)]
+        else:
+            for item in diagnostics:
+                reason = self._unhealthy_reason(item)
+                if reason:
+                    unhealthy.append({"service": str(item.get("service", "")), "reason": reason})
+                else:
+                    healthy.append(str(item.get("service", "")))
+        return {"kind": "diagnosis", "created_at": self._now(), "healthy": healthy, "unhealthy": unhealthy}
+
+    def _restart_summary(self, diagnostics: list[dict[str, Any]] | None) -> dict[str, Any]:
+        recovered: list[str] = []
+        failed: list[dict[str, str]] = []
+        if diagnostics is None:
+            failed = [{"service": service, "reason": "실행기 응답 없음"} for service in sorted(ALLOWED_SERVICES)]
+        else:
+            by_service = {str(item.get("service", "")): item for item in diagnostics}
+            for service in sorted(ALLOWED_SERVICES):
+                item = by_service.get(service)
+                if item is None:
+                    failed.append({"service": service, "reason": "실행기 응답 없음"})
+                    continue
+                reason = self._unhealthy_reason(item)
+                if reason:
+                    failed.append({"service": service, "reason": reason})
+                else:
+                    recovered.append(service)
+        return {"kind": "restart", "created_at": self._now(), "healthy": [], "recovered": recovered, "failed": failed}
+
+    @staticmethod
+    def _unhealthy_reason(diagnostics: dict[str, Any]) -> str | None:
+        container = diagnostics.get("container", {})
+        if container.get("status") != "running":
+            return "중지됨"
+        if container.get("health") not in (None, "none", "healthy"):
+            return "healthcheck 비정상"
+        return None
+
+    def _save_latest_summary(self, summary: dict[str, Any]) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO latest_homeops_summary (singleton_id, summary) VALUES (1, ?) "
+                "ON CONFLICT(singleton_id) DO UPDATE SET summary=excluded.summary",
+                (json.dumps(summary),),
+            )
+
     def _initialize(self) -> None:
         with self._connect() as conn:
             conn.execute("CREATE TABLE IF NOT EXISTS incidents (incident_id TEXT PRIMARY KEY, service TEXT, status TEXT, created_at TEXT, diagnostics TEXT, proposal TEXT, approved_by TEXT, completed_at TEXT)")
             conn.execute("CREATE TABLE IF NOT EXISTS approval_tokens (incident_id TEXT PRIMARY KEY, token_hash TEXT, expires_at TEXT, consumed_at TEXT)")
             conn.execute("CREATE TABLE IF NOT EXISTS alert_states (alert_key TEXT PRIMARY KEY, occurrences INTEGER NOT NULL, active INTEGER NOT NULL, updated_at TEXT NOT NULL)")
+            conn.execute("CREATE TABLE IF NOT EXISTS latest_homeops_summary (singleton_id INTEGER PRIMARY KEY CHECK (singleton_id=1), summary TEXT NOT NULL)")
 
     def _connect(self):
         return sqlite3.connect(self.db_path)
@@ -191,15 +292,21 @@ class ExecutorClient:
     def diagnostics(self, service: str) -> dict[str, Any]:
         return self._request(f"/v1/diagnostics/{service}")
 
+    def all_diagnostics(self) -> list[dict[str, Any]]:
+        return self._request("/v1/diagnostics")
+
     def restart(self, incident_id: str, approval_token: str, service: str) -> dict[str, Any]:
         return self._request("/v1/restarts", {"incident_id": incident_id, "approval_token": approval_token, "action": ALLOWED_ACTION, "service": service})
+
+    def restart_all(self) -> list[dict[str, Any]]:
+        return self._request("/v1/restarts/all", method="POST")
 
     def health(self, service: str) -> bool:
         return bool(self.diagnostics(service).get("container", {}).get("health") == "healthy")
 
-    def _request(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _request(self, path: str, payload: dict[str, Any] | None = None, method: str | None = None) -> Any:
         data = json.dumps(payload).encode() if payload else None
-        request = Request(self.url + path, data=data, headers={"X-HomeOps-Executor-Secret": self.secret, "Content-Type": "application/json"})
+        request = Request(self.url + path, data=data, headers={"X-HomeOps-Executor-Secret": self.secret, "Content-Type": "application/json"}, method=method)
         with urlopen(request, timeout=5) as response:
             return json.loads(response.read().decode())
 

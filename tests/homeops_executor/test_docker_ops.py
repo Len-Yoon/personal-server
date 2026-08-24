@@ -49,6 +49,95 @@ class FakeDockerClient:
 
 
 class DockerOpsTests(unittest.TestCase):
+    def test_all_diagnostics_returns_allowlist_in_name_order(self):
+        from app.services import docker_ops
+
+        client = FakeDockerClient()
+
+        result = docker_ops.collect_all_diagnostics(client=client)
+
+        self.assertEqual(
+            [item["service"] for item in result],
+            sorted(docker_ops.ALLOWED_SERVICES),
+        )
+        self.assertEqual(
+            client.containers.filters,
+            [
+                {"label": f"com.docker.compose.service={service}"}
+                for service in sorted(docker_ops.ALLOWED_SERVICES)
+            ],
+        )
+
+    def test_restart_all_places_executor_last(self):
+        from app.services import docker_ops
+
+        client = FakeDockerClient()
+
+        result = docker_ops.restart_all_services(client=client)
+
+        expected_services = sorted(docker_ops.ALLOWED_SERVICES - {"homeops-executor"}) + ["homeops-executor"]
+        self.assertEqual([item["service"] for item in result], expected_services)
+        self.assertEqual(
+            client.containers.filters,
+            [
+                {"label": f"com.docker.compose.service={service}"}
+                for service in expected_services
+            ],
+        )
+
+    def test_restart_all_continues_after_failure_and_restarts_executor_last(self):
+        from app.services import docker_ops
+
+        class FailingContainer(FakeContainer):
+            def restart(self, timeout: int):
+                if self.name == "caddy":
+                    raise RuntimeError("docker daemon unavailable")
+                super().restart(timeout)
+
+        class FailingContainers:
+            def __init__(self):
+                self.filters: list[dict[str, str]] = []
+
+            def list(self, filters: dict[str, str]):
+                self.filters.append(filters)
+                service = filters["label"].removeprefix("com.docker.compose.service=")
+                return [FailingContainer(name=service)]
+
+        class FailingDockerClient:
+            def __init__(self):
+                self.containers = FailingContainers()
+
+        client = FailingDockerClient()
+
+        result = docker_ops.restart_all_services(client=client)
+
+        expected_services = [
+            "book-memo",
+            "caddy",
+            "crawler-worker",
+            "portal-web",
+            "system-agent",
+            "youtube-memo",
+            "homeops-executor",
+        ]
+        self.assertEqual([item["service"] for item in result], expected_services)
+        self.assertEqual(
+            result[1],
+            {
+                "service": "caddy",
+                "status": "failed",
+                "error": "docker daemon unavailable",
+            },
+        )
+        self.assertEqual(result[-1]["service"], "homeops-executor")
+        self.assertEqual(
+            client.containers.filters,
+            [
+                {"label": f"com.docker.compose.service={service}"}
+                for service in expected_services
+            ],
+        )
+
     def test_diagnostics_rejects_service_outside_allowlist(self):
         from app.services import docker_ops
 
@@ -124,6 +213,45 @@ class DockerOpsTests(unittest.TestCase):
             response = TestClient(app).get("/v1/diagnostics/crawler-worker")
 
         self.assertEqual(response.status_code, 403)
+
+    def test_executor_returns_all_diagnostics_with_shared_secret(self):
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        diagnostics = [{"service": "caddy", "container": {}, "logs": []}]
+        with patch.dict("os.environ", {"HOMEOPS_EXECUTOR_SHARED_SECRET": "shared"}, clear=False):
+            with patch("app.main.docker_ops.collect_all_diagnostics", return_value=diagnostics):
+                response = TestClient(app).get(
+                    "/v1/diagnostics",
+                    headers={"X-HomeOps-Executor-Secret": "shared"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), diagnostics)
+
+    def test_executor_rejects_restart_all_without_shared_secret(self):
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        with patch.dict("os.environ", {"HOMEOPS_EXECUTOR_SHARED_SECRET": "shared"}, clear=False):
+            response = TestClient(app).post("/v1/restarts/all")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_executor_restarts_all_with_shared_secret(self):
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        restarts = [{"service": "homeops-executor", "status": "running", "container": {}}]
+        with patch.dict("os.environ", {"HOMEOPS_EXECUTOR_SHARED_SECRET": "shared"}, clear=False):
+            with patch("app.main.docker_ops.restart_all_services", return_value=restarts):
+                response = TestClient(app).post(
+                    "/v1/restarts/all",
+                    headers={"X-HomeOps-Executor-Secret": "shared"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), restarts)
 
     def test_executor_rejects_action_other_than_restart(self):
         from fastapi.testclient import TestClient

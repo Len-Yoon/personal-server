@@ -37,6 +37,12 @@ def diagnostics(service: str, x_homeops_executor_secret: str = Header(default=""
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
+@app.get("/v1/diagnostics")
+def all_diagnostics(x_homeops_executor_secret: str = Header(default="")):
+    _require_shared_secret(x_homeops_executor_secret)
+    return docker_ops.collect_all_diagnostics()
+
+
 @app.post("/v1/restarts")
 def restart(payload: RestartRequest, x_homeops_executor_secret: str = Header(default="")):
     _require_shared_secret(x_homeops_executor_secret)
@@ -46,3 +52,9 @@ def restart(payload: RestartRequest, x_homeops_executor_secret: str = Header(def
         return docker_ops.restart_service(payload.service)
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@app.post("/v1/restarts/all")
+def restart_all(x_homeops_executor_secret: str = Header(default="")):
+    _require_shared_secret(x_homeops_executor_secret)
+    return docker_ops.restart_all_services()
