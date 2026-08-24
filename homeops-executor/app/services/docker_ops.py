@@ -7,12 +7,16 @@ ALLOWED_SERVICES = frozenset({"portal-web", "system-agent", "crawler-worker", "y
 MAX_LOG_BYTES = 32 * 1024
 
 
-def collect_diagnostics(service: str, client: Any | None = None) -> dict[str, object]:
+def collect_diagnostics(
+    service: str,
+    client: Any | None = None,
+    include_runtime_evidence: bool = True,
+) -> dict[str, object]:
     container = _get_container(service, client)
-    logs = _decode_logs(container.logs(tail=100, timestamps=False))
+    logs = _decode_logs(container.logs(tail=100, timestamps=False)) if include_runtime_evidence else []
     return {
         "service": service,
-        "container": _container_snapshot(container),
+        "container": _container_snapshot(container, include_runtime_evidence=include_runtime_evidence),
         "logs": logs,
     }
 
@@ -21,7 +25,9 @@ def collect_all_diagnostics(client: Any | None = None) -> list[dict[str, object]
     diagnostics: list[dict[str, object]] = []
     for service in sorted(ALLOWED_SERVICES):
         try:
-            diagnostics.append(collect_diagnostics(service, client=client))
+            diagnostics.append(
+                collect_diagnostics(service, client=client, include_runtime_evidence=False)
+            )
         except ValueError as exc:
             diagnostics.append(_unavailable_diagnostics(service, str(exc)))
         except Exception:
@@ -79,10 +85,14 @@ def _require_allowed_service(service: str) -> None:
         raise ValueError("service_not_allowed")
 
 
-def _container_snapshot(container: Any) -> dict[str, object]:
+def _container_snapshot(container: Any, include_runtime_evidence: bool = True) -> dict[str, object]:
     state = container.attrs.get("State", {})
     health = state.get("Health", {})
-    stats = container.stats(stream=False) if state.get("Status") == "running" else {}
+    stats = (
+        container.stats(stream=False)
+        if include_runtime_evidence and state.get("Status") == "running"
+        else {}
+    )
     memory = stats.get("memory_stats", {})
     memory_limit = memory.get("limit") or 0
     memory_percent = round((memory.get("usage", 0) / memory_limit) * 100, 1) if memory_limit else 0.0

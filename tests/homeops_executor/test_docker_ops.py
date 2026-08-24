@@ -15,6 +15,8 @@ class FakeContainer:
             }
         }
         self.restart_calls: list[int] = []
+        self.logs_calls = 0
+        self.stats_calls = 0
 
     def restart(self, timeout: int):
         self.restart_calls.append(timeout)
@@ -23,9 +25,11 @@ class FakeContainer:
         return None
 
     def logs(self, **kwargs):
+        self.logs_calls += 1
         return b"worker ready\nAuthorization: Bearer should-not-be-masked-here\n"
 
     def stats(self, stream=False):
+        self.stats_calls += 1
         return {
             "memory_stats": {"usage": 45, "limit": 100},
             "cpu_stats": {"cpu_usage": {"total_usage": 200, "percpu_usage": [50, 50]}, "system_cpu_usage": 2_000},
@@ -60,6 +64,17 @@ class DockerOpsTests(unittest.TestCase):
             [item["service"] for item in result],
             sorted(docker_ops.ALLOWED_SERVICES),
         )
+
+    def test_all_diagnostics_uses_lightweight_container_state_only(self):
+        from app.services import docker_ops
+
+        client = FakeDockerClient()
+
+        result = docker_ops.collect_all_diagnostics(client=client)
+
+        self.assertTrue(all(item["logs"] == [] for item in result))
+        self.assertEqual(client.containers.container.logs_calls, 0)
+        self.assertEqual(client.containers.container.stats_calls, 0)
         self.assertEqual(
             client.containers.filters,
             [
