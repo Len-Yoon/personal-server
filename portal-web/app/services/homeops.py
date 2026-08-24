@@ -103,7 +103,7 @@ class HomeOpsService:
                         "status_label": {
                             "healthy": "점검 완료 · 정상",
                             "action_required": "점검 완료 · 조치 필요",
-                            "restart_pending": "재시작 실행 · 재점검 대기",
+                            "restart_pending": "재시작 실행",
                             "recovered": "재점검 완료 · 복구 완료",
                             "failed": "재점검 완료 · 복구 실패",
                         }.get(row[1], row[1]),

@@ -1382,6 +1382,15 @@ a {
 .homeops-abnormal-reasons li { display:flex; align-items:baseline; justify-content:flex-start; gap:8px; padding:9px 11px; border:1px solid rgba(248,113,113,.24); border-radius:10px; color:#fecaca; background:rgba(127,29,29,.16); }
 .homeops-abnormal-reasons li span { color:#fca5a5; }
 .homeops-abnormal-reasons .homeops-summary-separator { color:#fda4af; }
+.homeops-abnormal-reasons .homeops-history-healthy,
+.homeops-abnormal-reasons .homeops-history-recovered { border-color:rgba(56,189,248,.35); color:#bae6fd; background:rgba(3,105,161,.22); }
+.homeops-abnormal-reasons .homeops-history-healthy span,
+.homeops-abnormal-reasons .homeops-history-recovered span { color:#7dd3fc; }
+.homeops-abnormal-reasons .homeops-history-healthy .homeops-summary-separator,
+.homeops-abnormal-reasons .homeops-history-recovered .homeops-summary-separator { color:#38bdf8; }
+.homeops-abnormal-reasons .homeops-history-restart_pending { border-color:rgba(251,146,60,.32); color:#fed7aa; background:rgba(154,52,18,.18); }
+.homeops-abnormal-reasons .homeops-history-restart_pending span { color:#fdba74; }
+.homeops-abnormal-reasons .homeops-history-restart_pending .homeops-summary-separator { color:#fb923c; }
 .homeops-empty-summary { margin:0; padding:14px 16px; border:1px dashed rgba(148,163,184,.28); border-radius:12px; color:#94a3b8; }
 
 @media (max-width: 680px) {

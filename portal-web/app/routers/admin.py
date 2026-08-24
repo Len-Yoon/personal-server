@@ -87,7 +87,7 @@ def _render_authenticated_admin_status(request: Request, issue_homeops_session: 
     )
     homeops = get_homeops_service()
     context["homeops_summary"] = homeops.latest_summary()
-    context["homeops_history"] = homeops.operation_history()
+    context["homeops_history"] = homeops.operation_history(limit=5)
     context["homeops_actionable_operation"] = next(
         (item for item in context["homeops_history"] if item["status"] == "action_required"),
         None,

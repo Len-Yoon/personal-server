@@ -158,8 +158,8 @@
                     <section class="homeops-summary" aria-label="최근 HomeOps 운영 이력">
                         <h3>최근 운영 이력</h3>
                         <ul class="homeops-abnormal-reasons">
-                            {% for operation in homeops_history %}
-                                <li>
+                            {% for operation in homeops_history[:5] %}
+                                <li class="homeops-history-item homeops-history-{{ operation.status }}">
                                     <strong>{{ operation.status_label }}</strong>
                                     <span class="homeops-summary-separator">—</span>
                                     <span>{{ operation.created_at }}</span>
