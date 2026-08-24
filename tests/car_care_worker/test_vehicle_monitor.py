@@ -77,6 +77,43 @@ class VehicleMonitorTest(unittest.TestCase):
             [],
         )
 
+    def test_warning_emits_a_recovery_notice_once_after_it_clears(self) -> None:
+        activated = self.monitor.observe(self.snapshot(52340, frozenset({"tire_pressure"})))
+        self.monitor.acknowledge(activated[0])
+
+        recovered = self.monitor.observe(self.snapshot(52340, frozenset(), minutes=1))
+        self.monitor.acknowledge(recovered[0])
+
+        self.assertEqual([alert.key for alert in recovered], ["warning:tire_pressure:cleared"])
+        self.assertEqual(recovered[0].text, "경고등 해제: 타이어 공기압")
+        self.assertEqual(self.monitor.observe(self.snapshot(52340, frozenset(), minutes=2)), [])
+
+    def test_dte_alerts_once_at_each_threshold_and_rearms_after_refuel(self) -> None:
+        at_100 = self.monitor.observe(self.snapshot(52340, frozenset(), dte_km=100))
+        self.monitor.acknowledge(at_100[0])
+
+        at_50 = self.monitor.observe(self.snapshot(52340, frozenset(), minutes=1, dte_km=50))
+        self.monitor.acknowledge(at_50[0])
+
+        self.assertEqual([alert.key for alert in at_100], ["dte:100"])
+        self.assertEqual(at_100[0].text, "주유 필요: 주행 가능 거리 100km")
+        self.assertEqual([alert.key for alert in at_50], ["dte:50"])
+        self.assertEqual(at_50[0].text, "주유 필요: 주행 가능 거리 50km")
+        self.assertEqual(
+            self.monitor.observe(self.snapshot(52340, frozenset(), minutes=2, dte_km=49)), []
+        )
+
+        self.monitor.observe(self.snapshot(52340, frozenset(), minutes=3, dte_km=180))
+        rearmed = self.monitor.observe(self.snapshot(52340, frozenset(), minutes=4, dte_km=99))
+
+        self.assertEqual([alert.key for alert in rearmed], ["dte:100"])
+
+    def test_dte_below_50km_emits_only_the_most_urgent_alert(self) -> None:
+        alerts = self.monitor.observe(self.snapshot(52340, frozenset(), dte_km=49))
+
+        self.assertEqual([alert.key for alert in alerts], ["dte:50"])
+        self.assertEqual(alerts[0].text, "주유 필요: 주행 가능 거리 49km")
+
     def test_due_maintenance_remains_suppressed_after_corrected_odometer(self) -> None:
         self.store.complete_maintenance("engine_oil", 50000, date(2026, 1, 1))
 

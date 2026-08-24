@@ -6,6 +6,7 @@ from app.services.store import CarCareStore
 
 
 SUPPORTED_WARNINGS = {"engine_oil", "brake_oil", "tire_pressure", "washer_fluid", "fuel"}
+DTE_ALERT_THRESHOLDS = (100, 50)
 
 
 class VehicleMonitor:
@@ -15,6 +16,7 @@ class VehicleMonitor:
     def observe(self, snapshot: VehicleSnapshot) -> list[Alert]:
         previous = self._store.load_last_snapshot()
         alerts = self._observe_warnings(snapshot)
+        alerts.extend(self._observe_dte(snapshot))
         alerts.extend(self._observe_maintenance(snapshot))
         alerts.extend(self._observe_trip(snapshot, previous))
         self._store.save_snapshot(snapshot)
@@ -27,9 +29,34 @@ class VehicleMonitor:
             active = warning in snapshot.warnings
             if active and self._store.get_alert_state(key) != "active":
                 alerts.append(Alert("warning", key, f"경고등 점등: {_warning_name(warning)}"))
-            if not active:
+            if not active and self._store.get_alert_state(key) == "active":
+                alerts.append(Alert("warning", f"{key}:cleared", f"경고등 해제: {_warning_name(warning)}"))
+                self._store.set_alert_state(key, "recovery_pending")
+            elif not active and self._store.get_alert_state(key) == "recovery_pending":
+                alerts.append(Alert("warning", f"{key}:cleared", f"경고등 해제: {_warning_name(warning)}"))
+            elif not active:
                 self._store.set_alert_state(key, "inactive")
         return alerts
+
+    def _observe_dte(self, snapshot: VehicleSnapshot) -> list[Alert]:
+        if snapshot.dte_km is None:
+            return []
+        breached_thresholds = [
+            threshold_km for threshold_km in DTE_ALERT_THRESHOLDS if snapshot.dte_km <= threshold_km
+        ]
+        if not breached_thresholds:
+            for threshold_km in DTE_ALERT_THRESHOLDS:
+                self._store.set_alert_state(f"dte:{threshold_km}", "armed")
+            return []
+        urgent_threshold_km = min(breached_thresholds)
+        for threshold_km in DTE_ALERT_THRESHOLDS:
+            key = f"dte:{threshold_km}"
+            if threshold_km != urgent_threshold_km and snapshot.dte_km <= threshold_km:
+                self._store.set_alert_state(key, "notified")
+        key = f"dte:{urgent_threshold_km}"
+        if self._store.get_alert_state(key) == "notified":
+            return []
+        return [Alert("dte", key, f"주유 필요: 주행 가능 거리 {snapshot.dte_km:,}km")]
 
     def _observe_maintenance(self, snapshot: VehicleSnapshot) -> list[Alert]:
         records = {item: self._store.get_maintenance(item) for item in MAINTENANCE_RULES}
@@ -41,8 +68,12 @@ class VehicleMonitor:
         return alerts
 
     def acknowledge(self, alert: Alert) -> None:
-        if alert.kind in {"warning", "maintenance", "seasonal"}:
+        if alert.kind == "warning" and alert.key.endswith(":cleared"):
+            self._store.set_alert_state(alert.key.removesuffix(":cleared"), "inactive")
+        elif alert.kind in {"warning", "maintenance", "seasonal"}:
             self._store.set_alert_state(alert.key, "active")
+        elif alert.kind == "dte":
+            self._store.set_alert_state(alert.key, "notified")
         elif alert.kind == "trip":
             self._store.set_alert_state("trip:status", "emitted")
 
