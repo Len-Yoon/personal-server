@@ -317,6 +317,107 @@ class HomeOpsTests(unittest.TestCase):
         self.assertEqual(summary["failed"], [])
         self.assertEqual(self.service.latest_summary(), summary)
 
+    def test_operation_history_links_unhealthy_diagnosis_restart_and_recovery(self):
+        unhealthy = [
+            {
+                "service": service,
+                "container": {
+                    "status": "exited" if service == "caddy" else "running",
+                    "health": "none" if service == "caddy" else "healthy",
+                },
+                "logs": [],
+            }
+            for service in sorted({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
+        ]
+        healthy = [
+            {"service": service, "container": {"status": "running", "health": "healthy"}, "logs": []}
+            for service in sorted({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
+        ]
+        self.executor.all_diagnostics_results = [unhealthy]
+
+        diagnosis = self.service.diagnose_all()
+        operation_id = diagnosis["operation_id"]
+        self.executor.restart_all_result = {"status": "accepted"}
+        pending = self.service.restart_all(operation_id)
+
+        self.assertEqual(pending["kind"], "restart_pending")
+        self.assertEqual(pending["operation_id"], operation_id)
+        self.assertEqual(self.service.operation_history(limit=1)[0]["status"], "restart_pending")
+
+        with self.service._connect() as conn:
+            conn.execute(
+                "UPDATE homeops_operation_runs SET restart_requested_at=? WHERE operation_id=?",
+                ((datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat(), operation_id),
+            )
+        self.executor.all_diagnostics_results = [healthy]
+
+        completed = self.service.latest_summary()
+        history = self.service.operation_history(limit=1)[0]
+
+        self.assertEqual(completed["kind"], "restart")
+        self.assertEqual(history["operation_id"], operation_id)
+        self.assertEqual(history["status"], "recovered")
+        self.assertEqual(history["initial_result"]["unhealthy"], [{"service": "caddy", "reason": "중지됨"}])
+        self.assertEqual(history["final_result"]["failed"], [])
+        self.assertEqual(
+            [event["event_type"] for event in history["events"]],
+            ["diagnosis_completed", "restart_requested", "verification_completed"],
+        )
+
+    def test_pending_restart_retries_incomplete_verification_before_recording_failure(self):
+        services = sorted({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
+        unhealthy = [
+            {"service": service, "container": {"status": "exited" if service == "caddy" else "running", "health": "healthy"}, "logs": []}
+            for service in services
+        ]
+        still_starting = [
+            {"service": service, "container": {"status": "exited" if service == "caddy" else "running", "health": "healthy"}, "logs": []}
+            for service in services
+        ]
+        self.executor.all_diagnostics_results = [unhealthy]
+        operation_id = self.service.diagnose_all()["operation_id"]
+        self.executor.restart_all_result = {"status": "accepted"}
+        self.service.restart_all(operation_id)
+        with self.service._connect() as conn:
+            conn.execute(
+                "UPDATE homeops_operation_runs SET restart_requested_at=? WHERE operation_id=?",
+                ((datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat(), operation_id),
+            )
+        self.executor.all_diagnostics_results = [still_starting]
+
+        self.service.latest_summary()
+
+        history = self.service.operation_history(limit=1)[0]
+        self.assertEqual(history["status"], "restart_pending")
+        self.assertEqual(history["events"][-1]["event_type"], "verification_pending")
+
+    def test_pending_restart_verifies_every_due_operation(self):
+        services = sorted({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
+        unhealthy = [
+            {"service": service, "container": {"status": "exited" if service == "caddy" else "running", "health": "healthy"}, "logs": []}
+            for service in services
+        ]
+        healthy = [{"service": service, "container": {"status": "running", "health": "healthy"}, "logs": []} for service in services]
+        operation_ids = []
+        for _ in range(2):
+            self.executor.all_diagnostics_results = [unhealthy]
+            operation_id = self.service.diagnose_all()["operation_id"]
+            self.executor.restart_all_result = {"status": "accepted"}
+            self.service.restart_all(operation_id)
+            operation_ids.append(operation_id)
+        with self.service._connect() as conn:
+            conn.executemany(
+                "UPDATE homeops_operation_runs SET restart_requested_at=? WHERE operation_id=?",
+                [((datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat(), operation_id) for operation_id in operation_ids],
+            )
+        self.executor.all_diagnostics_results = [healthy, healthy]
+
+        self.service.latest_summary()
+
+        history = {item["operation_id"]: item for item in self.service.operation_history(limit=5)}
+        self.assertEqual(history[operation_ids[0]]["status"], "recovered")
+        self.assertEqual(history[operation_ids[1]]["status"], "recovered")
+
     def test_restart_all_recovers_from_executor_connection_close(self):
         healthy = [
             {"service": service, "container": {"status": "running", "health": "healthy"}, "logs": []}
@@ -537,6 +638,38 @@ class HomeOpsTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 303)
         self.assertIn("전체 재시작 요청이 접수되었습니다.", page.text)
+
+    def test_admin_status_renders_operation_history_for_action_required_diagnosis(self):
+        from fastapi.testclient import TestClient
+
+        self.executor.all_diagnostics_results = [
+            [
+                {
+                    "service": service,
+                    "container": {"status": "exited" if service == "caddy" else "running", "health": "healthy"},
+                    "logs": [],
+                }
+                for service in sorted({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
+            ]
+        ]
+        self.service.diagnose_all()
+        original = os.environ.get("ADMIN_STATUS_PASSWORD")
+        os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
+        try:
+            app = self._portal_app()
+            with patch("app.routers.admin.get_homeops_service", return_value=self.service):
+                with TestClient(app) as client:
+                    client.post("/admin/status", data={"password": "secret"}, headers={"Origin": "http://testserver"})
+                    page = client.get("/admin/status")
+        finally:
+            if original is None:
+                os.environ.pop("ADMIN_STATUS_PASSWORD", None)
+            else:
+                os.environ["ADMIN_STATUS_PASSWORD"] = original
+
+        self.assertIn("최근 운영 이력", page.text)
+        self.assertIn("점검 완료 · 조치 필요", page.text)
+        self.assertIn("원인: caddy", page.text)
 
     def test_homeops_global_actions_require_authentication_and_same_origin(self):
         from fastapi.testclient import TestClient

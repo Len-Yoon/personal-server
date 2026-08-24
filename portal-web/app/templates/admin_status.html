@@ -112,6 +112,9 @@
                         <button class="homeops-diagnose-button" type="submit">전체 상태 진단</button>
                     </form>
                     <form class="homeops-action-form homeops-restart-form" action="/admin/homeops/restart-all" method="post">
+                        {% if homeops_actionable_operation %}
+                            <input type="hidden" name="operation_id" value="{{ homeops_actionable_operation.operation_id }}">
+                        {% endif %}
                         <strong>전체 재시작</strong>
                         <span>관리 대상 컨테이너 전체를 재시작합니다.</span>
                         <button class="homeops-restart-button" type="submit">전체 재시작</button>
@@ -150,8 +153,33 @@
                 {% else %}
                     <p class="homeops-empty-summary">아직 HomeOps 진단 결과가 없습니다.</p>
                 {% endif %}
+
+                {% if homeops_history %}
+                    <section class="homeops-summary" aria-label="최근 HomeOps 운영 이력">
+                        <h3>최근 운영 이력</h3>
+                        <ul class="homeops-abnormal-reasons">
+                            {% for operation in homeops_history %}
+                                <li>
+                                    <strong>{{ operation.status_label }}</strong>
+                                    <span class="homeops-summary-separator">—</span>
+                                    <span>{{ operation.created_at }}</span>
+                                    {% if operation.initial_result.unhealthy %}
+                                        <span>· 원인: {{ operation.initial_result.unhealthy | map(attribute="service") | join(", ") }}</span>
+                                    {% endif %}
+                                    {% if operation.final_result %}
+                                        <span>· 정상: {{ operation.final_result.recovered | join(", ") or "없음" }}</span>
+                                    {% endif %}
+                                </li>
+                            {% endfor %}
+                        </ul>
+                    </section>
+                {% endif %}
             </div>
         </section>
+
+        {% if homeops_pending_restart %}
+            <script>window.setTimeout(() => window.location.reload(), 20000);</script>
+        {% endif %}
 
         <section class="ops-section admin-section">
             <div class="section-header">
