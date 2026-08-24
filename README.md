@@ -6,11 +6,19 @@
 
 단순히 서비스를 모아 둔 것이 아니라, 기능 변경을 PR·CI·독립 검토·N100 자동배포까지 연결한 운영 프로젝트입니다.
 
-<p align="center">
-  <img src="docs/images/portal-dashboard.png" alt="Personal Server Portal dashboard" width="360">
-</p>
+## 🖼️ 주요 화면
 
-<br>
+| 포털 대시보드 | 차량관리 Telegram |
+|---|---|
+| <img src="docs/images/portal-dashboard.png" alt="Personal Server Portal dashboard" width="360"> | <img src="docs/images/car-care-telegram-status.png" alt="Telegram 차량관리 봇의 운행 종료 알림 예시" width="360"> |
+
+| File Manager | News Hub |
+|---|---|
+| <img src="docs/images/file-manager.png" alt="File manager" width="360"> | <img src="docs/images/news-hub.png" alt="News hub" width="360"> |
+
+| YouTube Memo | Book Memo |
+|---|---|
+| <img src="docs/images/youtube-memo.png" alt="YouTube memo" width="360"> | <img src="docs/images/book-memo.png" alt="Book memo" width="360"> |
 
 ## ✨ 한눈에 보기
 
@@ -72,9 +80,8 @@ N100 운영 환경, 환경변수, 배포 절차는 [운영 문서 색인](docs/R
 | 정비 알림 | 엔진오일 10,000km, 미션오일·연료필터 60,000km 주기 / 각 500km 전부터 알림 |
 | 계절 타이어 | 매년 11월 15일 윈터타이어, 4월 1일 사계절타이어 교체 알림 |
 | 운행 요약 | 주행거리 변화가 멈춘 뒤 운행 거리·주행 가능 거리·엔진오일 잔여 거리 알림 |
+| 저유·경고 알림 | 주행 가능 거리 100km·50km 알림, 경고등 점등·정상 복귀 알림 |
 | 수동 관리 | Hyundai 연동이 없을 때 `/주행거리 <km>`로 관리 |
-
- <img src="docs/images/car-care-telegram-status.png" alt="Telegram 차량관리 봇의 운행 종료 알림 예시" width="360">
 
 <details>
 <summary><strong>Telegram 명령어와 Hyundai 설정 보기</strong></summary>
@@ -102,7 +109,7 @@ Hyundai OAuth 콜백은 `car.len.pe.kr`에서 Cloudflare Tunnel을 통해 로컬
 ### 🛠️ 운영과 안전성
 
 - **System Status**: N100 호스트의 CPU·메모리·디스크·백업·컨테이너 상태 확인
-- **HomeOps**: 이 Compose 프로젝트의 서비스만 진단·재시작하고, health check·실행 이력을 관리
+- **HomeOps**: 전체 서비스 상태를 정상·비정상 이유로 요약하고, 필요 시 관리 대상 컨테이너를 한 번에 재시작
 - **접근 제어**: 수정 기능에 세션 인증과 Origin 검증 적용
 - **데이터 분리**: 운영 데이터와 `.env`는 저장소에 올리지 않으며, 서비스별 경로에 보관
 
@@ -178,21 +185,6 @@ Internet
 ```
 
 공개 HTTPS는 Cloudflare Tunnel 또는 Caddy + Cloudflare DNS-01 중 실제 환경에 맞는 한 가지 방식만 사용합니다.
-
-</details>
-
-<details>
-<summary><strong>추가 서비스 화면 보기</strong></summary>
-
-<br>
-
-| File Manager | News Hub |
-|---|---|
-| ![File manager](docs/images/file-manager.png) | ![News hub](docs/images/news-hub.png) |
-
-| YouTube Memo | Book Memo |
-|---|---|
-| ![YouTube memo](docs/images/youtube-memo.png) | ![Book memo](docs/images/book-memo.png) |
 
 </details>
 
