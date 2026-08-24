@@ -306,6 +306,17 @@ class HomeOpsTests(unittest.TestCase):
         self.assertEqual(summary["failed"], [{"service": "caddy", "reason": "중지됨"}])
         self.assertEqual(self.service.latest_summary(), summary)
 
+    def test_restart_all_records_accepted_request_before_portal_is_restarted(self):
+        self.executor.restart_all_result = {"status": "accepted"}
+
+        summary = self.service.restart_all()
+
+        self.assertEqual(summary["kind"], "restart_pending")
+        self.assertEqual(summary["healthy"], [])
+        self.assertEqual(summary["recovered"], [])
+        self.assertEqual(summary["failed"], [])
+        self.assertEqual(self.service.latest_summary(), summary)
+
     def test_restart_all_recovers_from_executor_connection_close(self):
         healthy = [
             {"service": service, "container": {"status": "running", "health": "healthy"}, "logs": []}
@@ -500,6 +511,32 @@ class HomeOpsTests(unittest.TestCase):
         self.assertIn("복구됨:", page.text)
         self.assertIn("<strong>복구 확인 실패:</strong> caddy", page.text)
         self.assertIn("중지됨", page.text)
+
+    def test_restart_all_route_renders_pending_summary_after_redirect(self):
+        from fastapi.testclient import TestClient
+
+        self.executor.restart_all_result = {"status": "accepted"}
+        original = os.environ.get("ADMIN_STATUS_PASSWORD")
+        os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
+        try:
+            app = self._portal_app()
+            with patch("app.routers.admin.get_homeops_service", return_value=self.service):
+                with TestClient(app) as client:
+                    client.post("/admin/status", data={"password": "secret"}, headers={"Origin": "http://testserver"})
+                    response = client.post(
+                        "/admin/homeops/restart-all",
+                        headers={"Origin": "http://testserver"},
+                        follow_redirects=False,
+                    )
+                    page = client.get(response.headers["location"])
+        finally:
+            if original is None:
+                os.environ.pop("ADMIN_STATUS_PASSWORD", None)
+            else:
+                os.environ["ADMIN_STATUS_PASSWORD"] = original
+
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("전체 재시작 요청이 접수되었습니다.", page.text)
 
     def test_homeops_global_actions_require_authentication_and_same_origin(self):
         from fastapi.testclient import TestClient

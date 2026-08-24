@@ -57,7 +57,10 @@ class HomeOpsService:
             else:
                 diagnostics = None
                 executor_failure_reason = self._executor_failure_reason(exc)
-        summary = self._restart_summary(diagnostics, executor_failure_reason)
+        if isinstance(diagnostics, dict) and diagnostics.get("status") == "accepted":
+            summary = self._restart_pending_summary()
+        else:
+            summary = self._restart_summary(diagnostics, executor_failure_reason)
         self._save_latest_summary(summary)
         return summary
 
@@ -247,6 +250,9 @@ class HomeOpsService:
                 else:
                     recovered.append(service)
         return {"kind": "restart", "created_at": self._now(), "healthy": [], "recovered": recovered, "failed": failed}
+
+    def _restart_pending_summary(self) -> dict[str, Any]:
+        return {"kind": "restart_pending", "created_at": self._now(), "healthy": [], "recovered": [], "failed": []}
 
     @staticmethod
     def _unhealthy_reason(diagnostics: dict[str, Any]) -> str | None:

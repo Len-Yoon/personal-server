@@ -1,7 +1,7 @@
 import os
 import secrets
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from app.services import docker_ops
@@ -62,6 +62,7 @@ def restart(payload: RestartRequest, x_homeops_executor_secret: str = Header(def
 
 
 @app.post("/v1/restarts/all")
-def restart_all(x_homeops_executor_secret: str = Header(default="")):
+def restart_all(background_tasks: BackgroundTasks, x_homeops_executor_secret: str = Header(default="")):
     _require_shared_secret(x_homeops_executor_secret)
-    return docker_ops.restart_all_services()
+    background_tasks.add_task(docker_ops.restart_all_services)
+    return {"status": "accepted"}

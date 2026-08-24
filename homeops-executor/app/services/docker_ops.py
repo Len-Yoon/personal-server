@@ -44,7 +44,7 @@ def restart_service(service: str, client: Any | None = None) -> dict[str, object
 
 
 def restart_all_services(client: Any | None = None) -> list[dict[str, object]]:
-    services = sorted(ALLOWED_SERVICES - {"homeops-executor"}) + ["homeops-executor"]
+    services = sorted(ALLOWED_SERVICES - {"portal-web", "caddy", "homeops-executor"}) + ["portal-web", "caddy", "homeops-executor"]
     results: list[dict[str, object]] = []
     for service in services:
         try:
