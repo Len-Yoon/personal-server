@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 import os
 from datetime import datetime, timedelta, timezone
+from urllib.error import HTTPError, URLError
 
 from tests._test_support import prepare_service_import
 
@@ -227,6 +228,7 @@ class HomeOpsTests(unittest.TestCase):
             {"service": "crawler-worker", "container": {"status": "running", "health": "healthy"}, "logs": []},
             {"service": "portal-web", "container": {"status": "running", "health": "none"}, "logs": []},
             {"service": "caddy", "container": {"status": "running", "health": "unhealthy"}, "logs": []},
+            {"service": "book-memo", "container": {"status": "running", "health": "starting"}, "logs": []},
             {"service": "youtube-memo", "container": {"status": "exited", "health": "none"}, "logs": []},
         ]]
 
@@ -237,6 +239,7 @@ class HomeOpsTests(unittest.TestCase):
             summary["unhealthy"],
             [
                 {"service": "caddy", "reason": "healthcheck 비정상"},
+                {"service": "book-memo", "reason": "healthcheck 비정상"},
                 {"service": "youtube-memo", "reason": "중지됨"},
             ],
         )
@@ -270,14 +273,22 @@ class HomeOpsTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM latest_homeops_summary").fetchone()[0], 1)
 
     def test_restart_all_records_recovered_and_failed_services(self):
+        services = sorted({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
         self.executor.restart_all_result = [
-            {"service": "crawler-worker", "status": "running", "container": {"status": "running", "health": "healthy"}},
-            {"service": "caddy", "status": "exited", "container": {"status": "exited", "health": "none"}},
+            {
+                "service": service,
+                "status": "exited" if service == "caddy" else "running",
+                "container": {
+                    "status": "exited" if service == "caddy" else "running",
+                    "health": "none" if service == "caddy" else "healthy",
+                },
+            }
+            for service in services
         ]
 
         summary = self.service.restart_all()
 
-        self.assertEqual(summary["recovered"], ["crawler-worker"])
+        self.assertEqual(summary["recovered"], [service for service in services if service != "caddy"])
         self.assertEqual(summary["failed"], [{"service": "caddy", "reason": "중지됨"}])
         self.assertEqual(self.service.latest_summary(), summary)
 
@@ -286,7 +297,7 @@ class HomeOpsTests(unittest.TestCase):
             {"service": service, "container": {"status": "running", "health": "healthy"}, "logs": []}
             for service in sorted({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
         ]
-        self.executor.restart_all_error = OSError("connection reset")
+        self.executor.restart_all_error = ConnectionResetError("connection reset")
         self.executor.all_diagnostics_results = [OSError("still starting"), healthy]
 
         summary = self.service.restart_all()
@@ -295,8 +306,21 @@ class HomeOpsTests(unittest.TestCase):
         self.assertEqual(summary["recovered"], [item["service"] for item in healthy])
         self.assertEqual(self.executor.all_diagnostics_calls, 2)
 
+    def test_restart_all_recovers_from_wrapped_connection_reset(self):
+        healthy = [
+            {"service": service, "container": {"status": "running", "health": "healthy"}, "logs": []}
+            for service in sorted({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
+        ]
+        self.executor.restart_all_error = URLError(ConnectionResetError("connection reset"))
+        self.executor.all_diagnostics_results = [healthy]
+
+        summary = self.service.restart_all()
+
+        self.assertEqual(summary["failed"], [])
+        self.assertEqual(self.executor.all_diagnostics_calls, 1)
+
     def test_restart_all_stops_polling_and_records_executor_response_failure(self):
-        self.executor.restart_all_error = OSError("connection reset")
+        self.executor.restart_all_error = ConnectionResetError("connection reset")
         self.executor.all_diagnostics_results = [OSError("still starting")] * 5
 
         summary = self.service.restart_all()
@@ -309,6 +333,83 @@ class HomeOpsTests(unittest.TestCase):
                 for service in sorted({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
             ],
         )
+
+    def test_restart_all_does_not_poll_after_http_error(self):
+        self.executor.restart_all_error = HTTPError(
+            "http://executor/v1/restarts/all", 500, "server error", {}, None
+        )
+
+        summary = self.service.restart_all()
+
+        self.assertEqual(self.executor.all_diagnostics_calls, 0)
+        self.assertEqual(len(summary["failed"]), 7)
+        self.assertEqual({item["reason"] for item in summary["failed"]}, {"실행기 응답 없음"})
+
+    def test_restart_all_does_not_poll_after_generic_os_error(self):
+        self.executor.restart_all_error = OSError("network unreachable")
+
+        summary = self.service.restart_all()
+
+        self.assertEqual(self.executor.all_diagnostics_calls, 0)
+        self.assertEqual(len(summary["failed"]), 7)
+
+    def test_restart_all_polling_waits_until_every_service_is_healthy(self):
+        services = sorted({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
+        starting = [
+            {
+                "service": service,
+                "container": {
+                    "status": "running",
+                    "health": "starting" if service == "homeops-executor" else "healthy",
+                },
+                "logs": [],
+            }
+            for service in services
+        ]
+        healthy = [
+            {"service": service, "container": {"status": "running", "health": "healthy"}, "logs": []}
+            for service in services
+        ]
+        self.executor.restart_all_error = ConnectionResetError("connection reset")
+        self.executor.all_diagnostics_results = [starting, healthy]
+
+        summary = self.service.restart_all()
+
+        self.assertEqual(self.executor.all_diagnostics_calls, 2)
+        self.assertEqual(summary["failed"], [])
+        self.assertEqual(summary["recovered"], services)
+
+    def test_restart_all_polling_records_missing_target_as_failed(self):
+        partial = [
+            {"service": "crawler-worker", "container": {"status": "running", "health": "healthy"}, "logs": []}
+        ]
+        self.executor.restart_all_error = ConnectionResetError("connection reset")
+        self.executor.all_diagnostics_results = [partial] * 5
+
+        summary = self.service.restart_all()
+
+        self.assertEqual(self.executor.all_diagnostics_calls, 5)
+        self.assertEqual(summary["recovered"], ["crawler-worker"])
+        self.assertEqual(
+            {item["service"] for item in summary["failed"]},
+            {"portal-web", "system-agent", "youtube-memo", "book-memo", "caddy", "homeops-executor"},
+        )
+
+    def test_restart_all_polling_records_http_error_without_further_recovery(self):
+        healthy = [
+            {"service": service, "container": {"status": "running", "health": "healthy"}, "logs": []}
+            for service in sorted({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
+        ]
+        self.executor.restart_all_error = ConnectionResetError("connection reset")
+        self.executor.all_diagnostics_results = [
+            HTTPError("http://executor/v1/diagnostics", 403, "forbidden", {}, None),
+            healthy,
+        ]
+
+        summary = self.service.restart_all()
+
+        self.assertEqual(self.executor.all_diagnostics_calls, 1)
+        self.assertEqual(len(summary["failed"]), 7)
 
     def test_admin_page_renders_homeops_and_execute_requires_same_origin(self):
         from fastapi.testclient import TestClient

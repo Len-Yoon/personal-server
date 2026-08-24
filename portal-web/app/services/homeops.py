@@ -8,6 +8,7 @@ import sqlite3
 import uuid
 import os
 import time
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -47,8 +48,8 @@ class HomeOpsService:
     def restart_all(self) -> dict[str, Any]:
         try:
             diagnostics = self._mask(self.executor.restart_all())
-        except OSError:
-            diagnostics = self._poll_all_diagnostics()
+        except OSError as exc:
+            diagnostics = self._poll_all_diagnostics() if self._is_expected_restart_disconnect(exc) else None
         summary = self._restart_summary(diagnostics)
         self._save_latest_summary(summary)
         return summary
@@ -172,13 +173,30 @@ class HomeOpsService:
         return [{"incident_id": row[0], "service": row[1], "status": row[2], "created_at": row[3], "proposal": json.loads(row[4])} for row in rows]
 
     def _poll_all_diagnostics(self) -> list[dict[str, Any]] | None:
+        last_diagnostics = None
         for attempt in range(self.verification_attempts):
             try:
-                return self._mask(self.executor.all_diagnostics())
+                last_diagnostics = self._mask(self.executor.all_diagnostics())
+                if self._all_services_healthy(last_diagnostics):
+                    return last_diagnostics
+            except HTTPError:
+                return None
             except OSError:
-                if attempt < self.verification_attempts - 1:
-                    time.sleep(self.verification_interval_seconds)
-        return None
+                pass
+            if attempt < self.verification_attempts - 1:
+                time.sleep(self.verification_interval_seconds)
+        return last_diagnostics
+
+    @staticmethod
+    def _is_expected_restart_disconnect(exc: OSError) -> bool:
+        if isinstance(exc, HTTPError):
+            return False
+        cause = exc.reason if isinstance(exc, URLError) else exc
+        return isinstance(cause, (ConnectionResetError, BrokenPipeError))
+
+    def _all_services_healthy(self, diagnostics: list[dict[str, Any]]) -> bool:
+        by_service = {str(item.get("service", "")): item for item in diagnostics}
+        return all(service in by_service and self._unhealthy_reason(by_service[service]) is None for service in ALLOWED_SERVICES)
 
     def _diagnosis_summary(self, diagnostics: list[dict[str, Any]] | None) -> dict[str, Any]:
         healthy: list[str] = []
@@ -200,12 +218,17 @@ class HomeOpsService:
         if diagnostics is None:
             failed = [{"service": service, "reason": "실행기 응답 없음"} for service in sorted(ALLOWED_SERVICES)]
         else:
-            for item in diagnostics:
+            by_service = {str(item.get("service", "")): item for item in diagnostics}
+            for service in sorted(ALLOWED_SERVICES):
+                item = by_service.get(service)
+                if item is None:
+                    failed.append({"service": service, "reason": "실행기 응답 없음"})
+                    continue
                 reason = self._unhealthy_reason(item)
                 if reason:
-                    failed.append({"service": str(item.get("service", "")), "reason": reason})
+                    failed.append({"service": service, "reason": reason})
                 else:
-                    recovered.append(str(item.get("service", "")))
+                    recovered.append(service)
         return {"kind": "restart", "created_at": self._now(), "healthy": [], "recovered": recovered, "failed": failed}
 
     @staticmethod
@@ -213,7 +236,7 @@ class HomeOpsService:
         container = diagnostics.get("container", {})
         if container.get("status") != "running":
             return "중지됨"
-        if container.get("health") == "unhealthy":
+        if container.get("health") not in (None, "none", "healthy"):
             return "healthcheck 비정상"
         return None
 
