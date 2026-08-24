@@ -27,6 +27,8 @@
 
 ---
 
+<br>
+
 ## 🚀 빠른 시작
 
 ```bash
@@ -38,6 +40,8 @@ docker compose ps
 N100 운영 환경, 환경변수, 배포 절차는 [운영 문서 색인](docs/README.md)에서 확인합니다.
 
 ---
+
+<br>
 
 ## 🧩 핵심 기능
 
@@ -100,6 +104,8 @@ Hyundai OAuth 콜백은 `car.len.pe.kr`에서 Cloudflare Tunnel을 통해 로컬
 
 ---
 
+<br>
+
 ## 🤖 Harness / Loop Engineering
 
 AI가 코드를 작성하는 것에서 끝내지 않고, 운영 반영까지 검증 가능한 루프로 관리합니다.
@@ -124,6 +130,8 @@ main CI · N100 자동배포 · health 검증
 
 ---
 
+<br>
+
 ## ✅ 검증
 
 GitHub Actions CI에서 포털, 시스템 상태, 뉴스, HomeOps, 메모, 차량관리, Compose와 운영 스크립트의 서비스별 테스트를 실행합니다.
@@ -136,6 +144,8 @@ python3 tests/run_service_tests.py --list
 특정 서비스만 확인하려면 `--suite`를 사용합니다.
 
 ---
+
+<br>
 
 ## 🏗️ 아키텍처와 참고 자료
 
@@ -184,6 +194,8 @@ Internet
 | Storage | SQLite, JSON file storage |
 | Infrastructure | Docker Compose, Cloudflare, Caddy, Windows/WSL2 |
 | CI/CD | GitHub Actions, Windows self-hosted runner |
+
+<br>
 
 ## 🔎 운영 문서
 
