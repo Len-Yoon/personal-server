@@ -111,7 +111,7 @@ class DockerOpsTests(unittest.TestCase):
 
         result = docker_ops.restart_all_services(client=client)
 
-        expected_services = sorted(docker_ops.ALLOWED_SERVICES - {"homeops-executor"}) + ["homeops-executor"]
+        expected_services = sorted(docker_ops.ALLOWED_SERVICES - {"portal-web", "caddy", "homeops-executor"}) + ["portal-web", "caddy", "homeops-executor"]
         self.assertEqual([item["service"] for item in result], expected_services)
         self.assertEqual(
             client.containers.filters,
@@ -149,16 +149,16 @@ class DockerOpsTests(unittest.TestCase):
 
         expected_services = [
             "book-memo",
-            "caddy",
             "crawler-worker",
-            "portal-web",
             "system-agent",
             "youtube-memo",
+            "portal-web",
+            "caddy",
             "homeops-executor",
         ]
         self.assertEqual([item["service"] for item in result], expected_services)
         self.assertEqual(
-            result[1],
+            result[5],
             {
                 "service": "caddy",
                 "status": "failed",
@@ -299,14 +299,15 @@ class DockerOpsTests(unittest.TestCase):
 
         restarts = [{"service": "homeops-executor", "status": "running", "container": {}}]
         with patch.dict("os.environ", {"HOMEOPS_EXECUTOR_SHARED_SECRET": "shared"}, clear=False):
-            with patch("app.main.docker_ops.restart_all_services", return_value=restarts):
+            with patch("app.main.docker_ops.restart_all_services", return_value=restarts) as restart_all_services:
                 response = TestClient(app).post(
                     "/v1/restarts/all",
                     headers={"X-HomeOps-Executor-Secret": "shared"},
                 )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), restarts)
+        self.assertEqual(response.json(), {"status": "accepted"})
+        restart_all_services.assert_called_once_with()
 
     def test_executor_rejects_action_other_than_restart(self):
         from fastapi.testclient import TestClient
