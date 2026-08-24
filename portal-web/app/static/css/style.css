@@ -1379,13 +1379,14 @@ a {
 .homeops-summary p { margin:6px 0; color:#cbd5e1; line-height:1.6; }
 .homeops-summary p strong { color:#f8fafc; }
 .homeops-abnormal-reasons { display:grid; gap:7px; margin:13px 0 0; padding:0; list-style:none; }
-.homeops-abnormal-reasons li { display:flex; justify-content:space-between; gap:12px; padding:9px 11px; border:1px solid rgba(248,113,113,.24); border-radius:10px; color:#fecaca; background:rgba(127,29,29,.16); }
+.homeops-abnormal-reasons li { display:flex; align-items:baseline; justify-content:flex-start; gap:8px; padding:9px 11px; border:1px solid rgba(248,113,113,.24); border-radius:10px; color:#fecaca; background:rgba(127,29,29,.16); }
 .homeops-abnormal-reasons li span { color:#fca5a5; }
+.homeops-abnormal-reasons .homeops-summary-separator { color:#fda4af; }
 .homeops-empty-summary { margin:0; padding:14px 16px; border:1px dashed rgba(148,163,184,.28); border-radius:12px; color:#94a3b8; }
 
 @media (max-width: 680px) {
     .homeops-action-grid { grid-template-columns:1fr; }
-    .homeops-abnormal-reasons li { align-items:flex-start; flex-direction:column; gap:3px; }
+    .homeops-abnormal-reasons li { align-items:baseline; flex-direction:row; flex-wrap:wrap; gap:8px; }
 }
 
 .empty-log {

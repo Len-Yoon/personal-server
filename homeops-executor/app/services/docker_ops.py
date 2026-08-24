@@ -18,7 +18,15 @@ def collect_diagnostics(service: str, client: Any | None = None) -> dict[str, ob
 
 
 def collect_all_diagnostics(client: Any | None = None) -> list[dict[str, object]]:
-    return [collect_diagnostics(service, client=client) for service in sorted(ALLOWED_SERVICES)]
+    diagnostics: list[dict[str, object]] = []
+    for service in sorted(ALLOWED_SERVICES):
+        try:
+            diagnostics.append(collect_diagnostics(service, client=client))
+        except ValueError as exc:
+            diagnostics.append(_unavailable_diagnostics(service, str(exc)))
+        except Exception:
+            diagnostics.append(_unavailable_diagnostics(service, "diagnostic_unavailable"))
+    return diagnostics
 
 
 def restart_service(service: str, client: Any | None = None) -> dict[str, object]:
@@ -43,11 +51,21 @@ def restart_all_services(client: Any | None = None) -> list[dict[str, object]]:
 def _get_container(service: str, client: Any | None) -> Any:
     _require_allowed_service(service)
     containers = (client or _docker_client()).containers.list(
-        filters={"label": f"com.docker.compose.service={service}"}
+        all=True,
+        filters={"label": f"com.docker.compose.service={service}"},
     )
     if len(containers) != 1:
         raise ValueError("service_container_not_found")
     return containers[0]
+
+
+def _unavailable_diagnostics(service: str, error: str) -> dict[str, object]:
+    return {
+        "service": service,
+        "container": {"status": "unknown", "health": "unknown"},
+        "logs": [],
+        "error": error,
+    }
 
 
 def _docker_client() -> Any:

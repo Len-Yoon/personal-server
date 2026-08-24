@@ -37,20 +37,27 @@ class HomeOpsService:
         self._initialize()
 
     def diagnose_all(self) -> dict[str, Any]:
+        executor_failure_reason = None
         try:
             diagnostics = self._mask(self.executor.all_diagnostics())
-        except OSError:
+        except OSError as exc:
             diagnostics = None
-        summary = self._diagnosis_summary(diagnostics)
+            executor_failure_reason = self._executor_failure_reason(exc)
+        summary = self._diagnosis_summary(diagnostics, executor_failure_reason)
         self._save_latest_summary(summary)
         return summary
 
     def restart_all(self) -> dict[str, Any]:
+        executor_failure_reason = None
         try:
             diagnostics = self._mask(self.executor.restart_all())
         except OSError as exc:
-            diagnostics = self._poll_all_diagnostics() if self._is_expected_restart_disconnect(exc) else None
-        summary = self._restart_summary(diagnostics)
+            if self._is_expected_restart_disconnect(exc):
+                diagnostics = self._poll_all_diagnostics()
+            else:
+                diagnostics = None
+                executor_failure_reason = self._executor_failure_reason(exc)
+        summary = self._restart_summary(diagnostics, executor_failure_reason)
         self._save_latest_summary(summary)
         return summary
 
@@ -198,11 +205,16 @@ class HomeOpsService:
         by_service = {str(item.get("service", "")): item for item in diagnostics}
         return all(service in by_service and self._unhealthy_reason(by_service[service]) is None for service in ALLOWED_SERVICES)
 
-    def _diagnosis_summary(self, diagnostics: list[dict[str, Any]] | None) -> dict[str, Any]:
+    def _diagnosis_summary(
+        self,
+        diagnostics: list[dict[str, Any]] | None,
+        executor_failure_reason: str | None = None,
+    ) -> dict[str, Any]:
         healthy: list[str] = []
         unhealthy: list[dict[str, str]] = []
         if diagnostics is None:
-            unhealthy = [{"service": service, "reason": "실행기 응답 없음"} for service in sorted(ALLOWED_SERVICES)]
+            reason = executor_failure_reason or "실행기 연결 실패"
+            unhealthy = [{"service": service, "reason": reason} for service in sorted(ALLOWED_SERVICES)]
         else:
             for item in diagnostics:
                 reason = self._unhealthy_reason(item)
@@ -212,11 +224,16 @@ class HomeOpsService:
                     healthy.append(str(item.get("service", "")))
         return {"kind": "diagnosis", "created_at": self._now(), "healthy": healthy, "unhealthy": unhealthy}
 
-    def _restart_summary(self, diagnostics: list[dict[str, Any]] | None) -> dict[str, Any]:
+    def _restart_summary(
+        self,
+        diagnostics: list[dict[str, Any]] | None,
+        executor_failure_reason: str | None = None,
+    ) -> dict[str, Any]:
         recovered: list[str] = []
         failed: list[dict[str, str]] = []
         if diagnostics is None:
-            failed = [{"service": service, "reason": "실행기 응답 없음"} for service in sorted(ALLOWED_SERVICES)]
+            reason = executor_failure_reason or "실행기 연결 실패"
+            failed = [{"service": service, "reason": reason} for service in sorted(ALLOWED_SERVICES)]
         else:
             by_service = {str(item.get("service", "")): item for item in diagnostics}
             for service in sorted(ALLOWED_SERVICES):
@@ -233,12 +250,24 @@ class HomeOpsService:
 
     @staticmethod
     def _unhealthy_reason(diagnostics: dict[str, Any]) -> str | None:
+        if diagnostics.get("error") == "service_container_not_found":
+            return "컨테이너를 찾을 수 없음"
+        if diagnostics.get("error"):
+            return "진단 수집 실패"
         container = diagnostics.get("container", {})
         if container.get("status") != "running":
             return "중지됨"
         if container.get("health") not in (None, "none", "healthy"):
             return "healthcheck 비정상"
         return None
+
+    @staticmethod
+    def _executor_failure_reason(exc: OSError) -> str:
+        if isinstance(exc, HTTPError):
+            if exc.code in (401, 403):
+                return "실행기 인증 설정 확인 필요"
+            return "실행기 내부 오류"
+        return "실행기 연결 실패"
 
     def _save_latest_summary(self, summary: dict[str, Any]) -> None:
         with self._connect() as conn:
@@ -287,7 +316,7 @@ class HomeOpsService:
 class ExecutorClient:
     def __init__(self):
         self.url = os.getenv("HOMEOPS_EXECUTOR_URL", "http://homeops-executor:8011").rstrip("/")
-        self.secret = os.getenv("HOMEOPS_EXECUTOR_SHARED_SECRET", "")
+        self.secret = _executor_shared_secret()
 
     def diagnostics(self, service: str) -> dict[str, Any]:
         return self._request(f"/v1/diagnostics/{service}")
@@ -316,3 +345,10 @@ def get_homeops_service() -> HomeOpsService:
 
     data_root = Path(os.getenv("HOMEOPS_DB_PATH", str(PROJECT_DATA_ROOT / "logs" / "homeops.sqlite3")))
     return HomeOpsService(data_root, ExecutorClient(), notifier=HomeOpsTelegramNotifier())
+
+
+def _executor_shared_secret() -> str:
+    return (
+        os.getenv("HOMEOPS_EXECUTOR_SHARED_SECRET", "").strip()
+        or os.getenv("ADMIN_STATUS_PASSWORD", "").strip()
+    )
