@@ -23,6 +23,7 @@ HOST_MEMORY_ALERT_PERCENT = 90.0
 HOST_MEMORY_ALERT_CONSECUTIVE_SAMPLES = 3
 CONTAINER_CPU_RESTART_PERCENT = 85.0
 CONTAINER_MEMORY_RESTART_PERCENT = 90.0
+RESTART_VERIFICATION_DELAY_SECONDS = 20
 _CRITICAL_LOG_PATTERN = re.compile(r"(?i)\b(fatal|panic|oom|out of memory|memoryerror|segmentation fault|connection refused)\b")
 _SECRET_PATTERN = re.compile(r"(?i)(authorization:\s*bearer\s+|api[-_ ]?key[=:]\s*|password[=:]\s*|token[=:]\s*)\S+")
 PROJECT_DATA_ROOT = next((parent / "data" for parent in Path(__file__).resolve().parents if (parent / "docker-compose.yml").exists()), Path("/app/data"))
@@ -44,10 +45,12 @@ class HomeOpsService:
             diagnostics = None
             executor_failure_reason = self._executor_failure_reason(exc)
         summary = self._diagnosis_summary(diagnostics, executor_failure_reason)
+        summary["operation_id"] = self._create_operation(summary)
         self._save_latest_summary(summary)
         return summary
 
-    def restart_all(self) -> dict[str, Any]:
+    def restart_all(self, operation_id: str | None = None) -> dict[str, Any]:
+        operation_id = self._operation_for_restart(operation_id) or self._create_manual_restart_operation()
         executor_failure_reason = None
         try:
             diagnostics = self._mask(self.executor.restart_all())
@@ -59,15 +62,58 @@ class HomeOpsService:
                 executor_failure_reason = self._executor_failure_reason(exc)
         if isinstance(diagnostics, dict) and diagnostics.get("status") == "accepted":
             summary = self._restart_pending_summary()
+            self._mark_restart_pending(operation_id)
         else:
             summary = self._restart_summary(diagnostics, executor_failure_reason)
+            self._complete_operation(operation_id, summary)
+        summary["operation_id"] = operation_id
         self._save_latest_summary(summary)
         return summary
 
     def latest_summary(self) -> dict[str, Any] | None:
+        self._complete_due_pending_restart()
         with self._connect() as conn:
             row = conn.execute("SELECT summary FROM latest_homeops_summary WHERE singleton_id=1").fetchone()
         return json.loads(row[0]) if row else None
+
+    def operation_history(self, limit: int = 5) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT operation_id,status,created_at,diagnosed_at,restart_requested_at,verified_at,initial_result,final_result,restart_reason "
+                "FROM homeops_operation_runs ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            history = []
+            for row in rows:
+                events = conn.execute(
+                    "SELECT event_type,occurred_at,payload FROM homeops_operation_events WHERE operation_id=? ORDER BY event_id",
+                    (row[0],),
+                ).fetchall()
+                history.append(
+                    {
+                        "operation_id": row[0],
+                        "status": row[1],
+                        "created_at": row[2],
+                        "diagnosed_at": row[3],
+                        "restart_requested_at": row[4],
+                        "verified_at": row[5],
+                        "initial_result": json.loads(row[6]),
+                        "final_result": json.loads(row[7]) if row[7] else None,
+                        "restart_reason": json.loads(row[8]) if row[8] else [],
+                        "status_label": {
+                            "healthy": "점검 완료 · 정상",
+                            "action_required": "점검 완료 · 조치 필요",
+                            "restart_pending": "재시작 실행 · 재점검 대기",
+                            "recovered": "재점검 완료 · 복구 완료",
+                            "failed": "재점검 완료 · 복구 실패",
+                        }.get(row[1], row[1]),
+                        "events": [
+                            {"event_type": event[0], "occurred_at": event[1], "payload": json.loads(event[2])}
+                            for event in events
+                        ],
+                    }
+                )
+        return history
 
     def create_diagnosis(self, service: str, record_healthy: bool = True) -> dict[str, Any]:
         self._require_service(service)
@@ -254,6 +300,120 @@ class HomeOpsService:
     def _restart_pending_summary(self) -> dict[str, Any]:
         return {"kind": "restart_pending", "created_at": self._now(), "healthy": [], "recovered": [], "failed": []}
 
+    def _create_operation(self, summary: dict[str, Any]) -> str:
+        operation_id = str(uuid.uuid4())
+        status = "action_required" if summary.get("unhealthy") else "healthy"
+        now = self._now()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO homeops_operation_runs "
+                "(operation_id,status,created_at,diagnosed_at,restart_requested_at,verified_at,initial_result,final_result,restart_reason) "
+                "VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL, ?)",
+                (operation_id, status, now, now, json.dumps(summary), json.dumps(summary.get("unhealthy", []))),
+            )
+            self._append_operation_event(conn, operation_id, "diagnosis_completed", summary)
+        return operation_id
+
+    def _create_manual_restart_operation(self) -> str:
+        operation_id = str(uuid.uuid4())
+        now = self._now()
+        initial_result = {"kind": "manual_restart", "healthy": [], "unhealthy": []}
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO homeops_operation_runs "
+                "(operation_id,status,created_at,diagnosed_at,restart_requested_at,verified_at,initial_result,final_result,restart_reason) "
+                "VALUES (?, 'restart_pending', ?, NULL, ?, NULL, ?, NULL, ?)",
+                (operation_id, now, now, json.dumps(initial_result), json.dumps([])),
+            )
+        return operation_id
+
+    def _operation_for_restart(self, requested_operation_id: str | None) -> str | None:
+        with self._connect() as conn:
+            if requested_operation_id:
+                row = conn.execute(
+                    "SELECT operation_id FROM homeops_operation_runs WHERE operation_id=? AND status='action_required'",
+                    (requested_operation_id,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT operation_id FROM homeops_operation_runs WHERE status='action_required' ORDER BY created_at DESC LIMIT 1"
+                ).fetchone()
+        return str(row[0]) if row else None
+
+    def _mark_restart_pending(self, operation_id: str) -> None:
+        now = self._now()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE homeops_operation_runs SET status='restart_pending', restart_requested_at=? WHERE operation_id=?",
+                (now, operation_id),
+            )
+            self._append_operation_event(conn, operation_id, "restart_requested", {"operation_id": operation_id})
+
+    def _complete_due_pending_restart(self) -> None:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT operation_id,restart_requested_at FROM homeops_operation_runs "
+                "WHERE status='restart_pending' ORDER BY restart_requested_at DESC"
+            ).fetchall()
+        for row in rows:
+            if not row[1] or not self._pending_restart_is_due(str(row[0]), row[1]):
+                continue
+            try:
+                diagnostics = self._mask(self.executor.all_diagnostics())
+            except OSError:
+                continue
+            summary = self._restart_summary(diagnostics)
+            summary["operation_id"] = row[0]
+            if summary["failed"] and not self._verification_attempt_limit_reached(str(row[0])):
+                self._record_pending_verification(str(row[0]), summary)
+                continue
+            self._complete_operation(str(row[0]), summary)
+            self._save_latest_summary(summary)
+
+    def _pending_restart_is_due(self, operation_id: str, restart_requested_at: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT occurred_at FROM homeops_operation_events WHERE operation_id=? AND event_type='verification_pending' "
+                "ORDER BY event_id DESC LIMIT 1",
+                (operation_id,),
+            ).fetchone()
+        last_check = row[0] if row else restart_requested_at
+        return datetime.fromisoformat(last_check) + timedelta(seconds=RESTART_VERIFICATION_DELAY_SECONDS) <= datetime.now(timezone.utc)
+
+    def _verification_attempt_limit_reached(self, operation_id: str) -> bool:
+        with self._connect() as conn:
+            attempts = conn.execute(
+                "SELECT COUNT(*) FROM homeops_operation_events WHERE operation_id=? AND event_type='verification_pending'",
+                (operation_id,),
+            ).fetchone()[0]
+        return attempts >= 2
+
+    def _record_pending_verification(self, operation_id: str, summary: dict[str, Any]) -> None:
+        with self._connect() as conn:
+            self._append_operation_event(conn, operation_id, "verification_pending", summary)
+
+    def _complete_operation(self, operation_id: str, summary: dict[str, Any]) -> None:
+        status = "recovered" if not summary.get("failed") else "failed"
+        now = self._now()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE homeops_operation_runs SET status=?, verified_at=?, final_result=? WHERE operation_id=?",
+                (status, now, json.dumps(summary), operation_id),
+            )
+            self._append_operation_event(conn, operation_id, "verification_completed", summary)
+
+    def _append_operation_event(
+        self,
+        conn: sqlite3.Connection,
+        operation_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        conn.execute(
+            "INSERT INTO homeops_operation_events (operation_id,event_type,occurred_at,payload) VALUES (?, ?, ?, ?)",
+            (operation_id, event_type, self._now(), json.dumps(payload)),
+        )
+
     @staticmethod
     def _unhealthy_reason(diagnostics: dict[str, Any]) -> str | None:
         if diagnostics.get("error") == "service_container_not_found":
@@ -289,6 +449,18 @@ class HomeOpsService:
             conn.execute("CREATE TABLE IF NOT EXISTS approval_tokens (incident_id TEXT PRIMARY KEY, token_hash TEXT, expires_at TEXT, consumed_at TEXT)")
             conn.execute("CREATE TABLE IF NOT EXISTS alert_states (alert_key TEXT PRIMARY KEY, occurrences INTEGER NOT NULL, active INTEGER NOT NULL, updated_at TEXT NOT NULL)")
             conn.execute("CREATE TABLE IF NOT EXISTS latest_homeops_summary (singleton_id INTEGER PRIMARY KEY CHECK (singleton_id=1), summary TEXT NOT NULL)")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS homeops_operation_runs ("
+                "operation_id TEXT PRIMARY KEY, status TEXT NOT NULL, created_at TEXT NOT NULL, diagnosed_at TEXT, "
+                "restart_requested_at TEXT, verified_at TEXT, initial_result TEXT NOT NULL, final_result TEXT, restart_reason TEXT)"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS homeops_operation_events ("
+                "event_id INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL, event_type TEXT NOT NULL, "
+                "occurred_at TEXT NOT NULL, payload TEXT NOT NULL)"
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_homeops_operation_runs_created_at ON homeops_operation_runs(created_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_homeops_operation_events_operation_id ON homeops_operation_events(operation_id, event_id)")
 
     def _connect(self):
         return sqlite3.connect(self.db_path)

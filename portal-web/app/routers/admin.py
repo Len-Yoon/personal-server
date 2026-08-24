@@ -85,7 +85,16 @@ def _render_authenticated_admin_status(request: Request, issue_homeops_session: 
         service_health=get_service_health(),
         security=security_status(),
     )
-    context["homeops_summary"] = get_homeops_service().latest_summary()
+    homeops = get_homeops_service()
+    context["homeops_summary"] = homeops.latest_summary()
+    context["homeops_history"] = homeops.operation_history()
+    context["homeops_actionable_operation"] = next(
+        (item for item in context["homeops_history"] if item["status"] == "action_required"),
+        None,
+    )
+    context["homeops_pending_restart"] = any(
+        item["status"] == "restart_pending" for item in context["homeops_history"]
+    )
     response = templates.TemplateResponse(
         "admin_status.html",
         {
@@ -120,9 +129,9 @@ def homeops_diagnose(request: Request, password: str = Form(default=""), x_homeo
 
 
 @router.post("/admin/homeops/restart-all")
-def homeops_restart_all(request: Request, password: str = Form(default=""), x_homeops_password: str = Header(default="")):
+def homeops_restart_all(request: Request, operation_id: str = Form(default=""), password: str = Form(default=""), x_homeops_password: str = Header(default="")):
     _require_homeops_authorization(request, password or x_homeops_password)
-    get_homeops_service().restart_all()
+    get_homeops_service().restart_all(operation_id or None)
     return RedirectResponse(url="/admin/status", status_code=303)
 
 
