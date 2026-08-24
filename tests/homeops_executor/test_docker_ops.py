@@ -38,7 +38,7 @@ class FakeContainers:
         self.filters: list[dict[str, str]] = []
         self.container = FakeContainer()
 
-    def list(self, filters: dict[str, str]):
+    def list(self, filters: dict[str, str], all: bool = False):
         self.filters.append(filters)
         return [self.container]
 
@@ -67,6 +67,27 @@ class DockerOpsTests(unittest.TestCase):
                 for service in sorted(docker_ops.ALLOWED_SERVICES)
             ],
         )
+
+    def test_all_diagnostics_keeps_other_results_when_one_service_cannot_be_collected(self):
+        from app.services import docker_ops
+
+        class PartiallyFailingContainers:
+            def list(self, filters, all=False):
+                service = filters["label"].removeprefix("com.docker.compose.service=")
+                if service == "caddy":
+                    raise RuntimeError("docker daemon temporary failure")
+                return [FakeContainer(name=service)]
+
+        class PartiallyFailingClient:
+            def __init__(self):
+                self.containers = PartiallyFailingContainers()
+
+        result = docker_ops.collect_all_diagnostics(client=PartiallyFailingClient())
+        by_service = {item["service"]: item for item in result}
+
+        self.assertEqual(by_service["crawler-worker"]["container"]["status"], "running")
+        self.assertEqual(by_service["caddy"]["container"]["status"], "unknown")
+        self.assertEqual(by_service["caddy"]["error"], "diagnostic_unavailable")
 
     def test_restart_all_places_executor_last(self):
         from app.services import docker_ops
@@ -98,7 +119,7 @@ class DockerOpsTests(unittest.TestCase):
             def __init__(self):
                 self.filters: list[dict[str, str]] = []
 
-            def list(self, filters: dict[str, str]):
+            def list(self, filters: dict[str, str], all: bool = False):
                 self.filters.append(filters)
                 service = filters["label"].removeprefix("com.docker.compose.service=")
                 return [FailingContainer(name=service)]
@@ -176,7 +197,7 @@ class DockerOpsTests(unittest.TestCase):
             def get(self, _name):
                 raise AssertionError("generated Compose names must not be used as a fixed lookup")
 
-            def list(self, filters):
+            def list(self, filters, all: bool = False):
                 self.filters.append(filters)
                 return [self.container]
 
@@ -224,6 +245,25 @@ class DockerOpsTests(unittest.TestCase):
                 response = TestClient(app).get(
                     "/v1/diagnostics",
                     headers={"X-HomeOps-Executor-Secret": "shared"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), diagnostics)
+
+    def test_executor_accepts_admin_password_as_internal_secret_fallback(self):
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        diagnostics = [{"service": "caddy", "container": {}, "logs": []}]
+        with patch.dict(
+            "os.environ",
+            {"HOMEOPS_EXECUTOR_SHARED_SECRET": "", "ADMIN_STATUS_PASSWORD": "admin-secret"},
+            clear=False,
+        ):
+            with patch("app.main.docker_ops.collect_all_diagnostics", return_value=diagnostics):
+                response = TestClient(app).get(
+                    "/v1/diagnostics",
+                    headers={"X-HomeOps-Executor-Secret": "admin-secret"},
                 )
 
         self.assertEqual(response.status_code, 200)

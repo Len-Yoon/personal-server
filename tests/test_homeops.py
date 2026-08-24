@@ -247,7 +247,9 @@ class HomeOpsTests(unittest.TestCase):
         )
 
     def test_diagnose_all_normalizes_executor_failure_for_every_service(self):
-        self.executor.all_diagnostics_results = [OSError("executor unavailable")]
+        self.executor.all_diagnostics_results = [HTTPError(
+            "http://executor/v1/diagnostics", 403, "forbidden", {}, None
+        )]
 
         summary = self.service.diagnose_all()
 
@@ -255,10 +257,20 @@ class HomeOpsTests(unittest.TestCase):
         self.assertEqual(
             summary["unhealthy"],
             [
-                {"service": service, "reason": "실행기 응답 없음"}
+                {"service": service, "reason": "실행기 인증 설정 확인 필요"}
                 for service in sorted({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
             ],
         )
+
+    def test_executor_client_uses_admin_password_as_internal_secret_fallback(self):
+        from app.services.homeops import ExecutorClient
+
+        with patch.dict(
+            os.environ,
+            {"HOMEOPS_EXECUTOR_SHARED_SECRET": "", "ADMIN_STATUS_PASSWORD": "admin-secret"},
+            clear=False,
+        ):
+            self.assertEqual(ExecutorClient().secret, "admin-secret")
 
     def test_latest_summary_replaces_the_previous_singleton_record(self):
         first = [{"service": "crawler-worker", "container": {"status": "running", "health": "healthy"}, "logs": []}]
@@ -331,7 +343,7 @@ class HomeOpsTests(unittest.TestCase):
         self.assertEqual(
             summary["failed"],
             [
-                {"service": service, "reason": "실행기 응답 없음"}
+                {"service": service, "reason": "실행기 연결 실패"}
                 for service in sorted({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
             ],
         )
@@ -345,7 +357,7 @@ class HomeOpsTests(unittest.TestCase):
 
         self.assertEqual(self.executor.all_diagnostics_calls, 0)
         self.assertEqual(len(summary["failed"]), 7)
-        self.assertEqual({item["reason"] for item in summary["failed"]}, {"실행기 응답 없음"})
+        self.assertEqual({item["reason"] for item in summary["failed"]}, {"실행기 내부 오류"})
 
     def test_restart_all_does_not_poll_after_generic_os_error(self):
         self.executor.restart_all_error = OSError("network unreachable")
@@ -445,6 +457,7 @@ class HomeOpsTests(unittest.TestCase):
         self.assertIn("<strong>정상:</strong> crawler-worker", page.text)
         self.assertIn("<strong>비정상:</strong> caddy", page.text)
         self.assertIn("healthcheck 비정상", page.text)
+        self.assertIn('class="homeops-summary-separator">—</span>', page.text)
         self.assertNotIn("최근 조치 이력", page.text)
 
     def test_restart_all_route_renders_recovery_summary_after_redirect(self):

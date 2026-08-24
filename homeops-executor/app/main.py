@@ -18,9 +18,16 @@ class RestartRequest(BaseModel):
 
 
 def _require_shared_secret(provided: str) -> None:
-    configured = os.getenv("HOMEOPS_EXECUTOR_SHARED_SECRET", "")
+    configured = _executor_shared_secret()
     if not configured or not secrets.compare_digest(provided, configured):
         raise HTTPException(status_code=403, detail="executor_access_denied")
+
+
+def _executor_shared_secret() -> str:
+    return (
+        os.getenv("HOMEOPS_EXECUTOR_SHARED_SECRET", "").strip()
+        or os.getenv("ADMIN_STATUS_PASSWORD", "").strip()
+    )
 
 
 @app.get("/health")

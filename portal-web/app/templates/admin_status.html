@@ -127,7 +127,7 @@
                             {% if homeops_summary.unhealthy %}
                                 <ul class="homeops-abnormal-reasons">
                                     {% for item in homeops_summary.unhealthy %}
-                                        <li><strong>{{ item.service }}</strong><span>{{ item.reason }}</span></li>
+                                        <li><strong>{{ item.service }}</strong><span class="homeops-summary-separator">—</span><span>{{ item.reason }}</span></li>
                                     {% endfor %}
                                 </ul>
                             {% endif %}
@@ -138,7 +138,7 @@
                             {% if homeops_summary.failed %}
                                 <ul class="homeops-abnormal-reasons">
                                     {% for item in homeops_summary.failed %}
-                                        <li><strong>{{ item.service }}</strong><span>{{ item.reason }}</span></li>
+                                        <li><strong>{{ item.service }}</strong><span class="homeops-summary-separator">—</span><span>{{ item.reason }}</span></li>
                                     {% endfor %}
                                 </ul>
                             {% endif %}
