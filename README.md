@@ -112,7 +112,7 @@ main CI · N100 자동배포 · health 검증
 | 품질 확인 | 기능 테스트와 독립 diff 검토를 분리 |
 | 배포 통제 | PR CI 통과와 사용자 병합 승인 후 `main` 반영 |
 | 운영 검증 | N100 배포 후 컨테이너·공개 서비스 health 확인 |
-| 증거 보존 | CI artifact·로그 90일 보존, 장기 증적은 별도 저장소로 이전 |
+| 증거 보존 | CI artifact·로그 90일 보존, 장기 보관이 필요한 증적은 별도 저장소로 이전 |
 
 세부 절차는 [Codex 작업 완료 루프](docs/codex-work-loop.md), 증거 운영은 [작업 루프 증거 운영](docs/agent-loop-evidence.md)을 참고합니다.
 
