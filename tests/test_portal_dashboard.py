@@ -22,6 +22,7 @@ class PortalDashboardTests(unittest.TestCase):
                 "/admin/security",
                 "/admin/status",
                 "/admin/homeops/diagnose",
+                "/admin/homeops/restart-all",
                 "/admin/homeops/{incident_id}/approve",
                 "/admin/homeops/{incident_id}/execute",
                 "/internal/homeops/scan",
@@ -424,8 +425,8 @@ class PortalDashboardTests(unittest.TestCase):
         finally:
             os.environ.pop("FILE_MANAGER_PASSWORD", None)
 
-    def test_admin_status_renders_homeops_diagnosis_controls_as_an_operation_panel(self):
-        """Fails if the HomeOps form falls back to an unstyled browser-default control."""
+    def test_admin_status_renders_only_global_homeops_actions(self):
+        """Fails if removed service-level operations reappear on the administrator page."""
         os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
         try:
             app = self.load_app()
@@ -438,21 +439,17 @@ class PortalDashboardTests(unittest.TestCase):
                 )
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn("homeops-diagnosis-controls", response.text)
-            self.assertIn('class="homeops-service-select"', response.text)
+            self.assertIn('class="homeops-action-grid"', response.text)
             self.assertIn('class="homeops-diagnose-button"', response.text)
-            self.assertIn('class="homeops-guardrails"', response.text)
-            self.assertNotIn('class="homeops-policy-grid"', response.text)
-            self.assertIn("전체 서비스 스캔", response.text)
+            self.assertIn('action="/admin/homeops/restart-all"', response.text)
+            self.assertIn("전체 상태 진단", response.text)
+            self.assertIn("전체 재시작", response.text)
+            self.assertNotIn('name="service"', response.text)
+            self.assertNotIn("최근 조치 이력", response.text)
+            self.assertNotIn("재시작 실행", response.text)
+            self.assertNotIn(">승인<", response.text)
         finally:
             os.environ.pop("ADMIN_STATUS_PASSWORD", None)
-
-    def test_homeops_diagnosis_button_aligns_with_the_service_select_bottom_edge(self):
-        """Fails if the shared form centering rule offsets the action button from the select."""
-        stylesheet = (Path(__file__).parents[1] / "portal-web/app/static/css/style.css").read_text(encoding="utf-8")
-
-        self.assertIn(".homeops-diagnosis-controls {", stylesheet)
-        self.assertIn("align-items:end;", stylesheet)
 
     def test_admin_login_issues_homeops_session_that_allows_diagnosis_without_reentering_password(self):
         """A successful administrator login is the sole point that creates the HomeOps session."""
@@ -469,7 +466,6 @@ class PortalDashboardTests(unittest.TestCase):
                 )
                 diagnosis = client.post(
                     "/admin/homeops/diagnose",
-                    data={"service": "crawler-worker"},
                     headers={"Origin": "http://testserver"},
                     follow_redirects=False,
                 )

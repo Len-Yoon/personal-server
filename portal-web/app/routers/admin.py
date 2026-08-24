@@ -1,7 +1,6 @@
 import os
 import secrets
 from pathlib import Path
-from urllib.parse import urlencode
 
 from fastapi import APIRouter, Body, Form, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -86,11 +85,7 @@ def _render_authenticated_admin_status(request: Request, issue_homeops_session: 
         service_health=get_service_health(),
         security=security_status(),
     )
-    context["homeops_incidents"] = [
-        {**incident, "created_at": format_status_checked_at(str(incident.get("created_at") or ""))}
-        for incident in get_homeops_service().list_incidents()
-    ]
-    context["homeops_notice"] = _homeops_diagnosis_notice(request)
+    context["homeops_summary"] = get_homeops_service().latest_summary()
     response = templates.TemplateResponse(
         "admin_status.html",
         {
@@ -118,20 +113,17 @@ def _render_authenticated_admin_status(request: Request, issue_homeops_session: 
 
 
 @router.post("/admin/homeops/diagnose")
-def homeops_diagnose(request: Request, service: str = Form(default="crawler-worker"), password: str = Form(default=""), x_homeops_password: str = Header(default="")):
+def homeops_diagnose(request: Request, password: str = Form(default=""), x_homeops_password: str = Header(default="")):
     _require_homeops_authorization(request, password or x_homeops_password)
-    homeops = get_homeops_service()
-    completed = []
-    unavailable = []
-    for target in sorted(ALLOWED_SERVICES) if service == "all" else [service]:
-        try:
-            homeops.create_diagnosis(target)
-            completed.append(target)
-        except OSError:
-            append_security_event("homeops_diagnosis_unavailable", service=target)
-            unavailable.append(target)
-    query = urlencode({"homeops_completed": len(completed), "homeops_unavailable": ",".join(unavailable)})
-    return RedirectResponse(url=f"/admin/status?{query}", status_code=303)
+    get_homeops_service().diagnose_all()
+    return RedirectResponse(url="/admin/status", status_code=303)
+
+
+@router.post("/admin/homeops/restart-all")
+def homeops_restart_all(request: Request, password: str = Form(default=""), x_homeops_password: str = Header(default="")):
+    _require_homeops_authorization(request, password or x_homeops_password)
+    get_homeops_service().restart_all()
+    return RedirectResponse(url="/admin/status", status_code=303)
 
 
 @router.post("/admin/homeops/{incident_id}/approve")
@@ -205,17 +197,6 @@ def _require_homeops_authorization(request: Request, password: str) -> None:
     if has_auth_session("homeops_admin", request.cookies.get("homeops_admin_session", "")):
         return
     _require_security_password(request, password)
-
-
-def _homeops_diagnosis_notice(request: Request) -> str:
-    completed = request.query_params.get("homeops_completed", "")
-    unavailable = [service for service in request.query_params.get("homeops_unavailable", "").split(",") if service in ALLOWED_SERVICES]
-    if not completed.isdecimal():
-        return ""
-    message = f"{completed}개 서비스 진단을 기록했습니다."
-    if unavailable:
-        message += f" 응답 없음: {', '.join(unavailable)}"
-    return message
 
 
 def _client_id(request: Request) -> str:

@@ -100,70 +100,53 @@
                 <div>
                     <span class="modal-kicker">APPROVED OPERATIONS</span>
                     <h2>HomeOps 운영 보조</h2>
-                    <p>Compose 서비스의 상태를 확인하고, 필요한 경우에만 승인된 재시작을 수행합니다.</p>
+                    <p>관리 대상 전체의 상태를 확인하고 한 번에 재시작합니다.</p>
                 </div>
             </div>
-
-            {% if homeops_notice %}
-                <p class="homeops-result-notice" role="status">{{ homeops_notice }}</p>
-            {% endif %}
 
             <div class="homeops-workbench">
-                <div class="homeops-guardrails" aria-label="HomeOps 자동 복구 정책">
-                    <div class="homeops-guardrail-title"><strong>자동 복구 가드레일</strong><span>정책 조건을 모두 확인한 뒤에만 컨테이너를 재시작합니다.</span></div>
-                    <ul>
-                        <li>3회 연속 비정상</li>
-                        <li>CPU 85% 이상</li>
-                        <li>메모리 90% 이상</li>
-                        <li>컨테이너만 조치</li>
-                    </ul>
+                <div class="homeops-action-grid">
+                    <form class="homeops-action-form" action="/admin/homeops/diagnose" method="post">
+                        <strong>전체 상태 진단</strong>
+                        <span>관리 대상 전체의 현재 상태를 확인합니다.</span>
+                        <button class="homeops-diagnose-button" type="submit">전체 상태 진단</button>
+                    </form>
+                    <form class="homeops-action-form homeops-restart-form" action="/admin/homeops/restart-all" method="post">
+                        <strong>전체 재시작</strong>
+                        <span>관리 대상 컨테이너 전체를 재시작합니다.</span>
+                        <button class="homeops-restart-button" type="submit">전체 재시작</button>
+                    </form>
                 </div>
 
-                <form class="homeops-action-form homeops-diagnosis-controls" action="/admin/homeops/diagnose" method="post">
-                    <label class="homeops-service-picker">
-                        <span>진단 대상</span>
-                        <select class="homeops-service-select" name="service" aria-label="진단할 서비스 선택">
-                            <option value="all">전체 서비스 스캔</option>
-                            <option value="crawler-worker">crawler-worker</option>
-                            <option value="portal-web">portal-web</option>
-                            <option value="system-agent">system-agent</option>
-                            <option value="youtube-memo">youtube-memo</option>
-                            <option value="book-memo">book-memo</option>
-                            <option value="caddy">caddy</option>
-                            <option value="homeops-executor">homeops-executor</option>
-                        </select>
-                    </label>
-                    <button class="homeops-diagnose-button" type="submit">
-                        <span aria-hidden="true">⌁</span>
-                        상태 진단 시작
-                    </button>
-                </form>
-                <p class="homeops-control-hint">진단은 읽기 전용입니다. 재시작은 결과 확인 후 별도 승인해야 합니다.</p>
-            </div>
-
-            <div class="event-list homeops-history">
-                <h3>최근 조치 이력</h3>
-                {% for incident in homeops_incidents %}
-                    <article class="event-row homeops-row" data-homeops-status="{{ incident.status }}">
-                        <div>
-                            <span class="homeops-status">{{ incident.status }}</span>
-                            <strong>{{ incident.service }}</strong>
-                            <span>{{ incident.created_at }}</span>
-                        </div>
-                        <div>
-                            <strong>{{ incident.proposal.summary }}</strong>
-                            <span>허용 조치: {{ incident.proposal.action }}</span>
-                            {% if incident.status == "proposed" %}
-                                <form class="homeops-action-form" action="/admin/homeops/{{ incident.incident_id }}/approve" method="post"><button type="submit">승인</button></form>
+                {% if homeops_summary %}
+                    <section class="homeops-summary" role="status" aria-label="최근 HomeOps 결과">
+                        <h3>최근 결과</h3>
+                        {% if homeops_summary.kind == "diagnosis" %}
+                            <p><strong>정상:</strong> {{ homeops_summary.healthy | join(", ") or "없음" }}</p>
+                            <p><strong>비정상:</strong> {{ homeops_summary.unhealthy | map(attribute="service") | join(", ") or "없음" }}</p>
+                            {% if homeops_summary.unhealthy %}
+                                <ul class="homeops-abnormal-reasons">
+                                    {% for item in homeops_summary.unhealthy %}
+                                        <li><strong>{{ item.service }}</strong><span>{{ item.reason }}</span></li>
+                                    {% endfor %}
+                                </ul>
                             {% endif %}
-                            {% if incident.status == "approved" %}
-                                <form class="homeops-action-form" action="/admin/homeops/{{ incident.incident_id }}/execute" method="post"><button type="submit">재시작 실행</button></form>
+                        {% else %}
+                            <p><strong>정상:</strong> {{ homeops_summary.healthy | join(", ") or "없음" }}</p>
+                            <p><strong>복구됨:</strong> {{ homeops_summary.recovered | join(", ") or "없음" }}</p>
+                            <p><strong>복구 확인 실패:</strong> {{ homeops_summary.failed | map(attribute="service") | join(", ") or "없음" }}</p>
+                            {% if homeops_summary.failed %}
+                                <ul class="homeops-abnormal-reasons">
+                                    {% for item in homeops_summary.failed %}
+                                        <li><strong>{{ item.service }}</strong><span>{{ item.reason }}</span></li>
+                                    {% endfor %}
+                                </ul>
                             {% endif %}
-                        </div>
-                    </article>
+                        {% endif %}
+                    </section>
                 {% else %}
-                    <p class="empty-log">아직 HomeOps 진단 또는 조치 이력이 없습니다.</p>
-                {% endfor %}
+                    <p class="homeops-empty-summary">아직 HomeOps 진단 결과가 없습니다.</p>
+                {% endif %}
             </div>
         </section>
 

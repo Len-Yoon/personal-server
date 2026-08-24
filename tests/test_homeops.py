@@ -17,6 +17,7 @@ class FakeExecutor:
         self.all_diagnostics_results = []
         self.restart_all_result = []
         self.restart_all_error = None
+        self.restart_all_calls = 0
         self.all_diagnostics_calls = 0
 
     def diagnostics(self, service):
@@ -41,6 +42,7 @@ class FakeExecutor:
         return []
 
     def restart_all(self):
+        self.restart_all_calls += 1
         if self.restart_all_error:
             raise self.restart_all_error
         return self.restart_all_result
@@ -411,30 +413,13 @@ class HomeOpsTests(unittest.TestCase):
         self.assertEqual(self.executor.all_diagnostics_calls, 1)
         self.assertEqual(len(summary["failed"]), 7)
 
-    def test_admin_page_renders_homeops_and_execute_requires_same_origin(self):
-        from fastapi.testclient import TestClient
-        original = os.environ.get("ADMIN_STATUS_PASSWORD")
-        os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
-        try:
-            app = self._portal_app()
-            with patch("app.routers.admin.get_homeops_service", return_value=self.service):
-                with TestClient(app) as client:
-                    page = client.post("/admin/status", data={"password": "secret"}, headers={"Origin": "http://testserver"})
-                    blocked = client.post("/admin/homeops/one/execute", headers={"Origin": "https://evil.example", "X-HomeOps-Password": "secret"})
-        finally:
-            if original is None:
-                os.environ.pop("ADMIN_STATUS_PASSWORD", None)
-            else:
-                os.environ["ADMIN_STATUS_PASSWORD"] = original
-
-        self.assertEqual(page.status_code, 200)
-        self.assertIn("HomeOps 운영 보조", page.text)
-        self.assertIn('action="/admin/homeops/diagnose"', page.text)
-        self.assertEqual(blocked.status_code, 403)
-
-    def test_diagnosis_redirect_shows_a_result_notice(self):
+    def test_diagnose_all_route_renders_latest_compact_summary_after_redirect(self):
         from fastapi.testclient import TestClient
 
+        self.executor.all_diagnostics_results = [[
+            {"service": "crawler-worker", "container": {"status": "running", "health": "healthy"}, "logs": []},
+            {"service": "caddy", "container": {"status": "running", "health": "unhealthy"}, "logs": []},
+        ]]
         original = os.environ.get("ADMIN_STATUS_PASSWORD")
         os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
         try:
@@ -444,8 +429,82 @@ class HomeOpsTests(unittest.TestCase):
                     client.post("/admin/status", data={"password": "secret"}, headers={"Origin": "http://testserver"})
                     response = client.post(
                         "/admin/homeops/diagnose",
-                        data={"service": "crawler-worker"},
                         headers={"Origin": "http://testserver"},
+                        follow_redirects=False,
+                    )
+                    page = client.get(response.headers["location"])
+        finally:
+            if original is None:
+                os.environ.pop("ADMIN_STATUS_PASSWORD", None)
+            else:
+                os.environ["ADMIN_STATUS_PASSWORD"] = original
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(self.executor.all_diagnostics_calls, 1)
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("<strong>정상:</strong> crawler-worker", page.text)
+        self.assertIn("<strong>비정상:</strong> caddy", page.text)
+        self.assertIn("healthcheck 비정상", page.text)
+        self.assertNotIn("최근 조치 이력", page.text)
+
+    def test_restart_all_route_renders_recovery_summary_after_redirect(self):
+        from fastapi.testclient import TestClient
+
+        services = sorted({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
+        self.executor.restart_all_result = [
+            {
+                "service": service,
+                "container": {
+                    "status": "exited" if service == "caddy" else "running",
+                    "health": "healthy",
+                },
+                "logs": [],
+            }
+            for service in services
+        ]
+        original = os.environ.get("ADMIN_STATUS_PASSWORD")
+        os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
+        try:
+            app = self._portal_app()
+            with patch("app.routers.admin.get_homeops_service", return_value=self.service):
+                with TestClient(app) as client:
+                    client.post("/admin/status", data={"password": "secret"}, headers={"Origin": "http://testserver"})
+                    response = client.post(
+                        "/admin/homeops/restart-all",
+                        headers={"Origin": "http://testserver"},
+                        follow_redirects=False,
+                    )
+                    redirect_location = response.headers.get("location")
+                    page = client.get(redirect_location) if redirect_location else response
+        finally:
+            if original is None:
+                os.environ.pop("ADMIN_STATUS_PASSWORD", None)
+            else:
+                os.environ["ADMIN_STATUS_PASSWORD"] = original
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(self.executor.restart_all_calls, 1)
+        self.assertIn("복구됨:", page.text)
+        self.assertIn("<strong>복구 확인 실패:</strong> caddy", page.text)
+        self.assertIn("중지됨", page.text)
+
+    def test_homeops_global_actions_require_authentication_and_same_origin(self):
+        from fastapi.testclient import TestClient
+
+        original = os.environ.get("ADMIN_STATUS_PASSWORD")
+        os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
+        try:
+            app = self._portal_app()
+            with patch("app.routers.admin.get_homeops_service", return_value=self.service):
+                with TestClient(app) as client:
+                    unauthenticated = client.post(
+                        "/admin/homeops/diagnose",
+                        headers={"Origin": "http://testserver"},
+                    )
+                    client.post("/admin/status", data={"password": "secret"}, headers={"Origin": "http://testserver"})
+                    cross_origin = client.post(
+                        "/admin/homeops/restart-all",
+                        headers={"Origin": "https://evil.example"},
                     )
         finally:
             if original is None:
@@ -453,28 +512,10 @@ class HomeOpsTests(unittest.TestCase):
             else:
                 os.environ["ADMIN_STATUS_PASSWORD"] = original
 
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("1개 서비스 진단을 기록했습니다.", response.text)
-
-    def test_admin_page_formats_homeops_incident_timestamp_in_kst(self):
-        from fastapi.testclient import TestClient
-
-        self.service.create_diagnosis("crawler-worker")
-        original = os.environ.get("ADMIN_STATUS_PASSWORD")
-        os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
-        try:
-            app = self._portal_app()
-            with patch("app.routers.admin.get_homeops_service", return_value=self.service):
-                with TestClient(app) as client:
-                    page = client.post("/admin/status", data={"password": "secret"}, headers={"Origin": "http://testserver"})
-        finally:
-            if original is None:
-                os.environ.pop("ADMIN_STATUS_PASSWORD", None)
-            else:
-                os.environ["ADMIN_STATUS_PASSWORD"] = original
-
-        self.assertIn("KST", page.text)
-        self.assertNotIn("+00:00", page.text)
+        self.assertEqual(unauthenticated.status_code, 401)
+        self.assertEqual(cross_origin.status_code, 403)
+        self.assertEqual(self.executor.all_diagnostics_calls, 0)
+        self.assertEqual(self.executor.restart_all_calls, 0)
 
     def _portal_app(self):
         prepare_service_import("portal-web")
