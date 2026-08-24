@@ -31,7 +31,13 @@ def restart_service(service: str, client: Any | None = None) -> dict[str, object
 
 def restart_all_services(client: Any | None = None) -> list[dict[str, object]]:
     services = sorted(ALLOWED_SERVICES - {"homeops-executor"}) + ["homeops-executor"]
-    return [restart_service(service, client=client) for service in services]
+    results: list[dict[str, object]] = []
+    for service in services:
+        try:
+            results.append(restart_service(service, client=client))
+        except Exception as exc:
+            results.append({"service": service, "status": "failed", "error": str(exc)})
+    return results
 
 
 def _get_container(service: str, client: Any | None) -> Any:

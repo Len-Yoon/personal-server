@@ -85,6 +85,59 @@ class DockerOpsTests(unittest.TestCase):
             ],
         )
 
+    def test_restart_all_continues_after_failure_and_restarts_executor_last(self):
+        from app.services import docker_ops
+
+        class FailingContainer(FakeContainer):
+            def restart(self, timeout: int):
+                if self.name == "caddy":
+                    raise RuntimeError("docker daemon unavailable")
+                super().restart(timeout)
+
+        class FailingContainers:
+            def __init__(self):
+                self.filters: list[dict[str, str]] = []
+
+            def list(self, filters: dict[str, str]):
+                self.filters.append(filters)
+                service = filters["label"].removeprefix("com.docker.compose.service=")
+                return [FailingContainer(name=service)]
+
+        class FailingDockerClient:
+            def __init__(self):
+                self.containers = FailingContainers()
+
+        client = FailingDockerClient()
+
+        result = docker_ops.restart_all_services(client=client)
+
+        expected_services = [
+            "book-memo",
+            "caddy",
+            "crawler-worker",
+            "portal-web",
+            "system-agent",
+            "youtube-memo",
+            "homeops-executor",
+        ]
+        self.assertEqual([item["service"] for item in result], expected_services)
+        self.assertEqual(
+            result[1],
+            {
+                "service": "caddy",
+                "status": "failed",
+                "error": "docker daemon unavailable",
+            },
+        )
+        self.assertEqual(result[-1]["service"], "homeops-executor")
+        self.assertEqual(
+            client.containers.filters,
+            [
+                {"label": f"com.docker.compose.service={service}"}
+                for service in expected_services
+            ],
+        )
+
     def test_diagnostics_rejects_service_outside_allowlist(self):
         from app.services import docker_ops
 
