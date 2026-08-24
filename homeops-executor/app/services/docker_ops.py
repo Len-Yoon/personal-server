@@ -17,12 +17,21 @@ def collect_diagnostics(service: str, client: Any | None = None) -> dict[str, ob
     }
 
 
+def collect_all_diagnostics(client: Any | None = None) -> list[dict[str, object]]:
+    return [collect_diagnostics(service, client=client) for service in sorted(ALLOWED_SERVICES)]
+
+
 def restart_service(service: str, client: Any | None = None) -> dict[str, object]:
     container = _get_container(service, client)
     container.restart(timeout=10)
     container.reload()
     snapshot = _container_snapshot(container)
     return {"service": service, "status": snapshot["status"], "container": snapshot}
+
+
+def restart_all_services(client: Any | None = None) -> list[dict[str, object]]:
+    services = sorted(ALLOWED_SERVICES - {"homeops-executor"}) + ["homeops-executor"]
+    return [restart_service(service, client=client) for service in services]
 
 
 def _get_container(service: str, client: Any | None) -> Any:
