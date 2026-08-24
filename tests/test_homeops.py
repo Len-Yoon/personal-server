@@ -13,6 +13,10 @@ class FakeExecutor:
         self.restart_calls = []
         self.health_ok = True
         self.health_results = None
+        self.all_diagnostics_results = []
+        self.restart_all_result = []
+        self.restart_all_error = None
+        self.all_diagnostics_calls = 0
 
     def diagnostics(self, service):
         return {"service": service, "container": {"status": "running", "health": "unhealthy"}, "logs": ["error"]}
@@ -25,6 +29,20 @@ class FakeExecutor:
         if self.health_results:
             return self.health_results.pop(0)
         return self.health_ok
+
+    def all_diagnostics(self):
+        self.all_diagnostics_calls += 1
+        if self.all_diagnostics_results:
+            result = self.all_diagnostics_results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+        return []
+
+    def restart_all(self):
+        if self.restart_all_error:
+            raise self.restart_all_error
+        return self.restart_all_result
 
 
 class FakeNotifier:
@@ -180,6 +198,117 @@ class HomeOpsTests(unittest.TestCase):
         incident = self.service.create_diagnosis("crawler-worker")
 
         self.assertNotIn("secret-value", str(incident))
+
+    def test_executor_client_uses_whole_fleet_endpoints(self):
+        from app.services.homeops import ExecutorClient
+
+        class RecordingClient(ExecutorClient):
+            def __init__(self):
+                self.requests = []
+
+            def _request(self, path, payload=None, method=None):
+                self.requests.append((path, payload, method))
+                return {"path": path}
+
+        client = RecordingClient()
+
+        diagnostics = client.all_diagnostics()
+        restarts = client.restart_all()
+
+        self.assertEqual(diagnostics, {"path": "/v1/diagnostics"})
+        self.assertEqual(restarts, {"path": "/v1/restarts/all"})
+        self.assertEqual(
+            client.requests,
+            [("/v1/diagnostics", None, None), ("/v1/restarts/all", None, "POST")],
+        )
+
+    def test_diagnose_all_groups_healthy_and_normalized_unhealthy_services(self):
+        self.executor.all_diagnostics_results = [[
+            {"service": "crawler-worker", "container": {"status": "running", "health": "healthy"}, "logs": []},
+            {"service": "portal-web", "container": {"status": "running", "health": "none"}, "logs": []},
+            {"service": "caddy", "container": {"status": "running", "health": "unhealthy"}, "logs": []},
+            {"service": "youtube-memo", "container": {"status": "exited", "health": "none"}, "logs": []},
+        ]]
+
+        summary = self.service.diagnose_all()
+
+        self.assertEqual(summary["healthy"], ["crawler-worker", "portal-web"])
+        self.assertEqual(
+            summary["unhealthy"],
+            [
+                {"service": "caddy", "reason": "healthcheck 비정상"},
+                {"service": "youtube-memo", "reason": "중지됨"},
+            ],
+        )
+
+    def test_diagnose_all_normalizes_executor_failure_for_every_service(self):
+        self.executor.all_diagnostics_results = [OSError("executor unavailable")]
+
+        summary = self.service.diagnose_all()
+
+        self.assertEqual(summary["healthy"], [])
+        self.assertEqual(
+            summary["unhealthy"],
+            [
+                {"service": service, "reason": "실행기 응답 없음"}
+                for service in sorted({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
+            ],
+        )
+
+    def test_latest_summary_replaces_the_previous_singleton_record(self):
+        first = [{"service": "crawler-worker", "container": {"status": "running", "health": "healthy"}, "logs": []}]
+        second = [{"service": "caddy", "container": {"status": "exited", "health": "none"}, "logs": []}]
+        self.executor.all_diagnostics_results = [first, second]
+
+        self.service.diagnose_all()
+        expected = self.service.diagnose_all()
+
+        from app.services.homeops import HomeOpsService
+        reloaded = HomeOpsService(self.service.db_path, self.executor, verification_interval_seconds=0)
+        self.assertEqual(reloaded.latest_summary(), expected)
+        with self.service._connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM latest_homeops_summary").fetchone()[0], 1)
+
+    def test_restart_all_records_recovered_and_failed_services(self):
+        self.executor.restart_all_result = [
+            {"service": "crawler-worker", "status": "running", "container": {"status": "running", "health": "healthy"}},
+            {"service": "caddy", "status": "exited", "container": {"status": "exited", "health": "none"}},
+        ]
+
+        summary = self.service.restart_all()
+
+        self.assertEqual(summary["recovered"], ["crawler-worker"])
+        self.assertEqual(summary["failed"], [{"service": "caddy", "reason": "중지됨"}])
+        self.assertEqual(self.service.latest_summary(), summary)
+
+    def test_restart_all_recovers_from_executor_connection_close(self):
+        healthy = [
+            {"service": service, "container": {"status": "running", "health": "healthy"}, "logs": []}
+            for service in sorted({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
+        ]
+        self.executor.restart_all_error = OSError("connection reset")
+        self.executor.all_diagnostics_results = [OSError("still starting"), healthy]
+
+        summary = self.service.restart_all()
+
+        self.assertEqual(summary["failed"], [])
+        self.assertEqual(summary["recovered"], [item["service"] for item in healthy])
+        self.assertEqual(self.executor.all_diagnostics_calls, 2)
+
+    def test_restart_all_stops_polling_and_records_executor_response_failure(self):
+        self.executor.restart_all_error = OSError("connection reset")
+        self.executor.all_diagnostics_results = [OSError("still starting")] * 5
+
+        summary = self.service.restart_all()
+
+        self.assertEqual(self.executor.all_diagnostics_calls, 5)
+        self.assertEqual(
+            summary["failed"],
+            [
+                {"service": service, "reason": "실행기 응답 없음"}
+                for service in sorted({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
+            ],
+        )
 
     def test_admin_page_renders_homeops_and_execute_requires_same_origin(self):
         from fastapi.testclient import TestClient
