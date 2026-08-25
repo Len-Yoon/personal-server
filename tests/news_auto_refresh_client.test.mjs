@@ -128,6 +128,74 @@ test("자동 새로고침은 UTC 기사 시각을 KST 분 단위로 표시한다
     assert.doesNotMatch(cardText, /2026년|2026-07-10T15:58:15|00:58:15|KST/);
 });
 
+test("자동 새로고침은 호스트 로컬 시간대와 관계없이 naive ISO 시각을 UTC 기준 KST로 표시한다", async () => {
+    const originalTimezone = process.env.TZ;
+    process.env.TZ = "America/New_York";
+
+    try {
+        const container = new TestElement();
+        container.dataset.category = "KR_WORLD";
+        container.dataset.autoRefreshSeconds = "60";
+        const newsList = new TestElement("section");
+        const status = new TestElement();
+        let refreshNews;
+
+        globalThis.document = {
+            hidden: false,
+            querySelector(selector) {
+                return {
+                    "[data-auto-refresh-seconds]": container,
+                    "[data-news-list]": newsList,
+                    "[data-refresh-status]": status,
+                }[selector] || null;
+            },
+            createElement(tagName) {
+                return new TestElement(tagName);
+            },
+            createDocumentFragment() {
+                const fragment = new TestElement();
+                fragment.isFragment = true;
+                return fragment;
+            },
+        };
+        globalThis.window = {
+            location: { origin: "https://news.example.com" },
+            setInterval(callback) {
+                refreshNews = callback;
+            },
+        };
+        globalThis.fetch = async () => ({
+            ok: true,
+            async json() {
+                return {
+                    count: 1,
+                    cache: { hit: false },
+                    articles: [{
+                        title_ko: "naive ISO 기사",
+                        provider: "RSS",
+                        source: "RSS",
+                        collected_at: "2026-07-09T01:02:03",
+                    }],
+                };
+            },
+        });
+
+        eval(clientScript);
+        await refreshNews();
+
+        const cardText = allText(newsList.children[0]);
+        assert.match(cardText, /naive ISO 기사/);
+        assert.match(cardText, /2026-07-09 10:02/);
+        assert.doesNotMatch(cardText, /2026-07-09 14:02/);
+    } finally {
+        if (originalTimezone === undefined) {
+            delete process.env.TZ;
+        } else {
+            process.env.TZ = originalTimezone;
+        }
+    }
+});
+
 test("자동 새로고침은 해석할 수 없는 기사 시각을 표시하지 않는다", async () => {
     const container = new TestElement();
     container.dataset.category = "KR_WORLD";

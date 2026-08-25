@@ -173,7 +173,8 @@
         if (!raw || (!isIso8601 && !isRfc822)) {
             return "";
         }
-        const date = new Date(raw);
+        const hasIsoTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw);
+        const date = new Date(isIso8601 && !hasIsoTimezone ? `${raw}Z` : raw);
         if (Number.isNaN(date.getTime())) {
             return "";
         }
