@@ -19,6 +19,16 @@ def format_status_checked_at(value: str) -> str:
     return parsed.astimezone(SEOUL_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S KST")
 
 
+def format_operation_history_for_display(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            **operation,
+            "created_at": format_status_checked_at(str(operation.get("created_at") or "")),
+        }
+        for operation in history
+    ]
+
+
 def build_admin_status_context(
     system_status: dict[str, Any],
     service_health: list[dict[str, Any]],
