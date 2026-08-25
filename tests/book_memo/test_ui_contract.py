@@ -433,6 +433,22 @@ class BookMemoUiContractTests(unittest.TestCase):
         self.assertNotIn("KST", response.text)
         self.assertNotIn("10:02:03", response.text)
 
+    def test_display_datetime_handles_aware_and_invalid_values_safely(self):
+        """Fails if malformed stored memo dates can raise while rendering a detail page."""
+        from app.services.datetime_format import format_display_datetime
+
+        cases = (
+            ("2026-07-09T01:02:03+00:00", "2026-07-09 10:02"),
+            ("2026-07-09T10:02:03+09:00", "2026-07-09 10:02"),
+            (None, ""),
+            ("", ""),
+            ("not-a-datetime", "not-a-datetime"),
+        )
+
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(format_display_datetime(value), expected)
+
     def test_search_api_keeps_saved_book_and_memo_results_available(self):
         """Fails if a presentation-only change accidentally removes search results."""
         with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
