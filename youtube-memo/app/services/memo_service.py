@@ -8,6 +8,8 @@ from typing import Any, Callable, Iterator
 from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import urlopen
 
+from app.services.datetime_format import format_display_datetime
+
 
 PROJECT_DATA_ROOT = Path(__file__).resolve().parents[3] / "data"
 DEFAULT_DB_PATH = PROJECT_DATA_ROOT / "youtube-memo" / "youtube_memo.sqlite3"
@@ -197,7 +199,13 @@ def list_memos(video_id: int) -> list[dict[str, Any]]:
             (video_id,),
         ).fetchall()
 
-    return [_row_to_dict(row) for row in rows]
+    return [
+        {
+            **_row_to_dict(row),
+            "display_created_at": format_display_datetime(row["created_at"]),
+        }
+        for row in rows
+    ]
 
 
 def search_videos_and_memos(query: str, limit: int = 5) -> list[dict[str, Any]]:

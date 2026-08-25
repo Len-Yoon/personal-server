@@ -448,6 +448,28 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(format_display_datetime(value), expected)
 
+    def test_list_memos_prepares_compact_kst_display_timestamp_without_changing_raw_value(self):
+        """Fails if the memo display value is not prepared in the service layer."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir):
+            import app.services.memo_service as memo_service
+
+            video = memo_service.create_or_get_video(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                title_fetcher=lambda _youtube_id, _url: "서비스 시간 표시 테스트 영상",
+            )
+            memo = memo_service.create_memo(video["id"], "서비스 시간 메모", "표시 값 확인")
+            raw_utc_timestamp = "2026-07-09 01:02:03"
+            with sqlite3.connect(memo_service.DB_PATH) as connection:
+                connection.execute(
+                    "UPDATE memos SET created_at = ? WHERE id = ?",
+                    (raw_utc_timestamp, memo["id"]),
+                )
+
+            listed_memo = memo_service.list_memos(video["id"])[0]
+
+        self.assertEqual(listed_memo["created_at"], raw_utc_timestamp)
+        self.assertEqual(listed_memo["display_created_at"], "2026-07-09 10:02")
+
     def test_detail_hides_unparsable_utc_like_memo_timestamp(self):
         """Fails if an invalid UTC-like stored timestamp leaks into the video detail HTML."""
         with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:

@@ -4,6 +4,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+from app.services.datetime_format import format_display_datetime
+
 
 PROJECT_DATA_ROOT = next(
     (
@@ -425,7 +427,13 @@ def list_memos(book_id: int) -> list[dict[str, Any]]:
             (book_id,),
         ).fetchall()
 
-    return [_row_to_dict(row) for row in rows]
+    return [
+        {
+            **_row_to_dict(row),
+            "display_created_at": format_display_datetime(row["created_at"]),
+        }
+        for row in rows
+    ]
 
 
 def search_books_and_memos(query: str, limit: int = 5) -> list[dict[str, Any]]:

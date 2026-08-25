@@ -27,7 +27,6 @@ from app.services.memo_service import (
     search_videos_and_memos,
     update_memo,
 )
-from app.services.datetime_format import format_display_datetime
 from app.services.host_urls import portal_home_url, request_host_from_headers
 
 app = FastAPI(title="Youtube Memo")
@@ -76,7 +75,6 @@ async def apply_browser_security(request: Request, call_next):
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
-templates.env.filters["display_datetime"] = format_display_datetime
 AUTH_RATE_LIMIT_MAX_FAILURES = int(os.getenv("AUTH_RATE_LIMIT_MAX_FAILURES", "5"))
 AUTH_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("AUTH_RATE_LIMIT_WINDOW_SECONDS", "300"))
 AUTH_RATE_LIMIT_STATE_PATH = Path(

@@ -451,6 +451,26 @@ class BookMemoUiContractTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(format_display_datetime(value), expected)
 
+    def test_list_memos_prepares_compact_kst_display_timestamp_without_changing_raw_value(self):
+        """Fails if the memo display value is not prepared in the service layer."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir):
+            import app.services.book_service as book_service
+
+            book = book_service.create_or_get_book({"isbn": "9780000000022", "title": "서비스 시간 표시 테스트 책"})
+            book_service.create_memo(book["id"], chapter_id=None, title="서비스 시간 메모", content="표시 값 확인", page=0)
+            memo = book_service.list_memos(book["id"])[0]
+            raw_utc_timestamp = "2026-07-09 01:02:03"
+            with sqlite3.connect(book_service.DB_PATH) as connection:
+                connection.execute(
+                    "UPDATE book_memos SET created_at = ? WHERE id = ?",
+                    (raw_utc_timestamp, memo["id"]),
+                )
+
+            listed_memo = book_service.list_memos(book["id"])[0]
+
+        self.assertEqual(listed_memo["created_at"], raw_utc_timestamp)
+        self.assertEqual(listed_memo["display_created_at"], "2026-07-09 10:02")
+
     def test_detail_hides_unparsable_utc_like_memo_timestamp(self):
         """Fails if an invalid UTC-like stored timestamp leaks into the book detail HTML."""
         with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
