@@ -260,13 +260,24 @@ class PortalSecurityTests(unittest.TestCase):
             self.assertEqual(events[0]["event"], "user_service_opened")
             self.assertEqual(events[0]["details"]["target"], "유튜브 메모장")
 
-    def test_security_event_timestamp_uses_compact_kst_display(self):
+    def test_security_event_preserves_full_kst_timestamp_in_log_and_returns_compact_display(self):
+        """Fails if audit-log storage is reduced to the compact UI timestamp."""
         with tempfile.TemporaryDirectory() as tempdir:
             security = self.reload_security(tempdir)
 
             security.append_security_event("test_event")
 
+            stored_event = json.loads(
+                security._daily_log_path(datetime.now(security.LOG_TIMEZONE)).read_text(
+                    encoding="utf-8"
+                )
+            )
             events = security.read_recent_events()
+
+            self.assertRegex(
+                stored_event["timestamp"],
+                r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} KST$",
+            )
             self.assertRegex(events[0]["timestamp"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
 
     def test_read_recent_events_normalizes_legacy_kst_timestamp(self):
