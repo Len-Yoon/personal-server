@@ -6,7 +6,6 @@ from zoneinfo import ZoneInfo
 
 
 KOREA_TIMEZONE = ZoneInfo("Asia/Seoul")
-KOREAN_WEEKDAYS = ("월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일")
 
 
 def format_news_datetime(value: str) -> str:
@@ -28,5 +27,4 @@ def format_news_datetime(value: str) -> str:
         parsed = parsed.replace(tzinfo=timezone.utc)
 
     local = parsed.astimezone(KOREA_TIMEZONE)
-    weekday = KOREAN_WEEKDAYS[local.weekday()]
-    return f"{local.year}년 {local.month}월 {local.day}일 {weekday} {local:%H:%M:%S}"
+    return local.strftime("%Y-%m-%d %H:%M")
