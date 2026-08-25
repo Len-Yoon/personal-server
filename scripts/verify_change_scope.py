@@ -18,6 +18,7 @@ SERVICE_PREFIXES = {
 }
 DOCUMENTATION_PREFIXES = ("docs/",)
 DOCUMENTATION_FILES = {"README.md", "AGENTS.md", "CLAUDE.md"}
+SDD_REPORT_PREFIX = ".superpowers/sdd/"
 AUTOMATION_PREFIXES = (".github/", "tests/")
 BLOCKED_PREFIXES = ("caddy/", "scripts/")
 BLOCKED_INFRASTRUCTURE_FILES = {"docker-compose.yml", "docker-compose.n100.yml"}
@@ -90,7 +91,11 @@ def classify_paths(paths: list[str]) -> dict[str, object]:
                 _append_required_check(evidence, service)
             continue
 
-        if path in DOCUMENTATION_FILES or path.startswith(DOCUMENTATION_PREFIXES):
+        if (
+            path in DOCUMENTATION_FILES
+            or path.startswith(DOCUMENTATION_PREFIXES)
+            or (path.startswith(SDD_REPORT_PREFIX) and path.endswith("-report.md"))
+        ):
             evidence["documentation_files"].append(path)
             continue
 

@@ -2,6 +2,7 @@ import importlib
 import json
 import multiprocessing
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -407,6 +408,91 @@ class BookMemoUiContractTests(unittest.TestCase):
         self.assertIn('id="toc-fetch-button"', response.text)
         self.assertIn('class="chapter-list"', response.text)
         self.assertIn('class="memo-list"', response.text)
+
+    def test_detail_formats_stored_utc_memo_timestamp_as_compact_kst_datetime(self):
+        """Fails if a stored UTC memo timestamp is rendered without KST conversion."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            import app.services.book_service as book_service
+
+            book = book_service.create_or_get_book({"isbn": "9780000000020", "title": "시간 표시 테스트 책"})
+            book_service.create_memo(book["id"], chapter_id=None, title="시간 메모", content="표시 형식 확인", page=0)
+            memo = book_service.list_memos(book["id"])[0]
+            raw_utc_timestamp = "2026-07-09 01:02:03"
+            with sqlite3.connect(book_service.DB_PATH) as connection:
+                connection.execute(
+                    "UPDATE book_memos SET created_at = ? WHERE id = ?",
+                    (raw_utc_timestamp, memo["id"]),
+                )
+
+            with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                response = client.get(f"/books/{book['id']}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("2026-07-09 10:02", response.text)
+        self.assertNotIn(raw_utc_timestamp, response.text)
+        self.assertNotIn("KST", response.text)
+        self.assertNotIn("10:02:03", response.text)
+
+    def test_display_datetime_hides_unparsable_values_and_keeps_valid_kst_values(self):
+        """Fails if a malformed memo date is exposed instead of being hidden."""
+        from app.services.datetime_format import format_display_datetime
+
+        cases = (
+            ("2026-07-09 01:02:03", "2026-07-09 10:02"),
+            ("2026-07-09T01:02:03+00:00", "2026-07-09 10:02"),
+            ("2026-07-09T10:02:03+09:00", "2026-07-09 10:02"),
+            (None, ""),
+            ("", ""),
+            ("not-a-datetime", ""),
+            ("2026-07-09 01:02:03 UTC", ""),
+        )
+
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.assertEqual(format_display_datetime(value), expected)
+
+    def test_list_memos_prepares_compact_kst_display_timestamp_without_changing_raw_value(self):
+        """Fails if the memo display value is not prepared in the service layer."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir):
+            import app.services.book_service as book_service
+
+            book = book_service.create_or_get_book({"isbn": "9780000000022", "title": "서비스 시간 표시 테스트 책"})
+            book_service.create_memo(book["id"], chapter_id=None, title="서비스 시간 메모", content="표시 값 확인", page=0)
+            memo = book_service.list_memos(book["id"])[0]
+            raw_utc_timestamp = "2026-07-09 01:02:03"
+            with sqlite3.connect(book_service.DB_PATH) as connection:
+                connection.execute(
+                    "UPDATE book_memos SET created_at = ? WHERE id = ?",
+                    (raw_utc_timestamp, memo["id"]),
+                )
+
+            listed_memo = book_service.list_memos(book["id"])[0]
+
+        self.assertEqual(listed_memo["created_at"], raw_utc_timestamp)
+        self.assertEqual(listed_memo["display_created_at"], "2026-07-09 10:02")
+
+    def test_detail_hides_unparsable_utc_like_memo_timestamp(self):
+        """Fails if an invalid UTC-like stored timestamp leaks into the book detail HTML."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            import app.services.book_service as book_service
+
+            book = book_service.create_or_get_book({"isbn": "9780000000021", "title": "오류 시간 표시 테스트 책"})
+            book_service.create_memo(book["id"], chapter_id=None, title="오류 시간 메모", content="비표시 확인", page=0)
+            memo = book_service.list_memos(book["id"])[0]
+            raw_invalid_timestamp = "2026-07-09 01:02:03 UTC"
+            with sqlite3.connect(book_service.DB_PATH) as connection:
+                connection.execute(
+                    "UPDATE book_memos SET created_at = ? WHERE id = ?",
+                    (raw_invalid_timestamp, memo["id"]),
+                )
+
+            with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                response = client.get(f"/books/{book['id']}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(raw_invalid_timestamp, response.text)
+        self.assertNotIn("UTC", response.text)
+        self.assertNotIn("01:02:03", response.text)
 
     def test_search_api_keeps_saved_book_and_memo_results_available(self):
         """Fails if a presentation-only change accidentally removes search results."""

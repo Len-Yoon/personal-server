@@ -21,6 +21,18 @@ class ServiceTestRunnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("[PASS] system-agent", result.stdout)
 
+    def test_crawler_worker_suite_executes_news_auto_refresh_client_test(self):
+        """Fails if crawler-worker omits its browser-side time display regression test."""
+        result = subprocess.run(
+            [sys.executable, str(RUNNER), "--suite", "crawler-worker"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("자동 새로고침은 UTC 기사 시각을 KST 분 단위로 표시한다", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

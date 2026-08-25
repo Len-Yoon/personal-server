@@ -6,11 +6,10 @@ from zoneinfo import ZoneInfo
 
 
 KOREA_TIMEZONE = ZoneInfo("Asia/Seoul")
-KOREAN_WEEKDAYS = ("월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일")
 
 
-def format_news_datetime(value: str) -> str:
-    """Return a news timestamp in Korean local time, preserving invalid input."""
+def format_news_datetime(value: str | None) -> str:
+    """Return a valid news timestamp in Korean local time for display."""
     raw = str(value or "").strip()
     if not raw:
         return raw
@@ -22,11 +21,10 @@ def format_news_datetime(value: str) -> str:
         try:
             parsed = parsedate_to_datetime(raw)
         except (TypeError, ValueError, IndexError, OverflowError):
-            return raw
+            return ""
 
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
 
     local = parsed.astimezone(KOREA_TIMEZONE)
-    weekday = KOREAN_WEEKDAYS[local.weekday()]
-    return f"{local.year}년 {local.month}월 {local.day}일 {weekday} {local:%H:%M:%S}"
+    return local.strftime("%Y-%m-%d %H:%M")
