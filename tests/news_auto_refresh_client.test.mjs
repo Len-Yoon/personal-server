@@ -55,7 +55,7 @@ function allText(element) {
     return [element.textContent, ...element.children.map(allText)].join(" ");
 }
 
-test("동일 URL 기사의 분류가 archive에서 alert로 바뀌면 자동 갱신 화면도 변경한다", async () => {
+test("자동 새로고침은 UTC 기사 시각을 KST 분 단위로 표시한다", async () => {
     const container = new TestElement();
     container.dataset.category = "KR_WORLD";
     container.dataset.autoRefreshSeconds = "60";
@@ -102,6 +102,8 @@ test("동일 URL 기사의 분류가 archive에서 alert로 바뀌면 자동 갱
                         title_ko: "시장 충격 발생",
                         provider: "Investing.com RSS",
                         source: "Investing.com 한국어",
+                        collected_at: "2026-07-10T15:58:15.761236+00:00",
+                        published_at: "Fri, 10 Jul 2026 15:58:15 +0000",
                         topics: ["세계동향"],
                         summary: "기존 보관 기사에서 중요 뉴스로 갱신됨",
                         url: "https://example.com/market",
@@ -117,8 +119,11 @@ test("동일 URL 기사의 분류가 archive에서 alert로 바뀌면 자동 갱
 
     assert.equal(newsList.children.length, 1);
     assert.equal(newsList.children[0].dataset.newsAlertStatus, "alert");
-    assert.match(allText(newsList.children[0]), /시장 충격 발생/);
-    assert.match(allText(newsList.children[0]), /기존 보관 기사에서 중요 뉴스로 갱신됨/);
-    assert.match(allText(newsList.children[0]), /텔레그램 알림 대상/);
-    assert.match(allText(newsList.children[0]), /분류 사유: 시장 급변/);
+    const cardText = allText(newsList.children[0]);
+    assert.match(cardText, /시장 충격 발생/);
+    assert.match(cardText, /기존 보관 기사에서 중요 뉴스로 갱신됨/);
+    assert.match(cardText, /텔레그램 알림 대상/);
+    assert.match(cardText, /분류 사유: 시장 급변/);
+    assert.equal((cardText.match(/2026-07-11 00:58/g) || []).length, 2);
+    assert.doesNotMatch(cardText, /2026년|2026-07-10T15:58:15|00:58:15|KST/);
 });
