@@ -1,0 +1,15 @@
+{
+  "paths": ["docs/agent-loop-evidence.md"],
+  "check_results": [],
+  "expected_status": "ready_for_review",
+  "expected_exit_code": 0,
+  "expected_human_review_required": false,
+  "expected_summary": {
+    "services": [],
+    "required_checks": [],
+    "missing_checks": [],
+    "failed_checks": [],
+    "blocked_files": [],
+    "unclassified_files": []
+  }
+}

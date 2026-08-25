@@ -26,7 +26,10 @@ BLOCKED_FILES = {
     "scripts/deploy-n100.sh",
     "crawler-worker/app/services/news_scheduler.py",
 }
-POLICY_MAINTENANCE_FILES = {"scripts/verify_change_scope.py"}
+POLICY_MAINTENANCE_FILES = {
+    "scripts/verify_change_scope.py",
+    "scripts/run_change_harness.py",
+}
 
 
 class _ArgumentParser(argparse.ArgumentParser):

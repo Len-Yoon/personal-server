@@ -156,6 +156,16 @@ class VerifyChangeScopeTests(unittest.TestCase):
         self.assertEqual(evidence["blocked_files"], [])
         self.assertEqual(evidence["required_checks"], ["maintenance"])
 
+    def test_change_harness_is_maintenance_policy_file(self):
+        code, evidence = run_scope(
+            "scripts/run_change_harness.py", executed_checks=("maintenance",)
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(evidence["automation_files"], ["scripts/run_change_harness.py"])
+        self.assertEqual(evidence["required_checks"], ["maintenance"])
+        self.assertEqual(evidence["blocked_files"], [])
+
     def test_server_startup_paths_are_blocked(self):
         paths = (
             "docker-compose.yml",

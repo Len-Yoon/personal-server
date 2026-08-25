@@ -1,0 +1,15 @@
+{
+  "paths": ["portal-web/app/main.py"],
+  "check_results": [],
+  "expected_status": "verification_incomplete",
+  "expected_exit_code": 2,
+  "expected_human_review_required": true,
+  "expected_summary": {
+    "services": ["portal"],
+    "required_checks": ["portal"],
+    "missing_checks": ["portal"],
+    "failed_checks": [],
+    "blocked_files": [],
+    "unclassified_files": []
+  }
+}

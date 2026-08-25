@@ -1,0 +1,15 @@
+{
+  "paths": ["scripts/deploy-n100.sh"],
+  "check_results": [],
+  "expected_status": "blocked",
+  "expected_exit_code": 2,
+  "expected_human_review_required": true,
+  "expected_summary": {
+    "services": [],
+    "required_checks": [],
+    "missing_checks": [],
+    "failed_checks": [],
+    "blocked_files": ["scripts/deploy-n100.sh"],
+    "unclassified_files": []
+  }
+}
