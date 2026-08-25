@@ -671,6 +671,34 @@ class HomeOpsTests(unittest.TestCase):
         self.assertIn("점검 완료 · 조치 필요", page.text)
         self.assertIn("원인: caddy", page.text)
 
+    def test_admin_status_displays_operation_history_timestamp_in_kst(self):
+        from fastapi.testclient import TestClient
+
+        self.executor.all_diagnostics_results = [[]]
+        operation_id = self.service.diagnose_all()["operation_id"]
+        with self.service._connect() as conn:
+            conn.execute(
+                "UPDATE homeops_operation_runs SET created_at=? WHERE operation_id=?",
+                ("2026-08-24T07:21:18.895511+00:00", operation_id),
+            )
+
+        original = os.environ.get("ADMIN_STATUS_PASSWORD")
+        os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
+        try:
+            app = self._portal_app()
+            with patch("app.routers.admin.get_homeops_service", return_value=self.service):
+                with TestClient(app) as client:
+                    client.post("/admin/status", data={"password": "secret"}, headers={"Origin": "http://testserver"})
+                    page = client.get("/admin/status")
+        finally:
+            if original is None:
+                os.environ.pop("ADMIN_STATUS_PASSWORD", None)
+            else:
+                os.environ["ADMIN_STATUS_PASSWORD"] = original
+
+        self.assertIn("2026-08-24 16:21:18 KST", page.text)
+        self.assertNotIn("2026-08-24T07:21:18.895511+00:00", page.text)
+
     def test_homeops_global_actions_require_authentication_and_same_origin(self):
         from fastapi.testclient import TestClient
 
