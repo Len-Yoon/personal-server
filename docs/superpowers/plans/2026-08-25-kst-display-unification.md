@@ -58,6 +58,7 @@ Run: `git add portal-web/app/services/admin_status.py portal-web/app/services/se
 **Files:**
 
 - Modify: `crawler-worker/app/services/datetime_format.py`
+- Modify: `crawler-worker/app/templates/search.html`
 - Modify: `tests/crawler_worker/test_datetime_format.py`
 
 **Interfaces:**
@@ -73,7 +74,7 @@ Run: `PYTHONPATH=crawler-worker python3 -m unittest tests.crawler_worker.test_da
 
 Expected: 기존 한글 날짜·요일·초 형식 때문에 실패.
 
-- [ ] **Step 3: 최소 구현을 작성한다.** `local = parsed.astimezone(KOREA_TIMEZONE)` 뒤 `return local.strftime("%Y-%m-%d %H:%M")`으로 반환값을 통일한다.
+- [ ] **Step 3: 최소 구현을 작성한다.** `local = parsed.astimezone(KOREA_TIMEZONE)` 뒤 `return local.strftime("%Y-%m-%d %H:%M")`으로 반환값을 통일한다. 자동 새로고침을 담당하는 `search.html`의 브라우저 포매터도 같은 형식을 표시한다.
 
 - [ ] **Step 4: 뉴스 테스트를 통과시킨다.**
 
@@ -83,7 +84,7 @@ Expected: PASS.
 
 - [ ] **Step 5: 커밋한다.**
 
-Run: `git add crawler-worker/app/services/datetime_format.py tests/crawler_worker/test_datetime_format.py && git commit -m "fix: 뉴스 시간 표시 형식 통일"`
+Run: `git add crawler-worker/app/services/datetime_format.py crawler-worker/app/templates/search.html tests/crawler_worker/test_datetime_format.py && git commit -m "fix: 뉴스 시간 표시 형식 통일"`
 
 ### Task 3: 책 메모와 YouTube 메모 시간 표시 통일
 
