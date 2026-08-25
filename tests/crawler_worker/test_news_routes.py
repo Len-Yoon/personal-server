@@ -255,6 +255,40 @@ class CrawlerWorkerNewsRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("요약 정보가 없는 기사입니다.", response.text)
 
+    def test_category_page_hides_unparseable_article_times(self):
+        """Fails if a malformed stored time leaks UTC text or seconds into rendered markup."""
+        app = self.load_app()
+
+        with patch("app.routers.news.collect_korean_news") as mocked_collect:
+            mocked_collect.return_value = {
+                "category": "KR_IT",
+                "label": "IT 동향",
+                "description": "설명",
+                "count": 1,
+                "articles": [
+                    {
+                        "title_ko": "시간 오류 기사",
+                        "provider": "Google News",
+                        "source": "Google News",
+                        "collected_at": "2026-07-09 01:02:03 UTC",
+                        "published_at": "2026-07-09 01:02:03 UTC",
+                    },
+                ],
+                "cache": {"hit": True, "age_seconds": 12, "ttl_seconds": 300},
+            }
+
+            from fastapi.testclient import TestClient
+
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.get("/category?category=KR_IT")
+
+        self.assertEqual(response.status_code, 200)
+        rendered_markup = response.text.split('<script id="news-auto-refresh">', 1)[0]
+        self.assertIn("시간 오류 기사", rendered_markup)
+        self.assertNotIn("2026-07-09 01:02:03 UTC", rendered_markup)
+        self.assertNotIn("01:02:03", rendered_markup)
+        self.assertNotIn("KST", rendered_markup)
+
     def test_investing_page_shows_alert_archive_status_and_classification_reasons(self):
         """Fails if Nasdaq classification is collected but no longer visible to the user."""
         app = self.load_app()

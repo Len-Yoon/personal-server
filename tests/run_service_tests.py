@@ -19,6 +19,7 @@ class TestSuite:
     name: str
     command: tuple[str, ...]
     pythonpath: str | None = None
+    client_command: tuple[str, ...] | None = None
 
 
 SUITES = (
@@ -51,6 +52,7 @@ SUITES = (
             "tests.crawler_worker.test_telegram_notifier",
         ),
         "crawler-worker",
+        ("--test", "tests/news_auto_refresh_client.test.mjs"),
     ),
     TestSuite("homeops-executor", ("-m", "unittest", "tests.homeops_executor.test_docker_ops"), "homeops-executor"),
     TestSuite(
@@ -110,12 +112,18 @@ def _run_suite(suite: TestSuite) -> int:
         environment["PYTHONPATH"] = os.pathsep.join(filter(None, (service_path, previous_pythonpath)))
 
     executable = "node" if suite.name == "web-client" else sys.executable
-    result = subprocess.run((executable, *suite.command), cwd=ROOT, env=environment)
-    if result.returncode == 0:
-        print(f"[PASS] {suite.name}")
-    else:
-        print(f"[FAIL] {suite.name} (exit {result.returncode})")
-    return result.returncode
+    commands = [(executable, *suite.command)]
+    if suite.client_command is not None:
+        commands.append(("node", *suite.client_command))
+
+    for command in commands:
+        result = subprocess.run(command, cwd=ROOT, env=environment)
+        if result.returncode != 0:
+            print(f"[FAIL] {suite.name} (exit {result.returncode})")
+            return result.returncode
+
+    print(f"[PASS] {suite.name}")
+    return 0
 
 
 def main() -> int:
