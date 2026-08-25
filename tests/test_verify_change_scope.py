@@ -124,6 +124,25 @@ class VerifyChangeScopeTests(unittest.TestCase):
         )
         self.assertEqual(evidence["required_checks"], [])
 
+    def test_sdd_report_is_documentation(self):
+        path = ".superpowers/sdd/kst-display-unification/verification-report.md"
+
+        code, evidence = run_scope(path)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(evidence["documentation_files"], [path])
+        self.assertEqual(evidence["unclassified_files"], [])
+        self.assertEqual(evidence["required_checks"], [])
+
+    def test_non_report_sdd_file_blocks_review(self):
+        path = ".superpowers/sdd/kst-display-unification/verification-notes.md"
+
+        code, evidence = run_scope(path)
+
+        self.assertEqual(code, 2)
+        self.assertEqual(evidence["documentation_files"], [])
+        self.assertEqual(evidence["unclassified_files"], [path])
+
     def test_missing_input_is_an_input_error(self):
         completed = run_command()
         self.assertEqual(completed.returncode, 1)

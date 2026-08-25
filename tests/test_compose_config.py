@@ -125,7 +125,7 @@ class ComposeConfigTests(unittest.TestCase):
             "youtube-memo": "python3 -m unittest tests.youtube_memo.test_video_titles",
             "book-memo": "python3 -m unittest tests.book_memo.test_book_service",
             "car-care-worker": "python3 -m unittest discover -s tests/car_care_worker",
-            "maintenance": "python3 -m unittest tests.test_compose_config tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100",
+            "maintenance": "python3 -m unittest tests.test_compose_config tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100",
         }
         for service_name, test_command in expected_matrix_entries.items():
             self.assertIn(f"- name: {service_name}", workflow)
