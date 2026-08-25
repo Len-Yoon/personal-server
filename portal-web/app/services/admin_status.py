@@ -16,7 +16,7 @@ def format_status_checked_at(value: str) -> str:
     except ValueError:
         return "unknown"
 
-    return parsed.astimezone(SEOUL_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S KST")
+    return parsed.astimezone(SEOUL_TIMEZONE).strftime("%Y-%m-%d %H:%M")
 
 
 def format_operation_history_for_display(history: list[dict[str, Any]]) -> list[dict[str, Any]]:

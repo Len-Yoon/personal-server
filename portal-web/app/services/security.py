@@ -67,7 +67,7 @@ def append_security_event(event: str, **details: Any) -> None:
     log_path = _daily_log_path(now)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "timestamp": now.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "timestamp": now.strftime("%Y-%m-%d %H:%M"),
         "event": event,
         "details": details,
     }

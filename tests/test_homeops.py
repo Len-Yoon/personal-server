@@ -696,7 +696,8 @@ class HomeOpsTests(unittest.TestCase):
             else:
                 os.environ["ADMIN_STATUS_PASSWORD"] = original
 
-        self.assertIn("2026-08-24 16:21:18 KST", page.text)
+        self.assertIn("<span>2026-08-24 16:21</span>", page.text)
+        self.assertNotIn("2026-08-24 16:21:18 KST", page.text)
         self.assertNotIn("2026-08-24T07:21:18.895511+00:00", page.text)
 
     def test_homeops_global_actions_require_authentication_and_same_origin(self):
