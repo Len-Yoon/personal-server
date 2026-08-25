@@ -269,6 +269,23 @@ class PortalSecurityTests(unittest.TestCase):
             events = security.read_recent_events()
             self.assertRegex(events[0]["timestamp"], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
 
+    def test_read_recent_events_normalizes_legacy_kst_timestamp(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            security = self.reload_security(tempdir)
+            legacy_event = {
+                "timestamp": "2026-07-09 10:02:03 KST",
+                "event": "legacy_event",
+                "details": {},
+            }
+            security._daily_log_path(datetime.now(security.LOG_TIMEZONE)).write_text(
+                json.dumps(legacy_event) + "\n",
+                encoding="utf-8",
+            )
+
+            events = security.read_recent_events()
+
+            self.assertEqual(events[0]["timestamp"], "2026-07-09 10:02")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -224,6 +224,10 @@ class PortalDashboardTests(unittest.TestCase):
             format_status_checked_at("2026-07-09T01:02:03+00:00"),
             "2026-07-09 10:02",
         )
+        self.assertEqual(
+            format_status_checked_at("2026-07-09 10:02:03 KST"),
+            "2026-07-09 10:02",
+        )
         self.assertEqual(format_status_checked_at(""), "unknown")
         self.assertEqual(format_status_checked_at("not-a-timestamp"), "unknown")
 

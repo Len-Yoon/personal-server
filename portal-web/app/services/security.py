@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 
 import fcntl
 
+from app.services.admin_status import format_status_checked_at
+
 
 PROJECT_DATA_ROOT = next(
     (
@@ -157,9 +159,15 @@ def read_recent_events(limit: int = 8) -> list[dict[str, Any]]:
         lines = log_path.read_text(encoding="utf-8").splitlines()
         for line in reversed(lines[-200:]):
             try:
-                events.append(json.loads(line))
+                event = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if isinstance(event, dict):
+                event = {
+                    **event,
+                    "timestamp": format_status_checked_at(str(event.get("timestamp") or "")),
+                }
+            events.append(event)
             if len(events) >= limit:
                 return events
     return events
