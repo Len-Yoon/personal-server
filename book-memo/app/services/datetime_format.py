@@ -12,7 +12,7 @@ def format_display_datetime(value: str | None) -> str:
     try:
         parsed = datetime.fromisoformat(value)
     except (TypeError, ValueError):
-        return str(value)
+        return ""
 
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
