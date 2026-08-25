@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.services.book_search import search_books
+from app.services.datetime_format import format_display_datetime
 from app.services.book_service import (
     DB_PATH,
     create_chapter,
@@ -84,6 +85,7 @@ async def apply_browser_security(request: Request, call_next):
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
+templates.env.filters["display_datetime"] = format_display_datetime
 AUTH_RATE_LIMIT_MAX_FAILURES = int(os.getenv("AUTH_RATE_LIMIT_MAX_FAILURES", "5"))
 AUTH_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("AUTH_RATE_LIMIT_WINDOW_SECONDS", "300"))
 AUTH_RATE_LIMIT_STATE_PATH = Path(

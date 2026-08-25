@@ -143,7 +143,7 @@
                                 <small>
                                     {% if memo.chapter_title %}{{ memo.chapter_title }} · {% endif %}
                                     {% if memo.page %}p.{{ memo.page }} · {% endif %}
-                                    {{ memo.created_at }}
+                                    {{ memo.created_at|display_datetime }}
                                 </small>
                             </span>
                         </summary>

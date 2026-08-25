@@ -2,6 +2,7 @@ import importlib
 import json
 import multiprocessing
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -407,6 +408,30 @@ class BookMemoUiContractTests(unittest.TestCase):
         self.assertIn('id="toc-fetch-button"', response.text)
         self.assertIn('class="chapter-list"', response.text)
         self.assertIn('class="memo-list"', response.text)
+
+    def test_detail_formats_stored_utc_memo_timestamp_as_compact_kst_datetime(self):
+        """Fails if a stored UTC memo timestamp is rendered without KST conversion."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            import app.services.book_service as book_service
+
+            book = book_service.create_or_get_book({"isbn": "9780000000020", "title": "시간 표시 테스트 책"})
+            book_service.create_memo(book["id"], chapter_id=None, title="시간 메모", content="표시 형식 확인", page=0)
+            memo = book_service.list_memos(book["id"])[0]
+            raw_utc_timestamp = "2026-07-09 01:02:03"
+            with sqlite3.connect(book_service.DB_PATH) as connection:
+                connection.execute(
+                    "UPDATE book_memos SET created_at = ? WHERE id = ?",
+                    (raw_utc_timestamp, memo["id"]),
+                )
+
+            with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                response = client.get(f"/books/{book['id']}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("2026-07-09 10:02", response.text)
+        self.assertNotIn(raw_utc_timestamp, response.text)
+        self.assertNotIn("KST", response.text)
+        self.assertNotIn("10:02:03", response.text)
 
     def test_search_api_keeps_saved_book_and_memo_results_available(self):
         """Fails if a presentation-only change accidentally removes search results."""

@@ -2,6 +2,7 @@ import importlib
 import json
 import multiprocessing
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -402,6 +403,32 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
         self.assertNotIn('name="delete_password"', response.text)
         self.assertNotIn("삭제 비밀번호를 입력해주세요.", response.text)
         self.assertIn('class="memo-list"', response.text)
+
+    def test_detail_formats_stored_utc_memo_timestamp_as_compact_kst_datetime(self):
+        """Fails if a stored UTC memo timestamp is rendered without KST conversion."""
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            import app.services.memo_service as memo_service
+
+            video = memo_service.create_or_get_video(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                title_fetcher=lambda _youtube_id, _url: "시간 표시 테스트 영상",
+            )
+            memo = memo_service.create_memo(video["id"], "시간 메모", "표시 형식 확인")
+            raw_utc_timestamp = "2026-07-09 01:02:03"
+            with sqlite3.connect(memo_service.DB_PATH) as connection:
+                connection.execute(
+                    "UPDATE memos SET created_at = ? WHERE id = ?",
+                    (raw_utc_timestamp, memo["id"]),
+                )
+
+            with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                response = client.get(f"/videos/{video['id']}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("2026-07-09 10:02", response.text)
+        self.assertNotIn(raw_utc_timestamp, response.text)
+        self.assertNotIn("KST", response.text)
+        self.assertNotIn("10:02:03", response.text)
 
     def test_search_api_keeps_saved_video_and_memo_results_available(self):
         """Fails if a UI-only change accidentally removes the public search contract."""
