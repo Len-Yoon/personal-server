@@ -17,8 +17,11 @@ class DateTimeFormatTests(unittest.TestCase):
             "2026-07-11 00:45",
         )
 
-    def test_returns_original_value_when_unparseable(self):
-        self.assertEqual(format_news_datetime("not-a-date"), "not-a-date")
+    def test_hides_empty_and_unparseable_values(self):
+        """Fails if an invalid stored timestamp is exposed in the news UI."""
+        for value in (None, "", "not-a-date", "2026-07-09 01:02:03 UTC"):
+            with self.subTest(value=value):
+                self.assertEqual(format_news_datetime(value), "")
 
     def test_auto_refresh_uses_compact_kst_datetime_without_seconds_or_weekday(self):
         """Fails if the browser refresh path diverges from the displayed time contract."""

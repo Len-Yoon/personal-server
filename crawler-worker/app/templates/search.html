@@ -85,8 +85,9 @@
                         <span class="status-badge">{{ topic }}</span>
                     {% endfor %}
                     <span>{{ article.source }}</span>
-                    {% if article.collected_at %}
-                        <span>{{ article.collected_at|news_datetime }}</span>
+                    {% set collected_at = article.collected_at|news_datetime %}
+                    {% if collected_at %}
+                        <span>{{ collected_at }}</span>
                     {% endif %}
                 </div>
 
@@ -110,8 +111,9 @@
                     <p class="summary news-summary">{{ article.summary }}</p>
                 {% endif %}
 
-                {% if article.published_at %}
-                    <p class="published-at">{{ article.published_at|news_datetime }}</p>
+                {% set published_at = article.published_at|news_datetime %}
+                {% if published_at %}
+                    <p class="published-at">{{ published_at }}</p>
                 {% endif %}
 
                 {% if article.url %}
@@ -165,12 +167,15 @@
     }
 
     function formatNewsDate(value) {
-        if (!value) {
+        const raw = String(value || "").trim();
+        const isIso8601 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw);
+        const isRfc822 = /^(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s*)?\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{2,4}\s+\d{2}:\d{2}(?::\d{2})?\s+(?:[+-]\d{4}|UT|UTC|GMT|[ECMP][SD]T)$/i.test(raw);
+        if (!raw || (!isIso8601 && !isRfc822)) {
             return "";
         }
-        const date = new Date(value);
+        const date = new Date(raw);
         if (Number.isNaN(date.getTime())) {
-            return value;
+            return "";
         }
         const parts = new Intl.DateTimeFormat("ko-KR", {
             timeZone: "Asia/Seoul",

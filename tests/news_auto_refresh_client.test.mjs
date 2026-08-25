@@ -127,3 +127,60 @@ test("자동 새로고침은 UTC 기사 시각을 KST 분 단위로 표시한다
     assert.equal((cardText.match(/2026-07-11 00:58/g) || []).length, 2);
     assert.doesNotMatch(cardText, /2026년|2026-07-10T15:58:15|00:58:15|KST/);
 });
+
+test("자동 새로고침은 해석할 수 없는 기사 시각을 표시하지 않는다", async () => {
+    const container = new TestElement();
+    container.dataset.category = "KR_WORLD";
+    container.dataset.autoRefreshSeconds = "60";
+    const newsList = new TestElement("section");
+    const status = new TestElement();
+    let refreshNews;
+
+    globalThis.document = {
+        hidden: false,
+        querySelector(selector) {
+            return {
+                "[data-auto-refresh-seconds]": container,
+                "[data-news-list]": newsList,
+                "[data-refresh-status]": status,
+            }[selector] || null;
+        },
+        createElement(tagName) {
+            return new TestElement(tagName);
+        },
+        createDocumentFragment() {
+            const fragment = new TestElement();
+            fragment.isFragment = true;
+            return fragment;
+        },
+    };
+    globalThis.window = {
+        location: { origin: "https://news.example.com" },
+        setInterval(callback) {
+            refreshNews = callback;
+        },
+    };
+    globalThis.fetch = async () => ({
+        ok: true,
+        async json() {
+            return {
+                count: 1,
+                cache: { hit: false },
+                articles: [{
+                    title_ko: "시간 오류 기사",
+                    provider: "RSS",
+                    source: "RSS",
+                    collected_at: "2026-07-09 01:02:03 UTC",
+                    published_at: "2026-99-99T01:02:03+00:00",
+                }],
+            };
+        },
+    });
+
+    eval(clientScript);
+    await refreshNews();
+
+    const cardText = allText(newsList.children[0]);
+    assert.match(cardText, /시간 오류 기사/);
+    assert.doesNotMatch(cardText, /2026-|2026-07-09 01:02:03 UTC|01:02:03|UTC|KST/);
+});
