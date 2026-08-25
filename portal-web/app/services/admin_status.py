@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -15,12 +16,15 @@ def format_status_checked_at(value: str) -> str:
         if raw_value.endswith(" KST"):
             parsed = datetime.fromisoformat(raw_value.removesuffix(" KST")).replace(tzinfo=SEOUL_TIMEZONE)
         else:
-            parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
-    except ValueError:
+            try:
+                parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+            except ValueError:
+                parsed = parsedate_to_datetime(raw_value)
+    except (IndexError, TypeError, ValueError):
         return "unknown"
 
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=SEOUL_TIMEZONE)
+        parsed = parsed.replace(tzinfo=timezone.utc)
 
     return parsed.astimezone(SEOUL_TIMEZONE).strftime("%Y-%m-%d %H:%M")
 

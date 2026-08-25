@@ -231,6 +231,26 @@ class PortalDashboardTests(unittest.TestCase):
         self.assertEqual(format_status_checked_at(""), "unknown")
         self.assertEqual(format_status_checked_at("not-a-timestamp"), "unknown")
 
+    def test_admin_status_checked_at_treats_naive_iso_as_utc(self):
+        """Fails if legacy timezone-naive timestamps are treated as already-KST."""
+        prepare_service_import("portal-web")
+        from app.services.admin_status import format_status_checked_at
+
+        self.assertEqual(
+            format_status_checked_at("2026-07-09T01:02:03"),
+            "2026-07-09 10:02",
+        )
+
+    def test_admin_status_checked_at_formats_rfc822_utc_as_kst(self):
+        """Fails if RFC 822 status timestamps bypass the display-time parser."""
+        prepare_service_import("portal-web")
+        from app.services.admin_status import format_status_checked_at
+
+        self.assertEqual(
+            format_status_checked_at("Fri, 10 Jul 2026 15:58:15 +0000"),
+            "2026-07-11 00:58",
+        )
+
     def test_admin_status_login_disables_cache(self):
         app = self.load_app()
 
