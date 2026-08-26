@@ -3,6 +3,8 @@ import sys
 import unittest
 from pathlib import Path
 
+from tests.run_service_tests import SUITES
+
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "tests" / "run_service_tests.py"
@@ -32,6 +34,13 @@ class ServiceTestRunnerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("자동 새로고침은 UTC 기사 시각을 KST 분 단위로 표시한다", result.stdout)
+
+    def test_maintenance_suite_runs_documentation_index_checks(self):
+        """Fails if the local maintenance runner omits documentation index validation."""
+        maintenance = next(suite for suite in SUITES if suite.name == "maintenance")
+
+        self.assertIn("tests.test_documentation_index", maintenance.command)
+        self.assertEqual(maintenance.command.count("tests.test_documentation_index"), 1)
 
 
 if __name__ == "__main__":
