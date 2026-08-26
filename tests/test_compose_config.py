@@ -133,11 +133,12 @@ class ComposeConfigTests(unittest.TestCase):
             "youtube-memo": "python3 -m unittest tests.youtube_memo.test_video_titles",
             "book-memo": "python3 -m unittest tests.book_memo.test_book_service",
             "car-care-worker": "python3 -m unittest discover -s tests/car_care_worker",
-            "maintenance": "python3 -m unittest tests.test_compose_config tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements",
+            "maintenance": "python3 -m unittest tests.test_compose_config tests.test_documentation_index tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements",
         }
         for service_name, test_command in expected_matrix_entries.items():
             self.assertIn(f"- name: {service_name}", workflow)
             self.assertIn(f"test_command: {test_command}", workflow)
+        self.assertEqual(workflow.count("tests.test_documentation_index"), 1)
 
     def test_runtime_services_define_healthchecks(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")

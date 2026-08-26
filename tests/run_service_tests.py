@@ -86,6 +86,7 @@ SUITES = (
             "-m",
             "unittest",
             "tests.test_compose_config",
+            "tests.test_documentation_index",
             "tests.test_deploy_n100",
             "tests.test_maintenance",
             "tests.test_run_service_tests",
