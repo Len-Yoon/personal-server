@@ -99,7 +99,7 @@ jobs:
           - name: maintenance
             requirements: ""
             pythonpath: .
-            test_command: python3 -m unittest tests.test_compose_config tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_change_harness tests.test_change_harness_evals
+            test_command: python3 -m unittest tests.test_compose_config tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements
 
     steps:
       - name: Check out repository
@@ -139,15 +139,51 @@ jobs:
         shell: bash
         run: |
           set +e
+          check_results=()
+          executed_checks=()
+          if [[ "${{ needs.test.result }}" == "success" ]]; then
+            executed_checks=(
+              portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance
+            )
+            check_results=(
+              --check-result portal=success
+              --check-result system-agent=success
+              --check-result crawler-worker=success
+              --check-result homeops-executor=success
+              --check-result youtube-memo=success
+              --check-result book-memo=success
+              --check-result car-care-worker=success
+              --check-result maintenance=success
+            )
+          fi
           python3 scripts/verify_change_scope.py \
             --input changed-files.nul \
             --input-format git-name-status-z \
             --test-result "${{ needs.test.result }}" \
-            --executed-checks \
-            portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance \
+            --executed-checks "${executed_checks[@]}" \
             > agent-loop-evidence.json
           policy_status=$?
           echo "policy_status=$policy_status" >> "$GITHUB_OUTPUT"
+
+          python3 scripts/run_change_harness.py \
+            --input changed-files.nul \
+            --input-format git-name-status-z \
+            "${check_results[@]}" \
+            > agent-loop-harness.json
+          harness_status=$?
+          echo "harness_status=$harness_status" >> "$GITHUB_OUTPUT"
+
+          python3 scripts/run_change_harness.py \
+            --input changed-files.nul \
+            --input-format git-name-status-z \
+            "${check_results[@]}" \
+            --agent-context \
+            > agent-loop-harness-context.md
+          context_status=$?
+          echo "context_status=$context_status" >> "$GITHUB_OUTPUT"
+          if [[ "$harness_status" -ne "$context_status" ]]; then
+            exit 1
+          fi
           exit 0
 
       - name: Write GitHub Step Summary
@@ -160,6 +196,7 @@ jobs:
             echo "- Policy status: \`${{ steps.evidence.outputs.policy_status }}\`"
             echo "- Service test result: \`${{ needs.test.result }}\`"
             echo "- Missing checks: \`$missing_checks\`"
+            echo "- Harness status: \`${{ steps.evidence.outputs.harness_status }}\`"
             echo
             echo '```json'
             cat agent-loop-evidence.json
@@ -170,10 +207,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: agent-loop-final-evidence
-          path: agent-loop-evidence.json
+          path: |
+            agent-loop-evidence.json
+            agent-loop-harness.json
+            agent-loop-harness-context.md
 
       - name: Enforce policy and service test results
         shell: bash
         run: |
           test "${{ steps.evidence.outputs.policy_status }}" -eq 0
+          test "${{ steps.evidence.outputs.harness_status }}" -eq 0
+          test "${{ steps.evidence.outputs.context_status }}" -eq 0
           test "${{ needs.test.result }}" = "success"

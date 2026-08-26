@@ -120,6 +120,35 @@ class ChangeHarnessTests(unittest.TestCase):
         self.assertIn("Next action:", completed.stdout)
         self.assertNotIn("policy_evidence", completed.stdout)
 
+    def test_cli_preserves_rename_space_and_korean_paths_from_nul_input(self):
+        """A NUL Git diff must retain both rename paths without path splitting."""
+        with tempfile.TemporaryDirectory() as directory:
+            input_path = Path(directory) / "changed-files.nul"
+            input_path.write_bytes(
+                "R100\0docs/old name.md\0docs/한글 경로.md\0"
+                "M\0portal-web/templates/with space.html\0".encode("utf-8")
+            )
+            completed = self.run_cli(
+                "--input",
+                str(input_path),
+                "--input-format",
+                "git-name-status-z",
+                "--check-result",
+                "portal=success",
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        evidence = json.loads(completed.stdout)
+        self.assertEqual(evidence["work_status"], "ready_for_review")
+        self.assertEqual(
+            evidence["policy_evidence"]["changed_files"],
+            [
+                "docs/old name.md",
+                "docs/한글 경로.md",
+                "portal-web/templates/with space.html",
+            ],
+        )
+
     def test_incomplete_status_retains_missing_and_failed_reasons(self):
         """Dropping either simultaneous reason would hide required follow-up work."""
         code, evidence = run_harness(

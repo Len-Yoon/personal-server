@@ -116,6 +116,14 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn("--executed-checks", workflow)
         self.assertIn("portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance", workflow)
         self.assertIn("Missing checks", workflow)
+        self.assertIn("scripts/run_change_harness.py", workflow)
+        self.assertIn("agent-loop-harness.json", workflow)
+        self.assertIn("agent-loop-harness-context.md", workflow)
+        self.assertIn("--agent-context", workflow)
+        self.assertIn('if [[ "$harness_status" -ne "$context_status" ]]; then', workflow)
+        self.assertIn('test "${{ steps.evidence.outputs.harness_status }}" -eq 0', workflow)
+        self.assertIn('test "${{ steps.evidence.outputs.context_status }}" -eq 0', workflow)
+        self.assertIn('test "${{ needs.test.result }}" = "success"', workflow)
 
         expected_matrix_entries = {
             "portal": "python3 -m unittest tests.test_file_access tests.test_portal_dashboard tests.test_portal_security tests.test_homeops tests.test_homeops_notifier",
@@ -125,7 +133,7 @@ class ComposeConfigTests(unittest.TestCase):
             "youtube-memo": "python3 -m unittest tests.youtube_memo.test_video_titles",
             "book-memo": "python3 -m unittest tests.book_memo.test_book_service",
             "car-care-worker": "python3 -m unittest discover -s tests/car_care_worker",
-            "maintenance": "python3 -m unittest tests.test_compose_config tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_change_harness tests.test_change_harness_evals",
+            "maintenance": "python3 -m unittest tests.test_compose_config tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements",
         }
         for service_name, test_command in expected_matrix_entries.items():
             self.assertIn(f"- name: {service_name}", workflow)

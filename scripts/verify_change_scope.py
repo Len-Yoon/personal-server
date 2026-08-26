@@ -30,6 +30,7 @@ BLOCKED_FILES = {
 POLICY_MAINTENANCE_FILES = {
     "scripts/verify_change_scope.py",
     "scripts/run_change_harness.py",
+    "scripts/summarize_token_measurements.py",
 }
 
 
