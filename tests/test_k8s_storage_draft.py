@@ -14,11 +14,15 @@ class K3sStorageDraftTests(unittest.TestCase):
         self.assertIn("/var/lib/rancher/k3s/storage", document)
         self.assertIn("적용 전 검증", document)
 
-    def test_missing_native_ext4_path_keeps_static_local_pv_gate_blocked(self):
+    def test_native_ext4_path_is_prepared_but_app_storage_gate_remains_blocked(self):
         document = (ROOT / "docs/k3s-flux-transition-draft.md").read_text()
 
-        self.assertIn("미통과(경로 미준비)", document)
-        self.assertIn("디렉터리 생성·소유권/권한 설정 전까지 미통과", document)
+        self.assertIn("통과(경로 준비 완료)", document)
+        self.assertIn("`/dev/sdd` ext4의 `rw`", document)
+        self.assertIn("`desktop-utu2qat` Ready", document)
+        self.assertIn("`root:root`·`0750`", document)
+        self.assertIn("앱별 UID/GID", document)
+        self.assertIn("SQLite 잠금", document)
         self.assertIn("Static Local PV 게이트는 계속 차단 상태", document)
 
 

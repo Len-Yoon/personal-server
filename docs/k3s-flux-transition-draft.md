@@ -35,7 +35,9 @@ clusters/
 
 ## 1차 전환 범위
 
-N100 사전 검증에서 `/mnt/c` 아래 데이터의 소유권·권한이 WSL 파일 공유 특성상 `0777`로 관찰되었다. native ext4 후보 경로 `/var/lib/rancher/k3s/storage`는 현재 존재하지 않아 검증 결과를 **미통과(경로 미준비)**로 기록한다. 디렉터리 생성·소유권/권한 설정 전까지 미통과이며, 그 뒤에도 실제 Linux 파일시스템 경로의 소유권·권한, 컨테이너 UID/GID, SQLite 잠금, WSL 런타임 접근성을 적용 전 검증 게이트로 통과해야 한다. 따라서 Static Local PV 게이트는 계속 차단 상태로 유지하며, 이 조건을 모두 확인하기 전에는 PV/PVC를 만들거나 바인딩하지 않는다.
+N100 사전 검증에서 `/mnt/c` 아래 데이터의 소유권·권한이 WSL 파일 공유 특성상 `0777`로 관찰되었다. 2026-08-28 N100 호스트 직접 검증에서 native ext4 후보 `/var/lib/rancher/k3s/storage`는 **통과(경로 준비 완료)**로 확인했다. `/dev/sdd` ext4의 `rw` 마운트에서 경로는 `root:root`·`0750`이고, K3s 노드 `desktop-utu2qat`은 Ready 상태다. `kube-system/local-path-config`의 기본 경로도 이 후보와 일치한다.
+
+이는 K3s local-path provisioner의 기본 경로 준비와 노드 접근성만 확인한 결과이며, 실제 앱 데이터를 위한 Static Local PV 승인은 아니다. 앱별 UID/GID 읽기·쓰기, SQLite 잠금, WSL 런타임 접근성, 단일 writer와 복원 검증은 아직 미통과다. 따라서 Static Local PV 게이트는 계속 차단 상태로 유지하며, 이 조건을 모두 확인하기 전에는 PV/PVC를 만들거나 바인딩하지 않는다.
 
 1차 전환 후보는 다음 네 서비스로만 제한한다.
 
@@ -118,7 +120,7 @@ Secret 값과 실제 Secret 리소스는 이 저장소에 작성하지 않는다
 | --- | --- | --- |
 | 정적 초안 | `KUBECONFIG=/nonexistent kubectl kustomize infra/k8s` | 의도적으로 0줄을 출력해 활성 리소스가 없음을 확인 |
 | 저장소 경계 | diff 및 금지 리소스 점검 | Secret, Ingress, LoadBalancer, Flux 리소스와 Compose/Caddy 변경이 없음 |
-| 노드 저장소 | `/mnt/c` 0777 보류 상태와 native ext4 후보 `/var/lib/rancher/k3s/storage`의 미통과(경로 미준비) 확인 | 디렉터리 생성·소유권/권한 설정 후 서비스 UID/GID 읽기·쓰기, 단일 노드 고정, 파일 잠금, WSL 접근성이 모두 확인될 때까지 Static Local PV 게이트는 계속 차단 상태 |
+| 노드 저장소 | `/mnt/c` 0777 보류 상태와 native ext4 후보 `/var/lib/rancher/k3s/storage`의 통과(경로 준비 완료) 확인: `/dev/sdd` ext4 `rw`, `root:root`·`0750`, 노드 `desktop-utu2qat` Ready, local-path 기본 경로 일치 | 앱별 UID/GID 읽기·쓰기, 단일 노드 고정, SQLite·프로필 파일 잠금, WSL 접근성·복원 검증이 모두 확인될 때까지 Static Local PV 게이트는 계속 차단 상태 |
 | 단일 writer | Compose/K3s 동시 writer와 SQLite 프로세스 확인 | 대상 서비스마다 writer가 정확히 하나이고 `quick_check` 통과 |
 | Secret seed | dry-run, metadata, 로그·Git diff 점검 | 값·토큰이 노출되지 않고 승인된 주입 경로가 재현됨 |
 | 복구 | 임시 경로 복원, SQLite `quick_check`, 파일 존재 확인 | 데이터가 암호화 백업에서 독립 복원됨 |
