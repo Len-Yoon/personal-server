@@ -4,7 +4,7 @@
 
 ## 현재 방식
 
-N100 자체에 GitHub Actions self-hosted runner를 설치합니다. 기능 브랜치 PR을 병합해 `main`이 변경되면 CI가 실행됩니다. 해당 CI가 성공하면 GitHub Actions가 N100에서 직접 실행되고, `C:\personal-server`의 `scripts/deploy-n100.sh`가 Docker Compose 서비스를 재빌드·재기동합니다.
+N100 자체에 GitHub Actions self-hosted runner를 설치합니다. 기능 브랜치 PR을 병합해 `main`이 변경되면 CI가 실행됩니다. 해당 CI가 성공하고 런타임 배포 경로가 변경된 경우에만 GitHub Actions가 N100에서 직접 실행되고, `C:\personal-server`의 `scripts/deploy-n100.sh`가 Docker Compose 서비스를 재빌드·재기동합니다.
 
 N100은 Windows self-hosted runner가 로컬에서 배포를 실행하므로 GitHub-hosted runner의 SSH 접근, 포트포워딩, 배포용 개인키가 필요하지 않음.
 
@@ -58,19 +58,20 @@ Runner Windows 서비스도 WSL2를 설치한 Windows 사용자 계정으로 실
 
 ## 자동배포 흐름
 
-`.github/workflows/deploy-n100.yml`은 `main`에서 완료된 `CI` workflow가 성공한 경우에만 반응하며 다음 Runner 라벨을 요구합니다. 기본 변경 경로는 기능 브랜치 PR 병합이며, 긴급 복구를 제외한 `main` 직접 push는 사용하지 않음.
+`.github/workflows/deploy-n100.yml`은 `main`에서 완료된 `CI` workflow가 성공하고 런타임 배포 경로가 변경된 경우에만 N100 배포를 실행하며 다음 Runner 라벨을 요구합니다. 런타임 배포 경로는 Compose 파일, 배포 스크립트, Caddy 설정, 각 Compose 서비스 디렉터리임. 문서와 비활성 GitOps 초안만 변경된 경우에는 N100 배포를 건너뜀. 기본 변경 경로는 기능 브랜치 PR 병합이며, 긴급 복구를 제외한 `main` 직접 push는 사용하지 않음.
 
 ```yaml
 runs-on: [self-hosted, Windows, X64]
 ```
 
 1. 개발 PC에서 기능 브랜치를 push하고 PR CI·Agent Review를 통과시킨 뒤, 사용자 승인으로 PR을 `main`에 병합합니다. `main` CI가 실패하거나 취소되면 N100에 배포하지 않습니다.
-2. N100 Runner 서비스가 배포 작업을 받습니다.
-3. `C:\personal-server`의 존재와 `.env`, `data`, Compose 파일을 확인합니다.
-4. Ubuntu-24.04 WSL에서 `scripts/deploy-n100.sh`를 실행합니다.
-5. 스크립트가 `git fetch --prune origin`과 `git reset --hard origin/main`으로 **추적되는 코드 파일만** 최신 main에 맞춤.
-6. Compose 설정을 검증한 뒤 `docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo caddy`를 실행합니다.
-7. workflow가 모든 Compose 서비스의 실행 상태와 `portal-web`, `system-agent`, `crawler-worker`, `youtube-memo`, `book-memo`, `homeops-executor` health 상태를 확인합니다. 이 단계가 실패하면 배포 workflow도 실패로 표시됩니다.
+2. CI가 성공해도 런타임 배포 경로가 바뀌지 않은 문서와 비활성 GitOps 초안 변경은 N100 배포를 건너뜁니다.
+3. 런타임 배포 경로가 변경된 경우에만 N100 Runner 서비스가 배포 작업을 받습니다.
+4. `C:\personal-server`의 존재와 `.env`, `data`, Compose 파일을 확인합니다.
+5. Ubuntu-24.04 WSL에서 `scripts/deploy-n100.sh`를 실행합니다.
+6. 스크립트가 `git fetch --prune origin`과 `git reset --hard origin/main`으로 **추적되는 코드 파일만** 최신 main에 맞춤.
+7. Compose 설정을 검증한 뒤 `docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo caddy`를 실행합니다.
+8. workflow가 모든 Compose 서비스의 실행 상태와 `portal-web`, `system-agent`, `crawler-worker`, `youtube-memo`, `book-memo`, `homeops-executor` health 상태를 확인합니다. 이 단계가 실패하면 배포 workflow도 실패로 표시됩니다.
 
 같은 브랜치의 배포가 겹치면 기존 배포가 끝난 뒤 다음 배포가 실행됩니다.
 배포 스크립트는 원격 `main`을 기준으로 `git reset --hard`를 수행하므로

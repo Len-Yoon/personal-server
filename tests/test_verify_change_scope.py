@@ -245,15 +245,57 @@ class VerifyChangeScopeTests(unittest.TestCase):
                 self.assertEqual(code, 2)
                 self.assertEqual(evidence["blocked_files"], [path])
 
-    def test_deployment_workflow_is_blocked_before_general_automation(self):
+    def test_deployment_workflow_requires_maintenance_and_all_service_checks(self):
         path = ".github/workflows/deploy-n100.yml"
 
-        code, evidence = run_scope(path)
+        incomplete_checks = ("maintenance",)
+        code, evidence = run_scope(path, executed_checks=incomplete_checks)
 
         self.assertEqual(code, 2)
-        self.assertEqual(evidence["blocked_files"], [path])
-        self.assertEqual(evidence["automation_files"], [])
-        self.assertEqual(evidence["required_checks"], [])
+        self.assertEqual(evidence["blocked_files"], [])
+        self.assertEqual(evidence["automation_files"], [path])
+        self.assertEqual(
+            evidence["required_checks"],
+            [
+                "maintenance",
+                "portal",
+                "system-agent",
+                "crawler-worker",
+                "homeops-executor",
+                "youtube-memo",
+                "book-memo",
+                "car-care-worker",
+            ],
+        )
+        self.assertEqual(
+            evidence["missing_checks"],
+            [
+                "portal",
+                "system-agent",
+                "crawler-worker",
+                "homeops-executor",
+                "youtube-memo",
+                "book-memo",
+                "car-care-worker",
+            ],
+        )
+
+        code, evidence = run_scope(
+            path,
+            executed_checks=(
+                "maintenance",
+                "portal",
+                "system-agent",
+                "crawler-worker",
+                "homeops-executor",
+                "youtube-memo",
+                "book-memo",
+                "car-care-worker",
+            ),
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(evidence["missing_checks"], [])
 
     def test_unknown_change_blocks_review(self):
         code, evidence = run_scope("unknown-area/config.toml")
