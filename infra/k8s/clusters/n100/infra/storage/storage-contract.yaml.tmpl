@@ -9,7 +9,8 @@ metadata:
   annotations:
     draft.personal-server.io/not-for-apply: "true"
     draft.personal-server.io/purpose: "review-only static local PV contract"
-    draft.personal-server.io/blocked-gate: "n100-wsl-permissions"
+    draft.personal-server.io/blocked-gate: "n100-native-storage-validation"
+    draft.personal-server.io/candidate-path: "/var/lib/rancher/k3s/storage"
 provisioner: kubernetes.io/no-provisioner
 volumeBindingMode: WaitForFirstConsumer
 reclaimPolicy: Retain
@@ -59,7 +60,7 @@ spec:
       storage: __CONFIRM_PORTAL_FILES_CAPACITY__
 ---
 # Candidate PVC contracts for the restricted first wave. No PV paths are
-# supplied because Static Local PV is blocked by the N100 WSL permission gate.
+# supplied because the native ext4 candidate still requires validation.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -67,7 +68,8 @@ metadata:
   namespace: personal-server
   annotations:
     draft.personal-server.io/not-for-apply: "true"
-    draft.personal-server.io/blocked-gate: "n100-wsl-permissions"
+    draft.personal-server.io/blocked-gate: "n100-native-storage-validation"
+    draft.personal-server.io/candidate-path: "/var/lib/rancher/k3s/storage"
 data:
   candidates: |-
     portal-web: data/files -> portal-web-files-draft
