@@ -14,6 +14,14 @@ CRAWLER_REQUIREMENTS = (ROOT / "crawler-worker" / "requirements.txt").read_text(
 
 
 class DeployN100Tests(unittest.TestCase):
+    def test_deploy_workflow_skips_compose_redeploy_for_docs_and_gitops_drafts(self):
+        self.assertIn("name: Detect deployable runtime changes", WORKFLOW)
+        self.assertIn("needs: changes", WORKFLOW)
+        self.assertIn("needs.changes.outputs.runtime == 'true'", WORKFLOW)
+        self.assertIn("git diff --quiet HEAD^ HEAD --", WORKFLOW)
+        self.assertIn("docker-compose.yml", WORKFLOW)
+        self.assertIn("scripts/deploy-n100.sh", WORKFLOW)
+
     def test_workflow_waits_for_successful_main_ci_and_uses_n100_runner(self):
         self.assertIn("workflow_run:", WORKFLOW)
         self.assertIn("workflows: [CI]", WORKFLOW)
