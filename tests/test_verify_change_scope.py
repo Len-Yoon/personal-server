@@ -162,6 +162,42 @@ class VerifyChangeScopeTests(unittest.TestCase):
         self.assertEqual(evidence["required_checks"], ["maintenance"])
         self.assertEqual(evidence["unclassified_files"], [])
 
+    def test_gitops_draft_infrastructure_paths_require_maintenance_check(self):
+        paths = (
+            "infra/k8s/README.md",
+            "infra/k8s/clusters/n100/apps/transition-scope.yaml.tmpl",
+        )
+
+        code, evidence = run_scope(*paths)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(evidence["infrastructure_files"], list(paths))
+        self.assertEqual(evidence["required_checks"], ["maintenance"])
+        self.assertEqual(evidence["unclassified_files"], [])
+
+    def test_blocked_paths_remain_blocked_alongside_gitops_drafts(self):
+        paths = (
+            "infra/k8s/README.md",
+            "scripts/maintenance.py",
+        )
+
+        code, evidence = run_scope(*paths, executed_checks=("maintenance",))
+
+        self.assertEqual(code, 2)
+        self.assertEqual(evidence["infrastructure_files"], [paths[0]])
+        self.assertEqual(evidence["blocked_files"], [paths[1]])
+        self.assertEqual(evidence["unclassified_files"], [])
+
+    def test_path_traversal_cannot_enter_gitops_infrastructure_scope(self):
+        path = "infra/k8s/../scripts/maintenance.py"
+
+        code, evidence = run_scope(path, executed_checks=("maintenance",))
+
+        self.assertEqual(code, 2)
+        self.assertEqual(evidence["infrastructure_files"], [])
+        self.assertEqual(evidence["blocked_files"], [])
+        self.assertEqual(evidence["unclassified_files"], [path])
+
     def test_agent_loop_policy_files_are_maintainable_with_maintenance_check(self):
         paths = (
             "scripts/verify_change_scope.py",

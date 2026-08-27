@@ -1,0 +1,48 @@
+# DRAFT ONLY — NOT FOR APPLY. Image, data contract, and runtime Secret injection require approval.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portal-web
+  namespace: personal-server
+  annotations:
+    draft.personal-server.io/not-for-apply: "true"
+    draft.personal-server.io/confirm-required: "image digest, service account, data ownership, health endpoint"
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: portal-web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: portal-web
+      annotations:
+        draft.personal-server.io/not-for-apply: "true"
+    spec:
+      containers:
+        - name: portal-web
+          image: registry.example.invalid/personal-server/portal-web:__CONFIRM_IMAGE_TAG__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: portal-web-runtime
+                optional: false
+          volumeMounts:
+            - name: portal-web-files
+              mountPath: __CONFIRM_CONTAINER_DATA_PATH__
+              readOnly: false
+          readinessProbe:
+            httpGet:
+              path: __CONFIRM_HEALTH_PATH__
+              port: http
+          livenessProbe:
+            httpGet:
+              path: __CONFIRM_HEALTH_PATH__
+              port: http
+      volumes:
+        - name: portal-web-files
+          persistentVolumeClaim:
+            claimName: portal-web-files-draft

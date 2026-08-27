@@ -1,0 +1,5 @@
+# DRAFT ONLY — NOT FOR APPLY. This deliberately renders no resources.
+# Resource examples are .yaml.tmpl files and are never referenced here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: []

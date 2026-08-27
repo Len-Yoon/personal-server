@@ -20,6 +20,7 @@ DOCUMENTATION_PREFIXES = ("docs/",)
 DOCUMENTATION_FILES = {"README.md", "AGENTS.md", "CLAUDE.md"}
 SDD_REPORT_PREFIX = ".superpowers/sdd/"
 AUTOMATION_PREFIXES = (".github/", "tests/")
+INFRASTRUCTURE_PREFIXES = ("infra/k8s/",)
 BLOCKED_PREFIXES = ("caddy/", "scripts/")
 BLOCKED_INFRASTRUCTURE_FILES = {"docker-compose.yml", "docker-compose.n100.yml"}
 BLOCKED_FILES = {
@@ -51,6 +52,10 @@ def _append_required_check(evidence: dict[str, object], check: str) -> None:
         required_checks.append(check)
 
 
+def _has_traversal_component(path: str) -> bool:
+    return any(component in {".", ".."} for component in path.split("/"))
+
+
 def classify_paths(paths: list[str]) -> dict[str, object]:
     """Classify paths, retaining first-seen order in every result list."""
     changed_files = _unique(paths)
@@ -69,6 +74,10 @@ def classify_paths(paths: list[str]) -> dict[str, object]:
     }
 
     for path in changed_files:
+        if _has_traversal_component(path):
+            evidence["unclassified_files"].append(path)
+            continue
+
         if path in POLICY_MAINTENANCE_FILES:
             evidence["automation_files"].append(path)
             _append_required_check(evidence, "maintenance")
@@ -102,6 +111,11 @@ def classify_paths(paths: list[str]) -> dict[str, object]:
 
         if path.startswith(AUTOMATION_PREFIXES):
             evidence["automation_files"].append(path)
+            _append_required_check(evidence, "maintenance")
+            continue
+
+        if path.startswith(INFRASTRUCTURE_PREFIXES):
+            evidence["infrastructure_files"].append(path)
             _append_required_check(evidence, "maintenance")
             continue
 

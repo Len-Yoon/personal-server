@@ -34,6 +34,26 @@ class ChangeHarnessTests(unittest.TestCase):
         self.assertEqual(evidence["work_status"], "ready_for_review")
         self.assertEqual(evidence["summary"]["required_checks"], ["portal"])
 
+    def test_gitops_infrastructure_with_maintenance_is_ready_for_review(self):
+        code, evidence = run_harness(
+            ["infra/k8s/README.md"], check_results=("maintenance=success",)
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(evidence["work_status"], "ready_for_review")
+        self.assertEqual(evidence["summary"]["required_checks"], ["maintenance"])
+        self.assertEqual(evidence["summary"]["unclassified_files"], [])
+
+    def test_blocked_path_stays_blocked_with_maintenance_success(self):
+        code, evidence = run_harness(
+            ["infra/k8s/README.md", "scripts/maintenance.py"],
+            check_results=("maintenance=success",),
+        )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(evidence["work_status"], "blocked")
+        self.assertEqual(evidence["summary"]["blocked_files"], ["scripts/maintenance.py"])
+
     def test_risk_and_verification_states_follow_the_policy_priority(self):
         """Changing a state branch must not mark risky work ready for review."""
         cases = [
