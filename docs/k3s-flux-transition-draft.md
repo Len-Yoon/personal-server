@@ -35,7 +35,7 @@ clusters/
 
 ## 1차 전환 범위
 
-N100 사전 검증에서 `/mnt/c` 아래 데이터의 소유권·권한이 WSL 파일 공유 특성상 `0777`로 관찰되었다. 따라서 Static Local PV 적용은 보류한다. 실제 Linux 파일시스템 경로, 컨테이너 UID/GID, SQLite 잠금, WSL 런타임 접근성을 별도 게이트로 통과하기 전에는 PV/PVC를 만들거나 바인딩하지 않는다.
+N100 사전 검증에서 `/mnt/c` 아래 데이터의 소유권·권한이 WSL 파일 공유 특성상 `0777`로 관찰되었다. 따라서 Static Local PV 적용은 보류한다. native ext4 후보 경로는 `/var/lib/rancher/k3s/storage`이며, 실제 Linux 파일시스템 경로의 소유권·권한, 컨테이너 UID/GID, SQLite 잠금, WSL 런타임 접근성을 적용 전 검증 게이트로 통과하기 전에는 PV/PVC를 만들거나 바인딩하지 않는다.
 
 1차 전환 후보는 다음 네 서비스로만 제한한다.
 
