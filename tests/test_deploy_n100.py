@@ -15,12 +15,28 @@ CRAWLER_REQUIREMENTS = (ROOT / "crawler-worker" / "requirements.txt").read_text(
 
 class DeployN100Tests(unittest.TestCase):
     def test_deploy_workflow_skips_compose_redeploy_for_docs_and_gitops_drafts(self):
+        runtime_detector = WORKFLOW.split("- id: runtime", maxsplit=1)[1].split(
+            "\n\n  deploy:", maxsplit=1
+        )[0]
+
         self.assertIn("name: Detect deployable runtime changes", WORKFLOW)
         self.assertIn("needs: changes", WORKFLOW)
         self.assertIn("needs.changes.outputs.runtime == 'true'", WORKFLOW)
-        self.assertIn("git diff --quiet HEAD^ HEAD --", WORKFLOW)
-        self.assertIn("docker-compose.yml", WORKFLOW)
-        self.assertIn("scripts/deploy-n100.sh", WORKFLOW)
+        self.assertIn("git diff --quiet HEAD^ HEAD --", runtime_detector)
+        for runtime_path in (
+            "docker-compose.yml",
+            "docker-compose.n100.yml",
+            "scripts/deploy-n100.sh",
+            "caddy/",
+            "portal-web/",
+            "system-agent/",
+            "crawler-worker/",
+            "youtube-memo/",
+            "book-memo/",
+            "car-care-worker/",
+            "homeops-executor/",
+        ):
+            self.assertIn(runtime_path, runtime_detector)
 
     def test_workflow_waits_for_successful_main_ci_and_uses_n100_runner(self):
         self.assertIn("workflow_run:", WORKFLOW)
@@ -129,6 +145,8 @@ class DeployN100Tests(unittest.TestCase):
         self.assertNotIn("main push에만 반응", GUIDE)
         self.assertIn("직접 push", GUIDE)
         self.assertIn("기능 브랜치 PR", GUIDE)
+        self.assertIn("런타임 배포 경로", GUIDE)
+        self.assertIn("문서와 비활성 GitOps 초안", GUIDE)
         self.assertNotIn("PR은 선택", GUIDE)
 
 
