@@ -1,6 +1,7 @@
 # DRAFT ONLY — NOT FOR APPLY.
-# __CONFIRM_N100_HOST_PATH__ and __CONFIRM_N100_NODE_NAME__ must be replaced only
-# after host path, UID/GID, free space, filesystem semantics, and WSL access are verified.
+# BLOCKED GATE: N100 `/mnt/c` currently reports 0777 under WSL. Do not replace
+# placeholders or apply this template until path, UID/GID, free space, SQLite
+# locking, filesystem semantics, and K3s runtime access are verified.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -8,6 +9,7 @@ metadata:
   annotations:
     draft.personal-server.io/not-for-apply: "true"
     draft.personal-server.io/purpose: "review-only static local PV contract"
+    draft.personal-server.io/blocked-gate: "n100-wsl-permissions"
 provisioner: kubernetes.io/no-provisioner
 volumeBindingMode: WaitForFirstConsumer
 reclaimPolicy: Retain
@@ -19,7 +21,7 @@ metadata:
   name: portal-web-files-draft
   annotations:
     draft.personal-server.io/not-for-apply: "true"
-    draft.personal-server.io/confirm-required: "hostPath, node name, ownership, WSL mount suitability"
+    draft.personal-server.io/confirm-required: "host path, node name, ownership, WSL mount suitability, single writer"
 spec:
   capacity:
     storage: __CONFIRM_PORTAL_FILES_CAPACITY__
@@ -55,3 +57,22 @@ spec:
   resources:
     requests:
       storage: __CONFIRM_PORTAL_FILES_CAPACITY__
+---
+# Candidate PVC contracts for the restricted first wave. No PV paths are
+# supplied because Static Local PV is blocked by the N100 WSL permission gate.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: first-wave-pvc-contracts-draft
+  namespace: personal-server
+  annotations:
+    draft.personal-server.io/not-for-apply: "true"
+    draft.personal-server.io/blocked-gate: "n100-wsl-permissions"
+data:
+  candidates: |-
+    portal-web: data/files -> portal-web-files-draft
+    crawler-worker: data/crawler-worker -> crawler-worker-data-draft
+    youtube-memo: data/youtube-memo -> youtube-memo-data-draft
+    book-memo: data/book-memo -> book-memo-data-draft
+  excluded: |-
+    system-agent, homeops-executor, car-care-worker, caddy

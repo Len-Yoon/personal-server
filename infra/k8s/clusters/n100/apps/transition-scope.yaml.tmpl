@@ -1,0 +1,15 @@
+# DRAFT ONLY — NOT FOR APPLY. Scope contract for review; no workloads or
+# Secret values are created by this file.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: first-wave-transition-scope-draft
+  namespace: personal-server
+  annotations:
+    draft.personal-server.io/not-for-apply: "true"
+data:
+  in-scope: "portal-web,crawler-worker,youtube-memo,book-memo"
+  excluded: "system-agent,homeops-executor,car-care-worker,caddy"
+  storage-gate: "Static Local PV blocked until N100 WSL 0777 ownership/permission/locking validation passes"
+  writer-gate: "Exactly one Compose or K3s SQLite writer per service"
+  secret-gate: "Approved SOPS/age or Secret Manager seed; no Git plaintext"

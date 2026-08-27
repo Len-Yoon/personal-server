@@ -6,7 +6,7 @@
 
 **범위 제외:** GitHub push·PR, 별도 GitOps 저장소 생성, Flux bootstrap·연결, Kubernetes 적용, Secret 생성, PVC 생성, Caddy 및 Windows bootstrap 변경, Compose 중지·배포 변경.
 
-**성공 기준:** 모든 리소스 예시는 `.yaml.tmpl`에만 있고 검토 전용/적용 금지 표기를 포함한다. 루트 `kustomization.yaml`은 의도적으로 비어 `KUBECONFIG=/nonexistent kubectl kustomize infra/k8s`가 0줄을 출력한다. Secret 값·리소스·Ingress·LoadBalancer·Flux 리소스는 없다.
+**성공 기준:** 모든 리소스 예시는 `.yaml.tmpl`에만 있고 검토 전용/적용 금지 표기를 포함한다. `/mnt/c`의 WSL `0777` 문제로 Static Local PV는 blocked gate로 남긴다. 1차 후보는 `portal-web`, `crawler-worker`, `youtube-memo`, `book-memo`로 제한하고, `system-agent`, `homeops-executor`, `car-care-worker`, Caddy는 제외한다. 루트 `kustomization.yaml`은 의도적으로 비어 `KUBECONFIG=/nonexistent kubectl kustomize infra/k8s`가 0줄을 출력한다. Secret 값·리소스·Ingress·LoadBalancer·Flux 리소스는 없다.
 
 ## 작성 단계
 
@@ -36,17 +36,18 @@
 - 생성: `infra/k8s/clusters/n100/infra/storage/storage-contract.yaml.tmpl`
 - 생성: `infra/k8s/clusters/n100/infra/storage/kustomization.yaml.tmpl`
 
-**내용:** `local` PV, Retain 정책, 단일 노드 바인딩과 PVC 이름을 예시로 둔다. 실제 hostPath·노드 이름·권한은 placeholder로만 두며 Secret과 실제 데이터를 넣지 않는다.
+**내용:** `local` PV, Retain 정책, 단일 노드 바인딩과 네 서비스의 PVC 후보를 예시로 둔다. `/mnt/c` WSL `0777` 관찰로 실제 Static Local PV 적용은 보류하며, hostPath·노드 이름·권한·파일 잠금은 placeholder와 확인 게이트로만 둔다. Secret과 실제 데이터를 넣지 않는다.
 
-### 4. portal-web의 비배포 예시 작성
+### 4. 1차 전환 범위와 portal-web의 비배포 예시 작성
 
 **파일:**
 
 - 생성: `infra/k8s/clusters/n100/apps/portal-web/deployment.yaml.tmpl`
 - 생성: `infra/k8s/clusters/n100/apps/portal-web/service.yaml.tmpl`
 - 생성: `infra/k8s/clusters/n100/apps/portal-web/kustomization.yaml.tmpl`
+- 생성: `infra/k8s/clusters/n100/apps/transition-scope.yaml.tmpl`
 
-**내용:** `replicas: 0`과 placeholder 이미지를 사용해 실행 가능한 배포 정의가 아닌 계약임을 나타낸다. 예시는 활성 Kustomize 트리에 포함하지 않는다. NodePort는 미래 Caddy 백엔드 후보로만 기록하고 Ingress·LoadBalancer를 만들지 않는다.
+**내용:** 범위 계약에 1차 네 서비스와 제외 대상을 명시한다. `replicas: 0`과 placeholder 이미지를 사용해 실행 가능한 배포 정의가 아닌 계약임을 나타낸다. 예시는 활성 Kustomize 트리에 포함하지 않는다. NodePort는 미래 Caddy 백엔드 후보로만 기록하고 Ingress·LoadBalancer를 만들지 않는다.
 
 ### 5. 정적 검증과 독립 검토
 
@@ -60,6 +61,8 @@ git diff --name-only
 ```
 
 **기대 결과:** Kustomize 명령이 0줄을 출력하고 공백 검사가 성공하며, 의도하지 않은 금지 리소스가 없다. 독립 검토자는 범위 외 파일, template의 활성 트리 참조 여부, placeholder의 실제화 여부, Secret·네트워크 경계와 정적 검사 결과를 확인한다.
+
+추가로 템플릿에는 실제 Secret 값·PV 경로가 없고, 단일 writer·Secret seed·향후 PV 소유권/권한/WSL 검증 게이트가 명시되어야 한다.
 
 ## 실행 이후 보류 항목
 
