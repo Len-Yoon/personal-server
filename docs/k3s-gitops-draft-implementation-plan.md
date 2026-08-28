@@ -6,7 +6,7 @@
 
 **범위 제외:** GitHub push·PR, 별도 GitOps 저장소 생성, Flux bootstrap·연결, Kubernetes 적용, Secret 생성, PVC 생성, Caddy 및 Windows bootstrap 변경, Compose 중지·배포 변경.
 
-**성공 기준:** 모든 리소스 예시는 `.yaml.tmpl`에만 있고 검토 전용/적용 금지 표기를 포함한다. `/mnt/c`의 WSL `0777` 문제로 Static Local PV는 blocked gate로 남긴다. 1차 후보는 `portal-web`, `crawler-worker`, `youtube-memo`, `book-memo`로 제한하고, `system-agent`, `homeops-executor`, `car-care-worker`, Caddy는 제외한다. 루트 `kustomization.yaml`은 의도적으로 비어 `KUBECONFIG=/nonexistent kubectl kustomize infra/k8s`가 0줄을 출력한다. Secret 값·리소스·Ingress·LoadBalancer·Flux 리소스는 없다.
+**성공 기준:** 모든 리소스 예시는 `.yaml.tmpl`에만 있고 검토 전용/적용 금지 표기를 포함한다. K3s 기본 `local-path` 동적 PVC 계약만 기록하며, 실제 앱 데이터 복사·복원·cutover는 보류한다. 1차 후보는 `portal-web`, `crawler-worker`, `youtube-memo`, `book-memo`로 제한하고, `system-agent`, `homeops-executor`, `car-care-worker`, Caddy는 제외한다. 루트 `kustomization.yaml`은 의도적으로 비어 `KUBECONFIG=/nonexistent kubectl kustomize infra/k8s`가 0줄을 출력한다. Secret 값·리소스·Ingress·LoadBalancer·Flux 리소스는 없다.
 
 ## 작성 단계
 
@@ -36,7 +36,7 @@
 - 생성: `infra/k8s/clusters/n100/infra/storage/storage-contract.yaml.tmpl`
 - 생성: `infra/k8s/clusters/n100/infra/storage/kustomization.yaml.tmpl`
 
-**내용:** `local` PV, Retain 정책, 단일 노드 바인딩과 네 서비스의 PVC 후보를 예시로 둔다. `/mnt/c` WSL `0777` 관찰로 실제 Static Local PV 적용은 보류하며, hostPath·노드 이름·권한·파일 잠금은 placeholder와 확인 게이트로만 둔다. Secret과 실제 데이터를 넣지 않는다.
+**내용:** K3s 기본 `local-path` StorageClass를 참조하는 네 서비스의 PVC 후보만 예시로 둔다. custom StorageClass, PV, host path, node affinity를 만들지 않으며, 용량·데이터 복사·복원·단일 writer는 확인 게이트로 둔다. Secret과 실제 데이터를 넣지 않는다.
 
 ### 4. 1차 전환 범위와 portal-web의 비배포 예시 작성
 

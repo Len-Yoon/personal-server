@@ -39,7 +39,7 @@ N100 사전 검증에서 `/mnt/c` 아래 데이터의 소유권·권한이 WSL �
 
 추가 scratch 검증에서 `local-path` 64Mi ReadWriteOnce PVC와 Pod를 생성해 PV가 이 경로 하위에 Bound되고 Pod가 Ready인 것을 확인했다. 임시 볼륨에서 파일 I/O와 SQLite `BEGIN IMMEDIATE` 잠금 충돌도 통과했다. 검증 후 임시 namespace와 PV 삭제 완료를 확인했으며, 운영 데이터·Compose·Caddy·Flux는 변경하지 않았다.
 
-이는 K3s local-path provisioner의 기본 경로·동적 볼륨·일반 SQLite 잠금 동작만 확인한 결과이며, 실제 앱 데이터를 위한 Static Local PV 승인은 아니다. 앱별 UID/GID 읽기·쓰기, crawler 프로필 잠금, WSL 런타임 접근성, 단일 writer와 실제 복원본 검증은 아직 미통과다. 따라서 Static Local PV 게이트는 계속 차단 상태로 유지하며, 이 조건을 모두 확인하기 전에는 앱 PV/PVC를 만들거나 바인딩하지 않는다.
+이는 K3s `local-path` 동적 provisioner의 기본 경로·동적 볼륨·일반 SQLite 잠금 동작만 확인한 결과다. Portal 이미지와 빈 동적 볼륨의 별도 smoke도 통과했지만, 앱 데이터 복사·복원, 앱별 UID/GID, crawler 프로필 잠금, 단일 writer cutover, Caddy 전환, Secret 주입은 수행하지 않았다. 동적 PVC를 실제로 만들고 바인딩하는 것은 별도 승인 후 진행한다. 대화형 셸에서 `EXIT trap`에 의존하지 않고 검증 리소스별 삭제와 잔존 여부를 명시적으로 확인해야 한다.
 
 1차 전환 후보는 다음 네 서비스로만 제한한다.
 
@@ -56,15 +56,15 @@ Compose 데이터는 cutover 전까지 원본 위치와 Docker named volume을 �
 
 | 데이터 범주 | 전환 원칙 | Kubernetes 계약 | 적용 전 필수 확인 |
 | --- | --- | --- | --- |
-| `portal-web` | `data/files` | Static Local PV/PVC 후보(보류) | 실제 경로, UID/GID, 읽기·쓰기 권한, 여유 공간, WSL 적합성 |
-| `crawler-worker` | `data/crawler-worker` | Static Local PV/PVC 후보(보류) | 위 항목 + Playwright 프로필 잠금 |
-| `youtube-memo` | `data/youtube-memo` | Static Local PV/PVC 후보(보류) | 위 항목 + SQLite 무결성 |
-| `book-memo` | `data/book-memo` | Static Local PV/PVC 후보(보류) | 위 항목 + SQLite 무결성 |
+| `portal-web` | `data/files` | `local-path` 동적 PVC 후보(보류) | 용량, 데이터 복사·복원, UID/GID, 단일 writer |
+| `crawler-worker` | `data/crawler-worker` | `local-path` 동적 PVC 후보(보류) | 위 항목 + Playwright 프로필 잠금 |
+| `youtube-memo` | `data/youtube-memo` | `local-path` 동적 PVC 후보(보류) | 위 항목 + SQLite 무결성 |
+| `book-memo` | `data/book-memo` | `local-path` 동적 PVC 후보(보류) | 위 항목 + SQLite 무결성 |
 | Caddy named volume | Docker Caddy가 유지하는 동안 Kubernetes에 마운트하지 않음 | 별도 단계에서만 검토 | Docker volume 위치와 복구 절차 |
 | car-care OAuth named volume | Compose와 동시 마운트 금지 | 전용 PV/PVC 및 Secret 계약 분리 | 토큰 파일 권한, 재인증 절차, 복구 검증 |
 | SQLite 파일 | 서비스 중지 후 단일 writer 상태에서 복사 | PVC 하나를 하나의 서비스에만 연결 | `quick_check`, 파일 소유권, 롤백 가능성 |
 
-`infra/k8s/clusters/n100/infra/storage/storage-contract.yaml.tmpl`의 경로와 노드 이름은 의도적으로 확인용 placeholder다. 이 template은 활성 Kustomize 트리에 포함되지 않는다. `/mnt/c` 경로의 `0777` 관찰 결과만으로 권한을 승인하지 않으며, 실제 Linux 파일시스템 경로로 이전할지 또는 WSL 공유 마운트를 사용할지 검증 후 결정한다.
+`infra/k8s/clusters/n100/infra/storage/storage-contract.yaml.tmpl`은 K3s 기본 `local-path`와 용량 placeholder를 기록하는 PVC 계약이며 활성 Kustomize 트리에 포함되지 않는다. PV, custom StorageClass, host path, node affinity는 이 초안에 넣지 않는다.
 
 ## 단일 writer 게이트
 
@@ -90,7 +90,7 @@ Secret 값과 실제 Secret 리소스는 이 저장소에 작성하지 않는다
 1. 암호화 백업의 원격 보관과 별도 경로 복원 검증 상태를 재확인한다.
 2. 대상 서비스의 데이터·볼륨·SQLite 점검 항목과 예상 중단 시간을 승인받는다.
 3. 해당 Compose 서비스만 정지한 뒤 데이터 복사본을 만들고 SQLite `quick_check`와 파일 소유권을 확인한다.
-4. 확인된 경로와 권한으로 PV/PVC를 만들고, Secret을 승인된 주입 경로로 제공한다.
+4. 승인된 용량과 데이터 복사본을 기준으로 해당 앱의 `local-path` 동적 PVC를 생성·바인딩하고, Secret을 승인된 주입 경로로 제공한다. 이 초안에서는 custom PV를 만들지 않는다.
 5. Kubernetes 워크로드를 내부 검증용으로만 기동하고 데이터·로그·헬스 체크를 검증한다.
 6. 별도 승인 후 Caddy 백엔드를 한 서비스만 전환한다. 전환 전 Compose 컨테이너는 롤백 가능한 상태로 유지한다.
 7. 오류 시 Caddy를 이전 Compose 백엔드로 되돌리고, Kubernetes 워크로드를 중지한다. 데이터가 Kubernetes에서 변경되었다면 임의 재전환하지 말고 마지막 일관된 백업에서 복구 여부를 판단한다.
@@ -110,7 +110,7 @@ Secret 값과 실제 Secret 리소스는 이 저장소에 작성하지 않는다
 아래는 실행 순서 문서일 뿐 Flux 리소스를 포함하지 않는다.
 
 1. Git 저장소 경계, 기본 브랜치 보호, 배포 권한과 Secret 관리 방식을 검토·승인한다.
-2. K3s 접근과 Caddy 포트 경계, Static Local PV 경로·소유권·권한·WSL 적합성 게이트, 복원 절차를 사전 검증한다. 이 게이트가 닫힌 동안에는 PV/PVC를 적용하지 않는다.
+2. K3s 접근과 Caddy 포트 경계, `local-path` 동적 PVC의 용량·복원·단일 writer 게이트를 사전 검증한다. 이 게이트가 닫힌 동안에는 앱 PVC를 적용하지 않는다.
 3. Flux CLI와 컨트롤러 설치를 별도 변경으로 승인하고, 최소 권한 Git 인증을 준비한다.
 4. `flux bootstrap`의 대상 저장소와 권한을 별도 승인한 뒤에만 연결한다. 이 초안을 자동 연결 대상으로 취급하지 않는다.
 5. namespace → storage → Secret 주입 기반 → 단일 앱 순으로 Kustomization 의존성을 선언한다.
@@ -122,7 +122,7 @@ Secret 값과 실제 Secret 리소스는 이 저장소에 작성하지 않는다
 | --- | --- | --- |
 | 정적 초안 | `KUBECONFIG=/nonexistent kubectl kustomize infra/k8s` | 의도적으로 0줄을 출력해 활성 리소스가 없음을 확인 |
 | 저장소 경계 | diff 및 금지 리소스 점검 | Secret, Ingress, LoadBalancer, Flux 리소스와 Compose/Caddy 변경이 없음 |
-| 노드 저장소 | native ext4 경로 준비 및 scratch PVC/Pod 통과: `/dev/sdd` ext4 `rw`, `root:root`·`0750`, 노드 `desktop-utu2qat` Ready, local-path 기본 경로 일치, 파일 I/O와 SQLite `BEGIN IMMEDIATE` 잠금 통과, 임시 namespace와 PV 삭제 완료 | 앱별 UID/GID 읽기·쓰기, 단일 노드 고정, crawler 프로필 잠금, WSL 접근성·실제 복원본 검증이 모두 확인될 때까지 Static Local PV 게이트는 계속 차단 상태 |
+| 노드 저장소 | native ext4 경로 준비 및 `local-path` 동적 scratch PVC/Pod 통과: `/dev/sdd` ext4 `rw`, `root:root`·`0750`, 노드 `desktop-utu2qat` Ready, 기본 경로 일치, 파일 I/O와 SQLite `BEGIN IMMEDIATE` 잠금 통과, 임시 namespace와 PV 삭제 완료 | 앱별 데이터 복사·복원, UID/GID, 단일 writer, crawler 잠금, Caddy 전환과 Secret 주입이 확인될 때까지 앱 동적 PVC는 보류 |
 | 단일 writer | Compose/K3s 동시 writer와 SQLite 프로세스 확인 | 대상 서비스마다 writer가 정확히 하나이고 `quick_check` 통과 |
 | Secret seed | dry-run, metadata, 로그·Git diff 점검 | 값·토큰이 노출되지 않고 승인된 주입 경로가 재현됨 |
 | 복구 | 임시 경로 복원, SQLite `quick_check`, 파일 존재 확인 | 데이터가 암호화 백업에서 독립 복원됨 |
