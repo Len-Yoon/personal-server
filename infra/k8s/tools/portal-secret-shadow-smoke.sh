@@ -116,6 +116,13 @@ spec:
         - name: portal-web
           image: $IMAGE_REF
           imagePullPolicy: Never
+          command:
+            - uvicorn
+            - app.main:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
           envFrom:
             - secretRef:
                 name: $SECRET_NAME
