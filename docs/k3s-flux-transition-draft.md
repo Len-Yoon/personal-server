@@ -105,6 +105,26 @@ Secret 값과 실제 Secret 리소스는 이 저장소에 작성하지 않는다
 
 필수 키 목록은 기존 Compose 계약을 기준으로 별도 운영 문서에서 관리한다. 이 초안에는 키 이름 외의 값·토큰을 기록하지 않는다.
 
+### Portal Secret shadow smoke
+
+`infra/k8s/tools/portal-secret-shadow-smoke.sh`는 N100 일반 WSL 터미널에서 직접 실행하는 **isolated manual smoke** 절차다. 실행 전 K3s Secret 암호화가 Enabled인지 확인하고, 매 실행마다 고유 namespace·이미지·immutable Secret과 default-deny NetworkPolicy를 만든 뒤 네 개의 portal 핵심 키 주입과 Pod loopback `/health`만 검증한다. 실행 시작 시 출력되는 `portal_secret_shadow_run_id`는 비정상 중단 시 정리용 식별자다. 성공·실패 모두 임시 namespace와 정확한 이미지 참조를 삭제하고 잔존 여부를 확인한다.
+
+비정상 중단으로 정리가 남았을 때만 다음을 실행한다. `RUN_ID`에는 시작 시 출력된 값만 넣는다.
+
+`bash infra/k8s/tools/portal-secret-shadow-smoke.sh --cleanup RUN_ID`
+
+```bash
+bash infra/k8s/tools/portal-secret-shadow-smoke.sh
+```
+
+터미널이 중단되어 자동 정리가 완료되지 않은 경우에는 실행에 사용한 ID를 지정해 다음 복구 정리를 수행한다. 지정한 namespace, 정확한 containerd 이미지 참조와 일치하는 로컬 임시 Docker tag만 삭제하고 각각의 부재를 확인한다.
+
+```bash
+bash infra/k8s/tools/portal-secret-shadow-smoke.sh --cleanup RUN_ID
+```
+
+이 smoke는 선택적 HomeOps/portfolio configuration(optional HomeOps/portfolio), data copy, Caddy routing, actual cutover을 검증하지 않는다. Service, Ingress, NodePort, PV/PVC를 만들지 않으며, 기존 Compose·Caddy·스케줄러 운영을 변경하지 않는다. 실제 전환과 데이터 이동은 별도 승인과 검증이 필요한 작업이다.
+
 ## Flux bootstrap 순서
 
 아래는 실행 순서 문서일 뿐 Flux 리소스를 포함하지 않는다.
