@@ -1,4 +1,4 @@
-# DRAFT ONLY — NOT FOR APPLY. Image, data contract, and runtime Secret injection require approval.
+# DRAFT ONLY — NOT FOR APPLY. Image, data copy, and runtime Secret injection require approval.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,28 +21,31 @@ spec:
     spec:
       containers:
         - name: portal-web
-          image: registry.example.invalid/personal-server/portal-web:__CONFIRM_IMAGE_TAG__
+          image: __CONFIRM_PORTAL_IMAGE_REF__
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
-              containerPort: 8080
+              containerPort: 8000
           envFrom:
             - secretRef:
                 name: portal-web-runtime
                 optional: false
+          env:
+            - name: FILE_STORAGE_PATH
+              value: /data/files
           volumeMounts:
             - name: portal-web-files
-              mountPath: __CONFIRM_CONTAINER_DATA_PATH__
+              mountPath: /data/files
               readOnly: false
           readinessProbe:
             httpGet:
-              path: __CONFIRM_HEALTH_PATH__
+              path: /health
               port: http
           livenessProbe:
             httpGet:
-              path: __CONFIRM_HEALTH_PATH__
+              path: /health
               port: http
       volumes:
         - name: portal-web-files
           persistentVolumeClaim:
-            claimName: portal-web-files-draft
+            claimName: portal-web-files-dynamic-draft

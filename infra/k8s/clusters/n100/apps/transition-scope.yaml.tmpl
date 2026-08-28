@@ -10,6 +10,6 @@ metadata:
 data:
   in-scope: "portal-web,crawler-worker,youtube-memo,book-memo"
   excluded: "system-agent,homeops-executor,car-care-worker,caddy"
-  storage-gate: "Static Local PV blocked until N100 WSL 0777 ownership/permission/locking validation passes"
+  storage-gate: "Dynamic local-path scratch passed on native ext4; app data copy, restore, and one-writer cutover remain approval gates"
   writer-gate: "Exactly one Compose or K3s SQLite writer per service"
   secret-gate: "Approved SOPS/age or Secret Manager seed; no Git plaintext"
