@@ -16,22 +16,22 @@ portal.len.pe.kr {
 
 len.pe.kr {
     import common_tls
-    reverse_proxy portal-web:8000
+    reverse_proxy {env.PORTAL_UPSTREAM}
 }
 
 portfolio.len.pe.kr {
     import common_tls
-    reverse_proxy portal-web:8000
+    reverse_proxy {env.PORTAL_UPSTREAM}
 }
 
 file.len.pe.kr {
     import common_tls
-    reverse_proxy portal-web:8000
+    reverse_proxy {env.PORTAL_UPSTREAM}
 }
 
 admin.len.pe.kr {
     import common_tls
-    reverse_proxy portal-web:8000
+    reverse_proxy {env.PORTAL_UPSTREAM}
 }
 
 news.len.pe.kr {
