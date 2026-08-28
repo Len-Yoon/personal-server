@@ -21,8 +21,10 @@ class K3sStorageDraftTests(unittest.TestCase):
         self.assertIn("`/dev/sdd` ext4의 `rw`", document)
         self.assertIn("`desktop-utu2qat` Ready", document)
         self.assertIn("`root:root`·`0750`", document)
+        self.assertIn("scratch PVC/Pod", document)
+        self.assertIn("파일 I/O와 SQLite `BEGIN IMMEDIATE` 잠금", document)
+        self.assertIn("임시 namespace와 PV 삭제 완료", document)
         self.assertIn("앱별 UID/GID", document)
-        self.assertIn("SQLite 잠금", document)
         self.assertIn("Static Local PV 게이트는 계속 차단 상태", document)
 
 
