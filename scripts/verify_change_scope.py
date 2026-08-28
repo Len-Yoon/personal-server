@@ -23,6 +23,7 @@ AUTOMATION_PREFIXES = (".github/", "tests/")
 INFRASTRUCTURE_PREFIXES = ("infra/k8s/",)
 BLOCKED_PREFIXES = ("caddy/", "scripts/")
 BLOCKED_INFRASTRUCTURE_FILES = {"docker-compose.yml", "docker-compose.n100.yml"}
+APPROVED_RUNTIME_CONFIG_FILES = {"docker-compose.n100.yml", "caddy/Caddyfile"}
 DEPLOYMENT_WORKFLOW_FILES = {".github/workflows/deploy-n100.yml"}
 BLOCKED_FILES = {
     "scripts/deploy-n100.sh",
@@ -84,6 +85,13 @@ def classify_paths(paths: list[str]) -> dict[str, object]:
             continue
 
         if path in DEPLOYMENT_WORKFLOW_FILES:
+            evidence["automation_files"].append(path)
+            _append_required_check(evidence, "maintenance")
+            for service in SERVICE_PREFIXES.values():
+                _append_required_check(evidence, service)
+            continue
+
+        if path in APPROVED_RUNTIME_CONFIG_FILES:
             evidence["automation_files"].append(path)
             _append_required_check(evidence, "maintenance")
             for service in SERVICE_PREFIXES.values():

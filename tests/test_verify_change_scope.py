@@ -221,12 +221,21 @@ class VerifyChangeScopeTests(unittest.TestCase):
         self.assertEqual(evidence["required_checks"], ["maintenance"])
         self.assertEqual(evidence["blocked_files"], [])
 
+    def test_approved_caddy_runtime_files_require_full_validation(self):
+        paths = ("docker-compose.n100.yml", "caddy/Caddyfile")
+        code, evidence = run_scope(*paths, executed_checks=("maintenance",))
+        self.assertEqual(code, 2)
+        self.assertEqual(evidence["blocked_files"], [])
+        self.assertEqual(evidence["automation_files"], list(paths))
+        self.assertEqual(evidence["missing_checks"], [
+            "portal", "system-agent", "crawler-worker", "homeops-executor",
+            "youtube-memo", "book-memo", "car-care-worker",
+        ])
+
     def test_server_startup_paths_are_blocked(self):
         paths = (
             "docker-compose.yml",
-            "docker-compose.n100.yml",
             "scripts/maintenance.py",
-            "caddy/Caddyfile",
         )
         code, evidence = run_scope(*paths)
         self.assertEqual(code, 2)

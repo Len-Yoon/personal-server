@@ -205,6 +205,9 @@ services:
     environment:
       CADDY_EMAIL: ${CADDY_EMAIL:-}
       CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
+      PORTAL_UPSTREAM: ${PORTAL_UPSTREAM:-portal-web:8000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       portal-web:
         condition: service_healthy
