@@ -75,6 +75,38 @@ class PortalCutoverContractTest(unittest.TestCase):
             self.assertIn("--go", result.stderr)
             self.assertFalse(calls.exists())
 
+    def test_combined_prepare_and_public_switch_is_rejected_without_invoking_tools(self):
+        with tempfile.TemporaryDirectory() as directory:
+            calls = Path(directory) / "calls"
+            fake_bin = Path(directory) / "bin"
+            fake_bin.mkdir()
+            for name in ("sudo", "docker", "sha256sum", "kubectl", "k3s"):
+                tool = fake_bin / name
+                tool.write_text(f"#!/bin/sh\nprintf '%s\\n' '{name} $*' >> '{calls}'\nexit 99\n")
+                tool.chmod(0o755)
+            result = subprocess.run(
+                ["/bin/bash", str(SCRIPT), "--go", "--switch-caddy"],
+                env={
+                    **os.environ,
+                    "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+                    "RUN_ID": "combined-modes",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("--go", result.stderr)
+            self.assertIn("--switch-caddy", result.stderr)
+            self.assertIn("portal_cutover=FAIL", result.stderr)
+            self.assertFalse(calls.exists())
+
+    def test_document_requires_separate_prepare_and_public_switch_commands(self):
+        text = DOC.read_text(encoding="utf-8")
+        self.assertIn("portal-cutover.sh --go", text)
+        self.assertIn("portal-cutover.sh --switch-caddy", text)
+        self.assertNotIn("portal-cutover.sh --go --switch-caddy", text)
+
     def test_encryption_gate_happens_before_resource_or_secret_access(self):
         secret_value = "must-not-appear"
         with tempfile.TemporaryDirectory() as directory:

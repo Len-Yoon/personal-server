@@ -1043,7 +1043,7 @@ YAML
 }
 
 usage() {
-  printf '%s\n' "usage: portal-cutover.sh --check-nodeport-private | portal-cutover.sh --migrate-compose-state | portal-cutover.sh --go | portal-cutover.sh --go --switch-caddy | portal-cutover.sh --rollback-caddy" >&2
+  printf '%s\n' "usage: portal-cutover.sh --check-nodeport-private | portal-cutover.sh --migrate-compose-state | portal-cutover.sh --go | portal-cutover.sh --switch-caddy | portal-cutover.sh --rollback-caddy" >&2
 }
 
 main() {
@@ -1063,6 +1063,7 @@ main() {
   if [ "$CHECK_NODEPORT_PRIVATE" -eq 1 ] && { [ "$MIGRATE_COMPOSE_STATE" -eq 1 ] || [ "$GO" -eq 1 ] || [ "$SWITCH_CADDY" -eq 1 ] || [ "$ROLLBACK_CADDY" -eq 1 ]; }; then usage; fail; return 1; fi
   if [ "$MIGRATE_COMPOSE_STATE" -eq 1 ] && { [ "$GO" -eq 1 ] || [ "$SWITCH_CADDY" -eq 1 ] || [ "$ROLLBACK_CADDY" -eq 1 ]; }; then usage; fail; return 1; fi
   if [ "$ROLLBACK_CADDY" -eq 1 ] && [ "$SWITCH_CADDY" -eq 1 ]; then usage; fail; return 1; fi
+  if [ "$GO" -eq 1 ] && [ "$SWITCH_CADDY" -eq 1 ]; then usage; fail; return 1; fi
   if [ "$CHECK_NODEPORT_PRIVATE" -eq 1 ]; then
     if assert_nodeport_private_exposure; then printf '%s\n' "portal_nodeport_private=PASS"; return 0; fi
     printf '%s\n' "portal_nodeport_private=FAIL" >&2
@@ -1070,13 +1071,13 @@ main() {
   fi
   if [ "$MIGRATE_COMPOSE_STATE" -eq 1 ]; then migrate_compose_state; return $?; fi
   if [ "$ROLLBACK_CADDY" -eq 1 ]; then rollback_caddy; return $?; fi
+  if [ "$SWITCH_CADDY" -eq 1 ]; then switch_prepared_caddy; return $?; fi
   if [ "$GO" -ne 1 ]; then
     printf '%s\n' "explicit --go is required; no operation performed" >&2
     usage
     fail
     return 1
   fi
-  if [ "$SWITCH_CADDY" -eq 1 ]; then switch_prepared_caddy; return $?; fi
   prepare_cutover
 }
 

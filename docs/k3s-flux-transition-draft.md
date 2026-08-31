@@ -135,10 +135,10 @@ bash infra/k8s/tools/portal-secret-shadow-smoke.sh --cleanup RUN_ID
 bash infra/k8s/tools/portal-cutover.sh --go
 ```
 
-별도 최종 승인이 있는 경우에만 준비 단계가 성공한 뒤 `--go --switch-caddy`를 별도 호출해 `host.docker.internal:30080`으로 트래픽을 전환한다. 이 단계는 준비된 K3s Portal과 중지된 Compose Portal을 재확인한 뒤 Caddy만 재생성하고 네 개 Portal 호스트를 확인한다. 실패하면 이전 upstream으로 복구하고 Compose writer를 다시 시작하며 K3s writer를 중지한다.
+별도 최종 승인이 있는 경우에만 준비 단계가 성공한 뒤 `--switch-caddy`를 별도 호출해 `host.docker.internal:30080`으로 트래픽을 전환한다. `--go`와 `--switch-caddy`를 함께 전달하면 준비를 건너뛰는 위험을 막기 위해 즉시 실패한다. 이 단계는 준비된 K3s Portal과 중지된 Compose Portal을 재확인한 뒤 Caddy만 재생성하고 네 개 Portal 호스트를 확인한다. 실패하면 이전 upstream으로 복구하고 Compose writer를 다시 시작하며 K3s writer를 중지한다.
 
 ```bash
-bash infra/k8s/tools/portal-cutover.sh --go --switch-caddy
+bash infra/k8s/tools/portal-cutover.sh --switch-caddy
 ```
 
 롤백은 별도 명시 호출로만 수행한다. Caddy upstream을 `portal-web:8000`으로 복구하고 Caddy만 재생성한 뒤 Compose Portal을 시작하며, K3s Deployment는 중지 상태로 유지한다.
