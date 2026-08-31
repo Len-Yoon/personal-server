@@ -363,6 +363,30 @@ class PortalCutoverContractTest(unittest.TestCase):
         )
         self.assertIn("ip -4 -o addr show scope global", text)
 
+    def test_wait_for_first_consumer_pvcs_are_not_waited_on_before_copy_pod(self):
+        """local-path provisions only after the copy Pod consumes both claims."""
+        text = SCRIPT.read_text(encoding="utf-8")
+        prepare = text[text.index("prepare_cutover() {") : text.index("usage() {")]
+
+        files_claim = prepare.index("name: $PVC_NAME")
+        state_claim = prepare.index("name: $STATE_PVC_NAME")
+        copy_pod = prepare.index("name: $COPY_POD")
+        copy_ready = prepare.index('wait --for=condition=Ready "pod/$COPY_POD"')
+
+        self.assertLess(files_claim, state_claim)
+        self.assertLess(state_claim, copy_pod)
+        self.assertLess(copy_pod, copy_ready)
+        self.assertNotIn("wait --for=jsonpath='{.status.phase}'=Bound", prepare)
+
+    def test_pre_writer_pvc_failure_restarts_compose_without_restoring_empty_claims(self):
+        """A Pending first-consumer claim has no newer writer state to restore."""
+        text = SCRIPT.read_text(encoding="utf-8")
+        cleanup = text[text.index("remove_partial_resources() {") : text.index("abort_cutover() {")]
+
+        self.assertIn("K3S_WRITER_STARTED=0", text)
+        self.assertIn('[ "$K3S_WRITER_STARTED" -eq 0 ] || restore_files_from_pvc', cleanup)
+        self.assertIn('[ "$K3S_WRITER_STARTED" -eq 0 ] || restore_state_from_pvc', cleanup)
+
     def test_nodeport_private_check_rejects_a_reachable_non_bridge_address(self):
         """The switch gate must fail when the live NodePort answers on a host address."""
         with tempfile.TemporaryDirectory() as directory:
