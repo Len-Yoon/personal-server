@@ -39,6 +39,7 @@ SWITCH_CADDY=0
 ROLLBACK_CADDY=0
 MIGRATE_COMPOSE_STATE=0
 CHECK_NODEPORT_PRIVATE=0
+CLEANUP_ROLLEDBACK=0
 COMPOSE_STOPPED=0
 K3S_TARGET=0
 ENV_BACKUP_TARGET=0
@@ -115,6 +116,15 @@ assert_compose_writer_running() {
   local running
   running=$(run_timeout "$TIMEOUT_SECONDS" docker inspect portal-web --format '{{.State.Running}}') || return 1
   [ "$running" = "true" ]
+}
+
+assert_compose_writer_healthy() {
+  local marker_state running_health
+  [ -f "$RUNTIME_MARKER" ] || return 1
+  marker_state=$(<"$RUNTIME_MARKER") || return 1
+  [ "$marker_state" = "compose" ] || return 1
+  running_health=$(run_timeout "$TIMEOUT_SECONDS" docker inspect portal-web --format '{{.State.Running}} {{.State.Health.Status}}') || return 1
+  [ "$running_health" = "true healthy" ]
 }
 
 assert_compose_writer_stopped() {
@@ -431,6 +441,131 @@ restore_files_from_pvc() {
 
 restore_state_from_pvc() {
   restore_pvc_to_local "$STATE_PVC_NAME" /var/lib/portal "$STATE_SOURCE_DIR" "$STATE_RESTORE_POD" homeops.sqlite3
+}
+
+assert_k3s_writer_stopped_for_cleanup() {
+  local replicas ready pod_count
+  replicas=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" get deployment portal-web --ignore-not-found -o jsonpath='{.spec.replicas}') || return 1
+  ready=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" get deployment portal-web --ignore-not-found -o jsonpath='{.status.readyReplicas}') || return 1
+  replicas="${replicas:-0}"
+  ready="${ready:-0}"
+  [ "$replicas" = "0" ] || return 1
+  [ "$ready" = "0" ] || return 1
+  pod_count=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" get pod -l app.kubernetes.io/name=portal-web --field-selector=status.phase=Running -o name) || return 1
+  [ -z "$pod_count" ]
+}
+
+assert_cleanup_resource_absent() {
+  local kind="$1" name="$2" found
+  found=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" get "$kind" "$name" --ignore-not-found -o name) || return 1
+  [ -z "$found" ]
+}
+
+assert_cleanup_selector_absent() {
+  local kind="$1" selector="$2" found
+  found=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" get "$kind" -l "$selector" --ignore-not-found -o name) || return 1
+  [ -z "$found" ]
+}
+
+cleanup_expected_portal_pods() {
+  local pod
+  for pod in "$COPY_POD" "$FILES_RESTORE_POD" "$STATE_RESTORE_POD"; do
+    run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" delete pod "$pod" --ignore-not-found --wait=true >/dev/null || return 1
+  done
+  for pod in "$COPY_POD" "$FILES_RESTORE_POD" "$STATE_RESTORE_POD"; do
+    assert_cleanup_resource_absent pod "$pod" || return 1
+  done
+}
+
+assert_no_pods_referencing_cleanup_pvcs() {
+  local pod_refs
+  pod_refs=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" get pod -o json |
+    run_timeout "$TIMEOUT_SECONDS" python3 -c '
+import json
+import sys
+
+claims = set(sys.argv[1:])
+payload = json.load(sys.stdin)
+for pod in payload.get("items", []):
+    volumes = pod.get("spec", {}).get("volumes", [])
+    referenced = {
+        volume.get("persistentVolumeClaim", {}).get("claimName")
+        for volume in volumes
+    }
+    if claims.intersection(referenced):
+        print(pod.get("metadata", {}).get("name", ""))
+' "$PVC_NAME" "$STATE_PVC_NAME") || return 1
+  [ -z "$pod_refs" ]
+}
+
+cleanup_rolledback_resources() {
+  # This is deliberately a separate, operator-invoked path. It never restores,
+  # stops, or deletes Compose data; it only removes named Portal resources in
+  # the fixed personal-server namespace after both writers are verified safe.
+  if [ "$PVC_NAME" != "portal-web-files-dynamic" ] || [ "$STATE_PVC_NAME" != "portal-web-state-dynamic" ]; then
+    printf '%s\n' "rolled-back cleanup requires the fixed Portal PVC names" >&2
+    printf '%s\n' "portal_cleanup=FAIL" >&2
+    return 1
+  fi
+  if [ "$NAMESPACE" != "personal-server" ]; then
+    printf '%s\n' "rolled-back cleanup is restricted to the personal-server namespace" >&2
+    printf '%s\n' "portal_cleanup=FAIL" >&2
+    return 1
+  fi
+  if ! assert_compose_writer_healthy; then
+    printf '%s\n' "Compose Portal is not confirmed as the healthy current writer" >&2
+    printf '%s\n' "portal_cleanup=FAIL" >&2
+    return 1
+  fi
+  if ! assert_k3s_writer_stopped_for_cleanup; then
+    printf '%s\n' "K3s Portal deployment still has ready or desired writer replicas" >&2
+    printf '%s\n' "portal_cleanup=FAIL" >&2
+    return 1
+  fi
+  if ! cleanup_expected_portal_pods; then
+    printf '%s\n' "failed to remove or verify expected Portal copy/restore Pods" >&2
+    printf '%s\n' "portal_cleanup=FAIL" >&2
+    return 1
+  fi
+  if ! assert_no_pods_referencing_cleanup_pvcs; then
+    printf '%s\n' "Portal Pods still reference Portal PVCs; refusing PVC cleanup" >&2
+    printf '%s\n' "portal_cleanup=FAIL" >&2
+    return 1
+  fi
+
+  # PVC deletion is intentionally after every precondition above and after
+  # the other Portal resources have been removed and verified absent.
+  if ! run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" delete deployment portal-web --ignore-not-found --wait=true >/dev/null ||
+     ! run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" delete service portal-web --ignore-not-found --wait=true >/dev/null ||
+     ! run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" delete secret portal-web-runtime --ignore-not-found --wait=true >/dev/null ||
+     ! run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" delete endpointslice -l app.kubernetes.io/part-of=portal-compose-bridge --ignore-not-found --wait=true >/dev/null ||
+     ! run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" delete service -l app.kubernetes.io/part-of=portal-compose-bridge --ignore-not-found --wait=true >/dev/null; then
+    printf '%s\n' "failed to remove residual K3s Portal deployment, service, or Secret" >&2
+    printf '%s\n' "portal_cleanup=FAIL" >&2
+    return 1
+  fi
+  if ! assert_cleanup_resource_absent deployment portal-web ||
+     ! assert_cleanup_resource_absent service portal-web ||
+     ! assert_cleanup_resource_absent secret portal-web-runtime ||
+     ! assert_cleanup_selector_absent endpointslice app.kubernetes.io/part-of=portal-compose-bridge ||
+     ! assert_cleanup_selector_absent service app.kubernetes.io/part-of=portal-compose-bridge; then
+    printf '%s\n' "residual K3s Portal deployment, service, or Secret remains" >&2
+    printf '%s\n' "portal_cleanup=FAIL" >&2
+    return 1
+  fi
+  if ! run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" delete pvc "$PVC_NAME" --ignore-not-found --wait=true >/dev/null ||
+     ! run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" delete pvc "$STATE_PVC_NAME" --ignore-not-found --wait=true >/dev/null; then
+    printf '%s\n' "failed to remove residual K3s Portal PVCs" >&2
+    printf '%s\n' "portal_cleanup=FAIL" >&2
+    return 1
+  fi
+  if ! assert_cleanup_resource_absent pvc "$PVC_NAME" ||
+     ! assert_cleanup_resource_absent pvc "$STATE_PVC_NAME"; then
+    printf '%s\n' "residual K3s Portal PVC remains" >&2
+    printf '%s\n' "portal_cleanup=FAIL" >&2
+    return 1
+  fi
+  printf '%s\n' "portal_cleanup=PASS"
 }
 
 assert_namespace() {
@@ -1089,7 +1224,7 @@ YAML
 }
 
 usage() {
-  printf '%s\n' "usage: portal-cutover.sh --check-nodeport-private | portal-cutover.sh --migrate-compose-state | portal-cutover.sh --go | portal-cutover.sh --switch-caddy | portal-cutover.sh --rollback-caddy" >&2
+  printf '%s\n' "usage: portal-cutover.sh --check-nodeport-private | portal-cutover.sh --migrate-compose-state | portal-cutover.sh --go | portal-cutover.sh --switch-caddy | portal-cutover.sh --rollback-caddy | portal-cutover.sh --cleanup-rolledback" >&2
 }
 
 main() {
@@ -1100,6 +1235,7 @@ main() {
       --rollback-caddy) ROLLBACK_CADDY=1 ;;
       --migrate-compose-state) MIGRATE_COMPOSE_STATE=1 ;;
       --check-nodeport-private) CHECK_NODEPORT_PRIVATE=1 ;;
+      --cleanup-rolledback) CLEANUP_ROLLEDBACK=1 ;;
       --help|-h) usage; return 0 ;;
       *) usage; fail; return 1 ;;
     esac
@@ -1109,6 +1245,7 @@ main() {
   valid_k8s_run_id "$K8S_RUN_ID" || { printf '%s\n' "invalid Kubernetes resource RUN_ID" >&2; fail; return 1; }
   valid_restore_stream_attempts "$RESTORE_STREAM_ATTEMPTS" || { printf '%s\n' "invalid Portal restore stream attempt count" >&2; fail; return 1; }
   if [ "$CHECK_NODEPORT_PRIVATE" -eq 1 ] && { [ "$MIGRATE_COMPOSE_STATE" -eq 1 ] || [ "$GO" -eq 1 ] || [ "$SWITCH_CADDY" -eq 1 ] || [ "$ROLLBACK_CADDY" -eq 1 ]; }; then usage; fail; return 1; fi
+  if [ "$CLEANUP_ROLLEDBACK" -eq 1 ] && { [ "$CHECK_NODEPORT_PRIVATE" -eq 1 ] || [ "$MIGRATE_COMPOSE_STATE" -eq 1 ] || [ "$GO" -eq 1 ] || [ "$SWITCH_CADDY" -eq 1 ] || [ "$ROLLBACK_CADDY" -eq 1 ]; }; then usage; fail; return 1; fi
   if [ "$MIGRATE_COMPOSE_STATE" -eq 1 ] && { [ "$GO" -eq 1 ] || [ "$SWITCH_CADDY" -eq 1 ] || [ "$ROLLBACK_CADDY" -eq 1 ]; }; then usage; fail; return 1; fi
   if [ "$ROLLBACK_CADDY" -eq 1 ] && [ "$SWITCH_CADDY" -eq 1 ]; then usage; fail; return 1; fi
   if [ "$GO" -eq 1 ] && [ "$SWITCH_CADDY" -eq 1 ]; then usage; fail; return 1; fi
@@ -1117,6 +1254,7 @@ main() {
     printf '%s\n' "portal_nodeport_private=FAIL" >&2
     return 1
   fi
+  if [ "$CLEANUP_ROLLEDBACK" -eq 1 ]; then cleanup_rolledback_resources; return $?; fi
   if [ "$MIGRATE_COMPOSE_STATE" -eq 1 ]; then migrate_compose_state; return $?; fi
   if [ "$ROLLBACK_CADDY" -eq 1 ]; then rollback_caddy; return $?; fi
   if [ "$SWITCH_CADDY" -eq 1 ]; then switch_prepared_caddy; return $?; fi

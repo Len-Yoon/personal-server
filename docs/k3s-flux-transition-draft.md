@@ -147,6 +147,12 @@ bash infra/k8s/tools/portal-cutover.sh --switch-caddy
 bash infra/k8s/tools/portal-cutover.sh --rollback-caddy
 ```
 
+롤백이 완료되어 Compose Portal이 현재 writer로 확인되었지만 이전 K3s 시도의 Portal PVC가 남은 경우, 별도 정리 명령을 사용한다. 이 명령은 `portal-runtime.mode=compose`, Compose Portal의 running/healthy 상태, K3s Portal writer replica 0개와 실행 Pod 부재를 먼저 확인한다. 또한 이름이 고정된 Portal PVC 두 개만 대상으로 하며, PVC를 참조하는 Pod가 하나라도 남아 있으면 삭제하지 않고 실패한다. Deployment·Service·Secret·Compose bridge 리소스의 삭제 및 부재 검증이 끝난 뒤에만 PVC를 삭제한다. Compose 컨테이너와 로컬 `data/`는 이 명령으로 변경되지 않는다.
+
+```bash
+bash infra/k8s/tools/portal-cutover.sh --cleanup-rolledback
+```
+
 이 절차는 실제 N100에서 승인된 유지보수 창과 backup 복원 증적이 없으면 실행하지 않는다. `PORTAL_FILES_CAPACITY`, `PORTAL_IMAGE_REF`, `PORTAL_SOURCE_DIR`, `PORTAL_ENV_FILE`은 실행 전 실제 값 확인이 필요하다.
 
 #### Portal backup evidence 계약
