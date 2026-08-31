@@ -6,7 +6,8 @@ set -u -o pipefail
 # result and invokes abort_cutover explicitly so a partial operation is visible.
 
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-30}"
-RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+RUN_ID="${RUN_ID:-$(date -u +%Y%m%dt%H%M%Sz)-$$}"
+K8S_RUN_ID="$RUN_ID"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd)
 ENV_FILE="${PORTAL_ENV_FILE:-$REPO_ROOT/.env}"
@@ -27,9 +28,9 @@ BRIDGE_GATEWAY="${DOCKER_BRIDGE_GATEWAY:-}"
 BRIDGE_COMPOSE_FILE="${PORTAL_BRIDGE_COMPOSE_FILE:-$REPO_ROOT/docker-compose.portal-bridge.yml}"
 RUNTIME_MARKER="${PORTAL_RUNTIME_MARKER:-$REPO_ROOT/data/portal-runtime.mode}"
 NODE_PORT=30080
-COPY_POD="portal-web-files-copy-${RUN_ID}"
-FILES_RESTORE_POD="portal-web-files-restore-${RUN_ID}"
-STATE_RESTORE_POD="portal-web-state-restore-${RUN_ID}"
+COPY_POD="portal-web-files-copy-${K8S_RUN_ID}"
+FILES_RESTORE_POD="portal-web-files-restore-${K8S_RUN_ID}"
+STATE_RESTORE_POD="portal-web-state-restore-${K8S_RUN_ID}"
 TMP_ENV=""
 TMP_YAML=""
 GO=0
@@ -52,8 +53,14 @@ run_timeout() { timeout "${1}s" "${@:2}"; }
 fail() { printf '%s\n' "portal_cutover=FAIL" >&2; return 1; }
 valid_run_id() {
   case "$1" in
-    ''|*[!a-zA-Z0-9-]*) return 1 ;;
+    ''|*[!a-z0-9-]*) return 1 ;;
     *) return 0 ;;
+  esac
+}
+valid_k8s_run_id() {
+  case "$1" in
+    ''|*[!a-z0-9-]*|-*|*-) return 1 ;;
+    *) [ "${#1}" -le 36 ] ;;
   esac
 }
 valid_image_ref() {
@@ -1076,6 +1083,7 @@ main() {
     shift
   done
   valid_run_id "$RUN_ID" || { printf '%s\n' "invalid RUN_ID" >&2; fail; return 1; }
+  valid_k8s_run_id "$K8S_RUN_ID" || { printf '%s\n' "invalid Kubernetes resource RUN_ID" >&2; fail; return 1; }
   if [ "$CHECK_NODEPORT_PRIVATE" -eq 1 ] && { [ "$MIGRATE_COMPOSE_STATE" -eq 1 ] || [ "$GO" -eq 1 ] || [ "$SWITCH_CADDY" -eq 1 ] || [ "$ROLLBACK_CADDY" -eq 1 ]; }; then usage; fail; return 1; fi
   if [ "$MIGRATE_COMPOSE_STATE" -eq 1 ] && { [ "$GO" -eq 1 ] || [ "$SWITCH_CADDY" -eq 1 ] || [ "$ROLLBACK_CADDY" -eq 1 ]; }; then usage; fail; return 1; fi
   if [ "$ROLLBACK_CADDY" -eq 1 ] && [ "$SWITCH_CADDY" -eq 1 ]; then usage; fail; return 1; fi
