@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 
-ALLOWED_SERVICES = frozenset({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
+DEFAULT_ALLOWED_SERVICES = frozenset({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
+# Kept for existing callers; all operations read the configured allowlist again
+# so an explicit cutover runtime contract cannot restart a K3s-owned Portal.
+ALLOWED_SERVICES = DEFAULT_ALLOWED_SERVICES
 MAX_LOG_BYTES = 32 * 1024
+
+
+def allowed_services() -> frozenset[str]:
+    configured = os.getenv("HOMEOPS_DOCKER_MANAGED_SERVICES", "").strip()
+    if not configured:
+        return DEFAULT_ALLOWED_SERVICES
+    requested = frozenset(item.strip() for item in configured.split(",") if item.strip())
+    return requested & DEFAULT_ALLOWED_SERVICES
 
 
 def collect_diagnostics(
@@ -23,7 +35,7 @@ def collect_diagnostics(
 
 def collect_all_diagnostics(client: Any | None = None) -> list[dict[str, object]]:
     diagnostics: list[dict[str, object]] = []
-    for service in sorted(ALLOWED_SERVICES):
+    for service in sorted(allowed_services()):
         try:
             diagnostics.append(
                 collect_diagnostics(service, client=client, include_runtime_evidence=False)
@@ -44,7 +56,10 @@ def restart_service(service: str, client: Any | None = None) -> dict[str, object
 
 
 def restart_all_services(client: Any | None = None) -> list[dict[str, object]]:
-    services = sorted(ALLOWED_SERVICES - {"portal-web", "caddy", "homeops-executor"}) + ["portal-web", "caddy", "homeops-executor"]
+    managed = allowed_services()
+    services = sorted(managed - {"portal-web", "caddy", "homeops-executor"}) + [
+        service for service in ("portal-web", "caddy", "homeops-executor") if service in managed
+    ]
     results: list[dict[str, object]] = []
     for service in services:
         try:
@@ -81,7 +96,7 @@ def _docker_client() -> Any:
 
 
 def _require_allowed_service(service: str) -> None:
-    if service not in ALLOWED_SERVICES:
+    if service not in allowed_services():
         raise ValueError("service_not_allowed")
 
 

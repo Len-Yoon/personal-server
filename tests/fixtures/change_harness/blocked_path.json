@@ -1,5 +1,5 @@
 {
-  "paths": ["scripts/deploy-n100.sh"],
+  "paths": ["scripts/maintenance.py"],
   "check_results": [],
   "expected_status": "blocked",
   "expected_exit_code": 2,
@@ -9,7 +9,7 @@
     "required_checks": [],
     "missing_checks": [],
     "failed_checks": [],
-    "blocked_files": ["scripts/deploy-n100.sh"],
+    "blocked_files": ["scripts/maintenance.py"],
     "unclassified_files": []
   }
 }

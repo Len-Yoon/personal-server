@@ -34,11 +34,77 @@ wait_for_docker() {
   return 1
 }
 
+require_portal_state_ready() {
+  local state_database="$PROJECT_ROOT/data/portal-web-state/homeops.sqlite3"
+  if [ ! -f "$state_database" ] || ! python3 -c 'import sqlite3,sys; connection=sqlite3.connect(sys.argv[1]); result=connection.execute("PRAGMA quick_check").fetchone()[0]; connection.close(); sys.exit(result != "ok")' "$state_database" >/dev/null 2>&1; then
+    echo "Portal state migration is required before Compose Portal can start" >&2
+    return 1
+  fi
+}
+
+PORTAL_RUNTIME_MARKER="${PORTAL_RUNTIME_MARKER:-$PROJECT_ROOT/data/portal-runtime.mode}"
+PORTAL_RUNTIME_MODE="compose"
+PORTAL_BRIDGE_COMPOSE_FILE="${PORTAL_BRIDGE_COMPOSE_FILE:-$PROJECT_ROOT/docker-compose.portal-bridge.yml}"
+
+load_portal_runtime_mode() {
+  local mode
+  if [ ! -f "$PORTAL_RUNTIME_MARKER" ]; then
+    return 0
+  fi
+  mode=$(tr -d '[:space:]' < "$PORTAL_RUNTIME_MARKER")
+  case "$mode" in
+    compose|cutover|k3s) PORTAL_RUNTIME_MODE="$mode" ;;
+    *)
+      echo "Invalid portal runtime marker; refusing to select a Portal writer" >&2
+      return 1
+      ;;
+  esac
+}
+
+validate_docker_bridge_gateway() {
+  local actual_gateway
+  [ -f "$PORTAL_BRIDGE_COMPOSE_FILE" ] || {
+    echo "Portal bridge Compose override is missing: $PORTAL_BRIDGE_COMPOSE_FILE" >&2
+    return 1
+  }
+  actual_gateway=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}') || return 1
+  python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' "$actual_gateway" >/dev/null 2>&1 || {
+    echo "Docker bridge gateway is not a valid IPv4 address" >&2
+    return 1
+  }
+  if [ -n "${DOCKER_BRIDGE_GATEWAY:-}" ] && [ "$DOCKER_BRIDGE_GATEWAY" != "$actual_gateway" ]; then
+    echo "Configured Docker bridge gateway does not match the active bridge network" >&2
+    return 1
+  fi
+  export DOCKER_BRIDGE_GATEWAY="$actual_gateway"
+}
+
+deploy_runtime_services() {
+  local bridge_compose=(docker compose -f docker-compose.yml -f docker-compose.n100.yml -f "$PORTAL_BRIDGE_COMPOSE_FILE")
+  local bridge_services="homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker"
+
+  case "$PORTAL_RUNTIME_MODE" in
+    compose)
+      require_portal_state_ready
+      docker compose -f docker-compose.yml -f docker-compose.n100.yml config --quiet
+      docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker caddy
+      ;;
+    cutover|k3s)
+      validate_docker_bridge_gateway
+      export HOMEOPS_DOCKER_MANAGED_SERVICES="system-agent,crawler-worker,youtube-memo,book-memo,caddy,homeops-executor"
+      export EXPECTED_CONTAINERS="crawler-worker,youtube-memo,book-memo,system-agent"
+      "${bridge_compose[@]}" config --quiet
+      "${bridge_compose[@]}" up -d --build --no-deps --force-recreate $bridge_services
+      "${bridge_compose[@]}" up -d --no-deps caddy
+      ;;
+  esac
+}
+
 wait_for_docker
 docker compose version >/dev/null
 
 git fetch --prune origin
 git reset --hard origin/main
-docker compose -f docker-compose.yml -f docker-compose.n100.yml config --quiet
-docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker caddy
+load_portal_runtime_mode
+deploy_runtime_services
 docker compose -f docker-compose.yml -f docker-compose.n100.yml ps

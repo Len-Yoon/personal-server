@@ -1,3 +1,6 @@
+import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -51,6 +54,58 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("Start-Process -FilePath 'wsl.exe'", SCRIPT)
         self.assertIn("'cloudflared', 'tunnel', 'run'", SCRIPT)
         self.assertNotIn("nohup cloudflared tunnel run", WSL_SCRIPT)
+
+    def test_k3s_and_cutover_validate_and_preserve_the_opt_in_bridge_override(self):
+        """Recovery must not recreate dependencies without their K3s bridge ports."""
+        self.assertIn("validate_docker_bridge_gateway", WSL_SCRIPT)
+        self.assertIn("DOCKER_BRIDGE_GATEWAY", WSL_SCRIPT)
+        self.assertIn("docker network inspect bridge", WSL_SCRIPT)
+        self.assertIn("docker-compose.portal-bridge.yml", WSL_SCRIPT)
+        self.assertIn("-f \"$PORTAL_BRIDGE_COMPOSE_FILE\"", WSL_SCRIPT)
+        self.assertIn("--no-deps --force-recreate $compose_services", WSL_SCRIPT)
+
+    def test_compose_mode_does_not_require_or_export_the_bridge_override(self):
+        """Ordinary Compose recovery stays independent of the cutover-only gateway."""
+        runtime = WSL_SCRIPT[WSL_SCRIPT.index("start_runtime_services() {") :]
+        compose_body = runtime[runtime.index("compose)") : runtime.index("cutover)")]
+        self.assertNotIn("PORTAL_BRIDGE_COMPOSE_FILE", compose_body)
+        self.assertNotIn("DOCKER_BRIDGE_GATEWAY", compose_body)
+
+    def test_k3s_bootstrap_recreates_dependencies_with_validated_bridge_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            data.mkdir()
+            (data / "portal-runtime.mode").write_text("k3s\n", encoding="utf-8")
+            bridge = root / "docker-compose.portal-bridge.yml"
+            bridge.write_text("services: {}\n", encoding="utf-8")
+            calls = root / "calls"
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            (fake_bin / "docker").write_text(
+                "#!/bin/sh\n"
+                f"printf '%s|%s\\n' \"${{DOCKER_BRIDGE_GATEWAY:-unset}}\" \"$*\" >> '{calls}'\n"
+                "if [ \"$1\" = network ] && [ \"$2\" = inspect ]; then echo 172.17.0.1; fi\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "curl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            for tool in fake_bin.iterdir():
+                tool.chmod(0o755)
+
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "windows-bootstrap.sh"), str(root)],
+                env={**os.environ, "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"], "HOME": str(root)},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            recorded = calls.read_text(encoding="utf-8")
+            self.assertIn(f"-f {bridge}", recorded)
+            self.assertIn("172.17.0.1|compose", recorded)
+            self.assertIn("up -d --no-deps caddy", recorded)
+            self.assertNotIn("portal-web", recorded)
 
 
 if __name__ == "__main__":
