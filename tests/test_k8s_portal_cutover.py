@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -354,6 +355,82 @@ class PortalCutoverContractTest(unittest.TestCase):
         self.assertIn('get pvc "$pvc_name"', restore)
         self.assertIn('restore_pvc_to_local "$STATE_PVC_NAME"', restore)
         self.assertNotIn('[ "$STATE_PVC_TARGET" -eq 1 ] || return 1', restore)
+
+    def test_pvc_restore_retries_only_transient_exec_stream_failures(self):
+        """A closed kubectl exec stream must not discard an otherwise intact PVC."""
+        text = SCRIPT.read_text(encoding="utf-8")
+        restore = text[text.index("restore_pvc_to_local() {") : text.index("assert_namespace() {")]
+
+        self.assertIn('RESTORE_STREAM_ATTEMPTS="${PORTAL_RESTORE_STREAM_ATTEMPTS:-3}"', text)
+        self.assertIn('for attempt in $(seq 1 "$RESTORE_STREAM_ATTEMPTS")', restore)
+        self.assertIn('kubectl -n "$NAMESPACE" exec "$pod_name" -- tar', restore)
+        self.assertIn('rm -rf -- "$temporary"', restore)
+        self.assertIn('sleep 1', restore)
+        self.assertLess(restore.index('for attempt in $(seq 1 "$RESTORE_STREAM_ATTEMPTS")'), restore.index('local_digest='))
+
+    def test_pvc_restore_retries_a_stream_failure_without_replacing_local_data_early(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / "fixture"
+            fixture.mkdir()
+            (fixture / "copied.txt").write_text("from-pvc", encoding="utf-8")
+            destination = root / "destination"
+            destination.mkdir()
+            (destination / "before.txt").write_text("local-before", encoding="utf-8")
+            calls = root / "calls"
+            count = root / "tar-count"
+            fake_timeout = root / "timeout"
+            fake_timeout.write_text("#!/bin/sh\nshift\nexec \"$@\"\n", encoding="utf-8")
+            fake_timeout.chmod(0o755)
+            fake_sudo = root / "sudo"
+            fake_sudo.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"$*\" >> '{calls}'\n"
+                "case \"$*\" in\n"
+                "  *'get pvc'*) exit 0 ;;\n"
+                "  *' apply -f -'*) cat >/dev/null; exit 0 ;;\n"
+                "  *'wait --for=condition=Ready'*) exit 0 ;;\n"
+                "  *'exec restore-pod -- id -u'*) printf '0\\n'; exit 0 ;;\n"
+                "  *'exec restore-pod -- id -g'*) printf '0\\n'; exit 0 ;;\n"
+                "  *'exec restore-pod -- tar -C /data/files -cf - .'*)\n"
+                f"    count=$(cat '{count}' 2>/dev/null || printf '0')\n"
+                "    count=$((count + 1)); printf '%s\\n' \"$count\" > '" + str(count) + "'\n"
+                "    if [ \"$count\" = 1 ]; then exit 1; fi\n"
+                "    test -f \"$DESTINATION/before.txt\" || exit 97\n"
+                "    exec \"$REAL_TAR\" -C \"$FIXTURE\" -cf - . ;;\n"
+                "  *'exec restore-pod -- sh -c'*)\n"
+                "    (cd \"$FIXTURE\" && find . -type f -print0 | sort -z | xargs -0 sha256sum); exit 0 ;;\n"
+                "  *'delete pod'*) exit 0 ;;\n"
+                "esac\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_sudo.chmod(0o755)
+            library = root / "portal-cutover-lib.sh"
+            library.write_text(
+                SCRIPT.read_text(encoding="utf-8").rsplit('\nmain "$@"', 1)[0],
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["/bin/bash", "-c", f'. "{library}"; restore_pvc_to_local demo-pvc /data/files "{destination}" restore-pod ""'],
+                env={
+                    **os.environ,
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                    "DESTINATION": str(destination),
+                    "FIXTURE": str(fixture),
+                    "REAL_TAR": shutil.which("tar") or "tar",
+                    "PORTAL_RESTORE_STREAM_ATTEMPTS": "2",
+                    "RUN_ID": "restore-retry",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(count.read_text(encoding="utf-8").strip(), "2")
+            self.assertEqual((destination / "copied.txt").read_text(encoding="utf-8"), "from-pvc")
+            self.assertFalse((destination / "before.txt").exists())
 
     def test_rollback_restores_both_pvcs_before_compose_and_only_then_deletes_them(self):
         """Rollback preserves the only current copies until both local restores verify."""

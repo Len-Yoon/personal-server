@@ -6,6 +6,7 @@ set -u -o pipefail
 # result and invokes abort_cutover explicitly so a partial operation is visible.
 
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-30}"
+RESTORE_STREAM_ATTEMPTS="${PORTAL_RESTORE_STREAM_ATTEMPTS:-3}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dt%H%M%Sz)-$$}"
 K8S_RUN_ID="$RUN_ID"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -74,6 +75,12 @@ valid_capacity() {
     ''|*[!0-9MGTi]*) return 1 ;;
     *Mi|*Gi|*Ti) return 0 ;;
     *) return 1 ;;
+  esac
+}
+valid_restore_stream_attempts() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *) [ "$1" -ge 1 ] && [ "$1" -le 3 ] ;;
   esac
 }
 valid_ipv4() {
@@ -333,7 +340,7 @@ migrate_compose_state() {
 }
 
 restore_pvc_to_local() {
-  local pvc_name mount_path destination pod_name required_file parent temporary backup remote_digest local_digest
+  local pvc_name mount_path destination pod_name required_file parent temporary backup remote_digest local_digest attempt restored
   pvc_name="$1"
   mount_path="$2"
   destination="$3"
@@ -344,8 +351,6 @@ restore_pvc_to_local() {
   run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" get pvc "$pvc_name" >/dev/null 2>&1 || return 1
   parent=$(dirname -- "$destination")
   mkdir -p -- "$parent" || return 1
-  temporary=$(mktemp -d "$parent/.portal-pvc.restore.${RUN_ID}.XXXXXX") || return 1
-  chmod 700 "$temporary" || { rm -rf -- "$temporary"; return 1; }
   if ! run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" apply -f - >/dev/null <<YAML
 apiVersion: v1
 kind: Pod
@@ -378,19 +383,33 @@ YAML
     rm -rf -- "$temporary"
     return 1
   fi
-  remote_digest=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" exec "$pod_name" -- sh -c "cd '$mount_path' && find . -type f -print0 | sort -z | xargs -0 sha256sum" | sha256sum | awk '{print $1}') || remote_digest=""
-  if [ -z "$remote_digest" ] || ! run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" exec "$pod_name" -- tar -C "$mount_path" -cf - . | tar -C "$temporary" -xf -; then
-    run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" delete pod "$pod_name" --ignore-not-found --wait=true >/dev/null 2>&1 || true
-    rm -rf -- "$temporary"
-    return 1
-  fi
-  local_digest=$(tree_digest "$temporary") || local_digest=""
-  if [ "$remote_digest" != "$local_digest" ] || { [ -n "$required_file" ] && [ ! -f "$temporary/$required_file" ]; }; then
-    run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" delete pod "$pod_name" --ignore-not-found --wait=true >/dev/null 2>&1 || true
-    rm -rf -- "$temporary"
-    return 1
-  fi
-  if [ "$required_file" = "homeops.sqlite3" ] && ! assert_sqlite_quick_check "$temporary/$required_file"; then
+  restored=0
+  temporary=""
+  for attempt in $(seq 1 "$RESTORE_STREAM_ATTEMPTS"); do
+    temporary=$(mktemp -d "$parent/.portal-pvc.restore.${RUN_ID}.XXXXXX") || break
+    chmod 700 "$temporary" || { rm -rf -- "$temporary"; temporary=""; break; }
+    remote_digest=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" exec "$pod_name" -- sh -c "cd '$mount_path' && find . -type f -print0 | sort -z | xargs -0 sha256sum" | sha256sum | awk '{print $1}') || remote_digest=""
+    if [ -z "$remote_digest" ] || ! run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" exec "$pod_name" -- tar -C "$mount_path" -cf - . | tar -C "$temporary" -xf -; then
+      rm -rf -- "$temporary"
+      temporary=""
+      [ "$attempt" -lt "$RESTORE_STREAM_ATTEMPTS" ] && sleep 1
+      continue
+    fi
+    local_digest=$(tree_digest "$temporary") || local_digest=""
+    if [ "$remote_digest" != "$local_digest" ] || { [ -n "$required_file" ] && [ ! -f "$temporary/$required_file" ]; }; then
+      run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" delete pod "$pod_name" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+      rm -rf -- "$temporary"
+      return 1
+    fi
+    if [ "$required_file" = "homeops.sqlite3" ] && ! assert_sqlite_quick_check "$temporary/$required_file"; then
+      run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" delete pod "$pod_name" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+      rm -rf -- "$temporary"
+      return 1
+    fi
+    restored=1
+    break
+  done
+  if [ "$restored" -ne 1 ]; then
     run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" delete pod "$pod_name" --ignore-not-found --wait=true >/dev/null 2>&1 || true
     rm -rf -- "$temporary"
     return 1
@@ -1088,6 +1107,7 @@ main() {
   done
   valid_run_id "$RUN_ID" || { printf '%s\n' "invalid RUN_ID" >&2; fail; return 1; }
   valid_k8s_run_id "$K8S_RUN_ID" || { printf '%s\n' "invalid Kubernetes resource RUN_ID" >&2; fail; return 1; }
+  valid_restore_stream_attempts "$RESTORE_STREAM_ATTEMPTS" || { printf '%s\n' "invalid Portal restore stream attempt count" >&2; fail; return 1; }
   if [ "$CHECK_NODEPORT_PRIVATE" -eq 1 ] && { [ "$MIGRATE_COMPOSE_STATE" -eq 1 ] || [ "$GO" -eq 1 ] || [ "$SWITCH_CADDY" -eq 1 ] || [ "$ROLLBACK_CADDY" -eq 1 ]; }; then usage; fail; return 1; fi
   if [ "$MIGRATE_COMPOSE_STATE" -eq 1 ] && { [ "$GO" -eq 1 ] || [ "$SWITCH_CADDY" -eq 1 ] || [ "$ROLLBACK_CADDY" -eq 1 ]; }; then usage; fail; return 1; fi
   if [ "$ROLLBACK_CADDY" -eq 1 ] && [ "$SWITCH_CADDY" -eq 1 ]; then usage; fail; return 1; fi
