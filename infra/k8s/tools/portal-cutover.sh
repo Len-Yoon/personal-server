@@ -419,7 +419,11 @@ assert_namespace() {
 }
 
 stop_k3s_writer() {
-  run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" scale deployment/portal-web --replicas=0 --ignore-not-found >/dev/null 2>&1 || return 1
+  local deployment
+  deployment=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" get deployment portal-web --ignore-not-found -o name) || return 1
+  if [ -n "$deployment" ]; then
+    run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" scale deployment/portal-web --replicas=0 >/dev/null 2>&1 || return 1
+  fi
   wait_for_k3s_writer_absent
 }
 
