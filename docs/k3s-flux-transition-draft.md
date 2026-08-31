@@ -169,6 +169,14 @@ backup_id=opaque-safe-id
 
 선택 키는 암호문 artifact의 `artifact_digest=sha256:<64개의 소문자 hex>`, `restore_check=sqlite_quick_check`, `restore_path_check=success`뿐이다. 원본·복원 절대 경로, secret, token, 개인키는 증적에 기록하지 않는다. backup 또는 복원 절차가 실패하면 기존 증적을 갱신하지 않는다.
 
+N100에서는 `infra/k8s/tools/portal-backup-verify.sh`만 증적을 생성한다. 이 도구는 `data/files`와 `data/portal-web-state`를 stage한 뒤 age 공개 수신자 키로 암호화하고, `gdrive:PersonalServer-encrypted-backups`에 업로드한다. 이어서 Drive에서 별도 임시 경로로 다시 내려받아 복호화하며, 두 데이터 트리의 SHA-256 manifest와 복원된 HomeOps SQLite `quick_check`가 모두 통과할 때만 `.portal-backup-verified`를 권한 `0600`으로 원자 교체한다. age 개인키·rclone 설정·토큰은 명령 인수와 Git에 넣지 않는다.
+
+```bash
+bash infra/k8s/tools/portal-backup-verify.sh
+```
+
+실행 시작 시 기존 증적은 무효화한다. 따라서 실패하면 `portal_backup_verify=FAIL`만 출력되고 cutover는 차단된다. 성공한 뒤에만 `portal-cutover.sh --go`의 backup 게이트를 통과할 수 있다.
+
 ### Portal state and Compose bridge prerequisites
 
 Portal 상태는 `data/files`와 분리하여 `data/portal-web-state`에 유지한다. 이 경로에는 `homeops.sqlite3`, 보안 이벤트 로그, 로그인 rate-limit 상태를 포함하며 Compose와 K3s Portal 모두 `/var/lib/portal`로만 연결한다. 실제 cutover는 파일·상태 각각의 RWO `local-path` PVC에 복사한 뒤 SHA-256 manifest와 HomeOps SQLite `quick_check`가 모두 일치할 때만 계속한다. 기존 `data/logs`에서 전용 상태 경로로의 최초 분리·복원 검증은 별도 유지보수 창에서 완료해야 하며, 빈 상태 경로로 cutover를 시작하지 않는다.
