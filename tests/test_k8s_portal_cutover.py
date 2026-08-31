@@ -213,6 +213,16 @@ class PortalCutoverContractTest(unittest.TestCase):
             prepare.index("stop portal-web"),
         )
 
+    def test_bridge_preflight_retries_health_checks_until_services_are_ready(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        preflight = text[text.index("preflight_bridge() {") : text.index("secret_allowlist() {")]
+        self.assertIn('deadline=$((SECONDS + TIMEOUT_SECONDS))', preflight)
+        self.assertIn('while [ "$SECONDS" -lt "$deadline" ]', preflight)
+        self.assertIn('remaining=$((deadline - SECONDS))', preflight)
+        self.assertIn('run_timeout "$request_timeout" curl', preflight)
+        self.assertIn("sleep 1", preflight)
+        self.assertIn("bridge endpoint did not become ready", preflight)
+
     def test_compose_state_migration_requires_an_explicit_command(self):
         """A deployment must not silently switch Portal to an empty state mount."""
         text = SCRIPT.read_text(encoding="utf-8")
