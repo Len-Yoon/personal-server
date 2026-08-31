@@ -55,6 +55,13 @@ class PortalCutoverContractTest(unittest.TestCase):
         self.assertNotIn("kubectl create secret generic portal-web-runtime --from-literal", text)
         self.assertNotRegex(text, r"trap[^\n]+EXIT")
 
+    def test_secret_allowlist_requires_only_portal_core_keys(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        allowlist = text[text.index("secret_allowlist() {") : text.index("tree_digest() {")]
+        self.assertIn('required_keys="DELETE_PASSWORD FILE_MANAGER_PASSWORD ADMIN_STATUS_PASSWORD FILE_MANAGER_ACCESS_PASSWORD"', allowlist)
+        self.assertIn('optional_keys="PORTFOLIO_ADMIN_PASSWORD HOMEOPS_EXECUTOR_SHARED_SECRET HOMEOPS_SCHEDULER_SECRET HOMEOPS_TELEGRAM_BOT_TOKEN HOMEOPS_TELEGRAM_CHAT_ID"', allowlist)
+        self.assertLess(allowlist.index('if (key in found)'), allowlist.index('if (value == "")'))
+
     def test_default_mode_requires_go_without_invoking_tools(self):
         with tempfile.TemporaryDirectory() as directory:
             calls = Path(directory) / "calls"

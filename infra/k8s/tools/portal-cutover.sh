@@ -171,10 +171,14 @@ preflight_bridge() {
 
 secret_allowlist() {
   local output="$1"
-  awk -v out="$output" '
+  local required_keys="DELETE_PASSWORD FILE_MANAGER_PASSWORD ADMIN_STATUS_PASSWORD FILE_MANAGER_ACCESS_PASSWORD"
+  local optional_keys="PORTFOLIO_ADMIN_PASSWORD HOMEOPS_EXECUTOR_SHARED_SECRET HOMEOPS_SCHEDULER_SECRET HOMEOPS_TELEGRAM_BOT_TOKEN HOMEOPS_TELEGRAM_CHAT_ID"
+  awk -v out="$output" -v required="$required_keys" -v optional="$optional_keys" '
     BEGIN {
-      split("DELETE_PASSWORD FILE_MANAGER_PASSWORD ADMIN_STATUS_PASSWORD FILE_MANAGER_ACCESS_PASSWORD PORTFOLIO_ADMIN_PASSWORD HOMEOPS_EXECUTOR_SHARED_SECRET HOMEOPS_SCHEDULER_SECRET HOMEOPS_TELEGRAM_BOT_TOKEN HOMEOPS_TELEGRAM_CHAT_ID", keys, " ")
-      for (i in keys) wanted[keys[i]]=1
+      split(required, required_list, " ")
+      for (i in required_list) { wanted[required_list[i]]=1; required_key[required_list[i]]=1 }
+      split(optional, optional_list, " ")
+      for (i in optional_list) wanted[optional_list[i]]=1
     }
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
     {
@@ -186,12 +190,12 @@ secret_allowlist() {
       if (!(key in wanted)) next
       value=substr($0, equal+1)
       sub(/^[[:space:]]+/, "", value)
-      if (value == "") { bad=1; next }
       if (key in found) { bad=1; next }
-      print key "=" value >> out
       found[key]=1
+      if (value == "") { if (key in required_key) bad=1; next }
+      print key "=" value >> out
     }
-    END { for (key in wanted) if (!(key in found)) bad=1; close(out); exit bad }
+    END { for (key in required_key) if (!(key in found)) bad=1; close(out); exit bad }
   ' "$ENV_FILE"
 }
 
