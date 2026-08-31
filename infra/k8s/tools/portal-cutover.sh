@@ -44,6 +44,7 @@ SECRET_TARGET=0
 IMAGE_TARGET=0
 STATE_PVC_TARGET=0
 FILES_PVC_TARGET=0
+K3S_WRITER_STARTED=0
 MIGRATION_FAILED=0
 EXECUTOR_EXCLUDED=0
 
@@ -435,10 +436,10 @@ remove_partial_resources() {
   if [ "$K3S_TARGET" -eq 1 ]; then
     if stop_k3s_writer; then k3s_stopped=1; else ok=1; fi
     if [ "$FILES_PVC_TARGET" -eq 1 ] && [ "$k3s_stopped" -eq 1 ]; then
-      if restore_files_from_pvc; then files_restored=1; else ok=1; fi
+      if [ "$K3S_WRITER_STARTED" -eq 0 ] || restore_files_from_pvc; then files_restored=1; else ok=1; fi
     fi
     if [ "$STATE_PVC_TARGET" -eq 1 ] && [ "$k3s_stopped" -eq 1 ]; then
-      if restore_state_from_pvc; then state_restored=1; else ok=1; fi
+      if [ "$K3S_WRITER_STARTED" -eq 0 ] || restore_state_from_pvc; then state_restored=1; else ok=1; fi
     fi
     if { [ "$FILES_PVC_TARGET" -eq 0 ] || [ "$files_restored" -eq 1 ]; } && { [ "$STATE_PVC_TARGET" -eq 0 ] || [ "$state_restored" -eq 1 ]; }; then restore_ready=1; fi
     run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" delete pod "$COPY_POD" --ignore-not-found --wait=true >/dev/null 2>&1 || ok=1
@@ -738,7 +739,6 @@ spec:
       storage: $PVC_CAPACITY
 YAML
   then abort_cutover; return 1; fi
-  if ! run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Bound "pvc/$PVC_NAME" --timeout=120s >/dev/null; then abort_cutover; return 1; fi
   FILES_PVC_TARGET=1
   if ! run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" apply -f - >/dev/null <<YAML
 apiVersion: v1
@@ -754,7 +754,6 @@ spec:
       storage: $STATE_PVC_CAPACITY
 YAML
   then abort_cutover; return 1; fi
-  if ! run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Bound "pvc/$STATE_PVC_NAME" --timeout=120s >/dev/null; then abort_cutover; return 1; fi
   STATE_PVC_TARGET=1
   if ! run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" apply -f - >/dev/null <<YAML
 apiVersion: v1
@@ -1030,6 +1029,7 @@ spec:
             claimName: $STATE_PVC_NAME
 YAML
   then abort_cutover; return 1; fi
+  K3S_WRITER_STARTED=1
   if ! run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" apply -f - >/dev/null <<YAML
 apiVersion: v1
 kind: Service
