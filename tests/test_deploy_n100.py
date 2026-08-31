@@ -71,38 +71,20 @@ class DeployN100Tests(unittest.TestCase):
     def test_deploy_workflow_checks_services_after_deployment(self):
         health_check = WORKFLOW.split("- name: Verify deployed service health", maxsplit=1)[1]
         self.assertIn("Verify deployed service health", WORKFLOW)
-        self.assertIn("compose() { docker compose -f docker-compose.yml -f docker-compose.n100.yml $@; }", WORKFLOW)
-        self.assertIn("http://127.0.0.1:8000/health", WORKFLOW)
-        self.assertIn("http://127.0.0.1:18010/health", WORKFLOW)
-        self.assertIn("http://127.0.0.1:8001/health", WORKFLOW)
-        self.assertIn("http://127.0.0.1:8002/health", WORKFLOW)
-        self.assertIn("http://127.0.0.1:8003/health", WORKFLOW)
-        self.assertIn("http://127.0.0.1:8015/health", WORKFLOW)
-        self.assertIn("homeops-executor", WORKFLOW)
-        self.assertIn("--retry-all", health_check)
-        self.assertIn("--retry-connrefused", health_check)
-        self.assertNotIn("$service", health_check)
-        self.assertNotIn("$url", health_check)
-        self.assertIn("for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18", health_check)
-        self.assertIn("sleep 5", health_check)
-        for service in (
-            "portal-web",
-            "system-agent",
-            "crawler-worker",
-            "youtube-memo",
-            "book-memo",
-            "caddy",
-            "homeops-executor",
-            "car-care-worker",
-        ):
-            self.assertIn(f"grep -Fx -- {service}", health_check)
+        self.assertIn(
+            "bash ./scripts/verify-n100-deployment-health.sh",
+            health_check,
+        )
+        self.assertNotIn("compose() {", health_check)
 
     def test_deploy_health_check_is_portal_runtime_marker_aware(self):
         """K3s/cutover must not be judged as a missing Compose Portal writer."""
-        health_check = WORKFLOW.split("- name: Verify deployed service health", maxsplit=1)[1]
+        health_check = (ROOT / "scripts" / "verify-n100-deployment-health.sh").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("portal_runtime_marker=data/portal-runtime.mode", health_check)
-        self.assertIn("case $portal_runtime_mode in", health_check)
+        self.assertIn('case "$portal_runtime_mode" in', health_check)
         self.assertIn("compose)", health_check)
         self.assertIn("k3s)", health_check)
         self.assertIn("cutover)", health_check)
@@ -118,6 +100,11 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("grep -Fx -- portal-web", cutover_case)
         self.assertNotIn("http://127.0.0.1:8000/health", k3s_case)
         self.assertNotIn("http://127.0.0.1:8000/health", cutover_case)
+        self.assertIn("for service in", health_check)
+        self.assertIn("for url in", health_check)
+        self.assertIn("seq 1 18", health_check)
+        self.assertIn("sleep 5", health_check)
+        self.assertNotIn(".env", health_check)
 
     def test_deploy_refuses_to_mount_blank_portal_state(self):
         """Deploy must stop before Compose can create a blank Portal state mount."""
