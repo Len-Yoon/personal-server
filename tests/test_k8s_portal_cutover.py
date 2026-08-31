@@ -167,6 +167,87 @@ class PortalCutoverContractTest(unittest.TestCase):
         self.assertRegex(text, r"wait_for_k3s_writer_absent[\s\S]+get pod -l app\.kubernetes\.io/name=portal-web")
         self.assertRegex(text, r"start_compose_writer\(\) \{\s+assert_no_k3s_writer")
 
+    def test_stopping_an_absent_k3s_writer_does_not_fail_rollback(self):
+        """A pre-Deployment failure has no K3s writer to scale down."""
+        text = SCRIPT.read_text(encoding="utf-8")
+        stop = text[text.index("stop_k3s_writer() {") : text.index("wait_for_k3s_writer_absent() {")]
+
+        self.assertIn('get deployment portal-web', stop)
+        self.assertIn('scale deployment/portal-web --replicas=0', stop)
+        self.assertLess(stop.index('get deployment portal-web'), stop.index('scale deployment/portal-web --replicas=0'))
+
+    def test_stop_k3s_writer_accepts_an_absent_deployment_without_scaling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls = root / "calls"
+            fake_sudo = root / "sudo"
+            fake_sudo.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"$*\" >> '{calls}'\n"
+                "case \"$*\" in\n"
+                "  *'get deployment portal-web'*) exit 0 ;;\n"
+                "  *'get pod -l app.kubernetes.io/name=portal-web'*) exit 0 ;;\n"
+                "  *'kubectl wait '*) exit 0 ;;\n"
+                "esac\n"
+                "exit 99\n"
+            )
+            fake_sudo.chmod(0o755)
+            library = root / "portal-cutover-lib.sh"
+            library.write_text(
+                SCRIPT.read_text(encoding="utf-8").rsplit('\nmain "$@"', 1)[0],
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["/bin/bash", "-c", f'. "{library}"; stop_k3s_writer'],
+                env={
+                    **os.environ,
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                    "RUN_ID": "absent-deployment",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            recorded = calls.read_text(encoding="utf-8")
+            self.assertIn("get deployment portal-web", recorded)
+            self.assertIn("get pod -l app.kubernetes.io/name=portal-web", recorded)
+            self.assertNotIn("scale deployment/portal-web", recorded)
+
+    def test_stop_k3s_writer_rejects_a_deployment_lookup_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake_sudo = root / "sudo"
+            fake_sudo.write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *'get deployment portal-web'*) exit 1 ;;\n"
+                "esac\n"
+                "exit 99\n"
+            )
+            fake_sudo.chmod(0o755)
+            library = root / "portal-cutover-lib.sh"
+            library.write_text(
+                SCRIPT.read_text(encoding="utf-8").rsplit('\nmain "$@"', 1)[0],
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["/bin/bash", "-c", f'. "{library}"; stop_k3s_writer'],
+                env={
+                    **os.environ,
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                    "RUN_ID": "deployment-lookup-error",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+
     def test_rollback_does_not_start_compose_while_k3s_pod_remains(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -176,8 +257,9 @@ class PortalCutoverContractTest(unittest.TestCase):
                 "#!/bin/sh\n"
                 f"printf '%s\\n' \"sudo $*\" >> '{calls}'\n"
                 "if [ \"$1\" = k3s ] && [ \"$2\" = kubectl ] && [ \"$3\" = wait ]; then exit 0; fi\n"
-                "if [ \"$1\" = k3s ] && [ \"$2\" = kubectl ] && [ \"$3\" = get ] && [ \"$4\" = pod ]; then printf '%s\\n' pod/portal-web-1; exit 0; fi\n"
-                "if [ \"$1\" = k3s ] && [ \"$2\" = kubectl ] && [ \"$3\" = scale ]; then exit 0; fi\n"
+                "if [ \"$1\" = k3s ] && [ \"$2\" = kubectl ] && [ \"$5\" = get ] && [ \"$6\" = deployment ]; then printf '%s\\n' deployment/portal-web; exit 0; fi\n"
+                "if [ \"$1\" = k3s ] && [ \"$2\" = kubectl ] && [ \"$5\" = get ] && [ \"$6\" = pod ]; then printf '%s\\n' pod/portal-web-1; exit 0; fi\n"
+                "if [ \"$1\" = k3s ] && [ \"$2\" = kubectl ] && [ \"$5\" = scale ]; then exit 0; fi\n"
                 "exit 0\n"
             )
             fake_sudo.chmod(0o755)
