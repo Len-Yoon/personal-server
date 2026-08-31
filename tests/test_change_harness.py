@@ -57,7 +57,7 @@ class ChangeHarnessTests(unittest.TestCase):
     def test_risk_and_verification_states_follow_the_policy_priority(self):
         """Changing a state branch must not mark risky work ready for review."""
         cases = [
-            (["scripts/deploy-n100.sh"], (), "blocked", 2),
+            (["scripts/maintenance.py"], (), "blocked", 2),
             (["unknown-area/config.toml"], (), "blocked", 2),
             (["portal-web/app/main.py"], (), "verification_incomplete", 2),
             (["portal-web/app/main.py"], ("portal=failure",), "verification_failed", 2),
@@ -74,7 +74,7 @@ class ChangeHarnessTests(unittest.TestCase):
     def test_blocked_status_retains_failed_check_reason(self):
         """A blocked-path branch must retain simultaneous failed validation evidence."""
         code, evidence = run_harness(
-            ["scripts/deploy-n100.sh", "portal-web/app/main.py"],
+            ["scripts/maintenance.py", "portal-web/app/main.py"],
             check_results=("portal=failure",),
         )
 
@@ -186,7 +186,7 @@ class ChangeHarnessTests(unittest.TestCase):
         """A blocked branch must retain every simultaneous verification reason."""
         code, evidence = run_harness(
             [
-                "scripts/deploy-n100.sh",
+                "scripts/maintenance.py",
                 "portal-web/app/main.py",
                 "system-agent/app/main.py",
             ],

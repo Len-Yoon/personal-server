@@ -4,13 +4,13 @@
 
 ## 목적과 경계
 
-현재 `personal-server`의 Compose 기반 운영을 유지한 채, 추후 별도 승인으로 수행할 K3s·Flux 전환의 계약을 정의한다. 현재 저장소의 `main` 배포 흐름은 Compose 전용으로 유지한다.
+현재 `personal-server`의 Compose 기반 운영을 유지한 채, 추후 별도 승인으로 수행할 K3s·Flux 전환의 계약을 정의한다. 이 작업 브랜치는 Portal 단일 writer를 보장하기 위해 Compose 배포·Windows bootstrap의 marker 처리와 상태 사전검증을 변경한다. 아직 클러스터 cutover를 실행하거나 Flux를 연결하지 않는다.
 
 이 초안에서 하지 않는 일은 다음과 같다.
 
-- Compose 중지, 재기동 또는 배포 흐름 변경
-- Docker Caddy 설정·포트·라우트 변경
-- Windows bootstrap 또는 WSL 마운트 변경
+- 실제 N100에서의 Compose 중지·재기동, Portal 상태 migration 또는 Caddy upstream 전환
+- Docker Caddy의 호스트 포트·TLS 소유권 변경
+- WSL 마운트 변경
 - Flux 설치, bootstrap, GitRepository 연결 또는 Flux 리소스 적용
 - Kubernetes Secret 생성·값 기록, PVC/PV/Deployment/Service의 클러스터 적용
 - GitHub push, PR 생성 또는 원격 저장소 생성
@@ -124,6 +124,58 @@ bash infra/k8s/tools/portal-secret-shadow-smoke.sh --cleanup RUN_ID
 ```
 
 이 smoke는 선택적 HomeOps/portfolio configuration(optional HomeOps/portfolio), data copy, Caddy routing, actual cutover을 검증하지 않는다. Service, Ingress, NodePort, PV/PVC를 만들지 않으며, 기존 Compose·Caddy·스케줄러 운영을 변경하지 않는다. 실제 전환과 데이터 이동은 별도 승인과 검증이 필요한 작업이다.
+
+### Portal operator-only cutover
+
+`infra/k8s/tools/portal-cutover.sh`는 승인된 유지보수 창에서만 실행하는 **operator-only** 절차다. 기본 실행은 명시적 `--go`가 없으면 아무 리소스·컨테이너도 변경하지 않으며, K3s Secret 암호화 Enabled와 엄격한 암호화 백업·복원 증적을 먼저 확인한다. 증적은 기본 24시간(`PORTAL_BACKUP_MAX_AGE_SECONDS=86400`) 이내의 backup·별도 경로 restore 성공을 모두 증명해야 한다. 실행 전 Compose Portal만 writer인지 확인하고, 실행 중에는 해당 서비스만 중지한다.
+
+데이터는 `data/files`에서 새 `local-path` 동적 PVC로 복사되고, 원본·PVC의 `sha256` 매니페스트가 일치해야 다음 단계로 진행한다. Secret은 기존 `.env`에서 네 개의 허용 키만 읽어 권한 `0600` 임시 파일로 전달하며, 값은 로그·Git에 기록하지 않는다. Deployment·NodePort Service·Pod `/health`·Caddy 컨테이너 경로를 검증하지만, 기본적으로 public Caddy route는 전환하지 않는다.
+
+```bash
+bash infra/k8s/tools/portal-cutover.sh --go
+```
+
+별도 최종 승인이 있는 경우에만 준비 단계가 성공한 뒤 `--go --switch-caddy`를 별도 호출해 `host.docker.internal:30080`으로 트래픽을 전환한다. 이 단계는 준비된 K3s Portal과 중지된 Compose Portal을 재확인한 뒤 Caddy만 재생성하고 네 개 Portal 호스트를 확인한다. 실패하면 이전 upstream으로 복구하고 Compose writer를 다시 시작하며 K3s writer를 중지한다.
+
+```bash
+bash infra/k8s/tools/portal-cutover.sh --go --switch-caddy
+```
+
+롤백은 별도 명시 호출로만 수행한다. Caddy upstream을 `portal-web:8000`으로 복구하고 Caddy만 재생성한 뒤 Compose Portal을 시작하며, K3s Deployment는 중지 상태로 유지한다.
+
+```bash
+bash infra/k8s/tools/portal-cutover.sh --rollback-caddy
+```
+
+이 절차는 실제 N100에서 승인된 유지보수 창과 backup 복원 증적이 없으면 실행하지 않는다. `PORTAL_FILES_CAPACITY`, `PORTAL_IMAGE_REF`, `PORTAL_SOURCE_DIR`, `PORTAL_ENV_FILE`은 실행 전 실제 값 확인이 필요하다.
+
+#### Portal backup evidence 계약
+
+`PORTAL_BACKUP_EVIDENCE`는 backup 생성 도구가 성공한 뒤에만 권한 `0600`으로 원자적으로 기록하는 단일 `key=value` 파일이다. `validate-backup-evidence.py`는 빈 줄, 주석, 중복·알 수 없는 키와 값 누락을 모두 거부한다. 이 저장소는 암호화 backup artifact나 키를 생성하지 않으며, 증적만 검증한다.
+
+필수 키는 다음과 같다. 모든 시각은 UTC `Z` 형식이어야 하며 backup·restore 시각은 미래가 아니고 최대 연령 이내, `restore_verified_at`는 `backup_completed_at`보다 같거나 늦어야 하며, 증적 만료 시각은 현재보다 미래여야 한다.
+
+```text
+schema_version=1
+scope=portal
+backup_status=success
+encrypted=true
+backup_completed_at=2026-08-30T00:00:00Z
+restore_status=success
+restore_verified_at=2026-08-30T00:00:00Z
+evidence_expires_at=2026-08-31T00:00:00Z
+backup_id=opaque-safe-id
+```
+
+선택 키는 암호문 artifact의 `artifact_digest=sha256:<64개의 소문자 hex>`, `restore_check=sqlite_quick_check`, `restore_path_check=success`뿐이다. 원본·복원 절대 경로, secret, token, 개인키는 증적에 기록하지 않는다. backup 또는 복원 절차가 실패하면 기존 증적을 갱신하지 않는다.
+
+### Portal state and Compose bridge prerequisites
+
+Portal 상태는 `data/files`와 분리하여 `data/portal-web-state`에 유지한다. 이 경로에는 `homeops.sqlite3`, 보안 이벤트 로그, 로그인 rate-limit 상태를 포함하며 Compose와 K3s Portal 모두 `/var/lib/portal`로만 연결한다. 실제 cutover는 파일·상태 각각의 RWO `local-path` PVC에 복사한 뒤 SHA-256 manifest와 HomeOps SQLite `quick_check`가 모두 일치할 때만 계속한다. 기존 `data/logs`에서 전용 상태 경로로의 최초 분리·복원 검증은 별도 유지보수 창에서 완료해야 하며, 빈 상태 경로로 cutover를 시작하지 않는다.
+
+K3s Portal은 Docker 서비스 DNS 이름이나 `hostNetwork`를 사용하지 않는다. 실행 전 `DOCKER_BRIDGE_GATEWAY`를 실제 Docker `bridge` gateway 주소로 설정하고, Compose는 기존 loopback 바인딩을 유지하면서 gateway 전용 포트만 추가로 열어야 한다. Cutover 도구는 이 값을 현재 bridge 설정과 대조한 후 selector 없는 K3s Service와 EndpointSlice를 생성한다. 대상은 `system-agent`(18010), `homeops-executor`(18011), crawler(18001), YouTube(18002), book(18003)이며, Portal은 `compose-*` Service DNS만 사용한다.
+
+`data/portal-runtime.mode` marker는 `compose`, `cutover`, `k3s` 값만 허용한다. bootstrap과 자동 배포는 `cutover`에서 Portal과 scheduler scan을 모두 기동하지 않으며, `k3s`에서는 Compose Portal을 제외하고 Caddy를 `--no-deps`로만 재기동한다. `k3s`/`cutover`에서 Docker 의존 서비스가 재기동되면 검증된 Docker bridge gateway와 opt-in override를 다시 적용하고 HomeOps executor의 Portal 제어를 제외한다. marker가 없으면 기존 Compose 동작을 사용하고, 알 수 없는 값은 fail-closed로 거부한다.
 
 ## Flux bootstrap 순서
 

@@ -11,6 +11,7 @@ SERVICE_DIRS = {
     str(REPO_ROOT / "crawler-worker"),
     str(REPO_ROOT / "youtube-memo"),
     str(REPO_ROOT / "book-memo"),
+    str(REPO_ROOT / "homeops-executor"),
 }
 
 

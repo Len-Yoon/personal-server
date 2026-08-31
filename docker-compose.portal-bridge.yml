@@ -1,0 +1,27 @@
+# Used only by the operator cutover procedure after its Docker bridge preflight.
+# The normal Compose path keeps all dependency ports bound to loopback only.
+services:
+  homeops-executor:
+    ports: !override
+      - "127.0.0.1:18011:8011"
+      - "${DOCKER_BRIDGE_GATEWAY}:18011:8011"
+
+  system-agent:
+    ports: !override
+      - "127.0.0.1:18010:8010"
+      - "${DOCKER_BRIDGE_GATEWAY}:18010:8010"
+
+  crawler-worker:
+    ports: !override
+      - "127.0.0.1:8001:8001"
+      - "${DOCKER_BRIDGE_GATEWAY}:18001:8001"
+
+  youtube-memo:
+    ports: !override
+      - "127.0.0.1:8002:8002"
+      - "${DOCKER_BRIDGE_GATEWAY}:18002:8002"
+
+  book-memo:
+    ports: !override
+      - "127.0.0.1:8003:8003"
+      - "${DOCKER_BRIDGE_GATEWAY}:18003:8003"

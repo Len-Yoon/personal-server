@@ -232,9 +232,30 @@ class VerifyChangeScopeTests(unittest.TestCase):
             "youtube-memo", "book-memo", "car-care-worker",
         ])
 
-    def test_server_startup_paths_are_blocked(self):
+    def test_approved_portal_cutover_runtime_files_require_full_validation(self):
         paths = (
             "docker-compose.yml",
+            "docker-compose.portal-bridge.yml",
+            "scripts/deploy-n100.sh",
+            "scripts/windows-bootstrap.sh",
+        )
+        code, evidence = run_scope(*paths, executed_checks=("maintenance",))
+
+        self.assertEqual(code, 2)
+        self.assertEqual(evidence["blocked_files"], [])
+        self.assertEqual(evidence["automation_files"], list(paths))
+        self.assertEqual(evidence["missing_checks"], [
+            "portal",
+            "system-agent",
+            "crawler-worker",
+            "homeops-executor",
+            "youtube-memo",
+            "book-memo",
+            "car-care-worker",
+        ])
+
+    def test_server_startup_paths_are_blocked(self):
+        paths = (
             "scripts/maintenance.py",
         )
         code, evidence = run_scope(*paths)
@@ -246,7 +267,6 @@ class VerifyChangeScopeTests(unittest.TestCase):
     def test_blocked_changes_stop_review(self):
         for path in (
             "scripts/maintenance.py",
-            "scripts/deploy-n100.sh",
             "crawler-worker/app/services/news_scheduler.py",
         ):
             with self.subTest(path=path):

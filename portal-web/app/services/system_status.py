@@ -6,12 +6,16 @@ import json
 
 
 DEFAULT_AGENT_URL = "http://system-agent:8010"
-SERVICE_HEALTH_TARGETS = [
-    {"name": "뉴스 허브", "url": "http://crawler-worker:8001/health"},
-    {"name": "유튜브 메모", "url": "http://youtube-memo:8002/health"},
-    {"name": "책 메모", "url": "http://book-memo:8003/health"},
-    {"name": "시스템 상태", "url": "http://system-agent:8010/health"},
-]
+
+
+def _service_health_targets() -> list[dict[str, str]]:
+    """Return Compose defaults or the K3s bridge endpoints supplied at runtime."""
+    return [
+        {"name": "뉴스 허브", "url": os.getenv("NEWS_HEALTH_URL", "http://crawler-worker:8001/health")},
+        {"name": "유튜브 메모", "url": os.getenv("YOUTUBE_HEALTH_URL", "http://youtube-memo:8002/health")},
+        {"name": "책 메모", "url": os.getenv("BOOKS_HEALTH_URL", "http://book-memo:8003/health")},
+        {"name": "시스템 상태", "url": os.getenv("SYSTEM_AGENT_HEALTH_URL", "http://system-agent:8010/health")},
+    ]
 
 
 def get_dashboard_status(agent_url: str | None = None, timeout: float = 1.5) -> dict[str, Any]:
@@ -66,10 +70,10 @@ def get_service_health(timeout: float = 1.0) -> list[dict[str, Any]]:
                 "url": target["url"],
                 "demo_mode": True,
             }
-            for target in SERVICE_HEALTH_TARGETS
+            for target in _service_health_targets()
         ]
 
-    return [_check_service(target, timeout) for target in SERVICE_HEALTH_TARGETS]
+    return [_check_service(target, timeout) for target in _service_health_targets()]
 
 
 def _check_service(target: dict[str, str], timeout: float) -> dict[str, Any]:

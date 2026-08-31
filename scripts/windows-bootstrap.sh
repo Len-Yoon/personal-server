@@ -55,6 +55,90 @@ normalize_project_path SECURITY_LOG_PATH
 normalize_project_path NEWS_ARCHIVE_PATH
 normalize_project_path HOST_METRICS_PATH
 
+PORTAL_RUNTIME_MARKER="${PORTAL_RUNTIME_MARKER:-$PROJECT_ROOT/data/portal-runtime.mode}"
+PORTAL_RUNTIME_MODE="compose"
+PORTAL_SCAN_URL=""
+RUN_MAINTENANCE=1
+PORTAL_BRIDGE_COMPOSE_FILE="${PORTAL_BRIDGE_COMPOSE_FILE:-$PROJECT_ROOT/docker-compose.portal-bridge.yml}"
+
+load_portal_runtime_mode() {
+  local mode
+  if [ ! -f "$PORTAL_RUNTIME_MARKER" ]; then
+    return 0
+  fi
+  mode=$(tr -d '[:space:]' < "$PORTAL_RUNTIME_MARKER")
+  case "$mode" in
+    compose|cutover|k3s) PORTAL_RUNTIME_MODE="$mode" ;;
+    *)
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Invalid portal runtime marker; preserving Portal writer boundary" >> /tmp/windows-bootstrap-trace.log
+      PORTAL_RUNTIME_MODE="cutover"
+      ;;
+  esac
+}
+
+require_portal_state_ready() {
+  local state_directory="$PROJECT_ROOT/data/portal-web-state"
+  if [ -f "$state_directory/homeops.sqlite3" ] && python3 -c 'import sqlite3,sys; connection=sqlite3.connect(sys.argv[1]); result=connection.execute("PRAGMA quick_check").fetchone()[0]; connection.close(); sys.exit(result != "ok")' "$state_directory/homeops.sqlite3"; then
+    return 0
+  fi
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Portal state migration is required before Compose Portal can start" >> /tmp/windows-bootstrap-trace.log
+  return 1
+}
+
+validate_docker_bridge_gateway() {
+  local actual_gateway
+  [ -f "$PORTAL_BRIDGE_COMPOSE_FILE" ] || {
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Portal bridge Compose override is missing" >> /tmp/windows-bootstrap-trace.log
+    return 1
+  }
+  actual_gateway=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}') || return 1
+  if ! python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' "$actual_gateway" >/dev/null 2>&1; then
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Docker bridge gateway is invalid" >> /tmp/windows-bootstrap-trace.log
+    return 1
+  fi
+  if [ -n "${DOCKER_BRIDGE_GATEWAY:-}" ] && [ "$DOCKER_BRIDGE_GATEWAY" != "$actual_gateway" ]; then
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Configured Docker bridge gateway does not match active bridge" >> /tmp/windows-bootstrap-trace.log
+    return 1
+  fi
+  export DOCKER_BRIDGE_GATEWAY="$actual_gateway"
+}
+
+start_runtime_services() {
+  local compose_services
+  local bridge_compose
+  load_portal_runtime_mode
+  case "$PORTAL_RUNTIME_MODE" in
+    compose)
+      require_portal_state_ready
+      export HOMEOPS_DOCKER_MANAGED_SERVICES="${HOMEOPS_DOCKER_MANAGED_SERVICES:-portal-web,system-agent,crawler-worker,youtube-memo,book-memo,caddy,homeops-executor}"
+      export EXPECTED_CONTAINERS="${EXPECTED_CONTAINERS:-portal-web,crawler-worker,youtube-memo,book-memo,system-agent}"
+      docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d \
+        portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker caddy
+      PORTAL_SCAN_URL="http://127.0.0.1:8000/internal/homeops/scan"
+      ;;
+    cutover)
+      validate_docker_bridge_gateway
+      export HOMEOPS_DOCKER_MANAGED_SERVICES="system-agent,crawler-worker,youtube-memo,book-memo,caddy,homeops-executor"
+      export EXPECTED_CONTAINERS="crawler-worker,youtube-memo,book-memo,system-agent"
+      compose_services="homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker"
+      bridge_compose=(docker compose -f docker-compose.yml -f docker-compose.n100.yml -f "$PORTAL_BRIDGE_COMPOSE_FILE")
+      "${bridge_compose[@]}" up -d --no-deps --force-recreate $compose_services
+      "${bridge_compose[@]}" up -d --no-deps caddy
+      RUN_MAINTENANCE=0
+      ;;
+    k3s)
+      validate_docker_bridge_gateway
+      export HOMEOPS_DOCKER_MANAGED_SERVICES="system-agent,crawler-worker,youtube-memo,book-memo,caddy,homeops-executor"
+      export EXPECTED_CONTAINERS="crawler-worker,youtube-memo,book-memo,system-agent"
+      compose_services="homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker"
+      bridge_compose=(docker compose -f docker-compose.yml -f docker-compose.n100.yml -f "$PORTAL_BRIDGE_COMPOSE_FILE")
+      "${bridge_compose[@]}" up -d --no-deps --force-recreate $compose_services
+      "${bridge_compose[@]}" up -d --no-deps caddy
+      PORTAL_SCAN_URL="http://127.0.0.1:30080/internal/homeops/scan"
+      ;;
+  esac
+}
+
 run_daily_maintenance() {
   local marker=/tmp/personal-server-maintenance.last
   local today
@@ -70,16 +154,15 @@ run_daily_maintenance() {
   fi
 }
 
-docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d \
-  portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker caddy
+start_runtime_services
 
-if [ -n "${HOMEOPS_SCHEDULER_SECRET:-}" ]; then
+if [ -n "${HOMEOPS_SCHEDULER_SECRET:-}" ] && [ -n "$PORTAL_SCAN_URL" ]; then
   curl --fail --silent --show-error --max-time 20 \
-    -X POST http://127.0.0.1:8000/internal/homeops/scan \
+    -X POST "$PORTAL_SCAN_URL" \
     -H "X-HomeOps-Scheduler-Secret: ${HOMEOPS_SCHEDULER_SECRET}" \
     >> /tmp/homeops-scheduled-scan.log 2>&1 || echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] HomeOps scheduled scan failed" >> /tmp/windows-bootstrap-trace.log
 fi
 
-run_daily_maintenance
+if [ "$RUN_MAINTENANCE" -eq 1 ]; then run_daily_maintenance; fi
 
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] cloudflared is managed by the Windows bootstrap process" >> /tmp/windows-bootstrap-trace.log
