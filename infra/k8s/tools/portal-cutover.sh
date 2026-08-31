@@ -225,7 +225,7 @@ assert_pvc_runtime_permissions() {
     if test -n "$required_file"; then
       test -f "$mount_path/$required_file" && test -r "$mount_path/$required_file" && test -w "$mount_path/$required_file" || exit 1
       if test "$required_file" = homeops.sqlite3; then
-        printf "%s\\n" "BEGIN IMMEDIATE; CREATE TABLE IF NOT EXISTS __portal_cutover_permission_probe (id INTEGER PRIMARY KEY); INSERT INTO __portal_cutover_permission_probe DEFAULT VALUES; ROLLBACK;" | python -c '\''import sqlite3,sys; connection=sqlite3.connect(sys.argv[1], timeout=5); connection.executescript(sys.stdin.read()); connection.close()'\'' "$mount_path/$required_file" || exit 1
+        printf "%s\\n" "BEGIN IMMEDIATE; CREATE TABLE IF NOT EXISTS __portal_cutover_permission_probe (id INTEGER PRIMARY KEY); INSERT INTO __portal_cutover_permission_probe DEFAULT VALUES; ROLLBACK;" | python -c '\''import sqlite3,sys; connection=sqlite3.connect(sys.argv[1], timeout=5); connection.executescript(sys.stdin.read()); connection.close(); verification=sqlite3.connect(sys.argv[1], timeout=5); remaining_table=verification.execute("SELECT 1 FROM sqlite_master WHERE type=? AND name=?", ("table", "__portal_cutover_permission_probe")).fetchone(); remaining_row=verification.execute("SELECT 1 FROM __portal_cutover_permission_probe LIMIT 1").fetchone() if remaining_table is not None else None; verification.close(); sys.exit(1 if remaining_table is not None or remaining_row is not None else 0)'\'' "$mount_path/$required_file" || exit 1
       fi
     fi
     probe="$mount_path/.portal-cutover-permission-probe.$$"
