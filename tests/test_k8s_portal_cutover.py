@@ -387,6 +387,18 @@ class PortalCutoverContractTest(unittest.TestCase):
         self.assertIn('[ "$K3S_WRITER_STARTED" -eq 0 ] || restore_files_from_pvc', cleanup)
         self.assertIn('[ "$K3S_WRITER_STARTED" -eq 0 ] || restore_state_from_pvc', cleanup)
 
+    def test_kubernetes_temporary_pod_names_normalize_the_run_id_to_lowercase(self):
+        """The default UTC run id contains T/Z and is invalid in Kubernetes names."""
+        text = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn('RUN_ID="${RUN_ID:-$(date -u +%Y%m%dt%H%M%Sz)-$$}"', text)
+        self.assertIn('K8S_RUN_ID="$RUN_ID"', text)
+        self.assertIn("''|*[!a-z0-9-]*) return 1", text)
+        self.assertIn('COPY_POD="portal-web-files-copy-${K8S_RUN_ID}"', text)
+        self.assertIn('FILES_RESTORE_POD="portal-web-files-restore-${K8S_RUN_ID}"', text)
+        self.assertIn('STATE_RESTORE_POD="portal-web-state-restore-${K8S_RUN_ID}"', text)
+        self.assertIn('valid_k8s_run_id "$K8S_RUN_ID"', text)
+
     def test_nodeport_private_check_rejects_a_reachable_non_bridge_address(self):
         """The switch gate must fail when the live NodePort answers on a host address."""
         with tempfile.TemporaryDirectory() as directory:
