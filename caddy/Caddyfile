@@ -11,6 +11,7 @@
 }
 
 portal.len.pe.kr {
+    import common_tls
     redir https://len.pe.kr{uri} permanent
 }
 

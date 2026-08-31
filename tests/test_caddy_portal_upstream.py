@@ -24,6 +24,20 @@ def _site_block(caddyfile: str, host: str) -> str:
 
 
 class CaddyPortalUpstreamContractTest(unittest.TestCase):
+    def test_portal_alias_uses_the_cloudflare_dns_tls_policy(self):
+        caddyfile = (ROOT / "caddy" / "Caddyfile").read_text(encoding="utf-8")
+
+        block = _site_block(caddyfile, "portal.len.pe.kr")
+        self.assertIn("import common_tls", block)
+        self.assertIn("redir https://len.pe.kr{uri} permanent", block)
+        common_tls = re.search(
+            r"^\(common_tls\) \{\n(?P<body>.*?)(?=^\S|\Z)",
+            caddyfile,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(common_tls)
+        self.assertIn("dns cloudflare {env.CLOUDFLARE_API_TOKEN}", common_tls.group("body"))
+
     def test_all_portal_hosts_use_one_environment_backed_upstream(self):
         caddyfile = (ROOT / "caddy" / "Caddyfile").read_text(encoding="utf-8")
 
