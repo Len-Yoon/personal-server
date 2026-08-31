@@ -149,12 +149,24 @@ restore_compose_executor() {
 }
 
 preflight_bridge() {
-  local endpoint
+  local endpoint deadline ready remaining request_timeout
   assert_bridge_gateway || return 1
   [ -f "$BRIDGE_COMPOSE_FILE" ] || return 1
-  for endpoint in 18010 18011 18001 18002 18003; do
-    run_timeout "$TIMEOUT_SECONDS" curl --fail --silent --show-error --max-time 10 "http://${BRIDGE_GATEWAY}:${endpoint}/health" >/dev/null || return 1
+  deadline=$((SECONDS + TIMEOUT_SECONDS))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    ready=1
+    for endpoint in 18010 18011 18001 18002 18003; do
+      remaining=$((deadline - SECONDS))
+      if [ "$remaining" -le 0 ]; then ready=0; break; fi
+      request_timeout=$remaining
+      [ "$request_timeout" -le 2 ] || request_timeout=2
+      run_timeout "$request_timeout" curl --fail --silent --show-error --max-time "$request_timeout" "http://${BRIDGE_GATEWAY}:${endpoint}/health" >/dev/null || ready=0
+    done
+    [ "$ready" -eq 1 ] && return 0
+    [ "$SECONDS" -lt "$deadline" ] && sleep 1
   done
+  printf '%s\n' "bridge endpoint did not become ready" >&2
+  return 1
 }
 
 secret_allowlist() {
