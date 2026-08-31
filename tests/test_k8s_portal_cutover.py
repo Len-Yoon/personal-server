@@ -609,6 +609,287 @@ class PortalCutoverContractTest(unittest.TestCase):
         ):
             self.assertIn(required, text)
 
+    def test_rolledback_cleanup_refuses_unhealthy_compose_before_any_k3s_delete(self):
+        """Residual cleanup must not delete K3s data unless Compose is healthy."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls = root / "calls"
+            fake_docker = root / "docker"
+            fake_docker.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"docker $*\" >> '{calls}'\n"
+                "if [ \"$1\" = inspect ]; then printf 'true unhealthy\\n'; exit 0; fi\n"
+                "exit 99\n",
+                encoding="utf-8",
+            )
+            fake_docker.chmod(0o755)
+            fake_sudo = root / "sudo"
+            fake_sudo.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"sudo $*\" >> '{calls}'\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_sudo.chmod(0o755)
+            marker = root / "portal-runtime.mode"
+            marker.write_text("compose\n", encoding="utf-8")
+            result = subprocess.run(
+                ["/bin/bash", str(SCRIPT), "--cleanup-rolledback"],
+                env={
+                    **os.environ,
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                    "PORTAL_RUNTIME_MARKER": str(marker),
+                    "PORTAL_NAMESPACE": "personal-server",
+                    "RUN_ID": "cleanup-unhealthy",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Compose Portal", result.stderr)
+            recorded = calls.read_text(encoding="utf-8") if calls.exists() else ""
+            self.assertNotIn("delete", recorded)
+
+    def test_rolledback_cleanup_checks_all_writer_preconditions_before_pvc_deletion(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        cleanup = text[text.index("cleanup_rolledback_resources() {") : text.index("assert_namespace() {")]
+
+        self.assertIn("RUNTIME_MARKER", text)
+        self.assertIn("State.Health.Status", text)
+        self.assertIn("personal-server", cleanup)
+        self.assertIn("assert_k3s_writer_stopped_for_cleanup", cleanup)
+        self.assertLess(cleanup.index("assert_compose_writer_healthy"), cleanup.index("delete pvc"))
+        self.assertLess(cleanup.index("assert_k3s_writer_stopped_for_cleanup"), cleanup.index("delete pvc"))
+        self.assertLess(cleanup.index('delete secret portal-web-runtime'), cleanup.index('delete pvc'))
+        self.assertLess(cleanup.index('delete pvc'), cleanup.index("assert_cleanup_resource_absent pvc"))
+
+    def test_rolledback_cleanup_removes_and_verifies_named_portal_resources(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        cleanup = text[text.index("cleanup_rolledback_resources() {") : text.index("assert_namespace() {")]
+
+        for required in (
+            "delete deployment portal-web",
+            "delete service portal-web",
+            "delete secret portal-web-runtime",
+            "delete endpointslice -l app.kubernetes.io/part-of=portal-compose-bridge",
+            "delete service -l app.kubernetes.io/part-of=portal-compose-bridge",
+            'delete pvc "$PVC_NAME"',
+            'delete pvc "$STATE_PVC_NAME"',
+            "assert_cleanup_resource_absent deployment portal-web",
+            "assert_cleanup_resource_absent service portal-web",
+            "assert_cleanup_resource_absent secret portal-web-runtime",
+            "assert_cleanup_selector_absent endpointslice app.kubernetes.io/part-of=portal-compose-bridge",
+            "assert_cleanup_selector_absent service app.kubernetes.io/part-of=portal-compose-bridge",
+            'assert_cleanup_resource_absent pvc "$PVC_NAME"',
+            'assert_cleanup_resource_absent pvc "$STATE_PVC_NAME"',
+            "portal_cleanup=PASS",
+            "portal_cleanup=FAIL",
+        ):
+            self.assertIn(required, cleanup)
+
+    def test_rolledback_cleanup_refuses_ready_k3s_writer_without_deleting_pvcs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls = root / "calls"
+            fake_docker = root / "docker"
+            fake_docker.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"docker $*\" >> '{calls}'\n"
+                "printf 'true healthy\\n'\n",
+                encoding="utf-8",
+            )
+            fake_docker.chmod(0o755)
+            fake_sudo = root / "sudo"
+            fake_sudo.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"sudo $*\" >> '{calls}'\n"
+                "case \"$*\" in\n"
+                "  *'jsonpath={.spec.replicas}'*) printf '1\\n'; exit 0 ;;\n"
+                "  *'jsonpath={.status.readyReplicas}'*) printf '1\\n'; exit 0 ;;\n"
+                "esac\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_sudo.chmod(0o755)
+            marker = root / "portal-runtime.mode"
+            marker.write_text("compose\n", encoding="utf-8")
+            result = subprocess.run(
+                ["/bin/bash", str(SCRIPT), "--cleanup-rolledback"],
+                env={
+                    **os.environ,
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                    "PORTAL_RUNTIME_MARKER": str(marker),
+                    "PORTAL_NAMESPACE": "personal-server",
+                    "RUN_ID": "cleanup-ready-writer",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("ready or desired writer replicas", result.stderr)
+            recorded = calls.read_text(encoding="utf-8")
+            self.assertNotIn(" delete pvc ", recorded)
+
+    def test_rolledback_cleanup_success_removes_only_named_portal_resources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls = root / "calls"
+            fake_docker = root / "docker"
+            fake_docker.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"docker $*\" >> '{calls}'\n"
+                "printf 'true healthy\\n'\n",
+                encoding="utf-8",
+            )
+            fake_docker.chmod(0o755)
+            fake_sudo = root / "sudo"
+            fake_sudo.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"sudo $*\" >> '{calls}'\n"
+                "case \"$*\" in *'get pod -o json'*) printf '{}\\n'; exit 0 ;; esac\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_sudo.chmod(0o755)
+            marker = root / "portal-runtime.mode"
+            marker.write_text("compose\n", encoding="utf-8")
+            result = subprocess.run(
+                ["/bin/bash", str(SCRIPT), "--cleanup-rolledback"],
+                env={
+                    **os.environ,
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                    "PORTAL_RUNTIME_MARKER": str(marker),
+                    "PORTAL_NAMESPACE": "personal-server",
+                    "RUN_ID": "cleanup-success",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("portal_cleanup=PASS", result.stdout)
+            recorded = calls.read_text(encoding="utf-8")
+            self.assertIn("delete deployment portal-web", recorded)
+            self.assertIn("delete service portal-web", recorded)
+            self.assertIn("delete secret portal-web-runtime", recorded)
+            self.assertIn("delete endpointslice -l app.kubernetes.io/part-of=portal-compose-bridge", recorded)
+            self.assertIn("delete service -l app.kubernetes.io/part-of=portal-compose-bridge", recorded)
+            self.assertIn("delete pod portal-web-files-copy-cleanup-success", recorded)
+            self.assertIn("delete pod portal-web-files-restore-cleanup-success", recorded)
+            self.assertIn("delete pod portal-web-state-restore-cleanup-success", recorded)
+            self.assertIn("delete pvc portal-web-files-dynamic", recorded)
+            self.assertIn("delete pvc portal-web-state-dynamic", recorded)
+            self.assertNotIn("docker compose", recorded)
+
+            lines = recorded.splitlines()
+            first_pvc_delete = next(i for i, line in enumerate(lines) if "delete pvc" in line)
+            for fragment in (
+                "get deployment portal-web",
+                "get service portal-web",
+                "get secret portal-web-runtime",
+                "get endpointslice -l app.kubernetes.io/part-of=portal-compose-bridge",
+                "get service -l app.kubernetes.io/part-of=portal-compose-bridge",
+                "get pod portal-web-files-copy-cleanup-success",
+                "get pod portal-web-files-restore-cleanup-success",
+                "get pod portal-web-state-restore-cleanup-success",
+            ):
+                self.assertLess(
+                    next(i for i, line in enumerate(lines) if fragment in line),
+                    first_pvc_delete,
+                )
+
+    def test_rolledback_cleanup_refuses_pvc_name_overrides_before_any_deletion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls = root / "calls"
+            fake_docker = root / "docker"
+            fake_docker.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"docker $*\" >> '{calls}'\n"
+                "printf 'true healthy\\n'\n",
+                encoding="utf-8",
+            )
+            fake_docker.chmod(0o755)
+            fake_sudo = root / "sudo"
+            fake_sudo.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"sudo $*\" >> '{calls}'\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_sudo.chmod(0o755)
+            marker = root / "portal-runtime.mode"
+            marker.write_text("compose\n", encoding="utf-8")
+            result = subprocess.run(
+                ["/bin/bash", str(SCRIPT), "--cleanup-rolledback"],
+                env={
+                    **os.environ,
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                    "PORTAL_RUNTIME_MARKER": str(marker),
+                    "PORTAL_NAMESPACE": "personal-server",
+                    "PORTAL_PVC_NAME": "unrelated-pvc",
+                    "RUN_ID": "cleanup-override",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("fixed Portal PVC names", result.stderr)
+            recorded = calls.read_text(encoding="utf-8") if calls.exists() else ""
+            self.assertNotIn("delete", recorded)
+
+    def test_rolledback_cleanup_refuses_pvc_referencing_pod_before_pvc_deletion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls = root / "calls"
+            fake_docker = root / "docker"
+            fake_docker.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"docker $*\" >> '{calls}'\n"
+                "printf 'true healthy\\n'\n",
+                encoding="utf-8",
+            )
+            fake_docker.chmod(0o755)
+            fake_sudo = root / "sudo"
+            fake_sudo.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"sudo $*\" >> '{calls}'\n"
+                "case \"$*\" in\n"
+                "  *'get pod -l app.kubernetes.io/name=portal-web --field-selector=status.phase=Running -o name'*) exit 0 ;;\n"
+                "  *'get pod -o json'*) printf '%s\\n' '{\"items\":[{\"metadata\":{\"name\":\"orphan-copy\"},\"spec\":{\"volumes\":[{\"persistentVolumeClaim\":{\"claimName\":\"portal-web-files-dynamic\"}}]}}]}' ; exit 0 ;;\n"
+                "esac\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fake_sudo.chmod(0o755)
+            marker = root / "portal-runtime.mode"
+            marker.write_text("compose\n", encoding="utf-8")
+            result = subprocess.run(
+                ["/bin/bash", str(SCRIPT), "--cleanup-rolledback"],
+                env={
+                    **os.environ,
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                    "PORTAL_RUNTIME_MARKER": str(marker),
+                    "PORTAL_NAMESPACE": "personal-server",
+                    "RUN_ID": "cleanup-pod-ref",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("still reference Portal PVCs", result.stderr)
+            recorded = calls.read_text(encoding="utf-8")
+            self.assertNotIn("delete pvc", recorded)
+
 
 if __name__ == "__main__":
     unittest.main()
