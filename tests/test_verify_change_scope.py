@@ -238,6 +238,7 @@ class VerifyChangeScopeTests(unittest.TestCase):
             "docker-compose.portal-bridge.yml",
             "scripts/deploy-n100.sh",
             "scripts/windows-bootstrap.sh",
+            "scripts/verify-n100-deployment-health.sh",
         )
         code, evidence = run_scope(*paths, executed_checks=("maintenance",))
 

@@ -28,6 +28,7 @@ APPROVED_PORTAL_CUTOVER_RUNTIME_FILES = {
     "docker-compose.yml",
     "docker-compose.portal-bridge.yml",
     "scripts/deploy-n100.sh",
+    "scripts/verify-n100-deployment-health.sh",
     "scripts/windows-bootstrap.sh",
 }
 DEPLOYMENT_WORKFLOW_FILES = {".github/workflows/deploy-n100.yml"}
