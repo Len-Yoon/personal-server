@@ -204,6 +204,49 @@ assert_named_pvc_sqlite_quick_check() {
   run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" exec "$pod" -- python -c 'import sqlite3,sys; connection=sqlite3.connect(sys.argv[1]); result=connection.execute("PRAGMA quick_check").fetchone()[0]; connection.close(); sys.exit(result != "ok")' /var/lib/portal/homeops.sqlite3
 }
 
+assert_pvc_runtime_permissions() {
+  local pod="$1" mount_path="$2" required_file="$3" runtime_uid runtime_gid
+  # The Portal image currently runs as root. Keep this explicit: a future
+  # image identity change must be reviewed together with PVC ownership.
+  runtime_uid=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" exec "$pod" -- id -u) || return 1
+  runtime_gid=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" exec "$pod" -- id -g) || return 1
+  [ "$runtime_uid" = "0" ] && [ "$runtime_gid" = "0" ] || return 1
+  run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" exec "$pod" -- sh -c '
+    mount_path="$1"
+    required_file="$2"
+    test -d "$mount_path" && test -r "$mount_path" && test -w "$mount_path" || exit 1
+    if ! find "$mount_path" -type f -print0 | xargs -0 -r sh -c "
+      for path do
+        test -r \"\$path\" && test -w \"\$path\" || exit 1
+      done
+    " sh; then
+      exit 1
+    fi
+    if test -n "$required_file"; then
+      test -f "$mount_path/$required_file" && test -r "$mount_path/$required_file" && test -w "$mount_path/$required_file" || exit 1
+      if test "$required_file" = homeops.sqlite3; then
+        printf "%s\\n" "BEGIN IMMEDIATE; CREATE TABLE IF NOT EXISTS __portal_cutover_permission_probe (id INTEGER PRIMARY KEY); INSERT INTO __portal_cutover_permission_probe DEFAULT VALUES; ROLLBACK;" | python -c '\''import sqlite3,sys; connection=sqlite3.connect(sys.argv[1], timeout=5); connection.executescript(sys.stdin.read()); connection.close()'\'' "$mount_path/$required_file" || exit 1
+      fi
+    fi
+    probe="$mount_path/.portal-cutover-permission-probe.$$"
+    if ! printf "%s" portal-cutover > "$probe"; then
+      rm -f -- "$probe"
+      exit 1
+    fi
+    if ! test -r "$probe" || ! test -w "$probe"; then
+      rm -f -- "$probe"
+      exit 1
+    fi
+    rm -f -- "$probe"
+  ' sh "$mount_path" "$required_file"
+}
+
+assert_portal_runtime_permissions() {
+  local pod="$1"
+  assert_pvc_runtime_permissions "$pod" /data/files "" || return 1
+  assert_pvc_runtime_permissions "$pod" /var/lib/portal homeops.sqlite3
+}
+
 copy_portal_state_files() {
   local source="$1" destination="$2" state_file
   for state_file in homeops.sqlite3 homeops.sqlite3-wal homeops.sqlite3-shm security-events.txt auth-rate-limit-state.json; do
@@ -302,6 +345,11 @@ spec:
 YAML
   then rm -rf -- "$temporary"; return 1; fi
   if ! run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" wait --for=condition=Ready "pod/$pod_name" --timeout=120s >/dev/null; then
+    run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" delete pod "$pod_name" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+    rm -rf -- "$temporary"
+    return 1
+  fi
+  if ! assert_pvc_runtime_permissions "$pod_name" "$mount_path" "$required_file"; then
     run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" delete pod "$pod_name" --ignore-not-found --wait=true >/dev/null 2>&1 || true
     rm -rf -- "$temporary"
     return 1
@@ -482,8 +530,13 @@ validate_public_hosts() {
   done
 }
 
+validate_caddy_config() {
+  run_timeout "$TIMEOUT_SECONDS" docker exec "$CADDY_CONTAINER" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
+}
+
 rollback_caddy() {
-  # rollback restores PORTAL_UPSTREAM=portal-web:8000 before Compose is started.
+  # rollback restores PORTAL_UPSTREAM=portal-web:8000 and validates Caddy before
+  # Compose is started.
   # rollback uses docker compose only for caddy recreation and Portal restore.
   # rollback uses kubectl scale to keep the K3s writer stopped.
   [ -f "$ENV_FILE" ] || { printf '%s\n' "portal env file not found" >&2; fail; return 1; }
@@ -498,9 +551,9 @@ rollback_caddy() {
     fail
     return 1
   fi
-  if ! restore_compose_executor || ! start_compose_writer; then fail; return 1; fi
   if ! set_portal_upstream "portal-web:8000"; then fail; return 1; fi
-  if ! recreate_caddy; then fail; return 1; fi
+  if ! recreate_caddy || ! validate_caddy_config; then fail; return 1; fi
+  if ! restore_compose_executor || ! start_compose_writer; then fail; return 1; fi
   if ! validate_public_hosts; then fail; return 1; fi
   if ! set_runtime_marker compose; then fail; return 1; fi
   printf '%s\n' "portal_cutover=PASS"
@@ -536,7 +589,7 @@ switch_caddy() {
 }
 
 switch_prepared_caddy() {
-  local replicas
+  local replicas pod
   if ! assert_namespace; then printf '%s\n' "K3s namespace not found" >&2; fail; return 1; fi
   if ! assert_compose_writer_stopped; then
     printf '%s\n' "Compose Portal is still running; refusing public switch" >&2
@@ -549,6 +602,24 @@ switch_prepared_caddy() {
   [ "$replicas" = "1" ] || { printf '%s\n' "prepared K3s Portal deployment is not running" >&2; restore_writers_after_switch_failure; fail; return 1; }
   if ! run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" rollout status deployment/portal-web --timeout=120s >/dev/null || ! validate_nodeport || ! assert_nodeport_private_exposure; then
     printf '%s\n' "prepared K3s Portal failed health validation" >&2
+    restore_writers_after_switch_failure
+    fail
+    return 1
+  fi
+  pod=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" get pod -l app.kubernetes.io/name=portal-web -o jsonpath='{.items[0].metadata.name}') || {
+    printf '%s\n' "prepared K3s Portal Pod not found" >&2
+    restore_writers_after_switch_failure
+    fail
+    return 1
+  }
+  [ -n "$pod" ] || {
+    printf '%s\n' "prepared K3s Portal Pod name is empty" >&2
+    restore_writers_after_switch_failure
+    fail
+    return 1
+  }
+  if ! assert_portal_runtime_permissions "$pod"; then
+    printf '%s\n' "prepared K3s Portal PVC runtime permissions failed" >&2
     restore_writers_after_switch_failure
     fail
     return 1

@@ -237,6 +237,39 @@ class PortalCutoverContractTest(unittest.TestCase):
         self.assertLess(cleanup.index("restore_files_from_pvc"), cleanup.index('delete pvc "$PVC_NAME"'))
         self.assertLess(cleanup.index("restore_state_from_pvc"), cleanup.index('delete pvc "$STATE_PVC_NAME"'))
 
+    def test_rollback_validates_compose_caddy_before_starting_compose_writer(self):
+        """Caddy must point back to Compose and validate before its writer can start."""
+        text = SCRIPT.read_text(encoding="utf-8")
+        rollback = text[text.index("rollback_caddy() {") : text.index("switch_caddy() {")]
+
+        self.assertLess(rollback.index("stop_k3s_writer"), rollback.index('set_portal_upstream "portal-web:8000"'))
+        self.assertLess(rollback.index('set_portal_upstream "portal-web:8000"'), rollback.index("recreate_caddy"))
+        self.assertIn("validate_caddy_config", rollback)
+        self.assertLess(rollback.index("recreate_caddy"), rollback.index("validate_caddy_config"))
+        self.assertLess(rollback.index("validate_caddy_config"), rollback.index("restore_compose_executor"))
+        self.assertLess(rollback.index("validate_caddy_config"), rollback.index("start_compose_writer"))
+        self.assertLess(rollback.index("start_compose_writer"), rollback.index("validate_public_hosts"))
+
+    def test_pvc_restore_checks_runtime_uid_gid_and_file_permissions_in_pod(self):
+        """PVC restore must fail closed when the actual Portal runtime cannot read/write its data."""
+        text = SCRIPT.read_text(encoding="utf-8")
+        restore = text[text.index("restore_pvc_to_local() {") : text.index("assert_namespace() {")]
+        switch = text[text.index("switch_prepared_caddy() {") : text.index("prepare_cutover() {")]
+
+        self.assertIn("assert_pvc_runtime_permissions", text)
+        self.assertIn("id -u", text)
+        self.assertIn("id -g", text)
+        self.assertIn("test -r", text)
+        self.assertIn("test -w", text)
+        self.assertIn("xargs -0 -r sh -c", text)
+        self.assertIn("BEGIN IMMEDIATE", text)
+        self.assertIn("ROLLBACK", text)
+        self.assertNotIn('find "$mount_path" -type f -exec test', text)
+        self.assertLess(restore.index("wait --for=condition=Ready"), restore.index("assert_pvc_runtime_permissions"))
+        self.assertLess(restore.index("assert_pvc_runtime_permissions"), restore.index("tar -C"))
+        self.assertIn("assert_portal_runtime_permissions", switch)
+        self.assertLess(switch.index("assert_portal_runtime_permissions"), switch.index("switch_caddy"))
+
     def test_compose_restart_requires_verified_local_portal_state(self):
         """A rollback cannot start Compose with a missing or corrupt local state database."""
         text = SCRIPT.read_text(encoding="utf-8")
