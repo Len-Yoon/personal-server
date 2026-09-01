@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 NAMESPACE="monitoring"
 GRAFANA_SERVICE="personal-server-monitoring-grafana"
-PROMETHEUS_SERVICE="personal-server-monitoring-kube-prom-prometheus"
+PROMETHEUS_SERVICE="personal-server-monitoring-prometheus"
 PORT_FORWARD_PID=""
 
 fail() {
