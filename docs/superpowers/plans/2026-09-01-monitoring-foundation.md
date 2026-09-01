@@ -1,8 +1,8 @@
-# K3s 내부 관측 플랫폼 구현 계획
+# K3s Monitoring 구현 계획
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** N100 K3s에 내부 전용 Prometheus·Grafana 관측 플랫폼을 안전하게 설치·검증·삭제할 수 있는 운영 도구와 설정을 제공함.
+**Goal:** N100 K3s에 내부 전용 Prometheus·Grafana 기반 K3s Monitoring을 안전하게 설치·검증·삭제할 수 있는 운영 도구와 설정을 제공함.
 
 **Architecture:** `monitoring` namespace의 `kube-prometheus-stack` Helm release를 version `88.6.1`로 고정함. values 파일은 ClusterIP Grafana, local-path PVC, 7일 Prometheus retention, Alertmanager 비활성화를 선언함. 사전점검·설치·검증·삭제 도구는 기본적으로 읽기 전용 또는 dry-run이며, 명시적인 인자로만 클러스터 상태를 변경함.
 
@@ -167,7 +167,7 @@ Expected: PASS.
 
 ```bash
 git add infra/k8s/tools/monitoring-preflight.sh tests/test_k8s_monitoring_tools.py
-git commit -m "feat: 관측 플랫폼 사전점검 추가"
+git commit -m "feat: K3s Monitoring 사전점검 추가"
 ```
 
 ### Task 3: 명시적 설치·검증·삭제 도구
@@ -255,7 +255,7 @@ Grafana 접속 명령은 `sudo k3s kubectl -n monitoring port-forward --address 
 
 ```bash
 git add infra/k8s/tools/monitoring-install.sh infra/k8s/tools/monitoring-verify.sh infra/k8s/tools/monitoring-uninstall.sh tests/test_k8s_monitoring_tools.py infra/k8s/README.md
-git commit -m "feat: 내부 관측 플랫폼 운영 도구 추가"
+git commit -m "feat: K3s Monitoring 운영 도구 추가"
 ```
 
 ### Task 4: 전체 검증 및 독립 검토

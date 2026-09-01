@@ -1,4 +1,4 @@
-# K3s 내부 관측 플랫폼 설계
+# K3s Monitoring 설계
 
 ## 1. 목적
 
@@ -85,4 +85,3 @@ K3s cluster
 - Alertmanager에서 Telegram 알림 전송
 - 애플리케이션 `/metrics` endpoint 및 ServiceMonitor
 - 경고 발생 후 안전한 범위의 자동 대응
-
