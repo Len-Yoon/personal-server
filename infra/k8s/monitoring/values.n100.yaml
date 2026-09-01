@@ -1,6 +1,15 @@
 alertmanager:
   enabled: false
 
+# WSL2 does not provide the shared host-root mount required by node-exporter.
+nodeExporter:
+  enabled: false
+
+defaultRules:
+  rules:
+    nodeExporterAlerting: false
+    nodeExporterRecording: false
+
 grafana:
   service:
     type: ClusterIP

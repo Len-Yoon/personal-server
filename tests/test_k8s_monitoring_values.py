@@ -57,6 +57,13 @@ class MonitoringValuesContractTests(unittest.TestCase):
         self.assertTrue(resources["requests"])
         self.assertTrue(resources["limits"])
 
+    def test_values_disable_node_exporter_for_wsl_mount_propagation(self):
+        values = load_values()
+
+        self.assertIs(values["nodeExporter"]["enabled"], False)
+        self.assertIs(values["defaultRules"]["rules"]["nodeExporterAlerting"], False)
+        self.assertIs(values["defaultRules"]["rules"]["nodeExporterRecording"], False)
+
 
 if __name__ == "__main__":
     unittest.main()
