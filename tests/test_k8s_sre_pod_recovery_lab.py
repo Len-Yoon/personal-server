@@ -60,7 +60,7 @@ class K3sSrePodRecoveryLabTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             calls = pathlib.Path(td) / "calls"
             fake = pathlib.Path(td) / "sudo"
-            fake.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n[ \"$3\" = get ] && { echo 'connection refused' >&2; exit 1; }\nexit 0\n")
+            fake.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n[ \"$3\" = create ] && { echo 'connection refused' >&2; exit 1; }\nexit 0\n")
             fake.chmod(0o755)
             env = {**os.environ, "PATH": f"{td}:{os.environ['PATH']}", "CALLS": str(calls), "SRE_RECOVERY_LAB_RUN_ID": "api-error"}
             result = subprocess.run(["bash", str(SCRIPT), "--run"], env=env, check=False, text=True, capture_output=True)
@@ -74,7 +74,7 @@ class K3sSrePodRecoveryLabTest(unittest.TestCase):
             with self.subTest(run_id=run_id), tempfile.TemporaryDirectory() as td:
                 calls = pathlib.Path(td) / "calls"
                 fake = pathlib.Path(td) / "sudo"
-                fake.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n[ \"$3\" = get ] && {{ echo '{message}' >&2; exit 1; }}\nexit 0\n")
+                fake.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n[ \"$3\" = create ] && {{ echo '{message}' >&2; exit 1; }}\nexit 0\n")
                 fake.chmod(0o755)
                 env = {**os.environ, "PATH": f"{td}:{os.environ['PATH']}", "CALLS": str(calls), "SRE_RECOVERY_LAB_RUN_ID": run_id}
                 result = subprocess.run(["bash", str(SCRIPT), "--run"], env=env, check=False, text=True, capture_output=True)
@@ -82,6 +82,28 @@ class K3sSrePodRecoveryLabTest(unittest.TestCase):
                 recorded = calls.read_text()
                 self.assertNotIn(" apply ", recorded)
                 self.assertNotIn(" delete ", recorded)
+
+    def test_already_existing_namespace_is_not_owned_or_applied(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('create namespace "$NS"', text)
+        self.assertIn("AlreadyExists", text)
+
+    def test_uppercase_run_id_is_rejected_without_kubectl(self):
+        with tempfile.TemporaryDirectory() as td:
+            fake = pathlib.Path(td) / "sudo"
+            calls = pathlib.Path(td) / "calls"
+            fake.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n")
+            fake.chmod(0o755)
+            env = {**os.environ, "PATH": f"{td}:{os.environ['PATH']}", "CALLS": str(calls)}
+            result = subprocess.run(["bash", str(SCRIPT), "--cleanup", "Lab-A"], env=env, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(calls.exists())
+
+    def test_success_evidence_keys_and_event_query_are_present(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        for key in ("pod=", "restart_count_before=", "restart_count_after=", "ready=true", "event_seen="):
+            self.assertIn(key, text)
+        self.assertIn("get events", text)
 
 
 if __name__ == "__main__":
