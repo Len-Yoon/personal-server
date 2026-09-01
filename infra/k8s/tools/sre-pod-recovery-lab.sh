@@ -6,7 +6,7 @@ namespace_state(){
   local ns="$1" output
   if output="$(sudo k3s kubectl get namespace "$ns" 2>&1)"; then return 0; fi
   printf '%s\n' "$output" >&2
-  printf '%s\n' "$output" | grep -Eqi 'notfound|not found' && return 1
+  printf '%s\n' "$output" | grep -Eq "^Error from server \\(NotFound\\): namespaces \\\"${ns}\\\" not found$" && return 1
   return 2
 }
 cleanup_run(){
