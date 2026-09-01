@@ -62,7 +62,7 @@ EOF
     after="$(sudo k3s kubectl -n "$NS" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)"
     if (( after > baseline )) && sudo k3s kubectl -n "$NS" wait --for=condition=Ready pod "$pod" --timeout=5s >/dev/null 2>&1; then
       event_seen=false; sudo k3s kubectl -n "$NS" get events --field-selector involvedObject.name="$pod" >/dev/null 2>&1 && event_seen=true
-      echo "sre_pod_recovery=PASS"; echo "sre_pod_recovery_run_id=${run_id}"; echo "pod=${pod}"; echo "restart_count_before=${baseline}"; echo "restart_count_after=${after}"; echo "ready=true"; echo "event_seen=${event_seen}"; return 0
+      echo "sre_pod_recovery=PASS"; echo "sre_pod_recovery_run_id=${run_id}"; echo "pod=${pod}"; echo "sre_pod_recovery_restarts_before=${baseline}"; echo "sre_pod_recovery_restarts_after=${after}"; echo "ready=true"; echo "event_seen=${event_seen}"; return 0
     fi
     sleep 2
   done
