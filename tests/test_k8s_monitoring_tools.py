@@ -6,11 +6,12 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+TOOLS = ROOT / "infra/k8s/tools"
 SCRIPT = ROOT / "infra/k8s/tools/monitoring-preflight.sh"
 
 
 class MonitoringPreflightBehaviorTest(unittest.TestCase):
-    def run_tool(
+    def run_preflight(
         self,
         *,
         kubectl_nodes="n100 Ready",
@@ -57,14 +58,9 @@ class MonitoringPreflightBehaviorTest(unittest.TestCase):
             )
             for tool in (sudo, helm, df):
                 tool.chmod(0o755)
-            env = {
-                **os.environ,
-                "PATH": f"{directory}:{os.environ['PATH']}",
-                "CALLS": str(calls),
-            }
             result = subprocess.run(
                 ["bash", str(SCRIPT)],
-                env=env,
+                env={**os.environ, "PATH": f"{directory}:{os.environ['PATH']}", "CALLS": str(calls)},
                 capture_output=True,
                 text=True,
                 check=False,
@@ -73,42 +69,42 @@ class MonitoringPreflightBehaviorTest(unittest.TestCase):
             return result, recorded
 
     def test_fails_closed_when_k3s_node_is_not_ready(self):
-        result, _ = self.run_tool(kubectl_nodes="n100 NotReady")
+        result, _ = self.run_preflight(kubectl_nodes="n100 NotReady")
         self.assertEqual(result.returncode, 1)
         self.assertTrue(result.stdout.rstrip().endswith("monitoring_preflight=FAIL"))
 
     def test_passes_when_a_node_is_cordoned_but_ready(self):
-        result, _ = self.run_tool(kubectl_nodes="n100 Ready,SchedulingDisabled")
+        result, _ = self.run_preflight(kubectl_nodes="n100 Ready,SchedulingDisabled")
         self.assertEqual(result.returncode, 0)
         self.assertTrue(result.stdout.rstrip().endswith("monitoring_preflight=PASS"))
 
     def test_fails_closed_when_any_node_is_not_ready(self):
-        result, _ = self.run_tool(kubectl_nodes="n100 Ready\nn101 NotReady")
+        result, _ = self.run_preflight(kubectl_nodes="n100 Ready\nn101 NotReady")
         self.assertEqual(result.returncode, 1)
         self.assertTrue(result.stdout.rstrip().endswith("monitoring_preflight=FAIL"))
 
     def test_fails_closed_when_local_path_storageclass_is_missing(self):
-        result, _ = self.run_tool(storageclass=False)
+        result, _ = self.run_preflight(storageclass=False)
         self.assertEqual(result.returncode, 1)
         self.assertTrue(result.stdout.rstrip().endswith("monitoring_preflight=FAIL"))
 
     def test_fails_closed_when_helm_is_not_version_three(self):
-        result, _ = self.run_tool(helm3=False)
+        result, _ = self.run_preflight(helm3=False)
         self.assertEqual(result.returncode, 1)
         self.assertTrue(result.stdout.rstrip().endswith("monitoring_preflight=FAIL"))
 
     def test_fails_closed_when_storage_has_less_than_eight_gib_available(self):
-        result, _ = self.run_tool(disk_available=(8 * 1024 * 1024) - 1)
+        result, _ = self.run_preflight(disk_available=(8 * 1024 * 1024) - 1)
         self.assertEqual(result.returncode, 1)
         self.assertTrue(result.stdout.rstrip().endswith("monitoring_preflight=FAIL"))
 
     def test_fails_closed_when_storage_has_no_space_available(self):
-        result, _ = self.run_tool(disk_available=0)
+        result, _ = self.run_preflight(disk_available=0)
         self.assertEqual(result.returncode, 1)
         self.assertTrue(result.stdout.rstrip().endswith("monitoring_preflight=FAIL"))
 
     def test_passes_and_reports_chart_version_when_all_checks_succeed(self):
-        result, calls = self.run_tool()
+        result, calls = self.run_preflight()
         self.assertEqual(result.returncode, 0)
         self.assertIn("chart_version=88.6.1", result.stdout)
         self.assertTrue(result.stdout.rstrip().endswith("monitoring_preflight=PASS"))
@@ -118,11 +114,157 @@ class MonitoringPreflightBehaviorTest(unittest.TestCase):
         self.assertIn("df -Pk /var/lib/rancher/k3s/storage", calls)
 
     def test_only_read_only_commands_are_invoked(self):
-        result, calls = self.run_tool()
+        result, calls = self.run_preflight()
         self.assertEqual(result.returncode, 0)
         for forbidden in (" repo ", " install", " upgrade", " uninstall", " create", " apply", " delete", "secret"):
             self.assertNotIn(forbidden, calls)
         self.assertNotIn("http://", calls)
+
+
+class MonitoringToolsTest(unittest.TestCase):
+    def run_tool(self, name, *args, stubs=None):
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            calls = directory_path / "calls"
+            for command, body in (stubs or {}).items():
+                path = directory_path / command
+                path.write_text(body, encoding="utf-8")
+                path.chmod(0o755)
+            env = {**os.environ, "PATH": f"{directory}:{os.environ['PATH']}", "CALLS": str(calls)}
+            result = subprocess.run(
+                ["bash", str(TOOLS / name), *args],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            recorded = calls.read_text(encoding="utf-8") if calls.exists() else ""
+            return result, recorded
+
+    def test_install_requires_explicit_apply_or_render(self):
+        result, _ = self.run_tool("monitoring-install.sh")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--apply", result.stderr)
+
+    def test_uninstall_requires_explicit_uninstall(self):
+        result, _ = self.run_tool("monitoring-uninstall.sh")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--uninstall", result.stderr)
+
+    def test_apply_uses_pinned_helm_release_arguments(self):
+        result, calls = self.run_tool(
+            "monitoring-install.sh",
+            "--apply",
+            stubs={
+                "helm": "#!/bin/sh\nprintf 'helm %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+            },
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(
+            "helm upgrade --install personal-server-monitoring prometheus-community/kube-prometheus-stack "
+            "--namespace monitoring --create-namespace --version 88.6.1 "
+            "--values infra/k8s/monitoring/values.n100.yaml --wait --timeout 10m",
+            calls,
+        )
+        self.assertEqual(result.stdout.rstrip().splitlines()[-1], "monitoring_install=PASS")
+
+    def test_render_only_calls_helm_template(self):
+        result, calls = self.run_tool(
+            "monitoring-install.sh",
+            "--render",
+            stubs={
+                "helm": "#!/bin/sh\nprintf 'helm %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+            },
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(
+            "helm template personal-server-monitoring prometheus-community/kube-prometheus-stack "
+            "--namespace monitoring --version 88.6.1 --values infra/k8s/monitoring/values.n100.yaml",
+            calls,
+        )
+        self.assertNotIn("upgrade", calls)
+
+    def test_verify_fails_when_grafana_service_is_not_cluster_ip(self):
+        result, _ = self.run_tool(
+            "monitoring-verify.sh",
+            stubs={
+                "sudo": "#!/bin/sh\ncase \"$*\" in\n"
+                "  *'get pvc'*) exit 0;;\n"
+                "  *'get pods'*) exit 0;;\n"
+                "  *'wait --for=condition=Ready pod --all'*) exit 0;;\n"
+                "  *'get service personal-server-monitoring-grafana'*) printf 'NodePort\\n'; exit 0;;\n"
+                "  *) exit 1;;\n"
+                "esac\n",
+            },
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stderr.rstrip().endswith("monitoring_verify=FAIL"))
+
+    def test_uninstall_preserves_data_without_delete_data(self):
+        result, calls = self.run_tool(
+            "monitoring-uninstall.sh",
+            "--uninstall",
+            stubs={
+                "helm": "#!/bin/sh\nprintf 'helm %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+            },
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("helm uninstall personal-server-monitoring --namespace monitoring --wait --timeout 5m", calls)
+        self.assertNotIn("delete pvc", calls)
+        self.assertNotIn("delete namespace", calls)
+
+    def test_delete_data_requires_explicit_flag_and_deletes_pvc_and_namespace(self):
+        result, calls = self.run_tool(
+            "monitoring-uninstall.sh",
+            "--uninstall",
+            "--delete-data",
+            stubs={
+                "helm": "#!/bin/sh\nprintf 'helm %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+                "sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+            },
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("delete pvc --all", calls)
+        self.assertIn("delete namespace monitoring", calls)
+
+    def test_verify_port_forward_binds_localhost_and_does_not_read_secrets(self):
+        result, calls = self.run_tool(
+            "monitoring-verify.sh",
+            "--port-forward-check",
+            stubs={
+                "sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *'get pvc'*) exit 0;; *'get pods'*) exit 0;;\n"
+                "  *'wait --for=condition=Ready pod --all'*) exit 0;;\n"
+                "  *'get service personal-server-monitoring-grafana'*) printf 'ClusterIP\\n'; exit 0;;\n"
+                "  *'port-forward'*) sleep 30;;\n  *) exit 1;;\n"
+                "esac\n",
+                "curl": "#!/bin/sh\nprintf 'curl %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+            },
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("port-forward --address 127.0.0.1 service/personal-server-monitoring-grafana 3000:80", calls)
+        self.assertIn("http://127.0.0.1:3000/login", calls)
+        self.assertNotIn("get secret", calls)
+        self.assertNotIn("jsonpath='{.data", calls)
+
+    def test_verify_fails_when_port_forward_login_check_fails(self):
+        result, _ = self.run_tool(
+            "monitoring-verify.sh",
+            "--port-forward-check",
+            stubs={
+                "sudo": "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *'get pvc'*) exit 0;; *'get pods'*) exit 0;;\n"
+                "  *'wait --for=condition=Ready pod --all'*) exit 0;;\n"
+                "  *'get service personal-server-monitoring-grafana'*) printf 'ClusterIP\\n'; exit 0;;\n"
+                "  *'port-forward'*) sleep 30;;\n  *) exit 1;;\n"
+                "esac\n",
+                "curl": "#!/bin/sh\nexit 22\n",
+            },
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stderr.rstrip().endswith("monitoring_verify=FAIL"))
 
 
 if __name__ == "__main__":

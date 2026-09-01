@@ -56,6 +56,26 @@ bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
 
 이 실습은 다른 namespace, Portal, Compose, Caddy, scheduler를 변경하거나 재시작하지 않는다.
 
+## Monitoring 운영 도구
+
+N100에서 Monitoring을 설치·검증·삭제할 때는 다음 순서를 따른다.
+
+1. `monitoring-preflight.sh`를 실행한다.
+2. `monitoring-install.sh --render`로 Helm template만 확인한다.
+3. 운영자 승인 후 `monitoring-install.sh --apply`를 실행한다.
+4. `monitoring-verify.sh`로 PVC, Pod, Grafana Service를 검증한다.
+5. 필요할 때만 `monitoring-verify.sh --port-forward-check`로 localhost 접속을 확인한다.
+
+Grafana는 ClusterIP Service로만 제공한다. 운영자 접속은 다음 일회성 port-forward만 사용한다.
+
+```bash
+sudo k3s kubectl -n monitoring port-forward --address 127.0.0.1 service/personal-server-monitoring-grafana 3000:80
+```
+
+설치 도구는 `--apply`가 명시된 경우에만 Helm release를 생성하며, `--render`는 Helm template만 수행한다. 삭제는 `monitoring-uninstall.sh --uninstall`로 수행하고 PVC와 namespace는 기본적으로 보존한다. 데이터까지 삭제할 때만 `--delete-data`를 추가한다.
+
+Grafana 관리자 비밀번호는 Kubernetes Secret에서 운영자가 직접 확인한다. 비밀번호와 Secret 데이터는 채팅, Git, 문서, 명령 로그에 기록하거나 출력하지 않는다. Caddy, Compose, Portal, 서버 기동, Windows bootstrap, scheduler 및 외부 공개 Ingress/NodePort/LoadBalancer는 이 도구로 변경하지 않는다.
+
 ## N100 SRE 상태 점검 (읽기 전용)
 
 `infra/k8s/tools/sre-health-audit.sh`는 N100에서 수동 실행하는 읽기 전용 상태 점검 도구다. K3s 노드 중 하나 이상이 `Ready`인지 확인하고, 현재 Compose 설정에서 산출한 모든 서비스 컨테이너가 실행 중인지와 설정된 Docker health check가 `healthy`인지 확인한다. health check가 없는 실행 중 컨테이너는 정상으로 처리한다.
