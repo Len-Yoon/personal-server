@@ -18,11 +18,11 @@ cleanup_run(){
   case "$state" in 1) ;; 0) die "namespace 정리 확인 실패";; *) die "namespace 상태 확인 실패";; esac
 }
 run_lab(){
-  local run_id run_id_lc NS POD_LABEL baseline after deadline pod
+  local run_id run_id_lc NS POD_LABEL baseline after deadline pod created=0
   run_id="${SRE_RECOVERY_LAB_RUN_ID:-$(date -u +%Y%m%d%H%M%S)-$$}"; run_id_lc="$(printf '%s' "$run_id" | tr '[:upper:]' '[:lower:]')"
   [[ "$run_id_lc" =~ ^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$ ]] || die "유효하지 않은 run id"
   NS="sre-recovery-lab-${run_id_lc}"; POD_LABEL='app.kubernetes.io/name=sre-pod-recovery'
-  trap 'rc=$?; cleanup_run "$run_id" >/dev/null 2>&1 || true; trap - EXIT INT TERM; exit "$rc"' EXIT INT TERM
+  trap 'rc=$?; if [[ "$created" -eq 1 ]]; then cleanup_run "$run_id" >/dev/null 2>&1 || true; fi; trap - EXIT INT TERM; exit "$rc"' EXIT INT TERM
   local state; if namespace_state "$NS"; then state=0; else state=$?; fi
   case "$state" in 0) die "namespace already exists";; 1) ;; *) die "namespace 상태 확인 실패";; esac
   sudo k3s kubectl apply -f - <<EOF
@@ -56,6 +56,7 @@ spec:
           initialDelaySeconds: 1
           periodSeconds: 2
 EOF
+  created=1
   sudo k3s kubectl -n "$NS" wait --for=condition=Available deployment/sre-pod-recovery --timeout="${SRE_RECOVERY_LAB_TIMEOUT:-90}s"
   pod="$(sudo k3s kubectl -n "$NS" get pod -l "$POD_LABEL" -o jsonpath='{.items[0].metadata.name}')"
   baseline="$(sudo k3s kubectl -n "$NS" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}')"
