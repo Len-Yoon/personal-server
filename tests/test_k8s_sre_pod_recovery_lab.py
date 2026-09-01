@@ -30,7 +30,7 @@ class K3sSrePodRecoveryLabTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             calls = pathlib.Path(td) / "calls"
             fake = pathlib.Path(td) / "sudo"
-            fake.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n[ \"$3\" = get ] && { echo 'Error from server (NotFound): namespaces \\\"sre-recovery-lab-apply-failure\\\" not found' >&2; exit 1; }\n[ \"$3\" = apply ] && exit 42\nexit 0\n")
+            fake.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n[ \"$3\" = get ] && { echo \"Error from server (NotFound): namespaces \\\"sre-recovery-lab-apply-failure\\\" not found\" >&2; exit 1; }\n[ \"$3\" = apply ] && exit 42\nexit 0\n")
             fake.chmod(0o755)
             env = {**os.environ, "PATH": f"{td}:{os.environ['PATH']}", "CALLS": str(calls), "SRE_RECOVERY_LAB_RUN_ID": "apply-failure"}
             result = subprocess.run(["bash", str(SCRIPT), "--run"], env=env, check=False, text=True, capture_output=True)
