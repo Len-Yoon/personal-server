@@ -74,6 +74,8 @@ sudo k3s kubectl -n monitoring port-forward --address 127.0.0.1 service/personal
 
 설치 도구는 `--apply`가 명시된 경우에만 Helm release를 생성하며, `--render`는 Helm template만 수행한다. 삭제는 `monitoring-uninstall.sh --uninstall`로 수행하고 PVC와 namespace는 기본적으로 보존한다. 데이터까지 삭제할 때만 `--delete-data`를 추가한다.
 
+Grafana 및 Prometheus PVC에는 Helm resource keep 정책을 적용하여 기본 uninstall에서 데이터를 보존한다. `--delete-data`를 지정한 경우에만 두 PVC와 namespace를 삭제한다.
+
 Grafana 관리자 비밀번호는 Kubernetes Secret에서 운영자가 직접 확인한다. 비밀번호와 Secret 데이터는 채팅, Git, 문서, 명령 로그에 기록하거나 출력하지 않는다. Caddy, Compose, Portal, 서버 기동, Windows bootstrap, scheduler 및 외부 공개 Ingress/NodePort/LoadBalancer는 이 도구로 변경하지 않는다.
 
 ## N100 SRE 상태 점검 (읽기 전용)

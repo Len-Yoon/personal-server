@@ -23,6 +23,10 @@ class MonitoringValuesContractTests(unittest.TestCase):
             values["grafana"]["persistence"]["storageClassName"], "local-path"
         )
         self.assertEqual(values["grafana"]["persistence"]["size"], "1Gi")
+        self.assertEqual(
+            values["grafana"]["persistence"]["annotations"]["helm.sh/resource-policy"],
+            "keep",
+        )
 
     def test_values_keep_prometheus_retention_and_local_storage(self):
         spec = load_values()["prometheus"]["prometheusSpec"]
@@ -37,6 +41,12 @@ class MonitoringValuesContractTests(unittest.TestCase):
                 "requests"
             ]["storage"],
             "5Gi",
+        )
+        self.assertEqual(
+            spec["storageSpec"]["volumeClaimTemplate"]["metadata"]["annotations"][
+                "helm.sh/resource-policy"
+            ],
+            "keep",
         )
 
     def test_values_set_kube_state_metrics_resources(self):

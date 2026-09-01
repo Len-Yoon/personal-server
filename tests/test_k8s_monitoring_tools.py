@@ -122,7 +122,7 @@ class MonitoringPreflightBehaviorTest(unittest.TestCase):
 
 
 class MonitoringToolsTest(unittest.TestCase):
-    def run_tool(self, name, *args, stubs=None):
+    def run_tool(self, name, *args, stubs=None, env_overrides=None):
         with tempfile.TemporaryDirectory() as directory:
             directory_path = Path(directory)
             calls = directory_path / "calls"
@@ -131,6 +131,7 @@ class MonitoringToolsTest(unittest.TestCase):
                 path.write_text(body, encoding="utf-8")
                 path.chmod(0o755)
             env = {**os.environ, "PATH": f"{directory}:{os.environ['PATH']}", "CALLS": str(calls)}
+            env.update(env_overrides or {})
             result = subprocess.run(
                 ["bash", str(TOOLS / name), *args],
                 env=env,
@@ -157,16 +158,109 @@ class MonitoringToolsTest(unittest.TestCase):
             "--apply",
             stubs={
                 "helm": "#!/bin/sh\nprintf 'helm %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+                "preflight": "#!/bin/sh\nprintf 'preflight\\n' >> \"$CALLS\"\nprintf 'monitoring_preflight=PASS\\n'\nexit 0\n",
+                "sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *'get namespace monitoring'*) printf 'Error from server (NotFound): namespaces \\\"monitoring\\\" not found\\n' >&2; exit 1;;\n"
+                "  *'create namespace monitoring'*) exit 0;;\n"
+                "  *) exit 1;;\n"
+                "esac\n",
             },
+            env_overrides={"MONITORING_PREFLIGHT_SCRIPT": "preflight"},
         )
         self.assertEqual(result.returncode, 0)
         self.assertIn(
             "helm upgrade --install personal-server-monitoring prometheus-community/kube-prometheus-stack "
-            "--namespace monitoring --create-namespace --version 88.6.1 "
+            "--namespace monitoring --version 88.6.1 "
             "--values infra/k8s/monitoring/values.n100.yaml --wait --timeout 10m",
             calls,
         )
         self.assertEqual(result.stdout.rstrip().splitlines()[-1], "monitoring_install=PASS")
+
+    def test_apply_refuses_to_upgrade_when_preflight_fails(self):
+        result, calls = self.run_tool(
+            "monitoring-install.sh",
+            "--apply",
+            stubs={
+                "preflight": "#!/bin/sh\nprintf 'monitoring_preflight=FAIL\\n'\nexit 1\n",
+                "helm": "#!/bin/sh\nprintf 'helm %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+            },
+            env_overrides={"MONITORING_PREFLIGHT_SCRIPT": "preflight"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("upgrade --install", calls)
+
+    def test_apply_refuses_preexisting_monitoring_namespace(self):
+        result, calls = self.run_tool(
+            "monitoring-install.sh",
+            "--apply",
+            stubs={
+                "preflight": "#!/bin/sh\nprintf 'monitoring_preflight=PASS\\n'\nexit 0\n",
+                "sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+                "helm": "#!/bin/sh\nprintf 'helm %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+            },
+            env_overrides={"MONITORING_PREFLIGHT_SCRIPT": "preflight"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("get namespace monitoring", calls)
+        self.assertNotIn("upgrade --install", calls)
+
+    def test_failed_apply_rolls_back_release_and_new_namespace(self):
+        result, calls = self.run_tool(
+            "monitoring-install.sh",
+            "--apply",
+            stubs={
+                "preflight": "#!/bin/sh\nprintf 'monitoring_preflight=PASS\\n'\nexit 0\n",
+                "sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *'get namespace monitoring'*) printf 'Error from server (NotFound): namespaces \\\"monitoring\\\" not found\\n' >&2; exit 1;;\n"
+                "  *'create namespace monitoring'*) exit 0;;\n"
+                "  *'delete namespace monitoring'*) exit 0;;\n"
+                "  *) exit 1;;\n"
+                "esac\n",
+                "helm": "#!/bin/sh\nprintf 'helm %s\\n' \"$*\" >> \"$CALLS\"\ncase \"$1\" in upgrade) exit 9;; uninstall) exit 0;; esac\nexit 0\n",
+            },
+            env_overrides={"MONITORING_PREFLIGHT_SCRIPT": "preflight"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("helm upgrade --install", calls)
+        self.assertIn("helm uninstall personal-server-monitoring --namespace monitoring --wait --timeout 5m", calls)
+        self.assertIn("delete namespace monitoring", calls)
+
+    def test_apply_fails_closed_when_namespace_lookup_is_not_not_found(self):
+        result, calls = self.run_tool(
+            "monitoring-install.sh",
+            "--apply",
+            stubs={
+                "preflight": "#!/bin/sh\nprintf 'monitoring_preflight=PASS\\n'\nexit 0\n",
+                "sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\nprintf 'forbidden\\n' >&2\nexit 1\n",
+                "helm": "#!/bin/sh\nprintf 'helm %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+            },
+            env_overrides={"MONITORING_PREFLIGHT_SCRIPT": "preflight"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("upgrade --install", calls)
+        self.assertNotIn("delete namespace", calls)
+
+    def test_apply_fails_closed_on_namespace_create_race_without_deletion(self):
+        result, calls = self.run_tool(
+            "monitoring-install.sh",
+            "--apply",
+            stubs={
+                "preflight": "#!/bin/sh\nprintf 'monitoring_preflight=PASS\\n'\nexit 0\n",
+                "sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *'get namespace monitoring'*) printf 'Error from server (NotFound): namespaces \\\"monitoring\\\" not found\\n' >&2; exit 1;;\n"
+                "  *'create namespace monitoring'*) printf 'AlreadyExists\\n' >&2; exit 1;;\n"
+                "  *) exit 1;;\n"
+                "esac\n",
+                "helm": "#!/bin/sh\nprintf 'helm %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+            },
+            env_overrides={"MONITORING_PREFLIGHT_SCRIPT": "preflight"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("upgrade --install", calls)
+        self.assertNotIn("delete namespace", calls)
 
     def test_render_only_calls_helm_template(self):
         result, calls = self.run_tool(
@@ -189,10 +283,11 @@ class MonitoringToolsTest(unittest.TestCase):
             "monitoring-verify.sh",
             stubs={
                 "sudo": "#!/bin/sh\ncase \"$*\" in\n"
-                "  *'get pvc'*) exit 0;;\n"
+                "  *'get pvc'*) printf 'prometheus Bound\\ngrafana Bound\\n'; exit 0;;\n"
                 "  *'get pods'*) exit 0;;\n"
                 "  *'wait --for=condition=Ready pod --all'*) exit 0;;\n"
                 "  *'get service personal-server-monitoring-grafana'*) printf 'NodePort\\n'; exit 0;;\n"
+                "  *'get configmap'*) printf 'configmap/grafana-dashboard\\n'; exit 0;;\n"
                 "  *) exit 1;;\n"
                 "esac\n",
             },
@@ -234,12 +329,13 @@ class MonitoringToolsTest(unittest.TestCase):
             stubs={
                 "sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
                 "case \"$*\" in\n"
-                "  *'get pvc'*) exit 0;; *'get pods'*) exit 0;;\n"
+                "  *'get pvc'*) printf 'prometheus Bound\\ngrafana Bound\\n'; exit 0;; *'get pods'*) exit 0;;\n"
                 "  *'wait --for=condition=Ready pod --all'*) exit 0;;\n"
                 "  *'get service personal-server-monitoring-grafana'*) printf 'ClusterIP\\n'; exit 0;;\n"
+                "  *'get configmap'*) printf 'configmap/grafana-dashboard\\n'; exit 0;;\n"
                 "  *'port-forward'*) sleep 30;;\n  *) exit 1;;\n"
                 "esac\n",
-                "curl": "#!/bin/sh\nprintf 'curl %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+                "curl": "#!/bin/sh\nprintf 'curl %s\\n' \"$*\" >> \"$CALLS\"\nprintf '{\"status\":\"success\",\"data\":{\"active\":[{\"health\":\"up\"}]}}\\n'\nexit 0\n",
             },
         )
         self.assertEqual(result.returncode, 0)
@@ -255,12 +351,31 @@ class MonitoringToolsTest(unittest.TestCase):
             stubs={
                 "sudo": "#!/bin/sh\n"
                 "case \"$*\" in\n"
-                "  *'get pvc'*) exit 0;; *'get pods'*) exit 0;;\n"
+                "  *'get pvc'*) printf 'prometheus Bound\\ngrafana Bound\\n'; exit 0;; *'get pods'*) exit 0;;\n"
                 "  *'wait --for=condition=Ready pod --all'*) exit 0;;\n"
                 "  *'get service personal-server-monitoring-grafana'*) printf 'ClusterIP\\n'; exit 0;;\n"
+                "  *'get configmap'*) printf 'configmap/grafana-dashboard\\n'; exit 0;;\n"
                 "  *'port-forward'*) sleep 30;;\n  *) exit 1;;\n"
                 "esac\n",
                 "curl": "#!/bin/sh\nexit 22\n",
+            },
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stderr.rstrip().endswith("monitoring_verify=FAIL"))
+
+    def test_verify_fails_when_port_forward_exits_before_login_check(self):
+        result, _ = self.run_tool(
+            "monitoring-verify.sh",
+            "--port-forward-check",
+            stubs={
+                "sudo": "#!/bin/sh\ncase \"$*\" in\n"
+                "  *'get pvc'*) printf 'prometheus Bound\\ngrafana Bound\\n'; exit 0;; *'get pods'*) exit 0;;\n"
+                "  *'wait --for=condition=Ready pod --all'*) exit 0;;\n"
+                "  *'get service personal-server-monitoring-grafana'*) printf 'ClusterIP\\n'; exit 0;;\n"
+                "  *'get configmap'*) printf 'configmap/grafana-dashboard\\n'; exit 0;;\n"
+                "  *'port-forward'*) exit 1;; *) exit 1;;\n"
+                "esac\n",
+                "curl": "#!/bin/sh\nexit 0\n",
             },
         )
         self.assertNotEqual(result.returncode, 0)

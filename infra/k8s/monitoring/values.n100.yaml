@@ -10,6 +10,8 @@ grafana:
     enabled: true
     storageClassName: local-path
     size: 1Gi
+    annotations:
+      helm.sh/resource-policy: keep
   resources:
     requests:
       cpu: 100m
@@ -30,6 +32,9 @@ prometheus:
         memory: 1Gi
     storageSpec:
       volumeClaimTemplate:
+        metadata:
+          annotations:
+            helm.sh/resource-policy: keep
         spec:
           storageClassName: local-path
           accessModes: [ReadWriteOnce]
