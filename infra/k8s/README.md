@@ -26,3 +26,32 @@ git diff --check
 ```
 
 `kubectl apply`, `flux bootstrap`, `flux reconcile`, Compose 제어 명령은 이 초안의 범위 밖이다.
+
+## SRE Pod 자동복구 실습 (운영자 전용)
+
+`infra/k8s/tools/sre-pod-recovery-lab.sh`는 K3s에서 Pod 자동복구 동작을 확인하는 일회성 운영자 실습 도구다. GitOps resource가 아니며 production deploy가 아니다. N100에서 실행할 때는 운영자 승인과 클러스터 접근 권한을 확인한다.
+
+실습 시작:
+
+```bash
+bash infra/k8s/tools/sre-pod-recovery-lab.sh --run
+```
+
+정상 완료 시 `PASS` 출력과 함께 다음 증거를 확인한다.
+
+실습 리소스는 sre-recovery-lab-<run-id> namespace에만 생성된다.
+
+- 실행별 `sre-recovery-lab-<run-id>` namespace가 생성되어 다른 namespace와 격리됨
+- liveness sentinel로 비정상 상태를 유도한 뒤 같은 Deployment의 Pod가 재시작됨 (`restartCount` 증가)
+- `restartCount`가 증가한 선택 Pod가 `Ready` 조건으로 복구됨
+- 실행 종료 시 해당 실습 namespace만 정리됨
+
+비정상 중단으로 정리되지 않은 실행만 run ID를 지정해 정리한다.
+
+```bash
+bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
+```
+
+이 실습은 Portal, Compose, Caddy, scheduler를 변경하지 않는다. production Deployment·Service·Secret·PVC와 GitOps 리소스를 변경하지 않으며, 실습 namespace 밖의 리소스도 변경하지 않는다. 적용 전환이나 자동 배포를 수행하지 않으므로 Portal·Compose·Caddy·scheduler 운영에는 효과가 없다.
+
+이 실습은 다른 namespace, Portal, Compose, Caddy, scheduler를 변경하거나 재시작하지 않는다.
