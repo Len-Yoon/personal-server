@@ -9,6 +9,14 @@ SCRIPT = pathlib.Path(__file__).parents[1] / "infra/k8s/tools/sre-pod-recovery-l
 
 
 class K3sSrePodRecoveryLabTest(unittest.TestCase):
+    def test_readme_documents_operator_only_recovery_lab(self):
+        readme = pathlib.Path(__file__).parents[1] / "infra/k8s/README.md"
+        text = readme.read_text(encoding="utf-8")
+        self.assertIn("sre-pod-recovery-lab.sh --run", text)
+        self.assertIn("sre-pod-recovery-lab.sh --cleanup", text)
+        self.assertIn("Portal", text)
+        self.assertIn("변경하지 않는다", text)
+
     def test_lab_uses_isolated_deployment_and_liveness_sentinel(self):
         text = SCRIPT.read_text(encoding="utf-8")
         for required in (
