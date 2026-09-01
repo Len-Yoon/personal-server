@@ -17,6 +17,7 @@ class MonitoringPreflightBehaviorTest(unittest.TestCase):
         kubectl_nodes="n100 Ready",
         storageclass=True,
         helm3=True,
+        helm_available=True,
         disk_available=9 * 1024 * 1024,
     ):
         with tempfile.TemporaryDirectory() as directory:
@@ -38,17 +39,18 @@ class MonitoringPreflightBehaviorTest(unittest.TestCase):
                 "esac\n",
                 encoding="utf-8",
             )
-            helm.write_text(
-                "#!/bin/sh\n"
-                "printf 'helm %s\\n' \"$*\" >> \"$CALLS\"\n"
-                "case \"$1\" in\n"
-                "  version) "
-                + ("printf 'v3.16.4+g\\n'; exit 0 ;;\n" if helm3 else "printf 'v2.17.0\\n'; exit 0 ;;\n")
-                + "  show) printf 'version: 88.6.1\\n'; exit 0 ;;\n"
-                "  *) exit 1 ;;\n"
-                "esac\n",
-                encoding="utf-8",
-            )
+            if helm_available:
+                helm.write_text(
+                    "#!/bin/sh\n"
+                    "printf 'helm %s\\n' \"$*\" >> \"$CALLS\"\n"
+                    "case \"$1\" in\n"
+                    "  version) "
+                    + ("printf 'v3.16.4+g\\n'; exit 0 ;;\n" if helm3 else "printf 'v2.17.0\\n'; exit 0 ;;\n")
+                    + "  show) printf 'version: 88.6.1\\n'; exit 0 ;;\n"
+                    "  *) exit 1 ;;\n"
+                    "esac\n",
+                    encoding="utf-8",
+                )
             df.write_text(
                 "#!/bin/sh\n"
                 "printf 'df %s\\n' \"$*\" >> \"$CALLS\"\n"
@@ -56,11 +58,15 @@ class MonitoringPreflightBehaviorTest(unittest.TestCase):
                 f"printf '/dev/sda 100000 1000 {disk_available} 2%% /var/lib/rancher/k3s/storage\\n'\n",
                 encoding="utf-8",
             )
-            for tool in (sudo, helm, df):
+            tools = [sudo, df]
+            if helm_available:
+                tools.append(helm)
+            for tool in tools:
                 tool.chmod(0o755)
+            path = f"{directory}:{os.environ['PATH']}" if helm_available else f"{directory}:/usr/bin:/bin"
             result = subprocess.run(
                 ["bash", str(SCRIPT)],
-                env={**os.environ, "PATH": f"{directory}:{os.environ['PATH']}", "CALLS": str(calls)},
+                env={**os.environ, "PATH": path, "CALLS": str(calls)},
                 capture_output=True,
                 text=True,
                 check=False,
@@ -91,6 +97,12 @@ class MonitoringPreflightBehaviorTest(unittest.TestCase):
     def test_fails_closed_when_helm_is_not_version_three(self):
         result, _ = self.run_preflight(helm3=False)
         self.assertEqual(result.returncode, 1)
+        self.assertTrue(result.stdout.rstrip().endswith("monitoring_preflight=FAIL"))
+
+    def test_reports_helm_missing_without_hiding_the_failure_reason(self):
+        result, _ = self.run_preflight(helm_available=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("check=helm status=FAIL reason=missing", result.stdout)
         self.assertTrue(result.stdout.rstrip().endswith("monitoring_preflight=FAIL"))
 
     def test_fails_closed_when_storage_has_less_than_eight_gib_available(self):
