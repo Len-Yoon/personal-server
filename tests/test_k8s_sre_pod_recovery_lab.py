@@ -101,7 +101,7 @@ class K3sSrePodRecoveryLabTest(unittest.TestCase):
 
     def test_success_evidence_keys_and_event_query_are_present(self):
         text = SCRIPT.read_text(encoding="utf-8")
-        for key in ("pod=", "sre_pod_recovery_restarts_before=", "sre_pod_recovery_restarts_after=", "ready=true", "event_seen="):
+        for key in ("pod=", "restarts_before=", "restarts_after=", "ready=true", "event_seen="):
             self.assertIn(key, text)
         self.assertIn("get events", text)
 
