@@ -55,3 +55,14 @@ bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
 이 실습은 Portal, Compose, Caddy, scheduler를 변경하지 않는다. production Deployment·Service·Secret·PVC와 GitOps 리소스를 변경하지 않으며, 실습 namespace 밖의 리소스도 변경하지 않는다. 적용 전환이나 자동 배포를 수행하지 않으므로 Portal·Compose·Caddy·scheduler 운영에는 효과가 없다.
 
 이 실습은 다른 namespace, Portal, Compose, Caddy, scheduler를 변경하거나 재시작하지 않는다.
+
+## N100 SRE 상태 점검 (읽기 전용)
+
+`infra/k8s/tools/sre-health-audit.sh`는 N100에서 수동 실행하는 읽기 전용 상태 점검 도구다. K3s 노드 중 하나 이상이 `Ready`인지 확인하고, 현재 Compose 설정에서 산출한 모든 서비스 컨테이너가 실행 중인지와 설정된 Docker health check가 `healthy`인지 확인한다. health check가 없는 실행 중 컨테이너는 정상으로 처리한다.
+
+```bash
+bash infra/k8s/tools/sre-health-audit.sh
+bash infra/k8s/tools/sre-health-audit.sh --help
+```
+
+최종 줄은 기계 판독용 `sre_health=PASS` 또는 `sre_health=FAIL`이며, PASS일 때만 종료 코드 0을 반환한다. 점검은 `k3s kubectl get nodes`, `docker compose config --services`, `docker compose ps --all` 조회만 수행하며 Compose 기동·중지·재시작, Kubernetes 리소스 변경, Secret 접근, 외부 네트워크 호출을 수행하지 않는다. N100 운영 환경에서 실행하기 전 대상 호스트와 읽기 권한을 확인한다.
