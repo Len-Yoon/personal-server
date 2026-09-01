@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+LAB_CREATED=0
+LAB_RUN_ID=""
 usage(){ echo "사용법: $0 --run | --cleanup <run-id>" >&2; }
 die(){ echo "sre_pod_recovery=FAIL"; echo "${1:-실패}" >&2; exit 1; }
 namespace_state(){
@@ -24,8 +26,9 @@ run_lab(){
   run_id="${SRE_RECOVERY_LAB_RUN_ID:-$(date -u +%Y%m%d%H%M%S)-$$}"
   [[ "$run_id" =~ ^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$ ]] || die "유효하지 않은 run id"
   NS="sre-recovery-lab-${run_id}"; POD_LABEL='app.kubernetes.io/name=sre-pod-recovery'
-  trap 'rc=$?; if [[ "$created" -eq 1 ]]; then cleanup_run "$run_id" >/dev/null 2>&1 || true; fi; trap - EXIT INT TERM; exit "$rc"' EXIT INT TERM
-  local create_output; if create_output="$(sudo k3s kubectl create namespace "$NS" 2>&1)"; then created=1; else printf '%s\n' "$create_output" >&2; die "namespace 생성 실패"; fi
+  LAB_RUN_ID="$run_id"
+  trap 'rc=$?; if [[ "$LAB_CREATED" -eq 1 ]]; then cleanup_run "$LAB_RUN_ID" >/dev/null 2>&1 || true; fi; trap - EXIT INT TERM; exit "$rc"' EXIT INT TERM
+  local create_output; if create_output="$(sudo k3s kubectl create namespace "$NS" 2>&1)"; then created=1; LAB_CREATED=1; else printf '%s\n' "$create_output" >&2; die "namespace 생성 실패"; fi
   sudo k3s kubectl apply -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
@@ -61,8 +64,8 @@ EOF
     pod="$(sudo k3s kubectl -n "$NS" get pod -l "$POD_LABEL" -o jsonpath='{.items[0].metadata.name}')" || true
     after="$(sudo k3s kubectl -n "$NS" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)"
     if (( after > baseline )) && sudo k3s kubectl -n "$NS" wait --for=condition=Ready pod "$pod" --timeout=5s >/dev/null 2>&1; then
-      event_seen=false; sudo k3s kubectl -n "$NS" get events --field-selector involvedObject.name="$pod" >/dev/null 2>&1 && event_seen=true
-      echo "sre_pod_recovery=PASS"; echo "sre_pod_recovery_run_id=${run_id}"; echo "pod=${pod}"; echo "restarts_before=${baseline}"; echo "restarts_after=${after}"; echo "ready=true"; echo "event_seen=${event_seen}"; return 0
+      event_seen=false; event_output="$(sudo k3s kubectl -n "$NS" get events --field-selector involvedObject.name="$pod" 2>/dev/null || true)"; printf '%s\n' "$event_output" | grep -Eq 'Unhealthy|Killing' && event_seen=true
+      echo "sre_pod_recovery=PASS"; echo "sre_pod_recovery_run_id=${run_id}"; echo "pod=${pod}"; echo "restarts_before=${baseline}"; echo "restarts_after=${after}"; echo "ready=true"; echo "event_seen=${event_seen}"; cleanup_run "$run_id" >/dev/null 2>&1; LAB_CREATED=0; trap - EXIT INT TERM; return 0
     fi
     sleep 2
   done
