@@ -2,12 +2,20 @@
 set -Eeuo pipefail
 usage(){ echo "사용법: $0 --run | --cleanup <run-id>" >&2; }
 die(){ echo "sre_pod_recovery=FAIL"; echo "${1:-실패}" >&2; exit 1; }
+namespace_state(){
+  local ns="$1" output
+  if output="$(sudo k3s kubectl get namespace "$ns" 2>&1)"; then return 0; fi
+  printf '%s\n' "$output" >&2
+  printf '%s\n' "$output" | grep -Eqi 'notfound|not found' && return 1
+  return 2
+}
 cleanup_run(){
   local run_id="$1" run_id_lc ns; run_id_lc="$(printf '%s' "$run_id" | tr '[:upper:]' '[:lower:]')"
   [[ "$run_id_lc" =~ ^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$ ]] || die "유효하지 않은 run id"
   ns="sre-recovery-lab-${run_id_lc}"
   sudo k3s kubectl delete namespace "$ns" --ignore-not-found=true
-  sudo k3s kubectl get namespace "$ns" >/dev/null 2>&1 && die "namespace 정리 확인 실패" || true
+  local state; if namespace_state "$ns"; then state=0; else state=$?; fi
+  case "$state" in 1) ;; 0) die "namespace 정리 확인 실패";; *) die "namespace 상태 확인 실패";; esac
 }
 run_lab(){
   local run_id run_id_lc NS POD_LABEL baseline after deadline pod
@@ -15,7 +23,8 @@ run_lab(){
   [[ "$run_id_lc" =~ ^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$ ]] || die "유효하지 않은 run id"
   NS="sre-recovery-lab-${run_id_lc}"; POD_LABEL='app.kubernetes.io/name=sre-pod-recovery'
   trap 'rc=$?; cleanup_run "$run_id" >/dev/null 2>&1 || true; trap - EXIT INT TERM; exit "$rc"' EXIT INT TERM
-  sudo k3s kubectl get namespace "$NS" >/dev/null 2>&1 && die "namespace already exists"
+  local state; if namespace_state "$NS"; then state=0; else state=$?; fi
+  case "$state" in 0) die "namespace already exists";; 1) ;; *) die "namespace 상태 확인 실패";; esac
   sudo k3s kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Namespace

@@ -39,6 +39,19 @@ class K3sSrePodRecoveryLabTest(unittest.TestCase):
             self.assertIn("delete namespace sre-recovery-lab-apply-failure", recorded)
             self.assertNotIn("portal-web", recorded)
 
+    def test_namespace_api_error_fails_without_apply_or_delete(self):
+        with tempfile.TemporaryDirectory() as td:
+            calls = pathlib.Path(td) / "calls"
+            fake = pathlib.Path(td) / "sudo"
+            fake.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\n[ \"$3\" = get ] && { echo 'connection refused' >&2; exit 1; }\nexit 0\n")
+            fake.chmod(0o755)
+            env = {**os.environ, "PATH": f"{td}:{os.environ['PATH']}", "CALLS": str(calls), "SRE_RECOVERY_LAB_RUN_ID": "api-error"}
+            result = subprocess.run(["bash", str(SCRIPT), "--run"], env=env, check=False, text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            recorded = calls.read_text()
+            self.assertNotIn(" apply ", recorded)
+            self.assertNotIn(" delete ", recorded)
+
 
 if __name__ == "__main__":
     unittest.main()
