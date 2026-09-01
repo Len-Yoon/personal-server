@@ -41,7 +41,7 @@ bash infra/k8s/tools/sre-pod-recovery-lab.sh --run
 
 - 실행별 `sre-recovery-lab-<run-id>` namespace가 생성되어 다른 namespace와 격리됨
 - liveness sentinel로 비정상 상태를 유도한 뒤 같은 Deployment의 Pod가 재시작됨 (`restartCount` 증가)
-- 새 Pod가 `Ready` 조건으로 복구됨
+- `restartCount`가 증가한 선택 Pod가 `Ready` 조건으로 복구됨
 - 실행 종료 시 해당 실습 namespace만 정리됨
 
 비정상 중단으로 정리되지 않은 실행만 run ID를 지정해 정리한다.

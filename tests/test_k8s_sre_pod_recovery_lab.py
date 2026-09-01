@@ -14,8 +14,15 @@ class K3sSrePodRecoveryLabTest(unittest.TestCase):
         text = readme.read_text(encoding="utf-8")
         self.assertIn("sre-pod-recovery-lab.sh --run", text)
         self.assertIn("sre-pod-recovery-lab.sh --cleanup", text)
+        self.assertIn("sre-recovery-lab-<run-id>", text)
+        self.assertIn("`restartCount`가 증가한", text)
+        self.assertIn("Pod가 `Ready` 조건으로 복구됨", text)
         self.assertIn("Portal", text)
+        self.assertIn("Compose", text)
+        self.assertIn("Caddy", text)
+        self.assertIn("scheduler", text)
         self.assertIn("변경하지 않는다", text)
+        self.assertNotIn("새 Pod", text)
 
     def test_lab_uses_isolated_deployment_and_liveness_sentinel(self):
         text = SCRIPT.read_text(encoding="utf-8")
