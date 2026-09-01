@@ -25,6 +25,7 @@ run_lab(){
   trap 'rc=$?; if [[ "$created" -eq 1 ]]; then cleanup_run "$run_id" >/dev/null 2>&1 || true; fi; trap - EXIT INT TERM; exit "$rc"' EXIT INT TERM
   local state; if namespace_state "$NS"; then state=0; else state=$?; fi
   case "$state" in 0) die "namespace already exists";; 1) ;; *) die "namespace 상태 확인 실패";; esac
+  created=1
   sudo k3s kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Namespace
@@ -56,7 +57,6 @@ spec:
           initialDelaySeconds: 1
           periodSeconds: 2
 EOF
-  created=1
   sudo k3s kubectl -n "$NS" wait --for=condition=Available deployment/sre-pod-recovery --timeout="${SRE_RECOVERY_LAB_TIMEOUT:-90}s"
   pod="$(sudo k3s kubectl -n "$NS" get pod -l "$POD_LABEL" -o jsonpath='{.items[0].metadata.name}')"
   baseline="$(sudo k3s kubectl -n "$NS" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}')"
