@@ -39,6 +39,8 @@ bash infra/k8s/tools/sre-pod-recovery-lab.sh --run
 
 정상 완료 시 `PASS` 출력과 함께 다음 증거를 확인한다.
 
+실습 리소스는 sre-recovery-lab-<run-id> namespace에만 생성된다.
+
 - 실행별 `sre-recovery-lab-<run-id>` namespace가 생성되어 다른 namespace와 격리됨
 - liveness sentinel로 비정상 상태를 유도한 뒤 같은 Deployment의 Pod가 재시작됨 (`restartCount` 증가)
 - `restartCount`가 증가한 선택 Pod가 `Ready` 조건으로 복구됨
@@ -51,3 +53,5 @@ bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
 ```
 
 이 실습은 Portal, Compose, Caddy, scheduler를 변경하지 않는다. production Deployment·Service·Secret·PVC와 GitOps 리소스를 변경하지 않으며, 실습 namespace 밖의 리소스도 변경하지 않는다. 적용 전환이나 자동 배포를 수행하지 않으므로 Portal·Compose·Caddy·scheduler 운영에는 효과가 없다.
+
+이 실습은 다른 namespace, Portal, Compose, Caddy, scheduler를 변경하거나 재시작하지 않는다.

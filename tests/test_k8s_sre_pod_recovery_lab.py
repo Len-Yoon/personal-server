@@ -15,6 +15,7 @@ class K3sSrePodRecoveryLabTest(unittest.TestCase):
         self.assertIn("sre-pod-recovery-lab.sh --run", text)
         self.assertIn("sre-pod-recovery-lab.sh --cleanup", text)
         self.assertIn("sre-recovery-lab-<run-id>", text)
+        self.assertIn("실습 리소스는 sre-recovery-lab-<run-id> namespace에만 생성된다.", text)
         self.assertIn("`restartCount`가 증가한", text)
         self.assertIn("Pod가 `Ready` 조건으로 복구됨", text)
         self.assertIn("Portal", text)
@@ -22,6 +23,7 @@ class K3sSrePodRecoveryLabTest(unittest.TestCase):
         self.assertIn("Caddy", text)
         self.assertIn("scheduler", text)
         self.assertIn("변경하지 않는다", text)
+        self.assertIn("이 실습은 다른 namespace, Portal, Compose, Caddy, scheduler를 변경하거나 재시작하지 않는다.", text)
         self.assertNotIn("새 Pod", text)
 
     def test_lab_uses_isolated_deployment_and_liveness_sentinel(self):
