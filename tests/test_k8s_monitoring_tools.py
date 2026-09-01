@@ -352,6 +352,7 @@ class MonitoringToolsTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0)
         self.assertIn("port-forward --address 127.0.0.1 service/personal-server-monitoring-grafana 3000:80", calls)
+        self.assertIn("port-forward --address 127.0.0.1 service/personal-server-monitoring-prometheus 9090:9090", calls)
         self.assertIn("http://127.0.0.1:3000/login", calls)
         self.assertNotIn("get secret", calls)
         self.assertNotIn("jsonpath='{.data", calls)
