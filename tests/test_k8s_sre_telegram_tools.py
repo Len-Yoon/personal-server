@@ -881,6 +881,75 @@ class SreTelegramToolContractTest(unittest.TestCase):
             calls,
         )
 
+    def test_install_accepts_numeric_helm_status_version_as_previous_revision(self):
+        result, calls = self.run_tool(
+            "sre-telegram-install.sh",
+            "--apply",
+            stubs={
+                "preflight": "#!/bin/sh\nprintf 'sre_telegram_preflight=PASS\\n'\nexit 0\n",
+                "sudo": "#!/bin/sh\n"
+                "printf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *describe*) printf 'telegram_bot_token: 3 bytes\\nallowed_chat_id: 2 bytes\\nalertmanager_auth_token: 3 bytes\\nalertmanager.yaml: 4 bytes\\n'; exit 0;;\n"
+                "  *'apply --dry-run=client'*) exit 0;;\n"
+                "  *'images list'*) printf 'REF TYPE DIGEST SIZE PLATFORMS LABELS\\npersonal-server-sre-telegram-relay:latest x sha256:abc 1MB linux/amd64 -\\n'; exit 0;;\n"
+                "  *'create -f'*) printf 'configmap/sre-telegram-relay-state created\\n'; exit 0;;\n"
+                "  *delete*) exit 0;;\n"
+                "  *) exit 0;;\n"
+                "esac\n",
+                "docker": "#!/bin/sh\ncase \"$1\" in build) exit 0;; save) printf image-stream; exit 0;; esac\n",
+                "helm": "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  template) exit 0;;\n"
+                "  status) printf '{\"info\":{\"status\":\"deployed\",\"version\":3}}\\n'; exit 0;;\n"
+                "  upgrade) printf 'helm %s\\n' \"$*\" >> \"$CALLS\"; exit 1;;\n"
+                "  rollback) printf 'helm %s\\n' \"$*\" >> \"$CALLS\"; exit 0;;\n"
+                "  *) exit 0;;\n"
+                "esac\n",
+            },
+            env_overrides={"SRE_TELEGRAM_PREFLIGHT_SCRIPT": "preflight"},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_install=FAIL"))
+        self.assertIn(
+            "helm rollback personal-server-monitoring 3 --namespace monitoring",
+            calls,
+        )
+
+    def test_install_rejects_nested_chart_version_without_info_revision_or_version(self):
+        result, calls = self.run_tool(
+            "sre-telegram-install.sh",
+            "--apply",
+            stubs={
+                "preflight": "#!/bin/sh\nprintf 'sre_telegram_preflight=PASS\\n'\nexit 0\n",
+                "sudo": "#!/bin/sh\n"
+                "printf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *describe*) printf 'telegram_bot_token: 3 bytes\\nallowed_chat_id: 2 bytes\\nalertmanager_auth_token: 3 bytes\\nalertmanager.yaml: 4 bytes\\n'; exit 0;;\n"
+                "  *'apply --dry-run=client'*) exit 0;;\n"
+                "  *'images list'*) printf 'REF TYPE DIGEST SIZE PLATFORMS LABELS\\npersonal-server-sre-telegram-relay:latest x sha256:abc 1MB linux/amd64 -\\n'; exit 0;;\n"
+                "  *'create -f'*) printf 'configmap/sre-telegram-relay-state created\\n'; exit 0;;\n"
+                "  *delete*) exit 0;;\n"
+                "  *) exit 0;;\n"
+                "esac\n",
+                "docker": "#!/bin/sh\ncase \"$1\" in build) exit 0;; save) printf image-stream; exit 0;; esac\n",
+                "helm": "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  template) exit 0;;\n"
+                "  status) printf '{\"info\":{\"status\":\"deployed\"},\"chart\":{\"metadata\":{\"version\":\"3\"}}}\n'; exit 0;;\n"
+                "  upgrade) printf 'helm %s\\n' \"$*\" >> \"$CALLS\"; exit 1;;\n"
+                "  rollback) printf 'helm %s\\n' \"$*\" >> \"$CALLS\"; exit 0;;\n"
+                "  *) exit 0;;\n"
+                "esac\n",
+            },
+            env_overrides={"SRE_TELEGRAM_PREFLIGHT_SCRIPT": "preflight"},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_install=FAIL"))
+        self.assertNotIn("helm rollback", calls)
+
     def test_install_never_snapshots_helm_values_or_manifest(self):
         result, calls = self.run_tool(
             "sre-telegram-install.sh",

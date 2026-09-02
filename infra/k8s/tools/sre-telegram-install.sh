@@ -216,10 +216,14 @@ verify_imported_image() {
 }
 
 capture_previous_helm_state() {
-  local status
+  local status info
   status=$(helm status "$RELEASE" --namespace "$NAMESPACE" --output json 2>/dev/null) || return 1
-  [[ "$status" =~ \"status\"[[:space:]]*:[[:space:]]*\"deployed\" ]] || return 1
-  if [[ "$status" =~ \"revision\"[[:space:]]*:[[:space:]]*\"?([0-9]+)\"? ]]; then
+  [[ "$status" =~ ^\{[^\{\}]*\"info\"[[:space:]]*:[[:space:]]*\{([^\{\}]*)\} ]] || return 1
+  info="${BASH_REMATCH[1]}"
+  [[ "$info" =~ \"status\"[[:space:]]*:[[:space:]]*\"deployed\"[[:space:]]*[,}] ]] || return 1
+  if [[ "$info" =~ \"revision\"[[:space:]]*:[[:space:]]*\"?([0-9]+)\"?([,}[:space:]]|$) ]]; then
+    HELM_PREVIOUS_REVISION="${BASH_REMATCH[1]}"
+  elif [[ "$info" =~ \"version\"[[:space:]]*:[[:space:]]*\"?([0-9]+)\"?([,}[:space:]]|$) ]]; then
     HELM_PREVIOUS_REVISION="${BASH_REMATCH[1]}"
   else
     return 1
@@ -232,7 +236,9 @@ verify_or_restore_helm_release() {
 
   helm rollback "$RELEASE" "$HELM_PREVIOUS_REVISION" --namespace "$NAMESPACE" --wait --timeout 10m >/dev/null 2>&1 || return 1
   status=$(helm status "$RELEASE" --namespace "$NAMESPACE" --output json 2>/dev/null) || return 1
-  [[ "$status" =~ \"status\"[[:space:]]*:[[:space:]]*\"deployed\" ]]
+  [[ "$status" =~ ^\{[^\{\}]*\"info\"[[:space:]]*:[[:space:]]*\{([^\{\}]*)\} ]] || return 1
+  status="${BASH_REMATCH[1]}"
+  [[ "$status" =~ \"status\"[[:space:]]*:[[:space:]]*\"deployed\"[[:space:]]*[,}] ]]
 }
 
 cleanup_apply() {
