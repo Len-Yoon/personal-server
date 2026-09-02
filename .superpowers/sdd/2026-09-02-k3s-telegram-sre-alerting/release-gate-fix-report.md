@@ -93,3 +93,39 @@ RED 실행 결과는 7건 중 6건 실패였음. message delivery-only 로그 �
 - 구현·검증은 단일 담당자가 수행함.
 - 하위 에이전트는 상위 지시의 명시적 금지 조건에 따라 사용하지 않음.
 - 동일 파일 동시 수정은 수행하지 않았으며, 변경 범위·제외 범위·성공 기준을 작업 시작 전에 선언함.
+
+## 10. P1 구조적 Alertmanager route 검증 보완
+
+### 10.1 재검토 근거 및 근본 원인
+
+`release-gate-review.md`의 P1 지적을 반영함. 기존 effective-config gate는 `amtool check-config` 후 route matcher, receiver, URL, Bearer 문자열을 독립적으로 검색했음. 따라서 `sre_telegram="true"` route가 noop receiver를 선택하고, 도달하지 않는 별도 route/receiver에 relay URL과 Bearer 설정이 존재하는 문법상 유효 YAML이 PASS할 수 있었음.
+
+### 10.2 TDD 수행 결과
+
+| 단계 | 검증 | 결과 |
+|---|---|---|
+| RED | `test_preflight_rejects_amtool_valid_config_when_sre_route_does_not_select_relay` | 기존 구현에서 return code `0`으로 PASS하여 우회를 재현함 |
+| GREEN | 동일 테스트 및 정상 config/`amtool` 실패 경로 3건 | 3건 통과함 |
+
+### 10.3 보완 내용
+
+- 독립 문자열 검색을 제거하고, 비출력 Python YAML parser로 operator-supplied local config의 구조를 검증함.
+- root route의 non-empty `group_by`, `repeat_interval: 4h`를 확인함.
+- 모든 `sre_telegram=true` 또는 모호한 `sre_telegram` matcher 경로가 relay receiver를 명시적으로 선택하는지 확인함.
+- relay receiver가 하나만 존재하고, webhook이 하나만 존재하며, 해당 webhook이 ClusterIP URL, `send_resolved: true`, `type: Bearer`, expected credentials file을 함께 사용하는지 확인함.
+- YAML parser를 사용할 수 없거나 YAML 구조가 예상과 다르면 출력 없이 FAIL 처리함. Kubernetes Secret 값, local config 내용, token, payload는 로그·terminal에 출력하지 않음.
+
+### 10.4 재검증 결과
+
+| 검증 | 결과 |
+|---|---|
+| SRE relay·manifest·tool 회귀군 | 71건 통과 |
+| monitoring 회귀군 | 30건 통과 |
+| SRE health audit·pod recovery 회귀군 | 15건 통과 |
+| 총 관련 회귀군 | 116건 통과 |
+| Shell syntax 및 diff whitespace | 통과 |
+
+### 10.5 추가 확인 필요 사항
+
+- N100에서 `amtool`과 Python YAML parser가 모두 이용 가능해야 하며, 하나라도 없으면 의도적으로 preflight FAIL됨.
+- 실제 N100 operator file 검증은 승인된 Secret manager 절차에서만 수행 필요함. 본 보완에서는 N100, 실제 Secret, network, deploy를 수행하지 않음.

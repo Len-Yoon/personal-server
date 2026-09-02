@@ -50,39 +50,124 @@ alertmanager_contract_valid() {
   done
 }
 
-config_contains_non_comment_contract_text() {
-  local config_file="$1" required="$2"
-  awk -v required="$required" '
-    /^[[:space:]]*#/ { next }
-    {
-      line = $0
-      sub(/[[:space:]]+#.*/, "", line)
-      if (index(line, required) > 0) {
-        found = 1
-      }
-    }
-    END { exit(found ? 0 : 1) }
-  ' "$config_file"
+alertmanager_effective_config_structure_valid() {
+  local config_file="$1"
+  python3 - "$config_file" >/dev/null 2>&1 <<'PY'
+import re
+import sys
+
+RELAY_RECEIVER = "sre-telegram-relay"
+RELAY_URL = "http://sre-telegram-relay.monitoring.svc:8080/alertmanager"
+BEARER_CREDENTIALS_FILE = (
+    "/etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token"
+)
+MATCHER = re.compile(r"^sre_telegram\s*=\s*(?:[\"'])?(true|false)(?:[\"'])?$")
+
+
+def fail() -> None:
+    raise ValueError("invalid Alertmanager SRE route structure")
+
+
+def matcher_value(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return value.strip().lower()
+    return "ambiguous"
+
+
+def sre_telegram_matchers(route):
+    values = []
+    direct_match = route.get("match")
+    if isinstance(direct_match, dict) and "sre_telegram" in direct_match:
+        values.append(matcher_value(direct_match["sre_telegram"]))
+
+    matchers = route.get("matchers")
+    if matchers is not None:
+        if not isinstance(matchers, list):
+            fail()
+        for matcher in matchers:
+            if not isinstance(matcher, str):
+                fail()
+            normalized = matcher.strip().lower()
+            if normalized.startswith("sre_telegram"):
+                match = MATCHER.fullmatch(normalized)
+                values.append(match.group(1) if match else "ambiguous")
+    return values
+
+
+def routes_in(route):
+    yield route
+    children = route.get("routes", [])
+    if not isinstance(children, list):
+        fail()
+    for child in children:
+        if not isinstance(child, dict):
+            fail()
+        yield from routes_in(child)
+
+
+def receiver_is_valid(receivers):
+    if not isinstance(receivers, list):
+        return False
+    relay_receivers = [receiver for receiver in receivers if isinstance(receiver, dict) and receiver.get("name") == RELAY_RECEIVER]
+    if len(relay_receivers) != 1:
+        return False
+    webhooks = relay_receivers[0].get("webhook_configs")
+    if not isinstance(webhooks, list) or len(webhooks) != 1:
+        return False
+    webhook = webhooks[0]
+    if not isinstance(webhook, dict):
+        return False
+    authorization = webhook.get("http_config", {}).get("authorization")
+    return (
+        webhook.get("url") == RELAY_URL
+        and webhook.get("send_resolved") is True
+        and isinstance(authorization, dict)
+        and authorization.get("type") == "Bearer"
+        and authorization.get("credentials_file") == BEARER_CREDENTIALS_FILE
+    )
+
+
+try:
+    import yaml
+    with open(sys.argv[1], encoding="utf-8") as config_stream:
+        config = yaml.safe_load(config_stream)
+    if not isinstance(config, dict):
+        fail()
+    route = config.get("route")
+    if not isinstance(route, dict):
+        fail()
+    if not isinstance(route.get("group_by"), list) or not route["group_by"]:
+        fail()
+    if route.get("repeat_interval") != "4h":
+        fail()
+    matching_routes = [
+        candidate
+        for candidate in routes_in(route)
+        if any(value in {"true", "ambiguous"} for value in sre_telegram_matchers(candidate))
+    ]
+    if not matching_routes:
+        fail()
+    if any(
+        candidate.get("receiver") != RELAY_RECEIVER
+        or any(value != "true" for value in sre_telegram_matchers(candidate))
+        for candidate in matching_routes
+    ):
+        fail()
+    if not receiver_is_valid(config.get("receivers")):
+        fail()
+except Exception:
+    sys.exit(1)
+PY
 }
 
 alertmanager_effective_config_valid() {
-  local config_file="$1" required
+  local config_file="$1"
   [ -n "$config_file" ] && [ -f "$config_file" ] && [ -r "$config_file" ] || return 1
   command -v amtool >/dev/null 2>&1 || return 1
   amtool check-config "$config_file" >/dev/null 2>&1 || return 1
-
-  for required in \
-    'route:' \
-    'group_by:' \
-    'repeat_interval: 4h' \
-    'sre_telegram="true"' \
-    'receiver: sre-telegram-relay' \
-    'url: http://sre-telegram-relay.monitoring.svc:8080/alertmanager' \
-    'send_resolved: true' \
-    'type: Bearer' \
-    'credentials_file: /etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token'; do
-    config_contains_non_comment_contract_text "$config_file" "$required" || return 1
-  done
+  alertmanager_effective_config_structure_valid "$config_file"
 }
 
 monitoring_release_deployed() {
