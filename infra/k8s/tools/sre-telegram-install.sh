@@ -218,18 +218,21 @@ verify_imported_image() {
 }
 
 capture_previous_helm_state() {
-  local status info
+  local status
   status=$(helm status "$RELEASE" --namespace "$NAMESPACE" --output json 2>/dev/null) || return 1
-  [[ "$status" =~ ^\{[^\{\}]*\"info\"[[:space:]]*:[[:space:]]*\{([^\{\}]*)\} ]] || return 1
-  info="${BASH_REMATCH[1]}"
-  [[ "$info" =~ \"status\"[[:space:]]*:[[:space:]]*\"deployed\"[[:space:]]*[,}] ]] || return 1
-  if [[ "$info" =~ \"revision\"[[:space:]]*:[[:space:]]*\"?([0-9]+)\"?([,}[:space:]]|$) ]]; then
-    HELM_PREVIOUS_REVISION="${BASH_REMATCH[1]}"
-  elif [[ "$info" =~ \"version\"[[:space:]]*:[[:space:]]*\"?([0-9]+)\"?([,}[:space:]]|$) ]]; then
-    HELM_PREVIOUS_REVISION="${BASH_REMATCH[1]}"
-  else
-    return 1
-  fi
+  HELM_PREVIOUS_REVISION=$(python3 -c '
+import json
+import sys
+
+release = json.load(sys.stdin)
+info = release.get("info")
+if not isinstance(info, dict) or info.get("status") != "deployed":
+    raise SystemExit(1)
+revision = release.get("version")
+if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+    raise SystemExit(1)
+print(revision)
+' <<< "$status") || return 1
 }
 
 verify_or_restore_helm_release() {
