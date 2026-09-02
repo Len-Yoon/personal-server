@@ -613,6 +613,7 @@ def run_polling(
     consecutive_failures = 0
     cycles = 0
     while True:
+        polling_failed = False
         try:
             delivered = _poll_once(relay, telegram_client, allowed_chat_id)
         except Exception as exc:
@@ -621,6 +622,7 @@ def run_polling(
                 type(exc).__name__,
                 consecutive_failures + 1,
             )
+            polling_failed = True
             delivered = False
         cycles += 1
         if delivered:
@@ -628,7 +630,7 @@ def run_polling(
             consecutive_failures = 0
             delay = 1
         else:
-            if consecutive_failures == 0:
+            if not polling_failed and consecutive_failures == 0:
                 LOGGER.warning("telegram_delivery_failed reason=send_message_rejected")
             relay.mark_unhealthy()
             consecutive_failures += 1

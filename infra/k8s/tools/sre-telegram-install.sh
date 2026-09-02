@@ -13,6 +13,7 @@ ALERTMANAGER_VALUES="$REPO_ROOT/infra/k8s/sre-telegram/alertmanager-values.yaml"
 RELAY_BASE="$REPO_ROOT/infra/k8s/sre-telegram/base.yaml"
 PROMETHEUS_RULE="$REPO_ROOT/infra/k8s/sre-telegram/prometheus-rule.yaml"
 ALERTMANAGER_CONFIG_CONTRACT="${SRE_TELEGRAM_ALERTMANAGER_CONFIG_CONTRACT:-$REPO_ROOT/infra/k8s/sre-telegram/alertmanager-config.contract.yaml}"
+ALERTMANAGER_CONFIG_FILE="${SRE_TELEGRAM_ALERTMANAGER_CONFIG_FILE:-}"
 PREFLIGHT_SCRIPT="${SRE_TELEGRAM_PREFLIGHT_SCRIPT:-$SCRIPT_DIR/sre-telegram-preflight.sh}"
 
 created_resources=()
@@ -22,6 +23,7 @@ CLEANUP_DONE=0
 INTERRUPTED=0
 HELM_UPGRADE_STARTED=0
 HELM_PREVIOUS_REVISION=""
+HELM_SNAPSHOT_DIR=""
 
 fail() {
   printf 'sre_telegram_install=FAIL\n'
@@ -29,8 +31,8 @@ fail() {
 }
 
 usage() {
-  printf 'usage: %s [--render|--apply]\n' "$0" >&2
-  printf '%s\n' 'default is --render; --apply is required to change the N100 cluster.' >&2
+  printf 'usage: %s [--render|--apply [--alertmanager-config-file PATH]]\n' "$0" >&2
+  printf '%s\n' 'default is --render; --apply requires an N100 operator-supplied local Alertmanager config file.' >&2
 }
 
 render() {
@@ -211,8 +213,17 @@ verify_imported_image() {
   printf '%s\n' "$image_listing" | awk -v image="$IMAGE" 'NR > 1 && $1 == image && $3 ~ /^sha256:[[:xdigit:]]+$/ { found=1 } END { exit(found ? 0 : 1) }'
 }
 
-capture_previous_helm_revision() {
+cleanup_helm_snapshot() {
+  if [ -n "$HELM_SNAPSHOT_DIR" ] && [ -d "$HELM_SNAPSHOT_DIR" ]; then
+    rm -rf -- "$HELM_SNAPSHOT_DIR"
+  fi
+  HELM_SNAPSHOT_DIR=""
+}
+
+capture_previous_helm_state() {
   local status
+  cleanup_helm_snapshot
+  HELM_SNAPSHOT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/sre-telegram-helm-state.XXXXXX") || return 1
   status=$(helm status "$RELEASE" --namespace "$NAMESPACE" --output json 2>/dev/null) || return 1
   [[ "$status" =~ \"status\"[[:space:]]*:[[:space:]]*\"deployed\" ]] || return 1
   if [[ "$status" =~ \"revision\"[[:space:]]*:[[:space:]]*\"?([0-9]+)\"? ]]; then
@@ -220,30 +231,35 @@ capture_previous_helm_revision() {
   else
     return 1
   fi
+  helm get values "$RELEASE" --namespace "$NAMESPACE" --all --output yaml > "$HELM_SNAPSHOT_DIR/values.yaml" 2>/dev/null || return 1
+  helm get manifest "$RELEASE" --namespace "$NAMESPACE" > "$HELM_SNAPSHOT_DIR/manifest.yaml" 2>/dev/null || return 1
+  [ -s "$HELM_SNAPSHOT_DIR/manifest.yaml" ]
 }
 
-helm_revision_is_restored() {
-  local status="$1"
+helm_state_matches_snapshot() {
+  local status
+  [ -n "$HELM_SNAPSHOT_DIR" ] && [ -r "$HELM_SNAPSHOT_DIR/values.yaml" ] && [ -r "$HELM_SNAPSHOT_DIR/manifest.yaml" ] || return 1
+  status=$(helm status "$RELEASE" --namespace "$NAMESPACE" --output json 2>/dev/null) || return 1
   [[ "$status" =~ \"status\"[[:space:]]*:[[:space:]]*\"deployed\" ]] || return 1
-  [[ "$status" =~ \"revision\"[[:space:]]*:[[:space:]]*\"?${HELM_PREVIOUS_REVISION}\"?([,}]) ]]
+  helm get values "$RELEASE" --namespace "$NAMESPACE" --all --output yaml > "$HELM_SNAPSHOT_DIR/current-values.yaml" 2>/dev/null || return 1
+  helm get manifest "$RELEASE" --namespace "$NAMESPACE" > "$HELM_SNAPSHOT_DIR/current-manifest.yaml" 2>/dev/null || return 1
+  cmp -s "$HELM_SNAPSHOT_DIR/values.yaml" "$HELM_SNAPSHOT_DIR/current-values.yaml" || return 1
+  cmp -s "$HELM_SNAPSHOT_DIR/manifest.yaml" "$HELM_SNAPSHOT_DIR/current-manifest.yaml"
 }
 
 verify_or_restore_helm_release() {
-  local status
   [ -n "$HELM_PREVIOUS_REVISION" ] || return 1
 
   if [ "$INTERRUPTED" -eq 1 ]; then
     helm rollback "$RELEASE" "$HELM_PREVIOUS_REVISION" --namespace "$NAMESPACE" --wait --timeout 10m >/dev/null 2>&1 || return 1
   fi
 
-  status=$(helm status "$RELEASE" --namespace "$NAMESPACE" --output json 2>/dev/null) || return 1
-  if helm_revision_is_restored "$status"; then
+  if helm_state_matches_snapshot; then
     return 0
   fi
 
   helm rollback "$RELEASE" "$HELM_PREVIOUS_REVISION" --namespace "$NAMESPACE" --wait --timeout 10m >/dev/null 2>&1 || return 1
-  status=$(helm status "$RELEASE" --namespace "$NAMESPACE" --output json 2>/dev/null) || return 1
-  helm_revision_is_restored "$status"
+  helm_state_matches_snapshot
 }
 
 cleanup_apply() {
@@ -256,9 +272,12 @@ cleanup_apply() {
   if [ "$APPLY_MODE" -eq 1 ] && [ "$status" -ne 0 ]; then
     rollback_created_resources
     if [ "$HELM_UPGRADE_STARTED" -eq 1 ] && [ -n "$HELM_PREVIOUS_REVISION" ]; then
-      verify_or_restore_helm_release || true
+      if ! verify_or_restore_helm_release; then
+        printf 'sre_telegram_helm_restore=UNVERIFIED\n' >&2
+      fi
     fi
   fi
+  cleanup_helm_snapshot
   return "$status"
 }
 
@@ -268,7 +287,9 @@ interrupt_apply() {
 }
 
 apply() {
-  "$PREFLIGHT_SCRIPT" >/dev/null 2>&1 || return 1
+  local alertmanager_config_file="$1"
+  [ -n "$alertmanager_config_file" ] || return 1
+  "$PREFLIGHT_SCRIPT" --alertmanager-config-file "$alertmanager_config_file" >/dev/null 2>&1 || return 1
   require_secret_contract sre-telegram-relay-runtime telegram_bot_token allowed_chat_id alertmanager_auth_token || return 1
   require_secret_contract sre-telegram-alertmanager-config alertmanager.yaml || return 1
   render || return 1
@@ -279,30 +300,39 @@ apply() {
   verify_imported_image || return 1
   apply_file "$RELAY_BASE" || return 1
   apply_file "$PROMETHEUS_RULE" || return 1
-  capture_previous_helm_revision || return 1
+  capture_previous_helm_state || return 1
   HELM_UPGRADE_STARTED=1
   helm upgrade "$RELEASE" "$CHART" --namespace "$NAMESPACE" --version "$VERSION" \
     --values "$ALERTMANAGER_VALUES" --reuse-values --atomic --wait --timeout 10m || return 1
 }
 
 main() {
-  [ "$#" -le 1 ] || { usage; fail; return 2; }
   local mode="${1:---render}"
+  local alertmanager_config_file="$ALERTMANAGER_CONFIG_FILE"
   case "$mode" in
     --render)
+      [ "$#" -eq 1 ] || { usage; fail; return 2; }
       render || { fail; return 1; }
       printf 'sre_telegram_install=PASS\n'
       ;;
     --apply)
+      if [ "$#" -eq 3 ] && [ "$2" = "--alertmanager-config-file" ]; then
+        alertmanager_config_file="$3"
+      elif [ "$#" -ne 1 ]; then
+        usage
+        fail
+        return 2
+      fi
       APPLY_MODE=1
       trap cleanup_apply EXIT
       trap interrupt_apply INT TERM
-      if ! apply; then
+      if ! apply "$alertmanager_config_file"; then
         fail
         return 1
       fi
       APPLY_MODE=0
       trap - EXIT INT TERM
+      cleanup_helm_snapshot
       printf 'sre_telegram_install=PASS\n'
       ;;
     *)

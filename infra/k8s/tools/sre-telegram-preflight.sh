@@ -10,11 +10,17 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd)
 IMAGE_DIR="$REPO_ROOT/sre-telegram-relay"
 ALERTMANAGER_CONFIG_CONTRACT="${SRE_TELEGRAM_ALERTMANAGER_CONFIG_CONTRACT:-$REPO_ROOT/infra/k8s/sre-telegram/alertmanager-config.contract.yaml}"
+ALERTMANAGER_CONFIG_FILE="${SRE_TELEGRAM_ALERTMANAGER_CONFIG_FILE:-}"
 overall=0
 
 fail_check() {
   overall=1
   printf 'check=%s status=FAIL reason=%s\n' "$1" "$2"
+}
+
+usage() {
+  printf 'usage: %s [--alertmanager-config-file PATH]\n' "$0" >&2
+  printf '%s\n' 'An N100 operator-supplied local Alertmanager config file is required; its contents are never printed.' >&2
 }
 
 secret_keys_present() {
@@ -44,6 +50,41 @@ alertmanager_contract_valid() {
   done
 }
 
+config_contains_non_comment_contract_text() {
+  local config_file="$1" required="$2"
+  awk -v required="$required" '
+    /^[[:space:]]*#/ { next }
+    {
+      line = $0
+      sub(/[[:space:]]+#.*/, "", line)
+      if (index(line, required) > 0) {
+        found = 1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$config_file"
+}
+
+alertmanager_effective_config_valid() {
+  local config_file="$1" required
+  [ -n "$config_file" ] && [ -f "$config_file" ] && [ -r "$config_file" ] || return 1
+  command -v amtool >/dev/null 2>&1 || return 1
+  amtool check-config "$config_file" >/dev/null 2>&1 || return 1
+
+  for required in \
+    'route:' \
+    'group_by:' \
+    'repeat_interval: 4h' \
+    'sre_telegram="true"' \
+    'receiver: sre-telegram-relay' \
+    'url: http://sre-telegram-relay.monitoring.svc:8080/alertmanager' \
+    'send_resolved: true' \
+    'type: Bearer' \
+    'credentials_file: /etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token'; do
+    config_contains_non_comment_contract_text "$config_file" "$required" || return 1
+  done
+}
+
 monitoring_release_deployed() {
   local status
   status=$(helm status "$RELEASE" --namespace "$NAMESPACE" --output json 2>/dev/null) || return 1
@@ -60,8 +101,28 @@ positive_replica_count() {
 }
 
 main() {
-  if [ "$#" -ne 0 ]; then
-    printf 'usage: %s\n' "$0" >&2
+  local alertmanager_config_file="$ALERTMANAGER_CONFIG_FILE"
+  case "$#" in
+    0)
+      ;;
+    2)
+      if [ "$1" = "--alertmanager-config-file" ]; then
+        alertmanager_config_file="$2"
+      else
+        usage
+        printf 'sre_telegram_preflight=FAIL\n'
+        return 2
+      fi
+      ;;
+    *)
+      usage
+      printf 'sre_telegram_preflight=FAIL\n'
+      return 2
+      ;;
+  esac
+
+  if [ -z "$alertmanager_config_file" ]; then
+    usage
     printf 'sre_telegram_preflight=FAIL\n'
     return 2
   fi
@@ -96,6 +157,9 @@ main() {
 
   if ! alertmanager_contract_valid; then
     fail_check alertmanager_config_contract invalid
+  fi
+  if ! alertmanager_effective_config_valid "$alertmanager_config_file"; then
+    fail_check alertmanager_effective_config invalid_or_unavailable
   fi
 
   if ! secret_keys_present "$RUNTIME_SECRET" telegram_bot_token allowed_chat_id alertmanager_auth_token; then

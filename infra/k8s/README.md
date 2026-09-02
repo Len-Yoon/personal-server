@@ -91,12 +91,15 @@ bash infra/k8s/tools/sre-telegram-secret-template.sh
 | Secret 이름 | 필수 키 이름 | 관리 기준 |
 |---|---|---|
 | `sre-telegram-relay-runtime` | `telegram_bot_token`, `allowed_chat_id`, `alertmanager_auth_token` | N100 로컬 운영자 seed 필요 |
-| `sre-telegram-alertmanager-config` | `alertmanager.yaml` | N100 로컬 Alertmanager 설정 seed 필요; 계약 파일과 `amtool check-config`로 route/group/repeat/resolved/Bearer 연결 검증 필요 |
+| `sre-telegram-alertmanager-config` | `alertmanager.yaml` | N100 로컬 Alertmanager 설정 seed 필요; 운영자 임시 로컬 파일과 `amtool check-config`로 route/group/repeat/resolved/relay/Bearer 연결 검증 필요 |
 
-설치 전에는 읽기 전용 preflight를 실행한다. 기존 `personal-server-monitoring` Helm release가 `deployed` 상태인지, 기존 `personal-server-monitoring-prometheus` Service와 label 기반 Prometheus StatefulSet이 준비되었는지 함께 확인한다. Secret 검사는 `kubectl describe secret`의 키 이름과 1바이트 이상 여부만 확인하며, Secret 값 또는 `.data`를 읽거나 출력하지 않는다. 계약 검사는 Git의 비밀값 없는 템플릿만 확인하며 실제 Secret 내용은 승인된 N100 Secret manager 절차에서만 `amtool check-config`로 검증한다.
+설치 전에는 읽기 전용 preflight를 실행한다. 기존 `personal-server-monitoring` Helm release가 `deployed` 상태인지, 기존 `personal-server-monitoring-prometheus` Service와 label 기반 Prometheus StatefulSet이 준비되었는지 함께 확인한다. Secret 검사는 `kubectl describe secret`의 키 이름과 1바이트 이상 여부만 확인하며, Secret 값 또는 `.data`를 읽거나 출력하지 않는다. N100 운영자는 Secret manager 원본에서 생성한 권한 제한 임시 로컬 `alertmanager.yaml` 파일 경로를 전달해야 한다. preflight는 해당 로컬 파일을 출력하지 않고 `amtool check-config`와 route matcher `sre_telegram=true`, `group_by`, `repeat_interval: 4h`, `send_resolved: true`, relay ClusterIP URL, Bearer credential file 연결을 확인한다. `amtool` 또는 파일이 없거나 어느 검증이라도 실패하면 preflight는 실패한다.
 
 ```bash
+export SRE_TELEGRAM_ALERTMANAGER_CONFIG_FILE=/secure/operator-temporary/alertmanager.yaml
 bash infra/k8s/tools/sre-telegram-preflight.sh
+# 또는 환경변수 대신 명시적 경로 전달
+bash infra/k8s/tools/sre-telegram-preflight.sh --alertmanager-config-file /secure/operator-temporary/alertmanager.yaml
 ```
 
 설치 도구는 인자 없이 실행해도 render와 client dry-run만 수행한다. 이 경로는 image build/import나 Kubernetes resource 변경을 수행하지 않는다.
@@ -107,10 +110,10 @@ bash infra/k8s/tools/sre-telegram-install.sh
 bash infra/k8s/tools/sre-telegram-install.sh --render
 ```
 
-운영자 승인과 N100-local Secret seed가 완료된 경우에만 다음 명령으로 image build·K3s containerd import 검증·relay 및 PrometheusRule 선적용·기존 monitoring release upgrade를 수행한다. Helm 변경은 `--reuse-values --atomic`으로 실행하며, relay 적용이 실패하면 Helm 변경 전 중단한다. Helm 실패 또는 중단 시 이 도구가 이번 실행에서 생성한 relay resource만 원래 namespace 기준으로 정리하고, 기존 monitoring resource와 Secret은 삭제하지 않는다.
+운영자 승인과 N100-local Secret seed가 완료된 경우에만 다음 명령으로 image build·K3s containerd import 검증·relay 및 PrometheusRule 선적용·기존 monitoring release upgrade를 수행한다. Helm 변경은 `--reuse-values --atomic`으로 실행하며, relay 적용이 실패하면 Helm 변경 전 중단한다. Helm 실패 또는 중단 시 이 도구가 이번 실행에서 생성한 relay resource만 원래 namespace 기준으로 정리하고, rollback 뒤 release가 `deployed`인지와 사전 snapshot의 Helm values·rendered manifest가 동일한지를 확인한다. revision 번호 동일성은 복구 기준으로 사용하지 않는다. 이 검증이 불가능하거나 불일치하면 복구를 성공으로 표시하지 않는다.
 
 ```bash
-bash infra/k8s/tools/sre-telegram-install.sh --apply
+bash infra/k8s/tools/sre-telegram-install.sh --apply --alertmanager-config-file /secure/operator-temporary/alertmanager.yaml
 ```
 
 설치 후 검증은 relay Ready, ClusterIP 및 외부 노출 필드 drift, PrometheusRule, RBAC 비상승 명령의 명시적 `no` 응답, 임시 localhost `/healthz`, 모든 active Prometheus target의 `up` 상태를 확인한다. Secret 값은 조회 또는 출력하지 않는다.

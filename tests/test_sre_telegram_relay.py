@@ -508,7 +508,25 @@ class RelayServiceTest(unittest.TestCase):
         output = "\n".join(logs.output)
         self.assertIn("telegram_polling_failed", output)
         self.assertIn("TelegramPollingError", output)
+        self.assertNotIn("telegram_delivery_failed", output)
         self.assertNotIn("super-secret-token", output)
+
+    def test_message_delivery_failure_logs_delivery_without_polling_failure(self):
+        relay = RelayService(allowed_chat_id="123", k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
+        update = {"update_id": 12, "message": {"chat": {"id": 123}, "text": "/상태"}}
+
+        with self.assertLogs("app.main", level="WARNING") as logs:
+            run_polling(
+                relay,
+                FakePollingTelegram([update], send_result=False),
+                "123",
+                max_cycles=1,
+                sleep_fn=lambda _: None,
+            )
+
+        output = "\n".join(logs.output)
+        self.assertIn("telegram_delivery_failed", output)
+        self.assertNotIn("telegram_polling_failed", output)
 
     def test_telegram_transport_failure_logs_without_token_or_response_body(self):
         with patch("app.main.urlopen", side_effect=OSError("bot-token=super-secret")):
