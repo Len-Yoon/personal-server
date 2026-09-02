@@ -286,6 +286,40 @@ class SreTelegramToolContractTest(unittest.TestCase):
         self.assertIn("-n personal-server delete rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader", calls)
         self.assertNotIn("-n monitoring delete rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader", calls)
 
+    def test_install_handles_cluster_role_binding_as_cluster_scoped_during_create_and_rollback(self):
+        result, calls = self.run_tool(
+            "sre-telegram-install.sh",
+            "--apply",
+            stubs={
+                "preflight": "#!/bin/sh\nexit 0\n",
+                "sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *describe*) printf 'telegram_bot_token: 3 bytes\\nallowed_chat_id: 2 bytes\\nalertmanager_auth_token: 3 bytes\\nalertmanager.yaml: 4 bytes\\n'; exit 0;;\n"
+                "  *'apply --dry-run=client'*) exit 0;;\n"
+                "  *'ClusterRoleBinding-sre-telegram-relay-node-reader.yaml'*) printf 'clusterrolebinding.rbac.authorization.k8s.io/sre-telegram-relay-node-reader created\\n'; exit 0;;\n"
+                "  *'monitoring-Deployment-sre-telegram-relay.yaml'*) printf 'Error from server (InternalError): later resource create failed\\n'; exit 1;;\n"
+                "  *'images list'*) printf 'REF TYPE DIGEST SIZE PLATFORMS LABELS\\npersonal-server-sre-telegram-relay:latest x sha256:abc 1MB linux/amd64 -\\n'; exit 0;;\n"
+                "  *delete*) exit 0;;\n"
+                "  *) exit 0;;\n"
+                "esac\n",
+                "docker": "#!/bin/sh\n"
+                "case \"$1\" in build) exit 0;; save) printf image-stream; exit 0;; esac\n",
+                "helm": "#!/bin/sh\nprintf 'helm %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+            },
+            env_overrides={"SRE_TELEGRAM_PREFLIGHT_SCRIPT": "preflight"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_install=FAIL"))
+        cluster_binding = "clusterrolebinding.rbac.authorization.k8s.io/sre-telegram-relay-node-reader"
+        cluster_manifest = "ClusterRoleBinding-sre-telegram-relay-node-reader.yaml"
+        cluster_create_calls = [
+            line for line in calls.splitlines() if cluster_manifest in line and " create -f " in line
+        ]
+        self.assertTrue(cluster_create_calls)
+        self.assertTrue(all(" kubectl create -f " in line for line in cluster_create_calls))
+        self.assertIn(f"sudo k3s kubectl delete {cluster_binding} --ignore-not-found", calls)
+        self.assertNotIn(f"-n monitoring delete {cluster_binding}", calls)
+
     def test_install_refuses_preexisting_relay_resources_before_helm_upgrade(self):
         result, calls = self.run_tool(
             "sre-telegram-install.sh",

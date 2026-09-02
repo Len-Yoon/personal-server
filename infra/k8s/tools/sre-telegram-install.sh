@@ -59,6 +59,7 @@ record_reference() {
     rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader|rolebinding/sre-telegram-relay-workload-reader)
       ;;
     clusterrole.rbac.authorization.k8s.io/sre-telegram-relay-node-reader|clusterrole/sre-telegram-relay-node-reader|clusterrole.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader|clusterrole/sre-telegram-relay-workload-reader|clusterrolebinding.rbac.authorization.k8s.io/sre-telegram-relay-node-reader|clusterrolebinding/sre-telegram-relay-node-reader)
+      namespace="cluster"
       ;;
     *)
       return 0
@@ -91,8 +92,19 @@ manifest_document_count() {
 }
 
 manifest_namespace() {
-  local file="$1" document="$2" namespace
-  namespace=$(manifest_document "$file" "$document" | awk '$1 == "namespace:" { print $2; exit }')
+  local file="$1" document="$2" kind namespace
+  kind=$(manifest_document "$file" "$document" | awk '$1 == "kind:" { print $2; exit }') || return 1
+  case "$kind" in
+    ClusterRole|ClusterRoleBinding)
+      printf 'cluster\n'
+      return 0
+      ;;
+  esac
+  namespace=$(manifest_document "$file" "$document" | awk '
+    /^metadata:[[:space:]]*$/ { in_metadata=1; next }
+    in_metadata && /^[^[:space:]]/ { in_metadata=0 }
+    in_metadata && $1 == "namespace:" { print $2; exit }
+  ')
   printf '%s\n' "${namespace:-cluster}"
 }
 
