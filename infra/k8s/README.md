@@ -80,7 +80,7 @@ Grafana 관리자 비밀번호는 Kubernetes Secret에서 운영자가 직접 �
 
 ## Telegram SRE 알림 도구 (N100 운영자 전용)
 
-Telegram SRE relay는 기존 `personal-server-monitoring` release에만 연결한다. Alertmanager의 실제 route, group, repeat, resolved 설정은 N100에서 운영자가 별도로 seed한 `sre-telegram-alertmanager-config` Secret에만 둔다. Git에는 비밀값이 없는 `infra/k8s/sre-telegram/alertmanager-config.contract.yaml` 계약만 보관하며, values 파일에는 Secret 이름만 포함한다.
+Telegram SRE relay는 기존 `personal-server-monitoring` release에만 연결한다. Alertmanager의 실제 route, group, repeat, resolved 설정은 N100에서 운영자가 별도로 seed한 `sre-telegram-alertmanager-config` Secret에만 둔다. Git에는 비밀값이 없는 `infra/k8s/sre-telegram/alertmanager.yaml.tmpl` 고정 템플릿과 검증기만 보관하며, values 파일에는 Secret 이름만 포함한다.
 
 Secret 생성·값 입력·값 확인은 이 저장소의 도구 범위 밖이다. 운영자는 N100에서 승인된 Secret Manager 또는 SOPS/age 절차로 아래 **키 이름만** 충족해야 한다. 안내 도구는 값을 생성·출력·적용하지 않는다.
 
@@ -91,16 +91,19 @@ bash infra/k8s/tools/sre-telegram-secret-template.sh
 | Secret 이름 | 필수 키 이름 | 관리 기준 |
 |---|---|---|
 | `sre-telegram-relay-runtime` | `telegram_bot_token`, `allowed_chat_id`, `alertmanager_auth_token` | N100 로컬 운영자 seed 필요 |
-| `sre-telegram-alertmanager-config` | `alertmanager.yaml` | N100 로컬 Alertmanager 설정 seed 필요; 운영자 임시 로컬 파일과 `amtool check-config`로 route/group/repeat/resolved/relay/Bearer 연결 검증 필요 |
+| `sre-telegram-alertmanager-config` | `alertmanager.yaml` | N100 로컬 Alertmanager 설정 seed 필요; 고정 템플릿 기반 권한 `0600` 임시 파일을 `amtool`과 고정 검증기로 검증한 뒤 동일 파일만 seed 필요 |
 
-설치 전에는 읽기 전용 preflight를 실행한다. 기존 `personal-server-monitoring` Helm release가 `deployed` 상태인지, 기존 `personal-server-monitoring-prometheus` Service와 label 기반 Prometheus StatefulSet이 준비되었는지 함께 확인한다. Secret 검사는 `kubectl describe secret`의 키 이름과 1바이트 이상 여부만 확인하며, Secret 값 또는 `.data`를 읽거나 출력하지 않는다. N100 운영자는 Secret manager 원본에서 생성한 권한 제한 임시 로컬 `alertmanager.yaml` 파일 경로를 전달해야 한다. preflight는 해당 로컬 파일을 출력하지 않고 `amtool check-config`와 Python YAML 구조 검증을 수행한다. 구조 검증은 `sre_telegram=true` matcher가 있는 동일 route가 relay receiver를 선택하는지, relay receiver의 유일한 webhook이 ClusterIP URL·`send_resolved: true`·Bearer credentials file을 모두 사용하는지, root `group_by`·`repeat_interval: 4h`가 유지되는지 확인한다. `amtool`, Python YAML parser, 파일 또는 어느 검증이라도 사용할 수 없거나 실패하면 preflight는 실패한다.
+설치 전에는 읽기 전용 preflight를 실행한다. 기존 `personal-server-monitoring` Helm release가 `deployed` 상태인지, 기존 `personal-server-monitoring-prometheus` Service와 label 기반 Prometheus StatefulSet이 준비되었는지 함께 확인한다. Secret 검사는 `kubectl describe secret`의 키 이름과 1바이트 이상 여부만 확인하며, Secret 값 또는 `.data`를 읽거나 출력하지 않는다. N100 운영자는 승인된 N100 private directory에서 고정 템플릿을 `alertmanager.yaml`로 복사하고 `chmod 600`을 적용한 후, 승인된 bearer 값을 로컬에서 입력해야 한다. preflight는 해당 파일을 출력하지 않고 `amtool check-config` 후 고정 검증기를 실행한다. 파일 권한이 `0600`이 아니거나 `amtool`, Python, PyYAML, 파일 또는 어느 검증이라도 사용할 수 없거나 실패하면 preflight는 실패한다. preflight를 통과한 바로 그 파일만 `alertmanager.yaml` Secret 키로 seed한 뒤, 임시 파일을 즉시 승인된 보안 제거 절차로 삭제해야 한다.
 
 ```bash
-export SRE_TELEGRAM_ALERTMANAGER_CONFIG_FILE=/secure/operator-temporary/alertmanager.yaml
-bash infra/k8s/tools/sre-telegram-preflight.sh
-# 또는 환경변수 대신 명시적 경로 전달
+mkdir -p /secure/operator-temporary
+cp infra/k8s/sre-telegram/alertmanager.yaml.tmpl /secure/operator-temporary/alertmanager.yaml
+chmod 600 /secure/operator-temporary/alertmanager.yaml
+# 승인된 bearer 값은 로컬 편집기로만 입력하며, 명령·로그·Git에 출력하지 않음
 bash infra/k8s/tools/sre-telegram-preflight.sh --alertmanager-config-file /secure/operator-temporary/alertmanager.yaml
 ```
+
+preflight 통과 후 승인된 Secret manager 절차로 위 검증 파일 자체를 `alertmanager.yaml` 키로 seed하고, 즉시 임시 파일을 승인된 보안 제거 절차로 삭제한다.
 
 설치 도구는 인자 없이 실행해도 render와 client dry-run만 수행한다. 이 경로는 image build/import나 Kubernetes resource 변경을 수행하지 않는다.
 

@@ -7,6 +7,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "infra" / "k8s" / "tools"
+FIXED_ALERTMANAGER_TEMPLATE = (
+    ROOT / "infra" / "k8s" / "sre-telegram" / "alertmanager.yaml.tmpl"
+)
 
 BYPASS_ALERTMANAGER_CONFIG = """\
 route:
@@ -81,6 +84,27 @@ receivers:
             credentials_file: /etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token
 """
 
+EXTRA_ROUTE_ALERTMANAGER_CONFIG = """\
+route:
+  receiver: sre-telegram-relay
+  group_by: [alertname, namespace, pod, deployment, persistentvolumeclaim]
+  repeat_interval: 4h
+  routes:
+    - matchers: ['sre_telegram="true"']
+      receiver: sre-telegram-relay
+    - matchers: ['sre_telegram="false"']
+      receiver: sre-telegram-relay
+receivers:
+  - name: sre-telegram-relay
+    webhook_configs:
+      - url: http://sre-telegram-relay.monitoring.svc:8080/alertmanager
+        send_resolved: true
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token
+"""
+
 
 def read_tool(name: str) -> str:
     path = TOOLS / name
@@ -90,21 +114,23 @@ def read_tool(name: str) -> str:
 
 
 class SreTelegramToolContractTest(unittest.TestCase):
-    def run_tool(self, name, *args, stubs=None, env_overrides=None, files=None):
+    def run_tool(
+        self, name, *args, stubs=None, env_overrides=None, files=None, file_modes=None
+    ):
         with tempfile.TemporaryDirectory() as directory:
             directory_path = Path(directory)
             calls = directory_path / "calls"
             operator_config = directory_path / "operator-alertmanager.yaml"
             operator_config.write_text(
-                (ROOT / "infra" / "k8s" / "sre-telegram" / "alertmanager-config.contract.yaml").read_text(
-                    encoding="utf-8"
-                ),
+                FIXED_ALERTMANAGER_TEMPLATE.read_text(encoding="utf-8"),
                 encoding="utf-8",
             )
+            operator_config.chmod(0o600)
             for relative_path, body in (files or {}).items():
                 path = directory_path / relative_path
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(body, encoding="utf-8")
+                path.chmod((file_modes or {}).get(relative_path, 0o600))
             for command, body in (stubs or {}).items():
                 path = directory_path / command
                 path.write_text(body, encoding="utf-8")
@@ -169,21 +195,7 @@ class SreTelegramToolContractTest(unittest.TestCase):
         self.assertNotRegex(script, r"kubectl(?:\s+-\S+\s+\S+)*\s+describe\s+secrets?")
         self.assertNotIn(".data", script)
 
-    def test_preflight_validates_non_secret_alertmanager_contract(self):
-        script = read_tool("sre-telegram-preflight.sh")
-
-        self.assertIn("ALERTMANAGER_CONFIG_CONTRACT", script)
-        self.assertIn("ALERTMANAGER_CONFIG_FILE", script)
-        self.assertIn("alertmanager_config_contract", script)
-        self.assertIn("alertmanager_effective_config", script)
-        self.assertIn("amtool check-config", script)
-        self.assertIn("repeat_interval: 4h", script)
-        self.assertIn('sre_telegram="true"', script)
-        self.assertIn("send_resolved: true", script)
-        self.assertIn("credentials_file", script)
-
-    def test_preflight_validates_operator_local_alertmanager_config_without_echoing_data(self):
-        secret_marker = "operator-local-bearer-must-not-echo"
+    def test_preflight_runs_amtool_then_fixed_template_validator_without_echoing_config(self):
         result, calls = self.run_tool(
             "sre-telegram-preflight.sh",
             stubs={
@@ -203,23 +215,44 @@ class SreTelegramToolContractTest(unittest.TestCase):
                 "docker": "#!/bin/sh\nexit 0\n",
                 "amtool": "#!/bin/sh\nprintf 'amtool %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
             },
-            files={
-                "effective-alertmanager.yaml": (
-                    (ROOT / "infra" / "k8s" / "sre-telegram" / "alertmanager-config.contract.yaml").read_text(
-                        encoding="utf-8"
-                    )
-                    + f"# {secret_marker}\\n"
-                )
-            },
+            files={"effective-alertmanager.yaml": FIXED_ALERTMANAGER_TEMPLATE.read_text(encoding="utf-8")},
             env_overrides={"SRE_TELEGRAM_ALERTMANAGER_CONFIG_FILE": "{tmp}/effective-alertmanager.yaml"},
         )
 
         self.assertEqual(result.returncode, 0)
         self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_preflight=PASS"))
         self.assertIn("amtool check-config", calls)
-        self.assertNotIn(secret_marker, result.stdout)
-        self.assertNotIn(secret_marker, calls)
+        self.assertNotIn("route:", result.stdout)
+        self.assertNotIn("route:", calls)
         self.assertNotIn("get secret", calls)
+
+    def test_preflight_fails_when_validator_rejects_extra_route(self):
+        result, calls = self.run_tool(
+            "sre-telegram-preflight.sh",
+            stubs={
+                "sudo": "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *'get nodes --no-headers'*) printf 'n100 Ready\\n'; exit 0;;\n"
+                "  *'get deployment personal-server-monitoring-grafana'*) printf '1\\n'; exit 0;;\n"
+                "  *'get statefulset -l'*) printf '1\\n'; exit 0;;\n"
+                "  *'get service personal-server-monitoring-prometheus'*) exit 0;;\n"
+                "  *'describe secret sre-telegram-relay-runtime'*) printf 'telegram_bot_token: 3 bytes\\nallowed_chat_id: 2 bytes\\nalertmanager_auth_token: 3 bytes\\n'; exit 0;;\n"
+                "  *'describe secret sre-telegram-alertmanager-config'*) printf 'alertmanager.yaml: 4 bytes\\n'; exit 0;;\n"
+                "  *'ctr version'*) exit 0;;\n"
+                "  *) exit 1;;\n"
+                "esac\n",
+                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\\\"info\\\":{\\\"status\\\":\\\"deployed\\\"}}\\n'; exit 0;; esac\nexit 1\n",
+                "docker": "#!/bin/sh\nexit 0\n",
+                "amtool": "#!/bin/sh\nprintf 'amtool %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+            },
+            files={"extra-route.yaml": EXTRA_ROUTE_ALERTMANAGER_CONFIG},
+            env_overrides={"SRE_TELEGRAM_ALERTMANAGER_CONFIG_FILE": "{tmp}/extra-route.yaml"},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("amtool check-config", calls)
+        self.assertIn("check=alertmanager_effective_config status=FAIL", result.stdout)
+        self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_preflight=FAIL"))
 
     def test_preflight_fails_closed_when_amtool_rejects_operator_local_config(self):
         result, _ = self.run_tool(
@@ -353,17 +386,20 @@ class SreTelegramToolContractTest(unittest.TestCase):
         self.assertIn("--namespace monitoring", calls)
         self.assertIn("--namespace personal-server", calls)
 
-    def test_secret_guidance_only_names_required_keys_and_manual_procedure(self):
-        script = read_tool("sre-telegram-secret-template.sh")
+    def test_secret_guidance_requires_0600_temporary_file_and_immediate_removal(self):
+        result = subprocess.run(
+            ["bash", str(TOOLS / "sre-telegram-secret-template.sh")],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
-        self.assertIn("N100", script)
-        self.assertIn("manual", script.lower())
-        self.assertIn("telegram_bot_token", script)
-        self.assertIn("allowed_chat_id", script)
-        self.assertIn("alertmanager_auth_token", script)
-        self.assertIn("alertmanager.yaml", script)
-        self.assertNotRegex(script, r"kubectl +(create|apply|patch|replace)")
-        self.assertNotRegex(script, r"(echo|printf).*TOKEN")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("alertmanager.yaml.tmpl", result.stdout)
+        self.assertIn("chmod 600", result.stdout)
+        self.assertIn("immediately remove", result.stdout.lower())
+        self.assertNotRegex(result.stdout, r"kubectl +(create|apply|patch|replace)")
+        self.assertNotIn("alertmanager_auth_token=", result.stdout)
 
     def test_preflight_rejects_a_non_deployed_release_even_when_helm_status_returns_zero(self):
         result, _ = self.run_tool(

@@ -9,7 +9,7 @@ PROMETHEUS_SERVICE="personal-server-monitoring-prometheus"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd)
 IMAGE_DIR="$REPO_ROOT/sre-telegram-relay"
-ALERTMANAGER_CONFIG_CONTRACT="${SRE_TELEGRAM_ALERTMANAGER_CONFIG_CONTRACT:-$REPO_ROOT/infra/k8s/sre-telegram/alertmanager-config.contract.yaml}"
+ALERTMANAGER_CONFIG_VALIDATOR="$REPO_ROOT/infra/k8s/tools/validate-sre-alertmanager-config.py"
 ALERTMANAGER_CONFIG_FILE="${SRE_TELEGRAM_ALERTMANAGER_CONFIG_FILE:-}"
 overall=0
 
@@ -33,194 +33,21 @@ secret_keys_present() {
   done
 }
 
-alertmanager_contract_valid() {
-  local contract="$ALERTMANAGER_CONFIG_CONTRACT"
-  [ -r "$contract" ] || return 1
-  local required
-  for required in \
-    'route:' \
-    'group_by:' \
-    'repeat_interval: 4h' \
-    'sre_telegram="true"' \
-    'receiver: sre-telegram-relay' \
-    'url: http://sre-telegram-relay.monitoring.svc:8080/alertmanager' \
-    'send_resolved: true' \
-    'credentials_file: /etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token'; do
-    grep -F -- "$required" "$contract" >/dev/null || return 1
-  done
-}
-
-alertmanager_effective_config_structure_valid() {
-  local config_file="$1"
-  python3 - "$config_file" >/dev/null 2>&1 <<'PY'
-import re
-import sys
-
-RELAY_RECEIVER = "sre-telegram-relay"
-RELAY_URL = "http://sre-telegram-relay.monitoring.svc:8080/alertmanager"
-BEARER_CREDENTIALS_FILE = (
-    "/etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token"
-)
-MATCHER = re.compile(r"^sre_telegram\s*=\s*(?:[\"'])?(true|false)(?:[\"'])?$")
-SRE_MATCHER = re.compile(r"^sre_telegram(?:\s*(?:=|!=|=~|!~).*)?$")
-
-
-def fail() -> None:
-    raise ValueError("invalid Alertmanager SRE route structure")
-
-
-def matcher_value(value):
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, str):
-        return value.strip().lower()
-    return "ambiguous"
-
-
-def sre_telegram_matcher_state(route):
-    values = []
-    direct_match = route.get("match")
-    if direct_match is not None:
-        if not isinstance(direct_match, dict):
-            fail()
-        if "sre_telegram" in direct_match:
-            values.append(matcher_value(direct_match["sre_telegram"]))
-
-    direct_match_re = route.get("match_re")
-    if direct_match_re is not None:
-        if not isinstance(direct_match_re, dict):
-            fail()
-        if "sre_telegram" in direct_match_re:
-            values.append("ambiguous")
-
-    matchers = route.get("matchers")
-    if matchers is not None:
-        if not isinstance(matchers, list):
-            fail()
-        for matcher in matchers:
-            if not isinstance(matcher, str):
-                fail()
-            normalized = matcher.strip().lower()
-            if SRE_MATCHER.fullmatch(normalized):
-                match = MATCHER.fullmatch(normalized)
-                values.append(match.group(1) if match else "ambiguous")
-    if not values:
-        return "inherited"
-    if any(value not in {"true", "false"} for value in values):
-        return "ambiguous"
-    if len(set(values)) != 1:
-        return "ambiguous"
-    return values[0]
-
-
-def matches_sre_telegram_true(inherited_state, route):
-    if inherited_state not in {"true", "false", "ambiguous"}:
-        fail()
-    matcher_state = sre_telegram_matcher_state(route)
-    if inherited_state == "false" or matcher_state == "false":
-        return "false"
-    if inherited_state == "ambiguous" or matcher_state == "ambiguous":
-        return "ambiguous"
-    return "true"
-
-
-def route_receiver(route, inherited_receiver):
-    receiver = route.get("receiver", inherited_receiver)
-    if receiver is not None and not isinstance(receiver, str):
-        fail()
-    return receiver
-
-
-def terminal_receivers_for_sre_telegram_true(route, inherited_receiver, inherited_state):
-    if not isinstance(route, dict):
-        fail()
-    state = matches_sre_telegram_true(inherited_state, route)
-    if state == "false":
-        return []
-    if state != "true":
-        fail()
-
-    receiver = route_receiver(route, inherited_receiver)
-    children = route.get("routes", [])
-    if not isinstance(children, list):
-        fail()
-
-    terminal_receivers = []
-    matched_child = False
-    for child in children:
-        child_receivers = terminal_receivers_for_sre_telegram_true(
-            child, receiver, state
-        )
-        if not child_receivers:
-            continue
-        matched_child = True
-        terminal_receivers.extend(child_receivers)
-        child_continue = child.get("continue", False)
-        if not isinstance(child_continue, bool):
-            fail()
-        if not child_continue:
-            break
-
-    if matched_child:
-        return terminal_receivers
-    if receiver is None:
-        fail()
-    return [receiver]
-
-
-def receiver_is_valid(receivers):
-    if not isinstance(receivers, list):
-        return False
-    relay_receivers = [receiver for receiver in receivers if isinstance(receiver, dict) and receiver.get("name") == RELAY_RECEIVER]
-    if len(relay_receivers) != 1:
-        return False
-    webhooks = relay_receivers[0].get("webhook_configs")
-    if not isinstance(webhooks, list) or len(webhooks) != 1:
-        return False
-    webhook = webhooks[0]
-    if not isinstance(webhook, dict):
-        return False
-    authorization = webhook.get("http_config", {}).get("authorization")
-    return (
-        webhook.get("url") == RELAY_URL
-        and webhook.get("send_resolved") is True
-        and isinstance(authorization, dict)
-        and authorization.get("type") == "Bearer"
-        and authorization.get("credentials_file") == BEARER_CREDENTIALS_FILE
-    )
-
-
-try:
-    import yaml
-    with open(sys.argv[1], encoding="utf-8") as config_stream:
-        config = yaml.safe_load(config_stream)
-    if not isinstance(config, dict):
-        fail()
-    route = config.get("route")
-    if not isinstance(route, dict):
-        fail()
-    if not isinstance(route.get("group_by"), list) or not route["group_by"]:
-        fail()
-    if route.get("repeat_interval") != "4h":
-        fail()
-    terminal_receivers = terminal_receivers_for_sre_telegram_true(route, None, "true")
-    if not terminal_receivers or any(
-        receiver != RELAY_RECEIVER for receiver in terminal_receivers
-    ):
-        fail()
-    if not receiver_is_valid(config.get("receivers")):
-        fail()
-except Exception:
-    sys.exit(1)
-PY
+operator_file_mode() {
+  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
 }
 
 alertmanager_effective_config_valid() {
   local config_file="$1"
+  local file_mode
   [ -n "$config_file" ] && [ -f "$config_file" ] && [ -r "$config_file" ] || return 1
+  file_mode=$(operator_file_mode "$config_file") || return 1
+  [ "$file_mode" = "600" ] || return 1
+  [ -r "$ALERTMANAGER_CONFIG_VALIDATOR" ] || return 1
   command -v amtool >/dev/null 2>&1 || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
   amtool check-config "$config_file" >/dev/null 2>&1 || return 1
-  alertmanager_effective_config_structure_valid "$config_file"
+  python3 "$ALERTMANAGER_CONFIG_VALIDATOR" "$config_file" >/dev/null 2>&1
 }
 
 monitoring_release_deployed() {
@@ -293,9 +120,6 @@ main() {
     fail_check image_import_prerequisites unavailable
   fi
 
-  if ! alertmanager_contract_valid; then
-    fail_check alertmanager_config_contract invalid
-  fi
   if ! alertmanager_effective_config_valid "$alertmanager_config_file"; then
     fail_check alertmanager_effective_config invalid_or_unavailable
   fi
