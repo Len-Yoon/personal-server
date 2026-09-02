@@ -33,8 +33,11 @@ class ValidateSreAlertmanagerConfigTests(unittest.TestCase):
             )
 
     def assert_rejected(self, document):
+        self.assert_rejected_text(yaml.safe_dump(document, sort_keys=False))
+
+    def assert_rejected_text(self, config_text):
         marker = "operator-secret-marker-must-not-echo"
-        result = self.run_validator(yaml.safe_dump(document, sort_keys=False))
+        result = self.run_validator(config_text)
 
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
@@ -99,6 +102,69 @@ class ValidateSreAlertmanagerConfigTests(unittest.TestCase):
         for document in (continued, nested):
             with self.subTest(document=document):
                 self.assert_rejected(document)
+
+    def test_rejects_duplicate_route_key_hidden_by_later_valid_route(self):
+        duplicate_route_config = """\
+route:
+  receiver: unexpected-receiver
+  group_by: []
+  repeat_interval: 5m
+  routes:
+    - matchers: ['sre_telegram="false"']
+      receiver: unexpected-receiver
+    - matchers: ['sre_telegram="true"']
+      receiver: unexpected-receiver
+route:
+  receiver: sre-telegram-relay
+  group_by: [alertname, namespace, pod, deployment, persistentvolumeclaim]
+  repeat_interval: 4h
+  routes:
+    - matchers: ['sre_telegram="true"']
+      receiver: sre-telegram-relay
+receivers:
+  - name: sre-telegram-relay
+    webhook_configs:
+      - url: http://sre-telegram-relay.monitoring.svc:8080/alertmanager
+        send_resolved: true
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token
+"""
+
+        self.assert_rejected_text(duplicate_route_config)
+
+    def test_rejects_duplicate_receivers_key_hidden_by_later_valid_receivers(self):
+        duplicate_receivers_config = """\
+route:
+  receiver: sre-telegram-relay
+  group_by: [alertname, namespace, pod, deployment, persistentvolumeclaim]
+  repeat_interval: 4h
+  routes:
+    - matchers: ['sre_telegram="true"']
+      receiver: sre-telegram-relay
+receivers:
+  - name: unexpected-receiver
+  - name: sre-telegram-relay
+    webhook_configs:
+      - url: http://sre-telegram-relay.monitoring.svc:8080/alertmanager
+        send_resolved: true
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token
+receivers:
+  - name: sre-telegram-relay
+    webhook_configs:
+      - url: http://sre-telegram-relay.monitoring.svc:8080/alertmanager
+        send_resolved: true
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token
+"""
+
+        self.assert_rejected_text(duplicate_receivers_config)
 
     def test_rejects_wrong_matcher_receiver_url_or_credentials_file(self):
         wrong_matcher = self.template_document()

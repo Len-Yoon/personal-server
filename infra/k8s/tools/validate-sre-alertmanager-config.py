@@ -2,6 +2,7 @@
 """Fail-closed validation for the SRE-only Alertmanager configuration."""
 
 from pathlib import Path
+from collections.abc import Hashable
 import sys
 from typing import Any
 
@@ -9,6 +10,34 @@ try:
     import yaml
 except ImportError:  # pragma: no cover - exercised only where PyYAML is unavailable.
     yaml = None
+
+
+if yaml is not None:
+
+    class UniqueKeySafeLoader(yaml.SafeLoader):
+        """Safe YAML loader that rejects duplicate keys in every mapping."""
+
+        def construct_mapping(self, node, deep=False):
+            self.flatten_mapping(node)
+            mapping = {}
+            for key_node, value_node in node.value:
+                key = self.construct_object(key_node, deep=deep)
+                if not isinstance(key, Hashable):
+                    raise yaml.constructor.ConstructorError(
+                        "while constructing a mapping",
+                        node.start_mark,
+                        "found unhashable key",
+                        key_node.start_mark,
+                    )
+                if key in mapping:
+                    raise yaml.constructor.ConstructorError(
+                        "while constructing a mapping",
+                        node.start_mark,
+                        "found duplicate key",
+                        key_node.start_mark,
+                    )
+                mapping[key] = self.construct_object(value_node, deep=deep)
+            return mapping
 
 
 RELAY_RECEIVER = "sre-telegram-relay"
@@ -113,7 +142,7 @@ def main(argv: list[str]) -> int:
         return fail("invalid_alertmanager_input")
 
     try:
-        config = yaml.safe_load(config_text)
+        config = yaml.load(config_text, Loader=UniqueKeySafeLoader)
     except yaml.YAMLError:
         return fail("invalid_alertmanager_config")
 
