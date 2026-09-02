@@ -15,7 +15,7 @@ PROMETHEUS_RULE="$REPO_ROOT/infra/k8s/sre-telegram/prometheus-rule.yaml"
 PREFLIGHT_SCRIPT="${SRE_TELEGRAM_PREFLIGHT_SCRIPT:-$SCRIPT_DIR/sre-telegram-preflight.sh}"
 
 created_resources=()
-WORKLOAD_BINDING_INDEX=0
+TEMP_MANIFEST_DIR=""
 APPLY_MODE=0
 CLEANUP_DONE=0
 INTERRUPTED=0
@@ -52,21 +52,13 @@ require_secret_contract() {
 }
 
 record_reference() {
-  local reference="$1" action="$2" namespace="cluster"
+  local reference="$1" action="$2" namespace="$3"
   case "$reference" in
-    rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader|rolebinding/sre-telegram-relay-workload-reader)
-      if [ "$WORKLOAD_BINDING_INDEX" -eq 0 ]; then
-        namespace="$NAMESPACE"
-      else
-        namespace="personal-server"
-      fi
-      WORKLOAD_BINDING_INDEX=$((WORKLOAD_BINDING_INDEX + 1))
-      ;;
     configmap/sre-telegram-relay-state|serviceaccount/sre-telegram-relay|role.rbac.authorization.k8s.io/sre-telegram-relay-state|role/sre-telegram-relay-state|deployment.apps/sre-telegram-relay|deployment/sre-telegram-relay|service/sre-telegram-relay|prometheusrule.monitoring.coreos.com/sre-telegram-k3s-alerts|prometheusrule/sre-telegram-k3s-alerts)
-      namespace="$NAMESPACE"
+      ;;
+    rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader|rolebinding/sre-telegram-relay-workload-reader)
       ;;
     clusterrole.rbac.authorization.k8s.io/sre-telegram-relay-node-reader|clusterrole/sre-telegram-relay-node-reader|clusterrole.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader|clusterrole/sre-telegram-relay-workload-reader|clusterrolebinding.rbac.authorization.k8s.io/sre-telegram-relay-node-reader|clusterrolebinding/sre-telegram-relay-node-reader)
-      namespace="cluster"
       ;;
     *)
       return 0
@@ -78,21 +70,94 @@ record_reference() {
 }
 
 record_apply_output() {
-  local output="$1" reference action
+  local output="$1" namespace="$2" reference action
   while read -r reference action _; do
     [ -n "${reference:-}" ] || continue
-    record_reference "$reference" "${action:-}"
+    record_reference "$reference" "${action:-}" "$namespace" || return 1
   done <<< "$output"
 }
 
+manifest_document() {
+  local file="$1" document="$2"
+  awk -v wanted="$document" '
+    BEGIN { current = 1 }
+    /^---[[:space:]]*$/ { current++; next }
+    current == wanted { print }
+  ' "$file"
+}
+
+manifest_document_count() {
+  awk '/^---[[:space:]]*$/ { count++ } END { print count + 1 }' "$1"
+}
+
+manifest_namespace() {
+  local file="$1" document="$2" namespace
+  namespace=$(manifest_document "$file" "$document" | awk '$1 == "namespace:" { print $2; exit }')
+  printf '%s\n' "${namespace:-cluster}"
+}
+
+manifest_resource_name() {
+  local file="$1" document="$2" kind name
+  kind=$(manifest_document "$file" "$document" | awk '$1 == "kind:" { print $2; exit }') || return 1
+  name=$(manifest_document "$file" "$document" | awk '$1 == "name:" { print $2; exit }') || return 1
+  [ -n "$kind" ] && [ -n "$name" ] || return 1
+  printf '%s-%s\n' "$kind" "$name"
+}
+
+cleanup_manifest_dir() {
+  if [ -n "$TEMP_MANIFEST_DIR" ] && [ -d "$TEMP_MANIFEST_DIR" ]; then
+    rm -rf -- "$TEMP_MANIFEST_DIR"
+  fi
+  TEMP_MANIFEST_DIR=""
+}
+
 apply_file() {
-  local file="$1" output
-  WORKLOAD_BINDING_INDEX=0
-  if ! output=$(sudo k3s kubectl -n "$NAMESPACE" create -f "$file" 2>&1); then
-    record_apply_output "$output"
+  local file="$1" document_count document namespace resource_name document_path output result=0 had_existing=0
+  TEMP_MANIFEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/sre-telegram-install.XXXXXX") || return 1
+  if ! document_count=$(manifest_document_count "$file"); then
+    cleanup_manifest_dir
     return 1
   fi
-  record_apply_output "$output"
+  for ((document = 1; document <= document_count; document++)); do
+    if ! namespace=$(manifest_namespace "$file" "$document"); then
+      result=1
+      break
+    fi
+    if ! resource_name=$(manifest_resource_name "$file" "$document"); then
+      result=1
+      break
+    fi
+    document_path="$TEMP_MANIFEST_DIR/${namespace}-${resource_name}.yaml"
+    if ! manifest_document "$file" "$document" > "$document_path"; then
+      result=1
+      break
+    fi
+    if [ "$namespace" = "cluster" ]; then
+      if ! output=$(sudo k3s kubectl create -f "$document_path" 2>&1); then
+        record_apply_output "$output" "$namespace" || { result=1; break; }
+        if [[ "$output" == *AlreadyExists* ]]; then
+          had_existing=1
+          continue
+        fi
+        result=1
+        break
+      fi
+    elif ! output=$(sudo k3s kubectl -n "$namespace" create -f "$document_path" 2>&1); then
+      record_apply_output "$output" "$namespace" || { result=1; break; }
+      if [[ "$output" == *AlreadyExists* ]]; then
+        had_existing=1
+        continue
+      fi
+      result=1
+      break
+    fi
+    record_apply_output "$output" "$namespace" || { result=1; break; }
+  done
+  cleanup_manifest_dir
+  if [ "$had_existing" -eq 1 ]; then
+    result=1
+  fi
+  return "$result"
 }
 
 rollback_created_resources() {
@@ -132,6 +197,7 @@ cleanup_apply() {
     return "$status"
   fi
   CLEANUP_DONE=1
+  cleanup_manifest_dir
   if [ "$APPLY_MODE" -eq 1 ] && [ "$status" -ne 0 ]; then
     rollback_created_resources
     if [ "$HELM_UPGRADE_STARTED" -eq 1 ] && [ "$INTERRUPTED" -eq 1 ] && [ -n "$HELM_PREVIOUS_REVISION" ]; then

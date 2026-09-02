@@ -227,8 +227,7 @@ class SreTelegramToolContractTest(unittest.TestCase):
                 "case \"$*\" in\n"
                 "  *describe*) printf 'telegram_bot_token: 3 bytes\\nallowed_chat_id: 2 bytes\\nalertmanager_auth_token: 3 bytes\\nalertmanager.yaml: 4 bytes\\n'; exit 0;;\n"
                 "  *'apply --dry-run=client'*) exit 0;;\n"
-                "  *base.yaml*) printf 'serviceaccount/sre-telegram-relay created\\nrolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader created\\nrolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader created\\n'; exit 0;;\n"
-                "  *prometheus-rule.yaml*) printf 'prometheusrule.monitoring.coreos.com/sre-telegram-k3s-alerts created\\n'; exit 0;;\n"
+                "  *'RoleBinding-sre-telegram-relay-workload-reader.yaml'*) printf 'rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader created\\n'; exit 0;;\n"
                 "  *delete*) exit 0;;\n"
                 "  *'images list'*) printf 'REF TYPE DIGEST SIZE PLATFORMS LABELS\\npersonal-server-sre-telegram-relay:latest x sha256:abc 1MB linux/amd64 -\\n'; exit 0;;\n"
                 "  *) exit 0;;\n"
@@ -251,13 +250,41 @@ class SreTelegramToolContractTest(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_install=FAIL"))
-        self.assertIn("base.yaml", calls)
+        self.assertIn("monitoring-ConfigMap-sre-telegram-relay-state.yaml", calls)
         self.assertIn("helm upgrade", calls)
-        base_index = calls.index("base.yaml")
+        base_index = calls.index("monitoring-ConfigMap-sre-telegram-relay-state.yaml")
         upgrade_index = calls.index("helm upgrade")
         self.assertLess(base_index, upgrade_index)
         self.assertIn("--atomic", calls)
         self.assertIn("-n personal-server delete rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader", calls)
+
+    def test_install_rolls_back_only_personal_server_binding_when_monitoring_binding_preexists(self):
+        result, calls = self.run_tool(
+            "sre-telegram-install.sh",
+            "--apply",
+            stubs={
+                "preflight": "#!/bin/sh\nexit 0\n",
+                "sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *describe*) printf 'telegram_bot_token: 3 bytes\\nallowed_chat_id: 2 bytes\\nalertmanager_auth_token: 3 bytes\\nalertmanager.yaml: 4 bytes\\n'; exit 0;;\n"
+                "  *'apply --dry-run=client'*) exit 0;;\n"
+                "  *'monitoring-RoleBinding-sre-telegram-relay-workload-reader.yaml'*) printf 'Error from server (AlreadyExists): rolebindings.rbac.authorization.k8s.io \\\"sre-telegram-relay-workload-reader\\\" already exists\\n'; exit 1;;\n"
+                "  *'personal-server-RoleBinding-sre-telegram-relay-workload-reader.yaml'*) printf 'rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader created\\n'; exit 0;;\n"
+                "  *'monitoring-Deployment-sre-telegram-relay.yaml'*) printf 'Error from server (InternalError): later resource create failed\\n'; exit 1;;\n"
+                "  *'images list'*) printf 'REF TYPE DIGEST SIZE PLATFORMS LABELS\\npersonal-server-sre-telegram-relay:latest x sha256:abc 1MB linux/amd64 -\\n'; exit 0;;\n"
+                "  *delete*) exit 0;;\n"
+                "  *) exit 0;;\n"
+                "esac\n",
+                "docker": "#!/bin/sh\n"
+                "case \"$1\" in build) exit 0;; save) printf image-stream; exit 0;; esac\n",
+                "helm": "#!/bin/sh\nprintf 'helm %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+            },
+            env_overrides={"SRE_TELEGRAM_PREFLIGHT_SCRIPT": "preflight"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_install=FAIL"))
+        self.assertIn("-n personal-server delete rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader", calls)
+        self.assertNotIn("-n monitoring delete rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader", calls)
 
     def test_install_refuses_preexisting_relay_resources_before_helm_upgrade(self):
         result, calls = self.run_tool(
@@ -269,7 +296,7 @@ class SreTelegramToolContractTest(unittest.TestCase):
                 "case \"$*\" in\n"
                 "  *describe*) printf 'telegram_bot_token: 3 bytes\\nallowed_chat_id: 2 bytes\\nalertmanager_auth_token: 3 bytes\\nalertmanager.yaml: 4 bytes\\n'; exit 0;;\n"
                 "  *'apply --dry-run=client'*) exit 0;;\n"
-                "  *base.yaml*) printf 'configmap/sre-telegram-relay-state already exists\\n'; exit 1;;\n"
+                "  *'monitoring-ConfigMap-sre-telegram-relay-state.yaml'*) printf 'configmap/sre-telegram-relay-state already exists\\n'; exit 1;;\n"
                 "  *'images list'*) printf 'REF TYPE DIGEST SIZE PLATFORMS LABELS\\npersonal-server-sre-telegram-relay:latest x sha256:abc 1MB linux/amd64 -\\n'; exit 0;;\n"
                 "  *) exit 0;;\n"
                 "esac\n",
@@ -294,8 +321,7 @@ class SreTelegramToolContractTest(unittest.TestCase):
                 "case \"$*\" in\n"
                 "  *describe*) printf 'telegram_bot_token: 3 bytes\\nallowed_chat_id: 2 bytes\\nalertmanager_auth_token: 3 bytes\\nalertmanager.yaml: 4 bytes\\n'; exit 0;;\n"
                 "  *'apply --dry-run=client'*) exit 0;;\n"
-                "  *base.yaml*) printf 'serviceaccount/sre-telegram-relay created\\nrolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader created\\nrolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader created\\n'; exit 0;;\n"
-                "  *prometheus-rule.yaml*) printf 'prometheusrule.monitoring.coreos.com/sre-telegram-k3s-alerts created\\n'; exit 0;;\n"
+                "  *'RoleBinding-sre-telegram-relay-workload-reader.yaml'*) printf 'rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader created\\n'; exit 0;;\n"
                 "  *delete*) exit 0;;\n"
                 "  *'images list'*) printf 'REF TYPE DIGEST SIZE PLATFORMS LABELS\\npersonal-server-sre-telegram-relay:latest x sha256:abc 1MB linux/amd64 -\\n'; exit 0;;\n"
                 "  *) exit 0;;\n"
