@@ -25,6 +25,19 @@ def find_document(documents: list[dict], kind: str, name: str) -> dict:
 
 
 class SreTelegramManifestContractTests(unittest.TestCase):
+    def test_relay_uses_numeric_non_root_user_contract(self):
+        dockerfile = (ROOT / "sre-telegram-relay" / "Dockerfile").read_text(encoding="utf-8")
+        deployment = find_document(load_yaml_documents("base.yaml"), "Deployment", "sre-telegram-relay")
+        pod_security = deployment["spec"]["template"]["spec"]["securityContext"]
+
+        self.assertIn("addgroup --system --gid 10001 relay", dockerfile)
+        self.assertIn("adduser --system --uid 10001 --ingroup relay relay", dockerfile)
+        self.assertIn("COPY --chown=10001:10001 app ./app", dockerfile)
+        self.assertIn("USER 10001:10001", dockerfile)
+        self.assertEqual(pod_security["runAsUser"], 10001)
+        self.assertEqual(pod_security["runAsGroup"], 10001)
+        self.assertEqual(pod_security["fsGroup"], 10001)
+
     def test_relay_service_is_cluster_ip_without_published_node_port(self):
         service = find_document(load_yaml_documents("base.yaml"), "Service", "sre-telegram-relay")
 
