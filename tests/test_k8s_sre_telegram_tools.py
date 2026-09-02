@@ -260,6 +260,40 @@ class SreTelegramToolContractTest(unittest.TestCase):
         self.assertIn("check=alertmanager_effective_config status=FAIL", result.stdout)
         self.assertNotIn("amtool", calls)
 
+    def test_preflight_reads_linux_mode_when_gnu_stat_accepts_macos_flag(self):
+        result, calls = self.run_tool(
+            "sre-telegram-preflight.sh",
+            stubs={
+                "sudo": "#!/bin/sh\n"
+                "printf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *'get nodes --no-headers'*) printf 'n100 Ready\\n'; exit 0;;\n"
+                "  *'get deployment personal-server-monitoring-grafana'*) printf '1\\n'; exit 0;;\n"
+                "  *'get statefulset -l'*) printf '1\\n'; exit 0;;\n"
+                "  *'get service personal-server-monitoring-prometheus'*) exit 0;;\n"
+                "  *'describe secret sre-telegram-relay-runtime'*) printf 'telegram_bot_token: 3 bytes\\nallowed_chat_id: 2 bytes\\nalertmanager_auth_token: 3 bytes\\n'; exit 0;;\n"
+                "  *'describe secret sre-telegram-alertmanager-config'*) printf 'alertmanager.yaml: 4 bytes\\n'; exit 0;;\n"
+                "  *'ctr version'*) exit 0;;\n"
+                "  *) exit 1;;\n"
+                "esac\n",
+                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\\\"info\\\":{\\\"status\\\":\\\"deployed\\\"}}\\n'; exit 0;; esac\nexit 1\n",
+                "docker": "#!/bin/sh\nexit 0\n",
+                "stat": "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  -f) printf 'filesystem\\n'; exit 0;;\n"
+                "  -c) printf '600\\n'; exit 0;;\n"
+                "  *) exit 1;;\n"
+                "esac\n",
+                "uname": "#!/bin/sh\nprintf 'Linux\\n'\n",
+                "amtool": "#!/bin/sh\nexit 0\n",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_preflight=PASS"))
+        self.assertNotIn("filesystem", result.stdout)
+        self.assertNotIn("filesystem", calls)
+
     def test_preflight_fails_when_validator_rejects_extra_route(self):
         result, calls = self.run_tool(
             "sre-telegram-preflight.sh",

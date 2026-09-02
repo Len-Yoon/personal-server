@@ -34,7 +34,13 @@ secret_keys_present() {
 }
 
 operator_file_mode() {
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
+  local platform
+  platform=$(uname -s 2>/dev/null) || return 1
+  case "$platform" in
+    Darwin) stat -f '%Lp' "$1" 2>/dev/null;;
+    Linux) stat -c '%a' "$1" 2>/dev/null;;
+    *) return 1;;
+  esac
 }
 
 alertmanager_effective_config_valid() {
