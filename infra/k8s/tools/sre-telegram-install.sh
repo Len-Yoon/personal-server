@@ -22,8 +22,10 @@ APPLY_MODE=0
 CLEANUP_DONE=0
 HELM_UPGRADE_STARTED=0
 HELM_PREVIOUS_REVISION=""
+INSTALL_STAGE="argument_validation"
 
 fail() {
+  printf 'sre_telegram_install_stage=%s\n' "$INSTALL_STAGE"
   printf 'sre_telegram_install=FAIL\n'
   return 1
 }
@@ -266,18 +268,29 @@ interrupt_apply() {
 apply() {
   local alertmanager_config_file="$1"
   [ -n "$alertmanager_config_file" ] || return 1
+  INSTALL_STAGE="preflight"
   "$PREFLIGHT_SCRIPT" --alertmanager-config-file "$alertmanager_config_file" >/dev/null 2>&1 || return 1
+  INSTALL_STAGE="runtime_secret_contract"
   require_secret_contract sre-telegram-relay-runtime telegram_bot_token allowed_chat_id alertmanager_auth_token || return 1
+  INSTALL_STAGE="alertmanager_secret_contract"
   require_secret_contract sre-telegram-alertmanager-config alertmanager.yaml || return 1
+  INSTALL_STAGE="render"
   render || return 1
+  INSTALL_STAGE="image_build"
   docker build --tag "$IMAGE" "$REPO_ROOT/sre-telegram-relay" >/dev/null || return 1
+  INSTALL_STAGE="image_import"
   if ! docker save "$IMAGE" | sudo k3s ctr -n k8s.io images import -; then
     return 1
   fi
+  INSTALL_STAGE="image_import_verify"
   verify_imported_image || return 1
+  INSTALL_STAGE="relay_resource_create"
   apply_file "$RELAY_BASE" || return 1
+  INSTALL_STAGE="rule_resource_create"
   apply_file "$PROMETHEUS_RULE" || return 1
+  INSTALL_STAGE="helm_previous_state"
   capture_previous_helm_state || return 1
+  INSTALL_STAGE="helm_upgrade"
   HELM_UPGRADE_STARTED=1
   helm upgrade "$RELEASE" "$CHART" --namespace "$NAMESPACE" --version "$VERSION" \
     --values "$ALERTMANAGER_VALUES" --reuse-values --atomic --wait --timeout 10m || return 1
@@ -289,6 +302,7 @@ main() {
   case "$mode" in
     --render)
       [ "$#" -eq 1 ] || { usage; fail; return 2; }
+      INSTALL_STAGE="render"
       render || { fail; return 1; }
       printf 'sre_telegram_install=PASS\n'
       ;;
