@@ -9,6 +9,7 @@ PROMETHEUS_SERVICE="personal-server-monitoring-prometheus"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd)
 IMAGE_DIR="$REPO_ROOT/sre-telegram-relay"
+ALERTMANAGER_CONFIG_CONTRACT="${SRE_TELEGRAM_ALERTMANAGER_CONFIG_CONTRACT:-$REPO_ROOT/infra/k8s/sre-telegram/alertmanager-config.contract.yaml}"
 overall=0
 
 fail_check() {
@@ -23,6 +24,23 @@ secret_keys_present() {
   description=$(sudo k3s kubectl -n "$NAMESPACE" describe secret "$secret_name" 2>/dev/null) || return 1
   for key in "$@"; do
     printf '%s\n' "$description" | awk -v key="$key" '$1 == key ":" && $2 ~ /^[1-9][0-9]*$/ && $3 == "bytes" { found=1 } END { exit(found ? 0 : 1) }' || return 1
+  done
+}
+
+alertmanager_contract_valid() {
+  local contract="$ALERTMANAGER_CONFIG_CONTRACT"
+  [ -r "$contract" ] || return 1
+  local required
+  for required in \
+    'route:' \
+    'group_by:' \
+    'repeat_interval: 4h' \
+    'sre_telegram="true"' \
+    'receiver: sre-telegram-relay' \
+    'url: http://sre-telegram-relay.monitoring.svc:8080/alertmanager' \
+    'send_resolved: true' \
+    'credentials_file: /etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token'; do
+    grep -F -- "$required" "$contract" >/dev/null || return 1
   done
 }
 
@@ -74,6 +92,10 @@ main() {
   fi
   if ! sudo k3s ctr version >/dev/null 2>&1; then
     fail_check image_import_prerequisites unavailable
+  fi
+
+  if ! alertmanager_contract_valid; then
+    fail_check alertmanager_config_contract invalid
   fi
 
   if ! secret_keys_present "$RUNTIME_SECRET" telegram_bot_token allowed_chat_id alertmanager_auth_token; then

@@ -1,14 +1,20 @@
 import sys
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "sre-telegram-relay"))
 
 from app.main import (  # noqa: E402
+    ConfigMapAlertStateStore,
     ConfigMapOffsetStore,
+    MemoryAlertStateStore,
     MemoryOffsetStore,
+    PROMETHEUS_API_URL,
+    PrometheusClient,
     RELAY_NAMESPACE,
     RELAY_STATE_CONFIGMAP,
     RelayService,
@@ -108,6 +114,12 @@ class FailingPollingTelegram:
         raise AssertionError("failed poll must not send a message")
 
 
+class SecretLeakingPollingTelegram(FailingPollingTelegram):
+    def get_updates(self, offset):
+        self.calls += 1
+        raise TelegramPollingError("token=super-secret-token")
+
+
 class ControlledTelegramClient(TelegramClient):
     def __init__(self, response):
         super().__init__("test-token")
@@ -118,6 +130,23 @@ class ControlledTelegramClient(TelegramClient):
 
 
 class RelayServiceTest(unittest.TestCase):
+    def test_default_prometheus_client_uses_verified_monitoring_service(self):
+        with patch("app.main.urlopen") as opener:
+            response = opener.return_value.__enter__.return_value
+            response.read.return_value = b'{"status":"success","data":{"activeTargets":[]}}'
+
+            PrometheusClient().active_targets()
+
+        request = opener.call_args.args[0]
+        self.assertEqual(
+            request.full_url,
+            "http://personal-server-monitoring-prometheus.monitoring.svc:9090/api/v1/targets",
+        )
+        self.assertEqual(
+            PROMETHEUS_API_URL,
+            "http://personal-server-monitoring-prometheus.monitoring.svc:9090",
+        )
+
     def test_allowed_status_command_returns_redacted_summary(self):
         relay = RelayService(allowed_chat_id="123", k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
 
@@ -127,6 +156,23 @@ class RelayServiceTest(unittest.TestCase):
         self.assertIn("Node Ready: 1/1", reply)
         self.assertIn("Prometheus UP: 1/2", reply)
         self.assertNotIn("123", reply)
+
+    def test_single_digit_chat_id_does_not_corrupt_status_counts(self):
+        relay = RelayService(allowed_chat_id="1", k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
+
+        reply = relay.handle_update({"message": {"chat": {"id": 1}, "text": "/상태"}})
+
+        self.assertIn("Node Ready: 1/1", reply)
+        self.assertIn("Prometheus UP: 1/2", reply)
+
+    def test_long_numeric_chat_id_is_never_returned_in_status(self):
+        chat_id = "12345678901234567890"
+        relay = RelayService(allowed_chat_id=chat_id, k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
+
+        reply = relay.handle_update({"message": {"chat": {"id": int(chat_id)}, "text": "/상태"}})
+
+        self.assertNotIn(chat_id, reply)
+        self.assertIn("Node Ready: 1/1", reply)
 
     def test_other_chat_never_receives_status(self):
         relay = RelayService(allowed_chat_id="123", k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
@@ -188,6 +234,105 @@ class RelayServiceTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("[K3s 경고 복구]", reply)
         self.assertIn("PVCNotBound", reply)
+
+    def test_duplicate_firing_alert_with_same_fingerprint_is_suppressed(self):
+        state = MemoryAlertStateStore()
+        deliveries = []
+        relay = RelayService(
+            alertmanager_auth_token="expected",
+            k8s_client=FakeK8s(),
+            prometheus_client=FakePrometheus(),
+            alert_state_store=state,
+            alert_callback=lambda message: deliveries.append(message) or True,
+        )
+        payload = {"status": "firing", "alerts": [{"fingerprint": "fp-1", "labels": {"alertname": "PodRestartIncrease"}}]}
+
+        first_status, _ = relay.handle_alert(payload, "Bearer expected")
+        second_status, second_reply = relay.handle_alert(payload, "Bearer expected")
+
+        self.assertEqual(first_status, 200)
+        self.assertEqual(second_status, 200)
+        self.assertEqual(second_reply, "duplicate suppressed")
+        self.assertEqual(len(deliveries), 1)
+
+    def test_resolved_transition_after_firing_is_delivered_once(self):
+        state = MemoryAlertStateStore()
+        deliveries = []
+        relay = RelayService(
+            alertmanager_auth_token="expected",
+            k8s_client=FakeK8s(),
+            prometheus_client=FakePrometheus(),
+            alert_state_store=state,
+            alert_callback=lambda message: deliveries.append(message) or True,
+        )
+        firing = {"status": "firing", "alerts": [{"fingerprint": "fp-2", "labels": {"alertname": "PVCNotBound"}}]}
+        resolved = {"status": "resolved", "alerts": [{"fingerprint": "fp-2", "labels": {"alertname": "PVCNotBound"}}]}
+
+        relay.handle_alert(firing, "Bearer expected")
+        resolved_status, resolved_reply = relay.handle_alert(resolved, "Bearer expected")
+        duplicate_status, duplicate_reply = relay.handle_alert(resolved, "Bearer expected")
+
+        self.assertEqual(resolved_status, 200)
+        self.assertIn("[K3s 경고 복구]", resolved_reply)
+        self.assertEqual(duplicate_status, 200)
+        self.assertEqual(duplicate_reply, "duplicate suppressed")
+        self.assertEqual(len(deliveries), 2)
+
+    def test_firing_alert_state_suppression_survives_relay_restart(self):
+        state = MemoryAlertStateStore()
+        payload = {"status": "firing", "alerts": [{"fingerprint": "fp-3", "labels": {"alertname": "DeploymentUnavailable"}}]}
+        first_relay = RelayService(
+            alertmanager_auth_token="expected",
+            k8s_client=FakeK8s(),
+            prometheus_client=FakePrometheus(),
+            alert_state_store=state,
+        )
+        restarted_relay = RelayService(
+            alertmanager_auth_token="expected",
+            k8s_client=FakeK8s(),
+            prometheus_client=FakePrometheus(),
+            alert_state_store=state,
+        )
+
+        self.assertEqual(first_relay.handle_alert(payload, "Bearer expected")[0], 200)
+        self.assertEqual(restarted_relay.handle_alert(payload, "Bearer expected"), (200, "duplicate suppressed"))
+
+    def test_configmap_alert_state_store_persists_fingerprint_status_without_secret_values(self):
+        k8s = FakeConfigMapK8s()
+        store = ConfigMapAlertStateStore(k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP)
+
+        store.save("fp-persisted", "firing", 4_000_000_000)
+
+        restarted_store = ConfigMapAlertStateStore(k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP)
+        self.assertEqual(restarted_store.load("fp-persisted"), ("firing", 4_000_000_000))
+        self.assertNotIn("secret", str(k8s.data).lower())
+
+    def test_concurrent_duplicate_firing_alerts_only_deliver_once(self):
+        state = MemoryAlertStateStore()
+        deliveries = []
+        relay = RelayService(
+            alertmanager_auth_token="expected",
+            k8s_client=FakeK8s(),
+            prometheus_client=FakePrometheus(),
+            alert_state_store=state,
+            alert_callback=lambda message: deliveries.append(message) or True,
+        )
+        payload = {"status": "firing", "alerts": [{"fingerprint": "fp-concurrent", "labels": {"alertname": "PodRestartIncrease"}}]}
+        barrier = threading.Barrier(2)
+        results = []
+
+        def deliver():
+            barrier.wait()
+            results.append(relay.handle_alert(payload, "Bearer expected"))
+
+        threads = [threading.Thread(target=deliver) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual([status for status, _ in results], [200, 200])
+        self.assertEqual(len(deliveries), 1)
 
     def test_processed_update_is_not_replied_to_again_after_restart(self):
         offsets = MemoryOffsetStore()
@@ -353,6 +498,27 @@ class RelayServiceTest(unittest.TestCase):
         self.assertEqual(telegram.calls, 7)
         self.assertFalse(relay.is_healthy())
         self.assertEqual(delays, [1, 2, 4, 8, 16, 30])
+
+    def test_polling_failure_logs_only_secret_free_error_metadata(self):
+        relay = RelayService(allowed_chat_id="1", k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
+
+        with self.assertLogs("app.main", level="WARNING") as logs:
+            run_polling(relay, SecretLeakingPollingTelegram(), "1", max_cycles=1, sleep_fn=lambda _: None)
+
+        output = "\n".join(logs.output)
+        self.assertIn("telegram_polling_failed", output)
+        self.assertIn("TelegramPollingError", output)
+        self.assertNotIn("super-secret-token", output)
+
+    def test_telegram_transport_failure_logs_without_token_or_response_body(self):
+        with patch("app.main.urlopen", side_effect=OSError("bot-token=super-secret")):
+            with self.assertLogs("app.main", level="WARNING") as logs:
+                self.assertIsNone(TelegramClient("bot-token")._post("getUpdates", {}))
+
+        output = "\n".join(logs.output)
+        self.assertIn("telegram_http_request_failed", output)
+        self.assertIn("OSError", output)
+        self.assertNotIn("super-secret", output)
 
     def test_http_boundary_rejects_unauthorized_alertmanager_request(self):
         relay = RelayService(alertmanager_auth_token="expected", k8s_client=FakeK8s(), prometheus_client=FakePrometheus())

@@ -80,7 +80,7 @@ Grafana 관리자 비밀번호는 Kubernetes Secret에서 운영자가 직접 �
 
 ## Telegram SRE 알림 도구 (N100 운영자 전용)
 
-Telegram SRE relay는 기존 `personal-server-monitoring` release에만 연결한다. Alertmanager의 route, group, repeat, resolved 설정은 N100에서 운영자가 별도로 seed한 `sre-telegram-alertmanager-config` Secret에만 둔다. Git의 values 파일에는 Secret 이름만 있으며 설정 또는 Secret 값은 포함하지 않는다.
+Telegram SRE relay는 기존 `personal-server-monitoring` release에만 연결한다. Alertmanager의 실제 route, group, repeat, resolved 설정은 N100에서 운영자가 별도로 seed한 `sre-telegram-alertmanager-config` Secret에만 둔다. Git에는 비밀값이 없는 `infra/k8s/sre-telegram/alertmanager-config.contract.yaml` 계약만 보관하며, values 파일에는 Secret 이름만 포함한다.
 
 Secret 생성·값 입력·값 확인은 이 저장소의 도구 범위 밖이다. 운영자는 N100에서 승인된 Secret Manager 또는 SOPS/age 절차로 아래 **키 이름만** 충족해야 한다. 안내 도구는 값을 생성·출력·적용하지 않는다.
 
@@ -91,9 +91,9 @@ bash infra/k8s/tools/sre-telegram-secret-template.sh
 | Secret 이름 | 필수 키 이름 | 관리 기준 |
 |---|---|---|
 | `sre-telegram-relay-runtime` | `telegram_bot_token`, `allowed_chat_id`, `alertmanager_auth_token` | N100 로컬 운영자 seed 필요 |
-| `sre-telegram-alertmanager-config` | `alertmanager.yaml` | N100 로컬 Alertmanager route/group/repeat/resolved 설정 seed 필요 |
+| `sre-telegram-alertmanager-config` | `alertmanager.yaml` | N100 로컬 Alertmanager 설정 seed 필요; 계약 파일과 `amtool check-config`로 route/group/repeat/resolved/Bearer 연결 검증 필요 |
 
-설치 전에는 읽기 전용 preflight를 실행한다. 기존 `personal-server-monitoring` Helm release가 `deployed` 상태인지, 기존 `personal-server-monitoring-prometheus` Service와 label 기반 Prometheus StatefulSet이 준비되었는지 함께 확인한다. Secret 검사는 `kubectl describe secret`의 키 이름과 1바이트 이상 여부만 확인하며, Secret 값 또는 `.data`를 읽거나 출력하지 않는다.
+설치 전에는 읽기 전용 preflight를 실행한다. 기존 `personal-server-monitoring` Helm release가 `deployed` 상태인지, 기존 `personal-server-monitoring-prometheus` Service와 label 기반 Prometheus StatefulSet이 준비되었는지 함께 확인한다. Secret 검사는 `kubectl describe secret`의 키 이름과 1바이트 이상 여부만 확인하며, Secret 값 또는 `.data`를 읽거나 출력하지 않는다. 계약 검사는 Git의 비밀값 없는 템플릿만 확인하며 실제 Secret 내용은 승인된 N100 Secret manager 절차에서만 `amtool check-config`로 검증한다.
 
 ```bash
 bash infra/k8s/tools/sre-telegram-preflight.sh

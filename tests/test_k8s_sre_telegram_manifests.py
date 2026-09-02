@@ -174,7 +174,6 @@ class SreTelegramManifestContractTests(unittest.TestCase):
             {
                 "alert": "PodRestartIncrease",
                 "expr": 'increase(kube_pod_container_status_restarts_total{namespace=~"monitoring|personal-server"}[15m]) > 3',
-                "for": "15m",
                 "labels": {"severity": "warning", "sre_telegram": "true"},
             },
             {
@@ -199,11 +198,63 @@ class SreTelegramManifestContractTests(unittest.TestCase):
 
         self.assertEqual(len(rules), 4)
         self.assertEqual(
-            [{key: item[key] for key in ("alert", "expr", "for", "labels")} for item in rules],
-            expected_rules,
+            [{key: item[key] for key in ("alert", "expr", "labels")} for item in rules[:1]],
+            [expected_rules[0]],
+        )
+        self.assertEqual(
+            [{key: item[key] for key in ("alert", "expr", "for", "labels")} for item in rules[1:]],
+            expected_rules[1:],
         )
 
-    def test_alertmanager_references_existing_secret_not_inline_token(self):
+    def test_restart_alert_uses_rolling_window_without_extra_for_delay(self):
+        documents = load_yaml_documents("prometheus-rule.yaml")
+        rules = find_document(documents, "PrometheusRule", "sre-telegram-k3s-alerts")["spec"]["groups"][0]["rules"]
+
+        restart_rule = next(rule for rule in rules if rule["alert"] == "PodRestartIncrease")
+
+        self.assertEqual(
+            restart_rule["expr"],
+            'increase(kube_pod_container_status_restarts_total{namespace=~"monitoring|personal-server"}[15m]) > 3',
+        )
+        self.assertNotIn("for", restart_rule)
+
+    def test_alertmanager_contract_covers_route_group_repeat_resolved_and_bearer_linkage(self):
+        contract_path = MANIFEST_ROOT / "alertmanager-config.contract.yaml"
+        self.assertTrue(contract_path.is_file(), f"required contract is missing: {contract_path.relative_to(ROOT)}")
+        contract = yaml.safe_load(contract_path.read_text(encoding="utf-8"))
+
+        route = contract["route"]
+        receiver = next(item for item in contract["receivers"] if item["name"] == "sre-telegram-relay")
+        webhook = receiver["webhook_configs"][0]
+        matcher_route = next(item for item in route["routes"] if item["receiver"] == "sre-telegram-relay")
+
+        self.assertEqual(route["receiver"], "sre-telegram-noop")
+        self.assertIn("alertname", route["group_by"])
+        self.assertEqual(route["repeat_interval"], "4h")
+        self.assertEqual(matcher_route["matchers"], ['sre_telegram="true"'])
+        self.assertEqual(webhook["url"], "http://sre-telegram-relay.monitoring.svc:8080/alertmanager")
+        self.assertTrue(webhook["send_resolved"])
+        self.assertEqual(
+            webhook["http_config"]["authorization"],
+            {
+                "type": "Bearer",
+                "credentials_file": "/etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token",
+            },
+        )
+
+    def test_alertmanager_mounts_runtime_secret_for_bearer_credential_file(self):
+        values = yaml.safe_load((MANIFEST_ROOT / "alertmanager-values.yaml").read_text(encoding="utf-8"))
+
+        self.assertIn("sre-telegram-relay-runtime", values["alertmanager"]["alertmanagerSpec"]["secrets"])
+
+    def test_alertmanager_contract_contains_no_secret_values(self):
+        contract_text = (MANIFEST_ROOT / "alertmanager-config.contract.yaml").read_text(encoding="utf-8")
+
+        self.assertNotIn("telegram_bot_token", contract_text)
+        self.assertNotIn("allowed_chat_id", contract_text)
+        self.assertNotRegex(contract_text, r"credentials:\s*[^$\n]+")
+
+    def test_alertmanager_values_reference_existing_secret_not_inline_token(self):
         values_path = MANIFEST_ROOT / "alertmanager-values.yaml"
         self.assertTrue(values_path.is_file(), f"required manifest is missing: {values_path.relative_to(ROOT)}")
         values_text = values_path.read_text(encoding="utf-8")
@@ -218,7 +269,7 @@ class SreTelegramManifestContractTests(unittest.TestCase):
         self.assertNotIn("alertmanagerConfig", values)
         self.assertNotIn("token", values_text.lower())
         self.assertNotIn("Secret", {document["kind"] for document in load_yaml_documents("base.yaml")})
-        # Task 3 preflight/seed validation owns the external Secret's route structure without printing values.
+        # The non-secret contract owns route and receiver semantics; the external Secret owns only values.
 
 
 if __name__ == "__main__":

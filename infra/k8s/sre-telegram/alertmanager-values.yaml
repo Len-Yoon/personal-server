@@ -2,3 +2,5 @@ alertmanager:
   enabled: true
   alertmanagerSpec:
     configSecret: sre-telegram-alertmanager-config
+    secrets:
+      - sre-telegram-relay-runtime

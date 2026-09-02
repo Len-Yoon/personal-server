@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hmac
+import hashlib
 import json
+import logging
 import os
 import ssl
 import threading
@@ -15,7 +17,7 @@ from urllib.request import Request, urlopen
 
 
 KUBERNETES_API_URL = "https://kubernetes.default.svc"
-PROMETHEUS_API_URL = "http://prometheus-operated.monitoring.svc:9090"
+PROMETHEUS_API_URL = "http://personal-server-monitoring-prometheus.monitoring.svc:9090"
 SERVICE_ACCOUNT_DIRECTORY = "/var/run/secrets/kubernetes.io/serviceaccount"
 DEFAULT_NAMESPACES = ("monitoring", "personal-server")
 RELAY_NAMESPACE = "monitoring"
@@ -23,6 +25,9 @@ RELAY_STATE_CONFIGMAP = "sre-telegram-relay-state"
 MAX_ALERT_ITEMS = 4
 MAX_REQUEST_BODY_BYTES = 1_048_576
 CONFIGMAP_OFFSET_KEY = "telegram_next_update_id"
+CONFIGMAP_ALERT_STATE_KEY = "alert_state"
+ALERT_STATE_TTL_SECONDS = 4 * 60 * 60
+LOGGER = logging.getLogger(__name__)
 
 
 class TelegramPollingError(RuntimeError):
@@ -37,6 +42,14 @@ class OffsetStore(Protocol):
     def save(self, offset: int) -> None: ...
 
 
+class AlertStateStore(Protocol):
+    """Stores one alert fingerprint state for a short, bounded period."""
+
+    def load(self, fingerprint: str) -> tuple[str, float] | None: ...
+
+    def save(self, fingerprint: str, status: str, expires_at: float) -> None: ...
+
+
 class MemoryOffsetStore:
     """Small state holder used when a persistent ConfigMap-backed store is injected later."""
 
@@ -48,6 +61,28 @@ class MemoryOffsetStore:
 
     def save(self, offset: int) -> None:
         self._offset = offset
+
+
+class MemoryAlertStateStore:
+    """Small injectable alert state store used across relay instances in tests/runtime."""
+
+    def __init__(self) -> None:
+        self._states: dict[str, tuple[str, float]] = {}
+        self._lock = threading.Lock()
+
+    def load(self, fingerprint: str) -> tuple[str, float] | None:
+        with self._lock:
+            state = self._states.get(fingerprint)
+            if state is None:
+                return None
+            if state[1] <= time.time():
+                self._states.pop(fingerprint, None)
+                return None
+            return state
+
+    def save(self, fingerprint: str, status: str, expires_at: float) -> None:
+        with self._lock:
+            self._states[fingerprint] = (status, expires_at)
 
 
 class KubernetesClient:
@@ -151,6 +186,66 @@ class ConfigMapOffsetStore:
         )
 
 
+class ConfigMapAlertStateStore:
+    """Persists bounded, secret-free alert fingerprint state in the relay ConfigMap."""
+
+    def __init__(self, k8s_client: KubernetesClient, *, namespace: str, name: str) -> None:
+        if namespace != RELAY_NAMESPACE or name != RELAY_STATE_CONFIGMAP:
+            raise ValueError("Alert state storage must use the dedicated relay ConfigMap")
+        self._k8s_client = k8s_client
+        self._namespace = namespace
+        self._name = name
+
+    def load(self, fingerprint: str) -> tuple[str, float] | None:
+        states = self._read_states()
+        record = states.get(_alert_state_key(fingerprint))
+        if not isinstance(record, dict):
+            return None
+        status = record.get("status")
+        expires_at = record.get("expires_at")
+        if status not in {"firing", "resolved"} or not isinstance(expires_at, (int, float)):
+            raise ValueError("relay ConfigMap has invalid alert state")
+        if expires_at <= time.time():
+            return None
+        return status, float(expires_at)
+
+    def save(self, fingerprint: str, status: str, expires_at: float) -> None:
+        if status not in {"firing", "resolved"} or expires_at <= 0:
+            raise ValueError("invalid alert state")
+        states = self._read_states()
+        now = time.time()
+        states = {
+            key: value
+            for key, value in states.items()
+            if isinstance(value, dict)
+            and isinstance(value.get("expires_at"), (int, float))
+            and value["expires_at"] > now
+        }
+        states[_alert_state_key(fingerprint)] = {
+            "status": status,
+            "expires_at": expires_at,
+        }
+        self._k8s_client.patch_config_map(
+            self._namespace,
+            self._name,
+            {CONFIGMAP_ALERT_STATE_KEY: json.dumps(states, separators=(",", ":"), sort_keys=True)},
+        )
+
+    def _read_states(self) -> dict[str, Any]:
+        config_map = self._k8s_client.get_config_map(self._namespace, self._name)
+        data = config_map.get("data")
+        raw = data.get(CONFIGMAP_ALERT_STATE_KEY) if isinstance(data, dict) else None
+        if raw is None:
+            return {}
+        try:
+            states = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise ValueError("relay ConfigMap has invalid alert state data") from None
+        if not isinstance(states, dict):
+            raise ValueError("relay ConfigMap has invalid alert state data")
+        return states
+
+
 class PrometheusClient:
     """Read-only Prometheus client limited to active scrape targets."""
 
@@ -227,6 +322,7 @@ class RelayService:
         k8s_client: KubernetesClient,
         prometheus_client: PrometheusClient,
         offset_store: OffsetStore | None = None,
+        alert_state_store: AlertStateStore | None = None,
         alert_callback: Callable[[str], bool] | None = None,
     ) -> None:
         self._allowed_chat_id = str(allowed_chat_id)
@@ -234,6 +330,8 @@ class RelayService:
         self._k8s_client = k8s_client
         self._prometheus_client = prometheus_client
         self._offset_store = offset_store or MemoryOffsetStore()
+        self._alert_state_store = alert_state_store or MemoryAlertStateStore()
+        self._alert_state_lock = threading.Lock()
         self._alert_callback = alert_callback
         self._healthy = True
 
@@ -293,15 +391,66 @@ class RelayService:
         if not isinstance(alerts, list):
             return 400, "invalid alert payload"
 
-        reply = self._format_alert(status, alerts)
-        if self._alert_callback is not None:
+        with self._alert_state_lock:
             try:
-                delivered = self._alert_callback(reply)
-            except Exception:
+                deliverable_alerts, state_records = self._new_alerts(status, alerts)
+            except Exception as exc:
+                self.mark_unhealthy()
+                LOGGER.warning(
+                    "alert_state_read_failed error_type=%s",
+                    type(exc).__name__,
+                )
                 return 503, "delivery failed"
-            if not delivered:
+
+            if any(isinstance(alert, dict) for alert in alerts) and not deliverable_alerts:
+                return 200, "duplicate suppressed"
+
+            reply = self._format_alert(status, deliverable_alerts or alerts)
+            if self._alert_callback is not None:
+                try:
+                    delivered = self._alert_callback(reply)
+                except Exception as exc:
+                    self.mark_unhealthy()
+                    LOGGER.warning(
+                        "alert_delivery_failed error_type=%s",
+                        type(exc).__name__,
+                    )
+                    return 503, "delivery failed"
+                if not delivered:
+                    self.mark_unhealthy()
+                    LOGGER.warning("alert_delivery_failed reason=callback_rejected")
+                    return 503, "delivery failed"
+
+            try:
+                for fingerprint, state in state_records:
+                    self._alert_state_store.save(
+                        fingerprint,
+                        state,
+                        time.time() + ALERT_STATE_TTL_SECONDS,
+                    )
+            except Exception as exc:
+                self.mark_unhealthy()
+                LOGGER.warning(
+                    "alert_state_write_failed error_type=%s",
+                    type(exc).__name__,
+                )
                 return 503, "delivery failed"
-        return 200, reply
+            return 200, reply
+
+    def _new_alerts(self, status: str, alerts: list[Any]) -> tuple[list[dict[str, Any]], list[tuple[str, str]]]:
+        deliverable: list[dict[str, Any]] = []
+        state_records: list[tuple[str, str]] = []
+        now = time.time()
+        for alert in alerts:
+            if not isinstance(alert, dict):
+                continue
+            fingerprint = _alert_fingerprint(alert)
+            previous = self._alert_state_store.load(fingerprint)
+            if previous is not None and previous[0] == status and previous[1] > now:
+                continue
+            deliverable.append(alert)
+            state_records.append((fingerprint, status))
+        return deliverable, state_records
 
     def _format_alert(self, status: str, alerts: list[Any]) -> str:
         heading = "[K3s 경고 발생]" if status == "firing" else "[K3s 경고 복구]"
@@ -320,7 +469,7 @@ class RelayService:
         if value is None:
             return ""
         redacted = value
-        for sensitive_value in (self._allowed_chat_id, self._alertmanager_auth_token):
+        for sensitive_value in (self._alertmanager_auth_token,):
             if sensitive_value:
                 redacted = redacted.replace(sensitive_value, "[비공개]")
         return redacted
@@ -359,7 +508,12 @@ class TelegramClient:
         try:
             with urlopen(request, timeout=self._timeout_seconds) as response:
                 return _decode_object(response.read())
-        except (OSError, URLError, ValueError, json.JSONDecodeError):
+        except (OSError, URLError, ValueError, json.JSONDecodeError) as exc:
+            LOGGER.warning(
+                "telegram_http_request_failed method=%s error_type=%s",
+                method,
+                type(exc).__name__,
+            )
             return None
 
 
@@ -461,7 +615,12 @@ def run_polling(
     while True:
         try:
             delivered = _poll_once(relay, telegram_client, allowed_chat_id)
-        except Exception:
+        except Exception as exc:
+            LOGGER.warning(
+                "telegram_polling_failed error_type=%s consecutive_failures=%d",
+                type(exc).__name__,
+                consecutive_failures + 1,
+            )
             delivered = False
         cycles += 1
         if delivered:
@@ -469,6 +628,8 @@ def run_polling(
             consecutive_failures = 0
             delay = 1
         else:
+            if consecutive_failures == 0:
+                LOGGER.warning("telegram_delivery_failed reason=send_message_rejected")
             relay.mark_unhealthy()
             consecutive_failures += 1
             delay = min(2 ** (consecutive_failures - 1), 30)
@@ -503,6 +664,11 @@ def main() -> None:
         k8s_client=k8s_client,
         prometheus_client=PrometheusClient(),
         offset_store=ConfigMapOffsetStore(
+            k8s_client,
+            namespace=RELAY_NAMESPACE,
+            name=RELAY_STATE_CONFIGMAP,
+        ),
+        alert_state_store=ConfigMapAlertStateStore(
             k8s_client,
             namespace=RELAY_NAMESPACE,
             name=RELAY_STATE_CONFIGMAP,
@@ -583,6 +749,19 @@ def _decode_object(body: bytes) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("response must be a JSON object")
     return payload
+
+
+def _alert_fingerprint(alert: dict[str, Any]) -> str:
+    fingerprint = alert.get("fingerprint")
+    if isinstance(fingerprint, str) and fingerprint:
+        return fingerprint
+    identity = alert.get("labels") if isinstance(alert.get("labels"), dict) else alert
+    digest_input = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return f"derived:{hashlib.sha256(digest_input).hexdigest()}"
+
+
+def _alert_state_key(fingerprint: str) -> str:
+    return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
 
 
 if __name__ == "__main__":

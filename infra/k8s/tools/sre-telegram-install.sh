@@ -12,6 +12,7 @@ BASE_VALUES="$REPO_ROOT/infra/k8s/monitoring/values.n100.yaml"
 ALERTMANAGER_VALUES="$REPO_ROOT/infra/k8s/sre-telegram/alertmanager-values.yaml"
 RELAY_BASE="$REPO_ROOT/infra/k8s/sre-telegram/base.yaml"
 PROMETHEUS_RULE="$REPO_ROOT/infra/k8s/sre-telegram/prometheus-rule.yaml"
+ALERTMANAGER_CONFIG_CONTRACT="${SRE_TELEGRAM_ALERTMANAGER_CONFIG_CONTRACT:-$REPO_ROOT/infra/k8s/sre-telegram/alertmanager-config.contract.yaml}"
 PREFLIGHT_SCRIPT="${SRE_TELEGRAM_PREFLIGHT_SCRIPT:-$SCRIPT_DIR/sre-telegram-preflight.sh}"
 
 created_resources=()
@@ -33,10 +34,28 @@ usage() {
 }
 
 render() {
+  require_alertmanager_contract || return 1
   helm template "$RELEASE" "$CHART" --namespace "$NAMESPACE" --version "$VERSION" \
     --values "$BASE_VALUES" --values "$ALERTMANAGER_VALUES" >/dev/null || return 1
   sudo k3s kubectl apply --dry-run=client -f "$RELAY_BASE" >/dev/null || return 1
   sudo k3s kubectl apply --dry-run=client -f "$PROMETHEUS_RULE" >/dev/null
+}
+
+require_alertmanager_contract() {
+  local contract="$ALERTMANAGER_CONFIG_CONTRACT"
+  [ -r "$contract" ] || return 1
+  local required
+  for required in \
+    'route:' \
+    'group_by:' \
+    'repeat_interval: 4h' \
+    'sre_telegram="true"' \
+    'receiver: sre-telegram-relay' \
+    'url: http://sre-telegram-relay.monitoring.svc:8080/alertmanager' \
+    'send_resolved: true' \
+    'credentials_file: /etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token'; do
+    grep -F -- "$required" "$contract" >/dev/null || return 1
+  done
 }
 
 require_secret_contract() {
@@ -203,6 +222,30 @@ capture_previous_helm_revision() {
   fi
 }
 
+helm_revision_is_restored() {
+  local status="$1"
+  [[ "$status" =~ \"status\"[[:space:]]*:[[:space:]]*\"deployed\" ]] || return 1
+  [[ "$status" =~ \"revision\"[[:space:]]*:[[:space:]]*\"?${HELM_PREVIOUS_REVISION}\"?([,}]) ]]
+}
+
+verify_or_restore_helm_release() {
+  local status
+  [ -n "$HELM_PREVIOUS_REVISION" ] || return 1
+
+  if [ "$INTERRUPTED" -eq 1 ]; then
+    helm rollback "$RELEASE" "$HELM_PREVIOUS_REVISION" --namespace "$NAMESPACE" --wait --timeout 10m >/dev/null 2>&1 || return 1
+  fi
+
+  status=$(helm status "$RELEASE" --namespace "$NAMESPACE" --output json 2>/dev/null) || return 1
+  if helm_revision_is_restored "$status"; then
+    return 0
+  fi
+
+  helm rollback "$RELEASE" "$HELM_PREVIOUS_REVISION" --namespace "$NAMESPACE" --wait --timeout 10m >/dev/null 2>&1 || return 1
+  status=$(helm status "$RELEASE" --namespace "$NAMESPACE" --output json 2>/dev/null) || return 1
+  helm_revision_is_restored "$status"
+}
+
 cleanup_apply() {
   local status=$?
   if [ "$CLEANUP_DONE" -eq 1 ]; then
@@ -212,8 +255,8 @@ cleanup_apply() {
   cleanup_manifest_dir
   if [ "$APPLY_MODE" -eq 1 ] && [ "$status" -ne 0 ]; then
     rollback_created_resources
-    if [ "$HELM_UPGRADE_STARTED" -eq 1 ] && [ "$INTERRUPTED" -eq 1 ] && [ -n "$HELM_PREVIOUS_REVISION" ]; then
-      helm rollback "$RELEASE" "$HELM_PREVIOUS_REVISION" --namespace "$NAMESPACE" --wait --timeout 10m >/dev/null 2>&1 || true
+    if [ "$HELM_UPGRADE_STARTED" -eq 1 ] && [ -n "$HELM_PREVIOUS_REVISION" ]; then
+      verify_or_restore_helm_release || true
     fi
   fi
   return "$status"

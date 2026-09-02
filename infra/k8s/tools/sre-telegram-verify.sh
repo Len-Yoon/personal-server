@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 NAMESPACE="monitoring"
+WORKLOAD_NAMESPACES=("monitoring" "personal-server")
 RELEASE="personal-server-monitoring"
 RELAY="sre-telegram-relay"
 PROMETHEUS_SERVICE="personal-server-monitoring-prometheus"
@@ -66,29 +67,31 @@ raise SystemExit(0 if safe else 1)'
 }
 
 check_can_i_denied() {
-  local verb="$1" resource="$2" service_account="$3" result
-  result=$(sudo k3s kubectl auth can-i "$verb" "$resource" --namespace "$NAMESPACE" --as "$service_account" 2>/dev/null) || return 1
+  local verb="$1" resource="$2" namespace="$3" service_account="$4" result
+  result=$(sudo k3s kubectl auth can-i "$verb" "$resource" --namespace "$namespace" --as "$service_account" 2>/dev/null) || return 1
   [ "$result" = "no" ]
 }
 
 check_non_escalated_rbac() {
   local service_account="system:serviceaccount:${NAMESPACE}:${RELAY}"
-  local check verb resource
-  for check in \
-    'get|secrets' \
-    'list|secrets' \
-    'watch|secrets' \
-    'create|secrets' \
-    'delete|secrets' \
-    'patch|secrets' \
-    'create|pods' \
-    'delete|pods' \
-    'delete|deployments' \
-    'create|pods/exec' \
-    'create|pods/portforward' \
-    'patch|deployments'; do
-    IFS='|' read -r verb resource <<< "$check"
-    check_can_i_denied "$verb" "$resource" "$service_account" || return 1
+  local check verb resource namespace
+  for namespace in "${WORKLOAD_NAMESPACES[@]}"; do
+    for check in \
+      'get|secrets' \
+      'list|secrets' \
+      'watch|secrets' \
+      'create|secrets' \
+      'delete|secrets' \
+      'patch|secrets' \
+      'create|pods' \
+      'delete|pods' \
+      'delete|deployments' \
+      'create|pods/exec' \
+      'create|pods/portforward' \
+      'patch|deployments'; do
+      IFS='|' read -r verb resource <<< "$check"
+      check_can_i_denied "$verb" "$resource" "$namespace" "$service_account" || return 1
+    done
   done
 }
 

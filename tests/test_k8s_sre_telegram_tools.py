@@ -75,6 +75,42 @@ class SreTelegramToolContractTest(unittest.TestCase):
         self.assertNotRegex(script, r"kubectl(?:\s+-\S+\s+\S+)*\s+describe\s+secrets?")
         self.assertNotIn(".data", script)
 
+    def test_preflight_validates_non_secret_alertmanager_contract(self):
+        script = read_tool("sre-telegram-preflight.sh")
+
+        self.assertIn("ALERTMANAGER_CONFIG_CONTRACT", script)
+        self.assertIn("alertmanager_config_contract", script)
+        self.assertIn("repeat_interval: 4h", script)
+        self.assertIn('sre_telegram="true"', script)
+        self.assertIn("send_resolved: true", script)
+        self.assertIn("credentials_file", script)
+
+    def test_verify_checks_namespaced_denials_in_monitoring_and_personal_server(self):
+        result, calls = self.run_tool(
+            "sre-telegram-verify.sh",
+            stubs={
+                "sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *'rollout status deployment/sre-telegram-relay'*) exit 0;;\n"
+                "  *'get service sre-telegram-relay -o json'*) printf '{\"spec\":{\"type\":\"ClusterIP\",\"ports\":[{\"port\":8080}]}}\\n'; exit 0;;\n"
+                "  *'get prometheusrule sre-telegram-k3s-alerts'*) exit 0;;\n"
+                "  *'auth can-i'*) printf 'no\\n'; exit 0;;\n"
+                "  *'port-forward'*) sleep 30;;\n"
+                "  *) exit 1;;\n"
+                "esac\n",
+                "curl": "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *18080*) printf 'ok\\n';;\n"
+                "  *) printf '{\"status\":\"success\",\"data\":{\"activeTargets\":[{\"health\":\"up\"}]}}\\n';;\n"
+                "esac\n"
+                "exit 0\n",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--namespace monitoring", calls)
+        self.assertIn("--namespace personal-server", calls)
+
     def test_secret_guidance_only_names_required_keys_and_manual_procedure(self):
         script = read_tool("sre-telegram-secret-template.sh")
 
@@ -376,6 +412,43 @@ class SreTelegramToolContractTest(unittest.TestCase):
         self.assertEqual(result.returncode, 130)
         self.assertIn("helm rollback personal-server-monitoring 2 --namespace monitoring", calls)
         self.assertIn("-n personal-server delete rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader", calls)
+
+    def test_install_verifies_atomic_helm_failure_and_restores_previous_revision(self):
+        result, calls = self.run_tool(
+            "sre-telegram-install.sh",
+            "--apply",
+            stubs={
+                "preflight": "#!/bin/sh\nprintf 'sre_telegram_preflight=PASS\\n'\nexit 0\n",
+                "sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *describe*) printf 'telegram_bot_token: 3 bytes\\nallowed_chat_id: 2 bytes\\nalertmanager_auth_token: 3 bytes\\nalertmanager.yaml: 4 bytes\\n'; exit 0;;\n"
+                "  *'apply --dry-run=client'*) exit 0;;\n"
+                "  *'images list'*) printf 'REF TYPE DIGEST SIZE PLATFORMS LABELS\\npersonal-server-sre-telegram-relay:latest x sha256:abc 1MB linux/amd64 -\\n'; exit 0;;\n"
+                "  *'create -f'*) printf 'configmap/sre-telegram-relay-state created\\n'; exit 0;;\n"
+                "  *delete*) exit 0;;\n"
+                "  *) exit 0;;\n"
+                "esac\n",
+                "docker": "#!/bin/sh\ncase \"$1\" in build) exit 0;; save) printf image-stream; exit 0;; esac\n",
+                "helm": "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  template) exit 0;;\n"
+                "  status)\n"
+                "    count=$(grep -c '^helm status' \"$CALLS\" 2>/dev/null || true)\n"
+                "    if [ \"$count\" -lt 1 ]; then printf '{\"info\":{\"status\":\"deployed\",\"revision\":\"2\"}}\\n'; else printf '{\"info\":{\"status\":\"deployed\",\"revision\":\"3\"}}\\n'; fi\n"
+                "    printf 'helm %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "    exit 0;;\n"
+                "  upgrade) printf 'helm %s\\n' \"$*\" >> \"$CALLS\"; exit 1;;\n"
+                "  rollback) printf 'helm %s\\n' \"$*\" >> \"$CALLS\"; exit 0;;\n"
+                "  *) exit 0;;\n"
+                "esac\n",
+            },
+            env_overrides={"SRE_TELEGRAM_PREFLIGHT_SCRIPT": "preflight"},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_install=FAIL"))
+        self.assertIn("helm rollback personal-server-monitoring 2 --namespace monitoring", calls)
+        self.assertGreaterEqual(calls.count("helm status"), 3)
 
     def test_verify_fails_closed_when_rbac_can_i_errors(self):
         result, _ = self.run_tool(

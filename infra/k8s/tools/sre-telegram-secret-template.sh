@@ -15,7 +15,10 @@ main() {
   printf '%s\n' '   alertmanager_auth_token'
   printf '%s\n' '3. Seed namespace monitoring Secret sre-telegram-alertmanager-config with key name only:'
   printf '%s\n' '   alertmanager.yaml'
-  printf '%s\n' '4. Do not paste, display, commit, or log Secret values. This guidance does not create or modify Secrets.'
+  printf '%s\n' '4. Before seeding alertmanager.yaml, validate its non-secret structure with amtool check-config and compare it to infra/k8s/sre-telegram/alertmanager-config.contract.yaml:'
+  printf '%s\n' '   route matcher sre_telegram="true", group_by, repeat_interval 4h, relay URL, send_resolved true, and Bearer credentials_file linkage are required.'
+  printf '%s\n' '5. Confirm the credentials_file points to the mounted runtime Secret key alertmanager_auth_token; compare the value only inside the approved N100 Secret manager workflow.'
+  printf '%s\n' '6. Do not paste, display, commit, or log Secret values. This guidance does not create or modify Secrets.'
 }
 
 main "$@"
