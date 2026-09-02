@@ -53,7 +53,7 @@ def test_rejects_wrong_matcher_receiver_url_or_credentials_file(): ...
 
 - [ ] **Step 2: Run RED**
 
-Run: `python3 -m unittest tests/test_validate_sre_alertmanager_config.py -v`  
+Run: `python3 -m unittest tests/test_validate_sre_alertmanager_config.py -v`
 Expected: FAIL because the template and validator do not exist.
 
 - [ ] **Step 3: Create the non-secret template**
@@ -85,10 +85,10 @@ Parse with `yaml.safe_load`; reject non-mapping data, extra root keys except Ale
 
 - [ ] **Step 5: Run GREEN and syntax checks**
 
-Run: `python3 -m unittest tests/test_validate_sre_alertmanager_config.py -v`  
+Run: `python3 -m unittest tests/test_validate_sre_alertmanager_config.py -v`
 Expected: PASS.
 
-Run: `python3 -m py_compile infra/k8s/tools/validate-sre-alertmanager-config.py`  
+Run: `python3 -m py_compile infra/k8s/tools/validate-sre-alertmanager-config.py`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
@@ -120,7 +120,7 @@ def test_secret_guidance_requires_0600_temporary_file_and_immediate_removal(): .
 
 - [ ] **Step 2: Run RED**
 
-Run: `python3 -m unittest tests/test_k8s_sre_telegram_tools.py -v`  
+Run: `python3 -m unittest tests/test_k8s_sre_telegram_tools.py -v`
 Expected: new tests FAIL because the current route-tree parser accepts broader forms.
 
 - [ ] **Step 3: Replace route-tree interpretation**
@@ -133,10 +133,10 @@ Document: copy template in an N100 private directory, `chmod 600`, insert the ap
 
 - [ ] **Step 5: Run GREEN**
 
-Run: `python3 -m unittest tests/test_k8s_sre_telegram_tools.py tests/test_validate_sre_alertmanager_config.py -v`  
+Run: `python3 -m unittest tests/test_k8s_sre_telegram_tools.py tests/test_validate_sre_alertmanager_config.py -v`
 Expected: PASS.
 
-Run: `bash -n infra/k8s/tools/sre-telegram-preflight.sh infra/k8s/tools/sre-telegram-secret-template.sh`  
+Run: `bash -n infra/k8s/tools/sre-telegram-preflight.sh infra/k8s/tools/sre-telegram-secret-template.sh`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
@@ -153,15 +153,15 @@ git commit -m "fix: Alertmanager 고정 템플릿 사전점검 적용"
 
 - [ ] **Step 1: Run affected local suite**
 
-Run: `python3 -m unittest tests/test_validate_sre_alertmanager_config.py tests/test_k8s_sre_telegram_tools.py tests/test_k8s_sre_telegram_manifests.py tests/test_sre_telegram_relay.py tests/test_k8s_monitoring_tools.py tests/test_k8s_monitoring_values.py -v`  
+Run: `python3 -m unittest tests/test_validate_sre_alertmanager_config.py tests/test_k8s_sre_telegram_tools.py tests/test_k8s_sre_telegram_manifests.py tests/test_sre_telegram_relay.py tests/test_k8s_monitoring_tools.py tests/test_k8s_monitoring_values.py -v`
 Expected: all pass.
 
 - [ ] **Step 2: Run static and change-scope checks**
 
-Run: `git diff --check main...HEAD`  
+Run: `git diff --check main...HEAD`
 Expected: PASS.
 
-Generate a NUL-delimited changed-file record, then run `python3 scripts/run_change_harness.py --input <record> --input-format git-name-status-z --check-result maintenance=success --agent-context`.  
+Generate a NUL-delimited changed-file record, then run `python3 scripts/run_change_harness.py --input <record> --input-format git-name-status-z --check-result maintenance=success --agent-context`.
 Expected: `ready_for_review`.
 
 - [ ] **Step 3: Independent review**
