@@ -438,6 +438,16 @@ class SreTelegramToolContractTest(unittest.TestCase):
         self.assertNotRegex(result.stdout, r"kubectl +(create|apply|patch|replace)")
         self.assertNotIn("alertmanager_auth_token=", result.stdout)
 
+    def test_readme_keeps_bearer_out_of_temporary_alertmanager_config(self):
+        readme = (ROOT / "infra" / "k8s" / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("runtime Secret 키 `alertmanager_auth_token`에만 입력", readme)
+        self.assertIn(
+            "임시 Alertmanager 설정 파일에는 `credentials_file` 경로만 유지하며 bearer 값은 포함하지 않는다",
+            readme,
+        )
+        self.assertNotIn("bearer 값은 로컬 편집기로만 입력", readme)
+
     def test_preflight_rejects_a_non_deployed_release_even_when_helm_status_returns_zero(self):
         result, _ = self.run_tool(
             "sre-telegram-preflight.sh",

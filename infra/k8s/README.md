@@ -93,13 +93,14 @@ bash infra/k8s/tools/sre-telegram-secret-template.sh
 | `sre-telegram-relay-runtime` | `telegram_bot_token`, `allowed_chat_id`, `alertmanager_auth_token` | N100 로컬 운영자 seed 필요 |
 | `sre-telegram-alertmanager-config` | `alertmanager.yaml` | N100 로컬 Alertmanager 설정 seed 필요; 고정 템플릿 기반 권한 `0600` 임시 파일을 `amtool`과 고정 검증기로 검증한 뒤 동일 파일만 seed 필요 |
 
-설치 전에는 읽기 전용 preflight를 실행한다. 기존 `personal-server-monitoring` Helm release가 `deployed` 상태인지, 기존 `personal-server-monitoring-prometheus` Service와 label 기반 Prometheus StatefulSet이 준비되었는지 함께 확인한다. Secret 검사는 `kubectl describe secret`의 키 이름과 1바이트 이상 여부만 확인하며, Secret 값 또는 `.data`를 읽거나 출력하지 않는다. N100 운영자는 승인된 N100 private directory에서 고정 템플릿을 `alertmanager.yaml`로 복사하고 `chmod 600`을 적용해야 한다. 고정 템플릿의 `credentials_file`은 변경하지 않으며, 승인된 bearer 값은 승인된 로컬 Secret manager 절차에서 runtime Secret 키 `alertmanager_auth_token`에만 입력한다. 설정 파일 또는 Secret 값은 출력하지 않는다. preflight는 해당 파일을 출력하지 않고 `amtool check-config` 후 고정 검증기를 실행한다. 파일 권한이 `0600`이 아니거나 `amtool`, Python, PyYAML, 파일 또는 어느 검증이라도 사용할 수 없거나 실패하면 preflight는 실패한다. preflight를 통과한 바로 그 파일만 `alertmanager.yaml` Secret 키로 seed하고, 뒤따르는 `--apply` 재검증이 끝날 때까지 해당 임시 파일을 유지해야 한다.
+설치 전에는 읽기 전용 preflight를 실행한다. 기존 `personal-server-monitoring` Helm release가 `deployed` 상태인지, 기존 `personal-server-monitoring-prometheus` Service와 label 기반 Prometheus StatefulSet이 준비되었는지 함께 확인한다. Secret 검사는 `kubectl describe secret`의 키 이름과 1바이트 이상 여부만 확인하며, Secret 값 또는 `.data`를 읽거나 출력하지 않는다. N100 운영자는 승인된 N100 private directory에서 고정 템플릿을 `alertmanager.yaml`로 복사하고 `chmod 600`을 적용해야 한다. 임시 Alertmanager 설정 파일에는 `credentials_file` 경로만 유지하며 bearer 값은 포함하지 않는다. 승인된 bearer 값은 승인된 로컬 Secret manager 절차에서 runtime Secret 키 `alertmanager_auth_token`에만 입력한다. 설정 파일 또는 Secret 값은 출력하지 않는다. preflight는 해당 파일을 출력하지 않고 `amtool check-config` 후 고정 검증기를 실행한다. 파일 권한이 `0600`이 아니거나 `amtool`, Python, PyYAML, 파일 또는 어느 검증이라도 사용할 수 없거나 실패하면 preflight는 실패한다. preflight를 통과한 바로 그 파일만 `alertmanager.yaml` Secret 키로 seed하고, 뒤따르는 `--apply` 재검증이 끝날 때까지 해당 임시 파일을 유지해야 한다.
 
 ```bash
 mkdir -p /secure/operator-temporary
 cp infra/k8s/sre-telegram/alertmanager.yaml.tmpl /secure/operator-temporary/alertmanager.yaml
 chmod 600 /secure/operator-temporary/alertmanager.yaml
-# 승인된 bearer 값은 로컬 편집기로만 입력하며, 명령·로그·Git에 출력하지 않음
+# 임시 Alertmanager 설정 파일은 credentials_file 경로만 유지하며 bearer 값을 포함하지 않음
+# bearer 값은 runtime Secret 키 alertmanager_auth_token에만 입력하며, 설정 파일·Secret 값은 출력하지 않음
 bash infra/k8s/tools/sre-telegram-preflight.sh --alertmanager-config-file /secure/operator-temporary/alertmanager.yaml
 ```
 
