@@ -175,6 +175,33 @@ class VerifyChangeScopeTests(unittest.TestCase):
         self.assertEqual(evidence["required_checks"], ["maintenance"])
         self.assertEqual(evidence["unclassified_files"], [])
 
+    def test_sre_telegram_relay_paths_require_only_maintenance_check(self):
+        paths = (
+            "sre-telegram-relay/app/main.py",
+            "sre-telegram-relay/Dockerfile",
+        )
+
+        code, evidence = run_scope(*paths, executed_checks=("maintenance",))
+
+        self.assertEqual(code, 0)
+        self.assertEqual(evidence["services"], [])
+        self.assertEqual(evidence["infrastructure_files"], list(paths))
+        self.assertEqual(evidence["required_checks"], ["maintenance"])
+        self.assertEqual(evidence["unclassified_files"], [])
+
+    def test_sre_telegram_relay_scope_rejects_traversal_and_near_miss_paths(self):
+        paths = (
+            "sre-telegram-relay/../scripts/maintenance.py",
+            "sre-telegram-relay-extra/app/main.py",
+        )
+
+        code, evidence = run_scope(*paths, executed_checks=("maintenance",))
+
+        self.assertEqual(code, 2)
+        self.assertEqual(evidence["infrastructure_files"], [])
+        self.assertEqual(evidence["blocked_files"], [])
+        self.assertEqual(evidence["unclassified_files"], list(paths))
+
     def test_blocked_paths_remain_blocked_alongside_gitops_drafts(self):
         paths = (
             "infra/k8s/README.md",

@@ -78,6 +78,56 @@ Grafana 및 Prometheus PVC에는 Helm resource keep 정책을 적용하여 기�
 
 Grafana 관리자 비밀번호는 Kubernetes Secret에서 운영자가 직접 확인한다. 비밀번호와 Secret 데이터는 채팅, Git, 문서, 명령 로그에 기록하거나 출력하지 않는다. Caddy, Compose, Portal, 서버 기동, Windows bootstrap, scheduler 및 외부 공개 Ingress/NodePort/LoadBalancer는 이 도구로 변경하지 않는다.
 
+## Telegram SRE 알림 도구 (N100 운영자 전용)
+
+Telegram SRE relay는 기존 `personal-server-monitoring` release에만 연결한다. Alertmanager의 실제 route, group, repeat, resolved 설정은 N100에서 운영자가 별도로 seed한 `sre-telegram-alertmanager-config` Secret에만 둔다. Git에는 비밀값이 없는 `infra/k8s/sre-telegram/alertmanager.yaml.tmpl` 고정 템플릿과 검증기만 보관하며, values 파일에는 Secret 이름만 포함한다.
+
+Secret 생성·값 입력·값 확인은 이 저장소의 도구 범위 밖이다. 운영자는 N100에서 승인된 Secret Manager 또는 SOPS/age 절차로 아래 **키 이름만** 충족해야 한다. 안내 도구는 값을 생성·출력·적용하지 않는다.
+
+```bash
+bash infra/k8s/tools/sre-telegram-secret-template.sh
+```
+
+| Secret 이름 | 필수 키 이름 | 관리 기준 |
+|---|---|---|
+| `sre-telegram-relay-runtime` | `telegram_bot_token`, `allowed_chat_id`, `alertmanager_auth_token` | N100 로컬 운영자 seed 필요 |
+| `sre-telegram-alertmanager-config` | `alertmanager.yaml` | N100 로컬 Alertmanager 설정 seed 필요; 고정 템플릿 기반 권한 `0600` 임시 파일을 `amtool`과 고정 검증기로 검증한 뒤 동일 파일만 seed 필요 |
+
+설치 전에는 읽기 전용 preflight를 실행한다. 기존 `personal-server-monitoring` Helm release가 `deployed` 상태인지, 기존 `personal-server-monitoring-prometheus` Service와 label 기반 Prometheus StatefulSet이 준비되었는지 함께 확인한다. Secret 검사는 `kubectl describe secret`의 키 이름과 1바이트 이상 여부만 확인하며, Secret 값 또는 `.data`를 읽거나 출력하지 않는다. N100 운영자는 승인된 N100 private directory에서 고정 템플릿을 `alertmanager.yaml`로 복사하고 `chmod 600`을 적용해야 한다. 임시 Alertmanager 설정 파일에는 `credentials_file` 경로만 유지하며 bearer 값은 포함하지 않는다. 승인된 bearer 값은 승인된 로컬 Secret manager 절차에서 runtime Secret 키 `alertmanager_auth_token`에만 입력한다. 설정 파일 또는 Secret 값은 출력하지 않는다. preflight는 해당 파일을 출력하지 않고 `amtool check-config` 후 고정 검증기를 실행한다. 파일 권한이 `0600`이 아니거나 `amtool`, Python, PyYAML, 파일 또는 어느 검증이라도 사용할 수 없거나 실패하면 preflight는 실패한다. preflight를 통과한 바로 그 파일만 `alertmanager.yaml` Secret 키로 seed하고, 뒤따르는 `--apply` 재검증이 끝날 때까지 해당 임시 파일을 유지해야 한다.
+
+```bash
+mkdir -p /secure/operator-temporary
+cp infra/k8s/sre-telegram/alertmanager.yaml.tmpl /secure/operator-temporary/alertmanager.yaml
+chmod 600 /secure/operator-temporary/alertmanager.yaml
+# 임시 Alertmanager 설정 파일은 credentials_file 경로만 유지하며 bearer 값을 포함하지 않음
+# bearer 값은 runtime Secret 키 alertmanager_auth_token에만 입력하며, 설정 파일·Secret 값은 출력하지 않음
+bash infra/k8s/tools/sre-telegram-preflight.sh --alertmanager-config-file /secure/operator-temporary/alertmanager.yaml
+```
+
+preflight 통과 후 승인된 Secret manager 절차로 위 검증 파일 자체를 `alertmanager.yaml` 키로 seed한다. 임시 파일은 바로 삭제하지 않으며, 아래 `--apply` 명령이 같은 권한 `0600` 파일을 재검증하고 반환할 때까지 유지한다.
+
+설치 도구는 인자 없이 실행해도 render와 client dry-run만 수행한다. 이 경로는 image build/import나 Kubernetes resource 변경을 수행하지 않는다.
+
+```bash
+bash infra/k8s/tools/sre-telegram-install.sh
+# 또는 명시적 render
+bash infra/k8s/tools/sre-telegram-install.sh --render
+```
+
+운영자 승인과 N100-local Secret seed가 완료된 경우에만 다음 명령으로 image build·K3s containerd import 검증·relay 및 PrometheusRule 선적용·기존 monitoring release upgrade를 수행한다. Helm 변경은 `--reuse-values --atomic`으로 실행하며, relay 적용이 실패하면 Helm 변경 전 중단한다. Helm 실패 또는 중단 시 이 도구가 이번 실행에서 생성한 relay resource만 원래 namespace 기준으로 정리한 뒤, 사전에 확인한 deployed revision으로 rollback하고 `helm status --output json` 결과가 `deployed`인지 확인한다. rollback으로 새 revision이 생성될 수 있으므로 revision 번호 동일성은 복구 기준으로 사용하지 않는다. Secret 값이 포함될 수 있는 Helm values와 rendered manifest는 의도적으로 조회·보관·비교하지 않는다. rollback 또는 상태 검증이 불가능하면 복구를 성공으로 표시하지 않는다. 동일한 `0600` 임시 파일을 인자로 전달하고, 설치 명령이 반환된 뒤에만 즉시 승인된 보안 제거 절차로 해당 파일을 삭제한다.
+
+```bash
+bash infra/k8s/tools/sre-telegram-install.sh --apply --alertmanager-config-file /secure/operator-temporary/alertmanager.yaml
+```
+
+설치 후 검증은 relay Ready, ClusterIP 및 외부 노출 필드 drift, PrometheusRule, RBAC 비상승 명령의 명시적 `no` 응답, 임시 localhost `/healthz`, 모든 active Prometheus target의 `up` 상태를 확인한다. Secret 값은 조회 또는 출력하지 않는다.
+
+```bash
+bash infra/k8s/tools/sre-telegram-verify.sh
+```
+
+각 도구는 마지막 줄에 `sre_telegram_preflight=PASS|FAIL`, `sre_telegram_install=PASS|FAIL`, 또는 `sre_telegram_verify=PASS|FAIL`을 출력한다. 이 작업은 Compose, Portal, Caddy, 외부 Ingress/NodePort/LoadBalancer, 서버 기동 스크립트, Windows bootstrap, 기존 scheduler를 변경하지 않는다.
+
 ## N100 SRE 상태 점검 (읽기 전용)
 
 `infra/k8s/tools/sre-health-audit.sh`는 N100에서 수동 실행하는 읽기 전용 상태 점검 도구다. K3s 노드 중 하나 이상이 `Ready`인지 확인하고, 현재 Compose 설정에서 산출한 모든 서비스 컨테이너가 실행 중인지와 설정된 Docker health check가 `healthy`인지 확인한다. health check가 없는 실행 중 컨테이너는 정상으로 처리한다.

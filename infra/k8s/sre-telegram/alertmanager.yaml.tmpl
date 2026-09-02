@@ -1,0 +1,17 @@
+route:
+  receiver: sre-telegram-noop
+  group_by: [alertname, namespace, pod, deployment, persistentvolumeclaim]
+  repeat_interval: 4h
+  routes:
+    - matchers: ['sre_telegram="true"']
+      receiver: sre-telegram-relay
+receivers:
+  - name: sre-telegram-noop
+  - name: sre-telegram-relay
+    webhook_configs:
+      - url: http://sre-telegram-relay.monitoring.svc:8080/alertmanager
+        send_resolved: true
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token
