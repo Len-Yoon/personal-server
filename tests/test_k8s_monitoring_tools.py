@@ -307,6 +307,23 @@ class MonitoringToolsTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(result.stderr.rstrip().endswith("monitoring_verify=FAIL"))
 
+    def test_verify_accepts_bound_pvcs_with_real_kubectl_columns(self):
+        result, _ = self.run_tool(
+            "monitoring-verify.sh",
+            stubs={
+                "sudo": "#!/bin/sh\ncase \"$*\" in\n"
+                "  *'get pvc'*) printf '%s\\n' 'grafana Bound pvc-grafana 1Gi RWO local-path <unset> 11h' 'prometheus Bound pvc-prometheus 5Gi RWO local-path <unset> 11h'; exit 0;;\n"
+                "  *'get pods'*) exit 0;;\n"
+                "  *'wait --for=condition=Ready pod --all'*) exit 0;;\n"
+                "  *'get service personal-server-monitoring-grafana'*) printf 'ClusterIP\\n'; exit 0;;\n"
+                "  *'get configmap'*) printf 'configmap/grafana-dashboard\\n'; exit 0;;\n"
+                "  *) exit 1;;\n"
+                "esac\n",
+            },
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.rstrip().endswith("monitoring_verify=PASS"))
+
     def test_uninstall_preserves_data_without_delete_data(self):
         result, calls = self.run_tool(
             "monitoring-uninstall.sh",
