@@ -78,6 +78,49 @@ Grafana 및 Prometheus PVC에는 Helm resource keep 정책을 적용하여 기�
 
 Grafana 관리자 비밀번호는 Kubernetes Secret에서 운영자가 직접 확인한다. 비밀번호와 Secret 데이터는 채팅, Git, 문서, 명령 로그에 기록하거나 출력하지 않는다. Caddy, Compose, Portal, 서버 기동, Windows bootstrap, scheduler 및 외부 공개 Ingress/NodePort/LoadBalancer는 이 도구로 변경하지 않는다.
 
+## Telegram SRE 알림 도구 (N100 운영자 전용)
+
+Telegram SRE relay는 기존 `personal-server-monitoring` release에만 연결한다. Alertmanager의 route, group, repeat, resolved 설정은 N100에서 운영자가 별도로 seed한 `sre-telegram-alertmanager-config` Secret에만 둔다. Git의 values 파일에는 Secret 이름만 있으며 설정 또는 Secret 값은 포함하지 않는다.
+
+Secret 생성·값 입력·값 확인은 이 저장소의 도구 범위 밖이다. 운영자는 N100에서 승인된 Secret Manager 또는 SOPS/age 절차로 아래 **키 이름만** 충족해야 한다. 안내 도구는 값을 생성·출력·적용하지 않는다.
+
+```bash
+bash infra/k8s/tools/sre-telegram-secret-template.sh
+```
+
+| Secret 이름 | 필수 키 이름 | 관리 기준 |
+|---|---|---|
+| `sre-telegram-relay-runtime` | `telegram_bot_token`, `allowed_chat_id`, `alertmanager_auth_token` | N100 로컬 운영자 seed 필요 |
+| `sre-telegram-alertmanager-config` | `alertmanager.yaml` | N100 로컬 Alertmanager route/group/repeat/resolved 설정 seed 필요 |
+
+설치 전에는 읽기 전용 preflight를 실행한다. Secret 검사는 `kubectl describe secret`의 키 이름과 바이트 수만 확인하며, Secret 값 또는 `.data`를 읽거나 출력하지 않는다.
+
+```bash
+bash infra/k8s/tools/sre-telegram-preflight.sh
+```
+
+설치 도구는 인자 없이 실행해도 render와 client dry-run만 수행한다. 이 경로는 image build/import나 Kubernetes resource 변경을 수행하지 않는다.
+
+```bash
+bash infra/k8s/tools/sre-telegram-install.sh
+# 또는 명시적 render
+bash infra/k8s/tools/sre-telegram-install.sh --render
+```
+
+운영자 승인과 N100-local Secret seed가 완료된 경우에만 다음 명령으로 image build·K3s containerd import·기존 monitoring release upgrade·relay resource apply를 수행한다. apply 실패 시 이 도구가 이번 실행에서 생성한 relay resource만 삭제하며, Secret 및 기존 monitoring resource는 삭제하지 않는다.
+
+```bash
+bash infra/k8s/tools/sre-telegram-install.sh --apply
+```
+
+설치 후 검증은 relay Ready, ClusterIP, PrometheusRule, RBAC 비상승, 임시 localhost `/healthz`, Prometheus target 상태를 확인한다. Secret 값은 조회 또는 출력하지 않는다.
+
+```bash
+bash infra/k8s/tools/sre-telegram-verify.sh
+```
+
+각 도구는 마지막 줄에 `sre_telegram_preflight=PASS|FAIL`, `sre_telegram_install=PASS|FAIL`, 또는 `sre_telegram_verify=PASS|FAIL`을 출력한다. 이 작업은 Compose, Portal, Caddy, 외부 Ingress/NodePort/LoadBalancer, 서버 기동 스크립트, Windows bootstrap, 기존 scheduler를 변경하지 않는다.
+
 ## N100 SRE 상태 점검 (읽기 전용)
 
 `infra/k8s/tools/sre-health-audit.sh`는 N100에서 수동 실행하는 읽기 전용 상태 점검 도구다. K3s 노드 중 하나 이상이 `Ready`인지 확인하고, 현재 Compose 설정에서 산출한 모든 서비스 컨테이너가 실행 중인지와 설정된 Docker health check가 `healthy`인지 확인한다. health check가 없는 실행 중 컨테이너는 정상으로 처리한다.
