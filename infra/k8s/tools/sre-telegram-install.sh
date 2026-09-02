@@ -206,9 +206,13 @@ rollback_created_resources() {
 }
 
 verify_imported_image() {
-  local image_listing
+  local image_listing canonical_image
+  case "$IMAGE" in
+    */*) canonical_image="$IMAGE" ;;
+    *) canonical_image="docker.io/library/$IMAGE" ;;
+  esac
   image_listing=$(sudo k3s ctr -n k8s.io images list 2>/dev/null) || return 1
-  printf '%s\n' "$image_listing" | awk -v image="$IMAGE" 'NR > 1 && $1 == image && $3 ~ /^sha256:[[:xdigit:]]+$/ { found=1 } END { exit(found ? 0 : 1) }'
+  printf '%s\n' "$image_listing" | awk -v image="$IMAGE" -v canonical_image="$canonical_image" 'NR > 1 && ($1 == image || $1 == canonical_image) && $3 ~ /^sha256:[[:xdigit:]]+$/ { found=1 } END { exit(found ? 0 : 1) }'
 }
 
 capture_previous_helm_state() {
