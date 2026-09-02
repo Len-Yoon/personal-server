@@ -18,6 +18,8 @@ KUBERNETES_API_URL = "https://kubernetes.default.svc"
 PROMETHEUS_API_URL = "http://prometheus-operated.monitoring.svc:9090"
 SERVICE_ACCOUNT_DIRECTORY = "/var/run/secrets/kubernetes.io/serviceaccount"
 DEFAULT_NAMESPACES = ("monitoring", "personal-server")
+RELAY_NAMESPACE = "monitoring"
+RELAY_STATE_CONFIGMAP = "sre-telegram-relay-state"
 MAX_ALERT_ITEMS = 4
 MAX_REQUEST_BODY_BYTES = 1_048_576
 CONFIGMAP_OFFSET_KEY = "telegram_next_update_id"
@@ -115,6 +117,8 @@ class ConfigMapOffsetStore:
     """Persists the next Telegram update ID in the relay's dedicated ConfigMap."""
 
     def __init__(self, k8s_client: KubernetesClient, *, namespace: str, name: str) -> None:
+        if namespace != RELAY_NAMESPACE or name != RELAY_STATE_CONFIGMAP:
+            raise ValueError("Telegram offset storage must use the dedicated relay ConfigMap")
         self._k8s_client = k8s_client
         self._namespace = namespace
         self._name = name
@@ -219,7 +223,7 @@ class RelayService:
         k8s_client: KubernetesClient,
         prometheus_client: PrometheusClient,
         offset_store: OffsetStore | None = None,
-        alert_callback: Callable[[str], None] | None = None,
+        alert_callback: Callable[[str], bool] | None = None,
     ) -> None:
         self._allowed_chat_id = str(allowed_chat_id)
         self._alertmanager_auth_token = alertmanager_auth_token
@@ -227,13 +231,11 @@ class RelayService:
         self._prometheus_client = prometheus_client
         self._offset_store = offset_store or MemoryOffsetStore()
         self._alert_callback = alert_callback
+        self._healthy = True
 
     def handle_update(self, update: dict[str, Any]) -> str | None:
-        update_id = update.get("update_id")
-        if isinstance(update_id, int):
-            saved_offset = self._offset_store.load()
-            if saved_offset is not None and update_id < saved_offset:
-                return None
+        if self.is_update_processed(update):
+            return None
 
         message = update.get("message")
         reply: str | None = None
@@ -244,12 +246,35 @@ class RelayService:
             if str(chat_id) == self._allowed_chat_id and text == "/상태":
                 reply = build_status_summary(self._k8s_client, self._prometheus_client)
 
-        if isinstance(update_id, int) and update_id >= 0:
-            self._offset_store.save(update_id + 1)
         return self._redact(reply) if reply else None
 
     def current_offset(self) -> int | None:
         return self._offset_store.load()
+
+    def is_update_processed(self, update: dict[str, Any]) -> bool:
+        update_id = update.get("update_id")
+        if not isinstance(update_id, int):
+            return False
+        saved_offset = self._offset_store.load()
+        return saved_offset is not None and update_id < saved_offset
+
+    def acknowledge_update(self, update: dict[str, Any]) -> None:
+        update_id = update.get("update_id")
+        if not isinstance(update_id, int) or update_id < 0:
+            return
+        saved_offset = self._offset_store.load()
+        next_offset = update_id + 1
+        if saved_offset is None or next_offset > saved_offset:
+            self._offset_store.save(next_offset)
+
+    def is_healthy(self) -> bool:
+        return self._healthy
+
+    def mark_unhealthy(self) -> None:
+        self._healthy = False
+
+    def mark_healthy(self) -> None:
+        self._healthy = True
 
     def handle_alert(self, payload: dict[str, Any], authorization: str) -> tuple[int, str]:
         expected_authorization = f"Bearer {self._alertmanager_auth_token}"
@@ -266,7 +291,12 @@ class RelayService:
 
         reply = self._format_alert(status, alerts)
         if self._alert_callback is not None:
-            self._alert_callback(reply)
+            try:
+                delivered = self._alert_callback(reply)
+            except Exception:
+                return 503, "delivery failed"
+            if not delivered:
+                return 503, "delivery failed"
         return 200, reply
 
     def _format_alert(self, status: str, alerts: list[Any]) -> str:
@@ -333,6 +363,9 @@ def create_http_handler(relay: RelayService) -> type[BaseHTTPRequestHandler]:
             if self.path != "/healthz":
                 self.send_error(404)
                 return
+            if not relay.is_healthy():
+                self._respond(503, b"unavailable\n", "text/plain; charset=utf-8")
+                return
             self._respond(200, b"ok\n", "text/plain; charset=utf-8")
 
         def do_POST(self) -> None:  # noqa: N802
@@ -369,15 +402,46 @@ def create_http_handler(relay: RelayService) -> type[BaseHTTPRequestHandler]:
     return RelayRequestHandler
 
 
-def run_polling(relay: RelayService, telegram_client: TelegramClient, allowed_chat_id: str) -> None:
+def run_polling(
+    relay: RelayService,
+    telegram_client: TelegramClient,
+    allowed_chat_id: str,
+    *,
+    max_cycles: int | None = None,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> None:
     """Run outbound Telegram polling; errors remain local and never trigger remediation."""
+    consecutive_failures = 0
+    cycles = 0
     while True:
-        offset = relay.current_offset()
-        for update in telegram_client.get_updates(offset):
-            reply = relay.handle_update(update)
-            if reply is not None:
-                telegram_client.send_message(allowed_chat_id, reply)
-        time.sleep(1)
+        try:
+            delivered = _poll_once(relay, telegram_client, allowed_chat_id)
+        except Exception:
+            delivered = False
+        cycles += 1
+        if delivered:
+            relay.mark_healthy()
+            consecutive_failures = 0
+            delay = 1
+        else:
+            relay.mark_unhealthy()
+            consecutive_failures += 1
+            delay = min(2 ** (consecutive_failures - 1), 30)
+        if max_cycles is not None and cycles >= max_cycles:
+            return
+        sleep_fn(delay)
+
+
+def _poll_once(relay: RelayService, telegram_client: TelegramClient, allowed_chat_id: str) -> bool:
+    offset = relay.current_offset()
+    for update in telegram_client.get_updates(offset):
+        if relay.is_update_processed(update):
+            continue
+        reply = relay.handle_update(update)
+        if reply is not None and not telegram_client.send_message(allowed_chat_id, reply):
+            return False
+        relay.acknowledge_update(update)
+    return True
 
 
 def main() -> None:
@@ -395,8 +459,8 @@ def main() -> None:
         prometheus_client=PrometheusClient(),
         offset_store=ConfigMapOffsetStore(
             k8s_client,
-            namespace=os.getenv("POD_NAMESPACE", "monitoring"),
-            name=os.getenv("RELAY_STATE_CONFIGMAP", "sre-telegram-relay-state"),
+            namespace=RELAY_NAMESPACE,
+            name=RELAY_STATE_CONFIGMAP,
         ),
         alert_callback=lambda message: telegram_client.send_message(allowed_chat_id, message),
     )
