@@ -1,0 +1,47 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: sre-telegram-k3s-alerts
+  namespace: monitoring
+  labels:
+    release: personal-server-monitoring
+spec:
+  groups:
+    - name: sre-telegram-k3s
+      rules:
+        - alert: PodRestartIncrease
+          expr: increase(kube_pod_container_status_restarts_total{namespace=~"monitoring|personal-server"}[15m]) > 3
+          for: 15m
+          labels:
+            severity: warning
+            sre_telegram: "true"
+          annotations:
+            summary: "Pod 재시작 급증"
+            description: "컨테이너가 15분 동안 3회 초과 재시작됨"
+        - alert: DeploymentUnavailable
+          expr: kube_deployment_spec_replicas{namespace=~"monitoring|personal-server"} > kube_deployment_status_replicas_available{namespace=~"monitoring|personal-server"}
+          for: 10m
+          labels:
+            severity: warning
+            sre_telegram: "true"
+          annotations:
+            summary: "Deployment 미가용"
+            description: "Deployment의 desired replica가 available replica보다 큼"
+        - alert: PVCNotBound
+          expr: kube_persistentvolumeclaim_status_phase{namespace=~"monitoring|personal-server",phase="Bound"} == 0
+          for: 10m
+          labels:
+            severity: warning
+            sre_telegram: "true"
+          annotations:
+            summary: "PVC 미바인딩"
+            description: "PVC가 10분 동안 Bound 상태가 아님"
+        - alert: PrometheusTargetDown
+          expr: up == 0
+          for: 5m
+          labels:
+            severity: warning
+            sre_telegram: "true"
+          annotations:
+            summary: "Prometheus target down"
+            description: "Prometheus scrape target이 5분 동안 UP이 아님"
