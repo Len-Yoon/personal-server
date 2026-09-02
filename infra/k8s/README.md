@@ -93,7 +93,7 @@ bash infra/k8s/tools/sre-telegram-secret-template.sh
 | `sre-telegram-relay-runtime` | `telegram_bot_token`, `allowed_chat_id`, `alertmanager_auth_token` | N100 로컬 운영자 seed 필요 |
 | `sre-telegram-alertmanager-config` | `alertmanager.yaml` | N100 로컬 Alertmanager 설정 seed 필요; 고정 템플릿 기반 권한 `0600` 임시 파일을 `amtool`과 고정 검증기로 검증한 뒤 동일 파일만 seed 필요 |
 
-설치 전에는 읽기 전용 preflight를 실행한다. 기존 `personal-server-monitoring` Helm release가 `deployed` 상태인지, 기존 `personal-server-monitoring-prometheus` Service와 label 기반 Prometheus StatefulSet이 준비되었는지 함께 확인한다. Secret 검사는 `kubectl describe secret`의 키 이름과 1바이트 이상 여부만 확인하며, Secret 값 또는 `.data`를 읽거나 출력하지 않는다. N100 운영자는 승인된 N100 private directory에서 고정 템플릿을 `alertmanager.yaml`로 복사하고 `chmod 600`을 적용한 후, 승인된 bearer 값을 로컬에서 입력해야 한다. preflight는 해당 파일을 출력하지 않고 `amtool check-config` 후 고정 검증기를 실행한다. 파일 권한이 `0600`이 아니거나 `amtool`, Python, PyYAML, 파일 또는 어느 검증이라도 사용할 수 없거나 실패하면 preflight는 실패한다. preflight를 통과한 바로 그 파일만 `alertmanager.yaml` Secret 키로 seed한 뒤, 임시 파일을 즉시 승인된 보안 제거 절차로 삭제해야 한다.
+설치 전에는 읽기 전용 preflight를 실행한다. 기존 `personal-server-monitoring` Helm release가 `deployed` 상태인지, 기존 `personal-server-monitoring-prometheus` Service와 label 기반 Prometheus StatefulSet이 준비되었는지 함께 확인한다. Secret 검사는 `kubectl describe secret`의 키 이름과 1바이트 이상 여부만 확인하며, Secret 값 또는 `.data`를 읽거나 출력하지 않는다. N100 운영자는 승인된 N100 private directory에서 고정 템플릿을 `alertmanager.yaml`로 복사하고 `chmod 600`을 적용해야 한다. 고정 템플릿의 `credentials_file`은 변경하지 않으며, 승인된 bearer 값은 승인된 로컬 Secret manager 절차에서 runtime Secret 키 `alertmanager_auth_token`에만 입력한다. 설정 파일 또는 Secret 값은 출력하지 않는다. preflight는 해당 파일을 출력하지 않고 `amtool check-config` 후 고정 검증기를 실행한다. 파일 권한이 `0600`이 아니거나 `amtool`, Python, PyYAML, 파일 또는 어느 검증이라도 사용할 수 없거나 실패하면 preflight는 실패한다. preflight를 통과한 바로 그 파일만 `alertmanager.yaml` Secret 키로 seed하고, 뒤따르는 `--apply` 재검증이 끝날 때까지 해당 임시 파일을 유지해야 한다.
 
 ```bash
 mkdir -p /secure/operator-temporary
@@ -103,7 +103,7 @@ chmod 600 /secure/operator-temporary/alertmanager.yaml
 bash infra/k8s/tools/sre-telegram-preflight.sh --alertmanager-config-file /secure/operator-temporary/alertmanager.yaml
 ```
 
-preflight 통과 후 승인된 Secret manager 절차로 위 검증 파일 자체를 `alertmanager.yaml` 키로 seed하고, 즉시 임시 파일을 승인된 보안 제거 절차로 삭제한다.
+preflight 통과 후 승인된 Secret manager 절차로 위 검증 파일 자체를 `alertmanager.yaml` 키로 seed한다. 임시 파일은 바로 삭제하지 않으며, 아래 `--apply` 명령이 같은 권한 `0600` 파일을 재검증하고 반환할 때까지 유지한다.
 
 설치 도구는 인자 없이 실행해도 render와 client dry-run만 수행한다. 이 경로는 image build/import나 Kubernetes resource 변경을 수행하지 않는다.
 
@@ -113,7 +113,7 @@ bash infra/k8s/tools/sre-telegram-install.sh
 bash infra/k8s/tools/sre-telegram-install.sh --render
 ```
 
-운영자 승인과 N100-local Secret seed가 완료된 경우에만 다음 명령으로 image build·K3s containerd import 검증·relay 및 PrometheusRule 선적용·기존 monitoring release upgrade를 수행한다. Helm 변경은 `--reuse-values --atomic`으로 실행하며, relay 적용이 실패하면 Helm 변경 전 중단한다. Helm 실패 또는 중단 시 이 도구가 이번 실행에서 생성한 relay resource만 원래 namespace 기준으로 정리하고, rollback 뒤 release가 `deployed`인지와 사전 snapshot의 Helm values·rendered manifest가 동일한지를 확인한다. revision 번호 동일성은 복구 기준으로 사용하지 않는다. 이 검증이 불가능하거나 불일치하면 복구를 성공으로 표시하지 않는다.
+운영자 승인과 N100-local Secret seed가 완료된 경우에만 다음 명령으로 image build·K3s containerd import 검증·relay 및 PrometheusRule 선적용·기존 monitoring release upgrade를 수행한다. Helm 변경은 `--reuse-values --atomic`으로 실행하며, relay 적용이 실패하면 Helm 변경 전 중단한다. Helm 실패 또는 중단 시 이 도구가 이번 실행에서 생성한 relay resource만 원래 namespace 기준으로 정리하고, rollback 뒤 release가 `deployed`인지와 사전 snapshot의 Helm values·rendered manifest가 동일한지를 확인한다. revision 번호 동일성은 복구 기준으로 사용하지 않는다. 이 검증이 불가능하거나 불일치하면 복구를 성공으로 표시하지 않는다. 동일한 `0600` 임시 파일을 인자로 전달하고, 설치 명령이 반환된 뒤에만 즉시 승인된 보안 제거 절차로 해당 파일을 삭제한다.
 
 ```bash
 bash infra/k8s/tools/sre-telegram-install.sh --apply --alertmanager-config-file /secure/operator-temporary/alertmanager.yaml

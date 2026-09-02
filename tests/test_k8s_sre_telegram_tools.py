@@ -1,5 +1,7 @@
 import os
+import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -214,6 +216,7 @@ class SreTelegramToolContractTest(unittest.TestCase):
                 "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\\\"info\\\":{\\\"status\\\":\\\"deployed\\\"}}\\n'; exit 0;; esac\nexit 1\n",
                 "docker": "#!/bin/sh\nexit 0\n",
                 "amtool": "#!/bin/sh\nprintf 'amtool %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+                "python3": f"#!/bin/sh\nprintf 'validator %s\\n' \"$*\" >> \"$CALLS\"\nexec {shlex.quote(sys.executable)} \"$@\"\n",
             },
             files={"effective-alertmanager.yaml": FIXED_ALERTMANAGER_TEMPLATE.read_text(encoding="utf-8")},
             env_overrides={"SRE_TELEGRAM_ALERTMANAGER_CONFIG_FILE": "{tmp}/effective-alertmanager.yaml"},
@@ -222,9 +225,40 @@ class SreTelegramToolContractTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_preflight=PASS"))
         self.assertIn("amtool check-config", calls)
+        self.assertIn("validator", calls)
+        self.assertLess(calls.index("amtool check-config"), calls.index("validator"))
         self.assertNotIn("route:", result.stdout)
         self.assertNotIn("route:", calls)
         self.assertNotIn("get secret", calls)
+
+    def test_preflight_fails_closed_when_operator_config_file_is_not_0600(self):
+        result, calls = self.run_tool(
+            "sre-telegram-preflight.sh",
+            stubs={
+                "sudo": "#!/bin/sh\n"
+                "printf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *'get nodes --no-headers'*) printf 'n100 Ready\\n'; exit 0;;\n"
+                "  *'get deployment personal-server-monitoring-grafana'*) printf '1\\n'; exit 0;;\n"
+                "  *'get statefulset -l'*) printf '1\\n'; exit 0;;\n"
+                "  *'get service personal-server-monitoring-prometheus'*) exit 0;;\n"
+                "  *'describe secret sre-telegram-relay-runtime'*) printf 'telegram_bot_token: 3 bytes\\nallowed_chat_id: 2 bytes\\nalertmanager_auth_token: 3 bytes\\n'; exit 0;;\n"
+                "  *'describe secret sre-telegram-alertmanager-config'*) printf 'alertmanager.yaml: 4 bytes\\n'; exit 0;;\n"
+                "  *'ctr version'*) exit 0;;\n"
+                "  *) exit 1;;\n"
+                "esac\n",
+                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\\\"info\\\":{\\\"status\\\":\\\"deployed\\\"}}\\n'; exit 0;; esac\nexit 1\n",
+                "docker": "#!/bin/sh\nexit 0\n",
+                "amtool": "#!/bin/sh\nprintf 'amtool %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
+            },
+            files={"non-private-alertmanager.yaml": FIXED_ALERTMANAGER_TEMPLATE.read_text(encoding="utf-8")},
+            file_modes={"non-private-alertmanager.yaml": 0o640},
+            env_overrides={"SRE_TELEGRAM_ALERTMANAGER_CONFIG_FILE": "{tmp}/non-private-alertmanager.yaml"},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("check=alertmanager_effective_config status=FAIL", result.stdout)
+        self.assertNotIn("amtool", calls)
 
     def test_preflight_fails_when_validator_rejects_extra_route(self):
         result, calls = self.run_tool(
@@ -386,7 +420,7 @@ class SreTelegramToolContractTest(unittest.TestCase):
         self.assertIn("--namespace monitoring", calls)
         self.assertIn("--namespace personal-server", calls)
 
-    def test_secret_guidance_requires_0600_temporary_file_and_immediate_removal(self):
+    def test_secret_guidance_requires_0600_file_until_install_returns_then_removal(self):
         result = subprocess.run(
             ["bash", str(TOOLS / "sre-telegram-secret-template.sh")],
             capture_output=True,
@@ -397,7 +431,10 @@ class SreTelegramToolContractTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("alertmanager.yaml.tmpl", result.stdout)
         self.assertIn("chmod 600", result.stdout)
-        self.assertIn("immediately remove", result.stdout.lower())
+        self.assertIn("keep", result.stdout.lower())
+        self.assertIn("install", result.stdout.lower())
+        self.assertIn("returns", result.stdout.lower())
+        self.assertIn("do not print config or secret values", result.stdout.lower())
         self.assertNotRegex(result.stdout, r"kubectl +(create|apply|patch|replace)")
         self.assertNotIn("alertmanager_auth_token=", result.stdout)
 
