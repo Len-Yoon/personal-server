@@ -54,6 +54,16 @@ Telegram 사용자
 
 Alertmanager는 동일 경고를 group하고, 기본 반복 간격은 4시간으로 설정함. `send_resolved: true`를 사용해 복구 메시지를 보냄. relay는 자동 재시작 명령을 실행하지 않음. K3s가 수행한 기존 자동 복구의 결과만 관찰·보고함.
 
+### 5.1 Alertmanager 설정 소유권
+
+Telegram SRE 경고용 Alertmanager 설정은 N100에서만 생성하는 **SRE 전용 고정 템플릿**으로 관리함. 임의 Alertmanager route tree의 부분 해석이나 문자열 기반 검증은 사용하지 않음.
+
+- 템플릿은 root route와 단일 `sre_telegram="true"` child route, `sre-telegram-relay` receiver만 허용함.
+- child route에는 `group_by`, `repeat_interval: 4h`, `send_resolved: true`, relay ClusterIP webhook URL, bearer credential file을 고정함.
+- bearer 값은 N100 Secret seed 과정에서만 삽입하며 Git·문서·명령 출력·로그에 기록하지 않음.
+- 운영자는 Secret 생성 전에 권한 0600 임시 파일에서 `amtool check-config`와 고정 템플릿 구조 검증을 실행함. 검증 실패 또는 도구 부재 시 설치를 중단함.
+- 템플릿 외 route를 병합하거나 허용하는 요구는 별도 설계가 필요함. 1차 범위에서는 템플릿 외 route를 fail-closed로 거부함.
+
 ## 6. 보안 및 비밀값
 
 - Telegram bot token, 허용 chat ID, Alertmanager→relay 인증 토큰은 N100에서 Kubernetes Secret으로만 생성함.
@@ -61,6 +71,7 @@ Alertmanager는 동일 경고를 group하고, 기본 반복 간격은 4시간으
 - relay는 Alertmanager webhook에 인증 토큰이 없으면 요청을 거부함.
 - relay Service는 ClusterIP만 사용하고, NetworkPolicy를 적용할 수 있는 환경이면 Alertmanager와 relay의 필요한 통신만 허용함.
 - `/상태`는 읽기 전용 최소 RBAC만 사용하며, Secret·Pod exec·Pod delete·Deployment patch 권한을 받지 않음.
+- Alertmanager Secret의 Kubernetes `.data`는 설치·검증 도구에서 읽거나 출력하지 않음. 검증된 N100-local 임시 파일만 입력으로 사용하며 seed 뒤 즉시 폐기함.
 
 ## 7. 저장과 중복 방지
 
@@ -81,6 +92,7 @@ Alertmanager는 동일 경고를 group하고, 기본 반복 간격은 4시간으
 1. manifest·RBAC·경고 규칙·Secret key 계약을 정적 검증함.
 2. Secret 값 없이 render와 릴레이 단위 테스트를 통과시킴.
 3. N100에서 운영자가 Secret을 수동 생성한 뒤 ClusterIP·Pod Ready·최소 권한을 확인함.
+3.1. Alertmanager는 SRE 전용 고정 템플릿을 N100-local 임시 파일로 검증한 뒤에만 Secret으로 seed함. 템플릿 외 route 또는 검증 불가 상태는 설치 전 실패 처리함.
 4. 허용 chat의 `/상태` 요청이 비밀값 없이 요약을 반환하는지 확인함.
 5. 격리된 test alert로 firing과 resolved Telegram 메시지를 각각 한 번 검증함. 실제 장애를 만들거나 Compose·서버 기동·스케줄러를 변경하지 않음.
 6. 적용 후 Grafana, Prometheus, 기존 K3s 모니터링 검증이 계속 통과하는지 확인함.
