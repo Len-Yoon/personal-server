@@ -114,7 +114,7 @@ bash infra/k8s/tools/sre-telegram-install.sh
 bash infra/k8s/tools/sre-telegram-install.sh --render
 ```
 
-운영자 승인과 N100-local Secret seed가 완료된 경우에만 다음 명령으로 image build·K3s containerd import 검증·relay 및 PrometheusRule 선적용·기존 monitoring release upgrade를 수행한다. Helm 변경은 `--reuse-values --atomic`으로 실행하며, relay 적용이 실패하면 Helm 변경 전 중단한다. Helm 실패 또는 중단 시 이 도구가 이번 실행에서 생성한 relay resource만 원래 namespace 기준으로 정리하고, rollback 뒤 release가 `deployed`인지와 사전 snapshot의 Helm values·rendered manifest가 동일한지를 확인한다. revision 번호 동일성은 복구 기준으로 사용하지 않는다. 이 검증이 불가능하거나 불일치하면 복구를 성공으로 표시하지 않는다. 동일한 `0600` 임시 파일을 인자로 전달하고, 설치 명령이 반환된 뒤에만 즉시 승인된 보안 제거 절차로 해당 파일을 삭제한다.
+운영자 승인과 N100-local Secret seed가 완료된 경우에만 다음 명령으로 image build·K3s containerd import 검증·relay 및 PrometheusRule 선적용·기존 monitoring release upgrade를 수행한다. Helm 변경은 `--reuse-values --atomic`으로 실행하며, relay 적용이 실패하면 Helm 변경 전 중단한다. Helm 실패 또는 중단 시 이 도구가 이번 실행에서 생성한 relay resource만 원래 namespace 기준으로 정리한 뒤, 사전에 확인한 deployed revision으로 rollback하고 `helm status --output json` 결과가 `deployed`인지 확인한다. rollback으로 새 revision이 생성될 수 있으므로 revision 번호 동일성은 복구 기준으로 사용하지 않는다. Secret 값이 포함될 수 있는 Helm values와 rendered manifest는 의도적으로 조회·보관·비교하지 않는다. rollback 또는 상태 검증이 불가능하면 복구를 성공으로 표시하지 않는다. 동일한 `0600` 임시 파일을 인자로 전달하고, 설치 명령이 반환된 뒤에만 즉시 승인된 보안 제거 절차로 해당 파일을 삭제한다.
 
 ```bash
 bash infra/k8s/tools/sre-telegram-install.sh --apply --alertmanager-config-file /secure/operator-temporary/alertmanager.yaml

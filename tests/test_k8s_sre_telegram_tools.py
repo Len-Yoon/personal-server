@@ -743,7 +743,7 @@ class SreTelegramToolContractTest(unittest.TestCase):
         self.assertIn("helm rollback personal-server-monitoring 2 --namespace monitoring", calls)
         self.assertIn("-n personal-server delete rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader", calls)
 
-    def test_install_accepts_atomic_rollback_with_new_revision_when_pre_upgrade_state_matches(self):
+    def test_failed_upgrade_rolls_back_prior_revision_and_requires_deployed_status(self):
         result, calls = self.run_tool(
             "sre-telegram-install.sh",
             "--apply",
@@ -781,11 +781,13 @@ class SreTelegramToolContractTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_install=FAIL"))
-        self.assertGreaterEqual(calls.count("helm get values"), 2)
-        self.assertGreaterEqual(calls.count("helm get manifest"), 2)
-        self.assertNotIn("helm rollback personal-server-monitoring 2 --namespace monitoring", calls)
+        self.assertIn("helm rollback personal-server-monitoring 2 --namespace monitoring", calls)
+        self.assertIn(
+            "helm status personal-server-monitoring --namespace monitoring --output json",
+            calls,
+        )
 
-    def test_install_fails_closed_when_rollback_cannot_restore_pre_upgrade_content(self):
+    def test_install_never_snapshots_helm_values_or_manifest(self):
         result, calls = self.run_tool(
             "sre-telegram-install.sh",
             "--apply",
@@ -824,9 +826,8 @@ class SreTelegramToolContractTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_install=FAIL"))
-        self.assertIn("helm rollback personal-server-monitoring", calls)
-        self.assertGreaterEqual(calls.count("helm get values"), 3)
-        self.assertGreaterEqual(calls.count("helm get manifest"), 3)
+        self.assertNotIn("helm get values", calls)
+        self.assertNotIn("helm get manifest", calls)
 
     def test_verify_fails_closed_when_rbac_can_i_errors(self):
         result, _ = self.run_tool(

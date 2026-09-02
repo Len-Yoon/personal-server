@@ -20,10 +20,8 @@ created_resources=()
 TEMP_MANIFEST_DIR=""
 APPLY_MODE=0
 CLEANUP_DONE=0
-INTERRUPTED=0
 HELM_UPGRADE_STARTED=0
 HELM_PREVIOUS_REVISION=""
-HELM_SNAPSHOT_DIR=""
 
 fail() {
   printf 'sre_telegram_install=FAIL\n'
@@ -213,17 +211,8 @@ verify_imported_image() {
   printf '%s\n' "$image_listing" | awk -v image="$IMAGE" 'NR > 1 && $1 == image && $3 ~ /^sha256:[[:xdigit:]]+$/ { found=1 } END { exit(found ? 0 : 1) }'
 }
 
-cleanup_helm_snapshot() {
-  if [ -n "$HELM_SNAPSHOT_DIR" ] && [ -d "$HELM_SNAPSHOT_DIR" ]; then
-    rm -rf -- "$HELM_SNAPSHOT_DIR"
-  fi
-  HELM_SNAPSHOT_DIR=""
-}
-
 capture_previous_helm_state() {
   local status
-  cleanup_helm_snapshot
-  HELM_SNAPSHOT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/sre-telegram-helm-state.XXXXXX") || return 1
   status=$(helm status "$RELEASE" --namespace "$NAMESPACE" --output json 2>/dev/null) || return 1
   [[ "$status" =~ \"status\"[[:space:]]*:[[:space:]]*\"deployed\" ]] || return 1
   if [[ "$status" =~ \"revision\"[[:space:]]*:[[:space:]]*\"?([0-9]+)\"? ]]; then
@@ -231,35 +220,15 @@ capture_previous_helm_state() {
   else
     return 1
   fi
-  helm get values "$RELEASE" --namespace "$NAMESPACE" --all --output yaml > "$HELM_SNAPSHOT_DIR/values.yaml" 2>/dev/null || return 1
-  helm get manifest "$RELEASE" --namespace "$NAMESPACE" > "$HELM_SNAPSHOT_DIR/manifest.yaml" 2>/dev/null || return 1
-  [ -s "$HELM_SNAPSHOT_DIR/manifest.yaml" ]
-}
-
-helm_state_matches_snapshot() {
-  local status
-  [ -n "$HELM_SNAPSHOT_DIR" ] && [ -r "$HELM_SNAPSHOT_DIR/values.yaml" ] && [ -r "$HELM_SNAPSHOT_DIR/manifest.yaml" ] || return 1
-  status=$(helm status "$RELEASE" --namespace "$NAMESPACE" --output json 2>/dev/null) || return 1
-  [[ "$status" =~ \"status\"[[:space:]]*:[[:space:]]*\"deployed\" ]] || return 1
-  helm get values "$RELEASE" --namespace "$NAMESPACE" --all --output yaml > "$HELM_SNAPSHOT_DIR/current-values.yaml" 2>/dev/null || return 1
-  helm get manifest "$RELEASE" --namespace "$NAMESPACE" > "$HELM_SNAPSHOT_DIR/current-manifest.yaml" 2>/dev/null || return 1
-  cmp -s "$HELM_SNAPSHOT_DIR/values.yaml" "$HELM_SNAPSHOT_DIR/current-values.yaml" || return 1
-  cmp -s "$HELM_SNAPSHOT_DIR/manifest.yaml" "$HELM_SNAPSHOT_DIR/current-manifest.yaml"
 }
 
 verify_or_restore_helm_release() {
+  local status
   [ -n "$HELM_PREVIOUS_REVISION" ] || return 1
 
-  if [ "$INTERRUPTED" -eq 1 ]; then
-    helm rollback "$RELEASE" "$HELM_PREVIOUS_REVISION" --namespace "$NAMESPACE" --wait --timeout 10m >/dev/null 2>&1 || return 1
-  fi
-
-  if helm_state_matches_snapshot; then
-    return 0
-  fi
-
   helm rollback "$RELEASE" "$HELM_PREVIOUS_REVISION" --namespace "$NAMESPACE" --wait --timeout 10m >/dev/null 2>&1 || return 1
-  helm_state_matches_snapshot
+  status=$(helm status "$RELEASE" --namespace "$NAMESPACE" --output json 2>/dev/null) || return 1
+  [[ "$status" =~ \"status\"[[:space:]]*:[[:space:]]*\"deployed\" ]]
 }
 
 cleanup_apply() {
@@ -277,12 +246,10 @@ cleanup_apply() {
       fi
     fi
   fi
-  cleanup_helm_snapshot
   return "$status"
 }
 
 interrupt_apply() {
-  INTERRUPTED=1
   exit 130
 }
 
@@ -332,7 +299,6 @@ main() {
       fi
       APPLY_MODE=0
       trap - EXIT INT TERM
-      cleanup_helm_snapshot
       printf 'sre_telegram_install=PASS\n'
       ;;
     *)
