@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -u
+set -Eeuo pipefail
 
 RELEASE="personal-server-monitoring"
 CHART="prometheus-community/kube-prometheus-stack"
@@ -13,7 +13,14 @@ ALERTMANAGER_VALUES="$REPO_ROOT/infra/k8s/sre-telegram/alertmanager-values.yaml"
 RELAY_BASE="$REPO_ROOT/infra/k8s/sre-telegram/base.yaml"
 PROMETHEUS_RULE="$REPO_ROOT/infra/k8s/sre-telegram/prometheus-rule.yaml"
 PREFLIGHT_SCRIPT="${SRE_TELEGRAM_PREFLIGHT_SCRIPT:-$SCRIPT_DIR/sre-telegram-preflight.sh}"
+
 created_resources=()
+WORKLOAD_BINDING_INDEX=0
+APPLY_MODE=0
+CLEANUP_DONE=0
+INTERRUPTED=0
+HELM_UPGRADE_STARTED=0
+HELM_PREVIOUS_REVISION=""
 
 fail() {
   printf 'sre_telegram_install=FAIL\n'
@@ -36,51 +43,125 @@ require_secret_contract() {
   local secret_name="$1"
   shift
   local description key
-  description=$(sudo k3s kubectl -n "$NAMESPACE" describe secret "$secret_name" 2>/dev/null) || return 1
+  if ! description=$(sudo k3s kubectl -n "$NAMESPACE" describe secret "$secret_name" 2>/dev/null); then
+    return 1
+  fi
   for key in "$@"; do
-    printf '%s\n' "$description" | awk -v key="$key" '$1 == key ":" && $2 ~ /^[0-9]+$/ && $3 == "bytes" { found=1 } END { exit(found ? 0 : 1) }' || return 1
+    printf '%s\n' "$description" | awk -v key="$key" '$1 == key ":" && $2 ~ /^[1-9][0-9]*$/ && $3 == "bytes" { found=1 } END { exit(found ? 0 : 1) }' || return 1
   done
 }
 
-record_created() {
-  local reference="$1"
+record_reference() {
+  local reference="$1" action="$2" namespace="cluster"
   case "$reference" in
-    configmap/sre-telegram-relay-state|serviceaccount/sre-telegram-relay|clusterrole.rbac.authorization.k8s.io/sre-telegram-relay-node-reader|clusterrole.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader|role.rbac.authorization.k8s.io/sre-telegram-relay-state|clusterrolebinding.rbac.authorization.k8s.io/sre-telegram-relay-node-reader|rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader|rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-state|deployment.apps/sre-telegram-relay|service/sre-telegram-relay|prometheusrule.monitoring.coreos.com/sre-telegram-k3s-alerts)
-      created_resources+=("$reference")
+    rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader|rolebinding/sre-telegram-relay-workload-reader)
+      if [ "$WORKLOAD_BINDING_INDEX" -eq 0 ]; then
+        namespace="$NAMESPACE"
+      else
+        namespace="personal-server"
+      fi
+      WORKLOAD_BINDING_INDEX=$((WORKLOAD_BINDING_INDEX + 1))
+      ;;
+    configmap/sre-telegram-relay-state|serviceaccount/sre-telegram-relay|role.rbac.authorization.k8s.io/sre-telegram-relay-state|role/sre-telegram-relay-state|deployment.apps/sre-telegram-relay|deployment/sre-telegram-relay|service/sre-telegram-relay|prometheusrule.monitoring.coreos.com/sre-telegram-k3s-alerts|prometheusrule/sre-telegram-k3s-alerts)
+      namespace="$NAMESPACE"
+      ;;
+    clusterrole.rbac.authorization.k8s.io/sre-telegram-relay-node-reader|clusterrole/sre-telegram-relay-node-reader|clusterrole.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader|clusterrole/sre-telegram-relay-workload-reader|clusterrolebinding.rbac.authorization.k8s.io/sre-telegram-relay-node-reader|clusterrolebinding/sre-telegram-relay-node-reader)
+      namespace="cluster"
+      ;;
+    *)
+      return 0
       ;;
   esac
+  if [ "$action" = "created" ]; then
+    created_resources+=("$namespace|$reference")
+  fi
 }
 
-apply_file() {
-  local file="$1" output reference action
-  output=$(sudo k3s kubectl -n "$NAMESPACE" apply -f "$file" 2>&1) || {
-    while read -r reference action _; do
-      [ "$action" = "created" ] && record_created "$reference"
-    done <<< "$output"
-    return 1
-  }
+record_apply_output() {
+  local output="$1" reference action
   while read -r reference action _; do
-    [ "$action" = "created" ] && record_created "$reference"
+    [ -n "${reference:-}" ] || continue
+    record_reference "$reference" "${action:-}"
   done <<< "$output"
 }
 
+apply_file() {
+  local file="$1" output
+  WORKLOAD_BINDING_INDEX=0
+  if ! output=$(sudo k3s kubectl -n "$NAMESPACE" create -f "$file" 2>&1); then
+    record_apply_output "$output"
+    return 1
+  fi
+  record_apply_output "$output"
+}
+
 rollback_created_resources() {
-  local index
+  local index entry namespace reference
   for ((index=${#created_resources[@]} - 1; index>=0; index--)); do
-    sudo k3s kubectl -n "$NAMESPACE" delete "${created_resources[index]}" --ignore-not-found >/dev/null 2>&1 || true
+    entry="${created_resources[index]}"
+    namespace="${entry%%|*}"
+    reference="${entry#*|}"
+    if [ "$namespace" = "cluster" ]; then
+      sudo k3s kubectl delete "$reference" --ignore-not-found >/dev/null 2>&1 || true
+    else
+      sudo k3s kubectl -n "$namespace" delete "$reference" --ignore-not-found >/dev/null 2>&1 || true
+    fi
   done
+}
+
+verify_imported_image() {
+  local image_listing
+  image_listing=$(sudo k3s ctr -n k8s.io images list 2>/dev/null) || return 1
+  printf '%s\n' "$image_listing" | awk -v image="$IMAGE" 'NR > 1 && $1 == image && $3 ~ /^sha256:[[:xdigit:]]+$/ { found=1 } END { exit(found ? 0 : 1) }'
+}
+
+capture_previous_helm_revision() {
+  local status
+  status=$(helm status "$RELEASE" --namespace "$NAMESPACE" --output json 2>/dev/null) || return 1
+  [[ "$status" =~ \"status\"[[:space:]]*:[[:space:]]*\"deployed\" ]] || return 1
+  if [[ "$status" =~ \"revision\"[[:space:]]*:[[:space:]]*\"?([0-9]+)\"? ]]; then
+    HELM_PREVIOUS_REVISION="${BASH_REMATCH[1]}"
+  else
+    return 1
+  fi
+}
+
+cleanup_apply() {
+  local status=$?
+  if [ "$CLEANUP_DONE" -eq 1 ]; then
+    return "$status"
+  fi
+  CLEANUP_DONE=1
+  if [ "$APPLY_MODE" -eq 1 ] && [ "$status" -ne 0 ]; then
+    rollback_created_resources
+    if [ "$HELM_UPGRADE_STARTED" -eq 1 ] && [ "$INTERRUPTED" -eq 1 ] && [ -n "$HELM_PREVIOUS_REVISION" ]; then
+      helm rollback "$RELEASE" "$HELM_PREVIOUS_REVISION" --namespace "$NAMESPACE" --wait --timeout 10m >/dev/null 2>&1 || true
+    fi
+  fi
+  return "$status"
+}
+
+interrupt_apply() {
+  INTERRUPTED=1
+  exit 130
 }
 
 apply() {
   "$PREFLIGHT_SCRIPT" >/dev/null 2>&1 || return 1
   require_secret_contract sre-telegram-relay-runtime telegram_bot_token allowed_chat_id alertmanager_auth_token || return 1
   require_secret_contract sre-telegram-alertmanager-config alertmanager.yaml || return 1
+  render || return 1
   docker build --tag "$IMAGE" "$REPO_ROOT/sre-telegram-relay" >/dev/null || return 1
-  docker save "$IMAGE" | sudo k3s ctr -n k8s.io images import - || return 1
+  if ! docker save "$IMAGE" | sudo k3s ctr -n k8s.io images import -; then
+    return 1
+  fi
+  verify_imported_image || return 1
+  apply_file "$RELAY_BASE" || return 1
+  apply_file "$PROMETHEUS_RULE" || return 1
+  capture_previous_helm_revision || return 1
+  HELM_UPGRADE_STARTED=1
   helm upgrade "$RELEASE" "$CHART" --namespace "$NAMESPACE" --version "$VERSION" \
-    --values "$BASE_VALUES" --values "$ALERTMANAGER_VALUES" --wait --timeout 10m || return 1
-  apply_file "$RELAY_BASE" || { rollback_created_resources; return 1; }
-  apply_file "$PROMETHEUS_RULE" || { rollback_created_resources; return 1; }
+    --values "$ALERTMANAGER_VALUES" --reuse-values --atomic --wait --timeout 10m || return 1
 }
 
 main() {
@@ -92,7 +173,15 @@ main() {
       printf 'sre_telegram_install=PASS\n'
       ;;
     --apply)
-      apply || { fail; return 1; }
+      APPLY_MODE=1
+      trap cleanup_apply EXIT
+      trap interrupt_apply INT TERM
+      if ! apply; then
+        fail
+        return 1
+      fi
+      APPLY_MODE=0
+      trap - EXIT INT TERM
       printf 'sre_telegram_install=PASS\n'
       ;;
     *)

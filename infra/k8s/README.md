@@ -93,7 +93,7 @@ bash infra/k8s/tools/sre-telegram-secret-template.sh
 | `sre-telegram-relay-runtime` | `telegram_bot_token`, `allowed_chat_id`, `alertmanager_auth_token` | N100 로컬 운영자 seed 필요 |
 | `sre-telegram-alertmanager-config` | `alertmanager.yaml` | N100 로컬 Alertmanager route/group/repeat/resolved 설정 seed 필요 |
 
-설치 전에는 읽기 전용 preflight를 실행한다. Secret 검사는 `kubectl describe secret`의 키 이름과 바이트 수만 확인하며, Secret 값 또는 `.data`를 읽거나 출력하지 않는다.
+설치 전에는 읽기 전용 preflight를 실행한다. 기존 `personal-server-monitoring` Helm release가 `deployed` 상태인지, 기존 `personal-server-monitoring-prometheus` Service와 label 기반 Prometheus StatefulSet이 준비되었는지 함께 확인한다. Secret 검사는 `kubectl describe secret`의 키 이름과 1바이트 이상 여부만 확인하며, Secret 값 또는 `.data`를 읽거나 출력하지 않는다.
 
 ```bash
 bash infra/k8s/tools/sre-telegram-preflight.sh
@@ -107,13 +107,13 @@ bash infra/k8s/tools/sre-telegram-install.sh
 bash infra/k8s/tools/sre-telegram-install.sh --render
 ```
 
-운영자 승인과 N100-local Secret seed가 완료된 경우에만 다음 명령으로 image build·K3s containerd import·기존 monitoring release upgrade·relay resource apply를 수행한다. apply 실패 시 이 도구가 이번 실행에서 생성한 relay resource만 삭제하며, Secret 및 기존 monitoring resource는 삭제하지 않는다.
+운영자 승인과 N100-local Secret seed가 완료된 경우에만 다음 명령으로 image build·K3s containerd import 검증·relay 및 PrometheusRule 선적용·기존 monitoring release upgrade를 수행한다. Helm 변경은 `--reuse-values --atomic`으로 실행하며, relay 적용이 실패하면 Helm 변경 전 중단한다. Helm 실패 또는 중단 시 이 도구가 이번 실행에서 생성한 relay resource만 원래 namespace 기준으로 정리하고, 기존 monitoring resource와 Secret은 삭제하지 않는다.
 
 ```bash
 bash infra/k8s/tools/sre-telegram-install.sh --apply
 ```
 
-설치 후 검증은 relay Ready, ClusterIP, PrometheusRule, RBAC 비상승, 임시 localhost `/healthz`, Prometheus target 상태를 확인한다. Secret 값은 조회 또는 출력하지 않는다.
+설치 후 검증은 relay Ready, ClusterIP 및 외부 노출 필드 drift, PrometheusRule, RBAC 비상승 명령의 명시적 `no` 응답, 임시 localhost `/healthz`, 모든 active Prometheus target의 `up` 상태를 확인한다. Secret 값은 조회 또는 출력하지 않는다.
 
 ```bash
 bash infra/k8s/tools/sre-telegram-verify.sh

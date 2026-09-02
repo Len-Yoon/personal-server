@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-set -u
+set -Eeuo pipefail
 
 RELEASE="personal-server-monitoring"
 NAMESPACE="monitoring"
 RUNTIME_SECRET="sre-telegram-relay-runtime"
 ALERTMANAGER_SECRET="sre-telegram-alertmanager-config"
+PROMETHEUS_SERVICE="personal-server-monitoring-prometheus"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd)
 IMAGE_DIR="$REPO_ROOT/sre-telegram-relay"
@@ -21,8 +22,23 @@ secret_keys_present() {
   local description key
   description=$(sudo k3s kubectl -n "$NAMESPACE" describe secret "$secret_name" 2>/dev/null) || return 1
   for key in "$@"; do
-    printf '%s\n' "$description" | awk -v key="$key" '$1 == key ":" && $2 ~ /^[0-9]+$/ && $3 == "bytes" { found=1 } END { exit(found ? 0 : 1) }' || return 1
+    printf '%s\n' "$description" | awk -v key="$key" '$1 == key ":" && $2 ~ /^[1-9][0-9]*$/ && $3 == "bytes" { found=1 } END { exit(found ? 0 : 1) }' || return 1
   done
+}
+
+monitoring_release_deployed() {
+  local status
+  status=$(helm status "$RELEASE" --namespace "$NAMESPACE" --output json 2>/dev/null) || return 1
+  [[ "$status" =~ \"status\"[[:space:]]*:[[:space:]]*\"deployed\" ]]
+}
+
+all_prometheus_replicas_ready() {
+  local ready_replicas="$1"
+  printf '%s\n' "$ready_replicas" | awk 'NF { count++; if ($1 !~ /^[1-9][0-9]*$/) { bad=1 } } END { exit(count > 0 && !bad ? 0 : 1) }'
+}
+
+positive_replica_count() {
+  [[ "$1" =~ ^[1-9][0-9]*$ ]]
 }
 
 main() {
@@ -39,15 +55,18 @@ main() {
     fail_check k3s_nodes not_ready
   fi
 
-  if ! helm status "$RELEASE" --namespace "$NAMESPACE" >/dev/null 2>&1; then
-    fail_check monitoring_release unavailable
+  if ! monitoring_release_deployed; then
+    fail_check monitoring_release not_deployed
   fi
 
-  if ! grafana_ready=$(sudo k3s kubectl -n "$NAMESPACE" get deployment "${RELEASE}-grafana" -o jsonpath='{.status.availableReplicas}' 2>/dev/null) || [ "${grafana_ready:-0}" -lt 1 ]; then
+  if ! grafana_ready=$(sudo k3s kubectl -n "$NAMESPACE" get deployment "${RELEASE}-grafana" -o jsonpath='{.status.availableReplicas}' 2>/dev/null) || ! positive_replica_count "${grafana_ready:-0}"; then
     fail_check grafana unavailable
   fi
-  if ! prometheus_ready=$(sudo k3s kubectl -n "$NAMESPACE" get statefulset "prometheus-${RELEASE}-kube-prometheus-prometheus" -o jsonpath='{.status.readyReplicas}' 2>/dev/null) || [ "${prometheus_ready:-0}" -lt 1 ]; then
+  if ! prometheus_ready=$(sudo k3s kubectl -n "$NAMESPACE" get statefulset -l app.kubernetes.io/name=prometheus -o jsonpath='{range .items[*]}{.status.readyReplicas}{"\n"}{end}' 2>/dev/null) || ! all_prometheus_replicas_ready "$prometheus_ready"; then
     fail_check prometheus unavailable
+  fi
+  if ! sudo k3s kubectl -n "$NAMESPACE" get service "$PROMETHEUS_SERVICE" >/dev/null 2>&1; then
+    fail_check prometheus_service unavailable
   fi
 
   if ! command -v docker >/dev/null 2>&1 || [ ! -r "$IMAGE_DIR/Dockerfile" ] || [ ! -r "$IMAGE_DIR/app/main.py" ]; then
