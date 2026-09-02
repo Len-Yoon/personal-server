@@ -44,20 +44,42 @@ class ValidateSreAlertmanagerConfigTests(unittest.TestCase):
         self.assertEqual(result.stderr, "invalid_alertmanager_config\n")
         self.assertNotIn(marker, result.stdout + result.stderr)
 
-    def test_accepts_exact_sre_template_with_operator_supplied_bearer_file(self):
+    def test_accepts_only_noop_root_and_sre_labeled_relay_child(self):
+        document = self.template_document()
+
+        self.assertEqual(document["route"]["receiver"], "sre-telegram-noop")
+        self.assertEqual(
+            document["route"]["routes"],
+            [
+                {
+                    "matchers": ['sre_telegram="true"'],
+                    "receiver": "sre-telegram-relay",
+                }
+            ],
+        )
+        self.assertEqual(
+            document["receivers"][0],
+            {"name": "sre-telegram-noop"},
+        )
+        self.assertEqual(document["receivers"][1]["name"], "sre-telegram-relay")
+
         result = self.run_validator(TEMPLATE.read_text(encoding="utf-8"))
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
 
-        with_global_metadata = self.template_document()
-        with_global_metadata["global"] = {}
-        result = self.run_validator(yaml.safe_dump(with_global_metadata, sort_keys=False))
+    def test_rejects_root_relay_and_any_global_configuration(self):
+        root_relay = self.template_document()
+        root_relay["route"]["receiver"] = "sre-telegram-relay"
+        empty_global = self.template_document()
+        empty_global["global"] = {}
+        nonempty_global = self.template_document()
+        nonempty_global["global"] = {"resolve_timeout": "5m"}
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "")
-        self.assertEqual(result.stderr, "")
+        for document in (root_relay, empty_global, nonempty_global):
+            with self.subTest(document=document):
+                self.assert_rejected(document)
 
     def test_rejects_any_extra_route_or_receiver(self):
         extra_route = self.template_document()
@@ -172,9 +194,9 @@ receivers:
         wrong_receiver = self.template_document()
         wrong_receiver["route"]["routes"][0]["receiver"] = "unexpected-receiver"
         wrong_url = self.template_document()
-        wrong_url["receivers"][0]["webhook_configs"][0]["url"] = "http://unexpected.example/"
+        wrong_url["receivers"][1]["webhook_configs"][0]["url"] = "http://unexpected.example/"
         wrong_credentials_file = self.template_document()
-        wrong_credentials_file["receivers"][0]["webhook_configs"][0]["http_config"][
+        wrong_credentials_file["receivers"][1]["webhook_configs"][0]["http_config"][
             "authorization"
         ]["credentials_file"] = "/tmp/operator-secret-marker-must-not-echo"
         empty_group_by = self.template_document()
@@ -182,7 +204,7 @@ receivers:
         wrong_repeat_interval = self.template_document()
         wrong_repeat_interval["route"]["repeat_interval"] = "5m"
         unresolved_webhook = self.template_document()
-        unresolved_webhook["receivers"][0]["webhook_configs"][0]["send_resolved"] = False
+        unresolved_webhook["receivers"][1]["webhook_configs"][0]["send_resolved"] = False
 
         for document in (
             wrong_matcher,
@@ -195,6 +217,11 @@ receivers:
         ):
             with self.subTest(document=document):
                 self.assert_rejected(copy.deepcopy(document))
+
+    def test_rejects_multiple_yaml_documents(self):
+        multiple_documents = TEMPLATE.read_text(encoding="utf-8") + "---\nroute: {}\n"
+
+        self.assert_rejected_text(multiple_documents)
 
 
 if __name__ == "__main__":

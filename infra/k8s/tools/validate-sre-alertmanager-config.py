@@ -41,6 +41,7 @@ if yaml is not None:
 
 
 RELAY_RECEIVER = "sre-telegram-relay"
+NOOP_RECEIVER = "sre-telegram-noop"
 RELAY_WEBHOOK_URL = "http://sre-telegram-relay.monitoring.svc:8080/alertmanager"
 RELAY_CREDENTIALS_FILE = (
     "/etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token"
@@ -67,16 +68,13 @@ def is_fixed_config(config: Any) -> bool:
     if not is_mapping(config):
         return False
 
-    allowed_root_keys = {"global", "route", "receivers"}
-    if set(config) - allowed_root_keys or "route" not in config or "receivers" not in config:
-        return False
-    if "global" in config and not is_mapping(config["global"]):
+    if set(config) != {"route", "receivers"}:
         return False
 
     route = config["route"]
     if not has_exact_keys(route, {"receiver", "group_by", "repeat_interval", "routes"}):
         return False
-    if route["receiver"] != RELAY_RECEIVER:
+    if route["receiver"] != NOOP_RECEIVER:
         return False
     if route["group_by"] != EXPECTED_GROUP_BY:
         return False
@@ -95,9 +93,13 @@ def is_fixed_config(config: Any) -> bool:
         return False
 
     receivers = config["receivers"]
-    if not isinstance(receivers, list) or len(receivers) != 1:
+    if not isinstance(receivers, list) or len(receivers) != 2:
         return False
-    receiver = receivers[0]
+    noop_receiver, receiver = receivers
+    if not has_exact_keys(noop_receiver, {"name"}):
+        return False
+    if noop_receiver["name"] != NOOP_RECEIVER:
+        return False
     if not has_exact_keys(receiver, {"name", "webhook_configs"}):
         return False
     if receiver["name"] != RELAY_RECEIVER:

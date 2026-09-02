@@ -3,20 +3,10 @@
 # with amtool before seeding it. No credential value belongs in this file.
 route:
   receiver: sre-telegram-noop
-  group_by:
-    - alertname
-    - namespace
-    - pod
-    - deployment
-    - persistentvolumeclaim
-    - job
-    - instance
-  group_wait: 30s
-  group_interval: 5m
+  group_by: [alertname, namespace, pod, deployment, persistentvolumeclaim]
   repeat_interval: 4h
   routes:
-    - matchers:
-        - 'sre_telegram="true"'
+    - matchers: ['sre_telegram="true"']
       receiver: sre-telegram-relay
 receivers:
   - name: sre-telegram-noop

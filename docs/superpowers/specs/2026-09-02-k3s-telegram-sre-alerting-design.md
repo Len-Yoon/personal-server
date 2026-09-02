@@ -58,8 +58,9 @@ Alertmanager는 동일 경고를 group하고, 기본 반복 간격은 4시간으
 
 Telegram SRE 경고용 Alertmanager 설정은 N100에서만 생성하는 **SRE 전용 고정 템플릿**으로 관리함. 임의 Alertmanager route tree의 부분 해석이나 문자열 기반 검증은 사용하지 않음.
 
-- 템플릿은 root route와 단일 `sre_telegram="true"` child route, `sre-telegram-relay` receiver만 허용함.
-- child route에는 `group_by`, `repeat_interval: 4h`, `send_resolved: true`, relay ClusterIP webhook URL, bearer credential file을 고정함.
+- 템플릿은 `sre-telegram-noop` root route와 단일 `sre_telegram="true"` child route를 사용함. root grouping과 `repeat_interval: 4h`를 고정하고, child route만 `sre-telegram-relay` receiver로 전달함.
+- receiver는 notification configuration이 없는 `sre-telegram-noop`과 `send_resolved: true`, relay ClusterIP webhook URL, bearer credential file을 고정한 `sre-telegram-relay`의 정확히 두 개만 허용함. `global` configuration과 템플릿 외 route·receiver는 fail-closed로 거부함.
+- `sre_telegram="true"`에 일치하지 않는 alert는 no-op receiver에서 종료되며 relay 또는 Telegram으로 전달되지 않음.
 - bearer 값은 N100 Secret seed 과정에서만 삽입하며 Git·문서·명령 출력·로그에 기록하지 않음.
 - 운영자는 Secret 생성 전에 권한 0600 임시 파일에서 `amtool check-config`와 고정 템플릿 구조 검증을 실행함. 검증 실패 또는 도구 부재 시 설치를 중단함.
 - 템플릿 외 route를 병합하거나 허용하는 요구는 별도 설계가 필요함. 1차 범위에서는 템플릿 외 route를 fail-closed로 거부함.
