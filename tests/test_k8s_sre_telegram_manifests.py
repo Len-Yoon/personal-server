@@ -100,22 +100,108 @@ class SreTelegramManifestContractTests(unittest.TestCase):
         for binding in bindings:
             self.assertEqual(binding["subjects"], [{"kind": "ServiceAccount", "name": "sre-telegram-relay", "namespace": "monitoring"}])
 
+    def test_manifest_whitelists_every_rbac_role_and_binding(self):
+        documents = load_yaml_documents("base.yaml")
+        rbac_roles = [document for document in documents if document["kind"] in {"Role", "ClusterRole"}]
+        rbac_bindings = [document for document in documents if document["kind"] in {"RoleBinding", "ClusterRoleBinding"}]
+        expected_roles = {
+            ("ClusterRole", "sre-telegram-relay-node-reader"): [
+                {"apiGroups": [""], "resources": ["nodes"], "verbs": ["get", "list", "watch"]}
+            ],
+            ("ClusterRole", "sre-telegram-relay-workload-reader"): [
+                {
+                    "apiGroups": [""],
+                    "resources": ["pods", "persistentvolumeclaims"],
+                    "verbs": ["get", "list", "watch"],
+                },
+                {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["get", "list", "watch"]},
+            ],
+            ("Role", "sre-telegram-relay-state"): [
+                {
+                    "apiGroups": [""],
+                    "resources": ["configmaps"],
+                    "resourceNames": ["sre-telegram-relay-state"],
+                    "verbs": ["get", "update", "patch"],
+                }
+            ],
+        }
+        expected_bindings = {
+            ("ClusterRoleBinding", "sre-telegram-relay-node-reader", None): {
+                "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "sre-telegram-relay-node-reader"},
+                "subjects": [{"kind": "ServiceAccount", "name": "sre-telegram-relay", "namespace": "monitoring"}],
+            },
+            ("RoleBinding", "sre-telegram-relay-workload-reader", "monitoring"): {
+                "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "sre-telegram-relay-workload-reader"},
+                "subjects": [{"kind": "ServiceAccount", "name": "sre-telegram-relay", "namespace": "monitoring"}],
+            },
+            ("RoleBinding", "sre-telegram-relay-workload-reader", "personal-server"): {
+                "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "sre-telegram-relay-workload-reader"},
+                "subjects": [{"kind": "ServiceAccount", "name": "sre-telegram-relay", "namespace": "monitoring"}],
+            },
+            ("RoleBinding", "sre-telegram-relay-state", "monitoring"): {
+                "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "sre-telegram-relay-state"},
+                "subjects": [{"kind": "ServiceAccount", "name": "sre-telegram-relay", "namespace": "monitoring"}],
+            },
+        }
+
+        self.assertEqual(len(rbac_roles), len(expected_roles))
+        self.assertEqual(
+            {(document["kind"], document["metadata"]["name"]): document["rules"] for document in rbac_roles},
+            expected_roles,
+        )
+        self.assertEqual(len(rbac_bindings), len(expected_bindings))
+        self.assertEqual(
+            {
+                (document["kind"], document["metadata"]["name"], document["metadata"].get("namespace")): {
+                    "roleRef": document["roleRef"],
+                    "subjects": document["subjects"],
+                }
+                for document in rbac_bindings
+            },
+            expected_bindings,
+        )
+        for document in rbac_roles:
+            for rule in document["rules"]:
+                self.assertTrue({"secrets", "pods/exec"}.isdisjoint(rule["resources"]))
+                self.assertNotIn("delete", rule["verbs"])
+                if "deployments" in rule["resources"]:
+                    self.assertNotIn("patch", rule["verbs"])
+
     def test_rules_cover_restart_deployment_pvc_and_target_failures(self):
         rule = find_document(load_yaml_documents("prometheus-rule.yaml"), "PrometheusRule", "sre-telegram-k3s-alerts")
-        alerts = {item["alert"]: item for group in rule["spec"]["groups"] for item in group["rules"]}
+        rules = [item for group in rule["spec"]["groups"] for item in group["rules"]]
+        expected_rules = [
+            {
+                "alert": "PodRestartIncrease",
+                "expr": 'increase(kube_pod_container_status_restarts_total{namespace=~"monitoring|personal-server"}[15m]) > 3',
+                "for": "15m",
+                "labels": {"severity": "warning", "sre_telegram": "true"},
+            },
+            {
+                "alert": "DeploymentUnavailable",
+                "expr": 'kube_deployment_spec_replicas{namespace=~"monitoring|personal-server"} > kube_deployment_status_replicas_available{namespace=~"monitoring|personal-server"}',
+                "for": "10m",
+                "labels": {"severity": "warning", "sre_telegram": "true"},
+            },
+            {
+                "alert": "PVCNotBound",
+                "expr": 'kube_persistentvolumeclaim_status_phase{namespace=~"monitoring|personal-server",phase="Bound"} == 0',
+                "for": "10m",
+                "labels": {"severity": "warning", "sre_telegram": "true"},
+            },
+            {
+                "alert": "PrometheusTargetDown",
+                "expr": "up == 0",
+                "for": "5m",
+                "labels": {"severity": "warning", "sre_telegram": "true"},
+            },
+        ]
 
-        self.assertEqual(set(alerts), {"PodRestartIncrease", "DeploymentUnavailable", "PVCNotBound", "PrometheusTargetDown"})
-        self.assertEqual(alerts["PodRestartIncrease"]["for"], "15m")
-        self.assertIn("increase(kube_pod_container_status_restarts_total", alerts["PodRestartIncrease"]["expr"])
-        self.assertIn("[15m]", alerts["PodRestartIncrease"]["expr"])
-        self.assertEqual(alerts["DeploymentUnavailable"]["for"], "10m")
-        self.assertIn("kube_deployment_spec_replicas", alerts["DeploymentUnavailable"]["expr"])
-        self.assertEqual(alerts["PVCNotBound"]["for"], "10m")
-        self.assertIn("kube_persistentvolumeclaim_status_phase", alerts["PVCNotBound"]["expr"])
-        self.assertEqual(alerts["PrometheusTargetDown"]["for"], "5m")
-        self.assertEqual(alerts["PrometheusTargetDown"]["expr"], "up == 0")
-        for alert in alerts.values():
-            self.assertEqual(alert["labels"]["sre_telegram"], "true")
+        self.assertEqual(len(rules), 4)
+        self.assertEqual(
+            [{key: item[key] for key in ("alert", "expr", "for", "labels")} for item in rules],
+            expected_rules,
+        )
 
     def test_alertmanager_references_existing_secret_not_inline_token(self):
         values_path = MANIFEST_ROOT / "alertmanager-values.yaml"
@@ -132,6 +218,7 @@ class SreTelegramManifestContractTests(unittest.TestCase):
         self.assertNotIn("alertmanagerConfig", values)
         self.assertNotIn("token", values_text.lower())
         self.assertNotIn("Secret", {document["kind"] for document in load_yaml_documents("base.yaml")})
+        # Task 3 preflight/seed validation owns the external Secret's route structure without printing values.
 
 
 if __name__ == "__main__":
