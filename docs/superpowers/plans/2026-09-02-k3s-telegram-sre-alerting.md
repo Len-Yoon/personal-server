@@ -63,7 +63,7 @@ def test_alert_webhook_rejects_wrong_bearer_token():
 
 - [ ] **Step 2: Run RED**
 
-Run: `python3 -m unittest tests/test_sre_telegram_relay.py -v`  
+Run: `python3 -m unittest tests/test_sre_telegram_relay.py -v`
 Expected: FAIL because the relay does not exist.
 
 - [ ] **Step 3: Implement the smallest relay**
@@ -76,10 +76,10 @@ Test unsupported commands, K3s/Prometheus read failure, firing/resolved formatti
 
 - [ ] **Step 5: Run GREEN and build-only image check**
 
-Run: `python3 -m unittest tests/test_sre_telegram_relay.py -v`  
+Run: `python3 -m unittest tests/test_sre_telegram_relay.py -v`
 Expected: PASS.
 
-Run: `docker build -t personal-server-sre-telegram-relay:test sre-telegram-relay`  
+Run: `docker build -t personal-server-sre-telegram-relay:test sre-telegram-relay`
 Expected: image build succeeds without Secret values.
 
 - [ ] **Step 6: Commit**
@@ -109,7 +109,7 @@ def test_alertmanager_references_existing_secret_not_inline_token(): ...
 
 - [ ] **Step 2: Run RED**
 
-Run: `python3 -m unittest tests/test_k8s_sre_telegram_manifests.py -v`  
+Run: `python3 -m unittest tests/test_k8s_sre_telegram_manifests.py -v`
 Expected: FAIL because manifests do not exist.
 
 - [ ] **Step 3: Implement base manifest and minimum Role**
@@ -122,10 +122,10 @@ Create four rules: restart increase over 15 minutes, unavailable Deployment for 
 
 - [ ] **Step 5: Run GREEN and Helm render**
 
-Run: `python3 -m unittest tests/test_k8s_sre_telegram_manifests.py -v`  
+Run: `python3 -m unittest tests/test_k8s_sre_telegram_manifests.py -v`
 Expected: PASS.
 
-Run: `helm template personal-server-monitoring prometheus-community/kube-prometheus-stack --namespace monitoring --version 88.6.1 --values infra/k8s/monitoring/values.n100.yaml --values infra/k8s/sre-telegram/alertmanager-values.yaml >/dev/null`  
+Run: `helm template personal-server-monitoring prometheus-community/kube-prometheus-stack --namespace monitoring --version 88.6.1 --values infra/k8s/monitoring/values.n100.yaml --values infra/k8s/sre-telegram/alertmanager-values.yaml >/dev/null`
 Expected: exit 0.
 
 - [ ] **Step 6: Commit**
@@ -157,7 +157,7 @@ def test_verify_never_reads_or_prints_secret_data(): ...
 
 - [ ] **Step 2: Run RED**
 
-Run: `python3 -m unittest tests/test_k8s_sre_telegram_tools.py -v`  
+Run: `python3 -m unittest tests/test_k8s_sre_telegram_tools.py -v`
 Expected: FAIL because tools do not exist.
 
 - [ ] **Step 3: Implement preflight and Secret contract guidance**
@@ -170,10 +170,10 @@ Preflight checks only K3s Ready, monitoring release, Prometheus/Grafana health, 
 
 - [ ] **Step 5: Run GREEN and shell syntax checks**
 
-Run: `python3 -m unittest tests/test_k8s_sre_telegram_tools.py -v`  
+Run: `python3 -m unittest tests/test_k8s_sre_telegram_tools.py -v`
 Expected: PASS.
 
-Run: `bash -n infra/k8s/tools/sre-telegram-preflight.sh infra/k8s/tools/sre-telegram-secret-template.sh infra/k8s/tools/sre-telegram-install.sh infra/k8s/tools/sre-telegram-verify.sh`  
+Run: `bash -n infra/k8s/tools/sre-telegram-preflight.sh infra/k8s/tools/sre-telegram-secret-template.sh infra/k8s/tools/sre-telegram-install.sh infra/k8s/tools/sre-telegram-verify.sh`
 Expected: exit 0.
 
 - [ ] **Step 6: Commit**
@@ -191,15 +191,15 @@ Run: `git add infra/k8s/tools/sre-telegram-*.sh infra/k8s/README.md tests/test_k
 
 - [ ] **Step 1: Run complete affected suite**
 
-Run: `python3 -m unittest tests/test_sre_telegram_relay.py tests/test_k8s_sre_telegram_manifests.py tests/test_k8s_sre_telegram_tools.py tests/test_k8s_monitoring_tools.py tests/test_k8s_monitoring_values.py tests/test_k8s_sre_health_audit.py tests/test_k8s_sre_pod_recovery_lab.py -v`  
+Run: `python3 -m unittest tests/test_sre_telegram_relay.py tests/test_k8s_sre_telegram_manifests.py tests/test_k8s_sre_telegram_tools.py tests/test_k8s_monitoring_tools.py tests/test_k8s_monitoring_values.py tests/test_k8s_sre_health_audit.py tests/test_k8s_sre_pod_recovery_lab.py -v`
 Expected: all tests pass.
 
 - [ ] **Step 2: Run static, render and change-scope checks**
 
-Run: `git diff --check main...HEAD`  
+Run: `git diff --check main...HEAD`
 Expected: exit 0.
 
-Generate the NUL-delimited changed-file record and run `python3 scripts/run_change_harness.py --input <record> --input-format git-name-status-z --check-result maintenance=success --agent-context`.  
+Generate the NUL-delimited changed-file record and run `python3 scripts/run_change_harness.py --input <record> --input-format git-name-status-z --check-result maintenance=success --agent-context`.
 Expected: `ready_for_review`.
 
 - [ ] **Step 3: Independent review**
