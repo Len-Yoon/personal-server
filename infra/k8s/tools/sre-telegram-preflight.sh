@@ -62,6 +62,7 @@ BEARER_CREDENTIALS_FILE = (
     "/etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token"
 )
 MATCHER = re.compile(r"^sre_telegram\s*=\s*(?:[\"'])?(true|false)(?:[\"'])?$")
+SRE_MATCHER = re.compile(r"^sre_telegram(?:\s*(?:=|!=|=~|!~).*)?$")
 
 
 def fail() -> None:
@@ -76,11 +77,21 @@ def matcher_value(value):
     return "ambiguous"
 
 
-def sre_telegram_matchers(route):
+def sre_telegram_matcher_state(route):
     values = []
     direct_match = route.get("match")
-    if isinstance(direct_match, dict) and "sre_telegram" in direct_match:
-        values.append(matcher_value(direct_match["sre_telegram"]))
+    if direct_match is not None:
+        if not isinstance(direct_match, dict):
+            fail()
+        if "sre_telegram" in direct_match:
+            values.append(matcher_value(direct_match["sre_telegram"]))
+
+    direct_match_re = route.get("match_re")
+    if direct_match_re is not None:
+        if not isinstance(direct_match_re, dict):
+            fail()
+        if "sre_telegram" in direct_match_re:
+            values.append("ambiguous")
 
     matchers = route.get("matchers")
     if matchers is not None:
@@ -90,21 +101,71 @@ def sre_telegram_matchers(route):
             if not isinstance(matcher, str):
                 fail()
             normalized = matcher.strip().lower()
-            if normalized.startswith("sre_telegram"):
+            if SRE_MATCHER.fullmatch(normalized):
                 match = MATCHER.fullmatch(normalized)
                 values.append(match.group(1) if match else "ambiguous")
-    return values
+    if not values:
+        return "inherited"
+    if any(value not in {"true", "false"} for value in values):
+        return "ambiguous"
+    if len(set(values)) != 1:
+        return "ambiguous"
+    return values[0]
 
 
-def routes_in(route):
-    yield route
+def matches_sre_telegram_true(inherited_state, route):
+    if inherited_state not in {"true", "false", "ambiguous"}:
+        fail()
+    matcher_state = sre_telegram_matcher_state(route)
+    if inherited_state == "false" or matcher_state == "false":
+        return "false"
+    if inherited_state == "ambiguous" or matcher_state == "ambiguous":
+        return "ambiguous"
+    return "true"
+
+
+def route_receiver(route, inherited_receiver):
+    receiver = route.get("receiver", inherited_receiver)
+    if receiver is not None and not isinstance(receiver, str):
+        fail()
+    return receiver
+
+
+def terminal_receivers_for_sre_telegram_true(route, inherited_receiver, inherited_state):
+    if not isinstance(route, dict):
+        fail()
+    state = matches_sre_telegram_true(inherited_state, route)
+    if state == "false":
+        return []
+    if state != "true":
+        fail()
+
+    receiver = route_receiver(route, inherited_receiver)
     children = route.get("routes", [])
     if not isinstance(children, list):
         fail()
+
+    terminal_receivers = []
+    matched_child = False
     for child in children:
-        if not isinstance(child, dict):
+        child_receivers = terminal_receivers_for_sre_telegram_true(
+            child, receiver, state
+        )
+        if not child_receivers:
+            continue
+        matched_child = True
+        terminal_receivers.extend(child_receivers)
+        child_continue = child.get("continue", False)
+        if not isinstance(child_continue, bool):
             fail()
-        yield from routes_in(child)
+        if not child_continue:
+            break
+
+    if matched_child:
+        return terminal_receivers
+    if receiver is None:
+        fail()
+    return [receiver]
 
 
 def receiver_is_valid(receivers):
@@ -142,17 +203,9 @@ try:
         fail()
     if route.get("repeat_interval") != "4h":
         fail()
-    matching_routes = [
-        candidate
-        for candidate in routes_in(route)
-        if any(value in {"true", "ambiguous"} for value in sre_telegram_matchers(candidate))
-    ]
-    if not matching_routes:
-        fail()
-    if any(
-        candidate.get("receiver") != RELAY_RECEIVER
-        or any(value != "true" for value in sre_telegram_matchers(candidate))
-        for candidate in matching_routes
+    terminal_receivers = terminal_receivers_for_sre_telegram_true(route, None, "true")
+    if not terminal_receivers or any(
+        receiver != RELAY_RECEIVER for receiver in terminal_receivers
     ):
         fail()
     if not receiver_is_valid(config.get("receivers")):

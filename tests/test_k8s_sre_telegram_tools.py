@@ -33,6 +33,54 @@ receivers:
             credentials_file: /etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token
 """
 
+NESTED_RECEIVER_OVERRIDE_ALERTMANAGER_CONFIG = """\
+route:
+  receiver: sre-telegram-noop
+  group_by:
+    - alertname
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - 'sre_telegram="true"'
+      receiver: sre-telegram-relay
+      routes:
+        - receiver: sre-telegram-noop
+receivers:
+  - name: sre-telegram-noop
+  - name: sre-telegram-relay
+    webhook_configs:
+      - url: http://sre-telegram-relay.monitoring.svc:8080/alertmanager
+        send_resolved: true
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token
+"""
+
+CONTINUE_PARALLEL_NONRELAY_ALERTMANAGER_CONFIG = """\
+route:
+  receiver: sre-telegram-noop
+  group_by:
+    - alertname
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - 'sre_telegram="true"'
+      receiver: sre-telegram-relay
+      continue: true
+    - receiver: sre-telegram-noop
+receivers:
+  - name: sre-telegram-noop
+  - name: sre-telegram-relay
+    webhook_configs:
+      - url: http://sre-telegram-relay.monitoring.svc:8080/alertmanager
+        send_resolved: true
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/secrets/sre-telegram-relay-runtime/alertmanager_auth_token
+"""
+
 
 def read_tool(name: str) -> str:
     path = TOOLS / name
@@ -219,6 +267,60 @@ class SreTelegramToolContractTest(unittest.TestCase):
             },
             files={"bypass-alertmanager.yaml": BYPASS_ALERTMANAGER_CONFIG},
             env_overrides={"SRE_TELEGRAM_ALERTMANAGER_CONFIG_FILE": "{tmp}/bypass-alertmanager.yaml"},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("check=alertmanager_effective_config status=FAIL", result.stdout)
+        self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_preflight=FAIL"))
+
+    def test_preflight_rejects_nested_matcherless_child_that_overrides_relay_receiver(self):
+        result, _ = self.run_tool(
+            "sre-telegram-preflight.sh",
+            stubs={
+                "sudo": "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *'get nodes --no-headers'*) printf 'n100 Ready\\n'; exit 0;;\n"
+                "  *'get deployment personal-server-monitoring-grafana'*) printf '1\\n'; exit 0;;\n"
+                "  *'get statefulset -l'*) printf '1\\n'; exit 0;;\n"
+                "  *'get service personal-server-monitoring-prometheus'*) exit 0;;\n"
+                "  *'describe secret sre-telegram-relay-runtime'*) printf 'telegram_bot_token: 3 bytes\\nallowed_chat_id: 2 bytes\\nalertmanager_auth_token: 3 bytes\\n'; exit 0;;\n"
+                "  *'describe secret sre-telegram-alertmanager-config'*) printf 'alertmanager.yaml: 4 bytes\\n'; exit 0;;\n"
+                "  *'ctr version'*) exit 0;;\n"
+                "  *) exit 1;;\n"
+                "esac\n",
+                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\\\"info\\\":{\\\"status\\\":\\\"deployed\\\"}}\\n'; exit 0;; esac\nexit 1\n",
+                "docker": "#!/bin/sh\nexit 0\n",
+                "amtool": "#!/bin/sh\nexit 0\n",
+            },
+            files={"nested-receiver-override.yaml": NESTED_RECEIVER_OVERRIDE_ALERTMANAGER_CONFIG},
+            env_overrides={"SRE_TELEGRAM_ALERTMANAGER_CONFIG_FILE": "{tmp}/nested-receiver-override.yaml"},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("check=alertmanager_effective_config status=FAIL", result.stdout)
+        self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_preflight=FAIL"))
+
+    def test_preflight_rejects_continue_path_that_reaches_nonrelay_receiver(self):
+        result, _ = self.run_tool(
+            "sre-telegram-preflight.sh",
+            stubs={
+                "sudo": "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *'get nodes --no-headers'*) printf 'n100 Ready\\n'; exit 0;;\n"
+                "  *'get deployment personal-server-monitoring-grafana'*) printf '1\\n'; exit 0;;\n"
+                "  *'get statefulset -l'*) printf '1\\n'; exit 0;;\n"
+                "  *'get service personal-server-monitoring-prometheus'*) exit 0;;\n"
+                "  *'describe secret sre-telegram-relay-runtime'*) printf 'telegram_bot_token: 3 bytes\\nallowed_chat_id: 2 bytes\\nalertmanager_auth_token: 3 bytes\\n'; exit 0;;\n"
+                "  *'describe secret sre-telegram-alertmanager-config'*) printf 'alertmanager.yaml: 4 bytes\\n'; exit 0;;\n"
+                "  *'ctr version'*) exit 0;;\n"
+                "  *) exit 1;;\n"
+                "esac\n",
+                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\\\"info\\\":{\\\"status\\\":\\\"deployed\\\"}}\\n'; exit 0;; esac\nexit 1\n",
+                "docker": "#!/bin/sh\nexit 0\n",
+                "amtool": "#!/bin/sh\nexit 0\n",
+            },
+            files={"continue-parallel-nonrelay.yaml": CONTINUE_PARALLEL_NONRELAY_ALERTMANAGER_CONFIG},
+            env_overrides={"SRE_TELEGRAM_ALERTMANAGER_CONFIG_FILE": "{tmp}/continue-parallel-nonrelay.yaml"},
         )
 
         self.assertNotEqual(result.returncode, 0)

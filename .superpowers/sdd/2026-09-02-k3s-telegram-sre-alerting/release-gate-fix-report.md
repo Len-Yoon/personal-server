@@ -129,3 +129,42 @@ RED 실행 결과는 7건 중 6건 실패였음. message delivery-only 로그 �
 
 - N100에서 `amtool`과 Python YAML parser가 모두 이용 가능해야 하며, 하나라도 없으면 의도적으로 preflight FAIL됨.
 - 실제 N100 operator file 검증은 승인된 Secret manager 절차에서만 수행 필요함. 본 보완에서는 N100, 실제 Secret, network, deploy를 수행하지 않음.
+
+## 11. P1 중첩 Alertmanager route 전달 경로 검증 보완
+
+### 11.1 재검토 근거 및 근본 원인
+
+`release-gate-rereview.md`의 P1 지적을 반영함. 기존 구조 검증은 `sre_telegram=true` matcher를 직접 선언한 route만 평면 수집했음. 따라서 해당 parent route가 relay receiver를 지정해도, matcher를 선언하지 않은 child route가 receiver를 noop으로 덮어쓰는 실제 전달 경로는 수집·검증되지 않았음. 또한 `continue: true`인 sibling route의 병렬 전달 경로도 계산하지 않았음.
+
+### 11.2 TDD 재현 및 결과
+
+| 단계 | 테스트 | 결과 | 재현 내용 |
+|---|---|---|---|
+| RED | `test_preflight_rejects_nested_matcherless_child_that_overrides_relay_receiver` | 기존 구현에서 실패 | `sre_telegram=true` parent relay 아래 matcherless child가 noop receiver를 선택한 YAML이 성공 `amtool` stub 조건에서 preflight PASS함. |
+| RED | `test_preflight_rejects_continue_path_that_reaches_nonrelay_receiver` | 기존 구현에서 실패 | relay route의 `continue: true` 뒤 matcherless noop sibling이 병렬 전달되는 YAML이 preflight PASS함. |
+| GREEN | 위 2건 및 정상 local config·기존 직접 우회·`amtool` 거부 경로 | 4건 통과 | 중첩 receiver 덮어쓰기와 병렬 nonrelay 경로가 모두 preflight FAIL됨. |
+
+### 11.3 보완 내용
+
+- 평면 route 수집을 제거하고, `sre_telegram=true` alert를 기준으로 parent-to-child route tree를 평가하도록 변경함.
+- parent matcher 상태와 receiver를 child에 상속하고, matcherless child의 effective terminal receiver를 확인함.
+- 각 matching child의 `continue` 값을 평가하여, `continue: true` 이후 matching sibling의 terminal receiver도 모두 수집함.
+- `sre_telegram=true`에 대한 terminal delivery path가 하나도 없거나, receiver가 미지정·모호하거나, 하나라도 `sre-telegram-relay` 이외 receiver로 끝나면 fail-closed 처리함.
+- 정규식·부정·상충 matcher 또는 legacy `match_re`의 `sre_telegram` 조건은 전달 여부를 확정할 수 없으므로 fail-closed 처리함.
+- parser, `amtool`, local config의 stdout/stderr은 계속 억제함. Kubernetes Secret 값·local config 내용·token·payload를 읽거나 출력하는 경로를 추가하지 않음.
+
+### 11.4 재검증 결과
+
+| 검증 | 결과 | 비고 |
+|---|---|---|
+| 신규 nested/continue 회귀 RED | 2건 기대대로 실패 확인 | production code 변경 전 실행함. |
+| preflight 핵심 회귀 | 4건 통과 | 정상 계약, 기존 직접 우회, nested override, `continue` 병렬 경로를 확인함. |
+| `python3 -m unittest tests.test_k8s_sre_telegram_tools -q` | 28건 통과 | 모든 외부 실행은 temporary stub으로 대체됨. |
+| 관련 SRE·K3s·monitoring 회귀군 | 118건 통과 | relay, manifest, tool, monitoring, health audit, pod recovery lab 테스트를 포함함. |
+| `bash -n infra/k8s/tools/sre-telegram-preflight.sh` | 통과 | Shell 문법 확인함. |
+| `git diff --check` | 통과 | whitespace 오류 없음. |
+
+### 11.5 확인 필요 사항 및 운영 기록
+
+- 실제 N100 operator local config에 대한 `amtool`·route-tree gate 실행은 승인된 별도 운영 절차에서 수행 필요함. 본 작업에서는 N100·클러스터·네트워크·Secret data에 접근하지 않음.
+- 구현·테스트·보고서 갱신은 단일 담당자가 수행함. 하위 에이전트는 상위 지시의 명시적 금지 조건에 따라 사용하지 않음.
