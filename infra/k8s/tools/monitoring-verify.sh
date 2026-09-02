@@ -22,7 +22,7 @@ verify_resources() {
   local pvc_status service_type dashboard
   pvc_status=$(sudo k3s kubectl -n "$NAMESPACE" get pvc --no-headers) || return 1
   [ "$(printf '%s\n' "$pvc_status" | awk 'NF {count++} END {print count+0}')" -eq 2 ] || return 1
-  printf '%s\n' "$pvc_status" | awk 'NF && $NF != "Bound" {bad=1} END {exit bad}' || return 1
+  printf '%s\n' "$pvc_status" | awk 'NF && $2 != "Bound" {bad=1} END {exit bad}' || return 1
   sudo k3s kubectl -n "$NAMESPACE" get pods >/dev/null || return 1
   sudo k3s kubectl -n "$NAMESPACE" wait --for=condition=Ready pod --all --timeout=120s >/dev/null || return 1
   service_type=$(sudo k3s kubectl -n "$NAMESPACE" get service "$GRAFANA_SERVICE" -o jsonpath='{.spec.type}') || return 1
