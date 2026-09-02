@@ -1,10 +1,6 @@
 import sys
-import threading
 import unittest
-from http.server import ThreadingHTTPServer
 from pathlib import Path
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -16,8 +12,10 @@ from app.main import (  # noqa: E402
     RELAY_NAMESPACE,
     RELAY_STATE_CONFIGMAP,
     RelayService,
+    TelegramClient,
+    TelegramPollingError,
     build_status_summary,
-    create_http_handler,
+    handle_http_request,
     run_polling,
 )
 
@@ -96,6 +94,27 @@ class FakePollingTelegram:
     def send_message(self, chat_id, text):
         self.sent_messages.append((chat_id, text))
         return self._send_result
+
+
+class FailingPollingTelegram:
+    def __init__(self):
+        self.calls = 0
+
+    def get_updates(self, offset):
+        self.calls += 1
+        raise TelegramPollingError("getUpdates failed")
+
+    def send_message(self, chat_id, text):
+        raise AssertionError("failed poll must not send a message")
+
+
+class ControlledTelegramClient(TelegramClient):
+    def __init__(self, response):
+        super().__init__("test-token")
+        self._response = response
+
+    def _post(self, method, payload):
+        return self._response
 
 
 class RelayServiceTest(unittest.TestCase):
@@ -188,16 +207,11 @@ class RelayServiceTest(unittest.TestCase):
 
     def test_health_endpoint_returns_ok(self):
         relay = RelayService(allowed_chat_id="123", k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
-        server = ThreadingHTTPServer(("127.0.0.1", 0), create_http_handler(relay))
-        worker = threading.Thread(target=server.serve_forever, daemon=True)
-        worker.start()
-        try:
-            with urlopen(f"http://127.0.0.1:{server.server_port}/healthz", timeout=2) as response:
-                self.assertEqual(response.status, 200)
-                self.assertEqual(response.read(), b"ok\n")
-        finally:
-            server.shutdown()
-            server.server_close()
+
+        status, body = handle_http_request(relay, method="GET", path="/healthz")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"ok\n")
 
     def test_configmap_offset_store_persists_the_next_update_id(self):
         k8s = FakeConfigMapK8s()
@@ -240,7 +254,7 @@ class RelayServiceTest(unittest.TestCase):
         self.assertIsNone(offsets.load())
         self.assertFalse(relay.is_healthy())
 
-    def test_configmap_failure_marks_relay_unhealthy_without_stopping_poll_loop(self):
+    def test_configmap_failure_marks_relay_unhealthy_and_uses_backoff(self):
         relay = RelayService(
             allowed_chat_id="123",
             k8s_client=FakeK8s(),
@@ -248,9 +262,11 @@ class RelayServiceTest(unittest.TestCase):
             offset_store=FailingOffsetStore(),
         )
 
-        run_polling(relay, FakePollingTelegram([]), "123", max_cycles=1, sleep_fn=lambda _: None)
+        delays = []
+        run_polling(relay, FakePollingTelegram([]), "123", max_cycles=3, sleep_fn=delays.append)
 
         self.assertFalse(relay.is_healthy())
+        self.assertEqual(delays, [1, 2])
 
     def test_configmap_write_failure_marks_relay_unhealthy_after_delivery(self):
         relay = RelayService(
@@ -292,38 +308,97 @@ class RelayServiceTest(unittest.TestCase):
             prometheus_client=FakePrometheus(),
             alert_callback=raise_callback,
         )
-        server = ThreadingHTTPServer(("127.0.0.1", 0), create_http_handler(relay))
-        worker = threading.Thread(target=server.serve_forever, daemon=True)
-        worker.start()
-        request = Request(
-            f"http://127.0.0.1:{server.server_port}/alertmanager",
-            data=b'{"status":"firing","alerts":[]}',
-            headers={"Authorization": "Bearer expected", "Content-Type": "application/json"},
+        status, body = handle_http_request(
+            relay,
             method="POST",
+            path="/alertmanager",
+            authorization="Bearer expected",
+            content_length="31",
+            body=b'{"status":"firing","alerts":[]}',
         )
-        try:
-            with self.assertRaises(HTTPError) as raised:
-                urlopen(request, timeout=2)
-            self.assertEqual(raised.exception.code, 503)
-            self.assertEqual(raised.exception.read(), b"delivery failed\n")
-        finally:
-            server.shutdown()
-            server.server_close()
+
+        self.assertEqual(status, 503)
+        self.assertEqual(body, b"delivery failed\n")
 
     def test_unhealthy_relay_health_endpoint_returns_503(self):
         relay = RelayService(allowed_chat_id="123", k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
         relay.mark_unhealthy()
-        server = ThreadingHTTPServer(("127.0.0.1", 0), create_http_handler(relay))
-        worker = threading.Thread(target=server.serve_forever, daemon=True)
-        worker.start()
-        try:
-            with self.assertRaises(HTTPError) as raised:
-                urlopen(f"http://127.0.0.1:{server.server_port}/healthz", timeout=2)
-            self.assertEqual(raised.exception.code, 503)
-            self.assertEqual(raised.exception.read(), b"unavailable\n")
-        finally:
-            server.shutdown()
-            server.server_close()
+
+        status, body = handle_http_request(relay, method="GET", path="/healthz")
+
+        self.assertEqual(status, 503)
+        self.assertEqual(body, b"unavailable\n")
+
+    def test_get_updates_transport_and_api_failures_are_not_empty_polls(self):
+        self.assertEqual(ControlledTelegramClient({"ok": True, "result": []}).get_updates(None), [])
+        for response in (None, {"ok": False}):
+            with self.subTest(response=response):
+                with self.assertRaises(TelegramPollingError):
+                    ControlledTelegramClient(response).get_updates(None)
+
+    def test_empty_successful_poll_keeps_relay_healthy(self):
+        relay = RelayService(allowed_chat_id="123", k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
+
+        run_polling(relay, FakePollingTelegram([]), "123", max_cycles=1, sleep_fn=lambda _: None)
+
+        self.assertTrue(relay.is_healthy())
+
+    def test_get_updates_failure_marks_unhealthy_and_uses_bounded_backoff(self):
+        relay = RelayService(allowed_chat_id="123", k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
+        telegram = FailingPollingTelegram()
+        delays = []
+
+        run_polling(relay, telegram, "123", max_cycles=7, sleep_fn=delays.append)
+
+        self.assertEqual(telegram.calls, 7)
+        self.assertFalse(relay.is_healthy())
+        self.assertEqual(delays, [1, 2, 4, 8, 16, 30])
+
+    def test_http_boundary_rejects_unauthorized_alertmanager_request(self):
+        relay = RelayService(alertmanager_auth_token="expected", k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
+
+        status, body = handle_http_request(
+            relay,
+            method="POST",
+            path="/alertmanager",
+            authorization="Bearer wrong",
+            content_length="31",
+            body=b'{"status":"firing","alerts":[]}',
+        )
+
+        self.assertEqual(status, 401)
+        self.assertEqual(body, b"unauthorized\n")
+        self.assertNotIn(b"expected", body)
+
+    def test_http_boundary_rejects_malformed_alertmanager_json(self):
+        relay = RelayService(alertmanager_auth_token="expected", k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
+
+        status, body = handle_http_request(
+            relay,
+            method="POST",
+            path="/alertmanager",
+            authorization="Bearer expected",
+            content_length="8",
+            body=b"not-json",
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(body, b"invalid alert payload\n")
+
+    def test_http_boundary_rejects_oversized_alertmanager_body(self):
+        relay = RelayService(alertmanager_auth_token="expected", k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
+
+        status, body = handle_http_request(
+            relay,
+            method="POST",
+            path="/alertmanager",
+            authorization="Bearer expected",
+            content_length="1048577",
+            body=b"x",
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(body, b"invalid request body\n")
 
 
 if __name__ == "__main__":

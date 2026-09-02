@@ -25,6 +25,10 @@ MAX_REQUEST_BODY_BYTES = 1_048_576
 CONFIGMAP_OFFSET_KEY = "telegram_next_update_id"
 
 
+class TelegramPollingError(RuntimeError):
+    """Telegram did not confirm a successful getUpdates response."""
+
+
 class OffsetStore(Protocol):
     """Stores the next Telegram update ID to consume across restarts."""
 
@@ -334,8 +338,12 @@ class TelegramClient:
         if offset is not None:
             payload["offset"] = offset
         response = self._post("getUpdates", payload)
-        result = response.get("result") if isinstance(response, dict) else None
-        return result if isinstance(result, list) and all(isinstance(item, dict) for item in result) else []
+        if not isinstance(response, dict) or response.get("ok") is not True:
+            raise TelegramPollingError("Telegram getUpdates failed")
+        result = response.get("result")
+        if not isinstance(result, list) or not all(isinstance(item, dict) for item in result):
+            raise TelegramPollingError("Telegram getUpdates returned an invalid result")
+        return result
 
     def send_message(self, chat_id: str, text: str) -> bool:
         response = self._post("sendMessage", {"chat_id": chat_id, "text": text})
@@ -355,39 +363,66 @@ class TelegramClient:
             return None
 
 
+def handle_http_request(
+    relay: RelayService,
+    *,
+    method: str,
+    path: str,
+    authorization: str = "",
+    content_length: str | None = None,
+    body: bytes = b"",
+) -> tuple[int, bytes]:
+    """Apply the relay's HTTP contract independently from the socket server."""
+    if method == "GET" and path == "/healthz":
+        return (200, b"ok\n") if relay.is_healthy() else (503, b"unavailable\n")
+    if method != "POST" or path != "/alertmanager":
+        return 404, b"not found\n"
+
+    invalid_response = _invalid_body_response(content_length)
+    if invalid_response is not None:
+        return invalid_response
+    if len(body) != int(content_length):
+        return 400, b"invalid alert payload\n"
+    try:
+        payload = _decode_object(body)
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        return 400, b"invalid alert payload\n"
+    try:
+        status, response = relay.handle_alert(payload, authorization)
+    except Exception:
+        return 500, b"internal error\n"
+    return status, f"{response}\n".encode("utf-8")
+
+
 def create_http_handler(relay: RelayService) -> type[BaseHTTPRequestHandler]:
     """Create the private HTTP boundary used by the relay's ClusterIP Service."""
 
     class RelayRequestHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            if self.path != "/healthz":
-                self.send_error(404)
-                return
-            if not relay.is_healthy():
-                self._respond(503, b"unavailable\n", "text/plain; charset=utf-8")
-                return
-            self._respond(200, b"ok\n", "text/plain; charset=utf-8")
+            status, body = handle_http_request(relay, method="GET", path=self.path)
+            self._respond(status, body, "text/plain; charset=utf-8")
 
         def do_POST(self) -> None:  # noqa: N802
             if self.path != "/alertmanager":
-                self.send_error(404)
+                status, body = handle_http_request(relay, method="POST", path=self.path)
+                self._respond(status, body, "text/plain; charset=utf-8")
                 return
             content_length = self.headers.get("Content-Length")
-            try:
-                body_size = int(content_length) if content_length is not None else 0
-            except ValueError:
-                self._respond(400, b"invalid content length\n", "text/plain; charset=utf-8")
+            invalid_response = _invalid_body_response(content_length)
+            if invalid_response is not None:
+                status, body = invalid_response
+                self._respond(status, body, "text/plain; charset=utf-8")
                 return
-            if body_size < 1 or body_size > MAX_REQUEST_BODY_BYTES:
-                self._respond(400, b"invalid request body\n", "text/plain; charset=utf-8")
-                return
-            try:
-                payload = _decode_object(self.rfile.read(body_size))
-            except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
-                self._respond(400, b"invalid alert payload\n", "text/plain; charset=utf-8")
-                return
-            status, response = relay.handle_alert(payload, self.headers.get("Authorization", ""))
-            self._respond(status, f"{response}\n".encode("utf-8"), "text/plain; charset=utf-8")
+            body_size = int(content_length)
+            status, body = handle_http_request(
+                relay,
+                method="POST",
+                path=self.path,
+                authorization=self.headers.get("Authorization", ""),
+                content_length=content_length,
+                body=self.rfile.read(body_size),
+            )
+            self._respond(status, body, "text/plain; charset=utf-8")
 
         def log_message(self, format: str, *args: object) -> None:
             return
@@ -400,6 +435,16 @@ def create_http_handler(relay: RelayService) -> type[BaseHTTPRequestHandler]:
             self.wfile.write(body)
 
     return RelayRequestHandler
+
+
+def _invalid_body_response(content_length: str | None) -> tuple[int, bytes] | None:
+    try:
+        body_size = int(content_length) if content_length is not None else 0
+    except ValueError:
+        return 400, b"invalid content length\n"
+    if body_size < 1 or body_size > MAX_REQUEST_BODY_BYTES:
+        return 400, b"invalid request body\n"
+    return None
 
 
 def run_polling(
