@@ -615,6 +615,37 @@ class SreTelegramToolContractTest(unittest.TestCase):
         self.assertNotIn("create -f", calls)
         self.assertNotIn("helm upgrade", calls)
 
+    def test_install_accepts_containerd_canonical_image_reference_and_creates_resources(self):
+        result, calls = self.run_tool(
+            "sre-telegram-install.sh",
+            "--apply",
+            stubs={
+                "preflight": "#!/bin/sh\nexit 0\n",
+                "sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *describe*) printf 'telegram_bot_token: 3 bytes\\nallowed_chat_id: 2 bytes\\nalertmanager_auth_token: 3 bytes\\nalertmanager.yaml: 4 bytes\\n'; exit 0;;\n"
+                "  *'apply --dry-run=client'*) exit 0;;\n"
+                "  *'images list'*) printf 'REF TYPE DIGEST SIZE PLATFORMS LABELS\\ndocker.io/library/personal-server-sre-telegram-relay:latest x sha256:abc 1MB linux/amd64 -\\n'; exit 0;;\n"
+                "  *'create -f'*) printf 'configmap/sre-telegram-relay-state created\\n'; exit 0;;\n"
+                "  *) exit 0;;\n"
+                "esac\n",
+                "docker": "#!/bin/sh\n"
+                "case \"$1\" in build) exit 0;; save) printf image-stream; exit 0;; esac\n",
+                "helm": "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  template) exit 0;;\n"
+                "  status) printf '{\"info\":{\"status\":\"deployed\",\"revision\":\"2\"}}\\n'; exit 0;;\n"
+                "  upgrade) exit 0;;\n"
+                "  *) exit 0;;\n"
+                "esac\n",
+            },
+            env_overrides={"SRE_TELEGRAM_PREFLIGHT_SCRIPT": "preflight"},
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_install=PASS"))
+        self.assertIn("create -f", calls)
+
     def test_install_applies_relay_before_atomic_helm_upgrade_and_rolls_back_namespaced_resources(self):
         result, calls = self.run_tool(
             "sre-telegram-install.sh",
