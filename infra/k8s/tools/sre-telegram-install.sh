@@ -75,7 +75,7 @@ record_reference() {
   case "$reference" in
     configmap/sre-telegram-relay-state|serviceaccount/sre-telegram-relay|role.rbac.authorization.k8s.io/sre-telegram-relay-state|role/sre-telegram-relay-state|deployment.apps/sre-telegram-relay|deployment/sre-telegram-relay|service/sre-telegram-relay|prometheusrule.monitoring.coreos.com/sre-telegram-k3s-alerts|prometheusrule/sre-telegram-k3s-alerts)
       ;;
-    rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader|rolebinding/sre-telegram-relay-workload-reader)
+    rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader|rolebinding/sre-telegram-relay-workload-reader|rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-state|rolebinding/sre-telegram-relay-state)
       ;;
     clusterrole.rbac.authorization.k8s.io/sre-telegram-relay-node-reader|clusterrole/sre-telegram-relay-node-reader|clusterrole.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader|clusterrole/sre-telegram-relay-workload-reader|clusterrolebinding.rbac.authorization.k8s.io/sre-telegram-relay-node-reader|clusterrolebinding/sre-telegram-relay-node-reader)
       namespace="cluster"
