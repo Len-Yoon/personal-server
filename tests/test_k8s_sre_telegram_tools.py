@@ -588,7 +588,8 @@ class SreTelegramToolContractTest(unittest.TestCase):
             env_overrides={"SRE_TELEGRAM_PREFLIGHT_SCRIPT": "preflight"},
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_install=FAIL"))
+        self.assertIn("sre_telegram_install_stage=image_import", result.stdout)
+        self.assertNotIn("telegram_bot_token:", result.stdout)
         self.assertNotIn("helm upgrade", calls)
 
     def test_install_stops_before_resource_create_when_imported_image_has_no_digest(self):
