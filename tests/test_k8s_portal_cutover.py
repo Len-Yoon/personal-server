@@ -17,6 +17,10 @@ class PortalCutoverContractTest(unittest.TestCase):
         self.assertTrue(SCRIPT.is_file())
         self.assertTrue(SCRIPT.read_text(encoding="utf-8").startswith("#!/usr/bin/env bash"))
 
+    def test_default_timeout_allows_compose_bridge_services_to_start(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-60}"', text)
+
     def test_cutover_is_fail_closed_and_operator_gated(self):
         text = SCRIPT.read_text(encoding="utf-8")
         for required in (

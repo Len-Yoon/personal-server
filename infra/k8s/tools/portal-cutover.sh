@@ -5,7 +5,7 @@ set -u -o pipefail
 # This script intentionally has no EXIT trap: every destructive step checks its
 # result and invokes abort_cutover explicitly so a partial operation is visible.
 
-TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-30}"
+TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-60}"
 RESTORE_STREAM_ATTEMPTS="${PORTAL_RESTORE_STREAM_ATTEMPTS:-3}"
 CADDY_HEALTH_TIMEOUT_SECONDS=30
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dt%H%M%Sz)-$$}"
