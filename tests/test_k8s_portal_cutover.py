@@ -35,6 +35,25 @@ class PortalCutoverContractTest(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
+            source_dir = root / "files"
+            source_dir.mkdir()
+            state_dir = root / "state"
+            state_dir.mkdir()
+            (state_dir / "homeops.sqlite3").write_bytes(b"sqlite-placeholder")
+            env_file = root / ".env"
+            env_file.write_text(
+                "\n".join(
+                    f"{key}=test-value"
+                    for key in (
+                        "DELETE_PASSWORD",
+                        "FILE_MANAGER_PASSWORD",
+                        "ADMIN_STATUS_PASSWORD",
+                        "FILE_MANAGER_ACCESS_PASSWORD",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             fake_sudo = root / "sudo"
             fake_sudo.write_text(
                 "#!/bin/sh\n"
@@ -52,6 +71,9 @@ class PortalCutoverContractTest(unittest.TestCase):
                     **os.environ,
                     "PATH": str(root) + os.pathsep + os.environ["PATH"],
                     "PORTAL_BACKUP_EVIDENCE": str(evidence),
+                    "PORTAL_SOURCE_DIR": str(source_dir),
+                    "PORTAL_STATE_SOURCE_DIR": str(state_dir),
+                    "PORTAL_ENV_FILE": str(env_file),
                     "RUN_ID": "reject-k3s-evidence",
                 },
                 capture_output=True,
