@@ -1078,6 +1078,36 @@ class SreTelegramToolContractTest(unittest.TestCase):
         self.assertIn("service/personal-server-monitoring-prometheus", calls)
         self.assertGreaterEqual(calls.count("auth can-i"), 12)
 
+    def test_verify_retries_until_a_new_port_forward_serves_http(self):
+        result, _ = self.run_tool(
+            "sre-telegram-verify.sh",
+            stubs={
+                "sudo": "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *'rollout status deployment/sre-telegram-relay'*) exit 0;;\n"
+                "  *'get service sre-telegram-relay -o json'*) printf '{\"spec\":{\"type\":\"ClusterIP\",\"ports\":[{\"port\":8080}]}}\\n'; exit 0;;\n"
+                "  *'get prometheusrule sre-telegram-k3s-alerts'*) exit 0;;\n"
+                "  *'auth can-i'*) printf 'no\\n'; exit 0;;\n"
+                "  *'port-forward'*) sleep 30;;\n"
+                "  *) exit 1;;\n"
+                "esac\n",
+                "curl": "#!/bin/sh\n"
+                "count_file=\"${CALLS}.curl-count\"\n"
+                "count=$(cat \"$count_file\" 2>/dev/null || printf 0)\n"
+                "count=$((count + 1))\n"
+                "printf '%s' \"$count\" > \"$count_file\"\n"
+                "if [ \"$count\" -eq 1 ]; then exit 7; fi\n"
+                "case \"$*\" in\n"
+                "  *18080*) printf 'ok\\n';;\n"
+                "  *) printf '{\"status\":\"success\",\"data\":{\"activeTargets\":[{\"health\":\"up\"}]}}\\n';;\n"
+                "esac\n"
+                "exit 0\n",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_verify=PASS"))
+
 
 if __name__ == "__main__":
     unittest.main()
