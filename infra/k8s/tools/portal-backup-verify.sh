@@ -7,6 +7,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd)
 FILES_SOURCE=${PORTAL_FILES_SOURCE:-$REPO_ROOT/data/files}
 STATE_SOURCE=${PORTAL_STATE_SOURCE:-$REPO_ROOT/data/portal-web-state}
+RUNTIME_MARKER=${PORTAL_RUNTIME_MARKER:-$REPO_ROOT/data/portal-runtime.mode}
 EVIDENCE=${PORTAL_BACKUP_EVIDENCE:-$REPO_ROOT/.portal-backup-verified}
 RECIPIENT=${PORTAL_AGE_RECIPIENT:-$HOME/.local/share/personal-server/age/recipient.txt}
 IDENTITY=${PORTAL_AGE_IDENTITY:-$HOME/.local/share/personal-server/age/identity.txt}
@@ -25,6 +26,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 fail() { rm -f -- "$EVIDENCE"; printf '%s\n' 'portal_backup_verify=FAIL' >&2; exit 1; }
+fail_reason() { rm -f -- "$EVIDENCE"; printf '%s\n' 'portal_backup_verify=FAIL' "reason=$1" >&2; exit 1; }
 tree_digest() { (cd -- "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum) | sha256sum | awk '{print $1}'; }
 utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 assert_regular_tree() {
@@ -37,6 +39,15 @@ assert_regular_tree() {
 }
 
 [ "$MAX_AGE" -ge 1 ] 2>/dev/null || fail
+if [ -e "$RUNTIME_MARKER" ] || [ -L "$RUNTIME_MARKER" ]; then
+  [ -f "$RUNTIME_MARKER" ] && [ -r "$RUNTIME_MARKER" ] || fail_reason 'runtime marker is not a readable file'
+  runtime_marker=$(<"$RUNTIME_MARKER")
+  case "$runtime_marker" in
+    k3s|cutover) fail_reason 'local source backup blocked while PVC-backed runtime is active' ;;
+    compose) : ;;
+    *) fail_reason 'unrecognized runtime marker; local source backup blocked' ;;
+  esac
+fi
 [ -d "$FILES_SOURCE" ] && [ -d "$STATE_SOURCE" ] && [ -f "$STATE_SOURCE/homeops.sqlite3" ] || fail
 [ -r "$RECIPIENT" ] && [ -r "$IDENTITY" ] || fail
 assert_regular_tree "$FILES_SOURCE" && assert_regular_tree "$STATE_SOURCE" || fail
