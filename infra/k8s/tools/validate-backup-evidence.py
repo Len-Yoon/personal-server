@@ -23,7 +23,7 @@ REQUIRED_KEYS = frozenset(
         "backup_id",
     }
 )
-OPTIONAL_KEYS = frozenset({"artifact_digest", "restore_check", "restore_path_check"})
+OPTIONAL_KEYS = frozenset({"artifact_digest", "source_digest", "restore_check", "restore_path_check"})
 ALLOWED_KEYS = REQUIRED_KEYS | OPTIONAL_KEYS
 TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 BACKUP_ID_RE = re.compile(r"[A-Za-z0-9._-]+\Z")
@@ -82,6 +82,8 @@ def validate_evidence(values: dict[str, str], now: datetime, max_age_seconds: in
         raise EvidenceError("backup_id is not an opaque safe identifier")
     if "artifact_digest" in values and not ARTIFACT_DIGEST_RE.fullmatch(values["artifact_digest"]):
         raise EvidenceError("artifact_digest must be a lowercase sha256 digest")
+    if "source_digest" in values and not ARTIFACT_DIGEST_RE.fullmatch(values["source_digest"]):
+        raise EvidenceError("source_digest must be a lowercase sha256 digest")
     if values.get("restore_check", "sqlite_quick_check") != "sqlite_quick_check":
         raise EvidenceError("restore_check is not approved")
     if values.get("restore_path_check", "success") != "success":
