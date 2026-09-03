@@ -510,6 +510,27 @@ class PortalCutoverContractTest(unittest.TestCase):
             self.assertIn('request_timeout=$((deadline - SECONDS))', function)
             self.assertIn('run_timeout "$request_timeout"', function)
 
+    def test_public_switch_reports_safe_failure_stages_in_order(self):
+        """An operator must see the first failing Caddy handoff boundary without Secret data."""
+        text = SCRIPT.read_text(encoding="utf-8")
+        switch = text[text.index("switch_caddy() {") : text.index("switch_prepared_caddy() {")]
+
+        expected = (
+            "portal_cutover_stage=caddy_upstream",
+            "portal_cutover_stage=caddy_recreate",
+            "portal_cutover_stage=nodeport_health",
+            "portal_cutover_stage=public_health",
+            "portal_cutover_stage=runtime_marker",
+        )
+        for stage in expected:
+            self.assertIn(stage, switch)
+        self.assertLess(switch.index(expected[0]), switch.index("set_portal_upstream"))
+        self.assertLess(switch.index(expected[1]), switch.index("recreate_caddy"))
+        self.assertLess(switch.index(expected[2]), switch.index("validate_nodeport"))
+        self.assertLess(switch.index(expected[3]), switch.index("validate_public_hosts"))
+        self.assertLess(switch.index(expected[4]), switch.index("set_runtime_marker k3s"))
+        self.assertNotRegex(switch, r"portal_cutover_stage=.*(PASSWORD=|TOKEN=|SECRET=|PORTAL_UPSTREAM=)")
+
     def test_pvc_restore_retries_a_stream_failure_without_replacing_local_data_early(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
