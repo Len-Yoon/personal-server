@@ -13,6 +13,54 @@ BOOTSTRAP = ROOT / "scripts/windows-bootstrap.sh"
 
 
 class PortalCutoverContractTest(unittest.TestCase):
+    def test_cutover_rejects_k3s_pvc_backup_evidence_for_compose_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence = root / "backup.ok"
+            evidence.write_text(
+                "\n".join(
+                    (
+                        "schema_version=1",
+                        "scope=portal",
+                        "backup_status=success",
+                        "encrypted=true",
+                        "backup_completed_at=2026-09-03T00:00:00Z",
+                        "restore_status=success",
+                        "restore_verified_at=2026-09-03T00:00:00Z",
+                        "evidence_expires_at=2026-09-04T00:00:00Z",
+                        "backup_id=portal-test",
+                        "source_runtime=k3s-pvc",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake_sudo = root / "sudo"
+            fake_sudo.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = k3s ] && [ \"$2\" = secrets-encrypt ] && [ \"$3\" = status ]; then\n"
+                "  printf '%s\\n' 'Encryption Status: Enabled'\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 99\n",
+                encoding="utf-8",
+            )
+            fake_sudo.chmod(0o755)
+            result = subprocess.run(
+                ["/bin/bash", str(SCRIPT), "--go"],
+                env={
+                    **os.environ,
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                    "PORTAL_BACKUP_EVIDENCE": str(evidence),
+                    "RUN_ID": "reject-k3s-evidence",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("encrypted backup evidence is missing or invalid", result.stderr)
+
     def test_script_exists_and_is_bash(self):
         self.assertTrue(SCRIPT.is_file())
         self.assertTrue(SCRIPT.read_text(encoding="utf-8").startswith("#!/usr/bin/env bash"))

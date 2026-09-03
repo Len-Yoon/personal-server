@@ -159,6 +159,8 @@ bash infra/k8s/tools/portal-cutover.sh --cleanup-rolledback
 
 `PORTAL_BACKUP_EVIDENCE`는 backup 생성 도구가 성공한 뒤에만 권한 `0600`으로 원자적으로 기록하는 단일 `key=value` 파일이다. `validate-backup-evidence.py`는 빈 줄, 주석, 중복·알 수 없는 키와 값 누락을 모두 거부한다. 이 저장소는 암호화 backup artifact나 키를 생성하지 않으며, 증적만 검증한다.
 
+`compose-local` evidence는 Compose writer를 멈춰 생성한 cutover 전용 증적이다. `k3s-pvc` evidence는 K3s PVC writer를 멈춰 생성한 운영 backup 증적이다. 두 evidence는 `source_digest`가 같아도 상호 재사용하지 않는다. Compose→K3s cutover의 `--go`는 `source_runtime=compose-local`인 evidence만 허용하며, K3s PVC backup evidence는 gate를 통과하지 못한다.
+
 필수 키는 다음과 같다. 모든 시각은 UTC `Z` 형식이어야 하며 backup·restore 시각은 미래가 아니고 최대 연령 이내, `restore_verified_at`는 `backup_completed_at`보다 같거나 늦어야 하며, 증적 만료 시각은 현재보다 미래여야 한다.
 
 ```text
@@ -171,6 +173,7 @@ restore_status=success
 restore_verified_at=2026-08-30T00:00:00Z
 evidence_expires_at=2026-08-31T00:00:00Z
 backup_id=opaque-safe-id
+source_runtime=compose-local
 ```
 
 선택 키는 암호문 artifact의 `artifact_digest=sha256:<64개의 소문자 hex>`, 두 Portal 데이터 트리의 SHA-256 manifest를 결합한 `source_digest=sha256:<64개의 소문자 hex>`, `restore_check=sqlite_quick_check`, `restore_path_check=success`뿐이다. 원본·복원 절대 경로, secret, token, 개인키는 증적에 기록하지 않는다. backup 또는 복원 절차가 실패하면 기존 증적을 갱신하지 않는다.
@@ -182,6 +185,13 @@ bash infra/k8s/tools/portal-backup-verify.sh
 ```
 
 검증 실행 중 어떤 단계에서든 실패하면 기존 증적을 무효화한다. 따라서 실패하면 `portal_backup_verify=FAIL`만 출력되고 cutover는 차단된다. 내용이 같고 기존 증적이 유효한 경우에만 그 검증 증적을 재사용한다. 성공한 뒤에만 `portal-cutover.sh --go`의 backup 게이트를 통과할 수 있다.
+
+실행 예시는 `--check-nodeport-private`로 사전 확인한 뒤, 승인된 유지보수 창에서 `--go`를 한 번 실행하는 순서로 제시한다. 자동 실행·cron·GitHub Actions 배포 작업은 추가하지 않는다.
+
+```bash
+bash infra/k8s/tools/portal-cutover.sh --check-nodeport-private
+bash infra/k8s/tools/portal-cutover.sh --go
+```
 
 ### Portal state and Compose bridge prerequisites
 

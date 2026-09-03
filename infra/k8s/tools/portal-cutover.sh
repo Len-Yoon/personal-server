@@ -159,6 +159,11 @@ assert_backup_evidence() {
     --max-age-seconds "$BACKUP_MAX_AGE_SECONDS"
 }
 
+assert_compose_backup_evidence() {
+  assert_backup_evidence || return 1
+  awk -F= '$1 == "source_runtime" && $2 == "compose-local" { found=1 } END { exit !found }' "$BACKUP_EVIDENCE"
+}
+
 assert_bridge_gateway() {
   local actual_gateway
   valid_ipv4 "$BRIDGE_GATEWAY" || return 1
@@ -909,7 +914,7 @@ prepare_cutover() {
     fail
     return 1
   fi
-  if ! assert_backup_evidence; then printf '%s\n' "encrypted backup evidence is missing or invalid" >&2; fail; return 1; fi
+  if ! assert_compose_backup_evidence; then printf '%s\n' "encrypted backup evidence is missing or invalid" >&2; fail; return 1; fi
   if ! valid_capacity "$PVC_CAPACITY" || ! valid_capacity "$STATE_PVC_CAPACITY"; then printf '%s\n' "invalid Portal PVC capacity" >&2; fail; return 1; fi
   if ! valid_image_ref "$IMAGE_REF"; then printf '%s\n' "invalid Portal image reference" >&2; fail; return 1; fi
   if [ ! -d "$SOURCE_DIR" ]; then printf '%s\n' "Portal source data directory not found" >&2; fail; return 1; fi
