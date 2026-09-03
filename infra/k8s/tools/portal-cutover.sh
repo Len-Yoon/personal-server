@@ -114,14 +114,14 @@ set_runtime_marker() {
 }
 
 assert_no_k3s_writer() {
-  local replicas pod_count
-  if run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" get deployment portal-web >/dev/null 2>&1; then
+  local deployment replicas pod_count
+  deployment=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" get deployment portal-web --ignore-not-found -o name) || return 1
+  if [ -n "$deployment" ]; then
     replicas=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" get deployment portal-web -o jsonpath='{.spec.replicas}') || return 1
     [ "${replicas:-0}" = "0" ] || return 1
-    pod_count=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" get pod -l app.kubernetes.io/name=portal-web --field-selector=status.phase=Running -o name) || return 1
-    [ -z "$pod_count" ] || return 1
   fi
-  return 0
+  pod_count=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" get pod -l app.kubernetes.io/name=portal-web --field-selector=status.phase=Running -o name) || return 1
+  [ -z "$pod_count" ]
 }
 
 assert_compose_writer_running() {
@@ -680,12 +680,18 @@ abort_cutover() {
 }
 
 restore_writers_after_switch_failure() {
-  if stop_k3s_writer; then
-    if restore_files_from_pvc && restore_state_from_pvc; then
-      restore_compose_executor || true
-      if start_compose_writer; then set_runtime_marker compose || true; fi
-    fi
+  # switch_caddy can fail before its caller observes the failure. The caller
+  # may invoke this helper again after the first recovery restarted Compose.
+  # Never replace bind-mounted state below that active writer.
+  if assert_compose_writer_running; then
+    if assert_compose_writer_healthy && assert_no_k3s_writer; then return 0; fi
+    return 1
   fi
+  if ! assert_compose_writer_stopped || ! set_runtime_marker cutover || ! stop_k3s_writer; then return 1; fi
+  if ! restore_files_from_pvc || ! restore_state_from_pvc; then return 1; fi
+  restore_compose_executor || return 1
+  if ! start_compose_writer; then return 1; fi
+  set_runtime_marker compose
 }
 
 on_signal() { abort_cutover; exit 130; }
@@ -774,7 +780,7 @@ rollback_caddy() {
   # rollback uses docker compose only for caddy recreation and Portal restore.
   # rollback uses kubectl scale to keep the K3s writer stopped.
   [ -f "$ENV_FILE" ] || { printf '%s\n' "portal env file not found" >&2; fail; return 1; }
-  if ! set_runtime_marker cutover || ! stop_k3s_writer; then fail; return 1; fi
+  if ! assert_compose_writer_stopped || ! set_runtime_marker cutover || ! stop_k3s_writer; then fail; return 1; fi
   if ! restore_files_from_pvc; then
     printf '%s\n' "Portal files PVC restore digest failed" >&2
     fail
