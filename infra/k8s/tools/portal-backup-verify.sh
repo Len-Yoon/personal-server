@@ -13,6 +13,7 @@ RECIPIENT=${PORTAL_AGE_RECIPIENT:-$HOME/.local/share/personal-server/age/recipie
 IDENTITY=${PORTAL_AGE_IDENTITY:-$HOME/.local/share/personal-server/age/identity.txt}
 REMOTE=${PORTAL_BACKUP_REMOTE:-gdrive:PersonalServer-encrypted-backups}
 MAX_AGE=${PORTAL_BACKUP_MAX_AGE_SECONDS:-86400}
+COMPOSE_SOURCE_RUNTIME='compose-local'
 RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)-$$
 WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/portal-backup-${RUN_ID}.XXXXXX")
 PORTAL_PAUSED=0
@@ -70,7 +71,8 @@ state_digest=$(tree_digest "$stage/data/portal-web-state")
 source_digest="sha256:$(printf '%s\n%s\n' "$files_digest" "$state_digest" | sha256sum | awk '{print $1}')"
 if [ -f "$EVIDENCE" ] && python3 "$SCRIPT_DIR/validate-backup-evidence.py" --evidence "$EVIDENCE" --max-age-seconds "$MAX_AGE" >/dev/null 2>&1; then
   evidence_source_digest=$(awk -F= '$1 == "source_digest" { print $2 }' "$EVIDENCE")
-  if [ "$evidence_source_digest" = "$source_digest" ]; then
+  evidence_source_runtime=$(awk -F= '$1 == "source_runtime" { print $2 }' "$EVIDENCE")
+  if [ "$evidence_source_digest" = "$source_digest" ] && [ "$evidence_source_runtime" = "$COMPOSE_SOURCE_RUNTIME" ]; then
     printf '%s\n' 'portal_backup_verify=PASS' 'backup_upload=SKIPPED_UNCHANGED'
     exit 0
   fi
@@ -102,7 +104,8 @@ printf '%s\n' \
   "backup_completed_at=$backup_completed_at" 'restore_status=success' \
   "restore_verified_at=$restore_verified_at" "evidence_expires_at=$evidence_expires_at" \
   "backup_id=portal-$RUN_ID" "artifact_digest=$artifact_digest" \
-  "source_digest=$source_digest" 'restore_check=sqlite_quick_check' 'restore_path_check=success' > "$tmp_evidence"
+  "source_digest=$source_digest" "source_runtime=$COMPOSE_SOURCE_RUNTIME" \
+  'restore_check=sqlite_quick_check' 'restore_path_check=success' > "$tmp_evidence"
 python3 "$SCRIPT_DIR/validate-backup-evidence.py" --evidence "$tmp_evidence" --max-age-seconds "$MAX_AGE" >/dev/null || { rm -f -- "$tmp_evidence"; fail; }
 mv -- "$tmp_evidence" "$EVIDENCE"
 printf '%s\n' 'portal_backup_verify=PASS'

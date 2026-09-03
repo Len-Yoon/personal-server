@@ -12,7 +12,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-backup-verify.sh"
 
 
 class PortalBackupVerifyContractTest(unittest.TestCase):
-    def _run_fake_backup(self, *, source_digest=True, changed=False, runtime_marker=None, dangling_marker=False):
+    def _run_fake_backup(self, *, source_digest=True, changed=False, runtime_marker=None, dangling_marker=False, source_runtime="compose-local"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             files = root / "files"; state = root / "state"; bin_dir = root / "bin"
@@ -35,7 +35,7 @@ class PortalBackupVerifyContractTest(unittest.TestCase):
             if changed: (files / "note.txt").write_text("changed", encoding="utf-8")
             now = datetime.now(timezone.utc).replace(microsecond=0)
             evidence = root / "evidence"
-            values = ["schema_version=1", "scope=portal", "backup_status=success", "encrypted=true", f"backup_completed_at={(now-timedelta(seconds=60)).strftime('%Y-%m-%dT%H:%M:%SZ')}", "restore_status=success", f"restore_verified_at={(now-timedelta(seconds=30)).strftime('%Y-%m-%dT%H:%M:%SZ')}", f"evidence_expires_at={(now+timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ')}", "backup_id=portal-test"]
+            values = ["schema_version=1", "scope=portal", "backup_status=success", "encrypted=true", f"backup_completed_at={(now-timedelta(seconds=60)).strftime('%Y-%m-%dT%H:%M:%SZ')}", "restore_status=success", f"restore_verified_at={(now-timedelta(seconds=30)).strftime('%Y-%m-%dT%H:%M:%SZ')}", f"evidence_expires_at={(now+timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ')}", "backup_id=portal-test", f"source_runtime={source_runtime}"]
             if source_digest: values.append(f"source_digest={source}")
             evidence.write_text("\n".join(values) + "\n", encoding="utf-8")
             env = {**os.environ, "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"], "PORTAL_FILES_SOURCE": str(files), "PORTAL_STATE_SOURCE": str(state), "PORTAL_AGE_RECIPIENT": str(root / "recipient"), "PORTAL_AGE_IDENTITY": str(root / "identity"), "PORTAL_BACKUP_EVIDENCE": str(evidence), "PORTAL_BACKUP_REMOTE": "fake:remote"}
@@ -46,6 +46,8 @@ class PortalBackupVerifyContractTest(unittest.TestCase):
                 else:
                     marker_path.write_text(runtime_marker, encoding="utf-8")
                 env["PORTAL_RUNTIME_MARKER"] = str(marker_path)
+            else:
+                env["PORTAL_RUNTIME_MARKER"] = str(root / "missing-runtime.mode")
             result = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True)
             return result, (root / "FAKE_RCLONE_CALLED").exists(), (root / "FAKE_DOCKER_CALLED").exists()
 
@@ -60,6 +62,11 @@ class PortalBackupVerifyContractTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("SKIPPED_UNCHANGED", result.stdout)
         self.assertFalse(marker)
+
+    def test_compose_backup_does_not_reuse_k3s_pvc_evidence(self):
+        result, rclone_called, _ = self._run_fake_backup(source_runtime="k3s-pvc")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(rclone_called)
 
     def test_missing_digest_or_changed_source_does_not_skip(self):
         for kwargs in ({"source_digest": False}, {"changed": True}):
