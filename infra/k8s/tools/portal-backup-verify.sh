@@ -7,7 +7,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd)
 FILES_SOURCE=${PORTAL_FILES_SOURCE:-$REPO_ROOT/data/files}
 STATE_SOURCE=${PORTAL_STATE_SOURCE:-$REPO_ROOT/data/portal-web-state}
-EVIDENCE="$REPO_ROOT/.portal-backup-verified"
+EVIDENCE=${PORTAL_BACKUP_EVIDENCE:-$REPO_ROOT/.portal-backup-verified}
 RECIPIENT=${PORTAL_AGE_RECIPIENT:-$HOME/.local/share/personal-server/age/recipient.txt}
 IDENTITY=${PORTAL_AGE_IDENTITY:-$HOME/.local/share/personal-server/age/identity.txt}
 REMOTE=${PORTAL_BACKUP_REMOTE:-gdrive:PersonalServer-encrypted-backups}
@@ -17,11 +17,14 @@ WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/portal-backup-${RUN_ID}.XXXXXX")
 PORTAL_PAUSED=0
 
 cleanup() {
+  local status=$?
   if [ "$PORTAL_PAUSED" -eq 1 ]; then docker unpause portal-web >/dev/null 2>&1 || true; fi
   rm -rf -- "$WORKDIR"
+  [ "$status" -eq 0 ] || rm -f -- "$EVIDENCE"
+  return "$status"
 }
 trap cleanup EXIT INT TERM HUP
-fail() { printf '%s\n' 'portal_backup_verify=FAIL' >&2; exit 1; }
+fail() { rm -f -- "$EVIDENCE"; printf '%s\n' 'portal_backup_verify=FAIL' >&2; exit 1; }
 tree_digest() { (cd -- "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum) | sha256sum | awk '{print $1}'; }
 utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 assert_regular_tree() {
@@ -36,9 +39,8 @@ assert_regular_tree() {
 [ "$MAX_AGE" -ge 1 ] 2>/dev/null || fail
 [ -d "$FILES_SOURCE" ] && [ -d "$STATE_SOURCE" ] && [ -f "$STATE_SOURCE/homeops.sqlite3" ] || fail
 [ -r "$RECIPIENT" ] && [ -r "$IDENTITY" ] || fail
-command -v age >/dev/null && command -v rclone >/dev/null && command -v sqlite3 >/dev/null && command -v docker >/dev/null || fail
 assert_regular_tree "$FILES_SOURCE" && assert_regular_tree "$STATE_SOURCE" || fail
-rm -f -- "$EVIDENCE"
+command -v age >/dev/null && command -v rclone >/dev/null && command -v sqlite3 >/dev/null && command -v docker >/dev/null || fail
 
 stage="$WORKDIR/stage"
 restore="$WORKDIR/restore"
@@ -54,6 +56,14 @@ PORTAL_PAUSED=0
 
 files_digest=$(tree_digest "$stage/data/files")
 state_digest=$(tree_digest "$stage/data/portal-web-state")
+source_digest="sha256:$(printf '%s\n%s\n' "$files_digest" "$state_digest" | sha256sum | awk '{print $1}')"
+if [ -f "$EVIDENCE" ] && python3 "$SCRIPT_DIR/validate-backup-evidence.py" --evidence "$EVIDENCE" --max-age-seconds "$MAX_AGE" >/dev/null 2>&1; then
+  evidence_source_digest=$(awk -F= '$1 == "source_digest" { print $2 }' "$EVIDENCE")
+  if [ "$evidence_source_digest" = "$source_digest" ]; then
+    printf '%s\n' 'portal_backup_verify=PASS' 'backup_upload=SKIPPED_UNCHANGED'
+    exit 0
+  fi
+fi
 archive="$WORKDIR/portal-${RUN_ID}.tar"
 ciphertext="$archive.age"
 tar -C "$stage" -cf "$archive" data || fail
@@ -81,7 +91,7 @@ printf '%s\n' \
   "backup_completed_at=$backup_completed_at" 'restore_status=success' \
   "restore_verified_at=$restore_verified_at" "evidence_expires_at=$evidence_expires_at" \
   "backup_id=portal-$RUN_ID" "artifact_digest=$artifact_digest" \
-  'restore_check=sqlite_quick_check' 'restore_path_check=success' > "$tmp_evidence"
+  "source_digest=$source_digest" 'restore_check=sqlite_quick_check' 'restore_path_check=success' > "$tmp_evidence"
 python3 "$SCRIPT_DIR/validate-backup-evidence.py" --evidence "$tmp_evidence" --max-age-seconds "$MAX_AGE" >/dev/null || { rm -f -- "$tmp_evidence"; fail; }
 mv -- "$tmp_evidence" "$EVIDENCE"
 printf '%s\n' 'portal_backup_verify=PASS'

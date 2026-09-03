@@ -62,6 +62,10 @@ class ValidateBackupEvidenceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("backup_evidence=PASS", result.stdout)
 
+    def test_valid_source_digest_is_accepted(self):
+        result = self.run_validator(valid_evidence(source_digest="sha256:" + "b" * 64))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_rejects_unencrypted_or_unsuccessful_restore(self):
         for changes in (
             {"encrypted": "false"},
