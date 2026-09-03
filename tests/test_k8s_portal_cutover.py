@@ -249,6 +249,73 @@ class PortalCutoverContractTest(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
 
+    def test_absent_k3s_writer_check_rejects_a_deployment_lookup_error(self):
+        """A K3s lookup error cannot be treated as evidence that no writer exists."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake_sudo = root / "sudo"
+            fake_sudo.write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *'get deployment portal-web'*) exit 1 ;;\n"
+                "esac\n"
+                "exit 99\n"
+            )
+            fake_sudo.chmod(0o755)
+            library = root / "portal-cutover-lib.sh"
+            library.write_text(
+                SCRIPT.read_text(encoding="utf-8").rsplit('\nmain \"$@\"', 1)[0],
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["/bin/bash", "-c", f'. "{library}"; assert_no_k3s_writer'],
+                env={
+                    **os.environ,
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                    "RUN_ID": "no-writer-lookup-error",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+
+    def test_absent_k3s_writer_check_rejects_an_orphan_running_portal_pod(self):
+        """A deleted Deployment does not prove that its Portal writer is gone."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake_sudo = root / "sudo"
+            fake_sudo.write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *'get deployment portal-web --ignore-not-found -o name'*) exit 0 ;;\n"
+                "  *'get pod -l app.kubernetes.io/name=portal-web --field-selector=status.phase=Running -o name'*) printf 'pod/portal-web-orphan\\n'; exit 0 ;;\n"
+                "esac\n"
+                "exit 99\n"
+            )
+            fake_sudo.chmod(0o755)
+            library = root / "portal-cutover-lib.sh"
+            library.write_text(
+                SCRIPT.read_text(encoding="utf-8").rsplit('\nmain \"$@\"', 1)[0],
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["/bin/bash", "-c", f'. "{library}"; assert_no_k3s_writer'],
+                env={
+                    **os.environ,
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                    "RUN_ID": "no-writer-orphan-pod",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+
     def test_rollback_does_not_start_compose_while_k3s_pod_remains(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -265,7 +332,14 @@ class PortalCutoverContractTest(unittest.TestCase):
             )
             fake_sudo.chmod(0o755)
             fake_docker = root / "docker"
-            fake_docker.write_text(f"#!/bin/sh\nprintf '%s\\n' \\\"docker $*\\\" >> '{calls}'\nexit 0\n")
+            fake_docker.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \\\"docker $*\\\" >> '{calls}'\n"
+                "case \"$*\" in\n"
+                "  *'inspect portal-web --format'*) printf 'false\\n'; exit 0 ;;\n"
+                "esac\n"
+                "exit 0\n"
+            )
             fake_docker.chmod(0o755)
             env_file = root / ".env"
             env_file.write_text("PORTAL_UPSTREAM=host.docker.internal:30080\n")
@@ -473,6 +547,88 @@ class PortalCutoverContractTest(unittest.TestCase):
             rollback.index("restore_state_from_pvc"),
             rollback.index("start_compose_writer"),
         )
+
+    def test_duplicate_recovery_refuses_live_compose_when_k3s_writer_still_exists(self):
+        """A live but unverified Compose writer must not hide a K3s split-brain."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            library = root / "portal-cutover-lib.sh"
+            restored = root / "state-was-replaced"
+            library.write_text(
+                SCRIPT.read_text(encoding="utf-8").rsplit('\nmain "$@"', 1)[0],
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    f'''. "{library}"
+assert_compose_writer_running() {{ return 0; }}
+assert_compose_writer_healthy() {{ return 1; }}
+assert_no_k3s_writer() {{ return 1; }}
+restore_files_from_pvc() {{ touch "{restored}"; return 0; }}
+restore_state_from_pvc() {{ touch "{restored}"; return 0; }}
+restore_writers_after_switch_failure''',
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(restored.exists())
+
+    def test_duplicate_recovery_is_a_noop_only_after_compose_and_k3s_are_verified(self):
+        """The second recovery is safe only after the first one fully completed."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            library = root / "portal-cutover-lib.sh"
+            restored = root / "state-was-replaced"
+            library.write_text(
+                SCRIPT.read_text(encoding="utf-8").rsplit('\nmain "$@"', 1)[0],
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    f'''. "{library}"
+assert_compose_writer_running() {{ return 0; }}
+assert_compose_writer_healthy() {{ return 0; }}
+assert_no_k3s_writer() {{ return 0; }}
+restore_files_from_pvc() {{ touch "{restored}"; return 0; }}
+restore_state_from_pvc() {{ touch "{restored}"; return 0; }}
+restore_writers_after_switch_failure''',
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(restored.exists())
+
+    def test_switch_failure_rollback_requires_a_stopped_compose_writer_before_state_restore(self):
+        """Rollback keeps the writer boundary closed while replacing Portal state."""
+        text = SCRIPT.read_text(encoding="utf-8")
+        recovery = text[
+            text.index("restore_writers_after_switch_failure() {") : text.index("on_signal() {")
+        ]
+
+        self.assertIn("set_runtime_marker cutover", recovery)
+        self.assertIn("assert_compose_writer_stopped", recovery)
+        self.assertLess(recovery.index("set_runtime_marker cutover"), recovery.index("restore_files_from_pvc"))
+        self.assertLess(recovery.index("assert_compose_writer_stopped"), recovery.index("restore_state_from_pvc"))
+
+    def test_explicit_rollback_refuses_to_replace_state_below_a_live_compose_writer(self):
+        """Manual rollback must enforce the same writer boundary as automatic rollback."""
+        text = SCRIPT.read_text(encoding="utf-8")
+        rollback = text[text.index("rollback_caddy() {") : text.index("switch_caddy() {")]
+
+        self.assertIn("assert_compose_writer_stopped", rollback)
+        self.assertLess(rollback.index("assert_compose_writer_stopped"), rollback.index("restore_state_from_pvc"))
 
     def test_rollback_rechecks_the_existing_state_pvc_in_a_fresh_process(self):
         """A later --rollback-caddy invocation has no in-memory preparation flags."""
