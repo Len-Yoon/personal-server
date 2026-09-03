@@ -12,7 +12,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False):
+    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, lease_holder="", require_urllib=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -49,6 +49,8 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
                 "PORTAL_FAKE_HOLD": "1" if send_signal else "",
                 "PORTAL_FAKE_READER_WAIT": str(root / "reader-wait"),
                 "PORTAL_FAKE_NOISY": "1",
+                "PORTAL_FAKE_LEASE_HOLDER": lease_holder,
+                "PORTAL_FAKE_REQUIRE_URLLIB": "1" if require_urllib else "",
             }
             if namespace is not None:
                 env["PORTAL_NAMESPACE"] = namespace
@@ -113,9 +115,6 @@ fi
 if [ "${{PORTAL_FAKE_MISSING_PVC:-}}" = 1 ]; then
   case "$*" in *'get pvc/'*) exit 42 ;; esac
 fi
-if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = lock ]; then
-  case "$*" in *'create -f -'*) exit 42 ;; esac
-fi
 case "$*" in
   'get nodes --no-headers') printf '%s\\n' 'node-1 Ready'; exit 0 ;;
   *'get deployment portal-web -o jsonpath={{.spec.replicas}}') printf '%s\\n' '1'; exit 0 ;;
@@ -135,7 +134,18 @@ case "$*" in
     exit 0 ;;
   *'rollout status deployment/portal-web'*) exit 0 ;;
   *'get pod -l app.kubernetes.io/name=portal-web'*) printf '%s\\n' portal-web-1; exit 0 ;;
-  *'exec portal-web-1'*) printf '%s\\n' '{{"status":"ok"}}'; exit 0 ;;
+  *'get lease portal-pvc-backup-lock -o jsonpath='*)
+    if [ "${{PORTAL_FAKE_LEASE_HOLDER:-}}" = __MATCH_MANIFEST__ ]; then
+      sed -n 's/^  holderIdentity: //p' '{manifest}'
+    else
+      printf '%s\\n' "${{PORTAL_FAKE_LEASE_HOLDER:-}}"
+    fi
+    exit 0 ;;
+  *'exec portal-web-1'*)
+    if [ "${{PORTAL_FAKE_REQUIRE_URLLIB:-}}" = 1 ]; then case "$*" in *wget*) exit 42 ;; esac; fi
+    case "$*" in *python3*) printf '%s\\n' 200; exit 0 ;; esac
+    exit 42 ;;
+  *'delete lease portal-pvc-backup-lock'*) exit 0 ;;
   *'delete pod'*) exit 0 ;;
   *'exec -i'*'/data/files'*)
     if [ "${{PORTAL_FAKE_SPECIAL_ENTRY:-}}" = 1 ]; then exit 42; fi
@@ -266,7 +276,7 @@ esac
         self.assertNotIn("rclone copyto", calls)
 
     def test_go_success_writes_k3s_pvc_evidence_after_restore(self):
-        result, calls, _, evidence = self.run_tool("--go")
+        result, calls, _, evidence = self.run_tool("--go", require_urllib=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("portal_pvc_backup=PASS", result.stdout)
         self.assertIn("source_runtime=k3s-pvc", evidence)
@@ -287,6 +297,24 @@ esac
         self.assertEqual(result.stdout.strip(), "portal_pvc_backup_stage=portal_health\nportal_pvc_backup=FAIL")
         self.assertEqual(evidence, "")
         self.assertIn("scale deployment/portal-web --replicas=1", calls)
+
+    def test_restored_portal_health_uses_urllib_and_requires_http_200(self):
+        result, calls, _, evidence = self.run_tool("--go")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("portal_pvc_backup=PASS", result.stdout)
+        self.assertIn("exec portal-web-1", calls)
+        self.assertNotIn("wget", calls)
+
+    def test_failed_lease_create_reads_back_and_deletes_only_matching_holder(self):
+        result, calls, _, _ = self.run_tool("--go", fail_at="lock", lease_holder="__MATCH_MANIFEST__")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("get lease portal-pvc-backup-lock", calls)
+        self.assertIn("delete lease portal-pvc-backup-lock", calls)
+
+        result, calls, _, _ = self.run_tool("--go", fail_at="lock", lease_holder="another-run")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("get lease portal-pvc-backup-lock", calls)
+        self.assertNotIn("delete lease portal-pvc-backup-lock", calls)
 
     def test_lock_contention_prevents_scale_and_reader_creation(self):
         result, calls, _, evidence = self.run_tool("--go", fail_at="lock")

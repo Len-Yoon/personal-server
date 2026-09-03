@@ -93,6 +93,7 @@ assert_remote_access() {
 
 acquire_lock() {
   FAILURE_STAGE='lock'
+  local holder_identity="portal-pvc-backup-$RUN_ID" observed_holder=''
   if ! kctl -n personal-server create -f - <<YAML >>"$DIAGNOSTIC_FILE" 2>&1
 apiVersion: coordination.k8s.io/v1
 kind: Lease
@@ -100,10 +101,14 @@ metadata:
   name: $LEASE_NAME
   namespace: personal-server
 spec:
-  holderIdentity: portal-pvc-backup-$RUN_ID
+  holderIdentity: $holder_identity
   leaseDurationSeconds: 1800
 YAML
   then
+    observed_holder=$(kctl -n personal-server get lease "$LEASE_NAME" -o jsonpath='{.spec.holderIdentity}') || observed_holder=''
+    if [ "$observed_holder" = "$holder_identity" ]; then
+      kctl -n personal-server delete lease "$LEASE_NAME" --ignore-not-found >>"$DIAGNOSTIC_FILE" 2>&1 || true
+    fi
     return 1
   fi
   LOCK_HELD=1
@@ -174,7 +179,7 @@ cleanup() {
       restore_ok=0
     else
       PORTAL_POD=$(kctl -n personal-server get pod -l app.kubernetes.io/name=portal-web -o jsonpath='{.items[0].metadata.name}') || PORTAL_POD=''
-      if [ -z "$PORTAL_POD" ] || ! kctl -n personal-server exec "$PORTAL_POD" -- wget -q -O - http://127.0.0.1:8000/health >>"$DIAGNOSTIC_FILE" 2>&1; then
+      if [ -z "$PORTAL_POD" ] || ! kctl -n personal-server exec "$PORTAL_POD" -- python3 -c 'import urllib.request; response = urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=10); raise SystemExit(0 if response.status == 200 else 1)' >>"$DIAGNOSTIC_FILE" 2>&1; then
         FAILURE_STAGE='portal_health'
         restore_ok=0
       fi
