@@ -752,14 +752,25 @@ assert_nodeport_private_exposure() {
 }
 
 validate_public_hosts() {
-  local deadline request_timeout host ready
+  local deadline request_timeout target host path status_code ready
   deadline=$((SECONDS + CADDY_HEALTH_TIMEOUT_SECONDS))
   while [ "$SECONDS" -lt "$deadline" ]; do
     request_timeout=$((deadline - SECONDS))
     [ "$request_timeout" -le 5 ] || request_timeout=5
     ready=1
-    for host in len.pe.kr portfolio.len.pe.kr file.len.pe.kr admin.len.pe.kr; do
-      if ! run_timeout "$request_timeout" curl --fail --silent --show-error --max-time "$request_timeout" --resolve "$host:443:127.0.0.1" "https://${host}/health" | grep -Fq '"status":"ok"'; then
+    for target in "len.pe.kr|/health" "portfolio.len.pe.kr|/" "file.len.pe.kr|/health" "admin.len.pe.kr|/health"; do
+      host=${target%%|*}
+      path=${target#*|}
+      if [ "$path" = "/health" ]; then
+        run_timeout "$request_timeout" curl --fail --silent --show-error --max-time "$request_timeout" --resolve "$host:443:127.0.0.1" "https://${host}${path}" | grep -Fq '"status":"ok"' || ready=0
+      else
+        if ! status_code=$(run_timeout "$request_timeout" curl --silent --show-error --max-time "$request_timeout" --output /dev/null --write-out "%{http_code}" --resolve "$host:443:127.0.0.1" "https://${host}${path}"); then
+          ready=0
+        elif [ "$status_code" != "200" ]; then
+          ready=0
+        fi
+      fi
+      if [ "$ready" -ne 1 ]; then
         ready=0
         break
       fi
