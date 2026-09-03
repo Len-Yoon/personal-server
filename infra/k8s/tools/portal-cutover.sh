@@ -318,12 +318,21 @@ portal_state_digest() {
 }
 
 migrate_legacy_state_atomically() {
-  local parent temporary source_digest destination_digest
+  local parent temporary source_digest destination_digest target_is_empty=0
   if [ -d "$STATE_SOURCE_DIR" ]; then
-    [ -f "$STATE_SOURCE_DIR/homeops.sqlite3" ] && assert_sqlite_quick_check "$STATE_SOURCE_DIR/homeops.sqlite3"
-    return $?
+    if [ -f "$STATE_SOURCE_DIR/homeops.sqlite3" ]; then
+      assert_sqlite_quick_check "$STATE_SOURCE_DIR/homeops.sqlite3"
+      return $?
+    fi
+    # A previous Compose mount can leave only its empty directory behind.
+    # Do not remove it until the legacy copy has been fully verified.
+    [ -z "$(find -- "$STATE_SOURCE_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ] || return 1
+    target_is_empty=1
+  elif [ -e "$STATE_SOURCE_DIR" ] || [ -L "$STATE_SOURCE_DIR" ]; then
+    return 1
   fi
   [ -d "$LEGACY_STATE_SOURCE_DIR" ] && [ -f "$LEGACY_STATE_SOURCE_DIR/homeops.sqlite3" ] || return 1
+  assert_sqlite_quick_check "$LEGACY_STATE_SOURCE_DIR/homeops.sqlite3" || return 1
   parent=$(dirname -- "$STATE_SOURCE_DIR")
   mkdir -p -- "$parent" || return 1
   temporary=$(mktemp -d "$parent/.portal-web-state.${RUN_ID}.XXXXXX") || return 1
@@ -335,7 +344,18 @@ migrate_legacy_state_atomically() {
     rm -rf -- "$temporary"
     return 1
   fi
-  mv -- "$temporary" "$STATE_SOURCE_DIR"
+  if [ "$target_is_empty" -eq 1 ]; then
+    rmdir -- "$STATE_SOURCE_DIR" || { rm -rf -- "$temporary"; return 1; }
+  fi
+  if [ -e "$STATE_SOURCE_DIR" ] || [ -L "$STATE_SOURCE_DIR" ]; then
+    rm -rf -- "$temporary"
+    return 1
+  fi
+  if [ "$(uname -s)" = Linux ]; then
+    mv -T -- "$temporary" "$STATE_SOURCE_DIR" || { rm -rf -- "$temporary"; return 1; }
+  else
+    mv -- "$temporary" "$STATE_SOURCE_DIR" || { rm -rf -- "$temporary"; return 1; }
+  fi
 }
 
 migrate_compose_state() {
