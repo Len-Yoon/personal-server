@@ -437,7 +437,7 @@ class SreTelegramToolContractTest(unittest.TestCase):
                 "  *'rollout status deployment/sre-telegram-relay'*) exit 0;;\n"
                 "  *'get service sre-telegram-relay -o json'*) printf '{\"spec\":{\"type\":\"ClusterIP\",\"ports\":[{\"port\":8080}]}}\\n'; exit 0;;\n"
                 "  *'get prometheusrule sre-telegram-k3s-alerts'*) exit 0;;\n"
-                "  *'auth can-i'*) printf 'no\\n'; exit 0;;\n"
+                "  *'auth can-i'*) printf 'no\\n'; exit 1;;\n"
                 "  *'port-forward'*) sleep 30;;\n"
                 "  *) exit 1;;\n"
                 "esac\n",

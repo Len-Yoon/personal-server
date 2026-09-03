@@ -81,7 +81,7 @@ raise SystemExit(0 if safe else 1)'
 
 check_can_i_denied() {
   local verb="$1" resource="$2" namespace="$3" service_account="$4" result
-  result=$(sudo k3s kubectl auth can-i "$verb" "$resource" --namespace "$namespace" --as "$service_account" 2>/dev/null) || return 1
+  result=$(sudo k3s kubectl auth can-i "$verb" "$resource" --namespace "$namespace" --as "$service_account" 2>/dev/null) || :
   [ "$result" = "no" ]
 }
 
