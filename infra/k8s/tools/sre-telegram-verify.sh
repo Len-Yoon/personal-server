@@ -7,6 +7,7 @@ RELEASE="personal-server-monitoring"
 RELAY="sre-telegram-relay"
 PROMETHEUS_SERVICE="personal-server-monitoring-prometheus"
 PORT_FORWARD_PID=""
+PORT_FORWARD_RESPONSE=""
 
 fail() {
   printf 'sre_telegram_verify=FAIL\n'
@@ -21,24 +22,32 @@ cleanup_port_forward() {
   fi
 }
 
+wait_for_port_forward_http() {
+  local url="$1" attempt response
+  PORT_FORWARD_RESPONSE=""
+  for attempt in {1..5}; do
+    kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1 || return 1
+    if response=$(curl --fail --silent --show-error --max-time 10 "$url" 2>/dev/null); then
+      PORT_FORWARD_RESPONSE="$response"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 check_relay_health() {
-  local response
   sudo k3s kubectl -n "$NAMESPACE" port-forward --address 127.0.0.1 "service/$RELAY" 18080:8080 >/dev/null 2>&1 &
   PORT_FORWARD_PID=$!
-  sleep 1
-  kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1 || return 1
-  response=$(curl --fail --silent --show-error --max-time 10 http://127.0.0.1:18080/healthz 2>/dev/null) || return 1
-  [ "$response" = "ok" ]
+  wait_for_port_forward_http http://127.0.0.1:18080/healthz || return 1
+  [ "$PORT_FORWARD_RESPONSE" = "ok" ]
 }
 
 check_prometheus_targets() {
-  local response
   sudo k3s kubectl -n "$NAMESPACE" port-forward --address 127.0.0.1 "service/$PROMETHEUS_SERVICE" 19090:9090 >/dev/null 2>&1 &
   PORT_FORWARD_PID=$!
-  sleep 1
-  kill -0 "$PORT_FORWARD_PID" >/dev/null 2>&1 || return 1
-  response=$(curl --fail --silent --show-error --max-time 10 http://127.0.0.1:19090/api/v1/targets 2>/dev/null) || return 1
-  printf '%s\n' "$response" | python3 -c 'import json, sys
+  wait_for_port_forward_http http://127.0.0.1:19090/api/v1/targets || return 1
+  printf '%s\n' "$PORT_FORWARD_RESPONSE" | python3 -c 'import json, sys
 try:
     payload = json.load(sys.stdin)
     targets = payload.get("data", {}).get("activeTargets")
