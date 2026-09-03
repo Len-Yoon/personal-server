@@ -1108,6 +1108,28 @@ class SreTelegramToolContractTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_verify=PASS"))
 
+    def test_verify_reports_relay_health_stage_when_port_forward_never_becomes_ready(self):
+        result, _ = self.run_tool(
+            "sre-telegram-verify.sh",
+            stubs={
+                "sudo": "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *'rollout status deployment/sre-telegram-relay'*) exit 0;;\n"
+                "  *'get service sre-telegram-relay -o json'*) printf '{\"spec\":{\"type\":\"ClusterIP\",\"ports\":[{\"port\":8080}]}}\\n'; exit 0;;\n"
+                "  *'get prometheusrule sre-telegram-k3s-alerts'*) exit 0;;\n"
+                "  *'auth can-i'*) printf 'no\\n'; exit 0;;\n"
+                "  *'port-forward'*) sleep 30;;\n"
+                "  *) exit 1;;\n"
+                "esac\n",
+                "curl": "#!/bin/sh\nexit 7\n",
+            },
+            env_overrides={"SRE_TELEGRAM_VERIFY_PORT_FORWARD_WAIT_SECONDS": "1"},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("sre_telegram_verify_stage=relay_health", result.stdout)
+        self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_verify=FAIL"))
+
 
 if __name__ == "__main__":
     unittest.main()
