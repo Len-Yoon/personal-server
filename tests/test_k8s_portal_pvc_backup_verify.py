@@ -12,7 +12,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, lease_holder="", require_urllib=False):
+    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, lock_busy=False, require_urllib=False, health_status=200):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -49,8 +49,9 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
                 "PORTAL_FAKE_HOLD": "1" if send_signal else "",
                 "PORTAL_FAKE_READER_WAIT": str(root / "reader-wait"),
                 "PORTAL_FAKE_NOISY": "1",
-                "PORTAL_FAKE_LEASE_HOLDER": lease_holder,
+                "PORTAL_FAKE_LOCK_BUSY": "1" if lock_busy else "",
                 "PORTAL_FAKE_REQUIRE_URLLIB": "1" if require_urllib else "",
+                "PORTAL_FAKE_HEALTH_STATUS": str(health_status),
             }
             if namespace is not None:
                 env["PORTAL_NAMESPACE"] = namespace
@@ -88,6 +89,7 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
 
         write("sudo", "#!/bin/sh\nexec \"$@\"\n")
         write("timeout", "#!/bin/sh\nshift\nexec \"$@\"\n")
+        write("flock", "#!/bin/sh\nif [ \"${PORTAL_FAKE_LOCK_BUSY:-}\" = 1 ]; then exit 1; fi\nexit 0\n")
         write(
             "k3s",
             f'''#!/bin/sh
@@ -129,23 +131,17 @@ case "$*" in
     exit 0 ;;
   *'create -f -')
     cat > '{manifest}'
-    if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = lock ] && grep -Fq 'kind: Lease' '{manifest}'; then exit 42; fi
     if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = create ] && grep -Fq 'kind: Pod' '{manifest}'; then exit 42; fi
     exit 0 ;;
   *'rollout status deployment/portal-web'*) exit 0 ;;
   *'get pod -l app.kubernetes.io/name=portal-web'*) printf '%s\\n' portal-web-1; exit 0 ;;
-  *'get lease portal-pvc-backup-lock -o jsonpath='*)
-    if [ "${{PORTAL_FAKE_LEASE_HOLDER:-}}" = __MATCH_MANIFEST__ ]; then
-      sed -n 's/^  holderIdentity: //p' '{manifest}'
-    else
-      printf '%s\\n' "${{PORTAL_FAKE_LEASE_HOLDER:-}}"
-    fi
-    exit 0 ;;
   *'exec portal-web-1'*)
-    if [ "${{PORTAL_FAKE_REQUIRE_URLLIB:-}}" = 1 ]; then case "$*" in *wget*) exit 42 ;; esac; fi
-    case "$*" in *python3*) printf '%s\\n' 200; exit 0 ;; esac
+    case "$*" in
+      *'import urllib.request; response = urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=10); raise SystemExit(0 if response.status == 200 else 1)')
+        [ "${{PORTAL_FAKE_HEALTH_STATUS:-200}}" = 200 ] && exit 0 || exit 42 ;;
+      *python3*) exit 42 ;;
+    esac
     exit 42 ;;
-  *'delete lease portal-pvc-backup-lock'*) exit 0 ;;
   *'delete pod'*) exit 0 ;;
   *'exec -i'*'/data/files'*)
     if [ "${{PORTAL_FAKE_SPECIAL_ENTRY:-}}" = 1 ]; then exit 42; fi
@@ -305,25 +301,21 @@ esac
         self.assertIn("exec portal-web-1", calls)
         self.assertNotIn("wget", calls)
 
-    def test_failed_lease_create_reads_back_and_deletes_only_matching_holder(self):
-        result, calls, _, _ = self.run_tool("--go", fail_at="lock", lease_holder="__MATCH_MANIFEST__")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("get lease portal-pvc-backup-lock", calls)
-        self.assertIn("delete lease portal-pvc-backup-lock", calls)
-
-        result, calls, _, _ = self.run_tool("--go", fail_at="lock", lease_holder="another-run")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("get lease portal-pvc-backup-lock", calls)
-        self.assertNotIn("delete lease portal-pvc-backup-lock", calls)
-
-    def test_lock_contention_prevents_scale_and_reader_creation(self):
-        result, calls, _, evidence = self.run_tool("--go", fail_at="lock")
+    def test_lock_contention_uses_local_flock_without_kubernetes_lease_commands(self):
+        result, calls, _, _ = self.run_tool("--go", lock_busy=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("portal_pvc_backup_stage=lock", result.stdout)
         self.assertIn("portal_pvc_backup=FAIL", result.stdout)
         self.assertNotIn("scale deployment/portal-web", calls)
-        self.assertEqual(calls.count("create -f -"), 1)
+        self.assertNotIn("create -f", calls)
+        self.assertNotIn("lease", calls)
+
+    def test_non_200_health_blocks_evidence_and_reports_health_failure(self):
+        result, calls, _, evidence = self.run_tool("--go", health_status=503)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "portal_pvc_backup_stage=portal_health\nportal_pvc_backup=FAIL")
         self.assertEqual(evidence, "")
+        self.assertIn("exec portal-web-1", calls)
 
     def test_remote_preflight_failure_prevents_scale_and_redacts_noisy_error(self):
         result, calls, _, evidence = self.run_tool("--go", fail_at="remote")

@@ -182,6 +182,8 @@ source_runtime=compose-local
 
 Compose backup은 기존 도구를 사용한다. K3s PVC backup은 먼저 읽기 전용 `--check`를 실행하고, 결과가 PASS인 경우에만 사용자가 승인한 유지보수 창에서 `--go`를 한 번 실행한다. `--go`는 Portal Deployment를 일시 중지하므로 자동 실행·cron·GitHub Actions 배포 작업으로 등록하지 않는다.
 
+K3s PVC backup의 동시 실행 방지는 Kubernetes Lease가 아닌 로컬 비블로킹 `flock`으로 처리한다. lock 파일은 `PORTAL_BACKUP_LOCK_FILE`로 지정할 수 있으며 기본값은 임시 디렉터리의 `portal-pvc-backup.lock`이다. `--go`가 실행되는 동안 파일 디스크립터를 유지하고 종료 시 close하여 해제한다. 경합 시 Kubernetes scale 또는 reader Pod 생성 없이 `portal_pvc_backup_stage=lock` 및 FAIL을 출력한다. `--check`는 lock을 획득하지 않는 읽기 전용 모드다.
+
 ```bash
 # K3s PVC preflight (읽기 전용, scale/Pod 생성 없음)
 bash infra/k8s/tools/portal-pvc-backup-verify.sh --check

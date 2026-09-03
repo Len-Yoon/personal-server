@@ -16,7 +16,7 @@ MAX_AGE=${PORTAL_BACKUP_MAX_AGE_SECONDS:-86400}
 FILES_PVC='portal-web-files-dynamic'
 STATE_PVC='portal-web-state-dynamic'
 DEPLOYMENT='portal-web'
-LEASE_NAME='portal-pvc-backup-lock'
+LOCK_FILE=${PORTAL_BACKUP_LOCK_FILE:-${TMPDIR:-/tmp}/portal-pvc-backup.lock}
 RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)-$$
 WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/portal-pvc-backup-${RUN_ID}.XXXXXX")
 DIAGNOSTIC_FILE="$WORKDIR/diagnostics.log"
@@ -30,6 +30,7 @@ WRITERS_SCALED=0
 READER_CREATED=0
 READER_POD=''
 LOCK_HELD=0
+LOCK_FD=9
 EVIDENCE_PENDING=0
 BACKUP_UPLOAD_STATUS=''
 FAILURE_STAGE=''
@@ -71,7 +72,7 @@ assert_preflight() {
   [ "$(tr -d '\r\n' < "$RUNTIME_MARKER")" = k3s ] || return 1
   [ -r "$RECIPIENT" ] && [ -r "$IDENTITY" ] || return 1
   [ -d "$(dirname -- "$EVIDENCE")" ] && [ -w "$(dirname -- "$EVIDENCE")" ] || return 1
-  for command_name in age rclone sqlite3 python3 sudo k3s timeout tar find sha256sum awk grep xargs mktemp; do
+  for command_name in age rclone sqlite3 python3 sudo k3s timeout flock tar find sha256sum awk grep xargs mktemp; do
     command -v "$command_name" >/dev/null || return 1
   done
 
@@ -93,22 +94,9 @@ assert_remote_access() {
 
 acquire_lock() {
   FAILURE_STAGE='lock'
-  local holder_identity="portal-pvc-backup-$RUN_ID" observed_holder=''
-  if ! kctl -n personal-server create -f - <<YAML >>"$DIAGNOSTIC_FILE" 2>&1
-apiVersion: coordination.k8s.io/v1
-kind: Lease
-metadata:
-  name: $LEASE_NAME
-  namespace: personal-server
-spec:
-  holderIdentity: $holder_identity
-  leaseDurationSeconds: 1800
-YAML
-  then
-    observed_holder=$(kctl -n personal-server get lease "$LEASE_NAME" -o jsonpath='{.spec.holderIdentity}') || observed_holder=''
-    if [ "$observed_holder" = "$holder_identity" ]; then
-      kctl -n personal-server delete lease "$LEASE_NAME" --ignore-not-found >>"$DIAGNOSTIC_FILE" 2>&1 || true
-    fi
+  exec 9>"$LOCK_FILE" || return 1
+  if ! flock -n "$LOCK_FD" >>"$DIAGNOSTIC_FILE" 2>&1; then
+    exec 9>&-
     return 1
   fi
   LOCK_HELD=1
@@ -187,7 +175,7 @@ cleanup() {
     WRITERS_SCALED=0
   fi
   if [ "$LOCK_HELD" -eq 1 ]; then
-    kctl -n personal-server delete lease "$LEASE_NAME" --ignore-not-found >>"$DIAGNOSTIC_FILE" 2>&1 || restore_ok=0
+    exec 9>&-
     LOCK_HELD=0
   fi
   if [ "$status" -eq 0 ] && [ "$restore_ok" -eq 1 ] && [ "$EVIDENCE_PENDING" -eq 1 ]; then
