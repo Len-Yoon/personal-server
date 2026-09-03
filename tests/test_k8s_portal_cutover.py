@@ -335,6 +335,133 @@ class PortalCutoverContractTest(unittest.TestCase):
             prepare.index("tar -C \"$STATE_SOURCE_DIR\""),
         )
 
+    def test_state_migration_replaces_only_an_empty_target_directory(self):
+        """An empty old mount must not block the explicit legacy-state migration."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "logs"
+            target = root / "portal-web-state"
+            legacy.mkdir()
+            target.mkdir()
+            database = legacy / "homeops.sqlite3"
+            subprocess.run(
+                [
+                    "python3",
+                    "-c",
+                    "import sqlite3,sys; connection=sqlite3.connect(sys.argv[1]); "
+                    "connection.execute('CREATE TABLE state (id INTEGER)'); connection.commit(); connection.close()",
+                    str(database),
+                ],
+                check=True,
+            )
+            library = root / "portal-cutover-lib.sh"
+            library.write_text(
+                SCRIPT.read_text(encoding="utf-8").rsplit('\nmain "$@"', 1)[0],
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["/bin/bash", "-c", f'. "{library}"; migrate_legacy_state_atomically'],
+                env={
+                    **os.environ,
+                    "PORTAL_LEGACY_STATE_SOURCE_DIR": str(legacy),
+                    "PORTAL_STATE_SOURCE_DIR": str(target),
+                    "RUN_ID": "empty-target",
+                    "TIMEOUT_SECONDS": "10",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((legacy / "homeops.sqlite3").is_file())
+            self.assertTrue((target / "homeops.sqlite3").is_file())
+            self.assertEqual(database.read_bytes(), (target / "homeops.sqlite3").read_bytes())
+
+    def test_state_migration_refuses_a_nonempty_target_without_touching_legacy_state(self):
+        """Unexpected target entries must block migration rather than be overwritten."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "logs"
+            target = root / "portal-web-state"
+            legacy.mkdir()
+            target.mkdir()
+            database = legacy / "homeops.sqlite3"
+            subprocess.run(
+                [
+                    "python3",
+                    "-c",
+                    "import sqlite3,sys; connection=sqlite3.connect(sys.argv[1]); "
+                    "connection.execute('CREATE TABLE state (id INTEGER)'); connection.commit(); connection.close()",
+                    str(database),
+                ],
+                check=True,
+            )
+            before = database.read_bytes()
+            unexpected = target / "unexpected.txt"
+            unexpected.write_text("preserve", encoding="utf-8")
+            library = root / "portal-cutover-lib.sh"
+            library.write_text(
+                SCRIPT.read_text(encoding="utf-8").rsplit('\nmain "$@"', 1)[0],
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["/bin/bash", "-c", f'. "{library}"; migrate_legacy_state_atomically'],
+                env={
+                    **os.environ,
+                    "PORTAL_LEGACY_STATE_SOURCE_DIR": str(legacy),
+                    "PORTAL_STATE_SOURCE_DIR": str(target),
+                    "RUN_ID": "nonempty-target",
+                    "TIMEOUT_SECONDS": "10",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(database.read_bytes(), before)
+            self.assertEqual(unexpected.read_text(encoding="utf-8"), "preserve")
+
+    def test_state_migration_keeps_empty_target_when_legacy_database_is_missing(self):
+        """A failed migration must not change even an empty existing target mount."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy = root / "logs"
+            target = root / "portal-web-state"
+            legacy.mkdir()
+            target.mkdir()
+            library = root / "portal-cutover-lib.sh"
+            library.write_text(
+                SCRIPT.read_text(encoding="utf-8").rsplit('\nmain "$@"', 1)[0],
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["/bin/bash", "-c", f'. "{library}"; migrate_legacy_state_atomically'],
+                env={
+                    **os.environ,
+                    "PORTAL_LEGACY_STATE_SOURCE_DIR": str(legacy),
+                    "PORTAL_STATE_SOURCE_DIR": str(target),
+                    "RUN_ID": "missing-legacy",
+                    "TIMEOUT_SECONDS": "10",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue(target.is_dir())
+
+    def test_state_migration_uses_non_directory_replacing_publish(self):
+        """A recreated target directory must not absorb the staged state tree."""
+        text = SCRIPT.read_text(encoding="utf-8")
+        migration = text[text.index("migrate_legacy_state_atomically() {") : text.index("migrate_compose_state() {")]
+        self.assertIn('mv -T -- "$temporary" "$STATE_SOURCE_DIR"', migration)
+
     def test_rollback_restores_verified_state_pvc_before_compose_portal_start(self):
         """Rollback must not revive Compose against stale local Portal state."""
         text = SCRIPT.read_text(encoding="utf-8")
