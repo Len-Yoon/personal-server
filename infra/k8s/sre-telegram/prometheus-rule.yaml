@@ -17,8 +17,17 @@ spec:
           annotations:
             summary: "Pod 재시작 급증"
             description: "컨테이너가 15분 동안 3회 초과 재시작됨"
+        - alert: PortalUnavailable
+          expr: (kube_deployment_spec_replicas{namespace="personal-server",deployment="portal-web"} > 0) and on(namespace,deployment) (kube_deployment_status_replicas_available{namespace="personal-server",deployment="portal-web"} == 0)
+          for: 2m
+          labels:
+            severity: critical
+            sre_telegram: "true"
+          annotations:
+            summary: "Portal 미가용"
+            description: "K3s Portal이 2분 동안 Ready 상태가 아님"
         - alert: DeploymentUnavailable
-          expr: kube_deployment_spec_replicas{namespace=~"monitoring|personal-server"} > kube_deployment_status_replicas_available{namespace=~"monitoring|personal-server"}
+          expr: kube_deployment_spec_replicas{namespace=~"monitoring|personal-server",deployment!="portal-web"} > kube_deployment_status_replicas_available{namespace=~"monitoring|personal-server",deployment!="portal-web"}
           for: 10m
           labels:
             severity: warning

@@ -190,8 +190,14 @@ class SreTelegramManifestContractTests(unittest.TestCase):
                 "labels": {"severity": "warning", "sre_telegram": "true"},
             },
             {
+                "alert": "PortalUnavailable",
+                "expr": '(kube_deployment_spec_replicas{namespace="personal-server",deployment="portal-web"} > 0) and on(namespace,deployment) (kube_deployment_status_replicas_available{namespace="personal-server",deployment="portal-web"} == 0)',
+                "for": "2m",
+                "labels": {"severity": "critical", "sre_telegram": "true"},
+            },
+            {
                 "alert": "DeploymentUnavailable",
-                "expr": 'kube_deployment_spec_replicas{namespace=~"monitoring|personal-server"} > kube_deployment_status_replicas_available{namespace=~"monitoring|personal-server"}',
+                "expr": 'kube_deployment_spec_replicas{namespace=~"monitoring|personal-server",deployment!="portal-web"} > kube_deployment_status_replicas_available{namespace=~"monitoring|personal-server",deployment!="portal-web"}',
                 "for": "10m",
                 "labels": {"severity": "warning", "sre_telegram": "true"},
             },
@@ -209,7 +215,7 @@ class SreTelegramManifestContractTests(unittest.TestCase):
             },
         ]
 
-        self.assertEqual(len(rules), 4)
+        self.assertEqual(len(rules), 5)
         self.assertEqual(
             [{key: item[key] for key in ("alert", "expr", "labels")} for item in rules[:1]],
             [expected_rules[0]],
