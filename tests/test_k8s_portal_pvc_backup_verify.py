@@ -1,6 +1,8 @@
 import os
+import signal
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -10,7 +12,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None):
+    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -29,6 +31,8 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
             (root / "identity.txt").write_text("identity\n", encoding="utf-8")
             marker = root / "runtime.mode"
             marker.write_text(runtime + "\n", encoding="utf-8")
+            if existing_evidence:
+                evidence.write_text(existing_evidence, encoding="utf-8")
             self.write_fakes(bin_dir, root, calls, manifest, files, state, remote)
             env = {
                 **os.environ,
@@ -41,8 +45,23 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
                 "PORTAL_BACKUP_REMOTE": f"fake:{remote}",
                 "PORTAL_FAKE_FAIL_AT": fail_at,
                 "PORTAL_FAKE_MISSING_PVC": "1" if missing_pvc else "",
+                "PORTAL_FAKE_SPECIAL_ENTRY": "1" if special_entry else "",
+                "PORTAL_FAKE_HOLD": "1" if send_signal else "",
+                "PORTAL_FAKE_READER_WAIT": str(root / "reader-wait"),
             }
-            result = subprocess.run(["bash", str(SCRIPT), mode], env=env, capture_output=True, text=True)
+            if namespace is not None:
+                env["PORTAL_NAMESPACE"] = namespace
+            if send_signal:
+                process = subprocess.Popen(["bash", str(SCRIPT), mode], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                reader_wait = root / "reader-wait"
+                deadline = time.time() + 5
+                while not reader_wait.exists() and time.time() < deadline:
+                    time.sleep(0.01)
+                process.send_signal(signal.SIGTERM)
+                stdout, stderr = process.communicate(timeout=10)
+                result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+            else:
+                result = subprocess.run(["bash", str(SCRIPT), mode], env=env, capture_output=True, text=True)
             if repeat:
                 if second_runtime is not None and evidence.exists():
                     evidence.write_text(
@@ -78,6 +97,15 @@ fi
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = stream ]; then
   case "$*" in *'exec -i'*) exit 42 ;; esac
 fi
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = scale ]; then
+  case "$*" in *'scale deployment/portal-web --replicas=0'*) exit 42 ;; esac
+fi
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = restore ]; then
+  case "$*" in *'scale deployment/portal-web --replicas=1'*) exit 42 ;; esac
+fi
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = create ]; then
+  case "$*" in *'create -f -'*) exit 42 ;; esac
+fi
 if [ "${{PORTAL_FAKE_MISSING_PVC:-}}" = 1 ]; then
   case "$*" in *'get pvc/'*) exit 42 ;; esac
 fi
@@ -89,10 +117,15 @@ case "$*" in
   *'scale deployment/portal-web --replicas=0') exit 0 ;;
   *'scale deployment/portal-web --replicas=1') exit 0 ;;
   *'wait --for=delete pod'*) exit 0 ;;
-  *'wait --for=condition=Ready pod/'*) exit 0 ;;
+  *'wait --for=condition=Ready pod/'*)
+    touch "${{PORTAL_FAKE_READER_WAIT}}"
+    if [ "${{PORTAL_FAKE_HOLD:-}}" = 1 ]; then sleep 5; fi
+    exit 0 ;;
   *'create -f -') cat > '{manifest}'; exit 0 ;;
   *'delete pod'*) exit 0 ;;
-  *'exec -i'*'/data/files'*) tar -C '{files}' -cf - .; exit 0 ;;
+  *'exec -i'*'/data/files'*)
+    if [ "${{PORTAL_FAKE_SPECIAL_ENTRY:-}}" = 1 ]; then rm -f '{files}/special'; mkfifo '{files}/special'; fi
+    tar -C '{files}' -cf - .; exit 0 ;;
   *'exec -i'*'/data/portal-web-state'*) tar -C '{state}' -cf - .; exit 0 ;;
 esac
 exit 0
@@ -167,6 +200,49 @@ esac
         self.assertIn("portal_pvc_backup=FAIL", result.stdout)
         self.assertNotIn("scale deployment/portal-web", calls)
 
+    def test_check_mode_preserves_existing_evidence_on_success_and_failure(self):
+        previous = "existing-evidence\n"
+        result, _, _, evidence = self.run_tool("--check", existing_evidence=previous)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(evidence, previous)
+        result, _, _, evidence = self.run_tool("--check", runtime="compose", existing_evidence=previous)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(evidence, previous)
+
+    def test_namespace_override_is_rejected_before_kubernetes_reads(self):
+        result, calls, _, _ = self.run_tool("--check", namespace="other")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("get nodes", calls)
+
+    def test_scale_failure_still_attempts_original_replica_restore(self):
+        result, calls, _, _ = self.run_tool("--go", fail_at="scale")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("scale deployment/portal-web --replicas=0", calls)
+        self.assertIn("scale deployment/portal-web --replicas=1", calls)
+
+    def test_restore_failure_cannot_report_pass(self):
+        result, calls, _, _ = self.run_tool("--go", fail_at="restore")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "portal_pvc_backup=FAIL")
+        self.assertIn("kubectl -n personal-server delete pod", calls)
+
+    def test_signal_forces_fail_after_cleanup(self):
+        result, calls, _, _ = self.run_tool("--go", send_signal=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "portal_pvc_backup=FAIL")
+        self.assertIn("scale deployment/portal-web --replicas=1", calls)
+
+    def test_create_failure_still_deletes_the_reserved_reader_name(self):
+        result, calls, _, _ = self.run_tool("--go", fail_at="create")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("create -f -", calls)
+        self.assertIn("kubectl -n personal-server delete pod", calls)
+
+    def test_special_entry_in_staged_pvc_tree_is_rejected_before_upload(self):
+        result, calls, _, _ = self.run_tool("--go", special_entry=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("rclone copyto", calls)
+
     def test_go_success_writes_k3s_pvc_evidence_after_restore(self):
         result, calls, _, evidence = self.run_tool("--go")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -191,7 +267,7 @@ esac
         result, calls, _, evidence = self.run_tool("--go", fail_at="stream")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("scale deployment/portal-web --replicas=1", calls)
-        self.assertIn("delete pod", calls)
+        self.assertIn("kubectl -n personal-server delete pod", calls)
         self.assertEqual(evidence, "")
 
     def test_go_upload_failure_restores_original_replica_and_deletes_reader(self):

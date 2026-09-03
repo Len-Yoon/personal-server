@@ -52,6 +52,7 @@ assert_regular_tree() {
 }
 
 assert_preflight() {
+  [ "$NAMESPACE" = personal-server ] || return 1
   [ "$MAX_AGE" -ge 1 ] 2>/dev/null || return 1
   [ -f "$RUNTIME_MARKER" ] && [ -r "$RUNTIME_MARKER" ] || return 1
   [ "$(tr -d '\r\n' < "$RUNTIME_MARKER")" = k3s ] || return 1
@@ -74,6 +75,8 @@ assert_preflight() {
 
 create_reader_pod() {
   READER_POD="portal-pvc-backup-reader-$(date -u +%Y%m%d%H%M%S)-$$"
+  # Reserve cleanup before create: an API timeout may leave the Pod created.
+  READER_CREATED=1
   kctl -n "$NAMESPACE" create -f - <<YAML
 apiVersion: v1
 kind: Pod
@@ -102,7 +105,6 @@ spec:
       persistentVolumeClaim:
         claimName: $STATE_PVC
 YAML
-  READER_CREATED=1
   kctl -n "$NAMESPACE" wait --for=condition=Ready "pod/$READER_POD" --timeout=120s
 }
 
@@ -132,7 +134,7 @@ cleanup() {
     kctl -n "$NAMESPACE" scale "deployment/$DEPLOYMENT" --replicas="$ORIGINAL_REPLICAS" >/dev/null 2>&1 || restore_ok=0
   fi
   if [ "$status" -ne 0 ] || [ "$restore_ok" -ne 1 ]; then
-    rm -f -- "$EVIDENCE"
+    [ "$MODE" = --check ] || rm -f -- "$EVIDENCE"
     printf '%s\n' 'portal_pvc_backup=FAIL'
     rm -rf -- "$WORKDIR"
     exit 1
@@ -147,7 +149,9 @@ case "${1:-}" in
   --check|--go) MODE=$1 ;;
   *) usage; exit 2 ;;
 esac
-trap cleanup EXIT INT TERM HUP
+on_signal() { exit 130; }
+trap cleanup EXIT
+trap on_signal INT TERM HUP
 
 assert_preflight || exit 1
 [ "$MODE" = --check ] && exit 0
@@ -157,13 +161,16 @@ restore="$WORKDIR/restore"
 mkdir -p -- "$stage/data" "$restore"
 ORIGINAL_REPLICAS=$(kctl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o jsonpath='{.spec.replicas}')
 case "$ORIGINAL_REPLICAS" in ''|*[!0-9]*) exit 1 ;; esac
-kctl -n "$NAMESPACE" scale "deployment/$DEPLOYMENT" --replicas=0 >/dev/null
+# Mark restoration as required before the scale request: timeout/failure is ambiguous.
 WRITERS_SCALED=1
+kctl -n "$NAMESPACE" scale "deployment/$DEPLOYMENT" --replicas=0 >/dev/null
 kctl -n "$NAMESPACE" wait --for=delete pod -l app.kubernetes.io/name=portal-web --timeout=120s >/dev/null
 create_reader_pod
 stream_pvc_tree /data/files "$stage/data/files"
 stream_pvc_tree /data/portal-web-state "$stage/data/portal-web-state"
 sqlite3 "$stage/data/portal-web-state/homeops.sqlite3" 'PRAGMA quick_check;' | grep -Fxq ok
+assert_regular_tree "$stage/data/files"
+assert_regular_tree "$stage/data/portal-web-state"
 
 files_digest=$(tree_digest "$stage/data/files")
 state_digest=$(tree_digest "$stage/data/portal-web-state")
@@ -185,6 +192,8 @@ rclone copyto --log-level ERROR "$remote_object" "$WORKDIR/download.age"
 [ "$artifact_digest" = "sha256:$(sha256sum "$WORKDIR/download.age" | awk '{print $1}')" ]
 age -d -i "$IDENTITY" -o "$WORKDIR/restore.tar" "$WORKDIR/download.age"
 tar -C "$restore" -xf "$WORKDIR/restore.tar"
+assert_regular_tree "$restore/data/files"
+assert_regular_tree "$restore/data/portal-web-state"
 [ "$(tree_digest "$restore/data/files")" = "$files_digest" ]
 [ "$(tree_digest "$restore/data/portal-web-state")" = "$state_digest" ]
 grep -Fxq "source_runtime=k3s-pvc" "$restore/manifest.txt"
