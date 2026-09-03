@@ -12,7 +12,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-backup-verify.sh"
 
 
 class PortalBackupVerifyContractTest(unittest.TestCase):
-    def _run_fake_backup(self, *, source_digest=True, changed=False, runtime_marker=None, dangling_marker=False, source_runtime="compose-local"):
+    def _run_fake_backup(self, *, source_digest=True, changed=False, runtime_marker=None, dangling_marker=False, source_runtime="compose-local", allow_remote_success=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             files = root / "files"; state = root / "state"; bin_dir = root / "bin"
@@ -24,7 +24,12 @@ class PortalBackupVerifyContractTest(unittest.TestCase):
             (bin_dir / "docker").write_text(f"#!/bin/sh\ntouch '{root / 'FAKE_DOCKER_CALLED'}'\nexit 0\n", encoding="utf-8")
             (bin_dir / "sqlite3").write_text("#!/bin/sh\ncase \"$2\" in *PRAGMA*) echo ok;; *.backup*) cp \"$1\" \"$(printf '%s' \"$2\" | sed -n \"s/.*backup '\\(.*\\)'/\\1/p\")\";; esac\n", encoding="utf-8")
             (bin_dir / "age").write_text("#!/bin/sh\nif [ \"$1\" = \"-d\" ]; then cp \"$6\" \"$5\"; else cp \"$5\" \"$4\"; fi\n", encoding="utf-8")
-            (bin_dir / "rclone").write_text(f"#!/bin/sh\ntouch '{root / 'FAKE_RCLONE_CALLED'}'; exit 42\n", encoding="utf-8")
+            rclone_body = f"#!/bin/sh\ntouch '{root / 'FAKE_RCLONE_CALLED'}'; "
+            if allow_remote_success:
+                rclone_body += f"shift; while [ \"$#\" -gt 0 ]; do case \"$1\" in --immutable) shift;; --log-level) shift 2;; *) break;; esac; done; src=\"$1\"; dst=\"$2\"; case \"$src\" in fake:*) src='{root}/'\"${{src#fake:}}\";; esac; case \"$dst\" in fake:*) dst='{root}/'\"${{dst#fake:}}\";; esac; mkdir -p \"$(dirname \"$dst\")\"; cp \"$src\" \"$dst\"; exit 0\n"
+            else:
+                rclone_body += "exit 42\n"
+            (bin_dir / "rclone").write_text(rclone_body, encoding="utf-8")
             for tool in bin_dir.iterdir(): tool.chmod(0o755)
             def digest(path):
                 rows = []
@@ -49,29 +54,29 @@ class PortalBackupVerifyContractTest(unittest.TestCase):
             else:
                 env["PORTAL_RUNTIME_MARKER"] = str(root / "missing-runtime.mode")
             result = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True)
-            return result, (root / "FAKE_RCLONE_CALLED").exists(), (root / "FAKE_DOCKER_CALLED").exists()
+            return result, (root / "FAKE_RCLONE_CALLED").exists(), (root / "FAKE_DOCKER_CALLED").exists(), evidence.read_text(encoding="utf-8") if evidence.exists() else ""
 
     def test_matching_snapshot_evidence_skips_upload(self):
-        result, marker, docker_called = self._run_fake_backup()
+        result, marker, docker_called, _ = self._run_fake_backup()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("SKIPPED_UNCHANGED", result.stdout)
         self.assertFalse(marker)
 
     def test_compose_marker_allows_matching_snapshot_skip(self):
-        result, marker, _ = self._run_fake_backup(runtime_marker="compose")
+        result, marker, _, _ = self._run_fake_backup(runtime_marker="compose")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("SKIPPED_UNCHANGED", result.stdout)
         self.assertFalse(marker)
 
     def test_compose_backup_does_not_reuse_k3s_pvc_evidence(self):
-        result, rclone_called, _ = self._run_fake_backup(source_runtime="k3s-pvc")
+        result, rclone_called, _, _ = self._run_fake_backup(source_runtime="k3s-pvc")
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(rclone_called)
 
     def test_missing_digest_or_changed_source_does_not_skip(self):
         for kwargs in ({"source_digest": False}, {"changed": True}):
             with self.subTest(kwargs=kwargs):
-                result, marker, _ = self._run_fake_backup(**kwargs)
+                result, marker, _, _ = self._run_fake_backup(**kwargs)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
                 self.assertTrue(marker)
@@ -79,7 +84,7 @@ class PortalBackupVerifyContractTest(unittest.TestCase):
     def test_k3s_and_cutover_markers_fail_before_local_backup_tools(self):
         for runtime_marker in ("k3s", "cutover"):
             with self.subTest(runtime_marker=runtime_marker):
-                result, rclone_called, docker_called = self._run_fake_backup(runtime_marker=runtime_marker)
+                result, rclone_called, docker_called, _ = self._run_fake_backup(runtime_marker=runtime_marker)
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn("portal_backup_verify=FAIL", result.stderr)
                 self.assertIn("local source backup blocked", result.stderr)
@@ -89,7 +94,7 @@ class PortalBackupVerifyContractTest(unittest.TestCase):
     def test_unknown_runtime_marker_fails_closed_before_local_backup_tools(self):
         for runtime_marker in ("", "unexpected"):
             with self.subTest(runtime_marker=runtime_marker):
-                result, rclone_called, docker_called = self._run_fake_backup(runtime_marker=runtime_marker)
+                result, rclone_called, docker_called, _ = self._run_fake_backup(runtime_marker=runtime_marker)
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn("portal_backup_verify=FAIL", result.stderr)
                 self.assertIn("unrecognized runtime marker", result.stderr)
@@ -97,7 +102,7 @@ class PortalBackupVerifyContractTest(unittest.TestCase):
                 self.assertFalse(docker_called)
 
     def test_dangling_runtime_marker_fails_before_local_backup_tools(self):
-        result, rclone_called, docker_called = self._run_fake_backup(
+        result, rclone_called, docker_called, _ = self._run_fake_backup(
             runtime_marker="k3s", dangling_marker=True
         )
         self.assertEqual(result.returncode, 1, result.stderr)
@@ -105,6 +110,14 @@ class PortalBackupVerifyContractTest(unittest.TestCase):
         self.assertIn("runtime marker is not a readable file", result.stderr)
         self.assertFalse(rclone_called)
         self.assertFalse(docker_called)
+
+    def test_compose_success_writes_compose_local_source_runtime(self):
+        result, _, _, evidence = self._run_fake_backup(
+            source_digest=False, allow_remote_success=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("portal_backup_verify=PASS", result.stdout)
+        self.assertIn("source_runtime=compose-local", evidence)
     def test_backup_tool_requires_encryption_remote_restore_and_atomic_evidence(self):
         text = SCRIPT.read_text(encoding="utf-8")
         for required in (

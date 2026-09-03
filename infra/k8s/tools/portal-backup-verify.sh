@@ -30,6 +30,13 @@ fail() { rm -f -- "$EVIDENCE"; printf '%s\n' 'portal_backup_verify=FAIL' >&2; ex
 fail_reason() { rm -f -- "$EVIDENCE"; printf '%s\n' 'portal_backup_verify=FAIL' "reason=$1" >&2; exit 1; }
 tree_digest() { (cd -- "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum) | sha256sum | awk '{print $1}'; }
 utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+expiry_now() {
+  if date -u -v+1S +%Y-%m-%dT%H:%M:%SZ >/dev/null 2>&1; then
+    date -u -v+"${MAX_AGE}"S +%Y-%m-%dT%H:%M:%SZ
+  else
+    date -u -d "+${MAX_AGE} seconds" +%Y-%m-%dT%H:%M:%SZ
+  fi
+}
 assert_regular_tree() {
   local entry
   entry=$(find "$1" \( -type l -o -type b -o -type c -o -type p -o -type s \) -print -quit) || return 1
@@ -93,7 +100,7 @@ tar -C "$restore" -xf "$WORKDIR/restore.tar" || fail
 [ "$(tree_digest "$restore/data/portal-web-state")" = "$state_digest" ] || fail
 sqlite3 "$restore/data/portal-web-state/homeops.sqlite3" "PRAGMA quick_check;" | grep -Fxq ok || fail
 restore_verified_at=$(utc_now)
-evidence_expires_at=$(date -u -d "+${MAX_AGE} seconds" +%Y-%m-%dT%H:%M:%SZ) || fail
+evidence_expires_at=$(expiry_now) || fail
 
 evidence_dir=$(dirname -- "$EVIDENCE")
 mkdir -p -- "$evidence_dir"

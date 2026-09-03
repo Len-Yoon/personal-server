@@ -178,7 +178,21 @@ source_runtime=compose-local
 
 선택 키는 암호문 artifact의 `artifact_digest=sha256:<64개의 소문자 hex>`, 두 Portal 데이터 트리의 SHA-256 manifest를 결합한 `source_digest=sha256:<64개의 소문자 hex>`, `restore_check=sqlite_quick_check`, `restore_path_check=success`뿐이다. 원본·복원 절대 경로, secret, token, 개인키는 증적에 기록하지 않는다. backup 또는 복원 절차가 실패하면 기존 증적을 갱신하지 않는다.
 
-N100에서는 `infra/k8s/tools/portal-backup-verify.sh`만 증적을 생성한다. 이 도구는 `data/files`와 `data/portal-web-state`의 manifest 결합값이 현재 유효한 증적의 `source_digest`와 같으면 새 암호화 archive를 만들거나 업로드하지 않고 `backup_upload=SKIPPED_UNCHANGED`를 출력한다. 증적이 없거나 만료·무효이거나 데이터가 다르면 stage 후 age 공개 수신자 키로 암호화하고, `gdrive:PersonalServer-encrypted-backups`에 업로드한다. 이어서 Drive에서 별도 임시 경로로 다시 내려받아 복호화하며, 두 데이터 트리의 SHA-256 manifest와 복원된 HomeOps SQLite `quick_check`가 모두 통과할 때만 `.portal-backup-verified`를 권한 `0600`으로 원자 교체한다. 이 변경은 기존 원격 archive의 자동 삭제·보존기간 정리를 수행하지 않는다. age 개인키·rclone 설정·토큰은 명령 인수와 Git에 넣지 않는다.
+`infra/k8s/tools/portal-backup-verify.sh`는 Compose writer용 도구이며 `portal-runtime.mode=compose`에서만 사용한다. `infra/k8s/tools/portal-pvc-backup-verify.sh`는 K3s PVC writer용 도구이며 `portal-runtime.mode=k3s`에서만 사용한다. 두 도구를 runtime이 다른 상태에서 교차 실행하지 않는다.
+
+Compose backup은 기존 도구를 사용한다. K3s PVC backup은 먼저 읽기 전용 `--check`를 실행하고, 결과가 PASS인 경우에만 사용자가 승인한 유지보수 창에서 `--go`를 한 번 실행한다. `--go`는 Portal Deployment를 일시 중지하므로 자동 실행·cron·GitHub Actions 배포 작업으로 등록하지 않는다.
+
+```bash
+# K3s PVC preflight (읽기 전용, scale/Pod 생성 없음)
+bash infra/k8s/tools/portal-pvc-backup-verify.sh --check
+
+# 사용자가 승인한 유지보수 창에서만 실행
+bash infra/k8s/tools/portal-pvc-backup-verify.sh --go
+```
+
+K3s 도구는 원래 replica 복구 후 Deployment rollout과 Portal Pod 내부 `127.0.0.1:8000/health`가 모두 성공한 경우에만 evidence를 보존하고 PASS를 출력한다. 원격 preflight·백업·복원·readiness·health 중 하나라도 실패하면 evidence를 남기지 않고 FAIL 처리한다.
+
+N100에서 Compose-local 증적을 생성할 때는 `infra/k8s/tools/portal-backup-verify.sh`를 사용한다. 이 도구는 `data/files`와 `data/portal-web-state`의 manifest 결합값이 현재 유효한 Compose-local 증적의 `source_digest`와 같으면 새 암호화 archive를 만들거나 업로드하지 않고 `backup_upload=SKIPPED_UNCHANGED`를 출력한다. 증적이 없거나 만료·무효이거나 데이터가 다르면 stage 후 age 공개 수신자 키로 암호화하고, `gdrive:PersonalServer-encrypted-backups`에 업로드한다. 이어서 Drive에서 별도 임시 경로로 다시 내려받아 복호화하며, 두 데이터 트리의 SHA-256 manifest와 복원된 HomeOps SQLite `quick_check`가 모두 통과할 때만 `.portal-backup-verified`를 권한 `0600`으로 원자 교체한다. 이 변경은 기존 원격 archive의 자동 삭제·보존기간 정리를 수행하지 않는다. age 개인키·rclone 설정·토큰은 명령 인수와 Git에 넣지 않는다.
 
 ```bash
 bash infra/k8s/tools/portal-backup-verify.sh
@@ -186,12 +200,7 @@ bash infra/k8s/tools/portal-backup-verify.sh
 
 검증 실행 중 어떤 단계에서든 실패하면 기존 증적을 무효화한다. 따라서 실패하면 `portal_backup_verify=FAIL`만 출력되고 cutover는 차단된다. 내용이 같고 기존 증적이 유효한 경우에만 그 검증 증적을 재사용한다. 성공한 뒤에만 `portal-cutover.sh --go`의 backup 게이트를 통과할 수 있다.
 
-실행 예시는 `--check-nodeport-private`로 사전 확인한 뒤, 승인된 유지보수 창에서 `--go`를 한 번 실행하는 순서로 제시한다. 자동 실행·cron·GitHub Actions 배포 작업은 추가하지 않는다.
-
-```bash
-bash infra/k8s/tools/portal-cutover.sh --check-nodeport-private
-bash infra/k8s/tools/portal-cutover.sh --go
-```
+위 backup 절차와 Compose→K3s cutover 절차는 별도 단계로 수행한다. backup evidence가 성공한 뒤에만 `portal-cutover.sh --check-nodeport-private` 및 승인된 유지보수 창의 `portal-cutover.sh --go`를 진행한다.
 
 ### Portal state and Compose bridge prerequisites
 

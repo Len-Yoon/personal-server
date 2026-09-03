@@ -48,6 +48,7 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
                 "PORTAL_FAKE_SPECIAL_ENTRY": "1" if special_entry else "",
                 "PORTAL_FAKE_HOLD": "1" if send_signal else "",
                 "PORTAL_FAKE_READER_WAIT": str(root / "reader-wait"),
+                "PORTAL_FAKE_NOISY": "1",
             }
             if namespace is not None:
                 env["PORTAL_NAMESPACE"] = namespace
@@ -94,6 +95,12 @@ shift
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = reader ]; then
   case "$*" in *'wait --for=condition=Ready'*) exit 42 ;; esac
 fi
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = rollout ]; then
+  case "$*" in *'rollout status deployment/portal-web'*) exit 42 ;; esac
+fi
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = health ]; then
+  case "$*" in *'exec portal-web-1'*) exit 42 ;; esac
+fi
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = stream ]; then
   case "$*" in *'exec -i'*) exit 42 ;; esac
 fi
@@ -103,11 +110,11 @@ fi
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = restore ]; then
   case "$*" in *'scale deployment/portal-web --replicas=1'*) exit 42 ;; esac
 fi
-if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = create ]; then
-  case "$*" in *'create -f -'*) exit 42 ;; esac
-fi
 if [ "${{PORTAL_FAKE_MISSING_PVC:-}}" = 1 ]; then
   case "$*" in *'get pvc/'*) exit 42 ;; esac
+fi
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = lock ]; then
+  case "$*" in *'create -f -'*) exit 42 ;; esac
 fi
 case "$*" in
   'get nodes --no-headers') printf '%s\\n' 'node-1 Ready'; exit 0 ;;
@@ -121,10 +128,17 @@ case "$*" in
     touch "${{PORTAL_FAKE_READER_WAIT}}"
     if [ "${{PORTAL_FAKE_HOLD:-}}" = 1 ]; then sleep 5; fi
     exit 0 ;;
-  *'create -f -') cat > '{manifest}'; exit 0 ;;
+  *'create -f -')
+    cat > '{manifest}'
+    if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = lock ] && grep -Fq 'kind: Lease' '{manifest}'; then exit 42; fi
+    if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = create ] && grep -Fq 'kind: Pod' '{manifest}'; then exit 42; fi
+    exit 0 ;;
+  *'rollout status deployment/portal-web'*) exit 0 ;;
+  *'get pod -l app.kubernetes.io/name=portal-web'*) printf '%s\\n' portal-web-1; exit 0 ;;
+  *'exec portal-web-1'*) printf '%s\\n' '{{"status":"ok"}}'; exit 0 ;;
   *'delete pod'*) exit 0 ;;
   *'exec -i'*'/data/files'*)
-    if [ "${{PORTAL_FAKE_SPECIAL_ENTRY:-}}" = 1 ]; then rm -f '{files}/special'; mkfifo '{files}/special'; fi
+    if [ "${{PORTAL_FAKE_SPECIAL_ENTRY:-}}" = 1 ]; then exit 42; fi
     tar -C '{files}' -cf - .; exit 0 ;;
   *'exec -i'*'/data/portal-web-state'*) tar -C '{state}' -cf - .; exit 0 ;;
 esac
@@ -152,7 +166,15 @@ cp "$input" "$output"
             f'''#!/bin/sh
 set -eu
 printf '%s\\n' "rclone $*" >> '{calls}'
-[ "${{PORTAL_FAKE_FAIL_AT:-}}" = upload ] && exit 42
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = remote ] && [ "$1" = lsd ]; then
+  printf '%s\\n' 'fake-remote-secret /private/noisy/path' >&2
+  exit 42
+fi
+if [ "$1" = lsd ]; then exit 0; fi
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = upload ] && [ "$1" = copyto ]; then
+  printf '%s\\n' 'fake-upload-secret /private/noisy/path' >&2
+  exit 42
+fi
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -229,7 +251,7 @@ esac
     def test_signal_forces_fail_after_cleanup(self):
         result, calls, _, _ = self.run_tool("--go", send_signal=True)
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(result.stdout.strip(), "portal_pvc_backup=FAIL")
+        self.assertNotIn("portal_pvc_backup=PASS", result.stdout)
         self.assertIn("scale deployment/portal-web --replicas=1", calls)
 
     def test_create_failure_still_deletes_the_reserved_reader_name(self):
@@ -249,6 +271,41 @@ esac
         self.assertIn("portal_pvc_backup=PASS", result.stdout)
         self.assertIn("source_runtime=k3s-pvc", evidence)
         self.assertIn("scale deployment/portal-web --replicas=1", calls)
+        self.assertIn("rollout status deployment/portal-web", calls)
+        self.assertIn("exec portal-web-1", calls)
+
+    def test_rollout_failure_removes_evidence_and_reports_fixed_failure(self):
+        result, calls, _, evidence = self.run_tool("--go", fail_at="rollout")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "portal_pvc_backup_stage=portal_readiness\nportal_pvc_backup=FAIL")
+        self.assertEqual(evidence, "")
+        self.assertIn("scale deployment/portal-web --replicas=1", calls)
+
+    def test_health_failure_removes_evidence_and_reports_fixed_failure(self):
+        result, calls, _, evidence = self.run_tool("--go", fail_at="health")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "portal_pvc_backup_stage=portal_health\nportal_pvc_backup=FAIL")
+        self.assertEqual(evidence, "")
+        self.assertIn("scale deployment/portal-web --replicas=1", calls)
+
+    def test_lock_contention_prevents_scale_and_reader_creation(self):
+        result, calls, _, evidence = self.run_tool("--go", fail_at="lock")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("portal_pvc_backup_stage=lock", result.stdout)
+        self.assertIn("portal_pvc_backup=FAIL", result.stdout)
+        self.assertNotIn("scale deployment/portal-web", calls)
+        self.assertEqual(calls.count("create -f -"), 1)
+        self.assertEqual(evidence, "")
+
+    def test_remote_preflight_failure_prevents_scale_and_redacts_noisy_error(self):
+        result, calls, _, evidence = self.run_tool("--go", fail_at="remote")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("portal_pvc_backup_stage=remote_preflight", result.stdout)
+        self.assertIn("portal_pvc_backup=FAIL", result.stdout)
+        self.assertNotIn("scale deployment/portal-web", calls)
+        self.assertNotIn("/private/", result.stdout + result.stderr)
+        self.assertNotIn("fake-remote-secret", result.stdout + result.stderr)
+        self.assertEqual(evidence, "")
 
     def test_matching_k3s_pvc_evidence_skips_upload_after_staging(self):
         result, calls, _, _ = self.run_tool("--go", repeat=True)
@@ -275,6 +332,8 @@ esac
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("scale deployment/portal-web --replicas=1", calls)
         self.assertIn("delete pod", calls)
+        self.assertNotIn("fake-upload-secret", result.stdout + result.stderr)
+        self.assertNotIn("/private/noisy/path", result.stdout + result.stderr)
         self.assertEqual(evidence, "")
 
     def test_reader_manifest_is_read_only_and_never_restarts(self):

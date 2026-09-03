@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -17,6 +18,7 @@ class PortalCutoverContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             evidence = root / "backup.ok"
+            now = datetime.now(timezone.utc).replace(microsecond=0)
             evidence.write_text(
                 "\n".join(
                     (
@@ -24,10 +26,10 @@ class PortalCutoverContractTest(unittest.TestCase):
                         "scope=portal",
                         "backup_status=success",
                         "encrypted=true",
-                        "backup_completed_at=2026-09-03T00:00:00Z",
+                        f"backup_completed_at={(now - timedelta(minutes=5)).strftime('%Y-%m-%dT%H:%M:%SZ')}",
                         "restore_status=success",
-                        "restore_verified_at=2026-09-03T00:00:00Z",
-                        "evidence_expires_at=2026-09-04T00:00:00Z",
+                        f"restore_verified_at={(now - timedelta(minutes=4)).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+                        f"evidence_expires_at={(now + timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ')}",
                         "backup_id=portal-test",
                         "source_runtime=k3s-pvc",
                     )
