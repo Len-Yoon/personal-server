@@ -215,6 +215,19 @@ esac
         self.assertNotIn("scale deployment/portal-web", calls)
         self.assertNotIn("create -f", calls)
 
+    def test_remote_preflight_explains_hidden_password_input_and_has_deadline(self):
+        """Interactive operators must not mistake encrypted-rclone input for a hung check."""
+        text = SCRIPT.read_text(encoding="utf-8")
+        remote_preflight = text[text.index("assert_remote_access() {") : text.index("acquire_lock() {")]
+
+        self.assertIn("portal_pvc_backup_stage=remote_authentication", remote_preflight)
+        self.assertIn("[ -t 0 ]", remote_preflight)
+        self.assertIn('PORTAL_RCLONE_TIMEOUT_SECONDS:-30', remote_preflight)
+        self.assertLess(
+            remote_preflight.index("portal_pvc_backup_stage=remote_authentication"),
+            remote_preflight.index("rclone lsd"),
+        )
+
     def test_check_mode_rejects_non_k3s_runtime_without_mutation(self):
         result, calls, _, _ = self.run_tool("--check", runtime="compose")
         self.assertNotEqual(result.returncode, 0)

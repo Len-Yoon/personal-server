@@ -89,7 +89,14 @@ assert_preflight() {
 
 assert_remote_access() {
   FAILURE_STAGE='remote_preflight'
-  run_private rclone lsd --max-depth 1 --log-level ERROR "$REMOTE"
+  # rclone asks for an encrypted-config password on the terminal. Most command
+  # diagnostics are intentionally private, so announce that expected hidden input
+  # before redirecting rclone output to the private diagnostic file.
+  if [ -t 0 ]; then
+    printf '%s\n' 'portal_pvc_backup_stage=remote_authentication'
+    printf '%s\n' 'rclone 설정 암호가 필요할 수 있습니다. 입력은 화면에 표시되지 않습니다.'
+  fi
+  run_private timeout "${PORTAL_RCLONE_TIMEOUT_SECONDS:-30}" rclone lsd --max-depth 1 --log-level ERROR "$REMOTE"
 }
 
 acquire_lock() {
