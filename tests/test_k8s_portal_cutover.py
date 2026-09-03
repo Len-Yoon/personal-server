@@ -368,6 +368,148 @@ class PortalCutoverContractTest(unittest.TestCase):
         self.assertIn('sleep 1', restore)
         self.assertLess(restore.index('for attempt in $(seq 1 "$RESTORE_STREAM_ATTEMPTS")'), restore.index('local_digest='))
 
+    def test_rollback_retries_transient_wsl_directory_removal(self):
+        """A transient DrvFs removal error must not turn a completed restore into a rollback failure."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "rollback-backup"
+            target.mkdir()
+            (target / "stale.txt").write_text("stale", encoding="utf-8")
+            count = root / "rm-count"
+            fake_rm = root / "rm"
+            fake_rm.write_text(
+                "#!/bin/sh\n"
+                f"count=$(cat '{count}' 2>/dev/null || printf '0')\n"
+                "count=$((count + 1)); printf '%s\\n' \"$count\" > '" + str(count) + "'\n"
+                "if [ \"$count\" = 1 ]; then exit 1; fi\n"
+                "exec \"$REAL_RM\" \"$@\"\n",
+                encoding="utf-8",
+            )
+            fake_rm.chmod(0o755)
+            fake_sleep = root / "sleep"
+            fake_sleep.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_sleep.chmod(0o755)
+            library = root / "portal-cutover-lib.sh"
+            library.write_text(
+                SCRIPT.read_text(encoding="utf-8").rsplit('\nmain "$@"', 1)[0],
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["/bin/bash", "-c", f'. "{library}"; remove_tree_with_retries "{target}"'],
+                env={
+                    **os.environ,
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                    "REAL_RM": shutil.which("rm") or "rm",
+                    "RUN_ID": "wsl-remove-retry",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(count.read_text(encoding="utf-8").strip(), "2")
+            self.assertFalse(target.exists())
+
+    def test_public_host_validation_retries_caddy_startup_before_failing(self):
+        """Caddy TLS can briefly refuse connections immediately after recreate."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            count = root / "curl-count"
+            fake_timeout = root / "timeout"
+            fake_timeout.write_text("#!/bin/sh\nshift\nexec \"$@\"\n", encoding="utf-8")
+            fake_timeout.chmod(0o755)
+            fake_curl = root / "curl"
+            fake_curl.write_text(
+                "#!/bin/sh\n"
+                f"count=$(cat '{count}' 2>/dev/null || printf '0')\n"
+                "count=$((count + 1)); printf '%s\\n' \"$count\" > '" + str(count) + "'\n"
+                "if [ \"$count\" = 1 ]; then exit 7; fi\n"
+                "printf '%s\\n' '{\"service\":\"portal-web\",\"status\":\"ok\"}'\n",
+                encoding="utf-8",
+            )
+            fake_curl.chmod(0o755)
+            fake_sleep = root / "sleep"
+            fake_sleep.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_sleep.chmod(0o755)
+            library = root / "portal-cutover-lib.sh"
+            library.write_text(
+                SCRIPT.read_text(encoding="utf-8").rsplit('\nmain "$@"', 1)[0],
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["/bin/bash", "-c", f'. "{library}"; validate_public_hosts'],
+                env={
+                    **os.environ,
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                    "RUN_ID": "caddy-startup-retry",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertGreaterEqual(int(count.read_text(encoding="utf-8").strip()), 5)
+
+    def test_nodeport_validation_retries_caddy_startup_before_failing(self):
+        """The Caddy container can reject exec probes while it is still starting."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            count = root / "docker-count"
+            fake_timeout = root / "timeout"
+            fake_timeout.write_text("#!/bin/sh\nshift\nexec \"$@\"\n", encoding="utf-8")
+            fake_timeout.chmod(0o755)
+            fake_docker = root / "docker"
+            fake_docker.write_text(
+                "#!/bin/sh\n"
+                f"count=$(cat '{count}' 2>/dev/null || printf '0')\n"
+                "count=$((count + 1)); printf '%s\\n' \"$count\" > '" + str(count) + "'\n"
+                "if [ \"$count\" = 1 ]; then exit 1; fi\n"
+                "printf '%s\\n' '{\"service\":\"portal-web\",\"status\":\"ok\"}'\n",
+                encoding="utf-8",
+            )
+            fake_docker.chmod(0o755)
+            fake_sleep = root / "sleep"
+            fake_sleep.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_sleep.chmod(0o755)
+            library = root / "portal-cutover-lib.sh"
+            library.write_text(
+                SCRIPT.read_text(encoding="utf-8").rsplit('\nmain \"$@\"', 1)[0],
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["/bin/bash", "-c", f'. "{library}"; validate_nodeport'],
+                env={
+                    **os.environ,
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                    "RUN_ID": "nodeport-startup-retry",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(count.read_text(encoding="utf-8").strip(), "2")
+
+    def test_caddy_health_retries_have_a_fixed_deadline(self):
+        """A stalled Caddy check must not multiply a per-request timeout by retries."""
+        text = SCRIPT.read_text(encoding="utf-8")
+        nodeport = text[text.index("validate_nodeport() {") : text.index("assert_nodeport_private_exposure() {")]
+        public_hosts = text[text.index("validate_public_hosts() {") : text.index("validate_caddy_config() {")]
+
+        self.assertIn("CADDY_HEALTH_TIMEOUT_SECONDS=30", text)
+        self.assertNotIn("CADDY_HEALTH_ATTEMPTS", text)
+        for function in (nodeport, public_hosts):
+            self.assertIn('deadline=$((SECONDS + CADDY_HEALTH_TIMEOUT_SECONDS))', function)
+            self.assertIn('while [ "$SECONDS" -lt "$deadline" ]', function)
+            self.assertIn('request_timeout=$((deadline - SECONDS))', function)
+            self.assertIn('run_timeout "$request_timeout"', function)
+
     def test_pvc_restore_retries_a_stream_failure_without_replacing_local_data_early(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

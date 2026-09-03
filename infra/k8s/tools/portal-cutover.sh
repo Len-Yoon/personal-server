@@ -7,6 +7,7 @@ set -u -o pipefail
 
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-30}"
 RESTORE_STREAM_ATTEMPTS="${PORTAL_RESTORE_STREAM_ATTEMPTS:-3}"
+CADDY_HEALTH_TIMEOUT_SECONDS=30
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dt%H%M%Sz)-$$}"
 K8S_RUN_ID="$RUN_ID"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -53,6 +54,17 @@ EXECUTOR_EXCLUDED=0
 
 run_timeout() { timeout "${1}s" "${@:2}"; }
 fail() { printf '%s\n' "portal_cutover=FAIL" >&2; return 1; }
+remove_tree_with_retries() {
+  local target attempt
+  target="$1"
+  [ ! -e "$target" ] && return 0
+  for attempt in 1 2 3; do
+    rm -rf -- "$target" || true
+    [ ! -e "$target" ] && return 0
+    [ "$attempt" -lt 3 ] && sleep 1
+  done
+  return 1
+}
 valid_run_id() {
   case "$1" in
     ''|*[!a-z0-9-]*) return 1 ;;
@@ -432,7 +444,7 @@ YAML
     [ ! -e "$backup" ] || mv -- "$backup" "$destination" || true
     return 1
   fi
-  [ ! -e "$backup" ] || rm -rf -- "$backup"
+  [ ! -e "$backup" ] || remove_tree_with_retries "$backup"
 }
 
 restore_files_from_pvc() {
@@ -683,8 +695,18 @@ recreate_caddy() {
 }
 
 validate_nodeport() {
+  local deadline request_timeout
   # Caddy's cutover target is deliberately fixed at host.docker.internal:30080.
-  run_timeout "$TIMEOUT_SECONDS" docker exec "$CADDY_CONTAINER" curl --fail --silent --show-error --max-time 10 "http://host.docker.internal:30080/health" | grep -Fq '"status":"ok"'
+  deadline=$((SECONDS + CADDY_HEALTH_TIMEOUT_SECONDS))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    request_timeout=$((deadline - SECONDS))
+    [ "$request_timeout" -le 5 ] || request_timeout=5
+    if run_timeout "$request_timeout" docker exec "$CADDY_CONTAINER" curl --fail --silent --show-error --max-time "$request_timeout" "http://host.docker.internal:30080/health" | grep -Fq '"status":"ok"'; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 assert_nodeport_private_exposure() {
@@ -704,12 +726,22 @@ assert_nodeport_private_exposure() {
 }
 
 validate_public_hosts() {
-  local host
-  for host in len.pe.kr portfolio.len.pe.kr file.len.pe.kr admin.len.pe.kr; do
-    if ! run_timeout "$TIMEOUT_SECONDS" curl --fail --silent --show-error --max-time 20 --resolve "$host:443:127.0.0.1" "https://${host}/health" | grep -Fq '"status":"ok"'; then
-      return 1
-    fi
+  local deadline request_timeout host ready
+  deadline=$((SECONDS + CADDY_HEALTH_TIMEOUT_SECONDS))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    request_timeout=$((deadline - SECONDS))
+    [ "$request_timeout" -le 5 ] || request_timeout=5
+    ready=1
+    for host in len.pe.kr portfolio.len.pe.kr file.len.pe.kr admin.len.pe.kr; do
+      if ! run_timeout "$request_timeout" curl --fail --silent --show-error --max-time "$request_timeout" --resolve "$host:443:127.0.0.1" "https://${host}/health" | grep -Fq '"status":"ok"'; then
+        ready=0
+        break
+      fi
+    done
+    [ "$ready" -eq 1 ] && return 0
+    sleep 1
   done
+  return 1
 }
 
 validate_caddy_config() {
