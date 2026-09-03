@@ -391,6 +391,57 @@ class PortalCutoverContractTest(unittest.TestCase):
         self.assertIn("sleep 1", preflight)
         self.assertIn("bridge endpoint did not become ready", preflight)
 
+    def test_public_validation_uses_portfolio_root_not_blocked_health_route(self):
+        """The portfolio host intentionally blocks /health but serves its public root."""
+        text = SCRIPT.read_text(encoding="utf-8")
+        public_validation = text[text.index("validate_public_hosts() {") : text.index("validate_caddy_config() {")]
+
+        self.assertIn("len.pe.kr|/health", public_validation)
+        self.assertIn("portfolio.len.pe.kr|/", public_validation)
+        self.assertIn("file.len.pe.kr|/health", public_validation)
+        self.assertIn("admin.len.pe.kr|/health", public_validation)
+        self.assertIn('--write-out "%{http_code}"', public_validation)
+        self.assertIn('[ "$status_code" != "200" ]', public_validation)
+
+    def test_public_validation_rejects_a_portfolio_redirect(self):
+        """Portfolio root must be served directly, not redirected during the handoff."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake_curl = root / "curl"
+            fake_curl.write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *portfolio.len.pe.kr*) printf '%s' '302' ;;\n"
+                "  *) printf '%s' '{\"status\":\"ok\"}' ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            fake_curl.chmod(0o755)
+            fake_sleep = root / "sleep"
+            fake_sleep.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_sleep.chmod(0o755)
+            library = root / "portal-cutover-lib.sh"
+            library.write_text(
+                SCRIPT.read_text(encoding="utf-8").rsplit('\nmain \"$@\"', 1)[0],
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                ["/bin/bash", "-c", f'. "{library}"; CADDY_HEALTH_TIMEOUT_SECONDS=1; validate_public_hosts'],
+                env={
+                    **os.environ,
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                    "CADDY_HEALTH_TIMEOUT_SECONDS": "1",
+                    "TIMEOUT_SECONDS": "1",
+                    "RUN_ID": "portfolio-redirect",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+
     def test_compose_state_migration_requires_an_explicit_command(self):
         """A deployment must not silently switch Portal to an empty state mount."""
         text = SCRIPT.read_text(encoding="utf-8")
@@ -713,7 +764,10 @@ restore_writers_after_switch_failure''',
                 f"count=$(cat '{count}' 2>/dev/null || printf '0')\n"
                 "count=$((count + 1)); printf '%s\\n' \"$count\" > '" + str(count) + "'\n"
                 "if [ \"$count\" = 1 ]; then exit 7; fi\n"
-                "printf '%s\\n' '{\"service\":\"portal-web\",\"status\":\"ok\"}'\n",
+                "case \"$*\" in\n"
+                "  *'--write-out'*) printf '%s' '200' ;;\n"
+                "  *) printf '%s\\n' '{\"service\":\"portal-web\",\"status\":\"ok\"}' ;;\n"
+                "esac\n",
                 encoding="utf-8",
             )
             fake_curl.chmod(0o755)
