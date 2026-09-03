@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -13,6 +14,77 @@ BOOTSTRAP = ROOT / "scripts/windows-bootstrap.sh"
 
 
 class PortalCutoverContractTest(unittest.TestCase):
+    def test_cutover_rejects_k3s_pvc_backup_evidence_for_compose_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence = root / "backup.ok"
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            evidence.write_text(
+                "\n".join(
+                    (
+                        "schema_version=1",
+                        "scope=portal",
+                        "backup_status=success",
+                        "encrypted=true",
+                        f"backup_completed_at={(now - timedelta(minutes=5)).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+                        "restore_status=success",
+                        f"restore_verified_at={(now - timedelta(minutes=4)).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+                        f"evidence_expires_at={(now + timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+                        "backup_id=portal-test",
+                        "source_runtime=k3s-pvc",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            source_dir = root / "files"
+            source_dir.mkdir()
+            state_dir = root / "state"
+            state_dir.mkdir()
+            (state_dir / "homeops.sqlite3").write_bytes(b"sqlite-placeholder")
+            env_file = root / ".env"
+            env_file.write_text(
+                "\n".join(
+                    f"{key}=test-value"
+                    for key in (
+                        "DELETE_PASSWORD",
+                        "FILE_MANAGER_PASSWORD",
+                        "ADMIN_STATUS_PASSWORD",
+                        "FILE_MANAGER_ACCESS_PASSWORD",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake_sudo = root / "sudo"
+            fake_sudo.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = k3s ] && [ \"$2\" = secrets-encrypt ] && [ \"$3\" = status ]; then\n"
+                "  printf '%s\\n' 'Encryption Status: Enabled'\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 99\n",
+                encoding="utf-8",
+            )
+            fake_sudo.chmod(0o755)
+            result = subprocess.run(
+                ["/bin/bash", str(SCRIPT), "--go"],
+                env={
+                    **os.environ,
+                    "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                    "PORTAL_BACKUP_EVIDENCE": str(evidence),
+                    "PORTAL_SOURCE_DIR": str(source_dir),
+                    "PORTAL_STATE_SOURCE_DIR": str(state_dir),
+                    "PORTAL_ENV_FILE": str(env_file),
+                    "RUN_ID": "reject-k3s-evidence",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("encrypted backup evidence is missing or invalid", result.stderr)
+
     def test_script_exists_and_is_bash(self):
         self.assertTrue(SCRIPT.is_file())
         self.assertTrue(SCRIPT.read_text(encoding="utf-8").startswith("#!/usr/bin/env bash"))

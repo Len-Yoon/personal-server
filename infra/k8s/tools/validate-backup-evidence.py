@@ -21,6 +21,7 @@ REQUIRED_KEYS = frozenset(
         "restore_verified_at",
         "evidence_expires_at",
         "backup_id",
+        "source_runtime",
     }
 )
 OPTIONAL_KEYS = frozenset({"artifact_digest", "source_digest", "restore_check", "restore_path_check"})
@@ -28,6 +29,7 @@ ALLOWED_KEYS = REQUIRED_KEYS | OPTIONAL_KEYS
 TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 BACKUP_ID_RE = re.compile(r"[A-Za-z0-9._-]+\Z")
 ARTIFACT_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+SOURCE_RUNTIME_VALUES = frozenset({"compose-local", "k3s-pvc"})
 
 
 class EvidenceError(ValueError):
@@ -80,6 +82,8 @@ def validate_evidence(values: dict[str, str], now: datetime, max_age_seconds: in
 
     if not BACKUP_ID_RE.fullmatch(values["backup_id"]):
         raise EvidenceError("backup_id is not an opaque safe identifier")
+    if values["source_runtime"] not in SOURCE_RUNTIME_VALUES:
+        raise EvidenceError("source_runtime is not approved")
     if "artifact_digest" in values and not ARTIFACT_DIGEST_RE.fullmatch(values["artifact_digest"]):
         raise EvidenceError("artifact_digest must be a lowercase sha256 digest")
     if "source_digest" in values and not ARTIFACT_DIGEST_RE.fullmatch(values["source_digest"]):

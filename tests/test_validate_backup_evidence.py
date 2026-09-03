@@ -21,6 +21,7 @@ def valid_evidence(**overrides: str) -> str:
         "restore_verified_at": "2026-08-29T23:45:00Z",
         "evidence_expires_at": "2026-08-30T01:00:00Z",
         "backup_id": "portal-20260829.1",
+        "source_runtime": "compose-local",
     }
     values.update(overrides)
     return "\n".join(f"{key}={value}" for key, value in values.items()) + "\n"
@@ -65,6 +66,24 @@ class ValidateBackupEvidenceTests(unittest.TestCase):
     def test_valid_source_digest_is_accepted(self):
         result = self.run_validator(valid_evidence(source_digest="sha256:" + "b" * 64))
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rejects_evidence_without_source_runtime(self):
+        content = valid_evidence().replace("source_runtime=compose-local\n", "")
+        self.assertNotEqual(self.run_validator(content).returncode, 0)
+
+    def test_accepts_only_known_source_runtime_values(self):
+        self.assertEqual(
+            self.run_validator(valid_evidence(source_runtime="compose-local")).returncode,
+            0,
+        )
+        self.assertEqual(
+            self.run_validator(valid_evidence(source_runtime="k3s-pvc")).returncode,
+            0,
+        )
+        self.assertNotEqual(
+            self.run_validator(valid_evidence(source_runtime="unknown")).returncode,
+            0,
+        )
 
     def test_rejects_unencrypted_or_unsuccessful_restore(self):
         for changes in (
