@@ -784,14 +784,33 @@ switch_caddy() {
   if ! cp -- "$ENV_FILE" "$BACKUP_FILE"; then return 1; fi
   chmod 600 "$BACKUP_FILE" || return 1
   ENV_BACKUP_TARGET=1
+  printf '%s\n' 'portal_cutover_stage=caddy_upstream'
   if ! set_portal_upstream "host.docker.internal:${NODE_PORT}"; then return 1; fi
-  if ! recreate_caddy || ! validate_nodeport || ! validate_public_hosts; then
+  printf '%s\n' 'portal_cutover_stage=caddy_recreate'
+  if ! recreate_caddy; then
     set_portal_upstream "$previous_upstream" || true
     recreate_caddy || true
     restore_writers_after_switch_failure
     fail
     return 1
   fi
+  printf '%s\n' 'portal_cutover_stage=nodeport_health'
+  if ! validate_nodeport; then
+    set_portal_upstream "$previous_upstream" || true
+    recreate_caddy || true
+    restore_writers_after_switch_failure
+    fail
+    return 1
+  fi
+  printf '%s\n' 'portal_cutover_stage=public_health'
+  if ! validate_public_hosts; then
+    set_portal_upstream "$previous_upstream" || true
+    recreate_caddy || true
+    restore_writers_after_switch_failure
+    fail
+    return 1
+  fi
+  printf '%s\n' 'portal_cutover_stage=runtime_marker'
   if ! set_runtime_marker k3s; then
     set_portal_upstream "$previous_upstream" || true
     recreate_caddy || true
