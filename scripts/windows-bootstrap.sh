@@ -94,6 +94,13 @@ set_cutover_homeops_lists() {
   export HOMEOPS_DOCKER_MANAGED_SERVICES EXPECTED_CONTAINERS
 }
 
+set_compose_homeops_lists() {
+  set_cutover_homeops_lists
+  HOMEOPS_DOCKER_MANAGED_SERVICES="portal-web,$HOMEOPS_DOCKER_MANAGED_SERVICES"
+  EXPECTED_CONTAINERS="portal-web,$EXPECTED_CONTAINERS"
+  export HOMEOPS_DOCKER_MANAGED_SERVICES EXPECTED_CONTAINERS
+}
+
 load_runtime_service_modes() {
   local state row service mode
   state="$(load_service_runtime_state "$PROJECT_ROOT")" || return 1
@@ -166,6 +173,7 @@ start_runtime_services() {
         docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d \
           portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker caddy
       else
+        set_compose_homeops_lists
         compose_services="homeops-executor system-agent car-care-worker"
         for service in crawler-worker youtube-memo book-memo; do
           if [ "$(runtime_service_mode "$service")" = compose ]; then compose_services+=" $service"; fi

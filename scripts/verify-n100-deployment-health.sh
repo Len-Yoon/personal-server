@@ -47,7 +47,12 @@ for service in system-agent crawler-worker youtube-memo book-memo car-care-worke
       echo "Compose writer is running during K3s mode: $service" >&2
       exit 1
     fi
-    k3s kubectl -n "${K3S_NAMESPACE:-personal-server}" rollout status "deployment/$service" --timeout="${K3S_ROLLOUT_TIMEOUT:-120s}"
+    namespace="${K3S_NAMESPACE:-personal-server}"
+    desired=$(sudo k3s kubectl -n "$namespace" get "deployment/$service" -o jsonpath='{.spec.replicas}')
+    ready=$(sudo k3s kubectl -n "$namespace" get "deployment/$service" -o jsonpath='{.status.readyReplicas}')
+    available=$(sudo k3s kubectl -n "$namespace" get "deployment/$service" -o jsonpath='{.status.availableReplicas}')
+    [[ "$desired" =~ ^[0-9]+$ && "$desired" -ge 1 && "$ready" == "$desired" && "$available" == "$desired" ]]
+    sudo k3s kubectl -n "$namespace" rollout status "deployment/$service" --timeout="${K3S_ROLLOUT_TIMEOUT:-120s}"
   else
     compose ps --status running --services | grep -Fx -- "$service"
   fi

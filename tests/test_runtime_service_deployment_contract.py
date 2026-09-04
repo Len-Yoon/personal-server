@@ -39,6 +39,18 @@ class RuntimeServiceDeploymentContractTests(unittest.TestCase):
         k3s = runtime[runtime.index("k3s)") :]
         self.assertIn("set_cutover_homeops_lists", k3s)
 
+    def test_mixed_portal_compose_mode_rebuilds_homeops_lists(self):
+        text = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf-8")
+        compose = text[text.index("compose)") : text.index("cutover)")]
+        self.assertIn("set_compose_homeops_lists", compose)
+
+    def test_k3s_health_checks_desired_and_ready_replicas_with_sudo_k3s(self):
+        text = (ROOT / "scripts" / "verify-n100-deployment-health.sh").read_text(encoding="utf-8")
+        self.assertIn("sudo k3s kubectl", text)
+        self.assertIn(".spec.replicas", text)
+        self.assertIn(".status.readyReplicas", text)
+        self.assertIn(".status.availableReplicas", text)
+
 
 if __name__ == "__main__":
     unittest.main()
