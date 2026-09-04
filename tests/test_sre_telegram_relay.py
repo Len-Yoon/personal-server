@@ -1,8 +1,10 @@
+import json
 import sys
 import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +12,7 @@ sys.path.insert(0, str(REPO_ROOT / "sre-telegram-relay"))
 
 from app.main import (  # noqa: E402
     BACKUP_STATUS_CONFIGMAP,
+    MAX_BACKUP_DELIVERED_RUN_IDS,
     ConfigMapBackupDeliveryStore,
     ConfigMapAlertStateStore,
     ConfigMapOffsetStore,
@@ -84,6 +87,17 @@ class FakeBackupStatusK8s(FakeConfigMapK8s):
         return super().get_config_map(namespace, name)
 
 
+class UnavailableBackupStatusK8s(FakeConfigMapK8s):
+    def __init__(self, error):
+        super().__init__()
+        self._error = error
+
+    def get_config_map(self, namespace, name):
+        if name == BACKUP_STATUS_CONFIGMAP:
+            raise self._error
+        return super().get_config_map(namespace, name)
+
+
 class FailingOffsetStore:
     def load(self):
         raise OSError("ConfigMap unavailable")
@@ -143,6 +157,41 @@ class ControlledTelegramClient(TelegramClient):
 
 
 class RelayServiceTest(unittest.TestCase):
+    def test_absent_or_unreadable_backup_status_configmap_keeps_relay_healthy(self):
+        for error in (
+            HTTPError("https://kubernetes.invalid/backup-status", 404, "not found", None, None),
+            OSError("forbidden"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                k8s = UnavailableBackupStatusK8s(error)
+                relay = RelayService(
+                    allowed_chat_id="123",
+                    k8s_client=k8s,
+                    prometheus_client=FakePrometheus(),
+                    backup_delivery_store=ConfigMapBackupDeliveryStore(
+                        k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP
+                    ),
+                )
+
+                run_polling(relay, FakePollingTelegram([]), "123", max_cycles=1, sleep_fn=lambda _: None)
+                status, body = handle_http_request(relay, method="GET", path="/healthz")
+
+                self.assertTrue(relay.is_healthy())
+                self.assertEqual((status, body), (200, b"ok\n"))
+
+    def test_backup_delivery_state_keeps_only_bounded_recent_run_ids(self):
+        k8s = FakeConfigMapK8s()
+        store = ConfigMapBackupDeliveryStore(k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP)
+
+        for index in range(MAX_BACKUP_DELIVERED_RUN_IDS + 1):
+            store.save(f"run-{index}")
+
+        persisted = json.loads(k8s.data["backup_delivered_run_ids"])
+        self.assertEqual(len(persisted), MAX_BACKUP_DELIVERED_RUN_IDS)
+        self.assertEqual(persisted[0], "run-1")
+        self.assertTrue(store.contains(f"run-{MAX_BACKUP_DELIVERED_RUN_IDS}"))
+        self.assertFalse(store.contains("run-0"))
+
     def test_backup_report_delivers_each_allowed_status_once_and_persists_run_id(self):
         expected_messages = {
             "completed": "[백업 완료]\n상태: 암호화 백업과 복원 검증을 완료했습니다.\n대상: Portal 데이터",

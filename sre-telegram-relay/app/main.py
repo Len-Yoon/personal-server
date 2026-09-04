@@ -30,6 +30,7 @@ MAX_REQUEST_BODY_BYTES = 1_048_576
 CONFIGMAP_OFFSET_KEY = "telegram_next_update_id"
 CONFIGMAP_ALERT_STATE_KEY = "alert_state"
 CONFIGMAP_BACKUP_DELIVERED_RUN_IDS_KEY = "backup_delivered_run_ids"
+MAX_BACKUP_DELIVERED_RUN_IDS = 128
 ALERT_STATE_TTL_SECONDS = 4 * 60 * 60
 ALERT_PRESENTATIONS = {
     "PodRestartIncrease": ("서비스가 반복 재시작됨", "서비스 기능이 불안정할 수 있음"),
@@ -304,9 +305,9 @@ class ConfigMapBackupDeliveryStore:
         if not SAFE_BACKUP_RUN_ID.fullmatch(run_id):
             raise ValueError("invalid backup run ID")
         run_ids = self._read_run_ids()
-        if run_id in run_ids:
-            return
-        run_ids.append(run_id)
+        if run_id not in run_ids:
+            run_ids.append(run_id)
+        run_ids = run_ids[-MAX_BACKUP_DELIVERED_RUN_IDS:]
         self._k8s_client.patch_config_map(
             self._namespace,
             self._name,
@@ -329,7 +330,7 @@ class ConfigMapBackupDeliveryStore:
             or len(set(run_ids)) != len(run_ids)
         ):
             raise ValueError("relay ConfigMap has invalid backup delivery state")
-        return run_ids
+        return run_ids[-MAX_BACKUP_DELIVERED_RUN_IDS:]
 
 
 class PrometheusClient:
@@ -879,7 +880,11 @@ def _decode_object(body: bytes) -> dict[str, Any]:
 
 def _read_backup_report(k8s_client: KubernetesClient) -> dict[str, str] | None:
     """Return only a complete, allow-listed backup status report from its fixed ConfigMap."""
-    config_map = k8s_client.get_config_map(RELAY_NAMESPACE, BACKUP_STATUS_CONFIGMAP)
+    try:
+        config_map = k8s_client.get_config_map(RELAY_NAMESPACE, BACKUP_STATUS_CONFIGMAP)
+    except (OSError, URLError, ValueError, json.JSONDecodeError) as exc:
+        LOGGER.warning("backup_report_ignored reason=unavailable error_type=%s", type(exc).__name__)
+        return None
     data = config_map.get("data")
     if not isinstance(data, dict) or set(data) != BACKUP_REPORT_KEYS:
         LOGGER.warning("backup_report_ignored reason=invalid_keys")
