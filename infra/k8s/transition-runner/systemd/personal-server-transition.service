@@ -1,0 +1,20 @@
+[Unit]
+Description=Personal Server controlled Compose to K3s transition
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+LoadCredentialEncrypted=rclone-config:/etc/personal-server-transition/credentials/rclone-config.cred
+LoadCredentialEncrypted=rclone-config-passphrase:/etc/personal-server-transition/credentials/rclone-config-passphrase.cred
+LoadCredentialEncrypted=age-identity:/etc/personal-server-transition/credentials/age-identity.cred
+ExecStart=/usr/local/libexec/personal-server-transition-runner
+PrivateTmp=yes
+ProtectHome=yes
+NoNewPrivileges=yes
+ReadWritePaths=/var/lib/personal-server-transition
+
+[Install]
+WantedBy=multi-user.target
