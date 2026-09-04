@@ -12,7 +12,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_password=""):
+    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_password="", assert_lock_fd_closed=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -55,6 +55,7 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
                 "PORTAL_FAKE_REQUIRE_URLLIB": "1" if require_urllib else "",
                 "PORTAL_FAKE_HEALTH_STATUS": str(health_status),
                 "PORTAL_FAKE_REQUIRE_CONFIG_PASSWORD": "1" if rclone_config_password else "",
+                "PORTAL_FAKE_ASSERT_LOCK_FD_CLOSED": "1" if assert_lock_fd_closed else "",
                 "RCLONE_CONFIG_PASS": rclone_config_password,
             }
             if namespace is not None:
@@ -118,6 +119,13 @@ if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = health ]; then
 fi
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = stream ]; then
   case "$*" in *'exec -i'*) exit 42 ;; esac
+fi
+if [ "${{PORTAL_FAKE_ASSERT_LOCK_FD_CLOSED:-}}" = 1 ]; then
+  case "$*" in
+    *'exec -i'*)
+      if (: >&9) 2>/dev/null; then exit 42; fi
+      ;;
+  esac
 fi
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = scale ]; then
   case "$*" in *'scale deployment/portal-web --replicas=0'*) exit 42 ;; esac
@@ -194,6 +202,9 @@ if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = remote ] && [ "$1" = lsd ]; then
 fi
 if [ "${{PORTAL_FAKE_REQUIRE_CONFIG_PASSWORD:-}}" = 1 ]; then
   [ "${{RCLONE_CONFIG_PASS:-}}" = test-rclone-config-password ] || exit 42
+fi
+if [ "${{PORTAL_FAKE_ASSERT_LOCK_FD_CLOSED:-}}" = 1 ] && [ "$1" = copyto ]; then
+  if (: >&9) 2>/dev/null; then exit 42; fi
 fi
 if [ "$1" = lsd ]; then exit 0; fi
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = upload ] && [ "$1" = copyto ]; then
@@ -463,6 +474,13 @@ esac
         self.assertIn("scale deployment/portal-web --replicas=1", calls)
         self.assertIn("kubectl -n personal-server delete pod", calls)
         self.assertEqual(evidence, "")
+
+    def test_go_does_not_pass_the_backup_lock_to_stream_or_remote_transfer_children(self):
+        """Interrupted child commands must not retain the parent backup lock."""
+        result, _, _, _ = self.run_tool("--go", assert_lock_fd_closed=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("portal_pvc_backup=PASS", result.stdout)
 
     def test_go_upload_failure_restores_original_replica_and_deletes_reader(self):
         result, calls, _, evidence = self.run_tool("--go", fail_at="upload")
