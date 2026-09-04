@@ -121,7 +121,10 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
             path.write_text(text, encoding="utf-8")
             path.chmod(0o755)
 
-        write("sudo", "#!/bin/sh\nexec \"$@\"\n")
+        write(
+            "sudo",
+            "#!/bin/sh\nif [ \"${1:-}\" = -n ]; then shift; fi\nif [ \"${1:-}\" = -v ]; then exit 0; fi\nexec \"$@\"\n",
+        )
         write("flock", "#!/bin/sh\nif [ \"${PORTAL_FAKE_LOCK_BUSY:-}\" = 1 ]; then exit 1; fi\nexit 0\n")
         write(
             "k3s",
@@ -272,6 +275,14 @@ esac
         self.assertIn("portal_pvc_backup=PASS", result.stdout)
         self.assertNotIn("scale deployment/portal-web", calls)
         self.assertNotIn("create -f", calls)
+
+    def test_operator_is_prompted_for_sudo_before_hidden_kubernetes_preflight(self):
+        """A missing sudo credential must not look like an unexplained backup failure."""
+        text = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("sudo -n true", text)
+        self.assertIn("sudo -v 1>&3 2>&3", text)
+        self.assertLess(text.index("ensure_sudo_access || exit 1"), text.index("assert_preflight || exit 1"))
 
     def test_remote_preflight_has_a_hidden_password_prompt_and_clears_its_temporary_environment(self):
         """An interactive config password must be explained without exposing it."""
