@@ -357,17 +357,47 @@ esac
         self.assertIn("rollout status deployment/portal-web", calls)
         self.assertIn("exec portal-web-1", calls)
 
+    def test_go_reports_fixed_progress_stages_without_private_diagnostics(self):
+        result, _, _, _ = self.run_tool("--go")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for stage in (
+            "portal_pvc_backup_stage=writer_pause",
+            "portal_pvc_backup_stage=pvc_snapshot",
+            "portal_pvc_backup_stage=remote_upload",
+            "portal_pvc_backup_stage=remote_restore",
+            "portal_pvc_backup_stage=restore_validation",
+        ):
+            self.assertIn(stage, result.stdout)
+        self.assertNotIn("/tmp/", result.stdout)
+
     def test_rollout_failure_removes_evidence_and_reports_fixed_failure(self):
         result, calls, _, evidence = self.run_tool("--go", fail_at="rollout")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(result.stdout.strip(), "portal_pvc_backup_stage=portal_readiness\nportal_pvc_backup=FAIL")
+        self.assertEqual(result.stdout.strip(), "\n".join((
+            "portal_pvc_backup_stage=writer_pause",
+            "portal_pvc_backup_stage=pvc_snapshot",
+            "portal_pvc_backup_stage=remote_upload",
+            "portal_pvc_backup_stage=remote_restore",
+            "portal_pvc_backup_stage=restore_validation",
+            "portal_pvc_backup_stage=portal_readiness",
+            "portal_pvc_backup=FAIL",
+        )))
         self.assertEqual(evidence, "")
         self.assertIn("scale deployment/portal-web --replicas=1", calls)
 
     def test_health_failure_removes_evidence_and_reports_fixed_failure(self):
         result, calls, _, evidence = self.run_tool("--go", fail_at="health")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(result.stdout.strip(), "portal_pvc_backup_stage=portal_health\nportal_pvc_backup=FAIL")
+        self.assertEqual(result.stdout.strip(), "\n".join((
+            "portal_pvc_backup_stage=writer_pause",
+            "portal_pvc_backup_stage=pvc_snapshot",
+            "portal_pvc_backup_stage=remote_upload",
+            "portal_pvc_backup_stage=remote_restore",
+            "portal_pvc_backup_stage=restore_validation",
+            "portal_pvc_backup_stage=portal_health",
+            "portal_pvc_backup=FAIL",
+        )))
         self.assertEqual(evidence, "")
         self.assertIn("scale deployment/portal-web --replicas=1", calls)
 
@@ -390,7 +420,15 @@ esac
     def test_non_200_health_blocks_evidence_and_reports_health_failure(self):
         result, calls, _, evidence = self.run_tool("--go", health_status=503)
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(result.stdout.strip(), "portal_pvc_backup_stage=portal_health\nportal_pvc_backup=FAIL")
+        self.assertEqual(result.stdout.strip(), "\n".join((
+            "portal_pvc_backup_stage=writer_pause",
+            "portal_pvc_backup_stage=pvc_snapshot",
+            "portal_pvc_backup_stage=remote_upload",
+            "portal_pvc_backup_stage=remote_restore",
+            "portal_pvc_backup_stage=restore_validation",
+            "portal_pvc_backup_stage=portal_health",
+            "portal_pvc_backup=FAIL",
+        )))
         self.assertEqual(evidence, "")
         self.assertIn("exec portal-web-1", calls)
 
@@ -408,6 +446,8 @@ esac
         result, calls, _, _ = self.run_tool("--go", repeat=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("backup_upload=SKIPPED_UNCHANGED", result.stdout)
+        self.assertIn("portal_pvc_backup_stage=pvc_snapshot", result.stdout)
+        self.assertNotIn("portal_pvc_backup_stage=remote_upload", result.stdout)
         self.assertEqual(calls.count("rclone copyto"), 2)
         self.assertGreaterEqual(calls.count("exec -i"), 4)
 

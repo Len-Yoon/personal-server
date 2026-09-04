@@ -42,6 +42,7 @@ usage() { printf '%s\n' "usage: $0 --check|--go" >&2; }
 run_timeout() { timeout "$@"; }
 kctl() { run_timeout "${PORTAL_KUBECTL_TIMEOUT_SECONDS:-120}" sudo k3s kubectl "$@"; }
 fail() { return 1; }
+progress() { printf '%s\n' "portal_pvc_backup_stage=$1"; }
 
 run_private() {
   "$@" >>"$DIAGNOSTIC_FILE" 2>&1
@@ -256,8 +257,10 @@ ORIGINAL_REPLICAS=$(kctl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o jsonpat
 case "$ORIGINAL_REPLICAS" in ''|*[!0-9]*) exit 1 ;; esac
 # Mark restoration as required before the scale request: timeout/failure is ambiguous.
 WRITERS_SCALED=1
+progress writer_pause
 kctl -n personal-server scale "deployment/$DEPLOYMENT" --replicas=0 >>"$DIAGNOSTIC_FILE" 2>&1
 kctl -n personal-server wait --for=delete pod -l app.kubernetes.io/name=portal-web --timeout=120s >>"$DIAGNOSTIC_FILE" 2>&1
+progress pvc_snapshot
 create_reader_pod
 stream_pvc_tree /data/files "$stage/data/files"
 stream_pvc_tree /data/portal-web-state "$stage/data/portal-web-state"
@@ -280,7 +283,9 @@ tar -C "$stage" -cf "$archive" data manifest.txt >>"$DIAGNOSTIC_FILE" 2>&1
 age -R "$RECIPIENT" -o "$ciphertext" "$archive" >>"$DIAGNOSTIC_FILE" 2>&1
 artifact_digest="sha256:$(sha256sum "$ciphertext" | awk '{print $1}')"
 remote_object="$REMOTE/portal-${RUN_ID}.tar.age"
+progress remote_upload
 rclone copyto --immutable --log-level ERROR "$ciphertext" "$remote_object" >>"$DIAGNOSTIC_FILE" 2>&1
+progress remote_restore
 rclone copyto --log-level ERROR "$remote_object" "$WORKDIR/download.age" >>"$DIAGNOSTIC_FILE" 2>&1
 [ "$artifact_digest" = "sha256:$(sha256sum "$WORKDIR/download.age" | awk '{print $1}')" ]
 age -d -i "$IDENTITY" -o "$WORKDIR/restore.tar" "$WORKDIR/download.age" >>"$DIAGNOSTIC_FILE" 2>&1
@@ -291,6 +296,7 @@ assert_regular_tree "$restore/data/portal-web-state"
 [ "$(tree_digest "$restore/data/portal-web-state")" = "$state_digest" ]
 grep -Fxq "source_runtime=k3s-pvc" "$restore/manifest.txt"
 grep -Fxq "source_digest=$SOURCE_DIGEST" "$restore/manifest.txt"
+progress restore_validation
 sqlite3 "$restore/data/portal-web-state/homeops.sqlite3" 'PRAGMA quick_check;' 2>>"$DIAGNOSTIC_FILE" | grep -Fxq ok
 ARTIFACT_DIGEST="$artifact_digest"
 EVIDENCE_PENDING=1
