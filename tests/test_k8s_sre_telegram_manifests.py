@@ -78,6 +78,11 @@ class SreTelegramManifestContractTests(unittest.TestCase):
             },
         )
 
+    def test_relay_deployment_recreates_to_prevent_overlapping_singletons(self):
+        deployment = find_document(load_yaml_documents("base.yaml"), "Deployment", "sre-telegram-relay")
+
+        self.assertEqual(deployment["spec"]["strategy"], {"type": "Recreate"})
+
     def test_rbac_is_read_only_except_named_relay_state_configmap(self):
         documents = load_yaml_documents("base.yaml")
         state_role = find_document(documents, "Role", "sre-telegram-relay-state")
