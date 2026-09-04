@@ -36,6 +36,7 @@ EVIDENCE_PENDING=0
 BACKUP_UPLOAD_STATUS=''
 FAILURE_STAGE=''
 RCLONE_CONFIG_PASS_PROMPTED=0
+ACTIVE_TIMEOUT_PID=''
 
 usage() { printf '%s\n' "usage: $0 --check|--go" >&2; }
 
@@ -43,18 +44,28 @@ usage() { printf '%s\n' "usage: $0 --check|--go" >&2; }
 # children (kubectl exec/rclone) must not inherit it, otherwise an interrupted
 # backup can leave the lock held after this process exits.
 run_unlocked() { "$@" 9>&-; }
+TIMEOUT_SUPERVISOR=$'import ctypes\nimport os\nimport signal\nimport subprocess\nimport sys\n\nPR_SET_PDEATHSIG = 1\nif sys.platform.startswith("linux"):\n    libc = ctypes.CDLL(None, use_errno=True)\n    if libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM) != 0:\n        raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG)")\n\nseconds = int(sys.argv[1])\ncommand = sys.argv[2:]\nprocess = None\n\ndef terminate_group(signal_to_send):\n    if process is None:\n        return\n    try:\n        os.killpg(process.pid, signal_to_send)\n    except ProcessLookupError:\n        pass\n\ndef wait_after_termination():\n    if process is None:\n        return\n    try:\n        process.wait(timeout=10)\n    except subprocess.TimeoutExpired:\n        terminate_group(signal.SIGKILL)\n        process.wait()\n\ndef on_signal(signum, _frame):\n    terminate_group(signal.SIGTERM)\n    wait_after_termination()\n    raise SystemExit(128 + signum)\n\nsignal.signal(signal.SIGINT, on_signal)\nsignal.signal(signal.SIGTERM, on_signal)\nsignal.signal(signal.SIGHUP, on_signal)\nprocess = subprocess.Popen(command, start_new_session=True)\ntry:\n    raise SystemExit(process.wait(timeout=seconds))\nexcept subprocess.TimeoutExpired:\n    terminate_group(signal.SIGTERM)\n    wait_after_termination()\n    raise SystemExit(124)\n'
 run_timeout() {
   local seconds=$1
   shift
-  # `timeout` only signals its direct child.  Start a separate session with a
-  # supervising shell so its TERM trap can terminate every kubectl descendant.
-  timeout --kill-after=10s "$seconds" setsid bash -c '
-    trap '"'"'trap - TERM; kill -TERM -- -$$ 2>/dev/null || true; exit 143'"'"' TERM
-    # Keep heredoc/stdin-based kubectl create calls connected to this script.
-    "$@" <&0 &
-    child_pid=$!
-    wait "$child_pid"
-  ' bash "$@" 9>&-
+  # Python owns the child session and kills the whole process group on timeout.
+  # Unlike `timeout setsid`, it also preserves command output and stdin.
+  python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" "$@" 9>&-
+}
+run_timeout_tracked() {
+  local seconds=$1 status
+  shift
+  # Streaming does not consume stdin, so run it in the background only to let
+  # the controller's signal trap terminate the supervisor immediately.
+  python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" "$@" 9>&- &
+  ACTIVE_TIMEOUT_PID=$!
+  if wait "$ACTIVE_TIMEOUT_PID"; then
+    status=0
+  else
+    status=$?
+  fi
+  ACTIVE_TIMEOUT_PID=''
+  return "$status"
 }
 kctl() { run_timeout "${PORTAL_KUBECTL_TIMEOUT_SECONDS:-120}" sudo k3s kubectl "$@"; }
 fail() { return 1; }
@@ -91,7 +102,7 @@ assert_preflight() {
   [ "$(tr -d '\r\n' < "$RUNTIME_MARKER")" = k3s ] || return 1
   [ -r "$RECIPIENT" ] && [ -r "$IDENTITY" ] || return 1
   [ -d "$(dirname -- "$EVIDENCE")" ] && [ -w "$(dirname -- "$EVIDENCE")" ] || return 1
-  for command_name in age rclone sqlite3 python3 sudo k3s timeout setsid flock tar find sha256sum awk grep xargs mktemp; do
+  for command_name in age rclone sqlite3 python3 sudo k3s flock tar find sha256sum awk grep xargs mktemp; do
     command -v "$command_name" >/dev/null || return 1
   done
 
@@ -169,10 +180,15 @@ YAML
 }
 
 stream_pvc_tree() {
-  local mount_path=$1 destination=$2
+  local mount_path=$1 destination=$2 stream_archive
   mkdir -p -- "$destination"
-  run_timeout "${PORTAL_STREAM_TIMEOUT_SECONDS:-120}" sudo k3s kubectl -n "$NAMESPACE" exec -i "$READER_POD" -- tar -C "$mount_path" -cf - . >>"$DIAGNOSTIC_FILE" 2>&1 |
-    tar -C "$destination" -xf - >>"$DIAGNOSTIC_FILE" 2>&1
+  stream_archive="$destination/.pvc-stream.tar"
+  if ! run_timeout_tracked "${PORTAL_STREAM_TIMEOUT_SECONDS:-120}" sudo k3s kubectl -n "$NAMESPACE" exec -i "$READER_POD" -- tar -C "$mount_path" -cf - . >"$stream_archive" 2>>"$DIAGNOSTIC_FILE"; then
+    rm -f -- "$stream_archive"
+    return 1
+  fi
+  tar -C "$destination" -xf "$stream_archive" >>"$DIAGNOSTIC_FILE" 2>&1
+  rm -f -- "$stream_archive"
 }
 
 evidence_is_current_k3s_pvc() {
@@ -254,7 +270,12 @@ case "${1:-}" in
   --check|--go) MODE=$1 ;;
   *) usage; exit 2 ;;
 esac
-on_signal() { exit 130; }
+on_signal() {
+  if [ -n "$ACTIVE_TIMEOUT_PID" ]; then
+    kill -TERM "$ACTIVE_TIMEOUT_PID" 2>/dev/null || true
+  fi
+  exit 130
+}
 trap cleanup EXIT
 trap on_signal INT TERM HUP
 
