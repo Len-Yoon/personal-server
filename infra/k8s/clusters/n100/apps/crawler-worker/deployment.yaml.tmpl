@@ -1,0 +1,54 @@
+# DRAFT ONLY — NOT FOR APPLY. Image, data copy, and runtime Secret injection require approval.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crawler-worker
+  namespace: personal-server
+  annotations:
+    draft.personal-server.io/not-for-apply: "true"
+    draft.personal-server.io/confirm-required: "image digest, data ownership, health endpoint"
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: crawler-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: crawler-worker
+      annotations:
+        draft.personal-server.io/not-for-apply: "true"
+    spec:
+      containers:
+        - name: crawler-worker
+          image: __CONFIRM_CRAWLER_WORKER_IMAGE_REF__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8001
+          envFrom:
+            - secretRef:
+                name: crawler-worker-runtime
+                optional: false
+          env:
+            - name: NEWS_DB_PATH
+              value: /data/crawler-worker/news_summaries.sqlite3
+            - name: NEWS_ARCHIVE_PATH
+              value: /data/crawler-worker/news_archive.json
+          volumeMounts:
+            - name: crawler-worker-data
+              mountPath: /data/crawler-worker
+              readOnly: false
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+      volumes:
+        - name: crawler-worker-data
+          persistentVolumeClaim:
+            claimName: crawler-worker-data-dynamic-draft
+

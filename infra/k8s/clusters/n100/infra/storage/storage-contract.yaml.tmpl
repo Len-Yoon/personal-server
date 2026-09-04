@@ -20,6 +20,54 @@ spec:
       storage: __CONFIRM_PORTAL_FILES_CAPACITY__
 ---
 apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: crawler-worker-data-dynamic-draft
+  namespace: personal-server
+  annotations:
+    draft.personal-server.io/not-for-apply: "true"
+    draft.personal-server.io/confirm-required: "capacity, data copy, single writer, restore check"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: __CONFIRM_CRAWLER_DATA_CAPACITY__
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: youtube-memo-data-dynamic-draft
+  namespace: personal-server
+  annotations:
+    draft.personal-server.io/not-for-apply: "true"
+    draft.personal-server.io/confirm-required: "capacity, data copy, single writer, restore check"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: __CONFIRM_YOUTUBE_DATA_CAPACITY__
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: book-memo-data-dynamic-draft
+  namespace: personal-server
+  annotations:
+    draft.personal-server.io/not-for-apply: "true"
+    draft.personal-server.io/confirm-required: "capacity, data copy, single writer, restore check"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: __CONFIRM_BOOK_DATA_CAPACITY__
+---
+apiVersion: v1
 kind: ConfigMap
 metadata:
   name: first-wave-pvc-contracts-draft

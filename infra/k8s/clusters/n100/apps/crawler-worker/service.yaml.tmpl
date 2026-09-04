@@ -1,0 +1,19 @@
+# DRAFT ONLY — NOT FOR APPLY. Internal service contract only; public routing requires separate approval.
+apiVersion: v1
+kind: Service
+metadata:
+  name: crawler-worker
+  namespace: personal-server
+  annotations:
+    draft.personal-server.io/not-for-apply: "true"
+    draft.personal-server.io/confirm-required: "private reachability and service ownership"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: crawler-worker
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8001
+      targetPort: http
+
