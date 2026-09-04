@@ -33,7 +33,7 @@ safe_state_dir() {
 
 require_commands() {
   local command_name
-  for command_name in systemctl systemd-creds systemd-ask-password rclone sudo k3s findmnt; do
+  for command_name in systemctl systemd-analyze systemd-creds systemd-ask-password rclone sudo k3s findmnt; do
     command -v "$command_name" >/dev/null || return 1
   done
 }
@@ -82,6 +82,7 @@ install_units() {
   chmod 700 "$UNIT_DIR"
   render_template "$SERVICE_TEMPLATE" "$UNIT_DIR/$SERVICE_NAME"
   render_template "$TIMER_TEMPLATE" "$UNIT_DIR/$TIMER_NAME"
+  systemd-analyze --user verify "$UNIT_DIR/$SERVICE_NAME" "$UNIT_DIR/$TIMER_NAME"
   systemctl --user daemon-reload
   systemctl --user enable --now "$TIMER_NAME"
   printf '%s\n' 'portal_pvc_backup_automation_install=PASS'

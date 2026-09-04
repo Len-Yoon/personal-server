@@ -16,17 +16,18 @@ TIMER_TEMPLATE = (
 
 
 class PortalPvcBackupAutomationTests(unittest.TestCase):
-    def run_tool(self, action, *, backup_output="backup_upload=UPLOADED\n", backup_exit=0, seed_credentials=False, systemctl_stop_exit=0, systemctl_disable_exit=0):
+    def run_tool(self, action, *, backup_output="backup_upload=UPLOADED\n", backup_exit=0, seed_credentials=False, systemctl_stop_exit=0, systemctl_disable_exit=0, systemd_analyze_exit=0):
         self.assertTrue(SCRIPT.is_file(), "backup automation controller is required")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
             state_dir = root / "state"
             credential_dir = root / "credentials"
+            unit_dir = root / "units"
             source_config = root / "rclone.conf"
             configmap = root / "configmap.yaml"
             calls = root / "calls.log"
-            for path in (bin_dir, state_dir, credential_dir):
+            for path in (bin_dir, state_dir, credential_dir, unit_dir):
                 path.mkdir(parents=True)
             source_config.write_text("[remote]\ntype = drive\n", encoding="utf-8")
             if seed_credentials:
@@ -38,6 +39,7 @@ class PortalPvcBackupAutomationTests(unittest.TestCase):
                 "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
                 "PORTAL_BACKUP_AUTOMATION_STATE_DIR": str(state_dir),
                 "PORTAL_BACKUP_AUTOMATION_CREDENTIAL_DIR": str(credential_dir),
+                "PORTAL_BACKUP_AUTOMATION_UNIT_DIR": str(unit_dir),
                 "PORTAL_RCLONE_SOURCE_CONFIG": str(source_config),
                 "PORTAL_BACKUP_TOOL": str(bin_dir / "portal-pvc-backup-verify.sh"),
                 "PORTAL_BACKUP_AUTOMATION_CONFIGMAP_CAPTURE": str(configmap),
@@ -46,6 +48,7 @@ class PortalPvcBackupAutomationTests(unittest.TestCase):
                 "BACKUP_EXIT": str(backup_exit),
                 "SYSTEMCTL_STOP_EXIT": str(systemctl_stop_exit),
                 "SYSTEMCTL_DISABLE_EXIT": str(systemctl_disable_exit),
+                "SYSTEMD_ANALYZE_EXIT": str(systemd_analyze_exit),
             }
             result = subprocess.run(
                 ["bash", str(SCRIPT), action],
@@ -102,6 +105,11 @@ class PortalPvcBackupAutomationTests(unittest.TestCase):
         )
         write("rclone", "#!/bin/sh\nexit 0\n")
         write("findmnt", "#!/bin/sh\nprintf 'ext4\\n'\n")
+        write(
+            "systemd-analyze",
+            "#!/bin/sh\nprintf 'systemd-analyze %s\\n' \"$*\" >> \"$CALLS\"\n"
+            "exit \"${SYSTEMD_ANALYZE_EXIT:-0}\"\n",
+        )
 
     def test_run_writes_exact_completed_configmap_schema_from_upload_success(self):
         result, configmap, calls, _ = self.run_tool("--run")
@@ -174,6 +182,25 @@ class PortalPvcBackupAutomationTests(unittest.TestCase):
         self.assertEqual(set(credential_files), {"rclone-config.cred", "rclone-config-passphrase.cred"})
         self.assertNotIn("stop personal-server-portal-pvc-backup.service", calls)
         self.assertNotIn("delete configmap", calls)
+
+    def test_install_verifies_rendered_user_units_before_enabling_timer(self):
+        result, _, calls, _ = self.run_tool("--install", seed_credentials=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("systemd-analyze --user verify", calls)
+        self.assertIn("personal-server-portal-pvc-backup.service", calls)
+        self.assertIn("personal-server-portal-pvc-backup.timer", calls)
+        self.assertIn("systemctl --user enable --now personal-server-portal-pvc-backup.timer", calls)
+        self.assertLess(calls.index("systemd-analyze --user verify"), calls.index("enable --now"))
+
+    def test_install_fails_closed_when_rendered_unit_verification_fails(self):
+        result, _, calls, _ = self.run_tool(
+            "--install", seed_credentials=True, systemd_analyze_exit=1
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("systemd-analyze --user verify", calls)
+        self.assertNotIn("enable --now", calls)
 
     def test_service_template_keeps_cleanup_alive_during_shutdown(self):
         service = SERVICE_TEMPLATE.read_text(encoding="utf-8")
