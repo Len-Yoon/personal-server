@@ -2,6 +2,8 @@
 
 > 상태: 검토 전용 초안. 이 문서와 `infra/k8s/`의 파일은 클러스터 적용 대상이 아니다.
 
+전환 실행기 release의 실제 root 설치와 encrypted credential seed는 별도 N100 운영 승인 범위다. 이 초안은 data/PVC 이동, writer cutover, Caddy/public route 전환 및 설치 후 systemd 활성화·실행을 포함하지 않는다. 설치 전에는 `infra/k8s/tools/transition-runner-preflight.sh`의 읽기 전용 상태·식별자 검증만 수행한다.
+
 ## 목적과 경계
 
 현재 `personal-server`의 Compose 기반 운영을 유지한 채, 추후 별도 승인으로 수행할 K3s·Flux 전환의 계약을 정의한다. 이 작업 브랜치는 Portal 단일 writer를 보장하기 위해 Compose 배포·Windows bootstrap의 marker 처리와 상태 사전검증을 변경한다. 아직 클러스터 cutover를 실행하거나 Flux를 연결하지 않는다.

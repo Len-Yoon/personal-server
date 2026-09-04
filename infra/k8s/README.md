@@ -27,6 +27,12 @@ git diff --check
 
 `kubectl apply`, `flux bootstrap`, `flux reconcile`, Compose 제어 명령은 이 초안의 범위 밖이다.
 
+## 전환 실행기 release 설치
+
+`transition-runner-preflight.sh`는 읽기 전용 검사로 release artifact, 정책, native ext4 경계와 root 소유 `0600` 암호화 credential의 상태·식별자만 출력한다. 실제 root 설치는 N100 운영 승인 후 `install-transition-runner.sh --apply --release-digest ... --credential-dir ...`로 별도 수행한다. 설치기는 검증된 artifact를 `/usr/local/libexec/personal-server-transition` 및 `/etc/personal-server-transition`에 원자적으로 배치하며 저장소 소스를 설치 후 root runtime으로 실행하지 않는다.
+
+실제 root 설치, credential seed, systemd 활성화·실행, data route/PVC cutover 및 Caddy 공개 경로 전환은 이 저장소의 검토 범위가 아니며 별도 N100 운영 승인이 필요하다.
+
 ## SRE Pod 자동복구 실습 (운영자 전용)
 
 `infra/k8s/tools/sre-pod-recovery-lab.sh`는 K3s에서 Pod 자동복구 동작을 확인하는 일회성 운영자 실습 도구다. GitOps resource가 아니며 production deploy가 아니다. N100에서 실행할 때는 운영자 승인과 클러스터 접근 권한을 확인한다.
