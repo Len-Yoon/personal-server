@@ -26,7 +26,7 @@
 - Create: `tests/test_runtime_service_state.py`
 - Modify: `tests/test_verify_change_scope.py`
 
-**Interfaces:** `load_service_runtime_state <project-root>`는 `data/k3s-runtime-services.state`를 읽음. 허용 행은 세 서비스의 `=compose|k3s`뿐임. 파일이 없으면 모두 compose이고, duplicate·unknown·empty·malformed row는 nonzero로 거부함.
+**Interfaces:** `load_service_runtime_state <project-root>`는 저장소 경로를 신뢰하지 않고 `/var/lib/personal-server/k3s-runtime-services.state`만 읽음. 상위 디렉터리는 root 소유·비사용자쓰기·실제 디렉터리여야 하며, state 파일은 root 신뢰 디렉터리 내 regular non-symlink 파일만 허용함. 신뢰 경로의 state 파일이 없으면 모두 compose로 처리하고, 신뢰 경로 자체가 없거나 접근 불가하면 nonzero로 거부함. 허용 행은 세 서비스의 `=compose|k3s`뿐이며 duplicate·unknown·empty·malformed row는 nonzero로 거부함. 테스트는 명시적 test-only fixture seam을 사용함.
 
 - [ ] **Step 1: Write the failing tests**
 

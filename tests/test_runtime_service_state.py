@@ -15,12 +15,20 @@ def run_state_loader(project_root: Path) -> subprocess.CompletedProcess[str]:
         textwrap.dedent(
             """
             source "$1"
-            load_service_runtime_state "$2"
+            load_service_runtime_state_test_fixture "$2"
             """
         ),
         "loader-test",
         str(LOADER),
         str(project_root),
+    ]
+    return subprocess.run(command, text=True, capture_output=True, check=False)
+
+
+def run_production_loader(project_root: Path) -> subprocess.CompletedProcess[str]:
+    command = [
+        "bash", "-c", "source \"$1\"; load_service_runtime_state \"$2\"",
+        "loader-test", str(LOADER), str(project_root),
     ]
     return subprocess.run(command, text=True, capture_output=True, check=False)
 
@@ -119,7 +127,7 @@ class RuntimeServiceStateTests(unittest.TestCase):
         try:
             data_dir.mkdir()
             data_dir.chmod(0)
-            self.assertNotEqual(run_state_loader(project_root).returncode, 0)
+            self.assertNotEqual(run_production_loader(project_root).returncode, 0)
         finally:
             data_dir.chmod(0o700)
             self._remove_project(project_root)
@@ -127,19 +135,19 @@ class RuntimeServiceStateTests(unittest.TestCase):
     def test_missing_project_root_is_rejected(self):
         project_root = self._temporary_project()
         self._remove_project(project_root)
-        result = run_state_loader(project_root)
+        result = run_production_loader(project_root)
         self.assertNotEqual(result.returncode, 0)
 
     def test_project_root_must_be_a_real_directory(self):
         project_root = self._temporary_project() / "root-file"
         project_root.write_text("not a directory", encoding="utf-8")
-        self.assertNotEqual(run_state_loader(project_root).returncode, 0)
+        self.assertNotEqual(run_production_loader(project_root).returncode, 0)
         project_root.unlink()
 
     def test_missing_data_directory_is_rejected(self):
         project_root = self._temporary_project()
         try:
-            self.assertNotEqual(run_state_loader(project_root).returncode, 0)
+            self.assertNotEqual(run_production_loader(project_root).returncode, 0)
         finally:
             self._remove_project(project_root)
 
@@ -148,7 +156,7 @@ class RuntimeServiceStateTests(unittest.TestCase):
         try:
             (project_root / "data-target").mkdir()
             (project_root / "data").symlink_to(project_root / "data-target", target_is_directory=True)
-            self.assertNotEqual(run_state_loader(project_root).returncode, 0)
+            self.assertNotEqual(run_production_loader(project_root).returncode, 0)
         finally:
             self._remove_project(project_root)
 
@@ -160,7 +168,7 @@ class RuntimeServiceStateTests(unittest.TestCase):
             target = data_dir / "target.state"
             target.write_text("crawler-worker=compose\n", encoding="utf-8")
             (data_dir / "k3s-runtime-services.state").symlink_to(target)
-            self.assertNotEqual(run_state_loader(project_root).returncode, 0)
+            self.assertNotEqual(run_production_loader(project_root).returncode, 0)
         finally:
             self._remove_project(project_root)
 
