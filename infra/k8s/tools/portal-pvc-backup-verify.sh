@@ -43,7 +43,19 @@ usage() { printf '%s\n' "usage: $0 --check|--go" >&2; }
 # children (kubectl exec/rclone) must not inherit it, otherwise an interrupted
 # backup can leave the lock held after this process exits.
 run_unlocked() { "$@" 9>&-; }
-run_timeout() { timeout "$@" 9>&-; }
+run_timeout() {
+  local seconds=$1
+  shift
+  # `timeout` only signals its direct child.  Start a separate session with a
+  # supervising shell so its TERM trap can terminate every kubectl descendant.
+  timeout --kill-after=10s "$seconds" setsid bash -c '
+    trap '"'"'trap - TERM; kill -TERM -- -$$ 2>/dev/null || true; exit 143'"'"' TERM
+    # Keep heredoc/stdin-based kubectl create calls connected to this script.
+    "$@" <&0 &
+    child_pid=$!
+    wait "$child_pid"
+  ' bash "$@" 9>&-
+}
 kctl() { run_timeout "${PORTAL_KUBECTL_TIMEOUT_SECONDS:-120}" sudo k3s kubectl "$@"; }
 fail() { return 1; }
 progress() { printf '%s\n' "portal_pvc_backup_stage=$1"; }
@@ -79,7 +91,7 @@ assert_preflight() {
   [ "$(tr -d '\r\n' < "$RUNTIME_MARKER")" = k3s ] || return 1
   [ -r "$RECIPIENT" ] && [ -r "$IDENTITY" ] || return 1
   [ -d "$(dirname -- "$EVIDENCE")" ] && [ -w "$(dirname -- "$EVIDENCE")" ] || return 1
-  for command_name in age rclone sqlite3 python3 sudo k3s timeout flock tar find sha256sum awk grep xargs mktemp; do
+  for command_name in age rclone sqlite3 python3 sudo k3s timeout setsid flock tar find sha256sum awk grep xargs mktemp; do
     command -v "$command_name" >/dev/null || return 1
   done
 

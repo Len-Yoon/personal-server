@@ -100,7 +100,11 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
             path.chmod(0o755)
 
         write("sudo", "#!/bin/sh\nexec \"$@\"\n")
-        write("timeout", "#!/bin/sh\nshift\nexec \"$@\"\n")
+        write(
+            "timeout",
+            "#!/bin/sh\nset -eu\nwhile [ \"${1#--}\" != \"$1\" ]; do shift; done\nshift\nexec \"$@\"\n",
+        )
+        write("setsid", "#!/bin/sh\nexec \"$@\"\n")
         write("flock", "#!/bin/sh\nif [ \"${PORTAL_FAKE_LOCK_BUSY:-}\" = 1 ]; then exit 1; fi\nexit 0\n")
         write(
             "k3s",
@@ -325,7 +329,14 @@ esac
     def test_restore_failure_cannot_report_pass(self):
         result, calls, _, _ = self.run_tool("--go", fail_at="restore")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(result.stdout.strip(), "portal_pvc_backup=FAIL")
+        self.assertEqual(result.stdout.strip(), "\n".join((
+            "portal_pvc_backup_stage=writer_pause",
+            "portal_pvc_backup_stage=pvc_snapshot",
+            "portal_pvc_backup_stage=remote_upload",
+            "portal_pvc_backup_stage=remote_restore",
+            "portal_pvc_backup_stage=restore_validation",
+            "portal_pvc_backup=FAIL",
+        )))
         self.assertIn("kubectl -n personal-server delete pod", calls)
 
     def test_signal_forces_fail_after_cleanup(self):
@@ -481,6 +492,14 @@ esac
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("portal_pvc_backup=PASS", result.stdout)
+
+    def test_timeout_supervisor_terminates_the_entire_kubernetes_command_session(self):
+        """A timed-out kubectl exec must not leave a reader process behind."""
+        text = SCRIPT.read_text(encoding="utf-8")
+        timeout_helper = text[text.index("run_timeout() {") : text.index("kctl() {")]
+
+        self.assertIn('timeout --kill-after=10s "$seconds" setsid bash -c', timeout_helper)
+        self.assertIn('kill -TERM -- -$$', timeout_helper)
 
     def test_go_upload_failure_restores_original_replica_and_deletes_reader(self):
         result, calls, _, evidence = self.run_tool("--go", fail_at="upload")
