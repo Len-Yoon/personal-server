@@ -4,6 +4,8 @@
 
 이 구조는 현재 저장소에서 검토하는 `clusters/n100` 골격이다. 별도 GitOps 저장소는 만들지 않았으며, 이 저장소의 자동 배포 흐름은 Compose 전용으로 유지한다.
 
+N100 WSL 원격 Codex 개발 절차는 [원격 개발 환경 운영 절차](../../docs/n100-remote-development.md)를 참조한다.
+
 ## 안전 경계
 
 - 모든 Kubernetes 리소스 예시는 `.yaml.tmpl` 파일에만 있으며 `draft.personal-server.io/not-for-apply: "true"` annotation을 포함한다.
