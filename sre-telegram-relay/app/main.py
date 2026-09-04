@@ -7,9 +7,11 @@ import hashlib
 import json
 import logging
 import os
+import re
 import ssl
 import threading
 import time
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Callable, Protocol
 from urllib.error import URLError
@@ -22,10 +24,12 @@ SERVICE_ACCOUNT_DIRECTORY = "/var/run/secrets/kubernetes.io/serviceaccount"
 DEFAULT_NAMESPACES = ("monitoring", "personal-server")
 RELAY_NAMESPACE = "monitoring"
 RELAY_STATE_CONFIGMAP = "sre-telegram-relay-state"
+BACKUP_STATUS_CONFIGMAP = "sre-telegram-backup-status"
 MAX_ALERT_ITEMS = 4
 MAX_REQUEST_BODY_BYTES = 1_048_576
 CONFIGMAP_OFFSET_KEY = "telegram_next_update_id"
 CONFIGMAP_ALERT_STATE_KEY = "alert_state"
+CONFIGMAP_BACKUP_DELIVERED_RUN_IDS_KEY = "backup_delivered_run_ids"
 ALERT_STATE_TTL_SECONDS = 4 * 60 * 60
 ALERT_PRESENTATIONS = {
     "PodRestartIncrease": ("서비스가 반복 재시작됨", "서비스 기능이 불안정할 수 있음"),
@@ -34,6 +38,15 @@ ALERT_PRESENTATIONS = {
     "PVCNotBound": ("데이터 저장소 연결 실패", "저장된 데이터에 접근하지 못할 수 있음"),
     "PrometheusTargetDown": ("상태 수집 대상 응답 없음", "해당 서비스의 상태를 확인하지 못할 수 있음"),
 }
+BACKUP_STATUS_MESSAGES = {
+    "completed": "[백업 완료]\n상태: 암호화 백업과 복원 검증을 완료했습니다.\n대상: Portal 데이터",
+    "unchanged": "[백업 확인] 변경 없음\n상태: 백업 대상에 변경이 없습니다.\n대상: Portal 데이터",
+    "failed": "[백업 실패]\n상태: 백업 실행에 실패했습니다.\n대상: Portal 데이터",
+    "restore_failed": "[복원 검증 실패]\n상태: 복원 검증 또는 Portal 준비 상태 확인에 실패했습니다.\n대상: Portal 데이터",
+}
+BACKUP_REPORT_KEYS = frozenset({"run_id", "status", "completed_at", "stage"})
+SAFE_BACKUP_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+SAFE_BACKUP_STAGE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 LOGGER = logging.getLogger(__name__)
 
 
@@ -55,6 +68,14 @@ class AlertStateStore(Protocol):
     def load(self, fingerprint: str) -> tuple[str, float] | None: ...
 
     def save(self, fingerprint: str, status: str, expires_at: float) -> None: ...
+
+
+class BackupDeliveryStore(Protocol):
+    """Persists backup run IDs already delivered to Telegram."""
+
+    def contains(self, run_id: str) -> bool: ...
+
+    def save(self, run_id: str) -> None: ...
 
 
 class MemoryOffsetStore:
@@ -90,6 +111,19 @@ class MemoryAlertStateStore:
     def save(self, fingerprint: str, status: str, expires_at: float) -> None:
         with self._lock:
             self._states[fingerprint] = (status, expires_at)
+
+
+class MemoryBackupDeliveryStore:
+    """In-memory backup delivery state for isolated tests only."""
+
+    def __init__(self) -> None:
+        self._run_ids: set[str] = set()
+
+    def contains(self, run_id: str) -> bool:
+        return run_id in self._run_ids
+
+    def save(self, run_id: str) -> None:
+        self._run_ids.add(run_id)
 
 
 class KubernetesClient:
@@ -253,6 +287,51 @@ class ConfigMapAlertStateStore:
         return states
 
 
+class ConfigMapBackupDeliveryStore:
+    """Persists delivered backup run IDs in the relay's existing state ConfigMap."""
+
+    def __init__(self, k8s_client: KubernetesClient, *, namespace: str, name: str) -> None:
+        if namespace != RELAY_NAMESPACE or name != RELAY_STATE_CONFIGMAP:
+            raise ValueError("Backup delivery storage must use the dedicated relay ConfigMap")
+        self._k8s_client = k8s_client
+        self._namespace = namespace
+        self._name = name
+
+    def contains(self, run_id: str) -> bool:
+        return run_id in self._read_run_ids()
+
+    def save(self, run_id: str) -> None:
+        if not SAFE_BACKUP_RUN_ID.fullmatch(run_id):
+            raise ValueError("invalid backup run ID")
+        run_ids = self._read_run_ids()
+        if run_id in run_ids:
+            return
+        run_ids.append(run_id)
+        self._k8s_client.patch_config_map(
+            self._namespace,
+            self._name,
+            {CONFIGMAP_BACKUP_DELIVERED_RUN_IDS_KEY: json.dumps(run_ids, separators=(",", ":"))},
+        )
+
+    def _read_run_ids(self) -> list[str]:
+        config_map = self._k8s_client.get_config_map(self._namespace, self._name)
+        data = config_map.get("data")
+        raw = data.get(CONFIGMAP_BACKUP_DELIVERED_RUN_IDS_KEY) if isinstance(data, dict) else None
+        if raw is None:
+            return []
+        try:
+            run_ids = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise ValueError("relay ConfigMap has invalid backup delivery state") from None
+        if (
+            not isinstance(run_ids, list)
+            or not all(isinstance(run_id, str) and SAFE_BACKUP_RUN_ID.fullmatch(run_id) for run_id in run_ids)
+            or len(set(run_ids)) != len(run_ids)
+        ):
+            raise ValueError("relay ConfigMap has invalid backup delivery state")
+        return run_ids
+
+
 class PrometheusClient:
     """Read-only Prometheus client limited to active scrape targets."""
 
@@ -330,6 +409,7 @@ class RelayService:
         prometheus_client: PrometheusClient,
         offset_store: OffsetStore | None = None,
         alert_state_store: AlertStateStore | None = None,
+        backup_delivery_store: BackupDeliveryStore | None = None,
         alert_callback: Callable[[str], bool] | None = None,
     ) -> None:
         self._allowed_chat_id = str(allowed_chat_id)
@@ -338,7 +418,9 @@ class RelayService:
         self._prometheus_client = prometheus_client
         self._offset_store = offset_store or MemoryOffsetStore()
         self._alert_state_store = alert_state_store or MemoryAlertStateStore()
+        self._backup_delivery_store = backup_delivery_store
         self._alert_state_lock = threading.Lock()
+        self._backup_delivery_lock = threading.Lock()
         self._alert_callback = alert_callback
         self._healthy = True
 
@@ -384,6 +466,19 @@ class RelayService:
 
     def mark_healthy(self) -> None:
         self._healthy = True
+
+    def deliver_backup_report(self, send_message: Callable[[str, str], bool]) -> bool:
+        """Send one validated backup report and persist its run ID after delivery."""
+        if self._backup_delivery_store is None:
+            return True
+        with self._backup_delivery_lock:
+            report = _read_backup_report(self._k8s_client)
+            if report is None or self._backup_delivery_store.contains(report["run_id"]):
+                return True
+            if not send_message(self._allowed_chat_id, BACKUP_STATUS_MESSAGES[report["status"]]):
+                return False
+            self._backup_delivery_store.save(report["run_id"])
+            return True
 
     def handle_alert(self, payload: dict[str, Any], authorization: str) -> tuple[int, str]:
         expected_authorization = f"Bearer {self._alertmanager_auth_token}"
@@ -673,7 +768,7 @@ def _poll_once(relay: RelayService, telegram_client: TelegramClient, allowed_cha
         if reply is not None and not telegram_client.send_message(allowed_chat_id, reply):
             return False
         relay.acknowledge_update(update)
-    return True
+    return relay.deliver_backup_report(telegram_client.send_message)
 
 
 def main() -> None:
@@ -695,6 +790,11 @@ def main() -> None:
             name=RELAY_STATE_CONFIGMAP,
         ),
         alert_state_store=ConfigMapAlertStateStore(
+            k8s_client,
+            namespace=RELAY_NAMESPACE,
+            name=RELAY_STATE_CONFIGMAP,
+        ),
+        backup_delivery_store=ConfigMapBackupDeliveryStore(
             k8s_client,
             namespace=RELAY_NAMESPACE,
             name=RELAY_STATE_CONFIGMAP,
@@ -775,6 +875,43 @@ def _decode_object(body: bytes) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("response must be a JSON object")
     return payload
+
+
+def _read_backup_report(k8s_client: KubernetesClient) -> dict[str, str] | None:
+    """Return only a complete, allow-listed backup status report from its fixed ConfigMap."""
+    config_map = k8s_client.get_config_map(RELAY_NAMESPACE, BACKUP_STATUS_CONFIGMAP)
+    data = config_map.get("data")
+    if not isinstance(data, dict) or set(data) != BACKUP_REPORT_KEYS:
+        LOGGER.warning("backup_report_ignored reason=invalid_keys")
+        return None
+    if not all(isinstance(data[key], str) for key in BACKUP_REPORT_KEYS):
+        LOGGER.warning("backup_report_ignored reason=invalid_value_type")
+        return None
+    run_id = data["run_id"]
+    status = data["status"]
+    completed_at = data["completed_at"]
+    stage = data["stage"]
+    if not SAFE_BACKUP_RUN_ID.fullmatch(run_id):
+        LOGGER.warning("backup_report_ignored reason=invalid_run_id")
+        return None
+    if status not in BACKUP_STATUS_MESSAGES:
+        LOGGER.warning("backup_report_ignored reason=invalid_status")
+        return None
+    if not _is_utc_timestamp(completed_at):
+        LOGGER.warning("backup_report_ignored reason=invalid_completed_at")
+        return None
+    if not SAFE_BACKUP_STAGE.fullmatch(stage):
+        LOGGER.warning("backup_report_ignored reason=invalid_stage")
+        return None
+    return {"run_id": run_id, "status": status, "completed_at": completed_at, "stage": stage}
+
+
+def _is_utc_timestamp(value: str) -> bool:
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False
+    return True
 
 
 def _alert_fingerprint(alert: dict[str, Any]) -> str:

@@ -81,6 +81,7 @@ class SreTelegramManifestContractTests(unittest.TestCase):
     def test_rbac_is_read_only_except_named_relay_state_configmap(self):
         documents = load_yaml_documents("base.yaml")
         state_role = find_document(documents, "Role", "sre-telegram-relay-state")
+        backup_status_role = find_document(documents, "Role", "sre-telegram-backup-status-reader")
         node_role = find_document(documents, "ClusterRole", "sre-telegram-relay-node-reader")
         workload_role = find_document(documents, "ClusterRole", "sre-telegram-relay-workload-reader")
 
@@ -91,6 +92,15 @@ class SreTelegramManifestContractTests(unittest.TestCase):
                 "resources": ["configmaps"],
                 "resourceNames": ["sre-telegram-relay-state"],
                 "verbs": ["get", "update", "patch"],
+            }],
+        )
+        self.assertEqual(
+            backup_status_role["rules"],
+            [{
+                "apiGroups": [""],
+                "resources": ["configmaps"],
+                "resourceNames": ["sre-telegram-backup-status"],
+                "verbs": ["get"],
             }],
         )
         self.assertEqual(
@@ -137,6 +147,14 @@ class SreTelegramManifestContractTests(unittest.TestCase):
                     "verbs": ["get", "update", "patch"],
                 }
             ],
+            ("Role", "sre-telegram-backup-status-reader"): [
+                {
+                    "apiGroups": [""],
+                    "resources": ["configmaps"],
+                    "resourceNames": ["sre-telegram-backup-status"],
+                    "verbs": ["get"],
+                }
+            ],
         }
         expected_bindings = {
             ("ClusterRoleBinding", "sre-telegram-relay-node-reader", None): {
@@ -153,6 +171,10 @@ class SreTelegramManifestContractTests(unittest.TestCase):
             },
             ("RoleBinding", "sre-telegram-relay-state", "monitoring"): {
                 "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "sre-telegram-relay-state"},
+                "subjects": [{"kind": "ServiceAccount", "name": "sre-telegram-relay", "namespace": "monitoring"}],
+            },
+            ("RoleBinding", "sre-telegram-backup-status-reader", "monitoring"): {
+                "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "sre-telegram-backup-status-reader"},
                 "subjects": [{"kind": "ServiceAccount", "name": "sre-telegram-relay", "namespace": "monitoring"}],
             },
         }
