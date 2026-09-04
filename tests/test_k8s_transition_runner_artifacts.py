@@ -31,6 +31,9 @@ class TransitionRunnerArtifactTest(unittest.TestCase):
         self.assertIn("LoadCredentialEncrypted=", text)
         self.assertIn("PrivateTmp=yes", text)
         self.assertIn("ProtectHome=yes", text)
+        self.assertIn("ProtectSystem=strict", text)
+        self.assertIn("InaccessiblePaths=/mnt/c", text)
+        self.assertIn("ReadWritePaths=/var/lib/personal-server-transition", text)
         self.assertIn("ExecStart=/usr/local/libexec/personal-server-transition-runner", text)
 
     def test_shell_runner_has_valid_syntax(self):

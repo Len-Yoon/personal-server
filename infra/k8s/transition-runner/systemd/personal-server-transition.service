@@ -13,6 +13,8 @@ LoadCredentialEncrypted=age-identity:/etc/personal-server-transition/credentials
 ExecStart=/usr/local/libexec/personal-server-transition-runner
 PrivateTmp=yes
 ProtectHome=yes
+ProtectSystem=strict
+InaccessiblePaths=/mnt/c
 NoNewPrivileges=yes
 ReadWritePaths=/var/lib/personal-server-transition
 
