@@ -175,6 +175,23 @@ class PortalPvcBackupAutomationTests(unittest.TestCase):
         self.assertNotIn("stop personal-server-portal-pvc-backup.service", calls)
         self.assertNotIn("delete configmap", calls)
 
+    def test_service_template_keeps_cleanup_alive_during_shutdown(self):
+        service = SERVICE_TEMPLATE.read_text(encoding="utf-8")
+
+        directives = {
+            line.partition("=")[0]: line.partition("=")[2]
+            for line in service.splitlines()
+            if "=" in line
+        }
+        self.assertEqual(directives.get("TimeoutStartSec"), "0")
+        self.assertEqual(directives.get("KillMode"), "mixed")
+        self.assertGreaterEqual(int(directives.get("TimeoutStopSec", "0").removesuffix("min")), 10)
+        self.assertEqual(directives.get("PrivateTmp"), "yes")
+        self.assertEqual(directives.get("ProtectSystem"), "strict")
+        self.assertEqual(directives.get("ProtectHome"), "read-only")
+        self.assertEqual(directives.get("ReadOnlyPaths"), "@REPO_ROOT@")
+        self.assertEqual(directives.get("ReadWritePaths"), "@STATE_DIR@")
+
     def test_systemd_templates_use_one_persistent_daily_user_timer_and_credential_paths(self):
         self.assertTrue(SERVICE_TEMPLATE.is_file(), "backup service template is required")
         self.assertTrue(TIMER_TEMPLATE.is_file(), "backup timer template is required")

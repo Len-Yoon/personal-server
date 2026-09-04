@@ -13,6 +13,9 @@ Environment="PORTAL_RCLONE_PASSWORD_COMMAND=/usr/bin/cat %d/rclone-config-passph
 LoadCredentialEncrypted=rclone-config:@CREDENTIAL_DIR@/rclone-config.cred
 LoadCredentialEncrypted=rclone-config-passphrase:@CREDENTIAL_DIR@/rclone-config-passphrase.cred
 ExecStart=@REPO_ROOT@/infra/k8s/tools/portal-pvc-backup-automation.sh --run
+TimeoutStartSec=0
+TimeoutStopSec=10min
+KillMode=mixed
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
