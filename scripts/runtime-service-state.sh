@@ -37,9 +37,7 @@ _parse_runtime_service_state_file() {
 
 load_service_runtime_state() {
     [[ $# -eq 1 && -n ${1:-} ]] || return 1
-    local state_dir=${RUNTIME_SERVICE_STATE_FILE%/*}
-    _runtime_trusted_directory "$state_dir" || return 1
-    _parse_runtime_service_state_file "$RUNTIME_SERVICE_STATE_FILE"
+    python3 "${BASH_SOURCE[0]%/*}/runtime-service-state-reader.py" "$RUNTIME_SERVICE_STATE_FILE"
 }
 
 # Explicit test-only seam; production callers must use load_service_runtime_state.

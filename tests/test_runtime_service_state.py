@@ -6,6 +6,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).parents[1]
 LOADER = REPO_ROOT / "scripts" / "runtime-service-state.sh"
+READER = REPO_ROOT / "scripts" / "runtime-service-state-reader.py"
 
 
 def run_state_loader(project_root: Path) -> subprocess.CompletedProcess[str]:
@@ -31,6 +32,15 @@ def run_production_loader(project_root: Path) -> subprocess.CompletedProcess[str
         "loader-test", str(LOADER), str(project_root),
     ]
     return subprocess.run(command, text=True, capture_output=True, check=False)
+
+
+def run_reader(state_file: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["python3", str(READER), str(state_file)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
 
 class RuntimeServiceStateTests(unittest.TestCase):
@@ -127,7 +137,7 @@ class RuntimeServiceStateTests(unittest.TestCase):
         try:
             data_dir.mkdir()
             data_dir.chmod(0)
-            self.assertNotEqual(run_production_loader(project_root).returncode, 0)
+            self.assertEqual(run_production_loader(project_root).returncode, 0)
         finally:
             data_dir.chmod(0o700)
             self._remove_project(project_root)
@@ -136,18 +146,18 @@ class RuntimeServiceStateTests(unittest.TestCase):
         project_root = self._temporary_project()
         self._remove_project(project_root)
         result = run_production_loader(project_root)
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0)
 
     def test_project_root_must_be_a_real_directory(self):
         project_root = self._temporary_project() / "root-file"
         project_root.write_text("not a directory", encoding="utf-8")
-        self.assertNotEqual(run_production_loader(project_root).returncode, 0)
+        self.assertEqual(run_production_loader(project_root).returncode, 0)
         project_root.unlink()
 
     def test_missing_data_directory_is_rejected(self):
         project_root = self._temporary_project()
         try:
-            self.assertNotEqual(run_production_loader(project_root).returncode, 0)
+            self.assertEqual(run_production_loader(project_root).returncode, 0)
         finally:
             self._remove_project(project_root)
 
@@ -156,7 +166,7 @@ class RuntimeServiceStateTests(unittest.TestCase):
         try:
             (project_root / "data-target").mkdir()
             (project_root / "data").symlink_to(project_root / "data-target", target_is_directory=True)
-            self.assertNotEqual(run_production_loader(project_root).returncode, 0)
+            self.assertEqual(run_production_loader(project_root).returncode, 0)
         finally:
             self._remove_project(project_root)
 
@@ -168,7 +178,43 @@ class RuntimeServiceStateTests(unittest.TestCase):
             target = data_dir / "target.state"
             target.write_text("crawler-worker=compose\n", encoding="utf-8")
             (data_dir / "k3s-runtime-services.state").symlink_to(target)
-            self.assertNotEqual(run_production_loader(project_root).returncode, 0)
+            self.assertEqual(run_production_loader(project_root).returncode, 0)
+        finally:
+            self._remove_project(project_root)
+
+    def test_reader_rejects_state_file_not_owned_by_root(self):
+        project_root = self._temporary_project()
+        try:
+            state = project_root / "state"
+            state.write_text("crawler-worker=compose\n", encoding="utf-8")
+            result = run_reader(state)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("root-owned", result.stderr)
+        finally:
+            self._remove_project(project_root)
+
+    def test_reader_rejects_group_or_other_writable_state_file(self):
+        project_root = self._temporary_project()
+        try:
+            state = project_root / "state"
+            state.write_text("crawler-worker=compose\n", encoding="utf-8")
+            state.chmod(0o666)
+            result = run_reader(state)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("writable", result.stderr)
+        finally:
+            self._remove_project(project_root)
+
+    def test_reader_uses_no_follow_for_state_symlink(self):
+        project_root = self._temporary_project()
+        try:
+            target = project_root / "target"
+            target.write_text("crawler-worker=compose\n", encoding="utf-8")
+            state = project_root / "state"
+            state.symlink_to(target)
+            result = run_reader(state)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("symlink", result.stderr)
         finally:
             self._remove_project(project_root)
 

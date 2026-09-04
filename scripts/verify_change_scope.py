@@ -38,11 +38,15 @@ BLOCKED_FILES = {
 }
 POLICY_MAINTENANCE_FILES = {
     "scripts/runtime-service-state.sh",
+    "scripts/runtime-service-state-reader.py",
     "scripts/verify_change_scope.py",
     "scripts/run_change_harness.py",
     "scripts/summarize_token_measurements.py",
 }
-RUNTIME_STATE_POLICY_FILES = {"scripts/runtime-service-state.sh"}
+RUNTIME_STATE_POLICY_FILES = {
+    "scripts/runtime-service-state.sh",
+    "scripts/runtime-service-state-reader.py",
+}
 RUNTIME_STATE_REQUIRED_CHECKS = ("crawler-worker", "youtube-memo", "book-memo")
 
 
