@@ -23,6 +23,7 @@ die() { printf '오류: %s\n' "$*" >&2; exit 1; }
 
 validate_key_path() {
   [[ "$key_path" = /* ]] || die "SSH 키 경로는 절대 경로여야 함: $key_path"
+  [[ ! -L "$key_path" ]] || die "SSH 개인키는 심볼릭 링크가 아니어야 함: $key_path"
   if [[ -e "$key_path" ]]; then
     [[ -f "$key_path" ]] || die "SSH 키가 일반 파일이 아님: $key_path"
     local mode
@@ -42,6 +43,7 @@ create_key_if_missing() {
     chmod 600 "$key_path"
   fi
   local public_key="${key_path}.pub"
+  [[ ! -L "$public_key" ]] || die "SSH 공개키는 심볼릭 링크가 아니어야 함: $public_key"
   if [[ ! -f "$public_key" ]]; then
     ssh-keygen -y -f "$key_path" > "$public_key" || die "개인키에서 공개키를 생성할 수 없음"
     chmod 644 "$public_key"
@@ -68,7 +70,7 @@ run_remote() {
   # single quotes and pass only validated, whitespace-free values.
   remote_command="wsl.exe -d $distro -- bash $remote_script $command_name $repo"
   local -a ssh_args
-  ssh_args=(ssh -i "$key_path" -o BatchMode=yes -o PasswordAuthentication=no -o StrictHostKeyChecking=yes "$target" "$remote_command")
+  ssh_args=(ssh -i "$key_path" -o IdentitiesOnly=yes -o BatchMode=yes -o PasswordAuthentication=no -o StrictHostKeyChecking=yes "$target" "$remote_command")
   if [[ "$command_name" = start ]]; then
     cat "$task_file" | "${ssh_args[@]}"
   else

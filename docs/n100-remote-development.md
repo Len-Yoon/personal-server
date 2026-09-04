@@ -12,9 +12,9 @@
 
 ## 핵심 요약
 
-Mac 제어 명령은 SSH alias `n100-codex`를 사용함. 현재 Mac의 `~/.ssh/id_ed25519_n100` 키는 해당 alias로 이미 인증되는 상태이므로, 정상 연결 시 `keygen` 또는 Windows 키 재등록은 수행하지 않음. 직접 IP를 지정하면 SSH config의 alias 설정이 적용되지 않을 수 있으므로 기본 alias를 유지함.
+Mac 제어 명령은 SSH alias `n100-codex`를 사용함. 현재 Mac의 `~/.ssh/id_ed25519_n100` 키는 해당 alias로 이미 인증되는 상태이므로, 정상 연결 시 `keygen` 또는 Windows 키 재등록은 수행하지 않음. 직접 IP를 지정하면 SSH config의 alias 설정이 적용되지 않을 수 있으므로 기본 alias를 유지함. SSH는 지정 개인키만 시도하며, 개인키와 공개키 경로의 심볼릭 링크는 허용하지 않음.
 
-원격 실행기는 WSL의 고정 tmux 세션 `personal-server-codex-dev`에서 동작함. 작업 시작 시 전용 WSL worktree를 생성·재사용하며, 원본 `/mnt/c/personal-server`의 dirty source tree는 수정하지 않음.
+원격 실행기는 WSL의 고정 tmux 세션 `personal-server-codex-dev`에서 동작함. 작업 시작 시 전용 WSL worktree를 생성하며, 기존 worktree는 clean 상태이고 이전 상태 기록이 `completed`일 때만 재사용함. 상태 기록이 없거나 실행 중·비정상 상태이면 재사용하지 않음. 원본 `/mnt/c/personal-server`의 dirty source tree는 수정하지 않음.
 
 ## 사전 조건 및 최초 등록
 
@@ -53,7 +53,7 @@ bash scripts/n100-remote-dev.sh status
 bash scripts/n100-remote-dev.sh logs
 ```
 
-원격 상태·로그는 WSL의 `~/.local/state/personal-server/n100-dev`에 유지됨. 실행 작업은 `~/.local/share/personal-server/n100-dev-worktree`에서 수행되며, 전용 worktree가 없을 때 `main` 기준으로 생성됨. 기존 전용 worktree가 dirty하거나 다른 저장소에 연결되어 있으면 새 작업을 시작하지 않음.
+원격 상태·로그는 WSL의 `~/.local/state/personal-server/n100-dev`에 유지됨. 실행 작업은 `~/.local/share/personal-server/n100-dev-worktree`에서 수행되며, 전용 worktree가 없을 때 `main` 기준으로 생성됨. 기존 전용 worktree가 dirty하거나 다른 저장소에 연결되어 있거나 이전 상태가 `completed`가 아니면 새 작업을 시작하지 않음.
 
 작업이 정상 종료된 뒤에도 `status`와 `logs`로 종료 코드와 최근 로그를 확인할 수 있음. 작업을 중단해야 할 때만 고정 tmux 세션을 종료함.
 
@@ -67,7 +67,10 @@ bash scripts/n100-remote-dev.sh stop
 
 - Codex 작업은 로컬 변경·테스트·커밋까지만 허용함. push, pull request 생성, merge, deploy는 수행하지 않으며 필요한 경우 사용자 승인 필요함.
 - 서버 기동, scheduler, K3s, Compose, Caddy, tunnel 리소스는 변경하지 않음.
-- 실행기는 sudo 비밀번호, rclone 비밀번호/설정, GitHub 비밀번호·토큰, Codex 비밀번호·토큰을 자동으로 저장하거나 대리 입력하지 않음. 해당 값은 Git, 상태 파일, 로그에 기록하지 않음.
+- 실행기는 `password`, `token`, `secret`, `api key`의 할당 형태와 PEM 개인키 헤더가 포함된 작업 지시문을 영구 작업 파일로 저장하기 전에 거부함. 이 검사는 제한된 패턴 검사이므로 sudo 비밀번호, rclone 설정·비밀번호, GitHub 또는 Codex 비밀번호·토큰을 포함한 비밀값을 작업 지시문에 넣으면 안 됨.
+- tmux 실행 환경의 일반 `git push`는 `origin` push URL을 존재하지 않는 로컬 경로로 덮어써 기존 origin을 사용하지 못하게 함. `gh`는 새로 생성한 0700 전용 설정 디렉터리를 사용하므로 기존 사용자 설정에 저장된 인증을 사용하지 않음. Codex 실행에는 `--sandbox workspace-write`와 `sandbox_workspace_write.network_access=false`를 함께 적용하여 모델이 실행하는 workspace 명령의 네트워크 접근을 제한함. Codex 클라이언트의 모델 세션 연결은 유지됨.
+- runner는 0700 상태 hooks 경로의 local pre-commit gate를 적용함. staged 파일명은 NUL 구분으로 검사하며 `caddy/*`, `docker-compose.yml`, `docker-compose.n100.yml`, `scripts/deploy-n100.sh`, `scripts/windows-bootstrap.sh`, `scripts/windows-bootstrap.ps1`, `scripts/verify-n100-deployment-health.sh`, `scripts/maintenance.py`, `crawler-worker/app/services/news_scheduler.py`의 커밋을 거부함. 그 밖의 경로는 이 gate에서 허용됨.
+- 위 조치는 일반 CLI 경로와 모델 실행 명령의 실수 방지용 방어 심화 조치임. pre-commit gate는 생성된 runner 환경의 로컬 commit gate이며, 프롬프트의 금지 지시와 사용자의 운영 권한 경계는 정책 통제임. 직접 호스트 제어 권한을 가진 의도적인 악의적 행위자에 대한 방어로 간주하지 않음.
 - `status`는 상태 정보만 표시함. `logs`는 Codex 표준출력의 마지막 200줄을 그대로 표시하므로, 작업 지시문이나 실행 출력에 비밀값을 넣지 말고 로그를 외부에 붙여넣지 않음.
 
 ## Mac 절전 또는 SSH 끊김 후 복구

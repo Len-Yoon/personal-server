@@ -46,6 +46,46 @@ class N100RemoteDevHostTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(key_path.read_text(encoding="utf-8"), original)
 
+    def test_keygen_rejects_a_symlinked_private_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            key_path = root / "private-key"
+            subprocess.run(
+                ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key_path)],
+                check=True,
+            )
+            linked_key = home / ".ssh" / "id_ed25519_n100"
+            linked_key.parent.mkdir(parents=True)
+            linked_key.symlink_to(key_path)
+
+            result = self.run_script("keygen", env={"HOME": str(home)})
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("심볼릭 링크", result.stderr)
+
+    def test_keygen_rejects_a_symlinked_public_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            key_path = home / ".ssh" / "id_ed25519_n100"
+            key_path.parent.mkdir(parents=True)
+            subprocess.run(
+                ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key_path)],
+                check=True,
+            )
+            public_target = root / "public-key-target"
+            public_target.write_text("unchanged", encoding="utf-8")
+            public_key = Path(f"{key_path}.pub")
+            public_key.unlink()
+            public_key.symlink_to(public_target)
+
+            result = self.run_script("keygen", env={"HOME": str(home)})
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("심볼릭 링크", result.stderr)
+            self.assertEqual(public_target.read_text(encoding="utf-8"), "unchanged")
+
     def test_start_rejects_non_regular_task_file(self):
         with tempfile.TemporaryDirectory() as directory:
             result = self.run_script("start", "--task-file", directory)
@@ -113,6 +153,7 @@ class N100RemoteDevHostTests(unittest.TestCase):
             self.assertEqual(stdin_file.read_text(encoding="utf-8"), task.read_text(encoding="utf-8"))
             command = args_file.read_text(encoding="utf-8")
             self.assertIn("wsl.exe", command)
+            self.assertIn("IdentitiesOnly=yes", command)
             self.assertNotIn("do-not-put-this-in-command", command)
 
 
@@ -267,6 +308,188 @@ class N100RemoteDevRemoteTests(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse((home / ".local/state/personal-server/n100-dev/task.txt").exists())
+
+    def test_start_rejects_likely_credential_values_before_persisting_task(self):
+        rejected_tasks = (
+            "password=example",
+            "TOKEN: example",
+            "secret = example",
+            "api key=example",
+            "api_key: example",
+            "-----BEGIN OPENSSH PRIVATE KEY-----",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self.make_source_repo(root)
+            tools = self.make_tool_stubs(root)
+            for index, task in enumerate(rejected_tasks):
+                with self.subTest(task=task):
+                    home = root / f"home-{index}"
+                    result = self.run_remote_script(
+                        "start", str(source), input_text=task,
+                        env={
+                            "HOME": str(home),
+                            "PATH": f"{tools}:{os.environ['PATH']}",
+                            "N100_TMUX_ARGS": str(root / "tmux-args"),
+                        },
+                    )
+                    task_file = home / ".local/state/personal-server/n100-dev/task.txt"
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(task_file.exists())
+
+    def test_clean_worktree_reuse_requires_a_completed_status_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self.make_source_repo(root)
+            tools = self.make_tool_stubs(root)
+            home = root / "home"
+            environment = {
+                "HOME": str(home),
+                "PATH": f"{tools}:{os.environ['PATH']}",
+                "N100_TMUX_ARGS": str(root / "tmux-args"),
+            }
+            first = self.run_remote_script("start", str(source), input_text="first task", env=environment)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            status_file = home / ".local/state/personal-server/n100-dev/status"
+
+            for status_text in (None, "status=running\n", "status=unexpected\n", "status=completed\ninvalid=record\n"):
+                if status_text is None:
+                    status_file.unlink(missing_ok=True)
+                else:
+                    status_file.write_text(status_text, encoding="utf-8")
+                with self.subTest(status_text=status_text):
+                    rejected = self.run_remote_script(
+                        "start", str(source), input_text="replacement task", env=environment,
+                    )
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertIn("이전 작업", rejected.stderr)
+
+            status_file.write_text(
+                "status=completed\n"
+                "started_at=2026-09-04T00:00:00Z\n"
+                "completed_at=2026-09-04T00:01:00Z\n"
+                "exit_code=0\n"
+                f"worktree={home / '.local/share/personal-server/n100-dev-worktree'}\n",
+                encoding="utf-8",
+            )
+            accepted = self.run_remote_script(
+                "start", str(source), input_text="replacement task", env=environment,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
+    def test_runner_blocks_origin_push_isolates_gh_auth_state_disables_network_and_gates_commits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self.make_source_repo(root)
+            origin = root / "origin.git"
+            subprocess.run(["git", "init", "--bare", "-q", str(origin)], check=True)
+            subprocess.run(["git", "-C", str(source), "remote", "add", "origin", str(origin)], check=True)
+            tools = self.make_tool_stubs(root)
+            home = root / "home"
+            push_result = root / "push-result"
+            commit_result = root / "commit-result"
+            allowed_commit_result = root / "allowed-commit-result"
+            windows_bootstrap_commit_result = root / "windows-bootstrap-commit-result"
+            gh_config_record = root / "gh-config-dir"
+            codex_args = root / "codex-args"
+            git_config_record = root / "git-config"
+            worktree = home / ".local/share/personal-server/n100-dev-worktree"
+            (tools / "codex").write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = login ]; then exit 0; fi\n"
+                "printf '%s\\n' \"$@\" > \"$N100_CODEX_ARGS\"\n"
+                "printf '%s\\n' \"$GIT_CONFIG_COUNT\" \"$GIT_CONFIG_KEY_0\" \"$GIT_CONFIG_VALUE_0\" \"$GIT_CONFIG_KEY_1\" \"$GIT_CONFIG_VALUE_1\" > \"$N100_GIT_CONFIG_RECORD\"\n"
+                "git -C \"$N100_EXPECT_WORKTREE\" push origin HEAD:refs/heads/runner-push\n"
+                "printf '%s\\n' \"$?\" > \"$N100_PUSH_RESULT\"\n"
+                "git -C \"$N100_EXPECT_WORKTREE\" config user.email test@example.invalid\n"
+                "git -C \"$N100_EXPECT_WORKTREE\" config user.name 'Test User'\n"
+                "printf 'blocked\\n' > \"$N100_EXPECT_WORKTREE/docker-compose.n100.yml\"\n"
+                "git -C \"$N100_EXPECT_WORKTREE\" add docker-compose.n100.yml\n"
+                "git -C \"$N100_EXPECT_WORKTREE\" commit -m blocked\n"
+                "printf '%s\\n' \"$?\" > \"$N100_COMMIT_RESULT\"\n"
+                "git -C \"$N100_EXPECT_WORKTREE\" reset -q\n"
+                "printf 'allowed\\n' > \"$N100_EXPECT_WORKTREE/allowed.txt\"\n"
+                "git -C \"$N100_EXPECT_WORKTREE\" add allowed.txt\n"
+                "git -C \"$N100_EXPECT_WORKTREE\" commit -m allowed\n"
+                "printf '%s\\n' \"$?\" > \"$N100_ALLOWED_COMMIT_RESULT\"\n"
+                "mkdir -p \"$N100_EXPECT_WORKTREE/scripts\"\n"
+                "printf 'blocked\\n' > \"$N100_EXPECT_WORKTREE/scripts/windows-bootstrap.ps1\"\n"
+                "git -C \"$N100_EXPECT_WORKTREE\" add scripts/windows-bootstrap.ps1\n"
+                "git -C \"$N100_EXPECT_WORKTREE\" commit -m blocked-windows-bootstrap\n"
+                "printf '%s\\n' \"$?\" > \"$N100_WINDOWS_BOOTSTRAP_COMMIT_RESULT\"\n"
+                "export N100_GH_RUNNER_CONTEXT=1\n"
+                "gh auth status\n",
+                encoding="utf-8",
+            )
+            (tools / "gh").write_text(
+                "#!/bin/sh\n"
+                "if [ \"${N100_GH_RUNNER_CONTEXT:-}\" = 1 ]; then\n"
+                "  printf '%s\\n' \"${GH_CONFIG_DIR:-}\" > \"$N100_GH_CONFIG_RECORD\"\n"
+                "  test -n \"${GH_CONFIG_DIR:-}\" && test -d \"$GH_CONFIG_DIR\" && test ! -e \"$GH_CONFIG_DIR/hosts.yml\"\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            for tool in (tools / "codex", tools / "gh"):
+                tool.chmod(0o755)
+            environment = {
+                "HOME": str(home),
+                "PATH": f"{tools}:{os.environ['PATH']}",
+                "N100_TMUX_ARGS": str(root / "tmux-args"),
+                "N100_EXPECT_WORKTREE": str(worktree),
+                "N100_PUSH_RESULT": str(push_result),
+                "N100_COMMIT_RESULT": str(commit_result),
+                "N100_ALLOWED_COMMIT_RESULT": str(allowed_commit_result),
+                "N100_WINDOWS_BOOTSTRAP_COMMIT_RESULT": str(windows_bootstrap_commit_result),
+                "N100_GH_CONFIG_RECORD": str(gh_config_record),
+                "N100_CODEX_ARGS": str(codex_args),
+                "N100_GIT_CONFIG_RECORD": str(git_config_record),
+            }
+            started = self.run_remote_script("start", str(source), input_text="run tests", env=environment)
+            self.assertEqual(started.returncode, 0, started.stderr)
+
+            runner = home / ".local/state/personal-server/n100-dev/run-codex.sh"
+            hook = home / ".local/state/personal-server/n100-dev/hooks/pre-commit"
+            self.assertTrue(hook.is_file())
+            self.assertEqual(stat.S_IMODE(hook.parent.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(hook.stat().st_mode), 0o700)
+            hook_contents = hook.read_text(encoding="utf-8")
+            self.assertIn("git diff --cached --name-only -z", hook_contents)
+            for blocked_path in (
+                "caddy/*",
+                "docker-compose.yml",
+                "docker-compose.n100.yml",
+                "scripts/deploy-n100.sh",
+                "scripts/windows-bootstrap.sh",
+                "scripts/windows-bootstrap.ps1",
+                "scripts/verify-n100-deployment-health.sh",
+                "scripts/maintenance.py",
+                "crawler-worker/app/services/news_scheduler.py",
+            ):
+                self.assertIn(blocked_path, hook_contents)
+            runner_result = subprocess.run([str(runner)], env={**os.environ, **environment}, text=True, capture_output=True)
+
+            gh_config_dir = Path(gh_config_record.read_text(encoding="utf-8").strip())
+            git_config = git_config_record.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(runner_result.returncode, 0, runner_result.stderr)
+            self.assertIn("--sandbox", codex_args.read_text(encoding="utf-8").splitlines())
+            self.assertIn("workspace-write", codex_args.read_text(encoding="utf-8").splitlines())
+            self.assertIn("-c", codex_args.read_text(encoding="utf-8").splitlines())
+            self.assertIn(
+                "sandbox_workspace_write.network_access=false",
+                codex_args.read_text(encoding="utf-8").splitlines(),
+            )
+            self.assertEqual(git_config[0], "2")
+            self.assertEqual(git_config[1], "remote.origin.pushurl")
+            self.assertEqual(git_config[3], "core.hooksPath")
+            self.assertEqual(Path(git_config[4]), hook.parent)
+            self.assertNotEqual(push_result.read_text(encoding="utf-8").strip(), "0")
+            self.assertNotEqual(commit_result.read_text(encoding="utf-8").strip(), "0")
+            self.assertEqual(allowed_commit_result.read_text(encoding="utf-8").strip(), "0")
+            self.assertNotEqual(windows_bootstrap_commit_result.read_text(encoding="utf-8").strip(), "0")
+            self.assertEqual(gh_config_dir.parent, home / ".local/state/personal-server/n100-dev")
+            self.assertTrue(gh_config_dir.name.startswith("gh-config."))
+            self.assertEqual(stat.S_IMODE(gh_config_dir.stat().st_mode), 0o700)
+            self.assertEqual(list(gh_config_dir.iterdir()), [])
 
     def test_start_rejects_dirty_existing_worktree_without_replacing_prior_task(self):
         with tempfile.TemporaryDirectory() as directory:

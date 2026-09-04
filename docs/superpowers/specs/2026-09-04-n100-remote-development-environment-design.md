@@ -17,7 +17,7 @@
 
 `scripts/n100-remote-dev.sh`는 macOS에서 실행하는 제어 명령임. 고정된 `window@192.168.45.32` SSH 대상에 전용 키를 사용해 Windows의 `wsl.exe`를 실행하고, 저장소 내 `scripts/n100-remote-dev-remote.sh`를 호출함.
 
-WSL 실행기는 사용자 홈의 `~/.local/state/personal-server/n100-dev`에 작업 지시문, 실행 로그, 종료 상태만 보관함. Codex는 이 상태 디렉터리를 사용해 tmux 세션 안에서 실행되며, 작업 지시문에 외부 변경 금지 규칙을 덧붙임. 비밀값, sudo 암호, rclone 암호, API 토큰은 읽거나 저장하지 않음.
+WSL 실행기는 사용자 홈의 `~/.local/state/personal-server/n100-dev`에 작업 지시문, 실행 로그, 종료 상태를 보관함. Codex는 이 상태 디렉터리를 사용해 tmux 세션 안에서 실행되며, 작업 지시문에 외부 변경 금지 규칙을 덧붙임. `password`, `token`, `secret`, `api key` 할당 형태와 PEM 개인키 헤더를 포함한 지시문은 영구 작업 파일 저장 전에 거부함. 이 검사는 제한된 패턴 검사이므로 비밀값이 작업·출력·로그에 들어가지 않도록 사용자가 보장해야 함.
 
 ## 명령 계약
 
@@ -33,10 +33,13 @@ WSL 실행기는 사용자 홈의 `~/.local/state/personal-server/n100-dev`에 �
 ## 안전 경계
 
 - 명령은 `window@192.168.45.32`와 `Ubuntu-24.04`를 기본값으로 하되 환경 변수로만 명시적으로 재정의 가능함.
-- SSH 옵션은 전용 키·BatchMode·StrictHostKeyChecking을 사용하고, 암호 인증을 시도하지 않음.
+- SSH 옵션은 전용 키·IdentitiesOnly·BatchMode·StrictHostKeyChecking을 사용하고, 암호 인증을 시도하지 않음. 개인키와 공개키의 심볼릭 링크는 거부함.
 - `start`는 절대 경로의 일반 파일만 작업 지시문으로 허용하며 64 KiB를 초과하면 거부함.
 - tmux 세션명·상태 경로·저장소 경로는 고정함. 인자로 전달한 셸 코드는 실행하지 않음.
-- Codex 프롬프트에는 로컬 개발·테스트·커밋만 허용하고 push/PR/병합/배포·운영 리소스 변경은 중단 후 보고하도록 고정함.
+- 기존 전용 worktree는 clean 상태와 `status=completed` 상태 기록이 모두 확인될 때만 재사용함. 상태 기록이 없거나 `running`·비정상 값이면 재사용하지 않음.
+- Codex 프롬프트에는 로컬 개발·테스트·커밋만 허용하고 push/PR/병합/배포·운영 리소스 변경은 중단 후 보고하도록 고정함. 실행 환경은 `remote.origin.pushurl`을 존재하지 않는 로컬 값으로 덮어써 일반 `git push`의 기존 origin 사용을 차단하고, 0700의 새 `GH_CONFIG_DIR`로 기존 `gh` 인증 상태 사용을 차단함. `codex exec`에는 `--sandbox workspace-write`와 `sandbox_workspace_write.network_access=false`를 함께 적용하여 모델이 실행하는 workspace 명령의 네트워크 접근을 제한하며, Codex 클라이언트의 모델 세션 연결은 유지함.
+- start는 tmux 실행 전에 상태 디렉터리의 0700 `hooks` 경로에 고정 `pre-commit` hook을 생성함. hook은 staged 파일명을 NUL 구분으로 검사하여 `caddy/*`, `docker-compose.yml`, `docker-compose.n100.yml`, `scripts/deploy-n100.sh`, `scripts/windows-bootstrap.sh`, `scripts/windows-bootstrap.ps1`, `scripts/verify-n100-deployment-health.sh`, `scripts/maintenance.py`, `crawler-worker/app/services/news_scheduler.py`의 커밋을 거부하고, 다른 경로는 허용함. runner는 inherited Git config `core.hooksPath`로 이를 적용함.
+- Git/gh 환경 설정·sandbox 설정·local pre-commit gate·프롬프트는 일반 CLI 경로와 모델 실행 명령의 방어 심화 조치임. local gate는 생성된 runner 환경의 commit 경계일 뿐이며, 직접 호스트 제어 권한을 가진 의도적인 악의적 행위자에 대한 방어가 아님. 금지 행동의 최종 경계는 사용자의 정책·권한 통제임.
 - stop은 tmux 대상 세션만 종료하며 원격 파일·컨테이너·Kubernetes 리소스를 삭제하지 않음.
 
 ## 오류 처리
