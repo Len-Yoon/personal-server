@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "namespace": "personal-server",
+  "services": [
+    {"name": "crawler-worker", "pvc": "crawler-worker-data", "image": "ghcr.io/personal-server/crawler-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    {"name": "youtube-memo", "pvc": "youtube-memo-data", "image": "ghcr.io/personal-server/youtube-memo@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+    {"name": "book-memo", "pvc": "book-memo-data", "image": "ghcr.io/personal-server/book-memo@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+  ],
+  "phases": ["preflight", "backup", "stop-compose", "copy-pvc", "start-k3s", "verify-private", "record"],
+  "timeouts": {"preflight": 60, "backup": 3600, "stop-compose": 120, "copy-pvc": 3600, "start-k3s": 600, "verify-private": 300, "record": 60}
+}

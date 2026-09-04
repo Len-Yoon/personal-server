@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Release artifact: deliberately accepts no operator-controlled arguments.
+if (( $# != 0 )); then
+  printf '%s\n' 'transition runner does not accept arguments' >&2
+  exit 64
+fi
+
+readonly POLICY='/etc/personal-server-transition/runner-policy.json'
+readonly STATE_ROOT='/var/lib/personal-server-transition'
+readonly LOCK_ROOT='/var/lib/personal-server-transition/locks'
+readonly VALIDATOR='/usr/local/libexec/personal-server-transition/personal-server-transition-policy-validator'
+readonly SERVICES=(crawler-worker youtube-memo book-memo)
+readonly PHASES=(preflight backup stop-compose copy-pvc start-k3s verify-private record)
+
+if [[ "$(id -u)" != 0 || ! -r "$POLICY" || ! -x "$VALIDATOR" ]]; then
+  printf '%s\n' 'transition runner preflight failed' >&2
+  exit 1
+fi
+"$VALIDATOR" "$POLICY" >/dev/null
+mkdir -p -- "$LOCK_ROOT"
+
+for service in "${SERVICES[@]}"; do
+  exec {lock_fd}>"$LOCK_ROOT/$service.lock"
+  if ! flock -n "$lock_fd"; then
+    printf 'transition runner busy: %s\n' "$service" >&2
+    exit 1
+  fi
+  for phase in "${PHASES[@]}"; do
+    # Actual writer-changing operations are intentionally release-specific and
+    # must be supplied by the approved native runtime, never by CLI input.
+    printf 'service=%s phase=%s\n' "$service" "$phase" >> "$STATE_ROOT/journal"
+  done
+  exec {lock_fd}>&-
+done
