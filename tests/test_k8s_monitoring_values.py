@@ -28,6 +28,12 @@ class MonitoringValuesContractTests(unittest.TestCase):
             "keep",
         )
 
+    def test_values_reserve_enough_memory_for_grafana_runtime(self):
+        resources = load_values()["grafana"]["resources"]
+
+        self.assertEqual(resources["requests"]["memory"], "256Mi")
+        self.assertEqual(resources["limits"]["memory"], "512Mi")
+
     def test_values_keep_prometheus_retention_and_local_storage(self):
         spec = load_values()["prometheus"]["prometheusSpec"]
 
