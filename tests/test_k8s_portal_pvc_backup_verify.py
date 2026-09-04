@@ -235,7 +235,8 @@ if [ "${{PORTAL_FAKE_REQUIRE_CONFIG_PASSWORD:-}}" = 1 ]; then
   [ "${{RCLONE_CONFIG_PASS:-}}" = test-rclone-config-password ] || exit 42
 fi
 if [ "${{PORTAL_FAKE_ASSERT_LOCK_FD_CLOSED:-}}" = 1 ] && [ "$1" = copyto ]; then
-  if (: >&9) 2>/dev/null; then exit 42; fi
+  fd_mode=$(python3 -c 'import fcntl, os; print(fcntl.fcntl(9, fcntl.F_GETFL) & os.O_ACCMODE)' 2>/dev/null) || exit 42
+  [ "$fd_mode" = 0 ] || exit 42
 fi
 if [ "$1" = lsd ]; then exit 0; fi
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = upload ] && [ "$1" = copyto ]; then
@@ -534,6 +535,7 @@ esac
         timeout_helper = text[text.index("run_timeout() {") : text.index("kctl() {")]
 
         self.assertIn('python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" "$@" 9>&-', timeout_helper)
+        self.assertIn('run_unlocked() { "$@" 9</dev/null; }', text)
         self.assertIn("process_group=0", text)
         self.assertNotIn("start_new_session=True", text)
         self.assertIn("os.killpg(process.pid, signal_to_send)", text)

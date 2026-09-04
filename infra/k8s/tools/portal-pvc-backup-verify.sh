@@ -52,7 +52,10 @@ ensure_sudo_access() {
 # The advisory lock belongs only to this controller process.  Long-running
 # children (kubectl exec/rclone) must not inherit it, otherwise an interrupted
 # backup can leave the lock held after this process exits.
-run_unlocked() { "$@" 9>&-; }
+# Replace the controller's lock descriptor for child commands instead of simply
+# closing it.  rclone can stall when it inherits a closed descriptor here; a
+# /dev/null descriptor keeps the lock out of the child without that failure.
+run_unlocked() { "$@" 9</dev/null; }
 TIMEOUT_SUPERVISOR=$'import ctypes\nimport os\nimport signal\nimport subprocess\nimport sys\n\nPR_SET_PDEATHSIG = 1\nif sys.platform.startswith("linux"):\n    libc = ctypes.CDLL(None, use_errno=True)\n    if libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM) != 0:\n        raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG)")\n\nseconds = int(sys.argv[1])\ncommand = sys.argv[2:]\nprocess = None\n\ndef terminate_group(signal_to_send):\n    if process is None:\n        return\n    try:\n        os.killpg(process.pid, signal_to_send)\n    except ProcessLookupError:\n        pass\n\ndef wait_after_termination():\n    if process is None:\n        return\n    try:\n        process.wait(timeout=10)\n    except subprocess.TimeoutExpired:\n        terminate_group(signal.SIGKILL)\n        process.wait()\n\ndef on_signal(signum, _frame):\n    terminate_group(signal.SIGTERM)\n    wait_after_termination()\n    raise SystemExit(128 + signum)\n\nsignal.signal(signal.SIGINT, on_signal)\nsignal.signal(signal.SIGTERM, on_signal)\nsignal.signal(signal.SIGHUP, on_signal)\n# A separate process group keeps cancellation scoped without detaching the TTY.\nprocess = subprocess.Popen(command, process_group=0)\ntry:\n    raise SystemExit(process.wait(timeout=seconds))\nexcept subprocess.TimeoutExpired:\n    terminate_group(signal.SIGTERM)\n    wait_after_termination()\n    raise SystemExit(124)\n'
 run_timeout() {
   local seconds=$1
