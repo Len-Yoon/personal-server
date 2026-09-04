@@ -1,0 +1,20 @@
+[Unit]
+Description=Personal Server Portal PVC encrypted backup and restore verification
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment="PORTAL_BACKUP_AUTOMATION_STATE_DIR=@STATE_DIR@"
+Environment="PORTAL_BACKUP_STATE_DIR=@STATE_DIR@"
+Environment="PORTAL_BACKUP_EVIDENCE=@STATE_DIR@/.portal-backup-verified"
+Environment="PORTAL_RCLONE_CONFIG_FILE=%d/rclone-config"
+Environment="PORTAL_RCLONE_PASSWORD_COMMAND=/usr/bin/cat %d/rclone-config-passphrase"
+LoadCredentialEncrypted=rclone-config:@CREDENTIAL_DIR@/rclone-config.cred
+LoadCredentialEncrypted=rclone-config-passphrase:@CREDENTIAL_DIR@/rclone-config-passphrase.cred
+ExecStart=@REPO_ROOT@/infra/k8s/tools/portal-pvc-backup-automation.sh --run
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+InaccessiblePaths=/mnt/c
+ReadWritePaths=@STATE_DIR@

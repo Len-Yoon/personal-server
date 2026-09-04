@@ -16,7 +16,8 @@ MAX_AGE=${PORTAL_BACKUP_MAX_AGE_SECONDS:-86400}
 FILES_PVC='portal-web-files-dynamic'
 STATE_PVC='portal-web-state-dynamic'
 DEPLOYMENT='portal-web'
-LOCK_FILE=${PORTAL_BACKUP_LOCK_FILE:-${TMPDIR:-/tmp}/portal-pvc-backup.lock}
+STATE_DIR=${PORTAL_BACKUP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/personal-server/portal-pvc-backup}
+LOCK_FILE=${PORTAL_BACKUP_LOCK_FILE:-$STATE_DIR/portal-pvc-backup.lock}
 RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)-$$
 WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/portal-pvc-backup-${RUN_ID}.XXXXXX")
 DIAGNOSTIC_FILE="$WORKDIR/diagnostics.log"
@@ -35,18 +36,13 @@ LOCK_FD=9
 EVIDENCE_PENDING=0
 BACKUP_UPLOAD_STATUS=''
 FAILURE_STAGE=''
-RCLONE_CONFIG_PASS_PROMPTED=0
 ACTIVE_TIMEOUT_PID=''
+RCLONE_CREDENTIAL_ARGS=()
 
 usage() { printf '%s\n' "usage: $0 --check|--go" >&2; }
 
 ensure_sudo_access() {
-  sudo -n true >/dev/null 2>&1 && return 0
-  if [ ! -t 0 ]; then
-    return 1
-  fi
-  printf '%s\n' 'K3s 상태 확인에 관리자 권한이 필요합니다. 비밀번호를 입력하세요. 입력 내용은 표시되지 않습니다.' >&3
-  sudo -v 1>&3 2>&3
+  sudo -n k3s kubectl version --client >/dev/null 2>&1
 }
 
 # The advisory lock belongs only to this controller process.  Long-running
@@ -79,7 +75,7 @@ run_timeout_tracked() {
   ACTIVE_TIMEOUT_PID=''
   return "$status"
 }
-kctl() { run_timeout "${PORTAL_KUBECTL_TIMEOUT_SECONDS:-120}" sudo k3s kubectl "$@"; }
+kctl() { run_timeout "${PORTAL_KUBECTL_TIMEOUT_SECONDS:-120}" sudo -n k3s kubectl "$@"; }
 fail() { return 1; }
 progress() { printf '%s\n' "portal_pvc_backup_stage=$1"; }
 
@@ -114,6 +110,8 @@ assert_preflight() {
   [ "$(tr -d '\r\n' < "$RUNTIME_MARKER")" = k3s ] || return 1
   [ -r "$RECIPIENT" ] && [ -r "$IDENTITY" ] || return 1
   [ -d "$(dirname -- "$EVIDENCE")" ] && [ -w "$(dirname -- "$EVIDENCE")" ] || return 1
+  mkdir -p -- "$STATE_DIR" || return 1
+  chmod 700 "$STATE_DIR" || return 1
   for command_name in age rclone sqlite3 python3 sudo k3s flock tar find sha256sum awk grep xargs mktemp; do
     command -v "$command_name" >/dev/null || return 1
   done
@@ -129,21 +127,40 @@ assert_preflight() {
   [ "$files_phase" = Bound ] && [ "$state_phase" = Bound ]
 }
 
+rclone_with_credentials() {
+  if [ "${#RCLONE_CREDENTIAL_ARGS[@]}" -gt 0 ]; then
+    run_unlocked rclone "${RCLONE_CREDENTIAL_ARGS[@]}" "$@"
+  else
+    run_unlocked rclone "$@"
+  fi
+}
+
+rclone_with_credentials_timeout() {
+  local seconds=$1
+  shift
+  if [ "${#RCLONE_CREDENTIAL_ARGS[@]}" -gt 0 ]; then
+    run_timeout "$seconds" rclone "${RCLONE_CREDENTIAL_ARGS[@]}" "$@"
+  else
+    run_timeout "$seconds" rclone "$@"
+  fi
+}
+
+prepare_rclone_credentials() {
+  if [ -n "${PORTAL_RCLONE_CONFIG_FILE:-}" ] || [ -n "${PORTAL_RCLONE_PASSWORD_COMMAND:-}" ]; then
+    [ -n "${PORTAL_RCLONE_CONFIG_FILE:-}" ] && [ -r "$PORTAL_RCLONE_CONFIG_FILE" ] || return 1
+    [ -n "${PORTAL_RCLONE_PASSWORD_COMMAND:-}" ] || return 1
+    RCLONE_CREDENTIAL_ARGS=(--config "$PORTAL_RCLONE_CONFIG_FILE" --password-command "$PORTAL_RCLONE_PASSWORD_COMMAND")
+    return
+  fi
+  # Non-automated terminal use keeps rclone's own masked prompt as a fallback.
+  # A caller without systemd credentials intentionally delegates prompting to rclone.
+  RCLONE_CREDENTIAL_ARGS=()
+}
+
 assert_remote_access() {
   FAILURE_STAGE='remote_preflight'
-  # Do not rely on rclone's own prompt: its diagnostics are intentionally private.
-  # This value exists only for the one remote preflight subprocess and is cleared
-  # when the backup command exits.
-  if [ -t 0 ] && [ -z "${RCLONE_CONFIG_PASS:-}" ]; then
-    printf '%s\n' 'portal_pvc_backup_stage=remote_authentication'
-    printf '%s\n' 'rclone 설정 암호 입력 필요: 저장해 둔 암호를 입력하고 Enter를 누르세요. 입력 내용은 표시되지 않습니다.' >&3
-    printf '%s' '암호 입력 > ' >&3
-    IFS= read -r -s RCLONE_CONFIG_PASS
-    printf '\n' >&3
-    export RCLONE_CONFIG_PASS
-    RCLONE_CONFIG_PASS_PROMPTED=1
-  fi
-  run_private timeout "${PORTAL_RCLONE_TIMEOUT_SECONDS:-30}" rclone lsd --max-depth 1 --log-level ERROR "$REMOTE"
+  prepare_rclone_credentials || return 1
+  rclone_with_credentials_timeout "${PORTAL_RCLONE_TIMEOUT_SECONDS:-30}" lsd --max-depth 1 --log-level ERROR "$REMOTE" >>"$DIAGNOSTIC_FILE" 2>&1
 }
 
 acquire_lock() {
@@ -195,7 +212,7 @@ stream_pvc_tree() {
   local mount_path=$1 destination=$2 stream_archive
   mkdir -p -- "$destination"
   stream_archive="$destination/.pvc-stream.tar"
-  if ! run_timeout_tracked "${PORTAL_STREAM_TIMEOUT_SECONDS:-120}" sudo k3s kubectl -n "$NAMESPACE" exec -i "$READER_POD" -- tar -C "$mount_path" -cf - . >"$stream_archive" 2>>"$DIAGNOSTIC_FILE"; then
+  if ! run_timeout_tracked "${PORTAL_STREAM_TIMEOUT_SECONDS:-120}" sudo -n k3s kubectl -n "$NAMESPACE" exec -i "$READER_POD" -- tar -C "$mount_path" -cf - . >"$stream_archive" 2>>"$DIAGNOSTIC_FILE"; then
     rm -f -- "$stream_archive"
     return 1
   fi
@@ -217,9 +234,6 @@ cleanup() {
   trap - EXIT
   # A follow-up Ctrl+C must not interrupt reader deletion or Portal restoration.
   trap '' INT TERM HUP
-  if [ "$RCLONE_CONFIG_PASS_PROMPTED" -eq 1 ]; then
-    unset RCLONE_CONFIG_PASS
-  fi
   if [ "$READER_CREATED" -eq 1 ]; then
     kctl -n personal-server delete pod "$READER_POD" --ignore-not-found --wait=true >>"$DIAGNOSTIC_FILE" 2>&1 || restore_ok=0
   fi
@@ -295,7 +309,9 @@ ensure_sudo_access || exit 1
 assert_preflight || exit 1
 assert_remote_access || exit 1
 FAILURE_STAGE=''
-[ "$MODE" = --check ] && exit 0
+if [ "$MODE" = --check ]; then
+  exit 0
+fi
 
 acquire_lock || exit 1
 FAILURE_STAGE=''
@@ -334,9 +350,9 @@ age -R "$RECIPIENT" -o "$ciphertext" "$archive" >>"$DIAGNOSTIC_FILE" 2>&1
 artifact_digest="sha256:$(sha256sum "$ciphertext" | awk '{print $1}')"
 remote_object="$REMOTE/portal-${RUN_ID}.tar.age"
 progress remote_upload
-run_unlocked rclone copyto --immutable --log-level ERROR "$ciphertext" "$remote_object" >>"$DIAGNOSTIC_FILE" 2>&1
+rclone_with_credentials copyto --immutable --log-level ERROR "$ciphertext" "$remote_object" >>"$DIAGNOSTIC_FILE" 2>&1
 progress remote_restore
-run_unlocked rclone copyto --log-level ERROR "$remote_object" "$WORKDIR/download.age" >>"$DIAGNOSTIC_FILE" 2>&1
+rclone_with_credentials copyto --log-level ERROR "$remote_object" "$WORKDIR/download.age" >>"$DIAGNOSTIC_FILE" 2>&1
 [ "$artifact_digest" = "sha256:$(sha256sum "$WORKDIR/download.age" | awk '{print $1}')" ]
 age -d -i "$IDENTITY" -o "$WORKDIR/restore.tar" "$WORKDIR/download.age" >>"$DIAGNOSTIC_FILE" 2>&1
 tar -C "$restore" -xf "$WORKDIR/restore.tar" >>"$DIAGNOSTIC_FILE" 2>&1
