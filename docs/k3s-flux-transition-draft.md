@@ -6,7 +6,7 @@
 
 ## 목적과 경계
 
-현재 `personal-server`의 Compose 기반 운영을 유지한 채, 추후 별도 승인으로 수행할 K3s·Flux 전환의 계약을 정의한다. 이 작업 브랜치는 Portal 단일 writer를 보장하기 위해 Compose 배포·Windows bootstrap의 marker 처리와 상태 사전검증을 변경한다. 아직 클러스터 cutover를 실행하거나 Flux를 연결하지 않는다.
+현재 `personal-server`의 Compose 기반 운영을 유지한 채, 추후 별도 승인으로 수행할 K3s·Flux 전환의 계약을 정의한다. 현재 저장소에는 `crawler-worker`, `youtube-memo`, `book-memo`의 replica-zero, 비적용 Deployment·ClusterIP Service·PVC 계약 초안이 추가되어 있지만 활성 Kustomize에서 참조하지 않는다. 데이터 복사, writer 소유권, backup/restore, Secret 주입, crawler scheduler 동작, Caddy와 one-writer cutover는 여전히 별도 운영 승인 게이트다. 아직 클러스터 cutover를 실행하거나 Flux를 연결하지 않는다.
 
 이 초안에서 하지 않는 일은 다음과 같다.
 

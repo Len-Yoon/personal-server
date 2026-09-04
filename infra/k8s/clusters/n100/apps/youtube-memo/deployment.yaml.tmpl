@@ -1,0 +1,51 @@
+# DRAFT ONLY — NOT FOR APPLY. Image, data copy, and runtime Secret injection require approval.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: youtube-memo
+  namespace: personal-server
+  annotations:
+    draft.personal-server.io/not-for-apply: "true"
+    draft.personal-server.io/confirm-required: "image digest, data ownership, health endpoint"
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: youtube-memo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: youtube-memo
+      annotations:
+        draft.personal-server.io/not-for-apply: "true"
+    spec:
+      containers:
+        - name: youtube-memo
+          image: __CONFIRM_YOUTUBE_MEMO_IMAGE_REF__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8002
+          envFrom:
+            - secretRef:
+                name: youtube-memo-runtime
+                optional: false
+          env:
+            - name: YOUTUBE_MEMO_DB_PATH
+              value: /data/youtube-memo/youtube_memo.sqlite3
+          volumeMounts:
+            - name: youtube-memo-data
+              mountPath: /data/youtube-memo
+              readOnly: false
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+      volumes:
+        - name: youtube-memo-data
+          persistentVolumeClaim:
+            claimName: youtube-memo-data-dynamic-draft
