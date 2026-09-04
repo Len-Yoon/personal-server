@@ -211,8 +211,8 @@ class PortalPvcBackupAutomationTests(unittest.TestCase):
             if "=" in line
         }
         self.assertEqual(directives.get("TimeoutStartSec"), "0")
-        self.assertEqual(directives.get("KillMode"), "mixed")
-        self.assertGreaterEqual(int(directives.get("TimeoutStopSec", "0").removesuffix("min")), 10)
+        self.assertEqual(directives.get("KillMode"), "control-group")
+        self.assertGreaterEqual(int(directives.get("TimeoutStopSec", "0").removesuffix("min")), 20)
         self.assertEqual(directives.get("PrivateTmp"), "yes")
         self.assertEqual(directives.get("ProtectSystem"), "strict")
         self.assertEqual(directives.get("ProtectHome"), "read-only")
