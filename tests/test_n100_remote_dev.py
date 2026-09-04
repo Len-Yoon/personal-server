@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "n100-remote-dev.sh"
+REMOTE_SCRIPT = ROOT / "scripts" / "n100-remote-dev-remote.sh"
 
 
 class N100RemoteDevHostTests(unittest.TestCase):
@@ -112,6 +113,206 @@ class N100RemoteDevHostTests(unittest.TestCase):
             command = args_file.read_text(encoding="utf-8")
             self.assertIn("wsl.exe", command)
             self.assertNotIn("do-not-put-this-in-command", command)
+
+
+class N100RemoteDevRemoteTests(unittest.TestCase):
+    def remote_script_text(self):
+        return REMOTE_SCRIPT.read_text(encoding="utf-8")
+
+    def run_remote_script(self, *args, input_text="", env=None):
+        variables = os.environ.copy()
+        variables.update(env or {})
+        return subprocess.run(
+            [str(REMOTE_SCRIPT), *args],
+            cwd=ROOT,
+            env=variables,
+            input=input_text,
+            text=True,
+            capture_output=True,
+        )
+
+    def make_source_repo(self, root):
+        source = root / "source"
+        source.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(source)], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.invalid"], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.name", "Test User"], check=True)
+        (source / "tracked.txt").write_text("committed\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(source), "add", "tracked.txt"], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-qm", "initial"], check=True)
+        return source
+
+    def make_tool_stubs(self, root):
+        tools = root / "tools"
+        tools.mkdir()
+        for name, content in {
+            "codex": "#!/bin/sh\nexit 0\n",
+            "gh": "#!/bin/sh\n[ \"$1\" = auth ] && [ \"$2\" = status ]\n",
+            "tmux": (
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  has-session) exit \"${N100_TMUX_HAS_SESSION:-1}\" ;;\n"
+                "  new-session|kill-session) printf '%s\\n' \"$@\" > \"$N100_TMUX_ARGS\" ;;\n"
+                "esac\n"
+            ),
+        }.items():
+            path = tools / name
+            path.write_text(content, encoding="utf-8")
+            path.chmod(0o755)
+        return tools
+
+    def test_remote_start_contains_fixed_safe_codex_prompt(self):
+        text = self.remote_script_text()
+        self.assertIn("Do not push, create a pull request, merge, deploy", text)
+        self.assertIn("access or store credentials", text)
+        self.assertIn("server, scheduler, K3s, Compose, Caddy, or tunnel", text)
+
+    def test_remote_stop_only_targets_fixed_tmux_session(self):
+        self.assertIn('tmux kill-session -t "$SESSION_NAME"', self.remote_script_text())
+
+    def test_preflight_does_not_create_state_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self.make_source_repo(root)
+            tools = self.make_tool_stubs(root)
+            home = root / "home"
+            result = self.run_remote_script(
+                "preflight", str(source),
+                env={"HOME": str(home), "PATH": f"{tools}:{os.environ['PATH']}"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("n100_remote_dev=PASS", result.stdout)
+            self.assertFalse(home.exists())
+
+    def test_preflight_rejects_missing_codex_login(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self.make_source_repo(root)
+            tools = self.make_tool_stubs(root)
+            (tools / "codex").write_text(
+                "#!/bin/sh\n"
+                "[ \"$1\" = login ] && [ \"$2\" = status ] && exit 1\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            home = root / "home"
+            result = self.run_remote_script(
+                "preflight", str(source),
+                env={"HOME": str(home), "PATH": f"{tools}:{os.environ['PATH']}"},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("n100_remote_dev=FAIL", result.stderr)
+            self.assertFalse(home.exists())
+
+    def test_start_uses_dedicated_worktree_without_changing_dirty_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self.make_source_repo(root)
+            (source / "tracked.txt").write_text("dirty source\n", encoding="utf-8")
+            tools = self.make_tool_stubs(root)
+            home = root / "home"
+            tmux_args = root / "tmux-args"
+            result = self.run_remote_script(
+                "start", str(source), input_text="run focused tests\n",
+                env={
+                    "HOME": str(home),
+                    "PATH": f"{tools}:{os.environ['PATH']}",
+                    "N100_TMUX_ARGS": str(tmux_args),
+                },
+            )
+            state_dir = home / ".local/state/personal-server/n100-dev"
+            task_file = state_dir / "task.txt"
+            worktree = home / ".local/share/personal-server/n100-dev-worktree"
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((source / "tracked.txt").read_text(encoding="utf-8"), "dirty source\n")
+            self.assertTrue(worktree.is_dir())
+            self.assertTrue((worktree / ".git").exists())
+            self.assertEqual(task_file.read_text(encoding="utf-8"), "run focused tests\n")
+            self.assertEqual(stat.S_IMODE(task_file.stat().st_mode), 0o600)
+            self.assertIn("personal-server-codex-dev", tmux_args.read_text(encoding="utf-8"))
+
+    def test_start_rejects_an_active_fixed_tmux_session_without_writing_task(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self.make_source_repo(root)
+            tools = self.make_tool_stubs(root)
+            home = root / "home"
+            result = self.run_remote_script(
+                "start", str(source), input_text="must not be stored\n",
+                env={
+                    "HOME": str(home),
+                    "PATH": f"{tools}:{os.environ['PATH']}",
+                    "N100_TMUX_HAS_SESSION": "0",
+                    "N100_TMUX_ARGS": str(root / "tmux-args"),
+                },
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("n100_remote_dev=PASS", result.stdout)
+            self.assertFalse(home.exists())
+
+    def test_start_rejects_task_larger_than_64_kib(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self.make_source_repo(root)
+            tools = self.make_tool_stubs(root)
+            home = root / "home"
+            result = self.run_remote_script(
+                "start", str(source), input_text="x" * (64 * 1024 + 1),
+                env={
+                    "HOME": str(home),
+                    "PATH": f"{tools}:{os.environ['PATH']}",
+                    "N100_TMUX_ARGS": str(root / "tmux-args"),
+                },
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((home / ".local/state/personal-server/n100-dev/task.txt").exists())
+
+    def test_start_rejects_dirty_existing_worktree_without_replacing_prior_task(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self.make_source_repo(root)
+            tools = self.make_tool_stubs(root)
+            home = root / "home"
+            tmux_args = root / "tmux-args"
+            environment = {
+                "HOME": str(home),
+                "PATH": f"{tools}:{os.environ['PATH']}",
+                "N100_TMUX_ARGS": str(tmux_args),
+            }
+            first = self.run_remote_script("start", str(source), input_text="prior task\n", env=environment)
+            worktree = home / ".local/share/personal-server/n100-dev-worktree"
+            task_file = home / ".local/state/personal-server/n100-dev/task.txt"
+            self.assertEqual(first.returncode, 0, first.stderr)
+            (worktree / "uncommitted.txt").write_text("dirty\n", encoding="utf-8")
+
+            second = self.run_remote_script("start", str(source), input_text="replacement task\n", env=environment)
+
+            self.assertNotEqual(second.returncode, 0)
+            self.assertEqual(task_file.read_text(encoding="utf-8"), "prior task\n")
+
+    def test_start_refuses_a_same_named_branch_from_another_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = self.make_source_repo(root)
+            tools = self.make_tool_stubs(root)
+            home = root / "home"
+            unrelated = home / ".local/share/personal-server/n100-dev-worktree"
+            unrelated.parent.mkdir(parents=True)
+            subprocess.run(["git", "init", "-q", "-b", "codex/n100-dev-unrelated", str(unrelated)], check=True)
+            task_file = home / ".local/state/personal-server/n100-dev/task.txt"
+            task_file.parent.mkdir(parents=True)
+            task_file.write_text("prior task\n", encoding="utf-8")
+            result = self.run_remote_script(
+                "start", str(source), input_text="must not run here\n",
+                env={
+                    "HOME": str(home),
+                    "PATH": f"{tools}:{os.environ['PATH']}",
+                    "N100_TMUX_ARGS": str(root / "tmux-args"),
+                },
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(task_file.read_text(encoding="utf-8"), "prior task\n")
+            self.assertFalse((root / "tmux-args").exists())
 
 
 if __name__ == "__main__":
