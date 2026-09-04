@@ -248,6 +248,19 @@ class VerifyChangeScopeTests(unittest.TestCase):
         self.assertEqual(evidence["required_checks"], ["maintenance"])
         self.assertEqual(evidence["blocked_files"], [])
 
+    def test_remote_development_launchers_are_maintenance_policy_files(self):
+        paths = (
+            "scripts/n100-remote-dev.sh",
+            "scripts/n100-remote-dev-remote.sh",
+        )
+
+        code, evidence = run_scope(*paths, executed_checks=("maintenance",))
+
+        self.assertEqual(code, 0)
+        self.assertEqual(evidence["automation_files"], list(paths))
+        self.assertEqual(evidence["required_checks"], ["maintenance"])
+        self.assertEqual(evidence["blocked_files"], [])
+
     def test_runtime_service_state_parser_is_maintenance_policy_file(self):
         code, evidence = run_scope(
             "scripts/runtime-service-state.sh", executed_checks=("maintenance",)
