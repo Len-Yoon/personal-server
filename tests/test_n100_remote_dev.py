@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "n100-remote-dev.sh"
 REMOTE_SCRIPT = ROOT / "scripts" / "n100-remote-dev-remote.sh"
+DOCUMENTATION = ROOT / "docs" / "n100-remote-development.md"
 
 
 class N100RemoteDevHostTests(unittest.TestCase):
@@ -313,6 +314,43 @@ class N100RemoteDevRemoteTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(task_file.read_text(encoding="utf-8"), "prior task\n")
             self.assertFalse((root / "tmux-args").exists())
+
+
+class N100RemoteDevDocumentationTests(unittest.TestCase):
+    def documentation_text(self):
+        return DOCUMENTATION.read_text(encoding="utf-8")
+
+    def test_documentation_describes_existing_alias_and_key(self):
+        text = self.documentation_text()
+        self.assertIn("n100-codex", text)
+        self.assertIn("~/.ssh/id_ed25519_n100", text)
+        self.assertIn("직접 IP", text)
+
+    def test_documentation_contains_supported_commands(self):
+        text = self.documentation_text()
+        for command in ("preflight", "start --task-file /absolute/path/task.txt", "status", "logs", "stop"):
+            self.assertIn(command, text)
+
+    def test_documentation_describes_dedicated_worktree_and_dirty_source_safety(self):
+        text = self.documentation_text()
+        self.assertIn("전용 WSL worktree", text)
+        self.assertIn("dirty source tree", text)
+        self.assertIn("/mnt/c/personal-server", text)
+        self.assertIn("personal-server-codex-dev", text)
+
+    def test_documentation_prohibits_credential_storage_and_external_changes(self):
+        text = self.documentation_text()
+        for secret in ("sudo 비밀번호", "rclone", "GitHub", "Codex"):
+            self.assertIn(secret, text)
+        for prohibited in ("push", "pull request", "merge", "deploy"):
+            self.assertIn(prohibited, text)
+        self.assertNotIn("비밀번호를 파일에 저장", text)
+
+    def test_documentation_includes_disconnect_recovery(self):
+        text = self.documentation_text()
+        self.assertIn("SSH 연결이 끊겨도", text)
+        self.assertIn("Mac이 깨어난 뒤", text)
+        self.assertIn("중복 시작하지 않음", text)
 
 
 if __name__ == "__main__":
