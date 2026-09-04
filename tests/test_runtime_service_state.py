@@ -228,6 +228,23 @@ class RuntimeServiceStateTests(unittest.TestCase):
         finally:
             self._remove_project(project_root)
 
+    def test_reader_trusts_existing_state_only_through_trusted_anchor(self):
+        project_root = self._temporary_project()
+        try:
+            result = subprocess.run(
+                [
+                    "python3", "-c",
+                    "import importlib.util,sys; s=importlib.util.spec_from_file_location('r',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); raise SystemExit(0 if not m.trusted_directory_hierarchy(sys.argv[2]) else 1)",
+                    str(READER), str(project_root / "parent" / "state"),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0)
+        finally:
+            self._remove_project(project_root)
+
     @staticmethod
     def _temporary_project() -> Path:
         import tempfile

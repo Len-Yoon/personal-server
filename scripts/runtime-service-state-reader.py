@@ -26,6 +26,11 @@ def trusted_directory(path: str) -> bool:
     return os.access(path, os.R_OK | os.X_OK)
 
 
+def trusted_directory_hierarchy(state_path: str) -> bool:
+    parent = os.path.dirname(state_path)
+    return trusted_directory(os.path.dirname(parent)) and trusted_directory(parent)
+
+
 def read_state(path: str) -> int:
     parent = os.path.dirname(path)
     try:
@@ -49,7 +54,7 @@ def read_state(path: str) -> int:
         return fail("state file is group/other writable")
     if state_info.st_uid != 0:
         return fail("state file is not root-owned regular file")
-    if not trusted_directory(parent):
+    if not trusted_directory_hierarchy(path):
         return fail("state parent is not trusted")
 
     try:
