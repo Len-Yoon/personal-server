@@ -27,6 +27,13 @@ MAX_REQUEST_BODY_BYTES = 1_048_576
 CONFIGMAP_OFFSET_KEY = "telegram_next_update_id"
 CONFIGMAP_ALERT_STATE_KEY = "alert_state"
 ALERT_STATE_TTL_SECONDS = 4 * 60 * 60
+ALERT_PRESENTATIONS = {
+    "PodRestartIncrease": ("서비스가 반복 재시작됨", "서비스 기능이 불안정할 수 있음"),
+    "PortalUnavailable": ("Portal 접속 불가", "웹사이트가 열리지 않을 수 있음"),
+    "DeploymentUnavailable": ("서비스 실행 수 부족", "일부 기능이 정상 동작하지 않을 수 있음"),
+    "PVCNotBound": ("데이터 저장소 연결 실패", "저장된 데이터에 접근하지 못할 수 있음"),
+    "PrometheusTargetDown": ("상태 수집 대상 응답 없음", "해당 서비스의 상태를 확인하지 못할 수 있음"),
+}
 LOGGER = logging.getLogger(__name__)
 
 
@@ -453,17 +460,24 @@ class RelayService:
         return deliverable, state_records
 
     def _format_alert(self, status: str, alerts: list[Any]) -> str:
-        heading = "[K3s 경고 발생]" if status == "firing" else "[K3s 경고 복구]"
-        names: list[str] = []
+        heading = "[장애 감지]" if status == "firing" else "[복구 확인]"
+        entries: list[str] = []
         for alert in alerts[:MAX_ALERT_ITEMS]:
             if not isinstance(alert, dict):
                 continue
             labels = alert.get("labels")
-            alert_name = labels.get("alertname") if isinstance(labels, dict) else None
-            if isinstance(alert_name, str) and alert_name:
-                names.append(alert_name)
-        detail = ", ".join(names) if names else "상세 항목 없음"
-        return self._redact(f"{heading}\n{detail}")
+            safe_labels = labels if isinstance(labels, dict) else {}
+            alert_name = safe_labels.get("alertname")
+            presentation = ALERT_PRESENTATIONS.get(alert_name) if isinstance(alert_name, str) else None
+            problem, impact = presentation or ("운영 상태 경고", "상태를 자동으로 확인 중입니다.")
+            target = _format_alert_target(safe_labels)
+            state = "자동 복구를 확인 중입니다." if status == "firing" else "정상으로 돌아왔습니다."
+            lines = [f"문제: {problem}", f"영향: {impact}", f"대상: {target}", f"상태: {state}"]
+            entries.append("\n".join(lines))
+        if not entries:
+            entries.append("문제: 운영 상태 경고\n대상: 확인 대상 없음\n상태: 자동 확인이 필요합니다.")
+        suffix = f"\n\n총 {len(alerts)}건" if len(alerts) > len(entries) else ""
+        return self._redact(f"{heading}\n" + "\n\n".join(entries) + suffix)
 
     def _redact(self, value: str | None) -> str:
         if value is None:
@@ -515,6 +529,16 @@ class TelegramClient:
                 type(exc).__name__,
             )
             return None
+
+
+def _format_alert_target(labels: dict[str, Any]) -> str:
+    """Return a compact, allow-listed workload target for a Telegram message."""
+    values: list[str] = []
+    for key in ("namespace", "deployment", "pod", "persistentvolumeclaim", "job", "instance"):
+        value = labels.get(key)
+        if isinstance(value, str) and value:
+            values.append(value)
+    return " / ".join(values) if values else "확인 대상 없음"
 
 
 def handle_http_request(
