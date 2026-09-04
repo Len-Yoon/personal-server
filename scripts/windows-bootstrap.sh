@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${1:-/mnt/c/personal-server}"
 cd "$PROJECT_ROOT"
+source "$SCRIPT_DIR/runtime-service-state.sh"
 {
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] bootstrap start"
   echo "pwd=$(pwd)"
@@ -60,6 +62,54 @@ PORTAL_RUNTIME_MODE="compose"
 PORTAL_SCAN_URL=""
 RUN_MAINTENANCE=1
 PORTAL_BRIDGE_COMPOSE_FILE="${PORTAL_BRIDGE_COMPOSE_FILE:-$PROJECT_ROOT/docker-compose.portal-bridge.yml}"
+CRAWLER_WORKER_RUNTIME_MODE=compose
+YOUTUBE_MEMO_RUNTIME_MODE=compose
+BOOK_MEMO_RUNTIME_MODE=compose
+
+runtime_service_mode() {
+  case "$1" in
+    crawler-worker) printf '%s\n' "$CRAWLER_WORKER_RUNTIME_MODE" ;;
+    youtube-memo) printf '%s\n' "$YOUTUBE_MEMO_RUNTIME_MODE" ;;
+    book-memo) printf '%s\n' "$BOOK_MEMO_RUNTIME_MODE" ;;
+    *) return 1 ;;
+  esac
+}
+
+all_crawler_services_compose() {
+  [ "$CRAWLER_WORKER_RUNTIME_MODE" = compose ] && [ "$YOUTUBE_MEMO_RUNTIME_MODE" = compose ] && [ "$BOOK_MEMO_RUNTIME_MODE" = compose ]
+}
+
+set_cutover_homeops_lists() {
+  local service
+  HOMEOPS_DOCKER_MANAGED_SERVICES="system-agent"
+  EXPECTED_CONTAINERS=""
+  for service in crawler-worker youtube-memo book-memo; do
+    if [ "$(runtime_service_mode "$service")" = compose ]; then
+      HOMEOPS_DOCKER_MANAGED_SERVICES+=",$service"
+      EXPECTED_CONTAINERS+="${EXPECTED_CONTAINERS:+,}$service"
+    fi
+  done
+  HOMEOPS_DOCKER_MANAGED_SERVICES+=",caddy,homeops-executor"
+  EXPECTED_CONTAINERS+="${EXPECTED_CONTAINERS:+,}system-agent"
+  export HOMEOPS_DOCKER_MANAGED_SERVICES EXPECTED_CONTAINERS
+}
+
+load_runtime_service_modes() {
+  local state row service mode
+  state="$(load_service_runtime_state "$PROJECT_ROOT")" || return 1
+  while IFS='=' read -r service mode; do
+    if [[ "$service" == crawler-worker || "$service" == youtube-memo || "$service" == book-memo ]]; then
+      case "$service" in
+        crawler-worker) CRAWLER_WORKER_RUNTIME_MODE="$mode" ;;
+        youtube-memo) YOUTUBE_MEMO_RUNTIME_MODE="$mode" ;;
+        book-memo) BOOK_MEMO_RUNTIME_MODE="$mode" ;;
+      esac
+    else
+      echo "Invalid crawler runtime state" >> /tmp/windows-bootstrap-trace.log
+      return 1
+    fi
+  done <<< "$state"
+}
 
 load_portal_runtime_mode() {
   local mode
@@ -112,15 +162,31 @@ start_runtime_services() {
       require_portal_state_ready
       export HOMEOPS_DOCKER_MANAGED_SERVICES="${HOMEOPS_DOCKER_MANAGED_SERVICES:-portal-web,system-agent,crawler-worker,youtube-memo,book-memo,caddy,homeops-executor}"
       export EXPECTED_CONTAINERS="${EXPECTED_CONTAINERS:-portal-web,crawler-worker,youtube-memo,book-memo,system-agent}"
-      docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d \
-        portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker caddy
+      if all_crawler_services_compose; then
+        docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d \
+          portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker caddy
+      else
+        compose_services="homeops-executor system-agent car-care-worker"
+        for service in crawler-worker youtube-memo book-memo; do
+          if [ "$(runtime_service_mode "$service")" = compose ]; then compose_services+=" $service"; fi
+        done
+        docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d \
+          portal-web $compose_services caddy
+      fi
       PORTAL_SCAN_URL="http://127.0.0.1:8000/internal/homeops/scan"
       ;;
     cutover)
       validate_docker_bridge_gateway
-      export HOMEOPS_DOCKER_MANAGED_SERVICES="system-agent,crawler-worker,youtube-memo,book-memo,caddy,homeops-executor"
-      export EXPECTED_CONTAINERS="crawler-worker,youtube-memo,book-memo,system-agent"
-      compose_services="homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker"
+      if all_crawler_services_compose; then
+        export HOMEOPS_DOCKER_MANAGED_SERVICES="system-agent,crawler-worker,youtube-memo,book-memo,caddy,homeops-executor"
+        export EXPECTED_CONTAINERS="crawler-worker,youtube-memo,book-memo,system-agent"
+      else
+        set_cutover_homeops_lists
+      fi
+      compose_services="homeops-executor system-agent car-care-worker"
+      for service in crawler-worker youtube-memo book-memo; do
+        if [ "$(runtime_service_mode "$service")" = compose ]; then compose_services+=" $service"; fi
+      done
       bridge_compose=(docker compose -f docker-compose.yml -f docker-compose.n100.yml -f "$PORTAL_BRIDGE_COMPOSE_FILE")
       "${bridge_compose[@]}" up -d --no-deps --force-recreate $compose_services
       "${bridge_compose[@]}" up -d --no-deps caddy
@@ -128,9 +194,16 @@ start_runtime_services() {
       ;;
     k3s)
       validate_docker_bridge_gateway
-      export HOMEOPS_DOCKER_MANAGED_SERVICES="system-agent,crawler-worker,youtube-memo,book-memo,caddy,homeops-executor"
-      export EXPECTED_CONTAINERS="crawler-worker,youtube-memo,book-memo,system-agent"
-      compose_services="homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker"
+      if all_crawler_services_compose; then
+        export HOMEOPS_DOCKER_MANAGED_SERVICES="system-agent,crawler-worker,youtube-memo,book-memo,caddy,homeops-executor"
+        export EXPECTED_CONTAINERS="crawler-worker,youtube-memo,book-memo,system-agent"
+      else
+        set_cutover_homeops_lists
+      fi
+      compose_services="homeops-executor system-agent car-care-worker"
+      for service in crawler-worker youtube-memo book-memo; do
+        if [ "$(runtime_service_mode "$service")" = compose ]; then compose_services+=" $service"; fi
+      done
       bridge_compose=(docker compose -f docker-compose.yml -f docker-compose.n100.yml -f "$PORTAL_BRIDGE_COMPOSE_FILE")
       "${bridge_compose[@]}" up -d --no-deps --force-recreate $compose_services
       "${bridge_compose[@]}" up -d --no-deps caddy
@@ -154,6 +227,7 @@ run_daily_maintenance() {
   fi
 }
 
+load_runtime_service_modes
 start_runtime_services
 
 if [ -n "${HOMEOPS_SCHEDULER_SECRET:-}" ] && [ -n "$PORTAL_SCAN_URL" ]; then
