@@ -24,7 +24,7 @@ bash infra/k8s/tools/transition-runner-preflight.sh
 
 ## root 설치
 
-운영자는 승인된 release runner 파일의 SHA-256 값을 확인하고, root 소유 `0600` 암호화 credential 파일이 있는 native ext4 N100 경로를 준비해야 함. 다음 명령은 예시이며 digest와 credential 경로는 실제 승인 값으로 대체 필요함.
+운영자는 runner·policy·validator·systemd unit 전체 release manifest의 SHA-256 값을 확인하고, root 소유 `0600` 암호화 credential 파일이 있는 native ext4 N100 경로를 준비해야 함. 다음 명령은 예시이며 digest와 credential 경로는 실제 승인 값으로 대체 필요함.
 
 ```bash
 sudo bash infra/k8s/tools/install-transition-runner.sh --apply \
