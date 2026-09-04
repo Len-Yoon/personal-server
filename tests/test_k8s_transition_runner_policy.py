@@ -46,6 +46,11 @@ class TransitionRunnerPolicyTest(unittest.TestCase):
         data["services"][0]["image"] = f"evil.example/crawler-worker@sha256:{digest}"
         self.assertNotEqual(self.run_policy(data).returncode, 0)
 
+    def test_policy_rejects_unapproved_digest_in_approved_repository(self):
+        data = json.loads(POLICY.read_text(encoding="utf-8"))
+        data["services"][0]["image"] = "ghcr.io/personal-server/crawler-worker@sha256:" + "d" * 64
+        self.assertNotEqual(self.run_policy(data).returncode, 0)
+
     def test_policy_rejects_nonpositive_timeout(self):
         data = json.loads(POLICY.read_text(encoding="utf-8"))
         data["timeouts"]["backup"] = 0

@@ -12,7 +12,11 @@ SERVICE_KEYS = {"name", "pvc", "image"}
 DIGEST = re.compile(r"^[^@/\s]+(?:/[^@/\s]+)*@sha256:[0-9a-f]{64}$")
 SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 EXPECTED_PVCS = dict(zip(SERVICES, ("crawler-worker-data", "youtube-memo-data", "book-memo-data")))
-EXPECTED_IMAGE_PREFIXES = {service: f"ghcr.io/personal-server/{service}@sha256:" for service in SERVICES}
+EXPECTED_IMAGES = {
+    "crawler-worker": "ghcr.io/personal-server/crawler-worker@sha256:" + "a" * 64,
+    "youtube-memo": "ghcr.io/personal-server/youtube-memo@sha256:" + "b" * 64,
+    "book-memo": "ghcr.io/personal-server/book-memo@sha256:" + "c" * 64,
+}
 
 
 def fail(message):
@@ -38,8 +42,7 @@ def validate(data):
             raise ValueError("services are duplicated or out of order")
         if not isinstance(pvc, str) or pvc != EXPECTED_PVCS[name] or not SAFE_NAME.fullmatch(pvc):
             raise ValueError("unsafe PVC name")
-        if (not isinstance(image, str) or not DIGEST.fullmatch(image)
-                or not image.startswith(EXPECTED_IMAGE_PREFIXES[name])):
+        if not isinstance(image, str) or not DIGEST.fullmatch(image) or image != EXPECTED_IMAGES[name]:
             raise ValueError("image must be immutable lowercase sha256 digest")
         names.append(name)
     if not isinstance(data["timeouts"], dict) or set(data["timeouts"]) != set(PHASES):
