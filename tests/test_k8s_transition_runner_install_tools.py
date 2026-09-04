@@ -41,6 +41,27 @@ class TransitionRunnerInstallToolsTests(unittest.TestCase):
         self.assertNotIn("mkdir", result.stdout)
         self.assertNotIn("install", result.stdout)
 
+    def test_preflight_uses_normal_status_interface(self):
+        result = self.run_tool(PREFLIGHT)
+        self.assertNotIn("status=status=", result.stdout)
+
+    def test_installed_paths_are_aligned_with_unit(self):
+        installer = (ROOT / "infra/k8s/tools/install-transition-runner.sh").read_text()
+        unit = (ROOT / "infra/k8s/transition-runner/systemd/personal-server-transition.service").read_text()
+        self.assertIn("LIBEXEC=/usr/local/libexec/personal-server-transition", installer)
+        self.assertIn("ExecStart=/usr/local/libexec/personal-server-transition\n", unit)
+
+    def test_release_digest_covers_every_installed_artifact(self):
+        installer = (ROOT / "infra/k8s/tools/install-transition-runner.sh").read_text()
+        for artifact in ("SOURCE_RUNNER", "SOURCE_POLICY", "SOURCE_UNIT", "SOURCE_VALIDATOR"):
+            self.assertIn(artifact, installer)
+        self.assertIn("sha256sum", installer)
+
+    def test_preflight_does_not_execute_repository_validator(self):
+        preflight = PREFLIGHT.read_text()
+        self.assertNotIn("python3", preflight)
+        self.assertNotIn("python3", preflight)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -34,7 +34,7 @@ class TransitionRunnerArtifactTest(unittest.TestCase):
         self.assertIn("ProtectSystem=strict", text)
         self.assertIn("InaccessiblePaths=/mnt/c", text)
         self.assertIn("ReadWritePaths=/var/lib/personal-server-transition", text)
-        self.assertIn("ExecStart=/usr/local/libexec/personal-server-transition-runner", text)
+        self.assertIn("ExecStart=/usr/local/libexec/personal-server-transition", text)
 
     def test_shell_runner_has_valid_syntax(self):
         self.assertEqual(subprocess.run(["bash", "-n", str(RUNNER)]).returncode, 0)
