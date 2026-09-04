@@ -534,7 +534,8 @@ esac
         timeout_helper = text[text.index("run_timeout() {") : text.index("kctl() {")]
 
         self.assertIn('python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" "$@" 9>&-', timeout_helper)
-        self.assertIn("start_new_session=True", text)
+        self.assertIn("process_group=0", text)
+        self.assertNotIn("start_new_session=True", text)
         self.assertIn("os.killpg(process.pid, signal_to_send)", text)
         self.assertIn("process.wait(timeout=seconds)", text)
         self.assertIn("PR_SET_PDEATHSIG = 1", text)
