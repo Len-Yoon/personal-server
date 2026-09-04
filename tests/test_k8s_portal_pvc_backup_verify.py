@@ -12,7 +12,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_password=""):
+    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_password=""):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -48,6 +48,8 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
                 "PORTAL_FAKE_SPECIAL_ENTRY": "1" if special_entry else "",
                 "PORTAL_FAKE_HOLD": "1" if send_signal else "",
                 "PORTAL_FAKE_READER_WAIT": str(root / "reader-wait"),
+                "PORTAL_FAKE_CLEANUP_DELETE_WAIT": str(root / "cleanup-delete-wait"),
+                "PORTAL_FAKE_HOLD_CLEANUP_DELETE": "1" if followup_signal else "",
                 "PORTAL_FAKE_NOISY": "1",
                 "PORTAL_FAKE_LOCK_BUSY": "1" if lock_busy else "",
                 "PORTAL_FAKE_REQUIRE_URLLIB": "1" if require_urllib else "",
@@ -64,6 +66,13 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
                 while not reader_wait.exists() and time.time() < deadline:
                     time.sleep(0.01)
                 process.send_signal(signal.SIGTERM)
+                if followup_signal:
+                    cleanup_delete_wait = root / "cleanup-delete-wait"
+                    deadline = time.time() + 8
+                    while not cleanup_delete_wait.exists() and time.time() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(cleanup_delete_wait.exists(), "cleanup did not begin reader deletion")
+                    process.send_signal(signal.SIGTERM)
                 stdout, stderr = process.communicate(timeout=10)
                 result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
             else:
@@ -144,7 +153,12 @@ case "$*" in
       *python3*) exit 42 ;;
     esac
     exit 42 ;;
-  *'delete pod'*) exit 0 ;;
+  *'delete pod'*)
+    if [ "${{PORTAL_FAKE_HOLD_CLEANUP_DELETE:-}}" = 1 ]; then
+      touch "${{PORTAL_FAKE_CLEANUP_DELETE_WAIT}}"
+      sleep 1
+    fi
+    exit 0 ;;
   *'exec -i'*'/data/files'*)
     if [ "${{PORTAL_FAKE_SPECIAL_ENTRY:-}}" = 1 ]; then exit 42; fi
     tar -C '{files}' -cf - .; exit 0 ;;
@@ -308,6 +322,20 @@ esac
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("portal_pvc_backup=PASS", result.stdout)
         self.assertIn("scale deployment/portal-web --replicas=1", calls)
+
+    def test_followup_signal_during_cleanup_still_deletes_reader_and_restores_portal(self):
+        result, calls, _, _ = self.run_tool("--go", send_signal=True, followup_signal=True)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("kubectl -n personal-server delete pod", calls)
+        self.assertIn("scale deployment/portal-web --replicas=1", calls)
+
+    def test_cleanup_ignores_followup_termination_signals_until_portal_is_restored(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        cleanup = text[text.index("cleanup() {") : text.index('case "${1:-}" in')]
+
+        self.assertIn("trap '' INT TERM HUP", cleanup)
+        self.assertNotIn("trap - EXIT INT TERM HUP", cleanup)
 
     def test_create_failure_still_deletes_the_reserved_reader_name(self):
         result, calls, _, _ = self.run_tool("--go", fail_at="create")
