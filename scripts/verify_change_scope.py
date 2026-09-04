@@ -37,6 +37,7 @@ BLOCKED_FILES = {
     "crawler-worker/app/services/news_scheduler.py",
 }
 POLICY_MAINTENANCE_FILES = {
+    "scripts/runtime-service-state.sh",
     "scripts/verify_change_scope.py",
     "scripts/run_change_harness.py",
     "scripts/summarize_token_measurements.py",
