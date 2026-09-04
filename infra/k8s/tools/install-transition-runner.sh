@@ -34,7 +34,7 @@ for parent in /usr/local/libexec /etc /etc/systemd/system; do trusted_dir "$pare
 
 stage_libexec=$(mktemp -d /usr/local/libexec/.personal-server-transition.XXXXXX)
 stage_etc=$(mktemp -d /etc/.personal-server-transition.XXXXXX)
-stage_unit=$(mktemp /etc/systemd/.personal-server-transition.service.XXXXXX)
+stage_unit=$(mktemp /etc/systemd/system/.personal-server-transition.service.XXXXXX)
 cleanup() { rm -rf -- "$stage_libexec" "$stage_etc" "$stage_unit"; }
 trap cleanup EXIT
 install -o root -g root -m 0750 "$SOURCE_RUNNER" "$stage_libexec/personal-server-transition"

@@ -10,7 +10,7 @@ fi
 readonly POLICY='/etc/personal-server-transition/runner-policy.json'
 readonly STATE_ROOT='/var/lib/personal-server-transition'
 readonly LOCK_ROOT='/var/lib/personal-server-transition/locks'
-readonly VALIDATOR='/usr/local/libexec/personal-server-transition-policy-validator'
+readonly VALIDATOR='/usr/local/libexec/personal-server-transition/personal-server-transition-policy-validator'
 readonly SERVICES=(crawler-worker youtube-memo book-memo)
 readonly PHASES=(preflight backup stop-compose copy-pvc start-k3s verify-private record)
 

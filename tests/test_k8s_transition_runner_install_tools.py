@@ -57,6 +57,16 @@ class TransitionRunnerInstallToolsTests(unittest.TestCase):
             self.assertIn(artifact, installer)
         self.assertIn("sha256sum", installer)
 
+    def test_runner_validator_path_matches_installed_release_directory(self):
+        runner = (ROOT / "infra/k8s/transition-runner/runner/personal-server-transition-runner").read_text()
+        installer = (ROOT / "infra/k8s/tools/install-transition-runner.sh").read_text()
+        self.assertIn("/usr/local/libexec/personal-server-transition/personal-server-transition-policy-validator", runner)
+        self.assertIn("stage_libexec/personal-server-transition-policy-validator", installer)
+
+    def test_unit_staging_is_on_final_systemd_filesystem(self):
+        installer = (ROOT / "infra/k8s/tools/install-transition-runner.sh").read_text()
+        self.assertIn("mktemp /etc/systemd/system/", installer)
+
     def test_preflight_does_not_execute_repository_validator(self):
         preflight = PREFLIGHT.read_text()
         self.assertNotIn("python3", preflight)
