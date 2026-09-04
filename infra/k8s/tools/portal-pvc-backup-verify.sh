@@ -169,7 +169,9 @@ evidence_is_current_k3s_pvc() {
 
 cleanup() {
   local status=$? restore_ok=1
-  trap - EXIT INT TERM HUP
+  trap - EXIT
+  # A follow-up Ctrl+C must not interrupt reader deletion or Portal restoration.
+  trap '' INT TERM HUP
   if [ "$RCLONE_CONFIG_PASS_PROMPTED" -eq 1 ]; then
     unset RCLONE_CONFIG_PASS
   fi
