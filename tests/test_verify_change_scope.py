@@ -252,10 +252,24 @@ class VerifyChangeScopeTests(unittest.TestCase):
         code, evidence = run_scope(
             "scripts/runtime-service-state.sh", executed_checks=("maintenance",)
         )
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 2)
         self.assertEqual(evidence["automation_files"], ["scripts/runtime-service-state.sh"])
-        self.assertEqual(evidence["required_checks"], ["maintenance"])
+        self.assertEqual(
+            evidence["required_checks"],
+            ["maintenance", "crawler-worker", "youtube-memo", "book-memo"],
+        )
+        self.assertEqual(
+            evidence["missing_checks"], ["crawler-worker", "youtube-memo", "book-memo"]
+        )
         self.assertEqual(evidence["blocked_files"], [])
+
+    def test_runtime_service_state_parser_accepts_all_required_service_checks(self):
+        code, evidence = run_scope(
+            "scripts/runtime-service-state.sh",
+            executed_checks=("maintenance", "crawler-worker", "youtube-memo", "book-memo"),
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(evidence["missing_checks"], [])
 
     def test_approved_caddy_runtime_files_require_full_validation(self):
         paths = ("docker-compose.n100.yml", "caddy/Caddyfile")

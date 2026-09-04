@@ -42,6 +42,8 @@ POLICY_MAINTENANCE_FILES = {
     "scripts/run_change_harness.py",
     "scripts/summarize_token_measurements.py",
 }
+RUNTIME_STATE_POLICY_FILES = {"scripts/runtime-service-state.sh"}
+RUNTIME_STATE_REQUIRED_CHECKS = ("crawler-worker", "youtube-memo", "book-memo")
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -90,6 +92,9 @@ def classify_paths(paths: list[str]) -> dict[str, object]:
         if path in POLICY_MAINTENANCE_FILES:
             evidence["automation_files"].append(path)
             _append_required_check(evidence, "maintenance")
+            if path in RUNTIME_STATE_POLICY_FILES:
+                for service in RUNTIME_STATE_REQUIRED_CHECKS:
+                    _append_required_check(evidence, service)
             continue
 
         if path in DEPLOYMENT_WORKFLOW_FILES:
