@@ -112,6 +112,17 @@ class RuntimeServiceStateTests(unittest.TestCase):
         finally:
             self._remove_project(project_root)
 
+    def test_unreadable_data_directory_is_rejected_instead_of_defaulting(self):
+        project_root = self._temporary_project()
+        data_dir = project_root / "data"
+        try:
+            data_dir.mkdir()
+            data_dir.chmod(0)
+            self.assertNotEqual(run_state_loader(project_root).returncode, 0)
+        finally:
+            data_dir.chmod(0o700)
+            self._remove_project(project_root)
+
     @staticmethod
     def _temporary_project() -> Path:
         import tempfile

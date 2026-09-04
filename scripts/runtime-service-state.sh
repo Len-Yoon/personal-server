@@ -7,6 +7,7 @@ load_service_runtime_state() {
     fi
 
     local project_root=$1
+    local data_dir="$project_root/data"
     local state_file="$project_root/data/k3s-runtime-services.state"
     local crawler_worker=compose
     local youtube_memo=compose
@@ -16,6 +17,10 @@ load_service_runtime_state() {
     local book_memo_seen=0
     local row
     local -a rows
+
+    if [[ -e "$data_dir" || -L "$data_dir" ]]; then
+        [[ -d "$data_dir" && -r "$data_dir" && -x "$data_dir" ]] || return 1
+    fi
 
     if [[ -e "$state_file" || -L "$state_file" ]]; then
         [[ -f "$state_file" && -r "$state_file" ]] || return 1
