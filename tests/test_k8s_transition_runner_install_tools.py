@@ -49,7 +49,8 @@ class TransitionRunnerInstallToolsTests(unittest.TestCase):
         installer = (ROOT / "infra/k8s/tools/install-transition-runner.sh").read_text()
         unit = (ROOT / "infra/k8s/transition-runner/systemd/personal-server-transition.service").read_text()
         self.assertIn("LIBEXEC=/usr/local/libexec/personal-server-transition", installer)
-        self.assertIn("ExecStart=/usr/local/libexec/personal-server-transition\n", unit)
+        self.assertIn("stage_libexec/personal-server-transition-runner", installer)
+        self.assertIn("ExecStart=/usr/local/libexec/personal-server-transition/personal-server-transition-runner\n", unit)
 
     def test_release_digest_covers_every_installed_artifact(self):
         installer = (ROOT / "infra/k8s/tools/install-transition-runner.sh").read_text()

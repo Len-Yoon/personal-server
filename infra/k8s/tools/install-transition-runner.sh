@@ -37,7 +37,7 @@ stage_etc=$(mktemp -d /etc/.personal-server-transition.XXXXXX)
 stage_unit=$(mktemp /etc/systemd/system/.personal-server-transition.service.XXXXXX)
 cleanup() { rm -rf -- "$stage_libexec" "$stage_etc" "$stage_unit"; }
 trap cleanup EXIT
-install -o root -g root -m 0750 "$SOURCE_RUNNER" "$stage_libexec/personal-server-transition"
+install -o root -g root -m 0750 "$SOURCE_RUNNER" "$stage_libexec/personal-server-transition-runner"
 install -o root -g root -m 0755 "$SOURCE_VALIDATOR" "$stage_libexec/personal-server-transition-policy-validator"
 install -o root -g root -m 0750 "$SOURCE_POLICY" "$stage_etc/runner-policy.json"
 install -d -o root -g root -m 0700 "$stage_etc/credentials"
