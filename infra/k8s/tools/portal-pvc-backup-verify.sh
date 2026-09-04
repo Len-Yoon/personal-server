@@ -39,13 +39,17 @@ RCLONE_CONFIG_PASS_PROMPTED=0
 
 usage() { printf '%s\n' "usage: $0 --check|--go" >&2; }
 
-run_timeout() { timeout "$@"; }
+# The advisory lock belongs only to this controller process.  Long-running
+# children (kubectl exec/rclone) must not inherit it, otherwise an interrupted
+# backup can leave the lock held after this process exits.
+run_unlocked() { "$@" 9>&-; }
+run_timeout() { timeout "$@" 9>&-; }
 kctl() { run_timeout "${PORTAL_KUBECTL_TIMEOUT_SECONDS:-120}" sudo k3s kubectl "$@"; }
 fail() { return 1; }
 progress() { printf '%s\n' "portal_pvc_backup_stage=$1"; }
 
 run_private() {
-  "$@" >>"$DIAGNOSTIC_FILE" 2>&1
+  run_unlocked "$@" >>"$DIAGNOSTIC_FILE" 2>&1
 }
 
 tree_digest() {
@@ -284,9 +288,9 @@ age -R "$RECIPIENT" -o "$ciphertext" "$archive" >>"$DIAGNOSTIC_FILE" 2>&1
 artifact_digest="sha256:$(sha256sum "$ciphertext" | awk '{print $1}')"
 remote_object="$REMOTE/portal-${RUN_ID}.tar.age"
 progress remote_upload
-rclone copyto --immutable --log-level ERROR "$ciphertext" "$remote_object" >>"$DIAGNOSTIC_FILE" 2>&1
+run_unlocked rclone copyto --immutable --log-level ERROR "$ciphertext" "$remote_object" >>"$DIAGNOSTIC_FILE" 2>&1
 progress remote_restore
-rclone copyto --log-level ERROR "$remote_object" "$WORKDIR/download.age" >>"$DIAGNOSTIC_FILE" 2>&1
+run_unlocked rclone copyto --log-level ERROR "$remote_object" "$WORKDIR/download.age" >>"$DIAGNOSTIC_FILE" 2>&1
 [ "$artifact_digest" = "sha256:$(sha256sum "$WORKDIR/download.age" | awk '{print $1}')" ]
 age -d -i "$IDENTITY" -o "$WORKDIR/restore.tar" "$WORKDIR/download.age" >>"$DIAGNOSTIC_FILE" 2>&1
 tar -C "$restore" -xf "$WORKDIR/restore.tar" >>"$DIAGNOSTIC_FILE" 2>&1
