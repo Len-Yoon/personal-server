@@ -16,5 +16,5 @@ ExecStart=@REPO_ROOT@/infra/k8s/tools/portal-pvc-backup-automation.sh --run
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-InaccessiblePaths=/mnt/c
+ReadOnlyPaths=@REPO_ROOT@
 ReadWritePaths=@STATE_DIR@
