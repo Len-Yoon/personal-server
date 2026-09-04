@@ -92,6 +92,26 @@ class RuntimeServiceStateTests(unittest.TestCase):
         finally:
             self._remove_project(project_root)
 
+    def test_dangling_runtime_state_symlink_is_rejected(self):
+        project_root = self._temporary_project()
+        try:
+            state = project_root / "data" / "k3s-runtime-services.state"
+            state.parent.mkdir()
+            state.symlink_to(project_root / "data" / "missing.state")
+            self.assertNotEqual(run_state_loader(project_root).returncode, 0)
+        finally:
+            self._remove_project(project_root)
+
+    def test_nul_containing_runtime_state_row_is_rejected(self):
+        project_root = self._temporary_project()
+        try:
+            state = project_root / "data" / "k3s-runtime-services.state"
+            state.parent.mkdir()
+            state.write_bytes(b"crawler-worker=compose\x00\n")
+            self.assertNotEqual(run_state_loader(project_root).returncode, 0)
+        finally:
+            self._remove_project(project_root)
+
     @staticmethod
     def _temporary_project() -> Path:
         import tempfile

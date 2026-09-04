@@ -17,8 +17,11 @@ load_service_runtime_state() {
     local row
     local -a rows
 
-    if [[ -e "$state_file" ]]; then
+    if [[ -e "$state_file" || -L "$state_file" ]]; then
         [[ -f "$state_file" && -r "$state_file" ]] || return 1
+        if ! tr -d '\000' < "$state_file" | cmp -s - "$state_file"; then
+            return 1
+        fi
         while IFS= read -r row || [[ -n "$row" ]]; do
             rows+=("$row")
         done < "$state_file"
