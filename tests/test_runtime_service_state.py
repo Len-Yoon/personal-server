@@ -39,6 +39,7 @@ class RuntimeServiceStateTests(unittest.TestCase):
     def test_missing_runtime_state_defaults_all_services_to_compose(self):
         project_root = self._temporary_project()
         try:
+            (project_root / "data").mkdir()
             result = run_state_loader(project_root)
             self.assertEqual(result.returncode, 0)
             self.assertEqual(
@@ -121,6 +122,46 @@ class RuntimeServiceStateTests(unittest.TestCase):
             self.assertNotEqual(run_state_loader(project_root).returncode, 0)
         finally:
             data_dir.chmod(0o700)
+            self._remove_project(project_root)
+
+    def test_missing_project_root_is_rejected(self):
+        project_root = self._temporary_project()
+        self._remove_project(project_root)
+        result = run_state_loader(project_root)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_project_root_must_be_a_real_directory(self):
+        project_root = self._temporary_project() / "root-file"
+        project_root.write_text("not a directory", encoding="utf-8")
+        self.assertNotEqual(run_state_loader(project_root).returncode, 0)
+        project_root.unlink()
+
+    def test_missing_data_directory_is_rejected(self):
+        project_root = self._temporary_project()
+        try:
+            self.assertNotEqual(run_state_loader(project_root).returncode, 0)
+        finally:
+            self._remove_project(project_root)
+
+    def test_data_directory_symlink_is_rejected(self):
+        project_root = self._temporary_project()
+        try:
+            (project_root / "data-target").mkdir()
+            (project_root / "data").symlink_to(project_root / "data-target", target_is_directory=True)
+            self.assertNotEqual(run_state_loader(project_root).returncode, 0)
+        finally:
+            self._remove_project(project_root)
+
+    def test_state_file_symlink_is_rejected_even_when_target_is_valid(self):
+        project_root = self._temporary_project()
+        try:
+            data_dir = project_root / "data"
+            data_dir.mkdir()
+            target = data_dir / "target.state"
+            target.write_text("crawler-worker=compose\n", encoding="utf-8")
+            (data_dir / "k3s-runtime-services.state").symlink_to(target)
+            self.assertNotEqual(run_state_loader(project_root).returncode, 0)
+        finally:
             self._remove_project(project_root)
 
     @staticmethod

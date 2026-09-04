@@ -18,11 +18,13 @@ load_service_runtime_state() {
     local row
     local -a rows
 
-    if [[ -e "$data_dir" || -L "$data_dir" ]]; then
-        [[ -d "$data_dir" && -r "$data_dir" && -x "$data_dir" ]] || return 1
-    fi
+    [[ -d "$project_root" && ! -L "$project_root" && -r "$project_root" && -x "$project_root" ]] || return 1
+    [[ -d "$data_dir" && ! -L "$data_dir" && -r "$data_dir" && -x "$data_dir" ]] || return 1
 
-    if [[ -e "$state_file" || -L "$state_file" ]]; then
+    if [[ -L "$state_file" ]]; then
+        return 1
+    fi
+    if [[ -e "$state_file" ]]; then
         [[ -f "$state_file" && -r "$state_file" ]] || return 1
         if ! tr -d '\000' < "$state_file" | cmp -s - "$state_file"; then
             return 1
