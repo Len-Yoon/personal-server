@@ -40,6 +40,15 @@ ACTIVE_TIMEOUT_PID=''
 
 usage() { printf '%s\n' "usage: $0 --check|--go" >&2; }
 
+ensure_sudo_access() {
+  sudo -n true >/dev/null 2>&1 && return 0
+  if [ ! -t 0 ]; then
+    return 1
+  fi
+  printf '%s\n' 'K3s 상태 확인에 관리자 권한이 필요합니다. 비밀번호를 입력하세요. 입력 내용은 표시되지 않습니다.' >&3
+  sudo -v 1>&3 2>&3
+}
+
 # The advisory lock belongs only to this controller process.  Long-running
 # children (kubectl exec/rclone) must not inherit it, otherwise an interrupted
 # backup can leave the lock held after this process exits.
@@ -279,6 +288,7 @@ on_signal() {
 trap cleanup EXIT
 trap on_signal INT TERM HUP
 
+ensure_sudo_access || exit 1
 assert_preflight || exit 1
 assert_remote_access || exit 1
 FAILURE_STAGE=''
