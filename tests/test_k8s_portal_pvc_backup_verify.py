@@ -229,7 +229,7 @@ esac
         self.assertIn("RCLONE_CONFIG_PASS_PROMPTED=1", remote_preflight)
         cleanup = text[text.index("cleanup() {") : text.index('case "${1:-}" in')]
         self.assertIn("unset RCLONE_CONFIG_PASS", cleanup)
-        self.assertIn("rclone 설정 암호:", remote_preflight)
+        self.assertIn("rclone 설정 암호 입력 필요:", remote_preflight)
 
     def test_remote_preflight_passes_a_supplied_config_password_without_echoing_it(self):
         result, _, _, _ = self.run_tool(
