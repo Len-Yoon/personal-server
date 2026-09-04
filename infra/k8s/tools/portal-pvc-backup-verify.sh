@@ -96,7 +96,8 @@ assert_remote_access() {
   # when the backup command exits.
   if [ -t 0 ] && [ -z "${RCLONE_CONFIG_PASS:-}" ]; then
     printf '%s\n' 'portal_pvc_backup_stage=remote_authentication'
-    printf '%s' 'rclone 설정 암호: ' >&3
+    printf '%s\n' 'rclone 설정 암호 입력 필요: 저장해 둔 암호를 입력하고 Enter를 누르세요. 입력 내용은 표시되지 않습니다.' >&3
+    printf '%s' '암호 입력 > ' >&3
     IFS= read -r -s RCLONE_CONFIG_PASS
     printf '\n' >&3
     export RCLONE_CONFIG_PASS
