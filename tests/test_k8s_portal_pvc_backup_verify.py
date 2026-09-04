@@ -12,7 +12,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_password="", assert_lock_fd_closed=False):
+    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_password="", assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -46,8 +46,11 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
                 "PORTAL_FAKE_FAIL_AT": fail_at,
                 "PORTAL_FAKE_MISSING_PVC": "1" if missing_pvc else "",
                 "PORTAL_FAKE_SPECIAL_ENTRY": "1" if special_entry else "",
-                "PORTAL_FAKE_HOLD": "1" if send_signal else "",
+                "PORTAL_FAKE_HOLD": "1" if send_signal and signal_when == "reader" else "",
                 "PORTAL_FAKE_READER_WAIT": str(root / "reader-wait"),
+                "PORTAL_FAKE_HANG_STREAM": "1" if hang_stream else "",
+                "PORTAL_FAKE_STREAM_WAIT": str(root / "stream-wait"),
+                "PORTAL_FAKE_STREAM_CHILD_PID": str(root / "stream-child.pid"),
                 "PORTAL_FAKE_CLEANUP_DELETE_WAIT": str(root / "cleanup-delete-wait"),
                 "PORTAL_FAKE_HOLD_CLEANUP_DELETE": "1" if followup_signal else "",
                 "PORTAL_FAKE_NOISY": "1",
@@ -62,10 +65,11 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
                 env["PORTAL_NAMESPACE"] = namespace
             if send_signal:
                 process = subprocess.Popen(["bash", str(SCRIPT), mode], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                reader_wait = root / "reader-wait"
+                reader_wait = root / ("stream-wait" if signal_when == "stream" else "reader-wait")
                 deadline = time.time() + 5
                 while not reader_wait.exists() and time.time() < deadline:
                     time.sleep(0.01)
+                self.assertTrue(reader_wait.exists(), "signal boundary was not reached")
                 process.send_signal(signal.SIGTERM)
                 if followup_signal:
                     cleanup_delete_wait = root / "cleanup-delete-wait"
@@ -76,6 +80,14 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
                     process.send_signal(signal.SIGTERM)
                 stdout, stderr = process.communicate(timeout=10)
                 result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+                if assert_stream_child_stopped:
+                    child_pid_file = root / "stream-child.pid"
+                    self.assertTrue(child_pid_file.exists(), "fake stream child did not start")
+                    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+                    deadline = time.time() + 2
+                    while self.process_is_live(child_pid) and time.time() < deadline:
+                        time.sleep(0.01)
+                    self.assertFalse(self.process_is_live(child_pid), "interrupted stream child survived")
             else:
                 result = subprocess.run(["bash", str(SCRIPT), mode], env=env, capture_output=True, text=True)
             if repeat:
@@ -93,6 +105,16 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
             return result, recorded_calls, recorded_manifest, recorded_evidence
 
     @staticmethod
+    def process_is_live(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    @staticmethod
     def write_fakes(bin_dir, root, calls, manifest, files, state, remote):
         def write(name, text):
             path = bin_dir / name
@@ -100,11 +122,6 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
             path.chmod(0o755)
 
         write("sudo", "#!/bin/sh\nexec \"$@\"\n")
-        write(
-            "timeout",
-            "#!/bin/sh\nset -eu\nwhile [ \"${1#--}\" != \"$1\" ]; do shift; done\nshift\nexec \"$@\"\n",
-        )
-        write("setsid", "#!/bin/sh\nexec \"$@\"\n")
         write("flock", "#!/bin/sh\nif [ \"${PORTAL_FAKE_LOCK_BUSY:-}\" = 1 ]; then exit 1; fi\nexit 0\n")
         write(
             "k3s",
@@ -172,6 +189,13 @@ case "$*" in
     fi
     exit 0 ;;
   *'exec -i'*'/data/files'*)
+    if [ "${{PORTAL_FAKE_HANG_STREAM:-}}" = 1 ]; then
+      touch "${{PORTAL_FAKE_STREAM_WAIT}}"
+      sleep 60 &
+      echo "$!" > "${{PORTAL_FAKE_STREAM_CHILD_PID}}"
+      wait "$!"
+      exit 0
+    fi
     if [ "${{PORTAL_FAKE_SPECIAL_ENTRY:-}}" = 1 ]; then exit 42; fi
     tar -C '{files}' -cf - .; exit 0 ;;
   *'exec -i'*'/data/portal-web-state'*) tar -C '{state}' -cf - .; exit 0 ;;
@@ -498,8 +522,26 @@ esac
         text = SCRIPT.read_text(encoding="utf-8")
         timeout_helper = text[text.index("run_timeout() {") : text.index("kctl() {")]
 
-        self.assertIn('timeout --kill-after=10s "$seconds" setsid bash -c', timeout_helper)
-        self.assertIn('kill -TERM -- -$$', timeout_helper)
+        self.assertIn('python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" "$@" 9>&-', timeout_helper)
+        self.assertIn("start_new_session=True", text)
+        self.assertIn("os.killpg(process.pid, signal_to_send)", text)
+        self.assertIn("process.wait(timeout=seconds)", text)
+        self.assertIn("PR_SET_PDEATHSIG = 1", text)
+        self.assertIn("libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)", text)
+        self.assertIn("signal.signal(signal.SIGINT, on_signal)", text)
+
+    def test_signal_terminates_an_in_flight_pvc_stream_process_group(self):
+        """Interrupting the controller must also stop its live kubectl stream child."""
+        result, _, _, _ = self.run_tool(
+            "--go",
+            send_signal=True,
+            hang_stream=True,
+            signal_when="stream",
+            assert_stream_child_stopped=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("portal_pvc_backup=PASS", result.stdout)
 
     def test_go_upload_failure_restores_original_replica_and_deletes_reader(self):
         result, calls, _, evidence = self.run_tool("--go", fail_at="upload")
