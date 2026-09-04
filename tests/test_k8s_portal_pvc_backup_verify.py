@@ -12,7 +12,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, lock_busy=False, require_urllib=False, health_status=200):
+    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_password=""):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -52,6 +52,8 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
                 "PORTAL_FAKE_LOCK_BUSY": "1" if lock_busy else "",
                 "PORTAL_FAKE_REQUIRE_URLLIB": "1" if require_urllib else "",
                 "PORTAL_FAKE_HEALTH_STATUS": str(health_status),
+                "PORTAL_FAKE_REQUIRE_CONFIG_PASSWORD": "1" if rclone_config_password else "",
+                "RCLONE_CONFIG_PASS": rclone_config_password,
             }
             if namespace is not None:
                 env["PORTAL_NAMESPACE"] = namespace
@@ -176,6 +178,9 @@ if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = remote ] && [ "$1" = lsd ]; then
   printf '%s\\n' 'fake-remote-secret /private/noisy/path' >&2
   exit 42
 fi
+if [ "${{PORTAL_FAKE_REQUIRE_CONFIG_PASSWORD:-}}" = 1 ]; then
+  [ "${{RCLONE_CONFIG_PASS:-}}" = test-rclone-config-password ] || exit 42
+fi
 if [ "$1" = lsd ]; then exit 0; fi
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = upload ] && [ "$1" = copyto ]; then
   printf '%s\\n' 'fake-upload-secret /private/noisy/path' >&2
@@ -214,6 +219,37 @@ esac
         self.assertIn("portal_pvc_backup=PASS", result.stdout)
         self.assertNotIn("scale deployment/portal-web", calls)
         self.assertNotIn("create -f", calls)
+
+    def test_remote_preflight_has_a_hidden_password_prompt_and_clears_its_temporary_environment(self):
+        """An interactive config password must be explained without exposing it."""
+        text = SCRIPT.read_text(encoding="utf-8")
+        remote_preflight = text[text.index("assert_remote_access() {") : text.index("acquire_lock() {")]
+
+        self.assertIn("read -r -s RCLONE_CONFIG_PASS", remote_preflight)
+        self.assertIn("RCLONE_CONFIG_PASS_PROMPTED=1", remote_preflight)
+        cleanup = text[text.index("cleanup() {") : text.index('case "${1:-}" in')]
+        self.assertIn("unset RCLONE_CONFIG_PASS", cleanup)
+        self.assertIn("rclone 설정 암호:", remote_preflight)
+
+    def test_remote_preflight_passes_a_supplied_config_password_without_echoing_it(self):
+        result, _, _, _ = self.run_tool(
+            "--check",
+            rclone_config_password="test-rclone-config-password",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("portal_pvc_backup=PASS", result.stdout)
+        self.assertNotIn("test-rclone-config-password", result.stdout + result.stderr)
+
+    def test_go_keeps_a_supplied_config_password_for_upload_and_remote_restore(self):
+        result, calls, _, _ = self.run_tool(
+            "--go",
+            rclone_config_password="test-rclone-config-password",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls.count("rclone copyto"), 2)
+        self.assertNotIn("test-rclone-config-password", result.stdout + result.stderr)
 
     def test_remote_preflight_explains_hidden_password_input_and_has_deadline(self):
         """Interactive operators must not mistake encrypted-rclone input for a hung check."""

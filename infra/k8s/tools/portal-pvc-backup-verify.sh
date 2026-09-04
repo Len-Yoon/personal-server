@@ -23,6 +23,7 @@ DIAGNOSTIC_FILE="$WORKDIR/diagnostics.log"
 : > "$DIAGNOSTIC_FILE"
 chmod 600 "$DIAGNOSTIC_FILE"
 # Keep command diagnostics private; operator-facing output uses fixed labels.
+exec 3>&2
 exec 2>>"$DIAGNOSTIC_FILE"
 MODE=''
 ORIGINAL_REPLICAS=''
@@ -34,6 +35,7 @@ LOCK_FD=9
 EVIDENCE_PENDING=0
 BACKUP_UPLOAD_STATUS=''
 FAILURE_STAGE=''
+RCLONE_CONFIG_PASS_PROMPTED=0
 
 usage() { printf '%s\n' "usage: $0 --check|--go" >&2; }
 
@@ -89,12 +91,16 @@ assert_preflight() {
 
 assert_remote_access() {
   FAILURE_STAGE='remote_preflight'
-  # rclone asks for an encrypted-config password on the terminal. Most command
-  # diagnostics are intentionally private, so announce that expected hidden input
-  # before redirecting rclone output to the private diagnostic file.
-  if [ -t 0 ]; then
+  # Do not rely on rclone's own prompt: its diagnostics are intentionally private.
+  # This value exists only for the one remote preflight subprocess and is cleared
+  # when the backup command exits.
+  if [ -t 0 ] && [ -z "${RCLONE_CONFIG_PASS:-}" ]; then
     printf '%s\n' 'portal_pvc_backup_stage=remote_authentication'
-    printf '%s\n' 'rclone 설정 암호가 필요할 수 있습니다. 입력은 화면에 표시되지 않습니다.'
+    printf '%s' 'rclone 설정 암호: ' >&3
+    IFS= read -r -s RCLONE_CONFIG_PASS
+    printf '\n' >&3
+    export RCLONE_CONFIG_PASS
+    RCLONE_CONFIG_PASS_PROMPTED=1
   fi
   run_private timeout "${PORTAL_RCLONE_TIMEOUT_SECONDS:-30}" rclone lsd --max-depth 1 --log-level ERROR "$REMOTE"
 }
@@ -163,6 +169,9 @@ evidence_is_current_k3s_pvc() {
 cleanup() {
   local status=$? restore_ok=1
   trap - EXIT INT TERM HUP
+  if [ "$RCLONE_CONFIG_PASS_PROMPTED" -eq 1 ]; then
+    unset RCLONE_CONFIG_PASS
+  fi
   if [ "$READER_CREATED" -eq 1 ]; then
     kctl -n personal-server delete pod "$READER_POD" --ignore-not-found --wait=true >>"$DIAGNOSTIC_FILE" 2>&1 || restore_ok=0
   fi
