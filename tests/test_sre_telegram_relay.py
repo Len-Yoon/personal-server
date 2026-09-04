@@ -219,9 +219,40 @@ class RelayServiceTest(unittest.TestCase):
         )
 
         self.assertEqual(status, 200)
-        self.assertIn("[K3s 경고 발생]", reply)
-        self.assertIn("DeploymentUnavailable", reply)
+        self.assertIn("[장애 감지]", reply)
+        self.assertIn("문제: 서비스 실행 수 부족", reply)
         self.assertNotIn("test-token-not-for-replies", reply)
+
+    def test_firing_portal_alert_explains_problem_impact_and_target_in_korean(self):
+        relay = RelayService(
+            alertmanager_auth_token="expected",
+            k8s_client=FakeK8s(),
+            prometheus_client=FakePrometheus(),
+        )
+
+        status, reply = relay.handle_alert(
+            {
+                "status": "firing",
+                "alerts": [
+                    {
+                        "labels": {
+                            "alertname": "PortalUnavailable",
+                            "namespace": "personal-server",
+                            "deployment": "portal-web",
+                        },
+                    }
+                ],
+            },
+            "Bearer expected",
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIn("[장애 감지]", reply)
+        self.assertIn("문제: Portal 접속 불가", reply)
+        self.assertIn("영향: 웹사이트가 열리지 않을 수 있음", reply)
+        self.assertIn("대상: personal-server / portal-web", reply)
+        self.assertIn("상태: 자동 복구를 확인 중입니다.", reply)
+        self.assertNotIn("PortalUnavailable", reply)
 
     def test_resolved_alert_is_formatted(self):
         relay = RelayService(alertmanager_auth_token="expected", k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
@@ -232,8 +263,38 @@ class RelayServiceTest(unittest.TestCase):
         )
 
         self.assertEqual(status, 200)
-        self.assertIn("[K3s 경고 복구]", reply)
-        self.assertIn("PVCNotBound", reply)
+        self.assertIn("[복구 확인]", reply)
+        self.assertIn("문제: 데이터 저장소 연결 실패", reply)
+        self.assertIn("영향: 저장된 데이터에 접근하지 못할 수 있음", reply)
+        self.assertIn("대상: 확인 대상 없음", reply)
+        self.assertIn("상태: 정상으로 돌아왔습니다.", reply)
+
+    def test_prometheus_target_alert_uses_job_and_instance_as_the_target(self):
+        relay = RelayService(
+            alertmanager_auth_token="expected",
+            k8s_client=FakeK8s(),
+            prometheus_client=FakePrometheus(),
+        )
+
+        status, reply = relay.handle_alert(
+            {
+                "status": "firing",
+                "alerts": [
+                    {
+                        "labels": {
+                            "alertname": "PrometheusTargetDown",
+                            "job": "kubelet",
+                            "instance": "172.19.121.162:10250",
+                        },
+                    }
+                ],
+            },
+            "Bearer expected",
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIn("문제: 상태 수집 대상 응답 없음", reply)
+        self.assertIn("대상: kubelet / 172.19.121.162:10250", reply)
 
     def test_duplicate_firing_alert_with_same_fingerprint_is_suppressed(self):
         state = MemoryAlertStateStore()
@@ -273,7 +334,7 @@ class RelayServiceTest(unittest.TestCase):
         duplicate_status, duplicate_reply = relay.handle_alert(resolved, "Bearer expected")
 
         self.assertEqual(resolved_status, 200)
-        self.assertIn("[K3s 경고 복구]", resolved_reply)
+        self.assertIn("[복구 확인]", resolved_reply)
         self.assertEqual(duplicate_status, 200)
         self.assertEqual(duplicate_reply, "duplicate suppressed")
         self.assertEqual(len(deliveries), 2)
