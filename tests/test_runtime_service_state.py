@@ -218,6 +218,16 @@ class RuntimeServiceStateTests(unittest.TestCase):
         finally:
             self._remove_project(project_root)
 
+    def test_reader_rejects_absent_state_parent_with_untrusted_fixed_anchor(self):
+        project_root = self._temporary_project()
+        try:
+            state = project_root / "missing-parent" / "state"
+            result = run_reader(state)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("anchor", result.stderr)
+        finally:
+            self._remove_project(project_root)
+
     @staticmethod
     def _temporary_project() -> Path:
         import tempfile

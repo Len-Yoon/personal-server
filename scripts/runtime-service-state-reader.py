@@ -31,8 +31,11 @@ def read_state(path: str) -> int:
     try:
         state_info = os.lstat(path)
     except FileNotFoundError:
-        if os.path.lexists(parent) and not trusted_directory(parent):
-            return fail("state parent is not trusted")
+        if os.path.lexists(parent):
+            if not trusted_directory(parent):
+                return fail("state parent is not trusted")
+        elif not trusted_directory(os.path.dirname(parent)):
+            return fail("state anchor is not trusted")
         print(DEFAULT, end="")
         return 0
     except OSError:
