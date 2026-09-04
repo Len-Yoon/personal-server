@@ -16,7 +16,7 @@ TIMER_TEMPLATE = (
 
 
 class PortalPvcBackupAutomationTests(unittest.TestCase):
-    def run_tool(self, action, *, backup_output="backup_upload=UPLOADED\n", backup_exit=0, seed_credentials=False, systemctl_stop_exit=0, systemctl_disable_exit=0, systemd_analyze_exit=0):
+    def run_tool(self, action, *, backup_output="backup_upload=UPLOADED\n", backup_exit=0, seed_credentials=False, systemctl_stop_exit=0, systemctl_disable_exit=0, systemd_analyze_exit=0, initial_linger="yes", loginctl_enable_exit=0):
         self.assertTrue(SCRIPT.is_file(), "backup automation controller is required")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -27,9 +27,11 @@ class PortalPvcBackupAutomationTests(unittest.TestCase):
             source_config = root / "rclone.conf"
             configmap = root / "configmap.yaml"
             calls = root / "calls.log"
+            linger_state = root / "linger-state"
             for path in (bin_dir, state_dir, credential_dir, unit_dir):
                 path.mkdir(parents=True)
             source_config.write_text("[remote]\ntype = drive\n", encoding="utf-8")
+            linger_state.write_text(initial_linger, encoding="utf-8")
             if seed_credentials:
                 (credential_dir / "rclone-config.cred").write_text("host-encrypted", encoding="utf-8")
                 (credential_dir / "rclone-config-passphrase.cred").write_text("host-encrypted", encoding="utf-8")
@@ -49,6 +51,8 @@ class PortalPvcBackupAutomationTests(unittest.TestCase):
                 "SYSTEMCTL_STOP_EXIT": str(systemctl_stop_exit),
                 "SYSTEMCTL_DISABLE_EXIT": str(systemctl_disable_exit),
                 "SYSTEMD_ANALYZE_EXIT": str(systemd_analyze_exit),
+                "LOGINCTL_LINGER_STATE": str(linger_state),
+                "LOGINCTL_ENABLE_EXIT": str(loginctl_enable_exit),
             }
             result = subprocess.run(
                 ["bash", str(SCRIPT), action],
@@ -109,6 +113,16 @@ class PortalPvcBackupAutomationTests(unittest.TestCase):
             "systemd-analyze",
             "#!/bin/sh\nprintf 'systemd-analyze %s\\n' \"$*\" >> \"$CALLS\"\n"
             "exit \"${SYSTEMD_ANALYZE_EXIT:-0}\"\n",
+        )
+        write(
+            "loginctl",
+            "#!/bin/sh\nprintf 'loginctl %s\\n' \"$*\" >> \"$CALLS\"\n"
+            "case \"$1\" in\n"
+            "  show-user) cat \"$LOGINCTL_LINGER_STATE\" ;;\n"
+            "  enable-linger)\n"
+            "    [ \"${LOGINCTL_ENABLE_EXIT:-0}\" -eq 0 ] || exit \"${LOGINCTL_ENABLE_EXIT}\"\n"
+            "    printf 'yes' > \"$LOGINCTL_LINGER_STATE\" ;;\n"
+            "esac\n",
         )
 
     def test_run_writes_exact_completed_configmap_schema_from_upload_success(self):
@@ -201,6 +215,29 @@ class PortalPvcBackupAutomationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("systemd-analyze --user verify", calls)
         self.assertNotIn("enable --now", calls)
+
+    def test_install_enables_current_user_lingering_before_enabling_daily_timer(self):
+        result, _, calls, _ = self.run_tool(
+            "--install", seed_credentials=True, initial_linger="no"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("loginctl show-user", calls)
+        self.assertIn("loginctl enable-linger", calls)
+        self.assertLess(calls.index("enable-linger"), calls.index("enable --now"))
+
+    def test_install_fails_closed_when_current_user_lingering_cannot_be_enabled(self):
+        result, _, calls, _ = self.run_tool(
+            "--install",
+            seed_credentials=True,
+            initial_linger="no",
+            loginctl_enable_exit=1,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("loginctl enable-linger", calls)
+        self.assertNotIn("enable --now", calls)
+        self.assertIn("lingering", result.stderr)
 
     def test_service_template_keeps_cleanup_alive_during_shutdown(self):
         service = SERVICE_TEMPLATE.read_text(encoding="utf-8")

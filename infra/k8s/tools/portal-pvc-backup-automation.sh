@@ -33,9 +33,30 @@ safe_state_dir() {
 
 require_commands() {
   local command_name
-  for command_name in systemctl systemd-analyze systemd-creds systemd-ask-password rclone sudo k3s findmnt; do
+  for command_name in systemctl systemd-analyze systemd-creds systemd-ask-password rclone sudo k3s findmnt loginctl; do
     command -v "$command_name" >/dev/null || return 1
   done
+}
+
+ensure_user_lingering() {
+  local lingering
+  lingering=$(loginctl show-user "$USER" -p Linger --value 2>/dev/null) || {
+    printf '%s\n' 'systemd user lingering status could not be checked' >&2
+    return 1
+  }
+  [ "$lingering" = yes ] && return 0
+  loginctl enable-linger "$USER" || {
+    printf '%s\n' 'systemd user lingering could not be enabled' >&2
+    return 1
+  }
+  lingering=$(loginctl show-user "$USER" -p Linger --value 2>/dev/null) || {
+    printf '%s\n' 'systemd user lingering status could not be rechecked' >&2
+    return 1
+  }
+  if [ "$lingering" != yes ]; then
+    printf '%s\n' 'systemd user lingering remains disabled' >&2
+    return 1
+  fi
 }
 
 preflight() {
@@ -76,6 +97,7 @@ render_template() {
 
 install_units() {
   preflight || return 1
+  ensure_user_lingering || return 1
   [ -r "$(credential_path rclone-config)" ] || return 1
   [ -r "$(credential_path rclone-config-passphrase)" ] || return 1
   mkdir -p -- "$UNIT_DIR"

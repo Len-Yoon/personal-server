@@ -114,6 +114,21 @@ class WriteFailingOffsetStore:
         raise OSError("ConfigMap write unavailable")
 
 
+class FailOnceBackupDeliveryStore:
+    def __init__(self):
+        self.run_ids = set()
+        self.save_attempts = 0
+
+    def contains(self, run_id):
+        return run_id in self.run_ids
+
+    def save(self, run_id):
+        self.save_attempts += 1
+        if self.save_attempts == 1:
+            raise OSError("ConfigMap write unavailable")
+        self.run_ids.add(run_id)
+
+
 class FakePollingTelegram:
     def __init__(self, updates, send_result=True):
         self._updates = updates
@@ -231,6 +246,36 @@ class RelayServiceTest(unittest.TestCase):
                 run_polling(restarted_relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
 
                 self.assertEqual(telegram.sent_messages, [("123", expected_message)])
+
+    def test_backup_report_remains_eligible_when_delivery_state_write_fails(self):
+        k8s = FakeBackupStatusK8s(
+            {
+                "run_id": "20260905T010203Z-retry",
+                "status": "completed",
+                "completed_at": "2026-09-05T01:02:03Z",
+                "stage": "restore-verify",
+            }
+        )
+        store = FailOnceBackupDeliveryStore()
+        telegram = FakePollingTelegram([])
+
+        relay = RelayService(
+            allowed_chat_id="123",
+            k8s_client=k8s,
+            prometheus_client=FakePrometheus(),
+            backup_delivery_store=store,
+        )
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        restarted_relay = RelayService(
+            allowed_chat_id="123",
+            k8s_client=k8s,
+            prometheus_client=FakePrometheus(),
+            backup_delivery_store=store,
+        )
+        run_polling(restarted_relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+
+        self.assertEqual(len(telegram.sent_messages), 2)
+        self.assertEqual(store.save_attempts, 2)
 
     def test_malformed_backup_report_is_ignored_without_delivery_or_state_write(self):
         invalid_reports = (
