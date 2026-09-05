@@ -27,13 +27,10 @@ class N100SafeDeploymentClassifierTests(unittest.TestCase):
         self.assertEqual(decision.action, "deploy")
         self.assertEqual(decision.services, ("book-memo", "youtube-memo"))
 
-    def test_shared_n100_compose_change_deploys_all_safe_services(self):
-        decision = classifier.classify_changed_paths(["docker-compose.n100.yml"])
-        self.assertEqual(decision.action, "deploy")
-        self.assertEqual(
-            decision.services,
-            ("book-memo", "car-care-worker", "crawler-worker", "youtube-memo"),
-        )
+    def test_shared_compose_changes_are_blocked(self):
+        for path in ("docker-compose.yml", "docker-compose.n100.yml"):
+            with self.subTest(path=path):
+                self.assertEqual(classifier.classify_changed_paths([path]).action, "blocked")
 
     def test_allowlisted_and_unknown_runtime_change_is_blocked(self):
         decision = classifier.classify_changed_paths(
@@ -96,6 +93,32 @@ class N100SafeDeploymentClassifierTests(unittest.TestCase):
             paths = classifier._changed_paths("base", "head")
         self.assertEqual(paths, ["crawler-worker/.env", "crawler-worker/app/new.py"])
         self.assertEqual(run.call_args.args[0][1:5], ["diff", "--name-status", "-z", "--find-renames"])
+
+    def test_sensitive_components_inside_allowlisted_service_are_blocked(self):
+        paths = (
+            "crawler-worker/credentials/config.yaml",
+            "crawler-worker/.secrets/config.yaml",
+            "crawler-worker/.env.d/prod",
+            "crawler-worker/config/credential.yaml",
+            "crawler-worker/config/keys/service.yaml",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertEqual(classifier.classify_changed_paths([path]).action, "blocked")
+
+    def test_control_characters_are_rejected_without_output_injection(self):
+        path = "crawler-worker/app.py\n" + "deploy_action=deploy_services=portal-web"
+        decision = classifier.classify_changed_paths([path])
+        self.assertEqual(decision.action, "blocked")
+        self.assertNotIn("crawler-worker", decision.reason)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "github-output"
+            classifier.main(
+                ["--base", "base", "--head", "head", "--github-output", str(output)],
+                changed_paths=[path],
+            )
+            lines = output.read_text().splitlines()
+            self.assertEqual(lines, ["deploy_action=blocked", "deploy_services=", "deploy_reason=blocked_control_character"])
 
 
 if __name__ == "__main__":

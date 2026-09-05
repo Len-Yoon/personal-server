@@ -29,6 +29,12 @@ BLOCKED_PREFIXES = (
     "infra/k8s/",
 )
 SHARED_COMPOSE_PATHS = {"docker-compose.yml", "docker-compose.n100.yml"}
+REASON_NO_CHANGES = "no_changed_paths"
+REASON_CONTROL_CHARACTER = "blocked_control_character"
+REASON_BLOCKED_PATH = "blocked_path"
+REASON_UNKNOWN_RUNTIME = "blocked_unknown_runtime"
+REASON_SAFE_SERVICE = "safe_service_change"
+REASON_DOCUMENTATION = "documentation_or_test_only"
 
 DeploymentAction = Literal["skip", "deploy", "blocked"]
 
@@ -50,13 +56,23 @@ def _has_traversal_component(path: str) -> bool:
 
 def _is_sensitive_service_path(path: str) -> bool:
     parts = path.split("/")
-    name = parts[-1].lower()
+    components = [part.lower() for part in parts]
+    name = components[-1]
     return (
-        any(part.lower() in {"data", "runtime", "secrets", "secret"} for part in parts[1:-1])
-        or name in {".env", ".env.local", ".env.production", ".env.development"}
-        or name.startswith((".env.", "secret", "secrets", "password", "token"))
+        any(
+            any(signal in part for signal in ("credential", "secret", "private", "password", "token", "key"))
+            or part.startswith(".env")
+            or part in {"data", "runtime"}
+            for part in components[1:]
+        )
+        or name.startswith(".env")
+        or name.endswith(".env")
         or name.endswith((".sqlite", ".sqlite3", ".db", ".key", ".pem"))
     )
+
+
+def _has_control_character(path: str) -> bool:
+    return any(ord(character) < 32 or ord(character) == 127 for character in path)
 
 
 def _is_documentation_or_test(path: str) -> bool:
@@ -71,8 +87,10 @@ def classify_changed_paths(paths: Iterable[str]) -> DeploymentDecision:
     """Return a fail-closed deployment decision for repository-relative paths."""
     normalised = tuple(sorted({_normalise_path(path) for path in paths if path}))
     if not normalised:
-        return DeploymentDecision("skip", (), "변경 경로 없음")
+        return DeploymentDecision("skip", (), REASON_NO_CHANGES)
 
+    if any(_has_control_character(path) for path in normalised):
+        return DeploymentDecision("blocked", (), REASON_CONTROL_CHARACTER)
     blocked = tuple(
         path
         for path in normalised
@@ -84,7 +102,7 @@ def classify_changed_paths(paths: Iterable[str]) -> DeploymentDecision:
         )
     )
     if blocked:
-        return DeploymentDecision("blocked", (), f"비허용 경로 변경: {', '.join(blocked)}")
+        return DeploymentDecision("blocked", (), REASON_BLOCKED_PATH)
 
     services = {
         service
@@ -101,12 +119,12 @@ def classify_changed_paths(paths: Iterable[str]) -> DeploymentDecision:
         and path not in SHARED_COMPOSE_PATHS
     )
     if unknown:
-        return DeploymentDecision("blocked", (), f"검토가 필요한 운영 경로 변경: {', '.join(unknown)}")
-    if shared_compose:
-        services.update(SAFE_SERVICES)
+        return DeploymentDecision("blocked", (), REASON_UNKNOWN_RUNTIME)
+    if set(normalised) & SHARED_COMPOSE_PATHS:
+        return DeploymentDecision("blocked", (), REASON_BLOCKED_PATH)
     if services:
-        return DeploymentDecision("deploy", tuple(sorted(services)), "허용된 Compose 서비스 변경")
-    return DeploymentDecision("skip", (), "문서·테스트·비운영 경로만 변경")
+        return DeploymentDecision("deploy", tuple(sorted(services)), REASON_SAFE_SERVICE)
+    return DeploymentDecision("skip", (), REASON_DOCUMENTATION)
 
 
 def _changed_paths(base: str, head: str) -> list[str]:
