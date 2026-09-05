@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Personal Server Portal PVC backup timer
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+Unit=personal-server-portal-pvc-backup.service
+
+[Install]
+WantedBy=timers.target

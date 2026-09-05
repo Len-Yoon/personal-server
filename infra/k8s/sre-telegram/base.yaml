@@ -45,6 +45,17 @@ rules:
     verbs: [get, update, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sre-telegram-backup-status-reader
+  namespace: monitoring
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [sre-telegram-backup-status]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: sre-telegram-relay-node-reader
@@ -99,6 +110,20 @@ subjects:
     name: sre-telegram-relay
     namespace: monitoring
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sre-telegram-backup-status-reader
+  namespace: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sre-telegram-backup-status-reader
+subjects:
+  - kind: ServiceAccount
+    name: sre-telegram-relay
+    namespace: monitoring
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -108,6 +133,8 @@ metadata:
     app.kubernetes.io/name: sre-telegram-relay
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: sre-telegram-relay

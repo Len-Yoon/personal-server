@@ -136,6 +136,35 @@ bash infra/k8s/tools/sre-telegram-verify.sh
 
 각 도구는 마지막 줄에 `sre_telegram_preflight=PASS|FAIL`, `sre_telegram_install=PASS|FAIL`, 또는 `sre_telegram_verify=PASS|FAIL`을 출력한다. 이 작업은 Compose, Portal, Caddy, 외부 Ingress/NodePort/LoadBalancer, 서버 기동 스크립트, Windows bootstrap, 기존 scheduler를 변경하지 않는다.
 
+## Portal PVC 자동 백업 (N100 운영자 전용)
+
+Portal이 K3s runtime일 때만 N100의 `systemd --user` timer가 하루 한 번 기존 PVC 백업·암호화 업로드·복원 검증을 실행할 수 있다. CronJob은 rclone credential을 Kubernetes Secret으로 복제해야 하므로 사용하지 않는다. timer는 한 개만 사용하며, N100/WSL이 완전히 꺼져 있던 시간은 다음 기동 뒤 한 번만 보완 실행한다.
+
+sudo 비밀번호는 저장하지 않는다. rclone config과 config 암호는 N100 사용자 전용 `systemd-creds` 암호화 credential로만 보관된다. 등록 과정에서 rclone 암호는 마스킹 입력으로 직접 암호화되며 Git, 평문 파일, 환경 파일, 명령 출력에 남지 않는다. Telegram·Alertmanager Secret도 이 도구가 읽거나 복제하지 않는다.
+
+```bash
+# N100 WSL에서 실행
+bash infra/k8s/tools/portal-pvc-backup-automation.sh --preflight
+bash infra/k8s/tools/portal-pvc-backup-automation.sh --enroll
+bash infra/k8s/tools/portal-pvc-backup-automation.sh --install
+bash infra/k8s/tools/portal-pvc-backup-automation.sh --status
+```
+
+`--enroll`에서만 rclone 설정 암호 입력이 필요하다. `--install`은 생성한 user service/timer를 `systemd-analyze --user verify`로 먼저 검사하며, 검증 실패 시 timer를 활성화하지 않는다. 초기 점검은 다음 one-shot 실행으로 수행한다.
+
+```bash
+systemctl --user start personal-server-portal-pvc-backup.service
+systemctl --user status personal-server-portal-pvc-backup.service --no-pager
+```
+
+결과는 Telegram에 `[백업 완료]`, `[백업 확인] 변경 없음`, `[백업 실패]`, `[복원 검증 실패]`로 보고된다. 전달은 최소 1회 방식이므로 relay가 Telegram 수락 뒤 상태 저장 전에 중단되면 같은 run ID가 드물게 한 번 더 전송될 수 있다. 누락보다 중복을 우선 방지하지 않는 의도된 동작이다.
+
+자동화를 제거할 때는 timer를 먼저 중지한 뒤 credential과 backup status ConfigMap을 정리한다. 실행 중인 service를 안전하게 중지할 수 없으면 제거를 실패로 처리하고 credential을 보존한다.
+
+```bash
+bash infra/k8s/tools/portal-pvc-backup-automation.sh --uninstall
+```
+
 ## N100 SRE 상태 점검 (읽기 전용)
 
 `infra/k8s/tools/sre-health-audit.sh`는 N100에서 수동 실행하는 읽기 전용 상태 점검 도구다. K3s 노드 중 하나 이상이 `Ready`인지 확인하고, 현재 Compose 설정에서 산출한 모든 서비스 컨테이너가 실행 중인지와 설정된 Docker health check가 `healthy`인지 확인한다. health check가 없는 실행 중 컨테이너는 정상으로 처리한다.

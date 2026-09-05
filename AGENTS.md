@@ -1,9 +1,23 @@
 # Repository Guidance
 
+## 사용자 대화 언어
+
+- 사용자에게 보내는 기본 안내, 진행 보고, 질문, 선택지는 한국어로 작성함.
+- 사용자가 다른 언어를 명시적으로 요청한 경우에만 해당 언어를 사용함.
+- 도구·프레임워크의 영문 고정 문구를 그대로 인용해야 할 때도, 먼저 한국어 설명을 제공함.
+
 ## 작업 범위 제한
 
 - `서버 띄우는 쪽`과 `스케줄러 쪽`은 절대 수정하지 않음.
 - 기능 변경이 필요하더라도 위 두 영역은 제외하고 작업함.
+
+## 백업 자동화 예외
+
+- Portal K3s PVC 백업에 한해 `systemd --user` timer/service 또는 K3s CronJob을 추가·수정할 수 있음. CronJob은 매일 백업·복원 검증을 실행하고, 성공·변경 없음·실패·미복구 결과를 Telegram SRE relay로 보고하는 범위에서만 허용함.
+- 자동 실행은 하나의 방식만 선택해 중복 실행을 방지하며, `infra/k8s/tools/portal-pvc-backup-verify.sh --go`만 실행할 수 있음.
+- rclone 설정 암호는 Git·평문 파일·환경 변수에 저장하지 않음. `systemd --user` 방식은 N100 사용자 전용 `systemd-creds` 암호화 자격 증명만 사용함. CronJob 방식은 별도 승인된 Secret Manager 또는 SOPS/age 절차로 사전 시딩된 Kubernetes Secret만 참조할 수 있으며, 이 저장소의 도구가 비밀값을 생성·출력·복제하지 않음.
+- sudo 비밀번호는 저장하지 않음. 기존의 제한된 `sudo -n k3s` 권한만 사용함.
+- 백업 결과와 복구 실패는 Telegram SRE relay로 알림.
 
 ## 시간 처리 기준
 
@@ -37,3 +51,11 @@
 - 커밋 메시지는 기본적으로 한글로 작성함.
 - 형식은 가능하면 `유형: 설명` 형태를 따름.
 - 예시: `test: 서비스별 테스트 import 충돌 해결`, `chore: 홈 링크 정리`
+
+## N100 안전 자동 배포 정책 예외
+
+N100 안전 자동 배포 작업에 한해 변경 분류 계약(`scripts/classify-n100-safe-deployment.py`),
+안전 배포·health 검증 스크립트 및 `.github/workflows/deploy-n100.yml`만 추가·수정할 수 있음.
+자동 대상은 `crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker`의 허용된
+Compose 변경으로 제한함. Portal, K3s, Kubernetes Secret·PVC·운영 데이터, Caddy,
+서버 bootstrap 및 scheduler는 계속 제외하며, 해당 경로가 섞인 변경은 배포하지 않고 차단함.

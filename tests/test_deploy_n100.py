@@ -12,49 +12,81 @@ SCRIPT = (ROOT / "scripts" / "deploy-n100.sh").read_text(encoding="utf-8")
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 HANDOFF = (ROOT / "docs" / "agent-handoff.md").read_text(encoding="utf-8")
 GUIDE = (ROOT / "docs" / "n100-github-auto-deploy.md").read_text(encoding="utf-8") if (ROOT / "docs" / "n100-github-auto-deploy.md").exists() else ""
+SAFE_CD_SPEC = (ROOT / "docs" / "superpowers" / "specs" / "2026-09-05-safe-n100-continuous-deployment-design.md").read_text(encoding="utf-8")
+SAFE_CD_PLAN = (ROOT / "docs" / "superpowers" / "plans" / "2026-09-05-safe-n100-continuous-deployment.md").read_text(encoding="utf-8")
 HOMEOPS_REQUIREMENTS = (ROOT / "homeops-executor" / "requirements.txt").read_text(encoding="utf-8")
 CRAWLER_REQUIREMENTS = (ROOT / "crawler-worker" / "requirements.txt").read_text(encoding="utf-8")
 
 
 class DeployN100Tests(unittest.TestCase):
-    def test_deploy_workflow_skips_compose_redeploy_for_docs_and_gitops_drafts(self):
-        runtime_detector = WORKFLOW.split("- id: runtime", maxsplit=1)[1].split(
-            "\n\n  deploy:", maxsplit=1
-        )[0]
+    def test_deploy_workflow_classifies_the_exact_push_range_before_runner_allocation(self):
+        changes_job = WORKFLOW.split("\n  deploy:", maxsplit=1)[0]
 
-        self.assertIn("name: Detect deployable runtime changes", WORKFLOW)
-        self.assertIn("needs: changes", WORKFLOW)
-        self.assertIn("needs.changes.outputs.runtime == 'true'", WORKFLOW)
-        self.assertIn("git diff --quiet HEAD^ HEAD --", runtime_detector)
-        for runtime_path in (
-            "docker-compose.yml",
-            "docker-compose.n100.yml",
-            "scripts/deploy-n100.sh",
-            "caddy/",
-            "portal-web/",
-            "system-agent/",
-            "crawler-worker/",
-            "youtube-memo/",
-            "book-memo/",
-            "car-care-worker/",
-            "homeops-executor/",
-        ):
-            self.assertIn(runtime_path, runtime_detector)
+        self.assertIn("name: Classify safe N100 deployment", WORKFLOW)
+        self.assertIn("runs-on: ubuntu-latest", changes_job)
+        self.assertIn("context.payload.before", changes_job)
+        self.assertIn("github.sha", changes_job)
+        self.assertIn("classify-n100-safe-deployment.py", changes_job)
+        self.assertIn("actions/github-script@v7", changes_job)
+        self.assertIn("listWorkflowRuns", changes_job)
+        self.assertIn("workflow_id: 'ci.yml'", changes_job)
+        self.assertIn("core.setOutput('ci_sha'", changes_job)
+        self.assertIn("--base \"${{ steps.wait-ci.outputs.base_sha }}\"", changes_job)
+        self.assertIn("--head \"${{ github.sha }}\"", changes_job)
+        self.assertNotIn("--base HEAD^", changes_job)
+        self.assertIn("deploy_action", changes_job)
+        self.assertIn("deploy_services", changes_job)
+        self.assertIn("deploy_reason", changes_job)
+        self.assertIn("action=blocked", changes_job)
+        self.assertIn("exit 1", changes_job)
+        self.assertNotIn("git diff --quiet HEAD^ HEAD --", changes_job)
 
-    def test_workflow_waits_for_successful_main_ci_and_uses_n100_runner(self):
-        self.assertIn("workflow_run:", WORKFLOW)
-        self.assertIn("workflows: [CI]", WORKFLOW)
-        self.assertIn("types: [completed]", WORKFLOW)
-        self.assertIn("github.event.workflow_run.conclusion == 'success'", WORKFLOW)
-        self.assertIn("github.event.workflow_run.head_branch == 'main'", WORKFLOW)
+    def test_workflow_waits_for_successful_main_ci_for_the_exact_push_before_using_n100_runner(self):
+        self.assertIn("push:", WORKFLOW)
+        self.assertIn("branches: [main]", WORKFLOW)
+        self.assertIn("candidate.head_sha === context.sha", WORKFLOW)
+        self.assertIn("run.conclusion !== 'success'", WORKFLOW)
+        self.assertIn("await new Promise", WORKFLOW)
+        self.assertIn("actions: read", WORKFLOW)
         self.assertIn("runs-on: [self-hosted, Windows, X64]", WORKFLOW)
         self.assertIn("C:\\personal-server", WORKFLOW)
         self.assertIn("wsl.exe -d Ubuntu-24.04 -- bash -lc", WORKFLOW)
         self.assertIn("shell: cmd", WORKFLOW)
         self.assertNotIn("shell: powershell", WORKFLOW)
         self.assertNotIn("shell: pwsh", WORKFLOW)
-        self.assertIn("bash ./scripts/deploy-n100.sh", WORKFLOW)
+        self.assertIn("bash ./scripts/deploy-n100-safe.sh", WORKFLOW)
+        self.assertNotIn("bash ./scripts/deploy-n100.sh", WORKFLOW)
         self.assertNotIn("N100_SSH_KEY", WORKFLOW)
+
+    def test_workflow_passes_verified_push_sha_and_selected_services_to_safe_script(self):
+        deploy_job = WORKFLOW.split("\n  deploy:", maxsplit=1)[1]
+
+        self.assertIn("needs.changes.outputs.action == 'deploy'", deploy_job)
+        self.assertIn("github.sha", deploy_job)
+        self.assertIn("N100_SAFE_DEPLOY_SERVICES", deploy_job)
+        self.assertIn("N100_SAFE_DEPLOY_SHA", deploy_job)
+        self.assertIn('set "WSLENV=N100_SAFE_DEPLOY_SHA:N100_SAFE_DEPLOY_SERVICES"', deploy_job)
+        self.assertIn('\\"$N100_SAFE_DEPLOY_SERVICES\\"', deploy_job)
+        self.assertIn('\\"$N100_SAFE_DEPLOY_SHA\\"', deploy_job)
+        self.assertIn("bash ./scripts/deploy-n100-safe.sh", deploy_job)
+        self.assertNotIn("services=${services//,/ }", deploy_job)
+        self.assertNotIn("services='${{ needs.changes.outputs.services }}'", deploy_job)
+
+    def test_workflow_limits_both_jobs_to_the_main_push_event(self):
+        changes_job, deploy_job = WORKFLOW.split("\n  deploy:", maxsplit=1)
+        for job in (changes_job, deploy_job):
+            with self.subTest(job=job):
+                self.assertNotIn("github.event.workflow_run", job)
+        self.assertIn("branches: [main]", WORKFLOW)
+
+    def test_workflow_never_allocates_n100_runner_for_blocked_paths(self):
+        changes_job, deploy_job = WORKFLOW.split("\n  deploy:", maxsplit=1)
+
+        self.assertIn("action=blocked", changes_job)
+        self.assertIn("exit 1", changes_job)
+        self.assertIn("runs-on: ubuntu-latest", changes_job)
+        self.assertIn("needs.changes.outputs.action == 'deploy'", deploy_job)
+        self.assertNotIn("workflow_dispatch", WORKFLOW)
 
     def test_ci_covers_homeops_news_routes_and_deploy_script(self):
         self.assertIn("tests.test_homeops tests.test_homeops_notifier", CI_WORKFLOW)
@@ -68,14 +100,12 @@ class DeployN100Tests(unittest.TestCase):
     def test_crawler_worker_test_client_dependency_is_pinned(self):
         self.assertIn("httpx==0.28.1", CRAWLER_REQUIREMENTS)
 
-    def test_deploy_workflow_checks_services_after_deployment(self):
-        health_check = WORKFLOW.split("- name: Verify deployed service health", maxsplit=1)[1]
-        self.assertIn("Verify deployed service health", WORKFLOW)
-        self.assertIn(
-            "bash ./scripts/verify-n100-deployment-health.sh",
-            health_check,
-        )
-        self.assertNotIn("compose() {", health_check)
+    def test_deploy_workflow_delegates_health_and_rollback_to_safe_entrypoint(self):
+        deploy_job = WORKFLOW.split("\n  deploy:", maxsplit=1)[1]
+        self.assertIn("Run safe deployment", deploy_job)
+        self.assertIn("bash ./scripts/deploy-n100-safe.sh", deploy_job)
+        self.assertNotIn("verify-n100-deployment-health.sh", deploy_job)
+        self.assertNotIn("deploy-n100.sh", deploy_job)
 
     def test_deploy_health_check_is_portal_runtime_marker_aware(self):
         """K3s/cutover must not be judged as a missing Compose Portal writer."""
@@ -244,12 +274,21 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("main", README)
         self.assertIn("self-hosted", GUIDE)
         self.assertIn("runs-on: [self-hosted, Windows, X64]", GUIDE)
+        self.assertIn("github.sha", GUIDE)
+        self.assertIn("revision 고정", GUIDE)
+        self.assertIn("직전 정상 revision", GUIDE)
+        self.assertIn("자동 배포 제외", GUIDE)
+        self.assertIn("crawler-worker", GUIDE)
+        self.assertIn("youtube-memo", GUIDE)
+        self.assertIn("book-memo", GUIDE)
+        self.assertIn("car-care-worker", GUIDE)
+        self.assertIn("Portal", GUIDE)
+        self.assertIn("Caddy", GUIDE)
+        self.assertIn("K3s", GUIDE)
+        self.assertIn("Telegram 알림도 1차 CD 범위에서 제외", GUIDE)
+        self.assertIn("GitHub Actions 단계와 로그가 운영 신호", GUIDE)
+        self.assertIn("마스킹", GUIDE)
         self.assertNotIn("N100_SSH_HOST", GUIDE)
-        self.assertIn("git fetch --prune origin", GUIDE)
-        self.assertIn(
-            "docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo caddy",
-            GUIDE,
-        )
         self.assertIn("CI가 성공", HANDOFF)
         self.assertIn("CI가 성공", GUIDE)
         self.assertIn("main", GUIDE)
@@ -257,9 +296,20 @@ class DeployN100Tests(unittest.TestCase):
         self.assertNotIn("main push에만 반응", GUIDE)
         self.assertIn("직접 push", GUIDE)
         self.assertIn("기능 브랜치 PR", GUIDE)
-        self.assertIn("런타임 배포 경로", GUIDE)
-        self.assertIn("문서와 비활성 GitOps 초안", GUIDE)
         self.assertNotIn("PR은 선택", GUIDE)
+
+    def test_safe_cd_design_and_plan_match_the_push_range_release_contract(self):
+        for document in (SAFE_CD_SPEC, SAFE_CD_PLAN):
+            with self.subTest(document=document[:20]):
+                self.assertIn("before", document)
+                self.assertIn("github.sha", document)
+                self.assertIn("git archive", document)
+                self.assertIn("origin/main", document)
+                self.assertIn("Telegram", document)
+                self.assertIn("Phase 1", document)
+                self.assertIn("GitHub Actions stage", document)
+                self.assertNotIn("workflow_run.head_sha", document)
+                self.assertNotIn("detached checkout", document)
 
 
 if __name__ == "__main__":

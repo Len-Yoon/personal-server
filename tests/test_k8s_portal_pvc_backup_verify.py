@@ -12,7 +12,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_password="", assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False):
+    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -40,6 +40,7 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
                 "PORTAL_NAMESPACE": "personal-server",
                 "PORTAL_RUNTIME_MARKER": str(marker),
                 "PORTAL_BACKUP_EVIDENCE": str(evidence),
+                "PORTAL_BACKUP_STATE_DIR": str(root / "backup-state"),
                 "PORTAL_AGE_RECIPIENT": str(root / "recipient.txt"),
                 "PORTAL_AGE_IDENTITY": str(root / "identity.txt"),
                 "PORTAL_BACKUP_REMOTE": f"fake:{remote}",
@@ -57,9 +58,9 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
                 "PORTAL_FAKE_LOCK_BUSY": "1" if lock_busy else "",
                 "PORTAL_FAKE_REQUIRE_URLLIB": "1" if require_urllib else "",
                 "PORTAL_FAKE_HEALTH_STATUS": str(health_status),
-                "PORTAL_FAKE_REQUIRE_CONFIG_PASSWORD": "1" if rclone_config_password else "",
+                "PORTAL_RCLONE_CONFIG_FILE": rclone_config_file,
+                "PORTAL_RCLONE_PASSWORD_COMMAND": rclone_password_command,
                 "PORTAL_FAKE_ASSERT_LOCK_FD_CLOSED": "1" if assert_lock_fd_closed else "",
-                "RCLONE_CONFIG_PASS": rclone_config_password,
             }
             if namespace is not None:
                 env["PORTAL_NAMESPACE"] = namespace
@@ -227,19 +228,24 @@ cp "$input" "$output"
             f'''#!/bin/sh
 set -eu
 printf '%s\\n' "rclone $*" >> '{calls}'
-if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = remote ] && [ "$1" = lsd ]; then
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --config|--password-command|--log-level) shift 2 ;;
+    --immutable) shift ;;
+    *) break ;;
+  esac
+done
+operation=$1
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = remote ] && [ "$operation" = lsd ]; then
   printf '%s\\n' 'fake-remote-secret /private/noisy/path' >&2
   exit 42
 fi
-if [ "${{PORTAL_FAKE_REQUIRE_CONFIG_PASSWORD:-}}" = 1 ]; then
-  [ "${{RCLONE_CONFIG_PASS:-}}" = test-rclone-config-password ] || exit 42
-fi
-if [ "${{PORTAL_FAKE_ASSERT_LOCK_FD_CLOSED:-}}" = 1 ] && [ "$1" = copyto ]; then
+if [ "${{PORTAL_FAKE_ASSERT_LOCK_FD_CLOSED:-}}" = 1 ] && [ "$operation" = copyto ]; then
   fd_mode=$(python3 -c 'import fcntl, os; print(fcntl.fcntl(9, fcntl.F_GETFL) & os.O_ACCMODE)' 2>/dev/null) || exit 42
   [ "$fd_mode" = 0 ] || exit 42
 fi
-if [ "$1" = lsd ]; then exit 0; fi
-if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = upload ] && [ "$1" = copyto ]; then
+if [ "$operation" = lsd ]; then exit 0; fi
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = upload ] && [ "$operation" = copyto ]; then
   printf '%s\\n' 'fake-upload-secret /private/noisy/path' >&2
   exit 42
 fi
@@ -247,7 +253,7 @@ shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --log-level) shift 2 ;;
-    --*) shift ;;
+    --immutable) shift ;;
     *) break ;;
   esac
 done
@@ -277,57 +283,71 @@ esac
         self.assertNotIn("scale deployment/portal-web", calls)
         self.assertNotIn("create -f", calls)
 
-    def test_operator_is_prompted_for_sudo_before_hidden_kubernetes_preflight(self):
-        """A missing sudo credential must not look like an unexplained backup failure."""
+    def test_kubernetes_commands_use_the_limited_noninteractive_k3s_sudo_grant(self):
+        """Automatic backups may only use the existing passwordless k3s sudo grant."""
         text = SCRIPT.read_text(encoding="utf-8")
 
-        self.assertIn("sudo -n true", text)
-        self.assertIn("sudo -v 1>&3 2>&3", text)
+        self.assertIn("sudo -n k3s kubectl", text)
+        self.assertNotIn("sudo -n true", text)
+        self.assertNotIn("sudo -v", text)
         self.assertLess(text.index("ensure_sudo_access || exit 1"), text.index("assert_preflight || exit 1"))
 
-    def test_remote_preflight_has_a_hidden_password_prompt_and_clears_its_temporary_environment(self):
-        """An interactive config password must be explained without exposing it."""
+    def test_credential_paths_are_passed_to_rclone_without_a_password_environment_variable(self):
+        """The systemd credential boundary must reach rclone without exposing a secret."""
         text = SCRIPT.read_text(encoding="utf-8")
         remote_preflight = text[text.index("assert_remote_access() {") : text.index("acquire_lock() {")]
 
-        self.assertIn("read -r -s RCLONE_CONFIG_PASS", remote_preflight)
-        self.assertIn("RCLONE_CONFIG_PASS_PROMPTED=1", remote_preflight)
-        cleanup = text[text.index("cleanup() {") : text.index('case "${1:-}" in')]
-        self.assertIn("unset RCLONE_CONFIG_PASS", cleanup)
-        self.assertIn("rclone 설정 암호 입력 필요:", remote_preflight)
+        self.assertIn("PORTAL_RCLONE_CONFIG_FILE", text)
+        self.assertIn("PORTAL_RCLONE_PASSWORD_COMMAND", text)
+        self.assertIn("--password-command", text)
+        self.assertNotIn("RCLONE_CONFIG_PASS", text)
+        self.assertIn("--config", text)
 
-    def test_remote_preflight_passes_a_supplied_config_password_without_echoing_it(self):
-        result, _, _, _ = self.run_tool(
-            "--check",
-            rclone_config_password="test-rclone-config-password",
-        )
+    def test_remote_preflight_passes_credential_file_paths_without_echoing_a_password(self):
+        with tempfile.TemporaryDirectory() as directory:
+            credential_dir = Path(directory)
+            config_file = credential_dir / "rclone-config"
+            password_file = credential_dir / "rclone-config-passphrase"
+            config_file.write_text("encrypted-config", encoding="utf-8")
+            password_file.write_text("passphrase", encoding="utf-8")
+            result, calls, _, _ = self.run_tool_with_rclone_credentials(config_file, password_file, "--check")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("portal_pvc_backup=PASS", result.stdout)
-        self.assertNotIn("test-rclone-config-password", result.stdout + result.stderr)
+        self.assertIn(f"--config {config_file}", calls)
+        self.assertIn(f"--password-command /usr/bin/cat {password_file}", calls)
+        self.assertNotIn("passphrase", result.stdout + result.stderr)
 
-    def test_go_keeps_a_supplied_config_password_for_upload_and_remote_restore(self):
-        result, calls, _, _ = self.run_tool(
-            "--go",
-            rclone_config_password="test-rclone-config-password",
-        )
+    def test_go_passes_credential_file_paths_for_upload_and_remote_restore(self):
+        with tempfile.TemporaryDirectory() as directory:
+            credential_dir = Path(directory)
+            config_file = credential_dir / "rclone-config"
+            password_file = credential_dir / "rclone-config-passphrase"
+            config_file.write_text("encrypted-config", encoding="utf-8")
+            password_file.write_text("passphrase", encoding="utf-8")
+            result, calls, _, _ = self.run_tool_with_rclone_credentials(config_file, password_file, "--go")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(calls.count("rclone copyto"), 2)
-        self.assertNotIn("test-rclone-config-password", result.stdout + result.stderr)
+        self.assertEqual(calls.count(" copyto"), 2)
+        self.assertEqual(calls.count(f"--config {config_file}"), 3)
+        self.assertEqual(calls.count(f"--password-command /usr/bin/cat {password_file}"), 3)
+        self.assertNotIn("passphrase", result.stdout + result.stderr)
 
-    def test_remote_preflight_explains_hidden_password_input_and_has_deadline(self):
-        """Interactive operators must not mistake encrypted-rclone input for a hung check."""
+    def run_tool_with_rclone_credentials(self, config_file, password_file, mode):
+        return self.run_tool(
+            mode,
+            rclone_config_file=str(config_file),
+            rclone_password_command=f"/usr/bin/cat {password_file}",
+        )
+
+    def test_remote_preflight_uses_rclone_password_command_boundary_and_has_deadline(self):
+        """The automated path must receive only a credential command and deadline."""
         text = SCRIPT.read_text(encoding="utf-8")
         remote_preflight = text[text.index("assert_remote_access() {") : text.index("acquire_lock() {")]
 
-        self.assertIn("portal_pvc_backup_stage=remote_authentication", remote_preflight)
-        self.assertIn("[ -t 0 ]", remote_preflight)
         self.assertIn('PORTAL_RCLONE_TIMEOUT_SECONDS:-30', remote_preflight)
-        self.assertLess(
-            remote_preflight.index("portal_pvc_backup_stage=remote_authentication"),
-            remote_preflight.index("rclone lsd"),
-        )
+        self.assertIn("rclone_with_credentials_timeout", remote_preflight)
+        self.assertNotIn("RCLONE_CONFIG_PASS", remote_preflight)
 
     def test_check_mode_rejects_non_k3s_runtime_without_mutation(self):
         result, calls, _, _ = self.run_tool("--check", runtime="compose")
