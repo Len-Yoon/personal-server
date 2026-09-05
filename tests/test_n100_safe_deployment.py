@@ -190,6 +190,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         *,
         expected_sha: str = NEW_SHA,
         services: tuple[str, ...] = ("crawler-worker",),
+        services_csv: str | None = None,
         previous_sha: str | None = None,
         health_results: tuple[int, ...] = (0,),
         compose_results: tuple[int, ...] = (0,),
@@ -257,7 +258,12 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
             if rejected_sha is not None:
                 environment["FAKE_REJECT_SHA"] = rejected_sha
             result = subprocess.run(
-                ["bash", str(SAFE_DEPLOY_SCRIPT), expected_sha, *services],
+                [
+                    "bash",
+                    str(SAFE_DEPLOY_SCRIPT),
+                    expected_sha,
+                    services_csv if services_csv is not None else ",".join(services),
+                ],
                 env=environment,
                 capture_output=True,
                 text=True,
@@ -285,6 +291,41 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertIn("docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build --no-deps crawler-worker", calls)
         self.assertIn("safe_cd_stage=deploy", result.stderr)
         self.assertIn("safe_cd_stage=health", result.stderr)
+
+    def test_csv_service_argument_deploys_each_validated_service(self):
+        result, calls, _ = self.run_safe_deploy(
+            services_csv="crawler-worker,book-memo"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("up -d --build --no-deps crawler-worker book-memo", calls)
+
+    def test_malformed_or_repeated_csv_service_arguments_fail_before_compose(self):
+        malformed_values = (
+            "",
+            "crawler-worker,",
+            ",crawler-worker",
+            "crawler-worker,crawler-worker",
+            "crawler-worker;touch should-not-run",
+            "crawler-worker book-memo",
+            "crawler-worker\nbook-memo",
+            'crawler-worker,"book-memo"',
+        )
+        for services_csv in malformed_values:
+            with self.subTest(services_csv=services_csv):
+                result, calls, _ = self.run_safe_deploy(services_csv=services_csv)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("docker compose", calls)
+
+    def test_malformed_csv_cannot_execute_an_extra_shell_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "unexpected-command"
+            payload = f"crawler-worker;touch {marker}"
+            result, calls, _ = self.run_safe_deploy(services_csv=payload)
+            marker_created = marker.exists()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("docker compose", calls)
+        self.assertFalse(marker_created)
 
     def test_first_deploy_health_failure_does_not_create_healthy_state(self):
         result, calls, saved_state = self.run_safe_deploy(health_results=(1,))

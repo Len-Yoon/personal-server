@@ -8,6 +8,8 @@ readonly STATE_DIR="${N100_SAFE_DEPLOY_STATE_DIR:-$HOME/.local/state/personal-se
 readonly STATE_FILE="$STATE_DIR/last-healthy-revision"
 readonly SAFE_SERVICES=(crawler-worker youtube-memo book-memo car-care-worker)
 readonly HEALTH_SCRIPT="$SCRIPT_DIR/verify-n100-safe-deployment-health.sh"
+readonly SERVICE_CSV_PATTERN='^(crawler-worker|youtube-memo|book-memo|car-care-worker)(,(crawler-worker|youtube-memo|book-memo|car-care-worker))*$'
+PARSED_SERVICES=()
 
 is_revision() {
   [[ "$1" =~ ^[0-9a-f]{40}$ ]]
@@ -24,10 +26,22 @@ is_safe_service() {
 
 validate_services() {
   local service
+  local seen_services='|'
+
   [[ "$#" -gt 0 ]] || return 1
   for service in "$@"; do
     is_safe_service "$service" || return 1
+    [[ "$seen_services" != *"|$service|"* ]] || return 1
+    seen_services+="$service|"
   done
+}
+
+parse_services_csv() {
+  local services_csv="$1"
+
+  [[ "$services_csv" =~ $SERVICE_CSV_PATTERN ]] || return 1
+  IFS=',' read -r -a PARSED_SERVICES <<< "$services_csv"
+  validate_services "${PARSED_SERVICES[@]}"
 }
 
 deploy_revision() {
@@ -53,12 +67,11 @@ record_healthy_revision() {
 
 main() {
   local expected_sha="$1"
-  shift
   local previous_sha
 
   printf '%s\n' 'safe_cd_stage=preflight' >&2
   is_revision "$expected_sha" || return 1
-  validate_services "$@" || return 1
+  parse_services_csv "$2" || return 1
   [[ -d "$PROJECT_ROOT/.git" ]] || return 1
   [[ -x "$HEALTH_SCRIPT" ]] || return 1
   command -v git >/dev/null
@@ -69,7 +82,7 @@ main() {
   git fetch --prune origin
   git merge-base --is-ancestor "$expected_sha" origin/main
 
-  if deploy_revision "$expected_sha" "$@" && health_check "$@"; then
+  if deploy_revision "$expected_sha" "${PARSED_SERVICES[@]}" && health_check "${PARSED_SERVICES[@]}"; then
     record_healthy_revision "$expected_sha"
     return 0
   fi
@@ -81,13 +94,13 @@ main() {
   git merge-base --is-ancestor "$previous_sha" origin/main
 
   printf '%s\n' 'safe_cd_stage=rollback' >&2
-  if deploy_revision "$previous_sha" "$@" && health_check "$@"; then
+  if deploy_revision "$previous_sha" "${PARSED_SERVICES[@]}" && health_check "${PARSED_SERVICES[@]}"; then
     return 0
   fi
   return 1
 }
 
-[[ "$#" -ge 2 ]] || {
+[[ "$#" -eq 2 ]] || {
   printf '%s\n' 'safe_cd_stage=preflight' >&2
   exit 1
 }

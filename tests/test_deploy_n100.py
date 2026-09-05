@@ -39,6 +39,8 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("types: [completed]", WORKFLOW)
         self.assertIn("github.event.workflow_run.conclusion == 'success'", WORKFLOW)
         self.assertIn("github.event.workflow_run.head_branch == 'main'", WORKFLOW)
+        self.assertIn("github.event.workflow_run.event == 'push'", WORKFLOW)
+        self.assertIn("github.event.workflow_run.head_repository.full_name == github.repository", WORKFLOW)
         self.assertIn("runs-on: [self-hosted, Windows, X64]", WORKFLOW)
         self.assertIn("C:\\personal-server", WORKFLOW)
         self.assertIn("wsl.exe -d Ubuntu-24.04 -- bash -lc", WORKFLOW)
@@ -54,9 +56,24 @@ class DeployN100Tests(unittest.TestCase):
 
         self.assertIn("needs.changes.outputs.action == 'deploy'", deploy_job)
         self.assertIn("github.event.workflow_run.head_sha", deploy_job)
-        self.assertIn("needs.changes.outputs.services", deploy_job)
-        self.assertIn("services=${services//,/ }", deploy_job)
+        self.assertIn("N100_SAFE_DEPLOY_SERVICES", deploy_job)
+        self.assertIn("N100_SAFE_DEPLOY_SHA", deploy_job)
+        self.assertIn('set "WSLENV=N100_SAFE_DEPLOY_SHA:N100_SAFE_DEPLOY_SERVICES"', deploy_job)
+        self.assertIn('\\"$N100_SAFE_DEPLOY_SERVICES\\"', deploy_job)
+        self.assertIn('\\"$N100_SAFE_DEPLOY_SHA\\"', deploy_job)
         self.assertIn("bash ./scripts/deploy-n100-safe.sh", deploy_job)
+        self.assertNotIn("services=${services//,/ }", deploy_job)
+        self.assertNotIn("services='${{ needs.changes.outputs.services }}'", deploy_job)
+
+    def test_workflow_requires_a_first_party_push_for_both_jobs(self):
+        changes_job, deploy_job = WORKFLOW.split("\n  deploy:", maxsplit=1)
+        for job in (changes_job, deploy_job):
+            with self.subTest(job=job):
+                self.assertIn("github.event.workflow_run.event == 'push'", job)
+                self.assertIn(
+                    "github.event.workflow_run.head_repository.full_name == github.repository",
+                    job,
+                )
 
     def test_workflow_never_allocates_n100_runner_for_blocked_paths(self):
         changes_job, deploy_job = WORKFLOW.split("\n  deploy:", maxsplit=1)
