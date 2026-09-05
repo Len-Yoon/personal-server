@@ -17,15 +17,21 @@ CRAWLER_REQUIREMENTS = (ROOT / "crawler-worker" / "requirements.txt").read_text(
 
 
 class DeployN100Tests(unittest.TestCase):
-    def test_deploy_workflow_classifies_the_exact_ci_revision_before_runner_allocation(self):
+    def test_deploy_workflow_classifies_the_exact_push_range_before_runner_allocation(self):
         changes_job = WORKFLOW.split("\n  deploy:", maxsplit=1)[0]
 
         self.assertIn("name: Classify safe N100 deployment", WORKFLOW)
         self.assertIn("runs-on: ubuntu-latest", changes_job)
-        self.assertIn("github.event.workflow_run.head_sha", changes_job)
+        self.assertIn("context.payload.before", changes_job)
+        self.assertIn("github.sha", changes_job)
         self.assertIn("classify-n100-safe-deployment.py", changes_job)
-        self.assertIn("--base HEAD^", changes_job)
-        self.assertIn("--head HEAD", changes_job)
+        self.assertIn("actions/github-script@v7", changes_job)
+        self.assertIn("listWorkflowRuns", changes_job)
+        self.assertIn("workflow_id: 'ci.yml'", changes_job)
+        self.assertIn("core.setOutput('ci_sha'", changes_job)
+        self.assertIn("--base \"${{ steps.wait-ci.outputs.base_sha }}\"", changes_job)
+        self.assertIn("--head \"${{ github.sha }}\"", changes_job)
+        self.assertNotIn("--base HEAD^", changes_job)
         self.assertIn("deploy_action", changes_job)
         self.assertIn("deploy_services", changes_job)
         self.assertIn("deploy_reason", changes_job)
@@ -33,14 +39,13 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("exit 1", changes_job)
         self.assertNotIn("git diff --quiet HEAD^ HEAD --", changes_job)
 
-    def test_workflow_waits_for_successful_main_ci_and_uses_n100_runner(self):
-        self.assertIn("workflow_run:", WORKFLOW)
-        self.assertIn("workflows: [CI]", WORKFLOW)
-        self.assertIn("types: [completed]", WORKFLOW)
-        self.assertIn("github.event.workflow_run.conclusion == 'success'", WORKFLOW)
-        self.assertIn("github.event.workflow_run.head_branch == 'main'", WORKFLOW)
-        self.assertIn("github.event.workflow_run.event == 'push'", WORKFLOW)
-        self.assertIn("github.event.workflow_run.head_repository.full_name == github.repository", WORKFLOW)
+    def test_workflow_waits_for_successful_main_ci_for_the_exact_push_before_using_n100_runner(self):
+        self.assertIn("push:", WORKFLOW)
+        self.assertIn("branches: [main]", WORKFLOW)
+        self.assertIn("candidate.head_sha === context.sha", WORKFLOW)
+        self.assertIn("run.conclusion !== 'success'", WORKFLOW)
+        self.assertIn("await new Promise", WORKFLOW)
+        self.assertIn("actions: read", WORKFLOW)
         self.assertIn("runs-on: [self-hosted, Windows, X64]", WORKFLOW)
         self.assertIn("C:\\personal-server", WORKFLOW)
         self.assertIn("wsl.exe -d Ubuntu-24.04 -- bash -lc", WORKFLOW)
@@ -51,11 +56,11 @@ class DeployN100Tests(unittest.TestCase):
         self.assertNotIn("bash ./scripts/deploy-n100.sh", WORKFLOW)
         self.assertNotIn("N100_SSH_KEY", WORKFLOW)
 
-    def test_workflow_passes_ci_head_sha_and_selected_services_to_safe_script(self):
+    def test_workflow_passes_verified_push_sha_and_selected_services_to_safe_script(self):
         deploy_job = WORKFLOW.split("\n  deploy:", maxsplit=1)[1]
 
         self.assertIn("needs.changes.outputs.action == 'deploy'", deploy_job)
-        self.assertIn("github.event.workflow_run.head_sha", deploy_job)
+        self.assertIn("github.sha", deploy_job)
         self.assertIn("N100_SAFE_DEPLOY_SERVICES", deploy_job)
         self.assertIn("N100_SAFE_DEPLOY_SHA", deploy_job)
         self.assertIn('set "WSLENV=N100_SAFE_DEPLOY_SHA:N100_SAFE_DEPLOY_SERVICES"', deploy_job)
@@ -65,15 +70,12 @@ class DeployN100Tests(unittest.TestCase):
         self.assertNotIn("services=${services//,/ }", deploy_job)
         self.assertNotIn("services='${{ needs.changes.outputs.services }}'", deploy_job)
 
-    def test_workflow_requires_a_first_party_push_for_both_jobs(self):
+    def test_workflow_limits_both_jobs_to_the_main_push_event(self):
         changes_job, deploy_job = WORKFLOW.split("\n  deploy:", maxsplit=1)
         for job in (changes_job, deploy_job):
             with self.subTest(job=job):
-                self.assertIn("github.event.workflow_run.event == 'push'", job)
-                self.assertIn(
-                    "github.event.workflow_run.head_repository.full_name == github.repository",
-                    job,
-                )
+                self.assertNotIn("github.event.workflow_run", job)
+        self.assertIn("branches: [main]", WORKFLOW)
 
     def test_workflow_never_allocates_n100_runner_for_blocked_paths(self):
         changes_job, deploy_job = WORKFLOW.split("\n  deploy:", maxsplit=1)
@@ -270,7 +272,7 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("main", README)
         self.assertIn("self-hosted", GUIDE)
         self.assertIn("runs-on: [self-hosted, Windows, X64]", GUIDE)
-        self.assertIn("workflow_run.head_sha", GUIDE)
+        self.assertIn("github.sha", GUIDE)
         self.assertIn("revision 고정", GUIDE)
         self.assertIn("직전 정상 revision", GUIDE)
         self.assertIn("자동 배포 제외", GUIDE)
@@ -281,6 +283,8 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("Portal", GUIDE)
         self.assertIn("Caddy", GUIDE)
         self.assertIn("K3s", GUIDE)
+        self.assertIn("Telegram 알림도 1차 CD 범위에서 제외", GUIDE)
+        self.assertIn("GitHub Actions 단계와 로그가 운영 신호", GUIDE)
         self.assertIn("마스킹", GUIDE)
         self.assertNotIn("N100_SSH_HOST", GUIDE)
         self.assertIn("CI가 성공", HANDOFF)
