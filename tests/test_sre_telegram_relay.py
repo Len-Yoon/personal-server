@@ -1,14 +1,19 @@
+import json
 import sys
 import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "sre-telegram-relay"))
 
 from app.main import (  # noqa: E402
+    BACKUP_STATUS_CONFIGMAP,
+    MAX_BACKUP_DELIVERED_RUN_IDS,
+    ConfigMapBackupDeliveryStore,
     ConfigMapAlertStateStore,
     ConfigMapOffsetStore,
     MemoryAlertStateStore,
@@ -71,6 +76,28 @@ class FakeConfigMapK8s:
         self.data.update(data)
 
 
+class FakeBackupStatusK8s(FakeConfigMapK8s):
+    def __init__(self, backup_data):
+        super().__init__()
+        self.backup_data = backup_data
+
+    def get_config_map(self, namespace, name):
+        if name == BACKUP_STATUS_CONFIGMAP:
+            return {"data": dict(self.backup_data)}
+        return super().get_config_map(namespace, name)
+
+
+class UnavailableBackupStatusK8s(FakeConfigMapK8s):
+    def __init__(self, error):
+        super().__init__()
+        self._error = error
+
+    def get_config_map(self, namespace, name):
+        if name == BACKUP_STATUS_CONFIGMAP:
+            raise self._error
+        return super().get_config_map(namespace, name)
+
+
 class FailingOffsetStore:
     def load(self):
         raise OSError("ConfigMap unavailable")
@@ -85,6 +112,21 @@ class WriteFailingOffsetStore:
 
     def save(self, offset):
         raise OSError("ConfigMap write unavailable")
+
+
+class FailOnceBackupDeliveryStore:
+    def __init__(self):
+        self.run_ids = set()
+        self.save_attempts = 0
+
+    def contains(self, run_id):
+        return run_id in self.run_ids
+
+    def save(self, run_id):
+        self.save_attempts += 1
+        if self.save_attempts == 1:
+            raise OSError("ConfigMap write unavailable")
+        self.run_ids.add(run_id)
 
 
 class FakePollingTelegram:
@@ -130,6 +172,135 @@ class ControlledTelegramClient(TelegramClient):
 
 
 class RelayServiceTest(unittest.TestCase):
+    def test_absent_or_unreadable_backup_status_configmap_keeps_relay_healthy(self):
+        for error in (
+            HTTPError("https://kubernetes.invalid/backup-status", 404, "not found", None, None),
+            OSError("forbidden"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                k8s = UnavailableBackupStatusK8s(error)
+                relay = RelayService(
+                    allowed_chat_id="123",
+                    k8s_client=k8s,
+                    prometheus_client=FakePrometheus(),
+                    backup_delivery_store=ConfigMapBackupDeliveryStore(
+                        k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP
+                    ),
+                )
+
+                run_polling(relay, FakePollingTelegram([]), "123", max_cycles=1, sleep_fn=lambda _: None)
+                status, body = handle_http_request(relay, method="GET", path="/healthz")
+
+                self.assertTrue(relay.is_healthy())
+                self.assertEqual((status, body), (200, b"ok\n"))
+
+    def test_backup_delivery_state_keeps_only_bounded_recent_run_ids(self):
+        k8s = FakeConfigMapK8s()
+        store = ConfigMapBackupDeliveryStore(k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP)
+
+        for index in range(MAX_BACKUP_DELIVERED_RUN_IDS + 1):
+            store.save(f"run-{index}")
+
+        persisted = json.loads(k8s.data["backup_delivered_run_ids"])
+        self.assertEqual(len(persisted), MAX_BACKUP_DELIVERED_RUN_IDS)
+        self.assertEqual(persisted[0], "run-1")
+        self.assertTrue(store.contains(f"run-{MAX_BACKUP_DELIVERED_RUN_IDS}"))
+        self.assertFalse(store.contains("run-0"))
+
+    def test_backup_report_delivers_each_allowed_status_once_and_persists_run_id(self):
+        expected_messages = {
+            "completed": "[백업 완료]\n상태: 암호화 백업과 복원 검증을 완료했습니다.\n대상: Portal 데이터",
+            "unchanged": "[백업 확인] 변경 없음\n상태: 백업 대상에 변경이 없습니다.\n대상: Portal 데이터",
+            "failed": "[백업 실패]\n상태: 백업 실행에 실패했습니다.\n대상: Portal 데이터",
+            "restore_failed": "[복원 검증 실패]\n상태: 복원 검증 또는 Portal 준비 상태 확인에 실패했습니다.\n대상: Portal 데이터",
+        }
+        for status, expected_message in expected_messages.items():
+            with self.subTest(status=status):
+                k8s = FakeBackupStatusK8s(
+                    {
+                        "run_id": f"20260905T010203Z-{status}",
+                        "status": status,
+                        "completed_at": "2026-09-05T01:02:03Z",
+                        "stage": "restore-verify",
+                    }
+                )
+                telegram = FakePollingTelegram([])
+                relay = RelayService(
+                    allowed_chat_id="123",
+                    k8s_client=k8s,
+                    prometheus_client=FakePrometheus(),
+                    backup_delivery_store=ConfigMapBackupDeliveryStore(
+                        k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP
+                    ),
+                )
+
+                run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+                restarted_relay = RelayService(
+                    allowed_chat_id="123",
+                    k8s_client=k8s,
+                    prometheus_client=FakePrometheus(),
+                    backup_delivery_store=ConfigMapBackupDeliveryStore(
+                        k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP
+                    ),
+                )
+                run_polling(restarted_relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+
+                self.assertEqual(telegram.sent_messages, [("123", expected_message)])
+
+    def test_backup_report_remains_eligible_when_delivery_state_write_fails(self):
+        k8s = FakeBackupStatusK8s(
+            {
+                "run_id": "20260905T010203Z-retry",
+                "status": "completed",
+                "completed_at": "2026-09-05T01:02:03Z",
+                "stage": "restore-verify",
+            }
+        )
+        store = FailOnceBackupDeliveryStore()
+        telegram = FakePollingTelegram([])
+
+        relay = RelayService(
+            allowed_chat_id="123",
+            k8s_client=k8s,
+            prometheus_client=FakePrometheus(),
+            backup_delivery_store=store,
+        )
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        restarted_relay = RelayService(
+            allowed_chat_id="123",
+            k8s_client=k8s,
+            prometheus_client=FakePrometheus(),
+            backup_delivery_store=store,
+        )
+        run_polling(restarted_relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+
+        self.assertEqual(len(telegram.sent_messages), 2)
+        self.assertEqual(store.save_attempts, 2)
+
+    def test_malformed_backup_report_is_ignored_without_delivery_or_state_write(self):
+        invalid_reports = (
+            {"run_id": "20260905T010203Z-ok", "status": "completed", "completed_at": "2026-09-05 01:02:03Z", "stage": "restore-verify"},
+            {"run_id": "../../unsafe", "status": "completed", "completed_at": "2026-09-05T01:02:03Z", "stage": "restore-verify"},
+            {"run_id": "20260905T010203Z-ok", "status": "unexpected", "completed_at": "2026-09-05T01:02:03Z", "stage": "restore-verify"},
+            {"run_id": "20260905T010203Z-ok", "status": "completed", "completed_at": "2026-09-05T01:02:03Z", "stage": "shell;unsafe"},
+        )
+        for backup_data in invalid_reports:
+            with self.subTest(backup_data=backup_data):
+                k8s = FakeBackupStatusK8s(backup_data)
+                telegram = FakePollingTelegram([])
+                relay = RelayService(
+                    allowed_chat_id="123",
+                    k8s_client=k8s,
+                    prometheus_client=FakePrometheus(),
+                    backup_delivery_store=ConfigMapBackupDeliveryStore(
+                        k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP
+                    ),
+                )
+
+                run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+
+                self.assertEqual(telegram.sent_messages, [])
+                self.assertEqual(k8s.data, {})
     def test_default_prometheus_client_uses_verified_monitoring_service(self):
         with patch("app.main.urlopen") as opener:
             response = opener.return_value.__enter__.return_value

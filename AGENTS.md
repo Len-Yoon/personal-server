@@ -5,6 +5,14 @@
 - `서버 띄우는 쪽`과 `스케줄러 쪽`은 절대 수정하지 않음.
 - 기능 변경이 필요하더라도 위 두 영역은 제외하고 작업함.
 
+## 백업 자동화 예외
+
+- Portal K3s PVC 백업에 한해 `systemd --user` timer/service 또는 K3s CronJob을 추가·수정할 수 있음. CronJob은 매일 백업·복원 검증을 실행하고, 성공·변경 없음·실패·미복구 결과를 Telegram SRE relay로 보고하는 범위에서만 허용함.
+- 자동 실행은 하나의 방식만 선택해 중복 실행을 방지하며, `infra/k8s/tools/portal-pvc-backup-verify.sh --go`만 실행할 수 있음.
+- rclone 설정 암호는 Git·평문 파일·환경 변수에 저장하지 않음. `systemd --user` 방식은 N100 사용자 전용 `systemd-creds` 암호화 자격 증명만 사용함. CronJob 방식은 별도 승인된 Secret Manager 또는 SOPS/age 절차로 사전 시딩된 Kubernetes Secret만 참조할 수 있으며, 이 저장소의 도구가 비밀값을 생성·출력·복제하지 않음.
+- sudo 비밀번호는 저장하지 않음. 기존의 제한된 `sudo -n k3s` 권한만 사용함.
+- 백업 결과와 복구 실패는 Telegram SRE relay로 알림.
+
 ## 시간 처리 기준
 
 - 시간 관련 신규 기능은 내부 저장·비교용 시각을 UTC의 시간대 인식 ISO 8601 값으로 유지함.
