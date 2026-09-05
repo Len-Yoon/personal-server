@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** CI가 검증한 `main` revision만 N100에 자동 배포하고, allowlisted Compose 서비스의 health 실패 시 직전 정상 revision으로 한 번 복구함.
+**Goal:** `main` push의 정확한 `before..github.sha` 전체 범위를 분류하고, 해당 SHA의 CI 성공을 GitHub API로 확인한 경우에만 N100에 자동 배포하며, allowlisted Compose 서비스의 health 실패 시 직전 정상 revision으로 한 번 복구함.
 
-**Architecture:** GitHub Actions의 변경 분류 job은 정확한 CI `head_sha`에서 안전한 Compose 서비스만 선택함. N100 runner의 새 배포 스크립트는 해당 SHA가 `origin/main`의 조상인지 확인하고 detached checkout으로 배포하며, 성공 revision만 runner 전용 state 파일에 기록함. 새 revision health 실패 시 state 파일의 직전 revision을 한 번 재배포·검증하고 반복 rollback은 금지함.
+**Architecture:** GitHub Actions의 GitHub-hosted 변경 분류 job은 push event의 `before..github.sha` 전체 범위를 확보하고, 기본 `GITHUB_TOKEN`으로 정확한 `github.sha`의 CI 성공을 GitHub API에서 확인한 뒤 안전한 Compose 서비스만 선택함. N100 runner의 배포 스크립트는 SHA의 조상·현재 `origin/main` 일치 여부를 확인하고, 선택 서비스의 source만 `git archive`로 SHA release directory에 추출함. 임시 Compose override는 그 release source를 build context와 읽기 전용 `/app` mount로만 사용하며, 운영 checkout은 변경하지 않음. 새 revision health 실패 시 state 파일의 직전 revision도 별도 source archive로 한 번 재배포·검증하고 반복 rollback은 금지함.
 
-**Tech Stack:** GitHub Actions workflow_run, Windows self-hosted runner, WSL Bash, Docker Compose, Python 3.11 unittest.
+**Tech Stack:** GitHub Actions push event 및 Actions REST API, Windows self-hosted runner, WSL Bash, Docker Compose, Python 3.11 unittest.
 
 **Spec:** `docs/superpowers/specs/2026-09-05-safe-n100-continuous-deployment-design.md`
 
@@ -14,10 +14,13 @@
 
 - 자동 대상은 `crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker` Compose 서비스만 허용함.
 - Portal·Caddy·system-agent·homeops-executor·K3s·Secret·PVC·backup·scheduler는 1차 CD에서 자동 적용하지 않음.
-- CI `workflow_run.head_sha`만 배포하고, `origin/main` 최신 revision으로 대체하지 않음.
+- 정확한 `before..github.sha` 전체 범위와 동일 `github.sha`의 CI 성공을 확인한 경우만 배포함.
+- N100에서 `git checkout`을 실행하지 않고, SHA release source archive와 선택 서비스 임시 override만 사용함.
+- `expected_sha`가 현재 `origin/main`과 정확히 일치하지 않으면 stale revision으로 거부함.
 - `.env`, `data/`, Secret, credential, PVC 데이터를 읽어 출력하거나 변경하지 않음.
 - health 성공 뒤에만 마지막 정상 revision을 기록하고, 실패 시 rollback은 한 번만 수행함.
 - 기존 `scripts/deploy-n100.sh` 수동/기존 배포 경로는 변경하지 않음.
+- Telegram CD 상태 메시지는 Phase 1에서 제외하며, GitHub Actions stage가 운영자 신호임.
 
 ---
 
@@ -104,7 +107,7 @@ def test_health_failure_rolls_back_once_to_saved_healthy_revision(self):
         expected_sha=NEW_SHA, previous_sha=OLD_SHA, health_results=[1, 0]
     )
     self.assertEqual(result.returncode, 0)
-    self.assertEqual(calls.count("checkout --detach"), 2)
+    self.assertEqual(calls.count("git archive"), 2)
     self.assertIn(OLD_SHA, calls)
 ```
 
@@ -119,12 +122,13 @@ Expected: FAIL because safe deploy and health scripts do not exist.
 ```bash
 git fetch --prune origin
 git merge-base --is-ancestor "$expected_sha" origin/main || exit 1
-git checkout --detach "$expected_sha"
-docker compose -f docker-compose.yml -f docker-compose.n100.yml config --quiet
-docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build --no-deps "$@"
+test "$expected_sha" = "$(git rev-parse origin/main)" || exit 1
+release_dir="$(mktemp -d "$N100_SAFE_DEPLOY_STATE_DIR/releases/${expected_sha}.XXXXXX")"
+git archive --format=tar "$expected_sha" -- "$service/Dockerfile" "$service/requirements.txt" "$service/app" | tar -xf - -C "$release_dir"
+docker compose -f "$N100_SAFE_DEPLOY_PROJECT_ROOT/docker-compose.yml" -f "$N100_SAFE_DEPLOY_PROJECT_ROOT/docker-compose.n100.yml" -f "$temporary_override" up -d --build --no-deps "$@"
 ```
 
-The health script must inspect only the requested allowlisted containers and call only their loopback health endpoints. The deploy script writes the state file only after success. On the first health failure, it reads a validated 40-hex saved revision, checks it is an `origin/main` ancestor, performs one rollback deploy and health check, then returns the rollback outcome. It must not run `git reset --hard`, `rm`, `kubectl`, `sudo`, or touch `.env`/`data`.
+The health script must inspect only the requested allowlisted containers and call only their loopback health endpoints. It polls for up to 90 seconds at 2-second intervals and passes only when each requested container is `healthy` and its loopback endpoint succeeds. The deploy script writes the state file only after success. On the first health failure, it reads a validated 40-hex saved revision, checks it is an `origin/main` ancestor and current revision, performs one rollback release archive and health check, then returns the rollback outcome. It must not run `git checkout`, `git reset --hard`, `rm`, `kubectl`, `sudo`, or touch `.env`/`data`.
 
 - [ ] **Step 4: Run deployment tests to verify GREEN**
 
@@ -147,14 +151,16 @@ git commit -m "feat: revision 고정 안전 자동 배포 추가"
 - Modify: `tests/test_n100_safe_deployment.py`
 
 **Interfaces:**
-- Consumes: classifier GitHub output keys `action`, `services`, `reason`; `github.event.workflow_run.head_sha`.
-- Produces: N100 runner invocation `bash ./scripts/deploy-n100-safe.sh <head_sha> <services...>` only for `action=deploy`.
+- Consumes: classifier GitHub output keys `action`, `services`, `reason`; `github.event.before`, `github.sha` and Actions API CI run state.
+- Produces: N100 runner invocation `bash ./scripts/deploy-n100-safe.sh <github.sha> <services...>` only for `action=deploy`.
 
 - [ ] **Step 1: Write failing workflow contract tests**
 
 ```python
-def test_workflow_passes_ci_head_sha_and_selected_services_to_safe_script(self):
-    self.assertIn("github.event.workflow_run.head_sha", workflow)
+def test_workflow_passes_verified_push_sha_and_selected_services_to_safe_script(self):
+    self.assertIn("github.sha", workflow)
+    self.assertIn("github.event.before", workflow)
+    self.assertIn("listWorkflowRuns", workflow)
     self.assertIn("classify-n100-safe-deployment.py", workflow)
     self.assertIn("deploy-n100-safe.sh", workflow)
 
@@ -171,7 +177,7 @@ Expected: FAIL because the workflow currently calls `deploy-n100.sh` after a bro
 
 - [ ] **Step 3: Replace the broad detector with safe classification**
 
-Use the CI `head_sha` checkout and call the classifier with `HEAD^` and `HEAD`. Make blocked runtime changes fail in the `changes` job before a self-hosted runner is allocated. Pass the exact SHA and space-separated selected services to WSL. Keep `contents: read`, main+successful CI gating, and non-cancelling concurrency. Do not add SSH keys, GitHub Secrets, K3s commands, or workflow dispatch.
+Use a `push` trigger for `main`, validate `github.event.before`, and call the classifier with the complete `before..github.sha` range. In the GitHub-hosted job, query Actions API with the default `GITHUB_TOKEN` and wait only for the exact `github.sha` CI push run to complete successfully. Block invalid ranges, CI failures, timeouts, and blocked runtime changes before a self-hosted runner is allocated. Pass the exact SHA and space-separated selected services to WSL. Keep `contents: read`, `actions: read`, and non-cancelling concurrency. Do not add SSH keys, GitHub Secrets, K3s commands, or workflow dispatch.
 
 - [ ] **Step 4: Run workflow contract tests to verify GREEN**
 
@@ -200,7 +206,8 @@ git commit -m "ci: 안전 대상만 N100 자동 배포"
 
 ```python
 def test_n100_cd_guide_documents_revision_pinning_and_safe_scope(self):
-    self.assertIn("workflow_run.head_sha", guide)
+    self.assertIn("before..github.sha", guide)
+    self.assertIn("git archive", guide)
     self.assertIn("직전 정상 revision", guide)
     self.assertIn("Portal", guide)
     self.assertIn("자동 배포 제외", guide)
@@ -214,7 +221,7 @@ Expected: FAIL because the guide currently describes resetting to current `origi
 
 - [ ] **Step 3: Update the operator guide**
 
-Document allowlisted services, exact-SHA deployment, initial deploy behavior, one rollback, how to read Actions failures, and the explicit exclusions. State that N100 backup credential enrollment remains a separate manual, masked one-time action.
+Document allowlisted services, full-range `before..github.sha` classification, exact-SHA CI success wait, release archive/temporary override deployment, stale SHA rejection, initial deploy behavior, one rollback, how to read Actions failures, and the explicit exclusions. State that Telegram CD messages are excluded in Phase 1 and N100 backup credential enrollment remains a separate manual, masked one-time action.
 
 - [ ] **Step 4: Run focused and CI-equivalent tests**
 

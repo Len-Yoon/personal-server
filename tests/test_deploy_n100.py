@@ -12,6 +12,8 @@ SCRIPT = (ROOT / "scripts" / "deploy-n100.sh").read_text(encoding="utf-8")
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 HANDOFF = (ROOT / "docs" / "agent-handoff.md").read_text(encoding="utf-8")
 GUIDE = (ROOT / "docs" / "n100-github-auto-deploy.md").read_text(encoding="utf-8") if (ROOT / "docs" / "n100-github-auto-deploy.md").exists() else ""
+SAFE_CD_SPEC = (ROOT / "docs" / "superpowers" / "specs" / "2026-09-05-safe-n100-continuous-deployment-design.md").read_text(encoding="utf-8")
+SAFE_CD_PLAN = (ROOT / "docs" / "superpowers" / "plans" / "2026-09-05-safe-n100-continuous-deployment.md").read_text(encoding="utf-8")
 HOMEOPS_REQUIREMENTS = (ROOT / "homeops-executor" / "requirements.txt").read_text(encoding="utf-8")
 CRAWLER_REQUIREMENTS = (ROOT / "crawler-worker" / "requirements.txt").read_text(encoding="utf-8")
 
@@ -295,6 +297,19 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("직접 push", GUIDE)
         self.assertIn("기능 브랜치 PR", GUIDE)
         self.assertNotIn("PR은 선택", GUIDE)
+
+    def test_safe_cd_design_and_plan_match_the_push_range_release_contract(self):
+        for document in (SAFE_CD_SPEC, SAFE_CD_PLAN):
+            with self.subTest(document=document[:20]):
+                self.assertIn("before", document)
+                self.assertIn("github.sha", document)
+                self.assertIn("git archive", document)
+                self.assertIn("origin/main", document)
+                self.assertIn("Telegram", document)
+                self.assertIn("Phase 1", document)
+                self.assertIn("GitHub Actions stage", document)
+                self.assertNotIn("workflow_run.head_sha", document)
+                self.assertNotIn("detached checkout", document)
 
 
 if __name__ == "__main__":
