@@ -270,12 +270,19 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("main", README)
         self.assertIn("self-hosted", GUIDE)
         self.assertIn("runs-on: [self-hosted, Windows, X64]", GUIDE)
+        self.assertIn("workflow_run.head_sha", GUIDE)
+        self.assertIn("revision 고정", GUIDE)
+        self.assertIn("직전 정상 revision", GUIDE)
+        self.assertIn("자동 배포 제외", GUIDE)
+        self.assertIn("crawler-worker", GUIDE)
+        self.assertIn("youtube-memo", GUIDE)
+        self.assertIn("book-memo", GUIDE)
+        self.assertIn("car-care-worker", GUIDE)
+        self.assertIn("Portal", GUIDE)
+        self.assertIn("Caddy", GUIDE)
+        self.assertIn("K3s", GUIDE)
+        self.assertIn("마스킹", GUIDE)
         self.assertNotIn("N100_SSH_HOST", GUIDE)
-        self.assertIn("git fetch --prune origin", GUIDE)
-        self.assertIn(
-            "docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo caddy",
-            GUIDE,
-        )
         self.assertIn("CI가 성공", HANDOFF)
         self.assertIn("CI가 성공", GUIDE)
         self.assertIn("main", GUIDE)
@@ -283,8 +290,6 @@ class DeployN100Tests(unittest.TestCase):
         self.assertNotIn("main push에만 반응", GUIDE)
         self.assertIn("직접 push", GUIDE)
         self.assertIn("기능 브랜치 PR", GUIDE)
-        self.assertIn("런타임 배포 경로", GUIDE)
-        self.assertIn("문서와 비활성 GitOps 초안", GUIDE)
         self.assertNotIn("PR은 선택", GUIDE)
 
 
