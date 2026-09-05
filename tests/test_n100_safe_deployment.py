@@ -20,6 +20,24 @@ class N100SafeDeploymentClassifierTests(unittest.TestCase):
         self.assertEqual(decision.action, "deploy")
         self.assertEqual(decision.services, ("crawler-worker",))
 
+    def test_known_service_code_and_build_paths_deploy(self):
+        decision = classifier.classify_changed_paths(
+            ["crawler-worker/app/templates/index.html", "crawler-worker/app/static/site.css", "crawler-worker/Dockerfile"]
+        )
+        self.assertEqual(decision.action, "deploy")
+
+    def test_unknown_service_local_operational_paths_are_blocked(self):
+        for path in (
+            "crawler-worker/state/checkpoint.json",
+            "crawler-worker/.state/checkpoint.json",
+            "crawler-worker/storage/items.json",
+            "crawler-worker/cache/index.json",
+            "crawler-worker/var/run.pid",
+            "crawler-worker/config/auth.yaml",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(classifier.classify_changed_paths([path]).action, "blocked")
+
     def test_multiple_allowlisted_services_are_sorted_and_deployed(self):
         decision = classifier.classify_changed_paths(
             ["youtube-memo/app/main.py", "book-memo/app/main.py"]

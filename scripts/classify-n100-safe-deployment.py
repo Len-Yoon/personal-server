@@ -71,6 +71,14 @@ def _is_sensitive_service_path(path: str) -> bool:
     )
 
 
+def _is_allowed_service_path(path: str) -> bool:
+    for prefix in SAFE_SERVICE_PREFIXES:
+        if path.startswith(prefix):
+            relative = path[len(prefix) :]
+            return relative == "Dockerfile" or relative == "requirements.txt" or relative.startswith("app/")
+    return False
+
+
 def _has_control_character(path: str) -> bool:
     return any(ord(character) < 32 or ord(character) == 127 for character in path)
 
@@ -98,7 +106,10 @@ def classify_changed_paths(paths: Iterable[str]) -> DeploymentDecision:
         or path.startswith(BLOCKED_PREFIXES)
         or (
             path.startswith(tuple(SAFE_SERVICE_PREFIXES))
-            and _is_sensitive_service_path(path)
+            and (
+                not _is_allowed_service_path(path)
+                or _is_sensitive_service_path(path)
+            )
         )
     )
     if blocked:
