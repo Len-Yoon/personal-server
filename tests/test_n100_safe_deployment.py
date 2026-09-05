@@ -40,6 +40,12 @@ class N100SafeDeploymentClassifierTests(unittest.TestCase):
 
     def test_app_operational_and_database_sidecar_paths_are_blocked(self):
         for path in (
+            "crawler-worker/app/state/checkpoint.py",
+            "crawler-worker/app/.state/checkpoint.py",
+            "crawler-worker/app/storage/items.py",
+            "crawler-worker/app/cache/index.py",
+            "crawler-worker/app/var/runtime.py",
+            "crawler-worker/app/config/settings.py",
             "crawler-worker/app/state/checkpoint.json",
             "crawler-worker/app/.state/checkpoint.json",
             "crawler-worker/app/storage/items.json",

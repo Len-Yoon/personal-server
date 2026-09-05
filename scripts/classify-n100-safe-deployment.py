@@ -62,7 +62,7 @@ def _is_sensitive_service_path(path: str) -> bool:
         any(
             any(signal in part for signal in ("credential", "secret", "private", "password", "token", "key"))
             or part.startswith(".env")
-            or part in {"data", "runtime"}
+            or part in {"data", "runtime", "state", ".state", "storage", "cache", "var", "config"}
             for part in components[1:]
         )
         or name.startswith(".env")
