@@ -38,10 +38,12 @@ BLOCKED_FILES = {
 }
 POLICY_MAINTENANCE_FILES = {
     "scripts/classify-n100-safe-deployment.py",
+    "scripts/deploy-n100-safe.sh",
     "scripts/n100-remote-dev.sh",
     "scripts/n100-remote-dev-remote.sh",
     "scripts/runtime-service-state.sh",
     "scripts/runtime-service-state-reader.py",
+    "scripts/verify-n100-safe-deployment-health.sh",
     "scripts/verify_change_scope.py",
     "scripts/run_change_harness.py",
     "scripts/summarize_token_measurements.py",

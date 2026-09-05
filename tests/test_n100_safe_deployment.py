@@ -1,4 +1,6 @@
 import importlib.util
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -7,6 +9,9 @@ from pathlib import Path
 
 
 MODULE_PATH = Path(__file__).parents[1] / "scripts" / "classify-n100-safe-deployment.py"
+ROOT = Path(__file__).parents[1]
+SAFE_DEPLOY_SCRIPT = ROOT / "scripts" / "deploy-n100-safe.sh"
+SAFE_HEALTH_SCRIPT = ROOT / "scripts" / "verify-n100-safe-deployment-health.sh"
 SPEC = importlib.util.spec_from_file_location("classify_n100_safe_deployment", MODULE_PATH)
 classifier = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -170,6 +175,191 @@ class N100SafeDeploymentClassifierTests(unittest.TestCase):
             )
             lines = output.read_text().splitlines()
             self.assertEqual(lines, ["deploy_action=blocked", "deploy_services=", "deploy_reason=blocked_control_character"])
+
+
+class N100SafeDeploymentScriptTests(unittest.TestCase):
+    NEW_SHA = "a" * 40
+    OLD_SHA = "b" * 40
+
+    def _write_executable(self, path: Path, content: str) -> None:
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o755)
+
+    def run_safe_deploy(
+        self,
+        *,
+        expected_sha: str = NEW_SHA,
+        services: tuple[str, ...] = ("crawler-worker",),
+        previous_sha: str | None = None,
+        health_results: tuple[int, ...] = (0,),
+        rejected_sha: str | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], str, str | None]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "project"
+            root.mkdir()
+            (root / ".git").mkdir()
+            state_dir = Path(directory) / "state"
+            state_dir.mkdir()
+            if previous_sha is not None:
+                (state_dir / "last-healthy-revision").write_text(
+                    f"{previous_sha}\n", encoding="ascii"
+                )
+
+            fake_bin = Path(directory) / "bin"
+            fake_bin.mkdir()
+            calls = Path(directory) / "calls"
+            health_counter = Path(directory) / "health-counter"
+            self._write_executable(
+                fake_bin / "git",
+                "#!/bin/sh\n"
+                f"printf 'git %s\\n' \"$*\" >> '{calls}'\n"
+                "if [ \"$1\" = merge-base ]; then\n"
+                "  if [ -n \"${FAKE_REJECT_SHA:-}\" ] && [ \"$3\" = \"$FAKE_REJECT_SHA\" ]; then exit 1; fi\n"
+                "fi\n"
+                "exit 0\n",
+            )
+            self._write_executable(
+                fake_bin / "docker",
+                "#!/bin/sh\n"
+                f"printf 'docker %s\\n' \"$*\" >> '{calls}'\n"
+                "if [ \"$1\" = inspect ]; then printf '%s\\n' \"${FAKE_INSPECT_STATUS:-healthy}\"; fi\n"
+                "exit 0\n",
+            )
+            self._write_executable(
+                fake_bin / "curl",
+                "#!/bin/sh\n"
+                f"printf 'curl %s\\n' \"$*\" >> '{calls}'\n"
+                f"count=0; [ -f '{health_counter}' ] && count=$(cat '{health_counter}')\n"
+                "count=$((count + 1)); printf '%s' \"$count\" > '"
+                f"{health_counter}'\n"
+                "result=$(printf '%s' \"${FAKE_HEALTH_RESULTS:-0}\" | cut -d, -f \"$count\")\n"
+                "[ -n \"$result\" ] || result=0\n"
+                "exit \"$result\"\n",
+            )
+            environment = {
+                **os.environ,
+                "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+                "N100_SAFE_DEPLOY_PROJECT_ROOT": str(root),
+                "N100_SAFE_DEPLOY_STATE_DIR": str(state_dir),
+                "FAKE_HEALTH_RESULTS": ",".join(map(str, health_results)),
+            }
+            if rejected_sha is not None:
+                environment["FAKE_REJECT_SHA"] = rejected_sha
+            result = subprocess.run(
+                ["bash", str(SAFE_DEPLOY_SCRIPT), expected_sha, *services],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            recorded_calls = calls.read_text(encoding="utf-8") if calls.exists() else ""
+            saved_state = state_dir / "last-healthy-revision"
+            saved_content = (
+                saved_state.read_text(encoding="ascii") if saved_state.exists() else None
+            )
+            return result, recorded_calls, saved_content
+
+    def test_deploy_refuses_revision_that_is_not_an_origin_main_ancestor(self):
+        result, calls, _ = self.run_safe_deploy(expected_sha="f" * 40, rejected_sha="f" * 40)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("docker compose", calls)
+        self.assertIn("safe_cd_stage=preflight", result.stderr)
+
+    def test_successful_deployment_records_exact_revision_only_after_health(self):
+        result, calls, saved_state = self.run_safe_deploy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(saved_state, f"{self.NEW_SHA}\n")
+        self.assertIn(f"git checkout --detach {self.NEW_SHA}", calls)
+        self.assertIn("docker compose -f docker-compose.yml -f docker-compose.n100.yml config --quiet", calls)
+        self.assertIn("docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build --no-deps crawler-worker", calls)
+        self.assertIn("safe_cd_stage=deploy", result.stderr)
+        self.assertIn("safe_cd_stage=health", result.stderr)
+
+    def test_first_deploy_health_failure_does_not_create_healthy_state(self):
+        result, calls, saved_state = self.run_safe_deploy(health_results=(1,))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNone(saved_state)
+        self.assertEqual(calls.count("checkout --detach"), 1)
+        self.assertNotIn("safe_cd_stage=rollback", result.stderr)
+
+    def test_health_failure_rolls_back_once_to_saved_healthy_revision(self):
+        result, calls, saved_state = self.run_safe_deploy(
+            previous_sha=self.OLD_SHA, health_results=(1, 0)
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls.count("checkout --detach"), 2)
+        self.assertIn(f"git checkout --detach {self.OLD_SHA}", calls)
+        self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
+        self.assertEqual(result.stderr.count("safe_cd_stage=rollback"), 1)
+
+    def test_rollback_health_failure_returns_failure_without_repeating_rollback(self):
+        result, calls, saved_state = self.run_safe_deploy(
+            previous_sha=self.OLD_SHA, health_results=(1, 1)
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls.count("checkout --detach"), 2)
+        self.assertEqual(result.stderr.count("safe_cd_stage=rollback"), 1)
+        self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
+
+    def test_invalid_saved_revision_never_attempts_rollback(self):
+        result, calls, _ = self.run_safe_deploy(
+            previous_sha="not-a-revision", health_results=(1,)
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls.count("checkout --detach"), 1)
+        self.assertNotIn("safe_cd_stage=rollback", result.stderr)
+
+    def test_saved_revision_that_is_not_an_origin_main_ancestor_never_rolls_back(self):
+        result, calls, saved_state = self.run_safe_deploy(
+            previous_sha=self.OLD_SHA, health_results=(1,), rejected_sha=self.OLD_SHA
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls.count("checkout --detach"), 1)
+        self.assertNotIn("safe_cd_stage=rollback", result.stderr)
+        self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
+
+    def test_rejects_invalid_sha_and_non_allowlisted_service_before_compose(self):
+        invalid_sha, invalid_sha_calls, _ = self.run_safe_deploy(expected_sha="too-short")
+        invalid_service, invalid_service_calls, _ = self.run_safe_deploy(
+            services=("portal-web",)
+        )
+        self.assertNotEqual(invalid_sha.returncode, 0)
+        self.assertNotEqual(invalid_service.returncode, 0)
+        self.assertNotIn("docker compose", invalid_sha_calls)
+        self.assertNotIn("docker compose", invalid_service_calls)
+
+    def test_health_checks_requested_allowlisted_containers_at_loopback_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake_bin = Path(directory) / "bin"
+            fake_bin.mkdir()
+            calls = Path(directory) / "calls"
+            self._write_executable(
+                fake_bin / "docker",
+                "#!/bin/sh\n"
+                f"printf 'docker %s\\n' \"$*\" >> '{calls}'\n"
+                "printf 'healthy\\n'\n",
+            )
+            self._write_executable(
+                fake_bin / "curl",
+                "#!/bin/sh\n"
+                f"printf 'curl %s\\n' \"$*\" >> '{calls}'\n",
+            )
+            result = subprocess.run(
+                ["bash", str(SAFE_HEALTH_SCRIPT), "crawler-worker", "book-memo"],
+                env={**os.environ, "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"]},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            recorded_calls = calls.read_text(encoding="utf-8") if calls.exists() else ""
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("inspect --format {{.State.Health.Status}} crawler-worker", recorded_calls)
+        self.assertIn("inspect --format {{.State.Health.Status}} book-memo", recorded_calls)
+        self.assertNotIn("portal-web", recorded_calls)
+        self.assertIn("http://127.0.0.1:8001/health", recorded_calls)
+        self.assertIn("http://127.0.0.1:8003/health", recorded_calls)
+        self.assertNotIn("host.docker.internal", recorded_calls)
+
 
 
 if __name__ == "__main__":
