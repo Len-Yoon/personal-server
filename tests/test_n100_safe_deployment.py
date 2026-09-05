@@ -2,6 +2,7 @@ import importlib.util
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -72,6 +73,29 @@ class N100SafeDeploymentClassifierTests(unittest.TestCase):
             )
             self.assertEqual(values["deploy_action"], "deploy")
             self.assertEqual(values["deploy_services"], "crawler-worker")
+
+    def test_sensitive_service_local_runtime_paths_are_blocked(self):
+        for path in ("crawler-worker/.env", "crawler-worker/data/runtime.sqlite"):
+            with self.subTest(path=path):
+                self.assertEqual(classifier.classify_changed_paths([path]).action, "blocked")
+
+    def test_traversal_segments_are_blocked(self):
+        for path in ("crawler-worker/../portal-web/app.py", "crawler-worker/./app.py"):
+            with self.subTest(path=path):
+                self.assertEqual(classifier.classify_changed_paths([path]).action, "blocked")
+
+    def test_rename_input_includes_old_and_new_paths(self):
+        decision = classifier.classify_changed_paths(
+            ["crawler-worker/app/old.py", "portal-web/app/new.py"]
+        )
+        self.assertEqual(decision.action, "blocked")
+
+    def test_cli_git_discovery_is_nul_safe_and_expands_rename_paths(self):
+        completed = mock.Mock(stdout=b"R100\0crawler-worker/.env\0crawler-worker/app/new.py\0")
+        with mock.patch.object(classifier.subprocess, "run", return_value=completed) as run:
+            paths = classifier._changed_paths("base", "head")
+        self.assertEqual(paths, ["crawler-worker/.env", "crawler-worker/app/new.py"])
+        self.assertEqual(run.call_args.args[0][1:5], ["diff", "--name-status", "-z", "--find-renames"])
 
 
 if __name__ == "__main__":

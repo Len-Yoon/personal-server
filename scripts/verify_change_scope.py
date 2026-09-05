@@ -37,6 +37,7 @@ BLOCKED_FILES = {
     "crawler-worker/app/services/news_scheduler.py",
 }
 POLICY_MAINTENANCE_FILES = {
+    "scripts/classify-n100-safe-deployment.py",
     "scripts/n100-remote-dev.sh",
     "scripts/n100-remote-dev-remote.sh",
     "scripts/runtime-service-state.sh",

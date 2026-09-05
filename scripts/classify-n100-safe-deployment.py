@@ -41,7 +41,22 @@ class DeploymentDecision:
 
 
 def _normalise_path(path: str) -> str:
-    return path.replace("\\", "/").removeprefix("./")
+    return path.replace("\\", "/")
+
+
+def _has_traversal_component(path: str) -> bool:
+    return any(component in {".", ".."} for component in path.split("/"))
+
+
+def _is_sensitive_service_path(path: str) -> bool:
+    parts = path.split("/")
+    name = parts[-1].lower()
+    return (
+        any(part.lower() in {"data", "runtime", "secrets", "secret"} for part in parts[1:-1])
+        or name in {".env", ".env.local", ".env.production", ".env.development"}
+        or name.startswith((".env.", "secret", "secrets", "password", "token"))
+        or name.endswith((".sqlite", ".sqlite3", ".db", ".key", ".pem"))
+    )
 
 
 def _is_documentation_or_test(path: str) -> bool:
@@ -58,7 +73,16 @@ def classify_changed_paths(paths: Iterable[str]) -> DeploymentDecision:
     if not normalised:
         return DeploymentDecision("skip", (), "변경 경로 없음")
 
-    blocked = tuple(path for path in normalised if path.startswith(BLOCKED_PREFIXES))
+    blocked = tuple(
+        path
+        for path in normalised
+        if _has_traversal_component(path)
+        or path.startswith(BLOCKED_PREFIXES)
+        or (
+            path.startswith(tuple(SAFE_SERVICE_PREFIXES))
+            and _is_sensitive_service_path(path)
+        )
+    )
     if blocked:
         return DeploymentDecision("blocked", (), f"비허용 경로 변경: {', '.join(blocked)}")
 
@@ -87,12 +111,24 @@ def classify_changed_paths(paths: Iterable[str]) -> DeploymentDecision:
 
 def _changed_paths(base: str, head: str) -> list[str]:
     result = subprocess.run(
-        ["git", "diff", "--name-only", "--diff-filter=ACMR", f"{base}..{head}"],
+        ["git", "diff", "--name-status", "-z", "--find-renames", f"{base}..{head}"],
         check=True,
         capture_output=True,
-        text=True,
     )
-    return [line for line in result.stdout.splitlines() if line]
+    fields = result.stdout.split(b"\0")
+    if fields and fields[-1] == b"":
+        fields.pop()
+    paths: list[str] = []
+    index = 0
+    while index < len(fields):
+        status = fields[index].decode("ascii")
+        index += 1
+        count = 2 if status[:1] in {"R", "C"} else 1
+        if index + count > len(fields):
+            raise ValueError(f"invalid git name-status record: {status}")
+        paths.extend(field.decode("utf-8") for field in fields[index : index + count])
+        index += count
+    return paths
 
 
 def _write_github_output(path: str, decision: DeploymentDecision) -> None:
