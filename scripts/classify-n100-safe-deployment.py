@@ -75,7 +75,15 @@ def _is_allowed_service_path(path: str) -> bool:
     for prefix in SAFE_SERVICE_PREFIXES:
         if path.startswith(prefix):
             relative = path[len(prefix) :]
-            return relative == "Dockerfile" or relative == "requirements.txt" or relative.startswith("app/")
+            if relative in {"Dockerfile", "requirements.txt"}:
+                return True
+            if relative.startswith("app/"):
+                return (
+                    relative.endswith(".py")
+                    or (relative.startswith("app/templates/") and relative.endswith(".html"))
+                    or (relative.startswith("app/static/") and relative.endswith(".css"))
+                )
+            return False
     return False
 
 

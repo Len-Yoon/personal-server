@@ -38,6 +38,33 @@ class N100SafeDeploymentClassifierTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(classifier.classify_changed_paths([path]).action, "blocked")
 
+    def test_app_operational_and_database_sidecar_paths_are_blocked(self):
+        for path in (
+            "crawler-worker/app/state/checkpoint.json",
+            "crawler-worker/app/.state/checkpoint.json",
+            "crawler-worker/app/storage/items.json",
+            "crawler-worker/app/cache/index.json",
+            "crawler-worker/app/var/run.pid",
+            "crawler-worker/app/data/runtime.sqlite",
+            "crawler-worker/app/data/runtime.sqlite-wal",
+            "crawler-worker/app/data/runtime.sqlite-shm",
+            "crawler-worker/app/data/runtime.db-wal",
+            "crawler-worker/app/data/runtime.db-shm",
+            "crawler-worker/app/config/auth.yaml",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(classifier.classify_changed_paths([path]).action, "blocked")
+
+    def test_explicit_source_template_and_static_paths_deploy(self):
+        decision = classifier.classify_changed_paths(
+            [
+                "crawler-worker/app/main.py",
+                "crawler-worker/app/templates/index.html",
+                "crawler-worker/app/static/site.css",
+            ]
+        )
+        self.assertEqual(decision.action, "deploy")
+
     def test_multiple_allowlisted_services_are_sorted_and_deployed(self):
         decision = classifier.classify_changed_paths(
             ["youtube-memo/app/main.py", "book-memo/app/main.py"]
