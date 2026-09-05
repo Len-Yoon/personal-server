@@ -45,3 +45,11 @@
 - 커밋 메시지는 기본적으로 한글로 작성함.
 - 형식은 가능하면 `유형: 설명` 형태를 따름.
 - 예시: `test: 서비스별 테스트 import 충돌 해결`, `chore: 홈 링크 정리`
+
+## N100 안전 자동 배포 정책 예외
+
+N100 안전 자동 배포 작업에 한해 변경 분류 계약(`scripts/classify-n100-safe-deployment.py`),
+안전 배포·health 검증 스크립트 및 `.github/workflows/deploy-n100.yml`만 추가·수정할 수 있음.
+자동 대상은 `crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker`의 허용된
+Compose 변경으로 제한함. Portal, K3s, Kubernetes Secret·PVC·운영 데이터, Caddy,
+서버 bootstrap 및 scheduler는 계속 제외하며, 해당 경로가 섞인 변경은 배포하지 않고 차단함.
