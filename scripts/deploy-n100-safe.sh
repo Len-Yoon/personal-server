@@ -35,9 +35,9 @@ deploy_revision() {
   shift
 
   printf '%s\n' 'safe_cd_stage=deploy' >&2
-  git checkout --detach "$revision"
-  docker compose -f docker-compose.yml -f docker-compose.n100.yml config --quiet
-  docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build --no-deps "$@"
+  git checkout --detach "$revision" || return 1
+  docker compose -f docker-compose.yml -f docker-compose.n100.yml config --quiet || return 1
+  docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build --no-deps "$@" || return 1
 }
 
 health_check() {
@@ -69,8 +69,7 @@ main() {
   git fetch --prune origin
   git merge-base --is-ancestor "$expected_sha" origin/main
 
-  deploy_revision "$expected_sha" "$@"
-  if health_check "$@"; then
+  if deploy_revision "$expected_sha" "$@" && health_check "$@"; then
     record_healthy_revision "$expected_sha"
     return 0
   fi
@@ -82,8 +81,10 @@ main() {
   git merge-base --is-ancestor "$previous_sha" origin/main
 
   printf '%s\n' 'safe_cd_stage=rollback' >&2
-  deploy_revision "$previous_sha" "$@"
-  health_check "$@"
+  if deploy_revision "$previous_sha" "$@" && health_check "$@"; then
+    return 0
+  fi
+  return 1
 }
 
 [[ "$#" -ge 2 ]] || {

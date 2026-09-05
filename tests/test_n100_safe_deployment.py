@@ -192,6 +192,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         services: tuple[str, ...] = ("crawler-worker",),
         previous_sha: str | None = None,
         health_results: tuple[int, ...] = (0,),
+        compose_results: tuple[int, ...] = (0,),
         rejected_sha: str | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], str, str | None]:
         with tempfile.TemporaryDirectory() as directory:
@@ -209,6 +210,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
             fake_bin.mkdir()
             calls = Path(directory) / "calls"
             health_counter = Path(directory) / "health-counter"
+            compose_counter = Path(directory) / "compose-counter"
             self._write_executable(
                 fake_bin / "git",
                 "#!/bin/sh\n"
@@ -222,6 +224,14 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 fake_bin / "docker",
                 "#!/bin/sh\n"
                 f"printf 'docker %s\\n' \"$*\" >> '{calls}'\n"
+                "if [ \"$1\" = compose ]; then\n"
+                f"  count=0; [ -f '{compose_counter}' ] && count=$(cat '{compose_counter}')\n"
+                "  count=$((count + 1)); printf '%s' \"$count\" > '"
+                f"{compose_counter}'\n"
+                "  result=$(printf '%s' \"${FAKE_COMPOSE_RESULTS:-0}\" | cut -d, -f \"$count\")\n"
+                "  [ -n \"$result\" ] || result=0\n"
+                "  [ \"$result\" = 0 ] || exit \"$result\"\n"
+                "fi\n"
                 "if [ \"$1\" = inspect ]; then printf '%s\\n' \"${FAKE_INSPECT_STATUS:-healthy}\"; fi\n"
                 "exit 0\n",
             )
@@ -242,6 +252,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "N100_SAFE_DEPLOY_PROJECT_ROOT": str(root),
                 "N100_SAFE_DEPLOY_STATE_DIR": str(state_dir),
                 "FAKE_HEALTH_RESULTS": ",".join(map(str, health_results)),
+                "FAKE_COMPOSE_RESULTS": ",".join(map(str, compose_results)),
             }
             if rejected_sha is not None:
                 environment["FAKE_REJECT_SHA"] = rejected_sha
@@ -291,6 +302,16 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertIn(f"git checkout --detach {self.OLD_SHA}", calls)
         self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
         self.assertEqual(result.stderr.count("safe_cd_stage=rollback"), 1)
+
+    def test_compose_deploy_failure_rolls_back_once_to_saved_healthy_revision(self):
+        result, calls, saved_state = self.run_safe_deploy(
+            previous_sha=self.OLD_SHA, compose_results=(0, 1, 0, 0), health_results=(0,)
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls.count("checkout --detach"), 2)
+        self.assertIn(f"git checkout --detach {self.OLD_SHA}", calls)
+        self.assertEqual(result.stderr.count("safe_cd_stage=rollback"), 1)
+        self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
 
     def test_rollback_health_failure_returns_failure_without_repeating_rollback(self):
         result, calls, saved_state = self.run_safe_deploy(
