@@ -1,6 +1,18 @@
 # Personal Server
 
-Windows N100과 Ubuntu WSL2에서 운영하는 개인 서버임. 단순 서비스 배포를 넘어, 모니터링·장애 감지·자동복구·암호화 백업·복원 검증·Telegram 알림을 연결한 **개인 서버 SRE 운영 체계**를 구축함.
+Windows N100과 Ubuntu WSL2에서 운영하는 개인용 서비스 허브임. 파일·기록·뉴스·차량관리·서버 상태를 한 곳에서 사용하고, 이를 모니터링·자동복구·백업·Telegram 알림을 갖춘 **SRE 운영 체계**로 관리함.
+
+## 개인 서버 기능
+
+| 기능 | 제공 내용 | 실행 위치 |
+|---|---|---|
+| Portal | 자주 쓰는 서비스의 단일 진입점, 관리자 상태, 공개 포트폴리오 | K3s `portal-web` |
+| File Manager | 파일 업로드·정리·검색·ZIP 다운로드 | K3s `portal-web` + PVC |
+| News Hub | Investing.com·Google News 수집, 나스닥 관련성 분류, Telegram 중요 뉴스 알림 | `crawler-worker` |
+| YouTube Memo | 영상 링크·타임스탬프·메모 기록 | `youtube-memo` |
+| Book Memo | 책 검색·목차·독서 메모 관리 | `book-memo` |
+| 차량관리 | Hyundai 연동 차량 상태·정비 주기·운행 종료 Telegram 알림 | `car-care-worker` |
+| HomeOps | 제한된 컨테이너 진단과 승인된 복구 작업 | `system-agent` + `homeops-executor` |
 
 ## 현재 구조
 
@@ -49,13 +61,7 @@ Portal PVC 암호화 백업 → 원격 보관 → 복원 검증
 | 데이터 보호 | Portal PVC 암호화 백업과 실제 복원 검증 |
 | 안전 배포 | 허용된 Compose 서비스만 CI 성공 뒤 revision 고정 배포·health 검증·1회 rollback |
 
-## 주요 기능
-
-- 개인 포털, 파일 관리, 관리자 상태, 공개 포트폴리오
-- Investing.com·Google News 수집 및 Telegram 뉴스 알림
-- YouTube·독서 메모 관리
-- Hyundai 연동 차량 상태·정비 Telegram 알림
-- HomeOps 제한형 진단·복구, Grafana 상태 확인, Telegram SRE 알림
+개인 서버 기능을 직접 제공하는 것과 별도로, 장애를 빨리 발견하고 데이터 손실 가능성을 낮추며 복구 상태를 확인하는 운영 체계를 함께 구축한 구성이 핵심임.
 
 ## 빠른 상태 확인
 
