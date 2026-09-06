@@ -14,6 +14,24 @@ Windows N100과 Ubuntu WSL2에서 운영하는 개인용 서비스 허브임. �
 | 차량관리 | Hyundai 연동 차량 상태·정비 주기·운행 종료 Telegram 알림 | `car-care-worker` |
 | HomeOps | 제한된 컨테이너 진단과 승인된 복구 작업 | `system-agent` + `homeops-executor` |
 
+## 주요 화면
+
+| 포털 대시보드 | 차량관리 Telegram |
+|---|---|
+| <img src="docs/images/portal-dashboard.png" alt="Personal Server Portal dashboard" width="360"> | <img src="docs/images/car-care-telegram-status.png" alt="Telegram 차량관리 최신 운행 결과 알림" width="360"> |
+
+| File Manager | News Hub |
+|---|---|
+| <img src="docs/images/file-manager.png" alt="File manager" width="360"> | <img src="docs/images/news-hub.png" alt="News hub" width="360"> |
+
+| YouTube Memo | Book Memo |
+|---|---|
+| <img src="docs/images/youtube-memo.png" alt="YouTube memo" width="360"> | <img src="docs/images/book-memo.png" alt="Book memo" width="360"> |
+
+| 관리자 상태 |
+|---|
+| <img src="docs/images/admin-status.png" alt="Personal Server 관리자 상태 페이지" width="720"> |
+
 ## 현재 구조
 
 ```text
