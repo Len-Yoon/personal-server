@@ -14,6 +14,7 @@
 | [N100 운영 환경](n100-mt4-setup.md) | Windows·WSL2·Docker 최초 구성과 일상 운영을 확인할 때 | N100 Windows + Ubuntu-24.04 |
 | [GitHub 자동 배포](n100-github-auto-deploy.md) | self-hosted runner, 배포, 배포 장애를 확인할 때 | `Deploy N100` workflow |
 | [Cloudflare Tunnel](cloudflare-tunnel.md) | 포트포워딩 없이 공개 HTTPS를 구성할 때 | `cloudflared` ingress |
+| [공개 상태 Telegram 알림](public-uptime-monitor.md) | N100 외부에서 장애·복구 알림을 받을 때 | GitHub Actions + Telegram |
 | [Caddy + Cloudflare](caddy-cloudflare.md) | 외부 `80`·`443`을 직접 공개할 때 | Caddy DNS-01 |
 | [작업 인수인계](agent-handoff.md) | 코드 위치와 기능 계약을 빠르게 파악할 때 | 현재 저장소 구조 |
 | [Codex 작업 완료 루프](codex-work-loop.md) | 변경·검증·브랜치 정리 절차를 따를 때 | 프로젝트 작업 규칙 |
