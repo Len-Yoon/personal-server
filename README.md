@@ -36,17 +36,6 @@ Windows N100과 Ubuntu WSL2에서 운영하는 개인용 서비스 허브임. �
 
 ![Personal Server 운영 구조](docs/images/personal-server-architecture.svg)
 
-```text
-Internet
-  └─ Cloudflare Tunnel
-       └─ Caddy (Docker)
-            ├─ K3s NodePort → portal-web
-            └─ Docker Compose → news · memo · books · system status
-
-K3s monitoring → Prometheus · Grafana · Alertmanager · Telegram SRE relay
-GitHub Actions → 5분 외부 health 점검 → Telegram 장애·복구 알림
-```
-
 | 구분 | 현재 운영 방식 |
 |---|---|
 | Portal·파일함·관리자·포트폴리오 | K3s `portal-web` + PVC 단일 writer |
