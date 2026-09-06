@@ -1,0 +1,143 @@
+name: Public Portal Uptime Monitor
+
+permissions:
+  issues: write
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: public-uptime-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check notification secrets
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.UPTIME_TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.UPTIME_TELEGRAM_CHAT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
+            printf '%s\n' 'Required GitHub Secrets for uptime Telegram notifications are not configured.' >&2
+            exit 1
+          fi
+
+      - id: health
+        name: Check public Portal health
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 20 https://len.pe.kr/health >/dev/null
+
+      - id: incident
+        name: Find a pending health-state transition
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const incidentTitle = "[SRE] len.pe.kr 공개 상태 장애";
+            const downSentMarker = "<!-- uptime-down-telegram:sent -->";
+            const state = "${{ steps.health.outcome }}";
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              per_page: 100,
+            });
+            const incident = issues.find((issue) =>
+              !issue.pull_request &&
+              issue.user?.login === "github-actions[bot]" &&
+              issue.title === incidentTitle
+            );
+
+            if (state === "failure") {
+              const activeIncident = incident || (await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: incidentTitle,
+                body: "외부 건강 점검에서 https://len.pe.kr/health 응답 실패를 확인했습니다.",
+              })).data;
+              if (!(activeIncident.body || "").includes(downSentMarker)) {
+                core.setOutput('notification', 'down');
+                core.setOutput('issue_number', String(activeIncident.number));
+              }
+              return;
+            }
+
+            if (state === "success" && incident) {
+              core.setOutput('notification', 'recovered');
+              core.setOutput('issue_number', String(incident.number));
+            }
+
+      - name: Send Telegram status transition
+        if: steps.incident.outputs.notification != ''
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.UPTIME_TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.UPTIME_TELEGRAM_CHAT_ID }}
+          NOTIFICATION: ${{ steps.incident.outputs.notification }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$NOTIFICATION" in
+            down)
+              message='[개인서버 장애] 외부 점검에서 접속 실패를 확인했습니다. 자동복구 상태를 확인하세요.'
+              ;;
+            recovered)
+              message='[개인서버 복구] 외부 점검에서 정상 응답을 다시 확인했습니다.'
+              ;;
+            *)
+              printf '%s\n' 'Unknown uptime notification state.' >&2
+              exit 1
+              ;;
+          esac
+          curl --fail --silent --show-error --retry 2 --max-time 20 \
+            --request POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${message}" >/dev/null
+
+      - name: Confirm Telegram delivery before committing transition
+        if: steps.incident.outputs.notification != ''
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const notification = "${{ steps.incident.outputs.notification }}";
+            const issueNumber = Number("${{ steps.incident.outputs.issue_number }}");
+            const downSentMarker = "<!-- uptime-down-telegram:sent -->";
+            const issue = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+            });
+
+            if (notification === "down") {
+              const currentBody = issue.data.body || "";
+              const body = currentBody.includes(downSentMarker)
+                ? currentBody
+                : `${currentBody}\n${downSentMarker}`;
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body,
+              });
+              return;
+            }
+
+            if (notification === "recovered") {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                state: "closed",
+              });
+              return;
+            }
+
+            throw new Error("Unknown uptime notification state.");
