@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
+  <title id="title">Personal Server 운영 구조</title>
+  <desc id="desc">Cloudflare Tunnel과 Caddy를 거쳐 K3s 및 Docker 서비스로 연결되고, 모니터링과 백업·알림이 연동되는 개인 서버 구조도</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#059669"/>
+    </marker>
+    <style>
+      .title { font: 700 40px Arial, 'Apple SD Gothic Neo', sans-serif; fill: #0f172a; }
+      .subtitle { font: 400 20px Arial, 'Apple SD Gothic Neo', sans-serif; fill: #475569; }
+      .section { font: 700 24px Arial, 'Apple SD Gothic Neo', sans-serif; fill: #334155; }
+      .label { font: 700 24px Arial, 'Apple SD Gothic Neo', sans-serif; fill: #0f172a; }
+      .small { font: 400 19px Arial, 'Apple SD Gothic Neo', sans-serif; fill: #334155; }
+      .tiny { font: 400 17px Arial, 'Apple SD Gothic Neo', sans-serif; fill: #475569; }
+      .line { stroke: #64748b; stroke-width: 4; fill: none; marker-end: url(#arrow); }
+      .monitor-line { stroke: #059669; stroke-width: 4; fill: none; stroke-dasharray: 10 8; marker-end: url(#arrow-green); }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1000" fill="#f8fafc"/>
+  <text x="80" y="80" class="title">Personal Server 운영 구조</text>
+  <text x="80" y="118" class="subtitle">개인 서비스 제공과 SRE 관측·알림·백업 검증을 함께 운영</text>
+
+  <rect x="80" y="180" width="220" height="120" rx="18" fill="#dbeafe" stroke="#2563eb" stroke-width="3"/>
+  <text x="190" y="230" text-anchor="middle" class="label">Internet</text>
+  <text x="190" y="262" text-anchor="middle" class="small">공개 사용자</text>
+
+  <rect x="390" y="180" width="260" height="120" rx="18" fill="#fff7ed" stroke="#f97316" stroke-width="3"/>
+  <text x="520" y="230" text-anchor="middle" class="label">Cloudflare Tunnel</text>
+  <text x="520" y="262" text-anchor="middle" class="small">안전한 공개 연결</text>
+
+  <rect x="740" y="180" width="220" height="120" rx="18" fill="#fef3c7" stroke="#d97706" stroke-width="3"/>
+  <text x="850" y="230" text-anchor="middle" class="label">Caddy</text>
+  <text x="850" y="262" text-anchor="middle" class="small">라우팅</text>
+
+  <path d="M300 240 H390" class="line"/>
+  <path d="M650 240 H740" class="line"/>
+  <path d="M850 300 V360 H495" class="line"/>
+  <path d="M850 300 V360 H1110" class="line"/>
+
+  <rect x="80" y="390" width="760" height="300" rx="22" fill="#eff6ff" stroke="#2563eb" stroke-width="3"/>
+  <text x="120" y="435" class="section">K3s</text>
+  <rect x="120" y="470" width="300" height="150" rx="16" fill="#ffffff" stroke="#60a5fa" stroke-width="2"/>
+  <text x="270" y="520" text-anchor="middle" class="label">Portal Web</text>
+  <text x="270" y="553" text-anchor="middle" class="small">Portal · File Manager</text>
+  <text x="270" y="582" text-anchor="middle" class="small">관리자 · 포트폴리오</text>
+  <rect x="500" y="470" width="300" height="150" rx="16" fill="#ffffff" stroke="#60a5fa" stroke-width="2"/>
+  <text x="650" y="520" text-anchor="middle" class="label">Portal PVC</text>
+  <text x="650" y="553" text-anchor="middle" class="small">파일 · 상태 데이터</text>
+  <text x="650" y="582" text-anchor="middle" class="small">단일 writer</text>
+  <path d="M420 545 H500" class="line"/>
+
+  <rect x="930" y="390" width="590" height="300" rx="22" fill="#f0fdf4" stroke="#16a34a" stroke-width="3"/>
+  <text x="970" y="435" class="section">Docker Compose</text>
+  <rect x="970" y="470" width="250" height="150" rx="16" fill="#ffffff" stroke="#4ade80" stroke-width="2"/>
+  <text x="1095" y="520" text-anchor="middle" class="label">정보·기록</text>
+  <text x="1095" y="553" text-anchor="middle" class="small">News Hub</text>
+  <text x="1095" y="582" text-anchor="middle" class="small">YouTube · Book Memo</text>
+  <rect x="1260" y="470" width="220" height="150" rx="16" fill="#ffffff" stroke="#4ade80" stroke-width="2"/>
+  <text x="1370" y="520" text-anchor="middle" class="label">자동화</text>
+  <text x="1370" y="553" text-anchor="middle" class="small">차량관리</text>
+  <text x="1370" y="582" text-anchor="middle" class="small">HomeOps</text>
+
+  <rect x="80" y="770" width="640" height="150" rx="22" fill="#ecfdf5" stroke="#059669" stroke-width="3"/>
+  <text x="120" y="815" class="section">관측·알림</text>
+  <text x="120" y="856" class="label">Prometheus → Grafana → Alertmanager → Telegram</text>
+  <text x="120" y="890" class="small">K3s 상태 관측 · 이상·복구·백업 결과 알림</text>
+  <path d="M460 690 V770" class="monitor-line"/>
+  <path d="M1220 690 V745 H720" class="monitor-line"/>
+
+  <rect x="810" y="770" width="350" height="150" rx="22" fill="#fdf4ff" stroke="#c026d3" stroke-width="3"/>
+  <text x="850" y="815" class="section">외부 상태 점검</text>
+  <text x="850" y="856" class="label">GitHub Actions</text>
+  <text x="850" y="890" class="small">장애·복구 Telegram 알림</text>
+  <path d="M985 770 V720 H520" class="monitor-line"/>
+
+  <rect x="1250" y="770" width="270" height="150" rx="22" fill="#fff7ed" stroke="#ea580c" stroke-width="3"/>
+  <text x="1285" y="815" class="section">데이터 보호</text>
+  <text x="1285" y="856" class="label">암호화 백업</text>
+  <text x="1285" y="890" class="small">원격 보관 · 복원 검증</text>
+  <path d="M650 620 V720 H1385 V770" class="line"/>
+</svg>

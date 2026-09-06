@@ -34,6 +34,8 @@ Windows N100과 Ubuntu WSL2에서 운영하는 개인용 서비스 허브임. �
 
 ## 현재 구조
 
+![Personal Server 운영 구조](docs/images/personal-server-architecture.svg)
+
 ```text
 Internet
   └─ Cloudflare Tunnel
