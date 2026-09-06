@@ -1,177 +1,78 @@
-# K3s GitOps 검토 초안
+# K3s 운영
 
-> **NOT FOR APPLY:** 이 디렉터리는 K3s·Flux 전환 설계 검토용이다. 현재 클러스터, Flux, Caddy, Compose에 적용하거나 연결하지 않는다.
+N100의 K3s는 현재 Portal과 모니터링 운영에 사용함. 이 문서는 실제 운영 도구의 진입점만 정리하며, Secret 값·비밀번호·token은 출력하거나 문서화하지 않음.
 
-이 구조는 현재 저장소에서 검토하는 `clusters/n100` 골격이다. 별도 GitOps 저장소는 만들지 않았으며, 이 저장소의 자동 배포 흐름은 Compose 전용으로 유지한다.
+## 현재 구성
 
-N100 WSL 원격 Codex 개발 절차는 [원격 개발 환경 운영 절차](../../docs/n100-remote-development.md)를 참조한다.
+| Namespace | 구성 | 역할 |
+|---|---|---|
+| `personal-server` | `portal-web`, Service, Portal PVC | Portal·파일함·관리자·포트폴리오 |
+| `monitoring` | Prometheus, Grafana, Alertmanager, SRE Telegram relay | 상태 수집·시각화·경고 전달 |
 
-## 안전 경계
+Portal은 K3s PVC를 상태 저장소로 사용하며, Compose `portal-web`은 동시에 실행하지 않음. Caddy는 `host.docker.internal:30080` NodePort를 통해 K3s Portal로 전달함.
 
-- 모든 Kubernetes 리소스 예시는 `.yaml.tmpl` 파일에만 있으며 `draft.personal-server.io/not-for-apply: "true"` annotation을 포함한다.
-- 루트 `kustomization.yaml`은 의도적으로 비어 있으며 Flux `Kustomization` 리소스가 아니다. `kubectl apply -k infra/k8s`를 실행해도 리소스를 렌더링하지 않는다.
-- `.yaml.tmpl` 파일은 Kustomize `resources`에 절대 포함하지 않는다. 별도 승인, 실제 값 확인, 독립 검토가 완료된 뒤에만 새 작업 경로로 복사해 검토한다.
-- Secret 리소스와 비밀값은 포함하지 않는다. 참조 이름만 사용한다.
-- K3s 기본 `local-path` 동적 provisioner가 native ext4 경로에 할당하는 방식을 사용한다. scratch PVC·Pod와 파일 I/O·SQLite 잠금은 통과했지만, 실제 앱 PVC 템플릿은 비활성 상태이며 용량·데이터 복사·복원·UID/GID·단일 writer cutover는 별도 승인 게이트로 남긴다.
-- 1차 전환 후보는 `portal-web`, `crawler-worker`, `youtube-memo`, `book-memo`뿐이다. `system-agent`, `homeops-executor`, `car-care-worker`, Caddy는 제외한다.
-- SQLite와 파일 상태는 서비스별 단일 writer를 보장하기 전에는 PVC 후보로 사용하지 않는다.
-- Secret은 키 이름과 참조 계약만 두며 값은 만들거나 기록하지 않는다. seed는 승인된 SOPS/age 또는 Secret Manager 절차를 사용한다.
-- Ingress와 `LoadBalancer` Service는 포함하지 않는다. `portal-web`의 NodePort는 Docker Caddy를 바꾸지 않는 미래 백엔드 계약일 뿐이다.
-
-## 정적 검토
-
-클러스터 연결이나 적용 없이 다음 명령만 사용할 수 있다.
+## 빠른 상태 확인
 
 ```bash
-KUBECONFIG=/nonexistent kubectl kustomize infra/k8s
-git diff --check
+sudo k3s kubectl get nodes
+sudo k3s kubectl -n personal-server get deploy,pod,pvc
+sudo k3s kubectl -n monitoring get pod,pvc
+bash infra/k8s/tools/sre-health-audit.sh
 ```
 
-`kubectl apply`, `flux bootstrap`, `flux reconcile`, Compose 제어 명령은 이 초안의 범위 밖이다.
+## Grafana와 Prometheus
 
-## 전환 실행기 release 설치
-
-`transition-runner-preflight.sh`는 읽기 전용 검사로 release artifact, 정책, native ext4 경계와 root 소유 `0600` 암호화 credential의 상태·식별자만 출력한다. 실제 root 설치는 N100 운영 승인 후 `install-transition-runner.sh --apply --release-digest ... --credential-dir ...`로 별도 수행한다. 설치기는 검증된 artifact를 `/usr/local/libexec/personal-server-transition` 및 `/etc/personal-server-transition`에 원자적으로 배치하며 저장소 소스를 설치 후 root runtime으로 실행하지 않는다.
-
-실제 root 설치, credential seed, systemd 활성화·실행, data route/PVC cutover 및 Caddy 공개 경로 전환은 이 저장소의 검토 범위가 아니며 별도 N100 운영 승인이 필요하다.
-
-## SRE Pod 자동복구 실습 (운영자 전용)
-
-`infra/k8s/tools/sre-pod-recovery-lab.sh`는 K3s에서 Pod 자동복구 동작을 확인하는 일회성 운영자 실습 도구다. GitOps resource가 아니며 production deploy가 아니다. N100에서 실행할 때는 운영자 승인과 클러스터 접근 권한을 확인한다.
-
-실습 시작:
-
-```bash
-bash infra/k8s/tools/sre-pod-recovery-lab.sh --run
-```
-
-정상 완료 시 `PASS` 출력과 함께 다음 증거를 확인한다.
-
-실습 리소스는 sre-recovery-lab-<run-id> namespace에만 생성된다.
-
-- 실행별 `sre-recovery-lab-<run-id>` namespace가 생성되어 다른 namespace와 격리됨
-- liveness sentinel로 비정상 상태를 유도한 뒤 같은 Deployment의 Pod가 재시작됨 (`restartCount` 증가)
-- `restartCount`가 증가한 선택 Pod가 `Ready` 조건으로 복구됨
-- 실행 종료 시 해당 실습 namespace만 정리됨
-
-비정상 중단으로 정리되지 않은 실행만 run ID를 지정해 정리한다.
-
-```bash
-bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
-```
-
-이 실습은 Portal, Compose, Caddy, scheduler를 변경하지 않는다. production Deployment·Service·Secret·PVC와 GitOps 리소스를 변경하지 않으며, 실습 namespace 밖의 리소스도 변경하지 않는다. 적용 전환이나 자동 배포를 수행하지 않으므로 Portal·Compose·Caddy·scheduler 운영에는 효과가 없다.
-
-이 실습은 다른 namespace, Portal, Compose, Caddy, scheduler를 변경하거나 재시작하지 않는다.
-
-## Monitoring 운영 도구
-
-N100에서 Monitoring을 설치·검증·삭제할 때는 다음 순서를 따른다.
-
-1. `monitoring-preflight.sh`를 실행한다.
-2. `monitoring-install.sh --render`로 Helm template만 확인한다.
-3. 운영자 승인 후 `monitoring-install.sh --apply`를 실행한다.
-4. `monitoring-verify.sh`로 PVC, Pod, Grafana Service를 검증한다.
-5. 필요할 때만 `monitoring-verify.sh --port-forward-check`로 localhost 접속을 확인한다.
-
-Grafana는 ClusterIP Service로만 제공한다. 운영자 접속은 다음 일회성 port-forward만 사용한다.
+Grafana는 N100 내부 전용임. 필요할 때 아래 명령을 실행한 뒤 브라우저에서 `http://127.0.0.1:3000`을 열고, 종료할 때 `Ctrl+C`를 누름.
 
 ```bash
 sudo k3s kubectl -n monitoring port-forward --address 127.0.0.1 service/personal-server-monitoring-grafana 3000:80
 ```
 
-설치 도구는 `--apply`가 명시된 경우에만 Helm release를 생성하며, `--render`는 Helm template만 수행한다. 삭제는 `monitoring-uninstall.sh --uninstall`로 수행하고 PVC와 namespace는 기본적으로 보존한다. 데이터까지 삭제할 때만 `--delete-data`를 추가한다.
-
-Grafana 및 Prometheus PVC에는 Helm resource keep 정책을 적용하여 기본 uninstall에서 데이터를 보존한다. `--delete-data`를 지정한 경우에만 두 PVC와 namespace를 삭제한다.
-
-Grafana 관리자 비밀번호는 Kubernetes Secret에서 운영자가 직접 확인한다. 비밀번호와 Secret 데이터는 채팅, Git, 문서, 명령 로그에 기록하거나 출력하지 않는다. Caddy, Compose, Portal, 서버 기동, Windows bootstrap, scheduler 및 외부 공개 Ingress/NodePort/LoadBalancer는 이 도구로 변경하지 않는다.
-
-## Telegram SRE 알림 도구 (N100 운영자 전용)
-
-Telegram SRE relay는 기존 `personal-server-monitoring` release에만 연결한다. Alertmanager의 실제 route, group, repeat, resolved 설정은 N100에서 운영자가 별도로 seed한 `sre-telegram-alertmanager-config` Secret에만 둔다. Git에는 비밀값이 없는 `infra/k8s/sre-telegram/alertmanager.yaml.tmpl` 고정 템플릿과 검증기만 보관하며, values 파일에는 Secret 이름만 포함한다.
-
-Secret 생성·값 입력·값 확인은 이 저장소의 도구 범위 밖이다. 운영자는 N100에서 승인된 Secret Manager 또는 SOPS/age 절차로 아래 **키 이름만** 충족해야 한다. 안내 도구는 값을 생성·출력·적용하지 않는다.
+설치 상태를 점검할 때는 다음을 사용함.
 
 ```bash
-bash infra/k8s/tools/sre-telegram-secret-template.sh
+bash infra/k8s/tools/monitoring-preflight.sh
+bash infra/k8s/tools/monitoring-verify.sh
 ```
 
-| Secret 이름 | 필수 키 이름 | 관리 기준 |
-|---|---|---|
-| `sre-telegram-relay-runtime` | `telegram_bot_token`, `allowed_chat_id`, `alertmanager_auth_token` | N100 로컬 운영자 seed 필요 |
-| `sre-telegram-alertmanager-config` | `alertmanager.yaml` | N100 로컬 Alertmanager 설정 seed 필요; 고정 템플릿 기반 권한 `0600` 임시 파일을 `amtool`과 고정 검증기로 검증한 뒤 동일 파일만 seed 필요 |
+`monitoring-install.sh --apply`와 제거 명령은 운영자 승인 후에만 실행함. Grafana와 Prometheus PVC는 기본 제거에서 보존함.
 
-설치 전에는 읽기 전용 preflight를 실행한다. 기존 `personal-server-monitoring` Helm release가 `deployed` 상태인지, 기존 `personal-server-monitoring-prometheus` Service와 label 기반 Prometheus StatefulSet이 준비되었는지 함께 확인한다. Secret 검사는 `kubectl describe secret`의 키 이름과 1바이트 이상 여부만 확인하며, Secret 값 또는 `.data`를 읽거나 출력하지 않는다. N100 운영자는 승인된 N100 private directory에서 고정 템플릿을 `alertmanager.yaml`로 복사하고 `chmod 600`을 적용해야 한다. 임시 Alertmanager 설정 파일에는 `credentials_file` 경로만 유지하며 bearer 값은 포함하지 않는다. 승인된 bearer 값은 승인된 로컬 Secret manager 절차에서 runtime Secret 키 `alertmanager_auth_token`에만 입력한다. 설정 파일 또는 Secret 값은 출력하지 않는다. preflight는 해당 파일을 출력하지 않고 `amtool check-config` 후 고정 검증기를 실행한다. 파일 권한이 `0600`이 아니거나 `amtool`, Python, PyYAML, 파일 또는 어느 검증이라도 사용할 수 없거나 실패하면 preflight는 실패한다. preflight를 통과한 바로 그 파일만 `alertmanager.yaml` Secret 키로 seed하고, 뒤따르는 `--apply` 재검증이 끝날 때까지 해당 임시 파일을 유지해야 한다.
+## Telegram SRE 알림
 
-```bash
-mkdir -p /secure/operator-temporary
-cp infra/k8s/sre-telegram/alertmanager.yaml.tmpl /secure/operator-temporary/alertmanager.yaml
-chmod 600 /secure/operator-temporary/alertmanager.yaml
-# 임시 Alertmanager 설정 파일은 credentials_file 경로만 유지하며 bearer 값을 포함하지 않음
-# bearer 값은 runtime Secret 키 alertmanager_auth_token에만 입력하며, 설정 파일·Secret 값은 출력하지 않음
-bash infra/k8s/tools/sre-telegram-preflight.sh --alertmanager-config-file /secure/operator-temporary/alertmanager.yaml
-```
-
-preflight 통과 후 승인된 Secret manager 절차로 위 검증 파일 자체를 `alertmanager.yaml` 키로 seed한다. 임시 파일은 바로 삭제하지 않으며, 아래 `--apply` 명령이 같은 권한 `0600` 파일을 재검증하고 반환할 때까지 유지한다.
-
-설치 도구는 인자 없이 실행해도 render와 client dry-run만 수행한다. 이 경로는 image build/import나 Kubernetes resource 변경을 수행하지 않는다.
+Alertmanager 경고는 `sre-telegram-relay`를 통해 Telegram으로 전달함. Secret 값은 N100의 승인된 Secret 관리 절차로만 관리함.
 
 ```bash
-bash infra/k8s/tools/sre-telegram-install.sh
-# 또는 명시적 render
-bash infra/k8s/tools/sre-telegram-install.sh --render
-```
-
-운영자 승인과 N100-local Secret seed가 완료된 경우에만 다음 명령으로 image build·K3s containerd import 검증·relay 및 PrometheusRule 선적용·기존 monitoring release upgrade를 수행한다. Helm 변경은 `--reuse-values --atomic`으로 실행하며, relay 적용이 실패하면 Helm 변경 전 중단한다. Helm 실패 또는 중단 시 이 도구가 이번 실행에서 생성한 relay resource만 원래 namespace 기준으로 정리한 뒤, 사전에 확인한 deployed revision으로 rollback하고 `helm status --output json` 결과가 `deployed`인지 확인한다. rollback으로 새 revision이 생성될 수 있으므로 revision 번호 동일성은 복구 기준으로 사용하지 않는다. Secret 값이 포함될 수 있는 Helm values와 rendered manifest는 의도적으로 조회·보관·비교하지 않는다. rollback 또는 상태 검증이 불가능하면 복구를 성공으로 표시하지 않는다. 동일한 `0600` 임시 파일을 인자로 전달하고, 설치 명령이 반환된 뒤에만 즉시 승인된 보안 제거 절차로 해당 파일을 삭제한다.
-
-```bash
-bash infra/k8s/tools/sre-telegram-install.sh --apply --alertmanager-config-file /secure/operator-temporary/alertmanager.yaml
-```
-
-설치 후 검증은 relay Ready, ClusterIP 및 외부 노출 필드 drift, PrometheusRule, RBAC 비상승 명령의 명시적 `no` 응답, 임시 localhost `/healthz`, 모든 active Prometheus target의 `up` 상태를 확인한다. Secret 값은 조회 또는 출력하지 않는다.
-
-```bash
+bash infra/k8s/tools/sre-telegram-preflight.sh --alertmanager-config-file <0600-설정파일>
 bash infra/k8s/tools/sre-telegram-verify.sh
 ```
 
-각 도구는 마지막 줄에 `sre_telegram_preflight=PASS|FAIL`, `sre_telegram_install=PASS|FAIL`, 또는 `sre_telegram_verify=PASS|FAIL`을 출력한다. 이 작업은 Compose, Portal, Caddy, 외부 Ingress/NodePort/LoadBalancer, 서버 기동 스크립트, Windows bootstrap, 기존 scheduler를 변경하지 않는다.
+relay, PrometheusRule, RBAC 경계, Prometheus target 상태를 검증하며 Secret 값은 읽지 않음.
 
-## Portal PVC 자동 백업 (N100 운영자 전용)
+## Portal PVC 백업
 
-Portal이 K3s runtime일 때만 N100의 `systemd --user` timer가 하루 한 번 기존 PVC 백업·암호화 업로드·복원 검증을 실행할 수 있다. CronJob은 rclone credential을 Kubernetes Secret으로 복제해야 하므로 사용하지 않는다. timer는 한 개만 사용하며, N100/WSL이 완전히 꺼져 있던 시간은 다음 기동 뒤 한 번만 보완 실행한다.
-
-sudo 비밀번호는 저장하지 않는다. rclone config과 config 암호는 N100 사용자 전용 `systemd-creds` 암호화 credential로만 보관된다. 등록 과정에서 rclone 암호는 마스킹 입력으로 직접 암호화되며 Git, 평문 파일, 환경 파일, 명령 출력에 남지 않는다. Telegram·Alertmanager Secret도 이 도구가 읽거나 복제하지 않는다.
+Portal이 K3s runtime일 때 N100 사용자 `systemd` timer가 암호화 백업과 복원 검증을 수행함. rclone 설정 암호는 N100 사용자 전용 암호화 credential로만 보관하며, sudo 비밀번호와 함께 저장하지 않음.
 
 ```bash
-# N100 WSL에서 실행
-bash infra/k8s/tools/portal-pvc-backup-automation.sh --preflight
-bash infra/k8s/tools/portal-pvc-backup-automation.sh --enroll
-bash infra/k8s/tools/portal-pvc-backup-automation.sh --install
 bash infra/k8s/tools/portal-pvc-backup-automation.sh --status
+bash infra/k8s/tools/portal-pvc-backup-verify.sh --check
 ```
 
-`--enroll`에서만 rclone 설정 암호 입력이 필요하다. `--install`은 생성한 user service/timer를 `systemd-analyze --user verify`로 먼저 검사하며, 검증 실패 시 timer를 활성화하지 않는다. 초기 점검은 다음 one-shot 실행으로 수행한다.
+백업 성공·변경 없음·실패·복원 검증 실패는 Telegram SRE relay로 알림. 실행 중인 백업을 중단하면 Portal을 즉시 다시 1개 replica로 복구한 뒤 상태를 확인해야 함.
+
+## Portal 전환과 복구
+
+Portal 전환은 명시적 운영 작업임. 백업 증거를 먼저 확인하고, 전환과 공개 경로 변경을 분리해 실행함.
 
 ```bash
-systemctl --user start personal-server-portal-pvc-backup.service
-systemctl --user status personal-server-portal-pvc-backup.service --no-pager
+bash infra/k8s/tools/portal-backup-verify.sh
+bash infra/k8s/tools/portal-cutover.sh --go
+bash infra/k8s/tools/portal-cutover.sh --switch-caddy
 ```
 
-결과는 Telegram에 `[백업 완료]`, `[백업 확인] 변경 없음`, `[백업 실패]`, `[복원 검증 실패]`로 보고된다. 전달은 최소 1회 방식이므로 relay가 Telegram 수락 뒤 상태 저장 전에 중단되면 같은 run ID가 드물게 한 번 더 전송될 수 있다. 누락보다 중복을 우선 방지하지 않는 의도된 동작이다.
+실패하면 실행기가 Compose Portal과 이전 공개 경로를 복구하도록 설계됨. 결과는 마지막 `portal_cutover=PASS|FAIL`로 판단함.
 
-자동화를 제거할 때는 timer를 먼저 중지한 뒤 credential과 backup status ConfigMap을 정리한다. 실행 중인 service를 안전하게 중지할 수 없으면 제거를 실패로 처리하고 credential을 보존한다.
+## 운영 경계
 
-```bash
-bash infra/k8s/tools/portal-pvc-backup-automation.sh --uninstall
-```
-
-## N100 SRE 상태 점검 (읽기 전용)
-
-`infra/k8s/tools/sre-health-audit.sh`는 N100에서 수동 실행하는 읽기 전용 상태 점검 도구다. K3s 노드 중 하나 이상이 `Ready`인지 확인하고, 현재 Compose 설정에서 산출한 모든 서비스 컨테이너가 실행 중인지와 설정된 Docker health check가 `healthy`인지 확인한다. health check가 없는 실행 중 컨테이너는 정상으로 처리한다.
-
-```bash
-bash infra/k8s/tools/sre-health-audit.sh
-bash infra/k8s/tools/sre-health-audit.sh --help
-```
-
-최종 줄은 기계 판독용 `sre_health=PASS` 또는 `sre_health=FAIL`이며, PASS일 때만 종료 코드 0을 반환한다. 점검은 `k3s kubectl get nodes`, `docker compose config --services`, `docker compose ps --all` 조회만 수행하며 Compose 기동·중지·재시작, Kubernetes 리소스 변경, Secret 접근, 외부 네트워크 호출을 수행하지 않는다. N100 운영 환경에서 실행하기 전 대상 호스트와 읽기 권한을 확인한다.
+- Secret 생성·값 입력·출력은 이 저장소 도구의 범위 밖임.
+- Portal PVC·K3s·Caddy·Cloudflare Tunnel은 N100 안전 자동 배포 대상이 아님.
+- 임시 Pod 자동복구 실습은 `sre-pod-recovery-lab.sh`만 사용하며 production Portal을 변경하지 않음.

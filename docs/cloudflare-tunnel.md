@@ -1,107 +1,43 @@
 # Cloudflare Tunnel 운영 가이드
 
-이 저장소는 집 안/밖 모두에서 `len.pe.kr` 계열 서비스를 열 수 있지만, 현재 회선처럼 공유기 포트포워딩이 막히는 환경에서는 Cloudflare Tunnel이 가장 단순합니다.
+현재 공개 경로는 **Cloudflare Tunnel → WSL localhost Caddy → K3s Portal 또는 Compose 서비스**임. 공유기 포트포워딩은 이 경로에 사용하지 않음.
 
-> 공개 도메인과 로컬 포트의 기준은 [운영 참조](operations-reference.md)임. 이 문서는 Tunnel을 선택한 경우에만 사용하며, Caddy 방식과 동시에 공개 경로로 운영하지 않음.
+## 현재 ingress 기준
 
-이 문서는 `len.pe.kr`을 메인 진입점으로 두고, `portal.len.pe.kr`은 호환용 별칭으로 유지하면서 `file.len.pe.kr`, `admin.len.pe.kr`, `portfolio.len.pe.kr`, `news.len.pe.kr`, `memo.len.pe.kr`, `books.len.pe.kr`을 Cloudflare Tunnel로 연결하는 기준 운영 절차를 정리합니다.
+Tunnel의 `~/.cloudflared/config.yml`은 공개 호스트를 WSL의 `https://localhost:443`으로 전달함. Caddy가 host 이름을 기준으로 다음 대상으로 분기함.
 
-## 전제
+| 호스트 | Caddy 대상 |
+|---|---|
+| `len.pe.kr`, `portal.len.pe.kr`, `file.len.pe.kr`, `admin.len.pe.kr`, `portfolio.len.pe.kr` | K3s `portal-web` NodePort |
+| `news.len.pe.kr` | Compose `crawler-worker` |
+| `memo.len.pe.kr` | Compose `youtube-memo` |
+| `books.len.pe.kr` | Compose `book-memo` |
+| `car.len.pe.kr` | Compose `car-care-worker` callback |
 
-- `len.pe.kr` 도메인의 네임서버가 Cloudflare로 이전되어 있어야 합니다.
-- `cloudflared tunnel login`이 WSL/Linux 환경에서 성공해 `~/.cloudflared/cert.pem`이 생성되어 있어야 합니다.
-- Docker Compose로 앱 컨테이너가 먼저 떠 있어야 합니다.
-- Tunnel은 로컬 포트로 직접 붙으므로, 외부 공개용 `80`/`443` 포트포워딩은 필요하지 않습니다.
+Tunnel은 Windows 로그인 뒤 WSL 사용자 서비스로 실행됨. Windows 로그인 유지 작업이 WSL을 살려 두므로 SSH 종료만으로 Tunnel이 내려가면 안 됨.
 
-## 서비스 포트
-
-이 저장소의 기본 포트 매핑은 다음과 같습니다.
-
-- `portal-web`: `127.0.0.1:8000`
-- `crawler-worker`: `127.0.0.1:8001`
-- `youtube-memo`: `127.0.0.1:8002`
-- `book-memo`: `127.0.0.1:8003`
-
-`portal-web`은 `/`, `/files`, `/admin/status`를 함께 처리하므로 `portal`, `file`, `admin` 호스트를 모두 `8000`으로 보냅니다.
-
-## 1. tunnel 생성
-
-WSL/Linux 셸에서 실행합니다.
+## 정상 확인
 
 ```bash
-cloudflared tunnel create personal-server
+curl --fail --silent --show-error https://len.pe.kr/health
+systemctl --user status cloudflared-personal-server.service --no-pager
 ```
 
-출력되는 `Tunnel UUID`와 credentials 파일 경로를 기록해 둡니다.
+`/health`가 정상이고 Tunnel 서비스가 active면 공개 경로는 정상임.
 
-## 2. 설정 파일 작성
+## Cloudflare 1033 또는 502 대응
 
-`~/.cloudflared/config.yml` 예시는 아래와 같습니다.
+| 화면 | 의미 | 먼저 할 일 |
+|---|---|---|
+| Cloudflare 1033 | Tunnel 연결을 찾지 못함 | WSL 유지 상태와 `cloudflared-personal-server.service` 확인 |
+| Cloudflare 502 | Tunnel은 연결됐지만 내부 대상 응답 실패 | Caddy, K3s `portal-web`, NodePort 상태 확인 |
 
-```yaml
-tunnel: <Tunnel-UUID>
-credentials-file: /home/<your-linux-user>/.cloudflared/<Tunnel-UUID>.json
-
-ingress:
-  - hostname: len.pe.kr
-    service: http://localhost:8000
-  - hostname: portal.len.pe.kr # 호환용 별칭
-    service: http://localhost:8000
-  - hostname: file.len.pe.kr
-    service: http://localhost:8000
-  - hostname: admin.len.pe.kr
-    service: http://localhost:8000
-  - hostname: portfolio.len.pe.kr
-    service: http://localhost:8000
-  - hostname: news.len.pe.kr
-    service: http://localhost:8001
-  - hostname: memo.len.pe.kr
-    service: http://localhost:8002
-  - hostname: books.len.pe.kr
-    service: http://localhost:8003
-  - service: http_status:404
-```
-
-## 3. DNS 연결
-
-터널 이름을 각 호스트에 연결합니다.
+N100에서 다음 순서로 확인함.
 
 ```bash
-cloudflared tunnel route dns personal-server len.pe.kr
-cloudflared tunnel route dns personal-server portal.len.pe.kr
-cloudflared tunnel route dns personal-server file.len.pe.kr
-cloudflared tunnel route dns personal-server admin.len.pe.kr
-cloudflared tunnel route dns personal-server portfolio.len.pe.kr
-cloudflared tunnel route dns personal-server news.len.pe.kr
-cloudflared tunnel route dns personal-server memo.len.pe.kr
-cloudflared tunnel route dns personal-server books.len.pe.kr
+systemctl --user is-active cloudflared-personal-server.service
+sudo k3s kubectl -n personal-server get deploy,pod
+curl --resolve len.pe.kr:443:127.0.0.1 --fail --silent --show-error https://len.pe.kr/health
 ```
 
-Cloudflare 대시보드에서 DNS 레코드는 `CNAME` 기반으로 정리됩니다. 같은 이름에 남아 있는 `A` 레코드는 제거해야 합니다.
-
-## 4. tunnel 실행
-
-```bash
-cloudflared tunnel run personal-server
-```
-
-정상 동작 시 아래 주소가 HTTPS로 열립니다.
-
-```text
-https://len.pe.kr
-https://portal.len.pe.kr
-https://file.len.pe.kr
-https://admin.len.pe.kr
-https://portfolio.len.pe.kr
-https://news.len.pe.kr
-https://memo.len.pe.kr
-https://books.len.pe.kr
-```
-
-## 운영 팁
-
-- 외부 공개는 Tunnel이 담당하므로 공유기 `80`/`443` 포트포워딩은 끄는 편이 깔끔합니다.
-- 앱 컨테이너는 계속 `127.0.0.1` 바인드로 두어도 됩니다.
-- `cloudflared tunnel login` 후 `~/.cloudflared`가 비어 있으면, 같은 WSL 세션에서 다시 로그인해야 할 수 있습니다.
-- `len.pe.kr` 네임서버가 아직 Cloudflare에 위임되지 않았다면 Tunnel 생성이나 DNS 연결이 제대로 진행되지 않습니다.
-- N100 Windows bootstrap은 Docker 스택 확인 후 `cloudflared tunnel run` 프로세스가 없을 때만 시작합니다.
+외부 상태는 GitHub Actions가 약 5분 간격으로 별도 점검하며, 장애·복구 전환 시 Telegram 알림을 보냄. 상세는 [공개 상태 Telegram 알림](public-uptime-monitor.md)을 참고함.

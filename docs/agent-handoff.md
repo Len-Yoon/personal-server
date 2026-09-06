@@ -12,12 +12,12 @@
 | `crawler-worker` | Investing.com 시장 뉴스·Google News IT·AI 보관, 나스닥 관련성 분류, Telegram 중요 알림 | `crawler-worker/app/services/news_archive.py`, `nasdaq_relevance.py` |
 | `youtube-memo` | YouTube 영상·타임스탬프 메모 | `youtube-memo/app/main.py` |
 | `book-memo` | 책·목차·독서 메모 | `book-memo/app/main.py` |
-| `caddy` | 외부 `80`·`443`을 여는 경우의 대체 HTTPS 프록시 | `caddy/Caddyfile` |
+| `caddy` | Cloudflare Tunnel에서 전달받아 K3s Portal과 Compose 서비스를 분기하는 HTTPS 프록시 | `caddy/Caddyfile` |
 
 ## 2. 운영 구조
 
-- N100 override는 앱 포트를 `127.0.0.1`에만 바인드함.
-- Windows bootstrap은 host metrics를 기록하고, Docker 스택과 Cloudflare Tunnel 프로세스를 확인한 뒤 5분 주기의 내부 HomeOps 점검을 호출함.
+- Portal은 K3s `personal-server` namespace와 PVC 단일 writer로 운영하며, 나머지 업무 서비스는 Compose로 운영함.
+- 공개 경로는 Cloudflare Tunnel → Caddy → K3s Portal 또는 Compose 서비스임.
 - 기본 변경 흐름은 작업 브랜치 → PR → CI·Agent Review → 병합임. 병합 뒤 main CI와 N100 배포가 성공하고 작업공간이 깨끗한 경우에만 브랜치와 분리 작업공간을 정리함. 상세 절차는 [Codex 작업 완료 루프](codex-work-loop.md)를 따름.
 - `main`에서 실행된 CI가 성공하면 GitHub Actions `Deploy N100` workflow가 Windows self-hosted runner에서 배포하고 서비스 health를 확인함.
 - `scripts/deploy-n100.sh`는 원격 `origin/main`으로 코드 추적 파일을 맞추므로 N100 작업 디렉터리에서 추적 파일을 직접 수정하지 않음.
@@ -54,7 +54,7 @@
 - [운영 문서 색인](README.md)
 - [N100 운영 환경](n100-mt4-setup.md)
 - [Cloudflare Tunnel](cloudflare-tunnel.md)
-- [Caddy + Cloudflare](caddy-cloudflare.md)
+- [K3s 운영](../infra/k8s/README.md)
 - [자동 배포](n100-github-auto-deploy.md)
 - [Codex 작업 완료 루프](codex-work-loop.md)
 - [작업 루프 증거 운영](agent-loop-evidence.md)

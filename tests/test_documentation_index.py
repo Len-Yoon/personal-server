@@ -6,35 +6,30 @@ class DocumentationIndexTests(unittest.TestCase):
     def test_project_readme_exposes_quick_start_verification_and_next_steps(self):
         content = Path("README.md").read_text(encoding="utf-8")
 
-        self.assertIn("## 🚀 빠른 시작", content)
-        self.assertIn("## ✅ 검증", content)
-        self.assertIn("## 🔎 운영 문서", content)
+        self.assertIn("## 빠른 상태 확인", content)
+        self.assertIn("## 검증", content)
+        self.assertIn("## 운영 문서", content)
+        self.assertIn("Cloudflare Tunnel", content)
+        self.assertIn("K3s", content)
+        self.assertIn("Telegram", content)
 
-    def test_document_index_separates_current_operations_and_history(self):
+    def test_document_index_exposes_only_current_operations_documents(self):
         content = Path("docs/README.md").read_text(encoding="utf-8")
 
         self.assertIn("## 현재 운영 기준", content)
-        self.assertIn("## 참고 자료", content)
-        self.assertIn("## 과거 이력", content)
+        self.assertIn("Cloudflare Tunnel", content)
+        self.assertIn("K3s·모니터링·백업", content)
         self.assertIn("codex-work-loop.md", content)
         self.assertIn("agent-loop-evidence.md", content)
+        self.assertNotIn("superpowers/", content)
 
-    def test_history_plans_keep_examples_inside_fenced_blocks(self):
-        plan_paths = [
-            "docs/superpowers/plans/2026-08-21-agent-loop-ci-gate.md",
-            "docs/superpowers/plans/2026-08-21-codex-work-completion-loop.md",
-        ]
+    def test_operations_reference_describes_current_runtime_split(self):
+        content = Path("docs/operations-reference.md").read_text(encoding="utf-8")
 
-        for path in plan_paths:
-            in_fence = False
-            headings = []
-            for line in Path(path).read_text(encoding="utf-8").splitlines():
-                if line.startswith("```"):
-                    in_fence = not in_fence
-                    continue
-                if not in_fence and line.startswith("# "):
-                    headings.append(line)
-            self.assertEqual(len(headings), 1, path)
+        self.assertIn("Cloudflare Tunnel → Caddy → K3s Portal", content)
+        self.assertIn("portal-web", content)
+        self.assertIn("crawler-worker", content)
+        self.assertIn("공개 상태 Telegram 알림", content)
 
     def test_subagent_workflow_defines_mandatory_routes(self):
         project_rules = Path("AGENTS.md").read_text(encoding="utf-8")

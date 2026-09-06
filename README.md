@@ -1,244 +1,99 @@
-# 🏠 Personal Server
+# Personal Server
 
-> Windows N100 + WSL2에서 실제 운영 중인 개인용 홈 서버
+Windows N100과 Ubuntu WSL2에서 운영하는 개인 서버임. 단순 서비스 배포를 넘어, 모니터링·장애 감지·자동복구·암호화 백업·복원 검증·Telegram 알림을 연결한 **개인 서버 SRE 운영 체계**를 구축함.
 
-<br>
-
-개인 데이터 관리, 뉴스·메모, 서버 운영, 차량관리를 하나의 Docker Compose 환경에서 운영합니다 
-<br>
-기능 구현은 기능 브랜치·PR CI·독립 검토·`main` 자동배포·health 검증까지 연결해 관리합니다.
-
-<br>
-
-## ✨ 한눈에 보기
-
-| 항목 | 내용 |
-|---|---|
-| 운영 환경 | Windows N100 + Ubuntu WSL2 |
-| 서비스 구조 | Docker Compose 기반 서비스별 컨테이너 분리 |
-| 대표 기능 | 포털·파일 관리·뉴스·메모·서버 상태·차량관리 Telegram |
-| 운영 흐름 | 기능 브랜치 → PR CI·독립 검토 → `main` CI → N100 배포·health 검증 |
-
-<br>
-
-## 🖼️ 주요 화면
-
-| 포털 대시보드 | 차량관리 Telegram |
-|---|---|
-| <img src="docs/images/portal-dashboard.png" alt="Personal Server Portal dashboard" width="360"> | <img src="docs/images/car-care-telegram-status.png" alt="Telegram 차량관리 최신 운행 결과 알림" width="360"> |
-
-| File Manager | News Hub |
-|---|---|
-| <img src="docs/images/file-manager.png" alt="File manager" width="360"> | <img src="docs/images/news-hub.png" alt="News hub" width="360"> |
-
-| YouTube Memo | Book Memo |
-|---|---|
-| <img src="docs/images/youtube-memo.png" alt="YouTube memo" width="360"> | <img src="docs/images/book-memo.png" alt="Book memo" width="360"> |
-
-| 관리자 상태 |
-|---|
-| <img src="docs/images/admin-status.png" alt="Personal Server 관리자 상태 페이지" width="720"> |
-
-<br>
-
-## 🧩 핵심 기능
-
-### 🧭 포털과 개인 데이터
-
-`portal-web`은 자주 쓰는 링크, 파일함, 서버 상태, 포트폴리오를 한 화면에서 연결합니다.
-
-<br>
-
-#### 🗂️ 파일과 기록
-
-- **File Manager**: 다중 업로드, 폴더 생성, 검색·정렬, ZIP 다운로드
-- **YouTube / Book Memos**: 영상 타임스탬프와 독서 기록 관리
-
-#### 공개 포트폴리오
-
-- **Portfolio**: Markdown 기반 공개 포트폴리오와 로그인 후 편집
-
-<br>
-
-### 📰 뉴스와 알림
-
-`crawler-worker`는 Investing.com·Google News RSS를 수집하고, 나스닥 관련 기사를 분류해 Telegram으로 보냅니다.
-<br>
-시장 충격 가능성이 있는 기사와 전망성 기사를 구분해 불필요한 알림을 줄입니다.
-
-<br>
-
-### 🚗 차량관리 Telegram
-
-`car-care-worker`는 Hyundai OAuth 연동 후 누적 주행거리, 주행 가능 거리, 차량 경고 상태를 수집합니다. 운행 종료를 감지하면 이번 운행 거리와 다음 정비 잔여 거리를 Telegram으로 보냅니다.
-<br>
-#### 주행 상태와 안전 알림
-
-| 자동화 항목 | 현재 동작 |
-|---|---|
-| 운행 종료 요약 | 운행 거리, 누적 주행거리, 주행 가능 거리, 엔진오일 잔여 거리 알림 |
-| 저유·경고 상태 | 주행 가능 거리 100km·50km 알림, 경고등 점등·정상 복귀 알림 |
-
-#### 정비와 계절 관리
-
-| 자동화 항목 | 현재 동작 |
-|---|---|
-| 정비 주기 | 엔진오일 10,000km, 미션오일·연료필터 60,000km / 각 500km 전부터 알림 |
-| 계절 타이어 | 매년 11월 15일 윈터타이어, 4월 1일 사계절타이어 교체 알림 |
-
-#### 수동 보정과 연결 설정
-
-| 자동화 항목 | 현재 동작 |
-|---|---|
-| 수동 보정 | Hyundai 연동이 없을 때 `/주행거리 <km>`, `/정비완료` 명령으로 관리 |
-
-<details>
-<summary><strong>차량관리 명령어와 Hyundai 연결 설정</strong></summary>
-
-```text
-/차량
-/정비완료 엔진오일 [km]
-/정비완료 미션오일 [km]
-/정비완료 연료필터 [km]
-/타이어교체 윈터
-/타이어교체 사계절
-/정비목록
-/알림테스트
-/현대연결
-```
-
-`.env`에는 `CAR_CARE_TELEGRAM_BOT_TOKEN`, `CAR_CARE_TELEGRAM_CHAT_ID`, `HYUNDAI_CLIENT_ID`, `HYUNDAI_CLIENT_SECRET`, `HYUNDAI_REDIRECT_URI`를 설정합니다.
-
-Hyundai OAuth 콜백은 `car.len.pe.kr`에서 Cloudflare Tunnel을 통해 로컬 `8015` 포트로 전달합니다. 차량 상태는 `data/car-care`, OAuth 토큰은 별도 Docker volume에 저장합니다.
-
-</details>
-
-<br>
-
-### 🛠️ 서버 운영과 HomeOps
-
-#### 상태 진단
-
-System Status는 N100 호스트의 CPU·메모리·디스크·백업·컨테이너 상태를 확인합니다.
-
-<br>
-
-#### 전체 재시작
-
-HomeOps는 관리 대상 서비스를 한 번에 진단해 정상·비정상 서비스와 비정상 이유만 간결히 보여줍니다. 필요하면 전체 재시작을 실행하며, 개별 서비스 실패가 나도 나머지 서비스 처리는 계속합니다.
-
-<br>
-
-> 전체 재시작에는 포털도 포함됩니다. 실행 후 화면 연결이 잠시 끊길 수 있으므로 약 20~30초 뒤 관리자 상태 페이지를 다시 열어 결과를 확인합니다.
-
-<br>
-
-## 🤖 Harness / Loop Engineering
-
-### 개발·검증 루프
-
-AI가 코드를 작성하는 것에서 끝내지 않고, 운영 반영까지 확인 가능한 개발 루프를 유지합니다.
-
-<br>
-
-```text
-요구사항·성공 기준
-        ↓
-기능 브랜치 구현 · 회귀 테스트
-        ↓
-독립 검토 · PR CI · Agent Review
-        ↓
-사용자 병합 승인
-        ↓
-main CI · N100 자동배포 · health 검증
-```
-
-<br>
-
-### 입력 증적 압축과 재사용
-
-로컬 변경 하니스는 변경 범위, 필요한 검증, 중단 사유를 하나의 증적으로 정리합니다. `--agent-context`는 이 증적을 에이전트 작업용 짧은 요약으로 변환합니다.
-
-- 6개 대표 사례에서 UTF-8 바이트 기준 입력 증적 크기 79.5% 감소 확인됨
-- 범위·검증 판단 품질은 고정 평가 사례로 회귀 검증함
-- 실제 모델 토큰 사용량은 작업별 JSONL 기록으로 별도 측정·집계하며, 바이트 절감률과 혼용하지 않음
-
-<br>
-
-### 운영 증거와 배포 통제
-
-| 단계 | 적용 방식 |
-|---|---|
-| 범위 관리 | 변경·제외 범위와 성공 기준을 먼저 정의 |
-| 품질 확인 | 기능 테스트와 독립 diff 검토를 분리 |
-| 배포 통제 | PR CI 통과와 사용자 병합 승인 후 `main` 반영 |
-| 운영 검증 | N100 배포 후 컨테이너·공개 서비스 health 확인 |
-| 증거 보존 | CI artifact·로그 90일 보존, 장기 보관이 필요한 증적은 별도 저장소로 이전 |
-
-<br>
-
-세부 절차는 [Codex 작업 완료 루프](docs/codex-work-loop.md), 증거 운영은 [작업 루프 증거 운영](docs/agent-loop-evidence.md)을 참고합니다.
-
-<br>
-
-## 🚀 빠른 시작
-
-### 로컬 실행
-
-```bash
-cp .env.example .env
-docker compose up -d --build
-docker compose ps
-```
-
-<br>
-
-### 운영 환경 참고
-
-N100 운영 환경, 환경변수, 배포 절차는 [운영 문서 색인](docs/README.md)에서 확인합니다.
-
-<br>
-
-## ✅ 검증
-
-GitHub Actions CI에서 포털, 시스템 상태, 뉴스, HomeOps, 메모, 차량관리, Compose와 운영 스크립트의 서비스별 테스트를 실행합니다.
-
-<br>
-
-```bash
-python3 tests/run_service_tests.py
-python3 tests/run_service_tests.py --list
-```
-
-특정 서비스만 확인하려면 `--suite`를 사용합니다.
-
-<br>
-
-## 🏗️ 아키텍처
+## 현재 구조
 
 ```text
 Internet
-  └─ Cloudflare Tunnel 또는 Caddy
-       └─ Windows N100 + Ubuntu WSL2
-            ├─ portal-web       Portal · File Manager · Status · Portfolio
-            ├─ system-agent     Host metrics API
-            ├─ homeops-executor Restricted Docker diagnostics · restart
-            ├─ crawler-worker   RSS collection · archive · notification
-            ├─ youtube-memo     Video notes
-            ├─ book-memo        Book notes
-            └─ car-care-worker  Telegram vehicle-care worker (internal only)
+  └─ Cloudflare Tunnel
+       └─ Caddy (Docker)
+            ├─ K3s NodePort → portal-web
+            └─ Docker Compose → news · memo · books · system status
+
+K3s monitoring → Prometheus · Grafana · Alertmanager · Telegram SRE relay
+GitHub Actions → 5분 외부 health 점검 → Telegram 장애·복구 알림
 ```
 
-공개 HTTPS는 Cloudflare Tunnel 또는 Caddy + Cloudflare DNS-01 중 실제 환경에 맞는 한 가지 방식만 사용합니다.
+| 구분 | 현재 운영 방식 |
+|---|---|
+| Portal·파일함·관리자·포트폴리오 | K3s `portal-web` + PVC 단일 writer |
+| 뉴스·YouTube 메모·책 메모·차량관리 | Docker Compose |
+| 공개 경로 | Cloudflare Tunnel → Caddy → 서비스 |
+| 모니터링 | K3s Prometheus·Grafana, Telegram SRE 알림 |
+| 백업 | Portal PVC 암호화 백업 및 복원 검증 |
+| 외부 장애 감지 | GitHub Actions가 약 5분 간격으로 `https://len.pe.kr/health` 확인 |
 
-<br>
+## SRE 운영 체계
 
-## 🔎 운영 문서
+```text
+서비스 실행
+  ↓
+Prometheus·Grafana로 K3s 상태 관측
+  ↓
+Alertmanager·SRE relay로 내부 이상 Telegram 알림
+
+GitHub Actions가 외부 주소를 약 5분마다 별도 점검
+  ↓
+장애·복구 전환 시 Telegram 알림
+
+Portal PVC 암호화 백업 → 원격 보관 → 복원 검증
+```
+
+| SRE 영역 | 적용 내용 |
+|---|---|
+| 관측성 | Prometheus·Grafana로 K3s 노드·Pod·PVC·서비스 상태 확인 |
+| 장애 감지 | 내부 Prometheus 경고와 외부 GitHub Actions health 점검을 분리 |
+| 알림 | Telegram으로 장애·복구·백업 결과를 한국어로 전달 |
+| 복구 | K3s Pod 자동복구, HomeOps 제한형 컨테이너 복구, 재부팅 뒤 WSL 유지 |
+| 데이터 보호 | Portal PVC 암호화 백업과 실제 복원 검증 |
+| 안전 배포 | 허용된 Compose 서비스만 CI 성공 뒤 revision 고정 배포·health 검증·1회 rollback |
+
+## 주요 기능
+
+- 개인 포털, 파일 관리, 관리자 상태, 공개 포트폴리오
+- Investing.com·Google News 수집 및 Telegram 뉴스 알림
+- YouTube·독서 메모 관리
+- Hyundai 연동 차량 상태·정비 Telegram 알림
+- HomeOps 제한형 진단·복구, Grafana 상태 확인, Telegram SRE 알림
+
+## 빠른 상태 확인
+
+N100 WSL에서 실행함.
+
+```bash
+cd /mnt/c/personal-server
+curl --fail --silent --show-error https://len.pe.kr/health
+sudo k3s kubectl -n personal-server get deploy,pod,pvc
+bash infra/k8s/tools/sre-health-audit.sh
+```
+
+각 백업·모니터링·Telegram relay의 상세 점검은 [운영 문서 색인](docs/README.md)을 사용함. 비밀번호·토큰·Secret 값은 문서나 명령 출력에 기록하지 않음.
+
+## 개발과 배포
+
+```text
+기능 브랜치 → 테스트·독립 검토 → PR → 사용자 병합 승인 → main
+```
+
+`crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker`의 허용된 변경만 N100 안전 자동 배포 대상임. Portal, K3s, Caddy, Secret, PVC, 운영 데이터는 자동 배포 대상이 아니며 별도 운영 절차를 사용함.
+
+병합된 변경은 CI·배포·health 검증과 작업공간 정리까지 확인함. CI artifact와 운영 증적은 90일 보관하며, 장기 보관이 필요한 자료는 별도 증적 저장소로 이전함.
+
+## 검증
+
+```bash
+python3 tests/run_service_tests.py
+python3 -m unittest tests.test_documentation_index -v
+```
+
+## 운영 문서
 
 | 문서 | 내용 |
 |---|---|
-| [운영 문서 색인](docs/README.md) | 운영 문서의 단일 진입점 |
-| [운영 참조](docs/operations-reference.md) | 도메인·환경변수·일상 점검 명령 |
-| [N100 운영 환경](docs/n100-mt4-setup.md) | Windows·WSL2·Docker 운영 |
-| [N100 자동 배포](docs/n100-github-auto-deploy.md) | GitHub Actions 배포와 장애 대응 |
-| [프로젝트 포트폴리오 원문](docs/portfolio-content.md) | 공개 포트폴리오용 프로젝트 설명 |
+| [운영 문서 색인](docs/README.md) | 현재 운영 문서의 단일 진입점 |
+| [운영 참조](docs/operations-reference.md) | 서비스 구조·공개 경로·일상 점검 |
+| [N100 운영 환경](docs/n100-mt4-setup.md) | Windows·WSL2 자동 시작과 장애 확인 |
+| [N100 안전 자동 배포](docs/n100-github-auto-deploy.md) | 허용 Compose 서비스의 CI 기반 배포 |
+| [K3s 운영](infra/k8s/README.md) | Portal·Grafana·Telegram SRE·PVC 백업 |
+| [공개 상태 Telegram 알림](docs/public-uptime-monitor.md) | 외부 장애·복구 알림 기준 |
