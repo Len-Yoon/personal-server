@@ -30,7 +30,7 @@ class PublicUptimeMonitorTests(unittest.TestCase):
         self.assertIn("github.rest.issues.update", workflow)
         self.assertIn("Confirm Telegram delivery before committing transition", workflow)
         self.assertIn(
-            'if (state === "success" && incident) {\n'
+            'if (state === "success" && incident && (incident.body || "").includes(downSentMarker)) {\n'
             "              core.setOutput('notification', 'recovered');",
             workflow,
         )
@@ -52,6 +52,18 @@ class PublicUptimeMonitorTests(unittest.TestCase):
             "actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b",
             workflow,
         )
+
+    def test_workflow_classifies_telegram_delivery_failures_without_logging_responses(self):
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("--write-out '%{http_code}'", workflow)
+        self.assertIn('case "$telegram_status" in', workflow)
+        self.assertIn("Telegram rejected chat configuration.", workflow)
+        self.assertIn("Telegram rejected bot credentials.", workflow)
+        self.assertIn("Telegram blocked bot delivery.", workflow)
+        self.assertIn("--output /dev/null", workflow)
+        self.assertNotIn("response_body", workflow)
+        self.assertNotIn("description", workflow)
 
     def test_ci_runs_the_uptime_monitor_contract(self):
         ci_workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
