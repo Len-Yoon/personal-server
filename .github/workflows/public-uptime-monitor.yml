@@ -71,7 +71,7 @@ jobs:
               return;
             }
 
-            if (state === "success" && incident) {
+            if (state === "success" && incident && (incident.body || "").includes(downSentMarker)) {
               core.setOutput('notification', 'recovered');
               core.setOutput('issue_number', String(incident.number));
             }
@@ -97,10 +97,37 @@ jobs:
               exit 1
               ;;
           esac
-          curl --fail --silent --show-error --retry 2 --max-time 20 \
-            --request POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=${message}" >/dev/null
+          telegram_status="$(
+            curl --silent --show-error --retry 2 --max-time 20 \
+              --output /dev/null --write-out '%{http_code}' \
+              --request POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+              --data-urlencode "text=${message}" || true
+          )"
+          case "$telegram_status" in
+            200)
+              ;;
+            400)
+              printf '%s\n' 'Telegram rejected chat configuration. Check chat ID format and bot membership.' >&2
+              exit 1
+              ;;
+            401|404)
+              printf '%s\n' 'Telegram rejected bot credentials.' >&2
+              exit 1
+              ;;
+            403)
+              printf '%s\n' 'Telegram blocked bot delivery.' >&2
+              exit 1
+              ;;
+            000|'')
+              printf '%s\n' 'Telegram delivery connection failed.' >&2
+              exit 1
+              ;;
+            *)
+              printf 'Telegram delivery failed with HTTP status %s.\n' "$telegram_status" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Confirm Telegram delivery before committing transition
         if: steps.incident.outputs.notification != ''
