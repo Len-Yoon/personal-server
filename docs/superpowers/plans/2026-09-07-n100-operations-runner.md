@@ -4,7 +4,7 @@
 
 **Goal:** GitHub Actions가 N100 Windows self-hosted runner를 통해 고정된 운영 작업만 WSL에서 실행하고 안전한 결과를 반환하게 함.
 
-**Architecture:** 수동 실행 workflow는 choice input 하나를 고정 runner에 전달함. `scripts/run-n100-operations.sh`는 allowlist에 없는 입력을 즉시 거부하고, 각 operation을 명시된 읽기 전용·고정 apply·기존 안전 배포 경로로만 분기함. Kubernetes Secret은 key 존재 여부만 확인하며 값은 읽거나 출력하지 않음.
+**Architecture:** 수동 실행 workflow는 main의 성공한 CI SHA만 고정 runner에 전달함. `scripts/run-n100-operations.sh`는 allowlist에 없는 입력을 즉시 거부하고, root 소유 제한형 helper를 통해 읽기 전용·객체 정체성 검증 apply만 수행함. Kubernetes Secret은 key 존재 여부만 확인하며 값은 읽거나 출력하지 않음.
 
 **Tech Stack:** GitHub Actions YAML, Windows `wsl.exe`, Bash, Python `unittest`, K3s `kubectl`.
 
@@ -15,20 +15,22 @@
 - Workflow는 `workflow_dispatch`만 사용하고 operation choice 외 input을 받지 않음.
 - 허용 operation은 `diagnose`, `deploy_safe_crawler`, `verify_news_observability`, `apply_news_observability`만 사용함.
 - 서버 기동 방식, scheduler, Caddy, Cloudflare Tunnel 설정, Secret 생성·수정, PVC·운영 데이터 변경을 하지 않음.
-- K3s 변경은 `apply_news_observability`의 고정 ServiceMonitor·PrometheusRule 두 파일만 `sudo -n k3s kubectl`로 적용함.
+- K3s 변경은 root 소유 helper가 `apply_news_observability` stdin에서 정확히 검증한 ServiceMonitor·PrometheusRule 두 객체만 적용함. 일반 `sudo -n k3s`는 금지함.
 - Secret 값·환경변수 값·sudo·rclone 비밀번호를 출력·저장·전달하지 않음.
 - `deploy_safe_crawler`는 기존 `scripts/deploy-n100-safe.sh`만 사용하며 revision 고정·health·rollback 동작을 유지함.
 
 ---
 
-### Task 1: 고정 operation Bash 실행기와 계약 테스트
+### Task 1: 제한형 root helper·고정 operation 실행기와 계약 테스트
 
 **Files:**
 - Create: `scripts/run-n100-operations.sh`
+- Create: `infra/k8s/tools/n100-k3s-operations-helper.py`
+- Create: `infra/k8s/tools/install-n100-k3s-operations-helper.sh`
 - Create: `tests/test_n100_operations.py`
 
 **Interfaces:**
-- Consumes: operation 하나와 `N100_OPERATIONS_PROJECT_ROOT`, `N100_OPERATIONS_ACTIONS_ROOT`, `N100_OPERATIONS_DEPLOY_SHA` 환경변수.
+- Consumes: operation 하나, 검증된 Actions checkout 경로, deploy SHA.
 - Produces: `n100_operation=<operation> status=PASS|FAIL` 및 비밀값 없는 단계 이름.
 
 - [ ] **Step 1: 실패하는 allowlist·입력 거부 테스트 작성**
@@ -57,7 +59,7 @@ case "$operation" in
 esac
 ```
 
-`diagnose`는 `docker ps`, cloudflared process 존재, fixed loopback/public health, `sudo -n k3s kubectl`의 fixed get 명령만 실행함. `verify_news_observability`는 container 내부의 token non-empty 확인, Secret key 존재를 `/dev/null`로 확인, fixed ServiceMonitor·PrometheusRule get만 실행함. `apply_news_observability`는 고정된 두 manifest의 client dry-run 뒤 apply만 수행함. `deploy_safe_crawler`는 SHA 형식 검증 뒤 `scripts/deploy-n100-safe.sh "$sha" crawler-worker`만 실행함.
+실행기는 `/mnt/c/personal-server`와 root helper 경로를 상수로 사용함. `diagnose`·`verify_news_observability`는 `sudo -n /usr/local/libexec/personal-server/n100-k3s-operations <fixed operation>`만 호출함. `apply_news_observability`는 Actions checkout의 두 regular file을 읽어 stdin으로 helper에 전달함. helper는 PyYAML로 정확히 두 문서를 파싱하고 `monitoring.coreos.com/v1`의 `ServiceMonitor/monitoring/crawler-news-observability`, `PrometheusRule/monitoring/sre-telegram-k3s-alerts`만 허용한 뒤 canonical stream을 client dry-run과 apply에 전달함. installer는 root 소유 helper와 위 세 operation만 허용하는 `window` sudoers 항목을 설치함. `deploy_safe_crawler`는 SHA 형식 검증 뒤 기존 안전 배포 도구만 호출함.
 
 - [ ] **Step 4: operation별 허용 명령·비밀값 비노출 테스트 추가**
 
@@ -68,7 +70,7 @@ self.assertIn("servicemonitor", self.read_log())
 self.assertNotIn("super-secret", result.stdout + result.stderr)
 ```
 
-Mock `docker`, `pgrep`, `curl`, `sudo`, `kubectl`, `git` executables로 명령 인자와 stdout을 기록함. 테스트는 고정 manifest 두 개만 apply되는지, `sudo -n k3s`가 사용되는지, Secret value가 output에 없는지 검증함.
+Mock executables로 명령 인자·stdin을 기록함. 테스트는 runner의 root helper argv 고정, helper의 symlink·다중문서·List·객체 불일치 거부, Secret sentinel 비노출, sudoers 최소 허용 목록을 검증함.
 
 - [ ] **Step 5: 테스트 통과 확인**
 
@@ -120,7 +122,7 @@ on:
         options: [diagnose, deploy_safe_crawler, verify_news_observability, apply_news_observability]
 ```
 
-Job은 self-hosted Windows runner와 단일 concurrency group을 사용함. workflow checkout revision을 `N100_OPERATIONS_ACTIONS_ROOT`로 전달하고, N100 운영 checkout·Actions checkout이 존재하는지 확인한 뒤 `wsl.exe -d Ubuntu-24.04 -- bash -lc`로 script를 호출함. deploy operation에만 `github.sha`를 전달함.
+Job은 main ref·성공한 push CI SHA gate, self-hosted Windows runner, 기존 안전 배포와 공유하는 concurrency group을 사용함. checkout은 `persist-credentials: false`로 설정함. N100 운영 checkout·Actions checkout 검증 뒤 `wsl.exe -d Ubuntu-24.04 -- bash --noprofile --norc`로 고정 script를 호출함.
 
 - [ ] **Step 4: 권한·입력·명령 경계 테스트 추가**
 
@@ -128,7 +130,9 @@ Job은 self-hosted Windows runner와 단일 concurrency group을 사용함. work
 self.assertNotIn("pull_request", workflow)
 self.assertNotIn("schedule:", workflow)
 self.assertNotIn("${{ inputs.command }}", workflow)
-self.assertIn("N100_OPERATIONS_ACTIONS_ROOT", workflow)
+self.assertIn("persist-credentials: false", workflow)
+self.assertIn("refs/heads/main", workflow)
+self.assertIn("cancel-in-progress: false", workflow)
 ```
 
 - [ ] **Step 5: 테스트 통과 확인**
