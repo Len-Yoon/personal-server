@@ -1,12 +1,20 @@
 import os
+import importlib.util
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "run-n100-operations.sh"
+HELPER = ROOT / "infra/k8s/tools/n100-k3s-operations-helper.py"
+INSTALLER = ROOT / "infra/k8s/tools/install-n100-k3s-operations-helper.sh"
+HELPER_SPEC = importlib.util.spec_from_file_location("n100_helper", HELPER)
+assert HELPER_SPEC is not None and HELPER_SPEC.loader is not None
+HELPER_MODULE = importlib.util.module_from_spec(HELPER_SPEC)
+HELPER_SPEC.loader.exec_module(HELPER_MODULE)
 ALLOWED = {
     "diagnose",
     "deploy_safe_crawler",
@@ -50,6 +58,10 @@ class N100OperationsTests(unittest.TestCase):
         text = SCRIPT.read_text(encoding="utf-8")
         for operation in ALLOWED:
             self.assertIn(operation, text)
+        self.assertNotIn("sudo -n k3s", text)
+        self.assertIn("/mnt/c/personal-server", text)
+        self.assertIn("/usr/local/libexec/personal-server/n100-k3s-operations", text)
+        self.assertIn("set +x", text)
 
     def test_deploy_requires_a_valid_sha_and_fixed_service(self):
         result = self.run_operation(
@@ -69,8 +81,7 @@ class N100OperationsTests(unittest.TestCase):
             fake_sudo.write_text(
                 "#!/usr/bin/env bash\n"
                 "printf '%s\\n' \"$*\" >> \"$N100_TEST_CALLS\"\n"
-                "if [[ \"$*\" == *'apply --dry-run=client'* ]]; then exit 0; fi\n"
-                "if [[ \"$*\" == *'apply -f'* ]]; then exit 0; fi\n"
+                "cat >> \"$N100_TEST_CALLS\"\n"
                 "exit 0\n",
                 encoding="utf-8",
             )
@@ -85,17 +96,111 @@ class N100OperationsTests(unittest.TestCase):
             self.assertIn("n100_operation=apply_news_observability status=PASS", output)
             self.assertNotIn("super-secret", output)
             entries = calls.read_text(encoding="utf-8").splitlines()
-            apply_entries = [entry for entry in entries if "apply" in entry]
-            self.assertEqual(len(apply_entries), 4)
-            self.assertTrue(all("-n k3s kubectl" in entry for entry in apply_entries))
-            self.assertTrue(any("crawler-news-observability.yaml" in entry for entry in apply_entries))
-            self.assertTrue(any("prometheus-rule.yaml" in entry for entry in apply_entries))
-            self.assertFalse(any("secret" in entry.lower() and "crawler-news-metrics" not in entry for entry in apply_entries))
+            apply_entries = [entry for entry in entries if "n100-k3s-operations apply" in entry]
+            self.assertEqual(len(apply_entries), 1)
+            self.assertIn("apiVersion: monitoring.coreos.com/v1", calls.read_text(encoding="utf-8"))
+            self.assertNotIn("super-secret", calls.read_text(encoding="utf-8"))
+
+    def test_helper_has_exact_root_operation_allowlist(self):
+        self.assertEqual(
+            subprocess.run(
+                ["python3", str(HELPER), "apply_news_observability", "extra"],
+                text=True,
+                capture_output=True,
+            ).returncode,
+            2,
+        )
+        text = HELPER.read_text(encoding="utf-8")
+        self.assertNotIn("source_file", text)
+        self.assertNotIn("manifest_path", text)
+
+    def test_helper_rejects_symlink_multidoc_list_and_identity_mismatch(self):
+        valid = """apiVersion: monitoring.coreos.com/v1\nkind: ServiceMonitor\nmetadata:\n  name: crawler-news-observability\n  namespace: monitoring\n---\napiVersion: monitoring.coreos.com/v1\nkind: PrometheusRule\nmetadata:\n  name: sre-telegram-k3s-alerts\n  namespace: monitoring\n"""
+        cases = {
+            "multidoc": valid + "---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: bad\n",
+            "list": "apiVersion: v1\nkind: List\nitems: []\n",
+            "mismatch": valid.replace("crawler-news-observability", "not-allowed", 1),
+        }
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                result = subprocess.run(
+                    ["python3", str(HELPER), "apply_news_observability"],
+                    input=payload,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("super-secret", result.stdout + result.stderr)
+
+    def test_runner_rejects_symlink_manifest_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            actions = Path(directory) / "actions"
+            target = actions / "infra/k8s/sre-telegram"
+            target.mkdir(parents=True)
+            (target / "prometheus-rule.yaml").write_text("kind: List\nitems: []\n", encoding="utf-8")
+            (target / "crawler-news-observability.yaml").symlink_to(target / "prometheus-rule.yaml")
+            result = self.run_operation(
+                "apply_news_observability",
+                env={"N100_OPERATIONS_ACTIONS_ROOT": str(actions)},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("super-secret", result.stdout + result.stderr)
+
+    def test_verify_suppresses_secret_sentinel_from_fixed_command_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bin_dir = Path(directory) / "bin"
+            bin_dir.mkdir()
+            for command in ("curl", "docker", "sudo"):
+                path = bin_dir / command
+                path.write_text(
+                    "#!/usr/bin/env bash\n"
+                    "printf '%s\\n' super-secret\n"
+                    "exit 0\n",
+                    encoding="utf-8",
+                )
+                path.chmod(0o755)
+            result = self.run_operation(
+                "verify_news_observability",
+                env={"PATH": f"{bin_dir}:{os.environ['PATH']}"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("super-secret", result.stdout + result.stderr)
+
+    def test_helper_applies_the_same_canonical_stdin_bytes_twice(self):
+        payload = (
+            "apiVersion: monitoring.coreos.com/v1\nkind: ServiceMonitor\nmetadata:\n"
+            "  name: crawler-news-observability\n  namespace: monitoring\n---\n"
+            "apiVersion: monitoring.coreos.com/v1\nkind: PrometheusRule\nmetadata:\n"
+            "  name: sre-telegram-k3s-alerts\n  namespace: monitoring\n"
+        ).encode()
+        calls = []
+        with mock.patch.object(
+            HELPER_MODULE.subprocess,
+            "run",
+            side_effect=lambda command, **kwargs: calls.append((command, kwargs["input"]))
+            or subprocess.CompletedProcess(command, 0),
+        ):
+            self.assertTrue(HELPER_MODULE.canonical_documents(payload))
+            self.assertTrue(HELPER_MODULE.run_apply_from_bytes(payload))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][0], ["/usr/local/bin/k3s", "kubectl", "apply", "--dry-run=client", "-f", "-"])
+        self.assertEqual(calls[0][1], calls[1][1])
+
+    def test_installer_contains_only_three_exact_sudoers_operations(self):
+        text = INSTALLER.read_text(encoding="utf-8")
+        self.assertIn("EUID", text)
+        self.assertIn("visudo -cf", text)
+        self.assertIn("-o root -g root", text)
+        self.assertIn("0755", text)
+        self.assertIn("0440", text)
+        self.assertNotIn("k3s kubectl", text)
+        for operation in ("diagnose", "verify_news_observability", "apply_news_observability"):
+            self.assertIn(operation, text)
 
     def test_script_is_not_an_arbitrary_command_runner(self):
         text = SCRIPT.read_text(encoding="utf-8")
         self.assertNotIn('eval "', text)
-        self.assertIn("sudo -n k3s kubectl", text)
+        self.assertNotIn("sudo -n k3s", text)
 
 
 if __name__ == "__main__":
