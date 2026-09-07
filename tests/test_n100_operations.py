@@ -384,7 +384,7 @@ class N100OperationsDocumentationTests(unittest.TestCase):
     def test_documents_cover_fail_closed_safety_smoke_checklist_and_boundaries(self):
         documentation = self.documentation()
         for phrase in (
-            "실패 시 롤백",
+            "직전 정상 revision 1회 rollback",
             "Secret 값은 출력하지 않음",
             "실제 N100 smoke checklist",
             "diagnose → verify → 필요한 변경",
@@ -411,6 +411,27 @@ class N100OperationsDocumentationTests(unittest.TestCase):
             "확인 필요",
         ):
             self.assertIn(phrase, documentation)
+
+    def test_documents_separate_deploy_rollback_from_apply_partial_failure(self):
+        for path in self.DOCUMENTS:
+            with self.subTest(document=path.name):
+                documentation = path.read_text(encoding="utf-8")
+                self.assertIn(
+                    "`deploy_safe_crawler`의 health 검증과 직전 정상 revision 1회 rollback은 기존 안전 배포 도구에만 있음",
+                    documentation,
+                )
+                self.assertIn(
+                    "`apply_news_observability`는 제한형 helper가 client dry-run 후 두 리소스를 순서대로 apply함",
+                    documentation,
+                )
+                self.assertIn("helper는 health/undo/자동 rollback을 수행하지 않음", documentation)
+                self.assertIn("partial apply 가능", documentation)
+                self.assertIn(
+                    "`verify_news_observability`와 Kubernetes 리소스 확인 후 운영자 판단",
+                    documentation,
+                )
+                self.assertIn("자동 복구를 약속하지 않음", documentation)
+                self.assertNotIn("변경 실패 시 롤백함", documentation)
 
 
 if __name__ == "__main__":

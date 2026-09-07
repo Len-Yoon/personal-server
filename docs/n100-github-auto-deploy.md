@@ -21,9 +21,9 @@ GitHub 저장소에서 `Actions → N100 Operations → Run workflow`를 선택�
 | `deploy_safe_crawler` | 변경 | 기존 안전 배포 도구로 현재 검증된 main SHA의 `crawler-worker`만 배포 |
 | `apply_news_observability` | 변경 | 검증된 두 manifest의 고정 리소스만 제한형 root helper로 적용 |
 
-실행 순서는 반드시 `diagnose → verify_news_observability → 필요한 변경 operation`으로 진행함. 진단 또는 검증이 실패하면 변경 작업을 실행하지 않음. `diagnose`·`verify_news_observability`는 읽기 전용이며, 변경 operation은 preflight·health 검증과 기존 안전 배포의 rollback 동작을 따름. 실패 시 후속 변경을 수행하지 않고, 배포 health 실패는 직전 정상 revision으로 한 번만 롤백함.
+실행 순서는 반드시 `diagnose → verify_news_observability → 필요한 변경 operation`으로 진행함. 진단 또는 검증이 실패하면 변경 작업을 실행하지 않음. `diagnose`·`verify_news_observability`는 읽기 전용임. `deploy_safe_crawler`의 health 검증과 직전 정상 revision 1회 rollback은 기존 안전 배포 도구에만 있음.
 요약 순서는 `diagnose → verify → 필요한 변경`임.
-변경 실패 시 롤백함. 단, 롤백 결과와 원인은 Actions 로그에서 확인 필요함.
+`apply_news_observability`는 제한형 helper가 client dry-run 후 두 리소스를 순서대로 apply함. helper는 health/undo/자동 rollback을 수행하지 않음. 실제 apply 중 첫 리소스가 적용된 뒤 다음 리소스에서 실패하는 partial apply 가능성이 있음. apply 실패 대응은 `verify_news_observability`와 Kubernetes 리소스 확인 후 운영자 판단으로 제한하며 자동 복구를 약속하지 않음. 어떤 변경 operation도 실패 시 후속 변경을 수행하지 않음.
 
 ### 수동 호스트 단계: root helper 일회성 설치
 

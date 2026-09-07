@@ -50,9 +50,9 @@ Grafana, Prometheus, Telegram relay, Portal PVC 백업은 [K3s 운영 문서](..
 | `deploy_safe_crawler` | 변경 | 검증된 SHA의 crawler-worker만 기존 안전 배포 경로로 변경함 |
 | `apply_news_observability` | 변경 | 두 고정 manifest의 허용 객체만 적용함 |
 
-실행 순서는 `diagnose → verify_news_observability → 필요한 변경 operation`임. 진단·검증 실패 시 변경하지 않음. 변경 실패 시 후속 변경을 수행하지 않으며, 배포 health 실패는 직전 정상 revision으로 한 번만 롤백함. Secret 값은 출력하지 않음.
+실행 순서는 `diagnose → verify_news_observability → 필요한 변경 operation`임. 진단·검증 실패 시 변경하지 않음. `diagnose`·`verify_news_observability`는 읽기 전용임. `deploy_safe_crawler`의 health 검증과 직전 정상 revision 1회 rollback은 기존 안전 배포 도구에만 있음. Secret 값은 출력하지 않음.
 요약 순서는 `diagnose → verify → 필요한 변경`임.
-변경 실패 시 롤백함. 결과와 원인은 Actions 로그에서 확인 필요함.
+`apply_news_observability`는 제한형 helper가 client dry-run 후 두 리소스를 순서대로 apply함. helper는 health/undo/자동 rollback을 수행하지 않음. 실제 apply 중 첫 리소스가 적용된 뒤 다음 리소스에서 실패하는 partial apply 가능성이 있음. apply 실패 대응은 `verify_news_observability`와 Kubernetes 리소스 확인 후 운영자 판단으로 제한하며 자동 복구를 약속하지 않음. 어떤 변경 operation도 실패 시 후속 변경을 수행하지 않으며, 결과와 원인은 Actions 로그에서 확인 필요함.
 
 ### 수동 호스트 단계: root helper 일회성 설치
 
