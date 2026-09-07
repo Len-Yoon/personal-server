@@ -18,7 +18,9 @@ TIMER_TEMPLATE = (
 class PortalPvcBackupAutomationTests(unittest.TestCase):
     def run_tool(self, action, *, backup_output="backup_upload=UPLOADED\n", backup_exit=0, seed_credentials=False, systemctl_stop_exit=0, systemctl_disable_exit=0, systemd_analyze_exit=0, initial_linger="yes", loginctl_enable_exit=0):
         self.assertTrue(SCRIPT.is_file(), "backup automation controller is required")
-        with tempfile.TemporaryDirectory() as directory:
+        # The controller intentionally rejects /tmp state paths. Keep the
+        # fixture repository-local while retaining TemporaryDirectory cleanup.
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
             root = Path(directory)
             bin_dir = root / "bin"
             state_dir = root / "state"

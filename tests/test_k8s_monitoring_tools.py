@@ -173,7 +173,7 @@ class MonitoringToolsTest(unittest.TestCase):
                 "preflight": "#!/bin/sh\nprintf 'preflight\\n' >> \"$CALLS\"\nprintf 'monitoring_preflight=PASS\\n'\nexit 0\n",
                 "sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
                 "case \"$*\" in\n"
-                "  *'get namespace monitoring'*) printf 'Error from server (NotFound): namespaces \\\"monitoring\\\" not found\\n' >&2; exit 1;;\n"
+                "  *'get namespace monitoring'*) printf 'Error from server (NotFound): namespaces \"monitoring\" not found\\n' >&2; exit 1;;\n"
                 "  *'create namespace monitoring'*) exit 0;;\n"
                 "  *) exit 1;;\n"
                 "esac\n",
@@ -225,7 +225,7 @@ class MonitoringToolsTest(unittest.TestCase):
                 "preflight": "#!/bin/sh\nprintf 'monitoring_preflight=PASS\\n'\nexit 0\n",
                 "sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
                 "case \"$*\" in\n"
-                "  *'get namespace monitoring'*) printf 'Error from server (NotFound): namespaces \\\"monitoring\\\" not found\\n' >&2; exit 1;;\n"
+                "  *'get namespace monitoring'*) printf 'Error from server (NotFound): namespaces \"monitoring\" not found\\n' >&2; exit 1;;\n"
                 "  *'create namespace monitoring'*) exit 0;;\n"
                 "  *'delete namespace monitoring'*) exit 0;;\n"
                 "  *) exit 1;;\n"
@@ -262,7 +262,7 @@ class MonitoringToolsTest(unittest.TestCase):
                 "preflight": "#!/bin/sh\nprintf 'monitoring_preflight=PASS\\n'\nexit 0\n",
                 "sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
                 "case \"$*\" in\n"
-                "  *'get namespace monitoring'*) printf 'Error from server (NotFound): namespaces \\\"monitoring\\\" not found\\n' >&2; exit 1;;\n"
+                "  *'get namespace monitoring'*) printf 'Error from server (NotFound): namespaces \"monitoring\" not found\\n' >&2; exit 1;;\n"
                 "  *'create namespace monitoring'*) printf 'AlreadyExists\\n' >&2; exit 1;;\n"
                 "  *) exit 1;;\n"
                 "esac\n",

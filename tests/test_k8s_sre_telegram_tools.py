@@ -213,7 +213,7 @@ class SreTelegramToolContractTest(unittest.TestCase):
                 "  *'ctr version'*) exit 0;;\n"
                 "  *) exit 1;;\n"
                 "esac\n",
-                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\\\"info\\\":{\\\"status\\\":\\\"deployed\\\"}}\\n'; exit 0;; esac\nexit 1\n",
+                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\"info\":{\"status\":\"deployed\"}}\\n'; exit 0;; esac\nexit 1\n",
                 "docker": "#!/bin/sh\nexit 0\n",
                 "amtool": "#!/bin/sh\nprintf 'amtool %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
                 "python3": f"#!/bin/sh\nprintf 'validator %s\\n' \"$*\" >> \"$CALLS\"\nexec {shlex.quote(sys.executable)} \"$@\"\n",
@@ -247,7 +247,7 @@ class SreTelegramToolContractTest(unittest.TestCase):
                 "  *'ctr version'*) exit 0;;\n"
                 "  *) exit 1;;\n"
                 "esac\n",
-                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\\\"info\\\":{\\\"status\\\":\\\"deployed\\\"}}\\n'; exit 0;; esac\nexit 1\n",
+                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\"info\":{\"status\":\"deployed\"}}\\n'; exit 0;; esac\nexit 1\n",
                 "docker": "#!/bin/sh\nexit 0\n",
                 "amtool": "#!/bin/sh\nprintf 'amtool %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
             },
@@ -276,7 +276,7 @@ class SreTelegramToolContractTest(unittest.TestCase):
                 "  *'ctr version'*) exit 0;;\n"
                 "  *) exit 1;;\n"
                 "esac\n",
-                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\\\"info\\\":{\\\"status\\\":\\\"deployed\\\"}}\\n'; exit 0;; esac\nexit 1\n",
+                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\"info\":{\"status\":\"deployed\"}}\\n'; exit 0;; esac\nexit 1\n",
                 "docker": "#!/bin/sh\nexit 0\n",
                 "stat": "#!/bin/sh\n"
                 "case \"$1\" in\n"
@@ -309,7 +309,7 @@ class SreTelegramToolContractTest(unittest.TestCase):
                 "  *'ctr version'*) exit 0;;\n"
                 "  *) exit 1;;\n"
                 "esac\n",
-                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\\\"info\\\":{\\\"status\\\":\\\"deployed\\\"}}\\n'; exit 0;; esac\nexit 1\n",
+                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\"info\":{\"status\":\"deployed\"}}\\n'; exit 0;; esac\nexit 1\n",
                 "docker": "#!/bin/sh\nexit 0\n",
                 "amtool": "#!/bin/sh\nprintf 'amtool %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n",
             },
@@ -337,7 +337,7 @@ class SreTelegramToolContractTest(unittest.TestCase):
                 "  *'ctr version'*) exit 0;;\n"
                 "  *) exit 1;;\n"
                 "esac\n",
-                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\\\"info\\\":{\\\"status\\\":\\\"deployed\\\"}}\\n'; exit 0;; esac\nexit 1\n",
+                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\"info\":{\"status\":\"deployed\"}}\\n'; exit 0;; esac\nexit 1\n",
                 "docker": "#!/bin/sh\nexit 0\n",
                 "amtool": "#!/bin/sh\nexit 1\n",
             },
@@ -362,7 +362,7 @@ class SreTelegramToolContractTest(unittest.TestCase):
                 "  *'ctr version'*) exit 0;;\n"
                 "  *) exit 1;;\n"
                 "esac\n",
-                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\\\"info\\\":{\\\"status\\\":\\\"deployed\\\"}}\\n'; exit 0;; esac\nexit 1\n",
+                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\"info\":{\"status\":\"deployed\"}}\\n'; exit 0;; esac\nexit 1\n",
                 "docker": "#!/bin/sh\nexit 0\n",
                 "amtool": "#!/bin/sh\nexit 0\n",
             },
@@ -389,7 +389,7 @@ class SreTelegramToolContractTest(unittest.TestCase):
                 "  *'ctr version'*) exit 0;;\n"
                 "  *) exit 1;;\n"
                 "esac\n",
-                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\\\"info\\\":{\\\"status\\\":\\\"deployed\\\"}}\\n'; exit 0;; esac\nexit 1\n",
+                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\"info\":{\"status\":\"deployed\"}}\\n'; exit 0;; esac\nexit 1\n",
                 "docker": "#!/bin/sh\nexit 0\n",
                 "amtool": "#!/bin/sh\nexit 0\n",
             },
@@ -416,7 +416,7 @@ class SreTelegramToolContractTest(unittest.TestCase):
                 "  *'ctr version'*) exit 0;;\n"
                 "  *) exit 1;;\n"
                 "esac\n",
-                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\\\"info\\\":{\\\"status\\\":\\\"deployed\\\"}}\\n'; exit 0;; esac\nexit 1\n",
+                "helm": "#!/bin/sh\ncase \"$1\" in status) printf '{\"info\":{\"status\":\"deployed\"}}\\n'; exit 0;; esac\nexit 1\n",
                 "docker": "#!/bin/sh\nexit 0\n",
                 "amtool": "#!/bin/sh\nexit 0\n",
             },
@@ -699,7 +699,7 @@ class SreTelegramToolContractTest(unittest.TestCase):
                 "case \"$*\" in\n"
                 "  *describe*) printf 'telegram_bot_token: 3 bytes\\nallowed_chat_id: 2 bytes\\nalertmanager_auth_token: 3 bytes\\nalertmanager.yaml: 4 bytes\\n'; exit 0;;\n"
                 "  *'apply --dry-run=client'*) exit 0;;\n"
-                "  *'monitoring-RoleBinding-sre-telegram-relay-workload-reader.yaml'*) printf 'Error from server (AlreadyExists): rolebindings.rbac.authorization.k8s.io \\\"sre-telegram-relay-workload-reader\\\" already exists\\n'; exit 1;;\n"
+                "  *'monitoring-RoleBinding-sre-telegram-relay-workload-reader.yaml'*) printf 'Error from server (AlreadyExists): rolebindings.rbac.authorization.k8s.io \"sre-telegram-relay-workload-reader\" already exists\\n'; exit 1;;\n"
                 "  *'personal-server-RoleBinding-sre-telegram-relay-workload-reader.yaml'*) printf 'rolebinding.rbac.authorization.k8s.io/sre-telegram-relay-workload-reader created\\n'; exit 0;;\n"
                 "  *'monitoring-Deployment-sre-telegram-relay.yaml'*) printf 'Error from server (InternalError): later resource create failed\\n'; exit 1;;\n"
                 "  *'images list'*) printf 'REF TYPE DIGEST SIZE PLATFORMS LABELS\\npersonal-server-sre-telegram-relay:latest x sha256:abc 1MB linux/amd64 -\\n'; exit 0;;\n"
