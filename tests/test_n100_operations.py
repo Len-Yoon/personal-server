@@ -232,10 +232,16 @@ class N100OperationsTests(unittest.TestCase):
         self.assertIn("0440", text)
         self.assertIn("NOSETENV:", text)
         self.assertEqual(text.count("NOPASSWD: NOSETENV:"), 3)
-        self.assertIn("sudo -l -U window", text)
-        self.assertIn("sudo -n -l -U window", text)
-        self.assertIn("/usr/local/bin/k3s", text)
-        self.assertNotIn("k3s kubectl", text)
+        probe = "runuser -u window -- sudo -n /usr/local/bin/k3s kubectl version --client"
+        self.assertIn(probe, text)
+        self.assertIn("command -v runuser", text)
+        self.assertIn("command -v sudo", text)
+        self.assertIn(">/dev/null 2>&1", text)
+        self.assertNotIn("sudo_listing", text)
+        self.assertNotIn("grep -Fq '/usr/local/bin/k3s'", text)
+        self.assertLess(text.index(probe), text.index("install -d -o root"))
+        self.assertEqual(text.count("assert_generic_k3s_denied ||"), 2)
+        self.assertNotIn("sudo -n k3s kubectl", text)
         for operation in ("diagnose", "verify_news_observability", "apply_news_observability"):
             self.assertIn(operation, text)
 

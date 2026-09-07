@@ -10,11 +10,17 @@ readonly SUDOERS_DEST='/etc/sudoers.d/personal-server-n100-k3s-operations'
 [[ -f "$HELPER_SOURCE" && ! -L "$HELPER_SOURCE" ]] || { printf '%s\n' 'helper source가 regular file이 아님' >&2; exit 1; }
 [[ "$(head -n 1 "$HELPER_SOURCE")" == '#!/usr/bin/python3' ]] || { printf '%s\n' 'helper interpreter가 고정되지 않음' >&2; exit 1; }
 
-sudo_listing="$(sudo -l -U window 2>/dev/null)" || { printf '%s\n' 'window sudo 권한 사전 점검 실패' >&2; exit 1; }
-if grep -Fq '/usr/local/bin/k3s' <<<"$sudo_listing"; then
-  printf '%s\n' '일반 k3s sudo 권한이 남아 있어 설치를 중단함' >&2
-  exit 1
-fi
+assert_generic_k3s_denied() {
+  command -v runuser >/dev/null 2>&1 || return 1
+  command -v sudo >/dev/null 2>&1 || return 1
+  [[ -x /usr/local/bin/k3s ]] || return 1
+  if runuser -u window -- sudo -n /usr/local/bin/k3s kubectl version --client >/dev/null 2>&1; then
+    return 1
+  fi
+  return 0
+}
+
+assert_generic_k3s_denied || { printf '%s\n' '일반 k3s sudo 권한 점검 실패' >&2; exit 1; }
 
 install -d -o root -g root -m 0755 "$(dirname "$HELPER_DEST")"
 install -o root -g root -m 0755 "$HELPER_SOURCE" "$HELPER_DEST"
@@ -30,8 +36,8 @@ EOF
 visudo -cf "$sudoers_tmp" >/dev/null
 install -o root -g root -m 0440 "$sudoers_tmp" "$SUDOERS_DEST"
 
+assert_generic_k3s_denied || { printf '%s\n' '일반 k3s sudo 권한 사후 점검 실패' >&2; exit 1; }
 grants="$(sudo -n -l -U window 2>/dev/null)" || { printf '%s\n' 'window sudo 권한 사후 점검 실패' >&2; exit 1; }
-grep -Fq '/usr/local/bin/k3s' <<<"$grants" && { printf '%s\n' '일반 k3s sudo 권한이 남아 있어 설치를 중단함' >&2; exit 1; }
 for operation in diagnose verify_news_observability apply_news_observability; do
   grep -Fq "$HELPER_DEST $operation" <<<"$grants" || { printf '%s\n' 'helper sudo 권한 사후 점검 실패' >&2; exit 1; }
 done
