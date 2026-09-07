@@ -151,6 +151,47 @@ class ComposeConfigTests(unittest.TestCase):
         maintenance_end = workflow.index("\n    steps:")
         self.assertNotIn("tests.test_k8s_", workflow[maintenance_start:maintenance_end])
 
+    def test_ci_matrix_matches_service_docker_python_versions(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        test_job = workflow.split("  test:\n", 1)[1].split("\n  summary:", 1)[0]
+        dockerfiles = {
+            "portal": ROOT / "portal-web" / "Dockerfile",
+            "system-agent": ROOT / "system-agent" / "Dockerfile",
+            "crawler-worker": ROOT / "crawler-worker" / "Dockerfile",
+            "homeops-executor": ROOT / "homeops-executor" / "Dockerfile",
+            "youtube-memo": ROOT / "youtube-memo" / "Dockerfile",
+            "book-memo": ROOT / "book-memo" / "Dockerfile",
+            "car-care-worker": ROOT / "car-care-worker" / "Dockerfile",
+        }
+        expected_versions = {
+            name: re.search(
+                r"^FROM python:(?P<version>\d+\.\d+)-slim$",
+                path.read_text(encoding="utf-8"),
+                re.MULTILINE,
+            ).group("version")
+            for name, path in dockerfiles.items()
+        }
+        expected_versions.update({"k8s-contracts": "3.11", "maintenance": "3.11"})
+
+        for name, expected_version in expected_versions.items():
+            entry = re.search(
+                rf"(?ms)^          - name: {re.escape(name)}\n(?P<body>.*?)(?=^          - name:|^\n    steps:)",
+                test_job,
+            )
+            self.assertIsNotNone(entry, f"Missing CI matrix entry: {name}")
+            self.assertIn(
+                f'python_version: "{expected_version}"',
+                entry.group("body"),
+                f"CI Python version mismatch for {name}",
+            )
+
+        setup_python = re.search(
+            r"(?ms)^      - name: Set up Python\n(?P<body>.*?)(?=^      - name:|^\n  summary:)",
+            test_job,
+        )
+        self.assertIsNotNone(setup_python)
+        self.assertIn("python-version: ${{ matrix.python_version }}", setup_python.group("body"))
+
     def test_runtime_services_define_healthchecks(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         for port in (8000, 8010, 8001, 8002, 8003):
