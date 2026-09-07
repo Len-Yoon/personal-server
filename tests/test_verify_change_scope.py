@@ -266,26 +266,6 @@ class VerifyChangeScopeTests(unittest.TestCase):
         self.assertEqual(evidence["automation_files"], list(paths))
         self.assertEqual(evidence["blocked_files"], [])
 
-    def test_n100_operations_runner_tools_are_maintenance_policy_files(self):
-        paths = (
-            "scripts/run-n100-operations.sh",
-            "infra/k8s/tools/n100-k3s-operations-helper.py",
-            "infra/k8s/tools/install-n100-k3s-operations-helper.sh",
-            "infra/k8s/tools/n100-k3s-operations-install.py",
-            "infra/k8s/tools/n100-k3s-operations-wrapper.sh",
-            "tests/test_n100_operations_installer.py",
-        )
-        code, evidence = run_scope(*paths, executed_checks=("maintenance",))
-        self.assertEqual(code, 2)
-        self.assertEqual(evidence["automation_files"], [paths[0], paths[-1]])
-        self.assertEqual(evidence["infrastructure_files"], list(paths[1:-1]))
-        self.assertEqual(evidence["required_checks"], ["maintenance", "n100-operations"])
-        self.assertEqual(evidence["missing_checks"], ["n100-operations"])
-        code, evidence = run_scope(
-            *paths, executed_checks=("maintenance", "n100-operations")
-        )
-        self.assertEqual(code, 0)
-
     def test_remote_development_launchers_are_maintenance_policy_files(self):
         paths = (
             "scripts/n100-remote-dev.sh",
@@ -488,6 +468,24 @@ class VerifyChangeScopeTests(unittest.TestCase):
         self.assertEqual(evidence["changed_files"], [old_path, new_path])
         self.assertEqual(evidence["documentation_files"], [old_path])
         self.assertEqual(evidence["automation_files"], [new_path])
+
+    def test_legacy_n100_operations_runner_can_only_be_classified_for_deletion(self):
+        path = "scripts/run-n100-operations.sh"
+
+        deleted_code, deleted_evidence = run_git_name_status(
+            f"D\0{path}\0".encode(),
+            executed_checks=("maintenance",),
+        )
+        added_code, added_evidence = run_git_name_status(
+            f"A\0{path}\0".encode(),
+            executed_checks=("maintenance",),
+        )
+
+        self.assertEqual(deleted_code, 0)
+        self.assertEqual(deleted_evidence["automation_files"], [path])
+        self.assertEqual(deleted_evidence["blocked_files"], [])
+        self.assertEqual(added_code, 2)
+        self.assertEqual(added_evidence["blocked_files"], [path])
 
     def test_malformed_nul_separated_git_input_is_an_input_error(self):
         completed = run_command(

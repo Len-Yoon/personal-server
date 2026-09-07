@@ -39,42 +39,6 @@ bash infra/k8s/tools/sre-health-audit.sh
 
 Grafana, Prometheus, Telegram relay, Portal PVC 백업은 [K3s 운영 문서](../infra/k8s/README.md)를 따름.
 
-## N100 Operations 수동 실행
-
-원격 SSH 없이 GitHub Actions의 `Actions → N100 Operations → Run workflow`에서 고정 operation을 선택함. 실행 대상은 최신 `main`과 일치하고 성공한 main CI가 있는 revision으로 한정되며, main이 변경되거나 CI가 성공하지 않으면 fail-closed로 중단함.
-
-| 작업 | 변경 여부 | 운영 판단 |
-|---|---|---|
-| `diagnose` | 읽기 전용 | 모든 운영 작업의 첫 단계로 실행함 |
-| `verify_news_observability` | 읽기 전용 | 관측성 상태와 Secret key 존재 여부만 확인함 |
-| `deploy_safe_crawler` | 변경 | 검증된 SHA의 crawler-worker만 기존 안전 배포 경로로 변경함 |
-| `apply_news_observability` | 변경 | 두 고정 manifest의 허용 객체만 적용함 |
-
-실행 순서는 `diagnose → verify_news_observability → 필요한 변경 operation`임. 진단·검증 실패 시 변경하지 않음. `diagnose`·`verify_news_observability`는 읽기 전용임. `deploy_safe_crawler`의 health 검증과 직전 정상 revision 1회 rollback은 기존 안전 배포 도구에만 있음. Secret 값은 출력하지 않음.
-요약 순서는 `diagnose → verify → 필요한 변경`임.
-`apply_news_observability`는 제한형 helper가 client dry-run 후 두 리소스를 순서대로 apply함. helper는 health/undo/자동 rollback을 수행하지 않음. 실제 apply 중 첫 리소스가 적용된 뒤 다음 리소스에서 실패하는 partial apply 가능성이 있음. apply 실패 대응은 `verify_news_observability`와 Kubernetes 리소스 확인 후 운영자 판단으로 제한하며 자동 복구를 약속하지 않음. 어떤 변경 operation도 실패 시 후속 변경을 수행하지 않으며, 결과와 원인은 Actions 로그에서 확인 필요함.
-
-### 수동 호스트 단계: root helper 일회성 설치
-
-다음은 N100 관리자만 호스트에서 한 번 수행하는 수동 호스트 단계임. GitHub Actions가 대신 실행하지 않으며, 비밀값을 명령 인자·환경 변수·문서·로그에 넣지 않음.
-
-```bash
-cd /mnt/c/personal-server
-sudo ./infra/k8s/tools/install-n100-k3s-operations-helper.sh
-```
-
-generic broad k3s 권한이 허용된 상태이면 설치기는 fail-closed로 설치를 차단함. 설치 후 helper가 허용하는 세 가지 정확한 root operation은 `diagnose`, `verify_news_observability`, `apply_news_observability`뿐임. 일반 `sudo k3s`, 임의 kubectl, 임의 경로·명령은 허용하지 않음. 설치 실패 시 기존 helper·정책을 롤백하며, 롤백도 실패하면 관리자 복구용 보호 백업을 남기고 실패함.
-
-### 실제 N100 smoke checklist 및 실패 사례
-
-- `main` 최신 CI 성공과 Actions 실행 revision을 먼저 확인함.
-- `diagnose`로 Docker·cloudflared·로컬/공개 health·K3s를 확인함.
-- `verify_news_observability`로 crawler health, runtime token과 Secret key의 존재 여부, 고정 리소스만 확인함.
-- 필요한 경우에만 `deploy_safe_crawler` 또는 `apply_news_observability`를 실행하고 `n100_step` 결과를 확인함.
-- Runner Offline, helper 권한 부재, stale main, CI 실패, health 실패, manifest 객체 불일치는 실패 사례로 취급하고 Actions 로그를 확인한 뒤 중단함. Runner가 Offline이면 N100 Windows Runner 서비스 상태를 확인 필요함.
-
-서버 bootstrap, scheduler, Caddy, Cloudflare Tunnel, Kubernetes Secret, PVC, 운영 데이터는 이 수동 운영 경로에서도 제외함. Secret 값은 출력하지 않음.
-
 ## 장애 알림과 복구
 
 | 신호 | 감지 방식 | 알림 |
