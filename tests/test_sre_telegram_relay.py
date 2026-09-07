@@ -172,6 +172,21 @@ class ControlledTelegramClient(TelegramClient):
 
 
 class RelayServiceTest(unittest.TestCase):
+    def test_news_collection_alert_has_korean_secret_free_presentation(self):
+        relay = RelayService(
+            allowed_chat_id="123",
+            k8s_client=FakeK8s(),
+            prometheus_client=FakePrometheus(),
+        )
+        message = relay._format_alert(
+            "firing",
+            [{"labels": {"alertname": "NewsCollectionStale"}}],
+        )
+        self.assertIn("뉴스 수집 지연 또는 실패", message)
+        self.assertIn("최신 뉴스가 갱신되지 않을 수 있음", message)
+        self.assertNotIn("token", message.lower())
+        self.assertNotIn("http", message.lower())
+
     def test_absent_or_unreadable_backup_status_configmap_keeps_relay_healthy(self):
         for error in (
             HTTPError("https://kubernetes.invalid/backup-status", 404, "not found", None, None),

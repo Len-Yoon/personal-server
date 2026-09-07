@@ -38,6 +38,7 @@ ALERT_PRESENTATIONS = {
     "DeploymentUnavailable": ("서비스 실행 수 부족", "일부 기능이 정상 동작하지 않을 수 있음"),
     "PVCNotBound": ("데이터 저장소 연결 실패", "저장된 데이터에 접근하지 못할 수 있음"),
     "PrometheusTargetDown": ("상태 수집 대상 응답 없음", "해당 서비스의 상태를 확인하지 못할 수 있음"),
+    "NewsCollectionStale": ("뉴스 수집 지연 또는 실패", "최신 뉴스가 갱신되지 않을 수 있음"),
 }
 BACKUP_STATUS_MESSAGES = {
     "completed": "[백업 완료]\n상태: 암호화 백업과 복원 검증을 완료했습니다.\n대상: Portal 데이터",

@@ -25,6 +25,37 @@ def find_document(documents: list[dict], kind: str, name: str) -> dict:
 
 
 class SreTelegramManifestContractTests(unittest.TestCase):
+    def test_news_observability_manifest_uses_named_secret_key_and_existing_service(self):
+        monitor = find_document(
+            load_yaml_documents("crawler-news-observability.yaml"),
+            "ServiceMonitor",
+            "crawler-news-observability",
+        )
+        self.assertEqual(monitor["spec"]["namespaceSelector"], {"matchNames": ["personal-server"]})
+        self.assertEqual(
+            monitor["spec"]["selector"],
+            {"matchLabels": {"app.kubernetes.io/part-of": "portal-compose-bridge"}},
+        )
+        endpoint = monitor["spec"]["endpoints"][0]
+        self.assertEqual(endpoint["path"], "/internal/metrics")
+        self.assertEqual(endpoint["bearerTokenSecret"], {"name": "crawler-news-metrics", "key": "bearer_token"})
+        self.assertEqual(
+            endpoint["relabelings"],
+            [{
+                "sourceLabels": ["__meta_kubernetes_service_name"],
+                "action": "keep",
+                "regex": "compose-crawler",
+            }],
+        )
+        self.assertNotIn("stringData", monitor)
+
+    def test_news_observability_apply_contract_is_documented_without_secret_value(self):
+        operations = (ROOT / "docs" / "operations-reference.md").read_text(encoding="utf-8")
+        self.assertIn("kubectl -n monitoring apply -f infra/k8s/sre-telegram/crawler-news-observability.yaml", operations)
+        self.assertIn("kubectl -n monitoring apply -f infra/k8s/sre-telegram/prometheus-rule.yaml", operations)
+        self.assertIn("crawler-news-metrics", operations)
+        self.assertIn("bearer_token", operations)
+
     def test_relay_uses_numeric_non_root_user_contract(self):
         dockerfile = (ROOT / "sre-telegram-relay" / "Dockerfile").read_text(encoding="utf-8")
         deployment = find_document(load_yaml_documents("base.yaml"), "Deployment", "sre-telegram-relay")
@@ -240,9 +271,15 @@ class SreTelegramManifestContractTests(unittest.TestCase):
                 "for": "5m",
                 "labels": {"severity": "warning", "sre_telegram": "true"},
             },
+            {
+                "alert": "NewsCollectionStale",
+                "expr": "crawler_news_collection_initialized == 1 and time() - crawler_news_collection_first_attempt_timestamp_seconds > 900 and (\n  (crawler_news_collection_last_success_timestamp_seconds > 0\n   and time() - crawler_news_collection_last_success_timestamp_seconds > 900)\n  or\n  (crawler_news_collection_last_success_timestamp_seconds == 0\n   and time() - crawler_news_collection_last_attempt_timestamp_seconds > 900)\n  or crawler_news_collection_consecutive_failures >= 3\n)",
+                "for": "0m",
+                "labels": {"severity": "warning", "sre_telegram": "true"},
+            },
         ]
 
-        self.assertEqual(len(rules), 5)
+        self.assertEqual(len(rules), 6)
         self.assertEqual(
             [{key: item[key] for key in ("alert", "expr", "labels")} for item in rules[:1]],
             [expected_rules[0]],

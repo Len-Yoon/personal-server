@@ -7,6 +7,21 @@ from tests._test_support import prepare_service_import
 
 
 class InvestingNewsSchedulerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._baseline_path = list(sys.path)
+        cls._baseline_modules = {
+            name: module for name, module in sys.modules.items()
+            if name == "app" or name.startswith("app.")
+        }
+
+    def tearDown(self):
+        for name in list(sys.modules):
+            if name == "app" or name.startswith("app."):
+                del sys.modules[name]
+        sys.modules.update(self._baseline_modules)
+        sys.path[:] = self._baseline_path
+
     def reload_module(self):
         prepare_service_import("crawler-worker")
         sys.modules.pop("app.services.news_scheduler", None)

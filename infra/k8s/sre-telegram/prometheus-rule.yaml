@@ -53,3 +53,22 @@ spec:
           annotations:
             summary: "Prometheus target down"
             description: "Prometheus scrape target이 5분 동안 UP이 아님"
+        - alert: NewsCollectionStale
+          expr: >-
+            crawler_news_collection_initialized == 1
+            and time() - crawler_news_collection_first_attempt_timestamp_seconds > 900
+            and (
+              (crawler_news_collection_last_success_timestamp_seconds > 0
+               and time() - crawler_news_collection_last_success_timestamp_seconds > 900)
+              or
+              (crawler_news_collection_last_success_timestamp_seconds == 0
+               and time() - crawler_news_collection_last_attempt_timestamp_seconds > 900)
+              or crawler_news_collection_consecutive_failures >= 3
+            )
+          for: 0m
+          labels:
+            severity: warning
+            sre_telegram: "true"
+          annotations:
+            summary: "뉴스 수집 지연 또는 연속 실패"
+            description: "뉴스 수집이 최근 15분 동안 성공하지 않았거나 3회 연속 실패함"
