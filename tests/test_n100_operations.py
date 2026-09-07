@@ -343,5 +343,75 @@ class N100OperationsWorkflowTests(unittest.TestCase):
             self.assertNotIn(forbidden, text)
 
 
+class N100OperationsDocumentationTests(unittest.TestCase):
+    DOCUMENTS = (
+        ROOT / "docs" / "n100-github-auto-deploy.md",
+        ROOT / "docs" / "operations-reference.md",
+    )
+
+    @classmethod
+    def documentation(cls):
+        return "\n".join(path.read_text(encoding="utf-8") for path in cls.DOCUMENTS)
+
+    def test_documents_explain_manual_actions_workflow_and_operation_scope(self):
+        documentation = self.documentation()
+        for phrase in (
+            "Actions → N100 Operations → Run workflow",
+            "diagnose",
+            "deploy_safe_crawler",
+            "verify_news_observability",
+            "apply_news_observability",
+            "읽기 전용",
+            "변경",
+            "성공한 main CI",
+            "최신 main",
+            "SSH",
+            "필요하지 않음",
+        ):
+            self.assertIn(phrase, documentation)
+
+    def test_documents_describe_manual_host_onboarding_without_secret_values(self):
+        documentation = self.documentation()
+        self.assertIn("수동 호스트 단계", documentation)
+        self.assertIn("일회성", documentation)
+        self.assertIn("root helper", documentation)
+        self.assertIn("generic broad k3s", documentation)
+        self.assertIn("세 가지 정확한 root operation", documentation)
+        self.assertIn("비밀값", documentation)
+        self.assertIn("기록하지 않음", documentation)
+        self.assertNotRegex(documentation, r"(?i)(ghp_|github_pat_|AKIA[0-9A-Z]{16})")
+
+    def test_documents_cover_fail_closed_safety_smoke_checklist_and_boundaries(self):
+        documentation = self.documentation()
+        for phrase in (
+            "실패 시 롤백",
+            "Secret 값은 출력하지 않음",
+            "실제 N100 smoke checklist",
+            "diagnose → verify → 필요한 변경",
+            "fail-closed",
+            "서버 bootstrap",
+            "scheduler",
+            "Caddy",
+            "Tunnel",
+            "Secret",
+            "PVC",
+            "운영 데이터",
+            "실패 사례",
+        ):
+            self.assertIn(phrase, documentation)
+
+    def test_documents_provide_practical_failure_and_log_pointers(self):
+        documentation = self.documentation()
+        for phrase in (
+            "Actions 로그",
+            "Runner가 Offline",
+            "helper 권한 부재",
+            "main이 변경",
+            "N100 smoke",
+            "확인 필요",
+        ):
+            self.assertIn(phrase, documentation)
+
+
 if __name__ == "__main__":
     unittest.main()

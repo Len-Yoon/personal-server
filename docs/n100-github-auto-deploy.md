@@ -10,6 +10,42 @@ N100 자체에 GitHub Actions self-hosted runner를 설치합니다. 기능 브�
 
 N100은 Windows self-hosted runner가 로컬에서 배포를 실행하므로 GitHub-hosted runner의 SSH 접근, 포트포워딩, 배포용 개인키가 필요하지 않음.
 
+## N100 제한형 운영 작업
+
+GitHub 저장소에서 `Actions → N100 Operations → Run workflow`를 선택해 고정된 운영 작업 하나를 수동 실행함. 이 workflow는 현재 `main`의 최신 커밋과 일치하고 성공한 `main` push CI가 확인된 경우에만 실행되며, N100에 SSH로 접속하지 않음. `main`이 그 사이 변경되거나 CI가 성공하지 않으면 fail-closed로 중단함.
+
+| operation | 변경 여부 | 허용 범위 |
+|---|---|---|
+| `diagnose` | 읽기 전용 | Docker, cloudflared, 공개·로컬 health, K3s 상태 확인 |
+| `verify_news_observability` | 읽기 전용 | crawler health, runtime token·Secret key 존재 여부, 고정 관측성 리소스 확인 |
+| `deploy_safe_crawler` | 변경 | 기존 안전 배포 도구로 현재 검증된 main SHA의 `crawler-worker`만 배포 |
+| `apply_news_observability` | 변경 | 검증된 두 manifest의 고정 리소스만 제한형 root helper로 적용 |
+
+실행 순서는 반드시 `diagnose → verify_news_observability → 필요한 변경 operation`으로 진행함. 진단 또는 검증이 실패하면 변경 작업을 실행하지 않음. `diagnose`·`verify_news_observability`는 읽기 전용이며, 변경 operation은 preflight·health 검증과 기존 안전 배포의 rollback 동작을 따름. 실패 시 후속 변경을 수행하지 않고, 배포 health 실패는 직전 정상 revision으로 한 번만 롤백함.
+요약 순서는 `diagnose → verify → 필요한 변경`임.
+변경 실패 시 롤백함. 단, 롤백 결과와 원인은 Actions 로그에서 확인 필요함.
+
+### 수동 호스트 단계: root helper 일회성 설치
+
+아래 명령은 GitHub Actions가 실행하지 않으며, N100 관리자만 N100 WSL 호스트에서 일회성으로 수행하는 수동 호스트 단계임. 명령·문서·로그에 토큰, Secret 값 또는 기타 비밀값을 입력·기록하지 않음.
+
+```bash
+cd /mnt/c/personal-server
+sudo ./infra/k8s/tools/install-n100-k3s-operations-helper.sh
+```
+
+설치기는 generic broad k3s 권한이 이미 허용되어 있거나 권한 조회 결과가 예상과 다르면 설치를 차단함. 설치 후 root helper는 `diagnose`, `verify_news_observability`, `apply_news_observability` 세 가지 정확한 root operation만 허용하며, 일반적인 `sudo k3s`·임의 kubectl·임의 명령은 허용하지 않음. 설치 또는 사후 권한 점검이 실패하면 기존 파일을 복원하고, 복원까지 실패한 경우 관리자 확인용 보호 백업을 남긴 뒤 실패로 종료함.
+
+### 실제 N100 smoke checklist
+
+1. GitHub Actions에서 `N100 Operations` 실행 전 `main` 최신 CI가 성공했는지 확인함.
+2. `diagnose`를 실행해 Docker, cloudflared, 로컬·공개 health, K3s 상태를 확인함.
+3. `verify_news_observability`를 실행해 crawler health와 리소스·key 존재 여부를 확인함. Secret 값은 출력하지 않음.
+4. 변경이 필요할 때만 해당 변경 operation을 실행하고 Actions 로그의 `n100_operation`·`n100_step` 결과를 확인함.
+5. 실패 사례(오래된 main, CI 실패, Runner Offline, helper 권한 부재, health 실패, 고정 리소스 불일치)는 Actions 로그에서 원인을 확인하고 추가 변경 없이 중단함. Runner가 Offline이면 N100 Windows Runner 서비스 상태를 확인 필요함.
+
+이 경로의 운영 경계는 서버 bootstrap, scheduler, Caddy, Cloudflare Tunnel 설정, Kubernetes Secret 값·생성, PVC, 운영 데이터에 있음. 해당 영역은 계속 제외되며 이 workflow에서 변경하지 않음.
+
 ## Runner 최초 등록
 
 저장소의 GitHub 화면에서 다음 메뉴로 이동합니다.
