@@ -133,12 +133,23 @@ class ComposeConfigTests(unittest.TestCase):
             "youtube-memo": "python3 -m unittest tests.youtube_memo.test_video_titles",
             "book-memo": "python3 -m unittest tests.book_memo.test_book_service",
             "car-care-worker": "python3 -m unittest discover -s tests/car_care_worker",
+            "k8s-contracts": "python3 -m unittest tests.test_k8s_memo_crawler_workload_templates tests.test_k8s_monitoring_tools tests.test_k8s_monitoring_values tests.test_k8s_portal_availability_alert tests.test_k8s_portal_backup_verify tests.test_k8s_portal_cutover tests.test_k8s_portal_nodeport_connectivity_smoke tests.test_k8s_portal_pvc_backup_automation tests.test_k8s_portal_pvc_backup_verify tests.test_k8s_portal_secret_shadow_smoke tests.test_k8s_sre_health_audit tests.test_k8s_sre_pod_recovery_lab tests.test_k8s_sre_telegram_manifests tests.test_k8s_sre_telegram_tools tests.test_k8s_storage_draft tests.test_k8s_transition_runner_artifacts tests.test_k8s_transition_runner_install_tools tests.test_k8s_transition_runner_policy",
             "maintenance": "python3 -m unittest tests.test_compose_config tests.test_documentation_index tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_public_uptime_monitor tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements",
         }
         for service_name, test_command in expected_matrix_entries.items():
             self.assertIn(f"- name: {service_name}", workflow)
             self.assertIn(f"test_command: {test_command}", workflow)
         self.assertEqual(workflow.count("tests.test_documentation_index"), 1)
+
+    def test_ci_has_dedicated_k8s_contract_check(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("- name: k8s-contracts", workflow)
+        self.assertIn("Install K3s contract dependencies", workflow)
+        self.assertIn("test_command: python3 -m unittest tests.test_k8s_memo_crawler_workload_templates", workflow)
+        self.assertIn("tests.test_k8s_sre_telegram_tools", workflow)
+        maintenance_start = workflow.index("- name: maintenance")
+        maintenance_end = workflow.index("\n    steps:")
+        self.assertNotIn("tests.test_k8s_", workflow[maintenance_start:maintenance_end])
 
     def test_runtime_services_define_healthchecks(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")

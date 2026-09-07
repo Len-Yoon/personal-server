@@ -96,6 +96,10 @@ jobs:
             requirements: car-care-worker/requirements.txt
             pythonpath: car-care-worker
             test_command: python3 -m unittest discover -s tests/car_care_worker
+          - name: k8s-contracts
+            requirements: ""
+            pythonpath: .
+            test_command: python3 -m unittest tests.test_k8s_memo_crawler_workload_templates tests.test_k8s_monitoring_tools tests.test_k8s_monitoring_values tests.test_k8s_portal_availability_alert tests.test_k8s_portal_backup_verify tests.test_k8s_portal_cutover tests.test_k8s_portal_nodeport_connectivity_smoke tests.test_k8s_portal_pvc_backup_automation tests.test_k8s_portal_pvc_backup_verify tests.test_k8s_portal_secret_shadow_smoke tests.test_k8s_sre_health_audit tests.test_k8s_sre_pod_recovery_lab tests.test_k8s_sre_telegram_manifests tests.test_k8s_sre_telegram_tools tests.test_k8s_storage_draft tests.test_k8s_transition_runner_artifacts tests.test_k8s_transition_runner_install_tools tests.test_k8s_transition_runner_policy
           - name: maintenance
             requirements: ""
             pythonpath: .
@@ -113,6 +117,10 @@ jobs:
       - name: Install dependencies
         if: matrix.requirements != ''
         run: python3 -m pip install -r ${{ matrix.requirements }}
+
+      - name: Install K3s contract dependencies
+        if: matrix.name == 'k8s-contracts'
+        run: python3 -m pip install PyYAML
 
       - name: Run unit tests
         env:
@@ -143,7 +151,7 @@ jobs:
           executed_checks=()
           if [[ "${{ needs.test.result }}" == "success" ]]; then
             executed_checks=(
-              portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance
+              portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance k8s-contracts
             )
             check_results=(
               --check-result portal=success
@@ -154,6 +162,7 @@ jobs:
               --check-result book-memo=success
               --check-result car-care-worker=success
               --check-result maintenance=success
+              --check-result k8s-contracts=success
             )
           fi
           python3 scripts/verify_change_scope.py \

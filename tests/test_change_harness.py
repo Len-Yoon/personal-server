@@ -9,6 +9,19 @@ from scripts.run_change_harness import REPO_ROOT, run_harness
 
 
 class ChangeHarnessTests(unittest.TestCase):
+    def test_k8s_contracts_is_a_known_check(self):
+        code, evidence = run_harness(
+            ["infra/k8s/README.md"], check_results=("maintenance=success", "k8s-contracts=success")
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            evidence["check_results"],
+            [
+                {"name": "maintenance", "result": "success"},
+                {"name": "k8s-contracts", "result": "success"},
+            ],
+        )
+
     def run_cli(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         """Run the public CLI so argument parsing stays part of the contract."""
         return subprocess.run(

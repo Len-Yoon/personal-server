@@ -41,6 +41,9 @@ bash infra/k8s/tools/monitoring-verify.sh
 
 Alertmanager 경고는 `sre-telegram-relay`를 통해 Telegram으로 전달함. Secret 값은 N100의 승인된 Secret 관리 절차로만 관리함.
 
+- 승인된 bearer 값은 runtime Secret 키 `alertmanager_auth_token`에만 입력함.
+- 임시 Alertmanager 설정 파일에는 `credentials_file` 경로만 유지하며 bearer 값은 포함하지 않는다.
+
 ```bash
 bash infra/k8s/tools/sre-telegram-preflight.sh --alertmanager-config-file <0600-설정파일>
 bash infra/k8s/tools/sre-telegram-verify.sh
@@ -70,6 +73,20 @@ bash infra/k8s/tools/portal-cutover.sh --switch-caddy
 ```
 
 실패하면 실행기가 Compose Portal과 이전 공개 경로를 복구하도록 설계됨. 결과는 마지막 `portal_cutover=PASS|FAIL`로 판단함.
+
+## SRE Pod 자동복구 실습
+
+운영자 전용 실습은 `sre-pod-recovery-lab.sh`로 실행하며, production Portal과 별도의 namespace를 사용함.
+실습 리소스는 sre-recovery-lab-<run-id> namespace에만 생성된다.
+
+```bash
+bash infra/k8s/tools/sre-pod-recovery-lab.sh --run
+bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
+```
+
+성공 결과에는 liveness 실패 뒤 `restartCount`가 증가한 사실과 Pod가 `Ready` 조건으로 복구됨이 포함됨.
+이 실습은 다른 namespace, Portal, Compose, Caddy, scheduler를 변경하거나 재시작하지 않는다.
+운영 대상은 변경하지 않는다.
 
 ## 운영 경계
 
