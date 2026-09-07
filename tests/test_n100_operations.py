@@ -11,6 +11,7 @@ ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "run-n100-operations.sh"
 HELPER = ROOT / "infra/k8s/tools/n100-k3s-operations-helper.py"
 INSTALLER = ROOT / "infra/k8s/tools/install-n100-k3s-operations-helper.sh"
+WORKFLOW = ROOT / ".github" / "workflows" / "n100-operations.yml"
 HELPER_SPEC = importlib.util.spec_from_file_location("n100_helper", HELPER)
 assert HELPER_SPEC is not None and HELPER_SPEC.loader is not None
 HELPER_MODULE = importlib.util.module_from_spec(HELPER_SPEC)
@@ -233,6 +234,61 @@ class N100OperationsTests(unittest.TestCase):
         text = SCRIPT.read_text(encoding="utf-8")
         self.assertNotIn('eval "', text)
         self.assertNotIn("sudo -n k3s", text)
+
+
+class N100OperationsWorkflowTests(unittest.TestCase):
+    def read_workflow(self):
+        self.assertTrue(WORKFLOW.is_file(), "N100 operations workflow is required")
+        return WORKFLOW.read_text(encoding="utf-8")
+
+    def test_workflow_is_manual_and_has_only_the_fixed_operation_choice(self):
+        text = self.read_workflow()
+        self.assertIn("workflow_dispatch:", text)
+        self.assertNotIn("pull_request", text)
+        self.assertNotIn("schedule:", text)
+        self.assertIn("operation:", text)
+        self.assertIn("type: choice", text)
+        self.assertIn("required: true", text)
+        self.assertNotIn("type: string", text)
+        for operation in sorted(ALLOWED):
+            self.assertIn(f"- {operation}", text)
+        self.assertNotIn("inputs.command", text)
+        self.assertNotIn("inputs.ref", text)
+        self.assertNotIn("inputs.path", text)
+        self.assertNotIn("inputs.sha", text)
+
+    def test_workflow_requires_current_main_sha_with_successful_push_ci(self):
+        text = self.read_workflow()
+        self.assertIn("github.ref == 'refs/heads/main'", text)
+        self.assertIn('ref: "heads/main"', text)
+        self.assertIn("context.sha !== mainSha", text)
+        self.assertIn('workflow_id: "ci.yml"', text)
+        self.assertIn('event: "push"', text)
+        self.assertIn("head_sha: mainSha", text)
+        self.assertIn('run.conclusion === "success"', text)
+        self.assertIn("CI success is required", text)
+
+    def test_workflow_uses_minimal_permissions_and_shared_mutation_concurrency(self):
+        text = self.read_workflow()
+        self.assertIn("permissions:\n  actions: read\n  contents: read", text)
+        self.assertNotIn("contents: write", text)
+        self.assertNotIn("id-token: write", text)
+        self.assertIn("group: deploy-n100-${{ github.ref }}", text)
+        self.assertIn("cancel-in-progress: false", text)
+        self.assertIn("persist-credentials: false", text)
+
+    def test_workflow_runs_checked_out_revision_through_fixed_wsl_entrypoint(self):
+        text = self.read_workflow()
+        self.assertIn("runs-on: [self-hosted, Windows, X64]", text)
+        self.assertIn("ref: ${{ needs.gate-main-ci.outputs.main_sha }}", text)
+        self.assertIn("N100_OPERATIONS_ACTIONS_ROOT: ${{ github.workspace }}", text)
+        self.assertIn("N100_OPERATIONS_DEPLOY_SHA: ${{ needs.gate-main-ci.outputs.main_sha }}", text)
+        self.assertIn("bash --noprofile --norc -c", text)
+        self.assertIn('exec "$N100_OPERATIONS_ACTIONS_ROOT/scripts/run-n100-operations.sh" "$N100_OPERATION"', text)
+        self.assertNotIn("bash -lc", text)
+        self.assertNotIn("inputs.operation }}\"", text)
+        for forbidden in ("printenv", "docker inspect", "set -x", "-o yaml", "-o json"):
+            self.assertNotIn(forbidden, text)
 
 
 if __name__ == "__main__":

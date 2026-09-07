@@ -1,0 +1,105 @@
+name: N100 Operations
+
+permissions:
+  actions: read
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 승인된 N100 운영 작업
+        required: true
+        default: diagnose
+        type: choice
+        options:
+          - diagnose
+          - deploy_safe_crawler
+          - verify_news_observability
+          - apply_news_observability
+
+jobs:
+  gate-main-ci:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      main_sha: ${{ steps.verify.outputs.main_sha }}
+    steps:
+      - id: verify
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            if (context.ref !== "refs/heads/main") {
+              throw new Error("Only the main branch may run N100 operations.");
+            }
+
+            const { data: mainRef } = await github.rest.git.getRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: "heads/main",
+            });
+            const mainSha = mainRef.object.sha;
+            if (context.sha !== mainSha) {
+              throw new Error("The dispatched revision is not the current main SHA.");
+            }
+
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: "ci.yml",
+              branch: "main",
+              event: "push",
+              head_sha: mainSha,
+              per_page: 100,
+            });
+            const ciSucceeded = data.workflow_runs.some((run) =>
+              run.event === "push" &&
+              run.head_branch === "main" &&
+              run.head_sha === mainSha &&
+              run.status === "completed" &&
+              run.conclusion === "success"
+            );
+            if (!ciSucceeded) {
+              throw new Error("CI success is required for the current main SHA.");
+            }
+            core.setOutput("main_sha", mainSha);
+
+  run-operation:
+    needs: gate-main-ci
+    runs-on: [self-hosted, Windows, X64]
+    concurrency:
+      group: deploy-n100-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate-main-ci.outputs.main_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify N100 runner boundary
+        shell: pwsh
+        env:
+          N100_OPERATIONS_DEPLOY_SHA: ${{ needs.gate-main-ci.outputs.main_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path "$env:SystemRoot\System32\wsl.exe")) { throw 'WSL is unavailable.' }
+          if (-not (Test-Path "$env:GITHUB_WORKSPACE\scripts\run-n100-operations.sh")) { throw 'Operation script is unavailable.' }
+          if (-not (Test-Path 'C:\personal-server\.git')) { throw 'N100 operation checkout is unavailable.' }
+          if ((git rev-parse HEAD).Trim() -ne $env:N100_OPERATIONS_DEPLOY_SHA) { throw 'Checked-out revision does not match the gated main SHA.' }
+
+      - name: Run approved N100 operation
+        shell: pwsh
+        env:
+          N100_OPERATION: ${{ inputs.operation }}
+          N100_OPERATIONS_DEPLOY_SHA: ${{ needs.gate-main-ci.outputs.main_sha }}
+          N100_OPERATIONS_ACTIONS_ROOT: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $allowed = @('diagnose', 'deploy_safe_crawler', 'verify_news_observability', 'apply_news_observability')
+          if ($env:N100_OPERATION -notin $allowed) { throw 'Operation is not approved.' }
+          $env:WSLENV = 'N100_OPERATION:N100_OPERATIONS_DEPLOY_SHA:N100_OPERATIONS_ACTIONS_ROOT/p'
+          $fixedEntryPoint = 'exec "$N100_OPERATIONS_ACTIONS_ROOT/scripts/run-n100-operations.sh" "$N100_OPERATION"'
+          & "$env:SystemRoot\System32\wsl.exe" -d Ubuntu-24.04 -- bash --noprofile --norc -c $fixedEntryPoint
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
