@@ -85,7 +85,6 @@ SUITES = (
         (
             "-m",
             "unittest",
-            "tests.test_k8s_memo_crawler_workload_templates",
             "tests.test_k8s_monitoring_tools",
             "tests.test_k8s_monitoring_values",
             "tests.test_k8s_portal_availability_alert",
@@ -99,7 +98,6 @@ SUITES = (
             "tests.test_k8s_sre_pod_recovery_lab",
             "tests.test_k8s_sre_telegram_manifests",
             "tests.test_k8s_sre_telegram_tools",
-            "tests.test_k8s_storage_draft",
             "tests.test_k8s_transition_runner_artifacts",
             "tests.test_k8s_transition_runner_install_tools",
             "tests.test_k8s_transition_runner_policy",

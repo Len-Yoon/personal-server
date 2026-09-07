@@ -93,3 +93,14 @@ bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
 - Secret 생성·값 입력·출력은 이 저장소 도구의 범위 밖임.
 - Portal PVC·K3s·Caddy·Cloudflare Tunnel은 N100 안전 자동 배포 대상이 아님.
 - 임시 Pod 자동복구 실습은 `sre-pod-recovery-lab.sh`만 사용하며 production Portal을 변경하지 않음.
+
+## Portal 보안 smoke와 전환 경계
+
+`portal-secret-shadow-smoke.sh`는 `isolated manual smoke` 절차이며, 운영 Portal과 분리된 임시 namespace에서만 실행함. 이 smoke는 `optional HomeOps/portfolio` 설정, `data copy`, `Caddy routing`, `actual cutover`을 검증하지 않음. 실제 데이터 이동과 공개 경로 전환은 별도 승인·백업·복구 검증이 필요한 운영 작업임.
+
+Portal cutover는 `operator-only` 절차임. 실행 전 `K3s Secret encryption`과 `backup evidence`를 확인하고, `Compose writer` 단일 소유권 및 `PORTAL_BACKUP_MAX_AGE_SECONDS=86400` 유효성을 검증함. 데이터 매니페스트는 `sha256`으로 비교하고, 임시 Secret 파일은 `0600`으로 제한함. 공개 경로 변경과 정리는 별도 호출함.
+
+```bash
+bash infra/k8s/tools/portal-cutover.sh --rollback-caddy
+bash infra/k8s/tools/portal-cutover.sh --cleanup-rolledback
+```
