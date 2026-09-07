@@ -272,6 +272,7 @@ class VerifyChangeScopeTests(unittest.TestCase):
             "infra/k8s/tools/n100-k3s-operations-helper.py",
             "infra/k8s/tools/install-n100-k3s-operations-helper.sh",
             "infra/k8s/tools/n100-k3s-operations-install.py",
+            "infra/k8s/tools/n100-k3s-operations-wrapper.sh",
             "tests/test_n100_operations_installer.py",
         )
         code, evidence = run_scope(*paths, executed_checks=("maintenance",))

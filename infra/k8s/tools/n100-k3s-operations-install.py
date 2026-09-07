@@ -13,6 +13,7 @@ import sys
 import tempfile
 
 HELPER = Path('/usr/local/libexec/personal-server/n100-k3s-operations')
+HELPER_MODULE = Path('/usr/local/libexec/personal-server/n100-k3s-operations.py')
 SUDOERS = Path('/etc/sudoers.d/personal-server-n100-k3s-operations')
 OPERATIONS = ('diagnose', 'verify_news_observability', 'apply_news_observability')
 ENV = {'LC_ALL': 'C', 'PATH': '/usr/sbin:/usr/bin:/sbin:/bin'}
@@ -99,13 +100,16 @@ def ensure_directory(path, created):
     trusted_parent(path)
 
 
-def replace_files(helper_data, policy_data, helper=HELPER, sudoers=SUDOERS):
+def replace_files(wrapper_data, module_data, policy_data, helper=HELPER,
+                  module=HELPER_MODULE, sudoers=SUDOERS):
     """Stage on destination filesystems; atomic replacement and rollback."""
     staged = []
     replaced = []
     rollback_failed = False
     try:
-        for path, data, mode in [(helper, helper_data, 0o755), (sudoers, policy_data, 0o440)]:
+        for path, data, mode in [(module, module_data, 0o755),
+                                 (helper, wrapper_data, 0o755),
+                                 (sudoers, policy_data, 0o440)]:
             directory = Path(tempfile.mkdtemp(prefix='.n100-install-', dir=path.parent))
             backup = directory / 'previous'
             staged.append((path, directory, backup))
@@ -150,11 +154,21 @@ def install():
     # No command execution or filesystem mutation precedes this policy gate.
     if query(GENERIC) != 'DENIED':
         raise InstallError()
+    dependency = capture(['/usr/bin/python3', '-I', '-c', 'import yaml'])
+    if dependency.returncode or dependency.stdout or dependency.stderr:
+        raise InstallError()
     source = Path(__file__).with_name('n100-k3s-operations-helper.py')
     if source.is_symlink() or not source.is_file():
         raise InstallError()
     helper_data = source.read_bytes()
     if not helper_data.startswith(b'#!/usr/bin/python3\n'):
+        raise InstallError()
+    wrapper = Path(__file__).with_name('n100-k3s-operations-wrapper.sh')
+    if wrapper.is_symlink() or not wrapper.is_file():
+        raise InstallError()
+    wrapper_data = wrapper.read_bytes()
+    if wrapper_data != (b'#!/bin/sh\nexec /usr/bin/python3 -I '
+                        b'/usr/local/libexec/personal-server/n100-k3s-operations.py "$@"\n'):
         raise InstallError()
     policy_data = ''.join(f'window ALL=(root) NOPASSWD: NOSETENV: {HELPER} {op}\n'
                           for op in OPERATIONS).encode()
@@ -169,7 +183,7 @@ def install():
     try:
         ensure_directory(HELPER.parent, created)
         trusted_parent(SUDOERS.parent)
-        replace_files(helper_data, policy_data)
+        replace_files(wrapper_data, helper_data, policy_data)
     except BaseException:
         for directory in reversed(created):
             try:

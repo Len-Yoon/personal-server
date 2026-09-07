@@ -1,6 +1,7 @@
 import contextlib
 import importlib.util
 import io
+import os
 import subprocess
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).parents[1]
 MODULE_PATH = ROOT / "infra/k8s/tools/n100-k3s-operations-install.py"
+WRAPPER_PATH = ROOT / "infra/k8s/tools/n100-k3s-operations-wrapper.sh"
 
 
 class InstallerTests(unittest.TestCase):
@@ -22,6 +24,61 @@ class InstallerTests(unittest.TestCase):
 
     def result(self, code, out="", err=""):
         return subprocess.CompletedProcess([], code, out.encode(), err.encode())
+
+    def test_privileged_wrapper_ignores_python_environment_and_preserves_arguments(self):
+        self.assertTrue(WRAPPER_PATH.is_file(), "isolated privileged wrapper is missing")
+        wrapper = WRAPPER_PATH.read_text()
+        self.assertEqual(wrapper, '#!/bin/sh\nexec /usr/bin/python3 -I /usr/local/libexec/personal-server/n100-k3s-operations.py "$@"\n')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sentinel = root / "injected"
+            (root / "json.py").write_text(f"from pathlib import Path\nPath({str(sentinel)!r}).touch()\nraise RuntimeError('pythonpath-injected')\n")
+            probe = root / "probe.py"
+            probe.write_text("import json, sys\nprint(json.dumps(sys.argv[1:]))\n")
+            local_wrapper = root / "wrapper"
+            local_wrapper.write_text(wrapper.replace('/usr/local/libexec/personal-server/n100-k3s-operations.py', shlex.quote(str(probe))))
+            result = subprocess.run(['/bin/sh', str(local_wrapper), 'diagnose', 'one argument'], env={**os.environ, 'PYTHONPATH': str(root), 'PYTHONHOME': str(root)}, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), '["diagnose", "one argument"]')
+            self.assertFalse(sentinel.exists())
+
+    def test_missing_isolated_yaml_dependency_never_replaces_files(self):
+        with mock.patch.object(self.module.pwd, "getpwnam"), mock.patch.object(self.module, "query", return_value="DENIED"), mock.patch.object(self.module, "capture", return_value=self.result(1)) as capture, mock.patch.object(self.module, "replace_files") as change:
+            with self.assertRaises(self.module.InstallError):
+                self.module.install()
+            self.assertEqual(capture.call_args_list, [mock.call(['/usr/bin/python3', '-I', '-c', 'import yaml'])])
+            change.assert_not_called()
+
+    def test_installation_grants_only_wrapper_and_installs_distinct_python_module(self):
+        with mock.patch.object(self.module.pwd, "getpwnam"), mock.patch.object(self.module, "query", return_value="DENIED"), mock.patch.object(self.module, "capture", return_value=self.result(0)), mock.patch.object(self.module, "ensure_directory"), mock.patch.object(self.module, "trusted_parent"), mock.patch.object(self.module, "replace_files") as change:
+            self.module.install()
+        wrapper, helper, policy = change.call_args.args
+        self.assertEqual(wrapper, WRAPPER_PATH.read_bytes())
+        self.assertEqual(helper, (ROOT / 'infra/k8s/tools/n100-k3s-operations-helper.py').read_bytes())
+        self.assertEqual(policy.decode().splitlines(), [
+            'window ALL=(root) NOPASSWD: NOSETENV: /usr/local/libexec/personal-server/n100-k3s-operations diagnose',
+            'window ALL=(root) NOPASSWD: NOSETENV: /usr/local/libexec/personal-server/n100-k3s-operations verify_news_observability',
+            'window ALL=(root) NOPASSWD: NOSETENV: /usr/local/libexec/personal-server/n100-k3s-operations apply_news_observability',
+        ])
+        self.assertEqual(str(self.module.HELPER_MODULE), '/usr/local/libexec/personal-server/n100-k3s-operations.py')
+
+    def test_legacy_direct_helper_upgrade_rollback_removes_new_module(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            helper, module, sudoers = root / 'helper', root / 'module', root / 'sudoers'
+            helper.write_bytes(b'legacy direct python helper')
+            sudoers.write_bytes(b'legacy policy')
+            helper.chmod(0o751)
+            original = helper.stat()
+            with mock.patch.object(self.module.os, 'chown') as chown, mock.patch.object(self.module, 'postcheck', side_effect=self.module.InstallError):
+                with self.assertRaises(self.module.InstallError):
+                    self.module.replace_files(b'new wrapper', b'new module', b'new policy', helper, module, sudoers)
+            self.assertEqual(helper.read_bytes(), b'legacy direct python helper')
+            self.assertEqual(sudoers.read_bytes(), b'legacy policy')
+            self.assertFalse(module.exists())
+            self.assertEqual(helper.stat().st_mode, original.st_mode)
+            backups = [c for c in chown.call_args_list if c.args[0].name == 'previous']
+            self.assertEqual(backups[0].args[1:], (original.st_uid, original.st_gid))
 
     def test_query_distinguishes_policy_denial_from_errors_without_executing(self):
         command = ["/usr/local/bin/k3s", "kubectl", "version", "--client"]
@@ -70,24 +127,30 @@ class InstallerTests(unittest.TestCase):
             with self.subTest(existing=existing), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 helper = root / "helper"
+                module = root / "module"
                 sudoers = root / "sudoers"
                 if existing:
                     helper.write_bytes(b"old helper")
+                    module.write_bytes(b"old module")
                     sudoers.write_bytes(b"old policy")
                     helper.chmod(0o751)
+                    module.chmod(0o750)
                     sudoers.chmod(0o440)
                 with mock.patch.object(self.module.os, "chown"), mock.patch.object(self.module, "postcheck", side_effect=self.module.InstallError):
                     with self.assertRaises(self.module.InstallError):
-                        self.module.replace_files(b"new helper", b"new policy", helper, sudoers)
+                        self.module.replace_files(b"new helper", b"new module", b"new policy", helper, module, sudoers)
                 if existing:
                     self.assertEqual(helper.read_bytes(), b"old helper")
+                    self.assertEqual(module.read_bytes(), b"old module")
                     self.assertEqual(sudoers.read_bytes(), b"old policy")
                     self.assertEqual(helper.stat().st_mode & 0o777, 0o751)
+                    self.assertEqual(module.stat().st_mode & 0o777, 0o750)
                     self.assertEqual(sudoers.stat().st_mode & 0o777, 0o440)
                 else:
                     self.assertFalse(helper.exists())
+                    self.assertFalse(module.exists())
                     self.assertFalse(sudoers.exists())
-                self.assertEqual(sorted(p.name for p in root.iterdir()), ["helper", "sudoers"] if existing else [])
+                self.assertEqual(sorted(p.name for p in root.iterdir()), ["helper", "module", "sudoers"] if existing else [])
 
     def test_unknown_failure_never_prints_sensitive_output(self):
         stream = io.StringIO()
@@ -113,8 +176,9 @@ class InstallerTests(unittest.TestCase):
     def test_failed_rollback_keeps_previous_installation_backup(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            helper, sudoers = root / "helper", root / "sudoers"
+            helper, module, sudoers = root / "helper", root / "module", root / "sudoers"
             helper.write_bytes(b"old helper")
+            module.write_bytes(b"old module")
             sudoers.write_bytes(b"old policy")
             real_replace = self.module.os.replace
             def replace(source, destination):
@@ -123,21 +187,24 @@ class InstallerTests(unittest.TestCase):
                 return real_replace(source, destination)
             with mock.patch.object(self.module.os, "chown"), mock.patch.object(self.module.os, "replace", side_effect=replace), mock.patch.object(self.module, "postcheck", side_effect=self.module.InstallError):
                 with self.assertRaises(self.module.InstallError):
-                    self.module.replace_files(b"new helper", b"new policy", helper, sudoers)
+                    self.module.replace_files(b"new helper", b"new module", b"new policy", helper, module, sudoers)
             self.assertEqual(sudoers.read_bytes(), b"old policy")
+            self.assertEqual(module.read_bytes(), b"old module")
             self.assertIn(b"old helper", [path.read_bytes() for path in root.glob(".n100-install-*/previous")])
 
     def test_success_installs_root_owned_exact_modes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            helper, sudoers = root / "helper", root / "sudoers"
+            helper, module, sudoers = root / "helper", root / "module", root / "sudoers"
             with mock.patch.object(self.module.os, "chown") as chown, mock.patch.object(self.module, "postcheck"):
-                self.module.replace_files(b"new helper", b"new policy", helper, sudoers)
+                self.module.replace_files(b"new helper", b"new module", b"new policy", helper, module, sudoers)
             self.assertEqual(helper.read_bytes(), b"new helper")
+            self.assertEqual(module.read_bytes(), b"new module")
             self.assertEqual(sudoers.read_bytes(), b"new policy")
             self.assertEqual(helper.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(module.stat().st_mode & 0o777, 0o755)
             self.assertEqual(sudoers.stat().st_mode & 0o777, 0o440)
-            self.assertEqual([call.args[1:] for call in chown.call_args_list], [(0, 0), (0, 0)])
+            self.assertEqual([call.args[1:] for call in chown.call_args_list], [(0, 0), (0, 0), (0, 0)])
 
     def test_missing_parent_directories_are_created_and_tracked(self):
         with tempfile.TemporaryDirectory() as directory:
