@@ -1,11 +1,16 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+import hmac
+import os
 from fastapi.responses import JSONResponse
+from fastapi.responses import PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.routers import news
 from app.services.news_scheduler import InvestingNewsScheduler
+from app.services.news_collection_metrics import render_metrics
+from app.services.news_collection_status import NewsCollectionStatusStore
 
 
 @asynccontextmanager
@@ -65,6 +70,22 @@ async def apply_browser_security(request: Request, call_next):
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 app.include_router(news.router)
+
+
+@app.get("/internal/metrics", response_class=PlainTextResponse)
+def internal_metrics(request: Request):
+    configured_token = os.getenv("NEWS_METRICS_BEARER_TOKEN", "")
+    authorization = request.headers.get("authorization", "")
+    expected = f"Bearer {configured_token}"
+    if not configured_token or not hmac.compare_digest(authorization, expected):
+        return PlainTextResponse("not found\n", status_code=404)
+    return Response(
+        content=render_metrics(
+            NewsCollectionStatusStore().snapshot(),
+            refresh_interval_seconds=int(os.getenv("NEWS_REFRESH_INTERVAL_SECONDS", "300")),
+        ),
+        headers={"content-type": "text/plain; version=0.0.4"},
+    )
 
 
 @app.get("/health")

@@ -1,0 +1,25 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: crawler-news-observability
+  namespace: monitoring
+  labels:
+    release: personal-server-monitoring
+spec:
+  namespaceSelector:
+    matchNames:
+      - personal-server
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: portal-compose-bridge
+  endpoints:
+    - port: http
+      path: /internal/metrics
+      interval: 30s
+      bearerTokenSecret:
+        name: crawler-news-metrics
+        key: bearer_token
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_service_name]
+          action: keep
+          regex: compose-crawler

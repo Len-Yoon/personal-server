@@ -28,6 +28,7 @@ from app.services.news_archive_storage import (
     save_archive as _save_archive_to_storage,
 )
 from app.services.news_sources import collect_korean_news_from_sources
+from app.services.news_collection_status import NewsCollectionStatusStore
 from app.services.telegram_notifier import (
     notify_market_news_digest,
     notify_new_investing_articles,
@@ -45,6 +46,23 @@ _ARCHIVE_WRITE_LOCK = Lock()
 _REFRESH_LOCK = Lock()
 _REFRESH_WORK_LOCK = Lock()
 _REFRESHING_CATEGORIES: set[str] = set()
+_COLLECTION_STATUS: NewsCollectionStatusStore | None = None
+_COLLECTION_STATUS_PATH: str | None = None
+
+
+def _collection_status() -> NewsCollectionStatusStore:
+    global _COLLECTION_STATUS, _COLLECTION_STATUS_PATH
+    configured_status = os.getenv("NEWS_COLLECTION_STATUS_PATH")
+    configured_archive = os.getenv("NEWS_ARCHIVE_PATH")
+    path = configured_status or (
+        str(Path(configured_archive).with_name("news_collection_status.json"))
+        if configured_archive
+        else "/data/crawler-worker/news_collection_status.json"
+    )
+    if _COLLECTION_STATUS is None or _COLLECTION_STATUS_PATH != path:
+        _COLLECTION_STATUS = NewsCollectionStatusStore(path)
+        _COLLECTION_STATUS_PATH = path
+    return _COLLECTION_STATUS
 
 
 def collect_korean_news(
@@ -95,13 +113,17 @@ def collect_korean_news(
             description_resolver=_korean_category_description,
         )
 
+    _collection_status().record_attempt()
     try:
         fresh_articles = collect_korean_news_from_sources(
             category=category,
             limit=limit,
         )
     except Exception:
+        _collection_status().record_failure()
         fresh_articles = category_articles
+    else:
+        _collection_status().record_success()
     stored_articles = [
         _attach_archive_metadata(article, category=category, now=now)
         for article in fresh_articles
@@ -268,10 +290,14 @@ def _refresh_category(category: str, limit: int) -> None:
     if purged:
         archive["updated_at"] = _iso(now)
 
+    _collection_status().record_attempt()
     try:
         fresh_articles = collect_korean_news_from_sources(category=category, limit=limit)
     except Exception:
+        _collection_status().record_failure()
         fresh_articles = []
+    else:
+        _collection_status().record_success()
     stored_articles = [
         _attach_archive_metadata(article, category=category, now=now)
         for article in fresh_articles
