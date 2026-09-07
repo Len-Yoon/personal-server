@@ -113,6 +113,11 @@ jobs:
             requirements: ""
             pythonpath: .
             test_command: python3 -m unittest tests.test_compose_config tests.test_documentation_index tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_public_uptime_monitor tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements
+          - name: n100-operations
+            python_version: "3.11"
+            requirements: ""
+            pythonpath: .
+            test_command: python3 -m unittest tests.test_n100_operations tests.test_verify_change_scope
 
     steps:
       - name: Check out repository
@@ -129,6 +134,10 @@ jobs:
 
       - name: Install K3s contract dependencies
         if: matrix.name == 'k8s-contracts'
+        run: python3 -m pip install PyYAML
+
+      - name: Install N100 operations dependencies
+        if: matrix.name == 'n100-operations'
         run: python3 -m pip install PyYAML
 
       - name: Run unit tests
@@ -160,7 +169,7 @@ jobs:
           executed_checks=()
           if [[ "${{ needs.test.result }}" == "success" ]]; then
             executed_checks=(
-              portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance k8s-contracts
+              portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance k8s-contracts n100-operations
             )
             check_results=(
               --check-result portal=success
@@ -172,6 +181,7 @@ jobs:
               --check-result car-care-worker=success
               --check-result maintenance=success
               --check-result k8s-contracts=success
+              --check-result n100-operations=success
             )
           fi
           python3 scripts/verify_change_scope.py \

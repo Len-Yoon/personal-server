@@ -62,6 +62,9 @@ class N100OperationsTests(unittest.TestCase):
         self.assertIn("/mnt/c/personal-server", text)
         self.assertIn("/usr/local/libexec/personal-server/n100-k3s-operations", text)
         self.assertIn("set +x", text)
+        self.assertIn('sudo -n "$HELPER" diagnose', text)
+        self.assertIn('sudo -n "$HELPER" verify_news_observability', text)
+        self.assertIn('sudo -n "$HELPER" apply_news_observability', text)
 
     def test_deploy_requires_a_valid_sha_and_fixed_service(self):
         result = self.run_operation(
@@ -103,6 +106,10 @@ class N100OperationsTests(unittest.TestCase):
 
     def test_helper_has_exact_root_operation_allowlist(self):
         self.assertEqual(
+            HELPER_MODULE.ALLOWED,
+            {"diagnose", "verify_news_observability", "apply_news_observability"},
+        )
+        self.assertEqual(
             subprocess.run(
                 ["python3", str(HELPER), "apply_news_observability", "extra"],
                 text=True,
@@ -113,6 +120,7 @@ class N100OperationsTests(unittest.TestCase):
         text = HELPER.read_text(encoding="utf-8")
         self.assertNotIn("source_file", text)
         self.assertNotIn("manifest_path", text)
+        self.assertEqual(text.splitlines()[0], "#!/usr/bin/python3")
 
     def test_helper_rejects_symlink_multidoc_list_and_identity_mismatch(self):
         valid = """apiVersion: monitoring.coreos.com/v1\nkind: ServiceMonitor\nmetadata:\n  name: crawler-news-observability\n  namespace: monitoring\n---\napiVersion: monitoring.coreos.com/v1\nkind: PrometheusRule\nmetadata:\n  name: sre-telegram-k3s-alerts\n  namespace: monitoring\n"""
@@ -186,6 +194,35 @@ class N100OperationsTests(unittest.TestCase):
         self.assertEqual(calls[0][0], ["/usr/local/bin/k3s", "kubectl", "apply", "--dry-run=client", "-f", "-"])
         self.assertEqual(calls[0][1], calls[1][1])
 
+    def test_helper_verify_requires_nonempty_secret_stdout_without_logging_value(self):
+        base = ["/usr/local/bin/k3s", "kubectl"]
+
+        def fake_run(command, **kwargs):
+            if "secret" in command:
+                return subprocess.CompletedProcess(command, 0, stdout=b"super-secret")
+            return subprocess.CompletedProcess(command, 0, stdout=b"")
+
+        with mock.patch.object(HELPER_MODULE.subprocess, "run", side_effect=fake_run):
+            self.assertTrue(HELPER_MODULE.run_verify())
+
+        def empty_secret(command, **kwargs):
+            if "secret" in command:
+                return subprocess.CompletedProcess(command, 0, stdout=b"")
+            return subprocess.CompletedProcess(command, 0, stdout=b"")
+
+        with mock.patch.object(HELPER_MODULE.subprocess, "run", side_effect=empty_secret):
+            self.assertFalse(HELPER_MODULE.run_verify())
+        self.assertEqual(base, ["/usr/local/bin/k3s", "kubectl"])
+
+    def test_helper_oserror_exits_without_traceback(self):
+        result = subprocess.run(
+            ["python3", str(HELPER), "verify_news_observability"],
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_installer_contains_only_three_exact_sudoers_operations(self):
         text = INSTALLER.read_text(encoding="utf-8")
         self.assertIn("EUID", text)
@@ -193,6 +230,11 @@ class N100OperationsTests(unittest.TestCase):
         self.assertIn("-o root -g root", text)
         self.assertIn("0755", text)
         self.assertIn("0440", text)
+        self.assertIn("NOSETENV:", text)
+        self.assertEqual(text.count("NOPASSWD: NOSETENV:"), 3)
+        self.assertIn("sudo -l -U window", text)
+        self.assertIn("sudo -n -l -U window", text)
+        self.assertIn("/usr/local/bin/k3s", text)
         self.assertNotIn("k3s kubectl", text)
         for operation in ("diagnose", "verify_news_observability", "apply_news_observability"):
             self.assertIn(operation, text)

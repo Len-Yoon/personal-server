@@ -273,10 +273,15 @@ class VerifyChangeScopeTests(unittest.TestCase):
             "infra/k8s/tools/install-n100-k3s-operations-helper.sh",
         )
         code, evidence = run_scope(*paths, executed_checks=("maintenance",))
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 2)
         self.assertEqual(evidence["automation_files"], [paths[0]])
         self.assertEqual(evidence["infrastructure_files"], list(paths[1:]))
-        self.assertEqual(evidence["required_checks"], ["maintenance"])
+        self.assertEqual(evidence["required_checks"], ["maintenance", "n100-operations"])
+        self.assertEqual(evidence["missing_checks"], ["n100-operations"])
+        code, evidence = run_scope(
+            *paths, executed_checks=("maintenance", "n100-operations")
+        )
+        self.assertEqual(code, 0)
 
     def test_remote_development_launchers_are_maintenance_policy_files(self):
         paths = (

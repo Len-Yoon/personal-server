@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Root-owned, narrowly scoped K3s operations for the N100 runner."""
 
 from __future__ import annotations
@@ -35,8 +35,10 @@ def run_diagnose() -> bool:
 
 
 def run_verify() -> bool:
-    return (
-        run_kubectl(
+    secret = subprocess.run(
+        [
+            K3S,
+            "kubectl",
             "-n",
             "monitoring",
             "get",
@@ -44,7 +46,15 @@ def run_verify() -> bool:
             "crawler-news-metrics",
             "-o",
             "jsonpath={.data.bearer_token}",
-        )
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    token_present = secret.returncode == 0 and bool(secret.stdout.strip())
+    del secret
+    return (
+        token_present
         and run_kubectl("-n", "monitoring", "get", "servicemonitor", "crawler-news-observability")
         and run_kubectl("-n", "monitoring", "get", "prometheusrule", "sre-telegram-k3s-alerts")
     )
@@ -108,4 +118,7 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv))
+    try:
+        raise SystemExit(main(sys.argv))
+    except (OSError, UnicodeError, yaml.YAMLError):
+        raise SystemExit(1)

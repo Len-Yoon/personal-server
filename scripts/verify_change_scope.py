@@ -49,6 +49,13 @@ POLICY_MAINTENANCE_FILES = {
     "scripts/run_change_harness.py",
     "scripts/summarize_token_measurements.py",
 }
+N100_OPERATIONS_FILES = {
+    ".github/workflows/n100-operations.yml",
+    "scripts/run-n100-operations.sh",
+    "infra/k8s/tools/n100-k3s-operations-helper.py",
+    "infra/k8s/tools/install-n100-k3s-operations-helper.sh",
+    "tests/test_n100_operations.py",
+}
 RUNTIME_STATE_POLICY_FILES = {
     "scripts/runtime-service-state.sh",
     "scripts/runtime-service-state-reader.py",
@@ -97,6 +104,15 @@ def classify_paths(paths: list[str]) -> dict[str, object]:
     for path in changed_files:
         if _has_traversal_component(path):
             evidence["unclassified_files"].append(path)
+            continue
+
+        if path in N100_OPERATIONS_FILES:
+            if path.startswith("infra/"):
+                evidence["infrastructure_files"].append(path)
+            else:
+                evidence["automation_files"].append(path)
+            _append_required_check(evidence, "maintenance")
+            _append_required_check(evidence, "n100-operations")
             continue
 
         if path in POLICY_MAINTENANCE_FILES:

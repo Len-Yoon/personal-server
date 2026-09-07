@@ -94,7 +94,7 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertNotIn("git diff --name-only", workflow)
         self.assertIn("--input-format git-name-status-z", workflow)
         self.assertIn("--executed-checks", workflow)
-        self.assertIn("portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance", workflow)
+        self.assertIn("portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance n100-operations", workflow)
         self.assertIn("agent-review-scope", workflow)
         self.assertIn("policy_status", workflow)
 
@@ -114,7 +114,7 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn("  summary:\n    needs: [scope, test]\n    if: always()", workflow)
         self.assertIn("--test-result \"${{ needs.test.result }}\"", workflow)
         self.assertIn("--executed-checks", workflow)
-        self.assertIn("portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance", workflow)
+        self.assertIn("portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance k8s-contracts n100-operations", workflow)
         self.assertIn("Missing checks", workflow)
         self.assertIn("scripts/run_change_harness.py", workflow)
         self.assertIn("agent-loop-harness.json", workflow)
@@ -135,6 +135,7 @@ class ComposeConfigTests(unittest.TestCase):
             "car-care-worker": "python3 -m unittest discover -s tests/car_care_worker",
             "k8s-contracts": "python3 -m unittest tests.test_k8s_monitoring_tools tests.test_k8s_monitoring_values tests.test_k8s_portal_availability_alert tests.test_k8s_portal_backup_verify tests.test_k8s_portal_cutover tests.test_k8s_portal_nodeport_connectivity_smoke tests.test_k8s_portal_pvc_backup_automation tests.test_k8s_portal_pvc_backup_verify tests.test_k8s_portal_secret_shadow_smoke tests.test_k8s_sre_health_audit tests.test_k8s_sre_pod_recovery_lab tests.test_k8s_sre_telegram_manifests tests.test_k8s_sre_telegram_tools tests.test_k8s_transition_runner_artifacts tests.test_k8s_transition_runner_install_tools tests.test_k8s_transition_runner_policy",
             "maintenance": "python3 -m unittest tests.test_compose_config tests.test_documentation_index tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_public_uptime_monitor tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements",
+            "n100-operations": "python3 -m unittest tests.test_n100_operations tests.test_verify_change_scope",
         }
         for service_name, test_command in expected_matrix_entries.items():
             self.assertIn(f"- name: {service_name}", workflow)
@@ -145,6 +146,7 @@ class ComposeConfigTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("- name: k8s-contracts", workflow)
         self.assertIn("Install K3s contract dependencies", workflow)
+        self.assertIn("Install N100 operations dependencies", workflow)
         self.assertIn("test_command: python3 -m unittest tests.test_k8s_monitoring_tools", workflow)
         self.assertIn("tests.test_k8s_sre_telegram_tools", workflow)
         maintenance_start = workflow.index("- name: maintenance")
@@ -171,7 +173,7 @@ class ComposeConfigTests(unittest.TestCase):
             ).group("version")
             for name, path in dockerfiles.items()
         }
-        expected_versions.update({"k8s-contracts": "3.11", "maintenance": "3.11"})
+        expected_versions.update({"k8s-contracts": "3.11", "maintenance": "3.11", "n100-operations": "3.11"})
 
         for name, expected_version in expected_versions.items():
             entry = re.search(
