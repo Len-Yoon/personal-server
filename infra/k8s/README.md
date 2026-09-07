@@ -41,6 +41,9 @@ bash infra/k8s/tools/monitoring-verify.sh
 
 Alertmanager 경고는 `sre-telegram-relay`를 통해 Telegram으로 전달함. Secret 값은 N100의 승인된 Secret 관리 절차로만 관리함.
 
+- 승인된 bearer 값은 runtime Secret 키 `alertmanager_auth_token`에만 입력함.
+- 임시 Alertmanager 설정 파일에는 `credentials_file` 경로만 유지하며 bearer 값은 포함하지 않는다.
+
 ```bash
 bash infra/k8s/tools/sre-telegram-preflight.sh --alertmanager-config-file <0600-설정파일>
 bash infra/k8s/tools/sre-telegram-verify.sh
