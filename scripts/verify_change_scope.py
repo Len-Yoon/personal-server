@@ -37,6 +37,7 @@ BLOCKED_FILES = {
     "crawler-worker/app/services/news_scheduler.py",
 }
 POLICY_MAINTENANCE_FILES = {
+    "scripts/run-n100-operations.sh",
     "scripts/classify-n100-safe-deployment.py",
     "scripts/deploy-n100-safe.sh",
     "scripts/n100-remote-dev.sh",
@@ -47,6 +48,16 @@ POLICY_MAINTENANCE_FILES = {
     "scripts/verify_change_scope.py",
     "scripts/run_change_harness.py",
     "scripts/summarize_token_measurements.py",
+}
+N100_OPERATIONS_FILES = {
+    ".github/workflows/n100-operations.yml",
+    "scripts/run-n100-operations.sh",
+    "infra/k8s/tools/n100-k3s-operations-helper.py",
+    "infra/k8s/tools/install-n100-k3s-operations-helper.sh",
+    "infra/k8s/tools/n100-k3s-operations-install.py",
+    "infra/k8s/tools/n100-k3s-operations-wrapper.sh",
+    "tests/test_n100_operations.py",
+    "tests/test_n100_operations_installer.py",
 }
 RUNTIME_STATE_POLICY_FILES = {
     "scripts/runtime-service-state.sh",
@@ -96,6 +107,15 @@ def classify_paths(paths: list[str]) -> dict[str, object]:
     for path in changed_files:
         if _has_traversal_component(path):
             evidence["unclassified_files"].append(path)
+            continue
+
+        if path in N100_OPERATIONS_FILES:
+            if path.startswith("infra/"):
+                evidence["infrastructure_files"].append(path)
+            else:
+                evidence["automation_files"].append(path)
+            _append_required_check(evidence, "maintenance")
+            _append_required_check(evidence, "n100-operations")
             continue
 
         if path in POLICY_MAINTENANCE_FILES:
