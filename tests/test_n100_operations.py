@@ -77,7 +77,7 @@ class N100OperationsTests(unittest.TestCase):
         self.assertIn("n100_operation=deploy_safe_crawler status=FAIL", result.stdout + result.stderr)
         self.assertNotIn("super-secret", result.stdout + result.stderr)
 
-    def test_apply_uses_only_two_fixed_manifests_without_secret_values(self):
+    def test_apply_sends_two_yaml_documents_with_the_fixed_identities(self):
         with tempfile.TemporaryDirectory() as directory:
             bin_dir = Path(directory) / "bin"
             bin_dir.mkdir()
@@ -86,7 +86,7 @@ class N100OperationsTests(unittest.TestCase):
             fake_sudo.write_text(
                 "#!/usr/bin/env bash\n"
                 "printf '%s\\n' \"$*\" >> \"$N100_TEST_CALLS\"\n"
-                "cat >> \"$N100_TEST_CALLS\"\n"
+                "cat > \"$N100_TEST_STDIN\"\n"
                 "exit 0\n",
                 encoding="utf-8",
             )
@@ -94,6 +94,7 @@ class N100OperationsTests(unittest.TestCase):
             env = {
                 "PATH": f"{bin_dir}:{os.environ['PATH']}",
                 "N100_TEST_CALLS": str(calls),
+                "N100_TEST_STDIN": str(Path(directory) / "apply.yaml"),
             }
             result = self.run_operation("apply_news_observability", env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -103,8 +104,20 @@ class N100OperationsTests(unittest.TestCase):
             entries = calls.read_text(encoding="utf-8").splitlines()
             apply_entries = [entry for entry in entries if "n100-k3s-operations apply" in entry]
             self.assertEqual(len(apply_entries), 1)
-            self.assertIn("apiVersion: monitoring.coreos.com/v1", calls.read_text(encoding="utf-8"))
-            self.assertNotIn("super-secret", calls.read_text(encoding="utf-8"))
+            applied = Path(env["N100_TEST_STDIN"]).read_text(encoding="utf-8")
+            documents = list(yaml.safe_load_all(applied))
+            identities = {
+                (document["kind"], document["metadata"]["namespace"], document["metadata"]["name"])
+                for document in documents
+            }
+            self.assertEqual(
+                identities,
+                {
+                    ("ServiceMonitor", "monitoring", "crawler-news-observability"),
+                    ("PrometheusRule", "monitoring", "sre-telegram-k3s-alerts"),
+                },
+            )
+            self.assertNotIn("super-secret", applied)
 
     def test_helper_has_exact_root_operation_allowlist(self):
         self.assertEqual(

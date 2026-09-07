@@ -67,7 +67,7 @@ run_apply_news_observability() {
   news_manifest="$(validated_manifest "$ACTIONS_ROOT/infra/k8s/sre-telegram/crawler-news-observability.yaml")" || return 1
   rule_manifest="$(validated_manifest "$ACTIONS_ROOT/infra/k8s/sre-telegram/prometheus-rule.yaml")" || return 1
   printf '%s\n' 'n100_step=manifest_apply status=START'
-  if ! cat -- "$news_manifest" "$rule_manifest" | sudo -n "$HELPER" apply_news_observability >/dev/null 2>&1; then
+  if ! { cat -- "$news_manifest"; printf '\n---\n'; cat -- "$rule_manifest"; } | sudo -n "$HELPER" apply_news_observability >/dev/null 2>&1; then
     printf '%s\n' 'n100_step=manifest_apply status=FAIL' >&2; return 1
   fi
   printf '%s\n' 'n100_step=manifest_apply status=PASS'
