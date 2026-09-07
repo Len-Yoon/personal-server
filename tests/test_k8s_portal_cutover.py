@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "infra/k8s/tools/portal-cutover.sh"
-DOC = ROOT / "docs/k3s-flux-transition-draft.md"
+DOC = ROOT / "infra/k8s/README.md"
 BOOTSTRAP = ROOT / "scripts/windows-bootstrap.sh"
 
 

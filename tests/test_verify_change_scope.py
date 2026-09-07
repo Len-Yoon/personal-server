@@ -162,10 +162,10 @@ class VerifyChangeScopeTests(unittest.TestCase):
         self.assertEqual(evidence["required_checks"], ["maintenance"])
         self.assertEqual(evidence["unclassified_files"], [])
 
-    def test_gitops_draft_infrastructure_paths_require_maintenance_check(self):
+    def test_k8s_documentation_and_tool_paths_require_maintenance_check(self):
         paths = (
             "infra/k8s/README.md",
-            "infra/k8s/clusters/n100/apps/transition-scope.yaml.tmpl",
+            "infra/k8s/tools/sre-health-audit.sh",
         )
 
         code, evidence = run_scope(*paths)

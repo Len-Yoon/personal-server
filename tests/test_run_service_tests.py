@@ -45,7 +45,6 @@ class ServiceTestRunnerTests(unittest.TestCase):
     def test_k8s_contract_suite_runs_every_k8s_contract_module(self):
         suite = next(item for item in SUITES if item.name == "k8s-contracts")
         expected_modules = (
-            "tests.test_k8s_memo_crawler_workload_templates",
             "tests.test_k8s_monitoring_tools",
             "tests.test_k8s_monitoring_values",
             "tests.test_k8s_portal_availability_alert",
@@ -59,7 +58,6 @@ class ServiceTestRunnerTests(unittest.TestCase):
             "tests.test_k8s_sre_pod_recovery_lab",
             "tests.test_k8s_sre_telegram_manifests",
             "tests.test_k8s_sre_telegram_tools",
-            "tests.test_k8s_storage_draft",
             "tests.test_k8s_transition_runner_artifacts",
             "tests.test_k8s_transition_runner_install_tools",
             "tests.test_k8s_transition_runner_policy",
