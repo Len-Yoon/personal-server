@@ -54,7 +54,9 @@ N100_OPERATIONS_FILES = {
     "scripts/run-n100-operations.sh",
     "infra/k8s/tools/n100-k3s-operations-helper.py",
     "infra/k8s/tools/install-n100-k3s-operations-helper.sh",
+    "infra/k8s/tools/n100-k3s-operations-install.py",
     "tests/test_n100_operations.py",
+    "tests/test_n100_operations_installer.py",
 }
 RUNTIME_STATE_POLICY_FILES = {
     "scripts/runtime-service-state.sh",

@@ -117,7 +117,7 @@ jobs:
             python_version: "3.11"
             requirements: ""
             pythonpath: .
-            test_command: python3 -m unittest tests.test_n100_operations tests.test_verify_change_scope
+            test_command: python3 -m unittest tests.test_n100_operations tests.test_n100_operations_installer tests.test_verify_change_scope
 
     steps:
       - name: Check out repository

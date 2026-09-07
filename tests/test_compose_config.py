@@ -135,7 +135,7 @@ class ComposeConfigTests(unittest.TestCase):
             "car-care-worker": "python3 -m unittest discover -s tests/car_care_worker",
             "k8s-contracts": "python3 -m unittest tests.test_k8s_monitoring_tools tests.test_k8s_monitoring_values tests.test_k8s_portal_availability_alert tests.test_k8s_portal_backup_verify tests.test_k8s_portal_cutover tests.test_k8s_portal_nodeport_connectivity_smoke tests.test_k8s_portal_pvc_backup_automation tests.test_k8s_portal_pvc_backup_verify tests.test_k8s_portal_secret_shadow_smoke tests.test_k8s_sre_health_audit tests.test_k8s_sre_pod_recovery_lab tests.test_k8s_sre_telegram_manifests tests.test_k8s_sre_telegram_tools tests.test_k8s_transition_runner_artifacts tests.test_k8s_transition_runner_install_tools tests.test_k8s_transition_runner_policy",
             "maintenance": "python3 -m unittest tests.test_compose_config tests.test_documentation_index tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_public_uptime_monitor tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements",
-            "n100-operations": "python3 -m unittest tests.test_n100_operations tests.test_verify_change_scope",
+            "n100-operations": "python3 -m unittest tests.test_n100_operations tests.test_n100_operations_installer tests.test_verify_change_scope",
         }
         for service_name, test_command in expected_matrix_entries.items():
             self.assertIn(f"- name: {service_name}", workflow)

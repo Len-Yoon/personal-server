@@ -226,24 +226,8 @@ class N100OperationsTests(unittest.TestCase):
     def test_installer_contains_only_three_exact_sudoers_operations(self):
         text = INSTALLER.read_text(encoding="utf-8")
         self.assertIn("EUID", text)
-        self.assertIn("visudo -cf", text)
-        self.assertIn("-o root -g root", text)
-        self.assertIn("0755", text)
-        self.assertIn("0440", text)
-        self.assertIn("NOSETENV:", text)
-        self.assertEqual(text.count("NOPASSWD: NOSETENV:"), 3)
-        probe = "runuser -u window -- sudo -n /usr/local/bin/k3s kubectl version --client"
-        self.assertIn(probe, text)
-        self.assertIn("command -v runuser", text)
-        self.assertIn("command -v sudo", text)
-        self.assertIn(">/dev/null 2>&1", text)
-        self.assertNotIn("sudo_listing", text)
-        self.assertNotIn("grep -Fq '/usr/local/bin/k3s'", text)
-        self.assertLess(text.index(probe), text.index("install -d -o root"))
-        self.assertEqual(text.count("assert_generic_k3s_denied ||"), 2)
-        self.assertNotIn("sudo -n k3s kubectl", text)
-        for operation in ("diagnose", "verify_news_observability", "apply_news_observability"):
-            self.assertIn(operation, text)
+        self.assertIn('exec /usr/bin/python3 -I "$INSTALLER" "$@"', text)
+        self.assertNotIn("sudo -n k3s", text)
 
     def test_script_is_not_an_arbitrary_command_runner(self):
         text = SCRIPT.read_text(encoding="utf-8")
