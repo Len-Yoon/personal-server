@@ -22,14 +22,6 @@ class ChangeHarnessTests(unittest.TestCase):
             ],
         )
 
-    def test_n100_operations_is_a_known_check(self):
-        code, evidence = run_harness(
-            ["scripts/run-n100-operations.sh"],
-            check_results=("maintenance=success", "n100-operations=success"),
-        )
-        self.assertEqual(code, 0)
-        self.assertEqual(evidence["summary"]["required_checks"], ["maintenance", "n100-operations"])
-
     def run_cli(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         """Run the public CLI so argument parsing stays part of the contract."""
         return subprocess.run(

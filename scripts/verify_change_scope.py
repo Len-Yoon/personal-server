@@ -37,7 +37,6 @@ BLOCKED_FILES = {
     "crawler-worker/app/services/news_scheduler.py",
 }
 POLICY_MAINTENANCE_FILES = {
-    "scripts/run-n100-operations.sh",
     "scripts/classify-n100-safe-deployment.py",
     "scripts/deploy-n100-safe.sh",
     "scripts/n100-remote-dev.sh",
@@ -49,21 +48,14 @@ POLICY_MAINTENANCE_FILES = {
     "scripts/run_change_harness.py",
     "scripts/summarize_token_measurements.py",
 }
-N100_OPERATIONS_FILES = {
-    ".github/workflows/n100-operations.yml",
-    "scripts/run-n100-operations.sh",
-    "infra/k8s/tools/n100-k3s-operations-helper.py",
-    "infra/k8s/tools/install-n100-k3s-operations-helper.sh",
-    "infra/k8s/tools/n100-k3s-operations-install.py",
-    "infra/k8s/tools/n100-k3s-operations-wrapper.sh",
-    "tests/test_n100_operations.py",
-    "tests/test_n100_operations_installer.py",
-}
 RUNTIME_STATE_POLICY_FILES = {
     "scripts/runtime-service-state.sh",
     "scripts/runtime-service-state-reader.py",
 }
 RUNTIME_STATE_REQUIRED_CHECKS = ("crawler-worker", "youtube-memo", "book-memo")
+LEGACY_N100_OPERATIONS_REMOVAL_FILES = {
+    "scripts/run-n100-operations.sh",
+}
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -87,8 +79,11 @@ def _has_traversal_component(path: str) -> bool:
     return any(component in {".", ".."} for component in path.split("/"))
 
 
-def classify_paths(paths: list[str]) -> dict[str, object]:
+def classify_paths(
+    paths: list[str], *, deleted_paths: set[str] | None = None
+) -> dict[str, object]:
     """Classify paths, retaining first-seen order in every result list."""
+    deleted_paths = deleted_paths or set()
     changed_files = _unique(paths)
     evidence: dict[str, object] = {
         "changed_files": changed_files,
@@ -109,13 +104,9 @@ def classify_paths(paths: list[str]) -> dict[str, object]:
             evidence["unclassified_files"].append(path)
             continue
 
-        if path in N100_OPERATIONS_FILES:
-            if path.startswith("infra/"):
-                evidence["infrastructure_files"].append(path)
-            else:
-                evidence["automation_files"].append(path)
+        if path in LEGACY_N100_OPERATIONS_REMOVAL_FILES and path in deleted_paths:
+            evidence["automation_files"].append(path)
             _append_required_check(evidence, "maintenance")
-            _append_required_check(evidence, "n100-operations")
             continue
 
         if path in POLICY_MAINTENANCE_FILES:
@@ -181,13 +172,13 @@ def classify_paths(paths: list[str]) -> dict[str, object]:
     return evidence
 
 
-def _parse_git_name_status_z(contents: bytes) -> list[str]:
+def _parse_git_name_status_z(contents: bytes) -> list[tuple[str, str]]:
     fields = contents.split(b"\0")
     if fields[-1] != b"":
         raise ValueError("git-name-status-z input must end with a NUL byte")
     fields.pop()
 
-    paths: list[str] = []
+    changes: list[tuple[str, str]] = []
     index = 0
     while index < len(fields):
         status = fields[index].decode("ascii")
@@ -201,16 +192,20 @@ def _parse_git_name_status_z(contents: bytes) -> list[str]:
         for raw_path in fields[index : index + path_count]:
             if not raw_path:
                 raise ValueError(f"git-name-status-z input contains an empty path for status {status}")
-            paths.append(raw_path.decode("utf-8"))
+            changes.append((status, raw_path.decode("utf-8")))
         index += path_count
 
-    return paths
+    return changes
 
 
-def _read_paths(input_path: Path, input_format: str) -> list[str]:
+def _read_changes(input_path: Path, input_format: str) -> list[tuple[str, str]]:
     if input_format == "git-name-status-z":
         return _parse_git_name_status_z(input_path.read_bytes())
-    return [path for path in input_path.read_text(encoding="utf-8").splitlines() if path]
+    return [
+        ("M", path)
+        for path in input_path.read_text(encoding="utf-8").splitlines()
+        if path
+    ]
 
 
 def _parse_args() -> argparse.Namespace:
@@ -229,7 +224,11 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     try:
         args = _parse_args()
-        evidence = classify_paths(_read_paths(args.input, args.input_format))
+        changes = _read_changes(args.input, args.input_format)
+        evidence = classify_paths(
+            [path for _, path in changes],
+            deleted_paths={path for status, path in changes if status == "D"},
+        )
         if args.test_result is not None:
             evidence["test_result"] = args.test_result
         if args.executed_checks is not None:
