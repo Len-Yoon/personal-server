@@ -74,6 +74,20 @@ bash infra/k8s/tools/portal-cutover.sh --switch-caddy
 
 실패하면 실행기가 Compose Portal과 이전 공개 경로를 복구하도록 설계됨. 결과는 마지막 `portal_cutover=PASS|FAIL`로 판단함.
 
+## SRE Pod 자동복구 실습
+
+운영자 전용 실습은 `sre-pod-recovery-lab.sh`로 실행하며, production Portal과 별도의 namespace를 사용함.
+실습 리소스는 sre-recovery-lab-<run-id> namespace에만 생성된다.
+
+```bash
+bash infra/k8s/tools/sre-pod-recovery-lab.sh --run
+bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
+```
+
+성공 결과에는 liveness 실패 뒤 `restartCount`가 증가한 사실과 Pod가 `Ready` 조건으로 복구됨이 포함됨.
+이 실습은 다른 namespace, Portal, Compose, Caddy, scheduler를 변경하거나 재시작하지 않는다.
+운영 대상은 변경하지 않는다.
+
 ## 운영 경계
 
 - Secret 생성·값 입력·출력은 이 저장소 도구의 범위 밖임.

@@ -17,7 +17,7 @@ except ModuleNotFoundError:  # Direct execution sets sys.path to scripts/.
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 POLICY_CHECKER = REPO_ROOT / "scripts" / "verify_change_scope.py"
-KNOWN_CHECKS = frozenset(SERVICE_PREFIXES.values()) | {"maintenance"}
+KNOWN_CHECKS = frozenset(SERVICE_PREFIXES.values()) | {"maintenance", "k8s-contracts"}
 POLICY_LIST_KEYS = (
     "services",
     "required_checks",
