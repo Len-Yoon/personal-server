@@ -1,10 +1,10 @@
 # Cloudflare Tunnel 운영 가이드
 
-현재 공개 경로는 **Cloudflare Tunnel → WSL localhost Caddy → K3s Portal 또는 Compose 서비스**임. 공유기 포트포워딩은 이 경로에 사용하지 않음.
+현재 공개 경로는 **Cloudflare Tunnel → WSL localhost Caddy → K3s Portal 또는 Compose 서비스**임. 단, Hyundai OAuth callback인 `car.len.pe.kr`은 Caddy 경로에 포함하지 않으며 별도 Tunnel ingress로 `car-care-worker` loopback endpoint에 연결해야 함. 공유기 포트포워딩은 이 경로에 사용하지 않음.
 
 ## 현재 ingress 기준
 
-Tunnel의 `~/.cloudflared/config.yml`은 공개 호스트를 WSL의 `https://localhost:443`으로 전달함. Caddy가 host 이름을 기준으로 다음 대상으로 분기함.
+Tunnel의 `~/.cloudflared/config.yml`은 아래 Caddy 대상 호스트를 WSL의 `https://localhost:443`으로 전달함. Caddy가 host 이름을 기준으로 다음 대상으로 분기함.
 
 | 호스트 | Caddy 대상 |
 |---|---|
@@ -12,7 +12,12 @@ Tunnel의 `~/.cloudflared/config.yml`은 공개 호스트를 WSL의 `https://loc
 | `news.len.pe.kr` | Compose `crawler-worker` |
 | `memo.len.pe.kr` | Compose `youtube-memo` |
 | `books.len.pe.kr` | Compose `book-memo` |
-| `car.len.pe.kr` | Compose `car-care-worker` callback |
+
+## 차량 OAuth callback ingress
+
+`Caddyfile`에는 `car.len.pe.kr` 호스트 블록이 없음. 따라서 Hyundai OAuth callback은 Caddy 대상 표에 추가하지 않으며, Cloudflare Tunnel의 별도 ingress가 `http://localhost:8015`의 `car-care-worker` callback으로 전달해야 함.
+
+이 Tunnel 설정은 저장소 밖의 `~/.cloudflared/config.yml`에 있으므로 실제 운영 값은 별도 확인 필요함. 설정이 없거나 Caddy 443으로 전달되면 `HYUNDAI_REDIRECT_URI`의 callback이 404가 될 수 있음.
 
 Tunnel은 Windows 로그인 뒤 WSL 사용자 서비스로 실행됨. Windows 로그인 유지 작업이 WSL을 살려 두므로 SSH 종료만으로 Tunnel이 내려가면 안 됨.
 

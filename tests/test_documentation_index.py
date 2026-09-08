@@ -56,6 +56,22 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("crawler-worker", content)
         self.assertIn("공개 상태 Telegram 알림", content)
 
+    def test_public_route_docs_distinguish_the_car_callback_route_from_caddy(self):
+        tunnel = Path("docs/cloudflare-tunnel.md").read_text(encoding="utf-8")
+        operations = Path("docs/operations-reference.md").read_text(encoding="utf-8")
+
+        self.assertIn("`Caddyfile`에는 `car.len.pe.kr` 호스트 블록이 없음", tunnel)
+        self.assertIn("Cloudflare Tunnel의 별도 ingress", tunnel)
+        self.assertIn("별도 Cloudflare Tunnel ingress", operations)
+
+    def test_k3s_portal_environment_example_and_observability_prerequisite_are_documented(self):
+        k3s = Path("infra/k8s/README.md").read_text(encoding="utf-8")
+        operations = Path("docs/operations-reference.md").read_text(encoding="utf-8")
+
+        self.assertIn("PORTAL_UPSTREAM=host.docker.internal:30080", k3s)
+        self.assertIn("portal-compose-bridge", operations)
+        self.assertIn("compose-crawler", operations)
+
     def test_subagent_workflow_defines_mandatory_routes(self):
         project_rules = Path("AGENTS.md").read_text(encoding="utf-8")
         workflow = Path("docs/codex-work-loop.md").read_text(encoding="utf-8")

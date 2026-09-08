@@ -24,7 +24,7 @@
 | `news.len.pe.kr` | `crawler-worker` |
 | `memo.len.pe.kr` | `youtube-memo` |
 | `books.len.pe.kr` | `book-memo` |
-| `car.len.pe.kr` | `car-care-worker` OAuth callback |
+| `car.len.pe.kr` | `car-care-worker` OAuth callback. Caddy가 아닌 별도 Cloudflare Tunnel ingress의 `http://localhost:8015` 대상 설정 확인 필요 |
 
 ## 일상 상태 확인
 
@@ -64,7 +64,7 @@ Grafana, Prometheus, Telegram relay, Portal PVC 백업은 [K3s 운영 문서](..
 
 `crawler-worker`는 수집 상태를 `/data/crawler-worker/news_collection_status.json`에 원자적으로 저장함. 상태 파일에는 시각과 실패 횟수만 기록되며 기사·URL·예외 원문·토큰은 포함하지 않음.
 
-Prometheus 수집은 `infra/k8s/sre-telegram/crawler-news-observability.yaml`의 `ServiceMonitor`를 별도 승인 후 적용함. 인증은 Secret의 `bearer_token` 키를 참조하며 값은 문서·Git에 기록하지 않음. `/internal/metrics`는 정확한 Bearer 인증이 없으면 404를 반환함.
+Prometheus 수집은 `infra/k8s/sre-telegram/crawler-news-observability.yaml`의 `ServiceMonitor`를 별도 승인 후 적용함. 이 `ServiceMonitor`는 Portal cutover가 만든 `portal-compose-bridge` 라벨의 `compose-crawler` Service와 EndpointSlice를 전제함. 인증은 Secret의 `bearer_token` 키를 참조하며 값은 문서·Git에 기록하지 않음. `/internal/metrics`는 정확한 Bearer 인증이 없으면 404를 반환함.
 
 시딩 계약은 monitoring namespace Secret `crawler-news-metrics`의 `bearer_token` 키와 crawler runtime의 `NEWS_METRICS_BEARER_TOKEN`에 동일한 승인된 값을 주입하는 것임. 값 자체는 이 문서·Git·로그에 기록하지 않음. 적용 대상은 새 `crawler-news-observability.yaml`의 `ServiceMonitor`와 갱신된 `prometheus-rule.yaml`임.
 
@@ -79,6 +79,8 @@ Prometheus 수집은 `infra/k8s/sre-telegram/crawler-news-observability.yaml`의
 
 ```bash
 kubectl -n monitoring get secret crawler-news-metrics -o jsonpath='{.data.bearer_token}' >/dev/null
+kubectl -n personal-server get service compose-crawler -l app.kubernetes.io/part-of=portal-compose-bridge
+kubectl -n personal-server get endpointslice -l app.kubernetes.io/part-of=portal-compose-bridge
 kubectl -n monitoring apply --dry-run=client -f infra/k8s/sre-telegram/crawler-news-observability.yaml >/dev/null
 kubectl -n monitoring apply --dry-run=client -f infra/k8s/sre-telegram/prometheus-rule.yaml >/dev/null
 kubectl -n monitoring get servicemonitor crawler-news-observability
@@ -95,7 +97,7 @@ kubectl -n monitoring get servicemonitor crawler-news-observability
 kubectl -n monitoring get prometheus -o name
 ```
 
-적용 전 Secret key 존재 여부만 확인하고 값은 출력하지 않음. 적용 후 `ServiceMonitor` 상태와 Prometheus target의 `compose-crawler` 및 `/internal/metrics` 수집 상태를 확인함.
+적용 전 Secret key와 `portal-compose-bridge`의 `compose-crawler` Service·EndpointSlice 존재 여부만 확인하고 값은 출력하지 않음. bridge 리소스가 없으면 ServiceMonitor를 적용하지 않고 Portal cutover 상태를 먼저 확인함. 적용 후 `ServiceMonitor` 상태와 Prometheus target의 `compose-crawler` 및 `/internal/metrics` 수집 상태를 확인함.
 
 롤백 시 crawler 직전 이미지를 복귀한 뒤 `ServiceMonitor`와 `NewsCollectionStale` 규칙만 제거함. 실제 적용·Secret 생성·배포는 별도 승인 필요함.
 
