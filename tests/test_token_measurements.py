@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "summarize_token_measurements.py"
 RECORD_SCRIPT = ROOT / "scripts" / "record_token_measurement.py"
+RECORD_FINGERPRINT = "sha256:" + "a" * 64
 
 
 class TokenMeasurementTests(unittest.TestCase):
@@ -89,7 +90,7 @@ class TokenMeasurementTests(unittest.TestCase):
             "task_id": "task-001",
             "model": "gpt-5",
             "measurement_group": "harness-v1",
-            "prompt_fingerprint": "sha256:abc123",
+            "prompt_fingerprint": RECORD_FINGERPRINT,
             "recorded_at": "2026-08-26T01:00:00Z",
             "baseline_input_tokens": 100,
             "baseline_output_tokens": 20,
@@ -127,7 +128,7 @@ class TokenMeasurementTests(unittest.TestCase):
             "task_id": "task-001",
             "model": "gpt-5",
             "measurement_group": "harness-v1",
-            "prompt_fingerprint": "sha256:abc123",
+            "prompt_fingerprint": RECORD_FINGERPRINT,
             "recorded_at": "2026-08-26T01:00:00Z",
             "baseline_input_tokens": 100,
             "baseline_output_tokens": 20,
@@ -159,7 +160,7 @@ class TokenMeasurementTests(unittest.TestCase):
             "task_id": "task-001",
             "model": "gpt-5",
             "measurement_group": "harness-v1",
-            "prompt_fingerprint": "sha256:abc123",
+            "prompt_fingerprint": RECORD_FINGERPRINT,
             "recorded_at": "2026-08-26T01:00:00",
             "baseline_input_tokens": 100,
             "baseline_output_tokens": 20,
@@ -174,12 +175,32 @@ class TokenMeasurementTests(unittest.TestCase):
             self.assertIn("input_error", completed.stderr)
             self.assertFalse(output_path.exists())
 
+    def test_rejects_prompt_fingerprint_that_is_not_a_sha256_digest(self):
+        record = {
+            "task_id": "task-001",
+            "model": "gpt-5",
+            "measurement_group": "harness-v1",
+            "prompt_fingerprint": "synthetic-secret-token",
+            "recorded_at": "2026-08-26T01:00:00Z",
+            "baseline_input_tokens": 100,
+            "baseline_output_tokens": 20,
+            "harness_input_tokens": 50,
+            "harness_output_tokens": 10,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "measurements.jsonl"
+            completed = self.run_record_cli(json.dumps(record) + "\n", output_path)
+
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn("prompt_fingerprint", completed.stderr)
+            self.assertFalse(output_path.exists())
+
     def test_rejects_more_than_one_nonempty_json_line(self):
         record = {
             "task_id": "task-001",
             "model": "gpt-5",
             "measurement_group": "harness-v1",
-            "prompt_fingerprint": "sha256:abc123",
+            "prompt_fingerprint": RECORD_FINGERPRINT,
             "recorded_at": "2026-08-26T01:00:00Z",
             "baseline_input_tokens": 100,
             "baseline_output_tokens": 20,
@@ -201,7 +222,7 @@ class TokenMeasurementTests(unittest.TestCase):
             "task_id": "task-001",
             "model": "gpt-5",
             "measurement_group": "harness-v1",
-            "prompt_fingerprint": "sha256:abc123",
+            "prompt_fingerprint": RECORD_FINGERPRINT,
             "recorded_at": "2026-08-26T01:00:00+00:00",
             "baseline_input_tokens": 10,
             "baseline_output_tokens": 1,

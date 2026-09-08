@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from summarize_token_measurements import (
 
 
 RECORD_FIELDS = (*MEASUREMENT_CONDITION_FIELDS, "recorded_at", *TOKEN_FIELDS)
+SHA256_FINGERPRINT = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def parse_input(contents: str) -> dict[str, str | int]:
@@ -31,6 +33,9 @@ def parse_input(contents: str) -> dict[str, str | int]:
     # persisted fields so arbitrary input (including accidental secrets) is not
     # copied to the measurement log.
     _parse_record(record, 1)
+    fingerprint = record["prompt_fingerprint"]
+    if not SHA256_FINGERPRINT.fullmatch(fingerprint):
+        raise ValueError("line 1: prompt_fingerprint must be a SHA-256 digest")
     return {field: record[field] for field in RECORD_FIELDS}
 
 

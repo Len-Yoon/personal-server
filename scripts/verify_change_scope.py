@@ -46,6 +46,7 @@ POLICY_MAINTENANCE_FILES = {
     "scripts/verify-n100-safe-deployment-health.sh",
     "scripts/verify_change_scope.py",
     "scripts/run_change_harness.py",
+    "scripts/record_token_measurement.py",
     "scripts/summarize_token_measurements.py",
 }
 RUNTIME_STATE_POLICY_FILES = {
