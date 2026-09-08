@@ -124,9 +124,12 @@ class N100SafeDeploymentClassifierTests(unittest.TestCase):
                 self.assertEqual(decision.services, ())
 
     def test_documentation_and_tests_only_changes_are_skipped(self):
-        decision = classifier.classify_changed_paths(["README.md", "tests/test_example.py"])
+        decision = classifier.classify_changed_paths(
+            ["README.md", "tests/test_example.py", "scripts/record_token_measurement.py"]
+        )
         self.assertEqual(decision.action, "skip")
         self.assertEqual(decision.services, ())
+        self.assertEqual(decision.reason, classifier.REASON_DOCUMENTATION)
 
     def test_cli_writes_github_outputs(self):
         with tempfile.TemporaryDirectory() as directory:
