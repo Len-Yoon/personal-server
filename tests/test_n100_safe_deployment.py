@@ -66,6 +66,28 @@ class N100SafeDeploymentClassifierTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(classifier.classify_changed_paths([path]).action, "blocked")
 
+    def test_empty_log_mountpoint_markers_are_the_only_allowed_app_data_paths(self):
+        allowed = [
+            "crawler-worker/app/data/logs/.gitkeep",
+            "youtube-memo/app/data/logs/.gitkeep",
+            "book-memo/app/data/logs/.gitkeep",
+        ]
+        decision = classifier.classify_changed_paths(allowed)
+        self.assertEqual(decision.action, "deploy")
+        self.assertEqual(
+            decision.services,
+            ("book-memo", "crawler-worker", "youtube-memo"),
+        )
+
+        for path in (
+            "crawler-worker/app/data/logs/config.json",
+            "crawler-worker/app/data/logs/.keep",
+            "crawler-worker/app/data/runtime.sqlite3",
+            "car-care-worker/app/data/logs/.gitkeep",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(classifier.classify_changed_paths([path]).action, "blocked")
+
     def test_explicit_source_template_and_static_paths_deploy(self):
         decision = classifier.classify_changed_paths(
             [

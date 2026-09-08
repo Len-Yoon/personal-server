@@ -21,6 +21,10 @@ SAFE_SERVICE_PREFIXES = {
     "book-memo/": "book-memo",
     "car-care-worker/": "car-care-worker",
 }
+SAFE_LOG_MOUNTPOINT_MARKERS = frozenset(
+    f"{service}/app/data/logs/.gitkeep"
+    for service in ("crawler-worker", "youtube-memo", "book-memo")
+)
 BLOCKED_PREFIXES = (
     "portal-web/",
     "caddy/",
@@ -72,6 +76,8 @@ def _is_sensitive_service_path(path: str) -> bool:
 
 
 def _is_allowed_service_path(path: str) -> bool:
+    if path in SAFE_LOG_MOUNTPOINT_MARKERS:
+        return True
     for prefix in SAFE_SERVICE_PREFIXES:
         if path.startswith(prefix):
             relative = path[len(prefix) :]
@@ -89,6 +95,10 @@ def _is_allowed_service_path(path: str) -> bool:
 
 def _has_control_character(path: str) -> bool:
     return any(ord(character) < 32 or ord(character) == 127 for character in path)
+
+
+def _is_safe_log_mountpoint_marker(path: str) -> bool:
+    return path in SAFE_LOG_MOUNTPOINT_MARKERS
 
 
 def _is_documentation_or_test(path: str) -> bool:
@@ -116,7 +126,10 @@ def classify_changed_paths(paths: Iterable[str]) -> DeploymentDecision:
             path.startswith(tuple(SAFE_SERVICE_PREFIXES))
             and (
                 not _is_allowed_service_path(path)
-                or _is_sensitive_service_path(path)
+                or (
+                    _is_sensitive_service_path(path)
+                    and not _is_safe_log_mountpoint_marker(path)
+                )
             )
         )
     )
