@@ -105,5 +105,5 @@ jobs:
           @echo off
           if not exist "%SystemRoot%\System32\wsl.exe" exit /b 1
           set "WSLENV=N100_SAFE_DEPLOY_SHA:N100_SAFE_DEPLOY_SERVICES"
-          wsl.exe -d Ubuntu-24.04 -- bash -lc "set -euo pipefail; cd /mnt/c/personal-server; git fetch --prune origin; deploy_script=$(mktemp); trap 'rm -f -- \"$deploy_script\"' EXIT; git show \"$N100_SAFE_DEPLOY_SHA:scripts/deploy-n100-safe.sh\" > \"$deploy_script\"; chmod 700 \"$deploy_script\"; bash \"$deploy_script\" \"$N100_SAFE_DEPLOY_SHA\" \"$N100_SAFE_DEPLOY_SERVICES\""
+          wsl.exe -d Ubuntu-24.04 -- bash -lc "set -euo pipefail; cd /mnt/c/personal-server; git fetch --prune origin; deploy_script=\$(mktemp); trap 'rm -f -- \"\$deploy_script\"' EXIT; git show \"$N100_SAFE_DEPLOY_SHA:scripts/deploy-n100-safe.sh\" > \"\$deploy_script\"; chmod 700 \"\$deploy_script\"; bash \"\$deploy_script\" \"$N100_SAFE_DEPLOY_SHA\" \"$N100_SAFE_DEPLOY_SERVICES\""
           if errorlevel 1 exit /b 1
