@@ -255,6 +255,10 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "if [ \"$1\" = rev-parse ] && [ \"$2\" = origin/main ]; then\n"
                 "  printf '%s\\n' \"${FAKE_ORIGIN_MAIN_SHA}\"\n"
                 "fi\n"
+                "if [ \"$1\" = show ]; then\n"
+                "  cat \"${FAKE_HEALTH_SCRIPT}\"\n"
+                "  exit 0\n"
+                "fi\n"
                 "if [ \"$1\" = archive ]; then\n"
                 "  exec /usr/bin/tar -C \"${FAKE_RELEASE_SOURCE}\" -cf - crawler-worker youtube-memo book-memo car-care-worker\n"
                 "fi\n"
@@ -295,6 +299,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "FAKE_COMPOSE_RESULTS": ",".join(map(str, compose_results)),
                 "FAKE_ORIGIN_MAIN_SHA": origin_main_sha or expected_sha,
                 "FAKE_RELEASE_SOURCE": str(source),
+                "FAKE_HEALTH_SCRIPT": str(SAFE_HEALTH_SCRIPT),
                 "N100_SAFE_DEPLOY_HEALTH_MAX_ATTEMPTS": "1",
                 "N100_SAFE_DEPLOY_HEALTH_INTERVAL_SECONDS": "0",
             }
@@ -580,16 +585,22 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         script = SAFE_DEPLOY_SCRIPT.read_text(encoding="utf-8")
         self.assertNotIn("git checkout", script)
         self.assertIn("git archive --format=tar", script)
+        self.assertIn('git show "$revision:scripts/verify-n100-safe-deployment-health.sh"', script)
+        self.assertIn('mktemp "$STATE_DIR/verify-health.XXXXXX"', script)
+        self.assertIn('chmod 700 "$HEALTH_SCRIPT"', script)
+        self.assertNotIn('readonly HEALTH_SCRIPT=', script)
         self.assertIn("mktemp -d", script)
         self.assertIn("/app:ro", script)
         self.assertIn("docker-compose.yml", script)
         self.assertIn("docker-compose.n100.yml", script)
 
-    def test_deploy_script_trap_tracks_every_generated_override_for_rollback_cleanup(self):
+    def test_deploy_script_trap_tracks_temporary_resources_for_rollback_cleanup(self):
         script = SAFE_DEPLOY_SCRIPT.read_text(encoding="utf-8")
         self.assertIn("COMPOSE_OVERRIDES=()", script)
+        self.assertIn("HEALTH_SCRIPTS=()", script)
         self.assertIn('COMPOSE_OVERRIDES+=("$COMPOSE_OVERRIDE")', script)
-        self.assertIn("trap cleanup_generated_overrides EXIT INT TERM HUP", script)
+        self.assertIn('HEALTH_SCRIPTS+=("$HEALTH_SCRIPT")', script)
+        self.assertIn("trap cleanup_generated_resources EXIT INT TERM HUP", script)
 
     def test_workflow_uses_full_ci_run_range_not_bare_head_parent(self):
         workflow = (ROOT / ".github/workflows/deploy-n100.yml").read_text(encoding="utf-8")
