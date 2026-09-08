@@ -8,8 +8,11 @@
 
 ## 작업 범위 제한
 
-- `서버 띄우는 쪽`과 `스케줄러 쪽`은 절대 수정하지 않음.
-- 기능 변경이 필요하더라도 위 두 영역은 제외하고 작업함.
+- 서버 기동·스케줄러 코드는 기본적으로 수정하지 않음.
+- 단, N100 자동복구 감시·복구 작업은 사용자 명시 승인 시 `scripts/windows-bootstrap.ps1`과 관련 테스트를 수정할 수 있음.
+- 변경 범위는 WSL, K3s, Portal 상태, Cloudflare Tunnel 감시·복구와 중복 실행 방지로 제한함.
+- Portal PVC·Secret·운영 데이터·Caddyfile·Tunnel ingress·Compose Portal writer는 계속 수정 금지함.
+- 적용 전후 독립 운영 검토와 실제 외부 health 검증을 필수로 수행함.
 
 ## 백업 자동화 예외
 
