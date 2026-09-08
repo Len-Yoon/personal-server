@@ -52,7 +52,9 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("shell: cmd", WORKFLOW)
         self.assertNotIn("shell: powershell", WORKFLOW)
         self.assertNotIn("shell: pwsh", WORKFLOW)
-        self.assertIn("bash ./scripts/deploy-n100-safe.sh", WORKFLOW)
+        self.assertIn('git show \\"$N100_SAFE_DEPLOY_SHA:scripts/deploy-n100-safe.sh\\"', WORKFLOW)
+        self.assertIn("mktemp", WORKFLOW)
+        self.assertIn("chmod 700", WORKFLOW)
         self.assertNotIn("bash ./scripts/deploy-n100.sh", WORKFLOW)
         self.assertNotIn("N100_SSH_KEY", WORKFLOW)
 
@@ -66,7 +68,8 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn('set "WSLENV=N100_SAFE_DEPLOY_SHA:N100_SAFE_DEPLOY_SERVICES"', deploy_job)
         self.assertIn('\\"$N100_SAFE_DEPLOY_SERVICES\\"', deploy_job)
         self.assertIn('\\"$N100_SAFE_DEPLOY_SHA\\"', deploy_job)
-        self.assertIn("bash ./scripts/deploy-n100-safe.sh", deploy_job)
+        self.assertIn('git show \\"$N100_SAFE_DEPLOY_SHA:scripts/deploy-n100-safe.sh\\"', deploy_job)
+        self.assertIn('bash \\"$deploy_script\\"', deploy_job)
         self.assertNotIn("services=${services//,/ }", deploy_job)
         self.assertNotIn("services='${{ needs.changes.outputs.services }}'", deploy_job)
 
@@ -101,7 +104,8 @@ class DeployN100Tests(unittest.TestCase):
     def test_deploy_workflow_delegates_health_and_rollback_to_safe_entrypoint(self):
         deploy_job = WORKFLOW.split("\n  deploy:", maxsplit=1)[1]
         self.assertIn("Run safe deployment", deploy_job)
-        self.assertIn("bash ./scripts/deploy-n100-safe.sh", deploy_job)
+        self.assertIn('git show \\"$N100_SAFE_DEPLOY_SHA:scripts/deploy-n100-safe.sh\\"', deploy_job)
+        self.assertIn('bash \\"$deploy_script\\"', deploy_job)
         self.assertNotIn("verify-n100-deployment-health.sh", deploy_job)
         self.assertNotIn("deploy-n100.sh", deploy_job)
 

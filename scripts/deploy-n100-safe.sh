@@ -2,29 +2,34 @@
 set -euo pipefail
 umask 077
 
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly PROJECT_ROOT="${N100_SAFE_DEPLOY_PROJECT_ROOT:-$(pwd)}"
 readonly STATE_DIR="${N100_SAFE_DEPLOY_STATE_DIR:-$HOME/.local/state/personal-server/n100-safe-deploy}"
 readonly STATE_FILE="$STATE_DIR/last-healthy-revision"
 readonly RELEASES_DIR="$STATE_DIR/releases"
 readonly OVERRIDES_DIR="$STATE_DIR/overrides"
 readonly SAFE_SERVICES=(crawler-worker youtube-memo book-memo car-care-worker)
-readonly HEALTH_SCRIPT="$SCRIPT_DIR/verify-n100-safe-deployment-health.sh"
 readonly SERVICE_CSV_PATTERN='^(crawler-worker|youtube-memo|book-memo|car-care-worker)(,(crawler-worker|youtube-memo|book-memo|car-care-worker))*$'
 PARSED_SERVICES=()
 COMPOSE_OVERRIDE=''
 COMPOSE_OVERRIDES=()
+HEALTH_SCRIPT=''
+HEALTH_SCRIPTS=()
 
-cleanup_generated_overrides() {
-  local override
+cleanup_generated_resources() {
+  local override health_script
   for override in "${COMPOSE_OVERRIDES[@]}"; do
     if [[ -f "$override" && ! -L "$override" ]]; then
       unlink -- "$override"
     fi
   done
+  for health_script in "${HEALTH_SCRIPTS[@]}"; do
+    if [[ -f "$health_script" && ! -L "$health_script" ]]; then
+      unlink -- "$health_script"
+    fi
+  done
 }
 
-trap cleanup_generated_overrides EXIT INT TERM HUP
+trap cleanup_generated_resources EXIT INT TERM HUP
 
 is_revision() {
   [[ "$1" =~ ^[0-9a-f]{40}$ ]]
@@ -121,8 +126,21 @@ deploy_revision() {
     -f "$COMPOSE_OVERRIDE" up -d --build --no-deps "$@"
 }
 
+prepare_health_script() {
+  local revision="$1"
+
+  HEALTH_SCRIPT="$(mktemp "$STATE_DIR/verify-health.XXXXXX")" || return 1
+  HEALTH_SCRIPTS+=("$HEALTH_SCRIPT")
+  git show "$revision:scripts/verify-n100-safe-deployment-health.sh" > "$HEALTH_SCRIPT" || return 1
+  chmod 700 "$HEALTH_SCRIPT"
+}
+
 health_check() {
+  local revision="$1"
+  shift
+
   printf '%s\n' 'safe_cd_stage=health' >&2
+  prepare_health_script "$revision" || return 1
   "$HEALTH_SCRIPT" "$@"
 }
 
@@ -148,7 +166,6 @@ main() {
   [[ -f "$PROJECT_ROOT/docker-compose.n100.yml" ]] || return 1
   [[ -f "$PROJECT_ROOT/.env" ]] || return 1
   [[ -d "$PROJECT_ROOT/data" ]] || return 1
-  [[ -x "$HEALTH_SCRIPT" ]] || return 1
   command -v git >/dev/null
   command -v docker >/dev/null
   command -v curl >/dev/null
@@ -163,7 +180,7 @@ main() {
   [[ "$expected_sha" == "$origin_main_sha" ]] || return 1
   prepare_state_directories || return 1
 
-  if deploy_revision "$expected_sha" "${PARSED_SERVICES[@]}" && health_check "${PARSED_SERVICES[@]}"; then
+  if deploy_revision "$expected_sha" "${PARSED_SERVICES[@]}" && health_check "$expected_sha" "${PARSED_SERVICES[@]}"; then
     record_healthy_revision "$expected_sha"
     return 0
   fi
@@ -175,7 +192,7 @@ main() {
   git merge-base --is-ancestor "$previous_sha" origin/main
 
   printf '%s\n' 'safe_cd_stage=rollback' >&2
-  if deploy_revision "$previous_sha" "${PARSED_SERVICES[@]}" && health_check "${PARSED_SERVICES[@]}"; then
+  if deploy_revision "$previous_sha" "${PARSED_SERVICES[@]}" && health_check "$previous_sha" "${PARSED_SERVICES[@]}"; then
     return 0
   fi
   return 1
