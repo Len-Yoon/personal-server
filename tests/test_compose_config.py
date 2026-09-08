@@ -59,6 +59,23 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn("      - \"127.0.0.1:8015:8015\"", worker)
         self.assertIn("http://127.0.0.1:8015/health", worker)
 
+    def test_safe_n100_service_images_run_as_non_root(self):
+        for service in ("crawler-worker", "youtube-memo", "book-memo"):
+            with self.subTest(service=service):
+                dockerfile = (ROOT / service / "Dockerfile").read_text(encoding="utf-8")
+                self.assertIn("addgroup --system --gid 10001 app", dockerfile)
+                self.assertIn(
+                    "adduser --system --uid 10001 --ingroup app app", dockerfile
+                )
+                self.assertIn("COPY --chown=10001:10001", dockerfile)
+                self.assertIn("USER 10001:10001", dockerfile)
+
+        executor = (ROOT / "homeops-executor" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertNotIn("USER 10001:10001", executor)
+
+        car_care = (ROOT / "car-care-worker" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertNotIn("USER 10001:10001", car_care)
+
     def test_agent_loop_documents_require_branch_cleanup_after_merge(self):
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
