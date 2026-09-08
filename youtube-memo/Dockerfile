@@ -2,6 +2,7 @@ FROM python:3.11-slim
 
 LABEL org.opencontainers.image.source="https://github.com/Len-Yoon/personal-server"
 LABEL org.opencontainers.image.title="youtube-memo"
+LABEL org.opencontainers.image.description="Personal Server YouTube memo service"
 LABEL org.opencontainers.image.vendor="Len-Yoon"
 LABEL org.opencontainers.image.url="https://github.com/Len-Yoon/personal-server"
 LABEL org.opencontainers.image.documentation="https://github.com/Len-Yoon/personal-server#readme"
