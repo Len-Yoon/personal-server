@@ -32,6 +32,13 @@ is_nonnegative_integer() {
   [[ "$1" =~ ^[0-9]+$ ]]
 }
 
+report_health_diagnostic() {
+  local service="$1"
+
+  printf 'safe_cd_health_diagnostic service=%s\n' "$service" >&2
+  docker inspect --format 'state={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} exit={{.State.ExitCode}}' "$service" >&2 2>/dev/null || true
+}
+
 wait_for_service_health() {
   local service="$1"
   local attempt=1
@@ -71,6 +78,7 @@ main() {
 
   for service in "$@"; do
     wait_for_service_health "$service" || {
+      report_health_diagnostic "$service"
       printf '%s\n' 'safe_cd_health=FAIL reason=health_timeout' >&2
       return 1
     }
