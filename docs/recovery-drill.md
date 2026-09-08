@@ -57,11 +57,13 @@ bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
 
 ## 중단 기준과 복구 조치
 
+아래 중단 기준은 1·2단계의 정상적인 `personal-server`·`monitoring` 읽기 점검에는 적용하지 않으며, 3단계 격리된 Pod 자동복구 실습에만 적용함.
+
 다음 중 하나라도 발생하면 즉시 훈련을 중단함.
 
 | 상황 | 조치 |
 |---|---|
-| 대상 namespace가 `personal-server` 또는 `monitoring`으로 표시됨 | 명령을 중단하고 리소스를 삭제·변경하지 않은 채 운영자에게 보고함 |
+| 3단계 실습 대상 namespace가 `personal-server` 또는 `monitoring`으로 표시됨 | 명령을 중단하고 리소스를 삭제·변경하지 않은 채 운영자에게 보고함 |
 | Portal deployment, PVC, Caddy, 공개 경로가 변경될 조짐이 있음 | `Ctrl+C`로 중단하고 현재 상태만 확인함. cutover·rollback 명령은 실행하지 않음 |
 | `--run`이 실패하거나 중간 종료됨 | 출력된 run ID로 `--cleanup <run-id>`를 실행하고 namespace 부재를 확인함 |
 | Secret·token·chat ID가 출력됨 | 출력 공유를 중단하고 값을 저장하지 않음. 관련 로그·증적은 운영자 보안 절차로 처리함 |

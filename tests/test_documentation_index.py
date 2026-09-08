@@ -46,6 +46,7 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("sre-pod-recovery-lab.sh --cleanup", content)
         self.assertIn("중단", content)
         self.assertIn("운영 데이터", content)
+        self.assertIn("3단계 격리된 Pod 자동복구 실습에만 적용", content)
 
     def test_operations_reference_describes_current_runtime_split(self):
         content = Path("docs/operations-reference.md").read_text(encoding="utf-8")
