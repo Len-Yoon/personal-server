@@ -17,9 +17,13 @@ COMPOSE_OVERRIDES=()
 HEALTH_SCRIPT=''
 HEALTH_SCRIPTS=()
 OWNERSHIP_MUTATED_SERVICES=()
+OWNERSHIP_SNAPSHOTS=()
+OWNERSHIP_SNAPSHOTS_VERIFIED=0
+PAUSED_SERVICES=()
+TARGET_SERVICES_STARTED=0
 
 cleanup_generated_resources() {
-  local override health_script
+  local override health_script snapshot
   for override in "${COMPOSE_OVERRIDES[@]:-}"; do
     if [[ -f "$override" && ! -L "$override" ]]; then
       unlink -- "$override"
@@ -30,6 +34,13 @@ cleanup_generated_resources() {
       unlink -- "$health_script"
     fi
   done
+  if [[ "$OWNERSHIP_SNAPSHOTS_VERIFIED" -eq 1 ]]; then
+    for snapshot in "${OWNERSHIP_SNAPSHOTS[@]:-}"; do
+      if [[ -f "$snapshot" && ! -L "$snapshot" ]]; then
+        unlink -- "$snapshot"
+      fi
+    done
+  fi
 }
 
 trap cleanup_generated_resources EXIT INT TERM HUP
@@ -165,6 +176,127 @@ data_is_owned_by() {
     /bin/sh -ec "first=\"\$(find /data -xdev \\( ! -uid $uid -o ! -gid $gid \\) -print -quit)\" || exit \$?; test -z \"\$first\""
 }
 
+capture_data_ownership() {
+  local service="$1"
+  local data_directory="$2"
+  local snapshot
+
+  snapshot="$(mktemp "$STATE_DIR/ownership.XXXXXX")" || return 1
+  chmod 600 "$snapshot"
+  run_data_ownership_helper "$service" "$data_directory" python -c '
+import os
+import sys
+
+root = "/data"
+output = sys.stdout.buffer
+
+def emit(path):
+    metadata = os.lstat(path)
+    relative = os.path.relpath(path, root)
+    if relative == ".":
+        relative = ""
+    output.write(relative.encode("utf-8", "surrogateescape"))
+    output.write(b"\0")
+    output.write(str(metadata.st_uid).encode("ascii"))
+    output.write(b"\0")
+    output.write(str(metadata.st_gid).encode("ascii"))
+    output.write(b"\0")
+
+def raise_walk_error(error):
+    raise error
+
+emit(root)
+for parent, directories, filenames in os.walk(root, topdown=True, followlinks=False, onerror=raise_walk_error):
+    for name in directories + filenames:
+        emit(os.path.join(parent, name))
+' > "$snapshot" || {
+    unlink -- "$snapshot"
+    return 1
+  }
+  [[ -s "$snapshot" && ! -L "$snapshot" ]] || {
+    unlink -- "$snapshot"
+    return 1
+  }
+  OWNERSHIP_SNAPSHOTS+=("$snapshot")
+}
+
+restore_data_ownership_snapshot() {
+  local service="$1"
+  local data_directory="$2"
+  local snapshot="$3"
+
+  [[ -f "$snapshot" && ! -L "$snapshot" ]] || return 1
+  docker run --rm \
+    --network none \
+    --read-only \
+    --cap-drop ALL \
+    --cap-add CHOWN \
+    --cap-add FOWNER \
+    --cap-add DAC_OVERRIDE \
+    --user 0:0 \
+    --mount "type=bind,src=$data_directory,dst=/data" \
+    --mount "type=bind,src=$snapshot,dst=/state/ownership,readonly" \
+    "personal-server-$service:latest" \
+    python -c '
+import os
+
+root = "/data"
+fields = open("/state/ownership", "rb").read().split(b"\0")
+if not fields or fields[-1] != b"" or (len(fields) - 1) % 3:
+    raise SystemExit(1)
+
+for offset in range(0, len(fields) - 1, 3):
+    relative = fields[offset].decode("utf-8", "surrogateescape")
+    uid = fields[offset + 1]
+    gid = fields[offset + 2]
+    if not uid.isdigit() or not gid.isdigit():
+        raise SystemExit(1)
+    if relative:
+        if relative.startswith("/") or any(part in ("", ".", "..") for part in relative.split("/")):
+            raise SystemExit(1)
+        target = os.path.join(root, relative)
+    else:
+        target = root
+    try:
+        os.lchown(target, int(uid), int(gid))
+    except FileNotFoundError:
+        continue
+' || return 1
+}
+
+pause_service_writers() {
+  local service
+  local running
+
+  printf '%s\n' 'safe_cd_stage=writer_pause' >&2
+  for service in "$@"; do
+    running="$(docker inspect --format '{{.State.Running}}' "$service")" || return 1
+    [[ "$running" == true ]] || continue
+    docker stop "$service" >/dev/null || return 1
+    PAUSED_SERVICES+=("$service")
+  done
+}
+
+resume_paused_service_writers() {
+  local service
+
+  [[ "${#PAUSED_SERVICES[@]}" -gt 0 ]] || return 0
+  printf '%s\n' 'safe_cd_stage=writer_resume' >&2
+  for service in "${PAUSED_SERVICES[@]}"; do
+    docker start "$service" >/dev/null || return 1
+  done
+}
+
+stop_target_service_writers() {
+  local service
+
+  [[ "$TARGET_SERVICES_STARTED" -eq 1 ]] || return 0
+  printf '%s\n' 'safe_cd_stage=writer_stop' >&2
+  for service in "$@"; do
+    docker stop "$service" >/dev/null || return 1
+  done
+}
+
 align_service_data_ownership() {
   local service
   local data_directory
@@ -174,30 +306,32 @@ align_service_data_ownership() {
   for service in "$@"; do
     data_directory="$(data_directory_for_service "$service")" || continue
     [[ -d "$data_directory" && ! -L "$data_directory" ]] || return 1
-    if data_is_owned_by "$service" "$data_directory" 0 0; then
-      OWNERSHIP_MUTATED_SERVICES+=("$service")
-      run_data_ownership_helper "$service" "$data_directory" \
-        chown --recursive --no-dereference 10001:10001 /data || return 1
-    elif data_is_owned_by "$service" "$data_directory" 10001 10001; then
+    if data_is_owned_by "$service" "$data_directory" 10001 10001; then
       continue
-    else
-      return 1
     fi
+    capture_data_ownership "$service" "$data_directory" || return 1
+    OWNERSHIP_MUTATED_SERVICES+=("$service")
+    run_data_ownership_helper "$service" "$data_directory" \
+      chown --recursive --no-dereference 10001:10001 /data || return 1
   done
 }
 
 restore_root_owned_data_for_rollback() {
   local service
   local data_directory
+  local snapshot
+  local index
 
   [[ "${#OWNERSHIP_MUTATED_SERVICES[@]}" -gt 0 ]] || return 0
   printf '%s\n' 'safe_cd_stage=data_ownership_restore' >&2
-  for service in "${OWNERSHIP_MUTATED_SERVICES[@]}"; do
+  for ((index = 0; index < ${#OWNERSHIP_MUTATED_SERVICES[@]}; index++)); do
+    service="${OWNERSHIP_MUTATED_SERVICES[$index]}"
+    snapshot="${OWNERSHIP_SNAPSHOTS[$index]}"
     data_directory="$(data_directory_for_service "$service")" || return 1
     [[ -d "$data_directory" && ! -L "$data_directory" ]] || return 1
-    run_data_ownership_helper "$service" "$data_directory" \
-      chown --recursive --no-dereference 0:0 /data || return 1
+    restore_data_ownership_snapshot "$service" "$data_directory" "$snapshot" || return 1
   done
+  OWNERSHIP_SNAPSHOTS_VERIFIED=1
 }
 
 deploy_revision() {
@@ -217,7 +351,9 @@ deploy_revision() {
     -f "$PROJECT_ROOT/docker-compose.n100.yml" \
     -f "$COMPOSE_OVERRIDE" build "$@" || return 1
   if [[ "$align_data_ownership" == true ]]; then
+    pause_service_writers "$@" || return 1
     align_service_data_ownership "$@" || return 1
+    TARGET_SERVICES_STARTED=1
   fi
   docker compose \
     -f "$PROJECT_ROOT/docker-compose.yml" \
@@ -281,10 +417,16 @@ main() {
 
   if deploy_revision "$expected_sha" true "${PARSED_SERVICES[@]}" && health_check "$expected_sha" "${PARSED_SERVICES[@]}"; then
     record_healthy_revision "$expected_sha"
+    OWNERSHIP_SNAPSHOTS_VERIFIED=1
     return 0
   fi
 
+  stop_target_service_writers "${PARSED_SERVICES[@]}" || return 1
   restore_root_owned_data_for_rollback || return 1
+  if [[ "$TARGET_SERVICES_STARTED" -eq 0 ]]; then
+    resume_paused_service_writers || return 1
+    return 1
+  fi
   [[ -f "$STATE_FILE" ]] || return 1
   previous_sha="$(<"$STATE_FILE")"
   is_revision "$previous_sha" || return 1

@@ -304,8 +304,11 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "  esac\n"
                 "  [ -n \"$result\" ] || result=0\n"
                 "  [ \"$result\" = 0 ] || exit \"$result\"\n"
+                "  case \"$*\" in *'output = sys.stdout.buffer'*) printf snapshot ;; esac\n"
                 "fi\n"
-                "if [ \"$1\" = inspect ]; then printf '%s\\n' \"${FAKE_INSPECT_STATUS:-healthy}\"; fi\n"
+                "if [ \"$1\" = inspect ]; then\n"
+                "  case \"$*\" in *'.State.Running'*) printf 'true\\n' ;; *) printf '%s\\n' \"${FAKE_INSPECT_STATUS:-healthy}\" ;; esac\n"
+                "fi\n"
                 "exit 0\n",
             )
             self._write_executable(
@@ -445,44 +448,45 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertEqual(result.stderr.count("safe_cd_stage=rollback"), 1)
         self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
 
-    def test_data_ownership_failure_rolls_back_without_repeating_ownership_mutation(self):
+    def test_data_ownership_failure_restores_data_and_resumes_existing_services(self):
         result, calls, saved_state = self.run_safe_deploy(
-            previous_sha=self.OLD_SHA, docker_run_results=(1, 0), health_results=(0,)
+            previous_sha=self.OLD_SHA, docker_run_results=(0, 1, 0), health_results=(0,)
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(calls.count("docker run"), 3)
-        self.assertEqual(calls.count("git archive"), 2)
-        self.assertEqual(result.stderr.count("safe_cd_stage=rollback"), 1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls.count("docker run"), 4)
+        self.assertEqual(calls.count("git archive"), 1)
+        self.assertIn("docker start crawler-worker", calls)
+        self.assertNotIn("safe_cd_stage=rollback", result.stderr)
         self.assertEqual(result.stderr.count("safe_cd_stage=data_ownership_restore"), 1)
         self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
 
-    def test_non_root_owned_data_refuses_migration_without_reverting_unmodified_data(self):
+    def test_non_app_owned_data_is_snapshotted_before_migration(self):
         result, calls, saved_state = self.run_safe_deploy(
             previous_sha=self.OLD_SHA,
-            root_ownership_results=(1,),
             app_ownership_results=(1,),
             health_results=(0,),
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(calls.count("docker run"), 2)
-        self.assertEqual(result.stderr.count("safe_cd_stage=data_ownership_restore"), 0)
-        self.assertEqual(result.stderr.count("safe_cd_stage=rollback"), 1)
-        self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
-
-    def test_first_deploy_partial_ownership_change_is_restored_without_rollback_state(self):
-        result, calls, saved_state = self.run_safe_deploy(docker_run_results=(1, 0))
-        self.assertNotEqual(result.returncode, 0)
         self.assertEqual(calls.count("docker run"), 3)
+        self.assertEqual(result.stderr.count("safe_cd_stage=data_ownership_restore"), 0)
+        self.assertEqual(result.stderr.count("safe_cd_stage=rollback"), 0)
+        self.assertEqual(saved_state, f"{self.NEW_SHA}\n")
+
+    def test_first_deploy_partial_ownership_change_is_restored_and_previous_service_resumes(self):
+        result, calls, saved_state = self.run_safe_deploy(docker_run_results=(0, 1, 0))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls.count("docker run"), 4)
         self.assertEqual(result.stderr.count("safe_cd_stage=data_ownership_restore"), 1)
+        self.assertIn("docker start crawler-worker", calls)
         self.assertNotIn("safe_cd_stage=rollback", result.stderr)
         self.assertIsNone(saved_state)
 
     def test_app_owned_data_is_reused_without_a_second_ownership_change(self):
         result, calls, _ = self.run_safe_deploy(
-            root_ownership_results=(1,), app_ownership_results=(0,)
+            app_ownership_results=(0,)
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(calls.count("docker run"), 2)
+        self.assertEqual(calls.count("docker run"), 1)
         self.assertNotIn("chown --recursive --no-dereference 10001:10001", calls)
 
     def test_rollback_health_failure_returns_failure_without_repeating_rollback(self):
@@ -694,8 +698,16 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertIn("data_is_owned_by", script)
         self.assertIn("find /data -xdev", script)
         self.assertIn("OWNERSHIP_MUTATED_SERVICES", script)
+        self.assertIn("OWNERSHIP_SNAPSHOTS", script)
+        self.assertIn("OWNERSHIP_SNAPSHOTS_VERIFIED", script)
+        self.assertIn("capture_data_ownership", script)
+        self.assertIn("restore_data_ownership_snapshot", script)
+        self.assertIn("onerror=raise_walk_error", script)
+        self.assertIn("except FileNotFoundError", script)
         self.assertIn("safe_cd_stage=data_ownership_restore", script)
-        self.assertIn("chown --recursive --no-dereference 0:0 /data", script)
+        self.assertIn("safe_cd_stage=writer_pause", script)
+        self.assertIn("safe_cd_stage=writer_resume", script)
+        self.assertIn("safe_cd_stage=writer_stop", script)
         self.assertIn('[[ -d "$PROJECT_ROOT/data" && ! -L "$PROJECT_ROOT/data" ]]', script)
         self.assertIn('PROJECT_ROOT="$(cd -- "$PROJECT_ROOT" && pwd -P)"', script)
         self.assertIn('if [[ "$align_data_ownership" == true ]]; then', script)
