@@ -10,8 +10,55 @@ $ErrorActionPreference = "Stop"
 $ScriptPath = Join-Path $ProjectRoot "scripts\windows-bootstrap.ps1"
 $TaskName = "personal-server-autostart"
 $WslDistribution = "Ubuntu-24.04"
+$RecoveryIntervalSeconds = 180
+$RecoveryFailureThreshold = 2
+$RecoveryMaxAttempts = 3
+$RecoveryCommandTimeoutSeconds = 20
+$RecoveryStateDirectory = Join-Path $ProjectRoot "data"
+$RecoveryStatePath = Join-Path $ProjectRoot "data\recovery-state.json"
+$RecoveryLockPath = Join-Path $RecoveryStateDirectory "recovery.lock"
+$RecoveryComponents = @("keepalive", "k3s", "portal", "nodeport", "tunnel")
+$RecoveryFailureCounts = @{}
+$RecoveryAttemptCounts = @{}
+$RecoveryStateDirty = $false
 function Write-Info([string]$Message) {
     Write-Host $Message
+}
+
+function ConvertTo-WslArgument([string]$Argument) {
+    if ($Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+    return '"' + $Argument.Replace('"', '\"') + '"'
+}
+
+function Invoke-WslWithTimeout([string[]]$Arguments, [string]$Operation) {
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = "wsl.exe"
+    $startInfo.Arguments = (($Arguments | ForEach-Object { ConvertTo-WslArgument ([string]$_) }) -join " ")
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) {
+        Write-Info "$Operation could not start."
+        return $false
+    }
+    if (-not $process.WaitForExit($RecoveryCommandTimeoutSeconds * 1000)) {
+        try {
+            $process.Kill()
+        } catch {
+            Write-Info "$Operation timed out and could not be terminated."
+        }
+        Write-Info "$Operation timed out after $RecoveryCommandTimeoutSeconds seconds."
+        return $false
+    }
+    if ($process.ExitCode -ne 0) {
+        Write-Info "$Operation failed with exit code $($process.ExitCode)."
+        return $false
+    }
+    return $true
 }
 
 function Invoke-WslCommand {
@@ -27,16 +74,23 @@ function Invoke-WslCommand {
     }
 }
 
-function Start-CloudflareTunnel {
-    & wsl.exe -d $WslDistribution bash -lc "pgrep -af '[c]loudflared.*tunnel run' >/dev/null"
-    if ($LASTEXITCODE -eq 0) {
-        return
-    }
+function Test-CloudflareTunnelRunning {
+    return (Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "bash", "-lc", "pgrep -af '[c]loudflared.*tunnel run' >/dev/null") -Operation "Cloudflare Tunnel probe")
+}
 
+function Start-CloudflareTunnelProcess {
     Start-Process -FilePath 'wsl.exe' -WindowStyle Hidden -ArgumentList @(
         '-d', $WslDistribution,
         '--', 'cloudflared', 'tunnel', 'run'
     ) | Out-Null
+    return $true
+}
+
+function Start-CloudflareTunnel {
+    if (Test-CloudflareTunnelRunning) {
+        return $false
+    }
+    return (Start-CloudflareTunnelProcess)
 }
 
 function Update-HostMetrics {
@@ -72,7 +126,7 @@ function Start-PersonalServerStack {
     for ($attempt = 1; $attempt -le 10; $attempt++) {
         try {
             Invoke-WslCommand
-            Start-CloudflareTunnel
+            [void](Start-CloudflareTunnel)
             Write-Info "Ensured Docker stack is up and Cloudflare Tunnel is running."
             return
         } catch {
@@ -82,6 +136,274 @@ function Start-PersonalServerStack {
             Write-Info "Startup attempt $attempt failed; retrying in 30 seconds."
             Start-Sleep -Seconds 30
         }
+    }
+}
+
+function Get-RecoveryHealth {
+    $health = [ordered]@{
+        keepalive = "unhealthy"
+        k3s = "unhealthy"
+        portal = "deferred"
+        nodeport = "unhealthy"
+        tunnel = "unhealthy"
+    }
+
+    $keepAliveTask = Get-ScheduledTask -TaskName "PersonalServer-WSL-KeepAlive" -ErrorAction SilentlyContinue
+    if ($null -ne $keepAliveTask -and $keepAliveTask.State -eq "Running" -and (Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "--", "true") -Operation "WSL KeepAlive probe")) {
+        $health.keepalive = "healthy"
+    }
+
+    if (Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "-u", "root", "--", "systemctl", "is-active", "--quiet", "k3s") -Operation "K3s service probe") {
+        if (Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "-u", "root", "--", "k3s", "kubectl", "get", "--raw=/readyz") -Operation "K3s API probe") {
+            $health.k3s = "healthy"
+        }
+    }
+
+    if ($health.k3s -eq "healthy") {
+        $health.portal = "unhealthy"
+        if (Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "-u", "root", "--", "k3s", "kubectl", "-n", "personal-server", "wait", "--for=condition=Available", "--timeout=1s", "deployment/portal-web") -Operation "Portal availability probe") {
+            $health.portal = "healthy"
+        }
+    }
+
+    if (Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "--", "curl", "--fail", "--silent", "--show-error", "--max-time", "10", "http://127.0.0.1:30080/health") -Operation "Portal NodePort probe") {
+        $health.nodeport = "healthy"
+    }
+
+    if (Test-CloudflareTunnelRunning) {
+        $health.tunnel = "healthy"
+    }
+
+    return $health
+}
+
+function Save-RecoveryFailureState {
+    try {
+        New-Item -ItemType Directory -Path $RecoveryStateDirectory -Force | Out-Null
+        $state = [ordered]@{}
+        foreach ($component in $RecoveryComponents) {
+            $failureCount = if ($RecoveryFailureCounts.ContainsKey($component)) { [int]$RecoveryFailureCounts[$component] } else { 0 }
+            $attemptCount = if ($RecoveryAttemptCounts.ContainsKey($component)) { [int]$RecoveryAttemptCounts[$component] } else { 0 }
+            $state[$component] = [ordered]@{
+                health_failures = $failureCount
+                recovery_attempts = $attemptCount
+            }
+        }
+        $state | ConvertTo-Json -Depth 3 | Set-Content -Path $RecoveryStatePath -Encoding utf8
+        $script:RecoveryStateDirty = $false
+        return $true
+    } catch {
+        Write-Info "Recovery state could not be saved; continuing without state details."
+        $script:RecoveryStateDirty = $true
+        return $false
+    }
+}
+
+function Load-RecoveryFailureState {
+    if (-not (Test-Path -LiteralPath $RecoveryStatePath)) {
+        return
+    }
+    try {
+        $storedState = Get-Content -LiteralPath $RecoveryStatePath -Raw | ConvertFrom-Json
+        foreach ($property in $storedState.PSObject.Properties) {
+            if ($property.Name -in $RecoveryComponents) {
+                $failureCount = 0
+                $attemptCount = 0
+                if ([int]::TryParse([string]$property.Value, [ref]$failureCount) -and $failureCount -ge 0) {
+                    $RecoveryFailureCounts[$property.Name] = $failureCount
+                    $RecoveryAttemptCounts[$property.Name] = 0
+                    continue
+                }
+                $storedFailureCount = $property.Value.PSObject.Properties["health_failures"]
+                $storedAttemptCount = $property.Value.PSObject.Properties["recovery_attempts"]
+                if ($null -ne $storedFailureCount -and [int]::TryParse([string]$storedFailureCount.Value, [ref]$failureCount) -and $failureCount -ge 0) {
+                    $RecoveryFailureCounts[$property.Name] = $failureCount
+                }
+                if ($null -ne $storedAttemptCount -and [int]::TryParse([string]$storedAttemptCount.Value, [ref]$attemptCount) -and $attemptCount -ge 0) {
+                    $RecoveryAttemptCounts[$property.Name] = $attemptCount
+                }
+            }
+        }
+    } catch {
+        $RecoveryFailureCounts = @{}
+        $RecoveryAttemptCounts = @{}
+    }
+}
+
+function Register-RecoveryFailure([string]$Component) {
+    $failureCount = 0
+    if ($RecoveryFailureCounts.ContainsKey($Component)) {
+        $failureCount = [int]$RecoveryFailureCounts[$Component]
+    }
+    $failureCount += 1
+    $RecoveryFailureCounts[$Component] = $failureCount
+    [void](Save-RecoveryFailureState)
+    if ($failureCount -lt $RecoveryFailureThreshold) {
+        Write-Info "$Component recovery failure $failureCount/$RecoveryFailureThreshold."
+    }
+    return $failureCount
+}
+
+function Reset-RecoveryFailure([string]$Component) {
+    $failureCount = if ($RecoveryFailureCounts.ContainsKey($Component)) { [int]$RecoveryFailureCounts[$Component] } else { 0 }
+    $attemptCount = if ($RecoveryAttemptCounts.ContainsKey($Component)) { [int]$RecoveryAttemptCounts[$Component] } else { 0 }
+    $RecoveryFailureCounts[$Component] = 0
+    $RecoveryAttemptCounts[$Component] = 0
+    if ($failureCount -ne 0 -or $attemptCount -ne 0) {
+        [void](Save-RecoveryFailureState)
+    }
+}
+
+function Test-RecoveryAttemptAvailable([string]$Component) {
+    $attemptCount = if ($RecoveryAttemptCounts.ContainsKey($Component)) { [int]$RecoveryAttemptCounts[$Component] } else { 0 }
+    if ($attemptCount -ge $RecoveryMaxAttempts) {
+        Write-Info "$Component recovery limit reached; waiting for external status handling."
+        return $false
+    }
+    return $true
+}
+
+function Register-RecoveryAttempt([string]$Component) {
+    $attemptCount = if ($RecoveryAttemptCounts.ContainsKey($Component)) { [int]$RecoveryAttemptCounts[$Component] } else { 0 }
+    if ($attemptCount -ge $RecoveryMaxAttempts) {
+        Write-Info "$Component recovery limit reached; waiting for external status handling."
+        return $false
+    }
+    $RecoveryAttemptCounts[$Component] = $attemptCount + 1
+    [void](Save-RecoveryFailureState)
+    return $true
+}
+
+function Test-RecoveryActionNeeded([string]$Component) {
+    switch ($Component) {
+        "keepalive" {
+            $keepAliveTask = Get-ScheduledTask -TaskName "PersonalServer-WSL-KeepAlive" -ErrorAction SilentlyContinue
+            return ($null -eq $keepAliveTask -or $keepAliveTask.State -ne "Running")
+        }
+        "k3s" {
+            return (-not (Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "-u", "root", "--", "systemctl", "is-active", "--quiet", "k3s") -Operation "K3s recovery service check"))
+        }
+        "portal" {
+            return $true
+        }
+        "nodeport" {
+            Write-Info "NodePort is unhealthy; deferring to the next recovery cycle."
+            return $false
+        }
+        "tunnel" {
+            return (-not (Test-CloudflareTunnelRunning))
+        }
+    }
+    return $false
+}
+
+function Invoke-TargetedRecovery([string]$Component) {
+    Write-Info "Targeted recovery requested for $Component."
+    switch ($Component) {
+        "keepalive" {
+            Start-ScheduledTask -TaskName "PersonalServer-WSL-KeepAlive"
+            return $true
+        }
+        "k3s" {
+            [void](Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "-u", "root", "--", "systemctl", "start", "k3s") -Operation "K3s recovery start")
+            return $true
+        }
+        "portal" {
+            [void](Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "-u", "root", "--", "k3s", "kubectl", "-n", "personal-server", "rollout", "restart", "deployment/portal-web") -Operation "Portal rollout restart")
+            return $true
+        }
+        "nodeport" {
+            Write-Info "NodePort is unhealthy; deferring to the next recovery cycle."
+            return $false
+        }
+        "tunnel" {
+            return (Start-CloudflareTunnelProcess)
+        }
+    }
+    return $false
+}
+
+function Enter-RecoveryLock {
+    New-Item -ItemType Directory -Path $RecoveryStateDirectory -Force | Out-Null
+    try {
+        return [System.IO.File]::Open(
+            $RecoveryLockPath,
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None
+        )
+    } catch [System.IO.IOException] {
+        return $null
+    }
+}
+
+function Exit-RecoveryLock($LockStream) {
+    if ($null -eq $LockStream) {
+        return
+    }
+    try {
+        $LockStream.Dispose()
+    } finally {
+        Remove-Item -LiteralPath $RecoveryLockPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-RecoveryCycle {
+    $lockStream = Enter-RecoveryLock
+    if ($null -eq $lockStream) {
+        Write-Info "Recovery cycle is already running; skipping this interval."
+        return
+    }
+
+    try {
+        if (-not $RecoveryStateDirty) {
+            Load-RecoveryFailureState
+        }
+        $health = Get-RecoveryHealth
+        if ($RecoveryStateDirty) {
+            Write-Info "Recovery state is unsaved; retaining in-memory counters and blocking automated recovery until restart or operator action."
+            return
+        }
+        foreach ($component in $RecoveryComponents) {
+            if ($health[$component] -eq "healthy") {
+                Reset-RecoveryFailure $component
+                continue
+            }
+            if ($health[$component] -eq "deferred") {
+                Write-Info "$component health is deferred until K3s is healthy."
+                continue
+            }
+
+            $failureCount = Register-RecoveryFailure $component
+            if ($RecoveryStateDirty) {
+                Write-Info "Recovery state is unsaved; skipping automated recovery actions this cycle."
+                continue
+            }
+            if ($failureCount -lt $RecoveryFailureThreshold) {
+                continue
+            }
+
+            if ($component -eq "portal" -and $health.k3s -ne "healthy") {
+                Write-Info "Portal restart deferred until the K3s API is healthy."
+                continue
+            }
+            if (-not (Test-RecoveryActionNeeded $component)) {
+                continue
+            }
+            if (-not (Test-RecoveryAttemptAvailable $component)) {
+                continue
+            }
+            if (-not (Register-RecoveryAttempt $component)) {
+                continue
+            }
+            if ($RecoveryStateDirty) {
+                Write-Info "Recovery state is unsaved; skipping automated recovery actions this cycle."
+                continue
+            }
+            Invoke-TargetedRecovery $component
+        }
+    } finally {
+        Exit-RecoveryLock $lockStream
     }
 }
 
@@ -105,20 +427,27 @@ function Install-ScheduledTask {
     Write-Info "Registered scheduled task '$TaskName' to start with Windows."
 }
 
+Load-RecoveryFailureState
+
 function Start-Daemon {
     Update-HostMetrics
     Write-Info "Waiting 120 seconds for WSL and Docker after logon."
     Start-Sleep -Seconds 120
+    try {
+        Start-PersonalServerStack
+    } catch {
+        Write-Info "Initial stack bootstrap failed: $($_.Exception.Message)"
+    }
 
     while ($true) {
         try {
             Update-HostMetrics
-            Start-PersonalServerStack
+            Invoke-RecoveryCycle
         } catch {
             Write-Info "Recovery check failed: $($_.Exception.Message)"
         }
-        Write-Info "Sleeping 5 minutes before the next recovery check."
-        Start-Sleep -Seconds 300
+        Write-Info "Sleeping 3 minutes before the next recovery check."
+        Start-Sleep -Seconds $RecoveryIntervalSeconds
     }
 }
 

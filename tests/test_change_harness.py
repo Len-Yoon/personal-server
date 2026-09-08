@@ -47,6 +47,21 @@ class ChangeHarnessTests(unittest.TestCase):
         self.assertEqual(evidence["work_status"], "ready_for_review")
         self.assertEqual(evidence["summary"]["required_checks"], ["portal"])
 
+    def test_windows_bootstrap_without_maintenance_is_incomplete(self):
+        code, evidence = run_harness(["scripts/windows-bootstrap.ps1"])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(evidence["work_status"], "verification_incomplete")
+        self.assertEqual(evidence["summary"]["missing_checks"], ["maintenance"])
+
+    def test_windows_bootstrap_with_maintenance_is_ready_for_review(self):
+        code, evidence = run_harness(
+            ["scripts/windows-bootstrap.ps1"], check_results=("maintenance=success",)
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(evidence["work_status"], "ready_for_review")
+
     def test_gitops_infrastructure_with_maintenance_is_ready_for_review(self):
         code, evidence = run_harness(
             ["infra/k8s/README.md"], check_results=("maintenance=success",)

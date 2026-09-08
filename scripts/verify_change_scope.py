@@ -48,6 +48,7 @@ POLICY_MAINTENANCE_FILES = {
     "scripts/run_change_harness.py",
     "scripts/record_token_measurement.py",
     "scripts/summarize_token_measurements.py",
+    "scripts/windows-bootstrap.ps1",
 }
 RUNTIME_STATE_POLICY_FILES = {
     "scripts/runtime-service-state.sh",
