@@ -541,8 +541,40 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
             )
             recorded_calls = calls.read_text(encoding="utf-8")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(recorded_calls.count("docker inspect"), 2)
+        self.assertEqual(recorded_calls.count("docker inspect"), 3)
+        self.assertNotIn("docker logs", recorded_calls)
         self.assertNotIn("curl ", recorded_calls)
+
+    def test_health_timeout_reports_fixed_container_diagnostics_without_logs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake_bin = Path(directory) / "bin"
+            fake_bin.mkdir()
+            self._write_executable(
+                fake_bin / "docker",
+                "#!/bin/sh\n"
+                "if [ \"$1\" = inspect ]; then printf 'unhealthy\\n'; exit 0; fi\n"
+                "if [ \"$1\" = logs ]; then\n"
+                "  printf 'startup failed token=123456789:abcdefghijklmnopqrstuvwxyz\\n'\n"
+                "fi\n",
+            )
+            self._write_executable(fake_bin / "curl", "#!/bin/sh\nexit 1\n")
+            result = subprocess.run(
+                ["bash", str(SAFE_HEALTH_SCRIPT), "crawler-worker"],
+                env={
+                    **os.environ,
+                    "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+                    "N100_SAFE_DEPLOY_HEALTH_MAX_ATTEMPTS": "1",
+                    "N100_SAFE_DEPLOY_HEALTH_INTERVAL_SECONDS": "0",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("safe_cd_health_diagnostic service=crawler-worker", result.stderr)
+        self.assertIn("unhealthy", result.stderr)
+        self.assertNotIn("123456789:abcdefghijklmnopqrstuvwxyz", result.stderr)
+        self.assertNotIn("startup failed", result.stderr)
 
     def test_deploy_script_uses_release_archive_and_never_checks_out_shared_project(self):
         script = SAFE_DEPLOY_SCRIPT.read_text(encoding="utf-8")
