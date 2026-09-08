@@ -216,6 +216,9 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         previous_sha: str | None = None,
         health_results: tuple[int, ...] = (0,),
         compose_results: tuple[int, ...] = (0,),
+        docker_run_results: tuple[int, ...] = (0,),
+        root_ownership_results: tuple[int, ...] = (0,),
+        app_ownership_results: tuple[int, ...] = (1,),
         rejected_sha: str | None = None,
         origin_main_sha: str | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], str, str | None]:
@@ -226,6 +229,8 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
             for compose_file in ("docker-compose.yml", "docker-compose.n100.yml", ".env"):
                 (root / compose_file).write_text("services: {}\n", encoding="utf-8")
             (root / "data").mkdir()
+            for service in ("crawler-worker", "youtube-memo", "book-memo"):
+                (root / "data" / service).mkdir()
             source = Path(directory) / "source"
             for service in ("crawler-worker", "youtube-memo", "book-memo", "car-care-worker"):
                 service_root = source / service
@@ -245,6 +250,9 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
             calls = Path(directory) / "calls"
             health_counter = Path(directory) / "health-counter"
             compose_counter = Path(directory) / "compose-counter"
+            docker_run_counter = Path(directory) / "docker-run-counter"
+            root_ownership_counter = Path(directory) / "root-ownership-counter"
+            app_ownership_counter = Path(directory) / "app-ownership-counter"
             self._write_executable(
                 fake_bin / "git",
                 "#!/bin/sh\n"
@@ -276,6 +284,27 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "  [ -n \"$result\" ] || result=0\n"
                 "  [ \"$result\" = 0 ] || exit \"$result\"\n"
                 "fi\n"
+                "if [ \"$1\" = run ]; then\n"
+                "  case \"$*\" in\n"
+                "    *'! -uid 0'*)\n"
+                f"      count=0; [ -f '{root_ownership_counter}' ] && count=$(cat '{root_ownership_counter}')\n"
+                "      count=$((count + 1)); printf '%s' \"$count\" > '"
+                f"{root_ownership_counter}'\n"
+                "      result=$(printf '%s' \"${FAKE_ROOT_OWNERSHIP_RESULTS:-0}\" | cut -d, -f \"$count\") ;;\n"
+                "    *'! -uid 10001'*)\n"
+                f"      count=0; [ -f '{app_ownership_counter}' ] && count=$(cat '{app_ownership_counter}')\n"
+                "      count=$((count + 1)); printf '%s' \"$count\" > '"
+                f"{app_ownership_counter}'\n"
+                "      result=$(printf '%s' \"${FAKE_APP_OWNERSHIP_RESULTS:-1}\" | cut -d, -f \"$count\") ;;\n"
+                "    *)\n"
+                f"      count=0; [ -f '{docker_run_counter}' ] && count=$(cat '{docker_run_counter}')\n"
+                "      count=$((count + 1)); printf '%s' \"$count\" > '"
+                f"{docker_run_counter}'\n"
+                "      result=$(printf '%s' \"${FAKE_DOCKER_RUN_RESULTS:-0}\" | cut -d, -f \"$count\") ;;\n"
+                "  esac\n"
+                "  [ -n \"$result\" ] || result=0\n"
+                "  [ \"$result\" = 0 ] || exit \"$result\"\n"
+                "fi\n"
                 "if [ \"$1\" = inspect ]; then printf '%s\\n' \"${FAKE_INSPECT_STATUS:-healthy}\"; fi\n"
                 "exit 0\n",
             )
@@ -297,6 +326,9 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "N100_SAFE_DEPLOY_STATE_DIR": str(state_dir),
                 "FAKE_HEALTH_RESULTS": ",".join(map(str, health_results)),
                 "FAKE_COMPOSE_RESULTS": ",".join(map(str, compose_results)),
+                "FAKE_DOCKER_RUN_RESULTS": ",".join(map(str, docker_run_results)),
+                "FAKE_ROOT_OWNERSHIP_RESULTS": ",".join(map(str, root_ownership_results)),
+                "FAKE_APP_OWNERSHIP_RESULTS": ",".join(map(str, app_ownership_results)),
                 "FAKE_ORIGIN_MAIN_SHA": origin_main_sha or expected_sha,
                 "FAKE_RELEASE_SOURCE": str(source),
                 "FAKE_HEALTH_SCRIPT": str(SAFE_HEALTH_SCRIPT),
@@ -338,7 +370,9 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertIn(f"git archive --format=tar {self.NEW_SHA} -- crawler-worker/Dockerfile crawler-worker/requirements.txt crawler-worker/app", calls)
         self.assertIn("/project/docker-compose.yml -f", calls)
         self.assertIn("/project/docker-compose.n100.yml -f", calls)
-        self.assertIn("up -d --build --no-deps crawler-worker", calls)
+        self.assertIn("build crawler-worker", calls)
+        self.assertIn("--network none --read-only --cap-drop ALL --cap-add CHOWN --cap-add FOWNER --cap-add DAC_OVERRIDE --user 0:0", calls)
+        self.assertIn("up -d --no-build --no-deps crawler-worker", calls)
         self.assertIn("safe_cd_stage=deploy", result.stderr)
         self.assertIn("safe_cd_stage=health", result.stderr)
 
@@ -347,7 +381,14 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
             services_csv="crawler-worker,book-memo"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("up -d --build --no-deps crawler-worker book-memo", calls)
+        self.assertIn("build crawler-worker book-memo", calls)
+        self.assertIn("up -d --no-build --no-deps crawler-worker book-memo", calls)
+
+    def test_car_care_deploy_does_not_mutate_unrelated_persistent_data(self):
+        result, calls, _ = self.run_safe_deploy(services=("car-care-worker",))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("build car-care-worker", calls)
+        self.assertNotIn("docker run", calls)
 
     def test_malformed_or_repeated_csv_service_arguments_fail_before_compose(self):
         malformed_values = (
@@ -396,13 +437,53 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
 
     def test_compose_deploy_failure_rolls_back_once_to_saved_healthy_revision(self):
         result, calls, saved_state = self.run_safe_deploy(
-            previous_sha=self.OLD_SHA, compose_results=(0, 1, 0, 0), health_results=(0,)
+            previous_sha=self.OLD_SHA, compose_results=(0, 0, 1, 0, 0, 0), health_results=(0,)
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls.count("git archive"), 2)
         self.assertIn(f"git archive --format=tar {self.OLD_SHA}", calls)
         self.assertEqual(result.stderr.count("safe_cd_stage=rollback"), 1)
         self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
+
+    def test_data_ownership_failure_rolls_back_without_repeating_ownership_mutation(self):
+        result, calls, saved_state = self.run_safe_deploy(
+            previous_sha=self.OLD_SHA, docker_run_results=(1, 0), health_results=(0,)
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls.count("docker run"), 3)
+        self.assertEqual(calls.count("git archive"), 2)
+        self.assertEqual(result.stderr.count("safe_cd_stage=rollback"), 1)
+        self.assertEqual(result.stderr.count("safe_cd_stage=data_ownership_restore"), 1)
+        self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
+
+    def test_non_root_owned_data_refuses_migration_without_reverting_unmodified_data(self):
+        result, calls, saved_state = self.run_safe_deploy(
+            previous_sha=self.OLD_SHA,
+            root_ownership_results=(1,),
+            app_ownership_results=(1,),
+            health_results=(0,),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls.count("docker run"), 2)
+        self.assertEqual(result.stderr.count("safe_cd_stage=data_ownership_restore"), 0)
+        self.assertEqual(result.stderr.count("safe_cd_stage=rollback"), 1)
+        self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
+
+    def test_first_deploy_partial_ownership_change_is_restored_without_rollback_state(self):
+        result, calls, saved_state = self.run_safe_deploy(docker_run_results=(1, 0))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls.count("docker run"), 3)
+        self.assertEqual(result.stderr.count("safe_cd_stage=data_ownership_restore"), 1)
+        self.assertNotIn("safe_cd_stage=rollback", result.stderr)
+        self.assertIsNone(saved_state)
+
+    def test_app_owned_data_is_reused_without_a_second_ownership_change(self):
+        result, calls, _ = self.run_safe_deploy(
+            root_ownership_results=(1,), app_ownership_results=(0,)
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls.count("docker run"), 2)
+        self.assertNotIn("chown --recursive --no-dereference 10001:10001", calls)
 
     def test_rollback_health_failure_returns_failure_without_repeating_rollback(self):
         result, calls, saved_state = self.run_safe_deploy(
@@ -593,6 +674,31 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertIn("/app:ro", script)
         self.assertIn("docker-compose.yml", script)
         self.assertIn("docker-compose.n100.yml", script)
+
+    def test_deploy_script_repairs_only_allowlisted_service_data_with_restricted_helper(self):
+        script = SAFE_DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("safe_cd_stage=data_ownership", script)
+        self.assertIn("data_directory_for_service", script)
+        self.assertIn("crawler-worker) printf '%s/data/crawler-worker", script)
+        self.assertIn("youtube-memo) printf '%s/data/youtube-memo", script)
+        self.assertIn("book-memo) printf '%s/data/book-memo", script)
+        self.assertIn("--network none", script)
+        self.assertIn("--read-only", script)
+        self.assertIn("--cap-drop ALL", script)
+        self.assertIn("--cap-add CHOWN", script)
+        self.assertIn("--cap-add FOWNER", script)
+        self.assertIn("--cap-add DAC_OVERRIDE", script)
+        self.assertIn("--user 0:0", script)
+        self.assertIn("run_data_ownership_inspector", script)
+        self.assertIn("chown --recursive --no-dereference 10001:10001 /data", script)
+        self.assertIn("data_is_owned_by", script)
+        self.assertIn("find /data -xdev", script)
+        self.assertIn("OWNERSHIP_MUTATED_SERVICES", script)
+        self.assertIn("safe_cd_stage=data_ownership_restore", script)
+        self.assertIn("chown --recursive --no-dereference 0:0 /data", script)
+        self.assertIn('[[ -d "$PROJECT_ROOT/data" && ! -L "$PROJECT_ROOT/data" ]]', script)
+        self.assertIn('PROJECT_ROOT="$(cd -- "$PROJECT_ROOT" && pwd -P)"', script)
+        self.assertIn('if [[ "$align_data_ownership" == true ]]; then', script)
 
     def test_deploy_script_trap_tracks_temporary_resources_for_rollback_cleanup(self):
         script = SAFE_DEPLOY_SCRIPT.read_text(encoding="utf-8")
