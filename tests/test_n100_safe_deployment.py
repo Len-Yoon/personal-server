@@ -116,6 +116,13 @@ class N100SafeDeploymentClassifierTests(unittest.TestCase):
         )
         self.assertEqual(decision.action, "blocked")
 
+    def test_unlisted_scripts_remain_blocked(self):
+        for path in ("scripts/maintenance.py", "scripts/other-tool.py"):
+            with self.subTest(path=path):
+                decision = classifier.classify_changed_paths([path])
+                self.assertEqual(decision.action, "blocked")
+                self.assertEqual(decision.reason, classifier.REASON_UNKNOWN_RUNTIME)
+
     def test_portal_or_k3s_change_is_blocked_before_deployment(self):
         for path in ("portal-web/app/main.py", "infra/k8s/deployment.yaml"):
             with self.subTest(path=path):
@@ -124,9 +131,40 @@ class N100SafeDeploymentClassifierTests(unittest.TestCase):
                 self.assertEqual(decision.services, ())
 
     def test_documentation_and_tests_only_changes_are_skipped(self):
-        decision = classifier.classify_changed_paths(["README.md", "tests/test_example.py"])
+        decision = classifier.classify_changed_paths(
+            ["README.md", "tests/test_example.py", "scripts/record_token_measurement.py"]
+        )
         self.assertEqual(decision.action, "skip")
         self.assertEqual(decision.services, ())
+        self.assertEqual(decision.reason, classifier.REASON_DOCUMENTATION)
+
+    def test_operations_documentation_diff_with_policy_tools_is_skipped(self):
+        decision = classifier.classify_changed_paths(
+            [
+                "docs/agent-loop-evidence.md",
+                "docs/operations-roadmap.md",
+                "scripts/record_token_measurement.py",
+                "scripts/verify_change_scope.py",
+                "tests/test_token_measurements.py",
+                "tests/test_verify_change_scope.py",
+            ]
+        )
+
+        self.assertEqual(decision.action, "skip")
+        self.assertEqual(decision.services, ())
+        self.assertEqual(decision.reason, classifier.REASON_DOCUMENTATION)
+
+    def test_exact_non_runtime_policy_tools_are_each_skipped(self):
+        for path in (
+            "scripts/classify-n100-safe-deployment.py",
+            "scripts/record_token_measurement.py",
+            "scripts/verify_change_scope.py",
+        ):
+            with self.subTest(path=path):
+                decision = classifier.classify_changed_paths([path])
+                self.assertEqual(decision.action, "skip")
+                self.assertEqual(decision.services, ())
+                self.assertEqual(decision.reason, classifier.REASON_DOCUMENTATION)
 
     def test_cli_writes_github_outputs(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -33,6 +33,11 @@ BLOCKED_PREFIXES = (
     "infra/k8s/",
 )
 SHARED_COMPOSE_PATHS = {"docker-compose.yml", "docker-compose.n100.yml"}
+SAFE_NON_RUNTIME_PATHS = {
+    "scripts/classify-n100-safe-deployment.py",
+    "scripts/record_token_measurement.py",
+    "scripts/verify_change_scope.py",
+}
 REASON_NO_CHANGES = "no_changed_paths"
 REASON_CONTROL_CHARACTER = "blocked_control_character"
 REASON_BLOCKED_PATH = "blocked_path"
@@ -149,6 +154,7 @@ def classify_changed_paths(paths: Iterable[str]) -> DeploymentDecision:
         if not _is_documentation_or_test(path)
         and not path.startswith(tuple(SAFE_SERVICE_PREFIXES))
         and path not in SHARED_COMPOSE_PATHS
+        and path not in SAFE_NON_RUNTIME_PATHS
     )
     if unknown:
         return DeploymentDecision("blocked", (), REASON_UNKNOWN_RUNTIME)
