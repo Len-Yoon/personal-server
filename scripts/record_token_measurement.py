@@ -16,6 +16,10 @@ from summarize_token_measurements import (
 
 RECORD_FIELDS = (*MEASUREMENT_CONDITION_FIELDS, "recorded_at", *TOKEN_FIELDS)
 SHA256_FINGERPRINT = re.compile(r"^sha256:[0-9a-f]{64}$")
+IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+SENSITIVE_IDENTIFIER_PATTERN = re.compile(
+    r"authorization|bearer|token|password|secret", re.IGNORECASE
+)
 
 
 def parse_input(contents: str) -> dict[str, str | int]:
@@ -33,6 +37,13 @@ def parse_input(contents: str) -> dict[str, str | int]:
     # persisted fields so arbitrary input (including accidental secrets) is not
     # copied to the measurement log.
     _parse_record(record, 1)
+    for field in MEASUREMENT_CONDITION_FIELDS:
+        value = record[field]
+        if (
+            not IDENTIFIER_PATTERN.fullmatch(value)
+            or SENSITIVE_IDENTIFIER_PATTERN.search(value)
+        ):
+            raise ValueError(f"line 1: {field} contains an unsafe identifier")
     fingerprint = record["prompt_fingerprint"]
     if not SHA256_FINGERPRINT.fullmatch(fingerprint):
         raise ValueError("line 1: prompt_fingerprint must be a SHA-256 digest")

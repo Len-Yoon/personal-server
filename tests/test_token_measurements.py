@@ -195,6 +195,42 @@ class TokenMeasurementTests(unittest.TestCase):
             self.assertIn("prompt_fingerprint", completed.stderr)
             self.assertFalse(output_path.exists())
 
+    def test_rejects_secret_shaped_identifier_without_changing_log(self):
+        base = {
+            "task_id": "task-001",
+            "model": "gpt-5",
+            "measurement_group": "harness-v1",
+            "prompt_fingerprint": RECORD_FINGERPRINT,
+            "recorded_at": "2026-08-26T01:00:00Z",
+            "baseline_input_tokens": 100,
+            "baseline_output_tokens": 20,
+            "harness_input_tokens": 50,
+            "harness_output_tokens": 10,
+        }
+        sensitive_values = (
+            "Authorization: Basic abc",
+            "Bearer abc",
+            "token=abc",
+            "password=abc",
+            "secret-value",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "measurements.jsonl"
+            output_path.write_text("existing\n", encoding="utf-8")
+            original = output_path.read_text(encoding="utf-8")
+            for field in ("task_id", "model", "measurement_group"):
+                for value in sensitive_values:
+                    with self.subTest(field=field, value=value):
+                        record = dict(base)
+                        record[field] = value
+                        completed = self.run_record_cli(
+                            json.dumps(record) + "\n", output_path
+                        )
+
+                        self.assertEqual(completed.returncode, 1)
+                        self.assertIn(field, completed.stderr)
+                        self.assertEqual(output_path.read_text(encoding="utf-8"), original)
+
     def test_rejects_more_than_one_nonempty_json_line(self):
         record = {
             "task_id": "task-001",
