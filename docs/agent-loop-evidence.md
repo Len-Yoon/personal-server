@@ -53,6 +53,12 @@ python3 scripts/run_change_harness.py --input <변경경로파일> --check-resul
 
 UTF-8 바이트 측정은 입력 증적의 크기 비교용이며 모델 사용량·비용을 의미하지 않음. 실제 모델 토큰 절감은 같은 작업·모델·프롬프트 조건에서 수집한 JSONL 기록만으로 집계함.
 
+측정 기록은 `scripts/record_token_measurement.py`가 표준 입력의 단일 JSON 객체를 검증한 뒤 지정한 로컬 JSONL 파일에 추가함. 기존 집계기와 동일한 작업·모델·측정 그룹·프롬프트 지문 및 UTC 시간대 인식 ISO 8601 조건을 적용함. 허용된 측정 필드만 기록하므로 입력에 포함된 임의 필드나 비밀값은 기록하지 않으며, 검증 실패 시 출력 파일을 변경하지 않음.
+
+```text
+printf '%s\n' '<측정 JSON 객체>' | python3 scripts/record_token_measurement.py --output <측정기록.jsonl>
+```
+
 ```text
 python3 scripts/summarize_token_measurements.py --input <측정기록.jsonl>
 ```
