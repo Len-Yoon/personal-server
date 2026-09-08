@@ -55,6 +55,228 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("'cloudflared', 'tunnel', 'run'", SCRIPT)
         self.assertNotIn("nohup cloudflared tunnel run", WSL_SCRIPT)
 
+    def test_daemon_uses_three_minute_health_interval_and_two_failures_before_recovery(self):
+        self.assertIn("$RecoveryIntervalSeconds = 180", SCRIPT)
+        self.assertIn("$RecoveryFailureThreshold = 2", SCRIPT)
+        self.assertIn("if ($failureCount -lt $RecoveryFailureThreshold)", SCRIPT)
+
+    def test_daemon_runs_targeted_recovery_cycle_without_periodic_stack_recreation(self):
+        """A daemon-loop stack bootstrap would recreate normal services every interval."""
+        daemon = SCRIPT[
+            SCRIPT.index("function Start-Daemon") : SCRIPT.index("if ($InstallTask)")
+        ]
+        daemon_loop = daemon[daemon.index("while ($true)") :]
+        self.assertEqual(daemon.count("Start-PersonalServerStack"), 1)
+        self.assertIn("Start-PersonalServerStack", daemon[: daemon.index("while ($true)")])
+        self.assertIn("Invoke-RecoveryCycle", daemon_loop)
+        self.assertIn("Start-Sleep -Seconds $RecoveryIntervalSeconds", daemon_loop)
+        self.assertNotIn("Start-PersonalServerStack", daemon_loop)
+
+    def test_daemon_continues_targeted_recovery_after_initial_bootstrap_failure(self):
+        """An initial bootstrap exception must not prevent later targeted recovery cycles."""
+        daemon = SCRIPT[
+            SCRIPT.index("function Start-Daemon") : SCRIPT.index("if ($InstallTask)")
+        ]
+        startup = daemon[: daemon.index("while ($true)")]
+        daemon_loop = daemon[daemon.index("while ($true)") :]
+        self.assertIn("try {", startup)
+        self.assertIn("Start-PersonalServerStack", startup)
+        self.assertIn("Initial stack bootstrap failed", startup)
+        self.assertIn("Update-HostMetrics", daemon_loop)
+        self.assertIn("Invoke-RecoveryCycle", daemon_loop)
+        self.assertNotIn("Start-PersonalServerStack", daemon_loop)
+
+    def test_targeted_recovery_does_not_recreate_compose_portal_writer(self):
+        recovery = SCRIPT[SCRIPT.index("function Invoke-TargetedRecovery") : SCRIPT.index("function Start-Daemon")]
+        self.assertNotIn("Start-PersonalServerStack", recovery)
+        self.assertNotIn("docker compose", recovery)
+
+    def test_recovery_health_has_exact_five_component_contract(self):
+        health = SCRIPT[SCRIPT.index("function Get-RecoveryHealth") : SCRIPT.index("function Register-RecoveryFailure")]
+        for component in ("keepalive", "k3s", "portal", "nodeport", "tunnel"):
+            self.assertIn(f"{component} =", health)
+        self.assertNotIn("wsl =", health)
+
+    def test_recovery_failures_persist_only_counters_under_project_root(self):
+        self.assertIn('Join-Path $ProjectRoot "data\\recovery-state.json"', SCRIPT)
+        self.assertIn("ConvertTo-Json", SCRIPT)
+        self.assertIn("ConvertFrom-Json", SCRIPT)
+        self.assertIn("Set-Content", SCRIPT)
+        self.assertIn("catch {", SCRIPT)
+        self.assertIn("$RecoveryFailureCounts = @{}", SCRIPT)
+
+    def test_targeted_recovery_has_single_run_lock_and_component_limits(self):
+        self.assertIn("New-Item -ItemType Directory -Path $RecoveryStateDirectory -Force", SCRIPT)
+        self.assertIn("$RecoveryLockPath", SCRIPT)
+        self.assertIn("$RecoveryMaxAttempts = 3", SCRIPT)
+        self.assertIn("Start-CloudflareTunnel", SCRIPT)
+
+    def test_k3s_recovery_only_starts_inactive_service(self):
+        action_needed = SCRIPT[SCRIPT.index("function Test-RecoveryActionNeeded") : SCRIPT.index("function Invoke-TargetedRecovery")]
+        action = SCRIPT[SCRIPT.index("function Invoke-TargetedRecovery") : SCRIPT.index("function Enter-RecoveryLock")]
+        self.assertIn('"systemctl", "is-active", "--quiet", "k3s"', action_needed)
+        self.assertIn('"systemctl", "start", "k3s"', action)
+        self.assertNotIn("systemctl restart k3s", action_needed + action)
+
+    def test_recovery_health_checks_all_five_components_without_stack_bootstrap(self):
+        health = SCRIPT[SCRIPT.index("function Get-RecoveryHealth") : SCRIPT.index("function Save-RecoveryFailureState")]
+        self.assertIn('Get-ScheduledTask -TaskName "PersonalServer-WSL-KeepAlive"', health)
+        self.assertIn('"systemctl", "is-active", "--quiet", "k3s"', health)
+        self.assertIn("--raw=/readyz", health)
+        self.assertIn("deployment/portal-web", health)
+        self.assertIn("--for=condition=Available", health)
+        self.assertIn("127.0.0.1:30080/health", health)
+        self.assertIn("Test-CloudflareTunnelRunning", health)
+        self.assertIn("[c]loudflared.*tunnel run", SCRIPT)
+        self.assertNotIn("Start-PersonalServerStack", health)
+
+    def test_recovery_cycle_defers_nodeport_only_failure_without_portal_restart(self):
+        recovery = SCRIPT[SCRIPT.index("function Invoke-TargetedRecovery") : SCRIPT.index("function Enter-RecoveryLock")]
+        nodeport = recovery[recovery.index('"nodeport"') : recovery.index('"tunnel"')]
+        self.assertIn("NodePort is unhealthy; deferring to the next recovery cycle.", nodeport)
+        self.assertNotIn("rollout restart deployment/portal-web", nodeport)
+
+    def test_recovery_lock_reuses_stale_file_but_keeps_exclusive_ownership(self):
+        lock = SCRIPT[SCRIPT.index("function Enter-RecoveryLock") : SCRIPT.index("function Exit-RecoveryLock")]
+        self.assertIn("[System.IO.FileMode]::OpenOrCreate", lock)
+        self.assertIn("[System.IO.FileShare]::None", lock)
+        self.assertNotIn("[System.IO.FileMode]::CreateNew", lock)
+
+    def test_keepalive_health_requires_task_and_wsl_command(self):
+        health = SCRIPT[SCRIPT.index("function Get-RecoveryHealth") : SCRIPT.index("function Save-RecoveryFailureState")]
+        self.assertIn("Get-ScheduledTask -TaskName \"PersonalServer-WSL-KeepAlive\"", health)
+        self.assertIn("Invoke-WslWithTimeout", health)
+        self.assertNotIn("& wsl.exe", health)
+
+    def test_wsl_health_and_recovery_commands_have_process_timeout(self):
+        runner = SCRIPT
+        recovery = SCRIPT[SCRIPT.index("function Get-RecoveryHealth") : SCRIPT.index("function Install-ScheduledTask")]
+        self.assertIn("$RecoveryCommandTimeoutSeconds = 20", SCRIPT)
+        self.assertIn("WaitForExit($RecoveryCommandTimeoutSeconds * 1000)", runner)
+        self.assertIn("$process.Kill()", runner)
+        self.assertIn("return $false", runner)
+        self.assertNotIn("& wsl.exe", recovery)
+
+    def test_portal_health_is_deferred_without_changing_its_counters_when_k3s_is_unhealthy(self):
+        health = SCRIPT[SCRIPT.index("function Get-RecoveryHealth") : SCRIPT.index("function Save-RecoveryFailureState")]
+        cycle = SCRIPT[SCRIPT.index("function Invoke-RecoveryCycle") : SCRIPT.index("function Install-ScheduledTask")]
+        self.assertIn('portal = "deferred"', health)
+        self.assertIn('if ($health.k3s -eq "healthy")', health)
+        self.assertIn('if ($health[$component] -eq "deferred")', cycle)
+        self.assertLess(cycle.index('if ($health[$component] -eq "deferred")'), cycle.index("Register-RecoveryFailure $component"))
+        self.assertNotIn("Reset-RecoveryFailure $component", cycle[cycle.index('if ($health[$component] -eq "deferred")') : cycle.index("Register-RecoveryFailure $component")])
+
+    def test_recovery_attempt_budget_is_separate_from_health_failures_and_stops_after_three_attempts(self):
+        state = SCRIPT[SCRIPT.index("function Save-RecoveryFailureState") : SCRIPT.index("function Invoke-TargetedRecovery")]
+        targeted = SCRIPT[SCRIPT.index("function Invoke-TargetedRecovery") : SCRIPT.index("function Enter-RecoveryLock")]
+        self.assertIn("$RecoveryAttemptCounts = @{}", SCRIPT)
+        self.assertIn("health_failures", state)
+        self.assertIn("recovery_attempts", state)
+        self.assertIn("function Register-RecoveryAttempt", state)
+        self.assertIn("if ($attemptCount -ge $RecoveryMaxAttempts)", state)
+        self.assertIn("$RecoveryAttemptCounts[$Component] = 0", state)
+        self.assertNotIn("Register-RecoveryAttempt", targeted)
+
+    def test_alternating_daemons_reload_persisted_attempt_budget_before_recovery_actions(self):
+        """Each lock owner must use the latest persisted budget, so actions stay capped at three."""
+        loader = SCRIPT[
+            SCRIPT.index("function Load-RecoveryFailureState") : SCRIPT.index("function Register-RecoveryFailure")
+        ]
+        attempt = SCRIPT[
+            SCRIPT.index("function Register-RecoveryAttempt") : SCRIPT.index("function Test-RecoveryActionNeeded")
+        ]
+        cycle = SCRIPT[SCRIPT.index("function Invoke-RecoveryCycle") : SCRIPT.index("function Install-ScheduledTask")]
+        self.assertIn("$RecoveryMaxAttempts = 3", SCRIPT)
+        self.assertIn("catch {", loader)
+        self.assertIn("$RecoveryAttemptCounts = @{}", loader)
+        self.assertIn("Load-RecoveryFailureState", cycle)
+        self.assertLess(cycle.index("if ($null -eq $lockStream)"), cycle.index("Load-RecoveryFailureState"))
+        self.assertLess(cycle.index("Load-RecoveryFailureState"), cycle.index("Get-RecoveryHealth"))
+        self.assertLess(cycle.index("Register-RecoveryAttempt $component"), cycle.index("Invoke-TargetedRecovery $component"))
+        self.assertLess(attempt.index("$RecoveryAttemptCounts[$Component] = $attemptCount + 1"), attempt.index("Save-RecoveryFailureState"))
+
+    def test_unsaved_recovery_state_blocks_actions_and_retains_in_memory_attempt_budget(self):
+        """A failed state save must not allow a stale reload to bypass the three-action limit."""
+        save = SCRIPT[
+            SCRIPT.index("function Save-RecoveryFailureState") : SCRIPT.index("function Load-RecoveryFailureState")
+        ]
+        cycle = SCRIPT[SCRIPT.index("function Invoke-RecoveryCycle") : SCRIPT.index("function Install-ScheduledTask")]
+        setup = cycle[: cycle.index("$health = Get-RecoveryHealth")]
+        pre_actions = cycle[cycle.index("$health = Get-RecoveryHealth") : cycle.index("foreach ($component in $RecoveryComponents)")]
+        self.assertIn("$RecoveryStateDirty = $false", SCRIPT)
+        self.assertIn("return $true", save)
+        self.assertIn("return $false", save)
+        self.assertIn("$script:RecoveryStateDirty = $true", save)
+        self.assertIn("$script:RecoveryStateDirty = $false", save)
+        self.assertNotIn("Save-RecoveryFailureState", setup)
+        self.assertIn("if ($RecoveryStateDirty)", pre_actions)
+        self.assertIn("return", pre_actions)
+        self.assertLess(
+            cycle.index("if ($RecoveryStateDirty) {", cycle.index("$health = Get-RecoveryHealth")),
+            cycle.index("Invoke-TargetedRecovery $component"),
+        )
+
+    def test_dirty_daemon_never_overwrites_newer_persisted_attempt_state(self):
+        """A dirty daemon must fail closed rather than save stale counters over another daemon's state."""
+        cycle = SCRIPT[SCRIPT.index("function Invoke-RecoveryCycle") : SCRIPT.index("function Install-ScheduledTask")]
+        health_index = cycle.index("$health = Get-RecoveryHealth")
+        dirty_branch = cycle[
+            cycle.index("if ($RecoveryStateDirty) {", health_index) : cycle.index("foreach ($component in $RecoveryComponents)")
+        ]
+        self.assertIn("retaining in-memory counters", dirty_branch)
+        self.assertIn("return", dirty_branch)
+        self.assertNotIn("Load-RecoveryFailureState", dirty_branch)
+        self.assertNotIn("Save-RecoveryFailureState", dirty_branch)
+        self.assertIn("skipping automated recovery actions this cycle", cycle)
+
+    def test_bootstrap_path_keeps_its_original_unbounded_wsl_command(self):
+        startup = SCRIPT[SCRIPT.index("function Invoke-WslCommand") : SCRIPT.index("function Test-CloudflareTunnelRunning")]
+        self.assertIn("& wsl.exe -d $WslDistribution bash -lc", startup)
+        self.assertNotIn("Invoke-WslWithTimeout", startup)
+
+    def test_recovery_attempt_is_reserved_after_action_needed_check_and_before_targeted_action(self):
+        needed = SCRIPT
+        targeted = SCRIPT[SCRIPT.index("function Invoke-TargetedRecovery") : SCRIPT.index("function Enter-RecoveryLock")]
+        cycle = SCRIPT[SCRIPT.index("function Invoke-RecoveryCycle") : SCRIPT.index("function Install-ScheduledTask")]
+        self.assertNotIn("Register-RecoveryAttempt", targeted)
+        self.assertIn("function Test-RecoveryActionNeeded", needed)
+        self.assertIn('Get-ScheduledTask -TaskName "PersonalServer-WSL-KeepAlive"', needed)
+        self.assertIn('"systemctl", "is-active", "--quiet", "k3s"', needed)
+        self.assertNotIn('Get-ScheduledTask -TaskName "PersonalServer-WSL-KeepAlive"', targeted)
+        self.assertIn("if (-not (Test-RecoveryActionNeeded $component))", cycle)
+        self.assertLess(cycle.index("if (-not (Test-RecoveryActionNeeded $component))"), cycle.index("Register-RecoveryAttempt $component"))
+        self.assertLess(cycle.index("Register-RecoveryAttempt $component"), cycle.index("Invoke-TargetedRecovery $component"))
+
+    def test_tunnel_probe_uses_timeout_runner_without_writing_process_command_line(self):
+        tunnel = SCRIPT[SCRIPT.index("function Test-CloudflareTunnelRunning") : SCRIPT.index("function Start-CloudflareTunnelProcess")]
+        health = SCRIPT[SCRIPT.index("function Get-RecoveryHealth") : SCRIPT.index("function Save-RecoveryFailureState")]
+        expected_probe = "pgrep -af '[c]loudflared.*tunnel run' >/dev/null"
+        self.assertIn("Invoke-WslWithTimeout", tunnel)
+        self.assertIn(expected_probe, tunnel)
+        self.assertIn("Test-CloudflareTunnelRunning", health)
+
+    def test_bootstrap_suppresses_tunnel_recovery_boolean_result(self):
+        startup = SCRIPT[SCRIPT.index("function Start-PersonalServerStack") : SCRIPT.index("function Get-RecoveryHealth")]
+        self.assertIn("[void](Start-CloudflareTunnel)", startup)
+
+    def test_recovery_cycle_skips_the_fourth_action_before_invoking_targeted_recovery(self):
+        budget = SCRIPT
+        cycle = SCRIPT[SCRIPT.index("function Invoke-RecoveryCycle") : SCRIPT.index("function Install-ScheduledTask")]
+        self.assertIn("function Test-RecoveryAttemptAvailable", budget)
+        self.assertIn("if ($attemptCount -ge $RecoveryMaxAttempts)", budget)
+        self.assertIn("if (-not (Test-RecoveryAttemptAvailable $component))", cycle)
+        self.assertLess(
+            cycle.index("if (-not (Test-RecoveryAttemptAvailable $component))"),
+            cycle.index("Invoke-TargetedRecovery $component"),
+        )
+
+    def test_reserved_attempt_survives_targeted_action_exception_before_the_next_cycle(self):
+        cycle = SCRIPT[SCRIPT.index("function Invoke-RecoveryCycle") : SCRIPT.index("function Install-ScheduledTask")]
+        self.assertIn("Register-RecoveryAttempt $component", cycle)
+        self.assertLess(cycle.index("Register-RecoveryAttempt $component"), cycle.index("Invoke-TargetedRecovery $component"))
+        self.assertIn("finally {", cycle)
+        self.assertIn("Exit-RecoveryLock $lockStream", cycle)
+
     def test_k3s_and_cutover_validate_and_preserve_the_opt_in_bridge_override(self):
         """Recovery must not recreate dependencies without their K3s bridge ports."""
         self.assertIn("validate_docker_bridge_gateway", WSL_SCRIPT)

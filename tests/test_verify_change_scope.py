@@ -162,6 +162,15 @@ class VerifyChangeScopeTests(unittest.TestCase):
         self.assertEqual(evidence["required_checks"], ["maintenance"])
         self.assertEqual(evidence["unclassified_files"], [])
 
+    def test_windows_bootstrap_powershell_requires_maintenance_check(self):
+        code, evidence = run_scope("scripts/windows-bootstrap.ps1", executed_checks=())
+
+        self.assertEqual(code, 2)
+        self.assertEqual(evidence["automation_files"], ["scripts/windows-bootstrap.ps1"])
+        self.assertEqual(evidence["required_checks"], ["maintenance"])
+        self.assertEqual(evidence["missing_checks"], ["maintenance"])
+        self.assertEqual(evidence["unclassified_files"], [])
+
     def test_k8s_documentation_and_tool_paths_require_maintenance_check(self):
         paths = (
             "infra/k8s/README.md",

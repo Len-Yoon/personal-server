@@ -12,6 +12,7 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("Cloudflare Tunnel", content)
         self.assertIn("K3s", content)
         self.assertIn("Telegram", content)
+        self.assertIn("N100 제한형 자동복구", content)
 
     def test_document_index_exposes_only_current_operations_documents(self):
         content = Path("docs/README.md").read_text(encoding="utf-8")
@@ -55,6 +56,34 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("portal-web", content)
         self.assertIn("crawler-worker", content)
         self.assertIn("공개 상태 Telegram 알림", content)
+        self.assertIn("personal-server-autostart", content)
+
+    def test_public_route_docs_distinguish_the_car_callback_route_from_caddy(self):
+        tunnel = Path("docs/cloudflare-tunnel.md").read_text(encoding="utf-8")
+        operations = Path("docs/operations-reference.md").read_text(encoding="utf-8")
+
+        self.assertIn("`Caddyfile`에는 `car.len.pe.kr` 호스트 블록이 없음", tunnel)
+        self.assertIn("Cloudflare Tunnel의 별도 ingress", tunnel)
+        self.assertIn("별도 Cloudflare Tunnel ingress", operations)
+
+    def test_n100_recovery_and_uptime_alert_conditions_are_documented(self):
+        n100 = Path("docs/n100-mt4-setup.md").read_text(encoding="utf-8")
+        uptime = Path("docs/public-uptime-monitor.md").read_text(encoding="utf-8")
+
+        self.assertIn("3분 간격", n100)
+        self.assertIn("2회 연속", n100)
+        self.assertIn("최대 3회", n100)
+        self.assertIn("자동복구 작업은 Telegram을 직접 발송하지 않으며", n100)
+        self.assertIn("Telegram 장애 메시지 전송이 실패하면", uptime)
+        self.assertIn("복구 전환 메시지를 보내지 않음", uptime)
+
+    def test_k3s_portal_environment_example_and_observability_prerequisite_are_documented(self):
+        k3s = Path("infra/k8s/README.md").read_text(encoding="utf-8")
+        operations = Path("docs/operations-reference.md").read_text(encoding="utf-8")
+
+        self.assertIn("PORTAL_UPSTREAM=host.docker.internal:30080", k3s)
+        self.assertIn("portal-compose-bridge", operations)
+        self.assertIn("compose-crawler", operations)
 
     def test_subagent_workflow_defines_mandatory_routes(self):
         project_rules = Path("AGENTS.md").read_text(encoding="utf-8")
