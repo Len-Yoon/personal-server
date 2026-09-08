@@ -73,6 +73,10 @@ class ComposeConfigTests(unittest.TestCase):
                 )
                 self.assertIn("COPY --chown=10001:10001", dockerfile)
                 self.assertIn("USER 10001:10001", dockerfile)
+                self.assertTrue(
+                    (ROOT / service / "app" / "data" / "logs" / ".gitkeep").is_file(),
+                    "safe deployment's read-only app bind mount requires the nested log mountpoint",
+                )
 
         executor = (ROOT / "homeops-executor" / "Dockerfile").read_text(encoding="utf-8")
         self.assertNotIn("USER 10001:10001", executor)
