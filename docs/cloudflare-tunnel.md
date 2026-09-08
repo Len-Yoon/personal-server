@@ -19,7 +19,7 @@ Tunnel의 `~/.cloudflared/config.yml`은 아래 Caddy 대상 호스트를 WSL의
 
 이 Tunnel 설정은 저장소 밖의 `~/.cloudflared/config.yml`에 있으므로 실제 운영 값은 별도 확인 필요함. 설정이 없거나 Caddy 443으로 전달되면 `HYUNDAI_REDIRECT_URI`의 callback이 404가 될 수 있음.
 
-Tunnel은 Windows 로그인 뒤 WSL 사용자 서비스로 실행됨. Windows 로그인 유지 작업이 WSL을 살려 두므로 SSH 종료만으로 Tunnel이 내려가면 안 됨.
+Tunnel은 Windows 로그인 뒤 WSL 사용자 서비스로 실행됨. `PersonalServer-WSL-KeepAlive`가 WSL을 유지하고, `personal-server-autostart`가 3분 간격으로 Tunnel 프로세스와 공개 경로의 기반 구성요소를 점검함. 같은 항목이 2회 연속 비정상이면 Tunnel 실행을 포함한 제한된 복구를 시도하며, 항목별 시도는 최대 3회임. SSH 종료만으로 Tunnel이 내려가면 안 됨.
 
 ## 정상 확인
 
@@ -45,4 +45,4 @@ sudo k3s kubectl -n personal-server get deploy,pod
 curl --resolve len.pe.kr:443:127.0.0.1 --fail --silent --show-error https://len.pe.kr/health
 ```
 
-외부 상태는 GitHub Actions가 약 5분 간격으로 별도 점검하며, 장애·복구 전환 시 Telegram 알림을 보냄. 상세는 [공개 상태 Telegram 알림](public-uptime-monitor.md)을 참고함.
+자동복구 작업은 Telegram을 직접 발송하지 않음. 외부 상태는 GitHub Actions가 약 5분 간격으로 별도 점검하며, 장애 알림 전송에 성공한 뒤 이후 정상 전환을 확인하면 Telegram 복구 알림을 보냄. 상세는 [공개 상태 Telegram 알림](public-uptime-monitor.md)을 참고함.
