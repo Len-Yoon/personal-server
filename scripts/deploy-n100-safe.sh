@@ -2,7 +2,9 @@
 set -euo pipefail
 umask 077
 
-readonly PROJECT_ROOT="${N100_SAFE_DEPLOY_PROJECT_ROOT:-$(pwd)}"
+PROJECT_ROOT="${N100_SAFE_DEPLOY_PROJECT_ROOT:-$(pwd -P)}"
+PROJECT_ROOT="$(cd -- "$PROJECT_ROOT" && pwd -P)"
+readonly PROJECT_ROOT
 readonly STATE_DIR="${N100_SAFE_DEPLOY_STATE_DIR:-$HOME/.local/state/personal-server/n100-safe-deploy}"
 readonly STATE_FILE="$STATE_DIR/last-healthy-revision"
 readonly RELEASES_DIR="$STATE_DIR/releases"
@@ -14,15 +16,16 @@ COMPOSE_OVERRIDE=''
 COMPOSE_OVERRIDES=()
 HEALTH_SCRIPT=''
 HEALTH_SCRIPTS=()
+OWNERSHIP_MUTATED_SERVICES=()
 
 cleanup_generated_resources() {
   local override health_script
-  for override in "${COMPOSE_OVERRIDES[@]}"; do
+  for override in "${COMPOSE_OVERRIDES[@]:-}"; do
     if [[ -f "$override" && ! -L "$override" ]]; then
       unlink -- "$override"
     fi
   done
-  for health_script in "${HEALTH_SCRIPTS[@]}"; do
+  for health_script in "${HEALTH_SCRIPTS[@]:-}"; do
     if [[ -f "$health_script" && ! -L "$health_script" ]]; then
       unlink -- "$health_script"
     fi
@@ -109,9 +112,98 @@ create_compose_override() {
   } > "$COMPOSE_OVERRIDE"
 }
 
+data_directory_for_service() {
+  case "$1" in
+    crawler-worker) printf '%s/data/crawler-worker\n' "$PROJECT_ROOT" ;;
+    youtube-memo) printf '%s/data/youtube-memo\n' "$PROJECT_ROOT" ;;
+    book-memo) printf '%s/data/book-memo\n' "$PROJECT_ROOT" ;;
+    *) return 1 ;;
+  esac
+}
+
+run_data_ownership_helper() {
+  local service="$1"
+  local data_directory="$2"
+  shift 2
+
+  docker run --rm \
+    --network none \
+    --read-only \
+    --cap-drop ALL \
+    --cap-add CHOWN \
+    --cap-add FOWNER \
+    --cap-add DAC_OVERRIDE \
+    --user 0:0 \
+    --mount "type=bind,src=$data_directory,dst=/data" \
+    "personal-server-$service:latest" \
+    "$@"
+}
+
+run_data_ownership_inspector() {
+  local service="$1"
+  local data_directory="$2"
+  local user="$3"
+  shift 3
+
+  docker run --rm \
+    --network none \
+    --read-only \
+    --cap-drop ALL \
+    --user "$user" \
+    --mount "type=bind,src=$data_directory,dst=/data" \
+    "personal-server-$service:latest" \
+    "$@"
+}
+
+data_is_owned_by() {
+  local service="$1"
+  local data_directory="$2"
+  local uid="$3"
+  local gid="$4"
+
+  run_data_ownership_inspector "$service" "$data_directory" "$uid:$gid" \
+    /bin/sh -ec "first=\"\$(find /data -xdev \\( ! -uid $uid -o ! -gid $gid \\) -print -quit)\" || exit \$?; test -z \"\$first\""
+}
+
+align_service_data_ownership() {
+  local service
+  local data_directory
+
+  printf '%s\n' 'safe_cd_stage=data_ownership' >&2
+  [[ -d "$PROJECT_ROOT/data" && ! -L "$PROJECT_ROOT/data" ]] || return 1
+  for service in "$@"; do
+    data_directory="$(data_directory_for_service "$service")" || continue
+    [[ -d "$data_directory" && ! -L "$data_directory" ]] || return 1
+    if data_is_owned_by "$service" "$data_directory" 0 0; then
+      OWNERSHIP_MUTATED_SERVICES+=("$service")
+      run_data_ownership_helper "$service" "$data_directory" \
+        chown --recursive --no-dereference 10001:10001 /data || return 1
+    elif data_is_owned_by "$service" "$data_directory" 10001 10001; then
+      continue
+    else
+      return 1
+    fi
+  done
+}
+
+restore_root_owned_data_for_rollback() {
+  local service
+  local data_directory
+
+  [[ "${#OWNERSHIP_MUTATED_SERVICES[@]}" -gt 0 ]] || return 0
+  printf '%s\n' 'safe_cd_stage=data_ownership_restore' >&2
+  for service in "${OWNERSHIP_MUTATED_SERVICES[@]}"; do
+    data_directory="$(data_directory_for_service "$service")" || return 1
+    [[ -d "$data_directory" && ! -L "$data_directory" ]] || return 1
+    run_data_ownership_helper "$service" "$data_directory" \
+      chown --recursive --no-dereference 0:0 /data || return 1
+  done
+}
+
 deploy_revision() {
   local revision="$1"
-  shift
+  local align_data_ownership="$2"
+  shift 2
 
   printf '%s\n' 'safe_cd_stage=deploy' >&2
   create_release_source "$revision" "$@" || return 1
@@ -123,7 +215,14 @@ deploy_revision() {
   docker compose \
     -f "$PROJECT_ROOT/docker-compose.yml" \
     -f "$PROJECT_ROOT/docker-compose.n100.yml" \
-    -f "$COMPOSE_OVERRIDE" up -d --build --no-deps "$@"
+    -f "$COMPOSE_OVERRIDE" build "$@" || return 1
+  if [[ "$align_data_ownership" == true ]]; then
+    align_service_data_ownership "$@" || return 1
+  fi
+  docker compose \
+    -f "$PROJECT_ROOT/docker-compose.yml" \
+    -f "$PROJECT_ROOT/docker-compose.n100.yml" \
+    -f "$COMPOSE_OVERRIDE" up -d --no-build --no-deps "$@"
 }
 
 prepare_health_script() {
@@ -180,11 +279,12 @@ main() {
   [[ "$expected_sha" == "$origin_main_sha" ]] || return 1
   prepare_state_directories || return 1
 
-  if deploy_revision "$expected_sha" "${PARSED_SERVICES[@]}" && health_check "$expected_sha" "${PARSED_SERVICES[@]}"; then
+  if deploy_revision "$expected_sha" true "${PARSED_SERVICES[@]}" && health_check "$expected_sha" "${PARSED_SERVICES[@]}"; then
     record_healthy_revision "$expected_sha"
     return 0
   fi
 
+  restore_root_owned_data_for_rollback || return 1
   [[ -f "$STATE_FILE" ]] || return 1
   previous_sha="$(<"$STATE_FILE")"
   is_revision "$previous_sha" || return 1
@@ -192,7 +292,7 @@ main() {
   git merge-base --is-ancestor "$previous_sha" origin/main
 
   printf '%s\n' 'safe_cd_stage=rollback' >&2
-  if deploy_revision "$previous_sha" "${PARSED_SERVICES[@]}" && health_check "$previous_sha" "${PARSED_SERVICES[@]}"; then
+  if deploy_revision "$previous_sha" false "${PARSED_SERVICES[@]}" && health_check "$previous_sha" "${PARSED_SERVICES[@]}"; then
     return 0
   fi
   return 1
