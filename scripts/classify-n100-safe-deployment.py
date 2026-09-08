@@ -33,7 +33,11 @@ BLOCKED_PREFIXES = (
     "infra/k8s/",
 )
 SHARED_COMPOSE_PATHS = {"docker-compose.yml", "docker-compose.n100.yml"}
-SAFE_NON_RUNTIME_PATHS = {"scripts/record_token_measurement.py"}
+SAFE_NON_RUNTIME_PATHS = {
+    "scripts/classify-n100-safe-deployment.py",
+    "scripts/record_token_measurement.py",
+    "scripts/verify_change_scope.py",
+}
 REASON_NO_CHANGES = "no_changed_paths"
 REASON_CONTROL_CHARACTER = "blocked_control_character"
 REASON_BLOCKED_PATH = "blocked_path"
