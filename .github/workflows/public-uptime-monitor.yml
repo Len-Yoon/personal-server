@@ -76,7 +76,8 @@ jobs:
               core.setOutput('issue_number', String(incident.number));
             }
 
-      - name: Send Telegram status transition
+      - id: telegram
+        name: Send Telegram status transition
         if: steps.incident.outputs.notification != ''
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.UPTIME_TELEGRAM_BOT_TOKEN }}
@@ -85,6 +86,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          telegram_response="$(mktemp)"
+          trap 'rm -f "$telegram_response"' EXIT
           case "$NOTIFICATION" in
             down)
               message='[개인서버 장애] 외부 점검에서 접속 실패를 확인했습니다. 자동복구 상태를 확인하세요.'
@@ -99,13 +102,18 @@ jobs:
           esac
           telegram_status="$(
             curl --silent --show-error --retry 2 --max-time 20 \
-              --output /dev/null --write-out '%{http_code}' \
+              --output "$telegram_response" --write-out '%{http_code}' \
               --request POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
               --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
               --data-urlencode "text=${message}" || true
           )"
           case "$telegram_status" in
             200)
+              if ! jq -e '.ok == true and (.result.message_id | numbers)' "$telegram_response" >/dev/null; then
+                printf '%s\n' 'Telegram returned an invalid success response.' >&2
+                exit 1
+              fi
+              printf 'accepted=true\n' >> "$GITHUB_OUTPUT"
               ;;
             400)
               printf '%s\n' 'Telegram rejected chat configuration. Check chat ID format and bot membership.' >&2
@@ -130,13 +138,14 @@ jobs:
           esac
 
       - name: Confirm Telegram delivery before committing transition
-        if: steps.incident.outputs.notification != ''
+        if: steps.incident.outputs.notification != '' && steps.telegram.outputs.accepted == 'true'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
         with:
           script: |
             const notification = "${{ steps.incident.outputs.notification }}";
             const issueNumber = Number("${{ steps.incident.outputs.issue_number }}");
             const downSentMarker = "<!-- uptime-down-telegram:sent -->";
+            const recoveryMarker = "<!-- uptime-recovered-telegram:accepted -->";
             const issue = await github.rest.issues.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -145,9 +154,7 @@ jobs:
 
             if (notification === "down") {
               const currentBody = issue.data.body || "";
-              const body = currentBody.includes(downSentMarker)
-                ? currentBody
-                : `${currentBody}\n${downSentMarker}`;
+              const body = currentBody.includes(downSentMarker) ? currentBody : `${currentBody}\n${downSentMarker}`;
               await github.rest.issues.update({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -158,10 +165,14 @@ jobs:
             }
 
             if (notification === "recovered") {
+              const currentBody = issue.data.body || "";
+              const evidence = "복구 Telegram API 요청 수락 확인됨";
+              const bodyWithEvidence = currentBody.includes(evidence) ? currentBody : `${currentBody}\n${evidence}`;
               await github.rest.issues.update({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: issueNumber,
+                body: bodyWithEvidence.includes(recoveryMarker) ? bodyWithEvidence : `${bodyWithEvidence}\n${recoveryMarker}`,
                 state: "closed",
               });
               return;

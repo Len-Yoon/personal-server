@@ -61,9 +61,21 @@ class PublicUptimeMonitorTests(unittest.TestCase):
         self.assertIn("Telegram rejected chat configuration.", workflow)
         self.assertIn("Telegram rejected bot credentials.", workflow)
         self.assertIn("Telegram blocked bot delivery.", workflow)
-        self.assertIn("--output /dev/null", workflow)
+        self.assertIn('--output "$telegram_response"', workflow)
         self.assertNotIn("response_body", workflow)
         self.assertNotIn("description", workflow)
+
+    def test_workflow_verifies_telegram_success_and_records_safe_delivery_evidence(self):
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("telegram_response", workflow)
+        self.assertIn("jq -e '.ok == true and (.result.message_id | numbers)'", workflow)
+        self.assertIn("accepted=true", workflow)
+        self.assertIn("steps.telegram.outputs.accepted == 'true'", workflow)
+        self.assertIn("복구 Telegram API 요청 수락 확인됨", workflow)
+        self.assertIn("<!-- uptime-recovered-telegram:accepted -->", workflow)
+        self.assertIn("state: \"closed\"", workflow)
+        self.assertNotIn("TELEGRAM_CHAT_ID: ${{ steps.telegram.outputs", workflow)
 
     def test_ci_runs_the_uptime_monitor_contract(self):
         ci_workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
