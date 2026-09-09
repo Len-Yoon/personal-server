@@ -544,6 +544,8 @@ function Request-EmergencyReboot([string]$Component) {
         Write-Info "Emergency reboot blocked because its scheduled task is unavailable."
         return $false
     }
+    $previousEmergencyRebootLastAt = $EmergencyRebootLastAt
+    $previousEmergencyRebootCauseComponent = $EmergencyRebootCauseComponent
     $script:EmergencyRebootLastAt = (Get-Date).ToUniversalTime().ToString("o")
     $script:EmergencyRebootCauseComponent = $Component
     if (-not (Save-RecoveryFailureState)) {

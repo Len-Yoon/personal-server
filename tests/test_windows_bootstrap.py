@@ -11,6 +11,27 @@ WSL_SCRIPT = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf
 
 
 class WindowsBootstrapTests(unittest.TestCase):
+    def test_emergency_request_save_failure_restores_declared_prior_memory_state(self):
+        request = SCRIPT[
+            SCRIPT.index("function Request-EmergencyReboot")
+            : SCRIPT.index("function Set-RecoveryTaskSettings")
+        ]
+        save_failure = request[
+            request.index("if (-not (Save-RecoveryFailureState))")
+            : request.index("try {", request.index("if (-not (Save-RecoveryFailureState))"))
+        ]
+
+        self.assertLess(
+            request.index("$previousEmergencyRebootLastAt = $EmergencyRebootLastAt"),
+            request.index("$script:EmergencyRebootLastAt = (Get-Date)"),
+        )
+        self.assertLess(
+            request.index("$previousEmergencyRebootCauseComponent = $EmergencyRebootCauseComponent"),
+            request.index("$script:EmergencyRebootCauseComponent = $Component"),
+        )
+        self.assertIn("$script:EmergencyRebootLastAt = $previousEmergencyRebootLastAt", save_failure)
+        self.assertIn("$script:EmergencyRebootCauseComponent = $previousEmergencyRebootCauseComponent", save_failure)
+
     def test_failed_emergency_task_start_keeps_persisted_audit_and_cooldown_evidence(self):
         request = SCRIPT[
             SCRIPT.index("function Request-EmergencyReboot")
