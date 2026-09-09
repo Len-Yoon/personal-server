@@ -309,8 +309,8 @@ class WindowsBootstrapTests(unittest.TestCase):
             SCRIPT.index("function Test-CloudflareTunnelService") : SCRIPT.index("function Update-HostMetrics")
         ]
         self.assertIn('$WslServiceUser = "window"', SCRIPT)
-        self.assertIn('"systemctl", "--user", "is-active", "--quiet", "cloudflared-personal-server.service"', recovery)
-        self.assertIn('"systemctl", "--user", "start", "cloudflared-personal-server.service"', recovery)
+        self.assertIn('"bash", "-lc", "systemctl --user is-active --quiet \'$CloudflareTunnelService\'"', recovery)
+        self.assertIn('"bash", "-lc", "systemctl --user start \'$CloudflareTunnelService\'"', recovery)
         self.assertNotIn("Start-Process -FilePath 'wsl.exe'", recovery)
         self.assertNotIn("'cloudflared', 'tunnel', 'run'", recovery)
         self.assertNotIn("nohup cloudflared tunnel run", WSL_SCRIPT)
@@ -321,7 +321,7 @@ class WindowsBootstrapTests(unittest.TestCase):
         ]
         self.assertIn("if (Test-CloudflareTunnelService) {", recovery)
         self.assertIn("if (Test-CloudflareTunnelRunning) {", recovery)
-        self.assertIn('"systemctl", "--user", "restart", "cloudflared-personal-server.service"', recovery)
+        self.assertIn('"bash", "-lc", "systemctl --user restart \'$CloudflareTunnelService\'"', recovery)
         self.assertIn("return ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning))", recovery)
 
     def test_daemon_uses_three_minute_health_interval_and_two_failures_before_recovery(self):

@@ -90,7 +90,7 @@ function Test-CloudflareTunnelRunning {
 function Test-CloudflareTunnelService {
     return (Invoke-WslWithTimeout -Arguments @(
         "-d", $WslDistribution, "-u", $WslServiceUser, "--",
-        "systemctl", "--user", "is-active", "--quiet", "cloudflared-personal-server.service"
+        "bash", "-lc", "systemctl --user is-active --quiet '$CloudflareTunnelService'"
     ) -Operation "Cloudflare Tunnel service probe")
 }
 
@@ -101,13 +101,13 @@ function Start-CloudflareTunnel {
         }
         if (-not (Invoke-WslWithTimeout -Arguments @(
             "-d", $WslDistribution, "-u", $WslServiceUser, "--",
-            "systemctl", "--user", "restart", "cloudflared-personal-server.service"
+            "bash", "-lc", "systemctl --user restart '$CloudflareTunnelService'"
         ) -Operation "Cloudflare Tunnel service restart")) { return $false }
         return ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning))
     }
     if (-not (Invoke-WslWithTimeout -Arguments @(
         "-d", $WslDistribution, "-u", $WslServiceUser, "--",
-        "systemctl", "--user", "start", "cloudflared-personal-server.service"
+        "bash", "-lc", "systemctl --user start '$CloudflareTunnelService'"
     ) -Operation "Cloudflare Tunnel service start")) { return $false }
     return ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning))
 }
