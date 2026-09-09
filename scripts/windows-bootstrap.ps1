@@ -192,10 +192,12 @@ function Send-TunnelTelegramNotification([string]$Transition) {
         default { return $false }
     }
     try {
-        $response = Invoke-RestMethod -Method Post -Uri "https://api.telegram.org/bot$($configuration.bot_token)/sendMessage" -Body @{
+        $payload = @{
             chat_id = [string]$configuration.chat_id
             text = $message
-        } -TimeoutSec $RecoveryCommandTimeoutSeconds -ErrorAction Stop
+        } | ConvertTo-Json -Compress
+        $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+        $response = Invoke-RestMethod -Method Post -Uri "https://api.telegram.org/bot$($configuration.bot_token)/sendMessage" -ContentType "application/json; charset=utf-8" -Body $payloadBytes -TimeoutSec $RecoveryCommandTimeoutSeconds -ErrorAction Stop
         if ($null -eq $response -or $response.ok -ne $true -or $null -eq $response.result -or $null -eq $response.result.message_id) {
             Write-Info "Tunnel Telegram delivery was not accepted."
             return $false
