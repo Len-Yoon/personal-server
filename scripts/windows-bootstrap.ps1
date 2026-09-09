@@ -499,7 +499,6 @@ function Install-EmergencyRebootTask {
   <Principals>
     <Principal id="SYSTEM">
       <UserId>S-1-5-18</UserId>
-      <LogonType>ServiceAccount</LogonType>
       <RunLevel>HighestAvailable</RunLevel>
     </Principal>
   </Principals>
