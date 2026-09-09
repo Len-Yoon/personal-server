@@ -151,7 +151,7 @@ class WindowsBootstrapTests(unittest.TestCase):
         dirty_check = cycle.index("if ($RecoveryStateDirty) {", cycle.index("$health = Get-RecoveryHealth"))
         self.assertLess(dirty_check, cycle.index("Register-RecoveryFailure $component"))
 
-    def test_existing_recovery_state_requires_complete_emergency_reboot_schema(self):
+    def test_legacy_recovery_state_without_emergency_reboot_schema_is_migrated(self):
         loader = SCRIPT[
             SCRIPT.index("function Load-RecoveryFailureState")
             : SCRIPT.index("function Register-RecoveryFailure")
@@ -159,6 +159,8 @@ class WindowsBootstrapTests(unittest.TestCase):
 
         self.assertIn('Properties["emergency_reboot"]', loader)
         self.assertIn('$null -eq $storedEmergencyReboot', loader)
+        self.assertIn("Save-RecoveryFailureState", loader)
+        self.assertIn("Legacy recovery state is missing emergency reboot metadata; migrating.", loader)
         self.assertIn('$null -eq $storedEmergencyReboot.Value', loader)
         self.assertIn('$null -eq $storedLastReboot', loader)
         self.assertIn('$null -eq $storedCauseComponent', loader)

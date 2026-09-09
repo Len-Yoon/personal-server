@@ -237,8 +237,14 @@ function Load-RecoveryFailureState {
             Set-RecoveryStateInvalid
             return
         }
+        $legacyRecoveryState = $false
         $storedEmergencyReboot = $storedState.PSObject.Properties["emergency_reboot"]
-        if ($null -eq $storedEmergencyReboot -or $null -eq $storedEmergencyReboot.Value -or $storedEmergencyReboot.Value -isnot [PSCustomObject]) {
+        if ($null -eq $storedEmergencyReboot) {
+            # State files written before emergency reboot support have no cooldown metadata.
+            # Migrate only after all component counters have passed the existing validation.
+            $legacyRecoveryState = $true
+            Write-Info "Legacy recovery state is missing emergency reboot metadata; migrating."
+        } elseif ($null -eq $storedEmergencyReboot.Value -or $storedEmergencyReboot.Value -isnot [PSCustomObject]) {
             Set-RecoveryStateInvalid
         } else {
             $storedLastReboot = $storedEmergencyReboot.Value.PSObject.Properties["last_emergency_reboot_at"]
@@ -278,6 +284,9 @@ function Load-RecoveryFailureState {
             }
             $RecoveryFailureCounts[$component] = $failureCount
             $RecoveryAttemptCounts[$component] = $attemptCount
+        }
+        if ($legacyRecoveryState -and -not $RecoveryStateDirty) {
+            [void](Save-RecoveryFailureState)
         }
     } catch {
         $RecoveryFailureCounts = @{}
