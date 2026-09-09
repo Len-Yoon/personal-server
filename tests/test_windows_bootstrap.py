@@ -6,11 +6,15 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = (ROOT / "scripts" / "windows-bootstrap.ps1").read_text(encoding="utf-8-sig")
+SCRIPT_PATH = ROOT / "scripts" / "windows-bootstrap.ps1"
+SCRIPT = SCRIPT_PATH.read_text(encoding="utf-8-sig")
 WSL_SCRIPT = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf-8-sig")
 
 
 class WindowsBootstrapTests(unittest.TestCase):
+    def test_bootstrap_script_uses_utf8_bom_for_windows_powershell_korean_literals(self):
+        self.assertTrue(SCRIPT_PATH.read_bytes().startswith(b"\xef\xbb\xbf"))
+
     def test_tunnel_transition_alert_reads_only_windows_credential_manager(self):
         credential = SCRIPT[
             SCRIPT.index("function Get-TunnelTelegramConfiguration")

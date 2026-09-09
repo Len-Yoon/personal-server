@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$InstallTask,
     [switch]$Start,
     [switch]$Daemon,
