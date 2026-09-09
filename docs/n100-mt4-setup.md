@@ -28,6 +28,8 @@ wsl -l -v
 
 `personal-server-autostart` 작업은 초기 시작 이후 3분 간격으로 WSL 유지, K3s, Portal, NodePort, Cloudflare Tunnel을 점검함. 같은 구성요소가 2회 연속 비정상일 때만 승인된 복구를 시도하며, 구성요소별 시도 횟수는 최대 3회임.
 
+작업은 무기한 실행(`ExecutionTimeLimit PT0S`)되며, 비정상 종료 시 1분 간격으로 최대 3회 재시작함. 이 보강은 기존 BootTrigger, 실행 계정, 실행 명령을 유지한 상태에서 재시작 정책만 추가한 것임.
+
 | 대상 | 자동복구 범위 |
 |---|---|
 | WSL 유지 작업 | 중지된 `PersonalServer-WSL-KeepAlive` 작업 시작 |

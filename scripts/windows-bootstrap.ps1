@@ -10,6 +10,7 @@ $ErrorActionPreference = "Stop"
 $ScriptPath = Join-Path $ProjectRoot "scripts\windows-bootstrap.ps1"
 $TaskName = "personal-server-autostart"
 $WslDistribution = "Ubuntu-24.04"
+$CaddyContainerName = "personal-server-caddy-1"
 $RecoveryIntervalSeconds = 180
 $RecoveryFailureThreshold = 2
 $RecoveryMaxAttempts = 3
@@ -166,7 +167,7 @@ function Get-RecoveryHealth {
         }
     }
 
-    if (Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "--", "curl", "--fail", "--silent", "--show-error", "--max-time", "10", "http://127.0.0.1:30080/health") -Operation "Portal NodePort probe") {
+    if (Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "--", "docker", "exec", $CaddyContainerName, "curl", "--fail", "--silent", "--show-error", "--max-time", "10", "http://host.docker.internal:30080/health") -Operation "Portal NodePort probe") {
         $health.nodeport = "healthy"
     }
 
@@ -407,6 +408,15 @@ function Invoke-RecoveryCycle {
     }
 }
 
+function Set-RecoveryTaskSettings {
+    $scheduledTask = Get-ScheduledTask -TaskName $TaskName
+    $settings = $scheduledTask.Settings
+    $settings.ExecutionTimeLimit = "PT0S"
+    $settings.RestartCount = 3
+    $settings.RestartInterval = "PT1M"
+    Set-ScheduledTask -TaskName $TaskName -Settings $settings | Out-Null
+}
+
 function Install-ScheduledTask {
     $taskAction = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -Daemon"
     $runAsUser = "$env:USERDOMAIN\$env:USERNAME"
@@ -417,19 +427,25 @@ function Install-ScheduledTask {
         $existingTask = (& schtasks.exe /Query /TN $TaskName /FO LIST /V 2>&1 | Out-String)
         if ($existingTask -match [regex]::Escape($ScriptPath)) {
             Write-Info "Scheduled task '$TaskName' already points to $ScriptPath."
-            return
+        } else {
+            throw "Failed to register scheduled task '$TaskName' with schtasks.exe (exit code $createExitCode)."
         }
-        throw "Failed to register scheduled task '$TaskName' with schtasks.exe (exit code $createExitCode)."
-    }
-    if ($createOutput.Trim()) {
+    } elseif ($createOutput.Trim()) {
         Write-Info $createOutput.Trim()
     }
+
+    [void](Set-RecoveryTaskSettings)
     Write-Info "Registered scheduled task '$TaskName' to start with Windows."
 }
 
 Load-RecoveryFailureState
 
 function Start-Daemon {
+    try {
+        [void](Set-RecoveryTaskSettings)
+    } catch {
+        Write-Info "Could not update scheduled task recovery settings: $($_.Exception.Message)"
+    }
     Update-HostMetrics
     Write-Info "Waiting 120 seconds for WSL and Docker after logon."
     Start-Sleep -Seconds 120

@@ -60,6 +60,24 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("$RecoveryFailureThreshold = 2", SCRIPT)
         self.assertIn("if ($failureCount -lt $RecoveryFailureThreshold)", SCRIPT)
 
+    def test_daemon_preserves_task_identity_while_enabling_restart_after_crash(self):
+        settings = SCRIPT[
+            SCRIPT.index("function Set-RecoveryTaskSettings") : SCRIPT.index("function Install-ScheduledTask")
+        ]
+        installer = SCRIPT[
+            SCRIPT.index("function Install-ScheduledTask") : SCRIPT.index("\nLoad-RecoveryFailureState\n\nfunction Start-Daemon")
+        ]
+        self.assertIn("Get-ScheduledTask -TaskName $TaskName", settings)
+        self.assertIn("$settings = $scheduledTask.Settings", settings)
+        self.assertIn('$settings.ExecutionTimeLimit = "PT0S"', settings)
+        self.assertIn("$settings.RestartCount = 3", settings)
+        self.assertIn('$settings.RestartInterval = "PT1M"', settings)
+        self.assertIn("Set-ScheduledTask -TaskName $TaskName -Settings $settings", settings)
+        self.assertNotIn("New-ScheduledTaskSettingsSet", settings)
+        self.assertIn("[void](Set-RecoveryTaskSettings)", installer)
+        daemon = SCRIPT[SCRIPT.index("function Start-Daemon") : SCRIPT.index("if ($InstallTask)")]
+        self.assertIn("[void](Set-RecoveryTaskSettings)", daemon)
+
     def test_daemon_runs_targeted_recovery_cycle_without_periodic_stack_recreation(self):
         """A daemon-loop stack bootstrap would recreate normal services every interval."""
         daemon = SCRIPT[
@@ -125,7 +143,10 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("--raw=/readyz", health)
         self.assertIn("deployment/portal-web", health)
         self.assertIn("--for=condition=Available", health)
-        self.assertIn("127.0.0.1:30080/health", health)
+        self.assertIn('$CaddyContainerName = "personal-server-caddy-1"', SCRIPT)
+        self.assertIn('"docker", "exec", $CaddyContainerName, "curl"', health)
+        self.assertIn("host.docker.internal:30080/health", health)
+        self.assertNotIn("127.0.0.1:30080/health", health)
         self.assertIn("Test-CloudflareTunnelRunning", health)
         self.assertIn("[c]loudflared.*tunnel run", SCRIPT)
         self.assertNotIn("Start-PersonalServerStack", health)
