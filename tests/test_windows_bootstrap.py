@@ -11,6 +11,196 @@ WSL_SCRIPT = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf
 
 
 class WindowsBootstrapTests(unittest.TestCase):
+    def test_emergency_reboot_task_uses_triggerless_system_xml_registration(self):
+        reboot = SCRIPT[
+            SCRIPT.index("function Install-EmergencyRebootTask")
+            : SCRIPT.index("function Test-EmergencyRebootEligible")
+        ]
+        installer = SCRIPT[
+            SCRIPT.index("function Install-ScheduledTask")
+            : SCRIPT.index("\nLoad-RecoveryFailureState")
+        ]
+
+        self.assertIn("Join-Path $env:TEMP", reboot)
+        self.assertIn("schtasks.exe /Create /TN $EmergencyRebootTaskName /XML $temporaryTaskXml /F", reboot)
+        self.assertIn("<UserId>S-1-5-18</UserId>", reboot)
+        self.assertIn("<LogonType>ServiceAccount</LogonType>", reboot)
+        self.assertIn("<RunLevel>HighestAvailable</RunLevel>", reboot)
+        self.assertIn("<Command>shutdown.exe</Command>", reboot)
+        self.assertIn("<Arguments>/r /f /t 60</Arguments>", reboot)
+        self.assertNotIn("<Triggers>", reboot)
+        self.assertNotIn("/SC ONCE", reboot)
+        self.assertNotIn("/ST ", reboot)
+        self.assertIn("finally {", reboot)
+        self.assertIn("Remove-Item -LiteralPath $temporaryTaskXml", reboot)
+        self.assertLess(installer.index("Install-EmergencyRebootTask"), installer.index("schtasks.exe /Create /TN $TaskName"))
+
+    def test_emergency_request_save_failure_restores_declared_prior_memory_state(self):
+        request = SCRIPT[
+            SCRIPT.index("function Request-EmergencyReboot")
+            : SCRIPT.index("function Set-RecoveryTaskSettings")
+        ]
+        save_failure = request[
+            request.index("if (-not (Save-RecoveryFailureState))")
+            : request.index("try {", request.index("if (-not (Save-RecoveryFailureState))"))
+        ]
+
+        self.assertLess(
+            request.index("$previousEmergencyRebootLastAt = $EmergencyRebootLastAt"),
+            request.index("$script:EmergencyRebootLastAt = (Get-Date)"),
+        )
+        self.assertLess(
+            request.index("$previousEmergencyRebootCauseComponent = $EmergencyRebootCauseComponent"),
+            request.index("$script:EmergencyRebootCauseComponent = $Component"),
+        )
+        self.assertIn("$script:EmergencyRebootLastAt = $previousEmergencyRebootLastAt", save_failure)
+        self.assertIn("$script:EmergencyRebootCauseComponent = $previousEmergencyRebootCauseComponent", save_failure)
+
+    def test_failed_emergency_task_start_keeps_persisted_audit_and_cooldown_evidence(self):
+        request = SCRIPT[
+            SCRIPT.index("function Request-EmergencyReboot")
+            : SCRIPT.index("function Set-RecoveryTaskSettings")
+        ]
+
+        start_index = request.index("Start-ScheduledTask -TaskName $EmergencyRebootTaskName")
+        failed_start = request[request.index("catch {", start_index) :]
+        self.assertIn("Emergency reboot request was persisted but its scheduled task could not start.", failed_start)
+        self.assertNotIn("$script:EmergencyRebootLastAt = $previousEmergencyRebootLastAt", failed_start)
+        self.assertNotIn("$script:EmergencyRebootCauseComponent = $previousEmergencyRebootCauseComponent", failed_start)
+
+    def test_failed_target_action_escalates_only_after_final_core_health_check(self):
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle")
+            : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+
+        failed_action = cycle[cycle.index("if (-not $targetedRecoverySucceeded)") :]
+        self.assertIn("$finalHealth = Get-RecoveryHealth", failed_action)
+        self.assertIn('if ($finalHealth[$component] -ne "unhealthy")', failed_action)
+        self.assertLess(failed_action.index("$finalHealth = Get-RecoveryHealth"), failed_action.index("Test-EmergencyRebootEligible $component"))
+        self.assertLess(failed_action.index('if ($finalHealth[$component] -ne "unhealthy")'), failed_action.index("Test-EmergencyRebootEligible $component"))
+
+    def test_invalid_persisted_state_marks_recovery_dirty_before_any_recovery_save(self):
+        invalid_state = SCRIPT[
+            SCRIPT.index("function Set-RecoveryStateInvalid")
+            : SCRIPT.index("function Register-RecoveryFailure")
+        ]
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle")
+            : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+
+        self.assertIn('$script:EmergencyRebootCooldownStateValid = $false', invalid_state)
+        self.assertIn('$script:RecoveryStateDirty = $true', invalid_state)
+        self.assertIn("Set-RecoveryStateInvalid", invalid_state)
+        dirty_check = cycle.index("if ($RecoveryStateDirty) {", cycle.index("$health = Get-RecoveryHealth"))
+        self.assertLess(dirty_check, cycle.index("Register-RecoveryFailure $component"))
+
+    def test_existing_recovery_state_requires_complete_emergency_reboot_schema(self):
+        loader = SCRIPT[
+            SCRIPT.index("function Load-RecoveryFailureState")
+            : SCRIPT.index("function Register-RecoveryFailure")
+        ]
+
+        self.assertIn('Properties["emergency_reboot"]', loader)
+        self.assertIn('$null -eq $storedEmergencyReboot', loader)
+        self.assertIn('$null -eq $storedEmergencyReboot.Value', loader)
+        self.assertIn('$null -eq $storedLastReboot', loader)
+        self.assertIn('$null -eq $storedCauseComponent', loader)
+        self.assertIn("[string]::IsNullOrWhiteSpace", loader)
+        self.assertIn("Set-RecoveryStateInvalid", loader)
+
+    def test_existing_recovery_state_requires_complete_component_counter_schema_for_reboot(self):
+        loader = SCRIPT[
+            SCRIPT.index("function Load-RecoveryFailureState")
+            : SCRIPT.index("function Register-RecoveryFailure")
+        ]
+
+        self.assertIn("foreach ($component in $RecoveryComponents)", loader)
+        self.assertIn('$storedComponent.Value -isnot [PSCustomObject]', loader)
+        self.assertIn('$null -eq $storedFailureCount', loader)
+        self.assertIn('$null -eq $storedAttemptCount', loader)
+        self.assertIn('$failureCount -lt 0', loader)
+        self.assertIn('$attemptCount -lt 0', loader)
+
+    def test_corrupt_or_non_object_emergency_reboot_state_fails_closed_but_missing_file_remains_valid(self):
+        loader = SCRIPT[
+            SCRIPT.index("function Load-RecoveryFailureState")
+            : SCRIPT.index("function Register-RecoveryFailure")
+        ]
+
+        self.assertIn("if (-not (Test-Path -LiteralPath $RecoveryStatePath)) {\n        return", loader)
+        self.assertIn("$storedEmergencyReboot.Value -isnot [PSCustomObject]", loader)
+        self.assertIn("Set-RecoveryStateInvalid", loader)
+        catch_body = loader[loader.rindex("catch {") :]
+        self.assertIn("Set-RecoveryStateInvalid", catch_body)
+
+    def test_emergency_reboot_task_is_installed_and_failed_start_keeps_cooldown_state(self):
+        installer = SCRIPT[
+            SCRIPT.index("function Install-ScheduledTask")
+            : SCRIPT.index("\nLoad-RecoveryFailureState")
+        ]
+        request = SCRIPT[
+            SCRIPT.index("function Request-EmergencyReboot")
+            : SCRIPT.index("function Set-RecoveryTaskSettings")
+        ]
+
+        self.assertIn("Install-EmergencyRebootTask", installer)
+        self.assertIn("Get-ScheduledTask -TaskName $EmergencyRebootTaskName -ErrorAction Stop", request)
+        self.assertIn("Start-ScheduledTask -TaskName $EmergencyRebootTaskName", request)
+        start_index = request.index("Start-ScheduledTask -TaskName $EmergencyRebootTaskName")
+        failed_start = request[request.index("catch {", start_index) :]
+        self.assertIn("Emergency reboot request was persisted but its scheduled task could not start.", failed_start)
+        self.assertNotIn("$previousEmergencyRebootLastAt", failed_start)
+
+    def test_core_targeted_recovery_rechecks_health_before_emergency_escalation(self):
+        targeted = SCRIPT[
+            SCRIPT.index("function Invoke-TargetedRecovery")
+            : SCRIPT.index("function Enter-RecoveryLock")
+        ]
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle")
+            : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+
+        self.assertGreaterEqual(targeted.count("Get-RecoveryHealth"), 2)
+        self.assertIn('$health.keepalive -eq "healthy"', targeted)
+        self.assertIn('$health.k3s -eq "healthy"', targeted)
+        self.assertIn("$attemptCount -ne $RecoveryMaxAttempts", SCRIPT)
+        self.assertLess(cycle.index("Invoke-TargetedRecovery $component"), cycle.index("Test-EmergencyRebootEligible $component"))
+        self.assertIn("if (Request-EmergencyReboot $component)", cycle)
+
+    def test_invalid_persisted_emergency_reboot_timestamp_blocks_reboot_without_erasing_it(self):
+        loader = SCRIPT[
+            SCRIPT.index("function Load-RecoveryFailureState")
+            : SCRIPT.index("function Register-RecoveryFailure")
+        ]
+        eligible = SCRIPT[
+            SCRIPT.index("function Test-EmergencyRebootEligible")
+            : SCRIPT.index("function Request-EmergencyReboot")
+        ]
+
+        self.assertIn('$script:EmergencyRebootLastAt = [string]$storedLastReboot.Value', loader)
+        self.assertIn("Set-RecoveryStateInvalid", loader)
+        self.assertIn("if (-not $EmergencyRebootCooldownStateValid)", eligible)
+        self.assertIn("persisted cooldown timestamp is invalid", eligible)
+
+    def test_emergency_reboot_is_limited_to_exhausted_keepalive_or_k3s_recovery(self):
+        reboot = SCRIPT[
+            SCRIPT.index("function Install-EmergencyRebootTask")
+            : SCRIPT.index("function Set-RecoveryTaskSettings")
+        ]
+
+        self.assertIn('$EmergencyRebootTaskName = "PersonalServer-EmergencyReboot"', SCRIPT)
+        self.assertIn('$EmergencyRebootGraceSeconds = 1200', SCRIPT)
+        self.assertIn('$EmergencyRebootCooldownSeconds = 21600', SCRIPT)
+        self.assertIn('"keepalive", "k3s"', reboot)
+        self.assertNotIn('"tunnel", "portal", "nodeport"', reboot)
+        self.assertIn('shutdown.exe /r /f /t 60', reboot)
+        self.assertIn("<UserId>S-1-5-18</UserId>", reboot)
+        self.assertIn("<LogonType>ServiceAccount</LogonType>", reboot)
+        self.assertIn("<RunLevel>HighestAvailable</RunLevel>", reboot)
+
     def test_uses_schtasks_when_scheduled_task_cmdlets_are_unavailable(self):
         self.assertIn("schtasks.exe /Create", SCRIPT)
         self.assertIn("/SC ONSTART", SCRIPT)
@@ -50,10 +240,25 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("bash scripts/windows-bootstrap.sh", SCRIPT)
         self.assertIn("Recovery check failed", SCRIPT)
 
-    def test_powershell_daemon_keeps_cloudflare_tunnel_in_wsl_process(self):
-        self.assertIn("Start-Process -FilePath 'wsl.exe'", SCRIPT)
-        self.assertIn("'cloudflared', 'tunnel', 'run'", SCRIPT)
+    def test_tunnel_recovery_controls_the_registered_wsl_user_service(self):
+        recovery = SCRIPT[
+            SCRIPT.index("function Test-CloudflareTunnelService") : SCRIPT.index("function Update-HostMetrics")
+        ]
+        self.assertIn('$WslServiceUser = "window"', SCRIPT)
+        self.assertIn('"systemctl", "--user", "is-active", "--quiet", "cloudflared-personal-server.service"', recovery)
+        self.assertIn('"systemctl", "--user", "start", "cloudflared-personal-server.service"', recovery)
+        self.assertNotIn("Start-Process -FilePath 'wsl.exe'", recovery)
+        self.assertNotIn("'cloudflared', 'tunnel', 'run'", recovery)
         self.assertNotIn("nohup cloudflared tunnel run", WSL_SCRIPT)
+
+    def test_tunnel_recovery_restarts_active_service_when_connection_process_is_missing(self):
+        recovery = SCRIPT[
+            SCRIPT.index("function Start-CloudflareTunnel") : SCRIPT.index("function Update-HostMetrics")
+        ]
+        self.assertIn("if (Test-CloudflareTunnelService) {", recovery)
+        self.assertIn("if (Test-CloudflareTunnelRunning) {", recovery)
+        self.assertIn('"systemctl", "--user", "restart", "cloudflared-personal-server.service"', recovery)
+        self.assertIn("return ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning))", recovery)
 
     def test_daemon_uses_three_minute_health_interval_and_two_failures_before_recovery(self):
         self.assertIn("$RecoveryIntervalSeconds = 180", SCRIPT)
@@ -269,7 +474,7 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertLess(cycle.index("Register-RecoveryAttempt $component"), cycle.index("Invoke-TargetedRecovery $component"))
 
     def test_tunnel_probe_uses_timeout_runner_without_writing_process_command_line(self):
-        tunnel = SCRIPT[SCRIPT.index("function Test-CloudflareTunnelRunning") : SCRIPT.index("function Start-CloudflareTunnelProcess")]
+        tunnel = SCRIPT[SCRIPT.index("function Test-CloudflareTunnelRunning") : SCRIPT.index("function Test-CloudflareTunnelService")]
         health = SCRIPT[SCRIPT.index("function Get-RecoveryHealth") : SCRIPT.index("function Save-RecoveryFailureState")]
         expected_probe = "pgrep -af '[c]loudflared.*tunnel run' >/dev/null"
         self.assertIn("Invoke-WslWithTimeout", tunnel)
