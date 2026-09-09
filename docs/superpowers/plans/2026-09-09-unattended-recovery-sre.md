@@ -160,8 +160,9 @@ $EmergencyRebootGraceSeconds = 1200
 $EmergencyRebootCooldownSeconds = 21600
 
 function Install-EmergencyRebootTask {
-    $command = 'shutdown.exe /r /f /t 60'
-    $result = & schtasks.exe /Create /TN $EmergencyRebootTaskName /SC ONCE /ST 00:00 /RU "SYSTEM" /RL HIGHEST /TR $command /F 2>&1 | Out-String
+    # <Triggers> 없이 SYSTEM ServiceAccount XML을 등록하여
+    # Start-ScheduledTask로만 실행할 수 있게 함.
+    $result = & schtasks.exe /Create /TN $EmergencyRebootTaskName /XML $temporaryTaskXml /F 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { throw "Failed to register emergency reboot task." }
 }
 ```
