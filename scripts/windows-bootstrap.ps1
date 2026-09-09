@@ -10,6 +10,8 @@ $ErrorActionPreference = "Stop"
 $ScriptPath = Join-Path $ProjectRoot "scripts\windows-bootstrap.ps1"
 $TaskName = "personal-server-autostart"
 $WslDistribution = "Ubuntu-24.04"
+$WslServiceUser = "window"
+$CloudflareTunnelService = "cloudflared-personal-server.service"
 $CaddyContainerName = "personal-server-caddy-1"
 $RecoveryIntervalSeconds = 180
 $RecoveryFailureThreshold = 2
@@ -79,19 +81,22 @@ function Test-CloudflareTunnelRunning {
     return (Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "bash", "-lc", "pgrep -af '[c]loudflared.*tunnel run' >/dev/null") -Operation "Cloudflare Tunnel probe")
 }
 
-function Start-CloudflareTunnelProcess {
-    Start-Process -FilePath 'wsl.exe' -WindowStyle Hidden -ArgumentList @(
-        '-d', $WslDistribution,
-        '--', 'cloudflared', 'tunnel', 'run'
-    ) | Out-Null
-    return $true
+function Test-CloudflareTunnelService {
+    return (Invoke-WslWithTimeout -Arguments @(
+        "-d", $WslDistribution, "-u", $WslServiceUser, "--",
+        "systemctl", "--user", "is-active", "--quiet", "cloudflared-personal-server.service"
+    ) -Operation "Cloudflare Tunnel service probe")
 }
 
 function Start-CloudflareTunnel {
-    if (Test-CloudflareTunnelRunning) {
+    if (Test-CloudflareTunnelService) {
         return $false
     }
-    return (Start-CloudflareTunnelProcess)
+    if (-not (Invoke-WslWithTimeout -Arguments @(
+        "-d", $WslDistribution, "-u", $WslServiceUser, "--",
+        "systemctl", "--user", "start", "cloudflared-personal-server.service"
+    ) -Operation "Cloudflare Tunnel service start")) { return $false }
+    return (Test-CloudflareTunnelService)
 }
 
 function Update-HostMetrics {
@@ -171,7 +176,7 @@ function Get-RecoveryHealth {
         $health.nodeport = "healthy"
     }
 
-    if (Test-CloudflareTunnelRunning) {
+    if ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning)) {
         $health.tunnel = "healthy"
     }
 
@@ -292,7 +297,7 @@ function Test-RecoveryActionNeeded([string]$Component) {
             return $false
         }
         "tunnel" {
-            return (-not (Test-CloudflareTunnelRunning))
+            return ((-not (Test-CloudflareTunnelService)) -or (-not (Test-CloudflareTunnelRunning)))
         }
     }
     return $false
@@ -318,7 +323,7 @@ function Invoke-TargetedRecovery([string]$Component) {
             return $false
         }
         "tunnel" {
-            return (Start-CloudflareTunnelProcess)
+            return (Start-CloudflareTunnel)
         }
     }
     return $false

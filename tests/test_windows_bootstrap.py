@@ -50,9 +50,15 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("bash scripts/windows-bootstrap.sh", SCRIPT)
         self.assertIn("Recovery check failed", SCRIPT)
 
-    def test_powershell_daemon_keeps_cloudflare_tunnel_in_wsl_process(self):
-        self.assertIn("Start-Process -FilePath 'wsl.exe'", SCRIPT)
-        self.assertIn("'cloudflared', 'tunnel', 'run'", SCRIPT)
+    def test_tunnel_recovery_controls_the_registered_wsl_user_service(self):
+        recovery = SCRIPT[
+            SCRIPT.index("function Test-CloudflareTunnelService") : SCRIPT.index("function Update-HostMetrics")
+        ]
+        self.assertIn('$WslServiceUser = "window"', SCRIPT)
+        self.assertIn('"systemctl", "--user", "is-active", "--quiet", "cloudflared-personal-server.service"', recovery)
+        self.assertIn('"systemctl", "--user", "start", "cloudflared-personal-server.service"', recovery)
+        self.assertNotIn("Start-Process -FilePath 'wsl.exe'", recovery)
+        self.assertNotIn("'cloudflared', 'tunnel', 'run'", recovery)
         self.assertNotIn("nohup cloudflared tunnel run", WSL_SCRIPT)
 
     def test_daemon_uses_three_minute_health_interval_and_two_failures_before_recovery(self):
@@ -269,7 +275,7 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertLess(cycle.index("Register-RecoveryAttempt $component"), cycle.index("Invoke-TargetedRecovery $component"))
 
     def test_tunnel_probe_uses_timeout_runner_without_writing_process_command_line(self):
-        tunnel = SCRIPT[SCRIPT.index("function Test-CloudflareTunnelRunning") : SCRIPT.index("function Start-CloudflareTunnelProcess")]
+        tunnel = SCRIPT[SCRIPT.index("function Test-CloudflareTunnelRunning") : SCRIPT.index("function Test-CloudflareTunnelService")]
         health = SCRIPT[SCRIPT.index("function Get-RecoveryHealth") : SCRIPT.index("function Save-RecoveryFailureState")]
         expected_probe = "pgrep -af '[c]loudflared.*tunnel run' >/dev/null"
         self.assertIn("Invoke-WslWithTimeout", tunnel)
