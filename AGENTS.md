@@ -15,7 +15,7 @@
   - 자동복구 변경을 검증하는 관련 테스트 파일
   - `docs/codex-work-loop.md`
   - `docs/public-uptime-monitor.md`
-- 자동복구 변경은 WSL, K3s, Portal 상태, Cloudflare Tunnel 감시·복구, 실패 횟수 제한, 중복 실행 방지, Cloudflare Tunnel 장애·복구 전환 Telegram 알림에 한정함.
+- 자동복구 변경은 WSL, K3s, Portal 상태, Cloudflare Tunnel 감시·복구, 감시 프로세스 단일 실행·비정상 종료 재기동, 실패 횟수 제한, 중복 실행 방지, Cloudflare Tunnel 장애·복구 전환 Telegram 알림에 한정함.
 - 허용 복구 동작은 기존 KeepAlive 작업 시작, inactive 상태 K3s 시작, 제한형 `portal-web` rollout restart, Cloudflare Tunnel 재기동으로 한정함.
 - 허용 알림 동작은 Cloudflare Tunnel 장애·복구 상태 전환을 Telegram으로 1회씩 전달하는 것으로 한정함.
 - K3s가 active인 상태에서 K3s 전체 restart를 수행하지 않음.
@@ -52,12 +52,15 @@
 - 코드·설정 변경 전 변경 경로 파일을 준비하여 `python3 scripts/run_change_harness.py --input <변경경로파일> --agent-context`를 실행하고, 출력된 작업 상태와 다음 조치를 작업 컨텍스트에 반영함. Codex가 이 출력을 자동으로 작업 컨텍스트에 주입한다고 가정하지 않음.
 - N100 자동복구 승인 작업은 `scripts/verify_change_scope.py`가 `scripts/windows-bootstrap.ps1`을 maintenance 검증 대상 자동화 파일로 분류하도록 관련 정책·테스트를 함께 갱신함.
 - Git 변경 목록은 `git diff --name-status -z --find-renames <기준커밋> HEAD > <변경경로파일>`로 만들고, 하네스에는 `--input-format git-name-status-z`를 함께 전달함. 경로에 공백·한글·rename이 있어도 줄 단위 형식으로 변환하지 않음.
-- 관련 테스트와 적용 가능한 정적 검사를 실행하며, 통과 전에는 완료로 보고하지 않음.
+- 변경 범위와 직접 관련된 테스트 및 적용 가능한 정적 검사는 반드시 실행하고 통과해야 완료로 보고함.
+- 전체 테스트는 변경이 공용 런타임·공용 라이브러리·CI 계약·배포 경로에 영향을 주거나, 관련 테스트만으로 회귀 위험을 판단할 수 없을 때 실행함.
+- 전체 테스트에서 변경 범위와 무관한 기존 실패가 발생한 경우, 실패한 테스트·원인·변경 파일과의 비연관 근거를 완료 보고에 기록함. 관련 테스트와 정적 검사가 통과했고 독립 검토에서 비연관성이 확인되면, 사용자 승인 후 커밋·PR·병합을 진행할 수 있음.
+- 변경 파일, 변경 기능, 공용 계약과 직접 관련된 테스트 실패 또는 원인 분리가 불가능한 실패는 반드시 차단으로 처리하며 커밋·PR·병합하지 않음.
 - 테스트·정적 검사 후 실제 실행 결과를 `--check-result <검사명>=success` 또는 `--check-result <검사명>=failure`로 전달하여 `--agent-context`를 다시 실행함. 필요한 검증 결과가 누락되었거나 실패·차단 상태이면 완료로 보고하지 않음.
 - 실제 모델 토큰 절감률은 작업별 JSONL 기록을 `python3 scripts/summarize_token_measurements.py --input <측정기록.jsonl>`로 집계함. 바이트 크기 절감률을 모델 토큰 절감률로 표현하지 않음.
 - 실패 원인을 확인한 최소 수정만 수행하고, 동일 작업의 재검증은 최대 3회로 제한함.
 - 범위 불명확, 금지 영역 접근, 보안·운영·배포 영향 판단 필요 시 작업을 중단하고 사용자 확인을 요청함. 단, 위 N100 자동복구 예외의 승인 범위와 안전 경계를 모두 충족하면 진행 가능함.
-- 완료 보고에는 변경 내용, 변경 파일, 검증 결과, 미검증 항목, 확인 필요 사항을 포함함.
+- 완료 보고에는 변경 내용, 변경 파일, 관련 테스트·정적 검사 결과, 전체 테스트 실행 여부와 결과, 미검증 항목, 관련 없는 기존 실패의 근거, 확인 필요 사항을 포함함.
 - 기능 영향 없는 문서화·문구·서식 변경, 읽기 전용 조사, 단순 질문은 주 에이전트 1명이 처리할 수 있음. 완료 보고에 하위 에이전트 미사용 사유를 기록함.
 - 단일 서비스의 기능 변경·버그 수정은 주 에이전트와 독립 검토 에이전트로 역할을 분리함.
 - 리팩터링, 2개 이상 서비스·모듈 변경, 3개 초과 기능 구현·테스트·설정 파일을 수정하는 변경은 주 에이전트·구현 에이전트·검토 에이전트 3명 분업을 필수로 적용함.
@@ -74,10 +77,7 @@
 
 ## N100 안전 자동 배포 정책 예외
 
-N100 안전 자동 배포 작업에 한해 변경 분류 계약(`scripts/classify-n100-safe-deployment.py`),
-안전 배포·health 검증 스크립트 및 `.github/workflows/deploy-n100.yml`만 추가·수정할 수 있음.
-자동 대상은 `crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker`의 허용된
-Compose 변경으로 제한함. Portal, K3s, Kubernetes Secret·PVC·운영 데이터, Caddy,
-서버 bootstrap 및 scheduler는 계속 제외하며, 해당 경로가 섞인 변경은 배포하지 않고 차단함.
+N100 안전 자동 배포 작업에 한해 변경 분류 계약(`scripts/classify-n100-safe-deployment.py`), 안전 배포·health 검증 스크립트 및 `.github/workflows/deploy-n100.yml`만 추가·수정할 수 있음.
+자동 대상은 `crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker`의 허용된 Compose 변경으로 제한함. Portal, K3s, Kubernetes Secret·PVC·운영 데이터, Caddy, 서버 bootstrap 및 scheduler는 계속 제외하며, 해당 경로가 섞인 변경은 배포하지 않고 차단함.
 
 N100 자동복구 예외는 위 안전 자동배포 정책의 대상이 아니며, 자동복구 변경이 포함된 브랜치는 별도 운영 검토와 사용자 승인 없이는 배포하지 않음.

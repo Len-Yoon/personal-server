@@ -12,6 +12,74 @@ WSL_SCRIPT = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf
 
 
 class WindowsBootstrapTests(unittest.TestCase):
+    def test_scheduled_task_runs_a_supervisor_that_restarts_the_daemon(self):
+        self.assertIn("function Start-Supervisor", SCRIPT)
+        installer = SCRIPT[
+            SCRIPT.index("function Install-ScheduledTask")
+            : SCRIPT.index("\nLoad-RecoveryFailureState")
+        ]
+        supervisor = SCRIPT[
+            SCRIPT.index("function Start-Supervisor")
+            : SCRIPT.index("if ($InstallTask)")
+        ]
+
+        self.assertIn("[switch]$Supervisor", SCRIPT)
+        self.assertIn("-Supervisor", installer)
+        self.assertIn("Start-Process", supervisor)
+        self.assertIn("-Daemon", supervisor)
+        self.assertIn("-Wait", supervisor)
+        self.assertIn("Start-Sleep -Seconds $DaemonRestartDelaySeconds", supervisor)
+        self.assertIn("Enter-SupervisorLock", supervisor)
+        self.assertIn("Exit-SupervisorLock", supervisor)
+        self.assertIn("$daemonLifetimeSeconds -lt $DaemonRapidFailureWindowSeconds", supervisor)
+        self.assertIn("Start-Sleep -Seconds $DaemonFailureBackoffSeconds", supervisor)
+        self.assertIn("if ($Supervisor)", SCRIPT)
+        self.assertIn("Start-Supervisor", SCRIPT)
+
+    def test_supervisor_applies_boot_delay_once_while_daemon_restarts_without_it(self):
+        self.assertIn("function Start-Supervisor", SCRIPT)
+        supervisor = SCRIPT[
+            SCRIPT.index("function Start-Supervisor")
+            : SCRIPT.index("function Start-Daemon")
+        ]
+        daemon = SCRIPT[
+            SCRIPT.index("function Start-Daemon")
+            : SCRIPT.index("if ($InstallTask)")
+        ]
+
+        self.assertIn("Waiting 120 seconds for WSL and Docker after logon.", supervisor)
+        self.assertIn("Start-Sleep -Seconds 120", supervisor)
+        self.assertNotIn("Waiting 120 seconds for WSL and Docker after logon.", daemon)
+
+    def test_supervisor_uses_a_distinct_lifetime_lock_to_prevent_duplicate_daemons(self):
+        self.assertIn("function Enter-SupervisorLock", SCRIPT)
+        lock = SCRIPT[
+            SCRIPT.index("function Enter-SupervisorLock")
+            : SCRIPT.index("function Start-Supervisor")
+        ]
+
+        self.assertIn('$SupervisorLockPath = Join-Path $RecoveryStateDirectory "supervisor.lock"', SCRIPT)
+        self.assertIn("[System.IO.FileShare]::None", lock)
+        self.assertIn("[System.IO.FileMode]::OpenOrCreate", lock)
+        self.assertIn("Remove-Item -LiteralPath $SupervisorLockPath", lock)
+
+    def test_daemon_uses_its_own_lifetime_lock_to_block_legacy_or_manual_duplicates(self):
+        self.assertIn("function Enter-DaemonLock", SCRIPT)
+        lock = SCRIPT[
+            SCRIPT.index("function Enter-DaemonLock")
+            : SCRIPT.index("function Start-Daemon")
+        ]
+        daemon = SCRIPT[
+            SCRIPT.index("function Start-Daemon")
+            : SCRIPT.index("if ($InstallTask)")
+        ]
+
+        self.assertIn('$DaemonLockPath = Join-Path $RecoveryStateDirectory "daemon.lock"', SCRIPT)
+        self.assertIn("[System.IO.FileShare]::None", lock)
+        self.assertIn("Enter-DaemonLock", daemon)
+        self.assertIn("Exit-DaemonLock", daemon)
+        self.assertIn("already running; skipping duplicate start", daemon)
+
     def test_bootstrap_script_uses_utf8_bom_for_windows_powershell_korean_literals(self):
         self.assertTrue(SCRIPT_PATH.read_bytes().startswith(b"\xef\xbb\xbf"))
 
@@ -411,12 +479,12 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("$RecoveryFailureThreshold = 2", SCRIPT)
         self.assertIn("if ($failureCount -lt $RecoveryFailureThreshold)", SCRIPT)
 
-    def test_daemon_preserves_task_identity_while_enabling_restart_after_crash(self):
+    def test_supervisor_preserves_task_identity_while_enabling_restart_after_crash(self):
         settings = SCRIPT[
             SCRIPT.index("function Set-RecoveryTaskSettings") : SCRIPT.index("function Install-ScheduledTask")
         ]
         installer = SCRIPT[
-            SCRIPT.index("function Install-ScheduledTask") : SCRIPT.index("\nLoad-RecoveryFailureState\n\nfunction Start-Daemon")
+            SCRIPT.index("function Install-ScheduledTask") : SCRIPT.index("\nLoad-RecoveryFailureState\n\nfunction Enter-SupervisorLock")
         ]
         self.assertIn("Get-ScheduledTask -TaskName $TaskName", settings)
         self.assertIn("$settings = $scheduledTask.Settings", settings)
@@ -426,8 +494,8 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("Set-ScheduledTask -TaskName $TaskName -Settings $settings", settings)
         self.assertNotIn("New-ScheduledTaskSettingsSet", settings)
         self.assertIn("[void](Set-RecoveryTaskSettings)", installer)
-        daemon = SCRIPT[SCRIPT.index("function Start-Daemon") : SCRIPT.index("if ($InstallTask)")]
-        self.assertIn("[void](Set-RecoveryTaskSettings)", daemon)
+        supervisor = SCRIPT[SCRIPT.index("function Start-Supervisor") : SCRIPT.index("function Start-Daemon")]
+        self.assertIn("[void](Set-RecoveryTaskSettings)", supervisor)
 
     def test_install_task_keeps_registered_task_when_recovery_settings_update_fails(self):
         installer = SCRIPT[
@@ -450,18 +518,24 @@ class WindowsBootstrapTests(unittest.TestCase):
             SCRIPT.index("function Start-Daemon") : SCRIPT.index("if ($InstallTask)")
         ]
         daemon_loop = daemon[daemon.index("while ($true)") :]
-        self.assertEqual(daemon.count("Start-PersonalServerStack"), 1)
-        self.assertIn("Start-PersonalServerStack", daemon[: daemon.index("while ($true)")])
+        supervisor = SCRIPT[
+            SCRIPT.index("function Start-Supervisor") : SCRIPT.index("function Start-Daemon")
+        ]
+        self.assertEqual(daemon.count("Start-PersonalServerStack"), 0)
+        self.assertEqual(supervisor.count("Start-PersonalServerStack"), 1)
         self.assertIn("Invoke-RecoveryCycle", daemon_loop)
         self.assertIn("Start-Sleep -Seconds $RecoveryIntervalSeconds", daemon_loop)
         self.assertNotIn("Start-PersonalServerStack", daemon_loop)
 
-    def test_daemon_continues_targeted_recovery_after_initial_bootstrap_failure(self):
+    def test_daemon_continues_targeted_recovery_after_supervisor_bootstrap_failure(self):
         """An initial bootstrap exception must not prevent later targeted recovery cycles."""
+        supervisor = SCRIPT[
+            SCRIPT.index("function Start-Supervisor") : SCRIPT.index("function Start-Daemon")
+        ]
         daemon = SCRIPT[
             SCRIPT.index("function Start-Daemon") : SCRIPT.index("if ($InstallTask)")
         ]
-        startup = daemon[: daemon.index("while ($true)")]
+        startup = supervisor[: supervisor.index("while ($true)")]
         daemon_loop = daemon[daemon.index("while ($true)") :]
         self.assertIn("try {", startup)
         self.assertIn("Start-PersonalServerStack", startup)
@@ -471,7 +545,7 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertNotIn("Start-PersonalServerStack", daemon_loop)
 
     def test_targeted_recovery_does_not_recreate_compose_portal_writer(self):
-        recovery = SCRIPT[SCRIPT.index("function Invoke-TargetedRecovery") : SCRIPT.index("function Start-Daemon")]
+        recovery = SCRIPT[SCRIPT.index("function Invoke-TargetedRecovery") : SCRIPT.index("function Enter-RecoveryLock")]
         self.assertNotIn("Start-PersonalServerStack", recovery)
         self.assertNotIn("docker compose", recovery)
 

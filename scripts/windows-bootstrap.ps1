@@ -1,6 +1,7 @@
 ﻿param(
     [switch]$InstallTask,
     [switch]$Start,
+    [switch]$Supervisor,
     [switch]$Daemon,
     [string]$ProjectRoot = "C:\personal-server"
 )
@@ -24,6 +25,12 @@ $EmergencyRebootCooldownSeconds = 21600
 $RecoveryStateDirectory = Join-Path $ProjectRoot "data"
 $RecoveryStatePath = Join-Path $ProjectRoot "data\recovery-state.json"
 $RecoveryLockPath = Join-Path $RecoveryStateDirectory "recovery.lock"
+$SupervisorLockPath = Join-Path $RecoveryStateDirectory "supervisor.lock"
+$DaemonLockPath = Join-Path $RecoveryStateDirectory "daemon.lock"
+$DaemonRestartDelaySeconds = 15
+$DaemonFailureBackoffSeconds = 60
+$DaemonRapidFailureWindowSeconds = 60
+$DaemonRapidFailureLimit = 3
 $RecoveryComponents = @("keepalive", "k3s", "portal", "nodeport", "tunnel")
 $RecoveryFailureCounts = @{}
 $RecoveryAttemptCounts = @{}
@@ -804,7 +811,7 @@ function Set-RecoveryTaskSettings {
 
 function Install-ScheduledTask {
     Install-EmergencyRebootTask
-    $taskAction = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -Daemon"
+    $taskAction = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -Supervisor"
     $runAsUser = "$env:USERDOMAIN\$env:USERNAME"
     Write-Info "Registering startup task for $runAsUser. Windows will prompt for the account password."
     $previousErrorActionPreference = $ErrorActionPreference
@@ -836,35 +843,140 @@ function Install-ScheduledTask {
 
 Load-RecoveryFailureState
 
-function Start-Daemon {
+function Enter-SupervisorLock {
+    New-Item -ItemType Directory -Path $RecoveryStateDirectory -Force | Out-Null
+    try {
+        return [System.IO.File]::Open(
+            $SupervisorLockPath,
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None
+        )
+    } catch [System.IO.IOException] {
+        return $null
+    }
+}
+
+function Exit-SupervisorLock($LockStream) {
+    if ($null -eq $LockStream) {
+        return
+    }
+    try {
+        $LockStream.Dispose()
+    } finally {
+        Remove-Item -LiteralPath $SupervisorLockPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Start-Supervisor {
+    $lockStream = Enter-SupervisorLock
+    if ($null -eq $lockStream) {
+        Write-Info "Recovery supervisor is already running; skipping duplicate start."
+        return
+    }
+
     try {
         [void](Set-RecoveryTaskSettings)
     } catch {
         Write-Info "Could not update scheduled task recovery settings: $($_.Exception.Message)"
     }
-    Update-HostMetrics
-    Write-Info "Waiting 120 seconds for WSL and Docker after logon."
-    Start-Sleep -Seconds 120
-    try {
-        Start-PersonalServerStack
-    } catch {
-        Write-Info "Initial stack bootstrap failed: $($_.Exception.Message)"
-    }
 
-    while ($true) {
+    try {
+        Update-HostMetrics
+        Write-Info "Waiting 120 seconds for WSL and Docker after logon."
+        Start-Sleep -Seconds 120
         try {
-            Update-HostMetrics
-            Invoke-RecoveryCycle
+            Start-PersonalServerStack
         } catch {
-            Write-Info "Recovery check failed: $($_.Exception.Message)"
+            Write-Info "Initial stack bootstrap failed: $($_.Exception.Message)"
         }
-        Write-Info "Sleeping 3 minutes before the next recovery check."
-        Start-Sleep -Seconds $RecoveryIntervalSeconds
+
+        $rapidFailureCount = 0
+        while ($true) {
+            $startedAt = Get-Date
+            try {
+                [void](Start-Process -FilePath "powershell.exe" -ArgumentList @(
+                    "-WindowStyle", "Hidden", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                    "-File", $ScriptPath, "-Daemon", "-ProjectRoot", $ProjectRoot
+                ) -PassThru -Wait -ErrorAction Stop)
+            } catch {
+                Write-Info "Recovery daemon could not start; scheduling a supervised retry."
+            }
+
+            $daemonLifetimeSeconds = ((Get-Date) - $startedAt).TotalSeconds
+            if ($daemonLifetimeSeconds -lt $DaemonRapidFailureWindowSeconds) {
+                $rapidFailureCount += 1
+            } else {
+                $rapidFailureCount = 0
+            }
+            if ($rapidFailureCount -ge $DaemonRapidFailureLimit) {
+                Write-Info "Recovery daemon ended repeatedly; applying restart backoff."
+                Start-Sleep -Seconds $DaemonFailureBackoffSeconds
+                $rapidFailureCount = 0
+                continue
+            }
+            Write-Info "Recovery daemon exited; restarting under supervisor."
+            Start-Sleep -Seconds $DaemonRestartDelaySeconds
+        }
+    } finally {
+        Exit-SupervisorLock $lockStream
+    }
+}
+
+function Enter-DaemonLock {
+    New-Item -ItemType Directory -Path $RecoveryStateDirectory -Force | Out-Null
+    try {
+        return [System.IO.File]::Open(
+            $DaemonLockPath,
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None
+        )
+    } catch [System.IO.IOException] {
+        return $null
+    }
+}
+
+function Exit-DaemonLock($LockStream) {
+    if ($null -eq $LockStream) {
+        return
+    }
+    try {
+        $LockStream.Dispose()
+    } finally {
+        Remove-Item -LiteralPath $DaemonLockPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Start-Daemon {
+    $lockStream = Enter-DaemonLock
+    if ($null -eq $lockStream) {
+        Write-Info "Recovery daemon is already running; skipping duplicate start."
+        return
+    }
+    try {
+        while ($true) {
+            try {
+                Update-HostMetrics
+                Invoke-RecoveryCycle
+            } catch {
+                Write-Info "Recovery check failed: $($_.Exception.Message)"
+            }
+            Write-Info "Sleeping 3 minutes before the next recovery check."
+            Start-Sleep -Seconds $RecoveryIntervalSeconds
+        }
+    } finally {
+        Exit-DaemonLock $lockStream
     }
 }
 
 if ($InstallTask) {
     Install-ScheduledTask
+    exit 0
+}
+
+if ($Supervisor) {
+    Start-Supervisor
     exit 0
 }
 
@@ -879,4 +991,4 @@ if ($Start) {
     exit 0
 }
 
-throw "Use -InstallTask, -Start, or -Daemon."
+throw "Use -InstallTask, -Start, -Supervisor, or -Daemon."
