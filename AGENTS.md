@@ -14,11 +14,15 @@
   - `scripts/verify_change_scope.py`
   - 자동복구 변경을 검증하는 관련 테스트 파일
   - `docs/codex-work-loop.md`
-- 자동복구 변경은 WSL, K3s, Portal 상태, Cloudflare Tunnel 감시·복구, 실패 횟수 제한, 중복 실행 방지에 한정함.
+  - `docs/public-uptime-monitor.md`
+- 자동복구 변경은 WSL, K3s, Portal 상태, Cloudflare Tunnel 감시·복구, 실패 횟수 제한, 중복 실행 방지, Cloudflare Tunnel 장애·복구 전환 Telegram 알림에 한정함.
 - 허용 복구 동작은 기존 KeepAlive 작업 시작, inactive 상태 K3s 시작, 제한형 `portal-web` rollout restart, Cloudflare Tunnel 재기동으로 한정함.
+- 허용 알림 동작은 Cloudflare Tunnel 장애·복구 상태 전환을 Telegram으로 1회씩 전달하는 것으로 한정함.
 - K3s가 active인 상태에서 K3s 전체 restart를 수행하지 않음.
 - Portal PVC·Secret·운영 데이터·Caddyfile·Tunnel ingress·Compose Portal writer는 계속 수정·삭제·재생성 금지함.
 - 새 sudo 권한, 비밀번호, Telegram 토큰, Secret, 외부 자격 증명을 생성·저장·출력하지 않음.
+- 단, N100 Cloudflare Tunnel 장애·복구 Telegram 알림에 한해 운영자가 Windows Credential Manager에 수동으로 사전 시딩한 Bot token과 Chat ID를 읽기 전용으로 조회할 수 있음.
+- 저장소 코드·Git·문서·로그·상태 파일·환경 변수에는 Telegram Bot token·Chat ID를 생성, 출력, 복제하거나 평문으로 저장하지 않음. 전송 과정의 메모리에서만 사용하며, 알림 전송 실패 메시지에도 비밀값을 포함하지 않음.
 - 자동복구 상태와 로그에는 비밀값을 기록하지 않음.
 - 같은 구성요소의 자동복구가 3회 연속 실패하면 추가 재시작을 중단하고 기존 외부 상태 알림 경로로 이관함.
 - 정상 상태에서는 Compose 서비스 또는 Portal을 주기적으로 재생성하지 않음.
