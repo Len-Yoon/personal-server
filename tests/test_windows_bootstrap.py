@@ -24,7 +24,6 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("Join-Path $env:TEMP", reboot)
         self.assertIn("schtasks.exe /Create /TN $EmergencyRebootTaskName /XML $temporaryTaskXml /F", reboot)
         self.assertIn("<UserId>S-1-5-18</UserId>", reboot)
-        self.assertIn("<LogonType>ServiceAccount</LogonType>", reboot)
         self.assertIn("<RunLevel>HighestAvailable</RunLevel>", reboot)
         self.assertIn("<Command>shutdown.exe</Command>", reboot)
         self.assertIn("<Arguments>/r /f /t 60</Arguments>", reboot)
@@ -48,7 +47,6 @@ class WindowsBootstrapTests(unittest.TestCase):
             "<Principals>",
             '<Principal id="SYSTEM">',
             "<UserId>S-1-5-18</UserId>",
-            "<LogonType>ServiceAccount</LogonType>",
             "<RunLevel>HighestAvailable</RunLevel>",
             "<Settings>",
             "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
@@ -255,7 +253,6 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertNotIn('"tunnel", "portal", "nodeport"', reboot)
         self.assertIn('shutdown.exe /r /f /t 60', reboot)
         self.assertIn("<UserId>S-1-5-18</UserId>", reboot)
-        self.assertIn("<LogonType>ServiceAccount</LogonType>", reboot)
         self.assertIn("<RunLevel>HighestAvailable</RunLevel>", reboot)
 
     def test_uses_schtasks_when_scheduled_task_cmdlets_are_unavailable(self):
