@@ -26,9 +26,9 @@ wsl -l -v
 
 ## 제한형 자동복구
 
-`personal-server-autostart` 작업은 초기 시작 이후 3분 간격으로 상태를 점검함. 2회 연속 health 실패 시 구성요소별 승인된 복구를 시도하고, 핵심 복구가 3회 연속 실패한 경우에만 긴급 재부팅 승격을 검토함. 긴급 재부팅은 Tunnel·Portal·NodePort 단독 장애에 사용하지 않음.
+`personal-server-autostart` 작업은 Windows 시작 시 `-Supervisor`를 실행함. Supervisor는 중복 실행을 잠금으로 막고 초기 120초 안정화 대기 후 `-Daemon` 자식을 하나만 시작함. Daemon은 3분 간격으로 상태를 점검함. Daemon이 비정상 종료되면 Supervisor가 15초 뒤 새 Daemon을 시작하며, 60초 안에 3회 연속 종료되면 60초 backoff 뒤 다시 시도함. Daemon도 별도 잠금으로 중복·레거시 직접 실행을 막음. 2회 연속 health 실패 시 구성요소별 승인된 복구를 시도하고, 핵심 복구가 3회 연속 실패한 경우에만 긴급 재부팅 승격을 검토함. 긴급 재부팅은 Tunnel·Portal·NodePort 단독 장애에 사용하지 않음.
 
-작업은 무기한 실행(`ExecutionTimeLimit PT0S`)되며, 비정상 종료 시 1분 간격으로 최대 3회 재시작함. 이 보강은 기존 BootTrigger, 실행 계정, 실행 명령을 유지한 상태에서 재시작 정책만 추가한 것임.
+예약 작업은 무기한 실행(`ExecutionTimeLimit PT0S`)되며, Supervisor 자체가 비정상 종료하면 1분 간격으로 최대 3회 재시작함. 예약 작업의 실행 인자는 `windows-bootstrap.ps1 -Supervisor`여야 함. 이 보강은 기존 BootTrigger와 실행 계정을 유지하면서, Supervisor·Daemon 단일 실행 구조와 재시작 정책을 적용한 것임.
 
 | 대상 | 자동복구 범위 |
 |---|---|
@@ -57,7 +57,10 @@ Windows PowerShell에서 자동복구 작업 상태를 확인함.
 ```powershell
 Get-ScheduledTask -TaskName personal-server-autostart
 Get-ScheduledTask -TaskName PersonalServer-WSL-KeepAlive
+Export-ScheduledTask -TaskName personal-server-autostart | Select-String 'ExecutionTimeLimit|RestartOnFailure|-Supervisor'
 ```
+
+정상 기준은 `personal-server-autostart`가 `Running`이고, 내보낸 작업 XML에 `ExecutionTimeLimit` `PT0S`, `RestartOnFailure`, `-Supervisor`가 모두 포함되는 것임. Daemon 재기동 검증은 Supervisor를 중지하지 않고 Daemon 자식만 종료한 뒤 Supervisor PID가 유지되고 새 Daemon PID가 생성되는지 확인함. 이 검증은 사용자 승인된 점검 창에서만 수행함.
 
 ## 재부팅 뒤 상태 확인
 

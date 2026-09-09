@@ -76,8 +76,13 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("Tunnel 장애 알림을 1회 전송하는 데 성공한 경우", n100)
         self.assertIn("복구 알림을 1회", n100)
         self.assertIn("독립 보완 경로", n100)
+        self.assertIn("-Supervisor", n100)
+        self.assertIn("Daemon", n100)
+        self.assertIn("120초", n100)
+        self.assertIn("15초", n100)
         self.assertIn("Telegram 장애 메시지 전송이 실패하면", uptime)
         self.assertIn("복구 전환 메시지를 보내지 않음", uptime)
+        self.assertIn("Supervisor", uptime)
 
     def test_n100_docs_document_reboot_limits_and_tunnel_service_recovery(self):
         n100 = Path("docs/n100-mt4-setup.md").read_text(encoding="utf-8")

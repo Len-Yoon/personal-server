@@ -19,6 +19,8 @@ Telegram 장애 메시지 전송이 실패하면 다음 실패 점검에서 장�
 
 N100 감시기는 `cloudflared-personal-server.service`의 상태와 Tunnel 프로세스를 주기적으로 확인함. Tunnel 장애를 처음 확인하면 `[개인서버 장애]` 메시지를 1회 전송하고, 기존 임계치에 따라 로컬 복구를 시도함. 이후 Tunnel 서비스와 프로세스가 정상으로 돌아오면 `[개인서버 복구]` 메시지를 1회 전송함.
 
+Windows 예약 작업은 Supervisor를 하나만 실행하며, Supervisor는 초기 120초 대기 뒤 3분 주기 Daemon을 자식으로 관리함. Daemon이 비정상 종료되면 15초 뒤 재기동하고, Supervisor·Daemon 잠금으로 중복 실행을 막음. 이 구조는 Tunnel 감시가 Daemon 종료만으로 멈추지 않게 하는 보완 경로이며, N100 전원·네트워크·WSL 또는 Windows 작업 스케줄러 자체가 동작하지 않는 경우는 복구·직접 알림 범위 밖임.
+
 N100 알림 자격증명은 `window` 사용자 계정의 Windows Credential Manager에서 `personal-server-tunnel-telegram` 대상을 읽음. 일반 자격 증명의 사용자 이름에는 Telegram Chat ID를, 암호에는 Bot token을 입력함. 실제 값은 명령 출력·문서·로그에 표시하지 않음.
 
 | 항목 | 기준 |
