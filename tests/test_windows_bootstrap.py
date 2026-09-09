@@ -293,6 +293,21 @@ class WindowsBootstrapTests(unittest.TestCase):
         daemon = SCRIPT[SCRIPT.index("function Start-Daemon") : SCRIPT.index("if ($InstallTask)")]
         self.assertIn("[void](Set-RecoveryTaskSettings)", daemon)
 
+    def test_install_task_keeps_registered_task_when_recovery_settings_update_fails(self):
+        installer = SCRIPT[
+            SCRIPT.index("function Install-ScheduledTask") : SCRIPT.index("\nLoad-RecoveryFailureState")
+        ]
+        settings_update = installer[installer.index("try {", installer.index("[void](Set-RecoveryTaskSettings)") - 20) :]
+        self.assertIn("try {", settings_update)
+        self.assertIn("catch {", settings_update)
+        self.assertIn("Could not update scheduled task recovery settings after registration", settings_update)
+        self.assertIn("$TaskName", settings_update)
+        self.assertIn("manual", settings_update.lower())
+        self.assertLess(
+            settings_update.index("Could not update scheduled task recovery settings after registration"),
+            settings_update.index("Registered scheduled task '$TaskName'"),
+        )
+
     def test_daemon_runs_targeted_recovery_cycle_without_periodic_stack_recreation(self):
         """A daemon-loop stack bootstrap would recreate normal services every interval."""
         daemon = SCRIPT[

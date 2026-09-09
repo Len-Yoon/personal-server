@@ -626,7 +626,11 @@ function Install-ScheduledTask {
         $ErrorActionPreference = $previousErrorActionPreference
     }
 
-    [void](Set-RecoveryTaskSettings)
+    try {
+        [void](Set-RecoveryTaskSettings)
+    } catch {
+        Write-Info "Could not update scheduled task recovery settings after registration for '$TaskName': $($_.Exception.Message). Task identity was retained; manual follow-up required to configure restart-on-failure settings."
+    }
     Write-Info "Registered scheduled task '$TaskName' to start with Windows."
 }
 
