@@ -88,13 +88,23 @@ function Invoke-WslCommand {
 function Get-TunnelTelegramConfiguration {
     try {
         if ($null -ne ("PersonalServer.CredentialReader" -as [type])) {
-            $credentialPayload = [PersonalServer.CredentialReader]::ReadGeneric($TunnelTelegramCredentialTarget)
+            $credential = [PersonalServer.CredentialReader]::ReadGeneric($TunnelTelegramCredentialTarget)
         } else {
             Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 
 namespace PersonalServer {
+    public sealed class GenericCredential {
+        public string UserName { get; private set; }
+        public string Password { get; private set; }
+
+        public GenericCredential(string userName, string password) {
+            UserName = userName;
+            Password = password;
+        }
+    }
+
     public static class CredentialReader {
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct Credential {
@@ -118,13 +128,16 @@ namespace PersonalServer {
         [DllImport("Advapi32.dll", SetLastError = true)]
         private static extern void CredFree(IntPtr buffer);
 
-        public static string ReadGeneric(string target) {
+        public static GenericCredential ReadGeneric(string target) {
             IntPtr pointer;
             if (!CredRead(target, 1, 0, out pointer)) return null;
             try {
                 var credential = (Credential)Marshal.PtrToStructure(pointer, typeof(Credential));
                 if (credential.CredentialBlob == IntPtr.Zero || credential.CredentialBlobSize == 0 || credential.CredentialBlobSize % 2 != 0) return null;
-                return Marshal.PtrToStringUni(credential.CredentialBlob, (int)credential.CredentialBlobSize / 2);
+                return new GenericCredential(
+                    credential.UserName,
+                    Marshal.PtrToStringUni(credential.CredentialBlob, (int)credential.CredentialBlobSize / 2)
+                );
             } finally {
                 CredFree(pointer);
             }
@@ -132,26 +145,39 @@ namespace PersonalServer {
     }
 }
 '@
-            $credentialPayload = [PersonalServer.CredentialReader]::ReadGeneric($TunnelTelegramCredentialTarget)
+            $credential = [PersonalServer.CredentialReader]::ReadGeneric($TunnelTelegramCredentialTarget)
         }
     } catch {
         Write-Info "Tunnel Telegram credential is unavailable."
         return $null
     }
-    if ([string]::IsNullOrWhiteSpace($credentialPayload)) {
+    if ($null -eq $credential -or [string]::IsNullOrWhiteSpace([string]$credential.Password)) {
         Write-Info "Tunnel Telegram credential is unavailable."
         return $null
     }
-    try {
-        $configuration = $credentialPayload | ConvertFrom-Json
-        if ($null -eq $configuration -or [string]::IsNullOrWhiteSpace([string]$configuration.bot_token) -or [string]::IsNullOrWhiteSpace([string]$configuration.chat_id)) {
+
+    if (([string]$credential.Password).TrimStart().StartsWith("{")) {
+        try {
+            $configuration = $credential.Password | ConvertFrom-Json
+            if ($null -eq $configuration -or [string]::IsNullOrWhiteSpace([string]$configuration.bot_token) -or [string]::IsNullOrWhiteSpace([string]$configuration.chat_id)) {
+                Write-Info "Tunnel Telegram credential has an invalid format."
+                return $null
+            }
+            return $configuration
+        } catch {
             Write-Info "Tunnel Telegram credential has an invalid format."
             return $null
         }
-        return $configuration
-    } catch {
-        Write-Info "Tunnel Telegram credential has an invalid format."
+    }
+
+    if ([string]::IsNullOrWhiteSpace([string]$credential.UserName)) {
+        Write-Info "Tunnel Telegram credential is unavailable."
         return $null
+    }
+
+    return [pscustomobject]@{
+        bot_token = [string]$credential.Password
+        chat_id = [string]$credential.UserName
     }
 }
 
