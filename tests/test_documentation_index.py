@@ -73,7 +73,9 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("3분 간격", n100)
         self.assertIn("2회 연속", n100)
         self.assertIn("최대 3회", n100)
-        self.assertIn("자동복구 작업은 Telegram을 직접 발송하지 않으며", n100)
+        self.assertIn("Tunnel 장애 알림을 1회 전송하는 데 성공한 경우", n100)
+        self.assertIn("복구 알림을 1회", n100)
+        self.assertIn("독립 보완 경로", n100)
         self.assertIn("Telegram 장애 메시지 전송이 실패하면", uptime)
         self.assertIn("복구 전환 메시지를 보내지 않음", uptime)
 

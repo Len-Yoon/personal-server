@@ -58,6 +58,10 @@ GitHub Actions가 외부 주소를 약 5분마다 별도 점검
   ↓
 장애·복구 전환 시 Telegram 알림
 
+N100 감시기가 Tunnel 로컬 상태를 3분마다 점검
+  ↓
+Tunnel 장애·복구 전환 시 Telegram 알림과 제한형 자동복구
+
 Portal PVC 암호화 백업 → 원격 보관 → 복원 검증
 ```
 
@@ -65,14 +69,14 @@ Portal PVC 암호화 백업 → 원격 보관 → 복원 검증
 |---|---|
 | 관측성 | Prometheus·Grafana로 K3s 노드·Pod·PVC·서비스 상태 확인 |
 | 장애 감지 | 내부 Prometheus 경고와 외부 GitHub Actions health 점검을 분리 |
-| 알림 | Telegram으로 장애·복구·백업 결과를 한국어로 전달 |
+| 알림 | N100 Tunnel 전환, 외부 health, 내부 경고·백업 결과를 Telegram으로 한국어 전달 |
 | 복구 | K3s Pod 자동복구, HomeOps 제한형 컨테이너 복구, 재부팅 뒤 WSL 유지, N100 제한형 자동복구 |
 | 데이터 보호 | Portal PVC 암호화 백업과 실제 복원 검증 |
 | 안전 배포 | 허용된 Compose 서비스만 CI 성공 뒤 revision 고정 배포·health 검증·1회 rollback |
 
 개인 서버 기능을 직접 제공하는 것과 별도로, 장애를 빨리 발견하고 데이터 손실 가능성을 낮추며 복구 상태를 확인하는 운영 체계를 함께 구축한 구성이 핵심임.
 
-N100의 `personal-server-autostart` 작업은 3분 간격으로 WSL 유지, K3s, Portal, NodePort, Cloudflare Tunnel을 점검함. 같은 항목이 2회 연속 비정상이면 승인된 범위의 복구만 시도하며, 항목별 자동복구 시도는 최대 3회로 제한함. 상태 기록에 실패하면 추가 복구를 중단함. 이 작업은 Telegram을 직접 발송하지 않으며, 외부 장애·복구 알림은 GitHub Actions 공개 상태 점검이 담당함.
+N100의 `personal-server-autostart` 작업은 3분 간격으로 WSL 유지, K3s, Portal, NodePort, Cloudflare Tunnel을 점검함. 같은 항목이 2회 연속 비정상이면 승인된 범위의 복구만 시도하며, 항목별 자동복구 시도는 최대 3회로 제한함. 상태 기록에 실패하면 추가 복구를 중단함. Tunnel 장애 알림 전송이 성공한 경우에만 N100은 이후 Tunnel 정상 전환에서 복구 알림을 1회 보냄. 장애 알림 전송이 실패하면 다음 점검에서 장애 알림을 재시도함. GitHub Actions의 약 5분 외부 health 점검은 독립 보완 경로이므로 같은 장애에서 메시지가 중복될 수 있음. N100 전원·네트워크·WSL 자체가 불가한 물리·호스트 장애는 이 범위의 자동복구 대상이 아님.
 
 ## 모니터링 화면
 
