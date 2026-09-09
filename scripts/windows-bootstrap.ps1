@@ -488,9 +488,38 @@ function Invoke-RecoveryCycle {
 
 function Install-EmergencyRebootTask {
     $command = 'shutdown.exe /r /f /t 60'
-    $result = & schtasks.exe /Create /TN $EmergencyRebootTaskName /SC ONCE /ST 00:00 /RU "SYSTEM" /RL HIGHEST /TR $command /F 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to register emergency reboot task."
+    $temporaryTaskXml = Join-Path $env:TEMP "$EmergencyRebootTaskName.xml"
+    $taskXml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Principals>
+    <Principal id="System">
+      <UserId>S-1-5-18</UserId>
+      <LogonType>ServiceAccount</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>true</Hidden>
+  </Settings>
+  <Actions Context="System">
+    <Exec>
+      <Command>shutdown.exe</Command>
+      <Arguments>/r /f /t 60</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"@
+    try {
+        Set-Content -LiteralPath $temporaryTaskXml -Value $taskXml -Encoding unicode
+        $result = & schtasks.exe /Create /TN $EmergencyRebootTaskName /XML $temporaryTaskXml /F 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to register emergency reboot task."
+        }
+    } finally {
+        Remove-Item -LiteralPath $temporaryTaskXml -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -574,6 +603,7 @@ function Set-RecoveryTaskSettings {
 }
 
 function Install-ScheduledTask {
+    Install-EmergencyRebootTask
     $taskAction = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -Daemon"
     $runAsUser = "$env:USERDOMAIN\$env:USERNAME"
     Write-Info "Registering startup task for $runAsUser. Windows will prompt for the account password."
@@ -591,7 +621,6 @@ function Install-ScheduledTask {
     }
 
     [void](Set-RecoveryTaskSettings)
-    Install-EmergencyRebootTask
     Write-Info "Registered scheduled task '$TaskName' to start with Windows."
 }
 

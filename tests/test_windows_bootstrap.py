@@ -11,6 +11,30 @@ WSL_SCRIPT = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf
 
 
 class WindowsBootstrapTests(unittest.TestCase):
+    def test_emergency_reboot_task_uses_triggerless_system_xml_registration(self):
+        reboot = SCRIPT[
+            SCRIPT.index("function Install-EmergencyRebootTask")
+            : SCRIPT.index("function Test-EmergencyRebootEligible")
+        ]
+        installer = SCRIPT[
+            SCRIPT.index("function Install-ScheduledTask")
+            : SCRIPT.index("\nLoad-RecoveryFailureState")
+        ]
+
+        self.assertIn("Join-Path $env:TEMP", reboot)
+        self.assertIn("schtasks.exe /Create /TN $EmergencyRebootTaskName /XML $temporaryTaskXml /F", reboot)
+        self.assertIn("<UserId>S-1-5-18</UserId>", reboot)
+        self.assertIn("<LogonType>ServiceAccount</LogonType>", reboot)
+        self.assertIn("<RunLevel>HighestAvailable</RunLevel>", reboot)
+        self.assertIn("<Command>shutdown.exe</Command>", reboot)
+        self.assertIn("<Arguments>/r /f /t 60</Arguments>", reboot)
+        self.assertNotIn("<Triggers>", reboot)
+        self.assertNotIn("/SC ONCE", reboot)
+        self.assertNotIn("/ST ", reboot)
+        self.assertIn("finally {", reboot)
+        self.assertIn("Remove-Item -LiteralPath $temporaryTaskXml", reboot)
+        self.assertLess(installer.index("Install-EmergencyRebootTask"), installer.index("schtasks.exe /Create /TN $TaskName"))
+
     def test_emergency_request_save_failure_restores_declared_prior_memory_state(self):
         request = SCRIPT[
             SCRIPT.index("function Request-EmergencyReboot")
@@ -173,8 +197,9 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn('"keepalive", "k3s"', reboot)
         self.assertNotIn('"tunnel", "portal", "nodeport"', reboot)
         self.assertIn('shutdown.exe /r /f /t 60', reboot)
-        self.assertIn('/RU "SYSTEM"', reboot)
-        self.assertIn('/RL HIGHEST', reboot)
+        self.assertIn("<UserId>S-1-5-18</UserId>", reboot)
+        self.assertIn("<LogonType>ServiceAccount</LogonType>", reboot)
+        self.assertIn("<RunLevel>HighestAvailable</RunLevel>", reboot)
 
     def test_uses_schtasks_when_scheduled_task_cmdlets_are_unavailable(self):
         self.assertIn("schtasks.exe /Create", SCRIPT)
