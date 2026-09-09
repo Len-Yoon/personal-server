@@ -55,6 +55,18 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn('Write-Info "Tunnel Telegram credential has an invalid format."', credential)
         self.assertNotIn("Write-Info $credential", credential)
 
+    def test_tunnel_transition_alert_sends_korean_message_as_utf8_json(self):
+        notifier = SCRIPT[
+            SCRIPT.index("function Send-TunnelTelegramNotification")
+            : SCRIPT.index("function Update-TunnelTelegramNotification")
+        ]
+
+        self.assertIn("$payload = @{", notifier)
+        self.assertIn("ConvertTo-Json -Compress", notifier)
+        self.assertIn("[System.Text.Encoding]::UTF8.GetBytes($payload)", notifier)
+        self.assertIn('-ContentType "application/json; charset=utf-8"', notifier)
+        self.assertIn("-Body $payloadBytes", notifier)
+
     def test_tunnel_transition_alerts_are_persisted_and_sent_once_per_transition(self):
         state = SCRIPT[
             SCRIPT.index("function Save-RecoveryFailureState")
