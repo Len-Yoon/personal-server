@@ -12,6 +12,7 @@ $TaskName = "personal-server-autostart"
 $WslDistribution = "Ubuntu-24.04"
 $WslServiceUser = "window"
 $CloudflareTunnelService = "cloudflared-personal-server.service"
+$TunnelTelegramCredentialTarget = "personal-server-tunnel-telegram"
 $CaddyContainerName = "personal-server-caddy-1"
 $RecoveryIntervalSeconds = 180
 $RecoveryFailureThreshold = 2
@@ -30,6 +31,7 @@ $RecoveryStateDirty = $false
 $EmergencyRebootLastAt = $null
 $EmergencyRebootCauseComponent = $null
 $EmergencyRebootCooldownStateValid = $true
+$TunnelAlertDownNotified = $false
 function Write-Info([string]$Message) {
     Write-Host $Message
 }
@@ -80,6 +82,122 @@ function Invoke-WslCommand {
     & wsl.exe -d $WslDistribution bash -lc "cd '$wslProjectRoot' && bash scripts/windows-bootstrap.sh '$wslProjectRoot'"
     if ($LASTEXITCODE -ne 0) {
         throw "WSL command failed with exit code $LASTEXITCODE"
+    }
+}
+
+function Get-TunnelTelegramConfiguration {
+    try {
+        if ($null -ne ("PersonalServer.CredentialReader" -as [type])) {
+            $credentialPayload = [PersonalServer.CredentialReader]::ReadGeneric($TunnelTelegramCredentialTarget)
+        } else {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace PersonalServer {
+    public static class CredentialReader {
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct Credential {
+            public uint Flags;
+            public uint Type;
+            public string TargetName;
+            public string Comment;
+            public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+            public uint CredentialBlobSize;
+            public IntPtr CredentialBlob;
+            public uint Persist;
+            public uint AttributeCount;
+            public IntPtr Attributes;
+            public string TargetAlias;
+            public string UserName;
+        }
+
+        [DllImport("Advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CredRead(string target, uint type, uint flags, out IntPtr credential);
+
+        [DllImport("Advapi32.dll", SetLastError = true)]
+        private static extern void CredFree(IntPtr buffer);
+
+        public static string ReadGeneric(string target) {
+            IntPtr pointer;
+            if (!CredRead(target, 1, 0, out pointer)) return null;
+            try {
+                var credential = (Credential)Marshal.PtrToStructure(pointer, typeof(Credential));
+                if (credential.CredentialBlob == IntPtr.Zero || credential.CredentialBlobSize == 0 || credential.CredentialBlobSize % 2 != 0) return null;
+                return Marshal.PtrToStringUni(credential.CredentialBlob, (int)credential.CredentialBlobSize / 2);
+            } finally {
+                CredFree(pointer);
+            }
+        }
+    }
+}
+'@
+            $credentialPayload = [PersonalServer.CredentialReader]::ReadGeneric($TunnelTelegramCredentialTarget)
+        }
+    } catch {
+        Write-Info "Tunnel Telegram credential is unavailable."
+        return $null
+    }
+    if ([string]::IsNullOrWhiteSpace($credentialPayload)) {
+        Write-Info "Tunnel Telegram credential is unavailable."
+        return $null
+    }
+    try {
+        $configuration = $credentialPayload | ConvertFrom-Json
+        if ($null -eq $configuration -or [string]::IsNullOrWhiteSpace([string]$configuration.bot_token) -or [string]::IsNullOrWhiteSpace([string]$configuration.chat_id)) {
+            Write-Info "Tunnel Telegram credential has an invalid format."
+            return $null
+        }
+        return $configuration
+    } catch {
+        Write-Info "Tunnel Telegram credential has an invalid format."
+        return $null
+    }
+}
+
+function Send-TunnelTelegramNotification([string]$Transition) {
+    $configuration = Get-TunnelTelegramConfiguration
+    if ($null -eq $configuration) {
+        return $false
+    }
+    $message = switch ($Transition) {
+        "down" { "[개인서버 장애] Cloudflare Tunnel 연결 실패를 확인했습니다. 자동복구를 진행합니다." }
+        "recovered" { "[개인서버 복구] Cloudflare Tunnel 연결이 정상 복구되었습니다." }
+        default { return $false }
+    }
+    try {
+        $response = Invoke-RestMethod -Method Post -Uri "https://api.telegram.org/bot$($configuration.bot_token)/sendMessage" -Body @{
+            chat_id = [string]$configuration.chat_id
+            text = $message
+        } -TimeoutSec $RecoveryCommandTimeoutSeconds -ErrorAction Stop
+        if ($null -eq $response -or $response.ok -ne $true -or $null -eq $response.result -or $null -eq $response.result.message_id) {
+            Write-Info "Tunnel Telegram delivery was not accepted."
+            return $false
+        }
+        return $true
+    } catch {
+        Write-Info "Tunnel Telegram delivery failed."
+        return $false
+    }
+}
+
+function Update-TunnelTelegramNotification([string]$TunnelHealth) {
+    if ($TunnelHealth -eq "healthy") {
+        if (-not $TunnelAlertDownNotified) {
+            return
+        }
+        if (Send-TunnelTelegramNotification "recovered") {
+            $script:TunnelAlertDownNotified = $false
+            [void](Save-RecoveryFailureState)
+        }
+        return
+    }
+    if ($TunnelAlertDownNotified) {
+        return
+    }
+    if (Send-TunnelTelegramNotification "down") {
+        $script:TunnelAlertDownNotified = $true
+        [void](Save-RecoveryFailureState)
     }
 }
 
@@ -212,6 +330,9 @@ function Save-RecoveryFailureState {
             last_emergency_reboot_at = $EmergencyRebootLastAt
             cause_component = $EmergencyRebootCauseComponent
         }
+        $state.tunnel_alert = [ordered]@{
+            down_notified = $TunnelAlertDownNotified
+        }
         $state | ConvertTo-Json -Depth 3 | Set-Content -Path $RecoveryStatePath -Encoding utf8
         $script:RecoveryStateDirty = $false
         return $true
@@ -262,6 +383,19 @@ function Load-RecoveryFailureState {
                 if (-not [DateTimeOffset]::TryParseExact([string]$storedLastReboot.Value, "o", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$parsedLastReboot) -or $parsedLastReboot.Offset -ne [TimeSpan]::Zero) {
                     Set-RecoveryStateInvalid
                 }
+            }
+        }
+        $storedTunnelAlert = $storedState.PSObject.Properties["tunnel_alert"]
+        if ($null -eq $storedTunnelAlert) {
+            $legacyRecoveryState = $true
+        } elseif ($null -eq $storedTunnelAlert.Value -or $storedTunnelAlert.Value -isnot [PSCustomObject]) {
+            Set-RecoveryStateInvalid
+        } else {
+            $storedDownNotified = $storedTunnelAlert.Value.PSObject.Properties["down_notified"]
+            if ($null -eq $storedDownNotified -or $storedDownNotified.Value -isnot [bool]) {
+                Set-RecoveryStateInvalid
+            } else {
+                $script:TunnelAlertDownNotified = [bool]$storedDownNotified.Value
             }
         }
         foreach ($component in $RecoveryComponents) {
@@ -431,6 +565,11 @@ function Invoke-RecoveryCycle {
         $health = Get-RecoveryHealth
         if ($RecoveryStateDirty) {
             Write-Info "Recovery state is unsaved; retaining in-memory counters and blocking automated recovery until restart or operator action."
+            return
+        }
+        Update-TunnelTelegramNotification $health.tunnel
+        if ($RecoveryStateDirty) {
+            Write-Info "Recovery state is unsaved; skipping automated recovery actions this cycle."
             return
         }
         foreach ($component in $RecoveryComponents) {

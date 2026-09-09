@@ -11,6 +11,44 @@ WSL_SCRIPT = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf
 
 
 class WindowsBootstrapTests(unittest.TestCase):
+    def test_tunnel_transition_alert_reads_only_windows_credential_manager(self):
+        credential = SCRIPT[
+            SCRIPT.index("function Get-TunnelTelegramConfiguration")
+            : SCRIPT.index("function Test-CloudflareTunnelRunning")
+        ]
+        notifier = SCRIPT[
+            SCRIPT.index("function Send-TunnelTelegramNotification")
+            : SCRIPT.index("function Test-CloudflareTunnelRunning")
+        ]
+
+        self.assertIn('$TunnelTelegramCredentialTarget = "personal-server-tunnel-telegram"', SCRIPT)
+        self.assertIn("CredRead", credential)
+        self.assertIn("CredentialBlob", credential)
+        self.assertIn("ConvertFrom-Json", credential)
+        self.assertIn("https://api.telegram.org/bot", notifier)
+        self.assertNotIn("Write-Info $credentialPayload", credential)
+        self.assertNotIn("Write-Info $config", notifier)
+
+    def test_tunnel_transition_alerts_are_persisted_and_sent_once_per_transition(self):
+        state = SCRIPT[
+            SCRIPT.index("function Save-RecoveryFailureState")
+            : SCRIPT.index("function Set-RecoveryStateInvalid")
+        ]
+        loader = SCRIPT[
+            SCRIPT.index("function Load-RecoveryFailureState")
+            : SCRIPT.index("function Register-RecoveryFailure")
+        ]
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle")
+            : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+
+        self.assertIn("$TunnelAlertDownNotified", state)
+        self.assertIn("tunnel_alert", state)
+        self.assertIn('Properties["tunnel_alert"]', loader)
+        self.assertIn("Update-TunnelTelegramNotification", cycle)
+        self.assertLess(cycle.index("Update-TunnelTelegramNotification"), cycle.index("foreach ($component in $RecoveryComponents)"))
+
     def test_emergency_reboot_task_uses_triggerless_system_xml_registration(self):
         reboot = SCRIPT[
             SCRIPT.index("function Install-EmergencyRebootTask")
