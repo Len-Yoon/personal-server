@@ -11,6 +11,21 @@ WSL_SCRIPT = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf
 
 
 class WindowsBootstrapTests(unittest.TestCase):
+    def test_emergency_reboot_is_limited_to_exhausted_keepalive_or_k3s_recovery(self):
+        reboot = SCRIPT[
+            SCRIPT.index("function Install-EmergencyRebootTask")
+            : SCRIPT.index("function Set-RecoveryTaskSettings")
+        ]
+
+        self.assertIn('$EmergencyRebootTaskName = "PersonalServer-EmergencyReboot"', SCRIPT)
+        self.assertIn('$EmergencyRebootGraceSeconds = 1200', SCRIPT)
+        self.assertIn('$EmergencyRebootCooldownSeconds = 21600', SCRIPT)
+        self.assertIn('"keepalive", "k3s"', reboot)
+        self.assertNotIn('"tunnel", "portal", "nodeport"', reboot)
+        self.assertIn('shutdown.exe /r /f /t 60', reboot)
+        self.assertIn('/RU "SYSTEM"', reboot)
+        self.assertIn('/RL HIGHEST', reboot)
+
     def test_uses_schtasks_when_scheduled_task_cmdlets_are_unavailable(self):
         self.assertIn("schtasks.exe /Create", SCRIPT)
         self.assertIn("/SC ONSTART", SCRIPT)
