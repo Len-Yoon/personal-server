@@ -492,19 +492,37 @@ function Install-EmergencyRebootTask {
     $taskXml = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <URI>\PersonalServer-EmergencyReboot</URI>
+    <Description>Emergency reboot task for exhausted core recovery attempts.</Description>
+  </RegistrationInfo>
   <Principals>
-    <Principal id="System">
+    <Principal id="SYSTEM">
       <UserId>S-1-5-18</UserId>
       <LogonType>ServiceAccount</LogonType>
       <RunLevel>HighestAvailable</RunLevel>
     </Principal>
   </Principals>
   <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>true</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
     <AllowStartOnDemand>true</AllowStartOnDemand>
     <Enabled>true</Enabled>
     <Hidden>true</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
   </Settings>
-  <Actions Context="System">
+  <Actions Context="SYSTEM">
     <Exec>
       <Command>shutdown.exe</Command>
       <Arguments>/r /f /t 60</Arguments>
@@ -514,9 +532,16 @@ function Install-EmergencyRebootTask {
 "@
     try {
         Set-Content -LiteralPath $temporaryTaskXml -Value $taskXml -Encoding unicode
-        $result = & schtasks.exe /Create /TN $EmergencyRebootTaskName /XML $temporaryTaskXml /F 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to register emergency reboot task."
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $result = & schtasks.exe /Create /TN $EmergencyRebootTaskName /XML $temporaryTaskXml /F 2>&1 | Out-String
+            $createExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        if ($createExitCode -ne 0) {
+            throw "Failed to register emergency reboot task (exit code $createExitCode): $($result.Trim())"
         }
     } finally {
         Remove-Item -LiteralPath $temporaryTaskXml -Force -ErrorAction SilentlyContinue
