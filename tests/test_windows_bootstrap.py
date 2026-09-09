@@ -208,6 +208,16 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("/F", SCRIPT)
         self.assertIn("schtasks.exe /Query", SCRIPT)
 
+    def test_schtasks_warning_stderr_does_not_terminate_install_task(self):
+        installer = SCRIPT[
+            SCRIPT.index("function Install-ScheduledTask") : SCRIPT.index("\nLoad-RecoveryFailureState")
+        ]
+
+        self.assertIn('$ErrorActionPreference = "Continue"', installer)
+        self.assertIn("try {", installer)
+        self.assertIn("finally {", installer)
+        self.assertIn("$ErrorActionPreference = $previousErrorActionPreference", installer)
+
     def test_recovery_starts_the_car_care_worker_and_other_services(self):
         self.assertIn("docker-compose.yml", WSL_SCRIPT)
         self.assertIn("up -d", WSL_SCRIPT)

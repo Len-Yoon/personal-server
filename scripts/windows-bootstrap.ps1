@@ -607,17 +607,23 @@ function Install-ScheduledTask {
     $taskAction = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -Daemon"
     $runAsUser = "$env:USERDOMAIN\$env:USERNAME"
     Write-Info "Registering startup task for $runAsUser. Windows will prompt for the account password."
-    $createOutput = (& schtasks.exe /Create /TN $TaskName /SC ONSTART /RU $runAsUser /RP * /TR $taskAction /RL LIMITED /F 2>&1 | Out-String)
-    $createExitCode = $LASTEXITCODE
-    if ($createExitCode -ne 0) {
-        $existingTask = (& schtasks.exe /Query /TN $TaskName /FO LIST /V 2>&1 | Out-String)
-        if ($existingTask -match [regex]::Escape($ScriptPath)) {
-            Write-Info "Scheduled task '$TaskName' already points to $ScriptPath."
-        } else {
-            throw "Failed to register scheduled task '$TaskName' with schtasks.exe (exit code $createExitCode)."
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $createOutput = (& schtasks.exe /Create /TN $TaskName /SC ONSTART /RU $runAsUser /RP * /TR $taskAction /RL LIMITED /F 2>&1 | Out-String)
+        $createExitCode = $LASTEXITCODE
+        if ($createExitCode -ne 0) {
+            $existingTask = (& schtasks.exe /Query /TN $TaskName /FO LIST /V 2>&1 | Out-String)
+            if ($existingTask -match [regex]::Escape($ScriptPath)) {
+                Write-Info "Scheduled task '$TaskName' already points to $ScriptPath."
+            } else {
+                throw "Failed to register scheduled task '$TaskName' with schtasks.exe (exit code $createExitCode)."
+            }
+        } elseif ($createOutput.Trim()) {
+            Write-Info $createOutput.Trim()
         }
-    } elseif ($createOutput.Trim()) {
-        Write-Info $createOutput.Trim()
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
     }
 
     [void](Set-RecoveryTaskSettings)
