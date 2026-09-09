@@ -26,7 +26,7 @@ wsl -l -v
 
 ## 제한형 자동복구
 
-`personal-server-autostart` 작업은 초기 시작 이후 3분 간격으로 상태를 점검함. 기존 2회 연속 기준은 폐기되었으며, 동일 복구가 3회 연속 실패한 경우에만 승인된 복구 경계를 적용함. 자동으로 시작할 수 있는 대상은 중지된 WSL 유지 작업과 비활성 K3s뿐임. Tunnel·Portal·NodePort 단독 장애는 재부팅으로 우회하지 않음.
+`personal-server-autostart` 작업은 초기 시작 이후 3분 간격으로 상태를 점검함. 2회 연속 health 실패 시 구성요소별 승인된 복구를 시도하고, 핵심 복구가 3회 연속 실패한 경우에만 긴급 재부팅 승격을 검토함. 긴급 재부팅은 Tunnel·Portal·NodePort 단독 장애에 사용하지 않음.
 
 작업은 무기한 실행(`ExecutionTimeLimit PT0S`)되며, 비정상 종료 시 1분 간격으로 최대 3회 재시작함. 이 보강은 기존 BootTrigger, 실행 계정, 실행 명령을 유지한 상태에서 재시작 정책만 추가한 것임.
 
@@ -34,9 +34,9 @@ wsl -l -v
 |---|---|
 | WSL 유지 작업 | 중지된 `PersonalServer-WSL-KeepAlive` 작업 시작 |
 | K3s | 실행 중이 아닐 때만 시작. 실행 중인 K3s 재시작 금지 |
-| Portal | 상태 확인만 수행. 자동 재시작 금지 |
+| Portal | K3s가 정상이고 Portal이 비가용일 때 제한형 rollout 재시작 |
 | NodePort | 상태 확인만 수행. 자동 재시작 금지 |
-| Cloudflare Tunnel | 상태 확인만 수행. 자동 재시작 금지; 사용자 서비스 수동 시작만 허용 |
+| Cloudflare Tunnel | 사용자 서비스 시작·재시작 허용. 호스트 긴급 재부팅은 금지 |
 
 복구 시도 횟수는 상태 파일로 보존함. 상태를 저장하지 못하면 중복·무한 복구를 방지하기 위해 이후 복구를 중단함. Portal PVC·Secret·운영 데이터·Caddy 설정·Tunnel ingress는 자동복구 대상이 아님. 자동복구 작업은 Telegram을 직접 발송하지 않으며, 외부 장애·복구 알림은 GitHub Actions 상태 점검이 담당함.
 
