@@ -16,7 +16,7 @@
 
 ## Tunnel 장애 모의 순서
 
-`Tunnel만` 중지 → GitHub monitor 장애 확인 → 자동복구 대기 → 외부 health 및 복구 Telegram 확인 → 실패 시 사용자 서비스 수동 시작 또는 재시작 순서로 실행함. 실제 실행 전에는 별도 사용자 승인이 필요함. 서비스가 inactive면 `systemctl --user start cloudflared-personal-server.service`, active지만 연결 프로세스가 없으면 `systemctl --user restart cloudflared-personal-server.service`를 사용함.
+`Tunnel만` 중지 → N100 Tunnel 장애 Telegram 확인 → 자동복구 대기 → 외부 health와 N100 복구 Telegram 확인 → GitHub monitor의 독립 외부 점검 결과 확인 → 실패 시 사용자 서비스 수동 시작 또는 재시작 순서로 실행함. 실제 실행 전에는 별도 사용자 승인이 필요함. GitHub monitor 알림은 N100 직접 알림과 중복될 수 있음. 서비스가 inactive면 `systemctl --user start cloudflared-personal-server.service`, active지만 연결 프로세스가 없으면 `systemctl --user restart cloudflared-personal-server.service`를 사용함.
 
 ## 사전 조건
 
@@ -24,6 +24,8 @@
 - 운영자 권한과 K3s가 정상적으로 접근되는지 확인함.
 - 실행 전 장애나 배포가 진행 중이면 훈련을 시작하지 않음.
 - 출력에 Secret 값, token, chat ID, 개인 경로가 포함되지 않는지 확인함.
+- N100 직접 Telegram 자격 증명이 설정됐고 수신이 가능한 상태인지 사전에 확인함.
+- N100 전원·네트워크·WSL 자체가 동작하지 않는 장애는 이 훈련의 자동복구·직접 알림 대상이 아님.
 
 ## 월간 체크리스트
 

@@ -19,7 +19,7 @@ Tunnel의 `~/.cloudflared/config.yml`은 아래 Caddy 대상 호스트를 WSL의
 
 이 Tunnel 설정은 저장소 밖의 `~/.cloudflared/config.yml`에 있으므로 실제 운영 값은 별도 확인 필요함. 설정이 없거나 Caddy 443으로 전달되면 `HYUNDAI_REDIRECT_URI`의 callback이 404가 될 수 있음.
 
-Tunnel은 Windows 로그인 뒤 WSL 사용자 서비스로 실행됨. `PersonalServer-WSL-KeepAlive`가 WSL을 유지하고, `personal-server-autostart`가 3분 간격으로 Tunnel 프로세스와 공개 경로의 기반 구성요소를 점검함. 같은 항목이 2회 연속 비정상이면 Tunnel 사용자 서비스 시작·재시작을 포함한 제한된 복구를 시도하며, 항목별 시도는 최대 3회임. SSH 종료만으로 Tunnel이 내려가면 안 됨. Tunnel 단독 장애에는 호스트 긴급 재부팅을 사용하지 않음.
+Tunnel은 Windows 로그인 뒤 WSL 사용자 서비스로 실행됨. `PersonalServer-WSL-KeepAlive`가 WSL을 유지하고, `personal-server-autostart`가 3분 간격으로 WSL·K3s·Portal·NodePort·Tunnel을 점검함. 같은 구성요소가 2회 연속 비정상이면 승인된 제한 복구를 시도하며, 구성요소별 시도는 최대 3회임. 복구 상태를 기록하지 못하면 중복·무한 복구를 막기 위해 추가 복구를 중단함. SSH 종료만으로 Tunnel이 내려가면 안 됨. Tunnel 단독 장애에는 호스트 긴급 재부팅을 사용하지 않음.
 
 ## 정상 확인
 
@@ -55,4 +55,4 @@ systemctl --user start cloudflared-personal-server.service
 systemctl --user restart cloudflared-personal-server.service
 ```
 
-자동복구 작업은 Telegram을 직접 발송하지 않음. 외부 상태는 GitHub Actions가 약 5분 간격으로 별도 점검하며, 장애 알림 전송에 성공한 뒤 이후 정상 전환을 확인하면 Telegram 복구 알림을 보냄. 상세는 [공개 상태 Telegram 알림](public-uptime-monitor.md)을 참고함.
+N100 감시기는 Tunnel 장애의 최초 전환에 Telegram 장애 알림을 1회 시도함. 전송에 성공한 상태에서만 이후 정상 복구 전환을 Telegram으로 1회 알림하며, 전송에 실패하면 다음 점검에서 장애 알림을 재시도함. Telegram 자격 증명은 운영자가 Windows 자격 증명 관리자에 사전 등록하며, 값은 문서·로그·상태 파일에 기록하지 않음. 외부 상태는 GitHub Actions가 약 5분 간격으로 독립 점검하므로 같은 장애에 대한 알림이 중복될 수 있음. N100 전원·네트워크·WSL 자체가 동작하지 않는 경우에는 N100 직접 알림과 복구를 보장할 수 없음. 상세는 [공개 상태 Telegram 알림](public-uptime-monitor.md)을 참고함.

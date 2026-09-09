@@ -38,7 +38,7 @@ wsl -l -v
 | NodePort | 상태 확인만 수행. 자동 재시작 금지 |
 | Cloudflare Tunnel | 사용자 서비스 시작·재시작 허용. 호스트 긴급 재부팅은 금지 |
 
-복구 시도 횟수는 상태 파일로 보존함. 상태를 저장하지 못하면 중복·무한 복구를 방지하기 위해 이후 복구를 중단함. Portal PVC·Secret·운영 데이터·Caddy 설정·Tunnel ingress는 자동복구 대상이 아님. 자동복구 작업은 Telegram을 직접 발송하지 않으며, 외부 장애·복구 알림은 GitHub Actions 상태 점검이 담당함.
+복구 시도 횟수는 상태 파일로 보존함. 상태를 저장하지 못하면 중복·무한 복구를 방지하기 위해 이후 복구를 중단함. Portal PVC·Secret·운영 데이터·Caddy 설정·Tunnel ingress는 자동복구 대상이 아님. Tunnel 장애 알림을 1회 전송하는 데 성공한 경우에만 자동복구 작업은 이후 정상 전환에서 복구 알림을 1회 보냄. 장애 알림 전송이 실패하면 다음 점검에서 장애 알림을 재시도함. 자격증명은 `window` 계정의 Windows Credential Manager 일반 자격 증명에서만 읽으며 값은 로그·상태 파일·문서에 기록하지 않음. GitHub Actions 외부 health 점검은 독립 보완 경로이므로 같은 장애에서 메시지가 중복될 수 있음.
 
 ## 긴급 재부팅 발동·취소 기준
 
@@ -86,5 +86,6 @@ Windows 전체 메모리 사용량과 Docker·WSL 사용량은 다를 수 있음
 
 - `.env`, `data/`, Kubernetes Secret, PVC는 N100에만 보관하며 Git에 올리지 않음.
 - Portal, K3s, Caddy, Cloudflare Tunnel은 안전 자동 배포 대상이 아님.
+- N100 전원·네트워크·WSL 자체가 불가한 물리·호스트 장애는 자동복구·직접 Telegram 알림 범위 밖임.
 - 자동 배포 범위와 수동 복구는 [N100 안전 자동 배포](n100-github-auto-deploy.md)를 따름.
 - Mac에서 작업을 이어갈 때는 [N100 원격 개발](n100-remote-development.md)을 사용함.
