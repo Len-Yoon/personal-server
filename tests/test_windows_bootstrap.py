@@ -11,6 +11,58 @@ WSL_SCRIPT = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf
 
 
 class WindowsBootstrapTests(unittest.TestCase):
+    def test_emergency_reboot_task_is_installed_and_failed_start_restores_cooldown_state(self):
+        installer = SCRIPT[
+            SCRIPT.index("function Install-ScheduledTask")
+            : SCRIPT.index("\nLoad-RecoveryFailureState")
+        ]
+        request = SCRIPT[
+            SCRIPT.index("function Request-EmergencyReboot")
+            : SCRIPT.index("function Set-RecoveryTaskSettings")
+        ]
+
+        self.assertIn("Install-EmergencyRebootTask", installer)
+        self.assertIn("Get-ScheduledTask -TaskName $EmergencyRebootTaskName -ErrorAction Stop", request)
+        self.assertIn("$previousEmergencyRebootLastAt", request)
+        self.assertIn("$previousEmergencyRebootCauseComponent", request)
+        self.assertIn("Start-ScheduledTask -TaskName $EmergencyRebootTaskName", request)
+        start_index = request.index("Start-ScheduledTask -TaskName $EmergencyRebootTaskName")
+        failed_start = request[request.index("catch {", start_index) :]
+        self.assertIn("$script:EmergencyRebootLastAt = $previousEmergencyRebootLastAt", failed_start)
+        self.assertIn("Save-RecoveryFailureState", failed_start)
+
+    def test_core_targeted_recovery_rechecks_health_before_emergency_escalation(self):
+        targeted = SCRIPT[
+            SCRIPT.index("function Invoke-TargetedRecovery")
+            : SCRIPT.index("function Enter-RecoveryLock")
+        ]
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle")
+            : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+
+        self.assertGreaterEqual(targeted.count("Get-RecoveryHealth"), 2)
+        self.assertIn('$health.keepalive -eq "healthy"', targeted)
+        self.assertIn('$health.k3s -eq "healthy"', targeted)
+        self.assertIn("$attemptCount -ne $RecoveryMaxAttempts", SCRIPT)
+        self.assertLess(cycle.index("Invoke-TargetedRecovery $component"), cycle.index("Test-EmergencyRebootEligible $component"))
+        self.assertIn("if (Request-EmergencyReboot $component) {\n                    return", cycle)
+
+    def test_invalid_persisted_emergency_reboot_timestamp_blocks_reboot_without_erasing_it(self):
+        loader = SCRIPT[
+            SCRIPT.index("function Load-RecoveryFailureState")
+            : SCRIPT.index("function Register-RecoveryFailure")
+        ]
+        eligible = SCRIPT[
+            SCRIPT.index("function Test-EmergencyRebootEligible")
+            : SCRIPT.index("function Request-EmergencyReboot")
+        ]
+
+        self.assertIn('$script:EmergencyRebootLastAt = [string]$storedLastReboot.Value', loader)
+        self.assertIn('$script:EmergencyRebootCooldownStateValid = $false', loader)
+        self.assertIn("if (-not $EmergencyRebootCooldownStateValid)", eligible)
+        self.assertIn("persisted cooldown timestamp is invalid", eligible)
+
     def test_emergency_reboot_is_limited_to_exhausted_keepalive_or_k3s_recovery(self):
         reboot = SCRIPT[
             SCRIPT.index("function Install-EmergencyRebootTask")

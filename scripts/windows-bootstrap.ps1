@@ -29,6 +29,7 @@ $RecoveryAttemptCounts = @{}
 $RecoveryStateDirty = $false
 $EmergencyRebootLastAt = $null
 $EmergencyRebootCauseComponent = $null
+$EmergencyRebootCooldownStateValid = $true
 function Write-Info([string]$Message) {
     Write-Host $Message
 }
@@ -231,10 +232,11 @@ function Load-RecoveryFailureState {
         if ($null -ne $storedEmergencyReboot) {
             $storedLastReboot = $storedEmergencyReboot.Value.PSObject.Properties["last_emergency_reboot_at"]
             $storedCauseComponent = $storedEmergencyReboot.Value.PSObject.Properties["cause_component"]
-            if ($null -ne $storedLastReboot) {
+            if ($null -ne $storedLastReboot -and -not [string]::IsNullOrWhiteSpace([string]$storedLastReboot.Value)) {
+                $script:EmergencyRebootLastAt = [string]$storedLastReboot.Value
                 $parsedLastReboot = [DateTimeOffset]::MinValue
-                if ([DateTimeOffset]::TryParse([string]$storedLastReboot.Value, [ref]$parsedLastReboot)) {
-                    $script:EmergencyRebootLastAt = [string]$storedLastReboot.Value
+                if (-not [DateTimeOffset]::TryParseExact([string]$storedLastReboot.Value, "o", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$parsedLastReboot) -or $parsedLastReboot.Offset -ne [TimeSpan]::Zero) {
+                    $script:EmergencyRebootCooldownStateValid = $false
                 }
             }
             if ($null -ne $storedCauseComponent -and [string]$storedCauseComponent.Value -in @("keepalive", "k3s")) {
@@ -338,10 +340,15 @@ function Invoke-TargetedRecovery([string]$Component) {
     switch ($Component) {
         "keepalive" {
             Start-ScheduledTask -TaskName "PersonalServer-WSL-KeepAlive"
-            return $true
+            $health = Get-RecoveryHealth
+            return ($health.keepalive -eq "healthy")
         }
         "k3s" {
-            return (Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "-u", "root", "--", "systemctl", "start", "k3s") -Operation "K3s recovery start")
+            if (-not (Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "-u", "root", "--", "systemctl", "start", "k3s") -Operation "K3s recovery start")) {
+                return $false
+            }
+            $health = Get-RecoveryHealth
+            return ($health.k3s -eq "healthy")
         }
         "portal" {
             [void](Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "-u", "root", "--", "k3s", "kubectl", "-n", "personal-server", "rollout", "restart", "deployment/portal-web") -Operation "Portal rollout restart")
@@ -470,7 +477,7 @@ function Test-EmergencyRebootEligible([string]$Component) {
     }
 
     $attemptCount = if ($RecoveryAttemptCounts.ContainsKey($Component)) { [int]$RecoveryAttemptCounts[$Component] } else { 0 }
-    if ($attemptCount -lt $RecoveryMaxAttempts) {
+    if ($attemptCount -ne $RecoveryMaxAttempts) {
         return $false
     }
 
@@ -481,6 +488,10 @@ function Test-EmergencyRebootEligible([string]$Component) {
         return $false
     }
 
+    if (-not $EmergencyRebootCooldownStateValid) {
+        Write-Info "Emergency reboot blocked because the persisted cooldown timestamp is invalid."
+        return $false
+    }
     if ($null -ne $EmergencyRebootLastAt) {
         $lastRebootAt = [DateTimeOffset]::MinValue
         if (-not [DateTimeOffset]::TryParse($EmergencyRebootLastAt, [ref]$lastRebootAt)) {
@@ -500,13 +511,31 @@ function Request-EmergencyReboot([string]$Component) {
     if ($Component -notin @("keepalive", "k3s")) {
         return $false
     }
+    try {
+        Get-ScheduledTask -TaskName $EmergencyRebootTaskName -ErrorAction Stop | Out-Null
+    } catch {
+        Write-Info "Emergency reboot blocked because its scheduled task is unavailable."
+        return $false
+    }
+    $previousEmergencyRebootLastAt = $EmergencyRebootLastAt
+    $previousEmergencyRebootCauseComponent = $EmergencyRebootCauseComponent
     $script:EmergencyRebootLastAt = (Get-Date).ToUniversalTime().ToString("o")
     $script:EmergencyRebootCauseComponent = $Component
     if (-not (Save-RecoveryFailureState)) {
+        $script:EmergencyRebootLastAt = $previousEmergencyRebootLastAt
+        $script:EmergencyRebootCauseComponent = $previousEmergencyRebootCauseComponent
         Write-Info "Emergency reboot blocked because its state could not be saved."
         return $false
     }
-    Start-ScheduledTask -TaskName $EmergencyRebootTaskName
+    try {
+        Start-ScheduledTask -TaskName $EmergencyRebootTaskName
+    } catch {
+        $script:EmergencyRebootLastAt = $previousEmergencyRebootLastAt
+        $script:EmergencyRebootCauseComponent = $previousEmergencyRebootCauseComponent
+        [void](Save-RecoveryFailureState)
+        Write-Info "Emergency reboot blocked because its scheduled task could not start."
+        return $false
+    }
     Write-Info "Emergency reboot requested after exhausted $Component recovery attempts."
     return $true
 }
@@ -538,6 +567,7 @@ function Install-ScheduledTask {
     }
 
     [void](Set-RecoveryTaskSettings)
+    Install-EmergencyRebootTask
     Write-Info "Registered scheduled task '$TaskName' to start with Windows."
 }
 
