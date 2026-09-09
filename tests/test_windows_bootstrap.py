@@ -11,6 +11,18 @@ WSL_SCRIPT = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf
 
 
 class WindowsBootstrapTests(unittest.TestCase):
+    def test_corrupt_or_non_object_emergency_reboot_state_fails_closed_but_missing_file_remains_valid(self):
+        loader = SCRIPT[
+            SCRIPT.index("function Load-RecoveryFailureState")
+            : SCRIPT.index("function Register-RecoveryFailure")
+        ]
+
+        self.assertIn("if (-not (Test-Path -LiteralPath $RecoveryStatePath)) {\n        return", loader)
+        self.assertIn("$storedEmergencyReboot.Value -isnot [PSCustomObject]", loader)
+        self.assertIn('$script:EmergencyRebootCooldownStateValid = $false', loader)
+        catch_body = loader[loader.rindex("catch {") :]
+        self.assertIn('$script:EmergencyRebootCooldownStateValid = $false', catch_body)
+
     def test_emergency_reboot_task_is_installed_and_failed_start_restores_cooldown_state(self):
         installer = SCRIPT[
             SCRIPT.index("function Install-ScheduledTask")

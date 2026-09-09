@@ -228,19 +228,31 @@ function Load-RecoveryFailureState {
     }
     try {
         $storedState = Get-Content -LiteralPath $RecoveryStatePath -Raw | ConvertFrom-Json
+        if ($storedState -isnot [PSCustomObject]) {
+            $script:EmergencyRebootCooldownStateValid = $false
+            return
+        }
         $storedEmergencyReboot = $storedState.PSObject.Properties["emergency_reboot"]
         if ($null -ne $storedEmergencyReboot) {
-            $storedLastReboot = $storedEmergencyReboot.Value.PSObject.Properties["last_emergency_reboot_at"]
-            $storedCauseComponent = $storedEmergencyReboot.Value.PSObject.Properties["cause_component"]
-            if ($null -ne $storedLastReboot -and -not [string]::IsNullOrWhiteSpace([string]$storedLastReboot.Value)) {
-                $script:EmergencyRebootLastAt = [string]$storedLastReboot.Value
-                $parsedLastReboot = [DateTimeOffset]::MinValue
-                if (-not [DateTimeOffset]::TryParseExact([string]$storedLastReboot.Value, "o", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$parsedLastReboot) -or $parsedLastReboot.Offset -ne [TimeSpan]::Zero) {
+            if ($storedEmergencyReboot.Value -isnot [PSCustomObject]) {
+                $script:EmergencyRebootCooldownStateValid = $false
+            } else {
+                $storedLastReboot = $storedEmergencyReboot.Value.PSObject.Properties["last_emergency_reboot_at"]
+                $storedCauseComponent = $storedEmergencyReboot.Value.PSObject.Properties["cause_component"]
+                if ($null -eq $storedLastReboot -or $null -eq $storedCauseComponent) {
+                    $script:EmergencyRebootCooldownStateValid = $false
+                } elseif (-not [string]::IsNullOrWhiteSpace([string]$storedLastReboot.Value)) {
+                    $script:EmergencyRebootLastAt = [string]$storedLastReboot.Value
+                    $parsedLastReboot = [DateTimeOffset]::MinValue
+                    if (-not [DateTimeOffset]::TryParseExact([string]$storedLastReboot.Value, "o", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$parsedLastReboot) -or $parsedLastReboot.Offset -ne [TimeSpan]::Zero) {
+                        $script:EmergencyRebootCooldownStateValid = $false
+                    }
+                }
+                if ($null -ne $storedCauseComponent -and [string]$storedCauseComponent.Value -in @("keepalive", "k3s")) {
+                    $script:EmergencyRebootCauseComponent = [string]$storedCauseComponent.Value
+                } elseif ($null -ne $storedCauseComponent -and $null -ne $storedCauseComponent.Value) {
                     $script:EmergencyRebootCooldownStateValid = $false
                 }
-            }
-            if ($null -ne $storedCauseComponent -and [string]$storedCauseComponent.Value -in @("keepalive", "k3s")) {
-                $script:EmergencyRebootCauseComponent = [string]$storedCauseComponent.Value
             }
         }
         foreach ($property in $storedState.PSObject.Properties) {
@@ -265,6 +277,7 @@ function Load-RecoveryFailureState {
     } catch {
         $RecoveryFailureCounts = @{}
         $RecoveryAttemptCounts = @{}
+        $script:EmergencyRebootCooldownStateValid = $false
     }
 }
 
