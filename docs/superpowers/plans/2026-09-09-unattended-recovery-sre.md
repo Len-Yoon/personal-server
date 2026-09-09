@@ -1,5 +1,4 @@
 # 제한형 무인 자동복구 SRE Implementation Plan
-
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** N100의 WSL·K3s 핵심 기반 장애를 서비스 단위로 복구하고, 정해진 실패 조건에서만 한 번의 Windows 긴급 재부팅으로 승격하며, GitHub Actions가 외부 상태 전환을 Telegram으로 알리도록 함.
@@ -318,4 +317,3 @@ wsl -d Ubuntu-24.04 -u window -- bash -lc 'systemctl --user start cloudflared-pe
 ```
 
 Expected: Portal·Caddy·Secret·PVC·Tunnel ingress 변경 없이 외부 health가 정상화됨.
-

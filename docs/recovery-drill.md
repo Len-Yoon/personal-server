@@ -12,11 +12,11 @@
 
 ## 핵심 요약
 
-본 문서는 승인된 통제 훈련 절차임. 실제 운영 환경에서 실행하지 않으며, 자동복구·재부팅·Tunnel 중지 동작을 수행하지 않음. 다음 세 단계는 증적 확인과 모의 순서 검토만 수행함.
+본 문서는 승인된 통제 훈련 절차임. 이번 변경에서는 실제 Tunnel 중지·자동복구·재부팅을 수행하지 않음. 실제 Tunnel-only 훈련은 별도 사용자 승인 뒤에만 실행하며, 다음 순서와 외부 health·Telegram 결과를 증적으로 남김.
 
 ## Tunnel 장애 모의 순서
 
-실제 Tunnel을 중지하지 않고 아래 승인된 통제 훈련 순서를 확인함. `Tunnel만` 장애를 가정하고 GitHub monitor 장애 확인 → 자동복구 대기 → 외부 health 및 복구 Telegram 확인 → 실패 시 사용자 서비스 수동 시작 절차를 검토함. 수동 rollback 명령은 `systemctl --user start cloudflared-personal-server.service`만 허용함.
+`Tunnel만` 중지 → GitHub monitor 장애 확인 → 자동복구 대기 → 외부 health 및 복구 Telegram 확인 → 실패 시 사용자 서비스 수동 시작 또는 재시작 순서로 실행함. 실제 실행 전에는 별도 사용자 승인이 필요함. 서비스가 inactive면 `systemctl --user start cloudflared-personal-server.service`, active지만 연결 프로세스가 없으면 `systemctl --user restart cloudflared-personal-server.service`를 사용함.
 
 ## 사전 조건
 

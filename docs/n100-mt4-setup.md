@@ -42,7 +42,7 @@ wsl -l -v
 
 ## 긴급 재부팅 발동·취소 기준
 
-`PersonalServer-EmergencyReboot`는 승인된 수동 발동 작업임. WSL 유지 작업과 K3s 복구가 3회 연속 실패하고 호스트 재부팅이 필요하다고 운영자가 확인한 경우에만 실행함. Windows 부팅 시점부터 20분 유예가 있으며, 발동 후 6시간 cooldown 동안 재실행하지 않음. Tunnel·Portal·NodePort 단독 장애에는 사용하지 않음.
+`PersonalServer-EmergencyReboot`는 트리거 없이 등록되며, 자동복구가 WSL 유지 작업 또는 K3s 중 하나의 대상 복구를 3회 시도한 뒤에도 해당 항목이 비정상일 때만 시작함. Windows 부팅 시점부터 20분 유예가 있으며, 발동 후 6시간 cooldown 동안 재실행하지 않음. Tunnel·Portal·NodePort 단독 장애에는 사용하지 않음.
 
 유예 중 취소가 필요하면 Windows PowerShell에서 60초 안에 다음 명령을 실행함.
 

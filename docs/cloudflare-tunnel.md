@@ -45,10 +45,14 @@ sudo k3s kubectl -n personal-server get deploy,pod
 curl --resolve len.pe.kr:443:127.0.0.1 --fail --silent --show-error https://len.pe.kr/health
 ```
 
-수동 rollback이 필요한 경우 아래 사용자 서비스 시작 명령만 사용함. 호스트 재부팅이나 다른 서비스 재생성은 수행하지 않음.
+수동 rollback이 필요한 경우 서비스가 inactive면 아래 시작 명령을 사용함. 서비스는 active지만 Tunnel 연결 프로세스가 없으면 `start` 대신 `restart`를 사용함. 호스트 재부팅이나 다른 서비스 재생성은 수행하지 않음.
 
 ```bash
 systemctl --user start cloudflared-personal-server.service
+```
+
+```bash
+systemctl --user restart cloudflared-personal-server.service
 ```
 
 자동복구 작업은 Telegram을 직접 발송하지 않음. 외부 상태는 GitHub Actions가 약 5분 간격으로 별도 점검하며, 장애 알림 전송에 성공한 뒤 이후 정상 전환을 확인하면 Telegram 복구 알림을 보냄. 상세는 [공개 상태 Telegram 알림](public-uptime-monitor.md)을 참고함.
