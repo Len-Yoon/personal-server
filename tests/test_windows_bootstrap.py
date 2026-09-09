@@ -61,6 +61,15 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertNotIn("'cloudflared', 'tunnel', 'run'", recovery)
         self.assertNotIn("nohup cloudflared tunnel run", WSL_SCRIPT)
 
+    def test_tunnel_recovery_restarts_active_service_when_connection_process_is_missing(self):
+        recovery = SCRIPT[
+            SCRIPT.index("function Start-CloudflareTunnel") : SCRIPT.index("function Update-HostMetrics")
+        ]
+        self.assertIn("if (Test-CloudflareTunnelService) {", recovery)
+        self.assertIn("if (Test-CloudflareTunnelRunning) {", recovery)
+        self.assertIn('"systemctl", "--user", "restart", "cloudflared-personal-server.service"', recovery)
+        self.assertIn("return ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning))", recovery)
+
     def test_daemon_uses_three_minute_health_interval_and_two_failures_before_recovery(self):
         self.assertIn("$RecoveryIntervalSeconds = 180", SCRIPT)
         self.assertIn("$RecoveryFailureThreshold = 2", SCRIPT)

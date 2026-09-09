@@ -90,13 +90,20 @@ function Test-CloudflareTunnelService {
 
 function Start-CloudflareTunnel {
     if (Test-CloudflareTunnelService) {
-        return $false
+        if (Test-CloudflareTunnelRunning) {
+            return $false
+        }
+        if (-not (Invoke-WslWithTimeout -Arguments @(
+            "-d", $WslDistribution, "-u", $WslServiceUser, "--",
+            "systemctl", "--user", "restart", "cloudflared-personal-server.service"
+        ) -Operation "Cloudflare Tunnel service restart")) { return $false }
+        return ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning))
     }
     if (-not (Invoke-WslWithTimeout -Arguments @(
         "-d", $WslDistribution, "-u", $WslServiceUser, "--",
         "systemctl", "--user", "start", "cloudflared-personal-server.service"
     ) -Operation "Cloudflare Tunnel service start")) { return $false }
-    return (Test-CloudflareTunnelService)
+    return ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning))
 }
 
 function Update-HostMetrics {
