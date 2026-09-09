@@ -24,10 +24,36 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn('$TunnelTelegramCredentialTarget = "personal-server-tunnel-telegram"', SCRIPT)
         self.assertIn("CredRead", credential)
         self.assertIn("CredentialBlob", credential)
+        self.assertIn("UserName", credential)
+        self.assertIn("bot_token = [string]$credential.Password", credential)
+        self.assertIn("chat_id = [string]$credential.UserName", credential)
         self.assertIn("ConvertFrom-Json", credential)
+        self.assertIn('([string]$credential.Password).TrimStart().StartsWith("{")', credential)
         self.assertIn("https://api.telegram.org/bot", notifier)
         self.assertNotIn("Write-Info $credentialPayload", credential)
         self.assertNotIn("Write-Info $config", notifier)
+
+    def test_tunnel_transition_alert_keeps_legacy_json_credential_compatibility(self):
+        credential = SCRIPT[
+            SCRIPT.index("function Get-TunnelTelegramConfiguration")
+            : SCRIPT.index("function Send-TunnelTelegramNotification")
+        ]
+
+        self.assertIn('([string]$credential.Password).TrimStart().StartsWith("{")', credential)
+        self.assertIn("$credential.Password | ConvertFrom-Json", credential)
+        self.assertIn("$configuration.bot_token", credential)
+        self.assertIn("$configuration.chat_id", credential)
+
+    def test_tunnel_transition_alert_rejects_empty_or_malformed_credentials_without_logging_them(self):
+        credential = SCRIPT[
+            SCRIPT.index("function Get-TunnelTelegramConfiguration")
+            : SCRIPT.index("function Send-TunnelTelegramNotification")
+        ]
+
+        self.assertIn("[string]::IsNullOrWhiteSpace([string]$credential.Password)", credential)
+        self.assertIn("[string]::IsNullOrWhiteSpace([string]$credential.UserName)", credential)
+        self.assertIn('Write-Info "Tunnel Telegram credential has an invalid format."', credential)
+        self.assertNotIn("Write-Info $credential", credential)
 
     def test_tunnel_transition_alerts_are_persisted_and_sent_once_per_transition(self):
         state = SCRIPT[

@@ -19,13 +19,13 @@ Telegram 장애 메시지 전송이 실패하면 다음 실패 점검에서 장�
 
 N100 감시기는 `cloudflared-personal-server.service`의 상태와 Tunnel 프로세스를 주기적으로 확인함. Tunnel 장애를 처음 확인하면 `[개인서버 장애]` 메시지를 1회 전송하고, 기존 임계치에 따라 로컬 복구를 시도함. 이후 Tunnel 서비스와 프로세스가 정상으로 돌아오면 `[개인서버 복구]` 메시지를 1회 전송함.
 
-N100 알림 자격증명은 Windows Credential Manager의 `personal-server-tunnel-telegram` 대상에서 `window` 사용자 권한으로 읽음. 자격증명 값은 JSON 객체 `{ "bot_token": "...", "chat_id": "..." }` 형식으로 사전 등록하지만, 실제 값은 명령 출력·문서·로그에 표시하지 않음.
+N100 알림 자격증명은 `window` 사용자 계정의 Windows Credential Manager에서 `personal-server-tunnel-telegram` 대상을 읽음. 일반 자격 증명의 사용자 이름에는 Telegram Chat ID를, 암호에는 Bot token을 입력함. 실제 값은 명령 출력·문서·로그에 표시하지 않음.
 
 | 항목 | 기준 |
 |---|---|
 | 자격증명 저장소 | Windows Credential Manager |
 | 대상명 | `personal-server-tunnel-telegram` |
-| 값 형식 | JSON `bot_token` 및 `chat_id` 필드 |
+| 값 형식 | 사용자 이름=Telegram Chat ID, 암호=Bot token |
 | 금지 위치 | Git, 평문 설정 파일, 환경 변수, `recovery-state.json`, 로그 |
 | 장애 알림 | Tunnel 장애 최초 감지 시 1회, 전송 실패 시 다음 점검에서 재시도 |
 | 복구 알림 | 장애 알림 전송이 확정된 뒤 Tunnel 정상 전환 시 1회 |
@@ -43,6 +43,8 @@ GitHub 저장소의 `Settings` → `Secrets and variables` → `Actions`에서 �
 
 Secret 값은 Git, workflow 출력, GitHub 이슈에 기록하지 않음.
 
+N100 직접 알림 자격 증명은 **일반 자격 증명**으로 등록함. 대상명은 정확히 `personal-server-tunnel-telegram`으로 입력하고, 사용자 이름에는 Telegram Chat ID, 암호에는 Bot token을 입력함. Windows 자격 증명이나 도메인 자격 증명이 아닌 일반 자격 증명을 사용해야 함. 등록·확인 과정에서 Bot token과 Chat ID를 명령 출력, 문서, 로그 또는 채팅에 노출하지 않음.
+
 ## 수동 점검
 
 GitHub 저장소의 `Actions` → `Public Portal Uptime Monitor` → `Run workflow`를 선택해 즉시 실행 가능함. 정상 상태에서는 Telegram 메시지를 보내지 않음.
@@ -57,7 +59,7 @@ N100 직접 알림은 다음 순서로 수동 검증함.
 6. Telegram에서 장애 1회와 복구 1회가 수신되는지 확인함.
 7. 상태 파일에 자격증명 원문이 없고, 검증 종료 후 외부 health가 정상인지 확인함.
 
-Credential Manager 등록 여부는 자격증명 원문을 출력하지 않고 감시기의 설정 상태와 실제 전송 결과로만 확인함. 검증 실패 시 서비스는 수동으로 복구하되, 토큰이나 chat ID를 채팅·로그·이슈에 붙여 넣지 않음.
+Credential Manager 등록 여부는 자격증명 원문을 출력하지 않고 대상의 존재 여부, 감시기의 설정 상태와 실제 전송 결과로만 확인함. 검증 실패 시 서비스는 수동으로 복구하되, Bot token이나 Chat ID를 채팅·로그·이슈에 붙여 넣지 않음.
 
 ## 동작 범위와 한계
 
