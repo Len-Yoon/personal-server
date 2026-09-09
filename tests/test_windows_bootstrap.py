@@ -11,6 +11,33 @@ WSL_SCRIPT = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf
 
 
 class WindowsBootstrapTests(unittest.TestCase):
+    def test_existing_recovery_state_requires_complete_emergency_reboot_schema(self):
+        loader = SCRIPT[
+            SCRIPT.index("function Load-RecoveryFailureState")
+            : SCRIPT.index("function Register-RecoveryFailure")
+        ]
+
+        self.assertIn('Properties["emergency_reboot"]', loader)
+        self.assertIn('$null -eq $storedEmergencyReboot', loader)
+        self.assertIn('$null -eq $storedEmergencyReboot.Value', loader)
+        self.assertIn('$null -eq $storedLastReboot', loader)
+        self.assertIn('$null -eq $storedCauseComponent', loader)
+        self.assertIn("[string]::IsNullOrWhiteSpace", loader)
+        self.assertIn('$script:EmergencyRebootCooldownStateValid = $false', loader)
+
+    def test_existing_recovery_state_requires_complete_component_counter_schema_for_reboot(self):
+        loader = SCRIPT[
+            SCRIPT.index("function Load-RecoveryFailureState")
+            : SCRIPT.index("function Register-RecoveryFailure")
+        ]
+
+        self.assertIn("foreach ($component in $RecoveryComponents)", loader)
+        self.assertIn('$storedComponent.Value -isnot [PSCustomObject]', loader)
+        self.assertIn('$null -eq $storedFailureCount', loader)
+        self.assertIn('$null -eq $storedAttemptCount', loader)
+        self.assertIn('$failureCount -lt 0', loader)
+        self.assertIn('$attemptCount -lt 0', loader)
+
     def test_corrupt_or_non_object_emergency_reboot_state_fails_closed_but_missing_file_remains_valid(self):
         loader = SCRIPT[
             SCRIPT.index("function Load-RecoveryFailureState")

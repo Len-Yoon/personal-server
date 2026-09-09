@@ -233,46 +233,46 @@ function Load-RecoveryFailureState {
             return
         }
         $storedEmergencyReboot = $storedState.PSObject.Properties["emergency_reboot"]
-        if ($null -ne $storedEmergencyReboot) {
-            if ($storedEmergencyReboot.Value -isnot [PSCustomObject]) {
+        if ($null -eq $storedEmergencyReboot -or $null -eq $storedEmergencyReboot.Value -or $storedEmergencyReboot.Value -isnot [PSCustomObject]) {
+            $script:EmergencyRebootCooldownStateValid = $false
+        } else {
+            $storedLastReboot = $storedEmergencyReboot.Value.PSObject.Properties["last_emergency_reboot_at"]
+            $storedCauseComponent = $storedEmergencyReboot.Value.PSObject.Properties["cause_component"]
+            if ($null -eq $storedLastReboot -or $null -eq $storedCauseComponent) {
+                $script:EmergencyRebootCooldownStateValid = $false
+            } elseif ($null -eq $storedLastReboot.Value -and $null -eq $storedCauseComponent.Value) {
+                # A normal saved state has no prior emergency reboot yet.
+            } elseif ($null -eq $storedLastReboot.Value -or [string]::IsNullOrWhiteSpace([string]$storedLastReboot.Value) -or $null -eq $storedCauseComponent.Value -or [string]$storedCauseComponent.Value -notin @("keepalive", "k3s")) {
                 $script:EmergencyRebootCooldownStateValid = $false
             } else {
-                $storedLastReboot = $storedEmergencyReboot.Value.PSObject.Properties["last_emergency_reboot_at"]
-                $storedCauseComponent = $storedEmergencyReboot.Value.PSObject.Properties["cause_component"]
-                if ($null -eq $storedLastReboot -or $null -eq $storedCauseComponent) {
-                    $script:EmergencyRebootCooldownStateValid = $false
-                } elseif (-not [string]::IsNullOrWhiteSpace([string]$storedLastReboot.Value)) {
-                    $script:EmergencyRebootLastAt = [string]$storedLastReboot.Value
-                    $parsedLastReboot = [DateTimeOffset]::MinValue
-                    if (-not [DateTimeOffset]::TryParseExact([string]$storedLastReboot.Value, "o", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$parsedLastReboot) -or $parsedLastReboot.Offset -ne [TimeSpan]::Zero) {
-                        $script:EmergencyRebootCooldownStateValid = $false
-                    }
-                }
-                if ($null -ne $storedCauseComponent -and [string]$storedCauseComponent.Value -in @("keepalive", "k3s")) {
-                    $script:EmergencyRebootCauseComponent = [string]$storedCauseComponent.Value
-                } elseif ($null -ne $storedCauseComponent -and $null -ne $storedCauseComponent.Value) {
+                $script:EmergencyRebootLastAt = [string]$storedLastReboot.Value
+                $script:EmergencyRebootCauseComponent = [string]$storedCauseComponent.Value
+                $parsedLastReboot = [DateTimeOffset]::MinValue
+                if (-not [DateTimeOffset]::TryParseExact([string]$storedLastReboot.Value, "o", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$parsedLastReboot) -or $parsedLastReboot.Offset -ne [TimeSpan]::Zero) {
                     $script:EmergencyRebootCooldownStateValid = $false
                 }
             }
         }
-        foreach ($property in $storedState.PSObject.Properties) {
-            if ($property.Name -in $RecoveryComponents) {
-                $failureCount = 0
-                $attemptCount = 0
-                if ([int]::TryParse([string]$property.Value, [ref]$failureCount) -and $failureCount -ge 0) {
-                    $RecoveryFailureCounts[$property.Name] = $failureCount
-                    $RecoveryAttemptCounts[$property.Name] = 0
-                    continue
+        foreach ($component in $RecoveryComponents) {
+            $storedComponent = $storedState.PSObject.Properties[$component]
+            $failureCount = 0
+            $attemptCount = 0
+            if ($null -eq $storedComponent -or $null -eq $storedComponent.Value -or $storedComponent.Value -isnot [PSCustomObject]) {
+                $script:EmergencyRebootCooldownStateValid = $false
+                if ($null -ne $storedComponent -and [int]::TryParse([string]$storedComponent.Value, [ref]$failureCount) -and $failureCount -ge 0) {
+                    $RecoveryFailureCounts[$component] = $failureCount
+                    $RecoveryAttemptCounts[$component] = 0
                 }
-                $storedFailureCount = $property.Value.PSObject.Properties["health_failures"]
-                $storedAttemptCount = $property.Value.PSObject.Properties["recovery_attempts"]
-                if ($null -ne $storedFailureCount -and [int]::TryParse([string]$storedFailureCount.Value, [ref]$failureCount) -and $failureCount -ge 0) {
-                    $RecoveryFailureCounts[$property.Name] = $failureCount
-                }
-                if ($null -ne $storedAttemptCount -and [int]::TryParse([string]$storedAttemptCount.Value, [ref]$attemptCount) -and $attemptCount -ge 0) {
-                    $RecoveryAttemptCounts[$property.Name] = $attemptCount
-                }
+                continue
             }
+            $storedFailureCount = $storedComponent.Value.PSObject.Properties["health_failures"]
+            $storedAttemptCount = $storedComponent.Value.PSObject.Properties["recovery_attempts"]
+            if ($null -eq $storedFailureCount -or $null -eq $storedAttemptCount -or -not [int]::TryParse([string]$storedFailureCount.Value, [ref]$failureCount) -or $failureCount -lt 0 -or -not [int]::TryParse([string]$storedAttemptCount.Value, [ref]$attemptCount) -or $attemptCount -lt 0) {
+                $script:EmergencyRebootCooldownStateValid = $false
+                continue
+            }
+            $RecoveryFailureCounts[$component] = $failureCount
+            $RecoveryAttemptCounts[$component] = $attemptCount
         }
     } catch {
         $RecoveryFailureCounts = @{}
