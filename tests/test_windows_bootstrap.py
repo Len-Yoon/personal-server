@@ -35,6 +35,63 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("Remove-Item -LiteralPath $temporaryTaskXml", reboot)
         self.assertLess(installer.index("Install-EmergencyRebootTask"), installer.index("schtasks.exe /Create /TN $TaskName"))
 
+    def test_emergency_reboot_xml_has_exported_schema_element_order_and_complete_settings(self):
+        reboot = SCRIPT[
+            SCRIPT.index("function Install-EmergencyRebootTask")
+            : SCRIPT.index("function Test-EmergencyRebootEligible")
+        ]
+
+        required_elements = (
+            "<RegistrationInfo>",
+            "<URI>\\PersonalServer-EmergencyReboot</URI>",
+            "<Description>Emergency reboot task for exhausted core recovery attempts.</Description>",
+            "<Principals>",
+            '<Principal id="SYSTEM">',
+            "<UserId>S-1-5-18</UserId>",
+            "<LogonType>ServiceAccount</LogonType>",
+            "<RunLevel>HighestAvailable</RunLevel>",
+            "<Settings>",
+            "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
+            "<DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>",
+            "<StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>",
+            "<AllowHardTerminate>true</AllowHardTerminate>",
+            "<StartWhenAvailable>false</StartWhenAvailable>",
+            "<RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>",
+            "<IdleSettings>",
+            "<StopOnIdleEnd>true</StopOnIdleEnd>",
+            "<RestartOnIdle>false</RestartOnIdle>",
+            "<AllowStartOnDemand>true</AllowStartOnDemand>",
+            "<Enabled>true</Enabled>",
+            "<Hidden>true</Hidden>",
+            "<RunOnlyIfIdle>false</RunOnlyIfIdle>",
+            "<WakeToRun>false</WakeToRun>",
+            "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>",
+            "<Priority>7</Priority>",
+            '<Actions Context="SYSTEM">',
+            "<Command>shutdown.exe</Command>",
+            "<Arguments>/r /f /t 60</Arguments>",
+        )
+        for element in required_elements:
+            self.assertIn(element, reboot)
+        self.assertNotIn("<Triggers>", reboot)
+        self.assertEqual(
+            [reboot.index(element) for element in required_elements],
+            sorted(reboot.index(element) for element in required_elements),
+        )
+
+    def test_emergency_reboot_schtasks_capture_preserves_native_error_output(self):
+        reboot = SCRIPT[
+            SCRIPT.index("function Install-EmergencyRebootTask")
+            : SCRIPT.index("function Test-EmergencyRebootEligible")
+        ]
+
+        self.assertIn('$previousErrorActionPreference = $ErrorActionPreference', reboot)
+        self.assertIn('$ErrorActionPreference = "Continue"', reboot)
+        self.assertIn('$createExitCode = $LASTEXITCODE', reboot)
+        self.assertIn('$ErrorActionPreference = $previousErrorActionPreference', reboot)
+        self.assertIn('exit code $createExitCode', reboot)
+        self.assertIn('$result.Trim()', reboot)
+
     def test_emergency_request_save_failure_restores_declared_prior_memory_state(self):
         request = SCRIPT[
             SCRIPT.index("function Request-EmergencyReboot")
