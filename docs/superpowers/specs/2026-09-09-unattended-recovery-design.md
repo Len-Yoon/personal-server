@@ -63,6 +63,20 @@ Tunnel의 수동 중지는 복구 훈련에만 사용함. 자동복구가 동작
 - NodePort 단독 이상은 Portal 재시작으로 우회하지 않고 다음 주기에 재판정함.
 - Portal PVC·Secret·운영 데이터·Compose Portal writer는 복구 동작에서 제외함.
 
+### 4.4 N100 긴급 재부팅 계약
+
+N100 전체 재부팅은 서비스 단위 복구보다 영향이 크므로 최종 단계로만 사용함. 다음 조건을 모두 충족할 때만 Windows 전용 재부팅 작업을 한 번 시작함.
+
+1. `keepalive` 또는 `k3s` 중 하나가 여전히 비정상임.
+2. 해당 항목의 제한형 자동복구가 3회 실패함.
+3. Windows 시작 뒤 20분의 안정화 유예 시간이 지남.
+4. 이전 긴급 재부팅 뒤 6시간의 cooldown 시간이 지남.
+5. 재부팅 상태 기록을 안전하게 저장할 수 있음.
+
+`tunnel`, `portal`, `nodeport` 단독 장애는 긴급 재부팅 조건이 아님. Cloudflare·인터넷·Caddy·공개 경로 문제로 PC 전체를 재부팅하지 않음.
+
+재부팅은 최고 권한 `PersonalServer-EmergencyReboot` Windows 예약 작업 하나로만 수행함. 감시 작업은 이 작업을 시작할 수 있을 뿐, 임의 명령이나 일반 관리자 권한을 얻지 않음. 전용 작업은 `shutdown.exe /r /f /t 60`만 실행하며, 60초 유예 동안 운영자는 `shutdown /a`로 취소할 수 있음.
+
 ## 5. 상태 전이와 알림
 
 | 외부 상태 | GitHub Actions 동작 | Telegram | Issue |
@@ -108,6 +122,15 @@ Telegram API 응답의 `ok=true`와 메시지 ID 형식이 검증된 뒤에만 �
 
 성공 기준은 실서비스 데이터·Secret·PVC·Caddy·Tunnel ingress 변경 없이 각 훈련을 복구하는 것임.
 
+### 단계 5: 최종 단계 재부팅 보호 장치
+
+- `PersonalServer-EmergencyReboot` 작업은 Windows `SYSTEM` 계정의 최고 권한으로 생성하되, 재부팅 명령 하나만 허용함.
+- 감시 작업은 `keepalive` 또는 `k3s`의 복구 시도 횟수, 시작 유예, cooldown, 상태 저장 가능 여부를 모두 통과할 때만 전용 작업을 시작함.
+- 재부팅 시작 사실과 대상 구성요소는 Secret 없이 Windows 로그와 복구 상태 파일에 기록함.
+- 재부팅 뒤에는 기존 BootTrigger와 서비스 단위 복구 흐름이 다시 시작되며, GitHub Actions가 외부 health 전환을 판정함.
+
+성공 기준은 Tunnel·Portal 단독 실패에서 재부팅이 발생하지 않고, 허용된 핵심 기반 장애에서만 한 번의 재부팅 요청이 생성되는 것임.
+
 ## 7. 테스트와 검증 기준
 
 | 구분 | 검증 |
@@ -117,6 +140,7 @@ Telegram API 응답의 `ok=true`와 메시지 ID 형식이 검증된 뒤에만 �
 | 독립 운영 검토 | Windows Scheduled Task, WSL user systemd, 외부 monitor, 시크릿 경계, rollback 검토 |
 | 실제 훈련 | Tunnel만 중지한 뒤 자동복구, 외부 health, 장애·복구 Telegram 전환 확인 |
 | 재부팅 검증 | Windows 시작 뒤 WSL 유지·Tunnel·감시 작업·공개 health 확인 |
+| 긴급 재부팅 보호 | Tunnel·Portal 단독 실패에서 재부팅 없음, keepalive·K3s 3회 실패에서만 1회 요청, 20분 유예·6시간 cooldown·취소 명령 확인 |
 
 실제 훈련은 외부 공개 장애를 일시적으로 유발하므로 사용자 승인 아래 수행함. 훈련 중 Tunnel이 예상 시간 안에 복구되지 않으면 즉시 수동으로 사용자 서비스를 시작하고, 추가 자동 변경 없이 원인을 분석함.
 
@@ -129,5 +153,6 @@ Telegram API 응답의 `ok=true`와 메시지 ID 형식이 검증된 뒤에만 �
 3. 외부 `/health`가 정상 전환되고 GitHub Actions가 복구 Telegram을 1회 전송함.
 4. 반복 실패에서 자동 조작이 최대 시도 뒤 중단됨.
 5. Portal 데이터, Secret, PVC, Caddy, Tunnel ingress가 변경되지 않음.
+6. 긴급 재부팅은 keepalive 또는 K3s 3회 복구 실패에서만 1회 허용되고, Tunnel·Portal·NodePort 단독 장애에서는 시작되지 않음.
 
 정전·네트워크 회선 장애·Cloudflare·GitHub·Telegram 사업자 장애와 Telegram 기기 푸시 설정은 본 설계의 자동복구 보장 범위 밖임.
