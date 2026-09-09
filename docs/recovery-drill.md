@@ -12,7 +12,11 @@
 
 ## 핵심 요약
 
-다음 세 단계만 순서대로 실행함. 백업 단계는 `--check` 읽기 점검만 사용하고, Pod 실습은 별도 `sre-recovery-lab-<run-id>` namespace에서 실행함. 실제 Portal 전환·rollback·백업 업로드·운영 데이터 복원은 이 훈련에 포함하지 않음.
+본 문서는 승인된 통제 훈련 절차임. 실제 운영 환경에서 실행하지 않으며, 자동복구·재부팅·Tunnel 중지 동작을 수행하지 않음. 다음 세 단계는 증적 확인과 모의 순서 검토만 수행함.
+
+## Tunnel 장애 모의 순서
+
+실제 Tunnel을 중지하지 않고 아래 승인된 통제 훈련 순서를 확인함. `Tunnel만` 장애를 가정하고 GitHub monitor 장애 확인 → 자동복구 대기 → 외부 health 및 복구 Telegram 확인 → 실패 시 사용자 서비스 수동 시작 절차를 검토함. 수동 rollback 명령은 `systemctl --user start cloudflared-personal-server.service`만 허용함.
 
 ## 사전 조건
 

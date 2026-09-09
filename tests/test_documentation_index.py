@@ -77,6 +77,19 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("Telegram 장애 메시지 전송이 실패하면", uptime)
         self.assertIn("복구 전환 메시지를 보내지 않음", uptime)
 
+    def test_n100_docs_document_reboot_limits_and_tunnel_service_recovery(self):
+        n100 = Path("docs/n100-mt4-setup.md").read_text(encoding="utf-8")
+        tunnel = Path("docs/cloudflare-tunnel.md").read_text(encoding="utf-8")
+        drill = Path("docs/recovery-drill.md").read_text(encoding="utf-8")
+
+        self.assertIn("PersonalServer-EmergencyReboot", n100)
+        self.assertIn("20분", n100)
+        self.assertIn("6시간", n100)
+        self.assertIn("shutdown /a", n100)
+        self.assertIn("Tunnel·Portal·NodePort 단독 장애", n100)
+        self.assertIn("cloudflared-personal-server.service", tunnel)
+        self.assertIn("Tunnel만", drill)
+
     def test_k3s_portal_environment_example_and_observability_prerequisite_are_documented(self):
         k3s = Path("infra/k8s/README.md").read_text(encoding="utf-8")
         operations = Path("docs/operations-reference.md").read_text(encoding="utf-8")
