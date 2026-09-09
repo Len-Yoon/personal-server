@@ -466,9 +466,18 @@ function Invoke-RecoveryCycle {
             } catch {
                 Write-Info "$component targeted recovery failed: $($_.Exception.Message)"
             }
-            if (-not $targetedRecoverySucceeded -and (Test-EmergencyRebootEligible $component)) {
-                if (Request-EmergencyReboot $component) {
-                    return
+            if (-not $targetedRecoverySucceeded) {
+                if ($component -notin @("keepalive", "k3s")) {
+                    continue
+                }
+                $finalHealth = Get-RecoveryHealth
+                if ($finalHealth[$component] -ne "unhealthy") {
+                    continue
+                }
+                if (Test-EmergencyRebootEligible $component) {
+                    if (Request-EmergencyReboot $component) {
+                        return
+                    }
                 }
             }
         }
@@ -535,8 +544,6 @@ function Request-EmergencyReboot([string]$Component) {
         Write-Info "Emergency reboot blocked because its scheduled task is unavailable."
         return $false
     }
-    $previousEmergencyRebootLastAt = $EmergencyRebootLastAt
-    $previousEmergencyRebootCauseComponent = $EmergencyRebootCauseComponent
     $script:EmergencyRebootLastAt = (Get-Date).ToUniversalTime().ToString("o")
     $script:EmergencyRebootCauseComponent = $Component
     if (-not (Save-RecoveryFailureState)) {
@@ -548,10 +555,7 @@ function Request-EmergencyReboot([string]$Component) {
     try {
         Start-ScheduledTask -TaskName $EmergencyRebootTaskName
     } catch {
-        $script:EmergencyRebootLastAt = $previousEmergencyRebootLastAt
-        $script:EmergencyRebootCauseComponent = $previousEmergencyRebootCauseComponent
-        [void](Save-RecoveryFailureState)
-        Write-Info "Emergency reboot blocked because its scheduled task could not start."
+        Write-Info "Emergency reboot request was persisted but its scheduled task could not start."
         return $false
     }
     Write-Info "Emergency reboot requested after exhausted $Component recovery attempts."

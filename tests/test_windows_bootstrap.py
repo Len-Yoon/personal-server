@@ -11,6 +11,30 @@ WSL_SCRIPT = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf
 
 
 class WindowsBootstrapTests(unittest.TestCase):
+    def test_failed_emergency_task_start_keeps_persisted_audit_and_cooldown_evidence(self):
+        request = SCRIPT[
+            SCRIPT.index("function Request-EmergencyReboot")
+            : SCRIPT.index("function Set-RecoveryTaskSettings")
+        ]
+
+        start_index = request.index("Start-ScheduledTask -TaskName $EmergencyRebootTaskName")
+        failed_start = request[request.index("catch {", start_index) :]
+        self.assertIn("Emergency reboot request was persisted but its scheduled task could not start.", failed_start)
+        self.assertNotIn("$script:EmergencyRebootLastAt = $previousEmergencyRebootLastAt", failed_start)
+        self.assertNotIn("$script:EmergencyRebootCauseComponent = $previousEmergencyRebootCauseComponent", failed_start)
+
+    def test_failed_target_action_escalates_only_after_final_core_health_check(self):
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle")
+            : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+
+        failed_action = cycle[cycle.index("if (-not $targetedRecoverySucceeded)") :]
+        self.assertIn("$finalHealth = Get-RecoveryHealth", failed_action)
+        self.assertIn('if ($finalHealth[$component] -ne "unhealthy")', failed_action)
+        self.assertLess(failed_action.index("$finalHealth = Get-RecoveryHealth"), failed_action.index("Test-EmergencyRebootEligible $component"))
+        self.assertLess(failed_action.index('if ($finalHealth[$component] -ne "unhealthy")'), failed_action.index("Test-EmergencyRebootEligible $component"))
+
     def test_invalid_persisted_state_marks_recovery_dirty_before_any_recovery_save(self):
         invalid_state = SCRIPT[
             SCRIPT.index("function Set-RecoveryStateInvalid")
@@ -66,7 +90,7 @@ class WindowsBootstrapTests(unittest.TestCase):
         catch_body = loader[loader.rindex("catch {") :]
         self.assertIn("Set-RecoveryStateInvalid", catch_body)
 
-    def test_emergency_reboot_task_is_installed_and_failed_start_restores_cooldown_state(self):
+    def test_emergency_reboot_task_is_installed_and_failed_start_keeps_cooldown_state(self):
         installer = SCRIPT[
             SCRIPT.index("function Install-ScheduledTask")
             : SCRIPT.index("\nLoad-RecoveryFailureState")
@@ -78,13 +102,11 @@ class WindowsBootstrapTests(unittest.TestCase):
 
         self.assertIn("Install-EmergencyRebootTask", installer)
         self.assertIn("Get-ScheduledTask -TaskName $EmergencyRebootTaskName -ErrorAction Stop", request)
-        self.assertIn("$previousEmergencyRebootLastAt", request)
-        self.assertIn("$previousEmergencyRebootCauseComponent", request)
         self.assertIn("Start-ScheduledTask -TaskName $EmergencyRebootTaskName", request)
         start_index = request.index("Start-ScheduledTask -TaskName $EmergencyRebootTaskName")
         failed_start = request[request.index("catch {", start_index) :]
-        self.assertIn("$script:EmergencyRebootLastAt = $previousEmergencyRebootLastAt", failed_start)
-        self.assertIn("Save-RecoveryFailureState", failed_start)
+        self.assertIn("Emergency reboot request was persisted but its scheduled task could not start.", failed_start)
+        self.assertNotIn("$previousEmergencyRebootLastAt", failed_start)
 
     def test_core_targeted_recovery_rechecks_health_before_emergency_escalation(self):
         targeted = SCRIPT[
@@ -101,7 +123,7 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn('$health.k3s -eq "healthy"', targeted)
         self.assertIn("$attemptCount -ne $RecoveryMaxAttempts", SCRIPT)
         self.assertLess(cycle.index("Invoke-TargetedRecovery $component"), cycle.index("Test-EmergencyRebootEligible $component"))
-        self.assertIn("if (Request-EmergencyReboot $component) {\n                    return", cycle)
+        self.assertIn("if (Request-EmergencyReboot $component)", cycle)
 
     def test_invalid_persisted_emergency_reboot_timestamp_blocks_reboot_without_erasing_it(self):
         loader = SCRIPT[
