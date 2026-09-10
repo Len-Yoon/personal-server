@@ -33,7 +33,7 @@
 | P1 | 공개 감시 범위 검토 | 기존 GitHub Actions workflow와 실제 공개 health endpoint의 일치 여부를 검토함 | 감시 대상·간격·알림 전환 기준이 문서와 일치함 |
 | P2 | 작업 증적 정리 | 변경 경로, 검사 결과, 토큰 측정 기록을 로컬 증적으로 관리함 | 검증 결과가 작업별로 재현 가능함 |
 | P2 | 운영 문서 정기 검토 | 분기별로 서비스 경로·운영 경계·복구 절차를 실제 구성과 대조함 | 폐기된 절차와 확인 필요 항목이 분리됨 |
-| P3 | Dependabot 업데이트 정책 검토(예정) | Dependabot 도입 필요성과 업데이트 검토 주기를 별도 검토함 | 운영 승인 후 정책을 확정하고 문서화함 |
+| P3 | Dependabot 자동 PR 구성(완료) | GitHub Actions 루트 및 book-memo, car-care-worker, crawler-worker, homeops-executor, portal-web, sre-telegram-relay, system-agent, youtube-memo Docker 디렉터리를 매주 월요일 점검하여 자동 PR만 생성함. Caddy는 제외함 | 자동 병합·자동 배포·Secret 사용 없음 |
 
 ## 검토 결과
 
