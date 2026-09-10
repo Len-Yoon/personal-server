@@ -23,9 +23,15 @@ def find_update_entries(content: str) -> list[str]:
     header = TOP_LEVEL_UPDATES_HEADER.search(content)
     if header is None:
         return []
+    updates_block = re.match(
+        r"(?ms).*?(?=^[^\s][^:\n]*:\s*(?:#.*)?$|\Z)",
+        content[header.end() :],
+    )
+    if updates_block is None:
+        return []
     return re.findall(
         r"(?ms)^  - package-ecosystem: [^\n]+.*?(?=^  - package-ecosystem:|\Z)",
-        content[header.end() :],
+        updates_block.group(0),
     )
 
 
@@ -78,6 +84,29 @@ class DependabotConfigContractTests(unittest.TestCase):
         )
 
         self.assertEqual(find_update_entries(broken_content), [])
+
+    def test_ignores_indented_entries_under_metadata_inside_updates(self):
+        """Fails if entries nested under metadata are accepted as direct Dependabot updates."""
+        broken_content = (
+            'version: 2\nupdates:\nmetadata:\n'
+            '  - package-ecosystem: "github-actions"\n'
+        )
+
+        self.assertEqual(find_update_entries(broken_content), [])
+
+    def test_stops_reading_updates_at_the_next_top_level_key(self):
+        """Fails if an entry under later top-level metadata is counted as a Dependabot update."""
+        content = (
+            'version: 2\nupdates:\n'
+            '  - package-ecosystem: "github-actions"\n'
+            'metadata:\n'
+            '  - package-ecosystem: "docker"\n'
+        )
+
+        self.assertEqual(
+            find_update_entries(content),
+            ['  - package-ecosystem: "github-actions"\n'],
+        )
 
 
 if __name__ == "__main__":
