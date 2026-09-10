@@ -13,6 +13,9 @@ EXPECTED_WORKFLOW_ACTIONS = {
     "actions/github-script": ("f28e40c7f34bde8b3046d885e986cb6290c5673b", "v7"),
 }
 USES_LINE_PATTERN = re.compile(r"^\s*(?:-\s+)?uses:\s*(?P<value>.*?)\s*$")
+NONCANONICAL_USES_KEY_PATTERN = re.compile(
+    r"^\s*(?:-\s+)?(?:[\"']uses[\"']\s*:.*|uses\s+:.*|\?\s*(?:uses|[\"']uses[\"'])(?:\s*:.*)?)$"
+)
 ONE_LINE_USES_SCALAR_PATTERN = re.compile(
     r"(?P<quote>['\"]?)(?P<reference>[^\s#'\"]+)(?P=quote)"
     r"\s*(?:#\s*(?P<version>v\d+))?"
@@ -39,6 +42,11 @@ def _workflow_action_references(workflow_dir: Path) -> list[tuple[Path, str, str
         for line_number, line in enumerate(
             workflow_path.read_text(encoding="utf-8").splitlines(), start=1
         ):
+            if NONCANONICAL_USES_KEY_PATTERN.fullmatch(line):
+                raise AssertionError(
+                    f"{workflow_path}:{line_number}: uses key must be the unquoted exact uses: key"
+                )
+
             uses_line = USES_LINE_PATTERN.fullmatch(line)
             if uses_line is None:
                 continue
@@ -249,6 +257,28 @@ class ComposeConfigTests(unittest.TestCase):
                 )
 
                 with self.assertRaisesRegex(AssertionError, "one-line scalar"):
+                    _workflow_action_references(Path(temporary_directory))
+
+    def test_workflow_action_reference_extractor_rejects_noncanonical_uses_keys(self):
+        invalid_uses_keys = {
+            "double-quoted-key": '"uses": actions/checkout@v4\n',
+            "single-quoted-key": "'uses': actions/checkout@v4\n",
+            "space-before-colon": "uses : actions/checkout@v4\n",
+            "explicit-key": "? uses\n        : actions/checkout@v4\n",
+        }
+
+        for label, uses_key in invalid_uses_keys.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary_directory:
+                workflow_path = Path(temporary_directory) / f"{label}.yaml"
+                workflow_path.write_text(
+                    "jobs:\n"
+                    "  check:\n"
+                    "    steps:\n"
+                    f"      - {uses_key}",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(AssertionError, "unquoted exact uses"):
                     _workflow_action_references(Path(temporary_directory))
 
     def test_ci_collects_and_enforces_agent_loop_evidence(self):
