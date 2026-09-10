@@ -217,6 +217,9 @@ function Send-TunnelTelegramNotification([string]$Transition) {
 }
 
 function Update-TunnelTelegramNotification([string]$TunnelHealth) {
+    if ($TunnelHealth -eq "deferred") {
+        return
+    }
     if ($TunnelHealth -eq "healthy") {
         if (-not $TunnelAlertDownNotified) {
             return
@@ -247,10 +250,19 @@ function Test-CloudflareTunnelService {
     ) -Operation "Cloudflare Tunnel service probe")
 }
 
-function Start-CloudflareTunnel {
+function Test-PublicPortalHealth {
+    return (Invoke-WslWithTimeout -Arguments @(
+        "-d", $WslDistribution, "--",
+        "curl", "--fail", "--silent", "--show-error", "--max-time", "15", "https://len.pe.kr/health"
+    ) -Operation "Public Portal health probe")
+}
+
+function Start-CloudflareTunnel([switch]$ForceRestart) {
     if (Test-CloudflareTunnelService) {
         if (Test-CloudflareTunnelRunning) {
-            return $false
+            if (-not $ForceRestart) {
+                return $false
+            }
         }
         if (-not (Invoke-WslWithTimeout -Arguments @(
             "-d", $WslDistribution, "-u", $WslServiceUser, "--",
@@ -317,7 +329,7 @@ function Get-RecoveryHealth {
         k3s = "unhealthy"
         portal = "deferred"
         nodeport = "unhealthy"
-        tunnel = "unhealthy"
+        tunnel = "deferred"
     }
 
     $keepAliveTask = Get-ScheduledTask -TaskName "PersonalServer-WSL-KeepAlive" -ErrorAction SilentlyContinue
@@ -342,8 +354,11 @@ function Get-RecoveryHealth {
         $health.nodeport = "healthy"
     }
 
-    if ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning)) {
-        $health.tunnel = "healthy"
+    if ($health.nodeport -eq "healthy") {
+        $health.tunnel = "unhealthy"
+        if ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning) -and (Test-PublicPortalHealth)) {
+            $health.tunnel = "healthy"
+        }
     }
 
     return $health
@@ -525,7 +540,7 @@ function Test-RecoveryActionNeeded([string]$Component) {
             return $false
         }
         "tunnel" {
-            return ((-not (Test-CloudflareTunnelService)) -or (-not (Test-CloudflareTunnelRunning)))
+            return $true
         }
     }
     return $false
@@ -555,7 +570,7 @@ function Invoke-TargetedRecovery([string]$Component) {
             return $false
         }
         "tunnel" {
-            return (Start-CloudflareTunnel)
+            return (Start-CloudflareTunnel -ForceRestart)
         }
     }
     return $false
@@ -613,7 +628,7 @@ function Invoke-RecoveryCycle {
                 continue
             }
             if ($health[$component] -eq "deferred") {
-                Write-Info "$component health is deferred until K3s is healthy."
+                Write-Info "$component recovery is deferred because a required local dependency is not healthy."
                 continue
             }
 
@@ -882,7 +897,11 @@ function Start-Supervisor {
     }
 
     try {
-        Update-HostMetrics
+        try {
+            Update-HostMetrics
+        } catch {
+            Write-Info "Initial host metrics update failed; continuing startup."
+        }
         Write-Info "Waiting 120 seconds for WSL and Docker after logon."
         Start-Sleep -Seconds 120
         try {

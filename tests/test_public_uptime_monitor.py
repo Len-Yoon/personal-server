@@ -77,6 +77,29 @@ class PublicUptimeMonitorTests(unittest.TestCase):
         self.assertIn("state: \"closed\"", workflow)
         self.assertNotIn("TELEGRAM_CHAT_ID: ${{ steps.telegram.outputs", workflow)
 
+    def test_health_and_incident_lifecycle_do_not_exit_early_when_telegram_secrets_are_missing(self):
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+        self.assertNotIn("name: Check notification secrets", workflow)
+        health_start = workflow.index("- id: health")
+        telegram_start = workflow.index("- id: telegram")
+        self.assertLess(health_start, telegram_start)
+        telegram_step = workflow[telegram_start:]
+        self.assertIn('if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then', telegram_step)
+        self.assertIn("Telegram notification secrets are not configured; skipping delivery.", telegram_step)
+
+    def test_recovery_closes_an_unnotified_incident_with_safe_evidence(self):
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+        branch_start = workflow.index(
+            'if (state === "success" && incident && !(incident.body || "").includes(downSentMarker)) {'
+        )
+        branch_end = workflow.index("- id: telegram", branch_start)
+        unnotified_recovery_branch = workflow[branch_start:branch_end]
+        self.assertIn("github.rest.issues.update", unnotified_recovery_branch)
+        self.assertIn("알림 미전송", unnotified_recovery_branch)
+        self.assertIn('state: "closed"', unnotified_recovery_branch)
+
     def test_ci_runs_the_uptime_monitor_contract(self):
         ci_workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
 

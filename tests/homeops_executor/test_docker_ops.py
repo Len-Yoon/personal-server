@@ -265,7 +265,7 @@ class DockerOpsTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), diagnostics)
 
-    def test_executor_accepts_admin_password_as_internal_secret_fallback(self):
+    def test_executor_rejects_admin_password_when_shared_secret_is_missing(self):
         from fastapi.testclient import TestClient
         from app.main import app
 
@@ -275,14 +275,18 @@ class DockerOpsTests(unittest.TestCase):
             {"HOMEOPS_EXECUTOR_SHARED_SECRET": "", "ADMIN_STATUS_PASSWORD": "admin-secret"},
             clear=False,
         ):
-            with patch("app.main.docker_ops.collect_all_diagnostics", return_value=diagnostics):
+            with patch(
+                "app.main.docker_ops.collect_all_diagnostics",
+                return_value=diagnostics,
+            ) as collect_all_diagnostics:
                 response = TestClient(app).get(
                     "/v1/diagnostics",
                     headers={"X-HomeOps-Executor-Secret": "admin-secret"},
                 )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), diagnostics)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json(), {"detail": "executor_access_denied"})
+        collect_all_diagnostics.assert_not_called()
 
     def test_executor_rejects_restart_all_without_shared_secret(self):
         from fastapi.testclient import TestClient

@@ -262,7 +262,7 @@ class HomeOpsTests(unittest.TestCase):
             ],
         )
 
-    def test_executor_client_uses_admin_password_as_internal_secret_fallback(self):
+    def test_executor_client_rejects_admin_password_when_shared_secret_is_missing(self):
         from app.services.homeops import ExecutorClient
 
         with patch.dict(
@@ -270,7 +270,13 @@ class HomeOpsTests(unittest.TestCase):
             {"HOMEOPS_EXECUTOR_SHARED_SECRET": "", "ADMIN_STATUS_PASSWORD": "admin-secret"},
             clear=False,
         ):
-            self.assertEqual(ExecutorClient().secret, "admin-secret")
+            client = ExecutorClient()
+            with patch("app.services.homeops.urlopen") as urlopen:
+                with self.assertRaisesRegex(OSError, "homeops_executor_shared_secret_not_configured"):
+                    client.all_diagnostics()
+
+        self.assertEqual(client.secret, "")
+        urlopen.assert_not_called()
 
     def test_latest_summary_replaces_the_previous_singleton_record(self):
         first = [{"service": "crawler-worker", "container": {"status": "running", "health": "healthy"}, "logs": []}]

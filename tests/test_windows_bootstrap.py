@@ -716,6 +716,103 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn(expected_probe, tunnel)
         self.assertIn("Test-CloudflareTunnelRunning", health)
 
+    def test_public_portal_health_probe_uses_a_bounded_wsl_curl_request(self):
+        """A missing or unbounded public probe cannot detect an active disconnected Tunnel."""
+        public_health = SCRIPT[
+            SCRIPT.index("function Test-CloudflareTunnelRunning")
+            : SCRIPT.index("function Get-RecoveryHealth")
+        ]
+
+        self.assertIn("function Test-PublicPortalHealth", public_health)
+        self.assertIn("Invoke-WslWithTimeout", public_health)
+        self.assertIn(
+            '"curl", "--fail", "--silent", "--show-error", "--max-time", "15", "https://len.pe.kr/health"',
+            public_health,
+        )
+        self.assertIn(' -Operation "Public Portal health probe"', public_health)
+
+    def test_tunnel_health_requires_nodeport_and_public_health_after_local_tunnel_checks(self):
+        """A healthy service/process alone must not hide a disconnected public Tunnel."""
+        health = SCRIPT[
+            SCRIPT.index("function Get-RecoveryHealth") : SCRIPT.index("function Save-RecoveryFailureState")
+        ]
+        nodeport_gate = 'if ($health.nodeport -eq "healthy") {'
+        tunnel_condition = (
+            'if ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning) '
+            '-and (Test-PublicPortalHealth)) {'
+        )
+
+        self.assertIn(nodeport_gate, health)
+        self.assertIn(tunnel_condition, health)
+        self.assertIn('$health.tunnel = "healthy"', health)
+        self.assertLess(health.index('$health.nodeport = "healthy"'), health.index(nodeport_gate))
+        self.assertLess(health.index(nodeport_gate), health.index(tunnel_condition))
+
+    def test_nodeport_failure_defers_tunnel_without_alert_or_recovery_action(self):
+        """A local NodePort fault must not consume the Tunnel alert or restart budget."""
+        health = SCRIPT[
+            SCRIPT.index("function Get-RecoveryHealth") : SCRIPT.index("function Save-RecoveryFailureState")
+        ]
+        notifier = SCRIPT[
+            SCRIPT.index("function Update-TunnelTelegramNotification")
+            : SCRIPT.index("function Test-CloudflareTunnelRunning")
+        ]
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle") : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+        nodeport_gate = 'if ($health.nodeport -eq "healthy") {'
+
+        self.assertIn('tunnel = "deferred"', health)
+        self.assertIn(nodeport_gate, health)
+        self.assertLess(health.index(nodeport_gate), health.index('$health.tunnel = "unhealthy"'))
+        self.assertIn('if ($TunnelHealth -eq "deferred") {', notifier)
+        self.assertLess(notifier.index('if ($TunnelHealth -eq "deferred") {'), notifier.index('if ($TunnelHealth -eq "healthy") {'))
+        self.assertLess(cycle.index('if ($health[$component] -eq "deferred")'), cycle.index("Register-RecoveryFailure $component"))
+        self.assertLess(cycle.index('if ($health[$component] -eq "deferred")'), cycle.index("Invoke-TargetedRecovery $component"))
+
+    def test_public_only_tunnel_failure_uses_existing_threshold_then_forces_restart(self):
+        """A disconnected public path must take the same bounded Tunnel restart path as a local failure."""
+        action_needed = SCRIPT[
+            SCRIPT.index("function Test-RecoveryActionNeeded") : SCRIPT.index("function Invoke-TargetedRecovery")
+        ]
+        targeted = SCRIPT[
+            SCRIPT.index("function Invoke-TargetedRecovery") : SCRIPT.index("function Enter-RecoveryLock")
+        ]
+        start_tunnel = SCRIPT[
+            SCRIPT.index("function Start-CloudflareTunnel") : SCRIPT.index("function Update-HostMetrics")
+        ]
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle") : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+
+        self.assertIn('"tunnel" {\n            return $true', action_needed)
+        self.assertIn('return (Start-CloudflareTunnel -ForceRestart)', targeted)
+        self.assertIn('function Start-CloudflareTunnel([switch]$ForceRestart)', start_tunnel)
+        self.assertIn('if (-not $ForceRestart) {', start_tunnel)
+        self.assertIn("Cloudflare Tunnel service restart", start_tunnel)
+        self.assertLess(cycle.index("Register-RecoveryFailure $component"), cycle.index("Test-RecoveryActionNeeded $component"))
+        self.assertLess(cycle.index("Test-RecoveryActionNeeded $component"), cycle.index("Register-RecoveryAttempt $component"))
+        self.assertIn("$RecoveryFailureThreshold = 2", SCRIPT)
+        self.assertIn("$RecoveryMaxAttempts = 3", SCRIPT)
+
+    def test_supervisor_continues_startup_when_initial_host_metrics_update_fails(self):
+        """Telemetry failure must not suppress boot delay, bootstrap, or Daemon supervision."""
+        supervisor = SCRIPT[
+            SCRIPT.index("function Start-Supervisor") : SCRIPT.index("function Enter-DaemonLock")
+        ]
+        metrics_isolation = (
+            'try {\n'
+            '            Update-HostMetrics\n'
+            '        } catch {\n'
+            '            Write-Info "Initial host metrics update failed; continuing startup."\n'
+            '        }'
+        )
+
+        self.assertIn(metrics_isolation, supervisor)
+        self.assertLess(supervisor.index(metrics_isolation), supervisor.index("Waiting 120 seconds for WSL and Docker after logon."))
+        self.assertLess(supervisor.index("Waiting 120 seconds for WSL and Docker after logon."), supervisor.index("Start-PersonalServerStack"))
+        self.assertLess(supervisor.index("Start-PersonalServerStack"), supervisor.index("Start-Process"))
+
     def test_bootstrap_suppresses_tunnel_recovery_boolean_result(self):
         startup = SCRIPT[SCRIPT.index("function Start-PersonalServerStack") : SCRIPT.index("function Get-RecoveryHealth")]
         self.assertIn("[void](Start-CloudflareTunnel)", startup)

@@ -13,13 +13,13 @@ N100의 로컬 감시기와 GitHub Actions가 상호 보완적으로 장애·복
 
 점검이 실패한 동안에는 같은 장애 메시지를 반복 전송하지 않음. GitHub 저장소에 열린 `[SRE] len.pe.kr 공개 상태 장애` 이슈와, Telegram 장애 메시지 전송이 성공했음을 표시하는 기록으로 상태를 보관하며 정상 복구 시 해당 이슈를 닫음.
 
-Telegram 장애 메시지 전송이 실패하면 다음 실패 점검에서 장애 메시지 전송을 다시 시도함. 이 경우에는 성공 기록이 남기 전까지 복구 전환 메시지를 보내지 않음. 따라서 장애 알림이 수신됐는지와 이후 정상 점검이 모두 확인되어야 복구 알림이 발송됨.
+Telegram Secret이 누락되었거나 Telegram 장애 메시지 전송이 실패하면 GitHub Actions는 외부 health 점검과 장애 Issue 상태 처리를 계속함. 전송이 가능한 다음 실패 점검에서 장애 메시지 전송을 다시 시도함. 성공 기록이 남기 전까지 복구 전환 메시지를 보내지 않음. 알림 전송 증적이 없는 Issue가 정상 전환을 맞으면 복구 Telegram을 보내지 않고 `알림 미전송` 증적을 남긴 뒤 종료함. 따라서 장애 알림이 수신됐는지와 이후 정상 점검이 모두 확인되어야 복구 알림이 발송됨.
 
 ### N100 직접 Tunnel 알림
 
 N100 감시기는 `cloudflared-personal-server.service`의 상태와 Tunnel 프로세스를 주기적으로 확인함. Tunnel 장애를 처음 확인하면 `[개인서버 장애]` 메시지를 1회 전송하고, 기존 임계치에 따라 로컬 복구를 시도함. 이후 Tunnel 서비스와 프로세스가 정상으로 돌아오면 `[개인서버 복구]` 메시지를 1회 전송함.
 
-Windows 예약 작업은 Supervisor를 하나만 실행하며, Supervisor는 초기 120초 대기 뒤 3분 주기 Daemon을 자식으로 관리함. Daemon이 비정상 종료되면 15초 뒤 재기동하고, Supervisor·Daemon 잠금으로 중복 실행을 막음. 이 구조는 Tunnel 감시가 Daemon 종료만으로 멈추지 않게 하는 보완 경로이며, N100 전원·네트워크·WSL 또는 Windows 작업 스케줄러 자체가 동작하지 않는 경우는 복구·직접 알림 범위 밖임.
+Windows 예약 작업은 Supervisor를 하나만 실행하며, Supervisor는 초기 120초 대기 뒤 3분 주기 Daemon을 자식으로 관리함. Daemon이 비정상 종료되면 15초 뒤 재기동하고, Supervisor·Daemon 잠금으로 중복 실행을 막음. N100 Tunnel은 로컬 NodePort·서비스·프로세스·공개 health가 모두 정상일 때만 정상으로 판정하며, NodePort 장애는 Tunnel 알림·재기동 대상에서 제외함. 이 구조는 Tunnel 감시가 Daemon 종료나 active-but-disconnected 상태에서 멈추지 않게 하는 보완 경로이며, N100 전원·네트워크·WSL 또는 Windows 작업 스케줄러 자체가 동작하지 않는 경우는 복구·직접 알림 범위 밖임.
 
 N100 알림 자격증명은 `window` 사용자 계정의 Windows Credential Manager에서 `personal-server-tunnel-telegram` 대상을 읽음. 일반 자격 증명의 사용자 이름에는 Telegram Chat ID를, 암호에는 Bot token을 입력함. 실제 값은 명령 출력·문서·로그에 표시하지 않음.
 

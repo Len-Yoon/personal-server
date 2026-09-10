@@ -50,11 +50,13 @@ Grafana, Prometheus, Telegram relay, Portal PVC 백업은 [K3s 운영 문서](..
 | Compose 컨테이너 이상 | HomeOps 진단·제한형 복구 | 관리자 상태·필요 시 Telegram |
 | 뉴스 수집 지연·연속 실패 | Prometheus `NewsCollectionStale` | SRE relay → Telegram |
 
-N100 자동복구는 Windows 시작 시 Supervisor를 하나만 실행하고, 초기 120초 뒤 Daemon을 하나만 시작함. Daemon이 비정상 종료되면 Supervisor가 15초 뒤 재기동하며, 60초 안에 3회 연속 종료되면 60초 backoff를 적용함. 같은 구성요소가 2회 연속 비정상일 때만 승인된 제한 복구를 시도하고, 구성요소별 시도 횟수를 최대 3회로 제한함. 상태 기록을 저장하지 못하면 중복·무한 복구를 막기 위해 추가 복구를 중단함. K3s가 이미 실행 중이면 재시작하지 않으며, Portal PVC·Secret·운영 데이터·Caddy·Tunnel ingress는 수정하지 않음.
+N100 자동복구는 Windows 시작 시 Supervisor를 하나만 실행하고, 초기 120초 뒤 Daemon을 하나만 시작함. Daemon이 비정상 종료되면 Supervisor가 15초 뒤 재기동하며, 60초 안에 3회 연속 종료되면 60초 backoff를 적용함. Tunnel은 NodePort·서비스·프로세스·공개 health를 함께 확인하고, NodePort 장애는 Tunnel 알림·복구로 오분류하지 않음. 같은 구성요소가 2회 연속 비정상일 때만 승인된 제한 복구를 시도하고, 구성요소별 시도 횟수를 최대 3회로 제한함. Supervisor의 host metrics 기록 실패는 감시 기동을 막지 않지만, 상태 기록을 저장하지 못하면 중복·무한 복구를 막기 위해 추가 복구를 중단함. K3s가 이미 실행 중이면 재시작하지 않으며, Portal PVC·Secret·운영 데이터·Caddy·Tunnel ingress는 수정하지 않음.
 
 N100 감시기는 Tunnel 장애의 최초 전환에 직접 Telegram 장애 알림을 1회 시도함. 전송이 성공한 상태에서만 정상 복구 전환을 Telegram으로 1회 알리며, 전송 실패 시 다음 점검에서 장애 알림을 재시도함. GitHub Actions의 외부 점검은 독립 보완 경로이므로 같은 장애에 대한 Telegram 알림은 중복될 수 있음. N100 전원·네트워크·WSL 자체가 동작하지 않는 경우에는 N100 감시·직접 알림·자동복구를 보장할 수 없음. Telegram 자격 증명은 Windows 자격 증명 관리자에만 보관하며 문서·로그·상태 파일에는 기록하지 않음.
 
 공개 상태 Telegram 알림의 Secret 설정과 수동 점검은 [공개 상태 Telegram 알림](public-uptime-monitor.md)을 따름.
+
+HomeOps 실행기는 Docker socket을 제한된 allowlist 진단·재시작에만 사용함. Portal 관리자 비밀번호는 실행기 통신에 재사용하지 않으며, 운영자가 사전 설정한 `HOMEOPS_EXECUTOR_SHARED_SECRET`이 비어 있으면 Portal과 실행기 모두 HomeOps 요청을 fail-closed 처리함. 값은 Git·문서·로그·상태 파일에 기록하지 않음.
 
 ## 운영 경계
 

@@ -17,18 +17,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Check notification secrets
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.UPTIME_TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.UPTIME_TELEGRAM_CHAT_ID }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
-            printf '%s\n' 'Required GitHub Secrets for uptime Telegram notifications are not configured.' >&2
-            exit 1
-          fi
-
       - id: health
         name: Check public Portal health
         continue-on-error: true
@@ -76,6 +64,19 @@ jobs:
               core.setOutput('issue_number', String(incident.number));
             }
 
+            if (state === "success" && incident && !(incident.body || "").includes(downSentMarker)) {
+              const currentBody = incident.body || "";
+              const evidence = "알림 미전송: 다운 상태 Telegram 전송 증적이 없어 복구 알림을 생략함";
+              const body = currentBody.includes(evidence) ? currentBody : `${currentBody}\n${evidence}`;
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: incident.number,
+                body,
+                state: "closed",
+              });
+            }
+
       - id: telegram
         name: Send Telegram status transition
         if: steps.incident.outputs.notification != ''
@@ -86,6 +87,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
+            printf '%s\n' 'Telegram notification secrets are not configured; skipping delivery.' >&2
+            printf 'skipped=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           telegram_response="$(mktemp)"
           trap 'rm -f "$telegram_response"' EXIT
           case "$NOTIFICATION" in

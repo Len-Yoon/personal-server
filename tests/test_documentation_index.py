@@ -57,6 +57,8 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("crawler-worker", content)
         self.assertIn("공개 상태 Telegram 알림", content)
         self.assertIn("personal-server-autostart", content)
+        self.assertIn("HOMEOPS_EXECUTOR_SHARED_SECRET", content)
+        self.assertIn("fail-closed", content)
 
     def test_public_route_docs_distinguish_the_car_callback_route_from_caddy(self):
         tunnel = Path("docs/cloudflare-tunnel.md").read_text(encoding="utf-8")
@@ -80,9 +82,12 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("Daemon", n100)
         self.assertIn("120초", n100)
         self.assertIn("15초", n100)
+        self.assertIn("공개 `https://len.pe.kr/health`", n100)
+        self.assertIn("NodePort가 비정상이면 Tunnel 상태는 보류", n100)
         self.assertIn("Telegram 장애 메시지 전송이 실패하면", uptime)
         self.assertIn("복구 전환 메시지를 보내지 않음", uptime)
         self.assertIn("Supervisor", uptime)
+        self.assertIn("알림 미전송", uptime)
 
     def test_n100_docs_document_reboot_limits_and_tunnel_service_recovery(self):
         n100 = Path("docs/n100-mt4-setup.md").read_text(encoding="utf-8")

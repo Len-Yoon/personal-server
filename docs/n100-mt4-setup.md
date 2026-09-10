@@ -38,7 +38,7 @@ wsl -l -v
 | NodePort | 상태 확인만 수행. 자동 재시작 금지 |
 | Cloudflare Tunnel | 사용자 서비스 시작·재시작 허용. 호스트 긴급 재부팅은 금지 |
 
-복구 시도 횟수는 상태 파일로 보존함. 상태를 저장하지 못하면 중복·무한 복구를 방지하기 위해 이후 복구를 중단함. Portal PVC·Secret·운영 데이터·Caddy 설정·Tunnel ingress는 자동복구 대상이 아님. Tunnel 장애 알림을 1회 전송하는 데 성공한 경우에만 자동복구 작업은 이후 정상 전환에서 복구 알림을 1회 보냄. 장애 알림 전송이 실패하면 다음 점검에서 장애 알림을 재시도함. 자격증명은 `window` 계정의 Windows Credential Manager 일반 자격 증명에서만 읽으며 값은 로그·상태 파일·문서에 기록하지 않음. GitHub Actions 외부 health 점검은 독립 보완 경로이므로 같은 장애에서 메시지가 중복될 수 있음.
+Tunnel은 로컬 NodePort·`cloudflared` 서비스·Tunnel 프로세스·공개 `https://len.pe.kr/health`가 모두 정상일 때만 정상으로 판정함. NodePort가 비정상이면 Tunnel 상태는 보류하며 Tunnel Telegram 알림·재기동을 하지 않음. 반대로 로컬 상태는 정상인데 공개 health만 실패하면 기존 2회 연속 실패 기준 뒤 Tunnel 사용자 서비스를 강제 재기동함. 복구 시도 횟수는 상태 파일로 보존함. 상태를 저장하지 못하면 중복·무한 복구를 방지하기 위해 이후 복구를 중단함. Supervisor 초기 host metrics 기록 실패는 감시 기동을 막지 않음. Portal PVC·Secret·운영 데이터·Caddy 설정·Tunnel ingress는 자동복구 대상이 아님. Tunnel 장애 알림을 1회 전송하는 데 성공한 경우에만 자동복구 작업은 이후 정상 전환에서 복구 알림을 1회 보냄. 장애 알림 전송이 실패하면 다음 점검에서 장애 알림을 재시도함. 자격증명은 `window` 계정의 Windows Credential Manager 일반 자격 증명에서만 읽으며 값은 로그·상태 파일·문서에 기록하지 않음. GitHub Actions 외부 health 점검은 독립 보완 경로이므로 같은 장애에서 메시지가 중복될 수 있음.
 
 ## 긴급 재부팅 발동·취소 기준
 
