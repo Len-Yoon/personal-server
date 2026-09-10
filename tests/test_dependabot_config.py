@@ -15,6 +15,18 @@ EXPECTED_DOCKER_DIRECTORIES = {
     "/system-agent",
     "/youtube-memo",
 }
+TOP_LEVEL_UPDATES_HEADER = re.compile(r"(?m)^version: 2\nupdates:\n")
+
+
+def find_update_entries(content: str) -> list[str]:
+    """Return Dependabot entries only when they follow the required top-level header."""
+    header = TOP_LEVEL_UPDATES_HEADER.search(content)
+    if header is None:
+        return []
+    return re.findall(
+        r"(?ms)^  - package-ecosystem: [^\n]+.*?(?=^  - package-ecosystem:|\Z)",
+        content[header.end() :],
+    )
 
 
 class DependabotConfigContractTests(unittest.TestCase):
@@ -24,10 +36,8 @@ class DependabotConfigContractTests(unittest.TestCase):
         content = CONFIG_PATH.read_text(encoding="utf-8")
 
         self.assertRegex(content, r"(?m)^version: 2$")
-        entries = re.findall(
-            r"(?ms)^  - package-ecosystem: [^\n]+.*?(?=^  - package-ecosystem:|\Z)",
-            content,
-        )
+        self.assertRegex(content, TOP_LEVEL_UPDATES_HEADER)
+        entries = find_update_entries(content)
         self.assertEqual(len(entries), 9)
 
         package_directories = []
@@ -59,6 +69,15 @@ class DependabotConfigContractTests(unittest.TestCase):
         self.assertNotIn("caddy", lowered)
         for forbidden_command in ("auto-merge", "automerge", "gh pr merge", "deploy"):
             self.assertNotIn(forbidden_command, lowered)
+
+    def test_ignores_entries_when_updates_is_not_directly_after_version(self):
+        """Fails if a non-Dependabot top-level structure is accepted as a valid update list."""
+        broken_content = (
+            'version: 2\nmetadata: ignored\nupdates:\n'
+            '  - package-ecosystem: "github-actions"\n'
+        )
+
+        self.assertEqual(find_update_entries(broken_content), [])
 
 
 if __name__ == "__main__":
