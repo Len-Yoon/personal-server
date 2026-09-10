@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_WORKFLOW_ACTIONS = {
+    "aquasecurity/trivy-action": ("57a97c7e7821a5776cebc9bb87c984fa69cba8f1", "v0.35.0"),
     "actions/checkout": ("11d5960a326750d5838078e36cf38b85af677262", "v4"),
     "actions/setup-python": ("a26af69be951a213d495a4c3e4e4022e16d87065", "v5"),
     "actions/upload-artifact": ("ea165f8d65b6e75b540449e92b4886f43607fa02", "v4"),
@@ -67,7 +68,7 @@ NONCANONICAL_USES_KEY_PATTERN = re.compile(
 )
 ONE_LINE_USES_SCALAR_PATTERN = re.compile(
     r"(?P<quote>['\"]?)(?P<reference>[^\s#'\"]+)(?P=quote)"
-    r"\s*(?:#\s*(?P<version>v\d+))?"
+    r"\s*(?:#\s*(?P<version>v\d+(?:\.\d+){0,2}))?"
 )
 
 
@@ -397,7 +398,7 @@ class ComposeConfigTests(unittest.TestCase):
             "book-memo": "python3 -m unittest tests.book_memo.test_book_service",
             "car-care-worker": "python3 -m unittest discover -s tests/car_care_worker",
             "k8s-contracts": "python3 -m unittest tests.test_k8s_monitoring_tools tests.test_k8s_monitoring_values tests.test_k8s_portal_availability_alert tests.test_k8s_portal_backup_verify tests.test_k8s_portal_cutover tests.test_k8s_portal_nodeport_connectivity_smoke tests.test_k8s_portal_pvc_backup_automation tests.test_k8s_portal_pvc_backup_verify tests.test_k8s_portal_secret_shadow_smoke tests.test_k8s_sre_health_audit tests.test_k8s_sre_pod_recovery_lab tests.test_k8s_sre_telegram_manifests tests.test_k8s_sre_telegram_tools tests.test_k8s_transition_runner_artifacts tests.test_k8s_transition_runner_install_tools tests.test_k8s_transition_runner_policy",
-            "maintenance": "python3 -m unittest tests.test_compose_config tests.test_documentation_index tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_public_uptime_monitor tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements",
+            "maintenance": "python3 -m unittest tests.test_compose_config tests.test_supply_chain_security_workflow tests.test_documentation_index tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_public_uptime_monitor tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements",
         }
         for service_name, test_command in expected_matrix_entries.items():
             self.assertIn(f"- name: {service_name}", workflow)
