@@ -12,9 +12,10 @@ EXPECTED_WORKFLOW_ACTIONS = {
     "actions/download-artifact": ("d3f86a106a0bac45b974a628896c90dbdf5c8093", "v4"),
     "actions/github-script": ("f28e40c7f34bde8b3046d885e986cb6290c5673b", "v7"),
 }
-USES_PATTERN = re.compile(
-    r"^\s*(?:-\s+)?uses:\s*(?P<quote>['\"]?)(?P<action>[^@\s'\"]+)@"
-    r"(?P<ref>[^\s#'\"]+)(?P=quote)\s*(?:#\s*(?P<version>v\d+))?\s*$"
+USES_LINE_PATTERN = re.compile(r"^\s*(?:-\s+)?uses:\s*(?P<value>.*?)\s*$")
+ONE_LINE_USES_SCALAR_PATTERN = re.compile(
+    r"(?P<quote>['\"]?)(?P<reference>[^\s#'\"]+)(?P=quote)"
+    r"\s*(?:#\s*(?P<version>v\d+))?"
 )
 
 
@@ -35,17 +36,35 @@ def _workflow_action_references(workflow_dir: Path) -> list[tuple[Path, str, str
         [*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")]
     )
     for workflow_path in workflow_paths:
-        for line in workflow_path.read_text(encoding="utf-8").splitlines():
-            match = USES_PATTERN.fullmatch(line)
-            if match is not None:
-                references.append(
-                    (
-                        workflow_path,
-                        match.group("action"),
-                        match.group("ref"),
-                        match.group("version"),
-                    )
+        for line_number, line in enumerate(
+            workflow_path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            uses_line = USES_LINE_PATTERN.fullmatch(line)
+            if uses_line is None:
+                continue
+
+            value = uses_line.group("value")
+            if not value or value.startswith((">", "|", "&", "*", "{", "[", "!")):
+                raise AssertionError(
+                    f"{workflow_path}:{line_number}: uses must use a one-line scalar"
                 )
+
+            scalar = ONE_LINE_USES_SCALAR_PATTERN.fullmatch(value)
+            if scalar is None:
+                raise AssertionError(
+                    f"{workflow_path}:{line_number}: uses must use a one-line scalar"
+                )
+
+            reference = scalar.group("reference")
+            if reference.startswith("./"):
+                continue
+
+            action, separator, ref = reference.partition("@")
+            if not separator or not action or not ref:
+                raise AssertionError(
+                    f"{workflow_path}:{line_number}: external uses must include an action ref"
+                )
+            references.append((workflow_path, action, ref, scalar.group("version")))
     return references
 
 
@@ -186,7 +205,8 @@ class ComposeConfigTests(unittest.TestCase):
                 "  check:\n"
                 "    steps:\n"
                 "      - uses: \"actions/checkout@11d5960a326750d5838078e36cf38b85af677262\" # v4\n"
-                "      - uses: 'actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065' # v5\n",
+                "      - uses: 'actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065' # v5\n"
+                "      - uses: \"./.github/actions/verify\"\n",
                 encoding="utf-8",
             )
 
@@ -207,6 +227,29 @@ class ComposeConfigTests(unittest.TestCase):
                 ],
                 _workflow_action_references(Path(temporary_directory)),
             )
+
+    def test_workflow_action_reference_extractor_rejects_non_scalar_uses_values(self):
+        invalid_uses_values = {
+            "block-scalar": "uses: >-\n        actions/checkout@v4\n",
+            "literal-scalar": "uses: |\n        actions/checkout@v4\n",
+            "anchor": "uses: &checkout actions/checkout@v4\n",
+            "alias": "uses: *checkout\n",
+            "mapping": "uses: { action: actions/checkout@v4 }\n",
+        }
+
+        for label, uses_value in invalid_uses_values.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary_directory:
+                workflow_path = Path(temporary_directory) / f"{label}.yaml"
+                workflow_path.write_text(
+                    "jobs:\n"
+                    "  check:\n"
+                    "    steps:\n"
+                    f"      - {uses_value}",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(AssertionError, "one-line scalar"):
+                    _workflow_action_references(Path(temporary_directory))
 
     def test_ci_collects_and_enforces_agent_loop_evidence(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
