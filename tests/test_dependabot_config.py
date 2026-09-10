@@ -23,15 +23,15 @@ def find_update_entries(content: str) -> list[str]:
     header = TOP_LEVEL_UPDATES_HEADER.search(content)
     if header is None:
         return []
-    updates_block = re.match(
-        r"(?ms).*?(?=^[^\s][^:\n]*:\s*(?:#.*)?$|\Z)",
-        content[header.end() :],
-    )
-    if updates_block is None:
-        return []
+    updates_lines = []
+    for line in content[header.end() :].splitlines(keepends=True):
+        if not line.strip() or line.startswith("  "):
+            updates_lines.append(line)
+            continue
+        break
     return re.findall(
         r"(?ms)^  - package-ecosystem: [^\n]+.*?(?=^  - package-ecosystem:|\Z)",
-        updates_block.group(0),
+        "".join(updates_lines),
     )
 
 
@@ -107,6 +107,15 @@ class DependabotConfigContractTests(unittest.TestCase):
             find_update_entries(content),
             ['  - package-ecosystem: "github-actions"\n'],
         )
+
+    def test_stops_at_a_top_level_key_with_an_anchor_value(self):
+        """Fails if entries below a valued top-level key leak into the updates block."""
+        content = (
+            "version: 2\nupdates:\nmetadata: &ignored\n"
+            + ('  - package-ecosystem: "docker"\n' * 9)
+        )
+
+        self.assertEqual(find_update_entries(content), [])
 
 
 if __name__ == "__main__":
