@@ -38,9 +38,24 @@ EXPECTED_DOCKERFILE_BASE_IMAGES = {
         "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
     ),
 }
+DOCKERFILE_DIGEST_TARGETS = frozenset(
+    {
+        "book-memo/Dockerfile",
+        "car-care-worker/Dockerfile",
+        "crawler-worker/Dockerfile",
+        "homeops-executor/Dockerfile",
+        "portal-web/Dockerfile",
+        "sre-telegram-relay/Dockerfile",
+        "system-agent/Dockerfile",
+        "youtube-memo/Dockerfile",
+    }
+)
 DOCKERFILE_DIGEST_POLICY_EXCLUSIONS = frozenset({"caddy/Dockerfile"})
 DOCKERFILE_FROM_PATTERN = re.compile(
     r"^FROM\s+(?P<image>\S+)(?:\s+AS\s+\S+)?\s*$", re.MULTILINE | re.IGNORECASE
+)
+PYTHON_SLIM_IMAGE_DIGEST_PATTERN = re.compile(
+    r"^python:\d+\.\d+-slim@sha256:[0-9a-f]{64}$"
 )
 PYTHON_SLIM_FROM_PATTERN = re.compile(
     r"^FROM python:(?P<version>\d+\.\d+)-slim@sha256:[0-9a-f]{64}$",
@@ -116,9 +131,13 @@ class ComposeConfigTests(unittest.TestCase):
         dockerfile_paths = {
             path.relative_to(ROOT).as_posix() for path in ROOT.rglob("Dockerfile")
         }
+        self.assertEqual(DOCKERFILE_DIGEST_POLICY_EXCLUSIONS, {"caddy/Dockerfile"})
+        self.assertEqual(len(DOCKERFILE_DIGEST_TARGETS), 8)
+        self.assertIn("sre-telegram-relay/Dockerfile", DOCKERFILE_DIGEST_TARGETS)
+        self.assertEqual(set(EXPECTED_DOCKERFILE_BASE_IMAGES), DOCKERFILE_DIGEST_TARGETS)
         self.assertEqual(
             dockerfile_paths,
-            set(EXPECTED_DOCKERFILE_BASE_IMAGES) | DOCKERFILE_DIGEST_POLICY_EXCLUSIONS,
+            DOCKERFILE_DIGEST_TARGETS | DOCKERFILE_DIGEST_POLICY_EXCLUSIONS,
         )
 
         actual = {
@@ -128,8 +147,13 @@ class ComposeConfigTests(unittest.TestCase):
                     (ROOT / relative_path).read_text(encoding="utf-8")
                 )
             )
-            for relative_path in EXPECTED_DOCKERFILE_BASE_IMAGES
+            for relative_path in DOCKERFILE_DIGEST_TARGETS
         }
+
+        for relative_path, images in actual.items():
+            with self.subTest(dockerfile=relative_path):
+                self.assertEqual(len(images), 1)
+                self.assertRegex(images[0], PYTHON_SLIM_IMAGE_DIGEST_PATTERN)
 
         self.assertEqual(actual, EXPECTED_DOCKERFILE_BASE_IMAGES)
 
