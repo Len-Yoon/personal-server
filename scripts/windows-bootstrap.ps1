@@ -24,6 +24,8 @@ $EmergencyRebootGraceSeconds = 1200
 $EmergencyRebootCooldownSeconds = 21600
 $RecoveryStateDirectory = Join-Path $ProjectRoot "data"
 $RecoveryStatePath = Join-Path $ProjectRoot "data\recovery-state.json"
+$RecoveryEventLogPath = Join-Path $RecoveryStateDirectory "recovery-events.jsonl"
+$RecoveryEventLogMaxEntries = 200
 $RecoveryLockPath = Join-Path $RecoveryStateDirectory "recovery.lock"
 $SupervisorLockPath = Join-Path $RecoveryStateDirectory "supervisor.lock"
 $DaemonLockPath = Join-Path $RecoveryStateDirectory "daemon.lock"
@@ -227,6 +229,9 @@ function Update-TunnelTelegramNotification([string]$TunnelHealth) {
         if (Send-TunnelTelegramNotification "recovered") {
             $script:TunnelAlertDownNotified = $false
             [void](Save-RecoveryFailureState)
+            Write-RecoveryEvent -Component "tunnel" -Event "alert_recovered" -Status "sent" -Action "notify_telegram"
+        } else {
+            Write-RecoveryEvent -Component "tunnel" -Event "alert_recovered" -Status "failed" -Action "notify_telegram"
         }
         return
     }
@@ -236,6 +241,9 @@ function Update-TunnelTelegramNotification([string]$TunnelHealth) {
     if (Send-TunnelTelegramNotification "down") {
         $script:TunnelAlertDownNotified = $true
         [void](Save-RecoveryFailureState)
+        Write-RecoveryEvent -Component "tunnel" -Event "alert_down" -Status "sent" -Action "notify_telegram"
+    } else {
+        Write-RecoveryEvent -Component "tunnel" -Event "alert_down" -Status "failed" -Action "notify_telegram"
     }
 }
 
@@ -364,6 +372,48 @@ function Get-RecoveryHealth {
     return $health
 }
 
+function Write-RecoveryEvent(
+    [string]$Component,
+    [string]$Event,
+    [string]$Status,
+    [string]$Action = "none"
+) {
+    $temporaryPath = $null
+    try {
+        New-Item -ItemType Directory -Path $RecoveryStateDirectory -Force | Out-Null
+        $existingEntries = @()
+        if (Test-Path -LiteralPath $RecoveryEventLogPath) {
+            $existingEntries = @(Get-Content -LiteralPath $RecoveryEventLogPath -ErrorAction Stop | Where-Object {
+                -not [string]::IsNullOrWhiteSpace($_)
+            })
+        }
+        if ($existingEntries.Count -ge $RecoveryEventLogMaxEntries) {
+            $existingEntries = @($existingEntries | Select-Object -Last ($RecoveryEventLogMaxEntries - 1))
+        }
+        $entry = [ordered]@{
+            timestamp = (Get-Date).ToUniversalTime().ToString("o")
+            component = $Component
+            event = $Event
+            status = $Status
+            action = $Action
+        } | ConvertTo-Json -Compress
+        $temporaryPath = Join-Path $RecoveryStateDirectory "recovery-events.$PID.tmp"
+        $entriesToWrite = @($existingEntries + $entry)
+        [System.IO.File]::WriteAllLines(
+            $temporaryPath,
+            [string[]]$entriesToWrite,
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+        Move-Item -LiteralPath $temporaryPath -Destination $RecoveryEventLogPath -Force
+    } catch {
+        Write-Info "Recovery event logging failed."
+    } finally {
+        if ($null -ne $temporaryPath) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Save-RecoveryFailureState {
     try {
         New-Item -ItemType Directory -Path $RecoveryStateDirectory -Force | Out-Null
@@ -486,6 +536,7 @@ function Register-RecoveryFailure([string]$Component) {
     }
     $failureCount += 1
     $RecoveryFailureCounts[$Component] = $failureCount
+    Write-RecoveryEvent -Component $Component -Event "unhealthy_detected" -Status "unhealthy" -Action "none"
     [void](Save-RecoveryFailureState)
     if ($failureCount -lt $RecoveryFailureThreshold) {
         Write-Info "$Component recovery failure $failureCount/$RecoveryFailureThreshold."
@@ -499,6 +550,7 @@ function Reset-RecoveryFailure([string]$Component) {
     $RecoveryFailureCounts[$Component] = 0
     $RecoveryAttemptCounts[$Component] = 0
     if ($failureCount -ne 0 -or $attemptCount -ne 0) {
+        Write-RecoveryEvent -Component $Component -Event "health_restored" -Status "healthy" -Action "none"
         [void](Save-RecoveryFailureState)
     }
 }
@@ -521,6 +573,16 @@ function Register-RecoveryAttempt([string]$Component) {
     $RecoveryAttemptCounts[$Component] = $attemptCount + 1
     [void](Save-RecoveryFailureState)
     return $true
+}
+
+function Get-RecoveryActionName([string]$Component) {
+    switch ($Component) {
+        "keepalive" { return "start_keepalive" }
+        "k3s" { return "start_k3s" }
+        "portal" { return "rollout_restart_portal" }
+        "tunnel" { return "restart_tunnel" }
+        default { return "none" }
+    }
 }
 
 function Test-RecoveryActionNeeded([string]$Component) {
@@ -659,10 +721,17 @@ function Invoke-RecoveryCycle {
                 continue
             }
             $targetedRecoverySucceeded = $false
+            $recoveryAction = Get-RecoveryActionName $component
+            Write-RecoveryEvent -Component $component -Event "recovery_dispatch" -Status "requested" -Action $recoveryAction
             try {
                 $targetedRecoverySucceeded = Invoke-TargetedRecovery $component
             } catch {
                 Write-Info "$component targeted recovery failed: $($_.Exception.Message)"
+            }
+            if ($targetedRecoverySucceeded) {
+                Write-RecoveryEvent -Component $component -Event "recovery_dispatch" -Status "accepted" -Action $recoveryAction
+            } else {
+                Write-RecoveryEvent -Component $component -Event "recovery_dispatch" -Status "failed" -Action $recoveryAction
             }
             if (-not $targetedRecoverySucceeded) {
                 if ($component -notin @("keepalive", "k3s")) {
@@ -980,6 +1049,7 @@ function Start-Daemon {
                 Invoke-RecoveryCycle
             } catch {
                 Write-Info "Recovery check failed: $($_.Exception.Message)"
+                Write-RecoveryEvent -Component "system" -Event "recovery_cycle" -Status "failed" -Action "none"
             }
             Write-Info "Sleeping 3 minutes before the next recovery check."
             Start-Sleep -Seconds $RecoveryIntervalSeconds

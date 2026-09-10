@@ -34,6 +34,26 @@ N100 알림 자격증명은 `window` 사용자 계정의 Windows Credential Mana
 
 장애 알림 전송 확정 여부만 상태 파일에 보관하며, 자격증명 원문·Telegram API 응답·메시지 식별자는 기록하지 않음. 정상 점검마다 알림을 반복하지 않으며, 감시기와 GitHub Actions는 서로 독립적으로 전환을 판단하므로 동일 장애에 두 경로의 메시지가 수신될 수 있음.
 
+### N100 자동복구 이력 확인
+
+N100 감시기는 장애 감지·복구 요청·조치 실행 결과·Tunnel 알림 전환만 `C:\personal-server\data\recovery-events.jsonl`에 기록함. 정상 주기 점검은 기록하지 않으며 최근 200건만 유지함. 조치 실행 결과가 `accepted`여도 실제 정상 복구는 다음 점검의 `health_restored` 이벤트로만 확인함. 각 행에는 UTC 저장 시각, 구성요소, 이벤트, 결과, 수행 동작만 포함하고 자격증명·명령 인수·Telegram 응답은 기록하지 않음.
+
+Windows PowerShell에서 최근 이력을 화면 확인용 시각으로 보려면 다음 읽기 전용 명령을 사용함.
+
+```powershell
+Get-Content C:\personal-server\data\recovery-events.jsonl |
+  ForEach-Object {
+    $event = $_ | ConvertFrom-Json
+    [pscustomobject]@{
+      시각 = ([DateTimeOffset]::Parse($event.timestamp)).ToOffset([TimeSpan]::FromHours(9)).ToString('yyyy-MM-dd HH:mm')
+      구성요소 = $event.component
+      이벤트 = $event.event
+      결과 = $event.status
+      동작 = $event.action
+    }
+  } | Format-Table -AutoSize
+```
+
 ## 최초 설정
 
 GitHub 저장소의 `Settings` → `Secrets and variables` → `Actions`에서 아래 Repository secret 두 개를 추가함.
