@@ -16,6 +16,17 @@ EXPECTED_DOCKER_DIRECTORIES = {
     "/youtube-memo",
 }
 TOP_LEVEL_UPDATES_HEADER = re.compile(r"(?m)^version: 2\nupdates:\n")
+ENTRY_CONTRACT = re.compile(
+    r'(?ms)^  - package-ecosystem: "[^"]+"\n'
+    r'    directory: "[^"]+"\n'
+    r'    schedule:\n'
+    r'      interval: "weekly"\n'
+    r'      day: "monday"\n'
+    r'    open-pull-requests-limit: 5\n'
+    r'    labels:\n'
+    r'      - "dependencies"\n'
+    r'      - "security"\n?\Z'
+)
 
 
 def find_update_entries(content: str) -> list[str]:
@@ -48,17 +59,11 @@ class DependabotConfigContractTests(unittest.TestCase):
 
         package_directories = []
         for entry in entries:
+            self.assertRegex(entry, ENTRY_CONTRACT)
             ecosystem = re.search(r'(?m)^  - package-ecosystem: "([^"]+)"$', entry)
             directory = re.search(r'(?m)^    directory: "([^"]+)"$', entry)
             self.assertIsNotNone(ecosystem)
             self.assertIsNotNone(directory)
-            self.assertRegex(entry, r'(?m)^      interval: "weekly"$')
-            self.assertRegex(entry, r'(?m)^      day: "monday"$')
-            self.assertRegex(entry, r"(?m)^    open-pull-requests-limit: 5$")
-            self.assertRegex(
-                entry,
-                r'(?m)^    labels:\n      - "dependencies"\n      - "security"$',
-            )
             package_directories.append((ecosystem.group(1), directory.group(1)))
 
         self.assertEqual(package_directories.count(("github-actions", "/")), 1)
@@ -116,6 +121,14 @@ class DependabotConfigContractTests(unittest.TestCase):
         )
 
         self.assertEqual(find_update_entries(content), [])
+
+    def test_rejects_metadata_in_place_of_schedule(self):
+        entry = '  - package-ecosystem: "docker"\n    directory: "/x"\n    metadata:\n      interval: "weekly"\n      day: "monday"\n    open-pull-requests-limit: 5\n    labels:\n      - "dependencies"\n      - "security"\n'
+        self.assertIsNone(ENTRY_CONTRACT.fullmatch(entry))
+
+    def test_rejects_unexpected_label(self):
+        entry = '  - package-ecosystem: "docker"\n    directory: "/x"\n    schedule:\n      interval: "weekly"\n      day: "monday"\n    open-pull-requests-limit: 5\n    labels:\n      - "dependencies"\n      - "security"\n      - "unexpected"\n'
+        self.assertIsNone(ENTRY_CONTRACT.fullmatch(entry))
 
 
 if __name__ == "__main__":
