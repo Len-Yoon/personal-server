@@ -16,13 +16,29 @@ Windows N100과 Ubuntu WSL2에서 운영하는 개인용 서비스 허브임. �
 
 ## 주요 화면
 
-| 서비스 허브 | News Hub |
-|---|---|
-| <img src="docs/images/portal-dashboard.png" alt="Personal Server 서비스 허브" width="480"> | <img src="docs/images/news-hub.png" alt="News Hub" width="480"> |
+### 서비스 허브
 
-| YouTube Memo | Book Memo |
-|---|---|
-| <img src="docs/images/youtube-memo.png" alt="YouTube Memo" width="480"> | <img src="docs/images/book-memo.png" alt="Book Memo" width="480"> |
+전체 서비스와 통합 검색 진입점을 한 화면에서 확인함.
+
+<img src="docs/images/portal-dashboard.png" alt="Personal Server 서비스 허브와 전체 검색" width="960">
+
+### Investing.com 뉴스 수집
+
+RSS 수집 결과, Telegram 알림 분류, 원문 이동이 가능한 기사 목록을 확인함.
+
+<img src="docs/images/news-hub.png" alt="Investing.com 뉴스 수집 결과와 기사 목록" width="960">
+
+### YouTube Memo
+
+영상 링크 등록과 저장된 영상별 메모 수를 확인함.
+
+<img src="docs/images/youtube-memo.png" alt="YouTube Memo 영상 등록과 저장된 영상 목록" width="960">
+
+### Book Memo
+
+책 검색, 내 책장, 목차 체크, 장별 코멘트 기록을 한 화면에서 확인함.
+
+<img src="docs/images/book-memo.png" alt="Book Memo 책장과 목차 체크 및 코멘트 기능" width="960">
 
 ## 현재 구조
 
