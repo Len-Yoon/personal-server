@@ -12,6 +12,40 @@ EXPECTED_WORKFLOW_ACTIONS = {
     "actions/download-artifact": ("d3f86a106a0bac45b974a628896c90dbdf5c8093", "v4"),
     "actions/github-script": ("f28e40c7f34bde8b3046d885e986cb6290c5673b", "v7"),
 }
+EXPECTED_DOCKERFILE_BASE_IMAGES = {
+    "book-memo/Dockerfile": (
+        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+    ),
+    "car-care-worker/Dockerfile": (
+        "python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea",
+    ),
+    "crawler-worker/Dockerfile": (
+        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+    ),
+    "homeops-executor/Dockerfile": (
+        "python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea",
+    ),
+    "portal-web/Dockerfile": (
+        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+    ),
+    "sre-telegram-relay/Dockerfile": (
+        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+    ),
+    "system-agent/Dockerfile": (
+        "python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea",
+    ),
+    "youtube-memo/Dockerfile": (
+        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+    ),
+}
+DOCKERFILE_DIGEST_POLICY_EXCLUSIONS = frozenset({"caddy/Dockerfile"})
+DOCKERFILE_FROM_PATTERN = re.compile(
+    r"^FROM\s+(?P<image>\S+)(?:\s+AS\s+\S+)?\s*$", re.MULTILINE | re.IGNORECASE
+)
+PYTHON_SLIM_FROM_PATTERN = re.compile(
+    r"^FROM python:(?P<version>\d+\.\d+)-slim@sha256:[0-9a-f]{64}$",
+    re.MULTILINE,
+)
 USES_LINE_PATTERN = re.compile(r"^\s*(?:-\s+)?uses:\s*(?P<value>.*?)\s*$")
 NONCANONICAL_USES_KEY_PATTERN = re.compile(
     r"^\s*(?:-\s+)?(?:[\"']uses[\"']\s*:.*|uses\s+:.*|\?\s*(?:uses|[\"']uses[\"'])(?:\s*:.*)?)$"
@@ -77,6 +111,28 @@ def _workflow_action_references(workflow_dir: Path) -> list[tuple[Path, str, str
 
 
 class ComposeConfigTests(unittest.TestCase):
+    def test_pinned_dockerfile_base_images_exclude_caddy_by_policy(self):
+        """Fails if a governed Dockerfile is omitted or Caddy enters this supply-chain scope."""
+        dockerfile_paths = {
+            path.relative_to(ROOT).as_posix() for path in ROOT.rglob("Dockerfile")
+        }
+        self.assertEqual(
+            dockerfile_paths,
+            set(EXPECTED_DOCKERFILE_BASE_IMAGES) | DOCKERFILE_DIGEST_POLICY_EXCLUSIONS,
+        )
+
+        actual = {
+            relative_path: tuple(
+                match.group("image")
+                for match in DOCKERFILE_FROM_PATTERN.finditer(
+                    (ROOT / relative_path).read_text(encoding="utf-8")
+                )
+            )
+            for relative_path in EXPECTED_DOCKERFILE_BASE_IMAGES
+        }
+
+        self.assertEqual(actual, EXPECTED_DOCKERFILE_BASE_IMAGES)
+
     def test_compose_defines_isolated_car_care_worker(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         worker = _service_block(compose, "car-care-worker")
@@ -348,9 +404,8 @@ class ComposeConfigTests(unittest.TestCase):
         }
         expected_versions = {
             name: re.search(
-                r"^FROM python:(?P<version>\d+\.\d+)-slim$",
+                PYTHON_SLIM_FROM_PATTERN,
                 path.read_text(encoding="utf-8"),
-                re.MULTILINE,
             ).group("version")
             for name, path in dockerfiles.items()
         }
