@@ -27,7 +27,7 @@ jobs:
 
       - id: incident
         name: Find a pending health-state transition
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const incidentTitle = "[SRE] len.pe.kr 공개 상태 장애";
@@ -145,7 +145,7 @@ jobs:
 
       - name: Confirm Telegram delivery before committing transition
         if: steps.incident.outputs.notification != '' && steps.telegram.outputs.accepted == 'true'
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const notification = "${{ steps.incident.outputs.notification }}";

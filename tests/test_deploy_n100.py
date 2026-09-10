@@ -25,7 +25,7 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("context.payload.before", changes_job)
         self.assertIn("github.sha", changes_job)
         self.assertIn("classify-n100-safe-deployment.py", changes_job)
-        self.assertIn("actions/github-script@v7", changes_job)
+        self.assertIn("actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7", changes_job)
         self.assertIn("listWorkflowRuns", changes_job)
         self.assertIn("workflow_id: 'ci.yml'", changes_job)
         self.assertIn("core.setOutput('ci_sha'", changes_job)

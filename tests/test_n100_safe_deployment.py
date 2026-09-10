@@ -760,7 +760,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
 
     def test_workflow_uses_full_ci_run_range_not_bare_head_parent(self):
         workflow = (ROOT / ".github/workflows/deploy-n100.yml").read_text(encoding="utf-8")
-        self.assertIn("actions/github-script@v7", workflow)
+        self.assertIn("actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7", workflow)
         self.assertIn("listWorkflowRuns", workflow)
         self.assertIn("context.payload.before", workflow)
         self.assertIn("workflow_id: 'ci.yml'", workflow)

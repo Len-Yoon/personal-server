@@ -18,7 +18,7 @@ jobs:
       reason: ${{ steps.classify.outputs.deploy_reason }}
     steps:
       - id: wait-ci
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           github-token: ${{ github.token }}
           script: |
@@ -50,7 +50,7 @@ jobs:
               await new Promise((resolve) => setTimeout(resolve, 10000));
             }
             throw new Error(`Timed out waiting for CI for ${context.sha}; automatic deployment is refused.`);
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0

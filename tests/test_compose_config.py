@@ -123,6 +123,34 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn("agent-review-scope", workflow)
         self.assertIn("policy_status", workflow)
 
+    def test_workflow_actions_use_approved_full_shas_and_version_comments(self):
+        expected_action_refs = {
+            "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262",
+            "actions/setup-python": "a26af69be951a213d495a4c3e4e4022e16d87065",
+            "actions/upload-artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02",
+            "actions/download-artifact": "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+            "actions/github-script": "f28e40c7f34bde8b3046d885e986cb6290c5673b",
+        }
+        uses_pattern = re.compile(
+            r"^\s*(?:-\s+)?uses:\s*(?P<action>[^@\s]+)@(?P<ref>[^\s#]+)\s*(?P<comment>#\s*v\d+)?\s*$",
+            re.MULTILINE,
+        )
+        actual_refs = {}
+
+        for workflow_path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+            workflow = workflow_path.read_text(encoding="utf-8")
+            for match in uses_pattern.finditer(workflow):
+                action = match.group("action")
+                self.assertIn(action, expected_action_refs, f"Unexpected action in {workflow_path}")
+                self.assertEqual(expected_action_refs[action], match.group("ref"))
+                self.assertRegex(match.group("ref"), r"^[0-9a-f]{40}$")
+                self.assertIsNotNone(match.group("comment"), f"Missing version comment for {action}")
+                actual_refs.setdefault(action, set()).add(match.group("ref"))
+
+        self.assertEqual(
+            {action: {ref} for action, ref in expected_action_refs.items()}, actual_refs
+        )
+
     def test_ci_collects_and_enforces_agent_loop_evidence(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
