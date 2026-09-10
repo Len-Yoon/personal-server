@@ -16,6 +16,11 @@ EXPECTED_DOCKER_DIRECTORIES = {
     "/youtube-memo",
 }
 TOP_LEVEL_UPDATES_HEADER = re.compile(r"(?m)^version: 2\nupdates:\n")
+REGULAR_MAJOR_UPDATE_IGNORE_BLOCK = (
+    '    ignore:\n'
+    '      - dependency-name: "*"\n'
+    '        update-types: ["version-update:semver-major"]\n'
+)
 ENTRY_CONTRACT = re.compile(
     r'(?ms)^  - package-ecosystem: "[^"]+"\n'
     r'    directory: "[^"]+"\n'
@@ -23,6 +28,9 @@ ENTRY_CONTRACT = re.compile(
     r'      interval: "weekly"\n'
     r'      day: "monday"\n'
     r'    open-pull-requests-limit: 5\n'
+    r'    ignore:\n'
+    r'      - dependency-name: "\*"\n'
+    r'        update-types: \["version-update:semver-major"\]\n'
     r'    labels:\n'
     r'      - "dependencies"\n'
     r'      - "security"\n?\Z'
@@ -30,16 +38,16 @@ ENTRY_CONTRACT = re.compile(
 
 
 def find_update_entries(content: str) -> list[str]:
-    """Return Dependabot entries only when they follow the required top-level header."""
+    """Return entries only for a single top-level Dependabot updates block."""
     header = TOP_LEVEL_UPDATES_HEADER.search(content)
-    if header is None:
+    if header is None or header.start() != 0:
         return []
     updates_lines = []
     for line in content[header.end() :].splitlines(keepends=True):
         if not line.strip() or line.startswith("  "):
             updates_lines.append(line)
             continue
-        break
+        return []
     return re.findall(
         r"(?ms)^  - package-ecosystem: [^\n]+.*?(?=^  - package-ecosystem:|\Z)",
         "".join(updates_lines),
@@ -99,8 +107,8 @@ class DependabotConfigContractTests(unittest.TestCase):
 
         self.assertEqual(find_update_entries(broken_content), [])
 
-    def test_stops_reading_updates_at_the_next_top_level_key(self):
-        """Fails if an entry under later top-level metadata is counted as a Dependabot update."""
+    def test_rejects_a_top_level_key_after_updates(self):
+        """Fails if additional top-level content bypasses the approved update contract."""
         content = (
             'version: 2\nupdates:\n'
             '  - package-ecosystem: "github-actions"\n'
@@ -108,10 +116,7 @@ class DependabotConfigContractTests(unittest.TestCase):
             '  - package-ecosystem: "docker"\n'
         )
 
-        self.assertEqual(
-            find_update_entries(content),
-            ['  - package-ecosystem: "github-actions"\n'],
-        )
+        self.assertEqual(find_update_entries(content), [])
 
     def test_stops_at_a_top_level_key_with_an_anchor_value(self):
         """Fails if entries below a valued top-level key leak into the updates block."""
@@ -122,13 +127,43 @@ class DependabotConfigContractTests(unittest.TestCase):
 
         self.assertEqual(find_update_entries(content), [])
 
+    def test_rejects_a_second_updates_block_with_an_unapproved_daily_target(self):
+        """Fails if another top-level block bypasses the approved update targets."""
+        first_updates = ('  - package-ecosystem: "docker"\n' * 9)
+        content = (
+            "version: 2\nupdates:\n"
+            + first_updates
+            + "updates:\n"
+            + '  - package-ecosystem: "docker"\n'
+            + '    directory: "/"\n'
+            + "    schedule:\n"
+            + '      interval: "daily"\n'
+        )
+
+        self.assertEqual(find_update_entries(content), [])
+
     def test_rejects_metadata_in_place_of_schedule(self):
-        entry = '  - package-ecosystem: "docker"\n    directory: "/x"\n    metadata:\n      interval: "weekly"\n      day: "monday"\n    open-pull-requests-limit: 5\n    labels:\n      - "dependencies"\n      - "security"\n'
+        entry = '  - package-ecosystem: "docker"\n    directory: "/x"\n    metadata:\n      interval: "weekly"\n      day: "monday"\n    open-pull-requests-limit: 5\n' + REGULAR_MAJOR_UPDATE_IGNORE_BLOCK + '    labels:\n      - "dependencies"\n      - "security"\n'
         self.assertIsNone(ENTRY_CONTRACT.fullmatch(entry))
 
     def test_rejects_unexpected_label(self):
-        entry = '  - package-ecosystem: "docker"\n    directory: "/x"\n    schedule:\n      interval: "weekly"\n      day: "monday"\n    open-pull-requests-limit: 5\n    labels:\n      - "dependencies"\n      - "security"\n      - "unexpected"\n'
+        entry = '  - package-ecosystem: "docker"\n    directory: "/x"\n    schedule:\n      interval: "weekly"\n      day: "monday"\n    open-pull-requests-limit: 5\n' + REGULAR_MAJOR_UPDATE_IGNORE_BLOCK + '    labels:\n      - "dependencies"\n      - "security"\n      - "unexpected"\n'
         self.assertIsNone(ENTRY_CONTRACT.fullmatch(entry))
+
+    def test_rejects_missing_or_malformed_major_update_ignore_rule(self):
+        """Fails if regular version-update major updates stop being ignored."""
+        entry_prefix = '  - package-ecosystem: "docker"\n    directory: "/x"\n    schedule:\n      interval: "weekly"\n      day: "monday"\n    open-pull-requests-limit: 5\n'
+        entry_suffix = '    labels:\n      - "dependencies"\n      - "security"\n'
+        invalid_ignore_blocks = (
+            "",
+            '    ignore:\n      - dependency-name: "requests"\n        update-types: ["version-update:semver-major"]\n',
+            '    ignore:\n      - dependency-name: "*"\n        update-types: ["version-update:semver-minor"]\n',
+            '    ignore:\n      dependency-name: "*"\n      update-types: ["version-update:semver-major"]\n',
+        )
+
+        for ignore_block in invalid_ignore_blocks:
+            with self.subTest(ignore_block=ignore_block):
+                self.assertIsNone(ENTRY_CONTRACT.fullmatch(entry_prefix + ignore_block + entry_suffix))
 
 
 if __name__ == "__main__":
