@@ -5,14 +5,14 @@
 | 항목 | 내용 |
 |---|---|
 | 문서명 | 현재 운영 로드맵 |
-| 기준일 | 2026-09-08 |
+| 기준일 | 2026-09-10 |
 | 기준 자료 | 저장소 운영 문서·검증 도구·문서 계약 테스트 |
 | 목적 | 완료 항목과 후속 운영 개선을 분리해 관리함 |
 | 비고 | 비밀값·운영 데이터·실행 자격 증명은 기록하지 않음 |
 
 ## 핵심 요약
 
-현재 운영은 공개 경로 감시, K3s 상태·알림, Portal PVC 백업 검증, 격리된 Pod 복구 실습을 제공함. 이 문서는 완료된 운영 기준과 향후 개선 항목을 분리해 기록하며, 새 외부 감시 서비스나 자동 실행을 추가하지 않음.
+현재 운영은 공개 경로 감시, K3s 상태·알림, Portal PVC 백업 검증, 격리된 Pod 복구 실습, P3 공급망 보안 검증을 제공함. 이 문서는 완료된 운영 기준과 향후 개선 항목을 분리해 기록하며, 새 외부 감시 서비스나 자동 실행을 추가하지 않음.
 
 ## 현재 완료 기준
 
@@ -23,6 +23,7 @@
 | Portal 백업 검증 | Portal PVC 백업·복원 검증을 `--check` 읽기 점검과 별도 운영 실행으로 구분함 | [K3s 운영](../infra/k8s/README.md), `portal-pvc-backup-verify.sh` | 완료 |
 | Pod 자동복구 실습 | production과 분리된 임시 namespace에서 liveness 실패와 Ready 복구를 확인함 | `sre-pod-recovery-lab.sh` | 완료 |
 | 변경 검증 | 문서·설정 변경 전에 범위와 관련 검사를 확인함 | [Codex 작업 완료 루프](codex-work-loop.md) | 완료 |
+| P3 공급망 보안 | GitHub Actions 외부 action을 full SHA로 고정하고, Caddy를 제외한 관리 대상 Python Docker base image 8개를 digest로 고정함. Trivy filesystem/config scan은 report-only로 실행하며 CI 계약 테스트로 검증함 | `.github/workflows/trivy-security.yml`, `tests/test_supply_chain_security_workflow.py` | 완료 |
 
 ## 향후 개선 항목
 
@@ -32,6 +33,7 @@
 | P1 | 공개 감시 범위 검토 | 기존 GitHub Actions workflow와 실제 공개 health endpoint의 일치 여부를 검토함 | 감시 대상·간격·알림 전환 기준이 문서와 일치함 |
 | P2 | 작업 증적 정리 | 변경 경로, 검사 결과, 토큰 측정 기록을 로컬 증적으로 관리함 | 검증 결과가 작업별로 재현 가능함 |
 | P2 | 운영 문서 정기 검토 | 분기별로 서비스 경로·운영 경계·복구 절차를 실제 구성과 대조함 | 폐기된 절차와 확인 필요 항목이 분리됨 |
+| P3 | Dependabot 업데이트 정책 검토(예정) | Dependabot 도입 필요성과 업데이트 검토 주기를 별도 검토함 | 운영 승인 후 정책을 확정하고 문서화함 |
 
 ## 검토 결과
 
