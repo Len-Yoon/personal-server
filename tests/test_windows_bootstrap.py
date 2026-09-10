@@ -159,6 +159,43 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("Update-TunnelTelegramNotification", cycle)
         self.assertLess(cycle.index("Update-TunnelTelegramNotification"), cycle.index("foreach ($component in $RecoveryComponents)"))
 
+    def test_recovery_events_are_bounded_structured_and_secret_free(self):
+        """Operator diagnostics need a compact history without credential or command leakage."""
+        self.assertIn('$RecoveryEventLogPath = Join-Path $RecoveryStateDirectory "recovery-events.jsonl"', SCRIPT)
+        self.assertIn("$RecoveryEventLogMaxEntries = 200", SCRIPT)
+        event_log = SCRIPT[
+            SCRIPT.index("function Write-RecoveryEvent")
+            : SCRIPT.index("function Save-RecoveryFailureState")
+        ]
+
+        self.assertIn("ToUniversalTime().ToString(\"o\")", event_log)
+        self.assertIn("component = $Component", event_log)
+        self.assertIn("event = $Event", event_log)
+        self.assertIn("status = $Status", event_log)
+        self.assertIn("action = $Action", event_log)
+        self.assertIn("ConvertTo-Json -Compress", event_log)
+        self.assertIn("Select-Object -Last ($RecoveryEventLogMaxEntries - 1)", event_log)
+        self.assertIn('Write-Info "Recovery event logging failed."', event_log)
+        self.assertNotIn("bot_token", event_log)
+        self.assertNotIn("chat_id", event_log)
+        self.assertNotIn("CommandLine", event_log)
+
+    def test_recovery_events_do_not_treat_action_dispatch_as_health_restoration(self):
+        """A restart request is not evidence that the affected component is healthy."""
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle")
+            : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+        reset = SCRIPT[
+            SCRIPT.index("function Reset-RecoveryFailure")
+            : SCRIPT.index("function Test-RecoveryActionNeeded")
+        ]
+
+        self.assertIn('Event "recovery_dispatch" -Status "accepted"', cycle)
+        self.assertIn('Event "recovery_dispatch" -Status "failed"', cycle)
+        self.assertNotIn('Event "recovery_completed" -Status "succeeded"', cycle)
+        self.assertIn('Event "health_restored" -Status "healthy"', reset)
+
     def test_emergency_reboot_task_uses_triggerless_system_xml_registration(self):
         reboot = SCRIPT[
             SCRIPT.index("function Install-EmergencyRebootTask")
