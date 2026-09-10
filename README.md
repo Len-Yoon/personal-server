@@ -22,11 +22,11 @@ Windows N100과 Ubuntu WSL2에서 운영하는 개인용 서비스 허브임. �
 
 | YouTube Memo | Book Memo |
 |---|---|
-| 영상 링크 등록과 저장된 영상별 메모 수를 확인함.<br><br><img src="docs/images/youtube-memo.png" alt="YouTube Memo 영상 등록과 저장된 영상 목록" width="460"> | 책 검색, 내 책장, 목차 체크, 장별 코멘트 기록을 한 화면에서 확인함.<br><br><img src=<img width="1216" height="3011" alt="admin-status" src="https://github.com/user-attachments/assets/a2127470-7949-4542-8e49-459ca3915126" /> alt="Book Memo 책장과 목차 체크 및 코멘트 기능" width="460"> |
+| 영상 링크 등록과 저장된 영상별 메모 수를 확인함.<br><br><img src="docs/images/youtube-memo.png" alt="YouTube Memo 영상 등록과 저장된 영상 목록" width="460"> | 책 검색, 내 책장, 목차 체크, 장별 코멘트 기록을 한 화면에서 확인함.<br><br><img src="docs/images/book-memo.png" alt="Book Memo 책장과 목차 체크 및 코멘트 기능" width="460"> |
 
 | 파일함 | 관리자 상태 |
 |---|---|
-| 파일·폴더 생성, 업로드, 다운로드, 검색, 정렬과 선택 삭제를 지원함.<br><br><img src="docs/images/file-manager.png" alt="파일함의 파일 목록과 업로드 및 검색 기능" width="460"> | 서버 자원, 서비스 Health, 승인형 HomeOps 조치 이력을 확인함.<br><br><img src="docs/images/admin-status.png" alt="관리자 상태와 HomeOps 운영 보조" width="460"> |
+| 파일·폴더 생성, 업로드, 다운로드, 검색, 정렬과 선택 삭제를 지원함.<br><br><img src="docs/images/file-manager.png" alt="파일함의 파일 목록과 업로드 및 검색 기능" width="460"> | 서버 자원, 서비스 Health, 승인형 HomeOps 조치 이력을 확인함.<br><br><img src="docs/images/admin-status.png" alt="관리자 상태와 HomeOps 운영 보조" width="360"> |
 
 ## 현재 구조
 
