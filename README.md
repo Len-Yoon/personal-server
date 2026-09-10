@@ -16,21 +16,13 @@ Windows N100과 Ubuntu WSL2에서 운영하는 개인용 서비스 허브임. �
 
 ## 주요 화면
 
-| 포털 대시보드 | 차량관리 Telegram |
+| 서비스 허브 | News Hub |
 |---|---|
-| <img src="docs/images/portal-dashboard.png" alt="Personal Server Portal dashboard" width="360"> | <img src="docs/images/car-care-telegram-status.png" alt="Telegram 차량관리 최신 운행 결과 알림" width="360"> |
-
-| File Manager | News Hub |
-|---|---|
-| <img src="docs/images/file-manager.png" alt="File manager" width="360"> | <img src="docs/images/news-hub.png" alt="News hub" width="360"> |
+| <img src="docs/images/portal-dashboard.png" alt="Personal Server 서비스 허브" width="480"> | <img src="docs/images/news-hub.png" alt="News Hub" width="480"> |
 
 | YouTube Memo | Book Memo |
 |---|---|
-| <img src="docs/images/youtube-memo.png" alt="YouTube memo" width="360"> | <img src="docs/images/book-memo.png" alt="Book memo" width="360"> |
-
-| 관리자 상태 |
-|---|
-| <img src="docs/images/admin-status.png" alt="Personal Server 관리자 상태 페이지" width="720"> |
+| <img src="docs/images/youtube-memo.png" alt="YouTube Memo" width="480"> | <img src="docs/images/book-memo.png" alt="Book Memo" width="480"> |
 
 ## 현재 구조
 
