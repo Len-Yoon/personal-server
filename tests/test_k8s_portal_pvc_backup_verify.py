@@ -12,7 +12,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False):
+    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -34,6 +34,31 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
             if existing_evidence:
                 evidence.write_text(existing_evidence, encoding="utf-8")
             self.write_fakes(bin_dir, root, calls, manifest, files, state, remote)
+            kubectl = bin_dir / "kubectl"
+            kubectl.write_text(
+                f'''#!/bin/sh
+set -eu
+printf '%s\\n' "kubectl $*" >> '{calls}'
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = scale ]; then
+  case "$*" in *'scale deployment/portal-web --replicas=0'*) exit 42 ;; esac
+fi
+if [ "${{PORTAL_FAKE_MISSING_PVC:-}}" = 1 ]; then
+  case "$*" in *'get pvc/'*) exit 42 ;; esac
+fi
+case "$*" in
+  *'get deployment portal-web -o jsonpath={{.spec.replicas}}') printf '%s\\n' '1'; exit 0 ;;
+  *'get pvc/portal-web-files-dynamic -o jsonpath={{.status.phase}}') printf '%s\\n' 'Bound'; exit 0 ;;
+  *'get pvc/portal-web-state-dynamic -o jsonpath={{.status.phase}}') printf '%s\\n' 'Bound'; exit 0 ;;
+  *'get deployment portal-web -o jsonpath={{.status.availableReplicas}}') printf '%s\\n' '0'; exit 0 ;;
+  *'scale deployment/portal-web --replicas=0') exit 0 ;;
+  *'scale deployment/portal-web --replicas=1') exit 0 ;;
+  *'get nodes --no-headers') printf '%s\\n' 'node-1 Ready'; exit 0 ;;
+esac
+exit 0
+''',
+                encoding="utf-8",
+            )
+            kubectl.chmod(0o755)
             env = {
                 **os.environ,
                 "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
@@ -61,6 +86,9 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
                 "PORTAL_RCLONE_CONFIG_FILE": rclone_config_file,
                 "PORTAL_RCLONE_PASSWORD_COMMAND": rclone_password_command,
                 "PORTAL_FAKE_ASSERT_LOCK_FD_CLOSED": "1" if assert_lock_fd_closed else "",
+                "PORTAL_BACKUP_EXECUTION_MODE": execution_mode,
+                "PORTAL_BACKUP_FILES_MOUNT": str(files) if execution_mode == "in-cluster" else "/data/files",
+                "PORTAL_BACKUP_STATE_MOUNT": str(state) if execution_mode == "in-cluster" else "/data/portal-web-state",
             }
             if namespace is not None:
                 env["PORTAL_NAMESPACE"] = namespace
@@ -124,7 +152,7 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
 
         write(
             "sudo",
-            "#!/bin/sh\nif [ \"${1:-}\" = -n ]; then shift; fi\nif [ \"${1:-}\" = -v ]; then exit 0; fi\nexec \"$@\"\n",
+            f"#!/bin/sh\nprintf '%s\\n' \"sudo $*\" >> '{calls}'\nif [ \"${{1:-}}\" = -n ]; then shift; fi\nif [ \"${{1:-}}\" = -v ]; then exit 0; fi\nexec \"$@\"\n",
         )
         write("flock", "#!/bin/sh\nif [ \"${PORTAL_FAKE_LOCK_BUSY:-}\" = 1 ]; then exit 1; fi\nexit 0\n")
         write(
@@ -282,6 +310,57 @@ esac
         self.assertIn("portal_pvc_backup=PASS", result.stdout)
         self.assertNotIn("scale deployment/portal-web", calls)
         self.assertNotIn("create -f", calls)
+
+    def test_in_cluster_mode_uses_kubectl_without_sudo_or_k3s(self):
+        result, calls, _, _ = self.run_tool("--check", execution_mode="in-cluster")
+        self.assertEqual(result.returncode, 0, result.stderr + " calls=" + calls)
+        self.assertNotIn("sudo -n k3s", calls)
+        self.assertNotIn("get nodes", calls)
+        self.assertIn("kubectl -n personal-server", calls)
+
+    def test_in_cluster_mode_waits_for_zero_available_writers_before_snapshot(self):
+        result, calls, _, _ = self.run_tool("--go", execution_mode="in-cluster")
+        self.assertEqual(result.returncode, 0, result.stderr + " calls=" + calls)
+        wait_call = "get deployment portal-web -o jsonpath={.status.availableReplicas}"
+        self.assertIn(wait_call, calls)
+        self.assertLess(calls.index("kubectl -n personal-server scale deployment/portal-web --replicas=0"), calls.index(wait_call))
+
+    def test_in_cluster_go_reads_own_mount_without_reader_pod_or_exec(self):
+        result, calls, manifest, _ = self.run_tool("--go", execution_mode="in-cluster")
+        self.assertEqual(result.returncode, 0, result.stderr + " calls=" + calls)
+        self.assertIn("portal_pvc_backup=PASS", result.stdout)
+        self.assertNotIn("create -f", calls)
+        self.assertNotIn("delete pod", calls)
+        self.assertNotIn(" exec ", calls)
+        self.assertEqual(manifest, "")
+
+    def test_in_cluster_failure_restores_original_portal_replica(self):
+        result, calls, _, _ = self.run_tool("--go", execution_mode="in-cluster", fail_at="upload")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("kubectl -n personal-server scale deployment/portal-web --replicas=0", calls)
+        self.assertIn("kubectl -n personal-server scale deployment/portal-web --replicas=1", calls)
+        self.assertNotIn("sudo", calls)
+        self.assertNotIn("k3s", calls)
+
+    def test_in_cluster_scale_failure_restores_original_portal_replica(self):
+        result, calls, _, _ = self.run_tool("--go", execution_mode="in-cluster", fail_at="scale")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("kubectl -n personal-server scale deployment/portal-web --replicas=0", calls)
+        self.assertIn("kubectl -n personal-server scale deployment/portal-web --replicas=1", calls)
+        self.assertNotIn("k3s", calls)
+
+    def test_in_cluster_missing_pvc_blocks_before_writer_pause(self):
+        result, calls, _, _ = self.run_tool("--go", execution_mode="in-cluster", missing_pvc=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("kubectl -n personal-server get pvc/portal-web-files-dynamic", calls)
+        self.assertNotIn("scale deployment/portal-web --replicas=0", calls)
+
+    def test_in_cluster_mode_uses_fixed_secret_and_work_defaults(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("/work/data/portal-runtime.mode", text)
+        self.assertIn("/work/.portal-backup-verified", text)
+        self.assertIn("/run/secrets/portal-backup/age-recipient", text)
+        self.assertIn("/run/secrets/portal-backup/age-identity", text)
 
     def test_kubernetes_commands_use_the_limited_noninteractive_k3s_sudo_grant(self):
         """Automatic backups may only use the existing passwordless k3s sudo grant."""
