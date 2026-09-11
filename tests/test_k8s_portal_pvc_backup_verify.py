@@ -1,3 +1,4 @@
+import json
 import os
 import signal
 import subprocess
@@ -12,7 +13,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host"):
+    def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -30,7 +31,8 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
             (root / "recipient.txt").write_text("recipient\n", encoding="utf-8")
             (root / "identity.txt").write_text("identity\n", encoding="utf-8")
             marker = root / "runtime.mode"
-            marker.write_text(runtime + "\n", encoding="utf-8")
+            if runtime_marker_present:
+                marker.write_text(runtime + "\n", encoding="utf-8")
             if existing_evidence:
                 evidence.write_text(existing_evidence, encoding="utf-8")
             self.write_fakes(bin_dir, root, calls, manifest, files, state, remote)
@@ -317,6 +319,42 @@ esac
         self.assertNotIn("sudo -n k3s", calls)
         self.assertNotIn("get nodes", calls)
         self.assertIn("kubectl -n personal-server", calls)
+
+    def test_in_cluster_mode_reads_and_patches_nonsecret_evidence_without_host_marker(self):
+        """Removing the host marker check must not bypass fixed evidence persistence."""
+        result, calls, _, _ = self.run_tool(
+            "--go", execution_mode="in-cluster", runtime_marker_present=False
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr + " calls=" + calls)
+        self.assertIn(
+            "get configmap portal-pvc-backup-evidence -o jsonpath={.data.evidence}", calls
+        )
+        self.assertIn("patch configmap portal-pvc-backup-evidence", calls)
+        self.assertNotIn("secret", calls.lower())
+
+    def test_in_cluster_failure_reports_only_allowlisted_status_after_portal_restore(self):
+        """A failed upload must be reported only after restoring Portal and with relay-safe keys."""
+        result, calls, _, _ = self.run_tool(
+            "--go", execution_mode="in-cluster", fail_at="upload", runtime_marker_present=False
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        restore = "scale deployment/portal-web --replicas=1"
+        status_line = next(
+            line for line in calls.splitlines() if "patch configmap sre-telegram-backup-status" in line
+        )
+        self.assertLess(calls.index(restore), calls.index(status_line))
+        patch = json.loads(status_line.split("--patch ", 1)[1])
+        self.assertEqual(
+            {operation["path"] for operation in patch},
+            {"/data/run_id", "/data/status", "/data/completed_at", "/data/stage"},
+        )
+        self.assertTrue(all(operation["op"] == "add" for operation in patch))
+        self.assertIn('"value":"failed"', status_line)
+        self.assertNotIn("apply -f", calls)
+        self.assertNotIn("create -f", calls)
+        self.assertNotIn(" exec ", calls)
 
     def test_in_cluster_mode_waits_for_zero_available_writers_before_snapshot(self):
         result, calls, _, _ = self.run_tool("--go", execution_mode="in-cluster")

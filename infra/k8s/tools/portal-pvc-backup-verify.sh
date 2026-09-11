@@ -28,6 +28,9 @@ MAX_AGE=${PORTAL_BACKUP_MAX_AGE_SECONDS:-86400}
 FILES_PVC='portal-web-files-dynamic'
 STATE_PVC='portal-web-state-dynamic'
 DEPLOYMENT='portal-web'
+EVIDENCE_CONFIGMAP='portal-pvc-backup-evidence'
+STATUS_CONFIGMAP='sre-telegram-backup-status'
+STATUS_NAMESPACE='monitoring'
 if [ "$EXECUTION_MODE" = in-cluster ]; then
   STATE_DIR=${PORTAL_BACKUP_STATE_DIR:-/work/portal-pvc-backup}
 else
@@ -129,8 +132,10 @@ assert_regular_tree() {
 assert_preflight() {
   [ "$NAMESPACE" = personal-server ] || return 1
   [ "$MAX_AGE" -ge 1 ] 2>/dev/null || return 1
-  [ -f "$RUNTIME_MARKER" ] && [ -r "$RUNTIME_MARKER" ] || return 1
-  [ "$(tr -d '\r\n' < "$RUNTIME_MARKER")" = k3s ] || return 1
+  if [ "$EXECUTION_MODE" = host ]; then
+    [ -f "$RUNTIME_MARKER" ] && [ -r "$RUNTIME_MARKER" ] || return 1
+    [ "$(tr -d '\r\n' < "$RUNTIME_MARKER")" = k3s ] || return 1
+  fi
   [ -r "$RECIPIENT" ] && [ -r "$IDENTITY" ] || return 1
   [ -d "$(dirname -- "$EVIDENCE")" ] && [ -w "$(dirname -- "$EVIDENCE")" ] || return 1
   mkdir -p -- "$STATE_DIR" || return 1
@@ -144,6 +149,9 @@ assert_preflight() {
   for command_name in "${required_commands[@]}"; do
     command -v "$command_name" >/dev/null || return 1
   done
+  if [ "$EXECUTION_MODE" = in-cluster ]; then
+    load_in_cluster_evidence || return 1
+  fi
 
   local replicas files_phase state_phase
   if [ "$EXECUTION_MODE" = host ]; then
@@ -281,6 +289,78 @@ evidence_is_current_k3s_pvc() {
   [ "$evidence_digest" = "$SOURCE_DIGEST" ] && [ "$evidence_runtime" = k3s-pvc ]
 }
 
+load_in_cluster_evidence() {
+  [ "$EXECUTION_MODE" = in-cluster ] || return 0
+  kctl -n "$NAMESPACE" get configmap "$EVIDENCE_CONFIGMAP" -o jsonpath='{.data.evidence}' >"$EVIDENCE" 2>>"$DIAGNOSTIC_FILE"
+}
+
+patch_in_cluster_evidence() {
+  local patch
+  [ "$EXECUTION_MODE" = in-cluster ] || return 0
+  patch=$(python3 - "$EVIDENCE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+print(json.dumps([{
+    "op": "add",
+    "path": "/data/evidence",
+    "value": Path(sys.argv[1]).read_text(encoding="utf-8"),
+}], separators=(",", ":")))
+PY
+)
+  kctl -n "$NAMESPACE" patch configmap "$EVIDENCE_CONFIGMAP" --type=json --patch "$patch" >>"$DIAGNOSTIC_FILE" 2>&1
+}
+
+safe_status_stage() {
+  local stage=${1//_/-}
+  [[ "$stage" =~ ^[a-z][a-z0-9-]{0,63}$ ]] || return 1
+  printf '%s' "$stage"
+}
+
+patch_in_cluster_status() {
+  local report_status=$1 report_stage=$2 completed_at patch
+  case "$report_status" in completed|unchanged|failed|restore_failed) ;; *) return 1 ;; esac
+  completed_at=$(utc_now)
+  report_stage=$(safe_status_stage "$report_stage") || return 1
+  patch=$(python3 - "$RUN_ID" "$report_status" "$completed_at" "$report_stage" <<'PY'
+import json
+import sys
+
+keys = ("run_id", "status", "completed_at", "stage")
+print(json.dumps([
+    {"op": "add", "path": f"/data/{key}", "value": value}
+    for key, value in zip(keys, sys.argv[1:])
+], separators=(",", ":")))
+PY
+)
+  kctl -n "$STATUS_NAMESPACE" get configmap "$STATUS_CONFIGMAP" -o json >/dev/null 2>>"$DIAGNOSTIC_FILE" || return 1
+  kctl -n "$STATUS_NAMESPACE" patch configmap "$STATUS_CONFIGMAP" --type=json --patch "$patch" >>"$DIAGNOSTIC_FILE" 2>&1
+}
+
+report_in_cluster_status() {
+  local exit_code=$1 restore_ok=$2 report_status report_stage
+  [ "$EXECUTION_MODE" = in-cluster ] && [ "$MODE" = --go ] || return 0
+  if [ "$exit_code" -eq 0 ] && [ "$restore_ok" -eq 1 ]; then
+    if [ "$BACKUP_UPLOAD_STATUS" = SKIPPED_UNCHANGED ]; then
+      report_status=unchanged
+      report_stage=unchanged
+    else
+      report_status=completed
+      report_stage=completed
+    fi
+  else
+    case "$FAILURE_STAGE" in
+      remote_restore|restore_validation|portal_readiness|portal_health)
+        report_status=restore_failed ;;
+      *)
+        report_status=failed ;;
+    esac
+    report_stage=${FAILURE_STAGE:-backup_failed}
+  fi
+  patch_in_cluster_status "$report_status" "$report_stage"
+}
+
 cleanup() {
   local status=$? restore_ok=1
   trap - EXIT
@@ -331,7 +411,15 @@ cleanup() {
       restore_ok=0
     else
       mv -- "$tmp_evidence" "$EVIDENCE"
+      if ! patch_in_cluster_evidence; then
+        FAILURE_STAGE='evidence'
+        restore_ok=0
+      fi
     fi
+  fi
+  if ! report_in_cluster_status "$status" "$restore_ok"; then
+    [ -n "$FAILURE_STAGE" ] || FAILURE_STAGE='reporting'
+    restore_ok=0
   fi
   if [ "$status" -ne 0 ] || [ "$restore_ok" -ne 1 ]; then
     [ "$MODE" = --check ] || rm -f -- "$EVIDENCE"

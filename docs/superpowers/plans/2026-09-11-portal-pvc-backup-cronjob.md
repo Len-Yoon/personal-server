@@ -67,7 +67,43 @@ Run: `python3 -m unittest tests.test_k8s_portal_pvc_backup_verify`
 
 Expected: PASS.
 
-### Task 2: backup runner image와 CronJob 최소 권한 매니페스트
+### Task 2: in-cluster evidence·Telegram 상태 기록 완성
+
+**Files:**
+- Modify: `infra/k8s/tools/portal-pvc-backup-verify.sh`
+- Modify: `tests/test_k8s_portal_pvc_backup_verify.py`
+
+**Interfaces:**
+- Consumes: in-cluster ServiceAccount의 fixed ConfigMap `portal-pvc-backup-evidence`, `sre-telegram-backup-status` get/patch 권한.
+- Produces: host mode와 분리된 in-cluster evidence persistence 및 고정 4-field Telegram backup status patch.
+
+- [ ] **Step 1: evidence/status 기록 RED 테스트 작성**
+
+```python
+def test_in_cluster_failure_patches_only_allowlisted_telegram_status_after_portal_restore(self):
+    result, calls, _ = self.run_tool("--go", execution_mode="in-cluster", fail_at="upload")
+    self.assertNotEqual(result.returncode, 0)
+    self.assertLess(calls.index("scale deployment/portal-web --replicas=1"), calls.index("patch configmap sre-telegram-backup-status"))
+    self.assertNotIn("apply -f", calls)
+```
+
+- [ ] **Step 2: 테스트가 현재 verifier의 ConfigMap 미기록으로 실패함을 확인**
+
+Run: `python3 -m unittest tests.test_k8s_portal_pvc_backup_verify.PortalPvcBackupVerifyTests.test_in_cluster_failure_patches_only_allowlisted_telegram_status_after_portal_restore`
+
+Expected: FAIL because the verifier does not patch either ConfigMap.
+
+- [ ] **Step 3: 고정 ConfigMap get/patch 구현**
+
+in-cluster mode는 runtime marker를 검증하지 않음. evidence는 non-secret data field만 read/patch하며, Telegram 상태는 `run_id`, `status`, `completed_at`, `stage` 4개 allow-listed field만 JSON patch로 기록함. failure status 기록은 Portal cleanup 이후에만 수행함.
+
+- [ ] **Step 4: host와 in-cluster verifier 테스트를 통과시킴**
+
+Run: `python3 -m unittest tests.test_k8s_portal_pvc_backup_verify`
+
+Expected: PASS.
+
+### Task 3: backup runner image와 CronJob 최소 권한 매니페스트
 
 **Files:**
 - Create: `infra/k8s/backup-automation/Dockerfile`
@@ -118,7 +154,7 @@ Run: `python3 -m unittest tests.test_k8s_portal_pvc_backup_cronjob && docker bui
 
 Expected: PASS. 실제 image build/import는 배포 승인 단계에서만 수행함.
 
-### Task 3: 안전한 설치·사전 점검·운영 문서
+### Task 4: 안전한 설치·사전 점검·운영 문서
 
 **Files:**
 - Create: `infra/k8s/tools/portal-pvc-backup-cronjob.sh`
@@ -164,7 +200,7 @@ Run: `python3 -m unittest tests.test_k8s_portal_pvc_backup_cronjob_install tests
 
 Expected: PASS.
 
-### Task 4: 독립 보안·운영 검토와 배포 준비
+### Task 5: 독립 보안·운영 검토와 배포 준비
 
 **Files:**
 - Review: 모든 Task 1~3 변경

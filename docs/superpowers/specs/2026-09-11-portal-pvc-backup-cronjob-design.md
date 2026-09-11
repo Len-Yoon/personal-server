@@ -25,8 +25,8 @@ WSL 사용자 systemd credential host-key 권한 제약으로 실패한 Portal P
 
 1. 매일 KST 기준 지정 시각에 `CronJob`이 backup runner image를 실행함.
 2. runner는 in-cluster ServiceAccount token과 `kubectl`로 Portal Deployment만 제한적으로 제어하고, 자체 read-only PVC mount로 기존 backup verify 도구를 `--go`로 실행함.
-3. `portal-pvc-backup-verify.sh`는 host 전용 `sudo k3s kubectl` 호출 대신 명시적 실행 모드에서 in-cluster `kubectl`을 사용함. 기존 host 수동 실행 모드는 유지함.
-4. runner는 결과를 고정 schema의 `monitoring/sre-telegram-backup-status` ConfigMap에 기록함.
+3. `portal-pvc-backup-verify.sh`는 host 전용 `sudo k3s kubectl` 호출 대신 명시적 실행 모드에서 in-cluster `kubectl`을 사용함. in-cluster mode는 host runtime marker를 요구하지 않으며, 기존 host 수동 실행 모드는 유지함.
+4. runner는 verifier 내부에서 비밀값 없는 evidence ConfigMap을 갱신하고, 결과를 고정 schema의 `monitoring/sre-telegram-backup-status` ConfigMap에 patch함.
 5. 기존 Telegram relay가 해당 ConfigMap의 새로운 run ID를 한 번만 전달함. CronJob에는 Telegram 자격 증명을 주입하지 않음.
 
 ## 권한 설계
@@ -41,13 +41,13 @@ WSL 사용자 systemd credential host-key 권한 제약으로 실패한 Portal P
 
 ## runner image
 
-- backup runner는 고정된 base image digest를 사용하고 `kubectl`, `rclone`, `age`, `sqlite3`, `bash`, `tar` 및 기존 backup 도구를 포함함.
+- backup runner는 저장소에서 이미 사용·검증된 base image digest를 사용하고 `kubectl`, `rclone`, `age`, `sqlite3`, `bash`, `tar` 및 기존 backup 도구를 포함함.
 - non-root, read-only root filesystem, 모든 Linux capability drop, `allowPrivilegeEscalation: false`를 적용함.
 - N100 배포 시 이미지를 명시 태그로 build/import하고 `imagePullPolicy: Never`를 사용함.
 
 ## 오류 처리와 복구
 
-- CronJob의 `backoffLimit: 0`, `activeDeadlineSeconds`, `ttlSecondsAfterFinished`를 설정함.
+- CronJob의 `backoffLimit: 0`, `activeDeadlineSeconds`, `ttlSecondsAfterFinished`, Portal 복구에 충분한 `terminationGracePeriodSeconds`를 설정함.
 - timeout·signal·백업 실패 시 기존 cleanup trap이 Portal writer 복구를 우선 수행함.
 - 결과 상태는 `completed`, `unchanged`, `failed`, `restore_failed`만 사용하며 stage는 allow-list 형식만 기록함.
 - Secret 부재, 권한 부족, image 누락은 Job 실패로 기록하며 Secret 내용은 어떠한 출력에도 포함하지 않음.
