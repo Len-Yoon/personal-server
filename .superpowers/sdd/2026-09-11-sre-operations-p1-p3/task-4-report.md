@@ -27,3 +27,10 @@ Portal 관리자 상태의 읽기 전용 자동복구 이력 표시를 구현하
 - Portal은 Windows host 로그를 직접 mount·읽기하지 않음.
 - PVC, Secret, Caddy, Compose writer, 서버 기동·스케줄러, 자격증명은 변경하지 않음.
 - 실제 N100에서 bridge 응답과 외부 `https://len.pe.kr/health` 3회 검증은 통합 운영 검토에서 수행 필요함.
+
+## P1 검토 보완
+
+- 독립 검토에서 system-agent 응답 본문이 전송 중단될 때 `http.client.IncompleteRead`가 전파되어 관리자 화면을 실패시킬 수 있음을 확인함.
+- RED: `test_recovery_events_incomplete_bridge_body_returns_empty_list`를 추가하고 실행함. `IncompleteRead` 전파로 예상대로 실패함.
+- GREEN: recovery bridge 읽기 단계에서 `http.client.HTTPException` 계열을 기존 실패 처리와 함께 catch하여 빈 목록을 반환하도록 수정함.
+- 재검증: `python3 -m unittest tests.test_portal_dashboard tests.test_homeops tests.test_verify_change_scope` 실행 결과 98건 통과함. `python3 -m compileall -q portal-web/app`, `git diff --check`, change harness `ready_for_review` 확인함.

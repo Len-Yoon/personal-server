@@ -126,6 +126,27 @@ class PortalDashboardTests(unittest.TestCase):
             services,
         )
 
+    def test_recovery_events_incomplete_bridge_body_returns_empty_list(self):
+        """Fails if a partial system-agent response breaks the administrator status page."""
+        from http.client import IncompleteRead
+
+        system_status = self.reload_system_status("")
+
+        class IncompleteResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                raise IncompleteRead(b"partial", 20)
+
+        with patch("app.services.system_status.urlopen", return_value=IncompleteResponse()):
+            events = system_status.get_recovery_events(timeout=0.01)
+
+        self.assertEqual(events, [])
+
     def test_demo_search_results_include_metadata(self):
         prepare_service_import("portal-web")
         os.environ["DEMO_MODE"] = "true"

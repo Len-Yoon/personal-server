@@ -1,4 +1,5 @@
 import os
+from http.client import HTTPException
 from typing import Any
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -87,7 +88,7 @@ def get_recovery_events(agent_url: str | None = None, timeout: float = 1.0) -> l
     try:
         with urlopen(f"{agent_url.rstrip('/')}/recovery-events", timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
-    except (OSError, URLError, UnicodeError, json.JSONDecodeError):
+    except (OSError, URLError, UnicodeError, HTTPException, json.JSONDecodeError):
         return []
 
     if not isinstance(payload, list):
