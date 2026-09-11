@@ -208,10 +208,38 @@ prepare_rclone_credentials() {
   RCLONE_CREDENTIAL_ARGS=()
 }
 
+classify_remote_access_failure() {
+  if grep -Eiq 'decrypt.*config|config.*decrypt|bad password|password.*incorrect' "$DIAGNOSTIC_FILE"; then
+    printf '%s\n' remote-config-password
+  elif grep -Eiq 'directory not found|path not found|object not found|does not exist' "$DIAGNOSTIC_FILE"; then
+    printf '%s\n' remote-path
+  elif grep -Eiq 'invalid_grant|unauthorized|permission denied|http.*(401|403)' "$DIAGNOSTIC_FILE"; then
+    printf '%s\n' remote-auth
+  elif grep -Eiq 'no such host|network is unreachable|connection refused|i/o timeout' "$DIAGNOSTIC_FILE"; then
+    printf '%s\n' remote-network
+  else
+    printf '%s\n' remote-access
+  fi
+}
+
 assert_remote_access() {
+  local status
   FAILURE_STAGE='remote_preflight'
-  prepare_rclone_credentials || return 1
-  rclone_with_credentials_timeout "${PORTAL_RCLONE_TIMEOUT_SECONDS:-30}" lsd --max-depth 1 --log-level ERROR "$REMOTE" >>"$DIAGNOSTIC_FILE" 2>&1
+  prepare_rclone_credentials || {
+    FAILURE_STAGE='remote-credentials'
+    return 1
+  }
+  if rclone_with_credentials_timeout "${PORTAL_RCLONE_TIMEOUT_SECONDS:-30}" lsd --max-depth 1 --log-level ERROR "$REMOTE" >>"$DIAGNOSTIC_FILE" 2>&1; then
+    return 0
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 124 ]; then
+    FAILURE_STAGE='remote-timeout'
+  else
+    FAILURE_STAGE=$(classify_remote_access_failure)
+  fi
+  return 1
 }
 
 acquire_lock() {
