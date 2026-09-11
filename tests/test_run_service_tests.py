@@ -42,6 +42,13 @@ class ServiceTestRunnerTests(unittest.TestCase):
         self.assertIn("tests.test_documentation_index", maintenance.command)
         self.assertEqual(maintenance.command.count("tests.test_documentation_index"), 1)
 
+    def test_maintenance_suite_runs_python_multipart_security_checks(self):
+        """Fails if the maintenance runner omits the multipart security contract."""
+        maintenance = next(suite for suite in SUITES if suite.name == "maintenance")
+
+        self.assertIn("tests.test_python_multipart_security", maintenance.command)
+        self.assertEqual(maintenance.command.count("tests.test_python_multipart_security"), 1)
+
     def test_k8s_contract_suite_runs_every_k8s_contract_module(self):
         suite = next(item for item in SUITES if item.name == "k8s-contracts")
         expected_modules = (

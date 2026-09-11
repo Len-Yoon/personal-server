@@ -113,6 +113,7 @@ SUITES = (
             "tests.test_deploy_n100",
             "tests.test_maintenance",
             "tests.test_run_service_tests",
+            "tests.test_python_multipart_security",
             "tests.test_verify_change_scope",
             "tests.test_windows_bootstrap",
         ),
