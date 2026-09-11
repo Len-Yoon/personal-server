@@ -53,14 +53,26 @@ relay, PrometheusRule, RBAC 경계, Prometheus target 상태를 검증하며 Sec
 
 ## Portal PVC 백업
 
-Portal이 K3s runtime일 때 N100 사용자 `systemd` timer가 암호화 백업과 복원 검증을 수행함. rclone 설정 암호는 N100 사용자 전용 암호화 credential로만 보관하며, sudo 비밀번호와 함께 저장하지 않음.
+Portal PVC 백업은 K3s CronJob 경로로 전환 준비됨. CronJob은 `suspend: true` 상태로 배포되며, 승인된 Secret Manager 또는 SOPS/age 절차로 사전 시딩된 runtime Secret과 runner image가 준비되기 전에는 활성화하지 않음. 저장소 도구는 Secret 값·rclone 설정·age identity를 생성·입력·출력하지 않음.
+
+전환 전에는 아래 읽기 점검과 client-side render를 실행함. `--preflight`는 Secret **이름과 key 이름만** 확인하고, Portal PVC가 `Bound`·`ReadWriteOnce` mount 계약을 충족하는지 확인함.
 
 ```bash
-bash infra/k8s/tools/portal-pvc-backup-automation.sh --status
+bash infra/k8s/tools/portal-pvc-backup-cronjob.sh --preflight
+bash infra/k8s/tools/portal-pvc-backup-cronjob.sh --render
 bash infra/k8s/tools/portal-pvc-backup-verify.sh --check
 ```
 
-백업 성공·변경 없음·실패·복원 검증 실패는 Telegram SRE relay로 알림. 실행 중인 백업을 중단하면 Portal을 즉시 다시 1개 replica로 복구한 뒤 상태를 확인해야 함.
+운영자 승인 후 `--apply`는 suspended CronJob과 최소 RBAC만 적용함. 기존 systemd timer를 비활성화하고, 수동 실행의 백업·복원 검증 및 Telegram 결과를 확인한 뒤에만 `--activate`로 CronJob을 해제함. 두 scheduler가 동시에 활성화되는 상태는 허용하지 않음.
+
+```bash
+bash infra/k8s/tools/portal-pvc-backup-cronjob.sh --apply
+bash infra/k8s/tools/portal-pvc-backup-cronjob.sh --status
+# 기존 timer가 inactive이고 수동 검증이 성공한 뒤에만 실행함.
+bash infra/k8s/tools/portal-pvc-backup-cronjob.sh --activate
+```
+
+CronJob은 매일 03:00 KST에 실행되며, `Forbid` 동시 실행 제한·실패 재시도 없음·read-only PVC mount·고정 ServiceAccount 권한을 사용함. 성공·변경 없음·실패·복원 검증 실패는 Telegram SRE relay로 상태 전환을 전달함. 실행 중 백업이 중단되면 300초 종료 유예 안에서 Portal replica 복구를 시도하며, 복구 상태를 확인해야 함.
 
 ## Portal 전환과 복구
 

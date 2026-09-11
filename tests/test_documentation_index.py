@@ -113,6 +113,17 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("portal-compose-bridge", operations)
         self.assertIn("compose-crawler", operations)
 
+    def test_k3s_docs_describe_suspended_cronjob_backup_cutover(self):
+        k3s = Path("infra/k8s/README.md").read_text(encoding="utf-8")
+        drill = Path("docs/recovery-drill.md").read_text(encoding="utf-8")
+
+        self.assertIn("portal-pvc-backup-cronjob.sh --preflight", k3s)
+        self.assertIn("portal-pvc-backup-cronjob.sh --activate", k3s)
+        self.assertIn("suspend: true", k3s)
+        self.assertIn("Secret 값", k3s)
+        self.assertIn("CronJob", drill)
+        self.assertIn("단일 스케줄러", drill)
+
     def test_subagent_workflow_defines_mandatory_routes(self):
         project_rules = Path("AGENTS.md").read_text(encoding="utf-8")
         workflow = Path("docs/codex-work-loop.md").read_text(encoding="utf-8")

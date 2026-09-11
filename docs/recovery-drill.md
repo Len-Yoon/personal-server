@@ -43,6 +43,15 @@ bash infra/k8s/tools/portal-pvc-backup-verify.sh --check
 
 성공 기준은 `personal-server` namespace, K3s runtime marker, PVC `Bound` 상태, 단일 Portal replica, 암호화 자격 증명 파일 접근 조건이 통과하는 것임. 이 명령은 백업 업로드나 복원 실행을 대신하지 않음.
 
+CronJob 전환을 준비하거나 상태를 점검할 때는 다음을 추가로 사용함. 이 점검은 Secret 값이 아니라 Secret 이름·key 이름과 PVC mount 계약만 확인함.
+
+```bash
+bash infra/k8s/tools/portal-pvc-backup-cronjob.sh --preflight
+bash infra/k8s/tools/portal-pvc-backup-cronjob.sh --status
+```
+
+CronJob은 기본 suspended 상태이며, 기존 systemd timer가 inactive이고 수동 백업·복원 검증과 Telegram 결과 확인이 끝난 경우에만 별도 승인으로 활성화함. 단일 스케줄러 원칙에 따라 systemd timer와 CronJob을 동시에 활성화하지 않음.
+
 ### 2. SRE Telegram relay·Prometheus 점검
 
 ```bash
@@ -104,4 +113,4 @@ bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
 ## 확인 필요 사항
 
 - 실제 결과 보관 위치와 월간 실행 담당자는 운영자가 지정해야 함.
-- 이 절차는 자동 실행을 추가하지 않으며, scheduler·timer·CronJob 변경을 포함하지 않음.
+- 이 절차는 CronJob 활성화·systemd timer 중지·Secret 사전 시딩·runner image import를 수행하지 않음. 해당 변경은 별도 운영 승인과 배포 검증이 필요함.

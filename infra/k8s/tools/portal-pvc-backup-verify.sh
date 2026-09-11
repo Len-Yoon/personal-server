@@ -371,6 +371,7 @@ cleanup() {
   fi
   if [ "$WRITERS_SCALED" -eq 1 ] && [ "${ORIGINAL_REPLICAS:-0}" -gt 0 ] 2>/dev/null; then
     if ! kctl -n personal-server scale "deployment/$DEPLOYMENT" --replicas="$ORIGINAL_REPLICAS" >>"$DIAGNOSTIC_FILE" 2>&1; then
+      FAILURE_STAGE='portal_readiness'
       restore_ok=0
     elif ! kctl -n personal-server rollout status "deployment/$DEPLOYMENT" --timeout=120s >>"$DIAGNOSTIC_FILE" 2>&1; then
       FAILURE_STAGE='portal_readiness'
@@ -502,6 +503,7 @@ remote_object="$REMOTE/portal-${RUN_ID}.tar.age"
 progress remote_upload
 rclone_with_credentials copyto --immutable --log-level ERROR "$ciphertext" "$remote_object" >>"$DIAGNOSTIC_FILE" 2>&1
 progress remote_restore
+FAILURE_STAGE='remote_restore'
 rclone_with_credentials copyto --log-level ERROR "$remote_object" "$WORKDIR/download.age" >>"$DIAGNOSTIC_FILE" 2>&1
 [ "$artifact_digest" = "sha256:$(sha256sum "$WORKDIR/download.age" | awk '{print $1}')" ]
 age -d -i "$IDENTITY" -o "$WORKDIR/restore.tar" "$WORKDIR/download.age" >>"$DIAGNOSTIC_FILE" 2>&1
@@ -513,6 +515,7 @@ assert_regular_tree "$restore/data/portal-web-state"
 grep -Fxq "source_runtime=k3s-pvc" "$restore/manifest.txt"
 grep -Fxq "source_digest=$SOURCE_DIGEST" "$restore/manifest.txt"
 progress restore_validation
+FAILURE_STAGE='restore_validation'
 sqlite3 "$restore/data/portal-web-state/homeops.sqlite3" 'PRAGMA quick_check;' 2>>"$DIAGNOSTIC_FILE" | grep -Fxq ok
 ARTIFACT_DIGEST="$artifact_digest"
 EVIDENCE_PENDING=1

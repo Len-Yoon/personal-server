@@ -400,6 +400,15 @@ esac
         self.assertIn("/run/secrets/portal-backup/age-recipient", text)
         self.assertIn("/run/secrets/portal-backup/age-identity", text)
 
+    def test_restore_and_portal_recovery_failures_set_restore_specific_stages(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        restore = text[text.index("progress remote_restore") : text.index("ARTIFACT_DIGEST=")]
+        cleanup_start = text.index("if [ \"$WRITERS_SCALED\" -eq 1")
+        cleanup = text[cleanup_start : text.index("WRITERS_SCALED=0", cleanup_start)]
+        self.assertIn("FAILURE_STAGE='remote_restore'", restore)
+        self.assertIn("FAILURE_STAGE='restore_validation'", restore)
+        self.assertIn("FAILURE_STAGE='portal_readiness'", cleanup)
+
     def test_kubernetes_commands_use_the_limited_noninteractive_k3s_sudo_grant(self):
         """Automatic backups may only use the existing passwordless k3s sudo grant."""
         text = SCRIPT.read_text(encoding="utf-8")
