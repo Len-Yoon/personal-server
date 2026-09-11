@@ -7,17 +7,38 @@ umask 077
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd)
 NAMESPACE=${PORTAL_NAMESPACE:-personal-server}
-RUNTIME_MARKER=${PORTAL_RUNTIME_MARKER:-$REPO_ROOT/data/portal-runtime.mode}
-EVIDENCE=${PORTAL_BACKUP_EVIDENCE:-$REPO_ROOT/.portal-backup-verified}
-RECIPIENT=${PORTAL_AGE_RECIPIENT:-$HOME/.local/share/personal-server/age/recipient.txt}
-IDENTITY=${PORTAL_AGE_IDENTITY:-$HOME/.local/share/personal-server/age/identity.txt}
+EXECUTION_MODE=${PORTAL_BACKUP_EXECUTION_MODE:-host}
+case "$EXECUTION_MODE" in
+  host|in-cluster) ;;
+  *) printf '%s\n' 'portal_pvc_backup=FAIL' >&2; exit 2 ;;
+esac
+if [ "$EXECUTION_MODE" = in-cluster ]; then
+  RUNTIME_MARKER=${PORTAL_RUNTIME_MARKER:-/work/data/portal-runtime.mode}
+  EVIDENCE=${PORTAL_BACKUP_EVIDENCE:-/work/.portal-backup-verified}
+  RECIPIENT=${PORTAL_AGE_RECIPIENT:-/run/secrets/portal-backup/age-recipient}
+  IDENTITY=${PORTAL_AGE_IDENTITY:-/run/secrets/portal-backup/age-identity}
+else
+  RUNTIME_MARKER=${PORTAL_RUNTIME_MARKER:-$REPO_ROOT/data/portal-runtime.mode}
+  EVIDENCE=${PORTAL_BACKUP_EVIDENCE:-$REPO_ROOT/.portal-backup-verified}
+  RECIPIENT=${PORTAL_AGE_RECIPIENT:-$HOME/.local/share/personal-server/age/recipient.txt}
+  IDENTITY=${PORTAL_AGE_IDENTITY:-$HOME/.local/share/personal-server/age/identity.txt}
+fi
 REMOTE=${PORTAL_BACKUP_REMOTE:-gdrive:PersonalServer-encrypted-backups}
 MAX_AGE=${PORTAL_BACKUP_MAX_AGE_SECONDS:-86400}
 FILES_PVC='portal-web-files-dynamic'
 STATE_PVC='portal-web-state-dynamic'
 DEPLOYMENT='portal-web'
-STATE_DIR=${PORTAL_BACKUP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/personal-server/portal-pvc-backup}
+EVIDENCE_CONFIGMAP='portal-pvc-backup-evidence'
+STATUS_CONFIGMAP='sre-telegram-backup-status'
+STATUS_NAMESPACE='monitoring'
+if [ "$EXECUTION_MODE" = in-cluster ]; then
+  STATE_DIR=${PORTAL_BACKUP_STATE_DIR:-/work/portal-pvc-backup}
+else
+  STATE_DIR=${PORTAL_BACKUP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/personal-server/portal-pvc-backup}
+fi
 LOCK_FILE=${PORTAL_BACKUP_LOCK_FILE:-$STATE_DIR/portal-pvc-backup.lock}
+FILES_MOUNT=${PORTAL_BACKUP_FILES_MOUNT:-/data/files}
+STATE_MOUNT=${PORTAL_BACKUP_STATE_MOUNT:-/data/portal-web-state}
 RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)-$$
 WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/portal-pvc-backup-${RUN_ID}.XXXXXX")
 DIAGNOSTIC_FILE="$WORKDIR/diagnostics.log"
@@ -75,7 +96,12 @@ run_timeout_tracked() {
   ACTIVE_TIMEOUT_PID=''
   return "$status"
 }
-kctl() { run_timeout "${PORTAL_KUBECTL_TIMEOUT_SECONDS:-120}" sudo -n k3s kubectl "$@"; }
+if [ "$EXECUTION_MODE" = host ]; then
+  KCTL=(sudo -n k3s kubectl)
+else
+  KCTL=(kubectl)
+fi
+kctl() { run_timeout "${PORTAL_KUBECTL_TIMEOUT_SECONDS:-120}" "${KCTL[@]}" "$@"; }
 fail() { return 1; }
 progress() { printf '%s\n' "portal_pvc_backup_stage=$1"; }
 
@@ -106,25 +132,50 @@ assert_regular_tree() {
 assert_preflight() {
   [ "$NAMESPACE" = personal-server ] || return 1
   [ "$MAX_AGE" -ge 1 ] 2>/dev/null || return 1
-  [ -f "$RUNTIME_MARKER" ] && [ -r "$RUNTIME_MARKER" ] || return 1
-  [ "$(tr -d '\r\n' < "$RUNTIME_MARKER")" = k3s ] || return 1
+  if [ "$EXECUTION_MODE" = host ]; then
+    [ -f "$RUNTIME_MARKER" ] && [ -r "$RUNTIME_MARKER" ] || return 1
+    [ "$(tr -d '\r\n' < "$RUNTIME_MARKER")" = k3s ] || return 1
+  fi
   [ -r "$RECIPIENT" ] && [ -r "$IDENTITY" ] || return 1
   [ -d "$(dirname -- "$EVIDENCE")" ] && [ -w "$(dirname -- "$EVIDENCE")" ] || return 1
   mkdir -p -- "$STATE_DIR" || return 1
   chmod 700 "$STATE_DIR" || return 1
-  for command_name in age rclone sqlite3 python3 sudo k3s flock tar find sha256sum awk grep xargs mktemp; do
+  required_commands=(age rclone sqlite3 python3 flock tar find sha256sum awk grep xargs mktemp)
+  if [ "$EXECUTION_MODE" = host ]; then
+    required_commands+=(sudo k3s)
+  else
+    required_commands+=(kubectl)
+  fi
+  for command_name in "${required_commands[@]}"; do
     command -v "$command_name" >/dev/null || return 1
   done
+  if [ "$EXECUTION_MODE" = in-cluster ]; then
+    load_in_cluster_evidence || return 1
+  fi
 
-  local nodes ready_count replicas files_phase state_phase
-  nodes=$(kctl get nodes --no-headers) || return 1
-  ready_count=$(printf '%s\n' "$nodes" | awk '$2 == "Ready" { count++ } END { print count + 0 }')
-  [ "$ready_count" -eq 1 ] || return 1
+  local replicas files_phase state_phase
+  if [ "$EXECUTION_MODE" = host ]; then
+    local nodes ready_count
+    nodes=$(kctl get nodes --no-headers) || return 1
+    ready_count=$(printf '%s\n' "$nodes" | awk '$2 == "Ready" { count++ } END { print count + 0 }')
+    [ "$ready_count" -eq 1 ] || return 1
+  fi
   replicas=$(kctl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o jsonpath='{.spec.replicas}') || return 1
   [ "$replicas" = 1 ] || return 1
   files_phase=$(kctl -n "$NAMESPACE" get "pvc/$FILES_PVC" -o jsonpath='{.status.phase}') || return 1
   state_phase=$(kctl -n "$NAMESPACE" get "pvc/$STATE_PVC" -o jsonpath='{.status.phase}') || return 1
   [ "$files_phase" = Bound ] && [ "$state_phase" = Bound ]
+}
+
+wait_for_writer_termination() {
+  local deadline=$((SECONDS + ${PORTAL_WRITER_TERMINATION_TIMEOUT_SECONDS:-120})) available
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    available=$(kctl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o jsonpath='{.status.availableReplicas}') || return 1
+    available=${available:-0}
+    [ "$available" = 0 ] && return 0
+    sleep 1
+  done
+  return 1
 }
 
 rclone_with_credentials() {
@@ -212,7 +263,16 @@ stream_pvc_tree() {
   local mount_path=$1 destination=$2 stream_archive
   mkdir -p -- "$destination"
   stream_archive="$destination/.pvc-stream.tar"
-  if ! run_timeout_tracked "${PORTAL_STREAM_TIMEOUT_SECONDS:-120}" sudo -n k3s kubectl -n "$NAMESPACE" exec -i "$READER_POD" -- tar -C "$mount_path" -cf - . >"$stream_archive" 2>>"$DIAGNOSTIC_FILE"; then
+  if [ "$EXECUTION_MODE" = in-cluster ]; then
+    tar -C "$mount_path" -cf "$stream_archive" . >>"$DIAGNOSTIC_FILE" 2>&1 || {
+      rm -f -- "$stream_archive"
+      return 1
+    }
+    tar -C "$destination" -xf "$stream_archive" >>"$DIAGNOSTIC_FILE" 2>&1
+    rm -f -- "$stream_archive"
+    return
+  fi
+  if ! run_timeout_tracked "${PORTAL_STREAM_TIMEOUT_SECONDS:-120}" "${KCTL[@]}" -n "$NAMESPACE" exec -i "$READER_POD" -- tar -C "$mount_path" -cf - . >"$stream_archive" 2>>"$DIAGNOSTIC_FILE"; then
     rm -f -- "$stream_archive"
     return 1
   fi
@@ -229,6 +289,78 @@ evidence_is_current_k3s_pvc() {
   [ "$evidence_digest" = "$SOURCE_DIGEST" ] && [ "$evidence_runtime" = k3s-pvc ]
 }
 
+load_in_cluster_evidence() {
+  [ "$EXECUTION_MODE" = in-cluster ] || return 0
+  kctl -n "$NAMESPACE" get configmap "$EVIDENCE_CONFIGMAP" -o jsonpath='{.data.evidence}' >"$EVIDENCE" 2>>"$DIAGNOSTIC_FILE"
+}
+
+patch_in_cluster_evidence() {
+  local patch
+  [ "$EXECUTION_MODE" = in-cluster ] || return 0
+  patch=$(python3 - "$EVIDENCE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+print(json.dumps([{
+    "op": "add",
+    "path": "/data/evidence",
+    "value": Path(sys.argv[1]).read_text(encoding="utf-8"),
+}], separators=(",", ":")))
+PY
+)
+  kctl -n "$NAMESPACE" patch configmap "$EVIDENCE_CONFIGMAP" --type=json --patch "$patch" >>"$DIAGNOSTIC_FILE" 2>&1
+}
+
+safe_status_stage() {
+  local stage=${1//_/-}
+  [[ "$stage" =~ ^[a-z][a-z0-9-]{0,63}$ ]] || return 1
+  printf '%s' "$stage"
+}
+
+patch_in_cluster_status() {
+  local report_status=$1 report_stage=$2 completed_at patch
+  case "$report_status" in completed|unchanged|failed|restore_failed) ;; *) return 1 ;; esac
+  completed_at=$(utc_now)
+  report_stage=$(safe_status_stage "$report_stage") || return 1
+  patch=$(python3 - "$RUN_ID" "$report_status" "$completed_at" "$report_stage" <<'PY'
+import json
+import sys
+
+keys = ("run_id", "status", "completed_at", "stage")
+print(json.dumps([
+    {"op": "add", "path": f"/data/{key}", "value": value}
+    for key, value in zip(keys, sys.argv[1:])
+], separators=(",", ":")))
+PY
+)
+  kctl -n "$STATUS_NAMESPACE" get configmap "$STATUS_CONFIGMAP" -o json >/dev/null 2>>"$DIAGNOSTIC_FILE" || return 1
+  kctl -n "$STATUS_NAMESPACE" patch configmap "$STATUS_CONFIGMAP" --type=json --patch "$patch" >>"$DIAGNOSTIC_FILE" 2>&1
+}
+
+report_in_cluster_status() {
+  local exit_code=$1 restore_ok=$2 report_status report_stage
+  [ "$EXECUTION_MODE" = in-cluster ] && [ "$MODE" = --go ] || return 0
+  if [ "$exit_code" -eq 0 ] && [ "$restore_ok" -eq 1 ]; then
+    if [ "$BACKUP_UPLOAD_STATUS" = SKIPPED_UNCHANGED ]; then
+      report_status=unchanged
+      report_stage=unchanged
+    else
+      report_status=completed
+      report_stage=completed
+    fi
+  else
+    case "$FAILURE_STAGE" in
+      remote_restore|restore_validation|portal_readiness|portal_health)
+        report_status=restore_failed ;;
+      *)
+        report_status=failed ;;
+    esac
+    report_stage=${FAILURE_STAGE:-backup_failed}
+  fi
+  patch_in_cluster_status "$report_status" "$report_stage"
+}
+
 cleanup() {
   local status=$? restore_ok=1
   trap - EXIT
@@ -239,15 +371,18 @@ cleanup() {
   fi
   if [ "$WRITERS_SCALED" -eq 1 ] && [ "${ORIGINAL_REPLICAS:-0}" -gt 0 ] 2>/dev/null; then
     if ! kctl -n personal-server scale "deployment/$DEPLOYMENT" --replicas="$ORIGINAL_REPLICAS" >>"$DIAGNOSTIC_FILE" 2>&1; then
+      FAILURE_STAGE='portal_readiness'
       restore_ok=0
     elif ! kctl -n personal-server rollout status "deployment/$DEPLOYMENT" --timeout=120s >>"$DIAGNOSTIC_FILE" 2>&1; then
       FAILURE_STAGE='portal_readiness'
       restore_ok=0
     else
-      PORTAL_POD=$(kctl -n personal-server get pod -l app.kubernetes.io/name=portal-web -o jsonpath='{.items[0].metadata.name}') || PORTAL_POD=''
-      if [ -z "$PORTAL_POD" ] || ! kctl -n personal-server exec "$PORTAL_POD" -- python3 -c 'import urllib.request; response = urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=10); raise SystemExit(0 if response.status == 200 else 1)' >>"$DIAGNOSTIC_FILE" 2>&1; then
-        FAILURE_STAGE='portal_health'
-        restore_ok=0
+      if [ "$EXECUTION_MODE" = host ]; then
+        PORTAL_POD=$(kctl -n personal-server get pod -l app.kubernetes.io/name=portal-web -o jsonpath='{.items[0].metadata.name}') || PORTAL_POD=''
+        if [ -z "$PORTAL_POD" ] || ! kctl -n personal-server exec "$PORTAL_POD" -- python3 -c 'import urllib.request; response = urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=10); raise SystemExit(0 if response.status == 200 else 1)' >>"$DIAGNOSTIC_FILE" 2>&1; then
+          FAILURE_STAGE='portal_health'
+          restore_ok=0
+        fi
       fi
     fi
     WRITERS_SCALED=0
@@ -277,7 +412,15 @@ cleanup() {
       restore_ok=0
     else
       mv -- "$tmp_evidence" "$EVIDENCE"
+      if ! patch_in_cluster_evidence; then
+        FAILURE_STAGE='evidence'
+        restore_ok=0
+      fi
     fi
+  fi
+  if ! report_in_cluster_status "$status" "$restore_ok"; then
+    [ -n "$FAILURE_STAGE" ] || FAILURE_STAGE='reporting'
+    restore_ok=0
   fi
   if [ "$status" -ne 0 ] || [ "$restore_ok" -ne 1 ]; then
     [ "$MODE" = --check ] || rm -f -- "$EVIDENCE"
@@ -305,7 +448,9 @@ on_signal() {
 trap cleanup EXIT
 trap on_signal INT TERM HUP
 
-ensure_sudo_access || exit 1
+if [ "$EXECUTION_MODE" = host ]; then
+  ensure_sudo_access || exit 1
+fi
 assert_preflight || exit 1
 assert_remote_access || exit 1
 FAILURE_STAGE=''
@@ -325,11 +470,17 @@ case "$ORIGINAL_REPLICAS" in ''|*[!0-9]*) exit 1 ;; esac
 WRITERS_SCALED=1
 progress writer_pause
 kctl -n personal-server scale "deployment/$DEPLOYMENT" --replicas=0 >>"$DIAGNOSTIC_FILE" 2>&1
-kctl -n personal-server wait --for=delete pod -l app.kubernetes.io/name=portal-web --timeout=120s >>"$DIAGNOSTIC_FILE" 2>&1
+  if [ "$EXECUTION_MODE" = host ]; then
+    kctl -n personal-server wait --for=delete pod -l app.kubernetes.io/name=portal-web --timeout=120s >>"$DIAGNOSTIC_FILE" 2>&1
+  else
+    wait_for_writer_termination
+  fi
 progress pvc_snapshot
-create_reader_pod
-stream_pvc_tree /data/files "$stage/data/files"
-stream_pvc_tree /data/portal-web-state "$stage/data/portal-web-state"
+if [ "$EXECUTION_MODE" = host ]; then
+  create_reader_pod
+fi
+stream_pvc_tree "$FILES_MOUNT" "$stage/data/files"
+stream_pvc_tree "$STATE_MOUNT" "$stage/data/portal-web-state"
 sqlite3 "$stage/data/portal-web-state/homeops.sqlite3" 'PRAGMA quick_check;' 2>>"$DIAGNOSTIC_FILE" | grep -Fxq ok
 assert_regular_tree "$stage/data/files"
 assert_regular_tree "$stage/data/portal-web-state"
@@ -352,6 +503,7 @@ remote_object="$REMOTE/portal-${RUN_ID}.tar.age"
 progress remote_upload
 rclone_with_credentials copyto --immutable --log-level ERROR "$ciphertext" "$remote_object" >>"$DIAGNOSTIC_FILE" 2>&1
 progress remote_restore
+FAILURE_STAGE='remote_restore'
 rclone_with_credentials copyto --log-level ERROR "$remote_object" "$WORKDIR/download.age" >>"$DIAGNOSTIC_FILE" 2>&1
 [ "$artifact_digest" = "sha256:$(sha256sum "$WORKDIR/download.age" | awk '{print $1}')" ]
 age -d -i "$IDENTITY" -o "$WORKDIR/restore.tar" "$WORKDIR/download.age" >>"$DIAGNOSTIC_FILE" 2>&1
@@ -363,6 +515,7 @@ assert_regular_tree "$restore/data/portal-web-state"
 grep -Fxq "source_runtime=k3s-pvc" "$restore/manifest.txt"
 grep -Fxq "source_digest=$SOURCE_DIGEST" "$restore/manifest.txt"
 progress restore_validation
+FAILURE_STAGE='restore_validation'
 sqlite3 "$restore/data/portal-web-state/homeops.sqlite3" 'PRAGMA quick_check;' 2>>"$DIAGNOSTIC_FILE" | grep -Fxq ok
 ARTIFACT_DIGEST="$artifact_digest"
 EVIDENCE_PENDING=1
