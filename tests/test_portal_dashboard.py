@@ -475,6 +475,50 @@ class PortalDashboardTests(unittest.TestCase):
         finally:
             os.environ.pop("ADMIN_STATUS_PASSWORD", None)
 
+    def test_authenticated_admin_status_displays_only_sanitized_recent_recovery_events(self):
+        """Fails if recovery history bypasses the bridge, leaks raw fields, or exceeds ten rows."""
+        os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
+        recovery_events = [
+            {
+                "timestamp": f"2026-09-11T0{index}:30:00+00:00",
+                "component": f"component-{index}",
+                "event": "accepted" if index == 0 else "health_restored",
+                "status": "accepted" if index == 0 else "ok",
+                "action": "restart_tunnel" if index == 0 else "none",
+                "error": "raw-error-must-not-appear",
+                "path": "/host/recovery-events.jsonl",
+            }
+            for index in range(12)
+        ]
+        try:
+            app = self.load_app()
+            with patch(
+                "app.routers.admin.get_recovery_events",
+                return_value=recovery_events,
+                create=True,
+            ) as get_recovery_events:
+                with TestClient(app) as client:
+                    response = client.post(
+                        "/admin/status",
+                        data={"password": "secret"},
+                        headers={"Origin": "http://testserver"},
+                    )
+
+            self.assertEqual(response.status_code, 200)
+            get_recovery_events.assert_called_once_with()
+            self.assertIn("최근 자동복구 이력", response.text)
+            self.assertIn("조치 실행 수락", response.text)
+            self.assertIn("실제 복구 완료", response.text)
+            self.assertIn("2026-09-11 09:30", response.text)
+            for index in range(10):
+                self.assertIn(f"component-{index}", response.text)
+            self.assertNotIn("component-10", response.text)
+            self.assertNotIn("component-11", response.text)
+            self.assertNotIn("raw-error-must-not-appear", response.text)
+            self.assertNotIn("/host/recovery-events.jsonl", response.text)
+        finally:
+            os.environ.pop("ADMIN_STATUS_PASSWORD", None)
+
     def test_admin_login_issues_homeops_session_that_allows_diagnosis_without_reentering_password(self):
         """A successful administrator login is the sole point that creates the HomeOps session."""
         os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
