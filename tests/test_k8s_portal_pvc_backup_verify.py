@@ -44,13 +44,11 @@ printf '%s\\n' "kubectl $*" >> '{calls}'
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = scale ]; then
   case "$*" in *'scale deployment/portal-web --replicas=0'*) exit 42 ;; esac
 fi
-if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = rollout-timeout ]; then
-  case "$*" in
-    *'rollout status deployment/portal-web'*)
-      printf '%s\\n' 'error: timed out waiting for the condition' >&2
-      exit 1
-      ;;
-  esac
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = availability-command ]; then
+  case "$*" in *'get deployment portal-web -o jsonpath={{.status.availableReplicas}}'*) exit 42 ;; esac
+fi
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = availability-timeout ]; then
+  case "$*" in *'get deployment portal-web -o jsonpath={{.status.availableReplicas}}'*) exit 124 ;; esac
 fi
 if [ "${{PORTAL_FAKE_MISSING_PVC:-}}" = 1 ]; then
   case "$*" in *'get pvc/'*) exit 42 ;; esac
@@ -59,7 +57,9 @@ case "$*" in
   *'get deployment portal-web -o jsonpath={{.spec.replicas}}') printf '%s\\n' '1'; exit 0 ;;
   *'get pvc/portal-web-files-dynamic -o jsonpath={{.status.phase}}') printf '%s\\n' 'Bound'; exit 0 ;;
   *'get pvc/portal-web-state-dynamic -o jsonpath={{.status.phase}}') printf '%s\\n' 'Bound'; exit 0 ;;
-  *'get deployment portal-web -o jsonpath={{.status.availableReplicas}}') printf '%s\\n' '0'; exit 0 ;;
+  *'get deployment portal-web -o jsonpath={{.status.availableReplicas}}')
+    if grep -Fq 'scale deployment/portal-web --replicas=1' '{calls}'; then printf '%s\\n' '1'; else printf '%s\\n' '0'; fi
+    exit 0 ;;
   *'scale deployment/portal-web --replicas=0') exit 0 ;;
   *'scale deployment/portal-web --replicas=1') exit 0 ;;
   *'get nodes --no-headers') printf '%s\\n' 'node-1 Ready'; exit 0 ;;
@@ -177,16 +177,11 @@ shift
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = reader ]; then
   case "$*" in *'wait --for=condition=Ready'*) exit 42 ;; esac
 fi
-if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = rollout ]; then
-  case "$*" in *'rollout status deployment/portal-web'*) exit 42 ;; esac
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = availability-command ]; then
+  case "$*" in *'get deployment portal-web -o jsonpath={{.status.availableReplicas}}'*) exit 42 ;; esac
 fi
-if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = rollout-timeout ]; then
-  case "$*" in
-    *'rollout status deployment/portal-web'*)
-      printf '%s\\n' 'error: timed out waiting for the condition' >&2
-      exit 1
-      ;;
-  esac
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = availability-timeout ]; then
+  case "$*" in *'get deployment portal-web -o jsonpath={{.status.availableReplicas}}'*) exit 124 ;; esac
 fi
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = health ]; then
   case "$*" in *'exec portal-web-1'*) exit 42 ;; esac
@@ -212,6 +207,9 @@ if [ "${{PORTAL_FAKE_MISSING_PVC:-}}" = 1 ]; then
 fi
 case "$*" in
   'get nodes --no-headers') printf '%s\\n' 'node-1 Ready'; exit 0 ;;
+  *'get deployment portal-web -o jsonpath={{.status.availableReplicas}}')
+    if grep -Fq 'scale deployment/portal-web --replicas=1' '{calls}'; then printf '%s\\n' '1'; else printf '%s\\n' '0'; fi
+    exit 0 ;;
   *'get deployment portal-web -o jsonpath={{.spec.replicas}}') printf '%s\\n' '1'; exit 0 ;;
   *'get pvc/portal-web-files-dynamic -o jsonpath={{.status.phase}}') printf '%s\\n' 'Bound'; exit 0 ;;
   *'get pvc/portal-web-state-dynamic -o jsonpath={{.status.phase}}') printf '%s\\n' 'Bound'; exit 0 ;;
@@ -226,7 +224,6 @@ case "$*" in
     cat > '{manifest}'
     if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = create ] && grep -Fq 'kind: Pod' '{manifest}'; then exit 42; fi
     exit 0 ;;
-  *'rollout status deployment/portal-web'*) exit 0 ;;
   *'get pod -l app.kubernetes.io/name=portal-web'*) printf '%s\\n' portal-web-1; exit 0 ;;
   *'exec portal-web-1'*)
     case "$*" in
@@ -375,9 +372,9 @@ esac
         self.assertNotIn("create -f", calls)
         self.assertNotIn(" exec ", calls)
 
-    def test_in_cluster_rollout_timeout_reports_restore_failed_after_portal_restore(self):
+    def test_in_cluster_availability_command_failure_reports_restore_failed_after_portal_restore(self):
         result, calls, _, _ = self.run_tool(
-            "--go", execution_mode="in-cluster", fail_at="rollout-timeout"
+            "--go", execution_mode="in-cluster", fail_at="availability-command"
         )
 
         self.assertNotEqual(result.returncode, 0)
@@ -387,8 +384,8 @@ esac
         )
         self.assertLess(calls.index(restore), calls.index(status_line))
         self.assertIn('"value":"restore_failed"', status_line)
-        self.assertIn('"value":"portal-rollout-timeout"', status_line)
-        self.assertNotIn("timed out waiting for the condition", status_line)
+        self.assertIn('"value":"portal-rollout-command"', status_line)
+        self.assertNotIn("error:", status_line)
 
     def test_in_cluster_mode_waits_for_zero_available_writers_before_snapshot(self):
         result, calls, _, _ = self.run_tool("--go", execution_mode="in-cluster")
@@ -593,21 +590,45 @@ esac
         self.assertIn("portal_pvc_backup=PASS", result.stdout)
         self.assertIn("source_runtime=k3s-pvc", evidence)
         self.assertIn("scale deployment/portal-web --replicas=1", calls)
-        self.assertIn("rollout status deployment/portal-web", calls)
+        self.assertIn("get deployment portal-web -o jsonpath={.status.availableReplicas}", calls)
         self.assertIn("exec portal-web-1", calls)
 
     def test_portal_readiness_wait_defaults_to_five_minutes_and_can_be_overridden(self):
         result, default_calls, _, _ = self.run_tool("--go")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("rollout status deployment/portal-web --timeout=300s", default_calls)
+        self.assertIn("get deployment portal-web -o jsonpath={.status.availableReplicas}", default_calls)
 
         result, configured_calls, _, _ = self.run_tool("--go", readiness_timeout=420)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("rollout status deployment/portal-web --timeout=420s", configured_calls)
+        self.assertIn("get deployment portal-web -o jsonpath={.status.availableReplicas}", configured_calls)
 
         source = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("readiness_kubectl_timeout_seconds=$((READINESS_TIMEOUT_SECONDS + 30))", source)
-        self.assertIn('kctl_with_timeout "$readiness_kubectl_timeout_seconds" -n personal-server rollout status', source)
+        self.assertIn('READINESS_TIMEOUT_SECONDS=${PORTAL_READINESS_TIMEOUT_SECONDS:-300}', source)
+        self.assertIn("wait_for_portal_availability", source)
+
+    def test_portal_readiness_uses_available_replicas_not_rollout_watch(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        cleanup_start = text.index("cleanup() {")
+        cleanup = text[cleanup_start : text.index("WRITERS_SCALED=0", cleanup_start)]
+        self.assertIn("wait_for_portal_availability", cleanup)
+        self.assertNotIn("rollout status", cleanup)
+
+    def test_portal_availability_check_is_bounded_by_remaining_readiness_time(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        helper_start = text.index("wait_for_portal_availability() {")
+        helper = text[helper_start : text.index("cleanup() {", helper_start)]
+
+        self.assertIn("remaining=$((deadline - SECONDS))", helper)
+        self.assertIn('kctl_with_deadline_timeout "$remaining"', helper)
+        self.assertIn('sleep "$sleep_seconds"', helper)
+
+    def test_availability_query_timeout_reports_a_safe_timeout_stage(self):
+        result, _, _, evidence = self.run_tool("--go", fail_at="availability-timeout")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("portal_pvc_backup_stage=portal-rollout-timeout", result.stdout)
+        self.assertNotIn("portal-rollout-command", result.stdout)
+        self.assertEqual(evidence, "")
 
     def test_portal_readiness_timeout_rejects_out_of_range_or_noncanonical_values(self):
         for value in ("119", "601", "0300", "invalid"):
@@ -630,8 +651,8 @@ esac
             self.assertIn(stage, result.stdout)
         self.assertNotIn("/tmp/", result.stdout)
 
-    def test_rollout_failure_removes_evidence_and_reports_fixed_failure(self):
-        result, calls, _, evidence = self.run_tool("--go", fail_at="rollout")
+    def test_availability_command_failure_removes_evidence_and_reports_fixed_failure(self):
+        result, calls, _, evidence = self.run_tool("--go", fail_at="availability-command")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "\n".join((
             "portal_pvc_backup_stage=writer_pause",
@@ -645,17 +666,17 @@ esac
         self.assertEqual(evidence, "")
         self.assertIn("scale deployment/portal-web --replicas=1", calls)
 
-    def test_rollout_timeout_has_a_safe_distinct_failure_stage(self):
+    def test_availability_timeout_has_a_safe_distinct_failure_stage(self):
         text = SCRIPT.read_text(encoding="utf-8")
         cleanup_start = text.index("cleanup() {")
         cleanup = text[cleanup_start : text.index("WRITERS_SCALED=0", cleanup_start)]
-        self.assertIn("rollout_status=$?", cleanup)
-        self.assertIn("124) FAILURE_STAGE='portal-rollout-timeout'", cleanup)
+        self.assertIn("availability_status=$?", cleanup)
+        self.assertIn("1) FAILURE_STAGE='portal-rollout-timeout'", cleanup)
 
-    def test_rollout_command_timeout_reports_a_safe_timeout_stage(self):
-        result, _, _, evidence = self.run_tool("--go", fail_at="rollout-timeout")
+    def test_availability_command_failure_reports_a_safe_command_stage(self):
+        result, _, _, evidence = self.run_tool("--go", fail_at="availability-command")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("portal_pvc_backup_stage=portal-rollout-timeout", result.stdout)
+        self.assertIn("portal_pvc_backup_stage=portal-rollout-command", result.stdout)
         self.assertEqual(evidence, "")
 
     def test_health_failure_removes_evidence_and_reports_fixed_failure(self):
@@ -775,7 +796,8 @@ esac
         text = SCRIPT.read_text(encoding="utf-8")
         timeout_helper = text[text.index("run_timeout() {") : text.index("kctl() {")]
 
-        self.assertIn('python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" "$@" 9>&-', timeout_helper)
+        self.assertIn('python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" 10 "$@" 9>&-', timeout_helper)
+        self.assertIn('python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" 0 "$@" 9>&-', timeout_helper)
         self.assertIn('run_unlocked() { "$@" 9</dev/null; }', text)
         self.assertIn("process_group=0", text)
         self.assertNotIn("start_new_session=True", text)
