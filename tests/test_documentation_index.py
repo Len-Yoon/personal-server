@@ -41,6 +41,9 @@ class DocumentationIndexTests(unittest.TestCase):
     def test_recovery_drill_uses_isolated_safe_tools_and_stop_criteria(self):
         content = Path("docs/recovery-drill.md").read_text(encoding="utf-8")
 
+        self.assertIn("monthly-recovery-drill.sh", content)
+        self.assertIn("recovery-drills/<run-id>.json", content)
+        self.assertIn("원자적으로 증적화", content)
         self.assertIn("portal-pvc-backup-verify.sh --check", content)
         self.assertIn("sre-telegram-verify.sh", content)
         self.assertIn("sre-pod-recovery-lab.sh --run", content)

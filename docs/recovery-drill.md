@@ -12,7 +12,13 @@
 
 ## 핵심 요약
 
-본 문서는 승인된 통제 훈련 절차임. 이번 변경에서는 실제 Tunnel 중지·자동복구·재부팅을 수행하지 않음. 실제 Tunnel-only 훈련은 별도 사용자 승인 뒤에만 실행하며, 다음 순서와 외부 health·Telegram 결과를 증적으로 남김.
+본 문서는 승인된 통제 훈련 절차임. 이번 변경에서는 실제 Tunnel 중지·자동복구·재부팅을 수행하지 않음. 실제 Tunnel-only 훈련은 별도 사용자 승인 뒤에만 실행하며, 월간 실행기는 아래 세 도구를 순서대로 호출하고 결과를 원자적으로 증적화함.
+
+```bash
+bash infra/k8s/tools/monthly-recovery-drill.sh
+```
+
+증적은 `~/.local/state/personal-server/recovery-drills/<run-id>.json`에 저장함. 증적에는 실행 시각, 단계별 성공 여부, 실패 단계, Pod 정리 여부만 기록하며 명령 출력·Secret·token·chat ID·운영 데이터는 기록하지 않음. 한 단계가 실패하면 이후 단계는 실행하지 않음.
 
 ## Tunnel 장애 모의 순서
 
@@ -61,6 +67,8 @@ bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
 
 정리 성공 기준은 `sre-recovery-lab-<run-id>` namespace가 더 이상 존재하지 않는 것임.
 
+월간 실행기를 사용하는 경우 위 세 명령을 개별 실행하지 않고 `monthly-recovery-drill.sh`만 실행함. 실행기는 3단계의 출력에서 run ID를 확인한 뒤 `--cleanup <run-id>`를 호출하고 정리 성공 여부를 증적에 포함함.
+
 ## 중단 기준과 복구 조치
 
 아래 중단 기준은 1·2단계의 정상적인 `personal-server`·`monitoring` 읽기 점검에는 적용하지 않으며, 3단계 격리된 Pod 자동복구 실습에만 적용함.
@@ -88,6 +96,8 @@ bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
 | 알림 점검 | PASS 또는 FAIL |
 | Pod 복구 실습 | PASS 또는 FAIL 및 run ID |
 | 중단·예외 | 사실과 후속 조치만 기록함 |
+
+자동 증적 JSON의 상태값은 `success` 또는 `failed`이며, 단계 상태값은 `success`, `failed`, `not_run` 중 하나임.
 
 토큰, 비밀번호, Secret 값, chat ID, 운영 데이터 내용은 결과 기록에 포함하지 않음.
 
