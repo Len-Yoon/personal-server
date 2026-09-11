@@ -25,6 +25,7 @@ else
 fi
 REMOTE=${PORTAL_BACKUP_REMOTE:-gdrive:PersonalServer-encrypted-backups}
 MAX_AGE=${PORTAL_BACKUP_MAX_AGE_SECONDS:-86400}
+READINESS_TIMEOUT_SECONDS=${PORTAL_READINESS_TIMEOUT_SECONDS:-300}
 FILES_PVC='portal-web-files-dynamic'
 STATE_PVC='portal-web-state-dynamic'
 DEPLOYMENT='portal-web'
@@ -101,7 +102,12 @@ if [ "$EXECUTION_MODE" = host ]; then
 else
   KCTL=(kubectl)
 fi
-kctl() { run_timeout "${PORTAL_KUBECTL_TIMEOUT_SECONDS:-120}" "${KCTL[@]}" "$@"; }
+kctl_with_timeout() {
+  local seconds=$1
+  shift
+  run_timeout "$seconds" "${KCTL[@]}" "$@"
+}
+kctl() { kctl_with_timeout "${PORTAL_KUBECTL_TIMEOUT_SECONDS:-120}" "$@"; }
 fail() { return 1; }
 progress() { printf '%s\n' "portal_pvc_backup_stage=$1"; }
 
@@ -132,6 +138,8 @@ assert_regular_tree() {
 assert_preflight() {
   [ "$NAMESPACE" = personal-server ] || return 1
   [ "$MAX_AGE" -ge 1 ] 2>/dev/null || return 1
+  case "$READINESS_TIMEOUT_SECONDS" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
+  [ "$READINESS_TIMEOUT_SECONDS" -ge 120 ] && [ "$READINESS_TIMEOUT_SECONDS" -le 600 ] || return 1
   if [ "$EXECUTION_MODE" = host ]; then
     [ -f "$RUNTIME_MARKER" ] && [ -r "$RUNTIME_MARKER" ] || return 1
     [ "$(tr -d '\r\n' < "$RUNTIME_MARKER")" = k3s ] || return 1
@@ -390,7 +398,7 @@ report_in_cluster_status() {
 }
 
 cleanup() {
-  local status=$? restore_ok=1
+  local status=$? restore_ok=1 readiness_kubectl_timeout_seconds
   trap - EXIT
   # A follow-up Ctrl+C must not interrupt reader deletion or Portal restoration.
   trap '' INT TERM HUP
@@ -398,10 +406,11 @@ cleanup() {
     kctl -n personal-server delete pod "$READER_POD" --ignore-not-found --wait=true >>"$DIAGNOSTIC_FILE" 2>&1 || restore_ok=0
   fi
   if [ "$WRITERS_SCALED" -eq 1 ] && [ "${ORIGINAL_REPLICAS:-0}" -gt 0 ] 2>/dev/null; then
+    readiness_kubectl_timeout_seconds=$((READINESS_TIMEOUT_SECONDS + 30))
     if ! kctl -n personal-server scale "deployment/$DEPLOYMENT" --replicas="$ORIGINAL_REPLICAS" >>"$DIAGNOSTIC_FILE" 2>&1; then
       FAILURE_STAGE='portal_readiness'
       restore_ok=0
-    elif ! kctl -n personal-server rollout status "deployment/$DEPLOYMENT" --timeout=120s >>"$DIAGNOSTIC_FILE" 2>&1; then
+    elif ! kctl_with_timeout "$readiness_kubectl_timeout_seconds" -n personal-server rollout status "deployment/$DEPLOYMENT" --timeout="${READINESS_TIMEOUT_SECONDS}s" >>"$DIAGNOSTIC_FILE" 2>&1; then
       FAILURE_STAGE='portal_readiness'
       restore_ok=0
     else
