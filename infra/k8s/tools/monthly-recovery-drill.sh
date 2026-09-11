@@ -77,7 +77,12 @@ with open(path, "w", encoding="utf-8") as stream:
     stream.flush()
     os.fsync(stream.fileno())
 PY
-mv -f -- "$TMP_EVIDENCE" "$EVIDENCE"
+if ln "$TMP_EVIDENCE" "$EVIDENCE"; then
+  rm -f -- "$TMP_EVIDENCE"
+else
+  printf '%s\n' '복구 훈련 증적 publish 충돌; 기존 증적을 보존함' >&2
+  exit 1
+fi
 if [ "$status" = success ]; then
   printf 'recovery_drill=PASS\nrecovery_drill_run_id=%s\n' "$RUN_ID"
   exit 0

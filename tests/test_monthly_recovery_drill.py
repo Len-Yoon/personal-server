@@ -12,6 +12,11 @@ RUNNER = ROOT / "infra/k8s/tools/monthly-recovery-drill.sh"
 
 
 class MonthlyRecoveryDrillTests(unittest.TestCase):
+    def test_publish_contract_is_atomic_no_clobber(self):
+        source = RUNNER.read_text(encoding="utf-8")
+        self.assertNotIn("mv -f", source)
+        self.assertIn('ln "$TMP_EVIDENCE" "$EVIDENCE"', source)
+
     def run_drill(self, scripts, *, fail_stage=None, preexisting=False):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
