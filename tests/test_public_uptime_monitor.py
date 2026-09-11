@@ -5,6 +5,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "public-uptime-monitor.yml"
 CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
+PUBLIC_HEALTH_TARGETS = {
+    "portal": "https://len.pe.kr/health",
+    "news": "https://news.len.pe.kr/health",
+    "youtube_memo": "https://memo.len.pe.kr/health",
+    "book_memo": "https://books.len.pe.kr/health",
+}
 
 
 class PublicUptimeMonitorTests(unittest.TestCase):
@@ -16,6 +22,25 @@ class PublicUptimeMonitorTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("https://len.pe.kr/health", workflow)
         self.assertIn("--max-time", workflow)
+
+    def test_workflow_aggregates_all_fixed_public_service_health_checks(self):
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+        for identifier, url in PUBLIC_HEALTH_TARGETS.items():
+            self.assertIn(f'check_health "{identifier}" "{url}"', workflow)
+        self.assertIn('failed_services+=("$service")', workflow)
+        self.assertIn('(IFS=,; printf \'failed_services=%s\\n\' "${failed_services[*]}")', workflow)
+        self.assertIn('if ((${#failed_services[@]} > 0)); then', workflow)
+        self.assertIn('const failedServices = "${{ steps.health.outputs.failed_services }}";', workflow)
+        self.assertIn('body: `외부 건강 점검에서 실패한 서비스: ${failedServices}.`,', workflow)
+
+    def test_workflow_recovers_only_after_all_public_service_health_checks_succeed(self):
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+        health_step = workflow[workflow.index("- id: health"):workflow.index("- id: incident")]
+        self.assertIn('if ((${#failed_services[@]} > 0)); then', health_step)
+        self.assertIn("exit 1", health_step)
+        self.assertNotIn("exit 1\n          done", health_step)
 
     def test_workflow_notifies_only_when_an_incident_opens_or_recovers(self):
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")

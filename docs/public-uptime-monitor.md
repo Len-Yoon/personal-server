@@ -2,16 +2,23 @@
 
 ## 목적
 
-N100의 로컬 감시기와 GitHub Actions가 상호 보완적으로 장애·복구 전환을 감시함. N100 감시기는 Cloudflare Tunnel의 로컬 상태를 복구하면서 직접 알리고, GitHub Actions는 `https://len.pe.kr/health`를 N100과 독립된 외부 경로에서 확인해 알림을 보냄.
+N100의 로컬 감시기와 GitHub Actions가 상호 보완적으로 장애·복구 전환을 감시함. N100 감시기는 Cloudflare Tunnel의 로컬 상태를 복구하면서 직접 알리고, GitHub Actions는 네 공개 서비스 health를 N100과 독립된 외부 경로에서 확인해 알림을 보냄.
+
+| 식별자 | 공개 health URL |
+|---|---|
+| `portal` | `https://len.pe.kr/health` |
+| `news` | `https://news.len.pe.kr/health` |
+| `youtube_memo` | `https://memo.len.pe.kr/health` |
+| `book_memo` | `https://books.len.pe.kr/health` |
 
 ## 알림 기준
 
 | 상황 | Telegram 메시지 | 중복 처리 |
 |---|---|---|
-| 공개 건강 점검 실패 | `[개인서버 장애] 외부 점검에서 접속 실패를 확인했습니다. 자동복구 상태를 확인하세요.` | 장애 전환 시 1회 |
-| 장애 알림 전송이 성공한 뒤 이후 점검 성공 | `[개인서버 복구] 외부 점검에서 정상 응답을 다시 확인했습니다.` | 복구 전환 시 1회 |
+| 공개 health 중 하나 이상 실패 | `[개인서버 장애] 외부 점검에서 접속 실패를 확인했습니다. 자동복구 상태를 확인하세요.` | 장애 전환 시 1회 |
+| 장애 알림 전송이 성공한 뒤 네 공개 health 모두 성공 | `[개인서버 복구] 외부 점검에서 정상 응답을 다시 확인했습니다.` | 복구 전환 시 1회 |
 
-점검이 실패한 동안에는 같은 장애 메시지를 반복 전송하지 않음. GitHub 저장소에 열린 `[SRE] len.pe.kr 공개 상태 장애` 이슈와, Telegram 장애 메시지 전송이 성공했음을 표시하는 기록으로 상태를 보관하며 정상 복구 시 해당 이슈를 닫음.
+점검 중 하나라도 실패한 동안에는 같은 장애 메시지를 반복 전송하지 않음. 네 서비스가 모두 성공할 때만 정상 복구로 판정함. GitHub 저장소에 열린 `[SRE] len.pe.kr 공개 상태 장애` 이슈와, Telegram 장애 메시지 전송이 성공했음을 표시하는 기록으로 상태를 보관하며 정상 복구 시 해당 이슈를 닫음. 이슈에는 실패한 고정 서비스 식별자만 기록하며 URL query, 응답 본문, Telegram 자격증명은 기록하지 않음.
 
 Telegram Secret이 누락되었거나 Telegram 장애 메시지 전송이 실패하면 GitHub Actions는 외부 health 점검과 장애 Issue 상태 처리를 계속함. 전송이 가능한 다음 실패 점검에서 장애 메시지 전송을 다시 시도함. 성공 기록이 남기 전까지 복구 전환 메시지를 보내지 않음. 알림 전송 증적이 없는 Issue가 정상 전환을 맞으면 복구 Telegram을 보내지 않고 `알림 미전송` 증적을 남긴 뒤 종료함. 따라서 장애 알림이 수신됐는지와 이후 정상 점검이 모두 확인되어야 복구 알림이 발송됨.
 
@@ -69,7 +76,7 @@ N100 직접 알림 자격 증명은 **일반 자격 증명**으로 등록함. �
 
 ## 수동 점검
 
-GitHub 저장소의 `Actions` → `Public Portal Uptime Monitor` → `Run workflow`를 선택해 즉시 실행 가능함. 정상 상태에서는 Telegram 메시지를 보내지 않음.
+GitHub 저장소의 `Actions` → `Public Portal Uptime Monitor` → `Run workflow`를 선택해 즉시 실행 가능함. 네 공개 health가 모두 정상인 상태에서는 Telegram 메시지를 보내지 않음.
 
 N100 직접 알림은 다음 순서로 수동 검증함.
 
