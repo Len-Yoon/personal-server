@@ -12,7 +12,7 @@ RUNNER = ROOT / "infra/k8s/tools/monthly-recovery-drill.sh"
 
 
 class MonthlyRecoveryDrillTests(unittest.TestCase):
-    def run_drill(self, scripts, *, fail_stage=None):
+    def run_drill(self, scripts, *, fail_stage=None, preexisting=False):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             log = tmp_path / "calls.log"
@@ -33,11 +33,16 @@ class MonthlyRecoveryDrillTests(unittest.TestCase):
                     "CALL_LOG": str(log),
                     "RECOVERY_DRILL_STATE_DIR": str(tmp_path / "evidence"),
                     "RECOVERY_DRILL_RUN_ID": "20260911T120000Z-test",
+                    "RECOVERY_DRILL_POD_RUN_ID": "lab-test",
                     "MONTHLY_RECOVERY_DRILL_BACKUP_TOOL": str(tools["backup"]),
                     "MONTHLY_RECOVERY_DRILL_TELEGRAM_TOOL": str(tools["telegram"]),
                     "MONTHLY_RECOVERY_DRILL_POD_TOOL": str(tools["pod"]),
                 }
             )
+            if preexisting:
+                existing = tmp_path / "evidence" / "20260911T120000Z-test.json"
+                existing.parent.mkdir(parents=True, exist_ok=True)
+                existing.write_text('{"status":"original"}\n', encoding="utf-8")
             if fail_stage:
                 env["FAIL_STAGE"] = fail_stage
             result = subprocess.run(
@@ -70,6 +75,26 @@ class MonthlyRecoveryDrillTests(unittest.TestCase):
         self.assertIsNone(payload["failed_stage"])
         self.assertEqual([stage["name"] for stage in payload["stages"]], ["backup", "telegram", "pod"])
         self.assertTrue(payload["stages"][-1]["cleanup"])
+
+    def test_failed_pod_still_requests_cleanup_with_preassigned_safe_run_id(self):
+        scripts = {
+            "backup": "",
+            "telegram": "",
+            "pod": "if [[ ${1:-} == --run ]]; then exit 1; fi\n",
+        }
+        result, log, evidence = self.run_drill(scripts)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(log.splitlines(), ["backup --check", "telegram ", "pod --run", "pod --cleanup lab-test"])
+        payload = json.loads(evidence)
+        self.assertEqual(payload["failed_stage"], "pod")
+        self.assertEqual(payload["pod_run_id"], "lab-test")
+        self.assertTrue(payload["stages"][-1]["cleanup"])
+
+    def test_existing_evidence_is_not_overwritten(self):
+        scripts = {"backup": "", "telegram": "", "pod": "echo sre_pod_recovery_run_id=lab-test\n"}
+        result, _log, content = self.run_drill(scripts, preexisting=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(content, '{"status":"original"}\n')
 
     def test_failure_stops_following_steps_and_records_failed_stage(self):
         scripts = {

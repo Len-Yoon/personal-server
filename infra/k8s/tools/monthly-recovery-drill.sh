@@ -7,6 +7,7 @@ BACKUP_TOOL=${MONTHLY_RECOVERY_DRILL_BACKUP_TOOL:-$SCRIPT_DIR/portal-pvc-backup-
 TELEGRAM_TOOL=${MONTHLY_RECOVERY_DRILL_TELEGRAM_TOOL:-$SCRIPT_DIR/sre-telegram-verify.sh}
 POD_TOOL=${MONTHLY_RECOVERY_DRILL_POD_TOOL:-$SCRIPT_DIR/sre-pod-recovery-lab.sh}
 RUN_ID=${RECOVERY_DRILL_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}
+POD_RUN_ID=${RECOVERY_DRILL_POD_RUN_ID:-sre-drill-$(date -u +%Y%m%d%H%M%S)-$$}
 
 if [ "$#" -ne 0 ]; then printf '%s\n' "사용법: $0" >&2; exit 2; fi
 if [[ ! "$RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,62}$ ]]; then
@@ -15,6 +16,14 @@ fi
 mkdir -p -- "$STATE_DIR"
 chmod 700 "$STATE_DIR"
 EVIDENCE="$STATE_DIR/$RUN_ID.json"
+if [ -e "$EVIDENCE" ]; then
+  printf '%s\n' '동일 run id의 복구 훈련 증적이 이미 존재함' >&2
+  exit 1
+fi
+if [[ ! "$POD_RUN_ID" =~ ^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$ ]]; then
+  printf '%s\n' 'Pod 실습 run id가 유효하지 않음' >&2
+  exit 2
+fi
 TMP_OUTPUT=$(mktemp "${TMPDIR:-/tmp}/recovery-drill-output.XXXXXX")
 chmod 600 "$TMP_OUTPUT"
 TMP_EVIDENCE=$(mktemp "$STATE_DIR/.${RUN_ID}.XXXXXX")
@@ -39,22 +48,19 @@ if [ -z "$failed_stage" ]; then
   if run_quiet "$TELEGRAM_TOOL"; then telegram_status=success; else telegram_status=failed; failed_stage=telegram; fi
 fi
 if [ -z "$failed_stage" ]; then
-  if run_quiet "$POD_TOOL" --run; then pod_status=success; else pod_status=failed; failed_stage=pod; fi
-  pod_run_id=$(sed -nE 's/^sre_pod_recovery_run_id=([a-z0-9][a-z0-9-]*)$/\1/p' "$TMP_OUTPUT" | tail -n 1)
-  if [ -n "${pod_run_id:-}" ]; then
-    if run_quiet "$POD_TOOL" --cleanup "$pod_run_id"; then pod_cleanup=true; else failed_stage=${failed_stage:-pod_cleanup}; fi
-  fi
-  if [ "$pod_status" = success ] && [ "$pod_cleanup" != true ]; then failed_stage=${failed_stage:-pod_cleanup}; fi
+  if SRE_RECOVERY_LAB_RUN_ID="$POD_RUN_ID" run_quiet "$POD_TOOL" --run; then pod_status=success; else pod_status=failed; failed_stage=pod; fi
+  if run_quiet "$POD_TOOL" --cleanup "$POD_RUN_ID"; then pod_cleanup=true; else failed_stage=${failed_stage:-pod_cleanup}; fi
 fi
 
 completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 status=success
 [ -n "$failed_stage" ] && status=failed
-python3 - "$TMP_EVIDENCE" "$RUN_ID" "$started_at" "$completed_at" "$status" "${failed_stage:-}" "$backup_status" "$telegram_status" "$pod_status" "$pod_cleanup" <<'PY'
+python3 - "$TMP_EVIDENCE" "$RUN_ID" "$POD_RUN_ID" "$started_at" "$completed_at" "$status" "${failed_stage:-}" "$backup_status" "$telegram_status" "$pod_status" "$pod_cleanup" <<'PY'
 import json, os, sys
-path, run_id, started, completed, status, failed, backup, telegram, pod, cleanup = sys.argv[1:]
+path, run_id, pod_run_id, started, completed, status, failed, backup, telegram, pod, cleanup = sys.argv[1:]
 payload = {
     "run_id": run_id,
+    "pod_run_id": pod_run_id,
     "started_at": started,
     "completed_at": completed,
     "status": status,
