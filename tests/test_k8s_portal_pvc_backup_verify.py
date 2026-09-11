@@ -44,6 +44,14 @@ printf '%s\\n' "kubectl $*" >> '{calls}'
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = scale ]; then
   case "$*" in *'scale deployment/portal-web --replicas=0'*) exit 42 ;; esac
 fi
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = rollout-timeout ]; then
+  case "$*" in
+    *'rollout status deployment/portal-web'*)
+      printf '%s\\n' 'error: timed out waiting for the condition' >&2
+      exit 1
+      ;;
+  esac
+fi
 if [ "${{PORTAL_FAKE_MISSING_PVC:-}}" = 1 ]; then
   case "$*" in *'get pvc/'*) exit 42 ;; esac
 fi
@@ -171,6 +179,14 @@ if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = reader ]; then
 fi
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = rollout ]; then
   case "$*" in *'rollout status deployment/portal-web'*) exit 42 ;; esac
+fi
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = rollout-timeout ]; then
+  case "$*" in
+    *'rollout status deployment/portal-web'*)
+      printf '%s\\n' 'error: timed out waiting for the condition' >&2
+      exit 1
+      ;;
+  esac
 fi
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = health ]; then
   case "$*" in *'exec portal-web-1'*) exit 42 ;; esac
@@ -358,6 +374,21 @@ esac
         self.assertNotIn("apply -f", calls)
         self.assertNotIn("create -f", calls)
         self.assertNotIn(" exec ", calls)
+
+    def test_in_cluster_rollout_timeout_reports_restore_failed_after_portal_restore(self):
+        result, calls, _, _ = self.run_tool(
+            "--go", execution_mode="in-cluster", fail_at="rollout-timeout"
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        restore = "scale deployment/portal-web --replicas=1"
+        status_line = next(
+            line for line in calls.splitlines() if "patch configmap sre-telegram-backup-status" in line
+        )
+        self.assertLess(calls.index(restore), calls.index(status_line))
+        self.assertIn('"value":"restore_failed"', status_line)
+        self.assertIn('"value":"portal-rollout-timeout"', status_line)
+        self.assertNotIn("timed out waiting for the condition", status_line)
 
     def test_in_cluster_mode_waits_for_zero_available_writers_before_snapshot(self):
         result, calls, _, _ = self.run_tool("--go", execution_mode="in-cluster")
@@ -608,11 +639,24 @@ esac
             "portal_pvc_backup_stage=remote_upload",
             "portal_pvc_backup_stage=remote_restore",
             "portal_pvc_backup_stage=restore_validation",
-            "portal_pvc_backup_stage=portal_readiness",
+            "portal_pvc_backup_stage=portal-rollout-command",
             "portal_pvc_backup=FAIL",
         )))
         self.assertEqual(evidence, "")
         self.assertIn("scale deployment/portal-web --replicas=1", calls)
+
+    def test_rollout_timeout_has_a_safe_distinct_failure_stage(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        cleanup_start = text.index("cleanup() {")
+        cleanup = text[cleanup_start : text.index("WRITERS_SCALED=0", cleanup_start)]
+        self.assertIn("rollout_status=$?", cleanup)
+        self.assertIn("124) FAILURE_STAGE='portal-rollout-timeout'", cleanup)
+
+    def test_rollout_command_timeout_reports_a_safe_timeout_stage(self):
+        result, _, _, evidence = self.run_tool("--go", fail_at="rollout-timeout")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("portal_pvc_backup_stage=portal-rollout-timeout", result.stdout)
+        self.assertEqual(evidence, "")
 
     def test_health_failure_removes_evidence_and_reports_fixed_failure(self):
         result, calls, _, evidence = self.run_tool("--go", fail_at="health")
