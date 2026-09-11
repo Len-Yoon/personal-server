@@ -387,7 +387,7 @@ report_in_cluster_status() {
     fi
   else
     case "$FAILURE_STAGE" in
-      remote_restore|restore_validation|portal_readiness|portal_health)
+      remote_restore|restore_validation|portal_readiness|portal-rollout-timeout|portal-rollout-command|portal_health)
         report_status=restore_failed ;;
       *)
         report_status=failed ;;
@@ -398,7 +398,7 @@ report_in_cluster_status() {
 }
 
 cleanup() {
-  local status=$? restore_ok=1 readiness_kubectl_timeout_seconds
+  local status=$? restore_ok=1 readiness_kubectl_timeout_seconds rollout_status
   trap - EXIT
   # A follow-up Ctrl+C must not interrupt reader deletion or Portal restoration.
   trap '' INT TERM HUP
@@ -410,16 +410,27 @@ cleanup() {
     if ! kctl -n personal-server scale "deployment/$DEPLOYMENT" --replicas="$ORIGINAL_REPLICAS" >>"$DIAGNOSTIC_FILE" 2>&1; then
       FAILURE_STAGE='portal_readiness'
       restore_ok=0
-    elif ! kctl_with_timeout "$readiness_kubectl_timeout_seconds" -n personal-server rollout status "deployment/$DEPLOYMENT" --timeout="${READINESS_TIMEOUT_SECONDS}s" >>"$DIAGNOSTIC_FILE" 2>&1; then
-      FAILURE_STAGE='portal_readiness'
-      restore_ok=0
+    elif kctl_with_timeout "$readiness_kubectl_timeout_seconds" -n personal-server rollout status "deployment/$DEPLOYMENT" --timeout="${READINESS_TIMEOUT_SECONDS}s" >>"$DIAGNOSTIC_FILE" 2>&1; then
+      :
     else
-      if [ "$EXECUTION_MODE" = host ]; then
-        PORTAL_POD=$(kctl -n personal-server get pod -l app.kubernetes.io/name=portal-web -o jsonpath='{.items[0].metadata.name}') || PORTAL_POD=''
-        if [ -z "$PORTAL_POD" ] || ! kctl -n personal-server exec "$PORTAL_POD" -- python3 -c 'import urllib.request; response = urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=10); raise SystemExit(0 if response.status == 200 else 1)' >>"$DIAGNOSTIC_FILE" 2>&1; then
-          FAILURE_STAGE='portal_health'
-          restore_ok=0
-        fi
+      rollout_status=$?
+      case "$rollout_status" in
+        124) FAILURE_STAGE='portal-rollout-timeout' ;;
+        *)
+          if grep -Fqi 'timed out waiting for the condition' "$DIAGNOSTIC_FILE"; then
+            FAILURE_STAGE='portal-rollout-timeout'
+          else
+            FAILURE_STAGE='portal-rollout-command'
+          fi
+          ;;
+      esac
+      restore_ok=0
+    fi
+    if [ "$restore_ok" -eq 1 ] && [ "$EXECUTION_MODE" = host ]; then
+      PORTAL_POD=$(kctl -n personal-server get pod -l app.kubernetes.io/name=portal-web -o jsonpath='{.items[0].metadata.name}') || PORTAL_POD=''
+      if [ -z "$PORTAL_POD" ] || ! kctl -n personal-server exec "$PORTAL_POD" -- python3 -c 'import urllib.request; response = urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=10); raise SystemExit(0 if response.status == 200 else 1)' >>"$DIAGNOSTIC_FILE" 2>&1; then
+        FAILURE_STAGE='portal_health'
+        restore_ok=0
       fi
     fi
     WRITERS_SCALED=0
