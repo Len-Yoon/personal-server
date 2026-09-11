@@ -517,6 +517,7 @@ esac
             "portal_pvc_backup_stage=remote_upload",
             "portal_pvc_backup_stage=remote_restore",
             "portal_pvc_backup_stage=restore_validation",
+            "portal_pvc_backup_stage=portal_readiness",
             "portal_pvc_backup=FAIL",
         )))
         self.assertIn("kubectl -n personal-server delete pod", calls)

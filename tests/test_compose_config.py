@@ -14,6 +14,9 @@ EXPECTED_WORKFLOW_ACTIONS = {
     "actions/github-script": ("f28e40c7f34bde8b3046d885e986cb6290c5673b", "v7"),
 }
 EXPECTED_DOCKERFILE_BASE_IMAGES = {
+    "infra/k8s/backup-automation/Dockerfile": (
+        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+    ),
     "book-memo/Dockerfile": (
         "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
     ),
@@ -45,6 +48,7 @@ DOCKERFILE_DIGEST_TARGETS = frozenset(
         "car-care-worker/Dockerfile",
         "crawler-worker/Dockerfile",
         "homeops-executor/Dockerfile",
+        "infra/k8s/backup-automation/Dockerfile",
         "portal-web/Dockerfile",
         "sre-telegram-relay/Dockerfile",
         "system-agent/Dockerfile",
@@ -133,7 +137,7 @@ class ComposeConfigTests(unittest.TestCase):
             path.relative_to(ROOT).as_posix() for path in ROOT.rglob("Dockerfile")
         }
         self.assertEqual(DOCKERFILE_DIGEST_POLICY_EXCLUSIONS, {"caddy/Dockerfile"})
-        self.assertEqual(len(DOCKERFILE_DIGEST_TARGETS), 8)
+        self.assertEqual(len(DOCKERFILE_DIGEST_TARGETS), 9)
         self.assertIn("sre-telegram-relay/Dockerfile", DOCKERFILE_DIGEST_TARGETS)
         self.assertEqual(set(EXPECTED_DOCKERFILE_BASE_IMAGES), DOCKERFILE_DIGEST_TARGETS)
         self.assertEqual(
