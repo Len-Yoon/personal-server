@@ -35,9 +35,10 @@ class SupplyChainSecurityWorkflowTest(unittest.TestCase):
         for line in trivy_lines:
             self.assertRegex(line.split("#", 1)[1].strip(), r"^v\d+\.\d+\.\d+$")
 
-    def test_scan_is_report_only_and_has_read_only_contents_permission(self):
+    def test_high_and_critical_findings_block_with_read_only_contents_permission(self):
         self.assertRegex(self.workflow_text, r"(?ms)^permissions:\n  contents: read\s*$")
-        self.assertTrue(all(re.search(r'(?m)^          exit-code: "0"$', step) for step in self.trivy_steps))
+        self.assertTrue(all(re.search(r'(?m)^          severity: CRITICAL,HIGH$', step) for step in self.trivy_steps))
+        self.assertTrue(all(re.search(r'(?m)^          exit-code: "1"$', step) for step in self.trivy_steps))
         self.assertTrue(all(re.search(r"(?m)^          format: table$", step) for step in self.trivy_steps))
 
 

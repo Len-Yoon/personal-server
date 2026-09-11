@@ -181,7 +181,7 @@ def security_status() -> dict[str, Any]:
         "recent_events": read_recent_events(),
         "headers": list(SECURITY_HEADERS.keys()),
         "file_policy": {
-            "max_upload_mb": int(os.getenv("FILE_MAX_UPLOAD_MB", "50")),
+            "max_upload_mb": int(os.getenv("FILE_MAX_UPLOAD_MB", "25")),
             "blocked_extensions": sorted(_blocked_extensions()),
             "allowed_extensions": sorted(_allowed_extensions()),
         },

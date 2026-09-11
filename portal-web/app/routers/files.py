@@ -177,6 +177,11 @@ def download_files(request: Request, paths: list[str] = Form(...)):
     if not requested_paths:
         raise HTTPException(status_code=400, detail="다운로드할 파일이 없습니다.")
 
+    try:
+        file_store.validate_download_limits(requested_paths)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     archive_file = tempfile.NamedTemporaryFile(prefix="file-vault-", suffix=".zip", delete=False)
     archive_path = Path(archive_file.name)
     archive_file.close()
@@ -193,11 +198,18 @@ def download_files(request: Request, paths: list[str] = Form(...)):
                             archive.write(child, arcname=f"{archive_name}/{relative_child}")
                 else:
                     archive.write(item_path, arcname=archive_name)
+    except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+        archive_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="ZIP 파일을 생성할 수 없습니다.") from exc
     except (ValueError, FileNotFoundError, IsADirectoryError) as exc:
         archive_path.unlink(missing_ok=True)
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    append_security_event("files_downloaded", count=len(requested_paths))
+    try:
+        append_security_event("files_downloaded", count=len(requested_paths))
+    except Exception:
+        archive_path.unlink(missing_ok=True)
+        raise
     return FileResponse(
         archive_path,
         filename="files.zip",
