@@ -13,7 +13,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host"):
+    def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", remote_error="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -72,6 +72,7 @@ exit 0
                 "PORTAL_AGE_IDENTITY": str(root / "identity.txt"),
                 "PORTAL_BACKUP_REMOTE": f"fake:{remote}",
                 "PORTAL_FAKE_FAIL_AT": fail_at,
+                "PORTAL_FAKE_REMOTE_ERROR": remote_error,
                 "PORTAL_FAKE_MISSING_PVC": "1" if missing_pvc else "",
                 "PORTAL_FAKE_SPECIAL_ENTRY": "1" if special_entry else "",
                 "PORTAL_FAKE_HOLD": "1" if send_signal and signal_when == "reader" else "",
@@ -267,7 +268,7 @@ while [ "$#" -gt 0 ]; do
 done
 operation=$1
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = remote ] && [ "$operation" = lsd ]; then
-  printf '%s\\n' 'fake-remote-secret /private/noisy/path' >&2
+  printf '%s\\n' "${{PORTAL_FAKE_REMOTE_ERROR:-fake-remote-secret /private/noisy/path}}" >&2
   exit 42
 fi
 if [ "${{PORTAL_FAKE_ASSERT_LOCK_FD_CLOSED:-}}" = 1 ] && [ "$operation" = copyto ]; then
@@ -640,12 +641,39 @@ esac
     def test_remote_preflight_failure_prevents_scale_and_redacts_noisy_error(self):
         result, calls, _, evidence = self.run_tool("--go", fail_at="remote")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("portal_pvc_backup_stage=remote_preflight", result.stdout)
+        self.assertIn("portal_pvc_backup_stage=remote-access", result.stdout)
         self.assertIn("portal_pvc_backup=FAIL", result.stdout)
         self.assertNotIn("scale deployment/portal-web", calls)
         self.assertNotIn("/private/", result.stdout + result.stderr)
         self.assertNotIn("fake-remote-secret", result.stdout + result.stderr)
         self.assertEqual(evidence, "")
+
+    def test_remote_preflight_reports_safe_config_password_category(self):
+        result, calls, _, _ = self.run_tool(
+            "--go",
+            fail_at="remote",
+            remote_error="Failed to decrypt config: bad password",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("portal_pvc_backup_stage=remote-config-password", result.stdout)
+        self.assertNotIn("Failed to decrypt config", result.stdout + result.stderr)
+        self.assertNotIn("scale deployment/portal-web", calls)
+
+    def test_in_cluster_remote_config_failure_reports_allowlisted_status(self):
+        result, calls, _, _ = self.run_tool(
+            "--go",
+            execution_mode="in-cluster",
+            fail_at="remote",
+            remote_error="Failed to decrypt config: bad password",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("portal_pvc_backup_stage=remote-config-password", result.stdout)
+        self.assertIn("kubectl -n monitoring patch configmap sre-telegram-backup-status", calls)
+        self.assertIn("remote-config-password", calls)
+        self.assertNotIn("Failed to decrypt config", calls)
+        self.assertNotIn("scale deployment/portal-web", calls)
 
     def test_matching_k3s_pvc_evidence_skips_upload_after_staging(self):
         result, calls, _, _ = self.run_tool("--go", repeat=True)
