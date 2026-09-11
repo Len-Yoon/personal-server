@@ -95,6 +95,49 @@
             </div>
         </section>
 
+        <section class="ops-section admin-section" aria-labelledby="recovery-events-title">
+            <div class="section-header">
+                <div>
+                    <span class="modal-kicker">N100 RECOVERY</span>
+                    <h2 id="recovery-events-title">최근 자동복구 이력</h2>
+                    <p>system-agent가 정제한 최근 10건의 읽기 전용 이력입니다.</p>
+                </div>
+            </div>
+
+            <div class="recovery-event-guidance">
+                <p><strong>accepted</strong>는 조치 실행 수락이며, <strong>health_restored</strong>만 실제 복구 완료를 뜻합니다.</p>
+            </div>
+
+            {% if recovery_events %}
+                <div class="recovery-events-table-wrap">
+                    <table class="recovery-events-table">
+                        <thead>
+                            <tr>
+                                <th scope="col">시각</th>
+                                <th scope="col">구성요소</th>
+                                <th scope="col">이벤트</th>
+                                <th scope="col">상태</th>
+                                <th scope="col">수행 동작</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for recovery_event in recovery_events %}
+                                <tr>
+                                    <td><time>{{ recovery_event.timestamp }}</time></td>
+                                    <td>{{ recovery_event.component }}</td>
+                                    <td>{{ recovery_event.event }}</td>
+                                    <td>{{ recovery_event.status }}</td>
+                                    <td>{{ recovery_event.action }}</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% else %}
+                <p class="recovery-events-empty">표시할 자동복구 이력이 없습니다.</p>
+            {% endif %}
+        </section>
+
         <section class="ops-section admin-section">
             <div class="section-header">
                 <div>

@@ -1,4 +1,5 @@
 import os
+from http.client import HTTPException
 from typing import Any
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -6,6 +7,8 @@ import json
 
 
 DEFAULT_AGENT_URL = "http://system-agent:8010"
+RECOVERY_EVENT_FIELDS = ("timestamp", "component", "event", "status", "action")
+RECOVERY_EVENT_LIMIT = 10
 
 
 def _service_health_targets() -> list[dict[str, str]]:
@@ -74,6 +77,31 @@ def get_service_health(timeout: float = 1.0) -> list[dict[str, Any]]:
         ]
 
     return [_check_service(target, timeout) for target in _service_health_targets()]
+
+
+def get_recovery_events(agent_url: str | None = None, timeout: float = 1.0) -> list[dict[str, str]]:
+    """Fetch only the system-agent's sanitized recovery event contract."""
+    if _truthy(os.getenv("DEMO_MODE", "")):
+        return []
+
+    agent_url = agent_url or os.getenv("SYSTEM_AGENT_URL", DEFAULT_AGENT_URL)
+    try:
+        with urlopen(f"{agent_url.rstrip('/')}/recovery-events", timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, URLError, UnicodeError, HTTPException, json.JSONDecodeError):
+        return []
+
+    if not isinstance(payload, list):
+        return []
+
+    events: list[dict[str, str]] = []
+    for entry in payload[:RECOVERY_EVENT_LIMIT]:
+        if not isinstance(entry, dict) or not all(
+            isinstance(entry.get(field), str) for field in RECOVERY_EVENT_FIELDS
+        ):
+            return []
+        events.append({field: entry[field] for field in RECOVERY_EVENT_FIELDS})
+    return events
 
 
 def _check_service(target: dict[str, str], timeout: float) -> dict[str, Any]:
