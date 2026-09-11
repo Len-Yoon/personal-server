@@ -465,11 +465,77 @@ class ComposeConfigTests(unittest.TestCase):
             self.assertIn("healthcheck:", compose)
             self.assertIn(f"127.0.0.1:{port}", compose)
 
-    def test_homeops_executor_is_internal_and_owns_docker_socket(self):
+    def test_n100_override_removes_service_code_mounts_and_reload(self):
+        development_compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        n100_compose = (ROOT / "docker-compose.n100.yml").read_text(encoding="utf-8")
+
+        expected_data_mounts = {
+            "portal-web": ("./data/files:/data/files", "./data/portal-web-state:/var/lib/portal"),
+            "crawler-worker": ("./data/crawler-worker:/data/crawler-worker", "./data/logs:/app/data/logs"),
+            "youtube-memo": ("./data/youtube-memo:/data/youtube-memo", "./data/logs:/app/data/logs"),
+            "book-memo": ("./data/book-memo:/data/book-memo", "./data/logs:/app/data/logs"),
+        }
+        for service, data_mounts in expected_data_mounts.items():
+            with self.subTest(service=service):
+                development_service = _service_block(development_compose, service)
+                n100_service = _service_block(n100_compose, service)
+
+                self.assertIn(f"./{service}:/app", development_service)
+                self.assertIn("volumes: !override", n100_service)
+                self.assertNotIn(f"./{service}:/app", n100_service)
+                self.assertNotIn("--reload", n100_service)
+                for mount in data_mounts:
+                    self.assertIn(mount, n100_service)
+
+    def test_homeops_executor_uses_restart_only_docker_api_proxy(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-        self.assertIn("homeops-executor:", compose)
-        self.assertIn("/var/run/docker.sock:/var/run/docker.sock", compose)
-        self.assertNotIn("ports:\n      - \"8011:8011\"", compose)
+        executor = _service_block(compose, "homeops-executor")
+        proxy = _service_block(compose, "docker-socket-proxy")
+        proxy_config = (ROOT / "homeops-executor" / "docker-api-proxy.conf").read_text(
+            encoding="utf-8"
+        )
+        nginx_config = (ROOT / "homeops-executor" / "docker-api-proxy-nginx.conf").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn("/var/run/docker.sock", executor)
+        self.assertIn("HOMEOPS_DOCKER_HOST=tcp://docker-socket-proxy:2375", executor)
+        self.assertIn("condition: service_started", executor)
+        self.assertEqual(compose.count("/var/run/docker.sock:/var/run/docker.sock:ro"), 1)
+
+        self.assertIn("nginxinc/nginx-unprivileged:1.29-alpine@sha256:", proxy)
+        self.assertIn('user: "0:0"', proxy)
+        self.assertIn("docker-api-proxy-nginx.conf:/etc/nginx/nginx.conf:ro", proxy)
+        self.assertIn("docker-api-proxy.conf:/etc/nginx/conf.d/default.conf:ro", proxy)
+        self.assertIn("docker-api", executor)
+        self.assertIn("internal: true", compose)
+        self.assertNotIn("ports:", executor)
+        self.assertNotIn("ports:", proxy)
+
+        self.assertIn("location ~ ^/(?:v[0-9.]+/)?containers/[^/]+/restart$", proxy_config)
+        self.assertIn("limit_except POST", proxy_config)
+        self.assertIn("location ~ ^/(?:v[0-9.]+/)?containers/[^/]+/(?:json|logs|stats)$", proxy_config)
+        self.assertIn("limit_except GET", proxy_config)
+        self.assertIn("location /", proxy_config)
+        self.assertIn("return 403", proxy_config)
+        self.assertNotIn("/stop", proxy_config)
+        self.assertNotIn("/kill", proxy_config)
+        self.assertIn("user root", nginx_config)
+        self.assertIn("pid /tmp/nginx.pid", nginx_config)
+
+    def test_caddy_limits_file_upload_request_body_before_portal_parsing(self):
+        caddyfile = (ROOT / "caddy" / "Caddyfile").read_text(encoding="utf-8")
+
+        self.assertIn("(portal_file_upload_limit) {", caddyfile)
+        self.assertIn("@file_uploads path /files/uploads", caddyfile)
+        self.assertIn("request_body @file_uploads {", caddyfile)
+        self.assertIn("max_size 30MB", caddyfile)
+        for hostname in ("len.pe.kr", "portfolio.len.pe.kr", "file.len.pe.kr", "admin.len.pe.kr"):
+            with self.subTest(hostname=hostname):
+                self.assertIn(
+                    f"{hostname} {{\n    import common_tls\n    import portal_file_upload_limit",
+                    caddyfile,
+                )
 
     def test_caddy_waits_for_runtime_services_to_be_healthy(self):
         compose = (ROOT / "docker-compose.n100.yml").read_text(encoding="utf-8")

@@ -19,6 +19,24 @@ services:
         max-size: "5m"
         max-file: "2"
 
+  docker-socket-proxy:
+    cpus: "0.10"
+    mem_limit: 64m
+    pids_limit: 64
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /run:size=8m,mode=1777
+      - /tmp:size=8m,mode=1777
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
   portal-web:
     ports: !override
       - "127.0.0.1:8000:8000"
@@ -35,6 +53,9 @@ services:
     environment:
       - FILE_STORAGE_PATH=/data/files
       - PYTHONDONTWRITEBYTECODE=1
+    volumes: !override
+      - ./data/files:/data/files
+      - ./data/portal-web-state:/var/lib/portal
     cpus: "0.25"
     mem_limit: 160m
     pids_limit: 128
@@ -97,6 +118,9 @@ services:
       - --no-access-log
     environment:
       - PYTHONDONTWRITEBYTECODE=1
+    volumes: !override
+      - ./data/crawler-worker:/data/crawler-worker
+      - ./data/logs:/app/data/logs
     cpus: "0.50"
     mem_limit: 320m
     pids_limit: 160
@@ -128,6 +152,9 @@ services:
       - --no-access-log
     environment:
       - PYTHONDONTWRITEBYTECODE=1
+    volumes: !override
+      - ./data/youtube-memo:/data/youtube-memo
+      - ./data/logs:/app/data/logs
     cpus: "0.25"
     mem_limit: 160m
     pids_limit: 128
@@ -159,6 +186,9 @@ services:
       - --no-access-log
     environment:
       - PYTHONDONTWRITEBYTECODE=1
+    volumes: !override
+      - ./data/book-memo:/data/book-memo
+      - ./data/logs:/app/data/logs
     cpus: "0.35"
     mem_limit: 192m
     pids_limit: 128

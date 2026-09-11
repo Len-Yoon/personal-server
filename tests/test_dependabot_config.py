@@ -7,11 +7,21 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / ".github" / "dependabot.yml"
 EXPECTED_DOCKER_DIRECTORIES = {
     "/book-memo",
+    "/caddy",
     "/car-care-worker",
     "/crawler-worker",
     "/homeops-executor",
     "/portal-web",
     "/sre-telegram-relay",
+    "/system-agent",
+    "/youtube-memo",
+}
+EXPECTED_PIP_DIRECTORIES = {
+    "/book-memo",
+    "/car-care-worker",
+    "/crawler-worker",
+    "/homeops-executor",
+    "/portal-web",
     "/system-agent",
     "/youtube-memo",
 }
@@ -63,7 +73,7 @@ class DependabotConfigContractTests(unittest.TestCase):
         self.assertRegex(content, r"(?m)^version: 2$")
         self.assertRegex(content, TOP_LEVEL_UPDATES_HEADER)
         entries = find_update_entries(content)
-        self.assertEqual(len(entries), 9)
+        self.assertEqual(len(entries), 17)
 
         package_directories = []
         for entry in entries:
@@ -81,11 +91,14 @@ class DependabotConfigContractTests(unittest.TestCase):
         )
         self.assertEqual(
             {ecosystem for ecosystem, _ in package_directories},
-            {"github-actions", "docker"},
+            {"github-actions", "docker", "pip"},
+        )
+        self.assertEqual(
+            {directory for ecosystem, directory in package_directories if ecosystem == "pip"},
+            EXPECTED_PIP_DIRECTORIES,
         )
 
         lowered = content.casefold()
-        self.assertNotIn("caddy", lowered)
         for forbidden_command in ("auto-merge", "automerge", "gh pr merge", "deploy"):
             self.assertNotIn(forbidden_command, lowered)
 

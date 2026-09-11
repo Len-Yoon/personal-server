@@ -10,6 +10,13 @@
     encode zstd gzip
 }
 
+(portal_file_upload_limit) {
+    @file_uploads path /files/uploads
+    request_body @file_uploads {
+        max_size 30MB
+    }
+}
+
 portal.len.pe.kr {
     import common_tls
     redir https://len.pe.kr{uri} permanent
@@ -17,21 +24,25 @@ portal.len.pe.kr {
 
 len.pe.kr {
     import common_tls
+    import portal_file_upload_limit
     reverse_proxy {env.PORTAL_UPSTREAM}
 }
 
 portfolio.len.pe.kr {
     import common_tls
+    import portal_file_upload_limit
     reverse_proxy {env.PORTAL_UPSTREAM}
 }
 
 file.len.pe.kr {
     import common_tls
+    import portal_file_upload_limit
     reverse_proxy {env.PORTAL_UPSTREAM}
 }
 
 admin.len.pe.kr {
     import common_tls
+    import portal_file_upload_limit
     reverse_proxy {env.PORTAL_UPSTREAM}
 }
 

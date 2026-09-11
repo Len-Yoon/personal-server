@@ -92,7 +92,9 @@ def _unavailable_diagnostics(service: str, error: str) -> dict[str, object]:
 def _docker_client() -> Any:
     import docker
 
-    return docker.from_env()
+    return docker.DockerClient(
+        base_url=os.getenv("HOMEOPS_DOCKER_HOST", "tcp://docker-socket-proxy:2375")
+    )
 
 
 def _require_allowed_service(service: str) -> None:
