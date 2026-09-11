@@ -13,7 +13,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", remote_error="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host"):
+    def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", remote_error="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", readiness_timeout=None, assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -93,6 +93,8 @@ exit 0
                 "PORTAL_BACKUP_FILES_MOUNT": str(files) if execution_mode == "in-cluster" else "/data/files",
                 "PORTAL_BACKUP_STATE_MOUNT": str(state) if execution_mode == "in-cluster" else "/data/portal-web-state",
             }
+            if readiness_timeout is not None:
+                env["PORTAL_READINESS_TIMEOUT_SECONDS"] = str(readiness_timeout)
             if namespace is not None:
                 env["PORTAL_NAMESPACE"] = namespace
             if send_signal:
@@ -562,6 +564,26 @@ esac
         self.assertIn("scale deployment/portal-web --replicas=1", calls)
         self.assertIn("rollout status deployment/portal-web", calls)
         self.assertIn("exec portal-web-1", calls)
+
+    def test_portal_readiness_wait_defaults_to_five_minutes_and_can_be_overridden(self):
+        result, default_calls, _, _ = self.run_tool("--go")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("rollout status deployment/portal-web --timeout=300s", default_calls)
+
+        result, configured_calls, _, _ = self.run_tool("--go", readiness_timeout=420)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("rollout status deployment/portal-web --timeout=420s", configured_calls)
+
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("readiness_kubectl_timeout_seconds=$((READINESS_TIMEOUT_SECONDS + 30))", source)
+        self.assertIn('kctl_with_timeout "$readiness_kubectl_timeout_seconds" -n personal-server rollout status', source)
+
+    def test_portal_readiness_timeout_rejects_out_of_range_or_noncanonical_values(self):
+        for value in ("119", "601", "0300", "invalid"):
+            with self.subTest(value=value):
+                result, calls, _, _ = self.run_tool("--go", readiness_timeout=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("scale deployment/portal-web --replicas=0", calls)
 
     def test_go_reports_fixed_progress_stages_without_private_diagnostics(self):
         result, _, _, _ = self.run_tool("--go")
