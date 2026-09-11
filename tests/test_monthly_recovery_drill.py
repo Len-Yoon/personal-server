@@ -72,7 +72,6 @@ class MonthlyRecoveryDrillTests(unittest.TestCase):
                 "backup --check",
                 "telegram ",
                 "pod --run",
-                "pod --cleanup lab-test",
             ],
         )
         payload = json.loads(evidence)
@@ -81,7 +80,7 @@ class MonthlyRecoveryDrillTests(unittest.TestCase):
         self.assertEqual([stage["name"] for stage in payload["stages"]], ["backup", "telegram", "pod"])
         self.assertTrue(payload["stages"][-1]["cleanup"])
 
-    def test_failed_pod_still_requests_cleanup_with_preassigned_safe_run_id(self):
+    def test_failed_pod_does_not_request_cleanup_without_owned_run(self):
         scripts = {
             "backup": "",
             "telegram": "",
@@ -89,11 +88,22 @@ class MonthlyRecoveryDrillTests(unittest.TestCase):
         }
         result, log, evidence = self.run_drill(scripts)
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(log.splitlines(), ["backup --check", "telegram ", "pod --run", "pod --cleanup lab-test"])
+        self.assertEqual(log.splitlines(), ["backup --check", "telegram ", "pod --run"])
         payload = json.loads(evidence)
         self.assertEqual(payload["failed_stage"], "pod")
         self.assertEqual(payload["pod_run_id"], "lab-test")
-        self.assertTrue(payload["stages"][-1]["cleanup"])
+        self.assertFalse(payload["stages"][-1]["cleanup"])
+
+    def test_pod_run_failure_without_owned_run_does_not_call_wrapper_cleanup(self):
+        scripts = {
+            "backup": "",
+            "telegram": "",
+            # Simulates AlreadyExists before the lab tool acquires ownership.
+            "pod": "if [[ ${1:-} == --run ]]; then exit 1; fi\n",
+        }
+        result, log, _evidence = self.run_drill(scripts)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(log.splitlines(), ["backup --check", "telegram ", "pod --run"])
 
     def test_existing_evidence_is_not_overwritten(self):
         scripts = {"backup": "", "telegram": "", "pod": "echo sre_pod_recovery_run_id=lab-test\n"}

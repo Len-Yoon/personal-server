@@ -67,7 +67,7 @@ bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
 
 정리 성공 기준은 `sre-recovery-lab-<run-id>` namespace가 더 이상 존재하지 않는 것임.
 
-월간 실행기를 사용하는 경우 위 세 명령을 개별 실행하지 않고 `monthly-recovery-drill.sh`만 실행함. 실행기는 3단계의 출력에서 run ID를 확인한 뒤 `--cleanup <run-id>`를 호출하고 정리 성공 여부를 증적에 포함함.
+월간 실행기를 사용하는 경우 위 세 명령을 개별 실행하지 않고 `monthly-recovery-drill.sh`만 실행함. 실행기는 안전한 lowercase run ID를 사전 전달하며, 3단계 실습 도구가 소유권을 획득한 경우 도구 자체 cleanup 결과를 성공으로 기록함. `AlreadyExists` 등 소유권 미획득 실패에서는 wrapper가 cleanup하지 않음.
 
 ## 중단 기준과 복구 조치
 

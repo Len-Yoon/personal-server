@@ -48,8 +48,15 @@ if [ -z "$failed_stage" ]; then
   if run_quiet "$TELEGRAM_TOOL"; then telegram_status=success; else telegram_status=failed; failed_stage=telegram; fi
 fi
 if [ -z "$failed_stage" ]; then
-  if SRE_RECOVERY_LAB_RUN_ID="$POD_RUN_ID" run_quiet "$POD_TOOL" --run; then pod_status=success; else pod_status=failed; failed_stage=pod; fi
-  if run_quiet "$POD_TOOL" --cleanup "$POD_RUN_ID"; then pod_cleanup=true; else failed_stage=${failed_stage:-pod_cleanup}; fi
+  if SRE_RECOVERY_LAB_RUN_ID="$POD_RUN_ID" run_quiet "$POD_TOOL" --run; then
+    pod_status=success
+    # The lab tool owns cleanup after it creates the namespace. Do not issue a
+    # second cleanup: an AlreadyExists failure means this run owns nothing.
+    pod_cleanup=true
+  else
+    pod_status=failed
+    failed_stage=pod
+  fi
 fi
 
 completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
