@@ -74,20 +74,26 @@ ensure_sudo_access() {
 # closing it.  rclone can stall when it inherits a closed descriptor here; a
 # /dev/null descriptor keeps the lock out of the child without that failure.
 run_unlocked() { "$@" 9</dev/null; }
-TIMEOUT_SUPERVISOR=$'import ctypes\nimport os\nimport signal\nimport subprocess\nimport sys\n\nPR_SET_PDEATHSIG = 1\nif sys.platform.startswith("linux"):\n    libc = ctypes.CDLL(None, use_errno=True)\n    if libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM) != 0:\n        raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG)")\n\nseconds = int(sys.argv[1])\ncommand = sys.argv[2:]\nprocess = None\n\ndef terminate_group(signal_to_send):\n    if process is None:\n        return\n    try:\n        os.killpg(process.pid, signal_to_send)\n    except ProcessLookupError:\n        pass\n\ndef wait_after_termination():\n    if process is None:\n        return\n    try:\n        process.wait(timeout=10)\n    except subprocess.TimeoutExpired:\n        terminate_group(signal.SIGKILL)\n        process.wait()\n\ndef on_signal(signum, _frame):\n    terminate_group(signal.SIGTERM)\n    wait_after_termination()\n    raise SystemExit(128 + signum)\n\nsignal.signal(signal.SIGINT, on_signal)\nsignal.signal(signal.SIGTERM, on_signal)\nsignal.signal(signal.SIGHUP, on_signal)\n# A separate process group keeps cancellation scoped without detaching the TTY.\nprocess = subprocess.Popen(command, process_group=0)\ntry:\n    raise SystemExit(process.wait(timeout=seconds))\nexcept subprocess.TimeoutExpired:\n    terminate_group(signal.SIGTERM)\n    wait_after_termination()\n    raise SystemExit(124)\n'
+TIMEOUT_SUPERVISOR=$'import ctypes\nimport os\nimport signal\nimport subprocess\nimport sys\n\nPR_SET_PDEATHSIG = 1\nif sys.platform.startswith("linux"):\n    libc = ctypes.CDLL(None, use_errno=True)\n    if libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM) != 0:\n        raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG)")\n\nseconds = int(sys.argv[1])\ntermination_grace_seconds = int(sys.argv[2])\ncommand = sys.argv[3:]\nprocess = None\n\ndef terminate_group(signal_to_send):\n    if process is None:\n        return\n    try:\n        os.killpg(process.pid, signal_to_send)\n    except ProcessLookupError:\n        pass\n\ndef wait_after_termination():\n    if process is None:\n        return\n    try:\n        process.wait(timeout=termination_grace_seconds)\n    except subprocess.TimeoutExpired:\n        terminate_group(signal.SIGKILL)\n        process.wait()\n\ndef on_signal(signum, _frame):\n    terminate_group(signal.SIGTERM)\n    wait_after_termination()\n    raise SystemExit(128 + signum)\n\nsignal.signal(signal.SIGINT, on_signal)\nsignal.signal(signal.SIGTERM, on_signal)\nsignal.signal(signal.SIGHUP, on_signal)\n# A separate process group keeps cancellation scoped without detaching the TTY.\nprocess = subprocess.Popen(command, process_group=0)\ntry:\n    raise SystemExit(process.wait(timeout=seconds))\nexcept subprocess.TimeoutExpired:\n    terminate_group(signal.SIGTERM)\n    wait_after_termination()\n    raise SystemExit(124)\n'
 run_timeout() {
   local seconds=$1
   shift
   # Python owns the child session and kills the whole process group on timeout.
   # Unlike `timeout setsid`, it also preserves command output and stdin.
-  python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" "$@" 9>&-
+  python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" 10 "$@" 9>&-
+}
+run_timeout_at_deadline() {
+  local seconds=$1
+  shift
+  # Readiness polling must use the shared deadline without extra grace time.
+  python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" 0 "$@" 9>&-
 }
 run_timeout_tracked() {
   local seconds=$1 status
   shift
   # Streaming does not consume stdin, so run it in the background only to let
   # the controller's signal trap terminate the supervisor immediately.
-  python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" "$@" 9>&- &
+  python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" 10 "$@" 9>&- &
   ACTIVE_TIMEOUT_PID=$!
   if wait "$ACTIVE_TIMEOUT_PID"; then
     status=0
@@ -106,6 +112,11 @@ kctl_with_timeout() {
   local seconds=$1
   shift
   run_timeout "$seconds" "${KCTL[@]}" "$@"
+}
+kctl_with_deadline_timeout() {
+  local seconds=$1
+  shift
+  run_timeout_at_deadline "$seconds" "${KCTL[@]}" "$@"
 }
 kctl() { kctl_with_timeout "${PORTAL_KUBECTL_TIMEOUT_SECONDS:-120}" "$@"; }
 fail() { return 1; }
@@ -182,6 +193,29 @@ wait_for_writer_termination() {
     available=${available:-0}
     [ "$available" = 0 ] && return 0
     sleep 1
+  done
+  return 1
+}
+
+wait_for_portal_availability() {
+  local deadline=$((SECONDS + READINESS_TIMEOUT_SECONDS)) available remaining query_status sleep_seconds
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || break
+    if available=$(kctl_with_deadline_timeout "$remaining" -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o jsonpath='{.status.availableReplicas}'); then
+      :
+    else
+      query_status=$?
+      [ "$query_status" -eq 124 ] && return 1
+      return 2
+    fi
+    available=${available:-0}
+    [ "$available" = "$ORIGINAL_REPLICAS" ] && return 0
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || break
+    sleep_seconds=2
+    [ "$remaining" -lt "$sleep_seconds" ] && sleep_seconds=$remaining
+    sleep "$sleep_seconds"
   done
   return 1
 }
@@ -398,7 +432,7 @@ report_in_cluster_status() {
 }
 
 cleanup() {
-  local status=$? restore_ok=1 readiness_kubectl_timeout_seconds rollout_status
+  local status=$? restore_ok=1 availability_status
   trap - EXIT
   # A follow-up Ctrl+C must not interrupt reader deletion or Portal restoration.
   trap '' INT TERM HUP
@@ -406,23 +440,16 @@ cleanup() {
     kctl -n personal-server delete pod "$READER_POD" --ignore-not-found --wait=true >>"$DIAGNOSTIC_FILE" 2>&1 || restore_ok=0
   fi
   if [ "$WRITERS_SCALED" -eq 1 ] && [ "${ORIGINAL_REPLICAS:-0}" -gt 0 ] 2>/dev/null; then
-    readiness_kubectl_timeout_seconds=$((READINESS_TIMEOUT_SECONDS + 30))
     if ! kctl -n personal-server scale "deployment/$DEPLOYMENT" --replicas="$ORIGINAL_REPLICAS" >>"$DIAGNOSTIC_FILE" 2>&1; then
       FAILURE_STAGE='portal_readiness'
       restore_ok=0
-    elif kctl_with_timeout "$readiness_kubectl_timeout_seconds" -n personal-server rollout status "deployment/$DEPLOYMENT" --timeout="${READINESS_TIMEOUT_SECONDS}s" >>"$DIAGNOSTIC_FILE" 2>&1; then
+    elif wait_for_portal_availability; then
       :
     else
-      rollout_status=$?
-      case "$rollout_status" in
-        124) FAILURE_STAGE='portal-rollout-timeout' ;;
-        *)
-          if grep -Fqi 'timed out waiting for the condition' "$DIAGNOSTIC_FILE"; then
-            FAILURE_STAGE='portal-rollout-timeout'
-          else
-            FAILURE_STAGE='portal-rollout-command'
-          fi
-          ;;
+      availability_status=$?
+      case "$availability_status" in
+        1) FAILURE_STAGE='portal-rollout-timeout' ;;
+        *) FAILURE_STAGE='portal-rollout-command' ;;
       esac
       restore_ok=0
     fi
