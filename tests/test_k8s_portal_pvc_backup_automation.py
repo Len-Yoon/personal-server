@@ -158,15 +158,18 @@ class PortalPvcBackupAutomationTests(unittest.TestCase):
         self.assertIn('status: "restore_failed"', configmap)
         self.assertIn('stage: "restore-validation"', configmap)
 
-    def test_enroll_creates_only_host_encrypted_credentials_from_masked_input(self):
+    def test_enroll_creates_only_user_scoped_host_encrypted_credentials_from_masked_input(self):
         result, _, calls, credential_files = self.run_tool("--enroll")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(credential_files["rclone-config.cred"], "host-encrypted")
         self.assertEqual(credential_files["rclone-config-passphrase.cred"], "host-encrypted")
-        self.assertIn("--with-key=host --name=rclone-config", calls)
-        self.assertIn("--with-key=host --name=rclone-config-passphrase", calls)
-        self.assertNotIn("rclone-passphrase", calls)
+        self.assertIn("--user --with-key=host --name=rclone-config", calls)
+        self.assertIn("--user --with-key=host --name=rclone-config-passphrase", calls)
+        self.assertNotIn(
+            "rclone-passphrase",
+            result.stdout + result.stderr + calls + "".join(credential_files.values()),
+        )
         self.assertEqual(set(credential_files), {"rclone-config.cred", "rclone-config-passphrase.cred"})
 
     def test_uninstall_disables_the_only_timer_before_removing_credentials_and_status(self):

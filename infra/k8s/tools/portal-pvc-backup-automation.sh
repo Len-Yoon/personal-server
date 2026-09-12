@@ -76,11 +76,11 @@ enroll() {
   [ -r "${PORTAL_RCLONE_SOURCE_CONFIG:-$HOME/.config/rclone/rclone.conf}" ] || return 1
   mkdir -p -- "$CREDENTIAL_DIR"
   chmod 700 "$CREDENTIAL_DIR"
-  systemd-creds encrypt --with-key=host --name=rclone-config \
+  systemd-creds encrypt --user --with-key=host --name=rclone-config \
     "${PORTAL_RCLONE_SOURCE_CONFIG:-$HOME/.config/rclone/rclone.conf}" "$(credential_path rclone-config)"
   systemd-ask-password --id=personal-server-portal-pvc-backup-rclone-config-passphrase \
     'rclone 설정 암호를 입력하세요.' | \
-    systemd-creds encrypt --with-key=host --name=rclone-config-passphrase - "$(credential_path rclone-config-passphrase)"
+    systemd-creds encrypt --user --with-key=host --name=rclone-config-passphrase - "$(credential_path rclone-config-passphrase)"
   chmod 600 "$(credential_path rclone-config)" "$(credential_path rclone-config-passphrase)"
   printf '%s\n' 'portal_pvc_backup_automation_enroll=PASS'
 }
