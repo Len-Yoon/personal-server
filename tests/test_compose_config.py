@@ -274,6 +274,28 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn('user: "0:0"', proxy)
         self.assertEqual(compose.count("/var/run/docker.sock:/var/run/docker.sock:ro"), 1)
 
+    def test_n100_docker_socket_proxy_keeps_nginx_temp_paths_on_existing_tmpfs(self):
+        """Fails when nginx falls back to its read-only cache directory at startup."""
+        compose = (ROOT / "docker-compose.n100.yml").read_text(encoding="utf-8")
+        proxy = _service_block(compose, "docker-socket-proxy")
+        nginx_config = (ROOT / "homeops-executor" / "docker-api-proxy-nginx.conf").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("read_only: true", proxy)
+        self.assertNotIn("/var/cache/nginx", proxy)
+        self.assertIn("/tmp:size=8m,mode=1777", proxy)
+        self.assertIn("cap_drop:\n      - ALL", proxy)
+        self.assertIn("no-new-privileges:true", proxy)
+        for directive in (
+            "client_body_temp_path /tmp/client_temp;",
+            "proxy_temp_path /tmp/proxy_temp;",
+            "fastcgi_temp_path /tmp/fastcgi_temp;",
+            "uwsgi_temp_path /tmp/uwsgi_temp;",
+            "scgi_temp_path /tmp/scgi_temp;",
+        ):
+            self.assertIn(directive, nginx_config)
+
     def test_agent_loop_documents_require_branch_cleanup_after_merge(self):
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
