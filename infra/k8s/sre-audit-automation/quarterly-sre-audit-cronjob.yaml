@@ -130,7 +130,7 @@ rules:
   - apiGroups: [apps]
     resources: [deployments]
     resourceNames: [sre-pod-recovery]
-    verbs: [get, watch]
+    verbs: [get]
   - apiGroups: [apps]
     resources: [deployments/scale]
     resourceNames: [sre-pod-recovery]

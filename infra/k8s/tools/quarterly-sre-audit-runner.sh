@@ -46,13 +46,51 @@ EOF
 }
 
 cleanup_recovery_deployment() {
-  local replicas pods
+  local replicas
   kubectl -n "$RECOVERY_NAMESPACE" scale deployment "$RECOVERY_DEPLOYMENT" --replicas=0 || return 1
   replicas=$(kubectl -n "$RECOVERY_NAMESPACE" get deployment "$RECOVERY_DEPLOYMENT" -o jsonpath='{.spec.replicas}') || return 1
   [[ "$replicas" == 0 ]] || return 1
-  kubectl -n "$RECOVERY_NAMESPACE" wait --for=delete pod -l app.kubernetes.io/name=sre-pod-recovery --timeout=30s || return 1
-  pods=$(kubectl -n "$RECOVERY_NAMESPACE" get pods -l app.kubernetes.io/name=sre-pod-recovery -o jsonpath='{.items[*].metadata.name}') || return 1
-  [[ -z "$pods" ]] || return 1
+  wait_for_recovery_pods_absent || return 1
+}
+
+wait_for_recovery_available() {
+  local state available deadline
+  deadline=$((SECONDS + 90))
+  while (( SECONDS < deadline )); do
+    state=$(kubectl -n "$RECOVERY_NAMESPACE" get deployment "$RECOVERY_DEPLOYMENT" -o jsonpath='{.status.conditions[?(@.type=="Available")].status}:{.status.availableReplicas}') || return 1
+    available=${state#*:}
+    if [[ "${state%%:*}" == True && "$available" =~ ^[1-9][0-9]*$ ]]; then
+      return 0
+    fi
+    sleep 2 || return 1
+  done
+  return 1
+}
+
+wait_for_recovery_pod_ready() {
+  local pod=$1 ready deadline
+  deadline=$((SECONDS + 30))
+  while (( SECONDS < deadline )); do
+    ready=$(kubectl -n "$RECOVERY_NAMESPACE" get pod "$pod" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}') || return 1
+    if [[ "$ready" == True ]]; then
+      return 0
+    fi
+    sleep 2 || return 1
+  done
+  return 1
+}
+
+wait_for_recovery_pods_absent() {
+  local pods deadline
+  deadline=$((SECONDS + 30))
+  while (( SECONDS < deadline )); do
+    pods=$(kubectl -n "$RECOVERY_NAMESPACE" get pods -l app.kubernetes.io/name=sre-pod-recovery -o jsonpath='{.items[*].metadata.name}') || return 1
+    if [[ -z "$pods" ]]; then
+      return 0
+    fi
+    sleep 2 || return 1
+  done
+  return 1
 }
 
 report_status() {
@@ -115,7 +153,7 @@ check_backup_evidence() {
 check_recovery_lab() {
   local pod before after deadline
   kubectl -n "$RECOVERY_NAMESPACE" scale deployment "$RECOVERY_DEPLOYMENT" --replicas=1 || return 1
-  kubectl -n "$RECOVERY_NAMESPACE" wait --for=condition=Available "deployment/${RECOVERY_DEPLOYMENT}" --timeout=90s || return 1
+  wait_for_recovery_available || return 1
   pod=$(kubectl -n "$RECOVERY_NAMESPACE" get pods -l app.kubernetes.io/name=sre-pod-recovery -o jsonpath='{.items[0].metadata.name}') || return 1
   [[ -n "$pod" ]] || return 1
   before=$(kubectl -n "$RECOVERY_NAMESPACE" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}') || return 1
@@ -128,7 +166,7 @@ check_recovery_lab() {
     after=$(kubectl -n "$RECOVERY_NAMESPACE" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}') || return 1
     [[ "$after" =~ ^[0-9]+$ ]] || return 1
     if (( after > before )); then
-      kubectl -n "$RECOVERY_NAMESPACE" wait --for=condition=Ready "pod/${pod}" --timeout=5s >/dev/null || return 1
+      wait_for_recovery_pod_ready "$pod" || return 1
       kubectl -n "$RECOVERY_NAMESPACE" get events --field-selector "involvedObject.name=${pod}" >/dev/null || return 1
       return 0
     fi

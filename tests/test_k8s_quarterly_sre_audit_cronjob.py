@@ -87,7 +87,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertEqual(
             lab_rules,
             [
-                {"apiGroups": ["apps"], "resources": ["deployments"], "resourceNames": ["sre-pod-recovery"], "verbs": ["get", "watch"]},
+                {"apiGroups": ["apps"], "resources": ["deployments"], "resourceNames": ["sre-pod-recovery"], "verbs": ["get"]},
                 {"apiGroups": ["apps"], "resources": ["deployments/scale"], "resourceNames": ["sre-pod-recovery"], "verbs": ["get", "patch"]},
                 {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch"]},
                 {"apiGroups": [""], "resources": ["pods/exec"], "verbs": ["create"]},
@@ -148,8 +148,10 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 "  *'get deployment portal-web'*) printf 1 ;;\n"
                 "  *'scale deployment sre-pod-recovery --replicas=1'*) [ \"$SCENARIO\" = scale-up-fail ] && exit 1; printf 1 > \"$REPLICAS\"; exit 0 ;;\n"
                 "  *'scale deployment sre-pod-recovery --replicas=0'*) [ \"$SCENARIO\" = cleanup-fail ] && exit 1; printf 0 > \"$REPLICAS\"; exit 0 ;;\n"
-                "  *'get deployment sre-pod-recovery'*) cat \"$REPLICAS\" 2>/dev/null || printf 0 ;;\n"
+                "  *'get deployment sre-pod-recovery'*'.spec.replicas'*) cat \"$REPLICAS\" 2>/dev/null || printf 0 ;;\n"
+                "  *'get deployment sre-pod-recovery'*) replicas=$(cat \"$REPLICAS\" 2>/dev/null || printf 0); [ \"$replicas\" = 1 ] && printf True:1 || printf False:0 ;;\n"
                 "  *'get pods'*) replicas=$(cat \"$REPLICAS\" 2>/dev/null || printf 0); [ \"$replicas\" = 0 ] && exit 0; printf recovery-pod ;;\n"
+                "  *'get pod recovery-pod'*'Ready'*) printf True ;;\n"
                 "  *'get pod recovery-pod'*) n=$(cat \"$COUNTER\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$COUNTER\"; printf '%s' \"$((n - 1))\" ;;\n"
                 "  *'exec recovery-pod'*) [ \"$SCENARIO\" = exec-fail ] && exit 1; exit 0 ;;\n"
                 "  *'patch configmap sre-telegram-quarterly-audit-status'*) printf '%s' \"$9\" > \"$STATUS\"; [ \"$PATCH_FAILS\" = true ] && exit 1; exit 0 ;;\n"
@@ -217,6 +219,14 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertIn("scale deployment sre-pod-recovery --replicas=0", calls)
         self.assertNotIn(" create ", calls)
         self.assertNotIn(" delete ", calls)
+        self.assertNotIn(" wait ", calls)
+
+    def test_runner_uses_only_named_deployment_get_polling(self):
+        text = RUNNER.read_text(encoding="utf-8")
+        self.assertIn("get deployment \"$RECOVERY_DEPLOYMENT\"", text)
+        self.assertIn(".status.availableReplicas", text)
+        self.assertNotIn("kubectl -n \"$RECOVERY_NAMESPACE\" wait", text)
+        self.assertNotIn("get deployments", text)
 
     def test_runner_fails_closed_for_wrong_runtime_or_unreadable_backup_evidence(self):
         for evidence, scenario in (
