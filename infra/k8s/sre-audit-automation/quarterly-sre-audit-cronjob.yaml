@@ -1,0 +1,181 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sre-recovery-lab
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: quarterly-sre-audit
+  namespace: monitoring
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: quarterly-sre-audit-status
+  namespace: monitoring
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [sre-telegram-quarterly-audit-status]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: quarterly-sre-audit-status
+  namespace: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: quarterly-sre-audit-status
+subjects:
+  - kind: ServiceAccount
+    name: quarterly-sre-audit
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: quarterly-sre-audit-read
+  namespace: personal-server
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [portal-pvc-backup-evidence]
+    verbs: [get]
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [portal-web]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: quarterly-sre-audit-read
+  namespace: personal-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: quarterly-sre-audit-read
+subjects:
+  - kind: ServiceAccount
+    name: quarterly-sre-audit
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: quarterly-sre-audit-recovery-lab
+  namespace: sre-recovery-lab
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [quarterly-sre-recovery-drill]
+    verbs: [delete, get, watch]
+  # Kubernetes authorizes create requests against a collection URL, so a
+  # resourceNames constraint would prevent the runner from creating its fixed
+  # drill Deployment. The namespace is dedicated and the runner has no other
+  # Deployment name in its source.
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: quarterly-sre-audit-recovery-lab
+  namespace: sre-recovery-lab
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: quarterly-sre-audit-recovery-lab
+subjects:
+  - kind: ServiceAccount
+    name: quarterly-sre-audit
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: quarterly-sre-audit-nodes
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: quarterly-sre-audit-nodes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: quarterly-sre-audit-nodes
+subjects:
+  - kind: ServiceAccount
+    name: quarterly-sre-audit
+    namespace: monitoring
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: quarterly-sre-audit
+  namespace: monitoring
+spec:
+  schedule: "30 3 1 1,4,7,10 *"
+  timeZone: Asia/Seoul
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 1200
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          serviceAccountName: quarterly-sre-audit
+          restartPolicy: Never
+          automountServiceAccountToken: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: audit
+              image: personal-server-quarterly-sre-audit:task1
+              imagePullPolicy: Never
+              securityContext:
+                runAsNonRoot: true
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 250m
+                  memory: 256Mi
+              volumeMounts:
+                - name: temporary
+                  mountPath: /tmp
+          volumes:
+            - name: temporary
+              emptyDir:
+                sizeLimit: 16Mi
