@@ -41,24 +41,27 @@ Windows N100과 Ubuntu WSL2에서 운영하는 개인용 서비스 허브임. �
 | 백업 | Portal PVC 암호화 백업 및 복원 검증 |
 | 외부 장애 감지 | GitHub Actions가 약 5분 간격으로 `https://len.pe.kr/health` 확인 |
 
+## 빠른 상태 확인
+
+N100 WSL에서 실행함.
+
+```bash
+cd /mnt/c/personal-server
+curl --fail --silent --show-error https://len.pe.kr/health
+sudo k3s kubectl -n personal-server get deploy,pod,pvc
+bash infra/k8s/tools/sre-health-audit.sh
+```
+
+상세 점검 기준과 장애 대응은 [운영 문서 색인](docs/README.md)을 사용함. 비밀번호·토큰·Secret 값은 문서나 명령 출력에 기록하지 않음.
+
 ## SRE 운영 체계
 
 ```text
 서비스 실행
   ↓
-Prometheus·Grafana로 K3s 상태 관측
+내부 관측·외부 health 점검·제한형 자동복구·백업 복원 검증
   ↓
-Alertmanager·SRE relay로 내부 이상 Telegram 알림
-
-GitHub Actions가 외부 주소를 약 5분마다 별도 점검
-  ↓
-장애·복구 전환 시 Telegram 알림
-
-N100 감시기가 Tunnel 로컬 상태를 3분마다 점검
-  ↓
-Tunnel 장애·복구 전환 시 Telegram 알림과 제한형 자동복구
-
-Portal PVC 암호화 백업 → 원격 보관 → 복원 검증
+Telegram 알림과 운영 문서 기반 대응
 ```
 
 | SRE 영역 | 적용 내용 |
@@ -71,9 +74,7 @@ Portal PVC 암호화 백업 → 원격 보관 → 복원 검증
 | 안전 배포 | 허용된 Compose 서비스만 CI 성공 뒤 revision 고정 배포·health 검증·1회 rollback |
 | 공급망 보안 | GitHub Actions 외부 action을 full SHA로 고정하고, Caddy를 제외한 관리 대상 Python Docker base image 8개를 digest로 고정함. Trivy filesystem/config scan은 HIGH·CRITICAL 결과를 차단하며 CI에서 검증함 |
 
-개인 서버 기능을 직접 제공하는 것과 별도로, 장애를 빨리 발견하고 데이터 손실 가능성을 낮추며 복구 상태를 확인하는 운영 체계를 함께 구축한 구성이 핵심임.
-
-N100의 `personal-server-autostart` 작업은 Windows 시작 시 `-Supervisor`를 단일 실행함. Supervisor는 초기 120초 안정화 대기 뒤 Daemon을 시작하고, Daemon이 3분 간격으로 WSL 유지, K3s, Portal, NodePort, Cloudflare Tunnel을 점검함. Tunnel은 로컬 NodePort·서비스·프로세스와 공개 `/health`가 모두 정상일 때만 정상으로 판정하므로, active 상태이지만 Cloudflare 연결만 끊긴 장애도 감지함. NodePort 자체가 비정상이면 Tunnel 장애로 단정하거나 Tunnel 알림·재기동을 하지 않음. Daemon이 비정상 종료되면 Supervisor가 15초 뒤 새 Daemon을 시작하며, 60초 안에 3회 연속 종료되면 60초 backoff를 둠. Supervisor 초기 metrics 기록 실패는 감시 기동을 막지 않지만, 상태 기록 실패는 중복·무한 복구를 막기 위해 추가 복구를 중단함. Supervisor·Daemon 잠금으로 중복 실행을 막고, 예약 작업 자체에는 무기한 실행과 1분 간격 최대 3회 재시작 정책을 적용함. 같은 구성요소가 2회 연속 비정상이면 승인된 범위의 복구만 시도하며, 항목별 자동복구 시도는 최대 3회로 제한함. Tunnel 장애 알림 전송이 성공한 경우에만 N100은 이후 Tunnel 정상 전환에서 복구 알림을 1회 보냄. 장애 알림 전송이 실패하면 다음 점검에서 장애 알림을 재시도함. GitHub Actions의 약 5분 외부 health 점검은 독립 보완 경로이므로 같은 장애에서 메시지가 중복될 수 있음. N100 전원·네트워크·WSL 자체가 불가한 물리·호스트 장애는 이 범위의 자동복구 대상이 아님.
+개인 서버 기능과 함께 장애 감지·복구·데이터 보호를 운영하는 구성이 핵심임. 자동복구의 세부 조건·제한·예외는 [N100 운영 환경](docs/n100-mt4-setup.md)과 [운영 참조](docs/operations-reference.md)를 따름.
 
 ## 컨테이너 실행 보안
 
@@ -81,24 +82,11 @@ N100의 `personal-server-autostart` 작업은 Windows 시작 시 `-Supervisor`�
 
 Portal은 K3s 단일 writer와 PVC를 사용하므로 non-root 이미지 교체 전에 파일·상태 PVC의 UID/GID `10001:10001` 읽기·쓰기·디렉터리 접근 권한을 사전검증함. 권한이 충족되지 않으면 Deployment를 전환하지 않으며, PVC 권한 정렬은 자동 배포 대상이 아닌 별도 운영 작업으로 처리함.
 
-## 모니터링 화면
+## 모니터링 예시
 
 Grafana에서 K3s 네임스페이스별 CPU·메모리 사용량, Pod 수, 요청량·제한값을 확인하는 예시 화면임.
 
 ![Grafana K3s 모니터링 화면](docs/images/grafana-k3s-overview.png)
-
-## 빠른 상태 확인
-
-N100 WSL에서 실행함.
-
-```bash
-cd /mnt/c/personal-server
-curl --fail --silent --show-error https://len.pe.kr/health
-sudo k3s kubectl -n personal-server get deploy,pod,pvc
-bash infra/k8s/tools/sre-health-audit.sh
-```
-
-각 백업·모니터링·Telegram relay의 상세 점검은 [운영 문서 색인](docs/README.md)을 사용함. 비밀번호·토큰·Secret 값은 문서나 명령 출력에 기록하지 않음.
 
 ## 개발과 배포
 
