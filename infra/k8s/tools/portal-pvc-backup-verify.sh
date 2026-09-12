@@ -26,6 +26,9 @@ fi
 REMOTE=${PORTAL_BACKUP_REMOTE:-gdrive:PersonalServer-encrypted-backups}
 MAX_AGE=${PORTAL_BACKUP_MAX_AGE_SECONDS:-86400}
 READINESS_TIMEOUT_SECONDS=${PORTAL_READINESS_TIMEOUT_SECONDS:-300}
+RCLONE_PREFLIGHT_TIMEOUT_SECONDS=${PORTAL_RCLONE_TIMEOUT_SECONDS:-30}
+RCLONE_PREFLIGHT_RETRY_COUNT=${PORTAL_RCLONE_PREFLIGHT_RETRY_COUNT:-1}
+RCLONE_PREFLIGHT_RETRY_BACKOFF_SECONDS=${PORTAL_RCLONE_PREFLIGHT_RETRY_BACKOFF_SECONDS:-5}
 FILES_PVC='portal-web-files-dynamic'
 STATE_PVC='portal-web-state-dynamic'
 DEPLOYMENT='portal-web'
@@ -151,6 +154,12 @@ assert_preflight() {
   [ "$MAX_AGE" -ge 1 ] 2>/dev/null || return 1
   case "$READINESS_TIMEOUT_SECONDS" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
   [ "$READINESS_TIMEOUT_SECONDS" -ge 120 ] && [ "$READINESS_TIMEOUT_SECONDS" -le 600 ] || return 1
+  case "$RCLONE_PREFLIGHT_TIMEOUT_SECONDS" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
+  [ "$RCLONE_PREFLIGHT_TIMEOUT_SECONDS" -ge 1 ] && [ "$RCLONE_PREFLIGHT_TIMEOUT_SECONDS" -le 30 ] || return 1
+  case "$RCLONE_PREFLIGHT_RETRY_COUNT" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
+  [ "$RCLONE_PREFLIGHT_RETRY_COUNT" -ge 0 ] && [ "$RCLONE_PREFLIGHT_RETRY_COUNT" -le 1 ] || return 1
+  case "$RCLONE_PREFLIGHT_RETRY_BACKOFF_SECONDS" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
+  [ "$RCLONE_PREFLIGHT_RETRY_BACKOFF_SECONDS" -ge 1 ] && [ "$RCLONE_PREFLIGHT_RETRY_BACKOFF_SECONDS" -le 30 ] || return 1
   if [ "$EXECUTION_MODE" = host ]; then
     [ -f "$RUNTIME_MARKER" ] && [ -r "$RUNTIME_MARKER" ] || return 1
     [ "$(tr -d '\r\n' < "$RUNTIME_MARKER")" = k3s ] || return 1
@@ -265,23 +274,29 @@ classify_remote_access_failure() {
 }
 
 assert_remote_access() {
-  local status
+  local status retry_attempt=0
   FAILURE_STAGE='remote_preflight'
   prepare_rclone_credentials || {
     FAILURE_STAGE='remote-credentials'
     return 1
   }
-  if rclone_with_credentials_timeout "${PORTAL_RCLONE_TIMEOUT_SECONDS:-30}" lsd --max-depth 1 --log-level ERROR "$REMOTE" >>"$DIAGNOSTIC_FILE" 2>&1; then
-    return 0
-  else
-    status=$?
-  fi
-  if [ "$status" -eq 124 ]; then
-    FAILURE_STAGE='remote-timeout'
-  else
-    FAILURE_STAGE=$(classify_remote_access_failure)
-  fi
-  return 1
+  while :; do
+    if rclone_with_credentials_timeout "$RCLONE_PREFLIGHT_TIMEOUT_SECONDS" lsd --max-depth 1 --log-level ERROR "$REMOTE" >>"$DIAGNOSTIC_FILE" 2>&1; then
+      return 0
+    else
+      status=$?
+    fi
+    if [ "$status" -ne 124 ]; then
+      FAILURE_STAGE=$(classify_remote_access_failure)
+      return 1
+    fi
+    if [ "$retry_attempt" -ge "$RCLONE_PREFLIGHT_RETRY_COUNT" ]; then
+      FAILURE_STAGE='remote-timeout'
+      return 1
+    fi
+    retry_attempt=$((retry_attempt + 1))
+    sleep "$RCLONE_PREFLIGHT_RETRY_BACKOFF_SECONDS"
+  done
 }
 
 acquire_lock() {

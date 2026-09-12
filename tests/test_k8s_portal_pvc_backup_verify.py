@@ -13,7 +13,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", remote_error="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", readiness_timeout=None, assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host"):
+    def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", remote_error="", remote_timeout_attempts=0, rclone_timeout=None, rclone_retry_count=None, rclone_retry_backoff=None, missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", readiness_timeout=None, assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -81,6 +81,8 @@ exit 0
                 "PORTAL_BACKUP_REMOTE": f"fake:{remote}",
                 "PORTAL_FAKE_FAIL_AT": fail_at,
                 "PORTAL_FAKE_REMOTE_ERROR": remote_error,
+                "PORTAL_FAKE_REMOTE_TIMEOUT_ATTEMPTS": str(remote_timeout_attempts),
+                "PORTAL_FAKE_REMOTE_LSD_COUNT_FILE": str(root / "remote-lsd-count"),
                 "PORTAL_FAKE_MISSING_PVC": "1" if missing_pvc else "",
                 "PORTAL_FAKE_SPECIAL_ENTRY": "1" if special_entry else "",
                 "PORTAL_FAKE_HOLD": "1" if send_signal and signal_when == "reader" else "",
@@ -103,6 +105,12 @@ exit 0
             }
             if readiness_timeout is not None:
                 env["PORTAL_READINESS_TIMEOUT_SECONDS"] = str(readiness_timeout)
+            if rclone_timeout is not None:
+                env["PORTAL_RCLONE_TIMEOUT_SECONDS"] = str(rclone_timeout)
+            if rclone_retry_count is not None:
+                env["PORTAL_RCLONE_PREFLIGHT_RETRY_COUNT"] = str(rclone_retry_count)
+            if rclone_retry_backoff is not None:
+                env["PORTAL_RCLONE_PREFLIGHT_RETRY_BACKOFF_SECONDS"] = str(rclone_retry_backoff)
             if namespace is not None:
                 env["PORTAL_NAMESPACE"] = namespace
             if send_signal:
@@ -285,6 +293,17 @@ operation=$1
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = remote ] && [ "$operation" = lsd ]; then
   printf '%s\\n' "${{PORTAL_FAKE_REMOTE_ERROR:-fake-remote-secret /private/noisy/path}}" >&2
   exit 42
+fi
+if [ "$operation" = lsd ]; then
+  count=0
+  if [ -f "${{PORTAL_FAKE_REMOTE_LSD_COUNT_FILE}}" ]; then
+    count=$(cat "${{PORTAL_FAKE_REMOTE_LSD_COUNT_FILE}}")
+  fi
+  count=$((count + 1))
+  printf '%s\\n' "$count" > "${{PORTAL_FAKE_REMOTE_LSD_COUNT_FILE}}"
+  if [ "$count" -le "${{PORTAL_FAKE_REMOTE_TIMEOUT_ATTEMPTS:-0}}" ]; then
+    exit 124
+  fi
 fi
 if [ "${{PORTAL_FAKE_ASSERT_LOCK_FD_CLOSED:-}}" = 1 ] && [ "$operation" = copyto ]; then
   fd_mode=$(python3 -c 'import fcntl, os; print(fcntl.fcntl(9, fcntl.F_GETFL) & os.O_ACCMODE)' 2>/dev/null) || exit 42
@@ -502,8 +521,19 @@ esac
         text = SCRIPT.read_text(encoding="utf-8")
         remote_preflight = text[text.index("assert_remote_access() {") : text.index("acquire_lock() {")]
 
-        self.assertIn('PORTAL_RCLONE_TIMEOUT_SECONDS:-30', remote_preflight)
-        self.assertIn("rclone_with_credentials_timeout", remote_preflight)
+        self.assertIn(
+            'RCLONE_PREFLIGHT_TIMEOUT_SECONDS=${PORTAL_RCLONE_TIMEOUT_SECONDS:-30}', text
+        )
+        self.assertIn(
+            'RCLONE_PREFLIGHT_RETRY_COUNT=${PORTAL_RCLONE_PREFLIGHT_RETRY_COUNT:-1}', text
+        )
+        self.assertIn(
+            'RCLONE_PREFLIGHT_RETRY_BACKOFF_SECONDS=${PORTAL_RCLONE_PREFLIGHT_RETRY_BACKOFF_SECONDS:-5}', text
+        )
+        self.assertIn(
+            'rclone_with_credentials_timeout "$RCLONE_PREFLIGHT_TIMEOUT_SECONDS"',
+            remote_preflight,
+        )
         self.assertNotIn("RCLONE_CONFIG_PASS", remote_preflight)
 
     def test_check_mode_rejects_non_k3s_runtime_without_mutation(self):
@@ -734,6 +764,66 @@ esac
         self.assertNotIn("/private/", result.stdout + result.stderr)
         self.assertNotIn("fake-remote-secret", result.stdout + result.stderr)
         self.assertEqual(evidence, "")
+
+    def test_remote_preflight_retries_one_timeout_then_completes_writer_cycle(self):
+        """Removing timeout retry must fail before Portal writer pause and restore."""
+        result, calls, _, _ = self.run_tool(
+            "--go",
+            remote_timeout_attempts=1,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr + " calls=" + calls)
+        self.assertEqual(calls.count("rclone lsd"), 2)
+        writer_pause = "k3s kubectl -n personal-server scale deployment/portal-web --replicas=0"
+        writer_restore = "k3s kubectl -n personal-server scale deployment/portal-web --replicas=1"
+        call_lines = calls.splitlines()
+        self.assertEqual(call_lines.count(writer_pause), 1)
+        self.assertEqual(call_lines.count(writer_restore), 1)
+        self.assertLess(calls.rindex("rclone lsd"), calls.index("\n" + writer_pause))
+
+    def test_remote_preflight_timeout_exhaustion_stops_before_writer_pause(self):
+        """Removing the retry limit must allow an unbounded preflight loop."""
+        result, calls, _, evidence = self.run_tool(
+            "--go",
+            remote_timeout_attempts=2,
+            rclone_retry_count=1,
+            rclone_retry_backoff=1,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("portal_pvc_backup_stage=remote-timeout", result.stdout)
+        self.assertEqual(calls.count("rclone lsd"), 2)
+        self.assertNotIn("scale deployment/portal-web", calls)
+        self.assertEqual(evidence, "")
+
+    def test_remote_preflight_non_timeout_failure_is_not_retried(self):
+        """Retrying any non-timeout remote failure would delay safe error classification."""
+        result, calls, _, _ = self.run_tool(
+            "--go", fail_at="remote", rclone_retry_count=1, rclone_retry_backoff=1
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("portal_pvc_backup_stage=remote-access", result.stdout)
+        self.assertEqual(calls.count("rclone lsd"), 1)
+        self.assertNotIn("scale deployment/portal-web", calls)
+
+    def test_remote_preflight_rejects_noncanonical_or_out_of_range_retry_settings(self):
+        """Dropping preflight setting validation would permit unsafe timing or retry bounds."""
+        invalid_settings = (
+            {"rclone_timeout": "0"},
+            {"rclone_timeout": "31"},
+            {"rclone_timeout": "030"},
+            {"rclone_retry_count": "2"},
+            {"rclone_retry_count": "01"},
+            {"rclone_retry_backoff": "0"},
+            {"rclone_retry_backoff": "31"},
+            {"rclone_retry_backoff": "05"},
+        )
+        for settings in invalid_settings:
+            with self.subTest(settings=settings):
+                result, calls, _, _ = self.run_tool("--go", **settings)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("scale deployment/portal-web", calls)
 
     def test_remote_preflight_reports_safe_config_password_category(self):
         result, calls, _, _ = self.run_tool(
