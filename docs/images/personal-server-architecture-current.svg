@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1660" viewBox="0 0 1400 1660" role="img" aria-labelledby="title desc">
+  <title id="title">Personal Server 현재 운영 구조</title>
+  <desc id="desc">공개 진입 경로, N100 WSL2의 K3s와 Docker Compose 실행 경계, UID 10001 non-root 보안 경계, 관측과 백업을 구분한 현재 개인 서버 구조도</desc>
+  <defs>
+    <marker id="arrow" markerWidth="11" markerHeight="11" refX="10" refY="5" orient="auto"><path d="M0,0 L0,10 L10,5 z" fill="#64748b"/></marker>
+    <style>
+      .title { font: 700 46px Arial, 'Apple SD Gothic Neo', sans-serif; fill: #10213d; }
+      .subtitle { font: 400 21px Arial, 'Apple SD Gothic Neo', sans-serif; fill: #52627a; }
+      .section { font: 700 25px Arial, 'Apple SD Gothic Neo', sans-serif; fill: #1f3557; }
+      .label { font: 700 25px Arial, 'Apple SD Gothic Neo', sans-serif; fill: #13233c; }
+      .body { font: 400 19px Arial, 'Apple SD Gothic Neo', sans-serif; fill: #38506f; }
+      .small { font: 400 16px Arial, 'Apple SD Gothic Neo', sans-serif; fill: #52627a; }
+      .route { stroke: #64748b; stroke-width: 4; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #94a3b8; stroke-width: 3; fill: none; stroke-dasharray: 9 9; }
+    </style>
+  </defs>
+
+  <rect width="1400" height="1660" fill="#f7f9fc"/>
+  <text x="85" y="84" class="title">Personal Server 현재 운영 구조</text>
+  <text x="85" y="124" class="subtitle">서비스 제공 · 실행 보안 · 제한형 복구 · 관측 · 데이터 보호</text>
+
+  <!-- Public edge -->
+  <rect x="65" y="170" width="1270" height="245" rx="28" fill="#ffffff" stroke="#cbd5e1" stroke-width="2"/>
+  <text x="100" y="218" class="section">① 공개 진입 경로</text>
+  <rect x="115" y="255" width="255" height="105" rx="18" fill="#dbeafe" stroke="#2563eb" stroke-width="3"/>
+  <text x="242" y="297" text-anchor="middle" class="label">Internet</text>
+  <text x="242" y="329" text-anchor="middle" class="body">공개 사용자</text>
+  <rect x="572" y="255" width="255" height="105" rx="18" fill="#fff7ed" stroke="#f97316" stroke-width="3"/>
+  <text x="699" y="297" text-anchor="middle" class="label">Cloudflare Tunnel</text>
+  <text x="699" y="329" text-anchor="middle" class="body">안전한 공개 연결</text>
+  <rect x="1030" y="255" width="255" height="105" rx="18" fill="#fef3c7" stroke="#d97706" stroke-width="3"/>
+  <text x="1157" y="297" text-anchor="middle" class="label">Caddy</text>
+  <text x="1157" y="329" text-anchor="middle" class="body">도메인별 라우팅</text>
+  <path d="M370 307 H572" class="route"/>
+  <path d="M827 307 H1030" class="route"/>
+  <text x="700" y="394" text-anchor="middle" class="small">Caddy가 K3s Portal과 Docker Compose 서비스로 요청을 분기함</text>
+
+  <!-- Runtime -->
+  <rect x="65" y="455" width="1270" height="585" rx="30" fill="#eff6ff" stroke="#2563eb" stroke-width="3"/>
+  <text x="100" y="505" class="section">② Windows N100 · WSL2 실행 환경</text>
+  <text x="100" y="536" class="small">Cloudflare Tunnel과 Caddy는 WSL 사용자 환경에서 실행함</text>
+
+  <rect x="105" y="575" width="560" height="290" rx="22" fill="#ffffff" stroke="#60a5fa" stroke-width="3"/>
+  <text x="140" y="625" class="section">K3s · personal-server</text>
+  <rect x="145" y="665" width="225" height="145" rx="18" fill="#dbeafe" stroke="#3b82f6" stroke-width="2.5"/>
+  <text x="257" y="710" text-anchor="middle" class="label">portal-web</text>
+  <text x="257" y="744" text-anchor="middle" class="body">Portal · File Manager</text>
+  <text x="257" y="776" text-anchor="middle" class="small">UID/GID 10001</text>
+  <rect x="410" y="665" width="215" height="145" rx="18" fill="#e0f2fe" stroke="#38bdf8" stroke-width="2.5"/>
+  <text x="517" y="710" text-anchor="middle" class="label">Portal PVC</text>
+  <text x="517" y="744" text-anchor="middle" class="body">파일 · 상태 데이터</text>
+  <text x="517" y="776" text-anchor="middle" class="small">K3s 단일 writer</text>
+  <path d="M370 737 H410" class="route"/>
+
+  <rect x="735" y="575" width="560" height="290" rx="22" fill="#ffffff" stroke="#22c55e" stroke-width="3"/>
+  <text x="770" y="625" class="section">Docker Compose</text>
+  <rect x="775" y="665" width="225" height="145" rx="18" fill="#dcfce7" stroke="#4ade80" stroke-width="2.5"/>
+  <text x="887" y="710" text-anchor="middle" class="label">정보 · 기록</text>
+  <text x="887" y="744" text-anchor="middle" class="body">News · YouTube · Book</text>
+  <text x="887" y="776" text-anchor="middle" class="small">서비스별 데이터 경로</text>
+  <rect x="1040" y="665" width="215" height="145" rx="18" fill="#dcfce7" stroke="#4ade80" stroke-width="2.5"/>
+  <text x="1147" y="710" text-anchor="middle" class="label">자동화 · 운영</text>
+  <text x="1147" y="744" text-anchor="middle" class="body">차량관리 · HomeOps</text>
+  <text x="1147" y="776" text-anchor="middle" class="small">제한된 운영 작업</text>
+
+  <rect x="105" y="905" width="1190" height="90" rx="18" fill="#172554"/>
+  <text x="145" y="946" style="font:700 23px Arial, 'Apple SD Gothic Neo', sans-serif; fill:#dbeafe;">실행 보안 경계</text>
+  <text x="145" y="977" style="font:400 18px Arial, 'Apple SD Gothic Neo', sans-serif; fill:#ffffff;">Caddy · Portal · 차량관리 · HomeOps · system-agent는 UID/GID 10001로 실행하며, Caddy는 필요한 포트 binding capability만 사용함</text>
+  <text x="700" y="850" text-anchor="middle" class="small">car.len.pe.kr OAuth callback은 Caddy를 거치지 않는 예외 경로</text>
+
+  <!-- Operations -->
+  <text x="85" y="1105" class="section">③ 운영 · 관측 · 데이터 보호</text>
+  <rect x="65" y="1140" width="605" height="205" rx="24" fill="#eef2ff" stroke="#6366f1" stroke-width="3"/>
+  <text x="105" y="1190" class="section">N100 제한형 자동복구</text>
+  <text x="105" y="1235" class="label">KeepAlive → Supervisor → Daemon</text>
+  <text x="105" y="1270" class="body">WSL 유지 · 단일 실행 · 3분 상태 점검</text>
+  <text x="105" y="1306" class="small">K3s · Portal · Tunnel만 제한 복구 · 대상별 최대 3회</text>
+
+  <rect x="730" y="1140" width="605" height="205" rx="24" fill="#ecfdf5" stroke="#059669" stroke-width="3"/>
+  <text x="770" y="1190" class="section">내부 관측 · 알림</text>
+  <text x="770" y="1235" class="label">Prometheus → Grafana</text>
+  <text x="770" y="1270" class="body">Alertmanager → SRE relay → Telegram</text>
+  <text x="770" y="1306" class="small">K3s 노드 · Pod · PVC · 서비스 상태를 관측함</text>
+
+  <rect x="65" y="1385" width="605" height="205" rx="24" fill="#faf5ff" stroke="#a855f7" stroke-width="3"/>
+  <text x="105" y="1435" class="section">독립 외부 상태 점검</text>
+  <text x="105" y="1480" class="label">GitHub Actions · Codex 일일 점검</text>
+  <text x="105" y="1515" class="body">공개 /health · CI · Trivy 상태 확인</text>
+  <text x="105" y="1551" class="small">N100 직접 감시를 보완하며 조치 필요 시에만 알림</text>
+
+  <rect x="730" y="1385" width="605" height="205" rx="24" fill="#fff7ed" stroke="#ea580c" stroke-width="3"/>
+  <text x="770" y="1435" class="section">Portal 데이터 보호</text>
+  <text x="770" y="1480" class="label">Portal PVC → 암호화 백업 → 원격 보관</text>
+  <text x="770" y="1515" class="body">실제 복원 가능 여부까지 검증</text>
+  <text x="770" y="1551" class="small">백업과 복원 검증 결과는 운영 알림 경로로 보고함</text>
+</svg>
