@@ -16,6 +16,12 @@
 | `car-care-worker` | Docker Compose | 차량관리 데이터·Telegram |
 | Prometheus·Grafana·Alertmanager relay | K3s `monitoring` namespace | monitoring PVC와 Kubernetes Secret |
 
+## 컨테이너 실행 권한
+
+`caddy`, `car-care-worker`, `homeops-executor`, `portal-web`, `system-agent`는 UID/GID `10001:10001`의 전용 계정으로 실행함. Caddy는 내부 80·443 포트 binding에 필요한 `NET_BIND_SERVICE` capability만 사용함.
+
+Portal PVC는 `portal-web-files-dynamic`, `portal-web-state-dynamic` 두 개이며 K3s 단일 writer만 연결함. Portal non-root 이미지 교체 전에는 두 PVC의 UID/GID `10001:10001` 읽기·쓰기·디렉터리 접근 권한을 확인함. 권한 불충족 시 Deployment를 변경하지 않으며, PVC 권한 정렬은 자동화하지 않고 별도 운영 승인 아래 최소 범위로 수행함.
+
 ## 공개 도메인
 
 | 도메인 | 현재 대상 |
@@ -64,6 +70,7 @@ HomeOps 실행기는 Docker socket을 제한된 allowlist 진단·재시작에�
 - K3s Portal 전환·rollback·PVC 작업은 `infra/k8s/tools/portal-cutover.sh`의 명시적 운영 절차만 사용함.
 - 자동 배포는 `crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker`의 허용된 Compose 변경만 처리함.
 - Caddy, Cloudflare Tunnel, K3s Secret·PVC, `.env`, `data/`, Portal은 자동 배포에서 제외함.
+- Trivy filesystem/config 검사는 HIGH·CRITICAL 결과를 CI 차단 기준으로 사용함.
 
 ## 뉴스 수집 관측성
 

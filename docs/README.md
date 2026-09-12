@@ -9,6 +9,7 @@
 | [현재 운영 로드맵](operations-roadmap.md) | 완료 기준과 향후 운영 개선 항목 확인 |
 | [안전한 복구 훈련](recovery-drill.md) | 월간 백업·알림·격리 Pod 복구 점검 |
 | [운영 참조](operations-reference.md) | 전체 서비스 구조, 공개 경로, 일상 상태 확인 |
+| [컨테이너 실행 권한](operations-reference.md#컨테이너-실행-권한) | non-root 실행 계정과 Portal PVC 사전검증 기준 |
 | [N100 운영 환경](n100-mt4-setup.md) | Windows·WSL2 자동 시작, 제한형 자동복구, 재부팅 뒤 확인, 자원 점검 |
 | [K3s·모니터링·백업](../infra/k8s/README.md) | Portal K3s, Grafana, Telegram SRE relay, PVC 백업 |
 | [뉴스 수집 관측성](operations-reference.md#뉴스-수집-관측성) | crawler 수집 상태·인증 metrics·NewsCollectionStale 운영 기준 |
