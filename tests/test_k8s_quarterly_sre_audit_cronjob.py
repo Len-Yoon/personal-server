@@ -1,6 +1,8 @@
 import re
 import os
+import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -88,42 +90,75 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 {"apiGroups": [""], "resources": ["events"], "verbs": ["list"]},
             ],
         )
+        for rule in lab_rules:
+            self.assertNotIn("secrets", rule["resources"])
+            self.assertNotIn("persistentvolumeclaims", rule["resources"])
 
         node_rules = find("ClusterRole", "quarterly-sre-audit-nodes")["rules"]
         self.assertEqual(node_rules, [{"apiGroups": [""], "resources": ["nodes"], "verbs": ["get", "list"]}])
 
     def test_manifest_creates_only_the_fixed_recovery_namespace_and_no_sensitive_mounts(self):
-        self.assertEqual(find("Namespace", "sre-recovery-lab")["metadata"]["name"], "sre-recovery-lab")
+        namespace = find("Namespace", "sre-recovery-lab")
+        self.assertEqual(namespace["metadata"]["name"], "sre-recovery-lab")
+        self.assertEqual(
+            namespace["metadata"]["labels"],
+            {
+                "pod-security.kubernetes.io/enforce": "restricted",
+                "pod-security.kubernetes.io/enforce-version": "latest",
+                "pod-security.kubernetes.io/audit": "restricted",
+                "pod-security.kubernetes.io/audit-version": "latest",
+                "pod-security.kubernetes.io/warn": "restricted",
+                "pod-security.kubernetes.io/warn-version": "latest",
+            },
+        )
         pod = pod_spec()
         self.assertNotIn("hostPath", str(pod))
         self.assertNotIn("persistentVolumeClaim", str(pod))
         self.assertFalse(any("secret" in volume for volume in pod.get("volumes", [])))
 
-    def test_runner_records_failed_status_even_when_a_check_fails(self):
+    def run_runner(self, *, evidence, scenario="", patch_fails=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             command = root / "kubectl"
             status = root / "status.json"
+            calls = root / "calls"
+            manifest = root / "recovery.yaml"
+            date = root / "date"
             command.write_text(
                 "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" >> \"$CALLS\"\n"
                 "case \"$*\" in\n"
-                "  *'get nodes'*) exit 0 ;;\n"
-                "  *'get configmap portal-pvc-backup-evidence'*) printf '%s\\n' 'source_runtime=k3s-pvc' 'backup_completed_at=2020-01-01T00:00:00Z' ;;\n"
+                "  *'get nodes'*) printf 'node Ready worker' ;;\n"
+                "  *'get configmap portal-pvc-backup-evidence'*) [ \"$SCENARIO\" = configmap-fail ] && exit 1; printf '%s\\n' \"$EVIDENCE\"; exit 0 ;;\n"
                 "  *'get deployment portal-web'*) printf 1 ;;\n"
+                "  *'create -f -'*) [ \"$SCENARIO\" = create-fail ] && exit 1; cat > \"$MANIFEST\"; printf uid-1 ;;\n"
+                "  *'get deployment quarterly-sre-recovery-drill'*) run_id=$(awk '/audit-run-id:/ {print $2; exit}' \"$MANIFEST\"); printf 'uid-1:%s' \"$run_id\" ;;\n"
                 "  *'get pods'*) printf recovery-pod ;;\n"
                 "  *'get pod recovery-pod'*) n=$(cat \"$COUNTER\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$COUNTER\"; printf '%s' \"$((n - 1))\" ;;\n"
-                "  *'patch configmap sre-telegram-quarterly-audit-status'*) printf '%s' \"$*\" > \"$STATUS\" ;;\n"
+                "  *'exec recovery-pod'*) [ \"$SCENARIO\" = exec-fail ] && exit 1; exit 0 ;;\n"
+                "  *'delete deployment quarterly-sre-recovery-drill'*) [ \"$SCENARIO\" = cleanup-fail ] && exit 1; exit 0 ;;\n"
+                "  *'patch configmap sre-telegram-quarterly-audit-status'*) printf '%s' \"$9\" > \"$STATUS\"; [ \"$PATCH_FAILS\" = true ] && exit 1; exit 0 ;;\n"
                 "esac\n",
                 encoding="utf-8",
             )
+            date.write_text(
+                "#!/bin/sh\ncase \"$*\" in *'-d'*) printf 1000 ;; *'+%s'*) printf 1001 ;; *'+%Y%m%dT%H%M%SZ'*) printf 20260912T010203Z ;; *) printf 2026-09-12T01:02:03Z ;; esac\n",
+                encoding="utf-8",
+            )
             command.chmod(0o755)
+            date.chmod(0o755)
             result = subprocess.run(
                 ["bash", str(RUNNER)],
                 env={
                     **os.environ,
                     "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
+                    "CALLS": str(calls),
+                    "MANIFEST": str(manifest),
                     "STATUS": str(status),
                     "COUNTER": str(root / "counter"),
+                    "EVIDENCE": evidence,
+                    "SCENARIO": scenario,
+                    "PATCH_FAILS": str(patch_fails).lower(),
                     "KUBERNETES_SERVICE_HOST": "kubernetes.default.svc",
                     "KUBERNETES_SERVICE_PORT_HTTPS": "443",
                 },
@@ -131,9 +166,68 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 capture_output=True,
                 check=False,
             )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn('"status":"failed"', status.read_text(encoding="utf-8"))
-            self.assertIn('"health_check":"failed"', status.read_text(encoding="utf-8"))
+            return (
+                result,
+                json.loads(status.read_text(encoding="utf-8")),
+                calls.read_text(encoding="utf-8"),
+                manifest.read_text(encoding="utf-8") if manifest.exists() else "",
+            )
+
+    def test_runner_emits_relay_compatible_payload_after_a_successful_run(self):
+        result, payload, calls, manifest = self.run_runner(
+            evidence="source_runtime=k3s-pvc\nbackup_completed_at=2026-09-12T00:00:00Z"
+        )
+
+        self.assertEqual(result.returncode, 0, f"{result.stderr}\n{calls}\n{manifest}")
+        self.assertEqual(
+            set(payload["data"]),
+            {"run_id", "status", "completed_at", "health_audit", "backup_check", "recovery_lab"},
+        )
+        sys.path.insert(0, str(ROOT / "sre-telegram-relay"))
+        from app.main import _read_quarterly_audit_report
+
+        class RelayClient:
+            def get_config_map(self, namespace, name):
+                return payload
+
+        self.assertEqual(_read_quarterly_audit_report(RelayClient()), payload["data"])
+        self.assertIn("audit-run-id:", manifest)
+        self.assertIn(payload["data"]["run_id"], manifest)
+        self.assertLess(calls.index("create -f -"), calls.index("delete deployment quarterly-sre-recovery-drill"))
+
+    def test_runner_fails_closed_for_wrong_runtime_or_unreadable_backup_evidence(self):
+        for evidence, scenario in (
+            ("source_runtime=compose-local\nbackup_completed_at=2026-09-12T00:00:00Z", ""),
+            ("source_runtime=k3s-pvc\nbackup_completed_at=2026-09-12T00:00:00Z", "configmap-fail"),
+        ):
+            with self.subTest(scenario=scenario or "wrong-runtime"):
+                result, payload, _, _ = self.run_runner(evidence=evidence, scenario=scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(payload["data"]["status"], "failed")
+                self.assertEqual(payload["data"]["backup_check"], "failed")
+
+    def test_runner_never_executes_or_deletes_when_recovery_creation_fails(self):
+        result, payload, calls, _ = self.run_runner(
+            evidence="source_runtime=k3s-pvc\nbackup_completed_at=2026-09-12T00:00:00Z",
+            scenario="create-fail",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(payload["data"]["recovery_lab"], "failed")
+        self.assertNotIn("exec recovery-pod", calls)
+        self.assertNotIn("delete deployment quarterly-sre-recovery-drill", calls)
+
+    def test_runner_fails_when_owned_recovery_cleanup_or_status_patch_fails(self):
+        evidence = "source_runtime=k3s-pvc\nbackup_completed_at=2026-09-12T00:00:00Z"
+        for scenario, patch_fails in (("exec-fail", False), ("cleanup-fail", False), ("", True)):
+            with self.subTest(scenario=scenario or "patch-fail"):
+                result, payload, calls, _ = self.run_runner(
+                    evidence=evidence, scenario=scenario, patch_fails=patch_fails
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls.count("patch configmap sre-telegram-quarterly-audit-status"), 1)
+                if scenario in {"exec-fail", "cleanup-fail"}:
+                    self.assertEqual(payload["data"]["recovery_lab"], "failed")
 
     def test_runner_and_image_do_not_depend_on_host_or_sensitive_storage(self):
         text = "\n".join((RUNNER.read_text(encoding="utf-8"), DOCKERFILE.read_text(encoding="utf-8"))).lower()

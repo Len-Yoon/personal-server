@@ -6,17 +6,24 @@ STATUS_CONFIGMAP=sre-telegram-quarterly-audit-status
 PORTAL_NAMESPACE=personal-server
 RECOVERY_NAMESPACE=sre-recovery-lab
 RECOVERY_DEPLOYMENT=quarterly-sre-recovery-drill
-RECOVERY_LABEL=app.kubernetes.io/name=quarterly-sre-recovery-drill
 BACKUP_MAX_AGE_SECONDS=${QUARTERLY_SRE_AUDIT_BACKUP_MAX_AGE_SECONDS:-86400}
 
-health_check=failed
-backup_evidence=failed
+health_audit=failed
+backup_check=failed
 recovery_lab=failed
-recovery_deployment_created=false
+recovery_owned=false
+recovery_uid=""
+RUN_ID="audit-$$"
+run_id_ready=false
+
+if generated_run_id=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null); then
+  RUN_ID="${generated_run_id}-$$"
+  run_id_ready=true
+fi
 
 configure_client() {
-  : "${KUBERNETES_SERVICE_HOST:?Kubernetes API host is required}"
-  : "${KUBERNETES_SERVICE_PORT_HTTPS:?Kubernetes API port is required}"
+  [[ -n "${KUBERNETES_SERVICE_HOST:-}" ]] || return 1
+  [[ -n "${KUBERNETES_SERVICE_PORT_HTTPS:-}" ]] || return 1
   export KUBECONFIG=/tmp/kubeconfig
   cat >"$KUBECONFIG" <<EOF
 apiVersion: v1
@@ -37,20 +44,45 @@ contexts:
       user: runner
 current-context: in-cluster
 EOF
-  chmod 0600 "$KUBECONFIG"
+  chmod 0600 "$KUBECONFIG" || return 1
+}
+
+cleanup_recovery_deployment() {
+  local current_identity
+  [[ "$recovery_owned" == true ]] || return 0
+  current_identity=$(kubectl -n "$RECOVERY_NAMESPACE" get deployment "$RECOVERY_DEPLOYMENT" -o jsonpath='{.metadata.uid}:{.metadata.labels.audit-run-id}') || return 1
+  [[ "$current_identity" == "${recovery_uid}:${RUN_ID}" ]] || return 1
+  kubectl -n "$RECOVERY_NAMESPACE" delete deployment "$RECOVERY_DEPLOYMENT" --wait=false --timeout=30s || return 1
+  kubectl -n "$RECOVERY_NAMESPACE" wait --for=delete "deployment/${RECOVERY_DEPLOYMENT}" --timeout=30s || return 1
+  recovery_owned=false
 }
 
 report_status() {
-  local overall=failed completed_at run_id payload
-  [[ "$health_check" == passed && "$backup_evidence" == passed && "$recovery_lab" == passed ]] && overall=passed
-  completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  run_id=$(date -u +%Y%m%dT%H%M%SZ)
-  payload=$(printf '{"data":{"run_id":"%s","status":"%s","completed_at":"%s","health_check":"%s","backup_evidence":"%s","recovery_lab":"%s"}}' \
-    "$run_id" "$overall" "$completed_at" "$health_check" "$backup_evidence" "$recovery_lab")
-  kubectl -n "$STATUS_NAMESPACE" patch configmap "$STATUS_CONFIGMAP" --type merge --patch "$payload" >/dev/null 2>&1 || true
+  local overall=failed completed_at payload
+  [[ "$run_id_ready" == true ]] || return 1
+  if [[ "$health_audit" == passed && "$backup_check" == passed && "$recovery_lab" == passed ]]; then
+    overall=passed
+  fi
+  completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ) || return 1
+  payload=$(printf '{"data":{"run_id":"%s","status":"%s","completed_at":"%s","health_audit":"%s","backup_check":"%s","recovery_lab":"%s"}}' "$RUN_ID" "$overall" "$completed_at" "$health_audit" "$backup_check" "$recovery_lab") || return 1
+  kubectl -n "$STATUS_NAMESPACE" patch configmap "$STATUS_CONFIGMAP" --type merge --patch "$payload" >/dev/null 2>&1 || return 1
 }
 
-trap 'report_status' EXIT
+finalize() {
+  local result=$1
+  trap - EXIT INT TERM
+  if ! cleanup_recovery_deployment; then
+    recovery_lab=failed
+    result=1
+  fi
+  if ! report_status; then
+    result=1
+  fi
+  exit "$result"
+}
+
+trap 'finalize "$?"' EXIT
+trap 'finalize 1' INT TERM
 
 run_check() {
   local check_name=$1
@@ -58,46 +90,50 @@ run_check() {
   if "$@" >/dev/null 2>&1; then
     printf -v "$check_name" '%s' passed
   fi
+  return 0
 }
 
 check_k3s_and_portal() {
-  kubectl get nodes --no-headers | grep -q ' Ready ' && \
-    kubectl -n "$PORTAL_NAMESPACE" get deployment portal-web -o jsonpath='{.status.availableReplicas}' | grep -Eq '^[1-9][0-9]*$'
+  kubectl get nodes --no-headers | grep -q ' Ready ' || return 1
+  kubectl -n "$PORTAL_NAMESPACE" get deployment portal-web -o jsonpath='{.status.availableReplicas}' | grep -Eq '^[1-9][0-9]*$' || return 1
 }
 
 check_backup_evidence() {
-  local evidence completed_at completed_epoch now_epoch
-  evidence=$(kubectl -n "$PORTAL_NAMESPACE" get configmap portal-pvc-backup-evidence -o jsonpath='{.data.evidence}')
-  printf '%s\n' "$evidence" | grep -qx 'source_runtime=k3s-pvc'
-  completed_at=$(printf '%s\n' "$evidence" | sed -n 's/^backup_completed_at=//p' | head -n 1)
-  completed_epoch=$(date -u -d "$completed_at" +%s)
-  now_epoch=$(date -u +%s)
-  (( completed_epoch <= now_epoch && now_epoch - completed_epoch <= BACKUP_MAX_AGE_SECONDS ))
-}
-
-cleanup_recovery_deployment() {
-  if [[ "$recovery_deployment_created" == true ]]; then
-    kubectl -n "$RECOVERY_NAMESPACE" delete deployment "$RECOVERY_DEPLOYMENT" --ignore-not-found=true >/dev/null 2>&1 || true
-  fi
+  local evidence completed_at completed_epoch now_epoch completed_count runtime_count
+  evidence=$(kubectl -n "$PORTAL_NAMESPACE" get configmap portal-pvc-backup-evidence -o jsonpath='{.data.evidence}') || return 1
+  runtime_count=$(printf '%s\n' "$evidence" | grep -cx 'source_runtime=k3s-pvc' || true)
+  [[ "$runtime_count" == 1 ]] || return 1
+  completed_count=$(printf '%s\n' "$evidence" | grep -c '^backup_completed_at=' || true)
+  [[ "$completed_count" == 1 ]] || return 1
+  completed_at=$(printf '%s\n' "$evidence" | sed -n 's/^backup_completed_at=//p') || return 1
+  [[ -n "$completed_at" ]] || return 1
+  completed_epoch=$(date -u -d "$completed_at" +%s) || return 1
+  now_epoch=$(date -u +%s) || return 1
+  [[ "$completed_epoch" =~ ^[0-9]+$ && "$now_epoch" =~ ^[0-9]+$ ]] || return 1
+  (( completed_epoch <= now_epoch )) || return 1
+  (( now_epoch - completed_epoch <= BACKUP_MAX_AGE_SECONDS )) || return 1
 }
 
 check_recovery_lab() {
-  local pod before after deadline
-  trap 'cleanup_recovery_deployment' RETURN
-  kubectl -n "$RECOVERY_NAMESPACE" create -f - <<EOF
+  local pod before after deadline current_identity
+  recovery_uid=$(kubectl -n "$RECOVERY_NAMESPACE" create -f - -o jsonpath='{.metadata.uid}' <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ${RECOVERY_DEPLOYMENT}
+  labels:
+    audit-run-id: ${RUN_ID}
 spec:
   replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: quarterly-sre-recovery-drill
+      audit-run-id: ${RUN_ID}
   template:
     metadata:
       labels:
         app.kubernetes.io/name: quarterly-sre-recovery-drill
+        audit-run-id: ${RUN_ID}
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -122,30 +158,41 @@ spec:
             initialDelaySeconds: 2
             periodSeconds: 2
 EOF
-  recovery_deployment_created=true
-  kubectl -n "$RECOVERY_NAMESPACE" wait --for=condition=Available "deployment/${RECOVERY_DEPLOYMENT}" --timeout=90s
-  pod=$(kubectl -n "$RECOVERY_NAMESPACE" get pods -l "$RECOVERY_LABEL" -o jsonpath='{.items[0].metadata.name}')
-  before=$(kubectl -n "$RECOVERY_NAMESPACE" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}')
-  kubectl -n "$RECOVERY_NAMESPACE" exec "$pod" -- sh -c 'kill 1'
+  ) || return 1
+  [[ -n "$recovery_uid" ]] || return 1
+  recovery_owned=true
+  current_identity=$(kubectl -n "$RECOVERY_NAMESPACE" get deployment "$RECOVERY_DEPLOYMENT" -o jsonpath='{.metadata.uid}:{.metadata.labels.audit-run-id}') || return 1
+  [[ "$current_identity" == "${recovery_uid}:${RUN_ID}" ]] || return 1
+  kubectl -n "$RECOVERY_NAMESPACE" wait --for=condition=Available "deployment/${RECOVERY_DEPLOYMENT}" --timeout=90s || return 1
+  pod=$(kubectl -n "$RECOVERY_NAMESPACE" get pods -l "app.kubernetes.io/name=quarterly-sre-recovery-drill,audit-run-id=${RUN_ID}" -o jsonpath='{.items[0].metadata.name}') || return 1
+  [[ -n "$pod" ]] || return 1
+  before=$(kubectl -n "$RECOVERY_NAMESPACE" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}') || return 1
+  [[ "$before" =~ ^[0-9]+$ ]] || return 1
+  kubectl -n "$RECOVERY_NAMESPACE" exec "$pod" -- sh -c 'kill 1' || return 1
   deadline=$((SECONDS + 90))
   while (( SECONDS < deadline )); do
-    pod=$(kubectl -n "$RECOVERY_NAMESPACE" get pods -l "$RECOVERY_LABEL" -o jsonpath='{.items[0].metadata.name}')
-    after=$(kubectl -n "$RECOVERY_NAMESPACE" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}')
-    if (( after > before )) && kubectl -n "$RECOVERY_NAMESPACE" wait --for=condition=Ready "pod/${pod}" --timeout=5s >/dev/null; then
-      kubectl -n "$RECOVERY_NAMESPACE" get events --field-selector "involvedObject.name=${pod}" >/dev/null
+    pod=$(kubectl -n "$RECOVERY_NAMESPACE" get pods -l "app.kubernetes.io/name=quarterly-sre-recovery-drill,audit-run-id=${RUN_ID}" -o jsonpath='{.items[0].metadata.name}') || return 1
+    [[ -n "$pod" ]] || return 1
+    after=$(kubectl -n "$RECOVERY_NAMESPACE" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}') || return 1
+    [[ "$after" =~ ^[0-9]+$ ]] || return 1
+    if (( after > before )); then
+      kubectl -n "$RECOVERY_NAMESPACE" wait --for=condition=Ready "pod/${pod}" --timeout=5s >/dev/null || return 1
+      kubectl -n "$RECOVERY_NAMESPACE" get events --field-selector "involvedObject.name=${pod}" >/dev/null || return 1
       return 0
     fi
-    sleep 2
+    sleep 2 || return 1
   done
   return 1
 }
 
 main() {
-  configure_client
-  run_check health_check check_k3s_and_portal
-  run_check backup_evidence check_backup_evidence
+  configure_client || return 1
+  run_check health_audit check_k3s_and_portal
+  run_check backup_check check_backup_evidence
   run_check recovery_lab check_recovery_lab
-  [[ "$health_check" == passed && "$backup_evidence" == passed && "$recovery_lab" == passed ]]
+  [[ "$health_audit" == passed && "$backup_check" == passed && "$recovery_lab" == passed ]] || return 1
 }
 
-main
+main_result=0
+main || main_result=$?
+exit "$main_result"
