@@ -24,7 +24,7 @@
 | Pod 자동복구 실습 | production과 분리된 임시 namespace에서 liveness 실패와 Ready 복구를 확인함 | `sre-pod-recovery-lab.sh` | 완료 |
 | 변경 검증 | 문서·설정 변경 전에 범위와 관련 검사를 확인함 | [Codex 작업 완료 루프](codex-work-loop.md) | 완료 |
 | P3 공급망 보안 | GitHub Actions 외부 action을 full SHA로 고정하고, Caddy를 제외한 관리 대상 Python Docker base image 8개를 digest로 고정함. Trivy filesystem/config scan은 report-only로 실행하며 CI 계약 테스트로 검증함 | `.github/workflows/trivy-security.yml`, `tests/test_supply_chain_security_workflow.py` | 완료 |
-| 분기 SRE 점검 자동화 | controller와 기존 Telegram relay 연계를 준비함. N100 timer 설치·활성화 전 상태이며 별도 운영 승인과 운영자 수동 검증이 필요함 | [K3s 운영](../infra/k8s/README.md), `quarterly-sre-audit-automation.sh` | 준비됨·미적용 |
+| 분기 SRE 점검 자동화 | controller와 기존 Telegram relay 연계를 준비함. 백업 단계는 host rclone 자격 증명이 아닌 CronJob의 안전한 evidence ConfigMap을 검증함. N100 timer 설치·활성화 전 상태이며 별도 운영 승인과 운영자 수동 검증이 필요함 | [K3s 운영](../infra/k8s/README.md), `quarterly-sre-audit-automation.sh` | 준비됨·미적용 |
 
 ## 향후 개선 항목
 

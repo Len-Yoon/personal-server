@@ -76,7 +76,7 @@ CronJob은 매일 03:00 KST에 실행되며, `Forbid` 동시 실행 제한·실�
 
 ## 분기 SRE 점검 자동화
 
-분기 SRE 점검 자동화는 운영자 설치 전 상태이며 현재 N100에서 활성화되지 않음. 저장소 구현 또는 병합만으로 timer가 활성화되지 않으며, 별도 운영 승인 후 N100 운영자가 아래 `--install`을 직접 실행해야 함. 설치 전 `--preflight`가 통과해야 하며, 설치 과정에서 Secret·token·Telegram chat ID·rclone 자격 증명을 생성하거나 복제하지 않음. 기존에 승인된 runtime 자격 증명만 service의 `LoadCredentialEncrypted` 경로로 사용함.
+분기 SRE 점검 자동화는 운영자 설치 전 상태이며 현재 N100에서 활성화되지 않음. 저장소 구현 또는 병합만으로 timer가 활성화되지 않으며, 별도 운영 승인 후 N100 운영자가 아래 `--install`을 직접 실행해야 함. 설치 전 `--preflight`가 통과해야 하며, 설치 과정에서 Secret·token·Telegram chat ID·rclone 자격 증명을 생성·복제·읽지 않음. 백업 단계는 CronJob이 기록한 `personal-server/portal-pvc-backup-evidence` ConfigMap만 fail-closed로 검증함.
 
 ```bash
 bash infra/k8s/tools/quarterly-sre-audit-automation.sh --preflight
@@ -95,7 +95,7 @@ bash infra/k8s/tools/quarterly-sre-audit-automation.sh --run
 | 점검 | 실행 도구 | 범위 |
 |---|---|---|
 | 상태 점검 | `sre-health-audit.sh` | 운영 상태 확인 |
-| 백업 검증 상태 확인 | `portal-pvc-backup-verify.sh --check` | Portal PVC 백업 검증 상태 확인 |
+| 백업 증적 검증 | `portal-pvc-backup-evidence` ConfigMap + `validate-backup-evidence.py` | CronJob이 기록한 암호화 백업·복원 증적의 유효성·만료 상태를 fail-closed로 확인 |
 | 격리 Pod 복구 훈련 | `sre-pod-recovery-lab.sh --run` | 임시 격리 namespace의 Pod만 대상으로 자동 정리함 |
 
 이 과정은 Portal·Caddy·Cloudflare Tunnel·Compose 서비스를 stop, restart, scale 또는 rollout하지 않으며, 운영 데이터와 Portal PVC를 변경하지 않음. 결과는 실행 ID, 완료 시각, 종합 상태와 세 단계 상태만 `monitoring/sre-telegram-quarterly-audit-status` ConfigMap에 기록함. 기존 `sre-telegram-relay`는 Telegram 성공 응답이 확인될 때까지 재시도하며, 응답 유실 시 드물게 중복 메시지가 수신될 수 있음. 명령 출력 전문·namespace/Pod 식별자·파일 경로·내부 IP·Secret 값은 전달하지 않음.

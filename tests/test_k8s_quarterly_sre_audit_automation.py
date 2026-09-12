@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import unittest
 import fcntl
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -18,9 +19,10 @@ class QuarterlySreAuditAutomationContractTests(unittest.TestCase):
         action,
         *,
         filesystem="ext4",
-        seed_credentials=False,
         check_results=None,
         hold_run_lock=False,
+        backup_evidence=None,
+        backup_cronjob_suspended="false",
     ):
         """Run the host controller against only its external command boundary."""
         with tempfile.TemporaryDirectory(dir=ROOT) as directory:
@@ -28,14 +30,13 @@ class QuarterlySreAuditAutomationContractTests(unittest.TestCase):
             bin_dir = root / "bin"
             state_dir = root / "state"
             unit_dir = root / "units"
-            credential_dir = root / "backup-credentials"
             fixture_repo = root / "fixture-repo"
             fixture_tool_dir = fixture_repo / "infra/k8s/tools"
             fixture_template_dir = fixture_repo / "infra/k8s/sre-audit-automation"
             calls = root / "calls.log"
             check_calls = root / "check-calls.log"
             manifest = root / "applied-configmap.yaml"
-            for path in (bin_dir, state_dir, unit_dir, credential_dir, fixture_tool_dir, fixture_template_dir):
+            for path in (bin_dir, state_dir, unit_dir, fixture_tool_dir, fixture_template_dir):
                 path.mkdir(parents=True)
             controller = fixture_tool_dir / CONTROLLER.name
             controller.write_text(CONTROLLER.read_text(encoding="utf-8"), encoding="utf-8")
@@ -43,12 +44,12 @@ class QuarterlySreAuditAutomationContractTests(unittest.TestCase):
             for template in (SERVICE, TIMER):
                 target = fixture_template_dir / template.name
                 target.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
-            if seed_credentials:
-                (credential_dir / "rclone-config.cred").write_text("host-encrypted-config", encoding="utf-8")
-                (credential_dir / "rclone-config-passphrase.cred").write_text(
-                    "host-encrypted-passphrase", encoding="utf-8"
-                )
-
+            validator = fixture_tool_dir / "validate-backup-evidence.py"
+            validator.write_text(
+                (ROOT / "infra/k8s/tools/validate-backup-evidence.py").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            validator.chmod(0o755)
             def write(name, body):
                 path = bin_dir / name
                 path.write_text(body, encoding="utf-8")
@@ -79,7 +80,8 @@ class QuarterlySreAuditAutomationContractTests(unittest.TestCase):
             write(
                 "k3s",
                 "#!/bin/sh\nprintf 'k3s %s\\n' \"$*\" >> \"$CALLS\"\n"
-                "if [ \"$4\" = apply ]; then cat > \"$K3S_MANIFEST\"; fi\n",
+                "if [ \"$4\" = apply ]; then cat > \"$K3S_MANIFEST\"; fi\n"
+                "case \"$*\" in *\"get configmap portal-pvc-backup-evidence\"*) printf '%s' \"$BACKUP_EVIDENCE\" ;; *\"get cronjob portal-pvc-backup\"*) printf '%s' \"$BACKUP_CRONJOB_SUSPENDED\" ;; esac\n",
             )
             write("findmnt", f"#!/bin/sh\nprintf '%s\\n' '{filesystem}'\n")
             write(
@@ -95,10 +97,18 @@ class QuarterlySreAuditAutomationContractTests(unittest.TestCase):
             if check_results is not None:
                 for name in (
                     "sre-health-audit.sh",
-                    "portal-pvc-backup-verify.sh",
                     "sre-pod-recovery-lab.sh",
                 ):
                     write_check(name, check_results[name])
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            valid_evidence = (
+                "schema_version=1\nscope=portal\nbackup_status=success\nencrypted=true\n"
+                f"backup_completed_at={(now - timedelta(minutes=1)).strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
+                "restore_status=success\n"
+                f"restore_verified_at={now.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
+                f"evidence_expires_at={(now + timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
+                "backup_id=portal-test\nsource_runtime=k3s-pvc\n"
+            )
             env = {
                 **os.environ,
                 "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
@@ -107,7 +117,10 @@ class QuarterlySreAuditAutomationContractTests(unittest.TestCase):
                 "K3S_MANIFEST": str(manifest),
                 "QUARTERLY_SRE_AUDIT_STATE_DIR": str(state_dir),
                 "QUARTERLY_SRE_AUDIT_UNIT_DIR": str(unit_dir),
-                "QUARTERLY_SRE_AUDIT_BACKUP_CREDENTIAL_DIR": str(credential_dir),
+                "BACKUP_EVIDENCE": backup_evidence
+                if backup_evidence is not None
+                else valid_evidence,
+                "BACKUP_CRONJOB_SUSPENDED": backup_cronjob_suspended,
             }
             lock_handle = None
             if hold_run_lock:
@@ -125,15 +138,10 @@ class QuarterlySreAuditAutomationContractTests(unittest.TestCase):
             rendered_units = {
                 path.name: path.read_text(encoding="utf-8") for path in unit_dir.iterdir()
             }
-            credential_contents = {
-                path.name: path.read_text(encoding="utf-8") for path in credential_dir.iterdir()
-            }
             return (
                 result,
                 calls.read_text(encoding="utf-8") if calls.exists() else "",
                 rendered_units,
-                credential_contents,
-                str(credential_dir),
                 check_calls.read_text(encoding="utf-8") if check_calls.exists() else "",
                 manifest.read_text(encoding="utf-8") if manifest.exists() else "",
             )
@@ -145,8 +153,8 @@ class QuarterlySreAuditAutomationContractTests(unittest.TestCase):
         for option in ("--preflight", "--install", "--run", "--status"):
             self.assertIn(option, text)
         self.assertIn("sre-health-audit.sh", text)
-        self.assertIn("portal-pvc-backup-verify.sh", text)
-        self.assertIn("--check", text)
+        self.assertIn("portal-pvc-backup-evidence", text)
+        self.assertIn("validate-backup-evidence.py", text)
         self.assertIn("sre-pod-recovery-lab.sh", text)
         self.assertIn("--run", text)
         self.assertIn("sre-telegram-quarterly-audit-status", text)
@@ -155,11 +163,10 @@ class QuarterlySreAuditAutomationContractTests(unittest.TestCase):
         self.assertNotRegex(text, r"cat .*output|command_output|stdout=.*ConfigMap")
 
     def test_run_executes_every_check_and_applies_failure_status(self):
-        result, calls, _, _, _, check_calls, manifest = self.run_controller(
+        result, calls, _, check_calls, manifest = self.run_controller(
             "--run",
             check_results={
                 "sre-health-audit.sh": 1,
-                "portal-pvc-backup-verify.sh": 0,
                 "sre-pod-recovery-lab.sh": 1,
             },
         )
@@ -171,7 +178,6 @@ class QuarterlySreAuditAutomationContractTests(unittest.TestCase):
             [(Path(parts[0]).name, parts[1] if len(parts) == 2 else "") for parts in check_invocations],
             [
                 ("sre-health-audit.sh", ""),
-                ("portal-pvc-backup-verify.sh", "--check"),
                 ("sre-pod-recovery-lab.sh", "--run"),
             ],
         )
@@ -183,11 +189,10 @@ class QuarterlySreAuditAutomationContractTests(unittest.TestCase):
         self.assertNotIn("$(<", manifest)
 
     def test_run_rejects_lock_contention_before_launching_checks(self):
-        result, calls, _, _, _, check_calls, manifest = self.run_controller(
+        result, calls, _, check_calls, manifest = self.run_controller(
             "--run",
             check_results={
                 "sre-health-audit.sh": 0,
-                "portal-pvc-backup-verify.sh": 0,
                 "sre-pod-recovery-lab.sh": 0,
             },
             hold_run_lock=True,
@@ -197,6 +202,39 @@ class QuarterlySreAuditAutomationContractTests(unittest.TestCase):
         self.assertEqual(check_calls, "")
         self.assertNotIn(" apply -f -", calls)
         self.assertEqual(manifest, "")
+
+    def test_run_fails_closed_when_cronjob_backup_evidence_is_invalid(self):
+        result, _, _, _, manifest = self.run_controller(
+            "--run",
+            check_results={
+                "sre-health-audit.sh": 0,
+                "sre-pod-recovery-lab.sh": 0,
+            },
+            backup_evidence="schema_version=1\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout, "quarterly_sre_audit=failed\n")
+        self.assertIn('backup_check: "failed"', manifest)
+
+    def test_run_rejects_backup_evidence_from_a_non_k3s_runtime(self):
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        evidence = (
+            "schema_version=1\nscope=portal\nbackup_status=success\nencrypted=true\n"
+            f"backup_completed_at={(now - timedelta(minutes=1)).strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
+            "restore_status=success\n"
+            f"restore_verified_at={now.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
+            f"evidence_expires_at={(now + timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
+            "backup_id=portal-test\nsource_runtime=compose-local\n"
+        )
+        result, _, _, _, manifest = self.run_controller(
+            "--run",
+            check_results={"sre-health-audit.sh": 0, "sre-pod-recovery-lab.sh": 0},
+            backup_evidence=evidence,
+        )
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('backup_check: "failed"', manifest)
 
     def test_service_is_controller_only_and_hardened(self):
         text = SERVICE.read_text(encoding="utf-8")
@@ -211,10 +249,12 @@ class QuarterlySreAuditAutomationContractTests(unittest.TestCase):
         self.assertNotIn("portal-pvc-backup-verify.sh", text)
         self.assertNotIn("sre-pod-recovery-lab.sh", text)
 
-    def test_service_allows_backup_check_read_only_inputs_and_state(self):
+    def test_service_allows_controller_and_state_without_backup_credentials(self):
         text = SERVICE.read_text(encoding="utf-8")
-        self.assertIn("ReadOnlyPaths=@REPO_ROOT@ %h/.local/share/personal-server/age", text)
+        self.assertIn("ReadOnlyPaths=@REPO_ROOT@", text)
         self.assertIn("ReadWritePaths=@STATE_DIR@", text)
+        self.assertNotIn("LoadCredentialEncrypted", text)
+        self.assertNotIn("PORTAL_RCLONE_", text)
 
     def test_service_keeps_restricted_sudo_contract_without_no_new_privileges(self):
         text = SERVICE.read_text(encoding="utf-8")
@@ -227,39 +267,33 @@ class QuarterlySreAuditAutomationContractTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("sudo -n k3s", calls)
 
-    def test_install_reuses_existing_encrypted_backup_credentials_without_reading_values(self):
-        result, calls, rendered_units, credential_contents, credential_prefix, *_ = self.run_controller(
-            "--install", seed_credentials=True
+    def test_preflight_fails_closed_for_missing_malformed_or_stale_backup_evidence(self):
+        invalid_records = (
+            "",
+            "schema_version=1\n",
+            "schema_version=1\nscope=portal\nbackup_status=success\nencrypted=true\nbackup_completed_at=2020-01-01T00:00:00Z\nrestore_status=success\nrestore_verified_at=2020-01-01T00:01:00Z\nevidence_expires_at=2099-01-01T00:00:00Z\nbackup_id=portal-test\nsource_runtime=k3s-pvc\n",
         )
+        for evidence in invalid_records:
+            with self.subTest(evidence=evidence):
+                result, calls, *_ = self.run_controller("--preflight", backup_evidence=evidence)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("get cronjob portal-pvc-backup", calls)
+
+    def test_preflight_rejects_suspended_backup_cronjob(self):
+        result, calls, *_ = self.run_controller("--preflight", backup_cronjob_suspended="true")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("get cronjob portal-pvc-backup", calls)
+        self.assertNotIn("get configmap portal-pvc-backup-evidence", calls)
+
+    def test_install_uses_configmap_evidence_without_backup_credentials(self):
+        result, calls, rendered_units, *_ = self.run_controller("--install")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         service = rendered_units["personal-server-quarterly-sre-audit.service"]
-        self.assertIn(f"LoadCredentialEncrypted=rclone-config:{credential_prefix}/rclone-config.cred", service)
-        self.assertIn(
-            f"LoadCredentialEncrypted=rclone-config-passphrase:{credential_prefix}/rclone-config-passphrase.cred",
-            service,
-        )
-        self.assertIn("Environment=\"PORTAL_RCLONE_CONFIG_FILE=%d/rclone-config\"", service)
-        self.assertIn(
-            "Environment=\"PORTAL_RCLONE_PASSWORD_COMMAND=/usr/bin/cat %d/rclone-config-passphrase\"",
-            service,
-        )
-        self.assertEqual(credential_contents["rclone-config.cred"], "host-encrypted-config")
-        self.assertEqual(credential_contents["rclone-config-passphrase.cred"], "host-encrypted-passphrase")
-        self.assertNotIn("host-encrypted-config", service + calls)
-        self.assertNotIn("host-encrypted-passphrase", service + calls)
-
-    def test_install_fails_closed_when_reused_backup_credentials_are_missing(self):
-        result, calls, *_ = self.run_controller("--install")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn("enable --now", calls)
-
-    def test_preflight_requires_reused_backup_credentials_before_installation_checks(self):
-        result, calls, *_ = self.run_controller("--preflight")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn("sudo -n k3s", calls)
+        self.assertNotIn("LoadCredentialEncrypted", service)
+        self.assertNotIn("PORTAL_RCLONE_", service)
+        self.assertIn("get configmap portal-pvc-backup-evidence", calls)
 
     def test_installer_verifies_before_reload_and_enables_only_one_timer(self):
         text = CONTROLLER.read_text(encoding="utf-8")

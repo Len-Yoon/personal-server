@@ -4,12 +4,6 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-Environment="PORTAL_BACKUP_STATE_DIR=@STATE_DIR@"
-Environment="PORTAL_BACKUP_EVIDENCE=@STATE_DIR@/.portal-backup-verified"
-Environment="PORTAL_RCLONE_CONFIG_FILE=%d/rclone-config"
-Environment="PORTAL_RCLONE_PASSWORD_COMMAND=/usr/bin/cat %d/rclone-config-passphrase"
-LoadCredentialEncrypted=rclone-config:@BACKUP_CREDENTIAL_DIR@/rclone-config.cred
-LoadCredentialEncrypted=rclone-config-passphrase:@BACKUP_CREDENTIAL_DIR@/rclone-config-passphrase.cred
 ExecStart=@REPO_ROOT@/infra/k8s/tools/quarterly-sre-audit-automation.sh --run
 WorkingDirectory=@REPO_ROOT@
 TimeoutStartSec=20min
@@ -17,7 +11,7 @@ TimeoutStopSec=20s
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadOnlyPaths=@REPO_ROOT@ %h/.local/share/personal-server/age
+ReadOnlyPaths=@REPO_ROOT@
 ReadWritePaths=@STATE_DIR@
 # Existing restricted sudo -n k3s permission is required for the audit controller.
 
