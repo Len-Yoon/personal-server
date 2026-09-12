@@ -52,31 +52,25 @@ spec:
       containers:
       - name: recovery
         image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
-        command: ["sh", "-c", "while true; do sleep 3600; done"]
+        command: ["sh", "-c", "sh -c 'while true; do sleep 3600; done' health-sentinel & while true; do sleep 3600; done"]
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
           capabilities:
             drop: ["ALL"]
-        volumeMounts:
-        - name: tmp
-          mountPath: /tmp
         livenessProbe:
-          exec: {command: ["sh", "-c", "test ! -f /tmp/force-liveness-failure"]}
+          exec: {command: ["sh", "-c", "ps -o pid,args | grep -Eq '^[[:space:]]*([2-9]|[1-9][0-9]+)[[:space:]].*[h]ealth-sentinel'"]}
           initialDelaySeconds: 2
           periodSeconds: 2
         readinessProbe:
-          exec: {command: ["sh", "-c", "test ! -f /tmp/force-liveness-failure"]}
+          exec: {command: ["sh", "-c", "ps -o pid,args | grep -Eq '^[[:space:]]*([2-9]|[1-9][0-9]+)[[:space:]].*[h]ealth-sentinel'"]}
           initialDelaySeconds: 1
           periodSeconds: 2
-      volumes:
-      - name: tmp
-        emptyDir: {}
 EOF
   sudo k3s kubectl -n "$NS" wait --for=condition=Available deployment/sre-pod-recovery --timeout="${SRE_RECOVERY_LAB_TIMEOUT:-90}s"
   pod="$(sudo k3s kubectl -n "$NS" get pod -l "$POD_LABEL" -o jsonpath='{.items[0].metadata.name}')"
   baseline="$(sudo k3s kubectl -n "$NS" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}')"
-  sudo k3s kubectl -n "$NS" exec "$pod" -- touch /tmp/force-liveness-failure
+  sudo k3s kubectl -n "$NS" exec "$pod" -- sh -c 'health_pid="$(ps -o pid,args | awk '"'"'$1 != 1 && /[h]ealth-sentinel/ {print $1; exit}'"'"')"; test -n "$health_pid" && kill "$health_pid"'
   deadline=$((SECONDS + ${SRE_RECOVERY_LAB_TIMEOUT:-90})); after="$baseline"
   while (( SECONDS < deadline )); do
     pod="$(sudo k3s kubectl -n "$NS" get pod -l "$POD_LABEL" -o jsonpath='{.items[0].metadata.name}')" || true

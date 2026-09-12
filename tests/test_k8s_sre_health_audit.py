@@ -10,7 +10,7 @@ SCRIPT = ROOT / "infra/k8s/tools/sre-health-audit.sh"
 
 
 class SreHealthAuditBehaviorTest(unittest.TestCase):
-    def run_audit(self, *, nodes="n100 Ready", services=None, ps=None, extra_env=None):
+    def run_audit(self, *, nodes="n100 Ready", portal="True|1", services=None, ps=None, extra_env=None):
         services = services or ["portal-web", "crawler-worker"]
         ps = ps or ["portal-web|running|healthy", "crawler-worker|running|"]
         with tempfile.TemporaryDirectory() as directory:
@@ -21,11 +21,15 @@ class SreHealthAuditBehaviorTest(unittest.TestCase):
             sudo.write_text(
                 "#!/bin/sh\n"
                 "printf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
-                "if [ \"$1 $2 $3 $4\" = 'k3s kubectl get nodes' ]; then\n"
-                f"  printf '%s\\n' '{nodes}'\n"
-                "  exit 0\n"
-                "fi\n"
-                "exit 1\n",
+                "case \"$*\" in\n"
+                "  'k3s kubectl get nodes --no-headers')\n"
+                f"    printf '%s\\n' '{nodes}'\n"
+                "    ;;\n"
+                "  *'get deployment/portal-web -o jsonpath='*)\n"
+                f"    printf '%s\\n' '{portal}'\n"
+                "    ;;\n"
+                "  *) exit 1 ;;\n"
+                "esac\n",
                 encoding="utf-8",
             )
             docker.write_text(
@@ -60,7 +64,25 @@ class SreHealthAuditBehaviorTest(unittest.TestCase):
             recorded = calls.read_text(encoding="utf-8") if calls.exists() else ""
             return result, recorded
 
-    def test_passes_when_a_node_is_ready_and_all_compose_services_are_running(self):
+    def test_passes_when_k3s_portal_is_absent_from_compose_but_required_compose_services_run(self):
+        result, _ = self.run_audit(
+            services=["portal-web", "docker-socket-proxy", "crawler-worker"],
+            ps=["portal-web|exited|", "docker-socket-proxy|running|", "crawler-worker|running|healthy"],
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("compose_service=portal-web SKIP detail=k3s_owned", result.stdout)
+        self.assertIn("compose_service=docker-socket-proxy PASS", result.stdout)
+        self.assertIn("compose_service=crawler-worker PASS", result.stdout)
+        self.assertTrue(result.stdout.rstrip().endswith("sre_health=PASS"))
+
+    def test_fails_when_k3s_portal_deployment_is_not_available(self):
+        result, calls = self.run_audit(portal="False|0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("k3s_portal=FAIL detail=portal_deployment_not_available", result.stdout)
+        self.assertIn("get deployment/portal-web", calls)
+        self.assertTrue(result.stdout.rstrip().endswith("sre_health=FAIL"))
+
+    def test_passes_when_a_node_is_ready_and_all_active_compose_services_are_running(self):
         result, _ = self.run_audit()
         self.assertEqual(result.returncode, 0)
         self.assertIn("k3s_nodes=PASS", result.stdout)
@@ -85,7 +107,6 @@ class SreHealthAuditBehaviorTest(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("compose_containers=FAIL", result.stdout)
-        self.assertIn("portal-web", result.stdout)
         self.assertIn("crawler-worker", result.stdout)
         self.assertTrue(result.stdout.rstrip().endswith("sre_health=FAIL"))
 

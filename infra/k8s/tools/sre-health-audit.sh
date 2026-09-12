@@ -23,6 +23,15 @@ fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 COMPOSE_FILES=("$REPO_ROOT/docker-compose.yml" "$REPO_ROOT/docker-compose.n100.yml")
 
+compose_service_is_excluded() {
+  case "$1" in
+    # Portal has a single K3s writer in the current runtime.  The Compose
+    # declaration remains for local development, but it must be absent here.
+    portal-web) printf 'k3s_owned\n'; return 0 ;;
+  esac
+  return 1
+}
+
 k3s_nodes_check() {
   local output
   if ! output="$(sudo k3s kubectl get nodes --no-headers 2>&1)"; then
@@ -39,8 +48,25 @@ k3s_nodes_check() {
   return 1
 }
 
+k3s_portal_check() {
+  local output available replicas
+  if ! output="$(sudo k3s kubectl -n personal-server get deployment/portal-web -o jsonpath='{.status.conditions[?(@.type=="Available")].status}|{.status.availableReplicas}' 2>&1)"; then
+    printf 'k3s_portal=FAIL detail=unable_to_read_portal_deployment\n'
+    printf 'k3s_portal_detail=%s\n' "$output"
+    return 1
+  fi
+  available="${output%%|*}"
+  replicas="${output#*|}"
+  if [ "$available" = "True" ] && [[ "$replicas" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'k3s_portal=PASS detail=deployment_available\n'
+    return 0
+  fi
+  printf 'k3s_portal=FAIL detail=portal_deployment_not_available\n'
+  return 1
+}
+
 compose_check() {
-  local services_output ps_output service state health
+  local services_output ps_output service state health exclusion
   local -a expected_services=()
   local ok=0
   if ! services_output="$(docker compose -f "${COMPOSE_FILES[0]}" -f "${COMPOSE_FILES[1]}" config --services)"; then
@@ -61,6 +87,10 @@ compose_check() {
     return 1
   fi
   for service in "${expected_services[@]}"; do
+    if exclusion="$(compose_service_is_excluded "$service")"; then
+      printf 'compose_service=%s SKIP detail=%s\n' "$service" "$exclusion"
+      continue
+    fi
     state="$(printf '%s\n' "$ps_output" | awk -F '|' -v wanted="$service" '$1 == wanted { print $2; exit }')"
     health="$(printf '%s\n' "$ps_output" | awk -F '|' -v wanted="$service" '$1 == wanted { print $3; exit }')"
     if [[ "$state" != "running" && "$state" != "Running" && "$state" != "up" && "$state" != "Up" ]]; then
@@ -83,6 +113,7 @@ compose_check() {
 
 overall=0
 k3s_nodes_check || overall=1
+k3s_portal_check || overall=1
 compose_check || overall=1
 if [ "$overall" -eq 0 ]; then
   printf 'sre_health=PASS\n'
