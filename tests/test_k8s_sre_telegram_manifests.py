@@ -132,12 +132,20 @@ class SreTelegramManifestContractTests(unittest.TestCase):
         )
         self.assertEqual(
             backup_status_role["rules"],
-            [{
-                "apiGroups": [""],
-                "resources": ["configmaps"],
-                "resourceNames": ["sre-telegram-backup-status"],
-                "verbs": ["get"],
-            }],
+            [
+                {
+                    "apiGroups": [""],
+                    "resources": ["configmaps"],
+                    "resourceNames": ["sre-telegram-backup-status"],
+                    "verbs": ["get"],
+                },
+                {
+                    "apiGroups": [""],
+                    "resources": ["configmaps"],
+                    "resourceNames": ["sre-telegram-quarterly-audit-status"],
+                    "verbs": ["get"],
+                },
+            ],
         )
         self.assertEqual(
             node_role["rules"],
@@ -189,7 +197,13 @@ class SreTelegramManifestContractTests(unittest.TestCase):
                     "resources": ["configmaps"],
                     "resourceNames": ["sre-telegram-backup-status"],
                     "verbs": ["get"],
-                }
+                },
+                {
+                    "apiGroups": [""],
+                    "resources": ["configmaps"],
+                    "resourceNames": ["sre-telegram-quarterly-audit-status"],
+                    "verbs": ["get"],
+                },
             ],
         }
         expected_bindings = {

@@ -62,6 +62,7 @@ class ServiceTestRunnerTests(unittest.TestCase):
             "tests.test_k8s_portal_pvc_backup_verify",
             "tests.test_k8s_portal_secret_shadow_smoke",
             "tests.test_k8s_sre_health_audit",
+            "tests.test_k8s_quarterly_sre_audit_automation",
             "tests.test_k8s_sre_pod_recovery_lab",
             "tests.test_k8s_sre_telegram_manifests",
             "tests.test_k8s_sre_telegram_tools",

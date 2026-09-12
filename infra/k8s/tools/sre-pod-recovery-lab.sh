@@ -42,10 +42,25 @@ spec:
   template:
     metadata: {labels: {app.kubernetes.io/name: sre-pod-recovery}}
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
       containers:
       - name: recovery
-        image: busybox:1.36
+        image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
         command: ["sh", "-c", "while true; do sleep 3600; done"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
         livenessProbe:
           exec: {command: ["sh", "-c", "test ! -f /tmp/force-liveness-failure"]}
           initialDelaySeconds: 2
@@ -54,6 +69,9 @@ spec:
           exec: {command: ["sh", "-c", "test ! -f /tmp/force-liveness-failure"]}
           initialDelaySeconds: 1
           periodSeconds: 2
+      volumes:
+      - name: tmp
+        emptyDir: {}
 EOF
   sudo k3s kubectl -n "$NS" wait --for=condition=Available deployment/sre-pod-recovery --timeout="${SRE_RECOVERY_LAB_TIMEOUT:-90}s"
   pod="$(sudo k3s kubectl -n "$NS" get pod -l "$POD_LABEL" -o jsonpath='{.items[0].metadata.name}')"

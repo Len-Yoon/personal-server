@@ -12,7 +12,7 @@
 
 ## 핵심 요약
 
-현재 운영은 공개 경로 감시, K3s 상태·알림, Portal PVC 백업 검증, 격리된 Pod 복구 실습, P3 공급망 보안 검증을 제공함. 이 문서는 완료된 운영 기준과 향후 개선 항목을 분리해 기록하며, 새 외부 감시 서비스나 자동 실행을 추가하지 않음.
+현재 운영은 공개 경로 감시, K3s 상태·알림, Portal PVC 백업 검증, 격리된 Pod 복구 실습, P3 공급망 보안 검증을 제공함. 분기 SRE 점검 자동화는 운영 문서·controller·relay 계약이 준비되었으나 N100 timer는 아직 설치·활성화하지 않은 상태임. 이 문서는 완료된 운영 기준과 향후 개선 항목을 분리해 기록하며, 새 외부 감시 서비스나 승인 없는 자동 실행을 추가하지 않음.
 
 ## 현재 완료 기준
 
@@ -24,12 +24,14 @@
 | Pod 자동복구 실습 | production과 분리된 임시 namespace에서 liveness 실패와 Ready 복구를 확인함 | `sre-pod-recovery-lab.sh` | 완료 |
 | 변경 검증 | 문서·설정 변경 전에 범위와 관련 검사를 확인함 | [Codex 작업 완료 루프](codex-work-loop.md) | 완료 |
 | P3 공급망 보안 | GitHub Actions 외부 action을 full SHA로 고정하고, Caddy를 제외한 관리 대상 Python Docker base image 8개를 digest로 고정함. Trivy filesystem/config scan은 report-only로 실행하며 CI 계약 테스트로 검증함 | `.github/workflows/trivy-security.yml`, `tests/test_supply_chain_security_workflow.py` | 완료 |
+| 분기 SRE 점검 자동화 | controller와 기존 Telegram relay 연계를 준비함. N100 timer 설치·활성화 전 상태이며 별도 운영 승인과 운영자 수동 검증이 필요함 | [K3s 운영](../infra/k8s/README.md), `quarterly-sre-audit-automation.sh` | 준비됨·미적용 |
 
 ## 향후 개선 항목
 
 | 우선순위 | 항목 | 실행 기준 | 완료 조건 |
 |---|---|---|---|
 | P1 | 월간 복구 훈련 정례화 | `monthly-recovery-drill.sh`를 월 1회 수동 실행하고 결과 JSON을 운영 기록에 남김 | 백업 점검·알림 점검·격리 Pod 복구 결과와 미해결 이슈가 비밀값 없이 원자 기록됨 |
+| P1 | 분기 SRE 점검 적용 검토 | 별도 운영 승인 후 N100에서 `quarterly-sre-audit-automation.sh --preflight`, `--install`을 실행하고 수동 `--run` 1회의 ConfigMap·격리 namespace 정리·Telegram 수신을 확인함 | 운영자가 timer 활성화와 세 단계 결과·Telegram 전달을 직접 확인함 |
 | P1 | 공개 감시 범위 검토 | 기존 GitHub Actions workflow와 실제 공개 health endpoint의 일치 여부를 검토함 | 감시 대상·간격·알림 전환 기준이 문서와 일치함 |
 | P2 | 작업 증적 정리 | 변경 경로, 검사 결과, 토큰 측정 기록을 로컬 증적으로 관리함 | 검증 결과가 작업별로 재현 가능함 |
 | P2 | 운영 문서 정기 검토 | 분기별로 서비스 경로·운영 경계·복구 절차를 실제 구성과 대조함 | 폐기된 절차와 확인 필요 항목이 분리됨 |
@@ -41,14 +43,17 @@
 - 공개 외부 감시는 기존 GitHub Actions를 유지하며 별도 감시 서비스를 추가하지 않음.
 - Portal, K3s, Caddy, Secret, PVC와 운영 데이터의 변경은 이 로드맵의 범위가 아님.
 - 복구 훈련은 [복구 훈련 절차](recovery-drill.md)의 격리·읽기 점검 범위에서만 수행함.
+- 분기 SRE 점검은 실제 Portal·Caddy·Cloudflare Tunnel·Compose 서비스를 중단하거나 재시작하지 않으며, 결과를 `monitoring/sre-telegram-quarterly-audit-status` ConfigMap에서 기존 relay로 전달함.
 
 ## 확인 필요 사항
 
 - 월간 훈련의 실제 실행일과 결과 보관 위치는 운영자가 정해야 함.
 - 공개 감시 대상에 `news`, `memo`, `books` health endpoint를 추가할지는 별도 검토가 필요함.
+- 분기 SRE 점검 timer의 N100 설치 승인 시점과 실제 Telegram 수신 확인 결과는 운영자가 기록해야 함.
 
 ## 후속 조치
 
 1. 월 1회 [복구 훈련 절차](recovery-drill.md)를 실행함.
 2. 실패 또는 중단 시 운영 데이터를 변경하지 않고 원인을 기록함.
 3. 문서와 실제 도구의 명령·성공 기준이 달라지면 문서 계약 테스트를 먼저 갱신함.
+4. 분기 SRE 점검을 적용할 때는 별도 승인 후 `--install`을 실행하고, 수동 `--run` 결과와 Telegram 수신을 확인한 뒤 활성 상태를 기록함.

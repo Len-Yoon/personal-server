@@ -4,6 +4,8 @@ import subprocess
 import tempfile
 import unittest
 
+import yaml
+
 
 SCRIPT = pathlib.Path(__file__).parents[1] / "infra/k8s/tools/sre-pod-recovery-lab.sh"
 
@@ -32,7 +34,13 @@ class K3sSrePodRecoveryLabTest(unittest.TestCase):
             'NS="sre-recovery-lab-${run_id_lc}"',
             "kind: Namespace",
             "kind: Deployment",
-            "image: busybox:1.36",
+            "image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662",
+            "automountServiceAccountToken: false",
+            "runAsNonRoot: true",
+            "allowPrivilegeEscalation: false",
+            "drop: [\"ALL\"]",
+            "mountPath: /tmp",
+            "emptyDir: {}",
             "livenessProbe:",
             "test ! -f /tmp/force-liveness-failure",
             "touch /tmp/force-liveness-failure",
@@ -42,6 +50,24 @@ class K3sSrePodRecoveryLabTest(unittest.TestCase):
             self.assertIn(required, text)
         self.assertNotIn("portal-web", text)
         self.assertNotIn("docker compose", text.lower())
+
+    def test_lab_deployment_manifest_enforces_hardened_writable_tmp_only_contract(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        manifest = text.split("sudo k3s kubectl apply -f - <<EOF\n", 1)[1].split("\nEOF", 1)[0]
+        deployment = yaml.safe_load(manifest)
+        pod_spec = deployment["spec"]["template"]["spec"]
+        container = pod_spec["containers"][0]
+        security = container["securityContext"]
+
+        self.assertRegex(container["image"], r"^busybox@sha256:[0-9a-f]{64}$")
+        self.assertFalse(pod_spec["automountServiceAccountToken"])
+        self.assertEqual(pod_spec["securityContext"]["seccompProfile"]["type"], "RuntimeDefault")
+        self.assertTrue(pod_spec["securityContext"]["runAsNonRoot"])
+        self.assertFalse(security["allowPrivilegeEscalation"])
+        self.assertEqual(security["capabilities"]["drop"], ["ALL"])
+        self.assertTrue(security["readOnlyRootFilesystem"])
+        self.assertEqual(container["volumeMounts"], [{"name": "tmp", "mountPath": "/tmp"}])
+        self.assertEqual(pod_spec["volumes"], [{"name": "tmp", "emptyDir": {}}])
 
     def test_apply_failure_deletes_only_the_current_lab_namespace(self):
         with tempfile.TemporaryDirectory() as td:

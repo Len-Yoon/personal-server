@@ -12,8 +12,11 @@ sys.path.insert(0, str(REPO_ROOT / "sre-telegram-relay"))
 
 from app.main import (  # noqa: E402
     BACKUP_STATUS_CONFIGMAP,
+    QUARTERLY_AUDIT_STATUS_CONFIGMAP,
     MAX_BACKUP_DELIVERED_RUN_IDS,
+    MAX_QUARTERLY_AUDIT_DELIVERED_RUN_IDS,
     ConfigMapBackupDeliveryStore,
+    ConfigMapQuarterlyAuditDeliveryStore,
     ConfigMapAlertStateStore,
     ConfigMapOffsetStore,
     MemoryAlertStateStore,
@@ -87,6 +90,17 @@ class FakeBackupStatusK8s(FakeConfigMapK8s):
         return super().get_config_map(namespace, name)
 
 
+class FakeQuarterlyAuditStatusK8s(FakeConfigMapK8s):
+    def __init__(self, audit_data):
+        super().__init__()
+        self.audit_data = audit_data
+
+    def get_config_map(self, namespace, name):
+        if name == QUARTERLY_AUDIT_STATUS_CONFIGMAP:
+            return {"data": dict(self.audit_data)}
+        return super().get_config_map(namespace, name)
+
+
 class UnavailableBackupStatusK8s(FakeConfigMapK8s):
     def __init__(self, error):
         super().__init__()
@@ -129,6 +143,21 @@ class FailOnceBackupDeliveryStore:
         self.run_ids.add(run_id)
 
 
+class FailOnceQuarterlyAuditDeliveryStore:
+    def __init__(self):
+        self.run_ids = set()
+        self.save_attempts = 0
+
+    def contains(self, run_id):
+        return run_id in self.run_ids
+
+    def save(self, run_id):
+        self.save_attempts += 1
+        if self.save_attempts == 1:
+            raise OSError("ConfigMap write unavailable")
+        self.run_ids.add(run_id)
+
+
 class FakePollingTelegram:
     def __init__(self, updates, send_result=True):
         self._updates = updates
@@ -142,6 +171,16 @@ class FakePollingTelegram:
     def send_message(self, chat_id, text):
         self.sent_messages.append((chat_id, text))
         return self._send_result
+
+
+class SequencePollingTelegram(FakePollingTelegram):
+    def __init__(self, updates, send_results):
+        super().__init__(updates)
+        self._send_results = iter(send_results)
+
+    def send_message(self, chat_id, text):
+        self.sent_messages.append((chat_id, text))
+        return next(self._send_results)
 
 
 class FailingPollingTelegram:
@@ -172,6 +211,195 @@ class ControlledTelegramClient(TelegramClient):
 
 
 class RelayServiceTest(unittest.TestCase):
+    def test_quarterly_audit_saves_delivery_only_after_sending(self):
+        run_id = "20260912T010203Z-reserved-audit"
+        k8s = FakeQuarterlyAuditStatusK8s(
+            {
+                "run_id": run_id,
+                "status": "passed",
+                "completed_at": "2026-09-12T01:02:03Z",
+                "health_audit": "passed",
+                "backup_check": "passed",
+                "recovery_lab": "passed",
+            }
+        )
+        store = ConfigMapQuarterlyAuditDeliveryStore(
+            k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP
+        )
+        relay = RelayService(
+            allowed_chat_id="123",
+            k8s_client=k8s,
+            prometheus_client=FakePrometheus(),
+            quarterly_audit_delivery_store=store,
+        )
+
+        def send_message(_chat_id, _message):
+            self.assertFalse(store.contains(run_id))
+            return True
+
+        self.assertTrue(relay.deliver_quarterly_audit_report(send_message))
+        self.assertTrue(store.contains(run_id))
+
+    def test_quarterly_audit_retries_after_post_send_state_write_failure_and_allows_duplicate(self):
+        k8s = FakeQuarterlyAuditStatusK8s(
+            {
+                "run_id": "20260912T010203Z-reservation-failure",
+                "status": "passed",
+                "completed_at": "2026-09-12T01:02:03Z",
+                "health_audit": "passed",
+                "backup_check": "passed",
+                "recovery_lab": "passed",
+            }
+        )
+        store = FailOnceQuarterlyAuditDeliveryStore()
+        relay = RelayService(
+            allowed_chat_id="123",
+            k8s_client=k8s,
+            prometheus_client=FakePrometheus(),
+            quarterly_audit_delivery_store=store,
+        )
+        telegram = SequencePollingTelegram([], [True, True])
+        delays = []
+
+        run_polling(relay, telegram, "123", max_cycles=2, sleep_fn=delays.append)
+
+        self.assertTrue(relay.is_healthy())
+        self.assertEqual(len(telegram.sent_messages), 2)
+        self.assertEqual(delays, [1])
+        self.assertTrue(store.contains("20260912T010203Z-reservation-failure"))
+
+    def test_quarterly_audit_failed_send_is_retried_by_polling_backoff(self):
+        run_id = "20260912T010203Z-send-failure"
+        k8s = FakeQuarterlyAuditStatusK8s(
+            {
+                "run_id": run_id,
+                "status": "passed",
+                "completed_at": "2026-09-12T01:02:03Z",
+                "health_audit": "passed",
+                "backup_check": "passed",
+                "recovery_lab": "passed",
+            }
+        )
+        store = ConfigMapQuarterlyAuditDeliveryStore(
+            k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP
+        )
+        relay = RelayService(
+            allowed_chat_id="123",
+            k8s_client=k8s,
+            prometheus_client=FakePrometheus(),
+            quarterly_audit_delivery_store=store,
+        )
+        telegram = SequencePollingTelegram([], [False, True])
+        delays = []
+
+        run_polling(relay, telegram, "123", max_cycles=2, sleep_fn=delays.append)
+
+        self.assertTrue(store.contains(run_id))
+        self.assertEqual(len(telegram.sent_messages), 2)
+        self.assertEqual(delays, [1])
+
+    def test_quarterly_audit_delivery_state_keeps_only_bounded_recent_run_ids(self):
+        k8s = FakeConfigMapK8s()
+        store = ConfigMapQuarterlyAuditDeliveryStore(
+            k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP
+        )
+
+        for index in range(MAX_QUARTERLY_AUDIT_DELIVERED_RUN_IDS + 1):
+            store.save(f"audit-{index}")
+
+        persisted = json.loads(k8s.data["quarterly_audit_delivered_run_ids"])
+        self.assertEqual(len(persisted), MAX_QUARTERLY_AUDIT_DELIVERED_RUN_IDS)
+        self.assertEqual(persisted[0], "audit-1")
+        self.assertTrue(store.contains(f"audit-{MAX_QUARTERLY_AUDIT_DELIVERED_RUN_IDS}"))
+        self.assertFalse(store.contains("audit-0"))
+
+    def test_quarterly_audit_report_delivers_safe_summaries_once_without_raw_report_values(self):
+        reports = (
+            (
+                {
+                    "run_id": "20260912T010203Z-audit",
+                    "status": "passed",
+                    "completed_at": "2026-09-12T01:02:03Z",
+                    "health_audit": "passed",
+                    "backup_check": "passed",
+                    "recovery_lab": "passed",
+                },
+                "[분기 SRE 점검 완료]",
+            ),
+            (
+                {
+                    "run_id": "20260912T010203Z-failed-audit",
+                    "status": "failed",
+                    "completed_at": "2026-09-12T01:02:03Z",
+                    "health_audit": "passed",
+                    "backup_check": "failed",
+                    "recovery_lab": "passed",
+                },
+                "[분기 SRE 점검 실패]",
+            ),
+        )
+        for audit_data, heading in reports:
+            with self.subTest(status=audit_data["status"]):
+                k8s = FakeQuarterlyAuditStatusK8s(audit_data)
+                telegram = FakePollingTelegram([])
+                relay = RelayService(
+                    allowed_chat_id="123",
+                    k8s_client=k8s,
+                    prometheus_client=FakePrometheus(),
+                    quarterly_audit_delivery_store=ConfigMapQuarterlyAuditDeliveryStore(
+                        k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP
+                    ),
+                )
+
+                run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+                restarted_relay = RelayService(
+                    allowed_chat_id="123",
+                    k8s_client=k8s,
+                    prometheus_client=FakePrometheus(),
+                    quarterly_audit_delivery_store=ConfigMapQuarterlyAuditDeliveryStore(
+                        k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP
+                    ),
+                )
+                run_polling(restarted_relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+
+                self.assertEqual(len(telegram.sent_messages), 1)
+                message = telegram.sent_messages[0][1]
+                self.assertIn(heading, message)
+                self.assertIn("상태 점검: 통과", message)
+                self.assertIn("백업 검증 상태: " + ("실패" if audit_data["backup_check"] == "failed" else "통과"), message)
+                self.assertIn("격리 Pod 복구 훈련: 통과", message)
+                self.assertNotIn(audit_data["run_id"], message)
+                self.assertNotIn(audit_data["completed_at"], message)
+
+    def test_malformed_quarterly_audit_report_is_ignored_without_delivery_or_state_write(self):
+        invalid_reports = (
+            {"run_id": "20260912T010203Z-audit", "status": "passed", "completed_at": "2026-09-12T01:02:03Z", "health_audit": "passed", "backup_check": "passed"},
+            {"run_id": "../../unsafe", "status": "passed", "completed_at": "2026-09-12T01:02:03Z", "health_audit": "passed", "backup_check": "passed", "recovery_lab": "passed"},
+            {"run_id": "20260912T010203Z-audit", "status": "unexpected", "completed_at": "2026-09-12T01:02:03Z", "health_audit": "passed", "backup_check": "passed", "recovery_lab": "passed"},
+            {"run_id": "20260912T010203Z-audit", "status": "passed", "completed_at": "2026-09-12T01:02:03Z", "health_audit": "unsafe;output", "backup_check": "passed", "recovery_lab": "passed"},
+            {"run_id": "20260912T010203Z-audit", "status": "passed", "completed_at": "2026-09-12T01:02:03Z", "health_audit": "failed", "backup_check": "passed", "recovery_lab": "passed"},
+            {"run_id": "20260912T010203Z-audit", "status": "failed", "completed_at": "2026-09-12T01:02:03Z", "health_audit": "passed", "backup_check": "passed", "recovery_lab": "passed"},
+            {"run_id": "20260912T010203Z-audit", "status": "passed", "completed_at": "2026-9-12T01:02:03Z", "health_audit": "passed", "backup_check": "passed", "recovery_lab": "passed"},
+            {"run_id": "20260912T010203Z-audit", "status": "passed", "completed_at": "2026-09-2T01:02:03Z", "health_audit": "passed", "backup_check": "passed", "recovery_lab": "passed"},
+        )
+        for audit_data in invalid_reports:
+            with self.subTest(audit_data=audit_data):
+                k8s = FakeQuarterlyAuditStatusK8s(audit_data)
+                telegram = FakePollingTelegram([])
+                relay = RelayService(
+                    allowed_chat_id="123",
+                    k8s_client=k8s,
+                    prometheus_client=FakePrometheus(),
+                    quarterly_audit_delivery_store=ConfigMapQuarterlyAuditDeliveryStore(
+                        k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP
+                    ),
+                )
+
+                run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+
+                self.assertEqual(telegram.sent_messages, [])
+                self.assertEqual(k8s.data, {})
+
     def test_news_collection_alert_has_korean_secret_free_presentation(self):
         relay = RelayService(
             allowed_chat_id="123",

@@ -25,12 +25,15 @@ DEFAULT_NAMESPACES = ("monitoring", "personal-server")
 RELAY_NAMESPACE = "monitoring"
 RELAY_STATE_CONFIGMAP = "sre-telegram-relay-state"
 BACKUP_STATUS_CONFIGMAP = "sre-telegram-backup-status"
+QUARTERLY_AUDIT_STATUS_CONFIGMAP = "sre-telegram-quarterly-audit-status"
 MAX_ALERT_ITEMS = 4
 MAX_REQUEST_BODY_BYTES = 1_048_576
 CONFIGMAP_OFFSET_KEY = "telegram_next_update_id"
 CONFIGMAP_ALERT_STATE_KEY = "alert_state"
 CONFIGMAP_BACKUP_DELIVERED_RUN_IDS_KEY = "backup_delivered_run_ids"
+CONFIGMAP_QUARTERLY_AUDIT_DELIVERED_RUN_IDS_KEY = "quarterly_audit_delivered_run_ids"
 MAX_BACKUP_DELIVERED_RUN_IDS = 128
+MAX_QUARTERLY_AUDIT_DELIVERED_RUN_IDS = 128
 ALERT_STATE_TTL_SECONDS = 4 * 60 * 60
 ALERT_PRESENTATIONS = {
     "PodRestartIncrease": ("서비스가 반복 재시작됨", "서비스 기능이 불안정할 수 있음"),
@@ -47,8 +50,13 @@ BACKUP_STATUS_MESSAGES = {
     "restore_failed": "[복원 검증 실패]\n상태: 복원 검증 또는 Portal 준비 상태 확인에 실패했습니다.\n대상: Portal 데이터",
 }
 BACKUP_REPORT_KEYS = frozenset({"run_id", "status", "completed_at", "stage"})
+QUARTERLY_AUDIT_REPORT_KEYS = frozenset(
+    {"run_id", "status", "completed_at", "health_audit", "backup_check", "recovery_lab"}
+)
 SAFE_BACKUP_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+SAFE_QUARTERLY_AUDIT_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SAFE_BACKUP_STAGE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+CANONICAL_UTC_TIMESTAMP = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 LOGGER = logging.getLogger(__name__)
 
 
@@ -74,6 +82,14 @@ class AlertStateStore(Protocol):
 
 class BackupDeliveryStore(Protocol):
     """Persists backup run IDs already delivered to Telegram."""
+
+    def contains(self, run_id: str) -> bool: ...
+
+    def save(self, run_id: str) -> None: ...
+
+
+class QuarterlyAuditDeliveryStore(Protocol):
+    """Persists quarterly audit run IDs confirmed for Telegram delivery deduplication."""
 
     def contains(self, run_id: str) -> bool: ...
 
@@ -117,6 +133,19 @@ class MemoryAlertStateStore:
 
 class MemoryBackupDeliveryStore:
     """In-memory backup delivery state for isolated tests only."""
+
+    def __init__(self) -> None:
+        self._run_ids: set[str] = set()
+
+    def contains(self, run_id: str) -> bool:
+        return run_id in self._run_ids
+
+    def save(self, run_id: str) -> None:
+        self._run_ids.add(run_id)
+
+
+class MemoryQuarterlyAuditDeliveryStore:
+    """In-memory quarterly audit delivery state for isolated tests only."""
 
     def __init__(self) -> None:
         self._run_ids: set[str] = set()
@@ -334,6 +363,51 @@ class ConfigMapBackupDeliveryStore:
         return run_ids[-MAX_BACKUP_DELIVERED_RUN_IDS:]
 
 
+class ConfigMapQuarterlyAuditDeliveryStore:
+    """Persists delivered quarterly audit IDs separately in the relay ConfigMap."""
+
+    def __init__(self, k8s_client: KubernetesClient, *, namespace: str, name: str) -> None:
+        if namespace != RELAY_NAMESPACE or name != RELAY_STATE_CONFIGMAP:
+            raise ValueError("Quarterly audit delivery storage must use the dedicated relay ConfigMap")
+        self._k8s_client = k8s_client
+        self._namespace = namespace
+        self._name = name
+
+    def contains(self, run_id: str) -> bool:
+        return run_id in self._read_run_ids()
+
+    def save(self, run_id: str) -> None:
+        if not SAFE_QUARTERLY_AUDIT_RUN_ID.fullmatch(run_id):
+            raise ValueError("invalid quarterly audit run ID")
+        run_ids = self._read_run_ids()
+        if run_id not in run_ids:
+            run_ids.append(run_id)
+        run_ids = run_ids[-MAX_QUARTERLY_AUDIT_DELIVERED_RUN_IDS:]
+        self._k8s_client.patch_config_map(
+            self._namespace,
+            self._name,
+            {CONFIGMAP_QUARTERLY_AUDIT_DELIVERED_RUN_IDS_KEY: json.dumps(run_ids, separators=(",", ":"))},
+        )
+
+    def _read_run_ids(self) -> list[str]:
+        config_map = self._k8s_client.get_config_map(self._namespace, self._name)
+        data = config_map.get("data")
+        raw = data.get(CONFIGMAP_QUARTERLY_AUDIT_DELIVERED_RUN_IDS_KEY) if isinstance(data, dict) else None
+        if raw is None:
+            return []
+        try:
+            run_ids = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raise ValueError("relay ConfigMap has invalid quarterly audit delivery state") from None
+        if (
+            not isinstance(run_ids, list)
+            or not all(isinstance(run_id, str) and SAFE_QUARTERLY_AUDIT_RUN_ID.fullmatch(run_id) for run_id in run_ids)
+            or len(set(run_ids)) != len(run_ids)
+        ):
+            raise ValueError("relay ConfigMap has invalid quarterly audit delivery state")
+        return run_ids[-MAX_QUARTERLY_AUDIT_DELIVERED_RUN_IDS:]
+
+
 class PrometheusClient:
     """Read-only Prometheus client limited to active scrape targets."""
 
@@ -412,6 +486,7 @@ class RelayService:
         offset_store: OffsetStore | None = None,
         alert_state_store: AlertStateStore | None = None,
         backup_delivery_store: BackupDeliveryStore | None = None,
+        quarterly_audit_delivery_store: QuarterlyAuditDeliveryStore | None = None,
         alert_callback: Callable[[str], bool] | None = None,
     ) -> None:
         self._allowed_chat_id = str(allowed_chat_id)
@@ -421,8 +496,10 @@ class RelayService:
         self._offset_store = offset_store or MemoryOffsetStore()
         self._alert_state_store = alert_state_store or MemoryAlertStateStore()
         self._backup_delivery_store = backup_delivery_store
+        self._quarterly_audit_delivery_store = quarterly_audit_delivery_store
         self._alert_state_lock = threading.Lock()
         self._backup_delivery_lock = threading.Lock()
+        self._quarterly_audit_delivery_lock = threading.Lock()
         self._alert_callback = alert_callback
         self._healthy = True
 
@@ -480,6 +557,38 @@ class RelayService:
             if not send_message(self._allowed_chat_id, BACKUP_STATUS_MESSAGES[report["status"]]):
                 return False
             self._backup_delivery_store.save(report["run_id"])
+            return True
+
+    def deliver_quarterly_audit_report(self, send_message: Callable[[str, str], bool]) -> bool:
+        """Send one audit report and persist its ID only after Telegram confirms delivery."""
+        if self._quarterly_audit_delivery_store is None:
+            return True
+        with self._quarterly_audit_delivery_lock:
+            report = _read_quarterly_audit_report(self._k8s_client)
+            if report is None or self._quarterly_audit_delivery_store.contains(report["run_id"]):
+                return True
+            try:
+                delivered = send_message(self._allowed_chat_id, _format_quarterly_audit_message(report))
+            except Exception as exc:
+                self.mark_unhealthy()
+                LOGGER.warning(
+                    "quarterly_audit_delivery_failed error_type=%s",
+                    type(exc).__name__,
+                )
+                return False
+            if not delivered:
+                self.mark_unhealthy()
+                LOGGER.warning("quarterly_audit_delivery_failed reason=send_message_rejected")
+                return False
+            try:
+                self._quarterly_audit_delivery_store.save(report["run_id"])
+            except Exception as exc:
+                self.mark_unhealthy()
+                LOGGER.warning(
+                    "quarterly_audit_delivery_state_save_failed error_type=%s",
+                    type(exc).__name__,
+                )
+                return False
             return True
 
     def handle_alert(self, payload: dict[str, Any], authorization: str) -> tuple[int, str]:
@@ -770,7 +879,9 @@ def _poll_once(relay: RelayService, telegram_client: TelegramClient, allowed_cha
         if reply is not None and not telegram_client.send_message(allowed_chat_id, reply):
             return False
         relay.acknowledge_update(update)
-    return relay.deliver_backup_report(telegram_client.send_message)
+    if not relay.deliver_backup_report(telegram_client.send_message):
+        return False
+    return relay.deliver_quarterly_audit_report(telegram_client.send_message)
 
 
 def main() -> None:
@@ -797,6 +908,11 @@ def main() -> None:
             name=RELAY_STATE_CONFIGMAP,
         ),
         backup_delivery_store=ConfigMapBackupDeliveryStore(
+            k8s_client,
+            namespace=RELAY_NAMESPACE,
+            name=RELAY_STATE_CONFIGMAP,
+        ),
+        quarterly_audit_delivery_store=ConfigMapQuarterlyAuditDeliveryStore(
             k8s_client,
             namespace=RELAY_NAMESPACE,
             name=RELAY_STATE_CONFIGMAP,
@@ -912,7 +1028,62 @@ def _read_backup_report(k8s_client: KubernetesClient) -> dict[str, str] | None:
     return {"run_id": run_id, "status": status, "completed_at": completed_at, "stage": stage}
 
 
+def _read_quarterly_audit_report(k8s_client: KubernetesClient) -> dict[str, str] | None:
+    """Return only a complete, allow-listed quarterly audit report from its fixed ConfigMap."""
+    try:
+        config_map = k8s_client.get_config_map(RELAY_NAMESPACE, QUARTERLY_AUDIT_STATUS_CONFIGMAP)
+    except (OSError, URLError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        LOGGER.warning("quarterly_audit_report_ignored reason=unavailable error_type=%s", type(exc).__name__)
+        return None
+    data = config_map.get("data") if isinstance(config_map, dict) else None
+    if not isinstance(data, dict) or frozenset(data) != QUARTERLY_AUDIT_REPORT_KEYS:
+        LOGGER.warning("quarterly_audit_report_ignored reason=invalid_keys")
+        return None
+    if not all(isinstance(value, str) for value in data.values()):
+        LOGGER.warning("quarterly_audit_report_ignored reason=invalid_value_type")
+        return None
+    if not SAFE_QUARTERLY_AUDIT_RUN_ID.fullmatch(data["run_id"]):
+        LOGGER.warning("quarterly_audit_report_ignored reason=invalid_run_id")
+        return None
+    if data["status"] not in {"passed", "failed"}:
+        LOGGER.warning("quarterly_audit_report_ignored reason=invalid_status")
+        return None
+    if not _is_utc_timestamp(data["completed_at"]):
+        LOGGER.warning("quarterly_audit_report_ignored reason=invalid_completed_at")
+        return None
+    if any(data[key] not in {"passed", "failed"} for key in ("health_audit", "backup_check", "recovery_lab")):
+        LOGGER.warning("quarterly_audit_report_ignored reason=invalid_check_status")
+        return None
+    all_checks_passed = all(
+        data[key] == "passed" for key in ("health_audit", "backup_check", "recovery_lab")
+    )
+    if (data["status"] == "passed") != all_checks_passed:
+        LOGGER.warning("quarterly_audit_report_ignored reason=inconsistent_status")
+        return None
+    return data
+
+
+def _format_quarterly_audit_message(report: dict[str, str]) -> str:
+    """Format the allow-listed audit result without identifiers or command output."""
+    result = "완료" if report["status"] == "passed" else "실패"
+    health = "통과" if report["health_audit"] == "passed" else "실패"
+    backup = "통과" if report["backup_check"] == "passed" else "실패"
+    recovery = "통과" if report["recovery_lab"] == "passed" else "실패"
+    action = "조치: 실패 항목이 있으면 운영 문서에 따라 확인 필요" if report["status"] == "failed" else "조치: 추가 조치 없음"
+    return "\n".join(
+        [
+            f"[분기 SRE 점검 {result}]",
+            f"상태 점검: {health}",
+            f"백업 검증 상태: {backup}",
+            f"격리 Pod 복구 훈련: {recovery}",
+            action,
+        ]
+    )
+
+
 def _is_utc_timestamp(value: str) -> bool:
+    if not CANONICAL_UTC_TIMESTAMP.fullmatch(value):
+        return False
     try:
         datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
     except ValueError:
