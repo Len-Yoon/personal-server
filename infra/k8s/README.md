@@ -76,31 +76,38 @@ CronJob은 매일 03:00 KST에 실행되며, `Forbid` 동시 실행 제한·실�
 
 ## 분기 SRE 점검 자동화
 
-분기 SRE 점검 자동화는 운영자 설치 전 상태이며 현재 N100에서 활성화되지 않음. 저장소 구현 또는 병합만으로 timer가 활성화되지 않으며, 별도 운영 승인 후 N100 운영자가 아래 `--install`을 직접 실행해야 함. 설치 전 `--preflight`가 통과해야 하며, 설치 과정에서 Secret·token·Telegram chat ID·rclone 자격 증명을 생성·복제·읽지 않음. 백업 단계는 CronJob이 기록한 `personal-server/portal-pvc-backup-evidence` ConfigMap만 fail-closed로 검증함.
+분기 SRE 점검 자동화는 운영자 설치 전 상태이며 현재 N100에서 활성화되지 않음. 저장소 구현 또는 병합만으로 CronJob이 활성화되지 않으며, 별도 운영 승인 후 N100 운영자가 아래 `--install`을 직접 실행해야 함. 설치 전 `--preflight`와 `--render`가 통과해야 하며, 설치 과정에서 Secret·token·Telegram chat ID·rclone 자격 증명을 생성·복제·읽지 않음. 백업 단계는 CronJob이 기록한 `personal-server/portal-pvc-backup-evidence` ConfigMap만 fail-closed로 검증함.
 
 ```bash
 bash infra/k8s/tools/quarterly-sre-audit-automation.sh --preflight
+bash infra/k8s/tools/quarterly-sre-audit-automation.sh --render
 # 별도 운영 승인 후 N100에서 실행함.
 bash infra/k8s/tools/quarterly-sre-audit-automation.sh --install
+bash infra/k8s/tools/quarterly-sre-audit-automation.sh --status
 ```
 
-설치 후 timer는 N100 사용자 `systemd` 기준 매년 1·4·7·10월 1일 03:30 KST에 1회 실행되며, `Persistent=true`로 예정 시각을 놓친 경우의 catch-up을 허용함. timer와 수동 실행의 동시 실행은 non-blocking lock으로 차단함. 수동 점검은 다음 단일 명령만 사용함.
+`--install`은 아래 순서로만 수행함.
 
-```bash
-bash infra/k8s/tools/quarterly-sre-audit-automation.sh --run
-```
 
-`--run`은 다음 세 점검을 각각 수행하고 한 단계가 실패해도 나머지 점검을 계속 수행함.
+1. preflight 및 client-side render를 수행함.
+2. `suspend: true` CronJob과 최소 권한 RBAC를 적용하고 suspended 상태를 확인함.
+3. 기존 사용자 `personal-server-quarterly-sre-audit.timer`가 존재하면 `disable --now`로 중지·비활성화함.
+4. CronJob에서 고유 이름의 수동 Job을 생성하고 완료 성공을 대기함.
+5. `monitoring/sre-telegram-quarterly-audit-status` 상태가 `passed`인지 확인한 뒤에만 CronJob suspend를 해제함.
+
+수동 Job 실패, 상태 ConfigMap 조회 실패 또는 상태 미확인 시 CronJob은 suspended 상태를 유지함. 기존 systemd service·timer template은 이력 보존 목적으로만 남아 있으며, 신규 설치 또는 실행 경로에서 설치·사용하지 않음.
+
+CronJob은 `Asia/Seoul` 기준 매년 1·4·7·10월 1일 03:30에 1회 실행되며, `Forbid` 동시 실행 제한과 실패 재시도 없음 조건을 사용함. runner는 다음 세 점검을 수행하고 어느 한 단계라도 실패하면 결과를 fail-closed로 보고함.
 
 | 점검 | 실행 도구 | 범위 |
 |---|---|---|
-| 상태 점검 | `sre-health-audit.sh` | 운영 상태 확인 |
-| 백업 증적 검증 | `portal-pvc-backup-evidence` ConfigMap + `validate-backup-evidence.py` | CronJob이 기록한 암호화 백업·복원 증적의 유효성·만료 상태를 fail-closed로 확인 |
-| 격리 Pod 복구 훈련 | `sre-pod-recovery-lab.sh --run` | 임시 격리 namespace의 Pod만 대상으로 자동 정리함 |
+| K3s·Portal 상태 | Kubernetes API | Node와 `personal-server/portal-web` Deployment 상태 확인 |
+| 백업 증적 검증 | `portal-pvc-backup-evidence` ConfigMap | K3s PVC 백업·복원 증적의 유효성·만료 상태를 fail-closed로 확인 |
+| 격리 Pod 복구 훈련 | `sre-recovery-lab/sre-pod-recovery` | 고정된 격리 Deployment만 scale 방식으로 복구 확인 후 replica 0으로 정리함 |
 
-이 과정은 Portal·Caddy·Cloudflare Tunnel·Compose 서비스를 stop, restart, scale 또는 rollout하지 않으며, 운영 데이터와 Portal PVC를 변경하지 않음. 결과는 실행 ID, 완료 시각, 종합 상태와 세 단계 상태만 `monitoring/sre-telegram-quarterly-audit-status` ConfigMap에 기록함. 기존 `sre-telegram-relay`는 Telegram 성공 응답이 확인될 때까지 재시도하며, 응답 유실 시 드물게 중복 메시지가 수신될 수 있음. 명령 출력 전문·namespace/Pod 식별자·파일 경로·내부 IP·Secret 값은 전달하지 않음.
+이 과정은 Portal·Caddy·Cloudflare Tunnel·Compose 서비스를 stop, restart, scale 또는 rollout하지 않으며, 운영 데이터와 Portal PVC를 변경하지 않음. Compose 컨테이너 상태는 Docker socket·hostPath 접근이 필요한 별도 운영 증적으로 관리하며, 분기 CronJob 결과에 포함하지 않음. 결과는 실행 ID, 완료 시각, 종합 상태와 세 단계 상태만 `monitoring/sre-telegram-quarterly-audit-status` ConfigMap에 기록함. 기존 `sre-telegram-relay`는 Telegram 성공 응답이 확인될 때까지 재시도하며, 응답 유실 시 드물게 중복 메시지가 수신될 수 있음. 명령 출력 전문·namespace/Pod 식별자·파일 경로·내부 IP·Secret 값은 전달하지 않음.
 
-실제 적용 시 운영자는 수동 `--run` 1회를 실행한 뒤 다음 세 가지를 모두 직접 확인해야 함.
+실제 적용 시 운영자는 `--install`이 생성한 수동 Job 1회가 성공한 뒤 다음 세 가지를 모두 직접 확인해야 함.
 
 1. ConfigMap 기록에 세 단계 결과와 종합 결과가 남았는지 확인함.
 2. 격리 namespace의 임시 리소스가 정리되었는지 확인함.
