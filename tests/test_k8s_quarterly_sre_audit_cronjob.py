@@ -38,6 +38,10 @@ def pod_spec():
     return cronjob()["spec"]["jobTemplate"]["spec"]["template"]["spec"]
 
 
+def recovery_deployment():
+    return find("Deployment", "sre-pod-recovery", "sre-recovery-lab")
+
+
 class QuarterlySreAuditCronJobTests(unittest.TestCase):
     def test_cronjob_has_safe_quarterly_schedule_and_execution_limits(self):
         spec = cronjob()["spec"]
@@ -83,8 +87,8 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertEqual(
             lab_rules,
             [
-                {"apiGroups": ["apps"], "resources": ["deployments"], "resourceNames": ["quarterly-sre-recovery-drill"], "verbs": ["delete", "get", "watch"]},
-                {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["create"]},
+                {"apiGroups": ["apps"], "resources": ["deployments"], "resourceNames": ["sre-pod-recovery"], "verbs": ["get", "watch"]},
+                {"apiGroups": ["apps"], "resources": ["deployments/scale"], "resourceNames": ["sre-pod-recovery"], "verbs": ["get", "patch"]},
                 {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch"]},
                 {"apiGroups": [""], "resources": ["pods/exec"], "verbs": ["create"]},
                 {"apiGroups": [""], "resources": ["events"], "verbs": ["list"]},
@@ -116,13 +120,24 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertNotIn("persistentVolumeClaim", str(pod))
         self.assertFalse(any("secret" in volume for volume in pod.get("volumes", [])))
 
+        recovery = recovery_deployment()
+        self.assertEqual(recovery["spec"]["replicas"], 0)
+        recovery_pod = recovery["spec"]["template"]["spec"]
+        recovery_container = recovery_pod["containers"][0]
+        self.assertFalse(recovery_pod["automountServiceAccountToken"])
+        self.assertTrue(recovery_pod["securityContext"]["runAsNonRoot"])
+        self.assertEqual(recovery_pod["securityContext"]["seccompProfile"]["type"], "RuntimeDefault")
+        self.assertTrue(recovery_container["securityContext"]["readOnlyRootFilesystem"])
+        self.assertFalse(recovery_container["securityContext"]["allowPrivilegeEscalation"])
+        self.assertEqual(recovery_container["securityContext"]["capabilities"]["drop"], ["ALL"])
+        self.assertIn("livenessProbe", recovery_container)
+
     def run_runner(self, *, evidence, scenario="", patch_fails=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             command = root / "kubectl"
             status = root / "status.json"
             calls = root / "calls"
-            manifest = root / "recovery.yaml"
             date = root / "date"
             command.write_text(
                 "#!/bin/sh\n"
@@ -131,12 +146,12 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 "  *'get nodes'*) printf 'node Ready worker' ;;\n"
                 "  *'get configmap portal-pvc-backup-evidence'*) [ \"$SCENARIO\" = configmap-fail ] && exit 1; printf '%s\\n' \"$EVIDENCE\"; exit 0 ;;\n"
                 "  *'get deployment portal-web'*) printf 1 ;;\n"
-                "  *'create -f -'*) [ \"$SCENARIO\" = create-fail ] && exit 1; cat > \"$MANIFEST\"; printf uid-1 ;;\n"
-                "  *'get deployment quarterly-sre-recovery-drill'*) run_id=$(awk '/audit-run-id:/ {print $2; exit}' \"$MANIFEST\"); printf 'uid-1:%s' \"$run_id\" ;;\n"
-                "  *'get pods'*) printf recovery-pod ;;\n"
+                "  *'scale deployment sre-pod-recovery --replicas=1'*) [ \"$SCENARIO\" = scale-up-fail ] && exit 1; printf 1 > \"$REPLICAS\"; exit 0 ;;\n"
+                "  *'scale deployment sre-pod-recovery --replicas=0'*) [ \"$SCENARIO\" = cleanup-fail ] && exit 1; printf 0 > \"$REPLICAS\"; exit 0 ;;\n"
+                "  *'get deployment sre-pod-recovery'*) cat \"$REPLICAS\" 2>/dev/null || printf 0 ;;\n"
+                "  *'get pods'*) replicas=$(cat \"$REPLICAS\" 2>/dev/null || printf 0); [ \"$replicas\" = 0 ] && exit 0; printf recovery-pod ;;\n"
                 "  *'get pod recovery-pod'*) n=$(cat \"$COUNTER\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$COUNTER\"; printf '%s' \"$((n - 1))\" ;;\n"
                 "  *'exec recovery-pod'*) [ \"$SCENARIO\" = exec-fail ] && exit 1; exit 0 ;;\n"
-                "  *'delete deployment quarterly-sre-recovery-drill'*) [ \"$SCENARIO\" = cleanup-fail ] && exit 1; exit 0 ;;\n"
                 "  *'patch configmap sre-telegram-quarterly-audit-status'*) printf '%s' \"$9\" > \"$STATUS\"; [ \"$PATCH_FAILS\" = true ] && exit 1; exit 0 ;;\n"
                 "esac\n",
                 encoding="utf-8",
@@ -153,7 +168,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                     **os.environ,
                     "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
                     "CALLS": str(calls),
-                    "MANIFEST": str(manifest),
+                    "REPLICAS": str(root / "replicas"),
                     "STATUS": str(status),
                     "COUNTER": str(root / "counter"),
                     "EVIDENCE": evidence,
@@ -170,30 +185,38 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 result,
                 json.loads(status.read_text(encoding="utf-8")),
                 calls.read_text(encoding="utf-8"),
-                manifest.read_text(encoding="utf-8") if manifest.exists() else "",
             )
 
     def test_runner_emits_relay_compatible_payload_after_a_successful_run(self):
-        result, payload, calls, manifest = self.run_runner(
+        result, payload, calls = self.run_runner(
             evidence="source_runtime=k3s-pvc\nbackup_completed_at=2026-09-12T00:00:00Z"
         )
 
-        self.assertEqual(result.returncode, 0, f"{result.stderr}\n{calls}\n{manifest}")
-        self.assertEqual(
-            set(payload["data"]),
-            {"run_id", "status", "completed_at", "health_audit", "backup_check", "recovery_lab"},
-        )
+        self.assertEqual(result.returncode, 0, f"{result.stderr}\n{calls}")
+        self.assertEqual(set(payload["data"]), {"run_id", "status", "completed_at", "health_audit", "backup_check", "recovery_lab", "health_check", "backup_evidence"})
+        stale_configmap = {
+            "data": {
+                "health_check": "passed",
+                "backup_evidence": "passed",
+            }
+        }
+        for key, value in payload["data"].items():
+            if value is None:
+                stale_configmap["data"].pop(key, None)
+            else:
+                stale_configmap["data"][key] = value
         sys.path.insert(0, str(ROOT / "sre-telegram-relay"))
         from app.main import _read_quarterly_audit_report
 
         class RelayClient:
             def get_config_map(self, namespace, name):
-                return payload
+                return stale_configmap
 
-        self.assertEqual(_read_quarterly_audit_report(RelayClient()), payload["data"])
-        self.assertIn("audit-run-id:", manifest)
-        self.assertIn(payload["data"]["run_id"], manifest)
-        self.assertLess(calls.index("create -f -"), calls.index("delete deployment quarterly-sre-recovery-drill"))
+        self.assertEqual(_read_quarterly_audit_report(RelayClient()), stale_configmap["data"])
+        self.assertIn("scale deployment sre-pod-recovery --replicas=1", calls)
+        self.assertIn("scale deployment sre-pod-recovery --replicas=0", calls)
+        self.assertNotIn(" create ", calls)
+        self.assertNotIn(" delete ", calls)
 
     def test_runner_fails_closed_for_wrong_runtime_or_unreadable_backup_evidence(self):
         for evidence, scenario in (
@@ -201,27 +224,27 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
             ("source_runtime=k3s-pvc\nbackup_completed_at=2026-09-12T00:00:00Z", "configmap-fail"),
         ):
             with self.subTest(scenario=scenario or "wrong-runtime"):
-                result, payload, _, _ = self.run_runner(evidence=evidence, scenario=scenario)
+                result, payload, _ = self.run_runner(evidence=evidence, scenario=scenario)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(payload["data"]["status"], "failed")
                 self.assertEqual(payload["data"]["backup_check"], "failed")
 
-    def test_runner_never_executes_or_deletes_when_recovery_creation_fails(self):
-        result, payload, calls, _ = self.run_runner(
+    def test_runner_never_executes_when_recovery_scale_up_fails_and_restores_zero(self):
+        result, payload, calls = self.run_runner(
             evidence="source_runtime=k3s-pvc\nbackup_completed_at=2026-09-12T00:00:00Z",
-            scenario="create-fail",
+            scenario="scale-up-fail",
         )
 
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(payload["data"]["recovery_lab"], "failed")
         self.assertNotIn("exec recovery-pod", calls)
-        self.assertNotIn("delete deployment quarterly-sre-recovery-drill", calls)
+        self.assertIn("scale deployment sre-pod-recovery --replicas=0", calls)
 
     def test_runner_fails_when_owned_recovery_cleanup_or_status_patch_fails(self):
         evidence = "source_runtime=k3s-pvc\nbackup_completed_at=2026-09-12T00:00:00Z"
         for scenario, patch_fails in (("exec-fail", False), ("cleanup-fail", False), ("", True)):
             with self.subTest(scenario=scenario or "patch-fail"):
-                result, payload, calls, _ = self.run_runner(
+                result, payload, calls = self.run_runner(
                     evidence=evidence, scenario=scenario, patch_fails=patch_fails
                 )
                 self.assertNotEqual(result.returncode, 0)

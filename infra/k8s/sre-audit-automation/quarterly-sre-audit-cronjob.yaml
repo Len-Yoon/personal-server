@@ -10,6 +10,56 @@ metadata:
     pod-security.kubernetes.io/warn: restricted
     pod-security.kubernetes.io/warn-version: latest
 ---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sre-pod-recovery
+  namespace: sre-recovery-lab
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sre-pod-recovery
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sre-pod-recovery
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: recovery
+          image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+          command: ["sh", "-c", "touch /tmp/healthy && while true; do sleep 3600; done"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: recovery-tmp
+              mountPath: /tmp
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "test -f /tmp/healthy"]
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            failureThreshold: 1
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "test -f /tmp/healthy"]
+            initialDelaySeconds: 1
+            periodSeconds: 2
+      volumes:
+        - name: recovery-tmp
+          emptyDir:
+            sizeLimit: 16Mi
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -79,15 +129,12 @@ metadata:
 rules:
   - apiGroups: [apps]
     resources: [deployments]
-    resourceNames: [quarterly-sre-recovery-drill]
-    verbs: [delete, get, watch]
-  # Kubernetes authorizes create requests against a collection URL, so a
-  # resourceNames constraint would prevent the runner from creating its fixed
-  # drill Deployment. The namespace is dedicated and the runner has no other
-  # Deployment name in its source.
+    resourceNames: [sre-pod-recovery]
+    verbs: [get, watch]
   - apiGroups: [apps]
-    resources: [deployments]
-    verbs: [create]
+    resources: [deployments/scale]
+    resourceNames: [sre-pod-recovery]
+    verbs: [get, patch]
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list, watch]
