@@ -42,13 +42,17 @@ acquire_install_lock() {
 }
 
 assert_no_active_audit_jobs() {
-  local jobs name active conditions
-  jobs=$(kctl -n "$NAMESPACE" get jobs -o 'jsonpath={range .items[*]}{.metadata.name}{"\t"}{.status.active}{"\t"}{range .status.conditions[*]}{.type}{"="}{.status}{","}{end}{"\n"}{end}') || {
+  local jobs name conditions
+  jobs=$(kctl -n "$NAMESPACE" get jobs -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}') || {
     printf '%s\n' 'Quarterly SRE audit Job state could not be read; installation is blocked.' >&2
     return 1
   }
-  while IFS=$'\t' read -r name active conditions; do
+  while IFS= read -r name; do
     [[ "$name" == "${CRONJOB_NAME}-"* ]] || continue
+    conditions=$(kctl -n "$NAMESPACE" get job "$name" -o 'jsonpath={range .status.conditions[*]}{.type}{"="}{.status}{","}{end}') || {
+      printf '%s\n' 'Quarterly SRE audit Job condition could not be read; installation is blocked.' >&2
+      return 1
+    }
     case "$conditions" in
       *Complete=True,*|*Failed=True,*) continue ;;
     esac

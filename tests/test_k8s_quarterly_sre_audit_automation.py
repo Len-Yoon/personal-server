@@ -55,14 +55,19 @@ case "$*" in
     count=$((count + 1))
     printf '%s' "$count" > "{jobs_query_count}"
     case "{active_jobs}" in
-      active) printf '%s\\t%s\\t%s\\n' quarterly-sre-audit-manual-existing 1 '' ;;
-      active_empty) printf '%s\\t%s\\t%s\\n' quarterly-sre-audit-manual-existing '' '' ;;
-      active_zero) printf '%s\\t%s\\t%s\\n' quarterly-sre-audit-manual-existing 0 '' ;;
-      terminal) printf '%s\\t%s\\t%s\\n' quarterly-sre-audit-manual-existing 0 Complete=True, ;;
+      active|active_empty|active_zero|terminal_complete_empty|terminal_complete_zero|terminal_failed_empty|terminal_failed_zero)
+        printf '%s\\n' quarterly-sre-audit-manual-existing
+        ;;
     esac
     if [ "{str(active_jobs_after_preflight).lower()}" = true ] && [ "$count" -gt 1 ]; then
-      printf '%s\\t%s\\t%s\\n' quarterly-sre-audit-manual-existing 1 ''
+      printf '%s\\n' quarterly-sre-audit-manual-existing
     fi
+    ;;
+  *"get job quarterly-sre-audit-manual-existing"*"jsonpath={{range .status.conditions"*)
+    case "{active_jobs}" in
+      terminal_complete_empty|terminal_complete_zero) printf '%s' Complete=True, ;;
+      terminal_failed_empty|terminal_failed_zero) printf '%s' Failed=True, ;;
+    esac
     ;;
   *"get cronjob quarterly-sre-audit"*"jsonpath={{.spec.suspend}}"*) printf '%s' true ;;
   *"wait --for=condition=complete job/quarterly-sre-audit-manual-"*)
@@ -192,10 +197,32 @@ exit 0
         self.assertNotIn("apply -f", calls)
         self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
 
-    def test_terminal_matching_job_allows_install(self):
-        result, calls = self.run_tool("--install", active_jobs="terminal")
+    def test_complete_terminal_job_with_missing_active_allows_install(self):
+        result, calls = self.run_tool("--install", active_jobs="terminal_complete_empty")
 
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("get job quarterly-sre-audit-manual-existing", calls)
+        self.assertIn("create job quarterly-sre-audit-manual-", calls)
+
+    def test_complete_terminal_job_with_zero_active_allows_install(self):
+        result, calls = self.run_tool("--install", active_jobs="terminal_complete_zero")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("get job quarterly-sre-audit-manual-existing", calls)
+        self.assertIn("create job quarterly-sre-audit-manual-", calls)
+
+    def test_failed_terminal_job_with_missing_active_allows_install(self):
+        result, calls = self.run_tool("--install", active_jobs="terminal_failed_empty")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("get job quarterly-sre-audit-manual-existing", calls)
+        self.assertIn("create job quarterly-sre-audit-manual-", calls)
+
+    def test_failed_terminal_job_with_zero_active_allows_install(self):
+        result, calls = self.run_tool("--install", active_jobs="terminal_failed_zero")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("get job quarterly-sre-audit-manual-existing", calls)
         self.assertIn("create job quarterly-sre-audit-manual-", calls)
 
     def test_job_query_error_blocks_before_manifest_apply(self):
