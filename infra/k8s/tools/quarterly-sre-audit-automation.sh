@@ -28,7 +28,7 @@ kctl() {
 
 require_commands() {
   local command_name
-  for command_name in sudo k3s systemctl date flock grep; do
+  for command_name in sudo k3s systemctl date flock grep python3; do
     command -v "$command_name" >/dev/null || return 1
   done
 }
@@ -42,17 +42,35 @@ acquire_install_lock() {
 }
 
 assert_no_active_audit_jobs() {
-  local jobs name active
-  jobs=$(kctl -n "$NAMESPACE" get jobs -o 'jsonpath={range .items[*]}{.metadata.name}{"\t"}{.status.active}{"\n"}{end}') || {
+  local jobs name active conditions
+  jobs=$(kctl -n "$NAMESPACE" get jobs -o 'jsonpath={range .items[*]}{.metadata.name}{"\t"}{.status.active}{"\t"}{range .status.conditions[*]}{.type}{"="}{.status}{","}{end}{"\n"}{end}') || {
     printf '%s\n' 'Quarterly SRE audit Job state could not be read; installation is blocked.' >&2
     return 1
   }
-  while IFS=$'\t' read -r name active; do
+  while IFS=$'\t' read -r name active conditions; do
     [[ "$name" == "${CRONJOB_NAME}-"* ]] || continue
-    [[ -z "$active" || "$active" == 0 ]] && continue
-    printf '%s\n' 'An active quarterly SRE audit Job exists; installation is blocked.' >&2
+    case "$conditions" in
+      *Complete=True,*|*Failed=True,*) continue ;;
+    esac
+    printf '%s\n' 'A quarterly SRE audit Job is not terminal; installation is blocked.' >&2
     return 1
   done <<< "$jobs"
+}
+
+format_completed_at() {
+  python3 - "$1" <<'PY'
+from datetime import datetime
+from zoneinfo import ZoneInfo
+import sys
+
+try:
+    timestamp = datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        raise ValueError("timezone is required")
+    print(timestamp.astimezone(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M"))
+except (ValueError, IndexError):
+    raise SystemExit(1)
+PY
 }
 
 verify_manifest() {
@@ -186,13 +204,14 @@ install() {
 }
 
 status() {
-  local suspended report run_id audit_status completed_at health_audit backup_check recovery_lab
+  local suspended report run_id audit_status completed_at display_completed_at health_audit backup_check recovery_lab
   suspended=$(kctl -n "$NAMESPACE" get cronjob "$CRONJOB_NAME" -o 'jsonpath={.spec.suspend}') || return 1
   report=$(kctl -n "$NAMESPACE" get configmap "$STATUS_CONFIGMAP" -o 'jsonpath={.data.run_id}{"\t"}{.data.status}{"\t"}{.data.completed_at}{"\t"}{.data.health_audit}{"\t"}{.data.backup_check}{"\t"}{.data.recovery_lab}') || return 1
   IFS=$'\t' read -r run_id audit_status completed_at health_audit backup_check recovery_lab \
     <<< "$report" || return 1
+  display_completed_at=$(format_completed_at "$completed_at") || return 1
   printf 'cronjob_suspended=%s\nrun_id=%s\nstatus=%s\ncompleted_at=%s\nhealth_audit=%s\nbackup_check=%s\nrecovery_lab=%s\n' \
-    "$suspended" "$run_id" "$audit_status" "$completed_at" "$health_audit" "$backup_check" "$recovery_lab"
+    "$suspended" "$run_id" "$audit_status" "$display_completed_at" "$health_audit" "$backup_check" "$recovery_lab"
   legacy_timer_is_inactive
   legacy_service_is_inactive
 }

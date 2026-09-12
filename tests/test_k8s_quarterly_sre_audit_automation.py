@@ -54,8 +54,14 @@ case "$*" in
     count=$(cat "{jobs_query_count}" 2>/dev/null || printf 0)
     count=$((count + 1))
     printf '%s' "$count" > "{jobs_query_count}"
-    if [ "{active_jobs}" = active ] || {{ [ "{str(active_jobs_after_preflight).lower()}" = true ] && [ "$count" -gt 1 ]; }}; then
-      printf '%s\\t%s\\n' quarterly-sre-audit-manual-existing 1
+    case "{active_jobs}" in
+      active) printf '%s\\t%s\\t%s\\n' quarterly-sre-audit-manual-existing 1 '' ;;
+      active_empty) printf '%s\\t%s\\t%s\\n' quarterly-sre-audit-manual-existing '' '' ;;
+      active_zero) printf '%s\\t%s\\t%s\\n' quarterly-sre-audit-manual-existing 0 '' ;;
+      terminal) printf '%s\\t%s\\t%s\\n' quarterly-sre-audit-manual-existing 0 Complete=True, ;;
+    esac
+    if [ "{str(active_jobs_after_preflight).lower()}" = true ] && [ "$count" -gt 1 ]; then
+      printf '%s\\t%s\\t%s\\n' quarterly-sre-audit-manual-existing 1 ''
     fi
     ;;
   *"get cronjob quarterly-sre-audit"*"jsonpath={{.spec.suspend}}"*) printf '%s' true ;;
@@ -170,6 +176,28 @@ exit 0
         self.assertNotIn("apply -f", calls)
         self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
 
+    def test_matching_job_with_empty_active_and_no_terminal_condition_blocks_install(self):
+        result, calls = self.run_tool("--install", active_jobs="active_empty")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("get jobs -o jsonpath=", calls)
+        self.assertNotIn("apply -f", calls)
+        self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
+
+    def test_matching_job_with_zero_active_and_no_terminal_condition_blocks_install(self):
+        result, calls = self.run_tool("--install", active_jobs="active_zero")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("get jobs -o jsonpath=", calls)
+        self.assertNotIn("apply -f", calls)
+        self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
+
+    def test_terminal_matching_job_allows_install(self):
+        result, calls = self.run_tool("--install", active_jobs="terminal")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("create job quarterly-sre-audit-manual-", calls)
+
     def test_job_query_error_blocks_before_manifest_apply(self):
         result, calls = self.run_tool("--install", active_jobs="error")
 
@@ -230,7 +258,8 @@ exit 0
         self.assertIn("cronjob_suspended=true", result.stdout)
         self.assertIn("run_id=run-123", result.stdout)
         self.assertIn("status=passed", result.stdout)
-        self.assertIn("completed_at=2026-09-12T01:02:03Z", result.stdout)
+        self.assertIn("completed_at=2026-09-12 10:02", result.stdout)
+        self.assertNotIn("completed_at=2026-09-12T01:02:03Z", result.stdout)
         self.assertIn("health_audit=passed", result.stdout)
         self.assertIn("backup_check=passed", result.stdout)
         self.assertIn("recovery_lab=passed", result.stdout)
