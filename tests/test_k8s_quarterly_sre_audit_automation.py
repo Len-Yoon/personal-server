@@ -10,12 +10,25 @@ SCRIPT = ROOT / "infra" / "k8s" / "tools" / "quarterly-sre-audit-automation.sh"
 
 
 class QuarterlySreAuditAutomationTests(unittest.TestCase):
-    def run_tool(self, mode, *, timer="loaded", manual_job="success", status="success"):
+    def run_tool(
+        self,
+        mode,
+        *,
+        timer="loaded",
+        legacy_service="inactive",
+        manual_job="success",
+        status="success",
+        configmap="existing",
+        active_jobs="none",
+        active_jobs_after_preflight=False,
+        lock="available",
+    ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
             bin_dir.mkdir()
             calls = root / "calls.log"
+            jobs_query_count = root / "jobs-query-count"
 
             def write_fake(name, body):
                 path = bin_dir / name
@@ -36,11 +49,28 @@ exec "$@"
 printf '%s\\n' "k3s $*" >> "{calls}"
 case "$*" in
   *"get nodes"*) printf '%s\\n' 'node Ready worker' ;;
+  *"get jobs -o jsonpath="*)
+    [ "{active_jobs}" != error ] || exit 42
+    count=$(cat "{jobs_query_count}" 2>/dev/null || printf 0)
+    count=$((count + 1))
+    printf '%s' "$count" > "{jobs_query_count}"
+    if [ "{active_jobs}" = active ] || {{ [ "{str(active_jobs_after_preflight).lower()}" = true ] && [ "$count" -gt 1 ]; }}; then
+      printf '%s\\t%s\\n' quarterly-sre-audit-manual-existing 1
+    fi
+    ;;
   *"get cronjob quarterly-sre-audit"*"jsonpath={{.spec.suspend}}"*) printf '%s' true ;;
   *"wait --for=condition=complete job/quarterly-sre-audit-manual-"*)
     [ "{manual_job}" = success ] || exit 42
     ;;
   *"get job quarterly-sre-audit-manual-"*"jsonpath={{.status.succeeded}}"*) printf '%s' 1 ;;
+  *"get configmap sre-telegram-quarterly-audit-status --ignore-not-found -o name"*)
+    if [ "{configmap}" = existing ] || [ -f "{root}/configmap-created" ]; then printf '%s\\n' configmap/sre-telegram-quarterly-audit-status; fi
+    ;;
+  *"create configmap sre-telegram-quarterly-audit-status"*) touch "{root}/configmap-created" ;;
+  *"get configmap sre-telegram-quarterly-audit-status"*"jsonpath={{.data.run_id}}"*)
+    [ "{status}" != status_detail_read_failure ] || exit 42
+    printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' run-123 passed 2026-09-12T01:02:03Z passed passed passed
+    ;;
   *"get configmap sre-telegram-quarterly-audit-status"*)
     [ "{status}" != read_failure ] || exit 42
     if [ "{status}" = reported_failure ]; then printf '%s' failed; else printf '%s' passed; fi
@@ -59,7 +89,20 @@ case "$*" in
   *"show personal-server-quarterly-sre-audit.timer --property=ActiveState --value"*)
     printf '%s\\n' inactive
     ;;
+  *"show personal-server-quarterly-sre-audit.service --property=LoadState --value"*)
+    if [ "{legacy_service}" = missing ]; then printf '%s\\n' not-found; else printf '%s\\n' loaded; fi
+    ;;
+  *"show personal-server-quarterly-sre-audit.service --property=ActiveState --value"*)
+    printf '%s\\n' '{legacy_service}'
+    ;;
 esac
+''',
+            )
+            write_fake(
+                "flock",
+                f'''#!/bin/sh
+[ "{lock}" != busy ] || exit 42
+exit 0
 ''',
             )
             result = subprocess.run(
@@ -81,7 +124,7 @@ esac
         disable_at = calls.index("disable --now personal-server-quarterly-sre-audit.timer")
         create_at = calls.index("create job quarterly-sre-audit-manual-")
         wait_at = calls.index("wait --for=condition=complete job/quarterly-sre-audit-manual-")
-        status_at = calls.index("get configmap sre-telegram-quarterly-audit-status")
+        status_at = calls.rindex("get configmap sre-telegram-quarterly-audit-status -o jsonpath={.data.status}")
         activate_at = calls.index("patch cronjob quarterly-sre-audit")
         self.assertLess(apply_at, suspended_at)
         self.assertLess(suspended_at, disable_at)
@@ -96,6 +139,60 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("show personal-server-quarterly-sre-audit.timer --property=LoadState --value", calls)
         self.assertNotIn("disable --now personal-server-quarterly-sre-audit.timer", calls)
+
+    def test_install_creates_empty_status_configmap_only_when_it_is_missing(self):
+        result, calls = self.run_tool("--install", configmap="missing")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("get configmap sre-telegram-quarterly-audit-status --ignore-not-found -o name", calls)
+        self.assertIn("create configmap sre-telegram-quarterly-audit-status --from-literal=run_id=", calls)
+        self.assertNotIn("secret", calls.lower())
+
+    def test_install_preserves_existing_status_configmap_data(self):
+        result, calls = self.run_tool("--install", configmap="existing")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("get configmap sre-telegram-quarterly-audit-status --ignore-not-found -o name", calls)
+        self.assertNotIn("create configmap sre-telegram-quarterly-audit-status", calls)
+
+    def test_install_lock_contention_blocks_before_manifest_apply(self):
+        result, calls = self.run_tool("--install", lock="busy")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("apply -f", calls)
+        self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
+
+    def test_active_quarterly_job_blocks_before_manifest_apply(self):
+        result, calls = self.run_tool("--install", active_jobs="active")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("get jobs -o jsonpath=", calls)
+        self.assertNotIn("apply -f", calls)
+        self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
+
+    def test_job_query_error_blocks_before_manifest_apply(self):
+        result, calls = self.run_tool("--install", active_jobs="error")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("get jobs -o jsonpath=", calls)
+        self.assertNotIn("apply -f", calls)
+
+    def test_retry_does_not_start_manual_job_when_another_job_appears_after_preflight(self):
+        result, calls = self.run_tool("--install", active_jobs_after_preflight=True)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertGreaterEqual(calls.count("get jobs -o jsonpath="), 2)
+        self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
+        self.assertNotIn("patch cronjob quarterly-sre-audit", calls)
+
+    def test_active_legacy_service_blocks_without_forcing_service_stop(self):
+        result, calls = self.run_tool("--install", legacy_service="active")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("disable --now personal-server-quarterly-sre-audit.timer", calls)
+        self.assertIn("show personal-server-quarterly-sre-audit.service --property=ActiveState --value", calls)
+        self.assertNotIn("stop personal-server-quarterly-sre-audit.service", calls)
+        self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
 
     def test_install_leaves_cronjob_suspended_when_manual_job_fails(self):
         result, calls = self.run_tool("--install", manual_job="failure")
@@ -126,13 +223,25 @@ esac
         self.assertIn("quarterly_sre_audit_preflight=PASS", result.stdout)
         self.assertNotIn("secret", calls.lower())
 
-    def test_status_reads_cronjob_and_reported_audit_state_without_accessing_secrets(self):
+    def test_status_reports_allowed_audit_fields_without_accessing_secrets(self):
         result, calls = self.run_tool("--status")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("get cronjob quarterly-sre-audit", calls)
+        self.assertIn("cronjob_suspended=true", result.stdout)
+        self.assertIn("run_id=run-123", result.stdout)
+        self.assertIn("status=passed", result.stdout)
+        self.assertIn("completed_at=2026-09-12T01:02:03Z", result.stdout)
+        self.assertIn("health_audit=passed", result.stdout)
+        self.assertIn("backup_check=passed", result.stdout)
+        self.assertIn("recovery_lab=passed", result.stdout)
+        self.assertIn("get cronjob quarterly-sre-audit -o jsonpath=", calls)
         self.assertIn("get configmap sre-telegram-quarterly-audit-status", calls)
         self.assertNotIn("secret", calls.lower())
+
+    def test_status_fails_closed_when_audit_status_configmap_cannot_be_read(self):
+        result, _ = self.run_tool("--status", status="status_detail_read_failure")
+
+        self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":

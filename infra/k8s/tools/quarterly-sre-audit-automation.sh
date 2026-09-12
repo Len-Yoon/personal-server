@@ -14,7 +14,9 @@ NAMESPACE=monitoring
 CRONJOB_NAME=quarterly-sre-audit
 STATUS_CONFIGMAP=sre-telegram-quarterly-audit-status
 LEGACY_TIMER=${QUARTERLY_SRE_AUDIT_LEGACY_TIMER:-personal-server-quarterly-sre-audit.timer}
+LEGACY_SERVICE=${QUARTERLY_SRE_AUDIT_LEGACY_SERVICE:-personal-server-quarterly-sre-audit.service}
 MANUAL_JOB_TIMEOUT=${QUARTERLY_SRE_AUDIT_MANUAL_JOB_TIMEOUT:-20m}
+INSTALL_LOCK_FILE=${QUARTERLY_SRE_AUDIT_INSTALL_LOCK_FILE:-${XDG_RUNTIME_DIR:-/tmp}/personal-server-quarterly-sre-audit-install.lock}
 
 usage() {
   printf '%s\n' "usage: $0 --preflight|--render|--install|--status" >&2
@@ -26,9 +28,31 @@ kctl() {
 
 require_commands() {
   local command_name
-  for command_name in sudo k3s systemctl date grep; do
+  for command_name in sudo k3s systemctl date flock grep; do
     command -v "$command_name" >/dev/null || return 1
   done
+}
+
+acquire_install_lock() {
+  exec 9>"$INSTALL_LOCK_FILE" || return 1
+  flock -n 9 || {
+    printf '%s\n' 'Quarterly SRE audit installer is already running; retry is blocked.' >&2
+    return 1
+  }
+}
+
+assert_no_active_audit_jobs() {
+  local jobs name active
+  jobs=$(kctl -n "$NAMESPACE" get jobs -o 'jsonpath={range .items[*]}{.metadata.name}{"\t"}{.status.active}{"\n"}{end}') || {
+    printf '%s\n' 'Quarterly SRE audit Job state could not be read; installation is blocked.' >&2
+    return 1
+  }
+  while IFS=$'\t' read -r name active; do
+    [[ "$name" == "${CRONJOB_NAME}-"* ]] || continue
+    [[ -z "$active" || "$active" == 0 ]] && continue
+    printf '%s\n' 'An active quarterly SRE audit Job exists; installation is blocked.' >&2
+    return 1
+  done <<< "$jobs"
 }
 
 verify_manifest() {
@@ -47,6 +71,7 @@ preflight() {
   verify_manifest || return 1
   kctl apply --dry-run=client -f "$MANIFEST" >/dev/null || return 1
   kctl get nodes --no-headers >/dev/null || return 1
+  assert_no_active_audit_jobs || return 1
   printf '%s\n' 'quarterly_sre_audit_preflight=PASS'
 }
 
@@ -82,6 +107,43 @@ disable_legacy_timer_if_present() {
   legacy_timer_is_inactive
 }
 
+legacy_service_is_inactive() {
+  local load_state active_state
+  load_state=$(systemctl --user show "$LEGACY_SERVICE" --property=LoadState --value) || return 1
+  [ "$load_state" = not-found ] && return 0
+  active_state=$(systemctl --user show "$LEGACY_SERVICE" --property=ActiveState --value) || return 1
+  [ "$active_state" = inactive ] || {
+    printf '%s\n' 'Legacy quarterly SRE audit service is active; installation is blocked without stopping it.' >&2
+    return 1
+  }
+}
+
+ensure_status_configmap_if_absent() {
+  local existing
+  existing=$(kctl -n "$NAMESPACE" get configmap "$STATUS_CONFIGMAP" --ignore-not-found -o name) || {
+    printf '%s\n' 'Quarterly SRE audit status ConfigMap could not be read.' >&2
+    return 1
+  }
+  [ -n "$existing" ] && return 0
+  if kctl -n "$NAMESPACE" create configmap "$STATUS_CONFIGMAP" \
+    --from-literal=run_id= \
+    --from-literal=status= \
+    --from-literal=completed_at= \
+    --from-literal=health_audit= \
+    --from-literal=backup_check= \
+    --from-literal=recovery_lab=; then
+    return 0
+  fi
+  existing=$(kctl -n "$NAMESPACE" get configmap "$STATUS_CONFIGMAP" --ignore-not-found -o name) || {
+    printf '%s\n' 'Quarterly SRE audit status ConfigMap could not be re-read after create.' >&2
+    return 1
+  }
+  [ -n "$existing" ] || {
+    printf '%s\n' 'Quarterly SRE audit status ConfigMap was not created.' >&2
+    return 1
+  }
+}
+
 create_manual_job() {
   local timestamp job_name
   timestamp=$(date -u +%Y%m%d%H%M%S) || return 1
@@ -109,10 +171,14 @@ render() {
 }
 
 install() {
+  acquire_install_lock || return 1
   preflight || return 1
   kctl apply -f "$MANIFEST" || return 1
   assert_cronjob_suspended || return 1
+  ensure_status_configmap_if_absent || return 1
   disable_legacy_timer_if_present || return 1
+  legacy_service_is_inactive || return 1
+  assert_no_active_audit_jobs || return 1
   create_manual_job || return 1
   verify_status_reporting || return 1
   kctl -n "$NAMESPACE" patch cronjob "$CRONJOB_NAME" --type merge -p '{"spec":{"suspend":false}}' || return 1
@@ -120,9 +186,15 @@ install() {
 }
 
 status() {
-  kctl -n "$NAMESPACE" get cronjob "$CRONJOB_NAME"
-  kctl -n "$NAMESPACE" get configmap "$STATUS_CONFIGMAP"
+  local suspended report run_id audit_status completed_at health_audit backup_check recovery_lab
+  suspended=$(kctl -n "$NAMESPACE" get cronjob "$CRONJOB_NAME" -o 'jsonpath={.spec.suspend}') || return 1
+  report=$(kctl -n "$NAMESPACE" get configmap "$STATUS_CONFIGMAP" -o 'jsonpath={.data.run_id}{"\t"}{.data.status}{"\t"}{.data.completed_at}{"\t"}{.data.health_audit}{"\t"}{.data.backup_check}{"\t"}{.data.recovery_lab}') || return 1
+  IFS=$'\t' read -r run_id audit_status completed_at health_audit backup_check recovery_lab \
+    <<< "$report" || return 1
+  printf 'cronjob_suspended=%s\nrun_id=%s\nstatus=%s\ncompleted_at=%s\nhealth_audit=%s\nbackup_check=%s\nrecovery_lab=%s\n' \
+    "$suspended" "$run_id" "$audit_status" "$completed_at" "$health_audit" "$backup_check" "$recovery_lab"
   legacy_timer_is_inactive
+  legacy_service_is_inactive
 }
 
 case "${1:-}" in

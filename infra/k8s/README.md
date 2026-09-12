@@ -86,16 +86,17 @@ bash infra/k8s/tools/quarterly-sre-audit-automation.sh --install
 bash infra/k8s/tools/quarterly-sre-audit-automation.sh --status
 ```
 
-`--install`은 아래 순서로만 수행함.
+`--install`은 host 단일 실행 lock을 먼저 획득한 뒤 아래 순서로만 수행함.
 
-
-1. preflight 및 client-side render를 수행함.
+1. preflight와 client-side render를 수행하고, `monitoring` namespace의 활성 `quarterly-sre-audit-*` Job이 없는지 확인함. Job 목록 조회 오류 또는 활성 Job이 있으면 manifest를 적용하지 않고 중단함.
 2. `suspend: true` CronJob과 최소 권한 RBAC를 적용하고 suspended 상태를 확인함.
-3. 기존 사용자 `personal-server-quarterly-sre-audit.timer`가 존재하면 `disable --now`로 중지·비활성화함.
-4. CronJob에서 고유 이름의 수동 Job을 생성하고 완료 성공을 대기함.
-5. `monitoring/sre-telegram-quarterly-audit-status` 상태가 `passed`인지 확인한 뒤에만 CronJob suspend를 해제함.
+3. `monitoring/sre-telegram-quarterly-audit-status` ConfigMap이 없을 때만 비밀값 없는 빈 결과 필드를 생성함. 기존 ConfigMap 데이터는 덮어쓰지 않음.
+4. 기존 사용자 `personal-server-quarterly-sre-audit.timer`가 존재하면 `disable --now`로 중지·비활성화함. 이어서 legacy `personal-server-quarterly-sre-audit.service`가 inactive인지 확인하며, active 상태이면 강제 종료하지 않고 설치를 차단함.
+5. 수동 Job 생성 직전에 활성 `quarterly-sre-audit-*` Job이 없는지 다시 확인함. 재시도 시 이전 실행이 active이거나 상태 조회가 불확실하면 두 번째 Job을 생성하지 않음.
+6. CronJob에서 고유 이름의 수동 Job을 생성하고 완료 성공을 대기함.
+7. `monitoring/sre-telegram-quarterly-audit-status`의 `status=passed`를 확인한 뒤에만 CronJob suspend를 해제함.
 
-수동 Job 실패, 상태 ConfigMap 조회 실패 또는 상태 미확인 시 CronJob은 suspended 상태를 유지함. 기존 systemd service·timer template은 이력 보존 목적으로만 남아 있으며, 신규 설치 또는 실행 경로에서 설치·사용하지 않음.
+lock 경합, 활성 Job, Job 목록 조회 오류, legacy service 활성, 수동 Job 실패, 상태 ConfigMap 조회 실패 또는 상태 미확인 시 CronJob은 suspended 상태를 유지함. 기존 systemd service·timer template은 이력 보존 목적으로만 남아 있으며, 신규 설치 또는 실행 경로에서 설치·사용하지 않음.
 
 CronJob은 `Asia/Seoul` 기준 매년 1·4·7·10월 1일 03:30에 1회 실행되며, `Forbid` 동시 실행 제한과 실패 재시도 없음 조건을 사용함. runner는 다음 세 점검을 수행하고 어느 한 단계라도 실패하면 결과를 fail-closed로 보고함.
 
@@ -110,10 +111,10 @@ CronJob은 `Asia/Seoul` 기준 매년 1·4·7·10월 1일 03:30에 1회 실행�
 실제 적용 시 운영자는 `--install`이 생성한 수동 Job 1회가 성공한 뒤 다음 세 가지를 모두 직접 확인해야 함.
 
 1. ConfigMap 기록에 세 단계 결과와 종합 결과가 남았는지 확인함.
-2. 격리 namespace의 임시 리소스가 정리되었는지 확인함.
+2. 고정 `sre-recovery-lab/sre-pod-recovery` Deployment가 replica 0이고 Pod가 남아 있지 않은지 확인함. 고정 namespace와 Deployment 자체는 삭제하지 않음.
 3. 기존 SRE Telegram relay를 통해 요약 메시지가 수신되었는지 확인함.
 
-Telegram 수신을 확인하기 전에는 분기 점검 적용 또는 알림 정상으로 판단하지 않음. 확인 명령은 다음과 같으며, 출력에 Secret 값을 포함하지 않도록 함.
+Telegram 수신을 확인하기 전에는 분기 점검 적용 또는 알림 정상으로 판단하지 않음. `--status`는 CronJob suspended 상태와 ConfigMap의 `run_id`, `status`, `completed_at`, `health_audit`, `backup_check`, `recovery_lab`만 출력하므로 Secret 값은 포함하지 않음. 수동 Job 직후에는 `run_id`와 완료 시각이 해당 실행 결과인지 확인 필요함.
 
 ```bash
 bash infra/k8s/tools/quarterly-sre-audit-automation.sh --status
