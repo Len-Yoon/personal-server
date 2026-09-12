@@ -93,10 +93,29 @@ spec:
             runAsNonRoot: true
             runAsUser: 10001
             runAsGroup: 10001
-            fsGroup: 10001
-            fsGroupChangePolicy: OnRootMismatch
             seccompProfile:
               type: RuntimeDefault
+          initContainers:
+            # Prepare only scratch volumes. fsGroup is deliberately omitted because it
+            # would let kubelet change ownership/modes on the mounted Portal PVCs.
+            - name: prepare-writable-scratch
+              image: personal-server-portal-pvc-backup:task2
+              imagePullPolicy: Never
+              command: ["/bin/sh", "-ec", "chown 10001:10001 /work /tmp && chmod 0700 /work /tmp"]
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                runAsNonRoot: false
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
+                  add: [CHOWN, FOWNER]
+              volumeMounts:
+                - name: work
+                  mountPath: /work
+                - name: tmp
+                  mountPath: /tmp
           containers:
             - name: backup
               image: personal-server-portal-pvc-backup:task2
@@ -164,7 +183,9 @@ spec:
                     path: age-recipient
                   - key: age-identity
                     path: age-identity
-                defaultMode: 0440
+                # No fsGroup is used with Portal PVC mounts. The only container in
+                # this Pod needs read-only access to these projected credential files.
+                defaultMode: 0444
             - name: work
               emptyDir:
                 sizeLimit: 10Gi

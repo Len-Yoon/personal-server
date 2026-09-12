@@ -121,15 +121,20 @@ class PortalPvcBackupCronJobTests(unittest.TestCase):
         configmaps = [doc for doc in documents() if doc.get("kind") == "ConfigMap"]
         self.assertEqual(configmaps, [])
 
-    def test_secret_projection_and_emptydirs_are_securely_writable_by_the_nonroot_runner(self):
-        """The pod must read projected credentials while retaining only bounded writable scratch space."""
+    def test_pvc_backed_pod_avoids_fsgroup_and_uses_only_prepared_emptydirs_for_writes(self):
+        """fsGroup would mutate mounted PVC metadata even when the runner mounts it read-only."""
         spec = pod_spec()
-        self.assertEqual(spec["securityContext"]["fsGroup"], 10001)
-        self.assertEqual(spec["securityContext"]["fsGroupChangePolicy"], "OnRootMismatch")
+        self.assertNotIn("fsGroup", spec["securityContext"])
+        self.assertNotIn("fsGroupChangePolicy", spec["securityContext"])
         volumes = {volume["name"]: volume for volume in spec["volumes"]}
-        self.assertEqual(volumes["backup-runtime"]["secret"]["defaultMode"], 0o440)
+        self.assertEqual(volumes["backup-runtime"]["secret"]["defaultMode"], 0o444)
         self.assertEqual(volumes["work"]["emptyDir"]["sizeLimit"], "10Gi")
         self.assertEqual(volumes["tmp"]["emptyDir"]["sizeLimit"], "1Gi")
+        init = spec["initContainers"]
+        self.assertEqual(len(init), 1)
+        self.assertEqual(init[0]["name"], "prepare-writable-scratch")
+        self.assertEqual({mount["name"] for mount in init[0]["volumeMounts"]}, {"work", "tmp"})
+        self.assertIn("chown 10001:10001 /work /tmp", init[0]["command"][-1])
         environment = {item["name"]: item["value"] for item in spec["containers"][0]["env"]}
         self.assertEqual(environment["TMPDIR"], "/work")
         resources = spec["containers"][0]["resources"]
