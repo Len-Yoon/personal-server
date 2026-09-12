@@ -130,7 +130,10 @@ class PortalCutoverContractTest(unittest.TestCase):
         self.assertIn("host.docker.internal:30080", text)
         self.assertNotRegex(text, r"(^|\n)\s*(source|\.)\s+[^\n]*\.env")
         self.assertNotIn("kubectl create secret generic portal-web-runtime --from-literal", text)
-        self.assertNotRegex(text, r"trap[^\n]+EXIT")
+        # A remote shell may clean up its own temporary permission probe;
+        # the operator script must still avoid an implicit destructive rollback.
+        without_probe = text[:text.index("assert_pvc_runtime_permissions() {")] + text[text.index("assert_portal_runtime_permissions() {"):]
+        self.assertNotRegex(without_probe, r"trap[^\n]+EXIT")
 
     def test_secret_allowlist_requires_only_portal_core_keys(self):
         text = SCRIPT.read_text(encoding="utf-8")
@@ -945,6 +948,12 @@ restore_writers_after_switch_failure''',
         self.assertNotRegex(switch, r"portal_cutover_stage=.*(PASSWORD=|TOKEN=|SECRET=|PORTAL_UPSTREAM=)")
 
     def test_pvc_restore_retries_a_stream_failure_without_replacing_local_data_early(self):
+        self.run_pvc_restore_with_runtime_preflight(preflight_ok=True)
+
+    def test_pvc_restore_preserves_existing_destination_when_nonroot_preflight_fails(self):
+        self.run_pvc_restore_with_runtime_preflight(preflight_ok=False)
+
+    def run_pvc_restore_with_runtime_preflight(self, preflight_ok):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             fixture = root / "fixture"
@@ -966,8 +975,8 @@ restore_writers_after_switch_failure''',
                 "  *'get pvc'*) exit 0 ;;\n"
                 "  *' apply -f -'*) cat >/dev/null; exit 0 ;;\n"
                 "  *'wait --for=condition=Ready'*) exit 0 ;;\n"
-                "  *'exec restore-pod -- id -u'*) printf '0\\n'; exit 0 ;;\n"
-                "  *'exec restore-pod -- id -g'*) printf '0\\n'; exit 0 ;;\n"
+                "  *'exec restore-pod -- id -u'*) printf '10001\\n'; exit 0 ;;\n"
+                "  *'exec restore-pod -- id -g'*) printf '10001\\n'; exit 0 ;;\n"
                 "  *'exec restore-pod -- tar -C /data/files -cf - .'*)\n"
                 f"    count=$(cat '{count}' 2>/dev/null || printf '0')\n"
                 "    count=$((count + 1)); printf '%s\\n' \"$count\" > '" + str(count) + "'\n"
@@ -982,6 +991,15 @@ restore_writers_after_switch_failure''',
                 encoding="utf-8",
             )
             fake_sudo.chmod(0o755)
+            fake_docker = root / "docker"
+            fake_docker.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' \"docker $*\" >> '{calls}'\n"
+                "test -f \"$DESTINATION/before.txt\" || exit 97\n"
+                f"exit {0 if preflight_ok else 1}\n",
+                encoding="utf-8",
+            )
+            fake_docker.chmod(0o755)
             library = root / "portal-cutover-lib.sh"
             library.write_text(
                 SCRIPT.read_text(encoding="utf-8").rsplit('\nmain "$@"', 1)[0],
@@ -1003,10 +1021,23 @@ restore_writers_after_switch_failure''',
                 check=False,
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(count.read_text(encoding="utf-8").strip(), "2")
-            self.assertEqual((destination / "copied.txt").read_text(encoding="utf-8"), "from-pvc")
-            self.assertFalse((destination / "before.txt").exists())
+            if preflight_ok:
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((destination / "copied.txt").read_text(encoding="utf-8"), "from-pvc")
+                self.assertFalse((destination / "before.txt").exists())
+            else:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual((destination / "before.txt").read_text(), "local-before")
+                self.assertFalse((destination / "copied.txt").exists())
+                self.assertIn("non-root", result.stderr)
+                self.assertFalse(list(root.glob(".destination.rollback.*")))
+            recorded = calls.read_text()
+            self.assertIn("--user 10001:10001", recorded)
+            self.assertIn("--network none", recorded)
+            self.assertIn("--pull never", recorded)
+            self.assertIn("type=bind,src=", recorded)
+            self.assertNotIn("delete pvc", recorded)
 
     def test_rollback_restores_both_pvcs_before_compose_and_only_then_deletes_them(self):
         """Rollback preserves the only current copies until both local restores verify."""
@@ -1045,7 +1076,6 @@ restore_writers_after_switch_failure''',
         self.assertIn("id -g", text)
         self.assertIn("test -r", text)
         self.assertIn("test -w", text)
-        self.assertIn("xargs -0 -r sh -c", text)
         self.assertIn("BEGIN IMMEDIATE", text)
         self.assertIn("ROLLBACK", text)
         self.assertIn("sqlite_master", text)

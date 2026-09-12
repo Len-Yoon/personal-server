@@ -257,6 +257,13 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         docker_run_results: tuple[int, ...] = (0,),
         root_ownership_results: tuple[int, ...] = (0,),
         app_ownership_results: tuple[int, ...] = (1,),
+        car_care_oauth_ownership_approved: bool = False,
+        oauth_volume_name: str = "personal-server_car-care-oauth",
+        container_compose_project: str = "personal-server",
+        volume_compose_project: str | None = None,
+        volume_compose_name: str = "car-care-oauth",
+        oauth_mount_type: str = "volume",
+        oauth_mount_destination: str = "/data/oauth",
         rejected_sha: str | None = None,
         origin_main_sha: str | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], str, str | None]:
@@ -267,7 +274,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
             for compose_file in ("docker-compose.yml", "docker-compose.n100.yml", ".env"):
                 (root / compose_file).write_text("services: {}\n", encoding="utf-8")
             (root / "data").mkdir()
-            for service in ("crawler-worker", "youtube-memo", "book-memo"):
+            for service in ("crawler-worker", "youtube-memo", "book-memo", "car-care"):
                 (root / "data" / service).mkdir()
             source = Path(directory) / "source"
             for service in ("crawler-worker", "youtube-memo", "book-memo", "car-care-worker"):
@@ -345,7 +352,20 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "  case \"$*\" in *'output = sys.stdout.buffer'*) printf snapshot ;; esac\n"
                 "fi\n"
                 "if [ \"$1\" = inspect ]; then\n"
-                "  case \"$*\" in *'.State.Running'*) printf 'true\\n' ;; *) printf '%s\\n' \"${FAKE_INSPECT_STATUS:-healthy}\" ;; esac\n"
+                "  case \"$*\" in\n"
+                "    *'.State.Running'*) printf 'true\\n' ;;\n"
+                "    *'.State.Health.Status'*) printf '%s\\n' \"${FAKE_INSPECT_STATUS:-healthy}\" ;;\n"
+                "    *'.Mounts'*) printf '%s\\t%s\\t%s\\n' \"${FAKE_OAUTH_MOUNT_TYPE}\" \"${FAKE_OAUTH_VOLUME_NAME}\" \"${FAKE_OAUTH_MOUNT_DESTINATION}\" ;;\n"
+                "    *'com.docker.compose.project'*) printf '%s\\n' \"${FAKE_CONTAINER_COMPOSE_PROJECT}\" ;;\n"
+                "    *) exit 1 ;;\n"
+                "  esac\n"
+                "fi\n"
+                "if [ \"$1\" = volume ] && [ \"$2\" = inspect ]; then\n"
+                "  case \"$*\" in\n"
+                "    *'com.docker.compose.project'*) printf '%s\\n' \"${FAKE_VOLUME_COMPOSE_PROJECT}\" ;;\n"
+                "    *'com.docker.compose.volume'*) printf '%s\\n' \"${FAKE_VOLUME_COMPOSE_NAME}\" ;;\n"
+                "    *) : ;;\n"
+                "  esac\n"
                 "fi\n"
                 "exit 0\n",
             )
@@ -370,6 +390,15 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "FAKE_DOCKER_RUN_RESULTS": ",".join(map(str, docker_run_results)),
                 "FAKE_ROOT_OWNERSHIP_RESULTS": ",".join(map(str, root_ownership_results)),
                 "FAKE_APP_OWNERSHIP_RESULTS": ",".join(map(str, app_ownership_results)),
+                "N100_SAFE_DEPLOY_CAR_CARE_OAUTH_OWNERSHIP_APPROVED": (
+                    "1" if car_care_oauth_ownership_approved else "0"
+                ),
+                "FAKE_OAUTH_VOLUME_NAME": oauth_volume_name,
+                "FAKE_CONTAINER_COMPOSE_PROJECT": container_compose_project,
+                "FAKE_VOLUME_COMPOSE_PROJECT": volume_compose_project or container_compose_project,
+                "FAKE_VOLUME_COMPOSE_NAME": volume_compose_name,
+                "FAKE_OAUTH_MOUNT_TYPE": oauth_mount_type,
+                "FAKE_OAUTH_MOUNT_DESTINATION": oauth_mount_destination,
                 "FAKE_ORIGIN_MAIN_SHA": origin_main_sha or expected_sha,
                 "FAKE_RELEASE_SOURCE": str(source),
                 "FAKE_HEALTH_SCRIPT": str(SAFE_HEALTH_SCRIPT),
@@ -425,11 +454,103 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertIn("build crawler-worker book-memo", calls)
         self.assertIn("up -d --no-build --no-deps crawler-worker book-memo", calls)
 
-    def test_car_care_deploy_does_not_mutate_unrelated_persistent_data(self):
-        result, calls, _ = self.run_safe_deploy(services=("car-care-worker",))
+    def test_car_care_deploy_aligns_host_data_and_approved_oauth_volume(self):
+        result, calls, _ = self.run_safe_deploy(
+            services=("car-care-worker",),
+            car_care_oauth_ownership_approved=True,
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("build car-care-worker", calls)
-        self.assertNotIn("docker run", calls)
+        self.assertIn("data/car-care,dst=/data", calls)
+        self.assertIn("type=volume,src=personal-server_car-care-oauth,dst=/data", calls)
+        self.assertIn("chown --recursive --no-dereference 10001:10001 /data", calls)
+        self.assertNotIn("HYUNDAI_CLIENT_SECRET", calls)
+
+    def test_car_care_deploy_refuses_unowned_oauth_without_explicit_approval(self):
+        result, calls, saved_state = self.run_safe_deploy(services=("car-care-worker",))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("type=volume,src=personal-server_car-care-oauth,dst=/data", calls)
+        self.assertNotIn("docker stop car-care-worker", calls)
+        self.assertNotIn("chown --recursive --no-dereference 10001:10001 /data", calls)
+        self.assertIsNone(saved_state)
+
+    def test_car_care_ownership_failure_restores_snapshot_and_resumes_writer(self):
+        result, calls, saved_state = self.run_safe_deploy(
+            services=("car-care-worker",),
+            previous_sha=self.OLD_SHA,
+            docker_run_results=(0, 1, 0),
+            health_results=(0,),
+            car_care_oauth_ownership_approved=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("data/car-care,dst=/data", calls)
+        self.assertIn("docker start car-care-worker", calls)
+        self.assertEqual(result.stderr.count("safe_cd_stage=data_ownership_restore"), 1)
+        self.assertNotIn("safe_cd_stage=rollback", result.stderr)
+        self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
+
+    def test_car_care_oauth_ownership_failure_restores_volume_snapshot(self):
+        result, calls, saved_state = self.run_safe_deploy(
+            services=("car-care-worker",),
+            previous_sha=self.OLD_SHA,
+            app_ownership_results=(1, 0, 1),
+            docker_run_results=(0, 1, 0),
+            health_results=(0,),
+            car_care_oauth_ownership_approved=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(
+            calls.count("type=volume,src=personal-server_car-care-oauth,dst=/data"),
+            5,
+        )
+        self.assertIn("docker start car-care-worker", calls)
+        self.assertEqual(result.stderr.count("safe_cd_stage=data_ownership_restore"), 1)
+        self.assertNotIn("safe_cd_stage=rollback", result.stderr)
+        self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
+
+    def test_car_care_discovers_the_compose_scoped_oauth_volume_from_mount_and_labels(self):
+        result, calls, _ = self.run_safe_deploy(
+            services=("car-care-worker",),
+            car_care_oauth_ownership_approved=True,
+            oauth_volume_name="ops_car-care-oauth",
+            container_compose_project="ops",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("type=volume,src=ops_car-care-oauth,dst=/data", calls)
+        self.assertIn("docker inspect --format", calls)
+        self.assertIn("docker volume inspect --format", calls)
+        self.assertIn("com.docker.compose.project", calls)
+        self.assertIn("com.docker.compose.volume", calls)
+        self.assertIn("/data/oauth", calls)
+
+    def test_car_care_refuses_oauth_volume_when_compose_labels_do_not_match_mount(self):
+        result, calls, saved_state = self.run_safe_deploy(
+            services=("car-care-worker",),
+            car_care_oauth_ownership_approved=True,
+            oauth_volume_name="ops_car-care-oauth",
+            container_compose_project="ops",
+            volume_compose_project="other-project",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("docker stop car-care-worker", calls)
+        self.assertNotIn("chown --recursive --no-dereference 10001:10001 /data", calls)
+        self.assertIn("com.docker.compose.project", calls)
+        self.assertIn("com.docker.compose.volume", calls)
+        self.assertIsNone(saved_state)
+
+    def test_car_care_refuses_oauth_mount_with_wrong_type_or_destination(self):
+        for mount_type, destination in (("bind", "/data/oauth"), ("volume", "/data/other")):
+            with self.subTest(mount_type=mount_type, destination=destination):
+                result, calls, saved_state = self.run_safe_deploy(
+                    services=("car-care-worker",),
+                    car_care_oauth_ownership_approved=True,
+                    oauth_mount_type=mount_type,
+                    oauth_mount_destination=destination,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("docker stop car-care-worker", calls)
+                self.assertNotIn("chown --recursive --no-dereference 10001:10001 /data", calls)
+                self.assertIsNone(saved_state)
 
     def test_malformed_or_repeated_csv_service_arguments_fail_before_compose(self):
         malformed_values = (

@@ -203,7 +203,8 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn("      - \"127.0.0.1:8015:8015\"", worker)
         self.assertIn("http://127.0.0.1:8015/health", worker)
 
-    def test_safe_n100_service_images_run_as_non_root(self):
+    def test_non_root_service_images_define_the_dedicated_runtime_identity(self):
+        """Fails if a DS-0002 target can fall back to a root runtime user."""
         for service in ("crawler-worker", "youtube-memo", "book-memo"):
             with self.subTest(service=service):
                 dockerfile = (ROOT / service / "Dockerfile").read_text(encoding="utf-8")
@@ -222,11 +223,56 @@ class ComposeConfigTests(unittest.TestCase):
                     "safe deployment's read-only app bind mount requires the nested log mountpoint",
                 )
 
-        executor = (ROOT / "homeops-executor" / "Dockerfile").read_text(encoding="utf-8")
-        self.assertNotIn("USER 10001:10001", executor)
+        for service in (
+            "car-care-worker",
+            "homeops-executor",
+            "portal-web",
+            "system-agent",
+        ):
+            with self.subTest(service=service):
+                dockerfile = (ROOT / service / "Dockerfile").read_text(encoding="utf-8")
+                self.assertIn("addgroup --system --gid 10001 app", dockerfile)
+                self.assertIn(
+                    "adduser --system --uid 10001 --ingroup app app", dockerfile
+                )
+                self.assertIn("COPY --chown=10001:10001", dockerfile)
+                self.assertIn("USER 10001:10001", dockerfile)
 
         car_care = (ROOT / "car-care-worker" / "Dockerfile").read_text(encoding="utf-8")
-        self.assertNotIn("USER 10001:10001", car_care)
+        self.assertIn("mkdir -p /data/car-care /data/oauth", car_care)
+        self.assertIn("chown -R 10001:10001 /data", car_care)
+
+    def test_caddy_uses_non_root_identity_with_only_bind_capability(self):
+        """Fails if Caddy needs root or gains a capability beyond low-port binding."""
+        dockerfile = (ROOT / "caddy" / "Dockerfile").read_text(encoding="utf-8")
+        compose = (ROOT / "docker-compose.n100.yml").read_text(encoding="utf-8")
+        caddy = _service_block(compose, "caddy")
+
+        self.assertRegex(dockerfile, r"addgroup\s+-S\s+-g\s+10001\s+app")
+        self.assertRegex(
+            dockerfile,
+            r"adduser\s+-S\s+-D\s+-H\s+-u\s+10001\s+-G\s+app\s+app",
+        )
+        self.assertIn("COPY --chown=10001:10001 Caddyfile /etc/caddy/Caddyfile", dockerfile)
+        self.assertIn("mkdir -p /data /config", dockerfile)
+        self.assertIn("chown -R 10001:10001 /data /config /etc/caddy", dockerfile)
+        self.assertIn("USER 10001:10001", dockerfile)
+        self.assertIn("cap_drop:\n      - ALL", caddy)
+        self.assertIn("cap_add:\n      - NET_BIND_SERVICE", caddy)
+        self.assertEqual(caddy.count("NET_BIND_SERVICE"), 1)
+        self.assertIn("      - caddy_data:/data", caddy)
+        self.assertIn("      - caddy_config:/config", caddy)
+        self.assertRegex(compose, r"\nvolumes:\n  caddy_data:\n  caddy_config:\n")
+
+    def test_docker_socket_proxy_remains_the_only_root_socket_consumer(self):
+        """Fails if non-root services regain Docker socket access or proxy loses its root exception."""
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        executor = _service_block(compose, "homeops-executor")
+        proxy = _service_block(compose, "docker-socket-proxy")
+
+        self.assertNotIn("/var/run/docker.sock", executor)
+        self.assertIn('user: "0:0"', proxy)
+        self.assertEqual(compose.count("/var/run/docker.sock:/var/run/docker.sock:ro"), 1)
 
     def test_agent_loop_documents_require_branch_cleanup_after_merge(self):
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")

@@ -5,5 +5,12 @@ RUN xcaddy build \
 
 FROM caddy:2.11.4@sha256:13ba145cba2f3e28fa801994876e4c086d1b95d5aa2a520a734765ffb6b12017
 
-COPY --from=builder /usr/bin/caddy /usr/bin/caddy
-COPY Caddyfile /etc/caddy/Caddyfile
+RUN addgroup -S -g 10001 app \
+    && adduser -S -D -H -u 10001 -G app app \
+    && mkdir -p /data /config \
+    && chown -R 10001:10001 /data /config /etc/caddy
+
+COPY --from=builder --chown=10001:10001 /usr/bin/caddy /usr/bin/caddy
+COPY --chown=10001:10001 Caddyfile /etc/caddy/Caddyfile
+
+USER 10001:10001
