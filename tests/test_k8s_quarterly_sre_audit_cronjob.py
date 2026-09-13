@@ -189,7 +189,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 "  *'get deployment sre-pod-recovery'*'.spec.replicas'*) cat \"$REPLICAS\" 2>/dev/null || printf 0 ;;\n"
                 "  *'get deployment sre-pod-recovery'*) replicas=$(cat \"$REPLICAS\" 2>/dev/null || printf 0); [ \"$replicas\" = 1 ] && printf True:1 || printf False:0 ;;\n"
                 "  *'get pods'*) replicas=$(cat \"$REPLICAS\" 2>/dev/null || printf 0); [ \"$replicas\" = 0 ] && exit 0; printf recovery-pod ;;\n"
-                "  *'wait --for=condition=Ready pod/recovery-pod --timeout=30s'*) [ \"$SCENARIO\" = ready-wait-fail ] && exit 1; exit 0 ;;\n"
+                "  *'wait --for=condition=Ready pod/recovery-pod --timeout=60s'*) [ \"$SCENARIO\" = ready-wait-fail ] && exit 1; exit 0 ;;\n"
                 "  *'get events --field-selector involvedObject.name=recovery-pod'*) [ \"$SCENARIO\" = events-fail ] && exit 1; exit 0 ;;\n"
                 "  *'get pod recovery-pod'*'Ready'*) printf True ;;\n"
                 "  *'get pod recovery-pod'*) n=$(cat \"$COUNTER\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$COUNTER\"; printf '%s' \"$((n - 1))\" ;;\n"
@@ -257,17 +257,30 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertIn("scale deployment sre-pod-recovery --replicas=0", calls)
         self.assertNotIn(" create ", calls)
         self.assertNotIn(" delete ", calls)
-        self.assertIn("wait --for=condition=Ready pod/recovery-pod --timeout=30s", calls)
+        self.assertIn("wait --for=condition=Ready pod/recovery-pod --timeout=60s", calls)
 
     def test_runner_uses_deployment_get_polling_and_bounded_pod_ready_wait(self):
         text = RUNNER.read_text(encoding="utf-8")
         self.assertIn("get deployment \"$RECOVERY_DEPLOYMENT\"", text)
         self.assertIn(".status.availableReplicas", text)
         self.assertIn(
-            'kubectl -n "$RECOVERY_NAMESPACE" wait --for=condition=Ready "pod/$pod" --timeout=30s',
+            'kubectl -n "$RECOVERY_NAMESPACE" wait --for=condition=Ready "pod/$pod" --timeout=60s',
             text,
         )
         self.assertNotIn("get deployments", text)
+
+    def test_runner_allows_sixty_seconds_for_recovery_pod_ready_after_restart(self):
+        """The Ready wait must exceed the Pod's 30-second termination grace period."""
+        text = RUNNER.read_text(encoding="utf-8")
+        ready_wait = re.search(
+            r"wait_for_recovery_pod_ready\(\) \{(?P<body>.*?)^\}",
+            text,
+            re.DOTALL | re.MULTILINE,
+        )
+
+        self.assertIsNotNone(ready_wait)
+        self.assertIn("--timeout=60s", ready_wait.group("body"))
+        self.assertNotIn("--timeout=30s", ready_wait.group("body"))
 
     def test_runner_allows_sixty_seconds_for_recovery_pod_cleanup_after_scale_down(self):
         text = RUNNER.read_text(encoding="utf-8")

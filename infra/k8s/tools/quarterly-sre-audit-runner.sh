@@ -70,7 +70,7 @@ wait_for_recovery_available() {
 
 wait_for_recovery_pod_ready() {
   local pod=$1
-  kubectl -n "$RECOVERY_NAMESPACE" wait --for=condition=Ready "pod/$pod" --timeout=30s
+  kubectl -n "$RECOVERY_NAMESPACE" wait --for=condition=Ready "pod/$pod" --timeout=60s
 }
 
 wait_for_recovery_pods_absent() {
