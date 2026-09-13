@@ -68,6 +68,25 @@ metadata:
   namespace: monitoring
 automountServiceAccountToken: true
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: quarterly-sre-audit-validation
+  namespace: monitoring
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sre-quarterly-audit-diagnostics
+  namespace: monitoring
+data:
+  run_id: ""
+  result: ""
+  failure_stage: ""
+  cleanup_status: ""
+  completed_at: ""
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -91,6 +110,31 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: quarterly-sre-audit
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: quarterly-sre-audit-validation-diagnostics
+  namespace: monitoring
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [sre-quarterly-audit-diagnostics]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: quarterly-sre-audit-validation-diagnostics
+  namespace: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: quarterly-sre-audit-validation-diagnostics
+subjects:
+  - kind: ServiceAccount
+    name: quarterly-sre-audit-validation
     namespace: monitoring
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -120,6 +164,20 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: quarterly-sre-audit
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: quarterly-sre-audit-validation-read
+  namespace: personal-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: quarterly-sre-audit-read
+subjects:
+  - kind: ServiceAccount
+    name: quarterly-sre-audit-validation
     namespace: monitoring
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -161,6 +219,20 @@ subjects:
     namespace: monitoring
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: quarterly-sre-audit-validation-recovery-lab
+  namespace: sre-recovery-lab
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: quarterly-sre-audit-recovery-lab
+subjects:
+  - kind: ServiceAccount
+    name: quarterly-sre-audit-validation
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: quarterly-sre-audit-nodes
@@ -180,6 +252,19 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: quarterly-sre-audit
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: quarterly-sre-audit-validation-nodes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: quarterly-sre-audit-nodes
+subjects:
+  - kind: ServiceAccount
+    name: quarterly-sre-audit-validation
     namespace: monitoring
 ---
 apiVersion: batch/v1
@@ -214,6 +299,64 @@ spec:
             - name: audit
               image: personal-server-quarterly-sre-audit:task1
               imagePullPolicy: Never
+              securityContext:
+                runAsNonRoot: true
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 250m
+                  memory: 256Mi
+              volumeMounts:
+                - name: temporary
+                  mountPath: /tmp
+          volumes:
+            - name: temporary
+              emptyDir:
+                sizeLimit: 16Mi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: quarterly-sre-audit-validation
+  namespace: monitoring
+spec:
+  schedule: "30 3 1 1,4,7,10 *"
+  timeZone: Asia/Seoul
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 1200
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          serviceAccountName: quarterly-sre-audit-validation
+          restartPolicy: Never
+          automountServiceAccountToken: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: audit
+              image: personal-server-quarterly-sre-audit:task1
+              imagePullPolicy: Never
+              env:
+                - name: QUARTERLY_SRE_AUDIT_REPORT_MODE
+                  value: validation
+                - name: QUARTERLY_SRE_AUDIT_DIAGNOSTICS_CONFIGMAP
+                  value: sre-quarterly-audit-diagnostics
               securityContext:
                 runAsNonRoot: true
                 readOnlyRootFilesystem: true

@@ -3,15 +3,21 @@ set -Eeuo pipefail
 
 STATUS_NAMESPACE=monitoring
 STATUS_CONFIGMAP=sre-telegram-quarterly-audit-status
+REPORT_MODE=${QUARTERLY_SRE_AUDIT_REPORT_MODE:-official}
+DIAGNOSTICS_CONFIGMAP=${QUARTERLY_SRE_AUDIT_DIAGNOSTICS_CONFIGMAP:-sre-quarterly-audit-diagnostics}
 PORTAL_NAMESPACE=personal-server
 RECOVERY_NAMESPACE=sre-recovery-lab
 RECOVERY_DEPLOYMENT=sre-pod-recovery
 BACKUP_MAX_AGE_SECONDS=${QUARTERLY_SRE_AUDIT_BACKUP_MAX_AGE_SECONDS:-86400}
+RECOVERY_TIMEOUT_SECONDS=${QUARTERLY_SRE_AUDIT_RECOVERY_TIMEOUT_SECONDS:-90}
+RECOVERY_POLL_INTERVAL_SECONDS=${QUARTERLY_SRE_AUDIT_RECOVERY_POLL_INTERVAL_SECONDS:-2}
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 health_audit=failed
 backup_check=failed
 recovery_lab=failed
+validation_failure_stage=none
+cleanup_status=not_run
 RUN_ID="audit-$$"
 run_id_ready=false
 
@@ -68,9 +74,65 @@ wait_for_recovery_available() {
   return 1
 }
 
-wait_for_recovery_pod_ready() {
-  local pod=$1
-  kubectl -n "$RECOVERY_NAMESPACE" wait --for=condition=Ready "pod/$pod" --timeout=60s
+RECOVERY_POD_NAME=
+RECOVERY_POD_UID=
+RECOVERY_POD_READY=
+RECOVERY_CONTAINER_ID=
+RECOVERY_RESTART_COUNT=
+
+read_recovery_pod_snapshot() {
+  local pods_text raw candidate uid phase deletion_timestamp ready statuses status_name status_id status_restarts extra
+  local selected_pod= selected_uid= selected_ready= selected_statuses= selected_phase= selected_deletion_timestamp= live_count=0
+  local -a pods=()
+
+  pods_text=$(kubectl -n "$RECOVERY_NAMESPACE" get pods -l app.kubernetes.io/name=sre-pod-recovery -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}') || return 1
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] && pods+=("$candidate")
+  done <<<"$pods_text"
+  for candidate in "${pods[@]}"; do
+    raw=$(kubectl -n "$RECOVERY_NAMESPACE" get pod "$candidate" -o jsonpath='{.metadata.uid}{"|"}{.status.phase}{"|"}{.metadata.deletionTimestamp}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{range .status.containerStatuses[*]}{.name}{"="}{.containerID}{"="}{.restartCount}{";"}{end}') || return 1
+    IFS='|' read -r uid phase deletion_timestamp ready statuses extra <<<"$raw"
+    [[ -z "$extra" && -n "$uid" ]] || return 1
+    [[ "$phase" == Running && -z "$deletion_timestamp" ]] || continue
+    live_count=$((live_count + 1))
+    selected_pod=$candidate
+    selected_uid=$uid
+    selected_ready=$ready
+    selected_statuses=$statuses
+    selected_phase=$phase
+    selected_deletion_timestamp=$deletion_timestamp
+  done
+  (( live_count <= 1 )) || return 1
+  [[ "$live_count" == 1 ]] || return 2
+  pod=$selected_pod
+  uid=$selected_uid
+  ready=$selected_ready
+  statuses=$selected_statuses
+  [[ "$selected_phase" == Running && -z "$selected_deletion_timestamp" ]] || return 1
+  [[ "$ready" == True || "$ready" == False ]] || return 2
+
+  statuses=${statuses%;}
+  [[ -n "$statuses" && "$statuses" != *';'* ]] || return 2
+  IFS='=' read -r status_name status_id status_restarts extra <<<"$statuses"
+  [[ -z "$extra" && -n "$status_name" && -n "$status_id" && "$status_restarts" =~ ^[0-9]+$ ]] || return 2
+
+  RECOVERY_POD_NAME=$pod
+  RECOVERY_POD_UID=$uid
+  RECOVERY_POD_READY=$ready
+  RECOVERY_CONTAINER_ID=$status_id
+  RECOVERY_RESTART_COUNT=$status_restarts
+}
+
+wait_for_recovery_pod_baseline() {
+  local deadline
+  deadline=$((SECONDS + RECOVERY_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if read_recovery_pod_snapshot && [[ "$RECOVERY_POD_READY" == True ]]; then
+      return 0
+    fi
+    sleep "$RECOVERY_POLL_INTERVAL_SECONDS" || return 1
+  done
+  return 1
 }
 
 report_status() {
@@ -80,15 +142,30 @@ report_status() {
     overall=passed
   fi
   completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ) || return 1
-  payload=$(printf '{"data":{"run_id":"%s","status":"%s","completed_at":"%s","health_audit":"%s","backup_check":"%s","recovery_lab":"%s","health_check":null,"backup_evidence":null}}' "$RUN_ID" "$overall" "$completed_at" "$health_audit" "$backup_check" "$recovery_lab") || return 1
-  kubectl -n "$STATUS_NAMESPACE" patch configmap "$STATUS_CONFIGMAP" --type merge --patch "$payload" >/dev/null 2>&1 || return 1
+  case "$REPORT_MODE" in
+    official)
+      payload=$(printf '{"data":{"run_id":"%s","status":"%s","completed_at":"%s","health_audit":"%s","backup_check":"%s","recovery_lab":"%s","health_check":null,"backup_evidence":null}}' "$RUN_ID" "$overall" "$completed_at" "$health_audit" "$backup_check" "$recovery_lab") || return 1
+      kubectl -n "$STATUS_NAMESPACE" patch configmap "$STATUS_CONFIGMAP" --type merge --patch "$payload" >/dev/null 2>&1 || return 1
+      ;;
+    validation)
+      payload=$(printf '{"data":{"run_id":"%s","result":"%s","failure_stage":"%s","cleanup_status":"%s","completed_at":"%s"}}' "$RUN_ID" "$overall" "$validation_failure_stage" "$cleanup_status" "$completed_at") || return 1
+      kubectl -n "$STATUS_NAMESPACE" patch configmap "$DIAGNOSTICS_CONFIGMAP" --type merge --patch "$payload" >/dev/null 2>&1 || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 finalize() {
   local result=$1
   trap - EXIT INT TERM
-  if ! cleanup_recovery_deployment; then
+  if cleanup_recovery_deployment; then
+    cleanup_status=passed
+  else
+    cleanup_status=failed
     recovery_lab=failed
+    validation_failure_stage=cleanup_scale_down
     printf 'quarterly_sre_audit_check=recovery_lab result=failed stage=cleanup_scale_down\n' || true
     result=1
   fi
@@ -108,6 +185,7 @@ run_check() {
   if "$@" >/dev/null 2>&1; then
     printf -v "$check_name" '%s' passed
   else
+    validation_failure_stage="${check_name}:${check_failure_stage}"
     printf 'quarterly_sre_audit_check=%s result=failed stage=%s\n' "$check_name" "$check_failure_stage" || true
   fi
   return 0
@@ -136,36 +214,39 @@ check_backup_evidence() {
 }
 
 check_recovery_lab() {
-  local pod before after deadline
+  local pod uid container_id before deadline snapshot_result
+  local observed_restart=false
   check_failure_stage=scale
   kubectl -n "$RECOVERY_NAMESPACE" scale deployment "$RECOVERY_DEPLOYMENT" --replicas=1 || return 1
   check_failure_stage=availability
   wait_for_recovery_available || return 1
   check_failure_stage=pod_selection
-  pod=$(kubectl -n "$RECOVERY_NAMESPACE" get pods -l app.kubernetes.io/name=sre-pod-recovery -o jsonpath='{.items[0].metadata.name}') || return 1
-  [[ -n "$pod" ]] || return 1
-  check_failure_stage=restart_count
-  before=$(kubectl -n "$RECOVERY_NAMESPACE" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}') || return 1
-  [[ "$before" =~ ^[0-9]+$ ]] || return 1
+  wait_for_recovery_pod_baseline || return 1
+  pod=$RECOVERY_POD_NAME
+  uid=$RECOVERY_POD_UID
+  container_id=$RECOVERY_CONTAINER_ID
+  before=$RECOVERY_RESTART_COUNT
   check_failure_stage=exec
   kubectl -n "$RECOVERY_NAMESPACE" exec "$pod" -- rm /tmp/healthy || return 1
-  check_failure_stage=restart_count
-  deadline=$((SECONDS + 90))
+  check_failure_stage=recovery_transition
+  deadline=$((SECONDS + RECOVERY_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
-    check_failure_stage=pod_selection
-    pod=$(kubectl -n "$RECOVERY_NAMESPACE" get pods -l app.kubernetes.io/name=sre-pod-recovery -o jsonpath='{.items[0].metadata.name}') || return 1
-    [[ -n "$pod" ]] || return 1
-    check_failure_stage=restart_count
-    after=$(kubectl -n "$RECOVERY_NAMESPACE" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}') || return 1
-    [[ "$after" =~ ^[0-9]+$ ]] || return 1
-    if (( after > before )); then
-      check_failure_stage=ready_wait
-      wait_for_recovery_pod_ready "$pod" || return 1
-      check_failure_stage=events
-      kubectl -n "$RECOVERY_NAMESPACE" get events --field-selector "involvedObject.name=${pod}" >/dev/null || return 1
-      return 0
+    if read_recovery_pod_snapshot; then
+      [[ "$RECOVERY_POD_NAME" == "$pod" && "$RECOVERY_POD_UID" == "$uid" ]] || return 1
+      if (( RECOVERY_RESTART_COUNT > before )) && [[ "$RECOVERY_CONTAINER_ID" != "$container_id" ]]; then
+        observed_restart=true
+      fi
+      if [[ "$observed_restart" == true && "$RECOVERY_POD_READY" == True ]]; then
+        check_failure_stage=events
+        kubectl -n "$RECOVERY_NAMESPACE" get events --field-selector "involvedObject.name=${pod}" >/dev/null || return 1
+        return 0
+      fi
+    else
+      snapshot_result=$?
+      # Container status data is briefly empty while kubelet publishes a restart.
+      [[ "$snapshot_result" == 2 ]] || return 1
     fi
-    sleep 2 || return 1
+    sleep "$RECOVERY_POLL_INTERVAL_SECONDS" || return 1
   done
   return 1
 }

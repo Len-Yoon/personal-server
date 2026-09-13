@@ -101,6 +101,18 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
             status_rules,
             [{"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["sre-telegram-quarterly-audit-status"], "verbs": ["get", "patch"]}],
         )
+        validation_status_rules = find("Role", "quarterly-sre-audit-validation-diagnostics", "monitoring")["rules"]
+        self.assertEqual(
+            validation_status_rules,
+            [{"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["sre-quarterly-audit-diagnostics"], "verbs": ["get", "patch"]}],
+        )
+
+        official_status_binding = find("RoleBinding", "quarterly-sre-audit-status", "monitoring")
+        validation_status_binding = find("RoleBinding", "quarterly-sre-audit-validation-diagnostics", "monitoring")
+        self.assertEqual(official_status_binding["roleRef"]["name"], "quarterly-sre-audit-status")
+        self.assertEqual(official_status_binding["subjects"], [{"kind": "ServiceAccount", "name": "quarterly-sre-audit", "namespace": "monitoring"}])
+        self.assertEqual(validation_status_binding["roleRef"]["name"], "quarterly-sre-audit-validation-diagnostics")
+        self.assertEqual(validation_status_binding["subjects"], [{"kind": "ServiceAccount", "name": "quarterly-sre-audit-validation", "namespace": "monitoring"}])
 
         lab_rules = find("Role", "quarterly-sre-audit-recovery-lab", "sre-recovery-lab")["rules"]
         self.assertEqual(
@@ -170,13 +182,14 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertNotIn("persistentVolumeClaim", str(recovery_pod))
         self.assertFalse(any("secret" in volume for volume in recovery_pod["volumes"]))
 
-    def run_runner(self, *, evidence, scenario="", patch_fails=False):
+    def run_runner(self, *, evidence, scenario="", patch_fails=False, report_mode="official"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             command = root / "kubectl"
             status = root / "status.json"
             calls = root / "calls"
             date = root / "date"
+            diagnostics = root / "diagnostics.json"
             command.write_text(
                 "#!/bin/sh\n"
                 "printf '%s\\n' \"$*\" >> \"$CALLS\"\n"
@@ -188,13 +201,16 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 "  *'scale deployment sre-pod-recovery --replicas=0'*) [ \"$SCENARIO\" = cleanup-fail ] && exit 1; printf 0 > \"$REPLICAS\"; exit 0 ;;\n"
                 "  *'get deployment sre-pod-recovery'*'.spec.replicas'*) case \"$SCENARIO\" in cleanup-get-fail) exit 1 ;; cleanup-nonzero) printf 1; exit 0 ;; cleanup-empty) exit 0 ;; cleanup-malformed) printf unknown; exit 0 ;; esac; cat \"$REPLICAS\" 2>/dev/null || printf 0 ;;\n"
                 "  *'get deployment sre-pod-recovery'*) replicas=$(cat \"$REPLICAS\" 2>/dev/null || printf 0); [ \"$replicas\" = 1 ] && printf True:1 || printf False:0 ;;\n"
-                "  *'get pods'*) replicas=$(cat \"$REPLICAS\" 2>/dev/null || printf 0); if [ \"$replicas\" = 0 ] && [ \"$SCENARIO\" != cleanup-terminating ]; then exit 0; fi; printf recovery-pod ;;\n"
+                "  *'get pods'*) replicas=$(cat \"$REPLICAS\" 2>/dev/null || printf 0); if [ \"$replicas\" = 0 ] && [ \"$SCENARIO\" != cleanup-terminating ]; then exit 0; fi; [ \"$SCENARIO\" = terminating-old ] && { printf 'recovery-pod-old\\nrecovery-pod\\n'; exit 0; }; [ \"$SCENARIO\" = multiple-pods ] && [ -f \"$EXECUTED\" ] && { printf 'recovery-pod\\nrecovery-pod-2\\n'; exit 0; }; printf 'recovery-pod\\n' ;;\n"
                 "  *'wait --for=condition=Ready pod/recovery-pod --timeout=60s'*) [ \"$SCENARIO\" = ready-wait-fail ] && exit 1; exit 0 ;;\n"
                 "  *'get events --field-selector involvedObject.name=recovery-pod'*) [ \"$SCENARIO\" = events-fail ] && exit 1; exit 0 ;;\n"
+                "  *'get pod recovery-pod-old'*'containerStatuses'*) printf 'uid-old|Running|2026-09-13T00:00:00Z|False|recovery=containerd://old=0;' ;;\n"
+                "  *'get pod recovery-pod'*'containerStatuses'*) if [ ! -f \"$EXECUTED\" ]; then printf 'uid-1|Running||True|recovery=containerd://before=0;'; exit 0; fi; n=$(cat \"$COUNTER\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$COUNTER\"; case \"$SCENARIO\" in restart-without-not-ready) printf 'uid-1|Running||True|recovery=containerd://after=1;' ;; stale-ready) printf 'uid-1|Running||True|recovery=containerd://before=0;' ;; pod-replacement) printf 'uid-2|Running||True|recovery=containerd://after=1;' ;; transient-empty-status) [ \"$n\" = 1 ] && { printf 'uid-1|Running||False|'; exit 0; }; [ \"$n\" = 2 ] && { printf 'uid-1|Running||False|recovery=containerd://before=0;'; exit 0; }; printf 'uid-1|Running||True|recovery=containerd://after=1;' ;; *) [ \"$n\" = 1 ] && printf 'uid-1|Running||False|recovery=containerd://before=0;' || printf 'uid-1|Running||True|recovery=containerd://after=1;' ;; esac; exit 0 ;;\n"
                 "  *'get pod recovery-pod'*'Ready'*) printf True ;;\n"
                 "  *'get pod recovery-pod'*) n=$(cat \"$COUNTER\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$COUNTER\"; printf '%s' \"$((n - 1))\" ;;\n"
-                "  *'exec recovery-pod'*) [ \"$SCENARIO\" = exec-fail ] && exit 1; exit 0 ;;\n"
+                "  *'exec recovery-pod'*) [ \"$SCENARIO\" = exec-fail ] && exit 1; : > \"$EXECUTED\"; exit 0 ;;\n"
                 "  *'patch configmap sre-telegram-quarterly-audit-status'*) printf '%s' \"$9\" > \"$STATUS\"; [ \"$PATCH_FAILS\" = true ] && exit 1; exit 0 ;;\n"
+                "  *'patch configmap sre-quarterly-audit-diagnostics'*) printf '%s' \"$9\" > \"$DIAGNOSTICS\"; [ \"$PATCH_FAILS\" = true ] && exit 1; exit 0 ;;\n"
                 "esac\n",
                 encoding="utf-8",
             )
@@ -202,8 +218,10 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 "#!/bin/sh\ncase \"$*\" in *'-d'*) printf 1000 ;; *'+%s'*) printf 1001 ;; *'+%Y%m%dT%H%M%SZ'*) printf 20260912T010203Z ;; *) printf 2026-09-12T01:02:03Z ;; esac\n",
                 encoding="utf-8",
             )
+            (root / "sleep").write_text("#!/bin/sh\n/bin/sleep 0.01\n", encoding="utf-8")
             command.chmod(0o755)
             date.chmod(0o755)
+            (root / "sleep").chmod(0o755)
             result = subprocess.run(
                 ["bash", str(RUNNER)],
                 env={
@@ -213,9 +231,15 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                     "REPLICAS": str(root / "replicas"),
                     "STATUS": str(status),
                     "COUNTER": str(root / "counter"),
+                    "EXECUTED": str(root / "executed"),
                     "EVIDENCE": evidence,
                     "SCENARIO": scenario,
                     "PATCH_FAILS": str(patch_fails).lower(),
+                    "DIAGNOSTICS": str(diagnostics),
+                    "QUARTERLY_SRE_AUDIT_REPORT_MODE": report_mode,
+                    "QUARTERLY_SRE_AUDIT_DIAGNOSTICS_CONFIGMAP": "sre-quarterly-audit-diagnostics",
+                    "QUARTERLY_SRE_AUDIT_RECOVERY_TIMEOUT_SECONDS": "2",
+                    "QUARTERLY_SRE_AUDIT_RECOVERY_POLL_INTERVAL_SECONDS": "0.01",
                     "KUBERNETES_SERVICE_HOST": "kubernetes.default.svc",
                     "KUBERNETES_SERVICE_PORT_HTTPS": "443",
                 },
@@ -223,14 +247,10 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 capture_output=True,
                 check=False,
             )
-            return (
-                result,
-                json.loads(status.read_text(encoding="utf-8")),
-                calls.read_text(encoding="utf-8"),
-            )
+            return result, (json.loads(status.read_text(encoding="utf-8")) if status.exists() else None), (json.loads(diagnostics.read_text(encoding="utf-8")) if diagnostics.exists() else None), calls.read_text(encoding="utf-8")
 
     def test_runner_emits_relay_compatible_payload_after_a_successful_run(self):
-        result, payload, calls = self.run_runner(evidence=valid_backup_evidence())
+        result, payload, _, calls = self.run_runner(evidence=valid_backup_evidence())
 
         self.assertEqual(result.returncode, 0, f"{result.stderr}\n{calls}")
         self.assertEqual(set(payload["data"]), {"run_id", "status", "completed_at", "health_audit", "backup_check", "recovery_lab", "health_check", "backup_evidence"})
@@ -257,33 +277,25 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertIn("scale deployment sre-pod-recovery --replicas=0", calls)
         self.assertNotIn(" create ", calls)
         self.assertNotIn(" delete ", calls)
-        self.assertIn("wait --for=condition=Ready pod/recovery-pod --timeout=60s", calls)
+        self.assertIn("get pod recovery-pod", calls)
+        self.assertNotIn("wait --for=condition=Ready", calls)
 
-    def test_runner_uses_deployment_get_polling_and_bounded_pod_ready_wait(self):
+    def test_runner_uses_deployment_get_polling_and_bounded_recovery_transition_observation(self):
         text = RUNNER.read_text(encoding="utf-8")
         self.assertIn("get deployment \"$RECOVERY_DEPLOYMENT\"", text)
         self.assertIn(".status.availableReplicas", text)
-        self.assertIn(
-            'kubectl -n "$RECOVERY_NAMESPACE" wait --for=condition=Ready "pod/$pod" --timeout=60s',
-            text,
-        )
+        self.assertIn("read_recovery_pod_snapshot", text)
+        self.assertIn("RECOVERY_TIMEOUT_SECONDS", text)
         self.assertNotIn("get deployments", text)
 
-    def test_runner_allows_sixty_seconds_for_recovery_pod_ready_after_restart(self):
-        """The Ready wait must exceed the Pod's 30-second termination grace period."""
+    def test_runner_allows_ninety_seconds_for_recovery_transition_after_restart(self):
+        """The transition deadline must exceed the Pod's 30-second termination grace period."""
         text = RUNNER.read_text(encoding="utf-8")
-        ready_wait = re.search(
-            r"wait_for_recovery_pod_ready\(\) \{(?P<body>.*?)^\}",
-            text,
-            re.DOTALL | re.MULTILINE,
-        )
-
-        self.assertIsNotNone(ready_wait)
-        self.assertIn("--timeout=60s", ready_wait.group("body"))
-        self.assertNotIn("--timeout=30s", ready_wait.group("body"))
+        self.assertIn("RECOVERY_TIMEOUT_SECONDS=${QUARTERLY_SRE_AUDIT_RECOVERY_TIMEOUT_SECONDS:-90}", text)
+        self.assertNotIn("RECOVERY_TIMEOUT_SECONDS=${QUARTERLY_SRE_AUDIT_RECOVERY_TIMEOUT_SECONDS:-30}", text)
 
     def test_runner_accepts_verified_scale_down_while_pod_termination_is_asynchronous(self):
-        result, payload, calls = self.run_runner(
+        result, payload, _, calls = self.run_runner(
             evidence=valid_backup_evidence(), scenario="cleanup-terminating"
         )
 
@@ -298,7 +310,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
     def test_runner_rejects_unverified_scale_down(self):
         for scenario in ("cleanup-get-fail", "cleanup-nonzero", "cleanup-empty", "cleanup-malformed"):
             with self.subTest(scenario=scenario):
-                result, payload, _ = self.run_runner(
+                result, payload, _, _ = self.run_runner(
                     evidence=valid_backup_evidence(), scenario=scenario
                 )
                 self.assertNotEqual(result.returncode, 0)
@@ -319,7 +331,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
             (valid_backup_evidence(), "configmap-fail"),
         ):
             with self.subTest(scenario=scenario or "wrong-runtime"):
-                result, payload, _ = self.run_runner(evidence=evidence, scenario=scenario)
+                result, payload, _, _ = self.run_runner(evidence=evidence, scenario=scenario)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(payload["data"]["status"], "failed")
                 self.assertEqual(payload["data"]["backup_check"], "failed")
@@ -337,13 +349,13 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         }
         for name, evidence in cases.items():
             with self.subTest(name=name):
-                result, payload, _ = self.run_runner(evidence=evidence)
+                result, payload, _, _ = self.run_runner(evidence=evidence)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(payload["data"]["status"], "failed")
                 self.assertEqual(payload["data"]["backup_check"], "failed")
 
     def test_runner_never_executes_when_recovery_scale_up_fails_and_restores_zero(self):
-        result, payload, calls = self.run_runner(
+        result, payload, _, calls = self.run_runner(
             evidence=valid_backup_evidence(),
             scenario="scale-up-fail",
         )
@@ -353,10 +365,93 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertNotIn("exec recovery-pod", calls)
         self.assertIn("scale deployment sre-pod-recovery --replicas=0", calls)
 
-    def test_runner_logs_non_sensitive_stage_when_recovery_ready_wait_or_events_fail(self):
-        for scenario, stage in (("ready-wait-fail", "ready_wait"), ("events-fail", "events")):
+    def test_runner_accepts_a_completed_restart_when_not_ready_is_between_polling_intervals(self):
+        """A real restart remains valid when the transient NotReady state is not sampled."""
+        result, payload, _, _ = self.run_runner(
+            evidence=valid_backup_evidence(),
+            scenario="restart-without-not-ready",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(payload["data"]["status"], "passed")
+        self.assertEqual(payload["data"]["recovery_lab"], "passed")
+
+    def test_runner_rejects_a_stale_ready_state_without_restart_evidence(self):
+        result, payload, _, _ = self.run_runner(
+            evidence=valid_backup_evidence(),
+            scenario="stale-ready",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(payload["data"]["status"], "failed")
+        self.assertEqual(payload["data"]["recovery_lab"], "failed")
+        self.assertIn("stage=recovery_transition", result.stdout)
+
+    def test_runner_accepts_one_live_pod_while_an_old_terminating_pod_is_present(self):
+        result, payload, _, _ = self.run_runner(
+            evidence=valid_backup_evidence(),
+            scenario="terminating-old",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(payload["data"]["recovery_lab"], "passed")
+
+    def test_runner_retries_an_empty_container_status_during_the_observed_transition(self):
+        result, payload, _, _ = self.run_runner(
+            evidence=valid_backup_evidence(),
+            scenario="transient-empty-status",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(payload["data"]["recovery_lab"], "passed")
+
+    def test_runner_fails_closed_when_the_recovery_pod_is_replaced_or_duplicated(self):
+        for scenario in ("pod-replacement", "multiple-pods"):
             with self.subTest(scenario=scenario):
-                result, payload, _ = self.run_runner(
+                result, payload, _, _ = self.run_runner(
+                    evidence=valid_backup_evidence(),
+                    scenario=scenario,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(payload["data"]["recovery_lab"], "failed")
+                self.assertIn("stage=recovery_transition", result.stdout)
+
+    def test_validation_mode_reports_only_allowlisted_diagnostics_without_touching_relay_status(self):
+        result, payload, diagnostics, calls = self.run_runner(
+            evidence=valid_backup_evidence(),
+            report_mode="validation",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIsNone(payload)
+        self.assertEqual(
+            set(diagnostics["data"]),
+            {"run_id", "result", "failure_stage", "cleanup_status", "completed_at"},
+        )
+        self.assertEqual(diagnostics["data"]["result"], "passed")
+        self.assertEqual(diagnostics["data"]["failure_stage"], "none")
+        self.assertEqual(diagnostics["data"]["cleanup_status"], "passed")
+        self.assertIn("patch configmap sre-quarterly-audit-diagnostics", calls)
+        self.assertNotIn("patch configmap sre-telegram-quarterly-audit-status", calls)
+
+    def test_validation_mode_fails_closed_when_diagnostics_patch_fails(self):
+        result, payload, diagnostics, calls = self.run_runner(
+            evidence=valid_backup_evidence(),
+            report_mode="validation",
+            patch_fails=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNone(payload)
+        self.assertEqual(diagnostics["data"]["result"], "passed")
+        self.assertIn("patch configmap sre-quarterly-audit-diagnostics", calls)
+        self.assertNotIn("patch configmap sre-telegram-quarterly-audit-status", calls)
+
+    def test_runner_logs_non_sensitive_stage_when_recovery_events_fail(self):
+        for scenario, stage in (("events-fail", "events"),):
+            with self.subTest(scenario=scenario):
+                result, payload, _, _ = self.run_runner(
                     evidence=valid_backup_evidence(),
                     scenario=scenario,
                 )
@@ -375,7 +470,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         evidence = valid_backup_evidence()
         for scenario, patch_fails in (("exec-fail", False), ("cleanup-fail", False), ("", True)):
             with self.subTest(scenario=scenario or "patch-fail"):
-                result, payload, calls = self.run_runner(
+                result, payload, _, calls = self.run_runner(
                     evidence=evidence, scenario=scenario, patch_fails=patch_fails
                 )
                 self.assertNotEqual(result.returncode, 0)
@@ -384,7 +479,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                     self.assertEqual(payload["data"]["recovery_lab"], "failed")
 
     def test_runner_logs_non_sensitive_stage_when_recovery_cleanup_fails(self):
-        result, payload, _ = self.run_runner(
+        result, payload, _, _ = self.run_runner(
             evidence=valid_backup_evidence(),
             scenario="cleanup-fail",
         )

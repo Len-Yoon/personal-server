@@ -5,12 +5,49 @@ import time
 import unittest
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "infra" / "k8s" / "tools" / "quarterly-sre-audit-automation.sh"
 
 
 class QuarterlySreAuditAutomationTests(unittest.TestCase):
+    def test_validation_job_uses_a_service_account_without_official_status_patch_access(self):
+        documents = list(
+            yaml.safe_load_all(
+                (ROOT / "infra" / "k8s" / "sre-audit-automation" / "quarterly-sre-audit-cronjob.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+        )
+
+        def find(kind, name, namespace="monitoring"):
+            return next(
+                document
+                for document in documents
+                if document
+                and document["kind"] == kind
+                and document["metadata"]["name"] == name
+                and document["metadata"].get("namespace", namespace) == namespace
+            )
+
+        validation_job = find("CronJob", "quarterly-sre-audit-validation")
+        validation_spec = validation_job["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+        self.assertEqual(validation_spec["serviceAccountName"], "quarterly-sre-audit-validation")
+        official_status_role = find("Role", "quarterly-sre-audit-status")
+        self.assertEqual(
+            official_status_role["rules"][0]["resourceNames"],
+            ["sre-telegram-quarterly-audit-status"],
+        )
+        validation_role = find("Role", "quarterly-sre-audit-validation-diagnostics")
+        self.assertEqual(
+            validation_role["rules"][0]["resourceNames"],
+            ["sre-quarterly-audit-diagnostics"],
+        )
+        binding = find("RoleBinding", "quarterly-sre-audit-validation-diagnostics")
+        self.assertEqual(binding["subjects"][0]["name"], "quarterly-sre-audit-validation")
+
     def run_tool(
         self,
         mode,
@@ -28,6 +65,9 @@ class QuarterlySreAuditAutomationTests(unittest.TestCase):
         manual_job_wait_delay_seconds=0,
         manual_job_response_delay_seconds=0,
         manual_job_timeout="20m",
+        validation_job="success",
+        relay_delivery="delivered",
+        relay_delivery_timeout="3s",
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -112,13 +152,41 @@ case "$*" in
         ;;
     esac
     ;;
+  *"get job quarterly-sre-audit-validation-manual-"*"jsonpath={{range .status.conditions"*)
+    case "{validation_job}" in
+      success) printf '%s' Complete=True, ;;
+      failed_terminal) printf '%s' Failed=True, ;;
+    esac
+    ;;
+  *"get job quarterly-sre-audit-validation-manual-"*"jsonpath={{.status.succeeded}}"*)
+    [ "{validation_job}" = success ] && printf '%s' 1
+    ;;
+  *"create job quarterly-sre-audit-validation-manual-"*) touch "{root}/validation-job-created" ;;
+  *"create job quarterly-sre-audit-manual-"*) touch "{root}/official-job-created" ;;
+  *"get configmap sre-quarterly-audit-diagnostics --ignore-not-found -o name"*)
+    if [ -f "{root}/diagnostics-created" ]; then printf '%s\\n' configmap/sre-quarterly-audit-diagnostics; fi
+    ;;
+  *"create configmap sre-quarterly-audit-diagnostics"*) touch "{root}/diagnostics-created" ;;
+  *"get configmap sre-quarterly-audit-diagnostics"*)
+    printf '%s\\t%s\\t%s\\t%s\\t%s\\n' validation-run passed none passed 2026-09-12T01:02:03Z
+    ;;
+  *"get configmap sre-telegram-relay-state"*)
+    relay_queries=$(cat "{root}/relay-query-count" 2>/dev/null || printf 0)
+    relay_queries=$((relay_queries + 1))
+    printf '%s' "$relay_queries" > "{root}/relay-query-count"
+    if [ "{relay_delivery}" = delivered ] || {{ [ "{relay_delivery}" = delivered_after_retry ] && [ "$relay_queries" -gt 1 ]; }}; then
+      printf '%s' '["official-run-456"]'
+    fi
+    ;;
   *"get configmap sre-telegram-quarterly-audit-status --ignore-not-found -o name"*)
     if [ "{configmap}" = existing ] || [ -f "{root}/configmap-created" ]; then printf '%s\\n' configmap/sre-telegram-quarterly-audit-status; fi
     ;;
   *"create configmap sre-telegram-quarterly-audit-status"*) touch "{root}/configmap-created" ;;
   *"get configmap sre-telegram-quarterly-audit-status"*"jsonpath={{.data.run_id}}"*)
-    [ "{status}" != status_detail_read_failure ] || exit 42
-    printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' run-123 passed 2026-09-12T01:02:03Z passed passed passed
+    [ "{status}" != status_detail_read_failure ] && [ "{status}" != read_failure ] || exit 42
+    if [ -f "{root}/official-job-created" ]; then run_id=official-run-456; else run_id=run-123; fi
+    if [ "{status}" = reported_failure ]; then reported_status=failed; else reported_status=passed; fi
+    printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$run_id" "$reported_status" 2026-09-12T01:02:03Z passed passed passed
     ;;
   *"get configmap sre-telegram-quarterly-audit-status"*)
     [ "{status}" != read_failure ] || exit 42
@@ -175,6 +243,7 @@ exec /usr/bin/grep "$@"
                     "QUARTERLY_SRE_AUDIT_LEGACY_TIMER": "personal-server-quarterly-sre-audit.timer",
                     "QUARTERLY_SRE_AUDIT_MANIFEST": str(manifest) if manifest_crlf else os.environ.get("QUARTERLY_SRE_AUDIT_MANIFEST", ""),
                     "QUARTERLY_SRE_AUDIT_MANUAL_JOB_TIMEOUT": manual_job_timeout,
+                    "QUARTERLY_SRE_AUDIT_RELAY_DELIVERY_TIMEOUT": relay_delivery_timeout,
                 },
                 text=True,
                 capture_output=True,
@@ -192,7 +261,7 @@ exec /usr/bin/grep "$@"
         disable_at = calls.index("disable --now personal-server-quarterly-sre-audit.timer")
         create_at = calls.index("create job quarterly-sre-audit-manual-")
         terminal_at = calls.index("get job quarterly-sre-audit-manual-")
-        status_at = calls.rindex("get configmap sre-telegram-quarterly-audit-status -o jsonpath={.data.status}")
+        status_at = calls.rindex("get configmap sre-telegram-quarterly-audit-status -o jsonpath={.data.run_id}")
         activate_at = calls.index("patch cronjob quarterly-sre-audit")
         self.assertLess(apply_at, suspended_at)
         self.assertLess(suspended_at, disable_at)
@@ -214,6 +283,35 @@ exec /usr/bin/grep "$@"
         self.assertTrue(succeeded_queries)
         self.assertTrue(all("--request-timeout=" in call for call in condition_queries))
         self.assertTrue(all("--request-timeout=" in call for call in succeeded_queries))
+
+    def test_install_validates_in_isolation_then_confirms_official_delivery_before_activation(self):
+        result, calls = self.run_tool("--install")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        validation_at = calls.index("create job quarterly-sre-audit-validation-manual-")
+        official_at = calls.index("create job quarterly-sre-audit-manual-")
+        relay_at = calls.index("get configmap sre-telegram-relay-state")
+        activate_at = calls.index("patch cronjob quarterly-sre-audit")
+        self.assertLess(validation_at, official_at)
+        self.assertLess(official_at, relay_at)
+        self.assertLess(relay_at, activate_at)
+        self.assertIn("get configmap sre-quarterly-audit-diagnostics", calls)
+        self.assertNotIn("patch configmap sre-telegram-quarterly-audit-status", calls)
+
+    def test_install_keeps_official_cronjob_suspended_when_official_delivery_is_unconfirmed(self):
+        result, calls = self.run_tool("--install", relay_delivery="missing")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("create job quarterly-sre-audit-manual-", calls)
+        self.assertIn("get configmap sre-telegram-relay-state", calls)
+        self.assertNotIn("patch cronjob quarterly-sre-audit", calls)
+
+    def test_install_waits_for_relay_to_record_the_official_run_before_activation(self):
+        result, calls = self.run_tool("--install", relay_delivery="delivered_after_retry")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertGreaterEqual(calls.count("get configmap sre-telegram-relay-state"), 2)
+        self.assertIn("patch cronjob quarterly-sre-audit", calls)
 
     def test_install_skips_legacy_timer_disable_when_unit_is_absent(self):
         result, calls = self.run_tool("--install", timer="missing")
@@ -383,7 +481,12 @@ exec /usr/bin/grep "$@"
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("manual Job did not reach a terminal state before timeout", result.stderr)
         self.assertIn("--request-timeout=1s get job quarterly-sre-audit-manual-", calls)
-        self.assertNotIn("jsonpath={.status.succeeded}", calls)
+        official_success_queries = [
+            call
+            for call in calls.splitlines()
+            if "get job quarterly-sre-audit-manual-" in call and "status.succeeded" in call
+        ]
+        self.assertFalse(official_success_queries)
         self.assertNotIn("patch cronjob quarterly-sre-audit", calls)
 
     def test_late_succeeded_response_after_manual_job_timeout_cannot_activate_cronjob(self):
@@ -412,8 +515,8 @@ exec /usr/bin/grep "$@"
         result, calls = self.run_tool("--install", status="read_failure")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("get job quarterly-sre-audit-manual-", calls)
         self.assertIn("get configmap sre-telegram-quarterly-audit-status", calls)
+        self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
         self.assertNotIn("patch cronjob quarterly-sre-audit", calls)
 
     def test_install_leaves_cronjob_suspended_when_manual_job_reports_failed_audit_status(self):
