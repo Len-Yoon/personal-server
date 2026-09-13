@@ -130,14 +130,23 @@ disable_legacy_timer_if_present() {
 }
 
 legacy_service_is_inactive() {
-  local load_state active_state
+  local load_state active_state main_pid
   load_state=$(systemctl --user show "$LEGACY_SERVICE" --property=LoadState --value) || return 1
   [ "$load_state" = not-found ] && return 0
   active_state=$(systemctl --user show "$LEGACY_SERVICE" --property=ActiveState --value) || return 1
-  [ "$active_state" = inactive ] || {
-    printf '%s\n' 'Legacy quarterly SRE audit service is active; installation is blocked without stopping it.' >&2
-    return 1
-  }
+  case "$active_state" in
+    inactive|failed)
+      main_pid=$(systemctl --user show "$LEGACY_SERVICE" --property=MainPID --value) || return 1
+      [ "$main_pid" = 0 ] || {
+        printf '%s\n' 'Legacy quarterly SRE audit service has a running process; installation is blocked without stopping it.' >&2
+        return 1
+      }
+      ;;
+    *)
+      printf '%s\n' 'Legacy quarterly SRE audit service is running or transitioning; installation is blocked without stopping it.' >&2
+      return 1
+      ;;
+  esac
 }
 
 ensure_status_configmap_if_absent() {

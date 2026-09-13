@@ -91,7 +91,7 @@ bash infra/k8s/tools/quarterly-sre-audit-automation.sh --status
 1. preflight와 client-side render를 수행하고, `monitoring` namespace의 모든 `quarterly-sre-audit-*` Job이 `Complete=True` 또는 `Failed=True` 종료 condition을 가진 상태인지 확인함. Job 목록 조회 오류 또는 종료 미확정 Job이 있으면 manifest를 적용하지 않고 중단하며, 이 단계에서는 기존 CronJob schedule·상태를 변경하지 않음.
 2. `suspend: true` CronJob과 최소 권한 RBAC를 적용하고 suspended 상태를 확인함.
 3. `monitoring/sre-telegram-quarterly-audit-status` ConfigMap이 없을 때만 비밀값 없는 빈 결과 필드를 생성함. 기존 ConfigMap 데이터는 덮어쓰지 않음.
-4. 기존 사용자 `personal-server-quarterly-sre-audit.timer`가 존재하면 `disable --now`로 중지·비활성화함. 이어서 legacy `personal-server-quarterly-sre-audit.service`가 inactive인지 확인하며, active 상태이면 강제 종료하지 않고 설치를 차단함.
+4. 기존 사용자 `personal-server-quarterly-sre-audit.timer`가 존재하면 `disable --now`로 중지·비활성화함. 이어서 legacy `personal-server-quarterly-sre-audit.service`가 실행 중이 아닌지 확인함. 서비스 상태가 `inactive` 또는 `failed`인 경우에도 `MainPID=0`일 때만 통과시키며, 실행 중이거나 전환 중인 상태 또는 `MainPID`가 0이 아니면 강제 종료하지 않고 설치를 차단함.
 5. 수동 Job 생성 직전에 모든 `quarterly-sre-audit-*` Job의 종료 condition을 다시 확인함. 재시도 시 이전 실행의 종료가 확정되지 않았거나 상태 조회가 불확실하면 두 번째 Job을 생성하지 않음.
 6. CronJob에서 고유 이름의 수동 Job을 생성하고 완료 성공을 대기함.
 7. `monitoring/sre-telegram-quarterly-audit-status`의 `status=passed`를 확인한 뒤에만 CronJob suspend를 해제함.

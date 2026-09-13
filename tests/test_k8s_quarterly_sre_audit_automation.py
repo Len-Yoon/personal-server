@@ -16,6 +16,7 @@ class QuarterlySreAuditAutomationTests(unittest.TestCase):
         *,
         timer="loaded",
         legacy_service="inactive",
+        legacy_service_main_pid="0",
         manual_job="success",
         status="success",
         configmap="existing",
@@ -114,6 +115,9 @@ case "$*" in
     ;;
   *"show personal-server-quarterly-sre-audit.service --property=ActiveState --value"*)
     printf '%s\\n' '{legacy_service}'
+    ;;
+  *"show personal-server-quarterly-sre-audit.service --property=MainPID --value"*)
+    printf '%s\\n' '{legacy_service_main_pid}'
     ;;
 esac
 ''',
@@ -272,6 +276,37 @@ exec /usr/bin/grep "$@"
         self.assertIn("show personal-server-quarterly-sre-audit.service --property=ActiveState --value", calls)
         self.assertNotIn("stop personal-server-quarterly-sre-audit.service", calls)
         self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
+
+    def test_failed_legacy_service_with_no_main_pid_allows_install(self):
+        result, calls = self.run_tool("--install", legacy_service="failed")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("show personal-server-quarterly-sre-audit.service --property=MainPID --value", calls)
+        self.assertIn("create job quarterly-sre-audit-manual-", calls)
+
+    def test_failed_legacy_service_with_main_pid_blocks_without_forcing_service_stop(self):
+        result, calls = self.run_tool("--install", legacy_service="failed", legacy_service_main_pid="1234")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("show personal-server-quarterly-sre-audit.service --property=MainPID --value", calls)
+        self.assertNotIn("stop personal-server-quarterly-sre-audit.service", calls)
+        self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
+
+    def test_inactive_legacy_service_with_main_pid_blocks(self):
+        result, calls = self.run_tool("--install", legacy_service_main_pid="1234")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("show personal-server-quarterly-sre-audit.service --property=MainPID --value", calls)
+        self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
+
+    def test_transitioning_legacy_service_states_block_without_main_pid_query(self):
+        for state in ("activating", "deactivating"):
+            with self.subTest(state=state):
+                result, calls = self.run_tool("--install", legacy_service=state)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("show personal-server-quarterly-sre-audit.service --property=MainPID --value", calls)
+                self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
 
     def test_install_leaves_cronjob_suspended_when_manual_job_fails(self):
         result, calls = self.run_tool("--install", manual_job="failure")
