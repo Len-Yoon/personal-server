@@ -7,6 +7,7 @@ PORTAL_NAMESPACE=personal-server
 RECOVERY_NAMESPACE=sre-recovery-lab
 RECOVERY_DEPLOYMENT=sre-pod-recovery
 BACKUP_MAX_AGE_SECONDS=${QUARTERLY_SRE_AUDIT_BACKUP_MAX_AGE_SECONDS:-86400}
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 health_audit=failed
 backup_check=failed
@@ -135,19 +136,20 @@ check_k3s_and_portal() {
 }
 
 check_backup_evidence() {
-  local evidence completed_at completed_epoch now_epoch completed_count runtime_count
-  evidence=$(kubectl -n "$PORTAL_NAMESPACE" get configmap portal-pvc-backup-evidence -o jsonpath='{.data.evidence}') || return 1
-  runtime_count=$(printf '%s\n' "$evidence" | grep -cx 'source_runtime=k3s-pvc' || true)
-  [[ "$runtime_count" == 1 ]] || return 1
-  completed_count=$(printf '%s\n' "$evidence" | grep -c '^backup_completed_at=' || true)
-  [[ "$completed_count" == 1 ]] || return 1
-  completed_at=$(printf '%s\n' "$evidence" | sed -n 's/^backup_completed_at=//p') || return 1
-  [[ -n "$completed_at" ]] || return 1
-  completed_epoch=$(date -u -d "$completed_at" +%s) || return 1
-  now_epoch=$(date -u +%s) || return 1
-  [[ "$completed_epoch" =~ ^[0-9]+$ && "$now_epoch" =~ ^[0-9]+$ ]] || return 1
-  (( completed_epoch <= now_epoch )) || return 1
-  (( now_epoch - completed_epoch <= BACKUP_MAX_AGE_SECONDS )) || return 1
+  local evidence_file runtime_count
+  evidence_file=$(mktemp /tmp/quarterly-sre-audit-evidence.XXXXXX) || return 1
+  chmod 0600 "$evidence_file" || { rm -f -- "$evidence_file"; return 1; }
+  if ! kubectl -n "$PORTAL_NAMESPACE" get configmap portal-pvc-backup-evidence -o jsonpath='{.data.evidence}' >"$evidence_file"; then
+    rm -f -- "$evidence_file"
+    return 1
+  fi
+  if ! python3 "$SCRIPT_DIR/validate-backup-evidence.py" --evidence "$evidence_file" --max-age-seconds "$BACKUP_MAX_AGE_SECONDS" >/dev/null; then
+    rm -f -- "$evidence_file"
+    return 1
+  fi
+  runtime_count=$(grep -cx 'source_runtime=k3s-pvc' "$evidence_file" || true)
+  rm -f -- "$evidence_file"
+  [[ "$runtime_count" == 1 ]]
 }
 
 check_recovery_lab() {

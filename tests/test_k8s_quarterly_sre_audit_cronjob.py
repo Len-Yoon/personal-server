@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -14,6 +15,24 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "infra/k8s/sre-audit-automation/quarterly-sre-audit-cronjob.yaml"
 DOCKERFILE = ROOT / "infra/k8s/sre-audit-automation/Dockerfile"
 RUNNER = ROOT / "infra/k8s/tools/quarterly-sre-audit-runner.sh"
+
+
+def valid_backup_evidence(*, overrides=None, extra_lines=()):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    values = {
+        "schema_version": "1",
+        "scope": "portal",
+        "backup_status": "success",
+        "encrypted": "true",
+        "backup_completed_at": (now - timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "restore_status": "success",
+        "restore_verified_at": (now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "evidence_expires_at": (now + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "backup_id": "quarterly-audit-test",
+        "source_runtime": "k3s-pvc",
+    }
+    values.update(overrides or {})
+    return "\n".join([*(f"{key}={value}" for key, value in values.items()), *extra_lines])
 
 
 def documents():
@@ -190,9 +209,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
             )
 
     def test_runner_emits_relay_compatible_payload_after_a_successful_run(self):
-        result, payload, calls = self.run_runner(
-            evidence="source_runtime=k3s-pvc\nbackup_completed_at=2026-09-12T00:00:00Z"
-        )
+        result, payload, calls = self.run_runner(evidence=valid_backup_evidence())
 
         self.assertEqual(result.returncode, 0, f"{result.stderr}\n{calls}")
         self.assertEqual(set(payload["data"]), {"run_id", "status", "completed_at", "health_audit", "backup_check", "recovery_lab", "health_check", "backup_evidence"})
@@ -230,8 +247,8 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
 
     def test_runner_fails_closed_for_wrong_runtime_or_unreadable_backup_evidence(self):
         for evidence, scenario in (
-            ("source_runtime=compose-local\nbackup_completed_at=2026-09-12T00:00:00Z", ""),
-            ("source_runtime=k3s-pvc\nbackup_completed_at=2026-09-12T00:00:00Z", "configmap-fail"),
+            (valid_backup_evidence(overrides={"source_runtime": "compose-local"}), ""),
+            (valid_backup_evidence(), "configmap-fail"),
         ):
             with self.subTest(scenario=scenario or "wrong-runtime"):
                 result, payload, _ = self.run_runner(evidence=evidence, scenario=scenario)
@@ -239,9 +256,27 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 self.assertEqual(payload["data"]["status"], "failed")
                 self.assertEqual(payload["data"]["backup_check"], "failed")
 
+    def test_runner_rejects_invalid_backup_evidence_contracts(self):
+        cases = {
+            "failed-restore": valid_backup_evidence(overrides={"restore_status": "failed"}),
+            "unencrypted-backup": valid_backup_evidence(overrides={"encrypted": "false"}),
+            "expired-evidence": valid_backup_evidence(
+                overrides={"evidence_expires_at": "2000-01-01T00:00:00Z"}
+            ),
+            "duplicate-runtime": valid_backup_evidence(
+                extra_lines=("source_runtime=compose-local",)
+            ),
+        }
+        for name, evidence in cases.items():
+            with self.subTest(name=name):
+                result, payload, _ = self.run_runner(evidence=evidence)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(payload["data"]["status"], "failed")
+                self.assertEqual(payload["data"]["backup_check"], "failed")
+
     def test_runner_never_executes_when_recovery_scale_up_fails_and_restores_zero(self):
         result, payload, calls = self.run_runner(
-            evidence="source_runtime=k3s-pvc\nbackup_completed_at=2026-09-12T00:00:00Z",
+            evidence=valid_backup_evidence(),
             scenario="scale-up-fail",
         )
 
@@ -251,7 +286,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertIn("scale deployment sre-pod-recovery --replicas=0", calls)
 
     def test_runner_fails_when_owned_recovery_cleanup_or_status_patch_fails(self):
-        evidence = "source_runtime=k3s-pvc\nbackup_completed_at=2026-09-12T00:00:00Z"
+        evidence = valid_backup_evidence()
         for scenario, patch_fails in (("exec-fail", False), ("cleanup-fail", False), ("", True)):
             with self.subTest(scenario=scenario or "patch-fail"):
                 result, payload, calls = self.run_runner(

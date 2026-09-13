@@ -7,7 +7,8 @@ RUN apt-get update \
     && useradd --system --uid 10001 --gid sre-audit --no-create-home --home-dir /nonexistent sre-audit
 
 COPY infra/k8s/tools/quarterly-sre-audit-runner.sh /opt/personal-server/quarterly-sre-audit-runner.sh
-RUN chmod 0555 /opt/personal-server/quarterly-sre-audit-runner.sh
+COPY infra/k8s/tools/validate-backup-evidence.py /opt/personal-server/validate-backup-evidence.py
+RUN chmod 0555 /opt/personal-server/quarterly-sre-audit-runner.sh /opt/personal-server/validate-backup-evidence.py
 
 USER 10001:10001
 WORKDIR /tmp
