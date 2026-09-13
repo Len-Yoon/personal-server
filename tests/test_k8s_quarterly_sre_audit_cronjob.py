@@ -189,6 +189,8 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 "  *'get deployment sre-pod-recovery'*'.spec.replicas'*) cat \"$REPLICAS\" 2>/dev/null || printf 0 ;;\n"
                 "  *'get deployment sre-pod-recovery'*) replicas=$(cat \"$REPLICAS\" 2>/dev/null || printf 0); [ \"$replicas\" = 1 ] && printf True:1 || printf False:0 ;;\n"
                 "  *'get pods'*) replicas=$(cat \"$REPLICAS\" 2>/dev/null || printf 0); [ \"$replicas\" = 0 ] && exit 0; printf recovery-pod ;;\n"
+                "  *'wait --for=condition=Ready pod/recovery-pod --timeout=30s'*) [ \"$SCENARIO\" = ready-wait-fail ] && exit 1; exit 0 ;;\n"
+                "  *'get events --field-selector involvedObject.name=recovery-pod'*) [ \"$SCENARIO\" = events-fail ] && exit 1; exit 0 ;;\n"
                 "  *'get pod recovery-pod'*'Ready'*) printf True ;;\n"
                 "  *'get pod recovery-pod'*) n=$(cat \"$COUNTER\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$COUNTER\"; printf '%s' \"$((n - 1))\" ;;\n"
                 "  *'exec recovery-pod'*) [ \"$SCENARIO\" = exec-fail ] && exit 1; exit 0 ;;\n"
@@ -313,6 +315,24 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertEqual(payload["data"]["recovery_lab"], "failed")
         self.assertNotIn("exec recovery-pod", calls)
         self.assertIn("scale deployment sre-pod-recovery --replicas=0", calls)
+
+    def test_runner_logs_non_sensitive_stage_when_recovery_ready_wait_or_events_fail(self):
+        for scenario, stage in (("ready-wait-fail", "ready_wait"), ("events-fail", "events")):
+            with self.subTest(scenario=scenario):
+                result, payload, _ = self.run_runner(
+                    evidence=valid_backup_evidence(),
+                    scenario=scenario,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(payload["data"]["status"], "failed")
+                self.assertEqual(payload["data"]["recovery_lab"], "failed")
+                self.assertIn(
+                    f"quarterly_sre_audit_check=recovery_lab result=failed stage={stage}",
+                    result.stdout,
+                )
+                self.assertNotIn("source_runtime=k3s-pvc", result.stdout)
+                self.assertNotIn("recovery-pod", result.stdout)
 
     def test_runner_fails_when_owned_recovery_cleanup_or_status_patch_fails(self):
         evidence = valid_backup_evidence()

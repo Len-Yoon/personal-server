@@ -116,8 +116,11 @@ trap 'finalize 1' INT TERM
 run_check() {
   local check_name=$1
   shift
+  check_failure_stage=check
   if "$@" >/dev/null 2>&1; then
     printf -v "$check_name" '%s' passed
+  else
+    printf 'quarterly_sre_audit_check=%s result=failed stage=%s\n' "$check_name" "$check_failure_stage" || true
   fi
   return 0
 }
@@ -146,21 +149,31 @@ check_backup_evidence() {
 
 check_recovery_lab() {
   local pod before after deadline
+  check_failure_stage=scale
   kubectl -n "$RECOVERY_NAMESPACE" scale deployment "$RECOVERY_DEPLOYMENT" --replicas=1 || return 1
+  check_failure_stage=availability
   wait_for_recovery_available || return 1
+  check_failure_stage=pod_selection
   pod=$(kubectl -n "$RECOVERY_NAMESPACE" get pods -l app.kubernetes.io/name=sre-pod-recovery -o jsonpath='{.items[0].metadata.name}') || return 1
   [[ -n "$pod" ]] || return 1
+  check_failure_stage=restart_count
   before=$(kubectl -n "$RECOVERY_NAMESPACE" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}') || return 1
   [[ "$before" =~ ^[0-9]+$ ]] || return 1
+  check_failure_stage=exec
   kubectl -n "$RECOVERY_NAMESPACE" exec "$pod" -- rm /tmp/healthy || return 1
+  check_failure_stage=restart_count
   deadline=$((SECONDS + 90))
   while (( SECONDS < deadline )); do
+    check_failure_stage=pod_selection
     pod=$(kubectl -n "$RECOVERY_NAMESPACE" get pods -l app.kubernetes.io/name=sre-pod-recovery -o jsonpath='{.items[0].metadata.name}') || return 1
     [[ -n "$pod" ]] || return 1
+    check_failure_stage=restart_count
     after=$(kubectl -n "$RECOVERY_NAMESPACE" get pod "$pod" -o jsonpath='{.status.containerStatuses[0].restartCount}') || return 1
     [[ "$after" =~ ^[0-9]+$ ]] || return 1
     if (( after > before )); then
+      check_failure_stage=ready_wait
       wait_for_recovery_pod_ready "$pod" || return 1
+      check_failure_stage=events
       kubectl -n "$RECOVERY_NAMESPACE" get events --field-selector "involvedObject.name=${pod}" >/dev/null || return 1
       return 0
     fi
