@@ -1,6 +1,7 @@
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -24,6 +25,7 @@ class QuarterlySreAuditAutomationTests(unittest.TestCase):
         active_jobs_after_preflight=False,
         lock="available",
         manifest_crlf=False,
+        manual_job_wait_delay_seconds=0,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -79,11 +81,25 @@ case "$*" in
       terminal_failed_empty|terminal_failed_zero) printf '%s' Failed=True, ;;
     esac
     ;;
+  *"get job quarterly-sre-audit-manual-"*"jsonpath={{range .status.conditions"*)
+    case "{manual_job}" in
+      success) printf '%s' Complete=True, ;;
+      complete_without_success) printf '%s' Complete=True, ;;
+      failed_terminal) printf '%s' Failed=True, ;;
+    esac
+    ;;
   *"get cronjob quarterly-sre-audit"*"jsonpath={{.spec.suspend}}"*) printf '%s' true ;;
   *"wait --for=condition=complete job/quarterly-sre-audit-manual-"*)
-    [ "{manual_job}" = success ] || exit 42
+    [ "{manual_job}" = success ] && exit 0
+    sleep "{manual_job_wait_delay_seconds}"
+    exit 42
     ;;
-  *"get job quarterly-sre-audit-manual-"*"jsonpath={{.status.succeeded}}"*) printf '%s' 1 ;;
+  *"get job quarterly-sre-audit-manual-"*"jsonpath={{.status.succeeded}}"*)
+    case "{manual_job}" in
+      success) printf '%s' 1 ;;
+      complete_without_success) printf '%s' 0 ;;
+    esac
+    ;;
   *"get configmap sre-telegram-quarterly-audit-status --ignore-not-found -o name"*)
     if [ "{configmap}" = existing ] || [ -f "{root}/configmap-created" ]; then printf '%s\\n' configmap/sre-telegram-quarterly-audit-status; fi
     ;;
@@ -162,14 +178,14 @@ exec /usr/bin/grep "$@"
         suspended_at = calls.index("get cronjob quarterly-sre-audit -o jsonpath={.spec.suspend}")
         disable_at = calls.index("disable --now personal-server-quarterly-sre-audit.timer")
         create_at = calls.index("create job quarterly-sre-audit-manual-")
-        wait_at = calls.index("wait --for=condition=complete job/quarterly-sre-audit-manual-")
+        terminal_at = calls.index("get job quarterly-sre-audit-manual-")
         status_at = calls.rindex("get configmap sre-telegram-quarterly-audit-status -o jsonpath={.data.status}")
         activate_at = calls.index("patch cronjob quarterly-sre-audit")
         self.assertLess(apply_at, suspended_at)
         self.assertLess(suspended_at, disable_at)
         self.assertLess(disable_at, create_at)
-        self.assertLess(create_at, wait_at)
-        self.assertLess(wait_at, status_at)
+        self.assertLess(create_at, terminal_at)
+        self.assertLess(terminal_at, status_at)
         self.assertLess(status_at, activate_at)
 
     def test_install_skips_legacy_timer_disable_when_unit_is_absent(self):
@@ -308,18 +324,40 @@ exec /usr/bin/grep "$@"
                 self.assertNotIn("show personal-server-quarterly-sre-audit.service --property=MainPID --value", calls)
                 self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
 
-    def test_install_leaves_cronjob_suspended_when_manual_job_fails(self):
-        result, calls = self.run_tool("--install", manual_job="failure")
+    def test_failed_terminal_manual_job_returns_promptly_releases_installer_lock_and_keeps_cronjob_suspended(self):
+        started_at = time.monotonic()
+        result, calls = self.run_tool(
+            "--install",
+            manual_job="failed_terminal",
+            manual_job_wait_delay_seconds=2,
+        )
+        elapsed_seconds = time.monotonic() - started_at
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("wait --for=condition=complete job/quarterly-sre-audit-manual-", calls)
+        self.assertLess(elapsed_seconds, 2, result.stderr)
+        self.assertIn("get job quarterly-sre-audit-manual-", calls)
+        self.assertNotIn("wait --for=condition=complete job/quarterly-sre-audit-manual-", calls)
+        manual_job_creations = [
+            call
+            for call in calls.splitlines()
+            if call.startswith("k3s kubectl -n monitoring create job quarterly-sre-audit-manual-")
+        ]
+        self.assertEqual(len(manual_job_creations), 1)
+        self.assertNotIn("patch cronjob quarterly-sre-audit", calls)
+
+    def test_complete_manual_job_without_succeeded_one_keeps_cronjob_suspended(self):
+        result, calls = self.run_tool("--install", manual_job="complete_without_success")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("get job quarterly-sre-audit-manual-", calls)
+        self.assertIn("jsonpath={.status.succeeded}", calls)
         self.assertNotIn("patch cronjob quarterly-sre-audit", calls)
 
     def test_install_leaves_cronjob_suspended_when_status_reporting_cannot_be_read(self):
         result, calls = self.run_tool("--install", status="read_failure")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("wait --for=condition=complete job/quarterly-sre-audit-manual-", calls)
+        self.assertIn("get job quarterly-sre-audit-manual-", calls)
         self.assertIn("get configmap sre-telegram-quarterly-audit-status", calls)
         self.assertNotIn("patch cronjob quarterly-sre-audit", calls)
 

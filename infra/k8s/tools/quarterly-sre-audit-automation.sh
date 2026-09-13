@@ -28,7 +28,7 @@ kctl() {
 
 require_commands() {
   local command_name
-  for command_name in sudo k3s systemctl date flock grep python3; do
+  for command_name in sudo k3s systemctl date flock grep python3 sleep; do
     command -v "$command_name" >/dev/null || return 1
   done
 }
@@ -180,11 +180,58 @@ create_manual_job() {
   timestamp=$(date -u +%Y%m%d%H%M%S) || return 1
   job_name="${CRONJOB_NAME}-manual-${timestamp}-$$"
   kctl -n "$NAMESPACE" create job "$job_name" --from="cronjob/$CRONJOB_NAME" || return 1
-  kctl -n "$NAMESPACE" wait --for=condition=complete "job/$job_name" --timeout="$MANUAL_JOB_TIMEOUT" || return 1
+  wait_for_manual_job_terminal_state "$job_name" || return 1
   [ "$(kctl -n "$NAMESPACE" get job "$job_name" -o 'jsonpath={.status.succeeded}')" = 1 ] || {
     printf '%s\n' 'Quarterly SRE audit manual Job did not report success.' >&2
     return 1
   }
+}
+
+manual_job_timeout_seconds() {
+  python3 - "$MANUAL_JOB_TIMEOUT" <<'PY'
+import math
+import re
+import sys
+
+duration = sys.argv[1]
+parts = re.findall(r"([0-9]+(?:\.[0-9]+)?)(ns|us|µs|ms|s|m|h)", duration)
+if not parts or "".join(value + unit for value, unit in parts) != duration:
+    raise SystemExit(1)
+
+multipliers = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "ms": 1e-3, "s": 1, "m": 60, "h": 3600}
+seconds = sum(float(value) * multipliers[unit] for value, unit in parts)
+if seconds <= 0:
+    raise SystemExit(1)
+print(math.ceil(seconds))
+PY
+}
+
+wait_for_manual_job_terminal_state() {
+  local job_name timeout_seconds deadline conditions
+  job_name=$1
+  timeout_seconds=$(manual_job_timeout_seconds) || {
+    printf '%s\n' 'Quarterly SRE audit manual Job timeout is invalid; installation is blocked.' >&2
+    return 1
+  }
+  deadline=$((SECONDS + timeout_seconds))
+  while :; do
+    conditions=$(kctl -n "$NAMESPACE" get job "$job_name" -o 'jsonpath={range .status.conditions[*]}{.type}{"="}{.status}{","}{end}') || {
+      printf '%s\n' 'Quarterly SRE audit manual Job condition could not be read; installation is blocked.' >&2
+      return 1
+    }
+    case "$conditions" in
+      *Failed=True*)
+        printf '%s\n' 'Quarterly SRE audit manual Job reported failure; installation is blocked.' >&2
+        return 1
+        ;;
+      *Complete=True*) return 0 ;;
+    esac
+    [ "$SECONDS" -lt "$deadline" ] || {
+      printf '%s\n' 'Quarterly SRE audit manual Job did not reach a terminal state before timeout.' >&2
+      return 1
+    }
+    sleep 1 || return 1
+  done
 }
 
 verify_status_reporting() {
