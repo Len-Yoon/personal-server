@@ -22,6 +22,7 @@ class QuarterlySreAuditAutomationTests(unittest.TestCase):
         active_jobs="none",
         active_jobs_after_preflight=False,
         lock="available",
+        manifest_crlf=False,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -29,6 +30,14 @@ class QuarterlySreAuditAutomationTests(unittest.TestCase):
             bin_dir.mkdir()
             calls = root / "calls.log"
             jobs_query_count = root / "jobs-query-count"
+            manifest = root / "quarterly-sre-audit-cronjob.yaml"
+            manifest.write_bytes(
+                (ROOT / "infra" / "k8s" / "sre-audit-automation" / "quarterly-sre-audit-cronjob.yaml")
+                .read_bytes()
+                .replace(b"\n", b"\r\n")
+                if manifest_crlf
+                else (ROOT / "infra" / "k8s" / "sre-audit-automation" / "quarterly-sre-audit-cronjob.yaml").read_bytes()
+            )
 
             def write_fake(name, body):
                 path = bin_dir / name
@@ -118,7 +127,12 @@ exit 0
             )
             result = subprocess.run(
                 ["bash", str(SCRIPT), mode],
-                env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "QUARTERLY_SRE_AUDIT_LEGACY_TIMER": "personal-server-quarterly-sre-audit.timer"},
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                    "QUARTERLY_SRE_AUDIT_LEGACY_TIMER": "personal-server-quarterly-sre-audit.timer",
+                    "QUARTERLY_SRE_AUDIT_MANIFEST": str(manifest) if manifest_crlf else os.environ.get("QUARTERLY_SRE_AUDIT_MANIFEST", ""),
+                },
                 text=True,
                 capture_output=True,
                 check=False,
@@ -277,6 +291,13 @@ exit 0
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("quarterly_sre_audit_preflight=PASS", result.stdout)
         self.assertNotIn("secret", calls.lower())
+
+    def test_preflight_accepts_suspended_cronjob_manifest_with_crlf_line_endings(self):
+        result, calls = self.run_tool("--preflight", manifest_crlf=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("quarterly_sre_audit_preflight=PASS", result.stdout)
+        self.assertIn("apply --dry-run=client -f", calls)
 
     def test_status_reports_allowed_audit_fields_without_accessing_secrets(self):
         result, calls = self.run_tool("--status")
