@@ -151,6 +151,25 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertEqual(recovery_container["securityContext"]["capabilities"]["drop"], ["ALL"])
         self.assertIn("livenessProbe", recovery_container)
 
+    def test_fixed_recovery_emptydir_is_writable_for_the_initial_health_marker_only(self):
+        """The fixed non-PVC recovery Pod must create its first /tmp health marker as UID 10001."""
+        recovery_pod = recovery_deployment()["spec"]["template"]["spec"]
+        recovery_container = recovery_pod["containers"][0]
+
+        self.assertEqual(recovery_pod["securityContext"].get("fsGroup"), 10001)
+        self.assertEqual(
+            recovery_container["command"],
+            ["sh", "-c", "touch /tmp/healthy && while true; do sleep 3600; done"],
+        )
+        self.assertEqual(
+            recovery_pod["volumes"],
+            [{"name": "recovery-tmp", "emptyDir": {"sizeLimit": "16Mi"}}],
+        )
+        self.assertEqual(recovery_container["volumeMounts"], [{"name": "recovery-tmp", "mountPath": "/tmp"}])
+        self.assertNotIn("fsGroup", pod_spec()["securityContext"])
+        self.assertNotIn("persistentVolumeClaim", str(recovery_pod))
+        self.assertFalse(any("secret" in volume for volume in recovery_pod["volumes"]))
+
     def run_runner(self, *, evidence, scenario="", patch_fails=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
