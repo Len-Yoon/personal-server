@@ -269,6 +269,17 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         )
         self.assertNotIn("get deployments", text)
 
+    def test_runner_allows_sixty_seconds_for_recovery_pod_cleanup_after_scale_down(self):
+        text = RUNNER.read_text(encoding="utf-8")
+        cleanup_wait = re.search(
+            r"wait_for_recovery_pods_absent\(\) \{(?P<body>.*?)^\}",
+            text,
+            re.DOTALL | re.MULTILINE,
+        )
+
+        self.assertIsNotNone(cleanup_wait)
+        self.assertIn("deadline=$((SECONDS + 60))", cleanup_wait.group("body"))
+
     def test_recovery_lab_rbac_retains_pod_watch_for_bounded_ready_wait(self):
         lab_rules = find("Role", "quarterly-sre-audit-recovery-lab", "sre-recovery-lab")["rules"]
         self.assertIn(
@@ -345,6 +356,22 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 self.assertEqual(calls.count("patch configmap sre-telegram-quarterly-audit-status"), 1)
                 if scenario in {"exec-fail", "cleanup-fail"}:
                     self.assertEqual(payload["data"]["recovery_lab"], "failed")
+
+    def test_runner_logs_non_sensitive_stage_when_recovery_cleanup_fails(self):
+        result, payload, _ = self.run_runner(
+            evidence=valid_backup_evidence(),
+            scenario="cleanup-fail",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(payload["data"]["status"], "failed")
+        self.assertEqual(payload["data"]["recovery_lab"], "failed")
+        self.assertIn(
+            "quarterly_sre_audit_check=recovery_lab result=failed stage=cleanup_pods_absent",
+            result.stdout,
+        )
+        self.assertNotIn("source_runtime=k3s-pvc", result.stdout)
+        self.assertNotIn("recovery-pod", result.stdout)
 
     def test_runner_and_image_do_not_depend_on_host_or_sensitive_storage(self):
         text = "\n".join((RUNNER.read_text(encoding="utf-8"), DOCKERFILE.read_text(encoding="utf-8"))).lower()

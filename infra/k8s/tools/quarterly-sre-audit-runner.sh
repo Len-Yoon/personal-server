@@ -75,7 +75,7 @@ wait_for_recovery_pod_ready() {
 
 wait_for_recovery_pods_absent() {
   local pods deadline
-  deadline=$((SECONDS + 30))
+  deadline=$((SECONDS + 60))
   while (( SECONDS < deadline )); do
     pods=$(kubectl -n "$RECOVERY_NAMESPACE" get pods -l app.kubernetes.io/name=sre-pod-recovery -o jsonpath='{.items[*].metadata.name}') || return 1
     if [[ -z "$pods" ]]; then
@@ -102,6 +102,7 @@ finalize() {
   trap - EXIT INT TERM
   if ! cleanup_recovery_deployment; then
     recovery_lab=failed
+    printf 'quarterly_sre_audit_check=recovery_lab result=failed stage=cleanup_pods_absent\n' || true
     result=1
   fi
   if ! report_status; then
