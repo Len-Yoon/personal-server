@@ -69,16 +69,8 @@ wait_for_recovery_available() {
 }
 
 wait_for_recovery_pod_ready() {
-  local pod=$1 ready deadline
-  deadline=$((SECONDS + 30))
-  while (( SECONDS < deadline )); do
-    ready=$(kubectl -n "$RECOVERY_NAMESPACE" get pod "$pod" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}') || return 1
-    if [[ "$ready" == True ]]; then
-      return 0
-    fi
-    sleep 2 || return 1
-  done
-  return 1
+  local pod=$1
+  kubectl -n "$RECOVERY_NAMESPACE" wait --for=condition=Ready "pod/$pod" --timeout=30s
 }
 
 wait_for_recovery_pods_absent() {

@@ -255,14 +255,24 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertIn("scale deployment sre-pod-recovery --replicas=0", calls)
         self.assertNotIn(" create ", calls)
         self.assertNotIn(" delete ", calls)
-        self.assertNotIn(" wait ", calls)
+        self.assertIn("wait --for=condition=Ready pod/recovery-pod --timeout=30s", calls)
 
-    def test_runner_uses_only_named_deployment_get_polling(self):
+    def test_runner_uses_deployment_get_polling_and_bounded_pod_ready_wait(self):
         text = RUNNER.read_text(encoding="utf-8")
         self.assertIn("get deployment \"$RECOVERY_DEPLOYMENT\"", text)
         self.assertIn(".status.availableReplicas", text)
-        self.assertNotIn("kubectl -n \"$RECOVERY_NAMESPACE\" wait", text)
+        self.assertIn(
+            'kubectl -n "$RECOVERY_NAMESPACE" wait --for=condition=Ready "pod/$pod" --timeout=30s',
+            text,
+        )
         self.assertNotIn("get deployments", text)
+
+    def test_recovery_lab_rbac_retains_pod_watch_for_bounded_ready_wait(self):
+        lab_rules = find("Role", "quarterly-sre-audit-recovery-lab", "sre-recovery-lab")["rules"]
+        self.assertIn(
+            {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch"]},
+            lab_rules,
+        )
 
     def test_runner_fails_closed_for_wrong_runtime_or_unreadable_backup_evidence(self):
         for evidence, scenario in (
