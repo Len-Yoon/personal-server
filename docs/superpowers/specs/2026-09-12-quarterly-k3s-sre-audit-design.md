@@ -10,6 +10,8 @@ N100의 systemd 사용자 서비스가 제한된 `sudo -n k3s` 호출을 실행�
 - 점검 결과는 `monitoring/sre-telegram-quarterly-audit-status` ConfigMap에 기록됨.
 - 백업 증적은 `personal-server/portal-pvc-backup-evidence`를 24시간 이내, `source_runtime=k3s-pvc` 조건으로 fail-closed 검증함.
 - 복구 실습은 전용 `sre-recovery-lab` namespace 안에서만 실행·정리됨.
+- 복구 성공은 컨테이너 재시작 횟수 증가와 Pod Ready 복귀로 확인함. 정리 성공은 고정 Deployment의 scale 명령 성공 및 조회한 `.spec.replicas`가 정확히 `0`인 조건으로 정리 요청을 검증함. 이후 Pod 종료는 Kubernetes가 비동기로 처리하며 runner는 Pod 소멸을 기다리지 않음. 정상 종료 유예 중 남은 Pod를 점검 실패로 판정하지 않음.
+- 정리 scale·Deployment 조회 실패 또는 `.spec.replicas`가 `0`이 아닌 경우 복구 실습과 종합 상태를 실패로 기록함.
 - 기존 사용자 systemd timer는 설치 도구가 중지·비활성화하여 중복 실행을 방지함.
 
 ## 제외 범위

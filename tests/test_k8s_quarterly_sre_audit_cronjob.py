@@ -186,9 +186,9 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 "  *'get deployment portal-web'*) printf 1 ;;\n"
                 "  *'scale deployment sre-pod-recovery --replicas=1'*) [ \"$SCENARIO\" = scale-up-fail ] && exit 1; printf 1 > \"$REPLICAS\"; exit 0 ;;\n"
                 "  *'scale deployment sre-pod-recovery --replicas=0'*) [ \"$SCENARIO\" = cleanup-fail ] && exit 1; printf 0 > \"$REPLICAS\"; exit 0 ;;\n"
-                "  *'get deployment sre-pod-recovery'*'.spec.replicas'*) cat \"$REPLICAS\" 2>/dev/null || printf 0 ;;\n"
+                "  *'get deployment sre-pod-recovery'*'.spec.replicas'*) case \"$SCENARIO\" in cleanup-get-fail) exit 1 ;; cleanup-nonzero) printf 1; exit 0 ;; cleanup-empty) exit 0 ;; cleanup-malformed) printf unknown; exit 0 ;; esac; cat \"$REPLICAS\" 2>/dev/null || printf 0 ;;\n"
                 "  *'get deployment sre-pod-recovery'*) replicas=$(cat \"$REPLICAS\" 2>/dev/null || printf 0); [ \"$replicas\" = 1 ] && printf True:1 || printf False:0 ;;\n"
-                "  *'get pods'*) replicas=$(cat \"$REPLICAS\" 2>/dev/null || printf 0); [ \"$replicas\" = 0 ] && exit 0; printf recovery-pod ;;\n"
+                "  *'get pods'*) replicas=$(cat \"$REPLICAS\" 2>/dev/null || printf 0); if [ \"$replicas\" = 0 ] && [ \"$SCENARIO\" != cleanup-terminating ]; then exit 0; fi; printf recovery-pod ;;\n"
                 "  *'wait --for=condition=Ready pod/recovery-pod --timeout=60s'*) [ \"$SCENARIO\" = ready-wait-fail ] && exit 1; exit 0 ;;\n"
                 "  *'get events --field-selector involvedObject.name=recovery-pod'*) [ \"$SCENARIO\" = events-fail ] && exit 1; exit 0 ;;\n"
                 "  *'get pod recovery-pod'*'Ready'*) printf True ;;\n"
@@ -282,16 +282,29 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertIn("--timeout=60s", ready_wait.group("body"))
         self.assertNotIn("--timeout=30s", ready_wait.group("body"))
 
-    def test_runner_allows_sixty_seconds_for_recovery_pod_cleanup_after_scale_down(self):
-        text = RUNNER.read_text(encoding="utf-8")
-        cleanup_wait = re.search(
-            r"wait_for_recovery_pods_absent\(\) \{(?P<body>.*?)^\}",
-            text,
-            re.DOTALL | re.MULTILINE,
+    def test_runner_accepts_verified_scale_down_while_pod_termination_is_asynchronous(self):
+        result, payload, calls = self.run_runner(
+            evidence=valid_backup_evidence(), scenario="cleanup-terminating"
         )
 
-        self.assertIsNotNone(cleanup_wait)
-        self.assertIn("deadline=$((SECONDS + 60))", cleanup_wait.group("body"))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(payload["data"]["status"], "passed")
+        self.assertEqual(payload["data"]["recovery_lab"], "passed")
+        cleanup_calls = calls.split("scale deployment sre-pod-recovery --replicas=0", 1)[1]
+        self.assertIn("get deployment sre-pod-recovery -o jsonpath={.spec.replicas}", cleanup_calls)
+        self.assertNotIn("get pods", cleanup_calls)
+        self.assertNotIn("wait ", cleanup_calls)
+
+    def test_runner_rejects_unverified_scale_down(self):
+        for scenario in ("cleanup-get-fail", "cleanup-nonzero", "cleanup-empty", "cleanup-malformed"):
+            with self.subTest(scenario=scenario):
+                result, payload, _ = self.run_runner(
+                    evidence=valid_backup_evidence(), scenario=scenario
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(payload["data"]["status"], "failed")
+                self.assertEqual(payload["data"]["recovery_lab"], "failed")
+                self.assertIn("stage=cleanup_scale_down", result.stdout)
 
     def test_recovery_lab_rbac_retains_pod_watch_for_bounded_ready_wait(self):
         lab_rules = find("Role", "quarterly-sre-audit-recovery-lab", "sre-recovery-lab")["rules"]
@@ -380,7 +393,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertEqual(payload["data"]["status"], "failed")
         self.assertEqual(payload["data"]["recovery_lab"], "failed")
         self.assertIn(
-            "quarterly_sre_audit_check=recovery_lab result=failed stage=cleanup_pods_absent",
+            "quarterly_sre_audit_check=recovery_lab result=failed stage=cleanup_scale_down",
             result.stdout,
         )
         self.assertNotIn("source_runtime=k3s-pvc", result.stdout)

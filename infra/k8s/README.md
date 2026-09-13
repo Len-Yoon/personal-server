@@ -104,14 +104,16 @@ CronJob은 `Asia/Seoul` 기준 매년 1·4·7·10월 1일 03:30에 1회 실행�
 |---|---|---|
 | K3s·Portal 상태 | Kubernetes API | Node와 `personal-server/portal-web` Deployment 상태 확인 |
 | 백업 증적 검증 | `portal-pvc-backup-evidence` ConfigMap | K3s PVC 백업·복원 증적의 유효성·만료 상태를 fail-closed로 확인 |
-| 격리 Pod 복구 훈련 | `sre-recovery-lab/sre-pod-recovery` | 고정된 격리 Deployment만 scale 방식으로 복구 확인 후 replica 0으로 정리함 |
+| 격리 Pod 복구 훈련 | `sre-recovery-lab/sre-pod-recovery` | 재시작 횟수 증가와 Ready 복구 확인 후 scale 성공 및 Deployment의 `.spec.replicas=0`으로 정리 요청을 검증함 |
+
+정리 요청 이후 Pod 종료는 Kubernetes가 비동기로 처리함. runner는 Pod 소멸을 기다리지 않으며, 정상 종료 유예 중 Pod가 남아 있는 상태를 점검 실패로 판정하지 않음. scale 또는 Deployment 조회 실패, `.spec.replicas`가 정확히 `0`이 아닌 경우에는 복구 실습과 종합 결과를 실패로 기록함.
 
 이 과정은 Portal·Caddy·Cloudflare Tunnel·Compose 서비스를 stop, restart, scale 또는 rollout하지 않으며, 운영 데이터와 Portal PVC를 변경하지 않음. Compose 컨테이너 상태는 Docker socket·hostPath 접근이 필요한 별도 운영 증적으로 관리하며, 분기 CronJob 결과에 포함하지 않음. 결과는 실행 ID, 완료 시각, 종합 상태와 세 단계 상태만 `monitoring/sre-telegram-quarterly-audit-status` ConfigMap에 기록함. 기존 `sre-telegram-relay`는 Telegram 성공 응답이 확인될 때까지 재시도하며, 응답 유실 시 드물게 중복 메시지가 수신될 수 있음. 명령 출력 전문·namespace/Pod 식별자·파일 경로·내부 IP·Secret 값은 전달하지 않음.
 
 실제 적용 시 운영자는 `--install`이 생성한 수동 Job 1회가 성공한 뒤 다음 세 가지를 모두 직접 확인해야 함.
 
 1. ConfigMap 기록에 세 단계 결과와 종합 결과가 남았는지 확인함.
-2. 고정 `sre-recovery-lab/sre-pod-recovery` Deployment가 replica 0이고 Pod가 남아 있지 않은지 확인함. 고정 namespace와 Deployment 자체는 삭제하지 않음.
+2. 고정 `sre-recovery-lab/sre-pod-recovery` Deployment의 `.spec.replicas=0`으로 정리 요청이 반영되었는지 확인함. Pod는 정상 종료 유예 동안 남을 수 있으며, Kubernetes가 비동기로 종료함. 고정 namespace와 Deployment 자체는 삭제하지 않음.
 3. 기존 SRE Telegram relay를 통해 요약 메시지가 수신되었는지 확인함.
 
 Telegram 수신을 확인하기 전에는 분기 점검 적용 또는 알림 정상으로 판단하지 않음. `--status`는 CronJob suspended 상태와 ConfigMap의 `run_id`, `status`, `completed_at`, `health_audit`, `backup_check`, `recovery_lab`만 출력하므로 Secret 값은 포함하지 않음. `completed_at`은 서울 기준 `YYYY-MM-DD HH:MM`으로 표시됨. 수동 Job 직후에는 `run_id`와 완료 시각이 해당 실행 결과인지 확인 필요함.

@@ -50,8 +50,8 @@ cleanup_recovery_deployment() {
   local replicas
   kubectl -n "$RECOVERY_NAMESPACE" scale deployment "$RECOVERY_DEPLOYMENT" --replicas=0 || return 1
   replicas=$(kubectl -n "$RECOVERY_NAMESPACE" get deployment "$RECOVERY_DEPLOYMENT" -o jsonpath='{.spec.replicas}') || return 1
+  # Kubernetes terminates Pods asynchronously after this verified cleanup request.
   [[ "$replicas" == 0 ]] || return 1
-  wait_for_recovery_pods_absent || return 1
 }
 
 wait_for_recovery_available() {
@@ -73,19 +73,6 @@ wait_for_recovery_pod_ready() {
   kubectl -n "$RECOVERY_NAMESPACE" wait --for=condition=Ready "pod/$pod" --timeout=60s
 }
 
-wait_for_recovery_pods_absent() {
-  local pods deadline
-  deadline=$((SECONDS + 60))
-  while (( SECONDS < deadline )); do
-    pods=$(kubectl -n "$RECOVERY_NAMESPACE" get pods -l app.kubernetes.io/name=sre-pod-recovery -o jsonpath='{.items[*].metadata.name}') || return 1
-    if [[ -z "$pods" ]]; then
-      return 0
-    fi
-    sleep 2 || return 1
-  done
-  return 1
-}
-
 report_status() {
   local overall=failed completed_at payload
   [[ "$run_id_ready" == true ]] || return 1
@@ -102,7 +89,7 @@ finalize() {
   trap - EXIT INT TERM
   if ! cleanup_recovery_deployment; then
     recovery_lab=failed
-    printf 'quarterly_sre_audit_check=recovery_lab result=failed stage=cleanup_pods_absent\n' || true
+    printf 'quarterly_sre_audit_check=recovery_lab result=failed stage=cleanup_scale_down\n' || true
     result=1
   fi
   if ! report_status; then
