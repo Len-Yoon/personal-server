@@ -82,7 +82,7 @@ verify_manifest() {
     printf '%s\n' 'Quarterly SRE audit CronJob manifest is unavailable.' >&2
     return 1
   }
-  grep -Fq 'kind: CronJob' "$MANIFEST" && grep -Eq '^  suspend: true\r?$' "$MANIFEST" || {
+  grep -Fq 'kind: CronJob' "$MANIFEST" && tr -d '\r' < "$MANIFEST" | grep -Fxq '  suspend: true' || {
     printf '%s\n' 'Quarterly SRE audit CronJob manifest must install suspended.' >&2
     return 1
   }

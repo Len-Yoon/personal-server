@@ -125,6 +125,16 @@ esac
 exit 0
 ''',
             )
+            if manifest_crlf:
+                write_fake(
+                    "grep",
+                    '''#!/bin/sh
+case "$*" in
+  *'\\r'*) exit 1 ;;
+esac
+exec /usr/bin/grep "$@"
+''',
+                )
             result = subprocess.run(
                 ["bash", str(SCRIPT), mode],
                 env={
