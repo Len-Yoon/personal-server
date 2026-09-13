@@ -68,6 +68,7 @@ class QuarterlySreAuditAutomationTests(unittest.TestCase):
         validation_job="success",
         relay_delivery="delivered",
         relay_delivery_timeout="3s",
+        manifest_padding_lines=0,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -76,13 +77,10 @@ class QuarterlySreAuditAutomationTests(unittest.TestCase):
             calls = root / "calls.log"
             jobs_query_count = root / "jobs-query-count"
             manifest = root / "quarterly-sre-audit-cronjob.yaml"
-            manifest.write_bytes(
-                (ROOT / "infra" / "k8s" / "sre-audit-automation" / "quarterly-sre-audit-cronjob.yaml")
-                .read_bytes()
-                .replace(b"\n", b"\r\n")
-                if manifest_crlf
-                else (ROOT / "infra" / "k8s" / "sre-audit-automation" / "quarterly-sre-audit-cronjob.yaml").read_bytes()
-            )
+            manifest_bytes = (ROOT / "infra" / "k8s" / "sre-audit-automation" / "quarterly-sre-audit-cronjob.yaml").read_bytes()
+            if manifest_crlf:
+                manifest_bytes = manifest_bytes.replace(b"\n", b"\r\n")
+            manifest.write_bytes(manifest_bytes + (b"# pipeline padding\n" * manifest_padding_lines))
 
             def write_fake(name, body):
                 path = bin_dir / name
@@ -535,6 +533,17 @@ exec /usr/bin/grep "$@"
 
     def test_preflight_accepts_suspended_cronjob_manifest_with_crlf_line_endings(self):
         result, calls = self.run_tool("--preflight", manifest_crlf=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("quarterly_sre_audit_preflight=PASS", result.stdout)
+        self.assertIn("apply --dry-run=client -f", calls)
+
+    def test_preflight_does_not_fail_from_pipefail_after_finding_the_first_suspended_cronjob(self):
+        result, calls = self.run_tool(
+            "--preflight",
+            manifest_crlf=True,
+            manifest_padding_lines=200_000,
+        )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("quarterly_sre_audit_preflight=PASS", result.stdout)

@@ -82,11 +82,13 @@ PY
 }
 
 verify_manifest() {
+  local normalized_manifest
   [ -r "$MANIFEST" ] || {
     printf '%s\n' 'Quarterly SRE audit CronJob manifest is unavailable.' >&2
     return 1
   }
-  grep -Fq 'kind: CronJob' "$MANIFEST" && tr -d '\r' < "$MANIFEST" | grep -Fxq '  suspend: true' || {
+  normalized_manifest=$(tr -d '\r' < "$MANIFEST") || return 1
+  grep -Fq 'kind: CronJob' "$MANIFEST" && grep -Fxq '  suspend: true' <<< "$normalized_manifest" || {
     printf '%s\n' 'Quarterly SRE audit CronJob manifest must install suspended.' >&2
     return 1
   }
