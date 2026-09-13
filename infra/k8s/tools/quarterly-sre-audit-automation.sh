@@ -176,12 +176,29 @@ ensure_status_configmap_if_absent() {
 }
 
 create_manual_job() {
-  local timestamp job_name
+  local timestamp job_name timeout_seconds deadline request_timeout succeeded
   timestamp=$(date -u +%Y%m%d%H%M%S) || return 1
   job_name="${CRONJOB_NAME}-manual-${timestamp}-$$"
   kctl -n "$NAMESPACE" create job "$job_name" --from="cronjob/$CRONJOB_NAME" || return 1
-  wait_for_manual_job_terminal_state "$job_name" || return 1
-  [ "$(kctl -n "$NAMESPACE" get job "$job_name" -o 'jsonpath={.status.succeeded}')" = 1 ] || {
+  timeout_seconds=$(manual_job_timeout_seconds) || {
+    printf '%s\n' 'Quarterly SRE audit manual Job timeout is invalid; installation is blocked.' >&2
+    return 1
+  }
+  deadline=$((SECONDS + timeout_seconds))
+  wait_for_manual_job_terminal_state "$job_name" "$deadline" || return 1
+  request_timeout=$(manual_job_request_timeout "$deadline") || {
+    manual_job_timeout_reached
+    return 1
+  }
+  succeeded=$(kctl -n "$NAMESPACE" --request-timeout="$request_timeout" get job "$job_name" -o 'jsonpath={.status.succeeded}') || {
+    printf '%s\n' 'Quarterly SRE audit manual Job success state could not be read; installation is blocked.' >&2
+    return 1
+  }
+  [ "$SECONDS" -lt "$deadline" ] || {
+    manual_job_timeout_reached
+    return 1
+  }
+  [ "$succeeded" = 1 ] || {
     printf '%s\n' 'Quarterly SRE audit manual Job did not report success.' >&2
     return 1
   }
@@ -206,17 +223,34 @@ print(math.ceil(seconds))
 PY
 }
 
+manual_job_request_timeout() {
+  local deadline remaining_seconds
+  deadline=$1
+  remaining_seconds=$((deadline - SECONDS))
+  [ "$remaining_seconds" -gt 0 ] || return 1
+  [ "$remaining_seconds" -le 5 ] || remaining_seconds=5
+  printf '%ss\n' "$remaining_seconds"
+}
+
+manual_job_timeout_reached() {
+  printf '%s\n' 'Quarterly SRE audit manual Job did not reach a terminal state before timeout.' >&2
+}
+
 wait_for_manual_job_terminal_state() {
-  local job_name timeout_seconds deadline conditions
+  local job_name deadline request_timeout conditions
   job_name=$1
-  timeout_seconds=$(manual_job_timeout_seconds) || {
-    printf '%s\n' 'Quarterly SRE audit manual Job timeout is invalid; installation is blocked.' >&2
-    return 1
-  }
-  deadline=$((SECONDS + timeout_seconds))
+  deadline=$2
   while :; do
-    conditions=$(kctl -n "$NAMESPACE" get job "$job_name" -o 'jsonpath={range .status.conditions[*]}{.type}{"="}{.status}{","}{end}') || {
+    request_timeout=$(manual_job_request_timeout "$deadline") || {
+      manual_job_timeout_reached
+      return 1
+    }
+    conditions=$(kctl -n "$NAMESPACE" --request-timeout="$request_timeout" get job "$job_name" -o 'jsonpath={range .status.conditions[*]}{.type}{"="}{.status}{","}{end}') || {
       printf '%s\n' 'Quarterly SRE audit manual Job condition could not be read; installation is blocked.' >&2
+      return 1
+    }
+    [ "$SECONDS" -lt "$deadline" ] || {
+      manual_job_timeout_reached
       return 1
     }
     case "$conditions" in
@@ -226,10 +260,6 @@ wait_for_manual_job_terminal_state() {
         ;;
       *Complete=True*) return 0 ;;
     esac
-    [ "$SECONDS" -lt "$deadline" ] || {
-      printf '%s\n' 'Quarterly SRE audit manual Job did not reach a terminal state before timeout.' >&2
-      return 1
-    }
     sleep 1 || return 1
   done
 }

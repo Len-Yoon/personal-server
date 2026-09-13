@@ -26,6 +26,8 @@ class QuarterlySreAuditAutomationTests(unittest.TestCase):
         lock="available",
         manifest_crlf=False,
         manual_job_wait_delay_seconds=0,
+        manual_job_response_delay_seconds=0,
+        manual_job_timeout="20m",
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -86,6 +88,11 @@ case "$*" in
       success) printf '%s' Complete=True, ;;
       complete_without_success) printf '%s' Complete=True, ;;
       failed_terminal) printf '%s' Failed=True, ;;
+      slow_complete)
+        sleep "{manual_job_response_delay_seconds}"
+        printf '%s' Complete=True,
+        ;;
+      slow_succeeded) printf '%s' Complete=True, ;;
     esac
     ;;
   *"get cronjob quarterly-sre-audit"*"jsonpath={{.spec.suspend}}"*) printf '%s' true ;;
@@ -98,6 +105,11 @@ case "$*" in
     case "{manual_job}" in
       success) printf '%s' 1 ;;
       complete_without_success) printf '%s' 0 ;;
+      slow_complete) printf '%s' 1 ;;
+      slow_succeeded)
+        sleep "{manual_job_response_delay_seconds}"
+        printf '%s' 1
+        ;;
     esac
     ;;
   *"get configmap sre-telegram-quarterly-audit-status --ignore-not-found -o name"*)
@@ -162,6 +174,7 @@ exec /usr/bin/grep "$@"
                     "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
                     "QUARTERLY_SRE_AUDIT_LEGACY_TIMER": "personal-server-quarterly-sre-audit.timer",
                     "QUARTERLY_SRE_AUDIT_MANIFEST": str(manifest) if manifest_crlf else os.environ.get("QUARTERLY_SRE_AUDIT_MANIFEST", ""),
+                    "QUARTERLY_SRE_AUDIT_MANUAL_JOB_TIMEOUT": manual_job_timeout,
                 },
                 text=True,
                 capture_output=True,
@@ -187,6 +200,20 @@ exec /usr/bin/grep "$@"
         self.assertLess(create_at, terminal_at)
         self.assertLess(terminal_at, status_at)
         self.assertLess(status_at, activate_at)
+        condition_queries = [
+            call
+            for call in calls.splitlines()
+            if "get job quarterly-sre-audit-manual-" in call and "status.conditions" in call
+        ]
+        succeeded_queries = [
+            call
+            for call in calls.splitlines()
+            if "get job quarterly-sre-audit-manual-" in call and "status.succeeded" in call
+        ]
+        self.assertTrue(condition_queries)
+        self.assertTrue(succeeded_queries)
+        self.assertTrue(all("--request-timeout=" in call for call in condition_queries))
+        self.assertTrue(all("--request-timeout=" in call for call in succeeded_queries))
 
     def test_install_skips_legacy_timer_disable_when_unit_is_absent(self):
         result, calls = self.run_tool("--install", timer="missing")
@@ -324,7 +351,7 @@ exec /usr/bin/grep "$@"
                 self.assertNotIn("show personal-server-quarterly-sre-audit.service --property=MainPID --value", calls)
                 self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
 
-    def test_failed_terminal_manual_job_returns_promptly_releases_installer_lock_and_keeps_cronjob_suspended(self):
+    def test_failed_terminal_manual_job_returns_promptly_and_keeps_cronjob_suspended(self):
         started_at = time.monotonic()
         result, calls = self.run_tool(
             "--install",
@@ -343,6 +370,34 @@ exec /usr/bin/grep "$@"
             if call.startswith("k3s kubectl -n monitoring create job quarterly-sre-audit-manual-")
         ]
         self.assertEqual(len(manual_job_creations), 1)
+        self.assertNotIn("patch cronjob quarterly-sre-audit", calls)
+
+    def test_late_complete_response_after_manual_job_timeout_cannot_activate_cronjob(self):
+        result, calls = self.run_tool(
+            "--install",
+            manual_job="slow_complete",
+            manual_job_timeout="1s",
+            manual_job_response_delay_seconds=3,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("manual Job did not reach a terminal state before timeout", result.stderr)
+        self.assertIn("--request-timeout=1s get job quarterly-sre-audit-manual-", calls)
+        self.assertNotIn("jsonpath={.status.succeeded}", calls)
+        self.assertNotIn("patch cronjob quarterly-sre-audit", calls)
+
+    def test_late_succeeded_response_after_manual_job_timeout_cannot_activate_cronjob(self):
+        result, calls = self.run_tool(
+            "--install",
+            manual_job="slow_succeeded",
+            manual_job_timeout="1s",
+            manual_job_response_delay_seconds=3,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("manual Job did not reach a terminal state before timeout", result.stderr)
+        self.assertIn("--request-timeout=1s get job quarterly-sre-audit-manual-", calls)
+        self.assertIn("jsonpath={.status.succeeded}", calls)
         self.assertNotIn("patch cronjob quarterly-sre-audit", calls)
 
     def test_complete_manual_job_without_succeeded_one_keeps_cronjob_suspended(self):
