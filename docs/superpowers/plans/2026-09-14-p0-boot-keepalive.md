@@ -203,4 +203,3 @@ rg -n 'systemctl.*restart.*k3s|kubectl.*secret|persistentvolumeclaim|Caddyfile' 
 - 로그인하지 않은 상태로 Windows를 재시작함.
 - PersonalServer-WSL-KeepAlive가 Running인지, post_boot_check가 passed인지, 외부 health 3회가 모두 HTTP 200인지 확인함.
 - 실패 시 재부팅을 반복하지 않고 event log와 Task Scheduler 결과만 수집하여 원인을 분리함.
-
