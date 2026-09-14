@@ -1375,6 +1375,8 @@ apiVersion: v1
 kind: Service
 metadata:
   name: portal-web
+  labels:
+    app.kubernetes.io/name: portal-web
 spec:
   type: NodePort
   selector:

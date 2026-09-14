@@ -25,6 +25,24 @@ def find_document(documents: list[dict], kind: str, name: str) -> dict:
 
 
 class SreTelegramManifestContractTests(unittest.TestCase):
+    def test_portal_http_observability_uses_internal_service_and_named_secret_key(self):
+        monitor = find_document(
+            load_yaml_documents("portal-http-observability.yaml"),
+            "ServiceMonitor",
+            "portal-http-observability",
+        )
+
+        self.assertEqual(monitor["spec"]["namespaceSelector"], {"matchNames": ["personal-server"]})
+        self.assertEqual(
+            monitor["spec"]["selector"],
+            {"matchLabels": {"app.kubernetes.io/name": "portal-web"}},
+        )
+        endpoint = monitor["spec"]["endpoints"][0]
+        self.assertEqual(endpoint["port"], "http")
+        self.assertEqual(endpoint["path"], "/internal/metrics")
+        self.assertEqual(endpoint["bearerTokenSecret"], {"name": "portal-http-metrics", "key": "bearer_token"})
+        self.assertNotIn("stringData", monitor)
+
     def test_news_observability_manifest_uses_named_secret_key_and_existing_service(self):
         monitor = find_document(
             load_yaml_documents("crawler-news-observability.yaml"),
@@ -286,6 +304,18 @@ class SreTelegramManifestContractTests(unittest.TestCase):
                 "labels": {"severity": "warning", "sre_telegram": "true"},
             },
             {
+                "alert": "PortalHttp5xxErrorRateHigh",
+                "expr": '(sum(rate(portal_http_requests_total{status_code=~"5.."}[5m])) / clamp_min(sum(rate(portal_http_requests_total[5m])), 1)) > 0.01 and sum(rate(portal_http_requests_total[5m])) > 0.1',
+                "for": "5m",
+                "labels": {"severity": "warning", "sre_telegram": "true"},
+            },
+            {
+                "alert": "PortalHttpP95LatencyHigh",
+                "expr": "histogram_quantile(0.95, sum by (le) (rate(portal_http_request_duration_seconds_bucket[5m]))) > 1",
+                "for": "5m",
+                "labels": {"severity": "warning", "sre_telegram": "true"},
+            },
+            {
                 "alert": "NewsCollectionStale",
                 "expr": "crawler_news_collection_initialized == 1 and time() - crawler_news_collection_first_attempt_timestamp_seconds > 900 and (\n  (crawler_news_collection_last_success_timestamp_seconds > 0\n   and time() - crawler_news_collection_last_success_timestamp_seconds > 900)\n  or\n  (crawler_news_collection_last_success_timestamp_seconds == 0\n   and time() - crawler_news_collection_last_attempt_timestamp_seconds > 900)\n  or crawler_news_collection_consecutive_failures >= 3\n)",
                 "for": "0m",
@@ -293,7 +323,7 @@ class SreTelegramManifestContractTests(unittest.TestCase):
             },
         ]
 
-        self.assertEqual(len(rules), 6)
+        self.assertEqual(len(rules), 8)
         self.assertEqual(
             [{key: item[key] for key in ("alert", "expr", "labels")} for item in rules[:1]],
             [expected_rules[0]],

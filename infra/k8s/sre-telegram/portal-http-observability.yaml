@@ -1,0 +1,21 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: portal-http-observability
+  namespace: monitoring
+  labels:
+    release: personal-server-monitoring
+spec:
+  namespaceSelector:
+    matchNames:
+      - personal-server
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: portal-web
+  endpoints:
+    - port: http
+      path: /internal/metrics
+      interval: 30s
+      bearerTokenSecret:
+        name: portal-http-metrics
+        key: bearer_token

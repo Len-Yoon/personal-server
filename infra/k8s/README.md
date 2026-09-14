@@ -37,6 +37,26 @@ bash infra/k8s/tools/monitoring-verify.sh
 
 `monitoring-install.sh --apply`와 제거 명령은 운영자 승인 후에만 실행함. Grafana와 Prometheus PVC는 기본 제거에서 보존함.
 
+## Portal HTTP Grafana 대시보드
+
+Portal HTTP 관측성 대시보드는 `monitoring` namespace의 `portal-http-observability` ConfigMap으로 관리함. 대시보드에는 요청 수, HTTP 상태 코드별 요청 수, 5xx 비율, p95 응답 시간이 포함됨.
+
+적용 전에는 운영자가 Prometheus에서 `portal_http_requests_total`과 `portal_http_request_duration_seconds` 수집 여부를 수동 확인 필요함. 전용 도구는 Grafana Deployment와 고정 dashboard manifest만 검증하며, datasource·메트릭 존재 여부를 자동으로 확인하지 않음. 적용·상태 확인·롤백은 아래 전용 도구만 사용함.
+
+```bash
+bash infra/k8s/tools/monitoring-dashboard-apply.sh --check
+bash infra/k8s/tools/monitoring-dashboard-apply.sh --apply
+bash infra/k8s/tools/monitoring-dashboard-apply.sh --rollback
+```
+
+`--apply`는 대시보드 ConfigMap만 적용하며, `--rollback`은 해당 ConfigMap만 제거함. Secret, Portal PVC, Caddy 설정, Portal runtime Deployment는 변경하지 않음.
+
+적용 후에는 Grafana 포트포워드를 실행하고 `http://127.0.0.1:3000`에서 `Portal HTTP 관측성` 대시보드가 로드되는지 확인함. 포트포워드는 확인이 끝난 뒤 `Ctrl+C`로 종료함.
+
+```bash
+sudo k3s kubectl -n monitoring port-forward --address 127.0.0.1 service/personal-server-monitoring-grafana 3000:80
+```
+
 ## Telegram SRE 알림
 
 Alertmanager 경고는 `sre-telegram-relay`를 통해 Telegram으로 전달함. Secret 값은 N100의 승인된 Secret 관리 절차로만 관리함.

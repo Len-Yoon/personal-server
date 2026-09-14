@@ -117,3 +117,29 @@ kubectl -n monitoring get prometheus -o name
 kubectl -n monitoring delete servicemonitor crawler-news-observability
 kubectl -n monitoring patch prometheusrule sre-telegram-k3s-alerts --type=json -p='[{"op":"remove","path":"/spec/groups/0/rules/5"}]'
 ```
+
+## Portal HTTP 관측성
+
+Portal은 `/internal/metrics`에서 요청 수와 요청 지연시간 histogram만 Prometheus 형식으로 제공함. 지표 label은 `method`, 정규화된 route template, `status_code`만 사용함. raw path, query string, IP, 사용자 식별자, 인증정보, 요청·응답 본문, 예외 원문은 지표에 기록하지 않음.
+
+`/internal/metrics`는 `PORTAL_METRICS_BEARER_TOKEN`과 일치하는 Bearer 인증이 없는 경우 404를 반환함. Portal NodePort는 Caddy를 통해 공개 경로로 전달될 수 있으므로, 내부 경로명만으로 비공개 경계가 성립한다고 간주하지 않음.
+
+Prometheus 수집은 `infra/k8s/sre-telegram/portal-http-observability.yaml`의 `ServiceMonitor`를 별도 승인 후 적용함. 이 리소스는 `personal-server` namespace의 `app.kubernetes.io/name=portal-web` Service와 `http` port만 선택함. 인증은 monitoring namespace Secret `portal-http-metrics`의 `bearer_token` 키를 참조하며, 값은 문서·Git·로그에 기록하지 않음.
+
+Kubernetes Secret은 namespace 간 공유되지 않음. 따라서 동일한 승인된 bearer 값은 다음 두 Secret에 운영자 절차로 각각 시딩해야 함.
+
+| Namespace | Secret | Key | 사용처 |
+|---|---|---|---|
+| `monitoring` | `portal-http-metrics` | `bearer_token` | ServiceMonitor의 Prometheus scrape 인증 |
+| `personal-server` | `portal-http-metrics` | `bearer_token` | Portal Pod의 `PORTAL_METRICS_BEARER_TOKEN` 환경변수 |
+
+적용 전에는 두 namespace의 Secret key 존재 여부와 ServiceMonitor dry-run만 수행함. Portal Deployment에는 `personal-server/portal-http-metrics`의 `bearer_token`을 `PORTAL_METRICS_BEARER_TOKEN`으로 참조하는 환경변수만 추가함. 기존 `portal-web-runtime` Secret, Portal cutover, Caddy, Tunnel 변경은 별도 승인 범위임.
+
+```bash
+kubectl -n monitoring get secret portal-http-metrics -o jsonpath='{.data.bearer_token}' >/dev/null
+kubectl -n personal-server get secret portal-http-metrics -o jsonpath='{.data.bearer_token}' >/dev/null
+kubectl -n personal-server get service portal-web -l app.kubernetes.io/name=portal-web
+kubectl -n monitoring apply --dry-run=client -f infra/k8s/sre-telegram/portal-http-observability.yaml >/dev/null
+```
+
+적용 후에는 일반 Portal 요청을 최소 1회 발생시킨 뒤 Prometheus target의 `portal-web` 수집 상태와 `portal_http_requests_total`, `portal_http_request_duration_seconds` 지표의 존재를 확인함. 초기 요청 전에는 HELP·TYPE 선언만 존재할 수 있음. 값에 인증정보 또는 식별 정보가 포함되면 즉시 적용을 중지하고 외부 노출 없이 원인을 검토함.

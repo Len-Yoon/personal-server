@@ -7,6 +7,7 @@
 | 문서 | 사용할 때 |
 |---|---|
 | [현재 운영 로드맵](operations-roadmap.md) | 완료 기준과 향후 운영 개선 항목 확인 |
+| [SLI·SLO·에러 버짓 운영 기준](slo-baseline.md) | 현재 측정 가능한 운영 신호의 목표값·버짓·월간 검토 기준 확인 |
 | [안전한 복구 훈련](recovery-drill.md) | 월간 백업·알림·격리 Pod 복구 점검 |
 | [운영 참조](operations-reference.md) | 전체 서비스 구조, 공개 경로, 일상 상태 확인 |
 | [컨테이너 실행 권한](operations-reference.md#컨테이너-실행-권한) | non-root 실행 계정과 Portal PVC 사전검증 기준 |
