@@ -47,3 +47,12 @@ python3 -m unittest tests.test_windows_bootstrap.WindowsBootstrapTests.test_supe
 
 - `Invoke-RecoveryCycle` 자체의 Tunnel health probe 1회 이후 초기 점검에서 외부 health를 추가 3회 확인하므로, 초기 Supervisor 점검 중 외부 health 호출은 총 4회가 될 수 있음. 이는 기존 recovery cycle 재사용과 별도 3회 외부 검증 요구를 함께 만족하기 위한 구조이며 운영 문서 확인 필요함.
 - 실제 Windows/WSL/N100 환경 실행 및 외부 `https://len.pe.kr/health` HTTP 200 검증은 이 작업공간에서 수행하지 않음.
+
+## 리뷰 수정 라운드 1
+
+- public health 3회 검증 실패 시 `Invoke-RecoveryCycle -ForceTunnelUnhealthy`를 호출하도록 수정함.
+- 강제 경로는 기존 recovery lock 안에서 Tunnel을 `unhealthy`로 처리하여 기존 Telegram 전환 알림, failure/attempt counter, 3회 제한 및 제한형 Tunnel 재시작 정책을 재사용함.
+- Supervisor 시작 지연을 `$RecoveryStartupDelaySeconds = 120`으로 명시하고, 해당 지연 뒤 초기 점검을 정확히 1회 수행하며 Daemon `Start-Process` 전에 실행하는 계약 테스트를 보강함.
+- 점검 실패 이벤트가 기록되어도 Daemon 감독이 계속 시작되는 계약 테스트를 추가함.
+- 리뷰 수정 구현 커밋: `c276808 fix: 초기 점검 Tunnel 장애 경로 연계`
+- 리뷰 수정 후 `python3 -m unittest tests.test_windows_bootstrap -v`: 73건 통과함.
