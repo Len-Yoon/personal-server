@@ -8,6 +8,7 @@ DIAGNOSTICS_CONFIGMAP=${QUARTERLY_SRE_AUDIT_DIAGNOSTICS_CONFIGMAP:-sre-quarterly
 PORTAL_NAMESPACE=personal-server
 RECOVERY_NAMESPACE=sre-recovery-lab
 RECOVERY_DEPLOYMENT=sre-pod-recovery
+RECOVERY_TRIGGER_CONFIGMAP=sre-pod-recovery-trigger
 BACKUP_MAX_AGE_SECONDS=${QUARTERLY_SRE_AUDIT_BACKUP_MAX_AGE_SECONDS:-86400}
 RECOVERY_TIMEOUT_SECONDS=${QUARTERLY_SRE_AUDIT_RECOVERY_TIMEOUT_SECONDS:-90}
 RECOVERY_POLL_INTERVAL_SECONDS=${QUARTERLY_SRE_AUDIT_RECOVERY_POLL_INTERVAL_SECONDS:-2}
@@ -50,6 +51,13 @@ contexts:
 current-context: in-cluster
 EOF
   chmod 0600 "$KUBECONFIG" || return 1
+}
+
+patch_recovery_trigger() {
+  local trigger=$1
+  [[ "$trigger" == true || "$trigger" == false ]] || return 1
+  kubectl -n "$RECOVERY_NAMESPACE" patch configmap "$RECOVERY_TRIGGER_CONFIGMAP" \
+    --type merge --patch "{\"data\":{\"trigger\":\"${trigger}\"}}" --request-timeout=10s >/dev/null 2>&1 || return 1
 }
 
 cleanup_recovery_deployment() {
@@ -160,9 +168,15 @@ report_status() {
 finalize() {
   local result=$1
   trap - EXIT INT TERM
-  if cleanup_recovery_deployment; then
-    cleanup_status=passed
-  else
+  cleanup_status=passed
+  if ! patch_recovery_trigger false; then
+    cleanup_status=failed
+    recovery_lab=failed
+    validation_failure_stage=cleanup_trigger_reset
+    printf 'quarterly_sre_audit_check=recovery_lab result=failed stage=cleanup_trigger_reset\n' || true
+    result=1
+  fi
+  if ! cleanup_recovery_deployment; then
     cleanup_status=failed
     recovery_lab=failed
     validation_failure_stage=cleanup_scale_down
@@ -216,6 +230,8 @@ check_backup_evidence() {
 check_recovery_lab() {
   local pod uid container_id before deadline snapshot_result
   local observed_restart=false
+  check_failure_stage=trigger_reset
+  patch_recovery_trigger false || return 1
   check_failure_stage=scale
   kubectl -n "$RECOVERY_NAMESPACE" scale deployment "$RECOVERY_DEPLOYMENT" --replicas=1 || return 1
   check_failure_stage=availability
@@ -226,8 +242,8 @@ check_recovery_lab() {
   uid=$RECOVERY_POD_UID
   container_id=$RECOVERY_CONTAINER_ID
   before=$RECOVERY_RESTART_COUNT
-  check_failure_stage=exec
-  kubectl -n "$RECOVERY_NAMESPACE" exec "$pod" -- rm /tmp/healthy || return 1
+  check_failure_stage=trigger_activate
+  patch_recovery_trigger true || return 1
   check_failure_stage=recovery_transition
   deadline=$((SECONDS + RECOVERY_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
