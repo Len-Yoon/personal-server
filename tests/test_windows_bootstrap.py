@@ -82,9 +82,36 @@ class WindowsBootstrapTests(unittest.TestCase):
         cycle = SCRIPT[
             SCRIPT.index("function Invoke-RecoveryCycle") : SCRIPT.index("function Install-EmergencyRebootTask")
         ]
-        self.assertIn("Invoke-RecoveryCycle -ForceTunnelUnhealthy", post_boot)
-        self.assertIn("param([switch]$ForceTunnelUnhealthy)", cycle)
-        self.assertIn('$health.tunnel = "unhealthy"', cycle)
+        self.assertIn("Invoke-RecoveryCycle -RequirePublicPortalHealth", post_boot)
+        self.assertNotIn("ForceTunnelUnhealthy", SCRIPT)
+        self.assertIn("param([switch]$RequirePublicPortalHealth)", cycle)
+        self.assertIn("Get-RecoveryHealth -RequirePublicPortalHealth:$RequirePublicPortalHealth", cycle)
+
+    def test_post_boot_uses_one_recovery_cycle_and_requires_complete_health(self):
+        post_boot = SCRIPT[
+            SCRIPT.index("function Invoke-PostBootRecoveryCheck") : SCRIPT.index("function Start-CloudflareTunnel")
+        ]
+        self.assertEqual(post_boot.count("Invoke-RecoveryCycle"), 1)
+        self.assertIn("$health = Invoke-RecoveryCycle -RequirePublicPortalHealth", post_boot)
+        self.assertIn("$unhealthyComponents = @($RecoveryComponents | Where-Object", post_boot)
+        self.assertNotIn("ForceTunnelUnhealthy", post_boot)
+
+    def test_recovery_cycle_returns_null_when_skipped_or_dirty(self):
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle") : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+        self.assertIn("return $null", cycle)
+        self.assertIn("return $health", cycle)
+
+    def test_post_boot_requires_three_public_checks_only_after_healthy_nodeport(self):
+        health = SCRIPT[
+            SCRIPT.index("function Get-RecoveryHealth") : SCRIPT.index("function Write-RecoveryEvent")
+        ]
+        self.assertIn("param([switch]$RequirePublicPortalHealth)", health)
+        self.assertIn('if ($health.nodeport -eq "healthy") {', health)
+        self.assertIn("Test-PublicPortalHealthThreeTimes", health)
+        self.assertLess(health.index('if ($health.nodeport -eq "healthy") {'), health.index("Test-PublicPortalHealthThreeTimes"))
+        self.assertNotIn("ForceTunnelUnhealthy", health)
 
     def test_post_boot_check_failure_is_caught_before_daemon_start(self):
         post_boot = SCRIPT[
@@ -810,9 +837,11 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("function Test-PublicPortalHealth", public_health)
         self.assertIn("Invoke-WslWithTimeout", public_health)
         self.assertIn(
-            '"curl", "--fail", "--silent", "--show-error", "--max-time", "15", "https://len.pe.kr/health"',
+            '"curl", "--silent", "--show-error", "--output", "/dev/null", "--write-out", "%{http_code}", "--max-time", "15", "https://len.pe.kr/health"',
             public_health,
         )
+        self.assertIn('$status -eq "200"', public_health)
+        self.assertNotIn('"--location"', public_health)
         self.assertIn(' -Operation "Public Portal health probe"', public_health)
 
     def test_tunnel_health_requires_nodeport_and_public_health_after_local_tunnel_checks(self):
@@ -823,7 +852,7 @@ class WindowsBootstrapTests(unittest.TestCase):
         nodeport_gate = 'if ($health.nodeport -eq "healthy") {'
         tunnel_condition = (
             'if ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning) '
-            '-and (Test-PublicPortalHealth)) {'
+            '-and $publicHealthPassed) {'
         )
 
         self.assertIn(nodeport_gate, health)
