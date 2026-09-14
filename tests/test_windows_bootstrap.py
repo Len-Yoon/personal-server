@@ -74,6 +74,9 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("for ($attempt = 1; $attempt -le 3; $attempt++)", health_check)
         self.assertEqual(health_check.count("(Test-PublicPortalHealth)"), 1)
         self.assertIn("if ($attempt -lt 3) { Start-Sleep -Seconds 10 }", health_check)
+        self.assertIn("$allPassed = $true", health_check)
+        self.assertIn("return $allPassed", health_check)
+        self.assertNotIn("return $false", health_check)
 
     def test_post_boot_health_failure_forces_existing_tunnel_recovery_path(self):
         post_boot = SCRIPT[

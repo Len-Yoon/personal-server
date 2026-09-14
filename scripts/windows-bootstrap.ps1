@@ -272,11 +272,12 @@ function Test-PublicPortalHealth {
 }
 
 function Test-PublicPortalHealthThreeTimes {
+    $allPassed = $true
     for ($attempt = 1; $attempt -le 3; $attempt++) {
-        if (-not (Test-PublicPortalHealth)) { return $false }
+        if (-not (Test-PublicPortalHealth)) { $allPassed = $false }
         if ($attempt -lt 3) { Start-Sleep -Seconds 10 }
     }
-    return $true
+    return $allPassed
 }
 
 function Invoke-PostBootRecoveryCheck {
