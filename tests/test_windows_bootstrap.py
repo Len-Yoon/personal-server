@@ -19,8 +19,18 @@ class WindowsBootstrapTests(unittest.TestCase):
         ]
         self.assertIn('$KeepAliveTaskName = "PersonalServer-WSL-KeepAlive"', SCRIPT)
         self.assertIn("/SC ONSTART", installer)
+        self.assertIn('$runAsUser = "$env:USERDOMAIN\\$env:USERNAME"', installer)
+        self.assertIn("/RU $runAsUser", installer)
         self.assertIn("/RP *", installer)
-        self.assertIn('"while true; do sleep 3600; done"', installer)
+        for token in (
+            "wsl.exe",
+            "-d Ubuntu-24.04",
+            "-u root",
+            "--exec /bin/bash",
+            "-lc",
+            '"while true; do sleep 3600; done"',
+        ):
+            self.assertIn(token, installer)
         self.assertNotIn("/SC ONLOGON", installer)
         self.assertNotIn("InteractiveToken", installer)
 
