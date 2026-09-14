@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "infra/k8s/tools"
 SCRIPT = ROOT / "infra/k8s/tools/monitoring-preflight.sh"
+DASHBOARD_MANIFEST = ROOT / "infra/k8s/monitoring/portal-http-dashboard.yaml"
 
 
 class MonitoringPreflightBehaviorTest(unittest.TestCase):
@@ -134,6 +135,8 @@ class MonitoringPreflightBehaviorTest(unittest.TestCase):
 
 
 class MonitoringToolsTest(unittest.TestCase):
+    DASHBOARD_MANIFEST = str(ROOT / "infra/k8s/monitoring/portal-http-dashboard.yaml")
+
     def run_tool(self, name, *args, stubs=None, env_overrides=None):
         with tempfile.TemporaryDirectory() as directory:
             directory_path = Path(directory)
@@ -163,6 +166,184 @@ class MonitoringToolsTest(unittest.TestCase):
         result, _ = self.run_tool("monitoring-uninstall.sh")
         self.assertEqual(result.returncode, 2)
         self.assertIn("--uninstall", result.stderr)
+
+    def test_dashboard_apply_requires_explicit_mode(self):
+        result, calls = self.run_tool("monitoring-dashboard-apply.sh")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--check", result.stderr)
+        self.assertEqual(calls, "")
+
+    def test_dashboard_apply_applies_only_dashboard_manifest(self):
+        result, calls = self.run_tool(
+            "monitoring-dashboard-apply.sh",
+            "--apply",
+            stubs={
+                "sudo": "#!/bin/sh\n"
+                "printf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *'get deployment personal-server-monitoring-grafana'*) exit 0;;\n"
+                f"  *'apply --dry-run=server -f {self.DASHBOARD_MANIFEST}'*) exit 0;;\n"
+                f"  *'apply -f {self.DASHBOARD_MANIFEST}'*) exit 0;;\n"
+                "  *) exit 1;;\n"
+                "esac\n",
+            },
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(f"apply -f {self.DASHBOARD_MANIFEST}", calls)
+        self.assertNotIn("secret", calls.lower())
+        self.assertNotIn("helm", calls.lower())
+        self.assertTrue(result.stdout.rstrip().endswith("monitoring_dashboard=PASS"))
+
+    def test_dashboard_apply_runs_server_dry_run_before_apply(self):
+        result, calls = self.run_tool(
+            "monitoring-dashboard-apply.sh",
+            "--apply",
+            stubs={
+                "sudo": "#!/bin/sh\n"
+                "printf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *'get deployment personal-server-monitoring-grafana'*) exit 0;;\n"
+                f"  *'apply --dry-run=server -f {self.DASHBOARD_MANIFEST}'*) exit 0;;\n"
+                f"  *'apply -f {self.DASHBOARD_MANIFEST}'*) exit 0;;\n"
+                "  *) exit 1;;\n"
+                "esac\n",
+            },
+        )
+        self.assertEqual(result.returncode, 0)
+        dry_run = calls.index("apply --dry-run=server")
+        apply = calls.index("apply -f")
+        self.assertLess(dry_run, apply)
+
+    def test_dashboard_apply_fails_when_grafana_deployment_is_missing(self):
+        result, calls = self.run_tool(
+            "monitoring-dashboard-apply.sh", "--apply",
+            stubs={"sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\nexit 1\n"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.rstrip().endswith("monitoring_dashboard=FAIL"))
+        self.assertNotIn("dry-run", calls)
+        self.assertNotIn(" apply ", calls)
+
+    def test_dashboard_apply_fails_when_manifest_contract_is_invalid(self):
+        original = DASHBOARD_MANIFEST.read_text(encoding="utf-8")
+        DASHBOARD_MANIFEST.write_text(original.replace('grafana_dashboard: "1"', 'grafana_dashboard: "0"'), encoding="utf-8")
+        try:
+            result, calls = self.run_tool(
+                "monitoring-dashboard-apply.sh", "--apply",
+                stubs={"sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n"},
+            )
+        finally:
+            DASHBOARD_MANIFEST.write_text(original, encoding="utf-8")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.rstrip().endswith("monitoring_dashboard=FAIL"))
+        self.assertEqual(calls, "")
+
+    def test_dashboard_apply_rejects_a_multi_document_manifest(self):
+        original = DASHBOARD_MANIFEST.read_text(encoding="utf-8")
+        DASHBOARD_MANIFEST.write_text(
+            original
+            + "\n--- # second document\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: forbidden\n  namespace: personal-server\n",
+            encoding="utf-8",
+        )
+        try:
+            result, calls = self.run_tool(
+                "monitoring-dashboard-apply.sh",
+                "--check",
+                stubs={
+                    "sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                    "case \"$*\" in\n"
+                    "  *'get deployment personal-server-monitoring-grafana'*) exit 0;;\n"
+                    "  *) exit 1;;\n"
+                    "esac\n",
+                },
+            )
+        finally:
+            DASHBOARD_MANIFEST.write_text(original, encoding="utf-8")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.rstrip().endswith("monitoring_dashboard=FAIL"))
+        self.assertEqual(calls, "")
+
+    def test_dashboard_apply_fails_when_server_dry_run_fails(self):
+        result, calls = self.run_tool(
+            "monitoring-dashboard-apply.sh", "--apply",
+            stubs={
+                "sudo": "#!/bin/sh\n"
+                "printf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *'get deployment personal-server-monitoring-grafana'*) exit 0;;\n"
+                "  *'--dry-run=server'*) exit 1;;\n"
+                "  *) exit 0;;\n"
+                "esac\n",
+            },
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.rstrip().endswith("monitoring_dashboard=FAIL"))
+        self.assertNotIn(" apply -f ", calls)
+
+    def test_dashboard_apply_fails_when_apply_fails(self):
+        result, calls = self.run_tool(
+            "monitoring-dashboard-apply.sh", "--apply",
+            stubs={
+                "sudo": "#!/bin/sh\n"
+                "printf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *'get deployment personal-server-monitoring-grafana'*) exit 0;;\n"
+                "  *'--dry-run=server'*) exit 0;;\n"
+                "  *' apply -f '* ) exit 1;;\n"
+                "  *) exit 0;;\n"
+                "esac\n",
+            },
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.rstrip().endswith("monitoring_dashboard=FAIL"))
+
+    def test_dashboard_rollback_reports_delete_failure(self):
+        result, calls = self.run_tool(
+            "monitoring-dashboard-apply.sh", "--rollback",
+            stubs={"sudo": "#!/bin/sh\nprintf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\nexit 1\n"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("delete configmap portal-http-observability", calls)
+        self.assertTrue(result.stdout.rstrip().endswith("monitoring_dashboard=FAIL"))
+
+    def test_dashboard_apply_default_check_is_read_only(self):
+        result, calls = self.run_tool(
+            "monitoring-dashboard-apply.sh",
+            "--check",
+            stubs={
+                "sudo": "#!/bin/sh\n"
+                "printf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *'get deployment personal-server-monitoring-grafana'*) exit 0;;\n"
+                "  *) exit 1;;\n"
+                "esac\n",
+            },
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("get deployment personal-server-monitoring-grafana", calls)
+        self.assertNotIn(" apply ", calls)
+        self.assertNotIn(" delete ", calls)
+        self.assertTrue(result.stdout.rstrip().endswith("monitoring_dashboard=PASS"))
+
+    def test_dashboard_rollback_deletes_only_dashboard_configmap(self):
+        result, calls = self.run_tool(
+            "monitoring-dashboard-apply.sh",
+            "--rollback",
+            stubs={
+                "sudo": "#!/bin/sh\n"
+                "printf 'sudo %s\\n' \"$*\" >> \"$CALLS\"\n"
+                "case \"$*\" in\n"
+                "  *'delete configmap portal-http-observability --ignore-not-found'*) exit 0;;\n"
+                "  *) exit 1;;\n"
+                "esac\n",
+            },
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("delete configmap portal-http-observability --ignore-not-found", calls)
+        self.assertNotIn("secret", calls.lower())
+        self.assertNotIn("pvc", calls.lower())
+        self.assertNotIn("deployment", calls.lower())
+        self.assertTrue(result.stdout.rstrip().endswith("monitoring_dashboard=PASS"))
 
     def test_apply_uses_pinned_helm_release_arguments(self):
         result, calls = self.run_tool(
