@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -121,10 +122,19 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 {"apiGroups": ["apps"], "resources": ["deployments"], "resourceNames": ["sre-pod-recovery"], "verbs": ["get"]},
                 {"apiGroups": ["apps"], "resources": ["deployments/scale"], "resourceNames": ["sre-pod-recovery"], "verbs": ["get", "patch"]},
                 {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch"]},
-                {"apiGroups": [""], "resources": ["pods/exec"], "verbs": ["create"]},
+                {"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["sre-pod-recovery-trigger"], "verbs": ["get", "patch"]},
                 {"apiGroups": [""], "resources": ["events"], "verbs": ["list"]},
             ],
         )
+        self.assertEqual(
+            find("ConfigMap", "sre-pod-recovery-trigger", "sre-recovery-lab")["data"],
+            {"trigger": "false"},
+        )
+        self.assertIn(
+            {"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["sre-pod-recovery-trigger"], "verbs": ["get", "patch"]},
+            lab_rules,
+        )
+        self.assertNotIn("pods/exec", str(lab_rules))
         for rule in lab_rules:
             self.assertNotIn("secrets", rule["resources"])
             self.assertNotIn("persistentvolumeclaims", rule["resources"])
@@ -169,18 +179,64 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         recovery_container = recovery_pod["containers"][0]
 
         self.assertEqual(recovery_pod["securityContext"].get("fsGroup"), 10001)
-        self.assertEqual(
-            recovery_container["command"],
-            ["sh", "-c", "touch /tmp/healthy && while true; do sleep 3600; done"],
-        )
-        self.assertEqual(
+        self.assertIn(
+            {"name": "recovery-tmp", "emptyDir": {"sizeLimit": "16Mi"}},
             recovery_pod["volumes"],
-            [{"name": "recovery-tmp", "emptyDir": {"sizeLimit": "16Mi"}}],
         )
-        self.assertEqual(recovery_container["volumeMounts"], [{"name": "recovery-tmp", "mountPath": "/tmp"}])
+        self.assertIn({"name": "recovery-tmp", "mountPath": "/tmp"}, recovery_container["volumeMounts"])
         self.assertNotIn("fsGroup", pod_spec()["securityContext"])
         self.assertNotIn("persistentVolumeClaim", str(recovery_pod))
         self.assertFalse(any("secret" in volume for volume in recovery_pod["volumes"]))
+
+    def test_recovery_trigger_is_a_readonly_directory_projection(self):
+        recovery_pod = recovery_deployment()["spec"]["template"]["spec"]
+        mounts = recovery_pod["containers"][0]["volumeMounts"]
+        trigger_mounts = [mount for mount in mounts if mount["mountPath"] == "/var/run/recovery-trigger"]
+        self.assertEqual(len(trigger_mounts), 1)
+        mount = trigger_mounts[0]
+        self.assertTrue(mount.get("readOnly"))
+        self.assertNotIn("subPath", mount)
+        self.assertNotIn("subPathExpr", mount)
+        volume = next(volume for volume in recovery_pod["volumes"] if volume["name"] == mount["name"])
+        self.assertEqual(volume["configMap"]["name"], "sre-pod-recovery-trigger")
+
+    def test_recovery_command_injects_once_and_restores_health_on_container_restart(self):
+        command = recovery_deployment()["spec"]["template"]["spec"]["containers"][0]["command"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trigger_dir = root / "trigger-volume"
+            trigger_dir.mkdir()
+            trigger = trigger_dir / "trigger"
+            trigger.write_text("false", encoding="utf-8")
+            script = command[2].replace("/var/run/recovery-trigger", str(trigger_dir)).replace("/tmp/", f"{root}/")
+            script = script.replace("sleep 1", "sleep 0.01")
+            healthy = root / "healthy"
+            marker = root / "recovery-fault-injected"
+
+            def wait_for(predicate):
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    if predicate():
+                        return
+                    time.sleep(0.01)
+                self.fail("recovery command did not reach the expected health state")
+
+            for restart in (False, True):
+                process = subprocess.Popen(command[:2] + [script], start_new_session=True)
+                try:
+                    wait_for(healthy.exists)
+                    if not restart:
+                        self.assertFalse(marker.exists())
+                        trigger.write_text("true", encoding="utf-8")
+                        wait_for(lambda: not healthy.exists())
+                        self.assertTrue(marker.exists())
+                    else:
+                        time.sleep(0.1)
+                        self.assertTrue(healthy.exists())
+                        self.assertTrue(marker.exists())
+                finally:
+                    os.killpg(process.pid, 15)
+                    process.wait(timeout=2)
 
     def run_runner(self, *, evidence, scenario="", patch_fails=False, report_mode="official"):
         with tempfile.TemporaryDirectory() as directory:
@@ -201,14 +257,15 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 "  *'scale deployment sre-pod-recovery --replicas=0'*) [ \"$SCENARIO\" = cleanup-fail ] && exit 1; printf 0 > \"$REPLICAS\"; exit 0 ;;\n"
                 "  *'get deployment sre-pod-recovery'*'.spec.replicas'*) case \"$SCENARIO\" in cleanup-get-fail) exit 1 ;; cleanup-nonzero) printf 1; exit 0 ;; cleanup-empty) exit 0 ;; cleanup-malformed) printf unknown; exit 0 ;; esac; cat \"$REPLICAS\" 2>/dev/null || printf 0 ;;\n"
                 "  *'get deployment sre-pod-recovery'*) replicas=$(cat \"$REPLICAS\" 2>/dev/null || printf 0); [ \"$replicas\" = 1 ] && printf True:1 || printf False:0 ;;\n"
-                "  *'get pods'*) replicas=$(cat \"$REPLICAS\" 2>/dev/null || printf 0); if [ \"$replicas\" = 0 ] && [ \"$SCENARIO\" != cleanup-terminating ]; then exit 0; fi; [ \"$SCENARIO\" = terminating-old ] && { printf 'recovery-pod-old\\nrecovery-pod\\n'; exit 0; }; [ \"$SCENARIO\" = multiple-pods ] && [ -f \"$EXECUTED\" ] && { printf 'recovery-pod\\nrecovery-pod-2\\n'; exit 0; }; printf 'recovery-pod\\n' ;;\n"
+                "  *'get pods'*) replicas=$(cat \"$REPLICAS\" 2>/dev/null || printf 0); if [ \"$replicas\" = 0 ] && [ \"$SCENARIO\" != cleanup-terminating ]; then exit 0; fi; [ \"$SCENARIO\" = terminating-old ] && { printf 'recovery-pod-old\\nrecovery-pod\\n'; exit 0; }; [ \"$SCENARIO\" = multiple-pods ] && [ -f \"$TRIGGERED\" ] && { printf 'recovery-pod\\nrecovery-pod-2\\n'; exit 0; }; printf 'recovery-pod\\n' ;;\n"
                 "  *'wait --for=condition=Ready pod/recovery-pod --timeout=60s'*) [ \"$SCENARIO\" = ready-wait-fail ] && exit 1; exit 0 ;;\n"
                 "  *'get events --field-selector involvedObject.name=recovery-pod'*) [ \"$SCENARIO\" = events-fail ] && exit 1; exit 0 ;;\n"
                 "  *'get pod recovery-pod-old'*'containerStatuses'*) printf 'uid-old|Running|2026-09-13T00:00:00Z|False|recovery=containerd://old=0;' ;;\n"
-                "  *'get pod recovery-pod'*'containerStatuses'*) if [ ! -f \"$EXECUTED\" ]; then printf 'uid-1|Running||True|recovery=containerd://before=0;'; exit 0; fi; n=$(cat \"$COUNTER\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$COUNTER\"; case \"$SCENARIO\" in restart-without-not-ready) printf 'uid-1|Running||True|recovery=containerd://after=1;' ;; stale-ready) printf 'uid-1|Running||True|recovery=containerd://before=0;' ;; pod-replacement) printf 'uid-2|Running||True|recovery=containerd://after=1;' ;; transient-empty-status) [ \"$n\" = 1 ] && { printf 'uid-1|Running||False|'; exit 0; }; [ \"$n\" = 2 ] && { printf 'uid-1|Running||False|recovery=containerd://before=0;'; exit 0; }; printf 'uid-1|Running||True|recovery=containerd://after=1;' ;; *) [ \"$n\" = 1 ] && printf 'uid-1|Running||False|recovery=containerd://before=0;' || printf 'uid-1|Running||True|recovery=containerd://after=1;' ;; esac; exit 0 ;;\n"
+                "  *'get pod recovery-pod'*'containerStatuses'*) if [ ! -f \"$TRIGGERED\" ]; then printf 'uid-1|Running||True|recovery=containerd://before=0;'; exit 0; fi; n=$(cat \"$COUNTER\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$COUNTER\"; case \"$SCENARIO\" in restart-without-not-ready) printf 'uid-1|Running||True|recovery=containerd://after=1;' ;; stale-ready) printf 'uid-1|Running||True|recovery=containerd://before=0;' ;; pod-replacement) printf 'uid-2|Running||True|recovery=containerd://after=1;' ;; transient-empty-status) [ \"$n\" = 1 ] && { printf 'uid-1|Running||False|'; exit 0; }; [ \"$n\" = 2 ] && { printf 'uid-1|Running||False|recovery=containerd://before=0;'; exit 0; }; printf 'uid-1|Running||True|recovery=containerd://after=1;' ;; *) [ \"$n\" = 1 ] && printf 'uid-1|Running||False|recovery=containerd://before=0;' || printf 'uid-1|Running||True|recovery=containerd://after=1;' ;; esac; exit 0 ;;\n"
                 "  *'get pod recovery-pod'*'Ready'*) printf True ;;\n"
                 "  *'get pod recovery-pod'*) n=$(cat \"$COUNTER\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$COUNTER\"; printf '%s' \"$((n - 1))\" ;;\n"
-                "  *'exec recovery-pod'*) [ \"$SCENARIO\" = exec-fail ] && exit 1; : > \"$EXECUTED\"; exit 0 ;;\n"
+                "  *'exec recovery-pod'*) exit 1 ;;\n"
+                "  *'patch configmap sre-pod-recovery-trigger'*) case \"$9\" in '{\"data\":{\"trigger\":\"true\"}}') [ \"$SCENARIO\" = trigger-patch-fail ] && exit 1; : > \"$TRIGGERED\" ;; '{\"data\":{\"trigger\":\"false\"}}') [ \"$SCENARIO\" = trigger-reset-fail ] && exit 1; [ \"$SCENARIO\" = cleanup-trigger-fail ] && [ -f \"$TRIGGERED\" ] && exit 1 ;; *) exit 1 ;; esac; exit 0 ;;\n"
                 "  *'patch configmap sre-telegram-quarterly-audit-status'*) printf '%s' \"$9\" > \"$STATUS\"; [ \"$PATCH_FAILS\" = true ] && exit 1; exit 0 ;;\n"
                 "  *'patch configmap sre-quarterly-audit-diagnostics'*) printf '%s' \"$9\" > \"$DIAGNOSTICS\"; [ \"$PATCH_FAILS\" = true ] && exit 1; exit 0 ;;\n"
                 "esac\n",
@@ -231,7 +288,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                     "REPLICAS": str(root / "replicas"),
                     "STATUS": str(status),
                     "COUNTER": str(root / "counter"),
-                    "EXECUTED": str(root / "executed"),
+                    "TRIGGERED": str(root / "triggered"),
                     "EVIDENCE": evidence,
                     "SCENARIO": scenario,
                     "PATCH_FAILS": str(patch_fails).lower(),
@@ -275,6 +332,15 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertEqual(_read_quarterly_audit_report(RelayClient()), stale_configmap["data"])
         self.assertIn("scale deployment sre-pod-recovery --replicas=1", calls)
         self.assertIn("scale deployment sre-pod-recovery --replicas=0", calls)
+        trigger_calls = [call for call in calls.splitlines() if "patch configmap sre-pod-recovery-trigger" in call]
+        self.assertEqual(len(trigger_calls), 3)
+        self.assertIn('{"data":{"trigger":"false"}}', trigger_calls[0])
+        self.assertIn('{"data":{"trigger":"true"}}', trigger_calls[1])
+        self.assertIn('{"data":{"trigger":"false"}}', trigger_calls[2])
+        self.assertLess(calls.index(trigger_calls[0]), calls.index("scale deployment sre-pod-recovery --replicas=1"))
+        self.assertLess(calls.index("get pod recovery-pod"), calls.index(trigger_calls[1]))
+        self.assertLess(calls.rindex(trigger_calls[2]), calls.index("scale deployment sre-pod-recovery --replicas=0"))
+        self.assertNotIn(" exec ", calls)
         self.assertNotIn(" create ", calls)
         self.assertNotIn(" delete ", calls)
         self.assertIn("get pod recovery-pod", calls)
@@ -468,15 +534,37 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
 
     def test_runner_fails_when_owned_recovery_cleanup_or_status_patch_fails(self):
         evidence = valid_backup_evidence()
-        for scenario, patch_fails in (("exec-fail", False), ("cleanup-fail", False), ("", True)):
+        for scenario, patch_fails in (("trigger-patch-fail", False), ("cleanup-fail", False), ("", True)):
             with self.subTest(scenario=scenario or "patch-fail"):
                 result, payload, _, calls = self.run_runner(
                     evidence=evidence, scenario=scenario, patch_fails=patch_fails
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(calls.count("patch configmap sre-telegram-quarterly-audit-status"), 1)
-                if scenario in {"exec-fail", "cleanup-fail"}:
+                if scenario in {"trigger-patch-fail", "cleanup-fail"}:
                     self.assertEqual(payload["data"]["recovery_lab"], "failed")
+
+    def test_runner_fails_closed_on_trigger_patch_or_reset_failure_and_still_scales_down(self):
+        for scenario, stage in (
+            ("trigger-patch-fail", "trigger_activate"),
+            ("trigger-reset-fail", "cleanup_trigger_reset"),
+            ("cleanup-trigger-fail", "cleanup_trigger_reset"),
+        ):
+            with self.subTest(scenario=scenario):
+                result, payload, diagnostics, calls = self.run_runner(
+                    evidence=valid_backup_evidence(), scenario=scenario, report_mode="validation"
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIsNone(payload)
+                self.assertEqual(diagnostics["data"]["result"], "failed")
+                self.assertIn(stage, diagnostics["data"]["failure_stage"])
+                self.assertEqual(diagnostics["data"]["cleanup_status"], "passed" if scenario == "trigger-patch-fail" else "failed")
+                self.assertIn("scale deployment sre-pod-recovery --replicas=0", calls)
+                reset_call = [call for call in calls.splitlines() if '"trigger":"false"' in call][-1]
+                self.assertLess(calls.rindex(reset_call), calls.index("scale deployment sre-pod-recovery --replicas=0"))
+                self.assertNotIn(" exec ", calls)
+                if scenario == "trigger-reset-fail":
+                    self.assertNotIn("--replicas=1", calls)
 
     def test_runner_logs_non_sensitive_stage_when_recovery_cleanup_fails(self):
         result, payload, _, _ = self.run_runner(
