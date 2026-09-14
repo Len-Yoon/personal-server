@@ -18,24 +18,25 @@ class WindowsBootstrapTests(unittest.TestCase):
             : SCRIPT.index("function Set-RecoveryTaskSettings")
         ]
         self.assertIn('$KeepAliveTaskName = "PersonalServer-WSL-KeepAlive"', SCRIPT)
-        self.assertIn("/SC ONSTART", installer)
-        self.assertIn("/RU $RunAsUser", installer)
-        self.assertIn("/RP *", installer)
-        self.assertIn("/TR $KeepAliveTaskAction", installer)
-        self.assertIn(
-            '$KeepAliveTaskAction = \'wsl.exe -d Ubuntu-24.04 -u root --exec /bin/bash -lc "while true; do sleep 3600; done"\'',
-            SCRIPT,
-        )
+        self.assertIn('$temporaryTaskXml = Join-Path $env:TEMP "$KeepAliveTaskName.xml"', installer)
+        self.assertIn('$escapedRunAsUser = [System.Security.SecurityElement]::Escape($RunAsUser)', installer)
+        self.assertIn('Set-Content -LiteralPath $temporaryTaskXml -Value $taskXml -Encoding unicode', installer)
+        self.assertIn('schtasks.exe /Create /TN $KeepAliveTaskName /XML $temporaryTaskXml /RU $RunAsUser /RP * /F', installer)
         for token in (
-            "wsl.exe",
-            "-d Ubuntu-24.04",
-            "-u root",
-            "--exec /bin/bash",
-            "-lc",
-            '"while true; do sleep 3600; done"',
+            "<BootTrigger>",
+            "<LogonType>Password</LogonType>",
+            "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
+            "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>",
+            "<RestartOnFailure>",
+            "<Interval>PT1M</Interval>",
+            "<Count>3</Count>",
+            "<Command>C:\\Windows\\System32\\wsl.exe</Command>",
+            '<Arguments>-d Ubuntu-24.04 -u root --exec /bin/bash -lc "while true; do sleep 3600; done"</Arguments>',
+            'Remove-Item -LiteralPath $temporaryTaskXml -Force -ErrorAction SilentlyContinue',
         ):
-            self.assertIn(token, SCRIPT)
-        self.assertNotIn("/SC ONLOGON", installer)
+            self.assertIn(token, installer)
+        self.assertNotIn("/SC ONSTART", installer)
+        self.assertNotIn("/TR", installer)
         self.assertNotIn("InteractiveToken", installer)
 
     def test_install_task_registers_keepalive_before_supervisor(self):

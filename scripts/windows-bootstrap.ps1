@@ -11,7 +11,6 @@ $ErrorActionPreference = "Stop"
 $ScriptPath = Join-Path $ProjectRoot "scripts\windows-bootstrap.ps1"
 $TaskName = "personal-server-autostart"
 $KeepAliveTaskName = "PersonalServer-WSL-KeepAlive"
-$KeepAliveTaskAction = 'wsl.exe -d Ubuntu-24.04 -u root --exec /bin/bash -lc "while true; do sleep 3600; done"'
 $WslDistribution = "Ubuntu-24.04"
 $WslServiceUser = "window"
 $CloudflareTunnelService = "cloudflared-personal-server.service"
@@ -929,9 +928,73 @@ function Request-EmergencyReboot([string]$Component) {
 }
 
 function Install-KeepAliveTask([string]$RunAsUser) {
-    $createOutput = (& schtasks.exe /Create /TN $KeepAliveTaskName /SC ONSTART /RU $RunAsUser /RP * /TR $KeepAliveTaskAction /RL LIMITED /F 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to register scheduled task '$KeepAliveTaskName'."
+    $temporaryTaskXml = Join-Path $env:TEMP "$KeepAliveTaskName.xml"
+    $escapedRunAsUser = [System.Security.SecurityElement]::Escape($RunAsUser)
+    $taskXml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <URI>\PersonalServer-WSL-KeepAlive</URI>
+    <Description>Keeps the WSL distribution running after Windows startup.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+    </BootTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>$escapedRunAsUser</UserId>
+      <LogonType>Password</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>C:\Windows\System32\wsl.exe</Command>
+      <Arguments>-d Ubuntu-24.04 -u root --exec /bin/bash -lc "while true; do sleep 3600; done"</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"@
+    try {
+        Set-Content -LiteralPath $temporaryTaskXml -Value $taskXml -Encoding unicode
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $createOutput = (& schtasks.exe /Create /TN $KeepAliveTaskName /XML $temporaryTaskXml /RU $RunAsUser /RP * /F 2>&1 | Out-String)
+            $createExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        if ($createExitCode -ne 0) {
+            throw "Failed to register scheduled task '$KeepAliveTaskName' (exit code $createExitCode): $($createOutput.Trim())"
+        }
+    } finally {
+        Remove-Item -LiteralPath $temporaryTaskXml -Force -ErrorAction SilentlyContinue
     }
 }
 
