@@ -95,8 +95,12 @@ class DocumentationIndexTests(unittest.TestCase):
     def test_reboot_docs_describe_post_boot_check_without_new_telegram_message(self):
         uptime = Path("docs/public-uptime-monitor.md").read_text(encoding="utf-8")
 
-        self.assertIn("post_boot_check", uptime)
-        self.assertIn("Cloudflare Tunnel 장애·복구 전환", uptime)
+        self.assertIn("초기 대기 후 `post_boot_check`를 정확히 1회 수행함", uptime)
+        self.assertIn("WSL, K3s, Portal 상태를 확인", uptime)
+        self.assertIn("10초 간격으로 3회 호출해 모두 HTTP 200인지 확인", uptime)
+        self.assertIn("`recovery-events.jsonl`에 이벤트로만 기록", uptime)
+        self.assertIn("초기 점검 자체에 대한 신규 Telegram 메시지는 발송하지 않음", uptime)
+        self.assertIn("Cloudflare Tunnel 장애·복구 전환에만 사용", uptime)
 
     def test_n100_docs_document_reboot_limits_and_tunnel_service_recovery(self):
         n100 = Path("docs/n100-mt4-setup.md").read_text(encoding="utf-8")
