@@ -12,6 +12,26 @@ WSL_SCRIPT = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf
 
 
 class WindowsBootstrapTests(unittest.TestCase):
+    def test_install_task_registers_keepalive_at_boot_without_interactive_token(self):
+        installer = SCRIPT[
+            SCRIPT.index("function Install-KeepAliveTask")
+            : SCRIPT.index("function Set-RecoveryTaskSettings")
+        ]
+        self.assertIn('$KeepAliveTaskName = "PersonalServer-WSL-KeepAlive"', SCRIPT)
+        self.assertIn("/SC ONSTART", installer)
+        self.assertIn("/RP *", installer)
+        self.assertIn('"while true; do sleep 3600; done"', installer)
+        self.assertNotIn("/SC ONLOGON", installer)
+        self.assertNotIn("InteractiveToken", installer)
+
+    def test_install_task_registers_keepalive_before_supervisor(self):
+        installer = SCRIPT[
+            SCRIPT.index("function Install-ScheduledTask")
+            : SCRIPT.index("\nLoad-RecoveryFailureState")
+        ]
+        self.assertIn("Install-KeepAliveTask", installer)
+        self.assertLess(installer.index("Install-KeepAliveTask"), installer.index("$taskAction ="))
+
     def test_scheduled_task_runs_a_supervisor_that_restarts_the_daemon(self):
         self.assertIn("function Start-Supervisor", SCRIPT)
         installer = SCRIPT[
