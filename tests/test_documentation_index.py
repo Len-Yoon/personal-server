@@ -101,6 +101,9 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("`recovery-events.jsonl`에 이벤트로만 기록", uptime)
         self.assertIn("초기 점검 자체에 대한 신규 Telegram 메시지는 발송하지 않음", uptime)
         self.assertIn("Cloudflare Tunnel 장애·복구 전환에만 사용", uptime)
+        self.assertIn("저장소 구현은 완료되었으나 N100에는 아직 적용·검증하지 않음", uptime)
+        self.assertIn("사용자 승인 후 병합·적용", uptime)
+        self.assertIn("적용 후 event log와 외부 health 3회 모두 HTTP 200을 확인", uptime)
 
     def test_n100_docs_document_reboot_limits_and_tunnel_service_recovery(self):
         n100 = Path("docs/n100-mt4-setup.md").read_text(encoding="utf-8")

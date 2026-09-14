@@ -32,6 +32,8 @@ Windows 예약 작업은 Supervisor를 하나만 실행하며, Supervisor는 초
 
 Supervisor는 Windows 재시작 뒤 초기 대기 후 `post_boot_check`를 정확히 1회 수행함. 초기 점검은 WSL, K3s, Portal 상태를 확인하고, Tunnel이 정상인 경우 `https://len.pe.kr/health`를 10초 간격으로 3회 호출해 모두 HTTP 200인지 확인함. 시작·완료·실패 결과는 `recovery-events.jsonl`에 이벤트로만 기록하며, 재시작 또는 초기 점검 자체에 대한 신규 Telegram 메시지는 발송하지 않음. Telegram은 기존 정책대로 Cloudflare Tunnel 장애·복구 전환에만 사용함.
 
+위 `post_boot_check`는 저장소 구현은 완료되었으나 N100에는 아직 적용·검증하지 않음. N100 적용은 사용자 승인 후 병합·적용해야 하며, 적용 후 event log와 외부 health 3회 모두 HTTP 200을 확인해야 운영 적용 완료로 판단함.
+
 N100 알림 자격증명은 `window` 사용자 계정의 Windows Credential Manager에서 `personal-server-tunnel-telegram` 대상을 읽음. 일반 자격 증명의 사용자 이름에는 Telegram Chat ID를, 암호에는 Bot token을 입력함. 실제 값은 명령 출력·문서·로그에 표시하지 않음.
 
 | 항목 | 기준 |
