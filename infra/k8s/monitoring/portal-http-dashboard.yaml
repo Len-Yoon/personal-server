@@ -37,7 +37,7 @@ data:
           "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0},
           "id": 3,
           "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
-          "targets": [{"datasource": "Prometheus", "expr": "sum(rate(portal_http_requests_total{status_code=~\"5..\"}[5m])) / clamp_min(sum(rate(portal_http_requests_total[5m])), 1)", "refId": "A"}],
+          "targets": [{"datasource": "Prometheus", "expr": "(sum(rate(portal_http_requests_total{status_code=~\"5..\"}[5m])) / clamp_min(sum(rate(portal_http_requests_total[5m])), 1)) or vector(0)", "refId": "A"}],
           "title": "5xx 오류 비율",
           "type": "stat"
         },
