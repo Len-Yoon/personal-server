@@ -51,6 +51,21 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("Start-Sleep -Seconds 120", supervisor)
         self.assertNotIn("Waiting 120 seconds for WSL and Docker after logon.", daemon)
 
+    def test_supervisor_runs_one_post_boot_check_before_starting_daemon(self):
+        supervisor = SCRIPT[
+            SCRIPT.index("function Start-Supervisor") : SCRIPT.index("function Enter-DaemonLock")
+        ]
+        self.assertIn("Invoke-PostBootRecoveryCheck", supervisor)
+        self.assertLess(
+            supervisor.index("Invoke-PostBootRecoveryCheck"),
+            supervisor.index("Start-Process"),
+        )
+
+    def test_post_boot_public_health_requires_three_checks(self):
+        self.assertIn("function Test-PublicPortalHealthThreeTimes", SCRIPT)
+        self.assertIn("for ($attempt = 1; $attempt -le 3; $attempt++)", SCRIPT)
+        self.assertIn("Start-Sleep -Seconds 10", SCRIPT)
+
     def test_supervisor_uses_a_distinct_lifetime_lock_to_prevent_duplicate_daemons(self):
         self.assertIn("function Enter-SupervisorLock", SCRIPT)
         lock = SCRIPT[

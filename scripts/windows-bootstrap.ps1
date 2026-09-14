@@ -265,6 +265,25 @@ function Test-PublicPortalHealth {
     ) -Operation "Public Portal health probe")
 }
 
+function Test-PublicPortalHealthThreeTimes {
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        if (-not (Test-PublicPortalHealth)) { return $false }
+        if ($attempt -lt 3) { Start-Sleep -Seconds 10 }
+    }
+    return $true
+}
+
+function Invoke-PostBootRecoveryCheck {
+    Write-RecoveryEvent -Component "system" -Event "post_boot_check" -Status "started" -Action "none"
+    try {
+        Invoke-RecoveryCycle
+        if (-not (Test-PublicPortalHealthThreeTimes)) { throw "Public Portal health did not pass three checks." }
+        Write-RecoveryEvent -Component "system" -Event "post_boot_check" -Status "passed" -Action "none"
+    } catch {
+        Write-RecoveryEvent -Component "system" -Event "post_boot_check" -Status "failed" -Action "none"
+    }
+}
+
 function Start-CloudflareTunnel([switch]$ForceRestart) {
     if (Test-CloudflareTunnelService) {
         if (Test-CloudflareTunnelRunning) {
@@ -978,6 +997,7 @@ function Start-Supervisor {
         } catch {
             Write-Info "Initial stack bootstrap failed: $($_.Exception.Message)"
         }
+        Invoke-PostBootRecoveryCheck
 
         $rapidFailureCount = 0
         while ($true) {
