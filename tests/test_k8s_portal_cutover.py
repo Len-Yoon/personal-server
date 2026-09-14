@@ -132,6 +132,14 @@ class PortalCutoverContractTest(unittest.TestCase):
         self.assertNotIn("kubectl create secret generic portal-web-runtime --from-literal", text)
         self.assertNotRegex(text, r"trap[^\n]+EXIT")
 
+    def test_portal_service_has_observability_selector_label(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        marker = "kind: Service\nmetadata:\n  name: portal-web"
+        start = text.index(marker)
+        service = text[start : text.index("\nYAML", start)]
+
+        self.assertIn("labels:\n    app.kubernetes.io/name: portal-web", service)
+
     def test_secret_allowlist_requires_only_portal_core_keys(self):
         text = SCRIPT.read_text(encoding="utf-8")
         allowlist = text[text.index("secret_allowlist() {") : text.index("tree_digest() {")]
