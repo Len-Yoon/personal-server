@@ -117,10 +117,18 @@ Portal은 `/internal/metrics`에서 요청 수와 요청 지연시간 histogram�
 
 Prometheus 수집은 `infra/k8s/sre-telegram/portal-http-observability.yaml`의 `ServiceMonitor`를 별도 승인 후 적용함. 이 리소스는 `personal-server` namespace의 `app.kubernetes.io/name=portal-web` Service와 `http` port만 선택함. 인증은 monitoring namespace Secret `portal-http-metrics`의 `bearer_token` 키를 참조하며, 값은 문서·Git·로그에 기록하지 않음.
 
-적용 전에는 Portal runtime에 승인된 `PORTAL_METRICS_BEARER_TOKEN`이 주입됐는지 값 없이 확인하고, monitoring namespace의 Secret key 존재 여부와 ServiceMonitor dry-run만 수행함. Secret 생성·값 입력·Portal cutover·Caddy·Tunnel 변경은 별도 승인 범위임.
+Kubernetes Secret은 namespace 간 공유되지 않음. 따라서 동일한 승인된 bearer 값은 다음 두 Secret에 운영자 절차로 각각 시딩해야 함.
+
+| Namespace | Secret | Key | 사용처 |
+|---|---|---|---|
+| `monitoring` | `portal-http-metrics` | `bearer_token` | ServiceMonitor의 Prometheus scrape 인증 |
+| `personal-server` | `portal-http-metrics` | `bearer_token` | Portal Pod의 `PORTAL_METRICS_BEARER_TOKEN` 환경변수 |
+
+적용 전에는 두 namespace의 Secret key 존재 여부와 ServiceMonitor dry-run만 수행함. Portal Deployment에는 `personal-server/portal-http-metrics`의 `bearer_token`을 `PORTAL_METRICS_BEARER_TOKEN`으로 참조하는 환경변수만 추가함. 기존 `portal-web-runtime` Secret, Portal cutover, Caddy, Tunnel 변경은 별도 승인 범위임.
 
 ```bash
 kubectl -n monitoring get secret portal-http-metrics -o jsonpath='{.data.bearer_token}' >/dev/null
+kubectl -n personal-server get secret portal-http-metrics -o jsonpath='{.data.bearer_token}' >/dev/null
 kubectl -n personal-server get service portal-web -l app.kubernetes.io/name=portal-web
 kubectl -n monitoring apply --dry-run=client -f infra/k8s/sre-telegram/portal-http-observability.yaml >/dev/null
 ```
