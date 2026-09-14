@@ -74,6 +74,10 @@ CI artifact 확인·보존·결과 분류는 [작업 루프 증거 운영](agent
 
 ## 4. 실패 재시도 및 중단 기준
 
+### 4.0 N100 자동복구 적용 전후 확인
+
+N100 자동복구 변경은 적용 전후 `https://len.pe.kr/health`를 10초 간격으로 3회 호출해 모두 HTTP 200인지 확인함. 재시작 뒤 Supervisor의 `post_boot_check` 시작·완료·실패 이벤트와 기존 recovery event log를 확인하며, 초기 점검 자체로 새 Telegram 메시지를 보내지 않음을 확인함. Telegram 알림은 Cloudflare Tunnel 장애·복구 전환 경로만 대상으로 함.
+
 | 구분 | 기준 | 처리 |
 |---|---|---|
 | 재시도 | 실패 원인이 확인되고 최소 수정으로 해결 가능함 | 수정 후 관련 검증을 다시 실행함 |

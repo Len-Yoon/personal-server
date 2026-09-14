@@ -92,6 +92,12 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("Supervisor", uptime)
         self.assertIn("알림 미전송", uptime)
 
+    def test_reboot_docs_describe_post_boot_check_without_new_telegram_message(self):
+        uptime = Path("docs/public-uptime-monitor.md").read_text(encoding="utf-8")
+
+        self.assertIn("post_boot_check", uptime)
+        self.assertIn("Cloudflare Tunnel 장애·복구 전환", uptime)
+
     def test_n100_docs_document_reboot_limits_and_tunnel_service_recovery(self):
         n100 = Path("docs/n100-mt4-setup.md").read_text(encoding="utf-8")
         tunnel = Path("docs/cloudflare-tunnel.md").read_text(encoding="utf-8")
