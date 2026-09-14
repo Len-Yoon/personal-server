@@ -263,6 +263,24 @@ class MonitoringToolsTest(unittest.TestCase):
         self.assertTrue(result.stdout.rstrip().endswith("monitoring_dashboard=FAIL"))
         self.assertEqual(calls, "")
 
+    def test_dashboard_check_accepts_a_crlf_manifest(self):
+        original = DASHBOARD_MANIFEST.read_text(encoding="utf-8")
+        DASHBOARD_MANIFEST.write_bytes(original.replace("\n", "\r\n").encode("utf-8"))
+        try:
+            result, _ = self.run_tool(
+                "monitoring-dashboard-apply.sh",
+                "--check",
+                stubs={
+                    "sudo": "#!/bin/sh\ncase \"$*\" in\n"
+                    "  *'get deployment personal-server-monitoring-grafana'*) exit 0;;\n"
+                    "  *) exit 1;;\n"
+                    "esac\n",
+                },
+            )
+        finally:
+            DASHBOARD_MANIFEST.write_text(original, encoding="utf-8")
+        self.assertEqual(result.returncode, 0)
+
     def test_dashboard_apply_fails_when_server_dry_run_fails(self):
         result, calls = self.run_tool(
             "monitoring-dashboard-apply.sh", "--apply",
