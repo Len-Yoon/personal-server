@@ -7,6 +7,7 @@
 | 문서 | 사용할 때 |
 |---|---|
 | [현재 운영 로드맵](operations-roadmap.md) | 완료 기준과 향후 운영 개선 항목 확인 |
+| [SLI·SLO·에러 버짓 운영 기준](slo-baseline.md) | 현재 측정 가능한 운영 신호의 목표값·버짓·월간 검토 기준 확인 |
 | [안전한 복구 훈련](recovery-drill.md) | 월간 백업·알림·격리 Pod 복구 점검 |
 | [운영 참조](operations-reference.md) | 전체 서비스 구조, 공개 경로, 일상 상태 확인 |
 | [N100 운영 환경](n100-mt4-setup.md) | Windows·WSL2 자동 시작, 제한형 자동복구, 재부팅 뒤 확인, 자원 점검 |
