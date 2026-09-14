@@ -57,12 +57,20 @@ shutdown /a
 Windows PowerShell에서 자동복구 작업 상태를 확인함.
 
 ```powershell
-Get-ScheduledTask -TaskName personal-server-autostart
-Get-ScheduledTask -TaskName PersonalServer-WSL-KeepAlive
-Export-ScheduledTask -TaskName personal-server-autostart | Select-String 'ExecutionTimeLimit|RestartOnFailure|-Supervisor'
+$taskNames = 'PersonalServer-WSL-KeepAlive', 'personal-server-autostart'
+$actionContracts = @{
+  'PersonalServer-WSL-KeepAlive' = 'wsl.exe|Ubuntu-24.04|while true'
+  'personal-server-autostart' = 'windows-bootstrap.ps1|-Supervisor'
+}
+foreach ($taskName in $taskNames) {
+  Get-ScheduledTask -TaskName $taskName
+  $taskXml = Export-ScheduledTask -TaskName $taskName
+  $taskXml | Select-String 'BootTrigger|LogonType|Password|ExecutionTimeLimit|RestartOnFailure'
+  $taskXml | Select-String $actionContracts[$taskName]
+}
 ```
 
-정상 기준은 `PersonalServer-WSL-KeepAlive`와 `personal-server-autostart`가 모두 `Running`이고, 내보낸 작업 XML에 `BootTrigger`, `Password`, `ExecutionTimeLimit` `PT0S`, `RestartOnFailure`, `-Supervisor`가 모두 포함되는 것임. Daemon 재기동 검증은 Supervisor를 중지하지 않고 Daemon 자식만 종료한 뒤 Supervisor PID가 유지되고 새 Daemon PID가 생성되는지 확인함. 이 검증은 사용자 승인된 점검 창에서만 수행함.
+정상 기준은 `PersonalServer-WSL-KeepAlive`와 `personal-server-autostart`가 모두 `Running`이고, 두 작업의 내보낸 XML에 `BootTrigger`, `LogonType`의 `Password`, `ExecutionTimeLimit` `PT0S`, `RestartOnFailure`가 모두 포함되는 것임. KeepAlive XML은 `wsl.exe`, `Ubuntu-24.04`, `while true` action 계약을, Supervisor XML은 `windows-bootstrap.ps1`과 `-Supervisor` action 계약을 각각 포함해야 함. Daemon 재기동 검증은 Supervisor를 중지하지 않고 Daemon 자식만 종료한 뒤 Supervisor PID가 유지되고 새 Daemon PID가 생성되는지 확인함. 이 검증은 사용자 승인된 점검 창에서만 수행함.
 
 ## 재부팅 뒤 상태 확인
 
@@ -72,13 +80,20 @@ WSL에서 실행함.
 cd /mnt/c/personal-server
 systemctl --user is-active cloudflared-personal-server.service
 sudo k3s kubectl -n personal-server get deploy,pod,pvc
+failed=0
 for attempt in 1 2 3; do
-  curl --fail --silent --show-error https://len.pe.kr/health
+  http_code="$(curl --output /dev/null --silent --show-error --write-out '%{http_code}' https://len.pe.kr/health)"
+  curl_exit=$?
+  printf '외부 health %s회차: HTTP %s\n' "$attempt" "$http_code"
+  if [ "$curl_exit" -ne 0 ] || [ "$http_code" != "200" ]; then
+    failed=1
+  fi
   if [ "$attempt" -lt 3 ]; then sleep 10; fi
 done
+exit "$failed"
 ```
 
-`recovery-events.jsonl`에서 `post_boot_check`의 `passed` 결과를 확인한 뒤 위 외부 health 3회가 모두 HTTP 200이어야 함. 공개 주소가 실패하면 [Cloudflare Tunnel 운영 가이드](cloudflare-tunnel.md)의 1033·502 대응 절차를 따름.
+`recovery-events.jsonl`에서 `post_boot_check`의 `passed` 결과를 확인한 뒤 위 외부 health 3회가 모두 HTTP 200이어야 함. 각 probe는 HTTP 상태 코드를 출력하며, 전송 실패 또는 HTTP 200 이외의 코드가 하나라도 있으면 세 번째 probe까지 완료한 뒤 nonzero로 종료함. 공개 주소가 실패하면 [Cloudflare Tunnel 운영 가이드](cloudflare-tunnel.md)의 1033·502 대응 절차를 따름.
 
 ## 자원 확인
 

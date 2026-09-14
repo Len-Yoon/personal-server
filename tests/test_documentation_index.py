@@ -115,6 +115,13 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("Password", mt4)
         self.assertIn("로그인 없이", mt4)
 
+    def test_reboot_health_docs_require_exact_200_and_failure_exit(self):
+        mt4 = (ROOT / "docs" / "n100-mt4-setup.md").read_text(encoding="utf-8")
+
+        self.assertIn("curl --output /dev/null --silent --show-error --write-out '%{http_code}'", mt4)
+        self.assertIn('[ "$curl_exit" -ne 0 ] || [ "$http_code" != "200" ]', mt4)
+        self.assertIn('exit "$failed"', mt4)
+
     def test_n100_docs_document_reboot_limits_and_tunnel_service_recovery(self):
         n100 = Path("docs/n100-mt4-setup.md").read_text(encoding="utf-8")
         tunnel = Path("docs/cloudflare-tunnel.md").read_text(encoding="utf-8")
