@@ -985,13 +985,13 @@ function Install-KeepAliveTask([string]$RunAsUser) {
         $previousErrorActionPreference = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
         try {
-            $createOutput = (& schtasks.exe /Create /TN $KeepAliveTaskName /XML $temporaryTaskXml /RU $RunAsUser /RP * /F 2>&1 | Out-String)
+            & schtasks.exe /Create /TN $KeepAliveTaskName /XML $temporaryTaskXml /RU $RunAsUser /RP * /F 2>&1 | Out-Null
             $createExitCode = $LASTEXITCODE
         } finally {
             $ErrorActionPreference = $previousErrorActionPreference
         }
         if ($createExitCode -ne 0) {
-            throw "Failed to register scheduled task '$KeepAliveTaskName' (exit code $createExitCode): $($createOutput.Trim())"
+            throw "Failed to register scheduled task '$KeepAliveTaskName' (exit code $createExitCode)."
         }
     } finally {
         Remove-Item -LiteralPath $temporaryTaskXml -Force -ErrorAction SilentlyContinue

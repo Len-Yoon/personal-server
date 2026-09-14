@@ -39,6 +39,24 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertNotIn("/TR", installer)
         self.assertNotIn("InteractiveToken", installer)
 
+    def test_keepalive_registration_failure_does_not_emit_native_output_or_account_identity(self):
+        installer = SCRIPT[
+            SCRIPT.index("function Install-KeepAliveTask")
+            : SCRIPT.index("function Set-RecoveryTaskSettings")
+        ]
+        failure_path = installer[
+            installer.index("if ($createExitCode -ne 0)")
+            : installer.index("} finally", installer.index("if ($createExitCode -ne 0)"))
+        ]
+
+        self.assertIn(
+            'throw "Failed to register scheduled task \'$KeepAliveTaskName\' (exit code $createExitCode)."',
+            failure_path,
+        )
+        self.assertNotIn("$createOutput", failure_path)
+        self.assertNotIn("$RunAsUser", failure_path)
+        self.assertNotIn(".Trim()", failure_path)
+
     def test_install_task_registers_keepalive_before_supervisor(self):
         installer = SCRIPT[
             SCRIPT.index("function Install-ScheduledTask")
