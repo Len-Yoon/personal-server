@@ -13,12 +13,12 @@ fail() {
 verify_dashboard_contract() {
   [ -f "$DASHBOARD" ] || fail "dashboard manifest is missing: $DASHBOARD"
   ! grep -Eq '^(---|\.\.\.)([[:space:]]*(#.*)?)$' "$DASHBOARD" || fail "dashboard manifest must contain one document"
-  [ "$(grep -Ec '^apiVersion: v1$' "$DASHBOARD")" -eq 1 ] || fail "dashboard apiVersion contract is invalid"
-  [ "$(grep -Ec '^kind: ConfigMap$' "$DASHBOARD")" -eq 1 ] || fail "dashboard kind contract is invalid"
-  [ "$(grep -Ec '^  name: portal-http-observability$' "$DASHBOARD")" -eq 1 ] || fail "dashboard name contract is invalid"
-  [ "$(grep -Ec '^  namespace: monitoring$' "$DASHBOARD")" -eq 1 ] || fail "dashboard namespace contract is invalid"
-  [ "$(grep -Ec '^    grafana_dashboard: "1"$' "$DASHBOARD")" -eq 1 ] || fail "dashboard label contract is invalid"
-  [ "$(grep -Ec '^  portal-http-observability\.json:' "$DASHBOARD")" -eq 1 ] || fail "dashboard data contract is invalid"
+  [ "$(grep -Fxc 'apiVersion: v1' "$DASHBOARD")" -eq 1 ] || fail "dashboard apiVersion contract is invalid"
+  [ "$(grep -Fxc 'kind: ConfigMap' "$DASHBOARD")" -eq 1 ] || fail "dashboard kind contract is invalid"
+  [ "$(grep -Fxc '  name: portal-http-observability' "$DASHBOARD")" -eq 1 ] || fail "dashboard name contract is invalid"
+  [ "$(grep -Fxc '  namespace: monitoring' "$DASHBOARD")" -eq 1 ] || fail "dashboard namespace contract is invalid"
+  [ "$(grep -Fxc '    grafana_dashboard: "1"' "$DASHBOARD")" -eq 1 ] || fail "dashboard label contract is invalid"
+  [ "$(grep -Fc '  portal-http-observability.json:' "$DASHBOARD")" -eq 1 ] || fail "dashboard data contract is invalid"
   sudo k3s kubectl -n monitoring get deployment personal-server-monitoring-grafana >/dev/null \
     || fail "Grafana Deployment is unavailable"
 }
