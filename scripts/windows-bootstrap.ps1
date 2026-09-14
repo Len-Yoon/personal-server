@@ -10,6 +10,8 @@ $ErrorActionPreference = "Stop"
 
 $ScriptPath = Join-Path $ProjectRoot "scripts\windows-bootstrap.ps1"
 $TaskName = "personal-server-autostart"
+$KeepAliveTaskName = "PersonalServer-WSL-KeepAlive"
+$KeepAliveTaskAction = 'wsl.exe -d Ubuntu-24.04 -u root --exec /bin/bash -lc "while true; do sleep 3600; done"'
 $WslDistribution = "Ubuntu-24.04"
 $WslServiceUser = "window"
 $CloudflareTunnelService = "cloudflared-personal-server.service"
@@ -926,6 +928,13 @@ function Request-EmergencyReboot([string]$Component) {
     return $true
 }
 
+function Install-KeepAliveTask([string]$RunAsUser) {
+    $createOutput = (& schtasks.exe /Create /TN $KeepAliveTaskName /SC ONSTART /RU $RunAsUser /RP * /TR $KeepAliveTaskAction /RL LIMITED /F 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to register scheduled task '$KeepAliveTaskName'."
+    }
+}
+
 function Set-RecoveryTaskSettings {
     $scheduledTask = Get-ScheduledTask -TaskName $TaskName
     $settings = $scheduledTask.Settings
@@ -937,8 +946,9 @@ function Set-RecoveryTaskSettings {
 
 function Install-ScheduledTask {
     Install-EmergencyRebootTask
-    $taskAction = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -Supervisor"
     $runAsUser = "$env:USERDOMAIN\$env:USERNAME"
+    Install-KeepAliveTask -RunAsUser $runAsUser
+    $taskAction = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -Supervisor"
     Write-Info "Registering startup task for $runAsUser. Windows will prompt for the account password."
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
