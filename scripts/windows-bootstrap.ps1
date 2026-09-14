@@ -16,6 +16,7 @@ $CloudflareTunnelService = "cloudflared-personal-server.service"
 $TunnelTelegramCredentialTarget = "personal-server-tunnel-telegram"
 $CaddyContainerName = "personal-server-caddy-1"
 $RecoveryIntervalSeconds = 180
+$RecoveryStartupDelaySeconds = 120
 $RecoveryFailureThreshold = 2
 $RecoveryMaxAttempts = 3
 $RecoveryCommandTimeoutSeconds = 20
@@ -277,7 +278,10 @@ function Invoke-PostBootRecoveryCheck {
     Write-RecoveryEvent -Component "system" -Event "post_boot_check" -Status "started" -Action "none"
     try {
         Invoke-RecoveryCycle
-        if (-not (Test-PublicPortalHealthThreeTimes)) { throw "Public Portal health did not pass three checks." }
+        if (-not (Test-PublicPortalHealthThreeTimes)) {
+            Invoke-RecoveryCycle -ForceTunnelUnhealthy
+            throw "Public Portal health did not pass three checks."
+        }
         Write-RecoveryEvent -Component "system" -Event "post_boot_check" -Status "passed" -Action "none"
     } catch {
         Write-RecoveryEvent -Component "system" -Event "post_boot_check" -Status "failed" -Action "none"
@@ -683,6 +687,8 @@ function Exit-RecoveryLock($LockStream) {
 }
 
 function Invoke-RecoveryCycle {
+    param([switch]$ForceTunnelUnhealthy)
+
     $lockStream = Enter-RecoveryLock
     if ($null -eq $lockStream) {
         Write-Info "Recovery cycle is already running; skipping this interval."
@@ -694,6 +700,9 @@ function Invoke-RecoveryCycle {
             Load-RecoveryFailureState
         }
         $health = Get-RecoveryHealth
+        if ($ForceTunnelUnhealthy) {
+            $health.tunnel = "unhealthy"
+        }
         if ($RecoveryStateDirty) {
             Write-Info "Recovery state is unsaved; retaining in-memory counters and blocking automated recovery until restart or operator action."
             return
@@ -991,7 +1000,7 @@ function Start-Supervisor {
             Write-Info "Initial host metrics update failed; continuing startup."
         }
         Write-Info "Waiting 120 seconds for WSL and Docker after logon."
-        Start-Sleep -Seconds 120
+        Start-Sleep -Seconds $RecoveryStartupDelaySeconds
         try {
             Start-PersonalServerStack
         } catch {

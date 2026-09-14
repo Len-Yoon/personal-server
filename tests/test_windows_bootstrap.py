@@ -48,23 +48,55 @@ class WindowsBootstrapTests(unittest.TestCase):
         ]
 
         self.assertIn("Waiting 120 seconds for WSL and Docker after logon.", supervisor)
-        self.assertIn("Start-Sleep -Seconds 120", supervisor)
+        self.assertIn("Start-Sleep -Seconds $RecoveryStartupDelaySeconds", supervisor)
         self.assertNotIn("Waiting 120 seconds for WSL and Docker after logon.", daemon)
 
     def test_supervisor_runs_one_post_boot_check_before_starting_daemon(self):
         supervisor = SCRIPT[
             SCRIPT.index("function Start-Supervisor") : SCRIPT.index("function Enter-DaemonLock")
         ]
-        self.assertIn("Invoke-PostBootRecoveryCheck", supervisor)
+        self.assertIn("$RecoveryStartupDelaySeconds = 120", SCRIPT)
+        self.assertIn("Start-Sleep -Seconds $RecoveryStartupDelaySeconds", supervisor)
+        self.assertEqual(supervisor.count("Invoke-PostBootRecoveryCheck"), 1)
+        self.assertLess(
+            supervisor.index("Start-Sleep -Seconds $RecoveryStartupDelaySeconds"),
+            supervisor.index("Invoke-PostBootRecoveryCheck"),
+        )
         self.assertLess(
             supervisor.index("Invoke-PostBootRecoveryCheck"),
             supervisor.index("Start-Process"),
         )
 
     def test_post_boot_public_health_requires_three_checks(self):
-        self.assertIn("function Test-PublicPortalHealthThreeTimes", SCRIPT)
-        self.assertIn("for ($attempt = 1; $attempt -le 3; $attempt++)", SCRIPT)
-        self.assertIn("Start-Sleep -Seconds 10", SCRIPT)
+        health_check = SCRIPT[
+            SCRIPT.index("function Test-PublicPortalHealthThreeTimes") : SCRIPT.index("function Invoke-PostBootRecoveryCheck")
+        ]
+        self.assertIn("for ($attempt = 1; $attempt -le 3; $attempt++)", health_check)
+        self.assertEqual(health_check.count("(Test-PublicPortalHealth)"), 1)
+        self.assertIn("if ($attempt -lt 3) { Start-Sleep -Seconds 10 }", health_check)
+
+    def test_post_boot_health_failure_forces_existing_tunnel_recovery_path(self):
+        post_boot = SCRIPT[
+            SCRIPT.index("function Invoke-PostBootRecoveryCheck") : SCRIPT.index("function Start-CloudflareTunnel")
+        ]
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle") : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+        self.assertIn("Invoke-RecoveryCycle -ForceTunnelUnhealthy", post_boot)
+        self.assertIn("param([switch]$ForceTunnelUnhealthy)", cycle)
+        self.assertIn('$health.tunnel = "unhealthy"', cycle)
+
+    def test_post_boot_check_failure_is_caught_before_daemon_start(self):
+        post_boot = SCRIPT[
+            SCRIPT.index("function Invoke-PostBootRecoveryCheck") : SCRIPT.index("function Start-CloudflareTunnel")
+        ]
+        supervisor = SCRIPT[
+            SCRIPT.index("function Start-Supervisor") : SCRIPT.index("function Enter-DaemonLock")
+        ]
+        self.assertIn("try {", post_boot)
+        self.assertIn('Status "failed"', post_boot)
+        self.assertIn("Invoke-PostBootRecoveryCheck", supervisor)
+        self.assertLess(supervisor.index("Invoke-PostBootRecoveryCheck"), supervisor.index("Start-Process"))
 
     def test_supervisor_uses_a_distinct_lifetime_lock_to_prevent_duplicate_daemons(self):
         self.assertIn("function Enter-SupervisorLock", SCRIPT)
