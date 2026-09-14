@@ -12,6 +12,59 @@ WSL_SCRIPT = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf
 
 
 class WindowsBootstrapTests(unittest.TestCase):
+    def test_install_task_registers_keepalive_at_boot_without_interactive_token(self):
+        installer = SCRIPT[
+            SCRIPT.index("function Install-KeepAliveTask")
+            : SCRIPT.index("function Set-RecoveryTaskSettings")
+        ]
+        self.assertIn('$KeepAliveTaskName = "PersonalServer-WSL-KeepAlive"', SCRIPT)
+        self.assertIn('$temporaryTaskXml = Join-Path $env:TEMP "$KeepAliveTaskName.xml"', installer)
+        self.assertIn('$escapedRunAsUser = [System.Security.SecurityElement]::Escape($RunAsUser)', installer)
+        self.assertIn('Set-Content -LiteralPath $temporaryTaskXml -Value $taskXml -Encoding unicode', installer)
+        self.assertIn('schtasks.exe /Create /TN $KeepAliveTaskName /XML $temporaryTaskXml /RU $RunAsUser /RP * /F', installer)
+        for token in (
+            "<BootTrigger>",
+            "<LogonType>Password</LogonType>",
+            "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
+            "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>",
+            "<RestartOnFailure>",
+            "<Interval>PT1M</Interval>",
+            "<Count>3</Count>",
+            "<Command>C:\\Windows\\System32\\wsl.exe</Command>",
+            '<Arguments>-d Ubuntu-24.04 -u root --exec /bin/bash -lc "while true; do sleep 3600; done"</Arguments>',
+            'Remove-Item -LiteralPath $temporaryTaskXml -Force -ErrorAction SilentlyContinue',
+        ):
+            self.assertIn(token, installer)
+        self.assertNotIn("/SC ONSTART", installer)
+        self.assertNotIn("/TR", installer)
+        self.assertNotIn("InteractiveToken", installer)
+
+    def test_keepalive_registration_failure_does_not_emit_native_output_or_account_identity(self):
+        installer = SCRIPT[
+            SCRIPT.index("function Install-KeepAliveTask")
+            : SCRIPT.index("function Set-RecoveryTaskSettings")
+        ]
+        failure_path = installer[
+            installer.index("if ($createExitCode -ne 0)")
+            : installer.index("} finally", installer.index("if ($createExitCode -ne 0)"))
+        ]
+
+        self.assertIn(
+            'throw "Failed to register scheduled task \'$KeepAliveTaskName\' (exit code $createExitCode)."',
+            failure_path,
+        )
+        self.assertNotIn("$createOutput", failure_path)
+        self.assertNotIn("$RunAsUser", failure_path)
+        self.assertNotIn(".Trim()", failure_path)
+
+    def test_install_task_registers_keepalive_before_supervisor(self):
+        installer = SCRIPT[
+            SCRIPT.index("function Install-ScheduledTask")
+            : SCRIPT.index("\nLoad-RecoveryFailureState")
+        ]
+        self.assertIn("Install-KeepAliveTask", installer)
+        self.assertLess(installer.index("Install-KeepAliveTask"), installer.index("$taskAction ="))
+
     def test_scheduled_task_runs_a_supervisor_that_restarts_the_daemon(self):
         self.assertIn("function Start-Supervisor", SCRIPT)
         installer = SCRIPT[

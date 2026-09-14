@@ -2,6 +2,9 @@ from pathlib import Path
 import unittest
 
 
+ROOT = Path(".")
+
+
 class DocumentationIndexTests(unittest.TestCase):
     def test_project_readme_exposes_quick_start_verification_and_next_steps(self):
         content = Path("README.md").read_text(encoding="utf-8")
@@ -104,6 +107,20 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("저장소 구현은 완료되었으나 N100에는 아직 적용·검증하지 않음", uptime)
         self.assertIn("사용자 승인 후 병합·적용", uptime)
         self.assertIn("적용 후 event log와 외부 health 3회 모두 HTTP 200을 확인", uptime)
+
+    def test_reboot_docs_require_boot_trigger_keepalive_and_password_prompt(self):
+        mt4 = (ROOT / "docs" / "n100-mt4-setup.md").read_text(encoding="utf-8")
+
+        self.assertIn("BootTrigger", mt4)
+        self.assertIn("Password", mt4)
+        self.assertIn("로그인 없이", mt4)
+
+    def test_reboot_health_docs_require_exact_200_and_failure_exit(self):
+        mt4 = (ROOT / "docs" / "n100-mt4-setup.md").read_text(encoding="utf-8")
+
+        self.assertIn("curl --output /dev/null --silent --show-error --write-out '%{http_code}'", mt4)
+        self.assertIn('[ "$curl_exit" -ne 0 ] || [ "$http_code" != "200" ]', mt4)
+        self.assertIn('exit "$failed"', mt4)
 
     def test_n100_docs_document_reboot_limits_and_tunnel_service_recovery(self):
         n100 = Path("docs/n100-mt4-setup.md").read_text(encoding="utf-8")
