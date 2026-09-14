@@ -28,6 +28,12 @@ N100 감시기는 `cloudflared-personal-server.service`의 상태와 Tunnel 프�
 
 Windows 예약 작업은 Supervisor를 하나만 실행하며, Supervisor는 초기 120초 대기 뒤 3분 주기 Daemon을 자식으로 관리함. Daemon이 비정상 종료되면 15초 뒤 재기동하고, Supervisor·Daemon 잠금으로 중복 실행을 막음. N100 Tunnel은 로컬 NodePort·서비스·프로세스·공개 health가 모두 정상일 때만 정상으로 판정하며, NodePort 장애는 Tunnel 알림·재기동 대상에서 제외함. 이 구조는 Tunnel 감시가 Daemon 종료나 active-but-disconnected 상태에서 멈추지 않게 하는 보완 경로이며, N100 전원·네트워크·WSL 또는 Windows 작업 스케줄러 자체가 동작하지 않는 경우는 복구·직접 알림 범위 밖임.
 
+### 재시작 뒤 초기 점검
+
+Supervisor는 Windows 재시작 뒤 초기 대기 후 `post_boot_check`를 정확히 1회 수행함. 초기 점검은 WSL, K3s, Portal 상태를 확인하고, Tunnel이 정상인 경우 `https://len.pe.kr/health`를 10초 간격으로 3회 호출해 모두 HTTP 200인지 확인함. 시작·완료·실패 결과는 `recovery-events.jsonl`에 이벤트로만 기록하며, 재시작 또는 초기 점검 자체에 대한 신규 Telegram 메시지는 발송하지 않음. Telegram은 기존 정책대로 Cloudflare Tunnel 장애·복구 전환에만 사용함.
+
+위 `post_boot_check`는 저장소 구현은 완료되었으나 N100에는 아직 적용·검증하지 않음. N100 적용은 사용자 승인 후 병합·적용해야 하며, 적용 후 event log와 외부 health 3회 모두 HTTP 200을 확인해야 운영 적용 완료로 판단함.
+
 N100 알림 자격증명은 `window` 사용자 계정의 Windows Credential Manager에서 `personal-server-tunnel-telegram` 대상을 읽음. 일반 자격 증명의 사용자 이름에는 Telegram Chat ID를, 암호에는 Bot token을 입력함. 실제 값은 명령 출력·문서·로그에 표시하지 않음.
 
 | 항목 | 기준 |
@@ -43,7 +49,7 @@ N100 알림 자격증명은 `window` 사용자 계정의 Windows Credential Mana
 
 ### N100 자동복구 이력 확인
 
-N100 감시기는 장애 감지·복구 요청·조치 실행 결과·Tunnel 알림 전환만 `C:\personal-server\data\recovery-events.jsonl`에 기록함. 정상 주기 점검은 기록하지 않으며 최근 200건만 유지함. 조치 실행 결과가 `accepted`여도 실제 정상 복구는 다음 점검의 `health_restored` 이벤트로만 확인함. 각 행에는 UTC 저장 시각, 구성요소, 이벤트, 결과, 수행 동작만 포함하고 자격증명·명령 인수·Telegram 응답은 기록하지 않음.
+N100 감시기는 장애 감지·복구 요청·조치 실행 결과·Tunnel 알림 전환과 `post_boot_check` 결과만 `C:\personal-server\data\recovery-events.jsonl`에 기록함. 정상 주기 점검은 기록하지 않으며 최근 200건만 유지함. 조치 실행 결과가 `accepted`여도 실제 정상 복구는 다음 점검의 `health_restored` 이벤트로만 확인함. 각 행에는 UTC 저장 시각, 구성요소, 이벤트, 결과, 수행 동작만 포함하고 자격증명·명령 인수·Telegram 응답은 기록하지 않음.
 
 Windows PowerShell에서 최근 이력을 화면 확인용 시각으로 보려면 다음 읽기 전용 명령을 사용함.
 

@@ -16,6 +16,7 @@ $CloudflareTunnelService = "cloudflared-personal-server.service"
 $TunnelTelegramCredentialTarget = "personal-server-tunnel-telegram"
 $CaddyContainerName = "personal-server-caddy-1"
 $RecoveryIntervalSeconds = 180
+$RecoveryStartupDelaySeconds = 120
 $RecoveryFailureThreshold = 2
 $RecoveryMaxAttempts = 3
 $RecoveryCommandTimeoutSeconds = 20
@@ -52,12 +53,13 @@ function ConvertTo-WslArgument([string]$Argument) {
     return '"' + $Argument.Replace('"', '\"') + '"'
 }
 
-function Invoke-WslWithTimeout([string[]]$Arguments, [string]$Operation) {
+function Invoke-WslWithTimeout([string[]]$Arguments, [string]$Operation, [switch]$CaptureOutput) {
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = "wsl.exe"
     $startInfo.Arguments = (($Arguments | ForEach-Object { ConvertTo-WslArgument ([string]$_) }) -join " ")
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = [bool]$CaptureOutput
 
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
@@ -77,6 +79,9 @@ function Invoke-WslWithTimeout([string[]]$Arguments, [string]$Operation) {
     if ($process.ExitCode -ne 0) {
         Write-Info "$Operation failed with exit code $($process.ExitCode)."
         return $false
+    }
+    if ($CaptureOutput) {
+        return $process.StandardOutput.ReadToEnd().Trim()
     }
     return $true
 }
@@ -259,10 +264,34 @@ function Test-CloudflareTunnelService {
 }
 
 function Test-PublicPortalHealth {
-    return (Invoke-WslWithTimeout -Arguments @(
+    $status = Invoke-WslWithTimeout -CaptureOutput -Arguments @(
         "-d", $WslDistribution, "--",
-        "curl", "--fail", "--silent", "--show-error", "--max-time", "15", "https://len.pe.kr/health"
-    ) -Operation "Public Portal health probe")
+        "curl", "--silent", "--show-error", "--output", "/dev/null", "--write-out", "%{http_code}", "--max-time", "15", "https://len.pe.kr/health"
+    ) -Operation "Public Portal health probe"
+    return ($status -eq "200")
+}
+
+function Test-PublicPortalHealthThreeTimes {
+    $allPassed = $true
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        if (-not (Test-PublicPortalHealth)) { $allPassed = $false }
+        if ($attempt -lt 3) { Start-Sleep -Seconds 10 }
+    }
+    return $allPassed
+}
+
+function Invoke-PostBootRecoveryCheck {
+    Write-RecoveryEvent -Component "system" -Event "post_boot_check" -Status "started" -Action "none"
+    try {
+        $health = Invoke-RecoveryCycle -RequirePublicPortalHealth
+        $unhealthyComponents = @($RecoveryComponents | Where-Object { $health[$_] -ne "healthy" })
+        if ($null -eq $health -or $unhealthyComponents.Count -gt 0) {
+            throw "Post-boot recovery health did not pass for every required component."
+        }
+        Write-RecoveryEvent -Component "system" -Event "post_boot_check" -Status "passed" -Action "none"
+    } catch {
+        Write-RecoveryEvent -Component "system" -Event "post_boot_check" -Status "failed" -Action "none"
+    }
 }
 
 function Start-CloudflareTunnel([switch]$ForceRestart) {
@@ -332,6 +361,8 @@ function Start-PersonalServerStack {
 }
 
 function Get-RecoveryHealth {
+    param([switch]$RequirePublicPortalHealth)
+
     $health = [ordered]@{
         keepalive = "unhealthy"
         k3s = "unhealthy"
@@ -364,7 +395,12 @@ function Get-RecoveryHealth {
 
     if ($health.nodeport -eq "healthy") {
         $health.tunnel = "unhealthy"
-        if ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning) -and (Test-PublicPortalHealth)) {
+        $publicHealthPassed = if ($RequirePublicPortalHealth) {
+            Test-PublicPortalHealthThreeTimes
+        } else {
+            Test-PublicPortalHealth
+        }
+        if ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning) -and $publicHealthPassed) {
             $health.tunnel = "healthy"
         }
     }
@@ -664,25 +700,27 @@ function Exit-RecoveryLock($LockStream) {
 }
 
 function Invoke-RecoveryCycle {
+    param([switch]$RequirePublicPortalHealth)
+
     $lockStream = Enter-RecoveryLock
     if ($null -eq $lockStream) {
         Write-Info "Recovery cycle is already running; skipping this interval."
-        return
+        return $null
     }
 
     try {
         if (-not $RecoveryStateDirty) {
             Load-RecoveryFailureState
         }
-        $health = Get-RecoveryHealth
+        $health = Get-RecoveryHealth -RequirePublicPortalHealth:$RequirePublicPortalHealth
         if ($RecoveryStateDirty) {
             Write-Info "Recovery state is unsaved; retaining in-memory counters and blocking automated recovery until restart or operator action."
-            return
+            return $null
         }
         Update-TunnelTelegramNotification $health.tunnel
         if ($RecoveryStateDirty) {
             Write-Info "Recovery state is unsaved; skipping automated recovery actions this cycle."
-            return
+            return $null
         }
         foreach ($component in $RecoveryComponents) {
             if ($health[$component] -eq "healthy") {
@@ -743,11 +781,15 @@ function Invoke-RecoveryCycle {
                 }
                 if (Test-EmergencyRebootEligible $component) {
                     if (Request-EmergencyReboot $component) {
-                        return
+                        return $null
                     }
                 }
             }
         }
+        if ($RecoveryStateDirty) {
+            return $null
+        }
+        return $health
     } finally {
         Exit-RecoveryLock $lockStream
     }
@@ -972,12 +1014,13 @@ function Start-Supervisor {
             Write-Info "Initial host metrics update failed; continuing startup."
         }
         Write-Info "Waiting 120 seconds for WSL and Docker after logon."
-        Start-Sleep -Seconds 120
+        Start-Sleep -Seconds $RecoveryStartupDelaySeconds
         try {
             Start-PersonalServerStack
         } catch {
             Write-Info "Initial stack bootstrap failed: $($_.Exception.Message)"
         }
+        Invoke-PostBootRecoveryCheck
 
         $rapidFailureCount = 0
         while ($true) {
