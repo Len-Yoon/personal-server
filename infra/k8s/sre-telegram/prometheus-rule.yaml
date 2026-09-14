@@ -53,6 +53,24 @@ spec:
           annotations:
             summary: "Prometheus target down"
             description: "Prometheus scrape target이 5분 동안 UP이 아님"
+        - alert: PortalHttp5xxErrorRateHigh
+          expr: (sum(rate(portal_http_requests_total{status_code=~"5.."}[5m])) / clamp_min(sum(rate(portal_http_requests_total[5m])), 1)) > 0.01 and sum(rate(portal_http_requests_total[5m])) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+            sre_telegram: "true"
+          annotations:
+            summary: "Portal HTTP 5xx 오류율 높음"
+            description: "최근 5분 기준 5xx 비율이 1%를 초과했고 요청량이 충분한 상태가 5분 지속됨"
+        - alert: PortalHttpP95LatencyHigh
+          expr: histogram_quantile(0.95, sum by (le) (rate(portal_http_request_duration_seconds_bucket[5m]))) > 1
+          for: 5m
+          labels:
+            severity: warning
+            sre_telegram: "true"
+          annotations:
+            summary: "Portal HTTP p95 응답 지연"
+            description: "최근 5분 기준 Portal HTTP p95 응답 시간이 1초를 초과한 상태가 5분 지속됨"
         - alert: NewsCollectionStale
           expr: >-
             crawler_news_collection_initialized == 1
