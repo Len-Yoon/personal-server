@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,7 +14,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", remote_error="", remote_timeout_attempts=0, rclone_timeout=None, rclone_retry_count=None, rclone_retry_backoff=None, missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", readiness_timeout=None, assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host"):
+    def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", remote_error="", remote_timeout_attempts=0, rclone_timeout=None, rclone_retry_count=None, rclone_retry_backoff=None, missing_pvc=False, repeat=False, second_runtime=None, second_evidence_remaining=None, second_evidence_age=None, second_fail_at=None, refresh_window=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", readiness_timeout=None, assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -105,6 +106,8 @@ exit 0
             }
             if readiness_timeout is not None:
                 env["PORTAL_READINESS_TIMEOUT_SECONDS"] = str(readiness_timeout)
+            if refresh_window is not None:
+                env["PORTAL_BACKUP_EVIDENCE_REFRESH_WINDOW_SECONDS"] = str(refresh_window)
             if rclone_timeout is not None:
                 env["PORTAL_RCLONE_TIMEOUT_SECONDS"] = str(rclone_timeout)
             if rclone_retry_count is not None:
@@ -141,6 +144,18 @@ exit 0
             else:
                 result = subprocess.run(["bash", str(SCRIPT), mode], env=env, capture_output=True, text=True)
             if repeat:
+                self.assertEqual(result.returncode, 0, result.stderr)
+                if second_evidence_remaining is not None or second_evidence_age is not None:
+                    values = dict(line.split("=", 1) for line in evidence.read_text(encoding="utf-8").splitlines())
+                    now = datetime.now(timezone.utc)
+                    if second_evidence_remaining is not None:
+                        values["evidence_expires_at"] = (now + timedelta(seconds=second_evidence_remaining)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    if second_evidence_age is not None:
+                        for key in ("backup_completed_at", "restore_verified_at"):
+                            values[key] = (now - timedelta(seconds=second_evidence_age)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    evidence.write_text("".join(f"{key}={value}\n" for key, value in values.items()), encoding="utf-8")
+                if second_fail_at is not None:
+                    env["PORTAL_FAKE_FAIL_AT"] = second_fail_at
                 if second_runtime is not None and evidence.exists():
                     evidence.write_text(
                         evidence.read_text(encoding="utf-8").replace(
@@ -866,6 +881,56 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
         self.assertEqual(calls.count("rclone copyto"), 4)
+
+    def test_near_expiry_evidence_requires_new_backup_and_restore(self):
+        """Reusing evidence that expires eight minutes later must not skip the daily refresh."""
+        result, calls, _, evidence = self.run_tool(repeat=True, second_evidence_remaining=480)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
+        self.assertIn("portal_pvc_backup_stage=remote_upload", result.stdout)
+        self.assertIn("portal_pvc_backup_stage=restore_validation", result.stdout)
+        self.assertEqual(calls.count("rclone copyto"), 4)
+        values = dict(line.split("=", 1) for line in evidence.splitlines())
+        expiry = datetime.strptime(values["evidence_expires_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        self.assertGreater((expiry - datetime.now(timezone.utc)).total_seconds(), 86000)
+
+    def test_near_max_age_evidence_requires_new_backup_despite_later_expiry(self):
+        """A distant explicit expiry must not conceal the backup age limit."""
+        result, calls, _, _ = self.run_tool(repeat=True, second_evidence_age=86000)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
+        self.assertEqual(calls.count("rclone copyto"), 4)
+
+    def test_future_backup_and_restore_timestamps_are_not_reused(self):
+        """Checking only the future refresh deadline must not accept future-dated evidence."""
+        result, calls, _, _ = self.run_tool(repeat=True, second_evidence_age=-300)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
+        self.assertIn("portal_pvc_backup_stage=restore_validation", result.stdout)
+        self.assertEqual(calls.count("rclone copyto"), 4)
+
+    def test_refresh_window_override_controls_unchanged_skip(self):
+        """Valid overrides affect reuse while evidence remains outside the configured window."""
+        result, calls, _, _ = self.run_tool(repeat=True, second_evidence_remaining=7200, refresh_window=10800)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
+        self.assertEqual(calls.count("rclone copyto"), 4)
+
+    def test_failed_near_expiry_refresh_does_not_extend_evidence(self):
+        """Upload failure during renewal must not produce fresh success evidence."""
+        result, calls, _, evidence = self.run_tool(repeat=True, second_evidence_remaining=480, second_fail_at="upload")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
+        self.assertEqual(evidence, "")
+        self.assertIn("scale deployment/portal-web --replicas=1", calls)
+
+    def test_invalid_refresh_window_blocks_before_writer_scaling(self):
+        """Malformed or unbounded overrides must fail before any writer downtime."""
+        for value in ("0", "-1", "86401", "3600x", "03600", "999999999999999999999999"):
+            with self.subTest(value=value):
+                result, calls, _, _ = self.run_tool(refresh_window=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("scale deployment/portal-web", calls)
 
     def test_go_stream_failure_restores_original_replica_and_deletes_reader(self):
         result, calls, _, evidence = self.run_tool("--go", fail_at="stream")

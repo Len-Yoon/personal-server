@@ -25,6 +25,7 @@ else
 fi
 REMOTE=${PORTAL_BACKUP_REMOTE:-gdrive:PersonalServer-encrypted-backups}
 MAX_AGE=${PORTAL_BACKUP_MAX_AGE_SECONDS:-86400}
+EVIDENCE_REFRESH_WINDOW_SECONDS=${PORTAL_BACKUP_EVIDENCE_REFRESH_WINDOW_SECONDS:-3600}
 READINESS_TIMEOUT_SECONDS=${PORTAL_READINESS_TIMEOUT_SECONDS:-300}
 RCLONE_PREFLIGHT_TIMEOUT_SECONDS=${PORTAL_RCLONE_TIMEOUT_SECONDS:-30}
 RCLONE_PREFLIGHT_RETRY_COUNT=${PORTAL_RCLONE_PREFLIGHT_RETRY_COUNT:-1}
@@ -152,6 +153,8 @@ assert_regular_tree() {
 assert_preflight() {
   [ "$NAMESPACE" = personal-server ] || return 1
   [ "$MAX_AGE" -ge 1 ] 2>/dev/null || return 1
+  case "$EVIDENCE_REFRESH_WINDOW_SECONDS" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
+  [ "$EVIDENCE_REFRESH_WINDOW_SECONDS" -ge 1 ] && [ "$EVIDENCE_REFRESH_WINDOW_SECONDS" -le 86400 ] || return 1
   case "$READINESS_TIMEOUT_SECONDS" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
   [ "$READINESS_TIMEOUT_SECONDS" -ge 120 ] && [ "$READINESS_TIMEOUT_SECONDS" -le 600 ] || return 1
   case "$RCLONE_PREFLIGHT_TIMEOUT_SECONDS" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
@@ -368,7 +371,12 @@ stream_pvc_tree() {
 evidence_is_current_k3s_pvc() {
   [ -f "$EVIDENCE" ] || return 1
   python3 "$SCRIPT_DIR/validate-backup-evidence.py" --evidence "$EVIDENCE" --max-age-seconds "$MAX_AGE" >/dev/null 2>&1 || return 1
-  local evidence_digest evidence_runtime
+  # Reuse must remain valid through the refresh window, including both the
+  # explicit expiry and maximum backup/restore age. Otherwise perform the full
+  # upload and restore verification before producing fresh evidence.
+  local reuse_until evidence_digest evidence_runtime
+  reuse_until=$(python3 -c 'import sys; from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) + timedelta(seconds=int(sys.argv[1]))).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$EVIDENCE_REFRESH_WINDOW_SECONDS") || return 1
+  python3 "$SCRIPT_DIR/validate-backup-evidence.py" --evidence "$EVIDENCE" --max-age-seconds "$MAX_AGE" --now "$reuse_until" >/dev/null 2>&1 || return 1
   evidence_digest=$(awk -F= '$1 == "source_digest" { print $2 }' "$EVIDENCE")
   evidence_runtime=$(awk -F= '$1 == "source_runtime" { print $2 }' "$EVIDENCE")
   [ "$evidence_digest" = "$SOURCE_DIGEST" ] && [ "$evidence_runtime" = k3s-pvc ]
