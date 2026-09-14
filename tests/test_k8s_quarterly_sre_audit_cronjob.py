@@ -238,7 +238,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                     os.killpg(process.pid, 15)
                     process.wait(timeout=2)
 
-    def run_runner(self, *, evidence, scenario="", patch_fails=False, report_mode="official"):
+    def run_runner(self, *, evidence, scenario="", patch_fails=False, report_mode="official", recovery_timeout="2", fast_recovery_clock=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             command = root / "kubectl"
@@ -249,6 +249,15 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
             command.write_text(
                 "#!/bin/sh\n"
                 "printf '%s\\n' \"$*\" >> \"$CALLS\"\n"
+                "if [ \"$SCENARIO\" = delayed-projection ] && [ -f \"$TRIGGERED\" ]; then\n"
+                "  case \"$*\" in *'get pod recovery-pod'*'containerStatuses'*)\n"
+                "    n=$(cat \"$COUNTER\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$COUNTER\"\n"
+                "    if [ \"$n\" -le 4 ]; then printf 'uid-1|Running||True|recovery=containerd://before=0;'\n"
+                "    elif [ \"$n\" -eq 5 ]; then printf 'uid-1|Running||False|recovery=containerd://before=0;'\n"
+                "    else printf 'uid-1|Running||True|recovery=containerd://after=1;'; fi\n"
+                "    exit 0 ;;\n"
+                "  esac\n"
+                "fi\n"
                 "case \"$*\" in\n"
                 "  *'get nodes'*) printf 'node Ready worker' ;;\n"
                 "  *'get configmap portal-pvc-backup-evidence'*) [ \"$SCENARIO\" = configmap-fail ] && exit 1; printf '%s\\n' \"$EVIDENCE\"; exit 0 ;;\n"
@@ -279,10 +288,21 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
             command.chmod(0o755)
             date.chmod(0o755)
             (root / "sleep").chmod(0o755)
+            timing_env = {"QUARTERLY_SRE_AUDIT_RECOVERY_TIMEOUT_SECONDS": recovery_timeout}
+            if recovery_timeout is None:
+                timing_env = {}
+            if fast_recovery_clock:
+                # Advance the real runner's Bash clock without waiting minutes.
+                clock = root / "clock.bash"
+                clock.write_text("sleep() { SECONDS=$((SECONDS + 30)); }\n", encoding="utf-8")
+                timing_env["BASH_ENV"] = str(clock)
+            inherited_env = os.environ.copy()
+            inherited_env.pop("QUARTERLY_SRE_AUDIT_RECOVERY_TIMEOUT_SECONDS", None)
+            inherited_env.pop("BASH_ENV", None)
             result = subprocess.run(
                 ["bash", str(RUNNER)],
                 env={
-                    **os.environ,
+                    **inherited_env,
                     "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
                     "CALLS": str(calls),
                     "REPLICAS": str(root / "replicas"),
@@ -295,7 +315,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                     "DIAGNOSTICS": str(diagnostics),
                     "QUARTERLY_SRE_AUDIT_REPORT_MODE": report_mode,
                     "QUARTERLY_SRE_AUDIT_DIAGNOSTICS_CONFIGMAP": "sre-quarterly-audit-diagnostics",
-                    "QUARTERLY_SRE_AUDIT_RECOVERY_TIMEOUT_SECONDS": "2",
+                    **timing_env,
                     "QUARTERLY_SRE_AUDIT_RECOVERY_POLL_INTERVAL_SECONDS": "0.01",
                     "KUBERNETES_SERVICE_HOST": "kubernetes.default.svc",
                     "KUBERNETES_SERVICE_PORT_HTTPS": "443",
@@ -303,6 +323,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 text=True,
                 capture_output=True,
                 check=False,
+                timeout=15 if fast_recovery_clock else None,
             )
             return result, (json.loads(status.read_text(encoding="utf-8")) if status.exists() else None), (json.loads(diagnostics.read_text(encoding="utf-8")) if diagnostics.exists() else None), calls.read_text(encoding="utf-8")
 
@@ -354,11 +375,29 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertIn("RECOVERY_TIMEOUT_SECONDS", text)
         self.assertNotIn("get deployments", text)
 
-    def test_runner_allows_ninety_seconds_for_recovery_transition_after_restart(self):
-        """The transition deadline must exceed the Pod's 30-second termination grace period."""
-        text = RUNNER.read_text(encoding="utf-8")
-        self.assertIn("RECOVERY_TIMEOUT_SECONDS=${QUARTERLY_SRE_AUDIT_RECOVERY_TIMEOUT_SECONDS:-90}", text)
-        self.assertNotIn("RECOVERY_TIMEOUT_SECONDS=${QUARTERLY_SRE_AUDIT_RECOVERY_TIMEOUT_SECONDS:-30}", text)
+    def test_runner_waits_for_projected_trigger_propagation_with_default_timeout(self):
+        """Projection plus termination can delay a verified restart until 150 seconds."""
+        result, payload, _, calls = self.run_runner(
+            evidence=valid_backup_evidence(), scenario="delayed-projection",
+            recovery_timeout=None, fast_recovery_clock=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(payload["data"]["recovery_lab"], "passed")
+        self.assertIn("get events --field-selector involvedObject.name=recovery-pod", calls)
+        self.assertIn("scale deployment sre-pod-recovery --replicas=0", calls)
+
+    def test_runner_honors_shorter_recovery_timeout_override(self):
+        result, payload, _, calls = self.run_runner(
+            evidence=valid_backup_evidence(), scenario="delayed-projection",
+            recovery_timeout="90", fast_recovery_clock=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(payload["data"]["recovery_lab"], "failed")
+        self.assertIn("stage=recovery_transition", result.stdout)
+        self.assertNotIn("get events --field-selector involvedObject.name=recovery-pod", calls)
+        self.assertIn("scale deployment sre-pod-recovery --replicas=0", calls)
 
     def test_runner_accepts_verified_scale_down_while_pod_termination_is_asynchronous(self):
         result, payload, _, calls = self.run_runner(
