@@ -54,6 +54,10 @@ def cronjob():
     return find("CronJob", "quarterly-sre-audit", "monitoring")
 
 
+def monthly_cronjob():
+    return find("CronJob", "monthly-sre-audit", "monitoring")
+
+
 def pod_spec():
     return cronjob()["spec"]["jobTemplate"]["spec"]["template"]["spec"]
 
@@ -63,6 +67,26 @@ def recovery_deployment():
 
 
 class QuarterlySreAuditCronJobTests(unittest.TestCase):
+    def test_monthly_cronjob_reuses_the_official_runner_with_safe_limits(self):
+        monthly = monthly_cronjob()
+        spec = monthly["spec"]
+        template = spec["jobTemplate"]["spec"]["template"]["spec"]
+
+        self.assertEqual(spec["schedule"], "30 3 1 * *")
+        self.assertEqual(spec["timeZone"], "Asia/Seoul")
+        self.assertTrue(spec["suspend"])
+        self.assertEqual(spec["concurrencyPolicy"], "Forbid")
+        self.assertEqual(spec["jobTemplate"]["spec"]["backoffLimit"], 0)
+        self.assertGreater(spec["jobTemplate"]["spec"]["activeDeadlineSeconds"], 0)
+        self.assertGreater(spec["jobTemplate"]["spec"]["ttlSecondsAfterFinished"], 0)
+        self.assertEqual(template["serviceAccountName"], "quarterly-sre-audit")
+        self.assertEqual(template["restartPolicy"], "Never")
+        self.assertNotIn("secret", str(template).lower())
+
+    def test_legacy_quarterly_cronjobs_remain_suspended_after_monthly_transition(self):
+        self.assertTrue(cronjob()["spec"]["suspend"])
+        self.assertTrue(find("CronJob", "quarterly-sre-audit-validation", "monitoring")["spec"]["suspend"])
+
     def test_cronjob_has_safe_quarterly_schedule_and_execution_limits(self):
         spec = cronjob()["spec"]
         self.assertEqual(spec["schedule"], "30 3 1 1,4,7,10 *")
@@ -208,13 +232,17 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
             trigger_dir.mkdir()
             trigger = trigger_dir / "trigger"
             trigger.write_text("false", encoding="utf-8")
-            script = command[2].replace("/var/run/recovery-trigger", str(trigger_dir)).replace("/tmp/", f"{root}/")
+            # Rewrite generic /tmp paths before inserting a temporary path that
+            # itself may begin with /tmp on hosted Linux runners.
+            script = command[2].replace("/tmp/", f"{root}/").replace("/var/run/recovery-trigger", str(trigger_dir))
             script = script.replace("sleep 1", "sleep 0.01")
             healthy = root / "healthy"
             marker = root / "recovery-fault-injected"
 
             def wait_for(predicate):
-                deadline = time.monotonic() + 2
+                # The child shell must first start and observe the projected
+                # trigger file. A two-second window flakes on hosted runners.
+                deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
                     if predicate():
                         return
@@ -401,7 +429,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
 
     def test_runner_accepts_verified_scale_down_while_pod_termination_is_asynchronous(self):
         result, payload, _, calls = self.run_runner(
-            evidence=valid_backup_evidence(), scenario="cleanup-terminating"
+            evidence=valid_backup_evidence(), scenario="cleanup-terminating", recovery_timeout="10"
         )
 
         self.assertEqual(result.returncode, 0, result.stdout)

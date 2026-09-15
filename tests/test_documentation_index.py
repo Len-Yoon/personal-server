@@ -39,6 +39,9 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("## 현재 완료 기준", content)
         self.assertIn("## 향후 개선 항목", content)
         self.assertIn("GitHub Actions", content)
+        self.assertIn("월간 SRE 통합 점검", content)
+        self.assertIn("긴급·추가 점검", content)
+        self.assertNotIn("월 1회 [복구 훈련 절차]", content)
         self.assertNotIn("UptimeRobot", content)
 
     def test_recovery_drill_uses_isolated_safe_tools_and_stop_criteria(self):
@@ -47,7 +50,10 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("monthly-recovery-drill.sh", content)
         self.assertIn("recovery-drills/<run-id>.json", content)
         self.assertIn("원자적으로 증적화", content)
-        self.assertIn("portal-pvc-backup-verify.sh --check", content)
+        self.assertIn("check-portal-backup-evidence.sh", content)
+        self.assertIn("monthly-sre-audit", content)
+        self.assertIn("5분 외부 상태 감시", content)
+        self.assertNotIn("portal-pvc-backup-verify.sh --check", content)
         self.assertIn("sre-telegram-verify.sh", content)
         self.assertIn("sre-pod-recovery-lab.sh --run", content)
         self.assertIn("sre-pod-recovery-lab.sh --cleanup", content)
@@ -162,6 +168,13 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("전문 검토 에이전트를 필수로 포함해 최대 4명", project_rules)
         self.assertIn("에이전트 운영 기록", workflow)
         self.assertIn("전문 검토를 필수로 적용함", workflow)
+
+    def test_agent_handoff_documents_the_ci_equivalent_local_test_runner(self):
+        handoff = Path("docs/agent-handoff.md").read_text(encoding="utf-8")
+
+        self.assertIn("tests/run_service_tests.py", handoff)
+        self.assertIn("CI와 동일한 서비스별 격리", handoff)
+        self.assertIn("python3 tests/run_service_tests.py", handoff)
 
 
 if __name__ == "__main__":

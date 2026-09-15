@@ -94,9 +94,9 @@ bash infra/k8s/tools/portal-pvc-backup-cronjob.sh --activate
 
 CronJob은 매일 03:00 KST에 실행되며, `Forbid` 동시 실행 제한·실패 재시도 없음·read-only PVC mount·고정 ServiceAccount 권한을 사용함. 성공·변경 없음·실패·복원 검증 실패는 Telegram SRE relay로 상태 전환을 전달함. 실행 중 백업이 중단되면 300초 종료 유예 안에서 Portal replica 복구를 시도하며, 복구 상태를 확인해야 함.
 
-## 분기 SRE 점검 자동화
+## 월간 SRE 통합 점검 자동화
 
-분기 SRE 점검 자동화는 운영자 설치 전 상태이며 현재 N100에서 활성화되지 않음. 저장소 구현 또는 병합만으로 CronJob이 활성화되지 않으며, 별도 운영 승인 후 N100 운영자가 아래 `--install`을 직접 실행해야 함. 설치 전 `--preflight`와 `--render`가 통과해야 하며, 설치 과정에서 Secret·token·Telegram chat ID·rclone 자격 증명을 생성·복제·읽지 않음. 백업 단계는 CronJob이 기록한 `personal-server/portal-pvc-backup-evidence` ConfigMap만 fail-closed로 검증함.
+월간 SRE 통합 점검은 운영자 설치 전 상태이며 현재 N100에서 활성화되지 않음. 저장소 구현 또는 병합만으로 CronJob이 활성화되지 않으며, 별도 운영 승인 후 N100 운영자가 아래 `--install`을 직접 실행해야 함. 설치 전 `--preflight`와 `--render`가 통과해야 하며, 설치 과정에서 Secret·token·Telegram chat ID·rclone 자격 증명을 생성·복제·읽지 않음. 백업 단계는 CronJob이 기록한 `personal-server/portal-pvc-backup-evidence` ConfigMap만 fail-closed로 검증함. 공개 상태 5분 감시는 GitHub Actions에서 독립 유지하며 이 CronJob으로 통합하지 않음.
 
 ```bash
 bash infra/k8s/tools/quarterly-sre-audit-automation.sh --preflight
@@ -108,17 +108,17 @@ bash infra/k8s/tools/quarterly-sre-audit-automation.sh --status
 
 `--install`은 host 단일 실행 lock을 먼저 획득한 뒤 아래 순서로만 수행함.
 
-1. preflight와 client-side render를 수행하고, `monitoring` namespace의 모든 `quarterly-sre-audit-*` Job이 `Complete=True` 또는 `Failed=True` 종료 condition을 가진 상태인지 확인함. Job 목록 조회 오류 또는 종료 미확정 Job이 있으면 manifest를 적용하지 않고 중단하며, 이 단계에서는 기존 CronJob schedule·상태를 변경하지 않음.
-2. `suspend: true` CronJob과 최소 권한 RBAC를 적용하고 suspended 상태를 확인함.
+1. preflight와 client-side render를 수행하고, `monitoring` namespace의 모든 `monthly-sre-audit-*`, `quarterly-sre-audit-*` Job이 `Complete=True` 또는 `Failed=True` 종료 condition을 가진 상태인지 확인함. Job 목록 조회 오류 또는 종료 미확정 Job이 있으면 manifest를 적용하지 않고 중단하며, 이 단계에서는 기존 CronJob schedule·상태를 변경하지 않음.
+2. 새 월간 CronJob, 기존 분기·validation CronJob의 `suspend: true` 상태와 최소 권한 RBAC를 적용하고 suspended 상태를 확인함.
 3. `monitoring/sre-telegram-quarterly-audit-status` ConfigMap이 없을 때만 비밀값 없는 빈 결과 필드를 생성함. 기존 ConfigMap 데이터는 덮어쓰지 않음.
 4. 기존 사용자 `personal-server-quarterly-sre-audit.timer`가 존재하면 `disable --now`로 중지·비활성화함. 이어서 legacy `personal-server-quarterly-sre-audit.service`가 실행 중이 아닌지 확인함. 서비스 상태가 `inactive` 또는 `failed`인 경우에도 `MainPID=0`일 때만 통과시키며, 실행 중이거나 전환 중인 상태 또는 `MainPID`가 0이 아니면 강제 종료하지 않고 설치를 차단함.
-5. 수동 Job 생성 직전에 모든 `quarterly-sre-audit-*` Job의 종료 condition을 다시 확인함. 재시도 시 이전 실행의 종료가 확정되지 않았거나 상태 조회가 불확실하면 두 번째 Job을 생성하지 않음.
-6. CronJob에서 고유 이름의 수동 Job을 생성하고 완료 성공을 대기함.
-7. `monitoring/sre-telegram-quarterly-audit-status`의 `status=passed`를 확인한 뒤에만 CronJob suspend를 해제함.
+5. 수동 Job 생성 직전에 월간·기존 분기·validation Job의 종료 condition을 다시 확인함. 재시도 시 이전 실행의 종료가 확정되지 않았거나 상태 조회가 불확실하면 두 번째 Job을 생성하지 않음.
+6. 새 월간 CronJob에서 고유 이름의 수동 Job을 생성하고 완료 성공을 대기함.
+7. `monitoring/sre-telegram-quarterly-audit-status`의 기존 `status=passed` 계약과 relay 전달을 확인한 뒤에만 새 월간 CronJob suspend를 해제함. 기존 분기·validation CronJob은 suspended 상태를 유지함.
 
 lock 경합, Job 목록 조회 오류 또는 종료 미확정 Job으로 manifest 적용 전 차단되면 기존 CronJob schedule·상태는 변경하지 않음. suspended CronJob 적용 이후 legacy service 활성, 수동 Job 실패, 상태 ConfigMap 조회 실패 또는 상태 미확인으로 차단되면 CronJob은 suspended 상태를 유지함. 기존 systemd service·timer template은 이력 보존 목적으로만 남아 있으며, 신규 설치 또는 실행 경로에서 설치·사용하지 않음.
 
-CronJob은 `Asia/Seoul` 기준 매년 1·4·7·10월 1일 03:30에 1회 실행되며, `Forbid` 동시 실행 제한과 실패 재시도 없음 조건을 사용함. runner는 다음 세 점검을 수행하고 어느 한 단계라도 실패하면 결과를 fail-closed로 보고함.
+새 월간 CronJob은 `Asia/Seoul` 기준 매월 1일 03:30에 1회 실행되며, `Forbid` 동시 실행 제한과 실패 재시도 없음 조건을 사용함. 이전 분기·validation CronJob은 rollback·검증 이력용으로 suspended 상태를 유지함. runner는 다음 세 점검을 수행하고 어느 한 단계라도 실패하면 결과를 fail-closed로 보고함.
 
 | 점검 | 실행 도구 | 범위 |
 |---|---|---|
@@ -128,7 +128,7 @@ CronJob은 `Asia/Seoul` 기준 매년 1·4·7·10월 1일 03:30에 1회 실행�
 
 정리 요청 이후 Pod 종료는 Kubernetes가 비동기로 처리함. runner는 Pod 소멸을 기다리지 않으며, 정상 종료 유예 중 Pod가 남아 있는 상태를 점검 실패로 판정하지 않음. scale 또는 Deployment 조회 실패, `.spec.replicas`가 정확히 `0`이 아닌 경우에는 복구 실습과 종합 결과를 실패로 기록함.
 
-이 과정은 Portal·Caddy·Cloudflare Tunnel·Compose 서비스를 stop, restart, scale 또는 rollout하지 않으며, 운영 데이터와 Portal PVC를 변경하지 않음. Compose 컨테이너 상태는 Docker socket·hostPath 접근이 필요한 별도 운영 증적으로 관리하며, 분기 CronJob 결과에 포함하지 않음. 결과는 실행 ID, 완료 시각, 종합 상태와 세 단계 상태만 `monitoring/sre-telegram-quarterly-audit-status` ConfigMap에 기록함. 기존 `sre-telegram-relay`는 Telegram 성공 응답이 확인될 때까지 재시도하며, 응답 유실 시 드물게 중복 메시지가 수신될 수 있음. 명령 출력 전문·namespace/Pod 식별자·파일 경로·내부 IP·Secret 값은 전달하지 않음.
+이 과정은 Portal·Caddy·Cloudflare Tunnel·Compose 서비스를 stop, restart, scale 또는 rollout하지 않으며, 운영 데이터와 Portal PVC를 변경하지 않음. Compose 컨테이너 상태는 Docker socket·hostPath 접근이 필요한 별도 운영 증적으로 관리하며, 월간 CronJob 결과에 포함하지 않음. 결과는 실행 ID, 완료 시각, 종합 상태와 세 단계 상태만 기존 `monitoring/sre-telegram-quarterly-audit-status` ConfigMap에 기록함. 기존 `sre-telegram-relay`는 Telegram 성공 응답이 확인될 때까지 재시도하며, 응답 유실 시 드물게 중복 메시지가 수신될 수 있음. 명령 출력 전문·namespace/Pod 식별자·파일 경로·내부 IP·Secret 값은 전달하지 않음.
 
 실제 적용 시 운영자는 `--install`이 생성한 수동 Job 1회가 성공한 뒤 다음 세 가지를 모두 직접 확인해야 함.
 
@@ -136,7 +136,7 @@ CronJob은 `Asia/Seoul` 기준 매년 1·4·7·10월 1일 03:30에 1회 실행�
 2. 고정 `sre-recovery-lab/sre-pod-recovery` Deployment의 `.spec.replicas=0`으로 정리 요청이 반영되었는지 확인함. Pod는 정상 종료 유예 동안 남을 수 있으며, Kubernetes가 비동기로 종료함. 고정 namespace와 Deployment 자체는 삭제하지 않음.
 3. 기존 SRE Telegram relay를 통해 요약 메시지가 수신되었는지 확인함.
 
-Telegram 수신을 확인하기 전에는 분기 점검 적용 또는 알림 정상으로 판단하지 않음. `--status`는 CronJob suspended 상태와 ConfigMap의 `run_id`, `status`, `completed_at`, `health_audit`, `backup_check`, `recovery_lab`만 출력하므로 Secret 값은 포함하지 않음. `completed_at`은 서울 기준 `YYYY-MM-DD HH:MM`으로 표시됨. 수동 Job 직후에는 `run_id`와 완료 시각이 해당 실행 결과인지 확인 필요함.
+Telegram 수신을 확인하기 전에는 월간 점검 적용 또는 알림 정상으로 판단하지 않음. `--status`는 새 월간 CronJob suspended 상태와 ConfigMap의 `run_id`, `status`, `completed_at`, `health_audit`, `backup_check`, `recovery_lab`만 출력하므로 Secret 값은 포함하지 않음. `completed_at`은 서울 기준 `YYYY-MM-DD HH:MM`으로 표시됨. 수동 Job 직후에는 `run_id`와 완료 시각이 해당 실행 결과인지 확인 필요함.
 
 ```bash
 bash infra/k8s/tools/quarterly-sre-audit-automation.sh --status

@@ -1,4 +1,6 @@
+import json
 import re
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -448,10 +450,12 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertNotIn("git diff --name-only", workflow)
         self.assertIn("--input-format git-name-status-z", workflow)
         self.assertIn("agent-loop-evidence", workflow)
-        self.assertIn("  summary:\n", workflow)
-        self.assertIn("needs: [scope, test]", workflow)
-        self.assertIn("  test:\n    needs: scope\n    if: always()", workflow)
-        self.assertIn("  summary:\n    needs: [scope, test]\n    if: always()", workflow)
+        self.assertIn("  matrix:\n    needs: scope\n    if: always()", workflow)
+        self.assertIn("python3 tests/run_service_tests.py --github-matrix", workflow)
+        self.assertIn("include: ${{ steps.generate.outputs.include }}", workflow)
+        self.assertIn("  test:\n    needs: [scope, matrix]\n    if: always()", workflow)
+        self.assertIn("matrix: ${{ fromJSON(needs.matrix.outputs.include) }}", workflow)
+        self.assertIn("  summary:\n    needs: [scope, matrix, test]\n    if: always()", workflow)
         self.assertIn("--test-result \"${{ needs.test.result }}\"", workflow)
         self.assertIn("--executed-checks", workflow)
         self.assertIn("portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance", workflow)
@@ -465,31 +469,33 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn('test "${{ steps.evidence.outputs.context_status }}" -eq 0', workflow)
         self.assertIn('test "${{ needs.test.result }}" = "success"', workflow)
 
-        expected_matrix_entries = {
-            "portal": "python3 -m unittest tests.test_file_access tests.test_portal_dashboard tests.test_portal_security tests.test_homeops tests.test_homeops_notifier",
-            "system-agent": "python3 -m unittest tests.system_agent.test_metrics",
-            "crawler-worker": "python3 -m unittest tests.crawler_worker.test_datetime_format tests.crawler_worker.test_investing_news_rss tests.crawler_worker.test_news_service tests.crawler_worker.test_news_routes tests.crawler_worker.test_rss_news",
-            "homeops-executor": "python3 -m unittest tests.homeops_executor.test_docker_ops",
-            "youtube-memo": "python3 -m unittest tests.youtube_memo.test_video_titles",
-            "book-memo": "python3 -m unittest tests.book_memo.test_book_service",
-            "car-care-worker": "python3 -m unittest discover -s tests/car_care_worker",
-            "k8s-contracts": "python3 -m unittest tests.test_k8s_monitoring_tools tests.test_k8s_monitoring_values tests.test_k8s_portal_availability_alert tests.test_k8s_portal_backup_verify tests.test_k8s_portal_cutover tests.test_k8s_portal_nodeport_connectivity_smoke tests.test_k8s_portal_pvc_backup_automation tests.test_k8s_portal_pvc_backup_verify tests.test_k8s_portal_secret_shadow_smoke tests.test_k8s_sre_health_audit tests.test_k8s_sre_pod_recovery_lab tests.test_k8s_sre_telegram_manifests tests.test_k8s_sre_telegram_tools tests.test_k8s_transition_runner_artifacts tests.test_k8s_transition_runner_install_tools tests.test_k8s_transition_runner_policy",
-            "maintenance": "python3 -m unittest tests.test_compose_config tests.test_supply_chain_security_workflow tests.test_documentation_index tests.test_dependabot_config tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_public_uptime_monitor tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements tests.test_python_multipart_security",
-        }
-        for service_name, test_command in expected_matrix_entries.items():
-            self.assertIn(f"- name: {service_name}", workflow)
-            self.assertIn(f"test_command: {test_command}", workflow)
-        self.assertEqual(workflow.count("tests.test_documentation_index"), 1)
+        generated = json.loads(
+            subprocess.check_output(
+                ["python3", "tests/run_service_tests.py", "--github-matrix"],
+                cwd=ROOT,
+                text=True,
+            )
+        )
+        matrix = generated["include"]
+        self.assertEqual(len(matrix), 9)
+        self.assertEqual(
+            {entry["name"] for entry in matrix},
+            {
+                "portal", "system-agent", "crawler-worker", "homeops-executor",
+                "youtube-memo", "book-memo", "car-care-worker", "k8s-contracts",
+                "maintenance",
+            },
+        )
+        k8s_contracts = next(entry for entry in matrix if entry["name"] == "k8s-contracts")
+        self.assertIn("tests.test_monthly_recovery_drill", k8s_contracts["test_command"])
+        maintenance = next(entry for entry in matrix if entry["name"] == "maintenance")
+        self.assertIn("tests.test_documentation_index", maintenance["test_command"])
 
     def test_ci_has_dedicated_k8s_contract_check(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        self.assertIn("- name: k8s-contracts", workflow)
-        self.assertIn("Install K3s contract dependencies", workflow)
-        self.assertIn("test_command: python3 -m unittest tests.test_k8s_monitoring_tools", workflow)
-        self.assertIn("tests.test_k8s_sre_telegram_tools", workflow)
-        maintenance_start = workflow.index("- name: maintenance")
-        maintenance_end = workflow.index("\n    steps:")
-        self.assertNotIn("tests.test_k8s_", workflow[maintenance_start:maintenance_end])
+        self.assertIn("if: join(matrix.extra_packages, '') != ''", workflow)
+        self.assertIn("python3 -m pip install ${{ join(matrix.extra_packages, ' ') }}", workflow)
+        self.assertNotIn("Install K3s contract dependencies", workflow)
 
     def test_ci_matrix_matches_service_docker_python_versions(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
@@ -512,17 +518,16 @@ class ComposeConfigTests(unittest.TestCase):
         }
         expected_versions.update({"k8s-contracts": "3.11", "maintenance": "3.11"})
 
-        for name, expected_version in expected_versions.items():
-            entry = re.search(
-                rf"(?ms)^          - name: {re.escape(name)}\n(?P<body>.*?)(?=^          - name:|^\n    steps:)",
-                test_job,
+        generated = json.loads(
+            subprocess.check_output(
+                ["python3", "tests/run_service_tests.py", "--github-matrix"],
+                cwd=ROOT,
+                text=True,
             )
-            self.assertIsNotNone(entry, f"Missing CI matrix entry: {name}")
-            self.assertIn(
-                f'python_version: "{expected_version}"',
-                entry.group("body"),
-                f"CI Python version mismatch for {name}",
-            )
+        )
+        versions = {entry["name"]: entry["python_version"] for entry in generated["include"]}
+        self.assertEqual(versions, expected_versions)
+        self.assertNotIn("        include:", test_job)
 
         setup_python = re.search(
             r"(?ms)^      - name: Set up Python\n(?P<body>.*?)(?=^      - name:|^\n  summary:)",

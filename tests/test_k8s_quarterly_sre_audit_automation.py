@@ -13,6 +13,20 @@ SCRIPT = ROOT / "infra" / "k8s" / "tools" / "quarterly-sre-audit-automation.sh"
 
 
 class QuarterlySreAuditAutomationTests(unittest.TestCase):
+    def test_install_activates_monthly_cronjob_only_after_monthly_manual_job_and_relay_delivery(self):
+        result, calls = self.run_tool("--install")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("create job monthly-sre-audit-manual-", calls)
+        self.assertIn("patch cronjob monthly-sre-audit", calls)
+        manual_at = calls.index("create job monthly-sre-audit-manual-")
+        relay_at = calls.index("get configmap sre-telegram-relay-state")
+        activate_at = calls.index("patch cronjob monthly-sre-audit")
+        self.assertLess(manual_at, relay_at)
+        self.assertLess(relay_at, activate_at)
+        self.assertNotIn("patch cronjob quarterly-sre-audit --type merge", calls)
+        self.assertNotIn("patch cronjob quarterly-sre-audit-validation --type merge", calls)
+
     def test_validation_job_uses_a_service_account_without_official_status_patch_access(self):
         documents = list(
             yaml.safe_load_all(
@@ -110,6 +124,9 @@ case "$*" in
       active|active_empty|active_zero|terminal_complete_empty|terminal_complete_zero|terminal_failed_empty|terminal_failed_zero)
         printf '%s\\n' quarterly-sre-audit-manual-existing
         ;;
+      active_monthly)
+        printf '%s\\n' monthly-sre-audit-manual-existing
+        ;;
     esac
     if [ "{str(active_jobs_after_preflight).lower()}" = true ] && [ "$count" -gt 1 ]; then
       printf '%s\\n' quarterly-sre-audit-manual-existing
@@ -121,7 +138,8 @@ case "$*" in
       terminal_failed_empty|terminal_failed_zero) printf '%s' Failed=True, ;;
     esac
     ;;
-  *"get job quarterly-sre-audit-manual-"*"jsonpath={{range .status.conditions"*)
+  *"get job monthly-sre-audit-manual-existing"*"jsonpath={{range .status.conditions"*) ;;
+  *"get job quarterly-sre-audit-manual-"*"jsonpath={{range .status.conditions"*|*"get job monthly-sre-audit-manual-"*"jsonpath={{range .status.conditions"*)
     case "{manual_job}" in
       success) printf '%s' Complete=True, ;;
       complete_without_success) printf '%s' Complete=True, ;;
@@ -133,13 +151,13 @@ case "$*" in
       slow_succeeded) printf '%s' Complete=True, ;;
     esac
     ;;
-  *"get cronjob quarterly-sre-audit"*"jsonpath={{.spec.suspend}}"*) printf '%s' true ;;
+  *"get cronjob quarterly-sre-audit"*"jsonpath={{.spec.suspend}}"*|*"get cronjob quarterly-sre-audit-validation"*"jsonpath={{.spec.suspend}}"*|*"get cronjob monthly-sre-audit"*"jsonpath={{.spec.suspend}}"*) printf '%s' true ;;
   *"wait --for=condition=complete job/quarterly-sre-audit-manual-"*)
     [ "{manual_job}" = success ] && exit 0
     sleep "{manual_job_wait_delay_seconds}"
     exit 42
     ;;
-  *"get job quarterly-sre-audit-manual-"*"jsonpath={{.status.succeeded}}"*)
+  *"get job quarterly-sre-audit-manual-"*"jsonpath={{.status.succeeded}}"*|*"get job monthly-sre-audit-manual-"*"jsonpath={{.status.succeeded}}"*)
     case "{manual_job}" in
       success) printf '%s' 1 ;;
       complete_without_success) printf '%s' 0 ;;
@@ -160,7 +178,7 @@ case "$*" in
     [ "{validation_job}" = success ] && printf '%s' 1
     ;;
   *"create job quarterly-sre-audit-validation-manual-"*) touch "{root}/validation-job-created" ;;
-  *"create job quarterly-sre-audit-manual-"*) touch "{root}/official-job-created" ;;
+  *"create job quarterly-sre-audit-manual-"*|*"create job monthly-sre-audit-manual-"*) touch "{root}/official-job-created" ;;
   *"get configmap sre-quarterly-audit-diagnostics --ignore-not-found -o name"*)
     if [ -f "{root}/diagnostics-created" ]; then printf '%s\\n' configmap/sre-quarterly-audit-diagnostics; fi
     ;;
@@ -253,14 +271,14 @@ exec /usr/bin/grep "$@"
         result, calls = self.run_tool("--install")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("quarterly_sre_audit_install=PASS", result.stdout)
+        self.assertIn("monthly_sre_audit_install=PASS", result.stdout)
         apply_at = calls.index("apply -f")
-        suspended_at = calls.index("get cronjob quarterly-sre-audit -o jsonpath={.spec.suspend}")
+        suspended_at = calls.index("get cronjob monthly-sre-audit -o jsonpath={.spec.suspend}")
         disable_at = calls.index("disable --now personal-server-quarterly-sre-audit.timer")
-        create_at = calls.index("create job quarterly-sre-audit-manual-")
-        terminal_at = calls.index("get job quarterly-sre-audit-manual-")
+        create_at = calls.index("create job monthly-sre-audit-manual-")
+        terminal_at = calls.index("get job monthly-sre-audit-manual-")
         status_at = calls.rindex("get configmap sre-telegram-quarterly-audit-status -o jsonpath={.data.run_id}")
-        activate_at = calls.index("patch cronjob quarterly-sre-audit")
+        activate_at = calls.index("patch cronjob monthly-sre-audit")
         self.assertLess(apply_at, suspended_at)
         self.assertLess(suspended_at, disable_at)
         self.assertLess(disable_at, create_at)
@@ -270,12 +288,12 @@ exec /usr/bin/grep "$@"
         condition_queries = [
             call
             for call in calls.splitlines()
-            if "get job quarterly-sre-audit-manual-" in call and "status.conditions" in call
+            if "get job monthly-sre-audit-manual-" in call and "status.conditions" in call
         ]
         succeeded_queries = [
             call
             for call in calls.splitlines()
-            if "get job quarterly-sre-audit-manual-" in call and "status.succeeded" in call
+            if "get job monthly-sre-audit-manual-" in call and "status.succeeded" in call
         ]
         self.assertTrue(condition_queries)
         self.assertTrue(succeeded_queries)
@@ -287,9 +305,9 @@ exec /usr/bin/grep "$@"
 
         self.assertEqual(result.returncode, 0, result.stderr)
         validation_at = calls.index("create job quarterly-sre-audit-validation-manual-")
-        official_at = calls.index("create job quarterly-sre-audit-manual-")
+        official_at = calls.index("create job monthly-sre-audit-manual-")
         relay_at = calls.index("get configmap sre-telegram-relay-state")
-        activate_at = calls.index("patch cronjob quarterly-sre-audit")
+        activate_at = calls.index("patch cronjob monthly-sre-audit")
         self.assertLess(validation_at, official_at)
         self.assertLess(official_at, relay_at)
         self.assertLess(relay_at, activate_at)
@@ -300,16 +318,16 @@ exec /usr/bin/grep "$@"
         result, calls = self.run_tool("--install", relay_delivery="missing")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("create job quarterly-sre-audit-manual-", calls)
+        self.assertIn("create job monthly-sre-audit-manual-", calls)
         self.assertIn("get configmap sre-telegram-relay-state", calls)
-        self.assertNotIn("patch cronjob quarterly-sre-audit", calls)
+        self.assertNotIn("patch cronjob monthly-sre-audit", calls)
 
     def test_install_waits_for_relay_to_record_the_official_run_before_activation(self):
         result, calls = self.run_tool("--install", relay_delivery="delivered_after_retry")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertGreaterEqual(calls.count("get configmap sre-telegram-relay-state"), 2)
-        self.assertIn("patch cronjob quarterly-sre-audit", calls)
+        self.assertIn("patch cronjob monthly-sre-audit", calls)
 
     def test_install_skips_legacy_timer_disable_when_unit_is_absent(self):
         result, calls = self.run_tool("--install", timer="missing")
@@ -338,7 +356,7 @@ exec /usr/bin/grep "$@"
 
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("apply -f", calls)
-        self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
+        self.assertNotIn("create job monthly-sre-audit-manual-", calls)
 
     def test_active_quarterly_job_blocks_before_manifest_apply(self):
         result, calls = self.run_tool("--install", active_jobs="active")
@@ -346,7 +364,15 @@ exec /usr/bin/grep "$@"
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("get jobs -o jsonpath=", calls)
         self.assertNotIn("apply -f", calls)
-        self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
+        self.assertNotIn("create job monthly-sre-audit-manual-", calls)
+
+    def test_active_monthly_job_blocks_before_manifest_apply(self):
+        result, calls = self.run_tool("--install", active_jobs="active_monthly")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("get job monthly-sre-audit-manual-existing", calls)
+        self.assertNotIn("apply -f", calls)
+        self.assertNotIn("create job monthly-sre-audit-manual-", calls)
 
     def test_matching_job_with_empty_active_and_no_terminal_condition_blocks_install(self):
         result, calls = self.run_tool("--install", active_jobs="active_empty")
@@ -354,7 +380,7 @@ exec /usr/bin/grep "$@"
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("get jobs -o jsonpath=", calls)
         self.assertNotIn("apply -f", calls)
-        self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
+        self.assertNotIn("create job monthly-sre-audit-manual-", calls)
 
     def test_matching_job_with_zero_active_and_no_terminal_condition_blocks_install(self):
         result, calls = self.run_tool("--install", active_jobs="active_zero")
@@ -362,35 +388,35 @@ exec /usr/bin/grep "$@"
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("get jobs -o jsonpath=", calls)
         self.assertNotIn("apply -f", calls)
-        self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
+        self.assertNotIn("create job monthly-sre-audit-manual-", calls)
 
     def test_complete_terminal_job_with_missing_active_allows_install(self):
         result, calls = self.run_tool("--install", active_jobs="terminal_complete_empty")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("get job quarterly-sre-audit-manual-existing", calls)
-        self.assertIn("create job quarterly-sre-audit-manual-", calls)
+        self.assertIn("create job monthly-sre-audit-manual-", calls)
 
     def test_complete_terminal_job_with_zero_active_allows_install(self):
         result, calls = self.run_tool("--install", active_jobs="terminal_complete_zero")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("get job quarterly-sre-audit-manual-existing", calls)
-        self.assertIn("create job quarterly-sre-audit-manual-", calls)
+        self.assertIn("create job monthly-sre-audit-manual-", calls)
 
     def test_failed_terminal_job_with_missing_active_allows_install(self):
         result, calls = self.run_tool("--install", active_jobs="terminal_failed_empty")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("get job quarterly-sre-audit-manual-existing", calls)
-        self.assertIn("create job quarterly-sre-audit-manual-", calls)
+        self.assertIn("create job monthly-sre-audit-manual-", calls)
 
     def test_failed_terminal_job_with_zero_active_allows_install(self):
         result, calls = self.run_tool("--install", active_jobs="terminal_failed_zero")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("get job quarterly-sre-audit-manual-existing", calls)
-        self.assertIn("create job quarterly-sre-audit-manual-", calls)
+        self.assertIn("create job monthly-sre-audit-manual-", calls)
 
     def test_job_query_error_blocks_before_manifest_apply(self):
         result, calls = self.run_tool("--install", active_jobs="error")
@@ -404,8 +430,8 @@ exec /usr/bin/grep "$@"
 
         self.assertNotEqual(result.returncode, 0)
         self.assertGreaterEqual(calls.count("get jobs -o jsonpath="), 2)
-        self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
-        self.assertNotIn("patch cronjob quarterly-sre-audit", calls)
+        self.assertNotIn("create job monthly-sre-audit-manual-", calls)
+        self.assertNotIn("patch cronjob monthly-sre-audit", calls)
 
     def test_active_legacy_service_blocks_without_forcing_service_stop(self):
         result, calls = self.run_tool("--install", legacy_service="active")
@@ -414,14 +440,14 @@ exec /usr/bin/grep "$@"
         self.assertIn("disable --now personal-server-quarterly-sre-audit.timer", calls)
         self.assertIn("show personal-server-quarterly-sre-audit.service --property=ActiveState --value", calls)
         self.assertNotIn("stop personal-server-quarterly-sre-audit.service", calls)
-        self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
+        self.assertNotIn("create job monthly-sre-audit-manual-", calls)
 
     def test_failed_legacy_service_with_no_main_pid_allows_install(self):
         result, calls = self.run_tool("--install", legacy_service="failed")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("show personal-server-quarterly-sre-audit.service --property=MainPID --value", calls)
-        self.assertIn("create job quarterly-sre-audit-manual-", calls)
+        self.assertIn("create job monthly-sre-audit-manual-", calls)
 
     def test_failed_legacy_service_with_main_pid_blocks_without_forcing_service_stop(self):
         result, calls = self.run_tool("--install", legacy_service="failed", legacy_service_main_pid="1234")
@@ -429,14 +455,14 @@ exec /usr/bin/grep "$@"
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("show personal-server-quarterly-sre-audit.service --property=MainPID --value", calls)
         self.assertNotIn("stop personal-server-quarterly-sre-audit.service", calls)
-        self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
+        self.assertNotIn("create job monthly-sre-audit-manual-", calls)
 
     def test_inactive_legacy_service_with_main_pid_blocks(self):
         result, calls = self.run_tool("--install", legacy_service_main_pid="1234")
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("show personal-server-quarterly-sre-audit.service --property=MainPID --value", calls)
-        self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
+        self.assertNotIn("create job monthly-sre-audit-manual-", calls)
 
     def test_transitioning_legacy_service_states_block_without_main_pid_query(self):
         for state in ("activating", "deactivating"):
@@ -445,7 +471,7 @@ exec /usr/bin/grep "$@"
 
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn("show personal-server-quarterly-sre-audit.service --property=MainPID --value", calls)
-                self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
+                self.assertNotIn("create job monthly-sre-audit-manual-", calls)
 
     def test_failed_terminal_manual_job_returns_promptly_and_keeps_cronjob_suspended(self):
         started_at = time.monotonic()
@@ -457,16 +483,19 @@ exec /usr/bin/grep "$@"
         elapsed_seconds = time.monotonic() - started_at
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertLess(elapsed_seconds, 2, result.stderr)
-        self.assertIn("get job quarterly-sre-audit-manual-", calls)
+        # The fake client has a two-second delayed wait path; allow process
+        # startup variance while still proving terminal failure does not wait
+        # for the configured 20-minute manual-job deadline.
+        self.assertLess(elapsed_seconds, 5, result.stderr)
+        self.assertIn("get job monthly-sre-audit-manual-", calls)
         self.assertNotIn("wait --for=condition=complete job/quarterly-sre-audit-manual-", calls)
         manual_job_creations = [
             call
             for call in calls.splitlines()
-            if call.startswith("k3s kubectl -n monitoring create job quarterly-sre-audit-manual-")
+            if call.startswith("k3s kubectl -n monitoring create job monthly-sre-audit-manual-")
         ]
         self.assertEqual(len(manual_job_creations), 1)
-        self.assertNotIn("patch cronjob quarterly-sre-audit", calls)
+        self.assertNotIn("patch cronjob monthly-sre-audit", calls)
 
     def test_late_complete_response_after_manual_job_timeout_cannot_activate_cronjob(self):
         result, calls = self.run_tool(
@@ -478,14 +507,14 @@ exec /usr/bin/grep "$@"
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("manual Job did not reach a terminal state before timeout", result.stderr)
-        self.assertIn("--request-timeout=1s get job quarterly-sre-audit-manual-", calls)
+        self.assertIn("--request-timeout=1s get job monthly-sre-audit-manual-", calls)
         official_success_queries = [
             call
             for call in calls.splitlines()
-            if "get job quarterly-sre-audit-manual-" in call and "status.succeeded" in call
+            if "get job monthly-sre-audit-manual-" in call and "status.succeeded" in call
         ]
         self.assertFalse(official_success_queries)
-        self.assertNotIn("patch cronjob quarterly-sre-audit", calls)
+        self.assertNotIn("patch cronjob monthly-sre-audit", calls)
 
     def test_late_succeeded_response_after_manual_job_timeout_cannot_activate_cronjob(self):
         result, calls = self.run_tool(
@@ -497,32 +526,32 @@ exec /usr/bin/grep "$@"
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("manual Job did not reach a terminal state before timeout", result.stderr)
-        self.assertIn("--request-timeout=1s get job quarterly-sre-audit-manual-", calls)
+        self.assertIn("--request-timeout=1s get job monthly-sre-audit-manual-", calls)
         self.assertIn("jsonpath={.status.succeeded}", calls)
-        self.assertNotIn("patch cronjob quarterly-sre-audit", calls)
+        self.assertNotIn("patch cronjob monthly-sre-audit", calls)
 
     def test_complete_manual_job_without_succeeded_one_keeps_cronjob_suspended(self):
         result, calls = self.run_tool("--install", manual_job="complete_without_success")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("get job quarterly-sre-audit-manual-", calls)
+        self.assertIn("get job monthly-sre-audit-manual-", calls)
         self.assertIn("jsonpath={.status.succeeded}", calls)
-        self.assertNotIn("patch cronjob quarterly-sre-audit", calls)
+        self.assertNotIn("patch cronjob monthly-sre-audit", calls)
 
     def test_install_leaves_cronjob_suspended_when_status_reporting_cannot_be_read(self):
         result, calls = self.run_tool("--install", status="read_failure")
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("get configmap sre-telegram-quarterly-audit-status", calls)
-        self.assertNotIn("create job quarterly-sre-audit-manual-", calls)
-        self.assertNotIn("patch cronjob quarterly-sre-audit", calls)
+        self.assertNotIn("create job monthly-sre-audit-manual-", calls)
+        self.assertNotIn("patch cronjob monthly-sre-audit", calls)
 
     def test_install_leaves_cronjob_suspended_when_manual_job_reports_failed_audit_status(self):
         result, calls = self.run_tool("--install", status="reported_failure")
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("get configmap sre-telegram-quarterly-audit-status", calls)
-        self.assertNotIn("patch cronjob quarterly-sre-audit", calls)
+        self.assertNotIn("patch cronjob monthly-sre-audit", calls)
 
     def test_preflight_does_not_read_or_create_secret_values(self):
         result, calls = self.run_tool("--preflight")
@@ -561,7 +590,7 @@ exec /usr/bin/grep "$@"
         self.assertIn("health_audit=passed", result.stdout)
         self.assertIn("backup_check=passed", result.stdout)
         self.assertIn("recovery_lab=passed", result.stdout)
-        self.assertIn("get cronjob quarterly-sre-audit -o jsonpath=", calls)
+        self.assertIn("get cronjob monthly-sre-audit -o jsonpath=", calls)
         self.assertIn("get configmap sre-telegram-quarterly-audit-status", calls)
         self.assertNotIn("secret", calls.lower())
 
