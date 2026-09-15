@@ -12,7 +12,7 @@
 
 ## 핵심 요약
 
-본 문서는 승인된 통제 훈련 절차임. 정기 실행은 `monthly-sre-audit` CronJob이 Portal·최신 백업·복원 증적·격리 Pod 복구를 한 번에 점검하고 기존 SRE Telegram relay로 결과를 전달함. 공개 경로의 5분 외부 상태 감시는 GitHub Actions에서 독립 유지하며 이 감사로 통합하지 않음. 실제 Tunnel 중지·자동복구·재부팅은 수행하지 않으며, Tunnel-only 훈련은 별도 사용자 승인 뒤에만 실행함.
+본 문서는 승인된 통제 훈련 절차임. 정기 운영 결과는 N100에서 활성화된 `monthly-sre-audit` CronJob이 Portal·최신 백업·복원 증적·격리 Pod 복구를 한 번에 점검하고 기존 SRE Telegram relay로 결과를 전달함. 2026-09-15 첫 수동 Job은 세 단계와 relay 전달을 통과했고, 공개 health도 10초 간격 3회 HTTP 200으로 확인됨. 공개 경로의 5분 외부 상태 감시는 GitHub Actions에서 독립 유지하며 이 감사로 통합하지 않음. 실제 Tunnel 중지·자동복구·재부팅은 수행하지 않으며, Tunnel-only 훈련은 별도 사용자 승인 뒤에만 실행함.
 
 ```bash
 bash infra/k8s/tools/monthly-recovery-drill.sh
@@ -114,4 +114,4 @@ bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
 
 ## 확인 필요 사항
 
-- `monthly-sre-audit`의 N100 설치·이미지 반입·첫 수동 Job·Telegram relay 전달·외부 health 검증은 별도 운영 승인과 배포 검증이 필요함.
+- 월간 CronJob 변경 또는 재설치 시에는 기존 수동 Job·relay·외부 health 검증을 다시 수행해야 함.

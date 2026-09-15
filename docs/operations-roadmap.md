@@ -24,19 +24,18 @@
 | Pod 자동복구 실습 | production과 분리된 임시 namespace에서 liveness 실패와 Ready 복구를 확인함 | `sre-pod-recovery-lab.sh` | 완료 |
 | 변경 검증 | 문서·설정 변경 전에 범위와 관련 검사를 확인함 | [Codex 작업 완료 루프](codex-work-loop.md) | 완료 |
 | P3 공급망 보안 | GitHub Actions 외부 action을 full SHA로 고정하고, Caddy를 제외한 관리 대상 Python Docker base image 8개를 digest로 고정함. Trivy filesystem/config scan은 report-only로 실행하며 CI 계약 테스트로 검증함 | `.github/workflows/trivy-security.yml`, `tests/test_supply_chain_security_workflow.py` | 완료 |
-| 월간 SRE 통합 점검 자동화 | Portal·최신 백업 증적·격리 복구 실습을 하나의 월간 CronJob으로 점검하고 기존 Telegram relay 결과 전달을 사용함. 기존 분기 점검은 suspended 상태로 보존함 | [K3s 운영](../infra/k8s/README.md), `quarterly-sre-audit-automation.sh` | 완료 |
+| 월간 SRE 통합 점검 운영 검증 | N100에 최신 runner 이미지를 반입하고 첫 수동 Job·기존 Telegram relay·외부 health 3회 검증을 통과한 뒤 월간 CronJob을 활성화함. 기존 분기·validation CronJob은 suspended 상태로 보존함 | [K3s 운영](../infra/k8s/README.md), `quarterly-sre-audit-automation.sh` | 완료 |
 | 백업 CronJob 실제 복구 검증 | 백업·복원 검증과 중단 시 Portal replica 복구 결과를 확인함 | [K3s 운영](../infra/k8s/README.md), `portal-pvc-backup-verify.sh` | 완료 |
 | 공개 감시 범위 검토 | `portal`, `news`, `youtube_memo`, `book_memo` 공개 health 대상과 장애·복구 전환 기준을 문서와 대조함 | [공개 상태 Telegram 알림](public-uptime-monitor.md) | 완료 |
+| 작업 증적 정리 | 변경 경로·CI·운영 적용 결과와 토큰 측정 미수집 상태를 재현 가능한 기준으로 기록함 | [작업 루프 증거 운영](agent-loop-evidence.md) | 완료 |
+| 운영 문서 정기 검토 | 월간 SRE 설치 상태·서비스 경계·복구 절차를 실제 N100 결과와 대조하고 확인 필요 사항을 갱신함 | [K3s 운영](../infra/k8s/README.md), [복구 훈련](recovery-drill.md) | 완료 |
 | Telegram relay 시험 | 분기 SRE 점검 결과가 기존 SRE Telegram relay로 전달되는 경로를 확인함 | [K3s 운영](../infra/k8s/README.md), `sre-telegram-relay` | 완료 |
 
 ## 향후 개선 항목
 
 | 우선순위 | 항목 | 실행 기준 | 완료 조건 |
 |---|---|---|---|
-| P2 | 월간 복구 훈련 운영 검증 | `monthly-sre-audit`의 실제 N100 설치와 첫 정기 실행 결과를 확인함 | 수동 Job·Telegram relay·외부 health 검증이 모두 통과함 |
-| P2 | 작업 증적 정리 | 변경 경로, 검사 결과, 토큰 측정 기록을 작업별로 정리함 | 검증 결과가 작업별로 재현 가능함 |
-| P2 | 운영 문서 정기 검토 | 분기별로 서비스 경로·운영 경계·복구 절차를 실제 구성과 대조함 | 폐기된 절차와 확인 필요 항목이 분리됨 |
-| P3 | Dependabot 자동 PR 구성(완료) | GitHub Actions 루트 및 book-memo, car-care-worker, crawler-worker, homeops-executor, portal-web, sre-telegram-relay, system-agent, youtube-memo Docker 디렉터리를 매주 월요일 점검하여 자동 PR만 생성함. Caddy는 제외함 | 자동 병합·자동 배포·Secret 사용 없음 |
+| 없음 | 현재 계획된 미완료 개선 항목 없음 | 신규 운영 요구 또는 실제 점검 실패가 확인될 때만 범위를 정의함 | 확인 필요 |
 
 ## 검토 결과
 
@@ -48,11 +47,11 @@
 
 ## 확인 필요 사항
 
-- 월간 CronJob의 N100 적용은 별도 운영 승인 뒤 수동 Job 성공과 Telegram relay 전달을 확인한 경우에만 활성화함.
+- 실제 모델 토큰 측정 기록은 수집하지 않았으므로, 토큰 절감률은 확인 필요함.
 
 ## 후속 조치
 
 1. 월간 CronJob 실행 뒤 status ConfigMap과 Telegram relay 결과를 확인함. 수동 복구 실행기는 긴급·추가 점검이 필요한 경우에만 사용함.
 2. 실패 또는 중단 시 운영 데이터를 변경하지 않고 원인을 기록함.
 3. 문서와 실제 도구의 명령·성공 기준이 달라지면 문서 계약 테스트를 먼저 갱신함.
-4. 분기별로 운영 문서와 실제 서비스 경로·복구 절차를 대조하고, 변경 시 문서 계약 테스트를 갱신함.
+4. 다음 분기 운영 문서 검토 시 서비스 경로·복구 절차를 실제 구성과 다시 대조함.
