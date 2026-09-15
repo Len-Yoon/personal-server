@@ -101,7 +101,11 @@ create_release_source() {
   for service in "$@"; do
     archive_paths+=("$service/Dockerfile" "$service/requirements.txt" "$service/app")
   done
-  git archive --format=tar "$revision" -- "${archive_paths[@]}" | tar -xf - -C "$RELEASE_SOURCE"
+  git archive --format=tar "$revision" -- "${archive_paths[@]}" | tar -xf - -C "$RELEASE_SOURCE" || return 1
+  for service in "$@"; do
+    [[ -d "$RELEASE_SOURCE/$service/app" && ! -L "$RELEASE_SOURCE/$service/app" ]] || return 1
+    chmod -R a+rX "$RELEASE_SOURCE/$service/app" || return 1
+  done
 }
 
 create_compose_override() {
