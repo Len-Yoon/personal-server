@@ -66,8 +66,7 @@ jobs:
           case "$action" in
             deploy|skip) ;;
             blocked)
-              printf '%s\n' 'action=blocked; automatic N100 deployment is refused' >&2
-              exit 1
+              printf '%s\n' 'action=blocked; automatic N100 deployment is skipped'
               ;;
             *)
               printf '%s\n' 'action=invalid; automatic N100 deployment is refused' >&2

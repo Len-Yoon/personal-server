@@ -68,7 +68,7 @@ runs-on: [self-hosted, Windows, X64]
 
 1. 개발 PC에서 기능 브랜치를 push하고 PR CI·Agent Review를 통과시킨 뒤, 사용자 승인으로 PR을 `main`에 병합합니다. `main` CI가 실패하거나 취소되면 N100에 배포하지 않습니다.
 2. 변경 분류 job은 push event의 정확한 `before` SHA와 `github.sha`를 사용합니다. `before` SHA가 없거나 초기화 값이면 fail-closed로 중단합니다. GitHub API는 정확히 `github.sha`와 일치하는 `CI` push run을 최대 10분 대기하고, 성공하지 않으면 중단합니다. CI 성공 후 `before`부터 `github.sha`까지 전체 변경 경로를 GitHub-hosted runner에서 검사합니다. 이 job이 먼저 실행되므로 차단 변경은 N100 runner를 사용하지 않음.
-3. 문서만 변경된 경우에는 `skip`으로 끝납니다. 허용 서비스 코드만 변경된 경우에는 해당 서비스 이름만 선택됩니다. 허용 범위와 차단 범위가 섞이면 `blocked`로 실패하며 자동 배포하지 않음.
+3. 문서만 변경된 경우에는 `skip`으로 끝납니다. 허용 서비스 코드만 변경된 경우에는 해당 서비스 이름만 선택됩니다. 허용 범위와 차단 범위가 섞이면 `blocked`로 성공적으로 배포 생략하며, N100 runner를 할당하지 않음.
 4. `deploy`일 때에만 N100 Runner가 `N100_SAFE_DEPLOY_SHA`와 선택된 서비스 목록을 WSL에 전달합니다.
 5. `scripts/deploy-n100-safe.sh`는 해당 SHA가 `origin/main`의 조상이며 현재 최신 `origin/main` SHA와 정확히 일치하는지 확인합니다. 더 최신 main이 있으면 안전하게 중단합니다. `git checkout`과 `git reset --hard`는 사용하지 않음.
 6. 배포할 revision의 선택 서비스 소스(`Dockerfile`, `requirements.txt`, `app/`)만 `git archive`로 runner 전용 release 디렉터리에 추출합니다. 임시 Compose override는 해당 서비스의 build context와 `/app` bind mount만 release 디렉터리로 바꾸며, 운영 작업공간의 Compose 파일·`.env`·`data`는 그대로 유지합니다.
@@ -98,11 +98,11 @@ Telegram 알림도 1차 CD 범위에서 제외됨. 자동 배포 결과와 차�
 
 ## 확인과 장애 대응
 
-GitHub 저장소의 `Actions → Deploy N100`에서 실행 결과를 확인합니다. 실패 지점은 job 로그의 다음 값을 기준으로 확인함.
+GitHub 저장소의 `Actions → Deploy N100`에서 실행 결과를 확인합니다. 배포 생략 또는 실패 지점은 job 로그의 다음 값을 기준으로 확인함.
 
 | 화면 표시 | 의미 | 조치 |
 |---|---|---|
-| `action=blocked` | 자동 배포 제외 경로가 함께 변경됨 | 자동 적용하지 말고 별도 운영 절차와 검토로 처리 필요 |
+| `action=blocked` | 자동 배포 제외 경로가 함께 변경되어 성공적으로 배포 생략됨 | N100에는 적용하지 말고 별도 운영 절차와 검토로 처리 필요 |
 | `safe_cd_stage=preflight` | SHA, 서비스 목록 또는 N100 작업공간 사전조건을 확인하지 못함 | Actions 로그와 N100 Runner 상태 확인 필요 |
 | `safe_cd_stage=deploy` | 선택 서비스의 Compose 배포가 실패함 | N100 Compose 상태와 해당 서비스 로그 확인 필요 |
 | `safe_cd_stage=health` | 컨테이너 또는 loopback health 확인이 실패함 | 해당 서비스의 health endpoint 및 로그 확인 필요 |

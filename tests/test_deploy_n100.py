@@ -91,6 +91,25 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("needs.changes.outputs.action == 'deploy'", deploy_job)
         self.assertNotIn("workflow_dispatch", WORKFLOW)
 
+    def test_workflow_marks_blocked_paths_as_successful_no_deploy_outcomes(self):
+        changes_job = WORKFLOW.split("\n  deploy:", maxsplit=1)[0]
+        blocked_case = changes_job[
+            changes_job.index("blocked)") : changes_job.index("*)", changes_job.index("blocked)"))
+        ]
+
+        self.assertIn("action=blocked; automatic N100 deployment is skipped", blocked_case)
+        self.assertNotIn("exit 1", blocked_case)
+
+    def test_workflow_keeps_invalid_classification_as_a_failure(self):
+        changes_job = WORKFLOW.split("\n  deploy:", maxsplit=1)[0]
+        invalid_case = changes_job[changes_job.index("*)") : changes_job.index("esac")]
+
+        self.assertIn("action=invalid; automatic N100 deployment is refused", invalid_case)
+        self.assertIn("exit 1", invalid_case)
+
+    def test_safe_cd_guide_marks_blocked_paths_as_successful_no_deploy(self):
+        self.assertIn("성공적으로 배포 생략", GUIDE)
+
     def test_ci_covers_homeops_news_routes_and_deploy_script(self):
         commands = "\n".join(entry["test_command"] for entry in CI_TEST_MATRIX)
 
