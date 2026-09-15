@@ -632,31 +632,19 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
         self.assertEqual(result.stderr.count("safe_cd_stage=rollback"), 1)
 
-    def test_release_service_source_mount_is_readable_by_non_root_for_deploy_and_rollback(self):
-        result, _, _ = self.run_safe_deploy(
+    def test_release_build_context_is_used_without_runtime_source_mount_for_deploy_and_rollback(self):
+        result, calls, _ = self.run_safe_deploy(
             previous_sha=self.OLD_SHA,
             health_results=(1, 0),
-            capture_release_permissions=True,
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(result.release_permissions), 2)
-        self.assertIn("/crawler-worker:/app:ro", result.compose_override)
-        self.assertNotIn("/crawler-worker/app:/app:ro", result.compose_override)
-        for release_mode, service_mode, directory_mode, file_mode, nested_directory_mode, nested_file_mode, log_mountpoint_mode in result.release_permissions.values():
-            self.assertEqual(release_mode, 0o700)
-            self.assertEqual(service_mode & 0o005, 0o005)
-            self.assertEqual(directory_mode & 0o005, 0o005)
-            self.assertEqual(file_mode & 0o004, 0o004)
-            self.assertEqual(nested_directory_mode & 0o005, 0o005)
-            self.assertEqual(nested_file_mode & 0o004, 0o004)
-            self.assertEqual(log_mountpoint_mode & 0o005, 0o005)
-            self.assertEqual(directory_mode & 0o002, 0)
-            self.assertEqual(service_mode & 0o002, 0)
-            self.assertEqual(file_mode & 0o002, 0)
-            self.assertEqual(nested_directory_mode & 0o002, 0)
-            self.assertEqual(nested_file_mode & 0o002, 0)
-            self.assertEqual(log_mountpoint_mode & 0o002, 0)
+        self.assertIn("/crawler-worker'", result.compose_override)
+        self.assertNotIn("volumes:", result.compose_override)
+        self.assertNotIn("/app:ro", result.compose_override)
+        self.assertEqual(calls.count("git archive"), 2)
+        self.assertEqual(calls.count("build crawler-worker"), 2)
+        self.assertEqual(calls.count("up -d --no-build --no-deps crawler-worker"), 2)
 
     def test_compose_deploy_failure_rolls_back_once_to_saved_healthy_revision(self):
         result, calls, saved_state = self.run_safe_deploy(
@@ -895,7 +883,9 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertIn('chmod 700 "$HEALTH_SCRIPT"', script)
         self.assertNotIn('readonly HEALTH_SCRIPT=', script)
         self.assertIn("mktemp -d", script)
-        self.assertIn("/app:ro", script)
+        self.assertIn("      context: %s", script)
+        self.assertNotIn("service_source:/app:ro", script)
+        self.assertNotIn("    volumes:", script[script.index("create_compose_override() {") : script.index("data_directory_for_service() {")])
         self.assertIn("docker-compose.yml", script)
         self.assertIn("docker-compose.n100.yml", script)
 
