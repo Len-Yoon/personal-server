@@ -238,7 +238,9 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
             marker = root / "recovery-fault-injected"
 
             def wait_for(predicate):
-                deadline = time.monotonic() + 2
+                # The child shell must first start and observe the projected
+                # trigger file. A two-second window flakes on hosted runners.
+                deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
                     if predicate():
                         return
