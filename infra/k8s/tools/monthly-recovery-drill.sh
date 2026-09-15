@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 STATE_DIR=${RECOVERY_DRILL_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/personal-server/recovery-drills}
-BACKUP_TOOL=${MONTHLY_RECOVERY_DRILL_BACKUP_TOOL:-$SCRIPT_DIR/portal-pvc-backup-verify.sh}
+BACKUP_TOOL=${MONTHLY_RECOVERY_DRILL_BACKUP_TOOL:-$SCRIPT_DIR/check-portal-backup-evidence.sh}
 TELEGRAM_TOOL=${MONTHLY_RECOVERY_DRILL_TELEGRAM_TOOL:-$SCRIPT_DIR/sre-telegram-verify.sh}
 POD_TOOL=${MONTHLY_RECOVERY_DRILL_POD_TOOL:-$SCRIPT_DIR/sre-pod-recovery-lab.sh}
 RUN_ID=${RECOVERY_DRILL_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}
@@ -43,7 +43,7 @@ run_quiet() {
   "$@" >"$TMP_OUTPUT" 2>&1
 }
 
-if run_quiet "$BACKUP_TOOL" --check; then backup_status=success; else backup_status=failed; failed_stage=backup; fi
+if run_quiet "$BACKUP_TOOL"; then backup_status=success; else backup_status=failed; failed_stage=backup; fi
 if [ -z "$failed_stage" ]; then
   if run_quiet "$TELEGRAM_TOOL"; then telegram_status=success; else telegram_status=failed; failed_stage=telegram; fi
 fi

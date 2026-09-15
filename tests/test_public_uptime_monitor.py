@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 
@@ -5,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "public-uptime-monitor.yml"
 CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
+CI_TEST_MATRIX_PATH = ROOT / "tests" / "ci_test_matrix.json"
 PUBLIC_HEALTH_TARGETS = {
     "portal": "https://len.pe.kr/health",
     "news": "https://news.len.pe.kr/health",
@@ -127,5 +129,8 @@ class PublicUptimeMonitorTests(unittest.TestCase):
 
     def test_ci_runs_the_uptime_monitor_contract(self):
         ci_workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+        matrix = json.loads(CI_TEST_MATRIX_PATH.read_text(encoding="utf-8"))
+        commands = "\n".join(entry["test_command"] for entry in matrix)
 
-        self.assertIn("tests.test_public_uptime_monitor", ci_workflow)
+        self.assertIn("tests/run_service_tests.py --github-matrix", ci_workflow)
+        self.assertIn("tests.test_public_uptime_monitor", commands)

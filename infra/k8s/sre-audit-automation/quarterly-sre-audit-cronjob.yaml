@@ -296,6 +296,59 @@ subjects:
 apiVersion: batch/v1
 kind: CronJob
 metadata:
+  name: monthly-sre-audit
+  namespace: monitoring
+spec:
+  schedule: "30 3 1 * *"
+  timeZone: Asia/Seoul
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 1200
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          serviceAccountName: quarterly-sre-audit
+          restartPolicy: Never
+          automountServiceAccountToken: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: audit
+              image: personal-server-quarterly-sre-audit:task1
+              imagePullPolicy: Never
+              securityContext:
+                runAsNonRoot: true
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 250m
+                  memory: 256Mi
+              volumeMounts:
+                - name: temporary
+                  mountPath: /tmp
+          volumes:
+            - name: temporary
+              emptyDir:
+                sizeLimit: 16Mi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
   name: quarterly-sre-audit
   namespace: monitoring
 spec:

@@ -13,6 +13,7 @@ MANIFEST=${QUARTERLY_SRE_AUDIT_MANIFEST:-$REPO_ROOT/infra/k8s/sre-audit-automati
 NAMESPACE=monitoring
 CRONJOB_NAME=quarterly-sre-audit
 VALIDATION_CRONJOB_NAME=quarterly-sre-audit-validation
+MONTHLY_CRONJOB_NAME=monthly-sre-audit
 STATUS_CONFIGMAP=sre-telegram-quarterly-audit-status
 VALIDATION_DIAGNOSTICS_CONFIGMAP=sre-quarterly-audit-diagnostics
 RELAY_STATE_CONFIGMAP=sre-telegram-relay-state
@@ -52,7 +53,10 @@ assert_no_active_audit_jobs() {
     return 1
   }
   while IFS= read -r name; do
-    [[ "$name" == "${CRONJOB_NAME}-"* ]] || continue
+    case "$name" in
+      "${MONTHLY_CRONJOB_NAME}-"*|"${CRONJOB_NAME}-"*|"${VALIDATION_CRONJOB_NAME}-"*) ;;
+      *) continue ;;
+    esac
     conditions=$(kctl -n "$NAMESPACE" get job "$name" -o 'jsonpath={range .status.conditions[*]}{.type}{"="}{.status}{","}{end}') || {
       printf '%s\n' 'Quarterly SRE audit Job condition could not be read; installation is blocked.' >&2
       return 1
@@ -88,8 +92,12 @@ verify_manifest() {
     return 1
   }
   normalized_manifest=$(tr -d '\r' < "$MANIFEST") || return 1
-  grep -Fq 'kind: CronJob' "$MANIFEST" && grep -Fxq '  suspend: true' <<< "$normalized_manifest" || {
-    printf '%s\n' 'Quarterly SRE audit CronJob manifest must install suspended.' >&2
+  grep -Fq 'kind: CronJob' "$MANIFEST" && \
+    grep -Fq '  name: monthly-sre-audit' "$MANIFEST" && \
+    grep -Fq '  name: quarterly-sre-audit' "$MANIFEST" && \
+    grep -Fq '  name: quarterly-sre-audit-validation' "$MANIFEST" && \
+    [ "$(grep -Fxc '  suspend: true' <<< "$normalized_manifest")" -eq 3 ] || {
+    printf '%s\n' 'Monthly and legacy SRE audit CronJobs must install suspended.' >&2
     return 1
   }
 }
@@ -104,10 +112,10 @@ preflight() {
 }
 
 assert_cronjob_suspended() {
-  local suspended
-  suspended=$(kctl -n "$NAMESPACE" get cronjob "$CRONJOB_NAME" -o 'jsonpath={.spec.suspend}') || return 1
+  local cronjob_name=$1 suspended
+  suspended=$(kctl -n "$NAMESPACE" get cronjob "$cronjob_name" -o 'jsonpath={.spec.suspend}') || return 1
   [ "$suspended" = true ] || {
-    printf '%s\n' 'Quarterly SRE audit CronJob is not suspended; installation is blocked.' >&2
+    printf '%s\n' 'SRE audit CronJob is not suspended; installation is blocked.' >&2
     return 1
   }
 }
@@ -358,7 +366,9 @@ install() {
   acquire_install_lock || return 1
   preflight || return 1
   kctl apply -f "$MANIFEST" || return 1
-  assert_cronjob_suspended || return 1
+  assert_cronjob_suspended "$MONTHLY_CRONJOB_NAME" || return 1
+  assert_cronjob_suspended "$CRONJOB_NAME" || return 1
+  assert_cronjob_suspended "$VALIDATION_CRONJOB_NAME" || return 1
   ensure_status_configmap_if_absent || return 1
   ensure_validation_diagnostics_configmap_if_absent || return 1
   disable_legacy_timer_if_present || return 1
@@ -368,16 +378,16 @@ install() {
   verify_validation_reporting || return 1
   local_previous_run_id=$(current_official_run_id) || return 1
   assert_no_active_audit_jobs || return 1
-  create_manual_job_from_cronjob "$CRONJOB_NAME" "$CRONJOB_NAME" || return 1
+  create_manual_job_from_cronjob "$MONTHLY_CRONJOB_NAME" "$MONTHLY_CRONJOB_NAME" || return 1
   verify_status_reporting "$local_previous_run_id" || return 1
   verify_relay_delivery "$OFFICIAL_RUN_ID" || return 1
-  kctl -n "$NAMESPACE" patch cronjob "$CRONJOB_NAME" --type merge -p '{"spec":{"suspend":false}}' || return 1
-  printf '%s\n' 'quarterly_sre_audit_install=PASS'
+  kctl -n "$NAMESPACE" patch cronjob "$MONTHLY_CRONJOB_NAME" --type merge -p '{"spec":{"suspend":false}}' || return 1
+  printf '%s\n' 'monthly_sre_audit_install=PASS'
 }
 
 status() {
   local suspended report run_id audit_status completed_at display_completed_at health_audit backup_check recovery_lab
-  suspended=$(kctl -n "$NAMESPACE" get cronjob "$CRONJOB_NAME" -o 'jsonpath={.spec.suspend}') || return 1
+  suspended=$(kctl -n "$NAMESPACE" get cronjob "$MONTHLY_CRONJOB_NAME" -o 'jsonpath={.spec.suspend}') || return 1
   report=$(kctl -n "$NAMESPACE" get configmap "$STATUS_CONFIGMAP" -o 'jsonpath={.data.run_id}{"\t"}{.data.status}{"\t"}{.data.completed_at}{"\t"}{.data.health_audit}{"\t"}{.data.backup_check}{"\t"}{.data.recovery_lab}') || return 1
   IFS=$'\t' read -r run_id audit_status completed_at health_audit backup_check recovery_lab \
     <<< "$report" || return 1

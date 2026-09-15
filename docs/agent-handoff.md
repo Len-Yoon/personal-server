@@ -43,8 +43,9 @@
 
 ## 5. 검증과 배포
 
-- 단위 테스트는 `.github/workflows/ci.yml`의 서비스별 명령을 기준으로 실행함.
-- 변경 범위가 넓으면 포털·system-agent·crawler-worker·YouTube·책 테스트를 모두 실행하고 `git diff --check`를 확인함.
+- 단위 테스트의 단일 기준은 `tests/ci_test_matrix.json`이며, GitHub Actions와 로컬 모두 이 목록을 사용함.
+- 로컬 전체 검증은 `python3 tests/run_service_tests.py`로 실행함. 서비스마다 전용 Python 버전과 `PYTHONPATH`를 분리하므로, 서로 다른 서비스의 `app` 패키지가 충돌하지 않음.
+- 변경 범위가 넓으면 CI와 동일한 서비스별 격리 검증을 실행하고 `git diff --check`를 확인함. 특정 그룹만 확인할 때는 `python3 tests/run_service_tests.py --suite <그룹명>`을 사용함.
 - 배포 실패나 N100 상태 확인은 [N100 GitHub 자동배포 안내](n100-github-auto-deploy.md)의 WSL 명령을 사용함.
 - 서버 기동·스케줄러 변경은 운영 영향이 있으므로 HomeOps 정책·N100 문서·자동 테스트를 함께 갱신하고 검토함.
 - CI artifact 확인과 90일 보존 한계는 [작업 루프 증거 운영](agent-loop-evidence.md)을 따름.

@@ -9,9 +9,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "infra/k8s/tools/monthly-recovery-drill.sh"
+BACKUP_EVIDENCE_CHECKER = ROOT / "infra/k8s/tools/check-portal-backup-evidence.sh"
 
 
 class MonthlyRecoveryDrillTests(unittest.TestCase):
+    def test_backup_stage_uses_evidence_only_checker(self):
+        source = RUNNER.read_text(encoding="utf-8")
+        self.assertIn("check-portal-backup-evidence.sh", source)
+        self.assertNotIn("portal-pvc-backup-verify.sh", source)
+
     def test_publish_contract_is_atomic_no_clobber(self):
         source = RUNNER.read_text(encoding="utf-8")
         self.assertNotIn("mv -f", source)
@@ -60,7 +66,7 @@ class MonthlyRecoveryDrillTests(unittest.TestCase):
 
     def test_success_runs_three_steps_in_order_and_cleans_up_lab(self):
         scripts = {
-            "backup": "[[ ${1:-} == --check ]]\n",
+            "backup": "[[ $# == 0 ]]\n",
             "telegram": "",
             "pod": "if [[ ${1:-} == --run ]]; then echo sre_pod_recovery_run_id=lab-test; fi\n",
         }
@@ -69,7 +75,7 @@ class MonthlyRecoveryDrillTests(unittest.TestCase):
         self.assertEqual(
             log.splitlines(),
             [
-                "backup --check",
+                "backup ",
                 "telegram ",
                 "pod --run",
             ],
@@ -88,7 +94,7 @@ class MonthlyRecoveryDrillTests(unittest.TestCase):
         }
         result, log, evidence = self.run_drill(scripts)
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(log.splitlines(), ["backup --check", "telegram ", "pod --run"])
+        self.assertEqual(log.splitlines(), ["backup ", "telegram ", "pod --run"])
         payload = json.loads(evidence)
         self.assertEqual(payload["failed_stage"], "pod")
         self.assertEqual(payload["pod_run_id"], "lab-test")
@@ -103,7 +109,7 @@ class MonthlyRecoveryDrillTests(unittest.TestCase):
         }
         result, log, _evidence = self.run_drill(scripts)
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(log.splitlines(), ["backup --check", "telegram ", "pod --run"])
+        self.assertEqual(log.splitlines(), ["backup ", "telegram ", "pod --run"])
 
     def test_existing_evidence_is_not_overwritten(self):
         scripts = {"backup": "", "telegram": "", "pod": "echo sre_pod_recovery_run_id=lab-test\n"}
@@ -113,13 +119,13 @@ class MonthlyRecoveryDrillTests(unittest.TestCase):
 
     def test_failure_stops_following_steps_and_records_failed_stage(self):
         scripts = {
-            "backup": "[[ ${1:-} == --check ]]\n",
+            "backup": "[[ $# == 0 ]]\n",
             "telegram": "[[ ${FAIL_STAGE:-} != telegram ]]\n",
             "pod": "if [[ ${1:-} == --run ]]; then echo sre_pod_recovery_run_id=lab-test; fi\n",
         }
         result, log, evidence = self.run_drill(scripts, fail_stage="telegram")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(log.splitlines(), ["backup --check", "telegram "])
+        self.assertEqual(log.splitlines(), ["backup ", "telegram "])
         payload = json.loads(evidence)
         self.assertEqual(payload["status"], "failed")
         self.assertEqual(payload["failed_stage"], "telegram")
@@ -135,6 +141,64 @@ class MonthlyRecoveryDrillTests(unittest.TestCase):
         content = evidence
         self.assertNotIn("TELEGRAM_BOT_TOKEN", content)
         self.assertNotIn("do-not-record", content)
+
+
+class PortalBackupEvidenceCheckerTests(unittest.TestCase):
+    def test_default_client_uses_k3s_kubectl(self):
+        source = BACKUP_EVIDENCE_CHECKER.read_text(encoding="utf-8")
+        self.assertIn("KCTL=(sudo -n k3s kubectl)", source)
+
+    def test_reads_only_evidence_configmap_and_reports_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            kubectl = tmp_path / "kubectl"
+            kubectl.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "printf '%s\\n' \"$*\" >> \"$CALL_LOG\"\n"
+                "printf '%s' \"$EVIDENCE\"\n",
+                encoding="utf-8",
+            )
+            kubectl.chmod(0o700)
+            evidence = "\n".join(
+                [
+                    "schema_version=1",
+                    "scope=portal",
+                    "backup_status=success",
+                    "encrypted=true",
+                    "backup_completed_at=2026-09-15T00:00:00Z",
+                    "restore_status=success",
+                    "restore_verified_at=2026-09-15T00:00:00Z",
+                    "evidence_expires_at=2099-09-16T00:00:00Z",
+                    "backup_id=portal-test",
+                    "source_runtime=k3s-pvc",
+                    "",
+                ]
+            )
+            env = os.environ.copy()
+            env.update(
+                {
+                    "PORTAL_BACKUP_EVIDENCE_KUBECTL": str(kubectl),
+                    "CALL_LOG": str(tmp_path / "calls.log"),
+                    "EVIDENCE": evidence,
+                }
+            )
+            result = subprocess.run(
+                [str(BACKUP_EVIDENCE_CHECKER)], env=env, text=True, capture_output=True
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "portal_backup_evidence=PASS\n")
+            calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+            self.assertIn(
+                "-n personal-server get configmap portal-pvc-backup-evidence -o jsonpath={.data.evidence}",
+                calls,
+            )
+            self.assertNotIn("rclone", calls.lower())
+
+    def test_checker_does_not_reference_credentials_or_remote_backup_commands(self):
+        source = BACKUP_EVIDENCE_CHECKER.read_text(encoding="utf-8")
+        self.assertNotIn("rclone", source.lower())
+        self.assertNotIn("portal-pvc-backup-verify", source)
 
 
 if __name__ == "__main__":

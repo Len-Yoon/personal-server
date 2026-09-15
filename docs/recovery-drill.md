@@ -5,20 +5,22 @@
 | 항목 | 내용 |
 |---|---|
 | 문서명 | 월간 안전 복구 훈련 절차 |
-| 실행 주기 | 월 1회 수동 실행 |
+| 실행 주기 | 월 1회 자동 감사 및 필요 시 수동 실행 |
 | 기준 자료 | `infra/k8s/tools`의 검증·실습 도구 |
 | 목적 | 백업 사전조건, SRE 알림 경계, 격리 Pod 자동복구를 확인함 |
 | 비고 | production Portal·공개 경로·PVC·운영 데이터는 변경하지 않음 |
 
 ## 핵심 요약
 
-본 문서는 승인된 통제 훈련 절차임. 이번 변경에서는 실제 Tunnel 중지·자동복구·재부팅을 수행하지 않음. 실제 Tunnel-only 훈련은 별도 사용자 승인 뒤에만 실행하며, 월간 실행기는 아래 세 도구를 순서대로 호출하고 결과를 원자적으로 증적화함.
+본 문서는 승인된 통제 훈련 절차임. 정기 실행은 `monthly-sre-audit` CronJob이 Portal·최신 백업·복원 증적·격리 Pod 복구를 한 번에 점검하고 기존 SRE Telegram relay로 결과를 전달함. 공개 경로의 5분 외부 상태 감시는 GitHub Actions에서 독립 유지하며 이 감사로 통합하지 않음. 실제 Tunnel 중지·자동복구·재부팅은 수행하지 않으며, Tunnel-only 훈련은 별도 사용자 승인 뒤에만 실행함.
 
 ```bash
 bash infra/k8s/tools/monthly-recovery-drill.sh
 ```
 
-증적은 `~/.local/state/personal-server/recovery-drills/<run-id>.json`에 저장함. 증적에는 실행 시각, 단계별 성공 여부, 실패 단계, Pod 정리 여부만 기록하며 명령 출력·Secret·token·chat ID·운영 데이터는 기록하지 않음. 한 단계가 실패하면 이후 단계는 실행하지 않음.
+CronJob은 `Forbid` 동시 실행 제한을 사용하며 설치 시 `suspend: true` 상태로 적용됨. 설치기는 수동 Job 성공과 Telegram relay 전달을 확인한 뒤에만 월간 CronJob을 활성화함. 기존 분기 감사와 validation CronJob은 이력·rollback 용도로 suspended 상태를 유지함.
+
+운영자가 같은 세부 점검을 즉시 수행해야 할 때만 아래 수동 실행기를 사용함. 증적은 `~/.local/state/personal-server/recovery-drills/<run-id>.json`에 원자적으로 증적화하며, 실행 시각, 단계별 성공 여부, 실패 단계, Pod 정리 여부만 기록함. 명령 출력·Secret·token·chat ID·운영 데이터는 기록하지 않음. 한 단계가 실패하면 이후 단계는 실행하지 않음.
 
 ## Tunnel 장애 모의 순서
 
@@ -35,13 +37,13 @@ bash infra/k8s/tools/monthly-recovery-drill.sh
 
 ## 월간 체크리스트
 
-### 1. Portal PVC 백업 사전조건 점검
+### 1. Portal PVC 백업·복원 증적 점검
 
 ```bash
-bash infra/k8s/tools/portal-pvc-backup-verify.sh --check
+bash infra/k8s/tools/check-portal-backup-evidence.sh
 ```
 
-성공 기준은 `personal-server` namespace, K3s runtime marker, PVC `Bound` 상태, 단일 Portal replica, 암호화 자격 증명 파일 접근 조건이 통과하는 것임. 이 명령은 백업 업로드나 복원 실행을 대신하지 않음.
+성공 기준은 자동 백업 CronJob이 기록한 최신 K3s PVC 백업·복원 증적의 유효성, 암호화 상태, runtime marker가 통과하는 것임. 이 명령은 백업 업로드·복원·원격 저장소 접근을 수행하지 않으며, Secret·rclone 자격 증명을 읽지 않음.
 
 CronJob 전환을 준비하거나 상태를 점검할 때는 다음을 추가로 사용함. 이 점검은 Secret 값이 아니라 Secret 이름·key 이름과 PVC mount 계약만 확인함.
 
@@ -76,7 +78,7 @@ bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
 
 정리 성공 기준은 `sre-recovery-lab-<run-id>` namespace가 더 이상 존재하지 않는 것임.
 
-월간 실행기를 사용하는 경우 위 세 명령을 개별 실행하지 않고 `monthly-recovery-drill.sh`만 실행함. 실행기는 안전한 lowercase run ID를 사전 전달하며, 3단계 실습 도구가 소유권을 획득한 경우 도구 자체 cleanup 결과를 성공으로 기록함. `AlreadyExists` 등 소유권 미획득 실패에서는 wrapper가 cleanup하지 않음.
+수동 실행기를 사용하는 경우 위 세 명령을 개별 실행하지 않고 `monthly-recovery-drill.sh`만 실행함. 정기 월간 감사는 별도의 `monthly-sre-audit` CronJob으로 동일한 Portal·백업 증적·격리 Pod 복구 경계를 점검하고 relay 결과를 남김. 실행기는 안전한 lowercase run ID를 사전 전달하며, 3단계 실습 도구가 소유권을 획득한 경우 도구 자체 cleanup 결과를 성공으로 기록함. `AlreadyExists` 등 소유권 미획득 실패에서는 wrapper가 cleanup하지 않음.
 
 ## 중단 기준과 복구 조치
 
@@ -112,5 +114,4 @@ bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
 
 ## 확인 필요 사항
 
-- 실제 결과 보관 위치와 월간 실행 담당자는 운영자가 지정해야 함.
-- 이 절차는 CronJob 활성화·systemd timer 중지·Secret 사전 시딩·runner image import를 수행하지 않음. 해당 변경은 별도 운영 승인과 배포 검증이 필요함.
+- `monthly-sre-audit`의 N100 설치·이미지 반입·첫 수동 Job·Telegram relay 전달·외부 health 검증은 별도 운영 승인과 배포 검증이 필요함.
