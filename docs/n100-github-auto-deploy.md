@@ -71,7 +71,7 @@ runs-on: [self-hosted, Windows, X64]
 3. 문서만 변경된 경우에는 `skip`으로 끝납니다. 허용 서비스 코드만 변경된 경우에는 해당 서비스 이름만 선택됩니다. 허용 범위와 차단 범위가 섞이면 `blocked`로 성공적으로 배포 생략하며, N100 runner를 할당하지 않음.
 4. `deploy`일 때에만 N100 Runner가 `N100_SAFE_DEPLOY_SHA`와 선택된 서비스 목록을 WSL에 전달합니다.
 5. `scripts/deploy-n100-safe.sh`는 해당 SHA가 `origin/main`의 조상이며 현재 최신 `origin/main` SHA와 정확히 일치하는지 확인합니다. 더 최신 main이 있으면 안전하게 중단합니다. `git checkout`과 `git reset --hard`는 사용하지 않음.
-6. 배포할 revision의 선택 서비스 소스(`Dockerfile`, `requirements.txt`, `app/`)만 `git archive`로 runner 전용 release 디렉터리에 추출합니다. 임시 Compose override는 해당 서비스의 build context와 `/app` bind mount만 release 디렉터리로 바꾸며, 운영 작업공간의 Compose 파일·`.env`·`data`는 그대로 유지합니다.
+6. 배포할 revision의 선택 서비스 소스(`Dockerfile`, `requirements.txt`, `app/`)만 `git archive`로 runner 전용 release 디렉터리에 추출합니다. 임시 Compose override는 해당 release를 build context로만 사용하며 runtime `/app` source bind mount는 만들지 않습니다. 운영 작업공간의 Compose 파일·`.env`·`data`와 기존 데이터·로그 mount는 그대로 유지합니다.
 7. 선택한 서비스의 Compose 설정, 컨테이너 health, loopback `/health`가 최대 90초 동안 모두 정상인지 확인합니다.
 8. 첫 배포 또는 health 확인이 성공하면 그 SHA를 마지막 정상 revision으로 기록합니다.
 9. 새 revision의 health가 실패하고 직전 정상 revision이 있으면, 그 revision의 독립 release 디렉터리로 한 번만 배포·health 확인하여 복구합니다. 복구까지 실패하면 workflow는 실패로 끝남.
