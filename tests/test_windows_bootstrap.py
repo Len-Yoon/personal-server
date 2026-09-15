@@ -15,7 +15,7 @@ class WindowsBootstrapTests(unittest.TestCase):
     def test_install_task_registers_keepalive_at_boot_without_interactive_token(self):
         installer = SCRIPT[
             SCRIPT.index("function Install-KeepAliveTask")
-            : SCRIPT.index("function Set-RecoveryTaskSettings")
+            : SCRIPT.index("function Install-SupervisorTask")
         ]
         self.assertIn('$KeepAliveTaskName = "PersonalServer-WSL-KeepAlive"', SCRIPT)
         self.assertIn('$temporaryTaskXml = Join-Path $env:TEMP "$KeepAliveTaskName.xml"', installer)
@@ -42,7 +42,7 @@ class WindowsBootstrapTests(unittest.TestCase):
     def test_keepalive_registration_failure_does_not_emit_native_output_or_account_identity(self):
         installer = SCRIPT[
             SCRIPT.index("function Install-KeepAliveTask")
-            : SCRIPT.index("function Set-RecoveryTaskSettings")
+            : SCRIPT.index("function Install-SupervisorTask")
         ]
         failure_path = installer[
             installer.index("if ($createExitCode -ne 0)")
@@ -60,7 +60,7 @@ class WindowsBootstrapTests(unittest.TestCase):
     def test_keepalive_registration_keeps_the_password_prompt_interactive(self):
         installer = SCRIPT[
             SCRIPT.index("function Install-KeepAliveTask")
-            : SCRIPT.index("function Set-RecoveryTaskSettings")
+            : SCRIPT.index("function Install-SupervisorTask")
         ]
 
         self.assertIn(
@@ -82,7 +82,7 @@ class WindowsBootstrapTests(unittest.TestCase):
             : SCRIPT.index("\nLoad-RecoveryFailureState")
         ]
         self.assertIn("Install-KeepAliveTask", installer)
-        self.assertLess(installer.index("Install-KeepAliveTask"), installer.index("$taskAction ="))
+        self.assertLess(installer.index("Install-KeepAliveTask"), installer.index("Install-SupervisorTask"))
 
     def test_scheduled_task_runs_a_supervisor_that_restarts_the_daemon(self):
         self.assertIn("function Start-Supervisor", SCRIPT)
@@ -366,7 +366,7 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertNotIn("/ST ", reboot)
         self.assertIn("finally {", reboot)
         self.assertIn("Remove-Item -LiteralPath $temporaryTaskXml", reboot)
-        self.assertLess(installer.index("Install-EmergencyRebootTask"), installer.index("schtasks.exe /Create /TN $TaskName"))
+        self.assertLess(installer.index("Install-EmergencyRebootTask"), installer.index("Install-SupervisorTask"))
 
     def test_emergency_reboot_xml_has_exported_schema_element_order_and_complete_settings(self):
         reboot = SCRIPT[
@@ -427,7 +427,7 @@ class WindowsBootstrapTests(unittest.TestCase):
     def test_emergency_request_save_failure_restores_declared_prior_memory_state(self):
         request = SCRIPT[
             SCRIPT.index("function Request-EmergencyReboot")
-            : SCRIPT.index("function Set-RecoveryTaskSettings")
+            : SCRIPT.index("function Install-KeepAliveTask")
         ]
         save_failure = request[
             request.index("if (-not (Save-RecoveryFailureState))")
@@ -448,7 +448,7 @@ class WindowsBootstrapTests(unittest.TestCase):
     def test_failed_emergency_task_start_keeps_persisted_audit_and_cooldown_evidence(self):
         request = SCRIPT[
             SCRIPT.index("function Request-EmergencyReboot")
-            : SCRIPT.index("function Set-RecoveryTaskSettings")
+            : SCRIPT.index("function Install-KeepAliveTask")
         ]
 
         start_index = request.index("Start-ScheduledTask -TaskName $EmergencyRebootTaskName")
@@ -533,7 +533,7 @@ class WindowsBootstrapTests(unittest.TestCase):
         ]
         request = SCRIPT[
             SCRIPT.index("function Request-EmergencyReboot")
-            : SCRIPT.index("function Set-RecoveryTaskSettings")
+            : SCRIPT.index("function Install-KeepAliveTask")
         ]
 
         self.assertIn("Install-EmergencyRebootTask", installer)
@@ -579,7 +579,7 @@ class WindowsBootstrapTests(unittest.TestCase):
     def test_emergency_reboot_is_limited_to_exhausted_keepalive_or_k3s_recovery(self):
         reboot = SCRIPT[
             SCRIPT.index("function Install-EmergencyRebootTask")
-            : SCRIPT.index("function Set-RecoveryTaskSettings")
+            : SCRIPT.index("function Install-KeepAliveTask")
         ]
 
         self.assertIn('$EmergencyRebootTaskName = "PersonalServer-EmergencyReboot"', SCRIPT)
@@ -593,14 +593,15 @@ class WindowsBootstrapTests(unittest.TestCase):
 
     def test_uses_schtasks_when_scheduled_task_cmdlets_are_unavailable(self):
         self.assertIn("schtasks.exe /Create", SCRIPT)
-        self.assertIn("/SC ONSTART", SCRIPT)
+        self.assertIn("<BootTrigger>", SCRIPT)
+        self.assertIn("/XML $temporaryTaskXml", SCRIPT)
         self.assertIn("/RP *", SCRIPT)
         self.assertIn("/F", SCRIPT)
-        self.assertIn("schtasks.exe /Query", SCRIPT)
+        self.assertNotIn("/SC ONSTART", SCRIPT)
 
     def test_schtasks_warning_stderr_does_not_terminate_install_task(self):
         installer = SCRIPT[
-            SCRIPT.index("function Install-ScheduledTask") : SCRIPT.index("\nLoad-RecoveryFailureState")
+            SCRIPT.index("function Install-SupervisorTask") : SCRIPT.index("function Install-ScheduledTask")
         ]
 
         self.assertIn('$ErrorActionPreference = "Continue"', installer)
@@ -665,38 +666,54 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("$RecoveryFailureThreshold = 2", SCRIPT)
         self.assertIn("if ($failureCount -lt $RecoveryFailureThreshold)", SCRIPT)
 
-    def test_supervisor_preserves_task_identity_while_enabling_restart_after_crash(self):
-        settings = SCRIPT[
-            SCRIPT.index("function Set-RecoveryTaskSettings") : SCRIPT.index("function Install-ScheduledTask")
+    def test_supervisor_is_registered_with_restart_settings_in_the_task_xml(self):
+        self.assertIn("function Install-SupervisorTask", SCRIPT)
+        supervisor_task = SCRIPT[
+            SCRIPT.index("function Install-SupervisorTask") : SCRIPT.index("function Install-ScheduledTask")
         ]
         installer = SCRIPT[
             SCRIPT.index("function Install-ScheduledTask") : SCRIPT.index("\nLoad-RecoveryFailureState\n\nfunction Enter-SupervisorLock")
         ]
-        self.assertIn("Get-ScheduledTask -TaskName $TaskName", settings)
-        self.assertIn("$settings = $scheduledTask.Settings", settings)
-        self.assertIn('$settings.ExecutionTimeLimit = "PT0S"', settings)
-        self.assertIn("$settings.RestartCount = 3", settings)
-        self.assertIn('$settings.RestartInterval = "PT1M"', settings)
-        self.assertIn("Set-ScheduledTask -TaskName $TaskName -Settings $settings", settings)
-        self.assertNotIn("New-ScheduledTaskSettingsSet", settings)
-        self.assertIn("[void](Set-RecoveryTaskSettings)", installer)
+        self.assertIn('$temporaryTaskXml = Join-Path $env:TEMP "$TaskName.xml"', supervisor_task)
+        self.assertIn('$escapedRunAsUser = [System.Security.SecurityElement]::Escape($RunAsUser)', supervisor_task)
+        self.assertIn('$escapedScriptPath = [System.Security.SecurityElement]::Escape($ScriptPath)', supervisor_task)
+        self.assertIn('Set-Content -LiteralPath $temporaryTaskXml -Value $taskXml -Encoding unicode', supervisor_task)
+        self.assertIn('schtasks.exe /Create /TN $TaskName /XML $temporaryTaskXml /RU $RunAsUser /RP * /F', supervisor_task)
+        for token in (
+            "<BootTrigger>",
+            "<LogonType>Password</LogonType>",
+            "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>",
+            "<RestartOnFailure>",
+            "<Interval>PT1M</Interval>",
+            "<Count>3</Count>",
+            "<Command>powershell.exe</Command>",
+            "-Supervisor</Arguments>",
+            'Remove-Item -LiteralPath $temporaryTaskXml -Force -ErrorAction SilentlyContinue',
+        ):
+            self.assertIn(token, supervisor_task)
+        registration_call = next(
+            line
+            for line in supervisor_task.splitlines()
+            if "schtasks.exe /Create /TN $TaskName" in line
+        )
+        self.assertNotIn("|", registration_call)
+        self.assertNotIn("2>&1", registration_call)
+        self.assertNotIn("Out-", registration_call)
+        self.assertNotIn("/SC ONSTART", supervisor_task)
+        self.assertNotIn("/TR", supervisor_task)
+        self.assertNotIn("Set-ScheduledTask", supervisor_task)
+        self.assertNotIn("Set-RecoveryTaskSettings", installer)
         supervisor = SCRIPT[SCRIPT.index("function Start-Supervisor") : SCRIPT.index("function Start-Daemon")]
-        self.assertIn("[void](Set-RecoveryTaskSettings)", supervisor)
+        self.assertNotIn("Set-RecoveryTaskSettings", supervisor)
 
-    def test_install_task_keeps_registered_task_when_recovery_settings_update_fails(self):
+    def test_install_task_does_not_revalidate_credentials_after_task_registration(self):
         installer = SCRIPT[
             SCRIPT.index("function Install-ScheduledTask") : SCRIPT.index("\nLoad-RecoveryFailureState")
         ]
-        settings_update = installer[installer.index("try {", installer.index("[void](Set-RecoveryTaskSettings)") - 20) :]
-        self.assertIn("try {", settings_update)
-        self.assertIn("catch {", settings_update)
-        self.assertIn("Could not update scheduled task recovery settings after registration", settings_update)
-        self.assertIn("$TaskName", settings_update)
-        self.assertIn("manual", settings_update.lower())
-        self.assertLess(
-            settings_update.index("Could not update scheduled task recovery settings after registration"),
-            settings_update.index("Registered scheduled task '$TaskName'"),
-        )
+        self.assertIn("Install-SupervisorTask -RunAsUser $runAsUser", installer)
+        self.assertNotIn("Set-RecoveryTaskSettings", installer)
+        self.assertNotIn("Set-ScheduledTask", installer)
+        self.assertNotIn("Could not update scheduled task recovery settings after registration", installer)
 
     def test_daemon_runs_targeted_recovery_cycle_without_periodic_stack_recreation(self):
         """A daemon-loop stack bootstrap would recreate normal services every interval."""
