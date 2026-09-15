@@ -998,45 +998,83 @@ function Install-KeepAliveTask([string]$RunAsUser) {
     }
 }
 
-function Set-RecoveryTaskSettings {
-    $scheduledTask = Get-ScheduledTask -TaskName $TaskName
-    $settings = $scheduledTask.Settings
-    $settings.ExecutionTimeLimit = "PT0S"
-    $settings.RestartCount = 3
-    $settings.RestartInterval = "PT1M"
-    Set-ScheduledTask -TaskName $TaskName -Settings $settings | Out-Null
+function Install-SupervisorTask([string]$RunAsUser) {
+    $temporaryTaskXml = Join-Path $env:TEMP "$TaskName.xml"
+    $escapedRunAsUser = [System.Security.SecurityElement]::Escape($RunAsUser)
+    $escapedScriptPath = [System.Security.SecurityElement]::Escape($ScriptPath)
+    $taskXml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <URI>\personal-server-autostart</URI>
+    <Description>Starts the Personal Server recovery supervisor after Windows startup.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+    </BootTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>$escapedRunAsUser</UserId>
+      <LogonType>Password</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>powershell.exe</Command>
+      <Arguments>-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File &quot;$escapedScriptPath&quot; -Supervisor</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"@
+    try {
+        Set-Content -LiteralPath $temporaryTaskXml -Value $taskXml -Encoding unicode
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & schtasks.exe /Create /TN $TaskName /XML $temporaryTaskXml /RU $RunAsUser /RP * /F
+            $createExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        if ($createExitCode -ne 0) {
+            throw "Failed to register scheduled task '$TaskName' (exit code $createExitCode)."
+        }
+    } finally {
+        Remove-Item -LiteralPath $temporaryTaskXml -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Install-ScheduledTask {
     Install-EmergencyRebootTask
     $runAsUser = "$env:USERDOMAIN\$env:USERNAME"
     Install-KeepAliveTask -RunAsUser $runAsUser
-    $taskAction = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -Supervisor"
-    Write-Info "Registering startup task for $runAsUser. Windows will prompt for the account password."
-    $previousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-        $createOutput = (& schtasks.exe /Create /TN $TaskName /SC ONSTART /RU $runAsUser /RP * /TR $taskAction /RL LIMITED /F 2>&1 | Out-String)
-        $createExitCode = $LASTEXITCODE
-        if ($createExitCode -ne 0) {
-            $existingTask = (& schtasks.exe /Query /TN $TaskName /FO LIST /V 2>&1 | Out-String)
-            if ($existingTask -match [regex]::Escape($ScriptPath)) {
-                Write-Info "Scheduled task '$TaskName' already points to $ScriptPath."
-            } else {
-                throw "Failed to register scheduled task '$TaskName' with schtasks.exe (exit code $createExitCode)."
-            }
-        } elseif ($createOutput.Trim()) {
-            Write-Info $createOutput.Trim()
-        }
-    } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-
-    try {
-        [void](Set-RecoveryTaskSettings)
-    } catch {
-        Write-Info "Could not update scheduled task recovery settings after registration for '$TaskName': $($_.Exception.Message). Task identity was retained; manual follow-up required to configure restart-on-failure settings."
-    }
+    Install-SupervisorTask -RunAsUser $runAsUser
     Write-Info "Registered scheduled task '$TaskName' to start with Windows."
 }
 
@@ -1072,12 +1110,6 @@ function Start-Supervisor {
     if ($null -eq $lockStream) {
         Write-Info "Recovery supervisor is already running; skipping duplicate start."
         return
-    }
-
-    try {
-        [void](Set-RecoveryTaskSettings)
-    } catch {
-        Write-Info "Could not update scheduled task recovery settings: $($_.Exception.Message)"
     }
 
     try {
