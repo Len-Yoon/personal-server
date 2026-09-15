@@ -266,6 +266,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         oauth_mount_destination: str = "/data/oauth",
         rejected_sha: str | None = None,
         origin_main_sha: str | None = None,
+        capture_release_permissions: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], str, str | None]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "project"
@@ -283,6 +284,8 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 (service_root / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
                 (service_root / "requirements.txt").write_text("\n", encoding="utf-8")
                 (service_root / "app" / "main.py").write_text("\n", encoding="utf-8")
+                (service_root / "app" / "routers").mkdir()
+                (service_root / "app" / "routers" / "endpoints.py").write_text("\n", encoding="utf-8")
             state_dir = Path(directory) / "state"
             state_dir.mkdir()
             if previous_sha is not None:
@@ -419,6 +422,21 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 text=True,
                 check=False,
             )
+            release_permissions: dict[str, tuple[int, int, int, int, int]] = {}
+            if capture_release_permissions:
+                for release in (state_dir / "releases").iterdir():
+                    app_directory = release / "crawler-worker" / "app"
+                    main_module = app_directory / "main.py"
+                    nested_directory = app_directory / "routers"
+                    nested_module = nested_directory / "endpoints.py"
+                    release_permissions[release.name] = (
+                        release.stat().st_mode & 0o777,
+                        app_directory.stat().st_mode & 0o777,
+                        main_module.stat().st_mode & 0o777,
+                        nested_directory.stat().st_mode & 0o777,
+                        nested_module.stat().st_mode & 0o777,
+                    )
+            result.release_permissions = release_permissions
             recorded_calls = calls.read_text(encoding="utf-8") if calls.exists() else ""
             saved_state = state_dir / "last-healthy-revision"
             saved_content = (
@@ -596,6 +614,26 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertIn(f"git archive --format=tar {self.OLD_SHA}", calls)
         self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
         self.assertEqual(result.stderr.count("safe_cd_stage=rollback"), 1)
+
+    def test_release_app_source_is_readable_by_non_root_for_deploy_and_rollback(self):
+        result, _, _ = self.run_safe_deploy(
+            previous_sha=self.OLD_SHA,
+            health_results=(1, 0),
+            capture_release_permissions=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(result.release_permissions), 2)
+        for release_mode, directory_mode, file_mode, nested_directory_mode, nested_file_mode in result.release_permissions.values():
+            self.assertEqual(release_mode, 0o700)
+            self.assertEqual(directory_mode & 0o005, 0o005)
+            self.assertEqual(file_mode & 0o004, 0o004)
+            self.assertEqual(nested_directory_mode & 0o005, 0o005)
+            self.assertEqual(nested_file_mode & 0o004, 0o004)
+            self.assertEqual(directory_mode & 0o002, 0)
+            self.assertEqual(file_mode & 0o002, 0)
+            self.assertEqual(nested_directory_mode & 0o002, 0)
+            self.assertEqual(nested_file_mode & 0o002, 0)
 
     def test_compose_deploy_failure_rolls_back_once_to_saved_healthy_revision(self):
         result, calls, saved_state = self.run_safe_deploy(
