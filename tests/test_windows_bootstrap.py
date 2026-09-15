@@ -57,6 +57,25 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertNotIn("$RunAsUser", failure_path)
         self.assertNotIn(".Trim()", failure_path)
 
+    def test_keepalive_registration_keeps_the_password_prompt_interactive(self):
+        installer = SCRIPT[
+            SCRIPT.index("function Install-KeepAliveTask")
+            : SCRIPT.index("function Set-RecoveryTaskSettings")
+        ]
+
+        self.assertIn(
+            "& schtasks.exe /Create /TN $KeepAliveTaskName /XML $temporaryTaskXml /RU $RunAsUser /RP * /F",
+            installer,
+        )
+        registration_call = next(
+            line
+            for line in installer.splitlines()
+            if "schtasks.exe /Create /TN $KeepAliveTaskName" in line
+        )
+        self.assertNotIn("|", registration_call)
+        self.assertNotIn("2>&1", registration_call)
+        self.assertNotIn("Out-", registration_call)
+
     def test_install_task_registers_keepalive_before_supervisor(self):
         installer = SCRIPT[
             SCRIPT.index("function Install-ScheduledTask")
