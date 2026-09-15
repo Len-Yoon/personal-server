@@ -61,6 +61,20 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("운영 데이터", content)
         self.assertIn("3단계 격리된 Pod 자동복구 실습에만 적용", content)
 
+    def test_monthly_sre_docs_record_the_verified_n100_activation_and_review_cycle(self):
+        k3s = Path("infra/k8s/README.md").read_text(encoding="utf-8")
+        roadmap = Path("docs/operations-roadmap.md").read_text(encoding="utf-8")
+        drill = Path("docs/recovery-drill.md").read_text(encoding="utf-8")
+        evidence = Path("docs/agent-loop-evidence.md").read_text(encoding="utf-8")
+
+        self.assertIn("N100에서 활성화됨", k3s)
+        self.assertNotIn("현재 N100에서 활성화되지 않음", k3s)
+        self.assertIn("첫 수동 Job", roadmap)
+        self.assertNotIn("월간 복구 훈련 운영 검증", roadmap)
+        self.assertIn("정기 운영 결과", drill)
+        self.assertIn("월간 SRE 통합 점검 N100 적용", evidence)
+        self.assertIn("운영 문서 대조", evidence)
+
     def test_operations_reference_describes_current_runtime_split(self):
         content = Path("docs/operations-reference.md").read_text(encoding="utf-8")
 

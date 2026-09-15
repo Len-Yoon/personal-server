@@ -96,12 +96,12 @@ CronJob은 매일 03:00 KST에 실행되며, `Forbid` 동시 실행 제한·실�
 
 ## 월간 SRE 통합 점검 자동화
 
-월간 SRE 통합 점검은 운영자 설치 전 상태이며 현재 N100에서 활성화되지 않음. 저장소 구현 또는 병합만으로 CronJob이 활성화되지 않으며, 별도 운영 승인 후 N100 운영자가 아래 `--install`을 직접 실행해야 함. 설치 전 `--preflight`와 `--render`가 통과해야 하며, 설치 과정에서 Secret·token·Telegram chat ID·rclone 자격 증명을 생성·복제·읽지 않음. 백업 단계는 CronJob이 기록한 `personal-server/portal-pvc-backup-evidence` ConfigMap만 fail-closed로 검증함. 공개 상태 5분 감시는 GitHub Actions에서 독립 유지하며 이 CronJob으로 통합하지 않음.
+월간 SRE 통합 점검은 N100에서 활성화됨. 2026-09-15 첫 수동 Job은 Portal 상태·백업 증적·격리 Pod 복구 단계와 기존 SRE Telegram relay 전달을 모두 통과했고, 공개 `https://len.pe.kr/health`도 10초 간격 3회 HTTP 200으로 확인됨. 저장소 병합만으로는 CronJob이 활성화되지 않으며, 이후 재설치 또는 변경 적용 전에도 아래 `--preflight`와 `--render`를 먼저 통과해야 함. 설치 과정에서 Secret·token·Telegram chat ID·rclone 자격 증명을 생성·복제·읽지 않음. 백업 단계는 CronJob이 기록한 `personal-server/portal-pvc-backup-evidence` ConfigMap만 fail-closed로 검증함. 공개 상태 5분 감시는 GitHub Actions에서 독립 유지하며 이 CronJob으로 통합하지 않음.
 
 ```bash
 bash infra/k8s/tools/quarterly-sre-audit-automation.sh --preflight
 bash infra/k8s/tools/quarterly-sre-audit-automation.sh --render
-# 별도 운영 승인 후 N100에서 실행함.
+# 재설치 또는 운영 변경은 별도 승인 후 N100에서 실행함.
 bash infra/k8s/tools/quarterly-sre-audit-automation.sh --install
 bash infra/k8s/tools/quarterly-sre-audit-automation.sh --status
 ```
@@ -136,7 +136,7 @@ lock 경합, Job 목록 조회 오류 또는 종료 미확정 Job으로 manifest
 2. 고정 `sre-recovery-lab/sre-pod-recovery` Deployment의 `.spec.replicas=0`으로 정리 요청이 반영되었는지 확인함. Pod는 정상 종료 유예 동안 남을 수 있으며, Kubernetes가 비동기로 종료함. 고정 namespace와 Deployment 자체는 삭제하지 않음.
 3. 기존 SRE Telegram relay를 통해 요약 메시지가 수신되었는지 확인함.
 
-Telegram 수신을 확인하기 전에는 월간 점검 적용 또는 알림 정상으로 판단하지 않음. `--status`는 새 월간 CronJob suspended 상태와 ConfigMap의 `run_id`, `status`, `completed_at`, `health_audit`, `backup_check`, `recovery_lab`만 출력하므로 Secret 값은 포함하지 않음. `completed_at`은 서울 기준 `YYYY-MM-DD HH:MM`으로 표시됨. 수동 Job 직후에는 `run_id`와 완료 시각이 해당 실행 결과인지 확인 필요함.
+Telegram 수신을 확인하기 전에는 월간 점검 적용 또는 알림 정상으로 판단하지 않음. `--status`는 새 월간 CronJob의 suspend 상태와 ConfigMap의 `run_id`, `status`, `completed_at`, `health_audit`, `backup_check`, `recovery_lab`만 출력하므로 Secret 값은 포함하지 않음. `completed_at`은 서울 기준 `YYYY-MM-DD HH:MM`으로 표시됨. 수동 Job 직후에는 `run_id`와 완료 시각이 해당 실행 결과인지 확인 필요함.
 
 ```bash
 bash infra/k8s/tools/quarterly-sre-audit-automation.sh --status
