@@ -232,7 +232,9 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
             trigger_dir.mkdir()
             trigger = trigger_dir / "trigger"
             trigger.write_text("false", encoding="utf-8")
-            script = command[2].replace("/var/run/recovery-trigger", str(trigger_dir)).replace("/tmp/", f"{root}/")
+            # Rewrite generic /tmp paths before inserting a temporary path that
+            # itself may begin with /tmp on hosted Linux runners.
+            script = command[2].replace("/tmp/", f"{root}/").replace("/var/run/recovery-trigger", str(trigger_dir))
             script = script.replace("sleep 1", "sleep 0.01")
             healthy = root / "healthy"
             marker = root / "recovery-fault-injected"
