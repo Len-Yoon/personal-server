@@ -103,7 +103,9 @@ create_release_source() {
   done
   git archive --format=tar "$revision" -- "${archive_paths[@]}" | tar -xf - -C "$RELEASE_SOURCE" || return 1
   for service in "$@"; do
+    [[ -d "$RELEASE_SOURCE/$service" && ! -L "$RELEASE_SOURCE/$service" ]] || return 1
     [[ -d "$RELEASE_SOURCE/$service/app" && ! -L "$RELEASE_SOURCE/$service/app" ]] || return 1
+    chmod a+rx "$RELEASE_SOURCE/$service" || return 1
     chmod -R a+rX "$RELEASE_SOURCE/$service/app" || return 1
   done
 }
@@ -125,7 +127,7 @@ create_compose_override() {
       printf '      context: %s\n' "$quoted_source"
       printf '%s\n' '      dockerfile: Dockerfile'
       printf '%s\n' '    volumes:'
-      printf '      - %s\n' "$(yaml_quote "$service_source/app:/app:ro")"
+      printf '      - %s\n' "$(yaml_quote "$service_source:/app:ro")"
     done
   } > "$COMPOSE_OVERRIDE"
 }
