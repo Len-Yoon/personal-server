@@ -430,7 +430,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 text=True,
                 check=False,
             )
-            release_permissions: dict[str, tuple[int, int, int, int, int, int]] = {}
+            release_permissions: dict[str, tuple[int, int, int, int, int, int, int]] = {}
             if capture_release_permissions:
                 for release in (state_dir / "releases").iterdir():
                     service_source = release / "crawler-worker"
@@ -438,6 +438,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                     main_module = app_directory / "main.py"
                     nested_directory = app_directory / "routers"
                     nested_module = nested_directory / "endpoints.py"
+                    log_mountpoint = app_directory / "data" / "logs"
                     release_permissions[release.name] = (
                         release.stat().st_mode & 0o777,
                         service_source.stat().st_mode & 0o777,
@@ -445,6 +446,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                         main_module.stat().st_mode & 0o777,
                         nested_directory.stat().st_mode & 0o777,
                         nested_module.stat().st_mode & 0o777,
+                        log_mountpoint.stat().st_mode & 0o777 if log_mountpoint.exists() else 0,
                     )
             result.release_permissions = release_permissions
             result.compose_override = (
@@ -641,18 +643,20 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertEqual(len(result.release_permissions), 2)
         self.assertIn("/crawler-worker:/app:ro", result.compose_override)
         self.assertNotIn("/crawler-worker/app:/app:ro", result.compose_override)
-        for release_mode, service_mode, directory_mode, file_mode, nested_directory_mode, nested_file_mode in result.release_permissions.values():
+        for release_mode, service_mode, directory_mode, file_mode, nested_directory_mode, nested_file_mode, log_mountpoint_mode in result.release_permissions.values():
             self.assertEqual(release_mode, 0o700)
             self.assertEqual(service_mode & 0o005, 0o005)
             self.assertEqual(directory_mode & 0o005, 0o005)
             self.assertEqual(file_mode & 0o004, 0o004)
             self.assertEqual(nested_directory_mode & 0o005, 0o005)
             self.assertEqual(nested_file_mode & 0o004, 0o004)
+            self.assertEqual(log_mountpoint_mode & 0o005, 0o005)
             self.assertEqual(directory_mode & 0o002, 0)
             self.assertEqual(service_mode & 0o002, 0)
             self.assertEqual(file_mode & 0o002, 0)
             self.assertEqual(nested_directory_mode & 0o002, 0)
             self.assertEqual(nested_file_mode & 0o002, 0)
+            self.assertEqual(log_mountpoint_mode & 0o002, 0)
 
     def test_compose_deploy_failure_rolls_back_once_to_saved_healthy_revision(self):
         result, calls, saved_state = self.run_safe_deploy(
