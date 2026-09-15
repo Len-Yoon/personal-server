@@ -126,6 +126,27 @@ class PortalDashboardTests(unittest.TestCase):
             services,
         )
 
+    def test_recovery_events_incomplete_bridge_body_returns_empty_list(self):
+        """Fails if a partial system-agent response breaks the administrator status page."""
+        from http.client import IncompleteRead
+
+        system_status = self.reload_system_status("")
+
+        class IncompleteResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                raise IncompleteRead(b"partial", 20)
+
+        with patch("app.services.system_status.urlopen", return_value=IncompleteResponse()):
+            events = system_status.get_recovery_events(timeout=0.01)
+
+        self.assertEqual(events, [])
+
     def test_demo_search_results_include_metadata(self):
         prepare_service_import("portal-web")
         os.environ["DEMO_MODE"] = "true"
@@ -472,6 +493,50 @@ class PortalDashboardTests(unittest.TestCase):
             self.assertNotIn("최근 조치 이력", response.text)
             self.assertNotIn("재시작 실행", response.text)
             self.assertNotIn(">승인<", response.text)
+        finally:
+            os.environ.pop("ADMIN_STATUS_PASSWORD", None)
+
+    def test_authenticated_admin_status_displays_only_sanitized_recent_recovery_events(self):
+        """Fails if recovery history bypasses the bridge, leaks raw fields, or exceeds ten rows."""
+        os.environ["ADMIN_STATUS_PASSWORD"] = "secret"
+        recovery_events = [
+            {
+                "timestamp": f"2026-09-11T0{index}:30:00+00:00",
+                "component": f"component-{index}",
+                "event": "accepted" if index == 0 else "health_restored",
+                "status": "accepted" if index == 0 else "ok",
+                "action": "restart_tunnel" if index == 0 else "none",
+                "error": "raw-error-must-not-appear",
+                "path": "/host/recovery-events.jsonl",
+            }
+            for index in range(12)
+        ]
+        try:
+            app = self.load_app()
+            with patch(
+                "app.routers.admin.get_recovery_events",
+                return_value=recovery_events,
+                create=True,
+            ) as get_recovery_events:
+                with TestClient(app) as client:
+                    response = client.post(
+                        "/admin/status",
+                        data={"password": "secret"},
+                        headers={"Origin": "http://testserver"},
+                    )
+
+            self.assertEqual(response.status_code, 200)
+            get_recovery_events.assert_called_once_with()
+            self.assertIn("최근 자동복구 이력", response.text)
+            self.assertIn("조치 실행 수락", response.text)
+            self.assertIn("실제 복구 완료", response.text)
+            self.assertIn("2026-09-11 09:30", response.text)
+            for index in range(10):
+                self.assertIn(f"component-{index}", response.text)
+            self.assertNotIn("component-10", response.text)
+            self.assertNotIn("component-11", response.text)
+            self.assertNotIn("raw-error-must-not-appear", response.text)
+            self.assertNotIn("/host/recovery-events.jsonl", response.text)
         finally:
             os.environ.pop("ADMIN_STATUS_PASSWORD", None)
 

@@ -1,6 +1,7 @@
-param(
+﻿param(
     [switch]$InstallTask,
     [switch]$Start,
+    [switch]$Supervisor,
     [switch]$Daemon,
     [string]$ProjectRoot = "C:\personal-server"
 )
@@ -9,19 +10,39 @@ $ErrorActionPreference = "Stop"
 
 $ScriptPath = Join-Path $ProjectRoot "scripts\windows-bootstrap.ps1"
 $TaskName = "personal-server-autostart"
+$KeepAliveTaskName = "PersonalServer-WSL-KeepAlive"
 $WslDistribution = "Ubuntu-24.04"
+$WslServiceUser = "window"
+$CloudflareTunnelService = "cloudflared-personal-server.service"
+$TunnelTelegramCredentialTarget = "personal-server-tunnel-telegram"
 $CaddyContainerName = "personal-server-caddy-1"
 $RecoveryIntervalSeconds = 180
+$RecoveryStartupDelaySeconds = 120
 $RecoveryFailureThreshold = 2
 $RecoveryMaxAttempts = 3
 $RecoveryCommandTimeoutSeconds = 20
+$EmergencyRebootTaskName = "PersonalServer-EmergencyReboot"
+$EmergencyRebootGraceSeconds = 1200
+$EmergencyRebootCooldownSeconds = 21600
 $RecoveryStateDirectory = Join-Path $ProjectRoot "data"
 $RecoveryStatePath = Join-Path $ProjectRoot "data\recovery-state.json"
+$RecoveryEventLogPath = Join-Path $RecoveryStateDirectory "recovery-events.jsonl"
+$RecoveryEventLogMaxEntries = 200
 $RecoveryLockPath = Join-Path $RecoveryStateDirectory "recovery.lock"
+$SupervisorLockPath = Join-Path $RecoveryStateDirectory "supervisor.lock"
+$DaemonLockPath = Join-Path $RecoveryStateDirectory "daemon.lock"
+$DaemonRestartDelaySeconds = 15
+$DaemonFailureBackoffSeconds = 60
+$DaemonRapidFailureWindowSeconds = 60
+$DaemonRapidFailureLimit = 3
 $RecoveryComponents = @("keepalive", "k3s", "portal", "nodeport", "tunnel")
 $RecoveryFailureCounts = @{}
 $RecoveryAttemptCounts = @{}
 $RecoveryStateDirty = $false
+$EmergencyRebootLastAt = $null
+$EmergencyRebootCauseComponent = $null
+$EmergencyRebootCooldownStateValid = $true
+$TunnelAlertDownNotified = $false
 function Write-Info([string]$Message) {
     Write-Host $Message
 }
@@ -33,12 +54,13 @@ function ConvertTo-WslArgument([string]$Argument) {
     return '"' + $Argument.Replace('"', '\"') + '"'
 }
 
-function Invoke-WslWithTimeout([string[]]$Arguments, [string]$Operation) {
+function Invoke-WslWithTimeout([string[]]$Arguments, [string]$Operation, [switch]$CaptureOutput) {
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = "wsl.exe"
     $startInfo.Arguments = (($Arguments | ForEach-Object { ConvertTo-WslArgument ([string]$_) }) -join " ")
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = [bool]$CaptureOutput
 
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
@@ -59,6 +81,9 @@ function Invoke-WslWithTimeout([string[]]$Arguments, [string]$Operation) {
         Write-Info "$Operation failed with exit code $($process.ExitCode)."
         return $false
     }
+    if ($CaptureOutput) {
+        return $process.StandardOutput.ReadToEnd().Trim()
+    }
     return $true
 }
 
@@ -75,23 +100,219 @@ function Invoke-WslCommand {
     }
 }
 
+function Get-TunnelTelegramConfiguration {
+    try {
+        if ($null -ne ("PersonalServer.CredentialReader" -as [type])) {
+            $credential = [PersonalServer.CredentialReader]::ReadGeneric($TunnelTelegramCredentialTarget)
+        } else {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace PersonalServer {
+    public sealed class GenericCredential {
+        public string UserName { get; private set; }
+        public string Password { get; private set; }
+
+        public GenericCredential(string userName, string password) {
+            UserName = userName;
+            Password = password;
+        }
+    }
+
+    public static class CredentialReader {
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct Credential {
+            public uint Flags;
+            public uint Type;
+            public string TargetName;
+            public string Comment;
+            public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+            public uint CredentialBlobSize;
+            public IntPtr CredentialBlob;
+            public uint Persist;
+            public uint AttributeCount;
+            public IntPtr Attributes;
+            public string TargetAlias;
+            public string UserName;
+        }
+
+        [DllImport("Advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CredRead(string target, uint type, uint flags, out IntPtr credential);
+
+        [DllImport("Advapi32.dll", SetLastError = true)]
+        private static extern void CredFree(IntPtr buffer);
+
+        public static GenericCredential ReadGeneric(string target) {
+            IntPtr pointer;
+            if (!CredRead(target, 1, 0, out pointer)) return null;
+            try {
+                var credential = (Credential)Marshal.PtrToStructure(pointer, typeof(Credential));
+                if (credential.CredentialBlob == IntPtr.Zero || credential.CredentialBlobSize == 0 || credential.CredentialBlobSize % 2 != 0) return null;
+                return new GenericCredential(
+                    credential.UserName,
+                    Marshal.PtrToStringUni(credential.CredentialBlob, (int)credential.CredentialBlobSize / 2)
+                );
+            } finally {
+                CredFree(pointer);
+            }
+        }
+    }
+}
+'@
+            $credential = [PersonalServer.CredentialReader]::ReadGeneric($TunnelTelegramCredentialTarget)
+        }
+    } catch {
+        Write-Info "Tunnel Telegram credential is unavailable."
+        return $null
+    }
+    if ($null -eq $credential -or [string]::IsNullOrWhiteSpace([string]$credential.Password)) {
+        Write-Info "Tunnel Telegram credential is unavailable."
+        return $null
+    }
+
+    if (([string]$credential.Password).TrimStart().StartsWith("{")) {
+        try {
+            $configuration = $credential.Password | ConvertFrom-Json
+            if ($null -eq $configuration -or [string]::IsNullOrWhiteSpace([string]$configuration.bot_token) -or [string]::IsNullOrWhiteSpace([string]$configuration.chat_id)) {
+                Write-Info "Tunnel Telegram credential has an invalid format."
+                return $null
+            }
+            return $configuration
+        } catch {
+            Write-Info "Tunnel Telegram credential has an invalid format."
+            return $null
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace([string]$credential.UserName)) {
+        Write-Info "Tunnel Telegram credential is unavailable."
+        return $null
+    }
+
+    return [pscustomobject]@{
+        bot_token = [string]$credential.Password
+        chat_id = [string]$credential.UserName
+    }
+}
+
+function Send-TunnelTelegramNotification([string]$Transition) {
+    $configuration = Get-TunnelTelegramConfiguration
+    if ($null -eq $configuration) {
+        return $false
+    }
+    $message = switch ($Transition) {
+        "down" { "[개인서버 장애] Cloudflare Tunnel 연결 실패를 확인했습니다. 자동복구를 진행합니다." }
+        "recovered" { "[개인서버 복구] Cloudflare Tunnel 연결이 정상 복구되었습니다." }
+        default { return $false }
+    }
+    try {
+        $payload = @{
+            chat_id = [string]$configuration.chat_id
+            text = $message
+        } | ConvertTo-Json -Compress
+        $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+        $response = Invoke-RestMethod -Method Post -Uri "https://api.telegram.org/bot$($configuration.bot_token)/sendMessage" -ContentType "application/json; charset=utf-8" -Body $payloadBytes -TimeoutSec $RecoveryCommandTimeoutSeconds -ErrorAction Stop
+        if ($null -eq $response -or $response.ok -ne $true -or $null -eq $response.result -or $null -eq $response.result.message_id) {
+            Write-Info "Tunnel Telegram delivery was not accepted."
+            return $false
+        }
+        return $true
+    } catch {
+        Write-Info "Tunnel Telegram delivery failed."
+        return $false
+    }
+}
+
+function Update-TunnelTelegramNotification([string]$TunnelHealth) {
+    if ($TunnelHealth -eq "deferred") {
+        return
+    }
+    if ($TunnelHealth -eq "healthy") {
+        if (-not $TunnelAlertDownNotified) {
+            return
+        }
+        if (Send-TunnelTelegramNotification "recovered") {
+            $script:TunnelAlertDownNotified = $false
+            [void](Save-RecoveryFailureState)
+            Write-RecoveryEvent -Component "tunnel" -Event "alert_recovered" -Status "sent" -Action "notify_telegram"
+        } else {
+            Write-RecoveryEvent -Component "tunnel" -Event "alert_recovered" -Status "failed" -Action "notify_telegram"
+        }
+        return
+    }
+    if ($TunnelAlertDownNotified) {
+        return
+    }
+    if (Send-TunnelTelegramNotification "down") {
+        $script:TunnelAlertDownNotified = $true
+        [void](Save-RecoveryFailureState)
+        Write-RecoveryEvent -Component "tunnel" -Event "alert_down" -Status "sent" -Action "notify_telegram"
+    } else {
+        Write-RecoveryEvent -Component "tunnel" -Event "alert_down" -Status "failed" -Action "notify_telegram"
+    }
+}
+
 function Test-CloudflareTunnelRunning {
     return (Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "bash", "-lc", "pgrep -af '[c]loudflared.*tunnel run' >/dev/null") -Operation "Cloudflare Tunnel probe")
 }
 
-function Start-CloudflareTunnelProcess {
-    Start-Process -FilePath 'wsl.exe' -WindowStyle Hidden -ArgumentList @(
-        '-d', $WslDistribution,
-        '--', 'cloudflared', 'tunnel', 'run'
-    ) | Out-Null
-    return $true
+function Test-CloudflareTunnelService {
+    return (Invoke-WslWithTimeout -Arguments @(
+        "-d", $WslDistribution, "-u", $WslServiceUser, "--",
+        "bash", "-lc", "systemctl --user is-active --quiet '$CloudflareTunnelService'"
+    ) -Operation "Cloudflare Tunnel service probe")
 }
 
-function Start-CloudflareTunnel {
-    if (Test-CloudflareTunnelRunning) {
-        return $false
+function Test-PublicPortalHealth {
+    $status = Invoke-WslWithTimeout -CaptureOutput -Arguments @(
+        "-d", $WslDistribution, "--",
+        "curl", "--silent", "--show-error", "--output", "/dev/null", "--write-out", "%{http_code}", "--max-time", "15", "https://len.pe.kr/health"
+    ) -Operation "Public Portal health probe"
+    return ($status -eq "200")
+}
+
+function Test-PublicPortalHealthThreeTimes {
+    $allPassed = $true
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        if (-not (Test-PublicPortalHealth)) { $allPassed = $false }
+        if ($attempt -lt 3) { Start-Sleep -Seconds 10 }
     }
-    return (Start-CloudflareTunnelProcess)
+    return $allPassed
+}
+
+function Invoke-PostBootRecoveryCheck {
+    Write-RecoveryEvent -Component "system" -Event "post_boot_check" -Status "started" -Action "none"
+    try {
+        $health = Invoke-RecoveryCycle -RequirePublicPortalHealth
+        $unhealthyComponents = @($RecoveryComponents | Where-Object { $health[$_] -ne "healthy" })
+        if ($null -eq $health -or $unhealthyComponents.Count -gt 0) {
+            throw "Post-boot recovery health did not pass for every required component."
+        }
+        Write-RecoveryEvent -Component "system" -Event "post_boot_check" -Status "passed" -Action "none"
+    } catch {
+        Write-RecoveryEvent -Component "system" -Event "post_boot_check" -Status "failed" -Action "none"
+    }
+}
+
+function Start-CloudflareTunnel([switch]$ForceRestart) {
+    if (Test-CloudflareTunnelService) {
+        if (Test-CloudflareTunnelRunning) {
+            if (-not $ForceRestart) {
+                return $false
+            }
+        }
+        if (-not (Invoke-WslWithTimeout -Arguments @(
+            "-d", $WslDistribution, "-u", $WslServiceUser, "--",
+            "bash", "-lc", "systemctl --user restart '$CloudflareTunnelService'"
+        ) -Operation "Cloudflare Tunnel service restart")) { return $false }
+        return ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning))
+    }
+    if (-not (Invoke-WslWithTimeout -Arguments @(
+        "-d", $WslDistribution, "-u", $WslServiceUser, "--",
+        "bash", "-lc", "systemctl --user start '$CloudflareTunnelService'"
+    ) -Operation "Cloudflare Tunnel service start")) { return $false }
+    return ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning))
 }
 
 function Update-HostMetrics {
@@ -141,12 +362,14 @@ function Start-PersonalServerStack {
 }
 
 function Get-RecoveryHealth {
+    param([switch]$RequirePublicPortalHealth)
+
     $health = [ordered]@{
         keepalive = "unhealthy"
         k3s = "unhealthy"
         portal = "deferred"
         nodeport = "unhealthy"
-        tunnel = "unhealthy"
+        tunnel = "deferred"
     }
 
     $keepAliveTask = Get-ScheduledTask -TaskName "PersonalServer-WSL-KeepAlive" -ErrorAction SilentlyContinue
@@ -171,11 +394,61 @@ function Get-RecoveryHealth {
         $health.nodeport = "healthy"
     }
 
-    if (Test-CloudflareTunnelRunning) {
-        $health.tunnel = "healthy"
+    if ($health.nodeport -eq "healthy") {
+        $health.tunnel = "unhealthy"
+        $publicHealthPassed = if ($RequirePublicPortalHealth) {
+            Test-PublicPortalHealthThreeTimes
+        } else {
+            Test-PublicPortalHealth
+        }
+        if ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning) -and $publicHealthPassed) {
+            $health.tunnel = "healthy"
+        }
     }
 
     return $health
+}
+
+function Write-RecoveryEvent(
+    [string]$Component,
+    [string]$Event,
+    [string]$Status,
+    [string]$Action = "none"
+) {
+    $temporaryPath = $null
+    try {
+        New-Item -ItemType Directory -Path $RecoveryStateDirectory -Force | Out-Null
+        $existingEntries = @()
+        if (Test-Path -LiteralPath $RecoveryEventLogPath) {
+            $existingEntries = @(Get-Content -LiteralPath $RecoveryEventLogPath -ErrorAction Stop | Where-Object {
+                -not [string]::IsNullOrWhiteSpace($_)
+            })
+        }
+        if ($existingEntries.Count -ge $RecoveryEventLogMaxEntries) {
+            $existingEntries = @($existingEntries | Select-Object -Last ($RecoveryEventLogMaxEntries - 1))
+        }
+        $entry = [ordered]@{
+            timestamp = (Get-Date).ToUniversalTime().ToString("o")
+            component = $Component
+            event = $Event
+            status = $Status
+            action = $Action
+        } | ConvertTo-Json -Compress
+        $temporaryPath = Join-Path $RecoveryStateDirectory "recovery-events.$PID.tmp"
+        $entriesToWrite = @($existingEntries + $entry)
+        [System.IO.File]::WriteAllLines(
+            $temporaryPath,
+            [string[]]$entriesToWrite,
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+        Move-Item -LiteralPath $temporaryPath -Destination $RecoveryEventLogPath -Force
+    } catch {
+        Write-Info "Recovery event logging failed."
+    } finally {
+        if ($null -ne $temporaryPath) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Save-RecoveryFailureState {
@@ -190,6 +463,13 @@ function Save-RecoveryFailureState {
                 recovery_attempts = $attemptCount
             }
         }
+        $state.emergency_reboot = [ordered]@{
+            last_emergency_reboot_at = $EmergencyRebootLastAt
+            cause_component = $EmergencyRebootCauseComponent
+        }
+        $state.tunnel_alert = [ordered]@{
+            down_notified = $TunnelAlertDownNotified
+        }
         $state | ConvertTo-Json -Depth 3 | Set-Content -Path $RecoveryStatePath -Encoding utf8
         $script:RecoveryStateDirty = $false
         return $true
@@ -200,34 +480,89 @@ function Save-RecoveryFailureState {
     }
 }
 
+function Set-RecoveryStateInvalid {
+    $script:EmergencyRebootCooldownStateValid = $false
+    $script:RecoveryStateDirty = $true
+}
+
 function Load-RecoveryFailureState {
     if (-not (Test-Path -LiteralPath $RecoveryStatePath)) {
         return
     }
     try {
         $storedState = Get-Content -LiteralPath $RecoveryStatePath -Raw | ConvertFrom-Json
-        foreach ($property in $storedState.PSObject.Properties) {
-            if ($property.Name -in $RecoveryComponents) {
-                $failureCount = 0
-                $attemptCount = 0
-                if ([int]::TryParse([string]$property.Value, [ref]$failureCount) -and $failureCount -ge 0) {
-                    $RecoveryFailureCounts[$property.Name] = $failureCount
-                    $RecoveryAttemptCounts[$property.Name] = 0
-                    continue
-                }
-                $storedFailureCount = $property.Value.PSObject.Properties["health_failures"]
-                $storedAttemptCount = $property.Value.PSObject.Properties["recovery_attempts"]
-                if ($null -ne $storedFailureCount -and [int]::TryParse([string]$storedFailureCount.Value, [ref]$failureCount) -and $failureCount -ge 0) {
-                    $RecoveryFailureCounts[$property.Name] = $failureCount
-                }
-                if ($null -ne $storedAttemptCount -and [int]::TryParse([string]$storedAttemptCount.Value, [ref]$attemptCount) -and $attemptCount -ge 0) {
-                    $RecoveryAttemptCounts[$property.Name] = $attemptCount
+        if ($storedState -isnot [PSCustomObject]) {
+            Set-RecoveryStateInvalid
+            return
+        }
+        $legacyRecoveryState = $false
+        $storedEmergencyReboot = $storedState.PSObject.Properties["emergency_reboot"]
+        if ($null -eq $storedEmergencyReboot) {
+            # State files written before emergency reboot support have no cooldown metadata.
+            # Migrate only after all component counters have passed the existing validation.
+            $legacyRecoveryState = $true
+            Write-Info "Legacy recovery state is missing emergency reboot metadata; migrating."
+        } elseif ($null -eq $storedEmergencyReboot.Value -or $storedEmergencyReboot.Value -isnot [PSCustomObject]) {
+            Set-RecoveryStateInvalid
+        } else {
+            $storedLastReboot = $storedEmergencyReboot.Value.PSObject.Properties["last_emergency_reboot_at"]
+            $storedCauseComponent = $storedEmergencyReboot.Value.PSObject.Properties["cause_component"]
+            if ($null -eq $storedLastReboot -or $null -eq $storedCauseComponent) {
+                Set-RecoveryStateInvalid
+            } elseif ($null -eq $storedLastReboot.Value -and $null -eq $storedCauseComponent.Value) {
+                # A normal saved state has no prior emergency reboot yet.
+            } elseif ($null -eq $storedLastReboot.Value -or [string]::IsNullOrWhiteSpace([string]$storedLastReboot.Value) -or $null -eq $storedCauseComponent.Value -or [string]$storedCauseComponent.Value -notin @("keepalive", "k3s")) {
+                Set-RecoveryStateInvalid
+            } else {
+                $script:EmergencyRebootLastAt = [string]$storedLastReboot.Value
+                $script:EmergencyRebootCauseComponent = [string]$storedCauseComponent.Value
+                $parsedLastReboot = [DateTimeOffset]::MinValue
+                if (-not [DateTimeOffset]::TryParseExact([string]$storedLastReboot.Value, "o", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$parsedLastReboot) -or $parsedLastReboot.Offset -ne [TimeSpan]::Zero) {
+                    Set-RecoveryStateInvalid
                 }
             }
+        }
+        $storedTunnelAlert = $storedState.PSObject.Properties["tunnel_alert"]
+        if ($null -eq $storedTunnelAlert) {
+            $legacyRecoveryState = $true
+        } elseif ($null -eq $storedTunnelAlert.Value -or $storedTunnelAlert.Value -isnot [PSCustomObject]) {
+            Set-RecoveryStateInvalid
+        } else {
+            $storedDownNotified = $storedTunnelAlert.Value.PSObject.Properties["down_notified"]
+            if ($null -eq $storedDownNotified -or $storedDownNotified.Value -isnot [bool]) {
+                Set-RecoveryStateInvalid
+            } else {
+                $script:TunnelAlertDownNotified = [bool]$storedDownNotified.Value
+            }
+        }
+        foreach ($component in $RecoveryComponents) {
+            $storedComponent = $storedState.PSObject.Properties[$component]
+            $failureCount = 0
+            $attemptCount = 0
+            if ($null -eq $storedComponent -or $null -eq $storedComponent.Value -or $storedComponent.Value -isnot [PSCustomObject]) {
+                Set-RecoveryStateInvalid
+                if ($null -ne $storedComponent -and [int]::TryParse([string]$storedComponent.Value, [ref]$failureCount) -and $failureCount -ge 0) {
+                    $RecoveryFailureCounts[$component] = $failureCount
+                    $RecoveryAttemptCounts[$component] = 0
+                }
+                continue
+            }
+            $storedFailureCount = $storedComponent.Value.PSObject.Properties["health_failures"]
+            $storedAttemptCount = $storedComponent.Value.PSObject.Properties["recovery_attempts"]
+            if ($null -eq $storedFailureCount -or $null -eq $storedAttemptCount -or -not [int]::TryParse([string]$storedFailureCount.Value, [ref]$failureCount) -or $failureCount -lt 0 -or -not [int]::TryParse([string]$storedAttemptCount.Value, [ref]$attemptCount) -or $attemptCount -lt 0) {
+                Set-RecoveryStateInvalid
+                continue
+            }
+            $RecoveryFailureCounts[$component] = $failureCount
+            $RecoveryAttemptCounts[$component] = $attemptCount
+        }
+        if ($legacyRecoveryState -and -not $RecoveryStateDirty) {
+            [void](Save-RecoveryFailureState)
         }
     } catch {
         $RecoveryFailureCounts = @{}
         $RecoveryAttemptCounts = @{}
+        Set-RecoveryStateInvalid
     }
 }
 
@@ -238,6 +573,7 @@ function Register-RecoveryFailure([string]$Component) {
     }
     $failureCount += 1
     $RecoveryFailureCounts[$Component] = $failureCount
+    Write-RecoveryEvent -Component $Component -Event "unhealthy_detected" -Status "unhealthy" -Action "none"
     [void](Save-RecoveryFailureState)
     if ($failureCount -lt $RecoveryFailureThreshold) {
         Write-Info "$Component recovery failure $failureCount/$RecoveryFailureThreshold."
@@ -251,6 +587,7 @@ function Reset-RecoveryFailure([string]$Component) {
     $RecoveryFailureCounts[$Component] = 0
     $RecoveryAttemptCounts[$Component] = 0
     if ($failureCount -ne 0 -or $attemptCount -ne 0) {
+        Write-RecoveryEvent -Component $Component -Event "health_restored" -Status "healthy" -Action "none"
         [void](Save-RecoveryFailureState)
     }
 }
@@ -275,6 +612,16 @@ function Register-RecoveryAttempt([string]$Component) {
     return $true
 }
 
+function Get-RecoveryActionName([string]$Component) {
+    switch ($Component) {
+        "keepalive" { return "start_keepalive" }
+        "k3s" { return "start_k3s" }
+        "portal" { return "rollout_restart_portal" }
+        "tunnel" { return "restart_tunnel" }
+        default { return "none" }
+    }
+}
+
 function Test-RecoveryActionNeeded([string]$Component) {
     switch ($Component) {
         "keepalive" {
@@ -292,7 +639,7 @@ function Test-RecoveryActionNeeded([string]$Component) {
             return $false
         }
         "tunnel" {
-            return (-not (Test-CloudflareTunnelRunning))
+            return $true
         }
     }
     return $false
@@ -303,11 +650,15 @@ function Invoke-TargetedRecovery([string]$Component) {
     switch ($Component) {
         "keepalive" {
             Start-ScheduledTask -TaskName "PersonalServer-WSL-KeepAlive"
-            return $true
+            $health = Get-RecoveryHealth
+            return ($health.keepalive -eq "healthy")
         }
         "k3s" {
-            [void](Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "-u", "root", "--", "systemctl", "start", "k3s") -Operation "K3s recovery start")
-            return $true
+            if (-not (Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "-u", "root", "--", "systemctl", "start", "k3s") -Operation "K3s recovery start")) {
+                return $false
+            }
+            $health = Get-RecoveryHealth
+            return ($health.k3s -eq "healthy")
         }
         "portal" {
             [void](Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "-u", "root", "--", "k3s", "kubectl", "-n", "personal-server", "rollout", "restart", "deployment/portal-web") -Operation "Portal rollout restart")
@@ -318,7 +669,7 @@ function Invoke-TargetedRecovery([string]$Component) {
             return $false
         }
         "tunnel" {
-            return (Start-CloudflareTunnelProcess)
+            return (Start-CloudflareTunnel -ForceRestart)
         }
     }
     return $false
@@ -350,20 +701,27 @@ function Exit-RecoveryLock($LockStream) {
 }
 
 function Invoke-RecoveryCycle {
+    param([switch]$RequirePublicPortalHealth)
+
     $lockStream = Enter-RecoveryLock
     if ($null -eq $lockStream) {
         Write-Info "Recovery cycle is already running; skipping this interval."
-        return
+        return $null
     }
 
     try {
         if (-not $RecoveryStateDirty) {
             Load-RecoveryFailureState
         }
-        $health = Get-RecoveryHealth
+        $health = Get-RecoveryHealth -RequirePublicPortalHealth:$RequirePublicPortalHealth
         if ($RecoveryStateDirty) {
             Write-Info "Recovery state is unsaved; retaining in-memory counters and blocking automated recovery until restart or operator action."
-            return
+            return $null
+        }
+        Update-TunnelTelegramNotification $health.tunnel
+        if ($RecoveryStateDirty) {
+            Write-Info "Recovery state is unsaved; skipping automated recovery actions this cycle."
+            return $null
         }
         foreach ($component in $RecoveryComponents) {
             if ($health[$component] -eq "healthy") {
@@ -371,7 +729,7 @@ function Invoke-RecoveryCycle {
                 continue
             }
             if ($health[$component] -eq "deferred") {
-                Write-Info "$component health is deferred until K3s is healthy."
+                Write-Info "$component recovery is deferred because a required local dependency is not healthy."
                 continue
             }
 
@@ -401,74 +759,461 @@ function Invoke-RecoveryCycle {
                 Write-Info "Recovery state is unsaved; skipping automated recovery actions this cycle."
                 continue
             }
-            Invoke-TargetedRecovery $component
+            $targetedRecoverySucceeded = $false
+            $recoveryAction = Get-RecoveryActionName $component
+            Write-RecoveryEvent -Component $component -Event "recovery_dispatch" -Status "requested" -Action $recoveryAction
+            try {
+                $targetedRecoverySucceeded = Invoke-TargetedRecovery $component
+            } catch {
+                Write-Info "$component targeted recovery failed: $($_.Exception.Message)"
+            }
+            if ($targetedRecoverySucceeded) {
+                Write-RecoveryEvent -Component $component -Event "recovery_dispatch" -Status "accepted" -Action $recoveryAction
+            } else {
+                Write-RecoveryEvent -Component $component -Event "recovery_dispatch" -Status "failed" -Action $recoveryAction
+            }
+            if (-not $targetedRecoverySucceeded) {
+                if ($component -notin @("keepalive", "k3s")) {
+                    continue
+                }
+                $finalHealth = Get-RecoveryHealth
+                if ($finalHealth[$component] -ne "unhealthy") {
+                    continue
+                }
+                if (Test-EmergencyRebootEligible $component) {
+                    if (Request-EmergencyReboot $component) {
+                        return $null
+                    }
+                }
+            }
         }
+        if ($RecoveryStateDirty) {
+            return $null
+        }
+        return $health
     } finally {
         Exit-RecoveryLock $lockStream
     }
 }
 
-function Set-RecoveryTaskSettings {
-    $scheduledTask = Get-ScheduledTask -TaskName $TaskName
-    $settings = $scheduledTask.Settings
-    $settings.ExecutionTimeLimit = "PT0S"
-    $settings.RestartCount = 3
-    $settings.RestartInterval = "PT1M"
-    Set-ScheduledTask -TaskName $TaskName -Settings $settings | Out-Null
+function Install-EmergencyRebootTask {
+    $command = 'shutdown.exe /r /f /t 60'
+    $temporaryTaskXml = Join-Path $env:TEMP "$EmergencyRebootTaskName.xml"
+    $taskXml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <URI>\PersonalServer-EmergencyReboot</URI>
+    <Description>Emergency reboot task for exhausted core recovery attempts.</Description>
+  </RegistrationInfo>
+  <Principals>
+    <Principal id="SYSTEM">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>true</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>true</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="SYSTEM">
+    <Exec>
+      <Command>shutdown.exe</Command>
+      <Arguments>/r /f /t 60</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"@
+    try {
+        Set-Content -LiteralPath $temporaryTaskXml -Value $taskXml -Encoding unicode
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $result = & schtasks.exe /Create /TN $EmergencyRebootTaskName /XML $temporaryTaskXml /F 2>&1 | Out-String
+            $createExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        if ($createExitCode -ne 0) {
+            throw "Failed to register emergency reboot task (exit code $createExitCode): $($result.Trim())"
+        }
+    } finally {
+        Remove-Item -LiteralPath $temporaryTaskXml -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-EmergencyRebootEligible([string]$Component) {
+    if ($Component -notin @("keepalive", "k3s")) {
+        return $false
+    }
+    if ($RecoveryStateDirty) {
+        Write-Info "Emergency reboot blocked because recovery state is unsaved."
+        return $false
+    }
+
+    $attemptCount = if ($RecoveryAttemptCounts.ContainsKey($Component)) { [int]$RecoveryAttemptCounts[$Component] } else { 0 }
+    if ($attemptCount -ne $RecoveryMaxAttempts) {
+        return $false
+    }
+
+    $operatingSystem = Get-CimInstance Win32_OperatingSystem
+    $bootAgeSeconds = ((Get-Date).ToUniversalTime() - $operatingSystem.LastBootUpTime.ToUniversalTime()).TotalSeconds
+    if ($bootAgeSeconds -lt $EmergencyRebootGraceSeconds) {
+        Write-Info "Emergency reboot blocked during the post-boot grace period."
+        return $false
+    }
+
+    if (-not $EmergencyRebootCooldownStateValid) {
+        Write-Info "Emergency reboot blocked because the persisted cooldown timestamp is invalid."
+        return $false
+    }
+    if ($null -ne $EmergencyRebootLastAt) {
+        $lastRebootAt = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse($EmergencyRebootLastAt, [ref]$lastRebootAt)) {
+            Write-Info "Emergency reboot blocked because the persisted cooldown timestamp is invalid."
+            return $false
+        }
+        $cooldownAgeSeconds = ((Get-Date).ToUniversalTime() - $lastRebootAt.UtcDateTime).TotalSeconds
+        if ($cooldownAgeSeconds -lt $EmergencyRebootCooldownSeconds) {
+            Write-Info "Emergency reboot blocked during the cooldown period."
+            return $false
+        }
+    }
+    return $true
+}
+
+function Request-EmergencyReboot([string]$Component) {
+    if ($Component -notin @("keepalive", "k3s")) {
+        return $false
+    }
+    try {
+        Get-ScheduledTask -TaskName $EmergencyRebootTaskName -ErrorAction Stop | Out-Null
+    } catch {
+        Write-Info "Emergency reboot blocked because its scheduled task is unavailable."
+        return $false
+    }
+    $previousEmergencyRebootLastAt = $EmergencyRebootLastAt
+    $previousEmergencyRebootCauseComponent = $EmergencyRebootCauseComponent
+    $script:EmergencyRebootLastAt = (Get-Date).ToUniversalTime().ToString("o")
+    $script:EmergencyRebootCauseComponent = $Component
+    if (-not (Save-RecoveryFailureState)) {
+        $script:EmergencyRebootLastAt = $previousEmergencyRebootLastAt
+        $script:EmergencyRebootCauseComponent = $previousEmergencyRebootCauseComponent
+        Write-Info "Emergency reboot blocked because its state could not be saved."
+        return $false
+    }
+    try {
+        Start-ScheduledTask -TaskName $EmergencyRebootTaskName
+    } catch {
+        Write-Info "Emergency reboot request was persisted but its scheduled task could not start."
+        return $false
+    }
+    Write-Info "Emergency reboot requested after exhausted $Component recovery attempts."
+    return $true
+}
+
+function Install-KeepAliveTask([string]$RunAsUser) {
+    $temporaryTaskXml = Join-Path $env:TEMP "$KeepAliveTaskName.xml"
+    $escapedRunAsUser = [System.Security.SecurityElement]::Escape($RunAsUser)
+    $taskXml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <URI>\PersonalServer-WSL-KeepAlive</URI>
+    <Description>Keeps the WSL distribution running after Windows startup.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+    </BootTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>$escapedRunAsUser</UserId>
+      <LogonType>Password</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>C:\Windows\System32\wsl.exe</Command>
+      <Arguments>-d Ubuntu-24.04 -u root --exec /bin/bash -lc "while true; do sleep 3600; done"</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"@
+    try {
+        Set-Content -LiteralPath $temporaryTaskXml -Value $taskXml -Encoding unicode
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & schtasks.exe /Create /TN $KeepAliveTaskName /XML $temporaryTaskXml /RU $RunAsUser /RP * /F
+            $createExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        if ($createExitCode -ne 0) {
+            throw "Failed to register scheduled task '$KeepAliveTaskName' (exit code $createExitCode)."
+        }
+    } finally {
+        Remove-Item -LiteralPath $temporaryTaskXml -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Install-SupervisorTask([string]$RunAsUser) {
+    $temporaryTaskXml = Join-Path $env:TEMP "$TaskName.xml"
+    $escapedRunAsUser = [System.Security.SecurityElement]::Escape($RunAsUser)
+    $escapedScriptPath = [System.Security.SecurityElement]::Escape($ScriptPath)
+    $taskXml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <URI>\personal-server-autostart</URI>
+    <Description>Starts the Personal Server recovery supervisor after Windows startup.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+    </BootTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>$escapedRunAsUser</UserId>
+      <LogonType>Password</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>powershell.exe</Command>
+      <Arguments>-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File &quot;$escapedScriptPath&quot; -Supervisor</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"@
+    try {
+        Set-Content -LiteralPath $temporaryTaskXml -Value $taskXml -Encoding unicode
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & schtasks.exe /Create /TN $TaskName /XML $temporaryTaskXml /RU $RunAsUser /RP * /F
+            $createExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        if ($createExitCode -ne 0) {
+            throw "Failed to register scheduled task '$TaskName' (exit code $createExitCode)."
+        }
+    } finally {
+        Remove-Item -LiteralPath $temporaryTaskXml -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Install-ScheduledTask {
-    $taskAction = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -Daemon"
+    Install-EmergencyRebootTask
     $runAsUser = "$env:USERDOMAIN\$env:USERNAME"
-    Write-Info "Registering startup task for $runAsUser. Windows will prompt for the account password."
-    $createOutput = (& schtasks.exe /Create /TN $TaskName /SC ONSTART /RU $runAsUser /RP * /TR $taskAction /RL LIMITED /F 2>&1 | Out-String)
-    $createExitCode = $LASTEXITCODE
-    if ($createExitCode -ne 0) {
-        $existingTask = (& schtasks.exe /Query /TN $TaskName /FO LIST /V 2>&1 | Out-String)
-        if ($existingTask -match [regex]::Escape($ScriptPath)) {
-            Write-Info "Scheduled task '$TaskName' already points to $ScriptPath."
-        } else {
-            throw "Failed to register scheduled task '$TaskName' with schtasks.exe (exit code $createExitCode)."
-        }
-    } elseif ($createOutput.Trim()) {
-        Write-Info $createOutput.Trim()
-    }
-
-    [void](Set-RecoveryTaskSettings)
+    Install-KeepAliveTask -RunAsUser $runAsUser
+    Install-SupervisorTask -RunAsUser $runAsUser
     Write-Info "Registered scheduled task '$TaskName' to start with Windows."
 }
 
 Load-RecoveryFailureState
 
-function Start-Daemon {
+function Enter-SupervisorLock {
+    New-Item -ItemType Directory -Path $RecoveryStateDirectory -Force | Out-Null
     try {
-        [void](Set-RecoveryTaskSettings)
-    } catch {
-        Write-Info "Could not update scheduled task recovery settings: $($_.Exception.Message)"
+        return [System.IO.File]::Open(
+            $SupervisorLockPath,
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None
+        )
+    } catch [System.IO.IOException] {
+        return $null
     }
-    Update-HostMetrics
-    Write-Info "Waiting 120 seconds for WSL and Docker after logon."
-    Start-Sleep -Seconds 120
+}
+
+function Exit-SupervisorLock($LockStream) {
+    if ($null -eq $LockStream) {
+        return
+    }
     try {
-        Start-PersonalServerStack
-    } catch {
-        Write-Info "Initial stack bootstrap failed: $($_.Exception.Message)"
+        $LockStream.Dispose()
+    } finally {
+        Remove-Item -LiteralPath $SupervisorLockPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Start-Supervisor {
+    $lockStream = Enter-SupervisorLock
+    if ($null -eq $lockStream) {
+        Write-Info "Recovery supervisor is already running; skipping duplicate start."
+        return
     }
 
-    while ($true) {
+    try {
         try {
             Update-HostMetrics
-            Invoke-RecoveryCycle
         } catch {
-            Write-Info "Recovery check failed: $($_.Exception.Message)"
+            Write-Info "Initial host metrics update failed; continuing startup."
         }
-        Write-Info "Sleeping 3 minutes before the next recovery check."
-        Start-Sleep -Seconds $RecoveryIntervalSeconds
+        Write-Info "Waiting 120 seconds for WSL and Docker after logon."
+        Start-Sleep -Seconds $RecoveryStartupDelaySeconds
+        try {
+            Start-PersonalServerStack
+        } catch {
+            Write-Info "Initial stack bootstrap failed: $($_.Exception.Message)"
+        }
+        Invoke-PostBootRecoveryCheck
+
+        $rapidFailureCount = 0
+        while ($true) {
+            $startedAt = Get-Date
+            try {
+                [void](Start-Process -FilePath "powershell.exe" -ArgumentList @(
+                    "-WindowStyle", "Hidden", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                    "-File", $ScriptPath, "-Daemon", "-ProjectRoot", $ProjectRoot
+                ) -PassThru -Wait -ErrorAction Stop)
+            } catch {
+                Write-Info "Recovery daemon could not start; scheduling a supervised retry."
+            }
+
+            $daemonLifetimeSeconds = ((Get-Date) - $startedAt).TotalSeconds
+            if ($daemonLifetimeSeconds -lt $DaemonRapidFailureWindowSeconds) {
+                $rapidFailureCount += 1
+            } else {
+                $rapidFailureCount = 0
+            }
+            if ($rapidFailureCount -ge $DaemonRapidFailureLimit) {
+                Write-Info "Recovery daemon ended repeatedly; applying restart backoff."
+                Start-Sleep -Seconds $DaemonFailureBackoffSeconds
+                $rapidFailureCount = 0
+                continue
+            }
+            Write-Info "Recovery daemon exited; restarting under supervisor."
+            Start-Sleep -Seconds $DaemonRestartDelaySeconds
+        }
+    } finally {
+        Exit-SupervisorLock $lockStream
+    }
+}
+
+function Enter-DaemonLock {
+    New-Item -ItemType Directory -Path $RecoveryStateDirectory -Force | Out-Null
+    try {
+        return [System.IO.File]::Open(
+            $DaemonLockPath,
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None
+        )
+    } catch [System.IO.IOException] {
+        return $null
+    }
+}
+
+function Exit-DaemonLock($LockStream) {
+    if ($null -eq $LockStream) {
+        return
+    }
+    try {
+        $LockStream.Dispose()
+    } finally {
+        Remove-Item -LiteralPath $DaemonLockPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Start-Daemon {
+    $lockStream = Enter-DaemonLock
+    if ($null -eq $lockStream) {
+        Write-Info "Recovery daemon is already running; skipping duplicate start."
+        return
+    }
+    try {
+        while ($true) {
+            try {
+                Update-HostMetrics
+                Invoke-RecoveryCycle
+            } catch {
+                Write-Info "Recovery check failed: $($_.Exception.Message)"
+                Write-RecoveryEvent -Component "system" -Event "recovery_cycle" -Status "failed" -Action "none"
+            }
+            Write-Info "Sleeping 3 minutes before the next recovery check."
+            Start-Sleep -Seconds $RecoveryIntervalSeconds
+        }
+    } finally {
+        Exit-DaemonLock $lockStream
     }
 }
 
 if ($InstallTask) {
     Install-ScheduledTask
+    exit 0
+}
+
+if ($Supervisor) {
+    Start-Supervisor
     exit 0
 }
 
@@ -483,4 +1228,4 @@ if ($Start) {
     exit 0
 }
 
-throw "Use -InstallTask, -Start, or -Daemon."
+throw "Use -InstallTask, -Start, -Supervisor, or -Daemon."

@@ -4,6 +4,8 @@ import subprocess
 import tempfile
 import unittest
 
+import yaml
+
 
 SCRIPT = pathlib.Path(__file__).parents[1] / "infra/k8s/tools/sre-pod-recovery-lab.sh"
 
@@ -26,22 +28,62 @@ class K3sSrePodRecoveryLabTest(unittest.TestCase):
         self.assertIn("이 실습은 다른 namespace, Portal, Compose, Caddy, scheduler를 변경하거나 재시작하지 않는다.", text)
         self.assertNotIn("새 Pod", text)
 
-    def test_lab_uses_isolated_deployment_and_liveness_sentinel(self):
+    def test_lab_uses_isolated_deployment_and_ephemeral_liveness_sentinel(self):
         text = SCRIPT.read_text(encoding="utf-8")
         for required in (
             'NS="sre-recovery-lab-${run_id_lc}"',
             "kind: Namespace",
             "kind: Deployment",
-            "image: busybox:1.36",
+            "image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662",
+            "automountServiceAccountToken: false",
+            "runAsNonRoot: true",
+            "allowPrivilegeEscalation: false",
+            "drop: [\"ALL\"]",
             "livenessProbe:",
-            "test ! -f /tmp/force-liveness-failure",
-            "touch /tmp/force-liveness-failure",
+            "health-sentinel",
+            "grep -Eq '^[[:space:]]*([2-9]|[1-9][0-9]+)[[:space:]].*[h]ealth-sentinel'",
+            "$1 != 1 && /[h]ealth-sentinel/ {print $1; exit}",
+            "kill \"$health_pid\"",
             "restartCount",
             "--for=condition=Ready",
         ):
             self.assertIn(required, text)
         self.assertNotIn("portal-web", text)
         self.assertNotIn("docker compose", text.lower())
+
+    def test_lab_deployment_manifest_enforces_hardened_restartable_sentinel_contract(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        manifest = text.split("sudo k3s kubectl apply -f - <<EOF\n", 1)[1].split("\nEOF", 1)[0]
+        deployment = yaml.safe_load(manifest)
+        pod_spec = deployment["spec"]["template"]["spec"]
+        container = pod_spec["containers"][0]
+        security = container["securityContext"]
+
+        self.assertRegex(container["image"], r"^busybox@sha256:[0-9a-f]{64}$")
+        self.assertFalse(pod_spec["automountServiceAccountToken"])
+        self.assertEqual(pod_spec["securityContext"]["seccompProfile"]["type"], "RuntimeDefault")
+        self.assertTrue(pod_spec["securityContext"]["runAsNonRoot"])
+        self.assertFalse(security["allowPrivilegeEscalation"])
+        self.assertEqual(security["capabilities"]["drop"], ["ALL"])
+        self.assertTrue(security["readOnlyRootFilesystem"])
+        self.assertNotIn("volumeMounts", container)
+        self.assertNotIn("volumes", pod_spec)
+        self.assertEqual(
+            container["livenessProbe"]["exec"]["command"],
+            [
+                "sh",
+                "-c",
+                "ps -o pid,args | grep -Eq '^[[:space:]]*([2-9]|[1-9][0-9]+)[[:space:]].*[h]ealth-sentinel'",
+            ],
+        )
+        self.assertEqual(
+            container["readinessProbe"]["exec"]["command"],
+            [
+                "sh",
+                "-c",
+                "ps -o pid,args | grep -Eq '^[[:space:]]*([2-9]|[1-9][0-9]+)[[:space:]].*[h]ealth-sentinel'",
+            ],
+        )
 
     def test_apply_failure_deletes_only_the_current_lab_namespace(self):
         with tempfile.TemporaryDirectory() as td:

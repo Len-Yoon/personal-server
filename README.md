@@ -2,6 +2,8 @@
 
 Windows N100과 Ubuntu WSL2에서 운영하는 개인용 서비스 허브임. 파일·기록·뉴스·차량관리·서버 상태를 한 곳에서 사용하고, 이를 모니터링·자동복구·백업·Telegram 알림을 갖춘 **SRE 운영 체계**로 관리함.
 
+<br>
+
 ## 개인 서버 기능
 
 | 기능 | 제공 내용 | 실행 위치 |
@@ -14,27 +16,28 @@ Windows N100과 Ubuntu WSL2에서 운영하는 개인용 서비스 허브임. �
 | 차량관리 | Hyundai 연동 차량 상태·정비 주기·운행 종료 Telegram 알림 | `car-care-worker` |
 | HomeOps | 제한된 컨테이너 진단과 승인된 복구 작업 | `system-agent` + `homeops-executor` |
 
+<br>
+
+
 ## 주요 화면
 
-| 포털 대시보드 | 차량관리 Telegram |
+| Investing.com 뉴스 수집 | 차량 관리 Telegram |
 |---|---|
-| <img src="docs/images/portal-dashboard.png" alt="Personal Server Portal dashboard" width="360"> | <img src="docs/images/car-care-telegram-status.png" alt="Telegram 차량관리 최신 운행 결과 알림" width="360"> |
-
-| File Manager | News Hub |
-|---|---|
-| <img src="docs/images/file-manager.png" alt="File manager" width="360"> | <img src="docs/images/news-hub.png" alt="News hub" width="360"> |
+| RSS 수집 결과, Telegram 알림 분류, 원문 이동이 가능한 기사 목록을 확인함.<br><br><img src="docs/images/news-hub.png" alt="Investing.com 뉴스 수집 결과와 기사 목록" width="460"> | 운행 기록과 누적 주행거리, 주행 가능 거리, 소모품 정비 시점을 Telegram으로 확인함.<br><br><img src="docs/images/car-care-telegram-status.png" alt="Telegram 차량 관리 운행 및 정비 상태" width="460"> |
 
 | YouTube Memo | Book Memo |
 |---|---|
-| <img src="docs/images/youtube-memo.png" alt="YouTube memo" width="360"> | <img src="docs/images/book-memo.png" alt="Book memo" width="360"> |
+| 영상 링크 등록과 저장된 영상별 메모 수를 확인함.<br><br><img src="docs/images/youtube-memo.png" alt="YouTube Memo 영상 등록과 저장된 영상 목록" width="460"> | 책 검색, 내 책장, 목차 체크, 장별 코멘트 기록을 한 화면에서 확인함.<br><br><img src="docs/images/book-memo.png" alt="Book Memo 책장과 목차 체크 및 코멘트 기능" width="460"> |
 
-| 관리자 상태 |
-|---|
-| <img src="docs/images/admin-status.png" alt="Personal Server 관리자 상태 페이지" width="720"> |
+| 파일함 | 관리자 상태 |
+|---|---|
+| 파일·폴더 생성, 업로드, 다운로드, 검색, 정렬과 선택 삭제를 지원함.<br><br><img src="docs/images/file-manager.png" alt="파일함의 파일 목록과 업로드 및 검색 기능" width="460"> | 서버 자원, 서비스 Health, 승인형 HomeOps 조치 이력을 확인함.<br><br><img src="docs/images/admin-status.png" alt="관리자 상태와 HomeOps 운영 보조" width="360"> |
+
+<br>
 
 ## 현재 구조
 
-![Personal Server 운영 구조](docs/images/personal-server-architecture.svg)
+![Personal Server 현재 운영 구조](docs/images/personal-server-architecture-v2.svg)
 
 | 구분 | 현재 운영 방식 |
 |---|---|
@@ -45,40 +48,7 @@ Windows N100과 Ubuntu WSL2에서 운영하는 개인용 서비스 허브임. �
 | 백업 | Portal PVC 암호화 백업 및 복원 검증 |
 | 외부 장애 감지 | GitHub Actions가 약 5분 간격으로 `https://len.pe.kr/health` 확인 |
 
-## SRE 운영 체계
-
-```text
-서비스 실행
-  ↓
-Prometheus·Grafana로 K3s 상태 관측
-  ↓
-Alertmanager·SRE relay로 내부 이상 Telegram 알림
-
-GitHub Actions가 외부 주소를 약 5분마다 별도 점검
-  ↓
-장애·복구 전환 시 Telegram 알림
-
-Portal PVC 암호화 백업 → 원격 보관 → 복원 검증
-```
-
-| SRE 영역 | 적용 내용 |
-|---|---|
-| 관측성 | Prometheus·Grafana로 K3s 노드·Pod·PVC·서비스 상태 확인 |
-| 장애 감지 | 내부 Prometheus 경고와 외부 GitHub Actions health 점검을 분리 |
-| 알림 | Telegram으로 장애·복구·백업 결과를 한국어로 전달 |
-| 복구 | K3s Pod 자동복구, HomeOps 제한형 컨테이너 복구, 재부팅 뒤 WSL 유지, N100 제한형 자동복구 |
-| 데이터 보호 | Portal PVC 암호화 백업과 실제 복원 검증 |
-| 안전 배포 | 허용된 Compose 서비스만 CI 성공 뒤 revision 고정 배포·health 검증·1회 rollback |
-
-개인 서버 기능을 직접 제공하는 것과 별도로, 장애를 빨리 발견하고 데이터 손실 가능성을 낮추며 복구 상태를 확인하는 운영 체계를 함께 구축한 구성이 핵심임.
-
-N100의 `personal-server-autostart` 작업은 3분 간격으로 WSL 유지, K3s, Portal, NodePort, Cloudflare Tunnel을 점검함. 같은 항목이 2회 연속 비정상이면 승인된 범위의 복구만 시도하며, 항목별 자동복구 시도는 최대 3회로 제한함. 상태 기록에 실패하면 추가 복구를 중단함. 이 작업은 Telegram을 직접 발송하지 않으며, 외부 장애·복구 알림은 GitHub Actions 공개 상태 점검이 담당함.
-
-## 모니터링 화면
-
-Grafana에서 K3s 네임스페이스별 CPU·메모리 사용량, Pod 수, 요청량·제한값을 확인하는 예시 화면임.
-
-![Grafana K3s 모니터링 화면](docs/images/grafana-k3s-overview.png)
+<br>
 
 ## 빠른 상태 확인
 
@@ -91,7 +61,49 @@ sudo k3s kubectl -n personal-server get deploy,pod,pvc
 bash infra/k8s/tools/sre-health-audit.sh
 ```
 
-각 백업·모니터링·Telegram relay의 상세 점검은 [운영 문서 색인](docs/README.md)을 사용함. 비밀번호·토큰·Secret 값은 문서나 명령 출력에 기록하지 않음.
+상세 점검 기준과 장애 대응은 [운영 문서 색인](docs/README.md)을 사용함. 비밀번호·토큰·Secret 값은 문서나 명령 출력에 기록하지 않음.
+
+<br>
+
+## SRE 운영 체계
+
+```text
+서비스 실행
+  ↓
+내부 관측·외부 health 점검·제한형 자동복구·백업 복원 검증
+  ↓
+Telegram 알림과 운영 문서 기반 대응
+```
+
+| SRE 영역 | 적용 내용 |
+|---|---|
+| 관측성 | Prometheus·Grafana로 K3s 노드·Pod·PVC·서비스 상태 확인 |
+| 장애 감지 | 내부 Prometheus 경고와 외부 GitHub Actions health 점검을 분리 |
+| 알림 | N100 Tunnel 전환, 외부 health, 내부 경고·백업 결과를 Telegram으로 한국어 전달 |
+| 복구 | K3s Pod 자동복구, HomeOps 제한형 컨테이너 복구, 재부팅 뒤 WSL 유지, N100 제한형 자동복구 |
+| 데이터 보호 | Portal PVC 암호화 백업과 실제 복원 검증 |
+| 안전 배포 | 허용된 Compose 서비스만 CI 성공 뒤 revision 고정 배포·health 검증·1회 rollback |
+| 공급망 보안 | GitHub Actions 외부 action을 full SHA로 고정하고, Caddy를 제외한 관리 대상 Python Docker base image 8개를 digest로 고정함. Trivy filesystem/config scan은 HIGH·CRITICAL 결과를 차단하며 CI에서 검증함 |
+
+개인 서버 기능과 함께 장애 감지·복구·데이터 보호를 운영하는 구성이 핵심임. 자동복구의 세부 조건·제한·예외는 [N100 운영 환경](docs/n100-mt4-setup.md)과 [운영 참조](docs/operations-reference.md)를 따름.
+
+<br>
+
+## 컨테이너 실행 보안
+
+`caddy`, `car-care-worker`, `homeops-executor`, `portal-web`, `system-agent`는 전용 UID/GID `10001:10001`로 실행함. Caddy는 내부 80·443 포트 binding에 필요한 `NET_BIND_SERVICE` capability만 추가로 사용함.
+
+Portal은 K3s 단일 writer와 PVC를 사용하므로 non-root 이미지 교체 전에 파일·상태 PVC의 UID/GID `10001:10001` 읽기·쓰기·디렉터리 접근 권한을 사전검증함. 권한이 충족되지 않으면 Deployment를 전환하지 않으며, PVC 권한 정렬은 자동 배포 대상이 아닌 별도 운영 작업으로 처리함.
+
+<br>
+
+## 모니터링 예시
+
+Grafana에서 K3s 네임스페이스별 CPU·메모리 사용량, Pod 수, 요청량·제한값을 확인하는 예시 화면임.
+
+![Grafana K3s 모니터링 화면](docs/images/grafana-k3s-overview.png)
+
+<br>
 
 ## 개발과 배포
 
@@ -103,12 +115,16 @@ bash infra/k8s/tools/sre-health-audit.sh
 
 병합된 변경은 CI·배포·health 검증과 작업공간 정리까지 확인함. CI artifact와 운영 증적은 90일 보관하며, 장기 보관이 필요한 자료는 별도 증적 저장소로 이전함.
 
+<br>
+
 ## 검증
 
 ```bash
 python3 tests/run_service_tests.py
 python3 -m unittest tests.test_documentation_index -v
 ```
+
+<br>
 
 ## 운영 문서
 

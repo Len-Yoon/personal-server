@@ -17,34 +17,41 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Check notification secrets
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.UPTIME_TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.UPTIME_TELEGRAM_CHAT_ID }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
-            printf '%s\n' 'Required GitHub Secrets for uptime Telegram notifications are not configured.' >&2
-            exit 1
-          fi
-
       - id: health
-        name: Check public Portal health
+        name: Check public service health
         continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
-          curl --fail --silent --show-error --max-time 20 https://len.pe.kr/health >/dev/null
+          failed_services=()
+          check_health() {
+            local service="$1"
+            local url="$2"
+            if ! curl --fail --silent --show-error --max-time 20 "$url" >/dev/null; then
+              failed_services+=("$service")
+              printf 'Public health check failed: %s\n' "$service" >&2
+            fi
+          }
+
+          check_health "portal" "https://len.pe.kr/health"
+          check_health "news" "https://news.len.pe.kr/health"
+          check_health "youtube_memo" "https://memo.len.pe.kr/health"
+          check_health "book_memo" "https://books.len.pe.kr/health"
+
+          if ((${#failed_services[@]} > 0)); then
+            (IFS=,; printf 'failed_services=%s\n' "${failed_services[*]}") >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
 
       - id: incident
         name: Find a pending health-state transition
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const incidentTitle = "[SRE] len.pe.kr 공개 상태 장애";
             const downSentMarker = "<!-- uptime-down-telegram:sent -->";
             const state = "${{ steps.health.outcome }}";
+            const failedServices = "${{ steps.health.outputs.failed_services }}";
             const issues = await github.paginate(github.rest.issues.listForRepo, {
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -62,7 +69,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 title: incidentTitle,
-                body: "외부 건강 점검에서 https://len.pe.kr/health 응답 실패를 확인했습니다.",
+                body: `외부 건강 점검에서 실패한 서비스: ${failedServices}.`,
               })).data;
               if (!(activeIncident.body || "").includes(downSentMarker)) {
                 core.setOutput('notification', 'down');
@@ -76,6 +83,19 @@ jobs:
               core.setOutput('issue_number', String(incident.number));
             }
 
+            if (state === "success" && incident && !(incident.body || "").includes(downSentMarker)) {
+              const currentBody = incident.body || "";
+              const evidence = "알림 미전송: 다운 상태 Telegram 전송 증적이 없어 복구 알림을 생략함";
+              const body = currentBody.includes(evidence) ? currentBody : `${currentBody}\n${evidence}`;
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: incident.number,
+                body,
+                state: "closed",
+              });
+            }
+
       - id: telegram
         name: Send Telegram status transition
         if: steps.incident.outputs.notification != ''
@@ -86,6 +106,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
+            printf '%s\n' 'Telegram notification secrets are not configured; skipping delivery.' >&2
+            printf 'skipped=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           telegram_response="$(mktemp)"
           trap 'rm -f "$telegram_response"' EXIT
           case "$NOTIFICATION" in
@@ -139,7 +164,7 @@ jobs:
 
       - name: Confirm Telegram delivery before committing transition
         if: steps.incident.outputs.notification != '' && steps.telegram.outputs.accepted == 'true'
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const notification = "${{ steps.incident.outputs.notification }}";

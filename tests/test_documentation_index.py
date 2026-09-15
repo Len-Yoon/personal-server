@@ -2,6 +2,9 @@ from pathlib import Path
 import unittest
 
 
+ROOT = Path(".")
+
+
 class DocumentationIndexTests(unittest.TestCase):
     def test_project_readme_exposes_quick_start_verification_and_next_steps(self):
         content = Path("README.md").read_text(encoding="utf-8")
@@ -36,18 +39,41 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("## 현재 완료 기준", content)
         self.assertIn("## 향후 개선 항목", content)
         self.assertIn("GitHub Actions", content)
+        self.assertIn("월간 SRE 통합 점검", content)
+        self.assertIn("긴급·추가 점검", content)
+        self.assertNotIn("월 1회 [복구 훈련 절차]", content)
         self.assertNotIn("UptimeRobot", content)
 
     def test_recovery_drill_uses_isolated_safe_tools_and_stop_criteria(self):
         content = Path("docs/recovery-drill.md").read_text(encoding="utf-8")
 
-        self.assertIn("portal-pvc-backup-verify.sh --check", content)
+        self.assertIn("monthly-recovery-drill.sh", content)
+        self.assertIn("recovery-drills/<run-id>.json", content)
+        self.assertIn("원자적으로 증적화", content)
+        self.assertIn("check-portal-backup-evidence.sh", content)
+        self.assertIn("monthly-sre-audit", content)
+        self.assertIn("5분 외부 상태 감시", content)
+        self.assertNotIn("portal-pvc-backup-verify.sh --check", content)
         self.assertIn("sre-telegram-verify.sh", content)
         self.assertIn("sre-pod-recovery-lab.sh --run", content)
         self.assertIn("sre-pod-recovery-lab.sh --cleanup", content)
         self.assertIn("중단", content)
         self.assertIn("운영 데이터", content)
         self.assertIn("3단계 격리된 Pod 자동복구 실습에만 적용", content)
+
+    def test_monthly_sre_docs_record_the_verified_n100_activation_and_review_cycle(self):
+        k3s = Path("infra/k8s/README.md").read_text(encoding="utf-8")
+        roadmap = Path("docs/operations-roadmap.md").read_text(encoding="utf-8")
+        drill = Path("docs/recovery-drill.md").read_text(encoding="utf-8")
+        evidence = Path("docs/agent-loop-evidence.md").read_text(encoding="utf-8")
+
+        self.assertIn("N100에서 활성화됨", k3s)
+        self.assertNotIn("현재 N100에서 활성화되지 않음", k3s)
+        self.assertIn("첫 수동 Job", roadmap)
+        self.assertNotIn("월간 복구 훈련 운영 검증", roadmap)
+        self.assertIn("정기 운영 결과", drill)
+        self.assertIn("월간 SRE 통합 점검 N100 적용", evidence)
+        self.assertIn("운영 문서 대조", evidence)
 
     def test_operations_reference_describes_current_runtime_split(self):
         content = Path("docs/operations-reference.md").read_text(encoding="utf-8")
@@ -57,6 +83,8 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("crawler-worker", content)
         self.assertIn("공개 상태 Telegram 알림", content)
         self.assertIn("personal-server-autostart", content)
+        self.assertIn("HOMEOPS_EXECUTOR_SHARED_SECRET", content)
+        self.assertIn("fail-closed", content)
 
     def test_public_route_docs_distinguish_the_car_callback_route_from_caddy(self):
         tunnel = Path("docs/cloudflare-tunnel.md").read_text(encoding="utf-8")
@@ -73,9 +101,59 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("3분 간격", n100)
         self.assertIn("2회 연속", n100)
         self.assertIn("최대 3회", n100)
-        self.assertIn("자동복구 작업은 Telegram을 직접 발송하지 않으며", n100)
+        self.assertIn("Tunnel 장애 알림을 1회 전송하는 데 성공한 경우", n100)
+        self.assertIn("복구 알림을 1회", n100)
+        self.assertIn("독립 보완 경로", n100)
+        self.assertIn("-Supervisor", n100)
+        self.assertIn("Daemon", n100)
+        self.assertIn("120초", n100)
+        self.assertIn("15초", n100)
+        self.assertIn("공개 `https://len.pe.kr/health`", n100)
+        self.assertIn("NodePort가 비정상이면 Tunnel 상태는 보류", n100)
         self.assertIn("Telegram 장애 메시지 전송이 실패하면", uptime)
         self.assertIn("복구 전환 메시지를 보내지 않음", uptime)
+        self.assertIn("Supervisor", uptime)
+        self.assertIn("알림 미전송", uptime)
+
+    def test_reboot_docs_describe_post_boot_check_without_new_telegram_message(self):
+        uptime = Path("docs/public-uptime-monitor.md").read_text(encoding="utf-8")
+
+        self.assertIn("초기 대기 후 `post_boot_check`를 정확히 1회 수행함", uptime)
+        self.assertIn("WSL, K3s, Portal 상태를 확인", uptime)
+        self.assertIn("10초 간격으로 3회 호출해 모두 HTTP 200인지 확인", uptime)
+        self.assertIn("`recovery-events.jsonl`에 이벤트로만 기록", uptime)
+        self.assertIn("초기 점검 자체에 대한 신규 Telegram 메시지는 발송하지 않음", uptime)
+        self.assertIn("Cloudflare Tunnel 장애·복구 전환에만 사용", uptime)
+        self.assertIn("저장소 구현은 완료되었으나 N100에는 아직 적용·검증하지 않음", uptime)
+        self.assertIn("사용자 승인 후 병합·적용", uptime)
+        self.assertIn("적용 후 event log와 외부 health 3회 모두 HTTP 200을 확인", uptime)
+
+    def test_reboot_docs_require_boot_trigger_keepalive_and_password_prompt(self):
+        mt4 = (ROOT / "docs" / "n100-mt4-setup.md").read_text(encoding="utf-8")
+
+        self.assertIn("BootTrigger", mt4)
+        self.assertIn("Password", mt4)
+        self.assertIn("로그인 없이", mt4)
+
+    def test_reboot_health_docs_require_exact_200_and_failure_exit(self):
+        mt4 = (ROOT / "docs" / "n100-mt4-setup.md").read_text(encoding="utf-8")
+
+        self.assertIn("curl --output /dev/null --silent --show-error --write-out '%{http_code}'", mt4)
+        self.assertIn('[ "$curl_exit" -ne 0 ] || [ "$http_code" != "200" ]', mt4)
+        self.assertIn('exit "$failed"', mt4)
+
+    def test_n100_docs_document_reboot_limits_and_tunnel_service_recovery(self):
+        n100 = Path("docs/n100-mt4-setup.md").read_text(encoding="utf-8")
+        tunnel = Path("docs/cloudflare-tunnel.md").read_text(encoding="utf-8")
+        drill = Path("docs/recovery-drill.md").read_text(encoding="utf-8")
+
+        self.assertIn("PersonalServer-EmergencyReboot", n100)
+        self.assertIn("20분", n100)
+        self.assertIn("6시간", n100)
+        self.assertIn("shutdown /a", n100)
+        self.assertIn("Tunnel·Portal·NodePort 단독 장애", n100)
+        self.assertIn("cloudflared-personal-server.service", tunnel)
+        self.assertIn("Tunnel만", drill)
 
     def test_k3s_portal_environment_example_and_observability_prerequisite_are_documented(self):
         k3s = Path("infra/k8s/README.md").read_text(encoding="utf-8")
@@ -85,6 +163,17 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("portal-compose-bridge", operations)
         self.assertIn("compose-crawler", operations)
 
+    def test_k3s_docs_describe_suspended_cronjob_backup_cutover(self):
+        k3s = Path("infra/k8s/README.md").read_text(encoding="utf-8")
+        drill = Path("docs/recovery-drill.md").read_text(encoding="utf-8")
+
+        self.assertIn("portal-pvc-backup-cronjob.sh --preflight", k3s)
+        self.assertIn("portal-pvc-backup-cronjob.sh --activate", k3s)
+        self.assertIn("suspend: true", k3s)
+        self.assertIn("Secret 값", k3s)
+        self.assertIn("CronJob", drill)
+        self.assertIn("단일 스케줄러", drill)
+
     def test_subagent_workflow_defines_mandatory_routes(self):
         project_rules = Path("AGENTS.md").read_text(encoding="utf-8")
         workflow = Path("docs/codex-work-loop.md").read_text(encoding="utf-8")
@@ -93,6 +182,13 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("전문 검토 에이전트를 필수로 포함해 최대 4명", project_rules)
         self.assertIn("에이전트 운영 기록", workflow)
         self.assertIn("전문 검토를 필수로 적용함", workflow)
+
+    def test_agent_handoff_documents_the_ci_equivalent_local_test_runner(self):
+        handoff = Path("docs/agent-handoff.md").read_text(encoding="utf-8")
+
+        self.assertIn("tests/run_service_tests.py", handoff)
+        self.assertIn("CI와 동일한 서비스별 격리", handoff)
+        self.assertIn("python3 tests/run_service_tests.py", handoff)
 
 
 if __name__ == "__main__":

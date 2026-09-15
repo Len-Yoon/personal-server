@@ -112,6 +112,11 @@ spec:
         app: portal-web-shadow
     spec:
       automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
       containers:
         - name: portal-web
           image: $IMAGE_REF

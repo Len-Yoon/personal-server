@@ -264,29 +264,38 @@ assert_named_pvc_sqlite_quick_check() {
 
 assert_pvc_runtime_permissions() {
   local pod="$1" mount_path="$2" required_file="$3" runtime_uid runtime_gid
-  # The Portal image currently runs as root. Keep this explicit: a future
-  # image identity change must be reviewed together with PVC ownership.
+  # Verify the dedicated runtime identity before touching a probe file.
+  # Existing PVC ownership/modes are never repaired automatically.
   runtime_uid=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" exec "$pod" -- id -u) || return 1
   runtime_gid=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" exec "$pod" -- id -g) || return 1
-  [ "$runtime_uid" = "0" ] && [ "$runtime_gid" = "0" ] || return 1
+  [ "$runtime_uid" = "10001" ] && [ "$runtime_gid" = "10001" ] || return 1
   run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" exec "$pod" -- sh -c '
     mount_path="$1"
     required_file="$2"
-    test -d "$mount_path" && test -r "$mount_path" && test -w "$mount_path" || exit 1
-    if ! find "$mount_path" -type f -print0 | xargs -0 -r sh -c "
-      for path do
-        test -r \"\$path\" && test -w \"\$path\" || exit 1
-      done
-    " sh; then
-      exit 1
-    fi
+    test -d "$mount_path" && test -r "$mount_path" && test -w "$mount_path" && test -x "$mount_path" || exit 1
+    python -c '\''
+import os
+import sys
+
+def fail_walk(error):
+    sys.exit(1)
+for directory, dirs, files in os.walk(sys.argv[1], onerror=fail_walk):
+    for path in [directory] + [os.path.join(directory, name) for name in dirs]:
+        if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
+            sys.exit(1)
+    for name in files:
+        if not os.access(os.path.join(directory, name), os.R_OK | os.W_OK):
+            sys.exit(1)
+'\'' "$mount_path" || exit 1
     if test -n "$required_file"; then
       test -f "$mount_path/$required_file" && test -r "$mount_path/$required_file" && test -w "$mount_path/$required_file" || exit 1
       if test "$required_file" = homeops.sqlite3; then
         printf "%s\\n" "BEGIN IMMEDIATE; CREATE TABLE IF NOT EXISTS __portal_cutover_permission_probe (id INTEGER PRIMARY KEY); INSERT INTO __portal_cutover_permission_probe DEFAULT VALUES; ROLLBACK;" | python -c '\''import sqlite3,sys; connection=sqlite3.connect(sys.argv[1], timeout=5); connection.executescript(sys.stdin.read()); connection.close(); verification=sqlite3.connect(sys.argv[1], timeout=5); remaining_table=verification.execute("SELECT 1 FROM sqlite_master WHERE type=? AND name=?", ("table", "__portal_cutover_permission_probe")).fetchone(); remaining_row=verification.execute("SELECT 1 FROM __portal_cutover_permission_probe LIMIT 1").fetchone() if remaining_table is not None else None; verification.close(); sys.exit(1 if remaining_table is not None or remaining_row is not None else 0)'\'' "$mount_path/$required_file" || exit 1
       fi
     fi
-    probe="$mount_path/.portal-cutover-permission-probe.$$"
+    probe=$(mktemp "$mount_path/.portal-cutover-permission-probe.XXXXXX") || exit 1
+    trap '\''rm -f -- "$probe"'\'' EXIT
+    trap '\''exit 1'\'' HUP INT TERM
     if ! printf "%s" portal-cutover > "$probe"; then
       rm -f -- "$probe"
       exit 1
@@ -386,6 +395,53 @@ migrate_compose_state() {
   assert_compose_writer_running
 }
 
+assert_local_restore_runtime_permissions() {
+  local directory="$1" required_file="$2"
+  # Bind the staged copy into the same image/identity used by Compose before
+  # replacing its current directory. Never repair owner/mode on either copy.
+  run_timeout "$TIMEOUT_SECONDS" docker run --rm --pull never --network none \
+    --user 10001:10001 --read-only --cap-drop ALL --security-opt no-new-privileges \
+    --mount "type=bind,src=$directory,dst=/restore" \
+    --entrypoint python "$IMAGE_REF" -c '
+import os
+from pathlib import Path
+import sqlite3
+import sys
+import tempfile
+
+if (os.getuid(), os.getgid()) != (10001, 10001):
+    sys.exit(1)
+root = Path(sys.argv[1])
+def fail_walk(error):
+    raise error
+for directory, dirs, files in os.walk(root, onerror=fail_walk):
+    if not os.access(directory, os.R_OK | os.W_OK | os.X_OK):
+        sys.exit(1)
+    for name in files:
+        if not os.access(Path(directory) / name, os.R_OK | os.W_OK):
+            sys.exit(1)
+with tempfile.TemporaryFile(dir=root) as probe:
+    probe.write(b"portal-restore-permission-probe")
+    probe.flush()
+    probe.seek(0)
+    if probe.read() != b"portal-restore-permission-probe":
+        sys.exit(1)
+if sys.argv[2]:
+    required = root / sys.argv[2]
+    if not required.is_file():
+        sys.exit(1)
+    if sys.argv[2] == "homeops.sqlite3":
+        connection = sqlite3.connect(required.as_uri() + "?mode=rw", uri=True, timeout=5)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("PRAGMA quick_check").fetchone() != ("ok",):
+                sys.exit(1)
+        finally:
+            connection.rollback()
+            connection.close()
+' /restore "$required_file" >/dev/null 2>&1
+}
+
 restore_pvc_to_local() {
   local pvc_name mount_path destination pod_name required_file parent temporary backup remote_digest local_digest attempt restored
   pvc_name="$1"
@@ -406,6 +462,11 @@ metadata:
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false
+  # No fsGroup: mounting an existing PVC must not change its ownership/modes.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
   containers:
     - name: restore
       image: $IMAGE_REF
@@ -462,6 +523,11 @@ YAML
     return 1
   fi
   run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" delete pod "$pod_name" --wait=true >/dev/null || { rm -rf -- "$temporary"; return 1; }
+  if ! assert_local_restore_runtime_permissions "$temporary" "$required_file"; then
+    printf '%s\n' "Portal local restore non-root preflight failed; existing destination and PVC retained; permission changes require separate operator approval" >&2
+    rm -rf -- "$temporary"
+    return 1
+  fi
   backup="$parent/.$(basename -- "$destination").rollback.${RUN_ID}.bak"
   [ ! -e "$backup" ] || { rm -rf -- "$temporary"; return 1; }
   if [ -e "$destination" ] && ! mv -- "$destination" "$backup"; then rm -rf -- "$temporary"; return 1; fi
@@ -1023,6 +1089,11 @@ metadata:
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false
+  # Fail on incompatible permissions instead of repairing PVC ownership.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
   containers:
     - name: copier
       image: $IMAGE_REF
@@ -1043,6 +1114,12 @@ spec:
 YAML
   then abort_cutover; return 1; fi
   if ! run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" wait --for=condition=Ready "pod/$COPY_POD" --timeout=120s >/dev/null; then abort_cutover; return 1; fi
+  if ! assert_pvc_runtime_permissions "$COPY_POD" /data/files "" ||
+     ! assert_pvc_runtime_permissions "$COPY_POD" /var/lib/portal ""; then
+    printf '%s\n' "Portal PVC non-root write preflight failed; permission changes require separate operator approval" >&2
+    abort_cutover
+    return 1
+  fi
   if ! tar -C "$SOURCE_DIR" -cf - . | run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" exec -i "$COPY_POD" -- tar -xf - -C /data/files; then abort_cutover; return 1; fi
   if ! tar -C "$STATE_SOURCE_DIR" -cf - . | run_timeout 120 sudo k3s kubectl -n "$NAMESPACE" exec -i "$COPY_POD" -- tar -xf - -C /var/lib/portal; then abort_cutover; return 1; fi
   destination_digest=$(run_timeout "$TIMEOUT_SECONDS" sudo k3s kubectl -n "$NAMESPACE" exec "$COPY_POD" -- sh -c 'cd /data/files && find . -type f -print0 | sort -z | xargs -0 sha256sum' | sha256sum | awk '{print $1}') || { abort_cutover; return 1; }
@@ -1218,6 +1295,11 @@ spec:
         app.kubernetes.io/name: portal-web
     spec:
       automountServiceAccountToken: false
+      # fsGroup is omitted to preserve existing PVC ownership and modes.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
       containers:
         - name: portal-web
           image: $IMAGE_REF

@@ -9,6 +9,7 @@ from fastapi.templating import Jinja2Templates
 from app.services.admin_status import (
     build_admin_status_context,
     format_operation_history_for_display,
+    format_recovery_events_for_display,
     format_status_checked_at,
 )
 from app.services.homeops import ALLOWED_SERVICES, get_homeops_service
@@ -24,7 +25,7 @@ from app.services.security import (
     record_auth_failure,
     security_status,
 )
-from app.services.system_status import get_dashboard_status, get_service_health
+from app.services.system_status import get_dashboard_status, get_recovery_events, get_service_health
 
 router = APIRouter()
 templates = Jinja2Templates(directory=Path(__file__).resolve().parents[1] / "templates")
@@ -99,6 +100,7 @@ def _render_authenticated_admin_status(request: Request, issue_homeops_session: 
     context["homeops_pending_restart"] = any(
         item["status"] == "restart_pending" for item in context["homeops_history"]
     )
+    context["recovery_events"] = format_recovery_events_for_display(get_recovery_events())
     response = templates.TemplateResponse(
         "admin_status.html",
         {

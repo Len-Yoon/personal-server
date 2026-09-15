@@ -1,0 +1,407 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Host-side installer for the quarterly K3s SRE audit. It only controls the
+# CronJob and legacy user timer; the runner reports audit results through its
+# existing ConfigMap contract and this controller never reads or creates Secret
+# values.
+umask 077
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd)
+MANIFEST=${QUARTERLY_SRE_AUDIT_MANIFEST:-$REPO_ROOT/infra/k8s/sre-audit-automation/quarterly-sre-audit-cronjob.yaml}
+NAMESPACE=monitoring
+CRONJOB_NAME=quarterly-sre-audit
+VALIDATION_CRONJOB_NAME=quarterly-sre-audit-validation
+MONTHLY_CRONJOB_NAME=monthly-sre-audit
+STATUS_CONFIGMAP=sre-telegram-quarterly-audit-status
+VALIDATION_DIAGNOSTICS_CONFIGMAP=sre-quarterly-audit-diagnostics
+RELAY_STATE_CONFIGMAP=sre-telegram-relay-state
+LEGACY_TIMER=${QUARTERLY_SRE_AUDIT_LEGACY_TIMER:-personal-server-quarterly-sre-audit.timer}
+LEGACY_SERVICE=${QUARTERLY_SRE_AUDIT_LEGACY_SERVICE:-personal-server-quarterly-sre-audit.service}
+MANUAL_JOB_TIMEOUT=${QUARTERLY_SRE_AUDIT_MANUAL_JOB_TIMEOUT:-20m}
+RELAY_DELIVERY_TIMEOUT=${QUARTERLY_SRE_AUDIT_RELAY_DELIVERY_TIMEOUT:-2m}
+INSTALL_LOCK_FILE=${QUARTERLY_SRE_AUDIT_INSTALL_LOCK_FILE:-${XDG_RUNTIME_DIR:-/tmp}/personal-server-quarterly-sre-audit-install.lock}
+
+usage() {
+  printf '%s\n' "usage: $0 --preflight|--render|--install|--status" >&2
+}
+
+kctl() {
+  sudo -n k3s kubectl "$@"
+}
+
+require_commands() {
+  local command_name
+  for command_name in sudo k3s systemctl date flock grep python3 sleep; do
+    command -v "$command_name" >/dev/null || return 1
+  done
+}
+
+acquire_install_lock() {
+  exec 9>"$INSTALL_LOCK_FILE" || return 1
+  flock -n 9 || {
+    printf '%s\n' 'Quarterly SRE audit installer is already running; retry is blocked.' >&2
+    return 1
+  }
+}
+
+assert_no_active_audit_jobs() {
+  local jobs name conditions
+  jobs=$(kctl -n "$NAMESPACE" get jobs -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}') || {
+    printf '%s\n' 'Quarterly SRE audit Job state could not be read; installation is blocked.' >&2
+    return 1
+  }
+  while IFS= read -r name; do
+    case "$name" in
+      "${MONTHLY_CRONJOB_NAME}-"*|"${CRONJOB_NAME}-"*|"${VALIDATION_CRONJOB_NAME}-"*) ;;
+      *) continue ;;
+    esac
+    conditions=$(kctl -n "$NAMESPACE" get job "$name" -o 'jsonpath={range .status.conditions[*]}{.type}{"="}{.status}{","}{end}') || {
+      printf '%s\n' 'Quarterly SRE audit Job condition could not be read; installation is blocked.' >&2
+      return 1
+    }
+    case "$conditions" in
+      *Complete=True,*|*Failed=True,*) continue ;;
+    esac
+    printf '%s\n' 'A quarterly SRE audit Job is not terminal; installation is blocked.' >&2
+    return 1
+  done <<< "$jobs"
+}
+
+format_completed_at() {
+  python3 - "$1" <<'PY'
+from datetime import datetime
+from zoneinfo import ZoneInfo
+import sys
+
+try:
+    timestamp = datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        raise ValueError("timezone is required")
+    print(timestamp.astimezone(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M"))
+except (ValueError, IndexError):
+    raise SystemExit(1)
+PY
+}
+
+verify_manifest() {
+  local normalized_manifest
+  [ -r "$MANIFEST" ] || {
+    printf '%s\n' 'Quarterly SRE audit CronJob manifest is unavailable.' >&2
+    return 1
+  }
+  normalized_manifest=$(tr -d '\r' < "$MANIFEST") || return 1
+  grep -Fq 'kind: CronJob' "$MANIFEST" && \
+    grep -Fq '  name: monthly-sre-audit' "$MANIFEST" && \
+    grep -Fq '  name: quarterly-sre-audit' "$MANIFEST" && \
+    grep -Fq '  name: quarterly-sre-audit-validation' "$MANIFEST" && \
+    [ "$(grep -Fxc '  suspend: true' <<< "$normalized_manifest")" -eq 3 ] || {
+    printf '%s\n' 'Monthly and legacy SRE audit CronJobs must install suspended.' >&2
+    return 1
+  }
+}
+
+preflight() {
+  require_commands || return 1
+  verify_manifest || return 1
+  kctl apply --dry-run=client -f "$MANIFEST" >/dev/null || return 1
+  kctl get nodes --no-headers >/dev/null || return 1
+  assert_no_active_audit_jobs || return 1
+  printf '%s\n' 'quarterly_sre_audit_preflight=PASS'
+}
+
+assert_cronjob_suspended() {
+  local cronjob_name=$1 suspended
+  suspended=$(kctl -n "$NAMESPACE" get cronjob "$cronjob_name" -o 'jsonpath={.spec.suspend}') || return 1
+  [ "$suspended" = true ] || {
+    printf '%s\n' 'SRE audit CronJob is not suspended; installation is blocked.' >&2
+    return 1
+  }
+}
+
+legacy_timer_load_state() {
+  systemctl --user show "$LEGACY_TIMER" --property=LoadState --value
+}
+
+legacy_timer_is_inactive() {
+  local load_state active_state
+  load_state=$(legacy_timer_load_state) || return 1
+  [ "$load_state" = not-found ] && return 0
+  active_state=$(systemctl --user show "$LEGACY_TIMER" --property=ActiveState --value) || return 1
+  [ "$active_state" = inactive ] || {
+    printf '%s\n' 'Legacy quarterly SRE audit timer is not inactive; CronJob activation is blocked.' >&2
+    return 1
+  }
+}
+
+disable_legacy_timer_if_present() {
+  local load_state
+  load_state=$(legacy_timer_load_state) || return 1
+  [ "$load_state" = not-found ] && return 0
+  systemctl --user disable --now "$LEGACY_TIMER" || return 1
+  legacy_timer_is_inactive
+}
+
+legacy_service_is_inactive() {
+  local load_state active_state main_pid
+  load_state=$(systemctl --user show "$LEGACY_SERVICE" --property=LoadState --value) || return 1
+  [ "$load_state" = not-found ] && return 0
+  active_state=$(systemctl --user show "$LEGACY_SERVICE" --property=ActiveState --value) || return 1
+  case "$active_state" in
+    inactive|failed)
+      main_pid=$(systemctl --user show "$LEGACY_SERVICE" --property=MainPID --value) || return 1
+      [ "$main_pid" = 0 ] || {
+        printf '%s\n' 'Legacy quarterly SRE audit service has a running process; installation is blocked without stopping it.' >&2
+        return 1
+      }
+      ;;
+    *)
+      printf '%s\n' 'Legacy quarterly SRE audit service is running or transitioning; installation is blocked without stopping it.' >&2
+      return 1
+      ;;
+  esac
+}
+
+ensure_status_configmap_if_absent() {
+  local existing
+  existing=$(kctl -n "$NAMESPACE" get configmap "$STATUS_CONFIGMAP" --ignore-not-found -o name) || {
+    printf '%s\n' 'Quarterly SRE audit status ConfigMap could not be read.' >&2
+    return 1
+  }
+  [ -n "$existing" ] && return 0
+  if kctl -n "$NAMESPACE" create configmap "$STATUS_CONFIGMAP" \
+    --from-literal=run_id= \
+    --from-literal=status= \
+    --from-literal=completed_at= \
+    --from-literal=health_audit= \
+    --from-literal=backup_check= \
+    --from-literal=recovery_lab=; then
+    return 0
+  fi
+  existing=$(kctl -n "$NAMESPACE" get configmap "$STATUS_CONFIGMAP" --ignore-not-found -o name) || {
+    printf '%s\n' 'Quarterly SRE audit status ConfigMap could not be re-read after create.' >&2
+    return 1
+  }
+  [ -n "$existing" ] || {
+    printf '%s\n' 'Quarterly SRE audit status ConfigMap was not created.' >&2
+    return 1
+  }
+}
+
+ensure_validation_diagnostics_configmap_if_absent() {
+  local existing
+  existing=$(kctl -n "$NAMESPACE" get configmap "$VALIDATION_DIAGNOSTICS_CONFIGMAP" --ignore-not-found -o name) || {
+    printf '%s\n' 'Quarterly SRE audit validation diagnostics ConfigMap could not be read.' >&2
+    return 1
+  }
+  [ -n "$existing" ] && return 0
+  if kctl -n "$NAMESPACE" create configmap "$VALIDATION_DIAGNOSTICS_CONFIGMAP" \
+    --from-literal=run_id= \
+    --from-literal=result= \
+    --from-literal=failure_stage= \
+    --from-literal=cleanup_status= \
+    --from-literal=completed_at=; then
+    return 0
+  fi
+  existing=$(kctl -n "$NAMESPACE" get configmap "$VALIDATION_DIAGNOSTICS_CONFIGMAP" --ignore-not-found -o name) || return 1
+  [ -n "$existing" ] || {
+    printf '%s\n' 'Quarterly SRE audit validation diagnostics ConfigMap was not created.' >&2
+    return 1
+  }
+}
+
+create_manual_job_from_cronjob() {
+  local source_cronjob=$1 job_prefix=$2 timestamp job_name timeout_seconds deadline request_timeout succeeded
+  timestamp=$(date -u +%Y%m%d%H%M%S) || return 1
+  job_name="${job_prefix}-manual-${timestamp}-$$"
+  kctl -n "$NAMESPACE" create job "$job_name" --from="cronjob/$source_cronjob" || return 1
+  timeout_seconds=$(manual_job_timeout_seconds) || {
+    printf '%s\n' 'Quarterly SRE audit manual Job timeout is invalid; installation is blocked.' >&2
+    return 1
+  }
+  deadline=$((SECONDS + timeout_seconds))
+  wait_for_manual_job_terminal_state "$job_name" "$deadline" || return 1
+  request_timeout=$(manual_job_request_timeout "$deadline") || {
+    manual_job_timeout_reached
+    return 1
+  }
+  succeeded=$(kctl -n "$NAMESPACE" --request-timeout="$request_timeout" get job "$job_name" -o 'jsonpath={.status.succeeded}') || {
+    printf '%s\n' 'Quarterly SRE audit manual Job success state could not be read; installation is blocked.' >&2
+    return 1
+  }
+  [ "$SECONDS" -lt "$deadline" ] || {
+    manual_job_timeout_reached
+    return 1
+  }
+  [ "$succeeded" = 1 ] || {
+    printf '%s\n' 'Quarterly SRE audit manual Job did not report success.' >&2
+    return 1
+  }
+  LAST_MANUAL_JOB=$job_name
+}
+
+manual_job_timeout_seconds() {
+  duration_to_seconds "$MANUAL_JOB_TIMEOUT"
+}
+
+duration_to_seconds() {
+  python3 - "$1" <<'PY'
+import math
+import re
+import sys
+
+duration = sys.argv[1]
+parts = re.findall(r"([0-9]+(?:\.[0-9]+)?)(ns|us|µs|ms|s|m|h)", duration)
+if not parts or "".join(value + unit for value, unit in parts) != duration:
+    raise SystemExit(1)
+
+multipliers = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "ms": 1e-3, "s": 1, "m": 60, "h": 3600}
+seconds = sum(float(value) * multipliers[unit] for value, unit in parts)
+if seconds <= 0:
+    raise SystemExit(1)
+print(math.ceil(seconds))
+PY
+}
+
+manual_job_request_timeout() {
+  local deadline remaining_seconds
+  deadline=$1
+  remaining_seconds=$((deadline - SECONDS))
+  [ "$remaining_seconds" -gt 0 ] || return 1
+  [ "$remaining_seconds" -le 5 ] || remaining_seconds=5
+  printf '%ss\n' "$remaining_seconds"
+}
+
+manual_job_timeout_reached() {
+  printf '%s\n' 'Quarterly SRE audit manual Job did not reach a terminal state before timeout.' >&2
+}
+
+wait_for_manual_job_terminal_state() {
+  local job_name deadline request_timeout conditions
+  job_name=$1
+  deadline=$2
+  while :; do
+    request_timeout=$(manual_job_request_timeout "$deadline") || {
+      manual_job_timeout_reached
+      return 1
+    }
+    conditions=$(kctl -n "$NAMESPACE" --request-timeout="$request_timeout" get job "$job_name" -o 'jsonpath={range .status.conditions[*]}{.type}{"="}{.status}{","}{end}') || {
+      printf '%s\n' 'Quarterly SRE audit manual Job condition could not be read; installation is blocked.' >&2
+      return 1
+    }
+    [ "$SECONDS" -lt "$deadline" ] || {
+      manual_job_timeout_reached
+      return 1
+    }
+    case "$conditions" in
+      *Failed=True*)
+        printf '%s\n' 'Quarterly SRE audit manual Job reported failure; installation is blocked.' >&2
+        return 1
+        ;;
+      *Complete=True*) return 0 ;;
+    esac
+    sleep 1 || return 1
+  done
+}
+
+verify_status_reporting() {
+  local previous_run_id=${1:-} report run_id reported_status completed_at health_audit backup_check recovery_lab
+  report=$(kctl -n "$NAMESPACE" get configmap "$STATUS_CONFIGMAP" -o 'jsonpath={.data.run_id}{"\t"}{.data.status}{"\t"}{.data.completed_at}{"\t"}{.data.health_audit}{"\t"}{.data.backup_check}{"\t"}{.data.recovery_lab}') || return 1
+  IFS=$'\t' read -r run_id reported_status completed_at health_audit backup_check recovery_lab <<< "$report" || return 1
+  [ -n "$run_id" ] && [ "$run_id" != "$previous_run_id" ] && [ "$reported_status" = passed ] && [ "$health_audit" = passed ] && [ "$backup_check" = passed ] && [ "$recovery_lab" = passed ] || {
+    printf '%s\n' 'Quarterly SRE audit status reporting is not confirmed passed; CronJob activation is blocked.' >&2
+    return 1
+  }
+  OFFICIAL_RUN_ID=$run_id
+}
+
+current_official_run_id() {
+  kctl -n "$NAMESPACE" get configmap "$STATUS_CONFIGMAP" -o 'jsonpath={.data.run_id}'
+}
+
+verify_validation_reporting() {
+  local report run_id result failure_stage cleanup_status completed_at
+  report=$(kctl -n "$NAMESPACE" get configmap "$VALIDATION_DIAGNOSTICS_CONFIGMAP" -o 'jsonpath={.data.run_id}{"\t"}{.data.result}{"\t"}{.data.failure_stage}{"\t"}{.data.cleanup_status}{"\t"}{.data.completed_at}') || return 1
+  IFS=$'\t' read -r run_id result failure_stage cleanup_status completed_at <<< "$report" || return 1
+  [ -n "$run_id" ] && [ "$result" = passed ] && [ "$failure_stage" = none ] && [ "$cleanup_status" = passed ] && [ -n "$completed_at" ] || {
+    printf '%s\n' 'Quarterly SRE audit validation diagnostics are not confirmed passed; official Job is blocked.' >&2
+    return 1
+  }
+}
+
+verify_relay_delivery() {
+  local run_id=$1 timeout_seconds deadline delivered_run_ids
+  timeout_seconds=$(duration_to_seconds "$RELAY_DELIVERY_TIMEOUT") || return 1
+  deadline=$((SECONDS + timeout_seconds))
+  while (( SECONDS < deadline )); do
+    delivered_run_ids=$(kctl -n "$NAMESPACE" get configmap "$RELAY_STATE_CONFIGMAP" -o 'jsonpath={.data.quarterly_audit_delivered_run_ids}') || return 1
+    if python3 - "$run_id" "$delivered_run_ids" <<'PY'
+import json
+import sys
+
+try:
+    run_id, delivered = sys.argv[1:]
+    values = json.loads(delivered)
+    if not isinstance(values, list) or run_id not in values:
+        raise ValueError
+except (ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+PY
+    then
+      return 0
+    fi
+    sleep 2 || return 1
+  done
+  printf '%s\n' 'Quarterly SRE audit Telegram delivery is not confirmed; CronJob activation is blocked.' >&2
+  return 1
+}
+
+render() {
+  verify_manifest
+  kctl apply --dry-run=client -f "$MANIFEST"
+}
+
+install() {
+  acquire_install_lock || return 1
+  preflight || return 1
+  kctl apply -f "$MANIFEST" || return 1
+  assert_cronjob_suspended "$MONTHLY_CRONJOB_NAME" || return 1
+  assert_cronjob_suspended "$CRONJOB_NAME" || return 1
+  assert_cronjob_suspended "$VALIDATION_CRONJOB_NAME" || return 1
+  ensure_status_configmap_if_absent || return 1
+  ensure_validation_diagnostics_configmap_if_absent || return 1
+  disable_legacy_timer_if_present || return 1
+  legacy_service_is_inactive || return 1
+  assert_no_active_audit_jobs || return 1
+  create_manual_job_from_cronjob "$VALIDATION_CRONJOB_NAME" "$VALIDATION_CRONJOB_NAME" || return 1
+  verify_validation_reporting || return 1
+  local_previous_run_id=$(current_official_run_id) || return 1
+  assert_no_active_audit_jobs || return 1
+  create_manual_job_from_cronjob "$MONTHLY_CRONJOB_NAME" "$MONTHLY_CRONJOB_NAME" || return 1
+  verify_status_reporting "$local_previous_run_id" || return 1
+  verify_relay_delivery "$OFFICIAL_RUN_ID" || return 1
+  kctl -n "$NAMESPACE" patch cronjob "$MONTHLY_CRONJOB_NAME" --type merge -p '{"spec":{"suspend":false}}' || return 1
+  printf '%s\n' 'monthly_sre_audit_install=PASS'
+}
+
+status() {
+  local suspended report run_id audit_status completed_at display_completed_at health_audit backup_check recovery_lab
+  suspended=$(kctl -n "$NAMESPACE" get cronjob "$MONTHLY_CRONJOB_NAME" -o 'jsonpath={.spec.suspend}') || return 1
+  report=$(kctl -n "$NAMESPACE" get configmap "$STATUS_CONFIGMAP" -o 'jsonpath={.data.run_id}{"\t"}{.data.status}{"\t"}{.data.completed_at}{"\t"}{.data.health_audit}{"\t"}{.data.backup_check}{"\t"}{.data.recovery_lab}') || return 1
+  IFS=$'\t' read -r run_id audit_status completed_at health_audit backup_check recovery_lab \
+    <<< "$report" || return 1
+  display_completed_at=$(format_completed_at "$completed_at") || return 1
+  printf 'cronjob_suspended=%s\nrun_id=%s\nstatus=%s\ncompleted_at=%s\nhealth_audit=%s\nbackup_check=%s\nrecovery_lab=%s\n' \
+    "$suspended" "$run_id" "$audit_status" "$display_completed_at" "$health_audit" "$backup_check" "$recovery_lab"
+  legacy_timer_is_inactive
+  legacy_service_is_inactive
+}
+
+case "${1:-}" in
+  --preflight) preflight ;;
+  --render) render ;;
+  --install) install ;;
+  --status) status ;;
+  *) usage; exit 2 ;;
+esac

@@ -1393,6 +1393,27 @@ a {
 .homeops-abnormal-reasons .homeops-history-restart_pending .homeops-summary-separator { color:#fb923c; }
 .homeops-empty-summary { margin:0; padding:14px 16px; border:1px dashed rgba(148,163,184,.28); border-radius:12px; color:#94a3b8; }
 
+.recovery-event-guidance,
+.recovery-events-empty {
+    margin: 0 0 14px;
+    padding: 13px 15px;
+    border: 1px solid rgba(96, 165, 250, 0.28);
+    border-radius: 12px;
+    color: #cbd5e1;
+    background: rgba(15, 23, 42, 0.48);
+    line-height: 1.55;
+}
+
+.recovery-event-guidance p { margin: 0; }
+.recovery-event-guidance strong { color: #bae6fd; }
+.recovery-events-table-wrap { overflow-x: auto; border: 1px solid rgba(96, 165, 250, 0.22); border-radius: 12px; }
+.recovery-events-table { width: 100%; min-width: 760px; border-collapse: collapse; color: #cbd5e1; font-size: 13px; }
+.recovery-events-table th,
+.recovery-events-table td { padding: 12px 14px; border-bottom: 1px solid rgba(148, 163, 184, 0.14); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.recovery-events-table th { color: #bae6fd; background: rgba(30, 41, 59, 0.72); font-size: 12px; letter-spacing: .02em; }
+.recovery-events-table tr:last-child td { border-bottom: 0; }
+.recovery-events-table td:first-child { white-space: nowrap; color: #e2e8f0; }
+
 @media (max-width: 680px) {
     .homeops-action-grid { grid-template-columns:1fr; }
     .homeops-abnormal-reasons li { align-items:baseline; flex-direction:row; flex-wrap:wrap; gap:8px; }

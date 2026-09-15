@@ -5,14 +5,26 @@
 | 항목 | 내용 |
 |---|---|
 | 문서명 | 월간 안전 복구 훈련 절차 |
-| 실행 주기 | 월 1회 수동 실행 |
+| 실행 주기 | 월 1회 자동 감사 및 필요 시 수동 실행 |
 | 기준 자료 | `infra/k8s/tools`의 검증·실습 도구 |
 | 목적 | 백업 사전조건, SRE 알림 경계, 격리 Pod 자동복구를 확인함 |
 | 비고 | production Portal·공개 경로·PVC·운영 데이터는 변경하지 않음 |
 
 ## 핵심 요약
 
-다음 세 단계만 순서대로 실행함. 백업 단계는 `--check` 읽기 점검만 사용하고, Pod 실습은 별도 `sre-recovery-lab-<run-id>` namespace에서 실행함. 실제 Portal 전환·rollback·백업 업로드·운영 데이터 복원은 이 훈련에 포함하지 않음.
+본 문서는 승인된 통제 훈련 절차임. 정기 운영 결과는 N100에서 활성화된 `monthly-sre-audit` CronJob이 Portal·최신 백업·복원 증적·격리 Pod 복구를 한 번에 점검하고 기존 SRE Telegram relay로 결과를 전달함. 2026-09-15 첫 수동 Job은 세 단계와 relay 전달을 통과했고, 공개 health도 10초 간격 3회 HTTP 200으로 확인됨. 공개 경로의 5분 외부 상태 감시는 GitHub Actions에서 독립 유지하며 이 감사로 통합하지 않음. 실제 Tunnel 중지·자동복구·재부팅은 수행하지 않으며, Tunnel-only 훈련은 별도 사용자 승인 뒤에만 실행함.
+
+```bash
+bash infra/k8s/tools/monthly-recovery-drill.sh
+```
+
+CronJob은 `Forbid` 동시 실행 제한을 사용하며 설치 시 `suspend: true` 상태로 적용됨. 설치기는 수동 Job 성공과 Telegram relay 전달을 확인한 뒤에만 월간 CronJob을 활성화함. 기존 분기 감사와 validation CronJob은 이력·rollback 용도로 suspended 상태를 유지함.
+
+운영자가 같은 세부 점검을 즉시 수행해야 할 때만 아래 수동 실행기를 사용함. 증적은 `~/.local/state/personal-server/recovery-drills/<run-id>.json`에 원자적으로 증적화하며, 실행 시각, 단계별 성공 여부, 실패 단계, Pod 정리 여부만 기록함. 명령 출력·Secret·token·chat ID·운영 데이터는 기록하지 않음. 한 단계가 실패하면 이후 단계는 실행하지 않음.
+
+## Tunnel 장애 모의 순서
+
+`Tunnel만` 중지 → N100 Tunnel 장애 Telegram 확인 → 자동복구 대기 → 외부 health와 N100 복구 Telegram 확인 → GitHub monitor의 독립 외부 점검 결과 확인 → 실패 시 사용자 서비스 수동 시작 또는 재시작 순서로 실행함. 실제 실행 전에는 별도 사용자 승인이 필요함. GitHub monitor 알림은 N100 직접 알림과 중복될 수 있음. 서비스가 inactive면 `systemctl --user start cloudflared-personal-server.service`, active지만 연결 프로세스가 없으면 `systemctl --user restart cloudflared-personal-server.service`를 사용함.
 
 ## 사전 조건
 
@@ -20,16 +32,27 @@
 - 운영자 권한과 K3s가 정상적으로 접근되는지 확인함.
 - 실행 전 장애나 배포가 진행 중이면 훈련을 시작하지 않음.
 - 출력에 Secret 값, token, chat ID, 개인 경로가 포함되지 않는지 확인함.
+- N100 직접 Telegram 자격 증명이 설정됐고 수신이 가능한 상태인지 사전에 확인함.
+- N100 전원·네트워크·WSL 자체가 동작하지 않는 장애는 이 훈련의 자동복구·직접 알림 대상이 아님.
 
 ## 월간 체크리스트
 
-### 1. Portal PVC 백업 사전조건 점검
+### 1. Portal PVC 백업·복원 증적 점검
 
 ```bash
-bash infra/k8s/tools/portal-pvc-backup-verify.sh --check
+bash infra/k8s/tools/check-portal-backup-evidence.sh
 ```
 
-성공 기준은 `personal-server` namespace, K3s runtime marker, PVC `Bound` 상태, 단일 Portal replica, 암호화 자격 증명 파일 접근 조건이 통과하는 것임. 이 명령은 백업 업로드나 복원 실행을 대신하지 않음.
+성공 기준은 자동 백업 CronJob이 기록한 최신 K3s PVC 백업·복원 증적의 유효성, 암호화 상태, runtime marker가 통과하는 것임. 이 명령은 백업 업로드·복원·원격 저장소 접근을 수행하지 않으며, Secret·rclone 자격 증명을 읽지 않음.
+
+CronJob 전환을 준비하거나 상태를 점검할 때는 다음을 추가로 사용함. 이 점검은 Secret 값이 아니라 Secret 이름·key 이름과 PVC mount 계약만 확인함.
+
+```bash
+bash infra/k8s/tools/portal-pvc-backup-cronjob.sh --preflight
+bash infra/k8s/tools/portal-pvc-backup-cronjob.sh --status
+```
+
+CronJob은 기본 suspended 상태이며, 기존 systemd timer가 inactive이고 수동 백업·복원 검증과 Telegram 결과 확인이 끝난 경우에만 별도 승인으로 활성화함. 단일 스케줄러 원칙에 따라 systemd timer와 CronJob을 동시에 활성화하지 않음.
 
 ### 2. SRE Telegram relay·Prometheus 점검
 
@@ -54,6 +77,8 @@ bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
 ```
 
 정리 성공 기준은 `sre-recovery-lab-<run-id>` namespace가 더 이상 존재하지 않는 것임.
+
+수동 실행기를 사용하는 경우 위 세 명령을 개별 실행하지 않고 `monthly-recovery-drill.sh`만 실행함. 정기 월간 감사는 별도의 `monthly-sre-audit` CronJob으로 동일한 Portal·백업 증적·격리 Pod 복구 경계를 점검하고 relay 결과를 남김. 실행기는 안전한 lowercase run ID를 사전 전달하며, 3단계 실습 도구가 소유권을 획득한 경우 도구 자체 cleanup 결과를 성공으로 기록함. `AlreadyExists` 등 소유권 미획득 실패에서는 wrapper가 cleanup하지 않음.
 
 ## 중단 기준과 복구 조치
 
@@ -83,9 +108,10 @@ bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
 | Pod 복구 실습 | PASS 또는 FAIL 및 run ID |
 | 중단·예외 | 사실과 후속 조치만 기록함 |
 
+자동 증적 JSON의 상태값은 `success` 또는 `failed`이며, 단계 상태값은 `success`, `failed`, `not_run` 중 하나임.
+
 토큰, 비밀번호, Secret 값, chat ID, 운영 데이터 내용은 결과 기록에 포함하지 않음.
 
 ## 확인 필요 사항
 
-- 실제 결과 보관 위치와 월간 실행 담당자는 운영자가 지정해야 함.
-- 이 절차는 자동 실행을 추가하지 않으며, scheduler·timer·CronJob 변경을 포함하지 않음.
+- 월간 CronJob 변경 또는 재설치 시에는 기존 수동 Job·relay·외부 health 검증을 다시 수행해야 함.

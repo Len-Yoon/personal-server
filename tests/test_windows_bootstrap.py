@@ -6,17 +6,608 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = (ROOT / "scripts" / "windows-bootstrap.ps1").read_text(encoding="utf-8-sig")
+SCRIPT_PATH = ROOT / "scripts" / "windows-bootstrap.ps1"
+SCRIPT = SCRIPT_PATH.read_text(encoding="utf-8-sig")
 WSL_SCRIPT = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf-8-sig")
 
 
 class WindowsBootstrapTests(unittest.TestCase):
+    def test_install_task_registers_keepalive_at_boot_without_interactive_token(self):
+        installer = SCRIPT[
+            SCRIPT.index("function Install-KeepAliveTask")
+            : SCRIPT.index("function Install-SupervisorTask")
+        ]
+        self.assertIn('$KeepAliveTaskName = "PersonalServer-WSL-KeepAlive"', SCRIPT)
+        self.assertIn('$temporaryTaskXml = Join-Path $env:TEMP "$KeepAliveTaskName.xml"', installer)
+        self.assertIn('$escapedRunAsUser = [System.Security.SecurityElement]::Escape($RunAsUser)', installer)
+        self.assertIn('Set-Content -LiteralPath $temporaryTaskXml -Value $taskXml -Encoding unicode', installer)
+        self.assertIn('schtasks.exe /Create /TN $KeepAliveTaskName /XML $temporaryTaskXml /RU $RunAsUser /RP * /F', installer)
+        for token in (
+            "<BootTrigger>",
+            "<LogonType>Password</LogonType>",
+            "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
+            "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>",
+            "<RestartOnFailure>",
+            "<Interval>PT1M</Interval>",
+            "<Count>3</Count>",
+            "<Command>C:\\Windows\\System32\\wsl.exe</Command>",
+            '<Arguments>-d Ubuntu-24.04 -u root --exec /bin/bash -lc "while true; do sleep 3600; done"</Arguments>',
+            'Remove-Item -LiteralPath $temporaryTaskXml -Force -ErrorAction SilentlyContinue',
+        ):
+            self.assertIn(token, installer)
+        self.assertNotIn("/SC ONSTART", installer)
+        self.assertNotIn("/TR", installer)
+        self.assertNotIn("InteractiveToken", installer)
+
+    def test_keepalive_registration_failure_does_not_emit_native_output_or_account_identity(self):
+        installer = SCRIPT[
+            SCRIPT.index("function Install-KeepAliveTask")
+            : SCRIPT.index("function Install-SupervisorTask")
+        ]
+        failure_path = installer[
+            installer.index("if ($createExitCode -ne 0)")
+            : installer.index("} finally", installer.index("if ($createExitCode -ne 0)"))
+        ]
+
+        self.assertIn(
+            'throw "Failed to register scheduled task \'$KeepAliveTaskName\' (exit code $createExitCode)."',
+            failure_path,
+        )
+        self.assertNotIn("$createOutput", failure_path)
+        self.assertNotIn("$RunAsUser", failure_path)
+        self.assertNotIn(".Trim()", failure_path)
+
+    def test_keepalive_registration_keeps_the_password_prompt_interactive(self):
+        installer = SCRIPT[
+            SCRIPT.index("function Install-KeepAliveTask")
+            : SCRIPT.index("function Install-SupervisorTask")
+        ]
+
+        self.assertIn(
+            "& schtasks.exe /Create /TN $KeepAliveTaskName /XML $temporaryTaskXml /RU $RunAsUser /RP * /F",
+            installer,
+        )
+        registration_call = next(
+            line
+            for line in installer.splitlines()
+            if "schtasks.exe /Create /TN $KeepAliveTaskName" in line
+        )
+        self.assertNotIn("|", registration_call)
+        self.assertNotIn("2>&1", registration_call)
+        self.assertNotIn("Out-", registration_call)
+
+    def test_install_task_registers_keepalive_before_supervisor(self):
+        installer = SCRIPT[
+            SCRIPT.index("function Install-ScheduledTask")
+            : SCRIPT.index("\nLoad-RecoveryFailureState")
+        ]
+        self.assertIn("Install-KeepAliveTask", installer)
+        self.assertLess(installer.index("Install-KeepAliveTask"), installer.index("Install-SupervisorTask"))
+
+    def test_scheduled_task_runs_a_supervisor_that_restarts_the_daemon(self):
+        self.assertIn("function Start-Supervisor", SCRIPT)
+        installer = SCRIPT[
+            SCRIPT.index("function Install-ScheduledTask")
+            : SCRIPT.index("\nLoad-RecoveryFailureState")
+        ]
+        supervisor = SCRIPT[
+            SCRIPT.index("function Start-Supervisor")
+            : SCRIPT.index("if ($InstallTask)")
+        ]
+
+        self.assertIn("[switch]$Supervisor", SCRIPT)
+        self.assertIn("-Supervisor", installer)
+        self.assertIn("Start-Process", supervisor)
+        self.assertIn("-Daemon", supervisor)
+        self.assertIn("-Wait", supervisor)
+        self.assertIn("Start-Sleep -Seconds $DaemonRestartDelaySeconds", supervisor)
+        self.assertIn("Enter-SupervisorLock", supervisor)
+        self.assertIn("Exit-SupervisorLock", supervisor)
+        self.assertIn("$daemonLifetimeSeconds -lt $DaemonRapidFailureWindowSeconds", supervisor)
+        self.assertIn("Start-Sleep -Seconds $DaemonFailureBackoffSeconds", supervisor)
+        self.assertIn("if ($Supervisor)", SCRIPT)
+        self.assertIn("Start-Supervisor", SCRIPT)
+
+    def test_supervisor_applies_boot_delay_once_while_daemon_restarts_without_it(self):
+        self.assertIn("function Start-Supervisor", SCRIPT)
+        supervisor = SCRIPT[
+            SCRIPT.index("function Start-Supervisor")
+            : SCRIPT.index("function Start-Daemon")
+        ]
+        daemon = SCRIPT[
+            SCRIPT.index("function Start-Daemon")
+            : SCRIPT.index("if ($InstallTask)")
+        ]
+
+        self.assertIn("Waiting 120 seconds for WSL and Docker after logon.", supervisor)
+        self.assertIn("Start-Sleep -Seconds $RecoveryStartupDelaySeconds", supervisor)
+        self.assertNotIn("Waiting 120 seconds for WSL and Docker after logon.", daemon)
+
+    def test_supervisor_runs_one_post_boot_check_before_starting_daemon(self):
+        supervisor = SCRIPT[
+            SCRIPT.index("function Start-Supervisor") : SCRIPT.index("function Enter-DaemonLock")
+        ]
+        self.assertIn("$RecoveryStartupDelaySeconds = 120", SCRIPT)
+        self.assertIn("Start-Sleep -Seconds $RecoveryStartupDelaySeconds", supervisor)
+        self.assertEqual(supervisor.count("Invoke-PostBootRecoveryCheck"), 1)
+        self.assertLess(
+            supervisor.index("Start-Sleep -Seconds $RecoveryStartupDelaySeconds"),
+            supervisor.index("Invoke-PostBootRecoveryCheck"),
+        )
+        self.assertLess(
+            supervisor.index("Invoke-PostBootRecoveryCheck"),
+            supervisor.index("Start-Process"),
+        )
+
+    def test_post_boot_public_health_requires_three_checks(self):
+        health_check = SCRIPT[
+            SCRIPT.index("function Test-PublicPortalHealthThreeTimes") : SCRIPT.index("function Invoke-PostBootRecoveryCheck")
+        ]
+        self.assertIn("for ($attempt = 1; $attempt -le 3; $attempt++)", health_check)
+        self.assertEqual(health_check.count("(Test-PublicPortalHealth)"), 1)
+        self.assertIn("if ($attempt -lt 3) { Start-Sleep -Seconds 10 }", health_check)
+        self.assertIn("$allPassed = $true", health_check)
+        self.assertIn("return $allPassed", health_check)
+        self.assertNotIn("return $false", health_check)
+
+    def test_post_boot_health_failure_forces_existing_tunnel_recovery_path(self):
+        post_boot = SCRIPT[
+            SCRIPT.index("function Invoke-PostBootRecoveryCheck") : SCRIPT.index("function Start-CloudflareTunnel")
+        ]
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle") : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+        self.assertIn("Invoke-RecoveryCycle -RequirePublicPortalHealth", post_boot)
+        self.assertNotIn("ForceTunnelUnhealthy", SCRIPT)
+        self.assertIn("param([switch]$RequirePublicPortalHealth)", cycle)
+        self.assertIn("Get-RecoveryHealth -RequirePublicPortalHealth:$RequirePublicPortalHealth", cycle)
+
+    def test_post_boot_uses_one_recovery_cycle_and_requires_complete_health(self):
+        post_boot = SCRIPT[
+            SCRIPT.index("function Invoke-PostBootRecoveryCheck") : SCRIPT.index("function Start-CloudflareTunnel")
+        ]
+        self.assertEqual(post_boot.count("Invoke-RecoveryCycle"), 1)
+        self.assertIn("$health = Invoke-RecoveryCycle -RequirePublicPortalHealth", post_boot)
+        self.assertIn("$unhealthyComponents = @($RecoveryComponents | Where-Object", post_boot)
+        self.assertNotIn("ForceTunnelUnhealthy", post_boot)
+
+    def test_recovery_cycle_returns_null_when_skipped_or_dirty(self):
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle") : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+        self.assertIn("return $null", cycle)
+        self.assertIn("return $health", cycle)
+
+    def test_post_boot_requires_three_public_checks_only_after_healthy_nodeport(self):
+        health = SCRIPT[
+            SCRIPT.index("function Get-RecoveryHealth") : SCRIPT.index("function Write-RecoveryEvent")
+        ]
+        self.assertIn("param([switch]$RequirePublicPortalHealth)", health)
+        self.assertIn('if ($health.nodeport -eq "healthy") {', health)
+        self.assertIn("Test-PublicPortalHealthThreeTimes", health)
+        self.assertLess(health.index('if ($health.nodeport -eq "healthy") {'), health.index("Test-PublicPortalHealthThreeTimes"))
+        self.assertNotIn("ForceTunnelUnhealthy", health)
+
+    def test_post_boot_check_failure_is_caught_before_daemon_start(self):
+        post_boot = SCRIPT[
+            SCRIPT.index("function Invoke-PostBootRecoveryCheck") : SCRIPT.index("function Start-CloudflareTunnel")
+        ]
+        supervisor = SCRIPT[
+            SCRIPT.index("function Start-Supervisor") : SCRIPT.index("function Enter-DaemonLock")
+        ]
+        self.assertIn("try {", post_boot)
+        self.assertIn('Status "failed"', post_boot)
+        self.assertIn("Invoke-PostBootRecoveryCheck", supervisor)
+        self.assertLess(supervisor.index("Invoke-PostBootRecoveryCheck"), supervisor.index("Start-Process"))
+
+    def test_supervisor_uses_a_distinct_lifetime_lock_to_prevent_duplicate_daemons(self):
+        self.assertIn("function Enter-SupervisorLock", SCRIPT)
+        lock = SCRIPT[
+            SCRIPT.index("function Enter-SupervisorLock")
+            : SCRIPT.index("function Start-Supervisor")
+        ]
+
+        self.assertIn('$SupervisorLockPath = Join-Path $RecoveryStateDirectory "supervisor.lock"', SCRIPT)
+        self.assertIn("[System.IO.FileShare]::None", lock)
+        self.assertIn("[System.IO.FileMode]::OpenOrCreate", lock)
+        self.assertIn("Remove-Item -LiteralPath $SupervisorLockPath", lock)
+
+    def test_daemon_uses_its_own_lifetime_lock_to_block_legacy_or_manual_duplicates(self):
+        self.assertIn("function Enter-DaemonLock", SCRIPT)
+        lock = SCRIPT[
+            SCRIPT.index("function Enter-DaemonLock")
+            : SCRIPT.index("function Start-Daemon")
+        ]
+        daemon = SCRIPT[
+            SCRIPT.index("function Start-Daemon")
+            : SCRIPT.index("if ($InstallTask)")
+        ]
+
+        self.assertIn('$DaemonLockPath = Join-Path $RecoveryStateDirectory "daemon.lock"', SCRIPT)
+        self.assertIn("[System.IO.FileShare]::None", lock)
+        self.assertIn("Enter-DaemonLock", daemon)
+        self.assertIn("Exit-DaemonLock", daemon)
+        self.assertIn("already running; skipping duplicate start", daemon)
+
+    def test_bootstrap_script_uses_utf8_bom_for_windows_powershell_korean_literals(self):
+        self.assertTrue(SCRIPT_PATH.read_bytes().startswith(b"\xef\xbb\xbf"))
+
+    def test_tunnel_transition_alert_reads_only_windows_credential_manager(self):
+        credential = SCRIPT[
+            SCRIPT.index("function Get-TunnelTelegramConfiguration")
+            : SCRIPT.index("function Test-CloudflareTunnelRunning")
+        ]
+        notifier = SCRIPT[
+            SCRIPT.index("function Send-TunnelTelegramNotification")
+            : SCRIPT.index("function Test-CloudflareTunnelRunning")
+        ]
+
+        self.assertIn('$TunnelTelegramCredentialTarget = "personal-server-tunnel-telegram"', SCRIPT)
+        self.assertIn("CredRead", credential)
+        self.assertIn("CredentialBlob", credential)
+        self.assertIn("UserName", credential)
+        self.assertIn("bot_token = [string]$credential.Password", credential)
+        self.assertIn("chat_id = [string]$credential.UserName", credential)
+        self.assertIn("ConvertFrom-Json", credential)
+        self.assertIn('([string]$credential.Password).TrimStart().StartsWith("{")', credential)
+        self.assertIn("https://api.telegram.org/bot", notifier)
+        self.assertNotIn("Write-Info $credentialPayload", credential)
+        self.assertNotIn("Write-Info $config", notifier)
+
+    def test_tunnel_transition_alert_keeps_legacy_json_credential_compatibility(self):
+        credential = SCRIPT[
+            SCRIPT.index("function Get-TunnelTelegramConfiguration")
+            : SCRIPT.index("function Send-TunnelTelegramNotification")
+        ]
+
+        self.assertIn('([string]$credential.Password).TrimStart().StartsWith("{")', credential)
+        self.assertIn("$credential.Password | ConvertFrom-Json", credential)
+        self.assertIn("$configuration.bot_token", credential)
+        self.assertIn("$configuration.chat_id", credential)
+
+    def test_tunnel_transition_alert_rejects_empty_or_malformed_credentials_without_logging_them(self):
+        credential = SCRIPT[
+            SCRIPT.index("function Get-TunnelTelegramConfiguration")
+            : SCRIPT.index("function Send-TunnelTelegramNotification")
+        ]
+
+        self.assertIn("[string]::IsNullOrWhiteSpace([string]$credential.Password)", credential)
+        self.assertIn("[string]::IsNullOrWhiteSpace([string]$credential.UserName)", credential)
+        self.assertIn('Write-Info "Tunnel Telegram credential has an invalid format."', credential)
+        self.assertNotIn("Write-Info $credential", credential)
+
+    def test_tunnel_transition_alert_sends_korean_message_as_utf8_json(self):
+        notifier = SCRIPT[
+            SCRIPT.index("function Send-TunnelTelegramNotification")
+            : SCRIPT.index("function Update-TunnelTelegramNotification")
+        ]
+
+        self.assertIn("$payload = @{", notifier)
+        self.assertIn("ConvertTo-Json -Compress", notifier)
+        self.assertIn("[System.Text.Encoding]::UTF8.GetBytes($payload)", notifier)
+        self.assertIn('-ContentType "application/json; charset=utf-8"', notifier)
+        self.assertIn("-Body $payloadBytes", notifier)
+
+    def test_tunnel_transition_alerts_are_persisted_and_sent_once_per_transition(self):
+        state = SCRIPT[
+            SCRIPT.index("function Save-RecoveryFailureState")
+            : SCRIPT.index("function Set-RecoveryStateInvalid")
+        ]
+        loader = SCRIPT[
+            SCRIPT.index("function Load-RecoveryFailureState")
+            : SCRIPT.index("function Register-RecoveryFailure")
+        ]
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle")
+            : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+
+        self.assertIn("$TunnelAlertDownNotified", state)
+        self.assertIn("tunnel_alert", state)
+        self.assertIn('Properties["tunnel_alert"]', loader)
+        self.assertIn("Update-TunnelTelegramNotification", cycle)
+        self.assertLess(cycle.index("Update-TunnelTelegramNotification"), cycle.index("foreach ($component in $RecoveryComponents)"))
+
+    def test_recovery_events_are_bounded_structured_and_secret_free(self):
+        """Operator diagnostics need a compact history without credential or command leakage."""
+        self.assertIn('$RecoveryEventLogPath = Join-Path $RecoveryStateDirectory "recovery-events.jsonl"', SCRIPT)
+        self.assertIn("$RecoveryEventLogMaxEntries = 200", SCRIPT)
+        event_log = SCRIPT[
+            SCRIPT.index("function Write-RecoveryEvent")
+            : SCRIPT.index("function Save-RecoveryFailureState")
+        ]
+
+        self.assertIn("ToUniversalTime().ToString(\"o\")", event_log)
+        self.assertIn("component = $Component", event_log)
+        self.assertIn("event = $Event", event_log)
+        self.assertIn("status = $Status", event_log)
+        self.assertIn("action = $Action", event_log)
+        self.assertIn("ConvertTo-Json -Compress", event_log)
+        self.assertIn("Select-Object -Last ($RecoveryEventLogMaxEntries - 1)", event_log)
+        self.assertIn('Write-Info "Recovery event logging failed."', event_log)
+        self.assertNotIn("bot_token", event_log)
+        self.assertNotIn("chat_id", event_log)
+        self.assertNotIn("CommandLine", event_log)
+
+    def test_recovery_events_do_not_treat_action_dispatch_as_health_restoration(self):
+        """A restart request is not evidence that the affected component is healthy."""
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle")
+            : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+        reset = SCRIPT[
+            SCRIPT.index("function Reset-RecoveryFailure")
+            : SCRIPT.index("function Test-RecoveryActionNeeded")
+        ]
+
+        self.assertIn('Event "recovery_dispatch" -Status "accepted"', cycle)
+        self.assertIn('Event "recovery_dispatch" -Status "failed"', cycle)
+        self.assertNotIn('Event "recovery_completed" -Status "succeeded"', cycle)
+        self.assertIn('Event "health_restored" -Status "healthy"', reset)
+
+    def test_emergency_reboot_task_uses_triggerless_system_xml_registration(self):
+        reboot = SCRIPT[
+            SCRIPT.index("function Install-EmergencyRebootTask")
+            : SCRIPT.index("function Test-EmergencyRebootEligible")
+        ]
+        installer = SCRIPT[
+            SCRIPT.index("function Install-ScheduledTask")
+            : SCRIPT.index("\nLoad-RecoveryFailureState")
+        ]
+
+        self.assertIn("Join-Path $env:TEMP", reboot)
+        self.assertIn("schtasks.exe /Create /TN $EmergencyRebootTaskName /XML $temporaryTaskXml /F", reboot)
+        self.assertIn("<UserId>S-1-5-18</UserId>", reboot)
+        self.assertIn("<RunLevel>HighestAvailable</RunLevel>", reboot)
+        self.assertIn("<Command>shutdown.exe</Command>", reboot)
+        self.assertIn("<Arguments>/r /f /t 60</Arguments>", reboot)
+        self.assertNotIn("<Triggers>", reboot)
+        self.assertNotIn("/SC ONCE", reboot)
+        self.assertNotIn("/ST ", reboot)
+        self.assertIn("finally {", reboot)
+        self.assertIn("Remove-Item -LiteralPath $temporaryTaskXml", reboot)
+        self.assertLess(installer.index("Install-EmergencyRebootTask"), installer.index("Install-SupervisorTask"))
+
+    def test_emergency_reboot_xml_has_exported_schema_element_order_and_complete_settings(self):
+        reboot = SCRIPT[
+            SCRIPT.index("function Install-EmergencyRebootTask")
+            : SCRIPT.index("function Test-EmergencyRebootEligible")
+        ]
+
+        required_elements = (
+            "<RegistrationInfo>",
+            "<URI>\\PersonalServer-EmergencyReboot</URI>",
+            "<Description>Emergency reboot task for exhausted core recovery attempts.</Description>",
+            "<Principals>",
+            '<Principal id="SYSTEM">',
+            "<UserId>S-1-5-18</UserId>",
+            "<RunLevel>HighestAvailable</RunLevel>",
+            "<Settings>",
+            "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
+            "<DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>",
+            "<StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>",
+            "<AllowHardTerminate>true</AllowHardTerminate>",
+            "<StartWhenAvailable>false</StartWhenAvailable>",
+            "<RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>",
+            "<IdleSettings>",
+            "<StopOnIdleEnd>true</StopOnIdleEnd>",
+            "<RestartOnIdle>false</RestartOnIdle>",
+            "<AllowStartOnDemand>true</AllowStartOnDemand>",
+            "<Enabled>true</Enabled>",
+            "<Hidden>true</Hidden>",
+            "<RunOnlyIfIdle>false</RunOnlyIfIdle>",
+            "<WakeToRun>false</WakeToRun>",
+            "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>",
+            "<Priority>7</Priority>",
+            '<Actions Context="SYSTEM">',
+            "<Command>shutdown.exe</Command>",
+            "<Arguments>/r /f /t 60</Arguments>",
+        )
+        for element in required_elements:
+            self.assertIn(element, reboot)
+        self.assertNotIn("<Triggers>", reboot)
+        self.assertEqual(
+            [reboot.index(element) for element in required_elements],
+            sorted(reboot.index(element) for element in required_elements),
+        )
+
+    def test_emergency_reboot_schtasks_capture_preserves_native_error_output(self):
+        reboot = SCRIPT[
+            SCRIPT.index("function Install-EmergencyRebootTask")
+            : SCRIPT.index("function Test-EmergencyRebootEligible")
+        ]
+
+        self.assertIn('$previousErrorActionPreference = $ErrorActionPreference', reboot)
+        self.assertIn('$ErrorActionPreference = "Continue"', reboot)
+        self.assertIn('$createExitCode = $LASTEXITCODE', reboot)
+        self.assertIn('$ErrorActionPreference = $previousErrorActionPreference', reboot)
+        self.assertIn('exit code $createExitCode', reboot)
+        self.assertIn('$result.Trim()', reboot)
+
+    def test_emergency_request_save_failure_restores_declared_prior_memory_state(self):
+        request = SCRIPT[
+            SCRIPT.index("function Request-EmergencyReboot")
+            : SCRIPT.index("function Install-KeepAliveTask")
+        ]
+        save_failure = request[
+            request.index("if (-not (Save-RecoveryFailureState))")
+            : request.index("try {", request.index("if (-not (Save-RecoveryFailureState))"))
+        ]
+
+        self.assertLess(
+            request.index("$previousEmergencyRebootLastAt = $EmergencyRebootLastAt"),
+            request.index("$script:EmergencyRebootLastAt = (Get-Date)"),
+        )
+        self.assertLess(
+            request.index("$previousEmergencyRebootCauseComponent = $EmergencyRebootCauseComponent"),
+            request.index("$script:EmergencyRebootCauseComponent = $Component"),
+        )
+        self.assertIn("$script:EmergencyRebootLastAt = $previousEmergencyRebootLastAt", save_failure)
+        self.assertIn("$script:EmergencyRebootCauseComponent = $previousEmergencyRebootCauseComponent", save_failure)
+
+    def test_failed_emergency_task_start_keeps_persisted_audit_and_cooldown_evidence(self):
+        request = SCRIPT[
+            SCRIPT.index("function Request-EmergencyReboot")
+            : SCRIPT.index("function Install-KeepAliveTask")
+        ]
+
+        start_index = request.index("Start-ScheduledTask -TaskName $EmergencyRebootTaskName")
+        failed_start = request[request.index("catch {", start_index) :]
+        self.assertIn("Emergency reboot request was persisted but its scheduled task could not start.", failed_start)
+        self.assertNotIn("$script:EmergencyRebootLastAt = $previousEmergencyRebootLastAt", failed_start)
+        self.assertNotIn("$script:EmergencyRebootCauseComponent = $previousEmergencyRebootCauseComponent", failed_start)
+
+    def test_failed_target_action_escalates_only_after_final_core_health_check(self):
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle")
+            : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+
+        failed_action = cycle[cycle.index("if (-not $targetedRecoverySucceeded)") :]
+        self.assertIn("$finalHealth = Get-RecoveryHealth", failed_action)
+        self.assertIn('if ($finalHealth[$component] -ne "unhealthy")', failed_action)
+        self.assertLess(failed_action.index("$finalHealth = Get-RecoveryHealth"), failed_action.index("Test-EmergencyRebootEligible $component"))
+        self.assertLess(failed_action.index('if ($finalHealth[$component] -ne "unhealthy")'), failed_action.index("Test-EmergencyRebootEligible $component"))
+
+    def test_invalid_persisted_state_marks_recovery_dirty_before_any_recovery_save(self):
+        invalid_state = SCRIPT[
+            SCRIPT.index("function Set-RecoveryStateInvalid")
+            : SCRIPT.index("function Register-RecoveryFailure")
+        ]
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle")
+            : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+
+        self.assertIn('$script:EmergencyRebootCooldownStateValid = $false', invalid_state)
+        self.assertIn('$script:RecoveryStateDirty = $true', invalid_state)
+        self.assertIn("Set-RecoveryStateInvalid", invalid_state)
+        dirty_check = cycle.index("if ($RecoveryStateDirty) {", cycle.index("$health = Get-RecoveryHealth"))
+        self.assertLess(dirty_check, cycle.index("Register-RecoveryFailure $component"))
+
+    def test_legacy_recovery_state_without_emergency_reboot_schema_is_migrated(self):
+        loader = SCRIPT[
+            SCRIPT.index("function Load-RecoveryFailureState")
+            : SCRIPT.index("function Register-RecoveryFailure")
+        ]
+
+        self.assertIn('Properties["emergency_reboot"]', loader)
+        self.assertIn('$null -eq $storedEmergencyReboot', loader)
+        self.assertIn("Save-RecoveryFailureState", loader)
+        self.assertIn("Legacy recovery state is missing emergency reboot metadata; migrating.", loader)
+        self.assertIn('$null -eq $storedEmergencyReboot.Value', loader)
+        self.assertIn('$null -eq $storedLastReboot', loader)
+        self.assertIn('$null -eq $storedCauseComponent', loader)
+        self.assertIn("[string]::IsNullOrWhiteSpace", loader)
+        self.assertIn("Set-RecoveryStateInvalid", loader)
+
+    def test_existing_recovery_state_requires_complete_component_counter_schema_for_reboot(self):
+        loader = SCRIPT[
+            SCRIPT.index("function Load-RecoveryFailureState")
+            : SCRIPT.index("function Register-RecoveryFailure")
+        ]
+
+        self.assertIn("foreach ($component in $RecoveryComponents)", loader)
+        self.assertIn('$storedComponent.Value -isnot [PSCustomObject]', loader)
+        self.assertIn('$null -eq $storedFailureCount', loader)
+        self.assertIn('$null -eq $storedAttemptCount', loader)
+        self.assertIn('$failureCount -lt 0', loader)
+        self.assertIn('$attemptCount -lt 0', loader)
+
+    def test_corrupt_or_non_object_emergency_reboot_state_fails_closed_but_missing_file_remains_valid(self):
+        loader = SCRIPT[
+            SCRIPT.index("function Load-RecoveryFailureState")
+            : SCRIPT.index("function Register-RecoveryFailure")
+        ]
+
+        self.assertIn("if (-not (Test-Path -LiteralPath $RecoveryStatePath)) {\n        return", loader)
+        self.assertIn("$storedEmergencyReboot.Value -isnot [PSCustomObject]", loader)
+        self.assertIn("Set-RecoveryStateInvalid", loader)
+        catch_body = loader[loader.rindex("catch {") :]
+        self.assertIn("Set-RecoveryStateInvalid", catch_body)
+
+    def test_emergency_reboot_task_is_installed_and_failed_start_keeps_cooldown_state(self):
+        installer = SCRIPT[
+            SCRIPT.index("function Install-ScheduledTask")
+            : SCRIPT.index("\nLoad-RecoveryFailureState")
+        ]
+        request = SCRIPT[
+            SCRIPT.index("function Request-EmergencyReboot")
+            : SCRIPT.index("function Install-KeepAliveTask")
+        ]
+
+        self.assertIn("Install-EmergencyRebootTask", installer)
+        self.assertIn("Get-ScheduledTask -TaskName $EmergencyRebootTaskName -ErrorAction Stop", request)
+        self.assertIn("Start-ScheduledTask -TaskName $EmergencyRebootTaskName", request)
+        start_index = request.index("Start-ScheduledTask -TaskName $EmergencyRebootTaskName")
+        failed_start = request[request.index("catch {", start_index) :]
+        self.assertIn("Emergency reboot request was persisted but its scheduled task could not start.", failed_start)
+        self.assertNotIn("$previousEmergencyRebootLastAt", failed_start)
+
+    def test_core_targeted_recovery_rechecks_health_before_emergency_escalation(self):
+        targeted = SCRIPT[
+            SCRIPT.index("function Invoke-TargetedRecovery")
+            : SCRIPT.index("function Enter-RecoveryLock")
+        ]
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle")
+            : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+
+        self.assertGreaterEqual(targeted.count("Get-RecoveryHealth"), 2)
+        self.assertIn('$health.keepalive -eq "healthy"', targeted)
+        self.assertIn('$health.k3s -eq "healthy"', targeted)
+        self.assertIn("$attemptCount -ne $RecoveryMaxAttempts", SCRIPT)
+        self.assertLess(cycle.index("Invoke-TargetedRecovery $component"), cycle.index("Test-EmergencyRebootEligible $component"))
+        self.assertIn("if (Request-EmergencyReboot $component)", cycle)
+
+    def test_invalid_persisted_emergency_reboot_timestamp_blocks_reboot_without_erasing_it(self):
+        loader = SCRIPT[
+            SCRIPT.index("function Load-RecoveryFailureState")
+            : SCRIPT.index("function Register-RecoveryFailure")
+        ]
+        eligible = SCRIPT[
+            SCRIPT.index("function Test-EmergencyRebootEligible")
+            : SCRIPT.index("function Request-EmergencyReboot")
+        ]
+
+        self.assertIn('$script:EmergencyRebootLastAt = [string]$storedLastReboot.Value', loader)
+        self.assertIn("Set-RecoveryStateInvalid", loader)
+        self.assertIn("if (-not $EmergencyRebootCooldownStateValid)", eligible)
+        self.assertIn("persisted cooldown timestamp is invalid", eligible)
+
+    def test_emergency_reboot_is_limited_to_exhausted_keepalive_or_k3s_recovery(self):
+        reboot = SCRIPT[
+            SCRIPT.index("function Install-EmergencyRebootTask")
+            : SCRIPT.index("function Install-KeepAliveTask")
+        ]
+
+        self.assertIn('$EmergencyRebootTaskName = "PersonalServer-EmergencyReboot"', SCRIPT)
+        self.assertIn('$EmergencyRebootGraceSeconds = 1200', SCRIPT)
+        self.assertIn('$EmergencyRebootCooldownSeconds = 21600', SCRIPT)
+        self.assertIn('"keepalive", "k3s"', reboot)
+        self.assertNotIn('"tunnel", "portal", "nodeport"', reboot)
+        self.assertIn('shutdown.exe /r /f /t 60', reboot)
+        self.assertIn("<UserId>S-1-5-18</UserId>", reboot)
+        self.assertIn("<RunLevel>HighestAvailable</RunLevel>", reboot)
+
     def test_uses_schtasks_when_scheduled_task_cmdlets_are_unavailable(self):
         self.assertIn("schtasks.exe /Create", SCRIPT)
-        self.assertIn("/SC ONSTART", SCRIPT)
+        self.assertIn("<BootTrigger>", SCRIPT)
+        self.assertIn("/XML $temporaryTaskXml", SCRIPT)
         self.assertIn("/RP *", SCRIPT)
         self.assertIn("/F", SCRIPT)
-        self.assertIn("schtasks.exe /Query", SCRIPT)
+        self.assertNotIn("/SC ONSTART", SCRIPT)
+
+    def test_schtasks_warning_stderr_does_not_terminate_install_task(self):
+        installer = SCRIPT[
+            SCRIPT.index("function Install-SupervisorTask") : SCRIPT.index("function Install-ScheduledTask")
+        ]
+
+        self.assertIn('$ErrorActionPreference = "Continue"', installer)
+        self.assertIn("try {", installer)
+        self.assertIn("finally {", installer)
+        self.assertIn("$ErrorActionPreference = $previousErrorActionPreference", installer)
 
     def test_recovery_starts_the_car_care_worker_and_other_services(self):
         self.assertIn("docker-compose.yml", WSL_SCRIPT)
@@ -50,33 +641,79 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("bash scripts/windows-bootstrap.sh", SCRIPT)
         self.assertIn("Recovery check failed", SCRIPT)
 
-    def test_powershell_daemon_keeps_cloudflare_tunnel_in_wsl_process(self):
-        self.assertIn("Start-Process -FilePath 'wsl.exe'", SCRIPT)
-        self.assertIn("'cloudflared', 'tunnel', 'run'", SCRIPT)
+    def test_tunnel_recovery_controls_the_registered_wsl_user_service(self):
+        recovery = SCRIPT[
+            SCRIPT.index("function Test-CloudflareTunnelService") : SCRIPT.index("function Update-HostMetrics")
+        ]
+        self.assertIn('$WslServiceUser = "window"', SCRIPT)
+        self.assertIn('"bash", "-lc", "systemctl --user is-active --quiet \'$CloudflareTunnelService\'"', recovery)
+        self.assertIn('"bash", "-lc", "systemctl --user start \'$CloudflareTunnelService\'"', recovery)
+        self.assertNotIn("Start-Process -FilePath 'wsl.exe'", recovery)
+        self.assertNotIn("'cloudflared', 'tunnel', 'run'", recovery)
         self.assertNotIn("nohup cloudflared tunnel run", WSL_SCRIPT)
+
+    def test_tunnel_recovery_restarts_active_service_when_connection_process_is_missing(self):
+        recovery = SCRIPT[
+            SCRIPT.index("function Start-CloudflareTunnel") : SCRIPT.index("function Update-HostMetrics")
+        ]
+        self.assertIn("if (Test-CloudflareTunnelService) {", recovery)
+        self.assertIn("if (Test-CloudflareTunnelRunning) {", recovery)
+        self.assertIn('"bash", "-lc", "systemctl --user restart \'$CloudflareTunnelService\'"', recovery)
+        self.assertIn("return ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning))", recovery)
 
     def test_daemon_uses_three_minute_health_interval_and_two_failures_before_recovery(self):
         self.assertIn("$RecoveryIntervalSeconds = 180", SCRIPT)
         self.assertIn("$RecoveryFailureThreshold = 2", SCRIPT)
         self.assertIn("if ($failureCount -lt $RecoveryFailureThreshold)", SCRIPT)
 
-    def test_daemon_preserves_task_identity_while_enabling_restart_after_crash(self):
-        settings = SCRIPT[
-            SCRIPT.index("function Set-RecoveryTaskSettings") : SCRIPT.index("function Install-ScheduledTask")
+    def test_supervisor_is_registered_with_restart_settings_in_the_task_xml(self):
+        self.assertIn("function Install-SupervisorTask", SCRIPT)
+        supervisor_task = SCRIPT[
+            SCRIPT.index("function Install-SupervisorTask") : SCRIPT.index("function Install-ScheduledTask")
         ]
         installer = SCRIPT[
-            SCRIPT.index("function Install-ScheduledTask") : SCRIPT.index("\nLoad-RecoveryFailureState\n\nfunction Start-Daemon")
+            SCRIPT.index("function Install-ScheduledTask") : SCRIPT.index("\nLoad-RecoveryFailureState\n\nfunction Enter-SupervisorLock")
         ]
-        self.assertIn("Get-ScheduledTask -TaskName $TaskName", settings)
-        self.assertIn("$settings = $scheduledTask.Settings", settings)
-        self.assertIn('$settings.ExecutionTimeLimit = "PT0S"', settings)
-        self.assertIn("$settings.RestartCount = 3", settings)
-        self.assertIn('$settings.RestartInterval = "PT1M"', settings)
-        self.assertIn("Set-ScheduledTask -TaskName $TaskName -Settings $settings", settings)
-        self.assertNotIn("New-ScheduledTaskSettingsSet", settings)
-        self.assertIn("[void](Set-RecoveryTaskSettings)", installer)
-        daemon = SCRIPT[SCRIPT.index("function Start-Daemon") : SCRIPT.index("if ($InstallTask)")]
-        self.assertIn("[void](Set-RecoveryTaskSettings)", daemon)
+        self.assertIn('$temporaryTaskXml = Join-Path $env:TEMP "$TaskName.xml"', supervisor_task)
+        self.assertIn('$escapedRunAsUser = [System.Security.SecurityElement]::Escape($RunAsUser)', supervisor_task)
+        self.assertIn('$escapedScriptPath = [System.Security.SecurityElement]::Escape($ScriptPath)', supervisor_task)
+        self.assertIn('Set-Content -LiteralPath $temporaryTaskXml -Value $taskXml -Encoding unicode', supervisor_task)
+        self.assertIn('schtasks.exe /Create /TN $TaskName /XML $temporaryTaskXml /RU $RunAsUser /RP * /F', supervisor_task)
+        for token in (
+            "<BootTrigger>",
+            "<LogonType>Password</LogonType>",
+            "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>",
+            "<RestartOnFailure>",
+            "<Interval>PT1M</Interval>",
+            "<Count>3</Count>",
+            "<Command>powershell.exe</Command>",
+            "-Supervisor</Arguments>",
+            'Remove-Item -LiteralPath $temporaryTaskXml -Force -ErrorAction SilentlyContinue',
+        ):
+            self.assertIn(token, supervisor_task)
+        registration_call = next(
+            line
+            for line in supervisor_task.splitlines()
+            if "schtasks.exe /Create /TN $TaskName" in line
+        )
+        self.assertNotIn("|", registration_call)
+        self.assertNotIn("2>&1", registration_call)
+        self.assertNotIn("Out-", registration_call)
+        self.assertNotIn("/SC ONSTART", supervisor_task)
+        self.assertNotIn("/TR", supervisor_task)
+        self.assertNotIn("Set-ScheduledTask", supervisor_task)
+        self.assertNotIn("Set-RecoveryTaskSettings", installer)
+        supervisor = SCRIPT[SCRIPT.index("function Start-Supervisor") : SCRIPT.index("function Start-Daemon")]
+        self.assertNotIn("Set-RecoveryTaskSettings", supervisor)
+
+    def test_install_task_does_not_revalidate_credentials_after_task_registration(self):
+        installer = SCRIPT[
+            SCRIPT.index("function Install-ScheduledTask") : SCRIPT.index("\nLoad-RecoveryFailureState")
+        ]
+        self.assertIn("Install-SupervisorTask -RunAsUser $runAsUser", installer)
+        self.assertNotIn("Set-RecoveryTaskSettings", installer)
+        self.assertNotIn("Set-ScheduledTask", installer)
+        self.assertNotIn("Could not update scheduled task recovery settings after registration", installer)
 
     def test_daemon_runs_targeted_recovery_cycle_without_periodic_stack_recreation(self):
         """A daemon-loop stack bootstrap would recreate normal services every interval."""
@@ -84,18 +721,24 @@ class WindowsBootstrapTests(unittest.TestCase):
             SCRIPT.index("function Start-Daemon") : SCRIPT.index("if ($InstallTask)")
         ]
         daemon_loop = daemon[daemon.index("while ($true)") :]
-        self.assertEqual(daemon.count("Start-PersonalServerStack"), 1)
-        self.assertIn("Start-PersonalServerStack", daemon[: daemon.index("while ($true)")])
+        supervisor = SCRIPT[
+            SCRIPT.index("function Start-Supervisor") : SCRIPT.index("function Start-Daemon")
+        ]
+        self.assertEqual(daemon.count("Start-PersonalServerStack"), 0)
+        self.assertEqual(supervisor.count("Start-PersonalServerStack"), 1)
         self.assertIn("Invoke-RecoveryCycle", daemon_loop)
         self.assertIn("Start-Sleep -Seconds $RecoveryIntervalSeconds", daemon_loop)
         self.assertNotIn("Start-PersonalServerStack", daemon_loop)
 
-    def test_daemon_continues_targeted_recovery_after_initial_bootstrap_failure(self):
+    def test_daemon_continues_targeted_recovery_after_supervisor_bootstrap_failure(self):
         """An initial bootstrap exception must not prevent later targeted recovery cycles."""
+        supervisor = SCRIPT[
+            SCRIPT.index("function Start-Supervisor") : SCRIPT.index("function Start-Daemon")
+        ]
         daemon = SCRIPT[
             SCRIPT.index("function Start-Daemon") : SCRIPT.index("if ($InstallTask)")
         ]
-        startup = daemon[: daemon.index("while ($true)")]
+        startup = supervisor[: supervisor.index("while ($true)")]
         daemon_loop = daemon[daemon.index("while ($true)") :]
         self.assertIn("try {", startup)
         self.assertIn("Start-PersonalServerStack", startup)
@@ -105,7 +748,7 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertNotIn("Start-PersonalServerStack", daemon_loop)
 
     def test_targeted_recovery_does_not_recreate_compose_portal_writer(self):
-        recovery = SCRIPT[SCRIPT.index("function Invoke-TargetedRecovery") : SCRIPT.index("function Start-Daemon")]
+        recovery = SCRIPT[SCRIPT.index("function Invoke-TargetedRecovery") : SCRIPT.index("function Enter-RecoveryLock")]
         self.assertNotIn("Start-PersonalServerStack", recovery)
         self.assertNotIn("docker compose", recovery)
 
@@ -269,12 +912,111 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertLess(cycle.index("Register-RecoveryAttempt $component"), cycle.index("Invoke-TargetedRecovery $component"))
 
     def test_tunnel_probe_uses_timeout_runner_without_writing_process_command_line(self):
-        tunnel = SCRIPT[SCRIPT.index("function Test-CloudflareTunnelRunning") : SCRIPT.index("function Start-CloudflareTunnelProcess")]
+        tunnel = SCRIPT[SCRIPT.index("function Test-CloudflareTunnelRunning") : SCRIPT.index("function Test-CloudflareTunnelService")]
         health = SCRIPT[SCRIPT.index("function Get-RecoveryHealth") : SCRIPT.index("function Save-RecoveryFailureState")]
         expected_probe = "pgrep -af '[c]loudflared.*tunnel run' >/dev/null"
         self.assertIn("Invoke-WslWithTimeout", tunnel)
         self.assertIn(expected_probe, tunnel)
         self.assertIn("Test-CloudflareTunnelRunning", health)
+
+    def test_public_portal_health_probe_uses_a_bounded_wsl_curl_request(self):
+        """A missing or unbounded public probe cannot detect an active disconnected Tunnel."""
+        public_health = SCRIPT[
+            SCRIPT.index("function Test-CloudflareTunnelRunning")
+            : SCRIPT.index("function Get-RecoveryHealth")
+        ]
+
+        self.assertIn("function Test-PublicPortalHealth", public_health)
+        self.assertIn("Invoke-WslWithTimeout", public_health)
+        self.assertIn(
+            '"curl", "--silent", "--show-error", "--output", "/dev/null", "--write-out", "%{http_code}", "--max-time", "15", "https://len.pe.kr/health"',
+            public_health,
+        )
+        self.assertIn('$status -eq "200"', public_health)
+        self.assertNotIn('"--location"', public_health)
+        self.assertIn(' -Operation "Public Portal health probe"', public_health)
+
+    def test_tunnel_health_requires_nodeport_and_public_health_after_local_tunnel_checks(self):
+        """A healthy service/process alone must not hide a disconnected public Tunnel."""
+        health = SCRIPT[
+            SCRIPT.index("function Get-RecoveryHealth") : SCRIPT.index("function Save-RecoveryFailureState")
+        ]
+        nodeport_gate = 'if ($health.nodeport -eq "healthy") {'
+        tunnel_condition = (
+            'if ((Test-CloudflareTunnelService) -and (Test-CloudflareTunnelRunning) '
+            '-and $publicHealthPassed) {'
+        )
+
+        self.assertIn(nodeport_gate, health)
+        self.assertIn(tunnel_condition, health)
+        self.assertIn('$health.tunnel = "healthy"', health)
+        self.assertLess(health.index('$health.nodeport = "healthy"'), health.index(nodeport_gate))
+        self.assertLess(health.index(nodeport_gate), health.index(tunnel_condition))
+
+    def test_nodeport_failure_defers_tunnel_without_alert_or_recovery_action(self):
+        """A local NodePort fault must not consume the Tunnel alert or restart budget."""
+        health = SCRIPT[
+            SCRIPT.index("function Get-RecoveryHealth") : SCRIPT.index("function Save-RecoveryFailureState")
+        ]
+        notifier = SCRIPT[
+            SCRIPT.index("function Update-TunnelTelegramNotification")
+            : SCRIPT.index("function Test-CloudflareTunnelRunning")
+        ]
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle") : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+        nodeport_gate = 'if ($health.nodeport -eq "healthy") {'
+
+        self.assertIn('tunnel = "deferred"', health)
+        self.assertIn(nodeport_gate, health)
+        self.assertLess(health.index(nodeport_gate), health.index('$health.tunnel = "unhealthy"'))
+        self.assertIn('if ($TunnelHealth -eq "deferred") {', notifier)
+        self.assertLess(notifier.index('if ($TunnelHealth -eq "deferred") {'), notifier.index('if ($TunnelHealth -eq "healthy") {'))
+        self.assertLess(cycle.index('if ($health[$component] -eq "deferred")'), cycle.index("Register-RecoveryFailure $component"))
+        self.assertLess(cycle.index('if ($health[$component] -eq "deferred")'), cycle.index("Invoke-TargetedRecovery $component"))
+
+    def test_public_only_tunnel_failure_uses_existing_threshold_then_forces_restart(self):
+        """A disconnected public path must take the same bounded Tunnel restart path as a local failure."""
+        action_needed = SCRIPT[
+            SCRIPT.index("function Test-RecoveryActionNeeded") : SCRIPT.index("function Invoke-TargetedRecovery")
+        ]
+        targeted = SCRIPT[
+            SCRIPT.index("function Invoke-TargetedRecovery") : SCRIPT.index("function Enter-RecoveryLock")
+        ]
+        start_tunnel = SCRIPT[
+            SCRIPT.index("function Start-CloudflareTunnel") : SCRIPT.index("function Update-HostMetrics")
+        ]
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle") : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+
+        self.assertIn('"tunnel" {\n            return $true', action_needed)
+        self.assertIn('return (Start-CloudflareTunnel -ForceRestart)', targeted)
+        self.assertIn('function Start-CloudflareTunnel([switch]$ForceRestart)', start_tunnel)
+        self.assertIn('if (-not $ForceRestart) {', start_tunnel)
+        self.assertIn("Cloudflare Tunnel service restart", start_tunnel)
+        self.assertLess(cycle.index("Register-RecoveryFailure $component"), cycle.index("Test-RecoveryActionNeeded $component"))
+        self.assertLess(cycle.index("Test-RecoveryActionNeeded $component"), cycle.index("Register-RecoveryAttempt $component"))
+        self.assertIn("$RecoveryFailureThreshold = 2", SCRIPT)
+        self.assertIn("$RecoveryMaxAttempts = 3", SCRIPT)
+
+    def test_supervisor_continues_startup_when_initial_host_metrics_update_fails(self):
+        """Telemetry failure must not suppress boot delay, bootstrap, or Daemon supervision."""
+        supervisor = SCRIPT[
+            SCRIPT.index("function Start-Supervisor") : SCRIPT.index("function Enter-DaemonLock")
+        ]
+        metrics_isolation = (
+            'try {\n'
+            '            Update-HostMetrics\n'
+            '        } catch {\n'
+            '            Write-Info "Initial host metrics update failed; continuing startup."\n'
+            '        }'
+        )
+
+        self.assertIn(metrics_isolation, supervisor)
+        self.assertLess(supervisor.index(metrics_isolation), supervisor.index("Waiting 120 seconds for WSL and Docker after logon."))
+        self.assertLess(supervisor.index("Waiting 120 seconds for WSL and Docker after logon."), supervisor.index("Start-PersonalServerStack"))
+        self.assertLess(supervisor.index("Start-PersonalServerStack"), supervisor.index("Start-Process"))
 
     def test_bootstrap_suppresses_tunnel_recovery_boolean_result(self):
         startup = SCRIPT[SCRIPT.index("function Start-PersonalServerStack") : SCRIPT.index("function Get-RecoveryHealth")]

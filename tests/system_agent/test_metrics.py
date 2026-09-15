@@ -9,6 +9,89 @@ from tests._test_support import prepare_service_import
 
 
 class SystemAgentMetricsTests(unittest.TestCase):
+    def test_recovery_events_endpoint_returns_recent_allowlisted_records(self):
+        """A log's oldest entries and unapproved fields must not cross the bridge."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            events_path = root / "recovery-events.jsonl"
+            entries = [
+                {
+                    "timestamp": f"2026-09-11T00:{index:02d}:00+00:00",
+                    "component": f"component-{index}",
+                    "event": "recovery_dispatch",
+                    "status": "accepted",
+                    "action": "restart",
+                    "command": "must-not-leave-the-agent",
+                    "secret": "must-not-leave-the-agent",
+                }
+                for index in range(12)
+            ]
+            events_path.write_text(
+                "\n".join(json.dumps(entry) for entry in entries) + "\n",
+                encoding="utf-8",
+            )
+
+            original_data_root = os.environ.get("DATA_ROOT")
+            try:
+                os.environ["DATA_ROOT"] = str(root)
+                prepare_service_import("system-agent")
+                from app.main import app
+                from fastapi.testclient import TestClient
+
+                with TestClient(app) as client:
+                    response = client.get("/recovery-events")
+            finally:
+                if original_data_root is None:
+                    os.environ.pop("DATA_ROOT", None)
+                else:
+                    os.environ["DATA_ROOT"] = original_data_root
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            [
+                {
+                    "timestamp": f"2026-09-11T00:{index:02d}:00+00:00",
+                    "component": f"component-{index}",
+                    "event": "recovery_dispatch",
+                    "status": "accepted",
+                    "action": "restart",
+                }
+                for index in range(2, 12)
+            ],
+        )
+
+    def test_recovery_events_endpoint_returns_empty_list_for_absent_corrupt_or_unreadable_data(self):
+        """An unreadable recovery log is not an API error and must not leak its cause."""
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            events_path = root / "recovery-events.jsonl"
+            original_data_root = os.environ.get("DATA_ROOT")
+            try:
+                os.environ["DATA_ROOT"] = str(root)
+                prepare_service_import("system-agent")
+                from app.main import app
+                from fastapi.testclient import TestClient
+
+                with TestClient(app) as client:
+                    absent_response = client.get("/recovery-events")
+
+                    events_path.write_text("{not-json}\n", encoding="utf-8")
+                    corrupt_response = client.get("/recovery-events")
+
+                    events_path.unlink()
+                    events_path.mkdir()
+                    unreadable_response = client.get("/recovery-events")
+            finally:
+                if original_data_root is None:
+                    os.environ.pop("DATA_ROOT", None)
+                else:
+                    os.environ["DATA_ROOT"] = original_data_root
+
+        for response in (absent_response, corrupt_response, unreadable_response):
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), [])
+
     def test_demo_metrics_are_safe_and_ok(self):
         prepare_service_import("system-agent")
         from app.services.metrics import demo_metrics

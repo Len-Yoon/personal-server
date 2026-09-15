@@ -1,0 +1,10 @@
+[Unit]
+Description=Run personal server quarterly SRE audit
+
+[Timer]
+OnCalendar=*-01,04,07,10-01 03:30:00 Asia/Seoul
+Persistent=true
+Unit=personal-server-quarterly-sre-audit.service
+
+[Install]
+WantedBy=timers.target

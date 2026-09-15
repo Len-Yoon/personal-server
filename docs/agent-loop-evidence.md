@@ -125,3 +125,21 @@ CI artifact가 없거나 로그를 읽을 수 없는 경우 성공으로 처리�
 - 자동 분류 결과만으로 운영·보안·배포 영향이 확정되지 않는 변경은 담당자 검토 필요함.
 - 하네스 원본 입력·출력의 UTF-8 바이트 실측값과 25% 수용 목표 달성 여부는 확인 필요함.
 - 실제 토큰 절감률은 동일 조건의 측정 기록이 누적된 뒤 확정 필요함.
+
+## 7. 운영 적용 증적
+
+| 날짜/시간 | 범위 | 실패 유형 | 재시도 횟수 | 조치 | 잔여 위험 |
+|---|---|---|---:|---|---|
+| 2026-09-15 14:38 | 월간 SRE 통합 점검 N100 적용 | 성공 | 2 | `main` 병합 커밋 기준으로 N100 저장소를 fast-forward 동기화함. 최신 audit runner 이미지를 K3s에 반입하고 preflight·render·validation 수동 Job·월간 수동 Job·기존 SRE Telegram relay·격리 lab 정리·공개 health 3회 HTTP 200을 확인한 뒤 월간 CronJob을 활성화함 | 실제 모델 토큰 측정 기록은 수집하지 않아 토큰 절감률 확인 필요함 |
+
+### 7.1 재현 기준
+
+| 항목 | 결과 |
+|---|---|
+| 저장소 변경 | PR #200 병합, `main` 커밋 `d27cba8` |
+| CI | 정책·보안·서비스별 격리 테스트·K3s 계약·summary 통과 |
+| N100 수동 점검 | 종합·Portal health·백업 증적·격리 복구 단계 통과 |
+| 자동 실행 | `monthly-sre-audit` 활성화, 기존 분기·validation CronJob suspended 유지 |
+| 외부 health | 10초 간격 3회 모두 HTTP 200 |
+| 운영 문서 대조 | Portal 1/1 Ready, K3s SRE health audit 통과, 문서에 정의된 Compose 운영 서비스가 실행 중인 상태를 확인함 |
+| 제외 범위 | Secret 값, Portal PVC, Caddy, Cloudflare Tunnel ingress, Portal·Compose 서비스 변경 없음 |

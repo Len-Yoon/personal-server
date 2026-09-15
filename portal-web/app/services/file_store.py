@@ -16,7 +16,11 @@ PROJECT_DATA_ROOT = next(
 DEFAULT_STORAGE_PATH = PROJECT_DATA_ROOT / "files"
 STORAGE_PATH = Path(os.getenv("FILE_STORAGE_PATH", DEFAULT_STORAGE_PATH))
 CHUNK_SIZE = 1024 * 1024
-MAX_UPLOAD_BYTES = int(os.getenv("FILE_MAX_UPLOAD_MB", "50")) * CHUNK_SIZE
+MAX_UPLOAD_BYTES = int(os.getenv("FILE_MAX_UPLOAD_MB", "25")) * CHUNK_SIZE
+MAX_UPLOAD_FILES = int(os.getenv("FILE_MAX_UPLOAD_FILES", "10"))
+MAX_UPLOAD_TOTAL_BYTES = int(os.getenv("FILE_MAX_UPLOAD_TOTAL_MB", "30")) * CHUNK_SIZE
+MAX_DOWNLOAD_FILES = int(os.getenv("FILE_MAX_DOWNLOAD_FILES", "100"))
+MAX_DOWNLOAD_TOTAL_BYTES = int(os.getenv("FILE_MAX_DOWNLOAD_TOTAL_MB", "500")) * CHUNK_SIZE
 BLOCKED_EXTENSIONS = {
     extension.strip().lower().lstrip(".")
     for extension in os.getenv(
@@ -73,7 +77,7 @@ def get_directory(relative_path: str = "") -> dict[str, Any]:
     }
 
 
-def save_upload(relative_path: str, upload: Any) -> None:
+def save_upload(relative_path: str, upload: Any) -> int:
     ensure_storage()
     directory = _safe_path(relative_path)
     if not directory.is_dir():
@@ -104,20 +108,61 @@ def save_upload(relative_path: str, upload: Any) -> None:
             destination.unlink()
         raise
 
-    append_security_event(
-        "file_uploaded",
-        path=str(Path(relative_path) / filename),
-        size=size,
-        content_type=getattr(upload, "content_type", ""),
-    )
+    try:
+        append_security_event(
+            "file_uploaded",
+            path=str(Path(relative_path) / filename),
+            size=size,
+            content_type=getattr(upload, "content_type", ""),
+        )
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    return size
 
 
 def save_uploads(relative_path: str, uploads: list[Any]) -> int:
+    if len(uploads) > MAX_UPLOAD_FILES:
+        raise ValueError(f"한 번에 최대 {MAX_UPLOAD_FILES}개 파일만 업로드할 수 있습니다.")
+
     saved_count = 0
-    for upload in uploads:
-        save_upload(relative_path, upload)
-        saved_count += 1
+    total_size = 0
+    saved_paths: list[Path] = []
+    try:
+        for upload in uploads:
+            size = save_upload(relative_path, upload)
+            saved_count += 1
+            total_size += size
+            saved_paths.append(_safe_path(str(Path(relative_path) / _safe_name(upload.filename or ""))))
+            if total_size > MAX_UPLOAD_TOTAL_BYTES:
+                raise ValueError(
+                    f"일괄 업로드 파일의 합계는 {MAX_UPLOAD_TOTAL_BYTES // CHUNK_SIZE}MB 이하만 허용됩니다."
+                )
+    except Exception:
+        for saved_path in saved_paths:
+            saved_path.unlink(missing_ok=True)
+        raise
     return saved_count
+
+
+def validate_download_limits(relative_paths: list[str]) -> None:
+    file_count = 0
+    total_size = 0
+    for relative_path in relative_paths:
+        item_path = get_download_item_path(relative_path)
+        if item_path.is_dir():
+            children = (child for child in item_path.rglob("*") if child.is_file())
+        else:
+            children = (item_path,)
+        for child in children:
+            file_count += 1
+            total_size += child.stat().st_size
+            if file_count > MAX_DOWNLOAD_FILES:
+                raise ValueError(f"한 번에 최대 {MAX_DOWNLOAD_FILES}개 파일만 다운로드할 수 있습니다.")
+            if total_size > MAX_DOWNLOAD_TOTAL_BYTES:
+                raise ValueError(
+                    f"다운로드 원본 파일의 합계는 {MAX_DOWNLOAD_TOTAL_BYTES // CHUNK_SIZE}MB 이하만 허용됩니다."
+                )
 
 
 def create_directory(relative_path: str, name: str) -> None:

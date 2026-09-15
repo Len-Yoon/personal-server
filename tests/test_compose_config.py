@@ -1,9 +1,85 @@
+import json
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+EXPECTED_WORKFLOW_ACTIONS = {
+    "aquasecurity/trivy-action": ("57a97c7e7821a5776cebc9bb87c984fa69cba8f1", "v0.35.0"),
+    "actions/checkout": ("11d5960a326750d5838078e36cf38b85af677262", "v4"),
+    "actions/setup-python": ("a26af69be951a213d495a4c3e4e4022e16d87065", "v5"),
+    "actions/upload-artifact": ("ea165f8d65b6e75b540449e92b4886f43607fa02", "v4"),
+    "actions/download-artifact": ("d3f86a106a0bac45b974a628896c90dbdf5c8093", "v4"),
+    "actions/github-script": ("f28e40c7f34bde8b3046d885e986cb6290c5673b", "v7"),
+}
+EXPECTED_DOCKERFILE_BASE_IMAGES = {
+    "infra/k8s/backup-automation/Dockerfile": (
+        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+    ),
+    "infra/k8s/sre-audit-automation/Dockerfile": (
+        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+    ),
+    "book-memo/Dockerfile": (
+        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+    ),
+    "car-care-worker/Dockerfile": (
+        "python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea",
+    ),
+    "crawler-worker/Dockerfile": (
+        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+    ),
+    "homeops-executor/Dockerfile": (
+        "python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea",
+    ),
+    "portal-web/Dockerfile": (
+        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+    ),
+    "sre-telegram-relay/Dockerfile": (
+        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+    ),
+    "system-agent/Dockerfile": (
+        "python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea",
+    ),
+    "youtube-memo/Dockerfile": (
+        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+    ),
+}
+DOCKERFILE_DIGEST_TARGETS = frozenset(
+    {
+        "book-memo/Dockerfile",
+        "car-care-worker/Dockerfile",
+        "crawler-worker/Dockerfile",
+        "homeops-executor/Dockerfile",
+        "infra/k8s/backup-automation/Dockerfile",
+        "infra/k8s/sre-audit-automation/Dockerfile",
+        "portal-web/Dockerfile",
+        "sre-telegram-relay/Dockerfile",
+        "system-agent/Dockerfile",
+        "youtube-memo/Dockerfile",
+    }
+)
+DOCKERFILE_DIGEST_POLICY_EXCLUSIONS = frozenset({"caddy/Dockerfile"})
+DOCKERFILE_FROM_PATTERN = re.compile(
+    r"^FROM\s+(?P<image>\S+)(?:\s+AS\s+\S+)?\s*$", re.MULTILINE | re.IGNORECASE
+)
+PYTHON_SLIM_IMAGE_DIGEST_PATTERN = re.compile(
+    r"^python:\d+\.\d+-slim@sha256:[0-9a-f]{64}$"
+)
+PYTHON_SLIM_FROM_PATTERN = re.compile(
+    r"^FROM python:(?P<version>\d+\.\d+)-slim@sha256:[0-9a-f]{64}$",
+    re.MULTILINE,
+)
+USES_LINE_PATTERN = re.compile(r"^\s*(?:-\s+)?uses:\s*(?P<value>.*?)\s*$")
+NONCANONICAL_USES_KEY_PATTERN = re.compile(
+    r"^\s*(?:-\s+)?(?:[\"']uses[\"']\s*:.*|uses\s+:.*|\?\s*(?:uses|[\"']uses[\"'])(?:\s*:.*)?)$"
+)
+ONE_LINE_USES_SCALAR_PATTERN = re.compile(
+    r"(?P<quote>['\"]?)(?P<reference>[^\s#'\"]+)(?P=quote)"
+    r"\s*(?:#\s*(?P<version>v\d+(?:\.\d+){0,2}))?"
+)
 
 
 def _service_block(compose: str, service_name: str) -> str:
@@ -17,7 +93,81 @@ def _service_block(compose: str, service_name: str) -> str:
     return match.group("body")
 
 
+def _workflow_action_references(workflow_dir: Path) -> list[tuple[Path, str, str, str | None]]:
+    references = []
+    workflow_paths = sorted(
+        [*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")]
+    )
+    for workflow_path in workflow_paths:
+        for line_number, line in enumerate(
+            workflow_path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if NONCANONICAL_USES_KEY_PATTERN.fullmatch(line):
+                raise AssertionError(
+                    f"{workflow_path}:{line_number}: uses key must be the unquoted exact uses: key"
+                )
+
+            uses_line = USES_LINE_PATTERN.fullmatch(line)
+            if uses_line is None:
+                continue
+
+            value = uses_line.group("value")
+            if not value or value.startswith((">", "|", "&", "*", "{", "[", "!")):
+                raise AssertionError(
+                    f"{workflow_path}:{line_number}: uses must use a one-line scalar"
+                )
+
+            scalar = ONE_LINE_USES_SCALAR_PATTERN.fullmatch(value)
+            if scalar is None:
+                raise AssertionError(
+                    f"{workflow_path}:{line_number}: uses must use a one-line scalar"
+                )
+
+            reference = scalar.group("reference")
+            if reference.startswith("./"):
+                continue
+
+            action, separator, ref = reference.partition("@")
+            if not separator or not action or not ref:
+                raise AssertionError(
+                    f"{workflow_path}:{line_number}: external uses must include an action ref"
+                )
+            references.append((workflow_path, action, ref, scalar.group("version")))
+    return references
+
+
 class ComposeConfigTests(unittest.TestCase):
+    def test_pinned_dockerfile_base_images_exclude_caddy_by_policy(self):
+        """Fails if a governed Dockerfile is omitted or Caddy enters this supply-chain scope."""
+        dockerfile_paths = {
+            path.relative_to(ROOT).as_posix() for path in ROOT.rglob("Dockerfile")
+        }
+        self.assertEqual(DOCKERFILE_DIGEST_POLICY_EXCLUSIONS, {"caddy/Dockerfile"})
+        self.assertEqual(len(DOCKERFILE_DIGEST_TARGETS), 10)
+        self.assertIn("sre-telegram-relay/Dockerfile", DOCKERFILE_DIGEST_TARGETS)
+        self.assertEqual(set(EXPECTED_DOCKERFILE_BASE_IMAGES), DOCKERFILE_DIGEST_TARGETS)
+        self.assertEqual(
+            dockerfile_paths,
+            DOCKERFILE_DIGEST_TARGETS | DOCKERFILE_DIGEST_POLICY_EXCLUSIONS,
+        )
+
+        actual = {
+            relative_path: tuple(
+                match.group("image")
+                for match in DOCKERFILE_FROM_PATTERN.finditer(
+                    (ROOT / relative_path).read_text(encoding="utf-8")
+                )
+            )
+            for relative_path in DOCKERFILE_DIGEST_TARGETS
+        }
+
+        for relative_path, images in actual.items():
+            with self.subTest(dockerfile=relative_path):
+                self.assertEqual(len(images), 1)
+                self.assertRegex(images[0], PYTHON_SLIM_IMAGE_DIGEST_PATTERN)
+
+        self.assertEqual(actual, EXPECTED_DOCKERFILE_BASE_IMAGES)
+
     def test_compose_defines_isolated_car_care_worker(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         worker = _service_block(compose, "car-care-worker")
@@ -59,7 +209,8 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn("      - \"127.0.0.1:8015:8015\"", worker)
         self.assertIn("http://127.0.0.1:8015/health", worker)
 
-    def test_safe_n100_service_images_run_as_non_root(self):
+    def test_non_root_service_images_define_the_dedicated_runtime_identity(self):
+        """Fails if a DS-0002 target can fall back to a root runtime user."""
         for service in ("crawler-worker", "youtube-memo", "book-memo"):
             with self.subTest(service=service):
                 dockerfile = (ROOT / service / "Dockerfile").read_text(encoding="utf-8")
@@ -78,11 +229,78 @@ class ComposeConfigTests(unittest.TestCase):
                     "safe deployment's read-only app bind mount requires the nested log mountpoint",
                 )
 
-        executor = (ROOT / "homeops-executor" / "Dockerfile").read_text(encoding="utf-8")
-        self.assertNotIn("USER 10001:10001", executor)
+        for service in (
+            "car-care-worker",
+            "homeops-executor",
+            "portal-web",
+            "system-agent",
+        ):
+            with self.subTest(service=service):
+                dockerfile = (ROOT / service / "Dockerfile").read_text(encoding="utf-8")
+                self.assertIn("addgroup --system --gid 10001 app", dockerfile)
+                self.assertIn(
+                    "adduser --system --uid 10001 --ingroup app app", dockerfile
+                )
+                self.assertIn("COPY --chown=10001:10001", dockerfile)
+                self.assertIn("USER 10001:10001", dockerfile)
 
         car_care = (ROOT / "car-care-worker" / "Dockerfile").read_text(encoding="utf-8")
-        self.assertNotIn("USER 10001:10001", car_care)
+        self.assertIn("mkdir -p /data/car-care /data/oauth", car_care)
+        self.assertIn("chown -R 10001:10001 /data", car_care)
+
+    def test_caddy_uses_non_root_identity_with_only_bind_capability(self):
+        """Fails if Caddy needs root or gains a capability beyond low-port binding."""
+        dockerfile = (ROOT / "caddy" / "Dockerfile").read_text(encoding="utf-8")
+        compose = (ROOT / "docker-compose.n100.yml").read_text(encoding="utf-8")
+        caddy = _service_block(compose, "caddy")
+
+        self.assertRegex(dockerfile, r"addgroup\s+-S\s+-g\s+10001\s+app")
+        self.assertRegex(
+            dockerfile,
+            r"adduser\s+-S\s+-D\s+-H\s+-u\s+10001\s+-G\s+app\s+app",
+        )
+        self.assertIn("COPY --chown=10001:10001 Caddyfile /etc/caddy/Caddyfile", dockerfile)
+        self.assertIn("mkdir -p /data /config", dockerfile)
+        self.assertIn("chown -R 10001:10001 /data /config /etc/caddy", dockerfile)
+        self.assertIn("USER 10001:10001", dockerfile)
+        self.assertIn("cap_drop:\n      - ALL", caddy)
+        self.assertIn("cap_add:\n      - NET_BIND_SERVICE", caddy)
+        self.assertEqual(caddy.count("NET_BIND_SERVICE"), 1)
+        self.assertIn("      - caddy_data:/data", caddy)
+        self.assertIn("      - caddy_config:/config", caddy)
+        self.assertRegex(compose, r"\nvolumes:\n  caddy_data:\n  caddy_config:\n")
+
+    def test_docker_socket_proxy_remains_the_only_root_socket_consumer(self):
+        """Fails if non-root services regain Docker socket access or proxy loses its root exception."""
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        executor = _service_block(compose, "homeops-executor")
+        proxy = _service_block(compose, "docker-socket-proxy")
+
+        self.assertNotIn("/var/run/docker.sock", executor)
+        self.assertIn('user: "0:0"', proxy)
+        self.assertEqual(compose.count("/var/run/docker.sock:/var/run/docker.sock:ro"), 1)
+
+    def test_n100_docker_socket_proxy_keeps_nginx_temp_paths_on_existing_tmpfs(self):
+        """Fails when nginx falls back to its read-only cache directory at startup."""
+        compose = (ROOT / "docker-compose.n100.yml").read_text(encoding="utf-8")
+        proxy = _service_block(compose, "docker-socket-proxy")
+        nginx_config = (ROOT / "homeops-executor" / "docker-api-proxy-nginx.conf").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("read_only: true", proxy)
+        self.assertNotIn("/var/cache/nginx", proxy)
+        self.assertIn("/tmp:size=8m,mode=1777", proxy)
+        self.assertIn("cap_drop:\n      - ALL", proxy)
+        self.assertIn("no-new-privileges:true", proxy)
+        for directive in (
+            "client_body_temp_path /tmp/client_temp;",
+            "proxy_temp_path /tmp/proxy_temp;",
+            "fastcgi_temp_path /tmp/fastcgi_temp;",
+            "uwsgi_temp_path /tmp/uwsgi_temp;",
+            "scgi_temp_path /tmp/scgi_temp;",
+        ):
+            self.assertIn(directive, nginx_config)
 
     def test_agent_loop_documents_require_branch_cleanup_after_merge(self):
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
@@ -123,6 +341,105 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn("agent-review-scope", workflow)
         self.assertIn("policy_status", workflow)
 
+    def test_workflow_actions_use_approved_full_shas_and_version_comments(self):
+        actual_refs = {}
+
+        for workflow_path, action, ref, version in _workflow_action_references(
+            ROOT / ".github" / "workflows"
+        ):
+            expected_ref, expected_version = EXPECTED_WORKFLOW_ACTIONS.get(
+                action, (None, None)
+            )
+            self.assertIsNotNone(expected_ref, f"Unexpected action in {workflow_path}")
+            self.assertEqual(expected_ref, ref)
+            self.assertRegex(ref, r"^[0-9a-f]{40}$")
+            self.assertEqual(expected_version, version, f"Invalid version comment for {action}")
+            actual_refs.setdefault(action, set()).add(ref)
+
+        self.assertEqual(
+            {
+                action: {ref_version[0]}
+                for action, ref_version in EXPECTED_WORKFLOW_ACTIONS.items()
+            },
+            actual_refs,
+        )
+
+    def test_workflow_action_reference_extractor_covers_yaml_and_quoted_values(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workflow_path = Path(temporary_directory) / "quoted-action.yaml"
+            workflow_path.write_text(
+                "jobs:\n"
+                "  check:\n"
+                "    steps:\n"
+                "      - uses: \"actions/checkout@11d5960a326750d5838078e36cf38b85af677262\" # v4\n"
+                "      - uses: 'actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065' # v5\n"
+                "      - uses: \"./.github/actions/verify\"\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                [
+                    (
+                        workflow_path,
+                        "actions/checkout",
+                        "11d5960a326750d5838078e36cf38b85af677262",
+                        "v4",
+                    ),
+                    (
+                        workflow_path,
+                        "actions/setup-python",
+                        "a26af69be951a213d495a4c3e4e4022e16d87065",
+                        "v5",
+                    ),
+                ],
+                _workflow_action_references(Path(temporary_directory)),
+            )
+
+    def test_workflow_action_reference_extractor_rejects_non_scalar_uses_values(self):
+        invalid_uses_values = {
+            "block-scalar": "uses: >-\n        actions/checkout@v4\n",
+            "literal-scalar": "uses: |\n        actions/checkout@v4\n",
+            "anchor": "uses: &checkout actions/checkout@v4\n",
+            "alias": "uses: *checkout\n",
+            "mapping": "uses: { action: actions/checkout@v4 }\n",
+        }
+
+        for label, uses_value in invalid_uses_values.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary_directory:
+                workflow_path = Path(temporary_directory) / f"{label}.yaml"
+                workflow_path.write_text(
+                    "jobs:\n"
+                    "  check:\n"
+                    "    steps:\n"
+                    f"      - {uses_value}",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(AssertionError, "one-line scalar"):
+                    _workflow_action_references(Path(temporary_directory))
+
+    def test_workflow_action_reference_extractor_rejects_noncanonical_uses_keys(self):
+        invalid_uses_keys = {
+            "double-quoted-key": '"uses": actions/checkout@v4\n',
+            "single-quoted-key": "'uses': actions/checkout@v4\n",
+            "space-before-colon": "uses : actions/checkout@v4\n",
+            "explicit-key": "? uses\n        : actions/checkout@v4\n",
+        }
+
+        for label, uses_key in invalid_uses_keys.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary_directory:
+                workflow_path = Path(temporary_directory) / f"{label}.yaml"
+                workflow_path.write_text(
+                    "jobs:\n"
+                    "  check:\n"
+                    "    steps:\n"
+                    f"      - {uses_key}",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(AssertionError, "unquoted exact uses"):
+                    _workflow_action_references(Path(temporary_directory))
+
     def test_ci_collects_and_enforces_agent_loop_evidence(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
@@ -133,10 +450,12 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertNotIn("git diff --name-only", workflow)
         self.assertIn("--input-format git-name-status-z", workflow)
         self.assertIn("agent-loop-evidence", workflow)
-        self.assertIn("  summary:\n", workflow)
-        self.assertIn("needs: [scope, test]", workflow)
-        self.assertIn("  test:\n    needs: scope\n    if: always()", workflow)
-        self.assertIn("  summary:\n    needs: [scope, test]\n    if: always()", workflow)
+        self.assertIn("  matrix:\n    needs: scope\n    if: always()", workflow)
+        self.assertIn("python3 tests/run_service_tests.py --github-matrix", workflow)
+        self.assertIn("include: ${{ steps.generate.outputs.include }}", workflow)
+        self.assertIn("  test:\n    needs: [scope, matrix]\n    if: always()", workflow)
+        self.assertIn("matrix: ${{ fromJSON(needs.matrix.outputs.include) }}", workflow)
+        self.assertIn("  summary:\n    needs: [scope, matrix, test]\n    if: always()", workflow)
         self.assertIn("--test-result \"${{ needs.test.result }}\"", workflow)
         self.assertIn("--executed-checks", workflow)
         self.assertIn("portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance", workflow)
@@ -150,31 +469,33 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn('test "${{ steps.evidence.outputs.context_status }}" -eq 0', workflow)
         self.assertIn('test "${{ needs.test.result }}" = "success"', workflow)
 
-        expected_matrix_entries = {
-            "portal": "python3 -m unittest tests.test_file_access tests.test_portal_dashboard tests.test_portal_security tests.test_homeops tests.test_homeops_notifier",
-            "system-agent": "python3 -m unittest tests.system_agent.test_metrics",
-            "crawler-worker": "python3 -m unittest tests.crawler_worker.test_datetime_format tests.crawler_worker.test_investing_news_rss tests.crawler_worker.test_news_service tests.crawler_worker.test_news_routes tests.crawler_worker.test_rss_news",
-            "homeops-executor": "python3 -m unittest tests.homeops_executor.test_docker_ops",
-            "youtube-memo": "python3 -m unittest tests.youtube_memo.test_video_titles",
-            "book-memo": "python3 -m unittest tests.book_memo.test_book_service",
-            "car-care-worker": "python3 -m unittest discover -s tests/car_care_worker",
-            "k8s-contracts": "python3 -m unittest tests.test_k8s_monitoring_tools tests.test_k8s_monitoring_values tests.test_k8s_portal_availability_alert tests.test_k8s_portal_backup_verify tests.test_k8s_portal_cutover tests.test_k8s_portal_nodeport_connectivity_smoke tests.test_k8s_portal_pvc_backup_automation tests.test_k8s_portal_pvc_backup_verify tests.test_k8s_portal_secret_shadow_smoke tests.test_k8s_sre_health_audit tests.test_k8s_sre_pod_recovery_lab tests.test_k8s_sre_telegram_manifests tests.test_k8s_sre_telegram_tools tests.test_k8s_transition_runner_artifacts tests.test_k8s_transition_runner_install_tools tests.test_k8s_transition_runner_policy",
-            "maintenance": "python3 -m unittest tests.test_compose_config tests.test_documentation_index tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_public_uptime_monitor tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements",
-        }
-        for service_name, test_command in expected_matrix_entries.items():
-            self.assertIn(f"- name: {service_name}", workflow)
-            self.assertIn(f"test_command: {test_command}", workflow)
-        self.assertEqual(workflow.count("tests.test_documentation_index"), 1)
+        generated = json.loads(
+            subprocess.check_output(
+                ["python3", "tests/run_service_tests.py", "--github-matrix"],
+                cwd=ROOT,
+                text=True,
+            )
+        )
+        matrix = generated["include"]
+        self.assertEqual(len(matrix), 9)
+        self.assertEqual(
+            {entry["name"] for entry in matrix},
+            {
+                "portal", "system-agent", "crawler-worker", "homeops-executor",
+                "youtube-memo", "book-memo", "car-care-worker", "k8s-contracts",
+                "maintenance",
+            },
+        )
+        k8s_contracts = next(entry for entry in matrix if entry["name"] == "k8s-contracts")
+        self.assertIn("tests.test_monthly_recovery_drill", k8s_contracts["test_command"])
+        maintenance = next(entry for entry in matrix if entry["name"] == "maintenance")
+        self.assertIn("tests.test_documentation_index", maintenance["test_command"])
 
     def test_ci_has_dedicated_k8s_contract_check(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        self.assertIn("- name: k8s-contracts", workflow)
-        self.assertIn("Install K3s contract dependencies", workflow)
-        self.assertIn("test_command: python3 -m unittest tests.test_k8s_monitoring_tools", workflow)
-        self.assertIn("tests.test_k8s_sre_telegram_tools", workflow)
-        maintenance_start = workflow.index("- name: maintenance")
-        maintenance_end = workflow.index("\n    steps:")
-        self.assertNotIn("tests.test_k8s_", workflow[maintenance_start:maintenance_end])
+        self.assertIn("if: join(matrix.extra_packages, '') != ''", workflow)
+        self.assertIn("python3 -m pip install ${{ join(matrix.extra_packages, ' ') }}", workflow)
+        self.assertNotIn("Install K3s contract dependencies", workflow)
 
     def test_ci_matrix_matches_service_docker_python_versions(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
@@ -190,25 +511,23 @@ class ComposeConfigTests(unittest.TestCase):
         }
         expected_versions = {
             name: re.search(
-                r"^FROM python:(?P<version>\d+\.\d+)-slim$",
+                PYTHON_SLIM_FROM_PATTERN,
                 path.read_text(encoding="utf-8"),
-                re.MULTILINE,
             ).group("version")
             for name, path in dockerfiles.items()
         }
         expected_versions.update({"k8s-contracts": "3.11", "maintenance": "3.11"})
 
-        for name, expected_version in expected_versions.items():
-            entry = re.search(
-                rf"(?ms)^          - name: {re.escape(name)}\n(?P<body>.*?)(?=^          - name:|^\n    steps:)",
-                test_job,
+        generated = json.loads(
+            subprocess.check_output(
+                ["python3", "tests/run_service_tests.py", "--github-matrix"],
+                cwd=ROOT,
+                text=True,
             )
-            self.assertIsNotNone(entry, f"Missing CI matrix entry: {name}")
-            self.assertIn(
-                f'python_version: "{expected_version}"',
-                entry.group("body"),
-                f"CI Python version mismatch for {name}",
-            )
+        )
+        versions = {entry["name"]: entry["python_version"] for entry in generated["include"]}
+        self.assertEqual(versions, expected_versions)
+        self.assertNotIn("        include:", test_job)
 
         setup_python = re.search(
             r"(?ms)^      - name: Set up Python\n(?P<body>.*?)(?=^      - name:|^\n  summary:)",
@@ -223,11 +542,77 @@ class ComposeConfigTests(unittest.TestCase):
             self.assertIn("healthcheck:", compose)
             self.assertIn(f"127.0.0.1:{port}", compose)
 
-    def test_homeops_executor_is_internal_and_owns_docker_socket(self):
+    def test_n100_override_removes_service_code_mounts_and_reload(self):
+        development_compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        n100_compose = (ROOT / "docker-compose.n100.yml").read_text(encoding="utf-8")
+
+        expected_data_mounts = {
+            "portal-web": ("./data/files:/data/files", "./data/portal-web-state:/var/lib/portal"),
+            "crawler-worker": ("./data/crawler-worker:/data/crawler-worker", "./data/logs:/app/data/logs"),
+            "youtube-memo": ("./data/youtube-memo:/data/youtube-memo", "./data/logs:/app/data/logs"),
+            "book-memo": ("./data/book-memo:/data/book-memo", "./data/logs:/app/data/logs"),
+        }
+        for service, data_mounts in expected_data_mounts.items():
+            with self.subTest(service=service):
+                development_service = _service_block(development_compose, service)
+                n100_service = _service_block(n100_compose, service)
+
+                self.assertIn(f"./{service}:/app", development_service)
+                self.assertIn("volumes: !override", n100_service)
+                self.assertNotIn(f"./{service}:/app", n100_service)
+                self.assertNotIn("--reload", n100_service)
+                for mount in data_mounts:
+                    self.assertIn(mount, n100_service)
+
+    def test_homeops_executor_uses_restart_only_docker_api_proxy(self):
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-        self.assertIn("homeops-executor:", compose)
-        self.assertIn("/var/run/docker.sock:/var/run/docker.sock", compose)
-        self.assertNotIn("ports:\n      - \"8011:8011\"", compose)
+        executor = _service_block(compose, "homeops-executor")
+        proxy = _service_block(compose, "docker-socket-proxy")
+        proxy_config = (ROOT / "homeops-executor" / "docker-api-proxy.conf").read_text(
+            encoding="utf-8"
+        )
+        nginx_config = (ROOT / "homeops-executor" / "docker-api-proxy-nginx.conf").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn("/var/run/docker.sock", executor)
+        self.assertIn("HOMEOPS_DOCKER_HOST=tcp://docker-socket-proxy:2375", executor)
+        self.assertIn("condition: service_started", executor)
+        self.assertEqual(compose.count("/var/run/docker.sock:/var/run/docker.sock:ro"), 1)
+
+        self.assertIn("nginxinc/nginx-unprivileged:1.29-alpine@sha256:", proxy)
+        self.assertIn('user: "0:0"', proxy)
+        self.assertIn("docker-api-proxy-nginx.conf:/etc/nginx/nginx.conf:ro", proxy)
+        self.assertIn("docker-api-proxy.conf:/etc/nginx/conf.d/default.conf:ro", proxy)
+        self.assertIn("docker-api", executor)
+        self.assertIn("internal: true", compose)
+        self.assertNotIn("ports:", executor)
+        self.assertNotIn("ports:", proxy)
+
+        self.assertIn("location ~ ^/(?:v[0-9.]+/)?containers/[^/]+/restart$", proxy_config)
+        self.assertIn("limit_except POST", proxy_config)
+        self.assertIn("location ~ ^/(?:v[0-9.]+/)?containers/[^/]+/(?:json|logs|stats)$", proxy_config)
+        self.assertIn("limit_except GET", proxy_config)
+        self.assertIn("location /", proxy_config)
+        self.assertIn("return 403", proxy_config)
+        self.assertNotIn("/stop", proxy_config)
+        self.assertNotIn("/kill", proxy_config)
+        self.assertIn("user root", nginx_config)
+        self.assertIn("pid /tmp/nginx.pid", nginx_config)
+
+    def test_caddy_limits_file_upload_request_body_before_portal_parsing(self):
+        caddyfile = (ROOT / "caddy" / "Caddyfile").read_text(encoding="utf-8")
+
+        self.assertIn("(portal_file_upload_limit) {", caddyfile)
+        self.assertIn("@file_uploads path /files/uploads", caddyfile)
+        self.assertIn("request_body @file_uploads {", caddyfile)
+        self.assertIn("max_size 30MB", caddyfile)
+        for hostname in ("len.pe.kr", "portfolio.len.pe.kr", "file.len.pe.kr", "admin.len.pe.kr"):
+            with self.subTest(hostname=hostname):
+                self.assertIn(
+                    f"{hostname} {{\n    import common_tls\n    import portal_file_upload_limit",
+                    caddyfile,
+                )
 
     def test_caddy_waits_for_runtime_services_to_be_healthy(self):
         compose = (ROOT / "docker-compose.n100.yml").read_text(encoding="utf-8")

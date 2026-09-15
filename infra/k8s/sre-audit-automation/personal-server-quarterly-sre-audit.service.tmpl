@@ -1,0 +1,19 @@
+[Unit]
+Description=Personal Server quarterly SRE audit
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@REPO_ROOT@/infra/k8s/tools/quarterly-sre-audit-automation.sh --run
+WorkingDirectory=@REPO_ROOT@
+TimeoutStartSec=20min
+TimeoutStopSec=20s
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=@REPO_ROOT@
+ReadWritePaths=@STATE_DIR@
+# Existing restricted sudo -n k3s permission is required for the audit controller.
+
+[Install]
+WantedBy=default.target

@@ -55,6 +55,10 @@ class FileAccessTests(unittest.TestCase):
         "FILE_STORAGE_PATH",
         "AUTH_RATE_LIMIT_STATE_PATH",
         "SECURITY_LOG_PATH",
+        "FILE_MAX_UPLOAD_FILES",
+        "FILE_MAX_UPLOAD_TOTAL_MB",
+        "FILE_MAX_DOWNLOAD_FILES",
+        "FILE_MAX_DOWNLOAD_TOTAL_MB",
     )
 
     def setUp(self):
@@ -346,6 +350,159 @@ class FileAccessTests(unittest.TestCase):
         self.assertEqual(accepted.status_code, 303)
         self.assertTrue(same_origin_created)
         self.assertFalse(cross_origin_created)
+
+    def test_bulk_upload_rejects_too_many_files_without_saving_any(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ.pop("APP_ENV", None)
+            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
+            os.environ["FILE_MAX_UPLOAD_FILES"] = "1"
+            import app.main as main
+            from fastapi.testclient import TestClient
+
+            app = importlib.reload(main).app
+            with TestClient(app) as client:
+                response = client.post(
+                    "/files/uploads",
+                    files=[
+                        ("uploads", ("one.txt", b"1", "text/plain")),
+                        ("uploads", ("two.txt", b"2", "text/plain")),
+                    ],
+                    data={"path": ""},
+                    headers={"Origin": "http://testserver"},
+                )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertFalse((Path(tempdir) / "files").exists())
+
+    def test_bulk_upload_cleans_previous_files_when_total_limit_is_exceeded(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ.pop("APP_ENV", None)
+            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            storage_path = Path(tempdir) / "files"
+            os.environ["FILE_STORAGE_PATH"] = str(storage_path)
+            os.environ["FILE_MAX_UPLOAD_TOTAL_MB"] = "1"
+            import app.main as main
+            from fastapi.testclient import TestClient
+
+            app = importlib.reload(main).app
+            with TestClient(app) as client:
+                response = client.post(
+                    "/files/uploads",
+                    files=[
+                        ("uploads", ("one.txt", b"a" * (600 * 1024), "text/plain")),
+                        ("uploads", ("two.txt", b"b" * (500 * 1024), "text/plain")),
+                    ],
+                    data={"path": ""},
+                    headers={"Origin": "http://testserver"},
+                )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(list(storage_path.iterdir()), [])
+
+    def test_bulk_download_rejects_file_count_before_creating_archive(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ.pop("APP_ENV", None)
+            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            storage_path = Path(tempdir) / "files"
+            storage_path.mkdir()
+            (storage_path / "one.txt").write_text("1")
+            (storage_path / "two.txt").write_text("2")
+            os.environ["FILE_STORAGE_PATH"] = str(storage_path)
+            os.environ["FILE_MAX_DOWNLOAD_FILES"] = "1"
+            archives_before = set(Path(tempfile.gettempdir()).glob("file-vault-*.zip"))
+            import app.main as main
+            from fastapi.testclient import TestClient
+
+            app = importlib.reload(main).app
+            with TestClient(app) as client:
+                response = client.post(
+                    "/files/download-bulk",
+                    data={"paths": ["one.txt", "two.txt"]},
+                    headers={"Origin": "http://testserver"},
+                )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(set(Path(tempfile.gettempdir()).glob("file-vault-*.zip")), archives_before)
+
+    def test_bulk_download_rejects_original_total_size(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ.pop("APP_ENV", None)
+            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            storage_path = Path(tempdir) / "files"
+            storage_path.mkdir()
+            (storage_path / "large.txt").write_bytes(b"x" * (2 * 1024 * 1024))
+            os.environ["FILE_STORAGE_PATH"] = str(storage_path)
+            os.environ["FILE_MAX_DOWNLOAD_TOTAL_MB"] = "1"
+            import app.main as main
+            from fastapi.testclient import TestClient
+
+            app = importlib.reload(main).app
+            with TestClient(app) as client:
+                response = client.post(
+                    "/files/download-bulk",
+                    data={"paths": "large.txt"},
+                    headers={"Origin": "http://testserver"},
+                )
+
+            self.assertEqual(response.status_code, 400)
+
+    def test_upload_removes_file_when_security_event_recording_fails(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
+            import app.services.file_store as file_store
+
+            class _Upload:
+                filename = "event-failure.txt"
+                content_type = "text/plain"
+
+                class _File:
+                    _read = False
+
+                    def read(self, size):
+                        if self._read:
+                            return b""
+                        self._read = True
+                        return b"content"
+
+                file = _File()
+
+            with patch.object(file_store, "append_security_event", side_effect=OSError("log unavailable")):
+                with self.assertRaises(OSError):
+                    file_store.save_upload("", _Upload())
+
+            self.assertFalse((Path(tempdir) / "files" / "event-failure.txt").exists())
+
+    def test_bulk_download_removes_archive_when_zip_creation_fails(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ.pop("APP_ENV", None)
+            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            storage_path = Path(tempdir) / "files"
+            storage_path.mkdir()
+            (storage_path / "one.txt").write_text("1")
+            os.environ["FILE_STORAGE_PATH"] = str(storage_path)
+            archives_before = set(Path(tempfile.gettempdir()).glob("file-vault-*.zip"))
+            import app.main as main
+            import app.routers.files as files_router
+            from fastapi.testclient import TestClient
+
+            app = importlib.reload(main).app
+            with TestClient(app) as client:
+                with patch.object(files_router.zipfile, "ZipFile", side_effect=OSError("disk full")):
+                    response = client.post(
+                        "/files/download-bulk",
+                        data={"paths": "one.txt"},
+                        headers={"Origin": "http://testserver"},
+                    )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(set(Path(tempfile.gettempdir()).glob("file-vault-*.zip")), archives_before)
 
 
 if __name__ == "__main__":

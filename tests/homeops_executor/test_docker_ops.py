@@ -1,5 +1,9 @@
+import os
+import sys
 import unittest
 from unittest.mock import patch
+
+from tests._test_support import prepare_service_import
 
 
 class FakeContainer:
@@ -53,6 +57,41 @@ class FakeDockerClient:
 
 
 class DockerOpsTests(unittest.TestCase):
+    def test_docker_client_uses_restricted_socket_proxy_endpoint(self):
+        prepare_service_import("homeops-executor")
+        from app.services import docker_ops
+
+        created_clients = []
+
+        class DockerClient:
+            def __init__(self, *, base_url: str):
+                self.base_url = base_url
+                created_clients.append(self)
+
+        def from_env():
+            raise AssertionError("raw Docker environment discovery must not be used")
+
+        DockerModule = type(
+            "DockerModule",
+            (),
+            {
+                "DockerClient": DockerClient,
+                "from_env": staticmethod(from_env),
+            },
+        )
+
+        with patch.dict(sys.modules, {"docker": DockerModule}):
+            with patch.dict(
+                os.environ,
+                {"HOMEOPS_DOCKER_HOST": "tcp://docker-socket-proxy:2375"},
+                clear=False,
+            ):
+                result = docker_ops._docker_client()
+
+        self.assertEqual(len(created_clients), 1)
+        self.assertIs(result, created_clients[0])
+        self.assertEqual(result.base_url, "tcp://docker-socket-proxy:2375")
+
     def test_all_diagnostics_returns_allowlist_in_name_order(self):
         from app.services import docker_ops
 
@@ -265,7 +304,7 @@ class DockerOpsTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), diagnostics)
 
-    def test_executor_accepts_admin_password_as_internal_secret_fallback(self):
+    def test_executor_rejects_admin_password_when_shared_secret_is_missing(self):
         from fastapi.testclient import TestClient
         from app.main import app
 
@@ -275,14 +314,18 @@ class DockerOpsTests(unittest.TestCase):
             {"HOMEOPS_EXECUTOR_SHARED_SECRET": "", "ADMIN_STATUS_PASSWORD": "admin-secret"},
             clear=False,
         ):
-            with patch("app.main.docker_ops.collect_all_diagnostics", return_value=diagnostics):
+            with patch(
+                "app.main.docker_ops.collect_all_diagnostics",
+                return_value=diagnostics,
+            ) as collect_all_diagnostics:
                 response = TestClient(app).get(
                     "/v1/diagnostics",
                     headers={"X-HomeOps-Executor-Secret": "admin-secret"},
                 )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), diagnostics)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json(), {"detail": "executor_access_denied"})
+        collect_all_diagnostics.assert_not_called()
 
     def test_executor_rejects_restart_all_without_shared_secret(self):
         from fastapi.testclient import TestClient

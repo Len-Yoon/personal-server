@@ -1,0 +1,458 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sre-recovery-lab
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sre-pod-recovery
+  namespace: sre-recovery-lab
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sre-pod-recovery
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sre-pod-recovery
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: recovery
+          image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+          command:
+            - sh
+            - -c
+            - |
+              touch /tmp/healthy || exit 1
+              while true; do
+                if [ ! -f /tmp/recovery-fault-injected ] &&
+                   [ "$(cat /var/run/recovery-trigger/trigger)" = true ]; then
+                  touch /tmp/recovery-fault-injected && rm -f /tmp/healthy || exit 1
+                fi
+                sleep 1
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: recovery-tmp
+              mountPath: /tmp
+            - name: recovery-trigger
+              mountPath: /var/run/recovery-trigger
+              readOnly: true
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "test -f /tmp/healthy"]
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            failureThreshold: 1
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "test -f /tmp/healthy"]
+            initialDelaySeconds: 1
+            periodSeconds: 2
+      volumes:
+        - name: recovery-tmp
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: recovery-trigger
+          configMap:
+            name: sre-pod-recovery-trigger
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sre-pod-recovery-trigger
+  namespace: sre-recovery-lab
+data:
+  trigger: "false"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: quarterly-sre-audit
+  namespace: monitoring
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: quarterly-sre-audit-validation
+  namespace: monitoring
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sre-quarterly-audit-diagnostics
+  namespace: monitoring
+data:
+  run_id: ""
+  result: ""
+  failure_stage: ""
+  cleanup_status: ""
+  completed_at: ""
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: quarterly-sre-audit-status
+  namespace: monitoring
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [sre-telegram-quarterly-audit-status]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: quarterly-sre-audit-status
+  namespace: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: quarterly-sre-audit-status
+subjects:
+  - kind: ServiceAccount
+    name: quarterly-sre-audit
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: quarterly-sre-audit-validation-diagnostics
+  namespace: monitoring
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [sre-quarterly-audit-diagnostics]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: quarterly-sre-audit-validation-diagnostics
+  namespace: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: quarterly-sre-audit-validation-diagnostics
+subjects:
+  - kind: ServiceAccount
+    name: quarterly-sre-audit-validation
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: quarterly-sre-audit-read
+  namespace: personal-server
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [portal-pvc-backup-evidence]
+    verbs: [get]
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [portal-web]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: quarterly-sre-audit-read
+  namespace: personal-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: quarterly-sre-audit-read
+subjects:
+  - kind: ServiceAccount
+    name: quarterly-sre-audit
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: quarterly-sre-audit-validation-read
+  namespace: personal-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: quarterly-sre-audit-read
+subjects:
+  - kind: ServiceAccount
+    name: quarterly-sre-audit-validation
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: quarterly-sre-audit-recovery-lab
+  namespace: sre-recovery-lab
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [sre-pod-recovery]
+    verbs: [get]
+  - apiGroups: [apps]
+    resources: [deployments/scale]
+    resourceNames: [sre-pod-recovery]
+    verbs: [get, patch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [sre-pod-recovery-trigger]
+    verbs: [get, patch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: quarterly-sre-audit-recovery-lab
+  namespace: sre-recovery-lab
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: quarterly-sre-audit-recovery-lab
+subjects:
+  - kind: ServiceAccount
+    name: quarterly-sre-audit
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: quarterly-sre-audit-validation-recovery-lab
+  namespace: sre-recovery-lab
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: quarterly-sre-audit-recovery-lab
+subjects:
+  - kind: ServiceAccount
+    name: quarterly-sre-audit-validation
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: quarterly-sre-audit-nodes
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: quarterly-sre-audit-nodes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: quarterly-sre-audit-nodes
+subjects:
+  - kind: ServiceAccount
+    name: quarterly-sre-audit
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: quarterly-sre-audit-validation-nodes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: quarterly-sre-audit-nodes
+subjects:
+  - kind: ServiceAccount
+    name: quarterly-sre-audit-validation
+    namespace: monitoring
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: monthly-sre-audit
+  namespace: monitoring
+spec:
+  schedule: "30 3 1 * *"
+  timeZone: Asia/Seoul
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 1200
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          serviceAccountName: quarterly-sre-audit
+          restartPolicy: Never
+          automountServiceAccountToken: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: audit
+              image: personal-server-quarterly-sre-audit:task1
+              imagePullPolicy: Never
+              securityContext:
+                runAsNonRoot: true
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 250m
+                  memory: 256Mi
+              volumeMounts:
+                - name: temporary
+                  mountPath: /tmp
+          volumes:
+            - name: temporary
+              emptyDir:
+                sizeLimit: 16Mi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: quarterly-sre-audit
+  namespace: monitoring
+spec:
+  schedule: "30 3 1 1,4,7,10 *"
+  timeZone: Asia/Seoul
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 1200
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          serviceAccountName: quarterly-sre-audit
+          restartPolicy: Never
+          automountServiceAccountToken: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: audit
+              image: personal-server-quarterly-sre-audit:task1
+              imagePullPolicy: Never
+              securityContext:
+                runAsNonRoot: true
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 250m
+                  memory: 256Mi
+              volumeMounts:
+                - name: temporary
+                  mountPath: /tmp
+          volumes:
+            - name: temporary
+              emptyDir:
+                sizeLimit: 16Mi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: quarterly-sre-audit-validation
+  namespace: monitoring
+spec:
+  schedule: "30 3 1 1,4,7,10 *"
+  timeZone: Asia/Seoul
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 1200
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          serviceAccountName: quarterly-sre-audit-validation
+          restartPolicy: Never
+          automountServiceAccountToken: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: audit
+              image: personal-server-quarterly-sre-audit:task1
+              imagePullPolicy: Never
+              env:
+                - name: QUARTERLY_SRE_AUDIT_REPORT_MODE
+                  value: validation
+                - name: QUARTERLY_SRE_AUDIT_DIAGNOSTICS_CONFIGMAP
+                  value: sre-quarterly-audit-diagnostics
+              securityContext:
+                runAsNonRoot: true
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 250m
+                  memory: 256Mi
+              volumeMounts:
+                - name: temporary
+                  mountPath: /tmp
+          volumes:
+            - name: temporary
+              emptyDir:
+                sizeLimit: 16Mi

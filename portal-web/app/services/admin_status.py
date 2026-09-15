@@ -39,6 +39,25 @@ def format_operation_history_for_display(history: list[dict[str, Any]]) -> list[
     ]
 
 
+def format_recovery_events_for_display(events: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Keep the bridge's five permitted fields and convert timestamps for the UI."""
+    fields = ("timestamp", "component", "event", "status", "action")
+    formatted: list[dict[str, str]] = []
+    for event in events[:10]:
+        if not isinstance(event, dict) or not all(isinstance(event.get(field), str) for field in fields):
+            continue
+        formatted.append(
+            {
+                "timestamp": format_status_checked_at(event["timestamp"]),
+                "component": event["component"],
+                "event": event["event"],
+                "status": event["status"],
+                "action": event["action"],
+            }
+        )
+    return formatted
+
+
 def build_admin_status_context(
     system_status: dict[str, Any],
     service_health: list[dict[str, Any]],

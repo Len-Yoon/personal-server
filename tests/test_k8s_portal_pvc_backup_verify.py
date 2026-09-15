@@ -1,3 +1,4 @@
+import json
 import os
 import signal
 import subprocess
@@ -5,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,7 +14,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", fail_at="", missing_pvc=False, repeat=False, second_runtime=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False):
+    def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", remote_error="", remote_timeout_attempts=0, rclone_timeout=None, rclone_retry_count=None, rclone_retry_backoff=None, missing_pvc=False, repeat=False, second_runtime=None, second_evidence_remaining=None, second_evidence_age=None, second_fail_at=None, refresh_window=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", readiness_timeout=None, assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -30,10 +32,44 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
             (root / "recipient.txt").write_text("recipient\n", encoding="utf-8")
             (root / "identity.txt").write_text("identity\n", encoding="utf-8")
             marker = root / "runtime.mode"
-            marker.write_text(runtime + "\n", encoding="utf-8")
+            if runtime_marker_present:
+                marker.write_text(runtime + "\n", encoding="utf-8")
             if existing_evidence:
                 evidence.write_text(existing_evidence, encoding="utf-8")
             self.write_fakes(bin_dir, root, calls, manifest, files, state, remote)
+            kubectl = bin_dir / "kubectl"
+            kubectl.write_text(
+                f'''#!/bin/sh
+set -eu
+printf '%s\\n' "kubectl $*" >> '{calls}'
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = scale ]; then
+  case "$*" in *'scale deployment/portal-web --replicas=0'*) exit 42 ;; esac
+fi
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = availability-command ]; then
+  case "$*" in *'get deployment portal-web -o jsonpath={{.status.availableReplicas}}'*) exit 42 ;; esac
+fi
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = availability-timeout ]; then
+  case "$*" in *'get deployment portal-web -o jsonpath={{.status.availableReplicas}}'*) exit 124 ;; esac
+fi
+if [ "${{PORTAL_FAKE_MISSING_PVC:-}}" = 1 ]; then
+  case "$*" in *'get pvc/'*) exit 42 ;; esac
+fi
+case "$*" in
+  *'get deployment portal-web -o jsonpath={{.spec.replicas}}') printf '%s\\n' '1'; exit 0 ;;
+  *'get pvc/portal-web-files-dynamic -o jsonpath={{.status.phase}}') printf '%s\\n' 'Bound'; exit 0 ;;
+  *'get pvc/portal-web-state-dynamic -o jsonpath={{.status.phase}}') printf '%s\\n' 'Bound'; exit 0 ;;
+  *'get deployment portal-web -o jsonpath={{.status.availableReplicas}}')
+    if grep -Fq 'scale deployment/portal-web --replicas=1' '{calls}'; then printf '%s\\n' '1'; else printf '%s\\n' '0'; fi
+    exit 0 ;;
+  *'scale deployment/portal-web --replicas=0') exit 0 ;;
+  *'scale deployment/portal-web --replicas=1') exit 0 ;;
+  *'get nodes --no-headers') printf '%s\\n' 'node-1 Ready'; exit 0 ;;
+esac
+exit 0
+''',
+                encoding="utf-8",
+            )
+            kubectl.chmod(0o755)
             env = {
                 **os.environ,
                 "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
@@ -45,6 +81,9 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
                 "PORTAL_AGE_IDENTITY": str(root / "identity.txt"),
                 "PORTAL_BACKUP_REMOTE": f"fake:{remote}",
                 "PORTAL_FAKE_FAIL_AT": fail_at,
+                "PORTAL_FAKE_REMOTE_ERROR": remote_error,
+                "PORTAL_FAKE_REMOTE_TIMEOUT_ATTEMPTS": str(remote_timeout_attempts),
+                "PORTAL_FAKE_REMOTE_LSD_COUNT_FILE": str(root / "remote-lsd-count"),
                 "PORTAL_FAKE_MISSING_PVC": "1" if missing_pvc else "",
                 "PORTAL_FAKE_SPECIAL_ENTRY": "1" if special_entry else "",
                 "PORTAL_FAKE_HOLD": "1" if send_signal and signal_when == "reader" else "",
@@ -61,7 +100,20 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
                 "PORTAL_RCLONE_CONFIG_FILE": rclone_config_file,
                 "PORTAL_RCLONE_PASSWORD_COMMAND": rclone_password_command,
                 "PORTAL_FAKE_ASSERT_LOCK_FD_CLOSED": "1" if assert_lock_fd_closed else "",
+                "PORTAL_BACKUP_EXECUTION_MODE": execution_mode,
+                "PORTAL_BACKUP_FILES_MOUNT": str(files) if execution_mode == "in-cluster" else "/data/files",
+                "PORTAL_BACKUP_STATE_MOUNT": str(state) if execution_mode == "in-cluster" else "/data/portal-web-state",
             }
+            if readiness_timeout is not None:
+                env["PORTAL_READINESS_TIMEOUT_SECONDS"] = str(readiness_timeout)
+            if refresh_window is not None:
+                env["PORTAL_BACKUP_EVIDENCE_REFRESH_WINDOW_SECONDS"] = str(refresh_window)
+            if rclone_timeout is not None:
+                env["PORTAL_RCLONE_TIMEOUT_SECONDS"] = str(rclone_timeout)
+            if rclone_retry_count is not None:
+                env["PORTAL_RCLONE_PREFLIGHT_RETRY_COUNT"] = str(rclone_retry_count)
+            if rclone_retry_backoff is not None:
+                env["PORTAL_RCLONE_PREFLIGHT_RETRY_BACKOFF_SECONDS"] = str(rclone_retry_backoff)
             if namespace is not None:
                 env["PORTAL_NAMESPACE"] = namespace
             if send_signal:
@@ -92,6 +144,18 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
             else:
                 result = subprocess.run(["bash", str(SCRIPT), mode], env=env, capture_output=True, text=True)
             if repeat:
+                self.assertEqual(result.returncode, 0, result.stderr)
+                if second_evidence_remaining is not None or second_evidence_age is not None:
+                    values = dict(line.split("=", 1) for line in evidence.read_text(encoding="utf-8").splitlines())
+                    now = datetime.now(timezone.utc)
+                    if second_evidence_remaining is not None:
+                        values["evidence_expires_at"] = (now + timedelta(seconds=second_evidence_remaining)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    if second_evidence_age is not None:
+                        for key in ("backup_completed_at", "restore_verified_at"):
+                            values[key] = (now - timedelta(seconds=second_evidence_age)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    evidence.write_text("".join(f"{key}={value}\n" for key, value in values.items()), encoding="utf-8")
+                if second_fail_at is not None:
+                    env["PORTAL_FAKE_FAIL_AT"] = second_fail_at
                 if second_runtime is not None and evidence.exists():
                     evidence.write_text(
                         evidence.read_text(encoding="utf-8").replace(
@@ -124,7 +188,7 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
 
         write(
             "sudo",
-            "#!/bin/sh\nif [ \"${1:-}\" = -n ]; then shift; fi\nif [ \"${1:-}\" = -v ]; then exit 0; fi\nexec \"$@\"\n",
+            f"#!/bin/sh\nprintf '%s\\n' \"sudo $*\" >> '{calls}'\nif [ \"${{1:-}}\" = -n ]; then shift; fi\nif [ \"${{1:-}}\" = -v ]; then exit 0; fi\nexec \"$@\"\n",
         )
         write("flock", "#!/bin/sh\nif [ \"${PORTAL_FAKE_LOCK_BUSY:-}\" = 1 ]; then exit 1; fi\nexit 0\n")
         write(
@@ -136,8 +200,11 @@ shift
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = reader ]; then
   case "$*" in *'wait --for=condition=Ready'*) exit 42 ;; esac
 fi
-if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = rollout ]; then
-  case "$*" in *'rollout status deployment/portal-web'*) exit 42 ;; esac
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = availability-command ]; then
+  case "$*" in *'get deployment portal-web -o jsonpath={{.status.availableReplicas}}'*) exit 42 ;; esac
+fi
+if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = availability-timeout ]; then
+  case "$*" in *'get deployment portal-web -o jsonpath={{.status.availableReplicas}}'*) exit 124 ;; esac
 fi
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = health ]; then
   case "$*" in *'exec portal-web-1'*) exit 42 ;; esac
@@ -163,6 +230,9 @@ if [ "${{PORTAL_FAKE_MISSING_PVC:-}}" = 1 ]; then
 fi
 case "$*" in
   'get nodes --no-headers') printf '%s\\n' 'node-1 Ready'; exit 0 ;;
+  *'get deployment portal-web -o jsonpath={{.status.availableReplicas}}')
+    if grep -Fq 'scale deployment/portal-web --replicas=1' '{calls}'; then printf '%s\\n' '1'; else printf '%s\\n' '0'; fi
+    exit 0 ;;
   *'get deployment portal-web -o jsonpath={{.spec.replicas}}') printf '%s\\n' '1'; exit 0 ;;
   *'get pvc/portal-web-files-dynamic -o jsonpath={{.status.phase}}') printf '%s\\n' 'Bound'; exit 0 ;;
   *'get pvc/portal-web-state-dynamic -o jsonpath={{.status.phase}}') printf '%s\\n' 'Bound'; exit 0 ;;
@@ -177,7 +247,6 @@ case "$*" in
     cat > '{manifest}'
     if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = create ] && grep -Fq 'kind: Pod' '{manifest}'; then exit 42; fi
     exit 0 ;;
-  *'rollout status deployment/portal-web'*) exit 0 ;;
   *'get pod -l app.kubernetes.io/name=portal-web'*) printf '%s\\n' portal-web-1; exit 0 ;;
   *'exec portal-web-1'*)
     case "$*" in
@@ -237,8 +306,19 @@ while [ "$#" -gt 0 ]; do
 done
 operation=$1
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = remote ] && [ "$operation" = lsd ]; then
-  printf '%s\\n' 'fake-remote-secret /private/noisy/path' >&2
+  printf '%s\\n' "${{PORTAL_FAKE_REMOTE_ERROR:-fake-remote-secret /private/noisy/path}}" >&2
   exit 42
+fi
+if [ "$operation" = lsd ]; then
+  count=0
+  if [ -f "${{PORTAL_FAKE_REMOTE_LSD_COUNT_FILE}}" ]; then
+    count=$(cat "${{PORTAL_FAKE_REMOTE_LSD_COUNT_FILE}}")
+  fi
+  count=$((count + 1))
+  printf '%s\\n' "$count" > "${{PORTAL_FAKE_REMOTE_LSD_COUNT_FILE}}"
+  if [ "$count" -le "${{PORTAL_FAKE_REMOTE_TIMEOUT_ATTEMPTS:-0}}" ]; then
+    exit 124
+  fi
 fi
 if [ "${{PORTAL_FAKE_ASSERT_LOCK_FD_CLOSED:-}}" = 1 ] && [ "$operation" = copyto ]; then
   fd_mode=$(python3 -c 'import fcntl, os; print(fcntl.fcntl(9, fcntl.F_GETFL) & os.O_ACCMODE)' 2>/dev/null) || exit 42
@@ -282,6 +362,117 @@ esac
         self.assertIn("portal_pvc_backup=PASS", result.stdout)
         self.assertNotIn("scale deployment/portal-web", calls)
         self.assertNotIn("create -f", calls)
+
+    def test_in_cluster_mode_uses_kubectl_without_sudo_or_k3s(self):
+        result, calls, _, _ = self.run_tool("--check", execution_mode="in-cluster")
+        self.assertEqual(result.returncode, 0, result.stderr + " calls=" + calls)
+        self.assertNotIn("sudo -n k3s", calls)
+        self.assertNotIn("get nodes", calls)
+        self.assertIn("kubectl -n personal-server", calls)
+
+    def test_in_cluster_mode_reads_and_patches_nonsecret_evidence_without_host_marker(self):
+        """Removing the host marker check must not bypass fixed evidence persistence."""
+        result, calls, _, _ = self.run_tool(
+            "--go", execution_mode="in-cluster", runtime_marker_present=False
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr + " calls=" + calls)
+        self.assertIn(
+            "get configmap portal-pvc-backup-evidence -o jsonpath={.data.evidence}", calls
+        )
+        self.assertIn("patch configmap portal-pvc-backup-evidence", calls)
+        self.assertNotIn("secret", calls.lower())
+
+    def test_in_cluster_failure_reports_only_allowlisted_status_after_portal_restore(self):
+        """A failed upload must be reported only after restoring Portal and with relay-safe keys."""
+        result, calls, _, _ = self.run_tool(
+            "--go", execution_mode="in-cluster", fail_at="upload", runtime_marker_present=False
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        restore = "scale deployment/portal-web --replicas=1"
+        status_line = next(
+            line for line in calls.splitlines() if "patch configmap sre-telegram-backup-status" in line
+        )
+        self.assertLess(calls.index(restore), calls.index(status_line))
+        patch = json.loads(status_line.split("--patch ", 1)[1])
+        self.assertEqual(
+            {operation["path"] for operation in patch},
+            {"/data/run_id", "/data/status", "/data/completed_at", "/data/stage"},
+        )
+        self.assertTrue(all(operation["op"] == "add" for operation in patch))
+        self.assertIn('"value":"failed"', status_line)
+        self.assertNotIn("apply -f", calls)
+        self.assertNotIn("create -f", calls)
+        self.assertNotIn(" exec ", calls)
+
+    def test_in_cluster_availability_command_failure_reports_restore_failed_after_portal_restore(self):
+        result, calls, _, _ = self.run_tool(
+            "--go", execution_mode="in-cluster", fail_at="availability-command"
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        restore = "scale deployment/portal-web --replicas=1"
+        status_line = next(
+            line for line in calls.splitlines() if "patch configmap sre-telegram-backup-status" in line
+        )
+        self.assertLess(calls.index(restore), calls.index(status_line))
+        self.assertIn('"value":"restore_failed"', status_line)
+        self.assertIn('"value":"portal-rollout-command"', status_line)
+        self.assertNotIn("error:", status_line)
+
+    def test_in_cluster_mode_waits_for_zero_available_writers_before_snapshot(self):
+        result, calls, _, _ = self.run_tool("--go", execution_mode="in-cluster")
+        self.assertEqual(result.returncode, 0, result.stderr + " calls=" + calls)
+        wait_call = "get deployment portal-web -o jsonpath={.status.availableReplicas}"
+        self.assertIn(wait_call, calls)
+        self.assertLess(calls.index("kubectl -n personal-server scale deployment/portal-web --replicas=0"), calls.index(wait_call))
+
+    def test_in_cluster_go_reads_own_mount_without_reader_pod_or_exec(self):
+        result, calls, manifest, _ = self.run_tool("--go", execution_mode="in-cluster")
+        self.assertEqual(result.returncode, 0, result.stderr + " calls=" + calls)
+        self.assertIn("portal_pvc_backup=PASS", result.stdout)
+        self.assertNotIn("create -f", calls)
+        self.assertNotIn("delete pod", calls)
+        self.assertNotIn(" exec ", calls)
+        self.assertEqual(manifest, "")
+
+    def test_in_cluster_failure_restores_original_portal_replica(self):
+        result, calls, _, _ = self.run_tool("--go", execution_mode="in-cluster", fail_at="upload")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("kubectl -n personal-server scale deployment/portal-web --replicas=0", calls)
+        self.assertIn("kubectl -n personal-server scale deployment/portal-web --replicas=1", calls)
+        self.assertNotIn("sudo", calls)
+        self.assertNotIn("k3s", calls)
+
+    def test_in_cluster_scale_failure_restores_original_portal_replica(self):
+        result, calls, _, _ = self.run_tool("--go", execution_mode="in-cluster", fail_at="scale")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("kubectl -n personal-server scale deployment/portal-web --replicas=0", calls)
+        self.assertIn("kubectl -n personal-server scale deployment/portal-web --replicas=1", calls)
+        self.assertNotIn("k3s", calls)
+
+    def test_in_cluster_missing_pvc_blocks_before_writer_pause(self):
+        result, calls, _, _ = self.run_tool("--go", execution_mode="in-cluster", missing_pvc=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("kubectl -n personal-server get pvc/portal-web-files-dynamic", calls)
+        self.assertNotIn("scale deployment/portal-web --replicas=0", calls)
+
+    def test_in_cluster_mode_uses_fixed_secret_and_work_defaults(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("/work/data/portal-runtime.mode", text)
+        self.assertIn("/work/.portal-backup-verified", text)
+        self.assertIn("/run/secrets/portal-backup/age-recipient", text)
+        self.assertIn("/run/secrets/portal-backup/age-identity", text)
+
+    def test_restore_and_portal_recovery_failures_set_restore_specific_stages(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        restore = text[text.index("progress remote_restore") : text.index("ARTIFACT_DIGEST=")]
+        cleanup_start = text.index("if [ \"$WRITERS_SCALED\" -eq 1")
+        cleanup = text[cleanup_start : text.index("WRITERS_SCALED=0", cleanup_start)]
+        self.assertIn("FAILURE_STAGE='remote_restore'", restore)
+        self.assertIn("FAILURE_STAGE='restore_validation'", restore)
+        self.assertIn("FAILURE_STAGE='portal_readiness'", cleanup)
 
     def test_kubernetes_commands_use_the_limited_noninteractive_k3s_sudo_grant(self):
         """Automatic backups may only use the existing passwordless k3s sudo grant."""
@@ -345,8 +536,19 @@ esac
         text = SCRIPT.read_text(encoding="utf-8")
         remote_preflight = text[text.index("assert_remote_access() {") : text.index("acquire_lock() {")]
 
-        self.assertIn('PORTAL_RCLONE_TIMEOUT_SECONDS:-30', remote_preflight)
-        self.assertIn("rclone_with_credentials_timeout", remote_preflight)
+        self.assertIn(
+            'RCLONE_PREFLIGHT_TIMEOUT_SECONDS=${PORTAL_RCLONE_TIMEOUT_SECONDS:-30}', text
+        )
+        self.assertIn(
+            'RCLONE_PREFLIGHT_RETRY_COUNT=${PORTAL_RCLONE_PREFLIGHT_RETRY_COUNT:-1}', text
+        )
+        self.assertIn(
+            'RCLONE_PREFLIGHT_RETRY_BACKOFF_SECONDS=${PORTAL_RCLONE_PREFLIGHT_RETRY_BACKOFF_SECONDS:-5}', text
+        )
+        self.assertIn(
+            'rclone_with_credentials_timeout "$RCLONE_PREFLIGHT_TIMEOUT_SECONDS"',
+            remote_preflight,
+        )
         self.assertNotIn("RCLONE_CONFIG_PASS", remote_preflight)
 
     def test_check_mode_rejects_non_k3s_runtime_without_mutation(self):
@@ -391,6 +593,7 @@ esac
             "portal_pvc_backup_stage=remote_upload",
             "portal_pvc_backup_stage=remote_restore",
             "portal_pvc_backup_stage=restore_validation",
+            "portal_pvc_backup_stage=portal_readiness",
             "portal_pvc_backup=FAIL",
         )))
         self.assertIn("kubectl -n personal-server delete pod", calls)
@@ -432,8 +635,52 @@ esac
         self.assertIn("portal_pvc_backup=PASS", result.stdout)
         self.assertIn("source_runtime=k3s-pvc", evidence)
         self.assertIn("scale deployment/portal-web --replicas=1", calls)
-        self.assertIn("rollout status deployment/portal-web", calls)
+        self.assertIn("get deployment portal-web -o jsonpath={.status.availableReplicas}", calls)
         self.assertIn("exec portal-web-1", calls)
+
+    def test_portal_readiness_wait_defaults_to_five_minutes_and_can_be_overridden(self):
+        result, default_calls, _, _ = self.run_tool("--go")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("get deployment portal-web -o jsonpath={.status.availableReplicas}", default_calls)
+
+        result, configured_calls, _, _ = self.run_tool("--go", readiness_timeout=420)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("get deployment portal-web -o jsonpath={.status.availableReplicas}", configured_calls)
+
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('READINESS_TIMEOUT_SECONDS=${PORTAL_READINESS_TIMEOUT_SECONDS:-300}', source)
+        self.assertIn("wait_for_portal_availability", source)
+
+    def test_portal_readiness_uses_available_replicas_not_rollout_watch(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        cleanup_start = text.index("cleanup() {")
+        cleanup = text[cleanup_start : text.index("WRITERS_SCALED=0", cleanup_start)]
+        self.assertIn("wait_for_portal_availability", cleanup)
+        self.assertNotIn("rollout status", cleanup)
+
+    def test_portal_availability_check_is_bounded_by_remaining_readiness_time(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        helper_start = text.index("wait_for_portal_availability() {")
+        helper = text[helper_start : text.index("cleanup() {", helper_start)]
+
+        self.assertIn("remaining=$((deadline - SECONDS))", helper)
+        self.assertIn('kctl_with_deadline_timeout "$remaining"', helper)
+        self.assertIn('sleep "$sleep_seconds"', helper)
+
+    def test_availability_query_timeout_reports_a_safe_timeout_stage(self):
+        result, _, _, evidence = self.run_tool("--go", fail_at="availability-timeout")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("portal_pvc_backup_stage=portal-rollout-timeout", result.stdout)
+        self.assertNotIn("portal-rollout-command", result.stdout)
+        self.assertEqual(evidence, "")
+
+    def test_portal_readiness_timeout_rejects_out_of_range_or_noncanonical_values(self):
+        for value in ("119", "601", "0300", "invalid"):
+            with self.subTest(value=value):
+                result, calls, _, _ = self.run_tool("--go", readiness_timeout=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("scale deployment/portal-web --replicas=0", calls)
 
     def test_go_reports_fixed_progress_stages_without_private_diagnostics(self):
         result, _, _, _ = self.run_tool("--go")
@@ -449,8 +696,8 @@ esac
             self.assertIn(stage, result.stdout)
         self.assertNotIn("/tmp/", result.stdout)
 
-    def test_rollout_failure_removes_evidence_and_reports_fixed_failure(self):
-        result, calls, _, evidence = self.run_tool("--go", fail_at="rollout")
+    def test_availability_command_failure_removes_evidence_and_reports_fixed_failure(self):
+        result, calls, _, evidence = self.run_tool("--go", fail_at="availability-command")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "\n".join((
             "portal_pvc_backup_stage=writer_pause",
@@ -458,11 +705,24 @@ esac
             "portal_pvc_backup_stage=remote_upload",
             "portal_pvc_backup_stage=remote_restore",
             "portal_pvc_backup_stage=restore_validation",
-            "portal_pvc_backup_stage=portal_readiness",
+            "portal_pvc_backup_stage=portal-rollout-command",
             "portal_pvc_backup=FAIL",
         )))
         self.assertEqual(evidence, "")
         self.assertIn("scale deployment/portal-web --replicas=1", calls)
+
+    def test_availability_timeout_has_a_safe_distinct_failure_stage(self):
+        text = SCRIPT.read_text(encoding="utf-8")
+        cleanup_start = text.index("cleanup() {")
+        cleanup = text[cleanup_start : text.index("WRITERS_SCALED=0", cleanup_start)]
+        self.assertIn("availability_status=$?", cleanup)
+        self.assertIn("1) FAILURE_STAGE='portal-rollout-timeout'", cleanup)
+
+    def test_availability_command_failure_reports_a_safe_command_stage(self):
+        result, _, _, evidence = self.run_tool("--go", fail_at="availability-command")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("portal_pvc_backup_stage=portal-rollout-command", result.stdout)
+        self.assertEqual(evidence, "")
 
     def test_health_failure_removes_evidence_and_reports_fixed_failure(self):
         result, calls, _, evidence = self.run_tool("--go", fail_at="health")
@@ -513,12 +773,99 @@ esac
     def test_remote_preflight_failure_prevents_scale_and_redacts_noisy_error(self):
         result, calls, _, evidence = self.run_tool("--go", fail_at="remote")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("portal_pvc_backup_stage=remote_preflight", result.stdout)
+        self.assertIn("portal_pvc_backup_stage=remote-access", result.stdout)
         self.assertIn("portal_pvc_backup=FAIL", result.stdout)
         self.assertNotIn("scale deployment/portal-web", calls)
         self.assertNotIn("/private/", result.stdout + result.stderr)
         self.assertNotIn("fake-remote-secret", result.stdout + result.stderr)
         self.assertEqual(evidence, "")
+
+    def test_remote_preflight_retries_one_timeout_then_completes_writer_cycle(self):
+        """Removing timeout retry must fail before Portal writer pause and restore."""
+        result, calls, _, _ = self.run_tool(
+            "--go",
+            remote_timeout_attempts=1,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr + " calls=" + calls)
+        self.assertEqual(calls.count("rclone lsd"), 2)
+        writer_pause = "k3s kubectl -n personal-server scale deployment/portal-web --replicas=0"
+        writer_restore = "k3s kubectl -n personal-server scale deployment/portal-web --replicas=1"
+        call_lines = calls.splitlines()
+        self.assertEqual(call_lines.count(writer_pause), 1)
+        self.assertEqual(call_lines.count(writer_restore), 1)
+        self.assertLess(calls.rindex("rclone lsd"), calls.index("\n" + writer_pause))
+
+    def test_remote_preflight_timeout_exhaustion_stops_before_writer_pause(self):
+        """Removing the retry limit must allow an unbounded preflight loop."""
+        result, calls, _, evidence = self.run_tool(
+            "--go",
+            remote_timeout_attempts=2,
+            rclone_retry_count=1,
+            rclone_retry_backoff=1,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("portal_pvc_backup_stage=remote-timeout", result.stdout)
+        self.assertEqual(calls.count("rclone lsd"), 2)
+        self.assertNotIn("scale deployment/portal-web", calls)
+        self.assertEqual(evidence, "")
+
+    def test_remote_preflight_non_timeout_failure_is_not_retried(self):
+        """Retrying any non-timeout remote failure would delay safe error classification."""
+        result, calls, _, _ = self.run_tool(
+            "--go", fail_at="remote", rclone_retry_count=1, rclone_retry_backoff=1
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("portal_pvc_backup_stage=remote-access", result.stdout)
+        self.assertEqual(calls.count("rclone lsd"), 1)
+        self.assertNotIn("scale deployment/portal-web", calls)
+
+    def test_remote_preflight_rejects_noncanonical_or_out_of_range_retry_settings(self):
+        """Dropping preflight setting validation would permit unsafe timing or retry bounds."""
+        invalid_settings = (
+            {"rclone_timeout": "0"},
+            {"rclone_timeout": "31"},
+            {"rclone_timeout": "030"},
+            {"rclone_retry_count": "2"},
+            {"rclone_retry_count": "01"},
+            {"rclone_retry_backoff": "0"},
+            {"rclone_retry_backoff": "31"},
+            {"rclone_retry_backoff": "05"},
+        )
+        for settings in invalid_settings:
+            with self.subTest(settings=settings):
+                result, calls, _, _ = self.run_tool("--go", **settings)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("scale deployment/portal-web", calls)
+
+    def test_remote_preflight_reports_safe_config_password_category(self):
+        result, calls, _, _ = self.run_tool(
+            "--go",
+            fail_at="remote",
+            remote_error="Failed to decrypt config: bad password",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("portal_pvc_backup_stage=remote-config-password", result.stdout)
+        self.assertNotIn("Failed to decrypt config", result.stdout + result.stderr)
+        self.assertNotIn("scale deployment/portal-web", calls)
+
+    def test_in_cluster_remote_config_failure_reports_allowlisted_status(self):
+        result, calls, _, _ = self.run_tool(
+            "--go",
+            execution_mode="in-cluster",
+            fail_at="remote",
+            remote_error="Failed to decrypt config: bad password",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("portal_pvc_backup_stage=remote-config-password", result.stdout)
+        self.assertIn("kubectl -n monitoring patch configmap sre-telegram-backup-status", calls)
+        self.assertIn("remote-config-password", calls)
+        self.assertNotIn("Failed to decrypt config", calls)
+        self.assertNotIn("scale deployment/portal-web", calls)
 
     def test_matching_k3s_pvc_evidence_skips_upload_after_staging(self):
         result, calls, _, _ = self.run_tool("--go", repeat=True)
@@ -534,6 +881,56 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
         self.assertEqual(calls.count("rclone copyto"), 4)
+
+    def test_near_expiry_evidence_requires_new_backup_and_restore(self):
+        """Reusing evidence that expires eight minutes later must not skip the daily refresh."""
+        result, calls, _, evidence = self.run_tool(repeat=True, second_evidence_remaining=480)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
+        self.assertIn("portal_pvc_backup_stage=remote_upload", result.stdout)
+        self.assertIn("portal_pvc_backup_stage=restore_validation", result.stdout)
+        self.assertEqual(calls.count("rclone copyto"), 4)
+        values = dict(line.split("=", 1) for line in evidence.splitlines())
+        expiry = datetime.strptime(values["evidence_expires_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        self.assertGreater((expiry - datetime.now(timezone.utc)).total_seconds(), 86000)
+
+    def test_near_max_age_evidence_requires_new_backup_despite_later_expiry(self):
+        """A distant explicit expiry must not conceal the backup age limit."""
+        result, calls, _, _ = self.run_tool(repeat=True, second_evidence_age=86000)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
+        self.assertEqual(calls.count("rclone copyto"), 4)
+
+    def test_future_backup_and_restore_timestamps_are_not_reused(self):
+        """Checking only the future refresh deadline must not accept future-dated evidence."""
+        result, calls, _, _ = self.run_tool(repeat=True, second_evidence_age=-300)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
+        self.assertIn("portal_pvc_backup_stage=restore_validation", result.stdout)
+        self.assertEqual(calls.count("rclone copyto"), 4)
+
+    def test_refresh_window_override_controls_unchanged_skip(self):
+        """Valid overrides affect reuse while evidence remains outside the configured window."""
+        result, calls, _, _ = self.run_tool(repeat=True, second_evidence_remaining=7200, refresh_window=10800)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
+        self.assertEqual(calls.count("rclone copyto"), 4)
+
+    def test_failed_near_expiry_refresh_does_not_extend_evidence(self):
+        """Upload failure during renewal must not produce fresh success evidence."""
+        result, calls, _, evidence = self.run_tool(repeat=True, second_evidence_remaining=480, second_fail_at="upload")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
+        self.assertEqual(evidence, "")
+        self.assertIn("scale deployment/portal-web --replicas=1", calls)
+
+    def test_invalid_refresh_window_blocks_before_writer_scaling(self):
+        """Malformed or unbounded overrides must fail before any writer downtime."""
+        for value in ("0", "-1", "86401", "3600x", "03600", "999999999999999999999999"):
+            with self.subTest(value=value):
+                result, calls, _, _ = self.run_tool(refresh_window=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("scale deployment/portal-web", calls)
 
     def test_go_stream_failure_restores_original_replica_and_deletes_reader(self):
         result, calls, _, evidence = self.run_tool("--go", fail_at="stream")
@@ -554,7 +951,8 @@ esac
         text = SCRIPT.read_text(encoding="utf-8")
         timeout_helper = text[text.index("run_timeout() {") : text.index("kctl() {")]
 
-        self.assertIn('python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" "$@" 9>&-', timeout_helper)
+        self.assertIn('python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" 10 "$@" 9>&-', timeout_helper)
+        self.assertIn('python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" 0 "$@" 9>&-', timeout_helper)
         self.assertIn('run_unlocked() { "$@" 9</dev/null; }', text)
         self.assertIn("process_group=0", text)
         self.assertNotIn("start_new_session=True", text)

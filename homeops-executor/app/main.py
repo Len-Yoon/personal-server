@@ -24,10 +24,7 @@ def _require_shared_secret(provided: str) -> None:
 
 
 def _executor_shared_secret() -> str:
-    return (
-        os.getenv("HOMEOPS_EXECUTOR_SHARED_SECRET", "").strip()
-        or os.getenv("ADMIN_STATUS_PASSWORD", "").strip()
-    )
+    return os.getenv("HOMEOPS_EXECUTOR_SHARED_SECRET", "").strip()
 
 
 @app.get("/health")

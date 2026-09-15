@@ -9,6 +9,7 @@ readonly STATE_DIR="${N100_SAFE_DEPLOY_STATE_DIR:-$HOME/.local/state/personal-se
 readonly STATE_FILE="$STATE_DIR/last-healthy-revision"
 readonly RELEASES_DIR="$STATE_DIR/releases"
 readonly OVERRIDES_DIR="$STATE_DIR/overrides"
+readonly CAR_CARE_OAUTH_OWNERSHIP_APPROVAL="${N100_SAFE_DEPLOY_CAR_CARE_OAUTH_OWNERSHIP_APPROVED:-0}"
 readonly SAFE_SERVICES=(crawler-worker youtube-memo book-memo car-care-worker)
 readonly SERVICE_CSV_PATTERN='^(crawler-worker|youtube-memo|book-memo|car-care-worker)(,(crawler-worker|youtube-memo|book-memo|car-care-worker))*$'
 PARSED_SERVICES=()
@@ -17,6 +18,8 @@ COMPOSE_OVERRIDES=()
 HEALTH_SCRIPT=''
 HEALTH_SCRIPTS=()
 OWNERSHIP_MUTATED_SERVICES=()
+OWNERSHIP_MUTATED_MOUNT_TYPES=()
+OWNERSHIP_MUTATED_SOURCES=()
 OWNERSHIP_SNAPSHOTS=()
 OWNERSHIP_SNAPSHOTS_VERIFIED=0
 PAUSED_SERVICES=()
@@ -128,14 +131,57 @@ data_directory_for_service() {
     crawler-worker) printf '%s/data/crawler-worker\n' "$PROJECT_ROOT" ;;
     youtube-memo) printf '%s/data/youtube-memo\n' "$PROJECT_ROOT" ;;
     book-memo) printf '%s/data/book-memo\n' "$PROJECT_ROOT" ;;
+    car-care-worker) printf '%s/data/car-care\n' "$PROJECT_ROOT" ;;
+    *) return 1 ;;
+  esac
+}
+
+oauth_volume_for_service() {
+  local mount_record
+  local mount_type
+  local mount_name
+  local mount_destination
+  local container_project
+  local volume_project
+  local volume_key
+
+  case "$1" in
+    car-care-worker) ;;
+    *) return 1 ;;
+  esac
+
+  mount_record="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data/oauth"}}{{.Type}}{{"\t"}}{{.Name}}{{"\t"}}{{.Destination}}{{"\n"}}{{end}}{{end}}' car-care-worker)" || return 1
+  [[ -n "$mount_record" && "$mount_record" != *$'\n'* ]] || return 1
+  IFS=$'\t' read -r mount_type mount_name mount_destination <<< "$mount_record"
+  [[ "$mount_type" == volume && "$mount_destination" == /data/oauth ]] || return 1
+  [[ "$mount_name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || return 1
+
+  container_project="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' car-care-worker)" || return 1
+  [[ "$container_project" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || return 1
+  [[ "$mount_name" == "${container_project}_car-care-oauth" ]] || return 1
+
+  volume_project="$(docker volume inspect --format '{{index .Labels "com.docker.compose.project"}}' "$mount_name")" || return 1
+  volume_key="$(docker volume inspect --format '{{index .Labels "com.docker.compose.volume"}}' "$mount_name")" || return 1
+  [[ "$volume_project" == "$container_project" && "$volume_key" == car-care-oauth ]] || return 1
+  printf '%s\n' "$mount_name"
+}
+
+validate_ownership_source() {
+  local mount_type="$1"
+  local source="$2"
+
+  case "$mount_type" in
+    bind) [[ -d "$source" && ! -L "$source" ]] ;;
+    volume) [[ "$source" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] && docker volume inspect "$source" >/dev/null ;;
     *) return 1 ;;
   esac
 }
 
 run_data_ownership_helper() {
   local service="$1"
-  local data_directory="$2"
-  shift 2
+  local mount_type="$2"
+  local source="$3"
+  shift 3
 
   docker run --rm \
     --network none \
@@ -145,45 +191,48 @@ run_data_ownership_helper() {
     --cap-add FOWNER \
     --cap-add DAC_OVERRIDE \
     --user 0:0 \
-    --mount "type=bind,src=$data_directory,dst=/data" \
+    --mount "type=$mount_type,src=$source,dst=/data" \
     "personal-server-$service:latest" \
     "$@"
 }
 
 run_data_ownership_inspector() {
   local service="$1"
-  local data_directory="$2"
-  local user="$3"
-  shift 3
+  local mount_type="$2"
+  local source="$3"
+  local user="$4"
+  shift 4
 
   docker run --rm \
     --network none \
     --read-only \
     --cap-drop ALL \
     --user "$user" \
-    --mount "type=bind,src=$data_directory,dst=/data" \
+    --mount "type=$mount_type,src=$source,dst=/data" \
     "personal-server-$service:latest" \
     "$@"
 }
 
 data_is_owned_by() {
   local service="$1"
-  local data_directory="$2"
-  local uid="$3"
-  local gid="$4"
+  local mount_type="$2"
+  local source="$3"
+  local uid="$4"
+  local gid="$5"
 
-  run_data_ownership_inspector "$service" "$data_directory" "$uid:$gid" \
+  run_data_ownership_inspector "$service" "$mount_type" "$source" "$uid:$gid" \
     /bin/sh -ec "first=\"\$(find /data -xdev \\( ! -uid $uid -o ! -gid $gid \\) -print -quit)\" || exit \$?; test -z \"\$first\""
 }
 
 capture_data_ownership() {
   local service="$1"
-  local data_directory="$2"
+  local mount_type="$2"
+  local source="$3"
   local snapshot
 
   snapshot="$(mktemp "$STATE_DIR/ownership.XXXXXX")" || return 1
   chmod 600 "$snapshot"
-  run_data_ownership_helper "$service" "$data_directory" python -c '
+  run_data_ownership_helper "$service" "$mount_type" "$source" python -c '
 import os
 import sys
 
@@ -222,8 +271,9 @@ for parent, directories, filenames in os.walk(root, topdown=True, followlinks=Fa
 
 restore_data_ownership_snapshot() {
   local service="$1"
-  local data_directory="$2"
-  local snapshot="$3"
+  local mount_type="$2"
+  local source="$3"
+  local snapshot="$4"
 
   [[ -f "$snapshot" && ! -L "$snapshot" ]] || return 1
   docker run --rm \
@@ -234,7 +284,7 @@ restore_data_ownership_snapshot() {
     --cap-add FOWNER \
     --cap-add DAC_OVERRIDE \
     --user 0:0 \
-    --mount "type=bind,src=$data_directory,dst=/data" \
+    --mount "type=$mount_type,src=$source,dst=/data" \
     --mount "type=bind,src=$snapshot,dst=/state/ownership,readonly" \
     "personal-server-$service:latest" \
     python -c '
@@ -297,28 +347,61 @@ stop_target_service_writers() {
   done
 }
 
+preflight_service_data_ownership() {
+  local service
+  local oauth_volume
+
+  for service in "$@"; do
+    [[ "$service" == car-care-worker ]] || continue
+    oauth_volume="$(oauth_volume_for_service "$service")" || return 1
+    validate_ownership_source volume "$oauth_volume" || return 1
+    if data_is_owned_by "$service" volume "$oauth_volume" 10001 10001; then
+      continue
+    fi
+    [[ "$CAR_CARE_OAUTH_OWNERSHIP_APPROVAL" == 1 ]] || return 1
+  done
+}
+
+align_ownership_source() {
+  local service="$1"
+  local mount_type="$2"
+  local source="$3"
+
+  validate_ownership_source "$mount_type" "$source" || return 1
+  if data_is_owned_by "$service" "$mount_type" "$source" 10001 10001; then
+    return 0
+  fi
+  if [[ "$service" == car-care-worker && "$mount_type" == volume ]]; then
+    [[ "$CAR_CARE_OAUTH_OWNERSHIP_APPROVAL" == 1 ]] || return 1
+  fi
+  capture_data_ownership "$service" "$mount_type" "$source" || return 1
+  OWNERSHIP_MUTATED_SERVICES+=("$service")
+  OWNERSHIP_MUTATED_MOUNT_TYPES+=("$mount_type")
+  OWNERSHIP_MUTATED_SOURCES+=("$source")
+  run_data_ownership_helper "$service" "$mount_type" "$source" \
+    chown --recursive --no-dereference 10001:10001 /data
+}
+
 align_service_data_ownership() {
   local service
   local data_directory
+  local oauth_volume
 
   printf '%s\n' 'safe_cd_stage=data_ownership' >&2
   [[ -d "$PROJECT_ROOT/data" && ! -L "$PROJECT_ROOT/data" ]] || return 1
   for service in "$@"; do
     data_directory="$(data_directory_for_service "$service")" || continue
-    [[ -d "$data_directory" && ! -L "$data_directory" ]] || return 1
-    if data_is_owned_by "$service" "$data_directory" 10001 10001; then
-      continue
-    fi
-    capture_data_ownership "$service" "$data_directory" || return 1
-    OWNERSHIP_MUTATED_SERVICES+=("$service")
-    run_data_ownership_helper "$service" "$data_directory" \
-      chown --recursive --no-dereference 10001:10001 /data || return 1
+    align_ownership_source "$service" bind "$data_directory" || return 1
+    [[ "$service" == car-care-worker ]] || continue
+    oauth_volume="$(oauth_volume_for_service "$service")" || return 1
+    align_ownership_source "$service" volume "$oauth_volume" || return 1
   done
 }
 
 restore_root_owned_data_for_rollback() {
   local service
-  local data_directory
+  local mount_type
+  local source
   local snapshot
   local index
 
@@ -326,10 +409,11 @@ restore_root_owned_data_for_rollback() {
   printf '%s\n' 'safe_cd_stage=data_ownership_restore' >&2
   for ((index = 0; index < ${#OWNERSHIP_MUTATED_SERVICES[@]}; index++)); do
     service="${OWNERSHIP_MUTATED_SERVICES[$index]}"
+    mount_type="${OWNERSHIP_MUTATED_MOUNT_TYPES[$index]}"
+    source="${OWNERSHIP_MUTATED_SOURCES[$index]}"
     snapshot="${OWNERSHIP_SNAPSHOTS[$index]}"
-    data_directory="$(data_directory_for_service "$service")" || return 1
-    [[ -d "$data_directory" && ! -L "$data_directory" ]] || return 1
-    restore_data_ownership_snapshot "$service" "$data_directory" "$snapshot" || return 1
+    validate_ownership_source "$mount_type" "$source" || return 1
+    restore_data_ownership_snapshot "$service" "$mount_type" "$source" "$snapshot" || return 1
   done
   OWNERSHIP_SNAPSHOTS_VERIFIED=1
 }
@@ -351,6 +435,7 @@ deploy_revision() {
     -f "$PROJECT_ROOT/docker-compose.n100.yml" \
     -f "$COMPOSE_OVERRIDE" build "$@" || return 1
   if [[ "$align_data_ownership" == true ]]; then
+    preflight_service_data_ownership "$@" || return 1
     pause_service_writers "$@" || return 1
     align_service_data_ownership "$@" || return 1
     TARGET_SERVICES_STARTED=1

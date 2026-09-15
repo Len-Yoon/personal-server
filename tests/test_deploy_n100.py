@@ -1,4 +1,5 @@
 import os
+import json
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = (ROOT / ".github" / "workflows" / "deploy-n100.yml").read_text(encoding="utf-8")
 CI_WORKFLOW = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+CI_TEST_MATRIX = json.loads((ROOT / "tests" / "ci_test_matrix.json").read_text(encoding="utf-8"))
 SCRIPT = (ROOT / "scripts" / "deploy-n100.sh").read_text(encoding="utf-8")
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 HANDOFF = (ROOT / "docs" / "agent-handoff.md").read_text(encoding="utf-8")
@@ -25,7 +27,7 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("context.payload.before", changes_job)
         self.assertIn("github.sha", changes_job)
         self.assertIn("classify-n100-safe-deployment.py", changes_job)
-        self.assertIn("actions/github-script@v7", changes_job)
+        self.assertIn("actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7", changes_job)
         self.assertIn("listWorkflowRuns", changes_job)
         self.assertIn("workflow_id: 'ci.yml'", changes_job)
         self.assertIn("core.setOutput('ci_sha'", changes_job)
@@ -90,10 +92,13 @@ class DeployN100Tests(unittest.TestCase):
         self.assertNotIn("workflow_dispatch", WORKFLOW)
 
     def test_ci_covers_homeops_news_routes_and_deploy_script(self):
-        self.assertIn("tests.test_homeops tests.test_homeops_notifier", CI_WORKFLOW)
-        self.assertIn("tests.homeops_executor.test_docker_ops", CI_WORKFLOW)
-        self.assertIn("tests.crawler_worker.test_news_routes", CI_WORKFLOW)
-        self.assertIn("tests.test_deploy_n100", CI_WORKFLOW)
+        commands = "\n".join(entry["test_command"] for entry in CI_TEST_MATRIX)
+
+        self.assertIn("tests/run_service_tests.py --github-matrix", CI_WORKFLOW)
+        self.assertIn("tests.test_homeops tests.test_homeops_notifier", commands)
+        self.assertIn("tests.homeops_executor.test_docker_ops", commands)
+        self.assertIn("tests.crawler_worker.test_news_routes", commands)
+        self.assertIn("tests.test_deploy_n100", commands)
 
     def test_homeops_executor_test_client_dependency_is_pinned(self):
         self.assertIn("httpx==0.28.1", HOMEOPS_REQUIREMENTS)

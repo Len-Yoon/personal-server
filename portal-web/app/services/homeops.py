@@ -512,6 +512,8 @@ class ExecutorClient:
         return bool(self.diagnostics(service).get("container", {}).get("health") == "healthy")
 
     def _request(self, path: str, payload: dict[str, Any] | None = None, method: str | None = None) -> Any:
+        if not self.secret:
+            raise OSError("homeops_executor_shared_secret_not_configured")
         data = json.dumps(payload).encode() if payload else None
         request = Request(self.url + path, data=data, headers={"X-HomeOps-Executor-Secret": self.secret, "Content-Type": "application/json"}, method=method)
         with urlopen(request, timeout=5) as response:
@@ -526,7 +528,4 @@ def get_homeops_service() -> HomeOpsService:
 
 
 def _executor_shared_secret() -> str:
-    return (
-        os.getenv("HOMEOPS_EXECUTOR_SHARED_SECRET", "").strip()
-        or os.getenv("ADMIN_STATUS_PASSWORD", "").strip()
-    )
+    return os.getenv("HOMEOPS_EXECUTOR_SHARED_SECRET", "").strip()
