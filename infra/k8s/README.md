@@ -2,6 +2,17 @@
 
 N100의 K3s는 현재 Portal과 모니터링 운영에 사용함. 이 문서는 실제 운영 도구의 진입점만 정리하며, Secret 값·비밀번호·token은 출력하거나 문서화하지 않음.
 
+## 정기 운영 실행 경계
+
+| 구분 | 주기 | 실행 목적 | 월간 감사와의 관계 |
+|---|---:|---|---|
+| 공개 상태 감시 | 약 5분 | 외부에서 공개 health 장애·복구를 신속히 감지함 | GitHub Actions에서 독립 실행하며 월간 감사로 대체하지 않음 |
+| Portal PVC 백업·복원 검증 | 매일 03:00 | 최신 복구 가능 증적을 유지하고 백업 실패를 조기에 감지함 | 별도 CronJob이 실행하며 월간 감사는 증적만 읽기 확인함 |
+| 내부 SRE 통합 점검 | 매월 1일 03:30 | Portal·K3s·백업 증적·격리 복구 훈련을 한 번에 확인함 | `monthly-sre-audit`만 활성화함 |
+| 코드 변경 검증 | 변경 시점 | 변경 영향 범위의 회귀를 병합 전 확인함 | 정기 운영 점검과 별도임 |
+
+기존 `quarterly-sre-audit` 및 validation CronJob은 이력·rollback 검증용으로 suspended 상태를 유지함. 동일한 내부 점검을 별도 주기로 중복 실행하지 않음.
+
 ## 현재 구성
 
 | Namespace | 구성 | 역할 |
@@ -96,7 +107,7 @@ CronJob은 매일 03:00 KST에 실행되며, `Forbid` 동시 실행 제한·실�
 
 ## 월간 SRE 통합 점검 자동화
 
-월간 SRE 통합 점검은 N100에서 활성화됨. 2026-09-15 첫 수동 Job은 Portal 상태·백업 증적·격리 Pod 복구 단계와 기존 SRE Telegram relay 전달을 모두 통과했고, 공개 `https://len.pe.kr/health`도 10초 간격 3회 HTTP 200으로 확인됨. 저장소 병합만으로는 CronJob이 활성화되지 않으며, 이후 재설치 또는 변경 적용 전에도 아래 `--preflight`와 `--render`를 먼저 통과해야 함. 설치 과정에서 Secret·token·Telegram chat ID·rclone 자격 증명을 생성·복제·읽지 않음. 백업 단계는 CronJob이 기록한 `personal-server/portal-pvc-backup-evidence` ConfigMap만 fail-closed로 검증함. 공개 상태 5분 감시는 GitHub Actions에서 독립 유지하며 이 CronJob으로 통합하지 않음.
+월간 SRE 통합 점검은 N100에서 활성화됨. `monthly-sre-audit`는 매월 1일 03:30의 유일한 내부 정기 점검 실행기이며, Portal 상태·백업 증적·격리 Pod 복구 단계와 기존 SRE Telegram relay 전달을 확인함. 이는 일일 백업·복원 검증 및 약 5분 간격 공개 상태 감시를 대체하지 않음. 저장소 병합만으로는 CronJob이 활성화되지 않으며, 이후 재설치 또는 변경 적용 전에도 아래 `--preflight`와 `--render`를 먼저 통과해야 함. 설치 과정에서 Secret·token·Telegram chat ID·rclone 자격 증명을 생성·복제·읽지 않음. 백업 단계는 CronJob이 기록한 `personal-server/portal-pvc-backup-evidence` ConfigMap만 fail-closed로 검증함. 공개 상태 감시는 GitHub Actions에서 독립 유지하며 이 CronJob으로 통합하지 않음.
 
 ```bash
 bash infra/k8s/tools/quarterly-sre-audit-automation.sh --preflight
@@ -118,7 +129,7 @@ bash infra/k8s/tools/quarterly-sre-audit-automation.sh --status
 
 lock 경합, Job 목록 조회 오류 또는 종료 미확정 Job으로 manifest 적용 전 차단되면 기존 CronJob schedule·상태는 변경하지 않음. suspended CronJob 적용 이후 legacy service 활성, 수동 Job 실패, 상태 ConfigMap 조회 실패 또는 상태 미확인으로 차단되면 CronJob은 suspended 상태를 유지함. 기존 systemd service·timer template은 이력 보존 목적으로만 남아 있으며, 신규 설치 또는 실행 경로에서 설치·사용하지 않음.
 
-새 월간 CronJob은 `Asia/Seoul` 기준 매월 1일 03:30에 1회 실행되며, `Forbid` 동시 실행 제한과 실패 재시도 없음 조건을 사용함. 이전 분기·validation CronJob은 rollback·검증 이력용으로 suspended 상태를 유지함. runner는 다음 세 점검을 수행하고 어느 한 단계라도 실패하면 결과를 fail-closed로 보고함.
+새 월간 CronJob은 `Asia/Seoul` 기준 매월 1일 03:30에 1회 실행되며, `Forbid` 동시 실행 제한과 실패 재시도 없음 조건을 사용함. 이전 분기·validation CronJob은 rollback·검증 이력용으로 suspended 상태를 유지하며, 월간 점검과 같은 검증을 자동으로 중복 실행하지 않음. runner는 다음 세 점검을 수행하고 어느 한 단계라도 실패하면 결과를 fail-closed로 보고함.
 
 | 점검 | 실행 도구 | 범위 |
 |---|---|---|
