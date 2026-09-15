@@ -67,7 +67,7 @@ def recovery_deployment():
 
 
 class QuarterlySreAuditCronJobTests(unittest.TestCase):
-    def test_monthly_cronjob_reuses_the_official_runner_with_safe_limits(self):
+    def test_monthly_audit_is_the_only_scheduled_internal_audit(self):
         monthly = monthly_cronjob()
         spec = monthly["spec"]
         template = spec["jobTemplate"]["spec"]["template"]["spec"]
@@ -82,21 +82,16 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertEqual(template["serviceAccountName"], "quarterly-sre-audit")
         self.assertEqual(template["restartPolicy"], "Never")
         self.assertNotIn("secret", str(template).lower())
-
-    def test_legacy_quarterly_cronjobs_remain_suspended_after_monthly_transition(self):
-        self.assertTrue(cronjob()["spec"]["suspend"])
-        self.assertTrue(find("CronJob", "quarterly-sre-audit-validation", "monitoring")["spec"]["suspend"])
-
-    def test_cronjob_has_safe_quarterly_schedule_and_execution_limits(self):
-        spec = cronjob()["spec"]
-        self.assertEqual(spec["schedule"], "30 3 1 1,4,7,10 *")
-        self.assertEqual(spec["timeZone"], "Asia/Seoul")
-        self.assertTrue(spec["suspend"])
-        self.assertEqual(spec["concurrencyPolicy"], "Forbid")
-        self.assertEqual(spec["jobTemplate"]["spec"]["backoffLimit"], 0)
-        self.assertGreater(spec["jobTemplate"]["spec"]["activeDeadlineSeconds"], 0)
-        self.assertGreater(spec["jobTemplate"]["spec"]["ttlSecondsAfterFinished"], 0)
-        self.assertEqual(pod_spec()["restartPolicy"], "Never")
+        for legacy_name in ("quarterly-sre-audit", "quarterly-sre-audit-validation"):
+            legacy = find("CronJob", legacy_name, "monitoring")["spec"]
+            self.assertEqual(legacy["schedule"], "30 3 1 1,4,7,10 *")
+            self.assertEqual(legacy["timeZone"], "Asia/Seoul")
+            self.assertTrue(legacy["suspend"])
+            self.assertEqual(legacy["concurrencyPolicy"], "Forbid")
+            self.assertEqual(legacy["jobTemplate"]["spec"]["backoffLimit"], 0)
+            self.assertGreater(legacy["jobTemplate"]["spec"]["activeDeadlineSeconds"], 0)
+            self.assertGreater(legacy["jobTemplate"]["spec"]["ttlSecondsAfterFinished"], 0)
+            self.assertEqual(legacy["jobTemplate"]["spec"]["template"]["spec"]["restartPolicy"], "Never")
 
     def test_runner_pod_is_non_root_and_cannot_escalate_privileges(self):
         pod = pod_spec()
