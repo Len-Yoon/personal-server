@@ -318,7 +318,7 @@ class SreTelegramManifestContractTests(unittest.TestCase):
             },
             {
                 "alert": "NewsCollectionStale",
-                "expr": "crawler_news_collection_initialized == 1 and time() - crawler_news_collection_first_attempt_timestamp_seconds > 900 and (\n  (crawler_news_collection_last_success_timestamp_seconds > 0\n   and time() - crawler_news_collection_last_success_timestamp_seconds > 900)\n  or\n  (crawler_news_collection_last_success_timestamp_seconds == 0\n   and time() - crawler_news_collection_last_attempt_timestamp_seconds > 900)\n  or crawler_news_collection_consecutive_failures >= 3\n)",
+                "expr": "crawler_news_collection_initialized == 1 and (\n  crawler_news_collection_consecutive_failures >= 3\n  or (\n    time() - crawler_news_collection_first_attempt_timestamp_seconds > 1800\n    and (\n      (crawler_news_collection_last_success_timestamp_seconds > 0\n       and time() - crawler_news_collection_last_success_timestamp_seconds > 1800)\n      or\n      (crawler_news_collection_last_success_timestamp_seconds == 0\n       and time() - crawler_news_collection_last_attempt_timestamp_seconds > 1800)\n    )\n  )\n)",
                 "for": "0m",
                 "labels": {"severity": "warning", "sre_telegram": "true"},
             },

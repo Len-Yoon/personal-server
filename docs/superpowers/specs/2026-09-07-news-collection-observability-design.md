@@ -21,7 +21,7 @@
 | 수집 실패 | 정기 수집 경로에서 원본 수집 예외를 성공으로 처리하지 않음 | 사용자 요청 경로의 기존 fallback 동작은 유지 |
 | 지표 노출 | `/internal/metrics`에서 Prometheus 형식 제공 | bearer token 없거나 불일치 시 404 |
 | 접근 경계 | K3s `ServiceMonitor`만 `compose-crawler` bridge를 통해 내부 수집 | token 값은 Git·로그·문서에 저장하지 않음 |
-| 경고 | 최근 성공 15분 초과 또는 3회 연속 실패 시 `NewsCollectionStale` | 시작 후 15분 유예 |
+| 경고 | 최근 성공 30분 초과 또는 3회 연속 실패 시 `NewsCollectionStale` | 시작 후 30분 유예 |
 | 알림 | 기존 Alertmanager → SRE relay → Telegram 재사용 | 장애·복구 모두 한국어로 전달 |
 | 인증 시딩 | monitoring namespace Secret `crawler-news-metrics`의 `bearer_token`과 crawler runtime `NEWS_METRICS_BEARER_TOKEN`에 동일한 승인된 값을 별도 절차로 주입 | 값 자체는 Git·문서·로그에 기록하지 않음 |
 | 자동 조치 | 자동 재시작·자동 복구를 수행하지 않음 | 관측과 알림만 수행 |
@@ -39,7 +39,7 @@ crawler_news_collection_consecutive_failures
 crawler_news_refresh_interval_seconds
 ```
 
-`crawler_news_collection_first_attempt_timestamp_seconds`는 초기 수집 후 15분 유예를 적용하기 위한 기준 시각임.
+`crawler_news_collection_first_attempt_timestamp_seconds`는 초기 수집 후 30분 유예를 적용하기 위한 기준 시각임.
 
 기사 제목·URL·원문 예외·Telegram token·chat ID는 지표, 라벨, 알림에 포함하지 않음.
 

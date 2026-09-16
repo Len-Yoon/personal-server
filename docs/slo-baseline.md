@@ -34,7 +34,7 @@
 |---|---|---|---:|---:|---|
 | 공개 Portal | 완료된 외부 health 점검 중 `https://len.pe.kr/health`가 성공한 비율 | GitHub Actions `Public Portal Uptime Monitor` | 99.5% | 약 43회 점검 실패 또는 약 215분 | 측정 가능 |
 | K3s Portal | Prometheus 관측값 중 `portal-web`의 available replica가 1 이상인 비율 | kube-state-metrics | 99.5% | 약 216분 | 측정 가능 |
-| 뉴스 수집 | 뉴스 수집이 15분 이내 성공했거나 연속 실패가 3회 미만인 관측 비율 | `crawler_news_collection_*` metrics | 99.0% | 약 432분 | 측정 가능 |
+| 뉴스 수집 | 뉴스 수집이 30분 이내 성공했거나 연속 실패가 3회 미만인 관측 비율 | `crawler_news_collection_*` metrics | 99.0% | 약 432분 | 측정 가능 |
 | Compose 웹 서비스 | HTTP 성공률 및 p95 응답시간 | 없음 | 확정하지 않음 | 산정 불가 | 2차 계측 필요 |
 
 공개 Portal의 약 43회는 30일을 5분 간격으로 모두 실행한 8,640회 관측을 전제로 한 환산값임. workflow 실행 누락, GitHub Actions 장애, 점검 결과 보존 정책은 별도로 확인 필요함.
@@ -70,14 +70,14 @@ avg_over_time(
 avg_over_time(
   (
     crawler_news_collection_initialized == bool 1
-    and time() - crawler_news_collection_last_success_timestamp_seconds <= bool 900
+    and time() - crawler_news_collection_last_success_timestamp_seconds <= bool 1800
     and crawler_news_collection_consecutive_failures < bool 3
   )[30d:]
 ) * 100
 ```
 
 - 수집 성공 시각이 없는 초기화 구간은 SLO 측정 시작 전 상태로 처리함.
-- 현재 `NewsCollectionStale` 경고 조건과 같은 15분·연속 실패 3회 기준을 사용함.
+- 현재 `NewsCollectionStale` 경고 조건과 같은 30분·연속 실패 3회 기준을 사용함.
 - 이 SLI는 기사 품질이나 분류 정확도가 아니라 수집 freshness만 측정함.
 
 ## 에러 버짓 운영 기준
