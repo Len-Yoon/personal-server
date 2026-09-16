@@ -21,8 +21,8 @@ P2는 GitHub 밖의 새 감시 의존성을 추가하지 않음. 실행된 공�
 | 구분 | 판정 원본 | 기록 위치 | Telegram 전송 | 처리 기준 |
 |---|---|---|---|---|
 | 공개 서비스 장애 | 기존 health step 결과 | 기존 공개 상태 장애 Issue | 기존 장애·복구 전환만 전송 | 실패 서비스 식별자만 기록 |
-| Telegram 전달 실패 | 기존 Telegram step의 실패 또는 Secret 누락 | 기존 공개 상태 장애 Issue의 전달 상태 표기 | 추가 전송 없음 | health 점검과 Issue 처리는 계속 수행 |
-| workflow 실행 실패 | `Public Portal Uptime Monitor`의 완료된 실패 run | 전용 감시 실행 실패 Issue | 전송하지 않음 | 실행 실패 원인 원문·비밀값은 기록하지 않음 |
+| Telegram 전달 실패 | 기존 Telegram step의 실패 또는 Secret 누락 | 기존 공개 상태 장애 Issue의 전달 상태 표기 | 실패 시 전송 불가, 다음 전달 성공 시 복구 전송 | health 점검과 Issue 처리는 계속 수행 |
+| workflow 실행 실패 | `Public Portal Uptime Monitor`의 완료된 실패 run | 전용 감시 실행 실패 Issue | 장애·복구 전환을 각각 1회 전송 | 실행 실패 원인 원문·비밀값은 기록하지 않음 |
 | workflow 미실행 | GitHub 밖 독립 신호 없음 | 운영 문서 | 전송하지 않음 | `관측 불가`로 표시하고 자동 장애 판정하지 않음 |
 
 ## 구성
@@ -33,11 +33,15 @@ P2는 GitHub 밖의 새 감시 의존성을 추가하지 않음. 실행된 공�
 
 ### 2. workflow 실행 실패 기록
 
-새 GitHub workflow는 `workflow_run` 이벤트로 공개 health workflow의 완료 상태만 읽음. 완료 결과가 실패일 때 전용 Issue를 생성하거나 갱신하고, 이후 성공 run이 확인되면 같은 Issue를 닫음. 서비스 health 실패는 기존 monitor가 `continue-on-error`로 처리하므로, 이 전용 Issue는 monitor 내부 실행·GitHub API·Telegram 전달 경로의 실패를 식별하는 보조 증적으로 사용함.
+새 GitHub workflow는 `workflow_run` 이벤트로 공개 health workflow의 완료 상태만 읽음. 완료 결과가 실패일 때 전용 Issue를 생성하거나 갱신하고 Telegram 장애 메시지를 1회 전송함. 이후 성공 run이 확인되면 같은 Issue를 닫고 Telegram 복구 메시지를 1회 전송함. 서비스 health 실패는 기존 monitor가 `continue-on-error`로 처리하므로, 이 전용 Issue는 monitor 내부 실행·GitHub API·Telegram 전달 경로의 실패를 식별하는 보조 증적으로 사용함.
 
-이 workflow도 GitHub Actions에서 실행되므로 원본 workflow가 전혀 시작하지 않는 경우는 검출할 수 없음. 이를 새로운 서비스나 Secret으로 우회하지 않음.
+`workflow_run`은 repository Secret과 쓰기 토큰에 접근할 수 있으므로 신뢰되지 않은 workflow 산출물·artifact·repository 코드를 checkout하거나 실행하지 않음. 고정된 GitHub API 호출과 고정된 Telegram 메시지만 사용함. 이 workflow도 GitHub Actions에서 실행되므로 원본 workflow가 전혀 시작하지 않는 경우는 검출할 수 없음. 이를 새로운 서비스나 Secret으로 우회하지 않음.
 
-### 3. 뉴스 수집 Telegram 표현
+### 3. Telegram 전달 실패의 복구 표시
+
+Telegram API 전송 실패 자체는 동일 Telegram 경로로 즉시 알릴 수 없음. 기존 장애 Issue에 전달 실패 상태를 남기고, 이후 동일 경로의 다음 전송이 성공하면 `Telegram 전달 복구` 메시지를 1회 전송함. 전송 실패 동안 서비스 health 점검·Issue 갱신·복구 판단은 계속 수행함.
+
+### 4. 뉴스 수집 Telegram 표현
 
 `NewsCollectionStale`은 최근 성공이 15분을 초과하거나 연속 실패가 3회 이상일 때 발생함. 이 경고는 crawler 자동 재시작을 수행하지 않음. relay의 firing 문구는 `다음 수집 상태를 확인 중입니다.`로 표시하고, resolved 문구는 기존과 같이 정상 복귀를 표시함.
 
@@ -47,8 +51,8 @@ Alertmanager의 지속 경고 재전송 주기는 4시간이며, relay는 동일
 
 | 상황 | 처리 |
 |---|---|
-| Telegram 전달 실패 | health 상태와 Issue 처리는 유지하고, 전달 실패 상태만 기록함 |
-| workflow 실행 실패 | 전용 Issue에 최소 상태만 기록하고 Telegram을 보내지 않음 |
+| Telegram 전달 실패 | health 상태와 Issue 처리는 유지하고 전달 실패 상태를 기록함. 다음 Telegram 성공 시 복구 전환을 1회 전송함 |
+| workflow 실행 실패 | 전용 Issue에 최소 상태를 기록하고 Telegram 장애·복구 전환을 각각 1회 전송함 |
 | workflow 미실행 | 자동 장애·복구 판정이나 재실행을 시도하지 않음 |
 | NewsCollectionStale 발생 | crawler·Compose·K3s를 자동 재시작하지 않음 |
 | 동일 상태 재전송 | 4시간 반복 정책과 fingerprint 상태 보존을 유지함 |
@@ -60,11 +64,12 @@ Alertmanager의 지속 경고 재전송 주기는 4시간이며, relay는 동일
 ## 검증 기준
 
 1. 공개 health 장애와 Telegram 전달 실패가 서로 다른 Issue 상태로 확인됨.
-2. workflow 완료 실패는 전용 Issue로 확인되며, 다음 성공 run에서 닫힘.
+2. workflow 완료 실패는 전용 Issue 및 Telegram 장애 알림으로 확인되며, 다음 성공 run에서 Issue 종료와 Telegram 복구 알림이 발생함.
 3. workflow 미실행은 자동 감지 범위 밖이라는 문서 계약이 존재함.
 4. NewsCollectionStale firing 문구가 자동 복구를 암시하지 않음.
 5. 기존 4시간 반복 및 중복 억제 계약이 유지됨.
-6. 관련 workflow·relay·문서 계약 테스트가 통과함.
+6. `workflow_run` workflow가 외부 코드·artifact를 checkout·실행하지 않고, 최소 권한과 고정 메시지만 사용함.
+7. 관련 workflow·relay·문서 계약 테스트가 통과함.
 
 ## 확인 필요 사항
 
