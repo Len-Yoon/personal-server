@@ -33,6 +33,19 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("operations-roadmap.md", content)
         self.assertIn("recovery-drill.md", content)
 
+    def test_document_index_exposes_book_memo_k3s_preparation_and_cutover_contract(self):
+        index = Path("docs/README.md").read_text(encoding="utf-8")
+        operations = Path("docs/operations-reference.md").read_text(encoding="utf-8")
+
+        self.assertIn("Book Memo K3s 준비·전환", index)
+        self.assertIn("../infra/k8s/tools/k3s-app-image-build.sh", index)
+        self.assertIn("../infra/k8s/tools/k3s-app-image-import.sh", index)
+        self.assertIn("../infra/k8s/apps/book-memo.yaml", index)
+        self.assertIn("operations-reference.md#book-memo-k3s-전환-승인검증", index)
+        self.assertIn("## Book Memo K3s 전환 승인·검증", operations)
+        for mode in ("`--check`", "`--prepare`", "`--go`", "`--rollback`"):
+            self.assertIn(mode, operations)
+
     def test_operations_roadmap_separates_completed_and_next_work(self):
         content = Path("docs/operations-roadmap.md").read_text(encoding="utf-8")
 
