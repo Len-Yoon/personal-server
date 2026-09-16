@@ -32,8 +32,15 @@ done
 [ "$go" = true ] || fail arguments
 [[ "$image" =~ ^docker\.io/library/personal-server-book-memo@sha256:[0-9a-f]{64}$ ]] || fail image
 [ -f "$MANIFEST" ] || fail manifest
-[ "$(grep -Fxc '  replicas: 0' "$MANIFEST")" -eq 1 ] || fail manifest
-[ "$(grep -Fxc "          image: $SENTINEL_IMAGE" "$MANIFEST")" -eq 1 ] || fail manifest
+
+# Git checkouts on Windows may retain CRLF. Normalize only line endings while
+# preserving the exact one-line replica-zero and sentinel-image contracts.
+manifest_line_count() {
+  sed 's/\r$//' "$MANIFEST" | grep -Fxc "$1"
+}
+
+[ "$(manifest_line_count '  replicas: 0')" -eq 1 ] || fail manifest
+[ "$(manifest_line_count "          image: $SENTINEL_IMAGE")" -eq 1 ] || fail manifest
 
 # Only existence is checked; Secret values are never read or emitted.
 sudo -n k3s kubectl -n "$NAMESPACE" get secret book-memo-runtime >/dev/null 2>&1 || fail secret
