@@ -41,7 +41,7 @@ test -n "$dockerfile" || dockerfile="$app/Dockerfile"
 test -f "$dockerfile" || fail "Dockerfile is missing"
 
 image="personal-server-$app:$tag"
-docker buildx build --platform linux/amd64 --tag "$image" --file "$dockerfile" --output type=oci,dest="$output",annotation-manifest-descriptor.io.personal-server.image-ref="$image",annotation-index-descriptor.io.personal-server.image-ref="$image" "$app"
+docker buildx build --provenance=false --platform linux/amd64 --tag "$image" --file "$dockerfile" --output type=oci,dest="$output",annotation-manifest-descriptor.io.personal-server.image-ref="$image" "$app"
 
 if command -v sha256sum >/dev/null 2>&1; then
   sha256sum "$output"

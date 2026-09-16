@@ -118,8 +118,9 @@ class K3sAppImageTransferTests(unittest.TestCase):
         self.assertIn("uname -s", text)
         self.assertIn("Darwin", text)
         self.assertIn("latest", text)
+        self.assertIn("--provenance=false", text)
         self.assertIn('annotation-manifest-descriptor.io.personal-server.image-ref="$image"', text)
-        self.assertIn('annotation-index-descriptor.io.personal-server.image-ref="$image"', text)
+        self.assertNotIn("annotation-index-descriptor", text)
         self.assertIn("image_build=PASS", text)
 
     def test_import_script_requires_go_and_rejects_missing_archive_before_ctr_access(self):
