@@ -38,6 +38,8 @@ class BookMemoCutoverTests(unittest.TestCase):
         calls = base / "calls"
         calls.touch()
         state = {"compose": "running", "replicas": 0, "helper": False}
+        if scenario == "helper_collision":
+            state["helper"] = True
         if modes == ("--rollback",):
             state.update(compose="exited", replicas=1)
             (target / "memo.sqlite3").write_bytes((source / "memo.sqlite3").read_bytes())
@@ -57,7 +59,7 @@ class BookMemoCutoverTests(unittest.TestCase):
             deployed["spec"]["template"]["spec"]["initContainers"] = [{"name": "writer", "image": chosen_image}]
         fixture["deployment"] = deployed
         (base / "fixture").write_text(json.dumps(fixture))
-        mock = r'''import json, os, pathlib, subprocess, sys
+        mock = r'''import json, os, pathlib, sqlite3, subprocess, sys
 base = pathlib.Path(os.environ['CUTOVER_FIXTURE'])
 fixture = json.loads((base / 'fixture').read_text())
 state = json.loads((base / 'state').read_text())
@@ -105,22 +107,41 @@ elif name == 'sudo':
                     'volumes':[{'persistentVolumeClaim':{'claimName':'book-memo-data'}}]}})
             if state['helper']:
                 pods.append({'metadata':{'name':'book-memo-cutover-data'}, 'spec': {
-                    'volumes':[{'persistentVolumeClaim':{'claimName':'book-memo-data'}}]}})
+                    'volumes':[] if scenario == 'helper_collision' else [{'persistentVolumeClaim':{'claimName':'book-memo-data'}}]}})
             output({'items':pods})
+        elif command[:2] == ['get', 'pod']:
+            if state['helper']:
+                if scenario == 'helper_collision':
+                    output({'metadata': {'name': 'book-memo-cutover-data', 'uid': 'existing-uid'}})
+                else:
+                    output(json.loads((base / 'helper').read_text()))
         elif command[:2] == ['get', 'pvc']:
             output({'metadata':{'name':'book-memo-data'}, 'status':{'phase': 'Pending' if scenario == 'pending_pvc' else 'Bound'},
                     'spec':{'accessModes':['ReadWriteOnce']}})
         elif command[:2] == ['apply', '--dry-run=server']:
             pass
         elif command[:1] == ['create']:
+            if state['helper']: fail()
             payload = json.load(sys.stdin)
             assert payload['kind'] == 'Pod'
             assert payload['spec']['containers'][0]['image'] == fixture['image']
             assert 'envFrom' not in payload['spec']['containers'][0]
+            payload['metadata']['uid'] = 'created-uid'
+            (base / 'helper').write_text(json.dumps(payload))
             state['helper'] = True; save()
+            if scenario == 'create_response_lost': fail()
+            output(payload)
         elif command[:1] == ['wait']:
             pass
         elif command[:2] == ['delete', 'pod']:
+            state['helper'] = False; save()
+        elif command[:1] == ['delete'] and command[1].startswith('--raw='):
+            options = json.load(sys.stdin)
+            existing = json.loads((base / 'helper').read_text())
+            if scenario == 'helper_replaced':
+                existing['metadata']['uid'] = 'replacement-uid'
+                (base / 'helper').write_text(json.dumps(existing))
+            if options['preconditions']['uid'] != existing['metadata']['uid']: fail()
             state['helper'] = False; save()
         elif command[:1] == ['exec']:
             separator = command.index('--')
@@ -138,6 +159,14 @@ elif name == 'sudo':
             desired = int(next(x for x in command if x.startswith('--replicas=')).split('=')[1])
             state['replicas'] = desired; save()
         elif command[:2] == ['rollout', 'status']:
+            if scenario in ('rollout_divergence', 'rollout_unverifiable'):
+                target = pathlib.Path(fixture['target']) / 'memo.sqlite3'
+                if scenario == 'rollout_divergence':
+                    with sqlite3.connect(target) as connection:
+                        connection.execute("insert into memo values ('new-data')")
+                else:
+                    target.write_text('invalid sqlite')
+                fail()
             if scenario == 'rollout_failure': fail()
         else: fail()
 else: fail()
@@ -251,6 +280,41 @@ else: fail()
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn('"start"', calls.read_text())
         self.assertEqual(self.last_state, {"compose": "exited", "replicas": 1, "helper": False})
+
+    def test_failed_handoff_never_restores_stale_or_unverifiable_compose_data(self):
+        for scenario, stage in (("rollout_divergence", "recovery_data_divergence"),
+                                ("rollout_unverifiable", "recovery_data_unverified")):
+            with self.subTest(scenario=scenario):
+                result, calls = self.run_cutover("--go", scenario=scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, f"book_memo_cutover=FAIL stage={stage}\n")
+                self.assertNotIn('"start"', calls.read_text())
+                self.assertEqual(self.last_state, {"compose": "exited", "replicas": 0, "helper": False})
+                if scenario == "rollout_divergence":
+                    with sqlite3.connect(self.last_target / "memo.sqlite3") as connection:
+                        self.assertEqual(connection.execute("select count(*) from memo").fetchone()[0], 2)
+
+    def test_existing_helper_name_collision_never_deletes_the_existing_pod(self):
+        result, calls = self.run_cutover("--go", scenario="helper_collision")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('"delete"', calls.read_text())
+        self.assertNotIn('"stop"', calls.read_text())
+        self.assertEqual(self.last_state, {"compose": "running", "replicas": 0, "helper": True})
+
+    def test_lost_create_response_cleans_up_only_the_owned_helper(self):
+        result, calls = self.run_cutover("--go", scenario="create_response_lost")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.last_state, {"compose": "running", "replicas": 0, "helper": False})
+        commands = [json.loads(line) for line in calls.read_text().splitlines()]
+        deletes = [command for command in commands if 'delete' in command]
+        self.assertEqual(len(deletes), 1)
+        self.assertTrue(any(argument.startswith('--raw=') for argument in deletes[0]))
+
+    def test_replaced_helper_uid_is_never_deleted(self):
+        result, _ = self.run_cutover("--go", scenario="helper_replaced")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "book_memo_cutover=FAIL stage=recovery_required\n")
+        self.assertEqual(self.last_state, {"compose": "exited", "replicas": 0, "helper": True})
 
 
 class BookMemoManifestTests(unittest.TestCase):

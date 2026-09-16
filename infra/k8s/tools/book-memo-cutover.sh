@@ -14,6 +14,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import uuid
 
 
 NAMESPACE = "personal-server"
@@ -25,6 +26,9 @@ stage = "arguments"
 compose_changed = False
 k3s_changed = False
 helper_attempted = False
+helper_uid = None
+helper_owner = uuid.uuid4().hex
+OWNER_LABEL = "app.kubernetes.io/cutover-owner"
 mode = None
 
 
@@ -162,8 +166,11 @@ def data_check(location, action="verify"):
 
 
 def create_helper():
-    global helper_attempted
-    pod = {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": HELPER, "namespace": NAMESPACE},
+    global helper_attempted, helper_uid
+    require(get_helper() is None)
+    helper_uid = None
+    pod = {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": HELPER, "namespace": NAMESPACE,
+                                                            "labels": {OWNER_LABEL: helper_owner}},
            "spec": {"restartPolicy": "Never", "automountServiceAccountToken": False,
                     "securityContext": {"runAsNonRoot": True, "runAsUser": 10001, "runAsGroup": 10001,
                                         "fsGroup": 10001, "seccompProfile": {"type": "RuntimeDefault"}},
@@ -174,17 +181,55 @@ def create_helper():
                                                         "capabilities": {"drop": ["ALL"]}},
                                     "volumeMounts": [{"name": CLAIM, "mountPath": MOUNT}]}],
                     "volumes": [{"name": CLAIM, "persistentVolumeClaim": {"claimName": CLAIM}}]}}
-    # Mark before create: an interrupted response must trigger cleanup, not retry.
+    # An uncertain create response requires an ownership query, never a blind delete.
     helper_attempted = True
-    kube("create", "-f", "-", payload=json.dumps(pod).encode())
+    created = json.loads(kube("create", "-f", "-", "-o", "json", payload=json.dumps(pod).encode()))
+    require(created["metadata"].get("labels", {}).get(OWNER_LABEL) == helper_owner)
+    helper_uid = created["metadata"]["uid"]
+    require(bool(helper_uid))
     kube("wait", "--for=condition=Ready", "pod/" + HELPER, "--timeout=120s")
 
 
+def get_helper():
+    result = kube("get", "pod", HELPER, "--ignore-not-found", "-o", "json").strip()
+    return json.loads(result) if result else None
+
+
 def delete_helper():
-    global helper_attempted
+    global helper_attempted, helper_uid
     if helper_attempted:
-        kube("delete", "pod", HELPER, "--ignore-not-found", "--wait=true", "--timeout=120s")
+        current_helper = get_helper()
+        if current_helper is not None:
+            metadata = current_helper["metadata"]
+            require(metadata.get("labels", {}).get(OWNER_LABEL) == helper_owner)
+            require(bool(metadata.get("uid")))
+            if helper_uid is None:
+                helper_uid = metadata["uid"]
+            require(metadata["uid"] == helper_uid)
+            # UID precondition makes replacement between GET and DELETE safe.
+            options = {"apiVersion": "v1", "kind": "DeleteOptions",
+                       "preconditions": {"uid": helper_uid}}
+            kube("delete", "--raw=/api/v1/namespaces/" + NAMESPACE + "/pods/" + HELPER,
+                 "-f", "-", payload=json.dumps(options).encode())
+            kube("wait", "--for=delete", "pod/" + HELPER, "--timeout=120s")
+            require(get_helper() is None)
         helper_attempted = False
+        helper_uid = None
+
+
+def recovery_data_matches():
+    global stage
+    create_helper()
+    try:
+        matches = data_check("target") == data_check("source")
+    except Exception:
+        stage = "recovery_data_unverified"
+        delete_helper()
+        return False
+    delete_helper()
+    if not matches:
+        stage = "recovery_data_divergence"
+    return matches
 
 
 def recover():
@@ -195,6 +240,10 @@ def recover():
             if k3s_changed:
                 stop_k3s()
             delete_helper()
+            writers_absent()
+            if k3s_changed and not recovery_data_matches():
+                # Keep both app writers stopped and preserve the newer PVC data.
+                return
             writers_absent()
             run(["docker", "start", APP])
             wait_healthy()
@@ -273,6 +322,9 @@ try:
             and set(volumes["tmp"]) == {"name", "emptyDir"})
     require(container.get("volumeMounts") == [{"name": CLAIM, "mountPath": MOUNT},
                                              {"name": "tmp", "mountPath": "/tmp"}])
+
+    stage = "helper_collision"
+    require(get_helper() is None)
 
     if mode in {"--check", "--prepare", "--go"}:
         stage = "compose_health"
