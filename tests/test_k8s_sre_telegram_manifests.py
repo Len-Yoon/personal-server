@@ -49,6 +49,7 @@ class SreTelegramManifestContractTests(unittest.TestCase):
             "ServiceMonitor",
             "crawler-news-observability",
         )
+        self.assertEqual(monitor["spec"].get("serviceDiscoveryRole"), "EndpointSlice")
         self.assertEqual(monitor["spec"]["namespaceSelector"], {"matchNames": ["personal-server"]})
         self.assertEqual(
             monitor["spec"]["selector"],

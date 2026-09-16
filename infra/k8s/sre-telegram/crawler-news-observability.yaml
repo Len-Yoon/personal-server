@@ -6,6 +6,7 @@ metadata:
   labels:
     release: personal-server-monitoring
 spec:
+  serviceDiscoveryRole: EndpointSlice
   namespaceSelector:
     matchNames:
       - personal-server
