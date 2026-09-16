@@ -108,11 +108,14 @@ jobs:
           set -euo pipefail
           if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
             printf '%s\n' 'Telegram notification secrets are not configured; skipping delivery.' >&2
-            printf 'skipped=true\n' >> "$GITHUB_OUTPUT"
+            printf 'delivery=unavailable\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           telegram_response="$(mktemp)"
           trap 'rm -f "$telegram_response"' EXIT
+          record_delivery_failure() {
+            printf 'delivery=failed\n' >> "$GITHUB_OUTPUT"
+          }
           case "$NOTIFICATION" in
             down)
               message='[개인서버 장애] 외부 점검에서 접속 실패를 확인했습니다. 자동복구 상태를 확인하세요.'
@@ -136,34 +139,41 @@ jobs:
             200)
               if ! jq -e '.ok == true and (.result.message_id | numbers)' "$telegram_response" >/dev/null; then
                 printf '%s\n' 'Telegram returned an invalid success response.' >&2
+                record_delivery_failure
                 exit 1
               fi
               printf 'accepted=true\n' >> "$GITHUB_OUTPUT"
+              printf 'delivery=accepted\n' >> "$GITHUB_OUTPUT"
               ;;
             400)
               printf '%s\n' 'Telegram rejected chat configuration. Check chat ID format and bot membership.' >&2
+              record_delivery_failure
               exit 1
               ;;
             401|404)
               printf '%s\n' 'Telegram rejected bot credentials.' >&2
+              record_delivery_failure
               exit 1
               ;;
             403)
               printf '%s\n' 'Telegram blocked bot delivery.' >&2
+              record_delivery_failure
               exit 1
               ;;
             000|'')
               printf '%s\n' 'Telegram delivery connection failed.' >&2
+              record_delivery_failure
               exit 1
               ;;
             *)
               printf 'Telegram delivery failed with HTTP status %s.\n' "$telegram_status" >&2
+              record_delivery_failure
               exit 1
               ;;
           esac
 
       - name: Confirm Telegram delivery before committing transition
-        if: steps.incident.outputs.notification != '' && steps.telegram.outputs.accepted == 'true'
+        if: always() && steps.incident.outputs.notification != ''
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
@@ -171,11 +181,32 @@ jobs:
             const issueNumber = Number("${{ steps.incident.outputs.issue_number }}");
             const downSentMarker = "<!-- uptime-down-telegram:sent -->";
             const recoveryMarker = "<!-- uptime-recovered-telegram:accepted -->";
+            const deliveryFailureMarker = "<!-- uptime-telegram-delivery:failed -->";
+            const delivery = "${{ steps.telegram.outputs.delivery }}";
             const issue = await github.rest.issues.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: issueNumber,
             });
+
+            if (delivery === "failed" || delivery === "unavailable") {
+              const currentBody = issue.data.body || "";
+              const evidence = "알림 미전송: 상태 전환 Telegram 전송 증적이 없음";
+              const bodyWithEvidence = currentBody.includes(evidence) ? currentBody : `${currentBody}\n${evidence}`;
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: bodyWithEvidence.includes(deliveryFailureMarker)
+                  ? bodyWithEvidence
+                  : `${bodyWithEvidence}\n${deliveryFailureMarker}`,
+              });
+              return;
+            }
+
+            if (delivery !== "accepted") {
+              throw new Error("Unknown Telegram delivery state.");
+            }
 
             if (notification === "down") {
               const currentBody = issue.data.body || "";

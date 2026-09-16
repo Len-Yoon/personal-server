@@ -115,6 +115,20 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("Supervisor", uptime)
         self.assertIn("알림 미전송", uptime)
 
+    def test_public_uptime_docs_distinguish_monitor_path_failures_and_news_collection_boundary(self):
+        uptime = Path("docs/public-uptime-monitor.md").read_text(encoding="utf-8")
+        roadmap = Path("docs/operations-roadmap.md").read_text(encoding="utf-8")
+
+        self.assertIn("감시 실행 실패", uptime)
+        self.assertIn("Telegram 전달 실패", uptime)
+        self.assertIn("다음 성공적으로 끝난 점검", uptime)
+        self.assertIn("예약 실행 자체가 시작되지 않는 경우", uptime)
+        self.assertIn("외부 제공자 없이 감지할 수 없음", uptime)
+        self.assertIn("자동 재시작 또는 자동 복구를 수행하지 않음", uptime)
+        self.assertIn("감시 경로 식별·알림 보강", roadmap)
+        self.assertIn("Cloudflare Tunnel 읽기 전용 설정·문서 drift 점검", roadmap)
+        self.assertIn("YouTube Memo 선행 K3s 이전", roadmap)
+
     def test_reboot_docs_describe_post_boot_check_without_new_telegram_message(self):
         uptime = Path("docs/public-uptime-monitor.md").read_text(encoding="utf-8")
 

@@ -486,8 +486,16 @@ class RelayServiceTest(unittest.TestCase):
         )
         self.assertIn("뉴스 수집 지연 또는 실패", message)
         self.assertIn("최신 뉴스가 갱신되지 않을 수 있음", message)
+        self.assertIn("상태: 다음 수집 상태를 확인 중입니다.", message)
+        self.assertNotIn("상태: 자동 복구를 확인 중입니다.", message)
         self.assertNotIn("token", message.lower())
         self.assertNotIn("http", message.lower())
+
+        resolved_message = relay._format_alert(
+            "resolved",
+            [{"labels": {"alertname": "NewsCollectionStale"}}],
+        )
+        self.assertIn("상태: 정상으로 돌아왔습니다.", resolved_message)
 
     def test_absent_or_unreadable_backup_status_configmap_keeps_relay_healthy(self):
         for error in (
@@ -740,6 +748,7 @@ class RelayServiceTest(unittest.TestCase):
         self.assertIn("영향: 웹사이트가 열리지 않을 수 있음", reply)
         self.assertIn("대상: personal-server / portal-web", reply)
         self.assertIn("상태: 자동 복구를 확인 중입니다.", reply)
+        self.assertNotIn("상태: 다음 수집 상태를 확인 중입니다.", reply)
         self.assertNotIn("PortalUnavailable", reply)
 
     def test_resolved_alert_is_formatted(self):

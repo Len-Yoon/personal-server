@@ -22,6 +22,24 @@ N100의 로컬 감시기와 GitHub Actions가 상호 보완적으로 장애·복
 
 Telegram Secret이 누락되었거나 Telegram 장애 메시지 전송이 실패하면 GitHub Actions는 외부 health 점검과 장애 Issue 상태 처리를 계속함. 전송이 가능한 다음 실패 점검에서 장애 메시지 전송을 다시 시도함. 성공 기록이 남기 전까지 복구 전환 메시지를 보내지 않음. 알림 전송 증적이 없는 Issue가 정상 전환을 맞으면 복구 Telegram을 보내지 않고 `알림 미전송` 증적을 남긴 뒤 종료함. 따라서 장애 알림이 수신됐는지와 이후 정상 점검이 모두 확인되어야 복구 알림이 발송됨.
 
+### 감시 경로 실패 알림
+
+공개 health 결과와 별도로, `Public Uptime Monitor Path Observer`가 완료된 공개 감시 실행을 읽어 감시 경로의 실패를 구분함. 이 관찰자는 원본 workflow의 고정된 job·Telegram step 결론만 조회하며, 원본 코드·artifact·실행 로그는 내려받거나 실행하지 않음.
+
+| 구분 | Telegram 메시지 | GitHub Issue 처리 | 다음 정상 전환 |
+|---|---|---|---|
+| 감시 실행 실패 | `[감시 실행 실패]` | `[SRE] 공개 감시 경로 장애` Issue를 열거나 유지함 | 다음 성공적으로 끝난 점검에서 `[감시 경로 복구]`를 1회 전송하고 Issue를 닫음 |
+| Telegram 전달 실패 | `[감시 알림 전송 실패]`를 전송할 수 있을 때만 보냄 | 전달에 성공하기 전까지 성공 marker 없이 Issue를 유지함 | 다음 성공적으로 끝난 점검에서 이전 전달 성공 기록이 있을 때만 복구를 알림 |
+| 취소·건너뜀·대기시간 초과 | 알리지 않음 | Issue를 변경하지 않음 | 해당 없음 |
+
+관찰 workflow 자체의 Telegram 전송이 실패하면 Telegram으로 즉시 알릴 수 없으므로 Issue 증적만 유지함. 다음 원본 공개 감시 실행에서 Telegram 전송을 다시 시도함. Telegram Bot token, Chat ID, API 응답 본문, 원본 실행 오류 원문은 Telegram·Issue·workflow 출력에 기록하지 않음.
+
+GitHub Actions의 예약 실행 자체가 시작되지 않는 경우는 이 workflow로 확인할 실행 결과가 없으므로, 새 외부 제공자 없이 감지할 수 없음. 수동 확인이 필요하면 GitHub Actions 실행 이력과 열린 `[SRE] 공개 감시 경로 장애` Issue를 확인함.
+
+### K3s 뉴스 수집 지연 알림
+
+`NewsCollectionStale`는 뉴스 수집 성공 시각·시도 시각·연속 실패 수를 기준으로 Alertmanager가 감지함. firing Telegram에는 `다음 수집 상태를 확인 중입니다.`라고 표시함. 현재 이 알림은 수집 상태를 감지·알릴 뿐 crawler의 자동 재시작 또는 자동 복구를 수행하지 않음. 수신 시 Prometheus target과 crawler 로그·스케줄러 상태를 확인 필요함.
+
 ### N100 직접 Tunnel 알림
 
 N100 감시기는 `cloudflared-personal-server.service`의 상태와 Tunnel 프로세스를 주기적으로 확인함. Tunnel 장애를 처음 확인하면 `[개인서버 장애]` 메시지를 1회 전송하고, 기존 임계치에 따라 로컬 복구를 시도함. 이후 Tunnel 서비스와 프로세스가 정상으로 돌아오면 `[개인서버 복구]` 메시지를 1회 전송함.
@@ -101,6 +119,6 @@ Credential Manager 등록 여부는 자격증명 원문을 출력하지 않고 �
 - GitHub Actions의 예약 실행은 약 5분 간격이며, GitHub 부하에 따라 지연되거나 실행 간격이 길어질 수 있음. 즉시 확인이 필요하면 수동 점검을 실행함.
 - 재부팅이 점검 사이에 끝나면 장애 전환이 확인되지 않으므로 알림을 보내지 않음.
 - 이는 재부팅 알림 기능이 아니라, 외부에서 실제 접속 실패를 확인했을 때만 알리는 기능임.
-- GitHub Actions 또는 Telegram API 자체 장애는 별도로 감지하지 못함. Telegram 전송 실패 여부는 해당 workflow 실행 로그에서 확인 필요함.
+- 완료된 GitHub Actions 실행의 실패와 Telegram 전달 실패는 감시 경로 Issue·Telegram 전환으로 구분함. 다만 GitHub Actions 예약 실행 자체가 시작되지 않는 경우는 외부 제공자 없이 감지하지 못함.
 - N100 직접 알림은 N100 전원·WSL·네트워크 또는 Credential Manager 접근이 불가능한 경우 전송되지 않음. 이 경우 GitHub Actions 외부 점검 경로가 보완함.
 - GitHub Actions와 N100은 감지 주기가 다르므로 장애·복구 메시지가 중복 수신될 수 있음. 각 경로는 자체 상태 전환 기준으로 중복을 억제함.
