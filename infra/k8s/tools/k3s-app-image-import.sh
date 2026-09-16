@@ -18,28 +18,55 @@ import sys
 import tarfile
 
 archive = sys.argv[1]
+INDEX_MEDIA_TYPES = {
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+}
+
+
+def read_blob_json(source, descriptor):
+    digest = descriptor.get("digest", "")
+    if not digest.startswith("sha256:") or len(digest) != 71:
+        raise ValueError("invalid OCI descriptor digest")
+    digest_value = digest.split(":", 1)[1]
+    if any(character not in "0123456789abcdef" for character in digest_value):
+        raise ValueError("invalid OCI descriptor digest")
+    member = source.extractfile("blobs/sha256/" + digest_value)
+    if member is None:
+        raise ValueError("OCI descriptor blob is missing")
+    return json.load(member)
+
+
+def resolves_to_linux_amd64(source, descriptor, visited):
+    digest = descriptor.get("digest", "")
+    if digest in visited:
+        return False
+    visited.add(digest)
+    document = read_blob_json(source, descriptor)
+    media_type = descriptor.get("mediaType", "")
+    if media_type in INDEX_MEDIA_TYPES or "manifests" in document:
+        manifests = document.get("manifests", [])
+        return any(resolves_to_linux_amd64(source, child, visited) for child in manifests)
+
+    config = document.get("config", {})
+    if not isinstance(config, dict):
+        return False
+    config_document = read_blob_json(source, config)
+    return (
+        config_document.get("os") == "linux"
+        and config_document.get("architecture") == "amd64"
+    )
+
+
 with tarfile.open(archive, "r:*") as source:
-    index = json.load(source.extractfile("index.json"))
+    index_member = source.extractfile("index.json")
+    if index_member is None:
+        raise ValueError("OCI index is missing")
+    index = json.load(index_member)
     manifests = index.get("manifests", [])
     if not manifests:
         raise ValueError("OCI index has no manifests")
-    for manifest in manifests:
-        platform = manifest.get("platform")
-        if platform == {"os": "linux", "architecture": "amd64"}:
-            sys.exit(0)
-        digest = manifest.get("digest", "")
-        if not digest.startswith("sha256:"):
-            continue
-        manifest_path = "blobs/sha256/" + digest.split(":", 1)[1]
-        image_manifest = json.load(source.extractfile(manifest_path))
-        config_digest = image_manifest.get("config", {}).get("digest", "")
-        if not config_digest.startswith("sha256:"):
-            continue
-        config_path = "blobs/sha256/" + config_digest.split(":", 1)[1]
-        config = json.load(source.extractfile(config_path))
-        if config.get("os") == "linux" and config.get("architecture") == "amd64":
-            sys.exit(0)
-sys.exit(1)
+    sys.exit(0 if any(resolves_to_linux_amd64(source, manifest, set()) for manifest in manifests) else 1)
 PY
 }
 
