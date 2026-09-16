@@ -44,8 +44,8 @@ _QUERY_PORTAL_HTTP_P95 = (
     "(increase(portal_http_request_duration_seconds_bucket[24h])))"
 )
 _QUERY_PORTAL_READY = (
-    'min_over_time(kube_deployment_status_replicas_available{namespace="personal-server",'
-    'deployment="portal-web"}[24h])'
+    'min(min_over_time(kube_deployment_status_replicas_available{namespace="personal-server",'
+    'deployment="portal-web"}[24h]))'
 )
 _QUERY_CRAWLER_FRESHNESS = (
     "min_over_time(((crawler_news_collection_initialized == bool 1) * "

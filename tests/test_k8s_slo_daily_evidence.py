@@ -234,6 +234,43 @@ class SloDailyEvidenceValidationTests(unittest.TestCase):
 
 
 class SloDailyEvidenceCollectionTests(unittest.TestCase):
+    def test_portal_ready_query_aggregates_all_matching_series_to_one_scalar(self):
+        query = module._QUERY_PORTAL_READY
+
+        self.assertEqual(
+            query,
+            'min(min_over_time(kube_deployment_status_replicas_available{'
+            'namespace="personal-server",deployment="portal-web"}[24h]))',
+        )
+
+        class Response:
+            status = 200
+
+            def read(self):
+                return json.dumps({
+                    "status": "success",
+                    "data": {
+                        "resultType": "vector",
+                        # Two matching KSM series are reduced by the query itself.
+                        "result": [{"metric": {}, "value": [0, "1"]}],
+                    },
+                }).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *unused):
+                return False
+
+        def fake_urlopen(request, timeout):
+            self.assertEqual(parse_qs(urlparse(request.full_url).query)["query"][0], query)
+            return Response()
+
+        self.assertEqual(
+            module._prometheus_scalar("http://prometheus.example/api/v1/query", query, urlopen=fake_urlopen),
+            1,
+        )
+
     def test_crawler_query_uses_numeric_bool_multiplication_for_stale_conditions(self):
         query = module._QUERY_CRAWLER_FRESHNESS
 
