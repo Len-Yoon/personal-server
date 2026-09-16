@@ -347,12 +347,34 @@ else: fail()
 class BookMemoPrepareTests(unittest.TestCase):
     def run_prepare(self, *arguments, secret_exists=True, listed_image=None,
                     foreign_resource_after_dry_run=False, unexpected_dry_run_resource=False,
-                    sequential_dry_run_output=False):
+                    sequential_dry_run_output=False, manifest_line_endings=None,
+                    manifest_mutation=None):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         base = Path(directory.name)
         binaries = base / "bin"
         binaries.mkdir()
+        script = PREPARE
+        if manifest_line_endings or manifest_mutation:
+            tools = base / "tools"
+            apps = base / "apps"
+            tools.mkdir()
+            apps.mkdir()
+            script = tools / PREPARE.name
+            script.write_text(PREPARE.read_text(encoding="utf-8"), encoding="utf-8")
+            script.chmod(0o755)
+            manifest = MANIFEST.read_text(encoding="utf-8")
+            if manifest_mutation == "bad_replica":
+                manifest = manifest.replace("  replicas: 0", "  replicas: 1", 1)
+            elif manifest_mutation == "duplicate_sentinel":
+                manifest += f"\n          image: {UNCONFIGURED_IMAGE}\n"
+            elif manifest_mutation is not None:
+                raise ValueError(f"unsupported manifest mutation: {manifest_mutation}")
+            if manifest_line_endings == "crlf":
+                manifest = manifest.replace("\n", "\r\n")
+            elif manifest_line_endings is not None:
+                raise ValueError(f"unsupported manifest line ending: {manifest_line_endings}")
+            (apps / MANIFEST.name).write_text(manifest, encoding="utf-8", newline="")
         image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
         fixture = {"image": image, "listed_image": listed_image or image,
                    "secret_exists": secret_exists, "applied": False,
@@ -424,7 +446,7 @@ sys.exit(1)
         executable.chmod(0o755)
         environment = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
                        "PREPARE_FIXTURE": str(base)}
-        result = subprocess.run(["bash", str(PREPARE), *arguments], env=environment,
+        result = subprocess.run(["bash", str(script), *arguments], env=environment,
                                 text=True, capture_output=True, timeout=20)
         self.last_prepare_rendered = tuple(
             (base / name).read_text() if (base / name).exists() else None
@@ -491,6 +513,28 @@ sys.exit(1)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('"create", "--dry-run=server"', calls)
         self.assertIn('"create", "-f", "-"', calls)
+
+    def test_prepare_accepts_equivalent_crlf_manifest_without_relaxing_inert_contract(self):
+        image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
+        result, calls = self.run_prepare(
+            "--go", "--image", image, manifest_line_endings="crlf",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "book_memo_prepare=PASS\n")
+        self.assertIn('"create", "--dry-run=server"', calls)
+        self.assertIn('"create", "-f", "-"', calls)
+
+    def test_prepare_rejects_crlf_manifest_without_exact_inert_contract(self):
+        image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
+        for mutation in ("bad_replica", "duplicate_sentinel"):
+            with self.subTest(mutation=mutation):
+                result, calls = self.run_prepare(
+                    "--go", "--image", image, manifest_line_endings="crlf",
+                    manifest_mutation=mutation,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, "book_memo_prepare=FAIL stage=manifest\n")
+                self.assertEqual(calls, "")
 
 
 class BookMemoManifestTests(unittest.TestCase):
