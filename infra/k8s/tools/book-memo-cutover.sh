@@ -22,6 +22,7 @@ APP = "book-memo"
 CLAIM = "book-memo-data"
 HELPER = "book-memo-cutover-data"
 MOUNT = "/data/book-memo"
+UNCONFIGURED_IMAGE = "personal-server-book-memo:unconfigured-do-not-run"
 stage = "arguments"
 compose_changed = False
 k3s_changed = False
@@ -284,7 +285,7 @@ try:
             raise RuntimeError()
     require(mode in modes and set(options) == {"--source", "--database", "--image"})
     image = options["--image"]
-    require(re.fullmatch(r"personal-server-book-memo@sha256:[0-9a-f]{64}", image))
+    require(re.fullmatch(r"docker\.io/library/personal-server-book-memo@sha256:[0-9a-f]{64}", image))
     source = Path(options["--source"])
     require(source.is_absolute() and source.is_dir() and source.resolve() == source
             and source != Path("/"))
@@ -338,7 +339,10 @@ try:
     if mode == "--prepare":
         stage = "dry_run"
         manifest = Path(sys.argv[1]).resolve().parents[1] / "apps" / "book-memo.yaml"
-        kube("apply", "--dry-run=server", "-f", str(manifest))
+        template = manifest.read_text(encoding="utf-8")
+        require(template.count(UNCONFIGURED_IMAGE) == 1)
+        kube("apply", "--dry-run=server", "-f", "-",
+             payload=template.replace(UNCONFIGURED_IMAGE, image).encode())
     elif mode == "--go":
         stage = "compose_stop"
         compose_changed = True

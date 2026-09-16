@@ -74,12 +74,22 @@ HomeOps 실행기는 Docker socket을 제한된 allowlist 진단·재시작에�
 
 ## Book Memo K3s 전환 승인·검증
 
-Book Memo 전환 도구는 서비스별 사용자 승인 후 운영자가 수동으로 실행함. 이미지 반입, 전용 PVC 준비, replica 0의 Deployment 준비 및 runtime Secret 사전 시딩은 별도 승인 절차임. 사전 준비 전에는 도구가 실패하도록 구성됨. 운영 적용·공개 경로 변경·자동 실행 활성화를 저장소 구현 완료와 구분하여 보고함.
+Book Memo 전환 도구는 서비스별 사용자 승인 후 운영자가 수동으로 실행함. 정적 `book-memo.yaml`은 실행 불가 sentinel 이미지와 replica 0만 포함하므로 직접 적용하지 않음. 운영 적용·공개 경로 변경·자동 실행 활성화를 저장소 구현 완료와 구분하여 보고함.
+
+준비·전환 순서는 다음과 같음.
+
+1. 검증된 Linux AMD64 OCI 이미지를 `k3s-app-image-import.sh --go`로 반입하고, 성공 출력의 canonical digest 별칭을 다음 단계 입력으로 사용함.
+2. 운영자가 기존 런타임 설정과 동일한 `book-memo-runtime` Secret을 사전 시딩함. Secret 값은 조회·출력·복제하지 않음.
+3. 별도 승인 후 `book-memo-prepare.sh --go --image docker.io/library/personal-server-book-memo@sha256:<digest>`를 실행함. 이 도구만 importer가 등록·검증한 canonical immutable digest 별칭을 sentinel에 메모리에서 치환하고 PVC·Deployment·Service를 replica 0으로 생성함.
+4. `book-memo-cutover.sh --check`으로 writer 부재·PVC·이미지·Deployment 계약을 읽기 전용 검증함.
+5. 별도 전환 승인 후에만 `book-memo-cutover.sh --go`를 실행함.
+
+준비 도구는 Docker·원본 데이터·Secret 값을 읽거나 변경하지 않으며 replica를 1로 올리지 않음. 기존 PVC·Deployment·Service 중 하나라도 있으면 중단함.
 
 | 모드 | 승인·수행 범위 | 검증·실패 처리 | 비고 |
 |---|---|---|---|
 | `--check` | 읽기 전용 사전 점검 | Compose health, K3s writer 부재, 반입된 digest 고정 AMD64 이미지, Bound PVC, Deployment 계약 확인 | 데이터 복사 없음 |
-| `--prepare` | 사전 점검 및 Kubernetes server dry-run | 실제 리소스를 생성하지 않음 | 사전 준비 리소스 필요 |
+| `--prepare` | 사전 점검 및 Kubernetes server dry-run | 실제 리소스를 생성하지 않음 | `book-memo-prepare.sh --go` 적용 이후에만 사용 |
 | `--go` | 별도 전환 승인 후 Compose 중지, 빈 PVC로 1회 복사, K3s writer 기동 | Compose 중지 재확인, 양쪽 SQLite `PRAGMA quick_check`, 전체 데이터 digest 일치, rollout 확인 | 실패 시 K3s 종료 확인 후 Compose 복구 |
 | `--rollback` | 별도 롤백 승인 후 K3s 중지 및 Compose 복귀 | 양쪽 데이터가 같을 때만 복귀함. 데이터가 달라졌으면 K3s를 복구하고 실패함 | 신규 쓰기 이후 역방향 데이터 복사는 별도 승인 필요 |
 

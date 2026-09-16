@@ -17,7 +17,9 @@ metadata:
   labels:
     app.kubernetes.io/name: book-memo
 spec:
-  replicas: 1
+  # This manifest is intentionally inert. book-memo-prepare.sh replaces the
+  # sentinel with an imported immutable digest, while preserving replica 0.
+  replicas: 0
   strategy:
     type: Recreate
   selector:
@@ -38,7 +40,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: book-memo
-          image: personal-server-book-memo:v1
+          image: personal-server-book-memo:unconfigured-do-not-run
           imagePullPolicy: Never
           ports:
             - name: http

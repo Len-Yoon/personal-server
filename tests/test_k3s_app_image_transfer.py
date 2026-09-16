@@ -86,10 +86,21 @@ class K3sAppImageTransferTests(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             "printf '%s\\n' \"$*\" >> \"$CALL_LOG\"\n"
             "if [ \"$3\" = kubectl ]; then exit 0; fi\n"
-            "if [ \"$3 $4 $5\" = 'ctr images import' ]; then exit 0; fi\n"
+            "if [ \"$3 $4 $5\" = 'ctr images import' ]; then\n"
+            "  if [ -n \"${REGISTRY_STATE:-}\" ]; then printf '%s\\n' \"$TAG_ONLY_ROW\" > \"$REGISTRY_STATE\"; fi\n"
+            "  exit 0\n"
+            "fi\n"
+            "if [ \"$3 $4 $5\" = 'ctr images tag' ]; then\n"
+            "  [ -n \"${REGISTRY_STATE:-}\" ] || exit 64\n"
+            "  [ \"$6\" = \"$TAG_SOURCE\" ] && [ \"$7\" = \"$CANONICAL_ALIAS\" ] || exit 64\n"
+            "  printf '%s\\n' \"$ALIAS_ROW\" >> \"$REGISTRY_STATE\"\n"
+            "  exit 0\n"
+            "fi\n"
             "if [ \"$3 $4 $5\" = 'ctr images list' ]; then\n"
             "  printf '%s\\n' 'REF TYPE DIGEST SIZE PLATFORMS LABELS'\n"
-            "  if [ -n \"${LISTING_ROWS:-}\" ]; then\n"
+            "  if [ -n \"${REGISTRY_STATE:-}\" ]; then\n"
+            "    cat \"$REGISTRY_STATE\"\n"
+            "  elif [ -n \"${LISTING_ROWS:-}\" ]; then\n"
             "    printf '%s\\n' \"$LISTING_ROWS\"\n"
             "  else\n"
             "    printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"${LISTING_REF:-personal-server-book-memo:v1}\" 'application/vnd.oci.image.manifest.v1+json' \"$LISTING_DIGEST\" '1.0 KiB' 'linux/amd64' '-'\n"
@@ -108,6 +119,44 @@ class K3sAppImageTransferTests(unittest.TestCase):
             encoding="utf-8",
         )
         fake_sha256sum.chmod(0o755)
+
+    def _run_tag_only_registry_import(self, temporary_path, alias_row=None):
+        archive = temporary_path / "image.tar"
+        command_directory = temporary_path / "bin"
+        command_directory.mkdir()
+        call_log = temporary_path / "calls.log"
+        registry_state = temporary_path / "registry-state"
+        archive_digest = self._write_nested_oci_archive(
+            archive,
+            "amd64",
+            custom_image_refs=("personal-server-book-memo:k3s-test",),
+            standard_image_ref="k3s-test",
+        )
+        source = "docker.io/library/personal-server-book-memo:k3s-test"
+        alias = "docker.io/library/personal-server-book-memo@" + archive_digest
+        row = " application/vnd.oci.image.manifest.v1+json " + archive_digest + " 1.0 KiB linux/amd64 -"
+        self._write_fake_sudo(command_directory)
+        result = subprocess.run(
+            [
+                "bash", str(IMPORT), "--go", "--archive", str(archive),
+                "--sha256", hashlib.sha256(archive.read_bytes()).hexdigest(),
+                "--image", "personal-server-book-memo:k3s-test",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={
+                **os.environ,
+                "CALL_LOG": str(call_log),
+                "REGISTRY_STATE": str(registry_state),
+                "TAG_ONLY_ROW": source + row,
+                "ALIAS_ROW": alias + row if alias_row is None else alias_row,
+                "TAG_SOURCE": source,
+                "CANONICAL_ALIAS": alias,
+                "PATH": f"{command_directory}:{os.environ['PATH']}",
+            },
+        )
+        return result, call_log.read_text(encoding="utf-8"), registry_state, source, alias, row
 
     def test_build_script_requires_supported_app_amd64_and_explicit_output(self):
         text = BUILD.read_text(encoding="utf-8")
@@ -135,6 +184,36 @@ class K3sAppImageTransferTests(unittest.TestCase):
         self.assertIn("image_import=FAIL", result.stderr)
         self.assertNotIn("ctr images import", result.stdout + result.stderr)
 
+    def test_import_rejects_digest_reference_input_before_containerd_access(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_path = Path(temporary_directory)
+            archive = temporary_path / "image.tar"
+            command_directory = temporary_path / "bin"
+            command_directory.mkdir()
+            call_log = temporary_path / "calls.log"
+            archive.write_bytes(b"fixture")
+            self._write_fake_sudo(command_directory)
+
+            result = subprocess.run(
+                [
+                    "bash", str(IMPORT), "--go", "--archive", str(archive),
+                    "--sha256", "a" * 64,
+                    "--image", "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "CALL_LOG": str(call_log),
+                    "PATH": f"{command_directory}:{os.environ['PATH']}",
+                },
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("digest image reference is not allowed", result.stderr)
+            self.assertFalse(call_log.exists())
+
     def test_import_script_verifies_digest_platform_and_node_before_import(self):
         text = IMPORT.read_text(encoding="utf-8")
 
@@ -159,6 +238,10 @@ class K3sAppImageTransferTests(unittest.TestCase):
                 standard_image_ref="v1",
             )
             self._write_fake_sudo(command_directory)
+            registry_state = temporary_path / "registry-state"
+            source = "docker.io/library/personal-server-book-memo:v1"
+            alias = "docker.io/library/personal-server-book-memo@" + archive_digest
+            row = " application/vnd.oci.image.manifest.v1+json " + archive_digest + " 1.0 KiB linux/amd64 -"
 
             result = subprocess.run(
                 [
@@ -172,8 +255,11 @@ class K3sAppImageTransferTests(unittest.TestCase):
                 env={
                     **os.environ,
                     "CALL_LOG": str(call_log),
-                    "LISTING_REF": "docker.io/library/personal-server-book-memo:v1",
-                    "LISTING_DIGEST": archive_digest,
+                    "REGISTRY_STATE": str(registry_state),
+                    "TAG_ONLY_ROW": source + row,
+                    "ALIAS_ROW": alias + row,
+                    "TAG_SOURCE": source,
+                    "CANONICAL_ALIAS": alias,
                     "PATH": f"{command_directory}:{os.environ['PATH']}",
                 },
             )
@@ -181,6 +267,40 @@ class K3sAppImageTransferTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("image_import=PASS", result.stdout)
             self.assertIn("k3s ctr images import", call_log.read_text(encoding="utf-8"))
+
+    def test_import_registers_and_verifies_canonical_digest_alias_after_tag_only_import(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_path = Path(temporary_directory)
+            result, calls, registry_state, source, alias, row = self._run_tag_only_registry_import(temporary_path)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("k3s ctr images tag " + source + " " + alias, calls)
+            self.assertEqual(registry_state.read_text(encoding="utf-8").splitlines(), [source + row, alias + row])
+
+    def test_import_fails_closed_when_canonical_digest_alias_is_not_registered(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result, calls, registry_state, source, alias, row = self._run_tag_only_registry_import(
+                Path(temporary_directory), alias_row="",
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("canonical digest alias is missing or invalid", result.stderr)
+            self.assertIn("k3s ctr images tag " + source, calls)
+            self.assertEqual(registry_state.read_text(encoding="utf-8").splitlines()[0], source + row)
+            self.assertNotIn(alias, registry_state.read_text(encoding="utf-8"))
+
+    def test_import_rejects_unrelated_canonical_alias_registration(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_path = Path(temporary_directory)
+            unrelated = "docker.io/library/unrelated@sha256:" + "a" * 64
+            row = " application/vnd.oci.image.manifest.v1+json sha256:" + "a" * 64 + " 1.0 KiB linux/amd64 -"
+            result, calls, _, source, _, _ = self._run_tag_only_registry_import(
+                temporary_path, alias_row=unrelated + row,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("canonical digest alias is missing or invalid", result.stderr)
+            self.assertIn("k3s ctr images tag " + source, calls)
 
     def test_import_rejects_unannotated_archive_when_requested_image_already_exists(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
