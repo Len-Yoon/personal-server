@@ -18,6 +18,10 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 health_audit=failed
 backup_check=failed
 recovery_lab=failed
+slo_evidence=unobservable
+slo_days_recorded=0
+slo_days_ok=0
+slo_days_unobservable=0
 validation_failure_stage=none
 cleanup_status=not_run
 RUN_ID="audit-$$"
@@ -153,7 +157,7 @@ report_status() {
   completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ) || return 1
   case "$REPORT_MODE" in
     official)
-      payload=$(printf '{"data":{"run_id":"%s","status":"%s","completed_at":"%s","health_audit":"%s","backup_check":"%s","recovery_lab":"%s","health_check":null,"backup_evidence":null}}' "$RUN_ID" "$overall" "$completed_at" "$health_audit" "$backup_check" "$recovery_lab") || return 1
+      payload=$(printf '{"data":{"run_id":"%s","status":"%s","completed_at":"%s","health_audit":"%s","backup_check":"%s","recovery_lab":"%s","slo_evidence":"%s","slo_days_recorded":"%s","slo_days_ok":"%s","slo_days_unobservable":"%s","health_check":null,"backup_evidence":null}}' "$RUN_ID" "$overall" "$completed_at" "$health_audit" "$backup_check" "$recovery_lab" "$slo_evidence" "$slo_days_recorded" "$slo_days_ok" "$slo_days_unobservable") || return 1
       kubectl -n "$STATUS_NAMESPACE" patch configmap "$STATUS_CONFIGMAP" --type merge --patch "$payload" >/dev/null 2>&1 || return 1
       ;;
     validation)
@@ -228,6 +232,104 @@ check_backup_evidence() {
   [[ "$runtime_count" == 1 ]]
 }
 
+read_slo_evidence() {
+  local evidence_file summary
+  evidence_file=$(mktemp /tmp/monthly-slo-evidence.XXXXXX) || return 1
+  chmod 0600 "$evidence_file" || { rm -f -- "$evidence_file"; return 1; }
+  if ! kubectl -n monitoring get configmap slo-daily-evidence \
+    -o jsonpath='{.data.records\.json}' --request-timeout=10s >"$evidence_file" 2>/dev/null; then
+    rm -f -- "$evidence_file"
+    return 1
+  fi
+  if ! summary=$(python3 - "$evidence_file" 2>/dev/null <<'PY'
+from datetime import date, datetime, timedelta, timezone
+import json
+import math
+import re
+import sys
+from zoneinfo import ZoneInfo
+
+FIELDS = {"date", "collected_at", "overall", "public_health", "portal_ready", "portal_http", "crawler_freshness", "missing"}
+SOURCES = {"public_health", "portal_ready", "portal_http", "crawler_freshness"}
+STATUS_FIELDS = ("public_health", "portal_ready", "crawler_freshness")
+HTTP_FIELDS = {"requests", "server_errors", "server_error_ratio", "p95_seconds"}
+
+
+def require(condition):
+    if not condition:
+        raise ValueError("invalid evidence")
+
+
+def number(value):
+    require(type(value) in (int, float) and math.isfinite(value) and value >= 0)
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result)
+        result[key] = value
+    return result
+
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        raw = stream.read(1048577)
+    require(len(raw) <= 1048576)
+    records = json.loads(raw, object_pairs_hook=unique_object)
+    require(isinstance(records, list) and len(records) <= 30)
+    dates = set()
+    ok_days = unknown_days = 0
+    for record in records:
+        require(isinstance(record, dict) and set(record) == FIELDS)
+        day = record["date"]
+        require(isinstance(day, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day))
+        date.fromisoformat(day)
+        require(day not in dates)
+        dates.add(day)
+        timestamp = record["collected_at"]
+        require(isinstance(timestamp, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)", timestamp))
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        require(parsed.utcoffset() == timezone.utc.utcoffset(parsed))
+        require(record["overall"] in ("ok", "unobservable"))
+        for field in STATUS_FIELDS:
+            require(record[field] in ("ok", "failed", "unobservable"))
+        missing = record["missing"]
+        require(isinstance(missing, list) and all(isinstance(source, str) and source in SOURCES for source in missing))
+        require(len(set(missing)) == len(missing))
+        require((record["overall"] == "ok") == (not missing))
+        for field in STATUS_FIELDS:
+            require((record[field] == "unobservable") == (field in missing))
+        http = record["portal_http"]
+        require((http is None) == ("portal_http" in missing))
+        if http is not None:
+            require(isinstance(http, dict) and set(http) == HTTP_FIELDS)
+            number(http["requests"])
+            number(http["server_errors"])
+            require(http["server_errors"] <= http["requests"])
+            if http["requests"] == 0:
+                require(http["server_error_ratio"] is None and http["p95_seconds"] is None)
+            else:
+                number(http["server_error_ratio"])
+                number(http["p95_seconds"])
+                require(http["server_error_ratio"] <= 1)
+        unknown_days += bool(missing)
+        ok_days += not missing and all(record[field] == "ok" for field in STATUS_FIELDS)
+    today = datetime.now(ZoneInfo("Asia/Seoul")).date()
+    required_dates = {(today - timedelta(days=offset)).isoformat() for offset in range(30)}
+    result = "unobservable" if dates != required_dates or unknown_days else "passed" if ok_days == 30 else "failed"
+    print(result, len(records), ok_days, unknown_days)
+except (ValueError, TypeError, KeyError, OSError, OverflowError, RecursionError):
+    sys.exit(1)
+PY
+  ); then
+    rm -f -- "$evidence_file"
+    return 1
+  fi
+  rm -f -- "$evidence_file"
+  read -r slo_evidence slo_days_recorded slo_days_ok slo_days_unobservable <<<"$summary"
+}
+
 check_recovery_lab() {
   local pod uid container_id before deadline snapshot_result
   local observed_restart=false
@@ -270,6 +372,10 @@ check_recovery_lab() {
 
 main() {
   configure_client || return 1
+  # Coverage is reporting evidence, independent of existing audit success gates.
+  if [[ "$REPORT_MODE" == official ]]; then
+    read_slo_evidence || true
+  fi
   run_check health_audit check_k3s_and_portal
   run_check backup_check check_backup_evidence
   run_check recovery_lab check_recovery_lab

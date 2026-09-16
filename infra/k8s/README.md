@@ -7,6 +7,7 @@ N100의 K3s는 현재 Portal과 모니터링 운영에 사용함. 이 문서는 
 | 구분 | 주기 | 실행 목적 | 월간 감사와의 관계 |
 |---|---:|---|---|
 | 공개 상태 감시 | 약 5분 | 외부에서 공개 health 장애·복구를 신속히 감지함 | GitHub Actions에서 독립 실행하며 월간 감사로 대체하지 않음 |
+| 일별 SLO 증적 | 매일 02:15, 활성화 전 중지 | Prometheus 직전 24시간과 공개 health 교차 확인 증적을 최근 30건 보관함 | 월간 감사가 고정 ConfigMap을 읽기 전용으로 집계함 |
 | Portal PVC 백업·복원 검증 | 매일 03:00 | 최신 복구 가능 증적을 유지하고 백업 실패를 조기에 감지함 | 별도 CronJob이 실행하며 월간 감사는 증적만 읽기 확인함 |
 | 내부 SRE 통합 점검 | 매월 1일 03:30 | Portal·K3s·백업 증적·격리 복구 훈련을 한 번에 확인함 | `monthly-sre-audit`만 활성화함 |
 | 코드 변경 검증 | 변경 시점 | 변경 영향 범위의 회귀를 병합 전 확인함 | 정기 운영 점검과 별도임 |
@@ -104,6 +105,48 @@ bash infra/k8s/tools/portal-pvc-backup-cronjob.sh --activate
 ```
 
 CronJob은 매일 03:00 KST에 실행되며, `Forbid` 동시 실행 제한·실패 재시도 없음·read-only PVC mount·고정 ServiceAccount 권한을 사용함. 성공·변경 없음·실패·복원 검증 실패는 Telegram SRE relay로 상태 전환을 전달함. 실행 중 백업이 중단되면 300초 종료 유예 안에서 Portal replica 복구를 시도하며, 복구 상태를 확인해야 함.
+
+## 일별 SLO 증적
+
+`slo-daily-evidence` CronJob은 서울 기준 매일 02:15에 실행하도록 정의되며 기본값은 `suspend: true`임. `monitoring/slo-daily-evidence` ConfigMap의 `records.json`에 날짜별 검증 기록을 최대 30건 보관함. 같은 날짜의 재수집은 해당 기록을 교체함. Prometheus retention은 변경하지 않으며, 결측·질의 오류는 `unobservable`로 기록하고 Job이 실패함. 공개 health 비-200은 `failed`로 기록하며 관측 자체가 성공했다면 Job 실패로 취급하지 않음.
+
+실행 권한은 고정 증적 ConfigMap의 `get`, `patch`로 제한함. CronJob은 동시 실행 금지, 재시도 없음, 최대 180초 실행, non-root, read-only root filesystem, capability 전체 제거 및 크기가 제한된 `/tmp`만 사용함. Secret·PVC·host volume을 mount하지 않으며 Portal·K3s 복구 또는 배포 차단을 수행하지 않음.
+
+다음은 운영자 승인 후 N100에서 수행할 적용 순서임. 저장소 병합만으로 운영 적용 또는 자동 실행이 완료되지 않음.
+
+1. 저장소 루트에서 이미지를 빌드하고 K3s에 반입함.
+
+   ```bash
+   docker build -f infra/k8s/slo-evidence/Dockerfile -t personal-server-slo-evidence:local .
+   docker save personal-server-slo-evidence:local | sudo k3s ctr images import -
+   ```
+
+2. 최초 설치 시에만 전체 manifest를 적용함. `monitoring/slo-daily-evidence`가 이미 존재하면 `records.json: []`가 포함된 ConfigMap을 다시 적용하지 않음. 갱신 시에는 ConfigMap 문서를 제외한 ServiceAccount·Role·RoleBinding·CronJob만 적용하고 기존 증적은 보존함. 조회 실패를 리소스 부재로 취급하지 않으며, 실행 중인 Job이 있으면 종료 확인 전 변경·수동 재실행하지 않음.
+
+   ```bash
+   # 최초 설치이며 증적 ConfigMap이 없음을 확인한 경우에만 실행함.
+   sudo k3s kubectl apply -f infra/k8s/slo-evidence/slo-daily-evidence-cronjob.yaml
+   sudo k3s kubectl -n monitoring get cronjob slo-daily-evidence -o jsonpath='{.spec.suspend}'
+   ```
+
+3. `suspend=true`를 확인하고 고유 실행 이름으로 수동 Job을 한 번 생성함. 명령 응답이 유실되면 같은 생성 명령을 반복하지 않고 Job 상태부터 읽기 확인함. 수동 Job 생성은 CronJob의 `Forbid` 제한을 적용받지 않으므로 이전 수동 Job이 종료됐는지도 확인 필요함.
+
+   ```bash
+   slo_job="slo-daily-evidence-manual-$(date +%s)"
+   sudo k3s kubectl -n monitoring create job "$slo_job" --from=cronjob/slo-daily-evidence
+   sudo k3s kubectl -n monitoring wait --for=condition=complete "job/$slo_job" --timeout=240s
+   ```
+
+4. Job 성공 및 이번 실행 날짜의 증적 존재를 확인함. ConfigMap은 원문 출력 없이 수집기의 `validate_record`로 고정 필드·자료형·UTC 시각·수치 범위를 검증하고, 날짜 중복 없음·최대 30건·날짜 내림차순도 확인함. 실패 또는 관측 불가 결과는 성공으로 보정하지 않으며 중지 상태를 유지함.
+5. 수동 Job 성공과 증적 검증이 모두 끝난 뒤에만 일일 자동 실행을 활성화함. 외부 health 검증은 `https://len.pe.kr/health`를 10초 간격으로 3회 호출하여 모두 HTTP 200인지 확인함. 중단 시 CronJob을 다시 suspend하며 증적 ConfigMap은 삭제하지 않음.
+
+   ```bash
+   sudo k3s kubectl -n monitoring patch cronjob slo-daily-evidence --type=merge -p '{"spec":{"suspend":false}}'
+   # 자동 수집 중단이 필요한 경우에만 실행함.
+   sudo k3s kubectl -n monitoring patch cronjob slo-daily-evidence --type=merge -p '{"spec":{"suspend":true}}'
+   ```
+
+월간 감사는 30건 미만의 초기 수집 구간을 `unobservable`로 보고함. 이 증적은 일별 집계이며 기존 약 5분 공개 상태 감시를 대체하지 않음. 실제 적용 시 저장소 병합·N100 동기화·이미지 반입·수동 검증·자동 실행 활성화·외부 health 검증을 각각 구분하여 보고함.
 
 ## 월간 SRE 통합 점검 자동화
 

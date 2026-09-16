@@ -53,6 +53,7 @@ BACKUP_REPORT_KEYS = frozenset({"run_id", "status", "completed_at", "stage"})
 QUARTERLY_AUDIT_REPORT_KEYS = frozenset(
     {"run_id", "status", "completed_at", "health_audit", "backup_check", "recovery_lab"}
 )
+SLO_SUMMARY_KEYS = frozenset({"slo_evidence", "slo_days_recorded", "slo_days_ok", "slo_days_unobservable"})
 SAFE_BACKUP_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SAFE_QUARTERLY_AUDIT_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SAFE_BACKUP_STAGE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
@@ -1036,7 +1037,9 @@ def _read_quarterly_audit_report(k8s_client: KubernetesClient) -> dict[str, str]
         LOGGER.warning("quarterly_audit_report_ignored reason=unavailable error_type=%s", type(exc).__name__)
         return None
     data = config_map.get("data") if isinstance(config_map, dict) else None
-    if not isinstance(data, dict) or frozenset(data) != QUARTERLY_AUDIT_REPORT_KEYS:
+    if not isinstance(data, dict) or frozenset(data) not in {
+        QUARTERLY_AUDIT_REPORT_KEYS, QUARTERLY_AUDIT_REPORT_KEYS | SLO_SUMMARY_KEYS
+    }:
         LOGGER.warning("quarterly_audit_report_ignored reason=invalid_keys")
         return None
     if not all(isinstance(value, str) for value in data.values()):
@@ -1060,6 +1063,17 @@ def _read_quarterly_audit_report(k8s_client: KubernetesClient) -> dict[str, str]
     if (data["status"] == "passed") != all_checks_passed:
         LOGGER.warning("quarterly_audit_report_ignored reason=inconsistent_status")
         return None
+    if "slo_evidence" in data:
+        count_keys = ("slo_days_recorded", "slo_days_ok", "slo_days_unobservable")
+        if any(re.fullmatch(r"(?:[0-9]|[12][0-9]|30)", data[key]) is None for key in count_keys):
+            LOGGER.warning("quarterly_audit_report_ignored reason=invalid_slo_counts")
+            return None
+        recorded, ok, unknown = (int(data[key]) for key in count_keys)
+        expected_result = "unobservable" if recorded < 30 or unknown else "passed" if ok == 30 else "failed"
+        # Counts cannot establish date coverage; the producer may mark healthy records unobservable.
+        if ok + unknown > recorded or data["slo_evidence"] not in {expected_result, "unobservable"}:
+            LOGGER.warning("quarterly_audit_report_ignored reason=inconsistent_slo_summary")
+            return None
     return data
 
 
@@ -1070,12 +1084,21 @@ def _format_quarterly_audit_message(report: dict[str, str]) -> str:
     backup = "통과" if report["backup_check"] == "passed" else "실패"
     recovery = "통과" if report["recovery_lab"] == "passed" else "실패"
     action = "조치: 실패 항목이 있으면 운영 문서에 따라 확인 필요" if report["status"] == "failed" else "조치: 추가 조치 없음"
+    slo_lines = []
+    if "slo_evidence" in report:
+        slo_result = {"passed": "통과", "failed": "실패", "unobservable": "관측 불가"}[report["slo_evidence"]]
+        slo_lines = [
+            f"SLO 증적: {slo_result}",
+            f"수집 {report['slo_days_recorded']}/30일, 정상 {report['slo_days_ok']}일, "
+            f"관측 불가 {report['slo_days_unobservable']}일",
+        ]
     return "\n".join(
         [
             f"[분기 SRE 점검 {result}]",
             f"상태 점검: {health}",
             f"백업 검증 상태: {backup}",
             f"격리 Pod 복구 훈련: {recovery}",
+            *slo_lines,
             action,
         ]
     )
