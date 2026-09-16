@@ -18,7 +18,7 @@
 
 | 영역 | 현재 기준 | 확인 문서·도구 | 상태 |
 |---|---|---|---|
-| 공개 상태 감시 | GitHub Actions가 외부에서 `https://len.pe.kr/health`를 약 5분 간격으로 확인하고 장애·복구 전환을 알림 | [공개 상태 Telegram 알림](public-uptime-monitor.md) | 완료 |
+| 공개 상태 감시 | GitHub Actions가 외부에서 네 공개 health를 약 5분 간격으로 확인하고 장애·복구 전환을 알림 | [공개 상태 Telegram 알림](public-uptime-monitor.md) | 완료 |
 | K3s 상태·알림 | Prometheus·Alertmanager·SRE Telegram relay 경계를 점검함 | [K3s 운영](../infra/k8s/README.md), `sre-telegram-verify.sh` | 완료 |
 | Portal 백업 검증 | Portal PVC 백업·복원 검증을 `--check` 읽기 점검과 별도 운영 실행으로 구분함 | [K3s 운영](../infra/k8s/README.md), `portal-pvc-backup-verify.sh` | 완료 |
 | Pod 자동복구 실습 | production과 분리된 임시 namespace에서 liveness 실패와 Ready 복구를 확인함 | `sre-pod-recovery-lab.sh` | 완료 |
@@ -35,7 +35,9 @@
 
 | 우선순위 | 항목 | 실행 기준 | 완료 조건 |
 |---|---|---|---|
-| 없음 | 현재 계획된 미완료 개선 항목 없음 | 신규 운영 요구 또는 실제 점검 실패가 확인될 때만 범위를 정의함 | 확인 필요 |
+| P2 | 감시 경로 식별·알림 보강 | 완료된 공개 감시 실행의 실행 실패·Telegram 전달 실패를 별도 Issue·Telegram 전환으로 관리함 | 저장소 계약 테스트·독립 검토 통과 후 GitHub Actions 실제 실행 확인 필요 |
+| P3 | Cloudflare Tunnel 읽기 전용 설정·문서 drift 점검 | 실제 Tunnel 설정과 운영 문서의 경계를 읽기 전용으로 대조함 | 차이와 확인 결과를 문서화하고 운영 설정을 변경하지 않음 |
+| P4 | YouTube Memo 선행 K3s 이전 | YouTube Memo만 첫 이전 대상으로 설계·검증하고 Book Memo는 안정화 뒤 별도 범위로 진행함 | 격리 검증·rollback 기준·사용자 승인 적용을 모두 충족함 |
 
 ## 검토 결과
 

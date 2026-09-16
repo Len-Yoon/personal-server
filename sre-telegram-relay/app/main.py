@@ -678,7 +678,10 @@ class RelayService:
             presentation = ALERT_PRESENTATIONS.get(alert_name) if isinstance(alert_name, str) else None
             problem, impact = presentation or ("운영 상태 경고", "상태를 자동으로 확인 중입니다.")
             target = _format_alert_target(safe_labels)
-            state = "자동 복구를 확인 중입니다." if status == "firing" else "정상으로 돌아왔습니다."
+            if status == "firing" and alert_name == "NewsCollectionStale":
+                state = "다음 수집 상태를 확인 중입니다."
+            else:
+                state = "자동 복구를 확인 중입니다." if status == "firing" else "정상으로 돌아왔습니다."
             lines = [f"문제: {problem}", f"영향: {impact}", f"대상: {target}", f"상태: {state}"]
             entries.append("\n".join(lines))
         if not entries:

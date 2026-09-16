@@ -1,0 +1,275 @@
+name: Public Uptime Monitor Path Observer
+
+permissions:
+  actions: read
+  issues: write
+
+on:
+  workflow_run:
+    workflows: ["Public Portal Uptime Monitor"]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: public-uptime-monitor-path
+  cancel-in-progress: false
+
+jobs:
+  observe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - id: incident
+        name: Classify completed uptime monitor run
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const incidentTitle = "[SRE] 공개 감시 경로 장애";
+            const sourceIncidentTitle = "[SRE] len.pe.kr 공개 상태 장애";
+            const executionFailureMarker = "<!-- uptime-monitor-path:execution-failure:sent -->";
+            const deliveryFailureMarker = "<!-- uptime-monitor-path:telegram-delivery-failure:sent -->";
+            const recoveryMarker = "<!-- uptime-monitor-path:recovered:accepted -->";
+            const notificationUnavailableMarker = "<!-- uptime-monitor-path:notification-unavailable -->";
+            const sourceDeliveryFailureMarker = "<!-- uptime-telegram-delivery:failed -->";
+            const sourceObserverUnavailableMarker = "<!-- uptime-telegram-delivery:observer-unavailable -->";
+            const runConclusion = context.payload.workflow_run.conclusion;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              per_page: 100,
+            });
+            const incident = issues.find((issue) =>
+              !issue.pull_request &&
+              issue.user?.login === "github-actions[bot]" &&
+              issue.title === incidentTitle
+            );
+            const sourceIncident = issues.find((issue) =>
+              !issue.pull_request &&
+              issue.user?.login === "github-actions[bot]" &&
+              issue.title === sourceIncidentTitle
+            );
+
+            if (runConclusion === "success") {
+              if (incident) {
+                const body = incident.body || "";
+                if (body.includes(deliveryFailureMarker)) {
+                  core.setOutput("notification", "telegram_delivery_recovered");
+                  core.setOutput("issue_number", String(incident.number));
+                  return;
+                }
+                if (body.includes(executionFailureMarker)) {
+                  core.setOutput("notification", "execution_recovered");
+                  core.setOutput("issue_number", String(incident.number));
+                  return;
+                }
+
+                const evidence = "알림 미전송: 감시 경로 Telegram 전송 증적이 없어 복구 알림을 생략함";
+                const bodyWithEvidence = body.includes(evidence) ? body : `${body}\n${evidence}`;
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: incident.number,
+                  body: bodyWithEvidence.includes(notificationUnavailableMarker)
+                    ? bodyWithEvidence
+                    : `${bodyWithEvidence}\n${notificationUnavailableMarker}`,
+                  state: "closed",
+                });
+                return;
+              }
+
+              const sourceBody = sourceIncident?.body || "";
+              if (
+                sourceIncident &&
+                sourceBody.includes(sourceDeliveryFailureMarker) &&
+                !sourceBody.includes(sourceObserverUnavailableMarker)
+              ) {
+                const activeIncident = await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title: incidentTitle,
+                  body: "공개 상태 감시 경로 이상을 확인했습니다.\n분류: Telegram 전달 실패.",
+                });
+                core.setOutput("notification", "telegram_delivery_failure");
+                core.setOutput("issue_number", String(activeIncident.data.number));
+                core.setOutput("source_issue_number", String(sourceIncident.number));
+              }
+              return;
+            }
+
+            if (runConclusion !== "failure") {
+              return;
+            }
+
+            const { data: jobsPage } = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.payload.workflow_run.id,
+              filter: "latest",
+              per_page: 100,
+            });
+            const monitorJob = jobsPage.jobs.find((job) => job.name === "monitor");
+            const telegramStep = monitorJob?.steps?.find(
+              (step) => step.name === "Send Telegram status transition"
+            );
+            const sourceDeliveryFailed =
+              telegramStep?.conclusion === "failure" &&
+              (sourceIncident?.body || "").includes(sourceDeliveryFailureMarker);
+            const notification = sourceDeliveryFailed
+              ? "telegram_delivery_failure"
+              : "execution_failure";
+            const sentMarker = notification === "telegram_delivery_failure"
+              ? deliveryFailureMarker
+              : executionFailureMarker;
+            const classification = notification === "telegram_delivery_failure"
+              ? "Telegram 전달 실패"
+              : "실행 실패";
+            const activeIncident = incident || (await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: incidentTitle,
+              body: `공개 상태 감시 경로 이상을 확인했습니다.\n분류: ${classification}.`,
+            })).data;
+
+            if (!(activeIncident.body || "").includes(sentMarker)) {
+              core.setOutput("notification", notification);
+              core.setOutput("issue_number", String(activeIncident.number));
+              if (notification === "telegram_delivery_failure" && sourceIncident) {
+                core.setOutput("source_issue_number", String(sourceIncident.number));
+              }
+            }
+
+      - id: telegram
+        name: Send monitor path status transition
+        if: steps.incident.outputs.notification != ''
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.UPTIME_TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.UPTIME_TELEGRAM_CHAT_ID }}
+          NOTIFICATION: ${{ steps.incident.outputs.notification }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
+            printf '%s\n' 'Telegram notification secrets are not configured; keeping issue evidence open.' >&2
+            printf 'delivery=unavailable\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          case "$NOTIFICATION" in
+            execution_failure)
+              message='[감시 실행 실패] 공개 상태 감시 실행이 정상 완료되지 않았습니다. GitHub Issue 증적을 확인하세요.'
+              ;;
+            telegram_delivery_failure)
+              message='[감시 알림 전송 실패] 공개 상태 감시 알림의 Telegram 전송 실패를 확인했습니다. GitHub Issue 증적을 확인하세요.'
+              ;;
+            execution_recovered|telegram_delivery_recovered)
+              message='[감시 경로 복구] 공개 상태 감시 경로가 다시 정상 완료되었습니다.'
+              ;;
+            *)
+              printf '%s\n' 'Unknown monitor path notification state.' >&2
+              exit 1
+              ;;
+          esac
+
+          telegram_response="$(mktemp)"
+          trap 'rm -f "$telegram_response"' EXIT
+          telegram_status="$(
+            curl --silent --show-error --retry 2 --max-time 20 \
+              --output "$telegram_response" --write-out '%{http_code}' \
+              --request POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+              --data-urlencode "text=${message}" || true
+          )"
+          if [[ "$telegram_status" != "200" ]] || ! jq -e '.ok == true and (.result.message_id | numbers)' "$telegram_response" >/dev/null; then
+            printf '%s\n' 'Telegram monitor path notification was not accepted.' >&2
+            printf 'delivery=failed\n' >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          printf 'accepted=true\n' >> "$GITHUB_OUTPUT"
+          printf 'delivery=accepted\n' >> "$GITHUB_OUTPUT"
+
+      - name: Commit monitor path notification evidence
+        if: always() && steps.incident.outputs.notification != ''
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const notification = "${{ steps.incident.outputs.notification }}";
+            const issueNumber = Number("${{ steps.incident.outputs.issue_number }}");
+            const executionFailureMarker = "<!-- uptime-monitor-path:execution-failure:sent -->";
+            const deliveryFailureMarker = "<!-- uptime-monitor-path:telegram-delivery-failure:sent -->";
+            const recoveryMarker = "<!-- uptime-monitor-path:recovered:accepted -->";
+            const notificationUnavailableMarker = "<!-- uptime-monitor-path:notification-unavailable -->";
+            const sourceObserverUnavailableMarker = "<!-- uptime-telegram-delivery:observer-unavailable -->";
+            const accepted = "${{ steps.telegram.outputs.accepted }}" === "true";
+            const sourceIssueNumber = Number("${{ steps.incident.outputs.source_issue_number }}");
+            const issue = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+            });
+            const currentBody = issue.data.body || "";
+
+            if (!accepted) {
+              const evidence = "알림 미전송: 감시 경로 Telegram 전송 증적이 없어 복구 알림을 생략함";
+              const bodyWithEvidence = currentBody.includes(evidence) ? currentBody : `${currentBody}\n${evidence}`;
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: bodyWithEvidence.includes(notificationUnavailableMarker)
+                  ? bodyWithEvidence
+                  : `${bodyWithEvidence}\n${notificationUnavailableMarker}`,
+                state: "closed",
+              });
+              if (sourceIssueNumber > 0) {
+                const sourceIssue = await github.rest.issues.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: sourceIssueNumber,
+                });
+                const sourceBody = sourceIssue.data.body || "";
+                const sourceEvidence = "알림 미전송: 감시 경로 Telegram 전송 증적이 없음";
+                const bodyWithSourceEvidence = sourceBody.includes(sourceEvidence)
+                  ? sourceBody
+                  : `${sourceBody}\n${sourceEvidence}`;
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: sourceIssueNumber,
+                  body: bodyWithSourceEvidence.includes(sourceObserverUnavailableMarker)
+                    ? bodyWithSourceEvidence
+                    : `${bodyWithSourceEvidence}\n${sourceObserverUnavailableMarker}`,
+                });
+              }
+              return;
+            }
+
+            if (notification === "execution_failure" || notification === "telegram_delivery_failure") {
+              const marker = notification === "telegram_delivery_failure"
+                ? deliveryFailureMarker
+                : executionFailureMarker;
+              const body = currentBody.includes(marker) ? currentBody : `${currentBody}\n${marker}`;
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body,
+              });
+              return;
+            }
+
+            if (notification === "execution_recovered" || notification === "telegram_delivery_recovered") {
+              const body = currentBody.includes(recoveryMarker)
+                ? currentBody
+                : `${currentBody}\n${recoveryMarker}`;
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body,
+                state: "closed",
+              });
+              return;
+            }
+
+            throw new Error("Unknown monitor path notification state.");
