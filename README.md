@@ -43,7 +43,7 @@ Windows N100과 Ubuntu WSL2에서 운영하는 개인용 서비스 허브임. �
 |---|---|
 | Portal·파일함·관리자·포트폴리오 | K3s `portal-web` + PVC 단일 writer |
 | 뉴스·YouTube 메모·책 메모·차량관리 | Docker Compose |
-| 공개 경로 | Cloudflare Tunnel → Caddy → 서비스 |
+| 공개 경로 | Cloudflare Tunnel: Portal은 Caddy 경유, Compose 서비스는 Tunnel 직접 ingress. 차량 callback은 비공개 upstream |
 | 모니터링 | K3s Prometheus·Grafana, Telegram SRE 알림 |
 | 백업 | Portal PVC 암호화 백업 및 복원 검증 |
 | 외부 장애 감지 | GitHub Actions가 약 5분 간격으로 `https://len.pe.kr/health` 확인 |

@@ -107,6 +107,17 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("비공개 callback upstream", tunnel)
         self.assertNotIn("http://localhost:8015", tunnel)
 
+    def test_readme_and_operations_reference_match_verified_tunnel_route_split(self):
+        readme = Path("README.md").read_text(encoding="utf-8")
+        operations = Path("docs/operations-reference.md").read_text(encoding="utf-8")
+        index = Path("docs/README.md").read_text(encoding="utf-8")
+
+        self.assertIn("Portal은 Caddy 경유, Compose 서비스는 Tunnel 직접 ingress", readme)
+        self.assertIn("뉴스·YouTube 메모·책 메모는 Tunnel 직접 ingress", operations)
+        self.assertIn("비공개 callback upstream", operations)
+        self.assertNotIn("http://localhost:8015", operations)
+        self.assertIn("Caddy 경유 Portal·Compose 직접 ingress·차량 callback 경계", index)
+
     def test_n100_recovery_and_uptime_alert_conditions_are_documented(self):
         n100 = Path("docs/n100-mt4-setup.md").read_text(encoding="utf-8")
         uptime = Path("docs/public-uptime-monitor.md").read_text(encoding="utf-8")

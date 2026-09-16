@@ -4,7 +4,7 @@
 
 ## 현재 런타임
 
-**Cloudflare Tunnel → Caddy → K3s Portal** 경로로 공개 Portal을 제공함. Caddy는 K3s NodePort의 `portal-web`로 전달하고, 나머지 업무 서비스는 Docker Compose 컨테이너로 유지함.
+**Cloudflare Tunnel → Caddy → K3s Portal** 경로로 공개 Portal을 제공함. 뉴스·YouTube 메모·책 메모는 Tunnel 직접 ingress로 각 Docker Compose 서비스에 연결되며, 차량 OAuth callback은 별도 비공개 upstream을 사용함. Caddy는 K3s NodePort의 `portal-web`로만 전달함.
 
 | 구성 | 실행 위치 | 상태 데이터 |
 |---|---|---|
@@ -30,7 +30,7 @@ Portal PVC는 `portal-web-files-dynamic`, `portal-web-state-dynamic` 두 개이�
 | `news.len.pe.kr` | `crawler-worker` |
 | `memo.len.pe.kr` | `youtube-memo` |
 | `books.len.pe.kr` | `book-memo` |
-| `car.len.pe.kr` | `car-care-worker` OAuth callback. Caddy가 아닌 별도 Cloudflare Tunnel ingress의 `http://localhost:8015` 대상 설정 확인 필요 |
+| `car.len.pe.kr` | `car-care-worker` OAuth callback. Caddy가 아닌 별도 Cloudflare Tunnel ingress의 비공개 callback upstream |
 
 ## 일상 상태 확인
 
