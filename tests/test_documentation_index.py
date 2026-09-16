@@ -118,6 +118,21 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertNotIn("http://localhost:8015", operations)
         self.assertIn("Caddy 경유 Portal·Compose 직접 ingress·차량 callback 경계", index)
 
+    def test_architecture_diagram_records_current_routes_and_operational_checks(self):
+        content = Path("docs/images/personal-server-architecture-v2.svg").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("Cloudflare Tunnel → Caddy → K3s Portal", content)
+        self.assertIn("Compose 서비스는 Tunnel 직접 ingress", content)
+        self.assertIn("비공개 callback upstream", content)
+        self.assertIn("GitHub Actions · 약 5분 공개 health", content)
+        self.assertIn("NewsCollectionStale → Alertmanager → SRE relay → Telegram", content)
+        self.assertIn("NodePort 이상은 Tunnel 복구 제외", content)
+        self.assertNotIn("Caddy가 Portal과 Compose 서비스를", content)
+        self.assertNotIn("GitHub Actions · 일일 점검", content)
+        self.assertIn("월간 SRE 통합 점검", content)
+
     def test_n100_recovery_and_uptime_alert_conditions_are_documented(self):
         n100 = Path("docs/n100-mt4-setup.md").read_text(encoding="utf-8")
         uptime = Path("docs/public-uptime-monitor.md").read_text(encoding="utf-8")
