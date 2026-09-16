@@ -69,7 +69,7 @@ with tarfile.open(archive, "r:*") as source:
         raise ValueError("OCI index has no manifests")
     selected = [
         manifest for manifest in manifests
-        if manifest.get("annotations", {}).get("org.opencontainers.image.ref.name") == image
+        if manifest.get("annotations", {}).get("io.personal-server.image-ref") == image
     ]
     if len(selected) != 1:
         sys.exit(2)
@@ -81,17 +81,23 @@ PY
 }
 
 imported_image_digest() {
-  python3 -c '
-import json
-import re
-import sys
-
-document = json.load(sys.stdin)
-digest = document.get("target", {}).get("digest", "")
-if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
-    raise ValueError("containerd image target digest is invalid")
-print(digest)
-'
+  awk -v image="$1" '
+    function valid_digest(value, body) {
+      if (value !~ /^sha256:/ || length(value) != 71) return 0
+      body = substr(value, 8)
+      return body !~ /[^0-9a-f]/
+    }
+    NR == 1 { next }
+    $1 == image {
+      if (!valid_digest($3)) exit 2
+      count++
+      digest = $3
+    }
+    END {
+      if (count != 1) exit 1
+      print digest
+    }
+  '
 }
 
 go=false
@@ -127,6 +133,6 @@ else
 fi
 sudo -n k3s kubectl get node -o name >/dev/null || fail "K3s node is unavailable"
 sudo -n k3s ctr images import "$archive" || fail "containerd import failed"
-containerd_image_digest="$(sudo -n k3s ctr images inspect --output json "$image" | imported_image_digest)" || fail "imported image is unavailable"
+containerd_image_digest="$(sudo -n k3s ctr images list | imported_image_digest "$image")" || fail "imported image digest is missing or ambiguous"
 [ "$containerd_image_digest" = "$archive_image_digest" ] || fail "imported image digest does not match archive"
 printf '%s\n' 'image_import=PASS'
