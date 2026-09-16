@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -160,15 +161,16 @@ class PortalBackupEvidenceCheckerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             kubectl.chmod(0o700)
+            collected_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             evidence = "\n".join(
                 [
                     "schema_version=1",
                     "scope=portal",
                     "backup_status=success",
                     "encrypted=true",
-                    "backup_completed_at=2026-09-15T00:00:00Z",
+                    f"backup_completed_at={collected_at}",
                     "restore_status=success",
-                    "restore_verified_at=2026-09-15T00:00:00Z",
+                    f"restore_verified_at={collected_at}",
                     "evidence_expires_at=2099-09-16T00:00:00Z",
                     "backup_id=portal-test",
                     "source_runtime=k3s-pvc",
