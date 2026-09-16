@@ -100,6 +100,13 @@ imported_image_digest() {
   '
 }
 
+canonical_image_ref() {
+  case "$1" in
+    */*) printf '%s\n' "$1" ;;
+    *) printf 'docker.io/library/%s\n' "$1" ;;
+  esac
+}
+
 go=false
 archive=""
 digest=""
@@ -133,6 +140,7 @@ else
 fi
 sudo -n k3s kubectl get node -o name >/dev/null || fail "K3s node is unavailable"
 sudo -n k3s ctr images import "$archive" || fail "containerd import failed"
-containerd_image_digest="$(sudo -n k3s ctr images list | imported_image_digest "$image")" || fail "imported image digest is missing or ambiguous"
+containerd_image_ref="$(canonical_image_ref "$image")"
+containerd_image_digest="$(sudo -n k3s ctr images list | imported_image_digest "$containerd_image_ref")" || fail "imported image digest is missing or ambiguous"
 [ "$containerd_image_digest" = "$archive_image_digest" ] || fail "imported image digest does not match archive"
 printf '%s\n' 'image_import=PASS'

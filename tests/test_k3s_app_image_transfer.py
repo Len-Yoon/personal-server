@@ -119,6 +119,7 @@ class K3sAppImageTransferTests(unittest.TestCase):
         self.assertIn("Darwin", text)
         self.assertIn("latest", text)
         self.assertIn('annotation-manifest-descriptor.io.personal-server.image-ref="$image"', text)
+        self.assertIn('annotation-index-descriptor.io.personal-server.image-ref="$image"', text)
         self.assertIn("image_build=PASS", text)
 
     def test_import_script_requires_go_and_rejects_missing_archive_before_ctr_access(self):
@@ -170,6 +171,7 @@ class K3sAppImageTransferTests(unittest.TestCase):
                 env={
                     **os.environ,
                     "CALL_LOG": str(call_log),
+                    "LISTING_REF": "docker.io/library/personal-server-book-memo:v1",
                     "LISTING_DIGEST": archive_digest,
                     "PATH": f"{command_directory}:{os.environ['PATH']}",
                 },
@@ -203,6 +205,7 @@ class K3sAppImageTransferTests(unittest.TestCase):
                 env={
                     **os.environ,
                     "CALL_LOG": str(call_log),
+                    "LISTING_REF": "docker.io/library/personal-server-book-memo:v1",
                     "LISTING_DIGEST": "sha256:" + "a" * 64,
                     "PATH": f"{command_directory}:{os.environ['PATH']}",
                 },
@@ -238,6 +241,7 @@ class K3sAppImageTransferTests(unittest.TestCase):
                 env={
                     **os.environ,
                     "CALL_LOG": str(call_log),
+                    "LISTING_REF": "docker.io/library/personal-server-book-memo:v1",
                     "LISTING_DIGEST": "sha256:" + "a" * 64,
                     "PATH": f"{command_directory}:{os.environ['PATH']}",
                 },
@@ -334,7 +338,7 @@ class K3sAppImageTransferTests(unittest.TestCase):
                 standard_image_ref="v1",
             )
             self._write_fake_sudo(command_directory)
-            row = "personal-server-book-memo:v1 application/vnd.oci.image.manifest.v1+json sha256:" + "b" * 64 + " 1.0 KiB linux/amd64 -"
+            row = "docker.io/library/personal-server-book-memo:v1 application/vnd.oci.image.manifest.v1+json sha256:" + "b" * 64 + " 1.0 KiB linux/amd64 -"
 
             result = subprocess.run(
                 [
