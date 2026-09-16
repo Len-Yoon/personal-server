@@ -26,8 +26,8 @@
 
 | 파일 | 역할 |
 |---|---|
-| `scripts/build-k3s-app-image.sh` | 맥북에서 지정 앱의 Linux AMD64 OCI archive를 생성하고 digest를 출력함 |
-| `scripts/import-k3s-app-image.sh` | N100에서 지정 archive를 K3s containerd에 import하고 이미지 존재를 검증함 |
+| `infra/k8s/tools/k3s-app-image-build.sh` | 맥북에서 지정 앱의 Linux AMD64 OCI archive를 생성하고 digest를 출력함 |
+| `infra/k8s/tools/k3s-app-image-import.sh` | N100에서 승인된 archive를 K3s containerd에 import하고 digest·플랫폼·이미지 존재를 검증함 |
 | `infra/k8s/apps/book-memo.yaml` | Book Memo PVC·Deployment·ClusterIP Service의 선언형 정의를 보관함 |
 | `infra/k8s/tools/book-memo-cutover.sh` | 사전 점검, 준비, 사용자 승인 전환, 롤백을 분리한 operator 전용 도구임 |
 | `tests/test_k3s_app_image_transfer.py` | 이미지 플랫폼·archive·import 계약을 검증함 |
@@ -37,15 +37,15 @@
 ### Task 1: 이미지 생성·반입 계약
 
 **Files:**
-- Create: `scripts/build-k3s-app-image.sh`
-- Create: `scripts/import-k3s-app-image.sh`
+- Create: `infra/k8s/tools/k3s-app-image-build.sh`
+- Create: `infra/k8s/tools/k3s-app-image-import.sh`
 - Test: `tests/test_k3s_app_image_transfer.py`
 
 **Interfaces:**
 - Consumes: 앱 이름 하나(`book-memo`), Dockerfile 경로, 출력 OCI archive 경로.
 - Produces: `personal-server-<app>:<immutable-tag>` Linux AMD64 OCI archive와 확인 가능한 sha256 digest.
-- `build-k3s-app-image.sh --app book-memo --output <archive>`는 맥북에서만 실행함.
-- `import-k3s-app-image.sh --archive <archive> --image <image-ref>`는 N100에서만 실행하며 `sudo -n k3s ctr images import`를 사용함.
+- `k3s-app-image-build.sh --app book-memo --tag <immutable-tag> --output <archive>`는 macOS에서만 실행함.
+- `k3s-app-image-import.sh --go --archive <archive> --sha256 <digest> --image <image-ref>`는 N100에서만 실행하며 `sudo -n k3s ctr images import`를 사용함.
 
 - [ ] **Step 1: 이미지 도구 계약 테스트를 작성함.**
 
@@ -55,12 +55,16 @@ def test_build_script_requires_supported_app_amd64_and_explicit_output(self):
     self.assertIn('SUPPORTED_APPS="book-memo youtube-memo crawler-worker car-care-worker"', text)
     self.assertIn("--platform linux/amd64", text)
     self.assertIn("--output type=oci,dest=", text)
+    self.assertIn('uname -s', text)
+    self.assertIn('Darwin', text)
+    self.assertIn('latest', text)
     self.assertIn("image_build=PASS", text)
 
-def test_import_script_rejects_missing_archive_before_ctr_access(self):
+def test_import_script_requires_go_and_rejects_missing_archive_before_ctr_access(self):
     result = subprocess.run(["bash", str(IMPORT), "--archive", "/missing", "--image", "x:y"], capture_output=True, text=True)
     self.assertNotEqual(result.returncode, 0)
     self.assertIn("image_import=FAIL", result.stderr)
+    self.assertNotIn("ctr images import", result.stdout + result.stderr)
 ```
 
 - [ ] **Step 2: 테스트가 구현 부재로 실패하는지 확인함.**
@@ -72,7 +76,9 @@ Expected: FAIL because both scripts do not exist.
 - [ ] **Step 3: 최소 이미지 생성 도구를 구현함.**
 
 ```bash
+test "$(uname -s)" = Darwin || fail "build must run on macOS"
 case "$app" in book-memo|youtube-memo|crawler-worker|car-care-worker) ;; *) fail "unsupported app" ;; esac
+test -n "$tag" && test "$tag" != latest || fail "immutable tag is required"
 docker buildx build --platform linux/amd64 --tag "$image" --output "type=oci,dest=$output" "$app"
 sha256sum "$output"
 printf '%s\n' 'image_build=PASS'
@@ -83,7 +89,11 @@ printf '%s\n' 'image_build=PASS'
 - [ ] **Step 4: 최소 반입 도구를 구현함.**
 
 ```bash
+[ "$go" = true ] || fail "--go is required"
 [ -s "$archive" ] || fail "archive is missing"
+printf '%s  %s\n' "$digest" "$archive" | sha256sum --check --status || fail "archive digest mismatch"
+verify_oci_linux_amd64 "$archive" || fail "archive platform is not linux/amd64"
+sudo -n k3s kubectl get node -o name >/dev/null || fail "K3s node is unavailable"
 sudo -n k3s ctr images import "$archive" || fail "containerd import failed"
 sudo -n k3s ctr images list -q | grep -Fxq "$image" || fail "imported image is unavailable"
 printf '%s\n' 'image_import=PASS'
@@ -100,7 +110,7 @@ Expected: PASS.
 - [ ] **Step 6: 커밋함.**
 
 ```bash
-git add scripts/build-k3s-app-image.sh scripts/import-k3s-app-image.sh tests/test_k3s_app_image_transfer.py
+git add infra/k8s/tools/k3s-app-image-build.sh infra/k8s/tools/k3s-app-image-import.sh tests/test_k3s_app_image_transfer.py
 git commit -m "feat: K3s 앱 이미지 반입 도구 추가"
 ```
 
