@@ -14,6 +14,8 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "infra" / "k8s" / "apps" / "book-memo.yaml"
 CUTOVER = ROOT / "infra" / "k8s" / "tools" / "book-memo-cutover.sh"
+PREPARE = ROOT / "infra" / "k8s" / "tools" / "book-memo-prepare.sh"
+UNCONFIGURED_IMAGE = "personal-server-book-memo:unconfigured-do-not-run"
 
 
 class BookMemoCutoverTests(unittest.TestCase):
@@ -47,7 +49,7 @@ class BookMemoCutoverTests(unittest.TestCase):
                 with sqlite3.connect(target / "memo.sqlite3") as connection:
                     connection.execute("insert into memo values ('new-data')")
         (base / "state").write_text(json.dumps(state))
-        chosen_image = image or "personal-server-book-memo@sha256:" + "a" * 64
+        chosen_image = image or "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
         fixture = {"base": str(base), "source": str(source), "target": str(target),
                    "scenario": scenario, "after_stop": compose_state, "image": chosen_image}
         deployed = next(item for item in yaml.safe_load_all(MANIFEST.read_text()) if item["kind"] == "Deployment")
@@ -100,7 +102,9 @@ elif name == 'sudo':
         if scenario != 'missing_image':
             size = '10 MiB' if scenario == 'ctr_size_unit' else '10MiB'
             platform = 'linux/arm64' if scenario == 'wrong_platform' else 'linux/amd64'
-            print(fixture['image'] + ' application/vnd.oci.image.manifest.v1+json sha256:' + 'a'*64 + ' ' + size + ' ' + platform + ' -')
+            listed_image = ('docker.io/library/personal-server-book-memo:k3s-test'
+                            if scenario == 'alias_absent' else fixture['image'])
+            print(listed_image + ' application/vnd.oci.image.manifest.v1+json sha256:' + 'a'*64 + ' ' + size + ' ' + platform + ' -')
     else:
         if args[:5] != ['-n', 'k3s', 'kubectl', '-n', 'personal-server']: fail()
         command = args[5:]
@@ -226,7 +230,7 @@ else: fail()
                 self.assertEqual('--dry-run=server' in commands, mode == '--prepare')
 
     def test_prerequisite_failure_prevents_compose_stop(self):
-        for scenario in ("missing_image", "wrong_platform", "pending_pvc", "foreign_writer", "symlink"):
+        for scenario in ("missing_image", "wrong_platform", "alias_absent", "pending_pvc", "foreign_writer", "symlink"):
             with self.subTest(scenario=scenario):
                 result, calls = self.run_cutover("--go", scenario=scenario)
                 self.assertNotEqual(result.returncode, 0)
@@ -340,6 +344,155 @@ else: fail()
         self.assertEqual(self.last_state, {"compose": "exited", "replicas": 0, "helper": True})
 
 
+class BookMemoPrepareTests(unittest.TestCase):
+    def run_prepare(self, *arguments, secret_exists=True, listed_image=None,
+                    foreign_resource_after_dry_run=False, unexpected_dry_run_resource=False,
+                    sequential_dry_run_output=False):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        base = Path(directory.name)
+        binaries = base / "bin"
+        binaries.mkdir()
+        image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
+        fixture = {"image": image, "listed_image": listed_image or image,
+                   "secret_exists": secret_exists, "applied": False,
+                   "foreign_resource_after_dry_run": foreign_resource_after_dry_run,
+                   "foreign_resource_present": False,
+                   "unexpected_dry_run_resource": unexpected_dry_run_resource,
+                   "sequential_dry_run_output": sequential_dry_run_output}
+        (base / "fixture").write_text(json.dumps(fixture))
+        (base / "calls").touch()
+        mock = r'''import json, os, pathlib, sys
+base = pathlib.Path(os.environ["PREPARE_FIXTURE"])
+fixture = json.loads((base / "fixture").read_text())
+args = sys.argv[1:]
+with (base / "calls").open("a") as handle:
+    handle.write(json.dumps(args) + "\n")
+if args[:3] != ["-n", "k3s", "kubectl"] and args[:4] != ["-n", "k3s", "ctr", "images"]:
+    sys.exit(1)
+if args[:4] == ["-n", "k3s", "ctr", "images"]:
+    if args[4:] != ["list"]:
+        sys.exit(1)
+    digest = fixture["image"].split("@", 1)[1]
+    print("REF TYPE DIGEST SIZE PLATFORMS LABELS")
+    print(fixture["listed_image"] + " application/vnd.oci.image.manifest.v1+json " + digest + " 10MiB linux/amd64 -")
+    sys.exit(0)
+command = args[5:]
+if command[:2] == ["get", "secret"]:
+    sys.exit(0 if fixture["secret_exists"] else 1)
+if command[:1] == ["get"] and command[1] in {"pvc", "deployment", "service"}:
+    if command[1] == "deployment" and fixture["applied"] and command[-2:] == ["-o", "json"]:
+        deployment = {"kind": "Deployment", "metadata": {"name": "book-memo", "namespace": "personal-server"}, "spec": {"replicas": 0, "template": {"spec": {"containers": [{"image": fixture["image"]}]}}}}
+        print(json.dumps(deployment))
+    if command[1] == "service" and fixture["foreign_resource_present"]:
+        print("service/book-memo")
+    sys.exit(0)
+if command[:2] == ["create", "--dry-run=server"]:
+    rendered = sys.stdin.read()
+    if "unconfigured-do-not-run" in rendered or fixture["image"] not in rendered or "replicas: 0" not in rendered:
+        sys.exit(1)
+    pvc = {"kind": "PersistentVolumeClaim", "metadata": {"name": "book-memo-data", "namespace": "personal-server"}, "spec": {"accessModes": ["ReadWriteOnce"]}}
+    deployment = {"kind": "Deployment", "metadata": {"name": "book-memo", "namespace": "personal-server"}, "spec": {"replicas": 0, "template": {"spec": {"containers": [{"image": fixture["image"], "volumeMounts": [{"name": "book-memo-data", "mountPath": "/data/book-memo"}, {"name": "tmp", "mountPath": "/tmp"}]}], "volumes": [{"name": "book-memo-data", "persistentVolumeClaim": {"claimName": "book-memo-data"}}, {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"}}]}}}}
+    service = {"kind": "Service", "metadata": {"name": "book-memo", "namespace": "personal-server"}, "spec": {"selector": {"app.kubernetes.io/name": "book-memo"}}}
+    items = [pvc, deployment, service]
+    if fixture["unexpected_dry_run_resource"]:
+        items.append({"kind": "ConfigMap", "metadata": {"name": "foreign", "namespace": "personal-server"}})
+    (base / "dry-run-rendered").write_text(rendered)
+    if fixture["sequential_dry_run_output"]:
+        for item in items:
+            print(json.dumps(item))
+    else:
+        print(json.dumps({"kind": "List", "items": items}))
+    if fixture["foreign_resource_after_dry_run"]:
+        fixture["foreign_resource_present"] = True
+        (base / "fixture").write_text(json.dumps(fixture))
+    sys.exit(0)
+if command[:1] == ["create"]:
+    rendered = sys.stdin.read()
+    if "unconfigured-do-not-run" in rendered or fixture["image"] not in rendered or "replicas: 0" not in rendered:
+        sys.exit(1)
+    if fixture["foreign_resource_present"]:
+        sys.exit(1)
+    (base / "create-rendered").write_text(rendered)
+    fixture["applied"] = True
+    (base / "fixture").write_text(json.dumps(fixture))
+    sys.exit(0)
+sys.exit(1)
+'''
+        executable = binaries / "sudo"
+        executable.write_text(f"#!{sys.executable}\n" + mock)
+        executable.chmod(0o755)
+        environment = {**os.environ, "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
+                       "PREPARE_FIXTURE": str(base)}
+        result = subprocess.run(["bash", str(PREPARE), *arguments], env=environment,
+                                text=True, capture_output=True, timeout=20)
+        self.last_prepare_rendered = tuple(
+            (base / name).read_text() if (base / name).exists() else None
+            for name in ("dry-run-rendered", "create-rendered")
+        )
+        return result, (base / "calls").read_text()
+
+    def test_prepare_applies_only_rendered_replica_zero_resources(self):
+        image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
+        result, calls = self.run_prepare("--go", "--image", image)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "book_memo_prepare=PASS\n")
+        self.assertIn('"create", "--dry-run=server"', calls)
+        self.assertIn('"create", "-f", "-"', calls)
+        self.assertEqual(self.last_prepare_rendered[0], self.last_prepare_rendered[1])
+        self.assertNotIn("docker", calls)
+        self.assertNotIn("scale", calls)
+
+    def test_prepare_missing_secret_stops_before_image_or_resource_changes(self):
+        image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
+        result, calls = self.run_prepare("--go", "--image", image, secret_exists=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "book_memo_prepare=FAIL stage=secret\n")
+        self.assertNotIn("ctr", calls)
+        self.assertNotIn("create", calls)
+
+    def test_prepare_rejects_tag_only_listing_before_any_resource_create(self):
+        image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
+        result, calls = self.run_prepare(
+            "--go", "--image", image,
+            listed_image="docker.io/library/personal-server-book-memo:k3s-test",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "book_memo_prepare=FAIL stage=image\n")
+        self.assertIn("ctr", calls)
+        self.assertNotIn("create", calls)
+
+    def test_prepare_fails_closed_when_resource_appears_after_dry_run(self):
+        image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
+        result, calls = self.run_prepare(
+            "--go", "--image", image, foreign_resource_after_dry_run=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "book_memo_prepare=FAIL stage=create\n")
+        self.assertIn('"create", "--dry-run=server"', calls)
+        self.assertIn('"create", "-f", "-"', calls)
+        self.assertNotIn("apply", calls)
+
+    def test_prepare_rejects_any_unexpected_rendered_resource_before_create(self):
+        image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
+        result, calls = self.run_prepare(
+            "--go", "--image", image, unexpected_dry_run_resource=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "book_memo_prepare=FAIL stage=server_dry_run\n")
+        self.assertIn('"create", "--dry-run=server"', calls)
+        self.assertNotIn('"create", "-f", "-"', calls)
+
+    def test_prepare_accepts_exact_sequential_json_objects_from_server_dry_run(self):
+        image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
+        result, calls = self.run_prepare(
+            "--go", "--image", image, sequential_dry_run_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"create", "--dry-run=server"', calls)
+        self.assertIn('"create", "-f", "-"', calls)
+
+
 class BookMemoManifestTests(unittest.TestCase):
     def assert_manifest_contract(self, documents):
         self.assertEqual(
@@ -351,12 +504,12 @@ class BookMemoManifestTests(unittest.TestCase):
         self.assertEqual(pvc["metadata"], {"name": "book-memo-data", "namespace": "personal-server"})
         self.assertEqual(pvc["spec"]["accessModes"], ["ReadWriteOnce"])
         self.assertEqual(pvc["spec"]["resources"]["requests"]["storage"], "1Gi")
-        self.assertEqual(deployment["spec"]["replicas"], 1)
+        self.assertEqual(deployment["spec"]["replicas"], 0)
         self.assertEqual(deployment["spec"]["strategy"], {"type": "Recreate"})
         self.assertTrue(pod["securityContext"]["runAsNonRoot"])
         self.assertEqual(len(pod["containers"]), 1)
         container = pod["containers"][0]
-        self.assertEqual(container["image"], "personal-server-book-memo:v1")
+        self.assertEqual(container["image"], UNCONFIGURED_IMAGE)
         self.assertEqual(container["imagePullPolicy"], "Never")
         self.assertTrue(container["securityContext"]["readOnlyRootFilesystem"])
         self.assertFalse(container["securityContext"]["allowPrivilegeEscalation"])
@@ -423,7 +576,7 @@ class BookMemoManifestTests(unittest.TestCase):
         documents = list(yaml.safe_load_all(MANIFEST.read_text(encoding="utf-8")))
         deployment = next(item for item in documents if item["kind"] == "Deployment")
         service = next(item for item in documents if item["kind"] == "Service")
-        self.assertEqual(deployment["spec"]["replicas"], 1)
+        self.assertEqual(deployment["spec"]["replicas"], 0)
         self.assertTrue(deployment["spec"]["template"]["spec"]["securityContext"]["runAsNonRoot"])
         self.assertEqual(service["spec"]["type"], "ClusterIP")
         self.assertNotIn("nodePort", yaml.safe_dump(service))
@@ -431,6 +584,25 @@ class BookMemoManifestTests(unittest.TestCase):
     def test_book_memo_manifest_uses_its_pvc_and_hardened_local_image_contract(self):
         documents = [item for item in yaml.safe_load_all(MANIFEST.read_text(encoding="utf-8")) if item]
         self.assert_manifest_contract(documents)
+
+    def test_prepare_contract_keeps_static_manifest_inert_and_requires_immutable_image(self):
+        documents = [item for item in yaml.safe_load_all(MANIFEST.read_text(encoding="utf-8")) if item]
+        deployment = next(item for item in documents if item["kind"] == "Deployment")
+        container = deployment["spec"]["template"]["spec"]["containers"][0]
+
+        self.assertEqual(deployment["spec"]["replicas"], 0)
+        self.assertEqual(container["image"], UNCONFIGURED_IMAGE)
+        self.assertTrue(PREPARE.is_file())
+
+        source = PREPARE.read_text(encoding="utf-8")
+        self.assertIn('--go)', source)
+        self.assertIn('^docker\\.io/library/personal-server-book-memo@sha256:', source)
+        self.assertIn('get secret book-memo-runtime', source)
+        self.assertIn('ctr images list', source)
+        self.assertIn('create --dry-run=server', source)
+        self.assertNotIn('"docker"', source)
+        self.assertNotIn('--replicas=1', source)
+        self.assertNotIn('.data', source)
 
 
 if __name__ == "__main__":

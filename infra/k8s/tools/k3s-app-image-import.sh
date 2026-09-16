@@ -80,8 +80,8 @@ with tarfile.open(archive, "r:*") as source:
 PY
 }
 
-imported_image_digest() {
-  awk -v image="$1" '
+verified_imported_image() {
+  awk -v image="$1" -v expected_digest="$2" '
     function valid_digest(value, body) {
       if (value !~ /^sha256:/ || length(value) != 71) return 0
       body = substr(value, 8)
@@ -89,13 +89,17 @@ imported_image_digest() {
     }
     NR == 1 { next }
     $1 == image {
-      if (!valid_digest($3)) exit 2
       count++
-      digest = $3
+      if (!valid_digest($3) || $3 != expected_digest) invalid = 1
+      for (field_index = 4; field_index <= NF; field_index++) {
+        if ($field_index ~ /(^|,)linux\/amd64(,|$)/) platform = 1
+      }
     }
     END {
       if (count != 1) exit 1
-      print digest
+      if (invalid) exit 2
+      if (!platform) exit 3
+      print expected_digest
     }
   '
 }
@@ -105,6 +109,12 @@ canonical_image_ref() {
     */*) printf '%s\n' "$1" ;;
     *) printf 'docker.io/library/%s\n' "$1" ;;
   esac
+}
+
+canonical_digest_image_ref() {
+  local canonical_tag="$1"
+  local descriptor_digest="$2"
+  printf '%s@%s\n' "${canonical_tag%:*}" "$descriptor_digest"
 }
 
 go=false
@@ -127,7 +137,12 @@ done
 [ -s "$archive" ] || fail "archive is missing"
 [[ "$digest" =~ ^[0-9a-fA-F]{64}$ ]] || fail "sha256 digest is invalid"
 [[ "$image" =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]*$ ]] || fail "image reference is invalid"
-case "$image" in *:latest) fail "latest tag is not allowed" ;; esac
+case "$image" in
+  *@*) fail "digest image reference is not allowed for archive import" ;;
+  *:latest) fail "latest tag is not allowed" ;;
+  */*:*|*:* ) ;;
+  *) fail "immutable image tag is required" ;;
+esac
 
 printf '%s  %s\n' "$digest" "$archive" | sha256sum --check --status || fail "archive digest mismatch"
 if archive_image_digest="$(verify_oci_linux_amd64 "$archive" "$image")"; then
@@ -141,6 +156,16 @@ fi
 sudo -n k3s kubectl get node -o name >/dev/null || fail "K3s node is unavailable"
 sudo -n k3s ctr images import "$archive" || fail "containerd import failed"
 containerd_image_ref="$(canonical_image_ref "$image")"
-containerd_image_digest="$(sudo -n k3s ctr images list | imported_image_digest "$containerd_image_ref")" || fail "imported image digest is missing or ambiguous"
-[ "$containerd_image_digest" = "$archive_image_digest" ] || fail "imported image digest does not match archive"
-printf '%s\n' 'image_import=PASS'
+if sudo -n k3s ctr images list | verified_imported_image "$containerd_image_ref" "$archive_image_digest" >/dev/null; then
+  :
+else
+  case "$?" in
+    2) fail "imported image digest does not match archive" ;;
+    3) fail "imported image platform is not linux/amd64" ;;
+    *) fail "imported image digest is missing or ambiguous" ;;
+  esac
+fi
+canonical_digest_ref="$(canonical_digest_image_ref "$containerd_image_ref" "$archive_image_digest")"
+sudo -n k3s ctr images tag "$containerd_image_ref" "$canonical_digest_ref" || fail "canonical digest alias registration failed"
+sudo -n k3s ctr images list | verified_imported_image "$canonical_digest_ref" "$archive_image_digest" >/dev/null || fail "canonical digest alias is missing or invalid"
+printf 'image_import=PASS image=%s\n' "$canonical_digest_ref"
