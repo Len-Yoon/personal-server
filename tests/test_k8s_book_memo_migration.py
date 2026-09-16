@@ -85,6 +85,14 @@ if name == 'docker':
         state['compose'] = fixture['after_stop']; save()
     elif args[:1] == ['start']:
         state['compose'] = 'running'; save()
+        if scenario in ('rollback_divergence', 'rollback_unverifiable'):
+            source = pathlib.Path(fixture['source']) / 'memo.sqlite3'
+            if scenario == 'rollback_divergence':
+                with sqlite3.connect(source) as connection:
+                    connection.execute("insert into memo values ('after-compose-start')")
+            else:
+                source.write_text('invalid sqlite')
+            fail()
     else: fail()
 elif name == 'sudo':
     if args[:3] == ['-n', 'k3s', 'ctr']:
@@ -280,6 +288,21 @@ else: fail()
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn('"start"', calls.read_text())
         self.assertEqual(self.last_state, {"compose": "exited", "replicas": 1, "helper": False})
+
+    def test_failed_rollback_start_never_reactivates_stale_or_unverifiable_pvc(self):
+        for scenario, stage in (("rollback_divergence", "recovery_data_divergence"),
+                                ("rollback_unverifiable", "recovery_data_unverified")):
+            with self.subTest(scenario=scenario):
+                result, calls = self.run_cutover("--rollback", scenario=scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, f"book_memo_cutover=FAIL stage={stage}\n")
+                self.assertEqual(self.last_state, {"compose": "exited", "replicas": 0, "helper": False})
+                self.assertNotIn('--replicas=1', calls.read_text())
+                with sqlite3.connect(self.last_target / "memo.sqlite3") as connection:
+                    self.assertEqual(connection.execute("select count(*) from memo").fetchone()[0], 1)
+                if scenario == "rollback_divergence":
+                    with sqlite3.connect(self.last_target.parent / "source" / "memo.sqlite3") as connection:
+                        self.assertEqual(connection.execute("select count(*) from memo").fetchone()[0], 2)
 
     def test_failed_handoff_never_restores_stale_or_unverifiable_compose_data(self):
         for scenario, stage in (("rollout_divergence", "recovery_data_divergence"),

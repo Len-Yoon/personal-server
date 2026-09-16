@@ -253,6 +253,10 @@ def recover():
             if compose_changed:
                 run(["docker", "stop", "--time", "60", APP])
                 compose_stopped()
+                writers_absent()
+                if not recovery_data_matches():
+                    return
+                writers_absent()
             start_k3s()
         else:
             delete_helper()
