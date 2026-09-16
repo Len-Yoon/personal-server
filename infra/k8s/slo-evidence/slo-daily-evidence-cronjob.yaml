@@ -1,0 +1,99 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: slo-daily-evidence
+  namespace: monitoring
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: slo-daily-evidence
+  namespace: monitoring
+data:
+  records.json: "[]"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: slo-daily-evidence
+  namespace: monitoring
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [slo-daily-evidence]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: slo-daily-evidence
+  namespace: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: slo-daily-evidence
+subjects:
+  - kind: ServiceAccount
+    name: slo-daily-evidence
+    namespace: monitoring
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: slo-daily-evidence
+  namespace: monitoring
+spec:
+  schedule: "15 2 * * *"
+  timeZone: Asia/Seoul
+  suspend: true
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 180
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          serviceAccountName: slo-daily-evidence
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: collector
+              image: personal-server-slo-evidence:local
+              imagePullPolicy: Never
+              env:
+                - name: PROMETHEUS_URL
+                  value: http://prometheus-operated.monitoring.svc:9090/api/v1/query
+                - name: EVIDENCE_CONFIGMAP
+                  value: slo-daily-evidence
+                - name: HOME
+                  value: /tmp
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 32Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir:
+                sizeLimit: 16Mi

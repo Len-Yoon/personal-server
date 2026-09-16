@@ -41,6 +41,27 @@ def documents():
         return [document for document in yaml.safe_load_all(stream) if document]
 
 
+def valid_slo_records(count=30):
+    now = datetime.now(timezone.utc)
+    today = now.astimezone(timezone(timedelta(hours=9))).date()
+    return [
+        {
+            "date": (today - timedelta(days=day)).isoformat(),
+            "collected_at": now.isoformat(),
+            "overall": "ok",
+            "public_health": "ok",
+            "portal_ready": "ok",
+            "crawler_freshness": "ok",
+            "portal_http": {
+                "requests": 10, "server_errors": 0,
+                "server_error_ratio": 0, "p95_seconds": 0.1,
+            },
+            "missing": [],
+        }
+        for day in range(count)
+    ]
+
+
 def find(kind, name, namespace=None):
     for document in documents():
         metadata = document.get("metadata", {})
@@ -119,7 +140,10 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         status_rules = find("Role", "quarterly-sre-audit-status", "monitoring")["rules"]
         self.assertEqual(
             status_rules,
-            [{"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["sre-telegram-quarterly-audit-status"], "verbs": ["get", "patch"]}],
+            [
+                {"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["sre-telegram-quarterly-audit-status"], "verbs": ["get", "patch"]},
+                {"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["slo-daily-evidence"], "verbs": ["get"]},
+            ],
         )
         validation_status_rules = find("Role", "quarterly-sre-audit-validation-diagnostics", "monitoring")["rules"]
         self.assertEqual(
@@ -261,7 +285,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                     os.killpg(process.pid, 15)
                     process.wait(timeout=2)
 
-    def run_runner(self, *, evidence, scenario="", patch_fails=False, report_mode="official", recovery_timeout="2", fast_recovery_clock=False):
+    def run_runner(self, *, evidence, scenario="", patch_fails=False, report_mode="official", recovery_timeout="2", fast_recovery_clock=False, slo_records=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             command = root / "kubectl"
@@ -284,6 +308,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 "case \"$*\" in\n"
                 "  *'get nodes'*) printf 'node Ready worker' ;;\n"
                 "  *'get configmap portal-pvc-backup-evidence'*) [ \"$SCENARIO\" = configmap-fail ] && exit 1; printf '%s\\n' \"$EVIDENCE\"; exit 0 ;;\n"
+                "  *'get configmap slo-daily-evidence'*) [ \"$SCENARIO\" = slo-configmap-fail ] && { printf 'sensitive-source-error' >&2; exit 1; }; printf '%s' \"$SLO_RECORDS\"; exit 0 ;;\n"
                 "  *'get deployment portal-web'*) printf 1 ;;\n"
                 "  *'scale deployment sre-pod-recovery --replicas=1'*) [ \"$SCENARIO\" = scale-up-fail ] && exit 1; printf 1 > \"$REPLICAS\"; exit 0 ;;\n"
                 "  *'scale deployment sre-pod-recovery --replicas=0'*) [ \"$SCENARIO\" = cleanup-fail ] && exit 1; printf 0 > \"$REPLICAS\"; exit 0 ;;\n"
@@ -333,6 +358,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                     "COUNTER": str(root / "counter"),
                     "TRIGGERED": str(root / "triggered"),
                     "EVIDENCE": evidence,
+                    "SLO_RECORDS": json.dumps(valid_slo_records()) if slo_records is None else slo_records,
                     "SCENARIO": scenario,
                     "PATCH_FAILS": str(patch_fails).lower(),
                     "DIAGNOSTICS": str(diagnostics),
@@ -354,7 +380,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         result, payload, _, calls = self.run_runner(evidence=valid_backup_evidence())
 
         self.assertEqual(result.returncode, 0, f"{result.stderr}\n{calls}")
-        self.assertEqual(set(payload["data"]), {"run_id", "status", "completed_at", "health_audit", "backup_check", "recovery_lab", "health_check", "backup_evidence"})
+        self.assertEqual(set(payload["data"]), {"run_id", "status", "completed_at", "health_audit", "backup_check", "recovery_lab", "health_check", "backup_evidence", "slo_evidence", "slo_days_recorded", "slo_days_ok", "slo_days_unobservable"})
         stale_configmap = {
             "data": {
                 "health_check": "passed",
@@ -389,6 +415,99 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertNotIn(" delete ", calls)
         self.assertIn("get pod recovery-pod", calls)
         self.assertNotIn("wait --for=condition=Ready", calls)
+
+    def test_runner_slo_reads_only_fixed_evidence_and_reports_counts(self):
+        result, payload, _, calls = self.run_runner(evidence=valid_backup_evidence())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            {key: value for key, value in payload["data"].items() if key.startswith("slo_")},
+            {"slo_evidence": "passed", "slo_days_recorded": "30", "slo_days_ok": "30", "slo_days_unobservable": "0"},
+        )
+        evidence_calls = [line for line in calls.splitlines() if "slo-daily-evidence" in line]
+        self.assertEqual(len(evidence_calls), 1)
+        self.assertIn("-n monitoring get configmap slo-daily-evidence", evidence_calls[0])
+        self.assertIn("--request-timeout=10s", evidence_calls[0])
+        self.assertNotIn("portal_http", json.dumps(payload) + result.stdout + result.stderr)
+
+    def test_runner_requires_last_thirty_consecutive_kst_dates(self):
+        for kind in ("stale", "gap", "future"):
+            with self.subTest(kind=kind):
+                records = valid_slo_records()
+                today = datetime.fromisoformat(records[0]["date"]).date()
+                if kind == "stale":
+                    for record in records:
+                        record["date"] = (datetime.fromisoformat(record["date"]).date() - timedelta(days=90)).isoformat()
+                elif kind == "gap":
+                    records[10]["date"] = (today - timedelta(days=30)).isoformat()
+                else:
+                    records[-1]["date"] = (today + timedelta(days=1)).isoformat()
+                result, payload, _, _ = self.run_runner(
+                    evidence=valid_backup_evidence(), slo_records=json.dumps(records),
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(payload["data"]["status"], "passed")
+                self.assertEqual(payload["data"]["slo_evidence"], "unobservable")
+
+    def test_runner_slo_coverage_and_failures_do_not_change_existing_audit_result(self):
+        for kind, count, expected, ok_days, unknown_days in (
+            ("normal", 0, "unobservable", "0", "0"),
+            ("normal", 29, "unobservable", "29", "0"),
+            ("missing", 30, "unobservable", "29", "1"),
+            ("failed", 30, "failed", "29", "0"),
+            ("zero_requests", 30, "passed", "30", "0"),
+        ):
+            with self.subTest(kind=kind, count=count):
+                records = valid_slo_records(count)
+                if kind == "missing":
+                    records[0].update(overall="unobservable", portal_http=None, missing=["portal_http"])
+                if kind == "failed":
+                    records[0]["public_health"] = "failed"
+                if kind == "zero_requests":
+                    records[0]["portal_http"] = {"requests": 0, "server_errors": 0, "server_error_ratio": None, "p95_seconds": None}
+                result, payload, _, _ = self.run_runner(evidence=valid_backup_evidence(), slo_records=json.dumps(records))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(payload["data"]["status"], "passed")
+                self.assertEqual(payload["data"].get("slo_evidence"), expected)
+                self.assertEqual(payload["data"]["slo_days_recorded"], str(count))
+                self.assertEqual(payload["data"]["slo_days_ok"], ok_days)
+                self.assertEqual(payload["data"]["slo_days_unobservable"], unknown_days)
+
+    def test_runner_rejects_malformed_slo_records_without_exposing_payload(self):
+        invalid_records = ["sensitive-source-error", "{}", "null", '[{}]', json.dumps(valid_slo_records(31))]
+        duplicate = valid_slo_records()
+        duplicate[1]["date"] = duplicate[0]["date"]
+        invalid_records.append(json.dumps(duplicate))
+        for field, invalid in (
+            ("date", "2026-02-30"), ("collected_at", "2026-09-01T02:00:00+09:00"),
+            ("overall", "passed"), ("public_health", []), ("missing", ["sensitive-source-error"]),
+            ("portal_http", None), ("unexpected", "sensitive-source-error"),
+        ):
+            records = valid_slo_records()
+            records[0][field] = invalid
+            invalid_records.append(json.dumps(records))
+        for field, invalid in (("requests", True), ("requests", -1), ("p95_seconds", float("nan")), ("server_error_ratio", 2), ("server_errors", 11)):
+            records = valid_slo_records()
+            records[0]["portal_http"][field] = invalid
+            invalid_records.append(json.dumps(records))
+        for raw in invalid_records:
+            with self.subTest(raw=raw[:30]):
+                result, payload, _, _ = self.run_runner(evidence=valid_backup_evidence(), slo_records=raw)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(payload["data"].get("slo_evidence"), "unobservable")
+                for key in ("slo_days_recorded", "slo_days_ok", "slo_days_unobservable"):
+                    self.assertEqual(payload["data"][key], "0")
+                self.assertNotIn("sensitive-source-error", result.stdout + result.stderr + json.dumps(payload))
+
+    def test_runner_slo_read_failure_is_unobservable_and_validation_mode_skips_read(self):
+        result, payload, _, _ = self.run_runner(evidence=valid_backup_evidence(), scenario="slo-configmap-fail")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["data"].get("slo_evidence"), "unobservable")
+        self.assertEqual(payload["data"]["slo_days_recorded"], "0")
+        self.assertNotIn("sensitive-source-error", result.stdout + result.stderr)
+        result, _, diagnostics, calls = self.run_runner(evidence=valid_backup_evidence(), report_mode="validation")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("slo-daily-evidence", calls)
+        self.assertNotIn("slo_evidence", diagnostics["data"])
 
     def test_runner_uses_deployment_get_polling_and_bounded_recovery_transition_observation(self):
         text = RUNNER.read_text(encoding="utf-8")

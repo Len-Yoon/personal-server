@@ -371,6 +371,80 @@ class RelayServiceTest(unittest.TestCase):
                 self.assertNotIn(audit_data["run_id"], message)
                 self.assertNotIn(audit_data["completed_at"], message)
 
+    def test_quarterly_audit_accepts_complete_slo_summary_and_preserves_delivery_deduplication(self):
+        for result, recorded, ok, unknown, label in (
+            ("passed", "30", "30", "0", "통과"),
+            ("failed", "30", "29", "0", "실패"),
+            ("unobservable", "30", "29", "1", "관측 불가"),
+            # Stale, gapped, or future dates invalidate coverage despite all records being healthy.
+            ("unobservable", "30", "30", "0", "관측 불가"),
+            ("unobservable", "3", "3", "0", "관측 불가"),
+            ("unobservable", "0", "0", "0", "관측 불가"),
+        ):
+            with self.subTest(result=result, recorded=recorded, unknown=unknown):
+                audit_data = {
+                    "run_id": "20260912T010203Z-slo-audit",
+                    "status": "passed",
+                    "completed_at": "2026-09-12T01:02:03Z",
+                    "health_audit": "passed", "backup_check": "passed", "recovery_lab": "passed",
+                    "slo_evidence": result, "slo_days_recorded": recorded,
+                    "slo_days_ok": ok, "slo_days_unobservable": unknown,
+                }
+                k8s = FakeQuarterlyAuditStatusK8s(audit_data)
+                telegram = FakePollingTelegram([])
+                relay = RelayService(
+                    allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                    quarterly_audit_delivery_store=ConfigMapQuarterlyAuditDeliveryStore(
+                        k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP
+                    ),
+                )
+                self.assertTrue(relay.deliver_quarterly_audit_report(telegram.send_message))
+                relay.deliver_quarterly_audit_report(telegram.send_message)
+                self.assertEqual(len(telegram.sent_messages), 1)
+                message = telegram.sent_messages[0][1]
+                self.assertIn("[분기 SRE 점검 완료]", message)
+                self.assertIn(f"SLO 증적: {label}", message)
+                self.assertIn(f"수집 {recorded}/30일, 정상 {ok}일, 관측 불가 {unknown}일", message)
+                self.assertNotIn(audit_data["run_id"], message)
+                self.assertNotIn(audit_data["completed_at"], message)
+
+    def test_quarterly_audit_rejects_partial_unknown_and_malformed_slo_summaries(self):
+        valid = {
+            "run_id": "20260912T010203Z-slo-audit", "status": "passed",
+            "completed_at": "2026-09-12T01:02:03Z",
+            "health_audit": "passed", "backup_check": "passed", "recovery_lab": "passed",
+            "slo_evidence": "passed", "slo_days_recorded": "30",
+            "slo_days_ok": "30", "slo_days_unobservable": "0",
+        }
+        invalid_reports = [{key: value for key, value in valid.items() if key != missing} for missing in valid]
+        invalid_reports += [dict(valid, **change) for change in (
+            {"records.json": "private-raw-record"}, {"slo_evidence": "private-raw-record"},
+            {"slo_days_recorded": "31"}, {"slo_days_ok": "-1"}, {"slo_days_ok": "1.0"},
+            {"slo_days_ok": "03"}, {"slo_days_ok": "３０"}, {"slo_days_ok": " 30"},
+            {"slo_days_ok": 30}, {"slo_days_unobservable": "1"},
+            {"slo_days_recorded": "29"}, {"slo_days_ok": "29"},
+            {"slo_evidence": "failed"},
+            {"slo_evidence": "unobservable", "slo_days_recorded": "29"},
+            {"slo_evidence": "unobservable", "slo_days_unobservable": "1"},
+            {"slo_evidence": "unobservable", "slo_days_recorded": "31"},
+            {"slo_evidence": "failed", "slo_days_ok": "28", "slo_days_unobservable": "1"},
+        )]
+        for index, audit_data in enumerate(invalid_reports):
+            with self.subTest(case=index):
+                k8s = FakeQuarterlyAuditStatusK8s(audit_data)
+                telegram = FakePollingTelegram([])
+                relay = RelayService(
+                    allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                    quarterly_audit_delivery_store=ConfigMapQuarterlyAuditDeliveryStore(
+                        k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP
+                    ),
+                )
+                with self.assertLogs("app.main", level="WARNING") as captured:
+                    relay.deliver_quarterly_audit_report(telegram.send_message)
+                self.assertEqual(telegram.sent_messages, [])
+                self.assertEqual(k8s.data, {})
+                self.assertNotIn("private-raw-record", "\n".join(captured.output))
+
     def test_malformed_quarterly_audit_report_is_ignored_without_delivery_or_state_write(self):
         invalid_reports = (
             {"run_id": "20260912T010203Z-audit", "status": "passed", "completed_at": "2026-09-12T01:02:03Z", "health_audit": "passed", "backup_check": "passed"},

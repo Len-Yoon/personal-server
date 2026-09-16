@@ -122,6 +122,10 @@ rules:
     resources: [configmaps]
     resourceNames: [sre-telegram-quarterly-audit-status]
     verbs: [get, patch]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [slo-daily-evidence]
+    verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -13,6 +13,20 @@ SCRIPT = ROOT / "infra" / "k8s" / "tools" / "quarterly-sre-audit-automation.sh"
 
 
 class QuarterlySreAuditAutomationTests(unittest.TestCase):
+    def test_install_does_not_mutate_daily_slo_evidence(self):
+        result, calls = self.run_tool("--install")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for verb in ("create", "patch", "delete", "replace"):
+            self.assertNotIn(f"{verb} configmap slo-daily-evidence", calls)
+        manifest = ROOT / "infra/k8s/sre-audit-automation/quarterly-sre-audit-cronjob.yaml"
+        documents = [document for document in yaml.safe_load_all(manifest.read_text()) if document]
+        grants = [
+            rule for document in documents if document["kind"] in {"Role", "ClusterRole"}
+            for rule in document["rules"] if "slo-daily-evidence" in rule.get("resourceNames", [])
+        ]
+        self.assertEqual(grants, [{"apiGroups": [""], "resources": ["configmaps"], "resourceNames": ["slo-daily-evidence"], "verbs": ["get"]}])
+        self.assertFalse(any(document["kind"] == "ConfigMap" and document["metadata"]["name"] == "slo-daily-evidence" for document in documents))
+
     def test_install_activates_monthly_cronjob_only_after_monthly_manual_job_and_relay_delivery(self):
         result, calls = self.run_tool("--install")
 
