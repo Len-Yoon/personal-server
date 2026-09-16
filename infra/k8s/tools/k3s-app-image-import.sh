@@ -12,12 +12,13 @@ usage() {
 }
 
 verify_oci_linux_amd64() {
-  python3 - "$1" <<'PY'
+  python3 - "$1" "$2" <<'PY'
 import json
 import sys
 import tarfile
 
 archive = sys.argv[1]
+image = sys.argv[2]
 INDEX_MEDIA_TYPES = {
     "application/vnd.oci.image.index.v1+json",
     "application/vnd.docker.distribution.manifest.list.v2+json",
@@ -66,8 +67,31 @@ with tarfile.open(archive, "r:*") as source:
     manifests = index.get("manifests", [])
     if not manifests:
         raise ValueError("OCI index has no manifests")
-    sys.exit(0 if any(resolves_to_linux_amd64(source, manifest, set()) for manifest in manifests) else 1)
+    selected = [
+        manifest for manifest in manifests
+        if manifest.get("annotations", {}).get("org.opencontainers.image.ref.name") == image
+    ]
+    if len(selected) != 1:
+        sys.exit(2)
+    descriptor = selected[0]
+    if not resolves_to_linux_amd64(source, descriptor, set()):
+        sys.exit(3)
+    print(descriptor["digest"])
 PY
+}
+
+imported_image_digest() {
+  python3 -c '
+import json
+import re
+import sys
+
+document = json.load(sys.stdin)
+digest = document.get("target", {}).get("digest", "")
+if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+    raise ValueError("containerd image target digest is invalid")
+print(digest)
+'
 }
 
 go=false
@@ -93,8 +117,16 @@ done
 case "$image" in *:latest) fail "latest tag is not allowed" ;; esac
 
 printf '%s  %s\n' "$digest" "$archive" | sha256sum --check --status || fail "archive digest mismatch"
-verify_oci_linux_amd64 "$archive" || fail "archive platform is not linux/amd64"
+if archive_image_digest="$(verify_oci_linux_amd64 "$archive" "$image")"; then
+  :
+else
+  case "$?" in
+    3) fail "archive platform is not linux/amd64" ;;
+    *) fail "archive image reference is missing or ambiguous" ;;
+  esac
+fi
 sudo -n k3s kubectl get node -o name >/dev/null || fail "K3s node is unavailable"
 sudo -n k3s ctr images import "$archive" || fail "containerd import failed"
-sudo -n k3s ctr images list -q | grep -Fxq "$image" || fail "imported image is unavailable"
+containerd_image_digest="$(sudo -n k3s ctr images inspect --output json "$image" | imported_image_digest)" || fail "imported image is unavailable"
+[ "$containerd_image_digest" = "$archive_image_digest" ] || fail "imported image digest does not match archive"
 printf '%s\n' 'image_import=PASS'

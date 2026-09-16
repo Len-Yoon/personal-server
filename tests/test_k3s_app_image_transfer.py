@@ -23,7 +23,7 @@ class K3sAppImageTransferTests(unittest.TestCase):
         blobs[f"blobs/sha256/{digest}"] = payload
         return f"sha256:{digest}"
 
-    def _write_nested_oci_archive(self, path, config_architecture):
+    def _write_nested_oci_archive(self, path, config_architecture, image_ref=None):
         blobs = {}
         config_digest = self._add_blob(
             blobs,
@@ -52,13 +52,18 @@ class K3sAppImageTransferTests(unittest.TestCase):
                 "schemaVersion": 2,
             },
         )
+        descriptor = {
+            "digest": nested_index_digest,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "platform": {"architecture": "amd64", "os": "linux"},
+        }
+        if image_ref is not None:
+            descriptor["annotations"] = {
+                "org.opencontainers.image.ref.name": image_ref,
+            }
         index = {
             "manifests": [
-                {
-                    "digest": nested_index_digest,
-                    "mediaType": "application/vnd.oci.image.index.v1+json",
-                    "platform": {"architecture": "amd64", "os": "linux"},
-                }
+                descriptor,
             ],
             "schemaVersion": 2,
         }
@@ -67,6 +72,7 @@ class K3sAppImageTransferTests(unittest.TestCase):
                 info = tarfile.TarInfo(name)
                 info.size = len(payload)
                 archive.addfile(info, io.BytesIO(payload))
+        return nested_index_digest
 
     def _write_fake_sudo(self, directory):
         fake_sudo = directory / "sudo"
@@ -74,6 +80,10 @@ class K3sAppImageTransferTests(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             "printf '%s\\n' \"$*\" >> \"$CALL_LOG\"\n"
             "if [ \"$3\" = kubectl ]; then exit 0; fi\n"
+            "if [ \"$3 $4 $5\" = 'ctr images inspect' ]; then\n"
+            "  printf '{\"target\":{\"digest\":\"%s\"}}\\n' \"$INSPECT_TARGET_DIGEST\"\n"
+            "  exit 0\n"
+            "fi\n"
             "if [ \"$3 $4 $5\" = 'ctr images list' ]; then printf '%s\\n' 'personal-server-book-memo:v1'; fi\n",
             encoding="utf-8",
         )
@@ -96,6 +106,7 @@ class K3sAppImageTransferTests(unittest.TestCase):
         self.assertIn("uname -s", text)
         self.assertIn("Darwin", text)
         self.assertIn("latest", text)
+        self.assertIn('annotation-manifest-descriptor.org.opencontainers.image.ref.name="$image"', text)
         self.assertIn("image_build=PASS", text)
 
     def test_import_script_requires_go_and_rejects_missing_archive_before_ctr_access(self):
@@ -127,6 +138,39 @@ class K3sAppImageTransferTests(unittest.TestCase):
             command_directory = temporary_path / "bin"
             command_directory.mkdir()
             call_log = temporary_path / "calls.log"
+            archive_digest = self._write_nested_oci_archive(
+                archive, "amd64", "personal-server-book-memo:v1"
+            )
+            self._write_fake_sudo(command_directory)
+
+            result = subprocess.run(
+                [
+                    "bash", str(IMPORT), "--go", "--archive", str(archive),
+                    "--sha256", hashlib.sha256(archive.read_bytes()).hexdigest(),
+                    "--image", "personal-server-book-memo:v1",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "CALL_LOG": str(call_log),
+                    "INSPECT_TARGET_DIGEST": archive_digest,
+                    "PATH": f"{command_directory}:{os.environ['PATH']}",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("image_import=PASS", result.stdout)
+            self.assertIn("k3s ctr images import", call_log.read_text(encoding="utf-8"))
+
+    def test_import_rejects_unannotated_archive_when_requested_image_already_exists(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_path = Path(temporary_directory)
+            archive = temporary_path / "other-image.tar"
+            command_directory = temporary_path / "bin"
+            command_directory.mkdir()
+            call_log = temporary_path / "calls.log"
             self._write_nested_oci_archive(archive, "amd64")
             self._write_fake_sudo(command_directory)
 
@@ -142,12 +186,45 @@ class K3sAppImageTransferTests(unittest.TestCase):
                 env={
                     **os.environ,
                     "CALL_LOG": str(call_log),
+                    "INSPECT_TARGET_DIGEST": "sha256:" + "a" * 64,
                     "PATH": f"{command_directory}:{os.environ['PATH']}",
                 },
             )
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("image_import=PASS", result.stdout)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("image_import=FAIL", result.stderr)
+
+    def test_import_rejects_target_digest_different_from_selected_archive_descriptor(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_path = Path(temporary_directory)
+            archive = temporary_path / "image.tar"
+            command_directory = temporary_path / "bin"
+            command_directory.mkdir()
+            call_log = temporary_path / "calls.log"
+            self._write_nested_oci_archive(
+                archive, "amd64", "personal-server-book-memo:v1"
+            )
+            self._write_fake_sudo(command_directory)
+
+            result = subprocess.run(
+                [
+                    "bash", str(IMPORT), "--go", "--archive", str(archive),
+                    "--sha256", hashlib.sha256(archive.read_bytes()).hexdigest(),
+                    "--image", "personal-server-book-memo:v1",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "CALL_LOG": str(call_log),
+                    "INSPECT_TARGET_DIGEST": "sha256:" + "a" * 64,
+                    "PATH": f"{command_directory}:{os.environ['PATH']}",
+                },
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("image_import=FAIL", result.stderr)
             self.assertIn("k3s ctr images import", call_log.read_text(encoding="utf-8"))
 
     def test_import_rejects_amd64_descriptor_when_resolved_config_is_arm64(self):
@@ -157,7 +234,9 @@ class K3sAppImageTransferTests(unittest.TestCase):
             command_directory = temporary_path / "bin"
             command_directory.mkdir()
             call_log = temporary_path / "calls.log"
-            self._write_nested_oci_archive(archive, "arm64")
+            self._write_nested_oci_archive(
+                archive, "arm64", "personal-server-book-memo:v1"
+            )
             self._write_fake_sudo(command_directory)
 
             result = subprocess.run(
