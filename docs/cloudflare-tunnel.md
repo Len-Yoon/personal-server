@@ -1,23 +1,26 @@
 # Cloudflare Tunnel 운영 가이드
 
-현재 공개 경로는 **Cloudflare Tunnel → WSL localhost Caddy → K3s Portal 또는 Compose 서비스**임. 단, Hyundai OAuth callback인 `car.len.pe.kr`은 Caddy 경로에 포함하지 않으며 별도 Tunnel ingress로 `car-care-worker` loopback endpoint에 연결해야 함. 공유기 포트포워딩은 이 경로에 사용하지 않음.
+현재 공개 경로는 Portal 계열의 **Cloudflare Tunnel → WSL loopback Caddy → K3s Portal**과 Compose 서비스의 Tunnel 직접 ingress로 나뉨. Hyundai OAuth callback인 `car.len.pe.kr`도 Caddy 경로에 포함하지 않음. 공유기 포트포워딩은 이 경로에 사용하지 않음.
 
 ## 현재 ingress 기준
 
-Tunnel의 `~/.cloudflared/config.yml`은 아래 Caddy 대상 호스트를 WSL의 `https://localhost:443`으로 전달함. Caddy가 host 이름을 기준으로 다음 대상으로 분기함.
+2026-09-16 N100에서 `cloudflared-personal-server.service`가 active이고 9개 ingress가 있는 것을 읽기 전용으로 대조함. Tunnel ID, 인증 파일, private IP는 문서에 기록하지 않음.
 
-| 호스트 | Caddy 대상 |
-|---|---|
-| `len.pe.kr`, `portal.len.pe.kr`, `file.len.pe.kr`, `admin.len.pe.kr`, `portfolio.len.pe.kr` | K3s `portal-web` NodePort |
-| `news.len.pe.kr` | Compose `crawler-worker` |
-| `memo.len.pe.kr` | Compose `youtube-memo` |
-| `books.len.pe.kr` | Compose `book-memo` |
+| 호스트 | Tunnel 대상 유형 | 최종 대상 |
+|---|---|---|
+| `len.pe.kr`, `portal.len.pe.kr`, `file.len.pe.kr`, `admin.len.pe.kr`, `portfolio.len.pe.kr` | WSL loopback Caddy | K3s `portal-web` NodePort |
+| `news.len.pe.kr` | Compose `crawler-worker` loopback endpoint | `crawler-worker` |
+| `memo.len.pe.kr` | Compose `youtube-memo` loopback endpoint | `youtube-memo` |
+| `books.len.pe.kr` | Compose `book-memo` loopback endpoint | `book-memo` |
+| `car.len.pe.kr` | `car-care-worker` 비공개 callback upstream | Hyundai OAuth callback |
+
+뉴스·YouTube 메모·책 메모는 Caddy를 거치지 않고 각각의 Compose loopback endpoint로 연결됨. Caddy 경유 여부나 private callback upstream은 Tunnel 설정 대조 결과이며, 주소 값 자체는 운영 문서에 기록하지 않음.
 
 ## 차량 OAuth callback ingress
 
-`Caddyfile`에는 `car.len.pe.kr` 호스트 블록이 없음. 따라서 Hyundai OAuth callback은 Caddy 대상 표에 추가하지 않으며, Cloudflare Tunnel의 별도 ingress가 `http://localhost:8015`의 `car-care-worker` callback으로 전달해야 함.
+`Caddyfile`에는 `car.len.pe.kr` 호스트 블록이 없음. 따라서 Hyundai OAuth callback은 Caddy 대상 표에 추가하지 않으며, Cloudflare Tunnel의 별도 ingress가 `car-care-worker` 비공개 callback upstream으로 전달함. private callback upstream의 주소는 저장소·문서·로그에 기록하지 않음.
 
-이 Tunnel 설정은 저장소 밖의 `~/.cloudflared/config.yml`에 있으므로 실제 운영 값은 별도 확인 필요함. 설정이 없거나 Caddy 443으로 전달되면 `HYUNDAI_REDIRECT_URI`의 callback이 404가 될 수 있음.
+이 Tunnel 설정은 저장소 밖의 `~/.cloudflared/config.yml`에 있으므로 실제 운영 값은 변경 전 읽기 전용 대조가 필요함. 차량 callback ingress가 없거나 Caddy로 잘못 전달되면 `HYUNDAI_REDIRECT_URI`의 callback이 404가 될 수 있음.
 
 Tunnel은 Windows 로그인 뒤 WSL 사용자 서비스로 실행됨. `PersonalServer-WSL-KeepAlive`가 WSL을 유지하고, `personal-server-autostart`의 Supervisor가 Daemon을 단일 관리함. Supervisor는 초기 120초 대기 뒤 Daemon을 시작하며, Daemon은 3분 간격으로 WSL·K3s·Portal·NodePort·Tunnel을 점검함. Daemon이 비정상 종료되면 Supervisor가 15초 뒤 재기동하고, 짧은 시간에 3회 연속 종료되면 60초 backoff를 적용함. 같은 구성요소가 2회 연속 비정상이면 승인된 제한 복구를 시도하며, 구성요소별 시도는 최대 3회임. 복구 상태를 기록하지 못하면 중복·무한 복구를 막기 위해 추가 복구를 중단함. SSH 종료만으로 Tunnel이 내려가면 안 됨. Tunnel 단독 장애에는 호스트 긴급 재부팅을 사용하지 않음.
 

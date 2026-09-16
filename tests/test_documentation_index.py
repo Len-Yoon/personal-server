@@ -44,6 +44,12 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertNotIn("월 1회 [복구 훈련 절차]", content)
         self.assertNotIn("UptimeRobot", content)
 
+    def test_operations_roadmap_records_completed_read_only_tunnel_drift_check(self):
+        content = Path("docs/operations-roadmap.md").read_text(encoding="utf-8")
+
+        self.assertIn("Cloudflare Tunnel 구성 대조", content)
+        self.assertNotIn("| P3 | Cloudflare Tunnel 읽기 전용 설정·문서 drift 점검", content)
+
     def test_recovery_drill_uses_isolated_safe_tools_and_stop_criteria(self):
         content = Path("docs/recovery-drill.md").read_text(encoding="utf-8")
 
@@ -94,6 +100,13 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("Cloudflare Tunnel의 별도 ingress", tunnel)
         self.assertIn("별도 Cloudflare Tunnel ingress", operations)
 
+    def test_tunnel_documentation_matches_verified_direct_service_ingress_without_private_address(self):
+        tunnel = Path("docs/cloudflare-tunnel.md").read_text(encoding="utf-8")
+
+        self.assertIn("뉴스·YouTube 메모·책 메모는 Caddy를 거치지 않고", tunnel)
+        self.assertIn("비공개 callback upstream", tunnel)
+        self.assertNotIn("http://localhost:8015", tunnel)
+
     def test_n100_recovery_and_uptime_alert_conditions_are_documented(self):
         n100 = Path("docs/n100-mt4-setup.md").read_text(encoding="utf-8")
         uptime = Path("docs/public-uptime-monitor.md").read_text(encoding="utf-8")
@@ -126,7 +139,7 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("외부 제공자 없이 감지할 수 없음", uptime)
         self.assertIn("자동 재시작 또는 자동 복구를 수행하지 않음", uptime)
         self.assertIn("감시 경로 식별·알림 보강", roadmap)
-        self.assertIn("Cloudflare Tunnel 읽기 전용 설정·문서 drift 점검", roadmap)
+        self.assertIn("Cloudflare Tunnel 구성 대조", roadmap)
         self.assertIn("YouTube Memo 선행 K3s 이전", roadmap)
 
     def test_reboot_docs_describe_post_boot_check_without_new_telegram_message(self):
