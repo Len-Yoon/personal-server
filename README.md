@@ -11,8 +11,8 @@ Windows N100과 Ubuntu WSL2에서 운영하는 개인용 서비스 허브임. �
 | Portal | 자주 쓰는 서비스의 단일 진입점, 관리자 상태, 공개 포트폴리오 | K3s `portal-web` |
 | File Manager | 파일 업로드·정리·검색·ZIP 다운로드 | K3s `portal-web` + PVC |
 | News Hub | Investing.com·Google News 수집, 나스닥 관련성 분류, Telegram 중요 뉴스 알림 | `crawler-worker` |
-| YouTube Memo | 영상 링크·타임스탬프·메모 기록 | `youtube-memo` |
-| Book Memo | 책 검색·목차·독서 메모 관리 | `book-memo` |
+| YouTube Memo | 영상 링크·타임스탬프·메모 기록 | K3s `youtube-memo` + PVC |
+| Book Memo | 책 검색·목차·독서 메모 관리 | K3s `book-memo` + PVC |
 | 차량관리 | Hyundai 연동 차량 상태·정비 주기·운행 종료 Telegram 알림 | `car-care-worker` |
 | HomeOps | 제한된 컨테이너 진단과 승인된 복구 작업 | `system-agent` + `homeops-executor` |
 
@@ -42,8 +42,9 @@ Windows N100과 Ubuntu WSL2에서 운영하는 개인용 서비스 허브임. �
 | 구분 | 현재 운영 방식 |
 |---|---|
 | Portal·파일함·관리자·포트폴리오 | K3s `portal-web` + PVC 단일 writer |
-| 뉴스·YouTube 메모·책 메모·차량관리 | Docker Compose |
-| 공개 경로 | Cloudflare Tunnel: Portal은 Caddy 경유, Compose 서비스는 Tunnel 직접 ingress. 차량 callback은 비공개 upstream |
+| 뉴스·차량관리 | Docker Compose |
+| YouTube 메모·책 메모 | K3s `youtube-memo`·`book-memo` + 서비스별 PVC 단일 writer |
+| 공개 경로 | Cloudflare Tunnel: Portal·YouTube 메모·책 메모는 Caddy 경유 K3s Service, News는 Compose 직접 ingress, 차량 callback은 비공개 upstream |
 | 모니터링 | K3s Prometheus·Grafana, Telegram SRE 알림 |
 | 백업 | Portal PVC 암호화 백업 및 복원 검증 |
 | 외부 장애 감지 | GitHub Actions가 약 5분 간격으로 `https://len.pe.kr/health` 확인 |
@@ -111,7 +112,7 @@ Grafana에서 K3s 네임스페이스별 CPU·메모리 사용량, Pod 수, 요�
 기능 브랜치 → 테스트·독립 검토 → PR → 사용자 병합 승인 → main
 ```
 
-`crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker`의 허용된 변경만 N100 안전 자동 배포 대상임. Portal, K3s, Caddy, Secret, PVC, 운영 데이터는 자동 배포 대상이 아니며 별도 운영 절차를 사용함.
+`crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker`의 허용된 Compose 변경은 N100 안전 자동 배포 분류 대상임. 다만 현재 K3s runtime인 YouTube Memo·Book Memo는 Compose 안전 배포에서 자동으로 생략되며, 이미지 반입·PVC·Caddy 경로를 포함한 별도 운영 절차를 사용함. Portal, K3s, Caddy, Secret, PVC, 운영 데이터는 자동 배포 대상이 아님.
 
 병합된 변경은 CI·배포·health 검증과 작업공간 정리까지 확인함. CI artifact와 운영 증적은 90일 보관하며, 장기 보관이 필요한 자료는 별도 증적 저장소로 이전함.
 

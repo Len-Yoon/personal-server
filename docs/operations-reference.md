@@ -4,13 +4,13 @@
 
 ## 현재 런타임
 
-**Cloudflare Tunnel → Caddy → K3s Portal** 및 **Cloudflare Tunnel → Caddy → K3s Book Memo** 경로로 공개 서비스를 제공함. 뉴스·YouTube 메모는 Tunnel 직접 ingress로 각 Docker Compose 서비스에 연결되며, 차량 OAuth callback은 별도 비공개 upstream을 사용함. Caddy는 Portal과 Book Memo의 K3s Service로 전달함.
+**Cloudflare Tunnel → Caddy → K3s Portal·Book Memo·YouTube Memo** 경로로 공개 서비스를 제공함. 뉴스는 Tunnel 직접 ingress로 Docker Compose 서비스에 연결되며, 차량 OAuth callback은 별도 비공개 upstream을 사용함. Caddy는 Portal·Book Memo·YouTube Memo의 K3s Service로 전달함.
 
 | 구성 | 실행 위치 | 상태 데이터 |
 |---|---|---|
 | `portal-web` | K3s `personal-server` namespace | `portal-web-files-dynamic`, `portal-web-state-dynamic` PVC |
 | `crawler-worker` | Docker Compose | Compose 데이터 경로 |
-| `youtube-memo` | Docker Compose | Compose 데이터 경로 |
+| `youtube-memo` | K3s `personal-server` namespace | `youtube-memo-data` PVC |
 | `book-memo` | K3s `personal-server` namespace | `book-memo-data` PVC |
 | `system-agent`, `homeops-executor` | Docker Compose 내부 경계 | 호스트 상태·제한형 운영 작업 |
 | `car-care-worker` | Docker Compose | 차량관리 데이터·Telegram |
@@ -28,7 +28,7 @@ Portal PVC는 `portal-web-files-dynamic`, `portal-web-state-dynamic` 두 개이�
 |---|---|
 | `len.pe.kr`, `portal.len.pe.kr`, `file.len.pe.kr`, `admin.len.pe.kr`, `portfolio.len.pe.kr` | K3s `portal-web` |
 | `news.len.pe.kr` | `crawler-worker` |
-| `memo.len.pe.kr` | `youtube-memo` |
+| `memo.len.pe.kr` | Cloudflare Tunnel → Caddy → K3s `youtube-memo` Service |
 | `books.len.pe.kr` | Cloudflare Tunnel → Caddy → K3s `book-memo` Service |
 | `car.len.pe.kr` | `car-care-worker` OAuth callback. Caddy가 아닌 별도 Cloudflare Tunnel ingress의 비공개 callback upstream |
 
@@ -68,7 +68,7 @@ HomeOps 실행기는 Docker socket을 제한된 allowlist 진단·재시작에�
 
 - Portal은 K3s 단일 writer로만 실행함. Compose Portal과 동시에 실행하지 않음.
 - K3s Portal 전환·rollback·PVC 작업은 `infra/k8s/tools/portal-cutover.sh`의 명시적 운영 절차만 사용함.
-- 자동 배포는 `crawler-worker`, `youtube-memo`, `car-care-worker`의 허용된 Compose 변경만 처리함. K3s `book-memo`는 Compose 자동 배포 대상이 아님.
+- 자동 배포는 `crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker`의 허용된 변경을 분류함. 현재 K3s runtime state의 `book-memo`, `youtube-memo`는 Compose 안전 배포에서 `safe_cd_skip_k3s_service`로 생략되며, 실제 Compose 배포 대상은 `crawler-worker`, `car-care-worker`임.
 - Caddy, Cloudflare Tunnel, K3s Secret·PVC, `.env`, `data/`, Portal은 자동 배포에서 제외함.
 - Trivy filesystem/config 검사는 HIGH·CRITICAL 결과를 CI 차단 기준으로 사용함.
 
@@ -108,14 +108,16 @@ HomeOps 실행기는 Docker socket을 제한된 allowlist 진단·재시작에�
 
 공개 경로는 별도 승인·검증 대상이며 이 도구의 성공은 공개 서비스 전환 완료를 의미하지 않음. Secret·Portal·Caddy·Tunnel은 변경하지 않음. 적용 전후 독립 운영 검토, 서비스 수동 검증, 외부 health 검증은 실제 적용 승인 후 별도로 수행함.
 
-## YouTube Memo K3s 전환 준비 상태
+## YouTube Memo K3s 현재 운영 기준
 
-- 현재 production writer와 공개 경로는 Docker Compose `youtube-memo`이며, `memo.len.pe.kr`의 Tunnel ingress도 Compose loopback을 사용함. 이 절의 전환 자산 준비만으로 runtime 상태가 변경된 것은 아님.
-- `infra/k8s/apps/youtube-memo.yaml`은 replica 0과 실행 불가 sentinel 이미지를 갖는 준비 manifest임. 실제 운영 Deployment에 정적으로 재적용하지 않음.
-- 실제 전환 전 운영자는 `youtube-memo-runtime` Secret 존재만 확인하고, `youtube-memo-prepare.sh`와 `youtube-memo-cutover.sh --check`를 통해 이미지·PVC·단일 writer 사전 조건을 검증함. Secret 값과 데이터 내용은 출력하지 않음.
-- 별도 전환 승인 후에만 Docker 중지, 전체 `data/youtube-memo` 복사, SQLite 무결성·전체 digest 대조, K3s rollout, root 소유 runtime state 갱신, Caddy·Tunnel 공개 경로 변경을 순서대로 수행함.
+- `memo.len.pe.kr`의 확정 경로는 Cloudflare Tunnel → Caddy → K3s `youtube-memo` Service이며, K3s Pod만 production writer로 사용함. 중지된 Docker `youtube-memo`와 동시에 production write를 허용하지 않음.
+- `/var/lib/personal-server/k3s-runtime-services.state`의 root 소유 runtime state marker에 `youtube-memo=k3s`를 유지함. 이 marker가 없거나 신뢰할 수 없으면 자동화가 Compose 기본값으로 해석할 수 있으므로, 배포·점검 전 root 소유·일반 파일·비쓰기 가능 권한과 값을 확인함.
+- K3s Service의 정적 ClusterIP는 Git에 기록하지 않음. 코드와 운영 문서는 Service 이름·port 계약만 사용하며, 실제 주소는 실행 시 Kubernetes API로 조회함.
+- Docker 원본 `data/youtube-memo`는 롤백·증적 자산으로 보존함. 일상 정리·자동 배포·이미지 정리에서 삭제하지 않음.
+- 정적 `infra/k8s/apps/youtube-memo.yaml`은 초기 준비용 sentinel manifest임. 현재 production Deployment·Service·PVC에 정적 `youtube-memo.yaml`을 재적용하지 않음.
+- Docker Compose의 `youtube-memo` 서비스 정의는 검증된 롤백 자산으로 유지함. Caddy는 중지된 Docker rollback 컨테이너의 healthy 상태를 기다리지 않도록 `youtube-memo` Compose `depends_on`을 사용하지 않음.
 - K3s에서 새 쓰기가 발생한 이후에는 Docker를 단순 재기동하지 않음. Docker 원본과 PVC 데이터가 같은지 확인되지 않은 상태의 rollback은 데이터 분기로 이어질 수 있음.
-- 상세 설계와 구현 절차는 `docs/superpowers/specs/2026-09-17-youtube-memo-k3s-cutover-design.md` 및 `docs/superpowers/plans/2026-09-17-youtube-memo-k3s-cutover.md`를 참조함.
+- 상세 설계와 구현 절차는 과거 전환 기록으로 `docs/superpowers/specs/2026-09-17-youtube-memo-k3s-cutover-design.md` 및 `docs/superpowers/plans/2026-09-17-youtube-memo-k3s-cutover.md`를 참조함.
 
 ## 뉴스 수집 관측성
 

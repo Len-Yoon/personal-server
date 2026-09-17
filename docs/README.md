@@ -13,10 +13,10 @@
 | [컨테이너 실행 권한](operations-reference.md#컨테이너-실행-권한) | non-root 실행 계정과 Portal PVC 사전검증 기준 |
 | [N100 운영 환경](n100-mt4-setup.md) | Windows·WSL2 자동 시작, 제한형 자동복구, 재부팅 뒤 확인, 자원 점검 |
 | [K3s·모니터링·백업](../infra/k8s/README.md) | Portal K3s, Grafana, Telegram SRE relay, PVC 백업 |
-| [Book Memo K3s 현재 운영 기준](operations-reference.md#book-memo-k3s-현재-운영-기준) | 확정 공개 경로, runtime state marker, 롤백 자산 보존, 정적 manifest 재적용 금지 확인. 아직 전환하지 않은 환경의 준비·전환 절차는 같은 문서의 하위 절차를 참조함 |
-| [YouTube Memo K3s 전환 준비 상태](operations-reference.md#youtube-memo-k3s-전환-준비-상태) | 현재 Docker production 유지, K3s 준비 자산과 실제 전환 승인 경계 확인 |
+| [Book Memo K3s 현재 운영 기준](operations-reference.md#book-memo-k3s-현재-운영-기준) | 확정 공개 경로, runtime state marker, 롤백 자산 보존, 정적 manifest 재적용 금지 확인 |
+| [YouTube Memo K3s 현재 운영 기준](operations-reference.md#youtube-memo-k3s-현재-운영-기준) | 확정 공개 경로, runtime state marker, 롤백 자산 보존, 정적 manifest 재적용 금지 확인 |
 | [뉴스 수집 관측성](operations-reference.md#뉴스-수집-관측성) | crawler 수집 상태·인증 metrics·NewsCollectionStale 운영 기준 |
-| [Cloudflare Tunnel](cloudflare-tunnel.md) | Caddy 경유 Portal·Book Memo, Compose 직접 News·YouTube ingress, 차량 callback 경계와 터널 장애 대응 |
+| [Cloudflare Tunnel](cloudflare-tunnel.md) | Caddy 경유 Portal·Book Memo·YouTube Memo, Compose 직접 News ingress, 차량 callback 경계와 터널 장애 대응 |
 | [공개 상태 Telegram 알림](public-uptime-monitor.md) | 약 5분 외부 점검과 N100 직접 Tunnel 전환 알림 조건 |
 | [N100 안전 자동 배포](n100-github-auto-deploy.md) | 허용 서비스의 GitHub Actions 배포 |
 | [N100 원격 개발](n100-remote-development.md) | Mac에서 N100 WSL 작업 환경 사용 |

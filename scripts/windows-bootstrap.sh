@@ -234,6 +234,7 @@ start_runtime_services() {
       if all_crawler_services_compose; then
         resolve_book_memo_caddy_upstream
         resolve_youtube_memo_caddy_upstream
+        docker compose -f docker-compose.yml -f docker-compose.n100.yml build caddy
         docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d \
           portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker caddy
       else
@@ -246,7 +247,7 @@ start_runtime_services() {
           portal-web $compose_services
         resolve_book_memo_caddy_upstream
         resolve_youtube_memo_caddy_upstream
-        docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --no-deps caddy
+        docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build --no-deps caddy
       fi
       PORTAL_SCAN_URL="http://127.0.0.1:8000/internal/homeops/scan"
       ;;
@@ -266,7 +267,7 @@ start_runtime_services() {
       "${bridge_compose[@]}" up -d --no-deps --force-recreate $compose_services
       resolve_book_memo_caddy_upstream
       resolve_youtube_memo_caddy_upstream
-      "${bridge_compose[@]}" up -d --no-deps caddy
+      "${bridge_compose[@]}" up -d --build --no-deps caddy
       RUN_MAINTENANCE=0
       ;;
     k3s)
@@ -285,7 +286,7 @@ start_runtime_services() {
       "${bridge_compose[@]}" up -d --no-deps --force-recreate $compose_services
       resolve_book_memo_caddy_upstream
       resolve_youtube_memo_caddy_upstream
-      "${bridge_compose[@]}" up -d --no-deps caddy
+      "${bridge_compose[@]}" up -d --build --no-deps caddy
       PORTAL_SCAN_URL="http://127.0.0.1:30080/internal/homeops/scan"
       ;;
   esac

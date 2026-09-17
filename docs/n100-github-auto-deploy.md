@@ -83,6 +83,8 @@ runs-on: [self-hosted, Windows, X64]
 - `book-memo`
 - `car-care-worker`
 
+`youtube-memo`, `book-memo`는 변경 분류 대상이지만, root 소유 runtime state marker가 `k3s`인 현재 운영 상태에서는 Compose 안전 배포가 `safe_cd_skip_k3s_service`로 생략함. 이 두 서비스의 이미지 반입·PVC·Caddy 공개 경로 변경은 자동 배포가 아닌 별도 승인 운영 절차로 수행함.
+
 ### 자동 배포 제외
 
 다음 변경은 1차 CD에서 자동 적용하지 않음. 하나라도 포함되면 Actions의 변경 분류 job이 차단함.

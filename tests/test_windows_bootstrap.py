@@ -1056,6 +1056,17 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertNotIn("PORTAL_BRIDGE_COMPOSE_FILE", compose_body)
         self.assertNotIn("DOCKER_BRIDGE_GATEWAY", compose_body)
 
+    def test_compose_bootstrap_builds_only_caddy_before_starting_the_full_stack(self):
+        """A Caddyfile update must not rebuild every Compose service at Windows startup."""
+        runtime = WSL_SCRIPT[WSL_SCRIPT.index("start_runtime_services() {") :]
+        compose_body = runtime[runtime.index("compose)") : runtime.index("cutover)")]
+        caddy_build = "docker compose -f docker-compose.yml -f docker-compose.n100.yml build caddy"
+        full_stack_services = "portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker caddy"
+
+        self.assertIn(caddy_build, compose_body)
+        self.assertLess(compose_body.index(caddy_build), compose_body.index(full_stack_services))
+        self.assertNotIn("up -d --build " + "\\", compose_body)
+
     def test_k3s_bootstrap_recreates_dependencies_with_validated_bridge_only(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1089,7 +1100,7 @@ class WindowsBootstrapTests(unittest.TestCase):
             recorded = calls.read_text(encoding="utf-8")
             self.assertIn(f"-f {bridge}", recorded)
             self.assertIn("172.17.0.1|compose", recorded)
-            self.assertIn("up -d --no-deps caddy", recorded)
+            self.assertIn("up -d --build --no-deps caddy", recorded)
             self.assertNotIn("portal-web", recorded)
 
     def test_k3s_book_memo_resolves_service_endpoint_before_caddy_recreation(self):
@@ -1148,6 +1159,7 @@ class WindowsBootstrapTests(unittest.TestCase):
             )
             caddy = [line for line in calls.read_text(encoding="utf-8").splitlines() if "caddy" in line]
             self.assertEqual(len(caddy), 1)
+            self.assertIn("up -d --build --no-deps caddy", caddy[0])
             self.assertIn("upstream=192.0.2.10:8003", caddy[0])
             self.assertNotIn("book-memo", caddy[0])
 
@@ -1158,11 +1170,11 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("resolve_youtube_memo_caddy_upstream", WSL_SCRIPT)
         self.assertLess(
             runtime.index("resolve_book_memo_caddy_upstream"),
-            runtime.index("up -d --no-deps caddy"),
+            runtime.index("up -d --build --no-deps caddy"),
         )
         self.assertLess(
             runtime.index("resolve_youtube_memo_caddy_upstream"),
-            runtime.index("up -d --no-deps caddy"),
+            runtime.index("up -d --build --no-deps caddy"),
         )
 
 

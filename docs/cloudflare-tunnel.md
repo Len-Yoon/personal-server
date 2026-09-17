@@ -1,6 +1,6 @@
 # Cloudflare Tunnel 운영 가이드
 
-현재 공개 경로는 **Cloudflare Tunnel → WSL loopback Caddy → K3s Portal** 및 **Cloudflare Tunnel → WSL loopback Caddy → K3s Book Memo**와 Compose 서비스의 Tunnel 직접 ingress로 나뉨. Hyundai OAuth callback인 `car.len.pe.kr`도 Caddy 경로에 포함하지 않음. 공유기 포트포워딩은 이 경로에 사용하지 않음.
+현재 공개 경로는 **Cloudflare Tunnel → WSL loopback Caddy → K3s Portal·Book Memo·YouTube Memo**와 Compose 뉴스 서비스의 Tunnel 직접 ingress로 나뉨. Hyundai OAuth callback인 `car.len.pe.kr`도 Caddy 경로에 포함하지 않음. 공유기 포트포워딩은 이 경로에 사용하지 않음.
 
 ## 현재 ingress 기준
 
@@ -10,11 +10,11 @@
 |---|---|---|
 | `len.pe.kr`, `portal.len.pe.kr`, `file.len.pe.kr`, `admin.len.pe.kr`, `portfolio.len.pe.kr` | WSL loopback Caddy | K3s `portal-web` NodePort |
 | `news.len.pe.kr` | Compose `crawler-worker` loopback endpoint | `crawler-worker` |
-| `memo.len.pe.kr` | Compose `youtube-memo` loopback endpoint | `youtube-memo` |
+| `memo.len.pe.kr` | WSL loopback Caddy | K3s `youtube-memo` Service |
 | `books.len.pe.kr` | WSL loopback Caddy | K3s `book-memo` Service |
 | `car.len.pe.kr` | `car-care-worker` 비공개 callback upstream | Hyundai OAuth callback |
 
-뉴스·YouTube 메모는 Caddy를 거치지 않고 각각의 Compose loopback endpoint로 연결됨. Book Memo는 Caddy를 거쳐 K3s `book-memo` Service로 연결됨. Caddy 경유 여부나 private callback upstream은 Tunnel 설정 대조 결과이며, 주소 값 자체는 운영 문서에 기록하지 않음.
+뉴스는 Caddy를 거치지 않고 Compose loopback endpoint로 연결됨. Book Memo와 YouTube Memo는 Caddy를 거쳐 각각 K3s Service로 연결됨. Caddy 경유 여부나 private callback upstream은 Tunnel 설정 대조 결과이며, 주소 값 자체는 운영 문서에 기록하지 않음.
 
 ## 차량 OAuth callback ingress
 
@@ -38,7 +38,7 @@ systemctl --user status cloudflared-personal-server.service --no-pager
 | 화면 | 의미 | 먼저 할 일 |
 |---|---|---|
 | Cloudflare 1033 | Tunnel 연결을 찾지 못함 | WSL 유지 상태와 `cloudflared-personal-server.service` 확인 |
-| Cloudflare 502 | Tunnel은 연결됐지만 내부 대상 응답 실패 | Caddy, K3s `portal-web` 또는 `book-memo` Service 상태 확인 |
+| Cloudflare 502 | Tunnel은 연결됐지만 내부 대상 응답 실패 | Caddy, K3s `portal-web`·`book-memo`·`youtube-memo` Service 상태 확인 |
 
 N100에서 다음 순서로 확인함.
 

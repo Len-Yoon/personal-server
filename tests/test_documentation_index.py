@@ -102,6 +102,14 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("personal-server-autostart", content)
         self.assertIn("HOMEOPS_EXECUTOR_SHARED_SECRET", content)
         self.assertIn("fail-closed", content)
+        self.assertIn("safe_cd_skip_k3s_service", content)
+
+    def test_safe_deploy_docs_distinguish_k3s_memo_classification_from_compose_deployment(self):
+        content = Path("docs/n100-github-auto-deploy.md").read_text(encoding="utf-8")
+
+        self.assertIn("`youtube-memo`", content)
+        self.assertIn("`book-memo`", content)
+        self.assertIn("safe_cd_skip_k3s_service", content)
 
     def test_public_route_docs_distinguish_the_car_callback_route_from_caddy(self):
         tunnel = Path("docs/cloudflare-tunnel.md").read_text(encoding="utf-8")
@@ -111,23 +119,23 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("Cloudflare Tunnel의 별도 ingress", tunnel)
         self.assertIn("별도 Cloudflare Tunnel ingress", operations)
 
-    def test_tunnel_documentation_matches_book_memo_caddy_k3s_path_without_private_address(self):
+    def test_tunnel_documentation_matches_book_and_youtube_memo_caddy_k3s_paths_without_private_address(self):
         tunnel = Path("docs/cloudflare-tunnel.md").read_text(encoding="utf-8")
 
-        self.assertIn("Cloudflare Tunnel → WSL loopback Caddy → K3s Book Memo", tunnel)
+        self.assertIn("Cloudflare Tunnel → WSL loopback Caddy → K3s Portal·Book Memo·YouTube Memo", tunnel)
         self.assertIn("`books.len.pe.kr` | WSL loopback Caddy | K3s `book-memo` Service", tunnel)
-        self.assertIn("뉴스·YouTube 메모는 Caddy를 거치지 않고", tunnel)
+        self.assertIn("`memo.len.pe.kr` | WSL loopback Caddy | K3s `youtube-memo` Service", tunnel)
+        self.assertIn("뉴스는 Caddy를 거치지 않고", tunnel)
         self.assertNotIn("`books.len.pe.kr` | Compose `book-memo` loopback endpoint", tunnel)
+        self.assertNotIn("`memo.len.pe.kr` | Compose `youtube-memo` loopback endpoint", tunnel)
         self.assertIn("비공개 callback upstream", tunnel)
         self.assertNotIn("http://localhost:8015", tunnel)
 
     def test_operations_reference_records_book_memo_k3s_cutover_boundary(self):
-        readme = Path("README.md").read_text(encoding="utf-8")
         operations = Path("docs/operations-reference.md").read_text(encoding="utf-8")
         index = Path("docs/README.md").read_text(encoding="utf-8")
 
-        self.assertIn("Portal은 Caddy 경유, Compose 서비스는 Tunnel 직접 ingress", readme)
-        self.assertIn("Cloudflare Tunnel → Caddy → K3s Book Memo", operations)
+        self.assertIn("Cloudflare Tunnel → Caddy → K3s Portal·Book Memo·YouTube Memo", operations)
         self.assertIn("`book-memo` | K3s `personal-server` namespace", operations)
         self.assertIn("root 소유 runtime state marker", operations)
         self.assertIn("정적 ClusterIP는 Git에 기록하지 않음", operations)
@@ -143,13 +151,15 @@ class DocumentationIndexTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("Cloudflare Tunnel → Caddy → K3s Portal", content)
-        self.assertIn("Compose 서비스는 Tunnel 직접 ingress", content)
+        self.assertIn("Cloudflare Tunnel → Caddy → K3s Portal · Memo", content)
+        self.assertIn("News만 Tunnel 직접 ingress", content)
+        self.assertIn("Portal · YouTube · Book 전달", content)
         self.assertIn("비공개 callback upstream", content)
         self.assertIn("GitHub Actions · 약 5분 공개 health", content)
         self.assertIn("NewsCollectionStale → Alertmanager → SRE relay → Telegram", content)
         self.assertIn("NodePort 이상은 Tunnel 복구 제외", content)
-        self.assertNotIn("Caddy가 Portal과 Compose 서비스를", content)
+        self.assertNotIn("Portal 경로만 전달", content)
+        self.assertNotIn("News · YouTube · Book", content)
         self.assertNotIn("GitHub Actions · 일일 점검", content)
         self.assertIn("월간 SRE 통합 점검", content)
 
@@ -186,7 +196,7 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("자동 재시작 또는 자동 복구를 수행하지 않음", uptime)
         self.assertIn("감시 경로 식별·알림 보강", roadmap)
         self.assertIn("Cloudflare Tunnel 구성 대조", roadmap)
-        self.assertIn("YouTube Memo 선행 K3s 이전", roadmap)
+        self.assertIn("YouTube Memo K3s 이전", roadmap)
 
     def test_reboot_docs_describe_post_boot_check_without_new_telegram_message(self):
         uptime = Path("docs/public-uptime-monitor.md").read_text(encoding="utf-8")

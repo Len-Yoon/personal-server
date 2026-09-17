@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1760" viewBox="0 0 1200 1760" role="img" aria-labelledby="title desc">
   <title id="title">Personal Server 현재 운영 구조</title>
-  <desc id="desc">Cloudflare Tunnel의 Portal Caddy 경로와 Compose 직접 ingress, NewsCollectionStale → Alertmanager → SRE relay → Telegram 관측 경로, N100 실행 환경, 복구·백업·월간 점검 경계를 나타낸 구조도</desc>
+  <desc id="desc">Cloudflare Tunnel의 Portal·YouTube Memo·Book Memo Caddy 경로와 News Compose 직접 ingress, NewsCollectionStale → Alertmanager → SRE relay → Telegram 관측 경로, N100 실행 환경, 복구·백업·월간 점검 경계를 나타낸 구조도</desc>
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0 0 L0 10 L10 5 z" fill="#64748b"/></marker>
     <style>.title{font:700 42px 'Apple SD Gothic Neo','Noto Sans KR',Arial,sans-serif;fill:#10213d}.subtitle{font:400 18px 'Apple SD Gothic Neo','Noto Sans KR',Arial,sans-serif;fill:#52627a}.section{font:700 23px 'Apple SD Gothic Neo','Noto Sans KR',Arial,sans-serif;fill:#1f3557}.card-title{font:700 20px 'Apple SD Gothic Neo','Noto Sans KR',Arial,sans-serif;fill:#13233c}.card-body{font:400 16px 'Apple SD Gothic Neo','Noto Sans KR',Arial,sans-serif;fill:#38506f}.note{font:400 15px 'Apple SD Gothic Neo','Noto Sans KR',Arial,sans-serif;fill:#52627a}.route{stroke:#64748b;stroke-width:3;fill:none;marker-end:url(#arrow)}.direct{stroke:#059669;stroke-width:3;fill:none;marker-end:url(#arrow)}.private{stroke:#a855f7;stroke-width:3;fill:none;marker-end:url(#arrow)}</style>
@@ -16,24 +16,24 @@
   <rect x="410" y="225" width="250" height="100" rx="16" fill="#fff7ed" stroke="#f97316" stroke-width="2.5"/>
   <text x="535" y="265" text-anchor="middle" class="card-title">Cloudflare Tunnel</text><text x="535" y="294" text-anchor="middle" class="card-body">공개 ingress 분기</text><path d="M305 275 H410" class="route"/>
   <rect x="790" y="205" width="285" height="115" rx="16" fill="#fef3c7" stroke="#d97706" stroke-width="2.5"/>
-  <text x="932" y="247" text-anchor="middle" class="card-title">WSL loopback Caddy</text><text x="932" y="277" text-anchor="middle" class="card-body">Portal 경로만 전달</text><path d="M660 255 H790" class="route"/>
-  <text x="840" y="350" text-anchor="middle" class="note">Cloudflare Tunnel → Caddy → K3s Portal</text>
+  <text x="932" y="247" text-anchor="middle" class="card-title">WSL loopback Caddy</text><text x="932" y="277" text-anchor="middle" class="card-body">Portal · YouTube · Book 전달</text><path d="M660 255 H790" class="route"/>
+  <text x="840" y="350" text-anchor="middle" class="note">Cloudflare Tunnel → Caddy → K3s Portal · Memo</text>
   <rect x="790" y="375" width="285" height="115" rx="16" fill="#dcfce7" stroke="#16a34a" stroke-width="2.5"/>
-  <text x="932" y="417" text-anchor="middle" class="card-title">Compose 직접 ingress</text><text x="932" y="447" text-anchor="middle" class="card-body">News · YouTube · Book</text><path d="M660 295 C720 295 720 432 790 432" class="direct"/>
-  <text x="650" y="520" text-anchor="middle" class="note">Compose 서비스는 Tunnel 직접 ingress</text>
+  <text x="932" y="417" text-anchor="middle" class="card-title">Compose 직접 ingress</text><text x="932" y="447" text-anchor="middle" class="card-body">News</text><path d="M660 295 C720 295 720 432 790 432" class="direct"/>
+  <text x="650" y="520" text-anchor="middle" class="note">News만 Tunnel 직접 ingress</text>
   <rect x="790" y="545" width="285" height="70" rx="16" fill="#faf5ff" stroke="#a855f7" stroke-width="2.5"/>
   <text x="932" y="577" text-anchor="middle" class="card-title">차량 OAuth callback</text><text x="932" y="600" text-anchor="middle" class="note">비공개 callback upstream</text><path d="M660 315 C735 315 720 580 790 580" class="private"/>
 
   <rect x="55" y="685" width="1090" height="475" rx="26" fill="#eff6ff" stroke="#2563eb" stroke-width="2.5"/>
   <text x="85" y="732" class="section">02 · Windows N100 · WSL2 실행 환경</text><text x="85" y="761" class="note">Portal K3s와 Compose 서비스를 분리하고, 공개 경로는 Tunnel에서 분기함</text>
   <rect x="85" y="800" width="485" height="240" rx="20" fill="#ffffff" stroke="#60a5fa" stroke-width="2.5"/>
-  <text x="115" y="842" class="section">K3s · personal-server</text><rect x="115" y="875" width="190" height="120" rx="15" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+  <text x="115" y="842" class="section">K3s · Portal · Memo</text><rect x="115" y="875" width="190" height="120" rx="15" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
   <text x="210" y="916" text-anchor="middle" class="card-title">portal-web</text><text x="210" y="946" text-anchor="middle" class="card-body">Portal · 파일함</text><text x="210" y="974" text-anchor="middle" class="note">UID/GID 10001</text>
   <rect x="340" y="875" width="195" height="120" rx="15" fill="#e0f2fe" stroke="#38bdf8" stroke-width="2"/>
-  <text x="437" y="916" text-anchor="middle" class="card-title">Portal PVC</text><text x="437" y="946" text-anchor="middle" class="card-body">파일 · 상태 데이터</text><text x="437" y="974" text-anchor="middle" class="note">K3s 단일 writer</text><path d="M305 935 H340" class="route"/>
+  <text x="437" y="916" text-anchor="middle" class="card-title">Memo PVC</text><text x="437" y="946" text-anchor="middle" class="card-body">YouTube · Book</text><text x="437" y="974" text-anchor="middle" class="note">서비스별 K3s 단일 writer</text><path d="M305 935 H340" class="route"/>
   <rect x="630" y="800" width="485" height="240" rx="20" fill="#ffffff" stroke="#22c55e" stroke-width="2.5"/>
   <text x="660" y="842" class="section">Docker Compose</text><rect x="660" y="875" width="190" height="120" rx="15" fill="#dcfce7" stroke="#4ade80" stroke-width="2"/>
-  <text x="755" y="916" text-anchor="middle" class="card-title">정보 · 기록</text><text x="755" y="946" text-anchor="middle" class="card-body">News · YouTube · Book</text><text x="755" y="974" text-anchor="middle" class="note">서비스별 데이터 경로</text>
+  <text x="755" y="916" text-anchor="middle" class="card-title">정보 수집</text><text x="755" y="946" text-anchor="middle" class="card-body">News</text><text x="755" y="974" text-anchor="middle" class="note">서비스별 데이터 경로</text>
   <rect x="885" y="875" width="195" height="120" rx="15" fill="#dcfce7" stroke="#4ade80" stroke-width="2"/>
   <text x="982" y="916" text-anchor="middle" class="card-title">자동화 · 운영</text><text x="982" y="946" text-anchor="middle" class="card-body">차량관리 · HomeOps</text><text x="982" y="974" text-anchor="middle" class="note">제한된 운영 작업</text>
   <rect x="85" y="1070" width="1030" height="55" rx="14" fill="#172554"/><text x="115" y="1105" style="font:700 17px 'Apple SD Gothic Neo','Noto Sans KR',Arial,sans-serif;fill:#dbeafe">실행 보안 경계</text><text x="300" y="1105" style="font:400 16px 'Apple SD Gothic Neo','Noto Sans KR',Arial,sans-serif;fill:#ffffff">핵심 컨테이너 UID/GID 10001 · Caddy는 필요한 포트 권한만 사용</text>

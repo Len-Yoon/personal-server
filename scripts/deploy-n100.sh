@@ -206,7 +206,7 @@ deploy_runtime_services() {
         docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web $bridge_services
         resolve_book_memo_caddy_upstream
         resolve_youtube_memo_caddy_upstream
-        docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --no-deps caddy
+        docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build --no-deps caddy
       fi
       ;;
     cutover|k3s)
@@ -221,7 +221,7 @@ deploy_runtime_services() {
       "${bridge_compose[@]}" up -d --build --no-deps --force-recreate $bridge_services
       resolve_book_memo_caddy_upstream
       resolve_youtube_memo_caddy_upstream
-      "${bridge_compose[@]}" up -d --no-deps caddy
+      "${bridge_compose[@]}" up -d --build --no-deps caddy
       ;;
   esac
 }

@@ -228,7 +228,7 @@ class DeployN100Tests(unittest.TestCase):
             recorded = calls.read_text(encoding="utf-8")
             self.assertIn(f"-f {bridge}", recorded)
             self.assertIn("172.17.0.1|compose", recorded)
-            self.assertIn("up -d --no-deps caddy", recorded)
+            self.assertIn("up -d --build --no-deps caddy", recorded)
             self.assertNotIn("up -d --build portal-web", recorded)
 
     def test_k3s_book_memo_marker_excludes_docker_writer_and_injects_caddy_upstream(self):
@@ -288,7 +288,7 @@ class DeployN100Tests(unittest.TestCase):
             docker_up = [line for line in recorded.splitlines() if " up " in line]
             self.assertEqual(len(docker_up), 2)
             self.assertNotIn("book-memo", docker_up[0])
-            self.assertIn("args=compose -f docker-compose.yml -f docker-compose.n100.yml up -d --no-deps caddy", docker_up[1])
+            self.assertIn("args=compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build --no-deps caddy", docker_up[1])
             self.assertIn("upstream=192.0.2.10:8003", docker_up[1])
 
     def test_k3s_rollout_output_does_not_pollute_book_or_youtube_caddy_upstreams(self):
@@ -349,12 +349,12 @@ class DeployN100Tests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            caddy = [line for line in calls.read_text(encoding="utf-8").splitlines() if "up -d --no-deps caddy" in line]
+            caddy = [line for line in calls.read_text(encoding="utf-8").splitlines() if " caddy" in line]
             self.assertEqual(
                 caddy,
                 [
                     "docker book=192.0.2.10:8003 youtube=192.0.2.20:8002 "
-                    "args=compose -f docker-compose.yml -f docker-compose.n100.yml up -d --no-deps caddy"
+                    "args=compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build --no-deps caddy"
                 ],
             )
 
@@ -411,11 +411,11 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("resolve_youtube_memo_caddy_upstream", deployment)
         self.assertLess(
             deployment.index("resolve_book_memo_caddy_upstream"),
-            deployment.index("up -d --no-deps caddy"),
+            deployment.index("up -d --build --no-deps caddy"),
         )
         self.assertLess(
             deployment.index("resolve_youtube_memo_caddy_upstream"),
-            deployment.index("up -d --no-deps caddy"),
+            deployment.index("up -d --build --no-deps caddy"),
         )
 
     def test_invalid_runtime_marker_refuses_before_any_compose_start(self):
