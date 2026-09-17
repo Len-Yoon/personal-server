@@ -24,7 +24,8 @@
 | Pod 자동복구 실습 | production과 분리된 임시 namespace에서 liveness 실패와 Ready 복구를 확인함 | `sre-pod-recovery-lab.sh` | 완료 |
 | 변경 검증 | 문서·설정 변경 전에 범위와 관련 검사를 확인함 | [Codex 작업 완료 루프](codex-work-loop.md) | 완료 |
 | P3 공급망 보안 | GitHub Actions 외부 action을 full SHA로 고정하고, Caddy를 제외한 관리 대상 Python Docker base image 8개를 digest로 고정함. Trivy filesystem/config scan은 report-only로 실행하며 CI 계약 테스트로 검증함 | `.github/workflows/trivy-security.yml`, `tests/test_supply_chain_security_workflow.py` | 완료 |
-| Cloudflare Tunnel 구성 대조 | N100 Tunnel 서비스 상태와 9개 ingress를 읽기 전용으로 대조함. Portal·Book Memo·YouTube Memo는 Caddy loopback, 뉴스는 Compose 직접 ingress, 차량 callback은 비공개 upstream으로 문서화함 | [Cloudflare Tunnel](cloudflare-tunnel.md) | 완료 |
+| Cloudflare Tunnel 구성 대조 | N100 Tunnel 서비스와 9개 ingress를 대조함. Portal·Crawler Worker·Book Memo·YouTube Memo는 Caddy loopback, 차량 callback은 비공개 upstream으로 문서화함 | [Cloudflare Tunnel](cloudflare-tunnel.md) | 완료 |
+| Crawler Worker K3s 이전 | Docker writer 중지, 데이터 무결성 대조 후 K3s writer 기동과 Caddy·Tunnel 경로 전환을 완료함. Docker와 K3s의 동시 production write를 허용하지 않음 | [운영 참조](operations-reference.md#뉴스-수집-k3s-현재-운영-기준) | 완료 |
 | YouTube Memo K3s 이전 | Docker writer 중지, 데이터 무결성 대조 후 K3s writer 기동과 Caddy·Tunnel 경로 전환을 완료함. Docker와 K3s의 동시 production write를 허용하지 않음 | [운영 참조](operations-reference.md#youtube-memo-k3s-현재-운영-기준) | 완료 |
 | 월간 SRE 통합 점검 운영 검증 | 활성화 전 첫 수동 Job·기존 Telegram relay·외부 health 검증을 통과했으며, 매월 1일에 실행하는 유일한 내부 정기 점검으로 Portal·K3s·백업 증적·격리 복구 훈련을 확인함. 기존 분기·validation CronJob은 suspended 상태로 보존함 | [K3s 운영](../infra/k8s/README.md), `quarterly-sre-audit-automation.sh` | 완료 |
 | 백업 CronJob 실제 복구 검증 | 백업·복원 검증과 중단 시 Portal replica 복구 결과를 확인함 | [K3s 운영](../infra/k8s/README.md), `portal-pvc-backup-verify.sh` | 완료 |
@@ -38,7 +39,6 @@
 | 우선순위 | 항목 | 실행 기준 | 완료 조건 |
 |---|---|---|---|
 | P2 | 감시 경로 식별·알림 보강 | 완료된 공개 감시 실행의 실행 실패·Telegram 전달 실패를 별도 Issue·Telegram 전환으로 관리함 | 저장소 계약 테스트·독립 검토 통과 후 GitHub Actions 실제 실행 확인 필요 |
-| P2 | Crawler Worker K3s 전환 준비 | Docker production writer와 Tunnel 직접 ingress를 유지한 상태에서 sentinel manifest·단일 writer cutover 도구·native metrics 설정을 검증함 | 별도 운영 승인 뒤 데이터 digest·K3s readiness·Caddy·Tunnel·외부 health 3회 검증 필요 |
 
 ## 검토 결과
 

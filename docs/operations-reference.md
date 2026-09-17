@@ -4,12 +4,12 @@
 
 ## 현재 런타임
 
-**Cloudflare Tunnel → Caddy → K3s Portal·Book Memo·YouTube Memo** 경로로 공개 서비스를 제공함. 뉴스는 Tunnel 직접 ingress로 Docker Compose 서비스에 연결되며, 차량 OAuth callback은 별도 비공개 upstream을 사용함. Caddy는 Portal·Book Memo·YouTube Memo의 K3s Service로 전달함.
+**Cloudflare Tunnel → Caddy → K3s Portal·Crawler Worker·Book Memo·YouTube Memo** 경로로 공개 서비스를 제공함. 차량 OAuth callback만 별도 비공개 upstream을 사용함. Caddy는 Portal·Crawler Worker·Book Memo·YouTube Memo의 K3s Service로 전달함.
 
 | 구성 | 실행 위치 | 상태 데이터 |
 |---|---|---|
 | `portal-web` | K3s `personal-server` namespace | `portal-web-files-dynamic`, `portal-web-state-dynamic` PVC |
-| `crawler-worker` | Docker Compose | Compose 데이터 경로 |
+| `crawler-worker` | K3s `personal-server` namespace | `crawler-worker-data` PVC |
 | `youtube-memo` | K3s `personal-server` namespace | `youtube-memo-data` PVC |
 | `book-memo` | K3s `personal-server` namespace | `book-memo-data` PVC |
 | `system-agent`, `homeops-executor` | Docker Compose 내부 경계 | 호스트 상태·제한형 운영 작업 |
@@ -27,7 +27,7 @@ Portal PVC는 `portal-web-files-dynamic`, `portal-web-state-dynamic` 두 개이�
 | 도메인 | 현재 대상 |
 |---|---|
 | `len.pe.kr`, `portal.len.pe.kr`, `file.len.pe.kr`, `admin.len.pe.kr`, `portfolio.len.pe.kr` | K3s `portal-web` |
-| `news.len.pe.kr` | `crawler-worker` |
+| `news.len.pe.kr` | Cloudflare Tunnel → Caddy → K3s `crawler-worker` Service |
 | `memo.len.pe.kr` | Cloudflare Tunnel → Caddy → K3s `youtube-memo` Service |
 | `books.len.pe.kr` | Cloudflare Tunnel → Caddy → K3s `book-memo` Service |
 | `car.len.pe.kr` | `car-care-worker` OAuth callback. Caddy가 아닌 별도 Cloudflare Tunnel ingress의 비공개 callback upstream |
@@ -68,7 +68,7 @@ HomeOps 실행기는 Docker socket을 제한된 allowlist 진단·재시작에�
 
 - Portal은 K3s 단일 writer로만 실행함. Compose Portal과 동시에 실행하지 않음.
 - K3s Portal 전환·rollback·PVC 작업은 `infra/k8s/tools/portal-cutover.sh`의 명시적 운영 절차만 사용함.
-- 자동 배포는 `crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker`의 허용된 변경을 분류함. 현재 K3s runtime state의 `book-memo`, `youtube-memo`는 Compose 안전 배포에서 `safe_cd_skip_k3s_service`로 생략되며, 실제 Compose 배포 대상은 `crawler-worker`, `car-care-worker`임.
+- 자동 배포는 `crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker`의 허용된 변경을 분류함. 현재 K3s runtime state의 `crawler-worker`, `book-memo`, `youtube-memo`는 Compose 안전 배포에서 `safe_cd_skip_k3s_service`로 생략되며, 실제 Compose 배포 대상은 `car-care-worker`임.
 - Caddy, Cloudflare Tunnel, K3s Secret·PVC, `.env`, `data/`, Portal은 자동 배포에서 제외함.
 - Trivy filesystem/config 검사는 HIGH·CRITICAL 결과를 CI 차단 기준으로 사용함.
 
@@ -119,13 +119,15 @@ HomeOps 실행기는 Docker socket을 제한된 allowlist 진단·재시작에�
 - K3s에서 새 쓰기가 발생한 이후에는 Docker를 단순 재기동하지 않음. Docker 원본과 PVC 데이터가 같은지 확인되지 않은 상태의 rollback은 데이터 분기로 이어질 수 있음.
 - 상세 설계와 구현 절차는 과거 전환 기록으로 `docs/superpowers/specs/2026-09-17-youtube-memo-k3s-cutover-design.md` 및 `docs/superpowers/plans/2026-09-17-youtube-memo-k3s-cutover.md`를 참조함.
 
-## 뉴스 수집 K3s 전환 준비 기준
+## 뉴스 수집 K3s 현재 운영 기준
 
-현재 production writer는 Docker Compose `crawler-worker`이며, `news.len.pe.kr`은 Tunnel 직접 ingress를 사용함. K3s 전환 준비 자산은 구현·정적 검증 대상일 뿐 N100에 적용된 상태가 아님. 따라서 준비 단계에서 Docker writer, Tunnel ingress, root 소유 runtime state marker, Caddy 실행 상태를 변경하지 않음.
+- `news.len.pe.kr`의 확정 경로는 Cloudflare Tunnel → Caddy → K3s `crawler-worker` Service이며, K3s Pod만 production writer로 사용함.
+- `/var/lib/personal-server/k3s-runtime-services.state`의 root 소유 runtime state marker에 `crawler-worker=k3s`를 유지함. marker가 없거나 신뢰할 수 없으면 HomeOps와 배포 자동화는 Docker 재기동을 fail-closed로 차단해야 함.
+- K3s Service의 정적 ClusterIP는 Git·문서에 기록하지 않으며, 실행 시 Kubernetes API로 조회함.
+- `data/crawler-worker`의 `news_archive.json`, `news_collection_status.json`, `news_summaries.sqlite3`은 Docker 롤백·증적 자산으로 보존함. 일상 정리·자동 배포·이미지 정리에서 삭제하지 않음.
+- Docker Compose의 `crawler-worker` 서비스 정의와 중지된 Docker 컨테이너는 검증된 롤백 자산으로 유지함. K3s에서 새 수집 상태가 기록된 뒤 Docker `crawler-worker`를 다시 기동하지 않음.
 
-준비 자산은 `crawler-worker-data` PVC, replica 0 sentinel Deployment, ClusterIP Service, immutable image 준비 도구, 단일 writer cutover 도구와 native `crawler-worker` Service를 선택하는 ServiceMonitor manifest로 구성됨. Secret 값은 운영자가 별도로 시딩하고 존재 여부만 확인하며, 값은 조회·출력·Git 기록을 하지 않음.
-
-실제 전환은 별도 운영 승인 뒤 다음 순서로만 수행함.
+아래 절차는 완료된 이전의 전환 기록임. 현재 K3s production writer를 다시 전환하거나 정적 manifest를 재적용하는 데 사용하지 않음.
 
 1. Docker health와 K3s writer 부재를 확인하고, `news_archive.json`·`news_collection_status.json`을 포함한 데이터 디렉터리 구조를 검증함. 자동 배포·HomeOps 복구·다른 운영자의 수동 재시작이 전환 중 실행되지 않도록 유지보수 구간을 확보하고 진행 중 작업 종료를 확인함.
 2. 새 HomeOps 이미지에 N100 override의 runtime state 디렉터리 read-only mount를 적용함. 이 단계는 `homeops-executor`만 `--no-deps`로 갱신하며 Caddy·crawler 전체 배포를 실행하지 않음. `/var/lib/personal-server`와 state 파일은 root 소유·group/other 쓰기 금지를 유지함. 디렉터리 mount로 파일의 원자적 교체도 실행 중 프로세스에 반영됨.
@@ -135,13 +137,13 @@ HomeOps 실행기는 Docker socket을 제한된 allowlist 진단·재시작에�
 6. K3s Deployment rollout, Service·Endpoint·PVC readiness와 인증된 native metrics target을 확인함. Caddy upstream을 조회·검증하여 적용하고 Caddy 내부 health를 확인한 뒤 Tunnel의 뉴스 ingress를 Caddy 경로로 단일 전환함.
 7. 외부 health 3회를 모두 확인하고 유지보수를 해제함. HomeOps는 매 작업과 Docker restart 직전에 marker를 재조회하며 K3s 소유 서비스를 제외함. marker 누락·오염·권한 이상 시 crawler·Books·YouTube Docker 재시작을 차단함. 전환 실패 후 Docker로 복구됐더라도 marker는 자동으로 compose로 되돌리지 않으며 데이터·writer 상태를 확인한 운영자가 결정함.
 
-K3s에서 새 수집 상태가 기록된 이후 Docker를 단순 재기동하는 rollback은 허용하지 않음. Docker와 PVC 데이터의 단일 source of truth가 다시 확인되지 않은 경우 데이터 분기 위험이 있으므로, 공개 경로만 즉시 되돌리거나 Docker writer를 재기동하지 않음. 실제 N100 이미지 반입, Secret/PVC/manifest 적용, Docker 중지, data copy, Caddy·Tunnel 변경과 외부 검증은 별도 운영 승인 필요함.
+현재 K3s에서 새 수집 상태가 기록된 이후 Docker를 단순 재기동하는 rollback은 허용하지 않음. Docker와 PVC 데이터의 단일 source of truth가 다시 확인되지 않은 경우 데이터 분기 위험이 있으므로, 공개 경로만 즉시 되돌리거나 Docker writer를 재기동하지 않음. 향후 rollback은 별도 승인과 데이터 동등성 검증이 필요함.
 
 ## 뉴스 수집 관측성
 
 `crawler-worker`는 수집 상태를 `/data/crawler-worker/news_collection_status.json`에 원자적으로 저장함. 상태 파일에는 시각과 실패 횟수만 기록되며 기사·URL·예외 원문·토큰은 포함하지 않음.
 
-현재 Prometheus 수집은 Portal cutover가 만든 `portal-compose-bridge` 라벨의 `compose-crawler` Service와 EndpointSlice를 전제함. K3s 전환 준비 manifest `infra/k8s/sre-telegram/crawler-news-observability.yaml`는 전환 뒤 native `crawler-worker` Service를 선택하도록 갱신되어 있으나, 실제 ServiceMonitor 적용은 별도 승인 전까지 수행하지 않음. 인증은 Secret의 `bearer_token` 키를 참조하며 값은 문서·Git에 기록하지 않음. `/internal/metrics`는 정확한 Bearer 인증이 없으면 404를 반환함.
+Crawler 관측성 manifest `infra/k8s/sre-telegram/crawler-news-observability.yaml`는 native `crawler-worker` Service를 선택함. 실제 ServiceMonitor·PrometheusRule 적용 상태는 이 전환 검증 범위에서 재확인하지 않았으므로, 알림 경로를 변경하기 전에는 아래 읽기 전용 명령으로 확인 필요함. 인증은 Secret의 `bearer_token` 키를 참조하며 값은 문서·Git에 기록하지 않음. `/internal/metrics`는 정확한 Bearer 인증이 없으면 404를 반환함.
 
 시딩 계약은 monitoring namespace Secret `crawler-news-metrics`의 `bearer_token` 키와 crawler runtime의 `NEWS_METRICS_BEARER_TOKEN`에 동일한 승인된 값을 주입하는 것임. 값 자체는 이 문서·Git·로그에 기록하지 않음. 적용 대상은 새 `crawler-news-observability.yaml`의 `ServiceMonitor`와 갱신된 `prometheus-rule.yaml`임.
 

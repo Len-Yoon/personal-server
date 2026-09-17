@@ -1,22 +1,22 @@
 # Cloudflare Tunnel 운영 가이드
 
-현재 공개 경로는 **Cloudflare Tunnel → WSL loopback Caddy → K3s Portal·Book Memo·YouTube Memo**와 Compose 뉴스 서비스의 Tunnel 직접 ingress로 나뉨. Hyundai OAuth callback인 `car.len.pe.kr`도 Caddy 경로에 포함하지 않음. 공유기 포트포워딩은 이 경로에 사용하지 않음.
+현재 공개 경로는 **Cloudflare Tunnel → WSL loopback Caddy → K3s Portal·Crawler Worker·Book Memo·YouTube Memo**로 제공함. Hyundai OAuth callback인 `car.len.pe.kr`은 Caddy 경로에 포함하지 않음. 공유기 포트포워딩은 이 경로에 사용하지 않음.
 
 ## 현재 ingress 기준
 
-2026-09-16 N100에서 `cloudflared-personal-server.service`가 active이고 9개 ingress가 있는 것을 읽기 전용으로 대조함. Tunnel ID, 인증 파일, private IP는 문서에 기록하지 않음.
+2026-09-17 N100에서 `cloudflared-personal-server.service` active, 뉴스·Portal 외부 health 3회 HTTP 200, Caddy 내부 뉴스 health를 대조함. Tunnel ID, 인증 파일, private IP는 문서에 기록하지 않음.
 
 | 호스트 | Tunnel 대상 유형 | 최종 대상 |
 |---|---|---|
 | `len.pe.kr`, `portal.len.pe.kr`, `file.len.pe.kr`, `admin.len.pe.kr`, `portfolio.len.pe.kr` | WSL loopback Caddy | K3s `portal-web` NodePort |
-| `news.len.pe.kr` | Compose `crawler-worker` loopback endpoint | `crawler-worker` |
+| `news.len.pe.kr` | WSL loopback Caddy | K3s `crawler-worker` Service |
 | `memo.len.pe.kr` | WSL loopback Caddy | K3s `youtube-memo` Service |
 | `books.len.pe.kr` | WSL loopback Caddy | K3s `book-memo` Service |
 | `car.len.pe.kr` | `car-care-worker` 비공개 callback upstream | Hyundai OAuth callback |
 
-뉴스는 Caddy를 거치지 않고 Compose loopback endpoint로 연결됨. Book Memo와 YouTube Memo는 Caddy를 거쳐 각각 K3s Service로 연결됨. Caddy 경유 여부나 private callback upstream은 Tunnel 설정 대조 결과이며, 주소 값 자체는 운영 문서에 기록하지 않음.
+뉴스는 Caddy를 거쳐 K3s `crawler-worker` Service로 연결되며, Book Memo·YouTube Memo도 각각 K3s Service로 연결됨. Caddy 경유 여부나 private callback upstream은 Tunnel 설정 대조 결과이며, 주소 값 자체는 운영 문서에 기록하지 않음.
 
-Crawler Worker K3s 전환 준비 자산이 있어도 현재 ingress는 변경되지 않음. 실제 전환은 Docker writer 중지, PVC 데이터 검증, K3s readiness, Caddy 내부 확인을 모두 마친 뒤 별도 운영 승인으로 Tunnel의 뉴스 한 항목만 변경함. 준비·전환 경계는 [운영 참조](operations-reference.md#뉴스-수집-k3s-전환-준비-기준)를 따름.
+Crawler Worker는 Docker 중지, PVC 데이터 검증, K3s readiness, Caddy 내부 health, Tunnel 전환과 외부 health 3회 확인을 마쳐 현재 K3s 단일 writer로 운영함. 상세 경계는 [운영 참조](operations-reference.md#뉴스-수집-k3s-현재-운영-기준)를 따름.
 
 ## 차량 OAuth callback ingress
 
@@ -40,7 +40,7 @@ systemctl --user status cloudflared-personal-server.service --no-pager
 | 화면 | 의미 | 먼저 할 일 |
 |---|---|---|
 | Cloudflare 1033 | Tunnel 연결을 찾지 못함 | WSL 유지 상태와 `cloudflared-personal-server.service` 확인 |
-| Cloudflare 502 | Tunnel은 연결됐지만 내부 대상 응답 실패 | Caddy, K3s `portal-web`·`book-memo`·`youtube-memo` Service 상태 확인 |
+| Cloudflare 502 | Tunnel은 연결됐지만 내부 대상 응답 실패 | Caddy, K3s `portal-web`·`crawler-worker`·`book-memo`·`youtube-memo` Service 상태 확인 |
 
 N100에서 다음 순서로 확인함.
 

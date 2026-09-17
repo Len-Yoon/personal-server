@@ -15,9 +15,9 @@
 | [K3s·모니터링·백업](../infra/k8s/README.md) | Portal K3s, Grafana, Telegram SRE relay, PVC 백업 |
 | [Book Memo K3s 현재 운영 기준](operations-reference.md#book-memo-k3s-현재-운영-기준) | 확정 공개 경로, runtime state marker, 롤백 자산 보존, 정적 manifest 재적용 금지 확인 |
 | [YouTube Memo K3s 현재 운영 기준](operations-reference.md#youtube-memo-k3s-현재-운영-기준) | 확정 공개 경로, runtime state marker, 롤백 자산 보존, 정적 manifest 재적용 금지 확인 |
-| [뉴스 수집 K3s 전환 준비 기준](operations-reference.md#뉴스-수집-k3s-전환-준비-기준) | 현재 Docker 운영 유지 조건, 승인 뒤 단일 writer 전환 순서와 rollback 제한 확인 |
+| [뉴스 수집 K3s 현재 운영 기준](operations-reference.md#뉴스-수집-k3s-현재-운영-기준) | 확정 공개 경로, K3s 단일 writer, runtime marker, 롤백 자산 보존 기준 확인 |
 | [뉴스 수집 관측성](operations-reference.md#뉴스-수집-관측성) | crawler 수집 상태·인증 metrics·NewsCollectionStale 운영 기준 |
-| [Cloudflare Tunnel](cloudflare-tunnel.md) | Caddy 경유 Portal·Book Memo·YouTube Memo, 현재 Compose 직접 News ingress, 차량 callback 경계와 터널 장애 대응 |
+| [Cloudflare Tunnel](cloudflare-tunnel.md) | Caddy 경유 Portal·Crawler Worker·Book Memo·YouTube Memo, 차량 callback 경계와 터널 장애 대응 |
 | [공개 상태 Telegram 알림](public-uptime-monitor.md) | 약 5분 외부 점검과 N100 직접 Tunnel 전환 알림 조건 |
 | [N100 안전 자동 배포](n100-github-auto-deploy.md) | 허용 서비스의 GitHub Actions 배포 |
 | [N100 원격 개발](n100-remote-development.md) | Mac에서 N100 WSL 작업 환경 사용 |

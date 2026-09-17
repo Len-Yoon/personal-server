@@ -119,13 +119,16 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("Cloudflare Tunnel의 별도 ingress", tunnel)
         self.assertIn("별도 Cloudflare Tunnel ingress", operations)
 
-    def test_tunnel_documentation_matches_book_and_youtube_memo_caddy_k3s_paths_without_private_address(self):
+    def test_tunnel_documentation_matches_all_k3s_application_caddy_paths_without_private_address(self):
         tunnel = Path("docs/cloudflare-tunnel.md").read_text(encoding="utf-8")
 
-        self.assertIn("Cloudflare Tunnel → WSL loopback Caddy → K3s Portal·Book Memo·YouTube Memo", tunnel)
+        self.assertIn("Cloudflare Tunnel → WSL loopback Caddy → K3s Portal·Crawler Worker·Book Memo·YouTube Memo", tunnel)
+        self.assertIn("`news.len.pe.kr` | WSL loopback Caddy | K3s `crawler-worker` Service", tunnel)
         self.assertIn("`books.len.pe.kr` | WSL loopback Caddy | K3s `book-memo` Service", tunnel)
         self.assertIn("`memo.len.pe.kr` | WSL loopback Caddy | K3s `youtube-memo` Service", tunnel)
-        self.assertIn("뉴스는 Caddy를 거치지 않고", tunnel)
+        self.assertIn("뉴스는 Caddy를 거쳐 K3s `crawler-worker` Service", tunnel)
+        self.assertNotIn("Compose `crawler-worker` loopback endpoint", tunnel)
+        self.assertNotIn("뉴스는 Caddy를 거치지 않고", tunnel)
         self.assertNotIn("`books.len.pe.kr` | Compose `book-memo` loopback endpoint", tunnel)
         self.assertNotIn("`memo.len.pe.kr` | Compose `youtube-memo` loopback endpoint", tunnel)
         self.assertIn("비공개 callback upstream", tunnel)
@@ -135,7 +138,7 @@ class DocumentationIndexTests(unittest.TestCase):
         operations = Path("docs/operations-reference.md").read_text(encoding="utf-8")
         index = Path("docs/README.md").read_text(encoding="utf-8")
 
-        self.assertIn("Cloudflare Tunnel → Caddy → K3s Portal·Book Memo·YouTube Memo", operations)
+        self.assertIn("Cloudflare Tunnel → Caddy → K3s Portal·Crawler Worker·Book Memo·YouTube Memo", operations)
         self.assertIn("`book-memo` | K3s `personal-server` namespace", operations)
         self.assertIn("root 소유 runtime state marker", operations)
         self.assertIn("정적 ClusterIP는 Git에 기록하지 않음", operations)
@@ -146,51 +149,46 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("비공개 callback upstream", operations)
         self.assertIn("Book Memo K3s 현재 운영 기준", index)
 
-    def test_crawler_k3s_preparation_docs_preserve_the_current_compose_production_route(self):
+    def test_crawler_k3s_current_runtime_docs_preserve_the_single_writer_boundary(self):
         project_readme = Path("README.md").read_text(encoding="utf-8")
         index = Path("docs/README.md").read_text(encoding="utf-8")
         operations = Path("docs/operations-reference.md").read_text(encoding="utf-8")
         tunnel = Path("docs/cloudflare-tunnel.md").read_text(encoding="utf-8")
         roadmap = Path("docs/operations-roadmap.md").read_text(encoding="utf-8")
 
-        self.assertIn("Crawler Worker K3s 전환 준비", project_readme)
-        self.assertIn("현재 production writer는 Docker Compose", project_readme)
-        self.assertIn("뉴스 수집 K3s 전환 준비 기준", index)
-        self.assertIn("operations-reference.md#뉴스-수집-k3s-전환-준비-기준", index)
-        self.assertIn("## 뉴스 수집 K3s 전환 준비 기준", operations)
-        self.assertIn("현재 production writer는 Docker Compose", operations)
+        self.assertIn("Crawler Worker K3s 현재 운영 기준", project_readme)
+        self.assertIn("K3s `crawler-worker`", project_readme)
+        self.assertIn("뉴스 수집 K3s 현재 운영 기준", index)
+        self.assertIn("operations-reference.md#뉴스-수집-k3s-현재-운영-기준", index)
+        self.assertIn("## 뉴스 수집 K3s 현재 운영 기준", operations)
+        self.assertIn("`crawler-worker=k3s`", operations)
         self.assertIn("`news_archive.json`", operations)
         self.assertIn("`news_collection_status.json`", operations)
-        self.assertIn("전체 디렉터리 SHA-256 digest", operations)
+        self.assertIn("롤백 자산", operations)
         self.assertIn("native `crawler-worker` Service", operations)
         self.assertIn("root 소유 runtime state marker", operations)
         self.assertIn("외부 health 3회", operations)
-        self.assertIn("실제 전환은 별도 운영 승인", operations)
-        self.assertLess(
-            operations.index("replica 1로 확장"),
-            operations.index("K3s Deployment rollout, Service·Endpoint·PVC readiness"),
-        )
-        self.assertLess(
-            operations.index("root 소유 runtime state marker를 `crawler-worker=k3s`"),
-            operations.index("Docker crawler를 중지해 scheduler와 HTTP writer"),
-        )
-        self.assertIn("전환 준비 자산이 있어도 현재 ingress는 변경되지 않음", tunnel)
-        self.assertIn("Crawler Worker K3s 전환 준비", roadmap)
+        self.assertIn("Docker `crawler-worker`를 다시 기동하지 않음", operations)
+        self.assertIn("Cloudflare Tunnel → Caddy → K3s `crawler-worker` Service", operations)
+        self.assertIn("뉴스는 Caddy를 거쳐 K3s `crawler-worker` Service", tunnel)
+        self.assertIn("Crawler Worker K3s 이전", roadmap)
+        self.assertNotIn("Crawler Worker K3s 전환 준비", roadmap)
 
     def test_architecture_diagram_records_current_routes_and_operational_checks(self):
         content = Path("docs/images/personal-server-architecture-v2.svg").read_text(
             encoding="utf-8"
         )
 
-        self.assertIn("Cloudflare Tunnel → Caddy → K3s Portal · Memo", content)
-        self.assertIn("News만 Tunnel 직접 ingress", content)
-        self.assertIn("Portal · YouTube · Book 전달", content)
+        self.assertIn("Cloudflare Tunnel → Caddy → K3s Portal · Crawler · Memo", content)
+        self.assertIn("Portal · Crawler · YouTube · Book 전달", content)
+        self.assertIn("Crawler Worker PVC", content)
         self.assertIn("비공개 callback upstream", content)
         self.assertIn("GitHub Actions · 약 5분 공개 health", content)
         self.assertIn("NewsCollectionStale → Alertmanager → SRE relay → Telegram", content)
         self.assertIn("NodePort 이상은 Tunnel 복구 제외", content)
         self.assertNotIn("Portal 경로만 전달", content)
-        self.assertNotIn("News · YouTube · Book", content)
+        self.assertNotIn("News만 Tunnel 직접 ingress", content)
+        self.assertNotIn("Compose 직접 ingress", content)
         self.assertNotIn("GitHub Actions · 일일 점검", content)
         self.assertIn("월간 SRE 통합 점검", content)
 
@@ -274,8 +272,8 @@ class DocumentationIndexTests(unittest.TestCase):
         operations = Path("docs/operations-reference.md").read_text(encoding="utf-8")
 
         self.assertIn("PORTAL_UPSTREAM=host.docker.internal:30080", k3s)
-        self.assertIn("portal-compose-bridge", operations)
-        self.assertIn("compose-crawler", operations)
+        self.assertIn("native `crawler-worker` Service", operations)
+        self.assertNotIn("현재 Prometheus 수집은 Portal cutover가 만든", operations)
 
     def test_k3s_docs_describe_suspended_cronjob_backup_cutover(self):
         k3s = Path("infra/k8s/README.md").read_text(encoding="utf-8")
