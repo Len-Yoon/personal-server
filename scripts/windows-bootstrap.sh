@@ -161,7 +161,7 @@ validate_docker_bridge_gateway() {
 }
 
 resolve_book_memo_caddy_upstream() {
-  local namespace desired ready available service_selector service_cluster_ip service_port service_target_port endpoint_addresses endpoint_ports
+  local namespace desired ready available service_selector service_cluster_ip service_port service_target_port endpoint_addresses endpoint_ports pvc_phase
 
   if [[ "$BOOK_MEMO_RUNTIME_MODE" != k3s ]]; then
     export BOOK_MEMO_UPSTREAM="book-memo:8003"
@@ -183,11 +183,43 @@ resolve_book_memo_caddy_upstream() {
   service_target_port=$(sudo -n k3s kubectl -n "$namespace" get service/book-memo -o jsonpath='{.spec.ports[0].targetPort}') || return 1
   endpoint_addresses=$(sudo -n k3s kubectl -n "$namespace" get endpoints/book-memo -o jsonpath='{.subsets[*].addresses[*].ip}') || return 1
   endpoint_ports=$(sudo -n k3s kubectl -n "$namespace" get endpoints/book-memo -o jsonpath='{.subsets[*].ports[*].port}') || return 1
-  [[ "$service_selector" == book-memo && -n "$service_cluster_ip" && "$service_cluster_ip" != None && "$service_port" == 8003 && "$service_target_port" == http && -n "$endpoint_addresses" && "$endpoint_ports" == "$service_port" ]] || {
+  pvc_phase=$(sudo -n k3s kubectl -n "$namespace" get pvc/book-memo-data -o jsonpath='{.status.phase}') || return 1
+  [[ "$service_selector" == book-memo && -n "$service_cluster_ip" && "$service_cluster_ip" != None && "$service_port" == 8003 && "$service_target_port" == http && -n "$endpoint_addresses" && "$endpoint_ports" == "$service_port" && "$pvc_phase" == Bound ]] || {
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] K3s Book Memo Service endpoint is not ready; refusing to recreate Caddy" >> /tmp/windows-bootstrap-trace.log
     return 1
   }
   export BOOK_MEMO_UPSTREAM="$service_cluster_ip:$service_port"
+}
+
+resolve_youtube_memo_caddy_upstream() {
+  local namespace desired ready available service_selector service_cluster_ip service_port service_target_port endpoint_addresses endpoint_ports pvc_phase
+
+  if [[ "$YOUTUBE_MEMO_RUNTIME_MODE" != k3s ]]; then
+    export YOUTUBE_MEMO_UPSTREAM="youtube-memo:8002"
+    return 0
+  fi
+
+  namespace="${K3S_NAMESPACE:-personal-server}"
+  desired=$(sudo -n k3s kubectl -n "$namespace" get deployment/youtube-memo -o jsonpath='{.spec.replicas}') || return 1
+  ready=$(sudo -n k3s kubectl -n "$namespace" get deployment/youtube-memo -o jsonpath='{.status.readyReplicas}') || return 1
+  available=$(sudo -n k3s kubectl -n "$namespace" get deployment/youtube-memo -o jsonpath='{.status.availableReplicas}') || return 1
+  [[ "$desired" =~ ^[0-9]+$ && "$desired" -ge 1 && "$ready" == "$desired" && "$available" == "$desired" ]] || {
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] K3s YouTube Memo Deployment is not ready; refusing to recreate Caddy" >> /tmp/windows-bootstrap-trace.log
+    return 1
+  }
+  sudo -n k3s kubectl -n "$namespace" rollout status deployment/youtube-memo --timeout="${K3S_ROLLOUT_TIMEOUT:-120s}" || return 1
+  service_selector=$(sudo -n k3s kubectl -n "$namespace" get service/youtube-memo -o jsonpath='{.spec.selector.app\.kubernetes\.io/name}') || return 1
+  service_cluster_ip=$(sudo -n k3s kubectl -n "$namespace" get service/youtube-memo -o jsonpath='{.spec.clusterIP}') || return 1
+  service_port=$(sudo -n k3s kubectl -n "$namespace" get service/youtube-memo -o jsonpath='{.spec.ports[0].port}') || return 1
+  service_target_port=$(sudo -n k3s kubectl -n "$namespace" get service/youtube-memo -o jsonpath='{.spec.ports[0].targetPort}') || return 1
+  endpoint_addresses=$(sudo -n k3s kubectl -n "$namespace" get endpoints/youtube-memo -o jsonpath='{.subsets[*].addresses[*].ip}') || return 1
+  endpoint_ports=$(sudo -n k3s kubectl -n "$namespace" get endpoints/youtube-memo -o jsonpath='{.subsets[*].ports[*].port}') || return 1
+  pvc_phase=$(sudo -n k3s kubectl -n "$namespace" get pvc/youtube-memo-data -o jsonpath='{.status.phase}') || return 1
+  [[ "$service_selector" == youtube-memo && -n "$service_cluster_ip" && "$service_cluster_ip" != None && "$service_port" == 8002 && "$service_target_port" == http && -n "$endpoint_addresses" && "$endpoint_ports" == "$service_port" && "$pvc_phase" == Bound ]] || {
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] K3s YouTube Memo Service endpoint is not ready; refusing to recreate Caddy" >> /tmp/windows-bootstrap-trace.log
+    return 1
+  }
+  export YOUTUBE_MEMO_UPSTREAM="$service_cluster_ip:$service_port"
 }
 
 start_runtime_services() {
@@ -200,6 +232,8 @@ start_runtime_services() {
       export HOMEOPS_DOCKER_MANAGED_SERVICES="${HOMEOPS_DOCKER_MANAGED_SERVICES:-portal-web,system-agent,crawler-worker,youtube-memo,book-memo,caddy,homeops-executor}"
       export EXPECTED_CONTAINERS="${EXPECTED_CONTAINERS:-portal-web,crawler-worker,youtube-memo,book-memo,system-agent}"
       if all_crawler_services_compose; then
+        resolve_book_memo_caddy_upstream
+        resolve_youtube_memo_caddy_upstream
         docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d \
           portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker caddy
       else
@@ -211,6 +245,7 @@ start_runtime_services() {
         docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d \
           portal-web $compose_services
         resolve_book_memo_caddy_upstream
+        resolve_youtube_memo_caddy_upstream
         docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --no-deps caddy
       fi
       PORTAL_SCAN_URL="http://127.0.0.1:8000/internal/homeops/scan"
@@ -230,6 +265,7 @@ start_runtime_services() {
       bridge_compose=(docker compose -f docker-compose.yml -f docker-compose.n100.yml -f "$PORTAL_BRIDGE_COMPOSE_FILE")
       "${bridge_compose[@]}" up -d --no-deps --force-recreate $compose_services
       resolve_book_memo_caddy_upstream
+      resolve_youtube_memo_caddy_upstream
       "${bridge_compose[@]}" up -d --no-deps caddy
       RUN_MAINTENANCE=0
       ;;
@@ -248,6 +284,7 @@ start_runtime_services() {
       bridge_compose=(docker compose -f docker-compose.yml -f docker-compose.n100.yml -f "$PORTAL_BRIDGE_COMPOSE_FILE")
       "${bridge_compose[@]}" up -d --no-deps --force-recreate $compose_services
       resolve_book_memo_caddy_upstream
+      resolve_youtube_memo_caddy_upstream
       "${bridge_compose[@]}" up -d --no-deps caddy
       PORTAL_SCAN_URL="http://127.0.0.1:30080/internal/homeops/scan"
       ;;

@@ -137,34 +137,50 @@ validate_docker_bridge_gateway() {
   export DOCKER_BRIDGE_GATEWAY="$actual_gateway"
 }
 
-resolve_book_memo_caddy_upstream() {
-  local namespace desired ready available service_selector service_cluster_ip service_port service_target_port endpoint_addresses endpoint_ports
+require_k3s_service_endpoint() {
+  local service="$1" pvc_name="$2" expected_port="$3" display_name="$4"
+  local namespace desired ready available service_selector service_cluster_ip service_port service_target_port endpoint_addresses endpoint_ports pvc_phase
+  namespace="${K3S_NAMESPACE:-personal-server}"
+  desired=$(sudo -n k3s kubectl -n "$namespace" get "deployment/$service" -o jsonpath='{.spec.replicas}') || return 1
+  ready=$(sudo -n k3s kubectl -n "$namespace" get "deployment/$service" -o jsonpath='{.status.readyReplicas}') || return 1
+  available=$(sudo -n k3s kubectl -n "$namespace" get "deployment/$service" -o jsonpath='{.status.availableReplicas}') || return 1
+  [[ "$desired" =~ ^[0-9]+$ && "$desired" -ge 1 && "$ready" == "$desired" && "$available" == "$desired" ]] || {
+    echo "K3s $display_name Deployment is not ready; refusing to recreate Caddy" >&2
+    return 1
+  }
+  sudo -n k3s kubectl -n "$namespace" rollout status "deployment/$service" --timeout="${K3S_ROLLOUT_TIMEOUT:-120s}" >&2 || return 1
+  service_selector=$(sudo -n k3s kubectl -n "$namespace" get "service/$service" -o jsonpath='{.spec.selector.app\.kubernetes\.io/name}') || return 1
+  service_cluster_ip=$(sudo -n k3s kubectl -n "$namespace" get "service/$service" -o jsonpath='{.spec.clusterIP}') || return 1
+  service_port=$(sudo -n k3s kubectl -n "$namespace" get "service/$service" -o jsonpath='{.spec.ports[0].port}') || return 1
+  service_target_port=$(sudo -n k3s kubectl -n "$namespace" get "service/$service" -o jsonpath='{.spec.ports[0].targetPort}') || return 1
+  endpoint_addresses=$(sudo -n k3s kubectl -n "$namespace" get "endpoints/$service" -o jsonpath='{.subsets[*].addresses[*].ip}') || return 1
+  endpoint_ports=$(sudo -n k3s kubectl -n "$namespace" get "endpoints/$service" -o jsonpath='{.subsets[*].ports[*].port}') || return 1
+  pvc_phase=$(sudo -n k3s kubectl -n "$namespace" get "pvc/$pvc_name" -o jsonpath='{.status.phase}') || return 1
+  [[ "$service_selector" == "$service" && -n "$service_cluster_ip" && "$service_cluster_ip" != None && "$service_port" == "$expected_port" && "$service_target_port" == http && -n "$endpoint_addresses" && "$endpoint_ports" == "$expected_port" && "$pvc_phase" == Bound ]] || {
+    echo "K3s $display_name Service endpoint is not ready; refusing to recreate Caddy" >&2
+    return 1
+  }
+  printf '%s:%s\n' "$service_cluster_ip" "$service_port"
+}
 
+resolve_book_memo_caddy_upstream() {
   if [[ "$BOOK_MEMO_RUNTIME_MODE" != k3s ]]; then
     export BOOK_MEMO_UPSTREAM="book-memo:8003"
     return 0
   fi
 
-  namespace="${K3S_NAMESPACE:-personal-server}"
-  desired=$(sudo -n k3s kubectl -n "$namespace" get deployment/book-memo -o jsonpath='{.spec.replicas}') || return 1
-  ready=$(sudo -n k3s kubectl -n "$namespace" get deployment/book-memo -o jsonpath='{.status.readyReplicas}') || return 1
-  available=$(sudo -n k3s kubectl -n "$namespace" get deployment/book-memo -o jsonpath='{.status.availableReplicas}') || return 1
-  [[ "$desired" =~ ^[0-9]+$ && "$desired" -ge 1 && "$ready" == "$desired" && "$available" == "$desired" ]] || {
-    echo "K3s Book Memo Deployment is not ready; refusing to recreate Caddy" >&2
-    return 1
-  }
-  sudo -n k3s kubectl -n "$namespace" rollout status deployment/book-memo --timeout="${K3S_ROLLOUT_TIMEOUT:-120s}" || return 1
-  service_selector=$(sudo -n k3s kubectl -n "$namespace" get service/book-memo -o jsonpath='{.spec.selector.app\.kubernetes\.io/name}') || return 1
-  service_cluster_ip=$(sudo -n k3s kubectl -n "$namespace" get service/book-memo -o jsonpath='{.spec.clusterIP}') || return 1
-  service_port=$(sudo -n k3s kubectl -n "$namespace" get service/book-memo -o jsonpath='{.spec.ports[0].port}') || return 1
-  service_target_port=$(sudo -n k3s kubectl -n "$namespace" get service/book-memo -o jsonpath='{.spec.ports[0].targetPort}') || return 1
-  endpoint_addresses=$(sudo -n k3s kubectl -n "$namespace" get endpoints/book-memo -o jsonpath='{.subsets[*].addresses[*].ip}') || return 1
-  endpoint_ports=$(sudo -n k3s kubectl -n "$namespace" get endpoints/book-memo -o jsonpath='{.subsets[*].ports[*].port}') || return 1
-  [[ "$service_selector" == book-memo && -n "$service_cluster_ip" && "$service_cluster_ip" != None && "$service_port" == 8003 && "$service_target_port" == http && -n "$endpoint_addresses" && "$endpoint_ports" == "$service_port" ]] || {
-    echo "K3s Book Memo Service endpoint is not ready; refusing to recreate Caddy" >&2
-    return 1
-  }
-  export BOOK_MEMO_UPSTREAM="$service_cluster_ip:$service_port"
+  BOOK_MEMO_UPSTREAM=$(require_k3s_service_endpoint book-memo book-memo-data 8003 "Book Memo") || return 1
+  export BOOK_MEMO_UPSTREAM
+}
+
+resolve_youtube_memo_caddy_upstream() {
+  if [[ "$YOUTUBE_MEMO_RUNTIME_MODE" != k3s ]]; then
+    export YOUTUBE_MEMO_UPSTREAM="youtube-memo:8002"
+    return 0
+  fi
+
+  YOUTUBE_MEMO_UPSTREAM=$(require_k3s_service_endpoint youtube-memo youtube-memo-data 8002 "YouTube Memo") || return 1
+  export YOUTUBE_MEMO_UPSTREAM
 }
 
 deploy_runtime_services() {
@@ -182,11 +198,14 @@ deploy_runtime_services() {
       require_portal_state_ready
       docker compose -f docker-compose.yml -f docker-compose.n100.yml config --quiet
       if all_crawler_services_compose; then
+        resolve_book_memo_caddy_upstream
+        resolve_youtube_memo_caddy_upstream
         docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker caddy
       else
         set_compose_homeops_lists
         docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web $bridge_services
         resolve_book_memo_caddy_upstream
+        resolve_youtube_memo_caddy_upstream
         docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --no-deps caddy
       fi
       ;;
@@ -201,6 +220,7 @@ deploy_runtime_services() {
       "${bridge_compose[@]}" config --quiet
       "${bridge_compose[@]}" up -d --build --no-deps --force-recreate $bridge_services
       resolve_book_memo_caddy_upstream
+      resolve_youtube_memo_caddy_upstream
       "${bridge_compose[@]}" up -d --no-deps caddy
       ;;
   esac

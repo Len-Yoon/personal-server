@@ -1125,6 +1125,7 @@ class WindowsBootstrapTests(unittest.TestCase):
                 "  *'service/book-memo'*'.spec.ports[0].targetPort'*) printf 'http\\n' ;;\n"
                 "  *'endpoints/book-memo'*'.addresses[*].ip'*) printf '198.51.100.10\\n' ;;\n"
                 "  *'endpoints/book-memo'*'.ports[*].port'*) printf '8003\\n' ;;\n"
+                "  *'pvc/book-memo-data'*) printf 'Bound\\n' ;;\n"
                 "esac\n",
                 encoding="utf-8",
             )
@@ -1149,6 +1150,20 @@ class WindowsBootstrapTests(unittest.TestCase):
             self.assertEqual(len(caddy), 1)
             self.assertIn("upstream=192.0.2.10:8003", caddy[0])
             self.assertNotIn("book-memo", caddy[0])
+
+    def test_bootstrap_resolves_both_memo_upstreams_before_caddy_recreation(self):
+        runtime = WSL_SCRIPT[WSL_SCRIPT.index("start_runtime_services() {") :]
+
+        self.assertIn("resolve_book_memo_caddy_upstream", WSL_SCRIPT)
+        self.assertIn("resolve_youtube_memo_caddy_upstream", WSL_SCRIPT)
+        self.assertLess(
+            runtime.index("resolve_book_memo_caddy_upstream"),
+            runtime.index("up -d --no-deps caddy"),
+        )
+        self.assertLess(
+            runtime.index("resolve_youtube_memo_caddy_upstream"),
+            runtime.index("up -d --no-deps caddy"),
+        )
 
 
 if __name__ == "__main__":

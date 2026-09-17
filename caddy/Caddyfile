@@ -53,7 +53,7 @@ news.len.pe.kr {
 
 memo.len.pe.kr {
     import common_tls
-    reverse_proxy youtube-memo:8002
+    reverse_proxy {env.YOUTUBE_MEMO_UPSTREAM}
 }
 
 books.len.pe.kr {

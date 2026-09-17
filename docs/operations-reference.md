@@ -108,6 +108,15 @@ HomeOps 실행기는 Docker socket을 제한된 allowlist 진단·재시작에�
 
 공개 경로는 별도 승인·검증 대상이며 이 도구의 성공은 공개 서비스 전환 완료를 의미하지 않음. Secret·Portal·Caddy·Tunnel은 변경하지 않음. 적용 전후 독립 운영 검토, 서비스 수동 검증, 외부 health 검증은 실제 적용 승인 후 별도로 수행함.
 
+## YouTube Memo K3s 전환 준비 상태
+
+- 현재 production writer와 공개 경로는 Docker Compose `youtube-memo`이며, `memo.len.pe.kr`의 Tunnel ingress도 Compose loopback을 사용함. 이 절의 전환 자산 준비만으로 runtime 상태가 변경된 것은 아님.
+- `infra/k8s/apps/youtube-memo.yaml`은 replica 0과 실행 불가 sentinel 이미지를 갖는 준비 manifest임. 실제 운영 Deployment에 정적으로 재적용하지 않음.
+- 실제 전환 전 운영자는 `youtube-memo-runtime` Secret 존재만 확인하고, `youtube-memo-prepare.sh`와 `youtube-memo-cutover.sh --check`를 통해 이미지·PVC·단일 writer 사전 조건을 검증함. Secret 값과 데이터 내용은 출력하지 않음.
+- 별도 전환 승인 후에만 Docker 중지, 전체 `data/youtube-memo` 복사, SQLite 무결성·전체 digest 대조, K3s rollout, root 소유 runtime state 갱신, Caddy·Tunnel 공개 경로 변경을 순서대로 수행함.
+- K3s에서 새 쓰기가 발생한 이후에는 Docker를 단순 재기동하지 않음. Docker 원본과 PVC 데이터가 같은지 확인되지 않은 상태의 rollback은 데이터 분기로 이어질 수 있음.
+- 상세 설계와 구현 절차는 `docs/superpowers/specs/2026-09-17-youtube-memo-k3s-cutover-design.md` 및 `docs/superpowers/plans/2026-09-17-youtube-memo-k3s-cutover.md`를 참조함.
+
 ## 뉴스 수집 관측성
 
 `crawler-worker`는 수집 상태를 `/data/crawler-worker/news_collection_status.json`에 원자적으로 저장함. 상태 파일에는 시각과 실패 횟수만 기록되며 기사·URL·예외 원문·토큰은 포함하지 않음.

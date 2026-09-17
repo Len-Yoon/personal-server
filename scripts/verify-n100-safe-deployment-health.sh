@@ -6,6 +6,8 @@ RUNTIME_STATE_HELPER="$SCRIPT_DIR/runtime-service-state.sh"
 readonly SAFE_SERVICES=(crawler-worker youtube-memo book-memo car-care-worker)
 readonly MAX_ATTEMPTS="${N100_SAFE_DEPLOY_HEALTH_MAX_ATTEMPTS:-45}"
 readonly INTERVAL_SECONDS="${N100_SAFE_DEPLOY_HEALTH_INTERVAL_SECONDS:-2}"
+YOUTUBE_MEMO_RUNTIME_MODE=compose
+BOOK_MEMO_RUNTIME_MODE=compose
 
 is_safe_service() {
   local candidate="$1"
@@ -50,7 +52,7 @@ load_runtime_service_modes() {
     case "$service:$mode" in
       book-memo:compose|book-memo:k3s) [[ "$book_memo_seen" -eq 0 ]] || return 1; BOOK_MEMO_RUNTIME_MODE="$mode"; book_memo_seen=1 ;;
       crawler-worker:compose|crawler-worker:k3s) [[ "$crawler_worker_seen" -eq 0 ]] || return 1; crawler_worker_seen=1 ;;
-      youtube-memo:compose|youtube-memo:k3s) [[ "$youtube_memo_seen" -eq 0 ]] || return 1; youtube_memo_seen=1 ;;
+      youtube-memo:compose|youtube-memo:k3s) [[ "$youtube_memo_seen" -eq 0 ]] || return 1; YOUTUBE_MEMO_RUNTIME_MODE="$mode"; youtube_memo_seen=1 ;;
       *) return 1 ;;
     esac
   done <<< "$state"
@@ -58,7 +60,8 @@ load_runtime_service_modes() {
 }
 
 service_uses_k3s() {
-  [[ "$1" == book-memo && "$BOOK_MEMO_RUNTIME_MODE" == k3s ]]
+  [[ "$1" == book-memo && "$BOOK_MEMO_RUNTIME_MODE" == k3s ]] || \
+    [[ "$1" == youtube-memo && "$YOUTUBE_MEMO_RUNTIME_MODE" == k3s ]]
 }
 
 report_health_diagnostic() {

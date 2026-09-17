@@ -554,6 +554,23 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertNotIn("safe_cd_stage=rollback", result.stderr)
         self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
 
+    def test_k3s_owned_youtube_memo_is_skipped_without_docker_deploy_or_rollback(self):
+        result, calls, saved_state = self.run_safe_deploy(
+            services=("youtube-memo",),
+            previous_sha=self.OLD_SHA,
+            health_results=(1,),
+            runtime_state="crawler-worker=compose\nyoutube-memo=k3s\nbook-memo=compose\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("safe_cd_stage=skip reason=k3s_runtime_service", result.stderr)
+        self.assertNotIn("git archive", calls)
+        self.assertNotIn("docker compose", calls)
+        self.assertNotIn("docker stop youtube-memo", calls)
+        self.assertNotIn("docker start youtube-memo", calls)
+        self.assertNotIn("safe_cd_stage=rollback", result.stderr)
+        self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
+
     def test_mixed_services_skip_k3s_book_memo_in_deploy_health_and_rollback(self):
         result, calls, saved_state = self.run_safe_deploy(
             services=("crawler-worker", "book-memo"),
@@ -928,6 +945,44 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                     **os.environ,
                     "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
                     "FAKE_RUNTIME_STATE": "crawler-worker=compose\nyoutube-memo=compose\nbook-memo=k3s\n",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            recorded_calls = calls.read_text(encoding="utf-8") if calls.exists() else ""
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("safe_cd_health=FAIL reason=k3s_runtime_service", result.stderr)
+        self.assertNotIn("docker inspect", recorded_calls)
+        self.assertNotIn("curl ", recorded_calls)
+
+    def test_health_refuses_k3s_youtube_memo_without_docker_inspection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake_bin = Path(directory) / "bin"
+            fake_bin.mkdir()
+            calls = Path(directory) / "calls"
+            self._write_executable(
+                fake_bin / "docker",
+                "#!/bin/sh\n"
+                f"printf 'docker %s\\n' \"$*\" >> '{calls}'\n"
+                "printf 'healthy\\n'\n",
+            )
+            self._write_executable(
+                fake_bin / "curl",
+                "#!/bin/sh\n"
+                f"printf 'curl %s\\n' \"$*\" >> '{calls}'\n",
+            )
+            self._write_executable(
+                fake_bin / "python3",
+                "#!/bin/sh\n"
+                "printf '%s' \"${FAKE_RUNTIME_STATE}\"\n",
+            )
+            result = subprocess.run(
+                ["bash", str(SAFE_HEALTH_SCRIPT), "youtube-memo"],
+                env={
+                    **os.environ,
+                    "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+                    "FAKE_RUNTIME_STATE": "crawler-worker=compose\nyoutube-memo=k3s\nbook-memo=compose\n",
                 },
                 capture_output=True,
                 text=True,
