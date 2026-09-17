@@ -80,11 +80,11 @@ Book Memo 전환 도구는 서비스별 사용자 승인 후 운영자가 수동
 
 1. 검증된 Linux AMD64 OCI 이미지를 `k3s-app-image-import.sh --go`로 반입하고, 성공 출력의 canonical digest 별칭을 다음 단계 입력으로 사용함.
 2. 운영자가 기존 런타임 설정과 동일한 `book-memo-runtime` Secret을 사전 시딩함. Secret 값은 조회·출력·복제하지 않음.
-3. 별도 승인 후 `book-memo-prepare.sh --go --image docker.io/library/personal-server-book-memo@sha256:<digest>`를 실행함. 이 도구만 importer가 등록·검증한 canonical immutable digest 별칭을 sentinel에 메모리에서 치환하고 PVC·Deployment·Service를 replica 0으로 생성함.
+3. 별도 승인 후 `book-memo-prepare.sh --go --image docker.io/library/personal-server-book-memo@sha256:<digest>`를 실행함. 이 도구만 importer가 등록·검증한 canonical immutable digest 별칭을 sentinel에 메모리에서 치환하고 PVC·Deployment·Service를 replica 0으로 생성함. 이미 정확히 준비된 세 리소스가 있는 경우에는 `--bind-existing --image ...`만 사용하여 리소스 생성·수정 없이 PVC 바인딩만 수행함. 두 모드는 함께 지정할 수 없음. `WaitForFirstConsumer` StorageClass에서는 PVC 바인딩만을 위해 동일 digest 이미지의 임시 비작성 Pod를 생성함. 이 Pod는 서비스 계정 토큰·환경 변수·Secret을 사용하지 않고, read-only PVC만 mount한 상태로 짧게 대기한 뒤 소유 label과 UID를 재확인해 삭제함. 앱 writer 기동·원본 데이터 읽기·데이터 복사는 수행하지 않음.
 4. `book-memo-cutover.sh --check`으로 writer 부재·PVC·이미지·Deployment 계약을 읽기 전용 검증함.
 5. 별도 전환 승인 후에만 `book-memo-cutover.sh --go`를 실행함.
 
-준비 도구는 Docker·원본 데이터·Secret 값을 읽거나 변경하지 않으며 replica를 1로 올리지 않음. 기존 PVC·Deployment·Service 중 하나라도 있으면 중단함.
+준비 도구는 Docker·원본 데이터·Secret 값을 읽거나 변경하지 않으며 replica를 1로 올리지 않음. 임시 Pod는 server dry-run 결과에서 단일 컨테이너·init/ephemeral container 없음·lifecycle 없음·비작성 보안 계약을 먼저 검증한 뒤에만 실제 생성함. 생성 응답이 불확실하면 이름·소유 label·UID를 다시 확인한 경우에만 UID 사전조건 삭제를 시도하며, 그렇지 않으면 다른 Pod를 삭제하지 않고 복구 필요 상태로 중단함. 임시 PVC 바인딩 Pod가 Ready 또는 PVC Bound가 되지 않거나 소유권·UID가 달라지면 기존 PVC·Deployment·Service를 삭제하지 않고 중단함. `--go`는 기존 PVC·Deployment·Service 중 하나라도 있으면 중단하고, `--bind-existing`은 세 리소스의 안전 계약·replica 0·writer Pod 부재를 모두 확인한 경우에만 수행함.
 
 | 모드 | 승인·수행 범위 | 검증·실패 처리 | 비고 |
 |---|---|---|---|
