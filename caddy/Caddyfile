@@ -48,7 +48,7 @@ admin.len.pe.kr {
 
 news.len.pe.kr {
     import common_tls
-    reverse_proxy crawler-worker:8001
+    reverse_proxy {env.CRAWLER_WORKER_UPSTREAM}
 }
 
 memo.len.pe.kr {

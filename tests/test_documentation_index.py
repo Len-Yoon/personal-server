@@ -146,6 +146,37 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("비공개 callback upstream", operations)
         self.assertIn("Book Memo K3s 현재 운영 기준", index)
 
+    def test_crawler_k3s_preparation_docs_preserve_the_current_compose_production_route(self):
+        project_readme = Path("README.md").read_text(encoding="utf-8")
+        index = Path("docs/README.md").read_text(encoding="utf-8")
+        operations = Path("docs/operations-reference.md").read_text(encoding="utf-8")
+        tunnel = Path("docs/cloudflare-tunnel.md").read_text(encoding="utf-8")
+        roadmap = Path("docs/operations-roadmap.md").read_text(encoding="utf-8")
+
+        self.assertIn("Crawler Worker K3s 전환 준비", project_readme)
+        self.assertIn("현재 production writer는 Docker Compose", project_readme)
+        self.assertIn("뉴스 수집 K3s 전환 준비 기준", index)
+        self.assertIn("operations-reference.md#뉴스-수집-k3s-전환-준비-기준", index)
+        self.assertIn("## 뉴스 수집 K3s 전환 준비 기준", operations)
+        self.assertIn("현재 production writer는 Docker Compose", operations)
+        self.assertIn("`news_archive.json`", operations)
+        self.assertIn("`news_collection_status.json`", operations)
+        self.assertIn("전체 디렉터리 SHA-256 digest", operations)
+        self.assertIn("native `crawler-worker` Service", operations)
+        self.assertIn("root 소유 runtime state marker", operations)
+        self.assertIn("외부 health 3회", operations)
+        self.assertIn("실제 전환은 별도 운영 승인", operations)
+        self.assertLess(
+            operations.index("replica 1로 확장"),
+            operations.index("K3s Deployment rollout, Service·Endpoint·PVC readiness"),
+        )
+        self.assertLess(
+            operations.index("root 소유 runtime state marker를 `crawler-worker=k3s`"),
+            operations.index("Docker crawler를 중지해 scheduler와 HTTP writer"),
+        )
+        self.assertIn("전환 준비 자산이 있어도 현재 ingress는 변경되지 않음", tunnel)
+        self.assertIn("Crawler Worker K3s 전환 준비", roadmap)
+
     def test_architecture_diagram_records_current_routes_and_operational_checks(self):
         content = Path("docs/images/personal-server-architecture-v2.svg").read_text(
             encoding="utf-8"

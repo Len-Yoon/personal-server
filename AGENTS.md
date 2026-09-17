@@ -20,6 +20,9 @@
 - 허용 알림 동작은 Cloudflare Tunnel 장애·복구 상태 전환을 Telegram으로 1회씩 전달하는 것으로 한정함.
 - K3s가 active인 상태에서 K3s 전체 restart를 수행하지 않음.
 - Portal PVC·Secret·운영 데이터·Caddyfile·Tunnel ingress·Compose Portal writer는 계속 수정·삭제·재생성 금지함.
+- 사용자가 2026-09-17에 명시 승인한 crawler-worker K3s 전환 코드 준비에 한해 `infra/k8s/apps/crawler-worker.yaml`, `infra/k8s/tools/crawler-worker-prepare.sh`, `infra/k8s/tools/crawler-worker-cutover.sh`, `infra/k8s/sre-telegram/crawler-news-observability.yaml`, `caddy/Caddyfile`, `docker-compose.n100.yml`, `scripts/deploy-n100.sh`, `scripts/windows-bootstrap.sh`, `scripts/verify-n100-deployment-health.sh`와 직접 관련 테스트·문서를 최소 범위로 수정할 수 있음. Portal·Book Memo·YouTube Memo·기존 운영 데이터·기존 PVC는 수정하지 않음.
+- crawler-worker 전환 예외는 코드·테스트·문서 준비에만 적용함. 실제 N100 data 복사·Docker crawler 중지·K3s 리소스 적용·Caddy 재생성·Cloudflare Tunnel 변경·외부 전환 검증은 별도 사용자 승인 전 수행하지 않음.
+- 사용자가 승인한 crawler-worker 단일 writer 보완에 한해 `homeops-executor/app/services/docker_ops.py`, `homeops-executor/app/services/runtime_state.py`, `tests/ci_test_matrix.json`과 직접 관련 테스트·문서를 수정할 수 있음. HomeOps는 신뢰할 수 있는 runtime marker를 매 작업 시 읽어 K3s 소유 서비스를 Docker 자동복구에서 제외하며, marker 오류 시 전환 대상 재시작을 차단함. 실행 중 HomeOps의 crawler 제외 확인과 cutover 종료 시 Docker 중지 재확인을 필수로 함. 실제 운영 적용 제한은 그대로 유지함.
 - 새 sudo 권한, 비밀번호, Telegram 토큰, Secret, 외부 자격 증명을 생성·저장·출력하지 않음.
 - 단, N100 Cloudflare Tunnel 장애·복구 Telegram 알림에 한해 운영자가 Windows Credential Manager에 수동으로 사전 시딩한 Bot token과 Chat ID를 읽기 전용으로 조회할 수 있음.
 - 저장소 코드·Git·문서·로그·상태 파일·환경 변수에는 Telegram Bot token·Chat ID를 생성, 출력, 복제하거나 평문으로 저장하지 않음. 전송 과정의 메모리에서만 사용하며, 알림 전송 실패 메시지에도 비밀값을 포함하지 않음.

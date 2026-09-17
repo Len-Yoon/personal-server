@@ -16,6 +16,8 @@
 
 뉴스는 Caddy를 거치지 않고 Compose loopback endpoint로 연결됨. Book Memo와 YouTube Memo는 Caddy를 거쳐 각각 K3s Service로 연결됨. Caddy 경유 여부나 private callback upstream은 Tunnel 설정 대조 결과이며, 주소 값 자체는 운영 문서에 기록하지 않음.
 
+Crawler Worker K3s 전환 준비 자산이 있어도 현재 ingress는 변경되지 않음. 실제 전환은 Docker writer 중지, PVC 데이터 검증, K3s readiness, Caddy 내부 확인을 모두 마친 뒤 별도 운영 승인으로 Tunnel의 뉴스 한 항목만 변경함. 준비·전환 경계는 [운영 참조](operations-reference.md#뉴스-수집-k3s-전환-준비-기준)를 따름.
+
 ## 차량 OAuth callback ingress
 
 `Caddyfile`에는 `car.len.pe.kr` 호스트 블록이 없음. 따라서 Hyundai OAuth callback은 Caddy 대상 표에 추가하지 않으며, Cloudflare Tunnel의 별도 ingress가 `car-care-worker` 비공개 callback upstream으로 전달함. private callback upstream의 주소는 저장소·문서·로그에 기록하지 않음.

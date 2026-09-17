@@ -1,6 +1,15 @@
 # N100 override: binds app ports to localhost and adds Caddy for public HTTPS.
 services:
   homeops-executor:
+    environment:
+      - HOMEOPS_RUNTIME_STATE_PATH=/run/personal-server/k3s-runtime-services.state
+    volumes:
+      - type: bind
+        source: /var/lib/personal-server
+        target: /run/personal-server
+        read_only: true
+        bind:
+          create_host_path: false
     ports:
       - "127.0.0.1:18011:8011"
     cpus: "0.10"
@@ -238,14 +247,13 @@ services:
       CADDY_EMAIL: ${CADDY_EMAIL:-}
       CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
       PORTAL_UPSTREAM: ${PORTAL_UPSTREAM:-portal-web:8000}
+      CRAWLER_WORKER_UPSTREAM: ${CRAWLER_WORKER_UPSTREAM:-crawler-worker:8001}
       YOUTUBE_MEMO_UPSTREAM: ${YOUTUBE_MEMO_UPSTREAM:-youtube-memo:8002}
       BOOK_MEMO_UPSTREAM: ${BOOK_MEMO_UPSTREAM:-book-memo:8003}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       portal-web:
-        condition: service_healthy
-      crawler-worker:
         condition: service_healthy
     ports:
       - "80:80"

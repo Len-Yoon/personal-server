@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from app.services.runtime_state import RUNTIME_SERVICES, compose_owned_services
+
 
 DEFAULT_ALLOWED_SERVICES = frozenset({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
 # Kept for existing callers; all operations read the configured allowlist again
@@ -13,10 +15,10 @@ MAX_LOG_BYTES = 32 * 1024
 
 def allowed_services() -> frozenset[str]:
     configured = os.getenv("HOMEOPS_DOCKER_MANAGED_SERVICES", "").strip()
-    if not configured:
-        return DEFAULT_ALLOWED_SERVICES
-    requested = frozenset(item.strip() for item in configured.split(",") if item.strip())
-    return requested & DEFAULT_ALLOWED_SERVICES
+    requested = (frozenset(item.strip() for item in configured.split(",") if item.strip())
+                 if configured else DEFAULT_ALLOWED_SERVICES)
+    managed = requested & DEFAULT_ALLOWED_SERVICES
+    return managed - (RUNTIME_SERVICES - compose_owned_services())
 
 
 def collect_diagnostics(
@@ -49,6 +51,7 @@ def collect_all_diagnostics(client: Any | None = None) -> list[dict[str, object]
 
 def restart_service(service: str, client: Any | None = None) -> dict[str, object]:
     container = _get_container(service, client)
+    _require_allowed_service(service)
     container.restart(timeout=10)
     container.reload()
     snapshot = _container_snapshot(container)

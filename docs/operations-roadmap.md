@@ -38,6 +38,7 @@
 | 우선순위 | 항목 | 실행 기준 | 완료 조건 |
 |---|---|---|---|
 | P2 | 감시 경로 식별·알림 보강 | 완료된 공개 감시 실행의 실행 실패·Telegram 전달 실패를 별도 Issue·Telegram 전환으로 관리함 | 저장소 계약 테스트·독립 검토 통과 후 GitHub Actions 실제 실행 확인 필요 |
+| P2 | Crawler Worker K3s 전환 준비 | Docker production writer와 Tunnel 직접 ingress를 유지한 상태에서 sentinel manifest·단일 writer cutover 도구·native metrics 설정을 검증함 | 별도 운영 승인 뒤 데이터 digest·K3s readiness·Caddy·Tunnel·외부 health 3회 검증 필요 |
 
 ## 검토 결과
 

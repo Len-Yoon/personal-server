@@ -12,7 +12,7 @@ spec:
       - personal-server
   selector:
     matchLabels:
-      app.kubernetes.io/part-of: portal-compose-bridge
+      app.kubernetes.io/name: crawler-worker
   endpoints:
     - port: http
       path: /internal/metrics
@@ -20,7 +20,3 @@ spec:
       bearerTokenSecret:
         name: crawler-news-metrics
         key: bearer_token
-      relabelings:
-        - sourceLabels: [__meta_kubernetes_service_name]
-          action: keep
-          regex: compose-crawler

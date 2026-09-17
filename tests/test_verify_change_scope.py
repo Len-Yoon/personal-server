@@ -184,6 +184,42 @@ class VerifyChangeScopeTests(unittest.TestCase):
         self.assertEqual(evidence["required_checks"], ["maintenance"])
         self.assertEqual(evidence["unclassified_files"], [])
 
+    def test_crawler_k3s_cutover_scope_requires_crawler_and_maintenance_checks(self):
+        path = "infra/k8s/tools/crawler-worker-cutover.sh"
+
+        code, evidence = run_scope(
+            path,
+            executed_checks=("maintenance", "crawler-worker"),
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            evidence["required_checks"], ["maintenance", "crawler-worker"]
+        )
+        self.assertEqual(evidence["missing_checks"], [])
+
+    def test_crawler_k3s_dedicated_infrastructure_requires_crawler_and_maintenance_checks(
+        self,
+    ):
+        paths = (
+            "infra/k8s/apps/crawler-worker.yaml",
+            "infra/k8s/tools/crawler-worker-prepare.sh",
+            "infra/k8s/tools/crawler-worker-cutover.sh",
+            "infra/k8s/sre-telegram/crawler-news-observability.yaml",
+        )
+
+        code, evidence = run_scope(
+            *paths,
+            executed_checks=("maintenance", "crawler-worker"),
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(evidence["infrastructure_files"], list(paths))
+        self.assertEqual(
+            evidence["required_checks"], ["maintenance", "crawler-worker"]
+        )
+        self.assertEqual(evidence["missing_checks"], [])
+
     def test_sre_telegram_relay_paths_require_only_maintenance_check(self):
         paths = (
             "sre-telegram-relay/app/main.py",

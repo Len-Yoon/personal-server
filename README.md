@@ -49,6 +49,10 @@ Windows N100과 Ubuntu WSL2에서 운영하는 개인용 서비스 허브임. �
 | 백업 | Portal PVC 암호화 백업 및 복원 검증 |
 | 외부 장애 감지 | GitHub Actions가 약 5분 간격으로 `https://len.pe.kr/health` 확인 |
 
+### Crawler Worker K3s 전환 준비
+
+뉴스 수집 K3s 전환용 manifest·검증 도구·관측성 설정은 저장소에 준비되어 있음. 다만 현재 production writer는 Docker Compose이며 `news.len.pe.kr`의 Tunnel 직접 ingress도 유지함. Docker 중지, 데이터 복사, K3s 기동, Caddy·Tunnel 전환은 별도 운영 승인과 실제 검증 뒤에만 수행함. 상세 조건은 [운영 참조](docs/operations-reference.md#뉴스-수집-k3s-전환-준비-기준)를 따름.
+
 <br>
 
 ## 빠른 상태 확인

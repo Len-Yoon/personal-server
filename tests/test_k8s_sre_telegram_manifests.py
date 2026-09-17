@@ -43,7 +43,7 @@ class SreTelegramManifestContractTests(unittest.TestCase):
         self.assertEqual(endpoint["bearerTokenSecret"], {"name": "portal-http-metrics", "key": "bearer_token"})
         self.assertNotIn("stringData", monitor)
 
-    def test_news_observability_manifest_uses_named_secret_key_and_existing_service(self):
+    def test_news_observability_manifest_selects_native_k3s_service(self):
         monitor = find_document(
             load_yaml_documents("crawler-news-observability.yaml"),
             "ServiceMonitor",
@@ -53,19 +53,14 @@ class SreTelegramManifestContractTests(unittest.TestCase):
         self.assertEqual(monitor["spec"]["namespaceSelector"], {"matchNames": ["personal-server"]})
         self.assertEqual(
             monitor["spec"]["selector"],
-            {"matchLabels": {"app.kubernetes.io/part-of": "portal-compose-bridge"}},
+            {"matchLabels": {"app.kubernetes.io/name": "crawler-worker"}},
         )
         endpoint = monitor["spec"]["endpoints"][0]
+        self.assertEqual(endpoint["port"], "http")
         self.assertEqual(endpoint["path"], "/internal/metrics")
+        self.assertEqual(endpoint["interval"], "30s")
         self.assertEqual(endpoint["bearerTokenSecret"], {"name": "crawler-news-metrics", "key": "bearer_token"})
-        self.assertEqual(
-            endpoint["relabelings"],
-            [{
-                "sourceLabels": ["__meta_kubernetes_service_name"],
-                "action": "keep",
-                "regex": "compose-crawler",
-            }],
-        )
+        self.assertNotIn("relabelings", endpoint)
         self.assertNotIn("stringData", monitor)
 
     def test_news_observability_apply_contract_is_documented_without_secret_value(self):

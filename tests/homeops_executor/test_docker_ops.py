@@ -1,6 +1,8 @@
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from tests._test_support import prepare_service_import
@@ -370,6 +372,111 @@ class DockerOpsTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 403)
+
+
+class RuntimeMarkerDockerOpsTests(unittest.TestCase):
+    def setUp(self):
+        prepare_service_import("homeops-executor")
+        from app.services import docker_ops
+        self.ops = docker_ops
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.root.chmod(0o755)
+        self.marker = self.root / 'k3s-runtime-services.state'
+        self.write_marker('compose')
+        self.env = patch.dict(os.environ, {
+            'HOMEOPS_RUNTIME_STATE_PATH': str(self.marker),
+            'HOMEOPS_DOCKER_MANAGED_SERVICES': 'system-agent,crawler-worker,youtube-memo,book-memo,caddy,homeops-executor',
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        real_fstat = os.fstat
+        def root_owned_fstat(fd):
+            fields = list(real_fstat(fd))
+            fields[4] = 0
+            return os.stat_result(fields)
+        self.ownership = patch('os.fstat', side_effect=root_owned_fstat)
+        self.ownership.start()
+        self.addCleanup(self.ownership.stop)
+
+    def write_marker(self, crawler):
+        replacement = self.root / 'replacement'
+        replacement.write_text(f'crawler-worker={crawler}\nyoutube-memo=k3s\nbook-memo=k3s\n')
+        replacement.chmod(0o644)
+        replacement.replace(self.marker)
+
+    def test_marker_replacement_blocks_stale_environment_allowlist_without_restart(self):
+        client = FakeDockerClient()
+        self.ops.restart_service('crawler-worker', client=client)
+        self.write_marker('k3s')
+        with self.assertRaisesRegex(ValueError, 'service_not_allowed'):
+            self.ops.restart_service('crawler-worker', client=client)
+        self.assertEqual(client.containers.container.restart_calls, [10])
+        self.assertNotIn('youtube-memo', self.ops.allowed_services())
+        self.assertNotIn('book-memo', self.ops.allowed_services())
+        self.assertIn('caddy', self.ops.allowed_services())
+
+    def test_restart_all_excludes_k3s_writers_but_keeps_caddy_and_executor(self):
+        self.write_marker('k3s')
+        result = self.ops.restart_all_services(client=FakeDockerClient())
+        self.assertEqual([item['service'] for item in result], ['system-agent', 'caddy', 'homeops-executor'])
+
+    def test_marker_change_during_container_lookup_blocks_restart(self):
+        client = FakeDockerClient()
+        original_list = client.containers.list
+        def changed_list(**kwargs):
+            result = original_list(**kwargs)
+            self.write_marker('k3s')
+            return result
+        client.containers.list = changed_list
+        with self.assertRaisesRegex(ValueError, 'service_not_allowed'):
+            self.ops.restart_service('crawler-worker', client=client)
+        self.assertEqual(client.containers.container.restart_calls, [])
+
+    def test_missing_malformed_or_writable_marker_fails_closed_for_writers(self):
+        for bad in ('', 'crawler-worker=compose\ncrawler-worker=k3s\n',
+                    'crawler-worker=unexpected\n', 'unrecognized=compose\n', '\x00', 'x' * 5000):
+            with self.subTest(bad=bad[:40]):
+                self.marker.write_text(bad)
+                with self.assertRaisesRegex(ValueError, 'service_not_allowed'):
+                    self.ops.restart_service('crawler-worker', client=FakeDockerClient())
+        self.write_marker('compose')
+        self.marker.chmod(0o666)
+        self.assertNotIn('crawler-worker', self.ops.allowed_services())
+        self.marker.unlink()
+        self.assertNotIn('crawler-worker', self.ops.allowed_services())
+
+    def test_symlink_file_or_parent_is_rejected(self):
+        target = self.root / 'real-state'
+        self.marker.rename(target)
+        self.marker.symlink_to(target)
+        self.assertNotIn('crawler-worker', self.ops.allowed_services())
+        alias = self.root / 'alias'
+        alias.symlink_to(self.root, target_is_directory=True)
+        with patch.dict(os.environ, {'HOMEOPS_RUNTIME_STATE_PATH': str(alias / 'real-state')}):
+            self.assertNotIn('crawler-worker', self.ops.allowed_services())
+
+    def test_untrusted_file_owner_parent_permissions_and_hardlinks_are_rejected(self):
+        self.ownership.stop()
+        real_fstat = os.fstat
+        def untrusted_fstat(fd):
+            fields = list(real_fstat(fd))
+            fields[4] = 10001
+            return os.stat_result(fields)
+        with patch('os.fstat', side_effect=untrusted_fstat):
+            self.assertNotIn('crawler-worker', self.ops.allowed_services())
+        self.ownership.start()
+        self.root.chmod(0o777)
+        self.assertNotIn('crawler-worker', self.ops.allowed_services())
+        self.root.chmod(0o755)
+        os.link(self.marker, self.root / 'alias-state')
+        self.assertNotIn('crawler-worker', self.ops.allowed_services())
+
+    def test_environment_allowlist_still_blocks_a_compose_owned_service(self):
+        with patch.dict(os.environ, {'HOMEOPS_DOCKER_MANAGED_SERVICES': 'system-agent,caddy,homeops-executor'}):
+            with self.assertRaisesRegex(ValueError, 'service_not_allowed'):
+                self.ops.restart_service('crawler-worker', client=FakeDockerClient())
 
 
 if __name__ == "__main__":

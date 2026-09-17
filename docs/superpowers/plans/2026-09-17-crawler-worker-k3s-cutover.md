@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Docker와 K3s가 `data/crawler-worker` 또는 `news_summaries.sqlite3`를 동시에 쓰지 않음.
+- Docker와 K3s가 `data/crawler-worker`를 동시에 쓰지 않음.
 - Secret·Telegram 값·개인 뉴스 데이터는 읽거나 출력하거나 Git에 저장하지 않음.
 - immutable Linux AMD64 image digest만 허용함.
 - Portal·Book Memo·YouTube Memo·차량관리와 기존 PVC는 변경하지 않음.
@@ -38,11 +38,12 @@
 
 **Files:**
 - Modify: `AGENTS.md` — 사용자 승인 후 crawler-worker 전환의 최소 변경 예외만 추가
+- Modify: `scripts/verify_change_scope.py` — crawler 전환 도구 변경에 `maintenance`와 `crawler-worker` 검사를 모두 요구
 - Test: `tests/test_verify_change_scope.py`
 
 - [ ] **Step 1: crawler-worker 전환에 필요한 파일을 명시함.**
 
-`infra/k8s/apps/crawler-worker.yaml`, `infra/k8s/tools/crawler-worker-prepare.sh`, `infra/k8s/tools/crawler-worker-cutover.sh`, `infra/k8s/sre-telegram/crawler-news-observability.yaml`, Caddy/runtime/deployment health 스크립트와 직접 테스트·문서만 허용함. Portal·Book·YouTube·기존 운영 데이터는 제외함.
+`infra/k8s/apps/crawler-worker.yaml`, `infra/k8s/tools/crawler-worker-prepare.sh`, `infra/k8s/tools/crawler-worker-cutover.sh`, `infra/k8s/sre-telegram/crawler-news-observability.yaml`, Caddy/runtime/deployment health 스크립트, `scripts/verify_change_scope.py`, 직접 테스트·문서만 허용함. Portal·Book·YouTube·기존 운영 데이터는 제외함.
 
 - [ ] **Step 2: 변경 범위 테스트를 먼저 추가하고 실패를 확인함.**
 
@@ -61,7 +62,7 @@ Expected: crawler 전환 예외가 없으면 실패함.
 
 - [ ] **Step 3: 승인된 최소 예외와 테스트를 일치시킴.**
 
-실제 N100 데이터·Caddy·Tunnel 변경은 별도 사용자 승인 없이는 금지하고, 코드·테스트·문서 준비만 허용하는 문구로 제한함.
+`infra/k8s/apps/crawler-worker.yaml`, `infra/k8s/tools/crawler-worker-prepare.sh`, `infra/k8s/tools/crawler-worker-cutover.sh`는 infrastructure 경로이지만 crawler 전환 전용 정책 목록으로 분류해 `maintenance`와 `crawler-worker`를 함께 요구함. 실제 N100 데이터·Caddy·Tunnel 변경은 별도 사용자 승인 없이는 금지하고, 코드·테스트·문서 준비만 허용하는 문구로 제한함.
 
 - [ ] **Step 4: 변경 범위 계약을 통과시킴.**
 
@@ -79,7 +80,7 @@ Expected: PASS.
 
 **Interfaces:**
 - `crawler-worker-prepare.sh --go|--bind-existing --image docker.io/library/personal-server-crawler-worker@sha256:<digest>`는 Secret 존재와 imported image를 확인하고 replica 0으로 준비함.
-- `crawler-worker-cutover.sh --check|--prepare|--go|--rollback --source <absolute-dir> --database news_summaries.sqlite3 --image <digest>`는 `--go`에서만 writer 상태를 바꿈.
+- `crawler-worker-cutover.sh --check|--prepare|--go|--rollback --source <absolute-dir> --image <digest>`는 `--check`·`--prepare`에서 writer 상태를 바꾸지 않으며, `--go`·`--rollback`만 명시적으로 writer 상태를 바꿈.
 
 - [ ] **Step 1: fail-closed 전환 테스트를 작성함.**
 
@@ -104,7 +105,7 @@ Expected: manifest·prepare·cutover 파일 부재로 실패함.
 
 - [ ] **Step 3: Book Memo의 안전 제어 흐름을 crawler 고유 계약으로 제한해 구현함.**
 
-PVC `crawler-worker-data`, port `8001`, mount `/data/crawler-worker`, Secret `crawler-worker-runtime`, DB `news_summaries.sqlite3`만 허용함. helper Pod UID precondition, SQLite `quick_check`, 전체 directory digest, 실패 시 양쪽 writer 중지 원칙을 유지함.
+PVC `crawler-worker-data`, port `8001`, mount `/data/crawler-worker`, Secret `crawler-worker-runtime`만 허용함. 현재 writer가 사용하는 `news_archive.json`·`news_collection_status.json`을 포함한 전체 directory digest를 비교하고, 실제 존재하는 SQLite 파일에만 `quick_check`를 적용함. helper Pod UID precondition과 실패 시 양쪽 writer 중지 원칙을 유지함.
 
 - [ ] **Step 4: 전환 계약을 GREEN으로 만듦.**
 
@@ -120,7 +121,6 @@ Expected: PASS.
 - Modify: `scripts/deploy-n100.sh`
 - Modify: `scripts/windows-bootstrap.sh`
 - Modify: `scripts/verify-n100-deployment-health.sh`
-- Modify: `scripts/verify-n100-safe-deployment-health.sh`
 - Modify: `tests/test_runtime_service_deployment_contract.py`
 - Modify: `tests/test_deploy_n100.py`
 - Modify: `tests/test_windows_bootstrap.py`
@@ -216,7 +216,7 @@ Expected: PASS.
 
 - [ ] **Step 1: 준비와 실제 cutover를 분리하는 문서 계약을 작성함.**
 
-준비 단계에서는 Docker가 production writer이며 public Tunnel은 바뀌지 않음을 기록함. 실제 cutover에는 Docker 중지, 전체 data digest, K3s readiness, native metrics target, root-owned state marker, Caddy internal health, Tunnel 전환, 외부 health 3회, rollback 제한을 순서대로 기록함.
+준비 단계에서는 Docker가 production writer이며 public Tunnel은 바뀌지 않음을 기록함. 실제 cutover에는 유지보수 진입·진행 중 복구 종료, HomeOps runtime marker 읽기 적용, root-owned state marker 선갱신·crawler 복구 제외 확인, Docker 중지, 전체 data digest, K3s readiness·Docker 중지 재확인, native metrics target, Caddy internal health, Tunnel 전환, 외부 health 3회, rollback 제한을 순서대로 기록함.
 
 - [ ] **Step 2: 문서·정적 검사를 실행함.**
 
