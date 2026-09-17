@@ -9,6 +9,11 @@ defaultRules:
   rules:
     nodeExporterAlerting: false
     nodeExporterRecording: false
+  # K3s does not expose these control-plane targets for discovery.
+  disabled:
+    KubeControllerManagerDown: true
+    KubeSchedulerDown: true
+    KubeProxyDown: true
 
 grafana:
   service:

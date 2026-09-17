@@ -70,6 +70,22 @@ class MonitoringValuesContractTests(unittest.TestCase):
         self.assertIs(values["defaultRules"]["rules"]["nodeExporterAlerting"], False)
         self.assertIs(values["defaultRules"]["rules"]["nodeExporterRecording"], False)
 
+    def test_values_disable_only_unavailable_k3s_control_plane_alerts(self):
+        values = load_values()
+        disabled = values["defaultRules"]["disabled"]
+
+        self.assertEqual(
+            disabled,
+            {
+                "KubeControllerManagerDown": True,
+                "KubeSchedulerDown": True,
+                "KubeProxyDown": True,
+            },
+        )
+        self.assertNotIn("kubeControllerManager", values)
+        self.assertNotIn("kubeScheduler", values)
+        self.assertNotIn("kubeProxy", values)
+
 
 if __name__ == "__main__":
     unittest.main()
