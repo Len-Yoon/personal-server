@@ -348,7 +348,9 @@ class BookMemoPrepareTests(unittest.TestCase):
     def run_prepare(self, *arguments, secret_exists=True, listed_image=None,
                     foreign_resource_after_dry_run=False, unexpected_dry_run_resource=False,
                     sequential_dry_run_output=False, manifest_line_endings=None,
-                    manifest_mutation=None):
+                    manifest_mutation=None, binder_scenario="ok",
+                    existing_prepared=False, existing_mutation=None,
+                    existing_api_defaults=False):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         base = Path(directory.name)
@@ -377,11 +379,17 @@ class BookMemoPrepareTests(unittest.TestCase):
             (apps / MANIFEST.name).write_text(manifest, encoding="utf-8", newline="")
         image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
         fixture = {"image": image, "listed_image": listed_image or image,
-                   "secret_exists": secret_exists, "applied": False,
+                   "secret_exists": secret_exists, "applied": existing_prepared,
                    "foreign_resource_after_dry_run": foreign_resource_after_dry_run,
                    "foreign_resource_present": False,
                    "unexpected_dry_run_resource": unexpected_dry_run_resource,
-                   "sequential_dry_run_output": sequential_dry_run_output}
+                   "sequential_dry_run_output": sequential_dry_run_output,
+                   "binder_scenario": binder_scenario,
+                   "existing_mutation": existing_mutation,
+                   "existing_api_defaults": existing_api_defaults,
+                   "binder": None,
+                   "binder_get_count": 0,
+                   "pvc_bound": False}
         (base / "fixture").write_text(json.dumps(fixture))
         (base / "calls").touch()
         mock = r'''import json, os, pathlib, sys
@@ -402,15 +410,94 @@ if args[:4] == ["-n", "k3s", "ctr", "images"]:
 command = args[5:]
 if command[:2] == ["get", "secret"]:
     sys.exit(0 if fixture["secret_exists"] else 1)
+def pvc_document():
+    return {"kind": "PersistentVolumeClaim", "metadata": {"name": "book-memo-data", "namespace": "personal-server"},
+            "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": "1Gi"}}},
+            "status": {"phase": "Bound" if fixture["pvc_bound"] else "Pending"}}
+def deployment_document():
+    document = {"kind": "Deployment", "metadata": {"name": "book-memo", "namespace": "personal-server", "labels": {"app.kubernetes.io/name": "book-memo"}},
+      "spec": {"replicas": 0, "strategy": {"type": "Recreate"}, "selector": {"matchLabels": {"app.kubernetes.io/name": "book-memo"}},
+      "template": {"metadata": {"labels": {"app.kubernetes.io/name": "book-memo"}}, "spec": {
+      "automountServiceAccountToken": False,
+      "securityContext": {"runAsNonRoot": True, "runAsUser": 10001, "runAsGroup": 10001, "fsGroup": 10001, "seccompProfile": {"type": "RuntimeDefault"}},
+      "containers": [{"name": "book-memo", "image": fixture["image"], "imagePullPolicy": "Never",
+        "envFrom": [{"secretRef": {"name": "book-memo-runtime"}}],
+        "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}},
+        "readinessProbe": {"httpGet": {"path": "/health", "port": "http"}},
+        "livenessProbe": {"httpGet": {"path": "/health", "port": "http"}},
+        "volumeMounts": [{"name": "book-memo-data", "mountPath": "/data/book-memo"}, {"name": "tmp", "mountPath": "/tmp"}]}],
+      "volumes": [{"name": "book-memo-data", "persistentVolumeClaim": {"claimName": "book-memo-data"}}, {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"}}]}}}}
+    if fixture["existing_mutation"] == "wrong_image":
+        document["spec"]["template"]["spec"]["containers"][0]["image"] = "personal-server-book-memo:mutable"
+    if fixture["existing_api_defaults"]:
+        container = document["spec"]["template"]["spec"]["containers"][0]
+        container["readinessProbe"]["httpGet"]["scheme"] = "HTTP"
+        container["livenessProbe"]["httpGet"]["scheme"] = "HTTP"
+    return document
+def service_document():
+    document = {"kind": "Service", "metadata": {"name": "book-memo", "namespace": "personal-server"},
+                "spec": {"type": "ClusterIP", "selector": {"app.kubernetes.io/name": "book-memo"},
+                         "ports": [{"name": "http", "port": 8003, "targetPort": "http"}]}}
+    if fixture["existing_mutation"] == "bad_service":
+        document["spec"]["type"] = "NodePort"
+    if fixture["existing_api_defaults"]:
+        document["spec"]["ports"][0]["protocol"] = "TCP"
+    return document
 if command[:1] == ["get"] and command[1] in {"pvc", "deployment", "service"}:
-    if command[1] == "deployment" and fixture["applied"] and command[-2:] == ["-o", "json"]:
-        deployment = {"kind": "Deployment", "metadata": {"name": "book-memo", "namespace": "personal-server"}, "spec": {"replicas": 0, "template": {"spec": {"containers": [{"image": fixture["image"]}]}}}}
-        print(json.dumps(deployment))
+    resource = command[1]
+    if fixture["existing_mutation"] == "missing_" + resource:
+        sys.exit(0)
+    if fixture["applied"] and command[-2:] == ["-o", "name"]:
+        print(resource + "/" + ("book-memo-data" if resource == "pvc" else "book-memo"))
+    if fixture["applied"] and command[-2:] == ["-o", "json"]:
+        print(json.dumps({"pvc": pvc_document, "deployment": deployment_document, "service": service_document}[resource]()))
     if command[1] == "service" and fixture["foreign_resource_present"]:
         print("service/book-memo")
     sys.exit(0)
+if command[:2] == ["get", "pods"]:
+    pods = []
+    if fixture["existing_mutation"] == "writer_pod":
+        pods.append({"metadata": {"name": "foreign-writer"}, "spec": {"volumes": [{"persistentVolumeClaim": {"claimName": "book-memo-data"}}]}})
+    print(json.dumps({"items": pods}))
+    sys.exit(0)
+if command[:2] == ["get", "pod"]:
+    binder = fixture["binder"]
+    if binder is None:
+        sys.exit(0)
+    fixture["binder_get_count"] += 1
+    scenario = fixture["binder_scenario"]
+    returned = json.loads(json.dumps(binder))
+    if scenario == "binder_unowned":
+        returned["metadata"]["labels"]["personal-server.io/pvc-binder-owner"] = "foreign-owner"
+    elif scenario == "binder_replaced" and fixture["binder_get_count"] >= 2:
+        returned["metadata"]["uid"] = "replacement-uid"
+    (base / "fixture").write_text(json.dumps(fixture))
+    if command[-2:] == ["-o", "name"]:
+        print("pod/" + returned["metadata"]["name"])
+    else:
+        print(json.dumps(returned))
+    sys.exit(0)
 if command[:2] == ["create", "--dry-run=server"]:
     rendered = sys.stdin.read()
+    if rendered.lstrip().startswith("{"):
+        binder = json.loads(rendered)
+        scenario = fixture["binder_scenario"]
+        if scenario == "binder_server_hook":
+            binder["spec"]["initContainers"] = [{"name": "writer", "image": fixture["image"]}]
+        if scenario == "binder_server_ephemeral":
+            binder["spec"]["ephemeralContainers"] = [{"name": "writer", "image": fixture["image"]}]
+        if scenario == "binder_server_lifecycle":
+            binder["spec"]["containers"][0]["lifecycle"] = {"postStart": {"exec": {"command": ["true"]}}}
+        if scenario == "binder_server_environment":
+            binder["spec"]["containers"][0]["env"] = [{"name": "WRITER_HOOK", "value": "blocked"}]
+        if scenario == "binder_server_readiness_probe":
+            binder["spec"]["containers"][0]["readinessProbe"] = {"exec": {"command": ["true"]}}
+        if scenario == "binder_server_liveness_probe":
+            binder["spec"]["containers"][0]["livenessProbe"] = {"exec": {"command": ["true"]}}
+        if scenario == "binder_server_startup_probe":
+            binder["spec"]["containers"][0]["startupProbe"] = {"exec": {"command": ["true"]}}
+        print(json.dumps(binder))
+        sys.exit(0)
     if "unconfigured-do-not-run" in rendered or fixture["image"] not in rendered or "replicas: 0" not in rendered:
         sys.exit(1)
     pvc = {"kind": "PersistentVolumeClaim", "metadata": {"name": "book-memo-data", "namespace": "personal-server"}, "spec": {"accessModes": ["ReadWriteOnce"]}}
@@ -431,12 +518,57 @@ if command[:2] == ["create", "--dry-run=server"]:
     sys.exit(0)
 if command[:1] == ["create"]:
     rendered = sys.stdin.read()
+    if rendered.lstrip().startswith("{"):
+        if not fixture["applied"] or fixture["binder"] is not None:
+            sys.exit(1)
+        binder = json.loads(rendered)
+        if binder.get("kind") != "Pod":
+            sys.exit(1)
+        binder.setdefault("metadata", {})["uid"] = "created-uid"
+        fixture["binder"] = binder
+        (base / "binder-rendered").write_text(json.dumps(binder))
+        (base / "fixture").write_text(json.dumps(fixture))
+        if fixture["binder_scenario"] == "binder_create_uncertain_owned":
+            sys.exit(1)
+        if fixture["binder_scenario"] == "binder_create_uncertain_unowned":
+            fixture["binder"]["metadata"]["labels"]["personal-server.io/pvc-binder-owner"] = "foreign-owner"
+            (base / "fixture").write_text(json.dumps(fixture))
+            sys.exit(1)
+        print(json.dumps(binder))
+        sys.exit(0)
     if "unconfigured-do-not-run" in rendered or fixture["image"] not in rendered or "replicas: 0" not in rendered:
         sys.exit(1)
     if fixture["foreign_resource_present"]:
         sys.exit(1)
     (base / "create-rendered").write_text(rendered)
     fixture["applied"] = True
+    (base / "fixture").write_text(json.dumps(fixture))
+    sys.exit(0)
+if command[:1] == ["wait"]:
+    target = command[-2] if command[-1].startswith("--timeout=") else command[-1]
+    scenario = fixture["binder_scenario"]
+    if target.startswith("pod/"):
+        if command[1] == "--for=delete":
+            sys.exit(0 if fixture["binder"] is None else 1)
+        if fixture["binder"] is None or scenario == "binder_not_ready":
+            sys.exit(1)
+        fixture["pvc_bound"] = True
+        (base / "fixture").write_text(json.dumps(fixture))
+        sys.exit(0)
+    if target.startswith("pvc/"):
+        sys.exit(0 if fixture["pvc_bound"] else 1)
+    sys.exit(1)
+if command[:1] == ["delete"] and command[1].startswith("--raw="):
+    if fixture["binder"] is None:
+        sys.exit(1)
+    delete_options = json.load(sys.stdin)
+    current = fixture["binder"]
+    if fixture["binder_scenario"] == "binder_replaced":
+        current = json.loads(json.dumps(current))
+        current["metadata"]["uid"] = "replacement-uid"
+    if delete_options.get("preconditions", {}).get("uid") != current["metadata"].get("uid"):
+        sys.exit(1)
+    fixture["binder"] = None
     (base / "fixture").write_text(json.dumps(fixture))
     sys.exit(0)
 sys.exit(1)
@@ -452,6 +584,11 @@ sys.exit(1)
             (base / name).read_text() if (base / name).exists() else None
             for name in ("dry-run-rendered", "create-rendered")
         )
+        self.last_binder_rendered = (
+            json.loads((base / "binder-rendered").read_text())
+            if (base / "binder-rendered").exists() else None
+        )
+        self.last_prepare_fixture = json.loads((base / "fixture").read_text())
         return result, (base / "calls").read_text()
 
     def test_prepare_applies_only_rendered_replica_zero_resources(self):
@@ -464,6 +601,150 @@ sys.exit(1)
         self.assertEqual(self.last_prepare_rendered[0], self.last_prepare_rendered[1])
         self.assertNotIn("docker", calls)
         self.assertNotIn("scale", calls)
+
+    def test_prepare_binds_pending_pvc_with_owned_nonwriter_binder_then_removes_it(self):
+        image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
+        result, calls = self.run_prepare("--go", "--image", image)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "book_memo_prepare=PASS\n")
+        binder = self.last_binder_rendered
+        self.assertIsNotNone(binder)
+        self.assertEqual(binder["metadata"]["namespace"], "personal-server")
+        self.assertRegex(binder["metadata"]["name"], r"^book-memo-pvc-binder-[0-9a-f]{32}$")
+        labels = binder["metadata"]["labels"]
+        self.assertEqual(labels["app.kubernetes.io/managed-by"], "book-memo-prepare")
+        self.assertRegex(labels["personal-server.io/pvc-binder-owner"], r"^[0-9a-f]{32}$")
+        pod = binder["spec"]
+        self.assertFalse(pod["automountServiceAccountToken"])
+        self.assertEqual(pod["securityContext"], {
+            "runAsNonRoot": True, "runAsUser": 10001, "runAsGroup": 10001,
+            "fsGroup": 10001, "seccompProfile": {"type": "RuntimeDefault"},
+        })
+        self.assertEqual(pod["restartPolicy"], "Never")
+        self.assertEqual(pod["volumes"], [{"name": "book-memo-data", "persistentVolumeClaim": {"claimName": "book-memo-data"}}])
+        self.assertEqual(len(pod["containers"]), 1)
+        container = pod["containers"][0]
+        self.assertEqual(container["image"], image)
+        self.assertEqual(container["imagePullPolicy"], "Never")
+        self.assertEqual(container["command"], ["python3", "-c", "import time; time.sleep(180)"])
+        self.assertEqual(container["volumeMounts"], [{
+            "name": "book-memo-data", "mountPath": "/data/book-memo", "readOnly": True,
+        }])
+        self.assertEqual(container["securityContext"], {
+            "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
+            "capabilities": {"drop": ["ALL"]},
+        })
+        self.assertNotIn("env", container)
+        self.assertNotIn("envFrom", container)
+        self.assertTrue(self.last_prepare_fixture["applied"])
+        self.assertTrue(self.last_prepare_fixture["pvc_bound"])
+        self.assertIsNone(self.last_prepare_fixture["binder"])
+        commands = [json.loads(line) for line in calls.splitlines()]
+        self.assertTrue(any("--for=condition=Ready" in command for command in commands))
+        self.assertTrue(any("--for=jsonpath={.status.phase}=Bound" in command for command in commands))
+        self.assertTrue(any(any(item.startswith("--raw=") for item in command) for command in commands))
+        self.assertTrue(any("--for=delete" in command for command in commands))
+
+    def test_prepare_binder_failure_never_deletes_base_resources_or_foreign_binder(self):
+        image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
+        for scenario in ("binder_not_ready", "binder_unowned", "binder_replaced"):
+            with self.subTest(scenario=scenario):
+                result, calls = self.run_prepare(
+                    "--go", "--image", image, binder_scenario=scenario,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertRegex(result.stderr, r"^book_memo_prepare=FAIL stage=(pvc_bind|recovery)\n$")
+                self.assertTrue(self.last_prepare_fixture["applied"])
+                self.assertNotIn('"delete", "pvc"', calls)
+                self.assertNotIn('"delete", "deployment"', calls)
+                self.assertNotIn('"delete", "service"', calls)
+                if scenario in {"binder_unowned", "binder_replaced"}:
+                    self.assertNotIn("--raw=", calls)
+                    self.assertIsNotNone(self.last_prepare_fixture["binder"])
+
+    def test_prepare_rejects_server_dry_run_binder_writer_hooks_before_actual_create(self):
+        image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
+        for scenario in (
+            "binder_server_hook", "binder_server_ephemeral", "binder_server_lifecycle", "binder_server_environment",
+            "binder_server_readiness_probe", "binder_server_liveness_probe", "binder_server_startup_probe",
+        ):
+            with self.subTest(scenario=scenario):
+                result, calls = self.run_prepare("--go", "--image", image, binder_scenario=scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, "book_memo_prepare=FAIL stage=binder_contract\n")
+                commands = [json.loads(line) for line in calls.splitlines()]
+                self.assertTrue(any("--dry-run=server" in command for command in commands))
+                self.assertFalse(any(command[-5:] == ["create", "-o", "json", "-f", "-"] for command in commands))
+                self.assertIsNone(self.last_prepare_fixture["binder"])
+
+    def test_prepare_uncertain_binder_create_recovers_only_verified_owned_pod(self):
+        image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
+        for scenario, raw_delete_expected in (
+            ("binder_create_uncertain_owned", True),
+            ("binder_create_uncertain_unowned", False),
+        ):
+            with self.subTest(scenario=scenario):
+                result, calls = self.run_prepare("--go", "--image", image, binder_scenario=scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, "book_memo_prepare=FAIL stage=recovery\n")
+                self.assertEqual("--raw=" in calls, raw_delete_expected)
+                self.assertTrue(self.last_prepare_fixture["applied"])
+                if raw_delete_expected:
+                    self.assertIsNone(self.last_prepare_fixture["binder"])
+                else:
+                    self.assertIsNotNone(self.last_prepare_fixture["binder"])
+
+    def test_bind_existing_only_binds_exact_inert_resources_without_persistent_create(self):
+        image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
+        result, calls = self.run_prepare(
+            "--bind-existing", "--image", image, existing_prepared=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "book_memo_prepare=PASS\n")
+        self.assertTrue(self.last_prepare_fixture["pvc_bound"])
+        self.assertIsNone(self.last_prepare_fixture["binder"])
+        self.assertIsNone(self.last_prepare_rendered[0])
+        self.assertIsNone(self.last_prepare_rendered[1])
+        commands = [json.loads(line) for line in calls.splitlines()]
+        self.assertTrue(any(command[-5:] == ["get", "pvc", "book-memo-data", "-o", "json"] for command in commands))
+        self.assertTrue(any(command[-5:] == ["get", "deployment", "book-memo", "-o", "json"] for command in commands))
+        self.assertTrue(any(command[-5:] == ["get", "service", "book-memo", "-o", "json"] for command in commands))
+        self.assertFalse(any(command[-3:] == ["create", "-f", "-"] for command in commands))
+
+    def test_prepare_and_bind_existing_accept_only_kubernetes_probe_and_service_defaults(self):
+        image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
+        for arguments, prepared in (
+            (("--go", "--image", image), False),
+            (("--bind-existing", "--image", image), True),
+        ):
+            with self.subTest(arguments=arguments):
+                result, _ = self.run_prepare(
+                    *arguments, existing_prepared=prepared, existing_api_defaults=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "book_memo_prepare=PASS\n")
+
+    def test_bind_existing_rejects_missing_mutated_or_writer_resources_without_binder(self):
+        image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
+        for mutation in ("missing_deployment", "wrong_image", "bad_service", "writer_pod"):
+            with self.subTest(mutation=mutation):
+                result, calls = self.run_prepare(
+                    "--bind-existing", "--image", image,
+                    existing_prepared=True, existing_mutation=mutation,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, "book_memo_prepare=FAIL stage=existing\n")
+                self.assertIsNone(self.last_prepare_fixture["binder"])
+                self.assertNotIn("--raw=", calls)
+
+    def test_prepare_rejects_combined_create_and_bind_existing_modes_without_external_calls(self):
+        image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
+        result, calls = self.run_prepare(
+            "--go", "--bind-existing", "--image", image, existing_prepared=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "book_memo_prepare=FAIL stage=arguments\n")
+        self.assertEqual(calls, "")
 
     def test_prepare_missing_secret_stops_before_image_or_resource_changes(self):
         image = "docker.io/library/personal-server-book-memo@sha256:" + "a" * 64
