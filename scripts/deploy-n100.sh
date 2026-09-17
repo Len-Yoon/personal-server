@@ -183,6 +183,16 @@ resolve_youtube_memo_caddy_upstream() {
   export YOUTUBE_MEMO_UPSTREAM
 }
 
+resolve_crawler_worker_caddy_upstream() {
+  if [[ "$CRAWLER_WORKER_RUNTIME_MODE" != k3s ]]; then
+    export CRAWLER_WORKER_UPSTREAM="crawler-worker:8001"
+    return 0
+  fi
+
+  CRAWLER_WORKER_UPSTREAM=$(require_k3s_service_endpoint crawler-worker crawler-worker-data 8001 "Crawler Worker") || return 1
+  export CRAWLER_WORKER_UPSTREAM
+}
+
 deploy_runtime_services() {
   local bridge_compose=(docker compose -f docker-compose.yml -f docker-compose.n100.yml -f "$PORTAL_BRIDGE_COMPOSE_FILE")
   local bridge_services="homeops-executor system-agent car-care-worker"
@@ -198,12 +208,14 @@ deploy_runtime_services() {
       require_portal_state_ready
       docker compose -f docker-compose.yml -f docker-compose.n100.yml config --quiet
       if all_crawler_services_compose; then
+        resolve_crawler_worker_caddy_upstream
         resolve_book_memo_caddy_upstream
         resolve_youtube_memo_caddy_upstream
         docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web homeops-executor system-agent crawler-worker youtube-memo book-memo car-care-worker caddy
       else
         set_compose_homeops_lists
         docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build portal-web $bridge_services
+        resolve_crawler_worker_caddy_upstream
         resolve_book_memo_caddy_upstream
         resolve_youtube_memo_caddy_upstream
         docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build --no-deps caddy
@@ -219,6 +231,7 @@ deploy_runtime_services() {
       fi
       "${bridge_compose[@]}" config --quiet
       "${bridge_compose[@]}" up -d --build --no-deps --force-recreate $bridge_services
+      resolve_crawler_worker_caddy_upstream
       resolve_book_memo_caddy_upstream
       resolve_youtube_memo_caddy_upstream
       "${bridge_compose[@]}" up -d --build --no-deps caddy

@@ -23,6 +23,17 @@ def _site_block(caddyfile: str, host: str) -> str:
     return match.group("body")
 
 
+def _function_body(script: str, function: str) -> str:
+    match = re.search(
+        rf"^{re.escape(function)}\(\) \{{\n(?P<body>.*?)(?=^[A-Za-z_][A-Za-z0-9_]*\(\) \{{)",
+        script,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        raise AssertionError(f"Missing function: {function}")
+    return match.group("body")
+
+
 class CaddyPortalUpstreamContractTest(unittest.TestCase):
     def test_portal_alias_uses_the_cloudflare_dns_tls_policy(self):
         caddyfile = (ROOT / "caddy" / "Caddyfile").read_text(encoding="utf-8")
@@ -75,16 +86,47 @@ class CaddyPortalUpstreamContractTest(unittest.TestCase):
 
     def test_startup_scripts_resolve_k3s_books_before_recreating_caddy(self):
         """A K3s Books marker must gate Caddy recreation on ready Service endpoints."""
-        for filename in ("deploy-n100.sh", "windows-bootstrap.sh"):
-            script = (ROOT / "scripts" / filename).read_text(encoding="utf-8")
+        deploy = (ROOT / "scripts" / "deploy-n100.sh").read_text(encoding="utf-8")
+        bootstrap = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf-8")
 
+        for script in (deploy, bootstrap):
             self.assertIn("resolve_book_memo_caddy_upstream", script)
-            self.assertIn("service/book-memo", script)
-            self.assertIn("endpoints/book-memo", script)
             self.assertIn(".spec.selector.app\\.kubernetes\\.io/name", script)
             self.assertIn(".spec.ports[0].targetPort", script)
             self.assertIn("BOOK_MEMO_UPSTREAM", script)
             self.assertIn("sudo -n k3s kubectl", script)
+
+        # deploy-n100.sh shares one resolver across all K3s runtime services.
+        self.assertIn('get "service/$service"', deploy)
+        self.assertIn('get "endpoints/$service"', deploy)
+        # windows-bootstrap.sh keeps its service-specific bootstrap resolvers.
+        self.assertIn("get service/book-memo", bootstrap)
+        self.assertIn("get endpoints/book-memo", bootstrap)
+
+        deploy_books = _function_body(deploy, "resolve_book_memo_caddy_upstream")
+        bootstrap_books = _function_body(bootstrap, "resolve_book_memo_caddy_upstream")
+        self.assertIn(
+            'require_k3s_service_endpoint book-memo book-memo-data 8003 "Book Memo"',
+            deploy_books,
+        )
+        self.assertIn("get service/book-memo", bootstrap_books)
+        self.assertIn("get endpoints/book-memo", bootstrap_books)
+        self.assertIn("get pvc/book-memo-data", bootstrap_books)
+        self.assertIn('"$service_port" == 8003', bootstrap_books)
+
+        for script in (deploy, bootstrap):
+            calls = list(re.finditer(
+                r"(?m)^ {8}resolve_book_memo_caddy_upstream$", script,
+            ))
+            self.assertGreaterEqual(len(calls), 1)
+            for call in calls:
+                next_book_call = script.find("\n        resolve_book_memo_caddy_upstream", call.end())
+                next_caddy_use = script.find("caddy", call.end())
+                self.assertNotEqual(next_caddy_use, -1)
+                self.assertTrue(
+                    next_book_call == -1 or next_caddy_use < next_book_call,
+                    "Books resolver must be called before each Caddy recreation path",
+                )
 
 
 if __name__ == "__main__":

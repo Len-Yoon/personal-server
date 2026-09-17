@@ -55,6 +55,12 @@ RUNTIME_STATE_POLICY_FILES = {
     "scripts/runtime-service-state-reader.py",
 }
 RUNTIME_STATE_REQUIRED_CHECKS = ("crawler-worker", "youtube-memo", "book-memo")
+CRAWLER_K3S_CUTOVER_INFRASTRUCTURE_FILES = {
+    "infra/k8s/apps/crawler-worker.yaml",
+    "infra/k8s/tools/crawler-worker-prepare.sh",
+    "infra/k8s/tools/crawler-worker-cutover.sh",
+    "infra/k8s/sre-telegram/crawler-news-observability.yaml",
+}
 LEGACY_N100_OPERATIONS_REMOVAL_FILES = {
     "scripts/run-n100-operations.sh",
 }
@@ -109,6 +115,12 @@ def classify_paths(
         if path in LEGACY_N100_OPERATIONS_REMOVAL_FILES and path in deleted_paths:
             evidence["automation_files"].append(path)
             _append_required_check(evidence, "maintenance")
+            continue
+
+        if path in CRAWLER_K3S_CUTOVER_INFRASTRUCTURE_FILES:
+            evidence["infrastructure_files"].append(path)
+            _append_required_check(evidence, "maintenance")
+            _append_required_check(evidence, "crawler-worker")
             continue
 
         if path in POLICY_MAINTENANCE_FILES:

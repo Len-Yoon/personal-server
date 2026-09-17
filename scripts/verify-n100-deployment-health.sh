@@ -51,10 +51,14 @@ for service in system-agent crawler-worker youtube-memo book-memo car-care-worke
     desired=$(sudo k3s kubectl -n "$namespace" get "deployment/$service" -o jsonpath='{.spec.replicas}')
     ready=$(sudo k3s kubectl -n "$namespace" get "deployment/$service" -o jsonpath='{.status.readyReplicas}')
     available=$(sudo k3s kubectl -n "$namespace" get "deployment/$service" -o jsonpath='{.status.availableReplicas}')
-    [[ "$desired" =~ ^[0-9]+$ && "$desired" -ge 1 && "$ready" == "$desired" && "$available" == "$desired" ]]
+    [[ "$desired" =~ ^[0-9]+$ && "$desired" -ge 1 && "$ready" == "$desired" && "$available" == "$desired" ]] || {
+      echo "K3s Deployment is not ready: $service" >&2
+      exit 1
+    }
     sudo k3s kubectl -n "$namespace" rollout status "deployment/$service" --timeout="${K3S_ROLLOUT_TIMEOUT:-120s}"
-    if [ "$service" = book-memo ] || [ "$service" = youtube-memo ]; then
+    if [ "$service" = book-memo ] || [ "$service" = youtube-memo ] || [ "$service" = crawler-worker ]; then
       case "$service" in
+        crawler-worker) expected_port=8001; pvc_name=crawler-worker-data ;;
         book-memo) expected_port=8003; pvc_name=book-memo-data ;;
         youtube-memo) expected_port=8002; pvc_name=youtube-memo-data ;;
       esac
@@ -65,7 +69,10 @@ for service in system-agent crawler-worker youtube-memo book-memo car-care-worke
       endpoint_addresses=$(sudo k3s kubectl -n "$namespace" get "endpoints/$service" -o jsonpath='{.subsets[*].addresses[*].ip}')
       endpoint_ports=$(sudo k3s kubectl -n "$namespace" get "endpoints/$service" -o jsonpath='{.subsets[*].ports[*].port}')
       pvc_phase=$(sudo k3s kubectl -n "$namespace" get "pvc/$pvc_name" -o jsonpath='{.status.phase}')
-      [[ "$service_selector" == "$service" && -n "$service_cluster_ip" && "$service_cluster_ip" != None && "$service_port" == "$expected_port" && "$service_target_port" == http && -n "$endpoint_addresses" && "$endpoint_ports" == "$expected_port" && "$pvc_phase" == Bound ]]
+      [[ "$service_selector" == "$service" && -n "$service_cluster_ip" && "$service_cluster_ip" != None && "$service_port" == "$expected_port" && "$service_target_port" == http && -n "$endpoint_addresses" && "$endpoint_ports" == "$expected_port" && "$pvc_phase" == Bound ]] || {
+        echo "K3s Service endpoint is not ready: $service" >&2
+        exit 1
+      }
     fi
   else
     compose ps --status running --services | grep -Fx -- "$service"
@@ -97,10 +104,13 @@ case "$portal_runtime_mode" in
 esac
 
 for url in \
-  http://127.0.0.1:18010/health \
-  http://127.0.0.1:8001/health; do
+  http://127.0.0.1:18010/health; do
   curl --fail --silent --show-error --retry-all --retry-connrefused --retry 6 --retry-delay 5 "$url"
 done
+
+if [[ "$CRAWLER_WORKER_RUNTIME_MODE" != k3s ]]; then
+  curl --fail --silent --show-error --retry-all --retry-connrefused --retry 6 --retry-delay 5 http://127.0.0.1:8001/health
+fi
 
 if [[ "$YOUTUBE_MEMO_RUNTIME_MODE" != k3s ]]; then
   curl --fail --silent --show-error --retry-all --retry-connrefused --retry 6 --retry-delay 5 http://127.0.0.1:8002/health

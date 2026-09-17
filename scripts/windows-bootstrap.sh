@@ -222,6 +222,37 @@ resolve_youtube_memo_caddy_upstream() {
   export YOUTUBE_MEMO_UPSTREAM="$service_cluster_ip:$service_port"
 }
 
+resolve_crawler_worker_caddy_upstream() {
+  local namespace desired ready available service_selector service_cluster_ip service_port service_target_port endpoint_addresses endpoint_ports pvc_phase
+
+  if [[ "$CRAWLER_WORKER_RUNTIME_MODE" != k3s ]]; then
+    export CRAWLER_WORKER_UPSTREAM="crawler-worker:8001"
+    return 0
+  fi
+
+  namespace="${K3S_NAMESPACE:-personal-server}"
+  desired=$(sudo -n k3s kubectl -n "$namespace" get deployment/crawler-worker -o jsonpath='{.spec.replicas}') || return 1
+  ready=$(sudo -n k3s kubectl -n "$namespace" get deployment/crawler-worker -o jsonpath='{.status.readyReplicas}') || return 1
+  available=$(sudo -n k3s kubectl -n "$namespace" get deployment/crawler-worker -o jsonpath='{.status.availableReplicas}') || return 1
+  [[ "$desired" =~ ^[0-9]+$ && "$desired" -ge 1 && "$ready" == "$desired" && "$available" == "$desired" ]] || {
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] K3s Crawler Worker Deployment is not ready; refusing to recreate Caddy" >> /tmp/windows-bootstrap-trace.log
+    return 1
+  }
+  sudo -n k3s kubectl -n "$namespace" rollout status deployment/crawler-worker --timeout="${K3S_ROLLOUT_TIMEOUT:-120s}" || return 1
+  service_selector=$(sudo -n k3s kubectl -n "$namespace" get service/crawler-worker -o jsonpath='{.spec.selector.app\.kubernetes\.io/name}') || return 1
+  service_cluster_ip=$(sudo -n k3s kubectl -n "$namespace" get service/crawler-worker -o jsonpath='{.spec.clusterIP}') || return 1
+  service_port=$(sudo -n k3s kubectl -n "$namespace" get service/crawler-worker -o jsonpath='{.spec.ports[0].port}') || return 1
+  service_target_port=$(sudo -n k3s kubectl -n "$namespace" get service/crawler-worker -o jsonpath='{.spec.ports[0].targetPort}') || return 1
+  endpoint_addresses=$(sudo -n k3s kubectl -n "$namespace" get endpoints/crawler-worker -o jsonpath='{.subsets[*].addresses[*].ip}') || return 1
+  endpoint_ports=$(sudo -n k3s kubectl -n "$namespace" get endpoints/crawler-worker -o jsonpath='{.subsets[*].ports[*].port}') || return 1
+  pvc_phase=$(sudo -n k3s kubectl -n "$namespace" get pvc/crawler-worker-data -o jsonpath='{.status.phase}') || return 1
+  [[ "$service_selector" == crawler-worker && -n "$service_cluster_ip" && "$service_cluster_ip" != None && "$service_port" == 8001 && "$service_target_port" == http && -n "$endpoint_addresses" && "$endpoint_ports" == "$service_port" && "$pvc_phase" == Bound ]] || {
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] K3s Crawler Worker Service endpoint is not ready; refusing to recreate Caddy" >> /tmp/windows-bootstrap-trace.log
+    return 1
+  }
+  export CRAWLER_WORKER_UPSTREAM="$service_cluster_ip:$service_port"
+}
+
 start_runtime_services() {
   local compose_services
   local bridge_compose
@@ -232,6 +263,7 @@ start_runtime_services() {
       export HOMEOPS_DOCKER_MANAGED_SERVICES="${HOMEOPS_DOCKER_MANAGED_SERVICES:-portal-web,system-agent,crawler-worker,youtube-memo,book-memo,caddy,homeops-executor}"
       export EXPECTED_CONTAINERS="${EXPECTED_CONTAINERS:-portal-web,crawler-worker,youtube-memo,book-memo,system-agent}"
       if all_crawler_services_compose; then
+        resolve_crawler_worker_caddy_upstream
         resolve_book_memo_caddy_upstream
         resolve_youtube_memo_caddy_upstream
         docker compose -f docker-compose.yml -f docker-compose.n100.yml build caddy
@@ -245,6 +277,7 @@ start_runtime_services() {
         done
         docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d \
           portal-web $compose_services
+        resolve_crawler_worker_caddy_upstream
         resolve_book_memo_caddy_upstream
         resolve_youtube_memo_caddy_upstream
         docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --build --no-deps caddy
@@ -265,6 +298,7 @@ start_runtime_services() {
       done
       bridge_compose=(docker compose -f docker-compose.yml -f docker-compose.n100.yml -f "$PORTAL_BRIDGE_COMPOSE_FILE")
       "${bridge_compose[@]}" up -d --no-deps --force-recreate $compose_services
+      resolve_crawler_worker_caddy_upstream
       resolve_book_memo_caddy_upstream
       resolve_youtube_memo_caddy_upstream
       "${bridge_compose[@]}" up -d --build --no-deps caddy
@@ -284,6 +318,7 @@ start_runtime_services() {
       done
       bridge_compose=(docker compose -f docker-compose.yml -f docker-compose.n100.yml -f "$PORTAL_BRIDGE_COMPOSE_FILE")
       "${bridge_compose[@]}" up -d --no-deps --force-recreate $compose_services
+      resolve_crawler_worker_caddy_upstream
       resolve_book_memo_caddy_upstream
       resolve_youtube_memo_caddy_upstream
       "${bridge_compose[@]}" up -d --build --no-deps caddy
