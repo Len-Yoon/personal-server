@@ -10,7 +10,7 @@ Windows N100과 Ubuntu WSL2에서 운영하는 개인용 서비스 허브임. �
 |---|---|---|
 | Portal | 자주 쓰는 서비스의 단일 진입점, 관리자 상태, 공개 포트폴리오 | K3s `portal-web` |
 | File Manager | 파일 업로드·정리·검색·ZIP 다운로드 | K3s `portal-web` + PVC |
-| News Hub | Investing.com·Google News 수집, 나스닥 관련성 분류, Telegram 중요 뉴스 알림 | `crawler-worker` |
+| News Hub | Investing.com·Google News 수집, 나스닥 관련성 분류, Telegram 중요 뉴스 알림 | K3s `crawler-worker` + PVC |
 | YouTube Memo | 영상 링크·타임스탬프·메모 기록 | K3s `youtube-memo` + PVC |
 | Book Memo | 책 검색·목차·독서 메모 관리 | K3s `book-memo` + PVC |
 | 차량관리 | Hyundai 연동 차량 상태·정비 주기·운행 종료 Telegram 알림 | `car-care-worker` |
@@ -42,16 +42,16 @@ Windows N100과 Ubuntu WSL2에서 운영하는 개인용 서비스 허브임. �
 | 구분 | 현재 운영 방식 |
 |---|---|
 | Portal·파일함·관리자·포트폴리오 | K3s `portal-web` + PVC 단일 writer |
-| 뉴스·차량관리 | Docker Compose |
-| YouTube 메모·책 메모 | K3s `youtube-memo`·`book-memo` + 서비스별 PVC 단일 writer |
-| 공개 경로 | Cloudflare Tunnel: Portal·YouTube 메모·책 메모는 Caddy 경유 K3s Service, News는 Compose 직접 ingress, 차량 callback은 비공개 upstream |
+| 뉴스·YouTube 메모·책 메모 | K3s `crawler-worker`·`youtube-memo`·`book-memo` + 서비스별 PVC 단일 writer |
+| 차량관리·HomeOps | Docker Compose |
+| 공개 경로 | Cloudflare Tunnel: Portal·뉴스·YouTube 메모·책 메모는 Caddy 경유 K3s Service, 차량 callback은 비공개 upstream |
 | 모니터링 | K3s Prometheus·Grafana, Telegram SRE 알림 |
 | 백업 | Portal PVC 암호화 백업 및 복원 검증 |
 | 외부 장애 감지 | GitHub Actions가 약 5분 간격으로 `https://len.pe.kr/health` 확인 |
 
-### Crawler Worker K3s 전환 준비
+### Crawler Worker K3s 현재 운영 기준
 
-뉴스 수집 K3s 전환용 manifest·검증 도구·관측성 설정은 저장소에 준비되어 있음. 다만 현재 production writer는 Docker Compose이며 `news.len.pe.kr`의 Tunnel 직접 ingress도 유지함. Docker 중지, 데이터 복사, K3s 기동, Caddy·Tunnel 전환은 별도 운영 승인과 실제 검증 뒤에만 수행함. 상세 조건은 [운영 참조](docs/operations-reference.md#뉴스-수집-k3s-전환-준비-기준)를 따름.
+뉴스 수집 production writer는 K3s `crawler-worker`이며 `news.len.pe.kr`은 Cloudflare Tunnel → Caddy → K3s Service 경로를 사용함. Docker `crawler-worker`는 중지된 롤백 자산으로만 유지하며, K3s와 동시에 production write를 허용하지 않음. runtime state marker `crawler-worker=k3s`, PVC, Deployment readiness를 함께 확인함. 상세 기준은 [운영 참조](docs/operations-reference.md#뉴스-수집-k3s-현재-운영-기준)를 따름.
 
 <br>
 
@@ -116,7 +116,7 @@ Grafana에서 K3s 네임스페이스별 CPU·메모리 사용량, Pod 수, 요�
 기능 브랜치 → 테스트·독립 검토 → PR → 사용자 병합 승인 → main
 ```
 
-`crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker`의 허용된 Compose 변경은 N100 안전 자동 배포 분류 대상임. 다만 현재 K3s runtime인 YouTube Memo·Book Memo는 Compose 안전 배포에서 자동으로 생략되며, 이미지 반입·PVC·Caddy 경로를 포함한 별도 운영 절차를 사용함. Portal, K3s, Caddy, Secret, PVC, 운영 데이터는 자동 배포 대상이 아님.
+`crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker`의 허용된 Compose 변경은 N100 안전 자동 배포 분류 대상임. 다만 현재 K3s runtime인 Crawler Worker·YouTube Memo·Book Memo는 Compose 안전 배포에서 자동으로 생략되며, 이미지 반입·PVC·Caddy 경로를 포함한 별도 운영 절차를 사용함. Portal, K3s, Caddy, Secret, PVC, 운영 데이터는 자동 배포 대상이 아님.
 
 병합된 변경은 CI·배포·health 검증과 작업공간 정리까지 확인함. CI artifact와 운영 증적은 90일 보관하며, 장기 보관이 필요한 자료는 별도 증적 저장소로 이전함.
 
