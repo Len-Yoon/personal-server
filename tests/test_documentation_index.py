@@ -232,6 +232,15 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("Cloudflare Tunnel 구성 대조", roadmap)
         self.assertIn("YouTube Memo K3s 이전", roadmap)
 
+    def test_public_uptime_docs_explain_service_specific_telegram_messages(self):
+        uptime = Path("docs/public-uptime-monitor.md").read_text(encoding="utf-8")
+
+        self.assertIn("[외부 장애]", uptime)
+        self.assertIn("[외부 복구]", uptime)
+        self.assertIn("News Hub", uptime)
+        self.assertIn("서비스별 사용자용 이름", uptime)
+        self.assertIn("내부 IP", uptime)
+
     def test_reboot_docs_describe_post_boot_check_without_new_telegram_message(self):
         uptime = Path("docs/public-uptime-monitor.md").read_text(encoding="utf-8")
 

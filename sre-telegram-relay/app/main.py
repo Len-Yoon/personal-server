@@ -42,7 +42,22 @@ ALERT_PRESENTATIONS = {
     "PVCNotBound": ("데이터 저장소 연결 실패", "저장된 데이터에 접근하지 못할 수 있음"),
     "PrometheusTargetDown": ("상태 수집 대상 응답 없음", "해당 서비스의 상태를 확인하지 못할 수 있음"),
     "NewsCollectionStale": ("뉴스 수집 지연 또는 실패", "최신 뉴스가 갱신되지 않을 수 있음"),
+    "PortalHttp5xxErrorRateHigh": ("Portal HTTP 5xx 오류율 높음", "일부 요청이 정상 처리되지 않을 수 있음"),
+    "PortalHttpP95LatencyHigh": ("Portal HTTP p95 응답 지연", "Portal 화면 응답이 느릴 수 있음"),
 }
+ALERT_TARGETS_BY_NAME = {
+    "NewsCollectionStale": "News Hub 뉴스 수집기",
+    "PortalUnavailable": "Portal",
+    "PortalHttp5xxErrorRateHigh": "Portal",
+    "PortalHttpP95LatencyHigh": "Portal",
+    "PrometheusTargetDown": "Kubernetes 상태 수집",
+}
+WORKLOAD_TARGETS = (
+    ("portal-web", "Portal"),
+    ("crawler-worker", "News Hub"),
+    ("youtube-memo", "YouTube Memo"),
+    ("book-memo", "Book Memo"),
+)
 BACKUP_STATUS_MESSAGES = {
     "completed": "[백업 완료]\n상태: 암호화 백업과 복원 검증을 완료했습니다.\n대상: Portal 데이터",
     "unchanged": "[백업 확인] 변경 없음\n상태: 백업 대상에 변경이 없습니다.\n대상: Portal 데이터",
@@ -676,12 +691,12 @@ class RelayService:
             safe_labels = labels if isinstance(labels, dict) else {}
             alert_name = safe_labels.get("alertname")
             presentation = ALERT_PRESENTATIONS.get(alert_name) if isinstance(alert_name, str) else None
-            problem, impact = presentation or ("운영 상태 경고", "상태를 자동으로 확인 중입니다.")
-            target = _format_alert_target(safe_labels)
+            problem, impact = presentation or ("운영 상태 경고", "상태 확인이 필요합니다.")
+            target = _format_alert_target(safe_labels, alert_name)
             if status == "firing" and alert_name == "NewsCollectionStale":
                 state = "다음 수집 상태를 확인 중입니다."
             else:
-                state = "자동 복구를 확인 중입니다." if status == "firing" else "정상으로 돌아왔습니다."
+                state = "상태를 확인 중입니다." if status == "firing" else "정상으로 돌아왔습니다."
             lines = [f"문제: {problem}", f"영향: {impact}", f"대상: {target}", f"상태: {state}"]
             entries.append("\n".join(lines))
         if not entries:
@@ -741,14 +756,27 @@ class TelegramClient:
             return None
 
 
-def _format_alert_target(labels: dict[str, Any]) -> str:
-    """Return a compact, allow-listed workload target for a Telegram message."""
-    values: list[str] = []
-    for key in ("namespace", "deployment", "pod", "persistentvolumeclaim", "job", "instance"):
-        value = labels.get(key)
-        if isinstance(value, str) and value:
-            values.append(value)
-    return " / ".join(values) if values else "확인 대상 없음"
+def _format_alert_target(labels: dict[str, Any], alert_name: Any) -> str:
+    """Return only an allow-listed user-facing service name for Telegram."""
+    if isinstance(alert_name, str) and alert_name in ALERT_TARGETS_BY_NAME:
+        return ALERT_TARGETS_BY_NAME[alert_name]
+
+    label_values = (
+        value.lower()
+        for value in labels.values()
+        if isinstance(value, str)
+    )
+    for value in label_values:
+        for workload_name, target_name in WORKLOAD_TARGETS:
+            if workload_name in value:
+                return target_name
+
+    if any(
+        isinstance(labels.get(key), str) and labels[key]
+        for key in ("namespace", "deployment", "pod", "persistentvolumeclaim", "job", "instance")
+    ):
+        return "K3s 운영 구성 요소"
+    return "확인 대상 없음"
 
 
 def handle_http_request(

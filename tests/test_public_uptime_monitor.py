@@ -35,7 +35,25 @@ class PublicUptimeMonitorTests(unittest.TestCase):
         self.assertIn('(IFS=,; printf \'failed_services=%s\\n\' "${failed_services[*]}")', workflow)
         self.assertIn('if ((${#failed_services[@]} > 0)); then', workflow)
         self.assertIn('const failedServices = "${{ steps.health.outputs.failed_services }}";', workflow)
-        self.assertIn('body: `외부 건강 점검에서 실패한 서비스: ${failedServices}.`,', workflow)
+        self.assertIn("const affectedServiceSet = new Set([", workflow)
+        self.assertIn("...failedServices.split(\",\"),", workflow)
+        self.assertIn('`외부 건강 점검에서 실패한 서비스: ${affectedServices}.`,', workflow)
+        self.assertIn("const affectedServicesEvidence = `${affectedServicesMarker}${affectedServices} -->`;", workflow)
+        self.assertIn("(incident.body || \"\").replace(/<!-- uptime-affected-services: [a-z_,]+ -->/", workflow)
+        self.assertIn("`${incident.body || \"\"}\\n${affectedServicesEvidence}`", workflow)
+        self.assertIn("if (currentBody !== incidentBody)", workflow)
+
+    def test_workflow_sends_human_readable_affected_service_names_to_telegram(self):
+        workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("FAILED_SERVICES: ${{ steps.incident.outputs.affected_services }}", workflow)
+        self.assertIn('portal) printf "%s" "Portal (len.pe.kr)" ;;', workflow)
+        self.assertIn('news) printf "%s" "News Hub (news.len.pe.kr)" ;;', workflow)
+        self.assertIn('youtube_memo) printf "%s" "YouTube Memo (memo.len.pe.kr)" ;;', workflow)
+        self.assertIn('book_memo) printf "%s" "Book Memo (books.len.pe.kr)" ;;', workflow)
+        self.assertIn("[외부 장애]", workflow)
+        self.assertIn("[외부 복구]", workflow)
+        self.assertIn("대상: ${affected_services}", workflow)
 
     def test_workflow_recovers_only_after_all_public_service_health_checks_succeed(self):
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -57,11 +75,9 @@ class PublicUptimeMonitorTests(unittest.TestCase):
         self.assertIn("github.rest.issues.create", workflow)
         self.assertIn("github.rest.issues.update", workflow)
         self.assertIn("Confirm Telegram delivery before committing transition", workflow)
-        self.assertIn(
-            'if (state === "success" && incident && (incident.body || "").includes(downSentMarker)) {\n'
-            "              core.setOutput('notification', 'recovered');",
-            workflow,
-        )
+        self.assertIn('const affectedMatch = (incident.body || "").match(/<!-- uptime-affected-services: ([a-z_,]+) -->/);', workflow)
+        self.assertIn("core.setOutput('affected_services', affectedMatch ? affectedMatch[1] : 'all_public_services');", workflow)
+        self.assertIn("core.setOutput('notification', 'recovered');", workflow)
 
     def test_workflow_keeps_telegram_values_in_github_secrets(self):
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")

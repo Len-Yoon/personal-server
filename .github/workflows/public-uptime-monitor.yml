@@ -50,6 +50,7 @@ jobs:
           script: |
             const incidentTitle = "[SRE] len.pe.kr 공개 상태 장애";
             const downSentMarker = "<!-- uptime-down-telegram:sent -->";
+            const affectedServicesMarker = "<!-- uptime-affected-services: ";
             const state = "${{ steps.health.outcome }}";
             const failedServices = "${{ steps.health.outputs.failed_services }}";
             const issues = await github.paginate(github.rest.issues.listForRepo, {
@@ -65,12 +66,41 @@ jobs:
             );
 
             if (state === "failure") {
-              const activeIncident = incident || (await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title: incidentTitle,
-                body: `외부 건강 점검에서 실패한 서비스: ${failedServices}.`,
-              })).data;
+              const existingMatch = (incident?.body || "").match(/<!-- uptime-affected-services: ([a-z_,]+) -->/);
+              const affectedServiceSet = new Set([
+                ...(existingMatch ? existingMatch[1].split(",") : []),
+                ...failedServices.split(","),
+              ]);
+              const affectedServices = [...affectedServiceSet].filter(Boolean).join(",");
+              const affectedServicesEvidence = `${affectedServicesMarker}${affectedServices} -->`;
+              const incidentBody = incident
+                ? (incident.body || "").match(/<!-- uptime-affected-services: [a-z_,]+ -->/)
+                  ? (incident.body || "").replace(/<!-- uptime-affected-services: [a-z_,]+ -->/, affectedServicesEvidence)
+                  : `${incident.body || ""}\n${affectedServicesEvidence}`
+                : [
+                    `외부 건강 점검에서 실패한 서비스: ${affectedServices}.`,
+                    affectedServicesEvidence,
+                  ].join("\n");
+              let activeIncident = incident;
+              if (incident) {
+                const currentBody = incident.body || "";
+                if (currentBody !== incidentBody) {
+                  activeIncident = (await github.rest.issues.update({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: incident.number,
+                    body: incidentBody,
+                  })).data;
+                }
+              } else {
+                activeIncident = (await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title: incidentTitle,
+                  body: incidentBody,
+                })).data;
+              }
+              core.setOutput('affected_services', affectedServices);
               if (!(activeIncident.body || "").includes(downSentMarker)) {
                 core.setOutput('notification', 'down');
                 core.setOutput('issue_number', String(activeIncident.number));
@@ -79,6 +109,8 @@ jobs:
             }
 
             if (state === "success" && incident && (incident.body || "").includes(downSentMarker)) {
+              const affectedMatch = (incident.body || "").match(/<!-- uptime-affected-services: ([a-z_,]+) -->/);
+              core.setOutput('affected_services', affectedMatch ? affectedMatch[1] : 'all_public_services');
               core.setOutput('notification', 'recovered');
               core.setOutput('issue_number', String(incident.number));
             }
@@ -103,6 +135,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.UPTIME_TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.UPTIME_TELEGRAM_CHAT_ID }}
           NOTIFICATION: ${{ steps.incident.outputs.notification }}
+          FAILED_SERVICES: ${{ steps.incident.outputs.affected_services }}
         shell: bash
         run: |
           set -euo pipefail
@@ -116,12 +149,42 @@ jobs:
           record_delivery_failure() {
             printf 'delivery=failed\n' >> "$GITHUB_OUTPUT"
           }
+          service_name() {
+            case "$1" in
+              portal) printf "%s" "Portal (len.pe.kr)" ;;
+              news) printf "%s" "News Hub (news.len.pe.kr)" ;;
+              youtube_memo) printf "%s" "YouTube Memo (memo.len.pe.kr)" ;;
+              book_memo) printf "%s" "Book Memo (books.len.pe.kr)" ;;
+              all_public_services) printf "%s" "전체 공개 서비스" ;;
+              *) printf "%s" "확인 대상 서비스" ;;
+            esac
+          }
+          format_affected_services() {
+            local raw="$1" item label
+            local -a labels=()
+            IFS=',' read -r -a items <<< "$raw"
+            for item in "${items[@]}"; do
+              label="$(service_name "$item")"
+              labels+=("$label")
+            done
+            (IFS=', '; printf '%s' "${labels[*]}")
+          }
+          affected_services="$(format_affected_services "$FAILED_SERVICES")"
           case "$NOTIFICATION" in
             down)
-              message='[개인서버 장애] 외부 점검에서 접속 실패를 확인했습니다. 자동복구 상태를 확인하세요.'
+              message="$(printf '%s\n%s\n%s\n%s\n%s' \
+                '[외부 장애]' \
+                '문제: 공개 서비스 접속 실패' \
+                '영향: 해당 서비스의 웹 기능을 사용할 수 없을 수 있음' \
+                "대상: ${affected_services}" \
+                '상태: 다음 외부 점검에서 복구 여부를 확인합니다.')"
               ;;
             recovered)
-              message='[개인서버 복구] 외부 점검에서 정상 응답을 다시 확인했습니다.'
+              message="$(printf '%s\n%s\n%s\n%s' \
+                '[외부 복구]' \
+                '문제: 공개 서비스 접속이 정상으로 돌아왔습니다.' \
+                "대상: ${affected_services}" \
+                '상태: 외부 health 응답을 확인했습니다.')"
               ;;
             *)
               printf '%s\n' 'Unknown uptime notification state.' >&2

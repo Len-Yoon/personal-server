@@ -482,12 +482,24 @@ class RelayServiceTest(unittest.TestCase):
         )
         message = relay._format_alert(
             "firing",
-            [{"labels": {"alertname": "NewsCollectionStale"}}],
+            [
+                {
+                    "labels": {
+                        "alertname": "NewsCollectionStale",
+                        "job": "compose-crawler",
+                        "instance": "172.17.0.1:18001",
+                    }
+                }
+            ],
         )
         self.assertIn("뉴스 수집 지연 또는 실패", message)
         self.assertIn("최신 뉴스가 갱신되지 않을 수 있음", message)
+        self.assertIn("대상: News Hub 뉴스 수집기", message)
         self.assertIn("상태: 다음 수집 상태를 확인 중입니다.", message)
         self.assertNotIn("상태: 자동 복구를 확인 중입니다.", message)
+        self.assertNotIn("crawler-worker", message)
+        self.assertNotIn("compose-crawler", message)
+        self.assertNotIn("172.17.0.1", message)
         self.assertNotIn("token", message.lower())
         self.assertNotIn("http", message.lower())
 
@@ -746,10 +758,35 @@ class RelayServiceTest(unittest.TestCase):
         self.assertIn("[장애 감지]", reply)
         self.assertIn("문제: Portal 접속 불가", reply)
         self.assertIn("영향: 웹사이트가 열리지 않을 수 있음", reply)
-        self.assertIn("대상: personal-server / portal-web", reply)
-        self.assertIn("상태: 자동 복구를 확인 중입니다.", reply)
+        self.assertIn("대상: Portal", reply)
+        self.assertNotIn("personal-server", reply)
+        self.assertNotIn("portal-web", reply)
+        self.assertIn("상태: 상태를 확인 중입니다.", reply)
         self.assertNotIn("상태: 다음 수집 상태를 확인 중입니다.", reply)
         self.assertNotIn("PortalUnavailable", reply)
+
+    def test_portal_http_alerts_use_portal_specific_presentations(self):
+        relay = RelayService(
+            alertmanager_auth_token="expected",
+            k8s_client=FakeK8s(),
+            prometheus_client=FakePrometheus(),
+        )
+
+        for alert_name, problem in (
+            ("PortalHttp5xxErrorRateHigh", "Portal HTTP 5xx 오류율 높음"),
+            ("PortalHttpP95LatencyHigh", "Portal HTTP p95 응답 지연"),
+        ):
+            with self.subTest(alert_name=alert_name):
+                status, reply = relay.handle_alert(
+                    {"status": "firing", "alerts": [{"labels": {"alertname": alert_name}}]},
+                    "Bearer expected",
+                )
+
+                self.assertEqual(status, 200)
+                self.assertIn(f"문제: {problem}", reply)
+                self.assertIn("대상: Portal", reply)
+                self.assertNotIn("문제: 운영 상태 경고", reply)
+                self.assertIn("상태: 상태를 확인 중입니다.", reply)
 
     def test_resolved_alert_is_formatted(self):
         relay = RelayService(alertmanager_auth_token="expected", k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
@@ -766,7 +803,7 @@ class RelayServiceTest(unittest.TestCase):
         self.assertIn("대상: 확인 대상 없음", reply)
         self.assertIn("상태: 정상으로 돌아왔습니다.", reply)
 
-    def test_prometheus_target_alert_uses_job_and_instance_as_the_target(self):
+    def test_prometheus_target_alert_hides_internal_instance_and_uses_service_name(self):
         relay = RelayService(
             alertmanager_auth_token="expected",
             k8s_client=FakeK8s(),
@@ -791,7 +828,73 @@ class RelayServiceTest(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertIn("문제: 상태 수집 대상 응답 없음", reply)
-        self.assertIn("대상: kubelet / 172.19.121.162:10250", reply)
+        self.assertIn("대상: Kubernetes 상태 수집", reply)
+        self.assertNotIn("kubelet", reply)
+        self.assertNotIn("172.19.121.162", reply)
+
+    def test_workload_alert_maps_pod_and_pvc_identifiers_to_user_facing_service_name(self):
+        relay = RelayService(
+            alertmanager_auth_token="expected",
+            k8s_client=FakeK8s(),
+            prometheus_client=FakePrometheus(),
+        )
+
+        status, reply = relay.handle_alert(
+            {
+                "status": "firing",
+                "alerts": [
+                    {
+                        "labels": {
+                            "alertname": "PVCNotBound",
+                            "namespace": "personal-server",
+                            "persistentvolumeclaim": "book-memo-data",
+                            "pod": "book-memo-7d8f7b8d5c-x9lq2",
+                        },
+                    }
+                ],
+            },
+            "Bearer expected",
+        )
+
+        self.assertEqual(status, 200)
+        self.assertIn("대상: Book Memo", reply)
+        self.assertNotIn("personal-server", reply)
+        self.assertNotIn("book-memo-data", reply)
+        self.assertNotIn("book-memo-7d8f7b8d5c-x9lq2", reply)
+
+    def test_workload_alert_maps_news_and_youtube_identifiers_to_user_facing_service_names(self):
+        relay = RelayService(
+            alertmanager_auth_token="expected",
+            k8s_client=FakeK8s(),
+            prometheus_client=FakePrometheus(),
+        )
+
+        for workload, expected_target in (
+            ("crawler-worker-7d8f7b8d5c-x9lq2", "News Hub"),
+            ("youtube-memo-data", "YouTube Memo"),
+        ):
+            with self.subTest(workload=workload):
+                status, reply = relay.handle_alert(
+                    {
+                        "status": "firing",
+                        "alerts": [
+                            {
+                                "fingerprint": workload,
+                                "labels": {
+                                    "alertname": "PodRestartIncrease",
+                                    "namespace": "personal-server",
+                                    "pod": workload,
+                                },
+                            }
+                        ],
+                    },
+                    "Bearer expected",
+                )
+
+                self.assertEqual(status, 200)
+                self.assertIn(f"대상: {expected_target}", reply)
+                self.assertNotIn("personal-server", reply)
+                self.assertNotIn(workload, reply)
 
     def test_duplicate_firing_alert_with_same_fingerprint_is_suppressed(self):
         state = MemoryAlertStateStore()
