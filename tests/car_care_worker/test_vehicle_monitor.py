@@ -136,6 +136,19 @@ class VehicleMonitorTest(unittest.TestCase):
 
         self.assertEqual([alert.key for alert in alerts], ["maintenance:engine_oil"])
 
+    def test_maintenance_date_alert_uses_korea_date_at_utc_day_boundary(self) -> None:
+        self.store.complete_maintenance("engine_oil", 52340, date(2025, 9, 19))
+        snapshot = VehicleSnapshot(
+            observed_at=datetime(2026, 8, 19, 15, 1, tzinfo=timezone.utc),
+            odometer_km=52340,
+            dte_km=None,
+            warnings=frozenset(),
+        )
+
+        alerts = self.monitor.observe(snapshot)
+
+        self.assertEqual([alert.key for alert in alerts], ["maintenance:engine_oil"])
+
     def test_idle_after_distance_increase_emits_one_trip_summary(self) -> None:
         self.monitor.observe(self.snapshot(52320, frozenset()))
         self.monitor.observe(self.snapshot(52340, frozenset(), minutes=1))

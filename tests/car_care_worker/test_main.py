@@ -176,6 +176,34 @@ class RunOnceTests(unittest.TestCase):
             1,
         )
 
+    def test_hyundai_error_deduplication_uses_korea_date(self) -> None:
+        class EmptyTelegram:
+            def poll(self, _offset=None) -> list[TelegramUpdate]:
+                return []
+
+            def send(self, _text: str) -> bool:
+                return True
+
+        class ErrorHyundai:
+            def fetch_snapshot(self) -> HyundaiFetchResult:
+                return HyundaiFetchResult.failure("request")
+
+        class DateCapturingMonitor(_MonitorFake):
+            def __init__(self) -> None:
+                super().__init__()
+                self.notified_on: date | None = None
+
+            def should_notify_hyundai_error(self, today: date) -> bool:
+                self.notified_on = today
+                return True
+
+        monitor = DateCapturingMonitor()
+
+        with patch("app.main._today_in_korea", return_value=date(2026, 9, 19)):
+            run_once(_HandlerFake(), EmptyTelegram(), ErrorHyundai(), monitor)
+
+        self.assertEqual(monitor.notified_on, date(2026, 9, 19))
+
     def test_failed_manual_odometer_response_keeps_update_pending_for_retry(self) -> None:
         class RetryingTelegram:
             def __init__(self) -> None:

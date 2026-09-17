@@ -153,7 +153,7 @@ class CommandHandler:
                 warnings=frozenset() if previous is None else previous.warnings,
             )
         )
-        alerts = self._maintenance_alerts(odometer_km, date.today())
+        alerts = self._maintenance_alerts(odometer_km, _today_in_korea())
         return "\n".join([f"주행거리 등록 완료: {odometer_km:,}km", *(alert.text for alert in alerts)])
 
     def _complete_maintenance(self, parts: list[str]) -> str:
@@ -165,7 +165,7 @@ class CommandHandler:
         odometer_km = self._parse_odometer(parts[2]) if len(parts) == 3 else self._current_odometer()
         if len(parts) == 3 and odometer_km is None:
             return self._usage()
-        self.store.complete_maintenance(item, odometer_km, date.today())
+        self.store.complete_maintenance(item, odometer_km, _today_in_korea())
         item_name = parts[1]
         odometer_text = "주행거리 미입력" if odometer_km is None else f"{odometer_km:,}km"
         return f"{item_name} 정비 완료: {odometer_text}"
@@ -194,7 +194,7 @@ class CommandHandler:
     def _next_maintenance_status(self, snapshot: VehicleSnapshot) -> list[str]:
         alerts = {
             alert.key: alert.text
-            for alert in self._maintenance_alerts(snapshot.odometer_km, date.today())
+            for alert in self._maintenance_alerts(snapshot.odometer_km, _today_in_korea())
         }
         details = ["다음 정비:"]
         for item, name in (("engine_oil", "엔진오일"), ("transmission_oil", "미션오일"), ("fuel_filter", "연료필터")):

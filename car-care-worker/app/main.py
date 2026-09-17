@@ -95,7 +95,7 @@ def _observe_vehicle(
     if result.status == "disabled":
         return
     if result.status == "error":
-        today = date.today()
+        today = _today_in_korea()
         if monitor.should_notify_hyundai_error(today) and telegram.send(
             "Hyundai 차량 상태 조회 오류: API 연결 또는 응답을 확인하세요."
         ):

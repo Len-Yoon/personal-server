@@ -48,6 +48,15 @@ class CommandHandlerTests(unittest.TestCase):
 
         self.assertEqual(self.store.get_maintenance("engine_oil").odometer_km, 52340)
 
+    def test_complete_maintenance_records_korea_date(self) -> None:
+        with patch("app.services.telegram._today_in_korea", return_value=date(2026, 9, 19)):
+            self.handler.handle_update(TelegramUpdate("123", "/정비완료 엔진오일 52340"))
+
+        self.assertEqual(
+            self.store.get_maintenance("engine_oil").completed_at,
+            date(2026, 9, 19),
+        )
+
     def test_tire_change_records_current_odometer_and_suppresses_its_seasonal_alert(self) -> None:
         self.handler.handle_update(TelegramUpdate("123", "/주행거리 52340"))
 

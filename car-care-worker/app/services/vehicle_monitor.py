@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from app.models import VehicleSnapshot
 from app.services.maintenance import Alert, MAINTENANCE_RULES, evaluate_maintenance
@@ -60,7 +61,11 @@ class VehicleMonitor:
 
     def _observe_maintenance(self, snapshot: VehicleSnapshot) -> list[Alert]:
         records = {item: self._store.get_maintenance(item) for item in MAINTENANCE_RULES}
-        due_alerts = evaluate_maintenance(snapshot.odometer_km, snapshot.observed_at.date(), records)
+        due_alerts = evaluate_maintenance(
+            snapshot.odometer_km,
+            snapshot.observed_at.astimezone(ZoneInfo("Asia/Seoul")).date(),
+            records,
+        )
         alerts: list[Alert] = []
         for alert in due_alerts:
             if self._store.get_alert_state(alert.key) != "active":
