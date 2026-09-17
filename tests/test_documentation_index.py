@@ -179,9 +179,14 @@ class DocumentationIndexTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("Cloudflare Tunnel → Caddy → K3s Portal · Crawler · Memo", content)
-        self.assertIn("Portal · Crawler · YouTube · Book 전달", content)
-        self.assertIn("Crawler Worker PVC", content)
+        self.assertIn("Cloudflare Tunnel → Caddy → K3s Service", content)
+        self.assertIn("Portal · News · YouTube · Books", content)
+        self.assertIn("portal-web Service", content)
+        self.assertIn("crawler-worker Service", content)
+        self.assertIn("youtube-memo Service", content)
+        self.assertIn("book-memo Service", content)
+        self.assertIn("서비스별 PVC · 단일 writer", content)
+        self.assertIn("Portal PVC · Crawler PVC · YouTube PVC · Book PVC", content)
         self.assertIn("비공개 callback upstream", content)
         self.assertIn("GitHub Actions · 약 5분 공개 health", content)
         self.assertIn("NewsCollectionStale → Alertmanager → SRE relay → Telegram", content)
