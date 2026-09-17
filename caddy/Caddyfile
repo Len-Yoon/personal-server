@@ -58,5 +58,5 @@ memo.len.pe.kr {
 
 books.len.pe.kr {
     import common_tls
-    reverse_proxy book-memo:8003
+    reverse_proxy {env.BOOK_MEMO_UPSTREAM}
 }

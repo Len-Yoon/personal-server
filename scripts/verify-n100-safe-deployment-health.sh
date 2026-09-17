@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNTIME_STATE_HELPER="$SCRIPT_DIR/runtime-service-state.sh"
 readonly SAFE_SERVICES=(crawler-worker youtube-memo book-memo car-care-worker)
 readonly MAX_ATTEMPTS="${N100_SAFE_DEPLOY_HEALTH_MAX_ATTEMPTS:-45}"
 readonly INTERVAL_SECONDS="${N100_SAFE_DEPLOY_HEALTH_INTERVAL_SECONDS:-2}"
@@ -30,6 +32,33 @@ is_positive_integer() {
 
 is_nonnegative_integer() {
   [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+load_runtime_service_modes() {
+  local state
+  local service
+  local mode
+  local crawler_worker_seen=0
+  local youtube_memo_seen=0
+  local book_memo_seen=0
+
+  [[ -f "$RUNTIME_STATE_HELPER" && ! -L "$RUNTIME_STATE_HELPER" ]] || return 1
+  # shellcheck source=runtime-service-state.sh
+  source "$RUNTIME_STATE_HELPER"
+  state="$(load_service_runtime_state "$PWD")" || return 1
+  while IFS='=' read -r service mode; do
+    case "$service:$mode" in
+      book-memo:compose|book-memo:k3s) [[ "$book_memo_seen" -eq 0 ]] || return 1; BOOK_MEMO_RUNTIME_MODE="$mode"; book_memo_seen=1 ;;
+      crawler-worker:compose|crawler-worker:k3s) [[ "$crawler_worker_seen" -eq 0 ]] || return 1; crawler_worker_seen=1 ;;
+      youtube-memo:compose|youtube-memo:k3s) [[ "$youtube_memo_seen" -eq 0 ]] || return 1; youtube_memo_seen=1 ;;
+      *) return 1 ;;
+    esac
+  done <<< "$state"
+  [[ "$crawler_worker_seen" -eq 1 && "$youtube_memo_seen" -eq 1 && "$book_memo_seen" -eq 1 ]]
+}
+
+service_uses_k3s() {
+  [[ "$1" == book-memo && "$BOOK_MEMO_RUNTIME_MODE" == k3s ]]
 }
 
 report_health_diagnostic() {
@@ -68,12 +97,20 @@ main() {
     printf '%s\n' 'safe_cd_health=FAIL reason=invalid_poll_config' >&2
     return 1
   }
+  load_runtime_service_modes || {
+    printf '%s\n' 'safe_cd_health=FAIL reason=runtime_state' >&2
+    return 1
+  }
 
   for service in "$@"; do
     is_safe_service "$service" || {
       printf '%s\n' 'safe_cd_health=FAIL reason=unsupported_service' >&2
       return 1
     }
+    if service_uses_k3s "$service"; then
+      printf '%s\n' 'safe_cd_health=FAIL reason=k3s_runtime_service' >&2
+      return 1
+    fi
   done
 
   for service in "$@"; do

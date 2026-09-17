@@ -160,6 +160,36 @@ validate_docker_bridge_gateway() {
   export DOCKER_BRIDGE_GATEWAY="$actual_gateway"
 }
 
+resolve_book_memo_caddy_upstream() {
+  local namespace desired ready available service_selector service_cluster_ip service_port service_target_port endpoint_addresses endpoint_ports
+
+  if [[ "$BOOK_MEMO_RUNTIME_MODE" != k3s ]]; then
+    export BOOK_MEMO_UPSTREAM="book-memo:8003"
+    return 0
+  fi
+
+  namespace="${K3S_NAMESPACE:-personal-server}"
+  desired=$(sudo -n k3s kubectl -n "$namespace" get deployment/book-memo -o jsonpath='{.spec.replicas}') || return 1
+  ready=$(sudo -n k3s kubectl -n "$namespace" get deployment/book-memo -o jsonpath='{.status.readyReplicas}') || return 1
+  available=$(sudo -n k3s kubectl -n "$namespace" get deployment/book-memo -o jsonpath='{.status.availableReplicas}') || return 1
+  [[ "$desired" =~ ^[0-9]+$ && "$desired" -ge 1 && "$ready" == "$desired" && "$available" == "$desired" ]] || {
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] K3s Book Memo Deployment is not ready; refusing to recreate Caddy" >> /tmp/windows-bootstrap-trace.log
+    return 1
+  }
+  sudo -n k3s kubectl -n "$namespace" rollout status deployment/book-memo --timeout="${K3S_ROLLOUT_TIMEOUT:-120s}" || return 1
+  service_selector=$(sudo -n k3s kubectl -n "$namespace" get service/book-memo -o jsonpath='{.spec.selector.app\.kubernetes\.io/name}') || return 1
+  service_cluster_ip=$(sudo -n k3s kubectl -n "$namespace" get service/book-memo -o jsonpath='{.spec.clusterIP}') || return 1
+  service_port=$(sudo -n k3s kubectl -n "$namespace" get service/book-memo -o jsonpath='{.spec.ports[0].port}') || return 1
+  service_target_port=$(sudo -n k3s kubectl -n "$namespace" get service/book-memo -o jsonpath='{.spec.ports[0].targetPort}') || return 1
+  endpoint_addresses=$(sudo -n k3s kubectl -n "$namespace" get endpoints/book-memo -o jsonpath='{.subsets[*].addresses[*].ip}') || return 1
+  endpoint_ports=$(sudo -n k3s kubectl -n "$namespace" get endpoints/book-memo -o jsonpath='{.subsets[*].ports[*].port}') || return 1
+  [[ "$service_selector" == book-memo && -n "$service_cluster_ip" && "$service_cluster_ip" != None && "$service_port" == 8003 && "$service_target_port" == http && -n "$endpoint_addresses" && "$endpoint_ports" == "$service_port" ]] || {
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] K3s Book Memo Service endpoint is not ready; refusing to recreate Caddy" >> /tmp/windows-bootstrap-trace.log
+    return 1
+  }
+  export BOOK_MEMO_UPSTREAM="$service_cluster_ip:$service_port"
+}
+
 start_runtime_services() {
   local compose_services
   local bridge_compose
@@ -179,7 +209,9 @@ start_runtime_services() {
           if [ "$(runtime_service_mode "$service")" = compose ]; then compose_services+=" $service"; fi
         done
         docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d \
-          portal-web $compose_services caddy
+          portal-web $compose_services
+        resolve_book_memo_caddy_upstream
+        docker compose -f docker-compose.yml -f docker-compose.n100.yml up -d --no-deps caddy
       fi
       PORTAL_SCAN_URL="http://127.0.0.1:8000/internal/homeops/scan"
       ;;
@@ -197,6 +229,7 @@ start_runtime_services() {
       done
       bridge_compose=(docker compose -f docker-compose.yml -f docker-compose.n100.yml -f "$PORTAL_BRIDGE_COMPOSE_FILE")
       "${bridge_compose[@]}" up -d --no-deps --force-recreate $compose_services
+      resolve_book_memo_caddy_upstream
       "${bridge_compose[@]}" up -d --no-deps caddy
       RUN_MAINTENANCE=0
       ;;
@@ -214,6 +247,7 @@ start_runtime_services() {
       done
       bridge_compose=(docker compose -f docker-compose.yml -f docker-compose.n100.yml -f "$PORTAL_BRIDGE_COMPOSE_FILE")
       "${bridge_compose[@]}" up -d --no-deps --force-recreate $compose_services
+      resolve_book_memo_caddy_upstream
       "${bridge_compose[@]}" up -d --no-deps caddy
       PORTAL_SCAN_URL="http://127.0.0.1:30080/internal/homeops/scan"
       ;;

@@ -55,6 +55,37 @@ class CaddyPortalUpstreamContractTest(unittest.TestCase):
         self.assertIn("PORTAL_UPSTREAM: ${PORTAL_UPSTREAM:-portal-web:8000}", caddy)
         self.assertIn("host.docker.internal:host-gateway", caddy)
 
+    def test_n100_caddy_does_not_wait_for_k3s_book_memo_rollback_container(self):
+        compose = (ROOT / "docker-compose.n100.yml").read_text(encoding="utf-8")
+        caddy = compose[compose.index("  caddy:"):]
+
+        self.assertIn("  book-memo:\n", compose)
+        self.assertNotIn("      book-memo:\n        condition: service_healthy", caddy)
+
+    def test_books_upstream_is_runtime_configured_with_a_compose_safe_default(self):
+        """Books must use K3s discovery at runtime without committing a ClusterIP."""
+        caddyfile = (ROOT / "caddy" / "Caddyfile").read_text(encoding="utf-8")
+        compose = (ROOT / "docker-compose.n100.yml").read_text(encoding="utf-8")
+
+        books = _site_block(caddyfile, "books.len.pe.kr")
+        self.assertIn("reverse_proxy {env.BOOK_MEMO_UPSTREAM}", books)
+        self.assertNotRegex(books, r"\b10\.\d+\.\d+\.\d+\b")
+        caddy = compose[compose.index("  caddy:"):]
+        self.assertIn("BOOK_MEMO_UPSTREAM: ${BOOK_MEMO_UPSTREAM:-book-memo:8003}", caddy)
+
+    def test_startup_scripts_resolve_k3s_books_before_recreating_caddy(self):
+        """A K3s Books marker must gate Caddy recreation on ready Service endpoints."""
+        for filename in ("deploy-n100.sh", "windows-bootstrap.sh"):
+            script = (ROOT / "scripts" / filename).read_text(encoding="utf-8")
+
+            self.assertIn("resolve_book_memo_caddy_upstream", script)
+            self.assertIn("service/book-memo", script)
+            self.assertIn("endpoints/book-memo", script)
+            self.assertIn(".spec.selector.app\\.kubernetes\\.io/name", script)
+            self.assertIn(".spec.ports[0].targetPort", script)
+            self.assertIn("BOOK_MEMO_UPSTREAM", script)
+            self.assertIn("sudo -n k3s kubectl", script)
+
 
 if __name__ == "__main__":
     unittest.main()

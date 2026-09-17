@@ -267,11 +267,23 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         rejected_sha: str | None = None,
         origin_main_sha: str | None = None,
         capture_release_permissions: bool = False,
+        runtime_state: str | None = None,
+        runtime_states: tuple[str, ...] | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], str, str | None]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "project"
             root.mkdir()
             (root / ".git").mkdir()
+            runtime_scripts = root / "scripts"
+            runtime_scripts.mkdir()
+            for runtime_script in (
+                "runtime-service-state.sh",
+                "runtime-service-state-reader.py",
+            ):
+                (runtime_scripts / runtime_script).write_text(
+                    (ROOT / "scripts" / runtime_script).read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
             for compose_file in ("docker-compose.yml", "docker-compose.n100.yml", ".env"):
                 (root / compose_file).write_text("services: {}\n", encoding="utf-8")
             (root / "data").mkdir()
@@ -302,6 +314,19 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
             root_ownership_counter = Path(directory) / "root-ownership-counter"
             app_ownership_counter = Path(directory) / "app-ownership-counter"
             compose_override_copy = Path(directory) / "compose-override"
+            runtime_state_directory = Path(directory) / "runtime-states"
+            runtime_state_directory.mkdir()
+            configured_runtime_states = runtime_states or (
+                (
+                    "crawler-worker=compose\nyoutube-memo=compose\nbook-memo=compose\n"
+                    if runtime_state is None
+                    else runtime_state
+                ),
+            )
+            for index, configured_runtime_state in enumerate(configured_runtime_states, start=1):
+                (runtime_state_directory / str(index)).write_text(
+                    configured_runtime_state, encoding="utf-8"
+                )
             self._write_executable(
                 fake_bin / "git",
                 "#!/bin/sh\n"
@@ -313,7 +338,12 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "  printf '%s\\n' \"${FAKE_ORIGIN_MAIN_SHA}\"\n"
                 "fi\n"
                 "if [ \"$1\" = show ]; then\n"
-                "  cat \"${FAKE_HEALTH_SCRIPT}\"\n"
+                "  case \"$2\" in\n"
+                "    *verify-n100-safe-deployment-health.sh) cat \"${FAKE_HEALTH_SCRIPT}\" ;;\n"
+                "    *runtime-service-state.sh) cat \"${FAKE_RUNTIME_STATE_HELPER}\" ;;\n"
+                "    *runtime-service-state-reader.py) cat \"${FAKE_RUNTIME_STATE_READER}\" ;;\n"
+                "    *) exit 1 ;;\n"
+                "  esac\n"
                 "  exit 0\n"
                 "fi\n"
                 "if [ \"$1\" = archive ]; then\n"
@@ -390,6 +420,19 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "[ -n \"$result\" ] || result=0\n"
                 "exit \"$result\"\n",
             )
+            self._write_executable(
+                fake_bin / "python3",
+                "#!/bin/sh\n"
+                "case \"${1:-}\" in\n"
+                "  *runtime-service-state-reader.py)\n"
+                "    count=0; [ -f \"${FAKE_RUNTIME_STATE_COUNTER}\" ] && count=$(cat \"${FAKE_RUNTIME_STATE_COUNTER}\")\n"
+                "    count=$((count + 1)); printf '%s' \"$count\" > \"${FAKE_RUNTIME_STATE_COUNTER}\"\n"
+                "    state_file=\"${FAKE_RUNTIME_STATE_DIRECTORY}/$count\"\n"
+                "    [ -f \"$state_file\" ] || state_file=\"${FAKE_RUNTIME_STATE_DIRECTORY}/${FAKE_RUNTIME_STATE_COUNT}\"\n"
+                "    cat \"$state_file\" ;;\n"
+                "  *) exit 1 ;;\n"
+                "esac\n",
+            )
             environment = {
                 **os.environ,
                 "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
@@ -412,7 +455,12 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "FAKE_ORIGIN_MAIN_SHA": origin_main_sha or expected_sha,
                 "FAKE_RELEASE_SOURCE": str(source),
                 "FAKE_HEALTH_SCRIPT": str(SAFE_HEALTH_SCRIPT),
+                "FAKE_RUNTIME_STATE_HELPER": str(ROOT / "scripts" / "runtime-service-state.sh"),
+                "FAKE_RUNTIME_STATE_READER": str(ROOT / "scripts" / "runtime-service-state-reader.py"),
                 "FAKE_COMPOSE_OVERRIDE_COPY": str(compose_override_copy),
+                "FAKE_RUNTIME_STATE_DIRECTORY": str(runtime_state_directory),
+                "FAKE_RUNTIME_STATE_COUNTER": str(Path(directory) / "runtime-state-counter"),
+                "FAKE_RUNTIME_STATE_COUNT": str(len(configured_runtime_states)),
                 "N100_SAFE_DEPLOY_HEALTH_MAX_ATTEMPTS": "1",
                 "N100_SAFE_DEPLOY_HEALTH_INTERVAL_SECONDS": "0",
             }
@@ -488,6 +536,87 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("build crawler-worker book-memo", calls)
         self.assertIn("up -d --no-build --no-deps crawler-worker book-memo", calls)
+
+    def test_k3s_owned_book_memo_is_skipped_without_docker_deploy_or_rollback(self):
+        result, calls, saved_state = self.run_safe_deploy(
+            services=("book-memo",),
+            previous_sha=self.OLD_SHA,
+            health_results=(1,),
+            runtime_state="crawler-worker=compose\nyoutube-memo=compose\nbook-memo=k3s\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("safe_cd_stage=skip reason=k3s_runtime_service", result.stderr)
+        self.assertNotIn("git archive", calls)
+        self.assertNotIn("docker compose", calls)
+        self.assertNotIn("docker stop book-memo", calls)
+        self.assertNotIn("docker start book-memo", calls)
+        self.assertNotIn("safe_cd_stage=rollback", result.stderr)
+        self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
+
+    def test_mixed_services_skip_k3s_book_memo_in_deploy_health_and_rollback(self):
+        result, calls, saved_state = self.run_safe_deploy(
+            services=("crawler-worker", "book-memo"),
+            previous_sha=self.OLD_SHA,
+            health_results=(1, 0),
+            runtime_state="crawler-worker=compose\nyoutube-memo=compose\nbook-memo=k3s\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls.count("build crawler-worker"), 2)
+        self.assertNotIn("build crawler-worker book-memo", calls)
+        self.assertNotIn("build book-memo", calls)
+        self.assertEqual(calls.count("up -d --no-build --no-deps crawler-worker"), 2)
+        self.assertNotIn("up -d --no-build --no-deps crawler-worker book-memo", calls)
+        self.assertNotIn("docker inspect --format {{.State.Health.Status}} book-memo", calls)
+        self.assertNotIn("docker stop book-memo", calls)
+        self.assertNotIn("docker start book-memo", calls)
+        self.assertEqual(result.stderr.count("safe_cd_stage=rollback"), 1)
+        self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
+
+    def test_runtime_state_recheck_excludes_book_memo_before_docker_build(self):
+        result, calls, _ = self.run_safe_deploy(
+            services=("crawler-worker", "book-memo"),
+            runtime_states=(
+                "crawler-worker=compose\nyoutube-memo=compose\nbook-memo=compose\n",
+                "crawler-worker=compose\nyoutube-memo=compose\nbook-memo=k3s\n",
+            ),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("build crawler-worker", calls)
+        self.assertNotIn("build crawler-worker book-memo", calls)
+        self.assertNotIn("build book-memo", calls)
+        self.assertNotIn("up -d --no-build --no-deps crawler-worker book-memo", calls)
+        self.assertNotIn("docker inspect --format {{.State.Health.Status}} book-memo", calls)
+
+    def test_runtime_state_recheck_excludes_book_memo_from_rollback(self):
+        compose_state = "crawler-worker=compose\nyoutube-memo=compose\nbook-memo=compose\n"
+        k3s_state = "crawler-worker=compose\nyoutube-memo=compose\nbook-memo=k3s\n"
+        result, calls, saved_state = self.run_safe_deploy(
+            services=("crawler-worker", "book-memo"),
+            previous_sha=self.OLD_SHA,
+            health_results=(0, 1, 0),
+            runtime_states=(compose_state,) * 6 + (k3s_state,),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls.count("build crawler-worker book-memo"), 1)
+        self.assertEqual(calls.count("up -d --no-build --no-deps crawler-worker book-memo"), 1)
+        self.assertEqual(calls.count("build crawler-worker\n"), 1)
+        self.assertEqual(calls.count("up -d --no-build --no-deps crawler-worker\n"), 1)
+        self.assertEqual(result.stderr.count("safe_cd_stage=rollback"), 1)
+        self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
+
+    def test_incomplete_runtime_state_refuses_before_docker_deploy(self):
+        result, calls, saved_state = self.run_safe_deploy(
+            runtime_state="crawler-worker=compose\n"
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("docker compose", calls)
+        self.assertNotIn("git archive", calls)
+        self.assertIsNone(saved_state)
 
     def test_car_care_deploy_aligns_host_data_and_approved_oauth_volume(self):
         result, calls, _ = self.run_safe_deploy(
@@ -772,6 +901,44 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertIn("http://127.0.0.1:8003/health", recorded_calls)
         self.assertNotIn("host.docker.internal", recorded_calls)
 
+    def test_health_refuses_k3s_book_memo_without_docker_inspection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake_bin = Path(directory) / "bin"
+            fake_bin.mkdir()
+            calls = Path(directory) / "calls"
+            self._write_executable(
+                fake_bin / "docker",
+                "#!/bin/sh\n"
+                f"printf 'docker %s\\n' \"$*\" >> '{calls}'\n"
+                "printf 'healthy\\n'\n",
+            )
+            self._write_executable(
+                fake_bin / "curl",
+                "#!/bin/sh\n"
+                f"printf 'curl %s\\n' \"$*\" >> '{calls}'\n",
+            )
+            self._write_executable(
+                fake_bin / "python3",
+                "#!/bin/sh\n"
+                "printf '%s' \"${FAKE_RUNTIME_STATE}\"\n",
+            )
+            result = subprocess.run(
+                ["bash", str(SAFE_HEALTH_SCRIPT), "book-memo"],
+                env={
+                    **os.environ,
+                    "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+                    "FAKE_RUNTIME_STATE": "crawler-worker=compose\nyoutube-memo=compose\nbook-memo=k3s\n",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            recorded_calls = calls.read_text(encoding="utf-8") if calls.exists() else ""
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("safe_cd_health=FAIL reason=k3s_runtime_service", result.stderr)
+        self.assertNotIn("docker inspect", recorded_calls)
+        self.assertNotIn("curl ", recorded_calls)
+
     def test_health_waits_for_starting_container_to_become_healthy(self):
         with tempfile.TemporaryDirectory() as directory:
             fake_bin = Path(directory) / "bin"
@@ -879,8 +1046,10 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertNotIn("git checkout", script)
         self.assertIn("git archive --format=tar", script)
         self.assertIn('git show "$revision:scripts/verify-n100-safe-deployment-health.sh"', script)
-        self.assertIn('mktemp "$STATE_DIR/verify-health.XXXXXX"', script)
+        self.assertIn('mktemp -d "$STATE_DIR/verify-health.XXXXXX"', script)
         self.assertIn('chmod 700 "$HEALTH_SCRIPT"', script)
+        self.assertIn('runtime-service-state.sh', script)
+        self.assertIn('runtime-service-state-reader.py', script)
         self.assertNotIn('readonly HEALTH_SCRIPT=', script)
         self.assertIn("mktemp -d", script)
         self.assertIn("      context: %s", script)

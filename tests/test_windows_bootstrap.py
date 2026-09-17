@@ -1092,6 +1092,64 @@ class WindowsBootstrapTests(unittest.TestCase):
             self.assertIn("up -d --no-deps caddy", recorded)
             self.assertNotIn("portal-web", recorded)
 
+    def test_k3s_book_memo_resolves_service_endpoint_before_caddy_recreation(self):
+        """K3s Books must never recreate Caddy with the Docker rollback hostname."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "data").mkdir()
+            (root / "data" / "portal-web-state").mkdir()
+            (root / "data" / "portal-web-state" / "homeops.sqlite3").write_text("fixture\n", encoding="utf-8")
+            calls = root / "calls"
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            (fake_bin / "python3").write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' crawler-worker=compose youtube-memo=compose book-memo=k3s\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "docker").write_text(
+                "#!/bin/sh\n"
+                f"printf 'docker upstream=%s args=%s\\n' \"${{BOOK_MEMO_UPSTREAM:-unset}}\" \"$*\" >> '{calls}'\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "sudo").write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *'deployment/book-memo'*'.spec.replicas'*) printf '1\\n' ;;\n"
+                "  *'deployment/book-memo'*'.status.readyReplicas'*) printf '1\\n' ;;\n"
+                "  *'deployment/book-memo'*'.status.availableReplicas'*) printf '1\\n' ;;\n"
+                "  *'rollout status deployment/book-memo'*) exit 0 ;;\n"
+                "  *'service/book-memo'*'.spec.selector.app\\.kubernetes\\.io/name'*) printf 'book-memo\\n' ;;\n"
+                "  *'service/book-memo'*'.spec.clusterIP'*) printf '192.0.2.10\\n' ;;\n"
+                "  *'service/book-memo'*'.spec.ports[0].port'*) printf '8003\\n' ;;\n"
+                "  *'service/book-memo'*'.spec.ports[0].targetPort'*) printf 'http\\n' ;;\n"
+                "  *'endpoints/book-memo'*'.addresses[*].ip'*) printf '198.51.100.10\\n' ;;\n"
+                "  *'endpoints/book-memo'*'.ports[*].port'*) printf '8003\\n' ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "curl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            for tool in fake_bin.iterdir():
+                tool.chmod(0o755)
+
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "windows-bootstrap.sh"), str(root)],
+                env={**os.environ, "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"], "HOME": str(root)},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(
+                result.returncode,
+                0,
+                result.stderr + result.stdout + "\n" + calls.read_text(encoding="utf-8"),
+            )
+            caddy = [line for line in calls.read_text(encoding="utf-8").splitlines() if "caddy" in line]
+            self.assertEqual(len(caddy), 1)
+            self.assertIn("upstream=192.0.2.10:8003", caddy[0])
+            self.assertNotIn("book-memo", caddy[0])
+
 
 if __name__ == "__main__":
     unittest.main()

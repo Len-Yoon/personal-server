@@ -231,6 +231,65 @@ class DeployN100Tests(unittest.TestCase):
             self.assertIn("up -d --no-deps caddy", recorded)
             self.assertNotIn("up -d --build portal-web", recorded)
 
+    def test_k3s_book_memo_marker_excludes_docker_writer_and_injects_caddy_upstream(self):
+        """A final K3s Books cutover must not revive the Docker rollback writer."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".git").mkdir()
+            (root / ".env").write_text("unused=true\n", encoding="utf-8")
+            data = root / "data"
+            data.mkdir()
+            (data / "portal-web-state").mkdir()
+            (data / "portal-web-state" / "homeops.sqlite3").write_text("fixture\n", encoding="utf-8")
+            calls = root / "calls"
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            (fake_bin / "git").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (fake_bin / "python3").write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' crawler-worker=compose youtube-memo=compose book-memo=k3s\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "docker").write_text(
+                "#!/bin/sh\n"
+                f"printf 'docker upstream=%s args=%s\\n' \"${{BOOK_MEMO_UPSTREAM:-unset}}\" \"$*\" >> '{calls}'\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "sudo").write_text(
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *'deployment/book-memo'*'.spec.replicas'*) printf '1\\n' ;;\n"
+                "  *'deployment/book-memo'*'.status.readyReplicas'*) printf '1\\n' ;;\n"
+                "  *'deployment/book-memo'*'.status.availableReplicas'*) printf '1\\n' ;;\n"
+                "  *'rollout status deployment/book-memo'*) exit 0 ;;\n"
+                "  *'service/book-memo'*'.spec.selector.app\\.kubernetes\\.io/name'*) printf 'book-memo\\n' ;;\n"
+                "  *'service/book-memo'*'.spec.clusterIP'*) printf '192.0.2.10\\n' ;;\n"
+                "  *'service/book-memo'*'.spec.ports[0].port'*) printf '8003\\n' ;;\n"
+                "  *'service/book-memo'*'.spec.ports[0].targetPort'*) printf 'http\\n' ;;\n"
+                "  *'endpoints/book-memo'*'.addresses[*].ip'*) printf '198.51.100.10\\n' ;;\n"
+                "  *'endpoints/book-memo'*'.ports[*].port'*) printf '8003\\n' ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            for tool in fake_bin.iterdir():
+                tool.chmod(0o755)
+
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts" / "deploy-n100.sh"), str(root)],
+                env={**os.environ, "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"]},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            recorded = calls.read_text(encoding="utf-8")
+            docker_up = [line for line in recorded.splitlines() if " up " in line]
+            self.assertEqual(len(docker_up), 2)
+            self.assertNotIn("book-memo", docker_up[0])
+            self.assertIn("args=compose -f docker-compose.yml -f docker-compose.n100.yml up -d --no-deps caddy", docker_up[1])
+            self.assertIn("upstream=192.0.2.10:8003", docker_up[1])
+
     def test_invalid_runtime_marker_refuses_before_any_compose_start(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

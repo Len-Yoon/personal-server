@@ -14,7 +14,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", remote_error="", remote_timeout_attempts=0, rclone_timeout=None, rclone_retry_count=None, rclone_retry_backoff=None, missing_pvc=False, repeat=False, second_runtime=None, second_evidence_remaining=None, second_evidence_age=None, second_fail_at=None, refresh_window=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", readiness_timeout=None, assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host"):
+    def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", remote_error="", remote_timeout_attempts=0, rclone_timeout=None, rclone_retry_count=None, rclone_retry_backoff=None, missing_pvc=False, repeat=False, second_runtime=None, second_evidence_remaining=None, second_evidence_age=None, second_fail_at=None, refresh_window=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", readiness_timeout=None, assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host", command_timeout=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -24,6 +24,7 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
             evidence = root / "evidence" / "portal.evidence"
             calls = root / "calls.log"
             manifest = root / "reader-manifest.yaml"
+            available_replicas = root / "portal-available-replicas"
             for path in (bin_dir, files, state, remote):
                 path.mkdir(parents=True)
             evidence.parent.mkdir(parents=True)
@@ -31,6 +32,7 @@ class PortalPvcBackupVerifyTests(unittest.TestCase):
             (state / "homeops.sqlite3").write_text("fake sqlite\n", encoding="utf-8")
             (root / "recipient.txt").write_text("recipient\n", encoding="utf-8")
             (root / "identity.txt").write_text("identity\n", encoding="utf-8")
+            available_replicas.write_text("1\n", encoding="utf-8")
             marker = root / "runtime.mode"
             if runtime_marker_present:
                 marker.write_text(runtime + "\n", encoding="utf-8")
@@ -58,11 +60,9 @@ case "$*" in
   *'get deployment portal-web -o jsonpath={{.spec.replicas}}') printf '%s\\n' '1'; exit 0 ;;
   *'get pvc/portal-web-files-dynamic -o jsonpath={{.status.phase}}') printf '%s\\n' 'Bound'; exit 0 ;;
   *'get pvc/portal-web-state-dynamic -o jsonpath={{.status.phase}}') printf '%s\\n' 'Bound'; exit 0 ;;
-  *'get deployment portal-web -o jsonpath={{.status.availableReplicas}}')
-    if grep -Fq 'scale deployment/portal-web --replicas=1' '{calls}'; then printf '%s\\n' '1'; else printf '%s\\n' '0'; fi
-    exit 0 ;;
-  *'scale deployment/portal-web --replicas=0') exit 0 ;;
-  *'scale deployment/portal-web --replicas=1') exit 0 ;;
+  *'get deployment portal-web -o jsonpath={{.status.availableReplicas}}') cat "${{PORTAL_FAKE_AVAILABLE_REPLICAS_FILE}}"; exit 0 ;;
+  *'scale deployment/portal-web --replicas=0') printf '%s\\n' '0' > "${{PORTAL_FAKE_AVAILABLE_REPLICAS_FILE}}"; exit 0 ;;
+  *'scale deployment/portal-web --replicas=1') printf '%s\\n' '1' > "${{PORTAL_FAKE_AVAILABLE_REPLICAS_FILE}}"; exit 0 ;;
   *'get nodes --no-headers') printf '%s\\n' 'node-1 Ready'; exit 0 ;;
 esac
 exit 0
@@ -97,6 +97,7 @@ exit 0
                 "PORTAL_FAKE_LOCK_BUSY": "1" if lock_busy else "",
                 "PORTAL_FAKE_REQUIRE_URLLIB": "1" if require_urllib else "",
                 "PORTAL_FAKE_HEALTH_STATUS": str(health_status),
+                "PORTAL_FAKE_AVAILABLE_REPLICAS_FILE": str(available_replicas),
                 "PORTAL_RCLONE_CONFIG_FILE": rclone_config_file,
                 "PORTAL_RCLONE_PASSWORD_COMMAND": rclone_password_command,
                 "PORTAL_FAKE_ASSERT_LOCK_FD_CLOSED": "1" if assert_lock_fd_closed else "",
@@ -142,7 +143,13 @@ exit 0
                         time.sleep(0.01)
                     self.assertFalse(self.process_is_live(child_pid), "interrupted stream child survived")
             else:
-                result = subprocess.run(["bash", str(SCRIPT), mode], env=env, capture_output=True, text=True)
+                result = subprocess.run(
+                    ["bash", str(SCRIPT), mode],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=command_timeout,
+                )
             if repeat:
                 self.assertEqual(result.returncode, 0, result.stderr)
                 if second_evidence_remaining is not None or second_evidence_age is not None:
@@ -163,7 +170,13 @@ exit 0
                         ),
                         encoding="utf-8",
                     )
-                result = subprocess.run(["bash", str(SCRIPT), mode], env=env, capture_output=True, text=True)
+                result = subprocess.run(
+                    ["bash", str(SCRIPT), mode],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=command_timeout,
+                )
             recorded_calls = calls.read_text(encoding="utf-8") if calls.exists() else ""
             recorded_manifest = manifest.read_text(encoding="utf-8") if manifest.exists() else ""
             recorded_evidence = evidence.read_text(encoding="utf-8") if evidence.exists() else ""
@@ -231,13 +244,12 @@ fi
 case "$*" in
   'get nodes --no-headers') printf '%s\\n' 'node-1 Ready'; exit 0 ;;
   *'get deployment portal-web -o jsonpath={{.status.availableReplicas}}')
-    if grep -Fq 'scale deployment/portal-web --replicas=1' '{calls}'; then printf '%s\\n' '1'; else printf '%s\\n' '0'; fi
-    exit 0 ;;
+    cat "${{PORTAL_FAKE_AVAILABLE_REPLICAS_FILE}}"; exit 0 ;;
   *'get deployment portal-web -o jsonpath={{.spec.replicas}}') printf '%s\\n' '1'; exit 0 ;;
   *'get pvc/portal-web-files-dynamic -o jsonpath={{.status.phase}}') printf '%s\\n' 'Bound'; exit 0 ;;
   *'get pvc/portal-web-state-dynamic -o jsonpath={{.status.phase}}') printf '%s\\n' 'Bound'; exit 0 ;;
-  *'scale deployment/portal-web --replicas=0') exit 0 ;;
-  *'scale deployment/portal-web --replicas=1') exit 0 ;;
+  *'scale deployment/portal-web --replicas=0') printf '%s\\n' '0' > "${{PORTAL_FAKE_AVAILABLE_REPLICAS_FILE}}"; exit 0 ;;
+  *'scale deployment/portal-web --replicas=1') printf '%s\\n' '1' > "${{PORTAL_FAKE_AVAILABLE_REPLICAS_FILE}}"; exit 0 ;;
   *'wait --for=delete pod'*) exit 0 ;;
   *'wait --for=condition=Ready pod/'*)
     touch "${{PORTAL_FAKE_READER_WAIT}}"
@@ -900,6 +912,19 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
         self.assertEqual(calls.count("rclone copyto"), 4)
+
+    def test_in_cluster_repeated_refresh_does_not_wait_on_stale_writer_state(self):
+        """A second refresh must observe its own scale-down before its bounded wait."""
+        result, calls, _, _ = self.run_tool(
+            execution_mode="in-cluster",
+            repeat=True,
+            second_evidence_age=86000,
+            command_timeout=15,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls.count("scale deployment/portal-web --replicas=0"), 2)
+        self.assertEqual(calls.count("scale deployment/portal-web --replicas=1"), 2)
 
     def test_future_backup_and_restore_timestamps_are_not_reused(self):
         """Checking only the future refresh deadline must not accept future-dated evidence."""

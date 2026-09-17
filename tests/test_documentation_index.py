@@ -33,15 +33,13 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("operations-roadmap.md", content)
         self.assertIn("recovery-drill.md", content)
 
-    def test_document_index_exposes_book_memo_k3s_preparation_and_cutover_contract(self):
+    def test_document_index_exposes_book_memo_k3s_current_runtime_and_historical_cutover_contract(self):
         index = Path("docs/README.md").read_text(encoding="utf-8")
         operations = Path("docs/operations-reference.md").read_text(encoding="utf-8")
 
-        self.assertIn("Book Memo K3s 준비·전환", index)
-        self.assertIn("../infra/k8s/tools/k3s-app-image-build.sh", index)
-        self.assertIn("../infra/k8s/tools/k3s-app-image-import.sh", index)
-        self.assertIn("../infra/k8s/apps/book-memo.yaml", index)
-        self.assertIn("operations-reference.md#book-memo-k3s-전환-승인검증", index)
+        self.assertIn("Book Memo K3s 현재 운영 기준", index)
+        self.assertIn("operations-reference.md#book-memo-k3s-현재-운영-기준", index)
+        self.assertIn("## Book Memo K3s 현재 운영 기준", operations)
         self.assertIn("## Book Memo K3s 전환 승인·검증", operations)
         for mode in ("`--check`", "`--prepare`", "`--go`", "`--rollback`"):
             self.assertIn(mode, operations)
@@ -113,23 +111,32 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("Cloudflare Tunnel의 별도 ingress", tunnel)
         self.assertIn("별도 Cloudflare Tunnel ingress", operations)
 
-    def test_tunnel_documentation_matches_verified_direct_service_ingress_without_private_address(self):
+    def test_tunnel_documentation_matches_book_memo_caddy_k3s_path_without_private_address(self):
         tunnel = Path("docs/cloudflare-tunnel.md").read_text(encoding="utf-8")
 
-        self.assertIn("뉴스·YouTube 메모·책 메모는 Caddy를 거치지 않고", tunnel)
+        self.assertIn("Cloudflare Tunnel → WSL loopback Caddy → K3s Book Memo", tunnel)
+        self.assertIn("`books.len.pe.kr` | WSL loopback Caddy | K3s `book-memo` Service", tunnel)
+        self.assertIn("뉴스·YouTube 메모는 Caddy를 거치지 않고", tunnel)
+        self.assertNotIn("`books.len.pe.kr` | Compose `book-memo` loopback endpoint", tunnel)
         self.assertIn("비공개 callback upstream", tunnel)
         self.assertNotIn("http://localhost:8015", tunnel)
 
-    def test_readme_and_operations_reference_match_verified_tunnel_route_split(self):
+    def test_operations_reference_records_book_memo_k3s_cutover_boundary(self):
         readme = Path("README.md").read_text(encoding="utf-8")
         operations = Path("docs/operations-reference.md").read_text(encoding="utf-8")
         index = Path("docs/README.md").read_text(encoding="utf-8")
 
         self.assertIn("Portal은 Caddy 경유, Compose 서비스는 Tunnel 직접 ingress", readme)
-        self.assertIn("뉴스·YouTube 메모·책 메모는 Tunnel 직접 ingress", operations)
+        self.assertIn("Cloudflare Tunnel → Caddy → K3s Book Memo", operations)
+        self.assertIn("`book-memo` | K3s `personal-server` namespace", operations)
+        self.assertIn("root 소유 runtime state marker", operations)
+        self.assertIn("정적 ClusterIP는 Git에 기록하지 않음", operations)
+        self.assertIn("`data/book-memo`", operations)
+        self.assertIn("정적 `book-memo.yaml`을 재적용하지 않음", operations)
+        self.assertIn("K3s 단일 writer", operations)
+        self.assertNotIn("뉴스·YouTube 메모·책 메모는 Tunnel 직접 ingress", operations)
         self.assertIn("비공개 callback upstream", operations)
-        self.assertNotIn("http://localhost:8015", operations)
-        self.assertIn("Caddy 경유 Portal·Compose 직접 ingress·차량 callback 경계", index)
+        self.assertIn("Book Memo K3s 현재 운영 기준", index)
 
     def test_architecture_diagram_records_current_routes_and_operational_checks(self):
         content = Path("docs/images/personal-server-architecture-v2.svg").read_text(

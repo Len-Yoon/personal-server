@@ -53,6 +53,16 @@ for service in system-agent crawler-worker youtube-memo book-memo car-care-worke
     available=$(sudo k3s kubectl -n "$namespace" get "deployment/$service" -o jsonpath='{.status.availableReplicas}')
     [[ "$desired" =~ ^[0-9]+$ && "$desired" -ge 1 && "$ready" == "$desired" && "$available" == "$desired" ]]
     sudo k3s kubectl -n "$namespace" rollout status "deployment/$service" --timeout="${K3S_ROLLOUT_TIMEOUT:-120s}"
+    if [ "$service" = book-memo ]; then
+      service_selector=$(sudo k3s kubectl -n "$namespace" get "service/book-memo" -o jsonpath='{.spec.selector.app\.kubernetes\.io/name}')
+      service_cluster_ip=$(sudo k3s kubectl -n "$namespace" get "service/book-memo" -o jsonpath='{.spec.clusterIP}')
+      service_port=$(sudo k3s kubectl -n "$namespace" get "service/book-memo" -o jsonpath='{.spec.ports[0].port}')
+      service_target_port=$(sudo k3s kubectl -n "$namespace" get "service/book-memo" -o jsonpath='{.spec.ports[0].targetPort}')
+      endpoint_addresses=$(sudo k3s kubectl -n "$namespace" get "endpoints/book-memo" -o jsonpath='{.subsets[*].addresses[*].ip}')
+      endpoint_ports=$(sudo k3s kubectl -n "$namespace" get "endpoints/book-memo" -o jsonpath='{.subsets[*].ports[*].port}')
+      pvc_phase=$(sudo k3s kubectl -n "$namespace" get "pvc/book-memo-data" -o jsonpath='{.status.phase}')
+      [[ "$service_selector" == book-memo && -n "$service_cluster_ip" && "$service_cluster_ip" != None && "$service_port" == 8003 && "$service_target_port" == http && -n "$endpoint_addresses" && "$endpoint_ports" == 8003 && "$pvc_phase" == Bound ]]
+    fi
   else
     compose ps --status running --services | grep -Fx -- "$service"
   fi
@@ -85,8 +95,15 @@ esac
 for url in \
   http://127.0.0.1:18010/health \
   http://127.0.0.1:8001/health \
-  http://127.0.0.1:8002/health \
-  http://127.0.0.1:8003/health \
+  http://127.0.0.1:8002/health; do
+  curl --fail --silent --show-error --retry-all --retry-connrefused --retry 6 --retry-delay 5 "$url"
+done
+
+if [[ "$BOOK_MEMO_RUNTIME_MODE" != k3s ]]; then
+  curl --fail --silent --show-error --retry-all --retry-connrefused --retry 6 --retry-delay 5 http://127.0.0.1:8003/health
+fi
+
+for url in \
   http://127.0.0.1:8015/health; do
   curl --fail --silent --show-error --retry-all --retry-connrefused --retry 6 --retry-delay 5 "$url"
 done

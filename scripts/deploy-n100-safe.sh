@@ -13,10 +13,15 @@ readonly CAR_CARE_OAUTH_OWNERSHIP_APPROVAL="${N100_SAFE_DEPLOY_CAR_CARE_OAUTH_OW
 readonly SAFE_SERVICES=(crawler-worker youtube-memo book-memo car-care-worker)
 readonly SERVICE_CSV_PATTERN='^(crawler-worker|youtube-memo|book-memo|car-care-worker)(,(crawler-worker|youtube-memo|book-memo|car-care-worker))*$'
 PARSED_SERVICES=()
+DEPLOY_SERVICES=()
+CRAWLER_WORKER_RUNTIME_MODE=compose
+YOUTUBE_MEMO_RUNTIME_MODE=compose
+BOOK_MEMO_RUNTIME_MODE=compose
 COMPOSE_OVERRIDE=''
 COMPOSE_OVERRIDES=()
 HEALTH_SCRIPT=''
 HEALTH_SCRIPTS=()
+HEALTH_DIRECTORIES=()
 OWNERSHIP_MUTATED_SERVICES=()
 OWNERSHIP_MUTATED_MOUNT_TYPES=()
 OWNERSHIP_MUTATED_SOURCES=()
@@ -26,7 +31,7 @@ PAUSED_SERVICES=()
 TARGET_SERVICES_STARTED=0
 
 cleanup_generated_resources() {
-  local override health_script snapshot
+  local override health_script health_directory snapshot
   for override in "${COMPOSE_OVERRIDES[@]:-}"; do
     if [[ -f "$override" && ! -L "$override" ]]; then
       unlink -- "$override"
@@ -35,6 +40,11 @@ cleanup_generated_resources() {
   for health_script in "${HEALTH_SCRIPTS[@]:-}"; do
     if [[ -f "$health_script" && ! -L "$health_script" ]]; then
       unlink -- "$health_script"
+    fi
+  done
+  for health_directory in "${HEALTH_DIRECTORIES[@]:-}"; do
+    if [[ -d "$health_directory" && ! -L "$health_directory" ]]; then
+      rmdir -- "$health_directory"
     fi
   done
   if [[ "$OWNERSHIP_SNAPSHOTS_VERIFIED" -eq 1 ]]; then
@@ -79,6 +89,57 @@ parse_services_csv() {
   [[ "$services_csv" =~ $SERVICE_CSV_PATTERN ]] || return 1
   IFS=',' read -r -a PARSED_SERVICES <<< "$services_csv"
   validate_services "${PARSED_SERVICES[@]}"
+}
+
+load_runtime_service_modes() {
+  local state
+  local service
+  local mode
+  local crawler_worker_seen=0
+  local youtube_memo_seen=0
+  local book_memo_seen=0
+
+  [[ -f "$PROJECT_ROOT/scripts/runtime-service-state.sh" && ! -L "$PROJECT_ROOT/scripts/runtime-service-state.sh" ]] || return 1
+  # shellcheck source=runtime-service-state.sh
+  source "$PROJECT_ROOT/scripts/runtime-service-state.sh"
+  state="$(load_service_runtime_state "$PROJECT_ROOT")" || return 1
+  while IFS='=' read -r service mode; do
+    case "$service:$mode" in
+      crawler-worker:compose|crawler-worker:k3s) [[ "$crawler_worker_seen" -eq 0 ]] || return 1; CRAWLER_WORKER_RUNTIME_MODE="$mode"; crawler_worker_seen=1 ;;
+      youtube-memo:compose|youtube-memo:k3s) [[ "$youtube_memo_seen" -eq 0 ]] || return 1; YOUTUBE_MEMO_RUNTIME_MODE="$mode"; youtube_memo_seen=1 ;;
+      book-memo:compose|book-memo:k3s) [[ "$book_memo_seen" -eq 0 ]] || return 1; BOOK_MEMO_RUNTIME_MODE="$mode"; book_memo_seen=1 ;;
+      *) return 1 ;;
+    esac
+  done <<< "$state"
+  [[ "$crawler_worker_seen" -eq 1 && "$youtube_memo_seen" -eq 1 && "$book_memo_seen" -eq 1 ]]
+}
+
+runtime_service_mode() {
+  case "$1" in
+    crawler-worker) printf '%s\n' "$CRAWLER_WORKER_RUNTIME_MODE" ;;
+    youtube-memo) printf '%s\n' "$YOUTUBE_MEMO_RUNTIME_MODE" ;;
+    book-memo) printf '%s\n' "$BOOK_MEMO_RUNTIME_MODE" ;;
+    car-care-worker) printf '%s\n' compose ;;
+    *) return 1 ;;
+  esac
+}
+
+exclude_k3s_owned_services() {
+  local service
+
+  DEPLOY_SERVICES=()
+  for service in "$@"; do
+    if [[ "$(runtime_service_mode "$service")" == k3s ]]; then
+      printf 'safe_cd_skip_k3s_service=%s\n' "$service" >&2
+      continue
+    fi
+    DEPLOY_SERVICES+=("$service")
+  done
+}
+
+refresh_deploy_services() {
+  load_runtime_service_modes || return 1
+  exclude_k3s_owned_services "$@"
 }
 
 yaml_quote() {
@@ -422,37 +483,58 @@ restore_root_owned_data_for_rollback() {
 deploy_revision() {
   local revision="$1"
   local align_data_ownership="$2"
+  local -a requested_services
   shift 2
+  requested_services=("$@")
 
   printf '%s\n' 'safe_cd_stage=deploy' >&2
-  create_release_source "$revision" "$@" || return 1
-  create_compose_override "$@" || return 1
+  refresh_deploy_services "${requested_services[@]}" || return 1
+  [[ "${#DEPLOY_SERVICES[@]}" -gt 0 ]] || return 2
+  create_release_source "$revision" "${DEPLOY_SERVICES[@]}" || return 1
+  create_compose_override "${DEPLOY_SERVICES[@]}" || return 1
   docker compose \
     -f "$PROJECT_ROOT/docker-compose.yml" \
     -f "$PROJECT_ROOT/docker-compose.n100.yml" \
     -f "$COMPOSE_OVERRIDE" config --quiet || return 1
+  refresh_deploy_services "${requested_services[@]}" || return 1
+  [[ "${#DEPLOY_SERVICES[@]}" -gt 0 ]] || return 2
   docker compose \
     -f "$PROJECT_ROOT/docker-compose.yml" \
     -f "$PROJECT_ROOT/docker-compose.n100.yml" \
-    -f "$COMPOSE_OVERRIDE" build "$@" || return 1
+    -f "$COMPOSE_OVERRIDE" build "${DEPLOY_SERVICES[@]}" || return 1
+  refresh_deploy_services "${requested_services[@]}" || return 1
+  [[ "${#DEPLOY_SERVICES[@]}" -gt 0 ]] || return 2
   if [[ "$align_data_ownership" == true ]]; then
-    preflight_service_data_ownership "$@" || return 1
-    pause_service_writers "$@" || return 1
-    align_service_data_ownership "$@" || return 1
+    preflight_service_data_ownership "${DEPLOY_SERVICES[@]}" || return 1
+    pause_service_writers "${DEPLOY_SERVICES[@]}" || return 1
+    align_service_data_ownership "${DEPLOY_SERVICES[@]}" || return 1
     TARGET_SERVICES_STARTED=1
   fi
+  refresh_deploy_services "${requested_services[@]}" || return 1
+  [[ "${#DEPLOY_SERVICES[@]}" -gt 0 ]] || return 2
   docker compose \
     -f "$PROJECT_ROOT/docker-compose.yml" \
     -f "$PROJECT_ROOT/docker-compose.n100.yml" \
-    -f "$COMPOSE_OVERRIDE" up -d --no-build --no-deps "$@"
+    -f "$COMPOSE_OVERRIDE" up -d --no-build --no-deps "${DEPLOY_SERVICES[@]}"
 }
 
 prepare_health_script() {
   local revision="$1"
+  local health_directory
+  local runtime_state_helper
+  local runtime_state_reader
 
-  HEALTH_SCRIPT="$(mktemp "$STATE_DIR/verify-health.XXXXXX")" || return 1
+  health_directory="$(mktemp -d "$STATE_DIR/verify-health.XXXXXX")" || return 1
+  HEALTH_DIRECTORIES+=("$health_directory")
+  HEALTH_SCRIPT="$health_directory/verify-health"
+  runtime_state_helper="$health_directory/runtime-service-state.sh"
+  runtime_state_reader="$health_directory/runtime-service-state-reader.py"
   HEALTH_SCRIPTS+=("$HEALTH_SCRIPT")
+  HEALTH_SCRIPTS+=("$runtime_state_helper")
+  HEALTH_SCRIPTS+=("$runtime_state_reader")
   git show "$revision:scripts/verify-n100-safe-deployment-health.sh" > "$HEALTH_SCRIPT" || return 1
+  git show "$revision:scripts/runtime-service-state.sh" > "$runtime_state_helper" || return 1
+  git show "$revision:scripts/runtime-service-state-reader.py" > "$runtime_state_reader" || return 1
   chmod 700 "$HEALTH_SCRIPT"
 }
 
@@ -500,14 +582,21 @@ main() {
   origin_main_sha="$(git rev-parse origin/main)"
   [[ "$expected_sha" == "$origin_main_sha" ]] || return 1
   prepare_state_directories || return 1
+  refresh_deploy_services "${PARSED_SERVICES[@]}" || return 1
+  if [[ "${#DEPLOY_SERVICES[@]}" -eq 0 ]]; then
+    printf '%s\n' 'safe_cd_stage=skip reason=k3s_runtime_service' >&2
+    return 0
+  fi
 
-  if deploy_revision "$expected_sha" true "${PARSED_SERVICES[@]}" && health_check "$expected_sha" "${PARSED_SERVICES[@]}"; then
+  if deploy_revision "$expected_sha" true "${PARSED_SERVICES[@]}" && health_check "$expected_sha" "${DEPLOY_SERVICES[@]}"; then
     record_healthy_revision "$expected_sha"
     OWNERSHIP_SNAPSHOTS_VERIFIED=1
     return 0
   fi
 
-  stop_target_service_writers "${PARSED_SERVICES[@]}" || return 1
+  refresh_deploy_services "${PARSED_SERVICES[@]}" || return 1
+  [[ "${#DEPLOY_SERVICES[@]}" -gt 0 ]] || return 1
+  stop_target_service_writers "${DEPLOY_SERVICES[@]}" || return 1
   restore_root_owned_data_for_rollback || return 1
   if [[ "$TARGET_SERVICES_STARTED" -eq 0 ]]; then
     resume_paused_service_writers || return 1
@@ -520,7 +609,9 @@ main() {
   git merge-base --is-ancestor "$previous_sha" origin/main
 
   printf '%s\n' 'safe_cd_stage=rollback' >&2
-  if deploy_revision "$previous_sha" false "${PARSED_SERVICES[@]}" && health_check "$previous_sha" "${PARSED_SERVICES[@]}"; then
+  refresh_deploy_services "${PARSED_SERVICES[@]}" || return 1
+  [[ "${#DEPLOY_SERVICES[@]}" -gt 0 ]] || return 1
+  if deploy_revision "$previous_sha" false "${PARSED_SERVICES[@]}" && health_check "$previous_sha" "${DEPLOY_SERVICES[@]}"; then
     return 0
   fi
   return 1
