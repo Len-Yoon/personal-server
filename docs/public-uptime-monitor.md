@@ -48,7 +48,7 @@ Windows 예약 작업은 `PersonalServer-WSL-KeepAlive`와 Supervisor를 각각 
 
 ### 재시작 뒤 초기 점검
 
-Supervisor는 로그인 없이 Windows 재시작 뒤 초기 대기 후 `post_boot_check`를 정확히 1회 수행함. 초기 점검은 WSL, K3s, Portal 상태를 확인하고, Tunnel이 정상인 경우 `https://len.pe.kr/health`를 10초 간격으로 3회 호출해 모두 HTTP 200인지 확인함. 시작·완료·실패 결과는 `recovery-events.jsonl`에 이벤트로만 기록하며, 재시작 또는 초기 점검 자체에 대한 신규 Telegram 메시지는 발송하지 않음. Telegram은 기존 정책대로 Cloudflare Tunnel 장애·복구 전환에만 사용함.
+Windows boot-trigger 경로로 Supervisor가 시작되면 `boot_observed` 이벤트를 기록함. 이 이벤트는 Windows 부팅 경로에서 Supervisor 시작이 관측되었음을 뜻하며, WSL·K3s·Portal의 정상 여부는 별도 `post_boot_check` 결과로 확인함. Supervisor는 초기 대기 후 `post_boot_check`를 정확히 1회 수행함. 초기 점검은 WSL, K3s, Portal 상태를 확인하고, Tunnel이 정상인 경우 `https://len.pe.kr/health`를 10초 간격으로 3회 호출해 모두 HTTP 200인지 확인함. 시작·완료·실패 결과는 `recovery-events.jsonl`에 이벤트로만 기록하며, Windows·WSL·K3s 재시작 또는 초기 점검 자체에 대한 Telegram 메시지는 추가·발송하지 않음. Telegram은 기존 정책대로 Cloudflare Tunnel 장애·복구 전환에만 사용함.
 
 위 `post_boot_check`는 저장소 구현은 완료되었으나 N100에는 아직 적용·검증하지 않음. N100 적용은 사용자 승인 후 병합·적용해야 하며, 적용 후 event log와 외부 health 3회 모두 HTTP 200을 확인함. 이때 로그인 없이 재부팅해 KeepAlive가 `Running`인지, `post_boot_check`가 `passed`인지, 외부 health를 10초 간격으로 3회 호출해 모두 HTTP 200인지 순서대로 확인해야 운영 적용 완료로 판단함.
 
@@ -67,7 +67,7 @@ N100 알림 자격증명은 `window` 사용자 계정의 Windows Credential Mana
 
 ### N100 자동복구 이력 확인
 
-N100 감시기는 장애 감지·복구 요청·조치 실행 결과·Tunnel 알림 전환과 `post_boot_check` 결과만 `C:\personal-server\data\recovery-events.jsonl`에 기록함. 정상 주기 점검은 기록하지 않으며 최근 200건만 유지함. 조치 실행 결과가 `accepted`여도 실제 정상 복구는 다음 점검의 `health_restored` 이벤트로만 확인함. 각 행에는 UTC 저장 시각, 구성요소, 이벤트, 결과, 수행 동작만 포함하고 자격증명·명령 인수·Telegram 응답은 기록하지 않음.
+N100 감시기는 장애 감지·복구 요청·조치 실행 결과·Tunnel 알림 전환, `boot_observed` 및 `post_boot_check` 결과만 `C:\personal-server\data\recovery-events.jsonl`에 기록함. 정상 주기 점검은 기록하지 않으며 최근 200건만 유지함. `boot_observed`에는 기존 UTC `timestamp`가 적용되며, 이벤트 기록은 Telegram 알림을 발생시키지 않음. 조치 실행 결과가 `accepted`여도 실제 정상 복구는 다음 점검의 `health_restored` 이벤트로만 확인함. 각 행에는 UTC 저장 시각, 구성요소, 이벤트, 결과, 수행 동작만 포함하고 자격증명·명령 인수·Telegram 응답은 기록하지 않음.
 
 Windows PowerShell에서 최근 이력을 화면 확인용 시각으로 보려면 다음 읽기 전용 명령을 사용함.
 
