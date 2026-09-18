@@ -54,6 +54,81 @@ class CrawlerWorkerNewsRouteTests(unittest.TestCase):
         self.assertIn("IT 동향", response.text)
         self.assertIn("AI 뉴스", response.text)
 
+    def test_collection_status_api_returns_secret_free_snapshot(self):
+        app = self.load_app()
+        from fastapi.testclient import TestClient
+
+        with patch(
+            "app.services.news_collection_status.NewsCollectionStatusStore.snapshot",
+            return_value={
+                "initialized": True,
+                "first_attempt_at": "2026-09-18T00:30:00+00:00",
+                "last_attempt_at": "2026-09-18T00:35:00+00:00",
+                "last_success_at": "2026-09-18T00:34:00+00:00",
+                "last_failure_at": None,
+                "failures_total": 3,
+                "consecutive_failures": 2,
+                "token": "must-not-leak",
+                "host": "internal.example",
+                "exception": "private traceback",
+            }
+        ), TestClient(app) as client:
+            response = client.get("/api/collection-status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            set(response.json()),
+            {"initialized", "last_attempt_at", "last_success_at", "consecutive_failures"},
+        )
+        self.assertEqual(
+            response.json(),
+            {
+                "initialized": True,
+                "last_attempt_at": "2026-09-18T00:35:00+00:00",
+                "last_success_at": "2026-09-18T00:34:00+00:00",
+                "consecutive_failures": 2,
+            },
+        )
+
+    def test_home_page_shows_kst_success_time_and_consecutive_failures(self):
+        app = self.load_app()
+        from fastapi.testclient import TestClient
+
+        with patch(
+            "app.services.news_collection_status.NewsCollectionStatusStore.snapshot",
+            return_value={
+                "initialized": True,
+                "last_attempt_at": "2026-09-18T00:35:00+00:00",
+                "last_success_at": "2026-09-18T00:34:00+00:00",
+                "consecutive_failures": 2,
+            },
+        ), TestClient(app) as client:
+            response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("2026-09-18 09:34", response.text)
+        self.assertIn("최근 수집 실패 2회", response.text)
+        self.assertNotIn("2026-09-18T00:34:00+00:00", response.text)
+        self.assertNotIn("2026-09-18 00:34", response.text)
+
+    def test_home_page_shows_no_success_record_when_collection_has_never_succeeded(self):
+        app = self.load_app()
+        from fastapi.testclient import TestClient
+
+        with patch(
+            "app.services.news_collection_status.NewsCollectionStatusStore.snapshot",
+            return_value={
+                "initialized": False,
+                "last_attempt_at": None,
+                "last_success_at": None,
+                "consecutive_failures": 0,
+            },
+        ), TestClient(app) as client:
+            response = client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("성공 기록 없음", response.text)
+
     def test_health_response_has_browser_security_headers(self):
         """Fails if the news service stops applying its common browser protections."""
         app = self.load_app()

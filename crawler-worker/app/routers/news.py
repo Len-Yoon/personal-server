@@ -11,6 +11,7 @@ from app.services.news_archive import (
     get_korean_categories,
     list_recent_news,
 )
+from app.services.news_collection_status import NewsCollectionStatusStore
 
 
 router = APIRouter()
@@ -26,17 +27,50 @@ def _category_limit(category: str) -> int:
     return 24
 
 
+_COLLECTION_STATUS_API_KEYS = (
+    "initialized",
+    "last_attempt_at",
+    "last_success_at",
+    "consecutive_failures",
+)
+
+
+def _collection_status_snapshot() -> dict:
+    snapshot = NewsCollectionStatusStore().snapshot()
+    return {key: snapshot[key] for key in _COLLECTION_STATUS_API_KEYS}
+
+
+def _collection_status_for_home(snapshot: dict) -> dict:
+    last_success_at = snapshot.get("last_success_at")
+    consecutive_failures = snapshot.get("consecutive_failures", 0)
+    last_success_display = format_news_datetime(last_success_at)
+
+    if consecutive_failures:
+        status_message = f"최근 수집 실패 {consecutive_failures}회"
+    elif not last_success_display:
+        status_message = "성공 기록 없음"
+    else:
+        status_message = "최근 수집 정상"
+
+    return {
+        "last_success_display": last_success_display or "성공 기록 없음",
+        "status_message": status_message,
+    }
+
+
 templates.env.globals["portal_home_url"] = _portal_home_url
 
 
 @router.get("/")
 def home(request: Request):
+    collection_status = _collection_status_for_home(_collection_status_snapshot())
     return templates.TemplateResponse(
         "home.html",
         {
             "request": request,
             "title": "뉴스 허브",
             "categories": get_korean_categories(),
+            "collection_status": collection_status,
         },
     )
 
@@ -113,6 +147,11 @@ def category_api(
         limit=_category_limit(category),
         force_refresh=refresh,
     )
+
+
+@router.get("/api/collection-status")
+def collection_status_api():
+    return _collection_status_snapshot()
 
 
 @router.get("/news/api/category")

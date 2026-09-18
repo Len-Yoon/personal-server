@@ -12,6 +12,16 @@
     </p>
 </section>
 
+<section class="service-section" aria-label="뉴스 수집 상태">
+    <div class="section-header">
+        <div>
+            <h2>뉴스 수집 최신성</h2>
+            <p>최근 성공 시각: {{ collection_status.last_success_display }}</p>
+        </div>
+        <span class="status-badge">{{ collection_status.status_message }}</span>
+    </div>
+</section>
+
 <section class="service-section">
     <div class="section-header">
         <div>
