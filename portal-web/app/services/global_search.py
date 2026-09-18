@@ -58,8 +58,8 @@ def _fetch_results(
             payload = json.loads(response.read().decode("utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("invalid search payload")
-        results = payload.get("results", [])
-        if not isinstance(results, list):
+        results = payload.get("results")
+        if not isinstance(results, list) or any(not isinstance(item, dict) for item in results):
             raise ValueError("invalid search results")
     except Exception:
         return {"items": [], "status": "unavailable"}
@@ -73,7 +73,6 @@ def _fetch_results(
                 prefer_local=prefer_local,
             )
             for item in results
-            if isinstance(item, dict)
         ],
         "status": "ok",
     }

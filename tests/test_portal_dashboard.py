@@ -208,6 +208,39 @@ class PortalDashboardTests(unittest.TestCase):
 
         self.assertEqual(results["news"], {"items": [], "status": "ok"})
 
+    def search_with_news_payload(self, payload):
+        prepare_service_import("portal-web")
+        os.environ.pop("DEMO_MODE", None)
+        from app.services import global_search
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return payload
+
+        with patch("app.services.global_search.urlopen", return_value=Response()):
+            return global_search.search_all("malformed")
+
+    def test_search_all_marks_error_payload_without_results_as_unavailable(self):
+        results = self.search_with_news_payload(b'{"error": "upstream failure"}')
+
+        self.assertEqual(results["news"], {"items": [], "status": "unavailable"})
+
+    def test_search_all_marks_non_list_results_as_unavailable(self):
+        results = self.search_with_news_payload(b'{"results": "invalid"}')
+
+        self.assertEqual(results["news"], {"items": [], "status": "unavailable"})
+
+    def test_search_all_marks_non_dict_result_item_as_unavailable(self):
+        results = self.search_with_news_payload(b'{"results": [null]}')
+
+        self.assertEqual(results["news"], {"items": [], "status": "unavailable"})
+
     def test_dashboard_shows_unavailable_status_without_endpoint_details(self):
         app = self.load_app()
         search_results = {
