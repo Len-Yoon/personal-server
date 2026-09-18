@@ -106,7 +106,8 @@ class SreTelegramManifestContractTests(unittest.TestCase):
         self.assertEqual(container["securityContext"]["capabilities"]["drop"], ["ALL"])
         self.assertEqual(container["imagePullPolicy"], "Never")
         self.assertEqual(container["readinessProbe"]["httpGet"], {"path": "/healthz", "port": "http"})
-        self.assertEqual(container["livenessProbe"]["httpGet"], {"path": "/healthz", "port": "http"})
+        self.assertEqual(container["livenessProbe"]["tcpSocket"], {"port": "http"})
+        self.assertNotIn("httpGet", container["livenessProbe"])
 
         runtime_volume = next(volume for volume in pod_spec["volumes"] if volume["name"] == "relay-runtime")
         self.assertEqual(runtime_volume["secret"]["secretName"], "sre-telegram-relay-runtime")

@@ -178,8 +178,7 @@ spec:
               path: /healthz
               port: http
           livenessProbe:
-            httpGet:
-              path: /healthz
+            tcpSocket:
               port: http
           securityContext:
             allowPrivilegeEscalation: false
