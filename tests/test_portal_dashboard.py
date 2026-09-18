@@ -154,8 +154,76 @@ class PortalDashboardTests(unittest.TestCase):
 
         results = global_search.search_all("테스트")
 
-        self.assertIn("meta", results["youtube"][0])
-        self.assertIn("snippet", results["youtube"][0])
+        self.assertEqual(results["youtube"]["status"], "ok")
+        self.assertIn("meta", results["youtube"]["items"][0])
+        self.assertIn("snippet", results["youtube"]["items"][0])
+
+    def test_search_all_keeps_partial_results_when_one_service_is_unavailable(self):
+        prepare_service_import("portal-web")
+        os.environ.pop("DEMO_MODE", None)
+        from app.services import global_search
+
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return self.payload
+
+        def open_endpoint(url, timeout):
+            if "crawler-worker" in url:
+                raise OSError("internal failure detail")
+            return Response(b'{"results": [{"title": "available", "url": "#"}]}')
+
+        with patch("app.services.global_search.urlopen", side_effect=open_endpoint):
+            results = global_search.search_all("test")
+
+        self.assertEqual(results["news"], {"items": [], "status": "unavailable"})
+        self.assertEqual(results["youtube"]["status"], "ok")
+        self.assertEqual(results["youtube"]["items"][0]["title"], "available")
+
+    def test_search_all_marks_valid_empty_payload_as_ok(self):
+        prepare_service_import("portal-web")
+        os.environ.pop("DEMO_MODE", None)
+        from app.services import global_search
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"results": []}'
+
+        with patch("app.services.global_search.urlopen", return_value=Response()):
+            results = global_search.search_all("empty")
+
+        self.assertEqual(results["news"], {"items": [], "status": "ok"})
+
+    def test_dashboard_shows_unavailable_status_without_endpoint_details(self):
+        app = self.load_app()
+        search_results = {
+            "news": {"items": [], "status": "unavailable"},
+            "youtube": {"items": [], "status": "ok"},
+            "books": {"items": [], "status": "ok"},
+        }
+
+        with patch("app.routers.dashboard.search_all", return_value=search_results):
+            with TestClient(app) as client:
+                response = client.get("/?q=test")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("현재 응답 없음", response.text)
+        self.assertIn("검색 결과가 없습니다.", response.text)
+        self.assertNotIn("crawler-worker", response.text)
 
     def test_portal_home_url_uses_local_address_on_localhost(self):
         prepare_service_import("book-memo")

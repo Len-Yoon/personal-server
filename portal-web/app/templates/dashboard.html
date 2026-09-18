@@ -62,21 +62,25 @@
 
     {% if search_results %}
         <div class="search-results-grid">
-            {% for group, items in search_results.items() %}
+            {% for group, payload in search_results.items() %}
                 <section class="search-group">
                     <h3>{{ {"news": "뉴스", "youtube": "유튜브", "books": "책"}[group] }}</h3>
-                    {% for item in items %}
-                        <a href="{{ item.url }}" data-track-event="search_result_opened" data-track-target="{{ item.title }}">
-                            <small>{{ item.meta or {"news": "뉴스", "youtube": "유튜브", "books": "책"}[group] }}</small>
-                            <strong>{{ item.title }}</strong>
-                            <span>{{ item.description }}</span>
-                            {% if item.snippet %}
-                                <p>{{ item.snippet }}</p>
-                            {% endif %}
-                        </a>
+                    {% if payload["status"] == "unavailable" %}
+                        <p>현재 응답 없음</p>
                     {% else %}
-                        <p>검색 결과가 없습니다.</p>
-                    {% endfor %}
+                        {% for item in payload["items"] %}
+                            <a href="{{ item.url }}" data-track-event="search_result_opened" data-track-target="{{ item.title }}">
+                                <small>{{ item.meta or {"news": "뉴스", "youtube": "유튜브", "books": "책"}[group] }}</small>
+                                <strong>{{ item.title }}</strong>
+                                <span>{{ item.description }}</span>
+                                {% if item.snippet %}
+                                    <p>{{ item.snippet }}</p>
+                                {% endif %}
+                            </a>
+                        {% else %}
+                            <p>검색 결과가 없습니다.</p>
+                        {% endfor %}
+                    {% endif %}
                 </section>
             {% endfor %}
         </div>

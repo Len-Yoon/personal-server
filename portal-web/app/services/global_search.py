@@ -16,10 +16,10 @@ def search_all(
     public_base_urls: dict[str, str] | None = None,
     local_base_urls: dict[str, str] | None = None,
     prefer_local: bool = False,
-) -> dict[str, list[dict[str, Any]]]:
+) -> dict[str, dict[str, object]]:
     query = query.strip()
     if not query:
-        return {"news": [], "youtube": [], "books": []}
+        return {name: {"items": [], "status": "ok"} for name in ("news", "youtube", "books")}
 
     if _truthy(os.getenv("DEMO_MODE", "")):
         return _demo_results(query)
@@ -51,27 +51,32 @@ def _fetch_results(
     public_base_urls: dict[str, str] | None = None,
     local_base_urls: dict[str, str] | None = None,
     prefer_local: bool = False,
-) -> list[dict[str, Any]]:
+) -> dict[str, object]:
     url = f"{endpoint}?{urlencode({'q': query, 'limit': limit})}"
     try:
         with urlopen(url, timeout=1.5) as response:
             payload = json.loads(response.read().decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("invalid search payload")
+        results = payload.get("results", [])
+        if not isinstance(results, list):
+            raise ValueError("invalid search results")
     except Exception:
-        return []
-    results = payload.get("results", [])
-    if not isinstance(results, list):
-        return []
-    return [
-        _normalize_result_url(
-            name,
-            item,
-            public_base_urls=public_base_urls,
-            local_base_urls=local_base_urls,
-            prefer_local=prefer_local,
-        )
-        for item in results
-        if isinstance(item, dict)
-    ]
+        return {"items": [], "status": "unavailable"}
+    return {
+        "items": [
+            _normalize_result_url(
+                name,
+                item,
+                public_base_urls=public_base_urls,
+                local_base_urls=local_base_urls,
+                prefer_local=prefer_local,
+            )
+            for item in results
+            if isinstance(item, dict)
+        ],
+        "status": "ok",
+    }
 
 
 def _normalize_result_url(
@@ -96,35 +101,44 @@ def _normalize_result_url(
     return item
 
 
-def _demo_results(query: str) -> dict[str, list[dict[str, Any]]]:
+def _demo_results(query: str) -> dict[str, dict[str, object]]:
     return {
-        "news": [
-            {
-                "title": f"{query} 관련 저장 뉴스",
-                "description": "DEMO_MODE 샘플 뉴스 요약입니다.",
-                "snippet": "시장 흐름과 주요 이슈를 짧게 정리한 공개용 샘플입니다.",
-                "meta": "뉴스 · 샘플 · 오늘",
-                "url": "#",
-            }
-        ],
-        "youtube": [
-            {
-                "title": f"{query} 학습 영상",
-                "description": "샘플 유튜브 메모 2개",
-                "snippet": "영상에서 다시 볼 부분과 핵심 메모를 함께 보여주는 예시입니다.",
-                "meta": "유튜브 · 메모 2개 · 샘플",
-                "url": "#",
-            }
-        ],
-        "books": [
-            {
-                "title": f"{query} 독서 메모",
-                "description": "샘플 책 진행률 64%",
-                "snippet": "목차별 진행률과 독서 메모 일부를 보여주는 공개용 샘플입니다.",
-                "meta": "책 · 진행률 64% · 샘플",
-                "url": "#",
-            }
-        ],
+        "news": {
+            "items": [
+                {
+                    "title": f"{query} 관련 저장 뉴스",
+                    "description": "DEMO_MODE 샘플 뉴스 요약입니다.",
+                    "snippet": "시장 흐름과 주요 이슈를 짧게 정리한 공개용 샘플입니다.",
+                    "meta": "뉴스 · 샘플 · 오늘",
+                    "url": "#",
+                }
+            ],
+            "status": "ok",
+        },
+        "youtube": {
+            "items": [
+                {
+                    "title": f"{query} 학습 영상",
+                    "description": "샘플 유튜브 메모 2개",
+                    "snippet": "영상에서 다시 볼 부분과 핵심 메모를 함께 보여주는 예시입니다.",
+                    "meta": "유튜브 · 메모 2개 · 샘플",
+                    "url": "#",
+                }
+            ],
+            "status": "ok",
+        },
+        "books": {
+            "items": [
+                {
+                    "title": f"{query} 독서 메모",
+                    "description": "샘플 책 진행률 64%",
+                    "snippet": "목차별 진행률과 독서 메모 일부를 보여주는 공개용 샘플입니다.",
+                    "meta": "책 · 진행률 64% · 샘플",
+                    "url": "#",
+                }
+            ],
+            "status": "ok",
+        },
     }
 
 
