@@ -76,7 +76,7 @@ CI artifact 확인·보존·결과 분류는 [작업 루프 증거 운영](agent
 
 ### 4.0 N100 자동복구 적용 전후 확인
 
-N100 자동복구 변경은 적용 전후 `https://len.pe.kr/health`를 10초 간격으로 3회 호출해 모두 HTTP 200인지 확인함. Windows boot-trigger 경로로 Supervisor가 시작되면 `boot_observed`를 기록하며, 이는 부팅 경로에서 Supervisor가 시작되었다는 관측 이벤트임. 재시작 뒤 Supervisor의 `post_boot_check` 시작·완료·실패 이벤트와 기존 recovery event log를 확인함. 이벤트는 기존 UTC timestamp와 최근 200건 보존 기준을 사용함. Windows·WSL·K3s 재시작 또는 초기 점검 자체에 대한 Telegram 알림은 추가하지 않으며, Telegram 알림은 Cloudflare Tunnel 장애·복구 전환 경로만 대상으로 함.
+N100 자동복구 변경은 적용 전후 `https://len.pe.kr/health`를 10초 간격으로 3회 호출해 모두 HTTP 200인지 확인함. Windows boot-trigger 경로로 Supervisor가 시작되면 `boot_observed`를 기록하며, 이는 부팅 경로에서 Supervisor가 시작되었다는 관측 이벤트임. 재시작 뒤 Supervisor의 `post_boot_check` 시작·완료·실패 이벤트와 기존 recovery event log를 확인함. `boot_observed` 런타임 증명은 재부팅으로 강제하지 않고 다음 승인된 유지보수 재부팅에서 확인하며, 그 전에는 미검증으로 보고함. 이벤트는 기존 UTC timestamp와 최근 200건 보존 기준을 사용함. Windows·WSL·K3s 재시작 또는 초기 점검 자체에 대한 Telegram 알림은 추가하지 않으며, Telegram 알림은 Cloudflare Tunnel 장애·복구 전환 경로만 대상으로 함.
 
 | 구분 | 기준 | 처리 |
 |---|---|---|

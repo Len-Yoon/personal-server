@@ -50,7 +50,7 @@ Windows 예약 작업은 `PersonalServer-WSL-KeepAlive`와 Supervisor를 각각 
 
 Windows boot-trigger 경로로 Supervisor가 시작되면 `boot_observed` 이벤트를 기록함. 이 이벤트는 Windows 부팅 경로에서 Supervisor 시작이 관측되었음을 뜻하며, WSL·K3s·Portal의 정상 여부는 별도 `post_boot_check` 결과로 확인함. Supervisor는 초기 대기 후 `post_boot_check`를 정확히 1회 수행함. 초기 점검은 WSL, K3s, Portal 상태를 확인하고, Tunnel이 정상인 경우 `https://len.pe.kr/health`를 10초 간격으로 3회 호출해 모두 HTTP 200인지 확인함. 시작·완료·실패 결과는 `recovery-events.jsonl`에 이벤트로만 기록하며, Windows·WSL·K3s 재시작 또는 초기 점검 자체에 대한 Telegram 메시지는 추가·발송하지 않음. Telegram은 기존 정책대로 Cloudflare Tunnel 장애·복구 전환에만 사용함.
 
-위 `post_boot_check`는 저장소 구현은 완료되었으나 N100에는 아직 적용·검증하지 않음. N100 적용은 사용자 승인 후 병합·적용해야 하며, 적용 후 event log와 외부 health 3회 모두 HTTP 200을 확인함. 이때 로그인 없이 재부팅해 KeepAlive가 `Running`인지, `post_boot_check`가 `passed`인지, 외부 health를 10초 간격으로 3회 호출해 모두 HTTP 200인지 순서대로 확인해야 운영 적용 완료로 판단함.
+위 `post_boot_check`는 저장소 구현은 완료되었으나 N100에는 아직 적용·검증하지 않음. N100 적용 후에는 현재 실행 상태와 외부 health 3회 모두 HTTP 200을 확인함. `boot_observed`의 런타임 증명은 재부팅으로 강제하지 않으며, 다음 승인된 유지보수 재부팅에서 KeepAlive `Running`, `post_boot_check` 결과, 외부 health 3회를 함께 확인함. 그 전에는 해당 증명을 미검증으로 보고함.
 
 N100 알림 자격증명은 `window` 사용자 계정의 Windows Credential Manager에서 `personal-server-tunnel-telegram` 대상을 읽음. 일반 자격 증명의 사용자 이름에는 Telegram Chat ID를, 암호에는 Bot token을 입력함. 실제 값은 명령 출력·문서·로그에 표시하지 않음.
 
