@@ -1112,6 +1112,8 @@ function Start-Supervisor {
         return
     }
 
+    Write-RecoveryEvent -Component "system" -Event "boot_observed" -Status "observed" -Action "windows_boot"
+
     try {
         try {
             Update-HostMetrics
