@@ -123,19 +123,20 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("Start-Sleep -Seconds $RecoveryStartupDelaySeconds", supervisor)
         self.assertNotIn("Waiting 120 seconds for WSL and Docker after logon.", daemon)
 
-    def test_supervisor_records_boot_observed_after_lock_before_startup_delay(self):
+    def test_supervisor_records_its_start_after_lock_before_startup_delay(self):
         supervisor = SCRIPT[
             SCRIPT.index("function Start-Supervisor") : SCRIPT.index("function Start-Daemon")
         ]
-        boot_observed = 'Write-RecoveryEvent -Component "system" -Event "boot_observed" -Status "observed" -Action "windows_boot"'
+        supervisor_started = 'Write-RecoveryEvent -Component "system" -Event "supervisor_started" -Status "observed" -Action "supervisor_start"'
 
-        self.assertIn(boot_observed, supervisor)
+        self.assertIn(supervisor_started, supervisor)
+        self.assertNotIn('Event "boot_observed"', supervisor)
         self.assertLess(
             supervisor.index("$lockStream = Enter-SupervisorLock"),
-            supervisor.index(boot_observed),
+            supervisor.index(supervisor_started),
         )
         self.assertLess(
-            supervisor.index(boot_observed),
+            supervisor.index(supervisor_started),
             supervisor.index("Start-Sleep -Seconds $RecoveryStartupDelaySeconds"),
         )
 

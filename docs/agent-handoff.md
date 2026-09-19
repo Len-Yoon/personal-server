@@ -44,6 +44,7 @@
 ## 5. 검증과 배포
 
 - 단위 테스트의 단일 기준은 `tests/ci_test_matrix.json`이며, GitHub Actions와 로컬 모두 이 목록을 사용함.
+- 새 개발기는 먼저 `python3 scripts/setup-local-test-venvs.py --go`로 CI matrix 기반의 서비스별 `.venv`를 준비함. 이 명령은 시스템 Python·운영 서비스·비밀값을 변경하지 않으며, 각 가상환경의 requirements·추가 패키지 설치와 `pip check`만 수행함. 준비 상태만 확인할 때는 `python3 scripts/setup-local-test-venvs.py --check`를 사용함.
 - 로컬 전체 검증은 `python3 tests/run_service_tests.py`로 실행함. `.venv/<서비스>/bin/python`이 있으면 해당 서비스의 가상환경을 우선 사용하고, 없으면 CI와 동일하게 matrix의 전용 Python 버전으로 실행함. 다른 가상환경 위치를 사용할 때는 `--venv-root <경로>`를 지정함. 서비스마다 전용 Python 버전과 `PYTHONPATH`를 분리하므로, 서로 다른 서비스의 `app` 패키지가 충돌하지 않음.
 - 변경 범위가 넓으면 CI와 동일한 서비스별 격리 검증을 실행하고 `git diff --check`를 확인함. 특정 그룹만 확인할 때는 `python3 tests/run_service_tests.py --suite <그룹명>`을 사용함.
 - 배포 실패나 N100 상태 확인은 [N100 GitHub 자동배포 안내](n100-github-auto-deploy.md)의 WSL 명령을 사용함.

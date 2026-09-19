@@ -158,6 +158,7 @@ class N100SafeDeploymentClassifierTests(unittest.TestCase):
         for path in (
             "scripts/classify-n100-safe-deployment.py",
             "scripts/record_token_measurement.py",
+            "scripts/setup-local-test-venvs.py",
             "scripts/verify_change_scope.py",
         ):
             with self.subTest(path=path):

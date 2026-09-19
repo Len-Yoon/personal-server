@@ -62,6 +62,27 @@ class NewsCollectionStatusStoreTests(unittest.TestCase):
             self.assertEqual(snapshot["consecutive_failures"], 0)
             self.assertIsNotNone(snapshot["last_success_at"])
 
+    def test_negative_failure_counts_from_corrupt_status_file_reset_to_zero(self):
+        module = self.load_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "status.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "initialized": True,
+                        "failures_total": -1,
+                        "consecutive_failures": -2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            snapshot = module.NewsCollectionStatusStore(path).snapshot()
+
+            self.assertTrue(snapshot["initialized"])
+            self.assertEqual(snapshot["failures_total"], 0)
+            self.assertEqual(snapshot["consecutive_failures"], 0)
+
 
 class NewsCollectionStatusIntegrationTests(unittest.TestCase):
     @classmethod

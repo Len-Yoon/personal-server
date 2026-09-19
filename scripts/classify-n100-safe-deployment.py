@@ -36,6 +36,7 @@ SHARED_COMPOSE_PATHS = {"docker-compose.yml", "docker-compose.n100.yml"}
 SAFE_NON_RUNTIME_PATHS = {
     "scripts/classify-n100-safe-deployment.py",
     "scripts/record_token_measurement.py",
+    "scripts/setup-local-test-venvs.py",
     "scripts/verify_change_scope.py",
 }
 REASON_NO_CHANGES = "no_changed_paths"

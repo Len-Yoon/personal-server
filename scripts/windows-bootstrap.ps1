@@ -1112,7 +1112,7 @@ function Start-Supervisor {
         return
     }
 
-    Write-RecoveryEvent -Component "system" -Event "boot_observed" -Status "observed" -Action "windows_boot"
+    Write-RecoveryEvent -Component "system" -Event "supervisor_started" -Status "observed" -Action "supervisor_start"
 
     try {
         try {

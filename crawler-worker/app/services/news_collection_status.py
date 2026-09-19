@@ -69,7 +69,7 @@ class NewsCollectionStatusStore:
             value = payload.get(key)
             valid = (
                 isinstance(value, bool) if key == "initialized"
-                else isinstance(value, int) and not isinstance(value, bool)
+                else isinstance(value, int) and not isinstance(value, bool) and value >= 0
                 if key in {"failures_total", "consecutive_failures"}
                 else value is None or isinstance(value, str)
             )

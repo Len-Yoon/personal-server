@@ -47,6 +47,7 @@ POLICY_MAINTENANCE_FILES = {
     "scripts/verify_change_scope.py",
     "scripts/run_change_harness.py",
     "scripts/record_token_measurement.py",
+    "scripts/setup-local-test-venvs.py",
     "scripts/summarize_token_measurements.py",
     "scripts/windows-bootstrap.ps1",
 }

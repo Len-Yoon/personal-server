@@ -305,6 +305,16 @@ class VerifyChangeScopeTests(unittest.TestCase):
         self.assertEqual(evidence["required_checks"], ["maintenance"])
         self.assertEqual(evidence["blocked_files"], [])
 
+    def test_local_test_venv_setup_is_a_maintenance_policy_file(self):
+        code, evidence = run_scope(
+            "scripts/setup-local-test-venvs.py", executed_checks=("maintenance",)
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(evidence["automation_files"], ["scripts/setup-local-test-venvs.py"])
+        self.assertEqual(evidence["required_checks"], ["maintenance"])
+        self.assertEqual(evidence["blocked_files"], [])
+
     def test_n100_classifier_is_maintenance_policy_file(self):
         code, evidence = run_scope(
             "scripts/classify-n100-safe-deployment.py", executed_checks=("maintenance",)

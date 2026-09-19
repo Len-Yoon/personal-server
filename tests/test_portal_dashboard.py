@@ -106,6 +106,26 @@ class PortalDashboardTests(unittest.TestCase):
 
         self.assertEqual(result["url"], "https://books.len.pe.kr/books/1")
 
+    def test_search_result_rejects_unsafe_external_urls(self):
+        prepare_service_import("portal-web")
+        from app.services.global_search import _normalize_result_url
+
+        for url in ("javascript:alert(1)", "data:text/html,unsafe", "//attacker.example"):
+            with self.subTest(url=url):
+                result = _normalize_result_url("news", {"title": "unsafe", "url": url})
+
+                self.assertEqual(result["url"], "#")
+
+    def test_search_result_keeps_absolute_https_url(self):
+        prepare_service_import("portal-web")
+        from app.services.global_search import _normalize_result_url
+
+        result = _normalize_result_url(
+            "news", {"title": "article", "url": "https://news.example/articles/1?source=search"}
+        )
+
+        self.assertEqual(result["url"], "https://news.example/articles/1?source=search")
+
     def test_demo_mode_returns_service_health_samples(self):
         system_status = self.reload_system_status("true")
 

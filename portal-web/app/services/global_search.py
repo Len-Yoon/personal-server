@@ -1,7 +1,7 @@
 import json
 import os
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import urlopen
 
 
@@ -86,7 +86,10 @@ def _normalize_result_url(
     prefer_local: bool = False,
 ) -> dict[str, Any]:
     url = str(item.get("url", "#"))
-    if url.startswith("/"):
+    if url == "#":
+        return item
+
+    if url.startswith("/") and not url.startswith("//"):
         base_urls = local_base_urls if prefer_local and local_base_urls else public_base_urls
         if not base_urls:
             base_urls = {
@@ -97,6 +100,14 @@ def _normalize_result_url(
         base_url = base_urls[name].rstrip("/")
         item = dict(item)
         item["url"] = f"{base_url}{url}"
+        return item
+
+    parsed_url = urlsplit(url)
+    if parsed_url.scheme == "https" and parsed_url.netloc:
+        return item
+
+    item = dict(item)
+    item["url"] = "#"
     return item
 
 
