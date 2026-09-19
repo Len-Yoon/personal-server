@@ -250,9 +250,18 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("`recovery-events.jsonl`에 이벤트로만 기록", uptime)
         self.assertIn("초기 점검 자체에 대한 신규 Telegram 메시지는 발송하지 않음", uptime)
         self.assertIn("Cloudflare Tunnel 장애·복구 전환에만 사용", uptime)
-        self.assertIn("저장소 구현은 완료되었으나 N100에는 아직 적용·검증하지 않음", uptime)
-        self.assertIn("사용자 승인 후 병합·적용", uptime)
-        self.assertIn("적용 후 event log와 외부 health 3회 모두 HTTP 200을 확인", uptime)
+        self.assertIn("N100 적용과 검증을 완료함", uptime)
+        self.assertIn("2026-09-18 15:49", uptime)
+        self.assertIn("외부 health는 10초 간격 3회 모두 HTTP 200으로 확인함", uptime)
+        self.assertNotIn("N100에는 아직 적용·검증하지 않음", uptime)
+
+    def test_project_readme_describes_search_status_and_news_collection_freshness(self):
+        content = Path("README.md").read_text(encoding="utf-8")
+
+        self.assertIn("전체 검색", content)
+        self.assertIn("현재 응답 없음", content)
+        self.assertIn("수집 최신성", content)
+        self.assertIn("마지막 정상 수집", content)
 
     def test_reboot_docs_require_boot_trigger_keepalive_and_password_prompt(self):
         mt4 = (ROOT / "docs" / "n100-mt4-setup.md").read_text(encoding="utf-8")

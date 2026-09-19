@@ -8,13 +8,21 @@ Windows N100과 Ubuntu WSL2에서 운영하는 개인용 서비스 허브임. �
 
 | 기능 | 제공 내용 | 실행 위치 |
 |---|---|---|
-| Portal | 자주 쓰는 서비스의 단일 진입점, 관리자 상태, 공개 포트폴리오 | K3s `portal-web` |
+| Portal | 자주 쓰는 서비스의 단일 진입점, 전체 검색, 관리자 상태, 공개 포트폴리오 | K3s `portal-web` |
 | File Manager | 파일 업로드·정리·검색·ZIP 다운로드 | K3s `portal-web` + PVC |
-| News Hub | Investing.com·Google News 수집, 나스닥 관련성 분류, Telegram 중요 뉴스 알림 | K3s `crawler-worker` + PVC |
+| News Hub | Investing.com·Google News 수집, 수집 최신성 표시, 나스닥 관련성 분류, Telegram 중요 뉴스 알림 | K3s `crawler-worker` + PVC |
 | YouTube Memo | 영상 링크·타임스탬프·메모 기록 | K3s `youtube-memo` + PVC |
 | Book Memo | 책 검색·목차·독서 메모 관리 | K3s `book-memo` + PVC |
 | 차량관리 | Hyundai 연동 차량 상태·정비 주기·운행 종료 Telegram 알림 | `car-care-worker` |
 | HomeOps | 제한된 컨테이너 진단과 승인된 복구 작업 | `system-agent` + `homeops-executor` |
+
+<br>
+
+## 검색·뉴스 상태 표시
+
+Portal의 전체 검색은 서비스별 결과를 독립적으로 표시함. 특정 서비스 호출에 실패하면 다른 서비스의 검색 결과는 유지하고, 해당 서비스에는 `현재 응답 없음`을 표시함. 정상 응답이지만 결과가 없는 경우에는 장애로 표시하지 않고 빈 검색 결과로 구분함.
+
+News Hub는 제목 아래에 수집 최신성을 표시함. `마지막 정상 수집` 시각과 최근 수집 실패 횟수를 확인할 수 있으며, 정상 수집 기록이 없으면 해당 상태를 명확히 표시함. 상태 확인용 `GET /api/collection-status`는 초기화 여부, 마지막 시도·성공 시각, 연속 실패 횟수만 반환하며 기사·URL·자격증명은 포함하지 않음.
 
 <br>
 
