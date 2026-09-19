@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -55,13 +56,39 @@ class ServiceTestRunnerTests(unittest.TestCase):
         """Fails if inspection starts tests or inherits another service PYTHONPATH."""
         environment = os.environ.copy()
         environment["PYTHONPATH"] = "must-not-be-inherited"
-        result = self.run_runner("--dry-run", "--suite", "system-agent", environment=environment)
+        result = self.run_runner(
+            "--dry-run",
+            "--suite",
+            "system-agent",
+            "--venv-root",
+            str(ROOT / "missing-local-venvs"),
+            environment=environment,
+        )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("[DRY RUN] system-agent", result.stdout)
         self.assertIn("PYTHONPATH=" + str(ROOT / "system-agent"), result.stdout)
         self.assertNotIn("must-not-be-inherited", result.stdout)
         self.assertIn("python3.12 -m unittest tests.system_agent.test_metrics", result.stdout)
         self.assertNotIn("[PASS]", result.stdout)
+
+    def test_local_virtual_environment_python_is_preferred_when_available(self):
+        entry = {
+            "name": "system-agent",
+            "python_version": "3.12",
+            "requirements": "system-agent/requirements.txt",
+            "extra_packages": [],
+            "pythonpath": "system-agent",
+            "test_command": "python3 -m unittest tests.system_agent.test_metrics",
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            python_path = Path(temporary_directory) / "system-agent" / "bin" / "python"
+            python_path.parent.mkdir(parents=True)
+            python_path.touch()
+            python_path.chmod(0o755)
+
+            command, _ = runner.command_for(entry, Path(temporary_directory))
+
+        self.assertEqual(command[0], str(python_path))
 
     def test_unknown_suite_is_rejected(self):
         """Fails if a typo could silently skip all CI-equivalent suites."""

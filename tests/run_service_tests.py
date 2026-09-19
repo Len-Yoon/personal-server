@@ -14,6 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MATRIX_PATH = ROOT / "tests" / "ci_test_matrix.json"
+DEFAULT_VENV_ROOT = ROOT / ".venv"
 REQUIRED_FIELDS = {
     "name",
     "python_version",
@@ -59,18 +60,25 @@ def parse_args(matrix: list[dict[str, object]]) -> argparse.Namespace:
     parser.add_argument("--list", action="store_true", help="list available CI-equivalent Python suites and exit")
     parser.add_argument("--dry-run", action="store_true", help="print subprocess commands without executing tests")
     parser.add_argument("--github-matrix", action="store_true", help="print the GitHub Actions matrix JSON and exit")
+    parser.add_argument(
+        "--venv-root",
+        type=Path,
+        default=DEFAULT_VENV_ROOT,
+        help="use per-service local virtual environments below this directory when available",
+    )
     return parser.parse_args()
 
 
-def command_for(entry: dict[str, object]) -> tuple[list[str], dict[str, str]]:
+def command_for(entry: dict[str, object], venv_root: Path = DEFAULT_VENV_ROOT) -> tuple[list[str], dict[str, str]]:
     command = shlex.split(str(entry["test_command"]))
-    command[0] = f"python{entry['python_version']}"
+    venv_python = venv_root / str(entry["name"]) / "bin" / "python"
+    command[0] = str(venv_python) if venv_python.is_file() and os.access(venv_python, os.X_OK) else f"python{entry['python_version']}"
     environment = {"PATH": os.environ.get("PATH", os.defpath), "PYTHONPATH": str(ROOT / str(entry["pythonpath"]))}
     return command, environment
 
 
-def run_suite(entry: dict[str, object], dry_run: bool) -> int:
-    command, environment = command_for(entry)
+def run_suite(entry: dict[str, object], dry_run: bool, venv_root: Path = DEFAULT_VENV_ROOT) -> int:
+    command, environment = command_for(entry, venv_root)
     name = str(entry["name"])
     rendered = " ".join(shlex.quote(part) for part in command)
     if dry_run:
@@ -105,7 +113,7 @@ def main() -> int:
 
     selected_names = set(args.suite or ())
     selected = [entry for entry in matrix if not selected_names or entry["name"] in selected_names]
-    failures = sum(run_suite(entry, args.dry_run) for entry in selected)
+    failures = sum(run_suite(entry, args.dry_run, args.venv_root) for entry in selected)
     return 1 if failures else 0
 
 

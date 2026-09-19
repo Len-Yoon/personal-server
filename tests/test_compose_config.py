@@ -144,7 +144,9 @@ class ComposeConfigTests(unittest.TestCase):
     def test_pinned_dockerfile_base_images_exclude_caddy_by_policy(self):
         """Fails if a governed Dockerfile is omitted or Caddy enters this supply-chain scope."""
         dockerfile_paths = {
-            path.relative_to(ROOT).as_posix() for path in ROOT.rglob("Dockerfile")
+            path.relative_to(ROOT).as_posix()
+            for path in ROOT.rglob("Dockerfile")
+            if ".worktrees" not in path.relative_to(ROOT).parts
         }
         self.assertEqual(DOCKERFILE_DIGEST_POLICY_EXCLUSIONS, {"caddy/Dockerfile"})
         self.assertEqual(len(DOCKERFILE_DIGEST_TARGETS), 11)
