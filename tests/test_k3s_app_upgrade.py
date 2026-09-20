@@ -343,6 +343,16 @@ with pathlib.Path(os.environ['CALL_LOG']).open('a') as output: output.write(json
         self.assertEqual(len(external), 3)
         self.assertEqual([call for call in calls if call[0] == "sleep"], [["sleep", "10"], ["sleep", "10"]])
 
+    def test_portal_check_uses_the_ready_endpoint_without_requiring_a_pod_curl_binary(self):
+        """Requiring curl inside the Portal image rejects a healthy runtime that exposes its ready Endpoint."""
+        result, calls, before, after, _ = self.run_operator("--check", app="portal-web")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(after, before)
+        self.assertFalse(any("exec" in call for call in self.kubectl_calls(calls)))
+        endpoint_calls = [call for call in calls if call[0] == "curl" and call[-1] == "http://10.42.0.21:8000/health"]
+        self.assertEqual(len(endpoint_calls), 1)
+
     def test_portal_non_200_probe_is_not_a_successful_upgrade(self):
         """Ignoring a non-200 Portal probe would accept an externally unhealthy target."""
         result, calls, _, _, _ = self.run_operator("--go", app="portal-web", scenario="portal_non_200")
