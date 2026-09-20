@@ -183,11 +183,10 @@ runtime_health() {
   pod_name="$(ready_pod_name "$expected_image")" || return 1
   [ -n "$pod_name" ] || return 1
   endpoint_url="$(verify_service_endpoint "$pod_name")" || return 1
+  curl --fail --silent --show-error --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" \
+    --max-time "$CURL_MAX_TIME_SECONDS" "$endpoint_url" >/dev/null || return 1
 
   if [ "$app" = "portal-web" ]; then
-    kube exec "pod/$pod_name" -- curl --fail --silent --show-error \
-      --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" --max-time "$CURL_MAX_TIME_SECONDS" \
-      "http://127.0.0.1:$service_port/health" >/dev/null || return 1
     for probe in 1 2 3; do
       status="$(curl --silent --show-error --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" \
         --max-time "$CURL_MAX_TIME_SECONDS" --output /dev/null --write-out '%{http_code}' \
@@ -195,9 +194,6 @@ runtime_health() {
       [ "$status" = "200" ] || return 1
       [ "$probe" = 3 ] || sleep 10
     done
-  else
-    curl --fail --silent --show-error --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" \
-      --max-time "$CURL_MAX_TIME_SECONDS" "$endpoint_url" >/dev/null || return 1
   fi
 }
 
