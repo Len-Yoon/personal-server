@@ -108,7 +108,7 @@ expected_port, required_pod_name, service_payload, endpoints_payload = sys.argv[
 service = json.loads(service_payload)
 endpoints = json.loads(endpoints_payload)
 ports = service.get("spec", {}).get("ports", [])
-if (service.get("spec", {}).get("type") != "ClusterIP" or not service.get("spec", {}).get("clusterIP") or not any(port.get("name") == "http" and str(port.get("port")) == expected_port and port.get("targetPort") == "http" for port in ports)):
+if (service.get("spec", {}).get("type") not in {"ClusterIP", "NodePort"} or not service.get("spec", {}).get("clusterIP") or not any(port.get("name") == "http" and str(port.get("port")) == expected_port and port.get("targetPort") == "http" for port in ports)):
     sys.exit(1)
 for subset in endpoints.get("subsets", []):
     for address in subset.get("addresses", []):

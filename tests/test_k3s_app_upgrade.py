@@ -129,7 +129,8 @@ port = 8000 if app == 'portal-web' else 8001
 if args[:2] == ['get', 'deployment']:
     print(json.dumps(deployment)); sys.exit(0)
 if args[:2] == ['get', 'service']:
-    print(json.dumps({'metadata': {'name': app}, 'spec': {'type': 'ClusterIP', 'clusterIP': '10.43.0.17', 'ports': [{'name': 'http', 'port': port, 'targetPort': 'http'}]}})); sys.exit(0)
+    service_type = {'nodeport_service': 'NodePort', 'loadbalancer_service': 'LoadBalancer'}.get(fixture['scenario'], 'ClusterIP')
+    print(json.dumps({'metadata': {'name': app}, 'spec': {'type': service_type, 'clusterIP': '10.43.0.17', 'ports': [{'name': 'http', 'port': port, 'targetPort': 'http'}]}})); sys.exit(0)
 if args[:2] == ['get', 'endpoints']:
     image = deployment['spec']['template']['spec']['containers'][0]['image']
     suffix = 'target' if image == fixture['target'] else 'old'
@@ -213,6 +214,23 @@ with pathlib.Path(os.environ['CALL_LOG']).open('a') as output: output.write(json
         self.assertEqual(after, before)
         self.assertFalse(any("patch" in call or "rollout" in call for call in self.kubectl_calls(calls)))
         self.assertTrue(any(entry[0] == "ctr" for entry in calls))
+
+    def test_check_accepts_a_nodeport_service_with_a_ready_http_endpoint(self):
+        """Restricting a healthy application Service to ClusterIP rejects the live Portal topology."""
+        result, calls, before, after, _ = self.run_operator("--check", app="portal-web", scenario="nodeport_service")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("k3s_app_upgrade=PASS", result.stdout)
+        self.assertEqual(after, before)
+        self.assertFalse(any("patch" in call or "rollout" in call for call in self.kubectl_calls(calls)))
+
+    def test_check_rejects_a_loadbalancer_service(self):
+        """Allowing every Service type would weaken the explicit internal routing contract."""
+        result, calls, before, after, _ = self.run_operator("--check", scenario="loadbalancer_service")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(after, before)
+        self.assertFalse(any("patch" in call or "rollout" in call for call in self.kubectl_calls(calls)))
 
     def test_check_health_failure_is_read_only(self):
         """Skipping check-mode health would report a failing active Crawler as safe."""
