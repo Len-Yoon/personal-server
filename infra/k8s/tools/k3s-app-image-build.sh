@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SUPPORTED_APPS="book-memo youtube-memo crawler-worker car-care-worker"
+SUPPORTED_APPS="$SUPPORTED_APPS portal-web"
 
 fail() {
   printf 'image_build=FAIL: %s\n' "$*" >&2
@@ -31,7 +32,7 @@ done
 
 test "$(uname -s)" = Darwin || fail "build must run on macOS"
 case "$app" in
-  book-memo|youtube-memo|crawler-worker|car-care-worker) ;;
+  book-memo|youtube-memo|crawler-worker|car-care-worker|portal-web) ;;
   *) fail "unsupported app" ;;
 esac
 test -n "$tag" && test "$tag" != latest || fail "immutable tag is required"

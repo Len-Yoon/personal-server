@@ -184,6 +184,16 @@ class VerifyChangeScopeTests(unittest.TestCase):
         self.assertEqual(evidence["required_checks"], ["maintenance"])
         self.assertEqual(evidence["unclassified_files"], [])
 
+    def test_generic_k8s_app_tool_requires_maintenance_check(self):
+        path = "infra/k8s/tools/k3s-app-image-build.sh"
+
+        code, evidence = run_scope(path, executed_checks=("maintenance",))
+
+        self.assertEqual(code, 0)
+        self.assertEqual(evidence["infrastructure_files"], [path])
+        self.assertEqual(evidence["required_checks"], ["maintenance"])
+        self.assertEqual(evidence["unclassified_files"], [])
+
     def test_crawler_k3s_cutover_scope_requires_crawler_and_maintenance_checks(self):
         path = "infra/k8s/tools/crawler-worker-cutover.sh"
 
