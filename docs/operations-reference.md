@@ -72,6 +72,18 @@ HomeOps 실행기는 Docker socket을 제한된 allowlist 진단·재시작에�
 - Caddy, Cloudflare Tunnel, K3s Secret·PVC, `.env`, `data/`, Portal은 자동 배포에서 제외함.
 - Trivy filesystem/config 검사는 HIGH·CRITICAL 결과를 CI 차단 기준으로 사용함.
 
+## K3s 애플리케이션 이미지 교체 절차
+
+K3s 애플리케이션의 런타임 이미지만 교체하는 운영 절차임. 실제 적용은 서비스별 별도 승인 후 운영자가 수행하며, 저장소 변경 또는 CI 통과를 운영 적용 완료로 간주하지 않음. 이미지 참조값·archive 경로·digest·Secret 값·내부 IP는 문서와 로그에 기록하지 않음.
+
+1. macOS에서 `k3s-app-image-build.sh`로 대상 애플리케이션의 Linux AMD64 OCI archive를 생성함. `latest`가 아닌 immutable tag만 사용하고 archive SHA-256을 확인함.
+2. N100에서 대상 애플리케이션명을 명시한 별도 운영 승인을 받은 후에만 `k3s-app-image-import.sh --go`로 archive와 SHA-256을 검증하여 반입함. importer가 출력한 canonical immutable digest 별칭만 이후 단계의 이미지 입력으로 사용함.
+3. `k3s-app-upgrade.sh --check`으로 Deployment readiness, Service·Endpoint, 반입된 Linux AMD64 digest 이미지와 현재 애플리케이션 health를 읽기 전용으로 확인함.
+4. `k3s-app-upgrade.sh --go`는 check 성공 이후에도 대상 애플리케이션명을 명시한 별도 운영 승인을 받은 경우에만 실행함. 실행 시 현재 immutable digest를 `--expected-current-image`으로 지정하여 변경 전 이미지가 예상과 일치할 때만 patch함.
+5. rollout과 대상 애플리케이션 health를 확인한 뒤 다시 `--check`으로 결과를 검증함. Portal 교체는 Pod 내부 health와 공개 Portal health를 10초 간격으로 3회 모두 HTTP 200으로 확인함.
+
+대상 rollout 또는 health 검증 실패 시 도구는 직전 immutable digest로 **1회만** rollback을 시도함. rollback 실패·상태 불확실·두 번째 시도 필요 상황에서는 자동 재실행하지 않고 운영자가 상태를 확인한 뒤 별도 판단함. 이 절차는 Deployment의 컨테이너 이미지 외에는 변경하지 않으며 PVC, Secret, Caddy, Cloudflare Tunnel, Docker Compose를 생성·수정·삭제·재기동하지 않음.
+
 ## Book Memo K3s 현재 운영 기준
 
 - `books.len.pe.kr`의 확정 경로는 Cloudflare Tunnel → Caddy → K3s `book-memo` Service이며, K3s Pod만 production writer로 사용함. 중지된 Docker `book-memo`와 동시에 production write를 허용하지 않음.
