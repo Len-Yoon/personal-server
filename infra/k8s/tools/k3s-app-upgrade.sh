@@ -146,7 +146,7 @@ for pod in json.loads(pods_payload).get("items", []):
     if any(
         item.get("name") == container_name
         and item.get("ready") is True
-        and item.get("image") == expected_image
+        and (item.get("image") == expected_image or item.get("imageID") == expected_image)
         for item in statuses
     ):
         print(pod.get("metadata", {}).get("name", ""))

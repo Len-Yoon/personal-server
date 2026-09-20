@@ -142,7 +142,11 @@ if args[:2] == ['get', 'pods']:
     pod_image = image
     if fixture['scenario'] == 'target_stale_pod' and image == fixture['target']:
         suffix, pod_image = 'old', fixture['old']
-    print(json.dumps({'items': [{'metadata': {'name': app + '-' + suffix}, 'status': {'phase': 'Running', 'containerStatuses': [{'name': app, 'ready': True, 'image': pod_image}]}}]})); sys.exit(0)
+    status = {'name': app, 'ready': True, 'image': pod_image}
+    if fixture['scenario'] == 'status_image_id_only':
+        status['image'] = app + ':runtime-tag'
+        status['imageID'] = image
+    print(json.dumps({'items': [{'metadata': {'name': app + '-' + suffix}, 'status': {'phase': 'Running', 'containerStatuses': [status]}}]})); sys.exit(0)
 if args[:2] == ['rollout', 'status']:
     if args.count('--timeout=120s') != 1: sys.exit(67)
     image = deployment['spec']['template']['spec']['containers'][0]['image']
@@ -352,6 +356,14 @@ with pathlib.Path(os.environ['CALL_LOG']).open('a') as output: output.write(json
         self.assertFalse(any("exec" in call for call in self.kubectl_calls(calls)))
         endpoint_calls = [call for call in calls if call[0] == "curl" and call[-1] == "http://10.42.0.21:8000/health"]
         self.assertEqual(len(endpoint_calls), 1)
+
+    def test_check_accepts_the_expected_digest_from_container_image_id(self):
+        """Kubernetes may expose a runtime tag in image while imageID carries the immutable digest."""
+        result, calls, before, after, _ = self.run_operator("--check", scenario="status_image_id_only")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(after, before)
+        self.assertFalse(any("patch" in call or "rollout" in call for call in self.kubectl_calls(calls)))
 
     def test_portal_non_200_probe_is_not_a_successful_upgrade(self):
         """Ignoring a non-200 Portal probe would accept an externally unhealthy target."""
