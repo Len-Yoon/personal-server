@@ -10,6 +10,7 @@
 | [SLI·SLO·에러 버짓 운영 기준](slo-baseline.md) | 현재 측정 가능한 운영 신호의 목표값·버짓·월간 검토 기준 확인 |
 | [안전한 복구 훈련](recovery-drill.md) | 월간 백업·알림·격리 Pod 복구 점검 |
 | [운영 참조](operations-reference.md) | 전체 서비스 구조, 공개 경로, 일상 상태 확인 |
+| [운영 상태 확인 기록](operations-reference.md#운영-상태-확인-기록) | 백업·SRE·SLO 실행 주체와 마지막 확인 결과 |
 | [컨테이너 실행 권한](operations-reference.md#컨테이너-실행-권한) | non-root 실행 계정과 Portal PVC 사전검증 기준 |
 | [N100 운영 환경](n100-mt4-setup.md) | Windows·WSL2 자동 시작, 제한형 자동복구, 재부팅 뒤 확인, 자원 점검 |
 | [K3s·모니터링·백업](../infra/k8s/README.md) | Portal K3s, Grafana, Telegram SRE relay, PVC 백업 |
