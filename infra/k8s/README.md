@@ -1,13 +1,13 @@
 # K3s 운영
 
-N100의 K3s는 현재 Portal과 모니터링 운영에 사용함. 이 문서는 실제 운영 도구의 진입점만 정리하며, Secret 값·비밀번호·token은 출력하거나 문서화하지 않음.
+N100의 K3s는 현재 Portal·뉴스·YouTube Memo·Book Memo와 모니터링 운영에 사용함. 이 문서는 실제 운영 도구의 진입점만 정리하며, Secret 값·비밀번호·token은 출력하거나 문서화하지 않음.
 
 ## 정기 운영 실행 경계
 
 | 구분 | 주기 | 실행 목적 | 월간 감사와의 관계 |
 |---|---:|---|---|
 | 공개 상태 감시 | 약 5분 | 외부에서 공개 health 장애·복구를 신속히 감지함 | GitHub Actions에서 독립 실행하며 월간 감사로 대체하지 않음 |
-| 일별 SLO 증적 | 매일 02:15, 활성화 전 중지 | Prometheus 직전 24시간과 공개 health 교차 확인 증적을 최근 30건 보관함 | 월간 감사가 고정 ConfigMap을 읽기 전용으로 집계함 |
+| 일별 SLO 증적 | 매일 02:15, 운영 활성·최근 수집 실패 | Prometheus 직전 24시간과 공개 health 교차 확인 증적을 최근 30건 보관함 | 월간 감사가 고정 ConfigMap을 읽기 전용으로 집계함 |
 | Portal PVC 백업·복원 검증 | 매일 03:00 | 최신 복구 가능 증적을 유지하고 백업 실패를 조기에 감지함 | 별도 CronJob이 실행하며 월간 감사는 증적만 읽기 확인함 |
 | 내부 SRE 통합 점검 | 매월 1일 03:30 | Portal·K3s·백업 증적·격리 복구 훈련을 한 번에 확인함 | `monthly-sre-audit`만 활성화함 |
 | 코드 변경 검증 | 변경 시점 | 변경 영향 범위의 회귀를 병합 전 확인함 | 정기 운영 점검과 별도임 |
@@ -18,10 +18,12 @@ N100의 K3s는 현재 Portal과 모니터링 운영에 사용함. 이 문서는 
 
 | Namespace | 구성 | 역할 |
 |---|---|---|
-| `personal-server` | `portal-web`, Service, Portal PVC | Portal·파일함·관리자·포트폴리오 |
+| `personal-server` | `portal-web`, `crawler-worker`, `youtube-memo`, `book-memo`, Service, 서비스별 PVC | Portal·파일함·관리자·포트폴리오·뉴스·메모 |
 | `monitoring` | Prometheus, Grafana, Alertmanager, SRE Telegram relay | 상태 수집·시각화·경고 전달 |
 
 Portal은 K3s PVC를 상태 저장소로 사용하며, Compose `portal-web`은 동시에 실행하지 않음. Caddy는 `host.docker.internal:30080` NodePort를 통해 K3s Portal로 전달함. K3s runtime에서는 `.env`의 `PORTAL_UPSTREAM=host.docker.internal:30080` 설정이 필요하며, Compose runtime에서는 이 값을 `portal-web:8000`으로 유지하거나 비워 Compose 기본값을 사용함. Portal cutover는 이 값을 자동으로 전환하므로 수동 변경 대신 해당 절차를 사용함.
+
+현재 Book·Portal 이미지 적용과 뉴스 10차 보류 상태는 [최신 배포 결과](../../docs/reviews/20260921_K3s앱배포_검증결과.md)를 따름. 초기 manifest의 `replicas: 0`·sentinel image는 현재 운영 상태를 나타내지 않으므로 재적용하지 않음.
 
 ## 빠른 상태 확인
 
@@ -85,7 +87,7 @@ relay, PrometheusRule, RBAC 경계, Prometheus target 상태를 검증하며 Sec
 
 ## Portal PVC 백업
 
-Portal PVC 백업은 K3s CronJob 경로로 전환 준비됨. CronJob은 `suspend: true` 상태로 배포되며, 승인된 Secret Manager 또는 SOPS/age 절차로 사전 시딩된 runtime Secret과 runner image가 준비되기 전에는 활성화하지 않음. 저장소 도구는 Secret 값·rclone 설정·age identity를 생성·입력·출력하지 않음.
+Portal PVC 백업은 N100의 K3s CronJob으로 운영 중이며, 2026-09-21 조회에서 마지막 성공은 2026-09-21 03:03임. 기존 사용자 timer는 inactive로 확인됨. 아래는 최초 설치·재설치 절차이며, 초기 CronJob은 `suspend: true` 상태로 배포됨. 새 환경에서는 승인된 Secret Manager 또는 SOPS/age 절차로 사전 시딩된 runtime Secret과 runner image가 준비되기 전에는 활성화하지 않음. 저장소 도구는 Secret 값·rclone 설정·age identity를 생성·입력·출력하지 않음.
 
 전환 전에는 아래 읽기 점검과 client-side render를 실행함. `--preflight`는 Secret **이름과 key 이름만** 확인하고, Portal PVC가 `Bound`·`ReadWriteOnce` mount 계약을 충족하는지 확인함.
 
@@ -108,7 +110,7 @@ CronJob은 매일 03:00 KST에 실행되며, `Forbid` 동시 실행 제한·실�
 
 ## 일별 SLO 증적
 
-`slo-daily-evidence` CronJob은 서울 기준 매일 02:15에 실행하도록 정의되며 기본값은 `suspend: true`임. `monitoring/slo-daily-evidence` ConfigMap의 `records.json`에 날짜별 검증 기록을 최대 30건 보관함. 같은 날짜의 재수집은 해당 기록을 교체함. Prometheus retention은 변경하지 않으며, 결측·질의 오류는 `unobservable`로 기록하고 Job이 실패함. 공개 health 비-200은 `failed`로 기록하며 관측 자체가 성공했다면 Job 실패로 취급하지 않음.
+`slo-daily-evidence` CronJob은 서울 기준 매일 02:15에 실행하도록 정의됨. 저장소 초기 기본값은 `suspend: true`이나 N100에서는 활성 상태임. 마지막 성공은 2026-09-18 02:15이며, 최근 실패는 freshness 질의의 다중 시계열 원인으로 확인함. [SLO 원인 분석](../../docs/reviews/20260921_SLO증적실패_원인분석.md)의 수정안은 아직 운영에 적용하지 않음. `monitoring/slo-daily-evidence` ConfigMap의 `records.json`에 날짜별 검증 기록을 최대 30건 보관함. 같은 날짜의 재수집은 해당 기록을 교체함. Prometheus retention은 변경하지 않으며, 결측·질의 오류는 `unobservable`로 기록하고 Job이 실패함. 공개 health 비-200은 `failed`로 기록하며 관측 자체가 성공했다면 Job 실패로 취급하지 않음.
 
 실행 권한은 고정 증적 ConfigMap의 `get`, `patch`로 제한함. CronJob은 동시 실행 금지, 재시도 없음, 최대 180초 실행, non-root, read-only root filesystem, capability 전체 제거 및 크기가 제한된 `/tmp`만 사용함. Secret·PVC·host volume을 mount하지 않으며 Portal·K3s 복구 또는 배포 차단을 수행하지 않음.
 

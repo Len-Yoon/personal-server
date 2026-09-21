@@ -78,7 +78,7 @@
   <rect x="905" y="950" width="435" height="185" rx="20" fill="#ffffff" stroke="#4ade80" stroke-width="2.5"/>
   <text x="935" y="995" class="section">Docker Compose · 운영 보조</text>
   <text x="935" y="1030" class="card-body">Caddy · 차량관리 · HomeOps</text>
-  <text x="935" y="1060" class="note">Caddy가 현재 K3s Service upstream을 조회함</text>
+  <text x="935" y="1060" class="note">배포 스크립트가 조회한 upstream을 Caddy에 전달</text>
   <text x="935" y="1090" class="note">K3s 전환 서비스의 Docker writer는 중지 상태임</text>
 
   <text x="70" y="1255" class="section">03 · 운영 · 관측 · 데이터 보호</text>

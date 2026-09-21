@@ -27,7 +27,13 @@ News Hub는 제목 아래에 수집 최신성을 표시함. `마지막 정상 �
 <br>
 
 
+## 반영 상태
+
+2026-09-21 확인 기준으로 1~11차 개발의 저장소 반영은 완료함. Book·Portal·차량 변경은 운영 적용·검증까지 완료했으며, 뉴스 10차 알림 영속화는 복구 호환 보완 후 적용 대상으로 남음. SLO 증적 실패는 원인을 확인하고 수정안 검증을 마쳤으나 운영 수집기는 아직 변경하지 않음. [현재 개발 계획](docs/20260921_프로젝트보완_개발계획.md)과 [앱 배포 검증 결과](docs/reviews/20260921_K3s앱배포_검증결과.md)에서 코드 반영과 운영 이미지 적용을 구분함.
+
 ## 주요 화면
+
+아래 화면은 기능 소개용 기존 촬영 예시이며 현재 운영 상태·배포 버전의 증거가 아님. 뉴스 최신성 표시와 관리자 서비스 목록은 촬영 이후 변경됨. 전체 그림 9개의 용도·최신성·재촬영 필요 사항은 [이미지 목록](docs/images/README.md)을 따름.
 
 | Investing.com 뉴스 수집 | 차량 관리 Telegram |
 |---|---|
@@ -96,7 +102,7 @@ Telegram 알림과 운영 문서 기반 대응
 | 복구 | K3s Pod 자동복구, HomeOps 제한형 컨테이너 복구, 재부팅 뒤 WSL 유지, N100 제한형 자동복구 |
 | 데이터 보호 | Portal PVC 암호화 백업과 실제 복원 검증 |
 | 안전 배포 | 허용된 Compose 서비스만 CI 성공 뒤 revision 고정 배포·health 검증·1회 rollback |
-| 공급망 보안 | GitHub Actions 외부 action을 full SHA로 고정하고, Caddy를 제외한 관리 대상 Python Docker base image 8개를 digest로 고정함. Trivy filesystem/config scan은 HIGH·CRITICAL 결과를 차단하며 CI에서 검증함 |
+| 공급망 보안 | GitHub Actions 외부 action을 full SHA로 고정하고, 앱·운영 도구의 Python base image와 Caddy의 build/runtime base image를 digest로 고정함. Trivy filesystem/config scan은 HIGH·CRITICAL 결과를 차단하며 CI에서 검증함 |
 
 개인 서버 기능과 함께 장애 감지·복구·데이터 보호를 운영하는 구성이 핵심임. 자동복구의 세부 조건·제한·예외는 [N100 운영 환경](docs/n100-mt4-setup.md)과 [운영 참조](docs/operations-reference.md)를 따름.
 
@@ -104,7 +110,7 @@ Telegram 알림과 운영 문서 기반 대응
 
 ## 컨테이너 실행 보안
 
-`caddy`, `car-care-worker`, `homeops-executor`, `portal-web`, `system-agent`는 전용 UID/GID `10001:10001`로 실행함. Caddy는 내부 80·443 포트 binding에 필요한 `NET_BIND_SERVICE` capability만 추가로 사용함.
+저장소의 앱·운영 도구 Dockerfile 12개는 모두 `USER 10001:10001`을 지정함. 이는 이미지의 실행 사용자 설정이며, 실제 배포 버전과 PVC 접근 권한은 서비스별 운영 검증 결과로 확인함. Caddy는 내부 80·443 포트 binding에 필요한 `NET_BIND_SERVICE` capability만 추가로 사용함.
 
 Portal은 K3s 단일 writer와 PVC를 사용하므로 non-root 이미지 교체 전에 파일·상태 PVC의 UID/GID `10001:10001` 읽기·쓰기·디렉터리 접근 권한을 사전검증함. 권한이 충족되지 않으면 Deployment를 전환하지 않으며, PVC 권한 정렬은 자동 배포 대상이 아닌 별도 운영 작업으로 처리함.
 
@@ -112,7 +118,7 @@ Portal은 K3s 단일 writer와 PVC를 사용하므로 non-root 이미지 교체 
 
 ## 모니터링 예시
 
-Grafana에서 K3s 네임스페이스별 CPU·메모리 사용량, Pod 수, 요청량·제한값을 확인하는 예시 화면임.
+Grafana에서 K3s 자원 지표를 확인하는 과거 촬영 예시임. 이미지의 `No data`와 Pod 수는 촬영 당시 표시이며, 현재 지표 수집 성공이나 현재 워크로드 수를 의미하지 않음. 최신 운영 화면 재촬영이 필요함.
 
 ![Grafana K3s 모니터링 화면](docs/images/grafana-k3s-overview.png)
 
@@ -124,7 +130,7 @@ Grafana에서 K3s 네임스페이스별 CPU·메모리 사용량, Pod 수, 요�
 기능 브랜치 → 테스트·독립 검토 → PR → 사용자 병합 승인 → main
 ```
 
-`crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker`의 허용된 Compose 변경은 N100 안전 자동 배포 분류 대상임. 다만 현재 K3s runtime인 Crawler Worker·YouTube Memo·Book Memo는 Compose 안전 배포에서 자동으로 생략되며, 이미지 반입·PVC·Caddy 경로를 포함한 별도 운영 절차를 사용함. Portal, K3s, Caddy, Secret, PVC, 운영 데이터는 자동 배포 대상이 아님.
+`crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker`의 허용된 Compose 변경은 N100 안전 자동 배포 분류 대상임. 다만 현재 K3s runtime인 Crawler Worker·YouTube Memo·Book Memo는 Compose 안전 배포에서 자동으로 생략되며, 별도의 이미지 교체 절차를 사용함. 일반 이미지 교체는 PVC·Secret·Caddy·Tunnel을 유지하며, 최초 전환이나 공개 경로 변경은 각각 별도 범위로 취급함. Portal, K3s, Caddy, Secret, PVC, 운영 데이터는 자동 배포 대상이 아님.
 
 병합된 변경은 CI·배포·health 검증과 작업공간 정리까지 확인함. CI artifact와 운영 증적은 90일 보관하며, 장기 보관이 필요한 자료는 별도 증적 저장소로 이전함.
 
