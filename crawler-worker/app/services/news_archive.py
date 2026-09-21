@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from threading import Lock, Thread
+from threading import Lock, RLock, Thread
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -42,7 +42,8 @@ DIGEST_INTERVAL = timedelta(minutes=15)
 TOPIC_COOLDOWN = timedelta(minutes=30)
 DEDUPLICATION_WINDOW = timedelta(hours=2)
 
-_ARCHIVE_WRITE_LOCK = Lock()
+_ARCHIVE_WRITE_LOCK = RLock()
+_NOTIFICATION_LOCK = Lock()
 _REFRESH_LOCK = Lock()
 _REFRESH_WORK_LOCK = Lock()
 _REFRESHING_CATEGORIES: set[str] = set()
@@ -72,46 +73,44 @@ def collect_korean_news(
 ) -> dict[str, Any]:
     category = _normalize_korean_category(category)
     now = _now()
-    archive = _load_archive()
-    archive, purged = _purge_archive(archive, now)
-    if purged:
-        archive["updated_at"] = _iso(now)
-        _save_archive(archive)
+    with _ARCHIVE_WRITE_LOCK:
+        archive = _load_archive()
+        archive, purged = _purge_archive(archive, now)
+        if purged:
+            archive["updated_at"] = _iso(now)
+            _save_archive(archive)
+        category_articles = _get_category_articles(archive["articles"], category, today_only=True)
+        latest_collected_at = _latest_collected_at(category_articles)
 
-    category_articles = _get_category_articles(
-        archive["articles"], category, today_only=True
-    )
-    latest_collected_at = _latest_collected_at(category_articles)
+        if (
+            category_articles
+            and not force_refresh
+            and latest_collected_at
+            and (now - latest_collected_at).total_seconds() < CACHE_TTL_SECONDS
+        ):
+            return _build_result(
+                category=category,
+                articles=category_articles,
+                limit=limit,
+                cached=True,
+                age_seconds=int((now - latest_collected_at).total_seconds()),
+                label_resolver=_korean_category_label,
+                description_resolver=_korean_category_description,
+            )
 
-    if (
-        category_articles
-        and not force_refresh
-        and latest_collected_at
-        and (now - latest_collected_at).total_seconds() < CACHE_TTL_SECONDS
-    ):
-        return _build_result(
-            category=category,
-            articles=category_articles,
-            limit=limit,
-            cached=True,
-            age_seconds=int((now - latest_collected_at).total_seconds()),
-            label_resolver=_korean_category_label,
-            description_resolver=_korean_category_description,
-        )
-
-    if category_articles and not force_refresh:
-        _schedule_refresh(category, limit)
-        return _build_result(
-            category=category,
-            articles=category_articles,
-            limit=limit,
-            cached=True,
-            age_seconds=int((now - latest_collected_at).total_seconds())
-            if latest_collected_at
-            else 0,
-            label_resolver=_korean_category_label,
-            description_resolver=_korean_category_description,
-        )
+        if category_articles and not force_refresh:
+            _schedule_refresh(category, limit)
+            return _build_result(
+                category=category,
+                articles=category_articles,
+                limit=limit,
+                cached=True,
+                age_seconds=int((now - latest_collected_at).total_seconds())
+                if latest_collected_at
+                else 0,
+                label_resolver=_korean_category_label,
+                description_resolver=_korean_category_description,
+            )
 
     _collection_status().record_attempt()
     try:
@@ -128,17 +127,12 @@ def collect_korean_news(
         _attach_archive_metadata(article, category=category, now=now)
         for article in fresh_articles
     ]
-    new_articles = _new_articles(archive["articles"], stored_articles)
-    should_notify = _should_notify_new_investing_articles(archive, category, korean=True, now=now)
-
-    archive["articles"] = _merge_articles(archive["articles"], stored_articles)
-    archive["updated_at"] = _iso(now)
+    archive, new_articles, should_notify = _commit_collected_articles(category, stored_articles, now)
     alert_articles = _alert_articles(new_articles)
     if should_notify and alert_articles:
         notify_new_investing_articles(alert_articles)
     if should_notify:
-        _queue_and_send_general_digest(archive, new_articles, now)
-    _save_archive(archive)
+        _queue_and_send_general_digest(now)
 
     category_articles = _get_category_articles(
         archive["articles"], category, today_only=True
@@ -161,12 +155,14 @@ def list_recent_news(
     korean_only: bool = False,
     today_only: bool = False,
 ) -> list[dict[str, Any]]:
-    archive = _load_archive()
-    archive, purged = _purge_archive(archive, _now())
-    if purged:
-        archive["updated_at"] = _iso(_now())
-        _save_archive(archive)
-    articles = _dedupe_by_url(archive["articles"])
+    with _ARCHIVE_WRITE_LOCK:
+        now = _now()
+        archive = _load_archive()
+        archive, purged = _purge_archive(archive, now)
+        if purged:
+            archive["updated_at"] = _iso(now)
+            _save_archive(archive)
+        articles = _dedupe_by_url(archive["articles"])
     if korean_only:
         articles = [
             article
@@ -285,11 +281,6 @@ def _schedule_refresh(category: str, limit: int) -> None:
 
 def _refresh_category(category: str, limit: int) -> None:
     now = _now()
-    archive = _load_archive()
-    archive, purged = _purge_archive(archive, now)
-    if purged:
-        archive["updated_at"] = _iso(now)
-
     _collection_status().record_attempt()
     try:
         fresh_articles = collect_korean_news_from_sources(category=category, limit=limit)
@@ -302,17 +293,31 @@ def _refresh_category(category: str, limit: int) -> None:
         _attach_archive_metadata(article, category=category, now=now)
         for article in fresh_articles
     ]
-    new_articles = _new_articles(archive["articles"], stored_articles)
-    should_notify = _should_notify_new_investing_articles(archive, category, korean=True, now=now)
-
-    archive["articles"] = _merge_articles(archive["articles"], stored_articles)
-    archive["updated_at"] = _iso(now)
+    _, new_articles, should_notify = _commit_collected_articles(category, stored_articles, now)
     alert_articles = _alert_articles(new_articles)
     if should_notify and alert_articles:
         notify_new_investing_articles(alert_articles)
     if should_notify:
-        _queue_and_send_general_digest(archive, new_articles, now)
-    _save_archive(archive)
+        _queue_and_send_general_digest(now)
+
+
+def _commit_collected_articles(
+    category: str, stored_articles: list[dict[str, Any]], now: datetime
+) -> tuple[dict[str, Any], list[dict[str, Any]], bool]:
+    with _ARCHIVE_WRITE_LOCK:
+        archive = _load_archive()
+        archive, _ = _purge_archive(archive, now)
+        new_articles = _new_articles(archive["articles"], stored_articles)
+        should_notify = _should_notify_new_investing_articles(archive, category, korean=True, now=now)
+        archive["articles"] = _merge_articles(archive["articles"], stored_articles)
+        if should_notify:
+            archive["telegram_pending_articles"] = _merge_notification_articles(
+                _notification_articles(archive.get("telegram_pending_articles", [])),
+                [article for article in new_articles if not _alert_articles([article])],
+            )
+        archive["updated_at"] = _iso(now)
+        _save_archive(archive)
+        return archive, new_articles, should_notify
 
 
 def _purge_archive(archive: dict[str, Any], now: datetime) -> tuple[dict[str, Any], bool]:
@@ -396,45 +401,49 @@ def _should_notify_new_investing_articles(
     return True
 
 
-def _queue_and_send_general_digest(
-    archive: dict[str, Any], new_articles: list[dict[str, Any]], now: datetime
-) -> None:
-    pending = _notification_articles(archive.get("telegram_pending_articles", []))
-    pending.extend(article for article in new_articles if not _alert_articles([article]))
+def _queue_and_send_general_digest(now: datetime) -> None:
+    with _NOTIFICATION_LOCK:
+        with _ARCHIVE_WRITE_LOCK:
+            archive = _load_archive()
+            pending = _notification_articles(archive.get("telegram_pending_articles", []))
+            last_digest_at = _parse_dt(str(archive.get("telegram_last_digest_at", "")))
+            if last_digest_at and now - last_digest_at < DIGEST_INTERVAL:
+                return
+            selected, _, removed_urls = _select_general_digest_articles_with_removed(
+                pending,
+                now=now,
+                topic_last_sent_at=_notification_times(archive.get("telegram_topic_last_sent_at", {})),
+                recent_sent_articles=_notification_articles(archive.get("telegram_recent_articles", [])),
+            )
+            if not selected:
+                if removed_urls:
+                    archive["telegram_pending_articles"] = _remove_notification_urls(pending, removed_urls)
+                    _save_archive(archive)
+                return
 
-    last_digest_at = _parse_dt(str(archive.get("telegram_last_digest_at", "")))
-    if last_digest_at and now - last_digest_at < DIGEST_INTERVAL:
-        archive["telegram_pending_articles"] = pending
-        return
+        sent = notify_market_news_digest(selected)
+        if not sent:
+            return
 
-    selected, remaining = _select_general_digest_articles(
-        pending,
-        now=now,
-        topic_last_sent_at=_notification_times(archive.get("telegram_topic_last_sent_at", {})),
-        recent_sent_articles=_notification_articles(archive.get("telegram_recent_articles", [])),
-    )
-    if not selected:
-        archive["telegram_pending_articles"] = remaining
-        return
-    if not notify_market_news_digest(selected):
-        archive["telegram_pending_articles"] = selected + remaining
-        return
-
-    topic_times = _notification_times(archive.get("telegram_topic_last_sent_at", {}))
-    for article in selected:
-        topic_times[str(article["market_topic"])] = _iso(now)
-    recent = _notification_articles(archive.get("telegram_recent_articles", [])) + [
-        dict(article, sent_at=_iso(now)) for article in selected
-    ]
-    archive["telegram_pending_articles"] = remaining
-    archive["telegram_recent_articles"] = [
-        article
-        for article in recent
-        if (sent_at := _parse_dt(str(article.get("sent_at", ""))))
-        and now - sent_at <= DEDUPLICATION_WINDOW
-    ]
-    archive["telegram_topic_last_sent_at"] = topic_times
-    archive["telegram_last_digest_at"] = _iso(now)
+        with _ARCHIVE_WRITE_LOCK:
+            archive = _load_archive()
+            archive["telegram_pending_articles"] = _remove_notification_urls(
+                _notification_articles(archive.get("telegram_pending_articles", [])), removed_urls
+            )
+            topic_times = _notification_times(archive.get("telegram_topic_last_sent_at", {}))
+            for article in selected:
+                topic_times[str(article["market_topic"])] = _iso(now)
+            recent = _notification_articles(archive.get("telegram_recent_articles", [])) + [
+                dict(article, sent_at=_iso(now)) for article in selected
+            ]
+            archive["telegram_recent_articles"] = [
+                article for article in recent
+                if (sent_at := _parse_dt(str(article.get("sent_at", ""))))
+                and now - sent_at <= DEDUPLICATION_WINDOW
+            ]
+            archive["telegram_topic_last_sent_at"] = topic_times
+            archive["telegram_last_digest_at"] = _iso(now)
+            _save_archive(archive)
 
 
 def _select_general_digest_articles(
@@ -443,9 +452,22 @@ def _select_general_digest_articles(
     topic_last_sent_at: dict[str, str],
     recent_sent_articles: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    selected, remaining, _ = _select_general_digest_articles_with_removed(
+        pending, now, topic_last_sent_at, recent_sent_articles
+    )
+    return selected, remaining
+
+
+def _select_general_digest_articles_with_removed(
+    pending: list[dict[str, Any]],
+    now: datetime,
+    topic_last_sent_at: dict[str, str],
+    recent_sent_articles: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
     selected: list[dict[str, Any]] = []
     remaining: list[dict[str, Any]] = []
     selected_topics: set[str] = set()
+    removed_urls: set[str] = set()
     seen: list[dict[str, Any]] = list(recent_sent_articles)
     for article in pending:
         topic = _market_topic(article)
@@ -455,11 +477,40 @@ def _select_general_digest_articles(
             remaining.append(article)
             continue
         if topic in selected_topics or any(_same_market_event(candidate, prior) for prior in seen):
+            url = str(article.get("url", "")).strip()
+            if url:
+                removed_urls.add(url)
             continue
         selected.append(candidate)
         selected_topics.add(topic)
         seen.append(candidate)
-    return selected, remaining
+        url = str(article.get("url", "")).strip()
+        if url:
+            removed_urls.add(url)
+    return selected, remaining, removed_urls
+
+
+def _merge_notification_articles(
+    existing_articles: list[dict[str, Any]], new_articles: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for article in existing_articles + new_articles:
+        url = str(article.get("url", "")).strip()
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        merged.append(article)
+    return merged
+
+
+def _remove_notification_urls(
+    pending: list[dict[str, Any]], removed_urls: set[str]
+) -> list[dict[str, Any]]:
+    return [
+        article for article in pending
+        if str(article.get("url", "")).strip() not in removed_urls
+    ]
 
 
 def _dedupe_by_url(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
