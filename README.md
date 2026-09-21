@@ -35,15 +35,9 @@ News Hub는 제목 아래에 수집 최신성을 표시함. `마지막 정상 �
 
 Book·YouTube·관리자 화면과 이미지 목록의 Portal 화면은 2026-09-21 실제 서비스에서 다시 촬영함. 뉴스·파일함은 사용자 요청에 따라 재촬영 전 이미지를 사용함. 관리자는 자동복구·HomeOps·보안 정책까지 촬영하며 IP가 포함된 하단 보안 이벤트 목록은 제외함. Grafana도 N100 원격화면에서 재촬영했으며 차량 Telegram은 기존 촬영 예시를 유지함. 화면은 촬영 시점의 표시이며 배포 버전이나 지속적인 서비스 정상 상태를 증명하지 않음. 전체 그림 9개의 촬영 기준과 남은 재촬영 사항은 [이미지 목록](docs/images/README.md)을 따름.
 
-### 뉴스 허브
-
-Investing.com 뉴스 수집 결과와 기사 목록을 보여주는 기존 촬영 예시임. 현재 수집 최신성 표시는 반영되지 않은 이미지이며, 누르면 원본 크기로 볼 수 있음.
-
-[![Investing.com 뉴스 수집 결과와 기사 목록](docs/images/news-hub.png)](docs/images/news-hub.png)
-
-| 차량 관리 Telegram |
-|---|
-| 운행 기록과 누적 주행거리, 주행 가능 거리, 소모품 정비 시점을 Telegram으로 확인함.<br><br><img src="docs/images/car-care-telegram-status.png" alt="Telegram 차량 관리 운행 및 정비 상태" width="460"> |
+| Investing.com 뉴스 수집 | 차량 관리 Telegram |
+|---|---|
+| RSS 수집 결과, Telegram 알림 분류, 원문 이동이 가능한 기사 목록을 확인함.<br><br><img src="docs/images/news-hub.png" alt="Investing.com 뉴스 수집 결과와 기사 목록" width="460"> | 운행 기록과 누적 주행거리, 주행 가능 거리, 소모품 정비 시점을 Telegram으로 확인함.<br><br><img src="docs/images/car-care-telegram-status.png" alt="Telegram 차량 관리 운행 및 정비 상태" width="460"> |
 
 | YouTube Memo | Book Memo |
 |---|---|
