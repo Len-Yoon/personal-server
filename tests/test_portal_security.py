@@ -12,6 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from fastapi.testclient import TestClient
+
 from tests._test_support import prepare_service_import
 
 
@@ -78,6 +80,97 @@ class PortalSecurityTests(unittest.TestCase):
 
         importlib.reload(security)
         return importlib.reload(file_store)
+
+    def load_app(self):
+        prepare_service_import("portal-web")
+        import app.main as main
+
+        return importlib.reload(main).app
+
+    def test_admin_security_route_returns_json_and_disables_cache(self):
+        environment_keys = (
+            "ADMIN_STATUS_PASSWORD",
+            "AUTH_RATE_LIMIT_STATE_PATH",
+            "SECURITY_LOG_PATH",
+        )
+        original_environment = {key: os.environ.get(key) for key in environment_keys}
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                os.environ["ADMIN_STATUS_PASSWORD"] = "security-password"
+                os.environ["AUTH_RATE_LIMIT_STATE_PATH"] = str(Path(tempdir) / "auth-rate-limit.json")
+                os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security-events.txt")
+                app = self.load_app()
+
+                with TestClient(app) as client:
+                    response = client.get(
+                        "/admin/security",
+                        headers={"X-Security-Password": "security-password"},
+                    )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("recent_events", response.json())
+            self.assertIn("file_policy", response.json())
+            self.assertEqual(response.headers["cache-control"], "no-store, no-cache, must-revalidate, max-age=0")
+            self.assertEqual(response.headers["pragma"], "no-cache")
+            self.assertEqual(response.headers["expires"], "0")
+        finally:
+            for key, value in original_environment.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_admin_security_route_returns_auth_errors_without_server_error(self):
+        environment_keys = (
+            "ADMIN_STATUS_PASSWORD",
+            "AUTH_RATE_LIMIT_STATE_PATH",
+            "SECURITY_LOG_PATH",
+            "FILE_MANAGER_PASSWORD",
+            "DELETE_PASSWORD",
+        )
+        original_environment = {key: os.environ.get(key) for key in environment_keys}
+        try:
+            with tempfile.TemporaryDirectory() as tempdir:
+                os.environ["ADMIN_STATUS_PASSWORD"] = "security-password"
+                os.environ["AUTH_RATE_LIMIT_STATE_PATH"] = str(Path(tempdir) / "auth-rate-limit.json")
+                os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security-events.txt")
+                app = self.load_app()
+
+                with TestClient(app) as client:
+                    invalid = client.get(
+                        "/admin/security",
+                        headers={"X-Security-Password": "wrong"},
+                    )
+                    os.environ.pop("ADMIN_STATUS_PASSWORD", None)
+                    missing = client.get("/admin/security")
+
+            self.assertEqual(invalid.status_code, 401)
+            self.assertEqual(missing.status_code, 403)
+        finally:
+            for key, value in original_environment.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def test_admin_events_ignores_unknown_event_and_records_requested_event_detail(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            security = self.reload_security(tempdir)
+            app = self.load_app()
+
+            with TestClient(app) as client:
+                response = client.post(
+                    "/admin/events",
+                    json={"event": "unknown\n<script>", "path": "/dashboard"},
+                    headers={"Origin": "http://testserver"},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {"ok": True})
+            events = security.read_recent_events()
+            self.assertEqual(events[0]["event"], "user_event_blocked")
+            self.assertEqual(events[0]["details"]["reason"], "event_not_allowed")
+            self.assertEqual(events[0]["details"]["requested_event"], "unknown <script>")
 
     def test_daily_log_path_includes_date(self):
         with tempfile.TemporaryDirectory() as tempdir:
