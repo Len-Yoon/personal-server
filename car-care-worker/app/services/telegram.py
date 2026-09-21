@@ -61,8 +61,15 @@ class TelegramClient:
             if not isinstance(chat, dict):
                 continue
             chat_id = chat.get("id")
-            if isinstance(text, str) and chat_id is not None:
-                updates.append(TelegramUpdate(str(chat_id), text, item.get("update_id")))
+            update_id = item.get("update_id")
+            if (
+                isinstance(text, str)
+                and chat_id is not None
+                and isinstance(update_id, int)
+                and not isinstance(update_id, bool)
+                and update_id >= 0
+            ):
+                updates.append(TelegramUpdate(str(chat_id), text, update_id))
         return updates
 
     def send(self, text: str) -> bool:
@@ -101,18 +108,29 @@ class CommandHandler:
     def handle_update(self, update: TelegramUpdate) -> str | None:
         if update.chat_id != self._allowed_chat_id:
             return None
+        command = update.text.strip().split(maxsplit=1)[0].split("@", 1)[0] if update.text.strip() else ""
+        if command == "/현대연결":
+            return self._handle_update(update, self.store)
+        if _is_idempotent_update_id(update.update_id):
+            return self.store.process_command(
+                update.update_id,
+                lambda transaction: self._handle_update(update, transaction),
+            )
+        return self._handle_update(update, self.store)
+
+    def _handle_update(self, update: TelegramUpdate, store) -> str | None:
         parts = update.text.strip().split()
         if not parts:
             return self._usage()
         command = parts[0].split("@", 1)[0]
         if command == "/차량" and len(parts) == 1:
-            return self._vehicle_status()
+            return self._vehicle_status(store)
         if command == "/주행거리":
-            return self._set_odometer(parts)
+            return self._set_odometer(parts, store)
         if command == "/정비완료":
-            return self._complete_maintenance(parts)
+            return self._complete_maintenance(parts, store)
         if command == "/타이어교체":
-            return self._complete_tire_change(parts)
+            return self._complete_tire_change(parts, store)
         if command == "/정비목록" and len(parts) == 1:
             return self._maintenance_list()
         if command == "/알림테스트" and len(parts) == 1:
@@ -121,8 +139,8 @@ class CommandHandler:
             return self._hyundai_connect()
         return self._usage()
 
-    def _vehicle_status(self) -> str:
-        snapshot = self.store.load_last_snapshot()
+    def _vehicle_status(self, store) -> str:
+        snapshot = store.load_last_snapshot()
         if snapshot is None:
             return "차량 상태: 수동 모드\n등록된 주행거리가 없습니다. /주행거리 <km>로 등록하세요."
         details = [f"누적 주행거리: {snapshot.odometer_km:,}km"]
@@ -130,22 +148,22 @@ class CommandHandler:
             details.append(f"주행 가능 거리: {snapshot.dte_km:,}km")
         else:
             details.append("주행 가능 거리: 확인 필요")
-        tire_change = self.store.get_latest_tire_change()
+        tire_change = store.get_latest_tire_change()
         if tire_change is not None:
             tire_name = {"winter_tires": "윈터타이어", "all_season_tires": "사계절타이어"}[tire_change.tire_type]
             odometer_text = "주행거리 미입력" if tire_change.odometer_km is None else f"{tire_change.odometer_km:,}km"
             details.append(f"최근 타이어 교체: {tire_name} ({odometer_text})")
-        details.extend(self._next_maintenance_status(snapshot))
+        details.extend(self._next_maintenance_status(snapshot, store))
         return "\n".join(details)
 
-    def _set_odometer(self, parts: list[str]) -> str:
+    def _set_odometer(self, parts: list[str], store) -> str:
         if len(parts) != 2:
             return self._usage()
         odometer_km = self._parse_odometer(parts[1])
         if odometer_km is None:
             return self._usage()
-        previous = self.store.load_last_snapshot()
-        self.store.save_snapshot(
+        previous = store.load_last_snapshot()
+        store.save_snapshot(
             VehicleSnapshot(
                 observed_at=datetime.now(timezone.utc),
                 odometer_km=odometer_km,
@@ -153,48 +171,48 @@ class CommandHandler:
                 warnings=frozenset() if previous is None else previous.warnings,
             )
         )
-        alerts = self._maintenance_alerts(odometer_km, _today_in_korea())
+        alerts = self._maintenance_alerts(odometer_km, _today_in_korea(), store)
         return "\n".join([f"주행거리 등록 완료: {odometer_km:,}km", *(alert.text for alert in alerts)])
 
-    def _complete_maintenance(self, parts: list[str]) -> str:
+    def _complete_maintenance(self, parts: list[str], store) -> str:
         if len(parts) not in (2, 3):
             return self._usage()
         item = self._ITEM_ALIASES.get(parts[1])
         if item is None:
             return self._usage()
-        odometer_km = self._parse_odometer(parts[2]) if len(parts) == 3 else self._current_odometer()
+        odometer_km = self._parse_odometer(parts[2]) if len(parts) == 3 else self._current_odometer(store)
         if len(parts) == 3 and odometer_km is None:
             return self._usage()
-        self.store.complete_maintenance(item, odometer_km, _today_in_korea())
+        store.complete_maintenance(item, odometer_km, _today_in_korea())
         item_name = parts[1]
         odometer_text = "주행거리 미입력" if odometer_km is None else f"{odometer_km:,}km"
         return f"{item_name} 정비 완료: {odometer_text}"
 
-    def _complete_tire_change(self, parts: list[str]) -> str:
+    def _complete_tire_change(self, parts: list[str], store) -> str:
         if len(parts) != 2:
             return self._usage()
         tire_type = self._TIRE_ALIASES.get(parts[1])
         if tire_type is None:
             return self._usage()
         today = _today_in_korea()
-        odometer_km = self._current_odometer()
-        self.store.record_tire_change(tire_type, odometer_km, today)
-        self.store.set_alert_state(f"seasonal:{tire_type}:{today.year}", "active")
+        odometer_km = self._current_odometer(store)
+        store.record_tire_change(tire_type, odometer_km, today)
+        store.set_alert_state(f"seasonal:{tire_type}:{today.year}", "active")
         odometer_text = "주행거리 미입력" if odometer_km is None else f"{odometer_km:,}km"
         return f"{parts[1]}타이어 교체 완료: {odometer_text}"
 
-    def _current_odometer(self) -> int | None:
-        snapshot = self.store.load_last_snapshot()
+    def _current_odometer(self, store) -> int | None:
+        snapshot = store.load_last_snapshot()
         return None if snapshot is None else snapshot.odometer_km
 
-    def _maintenance_alerts(self, odometer_km: int, today: date):
-        records = {item: self.store.get_maintenance(item) for item in MAINTENANCE_RULES}
+    def _maintenance_alerts(self, odometer_km: int, today: date, store):
+        records = {item: store.get_maintenance(item) for item in MAINTENANCE_RULES}
         return evaluate_maintenance(odometer_km, today, records)
 
-    def _next_maintenance_status(self, snapshot: VehicleSnapshot) -> list[str]:
+    def _next_maintenance_status(self, snapshot: VehicleSnapshot, store) -> list[str]:
         alerts = {
             alert.key: alert.text
-            for alert in self._maintenance_alerts(snapshot.odometer_km, _today_in_korea())
+            for alert in self._maintenance_alerts(snapshot.odometer_km, _today_in_korea(), store)
         }
         details = ["다음 정비:"]
         for item, name in (("engine_oil", "엔진오일"), ("transmission_oil", "미션오일"), ("fuel_filter", "연료필터")):
@@ -202,7 +220,7 @@ class CommandHandler:
             if alert:
                 details.append(alert)
                 continue
-            record = self.store.get_maintenance(item)
+            record = store.get_maintenance(item)
             if record is None or record.odometer_km is None:
                 details.append(f"{name}: 정비 이력 확인 필요")
                 continue
@@ -254,3 +272,7 @@ class CommandHandler:
 
 def _today_in_korea() -> date:
     return datetime.now(ZoneInfo("Asia/Seoul")).date()
+
+
+def _is_idempotent_update_id(update_id: int | None) -> bool:
+    return isinstance(update_id, int) and not isinstance(update_id, bool) and update_id >= 0

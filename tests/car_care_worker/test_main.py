@@ -236,7 +236,52 @@ class RunOnceTests(unittest.TestCase):
             self.assertIsNone(failed_offset)
             self.assertEqual(store.get_alert_state("maintenance:engine_oil"), "inactive")
             self.assertEqual(successful_offset, 8)
-            self.assertEqual(len(telegram.attempts), 2)
+        self.assertEqual(len(telegram.attempts), 2)
+
+    def test_failed_tire_response_reuses_result_after_handler_restart(self) -> None:
+        class RetryingTelegram:
+            def __init__(self, should_send: bool) -> None:
+                self.should_send = should_send
+                self.attempts: list[str] = []
+
+            def poll(self, _offset=None) -> list[TelegramUpdate]:
+                return [TelegramUpdate("123", "/타이어교체 윈터", update_id=41)]
+
+            def send(self, text: str) -> bool:
+                self.attempts.append(text)
+                return self.should_send
+
+        class DisabledHyundai:
+            def fetch_snapshot(self) -> HyundaiFetchResult:
+                return HyundaiFetchResult.disabled()
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "car-care.sqlite3"
+            first_store = CarCareStore(path)
+            first_store.initialize()
+            first_telegram = RetryingTelegram(False)
+            first_offset = run_once(
+                CommandHandler(first_store, allowed_chat_id="123"),
+                first_telegram,
+                DisabledHyundai(),
+                _MonitorFake(),
+            )
+
+            second_store = CarCareStore(path)
+            second_telegram = RetryingTelegram(True)
+            second_offset = run_once(
+                CommandHandler(second_store, allowed_chat_id="123"),
+                second_telegram,
+                DisabledHyundai(),
+                _MonitorFake(),
+            )
+
+            self.assertIsNone(first_offset)
+            self.assertEqual(second_offset, 42)
+            self.assertEqual(first_telegram.attempts, second_telegram.attempts)
+            with second_store._connect() as db:
+                count = db.execute("SELECT COUNT(*) FROM tire_changes").fetchone()[0]
+            self.assertEqual(count, 1)
 
 
 if __name__ == "__main__":
