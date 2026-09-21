@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Barrier, Event, Thread, current_thread
 from unittest.mock import patch
 
 from tests._test_support import prepare_service_import
@@ -358,6 +359,303 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
 
         notify.assert_called_once()
         self.assertEqual(notify.call_args.args[0][0]["market_topic"], "원유")
+
+    def test_concurrent_direct_collections_preserve_both_articles(self):
+        """Fails if two RSS snapshots overwrite each other's archive write."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}, clear=False):
+                news_archive = self.reload_news_archive()
+                barrier = Barrier(2)
+                errors = []
+
+                def collect(category, limit):
+                    barrier.wait(timeout=2)
+                    return [{"url": f"https://example.com/{category}", "title": category, "source": "RSS"}]
+
+                def run(category):
+                    try:
+                        news_archive.collect_korean_news(category, limit=1, force_refresh=True)
+                    except Exception as error:  # pragma: no cover - asserted below
+                        errors.append(error)
+
+                with patch.object(news_archive, "collect_korean_news_from_sources", side_effect=collect):
+                    threads = [Thread(target=run, args=(category,)) for category in ("KR_IT", "KR_AI")]
+                    for thread in threads:
+                        thread.start()
+                    for thread in threads:
+                        thread.join(timeout=3)
+
+                self.assertFalse(any(thread.is_alive() for thread in threads))
+                self.assertEqual(errors, [])
+                self.assertEqual(
+                    {article["url"] for article in news_archive._load_archive()["articles"]},
+                    {"https://example.com/KR_IT", "https://example.com/KR_AI"},
+                )
+
+    def test_digest_ack_preserves_pending_added_while_notifier_runs(self):
+        """Fails if a successful digest ack writes a stale pending snapshot."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}, clear=False):
+                news_archive = self.reload_news_archive()
+                now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+                news_archive._save_archive({
+                    "updated_at": "", "articles": [], "telegram_notifications_initialized": True,
+                    "telegram_last_digest_at": (now - timedelta(hours=1)).isoformat(),
+                    "telegram_pending_articles": [{"url": "https://example.com/selected", "title": "국제유가 상승"}],
+                })
+                sending = Event()
+                release = Event()
+                sender_errors = []
+
+                def notify(_articles):
+                    sending.set()
+                    self.assertTrue(release.wait(timeout=2))
+                    return True
+
+                with patch.object(news_archive, "notify_market_news_digest", side_effect=notify):
+                    def send_digest_from_current_snapshot():
+                        try:
+                            news_archive._queue_and_send_general_digest(now)
+                        except Exception as error:  # pragma: no cover - asserted below
+                            sender_errors.append(error)
+
+                    sender = Thread(target=send_digest_from_current_snapshot)
+                    sender.start()
+                    try:
+                        self.assertTrue(sending.wait(timeout=2))
+                        news_archive._commit_collected_articles(
+                            "KR_WORLD",
+                            [news_archive._attach_archive_metadata(
+                                {"url": "https://example.com/new", "title": "새 시장 기사", "source": "Investing.com 한국어"},
+                                category="KR_WORLD",
+                                now=now,
+                            )],
+                            now,
+                        )
+                    finally:
+                        release.set()
+                        sender.join(timeout=3)
+
+                self.assertFalse(sender.is_alive())
+                self.assertEqual(sender_errors, [])
+                self.assertEqual(
+                    [article["url"] for article in news_archive._load_archive()["telegram_pending_articles"]],
+                    ["https://example.com/new"],
+                )
+
+    def test_direct_and_background_collections_preserve_both_articles(self):
+        """Fails if a background refresh saves an archive snapshot from before a direct refresh."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}, clear=False):
+                news_archive = self.reload_news_archive()
+                barrier = Barrier(2)
+                errors = []
+
+                def collect(category, limit):
+                    barrier.wait(timeout=2)
+                    return [{"url": f"https://example.com/{category}", "title": category, "source": "RSS"}]
+
+                def direct():
+                    try:
+                        news_archive.collect_korean_news("KR_IT", limit=1, force_refresh=True)
+                    except Exception as error:  # pragma: no cover - asserted below
+                        errors.append(error)
+
+                with patch.object(news_archive, "collect_korean_news_from_sources", side_effect=collect):
+                    thread = Thread(target=direct)
+                    thread.start()
+                    news_archive._refresh_category("KR_AI", limit=1)
+                    thread.join(timeout=3)
+
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(
+                    {article["url"] for article in news_archive._load_archive()["articles"]},
+                    {"https://example.com/KR_IT", "https://example.com/KR_AI"},
+                )
+
+    def test_rss_and_telegram_calls_do_not_hold_archive_lock(self):
+        """Fails if an external RSS or Telegram call blocks archive writers."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}, clear=False):
+                news_archive = self.reload_news_archive()
+                now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+                news_archive._save_archive({
+                    "updated_at": "", "articles": [], "telegram_notifications_initialized": True,
+                    "telegram_last_digest_at": (now - timedelta(hours=1)).isoformat(),
+                    "telegram_pending_articles": [{"url": "https://example.com/oil", "title": "국제유가 상승"}],
+                })
+
+                def lock_is_available():
+                    acquired = []
+                    def probe():
+                        got_lock = news_archive._ARCHIVE_WRITE_LOCK.acquire(blocking=False)
+                        acquired.append(got_lock)
+                        if got_lock:
+                            news_archive._ARCHIVE_WRITE_LOCK.release()
+                    thread = Thread(target=probe)
+                    thread.start()
+                    thread.join(timeout=2)
+                    self.assertFalse(thread.is_alive())
+                    return acquired == [True]
+
+                with patch.object(
+                    news_archive,
+                    "collect_korean_news_from_sources",
+                    side_effect=lambda **_kwargs: (self.assertTrue(lock_is_available()) or []),
+                ), patch.object(
+                    news_archive,
+                    "notify_market_news_digest",
+                    side_effect=lambda _articles: self.assertTrue(lock_is_available()) or True,
+                ):
+                    news_archive.collect_korean_news("KR_IT", limit=1, force_refresh=True)
+                    news_archive._queue_and_send_general_digest(now)
+
+    def test_digest_failure_or_exception_keeps_pending_articles(self):
+        """Fails if a failed digest acknowledges selected pending articles."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "news_archive.json"
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(archive_path)}, clear=False):
+                news_archive = self.reload_news_archive()
+                now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+
+                for notifier in (False, RuntimeError("telegram unavailable")):
+                    news_archive._save_archive({
+                        "updated_at": "", "articles": [], "telegram_notifications_initialized": True,
+                        "telegram_last_digest_at": (now - timedelta(hours=1)).isoformat(),
+                        "telegram_pending_articles": [{"url": "https://example.com/oil", "title": "국제유가 상승"}],
+                    })
+                    patch_args = {"side_effect": notifier} if isinstance(notifier, Exception) else {"return_value": notifier}
+                    with patch.object(news_archive, "notify_market_news_digest", **patch_args):
+                        if isinstance(notifier, Exception):
+                            with self.assertRaises(RuntimeError):
+                                news_archive._queue_and_send_general_digest(now)
+                        else:
+                            news_archive._queue_and_send_general_digest(now)
+
+                    self.assertEqual(
+                        [article["url"] for article in news_archive._load_archive()["telegram_pending_articles"]],
+                        ["https://example.com/oil"],
+                    )
+
+    def test_concurrent_general_articles_enqueue_once_each(self):
+        """Fails if concurrent ordinary KR_WORLD collection loses or duplicates pending URLs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}, clear=False):
+                news_archive = self.reload_news_archive()
+                now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+                news_archive._save_archive({
+                    "updated_at": "", "articles": [], "telegram_notifications_initialized": True,
+                    "telegram_last_digest_at": now.isoformat(),
+                    "telegram_pending_articles": [{"url": "https://example.com/existing", "title": "기존 시장 기사"}],
+                })
+                barrier = Barrier(2)
+                errors = []
+
+                def collect(category, limit):
+                    barrier.wait(timeout=2)
+                    article_id = current_thread().name
+                    return [{"url": f"https://example.com/{article_id}", "title": f"{article_id} 시장 기사", "source": "Investing.com 한국어"}]
+
+                def run(category):
+                    try:
+                        news_archive.collect_korean_news(category, limit=1, force_refresh=True)
+                    except Exception as error:  # pragma: no cover - asserted below
+                        errors.append(error)
+
+                with patch.object(news_archive, "_now", return_value=now), patch.object(
+                    news_archive, "collect_korean_news_from_sources", side_effect=collect
+                ), patch.object(news_archive, "notify_market_news_digest") as digest_notify, patch.object(
+                    news_archive, "notify_new_investing_articles"
+                ):
+                    threads = [Thread(target=run, args=("KR_WORLD",), name=f"pending-{index}") for index in (1, 2)]
+                    for thread in threads:
+                        thread.start()
+                    for thread in threads:
+                        thread.join(timeout=3)
+
+                self.assertFalse(any(thread.is_alive() for thread in threads))
+                self.assertEqual(errors, [])
+                pending_urls = [
+                    article["url"] for article in news_archive._load_archive()["telegram_pending_articles"]
+                ]
+                self.assertEqual(
+                    set(pending_urls),
+                    {"https://example.com/existing", "https://example.com/pending-1", "https://example.com/pending-2"},
+                )
+                self.assertEqual(len(pending_urls), len(set(pending_urls)))
+                digest_notify.assert_not_called()
+
+    def test_list_purge_and_normalize_do_not_overwrite_concurrent_collection(self):
+        """Fails if list purge saves its stale normalized snapshot after collection commits."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}, clear=False):
+                news_archive = self.reload_news_archive()
+                now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+                retained = {
+                    "url": "https://example.com/retained", "title": "보존 기사", "summary": "<b>정규화 내용</b>",
+                    "category": "KR_IT", "collected_at": now.isoformat(), "expires_at": (now + timedelta(days=1)).isoformat(),
+                }
+                expired = {
+                    "url": "https://example.com/expired", "title": "만료 기사", "category": "KR_IT",
+                    "collected_at": (now - timedelta(days=10)).isoformat(), "expires_at": (now - timedelta(days=1)).isoformat(),
+                }
+                news_archive._save_archive({"updated_at": "", "articles": [retained, expired], "telegram_notifications_initialized": True})
+                entered_purge = Event()
+                release_purge = Event()
+                errors = []
+                original_purge = news_archive._purge_archive
+
+                def purge_with_list_pause(archive, current_now):
+                    if current_thread().name == "list-purge-thread":
+                        entered_purge.set()
+                        self.assertTrue(release_purge.wait(timeout=2))
+                    return original_purge(archive, current_now)
+
+                def list_articles():
+                    try:
+                        news_archive.list_recent_news(korean_only=True)
+                    except Exception as error:  # pragma: no cover - asserted below
+                        errors.append(error)
+
+                def collect_article():
+                    try:
+                        news_archive.collect_korean_news("KR_AI", limit=1, force_refresh=True)
+                    except Exception as error:  # pragma: no cover - asserted below
+                        errors.append(error)
+
+                with patch.object(news_archive, "_now", return_value=now), patch.object(
+                    news_archive, "_purge_archive", side_effect=purge_with_list_pause
+                ), patch.object(
+                    news_archive, "collect_korean_news_from_sources",
+                    return_value=[{"url": "https://example.com/new", "title": "새 기사", "source": "RSS"}],
+                ):
+                    lister = Thread(target=list_articles, name="list-purge-thread")
+                    lister.start()
+                    collector = None
+                    try:
+                        self.assertTrue(entered_purge.wait(timeout=2))
+                        collector = Thread(target=collect_article, name="collector-thread")
+                        collector.start()
+                    finally:
+                        release_purge.set()
+                        lister.join(timeout=3)
+                        if collector is not None:
+                            collector.join(timeout=3)
+
+                self.assertFalse(lister.is_alive())
+                self.assertIsNotNone(collector)
+                self.assertFalse(collector.is_alive())
+                self.assertEqual(errors, [])
+                archive = news_archive._load_archive()
+                self.assertEqual(
+                    {article["url"] for article in archive["articles"]},
+                    {"https://example.com/retained", "https://example.com/new"},
+                )
+                self.assertEqual(
+                    next(article for article in archive["articles"] if article["url"] == "https://example.com/retained")["summary"],
+                    "정규화 내용",
+                )
 
 
 if __name__ == "__main__":
