@@ -31,6 +31,16 @@ router = APIRouter()
 templates = Jinja2Templates(directory=Path(__file__).resolve().parents[1] / "templates")
 
 
+def homeops_scheduler_secret_valid(provided: str, configured: str | None = None) -> bool:
+    configured = os.getenv("HOMEOPS_SCHEDULER_SECRET", "") if configured is None else configured
+    if not configured:
+        return False
+    try:
+        return secrets.compare_digest(provided, configured)
+    except (TypeError, UnicodeError):
+        return False
+
+
 @router.get("/admin/security")
 def admin_security_status(request: Request, x_security_password: str = Header(default="")):
     _require_security_password(request, x_security_password)
@@ -157,8 +167,7 @@ def homeops_execute(incident_id: str, request: Request, password: str = Form(def
 
 @router.post("/internal/homeops/scan")
 def homeops_scheduled_scan(x_homeops_scheduler_secret: str = Header(default="")):
-    configured = os.getenv("HOMEOPS_SCHEDULER_SECRET", "")
-    if not configured or not secrets.compare_digest(x_homeops_scheduler_secret, configured):
+    if not homeops_scheduler_secret_valid(x_homeops_scheduler_secret):
         raise HTTPException(status_code=403, detail="scheduler_access_denied")
     homeops = get_homeops_service()
     host = get_dashboard_status().get("host") or {}

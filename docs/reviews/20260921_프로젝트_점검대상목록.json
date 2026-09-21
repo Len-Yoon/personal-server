@@ -1,0 +1,2484 @@
+{
+  "commit": "773d648082a98bab8736e3297c153d62d166fb14",
+  "scope": "Git 추적 파일 목록 및 언어별 구문 검사. 개별 파일의 완전한 동작 검증을 의미하지 않음.",
+  "files": [
+    {
+      "path": ".env.example",
+      "kind": "text",
+      "lines": 86,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".gitattributes",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".github/dependabot.yml",
+      "kind": "text",
+      "lines": 206,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".github/workflows/agent-review.yml",
+      "kind": "text",
+      "lines": 40,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "kind": "text",
+      "lines": 215,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".github/workflows/deploy-n100.yml",
+      "kind": "text",
+      "lines": 108,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".github/workflows/public-uptime-monitor-path.yml",
+      "kind": "text",
+      "lines": 275,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".github/workflows/public-uptime-monitor.yml",
+      "kind": "text",
+      "lines": 300,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".github/workflows/trivy-security.yml",
+      "kind": "text",
+      "lines": 36,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".gitignore",
+      "kind": "text",
+      "lines": 64,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/2026-08-11-security-hardening/final-fixes-report.md",
+      "kind": "text",
+      "lines": 68,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/2026-08-11-security-hardening/task-1-report.md",
+      "kind": "text",
+      "lines": 169,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/2026-08-22-car-care-telegram/task-3-report.md",
+      "kind": "text",
+      "lines": 65,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/2026-08-22-car-care-telegram/task-4-report.md",
+      "kind": "text",
+      "lines": 130,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/2026-08-25-kst-display-unification/news-invalid-hidden-fix-report.md",
+      "kind": "text",
+      "lines": 56,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/2026-08-25-kst-display-unification/news-naive-browser-fix-report.md",
+      "kind": "text",
+      "lines": 43,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/2026-08-25-kst-display-unification/portal-time-parser-fix-report.md",
+      "kind": "text",
+      "lines": 54,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/2026-08-25-kst-display-unification/task-3-hidden-invalid-fix-report.md",
+      "kind": "text",
+      "lines": 53,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-02-alertmanager-fixed-template/task-3-fix-report.md",
+      "kind": "text",
+      "lines": 5,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-02-k3s-telegram-sre-alerting/final-fix-report.md",
+      "kind": "text",
+      "lines": 93,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-02-k3s-telegram-sre-alerting/release-gate-fix-report.md",
+      "kind": "text",
+      "lines": 170,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-03-portal-pvc-backup/final-fix-report.md",
+      "kind": "text",
+      "lines": 79,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-03-portal-pvc-backup/lock-fix-report.md",
+      "kind": "text",
+      "lines": 27,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-03-portal-pvc-backup/release-fix-report.md",
+      "kind": "text",
+      "lines": 55,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-11-sre-operations-p1-p3/task-4-report.md",
+      "kind": "text",
+      "lines": 36,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/book-ui-report.md",
+      "kind": "text",
+      "lines": 39,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/final-review-fixer-report.md",
+      "kind": "text",
+      "lines": 67,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/helm-status-version-fix-report.md",
+      "kind": "text",
+      "lines": 45,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/news-hub-ui-report.md",
+      "kind": "text",
+      "lines": 56,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": ".superpowers/sdd/preflight-linux-stat-fix-report.md",
+      "kind": "text",
+      "lines": 48,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "AGENTS.md",
+      "kind": "text",
+      "lines": 101,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "CLAUDE.md",
+      "kind": "text",
+      "lines": 33,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "README.md",
+      "kind": "text",
+      "lines": 151,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "book-memo/Dockerfile",
+      "kind": "text",
+      "lines": 21,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "book-memo/app/__init__.py",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "book-memo/app/data/logs/.gitkeep",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "book-memo/app/main.py",
+      "kind": "text",
+      "lines": 670,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "book-memo/app/services/__init__.py",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "book-memo/app/services/book_search.py",
+      "kind": "text",
+      "lines": 170,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "book-memo/app/services/book_service.py",
+      "kind": "text",
+      "lines": 613,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "book-memo/app/services/datetime_format.py",
+      "kind": "text",
+      "lines": 20,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "book-memo/app/services/host_urls.py",
+      "kind": "text",
+      "lines": 63,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "book-memo/app/services/toc_service.py",
+      "kind": "text",
+      "lines": 162,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "book-memo/app/static/css/style.css",
+      "kind": "text",
+      "lines": 833,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "book-memo/app/templates/auth_login.html",
+      "kind": "text",
+      "lines": 29,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "book-memo/app/templates/book_detail.html",
+      "kind": "text",
+      "lines": 350,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "book-memo/app/templates/home.html",
+      "kind": "text",
+      "lines": 384,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "book-memo/requirements.txt",
+      "kind": "text",
+      "lines": 5,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "caddy/Caddyfile",
+      "kind": "text",
+      "lines": 62,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "caddy/Dockerfile",
+      "kind": "text",
+      "lines": 16,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "car-care-worker/Dockerfile",
+      "kind": "text",
+      "lines": 17,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "car-care-worker/app/__init__.py",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "car-care-worker/app/main.py",
+      "kind": "text",
+      "lines": 164,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "car-care-worker/app/models.py",
+      "kind": "text",
+      "lines": 24,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "car-care-worker/app/services/__init__.py",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "car-care-worker/app/services/hyundai.py",
+      "kind": "text",
+      "lines": 305,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "car-care-worker/app/services/maintenance.py",
+      "kind": "text",
+      "lines": 95,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "car-care-worker/app/services/oauth_callback.py",
+      "kind": "text",
+      "lines": 104,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "car-care-worker/app/services/store.py",
+      "kind": "text",
+      "lines": 141,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "car-care-worker/app/services/telegram.py",
+      "kind": "text",
+      "lines": 256,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "car-care-worker/app/services/vehicle_monitor.py",
+      "kind": "text",
+      "lines": 158,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "car-care-worker/requirements.txt",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "crawler-worker/Dockerfile",
+      "kind": "text",
+      "lines": 21,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "crawler-worker/app/__init__.py",
+      "kind": "text",
+      "lines": 0,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/crawlers/__init__.py",
+      "kind": "text",
+      "lines": 0,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/crawlers/google_news_rss.py",
+      "kind": "text",
+      "lines": 48,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/crawlers/investing_news_rss.py",
+      "kind": "text",
+      "lines": 130,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/crawlers/news_quality.py",
+      "kind": "text",
+      "lines": 139,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/crawlers/rss_news.py",
+      "kind": "text",
+      "lines": 198,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/data/logs/.gitkeep",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "crawler-worker/app/main.py",
+      "kind": "text",
+      "lines": 96,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/routers/__init__.py",
+      "kind": "text",
+      "lines": 0,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/routers/news.py",
+      "kind": "text",
+      "lines": 199,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/services/__init__.py",
+      "kind": "text",
+      "lines": 0,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/services/datetime_format.py",
+      "kind": "text",
+      "lines": 30,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/services/host_urls.py",
+      "kind": "text",
+      "lines": 67,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/services/nasdaq_relevance.py",
+      "kind": "text",
+      "lines": 204,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/services/news_archive.py",
+      "kind": "text",
+      "lines": 619,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/services/news_archive_notifications.py",
+      "kind": "text",
+      "lines": 11,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/services/news_archive_processing.py",
+      "kind": "text",
+      "lines": 61,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/services/news_archive_storage.py",
+      "kind": "text",
+      "lines": 102,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/services/news_collection_metrics.py",
+      "kind": "text",
+      "lines": 46,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/services/news_collection_status.py",
+      "kind": "text",
+      "lines": 126,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/services/news_scheduler.py",
+      "kind": "text",
+      "lines": 48,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/services/news_sources.py",
+      "kind": "text",
+      "lines": 68,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/services/telegram_notifier.py",
+      "kind": "text",
+      "lines": 100,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "crawler-worker/app/static/css/style.css",
+      "kind": "text",
+      "lines": 968,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "crawler-worker/app/templates/base.html",
+      "kind": "text",
+      "lines": 40,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "crawler-worker/app/templates/home.html",
+      "kind": "text",
+      "lines": 61,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "crawler-worker/app/templates/saved.html",
+      "kind": "text",
+      "lines": 91,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "crawler-worker/app/templates/search.html",
+      "kind": "text",
+      "lines": 343,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "crawler-worker/requirements.txt",
+      "kind": "text",
+      "lines": 8,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docker-compose.n100.yml",
+      "kind": "text",
+      "lines": 271,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docker-compose.portal-bridge.yml",
+      "kind": "text",
+      "lines": 27,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docker-compose.yml",
+      "kind": "text",
+      "lines": 212,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/README.md",
+      "kind": "text",
+      "lines": 33,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/agent-handoff.md",
+      "kind": "text",
+      "lines": 62,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/agent-loop-evidence.md",
+      "kind": "text",
+      "lines": 145,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/cloudflare-tunnel.md",
+      "kind": "text",
+      "lines": 63,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/codex-work-loop.md",
+      "kind": "text",
+      "lines": 129,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/images/admin-status.png",
+      "kind": "binary",
+      "lines": null,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/images/book-memo.png",
+      "kind": "binary",
+      "lines": null,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/images/car-care-telegram-status.png",
+      "kind": "binary",
+      "lines": null,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/images/file-manager.png",
+      "kind": "binary",
+      "lines": null,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/images/grafana-k3s-overview.png",
+      "kind": "binary",
+      "lines": null,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/images/news-hub.png",
+      "kind": "binary",
+      "lines": null,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/images/personal-server-architecture-v2.svg",
+      "kind": "text",
+      "lines": 107,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/images/portal-dashboard.png",
+      "kind": "binary",
+      "lines": null,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/images/youtube-memo.png",
+      "kind": "binary",
+      "lines": null,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/n100-github-auto-deploy.md",
+      "kind": "text",
+      "lines": 141,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/n100-mt4-setup.md",
+      "kind": "text",
+      "lines": 114,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/n100-remote-development.md",
+      "kind": "text",
+      "lines": 95,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/operations-reference.md",
+      "kind": "text",
+      "lines": 224,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/operations-roadmap.md",
+      "kind": "text",
+      "lines": 62,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/portfolio-content.md",
+      "kind": "text",
+      "lines": 62,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/public-uptime-monitor.md",
+      "kind": "text",
+      "lines": 124,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/recovery-drill.md",
+      "kind": "text",
+      "lines": 117,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/slo-baseline.md",
+      "kind": "text",
+      "lines": 129,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-07-compose-container-hardening.md",
+      "kind": "text",
+      "lines": 152,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-07-p4-news-collection-observability.md",
+      "kind": "text",
+      "lines": 80,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-08-n100-auto-recovery.md",
+      "kind": "text",
+      "lines": 176,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-08-operations-roadmap.md",
+      "kind": "text",
+      "lines": 49,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-09-unattended-recovery-sre.md",
+      "kind": "text",
+      "lines": 320,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-10-security-recovery-phase-1.md",
+      "kind": "text",
+      "lines": 156,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-11-portal-pvc-backup-cronjob.md",
+      "kind": "text",
+      "lines": 216,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-12-backup-remote-preflight-retry.md",
+      "kind": "text",
+      "lines": 44,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-12-nonroot-container-hardening.md",
+      "kind": "text",
+      "lines": 51,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-12-security-p1-p2-hardening.md",
+      "kind": "text",
+      "lines": 59,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-14-grafana-portal-http-dashboard.md",
+      "kind": "text",
+      "lines": 127,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-14-p0-boot-keepalive.md",
+      "kind": "text",
+      "lines": 205,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-14-p2-postboot-recovery.md",
+      "kind": "text",
+      "lines": 171,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-15-ci-test-matrix.md",
+      "kind": "text",
+      "lines": 99,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-15-p1-daily-slo-evidence.md",
+      "kind": "text",
+      "lines": 210,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-16-k3s-app-migration.md",
+      "kind": "text",
+      "lines": 331,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-16-p1-observability-repair.md",
+      "kind": "text",
+      "lines": 21,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-16-p2-monitoring-path.md",
+      "kind": "text",
+      "lines": 215,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-17-book-memo-k3s-runtime-reconciliation.md",
+      "kind": "text",
+      "lines": 77,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-17-crawler-worker-k3s-cutover.md",
+      "kind": "text",
+      "lines": 257,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-17-youtube-memo-k3s-cutover.md",
+      "kind": "text",
+      "lines": 199,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-18-postboot-history.md",
+      "kind": "text",
+      "lines": 145,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-18-relay-probe-separation.md",
+      "kind": "text",
+      "lines": 111,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-18-search-status-news-freshness.md",
+      "kind": "text",
+      "lines": 123,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-20-k3s-runtime-upgrade.md",
+      "kind": "text",
+      "lines": 66,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-07-compose-container-hardening-design.md",
+      "kind": "text",
+      "lines": 57,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-07-news-collection-observability-design.md",
+      "kind": "text",
+      "lines": 55,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-08-n100-auto-recovery-design.md",
+      "kind": "text",
+      "lines": 61,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-08-operations-roadmap-design.md",
+      "kind": "text",
+      "lines": 27,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-09-unattended-recovery-design.md",
+      "kind": "text",
+      "lines": 158,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-10-security-recovery-phase-1-design.md",
+      "kind": "text",
+      "lines": 58,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-11-portal-pvc-backup-cronjob-design.md",
+      "kind": "text",
+      "lines": 70,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-11-sre-operations-p1-p3-design.md",
+      "kind": "text",
+      "lines": 52,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-12-backup-remote-preflight-retry-design.md",
+      "kind": "text",
+      "lines": 23,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-12-nonroot-container-hardening-design.md",
+      "kind": "text",
+      "lines": 33,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-12-quarterly-k3s-sre-audit-design.md",
+      "kind": "text",
+      "lines": 34,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-12-quarterly-sre-audit-design.md",
+      "kind": "text",
+      "lines": 67,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-12-security-p1-p2-hardening-design.md",
+      "kind": "text",
+      "lines": 47,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-14-grafana-portal-http-dashboard-design.md",
+      "kind": "text",
+      "lines": 28,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-14-p0-boot-keepalive-design.md",
+      "kind": "text",
+      "lines": 74,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-14-p2-postboot-recovery-design.md",
+      "kind": "text",
+      "lines": 73,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-14-recovery-lab-rbac-minimum-design.md",
+      "kind": "text",
+      "lines": 33,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-15-ci-test-matrix-design.md",
+      "kind": "text",
+      "lines": 38,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-15-monthly-sre-audit-design.md",
+      "kind": "text",
+      "lines": 48,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-15-p1-daily-slo-evidence-design.md",
+      "kind": "text",
+      "lines": 104,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-16-k3s-app-migration-design.md",
+      "kind": "text",
+      "lines": 131,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-16-p1-observability-repair-design.md",
+      "kind": "text",
+      "lines": 39,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-16-p2-monitoring-path-design.md",
+      "kind": "text",
+      "lines": 77,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-17-crawler-worker-k3s-cutover-design.md",
+      "kind": "text",
+      "lines": 104,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-17-youtube-memo-k3s-cutover-design.md",
+      "kind": "text",
+      "lines": 96,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-18-relay-postboot-observability-design.md",
+      "kind": "text",
+      "lines": 78,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-18-search-status-news-freshness-design.md",
+      "kind": "text",
+      "lines": 59,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-20-k3s-runtime-upgrade-design.md",
+      "kind": "text",
+      "lines": 72,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "homeops-executor/Dockerfile",
+      "kind": "text",
+      "lines": 14,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "homeops-executor/app/__init__.py",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "homeops-executor/app/main.py",
+      "kind": "text",
+      "lines": 65,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "homeops-executor/app/services/__init__.py",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "homeops-executor/app/services/docker_ops.py",
+      "kind": "text",
+      "lines": 141,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "homeops-executor/app/services/runtime_state.py",
+      "kind": "text",
+      "lines": 50,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "homeops-executor/docker-api-proxy-nginx.conf",
+      "kind": "text",
+      "lines": 20,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "homeops-executor/docker-api-proxy.conf",
+      "kind": "text",
+      "lines": 44,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "homeops-executor/requirements.txt",
+      "kind": "text",
+      "lines": 4,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/README.md",
+      "kind": "text",
+      "lines": 240,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/apps/book-memo.yaml",
+      "kind": "text",
+      "lines": 90,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/apps/crawler-worker.yaml",
+      "kind": "text",
+      "lines": 92,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/apps/youtube-memo.yaml",
+      "kind": "text",
+      "lines": 90,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/backup-automation/Dockerfile",
+      "kind": "text",
+      "lines": 15,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/backup-automation/personal-server-portal-pvc-backup.service.tmpl",
+      "kind": "text",
+      "lines": 23,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/backup-automation/personal-server-portal-pvc-backup.timer.tmpl",
+      "kind": "text",
+      "lines": 10,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/backup-automation/portal-pvc-backup-cronjob.yaml",
+      "kind": "text",
+      "lines": 194,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/monitoring/portal-http-dashboard.yaml",
+      "kind": "text",
+      "lines": 63,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/monitoring/values.n100.yaml",
+      "kind": "text",
+      "lines": 66,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/slo-evidence/Dockerfile",
+      "kind": "text",
+      "lines": 14,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/slo-evidence/slo-daily-evidence-cronjob.yaml",
+      "kind": "text",
+      "lines": 99,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/sre-audit-automation/Dockerfile",
+      "kind": "text",
+      "lines": 15,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/sre-audit-automation/personal-server-quarterly-sre-audit.service.tmpl",
+      "kind": "text",
+      "lines": 19,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/sre-audit-automation/personal-server-quarterly-sre-audit.timer.tmpl",
+      "kind": "text",
+      "lines": 10,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/sre-audit-automation/quarterly-sre-audit-cronjob.yaml",
+      "kind": "text",
+      "lines": 462,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/sre-telegram/alertmanager-config.contract.yaml",
+      "kind": "text",
+      "lines": 20,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/sre-telegram/alertmanager-values.yaml",
+      "kind": "text",
+      "lines": 6,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/sre-telegram/alertmanager.yaml.tmpl",
+      "kind": "text",
+      "lines": 17,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/sre-telegram/base.yaml",
+      "kind": "text",
+      "lines": 215,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/sre-telegram/crawler-news-observability.yaml",
+      "kind": "text",
+      "lines": 22,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/sre-telegram/portal-http-observability.yaml",
+      "kind": "text",
+      "lines": 21,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/sre-telegram/prometheus-rule.yaml",
+      "kind": "text",
+      "lines": 95,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/tools/book-memo-cutover.sh",
+      "kind": "text",
+      "lines": 398,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/book-memo-prepare.sh",
+      "kind": "text",
+      "lines": 427,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/check-portal-backup-evidence.sh",
+      "kind": "text",
+      "lines": 36,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/crawler-worker-cutover.sh",
+      "kind": "text",
+      "lines": 500,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/crawler-worker-prepare.sh",
+      "kind": "text",
+      "lines": 427,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/install-transition-runner.sh",
+      "kind": "text",
+      "lines": 55,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/k3s-app-image-build.sh",
+      "kind": "text",
+      "lines": 52,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/k3s-app-image-import.sh",
+      "kind": "text",
+      "lines": 171,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/k3s-app-upgrade.sh",
+      "kind": "text",
+      "lines": 235,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/monitoring-dashboard-apply.sh",
+      "kind": "text",
+      "lines": 54,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/monitoring-install.sh",
+      "kind": "text",
+      "lines": 74,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/monitoring-preflight.sh",
+      "kind": "text",
+      "lines": 65,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/monitoring-uninstall.sh",
+      "kind": "text",
+      "lines": 40,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/monitoring-verify.sh",
+      "kind": "text",
+      "lines": 80,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/monthly-recovery-drill.sh",
+      "kind": "text",
+      "lines": 98,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/portal-backup-verify.sh",
+      "kind": "text",
+      "lines": 118,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/portal-cutover.sh",
+      "kind": "text",
+      "lines": 1447,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/portal-nodeport-connectivity-smoke.sh",
+      "kind": "text",
+      "lines": 125,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/portal-pvc-backup-automation.sh",
+      "kind": "text",
+      "lines": 229,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/portal-pvc-backup-cronjob.sh",
+      "kind": "text",
+      "lines": 149,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/portal-pvc-backup-verify.sh",
+      "kind": "text",
+      "lines": 620,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/portal-secret-shadow-smoke.sh",
+      "kind": "text",
+      "lines": 155,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/quarterly-sre-audit-automation.sh",
+      "kind": "text",
+      "lines": 407,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/quarterly-sre-audit-runner.sh",
+      "kind": "text",
+      "lines": 387,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/slo-daily-evidence.py",
+      "kind": "text",
+      "lines": 336,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "infra/k8s/tools/sre-health-audit.sh",
+      "kind": "text",
+      "lines": 123,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/sre-pod-recovery-lab.sh",
+      "kind": "text",
+      "lines": 90,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/sre-telegram-install.sh",
+      "kind": "text",
+      "lines": 339,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/sre-telegram-preflight.sh",
+      "kind": "text",
+      "lines": 148,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/sre-telegram-secret-template.sh",
+      "kind": "text",
+      "lines": 28,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/sre-telegram-verify.sh",
+      "kind": "text",
+      "lines": 131,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/transition-runner-preflight.sh",
+      "kind": "text",
+      "lines": 21,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/validate-backup-evidence.py",
+      "kind": "text",
+      "lines": 135,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "infra/k8s/tools/validate-sre-alertmanager-config.py",
+      "kind": "text",
+      "lines": 157,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "infra/k8s/tools/validate-transition-runner-policy.py",
+      "kind": "text",
+      "lines": 69,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "infra/k8s/tools/youtube-memo-cutover.sh",
+      "kind": "text",
+      "lines": 444,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/tools/youtube-memo-prepare.sh",
+      "kind": "text",
+      "lines": 427,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "infra/k8s/transition-runner/policy/runner-policy.json",
+      "kind": "text",
+      "lines": 11,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/transition-runner/runner/personal-server-transition-runner",
+      "kind": "text",
+      "lines": 36,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "infra/k8s/transition-runner/systemd/personal-server-transition.service",
+      "kind": "text",
+      "lines": 22,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "portal-web/Dockerfile",
+      "kind": "text",
+      "lines": 17,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "portal-web/app/main.py",
+      "kind": "text",
+      "lines": 113,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "portal-web/app/routers/__init__.py",
+      "kind": "text",
+      "lines": 0,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "portal-web/app/routers/admin.py",
+      "kind": "text",
+      "lines": 238,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "portal-web/app/routers/dashboard.py",
+      "kind": "text",
+      "lines": 149,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "portal-web/app/routers/files.py",
+      "kind": "text",
+      "lines": 339,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "portal-web/app/routers/portfolio.py",
+      "kind": "text",
+      "lines": 151,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "portal-web/app/services/__init__.py",
+      "kind": "text",
+      "lines": 0,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "portal-web/app/services/admin_status.py",
+      "kind": "text",
+      "lines": 72,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "portal-web/app/services/file_store.py",
+      "kind": "text",
+      "lines": 273,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "portal-web/app/services/global_search.py",
+      "kind": "text",
+      "lines": 156,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "portal-web/app/services/homeops.py",
+      "kind": "text",
+      "lines": 531,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "portal-web/app/services/homeops_notifier.py",
+      "kind": "text",
+      "lines": 58,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "portal-web/app/services/host_urls.py",
+      "kind": "text",
+      "lines": 90,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "portal-web/app/services/http_metrics.py",
+      "kind": "text",
+      "lines": 67,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "portal-web/app/services/news_api_client.py",
+      "kind": "text",
+      "lines": 0,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "portal-web/app/services/portfolio_store.py",
+      "kind": "text",
+      "lines": 47,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "portal-web/app/services/security.py",
+      "kind": "text",
+      "lines": 324,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "portal-web/app/services/system_status.py",
+      "kind": "text",
+      "lines": 147,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "portal-web/app/static/css/portfolio.css",
+      "kind": "text",
+      "lines": 207,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "portal-web/app/static/css/style.css",
+      "kind": "text",
+      "lines": 1666,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "portal-web/app/templates/admin_status.html",
+      "kind": "text",
+      "lines": 285,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "portal-web/app/templates/base.html",
+      "kind": "text",
+      "lines": 24,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "portal-web/app/templates/dashboard.html",
+      "kind": "text",
+      "lines": 130,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "portal-web/app/templates/file_login.html",
+      "kind": "text",
+      "lines": 21,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "portal-web/app/templates/files.html",
+      "kind": "text",
+      "lines": 500,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "portal-web/app/templates/portfolio.html",
+      "kind": "text",
+      "lines": 23,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "portal-web/app/templates/portfolio_editor.html",
+      "kind": "text",
+      "lines": 5,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "portal-web/app/templates/portfolio_login.html",
+      "kind": "text",
+      "lines": 5,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "portal-web/requirements.txt",
+      "kind": "text",
+      "lines": 7,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "scripts/classify-n100-safe-deployment.py",
+      "kind": "text",
+      "lines": 212,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "scripts/deploy-n100-safe.sh",
+      "kind": "text",
+      "lines": 625,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "scripts/deploy-n100.sh",
+      "kind": "text",
+      "lines": 250,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "scripts/maintenance.py",
+      "kind": "text",
+      "lines": 166,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "scripts/n100-remote-dev-remote.sh",
+      "kind": "text",
+      "lines": 280,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "scripts/n100-remote-dev.sh",
+      "kind": "text",
+      "lines": 100,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "scripts/record_token_measurement.py",
+      "kind": "text",
+      "lines": 70,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "scripts/run_change_harness.py",
+      "kind": "text",
+      "lines": 247,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "scripts/runtime-service-state-reader.py",
+      "kind": "text",
+      "lines": 101,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "scripts/runtime-service-state.sh",
+      "kind": "text",
+      "lines": 47,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "scripts/setup-local-test-venvs.py",
+      "kind": "text",
+      "lines": 174,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "scripts/summarize_token_measurements.py",
+      "kind": "text",
+      "lines": 111,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "scripts/verify-n100-deployment-health.sh",
+      "kind": "text",
+      "lines": 133,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "scripts/verify-n100-safe-deployment-health.sh",
+      "kind": "text",
+      "lines": 130,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "scripts/verify_change_scope.py",
+      "kind": "text",
+      "lines": 273,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "scripts/windows-bootstrap.ps1",
+      "kind": "text",
+      "lines": 1233,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "scripts/windows-bootstrap.sh",
+      "kind": "text",
+      "lines": 357,
+      "syntax_check": "bash -n 통과"
+    },
+    {
+      "path": "sre-telegram-relay/Dockerfile",
+      "kind": "text",
+      "lines": 11,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "sre-telegram-relay/app/main.py",
+      "kind": "text",
+      "lines": 1162,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "system-agent/Dockerfile",
+      "kind": "text",
+      "lines": 14,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "system-agent/app/__init__.py",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "system-agent/app/main.py",
+      "kind": "text",
+      "lines": 61,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "system-agent/app/services/__init__.py",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "system-agent/app/services/metrics.py",
+      "kind": "text",
+      "lines": 345,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "system-agent/requirements.txt",
+      "kind": "text",
+      "lines": 3,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "tests/__init__.py",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/_test_support.py",
+      "kind": "text",
+      "lines": 26,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/book_memo/__init__.py",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/book_memo/test_book_service.py",
+      "kind": "text",
+      "lines": 121,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/book_memo/test_ui_contract.py",
+      "kind": "text",
+      "lines": 516,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/car_care_worker/__init__.py",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/car_care_worker/test_hyundai.py",
+      "kind": "text",
+      "lines": 162,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/car_care_worker/test_main.py",
+      "kind": "text",
+      "lines": 243,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/car_care_worker/test_maintenance.py",
+      "kind": "text",
+      "lines": 57,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/car_care_worker/test_oauth_callback.py",
+      "kind": "text",
+      "lines": 62,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/car_care_worker/test_store.py",
+      "kind": "text",
+      "lines": 77,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/car_care_worker/test_telegram.py",
+      "kind": "text",
+      "lines": 216,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/car_care_worker/test_vehicle_monitor.py",
+      "kind": "text",
+      "lines": 202,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/ci_test_matrix.json",
+      "kind": "text",
+      "lines": 74,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "tests/crawler_worker/__init__.py",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/crawler_worker/test_datetime_format.py",
+      "kind": "text",
+      "lines": 47,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/crawler_worker/test_investing_news_rss.py",
+      "kind": "text",
+      "lines": 117,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/crawler_worker/test_nasdaq_relevance.py",
+      "kind": "text",
+      "lines": 234,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/crawler_worker/test_news_collection_metrics.py",
+      "kind": "text",
+      "lines": 121,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/crawler_worker/test_news_collection_status.py",
+      "kind": "text",
+      "lines": 131,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/crawler_worker/test_news_routes.py",
+      "kind": "text",
+      "lines": 606,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/crawler_worker/test_news_scheduler.py",
+      "kind": "text",
+      "lines": 50,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/crawler_worker/test_news_service.py",
+      "kind": "text",
+      "lines": 364,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/crawler_worker/test_rss_news.py",
+      "kind": "text",
+      "lines": 105,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/crawler_worker/test_telegram_notifier.py",
+      "kind": "text",
+      "lines": 130,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/file_explorer_client.test.mjs",
+      "kind": "text",
+      "lines": 209,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "tests/fixtures/change_harness/blocked_path.json",
+      "kind": "text",
+      "lines": 15,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "tests/fixtures/change_harness/failed_check.json",
+      "kind": "text",
+      "lines": 15,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "tests/fixtures/change_harness/incomplete_check.json",
+      "kind": "text",
+      "lines": 15,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "tests/fixtures/change_harness/ready_documentation.json",
+      "kind": "text",
+      "lines": 15,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "tests/fixtures/change_harness/ready_service.json",
+      "kind": "text",
+      "lines": 15,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "tests/fixtures/change_harness/unclassified_path.json",
+      "kind": "text",
+      "lines": 15,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "tests/homeops_executor/__init__.py",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/homeops_executor/test_docker_ops.py",
+      "kind": "text",
+      "lines": 483,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/news_auto_refresh_client.test.mjs",
+      "kind": "text",
+      "lines": 254,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "tests/run_service_tests.py",
+      "kind": "text",
+      "lines": 121,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/system_agent/__init__.py",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/system_agent/test_metrics.py",
+      "kind": "text",
+      "lines": 321,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_caddy_portal_upstream.py",
+      "kind": "text",
+      "lines": 133,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_change_harness.py",
+      "kind": "text",
+      "lines": 233,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_change_harness_evals.py",
+      "kind": "text",
+      "lines": 60,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_compose_config.py",
+      "kind": "text",
+      "lines": 631,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_dependabot_config.py",
+      "kind": "text",
+      "lines": 183,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_deploy_n100.py",
+      "kind": "text",
+      "lines": 522,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_documentation_index.py",
+      "kind": "text",
+      "lines": 330,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_file_access.py",
+      "kind": "text",
+      "lines": 509,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_homeops.py",
+      "kind": "text",
+      "lines": 745,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_homeops_notifier.py",
+      "kind": "text",
+      "lines": 51,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k3s_app_image_build.py",
+      "kind": "text",
+      "lines": 77,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k3s_app_image_transfer.py",
+      "kind": "text",
+      "lines": 521,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k3s_app_upgrade.py",
+      "kind": "text",
+      "lines": 390,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_book_memo_migration.py",
+      "kind": "text",
+      "lines": 934,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_crawler_worker_migration.py",
+      "kind": "text",
+      "lines": 1070,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_grafana_portal_http_dashboard.py",
+      "kind": "text",
+      "lines": 35,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_monitoring_tools.py",
+      "kind": "text",
+      "lines": 615,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_monitoring_values.py",
+      "kind": "text",
+      "lines": 91,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_portal_availability_alert.py",
+      "kind": "text",
+      "lines": 55,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_portal_backup_verify.py",
+      "kind": "text",
+      "lines": 154,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_portal_cutover.py",
+      "kind": "text",
+      "lines": 1509,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_portal_nodeport_connectivity_smoke.py",
+      "kind": "text",
+      "lines": 96,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_portal_nonroot.py",
+      "kind": "text",
+      "lines": 195,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_portal_pvc_backup_automation.py",
+      "kind": "text",
+      "lines": 288,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_portal_pvc_backup_cronjob.py",
+      "kind": "text",
+      "lines": 177,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_portal_pvc_backup_cronjob_install.py",
+      "kind": "text",
+      "lines": 133,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_portal_pvc_backup_verify.py",
+      "kind": "text",
+      "lines": 1021,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_portal_secret_shadow_smoke.py",
+      "kind": "text",
+      "lines": 120,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_quarterly_sre_audit_automation.py",
+      "kind": "text",
+      "lines": 618,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_quarterly_sre_audit_cronjob.py",
+      "kind": "text",
+      "lines": 775,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_slo_daily_evidence.py",
+      "kind": "text",
+      "lines": 507,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_sre_health_audit.py",
+      "kind": "text",
+      "lines": 148,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_sre_pod_recovery_lab.py",
+      "kind": "text",
+      "lines": 152,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_sre_telegram_manifests.py",
+      "kind": "text",
+      "lines": 400,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_sre_telegram_tools.py",
+      "kind": "text",
+      "lines": 1135,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_transition_runner_artifacts.py",
+      "kind": "text",
+      "lines": 40,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_transition_runner_install_tools.py",
+      "kind": "text",
+      "lines": 78,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_transition_runner_policy.py",
+      "kind": "text",
+      "lines": 57,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_k8s_youtube_memo_migration.py",
+      "kind": "text",
+      "lines": 960,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_maintenance.py",
+      "kind": "text",
+      "lines": 55,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_monthly_recovery_drill.py",
+      "kind": "text",
+      "lines": 207,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_n100_remote_dev.py",
+      "kind": "text",
+      "lines": 580,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_n100_safe_deployment.py",
+      "kind": "text",
+      "lines": 1170,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_portal_dashboard.py",
+      "kind": "text",
+      "lines": 694,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_portal_http_metrics.py",
+      "kind": "text",
+      "lines": 94,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_portal_k3s_bridge_contract.py",
+      "kind": "text",
+      "lines": 128,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_portal_security.py",
+      "kind": "text",
+      "lines": 302,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_portfolio.py",
+      "kind": "text",
+      "lines": 232,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_public_uptime_monitor.py",
+      "kind": "text",
+      "lines": 226,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_python_multipart_security.py",
+      "kind": "text",
+      "lines": 32,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_run_service_tests.py",
+      "kind": "text",
+      "lines": 111,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_runtime_service_deployment_contract.py",
+      "kind": "text",
+      "lines": 403,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_runtime_service_state.py",
+      "kind": "text",
+      "lines": 262,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_setup_local_test_venvs.py",
+      "kind": "text",
+      "lines": 80,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_sre_telegram_relay.py",
+      "kind": "text",
+      "lines": 1250,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_supply_chain_security_workflow.py",
+      "kind": "text",
+      "lines": 46,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_token_measurements.py",
+      "kind": "text",
+      "lines": 286,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_validate_backup_evidence.py",
+      "kind": "text",
+      "lines": 143,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_validate_sre_alertmanager_config.py",
+      "kind": "text",
+      "lines": 228,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_verify_change_scope.py",
+      "kind": "text",
+      "lines": 578,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/test_windows_bootstrap.py",
+      "kind": "text",
+      "lines": 1199,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/youtube_memo/__init__.py",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/youtube_memo/test_ui_contract.py",
+      "kind": "text",
+      "lines": 520,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "tests/youtube_memo/test_video_titles.py",
+      "kind": "text",
+      "lines": 84,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "youtube-memo/Dockerfile",
+      "kind": "text",
+      "lines": 21,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "youtube-memo/app/__init__.py",
+      "kind": "text",
+      "lines": 0,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "youtube-memo/app/data/logs/.gitkeep",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "youtube-memo/app/main.py",
+      "kind": "text",
+      "lines": 492,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "youtube-memo/app/services/__init__.py",
+      "kind": "text",
+      "lines": 1,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "youtube-memo/app/services/datetime_format.py",
+      "kind": "text",
+      "lines": 20,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "youtube-memo/app/services/host_urls.py",
+      "kind": "text",
+      "lines": 63,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "youtube-memo/app/services/memo_service.py",
+      "kind": "text",
+      "lines": 371,
+      "syntax_check": "Python AST 통과"
+    },
+    {
+      "path": "youtube-memo/app/static/css/style.css",
+      "kind": "text",
+      "lines": 728,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "youtube-memo/app/templates/auth_login.html",
+      "kind": "text",
+      "lines": 29,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "youtube-memo/app/templates/home.html",
+      "kind": "text",
+      "lines": 154,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "youtube-memo/app/templates/video_detail.html",
+      "kind": "text",
+      "lines": 231,
+      "syntax_check": "해당 없음"
+    },
+    {
+      "path": "youtube-memo/requirements.txt",
+      "kind": "text",
+      "lines": 5,
+      "syntax_check": "해당 없음"
+    }
+  ]
+}
