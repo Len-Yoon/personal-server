@@ -14,6 +14,7 @@ def empty_archive() -> dict[str, object]:
         "updated_at": "",
         "articles": [],
         "telegram_notifications_initialized": False,
+        "telegram_outbox": [],
     }
 
 
@@ -32,6 +33,7 @@ def load_archive(
     sanitize_article: Callable[[dict[str, Any]], dict[str, Any]],
     notification_articles: Callable[[Any], list[dict[str, Any]]],
     notification_times: Callable[[Any], dict[str, str]],
+    notification_outbox: Callable[[Any], list[dict[str, Any]]],
     save_archive: Callable[[dict[str, Any]], None],
 ) -> dict[str, Any]:
     if not path.exists():
@@ -71,6 +73,7 @@ def load_archive(
         "telegram_pending_articles": notification_articles(data.get("telegram_pending_articles", [])),
         "telegram_recent_articles": notification_articles(data.get("telegram_recent_articles", [])),
         "telegram_topic_last_sent_at": notification_times(data.get("telegram_topic_last_sent_at", {})),
+        "telegram_outbox": notification_outbox(data.get("telegram_outbox", [])),
     }
     if changed:
         try:
