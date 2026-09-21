@@ -107,3 +107,11 @@ N100 안전 자동 배포 작업에 한해 변경 분류 계약(`scripts/classif
 자동 대상은 `crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker`의 허용된 Compose 변경으로 제한함. Portal, K3s, Kubernetes Secret·PVC·운영 데이터, Caddy, 서버 bootstrap 및 scheduler는 계속 제외하며, 해당 경로가 섞인 변경은 배포하지 않고 차단함.
 
 N100 자동복구 예외는 위 안전 자동배포 정책의 대상이 아니며, 자동복구 변경이 포함된 브랜치는 별도 운영 검토와 사용자 승인 없이는 배포하지 않음.
+
+## 운영 표시 파일 누락 차단 보완 승인
+
+- 사용자가 2026-09-21 `AGENTS.md` 변경과 운영 표시 파일 누락 시 배포 차단을 위한 코드·테스트 보완 및 연속 진행을 명시 승인함. 같은 범위의 승인을 다시 요청하지 않음.
+- 허용 경로는 `scripts/runtime-service-state-reader.py`, `scripts/runtime-service-state.sh`, `scripts/deploy-n100-safe.sh`와 직접 관련 테스트·계획·운영 지침 문서임. 기존 기본 동작의 호환성을 유지하되 안전 배포에서는 신뢰 가능한 표시 파일과 서비스별 명시 값을 필수로 검증함.
+- 성공 기준은 파일 부재·서비스 값 누락·중복·불신 상태에서 Docker 동작 전 중단, 명시 Compose 정상 경로 및 K3s 배포 제외 유지임. 실제 배포를 수행하지 않는 fake 기반 회귀와 독립 운영 검토를 필수로 함.
+- 코드·테스트·문서 준비, 검증, 커밋·push·PR 및 운영 적용을 유발하지 않는 저장소 병합까지 승인 범위에 포함함. 실제 N100 접속 변경·운영 표시 파일 변경·배포·서비스 재시작·K3s·PVC·Secret·Caddy·Tunnel 변경은 포함하지 않음.
+- 이번 보완은 뉴스 수집 PR과 별도로 검증·반영함. 자동 배포를 회피할 목적으로 변경을 섞거나 workflow·분류 정책을 변경하지 않음. 운영 배포를 유발하는 PR 병합은 기존 승인 경계를 유지함.

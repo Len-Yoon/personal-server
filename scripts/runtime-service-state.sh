@@ -36,8 +36,15 @@ _parse_runtime_service_state_file() {
 }
 
 load_service_runtime_state() {
-    [[ $# -eq 1 && -n ${1:-} ]] || return 1
-    python3 "${BASH_SOURCE[0]%/*}/runtime-service-state-reader.py" "$RUNTIME_SERVICE_STATE_FILE"
+    [[ $# -ge 1 && $# -le 2 && -n ${1:-} ]] || return 1
+    if [[ $# -eq 2 && ${2:-} != --require-explicit ]]; then
+        return 1
+    fi
+    if [[ $# -eq 2 ]]; then
+        python3 "${BASH_SOURCE[0]%/*}/runtime-service-state-reader.py" "$RUNTIME_SERVICE_STATE_FILE" "$2"
+    else
+        python3 "${BASH_SOURCE[0]%/*}/runtime-service-state-reader.py" "$RUNTIME_SERVICE_STATE_FILE"
+    fi
 }
 
 # Explicit test-only seam; production callers must use load_service_runtime_state.

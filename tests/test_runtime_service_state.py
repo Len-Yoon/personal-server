@@ -1,12 +1,25 @@
+import contextlib
+import importlib.util
+import io
+import os
 import subprocess
 import textwrap
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).parents[1]
 LOADER = REPO_ROOT / "scripts" / "runtime-service-state.sh"
 READER = REPO_ROOT / "scripts" / "runtime-service-state-reader.py"
+
+
+def load_reader_module():
+    spec = importlib.util.spec_from_file_location("runtime_service_state_reader", READER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def run_state_loader(project_root: Path) -> subprocess.CompletedProcess[str]:
@@ -43,7 +56,104 @@ def run_reader(state_file: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def run_strict_production_loader(state_file: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; RUNTIME_SERVICE_STATE_FILE="$2"; load_service_runtime_state ignored --require-explicit',
+            "loader-test",
+            str(LOADER),
+            str(state_file),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 class RuntimeServiceStateTests(unittest.TestCase):
+    def test_strict_reader_requires_a_complete_explicit_state_before_output(self):
+        """Removing an explicit service row must not turn a safe deploy into Compose."""
+        reader = load_reader_module()
+        cases = (
+            None,
+            "",
+            "crawler-worker=compose\n",
+            "crawler-worker=compose\ncrawler-worker=k3s\nyoutube-memo=compose\nbook-memo=compose\n",
+        )
+        for contents in cases:
+            with self.subTest(contents=contents):
+                project_root = self._temporary_project()
+                try:
+                    state = project_root / "state"
+                    if contents is not None:
+                        state.write_text(contents, encoding="utf-8")
+                    output = io.StringIO()
+                    with self._trusted_reader(reader, state), contextlib.redirect_stdout(output):
+                        result = reader.read_state(str(state), require_explicit=True)
+                    self.assertNotEqual(result, 0)
+                    self.assertEqual(output.getvalue(), "")
+                finally:
+                    self._remove_project(project_root)
+
+    def test_strict_reader_outputs_complete_explicit_k3s_and_compose_state(self):
+        """A complete trusted marker still communicates each writer's ownership."""
+        reader = load_reader_module()
+        project_root = self._temporary_project()
+        try:
+            state = project_root / "state"
+            state.write_text(
+                "crawler-worker=k3s\nyoutube-memo=compose\nbook-memo=k3s\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with self._trusted_reader(reader, state), contextlib.redirect_stdout(output):
+                result = reader.read_state(str(state), require_explicit=True)
+            self.assertEqual(result, 0)
+            self.assertEqual(
+                output.getvalue(),
+                "crawler-worker=k3s\nyoutube-memo=compose\nbook-memo=k3s\n",
+            )
+        finally:
+            self._remove_project(project_root)
+
+    def test_default_reader_keeps_partial_state_compose_compatible(self):
+        reader = load_reader_module()
+        project_root = self._temporary_project()
+        try:
+            state = project_root / "state"
+            state.write_text("crawler-worker=k3s\n", encoding="utf-8")
+            output = io.StringIO()
+            with self._trusted_reader(reader, state), contextlib.redirect_stdout(output):
+                result = reader.read_state(str(state))
+            self.assertEqual(result, 0)
+            self.assertEqual(
+                output.getvalue(),
+                "crawler-worker=k3s\nyoutube-memo=compose\nbook-memo=compose\n",
+            )
+        finally:
+            self._remove_project(project_root)
+
+    def test_strict_loader_passes_the_reader_option_for_a_missing_marker(self):
+        project_root = self._temporary_project()
+        try:
+            result = run_strict_production_loader(project_root / "missing.state")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("explicit state file is required", result.stderr)
+        finally:
+            self._remove_project(project_root)
+
+    def test_reader_rejects_unknown_cli_option(self):
+        result = subprocess.run(
+            ["python3", str(READER), "/missing", "--not-supported"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid option", result.stderr)
+
     def test_unknown_service_in_runtime_state_is_rejected(self):
         project_root = self._temporary_project()
         try:
@@ -256,6 +366,25 @@ class RuntimeServiceStateTests(unittest.TestCase):
         import shutil
 
         shutil.rmtree(project_root)
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _trusted_reader(reader, state: Path):
+        """Model a root-owned marker while retaining the real open/read path."""
+        real_lstat = os.lstat
+        real_fstat = os.fstat
+
+        def root_owned(info):
+            values = list(info)
+            values[4] = 0
+            return os.stat_result(values)
+
+        with (
+            mock.patch.object(reader, "trusted_directory_hierarchy", return_value=True),
+            mock.patch.object(reader.os, "lstat", side_effect=lambda path: root_owned(real_lstat(path))),
+            mock.patch.object(reader.os, "fstat", side_effect=lambda fd: root_owned(real_fstat(fd))),
+        ):
+            yield
 
 
 if __name__ == "__main__":
