@@ -57,7 +57,7 @@
 
 | 단계 | 상태 | 근거 | 후속 조치 | 비고 |
 |---|---|---|---|---|
-| 9차 차량 명령 멱등성 | 전체 PR CI 통과 | [PR #234](https://github.com/Len-Yoon/personal-server/pull/234), Car 67·maintenance 475·독립 검토 통과 | 운영 승인 범위에서 병합 | Compose 배포·보조 테이블 생성 영향 |
+| 9차 차량 명령 멱등성 | 전체 PR CI 통과 | [PR #234](https://github.com/Len-Yoon/personal-server/pull/234), Car 67·maintenance 475·독립 검토 통과 | 운영 승인 완료; health 정상 확인 후 병합 | Compose 배포·보조 테이블 생성 영향 |
 | 10차 뉴스 알림 영속화 | PR #236 병합 · 0207064 | [F15 계획](20260921_뉴스알림영속화_구현계획.md), Crawler104·maintenance475·전체 PR CI | 별도 운영 승인 시 K3s 적용 | 운영 적용 미수행 |
 
 ## 확인 필요 사항 및 후속 조치
