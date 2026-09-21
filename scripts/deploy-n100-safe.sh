@@ -102,7 +102,7 @@ load_runtime_service_modes() {
   [[ -f "$PROJECT_ROOT/scripts/runtime-service-state.sh" && ! -L "$PROJECT_ROOT/scripts/runtime-service-state.sh" ]] || return 1
   # shellcheck source=runtime-service-state.sh
   source "$PROJECT_ROOT/scripts/runtime-service-state.sh"
-  state="$(load_service_runtime_state "$PROJECT_ROOT")" || return 1
+  state="$(load_service_runtime_state "$PROJECT_ROOT" --require-explicit)" || return 1
   while IFS='=' read -r service mode; do
     case "$service:$mode" in
       crawler-worker:compose|crawler-worker:k3s) [[ "$crawler_worker_seen" -eq 0 ]] || return 1; CRAWLER_WORKER_RUNTIME_MODE="$mode"; crawler_worker_seen=1 ;;
