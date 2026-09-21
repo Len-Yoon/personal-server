@@ -270,6 +270,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         capture_release_permissions: bool = False,
         runtime_state: str | None = None,
         runtime_states: tuple[str, ...] | None = None,
+        runtime_state_missing: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], str, str | None]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "project"
@@ -426,6 +427,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "#!/bin/sh\n"
                 "case \"${1:-}\" in\n"
                 "  *runtime-service-state-reader.py)\n"
+                "    if [ \"${3:-}\" = --require-explicit ] && [ \"${FAKE_RUNTIME_STATE_MISSING:-0}\" = 1 ]; then exit 1; fi\n"
                 "    count=0; [ -f \"${FAKE_RUNTIME_STATE_COUNTER}\" ] && count=$(cat \"${FAKE_RUNTIME_STATE_COUNTER}\")\n"
                 "    count=$((count + 1)); printf '%s' \"$count\" > \"${FAKE_RUNTIME_STATE_COUNTER}\"\n"
                 "    state_file=\"${FAKE_RUNTIME_STATE_DIRECTORY}/$count\"\n"
@@ -462,6 +464,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "FAKE_RUNTIME_STATE_DIRECTORY": str(runtime_state_directory),
                 "FAKE_RUNTIME_STATE_COUNTER": str(Path(directory) / "runtime-state-counter"),
                 "FAKE_RUNTIME_STATE_COUNT": str(len(configured_runtime_states)),
+                "FAKE_RUNTIME_STATE_MISSING": "1" if runtime_state_missing else "0",
                 "N100_SAFE_DEPLOY_HEALTH_MAX_ATTEMPTS": "1",
                 "N100_SAFE_DEPLOY_HEALTH_INTERVAL_SECONDS": "0",
             }
@@ -634,6 +637,16 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("docker compose", calls)
         self.assertNotIn("git archive", calls)
+        self.assertIsNone(saved_state)
+
+    def test_missing_runtime_state_refuses_before_docker_deploy(self):
+        result, calls, saved_state = self.run_safe_deploy(runtime_state_missing=True)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("docker compose", calls)
+        self.assertNotIn("git archive", calls)
+        self.assertNotIn("docker stop", calls)
+        self.assertNotIn("docker start", calls)
         self.assertIsNone(saved_state)
 
     def test_car_care_deploy_aligns_host_data_and_approved_oauth_volume(self):
