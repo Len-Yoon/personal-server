@@ -87,6 +87,97 @@ class BookMemoServiceTests(unittest.TestCase):
 
             self.assertEqual([book["title"] for book in books], ["읽는 중 책", "읽을 예정 책", "완료 책"])
 
+    def test_get_and_list_preserve_manual_progress_without_chapters(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            book_service = self.reload_book_service(tempdir)
+            book = book_service.create_or_get_book({"isbn": "9780000000006", "title": "수동 진행 책"})
+            book_service.update_progress(
+                book["id"],
+                reading_status="보류",
+                current_page=140,
+                current_chapter="중간",
+                progress_percent=35,
+            )
+            fixed_timestamp = "2020-01-02 03:04:05"
+            with book_service._connect() as connection:
+                connection.execute(
+                    "UPDATE books SET updated_at = ? WHERE id = ?",
+                    (fixed_timestamp, book["id"]),
+                )
+                before = connection.execute(
+                    "SELECT * FROM books WHERE id = ?", (book["id"],)
+                ).fetchone()
+
+            self.assertEqual(book_service.get_book(book["id"])["progress_percent"], 35)
+            self.assertEqual(book_service.get_book(book["id"])["reading_status"], "보류")
+            self.assertEqual(book_service.list_books()[0]["progress_percent"], 35)
+            self.assertEqual(book_service.list_books()[0]["reading_status"], "보류")
+
+            with book_service._connect() as connection:
+                after = connection.execute(
+                    "SELECT * FROM books WHERE id = ?", (book["id"],)
+                ).fetchone()
+            self.assertEqual(dict(after), dict(before))
+
+    def test_get_and_list_compute_progress_from_chapters_without_writing(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            book_service = self.reload_book_service(tempdir)
+            book = book_service.create_or_get_book({"isbn": "9780000000007", "title": "목차 진행 책"})
+            book_service.create_chapters(book["id"], ["1장", "2장", "3장"])
+            chapters = book_service.list_chapters(book["id"])
+            with book_service._connect() as connection:
+                connection.execute(
+                    "UPDATE book_chapters SET is_done = 1 WHERE id IN (?, ?)",
+                    (chapters[0]["id"], chapters[1]["id"]),
+                )
+                connection.execute(
+                    "UPDATE books SET progress_percent = 99, reading_status = '보류', updated_at = ? WHERE id = ?",
+                    ("2020-01-02 03:04:05", book["id"]),
+                )
+                before = connection.execute(
+                    "SELECT * FROM books WHERE id = ?", (book["id"],)
+                ).fetchone()
+
+            listed = book_service.list_books()[0]
+            fetched = book_service.get_book(book["id"])
+            self.assertEqual(listed["progress_percent"], 67)
+            self.assertEqual(fetched["progress_percent"], 67)
+            self.assertEqual(listed["reading_status"], "읽는 중")
+            self.assertEqual(fetched["reading_status"], "읽는 중")
+
+            with book_service._connect() as connection:
+                after = connection.execute(
+                    "SELECT * FROM books WHERE id = ?", (book["id"],)
+                ).fetchone()
+            self.assertEqual(dict(after), dict(before))
+
+    def test_create_memo_rejects_chapter_from_another_book_without_side_effect(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            book_service = self.reload_book_service(tempdir)
+            book = book_service.create_or_get_book({"isbn": "9780000000008", "title": "메모 책"})
+            other_book = book_service.create_or_get_book({"isbn": "9780000000009", "title": "다른 책"})
+            book_service.create_chapter(other_book["id"], "다른 장")
+            chapter = book_service.list_chapters(other_book["id"])[0]
+
+            with self.assertRaises(ValueError):
+                book_service.create_memo(
+                    book["id"], chapter_id=chapter["id"], title="잘못된 메모", content="내용", page=1
+                )
+
+            self.assertEqual(book_service.list_memos(book["id"]), [])
+
+    def test_create_memo_rejects_missing_chapter_without_side_effect(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            book_service = self.reload_book_service(tempdir)
+            book = book_service.create_or_get_book({"isbn": "9780000000010", "title": "없는 장 책"})
+
+            with self.assertRaises(ValueError):
+                book_service.create_memo(
+                    book["id"], chapter_id=99999, title="잘못된 메모", content="내용", page=1
+                )
+
+            self.assertEqual(book_service.list_memos(book["id"]), [])
+
     def test_search_books_falls_back_to_google_books(self):
         os.environ.pop("ALADIN_TTB_KEY", None)
         book_search = self.reload_book_search()

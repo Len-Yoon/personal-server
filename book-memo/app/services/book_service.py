@@ -180,16 +180,30 @@ def get_book(book_id: int) -> dict[str, Any] | None:
     init_db()
 
     with _connect() as connection:
-        _sync_book_progress(connection, book_id)
         row = connection.execute(
-            "SELECT * FROM books WHERE id = ?",
+            """
+            SELECT
+                books.*,
+                COALESCE(chapter_counts.chapter_count, 0) AS chapter_count,
+                COALESCE(chapter_counts.done_chapter_count, 0) AS done_chapter_count
+            FROM books
+            LEFT JOIN (
+                SELECT
+                    book_id,
+                    COUNT(*) AS chapter_count,
+                    COALESCE(SUM(is_done), 0) AS done_chapter_count
+                FROM book_chapters
+                GROUP BY book_id
+            ) AS chapter_counts ON chapter_counts.book_id = books.id
+            WHERE books.id = ?
+            """,
             (book_id,),
         ).fetchone()
 
     if not row:
         return None
 
-    return _row_to_dict(row)
+    return _with_computed_progress(_row_to_dict(row))
 
 
 def delete_book(book_id: int) -> bool:
@@ -492,6 +506,22 @@ def create_memo(
         raise ValueError("메모 내용을 입력해주세요.")
 
     with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        book_row = connection.execute(
+            "SELECT id FROM books WHERE id = ?",
+            (book_id,),
+        ).fetchone()
+        if not book_row:
+            raise ValueError("책을 찾을 수 없습니다.")
+
+        if chapter_id is not None:
+            chapter_row = connection.execute(
+                "SELECT book_id FROM book_chapters WHERE id = ?",
+                (chapter_id,),
+            ).fetchone()
+            if not chapter_row or chapter_row["book_id"] != book_id:
+                raise ValueError("선택한 목차가 책에 속하지 않습니다.")
+
         connection.execute(
             """
             INSERT INTO book_memos (book_id, chapter_id, title, content, page)
@@ -567,6 +597,9 @@ def _sync_book_progress(connection: sqlite3.Connection, book_id: int) -> None:
 def _with_computed_progress(book: dict[str, Any]) -> dict[str, Any]:
     chapter_count = book.get("chapter_count", 0)
     done_chapter_count = book.get("done_chapter_count", 0)
+
+    if not chapter_count:
+        return book
 
     book["progress_percent"] = _calculate_progress_percent(done_chapter_count, chapter_count)
 
