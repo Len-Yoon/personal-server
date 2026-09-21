@@ -89,12 +89,14 @@ def save_upload(relative_path: str, upload: Any) -> int:
     _validate_upload_name(filename)
 
     destination = _safe_path(str(Path(relative_path) / filename))
-    if destination.exists():
-        raise FileExistsError("이미 같은 이름의 파일이 있습니다.")
-
     size = 0
     try:
-        with destination.open("wb") as output:
+        output = destination.open("xb")
+    except FileExistsError:
+        raise FileExistsError("이미 같은 이름의 파일이 있습니다.") from None
+
+    try:
+        with output:
             while True:
                 chunk = upload.file.read(CHUNK_SIZE)
                 if not chunk:
