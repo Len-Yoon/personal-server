@@ -3,7 +3,7 @@ import secrets
 from pathlib import Path
 
 from fastapi import APIRouter, Body, Form, Header, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.services.admin_status import (
@@ -45,7 +45,7 @@ def homeops_scheduler_secret_valid(provided: str, configured: str | None = None)
 def admin_security_status(request: Request, x_security_password: str = Header(default="")):
     _require_security_password(request, x_security_password)
     append_security_event("security_dashboard_viewed")
-    return _disable_cache(security_status())
+    return _disable_cache(JSONResponse(content=security_status()))
 
 
 @router.get("/admin/status")

@@ -79,7 +79,11 @@ def append_security_event(event: str, **details: Any) -> None:
 
 def append_user_event(event: str, **details: Any) -> None:
     if event not in _ALLOWED_USER_EVENTS:
-        append_security_event("user_event_blocked", reason="event_not_allowed", event=event)
+        append_security_event(
+            "user_event_blocked",
+            reason="event_not_allowed",
+            requested_event=_clean_detail(event),
+        )
         return
 
     append_security_event(
