@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import tempfile
 import unittest
@@ -260,6 +261,106 @@ class PortalDashboardTests(unittest.TestCase):
         results = self.search_with_news_payload(b'{"results": [null]}')
 
         self.assertEqual(results["news"], {"items": [], "status": "unavailable"})
+
+    def test_dashboard_search_get_uses_host_specific_service_result_urls(self):
+        environment = {
+            "DEMO_MODE": "",
+            "NEWS_SEARCH_URL": "http://crawler-worker:8001/api/search",
+            "YOUTUBE_SEARCH_URL": "http://youtube-memo:8002/api/search",
+            "BOOKS_SEARCH_URL": "http://book-memo:8003/api/search",
+        }
+
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return self.payload
+
+        def open_endpoint(url, timeout):
+            del timeout
+            if "crawler-worker" in url:
+                result = {"title": "뉴스 고유 결과", "url": "/articles/1"}
+            elif "youtube-memo" in url:
+                result = {"title": "유튜브 고유 결과", "url": "/videos/1"}
+            else:
+                result = {"title": "책 고유 결과", "url": "/books/1"}
+            return Response(json.dumps({"results": [result]}).encode("utf-8"))
+
+        expected_urls = {
+            "https://len.pe.kr": (
+                'href="https://news.len.pe.kr/articles/1"',
+                'href="https://memo.len.pe.kr/videos/1"',
+                'href="https://books.len.pe.kr/books/1"',
+            ),
+            "http://localhost": (
+                'href="http://127.0.0.1:8001/articles/1"',
+                'href="http://127.0.0.1:8002/videos/1"',
+                'href="http://127.0.0.1:8003/books/1"',
+            ),
+        }
+
+        with patch.dict(os.environ, environment, clear=False):
+            for base_url, urls in expected_urls.items():
+                with self.subTest(base_url=base_url):
+                    app = self.load_app()
+                    with patch("app.services.global_search.urlopen", side_effect=open_endpoint):
+                        with TestClient(app, base_url=base_url, raise_server_exceptions=False) as client:
+                            response = client.get("/?q=audit")
+
+                    self.assertEqual(response.status_code, 200)
+                    for expected_url in urls:
+                        self.assertIn(expected_url, response.text)
+
+    def test_dashboard_search_get_keeps_partial_empty_and_absolute_results(self):
+        environment = {
+            "DEMO_MODE": "",
+            "NEWS_SEARCH_URL": "http://crawler-worker:8001/api/search",
+            "YOUTUBE_SEARCH_URL": "http://youtube-memo:8002/api/search",
+            "BOOKS_SEARCH_URL": "http://book-memo:8003/api/search",
+        }
+
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return self.payload
+
+        def open_endpoint(url, timeout):
+            del timeout
+            if "crawler-worker" in url:
+                raise OSError("news unavailable")
+            if "youtube-memo" in url:
+                return Response(b'{"results": []}')
+            return Response(
+                '{"results": [{"title": "책 절대 결과", "url": "https://books.example/books/1"}]}'.encode(
+                    "utf-8"
+                )
+            )
+
+        with patch.dict(os.environ, environment, clear=False):
+            app = self.load_app()
+            with patch("app.services.global_search.urlopen", side_effect=open_endpoint):
+                with TestClient(app, base_url="https://len.pe.kr", raise_server_exceptions=False) as client:
+                    response = client.get("/?q=audit")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("현재 응답 없음", response.text)
+        self.assertIn("검색 결과가 없습니다.", response.text)
+        self.assertIn('href="https://books.example/books/1"', response.text)
 
     def test_dashboard_shows_unavailable_status_without_endpoint_details(self):
         app = self.load_app()

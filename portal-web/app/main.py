@@ -50,7 +50,13 @@ async def add_security_headers(request, call_next):
 
 @app.middleware("http")
 async def reject_cross_origin_unsafe_requests(request: Request, call_next):
-    if request.method in _SAFE_METHODS or request.headers.get("origin") == _request_origin(request):
+    scheduler_without_origin = (
+        request.method == "POST"
+        and request.url.path == "/internal/homeops/scan"
+        and "origin" not in request.headers
+        and admin.homeops_scheduler_secret_valid(request.headers.get("x-homeops-scheduler-secret", ""))
+    )
+    if request.method in _SAFE_METHODS or request.headers.get("origin") == _request_origin(request) or scheduler_without_origin:
         return await call_next(request)
 
     response = JSONResponse(

@@ -121,36 +121,74 @@ class HomeOpsService:
         unhealthy = self._needs_recovery(diagnostics)
         proposal = {"action": ALLOWED_ACTION if unhealthy else "no_action", "service": service, "requires_approval": bool(unhealthy),
                     "risk_level": "medium" if unhealthy else "low", "summary": "컨테이너 재시작 검토 필요" if unhealthy else "정상 상태: 조치 불필요", "evidence": diagnostics["logs"]}
-        if not unhealthy and not record_healthy:
-            return {"incident_id": None, "status": "healthy", "diagnostics": diagnostics, "proposal": proposal}
         incident_id = str(uuid.uuid4())
+        auto_reserved = False
+        limit_notification = False
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            now = self._now()
+            self._expire_stale_approvals(conn, now)
+            observation = conn.execute("SELECT consecutive_unhealthy FROM service_observations WHERE service=?", (service,)).fetchone()
+            consecutive = (observation[0] if observation else 0) + (1 if unhealthy else 0)
+            if not unhealthy:
+                consecutive = 0
+            conn.execute(
+                "INSERT INTO service_observations(service, consecutive_unhealthy, last_status, observed_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(service) DO UPDATE SET consecutive_unhealthy=excluded.consecutive_unhealthy, last_status=excluded.last_status, observed_at=excluded.observed_at",
+                (service, consecutive, "unhealthy" if unhealthy else "healthy", self._now()),
+            )
+            if not unhealthy and not record_healthy:
+                return {"incident_id": None, "status": "healthy", "diagnostics": diagnostics, "proposal": proposal}
             conn.execute("INSERT INTO incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                          (incident_id, service, "proposed", self._now(), json.dumps(diagnostics), json.dumps(proposal), None, None))
-        if unhealthy and self._consecutive_unhealthy(service) >= 3:
-            if self._auto_restart_allowed(service):
-                self.approve_incident(incident_id, "homeops-policy")
-                self.execute_approved_incident(incident_id)
-            else:
-                self._notify("auto_restart_limit_reached", {"service": service, "reason": "최근 1시간 자동 재시작 2회 제한 도달"})
+            auto_allowed = unhealthy and consecutive >= 3 and self._auto_restart_allowed(service, conn)
+            active = None
+            if auto_allowed:
+                active = conn.execute(
+                    "SELECT 1 FROM incidents WHERE service=? AND status IN ('approved', 'executing') LIMIT 1", (service,)
+                ).fetchone()
+                if not active:
+                    auto_token = secrets.token_urlsafe(32)
+                    expiry = (datetime.now(timezone.utc) + timedelta(seconds=self.approval_ttl_seconds)).isoformat()
+                    conn.execute("UPDATE incidents SET status='approved', approved_by='homeops-policy' WHERE incident_id=? AND status='proposed'", (incident_id,))
+                    conn.execute("INSERT INTO approval_tokens VALUES (?, ?, ?, NULL)", (incident_id, self._hash(auto_token), expiry))
+                    conn.execute("UPDATE service_observations SET consecutive_unhealthy=0 WHERE service=?", (service,))
+                    auto_reserved = True
+            if unhealthy and consecutive >= 3 and not auto_reserved and active is None:
+                policy_count = conn.execute(
+                    "SELECT COUNT(*) FROM incidents WHERE service=? AND approved_by='homeops-policy' AND created_at>=? AND status IN ('approved', 'executing', 'verified', 'failed')",
+                    (service, (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()),
+                ).fetchone()[0]
+                if policy_count >= AUTO_RESTART_MAX_PER_HOUR:
+                    limit_notification = True
+        if limit_notification:
+            self._notify("auto_restart_limit_reached", {"service": service, "reason": "최근 1시간 자동 재시작 2회 제한 도달"})
+        if auto_reserved:
+            self.execute_approved_incident(incident_id)
         return {"incident_id": incident_id, "status": "proposed", "diagnostics": diagnostics, "proposal": proposal}
 
     def _consecutive_unhealthy(self, service: str) -> int:
         with self._connect() as conn:
-            rows = conn.execute("SELECT proposal FROM incidents WHERE service=? ORDER BY created_at DESC LIMIT 3", (service,)).fetchall()
-            last_recovery = conn.execute("SELECT completed_at FROM incidents WHERE service=? AND status='verified' ORDER BY completed_at DESC LIMIT 1", (service,)).fetchone()
-        if last_recovery and datetime.fromisoformat(last_recovery[0]) + timedelta(seconds=AUTO_RESTART_COOLDOWN_SECONDS) > datetime.now(timezone.utc):
-            return 0
-        return len(rows) if len(rows) == 3 and all(json.loads(row[0]).get("action") == ALLOWED_ACTION for row in rows) else 0
+            row = conn.execute("SELECT consecutive_unhealthy FROM service_observations WHERE service=?", (service,)).fetchone()
+        return row[0] if row else 0
 
-    def _auto_restart_allowed(self, service: str) -> bool:
+    def _auto_restart_allowed(self, service: str, conn=None) -> bool:
+        owns_conn = conn is None
+        if owns_conn:
+            conn = self._connect()
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-        with self._connect() as conn:
+        try:
             count = conn.execute(
-                "SELECT COUNT(*) FROM incidents WHERE service=? AND approved_by='homeops-policy' AND created_at>=? AND status IN ('executing', 'verified', 'failed')",
+                "SELECT COUNT(*) FROM incidents WHERE service=? AND approved_by='homeops-policy' AND created_at>=? AND status IN ('approved', 'executing', 'verified', 'failed')",
                 (service, cutoff),
             ).fetchone()[0]
-        return count < AUTO_RESTART_MAX_PER_HOUR
+            latest = conn.execute("SELECT completed_at FROM incidents WHERE service=? AND status='verified' ORDER BY completed_at DESC LIMIT 1", (service,)).fetchone()
+            if latest and datetime.fromisoformat(latest[0]) + timedelta(seconds=AUTO_RESTART_COOLDOWN_SECONDS) > datetime.now(timezone.utc):
+                return False
+            return count < AUTO_RESTART_MAX_PER_HOUR
+        finally:
+            if owns_conn:
+                conn.close()
 
     @staticmethod
     def _needs_recovery(diagnostics: dict[str, Any]) -> bool:
@@ -167,6 +205,11 @@ class HomeOpsService:
         token = secrets.token_urlsafe(32)
         expiry = (datetime.now(timezone.utc) + timedelta(seconds=self.approval_ttl_seconds)).isoformat()
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._expire_stale_approvals(conn, self._now())
+            service_row = conn.execute("SELECT service FROM incidents WHERE incident_id=? AND status='proposed'", (incident_id,)).fetchone()
+            if not service_row or conn.execute("SELECT 1 FROM incidents WHERE service=? AND status IN ('approved', 'executing')", (service_row[0],)).fetchone():
+                return {"status": "failed", "reason": "incident_not_proposed"}
             updated = conn.execute("UPDATE incidents SET status='approved', approved_by=? WHERE incident_id=? AND status='proposed'", (approved_by, incident_id)).rowcount
             if not updated:
                 return {"status": "failed", "reason": "incident_not_proposed"}
@@ -175,12 +218,19 @@ class HomeOpsService:
 
     def execute_approved_incident(self, incident_id: str) -> dict[str, str]:
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            now = self._now()
+            self._expire_stale_approvals(conn, now)
             row = conn.execute("SELECT service,status FROM incidents WHERE incident_id=?", (incident_id,)).fetchone()
             token_row = conn.execute("SELECT token_hash,expires_at,consumed_at FROM approval_tokens WHERE incident_id=?", (incident_id,)).fetchone()
-            if not row or row[1] != "approved" or not token_row or token_row[2] or token_row[1] < self._now():
+            if not row or row[1] != "approved" or not token_row or token_row[2] or token_row[1] < now:
                 return {"status": "failed", "reason": "approval_not_available"}
-            conn.execute("UPDATE approval_tokens SET consumed_at=? WHERE incident_id=? AND consumed_at IS NULL", (self._now(), incident_id))
-            conn.execute("UPDATE incidents SET status='executing' WHERE incident_id=?", (incident_id,))
+            consume_now = self._now()
+            consumed = conn.execute("UPDATE approval_tokens SET consumed_at=? WHERE incident_id=? AND consumed_at IS NULL AND expires_at>=?", (consume_now, incident_id, consume_now)).rowcount
+            executing = conn.execute("UPDATE incidents SET status='executing' WHERE incident_id=? AND status='approved'", (incident_id,)).rowcount
+            if consumed != 1 or executing != 1:
+                conn.rollback()
+                return {"status": "failed", "reason": "approval_not_available"}
         self._notify("container_restart_started", {"service": row[0], "reason": "연속 비정상 상태 또는 관리자 승인"})
         token = "executor-token"  # Executor authentication is internal; approval consumption is enforced above.
         self.executor.restart(incident_id, token, row[0])
@@ -447,6 +497,7 @@ class HomeOpsService:
         with self._connect() as conn:
             conn.execute("CREATE TABLE IF NOT EXISTS incidents (incident_id TEXT PRIMARY KEY, service TEXT, status TEXT, created_at TEXT, diagnostics TEXT, proposal TEXT, approved_by TEXT, completed_at TEXT)")
             conn.execute("CREATE TABLE IF NOT EXISTS approval_tokens (incident_id TEXT PRIMARY KEY, token_hash TEXT, expires_at TEXT, consumed_at TEXT)")
+            conn.execute("CREATE TABLE IF NOT EXISTS service_observations (service TEXT PRIMARY KEY, consecutive_unhealthy INTEGER NOT NULL, last_status TEXT NOT NULL, observed_at TEXT NOT NULL)")
             conn.execute("CREATE TABLE IF NOT EXISTS alert_states (alert_key TEXT PRIMARY KEY, occurrences INTEGER NOT NULL, active INTEGER NOT NULL, updated_at TEXT NOT NULL)")
             conn.execute("CREATE TABLE IF NOT EXISTS latest_homeops_summary (singleton_id INTEGER PRIMARY KEY CHECK (singleton_id=1), summary TEXT NOT NULL)")
             conn.execute(
@@ -462,8 +513,16 @@ class HomeOpsService:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_homeops_operation_runs_created_at ON homeops_operation_runs(created_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_homeops_operation_events_operation_id ON homeops_operation_events(operation_id, event_id)")
 
+    @staticmethod
+    def _expire_stale_approvals(conn, now: str) -> None:
+        conn.execute(
+            "UPDATE incidents SET status='failed', completed_at=? WHERE status='approved' AND incident_id IN "
+            "(SELECT incident_id FROM approval_tokens WHERE consumed_at IS NULL AND expires_at < ?)",
+            (now, now),
+        )
+
     def _connect(self):
-        return sqlite3.connect(self.db_path)
+        return sqlite3.connect(self.db_path, timeout=5)
 
     @staticmethod
     def _hash(value: str) -> str:

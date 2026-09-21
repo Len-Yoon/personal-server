@@ -1,8 +1,10 @@
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError, URLError
 
@@ -155,6 +157,357 @@ class HomeOpsTests(unittest.TestCase):
 
         self.assertEqual(result["proposal"]["action"], "no_action")
         self.assertEqual(self.service.list_incidents(), [])
+
+    def test_observation_counter_resets_after_healthy_sample(self):
+        self.service.create_diagnosis("crawler-worker")
+        self.service.create_diagnosis("crawler-worker")
+        self.executor.diagnostics = lambda service: {
+            "service": service, "container": {"status": "running", "health": "healthy"}, "logs": []
+        }
+        self.service.create_diagnosis("crawler-worker", record_healthy=False)
+        with self.service._connect() as conn:
+            row = conn.execute("SELECT consecutive_unhealthy, last_status FROM service_observations WHERE service=?", ("crawler-worker",)).fetchone()
+        self.assertEqual(row, (0, "healthy"))
+
+    def test_auto_reservation_is_atomic_and_second_concurrent_scan_cannot_reserve(self):
+        barrier = threading.Barrier(2)
+        original_diagnostics = self.executor.diagnostics
+        results, errors = [], []
+
+        def scan():
+            try:
+                results.append(self.service.create_diagnosis("crawler-worker"))
+            except Exception as exc:
+                errors.append(exc)
+
+        for _ in range(2):
+            self.service.create_diagnosis("crawler-worker")
+        def diagnostics(service):
+            barrier.wait(timeout=2)
+            return original_diagnostics(service)
+        self.executor.diagnostics = diagnostics
+        workers = [threading.Thread(target=scan) for _ in range(2)]
+        for worker in workers: worker.start()
+        for worker in workers: worker.join(timeout=3)
+        self.assertFalse(errors)
+        self.assertFalse(any(worker.is_alive() for worker in workers))
+        self.assertEqual(len(self.executor.restart_calls), 1)
+
+    def test_scheduler_scan_allows_missing_origin_only_on_exact_path_with_valid_secret(self):
+        from fastapi.testclient import TestClient
+        original = os.environ.get("HOMEOPS_SCHEDULER_SECRET")
+        os.environ["HOMEOPS_SCHEDULER_SECRET"] = "fixture-secret"
+        try:
+            app = self._portal_app()
+            with patch("app.routers.admin.get_homeops_service", return_value=self.service), patch(
+                "app.routers.admin.get_dashboard_status", return_value={"host": {}}
+            ):
+                with TestClient(app) as client:
+                    response = client.post("/internal/homeops/scan", headers={"X-HomeOps-Scheduler-Secret": "fixture-secret"})
+                    wrong_path = client.post("/internal/homeops/scan/extra", headers={"X-HomeOps-Scheduler-Secret": "fixture-secret"})
+                    invalid = client.post("/internal/homeops/scan", headers={"X-HomeOps-Scheduler-Secret": "wrong"})
+        finally:
+            if original is None: os.environ.pop("HOMEOPS_SCHEDULER_SECRET", None)
+            else: os.environ["HOMEOPS_SCHEDULER_SECRET"] = original
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(wrong_path.status_code, 403)
+        self.assertEqual(invalid.status_code, 403)
+
+    def test_scheduler_origin_and_method_variants_are_rejected(self):
+        from fastapi.testclient import TestClient
+        original = os.environ.get("HOMEOPS_SCHEDULER_SECRET")
+        os.environ["HOMEOPS_SCHEDULER_SECRET"] = "fixture-secret"
+        try:
+            app = self._portal_app()
+            with patch("app.routers.admin.get_homeops_service", return_value=self.service), patch("app.routers.admin.get_dashboard_status", return_value={"host": {}}):
+                with TestClient(app) as client:
+                    evil = client.post("/internal/homeops/scan", headers={"Origin": "https://evil.example", "X-HomeOps-Scheduler-Secret": "fixture-secret"})
+                    empty = client.post("/internal/homeops/scan", headers={"Origin": "", "X-HomeOps-Scheduler-Secret": "fixture-secret"})
+                    wrong_method = client.get("/internal/homeops/scan", headers={"X-HomeOps-Scheduler-Secret": "fixture-secret"})
+                    same_origin_wrong_secret = client.post("/internal/homeops/scan", headers={"Origin": "http://testserver", "X-HomeOps-Scheduler-Secret": "wrong"})
+        finally:
+            if original is None: os.environ.pop("HOMEOPS_SCHEDULER_SECRET", None)
+            else: os.environ["HOMEOPS_SCHEDULER_SECRET"] = original
+        self.assertEqual([response.status_code for response in (evil, empty, wrong_method, same_origin_wrong_secret)], [403, 403, 405, 403])
+        from app.routers.admin import homeops_scheduler_secret_valid
+        self.assertFalse(homeops_scheduler_secret_valid(b"fixture-secret", "fixture-secret"))
+
+    def test_scheduler_scan_rejects_missing_or_malformed_credentials_without_calling_handler(self):
+        from fastapi.testclient import TestClient
+
+        original = os.environ.get("HOMEOPS_SCHEDULER_SECRET")
+        os.environ["HOMEOPS_SCHEDULER_SECRET"] = "fixture-secret"
+        try:
+            app = self._portal_app()
+            with patch.object(self.service, "create_diagnosis", wraps=self.service.create_diagnosis) as handler, patch(
+                "app.routers.admin.get_homeops_service", return_value=self.service
+            ), patch("app.routers.admin.get_dashboard_status", return_value={"host": {}}):
+                with TestClient(app) as client:
+                    missing = client.post("/internal/homeops/scan")
+                    null_origin = client.post(
+                        "/internal/homeops/scan",
+                        headers={"Origin": "null", "X-HomeOps-Scheduler-Secret": "fixture-secret"},
+                    )
+                    unsafe_put = client.put(
+                        "/internal/homeops/scan",
+                        headers={"X-HomeOps-Scheduler-Secret": "fixture-secret"},
+                    )
+                    non_ascii = client.post(
+                        "/internal/homeops/scan",
+                        headers={"X-HomeOps-Scheduler-Secret": "\\xff"},
+                    )
+            os.environ["HOMEOPS_SCHEDULER_SECRET"] = ""
+            with TestClient(app) as client:
+                unconfigured = client.post(
+                    "/internal/homeops/scan",
+                    headers={"X-HomeOps-Scheduler-Secret": "fixture-secret"},
+                )
+        finally:
+            if original is None:
+                os.environ.pop("HOMEOPS_SCHEDULER_SECRET", None)
+            else:
+                os.environ["HOMEOPS_SCHEDULER_SECRET"] = original
+
+        self.assertEqual(
+            [response.status_code for response in (missing, null_origin, unsafe_put, non_ascii, unconfigured)],
+            [403, 403, 403, 403, 403],
+        )
+        self.assertEqual(handler.call_count, 0)
+
+    def test_existing_database_keeps_approval_token_and_adds_observation_schema(self):
+        from app.services.homeops import HomeOpsService
+        with self.service._connect() as conn:
+            conn.execute("INSERT INTO incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?)", ("legacy", "crawler-worker", "approved", self.service._now(), "{}", "{}", "admin", None))
+            conn.execute("INSERT INTO approval_tokens VALUES (?, ?, ?, ?)", ("legacy", "legacy-hash", self.service._now(), None))
+        reloaded = HomeOpsService(self.service.db_path, self.executor, verification_interval_seconds=0)
+        with reloaded._connect() as conn:
+            self.assertEqual(conn.execute("SELECT token_hash FROM approval_tokens WHERE incident_id='legacy'").fetchone()[0], "legacy-hash")
+            self.assertIsNotNone(conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='service_observations'").fetchone())
+
+    def test_expired_approved_incident_does_not_block_new_manual_approval(self):
+        first = self.service.create_diagnosis("crawler-worker")
+        self.service.approve_incident(first["incident_id"], "admin")
+        with self.service._connect() as conn:
+            conn.execute("UPDATE approval_tokens SET expires_at=? WHERE incident_id=?", ("2000-01-01T00:00:00+00:00", first["incident_id"]))
+        second = self.service.create_diagnosis("crawler-worker")
+        result = self.service.approve_incident(second["incident_id"], "admin")
+        self.assertEqual(result["status"], "approved")
+
+    def test_approval_expiring_between_read_and_consumption_never_restarts(self):
+        incident = self.service.create_diagnosis("crawler-worker")
+        self.service.approve_incident(incident["incident_id"], "admin")
+        before_expiry = "2026-09-21T00:00:00+00:00"
+        after_expiry = "2026-09-21T00:00:01+00:00"
+        with self.service._connect() as conn:
+            conn.execute(
+                "UPDATE approval_tokens SET expires_at=? WHERE incident_id=?",
+                (before_expiry, incident["incident_id"]),
+            )
+
+        with patch.object(self.service, "_now", side_effect=[before_expiry, after_expiry]):
+            result = self.service.execute_approved_incident(incident["incident_id"])
+
+        self.assertEqual(result, {"status": "failed", "reason": "approval_not_available"})
+        self.assertEqual(self.executor.restart_calls, [])
+        with self.service._connect() as conn:
+            self.assertEqual(
+                conn.execute("SELECT status FROM incidents WHERE incident_id=?", (incident["incident_id"],)).fetchone()[0],
+                "approved",
+            )
+            self.assertIsNone(
+                conn.execute("SELECT consumed_at FROM approval_tokens WHERE incident_id=?", (incident["incident_id"],)).fetchone()[0]
+            )
+
+    def test_auto_limit_notification_runs_after_transaction_commits(self):
+        with self.service._connect() as conn:
+            conn.execute("CREATE TABLE notifier_writes (value TEXT)")
+            old = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+            for index in range(2):
+                conn.execute("INSERT INTO incidents VALUES (?, ?, 'verified', ?, '{}', '{}', 'homeops-policy', ?)", (f"prior-{index}", "crawler-worker", old, old))
+
+        class WritingNotifier:
+            def send(_, event_type, details):
+                with self.service._connect() as conn:
+                    conn.execute("INSERT INTO notifier_writes VALUES (?)", (event_type,))
+
+        self.service.notifier = WritingNotifier()
+        self.service.create_diagnosis("crawler-worker")
+        self.service.create_diagnosis("crawler-worker")
+        self.service.create_diagnosis("crawler-worker")
+        with self.service._connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM notifier_writes").fetchone()[0], 1)
+
+    def test_same_approval_concurrent_execute_across_service_instances_consumes_once(self):
+        from app.services.homeops import HomeOpsService
+
+        incident = self.service.create_diagnosis("crawler-worker")
+        self.service.approve_incident(incident["incident_id"], "admin")
+        second = HomeOpsService(self.service.db_path, self.executor, verification_interval_seconds=0)
+
+        lock_holder = sqlite3.connect(self.service.db_path, timeout=2)
+        lock_holder.execute("BEGIN IMMEDIATE")
+        entered = [threading.Event(), threading.Event()]
+        originals = [self.service._connect, second._connect]
+
+        def traced_connect(original_connect, entered_write):
+            def connect():
+                conn = original_connect()
+                conn.set_trace_callback(
+                    lambda statement: entered_write.set() if statement.strip().upper().startswith("BEGIN") else None
+                )
+                return conn
+
+            return connect
+
+        self.service._connect = traced_connect(originals[0], entered[0])
+        second._connect = traced_connect(originals[1], entered[1])
+        results, errors = [], []
+
+        def execute(service):
+            try:
+                results.append(service.execute_approved_incident(incident["incident_id"]))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=execute, args=(service,)) for service in (self.service, second)]
+        try:
+            for thread in threads:
+                thread.start()
+            self.assertTrue(entered[0].wait(timeout=2))
+            self.assertTrue(entered[1].wait(timeout=2))
+        finally:
+            lock_holder.rollback()
+            lock_holder.close()
+            for thread in threads:
+                thread.join(timeout=3)
+
+        self.assertFalse(errors)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(len(self.executor.restart_calls), 1)
+        self.assertEqual(sorted(result["status"] for result in results), ["failed", "verified"])
+
+    def test_executor_response_loss_keeps_consumed_executing_and_blocks_retry(self):
+        calls = []
+
+        def response_lost(*args):
+            calls.append(args)
+            raise OSError("response lost")
+
+        self.executor.restart = response_lost
+        incident = self.service.create_diagnosis("crawler-worker")
+        self.service.approve_incident(incident["incident_id"], "admin")
+        with self.assertRaises(OSError):
+            self.service.execute_approved_incident(incident["incident_id"])
+        reloaded = type(self.service)(self.service.db_path, self.executor, verification_interval_seconds=0)
+        self.assertEqual(reloaded.execute_approved_incident(incident["incident_id"])["status"], "failed")
+        for _ in range(3):
+            reloaded.create_diagnosis("crawler-worker")
+        self.assertEqual(len(calls), 1)
+        with reloaded._connect() as conn:
+            self.assertEqual(conn.execute("SELECT status FROM incidents WHERE incident_id=?", (incident["incident_id"],)).fetchone()[0], "executing")
+            self.assertIsNotNone(conn.execute("SELECT consumed_at FROM approval_tokens WHERE incident_id=?", (incident["incident_id"],)).fetchone()[0])
+
+    def test_expired_approved_incident_allows_auto_reservation_after_three_samples(self):
+        incident = self.service.create_diagnosis("crawler-worker")
+        self.service.approve_incident(incident["incident_id"], "admin")
+        with self.service._connect() as conn:
+            conn.execute(
+                "UPDATE approval_tokens SET expires_at=? WHERE incident_id=?",
+                ("2000-01-01T00:00:00+00:00", incident["incident_id"]),
+            )
+
+        for _ in range(3):
+            self.service.create_diagnosis("crawler-worker")
+
+        self.assertEqual(len(self.executor.restart_calls), 1)
+
+    def test_unhealthy_healthy_unhealthy_healthy_unhealthy_never_restarts(self):
+        for index in range(5):
+            if index in (1, 3):
+                self.executor.diagnostics = lambda service: {"service": service, "container": {"status": "running", "health": "healthy"}, "logs": []}
+            else:
+                self.executor.diagnostics = lambda service: {"service": service, "container": {"status": "running", "health": "unhealthy"}, "logs": ["error"]}
+            self.service.create_diagnosis("crawler-worker", record_healthy=False)
+            if index == 2:
+                from app.services.homeops import HomeOpsService
+                self.service = HomeOpsService(self.service.db_path, self.executor, verification_interval_seconds=0)
+        self.assertEqual(self.executor.restart_calls, [])
+
+    def test_legacy_only_database_migrates_without_changing_existing_rows(self):
+        from app.services.homeops import HomeOpsService
+
+        legacy_path = Path(self.tempdir.name) / "legacy.sqlite3"
+        conn = sqlite3.connect(legacy_path)
+        conn.execute("CREATE TABLE incidents (incident_id TEXT PRIMARY KEY, service TEXT, status TEXT, created_at TEXT, diagnostics TEXT, proposal TEXT, approved_by TEXT, completed_at TEXT)")
+        conn.execute("CREATE TABLE approval_tokens (incident_id TEXT PRIMARY KEY, token_hash TEXT, expires_at TEXT, consumed_at TEXT)")
+        conn.execute("INSERT INTO incidents VALUES ('legacy','crawler-worker','failed','2020-01-01T00:00:00+00:00','{}','{}','admin','2020-01-01T00:00:00+00:00')")
+        conn.execute("INSERT INTO approval_tokens VALUES ('legacy','hash','2020-01-01T00:00:00+00:00','2020-01-01T00:00:00+00:00')")
+        conn.commit(); conn.close()
+        reloaded = HomeOpsService(legacy_path, self.executor, verification_interval_seconds=0)
+        with sqlite3.connect(legacy_path) as conn:
+            self.assertEqual(
+                conn.execute("SELECT * FROM incidents").fetchall(),
+                [("legacy", "crawler-worker", "failed", "2020-01-01T00:00:00+00:00", "{}", "{}", "admin", "2020-01-01T00:00:00+00:00")],
+            )
+            self.assertEqual(
+                conn.execute("SELECT * FROM approval_tokens").fetchall(),
+                [("legacy", "hash", "2020-01-01T00:00:00+00:00", "2020-01-01T00:00:00+00:00")],
+            )
+            self.assertIsNotNone(
+                conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='service_observations'").fetchone()
+            )
+
+        healthy = {"service": "crawler-worker", "container": {"status": "running", "health": "healthy"}, "logs": []}
+        reloaded.executor.diagnostics = lambda service: healthy | {"service": service}
+        reloaded.create_diagnosis("crawler-worker", record_healthy=False)
+        reloaded.create_diagnosis("book-memo", record_healthy=False)
+        reloaded = HomeOpsService(legacy_path, self.executor, verification_interval_seconds=0)
+        with reloaded._connect() as conn:
+            rows = conn.execute(
+                "SELECT service, consecutive_unhealthy, last_status FROM service_observations ORDER BY service"
+            ).fetchall()
+        self.assertEqual(rows, [("book-memo", 0, "healthy"), ("crawler-worker", 0, "healthy")])
+
+    def test_auto_restart_respects_cooldown_then_reserves_once_after_expiry(self):
+        completed_at = self.service._now()
+        with self.service._connect() as conn:
+            conn.execute(
+                "INSERT INTO incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("cooldown", "crawler-worker", "verified", completed_at, "{}", "{}", "homeops-policy", completed_at),
+            )
+
+        for _ in range(3):
+            self.service.create_diagnosis("crawler-worker")
+        self.assertEqual(self.executor.restart_calls, [])
+        with self.service._connect() as conn:
+            self.assertEqual(
+                conn.execute("SELECT consecutive_unhealthy FROM service_observations WHERE service='crawler-worker'").fetchone()[0],
+                3,
+            )
+            elapsed = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
+            conn.execute("UPDATE incidents SET completed_at=? WHERE incident_id='cooldown'", (elapsed,))
+
+        self.service.create_diagnosis("crawler-worker")
+
+        self.assertEqual(len(self.executor.restart_calls), 1)
+        self.assertEqual(self.service._consecutive_unhealthy("crawler-worker"), 0)
+
+    def test_failed_auto_health_waits_for_three_new_samples_and_respects_hourly_limit(self):
+        self.executor.health_ok = False
+        for _ in range(3):
+            self.service.create_diagnosis("crawler-worker")
+        self.assertEqual(len(self.executor.restart_calls), 1)
+
+        for _ in range(2):
+            self.service.create_diagnosis("crawler-worker")
+        self.assertEqual(len(self.executor.restart_calls), 1)
+
+        self.service.create_diagnosis("crawler-worker")
+        self.assertEqual(len(self.executor.restart_calls), 2)
+
+        for _ in range(3):
+            self.service.create_diagnosis("crawler-worker")
+        self.assertEqual(len(self.executor.restart_calls), 2)
 
     def test_auto_restart_stops_after_two_policy_restarts_in_one_hour(self):
         completed_at = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()

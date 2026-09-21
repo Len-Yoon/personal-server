@@ -87,4 +87,9 @@ def service_url(env_name: str, host: str, fallback: str | None = None) -> str:
 
 
 def service_base_urls(host: str) -> dict[str, str]:
-    return LOCAL_SERVICE_URLS if is_local_host(host) else PUBLIC_SERVICE_URLS
+    base_urls = LOCAL_SERVICE_URLS if is_local_host(host) else PUBLIC_SERVICE_URLS
+    return {
+        "news": base_urls["NEWS_SERVICE_URL"],
+        "youtube": base_urls["YOUTUBE_MEMO_URL"],
+        "books": base_urls["BOOK_MEMO_URL"],
+    }
