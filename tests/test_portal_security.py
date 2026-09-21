@@ -1,4 +1,5 @@
 import importlib
+from io import BytesIO
 import json
 import multiprocessing
 import os
@@ -129,6 +130,91 @@ class PortalSecurityTests(unittest.TestCase):
 
             with self.assertRaises(FileExistsError):
                 file_store.save_upload("", upload)
+
+            self.assertEqual(destination.read_text(encoding="utf-8"), "already here")
+
+    def test_concurrent_same_name_upload_has_one_winner_and_preserves_winner_payload(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            file_store = self.reload_file_store(tempdir)
+            file_store.ensure_storage()
+            destination = Path(tempdir) / "files" / "memo.txt"
+            payloads = [b"first payload", b"second payload"]
+            start_gate = threading.Barrier(2)
+            gate = threading.Barrier(2)
+            successes = []
+            conflicts = []
+            worker_errors = []
+            open_calls = []
+            original_open = file_store.Path.open
+
+            def synchronized_open(path, mode="r", *args, **kwargs):
+                if path.resolve() == destination.resolve() and mode in {"wb", "xb"}:
+                    open_calls.append(mode)
+                    gate.wait(timeout=5)
+                return original_open(path, mode, *args, **kwargs)
+
+            def upload_worker(payload):
+                upload = SimpleNamespace(
+                    filename="memo.txt",
+                    file=BytesIO(payload),
+                    content_type="text/plain",
+                )
+                try:
+                    start_gate.wait(timeout=5)
+                    file_store.save_upload("", upload)
+                    successes.append(payload)
+                except FileExistsError as error:
+                    conflicts.append(error)
+                except BaseException as error:  # pragma: no cover - diagnostic guard
+                    worker_errors.append(error)
+
+            with patch.object(file_store, "append_security_event"):
+                with patch.object(file_store.Path, "open", synchronized_open):
+                    workers = [threading.Thread(target=upload_worker, args=(payload,)) for payload in payloads]
+                    for worker in workers:
+                        worker.start()
+                    for worker in workers:
+                        worker.join(timeout=5)
+
+            self.assertFalse(worker_errors)
+            self.assertEqual(len(open_calls), 2, open_calls)
+            self.assertTrue(all(not worker.is_alive() for worker in workers))
+            self.assertEqual(len(successes), 1)
+            self.assertEqual(len(conflicts), 1)
+            self.assertEqual(destination.read_bytes(), successes[0])
+
+    def test_upload_size_failure_removes_only_new_file(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            file_store = self.reload_file_store(tempdir)
+            upload = SimpleNamespace(
+                filename="oversized.txt",
+                file=BytesIO(b"x" * (file_store.MAX_UPLOAD_BYTES + 1)),
+                content_type="text/plain",
+            )
+
+            with self.assertRaises(ValueError):
+                file_store.save_upload("", upload)
+
+            self.assertFalse((Path(tempdir) / "files" / "oversized.txt").exists())
+
+    def test_upload_read_failure_removes_only_new_file(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            file_store = self.reload_file_store(tempdir)
+
+            class _FailingFile:
+                def read(self, size):
+                    raise OSError("read failed")
+
+            upload = SimpleNamespace(
+                filename="read-failure.txt",
+                file=_FailingFile(),
+                content_type="text/plain",
+            )
+
+            with self.assertRaises(OSError):
+                file_store.save_upload("", upload)
+
+            self.assertFalse((Path(tempdir) / "files" / "read-failure.txt").exists())
 
     def test_auth_rate_limit_blocks_repeated_failures(self):
         with tempfile.TemporaryDirectory() as tempdir:

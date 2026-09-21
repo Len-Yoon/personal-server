@@ -402,6 +402,36 @@ class FileAccessTests(unittest.TestCase):
             self.assertEqual(response.status_code, 400)
             self.assertEqual(list(storage_path.iterdir()), [])
 
+    def test_bulk_upload_conflict_rolls_back_only_request_files_and_preserves_existing_file(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ.pop("APP_ENV", None)
+            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            storage_path = Path(tempdir) / "files"
+            storage_path.mkdir()
+            existing_file = storage_path / "two.txt"
+            existing_file.write_text("original", encoding="utf-8")
+            os.environ["FILE_STORAGE_PATH"] = str(storage_path)
+            import app.main as main
+            from fastapi.testclient import TestClient
+
+            app = importlib.reload(main).app
+            with TestClient(app) as client:
+                response = client.post(
+                    "/files/uploads",
+                    files=[
+                        ("uploads", ("one.txt", b"new", "text/plain")),
+                        ("uploads", ("two.txt", b"replacement", "text/plain")),
+                    ],
+                    data={"path": ""},
+                    headers={"Origin": "http://testserver"},
+                )
+
+            self.assertEqual(response.status_code, 409)
+            self.assertFalse((storage_path / "one.txt").exists())
+            self.assertEqual(existing_file.read_text(encoding="utf-8"), "original")
+            self.assertNotIn(str(Path(tempdir)), response.text)
+
     def test_bulk_download_rejects_file_count_before_creating_archive(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
