@@ -216,6 +216,128 @@ class BookMemoUiContractTests(unittest.TestCase):
 
         self.assertEqual([response.status_code for response in responses], [401] * 11)
 
+    def test_memo_route_rejects_foreign_or_missing_chapter_without_db_side_effect(self):
+        previous_password = os.environ.get("DELETE_PASSWORD")
+        os.environ["DELETE_PASSWORD"] = "test-password"
+        try:
+            with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+                import app.services.book_service as book_service
+
+                book = book_service.create_or_get_book({"isbn": "9780000000011", "title": "HTTP 메모 책"})
+                other_book = book_service.create_or_get_book({"isbn": "9780000000012", "title": "HTTP 다른 책"})
+                book_service.create_chapter(book["id"], "같은 책 장")
+                own_chapter = book_service.list_chapters(book["id"])[0]
+                book_service.create_chapter(other_book["id"], "다른 장")
+                chapter = book_service.list_chapters(other_book["id"])[0]
+                with book_service._connect() as connection:
+                    before_book = dict(
+                        connection.execute(
+                            "SELECT * FROM books WHERE id = ?", (book["id"],)
+                        ).fetchone()
+                    )
+                before_memos = book_service.list_memos(book["id"])
+
+                with TestClient(app, base_url="https://books.len.pe.kr") as client:
+                    headers = {"Origin": "https://books.len.pe.kr"}
+                    login = client.post(
+                        "/auth/login",
+                        data={"password": "test-password"},
+                        headers=headers,
+                        follow_redirects=False,
+                    )
+                    self.assertEqual(login.status_code, 303)
+                    foreign = client.post(
+                        f"/books/{book['id']}/memos",
+                        data={"chapter_id": chapter["id"], "content": "외부 장 메모"},
+                        headers=headers,
+                    )
+                    missing = client.post(
+                        f"/books/{book['id']}/memos",
+                        data={"chapter_id": 99999, "content": "없는 장 메모"},
+                        headers=headers,
+                    )
+                    with book_service._connect() as connection:
+                        after_invalid_book = dict(
+                            connection.execute(
+                                "SELECT * FROM books WHERE id = ?", (book["id"],)
+                            ).fetchone()
+                        )
+                    after_invalid_memos = book_service.list_memos(book["id"])
+                    same_book = client.post(
+                        f"/books/{book['id']}/memos",
+                        data={"chapter_id": own_chapter["id"], "content": "같은 책 장 메모"},
+                        headers=headers,
+                        follow_redirects=False,
+                    )
+                    without_chapter = client.post(
+                        f"/books/{book['id']}/memos",
+                        data={"content": "목차 미지정 메모"},
+                        headers=headers,
+                        follow_redirects=False,
+                    )
+
+                self.assertEqual(before_memos, after_invalid_memos)
+                self.assertEqual(before_book, after_invalid_book)
+                self.assertEqual(same_book.status_code, 303)
+                self.assertEqual(without_chapter.status_code, 303)
+                created_memos = book_service.list_memos(book["id"])
+                self.assertEqual(len(created_memos), 2)
+                self.assertEqual(
+                    {memo["chapter_id"] for memo in created_memos},
+                    {own_chapter["id"], None},
+                )
+        finally:
+            if previous_password is None:
+                os.environ.pop("DELETE_PASSWORD", None)
+            else:
+                os.environ["DELETE_PASSWORD"] = previous_password
+
+        self.assertEqual(foreign.status_code, 400)
+        self.assertEqual(missing.status_code, 400)
+
+    def test_repeated_book_list_and_detail_gets_preserve_manual_progress_and_db_row(self):
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            import app.services.book_service as book_service
+
+            book = book_service.create_or_get_book({"isbn": "9780000000013", "title": "GET 불변 책"})
+            book_service.update_progress(
+                book["id"],
+                reading_status="보류",
+                current_page=140,
+                current_chapter="중간",
+                progress_percent=35,
+            )
+            fixed_timestamp = "2020-01-02 03:04:05"
+            with book_service._connect() as connection:
+                connection.execute(
+                    "UPDATE books SET updated_at = ? WHERE id = ?",
+                    (fixed_timestamp, book["id"]),
+                )
+                before = dict(
+                    connection.execute(
+                        "SELECT * FROM books WHERE id = ?", (book["id"],)
+                    ).fetchone()
+                )
+
+            with TestClient(app, base_url="https://books.len.pe.kr") as client:
+                responses = [
+                    client.get("/"),
+                    client.get("/"),
+                    client.get(f"/books/{book['id']}"),
+                    client.get(f"/books/{book['id']}"),
+                ]
+
+            self.assertEqual([response.status_code for response in responses], [200] * 4)
+            self.assertIn("35%", responses[0].text)
+            self.assertIn("GET 불변 책", responses[2].text)
+            with book_service._connect() as connection:
+                after = dict(
+                    connection.execute(
+                        "SELECT * FROM books WHERE id = ?", (book["id"],)
+                    ).fetchone()
+                )
+            self.assertEqual(after, before)
+
     def test_book_login_session_allows_writes_until_logout(self):
         """Fails if the DELETE_PASSWORD login does not grant and revoke a book write session."""
         previous_password = os.environ.get("DELETE_PASSWORD")
