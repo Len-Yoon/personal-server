@@ -74,6 +74,67 @@ class CommandHandlerTests(unittest.TestCase):
         )
         self.assertIn("최근 타이어 교체: 윈터타이어 (52,340km)", status)
 
+    def test_same_update_id_reuses_tire_response_and_business_state(self) -> None:
+        update = TelegramUpdate("123", "/타이어교체 윈터", update_id=31)
+        with patch("app.services.telegram._today_in_korea", return_value=date(2027, 1, 1)):
+            first = self.handler.handle_update(update)
+            second = self.handler.handle_update(update)
+
+        self.assertEqual(second, first)
+        with self.store._connect() as db:
+            count = db.execute("SELECT COUNT(*) FROM tire_changes").fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_none_update_id_keeps_direct_call_contract_without_idempotency(self) -> None:
+        update = TelegramUpdate("123", "/정비완료 엔진오일 52340")
+
+        first = self.handler.handle_update(update)
+        second = self.handler.handle_update(update)
+
+        self.assertEqual(first, second)
+        with self.store._connect() as db:
+            count = db.execute("SELECT COUNT(*) FROM telegram_command_results").fetchone()[0]
+        self.assertEqual(count, 0)
+
+    def test_same_update_id_reuses_odometer_and_maintenance_results(self) -> None:
+        cases = (
+            TelegramUpdate("123", "/주행거리 59000", update_id=34),
+            TelegramUpdate("123", "/정비완료 엔진오일 59000", update_id=35),
+        )
+        for update in cases:
+            with self.subTest(update_id=update.update_id):
+                first = self.handler.handle_update(update)
+                second = self.handler.handle_update(update)
+                self.assertEqual(first, second)
+
+        self.assertEqual(self.store.load_last_snapshot().odometer_km, 59000)
+        self.assertEqual(self.store.get_maintenance("engine_oil").odometer_km, 59000)
+
+    def test_unauthorized_update_with_id_does_not_create_result(self) -> None:
+        self.assertIsNone(self.handler.handle_update(TelegramUpdate("999", "/차량", update_id=32)))
+        with self.store._connect() as db:
+            count = db.execute("SELECT COUNT(*) FROM telegram_command_results").fetchone()[0]
+        self.assertEqual(count, 0)
+
+    def test_hyundai_oauth_command_is_not_cached(self) -> None:
+        class OAuthStarter:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def begin_authorization(self) -> str:
+                self.calls += 1
+                return f"https://example.test/{self.calls}"
+
+        oauth = OAuthStarter()
+        handler = CommandHandler(self.store, allowed_chat_id="123", hyundai_oauth=oauth)
+        update = TelegramUpdate("123", "/현대연결", update_id=33)
+
+        first = handler.handle_update(update)
+        second = handler.handle_update(update)
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(oauth.calls, 2)
+
     def test_manual_odometer_updates_snapshot(self) -> None:
         response = self.handler.handle_update(TelegramUpdate("123", "/주행거리 52340"))
 
@@ -167,6 +228,9 @@ class TelegramClientTests(unittest.TestCase):
             json.dumps({"ok": True, "result": {"unexpected": "object"}}).encode(),
             json.dumps({"ok": True, "result": [
                 "unexpected entry",
+                {"update_id": "bad", "message": {"chat": {"id": 123}, "text": "/차량"}},
+                {"update_id": -1, "message": {"chat": {"id": 123}, "text": "/차량"}},
+                {"update_id": True, "message": {"chat": {"id": 123}, "text": "/차량"}},
                 {"update_id": 1, "message": "unexpected message"},
                 {"update_id": 2, "message": {"chat": {"id": 123}, "text": "/차량"}},
             ]}).encode(),
