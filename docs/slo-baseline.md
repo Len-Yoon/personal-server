@@ -6,13 +6,14 @@
 |---|---|
 | 문서명 | SLI SLO 에러 버짓 운영 기준 초안 |
 | 작성일 | 2026-09-14 |
+| 운영 상태 대조 | 2026-09-21 |
 | 기준 자료 | 공개 상태 점검 workflow, PrometheusRule, crawler 뉴스 수집 metrics, 운영 참조 |
 | 목적 | 현재 수집 중인 신호를 기준으로 30일 SLO와 에러 버짓의 측정·검토 기준을 정의함 |
 | 상태 | 초안. 30일 기준선 수집 뒤 목표값을 재검토함 |
 
 ## 핵심 요약
 
-현재 측정 가능한 운영 신호는 공개 Portal health, K3s Portal Ready 상태, 뉴스 수집 freshness임. Portal과 일반 Compose 서비스의 HTTP 성공률·지연시간은 Prometheus 지표가 없으므로 SLO로 확정하지 않음. 1차에는 기존 신호만으로 기준선을 수집하며, 2차에서 HTTP 계측을 추가한 뒤 사용자 체감 SLO로 확대함.
+현재 관측 원본은 공개 health, K3s Portal Ready, 뉴스 freshness와 Portal HTTP 요청 수·오류·지연시간 지표임. Portal HTTP 계측은 구현·운영 반영되었으며 다른 Compose 서비스에 같은 계측이 있다고 가정하지 않음. 이 문서의 30일 목표값은 여전히 초안임. 일일 SLO 수집기는 운영 중이지만 최근 freshness 질의가 다중 시계열을 반환해 실패했으며, [원인·수정안 검증](reviews/20260921_SLO증적실패_원인분석.md)과 실제 운영 적용을 구분함.
 
 ## 용어와 공통 원칙
 
@@ -34,7 +35,7 @@
 |---|---|---|---:|---:|---|
 | 공개 Portal | 완료된 외부 health 점검 중 `https://len.pe.kr/health`가 성공한 비율 | GitHub Actions `Public Portal Uptime Monitor` | 99.5% | 약 43회 점검 실패 또는 약 215분 | 측정 가능 |
 | K3s Portal | Prometheus 관측값 중 `portal-web`의 available replica가 1 이상인 비율 | kube-state-metrics | 99.5% | 약 216분 | 측정 가능 |
-| 뉴스 수집 | 뉴스 수집이 30분 이내 성공했거나 연속 실패가 3회 미만인 관측 비율 | `crawler_news_collection_*` metrics | 99.0% | 약 432분 | 측정 가능 |
+| 뉴스 수집 | 초기화된 뉴스 수집이 30분 이내 성공했고 연속 실패도 3회 미만인 관측 비율 | `crawler_news_collection_*` metrics | 99.0% | 약 432분 | 측정 가능 |
 | Compose 웹 서비스 | HTTP 성공률 및 p95 응답시간 | 없음 | 확정하지 않음 | 산정 불가 | 2차 계측 필요 |
 
 공개 Portal의 약 43회는 30일을 5분 간격으로 모두 실행한 8,640회 관측을 전제로 한 환산값임. workflow 실행 누락, GitHub Actions 장애, 점검 결과 보존 정책은 별도로 확인 필요함.
@@ -69,15 +70,16 @@ avg_over_time(
 ```promql
 avg_over_time(
   (
-    crawler_news_collection_initialized == bool 1
-    and time() - crawler_news_collection_last_success_timestamp_seconds <= bool 1800
-    and crawler_news_collection_consecutive_failures < bool 3
+    (crawler_news_collection_initialized == bool 1)
+    * (time() - crawler_news_collection_last_success_timestamp_seconds <= bool 1800)
+    * (crawler_news_collection_consecutive_failures < bool 3)
   )[30d:]
 ) * 100
 ```
 
 - 수집 성공 시각이 없는 초기화 구간은 SLO 측정 시작 전 상태로 처리함.
-- 현재 `NewsCollectionStale` 경고 조건과 같은 30분·연속 실패 3회 기준을 사용함.
+- 위 식은 30일 목표 초안의 수치 조건 예시이며 현재 운영 수집기에 적용한 질의가 아님. 여러 시계열을 하나의 서비스 SLI로 집계하는 방식과 30일 보존은 추가 검증 필요함. `and` 집합 연산 대신 수치 조건을 곱해 거짓인 조건을 0으로 반영함.
+- `NewsCollectionStale` 경고는 30분 조건을 사용하며, 현재 일일 증적 collector의 freshness 기준은 15분·연속 실패 3회 미만임. 경고 기준과 증적 수집 기준을 혼동하지 않음.
 - 이 SLI는 기사 품질이나 분류 정확도가 아니라 수집 freshness만 측정함.
 
 ## 에러 버짓 운영 기준
@@ -106,7 +108,7 @@ avg_over_time(
 
 ## 2차 계측 범위
 
-다음 항목은 1차 기준선 수집 이후 별도 설계·승인을 거쳐 추가함.
+Portal HTTP 메트릭·scrape·HTTP 대시보드는 구현되어 있음. 아래 표는 계측 경계를 정리한 것이며, 다른 서비스 확대 및 별도 SLO·버짓 대시보드는 후속 설계 대상으로 구분함.
 
 | 항목 | 목적 | 최소 수집 항목 | 제외 사항 |
 |---|---|---|---|
@@ -125,5 +127,5 @@ avg_over_time(
 
 1. 공개 Portal workflow의 최근 30일 성공·실패·누락을 수동 집계해 기준선을 기록함.
 2. Prometheus retention을 변경하지 않고, 우선 7일 기준 K3s Portal·뉴스 수집 SLI를 관찰함.
-3. 30일 SLO에 필요한 장기 보존 방식은 운영 데이터·저장 용량 영향을 검토한 뒤 별도 승인으로 결정함.
+3. 일일 증적 ConfigMap은 최근 30건을 보관하나 원시 30일 시계열을 대체하지 않음. 현재 수집 실패를 수정·검증한 뒤 월간 증적의 누락과 목표 산정 방식을 재검토함.
 4. Portal HTTP 메트릭의 7일 기준선과 Prometheus target 상태를 확인한 뒤, 다른 서비스 적용 여부를 결정함.

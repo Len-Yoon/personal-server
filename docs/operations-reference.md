@@ -18,7 +18,7 @@
 
 ## 컨테이너 실행 권한
 
-`caddy`, `car-care-worker`, `homeops-executor`, `portal-web`, `system-agent`는 UID/GID `10001:10001`의 전용 계정으로 실행함. Caddy는 내부 80·443 포트 binding에 필요한 `NET_BIND_SERVICE` capability만 사용함.
+저장소의 앱·운영 도구 Dockerfile 12개는 모두 `USER 10001:10001`을 지정함. 실제 실행 이미지와 데이터 접근 권한은 서비스별 배포 증적으로 확인함. Caddy는 내부 80·443 포트 binding에 필요한 `NET_BIND_SERVICE` capability만 사용함.
 
 Portal PVC는 `portal-web-files-dynamic`, `portal-web-state-dynamic` 두 개이며 K3s 단일 writer만 연결함. Portal non-root 이미지 교체 전에는 두 PVC의 UID/GID `10001:10001` 읽기·쓰기·디렉터리 접근 권한을 확인함. 권한 불충족 시 Deployment를 변경하지 않으며, PVC 권한 정렬은 자동화하지 않고 별도 운영 승인 아래 최소 범위로 수행함.
 
@@ -41,11 +41,11 @@ Portal PVC는 `portal-web-files-dynamic`, `portal-web-state-dynamic` 두 개이�
 | Portal PVC 백업 | CronJob 활성 | 매일 03:00 | 2026-09-21 03:03 | 기존 사용자 timer inactive·unit not-found |
 | 월간 SRE 통합 점검 | CronJob 활성 | 매월 1일 03:30 | 2026-09-16 14:01 | 과거 성공 기록 |
 | 분기 SRE 점검 | CronJob 중지 | 기존 분기 일정 보존 | 2026-09-14 21:16 | 자동 실행 안 함 |
-| 일일 SLO 증적 | CronJob 활성 | 매일 02:15 | 2026-09-18 02:15 | 최근 Job 실패, 원인 확인 필요 |
+| 일일 SLO 증적 | CronJob 활성 | 매일 02:15 | 2026-09-18 02:15 | 최근 Job 실패, 다중 시계열 원인 확정·운영 수정 미적용 |
 
-확인 경로는 각각 `personal-server/portal-pvc-backup`, `monitoring/monthly-sre-audit`, `monitoring/quarterly-sre-audit`, `monitoring/slo-daily-evidence`의 spec.suspend와 status.lastSuccessfulTime임. SLO의 마지막 예약은 2026-09-21 02:15이며 active Job은 0개임. 보존된 최신 Job은 BackoffLimitExceeded, collector Pod는 Error·종료 코드 1로 확인됨. 실패 원인과 새 증적 복구는 확인 필요함. 이 문서 갱신에서 Job 재실행·스케줄러 수정은 수행하지 않음.
+확인 경로는 각각 `personal-server/portal-pvc-backup`, `monitoring/monthly-sre-audit`, `monitoring/quarterly-sre-audit`, `monitoring/slo-daily-evidence`의 spec.suspend와 status.lastSuccessfulTime임. SLO의 마지막 예약은 2026-09-21 02:15이며 active Job은 0개임. 보존된 최신 Job은 BackoffLimitExceeded, collector Pod는 Error·종료 코드 1로 확인됨. 뉴스 freshness의 24시간 질의가 시계열 3개를 반환해 단일 결과 계약에서 거절된 원인을 확인함. 수정식의 실제 읽기 검증과 관련 테스트 24건은 통과했으며, 운영 수정과 증적 재수집은 미수행함. [원인 분석](reviews/20260921_SLO증적실패_원인분석.md)을 따름. 이 문서 갱신에서 Job 재실행·스케줄러 수정은 수행하지 않음.
 
-저장소의 `suspend: true`, 앱 `replicas: 0`, sentinel image는 초기 적용용 안전 기본값임. 현재 실행 상태나 운영 미적용을 단독으로 증명하지 않음. 저장소 병합, 운영 동기화, 이미지 교체, 자동 실행 활성화, 실제 검증을 각각 기록함. Portal·뉴스의 2026-09-21 이미지 적용 근거는 [배포 검증 결과](reviews/20260921_앱배포_검증결과.md)이며 이후 코드 변경의 운영 적용을 뜻하지 않음.
+저장소의 `suspend: true`, 앱 `replicas: 0`, sentinel image는 초기 적용용 안전 기본값임. 현재 실행 상태나 운영 미적용을 단독으로 증명하지 않음. 저장소 병합, 운영 동기화, 이미지 교체, 자동 실행 활성화, 실제 검증을 각각 기록함. Portal·뉴스의 2026-09-21 이미지 적용 근거는 [배포 검증 결과](reviews/20260921_앱배포_검증결과.md)이며 이후 코드 변경의 운영 적용을 뜻하지 않음. 후속 Book·Portal 교체는 [K3s 앱 배포 결과](reviews/20260921_K3s앱배포_검증결과.md), 차량 교체는 [차량 배포 결과](reviews/20260921_차량배포_검증결과.md)를 따름. 뉴스 10차 목표 이미지는 아직 미적용임.
 
 ## 일상 상태 확인
 
@@ -89,7 +89,7 @@ HomeOps 실행기는 Docker socket을 제한된 allowlist 진단·재시작에�
 
 ## K3s 애플리케이션 이미지 교체 절차
 
-K3s 애플리케이션의 런타임 이미지만 교체하는 운영 절차임. 실제 적용은 서비스별 별도 승인 후 운영자가 수행하며, 저장소 변경 또는 CI 통과를 운영 적용 완료로 간주하지 않음. 이미지 참조값·archive 경로·digest·Secret 값·내부 IP는 문서와 로그에 기록하지 않음.
+K3s 애플리케이션의 런타임 이미지만 교체하는 운영 절차임. 실제 적용은 서비스별 별도 승인 후 운영자가 수행하며, 저장소 변경 또는 CI 통과를 운영 적용 완료로 간주하지 않음. 검증된 이미지 digest·소스 커밋·archive 체크섬은 배포 증적에 기록할 수 있음. Secret 값·내부 IP·개인 접속 경로는 기록하지 않음. 현재 공식 upgrade 도구 지원 대상은 `portal-web`, `crawler-worker`임. Book은 2026-09-21 독립 검토·회귀를 거친 1회성 이미지 교체 절차로 적용했으며, 일반 upgrade 도구가 Book·YouTube를 지원한다고 가정하지 않음.
 
 1. macOS에서 `k3s-app-image-build.sh`로 대상 애플리케이션의 Linux AMD64 OCI archive를 생성함. `latest`가 아닌 immutable tag만 사용하고 archive SHA-256을 확인함.
 2. N100에서 대상 애플리케이션명을 명시한 별도 운영 승인을 받은 후에만 `k3s-app-image-import.sh --go`로 archive와 SHA-256을 검증하여 반입함. importer가 출력한 canonical immutable digest 별칭만 이후 단계의 이미지 입력으로 사용함.
@@ -97,7 +97,7 @@ K3s 애플리케이션의 런타임 이미지만 교체하는 운영 절차임. 
 4. `k3s-app-upgrade.sh --go`는 check 성공 이후에도 대상 애플리케이션명을 명시한 별도 운영 승인을 받은 경우에만 실행함. 실행 시 현재 immutable digest를 `--expected-current-image`으로 지정하여 변경 전 이미지가 예상과 일치할 때만 patch함.
 5. rollout과 대상 애플리케이션 health를 확인한 뒤 다시 `--check`으로 결과를 검증함. Portal 교체는 Pod 내부 health와 공개 Portal health를 10초 간격으로 3회 모두 HTTP 200으로 확인함.
 
-대상 rollout 또는 health 검증 실패 시 도구는 직전 immutable digest로 **1회만** rollback을 시도함. rollback 실패·상태 불확실·두 번째 시도 필요 상황에서는 자동 재실행하지 않고 운영자가 상태를 확인한 뒤 별도 판단함. 이 절차는 Deployment의 컨테이너 이미지 외에는 변경하지 않으며 PVC, Secret, Caddy, Cloudflare Tunnel, Docker Compose를 생성·수정·삭제·재기동하지 않음.
+대상 rollout 또는 health 검증 실패 시 도구는 직전 immutable digest로 **1회만** rollback을 시도함. 다만 뉴스 10차는 구 버전이 새 outbox를 보존하지 못하므로 이 절차로 바로 적용하지 않음. [복구 호환 검토안](reviews/20260921_뉴스복구호환_적용검토안.md)의 중간 이미지 적용이 먼저 필요함. rollback 실패·상태 불확실·두 번째 시도 필요 상황에서는 자동 재실행하지 않고 운영자가 상태를 확인한 뒤 별도 판단함. 이 절차는 Deployment의 컨테이너 이미지 외에는 변경하지 않으며 PVC, Secret, Caddy, Cloudflare Tunnel, Docker Compose를 생성·수정·삭제·재기동하지 않음.
 
 ## Book Memo K3s 현재 운영 기준
 

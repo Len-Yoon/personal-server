@@ -1,6 +1,6 @@
 # Personal Server
 
-개인 생산성과 홈 서버 운영에 필요한 기능을 하나의 웹 플랫폼으로 통합한 개인 프로젝트입니다. Windows N100과 WSL2 환경에서 Docker Compose 기반으로 운영하며, 포털·파일함·운영 현황·뉴스·메모·공개 포트폴리오를 서비스별 책임으로 분리했습니다.
+개인 생산성과 홈 서버 운영에 필요한 기능을 하나의 웹 플랫폼으로 통합한 개인 프로젝트입니다. Windows N100과 WSL2 환경에서 K3s와 Docker Compose를 역할별로 나누어 운영하며, 포털·파일함·운영 현황·뉴스·메모·공개 포트폴리오를 서비스별 책임으로 분리했습니다.
 
 저장소: [GitHub 저장소](https://github.com/Len-Yoon/personal-server)
 
@@ -10,8 +10,8 @@
 |---|---|
 | 개발 기간 | 2026년 7월~현재 |
 | 담당 역할 | 문제 정의, 기능 우선순위, 보안 정책, 운영 구조, 배포 기준 및 최종 변경 판단 |
-| 핵심 기술 | Python, FastAPI, Jinja2, SQLite, Docker Compose, Cloudflare, GitHub Actions, Windows/WSL2 |
-| 운영 환경 | Windows N100 + Ubuntu-24.04 WSL2 + Docker Compose |
+| 핵심 기술 | Python, FastAPI, Jinja2, SQLite, K3s, Docker Compose, Prometheus, Grafana, Cloudflare, GitHub Actions, Windows/WSL2 |
+| 운영 환경 | Windows N100 + Ubuntu-24.04 WSL2 + K3s 공개 앱·모니터링 + Docker Compose 운영 보조 |
 
 ## 구현 내용
 
@@ -35,7 +35,7 @@
 
 - 관리자·파일함·메모 쓰기·포트폴리오 편집을 역할별 세션 인증으로 분리했습니다.
 - Origin 검증, HTTP-only·SameSite 쿠키, CSP 및 보안 헤더, 영속형 인증 실패 제한을 적용했습니다.
-- `main` 브랜치의 CI 성공 시에만 Windows self-hosted runner가 N100 배포와 서비스 health 확인을 실행하도록 구성했습니다.
+- 허용된 Compose 변경만 `main` CI 성공 뒤 N100 안전 자동배포 대상으로 분류하며, K3s 소유 서비스는 생략합니다. K3s 이미지는 별도 승인·반입·단일 writer·health 검증 절차로 교체합니다.
 
 ## 문제 해결 사례
 
