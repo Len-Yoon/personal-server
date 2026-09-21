@@ -392,6 +392,263 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                     {"https://example.com/KR_IT", "https://example.com/KR_AI"},
                 )
 
+    def test_committed_alert_is_persisted_as_pending_outbox_event_before_send(self):
+        """Fails if an alert can be sent without a durable retry record."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}, clear=False):
+                news_archive = self.reload_news_archive()
+                now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+                news_archive._save_archive({
+                    "updated_at": "", "articles": [], "telegram_notifications_initialized": True,
+                })
+                article = news_archive._attach_archive_metadata(
+                    {
+                        "url": "https://example.com/alert",
+                        "title": "미 연준 기준금리 동결",
+                        "source": "Investing.com 한국어",
+                    },
+                    category="KR_WORLD",
+                    now=now,
+                )
+
+                news_archive._commit_collected_articles("KR_WORLD", [article], now)
+
+                outbox = news_archive._load_archive()["telegram_outbox"]
+                self.assertEqual(len(outbox), 1)
+                self.assertEqual(outbox[0]["kind"], "alert")
+                self.assertEqual(outbox[0]["status"], "pending")
+                self.assertEqual(outbox[0]["articles"], [article])
+
+    def test_pending_alert_retries_after_failure_and_is_acknowledged_only_after_success(self):
+        """Fails if a failed alert is discarded or a successful retry is not recorded."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}, clear=False):
+                news_archive = self.reload_news_archive()
+                now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+                article = {"url": "https://example.com/alert", "title": "중요 기사", "nasdaq_relevance": {"level": "alert", "reasons": ["금리"]}}
+                event = news_archive.notification_event("alert", [article], now.isoformat())
+                news_archive._save_archive({
+                    "updated_at": "", "articles": [], "telegram_notifications_initialized": True,
+                    "telegram_outbox": [event],
+                })
+
+                with patch.object(news_archive, "notify_new_investing_articles", return_value=0) as notify:
+                    news_archive._drain_notification_outbox(now)
+                self.assertEqual(notify.call_count, 1)
+                self.assertEqual(news_archive._load_archive()["telegram_outbox"][0]["status"], "pending")
+
+                with patch.object(news_archive, "notify_new_investing_articles", return_value=1) as notify:
+                    news_archive._drain_notification_outbox(now)
+                self.assertEqual(notify.call_count, 1)
+                self.assertEqual(news_archive._load_archive()["telegram_outbox"][0]["status"], "sent")
+
+    def test_digest_is_persisted_before_send_and_sent_event_is_not_replayed_after_reload(self):
+        """Fails if digest selection has no durable event or sent events replay after restart."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}, clear=False):
+                news_archive = self.reload_news_archive()
+                now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+                article = {"url": "https://example.com/digest", "title": "시장 뉴스", "market_topic": "미국"}
+                news_archive._save_archive({
+                    "updated_at": "", "articles": [], "telegram_notifications_initialized": True,
+                    "telegram_last_digest_at": (now - timedelta(hours=1)).isoformat(),
+                    "telegram_pending_articles": [article],
+                })
+
+                with patch.object(news_archive, "notify_market_news_digest", return_value=True) as notify:
+                    news_archive._drain_notification_outbox(now)
+                archive = news_archive._load_archive()
+                self.assertEqual(notify.call_args.args[0], [article])
+                self.assertEqual(archive["telegram_pending_articles"], [])
+                self.assertEqual(archive["telegram_outbox"][0]["kind"], "digest")
+                self.assertEqual(archive["telegram_outbox"][0]["status"], "sent")
+
+                news_archive = self.reload_news_archive()
+                with patch.object(news_archive, "notify_market_news_digest") as notify:
+                    news_archive._drain_notification_outbox(now + timedelta(minutes=1))
+                notify.assert_not_called()
+
+    def test_drain_processes_starting_alerts_and_one_digest_without_consuming_new_events(self):
+        """Fails if one drain stops after one alert or follows newly enqueued events forever."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}, clear=False):
+                news_archive = self.reload_news_archive()
+                now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+                alerts = [
+                    {"url": f"https://example.com/alert-{number}", "title": f"중요 {number}", "nasdaq_relevance": {"level": "alert", "reasons": ["금리"]}}
+                    for number in (1, 2)
+                ]
+                digest_article = {"url": "https://example.com/digest", "title": "시장 뉴스", "market_topic": "미국"}
+                news_archive._save_archive({
+                    "updated_at": "", "articles": [], "telegram_notifications_initialized": True,
+                    "telegram_last_digest_at": (now - timedelta(hours=1)).isoformat(),
+                    "telegram_pending_articles": [digest_article],
+                    "telegram_outbox": [news_archive.notification_event("alert", [article], now.isoformat()) for article in alerts],
+                })
+
+                with patch.object(news_archive, "notify_new_investing_articles", return_value=1) as alert_notify, patch.object(
+                    news_archive, "notify_market_news_digest", return_value=True
+                ) as digest_notify:
+                    news_archive._drain_notification_outbox(now)
+
+                self.assertEqual(alert_notify.call_count, 2)
+                digest_notify.assert_called_once_with([digest_article])
+                self.assertTrue(all(event["status"] == "sent" for event in news_archive._load_archive()["telegram_outbox"]))
+
+    def test_outbox_failure_and_restart_contracts(self):
+        """Fails if save failures send early or pending events lose their retry meaning after reload."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}, clear=False):
+                news_archive = self.reload_news_archive()
+                now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+                alert = {"url": "https://example.com/alert-save", "title": "중요", "nasdaq_relevance": {"level": "alert", "reasons": ["금리"]}}
+                event = news_archive.notification_event("alert", [alert], now.isoformat())
+                news_archive._save_archive({"updated_at": "", "articles": [], "telegram_notifications_initialized": True, "telegram_outbox": [event]})
+
+                with patch.object(news_archive, "notify_new_investing_articles", return_value=1) as notify, patch.object(
+                    news_archive, "_save_archive", side_effect=OSError("disk full")
+                ):
+                    with self.assertRaises(OSError):
+                        news_archive._drain_notification_outbox(now)
+                notify.assert_not_called()
+                self.assertEqual(news_archive._load_archive()["telegram_outbox"][0]["status"], "pending")
+
+                news_archive = self.reload_news_archive()
+                with patch.object(news_archive, "notify_new_investing_articles", return_value=1) as notify, patch.object(
+                    news_archive, "_save_archive", side_effect=[None, OSError("ack disk full")]
+                ):
+                    with self.assertRaises(OSError):
+                        news_archive._drain_notification_outbox(now)
+                notify.assert_called_once()
+                self.assertEqual(news_archive._load_archive()["telegram_outbox"][0]["status"], "pending")
+
+                news_archive = self.reload_news_archive()
+                with patch.object(news_archive, "notify_new_investing_articles", return_value=1) as notify:
+                    news_archive._drain_notification_outbox(now)
+                notify.assert_called_once()
+                self.assertEqual(news_archive._load_archive()["telegram_outbox"][0]["status"], "sent")
+
+    def test_digest_pending_event_retries_after_reload_without_cooldown_block(self):
+        """Fails if a failed persisted digest is discarded or re-selection cooldown blocks its retry."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}, clear=False):
+                news_archive = self.reload_news_archive()
+                now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+                article = {"url": "https://example.com/digest-retry", "title": "시장", "market_topic": "미국"}
+                event = news_archive.notification_event("digest", [article], now.isoformat())
+                news_archive._save_archive({"updated_at": "", "articles": [], "telegram_notifications_initialized": True, "telegram_last_digest_at": now.isoformat(), "telegram_pending_articles": [article], "telegram_outbox": [event]})
+                with patch.object(news_archive, "notify_market_news_digest", return_value=False) as notify:
+                    news_archive._drain_notification_outbox(now)
+                notify.assert_called_once_with([article])
+                news_archive = self.reload_news_archive()
+                with patch.object(news_archive, "notify_market_news_digest", return_value=True) as notify:
+                    news_archive._drain_notification_outbox(now + timedelta(minutes=1))
+                notify.assert_called_once_with([article])
+                self.assertEqual(news_archive._load_archive()["telegram_outbox"][0]["status"], "sent")
+
+    def test_outbox_normalization_pruning_and_digest_reservation_contract(self):
+        """Fails if malformed state survives, IDs vary by order, old sent events persist, or reserved URLs reseat."""
+        news_archive = self.reload_news_archive()
+        now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+        first = {"url": "https://example.com/one", "title": "one"}
+        second = {"url": "https://example.com/two", "title": "two"}
+        self.assertEqual(
+            news_archive.notification_event("digest", [first, second], now.isoformat())["event_id"],
+            news_archive.notification_event("digest", [second, first], now.isoformat())["event_id"],
+        )
+        malformed = news_archive._notification_outbox([{"event_id": "bad", "kind": "alert", "status": "sent", "articles": [first], "sent_at": "not-a-time"}])
+        self.assertEqual(news_archive._prune_sent_events(malformed, now), [])
+        reserved = news_archive.notification_event("digest", [first], now.isoformat())
+        archive = {"telegram_last_digest_at": "", "telegram_pending_articles": [first, second], "telegram_topic_last_sent_at": {}, "telegram_recent_articles": []}
+        created = news_archive._create_pending_digest_event(archive, [reserved], now)
+        self.assertIsNotNone(created)
+        self.assertNotIn(first["url"], created["article_urls"])
+
+    def test_commit_enqueue_save_failure_preserves_disk_and_never_reaches_notifier(self):
+        """Fails if alert intent enqueue failure is hidden and later send code can run."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}, clear=False):
+                news_archive = self.reload_news_archive()
+                now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+                news_archive._save_archive({"updated_at": "", "articles": [], "telegram_notifications_initialized": True})
+                article = news_archive._attach_archive_metadata({"url": "https://example.com/enqueue-fail", "title": "미 연준 기준금리 동결", "source": "Investing.com 한국어"}, "KR_WORLD", now)
+                with patch.object(news_archive, "_save_archive", side_effect=OSError("enqueue disk full")), patch.object(news_archive, "notify_new_investing_articles") as notify:
+                    with self.assertRaises(OSError):
+                        news_archive._commit_collected_articles("KR_WORLD", [article], now)
+                notify.assert_not_called()
+                self.assertEqual(news_archive._load_archive()["telegram_outbox"], [])
+
+    def test_sent_and_recent_retention_prune_at_two_hour_boundary_and_persist(self):
+        """Fails if expired sent events or recent digest articles survive reload and suppress new news."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "news_archive.json")}, clear=False):
+                news_archive = self.reload_news_archive()
+                now = datetime(2026, 8, 20, 12, 1, tzinfo=timezone.utc)
+                article = {"url": "https://example.com/old", "title": "미국 CPI 발표", "market_topic": "미국"}
+                event = dict(news_archive.notification_event("digest", [article], now.isoformat()), status="sent", sent_at=(now - timedelta(hours=2, seconds=1)).isoformat())
+                news_archive._save_archive({"updated_at": "", "articles": [], "telegram_notifications_initialized": True, "telegram_outbox": [event], "telegram_recent_articles": [dict(article, sent_at=(now - timedelta(hours=2, seconds=1)).isoformat())]})
+                news_archive._drain_notification_outbox(now)
+                news_archive = self.reload_news_archive()
+                archive = news_archive._load_archive()
+                self.assertEqual(archive["telegram_outbox"], [])
+                self.assertEqual(archive["telegram_recent_articles"], [])
+
+    def test_digest_enqueue_and_ack_failures_preserve_retry_snapshot_on_disk(self):
+        for failure_stage in ("enqueue", "ack"):
+            with self.subTest(stage=failure_stage), tempfile.TemporaryDirectory() as tmpdir:
+                with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "archive.json")}, clear=False):
+                    news_archive = self.reload_news_archive()
+                    now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+                    article = {"url": "https://example.com/durable-digest", "title": "국제유가 상승", "market_topic": "원유"}
+                    news_archive._save_archive({"articles": [], "telegram_notifications_initialized": True,
+                                                "telegram_pending_articles": [article]})
+                    save = news_archive._save_archive
+
+                    def fail_at_event_transition(archive):
+                        events = archive.get("telegram_outbox", [])
+                        target = "pending" if failure_stage == "enqueue" else "sent"
+                        if any(event["status"] == target for event in events):
+                            raise OSError("injected persistence failure")
+                        save(archive)
+
+                    with patch.object(news_archive, "_save_archive", side_effect=fail_at_event_transition), patch.object(
+                        news_archive, "notify_market_news_digest", return_value=True
+                    ) as notify:
+                        with self.assertRaises(OSError):
+                            news_archive._drain_notification_outbox(now)
+                    self.assertEqual(notify.call_count, 0 if failure_stage == "enqueue" else 1)
+                    news_archive = self.reload_news_archive()
+                    saved = news_archive._load_archive()
+                    self.assertEqual(saved["telegram_pending_articles"], [article])
+                    self.assertEqual([event["status"] for event in saved["telegram_outbox"]],
+                                     [] if failure_stage == "enqueue" else ["pending"])
+                    with patch.object(news_archive, "notify_market_news_digest", return_value=True) as retry:
+                        news_archive._drain_notification_outbox(now + timedelta(minutes=1))
+                    retry.assert_called_once_with([article])
+                    self.assertEqual(news_archive._load_archive()["telegram_pending_articles"], [])
+                    self.assertEqual(news_archive._load_archive()["telegram_outbox"][0]["status"], "sent")
+
+    def test_legacy_and_malformed_outbox_preserve_existing_article_and_pending_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "archive.json")}, clear=False):
+                news_archive = self.reload_news_archive()
+                now = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+                article = news_archive._attach_archive_metadata(
+                    {"url": "https://example.com/legacy", "title": "시장 동향", "source": "RSS"}, "KR_IT", now)
+                news_archive._save_archive({"articles": [article], "telegram_notifications_initialized": True,
+                                            "telegram_pending_articles": [article]})
+                legacy = news_archive._load_archive()
+                self.assertEqual(legacy["telegram_outbox"], [])
+                legacy["telegram_outbox"] = [None, {}, {"event_id": "bad", "kind": "unknown"}]
+                news_archive._save_archive(legacy)
+                restored = news_archive._load_archive()
+                self.assertEqual(restored["articles"], legacy["articles"])
+                self.assertEqual(restored["telegram_pending_articles"], [article])
+                self.assertEqual(restored["telegram_outbox"], [])
+                old = news_archive.notification_event("alert", [article], now.isoformat())
+                old.update(status="sent", sent_at="2026-08-20T07:00:00")
+                self.assertEqual(news_archive._prune_sent_events([old], now), [])
+
     def test_digest_ack_preserves_pending_added_while_notifier_runs(self):
         """Fails if a successful digest ack writes a stale pending snapshot."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -426,22 +683,29 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                         news_archive._commit_collected_articles(
                             "KR_WORLD",
                             [news_archive._attach_archive_metadata(
-                                {"url": "https://example.com/new", "title": "새 시장 기사", "source": "Investing.com 한국어"},
+                                {"url": "https://example.com/new", "title": "미 연준 기준금리 동결", "source": "Investing.com 한국어"},
                                 category="KR_WORLD",
                                 now=now,
                             )],
                             now,
                         )
+                        with news_archive._ARCHIVE_WRITE_LOCK:
+                            latest = news_archive._load_archive()
+                            latest["telegram_pending_articles"].append(
+                                {"url": "https://example.com/concurrent-general", "title": "기업 실적"})
+                            news_archive._save_archive(latest)
                     finally:
                         release.set()
                         sender.join(timeout=3)
 
                 self.assertFalse(sender.is_alive())
                 self.assertEqual(sender_errors, [])
-                self.assertEqual(
-                    [article["url"] for article in news_archive._load_archive()["telegram_pending_articles"]],
-                    ["https://example.com/new"],
-                )
+                latest = news_archive._load_archive()
+                self.assertEqual([article["url"] for article in latest["telegram_pending_articles"]],
+                                 ["https://example.com/concurrent-general"])
+                self.assertIn("https://example.com/new", {article["url"] for article in latest["articles"]})
+                outbox = latest["telegram_outbox"]
+                self.assertTrue(any(event["kind"] == "alert" and event["status"] == "pending" and event["article_urls"] == ["https://example.com/new"] for event in outbox))
 
     def test_direct_and_background_collections_preserve_both_articles(self):
         """Fails if a background refresh saves an archive snapshot from before a direct refresh."""

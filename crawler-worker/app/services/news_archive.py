@@ -12,6 +12,7 @@ from app.crawlers.rss_news import _html_to_text
 from app.services.nasdaq_relevance import classify_nasdaq_relevance
 from app.services.news_archive_notifications import (
     notification_articles as _notification_articles,
+    notification_outbox as _notification_outbox,
     notification_times as _notification_times,
 )
 from app.services.news_archive_processing import (
@@ -22,6 +23,7 @@ from app.services.news_archive_processing import (
     market_topic as _market_topic,
     same_market_event as _same_market_event,
 )
+from app.services.news_archive_notifications import notification_event
 from app.services.news_archive_storage import (
     archive_path as _archive_path,
     load_archive as _load_archive_from_storage,
@@ -128,11 +130,8 @@ def collect_korean_news(
         for article in fresh_articles
     ]
     archive, new_articles, should_notify = _commit_collected_articles(category, stored_articles, now)
-    alert_articles = _alert_articles(new_articles)
-    if should_notify and alert_articles:
-        notify_new_investing_articles(alert_articles)
     if should_notify:
-        _queue_and_send_general_digest(now)
+        _drain_notification_outbox(now)
 
     category_articles = _get_category_articles(
         archive["articles"], category, today_only=True
@@ -249,6 +248,7 @@ def _load_archive() -> dict[str, Any]:
         _sanitize_article,
         _notification_articles,
         _notification_times,
+        _notification_outbox,
         _save_archive,
     )
 
@@ -294,11 +294,8 @@ def _refresh_category(category: str, limit: int) -> None:
         for article in fresh_articles
     ]
     _, new_articles, should_notify = _commit_collected_articles(category, stored_articles, now)
-    alert_articles = _alert_articles(new_articles)
-    if should_notify and alert_articles:
-        notify_new_investing_articles(alert_articles)
     if should_notify:
-        _queue_and_send_general_digest(now)
+        _drain_notification_outbox(now)
 
 
 def _commit_collected_articles(
@@ -315,9 +312,22 @@ def _commit_collected_articles(
                 _notification_articles(archive.get("telegram_pending_articles", [])),
                 [article for article in new_articles if not _alert_articles([article])],
             )
+            archive["telegram_outbox"] = _upsert_notification_events(
+                _notification_outbox(archive.get("telegram_outbox", [])),
+                [notification_event("alert", [article], _iso(now)) for article in _alert_articles(new_articles)],
+            )
         archive["updated_at"] = _iso(now)
         _save_archive(archive)
         return archive, new_articles, should_notify
+
+
+def _upsert_notification_events(
+    existing_events: list[dict[str, Any]], new_events: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    events = {str(event["event_id"]): event for event in existing_events}
+    for event in new_events:
+        events.setdefault(str(event["event_id"]), event)
+    return list(events.values())
 
 
 def _purge_archive(archive: dict[str, Any], now: datetime) -> tuple[dict[str, Any], bool]:
@@ -402,48 +412,142 @@ def _should_notify_new_investing_articles(
 
 
 def _queue_and_send_general_digest(now: datetime) -> None:
+    _drain_notification_outbox(now)
+
+
+def _drain_notification_outbox(now: datetime) -> None:
     with _NOTIFICATION_LOCK:
         with _ARCHIVE_WRITE_LOCK:
             archive = _load_archive()
-            pending = _notification_articles(archive.get("telegram_pending_articles", []))
-            last_digest_at = _parse_dt(str(archive.get("telegram_last_digest_at", "")))
-            if last_digest_at and now - last_digest_at < DIGEST_INTERVAL:
-                return
-            selected, _, removed_urls = _select_general_digest_articles_with_removed(
-                pending,
-                now=now,
-                topic_last_sent_at=_notification_times(archive.get("telegram_topic_last_sent_at", {})),
-                recent_sent_articles=_notification_articles(archive.get("telegram_recent_articles", [])),
-            )
-            if not selected:
-                if removed_urls:
-                    archive["telegram_pending_articles"] = _remove_notification_urls(pending, removed_urls)
-                    _save_archive(archive)
-                return
+            outbox = _prune_sent_events(_notification_outbox(archive.get("telegram_outbox", [])), now)
+            archive["telegram_outbox"] = outbox
+            _prune_recent_articles(archive, now)
+            initial_event_ids = [event["event_id"] for event in outbox if event["status"] == "pending"]
+            _save_archive(archive)
 
-        sent = notify_market_news_digest(selected)
-        if not sent:
-            return
+        for event_id in initial_event_ids:
+            if not _send_pending_event(event_id, now):
+                return
 
         with _ARCHIVE_WRITE_LOCK:
             archive = _load_archive()
+            event = _create_pending_digest_event(
+                archive, _notification_outbox(archive.get("telegram_outbox", [])), now
+            )
+            if event:
+                archive["telegram_outbox"] = _upsert_notification_events(
+                    _notification_outbox(archive.get("telegram_outbox", [])), [event]
+                )
+                _save_archive(archive)
+                digest_event_id = event["event_id"]
+            else:
+                digest_event_id = ""
+        if digest_event_id:
+            _send_pending_event(digest_event_id, now)
+
+
+def _send_pending_event(event_id: str, now: datetime) -> bool:
+    with _ARCHIVE_WRITE_LOCK:
+        archive = _load_archive()
+        event = next(
+            (item for item in _notification_outbox(archive.get("telegram_outbox", []))
+             if item["event_id"] == event_id and item["status"] == "pending"),
+            None,
+        )
+    if event is None:
+        return True
+    if event["kind"] == "alert":
+        sent = notify_new_investing_articles(event["articles"]) == 1
+    else:
+        sent = notify_market_news_digest(event["articles"])
+    if not sent:
+        return False
+    with _ARCHIVE_WRITE_LOCK:
+        archive = _load_archive()
+        archive["telegram_outbox"] = _ack_notification_event(
+            _notification_outbox(archive.get("telegram_outbox", [])), event, now
+        )
+        if event["kind"] == "digest":
+            _ack_digest_event(archive, event, now)
+        _prune_recent_articles(archive, now)
+        _save_archive(archive)
+    return True
+
+
+def _create_pending_digest_event(
+    archive: dict[str, Any], outbox: list[dict[str, Any]], now: datetime
+) -> dict[str, Any] | None:
+    last_digest_at = _parse_dt(str(archive.get("telegram_last_digest_at", "")))
+    if last_digest_at and now - last_digest_at < DIGEST_INTERVAL:
+        return None
+    reserved_urls = {
+        url for event in outbox if event["kind"] == "digest" and event["status"] == "pending"
+        for url in event["article_urls"]
+    }
+    pending = [
+        article for article in _notification_articles(archive.get("telegram_pending_articles", []))
+        if str(article.get("url", "")).strip() not in reserved_urls
+    ]
+    selected, _, removed_urls = _select_general_digest_articles_with_removed(
+        pending, now, _notification_times(archive.get("telegram_topic_last_sent_at", {})),
+        _notification_articles(archive.get("telegram_recent_articles", [])),
+    )
+    if not selected:
+        if removed_urls:
             archive["telegram_pending_articles"] = _remove_notification_urls(
                 _notification_articles(archive.get("telegram_pending_articles", [])), removed_urls
             )
-            topic_times = _notification_times(archive.get("telegram_topic_last_sent_at", {}))
-            for article in selected:
-                topic_times[str(article["market_topic"])] = _iso(now)
-            recent = _notification_articles(archive.get("telegram_recent_articles", [])) + [
-                dict(article, sent_at=_iso(now)) for article in selected
-            ]
-            archive["telegram_recent_articles"] = [
-                article for article in recent
-                if (sent_at := _parse_dt(str(article.get("sent_at", ""))))
-                and now - sent_at <= DEDUPLICATION_WINDOW
-            ]
-            archive["telegram_topic_last_sent_at"] = topic_times
-            archive["telegram_last_digest_at"] = _iso(now)
             _save_archive(archive)
+        return None
+    event = notification_event("digest", selected, _iso(now))
+    event["removed_urls"] = sorted(removed_urls)
+    return event
+
+
+def _ack_notification_event(
+    outbox: list[dict[str, Any]], event: dict[str, Any], now: datetime
+) -> list[dict[str, Any]]:
+    acknowledged = []
+    for current in outbox:
+        if current["event_id"] == event["event_id"] and current["status"] == "pending":
+            current = dict(current, status="sent", sent_at=_iso(now))
+        acknowledged.append(current)
+    return _prune_sent_events(acknowledged, now)
+
+
+def _ack_digest_event(archive: dict[str, Any], event: dict[str, Any], now: datetime) -> None:
+    removed_urls = set(event.get("removed_urls", event["article_urls"]))
+    archive["telegram_pending_articles"] = _remove_notification_urls(
+        _notification_articles(archive.get("telegram_pending_articles", [])), removed_urls
+    )
+    topic_times = _notification_times(archive.get("telegram_topic_last_sent_at", {}))
+    for article in event["articles"]:
+        topic_times[_market_topic(article)] = _iso(now)
+    archive["telegram_topic_last_sent_at"] = topic_times
+    archive["telegram_recent_articles"] = _notification_articles(archive.get("telegram_recent_articles", [])) + [
+        dict(article, sent_at=_iso(now)) for article in event["articles"]
+    ]
+    _prune_recent_articles(archive, now)
+    archive["telegram_last_digest_at"] = _iso(now)
+
+
+def _prune_sent_events(events: list[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
+    return [
+        event for event in events
+        if event["status"] != "sent"
+        or (
+            (sent_at := _parse_dt(str(event.get("sent_at", "")))) is not None
+            and now - sent_at <= DEDUPLICATION_WINDOW
+        )
+    ]
+
+
+def _prune_recent_articles(archive: dict[str, Any], now: datetime) -> None:
+    archive["telegram_recent_articles"] = [
+        article for article in _notification_articles(archive.get("telegram_recent_articles", []))
+        if (sent_at := _parse_dt(str(article.get("sent_at", ""))))
+        and now - sent_at <= DEDUPLICATION_WINDOW
+    ]
 
 
 def _select_general_digest_articles(
