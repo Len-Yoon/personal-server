@@ -27,7 +27,9 @@ validate_key_path() {
   if [[ -e "$key_path" ]]; then
     [[ -f "$key_path" ]] || die "SSH 키가 일반 파일이 아님: $key_path"
     local mode
-    mode="$(stat -f '%Lp' "$key_path" 2>/dev/null || stat -c '%a' "$key_path" 2>/dev/null || true)"
+    if ! mode="$(stat -f '%Lp' "$key_path" 2>/dev/null)"; then
+      mode="$(stat -c '%a' "$key_path" 2>/dev/null)" || mode=""
+    fi
     [[ "$mode" = 600 ]] || die "SSH 개인키 권한은 0600이어야 함: $key_path (현재 $mode)"
   fi
 }

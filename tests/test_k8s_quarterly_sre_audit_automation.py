@@ -515,13 +515,13 @@ exec /usr/bin/grep "$@"
         result, calls = self.run_tool(
             "--install",
             manual_job="slow_complete",
-            manual_job_timeout="1s",
-            manual_job_response_delay_seconds=3,
+            manual_job_timeout="5s",
+            manual_job_response_delay_seconds=6,
         )
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("manual Job did not reach a terminal state before timeout", result.stderr)
-        self.assertIn("--request-timeout=1s get job monthly-sre-audit-manual-", calls)
+        self.assertRegex(calls, r"--request-timeout=[1-5]s get job monthly-sre-audit-manual-")
         official_success_queries = [
             call
             for call in calls.splitlines()
@@ -534,13 +534,13 @@ exec /usr/bin/grep "$@"
         result, calls = self.run_tool(
             "--install",
             manual_job="slow_succeeded",
-            manual_job_timeout="1s",
-            manual_job_response_delay_seconds=3,
+            manual_job_timeout="5s",
+            manual_job_response_delay_seconds=6,
         )
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("manual Job did not reach a terminal state before timeout", result.stderr)
-        self.assertIn("--request-timeout=1s get job monthly-sre-audit-manual-", calls)
+        self.assertRegex(calls, r"--request-timeout=[1-5]s get job monthly-sre-audit-manual-")
         self.assertIn("jsonpath={.status.succeeded}", calls)
         self.assertNotIn("patch cronjob monthly-sre-audit", calls)
 

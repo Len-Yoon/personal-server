@@ -24,6 +24,39 @@ class N100RemoteDevHostTests(unittest.TestCase):
             capture_output=True,
         )
 
+    def test_permission_probe_discards_output_from_failed_stat_flavor(self):
+        cases = (("gnu", "600", 0, True), ("bsd", "600", 0, True),
+                 ("gnu", "644", 0, False), ("gnu", "600", 1, False))
+        for flavor, mode, fallback_exit, allowed in cases:
+            with self.subTest(flavor=flavor, mode=mode, fallback_exit=fallback_exit), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                tools = root / "tools"
+                tools.mkdir()
+                key = root / "fixture-key"
+                key.write_text("non-secret fixture", encoding="utf-8")
+                key.chmod(0o600)
+                marker = root / "ssh-called"
+                stat_tool = tools / "stat"
+                stat_tool.write_text(
+                    '#!/bin/sh\n'
+                    'if [ "$1" = "-f" ]; then\n'
+                    + ('printf "600\\n"; exit 0\n' if flavor == "bsd" else 'printf "filesystem report\\n"; exit 1\n')
+                    + 'fi\n'
+                    + f'printf "{mode}\\n"; exit {fallback_exit}\n',
+                    encoding="utf-8",
+                )
+                stat_tool.chmod(0o755)
+                ssh = tools / "ssh"
+                ssh.write_text('#!/bin/sh\nprintf called > "$PROBE_MARKER"\n', encoding="utf-8")
+                ssh.chmod(0o755)
+                result = self.run_script("preflight", env={
+                    "N100_SSH_KEY": str(key), "PROBE_MARKER": str(marker),
+                    "PATH": f"{tools}:{os.environ['PATH']}",
+                })
+                self.assertEqual(result.returncode == 0, allowed)
+                self.assertEqual(marker.exists(), allowed)
+                self.assertEqual(key.read_text(), "non-secret fixture")
+
     def test_keygen_creates_default_private_key_with_mode_0600(self):
         with tempfile.TemporaryDirectory() as home:
             result = self.run_script("keygen", env={"HOME": home})

@@ -52,16 +52,18 @@ def package_name(value: str) -> str:
 
 
 def declared_packages(entry: dict[str, object]) -> dict[str, str | None]:
-    packages = {package_name(str(package)): None for package in entry["extra_packages"]}
+    packages: dict[str, str | None] = {}
+    candidates = list(entry["extra_packages"])
     requirements = str(entry["requirements"])
     if requirements:
-        for line in (ROOT / requirements).read_text(encoding="utf-8").splitlines():
-            candidate = line.strip()
-            if not candidate or candidate.startswith(("#", "-")):
-                continue
-            match = re.match(r"(?P<name>[A-Za-z0-9_.-]+)(?:\[[^]]+\])?\s*(?:==\s*(?P<version>[^;\s]+))?", candidate)
-            if match:
-                packages[package_name(match.group("name"))] = match.group("version")
+        candidates.extend((ROOT / requirements).read_text(encoding="utf-8").splitlines())
+    for line in candidates:
+        candidate = line.strip()
+        if not candidate or candidate.startswith(("#", "-")):
+            continue
+        match = re.match(r"(?P<name>[A-Za-z0-9_.-]+)(?:\[[^]]+\])?\s*(?:==\s*(?P<version>[^;\s]+))?", candidate)
+        if match:
+            packages[package_name(match.group("name"))] = match.group("version")
     return packages
 
 

@@ -15,6 +15,17 @@ SPEC.loader.exec_module(setup)
 
 
 class SetupLocalTestVenvsTests(unittest.TestCase):
+    def test_check_enforces_pinned_extra_dependency_version(self):
+        matrix = [{"name": "book-memo", "python_version": "3.11", "requirements": "", "extra_packages": ["httpx==0.28.1"], "pythonpath": "book-memo", "test_command": "python3 -m unittest tests.book_memo.test_ui_contract"}]
+        with TemporaryDirectory() as directory:
+            python = Path(directory) / "book-memo" / "bin" / "python"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            python.chmod(0o755)
+            for installed, expected in (({}, 1), ({"httpx": "0.27.0"}, 1), ({"httpx": "0.28.1"}, 0)):
+                with self.subTest(installed=installed), mock.patch.object(setup, "load_matrix", return_value=matrix), mock.patch.object(setup, "environment_metadata", return_value=("3.11", installed)), mock.patch.object(setup.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+                    self.assertEqual(setup.main(["--check", "--venv-root", directory]), expected)
+
     def test_go_creates_each_matrix_environment_and_installs_declared_dependencies(self):
         matrix = [
             {
