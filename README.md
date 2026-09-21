@@ -118,7 +118,7 @@ Portal은 K3s 단일 writer와 PVC를 사용하므로 non-root 이미지 교체 
 
 ## 모니터링 예시
 
-2026-09-21 N100의 `Kubernetes / Compute Resources / Cluster` 대시보드를 실제 촬영함. CPU·메모리 그래프와 네임스페이스별 현황은 표시되지만, 상단 CPU Utilisation·Memory Utilisation 패널은 `No data`임. 해당 패널의 질의·지표 정합성은 확인 필요하며, 이미지의 수치나 상태는 보정하지 않음. 촬영 범위는 대시보드 상단부터 메모리 그래프까지이며 전체 대시보드가 아님.
+2026-09-21 N100의 `Kubernetes / Compute Resources / Cluster` 대시보드를 실제 촬영함. CPU·메모리 그래프와 네임스페이스별 현황은 표시되지만, 상단 CPU Utilisation·Memory Utilisation 패널은 `No data`임. Explore에서 두 node-exporter 지표가 조회되지 않았다는 사용자 확인과 저장소의 node-exporter 비활성화 설정을 함께 기록함. 이 지표 제한을 유지하며 이미지의 수치나 상태는 보정하지 않음. 촬영 범위는 대시보드 상단부터 메모리 그래프까지이며 전체 대시보드가 아님.
 
 ![Grafana K3s 모니터링 화면](docs/images/grafana-k3s-overview.png)
 
