@@ -110,7 +110,7 @@ CronJob은 매일 03:00 KST에 실행되며, `Forbid` 동시 실행 제한·실�
 
 ## 일별 SLO 증적
 
-`slo-daily-evidence` CronJob은 서울 기준 매일 02:15에 실행하도록 정의됨. 저장소 초기 기본값은 `suspend: true`이나 N100에서는 활성 상태임. 마지막 성공은 2026-09-18 02:15이며, 최근 실패는 freshness 질의의 다중 시계열 원인으로 확인함. [SLO 원인 분석](../../docs/reviews/20260921_SLO증적실패_원인분석.md)의 수정안은 아직 운영에 적용하지 않음. `monitoring/slo-daily-evidence` ConfigMap의 `records.json`에 날짜별 검증 기록을 최대 30건 보관함. 같은 날짜의 재수집은 해당 기록을 교체함. Prometheus retention은 변경하지 않으며, 결측·질의 오류는 `unobservable`로 기록하고 Job이 실패함. 공개 health 비-200은 `failed`로 기록하며 관측 자체가 성공했다면 Job 실패로 취급하지 않음.
+`slo-daily-evidence` CronJob은 서울 기준 매일 02:15에 실행하도록 정의됨. 2026-09-22에 freshness 다중 시계열 집계 수정 collector를 반입하고 수동 Job 1회 검증을 완료했으며, 현재 N100 CronJob은 `suspend: true`로 유지함. 당일 증적은 `ok`로 검증됐음. [SLO 원인 분석](../../docs/reviews/20260921_SLO증적실패_원인분석.md)과 [운영 적용 검증 결과](../../docs/reviews/20260922_뉴스_SLO_운영적용_검증결과.md)를 참조함. `monitoring/slo-daily-evidence` ConfigMap의 `records.json`에 날짜별 검증 기록을 최대 30건 보관함. 같은 날짜의 재수집은 해당 기록을 교체함. Prometheus retention은 변경하지 않으며, 결측·질의 오류는 `unobservable`로 기록하고 Job이 실패함. 공개 health 비-200은 `failed`로 기록하며 관측 자체가 성공했다면 Job 실패로 취급하지 않음.
 
 실행 권한은 고정 증적 ConfigMap의 `get`, `patch`로 제한함. CronJob은 동시 실행 금지, 재시도 없음, 최대 180초 실행, non-root, read-only root filesystem, capability 전체 제거 및 크기가 제한된 `/tmp`만 사용함. Secret·PVC·host volume을 mount하지 않으며 Portal·K3s 복구 또는 배포 차단을 수행하지 않음.
 
