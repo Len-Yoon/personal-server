@@ -323,7 +323,36 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("tunnel_alert", state)
         self.assertIn('Properties["tunnel_alert"]', loader)
         self.assertIn("Update-TunnelTelegramNotification", cycle)
-        self.assertLess(cycle.index("Update-TunnelTelegramNotification"), cycle.index("foreach ($component in $RecoveryComponents)"))
+        self.assertGreater(cycle.index("Update-TunnelTelegramNotification"), cycle.index("foreach ($component in $RecoveryComponents)"))
+
+    def test_tunnel_down_alert_waits_for_the_recovery_failure_threshold(self):
+        """A one-cycle public Tunnel probe failure must not notify Telegram."""
+        notifier = SCRIPT[
+            SCRIPT.index("function Update-TunnelTelegramNotification")
+            : SCRIPT.index("function Test-CloudflareTunnelRunning")
+        ]
+        cycle = SCRIPT[
+            SCRIPT.index("function Invoke-RecoveryCycle")
+            : SCRIPT.index("function Install-EmergencyRebootTask")
+        ]
+
+        self.assertIn("[int]$TunnelFailureCount", notifier)
+        self.assertIn("if ($TunnelFailureCount -lt $RecoveryFailureThreshold)", notifier)
+        self.assertIn("Update-TunnelTelegramNotification $health.tunnel $failureCount", cycle)
+        self.assertLess(cycle.index("Register-RecoveryFailure $component"), cycle.index("Update-TunnelTelegramNotification $health.tunnel $failureCount"))
+
+    def test_tunnel_process_probe_accepts_http2_service_command(self):
+        """The registered service command may put transport flags between tunnel and run."""
+        probe = SCRIPT[
+            SCRIPT.index("function Test-CloudflareTunnelRunning")
+            : SCRIPT.index("function Test-CloudflareTunnelService")
+        ]
+
+        self.assertIn("$CloudflareTunnelProcessPattern", SCRIPT)
+        self.assertIn("tunnel([[:space:]]+[^[:space:]]+)*[[:space:]]+run", SCRIPT)
+        self.assertIn("personal-server", SCRIPT)
+        self.assertIn("pgrep -af '$CloudflareTunnelProcessPattern'", probe)
+        self.assertNotIn("pgrep -af '[c]loudflared.*tunnel run'", probe)
 
     def test_recovery_events_are_bounded_structured_and_secret_free(self):
         """Operator diagnostics need a compact history without credential or command leakage."""
@@ -808,7 +837,7 @@ class WindowsBootstrapTests(unittest.TestCase):
         self.assertIn("host.docker.internal:30080/health", health)
         self.assertNotIn("127.0.0.1:30080/health", health)
         self.assertIn("Test-CloudflareTunnelRunning", health)
-        self.assertIn("[c]loudflared.*tunnel run", SCRIPT)
+        self.assertIn("$CloudflareTunnelProcessPattern", SCRIPT)
         self.assertNotIn("Start-PersonalServerStack", health)
 
     def test_recovery_cycle_defers_nodeport_only_failure_without_portal_restart(self):
@@ -931,7 +960,7 @@ class WindowsBootstrapTests(unittest.TestCase):
     def test_tunnel_probe_uses_timeout_runner_without_writing_process_command_line(self):
         tunnel = SCRIPT[SCRIPT.index("function Test-CloudflareTunnelRunning") : SCRIPT.index("function Test-CloudflareTunnelService")]
         health = SCRIPT[SCRIPT.index("function Get-RecoveryHealth") : SCRIPT.index("function Save-RecoveryFailureState")]
-        expected_probe = "pgrep -af '[c]loudflared.*tunnel run' >/dev/null"
+        expected_probe = "pgrep -af '$CloudflareTunnelProcessPattern' >/dev/null"
         self.assertIn("Invoke-WslWithTimeout", tunnel)
         self.assertIn(expected_probe, tunnel)
         self.assertIn("Test-CloudflareTunnelRunning", health)
