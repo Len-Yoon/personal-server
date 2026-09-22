@@ -96,6 +96,8 @@ class QuarterlySreAuditAutomationTests(unittest.TestCase):
         validation_job="success",
         relay_delivery="delivered",
         relay_delivery_timeout="3s",
+        relay_delivery_retry_seconds="",
+        record_sleep=False,
         manifest_padding_lines=0,
     ):
         with tempfile.TemporaryDirectory() as directory:
@@ -265,6 +267,13 @@ esac
 exec /usr/bin/grep "$@"
 ''',
                 )
+            if record_sleep:
+                write_fake(
+                    "sleep",
+                    f'''#!/bin/sh
+printf '%s\\n' "sleep $*" >> "{calls}"
+''',
+                )
             result = subprocess.run(
                 ["bash", str(SCRIPT), mode],
                 env={
@@ -274,6 +283,7 @@ exec /usr/bin/grep "$@"
                     "QUARTERLY_SRE_AUDIT_MANIFEST": str(manifest) if manifest_crlf else os.environ.get("QUARTERLY_SRE_AUDIT_MANIFEST", ""),
                     "QUARTERLY_SRE_AUDIT_MANUAL_JOB_TIMEOUT": manual_job_timeout,
                     "QUARTERLY_SRE_AUDIT_RELAY_DELIVERY_TIMEOUT": relay_delivery_timeout,
+                    "QUARTERLY_SRE_AUDIT_RELAY_DELIVERY_RETRY_SECONDS": relay_delivery_retry_seconds,
                 },
                 text=True,
                 capture_output=True,
@@ -336,10 +346,53 @@ exec /usr/bin/grep "$@"
         self.assertIn("get configmap sre-telegram-relay-state", calls)
         self.assertNotIn("patch cronjob monthly-sre-audit", calls)
 
+    def test_install_blocks_invalid_relay_delivery_retry_interval(self):
+        result, calls = self.run_tool(
+            "--install",
+            relay_delivery_retry_seconds="not-a-number",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("patch cronjob monthly-sre-audit", calls)
+
+    def test_install_blocks_relay_delivery_retry_interval_longer_than_timeout(self):
+        result, calls = self.run_tool(
+            "--install",
+            relay_delivery="pending",
+            relay_delivery_timeout="2s",
+            relay_delivery_retry_seconds="3",
+            record_sleep=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("sleep 3", calls)
+        self.assertNotIn("patch cronjob monthly-sre-audit", calls)
+
+    def test_install_blocks_relay_delivery_retry_interval_equal_to_timeout(self):
+        result, calls = self.run_tool(
+            "--install",
+            relay_delivery="pending",
+            relay_delivery_timeout="2s",
+            relay_delivery_retry_seconds="2",
+            record_sleep=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("sleep 2", calls)
+        self.assertNotIn("patch cronjob monthly-sre-audit", calls)
+
     def test_install_waits_for_relay_to_record_the_official_run_before_activation(self):
-        result, calls = self.run_tool("--install", relay_delivery="delivered_after_retry")
+        result, calls = self.run_tool(
+            "--install",
+            relay_delivery="delivered_after_retry",
+            relay_delivery_timeout="3s",
+            relay_delivery_retry_seconds="1",
+            record_sleep=True,
+        )
 
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("sleep 1", calls)
+        self.assertIn("--request-timeout=3s", calls)
         self.assertGreaterEqual(calls.count("get configmap sre-telegram-relay-state"), 2)
         self.assertIn("patch cronjob monthly-sre-audit", calls)
 
