@@ -14,6 +14,7 @@ $KeepAliveTaskName = "PersonalServer-WSL-KeepAlive"
 $WslDistribution = "Ubuntu-24.04"
 $WslServiceUser = "window"
 $CloudflareTunnelService = "cloudflared-personal-server.service"
+$CloudflareTunnelProcessPattern = "[c]loudflared[[:space:]]+tunnel([[:space:]]+[^[:space:]]+)*[[:space:]]+run[[:space:]]+personal-server([[:space:]]|$)"
 $TunnelTelegramCredentialTarget = "personal-server-tunnel-telegram"
 $CaddyContainerName = "personal-server-caddy-1"
 $RecoveryIntervalSeconds = 180
@@ -224,7 +225,7 @@ function Send-TunnelTelegramNotification([string]$Transition) {
     }
 }
 
-function Update-TunnelTelegramNotification([string]$TunnelHealth) {
+function Update-TunnelTelegramNotification([string]$TunnelHealth, [int]$TunnelFailureCount = 0) {
     if ($TunnelHealth -eq "deferred") {
         return
     }
@@ -244,6 +245,9 @@ function Update-TunnelTelegramNotification([string]$TunnelHealth) {
     if ($TunnelAlertDownNotified) {
         return
     }
+    if ($TunnelFailureCount -lt $RecoveryFailureThreshold) {
+        return
+    }
     if (Send-TunnelTelegramNotification "down") {
         $script:TunnelAlertDownNotified = $true
         [void](Save-RecoveryFailureState)
@@ -254,7 +258,7 @@ function Update-TunnelTelegramNotification([string]$TunnelHealth) {
 }
 
 function Test-CloudflareTunnelRunning {
-    return (Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "bash", "-lc", "pgrep -af '[c]loudflared.*tunnel run' >/dev/null") -Operation "Cloudflare Tunnel probe")
+    return (Invoke-WslWithTimeout -Arguments @("-d", $WslDistribution, "bash", "-lc", "pgrep -af '$CloudflareTunnelProcessPattern' >/dev/null") -Operation "Cloudflare Tunnel probe")
 }
 
 function Test-CloudflareTunnelService {
@@ -718,13 +722,15 @@ function Invoke-RecoveryCycle {
             Write-Info "Recovery state is unsaved; retaining in-memory counters and blocking automated recovery until restart or operator action."
             return $null
         }
-        Update-TunnelTelegramNotification $health.tunnel
-        if ($RecoveryStateDirty) {
-            Write-Info "Recovery state is unsaved; skipping automated recovery actions this cycle."
-            return $null
-        }
         foreach ($component in $RecoveryComponents) {
             if ($health[$component] -eq "healthy") {
+                if ($component -eq "tunnel") {
+                    Update-TunnelTelegramNotification $health.tunnel 0
+                    if ($RecoveryStateDirty) {
+                        Write-Info "Recovery state is unsaved; skipping automated recovery actions this cycle."
+                        return $null
+                    }
+                }
                 Reset-RecoveryFailure $component
                 continue
             }
@@ -737,6 +743,13 @@ function Invoke-RecoveryCycle {
             if ($RecoveryStateDirty) {
                 Write-Info "Recovery state is unsaved; skipping automated recovery actions this cycle."
                 continue
+            }
+            if ($component -eq "tunnel") {
+                Update-TunnelTelegramNotification $health.tunnel $failureCount
+                if ($RecoveryStateDirty) {
+                    Write-Info "Recovery state is unsaved; skipping automated recovery actions this cycle."
+                    continue
+                }
             }
             if ($failureCount -lt $RecoveryFailureThreshold) {
                 continue

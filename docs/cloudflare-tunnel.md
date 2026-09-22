@@ -68,4 +68,4 @@ systemctl --user start cloudflared-personal-server.service
 systemctl --user restart cloudflared-personal-server.service
 ```
 
-N100 감시기는 Tunnel 장애의 최초 전환에 Telegram 장애 알림을 1회 시도함. 전송에 성공한 상태에서만 이후 정상 복구 전환을 Telegram으로 1회 알림하며, 전송에 실패하면 다음 점검에서 장애 알림을 재시도함. Telegram 자격 증명은 운영자가 Windows 자격 증명 관리자에 사전 등록하며, 값은 문서·로그·상태 파일에 기록하지 않음. 외부 상태는 GitHub Actions가 약 5분 간격으로 독립 점검하므로 같은 장애에 대한 알림이 중복될 수 있음. N100 전원·네트워크·WSL 자체가 동작하지 않는 경우에는 N100 직접 알림과 복구를 보장할 수 없음. 상세는 [공개 상태 Telegram 알림](public-uptime-monitor.md)을 참고함.
+N100 감시기는 Tunnel이 2회 연속 비정상일 때 Telegram 장애 알림을 1회 시도하고 같은 시점부터 제한 복구를 시작함. 전송에 성공한 상태에서만 이후 정상 복구 전환을 Telegram으로 1회 알리며, 단발 실패 뒤 정상 전환은 알리지 않음. 전송에 실패하면 다음 임계치 충족 점검에서 장애 알림을 재시도함. Telegram 자격 증명은 운영자가 Windows 자격 증명 관리자에 사전 등록하며, 값은 문서·로그·상태 파일에 기록하지 않음. 외부 상태는 GitHub Actions가 약 5분 간격으로 독립 점검하므로 같은 장애에 대한 알림이 중복될 수 있음. N100 전원·네트워크·WSL 자체가 동작하지 않는 경우에는 N100 직접 알림과 복구를 보장할 수 없음. 상세는 [공개 상태 Telegram 알림](public-uptime-monitor.md)을 참고함.

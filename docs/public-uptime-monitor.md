@@ -42,7 +42,7 @@ GitHub Actions의 예약 실행 자체가 시작되지 않는 경우는 이 work
 
 ### N100 직접 Tunnel 알림
 
-N100 감시기는 `cloudflared-personal-server.service`의 상태와 Tunnel 프로세스를 주기적으로 확인함. Tunnel 장애를 처음 확인하면 `[개인서버 장애]` 메시지를 1회 전송하고, 기존 임계치에 따라 로컬 복구를 시도함. 이후 Tunnel 서비스와 프로세스가 정상으로 돌아오면 `[개인서버 복구]` 메시지를 1회 전송함.
+N100 감시기는 `cloudflared-personal-server.service`의 상태와 Tunnel 프로세스를 주기적으로 확인함. Tunnel 장애가 2회 연속 확인되면 `[개인서버 장애]` 메시지를 1회 전송하고 로컬 복구를 시도함. 한 번의 실패 뒤 정상으로 돌아오면 메시지를 보내지 않음. 장애 메시지를 성공적으로 보낸 뒤 Tunnel 서비스와 프로세스가 정상으로 돌아오면 `[개인서버 복구]` 메시지를 1회 전송함.
 
 Windows 예약 작업은 `PersonalServer-WSL-KeepAlive`와 Supervisor를 각각 `BootTrigger`와 `Password` LogonType으로 등록해 로그인 없이 부팅 시 실행함. `-InstallTask` 등록 때 Task Scheduler 암호는 운영자가 N100 콘솔에서 직접 입력하며, 암호는 Git·문서·로그·명령 출력·환경 변수에 평문으로 저장하거나 출력하지 않음. Supervisor는 초기 120초 대기 뒤 3분 주기 Daemon을 자식으로 관리함. Daemon이 비정상 종료되면 15초 뒤 재기동하고, Supervisor·Daemon 잠금으로 중복 실행을 막음. N100 Tunnel은 로컬 NodePort·서비스·프로세스·공개 health가 모두 정상일 때만 정상으로 판정하며, NodePort 장애는 Tunnel 알림·재기동 대상에서 제외함. 이 구조는 Tunnel 감시가 Daemon 종료나 active-but-disconnected 상태에서 멈추지 않게 하는 보완 경로이며, N100 전원·네트워크·WSL 또는 Windows 작업 스케줄러 자체가 동작하지 않는 경우는 복구·직접 알림 범위 밖임.
 
