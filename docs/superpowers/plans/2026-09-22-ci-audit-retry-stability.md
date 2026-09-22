@@ -19,7 +19,7 @@
 
 ## Review Focus
 
-- 2초 timeout에서 relay가 두 번째 조회에 전달 완료를 기록하면 활성화되어야 함.
+- 3초 timeout에서 relay가 두 번째 조회에 전달 완료를 기록하면 활성화되어야 함.
 - relay가 끝까지 전달 완료를 기록하지 않으면 활성화하면 안 됨.
 - 기본 2분 timeout에서는 기존 대기 간격을 유지해야 함.
 - duration 형식이 잘못되면 설치가 실패해야 함.
@@ -42,7 +42,7 @@
 ```python
 def test_install_waits_for_relay_to_record_the_official_run_before_activation(self):
     result, calls = self.run_tool(
-        "--install", relay_delivery="delivered_after_retry", relay_delivery_timeout="2s", relay_delivery_retry_seconds="1"
+        "--install", relay_delivery="delivered_after_retry", relay_delivery_timeout="3s", relay_delivery_retry_seconds="1"
     )
     self.assertEqual(result.returncode, 0, result.stderr)
     self.assertGreaterEqual(calls.count("get configmap sre-telegram-relay-state"), 2)

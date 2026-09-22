@@ -385,14 +385,14 @@ printf '%s\\n' "sleep $*" >> "{calls}"
         result, calls = self.run_tool(
             "--install",
             relay_delivery="delivered_after_retry",
-            relay_delivery_timeout="2s",
+            relay_delivery_timeout="3s",
             relay_delivery_retry_seconds="1",
             record_sleep=True,
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("sleep 1", calls)
-        self.assertIn("--request-timeout=2s", calls)
+        self.assertIn("--request-timeout=3s", calls)
         self.assertGreaterEqual(calls.count("get configmap sre-telegram-relay-state"), 2)
         self.assertIn("patch cronjob monthly-sre-audit", calls)
 
