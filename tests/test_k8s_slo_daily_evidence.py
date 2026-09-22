@@ -274,9 +274,12 @@ class SloDailyEvidenceCollectionTests(unittest.TestCase):
     def test_crawler_query_uses_numeric_bool_multiplication_for_stale_conditions(self):
         query = module._QUERY_CRAWLER_FRESHNESS
 
-        self.assertIn("crawler_news_collection_consecutive_failures < bool 3", query)
-        self.assertIn(" * ", query)
-        self.assertNotIn(" and ", query)
+        self.assertEqual(
+            query,
+            "min(min_over_time(((crawler_news_collection_initialized == bool 1) * "
+            "(time() - crawler_news_collection_last_success_timestamp_seconds <= bool 900) * "
+            "(crawler_news_collection_consecutive_failures < bool 3))[24h:]))",
+        )
 
     def test_collector_allows_finite_float_counter_increases(self):
         result = module.collect_record(

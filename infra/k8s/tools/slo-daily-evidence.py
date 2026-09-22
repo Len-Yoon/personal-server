@@ -48,9 +48,9 @@ _QUERY_PORTAL_READY = (
     'deployment="portal-web"}[24h]))'
 )
 _QUERY_CRAWLER_FRESHNESS = (
-    "min_over_time(((crawler_news_collection_initialized == bool 1) * "
+    "min(min_over_time(((crawler_news_collection_initialized == bool 1) * "
     "(time() - crawler_news_collection_last_success_timestamp_seconds <= bool 900) * "
-    "(crawler_news_collection_consecutive_failures < bool 3))[24h:])"
+    "(crawler_news_collection_consecutive_failures < bool 3))[24h:]))"
 )
 _QUERY_SOURCES = {
     _QUERY_PORTAL_HTTP_REQUESTS: "portal_http",
