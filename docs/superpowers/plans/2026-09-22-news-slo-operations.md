@@ -14,7 +14,7 @@
 
 - Do not change PVC, Secret, Caddy, Tunnel, schedule/time zone, or unrelated workloads. The live SLO CronJob is first set to `suspend: true` for the approved manual validation and remains suspended afterward.
 - Never apply the complete SLO manifest to an existing evidence ConfigMap.
-- Keep the SLO CronJob suspended after the one manual Job.
+- Keep the SLO CronJob suspended after the one manual Job until a separately approved activation.
 - Do not output archive contents, telemetry payloads, Secret values, or notification outbox entries.
 - Stop a stage after one failed rollout or rollback; do not retry blindly.
 
@@ -84,5 +84,5 @@
 | 뉴스 이미지 | 호환 이미지 → 목표 이미지 순으로 image-only 전환함. 목표 rollout 실패가 없어 rollback은 실행하지 않음. |
 | SLO 증적 | live CronJob을 `suspend: true`로 전환한 뒤 collector 이미지 필드만 immutable digest로 교체함. ConfigMap 전체 apply·초기화는 수행하지 않음. |
 | 수동 검증 | 고유 Job 1회가 Complete됨. 당일 증적의 고정 필드·형식·날짜 중복·최대 보관 수를 검증했고 `overall=ok`임. |
-| 자동 실행 | 미활성화. CronJob은 `suspend: true`로 유지함. |
+| 자동 실행 | 수동 검증 후 별도 승인으로 활성화함. CronJob은 `suspend: false`임. |
 | 외부·서비스 health | Portal 외부 health와 crawler Service health를 10초 간격 3회 확인해 모두 HTTP 200임. |
