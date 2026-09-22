@@ -21,6 +21,7 @@ LEGACY_TIMER=${QUARTERLY_SRE_AUDIT_LEGACY_TIMER:-personal-server-quarterly-sre-a
 LEGACY_SERVICE=${QUARTERLY_SRE_AUDIT_LEGACY_SERVICE:-personal-server-quarterly-sre-audit.service}
 MANUAL_JOB_TIMEOUT=${QUARTERLY_SRE_AUDIT_MANUAL_JOB_TIMEOUT:-20m}
 RELAY_DELIVERY_TIMEOUT=${QUARTERLY_SRE_AUDIT_RELAY_DELIVERY_TIMEOUT:-2m}
+RELAY_DELIVERY_RETRY_SECONDS=${QUARTERLY_SRE_AUDIT_RELAY_DELIVERY_RETRY_SECONDS:-2}
 INSTALL_LOCK_FILE=${QUARTERLY_SRE_AUDIT_INSTALL_LOCK_FILE:-${XDG_RUNTIME_DIR:-/tmp}/personal-server-quarterly-sre-audit-install.lock}
 
 usage() {
@@ -331,8 +332,10 @@ verify_validation_reporting() {
 }
 
 verify_relay_delivery() {
-  local run_id=$1 timeout_seconds deadline delivered_run_ids
+  local run_id=$1 timeout_seconds retry_seconds deadline delivered_run_ids
   timeout_seconds=$(duration_to_seconds "$RELAY_DELIVERY_TIMEOUT") || return 1
+  [[ "$RELAY_DELIVERY_RETRY_SECONDS" =~ ^[1-9][0-9]*$ ]] || return 1
+  retry_seconds=$RELAY_DELIVERY_RETRY_SECONDS
   deadline=$((SECONDS + timeout_seconds))
   while (( SECONDS < deadline )); do
     delivered_run_ids=$(kctl -n "$NAMESPACE" get configmap "$RELAY_STATE_CONFIGMAP" -o 'jsonpath={.data.quarterly_audit_delivered_run_ids}') || return 1
@@ -351,7 +354,7 @@ PY
     then
       return 0
     fi
-    sleep 2 || return 1
+    sleep "$retry_seconds" || return 1
   done
   printf '%s\n' 'Quarterly SRE audit Telegram delivery is not confirmed; CronJob activation is blocked.' >&2
   return 1

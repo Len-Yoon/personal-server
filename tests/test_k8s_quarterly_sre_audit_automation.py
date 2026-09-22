@@ -96,6 +96,7 @@ class QuarterlySreAuditAutomationTests(unittest.TestCase):
         validation_job="success",
         relay_delivery="delivered",
         relay_delivery_timeout="3s",
+        relay_delivery_retry_seconds="",
         manifest_padding_lines=0,
     ):
         with tempfile.TemporaryDirectory() as directory:
@@ -274,6 +275,7 @@ exec /usr/bin/grep "$@"
                     "QUARTERLY_SRE_AUDIT_MANIFEST": str(manifest) if manifest_crlf else os.environ.get("QUARTERLY_SRE_AUDIT_MANIFEST", ""),
                     "QUARTERLY_SRE_AUDIT_MANUAL_JOB_TIMEOUT": manual_job_timeout,
                     "QUARTERLY_SRE_AUDIT_RELAY_DELIVERY_TIMEOUT": relay_delivery_timeout,
+                    "QUARTERLY_SRE_AUDIT_RELAY_DELIVERY_RETRY_SECONDS": relay_delivery_retry_seconds,
                 },
                 text=True,
                 capture_output=True,
@@ -336,8 +338,22 @@ exec /usr/bin/grep "$@"
         self.assertIn("get configmap sre-telegram-relay-state", calls)
         self.assertNotIn("patch cronjob monthly-sre-audit", calls)
 
+    def test_install_blocks_invalid_relay_delivery_retry_interval(self):
+        result, calls = self.run_tool(
+            "--install",
+            relay_delivery_retry_seconds="not-a-number",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("patch cronjob monthly-sre-audit", calls)
+
     def test_install_waits_for_relay_to_record_the_official_run_before_activation(self):
-        result, calls = self.run_tool("--install", relay_delivery="delivered_after_retry")
+        result, calls = self.run_tool(
+            "--install",
+            relay_delivery="delivered_after_retry",
+            relay_delivery_timeout="2s",
+            relay_delivery_retry_seconds="1",
+        )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertGreaterEqual(calls.count("get configmap sre-telegram-relay-state"), 2)
