@@ -332,11 +332,11 @@ verify_validation_reporting() {
 }
 
 verify_relay_delivery() {
-  local run_id=$1 timeout_seconds retry_seconds deadline delivered_run_ids
+  local run_id=$1 timeout_seconds retry_seconds deadline remaining_seconds sleep_seconds delivered_run_ids
   timeout_seconds=$(duration_to_seconds "$RELAY_DELIVERY_TIMEOUT") || return 1
   [[ "$RELAY_DELIVERY_RETRY_SECONDS" =~ ^[1-9][0-9]*$ ]] || return 1
   retry_seconds=$RELAY_DELIVERY_RETRY_SECONDS
-  (( retry_seconds <= timeout_seconds )) || return 1
+  (( retry_seconds < timeout_seconds )) || return 1
   deadline=$((SECONDS + timeout_seconds))
   while (( SECONDS < deadline )); do
     delivered_run_ids=$(kctl -n "$NAMESPACE" get configmap "$RELAY_STATE_CONFIGMAP" -o 'jsonpath={.data.quarterly_audit_delivered_run_ids}') || return 1
@@ -355,7 +355,13 @@ PY
     then
       return 0
     fi
-    sleep "$retry_seconds" || return 1
+    remaining_seconds=$((deadline - SECONDS))
+    (( remaining_seconds > 0 )) || return 1
+    sleep_seconds=$retry_seconds
+    if (( sleep_seconds >= remaining_seconds )); then
+      sleep_seconds=$((remaining_seconds - 1))
+    fi
+    (( sleep_seconds == 0 )) || sleep "$sleep_seconds" || return 1
   done
   printf '%s\n' 'Quarterly SRE audit Telegram delivery is not confirmed; CronJob activation is blocked.' >&2
   return 1

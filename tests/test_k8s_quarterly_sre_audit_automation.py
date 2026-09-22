@@ -368,15 +368,30 @@ printf '%s\\n' "sleep $*" >> "{calls}"
         self.assertNotIn("sleep 3", calls)
         self.assertNotIn("patch cronjob monthly-sre-audit", calls)
 
+    def test_install_blocks_relay_delivery_retry_interval_equal_to_timeout(self):
+        result, calls = self.run_tool(
+            "--install",
+            relay_delivery="pending",
+            relay_delivery_timeout="2s",
+            relay_delivery_retry_seconds="2",
+            record_sleep=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("sleep 2", calls)
+        self.assertNotIn("patch cronjob monthly-sre-audit", calls)
+
     def test_install_waits_for_relay_to_record_the_official_run_before_activation(self):
         result, calls = self.run_tool(
             "--install",
             relay_delivery="delivered_after_retry",
             relay_delivery_timeout="2s",
             relay_delivery_retry_seconds="1",
+            record_sleep=True,
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("sleep 1", calls)
         self.assertGreaterEqual(calls.count("get configmap sre-telegram-relay-state"), 2)
         self.assertIn("patch cronjob monthly-sre-audit", calls)
 
