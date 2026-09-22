@@ -26,6 +26,14 @@ Crawler Worker는 Docker 중지, PVC 데이터 검증, K3s readiness, Caddy 내�
 
 Tunnel은 Windows 로그인 뒤 WSL 사용자 서비스로 실행됨. `PersonalServer-WSL-KeepAlive`가 WSL을 유지하고, `personal-server-autostart`의 Supervisor가 Daemon을 단일 관리함. Supervisor는 초기 120초 대기 뒤 Daemon을 시작하며, Daemon은 3분 간격으로 WSL·K3s·Portal·NodePort·Tunnel을 점검함. Daemon이 비정상 종료되면 Supervisor가 15초 뒤 재기동하고, 짧은 시간에 3회 연속 종료되면 60초 backoff를 적용함. 같은 구성요소가 2회 연속 비정상이면 승인된 제한 복구를 시도하며, 구성요소별 시도는 최대 3회임. 복구 상태를 기록하지 못하면 중복·무한 복구를 막기 위해 추가 복구를 중단함. SSH 종료만으로 Tunnel이 내려가면 안 됨. Tunnel 단독 장애에는 호스트 긴급 재부팅을 사용하지 않음.
 
+## 전송 프로토콜 기준
+
+2026-09-22 N100에서 QUIC용 UDP 통신이 차단되고 HTTP/2용 TCP 연결은 정상인 상태를 확인함. QUIC 연결 손실로 Tunnel 프로세스가 종료되어 3분 감시 주기마다 장애·복구 알림이 반복됐음. `cloudflared-personal-server.service`의 systemd drop-in에서 실행 명령을 `cloudflared tunnel --protocol http2 run personal-server`로 재정의해 HTTP/2를 고정함.
+
+적용 뒤 Tunnel 연결 4개가 HTTP/2로 등록되고, Portal·News 공개 health와 Caddy 내부 NodePort health가 모두 HTTP 200임을 확인함. QUIC 차단 자체는 해소되지 않았으나, HTTP/2가 정상 통신 경로로 사용되므로 방화벽·공유기·WSL 네트워크 설정을 추가 변경하지 않음. ICMP proxy 경고는 ping 기능 제한에 관한 것으로 Tunnel의 HTTP 요청 연결 장애 원인으로 처리하지 않음.
+
+원래 전송 방식으로 되돌려야 하는 경우에는 HTTP/2 drop-in만 제거하고 systemd daemon-reload 뒤 같은 사용자 서비스를 한 번 재시작함. Caddy·Tunnel ingress·K3s·PVC·Secret·다른 서비스는 rollback 대상이 아님.
+
 ## 정상 확인
 
 ```bash
