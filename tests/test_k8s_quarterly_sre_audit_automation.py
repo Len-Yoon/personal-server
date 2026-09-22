@@ -97,6 +97,7 @@ class QuarterlySreAuditAutomationTests(unittest.TestCase):
         relay_delivery="delivered",
         relay_delivery_timeout="3s",
         relay_delivery_retry_seconds="",
+        record_sleep=False,
         manifest_padding_lines=0,
     ):
         with tempfile.TemporaryDirectory() as directory:
@@ -266,6 +267,13 @@ esac
 exec /usr/bin/grep "$@"
 ''',
                 )
+            if record_sleep:
+                write_fake(
+                    "sleep",
+                    f'''#!/bin/sh
+printf '%s\\n' "sleep $*" >> "{calls}"
+''',
+                )
             result = subprocess.run(
                 ["bash", str(SCRIPT), mode],
                 env={
@@ -345,6 +353,19 @@ exec /usr/bin/grep "$@"
         )
 
         self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("patch cronjob monthly-sre-audit", calls)
+
+    def test_install_blocks_relay_delivery_retry_interval_longer_than_timeout(self):
+        result, calls = self.run_tool(
+            "--install",
+            relay_delivery="pending",
+            relay_delivery_timeout="2s",
+            relay_delivery_retry_seconds="3",
+            record_sleep=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("sleep 3", calls)
         self.assertNotIn("patch cronjob monthly-sre-audit", calls)
 
     def test_install_waits_for_relay_to_record_the_official_run_before_activation(self):

@@ -336,6 +336,7 @@ verify_relay_delivery() {
   timeout_seconds=$(duration_to_seconds "$RELAY_DELIVERY_TIMEOUT") || return 1
   [[ "$RELAY_DELIVERY_RETRY_SECONDS" =~ ^[1-9][0-9]*$ ]] || return 1
   retry_seconds=$RELAY_DELIVERY_RETRY_SECONDS
+  (( retry_seconds <= timeout_seconds )) || return 1
   deadline=$((SECONDS + timeout_seconds))
   while (( SECONDS < deadline )); do
     delivered_run_ids=$(kctl -n "$NAMESPACE" get configmap "$RELAY_STATE_CONFIGMAP" -o 'jsonpath={.data.quarterly_audit_delivered_run_ids}') || return 1
