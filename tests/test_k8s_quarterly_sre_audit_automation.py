@@ -392,6 +392,7 @@ printf '%s\\n' "sleep $*" >> "{calls}"
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("sleep 1", calls)
+        self.assertIn("--request-timeout=2s", calls)
         self.assertGreaterEqual(calls.count("get configmap sre-telegram-relay-state"), 2)
         self.assertIn("patch cronjob monthly-sre-audit", calls)
 

@@ -339,7 +339,10 @@ verify_relay_delivery() {
   (( retry_seconds < timeout_seconds )) || return 1
   deadline=$((SECONDS + timeout_seconds))
   while (( SECONDS < deadline )); do
-    delivered_run_ids=$(kctl -n "$NAMESPACE" get configmap "$RELAY_STATE_CONFIGMAP" -o 'jsonpath={.data.quarterly_audit_delivered_run_ids}') || return 1
+    remaining_seconds=$((deadline - SECONDS))
+    (( remaining_seconds > 0 )) || return 1
+    delivered_run_ids=$(kctl --request-timeout="${remaining_seconds}s" -n "$NAMESPACE" get configmap "$RELAY_STATE_CONFIGMAP" -o 'jsonpath={.data.quarterly_audit_delivered_run_ids}') || return 1
+    (( SECONDS < deadline )) || return 1
     if python3 - "$run_id" "$delivered_run_ids" <<'PY'
 import json
 import sys
@@ -356,7 +359,7 @@ PY
       return 0
     fi
     remaining_seconds=$((deadline - SECONDS))
-    (( remaining_seconds > 0 )) || return 1
+    (( remaining_seconds > 1 )) || return 1
     sleep_seconds=$retry_seconds
     if (( sleep_seconds >= remaining_seconds )); then
       sleep_seconds=$((remaining_seconds - 1))
