@@ -34,18 +34,18 @@ Portal PVC는 `portal-web-files-dynamic`, `portal-web-state-dynamic` 두 개이�
 
 ## 운영 상태 확인 기록
 
-2026-09-21 주 담당이 N100의 CronJob 상태와 기존 사용자 timer를 읽기 전용으로 조회함. 아래 시각은 서울 기준이며, Kubernetes의 성공 기록은 Telegram 수신이나 백업 내용의 별도 재검증을 의미하지 않음.
+2026-09-23 주 담당이 N100의 CronJob 상태를 읽기 전용으로 조회함. 아래 시각은 서울 기준이며, Kubernetes의 성공 기록은 Telegram 수신이나 백업 내용의 별도 재검증을 의미하지 않음.
 
 | 대상 | 조회 상태 | 일정 | 마지막 성공 | 비고 |
 |---|---|---|---|---|
-| Portal PVC 백업 | CronJob 활성 | 매일 03:00 | 2026-09-21 03:03 | 기존 사용자 timer inactive·unit not-found |
+| Portal PVC 백업 | CronJob 활성 | 매일 03:00 | 2026-09-23 03:10 | 최신 Job `SuccessCriteriaMet` |
 | 월간 SRE 통합 점검 | CronJob 활성 | 매월 1일 03:30 | 2026-09-16 14:01 | 과거 성공 기록 |
 | 분기 SRE 점검 | CronJob 중지 | 기존 분기 일정 보존 | 2026-09-14 21:16 | 자동 실행 안 함 |
-| 일일 SLO 증적 | CronJob 활성 | 매일 02:15 | 2026-09-18 02:15 | 최근 Job 실패, 다중 시계열 원인 확정·운영 수정 미적용 |
+| 일일 SLO 증적 | CronJob 활성 | 매일 02:15 | 2026-09-23 02:15 | freshness 집계 보완 적용 뒤 최신 Job `SuccessCriteriaMet` |
 
-확인 경로는 각각 `personal-server/portal-pvc-backup`, `monitoring/monthly-sre-audit`, `monitoring/quarterly-sre-audit`, `monitoring/slo-daily-evidence`의 spec.suspend와 status.lastSuccessfulTime임. SLO의 마지막 예약은 2026-09-21 02:15이며 active Job은 0개임. 보존된 최신 Job은 BackoffLimitExceeded, collector Pod는 Error·종료 코드 1로 확인됨. 뉴스 freshness의 24시간 질의가 시계열 3개를 반환해 단일 결과 계약에서 거절된 원인을 확인함. 수정식의 실제 읽기 검증과 관련 테스트 24건은 통과했으며, 운영 수정과 증적 재수집은 미수행함. [원인 분석](reviews/20260921_SLO증적실패_원인분석.md)을 따름. 이 문서 갱신에서 Job 재실행·스케줄러 수정은 수행하지 않음.
+확인 경로는 각각 `personal-server/portal-pvc-backup`, `monitoring/monthly-sre-audit`, `monitoring/quarterly-sre-audit`, `monitoring/slo-daily-evidence`의 spec.suspend와 status.lastSuccessfulTime임. 2026-09-23 조회에서 Portal 백업과 SLO CronJob은 모두 활성이고 active Job 없이 최신 Job이 `SuccessCriteriaMet`으로 종료됨. SLO 실패 원인과 보완 내용은 [원인 분석](reviews/20260921_SLO증적실패_원인분석.md), 운영 반영 근거는 [뉴스·SLO 운영 적용 검증 결과](reviews/20260922_뉴스_SLO_운영적용_검증결과.md)를 따름.
 
-저장소의 `suspend: true`, 앱 `replicas: 0`, sentinel image는 초기 적용용 안전 기본값임. 현재 실행 상태나 운영 미적용을 단독으로 증명하지 않음. 저장소 병합, 운영 동기화, 이미지 교체, 자동 실행 활성화, 실제 검증을 각각 기록함. Portal·뉴스의 2026-09-21 이미지 적용 근거는 [배포 검증 결과](reviews/20260921_앱배포_검증결과.md)이며 이후 코드 변경의 운영 적용을 뜻하지 않음. 후속 Book·Portal 교체는 [K3s 앱 배포 결과](reviews/20260921_K3s앱배포_검증결과.md), 차량 교체는 [차량 배포 결과](reviews/20260921_차량배포_검증결과.md)를 따름. 뉴스 10차 목표 이미지는 아직 미적용임.
+저장소의 `suspend: true`, 앱 `replicas: 0`, sentinel image는 초기 적용용 안전 기본값임. 현재 실행 상태나 운영 미적용을 단독으로 증명하지 않음. 저장소 병합, 운영 동기화, 이미지 교체, 자동 실행 활성화, 실제 검증을 각각 기록함. Portal·뉴스의 2026-09-21 이미지 적용 근거는 [배포 검증 결과](reviews/20260921_앱배포_검증결과.md)이며 이후 코드 변경의 운영 적용을 뜻하지 않음. 후속 Book·Portal 교체는 [K3s 앱 배포 결과](reviews/20260921_K3s앱배포_검증결과.md), 차량 교체는 [차량 배포 결과](reviews/20260921_차량배포_검증결과.md)를 따름. 뉴스 10차 목표 이미지는 2026-09-22에 적용했으며 SLO collector도 같은 운영 검증에서 갱신함.
 
 ## 일상 상태 확인
 
