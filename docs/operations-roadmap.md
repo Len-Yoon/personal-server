@@ -5,14 +5,14 @@
 | 항목 | 내용 |
 |---|---|
 | 문서명 | 현재 운영 로드맵 |
-| 기준일 | 2026-09-21 |
+| 기준일 | 2026-09-23 |
 | 기준 자료 | 저장소 운영 문서·검증 도구·문서 계약 테스트 |
 | 목적 | 완료 항목과 후속 운영 개선을 분리해 관리함 |
 | 비고 | 비밀값·운영 데이터·실행 자격 증명은 기록하지 않음 |
 
 ## 핵심 요약
 
-현재 운영은 공개 경로 감시, K3s 상태·알림, Portal PVC 백업 검증, 격리된 Pod 복구 실습, 월간 SRE 통합 점검 자동화, P3 공급망 보안 검증을 제공함. 정기 실행은 공개 상태의 약 5분 간격 외부 감시, 매일 백업·복원 검증, 일일 SLO 증적 수집, 매월 1일의 단일 CronJob 통합 점검으로 구분함. 일일 SLO 수집의 최근 실패 상태는 아래 확인 필요 사항에 기록함. 코드 변경 검증은 이 정기 일정과 별도로 변경 시점에 수행함. 이 문서는 완료된 운영 기준과 향후 거버넌스 항목을 분리해 기록하며, 새 외부 감시 서비스나 승인 없는 자동 실행을 추가하지 않음.
+현재 운영은 공개 경로 감시, K3s 상태·알림, Portal PVC 백업 검증, 격리된 Pod 복구 실습, 월간 SRE 통합 점검 자동화, P3 공급망 보안 검증을 제공함. 정기 실행은 공개 상태의 약 5분 간격 외부 감시, 매일 백업·복원 검증, 일일 SLO 증적 수집, 매월 1일의 단일 CronJob 통합 점검으로 구분함. 일일 SLO 수집은 2026-09-22 운영 적용 뒤 2026-09-23 예약 실행 성공을 확인함. 코드 변경 검증은 이 정기 일정과 별도로 변경 시점에 수행함. 이 문서는 완료된 운영 기준과 향후 거버넌스 항목을 분리해 기록하며, 새 외부 감시 서비스나 승인 없는 자동 실행을 추가하지 않음.
 
 현재 활성 스케줄러와 마지막 성공 시각은 [운영 상태 확인 기록](operations-reference.md#운영-상태-확인-기록)을 기준으로 함. 아래 완료 항목은 구현·과거 검증의 기록이며 모든 서비스의 최신 live 상태를 이번에 재검증했다는 의미는 아님.
 
@@ -23,6 +23,7 @@
 | 공개 상태 감시 | GitHub Actions가 외부에서 네 공개 health를 약 5분 간격으로 확인하고 장애·복구 전환을 알림 | [공개 상태 Telegram 알림](public-uptime-monitor.md) | 완료 |
 | K3s 상태·알림 | Prometheus·Alertmanager·SRE Telegram relay 경계를 점검함 | [K3s 운영](../infra/k8s/README.md), `sre-telegram-verify.sh` | 완료 |
 | Portal 백업 검증 | Portal PVC 백업 CronJob을 매일 실행하며 읽기 전용 증적 점검과 실제 백업 실행을 구분함 | [K3s 운영](../infra/k8s/README.md), `portal-pvc-backup-verify.sh` | 완료 |
+| 일일 SLO 증적 | freshness 다중 시계열 집계 보완을 운영 적용하고, 수동 검증 뒤 CronJob 자동 실행을 활성화함 | [뉴스·SLO 운영 적용 검증 결과](reviews/20260922_뉴스_SLO_운영적용_검증결과.md), `slo-daily-evidence.py` | 완료 |
 | Pod 자동복구 실습 | production과 분리된 임시 namespace에서 liveness 실패와 Ready 복구를 확인함 | `sre-pod-recovery-lab.sh` | 완료 |
 | 변경 검증 | 문서·설정 변경 전에 범위와 관련 검사를 확인함 | [Codex 작업 완료 루프](codex-work-loop.md) | 완료 |
 | P3 공급망 보안 | GitHub Actions 외부 action을 full SHA로 고정하고, Caddy를 제외한 관리 대상 Python Docker base image 8개를 digest로 고정함. Trivy filesystem/config scan은 HIGH·CRITICAL 결과를 exit-code 1로 차단하며 CI 계약 테스트로 검증함 | `.github/workflows/trivy-security.yml`, `tests/test_supply_chain_security_workflow.py` | 완료 |
@@ -54,7 +55,6 @@
 
 ## 확인 필요 사항
 
-- 일일 SLO 증적 CronJob은 활성이나 2026-09-21 조회에서 마지막 성공이 2026-09-18 02:15로 확인됨. 최근 Job은 BackoffLimitExceeded, collector 종료 코드 1로 확인됨. 뉴스 freshness 질의의 다중 시계열과 단일 결과 계약 충돌로 원인을 확인함. [수정안 검증](reviews/20260921_SLO증적실패_원인분석.md)은 완료했으며, 운영 수정·최신 증적 재수집은 미수행함.
 - 실제 모델 토큰 측정 기록은 수집하지 않았으므로, 토큰 절감률은 확인 필요함.
 
 ## 후속 조치
