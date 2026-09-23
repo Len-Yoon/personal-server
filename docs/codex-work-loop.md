@@ -78,7 +78,7 @@
 
 ### 4.0 N100 자동복구 적용 전후 확인
 
-N100 자동복구 변경은 적용 전후 `https://len.pe.kr/health`를 10초 간격으로 3회 호출해 모두 HTTP 200인지 확인함. Supervisor가 잠금을 획득하고 시작되면 `supervisor_started`를 기록함. `BootTrigger`에 의한 시작뿐 아니라 예약 작업의 재시작과 수동 `-Supervisor` 실행도 같은 이벤트를 기록하므로, 이 이벤트만으로 Windows 부팅을 증명하지 않음. 재시작 뒤 Supervisor의 `post_boot_check` 시작·완료·실패 이벤트와 기존 recovery event log를 확인함. BootTrigger 경로의 런타임 증명은 재부팅으로 강제하지 않고 다음 승인된 유지보수 재부팅에서 확인하며, 그 전에는 미검증으로 보고함. 이벤트는 기존 UTC timestamp와 최근 200건 보존 기준을 사용함. Windows·WSL·K3s 재시작 또는 초기 점검 자체에 대한 Telegram 알림은 추가하지 않으며, Telegram 알림은 Cloudflare Tunnel 장애·복구 전환 경로만 대상으로 함.
+N100 자동복구 변경은 적용 전후 `https://len.pe.kr/health`를 10초 간격으로 3회 호출해 모두 HTTP 200인지 확인함. Supervisor가 잠금을 획득하고 시작되면 `supervisor_started`를 기록함. `BootTrigger`에 의한 시작뿐 아니라 예약 작업의 재시작과 수동 `-Supervisor` 실행도 같은 이벤트를 기록하므로, 이 이벤트만으로 Windows 부팅을 증명하지 않음. 재시작 뒤 Supervisor의 `post_boot_check` 시작·완료·실패 이벤트와 기존 recovery event log를 확인함. BootTrigger 경로는 2026-09-23 승인된 유지보수 재부팅에서 두 예약 작업·WSL 시작, `post_boot_check=passed`, 외부 health 3회 HTTP 200으로 런타임 검증함. 이후 자동복구 변경이 이 경로에 영향을 주면 같은 검증을 다시 수행함. 이벤트는 기존 UTC timestamp와 최근 200건 보존 기준을 사용함. Windows·WSL·K3s 재시작 또는 초기 점검 자체에 대한 Telegram 알림은 추가하지 않으며, Telegram 알림은 Cloudflare Tunnel 장애·복구 전환 경로만 대상으로 함.
 
 [AGENTS.md 2절](../AGENTS.md#2-연속-진행과-중단-기준)의 승인·재시도 기준을 적용함. 동일 원인의 실패에 대한 수정·재실행은 최초 실패 이후 최대 3회이며, 정상적인 최초·후속 검증과 PR·main 검사는 실패 재시도 횟수에 포함하지 않음. 같은 원인의 실패는 단계가 바뀌어도 합산함.
 
