@@ -144,7 +144,7 @@
                         <details class="library-chapters" open>
                             <summary>목차 체크와 코멘트</summary>
                             <form class="library-check-form" action="/books/{{ book.id }}/chapter-statuses" method="post">
-                                <input type="hidden" name="redirect_to" value="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
+                                <input type="hidden" name="redirect_to" value="/books/{{ book.id }}">
                                 <div class="library-chapter-list">
                                     {% for chapter in chapters %}
                                         <label>
@@ -178,7 +178,7 @@
                                         </option>
                                     {% endfor %}
                                 </select>
-                                <input type="hidden" name="redirect_to" value="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
+                                <input type="hidden" name="redirect_to" value="/books/{{ book.id }}">
                                 <textarea name="comment" rows="3" placeholder="선택한 목차에 남길 코멘트"></textarea>
                                 <button type="submit">코멘트 저장</button>
                             </form>

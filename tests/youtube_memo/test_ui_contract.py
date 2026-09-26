@@ -9,6 +9,7 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlencode
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -144,6 +145,44 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
         self.assertIn("USING COVERING INDEX idx_videos_home_order", sort_plan)
         self.assertNotIn("TEMP B-TREE", sort_plan)
         self.assertIn("USING COVERING INDEX idx_memos_video", memo_plan)
+
+    def test_video_page_uses_one_snapshot_when_last_row_is_deleted_after_count(self):
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir):
+            import app.services.memo_service as memo_service
+
+            memo_service.init_db()
+            with memo_service._connect() as connection:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.executemany(
+                    "INSERT INTO videos (youtube_id, url, title) VALUES (?, ?, ?)",
+                    [(f"video-{number}", f"https://example.com/{number}", f"영상 {number}") for number in range(25)],
+                )
+            original_connect = memo_service._connect
+            deleted = False
+
+            class RacingConnection:
+                def __init__(self, connection):
+                    self.connection = connection
+
+                def execute(self, sql, parameters=()):
+                    nonlocal deleted
+                    cursor = self.connection.execute(sql, parameters)
+                    if sql == "SELECT COUNT(*) FROM videos" and not deleted:
+                        deleted = True
+                        with sqlite3.connect(memo_service.DB_PATH) as writer:
+                            writer.execute("DELETE FROM videos WHERE youtube_id = 'video-0'")
+                    return cursor
+
+            @contextmanager
+            def racing_connect():
+                with original_connect() as connection:
+                    yield RacingConnection(connection)
+
+            with patch.object(memo_service, "_connect", racing_connect):
+                rows, total, page = memo_service.list_videos_page(2)
+
+        self.assertTrue(deleted)
+        self.assertEqual((total, page, [video["title"] for video in rows]), (25, 2, ["영상 0"]))
 
     def test_video_delete_returns_to_current_page(self):
         previous_password = os.environ.get("DELETE_PASSWORD")

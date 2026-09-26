@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 import types
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -105,6 +106,44 @@ class BookMemoServiceTests(unittest.TestCase):
             self.assertEqual(len(first), 24)
             self.assertEqual([book["title"] for book in second], ["책 0", "책 25"])
             self.assertEqual([book["title"] for book in beyond], ["책 0", "책 25"])
+
+    def test_book_page_uses_one_snapshot_when_last_row_is_deleted_after_count(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            book_service = self.reload_book_service(tempdir)
+            book_service.init_db()
+            with book_service._connect() as connection:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.executemany(
+                    "INSERT INTO books (isbn, title) VALUES (?, ?)",
+                    [(f"isbn-{number}", f"책 {number}") for number in range(25)],
+                )
+
+            original_connect = book_service._connect
+            deleted = False
+
+            class RacingConnection:
+                def __init__(self, connection):
+                    self.connection = connection
+
+                def execute(self, sql, parameters=()):
+                    nonlocal deleted
+                    cursor = self.connection.execute(sql, parameters)
+                    if sql == "SELECT COUNT(*) FROM books" and not deleted:
+                        deleted = True
+                        with sqlite3.connect(book_service.DB_PATH) as writer:
+                            writer.execute("DELETE FROM books WHERE isbn = 'isbn-0'")
+                    return cursor
+
+            @contextmanager
+            def racing_connect():
+                with original_connect() as connection:
+                    yield RacingConnection(connection)
+
+            with patch.object(book_service, "_connect", racing_connect):
+                rows, total, page = book_service.list_books_page(2)
+
+            self.assertTrue(deleted)
+            self.assertEqual((total, page, [book["title"] for book in rows]), (25, 2, ["책 0"]))
 
     def test_home_indexes_serve_sort_and_page_counts(self):
         with tempfile.TemporaryDirectory() as tempdir:

@@ -128,7 +128,7 @@ class BookMemoUiContractTests(unittest.TestCase):
         self.assertNotIn("첫 책 목차", first.text)
         self.assertIn("첫 책 목차", second.text)
         self.assertIn("책 0", beyond.text)
-        self.assertIn('name="redirect_to" value="/?page=2&amp;q=', second.text)
+        self.assertIn('name="redirect_to" value="/books/1"', second.text)
 
     def test_book_delete_returns_to_current_page(self):
         previous_password = os.environ.get("DELETE_PASSWORD")

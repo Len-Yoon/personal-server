@@ -124,6 +124,7 @@ def list_videos_page(page: int, page_size: int = 24) -> tuple[list[dict[str, Any
     init_db()
 
     with _connect() as connection:
+        connection.execute("BEGIN")
         total = connection.execute("SELECT COUNT(*) FROM videos").fetchone()[0]
         last_page = max(1, (total + page_size - 1) // page_size)
         page = min(max(1, page), last_page)
