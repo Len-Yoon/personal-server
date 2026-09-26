@@ -55,3 +55,11 @@
 - [x] `python3 tests/run_service_tests.py --suite portal` 및 `--suite maintenance`, 구문·diff 검증 실행.
 - [x] 하네스에 실제 결과 입력 및 독립 보안 검토 인계.
 - [x] 기능 브랜치 로컬 커밋 생성; push·PR은 통합 담당에게 인계.
+
+### 독립 보안 검토 보완
+
+- [x] ZIP 검사·`archive.write(path)` 사이 symlink 교체, 삭제 검사 후 교체·부분 삭제를 RED로 재현함.
+- [x] ZIP 실제 읽기를 `O_NOFOLLOW` FD로 고정하고, 작성 중 파일 수·바이트 상한을 재검사함.
+- [x] 재귀 삭제를 FD 기반 사전 검사·삭제로 바꾸고 외부 symlink 대상을 따라가지 않음.
+- [x] 업로드 전체 사전 버퍼를 제거하고 스트리밍 바이트 상한 및 413 변환을 유지함.
+- [x] Portal·maintenance·하네스 재검증 및 독립 검토에 재인계함.

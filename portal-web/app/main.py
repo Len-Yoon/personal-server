@@ -1,6 +1,5 @@
 import hmac
 import os
-from collections import deque
 from pathlib import Path
 from time import perf_counter
 
@@ -67,26 +66,31 @@ class UploadBodyLimitMiddleware:
             return
 
         received = 0
-        buffered = deque()
-        while True:
+        too_large = False
+
+        async def limited_receive():
+            nonlocal received, too_large
+            if too_large:
+                return {"type": "http.disconnect"}
             message = await receive()
-            if message["type"] == "http.disconnect":
-                return
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > limit:
-                    await self._reject(scope, receive, send)
-                    return
-                buffered.append(message)
-                if not message.get("more_body", False):
-                    break
+                    too_large = True
+                    return {"type": "http.disconnect"}
+            return message
 
-        async def replay_receive():
-            if buffered:
-                return buffered.popleft()
-            return await receive()
+        async def guarded_send(message):
+            if not too_large:
+                await send(message)
 
-        await self.app(scope, replay_receive, send)
+        try:
+            await self.app(scope, limited_receive, guarded_send)
+        except Exception:
+            if not too_large:
+                raise
+        if too_large:
+            await self._reject(scope, receive, send)
 
     @staticmethod
     async def _reject(scope: Scope, receive: Receive, send: Send) -> None:

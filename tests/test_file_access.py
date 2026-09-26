@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import os
 import tempfile
@@ -754,6 +755,175 @@ class FileAccessTests(unittest.TestCase):
             self.assertEqual(bulk.status_code, 303)
             self.assertEqual((storage_path / "single.txt").read_bytes(), b"one")
             self.assertEqual((storage_path / "bulk.txt").read_bytes(), b"two")
+
+
+    def test_zip_rejects_file_swapped_to_external_symlink_after_scan(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ.pop("APP_ENV", None)
+            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
+            storage = Path(tempdir) / "files"
+            folder = storage / "folder"
+            folder.mkdir(parents=True)
+            source = folder / "source.txt"
+            source.write_text("inside")
+            outside = Path(tempdir) / "outside.txt"
+            outside.write_text("outside-secret")
+            os.environ["FILE_STORAGE_PATH"] = str(storage)
+            import app.main as main
+            import app.services.file_store as file_store
+            from fastapi.testclient import TestClient
+
+            original_iter = file_store.iter_download_files
+            scans = 0
+
+            def swap_after_entry_check(directory):
+                nonlocal scans
+                scans += 1
+                for child in original_iter(directory):
+                    if scans == 2 and child.name == "source.txt":
+                        source.unlink()
+                        source.symlink_to(outside)
+                    yield child
+
+            before = set(Path(tempfile.gettempdir()).glob("file-vault-*.zip"))
+            with patch.object(file_store, "iter_download_files", swap_after_entry_check):
+                with TestClient(importlib.reload(main).app) as client:
+                    response = client.post(
+                        "/files/download-bulk", data={"paths": "folder"},
+                        headers={"Origin": "http://testserver"},
+                    )
+
+            self.assertEqual(scans, 2)
+            self.assertEqual(response.status_code, 400)
+            self.assertNotIn("outside-secret", response.text)
+            self.assertEqual(outside.read_text(), "outside-secret")
+            self.assertEqual(set(Path(tempfile.gettempdir()).glob("file-vault-*.zip")), before)
+
+    def test_delete_rejects_directory_swapped_to_external_symlink_after_scan(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            storage = Path(tempdir) / "files"
+            folder = storage / "folder"
+            nested = folder / "nested"
+            nested.mkdir(parents=True)
+            ordinary = folder / "a-ordinary.txt"
+            ordinary.write_text("keep")
+            outside = Path(tempdir) / "outside"
+            outside.mkdir()
+            secret = outside / "secret.txt"
+            secret.write_text("outside-secret")
+            os.environ["FILE_STORAGE_PATH"] = str(storage)
+            import app.services.file_store as file_store
+
+            file_store = importlib.reload(file_store)
+            original_scan = file_store._checked_descendants
+
+            def swap_after_scan(directory):
+                yield from original_scan(directory)
+                nested.rmdir()
+                nested.symlink_to(outside, target_is_directory=True)
+
+            with patch.object(file_store, "_checked_descendants", swap_after_scan):
+                try:
+                    file_store.delete_item("folder")
+                except (ValueError, NotADirectoryError):
+                    pass
+
+            self.assertEqual(secret.read_text(), "outside-secret")
+            self.assertEqual(ordinary.read_text(), "keep")
+
+    def test_zip_checks_actual_file_size_after_preflight(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ.pop("APP_ENV", None)
+            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
+            storage = Path(tempdir) / "files"
+            storage.mkdir()
+            source = storage / "source.txt"
+            source.write_bytes(b"small")
+            os.environ["FILE_STORAGE_PATH"] = str(storage)
+            os.environ["FILE_MAX_DOWNLOAD_TOTAL_MB"] = "1"
+            import app.services.file_store as file_store
+            import app.main as main
+            from fastapi.testclient import TestClient
+
+            file_store = importlib.reload(file_store)
+            original_validate = file_store.validate_download_limits
+
+            def grow_after_scan(paths):
+                original_validate(paths)
+                source.write_bytes(b"x" * (2 * 1024 * 1024))
+
+            with patch.object(file_store, "validate_download_limits", grow_after_scan):
+                with TestClient(importlib.reload(main).app) as client:
+                    response = client.post(
+                        "/files/download-bulk", data={"paths": "source.txt"},
+                        headers={"Origin": "http://testserver"},
+                    )
+
+            self.assertEqual(response.status_code, 400)
+
+    def test_zip_checks_actual_file_count_after_preflight(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ.pop("APP_ENV", None)
+            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
+            storage = Path(tempdir) / "files"
+            folder = storage / "folder"
+            folder.mkdir(parents=True)
+            (folder / "one.txt").write_text("one")
+            os.environ["FILE_STORAGE_PATH"] = str(storage)
+            os.environ["FILE_MAX_DOWNLOAD_FILES"] = "1"
+            import app.services.file_store as file_store
+            import app.main as main
+            from fastapi.testclient import TestClient
+
+            file_store = importlib.reload(file_store)
+            original_validate = file_store.validate_download_limits
+
+            def add_after_scan(paths):
+                original_validate(paths)
+                (folder / "two.txt").write_text("two")
+
+            with patch.object(file_store, "validate_download_limits", add_after_scan):
+                with TestClient(importlib.reload(main).app) as client:
+                    response = client.post(
+                        "/files/download-bulk", data={"paths": "folder"},
+                        headers={"Origin": "http://testserver"},
+                    )
+
+            self.assertEqual(response.status_code, 400)
+
+    def test_upload_body_limit_streams_first_chunk_without_buffering_all(self):
+        prepare_service_import("portal-web")
+        import app.main as main
+
+        observed = []
+        supplied = 0
+
+        async def downstream(scope, receive, send):
+            observed.append(await receive())
+            await send({"type": "http.response.start", "status": 204, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        async def source():
+            nonlocal supplied
+            supplied += 1
+            if supplied == 1:
+                return {"type": "http.request", "body": b"x", "more_body": True}
+            return {"type": "http.request", "body": b"y", "more_body": False}
+
+        async def sink(message):
+            pass
+
+        scope = {"type": "http", "method": "POST", "path": "/files/uploads", "headers": []}
+        asyncio.run(main.UploadBodyLimitMiddleware(downstream)(scope, source, sink))
+        self.assertEqual(supplied, 1)
+        self.assertEqual(observed[0]["body"], b"x")
 
 
 if __name__ == "__main__":

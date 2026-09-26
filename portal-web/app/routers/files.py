@@ -188,19 +188,14 @@ def download_files(request: Request, paths: list[str] = Form(...)):
 
     try:
         with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for path in requested_paths:
-                item_path = file_store.get_download_item_path(path)
-                archive_name = Path(path).as_posix().lstrip("/")
-                if item_path.is_dir():
-                    for child in file_store.iter_download_files(item_path):
-                        relative_child = child.relative_to(item_path).as_posix()
-                        archive.write(child, arcname=f"{archive_name}/{relative_child}")
-                else:
-                    archive.write(item_path, arcname=archive_name)
+            file_store.write_download_archive(archive, requested_paths)
     except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
         archive_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="ZIP 파일을 생성할 수 없습니다.") from exc
-    except (ValueError, FileNotFoundError, IsADirectoryError) as exc:
+    except ValueError as exc:
+        archive_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (FileNotFoundError, IsADirectoryError) as exc:
         archive_path.unlink(missing_ok=True)
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
