@@ -9,6 +9,7 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlencode
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -102,6 +103,58 @@ class BookMemoUiContractTests(unittest.TestCase):
         self.assertIn('action="/" method="get"', response.text)
         self.assertIn('name="q"', response.text)
         self.assertIn('class="library-grid"', response.text)
+
+    def test_home_paginates_books_preserving_search_and_chapter_context(self):
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            import app.services.book_service as book_service
+
+            book_service.init_db()
+            with book_service._connect() as connection:
+                connection.executemany(
+                    "INSERT INTO books (isbn, title, updated_at) VALUES (?, ?, ?)",
+                    [(f"isbn-{number}", f"책 {number}", "2026-01-01 00:00:00") for number in range(25)],
+                )
+            book_service.create_chapter(1, "첫 책 목차")
+            with patch("app.main.search_books", return_value=[]):
+                with TestClient(app) as client:
+                    first = client.get("/?q=검색어")
+                    second = client.get("/?page=2&q=검색어")
+                    beyond = client.get("/?page=999")
+                    invalid = client.get("/?page=0")
+
+        self.assertEqual((first.status_code, second.status_code, beyond.status_code, invalid.status_code), (200, 200, 200, 422))
+        self.assertIn("25권의 책이 저장되어 있습니다.", first.text)
+        self.assertIn('href="/?page=2&amp;q=%EA%B2%80%EC%83%89%EC%96%B4"', first.text)
+        self.assertNotIn("첫 책 목차", first.text)
+        self.assertIn("첫 책 목차", second.text)
+        self.assertIn("책 0", beyond.text)
+        self.assertIn('name="redirect_to" value="/?page=2&amp;q=', second.text)
+
+    def test_book_delete_returns_to_current_page(self):
+        previous_password = os.environ.get("DELETE_PASSWORD")
+        os.environ["DELETE_PASSWORD"] = "session-password"
+        try:
+            with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+                import app.services.book_service as book_service
+
+                book = book_service.create_or_get_book({"isbn": "page-delete", "title": "삭제할 책"})
+                with TestClient(app, base_url="https://books.len.pe.kr") as client:
+                    headers = {"Origin": "https://books.len.pe.kr"}
+                    client.post("/auth/login", data={"password": "session-password"}, headers=headers)
+                    response = client.post(
+                        f"/books/{book['id']}/delete",
+                        data={"redirect_to": "/?page=2"},
+                        headers=headers,
+                        follow_redirects=False,
+                    )
+        finally:
+            if previous_password is None:
+                os.environ.pop("DELETE_PASSWORD", None)
+            else:
+                os.environ["DELETE_PASSWORD"] = previous_password
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/?page=2")
 
     def test_unauthenticated_write_forms_redirect_to_login_before_submitting(self):
         """Fails if browser form submissions still end on a raw 401 response."""

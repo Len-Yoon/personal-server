@@ -9,7 +9,7 @@ from urllib.parse import quote, urlsplit
 
 import fcntl
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -23,7 +23,7 @@ from app.services.memo_service import (
     embed_url,
     get_video,
     list_memos,
-    list_videos,
+    list_videos_page,
     search_videos_and_memos,
     update_memo,
 )
@@ -97,13 +97,17 @@ templates.env.globals["portal_home_url_for_request"] = _portal_home_url
 
 
 @app.get("/")
-def home(request: Request):
+def home(request: Request, page: int = Query(default=1, ge=1)):
+    videos, total_videos, current_page = list_videos_page(page)
     return templates.TemplateResponse(
         "home.html",
         {
             "request": request,
             "title": "유튜브 메모장",
-            "videos": list_videos(),
+            "videos": videos,
+            "total_videos": total_videos,
+            "current_page": current_page,
+            "total_pages": max(1, (total_videos + 23) // 24),
             "portal_home_url": portal_home_url(request_host_from_headers(request.headers)),
             "write_authenticated": _has_write_session(request),
         },
@@ -171,6 +175,7 @@ def create_video_memo(
 def delete_saved_video(
     request: Request,
     video_id: int,
+    redirect_to: str = Form(default=""),
 ):
     _require_write_session(request)
 
@@ -180,7 +185,7 @@ def delete_saved_video(
         raise HTTPException(status_code=404, detail="Video not found")
 
     return RedirectResponse(
-        url="/",
+        url=_safe_redirect(redirect_to) or "/",
         status_code=303,
     )
 

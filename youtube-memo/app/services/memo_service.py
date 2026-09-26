@@ -45,6 +45,12 @@ def init_db() -> None:
             )
             """
         )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_videos_home_order ON videos (updated_at DESC, id DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memos_video ON memos (video_id)"
+        )
 
 
 def create_or_get_video(
@@ -112,6 +118,31 @@ def list_videos() -> list[dict[str, Any]]:
         ).fetchall()
 
     return [_row_to_dict(row) for row in rows]
+
+
+def list_videos_page(page: int, page_size: int = 24) -> tuple[list[dict[str, Any]], int, int]:
+    init_db()
+
+    with _connect() as connection:
+        total = connection.execute("SELECT COUNT(*) FROM videos").fetchone()[0]
+        last_page = max(1, (total + page_size - 1) // page_size)
+        page = min(max(1, page), last_page)
+        rows = connection.execute(
+            """
+            WITH selected AS (
+                SELECT * FROM videos
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ? OFFSET ?
+            )
+            SELECT selected.*,
+                (SELECT COUNT(*) FROM memos WHERE video_id = selected.id) AS memo_count
+            FROM selected
+            ORDER BY selected.updated_at DESC, selected.id DESC
+            """,
+            (page_size, (page - 1) * page_size),
+        ).fetchall()
+
+    return [_row_to_dict(row) for row in rows], total, page
 
 
 def get_video(video_id: int) -> dict[str, Any] | None:

@@ -67,10 +67,9 @@
         <div class="section-header">
             <div>
                 <h2>저장한 영상</h2>
-                <p>{{ videos|length }}개의 영상이 저장되어 있습니다.</p>
+                <p>{{ total_videos }}개의 영상이 저장되어 있습니다.</p>
             </div>
         </div>
-
         <div class="video-grid">
             {% for video in videos %}
                 <article class="video-card">
@@ -95,6 +94,7 @@
                         data-confirm-message="이 영상과 메모를 모두 삭제할까요?"
                         data-error-message="영상 삭제에 실패했습니다."
                     >
+                        <input type="hidden" name="redirect_to" value="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
                         <button class="danger-button" type="submit">삭제</button>
                     </form>
                 </article>
@@ -105,6 +105,13 @@
                 </article>
             {% endfor %}
         </div>
+        {% if total_pages > 1 %}
+            <nav class="list-pagination" aria-label="저장한 영상 페이지">
+                {% if current_page > 1 %}<a href="/?page={{ current_page - 1 }}">이전</a>{% endif %}
+                <span>{{ current_page }} / {{ total_pages }} 페이지</span>
+                {% if current_page < total_pages %}<a href="/?page={{ current_page + 1 }}">다음</a>{% endif %}
+            </nav>
+        {% endif %}
     </section>
 </main>
 

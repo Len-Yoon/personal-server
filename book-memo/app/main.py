@@ -25,7 +25,7 @@ from app.services.book_service import (
     delete_chapter,
     delete_memo,
     get_book,
-    list_books,
+    list_books_page,
     list_chapters,
     list_memos,
     search_books_and_memos,
@@ -109,6 +109,7 @@ templates.env.globals["portal_home_url_for_request"] = _portal_home_url
 def home(
     request: Request,
     q: str = Query(default=""),
+    page: int = Query(default=1, ge=1),
 ):
     results = []
     error = ""
@@ -119,7 +120,8 @@ def home(
         except Exception as exc:
             error = str(exc)
 
-    books = list_books()
+    books, total_books, current_page = list_books_page(page)
+    total_pages = max(1, (total_books + 23) // 24)
 
     return templates.TemplateResponse(
         "home.html",
@@ -129,6 +131,9 @@ def home(
             "query": q,
             "results": results,
             "books": books,
+            "total_books": total_books,
+            "current_page": current_page,
+            "total_pages": total_pages,
             "chapters_by_book": {book["id"]: list_chapters(book["id"]) for book in books},
             "error": error,
             "has_aladin_key": bool(os.getenv("ALADIN_TTB_KEY", "").strip()),
@@ -215,13 +220,14 @@ def book_detail(request: Request, book_id: int):
 def delete_saved_book(
     request: Request,
     book_id: int,
+    redirect_to: str = Form(default=""),
 ):
     _require_write_session(request)
 
     if not delete_book(book_id):
         raise HTTPException(status_code=404, detail="Book not found")
 
-    return RedirectResponse(url="/", status_code=303)
+    return RedirectResponse(url=_safe_redirect(redirect_to) or "/", status_code=303)
 
 
 @app.post("/books/{book_id}/progress")
