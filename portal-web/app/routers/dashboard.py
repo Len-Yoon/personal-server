@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 
 from app.services.global_search import search_all
 from app.services.host_urls import portal_home_url, service_base_urls, service_url
@@ -16,10 +17,10 @@ templates = Jinja2Templates(directory=Path(__file__).resolve().parents[1] / "tem
 
 
 @router.get("/")
-def dashboard(request: Request, q: str = ""):
+async def dashboard(request: Request, q: str = ""):
     host = _request_host(request)
     if is_portfolio_host(request):
-        return render_public_portfolio(request)
+        return await run_in_threadpool(render_public_portfolio, request)
     local_mode = _is_local_host(host)
     base_urls = service_base_urls(host)
     if host == _configured_host("FILES_HOSTNAME") or host.startswith("file."):
@@ -89,7 +90,7 @@ def dashboard(request: Request, q: str = ""):
             "services": services,
             "demo_mode": os.getenv("DEMO_MODE", "").lower() in {"1", "true", "yes", "on"},
             "query": q.strip(),
-            "search_results": search_all(
+            "search_results": await search_all(
                 q,
                 public_base_urls=base_urls,
                 local_base_urls=base_urls,

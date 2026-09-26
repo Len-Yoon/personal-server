@@ -1,8 +1,9 @@
-import json
+import asyncio
 import os
 from typing import Any
 from urllib.parse import urlencode, urlsplit
-from urllib.request import urlopen
+
+import httpx
 
 
 DEFAULT_ENDPOINTS = {
@@ -10,7 +11,10 @@ DEFAULT_ENDPOINTS = {
     "youtube": "http://youtube-memo:8002/api/search",
     "books": "http://book-memo:8003/api/search",
 }
-def search_all(
+SEARCH_BUDGET_SECONDS = 1.5
+
+
+async def search_all(
     query: str,
     limit: int = 5,
     public_base_urls: dict[str, str] | None = None,
@@ -24,18 +28,39 @@ def search_all(
     if _truthy(os.getenv("DEMO_MODE", "")):
         return _demo_results(query)
 
-    return {
-        name: _fetch_results(
-            name,
-            _endpoint(name),
-            query,
-            limit,
-            public_base_urls=public_base_urls,
-            local_base_urls=local_base_urls,
-            prefer_local=prefer_local,
-        )
-        for name in ("news", "youtube", "books")
-    }
+    return await _search_parallel(
+        query, limit, public_base_urls, local_base_urls, prefer_local
+    )
+
+
+async def _search_parallel(
+    query: str,
+    limit: int,
+    public_base_urls: dict[str, str] | None,
+    local_base_urls: dict[str, str] | None,
+    prefer_local: bool,
+) -> dict[str, dict[str, object]]:
+    results = {name: {"items": [], "status": "unavailable"} for name in DEFAULT_ENDPOINTS}
+    async with httpx.AsyncClient(timeout=SEARCH_BUDGET_SECONDS, follow_redirects=True) as client:
+        tasks = {
+            name: asyncio.create_task(_fetch_results(
+                client, name, _endpoint(name), query, limit,
+                public_base_urls, local_base_urls, prefer_local,
+            ))
+            for name in DEFAULT_ENDPOINTS
+        }
+        try:
+            done, _ = await asyncio.wait(tasks.values(), timeout=SEARCH_BUDGET_SECONDS)
+            for name, task in tasks.items():
+                if task in done:
+                    results[name] = task.result()
+        finally:
+            # Drain cancellations before closing the client or the event loop.
+            for task in tasks.values():
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
+    return results
 
 
 def _endpoint(name: str) -> str:
@@ -43,7 +68,8 @@ def _endpoint(name: str) -> str:
     return os.getenv(env_name, DEFAULT_ENDPOINTS[name])
 
 
-def _fetch_results(
+async def _fetch_results(
+    client: httpx.AsyncClient,
     name: str,
     endpoint: str,
     query: str,
@@ -54,28 +80,29 @@ def _fetch_results(
 ) -> dict[str, object]:
     url = f"{endpoint}?{urlencode({'q': query, 'limit': limit})}"
     try:
-        with urlopen(url, timeout=1.5) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        response = await client.get(url)
+        response.raise_for_status()
+        payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("invalid search payload")
         results = payload.get("results")
         if not isinstance(results, list) or any(not isinstance(item, dict) for item in results):
             raise ValueError("invalid search results")
+        return {
+            "items": [
+                _normalize_result_url(
+                    name,
+                    item,
+                    public_base_urls=public_base_urls,
+                    local_base_urls=local_base_urls,
+                    prefer_local=prefer_local,
+                )
+                for item in results
+            ],
+            "status": "ok",
+        }
     except Exception:
         return {"items": [], "status": "unavailable"}
-    return {
-        "items": [
-            _normalize_result_url(
-                name,
-                item,
-                public_base_urls=public_base_urls,
-                local_base_urls=local_base_urls,
-                prefer_local=prefer_local,
-            )
-            for item in results
-        ],
-        "status": "ok",
-    }
 
 
 def _normalize_result_url(
