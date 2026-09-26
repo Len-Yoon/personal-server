@@ -77,6 +77,26 @@ def init_db() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_books_home_order ON books (
+                CASE
+                    WHEN reading_status = '읽는 중' THEN 0
+                    WHEN reading_status = '읽을 예정' THEN 1
+                    WHEN progress_percent >= 100 OR reading_status = '완료' THEN 2
+                    ELSE 3
+                END,
+                updated_at DESC,
+                id DESC
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_book_chapters_book ON book_chapters (book_id, position, id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_book_memos_book ON book_memos (book_id)"
+        )
 
 
 def list_books() -> list[dict[str, Any]]:
@@ -117,6 +137,51 @@ def list_books() -> list[dict[str, Any]]:
         ).fetchall()
 
     return [_with_computed_progress(_row_to_dict(row)) for row in rows]
+
+
+def list_books_page(page: int, page_size: int = 24) -> tuple[list[dict[str, Any]], int, int]:
+    init_db()
+
+    with _connect() as connection:
+        connection.execute("BEGIN")
+        total = connection.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+        last_page = max(1, (total + page_size - 1) // page_size)
+        page = min(max(1, page), last_page)
+        rows = connection.execute(
+            """
+            WITH selected AS (
+                SELECT * FROM books
+                ORDER BY
+                    CASE
+                        WHEN reading_status = '읽는 중' THEN 0
+                        WHEN reading_status = '읽을 예정' THEN 1
+                        WHEN progress_percent >= 100 OR reading_status = '완료' THEN 2
+                        ELSE 3
+                    END,
+                    updated_at DESC,
+                    id DESC
+                LIMIT ? OFFSET ?
+            )
+            SELECT
+                selected.*,
+                (SELECT COUNT(*) FROM book_memos WHERE book_id = selected.id) AS memo_count,
+                (SELECT COUNT(*) FROM book_chapters WHERE book_id = selected.id) AS chapter_count,
+                (SELECT COALESCE(SUM(is_done), 0) FROM book_chapters WHERE book_id = selected.id) AS done_chapter_count
+            FROM selected
+            ORDER BY
+                CASE
+                    WHEN reading_status = '읽는 중' THEN 0
+                    WHEN reading_status = '읽을 예정' THEN 1
+                    WHEN progress_percent >= 100 OR reading_status = '완료' THEN 2
+                    ELSE 3
+                END,
+                updated_at DESC,
+                id DESC
+            """,
+            (page_size, (page - 1) * page_size),
+        ).fetchall()
+
+    return [_with_computed_progress(_row_to_dict(row)) for row in rows], total, page
 
 
 def create_or_get_book(payload: dict[str, Any]) -> dict[str, Any]:

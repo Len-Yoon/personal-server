@@ -9,6 +9,7 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlencode
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -102,6 +103,115 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
         self.assertIn('action="/videos"', response.text)
         self.assertIn('name="url"', response.text)
         self.assertIn('class="video-grid"', response.text)
+
+    def test_home_paginates_videos_with_total_and_stable_order(self):
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            import app.services.memo_service as memo_service
+
+            memo_service.init_db()
+            with memo_service._connect() as connection:
+                connection.executemany(
+                    "INSERT INTO videos (youtube_id, url, title, updated_at) VALUES (?, ?, ?, ?)",
+                    [(f"video-{number}", f"https://example.com/{number}", f"영상 {number}", "2026-01-01 00:00:00") for number in range(26)],
+                )
+            with TestClient(app) as client:
+                first = client.get("/")
+                second = client.get("/?page=2")
+                beyond = client.get("/?page=999")
+                invalid = client.get("/?page=0")
+
+        self.assertEqual((first.status_code, second.status_code, beyond.status_code, invalid.status_code), (200, 200, 200, 422))
+        self.assertIn("26개의 영상이 저장되어 있습니다.", first.text)
+        self.assertIn('href="/?page=2"', first.text)
+        self.assertIn("영상 25", first.text)
+        self.assertNotIn("영상 1</h3>", first.text)
+        self.assertIn("영상 1", second.text)
+        self.assertIn("영상 0", second.text)
+        self.assertNotIn("영상 25", second.text)
+        self.assertIn("영상 0", beyond.text)
+
+    def test_home_indexes_serve_sort_and_memo_count(self):
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir):
+            import app.services.memo_service as memo_service
+
+            memo_service.init_db()
+            with memo_service._connect() as connection:
+                sort_plan = " ".join(row[3] for row in connection.execute(
+                    "EXPLAIN QUERY PLAN SELECT id FROM videos ORDER BY updated_at DESC, id DESC LIMIT 24"
+                ))
+                memo_plan = " ".join(row[3] for row in connection.execute(
+                    "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM memos WHERE video_id = 1"
+                ))
+        self.assertIn("USING COVERING INDEX idx_videos_home_order", sort_plan)
+        self.assertNotIn("TEMP B-TREE", sort_plan)
+        self.assertIn("USING COVERING INDEX idx_memos_video", memo_plan)
+
+    def test_video_page_uses_one_snapshot_when_last_row_is_deleted_after_count(self):
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir):
+            import app.services.memo_service as memo_service
+
+            memo_service.init_db()
+            with memo_service._connect() as connection:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.executemany(
+                    "INSERT INTO videos (youtube_id, url, title) VALUES (?, ?, ?)",
+                    [(f"video-{number}", f"https://example.com/{number}", f"영상 {number}") for number in range(25)],
+                )
+            original_connect = memo_service._connect
+            deleted = False
+
+            class RacingConnection:
+                def __init__(self, connection):
+                    self.connection = connection
+
+                def execute(self, sql, parameters=()):
+                    nonlocal deleted
+                    cursor = self.connection.execute(sql, parameters)
+                    if sql == "SELECT COUNT(*) FROM videos" and not deleted:
+                        deleted = True
+                        with sqlite3.connect(memo_service.DB_PATH) as writer:
+                            writer.execute("DELETE FROM videos WHERE youtube_id = 'video-0'")
+                    return cursor
+
+            @contextmanager
+            def racing_connect():
+                with original_connect() as connection:
+                    yield RacingConnection(connection)
+
+            with patch.object(memo_service, "_connect", racing_connect):
+                rows, total, page = memo_service.list_videos_page(2)
+
+        self.assertTrue(deleted)
+        self.assertEqual((total, page, [video["title"] for video in rows]), (25, 2, ["영상 0"]))
+
+    def test_video_delete_returns_to_current_page(self):
+        previous_password = os.environ.get("DELETE_PASSWORD")
+        os.environ["DELETE_PASSWORD"] = "session-password"
+        try:
+            with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+                import app.services.memo_service as memo_service
+
+                video = memo_service.create_or_get_video(
+                    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                    title_fetcher=lambda _youtube_id, _url: "삭제할 영상",
+                )
+                with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                    headers = {"Origin": "https://memo.len.pe.kr"}
+                    client.post("/auth/login", data={"password": "session-password"}, headers=headers)
+                    response = client.post(
+                        f"/videos/{video['id']}/delete",
+                        data={"redirect_to": "/?page=2"},
+                        headers=headers,
+                        follow_redirects=False,
+                    )
+        finally:
+            if previous_password is None:
+                os.environ.pop("DELETE_PASSWORD", None)
+            else:
+                os.environ["DELETE_PASSWORD"] = previous_password
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/?page=2")
 
     def test_unauthenticated_write_forms_redirect_to_login_before_submitting(self):
         """Fails if browser form submissions still end on a raw 401 response."""

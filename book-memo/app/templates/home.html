@@ -117,7 +117,7 @@
         <div class="section-header">
             <div>
                 <h2>내 책장</h2>
-                <p>{{ books|length }}권의 책이 저장되어 있습니다.</p>
+                <p>{{ total_books }}권의 책이 저장되어 있습니다.</p>
             </div>
         </div>
 
@@ -144,7 +144,7 @@
                         <details class="library-chapters" open>
                             <summary>목차 체크와 코멘트</summary>
                             <form class="library-check-form" action="/books/{{ book.id }}/chapter-statuses" method="post">
-                                <input type="hidden" name="redirect_to" value="/">
+                                <input type="hidden" name="redirect_to" value="/books/{{ book.id }}">
                                 <div class="library-chapter-list">
                                     {% for chapter in chapters %}
                                         <label>
@@ -178,13 +178,14 @@
                                         </option>
                                     {% endfor %}
                                 </select>
-                                <input type="hidden" name="redirect_to" value="/">
+                                <input type="hidden" name="redirect_to" value="/books/{{ book.id }}">
                                 <textarea name="comment" rows="3" placeholder="선택한 목차에 남길 코멘트"></textarea>
                                 <button type="submit">코멘트 저장</button>
                             </form>
                         </details>
                     {% endif %}
                     <form class="protected-delete-form" action="/books/{{ book.id }}/delete" method="post">
+                        <input type="hidden" name="redirect_to" value="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
                         <button class="danger-button" type="submit">책 삭제</button>
                     </form>
                 </article>
@@ -195,6 +196,13 @@
                 </article>
             {% endfor %}
         </div>
+        {% if total_pages > 1 %}
+            <nav class="list-pagination" aria-label="내 책장 페이지">
+                {% if current_page > 1 %}<a href="/?page={{ current_page - 1 }}{% if query %}&amp;q={{ query|urlencode }}{% endif %}">이전</a>{% endif %}
+                <span>{{ current_page }} / {{ total_pages }} 페이지</span>
+                {% if current_page < total_pages %}<a href="/?page={{ current_page + 1 }}{% if query %}&amp;q={{ query|urlencode }}{% endif %}">다음</a>{% endif %}
+            </nav>
+        {% endif %}
     </section>
 </main>
 

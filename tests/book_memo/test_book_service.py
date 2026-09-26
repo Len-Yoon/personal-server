@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 import types
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -86,6 +87,86 @@ class BookMemoServiceTests(unittest.TestCase):
             books = book_service.list_books()
 
             self.assertEqual([book["title"] for book in books], ["읽는 중 책", "읽을 예정 책", "완료 책"])
+
+    def test_book_page_is_bounded_stable_and_clamped(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            book_service = self.reload_book_service(tempdir)
+            book_service.init_db()
+            with book_service._connect() as connection:
+                connection.executemany(
+                    "INSERT INTO books (isbn, title, reading_status, updated_at) VALUES (?, ?, ?, ?)",
+                    [(f"isbn-{number}", f"책 {number}", "읽는 중", "2026-01-01 00:00:00") for number in range(26)],
+                )
+                connection.execute("UPDATE books SET reading_status = '읽을 예정' WHERE isbn = 'isbn-25'")
+            first, total, page = book_service.list_books_page(1)
+            second, _, second_page = book_service.list_books_page(2)
+            beyond, _, beyond_page = book_service.list_books_page(999)
+
+            self.assertEqual((total, page, second_page, beyond_page), (26, 1, 2, 2))
+            self.assertEqual(len(first), 24)
+            self.assertEqual([book["title"] for book in second], ["책 0", "책 25"])
+            self.assertEqual([book["title"] for book in beyond], ["책 0", "책 25"])
+
+    def test_book_page_uses_one_snapshot_when_last_row_is_deleted_after_count(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            book_service = self.reload_book_service(tempdir)
+            book_service.init_db()
+            with book_service._connect() as connection:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.executemany(
+                    "INSERT INTO books (isbn, title) VALUES (?, ?)",
+                    [(f"isbn-{number}", f"책 {number}") for number in range(25)],
+                )
+
+            original_connect = book_service._connect
+            deleted = False
+
+            class RacingConnection:
+                def __init__(self, connection):
+                    self.connection = connection
+
+                def execute(self, sql, parameters=()):
+                    nonlocal deleted
+                    cursor = self.connection.execute(sql, parameters)
+                    if sql == "SELECT COUNT(*) FROM books" and not deleted:
+                        deleted = True
+                        with sqlite3.connect(book_service.DB_PATH) as writer:
+                            writer.execute("DELETE FROM books WHERE isbn = 'isbn-0'")
+                    return cursor
+
+            @contextmanager
+            def racing_connect():
+                with original_connect() as connection:
+                    yield RacingConnection(connection)
+
+            with patch.object(book_service, "_connect", racing_connect):
+                rows, total, page = book_service.list_books_page(2)
+
+            self.assertTrue(deleted)
+            self.assertEqual((total, page, [book["title"] for book in rows]), (25, 2, ["책 0"]))
+
+    def test_home_indexes_serve_sort_and_page_counts(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            book_service = self.reload_book_service(tempdir)
+            book_service.init_db()
+            with book_service._connect() as connection:
+                sort_plan = " ".join(row[3] for row in connection.execute(
+                    """EXPLAIN QUERY PLAN SELECT id FROM books ORDER BY
+                    CASE WHEN reading_status = '읽는 중' THEN 0
+                    WHEN reading_status = '읽을 예정' THEN 1
+                    WHEN progress_percent >= 100 OR reading_status = '완료' THEN 2
+                    ELSE 3 END, updated_at DESC, id DESC LIMIT 24"""
+                ))
+                chapter_plan = " ".join(row[3] for row in connection.execute(
+                    "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM book_chapters WHERE book_id = 1"
+                ))
+                memo_plan = " ".join(row[3] for row in connection.execute(
+                    "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM book_memos WHERE book_id = 1"
+                ))
+            self.assertIn("USING INDEX idx_books_home_order", sort_plan)
+            self.assertNotIn("TEMP B-TREE", sort_plan)
+            self.assertIn("USING COVERING INDEX idx_book_chapters_book", chapter_plan)
+            self.assertIn("USING COVERING INDEX idx_book_memos_book", memo_plan)
 
     def test_get_and_list_preserve_manual_progress_without_chapters(self):
         with tempfile.TemporaryDirectory() as tempdir:
