@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from app.services.security import append_security_event
 
@@ -50,10 +50,11 @@ def get_directory(relative_path: str = "") -> dict[str, Any]:
 
     directories = []
     files = []
-    for item in sorted(current_path.iterdir(), key=lambda path: (path.is_file(), path.name.lower())):
-        if item.name.startswith("."):
-            continue
-
+    visible_items = (
+        item for item in current_path.iterdir()
+        if not item.name.startswith(".") and not item.is_symlink()
+    )
+    for item in sorted(visible_items, key=lambda path: (path.is_file(), path.name.lower())):
         stat = item.stat()
         entry = {
             "name": item.name,
@@ -153,7 +154,7 @@ def validate_download_limits(relative_paths: list[str]) -> None:
     for relative_path in relative_paths:
         item_path = get_download_item_path(relative_path)
         if item_path.is_dir():
-            children = (child for child in item_path.rglob("*") if child.is_file())
+            children = iter_download_files(item_path)
         else:
             children = (item_path,)
         for child in children:
@@ -165,6 +166,12 @@ def validate_download_limits(relative_paths: list[str]) -> None:
                 raise ValueError(
                     f"다운로드 원본 파일의 합계는 {MAX_DOWNLOAD_TOTAL_BYTES // CHUNK_SIZE}MB 이하만 허용됩니다."
                 )
+
+
+def iter_download_files(directory: Path) -> Iterator[Path]:
+    for child in _checked_descendants(directory):
+        if child.is_file():
+            yield child
 
 
 def create_directory(relative_path: str, name: str) -> None:
@@ -199,6 +206,8 @@ def delete_item(relative_path: str) -> None:
         raise FileNotFoundError("삭제할 항목을 찾을 수 없습니다.")
     item_type = "folder" if path.is_dir() else "file"
     if path.is_dir():
+        for _ in _checked_descendants(path):
+            pass
         _delete_directory(path)
         append_security_event("file_deleted", path=relative_path, item_type=item_type)
         return
@@ -220,10 +229,24 @@ def format_size(size: int) -> str:
 
 def _safe_path(relative_path: str) -> Path:
     storage_root = STORAGE_PATH.resolve()
-    path = (storage_root / relative_path.strip("/")).resolve()
-    if path != storage_root and storage_root not in path.parents:
+    path = storage_root
+    for part in Path(relative_path.strip("/")).parts:
+        if part == "..":
+            raise ValueError("허용되지 않는 경로입니다.")
+        path = path / part
+        if path.is_symlink():
+            raise ValueError("심볼릭 링크 경로는 허용되지 않습니다.")
+    resolved = path.resolve()
+    if resolved != storage_root and storage_root not in resolved.parents:
         raise ValueError("허용되지 않는 경로입니다.")
-    return path
+    return resolved
+
+
+def _checked_descendants(directory: Path) -> Iterator[Path]:
+    for child in directory.rglob("*"):
+        if child.is_symlink():
+            raise ValueError("심볼릭 링크 항목은 허용되지 않습니다.")
+        yield child
 
 
 def _safe_name(name: str) -> str:
@@ -245,6 +268,8 @@ def _validate_upload_name(filename: str) -> None:
 
 def _delete_directory(path: Path) -> None:
     for child in path.iterdir():
+        if child.is_symlink():
+            raise ValueError("심볼릭 링크 항목은 허용되지 않습니다.")
         if child.is_dir():
             _delete_directory(child)
         else:

@@ -1,11 +1,13 @@
 import hmac
 import os
+from collections import deque
 from pathlib import Path
 from time import perf_counter
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.routers import admin, dashboard, files, portfolio
 from app.services.http_metrics import HttpMetrics
@@ -38,6 +40,61 @@ async def restrict_portfolio_host(request: Request, call_next):
     ):
         return PlainTextResponse("Not Found", status_code=404)
     return await call_next(request)
+
+
+class UploadBodyLimitMiddleware:
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope["method"] != "POST":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope["path"]
+        if path == "/files/upload":
+            limit = files.file_store.MAX_UPLOAD_BYTES + files.file_store.CHUNK_SIZE
+        elif path == "/files/uploads":
+            limit = files.file_store.MAX_UPLOAD_TOTAL_BYTES + files.file_store.CHUNK_SIZE
+        else:
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", ()))
+        content_length = headers.get(b"content-length", b"")
+        if content_length.isdigit() and int(content_length) > limit:
+            await self._reject(scope, receive, send)
+            return
+
+        received = 0
+        buffered = deque()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    await self._reject(scope, receive, send)
+                    return
+                buffered.append(message)
+                if not message.get("more_body", False):
+                    break
+
+        async def replay_receive():
+            if buffered:
+                return buffered.popleft()
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
+
+    @staticmethod
+    async def _reject(scope: Scope, receive: Receive, send: Send) -> None:
+        response = JSONResponse(status_code=413, content={"detail": "업로드 요청이 너무 큽니다."})
+        await response(scope, receive, send)
+
+
+app.add_middleware(UploadBodyLimitMiddleware)
 
 
 @app.middleware("http")

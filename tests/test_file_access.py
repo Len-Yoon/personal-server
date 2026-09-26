@@ -55,8 +55,10 @@ class FileAccessTests(unittest.TestCase):
         "FILE_STORAGE_PATH",
         "AUTH_RATE_LIMIT_STATE_PATH",
         "SECURITY_LOG_PATH",
+        "FILE_MAX_UPLOAD_MB",
         "FILE_MAX_UPLOAD_FILES",
         "FILE_MAX_UPLOAD_TOTAL_MB",
+        "DELETE_PASSWORD",
         "FILE_MAX_DOWNLOAD_FILES",
         "FILE_MAX_DOWNLOAD_TOTAL_MB",
     )
@@ -533,6 +535,225 @@ class FileAccessTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 400)
             self.assertEqual(set(Path(tempfile.gettempdir()).glob("file-vault-*.zip")), archives_before)
+
+
+    def test_listing_omits_symlink_entries(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ.pop("APP_ENV", None)
+            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
+            storage_path = Path(tempdir) / "files"
+            storage_path.mkdir()
+            (storage_path / "regular.txt").write_text("regular")
+            outside = Path(tempdir) / "outside.txt"
+            outside.write_text("secret")
+            (storage_path / "outside-link.txt").symlink_to(outside)
+            os.environ["FILE_STORAGE_PATH"] = str(storage_path)
+            import app.main as main
+            from fastapi.testclient import TestClient
+
+            with TestClient(importlib.reload(main).app) as client:
+                response = client.get("/files")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("regular.txt", response.text)
+            self.assertNotIn("outside-link.txt", response.text)
+
+    def test_nested_file_symlink_blocks_bulk_download_without_archive(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ.pop("APP_ENV", None)
+            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
+            storage_path = Path(tempdir) / "files"
+            folder = storage_path / "folder"
+            folder.mkdir(parents=True)
+            (folder / "ordinary.txt").write_text("ordinary")
+            outside = Path(tempdir) / "outside.txt"
+            outside.write_text("outside-secret")
+            (folder / "link.txt").symlink_to(outside)
+            os.environ["FILE_STORAGE_PATH"] = str(storage_path)
+            import app.main as main
+            from fastapi.testclient import TestClient
+
+            before = set(Path(tempfile.gettempdir()).glob("file-vault-*.zip"))
+            with TestClient(importlib.reload(main).app) as client:
+                response = client.post(
+                    "/files/download-bulk",
+                    data={"paths": "folder"},
+                    headers={"Origin": "http://testserver"},
+                )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertNotIn("outside-secret", response.text)
+            self.assertEqual(set(Path(tempfile.gettempdir()).glob("file-vault-*.zip")), before)
+
+    def test_nested_directory_symlink_blocks_delete_before_any_mutation(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ.pop("APP_ENV", None)
+            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["DELETE_PASSWORD"] = "delete-test"
+            os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
+            storage_path = Path(tempdir) / "files"
+            folder = storage_path / "folder"
+            folder.mkdir(parents=True)
+            ordinary = folder / "a-ordinary.txt"
+            ordinary.write_text("keep")
+            outside = Path(tempdir) / "outside"
+            outside.mkdir()
+            secret = outside / "secret.txt"
+            secret.write_text("outside-secret")
+            (folder / "z-link").symlink_to(outside, target_is_directory=True)
+            os.environ["FILE_STORAGE_PATH"] = str(storage_path)
+            import app.main as main
+            from fastapi.testclient import TestClient
+
+            with TestClient(importlib.reload(main).app) as client:
+                response = client.post(
+                    "/files/delete",
+                    data={"path": "folder", "delete_password": "delete-test"},
+                    headers={"Origin": "http://testserver"},
+                    follow_redirects=False,
+                )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(ordinary.read_text(), "keep")
+            self.assertEqual(secret.read_text(), "outside-secret")
+
+    def test_upload_endpoints_reject_content_length_excess_with_413(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ.pop("APP_ENV", None)
+            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
+            os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
+            os.environ["FILE_MAX_UPLOAD_MB"] = "1"
+            os.environ["FILE_MAX_UPLOAD_TOTAL_MB"] = "1"
+            import app.services.file_store as file_store
+            import app.main as main
+            from fastapi.testclient import TestClient
+
+            importlib.reload(file_store)
+            app = importlib.reload(main).app
+            with TestClient(app) as client:
+                single = client.post(
+                    "/files/upload", files={"upload": ("huge.txt", b"x" * (3 * 1024 * 1024))},
+                    data={"path": ""}, headers={"Origin": "http://testserver"},
+                )
+                bulk = client.post(
+                    "/files/uploads", files=[("uploads", ("huge.txt", b"x" * (3 * 1024 * 1024)))],
+                    data={"path": ""}, headers={"Origin": "http://testserver"},
+                )
+
+            self.assertEqual(single.status_code, 413)
+            self.assertEqual(bulk.status_code, 413)
+            self.assertFalse((Path(tempdir) / "files" / "huge.txt").exists())
+
+    def test_upload_rejects_stream_without_content_length_at_receive_limit(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ.pop("APP_ENV", None)
+            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
+            os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
+            os.environ["FILE_MAX_UPLOAD_TOTAL_MB"] = "1"
+            import app.services.file_store as file_store
+            import app.main as main
+            from fastapi.testclient import TestClient
+
+            importlib.reload(file_store)
+            app = importlib.reload(main).app
+            def body_chunks():
+                yield b"--a5\r\nContent-Disposition: form-data; name=\"uploads\"; filename=\"huge.txt\"\r\nContent-Type: text/plain\r\n\r\n"
+                yield b"x" * (1024 * 1024)
+                yield b"x" * (1024 * 1024)
+                yield b"x" * 512
+                yield b"\r\n--a5--\r\n"
+
+            with TestClient(app) as client:
+                response = client.post(
+                    "/files/uploads", content=body_chunks(),
+                    headers={"Content-Type": "multipart/form-data; boundary=a5", "Origin": "http://testserver"},
+                )
+
+            self.assertEqual(response.status_code, 413)
+            self.assertFalse((Path(tempdir) / "files" / "huge.txt").exists())
+
+    def test_cross_origin_upload_is_rejected_before_body_limit(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ.pop("APP_ENV", None)
+            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
+            os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
+            os.environ["FILE_MAX_UPLOAD_MB"] = "1"
+            import app.services.file_store as file_store
+            import app.main as main
+            from fastapi.testclient import TestClient
+
+            importlib.reload(file_store)
+            with TestClient(importlib.reload(main).app) as client:
+                response = client.post(
+                    "/files/upload", files={"upload": ("huge.txt", b"x" * (3 * 1024 * 1024))},
+                    headers={"Origin": "https://attacker.example"},
+                )
+
+            self.assertEqual(response.status_code, 403)
+            self.assertFalse((Path(tempdir) / "files" / "huge.txt").exists())
+
+    def test_upload_limit_response_keeps_security_headers(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ.pop("APP_ENV", None)
+            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
+            os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
+            os.environ["FILE_MAX_UPLOAD_MB"] = "1"
+            import app.services.file_store as file_store
+            import app.main as main
+            from fastapi.testclient import TestClient
+
+            importlib.reload(file_store)
+            with TestClient(importlib.reload(main).app) as client:
+                response = client.post(
+                    "/files/upload", files={"upload": ("huge.txt", b"x" * (3 * 1024 * 1024))},
+                    headers={"Origin": "http://testserver"},
+                )
+
+            self.assertEqual(response.status_code, 413)
+            self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
+
+    def test_upload_endpoints_preserve_small_requests(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ.pop("APP_ENV", None)
+            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
+            storage_path = Path(tempdir) / "files"
+            os.environ["FILE_STORAGE_PATH"] = str(storage_path)
+            os.environ["FILE_MAX_UPLOAD_MB"] = "1"
+            os.environ["FILE_MAX_UPLOAD_TOTAL_MB"] = "1"
+            import app.services.file_store as file_store
+            import app.main as main
+            from fastapi.testclient import TestClient
+
+            importlib.reload(file_store)
+            with TestClient(importlib.reload(main).app) as client:
+                single = client.post(
+                    "/files/upload", files={"upload": ("single.txt", b"one")},
+                    data={"path": ""}, headers={"Origin": "http://testserver"}, follow_redirects=False,
+                )
+                bulk = client.post(
+                    "/files/uploads", files=[("uploads", ("bulk.txt", b"two"))],
+                    data={"path": ""}, headers={"Origin": "http://testserver"}, follow_redirects=False,
+                )
+
+            self.assertEqual(single.status_code, 303)
+            self.assertEqual(bulk.status_code, 303)
+            self.assertEqual((storage_path / "single.txt").read_bytes(), b"one")
+            self.assertEqual((storage_path / "bulk.txt").read_bytes(), b"two")
 
 
 if __name__ == "__main__":

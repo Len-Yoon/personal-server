@@ -208,6 +208,18 @@ class PortalSecurityTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 file_store._safe_path("../outside.txt")
 
+    def test_safe_path_rejects_symlink_component_inside_storage(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            file_store = self.reload_file_store(tempdir)
+            file_store.ensure_storage()
+            storage = Path(tempdir) / "files"
+            (storage / "actual").mkdir()
+            (storage / "actual" / "memo.txt").write_text("inside")
+            (storage / "alias").symlink_to(storage / "actual", target_is_directory=True)
+
+            with self.assertRaises(ValueError):
+                file_store.get_download_path("alias/memo.txt")
+
     def test_save_upload_rejects_existing_file(self):
         with tempfile.TemporaryDirectory() as tempdir:
             file_store = self.reload_file_store(tempdir)

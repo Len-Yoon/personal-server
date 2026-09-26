@@ -192,10 +192,9 @@ def download_files(request: Request, paths: list[str] = Form(...)):
                 item_path = file_store.get_download_item_path(path)
                 archive_name = Path(path).as_posix().lstrip("/")
                 if item_path.is_dir():
-                    for child in item_path.rglob("*"):
-                        if child.is_file():
-                            relative_child = child.relative_to(item_path).as_posix()
-                            archive.write(child, arcname=f"{archive_name}/{relative_child}")
+                    for child in file_store.iter_download_files(item_path):
+                        relative_child = child.relative_to(item_path).as_posix()
+                        archive.write(child, arcname=f"{archive_name}/{relative_child}")
                 else:
                     archive.write(item_path, arcname=archive_name)
     except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
