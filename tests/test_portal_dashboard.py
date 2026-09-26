@@ -1,14 +1,24 @@
+import asyncio
 import importlib
 import json
 import os
+import socket
 import tempfile
+import threading
+import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 from fastapi.testclient import TestClient
 
 from tests._test_support import prepare_service_import
+
+
+def _search_response(payload):
+    return httpx.Response(200, content=payload, request=httpx.Request("GET", "http://search.test"))
 
 
 class PortalDashboardTests(unittest.TestCase):
@@ -173,37 +183,198 @@ class PortalDashboardTests(unittest.TestCase):
         os.environ["DEMO_MODE"] = "true"
         from app.services import global_search
 
-        results = global_search.search_all("테스트")
+        results = asyncio.run(global_search.search_all("테스트"))
 
         self.assertEqual(results["youtube"]["status"], "ok")
         self.assertIn("meta", results["youtube"]["items"][0])
         self.assertIn("snippet", results["youtube"]["items"][0])
+
+    def run_search_transport(self, handler, query="test", budget=1.5):
+        prepare_service_import("portal-web")
+        from app.services import global_search
+
+        client_type = httpx.AsyncClient
+
+        def make_client(**kwargs):
+            return client_type(transport=httpx.MockTransport(handler), **kwargs)
+
+        with patch.dict(os.environ, {"DEMO_MODE": ""}), patch(
+            "httpx.AsyncClient", side_effect=make_client
+        ), patch.object(global_search, "SEARCH_BUDGET_SECONDS", budget):
+            return asyncio.run(global_search.search_all(query))
+
+    def test_search_starts_all_services_before_waiting_for_results(self):
+        started = set()
+        all_started = asyncio.Event()
+
+        async def handle(request):
+            started.add(request.url.host)
+            if len(started) == 3:
+                all_started.set()
+            await asyncio.wait_for(all_started.wait(), timeout=0.5)
+            self.assertEqual(request.url.params["q"], "한글 & query")
+            self.assertEqual(request.url.params["limit"], "5")
+            return httpx.Response(200, json={"results": [{"title": request.url.host, "url": "#"}]})
+
+        results = self.run_search_transport(handle, query="  한글 & query  ")
+        self.assertEqual(len(started), 3)
+        self.assertEqual(list(results), ["news", "youtube", "books"])
+        self.assertTrue(all(result["status"] == "ok" for result in results.values()))
+
+    def test_search_deadline_preserves_fast_results_and_cleans_up_pending_requests(self):
+        cancelled = set()
+        active = set()
+
+        async def handle(request):
+            host = request.url.host
+            active.add(host)
+            try:
+                if host != "book-memo":
+                    try:
+                        await asyncio.sleep(10)
+                    except asyncio.CancelledError:
+                        cancelled.add(host)
+                        raise
+                return httpx.Response(200, json={"results": [{"title": "fast book", "url": "/books/1"}]})
+            finally:
+                active.remove(host)
+
+        start = time.monotonic()
+        results = self.run_search_transport(handle, budget=0.05)
+        elapsed = time.monotonic() - start
+        self.assertEqual(results["books"]["status"], "ok")
+        self.assertEqual(results["books"]["items"][0]["title"], "fast book")
+        self.assertEqual(results["news"], {"items": [], "status": "unavailable"})
+        self.assertEqual(results["youtube"], {"items": [], "status": "unavailable"})
+        self.assertEqual(cancelled, {"crawler-worker", "youtube-memo"})
+        self.assertFalse(active)
+        self.assertLess(elapsed, 1.0)
+
+    def test_dashboard_deadline_does_not_wait_for_dns_worker_shutdown(self):
+        prepare_service_import("portal-web")
+        from app.services import global_search
+
+        release = threading.Event()
+        started = threading.Event()
+        finished = threading.Event()
+
+        def stalled_dns(*args, **kwargs):
+            started.set()
+            release.wait(2)
+            finished.set()
+            raise socket.gaierror("simulated DNS failure")
+
+        environment = {"DEMO_MODE": "", "NO_PROXY": "*", **{
+            f"{name.upper()}_SEARCH_URL": f"http://search-delay.test/{name}"
+            for name in ("news", "youtube", "books")
+        }}
+        with patch.dict(os.environ, environment), patch.object(
+            global_search, "SEARCH_BUDGET_SECONDS", 0.15
+        ), patch("socket.getaddrinfo", side_effect=stalled_dns):
+            with TestClient(self.load_app()) as client:
+                try:
+                    response = client.get("/?q=dns")
+                    self.assertEqual(response.status_code, 200)
+                    self.assertIn("현재 응답 없음", response.text)
+                    self.assertTrue(started.is_set())
+                    self.assertFalse(finished.is_set(), "response waited for DNS worker shutdown")
+                finally:
+                    release.set()
+
+    def test_search_deadline_interrupts_real_http_drip_body(self):
+        prepare_service_import("portal-web")
+        from app.services import global_search
+
+        stop = threading.Event()
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                body = b'{"results": []}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                try:
+                    if self.path.startswith("/news"):
+                        for byte in body:
+                            if stop.wait(0.03):
+                                return
+                            self.wfile.write(bytes([byte]))
+                            self.wfile.flush()
+                    else:
+                        self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+        thread.start()
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        environment = {"DEMO_MODE": "", **{
+            f"{name.upper()}_SEARCH_URL": f"{base_url}/{name}"
+            for name in ("news", "youtube", "books")
+        }}
+        try:
+            with patch.dict(os.environ, environment), patch.object(
+                global_search, "SEARCH_BUDGET_SECONDS", 0.15
+            ):
+                results = asyncio.run(global_search.search_all("drip"))
+            self.assertEqual(results["news"]["status"], "unavailable")
+            self.assertEqual(results["youtube"]["status"], "ok")
+            self.assertEqual(results["books"]["status"], "ok")
+        finally:
+            stop.set()
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_blank_and_demo_search_do_not_open_http_client(self):
+        prepare_service_import("portal-web")
+        from app.services import global_search
+
+        with patch("httpx.AsyncClient") as client:
+            with patch.dict(os.environ, {"DEMO_MODE": ""}):
+                results = asyncio.run(global_search.search_all("   "))
+                self.assertTrue(all(item == {"items": [], "status": "ok"} for item in results.values()))
+            with patch.dict(os.environ, {"DEMO_MODE": "true"}):
+                results = asyncio.run(global_search.search_all("sample"))
+                self.assertTrue(all(item["items"] for item in results.values()))
+            client.assert_not_called()
+
+    def test_search_invalid_json_is_isolated(self):
+        async def handle(request):
+            if request.url.host == "crawler-worker":
+                return httpx.Response(200, content=b"not json")
+            return httpx.Response(200, json={"results": []})
+
+        results = self.run_search_transport(handle)
+        self.assertEqual(results["news"]["status"], "unavailable")
+        self.assertEqual(results["books"]["status"], "ok")
+
+    def test_search_http_error_does_not_hide_other_services(self):
+        async def handle(request):
+            status = 503 if request.url.host == "crawler-worker" else 200
+            return httpx.Response(status, json={"results": []})
+
+        results = self.run_search_transport(handle)
+        self.assertEqual(results["news"]["status"], "unavailable")
+        self.assertEqual(results["youtube"], {"items": [], "status": "ok"})
+        self.assertEqual(results["books"], {"items": [], "status": "ok"})
 
     def test_search_all_keeps_partial_results_when_one_service_is_unavailable(self):
         prepare_service_import("portal-web")
         os.environ.pop("DEMO_MODE", None)
         from app.services import global_search
 
-        class Response:
-            def __init__(self, payload):
-                self.payload = payload
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return self.payload
-
-        def open_endpoint(url, timeout):
+        def open_endpoint(url):
             if "crawler-worker" in url:
                 raise OSError("internal failure detail")
-            return Response(b'{"results": [{"title": "available", "url": "#"}]}')
+            return _search_response(b'{"results": [{"title": "available", "url": "#"}]}')
 
-        with patch("app.services.global_search.urlopen", side_effect=open_endpoint):
-            results = global_search.search_all("test")
+        with patch("httpx.AsyncClient.get", side_effect=open_endpoint):
+            results = asyncio.run(global_search.search_all("test"))
 
         self.assertEqual(results["news"], {"items": [], "status": "unavailable"})
         self.assertEqual(results["youtube"]["status"], "ok")
@@ -214,18 +385,8 @@ class PortalDashboardTests(unittest.TestCase):
         os.environ.pop("DEMO_MODE", None)
         from app.services import global_search
 
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return b'{"results": []}'
-
-        with patch("app.services.global_search.urlopen", return_value=Response()):
-            results = global_search.search_all("empty")
+        with patch("httpx.AsyncClient.get", return_value=_search_response(b'{"results": []}')):
+            results = asyncio.run(global_search.search_all("empty"))
 
         self.assertEqual(results["news"], {"items": [], "status": "ok"})
 
@@ -234,18 +395,8 @@ class PortalDashboardTests(unittest.TestCase):
         os.environ.pop("DEMO_MODE", None)
         from app.services import global_search
 
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return payload
-
-        with patch("app.services.global_search.urlopen", return_value=Response()):
-            return global_search.search_all("malformed")
+        with patch("httpx.AsyncClient.get", return_value=_search_response(payload)):
+            return asyncio.run(global_search.search_all("malformed"))
 
     def test_search_all_marks_error_payload_without_results_as_unavailable(self):
         results = self.search_with_news_payload(b'{"error": "upstream failure"}')
@@ -270,28 +421,14 @@ class PortalDashboardTests(unittest.TestCase):
             "BOOKS_SEARCH_URL": "http://book-memo:8003/api/search",
         }
 
-        class Response:
-            def __init__(self, payload):
-                self.payload = payload
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return self.payload
-
-        def open_endpoint(url, timeout):
-            del timeout
+        def open_endpoint(url):
             if "crawler-worker" in url:
                 result = {"title": "뉴스 고유 결과", "url": "/articles/1"}
             elif "youtube-memo" in url:
                 result = {"title": "유튜브 고유 결과", "url": "/videos/1"}
             else:
                 result = {"title": "책 고유 결과", "url": "/books/1"}
-            return Response(json.dumps({"results": [result]}).encode("utf-8"))
+            return _search_response(json.dumps({"results": [result]}).encode("utf-8"))
 
         expected_urls = {
             "https://len.pe.kr": (
@@ -310,7 +447,7 @@ class PortalDashboardTests(unittest.TestCase):
             for base_url, urls in expected_urls.items():
                 with self.subTest(base_url=base_url):
                     app = self.load_app()
-                    with patch("app.services.global_search.urlopen", side_effect=open_endpoint):
+                    with patch("httpx.AsyncClient.get", side_effect=open_endpoint):
                         with TestClient(app, base_url=base_url, raise_server_exceptions=False) as client:
                             response = client.get("/?q=audit")
 
@@ -326,26 +463,12 @@ class PortalDashboardTests(unittest.TestCase):
             "BOOKS_SEARCH_URL": "http://book-memo:8003/api/search",
         }
 
-        class Response:
-            def __init__(self, payload):
-                self.payload = payload
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-            def read(self):
-                return self.payload
-
-        def open_endpoint(url, timeout):
-            del timeout
+        def open_endpoint(url):
             if "crawler-worker" in url:
                 raise OSError("news unavailable")
             if "youtube-memo" in url:
-                return Response(b'{"results": []}')
-            return Response(
+                return _search_response(b'{"results": []}')
+            return _search_response(
                 '{"results": [{"title": "책 절대 결과", "url": "https://books.example/books/1"}]}'.encode(
                     "utf-8"
                 )
@@ -353,7 +476,7 @@ class PortalDashboardTests(unittest.TestCase):
 
         with patch.dict(os.environ, environment, clear=False):
             app = self.load_app()
-            with patch("app.services.global_search.urlopen", side_effect=open_endpoint):
+            with patch("httpx.AsyncClient.get", side_effect=open_endpoint):
                 with TestClient(app, base_url="https://len.pe.kr", raise_server_exceptions=False) as client:
                     response = client.get("/?q=audit")
 
