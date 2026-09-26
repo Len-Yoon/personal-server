@@ -243,8 +243,7 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
             archive_path = Path(tmpdir) / "news_archive.json"
             with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(archive_path)}, clear=False):
                 news_archive = self.reload_news_archive()
-                archive_path.write_text(
-                    json.dumps(
+                original = json.dumps(
                         {
                             "schema_version": "2026-07-15-korean-news-v2",
                             "updated_at": "",
@@ -252,14 +251,45 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
                             "telegram_notifications_initialized": True,
                         },
                         ensure_ascii=False,
-                    ),
-                    encoding="utf-8",
-                )
+                    )
+                archive_path.write_text(original, encoding="utf-8")
 
                 archive = news_archive._load_archive()
 
+                backup = archive_path.with_name("news_archive.json.v2.bak")
+                self.assertTrue(backup.exists())
+                self.assertEqual(backup.read_bytes(), original.encode("utf-8"))
+                self.assertFalse(archive["telegram_notifications_initialized"])
+
         self.assertEqual(archive["schema_version"], news_archive.ARCHIVE_SCHEMA_VERSION)
         self.assertEqual(archive["articles"], [])
+
+    def test_archive_rejects_corrupt_and_unknown_schema_without_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "news_archive.json"
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(archive_path)}, clear=False):
+                news_archive = self.reload_news_archive()
+                for content in (
+                    '{broken',
+                    json.dumps({"schema_version": "future-v9", "articles": []}),
+                    json.dumps({"schema_version": news_archive.ARCHIVE_SCHEMA_VERSION, "articles": [], "telegram_future_state": [1]}),
+                ):
+                    archive_path.write_text(content, encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        news_archive._load_archive()
+                    self.assertEqual(archive_path.read_text(encoding="utf-8"), content)
+
+    def test_v2_backup_conflict_preserves_original_archive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive_path = Path(tmpdir) / "news_archive.json"
+            original = json.dumps({"schema_version": "2026-07-15-korean-news-v2", "articles": []})
+            archive_path.write_text(original, encoding="utf-8")
+            archive_path.with_name("news_archive.json.v2.bak").write_text("different", encoding="utf-8")
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(archive_path)}, clear=False):
+                news_archive = self.reload_news_archive()
+                with self.assertRaises(ValueError):
+                    news_archive._load_archive()
+            self.assertEqual(archive_path.read_text(encoding="utf-8"), original)
 
     def test_selects_one_article_per_topic_and_skips_similar_headlines(self):
         """Fails if a digest repeats the same topic or the same event."""
