@@ -1,6 +1,11 @@
+import errno
 import os
+import stat
+import time
+import zipfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from app.services.security import append_security_event
 
@@ -50,10 +55,11 @@ def get_directory(relative_path: str = "") -> dict[str, Any]:
 
     directories = []
     files = []
-    for item in sorted(current_path.iterdir(), key=lambda path: (path.is_file(), path.name.lower())):
-        if item.name.startswith("."):
-            continue
-
+    visible_items = (
+        item for item in current_path.iterdir()
+        if not item.name.startswith(".") and not item.is_symlink()
+    )
+    for item in sorted(visible_items, key=lambda path: (path.is_file(), path.name.lower())):
         stat = item.stat()
         entry = {
             "name": item.name,
@@ -153,7 +159,7 @@ def validate_download_limits(relative_paths: list[str]) -> None:
     for relative_path in relative_paths:
         item_path = get_download_item_path(relative_path)
         if item_path.is_dir():
-            children = (child for child in item_path.rglob("*") if child.is_file())
+            children = iter_download_files(item_path)
         else:
             children = (item_path,)
         for child in children:
@@ -165,6 +171,120 @@ def validate_download_limits(relative_paths: list[str]) -> None:
                 raise ValueError(
                     f"다운로드 원본 파일의 합계는 {MAX_DOWNLOAD_TOTAL_BYTES // CHUNK_SIZE}MB 이하만 허용됩니다."
                 )
+
+
+def iter_download_files(directory: Path) -> Iterator[Path]:
+    for child in _checked_descendants(directory):
+        if child.is_file():
+            yield child
+
+
+def write_download_archive(archive: zipfile.ZipFile, relative_paths: list[str]) -> None:
+    file_count = 0
+    total_size = 0
+
+    def add_file(relative_path: str, archive_name: str) -> None:
+        nonlocal file_count, total_size
+        with _open_storage_item(relative_path) as source_fd:
+            source_stat = os.fstat(source_fd)
+            if not stat.S_ISREG(source_stat.st_mode):
+                raise ValueError("일반 파일만 다운로드할 수 있습니다.")
+            file_count += 1
+            if file_count > MAX_DOWNLOAD_FILES:
+                raise ValueError(f"한 번에 최대 {MAX_DOWNLOAD_FILES}개 파일만 다운로드할 수 있습니다.")
+            if total_size + source_stat.st_size > MAX_DOWNLOAD_TOTAL_BYTES:
+                raise ValueError(
+                    f"다운로드 원본 파일의 합계는 {MAX_DOWNLOAD_TOTAL_BYTES // CHUNK_SIZE}MB 이하만 허용됩니다."
+                )
+            modified = time.localtime(source_stat.st_mtime)[:6]
+            if not 1980 <= modified[0] <= 2107:
+                modified = (1980, 1, 1, 0, 0, 0)
+            info = zipfile.ZipInfo(archive_name, date_time=modified)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = (source_stat.st_mode & 0xFFFF) << 16
+            with os.fdopen(os.dup(source_fd), "rb") as source:
+                with archive.open(info, "w") as output:
+                    while chunk := source.read(CHUNK_SIZE):
+                        total_size += len(chunk)
+                        if total_size > MAX_DOWNLOAD_TOTAL_BYTES:
+                            raise ValueError(
+                                f"다운로드 원본 파일의 합계는 {MAX_DOWNLOAD_TOTAL_BYTES // CHUNK_SIZE}MB 이하만 허용됩니다."
+                            )
+                        output.write(chunk)
+
+    storage_root = STORAGE_PATH.resolve()
+    for relative_path in relative_paths:
+        item_path = get_download_item_path(relative_path)
+        archive_name = Path(relative_path).as_posix().lstrip("/")
+        if item_path.is_dir():
+            for child in iter_download_files(item_path):
+                child_relative = child.relative_to(storage_root).as_posix()
+                child_name = child.relative_to(item_path).as_posix()
+                add_file(child_relative, f"{archive_name}/{child_name}")
+        else:
+            add_file(relative_path, archive_name)
+
+
+@contextmanager
+def _open_storage_item(relative_path: str) -> Iterator[int]:
+    storage_root = STORAGE_PATH.resolve()
+    descriptor = os.open(storage_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in Path(relative_path.strip("/")).parts:
+            if part == "..":
+                raise ValueError("허용되지 않는 경로입니다.")
+            child = _open_child_fd(descriptor, part)
+            os.close(descriptor)
+            descriptor = child
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def _open_child_fd(parent_fd: int, name: str) -> int:
+    try:
+        return os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=parent_fd,
+        )
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise ValueError("심볼릭 링크 경로는 허용되지 않습니다.") from exc
+        raise
+
+
+def _preflight_directory_fd(directory_fd: int) -> None:
+    with os.scandir(directory_fd) as entries:
+        names = [entry.name for entry in entries]
+    for name in names:
+        child_fd = _open_child_fd(directory_fd, name)
+        try:
+            mode = os.fstat(child_fd).st_mode
+            if stat.S_ISDIR(mode):
+                _preflight_directory_fd(child_fd)
+            elif not stat.S_ISREG(mode):
+                raise ValueError("일반 파일과 폴더만 삭제할 수 있습니다.")
+        finally:
+            os.close(child_fd)
+
+
+def _delete_directory_fd(directory_fd: int) -> None:
+    with os.scandir(directory_fd) as entries:
+        names = [entry.name for entry in entries]
+    for name in names:
+        child_fd = _open_child_fd(directory_fd, name)
+        try:
+            mode = os.fstat(child_fd).st_mode
+            if stat.S_ISDIR(mode):
+                _delete_directory_fd(child_fd)
+                os.rmdir(name, dir_fd=directory_fd)
+            elif stat.S_ISREG(mode):
+                os.unlink(name, dir_fd=directory_fd)
+            else:
+                raise ValueError("일반 파일과 폴더만 삭제할 수 있습니다.")
+        finally:
+            os.close(child_fd)
 
 
 def create_directory(relative_path: str, name: str) -> None:
@@ -197,12 +317,28 @@ def delete_item(relative_path: str) -> None:
         raise ValueError("파일함 루트는 삭제할 수 없습니다.")
     if not path.exists():
         raise FileNotFoundError("삭제할 항목을 찾을 수 없습니다.")
-    item_type = "folder" if path.is_dir() else "file"
     if path.is_dir():
-        _delete_directory(path)
-        append_security_event("file_deleted", path=relative_path, item_type=item_type)
-        return
-    path.unlink()
+        for _ in _checked_descendants(path):
+            pass
+
+    parts = Path(relative_path.strip("/")).parts
+    parent_path = Path(*parts[:-1]).as_posix() if len(parts) > 1 else ""
+    with _open_storage_item(parent_path) as parent_fd:
+        target_fd = _open_child_fd(parent_fd, parts[-1])
+        try:
+            mode = os.fstat(target_fd).st_mode
+            if stat.S_ISDIR(mode):
+                _preflight_directory_fd(target_fd)
+                _delete_directory_fd(target_fd)
+                os.rmdir(parts[-1], dir_fd=parent_fd)
+                item_type = "folder"
+            elif stat.S_ISREG(mode):
+                os.unlink(parts[-1], dir_fd=parent_fd)
+                item_type = "file"
+            else:
+                raise ValueError("일반 파일과 폴더만 삭제할 수 있습니다.")
+        finally:
+            os.close(target_fd)
     append_security_event("file_deleted", path=relative_path, item_type=item_type)
 
 
@@ -220,10 +356,24 @@ def format_size(size: int) -> str:
 
 def _safe_path(relative_path: str) -> Path:
     storage_root = STORAGE_PATH.resolve()
-    path = (storage_root / relative_path.strip("/")).resolve()
-    if path != storage_root and storage_root not in path.parents:
+    path = storage_root
+    for part in Path(relative_path.strip("/")).parts:
+        if part == "..":
+            raise ValueError("허용되지 않는 경로입니다.")
+        path = path / part
+        if path.is_symlink():
+            raise ValueError("심볼릭 링크 경로는 허용되지 않습니다.")
+    resolved = path.resolve()
+    if resolved != storage_root and storage_root not in resolved.parents:
         raise ValueError("허용되지 않는 경로입니다.")
-    return path
+    return resolved
+
+
+def _checked_descendants(directory: Path) -> Iterator[Path]:
+    for child in directory.rglob("*"):
+        if child.is_symlink():
+            raise ValueError("심볼릭 링크 항목은 허용되지 않습니다.")
+        yield child
 
 
 def _safe_name(name: str) -> str:
@@ -241,15 +391,6 @@ def _validate_upload_name(filename: str) -> None:
         raise ValueError("허용되지 않은 파일 형식입니다.")
     if extension in BLOCKED_EXTENSIONS:
         raise ValueError("보안 정책상 차단된 파일 형식입니다.")
-
-
-def _delete_directory(path: Path) -> None:
-    for child in path.iterdir():
-        if child.is_dir():
-            _delete_directory(child)
-        else:
-            child.unlink()
-    path.rmdir()
 
 
 def _relative_path(path: Path) -> str:
