@@ -2,6 +2,7 @@ import json
 import sys
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -12,6 +13,13 @@ sys.path.insert(0, str(REPO_ROOT / "sre-telegram-relay"))
 
 from app.main import (  # noqa: E402
     BACKUP_STATUS_CONFIGMAP,
+    BOOK_BACKUP_STATUS_CONFIGMAP,
+    BOOK_BACKUP_NAMESPACE,
+    CONFIGMAP_BOOK_BACKUP_DELIVERED_RUN_IDS_KEY,
+    CONFIGMAP_YOUTUBE_BACKUP_DELIVERED_RUN_IDS_KEY,
+    CONFIGMAP_CRAWLER_BACKUP_DELIVERED_RUN_IDS_KEY,
+    YOUTUBE_BACKUP_STATUS_CONFIGMAP,
+    CRAWLER_BACKUP_STATUS_CONFIGMAP,
     QUARTERLY_AUDIT_STATUS_CONFIGMAP,
     MAX_BACKUP_DELIVERED_RUN_IDS,
     MAX_QUARTERLY_AUDIT_DELIVERED_RUN_IDS,
@@ -31,6 +39,7 @@ from app.main import (  # noqa: E402
     build_status_summary,
     handle_http_request,
     run_polling,
+    _read_pvc_backup_report,
 )
 
 
@@ -86,6 +95,18 @@ class FakeBackupStatusK8s(FakeConfigMapK8s):
 
     def get_config_map(self, namespace, name):
         if name == BACKUP_STATUS_CONFIGMAP:
+            return {"data": dict(self.backup_data)}
+        return super().get_config_map(namespace, name)
+
+
+class FakeBookBackupStatusK8s(FakeConfigMapK8s):
+    def __init__(self, backup_data, name=BOOK_BACKUP_STATUS_CONFIGMAP):
+        super().__init__()
+        self.backup_data = backup_data
+        self.name = name
+
+    def get_config_map(self, namespace, name):
+        if namespace == BOOK_BACKUP_NAMESPACE and name == self.name:
             return {"data": dict(self.backup_data)}
         return super().get_config_map(namespace, name)
 
@@ -583,6 +604,239 @@ class RelayServiceTest(unittest.TestCase):
                 run_polling(restarted_relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
 
                 self.assertEqual(telegram.sent_messages, [("123", expected_message)])
+
+    def test_book_backup_failure_then_completed_run_alerts_once_each_across_restart(self):
+        data = {
+            "lock_run_id": "", "evidence": "", "run_id": "20260927T010203Z-101",
+            "status": "failed", "completed_at": "2026-09-27T01:02:03Z", "stage": "remote-restore",
+        }
+        k8s = FakeBookBackupStatusK8s(data)
+        telegram = FakePollingTelegram([])
+
+        def relay():
+            return RelayService(
+                allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                book_backup_delivery_store=ConfigMapBackupDeliveryStore(
+                    k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                    storage_key=CONFIGMAP_BOOK_BACKUP_DELIVERED_RUN_IDS_KEY,
+                ),
+            )
+
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 1)
+        self.assertIn("Book Memo", telegram.sent_messages[0][1])
+        self.assertIn("백업 실패", telegram.sent_messages[0][1])
+        self.assertNotIn("remote-restore", telegram.sent_messages[0][1])
+
+        k8s.backup_data = {
+            "lock_run_id": "", "evidence": "schema_version=1\nscope=book-memo\nbackup_status=success\nrestore_status=success\n",
+            "run_id": "20260928T010203Z-102", "status": "completed",
+            "completed_at": "2026-09-28T01:02:03Z", "stage": "completed",
+        }
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 2)
+        self.assertIn("Book Memo", telegram.sent_messages[1][1])
+        self.assertIn("백업 완료", telegram.sent_messages[1][1])
+        self.assertNotIn("schema_version", telegram.sent_messages[1][1])
+        self.assertIn(CONFIGMAP_BOOK_BACKUP_DELIVERED_RUN_IDS_KEY, k8s.data)
+        self.assertNotIn("backup_delivered_run_ids", k8s.data)
+
+    def test_book_backup_running_and_malformed_report_do_not_alert(self):
+        base = {
+            "lock_run_id": "20260927T010203Z-101", "evidence": "", "run_id": "20260927T010203Z-101",
+            "status": "running", "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "stage": "preflight",
+        }
+        invalid = [
+            base,
+            {**base, "status": "failed", "evidence": "raw-secret"},
+            {**base, "status": "completed", "lock_run_id": "", "evidence": ""},
+            {**base, "status": "failed", "run_id": "../../unsafe"},
+            {**base, "status": "failed", "extra": "private"},
+        ]
+        for report in invalid:
+            with self.subTest(report=report):
+                k8s = FakeBookBackupStatusK8s(report)
+                telegram = FakePollingTelegram([])
+                relay = RelayService(
+                    allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                    book_backup_delivery_store=ConfigMapBackupDeliveryStore(
+                        k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                        storage_key=CONFIGMAP_BOOK_BACKUP_DELIVERED_RUN_IDS_KEY,
+                    ),
+                )
+                run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+                self.assertEqual(telegram.sent_messages, [])
+                self.assertEqual(k8s.data, {})
+
+    def test_stale_running_book_backup_alerts_once_then_final_state_alerts(self):
+        for final_status in ("failed", "completed"):
+            with self.subTest(final_status=final_status):
+                run_id = "20260927T010203Z-105"
+                k8s = FakeBookBackupStatusK8s({
+                    "lock_run_id": run_id, "evidence": "", "run_id": run_id,
+                    "status": "running",
+                    "completed_at": (datetime.now(timezone.utc) - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "stage": "remote-upload",
+                })
+                telegram = FakePollingTelegram([])
+
+                def relay():
+                    return RelayService(
+                        allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                        book_backup_delivery_store=ConfigMapBackupDeliveryStore(
+                            k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                            storage_key=CONFIGMAP_BOOK_BACKUP_DELIVERED_RUN_IDS_KEY,
+                        ),
+                    )
+
+                run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+                run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+                self.assertEqual(len(telegram.sent_messages), 1)
+                self.assertIn("장기 실행", telegram.sent_messages[0][1])
+
+                k8s.backup_data = {
+                    "lock_run_id": "", "run_id": run_id, "status": final_status,
+                    "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "stage": "completed" if final_status == "completed" else "remote-upload",
+                    "evidence": (
+                        "schema_version=1\nscope=book-memo\nbackup_status=success\nrestore_status=success\n"
+                        if final_status == "completed" else ""
+                    ),
+                }
+                run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+                run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+                self.assertEqual(len(telegram.sent_messages), 2)
+                self.assertIn("백업 완료" if final_status == "completed" else "백업 실패", telegram.sent_messages[1][1])
+
+    def test_youtube_and_crawler_stale_failure_recovery_are_independently_deduplicated(self):
+        services = (
+            ("youtube", YOUTUBE_BACKUP_STATUS_CONFIGMAP, CONFIGMAP_YOUTUBE_BACKUP_DELIVERED_RUN_IDS_KEY, "YouTube Memo", "youtube-memo"),
+            ("crawler", CRAWLER_BACKUP_STATUS_CONFIGMAP, CONFIGMAP_CRAWLER_BACKUP_DELIVERED_RUN_IDS_KEY, "News Hub 뉴스 수집기", "crawler-worker"),
+        )
+        for service, configmap, state_key, target, scope in services:
+            with self.subTest(service=service):
+                run_id = "20260927T010203Z-106"
+                k8s = FakeBookBackupStatusK8s({
+                    "lock_run_id": run_id, "evidence": "", "run_id": run_id, "status": "running",
+                    "completed_at": (datetime.now(timezone.utc) - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "stage": "remote-upload",
+                }, name=configmap)
+                telegram = FakePollingTelegram([])
+
+                def relay():
+                    return RelayService(
+                        allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                        **{f"{service}_backup_delivery_store": ConfigMapBackupDeliveryStore(
+                            k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP, storage_key=state_key,
+                        )},
+                    )
+
+                for _ in range(2):
+                    run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+                k8s.backup_data = {
+                    "lock_run_id": "", "evidence": "", "run_id": run_id, "status": "failed",
+                    "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "stage": "remote-upload",
+                }
+                for _ in range(2):
+                    run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+                k8s.backup_data = {
+                    "lock_run_id": "", "run_id": "20260928T010203Z-107", "status": "completed",
+                    "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "stage": "completed",
+                    "evidence": f"schema_version=1\nscope={scope}\nbackup_status=success\nrestore_status=success\n",
+                }
+                for _ in range(2):
+                    run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+                self.assertEqual(len(telegram.sent_messages), 3)
+                self.assertEqual(["장기 실행", "백업 실패", "백업 완료"], [
+                    next(label for label in ("장기 실행", "백업 실패", "백업 완료") if label in message)
+                    for _, message in telegram.sent_messages
+                ])
+                self.assertTrue(all(target in message for _, message in telegram.sent_messages))
+                self.assertIn(state_key, k8s.data)
+                self.assertNotIn(CONFIGMAP_BOOK_BACKUP_DELIVERED_RUN_IDS_KEY, k8s.data)
+
+    def test_book_backup_retries_rejected_delivery_without_marking_run_delivered(self):
+        k8s = FakeBookBackupStatusK8s({
+            "lock_run_id": "", "evidence": "", "run_id": "20260927T010203Z-103",
+            "status": "failed", "completed_at": "2026-09-27T01:02:03Z", "stage": "writer-recovery",
+        })
+
+        def relay():
+            return RelayService(
+                allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                book_backup_delivery_store=ConfigMapBackupDeliveryStore(
+                    k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                    storage_key=CONFIGMAP_BOOK_BACKUP_DELIVERED_RUN_IDS_KEY,
+                ),
+            )
+
+        rejected = FakePollingTelegram([], send_result=False)
+        run_polling(relay(), rejected, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(rejected.sent_messages), 1)
+        self.assertNotIn(CONFIGMAP_BOOK_BACKUP_DELIVERED_RUN_IDS_KEY, k8s.data)
+        accepted = FakePollingTelegram([])
+        run_polling(relay(), accepted, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(accepted.sent_messages), 1)
+        self.assertIn(CONFIGMAP_BOOK_BACKUP_DELIVERED_RUN_IDS_KEY, k8s.data)
+
+    def test_book_backup_state_write_failure_is_retried_and_keeps_portal_state(self):
+        k8s = FakeBookBackupStatusK8s({
+            "lock_run_id": "", "evidence": "", "run_id": "20260927T010203Z-104",
+            "status": "failed", "completed_at": "2026-09-27T01:02:03Z", "stage": "remote-upload",
+        })
+        k8s.data["backup_delivered_run_ids"] = '["portal-run"]'
+        store = FailOnceBackupDeliveryStore()
+        telegram = FakePollingTelegram([])
+        for _ in range(2):
+            relay = RelayService(
+                allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                book_backup_delivery_store=store,
+            )
+            run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 2)
+        self.assertEqual(store.save_attempts, 2)
+        self.assertEqual(k8s.data["backup_delivered_run_ids"], '["portal-run"]')
+
+    def test_book_backup_delivery_store_rejects_unrelated_state_key(self):
+        with self.assertRaises(ValueError):
+            ConfigMapBackupDeliveryStore(
+                FakeConfigMapK8s(), namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                storage_key="telegram_next_update_id",
+            )
+
+    def test_pvc_backup_reader_refuses_non_allowlisted_service_before_api_call(self):
+        k8s = FakeConfigMapK8s()
+        with patch.object(k8s, "get_config_map") as read:
+            with self.assertRaises(ValueError):
+                _read_pvc_backup_report(k8s, "arbitrary-service")
+        read.assert_not_called()
+
+    def test_unavailable_pvc_backup_state_warning_is_rate_limited_and_recovers(self):
+        k8s = FakeBookBackupStatusK8s({
+            "lock_run_id": "", "evidence": "", "run_id": "", "status": "",
+            "completed_at": "", "stage": "",
+        })
+        missing = HTTPError("https://kubernetes.invalid", 404, "missing", {}, None)
+        with patch("app.main._PVC_BACKUP_WARNING_AT", {}), patch("app.main.time.monotonic") as now, \
+                patch("app.main.LOGGER.warning") as warning:
+            with patch.object(k8s, "get_config_map", side_effect=missing):
+                now.return_value = 100.0
+                self.assertIsNone(_read_pvc_backup_report(k8s, "book"))
+                now.return_value = 101.0
+                self.assertIsNone(_read_pvc_backup_report(k8s, "book"))
+                self.assertEqual(warning.call_count, 1)
+                now.return_value = 3701.0
+                self.assertIsNone(_read_pvc_backup_report(k8s, "book"))
+                self.assertEqual(warning.call_count, 2)
+            self.assertIsNone(_read_pvc_backup_report(k8s, "book"))
+            with patch.object(k8s, "get_config_map", side_effect=missing):
+                now.return_value = 3702.0
+                self.assertIsNone(_read_pvc_backup_report(k8s, "book"))
+                self.assertEqual(warning.call_count, 3)
 
     def test_backup_report_remains_eligible_when_delivery_state_write_fails(self):
         k8s = FakeBackupStatusK8s(
