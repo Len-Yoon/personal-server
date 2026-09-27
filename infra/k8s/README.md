@@ -23,7 +23,7 @@ N100의 K3s는 현재 Portal·뉴스·YouTube Memo·Book Memo와 모니터링 �
 
 Portal은 K3s PVC를 상태 저장소로 사용하며, Compose `portal-web`은 동시에 실행하지 않음. Caddy는 `host.docker.internal:30080` NodePort를 통해 K3s Portal로 전달함. K3s runtime에서는 `.env`의 `PORTAL_UPSTREAM=host.docker.internal:30080` 설정이 필요하며, Compose runtime에서는 이 값을 `portal-web:8000`으로 유지하거나 비워 Compose 기본값을 사용함. Portal cutover는 이 값을 자동으로 전환하므로 수동 변경 대신 해당 절차를 사용함.
 
-현재 Book·Portal 이미지 적용과 뉴스 10차 보류 상태는 [최신 배포 결과](../../docs/reviews/20260921_K3s앱배포_검증결과.md)를 따름. 초기 manifest의 `replicas: 0`·sentinel image는 현재 운영 상태를 나타내지 않으므로 재적용하지 않음.
+2026-09-27 기준 Crawler·Book·YouTube·Portal의 A2·A4·A5 이미지 적용과 외부 health 검증은 [최신 고도화 적용 결과](../../docs/20260921_프로젝트보완_개발계획.md#2026-09-27-a2a4a5-고도화-및-n100-적용-결과)를 따름. 뉴스 10차의 과거 보류와 후속 적용은 각각 [당시 K3s 앱 배포 결과](../../docs/reviews/20260921_K3s앱배포_검증결과.md)와 [뉴스·SLO 운영 적용 결과](../../docs/reviews/20260922_뉴스_SLO_운영적용_검증결과.md)에 기록됨. 초기 manifest의 `replicas: 0`·sentinel image는 현재 운영 상태를 나타내지 않으므로 재적용하지 않음.
 
 ## 빠른 상태 확인
 
@@ -87,7 +87,9 @@ relay, PrometheusRule, RBAC 경계, Prometheus target 상태를 검증하며 Sec
 
 ## Portal PVC 백업
 
-Portal PVC 백업은 N100의 K3s CronJob으로 운영 중이며, 2026-09-21 조회에서 마지막 성공은 2026-09-21 03:03임. 기존 사용자 timer는 inactive로 확인됨. 아래는 최초 설치·재설치 절차이며, 초기 CronJob은 `suspend: true` 상태로 배포됨. 새 환경에서는 승인된 Secret Manager 또는 SOPS/age 절차로 사전 시딩된 runtime Secret과 runner image가 준비되기 전에는 활성화하지 않음. 저장소 도구는 Secret 값·rclone 설정·age identity를 생성·입력·출력하지 않음.
+Portal PVC 백업은 N100의 K3s CronJob으로 운영 중임. 2026-09-27 후속 조회에서 최신 Job 성공과 `portal_pvc_backup=PASS` 증적을 확인했고, 원격 암호문 전체의 SHA-256 재계산 결과가 증적과 일치함. 이 확인은 원격 파일의 무결성 검증이며 공유·접근 권한 감사는 포함하지 않음. 기존 사용자 timer는 비활성 상태로 운영함. 아래는 최초 설치·재설치 절차이며, 초기 CronJob은 `suspend: true` 상태로 배포됨. 새 환경에서는 승인된 Secret Manager 또는 SOPS/age 절차로 사전 시딩된 runtime Secret과 runner image가 준비되기 전에는 활성화하지 않음. 저장소 도구는 Secret 값·rclone 설정·age identity를 생성·입력·출력하지 않음.
+
+백업 도구는 생성한 archive를 `age`로 암호화하고 암호문 파일의 SHA-256을 증적의 `artifact_digest`로 기록함. SHA-256은 암호화 방식이나 복호화 가능성을 뜻하지 않으며, 일일 Job은 원격에서 내려받은 암호문의 해시와 격리 복원 결과도 확인함. 2026-09-27 후속 검사는 별도로 원격 바이트를 다시 읽어 기록된 해시와 비교한 것임.
 
 전환 전에는 아래 읽기 점검과 client-side render를 실행함. `--preflight`는 Secret **이름과 key 이름만** 확인하고, Portal PVC가 `Bound`·`ReadWriteOnce` mount 계약을 충족하는지 확인함.
 
