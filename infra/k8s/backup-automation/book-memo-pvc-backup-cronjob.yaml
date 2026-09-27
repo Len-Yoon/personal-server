@@ -1,0 +1,144 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: book-pvc-backup
+  namespace: personal-server
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: book-pvc-backup
+  namespace: personal-server
+rules:
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    resourceNames: [book-memo-data]
+    verbs: [get]
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [book-memo]
+    verbs: [get]
+  - apiGroups: [apps]
+    resources: [deployments/scale]
+    resourceNames: [book-memo]
+    verbs: [get, patch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [book-pvc-backup-state]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: book-pvc-backup
+  namespace: personal-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: book-pvc-backup
+subjects:
+  - kind: ServiceAccount
+    name: book-pvc-backup
+    namespace: personal-server
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: book-pvc-backup
+  namespace: personal-server
+spec:
+  schedule: "0 4 * * *"
+  timeZone: Asia/Seoul
+  suspend: true
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 14400
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          serviceAccountName: book-pvc-backup
+          restartPolicy: Never
+          terminationGracePeriodSeconds: 300
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: prepare-scratch
+              image: personal-server-book-pvc-backup:unconfigured-do-not-run
+              imagePullPolicy: Never
+              command: [/bin/sh, -ec, "chown 10001:10001 /work && chmod 0700 /work"]
+              securityContext:
+                runAsNonRoot: false
+                runAsUser: 0
+                runAsGroup: 0
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
+                  add: [CHOWN, FOWNER]
+              volumeMounts:
+                - name: work
+                  mountPath: /work
+          containers:
+            - name: backup
+              image: personal-server-book-pvc-backup:unconfigured-do-not-run
+              imagePullPolicy: Never
+              command: [/opt/personal-server/book-pvc-backup-verify.py, --go]
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 10001
+                runAsGroup: 10001
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: [ALL]
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                  ephemeral-storage: 1Gi
+                limits:
+                  cpu: "1"
+                  memory: 1Gi
+                  ephemeral-storage: 11Gi
+              volumeMounts:
+                - name: book-data
+                  mountPath: /data/book-memo
+                  readOnly: true
+                - name: credentials
+                  mountPath: /run/secrets/book-backup
+                  readOnly: true
+                - name: work
+                  mountPath: /work
+          volumes:
+            - name: book-data
+              persistentVolumeClaim:
+                claimName: book-memo-data
+                readOnly: true
+            - name: credentials
+              secret:
+                secretName: book-memo-pvc-backup-runtime
+                optional: false
+                defaultMode: 0444
+                items:
+                  - key: rclone-config
+                    path: rclone-config
+                  - key: rclone-config-passphrase
+                    path: rclone-config-passphrase
+                  - key: age-recipient
+                    path: age-recipient
+                  - key: age-identity
+                    path: age-identity
+            - name: work
+              emptyDir:
+                sizeLimit: 10Gi
