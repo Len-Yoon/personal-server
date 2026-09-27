@@ -1,0 +1,53 @@
+# REVIEW CANDIDATE ONLY. The unresolved namespace marker intentionally makes
+# this template inapplicable. Observed labels: 2026-09-27 N100 read-only query.
+# Applying either policy would isolate Portal ingress or egress, even without
+# a default-deny policy. Caddy/NodePort ingress and other Portal egress are
+# not yet accounted for. Never apply this incomplete template.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: portal-metrics-ingress-candidate
+  namespace: __PORTAL_NAMESPACE__
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: portal-web
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+              operator.prometheus.io/name: personal-server-monitoring-prometheus
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: portal-dns-egress-candidate
+  namespace: __PORTAL_NAMESPACE__
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: portal-web
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
