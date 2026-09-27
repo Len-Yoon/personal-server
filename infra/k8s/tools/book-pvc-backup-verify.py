@@ -21,6 +21,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
+import pvc_backup_retention
+
 
 NAMESPACE = "personal-server"
 DEPLOYMENT = "book-memo"
@@ -373,9 +375,47 @@ def run_go() -> None:
     controller.publish_success(evidence)
 
 
+def run_retention(delete: bool) -> None:
+    # Retention does not inspect the PVC or pause its writer.
+    state = k8s_json("get", "configmap", STATE_CONFIGMAP).get("data", {})
+    if (state.get("status") != "completed" or state.get("lock_run_id") != "" or
+            not isinstance(state.get("evidence"), str) or not state["evidence"] or
+            not isinstance(state.get("run_id"), str) or not state["run_id"] or
+            "backup_id=book-" + state["run_id"] not in state["evidence"].splitlines()):
+        raise BackupError("Book backup evidence unavailable for retention")
+    evidence = state["evidence"]
+    lock_id = "retention-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{os.getpid()}"
+    if delete:
+        # The backup runner tests this same lock key before acquiring it.
+        # JSON Patch tests make the evidence/status/lock snapshot atomic.
+        acquire = [
+            {"op": "test", "path": "/data/lock_run_id", "value": ""},
+            {"op": "test", "path": "/data/status", "value": "completed"},
+            {"op": "test", "path": "/data/evidence", "value": evidence},
+            {"op": "test", "path": "/data/run_id", "value": state["run_id"]},
+            {"op": "replace", "path": "/data/lock_run_id", "value": lock_id},
+        ]
+        kubectl("patch", "configmap", STATE_CONFIGMAP, "--type=json",
+                "--patch=" + json.dumps(acquire, separators=(",", ":")))
+    try:
+        candidates = pvc_backup_retention.run_retention(
+            "book-memo", evidence, rclone_args(), run_command, delete=delete
+        )
+        for name in candidates:
+            print("retention_candidate=" + name)
+    finally:
+        if delete:
+            release = [
+                {"op": "test", "path": "/data/lock_run_id", "value": lock_id},
+                {"op": "replace", "path": "/data/lock_run_id", "value": ""},
+            ]
+            kubectl("patch", "configmap", STATE_CONFIGMAP, "--type=json",
+                    "--patch=" + json.dumps(release, separators=(",", ":")))
+
+
 def main() -> int:
-    if len(sys.argv) != 2 or sys.argv[1] not in {"--check", "--go"}:
-        print("usage: book-pvc-backup-verify.py --check|--go", file=sys.stderr)
+    if len(sys.argv) != 2 or sys.argv[1] not in {"--check", "--go", "--prune-preview", "--prune-go"}:
+        print("usage: book-pvc-backup-verify.py --check|--go|--prune-preview|--prune-go", file=sys.stderr)
         return 2
     mode = sys.argv[1]
     os.umask(0o077)
@@ -392,10 +432,14 @@ def main() -> int:
             run_command(*rclone_args(), "lsd", "--max-depth", "1", REMOTE_PARENT, timeout=30)
             print("book_pvc_backup_check=PASS")
             return 0
+        if mode in {"--prune-preview", "--prune-go"}:
+            run_retention(delete=mode == "--prune-go")
+            print("pvc_backup_retention=PASS")
+            return 0
         run_go()
         print("book_pvc_backup=PASS")
         return 0
-    except (BackupError, OSError, ValueError, tarfile.TarError):
+    except (BackupError, pvc_backup_retention.RetentionError, OSError, ValueError, tarfile.TarError):
         print("book_pvc_backup=FAIL", file=sys.stderr)
         return 1
 
