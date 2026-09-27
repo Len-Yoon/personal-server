@@ -40,6 +40,7 @@
     <section class="watch-layout">
         <div class="player-panel">
             <iframe
+                id="youtube-player"
                 src="{{ embed_url }}"
                 title="YouTube video player"
                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
@@ -105,7 +106,7 @@
                                 <small>{{ memo.display_created_at }}</small>
                             </span>
                         </summary>
-                        <p>{{ memo.content }}</p>
+                        <p>{% for part in memo.timestamp_segments %}{% if part.seconds is not none %}<a class="memo-timestamp" href="{{ video_watch_url }}&amp;t={{ part.seconds }}s" target="_blank" rel="noopener noreferrer" data-start-seconds="{{ part.seconds }}" aria-label="{{ part.text }}부터 재생">{{ part.text }}</a>{% else %}{{ part.text }}{% endif %}{% endfor %}</p>
                     </details>
                     <details class="memo-edit-panel">
                         <summary>수정</summary>
@@ -123,7 +124,6 @@
                                 autocomplete="off"
                             >
                             <textarea name="content" rows="7" required>{{ memo.content }}</textarea>
-                            <input type="hidden" name="edit_password">
                             <button type="submit">수정 저장</button>
                         </form>
                     </details>
@@ -157,6 +157,23 @@ const redirectToWriteLogin = () => {
     const loginUrl = `/auth/login?next_path=${encodeURIComponent(currentPath)}`;
     window.location.assign(loginUrl);
 };
+
+document.querySelectorAll(".memo-timestamp").forEach((link) => {
+    link.addEventListener("click", (event) => {
+        const player = document.getElementById("youtube-player");
+        const seconds = Number(link.dataset.startSeconds);
+        if (!player || !Number.isSafeInteger(seconds) || seconds < 0 || seconds >= 24 * 60 * 60) {
+            return;
+        }
+        const playerUrl = new URL(player.src);
+        if (playerUrl.origin !== "https://www.youtube.com" || !playerUrl.pathname.startsWith("/embed/")) {
+            return;
+        }
+        event.preventDefault();
+        playerUrl.searchParams.set("start", String(seconds));
+        player.src = playerUrl.toString();
+    });
+});
 
 document.querySelectorAll(".protected-delete-form").forEach((form) => {
     form.addEventListener("submit", async (event) => {
@@ -193,16 +210,9 @@ document.querySelectorAll(".protected-edit-form").forEach((form) => {
     form.addEventListener("submit", async (event) => {
         event.preventDefault();
 
-        const password = window.prompt("수정 비밀번호를 입력해주세요.");
-        if (!password) {
-            return;
-        }
-
         if (!window.confirm(form.dataset.confirmMessage || "수정할까요?")) {
             return;
         }
-
-        form.querySelector("input[name='edit_password']").value = password;
 
         try {
             const response = await fetch(form.action, {

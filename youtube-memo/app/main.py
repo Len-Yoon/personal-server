@@ -142,6 +142,7 @@ def video_detail(request: Request, video_id: int):
             "title": video["title"],
             "video": video,
             "embed_url": embed_url(video["youtube_id"]),
+            "video_watch_url": f"https://www.youtube.com/watch?v={quote(video['youtube_id'], safe='')}",
             "memos": list_memos(video_id),
             "portal_home_url": portal_home_url(request_host_from_headers(request.headers)),
             "write_authenticated": _has_write_session(request),
@@ -214,10 +215,8 @@ def update_video_memo(
     memo_id: int,
     memo_title: str = Form(default=""),
     content: str = Form(...),
-    edit_password: str = Form(default=""),
 ):
     _require_write_session(request)
-    _require_delete_password(request, edit_password)
 
     try:
         video_id = update_memo(memo_id=memo_id, title=memo_title, content=content)
@@ -290,23 +289,6 @@ def write_logout(request: Request, next_path: str = Form(default="")):
     response = RedirectResponse(url=_safe_redirect(next_path) or "/", status_code=303)
     response.delete_cookie(WRITE_AUTH_COOKIE, path="/")
     return response
-
-
-def _require_delete_password(request: Request, password: str) -> None:
-    configured_password = os.getenv("DELETE_PASSWORD", "").strip()
-    client = _client_id(request)
-
-    if _auth_rate_limited(client):
-        raise HTTPException(status_code=429, detail="비밀번호 실패가 반복되어 잠시 후 다시 시도해주세요.")
-
-    if not configured_password:
-        raise HTTPException(status_code=403, detail="삭제 비밀번호가 설정되지 않았습니다.")
-
-    if not secrets.compare_digest(password, configured_password):
-        if _record_auth_failure(client):
-            raise HTTPException(status_code=429, detail="비밀번호 실패가 반복되어 잠시 후 다시 시도해주세요.")
-        raise HTTPException(status_code=403, detail="삭제 비밀번호가 올바르지 않습니다.")
-    _clear_auth_failures(client)
 
 
 def _require_write_session(request: Request) -> None:

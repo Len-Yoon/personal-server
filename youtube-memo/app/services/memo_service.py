@@ -14,6 +14,7 @@ from app.services.datetime_format import format_display_datetime
 PROJECT_DATA_ROOT = Path(__file__).resolve().parents[3] / "data"
 DEFAULT_DB_PATH = PROJECT_DATA_ROOT / "youtube-memo" / "youtube_memo.sqlite3"
 DB_PATH = Path(os.getenv("YOUTUBE_MEMO_DB_PATH", DEFAULT_DB_PATH))
+MEMO_TIMESTAMP_PATTERN = re.compile(r"(?<![\w:])(?:\d{1,2}:\d{2}:\d{2}|\d{1,4}:\d{2})(?![\w:])")
 
 
 def init_db() -> None:
@@ -235,9 +236,35 @@ def list_memos(video_id: int) -> list[dict[str, Any]]:
         {
             **_row_to_dict(row),
             "display_created_at": format_display_datetime(row["created_at"]),
+            "timestamp_segments": memo_timestamp_segments(row["content"]),
         }
         for row in rows
     ]
+
+
+def memo_timestamp_segments(content: str) -> list[dict[str, Any]]:
+    """Split display text into escaped-by-template text and valid video positions."""
+    segments: list[dict[str, Any]] = []
+    cursor = 0
+    for match in MEMO_TIMESTAMP_PATTERN.finditer(content):
+        fields = [int(field) for field in match.group().split(":")]
+        if len(fields) == 3:
+            hours, minutes, seconds = fields
+            if minutes >= 60:
+                continue
+        else:
+            hours = 0
+            minutes, seconds = fields
+        position = hours * 3600 + minutes * 60 + seconds
+        if seconds >= 60 or position >= 24 * 3600:
+            continue
+        if match.start() > cursor:
+            segments.append({"text": content[cursor:match.start()], "seconds": None})
+        segments.append({"text": match.group(), "seconds": position})
+        cursor = match.end()
+    if cursor < len(content) or not segments:
+        segments.append({"text": content[cursor:], "seconds": None})
+    return segments
 
 
 def search_videos_and_memos(query: str, limit: int = 5) -> list[dict[str, Any]]:

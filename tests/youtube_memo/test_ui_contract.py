@@ -509,10 +509,93 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
         self.assertIn(f'action="/videos/{video["id"]}/delete"', response.text)
         self.assertIn(f'action="/memos/{memo["id"]}"', response.text)
         self.assertIn(f'action="/memos/{memo["id"]}/delete"', response.text)
-        self.assertIn('name="edit_password"', response.text)
+        self.assertNotIn('name="edit_password"', response.text)
+        self.assertNotIn('window.prompt("수정 비밀번호', response.text)
         self.assertNotIn('name="delete_password"', response.text)
         self.assertNotIn("삭제 비밀번호를 입력해주세요.", response.text)
         self.assertIn('class="memo-list"', response.text)
+
+    def test_logged_in_writer_can_edit_memo_without_second_password(self):
+        previous_password = os.environ.get("DELETE_PASSWORD")
+        os.environ["DELETE_PASSWORD"] = "session-password"
+        try:
+            with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+                import app.services.memo_service as memo_service
+
+                video = memo_service.create_or_get_video(
+                    "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                    title_fetcher=lambda _youtube_id, _url: "수정 인증 영상",
+                )
+                memo = memo_service.create_memo(video["id"], "처음 제목", "처음 내용")
+                with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                    headers = {"Origin": "https://memo.len.pe.kr"}
+                    client.post("/auth/login", data={"password": "session-password"}, headers=headers)
+                    updated = client.post(
+                        f"/memos/{memo['id']}",
+                        data={"memo_title": "바뀐 제목", "content": "1:23 장면"},
+                        headers=headers,
+                        follow_redirects=False,
+                    )
+                    client.post("/auth/logout", headers=headers)
+                    rejected = client.post(
+                        f"/memos/{memo['id']}",
+                        data={"content": "인증 없는 수정"},
+                        headers=headers,
+                    )
+
+                saved = memo_service.list_memos(video["id"])[0]
+        finally:
+            if previous_password is None:
+                os.environ.pop("DELETE_PASSWORD", None)
+            else:
+                os.environ["DELETE_PASSWORD"] = previous_password
+
+        self.assertEqual(updated.status_code, 303)
+        self.assertEqual(updated.headers["location"], f"/videos/{video['id']}")
+        self.assertEqual(rejected.status_code, 401)
+        self.assertEqual(saved["title"], "바뀐 제목")
+        self.assertEqual(saved["content"], "1:23 장면")
+
+    def test_detail_links_only_valid_timestamps_without_changing_saved_text(self):
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            import app.services.memo_service as memo_service
+
+            video = memo_service.create_or_get_video(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                title_fetcher=lambda _youtube_id, _url: "타임스탬프 영상",
+            )
+            original = "1:23 · 01:02:03 · 23:59:59 · 24:00:00 · 1:60 · 1:02:60 · <img src=x onerror=alert(1)>"
+            memo = memo_service.create_memo(video["id"], "시각 메모", original)
+
+            with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                response = client.get(f"/videos/{video['id']}")
+
+            saved = memo_service.list_memos(video["id"])[0]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(saved["content"], original)
+        self.assertIn('id="youtube-player"', response.text)
+        for seconds in (83, 3723, 86399):
+            self.assertIn(f'data-start-seconds="{seconds}"', response.text)
+            self.assertIn(f'&amp;t={seconds}s', response.text)
+        self.assertEqual(response.text.count('class="memo-timestamp"'), 3)
+        self.assertIn("24:00:00", response.text)
+        self.assertIn("1:60", response.text)
+        self.assertIn("1:02:60", response.text)
+        self.assertIn("&lt;img src=x onerror=alert(1)&gt;", response.text)
+        self.assertNotIn("<img src=x onerror=alert(1)>", response.text)
+
+    def test_timestamp_segments_reject_partial_and_embedded_matches(self):
+        from app.services.memo_service import memo_timestamp_segments
+
+        content = "x1:23 123:45:67 1:02:60 0:00 90:00"
+        segments = memo_timestamp_segments(content)
+
+        self.assertEqual(
+            [(part["text"], part["seconds"]) for part in segments if part["seconds"] is not None],
+            [("0:00", 0), ("90:00", 5400)],
+        )
+        self.assertEqual("".join(part["text"] for part in segments), content)
 
     def test_detail_formats_stored_utc_memo_timestamp_as_compact_kst_datetime(self):
         """Fails if a stored UTC memo timestamp is rendered without KST conversion."""
