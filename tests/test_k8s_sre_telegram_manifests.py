@@ -25,6 +25,26 @@ def find_document(documents: list[dict], kind: str, name: str) -> dict:
 
 
 class SreTelegramManifestContractTests(unittest.TestCase):
+    def test_pvc_backup_reader_is_separate_get_only_rbac_without_state_resources(self):
+        documents = load_yaml_documents("pvc-backup-reader.yaml")
+        self.assertEqual({document["kind"] for document in documents}, {"Role", "RoleBinding"})
+        self.assertEqual(len(documents), 2)
+        role = find_document(documents, "Role", "sre-telegram-pvc-backup-reader")
+        binding = find_document(documents, "RoleBinding", "sre-telegram-pvc-backup-reader")
+        self.assertEqual(role["metadata"]["namespace"], "personal-server")
+        self.assertEqual(role["rules"], [{
+            "apiGroups": [""], "resources": ["configmaps"],
+            "resourceNames": ["book-pvc-backup-state", "youtube-pvc-backup-state", "crawler-pvc-backup-state"],
+            "verbs": ["get"],
+        }])
+        self.assertEqual(binding["metadata"]["namespace"], "personal-server")
+        self.assertEqual(binding["roleRef"], {
+            "apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "sre-telegram-pvc-backup-reader",
+        })
+        self.assertEqual(binding["subjects"], [{
+            "kind": "ServiceAccount", "name": "sre-telegram-relay", "namespace": "monitoring",
+        }])
+
     def test_portal_http_observability_uses_internal_service_and_named_secret_key(self):
         monitor = find_document(
             load_yaml_documents("portal-http-observability.yaml"),

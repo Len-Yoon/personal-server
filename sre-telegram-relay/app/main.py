@@ -11,9 +11,9 @@ import re
 import ssl
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, NamedTuple, Protocol
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -25,14 +25,24 @@ DEFAULT_NAMESPACES = ("monitoring", "personal-server")
 RELAY_NAMESPACE = "monitoring"
 RELAY_STATE_CONFIGMAP = "sre-telegram-relay-state"
 BACKUP_STATUS_CONFIGMAP = "sre-telegram-backup-status"
+BOOK_BACKUP_NAMESPACE = "personal-server"
+BOOK_BACKUP_STATUS_CONFIGMAP = "book-pvc-backup-state"
+YOUTUBE_BACKUP_STATUS_CONFIGMAP = "youtube-pvc-backup-state"
+CRAWLER_BACKUP_STATUS_CONFIGMAP = "crawler-pvc-backup-state"
 QUARTERLY_AUDIT_STATUS_CONFIGMAP = "sre-telegram-quarterly-audit-status"
 MAX_ALERT_ITEMS = 4
 MAX_REQUEST_BODY_BYTES = 1_048_576
 CONFIGMAP_OFFSET_KEY = "telegram_next_update_id"
 CONFIGMAP_ALERT_STATE_KEY = "alert_state"
 CONFIGMAP_BACKUP_DELIVERED_RUN_IDS_KEY = "backup_delivered_run_ids"
+CONFIGMAP_BOOK_BACKUP_DELIVERED_RUN_IDS_KEY = "book_backup_delivered_run_ids"
+CONFIGMAP_YOUTUBE_BACKUP_DELIVERED_RUN_IDS_KEY = "youtube_backup_delivered_run_ids"
+CONFIGMAP_CRAWLER_BACKUP_DELIVERED_RUN_IDS_KEY = "crawler_backup_delivered_run_ids"
 CONFIGMAP_QUARTERLY_AUDIT_DELIVERED_RUN_IDS_KEY = "quarterly_audit_delivered_run_ids"
 MAX_BACKUP_DELIVERED_RUN_IDS = 128
+PVC_BACKUP_STALE_AFTER = timedelta(hours=5)
+PVC_BACKUP_WARNING_INTERVAL_SECONDS = 60 * 60
+_PVC_BACKUP_WARNING_AT: dict[tuple[str, str, int | None], float] = {}
 MAX_QUARTERLY_AUDIT_DELIVERED_RUN_IDS = 128
 ALERT_STATE_TTL_SECONDS = 4 * 60 * 60
 ALERT_PRESENTATIONS = {
@@ -64,12 +74,33 @@ BACKUP_STATUS_MESSAGES = {
     "failed": "[백업 실패]\n상태: 백업 실행에 실패했습니다.\n대상: Portal 데이터",
     "restore_failed": "[복원 검증 실패]\n상태: 복원 검증 또는 Portal 준비 상태 확인에 실패했습니다.\n대상: Portal 데이터",
 }
+
+
+class _PvcBackupService(NamedTuple):
+    configmap: str
+    scope: str
+    target: str
+    state_key: str
+
+
+PVC_BACKUP_SERVICES = {
+    "book": _PvcBackupService(BOOK_BACKUP_STATUS_CONFIGMAP, "book-memo", "Book Memo", CONFIGMAP_BOOK_BACKUP_DELIVERED_RUN_IDS_KEY),
+    "youtube": _PvcBackupService(YOUTUBE_BACKUP_STATUS_CONFIGMAP, "youtube-memo", "YouTube Memo", CONFIGMAP_YOUTUBE_BACKUP_DELIVERED_RUN_IDS_KEY),
+    "crawler": _PvcBackupService(CRAWLER_BACKUP_STATUS_CONFIGMAP, "crawler-worker", "News Hub 뉴스 수집기", CONFIGMAP_CRAWLER_BACKUP_DELIVERED_RUN_IDS_KEY),
+}
+PVC_BACKUP_STATUS_MESSAGES = {
+    "stalled": "[백업 장기 실행]\n대상: {target}\n상태: 백업이 5시간 이상 완료되지 않았습니다.\n영향: 이번 실행의 복구 검증이 확인되지 않았고 서비스 상태 확인이 필요합니다.",
+    "failed": "[백업 실패]\n대상: {target}\n상태: 백업 또는 복원 검증에 실패했습니다.\n영향: 이번 실행의 복구 가능성을 확인할 수 없습니다. 서비스 상태도 확인이 필요합니다.",
+    "completed": "[백업 완료]\n대상: {target}\n상태: 암호화 백업과 복원 검증을 완료했습니다.",
+}
 BACKUP_REPORT_KEYS = frozenset({"run_id", "status", "completed_at", "stage"})
+PVC_BACKUP_REPORT_KEYS = frozenset({"lock_run_id", "evidence", "run_id", "status", "completed_at", "stage"})
 QUARTERLY_AUDIT_REPORT_KEYS = frozenset(
     {"run_id", "status", "completed_at", "health_audit", "backup_check", "recovery_lab"}
 )
 SLO_SUMMARY_KEYS = frozenset({"slo_evidence", "slo_days_recorded", "slo_days_ok", "slo_days_unobservable"})
 SAFE_BACKUP_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+SAFE_BOOK_BACKUP_RUN_ID = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9]{1,10}$")
 SAFE_QUARTERLY_AUDIT_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SAFE_BACKUP_STAGE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 CANONICAL_UTC_TIMESTAMP = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
@@ -337,12 +368,17 @@ class ConfigMapAlertStateStore:
 class ConfigMapBackupDeliveryStore:
     """Persists delivered backup run IDs in the relay's existing state ConfigMap."""
 
-    def __init__(self, k8s_client: KubernetesClient, *, namespace: str, name: str) -> None:
+    def __init__(self, k8s_client: KubernetesClient, *, namespace: str, name: str,
+                 storage_key: str = CONFIGMAP_BACKUP_DELIVERED_RUN_IDS_KEY) -> None:
         if namespace != RELAY_NAMESPACE or name != RELAY_STATE_CONFIGMAP:
             raise ValueError("Backup delivery storage must use the dedicated relay ConfigMap")
+        allowed_keys = {CONFIGMAP_BACKUP_DELIVERED_RUN_IDS_KEY} | {spec.state_key for spec in PVC_BACKUP_SERVICES.values()}
+        if storage_key not in allowed_keys:
+            raise ValueError("Backup delivery storage key is not allowed")
         self._k8s_client = k8s_client
         self._namespace = namespace
         self._name = name
+        self._storage_key = storage_key
 
     def contains(self, run_id: str) -> bool:
         return run_id in self._read_run_ids()
@@ -357,13 +393,13 @@ class ConfigMapBackupDeliveryStore:
         self._k8s_client.patch_config_map(
             self._namespace,
             self._name,
-            {CONFIGMAP_BACKUP_DELIVERED_RUN_IDS_KEY: json.dumps(run_ids, separators=(",", ":"))},
+            {self._storage_key: json.dumps(run_ids, separators=(",", ":"))},
         )
 
     def _read_run_ids(self) -> list[str]:
         config_map = self._k8s_client.get_config_map(self._namespace, self._name)
         data = config_map.get("data")
-        raw = data.get(CONFIGMAP_BACKUP_DELIVERED_RUN_IDS_KEY) if isinstance(data, dict) else None
+        raw = data.get(self._storage_key) if isinstance(data, dict) else None
         if raw is None:
             return []
         try:
@@ -502,6 +538,9 @@ class RelayService:
         offset_store: OffsetStore | None = None,
         alert_state_store: AlertStateStore | None = None,
         backup_delivery_store: BackupDeliveryStore | None = None,
+        book_backup_delivery_store: BackupDeliveryStore | None = None,
+        youtube_backup_delivery_store: BackupDeliveryStore | None = None,
+        crawler_backup_delivery_store: BackupDeliveryStore | None = None,
         quarterly_audit_delivery_store: QuarterlyAuditDeliveryStore | None = None,
         alert_callback: Callable[[str], bool] | None = None,
     ) -> None:
@@ -512,9 +551,15 @@ class RelayService:
         self._offset_store = offset_store or MemoryOffsetStore()
         self._alert_state_store = alert_state_store or MemoryAlertStateStore()
         self._backup_delivery_store = backup_delivery_store
+        self._pvc_backup_delivery_stores = (
+            ("book", book_backup_delivery_store),
+            ("youtube", youtube_backup_delivery_store),
+            ("crawler", crawler_backup_delivery_store),
+        )
         self._quarterly_audit_delivery_store = quarterly_audit_delivery_store
         self._alert_state_lock = threading.Lock()
         self._backup_delivery_lock = threading.Lock()
+        self._pvc_backup_delivery_lock = threading.Lock()
         self._quarterly_audit_delivery_lock = threading.Lock()
         self._alert_callback = alert_callback
         self._healthy = True
@@ -574,6 +619,25 @@ class RelayService:
                 return False
             self._backup_delivery_store.save(report["run_id"])
             return True
+
+    def deliver_pvc_backup_reports(self, send_message: Callable[[str, str], bool]) -> bool:
+        """Send fixed-workload results with persisted dedupe, without exposing raw evidence."""
+        with self._pvc_backup_delivery_lock:
+            for service, store in self._pvc_backup_delivery_stores:
+                if store is None:
+                    continue
+                report = _read_pvc_backup_report(self._k8s_client, service)
+                if report is None:
+                    continue
+                event_id = f"{report['run_id']}-{report['status']}"
+                if store.contains(event_id):
+                    continue
+                target = PVC_BACKUP_SERVICES[service].target
+                message = PVC_BACKUP_STATUS_MESSAGES[report["status"]].format(target=target)
+                if not send_message(self._allowed_chat_id, message):
+                    return False
+                store.save(event_id)
+        return True
 
     def deliver_quarterly_audit_report(self, send_message: Callable[[str, str], bool]) -> bool:
         """Send one audit report and persist its ID only after Telegram confirms delivery."""
@@ -913,6 +977,8 @@ def _poll_once(relay: RelayService, telegram_client: TelegramClient, allowed_cha
         relay.acknowledge_update(update)
     if not relay.deliver_backup_report(telegram_client.send_message):
         return False
+    if not relay.deliver_pvc_backup_reports(telegram_client.send_message):
+        return False
     return relay.deliver_quarterly_audit_report(telegram_client.send_message)
 
 
@@ -943,6 +1009,24 @@ def main() -> None:
             k8s_client,
             namespace=RELAY_NAMESPACE,
             name=RELAY_STATE_CONFIGMAP,
+        ),
+        book_backup_delivery_store=ConfigMapBackupDeliveryStore(
+            k8s_client,
+            namespace=RELAY_NAMESPACE,
+            name=RELAY_STATE_CONFIGMAP,
+            storage_key=CONFIGMAP_BOOK_BACKUP_DELIVERED_RUN_IDS_KEY,
+        ),
+        youtube_backup_delivery_store=ConfigMapBackupDeliveryStore(
+            k8s_client,
+            namespace=RELAY_NAMESPACE,
+            name=RELAY_STATE_CONFIGMAP,
+            storage_key=CONFIGMAP_YOUTUBE_BACKUP_DELIVERED_RUN_IDS_KEY,
+        ),
+        crawler_backup_delivery_store=ConfigMapBackupDeliveryStore(
+            k8s_client,
+            namespace=RELAY_NAMESPACE,
+            name=RELAY_STATE_CONFIGMAP,
+            storage_key=CONFIGMAP_CRAWLER_BACKUP_DELIVERED_RUN_IDS_KEY,
         ),
         quarterly_audit_delivery_store=ConfigMapQuarterlyAuditDeliveryStore(
             k8s_client,
@@ -1058,6 +1142,60 @@ def _read_backup_report(k8s_client: KubernetesClient) -> dict[str, str] | None:
         LOGGER.warning("backup_report_ignored reason=invalid_stage")
         return None
     return {"run_id": run_id, "status": status, "completed_at": completed_at, "stage": stage}
+
+
+def _read_pvc_backup_report(k8s_client: KubernetesClient, service: str) -> dict[str, str] | None:
+    """Accept only fixed PVC backup state; never return its raw evidence."""
+    if service not in PVC_BACKUP_SERVICES:
+        raise ValueError("PVC backup service is not allow-listed")
+    spec = PVC_BACKUP_SERVICES[service]
+    try:
+        config_map = k8s_client.get_config_map(BOOK_BACKUP_NAMESPACE, spec.configmap)
+    except (OSError, URLError, ValueError, json.JSONDecodeError) as exc:
+        warning_key = (service, type(exc).__name__, getattr(exc, "code", None))
+        now = time.monotonic()
+        last_warning = _PVC_BACKUP_WARNING_AT.get(warning_key)
+        if last_warning is None or now - last_warning >= PVC_BACKUP_WARNING_INTERVAL_SECONDS:
+            LOGGER.warning("pvc_backup_report_ignored service=%s reason=unavailable error_type=%s", service, type(exc).__name__)
+            _PVC_BACKUP_WARNING_AT[warning_key] = now
+        return None
+    for warning_key in tuple(_PVC_BACKUP_WARNING_AT):
+        if warning_key[0] == service:
+            del _PVC_BACKUP_WARNING_AT[warning_key]
+    data = config_map.get("data")
+    if not isinstance(data, dict) or set(data) != PVC_BACKUP_REPORT_KEYS or not all(
+        isinstance(data[key], str) for key in PVC_BACKUP_REPORT_KEYS
+    ):
+        LOGGER.warning("pvc_backup_report_ignored service=%s reason=invalid_schema", service)
+        return None
+    run_id, status, completed_at, stage = (data[key] for key in ("run_id", "status", "completed_at", "stage"))
+    if status not in {"running", "failed", "completed"}:
+        return None  # Empty bootstrap and unknown states are not reports.
+    if (not SAFE_BOOK_BACKUP_RUN_ID.fullmatch(run_id) or not _is_utc_timestamp(completed_at)
+            or not SAFE_BACKUP_STAGE.fullmatch(stage)):
+        LOGGER.warning("pvc_backup_report_ignored service=%s reason=invalid_fields", service)
+        return None
+    if status == "running":
+        if data["evidence"] != "" or data["lock_run_id"] != run_id:
+            LOGGER.warning("pvc_backup_report_ignored service=%s reason=inconsistent_state", service)
+            return None
+        started_at = datetime.strptime(completed_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) - started_at < PVC_BACKUP_STALE_AFTER:
+            return None
+        return {"run_id": run_id, "status": "stalled"}
+    if status == "failed":
+        valid_state = data["evidence"] == "" and data["lock_run_id"] in {"", run_id}
+    else:
+        evidence_lines = set(data["evidence"].splitlines())
+        valid_state = (
+            data["lock_run_id"] == "" and stage == "completed"
+            and {"schema_version=1", f"scope={spec.scope}", "backup_status=success", "restore_status=success"}
+            <= evidence_lines
+        )
+    if not valid_state:
+        LOGGER.warning("pvc_backup_report_ignored service=%s reason=inconsistent_state", service)
+        return None
+    return {"run_id": run_id, "status": status}
 
 
 def _read_quarterly_audit_report(k8s_client: KubernetesClient) -> dict[str, str] | None:
