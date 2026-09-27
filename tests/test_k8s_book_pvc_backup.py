@@ -364,6 +364,19 @@ class BookBackupControllerTests(unittest.TestCase):
 
 
 class BookBackupManifestTests(unittest.TestCase):
+    def test_service_backup_cronjobs_limit_missed_schedule_catchup(self):
+        for filename in (
+            "book-memo-pvc-backup-cronjob.yaml",
+            "youtube-memo-pvc-backup-cronjob.yaml",
+            "crawler-worker-pvc-backup-cronjob.yaml",
+        ):
+            with self.subTest(filename=filename):
+                path = ROOT / "infra/k8s/backup-automation" / filename
+                documents = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
+                cronjob = next(document for document in documents if document["kind"] == "CronJob")
+                self.assertEqual(cronjob["spec"].get("startingDeadlineSeconds"), 300)
+                self.assertTrue(cronjob["spec"]["suspend"])
+
     def test_conditional_scale_has_named_update_permission(self):
         manifests = {
             "book-memo-pvc-backup-cronjob.yaml": "book-memo",
