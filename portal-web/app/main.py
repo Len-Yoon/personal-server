@@ -145,6 +145,13 @@ def _record_http_metric(request: Request, *, status_code: int, started_at: float
     if request.url.path != _METRICS_PATH:
         route = request.scope.get("route")
         route_template = getattr(route, "path", None) or "unmatched"
+        if (
+            route_template == "/"
+            and request.method == "GET"
+            and request.query_params.get("q", "").strip()
+            and not portfolio.is_portfolio_host(request)
+        ):
+            route_template = "/search"
         _HTTP_METRICS.record(
             method=request.method,
             route=route_template,

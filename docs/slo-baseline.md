@@ -15,6 +15,8 @@
 
 현재 관측 원본은 공개 health, K3s Portal Ready, 뉴스 freshness와 Portal HTTP 요청 수·오류·지연시간 지표임. Portal HTTP 계측은 구현·운영 반영되었으며 다른 Compose 서비스에 같은 계측이 있다고 가정하지 않음. 이 문서의 30일 목표값은 여전히 초안임. 일일 SLO 수집기는 freshness 다중 시계열 집계 보완을 운영 적용하고 자동 실행을 활성화했으며, 2026-09-23 예약 실행이 성공함. [원인 분석](reviews/20260921_SLO증적실패_원인분석.md)과 [운영 적용 검증 결과](reviews/20260922_뉴스_SLO_운영적용_검증결과.md)를 구분해 참조함.
 
+2026-09-27 읽기 전용 점검에서 일일 증적은 9월 16~27일의 12건만 확인됐고, 공개 감시 workflow는 9월 24~26일 각각 6·6·7회 실행됨. 5분 간격의 30일 전체 관측을 전제로 한 성공률·에러 버짓은 현재 산정할 수 없음. 최신 일일 기록의 `public_health`, `portal_ready`, `crawler_freshness`는 모두 `failed`였으나 현재 공개 Portal health의 별도 1회 조회는 HTTP 200이었음. 일일 기록이 과거 24시간 구간을 평가한다는 점과 현재 상태를 구분함. 당시 공개 health 응답 코드는 증적에 저장되지 않아 확인 필요함.
+
 ## 용어와 공통 원칙
 
 | 용어 | 정의 |
@@ -33,9 +35,9 @@
 
 | 대상 | SLI | 데이터 원본 | 제안 SLO | 30일 에러 버짓 | 상태 |
 |---|---|---|---:|---:|---|
-| 공개 Portal | 완료된 외부 health 점검 중 `https://len.pe.kr/health`가 성공한 비율 | GitHub Actions `Public Portal Uptime Monitor` | 99.5% | 약 43회 점검 실패 또는 약 215분 | 측정 가능 |
-| K3s Portal | Prometheus 관측값 중 `portal-web`의 available replica가 1 이상인 비율 | kube-state-metrics | 99.5% | 약 216분 | 측정 가능 |
-| 뉴스 수집 | 초기화된 뉴스 수집이 30분 이내 성공했고 연속 실패도 3회 미만인 관측 비율 | `crawler_news_collection_*` metrics | 99.0% | 약 432분 | 측정 가능 |
+| 공개 Portal | 완료된 외부 health 점검 중 `https://len.pe.kr/health`가 성공한 비율 | GitHub Actions `Public Portal Uptime Monitor` | 99.5% | 약 43회 점검 실패 또는 약 215분 | 30일 관측 누락으로 산정 보류 |
+| K3s Portal | Prometheus 관측값 중 `portal-web`의 available replica가 1 이상인 비율 | kube-state-metrics | 99.5% | 약 216분 | 30일 원시 지표 미보존·계획 정지 해석 보류 |
+| 뉴스 수집 | 초기화된 뉴스 수집이 30분 이내 성공했고 연속 실패도 3회 미만인 관측 비율 | `crawler_news_collection_*` metrics | 99.0% | 약 432분 | 30일 원시 지표 미보존 |
 | Compose 웹 서비스 | HTTP 성공률 및 p95 응답시간 | 없음 | 확정하지 않음 | 산정 불가 | 2차 계측 필요 |
 
 공개 Portal의 약 43회는 30일을 5분 간격으로 모두 실행한 8,640회 관측을 전제로 한 환산값임. workflow 실행 누락, GitHub Actions 장애, 점검 결과 보존 정책은 별도로 확인 필요함.
@@ -109,6 +111,8 @@ avg_over_time(
 ## 2차 계측 범위
 
 Portal HTTP 메트릭·scrape·HTTP 대시보드는 구현되어 있음. 아래 표는 계측 경계를 정리한 것이며, 다른 서비스 확대 및 별도 SLO·버짓 대시보드는 후속 설계 대상으로 구분함.
+
+Portal 홈의 검색 질의가 있는 `GET /` 요청은 Prometheus에서 고정된 `route="/search"` 라벨로 분리함. 검색어 자체는 지표에 포함하지 않으며 일반 홈 요청은 `route="/"`로 유지함. Grafana에 검색 p95 패널을 추가하지만, 코드 병합만으로 운영 계측이 시작된 것은 아님. 2026-09-27 외부 시험 질의 8회의 응답은 모두 HTTP 200, 왕복 시간은 0.207~0.417초였음. 이 작은 표본은 운영 검색 p95나 30일 SLO가 아님. 기존 Portal 전체 p95 알림은 유지하고 검색 전용 경보 임계값은 운영 기준선 확인 뒤 결정함.
 
 | 항목 | 목적 | 최소 수집 항목 | 제외 사항 |
 |---|---|---|---|
