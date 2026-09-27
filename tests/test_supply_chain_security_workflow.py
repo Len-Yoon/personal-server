@@ -22,6 +22,10 @@ class SupplyChainSecurityWorkflowTest(unittest.TestCase):
         scan_types = {re.search(r"(?m)^          scan-type: (\w+)$", step).group(1) for step in self.trivy_steps}
         self.assertEqual(scan_types, {"fs", "config"})
 
+    def test_can_refresh_vulnerability_results_weekly_and_on_demand(self):
+        self.assertRegex(self.workflow_text, r"(?m)^  workflow_dispatch:\s*$")
+        self.assertRegex(self.workflow_text, r"(?m)^  schedule:\n    - cron: ['\"]17 2 \* \* 1['\"]$")
+
     def test_uses_are_full_sha_pinned_with_version_comments(self):
         action_lines = [line.strip() for line in self.workflow_text.splitlines() if "uses:" in line]
         self.assertGreaterEqual(len(action_lines), 2)
