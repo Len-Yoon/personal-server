@@ -1,0 +1,28 @@
+# Apply separately from base.yaml; this Role reads only Job status and fixed CronJob ownership.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sre-telegram-pvc-backup-job-reader
+  namespace: personal-server
+rules:
+  - apiGroups: [batch]
+    resources: [cronjobs]
+    resourceNames: [book-pvc-backup, youtube-pvc-backup, crawler-pvc-backup]
+    verbs: [get]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sre-telegram-pvc-backup-job-reader
+  namespace: personal-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sre-telegram-pvc-backup-job-reader
+subjects:
+  - kind: ServiceAccount
+    name: sre-telegram-relay
+    namespace: monitoring
