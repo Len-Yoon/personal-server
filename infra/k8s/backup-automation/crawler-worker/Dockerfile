@@ -7,6 +7,7 @@ RUN apt-get update \
     && useradd --system --uid 10001 --gid crawler-backup --no-create-home --home-dir /nonexistent crawler-backup
 
 COPY infra/k8s/tools/crawler-pvc-backup-verify.py /opt/personal-server/crawler-pvc-backup-verify.py
+COPY infra/k8s/tools/pvc_backup_retention.py /opt/personal-server/pvc_backup_retention.py
 RUN chmod 0555 /opt/personal-server/crawler-pvc-backup-verify.py
 
 USER 10001:10001
