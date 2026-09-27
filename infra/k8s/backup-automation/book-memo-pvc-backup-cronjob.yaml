@@ -21,7 +21,7 @@ rules:
   - apiGroups: [apps]
     resources: [deployments/scale]
     resourceNames: [book-memo]
-    verbs: [get, patch]
+    verbs: [get, patch, update]
   - apiGroups: [""]
     resources: [pods]
     verbs: [list]
