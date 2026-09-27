@@ -13,6 +13,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "infra/k8s/tools/book-pvc-backup-verify.py"
@@ -362,6 +364,24 @@ class BookBackupControllerTests(unittest.TestCase):
 
 
 class BookBackupManifestTests(unittest.TestCase):
+    def test_conditional_scale_has_named_update_permission(self):
+        manifests = {
+            "book-memo-pvc-backup-cronjob.yaml": "book-memo",
+            "youtube-memo-pvc-backup-cronjob.yaml": "youtube-memo",
+            "crawler-worker-pvc-backup-cronjob.yaml": "crawler-worker",
+        }
+        for filename, deployment in manifests.items():
+            with self.subTest(filename=filename):
+                path = ROOT / "infra/k8s/backup-automation" / filename
+                documents = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
+                role = next(document for document in documents if document["kind"] == "Role")
+                scale = [rule for rule in role["rules"] if rule["resources"] == ["deployments/scale"]]
+                self.assertEqual(len(scale), 1)
+                self.assertEqual(scale[0]["apiGroups"], ["apps"])
+                self.assertEqual(scale[0]["resourceNames"], [deployment])
+                self.assertEqual(set(scale[0]["verbs"]), {"get", "patch", "update"})
+                self.assertFalse(any("secrets" in rule["resources"] for rule in role["rules"]))
+
     def test_cronjob_is_suspended_and_has_no_secret_values(self):
         text = MANIFEST.read_text(encoding="utf-8")
         self.assertIn("suspend: true", text)
