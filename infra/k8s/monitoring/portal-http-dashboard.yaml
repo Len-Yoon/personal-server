@@ -50,6 +50,16 @@ data:
           "targets": [{"datasource": "Prometheus", "expr": "histogram_quantile(0.95, sum by (le) (rate(portal_http_request_duration_seconds_bucket[5m])))", "refId": "A"}],
           "title": "p95 응답 시간",
           "type": "stat"
+        },
+        {
+          "datasource": "Prometheus",
+          "fieldConfig": {"defaults": {"decimals": 3, "unit": "s"}, "overrides": []},
+          "gridPos": {"h": 8, "w": 6, "x": 0, "y": 8},
+          "id": 5,
+          "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+          "targets": [{"datasource": "Prometheus", "expr": "histogram_quantile(0.95, sum by (le) (rate(portal_http_request_duration_seconds_bucket{method=\"GET\",route=\"/search\"}[5m])))", "refId": "A"}],
+          "title": "검색 p95 응답 시간",
+          "type": "stat"
         }
       ],
       "schemaVersion": 39,

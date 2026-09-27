@@ -3,6 +3,7 @@ import importlib
 import os
 import threading
 import tracemalloc
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 from tests._test_support import prepare_service_import
@@ -241,6 +242,25 @@ class PortalHttpMetricsTests(unittest.TestCase):
             'portal_http_requests_total{method="GET",route="/health",status_code="200"} 1',
             rendered,
         )
+
+    def test_search_has_distinct_bounded_metric_label_without_query_text(self):
+        prepare_service_import("portal-web")
+        os.environ["PORTAL_METRICS_BEARER_TOKEN"] = "test-token"
+        import app.main as main
+
+        app = importlib.reload(main).app
+        with patch("app.routers.dashboard.search_all", new_callable=AsyncMock, return_value={}), TestClient(app) as client:
+            self.assertEqual(client.get("/?q=private-term").status_code, 200)
+            self.assertEqual(client.get("/").status_code, 200)
+            rendered = client.get(
+                "/internal/metrics",
+                headers={"Authorization": "Bearer test-token"},
+            ).text
+
+        self.assertIn('portal_http_requests_total{method="GET",route="/search",status_code="200"} 1', rendered)
+        self.assertIn('portal_http_request_duration_seconds_count{method="GET",route="/search"} 1', rendered)
+        self.assertIn('portal_http_requests_total{method="GET",route="/",status_code="200"} 1', rendered)
+        self.assertNotIn("private-term", rendered)
 
     def test_records_server_error_when_route_raises(self):
         prepare_service_import("portal-web")
