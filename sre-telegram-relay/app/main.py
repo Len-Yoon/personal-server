@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Callable, NamedTuple, Protocol
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
@@ -38,6 +38,7 @@ CONFIGMAP_BACKUP_DELIVERED_RUN_IDS_KEY = "backup_delivered_run_ids"
 CONFIGMAP_BOOK_BACKUP_DELIVERED_RUN_IDS_KEY = "book_backup_delivered_run_ids"
 CONFIGMAP_YOUTUBE_BACKUP_DELIVERED_RUN_IDS_KEY = "youtube_backup_delivered_run_ids"
 CONFIGMAP_CRAWLER_BACKUP_DELIVERED_RUN_IDS_KEY = "crawler_backup_delivered_run_ids"
+CONFIGMAP_PVC_JOB_FAILURE_DELIVERED_IDS_KEY = "pvc_backup_job_failed_ids"
 CONFIGMAP_QUARTERLY_AUDIT_DELIVERED_RUN_IDS_KEY = "quarterly_audit_delivered_run_ids"
 MAX_BACKUP_DELIVERED_RUN_IDS = 128
 PVC_BACKUP_STALE_AFTER = timedelta(hours=5)
@@ -88,6 +89,15 @@ PVC_BACKUP_SERVICES = {
     "youtube": _PvcBackupService(YOUTUBE_BACKUP_STATUS_CONFIGMAP, "youtube-memo", "YouTube Memo", CONFIGMAP_YOUTUBE_BACKUP_DELIVERED_RUN_IDS_KEY),
     "crawler": _PvcBackupService(CRAWLER_BACKUP_STATUS_CONFIGMAP, "crawler-worker", "News Hub 뉴스 수집기", CONFIGMAP_CRAWLER_BACKUP_DELIVERED_RUN_IDS_KEY),
 }
+PVC_BACKUP_CRONJOBS = {
+    "book": "book-pvc-backup",
+    "youtube": "youtube-pvc-backup",
+    "crawler": "crawler-pvc-backup",
+}
+PVC_BACKUP_JOB_FAILURE_MESSAGE = (
+    "[백업 작업 실패]\n대상: {target}\n상태: 예약된 백업 작업이 실패했습니다."
+    "\n영향: 이번 실행의 복구 가능성을 확인할 수 없습니다. 서비스 상태와 백업 실행 기록을 확인해 주세요."
+)
 PVC_BACKUP_STATUS_MESSAGES = {
     "stalled": "[백업 장기 실행]\n대상: {target}\n상태: 백업이 5시간 이상 완료되지 않았습니다.\n영향: 이번 실행의 복구 검증이 확인되지 않았고 서비스 상태 확인이 필요합니다.",
     "failed": "[백업 실패]\n대상: {target}\n상태: 백업 또는 복원 검증에 실패했습니다.\n영향: 이번 실행의 복구 가능성을 확인할 수 없습니다. 서비스 상태도 확인이 필요합니다.",
@@ -101,6 +111,7 @@ QUARTERLY_AUDIT_REPORT_KEYS = frozenset(
 SLO_SUMMARY_KEYS = frozenset({"slo_evidence", "slo_days_recorded", "slo_days_ok", "slo_days_unobservable"})
 SAFE_BACKUP_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SAFE_BOOK_BACKUP_RUN_ID = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9]{1,10}$")
+SAFE_K8S_UID = re.compile(r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$")
 SAFE_QUARTERLY_AUDIT_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SAFE_BACKUP_STAGE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 CANONICAL_UTC_TIMESTAMP = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
@@ -233,6 +244,12 @@ class KubernetesClient:
 
     def get_config_map(self, namespace: str, name: str) -> dict[str, Any]:
         return self._request_json(f"/api/v1/namespaces/{namespace}/configmaps/{name}")
+
+    def get_cron_job(self, namespace: str, name: str) -> dict[str, Any]:
+        return self._request_json(f"/apis/batch/v1/namespaces/{namespace}/cronjobs/{name}")
+
+    def list_jobs(self, namespace: str) -> list[dict[str, Any]]:
+        return self._list_items(f"/apis/batch/v1/namespaces/{namespace}/jobs")
 
     def patch_config_map(self, namespace: str, name: str, data: dict[str, str]) -> None:
         self._request_json(
@@ -372,7 +389,9 @@ class ConfigMapBackupDeliveryStore:
                  storage_key: str = CONFIGMAP_BACKUP_DELIVERED_RUN_IDS_KEY) -> None:
         if namespace != RELAY_NAMESPACE or name != RELAY_STATE_CONFIGMAP:
             raise ValueError("Backup delivery storage must use the dedicated relay ConfigMap")
-        allowed_keys = {CONFIGMAP_BACKUP_DELIVERED_RUN_IDS_KEY} | {spec.state_key for spec in PVC_BACKUP_SERVICES.values()}
+        allowed_keys = {
+            CONFIGMAP_BACKUP_DELIVERED_RUN_IDS_KEY, CONFIGMAP_PVC_JOB_FAILURE_DELIVERED_IDS_KEY,
+        } | {spec.state_key for spec in PVC_BACKUP_SERVICES.values()}
         if storage_key not in allowed_keys:
             raise ValueError("Backup delivery storage key is not allowed")
         self._k8s_client = k8s_client
@@ -541,6 +560,7 @@ class RelayService:
         book_backup_delivery_store: BackupDeliveryStore | None = None,
         youtube_backup_delivery_store: BackupDeliveryStore | None = None,
         crawler_backup_delivery_store: BackupDeliveryStore | None = None,
+        job_failure_delivery_store: BackupDeliveryStore | None = None,
         quarterly_audit_delivery_store: QuarterlyAuditDeliveryStore | None = None,
         alert_callback: Callable[[str], bool] | None = None,
     ) -> None:
@@ -556,10 +576,12 @@ class RelayService:
             ("youtube", youtube_backup_delivery_store),
             ("crawler", crawler_backup_delivery_store),
         )
+        self._job_failure_delivery_store = job_failure_delivery_store
         self._quarterly_audit_delivery_store = quarterly_audit_delivery_store
         self._alert_state_lock = threading.Lock()
         self._backup_delivery_lock = threading.Lock()
         self._pvc_backup_delivery_lock = threading.Lock()
+        self._job_failure_delivery_lock = threading.Lock()
         self._quarterly_audit_delivery_lock = threading.Lock()
         self._alert_callback = alert_callback
         self._healthy = True
@@ -637,6 +659,22 @@ class RelayService:
                 if not send_message(self._allowed_chat_id, message):
                     return False
                 store.save(event_id)
+        return True
+
+    def deliver_pvc_backup_job_failures(self, send_message: Callable[[str, str], bool]) -> bool:
+        """Report terminal failures for Jobs owned by three fixed CronJobs."""
+        if self._job_failure_delivery_store is None:
+            return True
+        with self._job_failure_delivery_lock:
+            for service, job_uid in _read_pvc_backup_job_failures(self._k8s_client):
+                event_id = f"{service}-{job_uid}-failed"
+                if self._job_failure_delivery_store.contains(event_id):
+                    continue
+                target = PVC_BACKUP_SERVICES[service].target
+                message = PVC_BACKUP_JOB_FAILURE_MESSAGE.format(target=target)
+                if not send_message(self._allowed_chat_id, message):
+                    return False
+                self._job_failure_delivery_store.save(event_id)
         return True
 
     def deliver_quarterly_audit_report(self, send_message: Callable[[str, str], bool]) -> bool:
@@ -979,6 +1017,8 @@ def _poll_once(relay: RelayService, telegram_client: TelegramClient, allowed_cha
         return False
     if not relay.deliver_pvc_backup_reports(telegram_client.send_message):
         return False
+    if not relay.deliver_pvc_backup_job_failures(telegram_client.send_message):
+        return False
     return relay.deliver_quarterly_audit_report(telegram_client.send_message)
 
 
@@ -1027,6 +1067,12 @@ def main() -> None:
             namespace=RELAY_NAMESPACE,
             name=RELAY_STATE_CONFIGMAP,
             storage_key=CONFIGMAP_CRAWLER_BACKUP_DELIVERED_RUN_IDS_KEY,
+        ),
+        job_failure_delivery_store=ConfigMapBackupDeliveryStore(
+            k8s_client,
+            namespace=RELAY_NAMESPACE,
+            name=RELAY_STATE_CONFIGMAP,
+            storage_key=CONFIGMAP_PVC_JOB_FAILURE_DELIVERED_IDS_KEY,
         ),
         quarterly_audit_delivery_store=ConfigMapQuarterlyAuditDeliveryStore(
             k8s_client,
@@ -1142,6 +1188,66 @@ def _read_backup_report(k8s_client: KubernetesClient) -> dict[str, str] | None:
         LOGGER.warning("backup_report_ignored reason=invalid_stage")
         return None
     return {"run_id": run_id, "status": status, "completed_at": completed_at, "stage": stage}
+
+
+def _read_pvc_backup_job_failures(k8s_client: KubernetesClient) -> list[tuple[str, str]]:
+    """Read terminal failed Jobs only when their CronJob ownership is current."""
+    owners: dict[tuple[str, str], str] = {}
+    for service, cronjob_name in PVC_BACKUP_CRONJOBS.items():
+        try:
+            cronjob = k8s_client.get_cron_job(BOOK_BACKUP_NAMESPACE, cronjob_name)
+        except HTTPError as exc:
+            if exc.code == 404:  # A not-yet-installed backup CronJob is optional.
+                continue
+            raise
+        if not isinstance(cronjob, dict):
+            raise ValueError("invalid fixed backup CronJob response")
+        metadata = cronjob.get("metadata")
+        if (cronjob.get("apiVersion") != "batch/v1" or cronjob.get("kind") != "CronJob"
+                or not isinstance(metadata, dict) or metadata.get("name") != cronjob_name
+                or metadata.get("namespace") != BOOK_BACKUP_NAMESPACE
+                or not isinstance(metadata.get("uid"), str)
+                or not SAFE_K8S_UID.fullmatch(metadata["uid"])):
+            raise ValueError("invalid fixed backup CronJob response")
+        owners[(cronjob_name, metadata["uid"])] = service
+    if not owners:
+        return []
+
+    failures: list[tuple[str, str]] = []
+    for job in k8s_client.list_jobs(BOOK_BACKUP_NAMESPACE):
+        if not isinstance(job, dict) or job.get("apiVersion") != "batch/v1" or job.get("kind") != "Job":
+            continue
+        metadata = job.get("metadata")
+        status = job.get("status")
+        if (not isinstance(metadata, dict) or metadata.get("namespace") != BOOK_BACKUP_NAMESPACE
+                or not isinstance(metadata.get("uid"), str)
+                or not SAFE_K8S_UID.fullmatch(metadata["uid"])
+                or not isinstance(status, dict) or not isinstance(status.get("conditions"), list)):
+            continue
+        conditions = status["conditions"]
+        if not all(isinstance(condition, dict) for condition in conditions):
+            continue
+        if (not any(c.get("type") == "Failed" and c.get("status") == "True" for c in conditions)
+                or any(c.get("type") == "Complete" and c.get("status") == "True" for c in conditions)):
+            continue
+        references = metadata.get("ownerReferences")
+        if not isinstance(references, list):
+            continue
+        controllers = [reference for reference in references
+                       if isinstance(reference, dict) and reference.get("controller") is True]
+        if len(controllers) != 1:
+            continue
+        owner = controllers[0]
+        if owner.get("apiVersion") != "batch/v1" or owner.get("kind") != "CronJob":
+            continue
+        if not isinstance(owner.get("name"), str) or not isinstance(metadata.get("name"), str):
+            continue
+        if not metadata["name"].startswith(owner["name"] + "-"):
+            continue
+        service = owners.get((owner.get("name"), owner.get("uid")))
+        if service is not None:
+            failures.append((service, metadata["uid"]))
+    return failures
 
 
 def _read_pvc_backup_report(k8s_client: KubernetesClient, service: str) -> dict[str, str] | None:

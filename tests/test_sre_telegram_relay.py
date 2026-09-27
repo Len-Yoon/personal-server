@@ -111,6 +111,54 @@ class FakeBookBackupStatusK8s(FakeConfigMapK8s):
         return super().get_config_map(namespace, name)
 
 
+class FakePvcJobK8s(FakeConfigMapK8s):
+    def __init__(self, cronjobs, jobs):
+        super().__init__()
+        self.cronjobs = cronjobs
+        self.jobs = jobs
+        self.cronjob_reads = []
+        self.job_lists = []
+
+    def get_cron_job(self, namespace, name):
+        self.cronjob_reads.append((namespace, name))
+        if name not in self.cronjobs:
+            raise HTTPError("https://kubernetes.invalid", 404, "missing", {}, None)
+        return self.cronjobs[name]
+
+    def list_jobs(self, namespace):
+        self.job_lists.append(namespace)
+        return self.jobs
+
+
+def backup_cronjob(name, uid):
+    return {
+        "apiVersion": "batch/v1", "kind": "CronJob",
+        "metadata": {"name": name, "namespace": "personal-server", "uid": uid},
+    }
+
+
+def backup_job(name, uid, owner_name, owner_uid, *, conditions=None, owner_kind="CronJob",
+               controller=True, namespace="personal-server"):
+    return {
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {
+            "name": name, "namespace": namespace, "uid": uid,
+            "creationTimestamp": "2026-09-27T01:00:00Z",
+            "labels": {"batch.kubernetes.io/job-name": name},
+            "ownerReferences": [{
+                "apiVersion": "batch/v1", "kind": owner_kind, "name": owner_name,
+                "uid": owner_uid, "controller": controller,
+            }],
+        },
+        "status": {
+            "failed": 1,
+            "conditions": conditions if conditions is not None else [{
+                "type": "Failed", "status": "True", "reason": "BackoffLimitExceeded",
+            }],
+        },
+    }
+
+
 class FakeQuarterlyAuditStatusK8s(FakeConfigMapK8s):
     def __init__(self, audit_data):
         super().__init__()
@@ -604,6 +652,154 @@ class RelayServiceTest(unittest.TestCase):
                 run_polling(restarted_relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
 
                 self.assertEqual(telegram.sent_messages, [("123", expected_message)])
+
+    def test_fixed_pvc_cronjob_terminal_failures_alert_once_across_relay_restart(self):
+        cron_uids = {
+            "book-pvc-backup": "00000000-0000-4000-8000-000000000001",
+            "youtube-pvc-backup": "00000000-0000-4000-8000-000000000002",
+            "crawler-pvc-backup": "00000000-0000-4000-8000-000000000003",
+        }
+        job_uids = (
+            "10000000-0000-4000-8000-000000000001",
+            "10000000-0000-4000-8000-000000000002",
+            "10000000-0000-4000-8000-000000000003",
+        )
+        k8s = FakePvcJobK8s(
+            {name: backup_cronjob(name, uid) for name, uid in cron_uids.items()},
+            [backup_job(f"{name}-29840760", uid, name, cron_uids[name])
+             for (name, uid) in zip(cron_uids, job_uids)],
+        )
+        telegram = FakePollingTelegram([])
+
+        def relay():
+            return RelayService(
+                allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                job_failure_delivery_store=ConfigMapBackupDeliveryStore(
+                    k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                    storage_key="pvc_backup_job_failed_ids",
+                ),
+            )
+
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 3)
+        for target, (_, message) in zip(("Book Memo", "YouTube Memo", "News Hub 뉴스 수집기"), telegram.sent_messages):
+            self.assertIn(target, message)
+            self.assertIn("백업 작업 실패", message)
+            self.assertNotIn("29840760", message)
+            self.assertNotIn("10000000-", message)
+        self.assertEqual(len(json.loads(k8s.data["pvc_backup_job_failed_ids"])), 3)
+        self.assertNotIn("backup_delivered_run_ids", k8s.data)
+        self.assertEqual(sorted(set(k8s.cronjob_reads)), [
+            ("personal-server", "book-pvc-backup"),
+            ("personal-server", "crawler-pvc-backup"),
+            ("personal-server", "youtube-pvc-backup"),
+        ])
+        self.assertEqual(k8s.job_lists, ["personal-server", "personal-server"])
+
+    def test_job_failure_reader_rejects_forged_owner_nonterminal_and_invalid_uid(self):
+        cron_uid = "00000000-0000-4000-8000-000000000001"
+        valid_uid = "10000000-0000-4000-8000-000000000001"
+        valid = backup_job("book-pvc-backup-29840760", valid_uid, "book-pvc-backup", cron_uid)
+        wrong_owner_uid = backup_job("book-pvc-backup-29840761", "10000000-0000-4000-8000-000000000002",
+                                     "book-pvc-backup", "00000000-0000-4000-8000-000000000099")
+        wrong_owner_kind = backup_job("book-pvc-backup-29840762", "10000000-0000-4000-8000-000000000003",
+                                      "book-pvc-backup", cron_uid, owner_kind="Deployment")
+        non_controller = backup_job("book-pvc-backup-29840763", "10000000-0000-4000-8000-000000000004",
+                                    "book-pvc-backup", cron_uid, controller=False)
+        manual_name = backup_job("manual-backup", "10000000-0000-4000-8000-000000000005",
+                                 "book-pvc-backup", cron_uid)
+        nonterminal = backup_job("book-pvc-backup-29840764", "10000000-0000-4000-8000-000000000006",
+                                 "book-pvc-backup", cron_uid, conditions=[])
+        completed = backup_job("book-pvc-backup-29840765", "10000000-0000-4000-8000-000000000007",
+                               "book-pvc-backup", cron_uid, conditions=[
+                                   {"type": "Failed", "status": "True"}, {"type": "Complete", "status": "True"},
+                               ])
+        invalid_uid = backup_job("book-pvc-backup-29840766", "../unsafe", "book-pvc-backup", cron_uid)
+        k8s = FakePvcJobK8s(
+            {"book-pvc-backup": backup_cronjob("book-pvc-backup", cron_uid)},
+            [valid, wrong_owner_uid, wrong_owner_kind, non_controller, manual_name,
+             nonterminal, completed, invalid_uid],
+        )
+        telegram = FakePollingTelegram([])
+        relay = RelayService(
+            allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+            job_failure_delivery_store=ConfigMapBackupDeliveryStore(
+                k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                storage_key="pvc_backup_job_failed_ids",
+            ),
+        )
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 1)
+        self.assertTrue(relay.is_healthy())
+        self.assertEqual(len(json.loads(k8s.data["pvc_backup_job_failed_ids"])), 1)
+
+    def test_job_failure_owner_uid_rotation_ignores_old_job_and_alerts_new_failure(self):
+        first_cron_uid = "00000000-0000-4000-8000-000000000001"
+        next_cron_uid = "00000000-0000-4000-8000-000000000002"
+        old_job = backup_job("book-pvc-backup-29840760", "10000000-0000-4000-8000-000000000001",
+                             "book-pvc-backup", first_cron_uid)
+        new_job = backup_job("book-pvc-backup-29840761", "10000000-0000-4000-8000-000000000002",
+                             "book-pvc-backup", next_cron_uid)
+        k8s = FakePvcJobK8s({"book-pvc-backup": backup_cronjob("book-pvc-backup", first_cron_uid)}, [old_job])
+        telegram = FakePollingTelegram([])
+        store = ConfigMapBackupDeliveryStore(
+            k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+            storage_key="pvc_backup_job_failed_ids",
+        )
+
+        def relay():
+            return RelayService(allowed_chat_id="123", k8s_client=k8s,
+                                prometheus_client=FakePrometheus(), job_failure_delivery_store=store)
+
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        k8s.cronjobs["book-pvc-backup"] = backup_cronjob("book-pvc-backup", next_cron_uid)
+        k8s.jobs.append(new_job)
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 2)
+        self.assertEqual(len(json.loads(k8s.data["pvc_backup_job_failed_ids"])), 2)
+
+    def test_job_failure_rejected_delivery_and_state_save_failure_are_retryable(self):
+        cron_uid = "00000000-0000-4000-8000-000000000001"
+        job = backup_job("book-pvc-backup-29840760", "10000000-0000-4000-8000-000000000001",
+                         "book-pvc-backup", cron_uid)
+        k8s = FakePvcJobK8s({"book-pvc-backup": backup_cronjob("book-pvc-backup", cron_uid)}, [job])
+        store = FailOnceBackupDeliveryStore()
+
+        def relay():
+            return RelayService(allowed_chat_id="123", k8s_client=k8s,
+                                prometheus_client=FakePrometheus(), job_failure_delivery_store=store)
+
+        rejected = FakePollingTelegram([], send_result=False)
+        run_polling(relay(), rejected, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(rejected.sent_messages), 1)
+        self.assertEqual(store.save_attempts, 0)
+
+        accepted = FakePollingTelegram([])
+        run_polling(relay(), accepted, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(accepted.sent_messages), 1)
+        self.assertEqual(store.save_attempts, 1)
+        run_polling(relay(), accepted, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(accepted.sent_messages), 2)
+        self.assertEqual(store.save_attempts, 2)
+        run_polling(relay(), accepted, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(accepted.sent_messages), 2)
+
+    def test_malformed_fixed_backup_cronjob_marks_job_monitor_unhealthy(self):
+        k8s = FakePvcJobK8s({
+            "book-pvc-backup": backup_cronjob("book-pvc-backup", "invalid-uid"),
+        }, [])
+        telegram = FakePollingTelegram([])
+        relay = RelayService(
+            allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+            job_failure_delivery_store=ConfigMapBackupDeliveryStore(
+                k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                storage_key="pvc_backup_job_failed_ids",
+            ),
+        )
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertFalse(relay.is_healthy())
+        self.assertEqual(telegram.sent_messages, [])
 
     def test_book_backup_failure_then_completed_run_alerts_once_each_across_restart(self):
         data = {
