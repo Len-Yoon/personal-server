@@ -102,6 +102,6 @@
 
   <rect x="715" y="1475" width="625" height="145" rx="20" fill="#fff7ed" stroke="#ea580c" stroke-width="2.5"/>
   <text x="745" y="1518" class="section">백업 · 월간 운영 점검</text>
-  <text x="745" y="1553" class="card-body">Portal PVC 암호화 백업 · 복원 검증</text>
+  <text x="745" y="1553" class="card-body">Portal 정기 · 3서비스 수동 백업·복원 검증</text>
   <text x="745" y="1583" class="note">월간 SRE 통합 점검 · 기존 Telegram relay</text>
 </svg>
