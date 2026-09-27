@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import importlib.util
 import json
 import os
 import socket
@@ -17,11 +18,52 @@ from fastapi.testclient import TestClient
 from tests._test_support import prepare_service_import
 
 
+SERVICE_CONTRACT_SERVICES = ("portal-web", "crawler-worker", "book-memo", "youtube-memo")
+
+
+def _load_service_contract_module(service: str, module: str):
+    path = Path(__file__).resolve().parents[1] / service / "app" / "services" / f"{module}.py"
+    spec = importlib.util.spec_from_file_location(f"contract_{service.replace('-', '_')}_{module}", path)
+    assert spec is not None and spec.loader is not None
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    return loaded
+
+
 def _search_response(payload):
     return httpx.Response(200, content=payload, request=httpx.Request("GET", "http://search.test"))
 
 
 class PortalDashboardTests(unittest.TestCase):
+    def test_forwarded_host_port_keeps_public_portal_return_url_across_services(self):
+        for service in SERVICE_CONTRACT_SERVICES:
+            with self.subTest(service=service):
+                urls = _load_service_contract_module(service, "host_urls")
+                host = urls.request_host_from_headers(
+                    {"x-forwarded-host": "memo.len.pe.kr:443, proxy.internal", "host": "localhost:8000"}
+                )
+                self.assertEqual(host, "memo.len.pe.kr")
+                self.assertEqual(urls.portal_home_url(host), "https://len.pe.kr/")
+
+    def test_local_host_with_port_keeps_local_portal_across_services(self):
+        for service in SERVICE_CONTRACT_SERVICES:
+            with self.subTest(service=service):
+                urls = _load_service_contract_module(service, "host_urls")
+                host = urls.request_host_from_headers({"host": "localhost:8001"})
+                self.assertEqual(urls.portal_home_url(host), "http://127.0.0.1:8000/")
+
+    def test_utc_display_keeps_same_korean_minute_across_services(self):
+        value = "2026-07-09T01:02:03+00:00"
+        for service in SERVICE_CONTRACT_SERVICES:
+            with self.subTest(service=service):
+                if service == "portal-web":
+                    formatted = _load_service_contract_module(service, "admin_status").format_status_checked_at(value)
+                elif service == "crawler-worker":
+                    formatted = _load_service_contract_module(service, "datetime_format").format_news_datetime(value)
+                else:
+                    formatted = _load_service_contract_module(service, "datetime_format").format_display_datetime(value)
+                self.assertEqual(formatted, "2026-07-09 10:02")
+
     def test_admin_router_owns_administrator_and_homeops_paths(self):
         prepare_service_import("portal-web")
         from app.routers import admin

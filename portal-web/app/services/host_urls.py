@@ -39,7 +39,7 @@ def public_portal_url(host: str) -> str:
 def request_host_from_headers(headers: Mapping[str, str]) -> str:
     forwarded_host = headers.get("x-forwarded-host", "").strip()
     if forwarded_host:
-        return forwarded_host.split(",")[0].strip().lower()
+        return forwarded_host.split(",", 1)[0].strip().split(":", 1)[0].lower()
 
     host = headers.get("host", "").strip()
     if host:
