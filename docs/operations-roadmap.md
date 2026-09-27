@@ -12,7 +12,7 @@
 
 ## 핵심 요약
 
-현재 운영은 공개 경로 감시, K3s 상태·알림, Portal PVC 백업 검증, 격리된 Pod 복구 실습, 월간 SRE 통합 점검 자동화, P3 공급망 보안 검증을 제공함. 정기 실행은 공개 상태의 약 5분 간격 외부 감시, 매일 백업·복원 검증, 일일 SLO 증적 수집, 매월 1일의 단일 CronJob 통합 점검으로 구분함. 일일 SLO 수집은 2026-09-22 운영 적용 뒤 2026-09-23 예약 실행 성공을 확인함. 코드 변경 검증은 이 정기 일정과 별도로 변경 시점에 수행함. 이 문서는 완료된 운영 기준과 향후 거버넌스 항목을 분리해 기록하며, 새 외부 감시 서비스나 승인 없는 자동 실행을 추가하지 않음.
+현재 운영은 공개 경로 감시, K3s 상태·알림, Portal PVC 백업 검증, 격리된 Pod 복구 실습, 월간 SRE 통합 점검 자동화, P3 공급망 보안 검증을 제공함. 정기 실행은 공개 상태의 약 5분 간격 외부 감시, 매일 백업·복원 검증, 일일 SLO 증적 수집, 매월 1일의 단일 CronJob 통합 점검, GitHub의 주간 Trivy 검증으로 구분함. 일일 SLO 수집은 2026-09-22 운영 적용 뒤 2026-09-23 예약 실행 성공을 확인함. Trivy 주간 일정은 저장소 설정 기준이며 첫 예약 실행 결과는 확인 필요함. 코드 변경 검증은 이 정기 일정과 별도로 변경 시점에 수행함. 이 문서는 완료된 운영 기준과 향후 거버넌스 항목을 분리해 기록함.
 
 현재 활성 스케줄러와 마지막 성공 시각은 [운영 상태 확인 기록](operations-reference.md#운영-상태-확인-기록)을 기준으로 함. 아래 완료 항목은 구현·과거 검증의 기록이며 모든 서비스의 최신 live 상태를 이번에 재검증했다는 의미는 아님.
 
@@ -27,6 +27,7 @@
 | Pod 자동복구 실습 | production과 분리된 임시 namespace에서 liveness 실패와 Ready 복구를 확인함 | `sre-pod-recovery-lab.sh` | 완료 |
 | 변경 검증 | 문서·설정 변경 전에 범위와 관련 검사를 확인함 | [Codex 작업 완료 루프](codex-work-loop.md) | 완료 |
 | P3 공급망 보안 | GitHub Actions 외부 action을 full SHA로 고정하고, Caddy를 제외한 관리 대상 Python Docker base image 8개를 digest로 고정함. Trivy filesystem/config scan은 HIGH·CRITICAL 결과를 exit-code 1로 차단하며 CI 계약 테스트로 검증함 | `.github/workflows/trivy-security.yml`, `tests/test_supply_chain_security_workflow.py` | 완료 |
+| 주간 공급망 재검증 | 같은 Trivy filesystem/config 검사를 매주 월요일 11:17 KST와 수동 실행에 재사용함. 예약 실행은 GitHub 사정에 따라 지연·누락될 수 있으므로 실제 run과 결과를 별도로 확인함. N100 로컬 이미지는 이 검사 범위에 포함되지 않음 | `.github/workflows/trivy-security.yml` | 첫 예약 실행 확인 필요 |
 | Cloudflare Tunnel 구성 대조 | N100 Tunnel 서비스와 9개 ingress를 대조함. Portal·Crawler Worker·Book Memo·YouTube Memo는 Caddy loopback, 차량 callback은 비공개 upstream으로 문서화함 | [Cloudflare Tunnel](cloudflare-tunnel.md) | 완료 |
 | Crawler Worker K3s 이전 | Docker writer 중지, 데이터 무결성 대조 후 K3s writer 기동과 Caddy·Tunnel 경로 전환을 완료함. Docker와 K3s의 동시 production write를 허용하지 않음 | [운영 참조](operations-reference.md#뉴스-수집-k3s-현재-운영-기준) | 완료 |
 | YouTube Memo K3s 이전 | Docker writer 중지, 데이터 무결성 대조 후 K3s writer 기동과 Caddy·Tunnel 경로 전환을 완료함. Docker와 K3s의 동시 production write를 허용하지 않음 | [운영 참조](operations-reference.md#youtube-memo-k3s-현재-운영-기준) | 완료 |
