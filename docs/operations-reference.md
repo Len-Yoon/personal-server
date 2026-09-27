@@ -45,7 +45,9 @@ Portal PVC는 `portal-web-files-dynamic`, `portal-web-state-dynamic` 두 개이�
 
 확인 경로는 각각 `personal-server/portal-pvc-backup`, `monitoring/monthly-sre-audit`, `monitoring/quarterly-sre-audit`, `monitoring/slo-daily-evidence`의 spec.suspend와 status.lastSuccessfulTime임. 2026-09-23 조회에서 Portal 백업과 SLO CronJob은 모두 활성이고 active Job 없이 최신 Job이 `SuccessCriteriaMet`으로 종료됨. SLO 실패 원인과 보완 내용은 [원인 분석](reviews/20260921_SLO증적실패_원인분석.md), 운영 반영 근거는 [뉴스·SLO 운영 적용 검증 결과](reviews/20260922_뉴스_SLO_운영적용_검증결과.md)를 따름.
 
-저장소의 `suspend: true`, 앱 `replicas: 0`, sentinel image는 초기 적용용 안전 기본값임. 현재 실행 상태나 운영 미적용을 단독으로 증명하지 않음. 저장소 병합, 운영 동기화, 이미지 교체, 자동 실행 활성화, 실제 검증을 각각 기록함. Portal·뉴스의 2026-09-21 이미지 적용 근거는 [배포 검증 결과](reviews/20260921_앱배포_검증결과.md)이며 이후 코드 변경의 운영 적용을 뜻하지 않음. 후속 Book·Portal 교체는 [K3s 앱 배포 결과](reviews/20260921_K3s앱배포_검증결과.md), 차량 교체는 [차량 배포 결과](reviews/20260921_차량배포_검증결과.md)를 따름. 뉴스 10차 목표 이미지는 2026-09-22에 적용했으며 SLO collector도 같은 운영 검증에서 갱신함.
+2026-09-27 후속 조회에서 Portal 백업 Job은 성공, active Job은 0으로 확인함. 최신 백업 증적은 `portal_pvc_backup=PASS`였고, 해당 원격 암호문 전체의 SHA-256을 읽기 전용으로 재계산하여 증적의 `artifact_digest`와 일치함을 확인함. 원격 저장소의 공유·접근 권한은 이 해시 검사로 확인되지 않으므로 **확인 필요**로 유지함. 다른 CronJob의 마지막 성공 시각은 위 2026-09-23 조회 이후 이 문서에서 재확인하지 않음.
+
+저장소의 `suspend: true`, 앱 `replicas: 0`, sentinel image는 초기 적용용 안전 기본값임. 현재 실행 상태나 운영 미적용을 단독으로 증명하지 않음. 저장소 병합, 운영 동기화, 이미지 교체, 자동 실행 활성화, 실제 검증을 각각 기록함. Portal·뉴스의 2026-09-21 이미지 적용 근거는 [배포 검증 결과](reviews/20260921_앱배포_검증결과.md), 후속 Book·Portal 교체는 [K3s 앱 배포 결과](reviews/20260921_K3s앱배포_검증결과.md), 차량 교체는 [차량 배포 결과](reviews/20260921_차량배포_검증결과.md)를 따름. 뉴스 10차 목표 이미지는 2026-09-22에 적용했으며 SLO collector도 같은 운영 검증에서 갱신함. 2026-09-27 A2·A4·A5 이미지 교체와 A3 검색 코드의 Portal 실행 확인은 [최신 고도화 적용 결과](20260921_프로젝트보완_개발계획.md#2026-09-27-a2a4a5-고도화-및-n100-적용-결과)를 따름.
 
 ## 일상 상태 확인
 
@@ -97,7 +99,7 @@ K3s 애플리케이션의 런타임 이미지만 교체하는 운영 절차임. 
 4. `k3s-app-upgrade.sh --go`는 check 성공 이후에도 대상 애플리케이션명을 명시한 별도 운영 승인을 받은 경우에만 실행함. 실행 시 현재 immutable digest를 `--expected-current-image`으로 지정하여 변경 전 이미지가 예상과 일치할 때만 patch함.
 5. rollout과 대상 애플리케이션 health를 확인한 뒤 다시 `--check`으로 결과를 검증함. Portal 교체는 Pod 내부 health와 공개 Portal health를 10초 간격으로 3회 모두 HTTP 200으로 확인함.
 
-대상 rollout 또는 health 검증 실패 시 도구는 직전 immutable digest로 **1회만** rollback을 시도함. 다만 뉴스 10차는 구 버전이 새 outbox를 보존하지 못하므로 이 절차로 바로 적용하지 않음. [복구 호환 검토안](reviews/20260921_뉴스복구호환_적용검토안.md)의 중간 이미지 적용이 먼저 필요함. rollback 실패·상태 불확실·두 번째 시도 필요 상황에서는 자동 재실행하지 않고 운영자가 상태를 확인한 뒤 별도 판단함. 이 절차는 Deployment의 컨테이너 이미지 외에는 변경하지 않으며 PVC, Secret, Caddy, Cloudflare Tunnel, Docker Compose를 생성·수정·삭제·재기동하지 않음.
+대상 rollout 또는 health 검증 실패 시 도구는 직전 immutable digest로 **1회만** rollback을 시도함. 뉴스 10차는 구 버전이 새 outbox를 보존하지 못해 [복구 호환 검토안](reviews/20260921_뉴스복구호환_적용검토안.md)의 중간 이미지를 거쳐 2026-09-22 적용했음. 이는 완료된 전환 이력이며 새 이미지의 rollback 호환성을 자동 보장하지 않음. rollback 실패·상태 불확실·두 번째 시도 필요 상황에서는 자동 재실행하지 않고 운영자가 상태를 확인한 뒤 별도 판단함. 이 절차는 Deployment의 컨테이너 이미지 외에는 변경하지 않으며 PVC, Secret, Caddy, Cloudflare Tunnel, Docker Compose를 생성·수정·삭제·재기동하지 않음.
 
 ## Book Memo K3s 현재 운영 기준
 
