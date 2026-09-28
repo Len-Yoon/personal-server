@@ -110,7 +110,7 @@ PVC_BACKUP_MISSED_MESSAGE = (
     "\n영향: 이번 일정의 새 복구 지점을 확인할 수 없습니다. 백업 실행 상태를 확인해 주세요."
 )
 PVC_BACKUP_JOB_FAILURE_MESSAGE = (
-    "[백업 작업 실패]\n대상: {target}\n상태: 예약된 백업 작업이 실패했습니다."
+    "[백업 작업 실패]\n대상: {target}\n예약 시각: {scheduled_at} KST\n상태: 예약된 백업 작업이 실패했습니다."
     "\n영향: 이번 실행의 복구 가능성을 확인할 수 없습니다. 서비스 상태와 백업 실행 기록을 확인해 주세요."
 )
 PVC_BACKUP_STATUS_MESSAGES = {
@@ -688,12 +688,12 @@ class RelayService:
         if self._job_failure_delivery_store is None:
             return True
         with self._job_failure_delivery_lock:
-            for service, job_uid in _read_pvc_backup_job_failures(self._k8s_client):
+            for service, job_uid, scheduled_at in _read_pvc_backup_job_failures(self._k8s_client):
                 event_id = f"{service}-{job_uid}-failed"
                 if self._job_failure_delivery_store.contains(event_id):
                     continue
                 target = PVC_BACKUP_SERVICES[service].target
-                message = PVC_BACKUP_JOB_FAILURE_MESSAGE.format(target=target)
+                message = PVC_BACKUP_JOB_FAILURE_MESSAGE.format(target=target, scheduled_at=scheduled_at)
                 if not send_message(self._allowed_chat_id, message):
                     return False
                 self._job_failure_delivery_store.save(event_id)
@@ -1320,7 +1320,7 @@ def _read_pvc_backup_missed_schedules(
     return missed
 
 
-def _read_pvc_backup_job_failures(k8s_client: KubernetesClient) -> list[tuple[str, str]]:
+def _read_pvc_backup_job_failures(k8s_client: KubernetesClient) -> list[tuple[str, str, str]]:
     """Read terminal failed Jobs only when their CronJob ownership is current."""
     owners: dict[tuple[str, str], str] = {}
     for service, cronjob_name in PVC_BACKUP_CRONJOBS.items():
@@ -1343,7 +1343,7 @@ def _read_pvc_backup_job_failures(k8s_client: KubernetesClient) -> list[tuple[st
     if not owners:
         return []
 
-    failures: list[tuple[str, str]] = []
+    failures: list[tuple[str, str, str]] = []
     for job in k8s_client.list_jobs(BOOK_BACKUP_NAMESPACE):
         if (not isinstance(job, dict)
                 or job.get("apiVersion") not in (None, "batch/v1")
@@ -1355,6 +1355,19 @@ def _read_pvc_backup_job_failures(k8s_client: KubernetesClient) -> list[tuple[st
                 or not isinstance(metadata.get("uid"), str)
                 or not SAFE_K8S_UID.fullmatch(metadata["uid"])
                 or not isinstance(status, dict) or not isinstance(status.get("conditions"), list)):
+            continue
+        annotations = metadata.get("annotations")
+        if (not isinstance(annotations, dict)
+                or annotations.get("cronjob.kubernetes.io/instantiate") == "manual"):
+            continue
+        scheduled_at = annotations.get("batch.kubernetes.io/cronjob-scheduled-timestamp")
+        if not isinstance(scheduled_at, str):
+            continue
+        try:
+            scheduled_time = datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if scheduled_time.tzinfo is None or scheduled_time.utcoffset() is None:
             continue
         conditions = status["conditions"]
         if not all(isinstance(condition, dict) for condition in conditions):
@@ -1378,7 +1391,8 @@ def _read_pvc_backup_job_failures(k8s_client: KubernetesClient) -> list[tuple[st
             continue
         service = owners.get((owner.get("name"), owner.get("uid")))
         if service is not None:
-            failures.append((service, metadata["uid"]))
+            failures.append((service, metadata["uid"],
+                             scheduled_time.astimezone(PVC_BACKUP_TIME_ZONE).strftime("%Y-%m-%d %H:%M")))
     return failures
 
 
