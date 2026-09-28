@@ -217,8 +217,13 @@ def _public_health_status(public_health_url, *, urlopen):
     request = Request(public_health_url, method="GET")
     try:
         with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-            return "ok" if getattr(response, "status", 200) == 200 else "failed"
-    except HTTPError:
+            status = getattr(response, "status", 200)
+            if status != 200:
+                print(f"public_health_http_status={status}")
+                return "failed"
+            return "ok"
+    except HTTPError as exc:
+        print(f"public_health_http_status={exc.code}")
         return "failed"
     except (URLError, OSError, ValueError):
         return "unobservable"

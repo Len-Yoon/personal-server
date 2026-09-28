@@ -15,6 +15,8 @@ OLD = "docker.io/library/personal-server-crawler-worker@sha256:" + "a" * 64
 TARGET = "docker.io/library/personal-server-crawler-worker@sha256:" + "b" * 64
 PORTAL_OLD = "docker.io/library/personal-server-portal-web@sha256:" + "c" * 64
 PORTAL_TARGET = "docker.io/library/personal-server-portal-web@sha256:" + "d" * 64
+BOOK_OLD = "docker.io/library/personal-server-book-memo@sha256:" + "e" * 64
+BOOK_TARGET = "docker.io/library/personal-server-book-memo@sha256:" + "f" * 64
 
 
 class K3sAppUpgradeTests(unittest.TestCase):
@@ -31,11 +33,13 @@ class K3sAppUpgradeTests(unittest.TestCase):
         deployment_path = base / "deployment.json"
         fixture_path = base / "fixture.json"
 
-        current = PORTAL_OLD if app == "portal-web" else OLD
-        target = PORTAL_TARGET if app == "portal-web" and image == TARGET else image
-        if app == "portal-web" and expected == OLD:
-            expected = PORTAL_OLD
+        current = {"portal-web": PORTAL_OLD, "book-memo": BOOK_OLD}.get(app, OLD)
+        target = {"portal-web": PORTAL_TARGET, "book-memo": BOOK_TARGET}.get(app, image) if image == TARGET else image
+        if expected == OLD:
+            expected = {"portal-web": PORTAL_OLD, "book-memo": BOOK_OLD}.get(app, OLD)
         deployment = self.deployment_for(app, current)
+        if scenario == "book_wrong_mount":
+            deployment["spec"]["template"]["spec"]["containers"][0]["volumeMounts"][0]["mountPath"] = "/tmp/book-memo"
         deployment_path.write_text(json.dumps(deployment), encoding="utf-8")
         fixture_path.write_text(json.dumps({
             "app": app,
@@ -67,19 +71,20 @@ class K3sAppUpgradeTests(unittest.TestCase):
 
     @staticmethod
     def deployment_for(app, image):
-        port = 8000 if app == "portal-web" else 8001
-        pvc = "portal-web-state-dynamic" if app == "portal-web" else "crawler-worker-data"
+        port = {"portal-web": 8000, "book-memo": 8003}.get(app, 8001)
+        pvc = {"portal-web": "portal-web-state-dynamic", "book-memo": "book-memo-data"}.get(app, "crawler-worker-data")
         return {
             "metadata": {"name": app, "namespace": "personal-server"},
             "spec": {
                 "replicas": 1,
+                "strategy": {"type": "Recreate"},
                 "template": {"spec": {
                     "containers": [{
                         "name": app,
                         "image": image,
                         "ports": [{"name": "http", "containerPort": port}],
                         "envFrom": [{"secretRef": {"name": app + "-runtime"}}],
-                        "volumeMounts": [{"name": "data", "mountPath": "/data"}],
+                        "volumeMounts": [{"name": "data", "mountPath": "/data/book-memo" if app == "book-memo" else "/data"}],
                     }],
                     "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": pvc}}],
                 }},
@@ -125,7 +130,7 @@ if args[:2] == ['-n', 'personal-server']: args = args[2:]
 if args and args[0].startswith('--request-timeout='): args = args[1:]
 deployment = json.loads(base.read_text())
 app = fixture['app']
-port = 8000 if app == 'portal-web' else 8001
+port = {'portal-web': 8000, 'book-memo': 8003}.get(app, 8001)
 if args[:2] == ['get', 'deployment']:
     print(json.dumps(deployment)); sys.exit(0)
 if args[:2] == ['get', 'service']:
@@ -173,12 +178,14 @@ fixture_path = pathlib.Path(os.environ['UPGRADE_FIXTURE'])
 fixture = json.loads(fixture_path.read_text())
 with pathlib.Path(os.environ['CALL_LOG']).open('a') as output: output.write(json.dumps(['curl', *sys.argv[1:]]) + '\n')
 url = sys.argv[-1]
-if url == 'https://len.pe.kr/health':
+if url in ('https://len.pe.kr/health', 'https://books.len.pe.kr/health'):
     fixture['external_calls'] += 1
     fixture_path.write_text(json.dumps(fixture))
     deployment = json.loads(pathlib.Path(os.environ['UPGRADE_DEPLOYMENT']).read_text())
     image = deployment['spec']['template']['spec']['containers'][0]['image']
     if fixture['scenario'] == 'portal_non_200' and image == fixture['target'] and fixture['external_calls'] == 2:
+        print('503'); sys.exit(0)
+    if fixture['scenario'] == 'book_non_200' and image == fixture['target'] and fixture['external_calls'] == 2:
         print('503'); sys.exit(0)
     if fixture['scenario'] == 'target_health_fail' and image == fixture['target']:
         sys.exit(22)
@@ -227,6 +234,43 @@ with pathlib.Path(os.environ['CALL_LOG']).open('a') as output: output.write(json
         self.assertIn("k3s_app_upgrade=PASS", result.stdout)
         self.assertEqual(after, before)
         self.assertFalse(any("patch" in call or "rollout" in call for call in self.kubectl_calls(calls)))
+
+    def test_book_check_and_go_use_immutable_image_without_touching_pvc(self):
+        """Book upgrades must preserve its PVC and roll back on failed health."""
+        checked, check_calls, before, after_check, _ = self.run_operator("--check", app="book-memo")
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertEqual(after_check, before)
+        self.assertFalse(any("patch" in call for call in self.kubectl_calls(check_calls)))
+
+        failed, calls, before, after, _ = self.run_operator(
+            "--go", app="book-memo", scenario="target_health_fail"
+        )
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("rollback=PASS", failed.stderr)
+        self.assertEqual(after, before)
+        patches = [call for call in self.kubectl_calls(calls) if "patch" in call]
+        self.assertEqual(len(patches), 2)
+        self.assertTrue(all("/spec/template/spec/containers/0/image" in str(call) for call in patches))
+
+    def test_book_public_health_non_200_rolls_back(self):
+        """A healthy Pod cannot hide a broken public Book route."""
+        result, calls, before, after, fixture = self.run_operator(
+            "--go", app="book-memo", scenario="book_non_200"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("rollback=PASS", result.stderr)
+        self.assertEqual(after, before)
+        self.assertGreaterEqual(fixture["external_calls"], 2)
+        self.assertEqual(len([c for c in self.kubectl_calls(calls) if "patch" in c]), 2)
+
+    def test_book_rejects_pvc_mount_drift_before_patch(self):
+        """An existing PVC volume is insufficient when the writer mount moved."""
+        result, calls, before, after, _ = self.run_operator(
+            "--go", app="book-memo", scenario="book_wrong_mount"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(after, before)
+        self.assertFalse(any("patch" in call for call in self.kubectl_calls(calls)))
 
     def test_check_rejects_a_loadbalancer_service(self):
         """Allowing every Service type would weaken the explicit internal routing contract."""

@@ -3,6 +3,7 @@ set -o pipefail
 
 NAMESPACE="personal-server"
 PORTAL_HEALTH_URL="https://len.pe.kr/health"
+BOOK_HEALTH_URL="https://books.len.pe.kr/health"
 KUBECTL_REQUEST_TIMEOUT="15s"
 CURL_CONNECT_TIMEOUT_SECONDS="5"
 CURL_MAX_TIME_SECONDS="15"
@@ -13,8 +14,8 @@ fail() {
 }
 
 usage() {
-  printf 'Usage: %s --check --app <portal-web|crawler-worker> --image <canonical-digest-ref>\n' "$0" >&2
-  printf '       %s --go --app <portal-web|crawler-worker> --image <canonical-digest-ref> --expected-current-image <current-ref>\n' "$0" >&2
+  printf 'Usage: %s --check --app <portal-web|crawler-worker|book-memo> --image <canonical-digest-ref>\n' "$0" >&2
+  printf '       %s --go --app <portal-web|crawler-worker|book-memo> --image <canonical-digest-ref> --expected-current-image <current-ref>\n' "$0" >&2
   exit 2
 }
 
@@ -38,6 +39,7 @@ done
 case "$app" in
   portal-web) container_name="portal-web"; service_port="8000" ;;
   crawler-worker) container_name="crawler-worker"; service_port="8001" ;;
+  book-memo) container_name="book-memo"; service_port="8003" ;;
   *) fail "unsupported app" ;;
 esac
 
@@ -47,7 +49,7 @@ case "$image" in
   "$expected_image_prefix"*) ;;
   *) fail "image must be the canonical immutable digest for $app" ;;
 esac
-[[ "$image" =~ ^docker\.io/library/personal-server-(portal-web|crawler-worker)@sha256:[0-9a-f]{64}$ ]] ||
+[[ "$image" =~ ^docker\.io/library/personal-server-(portal-web|crawler-worker|book-memo)@sha256:[0-9a-f]{64}$ ]] ||
   fail "image must be an immutable sha256 digest"
 [ "$mode" != "--go" ] || [ -n "$expected_current_image" ] ||
   fail "--expected-current-image is required with --go"
@@ -59,10 +61,10 @@ kube() {
 read_deployment_image() {
   local deployment_json
   deployment_json="$(kube get deployment "$app" -o json)" || return 1
-  python3 - "$container_name" "$service_port" "$deployment_json" <<'PY'
+  python3 - "$container_name" "$service_port" "$app" "$deployment_json" <<'PY'
 import json
 import sys
-container_name, expected_port, deployment_payload = sys.argv[1:]
+container_name, expected_port, app, deployment_payload = sys.argv[1:]
 deployment = json.loads(deployment_payload)
 spec = deployment.get("spec", {})
 status = deployment.get("status", {})
@@ -71,6 +73,18 @@ if spec.get("replicas") != 1 or status.get("readyReplicas") != 1 or status.get("
     sys.exit(1)
 if len(containers) != 1:
     sys.exit(1)
+if app == "book-memo":
+    pod = spec.get("template", {}).get("spec", {})
+    data_volumes = [volume for volume in pod.get("volumes", []) if
+        volume.get("persistentVolumeClaim", {}).get("claimName") == "book-memo-data"
+    ]
+    if spec.get("strategy", {}).get("type") != "Recreate" or len(data_volumes) != 1:
+        sys.exit(1)
+    data_mounts = [mount for mount in containers[0].get("volumeMounts", []) if
+        mount.get("name") == data_volumes[0].get("name")
+    ]
+    if len(data_mounts) != 1 or data_mounts[0].get("mountPath") != "/data/book-memo" or data_mounts[0].get("readOnly") is True:
+        sys.exit(1)
 container = containers[0]
 if container.get("name") != container_name:
     sys.exit(1)
@@ -186,11 +200,13 @@ runtime_health() {
   curl --fail --silent --show-error --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" \
     --max-time "$CURL_MAX_TIME_SECONDS" "$endpoint_url" >/dev/null || return 1
 
-  if [ "$app" = "portal-web" ]; then
+  if [ "$app" = "portal-web" ] || [ "$app" = "book-memo" ]; then
+    public_health_url="$PORTAL_HEALTH_URL"
+    [ "$app" != "book-memo" ] || public_health_url="$BOOK_HEALTH_URL"
     for probe in 1 2 3; do
       status="$(curl --silent --show-error --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" \
         --max-time "$CURL_MAX_TIME_SECONDS" --output /dev/null --write-out '%{http_code}' \
-        "$PORTAL_HEALTH_URL")" || return 1
+        "$public_health_url")" || return 1
       [ "$status" = "200" ] || return 1
       [ "$probe" = 3 ] || sleep 10
     done

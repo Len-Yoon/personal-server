@@ -24,7 +24,7 @@
       "timeZone": "Asia/Seoul",
       "startingDeadlineSeconds": 300,
       "suspend": false,
-      "image": "docker.io/library/personal-server-crawler-pvc-backup@sha256:2515d72d55115f5c2ef429729e7f76326eb7567903420515836987f9ba3490bf"
+      "image": "docker.io/library/personal-server-crawler-pvc-backup@sha256:6e49af740101fe47601b48dc1a7da59a201f01e108b770e221bcb5a3b8a62846"
     }
   ]
 }
