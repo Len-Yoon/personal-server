@@ -11,9 +11,26 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.verify_change_scope import SERVICE_PREFIXES, _read_changes, classify_paths
+
+
 MATRIX_PATH = ROOT / "tests" / "ci_test_matrix.json"
+DOCUMENTATION_COMMAND = "python3 -m unittest " + " ".join((
+    "tests.test_documentation_index",
+    "tests.test_documentation_links",
+    "tests.test_compose_config",
+    "tests.test_verify_change_scope",
+    "tests.test_deploy_n100",
+    "tests.test_change_harness",
+    "tests.test_token_measurements",
+    "tests.test_n100_remote_dev",
+    "tests.test_n100_safe_deployment",
+    "tests.test_run_service_tests",
+))
 DEFAULT_VENV_ROOT = ROOT / ".venv"
 REQUIRED_FIELDS = {
     "name",
@@ -24,6 +41,10 @@ REQUIRED_FIELDS = {
     "test_command",
 }
 _UNITTEST_PREFIX = ("python3", "-m", "unittest")
+_SCOPE_LIST_FIELDS = (
+    "changed_files", "services", "documentation_files", "automation_files",
+    "infrastructure_files", "blocked_files", "unclassified_files", "required_checks",
+)
 
 
 def load_matrix() -> list[dict[str, object]]:
@@ -165,12 +186,87 @@ def validate_matrix_coverage(matrix: list[dict[str, object]]) -> set[str]:
     return assigned
 
 
+def select_ci_suites(
+    evidence: dict[str, object], matrix: list[dict[str, object]],
+    *, deleted_paths: set[str] | None = None,
+) -> tuple[str, list[str]]:
+    """Select bounded suites from validated scope evidence; uncertainty runs all suites."""
+    if not isinstance(evidence, dict) or any(
+        not isinstance(evidence.get(field), list)
+        or any(not isinstance(value, str) for value in evidence[field])
+        for field in _SCOPE_LIST_FIELDS
+    ):
+        raise ValueError("scope evidence is incomplete")
+
+    changed = set(evidence["changed_files"])
+    categories = (
+        "documentation_files", "automation_files", "infrastructure_files",
+        "blocked_files", "unclassified_files",
+    )
+    classified = set().union(*(evidence[field] for field in categories))
+    service_paths = {
+        path for path in changed if any(path.startswith(prefix) for prefix in SERVICE_PREFIXES)
+    }
+    if changed != classified | service_paths:
+        raise ValueError("scope evidence does not classify every changed path")
+
+    independently_classified = classify_paths(evidence["changed_files"], deleted_paths=deleted_paths)
+    if any(
+        evidence[field] != independently_classified[field]
+        for field in (*_SCOPE_LIST_FIELDS,)
+    ):
+        raise ValueError("scope evidence classification does not match changed paths")
+
+    all_names = [str(entry["name"]) for entry in matrix]
+    known = set(all_names)
+    if "maintenance" not in known or not set(evidence["required_checks"]) <= known:
+        raise ValueError("scope evidence requires an unknown CI suite")
+    full = ("full", all_names)
+    if (
+        not changed or evidence["blocked_files"] or evidence["unclassified_files"]
+        or evidence["infrastructure_files"]
+        or any(Path(path).name in {"Dockerfile", ".dockerignore", "pyproject.toml", "uv.lock", "package.json", "package-lock.json"}
+               or Path(path).name.startswith("requirements") for path in service_paths)
+    ):
+        return full
+
+    owners = {
+        path: str(entry["name"])
+        for entry in matrix
+        for path in files_for_test_command(str(entry["test_command"]))
+    }
+    service_names = set(SERVICE_PREFIXES.values())
+    touched = set(evidence["services"])
+    if not touched <= service_names:
+        raise ValueError("scope evidence names an unknown service")
+    for path in evidence["automation_files"]:
+        owner = owners.get(path) if path.startswith("tests/") else None
+        if owner not in service_names:
+            return full
+        touched.add(owner)
+
+    if len(touched) > 1:
+        return full
+    if touched:
+        selected = [name for name in all_names if name in touched or name == "maintenance"]
+        if set(evidence["required_checks"]) <= set(selected):
+            return "service", selected
+        return full
+    if evidence["documentation_files"]:
+        if not evidence["required_checks"]:
+            return "documentation", ["documentation"]
+        return full
+    return full
+
+
 def parse_args(matrix: list[dict[str, object]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", choices=[entry["name"] for entry in matrix], action="append")
     parser.add_argument("--list", action="store_true", help="list available CI-equivalent Python suites and exit")
     parser.add_argument("--dry-run", action="store_true", help="print subprocess commands without executing tests")
     parser.add_argument("--github-matrix", action="store_true", help="print the GitHub Actions matrix JSON and exit")
+    parser.add_argument("--scope-evidence", type=Path, help="select GitHub matrix suites from scope JSON")
+    parser.add_argument("--changes-input", type=Path, help="name-status-z changes used to build scope evidence")
     parser.add_argument(
         "--venv-root",
         type=Path,
@@ -222,7 +318,37 @@ def main() -> int:
         return 2
     args = parse_args(matrix)
     if args.github_matrix:
-        print(json.dumps({"include": matrix}, separators=(",", ":")))
+        if args.scope_evidence is None:
+            print(json.dumps({"include": matrix}, separators=(",", ":")))
+            return 0
+        try:
+            evidence = json.loads(args.scope_evidence.read_text(encoding="utf-8"))
+            deleted_paths = None
+            if args.changes_input is not None:
+                changes = _read_changes(args.changes_input, "git-name-status-z")
+                if list(dict.fromkeys(path for _, path in changes)) != evidence.get("changed_files"):
+                    raise ValueError("scope evidence changed paths do not match Git input")
+                deleted_paths = {path for status, path in changes if status == "D"}
+            mode, selected = select_ci_suites(evidence, matrix, deleted_paths=deleted_paths)
+        except (OSError, ValueError) as error:
+            print(f"CI selection failed: {error}", file=sys.stderr)
+            return 2
+        include = [entry for entry in matrix if entry["name"] in selected]
+        if mode == "documentation":
+            files_for_test_command(DOCUMENTATION_COMMAND)
+            include = [{
+                "name": "documentation",
+                "python_version": "3.11",
+                "requirements": "",
+                "extra_packages": [],
+                "pythonpath": ".",
+                "test_command": DOCUMENTATION_COMMAND,
+            }]
+        print(json.dumps({
+            "include": include,
+            "selected_checks": selected,
+            "mode": mode,
+        }, separators=(",", ":")))
         return 0
     if args.list:
         print("\n".join(str(entry["name"]) for entry in matrix))

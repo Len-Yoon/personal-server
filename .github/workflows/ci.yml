@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       policy_status: ${{ steps.classify.outputs.policy_status }}
+      selection: ${{ steps.select.outputs.selection }}
 
     steps:
       - name: Check out repository
@@ -59,27 +60,40 @@ jobs:
             changed-files.nul
             agent-loop-scope.json
 
+      - name: Select CI suites
+        id: select
+        run: |
+          python3 tests/run_service_tests.py --github-matrix --scope-evidence agent-loop-scope.json --changes-input changed-files.nul > ci-selection.json
+          echo "selection=$(cat ci-selection.json)" >> "$GITHUB_OUTPUT"
+
   matrix:
     needs: scope
     if: always()
     runs-on: ubuntu-latest
     outputs:
       include: ${{ steps.generate.outputs.include }}
+      selected_checks: ${{ steps.generate.outputs.selected_checks }}
+      mode: ${{ steps.generate.outputs.mode }}
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.11"
-
       - name: Generate CI test matrix
         id: generate
+        env:
+          CI_SELECTION: ${{ needs.scope.outputs.selection }}
         run: |
-          include="$(python3 tests/run_service_tests.py --github-matrix)"
-          echo "include=$include" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          selection = json.loads(os.environ["CI_SELECTION"])
+          include = selection["include"]
+          selected = selection["selected_checks"]
+          if not include or [entry["name"] for entry in include] != selected:
+              raise SystemExit("CI selection is empty or inconsistent")
+          print("include=" + json.dumps({"include": include}, separators=(",", ":")))
+          print("selected_checks=" + json.dumps(selected, separators=(",", ":")))
+          print("mode=" + selection["mode"])
+          PY
 
   test:
     needs: [scope, matrix]
@@ -130,25 +144,33 @@ jobs:
       - name: Build agent-loop evidence
         id: evidence
         shell: bash
+        env:
+          CI_SELECTED_CHECKS_JSON: ${{ needs.matrix.outputs.selected_checks }}
         run: |
           set +e
           check_results=()
           executed_checks=()
           if [[ "${{ needs.test.result }}" == "success" ]]; then
-            executed_checks=(
-              portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance k8s-contracts
-            )
-            check_results=(
-              --check-result portal=success
-              --check-result system-agent=success
-              --check-result crawler-worker=success
-              --check-result homeops-executor=success
-              --check-result youtube-memo=success
-              --check-result book-memo=success
-              --check-result car-care-worker=success
-              --check-result maintenance=success
-              --check-result k8s-contracts=success
-            )
+            python3 - "$CI_SELECTED_CHECKS_JSON" <<'PY' > selected-checks.txt
+          import json
+          import sys
+
+          selected = json.loads(sys.argv[1])
+          if not isinstance(selected, list) or not selected or len(selected) != len(set(selected)):
+              raise SystemExit("CI selected checks are missing or duplicated")
+          for check in selected:
+              if not isinstance(check, str) or not check or "\n" in check:
+                  raise SystemExit("CI selected check is invalid")
+              print(check)
+          PY
+            selection_status=$?
+            if [[ "$selection_status" -ne 0 ]]; then
+              exit 1
+            fi
+            mapfile -t executed_checks < selected-checks.txt
+            for check in "${executed_checks[@]}"; do
+              check_results+=(--check-result "$check=success")
+            done
           fi
           python3 scripts/verify_change_scope.py \
             --input changed-files.nul \
@@ -189,6 +211,8 @@ jobs:
             echo
             echo "- Policy status: \`${{ steps.evidence.outputs.policy_status }}\`"
             echo "- Service test result: \`${{ needs.test.result }}\`"
+            echo "- Selected CI mode: \`${{ needs.matrix.outputs.mode }}\`"
+            echo "- Selected suites: \`${{ needs.matrix.outputs.selected_checks }}\`"
             echo "- Missing checks: \`$missing_checks\`"
             echo "- Harness status: \`${{ steps.evidence.outputs.harness_status }}\`"
             echo
