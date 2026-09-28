@@ -122,7 +122,7 @@ K3s 전환 뒤에도 예전 Docker 컨테이너가 남아 있으면, 복구 도�
 | 상태 확인 | Prometheus·Grafana 지표와 관리자 화면, 외부 health 점검 |
 | 제한형 복구 | HomeOps 조치와 N100 제한형 자동복구에 대상·실행 조건·횟수 제한 적용 |
 | 데이터 보존 | 앱 데이터는 PVC에 유지하고 이미지 교체와 데이터 변경을 별도 절차로 처리 |
-| 백업 | Portal PVC 정기 백업을 `age`로 암호화해 원격 저장·복원 검증. Book·YouTube·Crawler PVC도 N100에서 각각 원격 암호화 백업과 격리 복원을 수동 검증함. 세 서비스 CronJob은 자동 실행을 중지한 상태임. [수동 검증 결과](docs/reviews/20260928_서비스별_PVC_백업_N100_수동검증결과.md) |
+| 백업 | Portal PVC 정기 백업을 `age`로 암호화해 원격 저장·복원 검증. Book·YouTube·Crawler PVC도 N100에서 각각 원격 암호화 백업과 격리 복원을 수동 검증했고, 세 CronJob을 활성화함. 다음 정기 실행 성공은 확인 필요. [자동 실행 적용 결과](docs/reviews/20260928_서비스별_PVC_백업_자동실행_적용결과.md) |
 | 인증 | 관리자·파일함·메모 쓰기 권한 분리, 세션 인증과 Origin 검증 |
 | 요청 보호 | HttpOnly·SameSite 쿠키, 보안 헤더, 재시작 후에도 유지되는 인증 실패 제한 |
 | 컨테이너·공급망 | non-root 실행 사용자 설정, 베이스 이미지 digest와 외부 Action SHA 고정, Trivy 검사 |
