@@ -9,6 +9,11 @@ from scripts.run_change_harness import REPO_ROOT, run_harness
 
 
 class ChangeHarnessTests(unittest.TestCase):
+    def test_documentation_check_is_recorded_without_full_maintenance(self):
+        code, evidence = run_harness(["README.md"], check_results=("documentation=success",))
+        self.assertEqual(code, 0)
+        self.assertEqual(evidence["check_results"], [{"name": "documentation", "result": "success"}])
+
     def test_k8s_contracts_is_a_known_check(self):
         code, evidence = run_harness(
             ["infra/k8s/README.md"], check_results=("maintenance=success", "k8s-contracts=success")

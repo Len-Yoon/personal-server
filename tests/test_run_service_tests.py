@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests import run_service_tests as runner
+from scripts.verify_change_scope import classify_paths
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,7 +27,7 @@ EXPECTED_GROUPS = {
     "book-memo": ("3.11", "book-memo/requirements.txt", ["httpx==0.28.1"], "book-memo", "python3 -m unittest tests.book_memo.test_book_service tests.book_memo.test_ui_contract"),
     "car-care-worker": ("3.12", "car-care-worker/requirements.txt", [], "car-care-worker", "python3 -m unittest discover -s tests/car_care_worker"),
     "k8s-contracts": ("3.11", "", ["PyYAML"], ".", "python3 -m unittest tests.test_k8s_monitoring_tools tests.test_k8s_monitoring_values tests.test_k8s_portal_availability_alert tests.test_k8s_portal_backup_verify tests.test_k8s_portal_cutover tests.test_k8s_portal_nodeport_connectivity_smoke tests.test_k8s_portal_pvc_backup_automation tests.test_k8s_portal_pvc_backup_verify tests.test_k8s_portal_secret_shadow_smoke tests.test_k8s_sre_health_audit tests.test_k8s_sre_pod_recovery_lab tests.test_k8s_networkpolicy_smoke tests.test_k8s_sre_telegram_manifests tests.test_k8s_sre_telegram_tools tests.test_k8s_sre_telegram_update tests.test_k8s_transition_runner_artifacts tests.test_k8s_transition_runner_install_tools tests.test_k8s_transition_runner_policy tests.test_k8s_quarterly_sre_audit_cronjob tests.test_k8s_quarterly_sre_audit_automation tests.test_monthly_recovery_drill tests.test_k8s_slo_daily_evidence tests.test_k8s_crawler_worker_migration tests.test_k8s_crawler_pvc_backup tests.test_k8s_pvc_backup_retention tests.test_k8s_pvc_backup_retention_entrypoints tests.test_k3s_app_image_build tests.test_k3s_app_upgrade tests.test_k3s_app_image_transfer tests.test_k8s_book_memo_migration tests.test_k8s_book_pvc_backup tests.test_k8s_grafana_portal_http_dashboard tests.test_k8s_portal_nonroot tests.test_k8s_portal_pvc_backup_cronjob tests.test_k8s_portal_pvc_backup_cronjob_install tests.test_k8s_youtube_memo_migration tests.test_k8s_youtube_pvc_backup tests.test_validate_backup_evidence tests.test_validate_sre_alertmanager_config"),
-    "maintenance": ("3.11", "", [], ".", "python3 -m unittest tests.test_compose_config tests.test_supply_chain_security_workflow tests.test_documentation_index tests.test_dependabot_config tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_public_uptime_monitor tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements tests.test_python_multipart_security tests.test_runtime_service_deployment_contract tests.test_caddy_portal_upstream tests.test_n100_remote_dev tests.test_n100_safe_deployment tests.test_run_service_tests tests.test_runtime_service_state tests.test_setup_local_test_venvs tests.test_sre_telegram_relay"),
+    "maintenance": ("3.11", "", [], ".", "python3 -m unittest tests.test_compose_config tests.test_supply_chain_security_workflow tests.test_documentation_index tests.test_documentation_links tests.test_dependabot_config tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_public_uptime_monitor tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements tests.test_python_multipart_security tests.test_runtime_service_deployment_contract tests.test_caddy_portal_upstream tests.test_n100_remote_dev tests.test_n100_safe_deployment tests.test_run_service_tests tests.test_runtime_service_state tests.test_setup_local_test_venvs tests.test_sre_telegram_relay"),
 }
 
 # Keep the exact CI command fixture in sync with the new production-state contract.
@@ -38,6 +39,95 @@ EXPECTED_GROUPS["k8s-contracts"] = (*_k8s[:-1], _k8s[-1].replace(
 
 
 class ServiceTestRunnerTests(unittest.TestCase):
+    def test_ci_selection_uses_documentation_subset_for_documentation(self):
+        mode, names = runner.select_ci_suites(
+            classify_paths(["README.md"]), runner.load_matrix()
+        )
+        self.assertEqual((mode, names), ("documentation", ["documentation"]))
+
+    def test_ci_selection_includes_owned_test_and_common_contracts(self):
+        mode, names = runner.select_ci_suites(
+            classify_paths(["portal-web/app/main.py", "tests/test_portfolio.py"]),
+            runner.load_matrix(),
+        )
+        self.assertEqual((mode, names), ("service", ["portal", "maintenance"]))
+
+    def test_ci_selection_runs_all_for_multiple_services_and_shared_changes(self):
+        matrix = runner.load_matrix()
+        full = [entry["name"] for entry in matrix]
+        for paths in (
+            ["portal-web/app/main.py", "book-memo/app/main.py"],
+            ["tests/test_compose_config.py"],
+            ["tests/ci_test_matrix.json"],
+            [".github/workflows/ci.yml"],
+            ["portal-web/Dockerfile"],
+            ["portal-web/requirements.txt"],
+            ["infra/k8s/tools/k3s-app-upgrade.sh"],
+            ["unknown-area/config.toml"],
+            [],
+        ):
+            with self.subTest(paths=paths):
+                mode, names = runner.select_ci_suites(classify_paths(paths), matrix)
+                self.assertEqual((mode, names), ("full", full))
+
+    def test_ci_selection_rejects_incomplete_scope_evidence(self):
+        with self.assertRaisesRegex(ValueError, "scope evidence"):
+            runner.select_ci_suites({"changed_files": ["README.md"]}, runner.load_matrix())
+
+    def test_ci_selection_rejects_misclassified_service_file(self):
+        evidence = classify_paths(["portal-web/app/main.py"])
+        evidence["services"] = []
+        evidence["documentation_files"] = ["portal-web/app/main.py"]
+        evidence["required_checks"] = []
+        with self.assertRaisesRegex(ValueError, "classification"):
+            runner.select_ci_suites(evidence, runner.load_matrix())
+
+    def test_ci_selection_accepts_approved_legacy_file_deletion(self):
+        path = "scripts/run-n100-operations.sh"
+        evidence = classify_paths([path], deleted_paths={path})
+        mode, names = runner.select_ci_suites(evidence, runner.load_matrix(), deleted_paths={path})
+        self.assertEqual(mode, "full")
+        self.assertEqual(names, [entry["name"] for entry in runner.load_matrix()])
+
+    def test_github_matrix_uses_git_deletion_status_for_scope_validation(self):
+        path = "scripts/run-n100-operations.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            scope = Path(directory) / "scope.json"
+            changes = Path(directory) / "changed-files.nul"
+            scope.write_text(json.dumps(classify_paths([path], deleted_paths={path})), encoding="utf-8")
+            changes.write_bytes(b"D\0scripts/run-n100-operations.sh\0")
+            result = self.run_runner(
+                "--github-matrix", "--scope-evidence", str(scope), "--changes-input", str(changes)
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["mode"], "full")
+
+    def test_github_matrix_selects_only_documentation_contract_group(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scope = Path(directory) / "scope.json"
+            scope.write_text(json.dumps(classify_paths(["README.md"])), encoding="utf-8")
+            result = self.run_runner("--github-matrix", "--scope-evidence", str(scope))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        selection = json.loads(result.stdout)
+        self.assertEqual(selection["mode"], "documentation")
+        self.assertEqual(selection["selected_checks"], ["documentation"])
+        self.assertEqual([entry["name"] for entry in selection["include"]], ["documentation"])
+        self.assertEqual(selection["include"][0]["test_command"], runner.DOCUMENTATION_COMMAND)
+        for module in (
+            "tests.test_deploy_n100", "tests.test_token_measurements",
+            "tests.test_n100_remote_dev", "tests.test_n100_safe_deployment",
+        ):
+            self.assertIn(module, selection["include"][0]["test_command"].split())
+
+    def test_github_matrix_rejects_malformed_scope_without_partial_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scope = Path(directory) / "scope.json"
+            scope.write_text('{"changed_files": ["README.md"]}', encoding="utf-8")
+            result = self.run_runner("--github-matrix", "--scope-evidence", str(scope))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("scope evidence", result.stderr)
+
     def test_matrix_coverage_matches_every_repository_test_file_exactly_once(self):
         assigned = runner.validate_matrix_coverage(runner.load_matrix())
         self.assertEqual(assigned, runner.discover_test_files())

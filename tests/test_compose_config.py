@@ -1,7 +1,9 @@
 import json
+import os
 import re
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -473,10 +475,11 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn("include: ${{ steps.generate.outputs.include }}", workflow)
         self.assertIn("  test:\n    needs: [scope, matrix]\n    if: always()", workflow)
         self.assertIn("matrix: ${{ fromJSON(needs.matrix.outputs.include) }}", workflow)
+        self.assertIn('json.dumps({"include": include}, separators=(",", ":"))', workflow)
         self.assertIn("  summary:\n    needs: [scope, matrix, test]\n    if: always()", workflow)
         self.assertIn("--test-result \"${{ needs.test.result }}\"", workflow)
         self.assertIn("--executed-checks", workflow)
-        self.assertIn("portal system-agent crawler-worker homeops-executor youtube-memo book-memo car-care-worker maintenance", workflow)
+        self.assertIn("mapfile -t executed_checks < selected-checks.txt", workflow)
         self.assertIn("Missing checks", workflow)
         self.assertIn("scripts/run_change_harness.py", workflow)
         self.assertIn("agent-loop-harness.json", workflow)
@@ -514,6 +517,34 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn("if: join(matrix.extra_packages, '') != ''", workflow)
         self.assertIn("python3 -m pip install ${{ join(matrix.extra_packages, ' ') }}", workflow)
         self.assertNotIn("Install K3s contract dependencies", workflow)
+
+    def test_ci_selects_suites_and_records_only_executed_checks(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("--scope-evidence agent-loop-scope.json", workflow)
+        self.assertIn("selection: ${{ steps.select.outputs.selection }}", workflow)
+        self.assertIn("CI_SELECTION: ${{ needs.scope.outputs.selection }}", workflow)
+        self.assertIn("selected_checks: ${{ steps.generate.outputs.selected_checks }}", workflow)
+        self.assertIn("CI_SELECTED_CHECKS_JSON: ${{ needs.matrix.outputs.selected_checks }}", workflow)
+        self.assertIn('check_results+=(--check-result "$check=success")', workflow)
+        self.assertNotIn("--check-result portal=success", workflow)
+
+    def test_ci_matrix_output_is_a_github_matrix_object(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        generate = workflow.split("      - name: Generate CI test matrix\n", 1)[1].split("\n  test:", 1)[0]
+        script = textwrap.dedent(generate.split("        run: |\n", 1)[1])
+        selection = {
+            "include": [{"name": "documentation"}],
+            "selected_checks": ["documentation"],
+            "mode": "documentation",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "github-output"
+            env = {**os.environ, "CI_SELECTION": json.dumps(selection), "GITHUB_OUTPUT": str(output)}
+            completed = subprocess.run(["bash", "-e"], input=script, text=True, capture_output=True, env=env)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+        self.assertEqual(json.loads(values["include"]), {"include": selection["include"]})
+        self.assertEqual(json.loads(values["selected_checks"]), ["documentation"])
 
     def test_ci_matrix_matches_service_docker_python_versions(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
