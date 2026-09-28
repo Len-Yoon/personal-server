@@ -29,6 +29,13 @@ EXPECTED_GROUPS = {
     "maintenance": ("3.11", "", [], ".", "python3 -m unittest tests.test_compose_config tests.test_supply_chain_security_workflow tests.test_documentation_index tests.test_dependabot_config tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_public_uptime_monitor tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements tests.test_python_multipart_security tests.test_runtime_service_deployment_contract tests.test_caddy_portal_upstream tests.test_n100_remote_dev tests.test_n100_safe_deployment tests.test_run_service_tests tests.test_runtime_service_state tests.test_setup_local_test_venvs tests.test_sre_telegram_relay"),
 }
 
+# Keep the exact CI command fixture in sync with the new production-state contract.
+_k8s = EXPECTED_GROUPS["k8s-contracts"]
+EXPECTED_GROUPS["k8s-contracts"] = (*_k8s[:-1], _k8s[-1].replace(
+    "tests.test_k8s_crawler_pvc_backup tests.test_k8s_pvc_backup_retention",
+    "tests.test_k8s_crawler_pvc_backup tests.test_k8s_service_backup_production_state tests.test_k8s_pvc_backup_retention",
+))
+
 
 class ServiceTestRunnerTests(unittest.TestCase):
     def test_matrix_coverage_matches_every_repository_test_file_exactly_once(self):

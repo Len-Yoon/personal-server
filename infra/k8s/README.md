@@ -25,6 +25,24 @@ Portal은 K3s PVC를 상태 저장소로 사용하며, Compose `portal-web`은 �
 
 2026-09-27 기준 Crawler·Book·YouTube·Portal의 A2·A4·A5 이미지 적용과 외부 health 검증은 [최신 고도화 적용 결과](../../docs/20260921_프로젝트보완_개발계획.md#2026-09-27-a2a4a5-고도화-및-n100-적용-결과)를 따름. 2026-09-28 Book·YouTube·Crawler PVC 백업 CronJob은 수동 백업·격리 복원 성공 뒤 [자동 실행을 활성화](../../docs/reviews/20260928_서비스별_PVC_백업_자동실행_적용결과.md)함. 다음 정기 실행 성공은 확인 필요. 뉴스 10차의 과거 보류와 후속 적용은 각각 [당시 K3s 앱 배포 결과](../../docs/reviews/20260921_K3s앱배포_검증결과.md)와 [뉴스·SLO 운영 적용 결과](../../docs/reviews/20260922_뉴스_SLO_운영적용_검증결과.md)에 기록됨. 초기 manifest의 `replicas: 0`·sentinel image는 현재 운영 상태를 나타내지 않으므로 재적용하지 않음.
 
+### 서비스별 PVC 백업 운영 목표 상태
+
+Book·YouTube·Crawler 백업 CronJob의 맥 저장소 기준 운영 상태는 [production-cronjob-state.json](backup-automation/production-cronjob-state.json)에 기록함. 세 `*-pvc-backup-cronjob.yaml`은 최초 설치용 `suspend: true`·sentinel 이미지이므로 활성 운영 CronJob에 전체 적용하지 않음. 목표 파일은 일정·시간대·시작 마감·활성 상태·고정 이미지 digest를 보관하며 Secret 값은 포함하지 않음.
+
+맥에서 변경·테스트 → 기능 브랜치 PR·CI → `main` 병합을 마친 뒤, **N100 운영 적용은 별도 최종 승인**을 받고 정확한 커밋으로 fast-forward함. N100 WSL의 저장소 루트에서 아래 순서로 확인함. `--check`는 읽기 전용이며 목표와 실제 값이 다르면 실패함. `--apply`는 사전 승인된 대상 커밋과 깨끗한 추적 작업공간을 요구하고, 세 CronJob의 `startingDeadlineSeconds`와 `suspend`만 조건부 patch함. 이미지가 목표와 다르면 이미지 반입·교체 절차를 별도로 검토하며 이 도구로 수정하지 않음.
+
+```bash
+python3 infra/k8s/tools/service-pvc-backup-production-state.py --validate
+python3 infra/k8s/tools/service-pvc-backup-production-state.py --check
+# 최종 운영 승인 뒤에만 실행함. 승인된 main의 40자리 전체 SHA를 입력함.
+python3 infra/k8s/tools/service-pvc-backup-production-state.py --apply --expected-sha "$APPROVED_MAIN_SHA"
+python3 infra/k8s/tools/service-pvc-backup-production-state.py --check
+```
+
+도구는 Job 실행 중·writer/PVC/백업 증적/Relay 이상·예정 시각 직후 300초·이미지 미반입·동시 수정 충돌을 차단함. JSON Patch의 UID·resourceVersion 조건과 server dry-run 뒤 실제 적용하며, 이미 일치하면 쓰기 0건임. 여러 대상 중 일부만 적용된 뒤 실패하면 재실행이나 rollback을 자동으로 하지 않고 실제 상태를 다시 조회함. 적용 후 Portal 및 변경 서비스의 외부 health를 10초 간격 3회 확인하고, 다음 정기 실행의 성공은 별도 증적으로 검증함. 이 도구는 Secret·PVC·ConfigMap·RBAC·Deployment를 쓰지 않음.
+
+`--check`는 목표 필드와 백업 명령·ServiceAccount·PVC/Secret mount·핵심 보안 설정을 확인함. CronJob 전체 spec·Secret 내용·이미지의 플랫폼 manifest까지 포괄 감사하는 도구는 아니므로 운영 사전검토에서 별도 확인함. N100 이미지 목록에 고정 alias가 있어도 해당 이미지가 `linux/amd64`로 실행 가능한지는 정기 Job 또는 별도 이미지 검사로 확인 필요함.
+
 ## 빠른 상태 확인
 
 ```bash
