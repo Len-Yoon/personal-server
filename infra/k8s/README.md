@@ -29,6 +29,8 @@ Portal은 K3s PVC를 상태 저장소로 사용하며, Compose `portal-web`은 �
 
 Book·YouTube·Crawler 백업 CronJob의 맥 저장소 기준 운영 상태는 [production-cronjob-state.json](backup-automation/production-cronjob-state.json)에 기록함. 세 `*-pvc-backup-cronjob.yaml`은 최초 설치용 `suspend: true`·sentinel 이미지이므로 활성 운영 CronJob에 전체 적용하지 않음. 목표 파일은 일정·시간대·시작 마감·활성 상태·고정 이미지 digest를 보관하며 Secret 값은 포함하지 않음.
 
+2026-09-28 최종 승인에 따라 이 목표 상태를 N100에서 [검증](../../docs/reviews/20260928_백업운영목표상태_동기화결과.md)함. 세 CronJob이 이미 목표와 같아 적용 명령은 쓰기 0건으로 종료됨. 이후 변경에도 아래 절차와 최종 운영 승인 기준을 유지함.
+
 맥에서 변경·테스트 → 기능 브랜치 PR·CI → `main` 병합을 마친 뒤, **N100 운영 적용은 별도 최종 승인**을 받고 정확한 커밋으로 fast-forward함. N100 WSL의 저장소 루트에서 아래 순서로 확인함. `--check`는 읽기 전용이며 목표와 실제 값이 다르면 실패함. `--apply`는 사전 승인된 대상 커밋과 깨끗한 추적 작업공간을 요구하고, 세 CronJob의 `startingDeadlineSeconds`와 `suspend`만 조건부 patch함. 이미지가 목표와 다르면 이미지 반입·교체 절차를 별도로 검토하며 이 도구로 수정하지 않음.
 
 ```bash

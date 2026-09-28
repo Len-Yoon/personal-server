@@ -49,6 +49,8 @@ Portal PVC는 `portal-web-files-dynamic`, `portal-web-state-dynamic` 두 개이�
 
 2026-09-28 Book·YouTube·Crawler PVC는 N100에서 각각 원격 암호화 백업과 격리 복원을 수동 Job으로 검증함. 세 Job의 성공 증적·잠금 해제·단일 writer·PVC Bound·외부 health를 확인함. 이후 세 CronJob에 시작 마감 300초를 적용하고 자동 실행을 활성화함. 활성화 직후 신규 Job은 없었으며 writer·잠금·외부 health가 유지됨. 다음 정기 실행 성공과 실패 알림 최종 수신은 확인 필요. Portal 정기 백업 상태는 변경하지 않음. [수동 검증 결과](reviews/20260928_서비스별_PVC_백업_N100_수동검증결과.md)와 [자동 실행 적용 결과](reviews/20260928_서비스별_PVC_백업_자동실행_적용결과.md)를 따름.
 
+같은 날 맥 저장소에 세 CronJob의 [운영 목표 상태](../infra/k8s/backup-automation/production-cronjob-state.json)와 제한 적용 도구를 반영하고 N100을 해당 구현 커밋으로 fast-forward함. N100의 목표 검증은 통과했고 기존 값과 일치하여 CronJob 쓰기는 0건이었음. 독립 운영 검토와 네 서비스 외부 health 12/12 HTTP 200을 확인함. [동기화 결과](reviews/20260928_백업운영목표상태_동기화결과.md)에 범위와 잔여 확인 사항을 기록함.
+
 저장소의 `suspend: true`, 앱 `replicas: 0`, sentinel image는 초기 적용용 안전 기본값임. 현재 실행 상태나 운영 미적용을 단독으로 증명하지 않음. 저장소 병합, 운영 동기화, 이미지 교체, 자동 실행 활성화, 실제 검증을 각각 기록함. Portal·뉴스의 2026-09-21 이미지 적용 근거는 [배포 검증 결과](reviews/20260921_앱배포_검증결과.md), 후속 Book·Portal 교체는 [K3s 앱 배포 결과](reviews/20260921_K3s앱배포_검증결과.md), 차량 교체는 [차량 배포 결과](reviews/20260921_차량배포_검증결과.md)를 따름. 뉴스 10차 목표 이미지는 2026-09-22에 적용했으며 SLO collector도 같은 운영 검증에서 갱신함. 2026-09-27 A2·A4·A5 이미지 교체와 A3 검색 코드의 Portal 실행 확인은 [최신 고도화 적용 결과](20260921_프로젝트보완_개발계획.md#2026-09-27-a2a4a5-고도화-및-n100-적용-결과)를 따름.
 
 ## 일상 상태 확인
