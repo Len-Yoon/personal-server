@@ -1,11 +1,14 @@
 import importlib.util
+import io
 import json
 import math
 import subprocess
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
 
 import yaml
@@ -234,6 +237,34 @@ class SloDailyEvidenceValidationTests(unittest.TestCase):
 
 
 class SloDailyEvidenceCollectionTests(unittest.TestCase):
+    def test_public_health_non_200_logs_only_status_code(self):
+        class Response:
+            status = 503
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *unused):
+                return False
+
+        endpoint = "https://public.example/health"
+
+        def raise_http_error(*unused, **kwargs):
+            raise HTTPError(endpoint, 403, "blocked", {}, io.BytesIO(b"private response body"))
+
+        cases = (
+            ("HTTPError", raise_http_error, "403"),
+            ("response", lambda *unused, **kwargs: Response(), "503"),
+        )
+        for name, fake_urlopen, expected_status in cases:
+            with self.subTest(name=name):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    result = module._public_health_status(endpoint, urlopen=fake_urlopen)
+
+                self.assertEqual(result, "failed")
+                self.assertEqual(output.getvalue(), f"public_health_http_status={expected_status}\n")
+
     def test_portal_ready_query_aggregates_all_matching_series_to_one_scalar(self):
         query = module._QUERY_PORTAL_READY
 

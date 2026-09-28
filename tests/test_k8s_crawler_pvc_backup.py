@@ -7,6 +7,7 @@ import io
 import json
 import shutil
 import sqlite3
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -40,6 +41,36 @@ def write_crawler_state(root: Path) -> None:
 
 
 class CrawlerBackupDataTests(unittest.TestCase):
+    def test_command_timeout_has_safe_distinct_type(self):
+        runner = load_runner()
+        with patch.object(runner.subprocess, "run", side_effect=subprocess.TimeoutExpired(
+            ["rclone", "private-config-path"], 30, stderr=b"private diagnostic"
+        )):
+            with self.assertRaises(runner.CommandTimeout) as caught:
+                runner.run_command("rclone", "lsd", timeout=30)
+        self.assertEqual(str(caught.exception), "external command timed out")
+
+    def test_remote_preflight_retries_one_timeout_with_bounded_calls(self):
+        runner = load_runner()
+        with patch.object(runner, "rclone_args", return_value=("rclone",)), \
+                patch.object(runner, "run_command", side_effect=[runner.CommandTimeout("timeout"), ""]) as command, \
+                patch.object(runner.time, "sleep") as sleep:
+            runner.remote_preflight()
+        self.assertEqual(command.call_count, 2)
+        self.assertEqual([call.kwargs["timeout"] for call in command.call_args_list], [60, 60])
+        sleep.assert_called_once_with(2)
+
+    def test_remote_preflight_does_not_retry_command_error(self):
+        runner = load_runner()
+        with patch.object(runner, "rclone_args", return_value=("rclone",)), \
+                patch.object(runner, "run_command", side_effect=runner.BackupError("private diagnostic")) as command, \
+                patch.object(runner.time, "sleep") as sleep:
+            with self.assertRaises(runner.RemotePreflightError) as caught:
+                runner.remote_preflight()
+        self.assertEqual(str(caught.exception), "remote preflight failed")
+        command.assert_called_once()
+        sleep.assert_not_called()
+
     def test_snapshot_round_trip_checks_database_and_tree_digest(self):
         runner = load_runner()
         with tempfile.TemporaryDirectory() as directory:
@@ -197,7 +228,8 @@ class CrawlerBackupControllerTests(unittest.TestCase):
             self.assertEqual(state_patch.call_args_list[0].args[0]["status"], "running")
             self.assertEqual(state_patch.call_args_list[1].args[0]["status"], "failed")
 
-    def run_full_backup(self, *, fail_remote_restore=False, fail_remote_preflight=False, lock_busy=False,
+    def run_full_backup(self, *, fail_remote_restore=False, fail_remote_preflight=False,
+                        remote_preflight_timeouts=0, lock_busy=False,
                         fail_success_patch=False, fail_failure_patch=False,
                         fail_scale=False, pods_stay=False, fail_writer_recovery=False,
                         missing_secret=False, fail_cleanup=False,
@@ -224,6 +256,7 @@ class CrawlerBackupControllerTests(unittest.TestCase):
             reports = []
             state = {"replicas": 1, "lock": "other-run" if lock_busy else "", "uid": "deployment-1"}
             revision = [1]
+            remote_attempts = [0]
 
             def command(*argv, **_kwargs):
                 calls.append(argv)
@@ -271,6 +304,9 @@ class CrawlerBackupControllerTests(unittest.TestCase):
                     return ""
                 if argv[0] == "rclone":
                     if "lsd" in argv:
+                        remote_attempts[0] += 1
+                        if remote_attempts[0] <= remote_preflight_timeouts:
+                            raise runner.CommandTimeout("external command timed out")
                         if fail_remote_preflight:
                             raise runner.BackupError("remote unavailable")
                         return ""
@@ -319,7 +355,8 @@ class CrawlerBackupControllerTests(unittest.TestCase):
                 runner.tempfile, "TemporaryDirectory", return_value=ScratchDirectory()
             ), patch.object(runner, "create_snapshot", side_effect=snapshot
             ):
-                if any((fail_remote_restore, fail_remote_preflight, lock_busy, fail_success_patch, fail_scale,
+                if any((fail_remote_restore, fail_remote_preflight, remote_preflight_timeouts >= 2,
+                        lock_busy, fail_success_patch, fail_scale,
                         pods_stay, fail_writer_recovery, missing_secret, fail_cleanup,
                         replacement_deployment, pause_conflict, pause_replacement,
                         restore_conflict, restore_replacement)):
@@ -443,6 +480,22 @@ class CrawlerBackupControllerTests(unittest.TestCase):
         self.assertEqual([next(item["value"] for item in operations if item["path"] == "/data/status") for _, operations in reports], ["running", "failed"])
         self.assertFalse(any(call[3:5] == ("scale", "deployment/crawler-worker") for call in calls))
         self.assertEqual(state["replicas"], 1)
+        self.assertEqual(sum(call[0] == "rclone" and "lsd" in call for call in calls), 1)
+        self.assertIn({"op": "add", "path": "/data/stage", "value": "preflight-remote-error"}, reports[-1][1])
+
+    def test_remote_preflight_timeout_exhaustion_reports_safe_stage_without_writer_pause(self):
+        calls, reports, state, _ciphertext = self.run_full_backup(remote_preflight_timeouts=2)
+        self.assertEqual(sum(call[0] == "rclone" and "lsd" in call for call in calls), 2)
+        self.assertFalse(any(call[3:5] == ("scale", "deployment/crawler-worker") for call in calls))
+        self.assertEqual(state["replicas"], 1)
+        self.assertIn({"op": "add", "path": "/data/stage", "value": "preflight-remote-timeout"}, reports[-1][1])
+
+    def test_remote_preflight_single_timeout_recovers_before_writer_pause(self):
+        calls, reports, state, ciphertext = self.run_full_backup(remote_preflight_timeouts=1)
+        self.assertTrue(ciphertext)
+        self.assertEqual(sum(call[0] == "rclone" and "lsd" in call for call in calls), 2)
+        self.assertEqual(state["replicas"], 1)
+        self.assertIn({"op": "add", "path": "/data/status", "value": "completed"}, reports[-1][1])
 
     def test_ambiguous_pause_response_keeps_lock_for_manual_recovery(self):
         calls, reports, state, _ciphertext = self.run_full_backup(fail_scale=True)

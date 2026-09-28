@@ -7,7 +7,7 @@ N100의 K3s는 현재 Portal·뉴스·YouTube Memo·Book Memo와 모니터링 �
 | 구분 | 주기 | 실행 목적 | 월간 감사와의 관계 |
 |---|---:|---|---|
 | 공개 상태 감시 | 약 5분 | 외부에서 공개 health 장애·복구를 신속히 감지함 | GitHub Actions에서 독립 실행하며 월간 감사로 대체하지 않음 |
-| 일별 SLO 증적 | 매일 02:15, 운영 활성·최근 수집 실패 | Prometheus 직전 24시간과 공개 health 교차 확인 증적을 최근 30건 보관함 | 월간 감사가 고정 ConfigMap을 읽기 전용으로 집계함 |
+| 일별 SLO 증적 | 매일 02:15, 운영 활성·최근 수집 성공 | Prometheus 직전 24시간과 공개 health 교차 확인 증적을 최근 30건 보관함. 세부 건강 항목은 `failed`일 수 있음 | 월간 감사가 고정 ConfigMap을 읽기 전용으로 집계함 |
 | Portal PVC 백업·복원 검증 | 매일 03:00 | 최신 복구 가능 증적을 유지하고 백업 실패를 조기에 감지함 | 별도 CronJob이 실행하며 월간 감사는 증적만 읽기 확인함 |
 | 내부 SRE 통합 점검 | 매월 1일 03:30 | Portal·K3s·백업 증적·격리 복구 훈련을 한 번에 확인함 | `monthly-sre-audit`만 활성화함 |
 | 코드 변경 검증 | 변경 시점 | 변경 영향 범위의 회귀를 병합 전 확인함 | 정기 운영 점검과 별도임 |
@@ -23,7 +23,7 @@ N100의 K3s는 현재 Portal·뉴스·YouTube Memo·Book Memo와 모니터링 �
 
 Portal은 K3s PVC를 상태 저장소로 사용하며, Compose `portal-web`은 동시에 실행하지 않음. Caddy는 `host.docker.internal:30080` NodePort를 통해 K3s Portal로 전달함. K3s runtime에서는 `.env`의 `PORTAL_UPSTREAM=host.docker.internal:30080` 설정이 필요하며, Compose runtime에서는 이 값을 `portal-web:8000`으로 유지하거나 비워 Compose 기본값을 사용함. Portal cutover는 이 값을 자동으로 전환하므로 수동 변경 대신 해당 절차를 사용함.
 
-2026-09-27 기준 Crawler·Book·YouTube·Portal의 A2·A4·A5 이미지 적용과 외부 health 검증은 [최신 고도화 적용 결과](../../docs/20260921_프로젝트보완_개발계획.md#2026-09-27-a2a4a5-고도화-및-n100-적용-결과)를 따름. 2026-09-28 Book·YouTube·Crawler PVC 백업 CronJob은 수동 백업·격리 복원 성공 뒤 [자동 실행을 활성화](../../docs/reviews/20260928_서비스별_PVC_백업_자동실행_적용결과.md)함. 다음 정기 실행 성공은 확인 필요. 뉴스 10차의 과거 보류와 후속 적용은 각각 [당시 K3s 앱 배포 결과](../../docs/reviews/20260921_K3s앱배포_검증결과.md)와 [뉴스·SLO 운영 적용 결과](../../docs/reviews/20260922_뉴스_SLO_운영적용_검증결과.md)에 기록됨. 초기 manifest의 `replicas: 0`·sentinel image는 현재 운영 상태를 나타내지 않으므로 재적용하지 않음.
+2026-09-27 기준 Crawler·Book·YouTube·Portal의 A2·A4·A5 이미지 적용과 외부 health 검증은 [최신 고도화 적용 결과](../../docs/20260921_프로젝트보완_개발계획.md#2026-09-27-a2a4a5-고도화-및-n100-적용-결과)를 따름. 2026-09-28 Book·YouTube·Crawler PVC 백업 CronJob은 수동 백업·격리 복원 성공 뒤 [자동 실행을 활성화](../../docs/reviews/20260928_서비스별_PVC_백업_자동실행_적용결과.md)함. 그러나 같은 날 13:00 뉴스 백업의 첫 정기 Job은 사전 점검에서 실패했으며, 원인과 수정 후보·미적용 상태는 [운영 반영 사전검토](../../docs/reviews/20260928_Book_SLO_뉴스백업_운영반영_사전검토.md)에 기록함. 뉴스 10차의 과거 보류와 후속 적용은 각각 [당시 K3s 앱 배포 결과](../../docs/reviews/20260921_K3s앱배포_검증결과.md)와 [뉴스·SLO 운영 적용 결과](../../docs/reviews/20260922_뉴스_SLO_운영적용_검증결과.md)에 기록됨. 초기 manifest의 `replicas: 0`·sentinel image는 현재 운영 상태를 나타내지 않으므로 재적용하지 않음.
 
 ### 서비스별 PVC 백업 운영 목표 상태
 
@@ -43,7 +43,7 @@ python3 infra/k8s/tools/service-pvc-backup-production-state.py --check
 
 도구는 Job 실행 중·writer/PVC/백업 증적/Relay 이상·예정 시각 직후 300초·이미지 미반입·동시 수정 충돌을 차단함. JSON Patch의 UID·resourceVersion 조건과 server dry-run 뒤 실제 적용하며, 이미 일치하면 쓰기 0건임. 여러 대상 중 일부만 적용된 뒤 실패하면 재실행이나 rollback을 자동으로 하지 않고 실제 상태를 다시 조회함. 적용 후 Portal 및 변경 서비스의 외부 health를 10초 간격 3회 확인하고, 다음 정기 실행의 성공은 별도 증적으로 검증함. 이 도구는 Secret·PVC·ConfigMap·RBAC·Deployment를 쓰지 않음.
 
-`--check`는 목표 필드와 백업 명령·ServiceAccount·PVC/Secret mount·핵심 보안 설정을 확인함. CronJob 전체 spec·Secret 내용·이미지의 플랫폼 manifest까지 포괄 감사하는 도구는 아니므로 운영 사전검토에서 별도 확인함. N100 이미지 목록에 고정 alias가 있어도 해당 이미지가 `linux/amd64`로 실행 가능한지는 정기 Job 또는 별도 이미지 검사로 확인 필요함.
+`--check`는 목표 필드와 백업 명령·ServiceAccount·PVC/Secret mount·핵심 보안 설정을 확인함. 2026-09-28 뉴스 백업 실패 보완으로 목표 이미지 digest를 먼저 갱신했으므로 승인된 이미지 반입·교체 전에는 이미지 불일치로 실패하는 것이 정상임. CronJob 전체 spec·Secret 내용·이미지의 플랫폼 manifest까지 포괄 감사하는 도구는 아니므로 운영 사전검토에서 별도 확인함. N100 이미지 목록에 고정 alias가 있어도 해당 이미지가 `linux/amd64`로 실행 가능한지는 정기 Job 또는 별도 이미지 검사로 확인 필요함.
 
 ## 빠른 상태 확인
 
@@ -134,18 +134,23 @@ CronJob은 매일 03:00 KST에 실행되며, `Forbid` 동시 실행 제한·실�
 
 `slo-daily-evidence` CronJob은 서울 기준 매일 02:15에 실행하도록 정의됨. 2026-09-22에 freshness 다중 시계열 집계 수정 collector를 반입하고 수동 Job 1회 검증을 완료했으며, 수동 검증 뒤 별도 승인으로 N100 CronJob을 `suspend: false`로 활성화함. 당일 증적은 `ok`로 검증됐음. [SLO 원인 분석](../../docs/reviews/20260921_SLO증적실패_원인분석.md)과 [운영 적용 검증 결과](../../docs/reviews/20260922_뉴스_SLO_운영적용_검증결과.md)를 참조함. `monitoring/slo-daily-evidence` ConfigMap의 `records.json`에 날짜별 검증 기록을 최대 30건 보관함. 같은 날짜의 재수집은 해당 기록을 교체함. Prometheus retention은 변경하지 않으며, 결측·질의 오류는 `unobservable`로 기록하고 Job이 실패함. 공개 health 비-200은 `failed`로 기록하며 관측 자체가 성공했다면 Job 실패로 취급하지 않음.
 
+2026-09-28 읽기 점검에서 Job은 증적 수집에 성공했으나 공개 health·Portal Ready·뉴스 freshness 세부 값은 `failed`였음. [사전검토](../../docs/reviews/20260928_Book_SLO_뉴스백업_운영반영_사전검토.md)의 새 이미지는 앞으로 공개 health의 비-200 상태 코드만 Job 로그에 남기며, 기존 판정과 증적은 바꾸지 않음. 과거 실패 원인은 확인 필요임.
+
 실행 권한은 고정 증적 ConfigMap의 `get`, `patch`로 제한함. CronJob은 동시 실행 금지, 재시도 없음, 최대 180초 실행, non-root, read-only root filesystem, capability 전체 제거 및 크기가 제한된 `/tmp`만 사용함. Secret·PVC·host volume을 mount하지 않으며 Portal·K3s 복구 또는 배포 차단을 수행하지 않음.
 
 다음은 운영자 승인 후 N100에서 수행할 적용 순서임. 저장소 병합만으로 운영 적용 또는 자동 실행이 완료되지 않음.
 
-1. 저장소 루트에서 이미지를 빌드하고 K3s에 반입함.
+1. 맥 저장소에서 먼저 테스트하고 Linux AMD64 OCI archive를 빌드함. archive SHA-256과 OCI manifest digest·플랫폼을 대조한 뒤 최종 운영 승인 후 N100에 전송·검증·반입함. 2026-09-28 후보의 이미지 참조와 해시는 [사전검토](../../docs/reviews/20260928_Book_SLO_뉴스백업_운영반영_사전검토.md)를 따름. N100에서 소스를 새로 빌드하지 않음.
 
    ```bash
-   docker build -f infra/k8s/slo-evidence/Dockerfile -t personal-server-slo-evidence:local .
-   docker save personal-server-slo-evidence:local | sudo k3s ctr images import -
+   # 맥: 변경한 소스와 Dockerfile을 함께 고정한 linux/amd64 OCI archive 생성
+   docker buildx build --provenance=false --platform linux/amd64 \
+     --tag personal-server-slo-evidence:20260928-http-status \
+     --file infra/k8s/slo-evidence/Dockerfile \
+     --output type=oci,dest=data/build-artifacts/20260928-book-slo-news/slo-evidence-20260928-http-status.oci.tar,annotation-manifest-descriptor.io.personal-server.image-ref=personal-server-slo-evidence:20260928-http-status .
    ```
 
-2. 최초 설치 시에만 전체 manifest를 적용함. `monitoring/slo-daily-evidence`가 이미 존재하면 `records.json: []`가 포함된 ConfigMap을 다시 적용하지 않음. 갱신 시에는 ConfigMap 문서를 제외한 ServiceAccount·Role·RoleBinding·CronJob만 적용하고 기존 증적은 보존함. 조회 실패를 리소스 부재로 취급하지 않으며, 실행 중인 Job이 있으면 종료 확인 전 변경·수동 재실행하지 않음.
+2. 최초 설치 시에만 전체 manifest를 적용함. `monitoring/slo-daily-evidence`가 이미 존재하면 `records.json: []`가 포함된 ConfigMap을 다시 적용하지 않음. **기존 활성 CronJob 갱신에는 설치용 `suspend: true` manifest도 재적용하지 않고 이미지 필드만 현재 값 일치 조건으로 변경함.** 기존 증적과 일정·활성 상태를 보존하고, 실행 중인 Job이 있으면 종료 확인 전 변경·수동 재실행하지 않음. 조회 실패를 리소스 부재로 취급하지 않음.
 
    ```bash
    # 최초 설치이며 증적 ConfigMap이 없음을 확인한 경우에만 실행함.
@@ -153,7 +158,7 @@ CronJob은 매일 03:00 KST에 실행되며, `Forbid` 동시 실행 제한·실�
    sudo k3s kubectl -n monitoring get cronjob slo-daily-evidence -o jsonpath='{.spec.suspend}'
    ```
 
-3. `suspend=true`를 확인하고 고유 실행 이름으로 수동 Job을 한 번 생성함. 명령 응답이 유실되면 같은 생성 명령을 반복하지 않고 Job 상태부터 읽기 확인함. 수동 Job 생성은 CronJob의 `Forbid` 제한을 적용받지 않으므로 이전 수동 Job이 종료됐는지도 확인 필요함.
+3. **최초 설치 시에만** `suspend=true`를 확인함. 기존 활성 CronJob의 이미지 갱신은 `suspend=false`를 보존함. 두 경우 모두 실행 중인 Job이 없음을 확인한 뒤 고유 실행 이름으로 수동 Job을 한 번 생성함. 명령 응답이 유실되면 같은 생성 명령을 반복하지 않고 Job 상태부터 읽기 확인함. 수동 Job 생성은 CronJob의 `Forbid` 제한을 적용받지 않음.
 
    ```bash
    slo_job="slo-daily-evidence-manual-$(date +%s)"
@@ -161,8 +166,8 @@ CronJob은 매일 03:00 KST에 실행되며, `Forbid` 동시 실행 제한·실�
    sudo k3s kubectl -n monitoring wait --for=condition=complete "job/$slo_job" --timeout=240s
    ```
 
-4. Job 성공 및 이번 실행 날짜의 증적 존재를 확인함. ConfigMap은 원문 출력 없이 수집기의 `validate_record`로 고정 필드·자료형·UTC 시각·수치 범위를 검증하고, 날짜 중복 없음·최대 30건·날짜 내림차순도 확인함. 실패 또는 관측 불가 결과는 성공으로 보정하지 않으며 중지 상태를 유지함.
-5. 수동 Job 성공과 증적 검증이 모두 끝난 뒤에만 일일 자동 실행을 활성화함. 외부 health 검증은 `https://len.pe.kr/health`를 10초 간격으로 3회 호출하여 모두 HTTP 200인지 확인함. 중단 시 CronJob을 다시 suspend하며 증적 ConfigMap은 삭제하지 않음.
+4. Job 성공 및 이번 실행 날짜의 증적 존재를 확인함. ConfigMap은 원문 출력 없이 수집기의 `validate_record`로 고정 필드·자료형·UTC 시각·수치 범위를 검증하고, 날짜 중복 없음·최대 30건·날짜 내림차순도 확인함. 실패 또는 관측 불가 결과는 성공으로 보정하지 않음. 기존 활성 CronJob 갱신에서 수동 검증이 실패하면 추가 변경을 중단하고 실제 상태를 조회하며, 기존 자동 실행의 중단 여부는 별도 판단함.
+5. **최초 설치 시에만** 수동 Job 성공과 증적 검증 뒤 일일 자동 실행을 활성화함. 기존 활성 CronJob 갱신에서는 활성 상태를 변경하지 않음. 외부 health는 `https://len.pe.kr/health`를 10초 간격으로 3회 호출해 모두 HTTP 200인지 확인함. 명시적으로 자동 수집을 중단하기로 결정한 경우에만 CronJob을 suspend하며 증적 ConfigMap은 삭제하지 않음.
 
    ```bash
    sudo k3s kubectl -n monitoring patch cronjob slo-daily-evidence --type=merge -p '{"spec":{"suspend":false}}'

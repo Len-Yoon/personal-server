@@ -44,10 +44,24 @@ class BackupError(RuntimeError):
     """A fixed-label backup failure; never includes command diagnostics."""
 
 
+class CommandTimeout(BackupError):
+    """An external command exceeded its fixed deadline."""
+
+
+class RemotePreflightError(BackupError):
+    """Remote access failed without exposing command output or credentials."""
+
+
+class RemotePreflightTimeout(RemotePreflightError):
+    """Both bounded remote preflight attempts timed out."""
+
+
 def run_command(*argv: str, timeout: int = COMMAND_TIMEOUT) -> str:
     try:
         result = subprocess.run(argv, check=True, text=True, capture_output=True, timeout=timeout)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
+    except subprocess.TimeoutExpired:
+        raise CommandTimeout("external command timed out") from None
+    except (subprocess.CalledProcessError, OSError) as error:
         raise BackupError("external command failed") from error
     return result.stdout
 
@@ -186,6 +200,19 @@ def rclone_args() -> tuple[str, ...]:
     return ("rclone", "--config", str(config), "--password-command", f"/usr/bin/cat {password}")
 
 
+def remote_preflight() -> None:
+    for attempt in range(2):
+        try:
+            run_command(*rclone_args(), "lsd", "--max-depth", "1", REMOTE_PARENT, timeout=60)
+            return
+        except CommandTimeout:
+            if attempt == 1:
+                raise RemotePreflightTimeout("remote preflight timed out") from None
+            time.sleep(2)
+        except BackupError:
+            raise RemotePreflightError("remote preflight failed") from None
+
+
 def workload_state() -> tuple[str, str]:
     deployment = k8s_json("get", "deployment", DEPLOYMENT)
     pvc = k8s_json("get", "pvc", PVC)
@@ -291,7 +318,14 @@ class CrawlerBackupController:
             deployment_uid, pvc_uid = workload_state()
             self.deployment_uid = deployment_uid
             check_crawler_data(MOUNT)
-            run_command(*rclone_args(), "lsd", "--max-depth", "1", REMOTE_PARENT, timeout=30)
+            try:
+                remote_preflight()
+            except RemotePreflightTimeout:
+                stage = "preflight-remote-timeout"
+                raise
+            except RemotePreflightError:
+                stage = "preflight-remote-error"
+                raise
             self.writer_restore_needed = True
             if workload_state() != (deployment_uid, pvc_uid):
                 raise BackupError("Crawler workload changed before backup")
@@ -438,7 +472,7 @@ def main() -> int:
             workload_state()
             assert_lock_available()
             check_crawler_data(MOUNT)
-            run_command(*rclone_args(), "lsd", "--max-depth", "1", REMOTE_PARENT, timeout=30)
+            remote_preflight()
             print("crawler_pvc_backup_check=PASS")
             return 0
         if mode in {"--prune-preview", "--prune-go"}:
