@@ -152,12 +152,14 @@ def scheduled_backup_cronjob(name, uid, schedule, *, last_schedule=None, suspend
 
 
 def backup_job(name, uid, owner_name, owner_uid, *, conditions=None, owner_kind="CronJob",
-               controller=True, namespace="personal-server"):
+               controller=True, namespace="personal-server", annotations=None):
     return {
         "apiVersion": "batch/v1", "kind": "Job",
         "metadata": {
             "name": name, "namespace": namespace, "uid": uid,
             "creationTimestamp": "2026-09-27T01:00:00Z",
+            "annotations": ({"batch.kubernetes.io/cronjob-scheduled-timestamp": "2026-09-27T01:00:00Z"}
+                            if annotations is None else annotations),
             "labels": {"batch.kubernetes.io/job-name": name},
             "ownerReferences": [{
                 "apiVersion": "batch/v1", "kind": owner_kind, "name": owner_name,
@@ -865,6 +867,7 @@ class RelayServiceTest(unittest.TestCase):
         for target, (_, message) in zip(("Book Memo", "YouTube Memo", "News Hub 뉴스 수집기"), telegram.sent_messages):
             self.assertIn(target, message)
             self.assertIn("백업 작업 실패", message)
+            self.assertIn("예약 시각: 2026-09-27 10:00 KST", message)
             self.assertNotIn("29840760", message)
             self.assertNotIn("10000000-", message)
         self.assertEqual(len(json.loads(k8s.data["pvc_backup_job_failed_ids"])), 3)
@@ -887,7 +890,44 @@ class RelayServiceTest(unittest.TestCase):
         forged["kind"] = "Deployment"
         k8s = FakePvcJobK8s({"crawler-pvc-backup": backup_cronjob("crawler-pvc-backup", cron_uid)},
                             [job, forged])
-        self.assertEqual(_read_pvc_backup_job_failures(k8s), [("crawler", job["metadata"]["uid"])])
+        self.assertEqual(_read_pvc_backup_job_failures(k8s),
+                         [("crawler", job["metadata"]["uid"], "2026-09-27 10:00")])
+
+    def test_manual_job_created_from_cronjob_is_not_reported_as_scheduled_failure(self):
+        cron_uid = "00000000-0000-4000-8000-000000000001"
+        manual = backup_job(
+            "book-pvc-backup-diagnose-20260927", "10000000-0000-4000-8000-000000000001",
+            "book-pvc-backup", cron_uid,
+            annotations={
+                "cronjob.kubernetes.io/instantiate": "manual",
+                "batch.kubernetes.io/cronjob-scheduled-timestamp": "2026-09-27T01:00:00Z",
+            },
+        )
+        no_schedule = backup_job(
+            "book-pvc-backup-29840759", "10000000-0000-4000-8000-000000000003",
+            "book-pvc-backup", cron_uid, annotations={},
+        )
+        invalid_schedule = backup_job(
+            "book-pvc-backup-29840758", "10000000-0000-4000-8000-000000000004",
+            "book-pvc-backup", cron_uid,
+            annotations={"batch.kubernetes.io/cronjob-scheduled-timestamp": "invalid"},
+        )
+        no_timezone = backup_job(
+            "book-pvc-backup-29840757", "10000000-0000-4000-8000-000000000005",
+            "book-pvc-backup", cron_uid,
+            annotations={"batch.kubernetes.io/cronjob-scheduled-timestamp": "2026-09-27T01:00:00"},
+        )
+        scheduled = backup_job(
+            "book-pvc-backup-29840760", "10000000-0000-4000-8000-000000000002",
+            "book-pvc-backup", cron_uid,
+        )
+        k8s = FakePvcJobK8s(
+            {"book-pvc-backup": backup_cronjob("book-pvc-backup", cron_uid)},
+            [manual, no_schedule, invalid_schedule, no_timezone, scheduled],
+        )
+
+        self.assertEqual(_read_pvc_backup_job_failures(k8s),
+                         [("book", scheduled["metadata"]["uid"], "2026-09-27 10:00")])
 
     def test_job_failure_reader_rejects_forged_owner_nonterminal_and_invalid_uid(self):
         cron_uid = "00000000-0000-4000-8000-000000000001"
