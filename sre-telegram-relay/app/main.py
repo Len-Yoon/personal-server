@@ -11,11 +11,12 @@ import re
 import ssl
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Callable, NamedTuple, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 
 KUBERNETES_API_URL = "https://kubernetes.default.svc"
@@ -39,6 +40,7 @@ CONFIGMAP_BOOK_BACKUP_DELIVERED_RUN_IDS_KEY = "book_backup_delivered_run_ids"
 CONFIGMAP_YOUTUBE_BACKUP_DELIVERED_RUN_IDS_KEY = "youtube_backup_delivered_run_ids"
 CONFIGMAP_CRAWLER_BACKUP_DELIVERED_RUN_IDS_KEY = "crawler_backup_delivered_run_ids"
 CONFIGMAP_PVC_JOB_FAILURE_DELIVERED_IDS_KEY = "pvc_backup_job_failed_ids"
+CONFIGMAP_PVC_MISSED_DELIVERED_IDS_KEY = "pvc_backup_missed_ids"
 CONFIGMAP_QUARTERLY_AUDIT_DELIVERED_RUN_IDS_KEY = "quarterly_audit_delivered_run_ids"
 MAX_BACKUP_DELIVERED_RUN_IDS = 128
 PVC_BACKUP_STALE_AFTER = timedelta(hours=5)
@@ -94,6 +96,19 @@ PVC_BACKUP_CRONJOBS = {
     "youtube": "youtube-pvc-backup",
     "crawler": "crawler-pvc-backup",
 }
+PVC_BACKUP_DAILY_SCHEDULES = {
+    "book": ("0 4 * * *", 4, 0),
+    "youtube": ("30 8 * * *", 8, 30),
+    "crawler": ("0 13 * * *", 13, 0),
+}
+PVC_BACKUP_MISSED_GRACE = timedelta(minutes=30)
+PVC_BACKUP_MISSED_CHECK_INTERVAL_SECONDS = 300
+PVC_BACKUP_MONITOR_ACTIVE_FROM_KEY = "pvc_backup_monitor_active_from"
+PVC_BACKUP_TIME_ZONE = ZoneInfo("Asia/Seoul")
+PVC_BACKUP_MISSED_MESSAGE = (
+    "[백업 미실행]\n대상: {target}\n상태: 예정 시각 후 30분이 지났지만 정기 백업 실행이 확인되지 않았습니다."
+    "\n영향: 이번 일정의 새 복구 지점을 확인할 수 없습니다. 백업 실행 상태를 확인해 주세요."
+)
 PVC_BACKUP_JOB_FAILURE_MESSAGE = (
     "[백업 작업 실패]\n대상: {target}\n상태: 예약된 백업 작업이 실패했습니다."
     "\n영향: 이번 실행의 복구 가능성을 확인할 수 없습니다. 서비스 상태와 백업 실행 기록을 확인해 주세요."
@@ -391,6 +406,7 @@ class ConfigMapBackupDeliveryStore:
             raise ValueError("Backup delivery storage must use the dedicated relay ConfigMap")
         allowed_keys = {
             CONFIGMAP_BACKUP_DELIVERED_RUN_IDS_KEY, CONFIGMAP_PVC_JOB_FAILURE_DELIVERED_IDS_KEY,
+            CONFIGMAP_PVC_MISSED_DELIVERED_IDS_KEY,
         } | {spec.state_key for spec in PVC_BACKUP_SERVICES.values()}
         if storage_key not in allowed_keys:
             raise ValueError("Backup delivery storage key is not allowed")
@@ -561,8 +577,10 @@ class RelayService:
         youtube_backup_delivery_store: BackupDeliveryStore | None = None,
         crawler_backup_delivery_store: BackupDeliveryStore | None = None,
         job_failure_delivery_store: BackupDeliveryStore | None = None,
+        missed_schedule_delivery_store: BackupDeliveryStore | None = None,
         quarterly_audit_delivery_store: QuarterlyAuditDeliveryStore | None = None,
         alert_callback: Callable[[str], bool] | None = None,
+        now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         self._allowed_chat_id = str(allowed_chat_id)
         self._alertmanager_auth_token = alertmanager_auth_token
@@ -577,6 +595,10 @@ class RelayService:
             ("crawler", crawler_backup_delivery_store),
         )
         self._job_failure_delivery_store = job_failure_delivery_store
+        self._missed_schedule_delivery_store = missed_schedule_delivery_store
+        self._missed_schedule_lock = threading.Lock()
+        self._last_missed_schedule_check: float | None = None
+        self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self._quarterly_audit_delivery_store = quarterly_audit_delivery_store
         self._alert_state_lock = threading.Lock()
         self._backup_delivery_lock = threading.Lock()
@@ -675,6 +697,28 @@ class RelayService:
                 if not send_message(self._allowed_chat_id, message):
                     return False
                 self._job_failure_delivery_store.save(event_id)
+        return True
+
+    def deliver_pvc_backup_missed_schedules(self, send_message: Callable[[str, str], bool]) -> bool:
+        """Report an active daily backup schedule with no recorded start after its grace period."""
+        if self._missed_schedule_delivery_store is None:
+            return True
+        with self._missed_schedule_lock:
+            checked_at = time.monotonic()
+            if (self._last_missed_schedule_check is not None
+                    and checked_at - self._last_missed_schedule_check < PVC_BACKUP_MISSED_CHECK_INTERVAL_SECONDS):
+                return True
+            now = self._now_fn()
+            active_from = _backup_monitor_active_from(self._k8s_client, now)
+            for service, due_date in _read_pvc_backup_missed_schedules(self._k8s_client, now, active_from):
+                event_id = f"{service}-{due_date}-missed"
+                if self._missed_schedule_delivery_store.contains(event_id):
+                    continue
+                message = PVC_BACKUP_MISSED_MESSAGE.format(target=PVC_BACKUP_SERVICES[service].target)
+                if not send_message(self._allowed_chat_id, message):
+                    return False
+                self._missed_schedule_delivery_store.save(event_id)
+            self._last_missed_schedule_check = checked_at
         return True
 
     def deliver_quarterly_audit_report(self, send_message: Callable[[str, str], bool]) -> bool:
@@ -1019,6 +1063,8 @@ def _poll_once(relay: RelayService, telegram_client: TelegramClient, allowed_cha
         return False
     if not relay.deliver_pvc_backup_job_failures(telegram_client.send_message):
         return False
+    if not relay.deliver_pvc_backup_missed_schedules(telegram_client.send_message):
+        return False
     return relay.deliver_quarterly_audit_report(telegram_client.send_message)
 
 
@@ -1073,6 +1119,12 @@ def main() -> None:
             namespace=RELAY_NAMESPACE,
             name=RELAY_STATE_CONFIGMAP,
             storage_key=CONFIGMAP_PVC_JOB_FAILURE_DELIVERED_IDS_KEY,
+        ),
+        missed_schedule_delivery_store=ConfigMapBackupDeliveryStore(
+            k8s_client,
+            namespace=RELAY_NAMESPACE,
+            name=RELAY_STATE_CONFIGMAP,
+            storage_key=CONFIGMAP_PVC_MISSED_DELIVERED_IDS_KEY,
         ),
         quarterly_audit_delivery_store=ConfigMapQuarterlyAuditDeliveryStore(
             k8s_client,
@@ -1190,6 +1242,84 @@ def _read_backup_report(k8s_client: KubernetesClient) -> dict[str, str] | None:
     return {"run_id": run_id, "status": status, "completed_at": completed_at, "stage": stage}
 
 
+def _backup_monitor_active_from(k8s_client: KubernetesClient, now: datetime) -> date:
+    """Start monitoring on the next local day, without judging pre-install schedules."""
+    config_map = k8s_client.get_config_map(RELAY_NAMESPACE, RELAY_STATE_CONFIGMAP)
+    data = config_map.get("data") if isinstance(config_map, dict) else None
+    if not isinstance(data, dict):
+        raise ValueError("invalid backup monitor state")
+    raw = data.get(PVC_BACKUP_MONITOR_ACTIVE_FROM_KEY)
+    if raw is None:
+        active_from = now.astimezone(PVC_BACKUP_TIME_ZONE).date() + timedelta(days=1)
+        k8s_client.patch_config_map(RELAY_NAMESPACE, RELAY_STATE_CONFIGMAP,
+                                    {PVC_BACKUP_MONITOR_ACTIVE_FROM_KEY: active_from.isoformat()})
+        return active_from
+    if not isinstance(raw, str):
+        raise ValueError("invalid backup monitor start date")
+    try:
+        return date.fromisoformat(raw)
+    except ValueError as exc:
+        raise ValueError("invalid backup monitor start date") from exc
+
+
+def _read_pvc_backup_missed_schedules(
+    k8s_client: KubernetesClient, now: datetime, active_from: date
+) -> list[tuple[str, str]]:
+    """Find active daily schedules missed today or yesterday after their grace period."""
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("backup schedule check requires timezone-aware time")
+    local_now = now.astimezone(PVC_BACKUP_TIME_ZONE)
+    missed = []
+    for service, cronjob_name in PVC_BACKUP_CRONJOBS.items():
+        schedule, hour, minute = PVC_BACKUP_DAILY_SCHEDULES[service]
+        today_due = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        due_dates = (today_due - timedelta(days=1), today_due)
+        due_dates = [due for due in due_dates
+                     if due.date() >= active_from and local_now >= due + PVC_BACKUP_MISSED_GRACE]
+        if not due_dates:
+            continue
+        try:
+            cronjob = k8s_client.get_cron_job(BOOK_BACKUP_NAMESPACE, cronjob_name)
+        except HTTPError as exc:
+            if exc.code == 404:
+                raise ValueError("fixed backup CronJob is unavailable") from exc
+            raise
+        if not isinstance(cronjob, dict):
+            raise ValueError("invalid fixed backup CronJob schedule")
+        metadata = cronjob.get("metadata")
+        spec = cronjob.get("spec")
+        status = cronjob.get("status")
+        if (
+            cronjob.get("apiVersion") != "batch/v1" or cronjob.get("kind") != "CronJob"
+            or not isinstance(metadata, dict) or metadata.get("name") != cronjob_name
+            or metadata.get("namespace") != BOOK_BACKUP_NAMESPACE
+            or not isinstance(metadata.get("uid"), str) or not SAFE_K8S_UID.fullmatch(metadata["uid"])
+            or not isinstance(spec, dict) or spec.get("schedule") != schedule
+            or spec.get("timeZone") != "Asia/Seoul"
+            or not isinstance(spec.get("suspend"), bool)
+            or spec.get("startingDeadlineSeconds") != 300
+            or not isinstance(status, dict)
+        ):
+            raise ValueError("invalid fixed backup CronJob schedule")
+        if spec["suspend"]:
+            continue
+        last_schedule = status.get("lastScheduleTime")
+        if last_schedule is None:
+            missed.extend((service, due.date().isoformat()) for due in due_dates)
+            continue
+        if not isinstance(last_schedule, str):
+            raise ValueError("invalid backup CronJob last schedule time")
+        try:
+            parsed = datetime.fromisoformat(last_schedule.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("invalid backup CronJob last schedule time") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None or parsed > now + timedelta(minutes=5):
+            raise ValueError("invalid backup CronJob last schedule time")
+        missed.extend((service, due.date().isoformat()) for due in due_dates
+                      if parsed < due.astimezone(timezone.utc))
+    return missed
+
+
 def _read_pvc_backup_job_failures(k8s_client: KubernetesClient) -> list[tuple[str, str]]:
     """Read terminal failed Jobs only when their CronJob ownership is current."""
     owners: dict[tuple[str, str], str] = {}
@@ -1215,7 +1345,9 @@ def _read_pvc_backup_job_failures(k8s_client: KubernetesClient) -> list[tuple[st
 
     failures: list[tuple[str, str]] = []
     for job in k8s_client.list_jobs(BOOK_BACKUP_NAMESPACE):
-        if not isinstance(job, dict) or job.get("apiVersion") != "batch/v1" or job.get("kind") != "Job":
+        if (not isinstance(job, dict)
+                or job.get("apiVersion") not in (None, "batch/v1")
+                or job.get("kind") not in (None, "Job")):
             continue
         metadata = job.get("metadata")
         status = job.get("status")

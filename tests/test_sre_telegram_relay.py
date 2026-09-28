@@ -2,7 +2,7 @@ import json
 import sys
 import threading
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -39,6 +39,8 @@ from app.main import (  # noqa: E402
     build_status_summary,
     handle_http_request,
     run_polling,
+    _read_pvc_backup_job_failures,
+    _read_pvc_backup_missed_schedules,
     _read_pvc_backup_report,
 )
 
@@ -135,6 +137,18 @@ def backup_cronjob(name, uid):
         "apiVersion": "batch/v1", "kind": "CronJob",
         "metadata": {"name": name, "namespace": "personal-server", "uid": uid},
     }
+
+
+def scheduled_backup_cronjob(name, uid, schedule, *, last_schedule=None, suspend=False):
+    cronjob = backup_cronjob(name, uid)
+    cronjob["spec"] = {
+        "schedule": schedule,
+        "timeZone": "Asia/Seoul",
+        "startingDeadlineSeconds": 300,
+        "suspend": suspend,
+    }
+    cronjob["status"] = {} if last_schedule is None else {"lastScheduleTime": last_schedule}
+    return cronjob
 
 
 def backup_job(name, uid, owner_name, owner_uid, *, conditions=None, owner_kind="CronJob",
@@ -653,6 +667,171 @@ class RelayServiceTest(unittest.TestCase):
 
                 self.assertEqual(telegram.sent_messages, [("123", expected_message)])
 
+    def test_missed_daily_backups_alert_once_after_grace_across_restart(self):
+        schedules = {
+            "book-pvc-backup": "0 4 * * *",
+            "youtube-pvc-backup": "30 8 * * *",
+            "crawler-pvc-backup": "0 13 * * *",
+        }
+        k8s = FakePvcJobK8s({
+            name: scheduled_backup_cronjob(
+                name, f"00000000-0000-4000-8000-00000000000{index}", schedule,
+                last_schedule="2026-09-28T04:00:00Z",
+            )
+            for index, (name, schedule) in enumerate(schedules.items(), start=1)
+        }, [])
+        k8s.data["pvc_backup_monitor_active_from"] = "2026-09-29"
+        store = ConfigMapBackupDeliveryStore(
+            k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+            storage_key="pvc_backup_missed_ids",
+        )
+        telegram = FakePollingTelegram([])
+        now = datetime(2026, 9, 29, 4, 31, tzinfo=timezone.utc)
+
+        def relay():
+            return RelayService(
+                allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                missed_schedule_delivery_store=store, now_fn=lambda: now,
+            )
+
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 3)
+        self.assertTrue(all("백업 미실행" in message for _, message in telegram.sent_messages))
+        self.assertEqual(len(json.loads(k8s.data["pvc_backup_missed_ids"])), 3)
+
+    def test_missed_backup_check_waits_for_grace_and_skips_suspended_or_scheduled(self):
+        cronjobs = {
+            "book-pvc-backup": scheduled_backup_cronjob(
+                "book-pvc-backup", "00000000-0000-4000-8000-000000000001", "0 4 * * *",
+                last_schedule="2026-09-28T19:00:00Z",
+            ),
+            "youtube-pvc-backup": scheduled_backup_cronjob(
+                "youtube-pvc-backup", "00000000-0000-4000-8000-000000000002", "30 8 * * *",
+                suspend=True,
+            ),
+            "crawler-pvc-backup": scheduled_backup_cronjob(
+                "crawler-pvc-backup", "00000000-0000-4000-8000-000000000003", "0 13 * * *",
+                last_schedule="2026-09-28T04:00:00Z",
+            ),
+        }
+        k8s = FakePvcJobK8s(cronjobs, [])
+        k8s.data["pvc_backup_monitor_active_from"] = "2026-09-29"
+        telegram = FakePollingTelegram([])
+        relay = RelayService(
+            allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+            missed_schedule_delivery_store=ConfigMapBackupDeliveryStore(
+                k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                storage_key="pvc_backup_missed_ids",
+            ),
+            now_fn=lambda: datetime(2026, 9, 29, 4, 29, tzinfo=timezone.utc),
+        )
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(telegram.sent_messages, [])
+
+    def test_missed_backup_check_runs_immediately_after_relay_start(self):
+        k8s = FakePvcJobK8s({
+            name: scheduled_backup_cronjob(name, f"00000000-0000-4000-8000-00000000000{index}", schedule,
+                                           last_schedule="2026-09-28T04:00:00Z")
+            for index, (name, schedule) in enumerate((
+                ("book-pvc-backup", "0 4 * * *"),
+                ("youtube-pvc-backup", "30 8 * * *"),
+                ("crawler-pvc-backup", "0 13 * * *"),
+            ), start=1)
+        }, [])
+        k8s.data["pvc_backup_monitor_active_from"] = "2026-09-29"
+        telegram = FakePollingTelegram([])
+        relay = RelayService(
+            allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+            missed_schedule_delivery_store=ConfigMapBackupDeliveryStore(
+                k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                storage_key="pvc_backup_missed_ids",
+            ),
+            now_fn=lambda: datetime(2026, 9, 29, 4, 31, tzinfo=timezone.utc),
+        )
+        with patch("app.main.time.monotonic", return_value=0):
+            run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 3)
+
+    def test_missed_monitor_matches_approved_production_cronjob_state(self):
+        target = json.loads((REPO_ROOT / "infra/k8s/backup-automation/production-cronjob-state.json").read_text())
+        cronjobs = {}
+        for index, entry in enumerate(target["cronJobs"], start=1):
+            cronjob = scheduled_backup_cronjob(
+                entry["name"], f"00000000-0000-4000-8000-00000000000{index}", entry["schedule"],
+                suspend=entry["suspend"], last_schedule="2026-09-28T04:00:00Z",
+            )
+            cronjob["spec"]["timeZone"] = entry["timeZone"]
+            cronjob["spec"]["startingDeadlineSeconds"] = entry["startingDeadlineSeconds"]
+            cronjobs[entry["name"]] = cronjob
+        k8s = FakePvcJobK8s(cronjobs, [])
+        k8s.data["pvc_backup_monitor_active_from"] = "2026-09-29"
+        telegram = FakePollingTelegram([])
+        relay = RelayService(
+            allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+            missed_schedule_delivery_store=ConfigMapBackupDeliveryStore(
+                k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                storage_key="pvc_backup_missed_ids",
+            ),
+            now_fn=lambda: datetime(2026, 9, 29, 4, 31, tzinfo=timezone.utc),
+        )
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertTrue(relay.is_healthy())
+        self.assertEqual(len(telegram.sent_messages), 3)
+
+    def test_missed_backup_from_previous_day_is_detected_after_restart(self):
+        cronjobs = {
+            name: scheduled_backup_cronjob(name, f"00000000-0000-4000-8000-00000000000{index}", schedule,
+                                           last_schedule="2026-09-26T19:00:00Z")
+            for index, (name, schedule) in enumerate((
+                ("book-pvc-backup", "0 4 * * *"),
+                ("youtube-pvc-backup", "30 8 * * *"),
+                ("crawler-pvc-backup", "0 13 * * *"),
+            ), start=1)
+        }
+        k8s = FakePvcJobK8s(cronjobs, [])
+        missed = _read_pvc_backup_missed_schedules(
+            k8s, datetime(2026, 9, 29, 3, 59, tzinfo=timezone.utc), date(2026, 9, 28)
+        )
+        self.assertIn(("book", "2026-09-28"), missed)
+
+    def test_first_monitor_start_does_not_retroactively_alert_suspended_history(self):
+        cronjobs = {
+            name: scheduled_backup_cronjob(name, f"00000000-0000-4000-8000-00000000000{index}", schedule)
+            for index, (name, schedule) in enumerate((
+                ("book-pvc-backup", "0 4 * * *"),
+                ("youtube-pvc-backup", "30 8 * * *"),
+                ("crawler-pvc-backup", "0 13 * * *"),
+            ), start=1)
+        }
+        k8s = FakePvcJobK8s(cronjobs, [])
+        telegram = FakePollingTelegram([])
+
+        def relay(now):
+            return RelayService(
+                allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                missed_schedule_delivery_store=ConfigMapBackupDeliveryStore(
+                    k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                    storage_key="pvc_backup_missed_ids",
+                ), now_fn=lambda: now,
+            )
+
+        run_polling(relay(datetime(2026, 9, 28, 7, 0, tzinfo=timezone.utc)), telegram, "123",
+                    max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(k8s.data["pvc_backup_monitor_active_from"], "2026-09-29")
+        self.assertEqual(telegram.sent_messages, [])
+        run_polling(relay(datetime(2026, 9, 29, 4, 31, tzinfo=timezone.utc)), telegram, "123",
+                    max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 3)
+        self.assertEqual(len(json.loads(k8s.data["pvc_backup_missed_ids"])), 3)
+
+    def test_missing_cronjob_is_monitor_error_not_missed_delivery(self):
+        k8s = FakePvcJobK8s({}, [])
+        with self.assertRaises(ValueError):
+            _read_pvc_backup_missed_schedules(
+                k8s, datetime(2026, 9, 29, 4, 31, tzinfo=timezone.utc), date(2026, 9, 29)
+            )
+
     def test_fixed_pvc_cronjob_terminal_failures_alert_once_across_relay_restart(self):
         cron_uids = {
             "book-pvc-backup": "00000000-0000-4000-8000-000000000001",
@@ -696,6 +875,19 @@ class RelayServiceTest(unittest.TestCase):
             ("personal-server", "youtube-pvc-backup"),
         ])
         self.assertEqual(k8s.job_lists, ["personal-server", "personal-server"])
+
+    def test_job_list_items_without_type_fields_still_report_failed_backup(self):
+        cron_uid = "00000000-0000-4000-8000-000000000001"
+        job = backup_job("crawler-pvc-backup-29840760", "10000000-0000-4000-8000-000000000001",
+                         "crawler-pvc-backup", cron_uid)
+        job.pop("apiVersion")
+        job.pop("kind")
+        forged = backup_job("crawler-pvc-backup-29840761", "10000000-0000-4000-8000-000000000002",
+                            "crawler-pvc-backup", cron_uid)
+        forged["kind"] = "Deployment"
+        k8s = FakePvcJobK8s({"crawler-pvc-backup": backup_cronjob("crawler-pvc-backup", cron_uid)},
+                            [job, forged])
+        self.assertEqual(_read_pvc_backup_job_failures(k8s), [("crawler", job["metadata"]["uid"])])
 
     def test_job_failure_reader_rejects_forged_owner_nonterminal_and_invalid_uid(self):
         cron_uid = "00000000-0000-4000-8000-000000000001"
