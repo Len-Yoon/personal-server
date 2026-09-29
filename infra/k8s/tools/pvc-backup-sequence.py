@@ -309,8 +309,8 @@ def run(api, now=lambda: datetime.now(KST), sleep=time.sleep, poll_seconds=30):
     try:
         state = api.get_state()  # Must already exist; never create it here.
         validate_state_identity(state)
-        if (local.hour, local.minute) < (0, 30):
-            raise SafetyError("before 00:30 KST")
+        if (local.hour, local.minute) < (2, 30):
+            raise SafetyError("before 02:30 KST")
         active_from = activation_date(state.get("data", {}).get("active_from"))
         if local.date() < active_from:
             raise SafetyError("before activation date")

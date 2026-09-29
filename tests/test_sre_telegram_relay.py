@@ -702,7 +702,7 @@ class RelayServiceTest(unittest.TestCase):
 
                 self.assertEqual(telegram.sent_messages, [("123", expected_message)])
 
-    def test_sequence_missing_today_alerts_once_at_0100_kst_across_restart(self):
+    def test_sequence_missing_today_alerts_once_at_0300_kst_across_restart(self):
         self.assertTrue(hasattr(RelayService, "deliver_pvc_backup_sequence_alerts"))
         k8s = FakeSequenceK8s(sequence_state(run_date="2026-09-28"))
         telegram = FakePollingTelegram([])
@@ -717,13 +717,14 @@ class RelayServiceTest(unittest.TestCase):
                 sequence_delivery_store=store, now_fn=lambda: now,
             )
 
-        before = datetime(2026, 9, 28, 15, 59, tzinfo=timezone.utc)
-        due = datetime(2026, 9, 28, 16, 0, tzinfo=timezone.utc)
+        before = datetime(2026, 9, 28, 17, 59, tzinfo=timezone.utc)
+        due = datetime(2026, 9, 28, 18, 0, tzinfo=timezone.utc)
         run_polling(relay(before), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
         self.assertEqual(telegram.sent_messages, [])
         run_polling(relay(due), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
         run_polling(relay(due), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
         self.assertEqual(len(telegram.sent_messages), 1)
+        self.assertIn("03:00 KST", telegram.sent_messages[0][1])
         self.assertIn("정기 백업 시작이 확인되지", telegram.sent_messages[0][1])
         self.assertEqual(k8s.sequence_reads, [("personal-server", "pvc-backup-sequence-state")] * 3)
 
@@ -959,7 +960,7 @@ class RelayServiceTest(unittest.TestCase):
         relay = RelayService(
             allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
             sequence_delivery_store=store,
-            now_fn=lambda: datetime(2026, 9, 28, 16, tzinfo=timezone.utc),
+            now_fn=lambda: datetime(2026, 9, 28, 18, tzinfo=timezone.utc),
         )
         run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
         self.assertTrue(relay.is_healthy())
