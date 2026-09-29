@@ -7,6 +7,7 @@ import io
 import json
 import shutil
 import sqlite3
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -75,6 +76,29 @@ class YouTubeBackupDataTests(unittest.TestCase):
 
 
 class YouTubeBackupControllerTests(unittest.TestCase):
+    def test_remote_preflight_retries_only_timeout_without_exposing_diagnostics(self):
+        runner = load_runner()
+        with patch.object(runner.subprocess, "run", side_effect=subprocess.TimeoutExpired(
+            ["rclone", "private-config-path"], 30, stderr=b"private diagnostic"
+        )):
+            with self.assertRaises(runner.CommandTimeout) as caught:
+                runner.run_command("rclone", "lsd", timeout=30)
+        self.assertEqual(str(caught.exception), "external command timed out")
+        with patch.object(runner, "rclone_args", return_value=("rclone",)), patch.object(
+            runner, "run_command", side_effect=[runner.CommandTimeout("private diagnostic"), ""]
+        ) as command, patch.object(runner.time, "sleep") as sleep:
+            runner.remote_preflight()
+        self.assertEqual([call.kwargs["timeout"] for call in command.call_args_list], [60, 60])
+        sleep.assert_called_once_with(2)
+        with patch.object(runner, "rclone_args", return_value=("rclone",)), patch.object(
+            runner, "run_command", side_effect=runner.BackupError("private diagnostic")
+        ) as command, patch.object(runner.time, "sleep") as sleep:
+            with self.assertRaises(runner.RemotePreflightError) as caught:
+                runner.remote_preflight()
+        self.assertEqual(str(caught.exception), "remote preflight failed")
+        command.assert_called_once()
+        sleep.assert_not_called()
+
     def test_check_refuses_stale_lock(self):
         runner = load_runner()
         with patch.object(runner, "k8s_json", return_value={"data": {"lock_run_id": "previous-run"}}):
@@ -121,7 +145,8 @@ class YouTubeBackupControllerTests(unittest.TestCase):
         self.assertEqual(state_patch.call_args_list[0].args[0]["status"], "running")
         self.assertEqual(state_patch.call_args_list[1].args[0]["status"], "failed")
 
-    def run_full_backup(self, *, fail_remote_restore=False, fail_remote_preflight=False, lock_busy=False,
+    def run_full_backup(self, *, fail_remote_restore=False, fail_remote_preflight=False,
+                        remote_preflight_timeouts=0, lock_busy=False,
                         fail_success_patch=False, fail_failure_patch=False,
                         fail_scale=False, pods_stay=False, fail_writer_recovery=False,
                         missing_secret=False, fail_cleanup=False,
@@ -196,6 +221,8 @@ class YouTubeBackupControllerTests(unittest.TestCase):
                     if "lsd" in argv:
                         if fail_remote_preflight:
                             raise runner.BackupError("remote unavailable")
+                        if sum("lsd" in call for call in calls) <= remote_preflight_timeouts:
+                            raise runner.CommandTimeout("private diagnostic")
                         return ""
                     if fail_remote_restore and str(argv[-1]).endswith("download.age"):
                         raise runner.BackupError("remote restore failed")
@@ -235,6 +262,8 @@ class YouTubeBackupControllerTests(unittest.TestCase):
                     return False
 
             with patch.object(runner, "run_command", side_effect=command), patch.object(
+                runner.time, "sleep"
+            ), patch.object(
                 runner, "MOUNT", source
             ), patch.object(runner, "SECRET", secret), patch.object(
                 runner, "wait_for_pods_absent", side_effect=no_pods
@@ -242,7 +271,8 @@ class YouTubeBackupControllerTests(unittest.TestCase):
                 runner.tempfile, "TemporaryDirectory", return_value=ScratchDirectory()
             ), patch.object(runner, "create_snapshot", side_effect=snapshot
             ):
-                if any((fail_remote_restore, fail_remote_preflight, lock_busy, fail_success_patch, fail_scale,
+                if any((fail_remote_restore, fail_remote_preflight, remote_preflight_timeouts > 1,
+                        lock_busy, fail_success_patch, fail_scale,
                         pods_stay, fail_writer_recovery, missing_secret, fail_cleanup,
                         replacement_deployment, pause_conflict, pause_replacement,
                         restore_conflict, restore_replacement)):
@@ -365,6 +395,24 @@ class YouTubeBackupControllerTests(unittest.TestCase):
         self.assertEqual([next(item["value"] for item in operations if item["path"] == "/data/status") for _, operations in reports], ["running", "failed"])
         self.assertFalse(any(call[3:5] == ("scale", "deployment/youtube-memo") for call in calls))
         self.assertEqual(state["replicas"], 1)
+        self.assertEqual(sum("lsd" in call for call in calls), 1)
+        self.assertIn({"op": "add", "path": "/data/stage", "value": "preflight-remote-error"}, reports[-1][1])
+
+    def test_remote_preflight_timeout_exhaustion_releases_lock_without_pausing_writer(self):
+        calls, reports, state, _ = self.run_full_backup(remote_preflight_timeouts=2)
+        self.assertEqual(sum("lsd" in call for call in calls), 2)
+        self.assertFalse(any(call[3:5] == ("scale", "deployment/youtube-memo") for call in calls))
+        self.assertEqual(state["replicas"], 1)
+        self.assertEqual(state["lock"], "")
+        self.assertIn({"op": "add", "path": "/data/stage", "value": "preflight-remote-timeout"}, reports[-1][1])
+        self.assertIn({"op": "add", "path": "/data/evidence", "value": ""}, reports[0][1])
+
+    def test_single_remote_timeout_recovers_before_writer_pause(self):
+        calls, reports, state, ciphertext = self.run_full_backup(remote_preflight_timeouts=1)
+        self.assertTrue(ciphertext)
+        self.assertEqual(sum("lsd" in call for call in calls), 2)
+        self.assertEqual(state["replicas"], 1)
+        self.assertIn({"op": "add", "path": "/data/status", "value": "completed"}, reports[-1][1])
 
     def test_ambiguous_pause_response_keeps_lock_for_manual_recovery(self):
         calls, reports, state, _ciphertext = self.run_full_backup(fail_scale=True)
