@@ -42,16 +42,43 @@ class BackupError(RuntimeError):
     """A fixed-label backup failure; never includes command diagnostics."""
 
 
+class CommandTimeout(BackupError):
+    """An external command exceeded its fixed deadline."""
+
+
+class RemotePreflightError(BackupError):
+    """Remote access failed without exposing command output or credentials."""
+
+
+class RemotePreflightTimeout(RemotePreflightError):
+    """Both bounded remote preflight attempts timed out."""
+
+
 def run_command(*argv: str, timeout: int = COMMAND_TIMEOUT) -> str:
     try:
         result = subprocess.run(argv, check=True, text=True, capture_output=True, timeout=timeout)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
+    except subprocess.TimeoutExpired:
+        raise CommandTimeout("external command timed out") from None
+    except (subprocess.CalledProcessError, OSError) as error:
         raise BackupError("external command failed") from error
     return result.stdout
 
 
 def kubectl(*argv: str, timeout: int = COMMAND_TIMEOUT) -> str:
     return run_command("kubectl", "-n", NAMESPACE, *argv, timeout=timeout)
+
+
+def remote_preflight() -> None:
+    for attempt in range(2):
+        try:
+            run_command(*rclone_args(), "lsd", "--max-depth", "1", REMOTE_PARENT, timeout=60)
+            return
+        except CommandTimeout:
+            if attempt == 1:
+                raise RemotePreflightTimeout("remote preflight timed out") from None
+            time.sleep(2)
+        except BackupError:
+            raise RemotePreflightError("remote preflight failed") from None
 
 
 def k8s_json(*argv: str) -> dict:
@@ -265,10 +292,17 @@ class YouTubeBackupController:
             deployment_uid, pvc_uid = workload_state()
             self.deployment_uid = deployment_uid
             check_sqlite(MOUNT)
-            run_command(*rclone_args(), "lsd", "--max-depth", "1", REMOTE_PARENT, timeout=30)
-            self.writer_restore_needed = True
+            try:
+                remote_preflight()
+            except RemotePreflightTimeout:
+                stage = "preflight-remote-timeout"
+                raise
+            except RemotePreflightError:
+                stage = "preflight-remote-error"
+                raise
             if workload_state() != (deployment_uid, pvc_uid):
                 raise BackupError("YouTube workload changed before backup")
+            self.writer_restore_needed = True
             stage = "writer-pause"
             version = deployment_scale_version(deployment_uid, 1)
             kubectl("scale", f"deployment/{DEPLOYMENT}", "--replicas=0",
@@ -412,7 +446,7 @@ def main() -> int:
             workload_state()
             assert_lock_available()
             check_sqlite(MOUNT)
-            run_command(*rclone_args(), "lsd", "--max-depth", "1", REMOTE_PARENT, timeout=30)
+            remote_preflight()
             print("youtube_pvc_backup_check=PASS")
             return 0
         if mode in {"--prune-preview", "--prune-go"}:
