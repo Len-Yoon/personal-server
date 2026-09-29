@@ -1,8 +1,8 @@
 [Unit]
-Description=Start sequential PVC backups at 00:30 KST
+Description=Start sequential PVC backups at 02:30 KST
 
 [Timer]
-OnCalendar=*-*-* 00:30:00 Asia/Seoul
+OnCalendar=*-*-* 02:30:00 Asia/Seoul
 Persistent=false
 AccuracySec=1min
 Unit=personal-server-pvc-backup-sequence.service

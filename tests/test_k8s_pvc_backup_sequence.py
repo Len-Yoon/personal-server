@@ -18,7 +18,7 @@ spec = importlib.util.spec_from_file_location("pvc_backup_sequence", SCRIPT)
 sequence = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sequence)
 
-NOW = datetime(2026, 9, 29, 0, 30, tzinfo=sequence.KST)
+NOW = datetime(2026, 9, 29, 2, 30, tzinfo=sequence.KST)
 
 
 def cronjob(stage):
@@ -36,7 +36,7 @@ def cronjob(stage):
 
 
 class FakeAPI:
-    def __init__(self, outcomes=None, create_ambiguous=False, status_completed_at="2026-09-28T15:31:00Z"):
+    def __init__(self, outcomes=None, create_ambiguous=False, status_completed_at="2026-09-28T17:31:00Z"):
         self.jobs = {}
         self.cronjobs = {stage: cronjob(stage) for stage in sequence.ORDER}
         self.state = {"metadata": {"name": sequence.STATE_NAME, "namespace": "personal-server", "resourceVersion": "1"}, "data": {"active_from": "2026-09-29"}}
@@ -52,7 +52,7 @@ class FakeAPI:
     def create_job(self, job):
         self.created.append(job["metadata"]["name"])
         stage = job["metadata"]["labels"]["personal-server/backup-stage"]
-        job["metadata"]["creationTimestamp"] = "2026-09-28T15:30:00Z"
+        job["metadata"]["creationTimestamp"] = "2026-09-28T17:30:00Z"
         job["metadata"]["uid"] = job["metadata"]["name"] + "-uid"
         job["status"] = {"conditions": [{"type": self.outcomes.get(stage, "Complete"), "status": "True"}]}
         self.jobs[job["metadata"]["name"]] = job
@@ -90,14 +90,14 @@ class SequenceTests(unittest.TestCase):
         self.assertEqual(len(api.created), 4)
 
     def test_failed_job_without_new_runner_status_is_classified_before_runner(self):
-        api = FakeAPI({"book": "Failed"}, status_completed_at="2026-09-28T15:29:00Z")
+        api = FakeAPI({"book": "Failed"}, status_completed_at="2026-09-28T17:29:00Z")
         self.assertEqual(self.run_sequence(api), 0)
         self.assertEqual(json.loads(api.state["data"]["results"])["book"], "failed_before_runner")
 
     def test_existing_job_with_modified_spec_is_not_attached(self):
         api = FakeAPI()
         job = sequence.make_job("portal", NOW.date(), api.cronjobs["portal"], *sequence.validate_cronjob("portal", api.cronjobs["portal"]))
-        job["metadata"]["creationTimestamp"] = "2026-09-28T15:30:00Z"
+        job["metadata"]["creationTimestamp"] = "2026-09-28T17:30:00Z"
         job["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
         job["spec"] = copy.deepcopy(job["spec"])
         job["spec"]["template"]["spec"]["containers"][0]["command"] = ["/bin/false"]
@@ -174,7 +174,7 @@ class SequenceTests(unittest.TestCase):
         self.assertEqual(self.run_sequence(api), 0)
         self.assertEqual(api.created, [f"{sequence.STAGES[s].name}-20260929" for s in sequence.ORDER[1:]])
 
-    def test_before_0030_cannot_start(self):
+    def test_before_0230_cannot_start(self):
         api = FakeAPI()
         self.assertEqual(self.run_sequence(api, NOW.replace(minute=29)), 1)
         self.assertEqual(api.created, [])

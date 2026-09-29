@@ -774,9 +774,9 @@ class RelayService:
                         "\n영향: 오늘의 백업 진행과 복구 지점을 확인할 수 없습니다."
                     )))
                 elif state["run_date"] != today:
-                    if (local_now.hour, local_now.minute) >= (1, 0):
+                    if (local_now.hour, local_now.minute) >= (3, 0):
                         events.append((f"{today}-sequence-missed", (
-                            "[백업 미실행]\n대상: 정기 PVC 백업\n상태: 01:00 KST까지 오늘의 정기 백업 시작이 확인되지 않았습니다."
+                            "[백업 미실행]\n대상: 정기 PVC 백업\n상태: 03:00 KST까지 오늘의 정기 백업 시작이 확인되지 않았습니다."
                             "\n영향: 오늘의 새 복구 지점을 확인할 수 없습니다."
                         )))
                 else:

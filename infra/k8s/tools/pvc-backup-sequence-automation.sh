@@ -105,9 +105,9 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 now = datetime.now(ZoneInfo("Asia/Seoul"))
 minute_of_day = now.hour * 60 + now.minute
-if 25 <= minute_of_day < 36:
-    raise SystemExit("activation is too close to the 00:30 backup window")
-print((now.date() + timedelta(days=now.hour * 60 + now.minute >= 30)).isoformat())
+if 145 <= minute_of_day < 156:
+    raise SystemExit("activation is too close to the 02:30 backup window")
+print((now.date() + timedelta(days=minute_of_day >= 150)).isoformat())
 ') || return 1
   systemctl --user enable --now "$TIMER" || return 1
   if ! "${KCTL[@]}" patch configmap pvc-backup-sequence-state --type=merge \

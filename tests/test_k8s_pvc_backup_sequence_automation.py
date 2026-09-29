@@ -14,7 +14,7 @@ TEMPLATES = ROOT / "infra/k8s/backup-automation"
 class PvcBackupSequenceAutomationTests(unittest.TestCase):
     def test_timer_has_no_missed_run_catchup(self):
         timer = (TEMPLATES / "pvc-backup-sequence.timer.tmpl").read_text(encoding="utf-8")
-        self.assertIn("OnCalendar=*-*-* 00:30:00 Asia/Seoul", timer)
+        self.assertIn("OnCalendar=*-*-* 02:30:00 Asia/Seoul", timer)
         self.assertIn("Persistent=false", timer)
 
     def test_service_runs_one_coordinator_with_bounded_retries(self):

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 매일 00:30 KST에 네 PVC 백업을 앞 Job 종료 후 다음 Job을 시작하는 방식으로 실행함.
+**Goal:** 매일 02:30 KST에 네 PVC 백업을 앞 Job 종료 후 다음 Job을 시작하는 방식으로 실행함.
 
 **Architecture:** N100 WSL 사용자 timer가 기존 제한된 `sudo -n k3s kubectl`로 호스트 조정기를 실행함. 기존 네 CronJob은 중지하되 Job 템플릿과 자격 증명 경계는 유지하고, Relay는 조정기의 고정 상태 ConfigMap으로 누락·시작 전 실패를 감시함.
 
@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Portal → Book → YouTube → Crawler 순서; 앞 Job의 Complete/Failed 전에는 다음을 시작하지 않음.
-- 00:30 KST 시작, 06:00 KST 이후 새로운 Job 생성 금지, `Persistent=false`.
+- 02:30 KST 시작, 06:00 KST 이후 새로운 Job 생성 금지, `Persistent=false`.
 - 기존 Secret·PVC·runner 이미지·ServiceAccount를 보존하고 새 비밀값·sudo 권한을 만들지 않음.
 - 기존 네 CronJob은 활성 Job 0건 확인 후 `suspend:true`; 자동배포 대상에서 제외.
 - N100 운영 적용은 코드·검증·독립 검토·PR CI 뒤 최종 승인 한 번으로 수행함.
