@@ -1359,7 +1359,7 @@ def _read_pvc_backup_sequence_state(k8s_client: KubernetesClient) -> dict[str, A
             or metadata.get("name") != PVC_BACKUP_SEQUENCE_CONFIGMAP
             or metadata.get("namespace") != BOOK_BACKUP_NAMESPACE):
         raise ValueError("invalid backup sequence ConfigMap")
-    data = config_map.get("data")
+    data = config_map.get("data", {})
     if isinstance(data, dict) and set(data) <= {"active_from", "deactivated_at"}:
         if "active_from" in data and "deactivated_at" in data:
             raise ValueError("conflicting backup sequence activation state")

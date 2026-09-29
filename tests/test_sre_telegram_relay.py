@@ -1108,6 +1108,17 @@ class RelayServiceTest(unittest.TestCase):
             with self.subTest(partial_data=data), self.assertRaises(ValueError):
                 relay_main._read_pvc_backup_sequence_state(FakeSequenceK8s(data))
 
+    def test_sequence_reader_accepts_kubernetes_omitted_empty_data(self):
+        class OmittedEmptyData(FakeSequenceK8s):
+            def get_config_map(self, namespace, name):
+                config_map = super().get_config_map(namespace, name)
+                config_map.pop("data", None)
+                return config_map
+
+        state = relay_main._read_pvc_backup_sequence_state(OmittedEmptyData({}))
+        self.assertEqual(state, {"active_from": None, "run_date": None,
+                                 "deactivated_at": None})
+
     def test_missed_daily_backups_alert_once_after_grace_across_restart(self):
         schedules = {
             "book-pvc-backup": "0 4 * * *",
