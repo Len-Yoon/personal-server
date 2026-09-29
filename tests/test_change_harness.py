@@ -77,20 +77,24 @@ class ChangeHarnessTests(unittest.TestCase):
         self.assertEqual(evidence["summary"]["required_checks"], ["maintenance"])
         self.assertEqual(evidence["summary"]["unclassified_files"], [])
 
-    def test_blocked_path_stays_blocked_with_maintenance_success(self):
+    def test_host_maintenance_requires_full_verification(self):
         code, evidence = run_harness(
             ["infra/k8s/README.md", "scripts/maintenance.py"],
-            check_results=("maintenance=success",),
+            check_results=("maintenance=success", "k8s-contracts=success"),
         )
 
         self.assertEqual(code, 2)
-        self.assertEqual(evidence["work_status"], "blocked")
-        self.assertEqual(evidence["summary"]["blocked_files"], ["scripts/maintenance.py"])
+        self.assertEqual(evidence["work_status"], "verification_incomplete")
+        self.assertEqual(evidence["summary"]["blocked_files"], [])
+        self.assertEqual(evidence["summary"]["missing_checks"], [
+            "portal", "system-agent", "crawler-worker", "homeops-executor",
+            "youtube-memo", "book-memo", "car-care-worker",
+        ])
 
     def test_risk_and_verification_states_follow_the_policy_priority(self):
         """Changing a state branch must not mark risky work ready for review."""
         cases = [
-            (["scripts/maintenance.py"], (), "blocked", 2),
+            (["scripts/other-tool.py"], (), "blocked", 2),
             (["unknown-area/config.toml"], (), "blocked", 2),
             (["portal-web/app/main.py"], (), "verification_incomplete", 2),
             (["portal-web/app/main.py"], ("portal=failure",), "verification_failed", 2),
@@ -107,7 +111,7 @@ class ChangeHarnessTests(unittest.TestCase):
     def test_blocked_status_retains_failed_check_reason(self):
         """A blocked-path branch must retain simultaneous failed validation evidence."""
         code, evidence = run_harness(
-            ["scripts/maintenance.py", "portal-web/app/main.py"],
+            ["scripts/other-tool.py", "portal-web/app/main.py"],
             check_results=("portal=failure",),
         )
 
@@ -219,7 +223,7 @@ class ChangeHarnessTests(unittest.TestCase):
         """A blocked branch must retain every simultaneous verification reason."""
         code, evidence = run_harness(
             [
-                "scripts/maintenance.py",
+                "scripts/other-tool.py",
                 "portal-web/app/main.py",
                 "system-agent/app/main.py",
             ],

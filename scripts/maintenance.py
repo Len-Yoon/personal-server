@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import json
 import os
 import shutil
 import sqlite3
@@ -14,7 +13,6 @@ BACKUP_ROOT = Path(os.getenv("BACKUP_PATH", DATA_ROOT / "backups"))
 BACKUP_RETENTION_DAYS = int(os.getenv("BACKUP_RETENTION_DAYS", "14"))
 SECURITY_LOG_PATH = Path(os.getenv("SECURITY_LOG_PATH", DATA_ROOT / "logs" / "security-events.txt"))
 SECURITY_LOG_RETENTION_DAYS = int(os.getenv("SECURITY_LOG_RETENTION_DAYS", "30"))
-NEWS_RETENTION_DAYS = int(os.getenv("NEWS_RETENTION_DAYS", "7"))
 
 
 def backup() -> None:
@@ -48,66 +46,9 @@ def prune_logs() -> None:
 
 
 def prune_news_archive() -> int:
-    retention_days = int(os.getenv("NEWS_RETENTION_DAYS", str(NEWS_RETENTION_DAYS)))
-    if retention_days < 0:
-        raise ValueError("NEWS_RETENTION_DAYS must be non-negative")
-
-    archive_path = Path(
-        os.getenv(
-            "NEWS_ARCHIVE_PATH",
-            DATA_ROOT / "crawler-worker" / "news_archive.json",
-        )
-    )
-    if not archive_path.exists():
-        return 0
-
-    try:
-        archive = json.loads(archive_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return 0
-
-    articles = archive.get("articles", [])
-    if not isinstance(articles, list):
-        return 0
-
-    today = datetime.now().date()
-    cutoff = today - timedelta(days=retention_days)
-    kept = []
-    removed = 0
-    for article in articles:
-        if not isinstance(article, dict):
-            removed += 1
-            continue
-        expires_at = _parse_archive_datetime(article.get("expires_at"))
-        collected_at = _parse_archive_datetime(article.get("collected_at"))
-        expired = (
-            expires_at.date() < today
-            if expires_at
-            else collected_at.date() < cutoff if collected_at else False
-        )
-        if expired:
-            removed += 1
-        else:
-            kept.append(article)
-
-    if removed:
-        archive["articles"] = kept
-        archive["updated_at"] = datetime.now().isoformat()
-        archive_path.write_text(
-            json.dumps(archive, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        print(f"removed expired news articles: {removed}")
-    return removed
-
-
-def _parse_archive_datetime(value: object) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
+    """Keep the legacy command harmless; the crawler owns archive retention."""
+    print("news archive pruning is managed by crawler-worker")
+    return 0
 
 
 def _backup_sqlite(source: Path, destination: Path) -> None:

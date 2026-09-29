@@ -51,6 +51,7 @@ POLICY_MAINTENANCE_FILES = {
     "scripts/summarize_token_measurements.py",
     "scripts/windows-bootstrap.ps1",
 }
+HOST_MAINTENANCE_FILES = {"scripts/maintenance.py"}
 RUNTIME_STATE_POLICY_FILES = {
     "scripts/runtime-service-state.sh",
     "scripts/runtime-service-state-reader.py",
@@ -130,6 +131,13 @@ def classify_paths(
             if path in RUNTIME_STATE_POLICY_FILES:
                 for service in RUNTIME_STATE_REQUIRED_CHECKS:
                     _append_required_check(evidence, service)
+            continue
+
+        if path in HOST_MAINTENANCE_FILES:
+            evidence["automation_files"].append(path)
+            _append_required_check(evidence, "maintenance")
+            for service in SERVICE_PREFIXES.values():
+                _append_required_check(evidence, service)
             continue
 
         if path in DEPLOYMENT_WORKFLOW_FILES:
