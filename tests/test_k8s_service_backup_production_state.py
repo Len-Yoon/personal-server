@@ -28,7 +28,7 @@ class ProductionStateTests(unittest.TestCase):
     def test_target_has_exact_live_allowlist_and_bootstrap_stays_suspended(self):
         self.assertEqual({entry["name"] for entry in self.entries}, set(module.SCHEDULES))
         for entry in self.entries:
-            self.assertFalse(entry["suspend"])
+            self.assertTrue(entry["suspend"])
             self.assertIn("@sha256:", entry["image"])
             manifest = ROOT / "infra/k8s/backup-automation" / f"{module.SCHEDULES[entry['name']][1]}-pvc-backup-cronjob.yaml"
             self.assertIn("  suspend: true", manifest.read_text())
@@ -111,7 +111,7 @@ class ProductionStateTests(unittest.TestCase):
     def test_apply_only_patches_deadline_and_suspend_with_cas(self):
         entries = self.entries
         live = [self._cron(entry) for entry in entries]
-        live[0]["spec"]["suspend"] = True
+        live[0]["spec"]["suspend"] = False
         after = [self._cron(entry) for entry in entries]
         with mock.patch.object(module, "inspect", side_effect=[live, after]), mock.patch.object(module, "kubectl") as kubectl:
             self.assertEqual(module.apply(entries, live, self._now()), 1)
@@ -127,7 +127,7 @@ class ProductionStateTests(unittest.TestCase):
     def test_apply_stops_after_failed_dry_run(self):
         entries = self.entries
         live = [self._cron(entry) for entry in entries]
-        live[0]["spec"]["suspend"] = True
+        live[0]["spec"]["suspend"] = False
         with mock.patch.object(module, "inspect", return_value=live), mock.patch.object(module, "kubectl", side_effect=module.StateError("conflict")) as kubectl:
             with self.assertRaises(module.StateError):
                 module.apply(entries, live, self._now())

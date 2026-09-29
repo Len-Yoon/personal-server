@@ -45,6 +45,22 @@ python3 infra/k8s/tools/service-pvc-backup-production-state.py --check
 
 `--check`는 목표 필드와 백업 명령·ServiceAccount·PVC/Secret mount·핵심 보안 설정을 확인함. 2026-09-28 뉴스 백업 실패 보완으로 목표 이미지 digest를 먼저 갱신했으므로 승인된 이미지 반입·교체 전에는 이미지 불일치로 실패하는 것이 정상임. CronJob 전체 spec·Secret 내용·이미지의 플랫폼 manifest까지 포괄 감사하는 도구는 아니므로 운영 사전검토에서 별도 확인함. N100 이미지 목록에 고정 alias가 있어도 해당 이미지가 `linux/amd64`로 실행 가능한지는 정기 Job 또는 별도 이미지 검사로 확인 필요함.
 
+### 새벽 순차 백업 전환 목표
+
+맥 저장소의 [순차 백업 설계](../../docs/superpowers/specs/2026-09-29-sequential-night-backup-design.md)는 네 백업을 서울 시각 00:30에 Portal → Book Memo → YouTube Memo → News Hub 수집기 순서로 실행하도록 정의함. 앞 Job의 최종 종료를 확인한 직후 다음 Job을 시작하며, 실패해도 최종 종료가 확인되면 다음 백업을 시도함. 종료 상태가 불명확하면 중복 백업을 피하기 위해 중단함. 네 개별 CronJob은 중지하고 기존 jobTemplate을 순차 실행에 재사용함. 이 절은 **운영 적용 목표**이며 N100 timer 활성화 또는 첫 야간 백업의 성공을 의미하지 않음.
+
+운영 전환에는 Relay의 순차 실행 상태 감시 적용, 기존 네 CronJob 중지, `pvc-backup-sequence-state` ConfigMap 최초 생성, N100 사용자 systemd 단위 설치·활성화가 필요함. 상태 ConfigMap은 한 번 생성한 뒤 다시 manifest로 적용하면 기존 실행 기록이 초기화될 수 있으므로 재적용하지 않음. 기존 Book·YouTube·Crawler 목표는 위 전용 도구로 제한 적용함. Portal은 현재 CronJob의 UID·resourceVersion·기존 schedule·jobTemplate을 읽기 전용으로 확인한 뒤, UID·resourceVersion 일치 조건의 JSON patch로 `startingDeadlineSeconds: 300`과 `suspend: true`만 변경함. 기존 active Job이 없고 writer·잠금 상태가 정상인지 먼저 확인하며 설치용 전체 manifest는 재적용하지 않음. installer의 `--preflight`는 사용자 systemd·linger·K3s 접근을 확인함. `--activate`는 네 CronJob 중지·시작 마감 300초·기존 Portal timer 및 service 비활성·활성 백업 Job 부재·현재 네 백업 템플릿의 보안 계약·호스트 잠금 획득 가능성을 확인한 뒤 timer를 켬.
+
+```bash
+bash infra/k8s/tools/pvc-backup-sequence-automation.sh --preflight
+bash infra/k8s/tools/pvc-backup-sequence-automation.sh --install
+# 네 CronJob 중지·Relay 적용·상태 ConfigMap 최초 생성 후, 최종 운영 승인 범위에서만 실행함.
+bash infra/k8s/tools/pvc-backup-sequence-automation.sh --activate
+bash infra/k8s/tools/pvc-backup-sequence-automation.sh --status
+```
+
+timer는 놓친 시각의 낮 시간 보충 실행을 하지 않음. 조정기는 06:00 이후 새 Job을 시작하지 않지만 이미 시작한 Job은 종료까지 관찰함. 다음 실제 00:30 실행에서 순서·네 복원 검증·Relay 알림을 별도 확인해야 함. 되돌릴 때 `--deactivate`는 먼저 다음 timer 실행을 막음. 실행 중인 service/Job 또는 미완료 상태가 있으면 상태 기록 변경을 거부하므로 종료·결과 확인 뒤 다시 실행해야 명시적 중지 시각이 기록됨. Relay는 중지 후 새 날짜의 실행 누락 감시를 멈추되 이미 시작된 실행의 확정 실패 알림은 유지하며, 활성화 후 상태 ConfigMap 자체가 삭제·초기화된 경우에는 상태 누락을 알림. Book·YouTube·Crawler의 운영 목표 파일도 기존 `suspend: false`로 되돌려 맥에서 검증·반영한 뒤 전용 도구로 조건부 적용하고, Portal은 시작 마감 300초를 유지한 채 UID·resourceVersion 조건부 patch로 재활성화함. 실행 중 Job을 삭제하거나 두 예약 방식을 동시에 활성화하지 않음. 상태 ConfigMap이 `completed`가 아니어서 제한 적용 도구가 차단하면 재실행·강제 변경하지 않고 Job·writer·잠금·증적을 확인한 뒤 별도 수동 조건부 복구 경로를 검토함.
+
 ## 빠른 상태 확인
 
 ```bash

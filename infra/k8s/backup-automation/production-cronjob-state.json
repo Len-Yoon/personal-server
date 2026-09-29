@@ -7,7 +7,7 @@
       "schedule": "0 4 * * *",
       "timeZone": "Asia/Seoul",
       "startingDeadlineSeconds": 300,
-      "suspend": false,
+      "suspend": true,
       "image": "docker.io/library/personal-server-book-pvc-backup@sha256:dc46dfdc67145e649029c3fc3d0a76b2dd3480a94ac4d0198df748854ca0bc54"
     },
     {
@@ -15,7 +15,7 @@
       "schedule": "30 8 * * *",
       "timeZone": "Asia/Seoul",
       "startingDeadlineSeconds": 300,
-      "suspend": false,
+      "suspend": true,
       "image": "docker.io/library/personal-server-youtube-pvc-backup@sha256:fb570a295d8a681d9d3990750cd74152bb30a9ce0701ccf34421f9a50c72a4b4"
     },
     {
@@ -23,7 +23,7 @@
       "schedule": "0 13 * * *",
       "timeZone": "Asia/Seoul",
       "startingDeadlineSeconds": 300,
-      "suspend": false,
+      "suspend": true,
       "image": "docker.io/library/personal-server-crawler-pvc-backup@sha256:6e49af740101fe47601b48dc1a7da59a201f01e108b770e221bcb5a3b8a62846"
     }
   ]

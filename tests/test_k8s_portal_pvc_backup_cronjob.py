@@ -36,6 +36,7 @@ class PortalPvcBackupCronJobTests(unittest.TestCase):
     def test_cronjob_is_suspended_singleton_and_never_retries(self):
         job = cronjob()
         self.assertTrue(job["spec"]["suspend"])
+        self.assertEqual(job["spec"]["startingDeadlineSeconds"], 300)
         self.assertEqual(job["spec"]["concurrencyPolicy"], "Forbid")
         self.assertEqual(job["spec"]["jobTemplate"]["spec"]["backoffLimit"], 0)
         self.assertEqual(pod_spec()["restartPolicy"], "Never")
