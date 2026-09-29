@@ -1,0 +1,13 @@
+[Unit]
+Description=Sequential Personal Server PVC backups
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO_ROOT@
+ExecStart=/usr/bin/python3 @REPO_ROOT@/infra/k8s/tools/pvc-backup-sequence.py --go
+TimeoutStartSec=36000
+Restart=on-failure
+RestartSec=30

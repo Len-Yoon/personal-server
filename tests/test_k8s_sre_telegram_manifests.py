@@ -25,7 +25,7 @@ def find_document(documents: list[dict], kind: str, name: str) -> dict:
 
 
 class SreTelegramManifestContractTests(unittest.TestCase):
-    def test_pvc_job_failure_reader_has_only_fixed_cronjob_get_and_namespace_job_list(self):
+    def test_pvc_job_failure_reader_has_fixed_sequence_state_and_cronjob_get(self):
         documents = load_yaml_documents("pvc-backup-job-reader.yaml")
         self.assertEqual({document["kind"] for document in documents}, {"Role", "RoleBinding"})
         self.assertEqual(len(documents), 2)
@@ -33,6 +33,8 @@ class SreTelegramManifestContractTests(unittest.TestCase):
         binding = find_document(documents, "RoleBinding", "sre-telegram-pvc-backup-job-reader")
         self.assertEqual(role["metadata"]["namespace"], "personal-server")
         self.assertEqual(role["rules"], [
+            {"apiGroups": [""], "resources": ["configmaps"],
+             "resourceNames": ["pvc-backup-sequence-state"], "verbs": ["get"]},
             {"apiGroups": ["batch"], "resources": ["cronjobs"],
              "resourceNames": ["book-pvc-backup", "youtube-pvc-backup", "crawler-pvc-backup"],
              "verbs": ["get"]},

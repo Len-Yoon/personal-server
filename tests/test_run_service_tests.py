@@ -34,7 +34,7 @@ EXPECTED_GROUPS = {
 _k8s = EXPECTED_GROUPS["k8s-contracts"]
 EXPECTED_GROUPS["k8s-contracts"] = (*_k8s[:-1], _k8s[-1].replace(
     "tests.test_k8s_crawler_pvc_backup tests.test_k8s_pvc_backup_retention",
-    "tests.test_k8s_crawler_pvc_backup tests.test_k8s_service_backup_production_state tests.test_k8s_pvc_backup_retention",
+    "tests.test_k8s_crawler_pvc_backup tests.test_k8s_service_backup_production_state tests.test_k8s_pvc_backup_sequence tests.test_k8s_pvc_backup_sequence_automation tests.test_k8s_pvc_backup_retention",
 ))
 
 

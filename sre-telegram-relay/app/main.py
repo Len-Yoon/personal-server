@@ -30,6 +30,7 @@ BOOK_BACKUP_NAMESPACE = "personal-server"
 BOOK_BACKUP_STATUS_CONFIGMAP = "book-pvc-backup-state"
 YOUTUBE_BACKUP_STATUS_CONFIGMAP = "youtube-pvc-backup-state"
 CRAWLER_BACKUP_STATUS_CONFIGMAP = "crawler-pvc-backup-state"
+PVC_BACKUP_SEQUENCE_CONFIGMAP = "pvc-backup-sequence-state"
 QUARTERLY_AUDIT_STATUS_CONFIGMAP = "sre-telegram-quarterly-audit-status"
 MAX_ALERT_ITEMS = 4
 MAX_REQUEST_BODY_BYTES = 1_048_576
@@ -41,6 +42,8 @@ CONFIGMAP_YOUTUBE_BACKUP_DELIVERED_RUN_IDS_KEY = "youtube_backup_delivered_run_i
 CONFIGMAP_CRAWLER_BACKUP_DELIVERED_RUN_IDS_KEY = "crawler_backup_delivered_run_ids"
 CONFIGMAP_PVC_JOB_FAILURE_DELIVERED_IDS_KEY = "pvc_backup_job_failed_ids"
 CONFIGMAP_PVC_MISSED_DELIVERED_IDS_KEY = "pvc_backup_missed_ids"
+CONFIGMAP_PVC_SEQUENCE_DELIVERED_IDS_KEY = "pvc_backup_sequence_delivered_ids"
+CONFIGMAP_PVC_SEQUENCE_ACTIVE_FROM_KEY = "pvc_backup_sequence_active_from"
 CONFIGMAP_QUARTERLY_AUDIT_DELIVERED_RUN_IDS_KEY = "quarterly_audit_delivered_run_ids"
 MAX_BACKUP_DELIVERED_RUN_IDS = 128
 PVC_BACKUP_STALE_AFTER = timedelta(hours=5)
@@ -105,6 +108,13 @@ PVC_BACKUP_MISSED_GRACE = timedelta(minutes=30)
 PVC_BACKUP_MISSED_CHECK_INTERVAL_SECONDS = 300
 PVC_BACKUP_MONITOR_ACTIVE_FROM_KEY = "pvc_backup_monitor_active_from"
 PVC_BACKUP_TIME_ZONE = ZoneInfo("Asia/Seoul")
+PVC_BACKUP_SEQUENCE_KEYS = frozenset({"run_date", "status", "current", "updated_at", "results"})
+PVC_BACKUP_SEQUENCE_STALE_AFTER = timedelta(hours=4, minutes=15)
+PVC_BACKUP_SEQUENCE_SERVICES = ("portal", "book", "youtube", "crawler")
+PVC_BACKUP_SEQUENCE_TARGETS = {
+    "portal": "Portal", "book": "Book Memo", "youtube": "YouTube Memo",
+    "crawler": "News Hub 뉴스 수집기",
+}
 PVC_BACKUP_MISSED_MESSAGE = (
     "[백업 미실행]\n대상: {target}\n상태: 예정 시각 후 30분이 지났지만 정기 백업 실행이 확인되지 않았습니다."
     "\n영향: 이번 일정의 새 복구 지점을 확인할 수 없습니다. 백업 실행 상태를 확인해 주세요."
@@ -130,6 +140,9 @@ SAFE_K8S_UID = re.compile(r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$")
 SAFE_QUARTERLY_AUDIT_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SAFE_BACKUP_STAGE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 CANONICAL_UTC_TIMESTAMP = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+UTC_ISO8601_TIMESTAMP = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|\+00:00)$"
+)
 LOGGER = logging.getLogger(__name__)
 
 
@@ -266,7 +279,7 @@ class KubernetesClient:
     def list_jobs(self, namespace: str) -> list[dict[str, Any]]:
         return self._list_items(f"/apis/batch/v1/namespaces/{namespace}/jobs")
 
-    def patch_config_map(self, namespace: str, name: str, data: dict[str, str]) -> None:
+    def patch_config_map(self, namespace: str, name: str, data: dict[str, str | None]) -> None:
         self._request_json(
             f"/api/v1/namespaces/{namespace}/configmaps/{name}",
             method="PATCH",
@@ -406,7 +419,7 @@ class ConfigMapBackupDeliveryStore:
             raise ValueError("Backup delivery storage must use the dedicated relay ConfigMap")
         allowed_keys = {
             CONFIGMAP_BACKUP_DELIVERED_RUN_IDS_KEY, CONFIGMAP_PVC_JOB_FAILURE_DELIVERED_IDS_KEY,
-            CONFIGMAP_PVC_MISSED_DELIVERED_IDS_KEY,
+            CONFIGMAP_PVC_MISSED_DELIVERED_IDS_KEY, CONFIGMAP_PVC_SEQUENCE_DELIVERED_IDS_KEY,
         } | {spec.state_key for spec in PVC_BACKUP_SERVICES.values()}
         if storage_key not in allowed_keys:
             raise ValueError("Backup delivery storage key is not allowed")
@@ -578,6 +591,7 @@ class RelayService:
         crawler_backup_delivery_store: BackupDeliveryStore | None = None,
         job_failure_delivery_store: BackupDeliveryStore | None = None,
         missed_schedule_delivery_store: BackupDeliveryStore | None = None,
+        sequence_delivery_store: BackupDeliveryStore | None = None,
         quarterly_audit_delivery_store: QuarterlyAuditDeliveryStore | None = None,
         alert_callback: Callable[[str], bool] | None = None,
         now_fn: Callable[[], datetime] | None = None,
@@ -596,6 +610,8 @@ class RelayService:
         )
         self._job_failure_delivery_store = job_failure_delivery_store
         self._missed_schedule_delivery_store = missed_schedule_delivery_store
+        self._sequence_delivery_store = sequence_delivery_store
+        self._sequence_delivery_lock = threading.Lock()
         self._missed_schedule_lock = threading.Lock()
         self._last_missed_schedule_check: float | None = None
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
@@ -719,6 +735,84 @@ class RelayService:
                     return False
                 self._missed_schedule_delivery_store.save(event_id)
             self._last_missed_schedule_check = checked_at
+        return True
+
+    def deliver_pvc_backup_sequence_alerts(self, send_message: Callable[[str, str], bool]) -> bool:
+        """Alert on the host sequence start and failures outside service runners."""
+        if self._sequence_delivery_store is None:
+            return True
+        with self._sequence_delivery_lock:
+            now = self._now_fn()
+            if now.tzinfo is None or now.utcoffset() is None:
+                raise ValueError("sequence check requires timezone-aware time")
+            local_now = now.astimezone(PVC_BACKUP_TIME_ZONE)
+            today = local_now.date().isoformat()
+            state = _read_pvc_backup_sequence_state(self._k8s_client)
+            recorded_active_from = _read_pvc_backup_sequence_active_from(self._k8s_client)
+            deactivated = state is not None and state["deactivated_at"] is not None
+            if deactivated:
+                if recorded_active_from is not None:
+                    self._k8s_client.patch_config_map(
+                        RELAY_NAMESPACE, RELAY_STATE_CONFIGMAP,
+                        {CONFIGMAP_PVC_SEQUENCE_ACTIVE_FROM_KEY: None},
+                    )
+            events: list[tuple[str, str]] = []
+            run_date: str | None = state["run_date"] if deactivated else None
+            if not deactivated:
+                state_active_from = state["active_from"] if state is not None else None
+                active_from = state_active_from if state_active_from is not None else recorded_active_from
+                if active_from is not None and active_from != recorded_active_from:
+                    self._k8s_client.patch_config_map(
+                        RELAY_NAMESPACE, RELAY_STATE_CONFIGMAP,
+                        {CONFIGMAP_PVC_SEQUENCE_ACTIVE_FROM_KEY: active_from.isoformat()},
+                    )
+                if active_from is None or local_now.date() < active_from:
+                    return True
+                if state is None or state["active_from"] is None:
+                    events.append((f"{today}-sequence-state-missing", (
+                        "[순차 백업 상태 확인 불가]\n대상: 정기 PVC 백업\n상태: 활성화된 백업의 상태 기록을 확인할 수 없습니다."
+                        "\n영향: 오늘의 백업 진행과 복구 지점을 확인할 수 없습니다."
+                    )))
+                elif state["run_date"] != today:
+                    if (local_now.hour, local_now.minute) >= (1, 0):
+                        events.append((f"{today}-sequence-missed", (
+                            "[백업 미실행]\n대상: 정기 PVC 백업\n상태: 01:00 KST까지 오늘의 정기 백업 시작이 확인되지 않았습니다."
+                            "\n영향: 오늘의 새 복구 지점을 확인할 수 없습니다."
+                        )))
+                else:
+                    run_date = today
+            if run_date is not None and state is not None:
+                for service, result in state["results"].items():
+                    if (result != "failed_before_runner"
+                            and not (result == "skipped" and state["status"] == "completed")):
+                        continue
+                    target = PVC_BACKUP_SEQUENCE_TARGETS[service]
+                    status = "실행 전 실패" if result == "failed_before_runner" else "건너뜀"
+                    events.append((f"{run_date}-{service}-sequence-result", (
+                        f"[백업 {status}]\n대상: {target}\n상태: 순차 백업에서 {status} 처리되었습니다."
+                        "\n영향: 이번 실행의 새 복구 지점을 확인할 수 없습니다."
+                    )))
+                if state["status"] == "blocked":
+                    current = state["current"]
+                    target = PVC_BACKUP_SEQUENCE_TARGETS.get(current, "정기 PVC 백업")
+                    events.append((f"{run_date}-{current}-sequence-blocked", (
+                        f"[순차 백업 중단]\n대상: {target}\n상태: 순차 백업이 중단되었습니다."
+                        "\n영향: 남은 대상의 이번 실행 결과를 확인할 수 없습니다."
+                    )))
+                elif (not deactivated and state["status"] == "running"
+                      and now.astimezone(timezone.utc) - state["updated_at"] >= PVC_BACKUP_SEQUENCE_STALE_AFTER):
+                    current = state["current"]
+                    target = PVC_BACKUP_SEQUENCE_TARGETS.get(current, "정기 PVC 백업")
+                    events.append((f"{run_date}-{current}-sequence-stalled", (
+                        f"[순차 백업 장기 정지]\n대상: {target}\n상태: 순차 백업 상태가 4시간 15분 이상 갱신되지 않았습니다."
+                        "\n영향: 이번 실행의 복구 검증 결과를 확인할 수 없습니다."
+                    )))
+            for event_id, message in events:
+                if self._sequence_delivery_store.contains(event_id):
+                    continue
+                if not send_message(self._allowed_chat_id, message):
+                    return False
+                self._sequence_delivery_store.save(event_id)
         return True
 
     def deliver_quarterly_audit_report(self, send_message: Callable[[str, str], bool]) -> bool:
@@ -1065,6 +1159,8 @@ def _poll_once(relay: RelayService, telegram_client: TelegramClient, allowed_cha
         return False
     if not relay.deliver_pvc_backup_missed_schedules(telegram_client.send_message):
         return False
+    if not relay.deliver_pvc_backup_sequence_alerts(telegram_client.send_message):
+        return False
     return relay.deliver_quarterly_audit_report(telegram_client.send_message)
 
 
@@ -1125,6 +1221,12 @@ def main() -> None:
             namespace=RELAY_NAMESPACE,
             name=RELAY_STATE_CONFIGMAP,
             storage_key=CONFIGMAP_PVC_MISSED_DELIVERED_IDS_KEY,
+        ),
+        sequence_delivery_store=ConfigMapBackupDeliveryStore(
+            k8s_client,
+            namespace=RELAY_NAMESPACE,
+            name=RELAY_STATE_CONFIGMAP,
+            storage_key=CONFIGMAP_PVC_SEQUENCE_DELIVERED_IDS_KEY,
         ),
         quarterly_audit_delivery_store=ConfigMapQuarterlyAuditDeliveryStore(
             k8s_client,
@@ -1240,6 +1342,104 @@ def _read_backup_report(k8s_client: KubernetesClient) -> dict[str, str] | None:
         LOGGER.warning("backup_report_ignored reason=invalid_stage")
         return None
     return {"run_id": run_id, "status": status, "completed_at": completed_at, "stage": stage}
+
+
+def _read_pvc_backup_sequence_state(k8s_client: KubernetesClient) -> dict[str, Any] | None:
+    """Read only the fixed host sequence state with a strict, secret-free schema."""
+    try:
+        config_map = k8s_client.get_config_map(BOOK_BACKUP_NAMESPACE, PVC_BACKUP_SEQUENCE_CONFIGMAP)
+    except HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+    if not isinstance(config_map, dict):
+        raise ValueError("invalid backup sequence ConfigMap")
+    metadata = config_map.get("metadata")
+    if (not isinstance(metadata, dict)
+            or metadata.get("name") != PVC_BACKUP_SEQUENCE_CONFIGMAP
+            or metadata.get("namespace") != BOOK_BACKUP_NAMESPACE):
+        raise ValueError("invalid backup sequence ConfigMap")
+    data = config_map.get("data")
+    if isinstance(data, dict) and set(data) <= {"active_from", "deactivated_at"}:
+        if "active_from" in data and "deactivated_at" in data:
+            raise ValueError("conflicting backup sequence activation state")
+        deactivated_at = _parse_sequence_deactivated_at(data)
+        raw_active_from = data.get("active_from")
+        if "active_from" not in data:
+            return {"active_from": None, "run_date": None, "deactivated_at": deactivated_at}
+        if not isinstance(raw_active_from, str):
+            raise ValueError("invalid backup sequence activation date")
+        try:
+            active_from = date.fromisoformat(raw_active_from)
+        except ValueError as exc:
+            raise ValueError("invalid backup sequence activation date") from exc
+        if raw_active_from != active_from.isoformat():
+            raise ValueError("invalid backup sequence activation date")
+        return {"active_from": active_from, "run_date": None, "deactivated_at": None}
+    if (not isinstance(data, dict) or not PVC_BACKUP_SEQUENCE_KEYS <= set(data)
+            or set(data) - PVC_BACKUP_SEQUENCE_KEYS - {"active_from", "deactivated_at"}
+            or ("active_from" in data and "deactivated_at" in data)):
+        raise ValueError("invalid backup sequence state schema")
+    if not all(isinstance(value, str) for value in data.values()):
+        raise ValueError("invalid backup sequence state fields")
+    if not UTC_ISO8601_TIMESTAMP.fullmatch(data["updated_at"]):
+        raise ValueError("invalid backup sequence update time")
+    try:
+        run_date = date.fromisoformat(data["run_date"])
+        active_from = date.fromisoformat(data["active_from"]) if "active_from" in data else None
+        deactivated_at = _parse_sequence_deactivated_at(data)
+        updated_at = datetime.fromisoformat(data["updated_at"].replace("Z", "+00:00"))
+        results = json.loads(data["results"])
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid backup sequence state fields") from exc
+    if (data["run_date"] != run_date.isoformat()
+            or (active_from is not None and data["active_from"] != active_from.isoformat())
+            or data["status"] not in {"running", "completed", "blocked"}
+            or data["current"] not in (*PVC_BACKUP_SEQUENCE_SERVICES, "none")
+            or updated_at.tzinfo is None or updated_at.utcoffset() != timedelta(0)
+            or not isinstance(results, dict)
+            or any(key not in PVC_BACKUP_SEQUENCE_SERVICES
+                   or value not in {"passed", "runner_failed", "failed_before_runner", "skipped"}
+                   for key, value in results.items())):
+        raise ValueError("invalid backup sequence state fields")
+    return {"run_date": data["run_date"], "status": data["status"],
+            "current": data["current"], "updated_at": updated_at, "results": results,
+            "active_from": active_from, "deactivated_at": deactivated_at}
+
+
+def _parse_sequence_deactivated_at(data: dict[str, Any]) -> datetime | None:
+    if "deactivated_at" not in data:
+        return None
+    raw = data["deactivated_at"]
+    if not isinstance(raw, str) or not UTC_ISO8601_TIMESTAMP.fullmatch(raw):
+        raise ValueError("invalid backup sequence deactivation time")
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("invalid backup sequence deactivation time") from exc
+    if parsed.utcoffset() != timedelta(0):
+        raise ValueError("invalid backup sequence deactivation time")
+    return parsed
+
+
+def _read_pvc_backup_sequence_active_from(k8s_client: KubernetesClient) -> date | None:
+    """Read activation history from the relay-owned persistent state."""
+    config_map = k8s_client.get_config_map(RELAY_NAMESPACE, RELAY_STATE_CONFIGMAP)
+    data = config_map.get("data") if isinstance(config_map, dict) else None
+    if not isinstance(data, dict):
+        raise ValueError("invalid relay sequence activation state")
+    raw = data.get(CONFIGMAP_PVC_SEQUENCE_ACTIVE_FROM_KEY)
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError("invalid relay sequence activation date")
+    try:
+        active_from = date.fromisoformat(raw)
+    except ValueError as exc:
+        raise ValueError("invalid relay sequence activation date") from exc
+    if raw != active_from.isoformat():
+        raise ValueError("invalid relay sequence activation date")
+    return active_from
 
 
 def _backup_monitor_active_from(k8s_client: KubernetesClient, now: datetime) -> date:

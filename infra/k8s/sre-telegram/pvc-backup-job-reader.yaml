@@ -5,6 +5,10 @@ metadata:
   name: sre-telegram-pvc-backup-job-reader
   namespace: personal-server
 rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [pvc-backup-sequence-state]
+    verbs: [get]
   - apiGroups: [batch]
     resources: [cronjobs]
     resourceNames: [book-pvc-backup, youtube-pvc-backup, crawler-pvc-backup]

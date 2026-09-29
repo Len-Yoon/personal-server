@@ -11,6 +11,7 @@ from urllib.error import HTTPError
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "sre-telegram-relay"))
 
+from app import main as relay_main  # noqa: E402
 from app.main import (  # noqa: E402
     BACKUP_STATUS_CONFIGMAP,
     BOOK_BACKUP_STATUS_CONFIGMAP,
@@ -111,6 +112,38 @@ class FakeBookBackupStatusK8s(FakeConfigMapK8s):
         if namespace == BOOK_BACKUP_NAMESPACE and name == self.name:
             return {"data": dict(self.backup_data)}
         return super().get_config_map(namespace, name)
+
+
+class FakeSequenceK8s(FakeConfigMapK8s):
+    def __init__(self, sequence_data=None):
+        super().__init__()
+        self.sequence_data = sequence_data
+        self.sequence_reads = []
+
+    def get_config_map(self, namespace, name):
+        if name == "pvc-backup-sequence-state":
+            self.sequence_reads.append((namespace, name))
+            if self.sequence_data is None:
+                raise HTTPError("https://kubernetes.invalid", 404, "missing", {}, None)
+            return {"metadata": {"name": name, "namespace": namespace}, "data": dict(self.sequence_data)}
+        return super().get_config_map(namespace, name)
+
+    def patch_config_map(self, namespace, name, data):
+        for key, value in data.items():
+            if value is None:
+                self.data.pop(key, None)
+            else:
+                self.data[key] = value
+
+
+def sequence_state(*, run_date="2026-09-29", status="running", current="portal", results=None,
+                   updated_at="2026-09-28T15:30:00Z", active_from="2026-09-29"):
+    return {
+        "run_date": run_date, "status": status, "current": current,
+        "updated_at": updated_at,
+        "results": json.dumps({} if results is None else results),
+        "active_from": active_from,
+    }
 
 
 class FakePvcJobK8s(FakeConfigMapK8s):
@@ -669,6 +702,411 @@ class RelayServiceTest(unittest.TestCase):
 
                 self.assertEqual(telegram.sent_messages, [("123", expected_message)])
 
+    def test_sequence_missing_today_alerts_once_at_0100_kst_across_restart(self):
+        self.assertTrue(hasattr(RelayService, "deliver_pvc_backup_sequence_alerts"))
+        k8s = FakeSequenceK8s(sequence_state(run_date="2026-09-28"))
+        telegram = FakePollingTelegram([])
+        store = ConfigMapBackupDeliveryStore(
+            k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+            storage_key="pvc_backup_sequence_delivered_ids",
+        )
+
+        def relay(now):
+            return RelayService(
+                allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                sequence_delivery_store=store, now_fn=lambda: now,
+            )
+
+        before = datetime(2026, 9, 28, 15, 59, tzinfo=timezone.utc)
+        due = datetime(2026, 9, 28, 16, 0, tzinfo=timezone.utc)
+        run_polling(relay(before), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(telegram.sent_messages, [])
+        run_polling(relay(due), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        run_polling(relay(due), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 1)
+        self.assertIn("정기 백업 시작이 확인되지", telegram.sent_messages[0][1])
+        self.assertEqual(k8s.sequence_reads, [("personal-server", "pvc-backup-sequence-state")] * 3)
+
+    def test_sequence_alerts_remain_inactive_until_activation_date(self):
+        k8s = FakeSequenceK8s(sequence_state(
+            status="blocked", current="book", results={"book": "skipped"},
+            active_from="2026-09-30",
+        ))
+        telegram = FakePollingTelegram([])
+        relay = RelayService(
+            allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+            sequence_delivery_store=ConfigMapBackupDeliveryStore(
+                k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                storage_key="pvc_backup_sequence_delivered_ids",
+            ),
+            now_fn=lambda: datetime(2026, 9, 28, 16, tzinfo=timezone.utc),
+        )
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(telegram.sent_messages, [])
+        del k8s.sequence_data["active_from"]
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(telegram.sent_messages, [])
+        self.assertTrue(relay.is_healthy())
+
+    def test_sequence_absent_state_does_not_alert_before_activation(self):
+        k8s = FakeSequenceK8s()
+        telegram = FakePollingTelegram([])
+        relay = RelayService(
+            allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+            sequence_delivery_store=ConfigMapBackupDeliveryStore(
+                k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                storage_key="pvc_backup_sequence_delivered_ids",
+            ),
+            now_fn=lambda: datetime(2026, 9, 28, 16, tzinfo=timezone.utc),
+        )
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(telegram.sent_messages, [])
+
+    def test_sequence_state_deleted_after_activation_alerts_once_across_restart(self):
+        k8s = FakeSequenceK8s(sequence_state(
+            results={service: "skipped" for service in ("portal", "book", "youtube", "crawler")},
+        ))
+        telegram = FakePollingTelegram([])
+        store = ConfigMapBackupDeliveryStore(
+            k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+            storage_key="pvc_backup_sequence_delivered_ids",
+        )
+        now = datetime(2026, 9, 28, 15, 35, tzinfo=timezone.utc)
+
+        def relay():
+            return RelayService(
+                allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                sequence_delivery_store=store, now_fn=lambda: now,
+            )
+
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(telegram.sent_messages, [])
+        self.assertEqual(k8s.data["pvc_backup_sequence_active_from"], "2026-09-29")
+        k8s.sequence_data = None
+        now = datetime(2026, 9, 28, 16, 1, tzinfo=timezone.utc)
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 1)
+        self.assertIn("순차 백업 상태 확인 불가", telegram.sent_messages[0][1])
+
+    def test_sequence_empty_state_after_activation_alerts_missing_state(self):
+        k8s = FakeSequenceK8s(sequence_state())
+        telegram = FakePollingTelegram([])
+        relay = RelayService(
+            allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+            sequence_delivery_store=ConfigMapBackupDeliveryStore(
+                k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                storage_key="pvc_backup_sequence_delivered_ids",
+            ),
+            now_fn=lambda: datetime(2026, 9, 28, 16, tzinfo=timezone.utc),
+        )
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        k8s.sequence_data = {}
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 1)
+        self.assertIn("순차 백업 상태 확인 불가", telegram.sent_messages[0][1])
+
+    def test_sequence_explicit_deactivation_clears_activation_history_without_alert(self):
+        k8s = FakeSequenceK8s(sequence_state())
+        telegram = FakePollingTelegram([])
+        store = ConfigMapBackupDeliveryStore(
+            k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+            storage_key="pvc_backup_sequence_delivered_ids",
+        )
+        now = datetime(2026, 9, 28, 15, 35, tzinfo=timezone.utc)
+
+        def relay():
+            return RelayService(
+                allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                sequence_delivery_store=store, now_fn=lambda: now,
+            )
+
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(k8s.data["pvc_backup_sequence_active_from"], "2026-09-29")
+        del k8s.sequence_data["active_from"]
+        k8s.sequence_data["deactivated_at"] = "2026-09-28T15:45:00Z"
+        now = datetime(2026, 9, 28, 16, 5, tzinfo=timezone.utc)
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertNotIn("pvc_backup_sequence_active_from", k8s.data)
+        self.assertEqual(telegram.sent_messages, [])
+        k8s.sequence_data = None
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(telegram.sent_messages, [])
+
+    def test_sequence_deactivation_preserves_undelivered_blocked_failure_after_midnight(self):
+        data = sequence_state(
+            run_date="2026-09-29", status="blocked", current="book",
+            results={"portal": "passed", "book": "failed_before_runner", "youtube": "skipped", "crawler": "skipped"},
+        )
+        del data["active_from"]
+        data["deactivated_at"] = "2026-09-29T15:05:00Z"
+        k8s = FakeSequenceK8s(data)
+        k8s.data["pvc_backup_sequence_active_from"] = "2026-09-29"
+        telegram = FakePollingTelegram([])
+        store = ConfigMapBackupDeliveryStore(
+            k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+            storage_key="pvc_backup_sequence_delivered_ids",
+        )
+
+        def relay():
+            return RelayService(
+                allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                sequence_delivery_store=store,
+                now_fn=lambda: datetime(2026, 9, 29, 16, 5, tzinfo=timezone.utc),
+            )
+
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertNotIn("pvc_backup_sequence_active_from", k8s.data)
+        self.assertEqual(len(telegram.sent_messages), 2)
+        messages = [message for _, message in telegram.sent_messages]
+        self.assertTrue(any("Book Memo" in message and "실행 전 실패" in message for message in messages))
+        self.assertTrue(any("Book Memo" in message and "순차 백업 중단" in message for message in messages))
+        self.assertFalse(any("건너뜀" in message or "미실행" in message for message in messages))
+        self.assertTrue(all(run_id.startswith("2026-09-29-") for run_id in json.loads(
+            k8s.data["pvc_backup_sequence_delivered_ids"])))
+
+    def test_sequence_deactivation_preserves_undelivered_completed_results(self):
+        data = sequence_state(
+            status="completed", current="none",
+            results={"portal": "passed", "book": "failed_before_runner", "youtube": "skipped", "crawler": "passed"},
+        )
+        del data["active_from"]
+        data["deactivated_at"] = "2026-09-28T16:00:00+00:00"
+        k8s = FakeSequenceK8s(data)
+        telegram = FakePollingTelegram([])
+        relay = RelayService(
+            allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+            sequence_delivery_store=ConfigMapBackupDeliveryStore(
+                k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                storage_key="pvc_backup_sequence_delivered_ids",
+            ),
+            now_fn=lambda: datetime(2026, 9, 28, 16, 5, tzinfo=timezone.utc),
+        )
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 2)
+        self.assertTrue(any("Book Memo" in message and "실행 전 실패" in message
+                            for _, message in telegram.sent_messages))
+        self.assertTrue(any("YouTube Memo" in message and "건너뜀" in message
+                            for _, message in telegram.sent_messages))
+
+    def test_sequence_missing_activation_field_without_deactivation_keeps_missing_state_alert(self):
+        k8s = FakeSequenceK8s(sequence_state())
+        telegram = FakePollingTelegram([])
+        store = ConfigMapBackupDeliveryStore(
+            k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+            storage_key="pvc_backup_sequence_delivered_ids",
+        )
+        now = datetime(2026, 9, 28, 15, 35, tzinfo=timezone.utc)
+
+        def relay():
+            return RelayService(
+                allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                sequence_delivery_store=store, now_fn=lambda: now,
+            )
+
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        del k8s.sequence_data["active_from"]
+        now = datetime(2026, 9, 28, 16, 5, tzinfo=timezone.utc)
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(k8s.data["pvc_backup_sequence_active_from"], "2026-09-29")
+        self.assertEqual(len(telegram.sent_messages), 1)
+        self.assertIn("순차 백업 상태 확인 불가", telegram.sent_messages[0][1])
+
+    def test_sequence_reactivation_uses_current_activation_date_over_recorded_date(self):
+        k8s = FakeSequenceK8s(sequence_state(
+            run_date="2026-09-28", active_from="2026-09-30",
+        ))
+        k8s.data["pvc_backup_sequence_active_from"] = "2026-09-29"
+        telegram = FakePollingTelegram([])
+        relay = RelayService(
+            allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+            sequence_delivery_store=ConfigMapBackupDeliveryStore(
+                k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                storage_key="pvc_backup_sequence_delivered_ids",
+            ),
+            now_fn=lambda: datetime(2026, 9, 28, 16, 5, tzinfo=timezone.utc),
+        )
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(telegram.sent_messages, [])
+        self.assertEqual(k8s.data["pvc_backup_sequence_active_from"], "2026-09-30")
+
+    def test_sequence_deactivation_marker_without_run_state_clears_history(self):
+        k8s = FakeSequenceK8s(sequence_state())
+        telegram = FakePollingTelegram([])
+        relay = RelayService(
+            allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+            sequence_delivery_store=ConfigMapBackupDeliveryStore(
+                k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                storage_key="pvc_backup_sequence_delivered_ids",
+            ),
+            now_fn=lambda: datetime(2026, 9, 28, 16, tzinfo=timezone.utc),
+        )
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        k8s.sequence_data = {"deactivated_at": "2026-09-28T16:00:00+00:00"}
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertTrue(relay.is_healthy())
+        self.assertNotIn("pvc_backup_sequence_active_from", k8s.data)
+        self.assertEqual(telegram.sent_messages, [])
+
+    def test_sequence_installed_empty_state_is_healthy_and_activation_only_can_detect_missed_run(self):
+        k8s = FakeSequenceK8s({})
+        telegram = FakePollingTelegram([])
+        store = ConfigMapBackupDeliveryStore(
+            k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+            storage_key="pvc_backup_sequence_delivered_ids",
+        )
+        relay = RelayService(
+            allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+            sequence_delivery_store=store,
+            now_fn=lambda: datetime(2026, 9, 28, 16, tzinfo=timezone.utc),
+        )
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertTrue(relay.is_healthy())
+        self.assertEqual(telegram.sent_messages, [])
+        k8s.sequence_data["active_from"] = "2026-09-29"
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 1)
+        self.assertIn("정기 백업 시작이 확인되지", telegram.sent_messages[0][1])
+
+    def test_sequence_stale_running_current_alerts_once_after_4h15m(self):
+        k8s = FakeSequenceK8s(sequence_state(updated_at="2026-09-28T15:30:00Z"))
+        telegram = FakePollingTelegram([])
+        store = ConfigMapBackupDeliveryStore(
+            k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+            storage_key="pvc_backup_sequence_delivered_ids",
+        )
+
+        def relay(now):
+            return RelayService(
+                allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                sequence_delivery_store=store, now_fn=lambda: now,
+            )
+
+        before = datetime(2026, 9, 28, 19, 44, tzinfo=timezone.utc)
+        due = datetime(2026, 9, 28, 19, 45, tzinfo=timezone.utc)
+        run_polling(relay(before), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(telegram.sent_messages, [])
+        run_polling(relay(due), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        run_polling(relay(due), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 1)
+        self.assertIn("Portal", telegram.sent_messages[0][1])
+        self.assertIn("장기 정지", telegram.sent_messages[0][1])
+
+    def test_sequence_running_placeholder_skips_do_not_alert_until_terminal(self):
+        k8s = FakeSequenceK8s(sequence_state(
+            current="portal", results={service: "skipped" for service in ("portal", "book", "youtube", "crawler")},
+        ))
+        telegram = FakePollingTelegram([])
+        store = ConfigMapBackupDeliveryStore(
+            k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+            storage_key="pvc_backup_sequence_delivered_ids",
+        )
+        relay = RelayService(
+            allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+            sequence_delivery_store=store,
+            now_fn=lambda: datetime(2026, 9, 28, 16, tzinfo=timezone.utc),
+        )
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(telegram.sent_messages, [])
+        k8s.sequence_data = sequence_state(
+            current="book", results={"portal": "passed", "book": "skipped", "youtube": "skipped", "crawler": "skipped"},
+        )
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(telegram.sent_messages, [])
+        k8s.sequence_data = sequence_state(
+            status="completed", current="none",
+            results={"portal": "passed", "book": "passed", "youtube": "skipped", "crawler": "skipped"},
+        )
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 2)
+        self.assertTrue(all("건너뜀" in message for _, message in telegram.sent_messages))
+
+    def test_sequence_blocked_placeholder_skips_only_alerts_blocked_current(self):
+        k8s = FakeSequenceK8s(sequence_state(
+            status="blocked", current="portal",
+            results={service: "skipped" for service in ("portal", "book", "youtube", "crawler")},
+        ))
+        telegram = FakePollingTelegram([])
+        relay = RelayService(
+            allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+            sequence_delivery_store=ConfigMapBackupDeliveryStore(
+                k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                storage_key="pvc_backup_sequence_delivered_ids",
+            ),
+            now_fn=lambda: datetime(2026, 9, 28, 16, tzinfo=timezone.utc),
+        )
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 1)
+        self.assertIn("순차 백업 중단", telegram.sent_messages[0][1])
+        self.assertNotIn("건너뜀", telegram.sent_messages[0][1])
+
+    def test_sequence_reports_pre_runner_results_and_blocked_current_once(self):
+        self.assertTrue(hasattr(RelayService, "deliver_pvc_backup_sequence_alerts"))
+        k8s = FakeSequenceK8s(sequence_state(
+            status="blocked", current="youtube",
+            results={"portal": "passed", "book": "failed_before_runner", "youtube": "skipped", "crawler": "runner_failed"},
+        ))
+        telegram = FakePollingTelegram([])
+        store = ConfigMapBackupDeliveryStore(
+            k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+            storage_key="pvc_backup_sequence_delivered_ids",
+        )
+
+        def relay():
+            return RelayService(
+                allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                sequence_delivery_store=store,
+                now_fn=lambda: datetime(2026, 9, 28, 16, 5, tzinfo=timezone.utc),
+            )
+
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        run_polling(relay(), telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 2)
+        messages = [message for _, message in telegram.sent_messages]
+        self.assertTrue(any("Book Memo" in message and "실행 전 실패" in message for message in messages))
+        self.assertTrue(any("YouTube Memo" in message and "순차 백업 중단" in message for message in messages))
+        self.assertFalse(any("건너뜀" in message for message in messages))
+        self.assertFalse(any("News Hub" in message for message in messages))
+        self.assertNotIn("runner_failed", "\n".join(messages))
+
+    def test_sequence_reader_rejects_malformed_fixed_state(self):
+        self.assertTrue(hasattr(relay_main, "_read_pvc_backup_sequence_state"))
+        valid = sequence_state()
+        malformed = [
+            {**valid, "run_date": "2026-9-29"},
+            {**valid, "status": "other"},
+            {**valid, "current": "secret"},
+            {**valid, "updated_at": "2026-09-28T15:30:00"},
+            {**valid, "updated_at": "2026-09-28 15:30:00Z"},
+            {**valid, "updated_at": "2026-09-28T15:30:00+09:00"},
+            {**valid, "results": '{"portal":"unexpected"}'},
+            {**valid, "results": '{"secret":"passed"}'},
+            {**valid, "results": "[]"},
+            {**valid, "active_from": "2026-9-29"},
+            {**valid, "active_from": None},
+            {**valid, "deactivated_at": "2026-09-28T16:00:00Z"},
+            {**{key: value for key, value in valid.items() if key != "active_from"},
+             "deactivated_at": "2026-09-28T16:00:00+09:00"},
+            {**valid, "extra": "unexpected"},
+        ]
+        for data in malformed:
+            with self.subTest(data=data):
+                with self.assertRaises(ValueError):
+                    relay_main._read_pvc_backup_sequence_state(FakeSequenceK8s(data))
+        class MissingMetadata(FakeSequenceK8s):
+            def get_config_map(self, namespace, name):
+                config_map = super().get_config_map(namespace, name)
+                config_map.pop("metadata", None)
+                return config_map
+
+        with self.assertRaises(ValueError):
+            relay_main._read_pvc_backup_sequence_state(MissingMetadata(valid))
+        for data in ({"active_from": None}, {"deactivated_at": None},
+                     {"active_from": "2026-09-29", "deactivated_at": "2026-09-28T16:00:00Z"}):
+            with self.subTest(partial_data=data), self.assertRaises(ValueError):
+                relay_main._read_pvc_backup_sequence_state(FakeSequenceK8s(data))
+
     def test_missed_daily_backups_alert_once_after_grace_across_restart(self):
         schedules = {
             "book-pvc-backup": "0 4 * * *",
@@ -779,7 +1217,7 @@ class RelayServiceTest(unittest.TestCase):
         )
         run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
         self.assertTrue(relay.is_healthy())
-        self.assertEqual(len(telegram.sent_messages), 3)
+        self.assertEqual(len(telegram.sent_messages), sum(not entry["suspend"] for entry in target["cronJobs"]))
 
     def test_missed_backup_from_previous_day_is_detected_after_restart(self):
         cronjobs = {
