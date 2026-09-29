@@ -260,7 +260,7 @@ class VerifyChangeScopeTests(unittest.TestCase):
     def test_blocked_paths_remain_blocked_alongside_gitops_drafts(self):
         paths = (
             "infra/k8s/README.md",
-            "scripts/maintenance.py",
+            "scripts/other-tool.py",
         )
 
         code, evidence = run_scope(*paths, executed_checks=("maintenance",))
@@ -421,19 +421,24 @@ class VerifyChangeScopeTests(unittest.TestCase):
             "car-care-worker",
         ])
 
-    def test_server_startup_paths_are_blocked(self):
-        paths = (
-            "scripts/maintenance.py",
-        )
-        code, evidence = run_scope(*paths)
+    def test_host_maintenance_requires_all_service_checks(self):
+        path = "scripts/maintenance.py"
+        code, evidence = run_scope(path, executed_checks=("maintenance",))
         self.assertEqual(code, 2)
-        self.assertEqual(evidence["blocked_files"], list(paths))
-        self.assertEqual(evidence["infrastructure_files"], [])
-        self.assertEqual(evidence["required_checks"], [])
+        self.assertEqual(evidence["blocked_files"], [])
+        self.assertEqual(evidence["automation_files"], [path])
+        self.assertEqual(evidence["required_checks"], [
+            "maintenance", "portal", "system-agent", "crawler-worker",
+            "homeops-executor", "youtube-memo", "book-memo", "car-care-worker",
+        ])
+        self.assertEqual(evidence["missing_checks"], [
+            "portal", "system-agent", "crawler-worker", "homeops-executor",
+            "youtube-memo", "book-memo", "car-care-worker",
+        ])
 
     def test_blocked_changes_stop_review(self):
         for path in (
-            "scripts/maintenance.py",
+            "scripts/other-tool.py",
             "crawler-worker/app/services/news_scheduler.py",
         ):
             with self.subTest(path=path):
