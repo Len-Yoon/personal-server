@@ -211,6 +211,56 @@ a {
     margin-bottom: 24px;
 }
 
+.home-page .container {
+    padding-top: 28px;
+}
+
+.home-hero {
+    padding: 28px 32px;
+    margin-bottom: 16px;
+}
+
+.home-hero h1 {
+    font-size: clamp(30px, 3vw, 40px);
+}
+
+.home-page .panel {
+    margin-bottom: 16px;
+}
+
+.search-panel {
+    border-color: var(--border-strong);
+}
+
+.home-export {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    padding: 20px 24px;
+}
+
+.home-export h2 {
+    margin: 0;
+    font-size: 18px;
+}
+
+.home-export p {
+    margin: 4px 0 0;
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.export-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.export-actions .text-link {
+    white-space: nowrap;
+}
+
 .section-header {
     display: flex;
     justify-content: space-between;
@@ -236,6 +286,24 @@ a {
 
 .search-form {
     max-width: 820px;
+}
+
+.home-page .search-form {
+    max-width: none;
+}
+
+.home-page .search-form input {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 58px;
+    height: 58px;
+    font-size: 17px;
+}
+
+.home-page .search-form button {
+    min-width: 96px;
+    height: 58px;
+    font-size: 16px;
 }
 
 input,
@@ -726,6 +794,26 @@ button:disabled {
     .panel,
     .book-hero {
         padding: var(--space-panel-sm);
+    }
+
+    .home-page .container {
+        padding-top: 20px;
+    }
+
+    .home-hero {
+        padding: 22px 24px;
+        margin-bottom: 12px;
+    }
+
+    .home-export {
+        align-items: stretch;
+        flex-direction: column;
+        gap: 12px;
+        padding: 18px 20px;
+    }
+
+    .export-actions .text-link {
+        flex: 1;
     }
 
     .search-form,

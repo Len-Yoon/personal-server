@@ -65,6 +65,16 @@ def _record_book_auth_failure_in_process(
 
 
 class BookMemoUiContractTests(unittest.TestCase):
+    def test_search_results_do_not_push_export_below_the_result_list(self):
+        with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            with patch("app.main.search_books", return_value=[]):
+                with TestClient(app, base_url="https://books.len.pe.kr") as client:
+                    response = client.get("/?q=missing")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertLess(response.text.index("책 검색"), response.text.index("전체 기록 내보내기"))
+        self.assertLess(response.text.index("전체 기록 내보내기"), response.text.index("검색 결과가 없습니다."))
+
     def test_tag_filter_keeps_pagination_and_saved_memo_tags_are_editable_only_after_login(self):
         previous_password = os.environ.get("DELETE_PASSWORD")
         os.environ["DELETE_PASSWORD"] = "session-password"
@@ -132,6 +142,8 @@ class BookMemoUiContractTests(unittest.TestCase):
                 after_logout = client.get("/api/export", headers={"Accept": "application/json"})
 
         self.assertEqual(unauthenticated.status_code, 401)
+        self.assertIn("전체 기록 내보내기", home_before.text)
+        self.assertIn("로그인 후 내보내기", home_before.text)
         self.assertNotIn("/api/export?format=json", home_before.text)
         self.assertEqual(login.status_code, 303)
         self.assertEqual(authenticated.status_code, 200)
@@ -139,6 +151,8 @@ class BookMemoUiContractTests(unittest.TestCase):
         self.assertIn('attachment; filename="book-memo-export.json"', authenticated.headers["content-disposition"])
         self.assertEqual(authenticated.headers["cache-control"], "no-store")
         self.assertIn("/api/export?format=json", home_after.text)
+        self.assertLess(home_after.text.index("책 검색"), home_after.text.index("전체 기록 내보내기"))
+        self.assertLess(home_after.text.index("전체 기록 내보내기"), home_after.text.index("내 책장"))
         self.assertEqual(invalid.status_code, 400)
         self.assertEqual(after_logout.status_code, 401)
         data = authenticated.json()
