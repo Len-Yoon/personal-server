@@ -231,7 +231,7 @@ class PortalDashboardTests(unittest.TestCase):
         self.assertIn("meta", results["youtube"]["items"][0])
         self.assertIn("snippet", results["youtube"]["items"][0])
 
-    def run_search_transport(self, handler, query="test", budget=1.5):
+    def run_search_transport(self, handler, query="test", budget=1.5, source="all"):
         prepare_service_import("portal-web")
         from app.services import global_search
 
@@ -243,7 +243,32 @@ class PortalDashboardTests(unittest.TestCase):
         with patch.dict(os.environ, {"DEMO_MODE": ""}), patch(
             "httpx.AsyncClient", side_effect=make_client
         ), patch.object(global_search, "SEARCH_BUDGET_SECONDS", budget):
-            return asyncio.run(global_search.search_all(query))
+            return asyncio.run(global_search.search_all(query, source=source))
+
+    def test_search_source_filter_only_contacts_selected_service(self):
+        contacted = []
+
+        async def handle(request):
+            contacted.append(request.url.host)
+            return httpx.Response(200, json={"results": [{"title": "책 결과", "url": "/books/1"}]})
+
+        results = self.run_search_transport(handle, source="books")
+
+        self.assertEqual(contacted, ["book-memo"])
+        self.assertEqual(list(results), ["books"])
+        self.assertEqual(results["books"]["items"][0]["title"], "책 결과")
+
+    def test_unknown_search_source_falls_back_to_all_services(self):
+        contacted = set()
+
+        async def handle(request):
+            contacted.add(request.url.host)
+            return httpx.Response(200, json={"results": []})
+
+        results = self.run_search_transport(handle, source="unexpected")
+
+        self.assertEqual(len(contacted), 3)
+        self.assertEqual(list(results), ["news", "youtube", "books"])
 
     def test_search_starts_all_services_before_waiting_for_results(self):
         started = set()
@@ -383,6 +408,9 @@ class PortalDashboardTests(unittest.TestCase):
             with patch.dict(os.environ, {"DEMO_MODE": "true"}):
                 results = asyncio.run(global_search.search_all("sample"))
                 self.assertTrue(all(item["items"] for item in results.values()))
+                selected = asyncio.run(global_search.search_all("sample", source="youtube"))
+                self.assertEqual(list(selected), ["youtube"])
+                self.assertTrue(selected["youtube"]["items"])
             client.assert_not_called()
 
     def test_search_invalid_json_is_isolated(self):
@@ -543,6 +571,20 @@ class PortalDashboardTests(unittest.TestCase):
         self.assertIn("현재 응답 없음", response.text)
         self.assertIn("검색 결과가 없습니다.", response.text)
         self.assertNotIn("crawler-worker", response.text)
+
+    def test_dashboard_keeps_selected_search_source(self):
+        app = self.load_app()
+        search_results = {"books": {"items": [], "status": "ok"}}
+
+        with patch("app.routers.dashboard.search_all", return_value=search_results) as search:
+            with TestClient(app) as client:
+                response = client.get("/?q=test&source=books")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('<option value="books" selected>', response.text)
+        self.assertIn("검색 결과가 없습니다.", response.text)
+        self.assertNotIn('<h3>뉴스</h3>', response.text)
+        self.assertEqual(search.call_args.kwargs["source"], "books")
 
     def test_portal_home_url_uses_local_address_on_localhost(self):
         prepare_service_import("book-memo")

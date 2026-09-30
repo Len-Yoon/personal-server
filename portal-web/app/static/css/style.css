@@ -416,11 +416,12 @@ a {
 
 .global-search {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(110px, 150px) minmax(0, 1fr) auto;
     gap: 10px;
 }
 
-.global-search input {
+.global-search input,
+.global-search select {
     width: 100%;
     min-height: 44px;
     padding: 0 14px;
@@ -429,6 +430,10 @@ a {
     color: var(--text-primary);
     background: rgba(15, 23, 42, 0.72);
     font: inherit;
+}
+
+.global-search select {
+    cursor: pointer;
 }
 
 .global-search button {

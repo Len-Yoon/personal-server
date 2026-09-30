@@ -65,6 +65,40 @@ def _record_book_auth_failure_in_process(
 
 
 class BookMemoUiContractTests(unittest.TestCase):
+    def test_tag_filter_keeps_pagination_and_saved_memo_tags_are_editable_only_after_login(self):
+        previous_password = os.environ.get("DELETE_PASSWORD")
+        os.environ["DELETE_PASSWORD"] = "session-password"
+        try:
+            with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+                import app.services.book_service as service
+                tagged = service.create_or_get_book({"isbn": "tagged", "title": "태그 있는 책"})
+                other = service.create_or_get_book({"isbn": "other", "title": "다른 책"})
+                service.create_memo(tagged["id"], None, "메모", "내용", 0, tags="공부")
+                service.create_memo(other["id"], None, "메모", "내용", 0)
+                memo_id = service.list_memos(tagged["id"])[0]["id"]
+                with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                    home = client.get("/?tag=공부")
+                    detail = client.get(f"/books/{tagged['id']}")
+                    headers = {"Origin": "https://memo.len.pe.kr"}
+                    blocked = client.post(f"/memos/{memo_id}/tags", data={"tags": "새 태그"}, headers=headers)
+                    client.post("/auth/login", data={"password": "session-password"}, headers=headers)
+                    updated = client.post(f"/memos/{memo_id}/tags", data={"tags": "새 태그"}, headers=headers, follow_redirects=False)
+                    filtered = client.get("/?tag=새 태그")
+        finally:
+            if previous_password is None:
+                os.environ.pop("DELETE_PASSWORD", None)
+            else:
+                os.environ["DELETE_PASSWORD"] = previous_password
+        self.assertEqual(home.status_code, 200)
+        self.assertIn("태그 있는 책", home.text)
+        self.assertNotIn("다른 책", home.text)
+        self.assertIn('name="tag"', home.text)
+        self.assertIn('action="/memos/', detail.text)
+        self.assertIn("공부", detail.text)
+        self.assertIn(blocked.status_code, (302, 303, 401, 403))
+        self.assertEqual(updated.status_code, 303)
+        self.assertIn("태그 있는 책", filtered.text)
+
     def assert_portal_security_headers(self, response):
         for name, value in PORTAL_SECURITY_HEADERS.items():
             self.assertEqual(response.headers[name], value)

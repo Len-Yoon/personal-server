@@ -56,6 +56,13 @@
         </div>
     </div>
     <form class="global-search" method="get" action="/" data-track-event="global_search_submitted">
+        <label class="sr-only" for="global-search-source">검색 대상</label>
+        <select id="global-search-source" name="source">
+            <option value="all"{% if search_source == "all" %} selected{% endif %}>전체</option>
+            <option value="news"{% if search_source == "news" %} selected{% endif %}>뉴스</option>
+            <option value="youtube"{% if search_source == "youtube" %} selected{% endif %}>유튜브</option>
+            <option value="books"{% if search_source == "books" %} selected{% endif %}>책</option>
+        </select>
         <input type="search" name="q" value="{{ query }}" placeholder="검색어 입력">
         <button type="submit">검색</button>
     </form>
@@ -100,7 +107,8 @@ document.querySelectorAll("a[data-track-event], button[data-track-event]").forEa
 document.querySelector(".global-search")?.addEventListener("submit", (event) => {
     const form = event.currentTarget;
     const query = new FormData(form).get("q") || "";
-    trackUserEvent(form.dataset.trackEvent, { query });
+    const source = new FormData(form).get("source") || "all";
+    trackUserEvent(form.dataset.trackEvent, { query, source });
 });
 
 function trackUserEvent(event, details = {}) {

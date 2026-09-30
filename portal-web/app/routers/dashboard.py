@@ -8,7 +8,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
-from app.services.global_search import search_all
+from app.services.global_search import SEARCH_SOURCES, search_all
 from app.services.host_urls import portal_home_url, service_base_urls, service_url
 from app.routers.portfolio import is_portfolio_host, render_public_portfolio
 
@@ -17,7 +17,7 @@ templates = Jinja2Templates(directory=Path(__file__).resolve().parents[1] / "tem
 
 
 @router.get("/")
-async def dashboard(request: Request, q: str = ""):
+async def dashboard(request: Request, q: str = "", source: str = "all"):
     host = _request_host(request)
     if is_portfolio_host(request):
         return await run_in_threadpool(render_public_portfolio, request)
@@ -27,6 +27,7 @@ async def dashboard(request: Request, q: str = ""):
         return RedirectResponse(url="/files", status_code=302)
     if host == _configured_host("ADMIN_HOSTNAME") or host.startswith("admin."):
         return RedirectResponse(url="/admin/status", status_code=302)
+    source = source if source in SEARCH_SOURCES else "all"
 
     services = [
         {
@@ -90,8 +91,10 @@ async def dashboard(request: Request, q: str = ""):
             "services": services,
             "demo_mode": os.getenv("DEMO_MODE", "").lower() in {"1", "true", "yes", "on"},
             "query": q.strip(),
+            "search_source": source,
             "search_results": await search_all(
                 q,
+                source=source,
                 public_base_urls=base_urls,
                 local_base_urls=base_urls,
                 prefer_local=local_mode,

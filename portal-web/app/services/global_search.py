@@ -12,6 +12,7 @@ DEFAULT_ENDPOINTS = {
     "books": "http://book-memo:8003/api/search",
 }
 SEARCH_BUDGET_SECONDS = 1.5
+SEARCH_SOURCES = ("news", "youtube", "books")
 
 
 async def search_all(
@@ -20,16 +21,19 @@ async def search_all(
     public_base_urls: dict[str, str] | None = None,
     local_base_urls: dict[str, str] | None = None,
     prefer_local: bool = False,
+    source: str = "all",
 ) -> dict[str, dict[str, object]]:
     query = query.strip()
+    sources = (source,) if source in SEARCH_SOURCES else SEARCH_SOURCES
     if not query:
-        return {name: {"items": [], "status": "ok"} for name in ("news", "youtube", "books")}
+        return {name: {"items": [], "status": "ok"} for name in sources}
 
     if _truthy(os.getenv("DEMO_MODE", "")):
-        return _demo_results(query)
+        demo = _demo_results(query)
+        return {name: demo[name] for name in sources}
 
     return await _search_parallel(
-        query, limit, public_base_urls, local_base_urls, prefer_local
+        query, limit, public_base_urls, local_base_urls, prefer_local, sources
     )
 
 
@@ -39,15 +43,16 @@ async def _search_parallel(
     public_base_urls: dict[str, str] | None,
     local_base_urls: dict[str, str] | None,
     prefer_local: bool,
+    sources: tuple[str, ...],
 ) -> dict[str, dict[str, object]]:
-    results = {name: {"items": [], "status": "unavailable"} for name in DEFAULT_ENDPOINTS}
+    results = {name: {"items": [], "status": "unavailable"} for name in sources}
     async with httpx.AsyncClient(timeout=SEARCH_BUDGET_SECONDS, follow_redirects=True) as client:
         tasks = {
             name: asyncio.create_task(_fetch_results(
                 client, name, _endpoint(name), query, limit,
                 public_base_urls, local_base_urls, prefer_local,
             ))
-            for name in DEFAULT_ENDPOINTS
+            for name in sources
         }
         try:
             done, _ = await asyncio.wait(tasks.values(), timeout=SEARCH_BUDGET_SECONDS)

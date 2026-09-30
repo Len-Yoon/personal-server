@@ -26,6 +26,7 @@ from app.services.book_service import (
     delete_memo,
     get_book,
     list_books_page,
+    list_available_tags,
     list_chapters,
     list_memos,
     search_books_and_memos,
@@ -33,6 +34,7 @@ from app.services.book_service import (
     update_chapter_comment,
     update_chapter_statuses,
     update_progress,
+    update_memo_tags,
 )
 from app.services.toc_service import fetch_toc_candidates
 from app.services.host_urls import portal_home_url, request_host_from_headers
@@ -110,6 +112,7 @@ def home(
     request: Request,
     q: str = Query(default=""),
     page: int = Query(default=1, ge=1),
+    tag: str = Query(default=""),
 ):
     results = []
     error = ""
@@ -120,7 +123,9 @@ def home(
         except Exception as exc:
             error = str(exc)
 
-    books, total_books, current_page = list_books_page(page)
+    books, total_books, current_page = list_books_page(page, tag=tag)
+    available_tags = list_available_tags()
+    active_tag = next((item for item in available_tags if item.casefold() == tag.strip().casefold()), tag.strip())
     total_pages = max(1, (total_books + 23) // 24)
 
     return templates.TemplateResponse(
@@ -129,6 +134,8 @@ def home(
             "request": request,
             "title": "책 메모장",
             "query": q,
+            "active_tag": active_tag,
+            "available_tags": available_tags,
             "results": results,
             "books": books,
             "total_books": total_books,
@@ -377,6 +384,7 @@ def create_book_memo(
     memo_title: str = Form(default=""),
     content: str = Form(...),
     page: int = Form(default=0),
+    tags: str = Form(default=""),
 ):
     _require_write_session(request)
     if not get_book(book_id):
@@ -389,10 +397,23 @@ def create_book_memo(
             title=memo_title,
             content=content,
             page=page,
+            tags=tags,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
+    return RedirectResponse(url=f"/books/{book_id}", status_code=303)
+
+
+@app.post("/memos/{memo_id}/tags")
+def edit_book_memo_tags(request: Request, memo_id: int, tags: str = Form(default="")):
+    _require_write_session(request)
+    try:
+        book_id = update_memo_tags(memo_id, tags)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if book_id is None:
+        raise HTTPException(status_code=404, detail="Memo not found")
     return RedirectResponse(url=f"/books/{book_id}", status_code=303)
 
 

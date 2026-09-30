@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <title>{{ title }}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=20260810-legacy-ui-1">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260930-memo-tags-1">
 </head>
 <body>
 <div class="background-orb orb-one"></div>
@@ -128,6 +128,8 @@
                     </select>
                     <input type="number" name="page" min="0" placeholder="페이지">
                 </div>
+                <label for="new-memo-tags">태그 (쉼표로 구분, 최대 5개)</label>
+                <input id="new-memo-tags" type="text" name="tags" placeholder="예: 공부, 독서" maxlength="160" autocomplete="off">
                 <textarea name="content" rows="8" placeholder="책을 읽으며 남길 생각을 적어두세요." required></textarea>
                 <button type="submit">저장</button>
             </form>
@@ -148,7 +150,17 @@
                             </span>
                         </summary>
                         <p>{{ memo.content }}</p>
+                        {% if memo.tags %}
+                            <div class="memo-tags" aria-label="메모 태그">
+                                {% for tag in memo.tags %}<a class="memo-tag" href="/?tag={{ tag|urlencode }}">{{ tag }}</a>{% endfor %}
+                            </div>
+                        {% endif %}
                     </details>
+                    <form class="memo-tags-editor" action="/memos/{{ memo.id }}/tags" method="post">
+                        <label for="memo-tags-{{ memo.id }}">태그 수정</label>
+                        <input id="memo-tags-{{ memo.id }}" type="text" name="tags" value="{{ memo.tags|join(', ') }}" placeholder="쉼표로 구분" maxlength="160" autocomplete="off">
+                        <button type="submit">태그 저장</button>
+                    </form>
                     <form class="protected-delete-form" action="/memos/{{ memo.id }}/delete" method="post" data-confirm-message="이 메모를 삭제할까요?">
                         <button class="danger-button" type="submit">삭제</button>
                     </form>

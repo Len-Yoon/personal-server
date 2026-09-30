@@ -13,6 +13,150 @@ from tests._test_support import prepare_service_import
 
 
 class BookMemoServiceTests(unittest.TestCase):
+    def test_existing_database_gains_tags_without_losing_memos(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            service = self.reload_book_service(tempdir)
+            service.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(service.DB_PATH) as connection:
+                connection.executescript("""
+                    CREATE TABLE books (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, isbn TEXT NOT NULL UNIQUE,
+                        title TEXT NOT NULL, authors TEXT NOT NULL DEFAULT '',
+                        reading_status TEXT NOT NULL DEFAULT '읽는 중',
+                        progress_percent INTEGER NOT NULL DEFAULT 0,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE TABLE book_chapters (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, book_id INTEGER NOT NULL,
+                        title TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0,
+                        is_done INTEGER NOT NULL DEFAULT 0
+                    );
+                    CREATE TABLE book_memos (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, book_id INTEGER NOT NULL,
+                        chapter_id INTEGER, title TEXT NOT NULL, content TEXT NOT NULL,
+                        page INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+                    );
+                    INSERT INTO books (isbn, title) VALUES ('old', '기존 책');
+                    INSERT INTO book_memos (book_id, title, content) VALUES (1, '기존 메모', '보존할 내용');
+                """)
+            service.init_db()
+            self.assertEqual(service.list_memos(1)[0]["content"], "보존할 내용")
+            self.assertEqual(service.list_memos(1)[0]["tags"], [])
+
+    def test_tags_are_normalized_updated_and_filter_books_before_pagination(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            service = self.reload_book_service(tempdir)
+            for number in range(26):
+                book = service.create_or_get_book({"isbn": f"tag-{number}", "title": f"책 {number}"})
+                service.create_memo(book["id"], None, "메모", "내용", 0, tags=" 공부, 공부 , 독서 ")
+            first, total, _ = service.list_books_page(1, tag="공부")
+            second, _, _ = service.list_books_page(2, tag="공부")
+            self.assertEqual((len(first), len(second), total), (24, 2, 26))
+            self.assertEqual(service.list_memos(first[0]["id"])[0]["tags"], ["공부", "독서"])
+            self.assertEqual(service.list_available_tags(), ["공부", "독서"])
+            memo_id = service.list_memos(first[0]["id"])[0]["id"]
+            self.assertEqual(service.update_memo_tags(memo_id, "새 태그"), first[0]["id"])
+            self.assertEqual(service.list_memos(first[0]["id"])[0]["tags"], ["새 태그"])
+            self.assertEqual(service.list_books_page(1, tag="공부")[1], 25)
+            self.assertEqual(service.update_memo_tags(999999, "기타"), None)
+
+    def test_tags_reject_overlong_control_and_excess_count_without_partial_write(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            service = self.reload_book_service(tempdir)
+            book = service.create_or_get_book({"isbn": "invalid-tags", "title": "책"})
+            for tags in ["x" * 31, "a\x00b", "a,b,c,d,e,f"]:
+                with self.assertRaises(ValueError):
+                    service.create_memo(book["id"], None, "메모", "내용", 0, tags=tags)
+            self.assertEqual(service.list_memos(book["id"]), [])
+
+    def test_search_ranks_title_before_content_and_shows_query_context(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            service = self.reload_book_service(tempdir)
+            book = service.create_or_get_book({"isbn": "rank", "title": "검색 책"})
+            other = service.create_or_get_book({"isbn": "rank-other", "title": "다른 책"})
+            service.create_memo(other["id"], None, "일반", "앞" * 100 + "핵심단어" + "뒤" * 100, 0)
+            service.create_memo(book["id"], None, "핵심단어 제목", "짧은 내용", 0)
+            results = service.search_books_and_memos("핵심단어")
+            self.assertEqual(results[0]["title"], "핵심단어 제목")
+            self.assertIn("핵심단어", results[1]["snippet"])
+            self.assertEqual(set(results[0]), {"title", "description", "snippet", "meta", "url"})
+
+    def test_search_treats_like_wildcards_as_text_and_returns_one_parent_result(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            service = self.reload_book_service(tempdir)
+            book = service.create_or_get_book({"isbn": "wildcard", "title": "100% 독서"})
+            service.create_memo(book["id"], None, "메모", "관련 없는 글", 0)
+            service.create_memo(book["id"], None, "다른 메모", "또 다른 글", 0)
+            self.assertEqual(len(service.search_books_and_memos("100%")), 1)
+            self.assertEqual(service.search_books_and_memos("%") [0]["title"], "100% 독서")
+            self.assertEqual(service.search_books_and_memos("_"), [])
+
+    def test_search_limits_to_best_memo_per_book_before_global_limit(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            service = self.reload_book_service(tempdir)
+            first = service.create_or_get_book({"isbn": "many", "title": "첫 책"})
+            second = service.create_or_get_book({"isbn": "second", "title": "둘째 책"})
+            for number in range(4):
+                service.create_memo(first["id"], None, f"메모 {number}", "공통단어", 0)
+            service.create_memo(second["id"], None, "다른 메모", "공통단어", 0)
+            with service._connect() as connection:
+                connection.execute("UPDATE books SET updated_at = '2099-01-01' WHERE id = ?", (first["id"],))
+                connection.execute("UPDATE books SET updated_at = '2000-01-01' WHERE id = ?", (second["id"],))
+            results = service.search_books_and_memos("공통단어", limit=2)
+            self.assertEqual(len(results), 2)
+            self.assertEqual({item["url"] for item in results}, {f"/books/{first['id']}", f"/books/{second['id']}"})
+            self.assertEqual(results[0]["url"], f"/books/{first['id']}")
+
+    def test_search_ranks_exact_memo_title_before_partial_book_title(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            service = self.reload_book_service(tempdir)
+            partial = service.create_or_get_book({"isbn": "partial", "title": "Alpha and more"})
+            exact = service.create_or_get_book({"isbn": "exact", "title": "다른 책"})
+            service.create_memo(exact["id"], None, "ALPHA", "내용", 0)
+            with service._connect() as connection:
+                connection.execute("UPDATE books SET updated_at = '2099-01-01' WHERE id = ?", (partial["id"],))
+            results = service.search_books_and_memos("alpha", limit=2)
+            self.assertEqual(results[0]["url"], f"/books/{exact['id']}")
+
+    def test_search_displays_book_title_when_book_or_author_is_best_match(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            service = self.reload_book_service(tempdir)
+            exact = service.create_or_get_book({"isbn": "book-exact", "title": "Alpha", "authors": "A"})
+            partial = service.create_or_get_book({"isbn": "book-partial", "title": "Alpha guide", "authors": "B"})
+            author = service.create_or_get_book({"isbn": "book-author", "title": "Other", "authors": "Alpha writer"})
+            for book in (exact, partial):
+                service.create_memo(book["id"], None, "Alpha note", "Alpha in content", 0)
+            service.create_memo(author["id"], None, "Other note", "Alpha in content", 0)
+            results = service.search_books_and_memos("Alpha", limit=3)
+            titles = {item["url"]: item["title"] for item in results}
+            self.assertEqual(titles[f"/books/{exact['id']}"], "Alpha")
+            self.assertEqual(titles[f"/books/{partial['id']}"], "Alpha guide")
+            self.assertEqual(titles[f"/books/{author['id']}"], "Other")
+
+    def test_tag_filter_ignores_case_consistent_with_duplicate_normalization(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            service = self.reload_book_service(tempdir)
+            book = service.create_or_get_book({"isbn": "case-tag", "title": "책"})
+            service.create_memo(book["id"], None, "메모", "내용", 0, tags="Study, study, Straße, STRASSE")
+            self.assertEqual(service.list_memos(book["id"])[0]["tags"], ["Study", "Straße"])
+            self.assertEqual(service.list_books_page(1, tag="STUDY")[1], 1)
+            self.assertEqual(service.list_books_page(1, tag="STRASSE")[1], 1)
+
+    def test_deleting_memo_cascades_tags_and_invalid_update_preserves_old_tags(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            service = self.reload_book_service(tempdir)
+            book = service.create_or_get_book({"isbn": "cascade", "title": "책"})
+            service.create_memo(book["id"], None, "메모", "내용", 0, tags="보존")
+            memo_id = service.list_memos(book["id"])[0]["id"]
+            with self.assertRaises(ValueError):
+                service.update_memo_tags(memo_id, "x" * 31)
+            self.assertEqual(service.list_memos(book["id"])[0]["tags"], ["보존"])
+            self.assertEqual(service.delete_memo(memo_id), book["id"])
+            self.assertEqual(service.list_available_tags(), [])
+
     def reload_book_service(self, tempdir: str):
         prepare_service_import("book-memo")
         os.environ["BOOK_MEMO_DB_PATH"] = str(Path(tempdir) / "book_memo.sqlite3")

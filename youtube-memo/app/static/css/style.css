@@ -346,6 +346,29 @@ a {
     text-decoration: none;
 }
 
+.tag-filter,
+.memo-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 12px 0;
+}
+
+.tag-filter a,
+.memo-tags a {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 5px 11px;
+    color: var(--accent);
+    text-decoration: none;
+    font-size: 13px;
+}
+
+.tag-filter a[aria-current="page"] {
+    border-color: var(--accent);
+    background: rgba(14, 165, 233, 0.18);
+}
+
 .video-card,
 .empty-card,
 .memo-card {

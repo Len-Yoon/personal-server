@@ -23,9 +23,11 @@ from app.services.memo_service import (
     embed_url,
     get_video,
     list_memos,
+    list_available_tags,
     list_videos_page,
     search_videos_and_memos,
     update_memo,
+    update_memo_tags,
 )
 from app.services.host_urls import portal_home_url, request_host_from_headers
 
@@ -97,8 +99,9 @@ templates.env.globals["portal_home_url_for_request"] = _portal_home_url
 
 
 @app.get("/")
-def home(request: Request, page: int = Query(default=1, ge=1)):
-    videos, total_videos, current_page = list_videos_page(page)
+def home(request: Request, page: int = Query(default=1, ge=1), tag: str = ""):
+    selected_tag = tag.strip()
+    videos, total_videos, current_page = list_videos_page(page, tag=selected_tag)
     return templates.TemplateResponse(
         "home.html",
         {
@@ -108,6 +111,9 @@ def home(request: Request, page: int = Query(default=1, ge=1)):
             "total_videos": total_videos,
             "current_page": current_page,
             "total_pages": max(1, (total_videos + 23) // 24),
+            "available_tags": list_available_tags(),
+            "selected_tag": selected_tag,
+            "selected_tag_key": selected_tag.casefold(),
             "portal_home_url": portal_home_url(request_host_from_headers(request.headers)),
             "write_authenticated": _has_write_session(request),
         },
@@ -156,13 +162,14 @@ def create_video_memo(
     video_id: int,
     memo_title: str = Form(default=""),
     content: str = Form(...),
+    tags: str = Form(default=""),
 ):
     _require_write_session(request)
     if not get_video(video_id):
         raise HTTPException(status_code=404, detail="Video not found")
 
     try:
-        create_memo(video_id=video_id, title=memo_title, content=content)
+        create_memo(video_id=video_id, title=memo_title, content=content, tags=tags)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -170,6 +177,18 @@ def create_video_memo(
         url=f"/videos/{video_id}",
         status_code=303,
     )
+
+
+@app.post("/memos/{memo_id}/tags")
+def update_video_memo_tags(request: Request, memo_id: int, tags: str = Form(default="")):
+    _require_write_session(request)
+    try:
+        video_id = update_memo_tags(memo_id, tags)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if video_id is None:
+        raise HTTPException(status_code=404, detail="Memo not found")
+    return RedirectResponse(url=f"/videos/{video_id}", status_code=303)
 
 
 @app.post("/videos/{video_id}/delete")
