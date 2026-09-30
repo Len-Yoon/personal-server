@@ -27,6 +27,8 @@
     </div>
 
     {% if write_authenticated %}
+        <a class="home-pill" href="/api/export?format=markdown">Markdown 내보내기</a>
+        <a class="home-pill" href="/api/export?format=json">JSON 내보내기</a>
         <form class="write-auth-form" action="/auth/logout" method="post">
             <input type="hidden" name="next_path" value="{{ request.url.path }}">
             <button class="home-pill" type="submit">쓰기 로그아웃</button>

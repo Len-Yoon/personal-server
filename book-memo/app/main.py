@@ -10,11 +10,12 @@ from urllib.parse import quote, urlsplit
 import fcntl
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.services.book_search import search_books
+from app.services.export_service import export_json, export_markdown, export_records
 from app.services.book_service import (
     DB_PATH,
     create_chapter,
@@ -446,6 +447,27 @@ def search_api(q: str = "", limit: int = 5):
     return {
         "results": search_books_and_memos(q, limit=limit),
     }
+
+
+@app.get("/api/export")
+def export_library(request: Request, format: str = "json"):
+    _require_write_session(request)
+    if format not in {"json", "markdown"}:
+        raise HTTPException(status_code=400, detail="지원하지 않는 내보내기 형식입니다.")
+
+    data = export_records()
+    if format == "json":
+        content, media_type, extension = export_json(data), "application/json", "json"
+    else:
+        content, media_type, extension = export_markdown(data), "text/markdown", "md"
+    return Response(
+        content=content,
+        media_type=f"{media_type}; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="book-memo-export.{extension}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @app.get("/auth/login")

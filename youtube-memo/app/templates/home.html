@@ -46,6 +46,21 @@
     <section class="panel">
         <div class="section-header">
             <div>
+                <h2>전체 기록 내보내기</h2>
+                <p>저장한 모든 영상과 메모를 파일로 내려받습니다.</p>
+            </div>
+        </div>
+        {% if write_authenticated %}
+            <a class="text-link" href="/api/export?format=markdown">Markdown 다운로드</a>
+            <a class="text-link" href="/api/export?format=json">JSON 다운로드</a>
+        {% else %}
+            <a class="text-link" href="/auth/login?next_path=%2F">로그인 후 내보내기</a>
+        {% endif %}
+    </section>
+
+    <section class="panel">
+        <div class="section-header">
+            <div>
                 <h2>영상 등록</h2>
                 <p>링크를 넣으면 영상 화면과 메모장이 열립니다.</p>
             </div>

@@ -31,6 +31,46 @@ class CrawlerWorkerNewsServiceTests(unittest.TestCase):
         self.assertFalse(hasattr(news_archive, "collect_market_news"))
         self.assertFalse(hasattr(news_archive, "get_categories"))
 
+    def test_saved_archive_filters_korean_collection_date_and_pages_in_seoul_time(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmpdir) / "archive.json")}, clear=False):
+                news_archive = self.reload_news_archive()
+                fixed_now = datetime(2026, 9, 30, 3, tzinfo=timezone.utc)
+                articles = [
+                    {"url": f"https://example.com/{index}", "category": "KR_WORLD",
+                     "title": f"기사 {index}", "collected_at": collected_at,
+                     "published_at_sort": "2026-09-20T00:00:00+00:00"}
+                    for index, collected_at in enumerate([
+                        "2026-09-29T14:30:00+00:00",  # 29일 23:30 KST
+                        "2026-09-29T15:30:00+00:00",  # 30일 00:30 KST
+                        "2026-09-30T02:00:00+00:00",  # 30일 11:00 KST
+                    ])
+                ]
+                articles.append({"url": "https://example.com/en", "category": "EN_WORLD",
+                                 "title": "Other", "collected_at": "2026-09-30T02:30:00+00:00"})
+                articles.extend([
+                    {"url": "https://example.com/retained", "category": "KR_IT",
+                     "title": "보관된 기사", "collected_at": "2026-09-24T03:00:00+00:00"},
+                    {"url": "https://example.com/expired", "category": "KR_IT",
+                     "title": "만료된 기사", "collected_at": "2026-09-22T03:00:00+00:00"},
+                ])
+                with patch.object(news_archive, "_now", return_value=fixed_now):
+                    news_archive._save_archive({"updated_at": "", "articles": articles})
+                    all_page = news_archive.list_recent_news(korean_only=True, limit=2,
+                                                             sort_by_collected=True)
+                    next_page = news_archive.list_recent_news(korean_only=True, limit=2,
+                                                              offset=2, sort_by_collected=True)
+                    date_page = news_archive.list_recent_news(korean_only=True,
+                        collected_on=fixed_now.astimezone(news_archive.ZoneInfo("Asia/Seoul")).date(),
+                        sort_by_collected=True)
+
+        self.assertEqual([item["url"] for item in all_page],
+                         ["https://example.com/2", "https://example.com/1"])
+        self.assertEqual([item["url"] for item in next_page],
+                         ["https://example.com/0", "https://example.com/retained"])
+        self.assertEqual([item["url"] for item in date_page],
+                         ["https://example.com/2", "https://example.com/1"])
+
     def test_archive_internal_modules_keep_storage_processing_and_notification_helpers(self):
         prepare_service_import("crawler-worker")
         from app.services import (

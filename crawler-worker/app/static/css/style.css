@@ -705,6 +705,22 @@ a {
     border: 1px solid rgba(148, 163, 184, 0.14);
     border-radius: 22px;
     background: rgba(15, 23, 42, 0.38);
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.saved-search-form input[type="date"] {
+    width: auto;
+    min-width: 170px;
+    color: var(--text-primary);
+    color-scheme: dark;
+}
+
+.saved-pagination {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    padding: 24px;
 }
 
 .empty-card {

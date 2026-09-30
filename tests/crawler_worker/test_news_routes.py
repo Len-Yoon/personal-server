@@ -469,6 +469,43 @@ class CrawlerWorkerNewsRouteTests(unittest.TestCase):
         self.assertIn('class="search-form saved-search-form" action="/saved" method="get"', response.text)
         self.assertIn('class="article-link" href="https://example.com/chip-exports"', response.text)
 
+    def test_saved_page_filters_by_collection_date_and_preserves_filters_on_next_page(self):
+        app = self.load_app()
+        from fastapi.testclient import TestClient
+
+        with patch("app.routers.news.list_recent_news", return_value=[{}] * 51) as recent:
+            with TestClient(app) as client:
+                response = client.get("/saved?q=반도체&date=2026-09-29&page=2")
+                invalid = client.get("/saved?date=2026-09-99")
+                far_page = client.get("/saved?page=1001")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(invalid.status_code, 422)
+        self.assertEqual(far_page.status_code, 200)
+        self.assertIn('name="date"', response.text)
+        self.assertIn('value="2026-09-29"', response.text)
+        self.assertIn('q=%EB%B0%98%EB%8F%84%EC%B2%B4', response.text)
+        self.assertIn('page=3', response.text)
+        selected_call = recent.call_args_list[-2]
+        self.assertEqual(selected_call.kwargs["offset"], 50)
+        self.assertEqual(selected_call.kwargs["limit"], 51)
+        self.assertEqual(selected_call.kwargs["query"], "반도체")
+        self.assertEqual(selected_call.kwargs["collected_on"].isoformat(), "2026-09-29")
+        self.assertFalse(selected_call.kwargs["today_only"])
+        self.assertEqual(recent.call_args.kwargs["offset"], 50000)
+
+    def test_saved_page_defaults_to_full_retained_archive(self):
+        app = self.load_app()
+        from fastapi.testclient import TestClient
+
+        with patch("app.routers.news.list_recent_news", return_value=[]) as recent:
+            with TestClient(app) as client:
+                response = client.get("/saved")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(recent.call_args.kwargs["today_only"])
+        self.assertEqual(recent.call_args.kwargs["offset"], 0)
+
     def test_saved_page_shows_classification_only_for_investing_world_news(self):
         """Fails if classification leaks to unrelated categories or disappears from the archive."""
         app = self.load_app()
