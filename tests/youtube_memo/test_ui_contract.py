@@ -709,5 +709,158 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
         )
 
 
+@contextmanager
+def isolated_service():
+    with tempfile.TemporaryDirectory() as directory:
+        previous_cwd = Path.cwd()
+        previous_db = os.environ.get("YOUTUBE_MEMO_DB_PATH")
+        service_dir = Path(__file__).resolve().parents[2] / "youtube-memo"
+        os.environ["YOUTUBE_MEMO_DB_PATH"] = str(Path(directory) / "memo.sqlite3")
+        prepare_service_import("youtube-memo")
+        os.chdir(service_dir)
+        try:
+            import app.services.memo_service as memo_service
+            import app.main as main
+            yield importlib.reload(memo_service), importlib.reload(main).app
+        finally:
+            os.chdir(previous_cwd)
+            if previous_db is None:
+                os.environ.pop("YOUTUBE_MEMO_DB_PATH", None)
+            else:
+                os.environ["YOUTUBE_MEMO_DB_PATH"] = previous_db
+
+
+def make_video(service, youtube_id: str, title: str):
+    return service.create_or_get_video(
+        f"https://www.youtube.com/watch?v={youtube_id}",
+        title_fetcher=lambda _id, _url: title,
+    )
+
+
+class YoutubeTagsSearchTests(unittest.TestCase):
+    def test_existing_database_migration_tags_and_cascade(self):
+        with isolated_service() as (service, _app):
+            with sqlite3.connect(service.DB_PATH) as connection:
+                connection.executescript("""
+                    CREATE TABLE videos (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, youtube_id TEXT NOT NULL UNIQUE,
+                        url TEXT NOT NULL, title TEXT NOT NULL,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE TABLE memos (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, video_id INTEGER NOT NULL,
+                        title TEXT NOT NULL, content TEXT NOT NULL,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE
+                    );
+                    INSERT INTO videos (youtube_id, url, title) VALUES
+                        ('dQw4w9WgXcQ', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', '기존 영상');
+                    INSERT INTO memos (video_id, title, content) VALUES (1, '기존 메모', '보존 내용');
+                """)
+            service.init_db()
+            self.assertEqual(service.list_memos(1)[0]["tags"], [])
+            self.assertEqual(service.list_memos(1)[0]["content"], "보존 내용")
+            self.assertEqual(service.update_memo_tags(1, " Python, python, 공부 "), 1)
+            self.assertEqual(service.list_memos(1)[0]["tags"], ["Python", "공부"])
+            self.assertEqual(service.list_available_tags()[0]["video_count"], 1)
+            service.delete_memo(1)
+            with sqlite3.connect(service.DB_PATH) as connection:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM memo_tags").fetchone()[0], 0)
+
+    def test_tag_validation_and_filtered_pagination(self):
+        with isolated_service() as (service, _app):
+            first = make_video(service, "dQw4w9WgXcQ", "첫 영상")
+            second = make_video(service, "abcdefghijk", "둘째 영상")
+            memo = service.create_memo(first["id"], "제목", "내용", tags="개발, 학습")
+            service.create_memo(first["id"], "다른 메모", "내용", tags="개발")
+            service.create_memo(second["id"], "제목", "내용", tags="독서")
+            rows, total, page = service.list_videos_page(99, 1, tag="개발")
+            self.assertEqual(([row["id"] for row in rows], total, page), ([first["id"]], 1, 1))
+            self.assertEqual(service.list_videos_page(1, tag="없음")[1], 0)
+            for invalid in ("a,b,c,d,e,f", "x" * 31, "정상,\x00오류", "보이지\u200b않음"):
+                with self.assertRaises(ValueError):
+                    service.update_memo_tags(memo["id"], invalid)
+            self.assertEqual(service.list_memos(first["id"])[1]["tags"], ["개발", "학습"])
+            service.update_memo_tags(memo["id"], "")
+            self.assertEqual(service.list_memos(first["id"])[1]["tags"], [])
+
+    def test_tag_route_requires_writer_and_home_filter_is_public(self):
+        with isolated_service() as (service, app):
+            video = make_video(service, "dQw4w9WgXcQ", "영상")
+            memo = service.create_memo(video["id"], "메모", "내용", tags="기존")
+            previous_password = os.environ.get("DELETE_PASSWORD")
+            os.environ["DELETE_PASSWORD"] = "test-session-password"
+            try:
+                with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                    headers = {"Origin": "https://memo.len.pe.kr"}
+                    self.assertEqual(client.get("/?tag=기존").status_code, 200)
+                    self.assertEqual(client.post(f"/memos/{memo['id']}/tags", data={"tags": "새태그"}, headers=headers).status_code, 401)
+                    client.post("/auth/login", data={"password": "test-session-password"}, headers=headers)
+                    updated = client.post(f"/memos/{memo['id']}/tags", data={"tags": "새태그"}, headers=headers, follow_redirects=False)
+                    self.assertEqual(updated.status_code, 303)
+                    self.assertIn("#새태그", client.get(f"/videos/{video['id']}").text)
+                    self.assertIn("영상", client.get("/?tag=새태그").text)
+                    self.assertEqual(client.get("/?tag=기존").text.count('class="video-card"'), 0)
+                    self.assertEqual(client.post(f"/memos/{memo['id']}/tags", data={"tags": "x,y,z,a,b,c"}, headers=headers).status_code, 400)
+            finally:
+                if previous_password is None:
+                    os.environ.pop("DELETE_PASSWORD", None)
+                else:
+                    os.environ["DELETE_PASSWORD"] = previous_password
+
+    def test_unicode_tag_filter_keeps_selected_chip_highlighted(self):
+        with isolated_service() as (service, app):
+            video = make_video(service, "dQw4w9WgXcQ", "독일어 영상")
+            service.create_memo(video["id"], "어휘", "내용", tags="Straße")
+
+            with TestClient(app) as client:
+                response = client.get("/", params={"tag": "STRASSE"})
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("독일어 영상", response.text)
+            self.assertIn("#Straße", response.text)
+            self.assertIn('href="/?tag=Stra%C3%9Fe" aria-current="page"', response.text)
+
+    def test_search_ranking_deduplication_and_context(self):
+        with isolated_service() as (service, _app):
+            content = make_video(service, "dQw4w9WgXcQ", "다른 영상")
+            titled = make_video(service, "abcdefghijk", "Python 튜토리얼")
+            service.create_memo(content["id"], "두 번째 메모", "python 내용")
+            service.create_memo(content["id"], "본문 메모", "앞" * 100 + "python 핵심 장면" + "뒤" * 100)
+            service.create_memo(titled["id"], "제목 메모", "본문")
+            results = service.search_videos_and_memos("PYTHON")
+            self.assertEqual([result["url"] for result in results], [f"/videos/{titled['id']}", f"/videos/{content['id']}"])
+            self.assertIn("python 핵심 장면", results[1]["snippet"])
+            self.assertEqual(service.search_videos_and_memos("%"), [])
+            self.assertEqual(service.search_videos_and_memos("_"), [])
+
+    def test_exact_memo_title_precedes_partial_video_title(self):
+        with isolated_service() as (service, _app):
+            video_partial = make_video(service, "dQw4w9WgXcQ", "Python 튜토리얼")
+            memo_exact = make_video(service, "abcdefghijk", "다른 영상")
+            service.create_memo(video_partial["id"], "일반 메모", "본문")
+            service.create_memo(memo_exact["id"], "Python", "본문")
+
+            results = service.search_videos_and_memos("python")
+
+            self.assertEqual(
+                [result["url"] for result in results],
+                [f"/videos/{memo_exact['id']}", f"/videos/{video_partial['id']}"],
+            )
+
+    def test_video_title_match_does_not_show_unrelated_memo_snippet(self):
+        with isolated_service() as (service, _app):
+            video = make_video(service, "dQw4w9WgXcQ", "Python 학습")
+            service.create_memo(video["id"], "무관한 메모", "검색어와 관계없는 개인 기록")
+
+            results = service.search_videos_and_memos("Python")
+
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0]["title"], "Python 학습")
+            self.assertEqual(results[0]["snippet"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

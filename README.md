@@ -43,7 +43,7 @@ Portal을 시작점으로 뉴스와 메모를 찾아보고, 파일을 관리하�
 
 ![Personal Server 현재 운영 구조](docs/images/personal-server-architecture-v2.svg)
 
-이 그림은 현재 N100 운영 구성을 나타냅니다. Portal PVC는 정기 백업 중이며, Book·YouTube·Crawler PVC는 원격 암호화 백업과 격리 복원을 수동으로 검증했습니다. 세 서비스의 자동 백업은 아직 중지 상태입니다. NetworkPolicy 검증 도구와 Relay 갱신 도구는 그림의 운영 구성에 포함되지 않았습니다.
+이 그림은 현재 N100 운영 구성을 나타냅니다. Portal·Book·YouTube·Crawler PVC는 매일 02:30 KST부터 순서대로 원격 암호화 백업과 격리 복원 검증을 수행합니다. 2026-09-30 첫 정기 실행에서 네 대상 모두 성공했습니다. NetworkPolicy 검증 도구와 Relay 갱신 도구는 그림의 운영 구성에 포함되지 않았습니다.
 
 Windows의 Ubuntu WSL2에서 공개 웹 서비스와 모니터링은 K3s로, 차량관리와 운영 보조 작업은 Docker Compose로 실행합니다. 외부 요청은 Cloudflare Tunnel과 Caddy를 거쳐 각 웹 서비스로 전달됩니다.
 
@@ -122,9 +122,7 @@ K3s 전환 뒤에도 예전 Docker 컨테이너가 남아 있으면, 복구 도�
 | 상태 확인 | Prometheus·Grafana 지표와 관리자 화면, 외부 health 점검 |
 | 제한형 복구 | HomeOps 조치와 N100 제한형 자동복구에 대상·실행 조건·횟수 제한 적용 |
 | 데이터 보존 | 앱 데이터는 PVC에 유지하고 이미지 교체와 데이터 변경을 별도 절차로 처리 |
-| 백업 | Portal PVC 정기 백업을 `age`로 암호화해 원격 저장·복원 검증. Book·YouTube·Crawler PVC도 N100에서 각각 원격 암호화 백업과 격리 복원을 수동 검증했고, 세 CronJob을 활성화함. 다음 정기 실행 성공은 확인 필요. [자동 실행 적용 결과](docs/reviews/20260928_서비스별_PVC_백업_자동실행_적용결과.md) |
-
-네 PVC 백업을 새벽 02:30부터 하나씩 이어서 실행하는 [순차 백업 설계와 운영 절차](infra/k8s/README.md#새벽-순차-백업-전환-목표)를 저장소에서 준비 중임. 이 경로는 N100 적용·첫 야간 실행 검증 전까지 현재 운영 상태로 보지 않음.
+| 백업 | Portal·Book·YouTube·Crawler PVC를 매일 02:30 KST부터 순차적으로 `age` 암호화해 원격 저장하고 격리 복원을 검증. 2026-09-30 첫 정기 실행에서 네 작업의 성공·SHA-256 증적·복원 검증을 확인함. [순차 백업 운영 기록](docs/reviews/20260929_순차PVC백업_N100운영반영결과.md) |
 | 인증 | 관리자·파일함·메모 쓰기 권한 분리, 세션 인증과 Origin 검증 |
 | 요청 보호 | HttpOnly·SameSite 쿠키, 보안 헤더, 재시작 후에도 유지되는 인증 실패 제한 |
 | 컨테이너·공급망 | non-root 실행 사용자 설정, 베이스 이미지 digest와 외부 Action SHA 고정, Trivy 검사 |

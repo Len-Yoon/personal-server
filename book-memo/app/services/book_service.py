@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -97,6 +98,19 @@ def init_db() -> None:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_book_memos_book ON book_memos (book_id)"
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memo_tags (
+                memo_id INTEGER NOT NULL,
+                tag TEXT NOT NULL,
+                tag_key TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                PRIMARY KEY (memo_id, tag_key),
+                FOREIGN KEY (memo_id) REFERENCES book_memos(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_memo_tags_key ON memo_tags (tag_key, memo_id)")
 
 
 def list_books() -> list[dict[str, Any]]:
@@ -139,18 +153,26 @@ def list_books() -> list[dict[str, Any]]:
     return [_with_computed_progress(_row_to_dict(row)) for row in rows]
 
 
-def list_books_page(page: int, page_size: int = 24) -> tuple[list[dict[str, Any]], int, int]:
+def list_books_page(page: int, page_size: int = 24, tag: str = "") -> tuple[list[dict[str, Any]], int, int]:
     init_db()
 
     with _connect() as connection:
         connection.execute("BEGIN")
-        total = connection.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+        tag = tag.strip()
+        tag_filter = """WHERE EXISTS (
+            SELECT 1 FROM book_memos AS tagged_memos
+            JOIN memo_tags ON memo_tags.memo_id = tagged_memos.id
+            WHERE tagged_memos.book_id = books.id AND memo_tags.tag_key = ?
+        )""" if tag else ""
+        parameters: tuple[Any, ...] = (tag.casefold(),) if tag else ()
+        total = connection.execute(f"SELECT COUNT(*) FROM books {tag_filter}".strip(), parameters).fetchone()[0]
         last_page = max(1, (total + page_size - 1) // page_size)
         page = min(max(1, page), last_page)
         rows = connection.execute(
-            """
+            f"""
             WITH selected AS (
                 SELECT * FROM books
+                {tag_filter}
                 ORDER BY
                     CASE
                         WHEN reading_status = '읽는 중' THEN 0
@@ -178,7 +200,7 @@ def list_books_page(page: int, page_size: int = 24) -> tuple[list[dict[str, Any]
                 updated_at DESC,
                 id DESC
             """,
-            (page_size, (page - 1) * page_size),
+            (*parameters, page_size, (page - 1) * page_size),
         ).fetchall()
 
     return [_with_computed_progress(_row_to_dict(row)) for row in rows], total, page
@@ -506,13 +528,72 @@ def list_memos(book_id: int) -> list[dict[str, Any]]:
             (book_id,),
         ).fetchall()
 
+        tags_by_memo = _tags_for_memos(connection, [row["id"] for row in rows])
+
     return [
         {
             **_row_to_dict(row),
+            "tags": tags_by_memo.get(row["id"], []),
             "display_created_at": format_display_datetime(row["created_at"]),
         }
         for row in rows
     ]
+
+
+def list_available_tags() -> list[str]:
+    init_db()
+    with _connect() as connection:
+        return [row["tag"] for row in connection.execute(
+            "SELECT MIN(tag) AS tag FROM memo_tags GROUP BY tag_key ORDER BY tag_key"
+        )]
+
+
+def _tags_for_memos(connection: sqlite3.Connection, memo_ids: list[int]) -> dict[int, list[str]]:
+    if not memo_ids:
+        return {}
+    placeholders = ",".join("?" for _ in memo_ids)
+    rows = connection.execute(
+        f"SELECT memo_id, tag FROM memo_tags WHERE memo_id IN ({placeholders}) ORDER BY position",
+        memo_ids,
+    )
+    result: dict[int, list[str]] = {}
+    for row in rows:
+        result.setdefault(row["memo_id"], []).append(row["tag"])
+    return result
+
+
+def _parse_tags(value: str) -> list[str]:
+    tags: list[str] = []
+    seen: set[str] = set()
+    for raw in value.split(","):
+        tag = " ".join(raw.strip().split())
+        if not tag:
+            continue
+        if len(tag) > 30 or any(unicodedata.category(char).startswith("C") for char in raw):
+            raise ValueError("태그는 제어 문자 없이 30자 이내로 입력해주세요.")
+        key = tag.casefold()
+        if key not in seen:
+            tags.append(tag)
+            seen.add(key)
+    if len(tags) > 5:
+        raise ValueError("태그는 최대 5개까지 입력할 수 있습니다.")
+    return tags
+
+
+def update_memo_tags(memo_id: int, tags: str) -> int | None:
+    parsed = _parse_tags(tags)
+    init_db()
+    with _connect() as connection:
+        row = connection.execute("SELECT book_id FROM book_memos WHERE id = ?", (memo_id,)).fetchone()
+        if not row:
+            return None
+        connection.execute("DELETE FROM memo_tags WHERE memo_id = ?", (memo_id,))
+        connection.executemany(
+            "INSERT INTO memo_tags (memo_id, tag, tag_key, position) VALUES (?, ?, ?, ?)",
+            [(memo_id, tag, tag.casefold(), index) for index, tag in enumerate(parsed)],
+        )
+        _touch_book(connection, row["book_id"])
+        return row["book_id"]
 
 
 def search_books_and_memos(query: str, limit: int = 5) -> list[dict[str, Any]]:
@@ -521,34 +602,56 @@ def search_books_and_memos(query: str, limit: int = 5) -> list[dict[str, Any]]:
     if not query:
         return []
 
-    keyword = f"%{query}%"
+    escaped_query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    keyword = f"%{escaped_query}%"
     with _connect() as connection:
         rows = connection.execute(
             """
-            SELECT
-                books.id AS book_id,
-                books.title AS book_title,
-                books.authors AS authors,
-                books.progress_percent AS progress_percent,
-                book_memos.title AS memo_title,
-                book_memos.content AS memo_content
-            FROM books
-            LEFT JOIN book_memos ON book_memos.book_id = books.id
-            WHERE books.title LIKE ?
-               OR books.authors LIKE ?
-               OR book_memos.title LIKE ?
-               OR book_memos.content LIKE ?
-            ORDER BY books.updated_at DESC, book_memos.created_at DESC
+            WITH candidates AS (
+                SELECT
+                    books.id AS book_id,
+                    books.title AS book_title,
+                    books.authors AS authors,
+                    books.progress_percent AS progress_percent,
+                    books.updated_at AS book_updated_at,
+                    book_memos.id AS memo_id,
+                    book_memos.title AS memo_title,
+                    book_memos.content AS memo_content,
+                    book_memos.created_at AS memo_created_at,
+                    CASE
+                        WHEN books.title = ? COLLATE NOCASE THEN 0
+                        WHEN book_memos.title = ? COLLATE NOCASE THEN 1
+                        WHEN books.title LIKE ? ESCAPE '\\' THEN 2
+                        WHEN book_memos.title LIKE ? ESCAPE '\\' THEN 3
+                        WHEN books.authors LIKE ? ESCAPE '\\' THEN 4
+                        ELSE 5
+                    END AS relevance
+                FROM books
+                LEFT JOIN book_memos ON book_memos.book_id = books.id
+                    AND (book_memos.title LIKE ? ESCAPE '\\' OR book_memos.content LIKE ? ESCAPE '\\')
+                WHERE books.title LIKE ? ESCAPE '\\'
+                   OR books.authors LIKE ? ESCAPE '\\'
+                   OR book_memos.title LIKE ? ESCAPE '\\'
+                   OR book_memos.content LIKE ? ESCAPE '\\'
+            ), ranked AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY book_id
+                    ORDER BY relevance, memo_created_at DESC, memo_id DESC
+                ) AS hit_rank FROM candidates
+            )
+            SELECT book_id, book_title, authors, progress_percent, memo_title, memo_content, relevance
+            FROM ranked WHERE hit_rank = 1
+            ORDER BY relevance, book_updated_at DESC, memo_created_at DESC, book_id DESC
             LIMIT ?
             """,
-            (keyword, keyword, keyword, keyword, limit),
+            (query, query, keyword, keyword, keyword, keyword, keyword, keyword, keyword, keyword, keyword, limit),
         ).fetchall()
 
     return [
         {
-            "title": row["memo_title"] or row["book_title"],
+            "title": row["book_title"] if row["relevance"] in (0, 2, 4) else (row["memo_title"] or row["book_title"]),
             "description": row["book_title"] or f"{row['authors']} · 진행률 {row['progress_percent']}%",
-            "snippet": _snippet(row["memo_content"] or ""),
+            "snippet": _snippet(row["memo_content"] or "", query=query),
             "meta": f"책 · {row['authors']} · 진행률 {row['progress_percent']}%",
             "url": f"/books/{row['book_id']}",
         }
@@ -562,8 +665,10 @@ def create_memo(
     title: str,
     content: str,
     page: int,
+    tags: str = "",
 ) -> None:
     init_db()
+    parsed_tags = _parse_tags(tags)
     title = title.strip() or "제목 없는 메모"
     content = content.strip()
 
@@ -587,12 +692,16 @@ def create_memo(
             if not chapter_row or chapter_row["book_id"] != book_id:
                 raise ValueError("선택한 목차가 책에 속하지 않습니다.")
 
-        connection.execute(
+        cursor = connection.execute(
             """
             INSERT INTO book_memos (book_id, chapter_id, title, content, page)
             VALUES (?, ?, ?, ?, ?)
             """,
             (book_id, chapter_id or None, title, content, max(0, page)),
+        )
+        connection.executemany(
+            "INSERT INTO memo_tags (memo_id, tag, tag_key, position) VALUES (?, ?, ?, ?)",
+            [(cursor.lastrowid, tag, tag.casefold(), index) for index, tag in enumerate(parsed_tags)],
         )
         _touch_book(connection, book_id)
 
@@ -685,11 +794,15 @@ def _calculate_progress_percent(done_chapter_count: int, chapter_count: int) -> 
     return round((done_chapter_count / chapter_count) * 100)
 
 
-def _snippet(value: str, limit: int = 140) -> str:
+def _snippet(value: str, limit: int = 140, query: str = "") -> str:
     cleaned = " ".join(value.strip().split())
     if len(cleaned) <= limit:
         return cleaned
-    return f"{cleaned[:limit].rstrip()}..."
+    match = cleaned.casefold().find(query.casefold()) if query else -1
+    start = max(0, match - limit // 3) if match >= 0 else 0
+    start = min(start, len(cleaned) - limit)
+    end = start + limit
+    return f"{'...' if start else ''}{cleaned[start:end].strip()}{'...' if end < len(cleaned) else ''}"
 
 
 @contextmanager

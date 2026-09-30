@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <title>{{ title }}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=20260810-legacy-ui-1">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260930-memo-tags-1">
 </head>
 <body>
 <div class="background-orb orb-one"></div>
@@ -70,6 +70,14 @@
                 <p>{{ total_videos }}개의 영상이 저장되어 있습니다.</p>
             </div>
         </div>
+        {% if available_tags %}
+            <nav class="tag-filter" aria-label="태그 필터">
+                <a href="/" {% if not selected_tag %}aria-current="page"{% endif %}>전체</a>
+                {% for item in available_tags %}
+                    <a href="/?tag={{ item.tag|urlencode }}" {% if selected_tag_key == item.tag_key %}aria-current="page"{% endif %}>#{{ item.tag }} ({{ item.video_count }})</a>
+                {% endfor %}
+            </nav>
+        {% endif %}
         <div class="video-grid">
             {% for video in videos %}
                 <article class="video-card">
@@ -100,16 +108,16 @@
                 </article>
             {% else %}
                 <article class="empty-card">
-                    <h3>아직 저장한 영상이 없습니다.</h3>
-                    <p>위 입력창에 YouTube 링크를 넣어 첫 메모장을 열어보세요.</p>
+                    <h3>{% if selected_tag %}이 태그의 영상이 없습니다.{% else %}아직 저장한 영상이 없습니다.{% endif %}</h3>
+                    <p>{% if selected_tag %}다른 태그를 선택하거나 전체 목록을 확인하세요.{% else %}위 입력창에 YouTube 링크를 넣어 첫 메모장을 열어보세요.{% endif %}</p>
                 </article>
             {% endfor %}
         </div>
         {% if total_pages > 1 %}
             <nav class="list-pagination" aria-label="저장한 영상 페이지">
-                {% if current_page > 1 %}<a href="/?page={{ current_page - 1 }}">이전</a>{% endif %}
+                {% if current_page > 1 %}<a href="/?page={{ current_page - 1 }}{% if selected_tag %}&amp;tag={{ selected_tag|urlencode }}{% endif %}">이전</a>{% endif %}
                 <span>{{ current_page }} / {{ total_pages }} 페이지</span>
-                {% if current_page < total_pages %}<a href="/?page={{ current_page + 1 }}">다음</a>{% endif %}
+                {% if current_page < total_pages %}<a href="/?page={{ current_page + 1 }}{% if selected_tag %}&amp;tag={{ selected_tag|urlencode }}{% endif %}">다음</a>{% endif %}
             </nav>
         {% endif %}
     </section>

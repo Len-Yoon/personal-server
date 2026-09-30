@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <title>{{ title }}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=20260810-legacy-ui-1">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260930-memo-tags-1">
 </head>
 <body>
 <div class="background-orb orb-one"></div>
@@ -121,6 +121,20 @@
             </div>
         </div>
 
+        {% if available_tags or active_tag %}
+            <form class="tag-filter" action="/" method="get">
+                {% if query %}<input type="hidden" name="q" value="{{ query }}">{% endif %}
+                <label for="book-tag-filter">메모 태그</label>
+                <select id="book-tag-filter" name="tag">
+                    <option value="">전체 책</option>
+                    {% for tag in available_tags %}
+                        <option value="{{ tag }}" {% if tag == active_tag %}selected{% endif %}>{{ tag }}</option>
+                    {% endfor %}
+                </select>
+                <button type="submit">필터 적용</button>
+            </form>
+        {% endif %}
+
         <div class="library-grid">
             {% for book in books %}
                 <article class="library-card">
@@ -198,9 +212,9 @@
         </div>
         {% if total_pages > 1 %}
             <nav class="list-pagination" aria-label="내 책장 페이지">
-                {% if current_page > 1 %}<a href="/?page={{ current_page - 1 }}{% if query %}&amp;q={{ query|urlencode }}{% endif %}">이전</a>{% endif %}
+                {% if current_page > 1 %}<a href="/?page={{ current_page - 1 }}{% if query %}&amp;q={{ query|urlencode }}{% endif %}{% if active_tag %}&amp;tag={{ active_tag|urlencode }}{% endif %}">이전</a>{% endif %}
                 <span>{{ current_page }} / {{ total_pages }} 페이지</span>
-                {% if current_page < total_pages %}<a href="/?page={{ current_page + 1 }}{% if query %}&amp;q={{ query|urlencode }}{% endif %}">다음</a>{% endif %}
+                {% if current_page < total_pages %}<a href="/?page={{ current_page + 1 }}{% if query %}&amp;q={{ query|urlencode }}{% endif %}{% if active_tag %}&amp;tag={{ active_tag|urlencode }}{% endif %}">다음</a>{% endif %}
             </nav>
         {% endif %}
     </section>
