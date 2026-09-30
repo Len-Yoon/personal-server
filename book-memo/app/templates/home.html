@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <title>{{ title }}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=20260930-home-clarity-3">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260930-selected-export-1">
 </head>
 <body class="home-page">
 <div class="background-orb orb-one"></div>
@@ -88,6 +88,16 @@
                 <a class="text-link" href="/auth/login?next_path=%2F">로그인 후 내보내기</a>
             {% endif %}
         </div>
+        {% if write_authenticated %}
+            <div class="selected-export" data-selected-export>
+                <p><strong>책을 골라 받기</strong> · 책장 카드에서 체크하세요. <span data-selected-count aria-live="polite">0권 선택</span></p>
+                <div class="export-actions">
+                    <button type="button" data-selected-format="markdown" disabled>선택 Markdown</button>
+                    <button type="button" data-selected-format="json" disabled>선택 JSON</button>
+                    <button type="button" class="selection-clear" data-clear-selection disabled>선택 해제</button>
+                </div>
+            </div>
+        {% endif %}
     </section>
 
     {% if query %}
@@ -158,6 +168,12 @@
         <div class="library-grid">
             {% for book in books %}
                 <article class="library-card">
+                    {% if write_authenticated %}
+                        <label class="export-select-label">
+                            <input class="export-select-checkbox" type="checkbox" value="{{ book.id }}">
+                            <span>내보내기에 선택: {{ book.title }}</span>
+                        </label>
+                    {% endif %}
                     <a class="library-link" href="/books/{{ book.id }}">
                         <div class="cover">
                             {% if book.thumbnail %}
@@ -250,6 +266,80 @@ const redirectToWriteLogin = () => {
     const loginUrl = `/auth/login?next_path=${encodeURIComponent(currentPath)}`;
     window.location.assign(loginUrl);
 };
+
+const selectedExport = document.querySelector("[data-selected-export]");
+if (selectedExport) {
+    const storageKey = "book-memo:selected-export-ids:v1";
+    let storedIds = [];
+    try {
+        const parsed = JSON.parse(sessionStorage.getItem(storageKey) || "[]");
+        if (Array.isArray(parsed)) {
+            storedIds = parsed.filter((id) => typeof id === "string" && /^[1-9][0-9]*$/.test(id)).slice(0, 100);
+        }
+    } catch (_) {
+        storedIds = [];
+    }
+    const selectedIds = new Set(storedIds);
+    const checkboxes = [...document.querySelectorAll(".export-select-checkbox")];
+    const downloadButtons = [...selectedExport.querySelectorAll("[data-selected-format]")];
+    const clearButton = selectedExport.querySelector("[data-clear-selection]");
+    const count = selectedExport.querySelector("[data-selected-count]");
+    const saveSelection = () => {
+        try { sessionStorage.setItem(storageKey, JSON.stringify([...selectedIds])); } catch (_) { /* Tab storage may be unavailable. */ }
+        count.textContent = `${selectedIds.size}권 선택`;
+        downloadButtons.forEach((button) => { button.disabled = selectedIds.size === 0; });
+        clearButton.disabled = selectedIds.size === 0;
+    };
+    checkboxes.forEach((checkbox) => {
+        checkbox.checked = selectedIds.has(checkbox.value);
+        checkbox.addEventListener("change", () => {
+            if (checkbox.checked && selectedIds.size >= 100) {
+                checkbox.checked = false;
+                window.alert("한 번에 최대 100권까지 선택할 수 있습니다.");
+                return;
+            }
+            if (checkbox.checked) selectedIds.add(checkbox.value);
+            else selectedIds.delete(checkbox.value);
+            saveSelection();
+        });
+    });
+    clearButton.addEventListener("click", () => {
+        selectedIds.clear();
+        checkboxes.forEach((checkbox) => { checkbox.checked = false; });
+        saveSelection();
+    });
+    downloadButtons.forEach((button) => button.addEventListener("click", async () => {
+        if (selectedIds.size === 0) return;
+        const params = new URLSearchParams({format: button.dataset.selectedFormat});
+        [...selectedIds].sort((a, b) => Number(a) - Number(b)).forEach((id) => params.append("id", id));
+        button.disabled = true;
+        try {
+            const response = await fetch(`/api/export?${params.toString()}`, {credentials: "same-origin"});
+            if (response.status === 401) { redirectToWriteLogin(); return; }
+            if (response.status === 400) {
+                window.alert("선택한 책 중 삭제된 항목이 있습니다. 선택을 해제하고 다시 골라주세요.");
+                return;
+            }
+            if (!response.ok) throw new Error("내보내기 실패");
+            const blobUrl = URL.createObjectURL(await response.blob());
+            const link = document.createElement("a");
+            link.href = blobUrl;
+            link.download = `book-memo-selected.${button.dataset.selectedFormat === "json" ? "json" : "md"}`;
+            document.body.append(link);
+            link.click();
+            link.remove();
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+        } catch (_) {
+            window.alert("선택한 기록을 다운로드하지 못했습니다. 다시 시도해 주세요.");
+        } finally {
+            button.disabled = selectedIds.size === 0;
+        }
+    }));
+    document.querySelector(".write-auth-form")?.addEventListener("submit", () => {
+        try { sessionStorage.removeItem(storageKey); } catch (_) { /* Tab storage may be unavailable. */ }
+    });
+    saveSelection();
+}
 
     const shouldSelectTocByDefault = (title) => {
         const line = title.trim().replace(/\s+/g, " ");

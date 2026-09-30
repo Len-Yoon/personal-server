@@ -137,6 +137,7 @@ class BookMemoUiContractTests(unittest.TestCase):
                 authenticated = client.get("/api/export")
                 repeated = client.get("/api/export")
                 home_after = client.get("/")
+                second_page = client.get("/?page=2")
                 invalid = client.get("/api/export?format=xml")
                 client.post("/auth/logout", headers={"Origin": "https://books.len.pe.kr"})
                 after_logout = client.get("/api/export", headers={"Accept": "application/json"})
@@ -151,6 +152,8 @@ class BookMemoUiContractTests(unittest.TestCase):
         self.assertIn('attachment; filename="book-memo-export.json"', authenticated.headers["content-disposition"])
         self.assertEqual(authenticated.headers["cache-control"], "no-store")
         self.assertIn("/api/export?format=json", home_after.text)
+        self.assertEqual(home_after.text.count('class="export-select-checkbox"'), 24)
+        self.assertEqual(second_page.text.count('class="export-select-checkbox"'), 2)
         self.assertLess(home_after.text.index("책 검색"), home_after.text.index("전체 기록 내보내기"))
         self.assertLess(home_after.text.index("전체 기록 내보내기"), home_after.text.index("내 책장"))
         self.assertEqual(invalid.status_code, 400)
@@ -193,6 +196,55 @@ class BookMemoUiContractTests(unittest.TestCase):
         self.assertIn("내용\n````\n끝", markdown.text)
         self.assertIn("- 태그: 공부", markdown.text)
         self.assertEqual(data["records"][0]["description"], "설명\n```\n다음 줄")
+
+    def test_selected_export_includes_only_chosen_books_and_their_children(self):
+        with (
+            patch.dict(os.environ, {"DELETE_PASSWORD": "test-export-password"}),
+            tempfile.TemporaryDirectory() as tempdir,
+            self.loaded_app(tempdir) as app,
+        ):
+            from app.services import book_service
+
+            first = book_service.create_or_get_book({"isbn": "chosen-1", "title": "첫 번째 책"})
+            other = book_service.create_or_get_book({"isbn": "skip", "title": "제외할 책"})
+            last = book_service.create_or_get_book({"isbn": "chosen-2", "title": "마지막 책"})
+            book_service.create_chapters(first["id"], ["선택 목차"])
+            book_service.create_chapters(other["id"], ["제외 목차"])
+            book_service.create_memo(first["id"], None, "선택 메모", "선택 내용", 2, tags="선택")
+            book_service.create_memo(other["id"], None, "제외 메모", "제외 내용", 3, tags="제외")
+            with TestClient(app, base_url="https://books.len.pe.kr") as client:
+                blocked = client.get(f"/api/export?format=json&id={first['id']}")
+                before_login = client.get("/")
+                client.post(
+                    "/auth/login", data={"password": "test-export-password"},
+                    headers={"Origin": "https://books.len.pe.kr"},
+                )
+                home = client.get("/")
+                selected = client.get(f"/api/export?format=json&id={last['id']}&id={first['id']}")
+                markdown = client.get(f"/api/export?format=markdown&id={first['id']}")
+                full = client.get("/api/export?format=json")
+                invalid = [
+                    client.get(f"/api/export?format=json&id={value}")
+                    for value in ("", "0", "abc", str(2**63), "999999")
+                ]
+                duplicate = client.get(f"/api/export?id={first['id']}&id={first['id']}")
+                too_many = client.get("/api/export?" + urlencode([("id", i) for i in range(1, 102)]))
+
+        self.assertEqual(blocked.status_code, 401)
+        self.assertNotIn('class="export-select-checkbox"', before_login.text)
+        self.assertIn('class="export-select-checkbox"', home.text)
+        self.assertEqual(selected.status_code, 200)
+        self.assertIn('filename="book-memo-selected-export.json"', selected.headers["content-disposition"])
+        self.assertEqual([record["id"] for record in selected.json()["records"]], [first["id"], last["id"]])
+        self.assertEqual(selected.json()["records"][0]["chapters"][0]["title"], "선택 목차")
+        self.assertEqual(selected.json()["records"][0]["memos"][0]["tags"], ["선택"])
+        self.assertNotIn("제외 내용", selected.text)
+        self.assertIn("첫 번째 책", markdown.text)
+        self.assertNotIn("제외할 책", markdown.text)
+        self.assertEqual(len(full.json()["records"]), 3)
+        self.assertTrue(all(response.status_code == 400 for response in invalid))
+        self.assertEqual(duplicate.status_code, 400)
+        self.assertEqual(too_many.status_code, 400)
 
 
     def assert_portal_security_headers(self, response):

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <title>{{ title }}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=20260930-home-clarity-1">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260930-selected-export-2">
 </head>
 <body class="home-page">
 <div class="background-orb orb-one"></div>
@@ -27,7 +27,7 @@
     </div>
 
     {% if write_authenticated %}
-        <form class="write-auth-form" action="/auth/logout" method="post">
+        <form class="write-auth-form" action="/auth/logout" method="post" data-clear-export-on-logout>
             <input type="hidden" name="next_path" value="{{ request.url.path }}">
             <button class="home-pill" type="submit">쓰기 로그아웃</button>
         </form>
@@ -76,6 +76,16 @@
                 <a class="text-link" href="/auth/login?next_path=%2F">로그인 후 내보내기</a>
             {% endif %}
         </div>
+        {% if write_authenticated %}
+        <div class="selected-export">
+            <p><strong>영상을 골라 받기</strong> · 저장한 영상 카드에서 체크하세요. <span id="selected-export-count" aria-live="polite">선택한 영상 0개</span></p>
+            <div class="export-actions">
+                <button class="text-link export-button" type="button" data-export-format="markdown" disabled>선택 Markdown</button>
+                <button class="text-link export-button" type="button" data-export-format="json" disabled>선택 JSON</button>
+                <button class="text-link export-button" type="button" id="clear-export-selection" disabled>선택 해제</button>
+            </div>
+        </div>
+        {% endif %}
     </section>
 
     <section class="panel">
@@ -96,6 +106,12 @@
         <div class="video-grid">
             {% for video in videos %}
                 <article class="video-card">
+                    {% if write_authenticated %}
+                    <label class="video-card-selection">
+                        <input type="checkbox" data-export-video-id="{{ video.id }}">
+                        <span>내보내기에 선택: {{ video.title }}</span>
+                    </label>
+                    {% endif %}
                     <a class="video-card-link" href="/videos/{{ video.id }}">
                         <div class="thumbnail">
                             <img
@@ -143,6 +159,93 @@
     <span>Len Private Workspace</span>
 </footer>
 <script>
+const exportSelectionKey = "youtube-memo-selected-video-ids";
+const exportCheckboxes = [...document.querySelectorAll("[data-export-video-id]")];
+if (exportCheckboxes.length || document.getElementById("selected-export-count")) {
+    let selectedIds = [];
+    try {
+        const stored = JSON.parse(window.sessionStorage.getItem(exportSelectionKey) || "[]");
+        if (Array.isArray(stored)) {
+            selectedIds = [...new Set(stored.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))].slice(0, 100);
+        }
+    } catch (error) {
+        selectedIds = [];
+    }
+
+    const updateSelection = () => {
+        const count = document.getElementById("selected-export-count");
+        count.textContent = `선택한 영상 ${selectedIds.length}개`;
+        document.querySelectorAll("[data-export-format], #clear-export-selection").forEach((button) => {
+            button.disabled = selectedIds.length === 0;
+        });
+        exportCheckboxes.forEach((checkbox) => {
+            checkbox.checked = selectedIds.includes(Number(checkbox.dataset.exportVideoId));
+        });
+        try {
+            window.sessionStorage.setItem(exportSelectionKey, JSON.stringify(selectedIds));
+        } catch (error) {
+            // 선택 상태는 현재 페이지에서 계속 사용합니다.
+        }
+    };
+
+    exportCheckboxes.forEach((checkbox) => checkbox.addEventListener("change", () => {
+        const id = Number(checkbox.dataset.exportVideoId);
+        selectedIds = selectedIds.filter((value) => value !== id);
+        if (checkbox.checked && selectedIds.length < 100) {
+            selectedIds.push(id);
+        } else if (checkbox.checked) {
+            window.alert("한 번에 최대 100개 영상을 선택할 수 있습니다.");
+        }
+        updateSelection();
+    }));
+    document.getElementById("clear-export-selection").addEventListener("click", () => {
+        selectedIds = [];
+        updateSelection();
+    });
+    document.querySelectorAll("[data-export-format]").forEach((button) => button.addEventListener("click", async () => {
+        if (!selectedIds.length) return;
+        const params = new URLSearchParams({format: button.dataset.exportFormat});
+        selectedIds.forEach((id) => params.append("id", String(id)));
+        button.disabled = true;
+        try {
+            const response = await fetch(`/api/export?${params.toString()}`, {credentials: "same-origin"});
+            if (response.status === 401) {
+                redirectToWriteLogin();
+                return;
+            }
+            if (response.status === 400) {
+                window.alert("선택한 영상 중 삭제되었거나 사용할 수 없는 항목이 있습니다. 선택을 해제하고 다시 골라주세요.");
+                return;
+            }
+            if (!response.ok) {
+                window.alert("선택한 영상을 다운로드하지 못했습니다. 다시 시도해주세요.");
+                return;
+            }
+            const blobUrl = URL.createObjectURL(await response.blob());
+            const download = document.createElement("a");
+            download.href = blobUrl;
+            download.download = `youtube-memo-selected-export.${button.dataset.exportFormat === "json" ? "json" : "md"}`;
+            document.body.appendChild(download);
+            download.click();
+            download.remove();
+            window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+        } catch (error) {
+            window.alert("선택한 영상을 다운로드하지 못했습니다. 다시 시도해주세요.");
+        } finally {
+            updateSelection();
+        }
+    }));
+    updateSelection();
+}
+
+document.querySelector("[data-clear-export-on-logout]")?.addEventListener("submit", () => {
+    try {
+        window.sessionStorage.removeItem(exportSelectionKey);
+    } catch (error) {
+        // 로그아웃은 계속 진행합니다.
+    }
+});
+
 const redirectToWriteLogin = () => {
     const currentPath = `${window.location.pathname}${window.location.search}`;
     const loginUrl = `/auth/login?next_path=${encodeURIComponent(currentPath)}`;
