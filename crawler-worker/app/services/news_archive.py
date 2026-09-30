@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 from threading import Lock, RLock, Thread
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -153,6 +153,9 @@ def list_recent_news(
     limit: int = 50,
     korean_only: bool = False,
     today_only: bool = False,
+    collected_on: date | None = None,
+    offset: int = 0,
+    sort_by_collected: bool = False,
 ) -> list[dict[str, Any]]:
     with _ARCHIVE_WRITE_LOCK:
         now = _now()
@@ -170,6 +173,12 @@ def list_recent_news(
         ]
     if today_only:
         articles = [article for article in articles if _is_today_article(article)]
+    if collected_on is not None:
+        articles = [
+            article for article in articles
+            if (collected_at := _parse_dt(str(article.get("collected_at", "")))) is not None
+            and collected_at.astimezone(ZoneInfo("Asia/Seoul")).date() == collected_on
+        ]
 
     if query.strip():
         keyword = query.strip().casefold()
@@ -179,8 +188,8 @@ def list_recent_news(
             if _matches_query(article, keyword)
         ]
 
-    articles.sort(key=_sort_key, reverse=True)
-    return articles[:limit]
+    articles.sort(key=_collection_sort_key if sort_by_collected else _sort_key, reverse=True)
+    return articles[offset:offset + limit]
 
 
 def get_korean_categories() -> list[dict[str, str]]:
@@ -712,6 +721,10 @@ def _sort_key(article: dict[str, Any]) -> tuple[str, str]:
     published_at_sort = str(article.get("published_at_sort", "")).strip()
     collected_at = str(article.get("collected_at", "")).strip()
     return (published_at_sort or collected_at or "", str(article.get("title", "")))
+
+
+def _collection_sort_key(article: dict[str, Any]) -> tuple[str, str]:
+    return (str(article.get("collected_at", "")), str(article.get("title", "")))
 
 
 def _matches_query(article: dict[str, Any], keyword: str) -> bool:

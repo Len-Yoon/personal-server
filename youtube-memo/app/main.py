@@ -10,7 +10,7 @@ from urllib.parse import quote, urlsplit
 import fcntl
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -24,12 +24,14 @@ from app.services.memo_service import (
     get_video,
     list_memos,
     list_available_tags,
+    list_export_records,
     list_videos_page,
     search_videos_and_memos,
     update_memo,
     update_memo_tags,
 )
 from app.services.host_urls import portal_home_url, request_host_from_headers
+from app.services.export_service import export_json, export_markdown
 
 app = FastAPI(title="Youtube Memo")
 
@@ -265,6 +267,31 @@ def search_api(q: str = "", limit: int = 5):
     return {
         "results": search_videos_and_memos(q, limit=limit),
     }
+
+
+@app.get("/api/export")
+def export_records(request: Request, format: str = "json"):
+    _require_write_session(request)
+    if format not in {"json", "markdown"}:
+        raise HTTPException(status_code=400, detail="지원하지 않는 내보내기 형식입니다.")
+
+    records = list_export_records()
+    if format == "json":
+        content = export_json(records)
+        media_type = "application/json; charset=utf-8"
+        filename = "youtube-memo-export.json"
+    else:
+        content = export_markdown(records)
+        media_type = "text/markdown; charset=utf-8"
+        filename = "youtube-memo-export.md"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @app.get("/auth/login")

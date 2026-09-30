@@ -862,5 +862,92 @@ class YoutubeTagsSearchTests(unittest.TestCase):
             self.assertEqual(results[0]["snippet"], "")
 
 
+@contextmanager
+def isolated_export_service():
+    previous_password = os.environ.get("DELETE_PASSWORD")
+    os.environ["DELETE_PASSWORD"] = "export-test-password"
+    try:
+        with isolated_service() as (service, app):
+            yield app, service
+    finally:
+        if previous_password is None:
+            os.environ.pop("DELETE_PASSWORD", None)
+        else:
+            os.environ["DELETE_PASSWORD"] = previous_password
+
+
+def login(client):
+    response = client.post(
+        "/auth/login",
+        data={"password": "export-test-password"},
+        headers={"Origin": "https://memo.len.pe.kr"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+
+class YoutubeExportTests(unittest.TestCase):
+    def test_export_requires_session_and_does_not_expose_records(self):
+        with isolated_export_service() as (app, service):
+            service.create_or_get_video("dQw4w9WgXcQ", title_fetcher=lambda *_: "개인 영상")
+            with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                response = client.get("/api/export?format=json")
+
+        self.assertEqual(response.status_code, 401)
+        self.assertNotIn("개인 영상", response.text)
+        self.assertNotIn("attachment", response.headers.get("content-disposition", ""))
+
+    def test_json_export_includes_all_videos_memos_tags_and_timestamps_in_stable_order(self):
+        with isolated_export_service() as (app, service):
+            first = service.create_or_get_video("dQw4w9WgXcQ", title_fetcher=lambda *_: "첫 영상")
+            service.create_memo(first["id"], "한국어 메모", "00:15 장면\n01:02 다시 보기", "학습, 참고")
+            second = service.create_or_get_video("abcdefghijk", title_fetcher=lambda *_: "메모 없는 영상")
+            for number in range(25):
+                service.create_or_get_video(f"id{number:09d}", title_fetcher=lambda *_: f"나머지 {number}")
+            with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                login(client)
+                response = client.get("/api/export")
+                repeated = client.get("/api/export?format=json")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, repeated.content)
+        self.assertEqual(response.headers["content-type"], "application/json; charset=utf-8")
+        self.assertIn('attachment; filename="youtube-memo-export.json"', response.headers["content-disposition"])
+        payload = json.loads(response.content)
+        self.assertEqual(payload["metadata"], {"service": "youtube-memo", "schema_version": 1, "video_count": 27, "memo_count": 1})
+        self.assertEqual(len(payload["records"]), 27)
+        self.assertEqual(payload["records"][0]["id"], first["id"])
+        self.assertEqual(payload["records"][1]["id"], second["id"])
+        self.assertEqual(payload["records"][1]["memos"], [])
+        memo = payload["records"][0]["memos"][0]
+        self.assertEqual(memo["content"], "00:15 장면\n01:02 다시 보기")
+        self.assertEqual(memo["tags"], ["학습", "참고"])
+        self.assertEqual(memo["timestamps"], [{"text": "00:15", "seconds": 15}, {"text": "01:02", "seconds": 62}])
+
+    def test_markdown_export_preserves_content_and_escapes_untrusted_title(self):
+        with isolated_export_service() as (app, service):
+            video = service.create_or_get_video("dQw4w9WgXcQ", title_fetcher=lambda *_: "<script> # 영상")
+            service.create_memo(video["id"], "# 제목", "줄 1\n```\n줄 2 00:30", "태그")
+            with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                login(client)
+                response = client.get("/api/export?format=markdown")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "text/markdown; charset=utf-8")
+        self.assertIn('attachment; filename="youtube-memo-export.md"', response.headers["content-disposition"])
+        self.assertIn("&lt;script&gt;", response.text)
+        self.assertNotIn("## <script>", response.text)
+        self.assertIn("줄 1\n```\n줄 2 00:30", response.text)
+        self.assertIn("00:30", response.text)
+
+    def test_invalid_format_is_rejected_after_authentication(self):
+        with isolated_export_service() as (app, _service):
+            with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                login(client)
+                response = client.get("/api/export?format=csv")
+
+        self.assertEqual(response.status_code, 400)
+
+
 if __name__ == "__main__":
     unittest.main()

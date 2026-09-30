@@ -308,6 +308,38 @@ def list_memos(video_id: int) -> list[dict[str, Any]]:
     ]
 
 
+def list_export_records() -> list[dict[str, Any]]:
+    """Return every saved video and memo from one consistent database snapshot."""
+    init_db()
+    with _connect() as connection:
+        connection.execute("BEGIN")
+        videos = connection.execute(
+            "SELECT id, youtube_id, url, title, created_at, updated_at FROM videos ORDER BY id"
+        ).fetchall()
+        memos = connection.execute(
+            "SELECT id, video_id, title, content, created_at, updated_at FROM memos ORDER BY video_id, id"
+        ).fetchall()
+        tags = connection.execute(
+            "SELECT memo_id, tag FROM memo_tags ORDER BY memo_id, position"
+        ).fetchall()
+
+    tags_by_memo: dict[int, list[str]] = {}
+    for row in tags:
+        tags_by_memo.setdefault(row["memo_id"], []).append(row["tag"])
+
+    records = [{**_row_to_dict(row), "memos": []} for row in videos]
+    records_by_id = {record["id"]: record for record in records}
+    for row in memos:
+        memo = _row_to_dict(row)
+        memo["tags"] = tags_by_memo.get(memo["id"], [])
+        memo["timestamps"] = [
+            segment for segment in memo_timestamp_segments(memo["content"])
+            if segment["seconds"] is not None
+        ]
+        records_by_id[memo["video_id"]]["memos"].append(memo)
+    return records
+
+
 def update_memo_tags(memo_id: int, tags: str) -> int | None:
     init_db()
     parsed_tags = parse_tags(tags)

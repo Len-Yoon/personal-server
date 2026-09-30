@@ -99,6 +99,88 @@ class BookMemoUiContractTests(unittest.TestCase):
         self.assertEqual(updated.status_code, 303)
         self.assertIn("태그 있는 책", filtered.text)
 
+    def test_export_requires_session_and_contains_all_saved_records(self):
+        with (
+            patch.dict(os.environ, {"DELETE_PASSWORD": "test-export-password"}),
+            tempfile.TemporaryDirectory() as tempdir,
+            self.loaded_app(tempdir) as app,
+        ):
+            from app.services import book_service
+
+            books = [
+                book_service.create_or_get_book({"isbn": f"isbn-{i}", "title": f"책 {i}"})
+                for i in range(26)
+            ]
+            first = books[0]
+            book_service.update_progress(first["id"], "읽는 중", 52, "2장", 40)
+            book_service.create_chapters(first["id"], ["1장", "2장"])
+            chapter = book_service.list_chapters(first["id"])[0]
+            book_service.update_chapter(chapter["id"], True, "좋은 장")
+            book_service.create_memo(first["id"], chapter["id"], "인상", "한글 내용", 52, tags="공부, 독서")
+            with TestClient(app, base_url="https://books.len.pe.kr") as client:
+                unauthenticated = client.get("/api/export?format=json", headers={"Accept": "application/json"})
+                home_before = client.get("/")
+                login = client.post(
+                    "/auth/login", data={"password": "test-export-password"},
+                    headers={"Origin": "https://books.len.pe.kr"}, follow_redirects=False,
+                )
+                authenticated = client.get("/api/export")
+                repeated = client.get("/api/export")
+                home_after = client.get("/")
+                invalid = client.get("/api/export?format=xml")
+                client.post("/auth/logout", headers={"Origin": "https://books.len.pe.kr"})
+                after_logout = client.get("/api/export", headers={"Accept": "application/json"})
+
+        self.assertEqual(unauthenticated.status_code, 401)
+        self.assertNotIn("/api/export?format=json", home_before.text)
+        self.assertEqual(login.status_code, 303)
+        self.assertEqual(authenticated.status_code, 200)
+        self.assertEqual(authenticated.content, repeated.content)
+        self.assertIn('attachment; filename="book-memo-export.json"', authenticated.headers["content-disposition"])
+        self.assertEqual(authenticated.headers["cache-control"], "no-store")
+        self.assertIn("/api/export?format=json", home_after.text)
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(after_logout.status_code, 401)
+        data = authenticated.json()
+        self.assertEqual(data["metadata"], {"service": "book-memo", "schema_version": 1})
+        self.assertEqual(len(data["records"]), 26)
+        self.assertEqual([book["id"] for book in data["records"]], sorted(book["id"] for book in books))
+        record = data["records"][0]
+        self.assertEqual(record["current_page"], 52)
+        self.assertEqual(record["current_chapter"], "2장")
+        self.assertEqual(record["chapters"][0]["comment"], "좋은 장")
+        self.assertEqual(record["memos"][0]["content"], "한글 내용")
+        self.assertEqual(record["memos"][0]["chapter_id"], chapter["id"])
+        self.assertEqual(record["memos"][0]["tags"], ["공부", "독서"])
+        self.assertNotIn("test-export-password", authenticated.text)
+
+    def test_markdown_uses_same_records_and_preserves_literal_user_text(self):
+        with (
+            patch.dict(os.environ, {"DELETE_PASSWORD": "test-export-password"}),
+            tempfile.TemporaryDirectory() as tempdir,
+            self.loaded_app(tempdir) as app,
+        ):
+            from app.services import book_service
+
+            book = book_service.create_or_get_book({
+                "isbn": "md-1", "title": "# 제목 [링크]", "description": "설명\n```\n다음 줄",
+            })
+            book_service.create_memo(book["id"], None, "메모", "내용\n````\n끝", 3, tags="공부")
+            with TestClient(app, base_url="https://books.len.pe.kr") as client:
+                client.post("/auth/login", data={"password": "test-export-password"}, headers={"Origin": "https://books.len.pe.kr"})
+                markdown = client.get("/api/export?format=markdown")
+                data = json.loads(client.get("/api/export?format=json").text)
+
+        self.assertEqual(markdown.status_code, 200)
+        self.assertIn("text/markdown", markdown.headers["content-type"])
+        self.assertIn('filename="book-memo-export.md"', markdown.headers["content-disposition"])
+        self.assertIn("## 책 1: \\# 제목 \\[링크\\]", markdown.text)
+        self.assertIn("설명\n```\n다음 줄", markdown.text)
+        self.assertIn("내용\n````\n끝", markdown.text)
+        self.assertIn("- 태그: 공부", markdown.text)
+        self.assertEqual(data["records"][0]["description"], "설명\n```\n다음 줄")
+
+
     def assert_portal_security_headers(self, response):
         for name, value in PORTAL_SECURITY_HEADERS.items():
             self.assertEqual(response.headers[name], value)

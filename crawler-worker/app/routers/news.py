@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import date
+from urllib.parse import urlencode
+
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -79,16 +82,39 @@ def home(request: Request):
 def recent_news_page(
     request: Request,
     q: str = Query(default=""),
+    selected_date: date | None = Query(default=None, alias="date"),
+    page: int = Query(default=1, ge=1),
 ):
-    recent_news = list_recent_news(query=q, korean_only=True, today_only=True)
+    page_size = 50
+    recent_news = list_recent_news(
+        query=q,
+        limit=page_size + 1,
+        offset=(page - 1) * page_size,
+        korean_only=True,
+        today_only=False,
+        collected_on=selected_date,
+        sort_by_collected=True,
+    )
+    has_next = len(recent_news) > page_size
+    def page_url(target: int) -> str:
+        params = {"page": target}
+        if q:
+            params["q"] = q
+        if selected_date:
+            params["date"] = selected_date.isoformat()
+        return "/saved?" + urlencode(params)
 
     return templates.TemplateResponse(
         "saved.html",
         {
             "request": request,
             "title": "보관 뉴스",
-            "recent_news": recent_news,
+            "recent_news": recent_news[:page_size],
             "query": q,
+            "selected_date": selected_date.isoformat() if selected_date else "",
+            "page": page,
+            "previous_url": page_url(page - 1) if page > 1 else "",
+            "next_url": page_url(page + 1) if has_next else "",
         },
     )
 
