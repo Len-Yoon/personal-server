@@ -308,20 +308,32 @@ def list_memos(video_id: int) -> list[dict[str, Any]]:
     ]
 
 
-def list_export_records() -> list[dict[str, Any]]:
-    """Return every saved video and memo from one consistent database snapshot."""
+def list_export_records(video_ids: list[int] | None = None) -> list[dict[str, Any]]:
+    """Return saved videos and their memos from one consistent database snapshot."""
     init_db()
     with _connect() as connection:
         connection.execute("BEGIN")
+        where = f" WHERE id IN ({','.join('?' for _ in video_ids)})" if video_ids is not None else ""
         videos = connection.execute(
-            "SELECT id, youtube_id, url, title, created_at, updated_at FROM videos ORDER BY id"
+            "SELECT id, youtube_id, url, title, created_at, updated_at FROM videos" + where + " ORDER BY id",
+            video_ids or [],
         ).fetchall()
+        if video_ids is not None and len(videos) != len(video_ids):
+            raise ValueError("선택한 영상 중 찾을 수 없는 항목이 있습니다.")
+        memo_where = f" WHERE video_id IN ({','.join('?' for _ in video_ids)})" if video_ids is not None else ""
         memos = connection.execute(
-            "SELECT id, video_id, title, content, created_at, updated_at FROM memos ORDER BY video_id, id"
+            "SELECT id, video_id, title, content, created_at, updated_at FROM memos" + memo_where + " ORDER BY video_id, id",
+            video_ids or [],
         ).fetchall()
-        tags = connection.execute(
-            "SELECT memo_id, tag FROM memo_tags ORDER BY memo_id, position"
-        ).fetchall()
+        if video_ids is None:
+            tags = connection.execute("SELECT memo_id, tag FROM memo_tags ORDER BY memo_id, position").fetchall()
+        else:
+            tags = connection.execute(
+                "SELECT memo_tags.memo_id, memo_tags.tag FROM memo_tags "
+                "JOIN memos ON memos.id = memo_tags.memo_id" + memo_where.replace("video_id", "memos.video_id") +
+                " ORDER BY memo_tags.memo_id, memo_tags.position",
+                video_ids,
+            ).fetchall()
 
     tags_by_memo: dict[int, list[str]] = {}
     for row in tags:

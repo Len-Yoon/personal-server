@@ -887,6 +887,68 @@ def login(client):
 
 
 class YoutubeExportTests(unittest.TestCase):
+    def test_selected_export_keeps_only_requested_videos_with_complete_memos(self):
+        with isolated_export_service() as (app, service):
+            first = service.create_or_get_video("dQw4w9WgXcQ", title_fetcher=lambda *_: "첫 영상")
+            service.create_memo(first["id"], "첫 메모", "00:15 내용", "첫태그")
+            omitted = service.create_or_get_video("abcdefghijk", title_fetcher=lambda *_: "제외 영상")
+            chosen = service.create_or_get_video("lmnopqrstuv", title_fetcher=lambda *_: "선택 영상")
+            service.create_memo(chosen["id"], "선택 메모", "01:02 다시 보기", "학습, 참고")
+            with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                login(client)
+                json_response = client.get("/api/export", params=[("format", "json"), ("id", str(chosen["id"])), ("id", str(first["id"]))])
+                markdown_response = client.get("/api/export", params=[("format", "markdown"), ("id", str(chosen["id"]))])
+
+        self.assertEqual((json_response.status_code, markdown_response.status_code), (200, 200))
+        self.assertEqual(json_response.headers["cache-control"], "no-store")
+        self.assertIn('filename="youtube-memo-selected-export.json"', json_response.headers["content-disposition"])
+        self.assertIn('filename="youtube-memo-selected-export.md"', markdown_response.headers["content-disposition"])
+        payload = json_response.json()
+        self.assertEqual(payload["metadata"]["video_count"], 2)
+        self.assertEqual(payload["metadata"]["memo_count"], 2)
+        self.assertEqual([record["id"] for record in payload["records"]], [first["id"], chosen["id"]])
+        self.assertEqual(payload["records"][1]["memos"][0]["tags"], ["학습", "참고"])
+        self.assertEqual(payload["records"][1]["memos"][0]["timestamps"], [{"text": "01:02", "seconds": 62}])
+        self.assertNotIn("제외 영상", json_response.text)
+        self.assertIn("선택 영상", markdown_response.text)
+        self.assertNotIn("첫 영상", markdown_response.text)
+        self.assertNotIn("제외 영상", markdown_response.text)
+
+    def test_selected_export_rejects_invalid_duplicate_large_and_missing_ids(self):
+        with isolated_export_service() as (app, service):
+            video = service.create_or_get_video("dQw4w9WgXcQ", title_fetcher=lambda *_: "개인 영상")
+            with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                login(client)
+                responses = [
+                    client.get("/api/export", params=[("id", value)])
+                    for value in ("", "0", "-1", "abc", "1.5", str(2**64), "9" * 5000, str(video["id"] + 100))
+                ]
+                responses.append(client.get("/api/export", params=[("id", str(video["id"])), ("id", str(video["id"]))]))
+                responses.append(client.get("/api/export", params=[("id", str(video["id"]))] + [("id", str(number)) for number in range(100, 200)]))
+
+        self.assertEqual([response.status_code for response in responses], [400] * len(responses))
+        self.assertTrue(all("개인 영상" not in response.text for response in responses))
+
+    def test_home_offers_authenticated_video_selection_on_each_page(self):
+        with isolated_export_service() as (app, service):
+            for number in range(25):
+                service.create_or_get_video(f"id{number:09d}", title_fetcher=lambda *_: f"영상 {number}")
+            with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                anonymous = client.get("/")
+                login(client)
+                first_page = client.get("/")
+                second_page = client.get("/?page=2")
+
+        self.assertNotIn('data-export-video-id=', anonymous.text)
+        self.assertEqual(first_page.text.count('data-export-video-id='), 24)
+        self.assertEqual(second_page.text.count('data-export-video-id='), 1)
+        self.assertIn('id="selected-export-count"', first_page.text)
+        self.assertIn('id="clear-export-selection"', first_page.text)
+        self.assertIn('data-export-format="json"', first_page.text)
+        self.assertIn('data-export-format="markdown"', first_page.text)
+        self.assertIn('class="selected-export"', first_page.text)
+        self.assertNotIn('class="panel export-panel selected-export-panel"', first_page.text)
+
     def test_home_puts_video_registration_before_export_and_keeps_login_path(self):
         with isolated_export_service() as (app, _service):
             with TestClient(app, base_url="https://memo.len.pe.kr") as client:

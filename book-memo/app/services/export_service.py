@@ -22,23 +22,35 @@ _MEMO_FIELDS = (
 )
 
 
-def export_records() -> dict[str, Any]:
-    """Read every saved record from one SQLite snapshot without UI-derived fields."""
+def export_records(selected_ids: set[int] | None = None) -> dict[str, Any]:
+    """Read saved records from one SQLite snapshot without UI-derived fields."""
     book_service.init_db()
+    ids = sorted(selected_ids) if selected_ids is not None else []
+    if selected_ids is not None and not ids:
+        raise ValueError("내보낼 책을 선택해 주세요.")
+    placeholders = ", ".join("?" for _ in ids)
+    book_filter = f" WHERE id IN ({placeholders})" if selected_ids is not None else ""
+    child_filter = f" WHERE book_id IN ({placeholders})" if selected_ids is not None else ""
+    tag_filter = (
+        f" WHERE memo_id IN (SELECT id FROM book_memos WHERE book_id IN ({placeholders}))"
+        if selected_ids is not None else ""
+    )
     with book_service._connect() as connection:
         connection.execute("BEGIN")
         books = connection.execute(
-            f"SELECT {', '.join(_BOOK_FIELDS)} FROM books ORDER BY id"
+            f"SELECT {', '.join(_BOOK_FIELDS)} FROM books{book_filter} ORDER BY id", ids
         ).fetchall()
+        if selected_ids is not None and len(books) != len(ids):
+            raise ValueError("선택한 책을 찾을 수 없습니다.")
         chapters = connection.execute(
             f"SELECT {', '.join(_CHAPTER_FIELDS)} FROM book_chapters "
-            "ORDER BY book_id, position, id"
+            f"{child_filter} ORDER BY book_id, position, id", ids
         ).fetchall()
         memos = connection.execute(
-            f"SELECT {', '.join(_MEMO_FIELDS)} FROM book_memos ORDER BY book_id, id"
+            f"SELECT {', '.join(_MEMO_FIELDS)} FROM book_memos{child_filter} ORDER BY book_id, id", ids
         ).fetchall()
         tag_rows = connection.execute(
-            "SELECT memo_id, tag FROM memo_tags ORDER BY memo_id, position, tag_key"
+            f"SELECT memo_id, tag FROM memo_tags{tag_filter} ORDER BY memo_id, position, tag_key", ids
         ).fetchall()
 
     chapters_by_book: dict[int, list[dict[str, Any]]] = {}

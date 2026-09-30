@@ -265,6 +265,7 @@ a {
 
 .export-panel {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
     gap: 20px;
@@ -290,6 +291,41 @@ a {
     flex-wrap: wrap;
     gap: 8px;
     flex: 0 0 auto;
+}
+
+.selected-export {
+    flex: 1 0 100%;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+}
+
+.selected-export p {
+    margin: 0 0 10px;
+    font-size: 13px;
+}
+
+.export-button {
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.export-button:disabled {
+    cursor: not-allowed;
+    opacity: .5;
+}
+
+.video-card-selection {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px var(--space-card);
+    cursor: pointer;
+}
+
+.video-card-selection input {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--accent);
 }
 
 .section-header {
@@ -710,6 +746,10 @@ a {
 
     .video-card-delete-form {
         padding: 0 var(--space-card-sm) var(--space-card-sm);
+    }
+
+    .video-card-selection {
+        padding: 12px var(--space-card-sm);
     }
 
     .memo-card .protected-delete-form {

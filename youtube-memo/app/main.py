@@ -275,15 +275,29 @@ def export_records(request: Request, format: str = "json"):
     if format not in {"json", "markdown"}:
         raise HTTPException(status_code=400, detail="지원하지 않는 내보내기 형식입니다.")
 
-    records = list_export_records()
+    raw_ids = request.query_params.getlist("id")
+    video_ids = None
+    if raw_ids:
+        if len(raw_ids) > 100 or any(
+            not value.isascii() or not value.isdecimal() or len(value) > 19
+            or int(value) < 1 or int(value) > 2**63 - 1 for value in raw_ids
+        ):
+            raise HTTPException(status_code=400, detail="선택한 영상 ID가 올바르지 않습니다.")
+        video_ids = [int(value) for value in raw_ids]
+        if len(set(video_ids)) != len(video_ids):
+            raise HTTPException(status_code=400, detail="중복된 영상 ID가 있습니다.")
+    try:
+        records = list_export_records(video_ids)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     if format == "json":
         content = export_json(records)
         media_type = "application/json; charset=utf-8"
-        filename = "youtube-memo-export.json"
+        filename = "youtube-memo-selected-export.json" if video_ids is not None else "youtube-memo-export.json"
     else:
         content = export_markdown(records)
         media_type = "text/markdown; charset=utf-8"
-        filename = "youtube-memo-export.md"
+        filename = "youtube-memo-selected-export.md" if video_ids is not None else "youtube-memo-export.md"
     return Response(
         content=content,
         media_type=media_type,

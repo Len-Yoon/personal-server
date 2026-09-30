@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import secrets
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -455,7 +456,19 @@ def export_library(request: Request, format: str = "json"):
     if format not in {"json", "markdown"}:
         raise HTTPException(status_code=400, detail="지원하지 않는 내보내기 형식입니다.")
 
-    data = export_records()
+    raw_ids = request.query_params.getlist("id")
+    selected_ids = None
+    if raw_ids:
+        if len(raw_ids) > 100 or any(not re.fullmatch(r"[1-9][0-9]*", value) or len(value) > 19 for value in raw_ids):
+            raise HTTPException(status_code=400, detail="선택한 책 ID가 올바르지 않습니다.")
+        ids = [int(value) for value in raw_ids]
+        if any(value > 2**63 - 1 for value in ids) or len(set(ids)) != len(ids):
+            raise HTTPException(status_code=400, detail="선택한 책 ID가 올바르지 않습니다.")
+        selected_ids = set(ids)
+    try:
+        data = export_records(selected_ids)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     if format == "json":
         content, media_type, extension = export_json(data), "application/json", "json"
     else:
@@ -464,7 +477,9 @@ def export_library(request: Request, format: str = "json"):
         content=content,
         media_type=f"{media_type}; charset=utf-8",
         headers={
-            "Content-Disposition": f'attachment; filename="book-memo-export.{extension}"',
+            "Content-Disposition": (
+                f'attachment; filename="book-memo-{"selected-" if selected_ids is not None else ""}export.{extension}"'
+            ),
             "Cache-Control": "no-store",
         },
     )
