@@ -97,7 +97,7 @@ HomeOps 실행기는 Docker socket을 제한된 allowlist 진단·재시작에�
 
 ## K3s 애플리케이션 이미지 교체 절차
 
-K3s 애플리케이션의 런타임 이미지만 교체하는 운영 절차임. 실제 적용은 서비스별 별도 승인 후 운영자가 수행하며, 저장소 변경 또는 CI 통과를 운영 적용 완료로 간주하지 않음. 검증된 이미지 digest·소스 커밋·archive 체크섬은 배포 증적에 기록할 수 있음. Secret 값·내부 IP·개인 접속 경로는 기록하지 않음. 현재 공식 upgrade 도구 지원 대상은 `portal-web`, `crawler-worker`임. Book은 2026-09-21 독립 검토·회귀를 거친 1회성 이미지 교체 절차로 적용했으며, 일반 upgrade 도구가 Book·YouTube를 지원한다고 가정하지 않음.
+K3s 애플리케이션의 런타임 이미지만 교체하는 운영 절차임. 실제 적용은 서비스별 별도 승인 후 운영자가 수행하며, 저장소 변경 또는 CI 통과를 운영 적용 완료로 간주하지 않음. 검증된 이미지 digest·소스 커밋·archive 체크섬은 배포 증적에 기록할 수 있음. Secret 값·내부 IP·개인 접속 경로는 기록하지 않음. 현재 공식 upgrade 도구 지원 대상은 `portal-web`, `crawler-worker`, `book-memo`임. YouTube는 이 도구의 지원 대상이 아니며, [검증된 이미지 단일 필드 조건부 변경 절차](reviews/20260930_뉴스보관함_메모내보내기_N100운영반영결과.md)를 따른 사례가 있음. Book의 이전 2026-09-21 전환 절차와 현재 이미지 교체 도구는 구분함.
 
 1. macOS에서 `k3s-app-image-build.sh`로 대상 애플리케이션의 Linux AMD64 OCI archive를 생성함. `latest`가 아닌 immutable tag만 사용하고 archive SHA-256을 확인함.
 2. N100에서 대상 애플리케이션명을 명시한 별도 운영 승인을 받은 후에만 `k3s-app-image-import.sh --go`로 archive와 SHA-256을 검증하여 반입함. importer가 출력한 canonical immutable digest 별칭만 이후 단계의 이미지 입력으로 사용함.
