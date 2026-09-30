@@ -887,6 +887,21 @@ def login(client):
 
 
 class YoutubeExportTests(unittest.TestCase):
+    def test_home_puts_video_registration_before_export_and_keeps_login_path(self):
+        with isolated_export_service() as (app, _service):
+            with TestClient(app, base_url="https://memo.len.pe.kr") as client:
+                home = client.get("/")
+                login(client)
+                authenticated_home = client.get("/")
+
+        self.assertEqual((home.status_code, authenticated_home.status_code), (200, 200))
+        for response in (home, authenticated_home):
+            self.assertLess(response.text.index("영상 등록"), response.text.index("전체 기록 내보내기"))
+            self.assertLess(response.text.index("전체 기록 내보내기"), response.text.index("저장한 영상"))
+        self.assertIn('href="/auth/login?next_path=%2F">로그인 후 내보내기</a>', home.text)
+        self.assertIn('href="/api/export?format=markdown">Markdown 다운로드</a>', authenticated_home.text)
+        self.assertIn('href="/api/export?format=json">JSON 다운로드</a>', authenticated_home.text)
+
     def test_export_requires_session_and_does_not_expose_records(self):
         with isolated_export_service() as (app, service):
             service.create_or_get_video("dQw4w9WgXcQ", title_fetcher=lambda *_: "개인 영상")

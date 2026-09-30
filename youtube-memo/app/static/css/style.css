@@ -205,6 +205,19 @@ a {
     margin-bottom: 30px;
 }
 
+.home-page .container {
+    padding-top: 28px;
+}
+
+.home-hero {
+    padding: 28px 32px;
+    margin-bottom: 16px;
+}
+
+.home-hero h1 {
+    font-size: clamp(30px, 3vw, 40px);
+}
+
 .hero-badge {
     display: inline-flex;
     align-items: center;
@@ -239,6 +252,44 @@ a {
 .panel {
     padding: var(--space-panel);
     margin-bottom: 24px;
+}
+
+.registration-panel {
+    border-color: var(--border-strong);
+    margin-bottom: 16px;
+}
+
+.registration-panel .section-header {
+    margin-bottom: 18px;
+}
+
+.export-panel {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    padding: 20px 24px;
+    margin-bottom: 16px;
+}
+
+.export-panel .section-header {
+    margin-bottom: 0;
+}
+
+.export-panel .section-header h2 {
+    font-size: 18px;
+}
+
+.export-panel .section-header p {
+    margin-top: 4px;
+    font-size: 13px;
+}
+
+.export-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    flex: 0 0 auto;
 }
 
 .section-header {
@@ -624,6 +675,31 @@ a {
     .panel,
     .video-info {
         padding: var(--space-panel-sm);
+    }
+
+    .home-page .container {
+        padding-top: 20px;
+    }
+
+    .home-hero {
+        padding: 22px 24px;
+        margin-bottom: 12px;
+    }
+
+    .registration-panel {
+        margin-bottom: 12px;
+    }
+
+    .export-panel {
+        align-items: stretch;
+        flex-direction: column;
+        gap: 12px;
+        padding: 18px 20px;
+        margin-bottom: 16px;
+    }
+
+    .export-actions {
+        flex: 0 1 auto;
     }
 
     .video-card-body,
