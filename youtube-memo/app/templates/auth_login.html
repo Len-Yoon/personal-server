@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <title>{{ title }}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=20260811-write-auth-1">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260930-auth-input-3">
 </head>
 <body>
 <div class="background-orb orb-one"></div>
@@ -18,7 +18,7 @@
             </div>
         </div>
         {% if error %}<p class="error-text">{{ error }}</p>{% endif %}
-        <form class="url-form" action="/auth/login" method="post">
+        <form class="url-form auth-login-form" action="/auth/login" method="post">
             <input type="hidden" name="next_path" value="{{ next_path }}">
             <input name="password" type="password" autocomplete="current-password" placeholder="쓰기 비밀번호" required autofocus>
             <button type="submit">로그인</button>

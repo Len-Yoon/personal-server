@@ -356,6 +356,13 @@ a {
     min-width: 0;
 }
 
+.auth-login-form input[type="password"] {
+    flex: 1 1 auto;
+    min-height: 52px;
+    height: 52px;
+    font-size: 15px;
+}
+
 .url-form input,
 .memo-editor input,
 .memo-editor textarea,

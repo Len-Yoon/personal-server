@@ -363,6 +363,13 @@ textarea:focus {
     flex: 1;
 }
 
+.auth-login-form input[type="password"] {
+    flex: 1 1 auto;
+    min-height: 52px;
+    height: 52px;
+    font-size: 15px;
+}
+
 .tag-filter, .memo-tags-editor, .memo-tags {
     display: flex;
     flex-wrap: wrap;
