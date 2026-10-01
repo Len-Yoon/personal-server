@@ -1,5 +1,6 @@
 """Contracts for the isolated, sample-only Loki observability lab."""
 
+import json
 import unittest
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "infra/k8s/observability-lab/loki-lab.yaml"
 NAMESPACE = "observability-lab"
+MONITORING = ROOT / "infra/k8s/monitoring"
 
 
 class LokiLabManifestTests(unittest.TestCase):
@@ -151,3 +153,47 @@ class LokiLabManifestTests(unittest.TestCase):
         self.assertEqual(self.find("Deployment", "loki-lab-sample")["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/name"], "loki-lab-sample")
         sample = self.find("Deployment", "loki-lab-sample")["spec"]["template"]["spec"]["containers"][0]
         self.assertEqual(sample["command"], ["/bin/sh", "-c", "while true; do echo 'loki lab sample ready'; sleep 30; done"])
+
+
+class LokiLabGrafanaTests(unittest.TestCase):
+    def test_grafana_datasource_sidecar_is_explicitly_enabled(self):
+        values = yaml.safe_load((MONITORING / "values.n100.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(values["grafana"]["sidecar"]["datasources"], {
+            "enabled": True, "label": "grafana_datasource", "labelValue": "1",
+        })
+
+    def test_loki_datasource_is_provisioned_as_nondefault_internal_proxy(self):
+        path = MONITORING / "loki-lab-datasource.yaml"
+        self.assertTrue(path.is_file(), path)
+        manifest = yaml.safe_load(path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["kind"], "ConfigMap")
+        self.assertEqual(manifest["metadata"]["namespace"], "monitoring")
+        self.assertEqual(manifest["metadata"]["labels"], {"grafana_datasource": "1"})
+        self.assertEqual(len(manifest["data"]), 1)
+        provisioning = yaml.safe_load(next(iter(manifest["data"].values())))
+        self.assertEqual(provisioning["apiVersion"], 1)
+        self.assertEqual(provisioning["datasources"], [{
+            "name": "Loki Lab", "uid": "loki-lab", "type": "loki",
+            "access": "proxy", "url": "http://loki-lab.observability-lab.svc.cluster.local:3100",
+            "isDefault": False, "editable": False,
+        }])
+
+    def test_loki_dashboard_queries_only_sample_logs_with_fixed_line_format(self):
+        path = MONITORING / "loki-lab-dashboard.yaml"
+        self.assertTrue(path.is_file(), path)
+        manifest = yaml.safe_load(path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["kind"], "ConfigMap")
+        self.assertEqual(manifest["metadata"]["namespace"], "monitoring")
+        self.assertEqual(manifest["metadata"]["labels"], {"grafana_dashboard": "1"})
+        self.assertEqual(len(manifest["data"]), 1)
+        dashboard = json.loads(next(iter(manifest["data"].values())))
+        self.assertEqual(dashboard["uid"], "loki-lab-sample")
+        self.assertEqual(len(dashboard["panels"]), 1)
+        panel = dashboard["panels"][0]
+        self.assertEqual(panel["type"], "logs")
+        self.assertEqual(panel["datasource"], {"type": "loki", "uid": "loki-lab"})
+        self.assertEqual(panel["targets"], [{
+            "datasource": {"type": "loki", "uid": "loki-lab"},
+            "expr": '{app="loki-lab-sample"} | line_format "{{ __line__ }}"',
+            "refId": "A",
+        }])
