@@ -1,0 +1,61 @@
+# Ansible Localhost Lab Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** N100 WSL 한 대에서 운영 서비스와 분리된 loopback Compose 앱을 Ansible로 멱등 배치·검증·롤백하는 실습을 추가함.
+
+**Architecture:** `infra/ansible-lab`은 localhost inventory, collection dependency, 전용 Compose template, deploy·rollback playbook을 보관함. Ansible은 user-owned lab directory와 project name만 다루고 sample app은 `127.0.0.1`에만 바인딩됨. 실행 전 collection·Docker Compose·포트 충돌을 fail-closed preflight로 확인함.
+
+**Tech Stack:** Ansible Core, `community.docker` collection, Docker Compose v2, Nginx sample container, YAML, Python unittest.
+
+**Spec:** `docs/superpowers/specs/2026-10-01-loki-ansible-lab-design.md`
+
+## Global Constraints
+
+- inventory는 `localhost ansible_connection=local` 하나만 포함하고 SSH, Windows, remote host, `become`을 사용하지 않음.
+- sample Compose project·user-home-relative lab directory·loopback port만 관리함.
+- 운영 Compose·K3s·PVC·Secret·Caddy·Tunnel·bootstrap·scheduler·기존 deploy/backup 도구를 수정·호출하지 않음.
+- `community.docker` collection·Docker Compose v2는 확인만 하고 자동 설치하지 않음.
+- 변수·template·문서·test output에 비밀번호, token, actual account name, internal address를 기록하지 않음.
+- rollback은 lab project와 lab directory만 대상으로 명시 실행함.
+
+## Review Focus
+
+- inventory/playbook에 localhost 외 대상, `become`, SSH key, 실제 사용자명·비밀값이 없는지 확인함.
+- Compose port가 `127.0.0.1` only이고 public ingress·network·host mount가 없는지 확인함.
+- deploy가 preflight 없이 실행되거나 collection을 자동 설치하지 않는지 확인함.
+- 두 번째 apply의 change result와 rollback resource scope가 정직하게 검증되는지 확인함.
+
+### Task 1: Ansible lab 구조와 static safety contract
+
+**Files:** Create `infra/ansible-lab/ansible.cfg`, `infra/ansible-lab/inventory/localhost.ini`, `infra/ansible-lab/group_vars/all.yml`, `infra/ansible-lab/collections/requirements.yml`, `infra/ansible-lab/playbooks/site.yml`, `infra/ansible-lab/playbooks/rollback.yml`, `infra/ansible-lab/templates/compose.yaml.j2`, `infra/ansible-lab/templates/index.html.j2`, `tests/test_ansible_lab_contract.py`.
+
+**Produces:** fixed `personal-server-ansible-lab` project name, user-home-relative lab directory, loopback-only sample HTTP service, `preflight|deploy|verify|rollback` tags.
+
+- [ ] YAML/INI static failure test를 먼저 작성함: one localhost inventory, `become: false`, fixed project name, `127.0.0.1` binding, resource limits, no privileged/host mount/secret-like variable/operational Compose path를 확인함.
+- [ ] Run: `python3 -m unittest tests.test_ansible_lab_contract -v`. Expected: file absence FAIL.
+- [ ] Ansible config·inventory·collection requirement·group vars·Compose and fixed response templates를 구현함. Compose에는 pinned sample image, read-only filesystem, dropped capabilities, cpu/memory/pid limits만 포함함.
+- [ ] Run: `python3 -m unittest tests.test_ansible_lab_contract -v`. Expected: PASS.
+
+### Task 2: preflight·deploy·verify·rollback idempotency
+
+**Files:** Modify `infra/ansible-lab/playbooks/site.yml`, `infra/ansible-lab/playbooks/rollback.yml`, `tests/test_ansible_lab_contract.py`; create `infra/ansible-lab/README.md`.
+
+**Produces:** preflight→deploy→verify and explicit rollback with an honest local evidence format.
+
+- [ ] 실패 test로 deploy 전 `ansible-galaxy collection list community.docker`, `docker compose version`, port/directory conflict preflight, `community.docker.docker_compose_v2` lifecycle, fixed project·directory only rollback을 정의함.
+- [ ] preflight failure does not start the container; template/file task reports real state; `uri` health check only calls loopback URL; rollback uses project `absent` and lab directory `absent` only.
+- [ ] Run: `python3 -m unittest tests.test_ansible_lab_contract -v && ansible-playbook -i infra/ansible-lab/inventory/localhost.ini infra/ansible-lab/playbooks/site.yml --syntax-check && ansible-playbook -i infra/ansible-lab/inventory/localhost.ini infra/ansible-lab/playbooks/site.yml --check --diff`. Expected: static/syntax PASS and check mode does not start container.
+- [ ] Run rehearsal twice then rollback: deploy/verify, deploy/verify, rollback. Expected: second apply reports zero changes and rollback removes lab only. If collection/image is unavailable, record runtime rehearsal as unverified; do not install it automatically.
+
+### Task 3: CI scope·documentation·integrated verification
+
+**Files:** Modify `scripts/verify_change_scope.py`, `tests/test_verify_change_scope.py`, `tests/ci_test_matrix.json`, `tests/test_run_service_tests.py`, `docs/operations-reference.md`, `docs/20260921_프로젝트보완_개발계획.md`.
+
+**Produces:** `infra/ansible-lab/` is infrastructure requiring maintenance, and its contract test runs exactly once in existing maintenance group.
+
+- [ ] `infra/ansible-lab/playbooks/site.yml` classification failure test를 작성하고 infrastructure prefix에 lab path를 추가함.
+- [ ] maintenance test command과 `test_run_service_tests.py` contract를 동기화함.
+- [ ] Run: `python3 -m unittest tests.test_ansible_lab_contract tests.test_verify_change_scope tests.test_run_service_tests tests.test_documentation_index tests.test_documentation_links -v && python3 tests/run_service_tests.py --group k8s-contracts && python3 tests/run_service_tests.py --group maintenance && git diff --check`. Expected: PASS.
+- [ ] Run change harness, independent operational review, then result harness with `k8s-contracts=success` and `maintenance=success`. Expected: `ready_for_review`.
+- [ ] Existing branch에 PR을 만들고 CI·Agent Review·Trivy 성공 후 병합함. N100 lab application remains a separate explicit operational approval.
