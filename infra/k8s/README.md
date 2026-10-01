@@ -87,6 +87,23 @@ bash infra/k8s/tools/monitoring-verify.sh
 
 `monitoring-install.sh --apply`와 제거 명령은 운영자 승인 후에만 실행함. Grafana와 Prometheus PVC는 기본 제거에서 보존함.
 
+## Loki 로그 관측 실습
+
+`observability-lab`의 Loki·Alloy·비민감 샘플 앱과 `monitoring`의 전용 Grafana ConfigMap 2개는 `observability-lab.sh`로만 관리함. 기존 monitoring Helm release와 운영 서비스 로그 수집 범위는 변경하지 않음. 아래 명령은 N100 운영 적용 승인과 정확한 커밋 동기화 이후에만 실행함. `CURRENT_CONTEXT`에는 `sudo k3s kubectl config current-context`의 실제 값을 입력함.
+
+```bash
+bash infra/k8s/tools/observability-lab.sh --check --context CURRENT_CONTEXT
+bash infra/k8s/tools/observability-lab.sh --apply --context CURRENT_CONTEXT
+bash infra/k8s/tools/observability-lab.sh --verify --context CURRENT_CONTEXT
+bash infra/k8s/tools/observability-lab.sh --rollback --context CURRENT_CONTEXT
+# Loki 실습 로그 데이터의 별도 삭제 승인 뒤에만 실행함.
+bash infra/k8s/tools/observability-lab.sh --rollback --delete-data --context CURRENT_CONTEXT
+```
+
+`--check`는 context, manifest 파일, `local-path` StorageClass, Grafana Deployment, 실습 namespace 조회만 점검하며 쓰지 않음. `--apply`는 첫 설치에 필요한 namespace를 server dry-run 후 생성하고, 각 manifest에 server dry-run을 수행한 뒤 적용함. namespace 생성 후 다음 단계가 실패하면 상태를 조회한 뒤 조치하며 즉시 재실행하지 않음. `--verify`는 세 Deployment Available, Loki PVC Bound, Grafana ConfigMap, 내부 Loki `/ready`, 고정 샘플 로그 selector의 조회 결과를 검사함. 이 조회 결과의 로그 내용은 출력하지 않음.
+
+기본 `--rollback`은 이름이 고정된 실습 workload·설정과 Grafana ConfigMap 2개만 제거하고 `loki-lab-data` PVC와 `observability-lab` namespace를 보존함. `--delete-data`를 함께 지정한 경우에만 해당 PVC를 추가 제거함. namespace를 삭제하지 않으므로 다른 자원이 함께 지워지지 않음. 실제 가용 메모리·디스크, 기존 monitoring 및 Portal health는 운영 적용 전후에 별도로 확인 필요함.
+
 ## Portal HTTP Grafana 대시보드
 
 Portal HTTP 관측성 대시보드는 `monitoring` namespace의 `portal-http-observability` ConfigMap으로 관리함. 대시보드에는 요청 수, HTTP 상태 코드별 요청 수, 5xx 비율, p95 응답 시간이 포함됨.
