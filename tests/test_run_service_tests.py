@@ -35,6 +35,9 @@ _k8s = EXPECTED_GROUPS["k8s-contracts"]
 EXPECTED_GROUPS["k8s-contracts"] = (*_k8s[:-1], _k8s[-1].replace(
     "tests.test_k8s_crawler_pvc_backup tests.test_k8s_pvc_backup_retention",
     "tests.test_k8s_crawler_pvc_backup tests.test_k8s_service_backup_production_state tests.test_k8s_pvc_backup_sequence tests.test_k8s_pvc_backup_sequence_automation tests.test_k8s_pvc_backup_retention",
+).replace(
+    "tests.test_validate_sre_alertmanager_config",
+    "tests.test_validate_sre_alertmanager_config tests.test_k8s_observability_lab tests.test_k8s_observability_lab_tools",
 ))
 
 
@@ -221,6 +224,21 @@ class ServiceTestRunnerTests(unittest.TestCase):
         for module in ('tests.test_runtime_service_deployment_contract', 'tests.test_caddy_portal_upstream',
                        'tests.test_run_service_tests', 'tests.test_setup_local_test_venvs'):
             self.assertIn(module, groups['maintenance']['test_command'].split())
+
+    def test_observability_lab_contracts_are_registered_once_in_k8s_group(self):
+        matrix = json.loads(MATRIX.read_text(encoding="utf-8"))
+        self.assertEqual(len(matrix), 9)
+        for module in (
+            "tests.test_k8s_observability_lab",
+            "tests.test_k8s_observability_lab_tools",
+        ):
+            assignments = [
+                item["name"]
+                for item in matrix
+                for command_module in item["test_command"].split()
+                if command_module == module
+            ]
+            self.assertEqual(assignments, ["k8s-contracts"])
 
     def run_runner(self, *arguments, environment=None):
         return subprocess.run([sys.executable, str(RUNNER), *arguments], cwd=ROOT, capture_output=True, text=True, env=environment)
