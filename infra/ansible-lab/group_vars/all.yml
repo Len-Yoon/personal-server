@@ -1,0 +1,4 @@
+---
+lab_project_name: personal-server-ansible-lab
+lab_root: "{{ ansible_env.HOME }}/.local/share/personal-server-ansible-lab"
+lab_http_port: 18088

@@ -1,0 +1,13 @@
+---
+- name: Local sample lab rollback
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: true
+  vars_files:
+    - ../group_vars/all.yml
+  tasks:
+    - name: Rollback is unavailable until the scoped workflow is implemented
+      ansible.builtin.fail:
+        msg: "Local lab rollback is not implemented yet."
+      tags: [rollback]

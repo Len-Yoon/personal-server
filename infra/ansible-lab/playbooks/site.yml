@@ -1,0 +1,23 @@
+---
+- name: Local sample lab
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: true
+  vars_files:
+    - ../group_vars/all.yml
+  tasks:
+    - name: Deployment is unavailable until the preflight workflow is implemented
+      ansible.builtin.fail:
+        msg: "Local lab preflight is not implemented yet."
+      tags: [preflight]
+
+    - name: Deployment is unavailable until the deploy workflow is implemented
+      ansible.builtin.fail:
+        msg: "Local lab deploy is not implemented yet."
+      tags: [deploy]
+
+    - name: Verification is unavailable until the verify workflow is implemented
+      ansible.builtin.fail:
+        msg: "Local lab verify is not implemented yet."
+      tags: [verify]
