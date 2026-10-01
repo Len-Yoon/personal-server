@@ -32,6 +32,7 @@ class LokiLabManifestTests(unittest.TestCase):
             ("ConfigMap", "loki-lab-alloy"), ("ServiceAccount", "loki-lab-alloy"),
             ("Role", "loki-lab-alloy"), ("RoleBinding", "loki-lab-alloy"),
             ("Deployment", "loki-lab-alloy"), ("Deployment", "loki-lab-sample"),
+            ("NetworkPolicy", "loki-lab-ingress"),
         })
         for doc in self.documents:
             if doc["kind"] != "Namespace":
@@ -39,11 +40,15 @@ class LokiLabManifestTests(unittest.TestCase):
         self.assertEqual(self.find("Namespace", NAMESPACE)["metadata"]["name"], NAMESPACE)
 
     def test_loki_storage_retention_and_internal_service_are_bounded(self):
-        pvc = self.find("PersistentVolumeClaim", "loki-lab-data")["spec"]
+        pvc_document = self.find("PersistentVolumeClaim", "loki-lab-data")
+        pvc = pvc_document["spec"]
         self.assertEqual(pvc["storageClassName"], "local-path")
         self.assertEqual(pvc["accessModes"], ["ReadWriteOnce"])
         self.assertEqual(pvc["resources"]["requests"]["storage"], "1Gi")
-        config = yaml.safe_load(self.find("ConfigMap", "loki-lab")["data"]["loki.yaml"])
+        self.assertIn("not a host disk quota", pvc_document["metadata"].get("annotations", {}).get("storage-boundary", ""))
+        loki_configmap = self.find("ConfigMap", "loki-lab")
+        self.assertIn("not a disk usage limit", loki_configmap["metadata"].get("annotations", {}).get("retention-boundary", ""))
+        config = yaml.safe_load(loki_configmap["data"]["loki.yaml"])
         self.assertFalse(config["auth_enabled"])
         self.assertEqual(config["common"]["replication_factor"], 1)
         self.assertEqual(config["schema_config"]["configs"][0]["store"], "tsdb")
@@ -56,6 +61,25 @@ class LokiLabManifestTests(unittest.TestCase):
         self.assertEqual(service["type"], "ClusterIP")
         self.assertEqual(service["ports"], [{"name": "http", "port": 3100, "targetPort": "http"}])
         self.assertNotIn("externalIPs", service)
+
+    def test_unauthenticated_loki_ingress_only_accepts_alloy_and_grafana(self):
+        policy = self.find("NetworkPolicy", "loki-lab-ingress")["spec"]
+        self.assertEqual(policy["podSelector"], {"matchLabels": {"app.kubernetes.io/name": "loki-lab"}})
+        self.assertEqual(policy["policyTypes"], ["Ingress"])
+        self.assertEqual(policy["ingress"], [{
+            "from": [
+                {"podSelector": {"matchLabels": {"app.kubernetes.io/name": "loki-lab-alloy"}}},
+                {
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "monitoring"}},
+                    "podSelector": {"matchLabels": {
+                        "app.kubernetes.io/name": "grafana",
+                        "app.kubernetes.io/instance": "personal-server-monitoring",
+                    }},
+                },
+            ],
+            "ports": [{"protocol": "TCP", "port": 3100}],
+        }])
+        self.assertNotIn("egress", policy)  # DNS, K8s API, and Loki egress remain available.
 
     def test_collector_rbac_reads_only_local_pods_and_logs(self):
         role = self.find("Role", "loki-lab-alloy")
@@ -100,6 +124,10 @@ class LokiLabManifestTests(unittest.TestCase):
                 pod = deployment["spec"]["template"]["spec"]
                 self.assertFalse(pod.get("hostNetwork", False))
                 self.assertFalse(pod.get("hostPID", False))
+                self.assertIn("hostIPC", pod)
+                self.assertFalse(pod["hostIPC"])
+                self.assertFalse(pod.get("initContainers"))
+                self.assertFalse(pod.get("ephemeralContainers"))
                 self.assertEqual(pod["automountServiceAccountToken"], name == "loki-lab-alloy")
                 self.assertEqual(pod["securityContext"]["runAsNonRoot"], True)
                 self.assertGreater(pod["securityContext"]["runAsUser"], 0)
@@ -109,6 +137,7 @@ class LokiLabManifestTests(unittest.TestCase):
                 self.assertEqual(container["resources"], {"requests": requests, "limits": limits})
                 self.assertEqual(container["securityContext"], {
                     "allowPrivilegeEscalation": False,
+                    "privileged": False,
                     "readOnlyRootFilesystem": True,
                     "capabilities": {"drop": ["ALL"]},
                 })
