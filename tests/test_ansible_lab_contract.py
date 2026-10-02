@@ -100,7 +100,11 @@ class AnsibleLabContractTests(unittest.TestCase):
              [network_name], [network_name], container_labels, network_labels, True),
             ("unlabeled name", [], [container_name], [], [], {}, {}, False),
             ("container query mismatch", [container_name], [], [], [], {}, {}, False),
+            ("equal-count different container", [container_name], ["different-container"],
+             [], [], {}, {}, False),
             ("network query mismatch", [], [], [network_name], [], {}, {}, False),
+            ("equal-count different network", [], [], [network_name], ["different-network"],
+             {}, {}, False),
             ("extra named network", [], [], [], [network_name], {}, {}, False),
             ("duplicate count", [container_name, container_name], [container_name],
              [], [], {}, {}, False),
@@ -136,6 +140,8 @@ class AnsibleLabContractTests(unittest.TestCase):
                             "lab_container_labels.stdout" in clause or
                             "lab_network_labels.stdout" in clause]
             self.assertEqual(len(query_guards), 4, name)
+            self.assertEqual(sum("| length" in clause for clause in query_guards), 2, name)
+            self.assertEqual(sum("| sort" in clause for clause in query_guards), 2, name)
             self.assertEqual(len(label_guards), 6, name)
             for scenario, containers, named_containers, networks, named_networks, labels, net_labels, allowed in cases:
                 with self.subTest(playbook=name, scenario=scenario):
