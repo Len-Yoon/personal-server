@@ -81,15 +81,44 @@ class AnsibleLabContractTests(unittest.TestCase):
     def test_resource_query_guards_reject_unlabeled_and_foreign_resources(self):
         env = Environment()
         env.filters["from_json"] = json.loads
-        cases = (
-            ([], [], [], [], {}, {}, True),
-            ([], [f"{PROJECT}-sample-1"], [], [], {}, {}, False),
-            ([f"{PROJECT}-sample-1"], [f"{PROJECT}-sample-1"],
-             [f"{PROJECT}_default"], [f"{PROJECT}_default"],
-             {"com.docker.compose.project": "other-project"}, {}, False),
-            ([f"{PROJECT}-sample-1"], [], [], [], {}, {}, False),
-            ([], [], [f"{PROJECT}_default"], [], {}, {}, False),
-        )
+        lab_root = "/home/lab/.local/share/personal-server-ansible-lab"
+        container_name = f"{PROJECT}-sample-1"
+        network_name = f"{PROJECT}_default"
+        container_labels = {
+            "com.docker.compose.project": PROJECT,
+            "com.docker.compose.service": "sample",
+            "com.docker.compose.project.working_dir": lab_root,
+            "com.docker.compose.project.config_files": f"{lab_root}/compose.yaml",
+        }
+        network_labels = {
+            "com.docker.compose.project": PROJECT,
+            "com.docker.compose.network": "default",
+        }
+        cases = [
+            ("no resources", [], [], [], [], {}, {}, True),
+            ("owned resources", [container_name], [container_name],
+             [network_name], [network_name], container_labels, network_labels, True),
+            ("unlabeled name", [], [container_name], [], [], {}, {}, False),
+            ("container query mismatch", [container_name], [], [], [], {}, {}, False),
+            ("network query mismatch", [], [], [network_name], [], {}, {}, False),
+            ("extra named network", [], [], [], [network_name], {}, {}, False),
+            ("duplicate count", [container_name, container_name], [container_name],
+             [], [], {}, {}, False),
+        ]
+        for key in container_labels:
+            missing = {k: v for k, v in container_labels.items() if k != key}
+            changed = {**container_labels, key: "different"}
+            cases.append((f"missing container {key}", [container_name], [container_name],
+                          [network_name], [network_name], missing, network_labels, False))
+            cases.append((f"different container {key}", [container_name], [container_name],
+                          [network_name], [network_name], changed, network_labels, False))
+        for key in network_labels:
+            missing = {k: v for k, v in network_labels.items() if k != key}
+            changed = {**network_labels, key: "different"}
+            cases.append((f"missing network {key}", [container_name], [container_name],
+                          [network_name], [network_name], container_labels, missing, False))
+            cases.append((f"different network {key}", [container_name], [container_name],
+                          [network_name], [network_name], container_labels, changed, False))
         for name in ("site", "rollback"):
             tasks = self._tasks(name)
             clauses = [clause for task in tasks for clause in
@@ -97,17 +126,19 @@ class AnsibleLabContractTests(unittest.TestCase):
                        if isinstance(clause, str)]
             query_guards = [clause for clause in clauses if
                             "lab_project_containers.stdout_lines" in clause and
-                            "lab_named_container.stdout_lines" in clause and "| sort" in clause]
+                            "lab_named_container.stdout_lines" in clause and
+                            ("| sort" in clause or "| length" in clause)]
             query_guards += [clause for clause in clauses if
                              "lab_project_networks.stdout_lines" in clause and
-                             "lab_named_network.stdout_lines" in clause and "| sort" in clause]
+                             "lab_named_network.stdout_lines" in clause and
+                             ("| sort" in clause or "| length" in clause)]
             label_guards = [clause for clause in clauses if
-                            "lab_container_labels.stdout" in clause and
-                            "com.docker.compose.project')" in clause]
-            self.assertEqual(len(query_guards), 2, name)
-            self.assertEqual(len(label_guards), 1, name)
-            for containers, named_containers, networks, named_networks, labels, net_labels, allowed in cases:
-                with self.subTest(playbook=name, allowed=allowed, names=named_containers):
+                            "lab_container_labels.stdout" in clause or
+                            "lab_network_labels.stdout" in clause]
+            self.assertEqual(len(query_guards), 4, name)
+            self.assertEqual(len(label_guards), 6, name)
+            for scenario, containers, named_containers, networks, named_networks, labels, net_labels, allowed in cases:
+                with self.subTest(playbook=name, scenario=scenario):
                     context = {
                         "lab_project_containers": {"stdout_lines": containers},
                         "lab_named_container": {"stdout_lines": named_containers},
@@ -116,6 +147,7 @@ class AnsibleLabContractTests(unittest.TestCase):
                         "lab_container_labels": {"stdout": json.dumps(labels)},
                         "lab_network_labels": {"stdout": json.dumps(net_labels)},
                         "lab_project_name": PROJECT,
+                        "lab_root": lab_root,
                     }
                     result = all(bool(env.compile_expression(clause)(**context))
                                  for clause in query_guards + label_guards)
