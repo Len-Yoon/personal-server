@@ -1,8 +1,10 @@
 """Static safety boundaries for the localhost-only Ansible exercise."""
 
 import unittest
+import json
 from pathlib import Path
 
+from jinja2 import Environment
 import yaml
 
 
@@ -75,6 +77,49 @@ class AnsibleLabContractTests(unittest.TestCase):
                 assertions = str([task.get("ansible.builtin.assert", {}).get("that") for task in tasks])
                 self.assertIn("lab_named_container.stdout_lines", assertions)
                 self.assertIn("lab_named_network.stdout_lines", assertions)
+
+    def test_resource_query_guards_reject_unlabeled_and_foreign_resources(self):
+        env = Environment()
+        env.filters["from_json"] = json.loads
+        cases = (
+            ([], [], [], [], {}, {}, True),
+            ([], [f"{PROJECT}-sample-1"], [], [], {}, {}, False),
+            ([f"{PROJECT}-sample-1"], [f"{PROJECT}-sample-1"],
+             [f"{PROJECT}_default"], [f"{PROJECT}_default"],
+             {"com.docker.compose.project": "other-project"}, {}, False),
+            ([f"{PROJECT}-sample-1"], [], [], [], {}, {}, False),
+            ([], [], [f"{PROJECT}_default"], [], {}, {}, False),
+        )
+        for name in ("site", "rollback"):
+            tasks = self._tasks(name)
+            clauses = [clause for task in tasks for clause in
+                       task.get("ansible.builtin.assert", {}).get("that", [])
+                       if isinstance(clause, str)]
+            query_guards = [clause for clause in clauses if
+                            "lab_project_containers.stdout_lines" in clause and
+                            "lab_named_container.stdout_lines" in clause and "| sort" in clause]
+            query_guards += [clause for clause in clauses if
+                             "lab_project_networks.stdout_lines" in clause and
+                             "lab_named_network.stdout_lines" in clause and "| sort" in clause]
+            label_guards = [clause for clause in clauses if
+                            "lab_container_labels.stdout" in clause and
+                            "com.docker.compose.project')" in clause]
+            self.assertEqual(len(query_guards), 2, name)
+            self.assertEqual(len(label_guards), 1, name)
+            for containers, named_containers, networks, named_networks, labels, net_labels, allowed in cases:
+                with self.subTest(playbook=name, allowed=allowed, names=named_containers):
+                    context = {
+                        "lab_project_containers": {"stdout_lines": containers},
+                        "lab_named_container": {"stdout_lines": named_containers},
+                        "lab_project_networks": {"stdout_lines": networks},
+                        "lab_named_network": {"stdout_lines": named_networks},
+                        "lab_container_labels": {"stdout": json.dumps(labels)},
+                        "lab_network_labels": {"stdout": json.dumps(net_labels)},
+                        "lab_project_name": PROJECT,
+                    }
+                    result = all(bool(env.compile_expression(clause)(**context))
+                                 for clause in query_guards + label_guards)
+                    self.assertIs(result, allowed)
 
     def test_existing_compose_must_match_approved_render(self):
         for name in ("site", "rollback"):

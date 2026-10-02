@@ -137,8 +137,10 @@
           - lab_project_volumes.stdout_lines | length == 0
           - (lab_project_containers.stdout_lines | length) + (lab_project_networks.stdout_lines | length) == 0 or lab_directory.stat.exists
           - (lab_project_containers.stdout_lines | length) + (lab_project_networks.stdout_lines | length) == 0 or lab_compose_file.stat.isreg | default(false)
-          - (lab_project_containers.stdout_lines | difference(lab_named_container.stdout_lines) | length) == 0
-          - (lab_project_networks.stdout_lines | difference(lab_named_network.stdout_lines) | length) == 0
+          - (lab_project_containers.stdout_lines | length) == (lab_named_container.stdout_lines | length)
+          - (lab_project_containers.stdout_lines | sort) == (lab_named_container.stdout_lines | sort)
+          - (lab_project_networks.stdout_lines | length) == (lab_named_network.stdout_lines | length)
+          - (lab_project_networks.stdout_lines | sort) == (lab_named_network.stdout_lines | sort)
           - (lab_named_container.stdout_lines | length) + (lab_named_network.stdout_lines | length) == 0 or lab_directory.stat.exists
           - (lab_named_container.stdout_lines | length) + (lab_named_network.stdout_lines | length) == 0 or lab_compose_file.stat.isreg | default(false)
         fail_msg: "A Docker resource uses the lab project name without matching owned lab files."
