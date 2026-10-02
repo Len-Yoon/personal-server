@@ -7,7 +7,78 @@
   vars_files:
     - ../group_vars/all.yml
   tasks:
-    - name: Rollback is unavailable until the scoped workflow is implemented
-      ansible.builtin.fail:
-        msg: "Local lab rollback is not implemented yet."
+    - name: Inspect lab directory before rollback
+      ansible.builtin.stat:
+        path: "{{ lab_root }}"
+        follow: false
+      register: lab_directory
+      tags: [rollback]
+
+    - name: Inspect ownership marker before rollback
+      ansible.builtin.stat:
+        path: "{{ lab_root }}/.owner"
+        follow: false
+      register: lab_marker
+      when: lab_directory.stat.isdir | default(false)
+      tags: [rollback]
+
+    - name: Read ownership marker before rollback
+      ansible.builtin.slurp:
+        src: "{{ lab_root }}/.owner"
+      register: lab_marker_data
+      when: lab_marker.stat.isreg | default(false)
+      tags: [rollback]
+
+    - name: Inspect Compose definition before rollback
+      ansible.builtin.stat:
+        path: "{{ lab_root }}/compose.yaml"
+        follow: false
+      register: lab_compose_file
+      when: lab_directory.stat.isdir | default(false)
+      tags: [rollback]
+
+    - name: Read Compose definition before rollback
+      ansible.builtin.slurp:
+        src: "{{ lab_root }}/compose.yaml"
+      register: lab_compose_data
+      when: lab_compose_file.stat.isreg | default(false)
+      tags: [rollback]
+
+    - name: List direct lab directory entries before rollback
+      ansible.builtin.find:
+        paths: "{{ lab_root }}"
+        recurse: false
+        hidden: true
+        file_type: any
+      register: lab_files
+      when: lab_directory.stat.isdir | default(false)
+      tags: [rollback]
+
+    - name: Refuse rollback of an unowned project
+      ansible.builtin.assert:
+        that:
+          - not lab_directory.stat.exists or lab_directory.stat.isdir | default(false)
+          - not lab_directory.stat.exists or lab_marker.stat.isreg | default(false)
+          - not lab_directory.stat.exists or (lab_marker_data.content | default('') | b64decode) == lab_project_name ~ '\n'
+          - not lab_directory.stat.exists or lab_compose_file.stat.isreg | default(false)
+          - not lab_directory.stat.exists or (lab_compose_data.content | default('') | b64decode | from_yaml).name == lab_project_name
+          - not lab_directory.stat.exists or ((lab_compose_data.content | default('') | b64decode | from_yaml).services | list) == ['sample']
+          - not lab_directory.stat.exists or (lab_compose_data.content | default('') | b64decode | from_yaml).get('volumes') is none
+          - not lab_directory.stat.exists or (lab_files.files | map(attribute='path') | map('basename') | difference(['.owner', 'compose.yaml', 'index.html']) | list | length) == 0
+        fail_msg: "Rollback refused: lab project ownership cannot be verified."
+      tags: [rollback]
+
+    - name: Stop only the owned lab Compose project
+      community.docker.docker_compose_v2:
+        project_src: "{{ lab_root }}"
+        project_name: "{{ lab_project_name }}"
+        state: absent
+      when: lab_directory.stat.exists and not ansible_check_mode
+      tags: [rollback]
+
+    - name: Remove only the owned lab directory
+      ansible.builtin.file:
+        path: "{{ lab_root }}"
+        state: absent
+      when: lab_directory.stat.exists and not ansible_check_mode
       tags: [rollback]

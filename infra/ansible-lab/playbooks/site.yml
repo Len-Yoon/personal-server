@@ -7,17 +7,158 @@
   vars_files:
     - ../group_vars/all.yml
   tasks:
-    - name: Deployment is unavailable until the preflight workflow is implemented
-      ansible.builtin.fail:
-        msg: "Local lab preflight is not implemented yet."
+    - name: Check collection availability
+      ansible.builtin.command: ansible-galaxy collection list community.docker
+      register: lab_collection
+      changed_when: false
+      check_mode: false
       tags: [preflight]
 
-    - name: Deployment is unavailable until the deploy workflow is implemented
-      ansible.builtin.fail:
-        msg: "Local lab deploy is not implemented yet."
+    - name: Require the Docker collection
+      ansible.builtin.assert:
+        that: "'community.docker' in lab_collection.stdout"
+        fail_msg: "community.docker collection is unavailable."
+      tags: [preflight]
+
+    - name: Check Docker Compose availability
+      ansible.builtin.command: docker compose version
+      changed_when: false
+      check_mode: false
+      tags: [preflight]
+
+    - name: Inspect lab directory
+      ansible.builtin.stat:
+        path: "{{ lab_root }}"
+        follow: false
+      register: lab_directory
+      tags: [preflight]
+
+    - name: Inspect lab ownership marker
+      ansible.builtin.stat:
+        path: "{{ lab_root }}/.owner"
+        follow: false
+      register: lab_marker
+      when: lab_directory.stat.isdir | default(false)
+      tags: [preflight]
+
+    - name: Read lab ownership marker
+      ansible.builtin.slurp:
+        src: "{{ lab_root }}/.owner"
+      register: lab_marker_data
+      when: lab_marker.stat.isreg | default(false)
+      tags: [preflight]
+
+    - name: Refuse unowned lab directory
+      ansible.builtin.assert:
+        that:
+          - not lab_directory.stat.exists or lab_directory.stat.isdir | default(false)
+          - not lab_directory.stat.exists or lab_marker.stat.isreg | default(false)
+          - not lab_directory.stat.exists or (lab_marker_data.content | default('') | b64decode) == lab_project_name ~ '\n'
+        fail_msg: "Lab directory exists without the expected ownership marker."
+      tags: [preflight]
+
+    - name: Inspect existing lab Compose definition
+      ansible.builtin.stat:
+        path: "{{ lab_root }}/compose.yaml"
+        follow: false
+      register: lab_compose_file
+      when: lab_directory.stat.exists
+      tags: [preflight]
+
+    - name: Read existing lab Compose definition
+      ansible.builtin.slurp:
+        src: "{{ lab_root }}/compose.yaml"
+      register: lab_compose_data
+      when: lab_compose_file.stat.isreg | default(false)
+      tags: [preflight]
+
+    - name: Refuse conflicting lab Compose definition
+      ansible.builtin.assert:
+        that:
+          - not lab_compose_file.stat.exists | default(false) or lab_compose_file.stat.isreg | default(false)
+          - not lab_compose_file.stat.exists | default(false) or (lab_compose_data.content | b64decode | from_yaml).name == lab_project_name
+        fail_msg: "Existing lab Compose definition is not owned by this project."
+      tags: [preflight]
+
+    - name: Check owned lab container state
+      ansible.builtin.command: "docker compose --project-name {{ lab_project_name }} --project-directory {{ lab_root }} ps --status running --services"
+      register: lab_running_services
+      changed_when: false
+      check_mode: false
+      when: lab_compose_file.stat.isreg | default(false)
+      tags: [preflight]
+
+    - name: Check loopback port is available for a new lab container
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ lab_http_port }}"
+        state: stopped
+        timeout: 1
+        msg: "Lab loopback port is in use by another process."
+      check_mode: false
+      when: "'sample' not in (lab_running_services.stdout_lines | default([]))"
+      tags: [preflight]
+
+    - name: Record successful preflight
+      ansible.builtin.set_fact:
+        lab_preflight_passed: true
+      tags: [preflight]
+
+    - name: Require preflight before deployment
+      ansible.builtin.assert:
+        that: lab_preflight_passed | default(false)
+        fail_msg: "Run the full site playbook so preflight completes before deployment."
       tags: [deploy]
 
-    - name: Verification is unavailable until the verify workflow is implemented
-      ansible.builtin.fail:
-        msg: "Local lab verify is not implemented yet."
+    - name: Create owned lab directory
+      ansible.builtin.file:
+        path: "{{ lab_root }}"
+        state: directory
+        mode: '0750'
+      tags: [deploy]
+
+    - name: Write lab ownership marker
+      ansible.builtin.copy:
+        dest: "{{ lab_root }}/.owner"
+        content: "{{ lab_project_name }}\n"
+        mode: '0640'
+      when: lab_directory.stat.exists or not ansible_check_mode
+      tags: [deploy]
+
+    - name: Render sample response
+      ansible.builtin.template:
+        src: ../templates/index.html.j2
+        dest: "{{ lab_root }}/index.html"
+        mode: '0644'
+      when: lab_directory.stat.exists or not ansible_check_mode
+      tags: [deploy]
+
+    - name: Render lab Compose definition
+      ansible.builtin.template:
+        src: ../templates/compose.yaml.j2
+        dest: "{{ lab_root }}/compose.yaml"
+        mode: '0644'
+      when: lab_directory.stat.exists or not ansible_check_mode
+      tags: [deploy]
+
+    - name: Start only the lab Compose project
+      community.docker.docker_compose_v2:
+        project_src: "{{ lab_root }}"
+        project_name: "{{ lab_project_name }}"
+        state: present
+        wait: true
+      when: not ansible_check_mode
+      tags: [deploy]
+
+    - name: Verify the loopback sample response
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ lab_http_port }}/"
+        status_code: 200
+        return_content: true
+      register: lab_http_response
+      until: lab_http_response.status == 200 and 'ansible lab sample ready' in lab_http_response.content
+      retries: 5
+      delay: 2
+      when: not ansible_check_mode
+      changed_when: false
       tags: [verify]
