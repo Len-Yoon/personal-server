@@ -59,6 +59,22 @@
       check_mode: false
       tags: [preflight]
 
+    - name: Query the expected container name without a project label filter
+      ansible.builtin.command:
+        argv: [docker, ps, --all, --filter, "name=^/{{ lab_project_name }}-sample-1$", --format, "{{ '{{.Names}}' }}"]
+      register: lab_named_container
+      changed_when: false
+      check_mode: false
+      tags: [preflight]
+
+    - name: Query the expected network name without a project label filter
+      ansible.builtin.command:
+        argv: [docker, network, ls, --filter, "name=^{{ lab_project_name }}_default$", --format, "{{ '{{.Name}}' }}"]
+      register: lab_named_network
+      changed_when: false
+      check_mode: false
+      tags: [preflight]
+
     - name: Inspect lab directory
       ansible.builtin.stat:
         path: "{{ lab_root }}"
@@ -121,6 +137,10 @@
           - lab_project_volumes.stdout_lines | length == 0
           - (lab_project_containers.stdout_lines | length) + (lab_project_networks.stdout_lines | length) == 0 or lab_directory.stat.exists
           - (lab_project_containers.stdout_lines | length) + (lab_project_networks.stdout_lines | length) == 0 or lab_compose_file.stat.isreg | default(false)
+          - (lab_project_containers.stdout_lines | difference(lab_named_container.stdout_lines) | length) == 0
+          - (lab_project_networks.stdout_lines | difference(lab_named_network.stdout_lines) | length) == 0
+          - (lab_named_container.stdout_lines | length) + (lab_named_network.stdout_lines | length) == 0 or lab_directory.stat.exists
+          - (lab_named_container.stdout_lines | length) + (lab_named_network.stdout_lines | length) == 0 or lab_compose_file.stat.isreg | default(false)
         fail_msg: "A Docker resource uses the lab project name without matching owned lab files."
       tags: [preflight]
 
@@ -131,7 +151,7 @@
       changed_when: false
       check_mode: false
       no_log: true
-      when: lab_project_containers.stdout_lines | length > 0
+      when: lab_named_container.stdout_lines | length > 0
       tags: [preflight]
 
     - name: Read existing lab network ownership labels
@@ -141,18 +161,18 @@
       changed_when: false
       check_mode: false
       no_log: true
-      when: lab_project_networks.stdout_lines | length > 0
+      when: lab_named_network.stdout_lines | length > 0
       tags: [preflight]
 
     - name: Require Compose ownership labels on existing resources
       ansible.builtin.assert:
         that:
-          - lab_project_containers.stdout_lines | length == 0 or (lab_container_labels.stdout | default('{}') | from_json).get('com.docker.compose.project') == lab_project_name
-          - lab_project_containers.stdout_lines | length == 0 or (lab_container_labels.stdout | default('{}') | from_json).get('com.docker.compose.service') == 'sample'
-          - lab_project_containers.stdout_lines | length == 0 or (lab_container_labels.stdout | default('{}') | from_json).get('com.docker.compose.project.working_dir') == lab_root
-          - lab_project_containers.stdout_lines | length == 0 or (lab_container_labels.stdout | default('{}') | from_json).get('com.docker.compose.project.config_files') == lab_root ~ '/compose.yaml'
-          - lab_project_networks.stdout_lines | length == 0 or (lab_network_labels.stdout | default('{}') | from_json).get('com.docker.compose.project') == lab_project_name
-          - lab_project_networks.stdout_lines | length == 0 or (lab_network_labels.stdout | default('{}') | from_json).get('com.docker.compose.network') == 'default'
+          - lab_named_container.stdout_lines | length == 0 or (lab_container_labels.stdout | default('{}') | from_json).get('com.docker.compose.project') == lab_project_name
+          - lab_named_container.stdout_lines | length == 0 or (lab_container_labels.stdout | default('{}') | from_json).get('com.docker.compose.service') == 'sample'
+          - lab_named_container.stdout_lines | length == 0 or (lab_container_labels.stdout | default('{}') | from_json).get('com.docker.compose.project.working_dir') == lab_root
+          - lab_named_container.stdout_lines | length == 0 or (lab_container_labels.stdout | default('{}') | from_json).get('com.docker.compose.project.config_files') == lab_root ~ '/compose.yaml'
+          - lab_named_network.stdout_lines | length == 0 or (lab_network_labels.stdout | default('{}') | from_json).get('com.docker.compose.project') == lab_project_name
+          - lab_named_network.stdout_lines | length == 0 or (lab_network_labels.stdout | default('{}') | from_json).get('com.docker.compose.network') == 'default'
         fail_msg: "Existing Docker resources do not carry the approved Compose ownership labels."
       tags: [preflight]
 

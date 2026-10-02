@@ -15,7 +15,7 @@ ansible-playbook -i infra/ansible-lab/inventory/localhost.ini infra/ansible-lab/
 ansible-playbook -i infra/ansible-lab/inventory/localhost.ini infra/ansible-lab/playbooks/site.yml --check --diff
 ```
 
-전체 `site.yml` 실행 시 collection·Compose·고정 대상 변수·전용 디렉터리 소유 표식·동일 이름 Docker project 자원과 Compose 소유 label·loopback 포트를 먼저 검사함. `-e`로 project 이름, 경로, 포트를 바꾸면 실패함. 기존 Compose 정의는 승인된 템플릿과 전체 구성이 일치해야 함. 사전 검사가 실패하면 앱을 시작하지 않음. `--tags deploy`만 지정하면 사전 검사 완료 기록이 없어 실패함.
+전체 `site.yml` 실행 시 collection·Compose·고정 대상 변수·전용 디렉터리 소유 표식·동일 이름 Docker 자원과 Compose 소유 label·loopback 포트를 먼저 검사함. 예상 컨테이너·네트워크 이름은 project label과 별도로 조회하므로 label이 없거나 다른 project를 가리켜도 충돌로 처리함. `-e`로 project 이름, 경로, 포트를 바꾸면 실패함. 기존 Compose 정의는 승인된 템플릿과 전체 구성이 일치해야 함. 사전 검사가 실패하면 앱을 시작하지 않음. `--tags deploy`만 지정하면 사전 검사 완료 기록이 없어 실패함.
 
 ## 배치·검증·롤백
 

@@ -58,6 +58,24 @@ class AnsibleLabContractTests(unittest.TestCase):
                 self.assertIn("com.docker.compose.network", assertions)
                 self.assertIn("lab_root", assertions)
 
+    def test_expected_resource_names_are_checked_without_project_label(self):
+        for name in ("site", "rollback"):
+            with self.subTest(playbook=name):
+                tasks = self._tasks(name)
+                by_name = {task.get("register"): task for task in tasks
+                           if task.get("register") in {"lab_named_container", "lab_named_network"}}
+                self.assertEqual(set(by_name), {"lab_named_container", "lab_named_network"})
+                for task in by_name.values():
+                    self.assertNotIn("when", task)
+                    self.assertNotIn("com.docker.compose.project", str(task["ansible.builtin.command"]))
+                inspections = {task.get("register"): task for task in tasks
+                               if task.get("register") in {"lab_container_labels", "lab_network_labels"}}
+                self.assertIn("lab_named_container.stdout_lines", inspections["lab_container_labels"]["when"])
+                self.assertIn("lab_named_network.stdout_lines", inspections["lab_network_labels"]["when"])
+                assertions = str([task.get("ansible.builtin.assert", {}).get("that") for task in tasks])
+                self.assertIn("lab_named_container.stdout_lines", assertions)
+                self.assertIn("lab_named_network.stdout_lines", assertions)
+
     def test_existing_compose_must_match_approved_render(self):
         for name in ("site", "rollback"):
             with self.subTest(playbook=name):
