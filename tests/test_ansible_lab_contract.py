@@ -42,6 +42,22 @@ class AnsibleLabContractTests(unittest.TestCase):
                 self.assertTrue(any("lab_project_containers.stdout" in str(task) and
                                     "lab_directory.stat.exists" in str(task) for task in guards))
 
+    def test_existing_docker_resources_require_compose_ownership_labels(self):
+        for name in ("site", "rollback"):
+            with self.subTest(playbook=name):
+                tasks = self._tasks(name)
+                inspections = [task for task in tasks if task.get("register") in
+                               {"lab_container_labels", "lab_network_labels"}]
+                self.assertEqual(len(inspections), 2)
+                self.assertTrue(all("ansible.builtin.command" in task for task in inspections))
+                assertions = " ".join(str(task.get("ansible.builtin.assert", {}).get("that", ""))
+                                      for task in tasks)
+                self.assertIn("com.docker.compose.project.working_dir", assertions)
+                self.assertIn("com.docker.compose.project.config_files", assertions)
+                self.assertIn("com.docker.compose.service", assertions)
+                self.assertIn("com.docker.compose.network", assertions)
+                self.assertIn("lab_root", assertions)
+
     def test_existing_compose_must_match_approved_render(self):
         for name in ("site", "rollback"):
             with self.subTest(playbook=name):

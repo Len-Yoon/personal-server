@@ -124,6 +124,38 @@
         fail_msg: "A Docker resource uses the lab project name without matching owned lab files."
       tags: [preflight]
 
+    - name: Read existing lab container ownership labels
+      ansible.builtin.command:
+        argv: [docker, container, inspect, "{{ lab_project_name }}-sample-1", --format, "{{ '{{json .Config.Labels}}' }}"]
+      register: lab_container_labels
+      changed_when: false
+      check_mode: false
+      no_log: true
+      when: lab_project_containers.stdout_lines | length > 0
+      tags: [preflight]
+
+    - name: Read existing lab network ownership labels
+      ansible.builtin.command:
+        argv: [docker, network, inspect, "{{ lab_project_name }}_default", --format, "{{ '{{json .Labels}}' }}"]
+      register: lab_network_labels
+      changed_when: false
+      check_mode: false
+      no_log: true
+      when: lab_project_networks.stdout_lines | length > 0
+      tags: [preflight]
+
+    - name: Require Compose ownership labels on existing resources
+      ansible.builtin.assert:
+        that:
+          - lab_project_containers.stdout_lines | length == 0 or (lab_container_labels.stdout | default('{}') | from_json).get('com.docker.compose.project') == lab_project_name
+          - lab_project_containers.stdout_lines | length == 0 or (lab_container_labels.stdout | default('{}') | from_json).get('com.docker.compose.service') == 'sample'
+          - lab_project_containers.stdout_lines | length == 0 or (lab_container_labels.stdout | default('{}') | from_json).get('com.docker.compose.project.working_dir') == lab_root
+          - lab_project_containers.stdout_lines | length == 0 or (lab_container_labels.stdout | default('{}') | from_json).get('com.docker.compose.project.config_files') == lab_root ~ '/compose.yaml'
+          - lab_project_networks.stdout_lines | length == 0 or (lab_network_labels.stdout | default('{}') | from_json).get('com.docker.compose.project') == lab_project_name
+          - lab_project_networks.stdout_lines | length == 0 or (lab_network_labels.stdout | default('{}') | from_json).get('com.docker.compose.network') == 'default'
+        fail_msg: "Existing Docker resources do not carry the approved Compose ownership labels."
+      tags: [preflight]
+
     - name: Check owned lab container state
       ansible.builtin.command: "docker compose --project-name {{ lab_project_name }} --project-directory {{ lab_root }} ps --status running --services"
       register: lab_running_services
