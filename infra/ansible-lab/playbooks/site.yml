@@ -7,6 +7,15 @@
   vars_files:
     - ../group_vars/all.yml
   tasks:
+    - name: Require fixed local lab targets
+      ansible.builtin.assert:
+        that:
+          - lab_project_name == 'personal-server-ansible-lab'
+          - lab_http_port | int == 18088
+          - lab_root == lookup('ansible.builtin.env', 'HOME') ~ '/.local/share/personal-server-ansible-lab'
+        fail_msg: "Lab target variables must retain their approved local values."
+      tags: [preflight]
+
     - name: Check collection availability
       ansible.builtin.command: ansible-galaxy collection list community.docker
       register: lab_collection
@@ -22,6 +31,30 @@
 
     - name: Check Docker Compose availability
       ansible.builtin.command: docker compose version
+      changed_when: false
+      check_mode: false
+      tags: [preflight]
+
+    - name: Query containers with the lab project label
+      ansible.builtin.command:
+        argv: [docker, ps, --all, --filter, "label=com.docker.compose.project={{ lab_project_name }}", --format, "{{ '{{.Names}}' }}"]
+      register: lab_project_containers
+      changed_when: false
+      check_mode: false
+      tags: [preflight]
+
+    - name: Query networks with the lab project label
+      ansible.builtin.command:
+        argv: [docker, network, ls, --filter, "label=com.docker.compose.project={{ lab_project_name }}", --format, "{{ '{{.Name}}' }}"]
+      register: lab_project_networks
+      changed_when: false
+      check_mode: false
+      tags: [preflight]
+
+    - name: Query volumes with the lab project label
+      ansible.builtin.command:
+        argv: [docker, volume, ls, --filter, "label=com.docker.compose.project={{ lab_project_name }}", --format, "{{ '{{.Name}}' }}"]
+      register: lab_project_volumes
       changed_when: false
       check_mode: false
       tags: [preflight]
@@ -76,8 +109,19 @@
       ansible.builtin.assert:
         that:
           - not lab_compose_file.stat.exists | default(false) or lab_compose_file.stat.isreg | default(false)
-          - not lab_compose_file.stat.exists | default(false) or (lab_compose_data.content | b64decode | from_yaml).name == lab_project_name
+          - not lab_compose_file.stat.exists | default(false) or (lab_compose_data.content | b64decode | from_yaml) == (lookup('ansible.builtin.template', playbook_dir ~ '/../templates/compose.yaml.j2') | from_yaml)
         fail_msg: "Existing lab Compose definition is not owned by this project."
+      tags: [preflight]
+
+    - name: Refuse conflicting Docker project resources
+      ansible.builtin.assert:
+        that:
+          - (lab_project_containers.stdout_lines | difference([lab_project_name ~ '-sample-1']) | length) == 0
+          - (lab_project_networks.stdout_lines | difference([lab_project_name ~ '_default']) | length) == 0
+          - lab_project_volumes.stdout_lines | length == 0
+          - (lab_project_containers.stdout_lines | length) + (lab_project_networks.stdout_lines | length) == 0 or lab_directory.stat.exists
+          - (lab_project_containers.stdout_lines | length) + (lab_project_networks.stdout_lines | length) == 0 or lab_compose_file.stat.isreg | default(false)
+        fail_msg: "A Docker resource uses the lab project name without matching owned lab files."
       tags: [preflight]
 
     - name: Check owned lab container state

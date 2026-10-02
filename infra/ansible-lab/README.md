@@ -15,7 +15,7 @@ ansible-playbook -i infra/ansible-lab/inventory/localhost.ini infra/ansible-lab/
 ansible-playbook -i infra/ansible-lab/inventory/localhost.ini infra/ansible-lab/playbooks/site.yml --check --diff
 ```
 
-전체 `site.yml` 실행 시 collection·Compose·전용 디렉터리 소유 표식·loopback 포트를 먼저 검사함. 사전 검사가 실패하면 앱을 시작하지 않음. `--tags deploy`만 지정하면 사전 검사 완료 기록이 없어 실패함.
+전체 `site.yml` 실행 시 collection·Compose·고정 대상 변수·전용 디렉터리 소유 표식·동일 이름 Docker project 자원·loopback 포트를 먼저 검사함. `-e`로 project 이름, 경로, 포트를 바꾸면 실패함. 기존 Compose 정의는 승인된 템플릿과 전체 구성이 일치해야 함. 사전 검사가 실패하면 앱을 시작하지 않음. `--tags deploy`만 지정하면 사전 검사 완료 기록이 없어 실패함.
 
 ## 배치·검증·롤백
 
@@ -27,7 +27,7 @@ ansible-playbook -i infra/ansible-lab/inventory/localhost.ini infra/ansible-lab/
 ansible-playbook -i infra/ansible-lab/inventory/localhost.ini infra/ansible-lab/playbooks/rollback.yml
 ```
 
-첫 실행은 응답 파일과 Compose 정의를 배치한 뒤 loopback HTTP 200 및 고정 응답을 확인함. 두 번째 실행의 변경 수는 0건이어야 함. 롤백은 `.owner` 내용과 Compose project·서비스 범위, 디렉터리 내 파일 목록을 확인한 뒤 전용 project를 중지하고 전용 디렉터리만 제거함. 소유 확인에 실패하거나 다른 파일이 있으면 삭제하지 않음.
+첫 실행은 응답 파일과 Compose 정의를 배치한 뒤 loopback HTTP 200 및 고정 응답을 확인함. 두 번째 실행의 변경 수는 0건이어야 함. 롤백은 `.owner` 내용, 승인된 Compose 전체 구성, 동일 이름 Docker 자원, 디렉터리 내 일반 파일 3개만 있는지 확인한 뒤 전용 project를 중지하고 전용 디렉터리만 제거함. 소유 확인에 실패하거나 다른 파일·디렉터리·링크가 있으면 삭제하지 않음.
 
 ## 증적 기록
 

@@ -12,6 +12,56 @@ PROJECT = "personal-server-ansible-lab"
 
 
 class AnsibleLabContractTests(unittest.TestCase):
+    def _tasks(self, name):
+        return yaml.safe_load((LAB / f"playbooks/{name}.yml").read_text(encoding="utf-8"))[0]["tasks"]
+
+    def test_extra_vars_cannot_redirect_lab_targets(self):
+        for name in ("site", "rollback"):
+            with self.subTest(playbook=name):
+                tasks = self._tasks(name)
+                first = tasks[0]
+                self.assertIn("ansible.builtin.assert", first)
+                assertions = " ".join(first["ansible.builtin.assert"]["that"])
+                self.assertIn("lab_project_name == 'personal-server-ansible-lab'", assertions)
+                self.assertIn("lab_http_port", assertions)
+                self.assertIn("18088", assertions)
+                self.assertIn("lab_root", assertions)
+                self.assertIn("lookup('ansible.builtin.env', 'HOME')", assertions)
+
+    def test_project_collision_is_checked_without_lab_directory(self):
+        for name in ("site", "rollback"):
+            with self.subTest(playbook=name):
+                tasks = self._tasks(name)
+                queries = [task for task in tasks if task.get("register", "").startswith("lab_project_")]
+                self.assertEqual(len(queries), 3)
+                for task in queries:
+                    self.assertIn("ansible.builtin.command", task)
+                    self.assertNotIn("when", task)
+                    self.assertIs(task["changed_when"], False)
+                guards = [task for task in tasks if "ansible.builtin.assert" in task]
+                self.assertTrue(any("lab_project_containers.stdout" in str(task) and
+                                    "lab_directory.stat.exists" in str(task) for task in guards))
+
+    def test_existing_compose_must_match_approved_render(self):
+        for name in ("site", "rollback"):
+            with self.subTest(playbook=name):
+                assertions = " ".join(clause for task in self._tasks(name)
+                                      for clause in task.get("ansible.builtin.assert", {}).get("that", []))
+                self.assertIn("lookup('ansible.builtin.template'", assertions)
+                self.assertIn("lab_compose_data.content", assertions)
+
+    def test_rollback_only_removes_three_regular_top_level_files(self):
+        tasks = self._tasks("rollback")
+        found = next(task for task in tasks if "ansible.builtin.find" in task)
+        self.assertIs(found["ansible.builtin.find"]["recurse"], True)
+        self.assertIs(found["ansible.builtin.find"]["hidden"], True)
+        assertions = " ".join(clause for task in tasks
+                              for clause in task.get("ansible.builtin.assert", {}).get("that", []))
+        self.assertIn("lab_index_file.stat.isreg", assertions)
+        self.assertIn("lab_files.files", assertions)
+        self.assertIn("lab_files.matched", assertions)
+        self.assertIn("== 3", assertions)
+
     def test_required_lab_files_are_present(self):
         for relative in (
             "ansible.cfg", "inventory/localhost.ini", "group_vars/all.yml",
