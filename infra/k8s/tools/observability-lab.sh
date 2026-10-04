@@ -43,9 +43,9 @@ done
 [[ "$delete_data" == false || "$mode" == --rollback ]] || { usage; fail 'delete-data requires rollback'; }
 
 # The context is checked before all reads that could precede a mutation.
-active_context="$(sudo k3s kubectl config current-context 2>/dev/null)" || fail 'cannot determine active Kubernetes context'
+active_context="$(sudo -n k3s kubectl --request-timeout=15s config current-context 2>/dev/null)" || fail 'cannot determine active Kubernetes context'
 [[ "$active_context" == "$expected_context" ]] || fail 'active Kubernetes context differs from requested context'
-kubectl=(sudo k3s kubectl --context "$expected_context")
+kubectl=(sudo -n k3s kubectl --context "$expected_context" --request-timeout=15s)
 
 require_files() {
   [[ -r "$LAB_MANIFEST" && -r "$DATASOURCE_MANIFEST" && -r "$DASHBOARD_MANIFEST" ]] \
@@ -95,7 +95,7 @@ verify_lab() {
   "${kubectl[@]}" get namespace "$LAB_NAMESPACE" >/dev/null 2>&1 || fail 'lab namespace unavailable'
   local deployment
   for deployment in loki-lab loki-lab-alloy loki-lab-sample; do
-    "${kubectl[@]}" -n "$LAB_NAMESPACE" wait --for=condition=Available "deployment/$deployment" --timeout=90s >/dev/null 2>&1 \
+    "${kubectl[@]}" --request-timeout=100s -n "$LAB_NAMESPACE" wait --for=condition=Available "deployment/$deployment" --timeout=90s >/dev/null 2>&1 \
       || fail 'lab deployment unavailable'
   done
   local pvc_phase
@@ -108,10 +108,27 @@ verify_lab() {
     || fail 'lab dashboard unavailable'
 
   local proxy='/api/v1/namespaces/observability-lab/services/http:loki-lab:3100/proxy'
-  "${kubectl[@]}" get --raw "$proxy/ready" >/dev/null 2>&1 || fail 'Loki readiness failed'
+  retry_probe loki_ready || fail 'Loki readiness failed after 3 attempts'
+  retry_probe sample_query || fail 'allowlisted sample log query failed after 3 attempts'
+}
+
+# Bound both individual API calls (15s) and startup retries (3 calls, two 10s gaps).
+retry_probe() {
+  local probe="$1" attempt
+  for attempt in 1 2 3; do
+    if "$probe"; then return 0; fi
+    if ((attempt < 3)); then sleep 10; fi
+  done
+  return 1
+}
+
+loki_ready() {
+  "${kubectl[@]}" get --raw "$proxy/ready" >/dev/null 2>&1
+}
+
+sample_query() {
   "${kubectl[@]}" get --raw "$proxy/loki/api/v1/query_range?query=%7Bapp%3D%22loki-lab-sample%22%2Cnamespace%3D%22observability-lab%22%7D&limit=1" 2>/dev/null \
-    | python3 -c 'import json, sys; p=json.load(sys.stdin); sys.exit(0 if p.get("status")=="success" and any(s.get("values") for s in p.get("data",{}).get("result",[])) else 1)' >/dev/null 2>&1 \
-    || fail 'allowlisted sample log query failed'
+    | python3 -c 'import json, sys; p=json.load(sys.stdin); sys.exit(0 if p.get("status")=="success" and any(s.get("values") for s in p.get("data",{}).get("result",[])) else 1)' >/dev/null 2>&1
 }
 
 delete_named() {

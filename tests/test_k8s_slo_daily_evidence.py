@@ -132,6 +132,17 @@ def valid_fields(**overrides):
 
 
 class SloDailyEvidenceValidationTests(unittest.TestCase):
+    def test_public_probe_uses_fixed_honest_monitor_identity_and_preserves_403(self):
+        requests = []
+        def reject(request, timeout):
+            requests.append(request)
+            raise HTTPError(request.full_url, 403, 'Forbidden', {}, None)
+        with redirect_stdout(io.StringIO()):
+            result = module._public_health_status('https://public.example/health', urlopen=reject)
+        self.assertEqual(result, 'failed')
+        self.assertEqual(requests[0].get_header('User-agent'), 'personal-server-slo-monitor/1.0')
+        self.assertEqual(requests[0].get_method(), 'GET')
+
     def test_merge_replaces_same_date_and_keeps_thirty_newest(self):
         records = [
             {"date": f"2026-08-{day:02d}", **valid_fields()}

@@ -29,6 +29,15 @@ ansible-playbook -i infra/ansible-lab/inventory/localhost.ini infra/ansible-lab/
 
 첫 실행은 응답 파일과 Compose 정의를 배치한 뒤 loopback HTTP 200 및 고정 응답을 확인함. 두 번째 실행의 변경 수는 0건이어야 함. 롤백은 `.owner` 내용, 승인된 Compose 전체 구성, 동일 이름 Docker 자원, 디렉터리 내 일반 파일 3개만 있는지 확인한 뒤 전용 project를 중지하고 전용 디렉터리만 제거함. 소유 확인에 실패하거나 다른 파일·디렉터리·링크가 있으면 삭제하지 않음.
 
+## 응답 drift 훈련
+
+```sh
+python3 infra/ansible-lab/tools/drift-lab.py --check
+python3 infra/ansible-lab/tools/drift-lab.py --go
+```
+
+기본값·`--check`는 소유 확인과 check mode만 수행함. `--go`는 별도 실습 적용 승인 후 기존 고정 localhost project의 정상 응답 파일만 변경함. drift check/diff → site 원복 → site 재실행 changed=0을 확인함. 운영 앱·Compose 정의·소유 marker는 변경하지 않음. 디렉터리·파일의 symlink/hardlink·다른 소유·추가 파일을 거부함. timeout/interrupt 시 하위 프로세스 종료를 확인한 뒤에만 원복함. 종료 확인이 불가능하면 추가 쓰기를 보류하고 실패 상태를 보고함. 전체 실습 원복이 아닌 실패 중 response drift 원복과 기존 rollback playbook은 구분함.
+
 ## 증적 기록
 
 | 항목 | 기록값 | 비고 |
