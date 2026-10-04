@@ -203,6 +203,20 @@ class VerifyChangeScopeTests(unittest.TestCase):
         self.assertEqual(evidence["required_checks"], ["maintenance"])
         self.assertEqual(evidence["unclassified_files"], [])
 
+    def test_ansible_lab_paths_require_maintenance_check(self):
+        paths = ("infra/ansible-lab/ansible.cfg", "infra/ansible-lab/playbooks/site.yml")
+        code, evidence = run_scope(*paths, executed_checks=("maintenance",))
+        self.assertEqual(code, 0)
+        self.assertEqual(evidence["infrastructure_files"], list(paths))
+        self.assertEqual(evidence["required_checks"], ["maintenance"])
+        self.assertEqual(evidence["unclassified_files"], [])
+
+    def test_ansible_lab_does_not_allow_traversal_or_sibling_paths(self):
+        paths = ("infra/ansible-lab/../scripts/deploy-n100.sh", "infra/ansible-lab-foreign/site.yml")
+        code, evidence = run_scope(*paths, executed_checks=("maintenance",))
+        self.assertEqual(code, 2)
+        self.assertEqual(evidence["unclassified_files"], list(paths))
+
     def test_crawler_k3s_cutover_scope_requires_crawler_and_maintenance_checks(self):
         path = "infra/k8s/tools/crawler-worker-cutover.sh"
 

@@ -98,31 +98,45 @@ class AnsibleLabContractTests(unittest.TestCase):
             ("no resources", [], [], [], [], {}, {}, True),
             ("owned resources", [container_name], [container_name],
              [network_name], [network_name], container_labels, network_labels, True),
-            ("unlabeled name", [], [container_name], [], [], {}, {}, False),
-            ("container query mismatch", [container_name], [], [], [], {}, {}, False),
+            ("extra named container", [], [container_name], [], [], container_labels, network_labels, False),
+            ("container query mismatch", [container_name], [], [], [], container_labels, network_labels, False),
             ("equal-count different container", [container_name], ["different-container"],
-             [], [], {}, {}, False),
-            ("network query mismatch", [], [], [network_name], [], {}, {}, False),
+             [], [], container_labels, network_labels, False),
+            ("network query mismatch", [], [], [network_name], [], container_labels, network_labels, False),
             ("equal-count different network", [], [], [network_name], ["different-network"],
-             {}, {}, False),
-            ("extra named network", [], [], [], [network_name], {}, {}, False),
+             container_labels, network_labels, False),
+            ("extra named network", [], [], [], [network_name], container_labels, network_labels, False),
             ("duplicate count", [container_name, container_name], [container_name],
-             [], [], {}, {}, False),
+             [], [], container_labels, network_labels, False),
         ]
-        for key in container_labels:
+        expected_query_failures = {
+            "extra named container": [0, 1],
+            "container query mismatch": [0, 1],
+            "equal-count different container": [1],
+            "network query mismatch": [2, 3],
+            "equal-count different network": [3],
+            "extra named network": [2, 3],
+            "duplicate count": [0, 1],
+        }
+        expected_label_failures = {}
+        for index, key in enumerate(container_labels):
             missing = {k: v for k, v in container_labels.items() if k != key}
             changed = {**container_labels, key: "different"}
             cases.append((f"missing container {key}", [container_name], [container_name],
                           [network_name], [network_name], missing, network_labels, False))
             cases.append((f"different container {key}", [container_name], [container_name],
                           [network_name], [network_name], changed, network_labels, False))
-        for key in network_labels:
+            expected_label_failures[f"missing container {key}"] = [index]
+            expected_label_failures[f"different container {key}"] = [index]
+        for index, key in enumerate(network_labels, start=4):
             missing = {k: v for k, v in network_labels.items() if k != key}
             changed = {**network_labels, key: "different"}
             cases.append((f"missing network {key}", [container_name], [container_name],
                           [network_name], [network_name], container_labels, missing, False))
             cases.append((f"different network {key}", [container_name], [container_name],
                           [network_name], [network_name], container_labels, changed, False))
+            expected_label_failures[f"missing network {key}"] = [index]
+            expected_label_failures[f"different network {key}"] = [index]
         for name in ("site", "rollback"):
             tasks = self._tasks(name)
             clauses = [clause for task in tasks for clause in
@@ -155,9 +169,17 @@ class AnsibleLabContractTests(unittest.TestCase):
                         "lab_project_name": PROJECT,
                         "lab_root": lab_root,
                     }
-                    result = all(bool(env.compile_expression(clause)(**context))
-                                 for clause in query_guards + label_guards)
-                    self.assertIs(result, allowed)
+                    # Evaluate every clause eagerly: an earlier rejection must
+                    # not conceal an ineffective name or ownership guard.
+                    query_results = [bool(env.compile_expression(clause)(**context))
+                                     for clause in query_guards]
+                    label_results = [bool(env.compile_expression(clause)(**context))
+                                     for clause in label_guards]
+                    self.assertEqual([i for i, result in enumerate(query_results) if not result],
+                                     expected_query_failures.get(scenario, []))
+                    self.assertEqual([i for i, result in enumerate(label_results) if not result],
+                                     expected_label_failures.get(scenario, []))
+                    self.assertIs(all(query_results + label_results), allowed)
 
     def test_existing_compose_must_match_approved_render(self):
         for name in ("site", "rollback"):
