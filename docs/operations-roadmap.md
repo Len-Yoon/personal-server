@@ -42,14 +42,14 @@
 
 ### Loki·Ansible 후속 실습 상태
 
-`codex/loki-ansible-lab`의 `52f0e2a` 기준 개발 상태임. 기존 운영 완료 항목에 포함하지 않음. 면접 설명은 [DevOps 포트폴리오](portfolio-devops.md)를 참조함.
+`f66a42a` ([PR #331](https://github.com/Len-Yoon/personal-server/pull/331) 병합) 기준 상태임. 저장소 검증 완료와 N100 실동작 검증 결과를 구분함. 면접 설명은 [DevOps 포트폴리오](portfolio-devops.md)를 참조함.
 
 | 항목 | 현재 상태 | 남은 조건 |
 |---|---|---|
-| Loki·Alloy·Grafana 실습 | manifest·관리 도구 구현, 단계별 계약 검사·독립 검토 통과 기록 있음 | Helm 렌더·실제 CNI·Grafana 연동·디스크 보호 확인 필요 |
-| Ansible localhost 실습 | 배치·검증·롤백과 소유 경계 구현됨 | 마지막 의미 계약 독립 검토 미해결, CI 경로 분류·검사 등록·실제 리허설 필요 |
-| 저장소 통합 | 기능 브랜치에 구현 커밋 있음 | 전체 필수 검증·PR·병합 미완료 |
-| N100 실습 적용 | 미수행 | 검증된 커밋과 운영 적용 승인 필요 |
+| Loki·Alloy·Grafana 실습 | N100 3개 Deployment `1/1`·PVC Bound, 실제 샘플 로그 조회·datasource 등록 확인 | 최초 조회 실패 후 무변경 재조회 성공. 화면/API·CNI 원인·retention·hard quota 확인 필요 |
+| Ansible localhost 실습 | syntax-check·check mode·배치·2회차 `changed=0`·롤백·재배치 통과 | 모두 `failed=0`, 최종 loopback HTTP 정상 |
+| 저장소 통합 | PR CI·Trivy·독립 검토 통과 후 `f66a42a` 병합 완료 | 병합 후 CI·Trivy 성공. 자동배포는 `blocked_path`로 제외됨 |
+| N100 실습 적용 | 동일 커밋 동기화·승인된 수동 실습 적용 및 검증 완료 | [운영 검증 결과](reviews/20261004_Loki_Ansible_실습_N100운영검증결과.md). Portal 전후 각 3회 정상, 기존 monitoring 준비 상태 유지 |
 
 | 우선순위 | 항목 | 실행 기준 | 완료 조건 |
 |---|---|---|---|

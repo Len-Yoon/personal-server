@@ -8,7 +8,7 @@
 | 작성일 | 2026-10-01 |
 | 목적 | 기존 개인 서버 운영 경계를 보존하면서 로그 관측과 멱등형 자동화의 실습·포트폴리오 증적을 추가함 |
 | 대상 | N100 WSL2의 K3s 및 Docker Compose 실습 전용 자원 |
-| 상태 | 2026-10-04 기준 Loki 단계별 구현·검토 기록 있음. Ansible 최종 계약 검토·CI 통합 미완료, N100 미적용 |
+| 상태 | 2026-10-04 PR #331 CI·Trivy·독립 검토 통과 후 `f66a42a` 병합됨. 승인된 N100 적용·샘플 로그 조회·Ansible 멱등성·롤백 검증 완료. 화면/API·CNI 원인·retention·hard quota 확인 필요 |
 
 ## 핵심 요약
 
@@ -24,7 +24,7 @@
 | 로그 대상 | 같은 namespace의 샘플 앱 stdout만 allowlist로 수집 | `personal-server`, `monitoring`의 기존 워크로드·백업 Job·시스템 로그 |
 | Grafana | Loki 데이터 소스 및 실습 대시보드 ConfigMap 추가 | Grafana 인증·공개 ingress·기존 Prometheus 대시보드 변경 |
 | Ansible | WSL `localhost`, 전용 Compose project·디렉터리·loopback 포트 | SSH, Windows 작업, `become`, 운영 Compose·K3s·PVC·Secret·Caddy·Tunnel·bootstrap·scheduler |
-| 배포 | 저장소 구현·검증·PR·병합까지 준비 | N100 동기화·이미지 반입·K3s 적용·실제 서비스 재시작은 별도 운영 승인 전 미수행 |
+| 배포 | 저장소·병합 후 CI 검증 및 승인된 N100 실습 적용 완료 | 운영 서비스 이미지 교체·PVC 데이터 삭제·운영 로그 수집 확대는 이번 실습 범위에서 제외함 |
 
 ## 설계 대안과 선택
 
@@ -98,9 +98,9 @@ Ansible은 `become`을 사용하지 않고, 기존 배포·백업·복구 도구
 
 ## 확인 필요 사항
 
-- N100의 실제 가용 메모리·디스크, 현재 로그 형식, Ansible·Docker Compose 설치 상태는 운영 사전 점검에서 확인 필요함.
+- 실제 적용·사후 검증은 [운영 검증 결과](../../reviews/20261004_Loki_Ansible_실습_N100운영검증결과.md)를 따름. 24시간 retention·hard quota·Grafana 화면/API 조회 및 CNI 규칙 원인 검증은 확인 필요함.
 - 운영 서비스 로그 수집 확대는 로그 민감정보 검토와 별도 승인 없이는 수행하지 않음.
-- Grafana data source sidecar의 현재 label·갱신 계약은 구현 검증에서 렌더링·테스트로 확인 필요함.
+- chart 88.6.1 Helm 렌더, live Grafana label 대조와 datasource 삽입은 확인됨. 대시보드 화면/API의 실제 로그 표시 조회는 미수행함.
 
 ## 후속 조치
 

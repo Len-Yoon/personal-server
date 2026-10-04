@@ -28,7 +28,7 @@
 
 ## 최신 반영·검증 기록
 
-[DevOps 포트폴리오](portfolio-devops.md)는 면접용 설계 판단·검증 근거·예상 질문을 정리함. Loki·Ansible 후속 실습은 개발 단계이며 운영 적용 성과와 구분함.
+[DevOps 포트폴리오](portfolio-devops.md)는 면접용 설계 판단·검증 근거·예상 질문을 정리함. Loki·Ansible 후속 실습은 [PR #331](https://github.com/Len-Yoon/personal-server/pull/331)의 CI·Trivy·독립 검토 통과 후 `f66a42a`로 병합됨. 승인된 N100 적용과 Loki 샘플 조회·Ansible 멱등성·롤백 리허설을 완료함. 최초 조회 실패와 미검증 항목은 [운영 검증 결과](reviews/20261004_Loki_Ansible_실습_N100운영검증결과.md)에 기록함.
 
 | 문서 | 확인 내용 |
 |---|---|

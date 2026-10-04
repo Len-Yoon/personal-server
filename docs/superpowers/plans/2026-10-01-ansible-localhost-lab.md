@@ -14,18 +14,18 @@
 
 ### 실행 상태 — 2026-10-04 문서 대조
 
-기준 커밋 `52f0e2a`. 아래 원래 실행 절차의 체크박스는 최초 계획이며, 실제 완료 판정은 이 표를 기준으로 함.
+기준 커밋 `f66a42a` ([PR #331](https://github.com/Len-Yoon/personal-server/pull/331) 병합). 아래 원래 실행 절차의 체크박스는 최초 계획이며, 실제 완료 판정은 이 표를 기준으로 함.
 
 | 단계 | 구현·검토 상태 | 검증 근거·남은 조건 |
 |---|---|---|
 | Task 1 기본 구조 | 구현·독립 검토 완료 기록 있음 (`cb2f437`) | localhost·loopback·권한 경계 계약 5건 통과 기록 |
-| Task 2 lifecycle | 구현 및 반복 보완 반영됨. 최종 검토 미해결 | `6e4165a`부터 `52f0e2a`까지 파일·Compose 소유·고정 변수·이름 충돌·양방향 조회 계약 보완. 관련 검사 44건 통과 기록 |
-| Task 2 계약 증명 | 보완 필요 | 마지막 검토에서 동수·상이름 사례의 label도 불일치해 sort 조건만의 효과를 입증하지 못함. count·sort·label 결과 분리 및 정상 label 사례 필요 |
-| Task 2 실동작 | 미검증 | Ansible 실행 파일 부재로 syntax-check·check mode·2회 배치 changed=0·rollback 리허설 미수행 |
-| Task 3 CI 통합 | 미완료 | `infra/ansible-lab/` 미분류 및 계약 테스트 matrix 미등록으로 하네스·maintenance 차단 상태. 경로 분류·등록·전체 검사·PR·CI·병합 필요 |
-| N100 적용 | 미수행 | 검증 완료 후 운영 적용 승인 필요 |
+| Task 2 lifecycle | 구현·최종 독립 검토 완료 | 파일·Compose 소유·고정 변수·이름 충돌·양방향 조회 계약을 보완하고 독립 검토 승인됨 |
+| Task 2 계약 증명 | 보완·검증 완료 (`3d866df`) | 정상 label로 동수·상이름 사례를 구성하고 count·sort·label 결과를 개별 평가함. site·rollback 조건 우회 변이 20/20 검출함 |
+| Task 2 실동작 | 실제 리허설 완료 | syntax-check 2개·check mode 통과. 최초 changed=5·2회차 changed=0·rollback changed=2·재배치 changed=5, 모두 failed=0 |
+| Task 3 CI 통합 | 완료 | `infra/ansible-lab/` infrastructure·maintenance 분류 및 계약 테스트 1회 등록 완료. maintenance 546건, PR CI·Trivy·독립 검토 통과 후 `f66a42a` 병합됨 |
+| N100 적용 | 승인된 리허설 완료 | 동일 커밋 동기화와 재배치 후 HTTP 정상. [운영 검증 결과](../../reviews/20261004_Loki_Ansible_실습_N100운영검증결과.md) 참조 |
 
-실행기 묶음 옵션은 `--suite`임. 아래 최초 계획의 `--group` 표기는 실제 실행 시 `--suite`로 교정함. 면접에서는 멱등성을 검증한 성과로 주장하지 않고 설계 목표와 미수행 리허설을 구분함. [DevOps 포트폴리오](../../portfolio-devops.md)를 참조함.
+실행기 묶음 옵션은 `--suite`임. 아래 최초 계획의 `--group` 표기는 실제 실행 시 `--suite`로 교정함. 면접에서는 저장소 검증 완료와 실제 멱등성·롤백 리허설 결과를 구분함. [DevOps 포트폴리오](../../portfolio-devops.md)를 참조함.
 
 - inventory는 `localhost ansible_connection=local` 하나만 포함하고 SSH, Windows, remote host, `become`을 사용하지 않음.
 - sample Compose project·user-home-relative lab directory·loopback port만 관리함.
