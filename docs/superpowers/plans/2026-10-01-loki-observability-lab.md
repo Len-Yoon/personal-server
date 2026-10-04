@@ -12,6 +12,21 @@
 
 ## Global Constraints
 
+### 실행 상태 — 2026-10-04 문서 대조
+
+기준 커밋 `52f0e2a`. 아래 원래 실행 절차의 체크박스는 최초 계획이며, 실제 완료 판정은 이 표를 기준으로 함. 검사 증적은 해당 단계 실행에 한정되며 최종 브랜치 전체 통과를 의미하지 않음.
+
+| 단계 | 구현·검토 상태 | 검증 근거·남은 조건 |
+|---|---|---|
+| Task 1 CI 등록 | 완료 기록 있음 (`854ce53`, `b5d92e8`) | 관련 검사 67건 및 독립 검토 통과. 기존 `infra/k8s/` 분류를 재사용해 좁은 prefix는 추가하지 않음 |
+| Task 2 manifest | 보안 보완·재검토 완료 기록 있음 (`3740d09`, `a147e8c`) | namespace·RBAC·NetworkPolicy·보안 계약 통과. local-path 1Gi는 hard quota 아님 |
+| Task 3 Grafana | 구현·독립 검토 완료 기록 있음 (`838af2a`) | 직접 계약 16건, maintenance 528건, K8s 812건 통과 기록. Helm chart 렌더 미검증 |
+| Task 4 전용 도구 | 구현·독립 검토 완료 기록 있음 (`5d13aad`, `2a0a4fe`) | 도구 11건, K8s 823건, maintenance 528건 통과 기록. manifest별 dry-run 순서 테스트 보강 권고 있음 |
+| Task 5 최종 통합 | 미완료 | Ansible CI 통합과 함께 최종 하네스·전체 검사·PR·CI·병합 수행 필요 |
+| N100 적용 | 미수행 | 실제 CNI·Grafana label·로그 조회·디스크 보호 확인 및 운영 적용 승인 필요 |
+
+실행기 묶음 옵션은 `--suite`임. 아래 최초 계획의 `--group` 표기는 실제 실행 시 `--suite`로 교정함. 면접 제출 설명은 [DevOps 포트폴리오](../../portfolio-devops.md)를 따름.
+
 - 기존 `monitoring` Helm release, `monitoring-install.sh`, `monitoring-uninstall.sh`를 Loki 설치·제거에 사용하지 않음.
 - Loki·Alloy·샘플 앱은 non-root, read-only root filesystem, capability drop, privilege escalation 금지, request/limit을 사용함.
 - 로그 수집 대상은 `observability-lab`의 allowlist 샘플 Pod로 한정하고 hostPath, Docker socket, Secret, ClusterRole, cluster-admin을 사용하지 않음.

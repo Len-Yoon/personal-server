@@ -8,7 +8,7 @@
 | 작성일 | 2026-10-01 |
 | 목적 | 기존 개인 서버 운영 경계를 보존하면서 로그 관측과 멱등형 자동화의 실습·포트폴리오 증적을 추가함 |
 | 대상 | N100 WSL2의 K3s 및 Docker Compose 실습 전용 자원 |
-| 상태 | 사용자 설계 승인 후 구현 계획 작성 전 |
+| 상태 | 2026-10-04 기준 Loki 단계별 구현·검토 기록 있음. Ansible 최종 계약 검토·CI 통합 미완료, N100 미적용 |
 
 ## 핵심 요약
 
@@ -48,10 +48,10 @@
 
 | 항목 | 계약 |
 |---|---|
-| 로그 보존 | 짧은 보존 기간과 전용 PVC 상한을 명시함. 실제 값은 N100의 가용 메모리·디스크 사전 점검 결과를 만족하는 값으로 고정함 |
+| 로그 보존 | 24h 보존과 local-path PVC 1Gi 요청을 선언함. 비동기 보존 및 PVC 요청은 실제 디스크 사용량 상한을 강제하지 않으므로 호스트 디스크 여유·경보 확인 필요함 |
 | 자원 | Loki·수집기·샘플 앱 각각 request와 limit을 선언함. 사전 점검에서 여유가 부족하면 적용하지 않음 |
 | 로그 내용 | 고정된 비민감 샘플 문장과 최소 label만 허용함. 토큰, 쿠키, 요청 본문, 사용자 입력, 내부 주소를 넣지 않음 |
-| 네트워크 | Loki와 샘플 앱은 ClusterIP만 사용함. 외부 ingress·NodePort를 만들지 않음 |
+| 네트워크 | Loki는 ClusterIP 및 ingress NetworkPolicy를 사용함. 동일 namespace Alloy와 monitoring Grafana의 TCP 3100만 허용함. 샘플 앱은 로그 생성용이며 Service를 만들지 않음. 실제 CNI 정책 집행 확인 필요함 |
 | 파일시스템 | Loki 전용 PVC 외 기존 PVC·hostPath·Secret volume을 mount하지 않음 |
 | 컨테이너 | non-root, privilege escalation 금지, capability 전체 drop, read-only root filesystem을 기본으로 함. 필요한 임시 쓰기는 `emptyDir`로 한정함 |
 
@@ -84,7 +84,7 @@ Ansible은 `become`을 사용하지 않고, 기존 배포·백업·복구 도구
 
 1. N100 저장소가 검증된 `main` 커밋으로 fast-forward 가능한지 확인함.
 2. K3s node, 기존 monitoring Pod·PVC, Prometheus scrape, Grafana, Alertmanager→Relay가 정상인지 읽기 전용으로 확인함.
-3. 실제 가용 메모리·디스크와 Loki 요청·제한·PVC 상한을 대조함. 여유가 부족하면 적용하지 않음.
+3. 실제 가용 메모리·디스크와 Loki 요청·제한·PVC 요청량을 대조함. local-path의 디스크 강제 상한은 보장되지 않으므로 디스크 보호 방안을 확인하고, 여유가 부족하면 적용하지 않음.
 4. 외부 Portal health를 10초 간격 3회 확인함.
 5. 수집 대상 샘플 로그에 민감 정보가 없음을 값 자체를 출력하지 않는 방식으로 확인함.
 
