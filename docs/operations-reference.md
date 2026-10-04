@@ -68,6 +68,8 @@ bash infra/k8s/tools/sre-health-audit.sh
 
 Grafana, Prometheus, Telegram relay, Portal PVC 백업은 [K3s 운영 문서](../infra/k8s/README.md)를 따름.
 
+Loki 로그 관측 실습은 `observability-lab` namespace의 전용 자원과 `monitoring`의 전용 Grafana ConfigMap 2개만 대상으로 함. 적용·검증·명시적 롤백 명령 및 PVC 보존 기준은 [K3s 운영 문서의 Loki 실습 절](../infra/k8s/README.md#loki-로그-관측-실습)을 따름. 저장소 변경만으로 N100에 적용된 상태로 간주하지 않으며, 운영 승인 후 실제 여유 자원과 기존 서비스 health를 확인 필요함.
+
 ## 장애 알림과 복구
 
 | 신호 | 감지 방식 | 알림 |

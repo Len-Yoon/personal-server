@@ -1,0 +1,177 @@
+---
+- name: Local sample lab rollback
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: true
+  vars_files:
+    - ../group_vars/all.yml
+  tasks:
+    - name: Require fixed local lab targets before rollback
+      ansible.builtin.assert:
+        that:
+          - lab_project_name == 'personal-server-ansible-lab'
+          - lab_http_port | int == 18088
+          - lab_root == lookup('ansible.builtin.env', 'HOME') ~ '/.local/share/personal-server-ansible-lab'
+        fail_msg: "Lab target variables must retain their approved local values."
+      tags: [rollback]
+
+    - name: Query containers with the lab project label before rollback
+      ansible.builtin.command:
+        argv: [docker, ps, --all, --filter, "label=com.docker.compose.project={{ lab_project_name }}", --format, "{{ '{{.Names}}' }}"]
+      register: lab_project_containers
+      changed_when: false
+      check_mode: false
+      tags: [rollback]
+
+    - name: Query networks with the lab project label before rollback
+      ansible.builtin.command:
+        argv: [docker, network, ls, --filter, "label=com.docker.compose.project={{ lab_project_name }}", --format, "{{ '{{.Name}}' }}"]
+      register: lab_project_networks
+      changed_when: false
+      check_mode: false
+      tags: [rollback]
+
+    - name: Query volumes with the lab project label before rollback
+      ansible.builtin.command:
+        argv: [docker, volume, ls, --filter, "label=com.docker.compose.project={{ lab_project_name }}", --format, "{{ '{{.Name}}' }}"]
+      register: lab_project_volumes
+      changed_when: false
+      check_mode: false
+      tags: [rollback]
+
+    - name: Query the expected container name without a project label filter before rollback
+      ansible.builtin.command:
+        argv: [docker, ps, --all, --filter, "name=^/{{ lab_project_name }}-sample-1$", --format, "{{ '{{.Names}}' }}"]
+      register: lab_named_container
+      changed_when: false
+      check_mode: false
+      tags: [rollback]
+
+    - name: Query the expected network name without a project label filter before rollback
+      ansible.builtin.command:
+        argv: [docker, network, ls, --filter, "name=^{{ lab_project_name }}_default$", --format, "{{ '{{.Name}}' }}"]
+      register: lab_named_network
+      changed_when: false
+      check_mode: false
+      tags: [rollback]
+
+    - name: Read existing lab container ownership labels before rollback
+      ansible.builtin.command:
+        argv: [docker, container, inspect, "{{ lab_project_name }}-sample-1", --format, "{{ '{{json .Config.Labels}}' }}"]
+      register: lab_container_labels
+      changed_when: false
+      check_mode: false
+      no_log: true
+      when: "lab_named_container.stdout_lines == [lab_project_name ~ '-sample-1']"
+      tags: [rollback]
+
+    - name: Read existing lab network ownership labels before rollback
+      ansible.builtin.command:
+        argv: [docker, network, inspect, "{{ lab_project_name }}_default", --format, "{{ '{{json .Labels}}' }}"]
+      register: lab_network_labels
+      changed_when: false
+      check_mode: false
+      no_log: true
+      when: "lab_named_network.stdout_lines == [lab_project_name ~ '_default']"
+      tags: [rollback]
+
+    - name: Inspect lab directory before rollback
+      ansible.builtin.stat:
+        path: "{{ lab_root }}"
+        follow: false
+      register: lab_directory
+      tags: [rollback]
+
+    - name: Inspect ownership marker before rollback
+      ansible.builtin.stat:
+        path: "{{ lab_root }}/.owner"
+        follow: false
+      register: lab_marker
+      when: lab_directory.stat.isdir | default(false)
+      tags: [rollback]
+
+    - name: Read ownership marker before rollback
+      ansible.builtin.slurp:
+        src: "{{ lab_root }}/.owner"
+      register: lab_marker_data
+      when: lab_marker.stat.isreg | default(false)
+      tags: [rollback]
+
+    - name: Inspect Compose definition before rollback
+      ansible.builtin.stat:
+        path: "{{ lab_root }}/compose.yaml"
+        follow: false
+      register: lab_compose_file
+      when: lab_directory.stat.isdir | default(false)
+      tags: [rollback]
+
+    - name: Read Compose definition before rollback
+      ansible.builtin.slurp:
+        src: "{{ lab_root }}/compose.yaml"
+      register: lab_compose_data
+      when: lab_compose_file.stat.isreg | default(false)
+      tags: [rollback]
+
+    - name: Inspect sample response before rollback
+      ansible.builtin.stat:
+        path: "{{ lab_root }}/index.html"
+        follow: false
+      register: lab_index_file
+      when: lab_directory.stat.isdir | default(false)
+      tags: [rollback]
+
+    - name: List direct lab directory entries before rollback
+      ansible.builtin.find:
+        paths: "{{ lab_root }}"
+        recurse: true
+        hidden: true
+        file_type: any
+        follow: false
+      register: lab_files
+      when: lab_directory.stat.isdir | default(false)
+      tags: [rollback]
+
+    - name: Refuse rollback of an unowned project
+      ansible.builtin.assert:
+        that:
+          - not lab_directory.stat.exists or lab_directory.stat.isdir | default(false)
+          - not lab_directory.stat.exists or lab_marker.stat.isreg | default(false)
+          - not lab_directory.stat.exists or (lab_marker_data.content | default('') | b64decode) == lab_project_name ~ '\n'
+          - not lab_directory.stat.exists or lab_compose_file.stat.isreg | default(false)
+          - not lab_directory.stat.exists or lab_index_file.stat.isreg | default(false)
+          - not lab_directory.stat.exists or (lab_compose_data.content | default('') | b64decode | from_yaml) == (lookup('ansible.builtin.template', playbook_dir ~ '/../templates/compose.yaml.j2') | from_yaml)
+          - not lab_directory.stat.exists or lab_files.matched == 3
+          - not lab_directory.stat.exists or (lab_files.files | map(attribute='path') | difference([lab_root ~ '/.owner', lab_root ~ '/compose.yaml', lab_root ~ '/index.html']) | list | length) == 0
+          - (lab_project_containers.stdout_lines | difference([lab_project_name ~ '-sample-1']) | length) == 0
+          - (lab_project_networks.stdout_lines | difference([lab_project_name ~ '_default']) | length) == 0
+          - lab_project_volumes.stdout_lines | length == 0
+          - (lab_project_containers.stdout_lines | length) + (lab_project_networks.stdout_lines | length) == 0 or lab_directory.stat.exists
+          - (lab_project_containers.stdout_lines | length) == (lab_named_container.stdout_lines | length)
+          - (lab_project_containers.stdout_lines | sort) == (lab_named_container.stdout_lines | sort)
+          - (lab_project_networks.stdout_lines | length) == (lab_named_network.stdout_lines | length)
+          - (lab_project_networks.stdout_lines | sort) == (lab_named_network.stdout_lines | sort)
+          - (lab_named_container.stdout_lines | length) + (lab_named_network.stdout_lines | length) == 0 or lab_directory.stat.exists
+          - lab_named_container.stdout_lines | length == 0 or (lab_container_labels.stdout | default('{}') | from_json).get('com.docker.compose.project') == lab_project_name
+          - lab_named_container.stdout_lines | length == 0 or (lab_container_labels.stdout | default('{}') | from_json).get('com.docker.compose.service') == 'sample'
+          - lab_named_container.stdout_lines | length == 0 or (lab_container_labels.stdout | default('{}') | from_json).get('com.docker.compose.project.working_dir') == lab_root
+          - lab_named_container.stdout_lines | length == 0 or (lab_container_labels.stdout | default('{}') | from_json).get('com.docker.compose.project.config_files') == lab_root ~ '/compose.yaml'
+          - lab_named_network.stdout_lines | length == 0 or (lab_network_labels.stdout | default('{}') | from_json).get('com.docker.compose.project') == lab_project_name
+          - lab_named_network.stdout_lines | length == 0 or (lab_network_labels.stdout | default('{}') | from_json).get('com.docker.compose.network') == 'default'
+        fail_msg: "Rollback refused: lab project ownership cannot be verified."
+      tags: [rollback]
+
+    - name: Stop only the owned lab Compose project
+      community.docker.docker_compose_v2:
+        project_src: "{{ lab_root }}"
+        project_name: "{{ lab_project_name }}"
+        state: absent
+      when: lab_directory.stat.exists and not ansible_check_mode
+      tags: [rollback]
+
+    - name: Remove only the owned lab directory
+      ansible.builtin.file:
+        path: "{{ lab_root }}"
+        state: absent
+      when: lab_directory.stat.exists and not ansible_check_mode
+      tags: [rollback]

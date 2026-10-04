@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-lab-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  loki-lab-sample.json: |
+    {
+      "annotations": {"list": []},
+      "editable": false,
+      "panels": [
+        {
+          "datasource": {"type": "loki", "uid": "loki-lab"},
+          "gridPos": {"h": 12, "w": 24, "x": 0, "y": 0},
+          "id": 1,
+          "targets": [
+            {
+              "datasource": {"type": "loki", "uid": "loki-lab"},
+              "expr": "{app=\"loki-lab-sample\"} | line_format \"{{ __line__ }}\"",
+              "refId": "A"
+            }
+          ],
+          "title": "샘플 앱 로그",
+          "type": "logs"
+        }
+      ],
+      "schemaVersion": 39,
+      "tags": ["loki-lab", "sample"],
+      "templating": {"list": []},
+      "time": {"from": "now-1h", "to": "now"},
+      "timezone": "browser",
+      "title": "Loki Lab 샘플 로그",
+      "uid": "loki-lab-sample",
+      "version": 1
+    }
