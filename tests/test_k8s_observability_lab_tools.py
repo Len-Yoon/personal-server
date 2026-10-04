@@ -27,13 +27,16 @@ class ObservabilityLabToolTests(unittest.TestCase):
             "  *'config current-context'*) printf '%s\\n' \"${LAB_CONTEXT:-k3s-test}\";;\n"
             "  *'get namespace observability-lab'*) if [ \"${LAB_NS_EXISTS:-yes}\" = yes ] && [[ \"$*\" == *'-o name'* ]]; then printf 'namespace/observability-lab'; fi;;\n"
             "  *'get pvc loki-lab-data'*) printf Bound;;\n"
-            "  *'get --raw '*'/query_range?'*) if [ \"${LAB_EMPTY_QUERY:-no}\" = yes ]; then printf '%s\\n' '{\"status\":\"success\",\"data\":{\"result\":[]}}'; else printf '%s\\n' '{\"status\":\"success\",\"data\":{\"result\":[{\"values\":[[\"1\",\"loki lab sample ready\"]]}]}}'; fi;;\n"
-            "  *'get --raw '*'/ready'*) printf ready;;\n"
+            "  *'get --raw '*'/query_range?'*) count=$(awk '/query_range/ {n++} END {print n}' \"$LAB_CALLS\"); if [ \"${LAB_EMPTY_QUERY:-no}\" = yes ] || [ \"$count\" -le \"${LAB_DELAY_QUERY:-0}\" ]; then printf '%s\\n' '{\"status\":\"success\",\"data\":{\"result\":[]}}'; else printf '%s\\n' '{\"status\":\"success\",\"data\":{\"result\":[{\"values\":[[\"1\",\"loki lab sample ready\"]]}]}}'; fi;;\n"
+            "  *'get --raw '*'/ready'*) count=$(awk '/proxy\\/ready/ {n++} END {print n}' \"$LAB_CALLS\"); [ \"${LAB_FAIL_READY:-no}\" = no ] && [ \"$count\" -gt \"${LAB_DELAY_READY:-0}\" ];;\n"
             "  *'--dry-run=server'*) [ \"${LAB_FAIL_DRY_RUN:-no}\" = no ];;\n"
             "  *) exit 0;;\n"
             "esac\n"
         )
         fake.chmod(0o755)
+        sleeper = self.directory / "sleep"
+        sleeper.write_text("#!/bin/sh\nexit 0\n")
+        sleeper.chmod(0o755)
 
     def run_tool(self, *args: str, **extra_env: str) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
@@ -113,6 +116,35 @@ class ObservabilityLabToolTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("observability_lab=FAIL", result.stdout)
         self.assertNotIn('"result"', result.stdout + result.stderr)
+
+    def test_delayed_sample_logs_succeed_on_third_attempt(self) -> None:
+        result = self.run_tool("--verify", "--context", "k3s-test", LAB_DELAY_QUERY="2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        queries = [call for call in self.recorded() if "/query_range?" in call]
+        self.assertEqual(len(queries), 3)
+        self.assertTrue(all("--request-timeout=15s" in call for call in queries))
+
+    def test_persistent_readiness_failure_stops_after_three_attempts(self) -> None:
+        result = self.run_tool("--verify", "--context", "k3s-test", LAB_FAIL_READY="yes")
+        self.assertNotEqual(result.returncode, 0)
+        ready = [call for call in self.recorded() if "/ready" in call]
+        self.assertEqual(len(ready), 3)
+        self.assertTrue(all("--request-timeout=15s" in call for call in ready))
+        self.assertFalse(any("query_range" in call for call in self.recorded()))
+
+    def test_delayed_readiness_recovers_and_queries_after_ready(self) -> None:
+        result = self.run_tool("--verify", "--context", "k3s-test", LAB_DELAY_READY="2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.recorded()
+        ready = [i for i, call in enumerate(calls) if "/ready" in call]
+        query = [i for i, call in enumerate(calls) if "query_range" in call]
+        self.assertEqual(len(ready), 3)
+        self.assertLess(ready[-1], query[0])
+
+    def test_empty_sample_query_stops_after_three_attempts(self) -> None:
+        result = self.run_tool("--verify", "--context", "k3s-test", LAB_EMPTY_QUERY="yes")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(sum("query_range" in call for call in self.recorded()), 3)
 
     def test_rollback_uses_only_named_resources_and_keeps_pvc(self) -> None:
         result = self.run_tool("--rollback", "--context", "k3s-test")

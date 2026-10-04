@@ -214,7 +214,10 @@ def _prometheus_scalar(prometheus_url, query, *, urlopen):
 
 
 def _public_health_status(public_health_url, *, urlopen):
-    request = Request(public_health_url, method="GET")
+    # Use an honest fixed identity rather than the edge-rejected urllib default.
+    request = Request(public_health_url, method="GET", headers={
+        "User-Agent": "personal-server-slo-monitor/1.0",
+    })
     try:
         with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
             status = getattr(response, "status", 200)

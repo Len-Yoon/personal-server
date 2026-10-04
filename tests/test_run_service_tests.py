@@ -40,6 +40,14 @@ EXPECTED_GROUPS["k8s-contracts"] = (*_k8s[:-1], _k8s[-1].replace(
     "tests.test_validate_sre_alertmanager_config tests.test_k8s_observability_lab tests.test_k8s_observability_lab_tools",
 ))
 
+# Newly added isolated drills and read-only aggregation remain in one owning suite.
+for _name, _modules in (
+    ("k8s-contracts", " tests.test_k8s_slo_evidence_summary tests.test_k8s_deployment_rollback_lab"),
+    ("maintenance", " tests.test_ansible_drift_lab"),
+):
+    _entry = EXPECTED_GROUPS[_name]
+    EXPECTED_GROUPS[_name] = (*_entry[:-1], _entry[-1] + _modules)
+
 
 class ServiceTestRunnerTests(unittest.TestCase):
     def test_ci_selection_uses_documentation_subset_for_documentation(self):

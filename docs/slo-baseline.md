@@ -133,6 +133,18 @@ Portal 홈의 검색 질의가 있는 `GET /` 요청은 Prometheus에서 고정�
 
 ## 후속 조치
 
+### 2026-10-05 읽기 전용 집계 보강
+
+`infra/k8s/tools/slo-evidence-summary.py`가 기존 `records.json` 배열 또는 해당 ConfigMap JSON을 읽어 기간별 성공·실패·관측 불가·미수집 날짜를 분리함. UTC 수집 시각과 KST 기록 날짜·HTTP 오류 비율 일치·중복 날짜·미래 기록을 검사하며 원본을 변경하지 않음. `overall=ok`는 수집 성공이며 서비스 정상 판정과 구분함.
+
+```sh
+python3 infra/k8s/tools/slo-evidence-summary.py --input /tmp/slo-records.json --end-date 2026-10-04 --days 30
+```
+
+일일 HTTP 창의 가중 오류 비율은 요청 수 가중치로 계산하되, 창의 겹침·누락이 있으므로 정확한 기간의 서비스 성공률로 사용하지 않음. 일일 p95는 평균하거나 병합하지 않음. 시간 기반 가용성·에러 버짓은 항상 `not_calculable`로 남김. 예정 수집 시각 전 당일을 종료일로 넣지 않으며, 과거 기록 부족을 정상으로 채우지 않음.
+
+실제 30일 집계와 기본 urllib 요청의 HTTP 403 식별자 차이 재현은 [고도화 검증 결과](reviews/20261005_DevOps실습고도화_검증결과.md)를 따름. 새 고정 모니터 User-Agent는 코드만 보완됐으며 운영 이미지 적용 전에는 정기 수집에 반영되지 않음.
+
 1. 공개 Portal workflow의 최근 30일 성공·실패·누락을 수동 집계해 기준선을 기록함.
 2. Prometheus retention을 변경하지 않고, 우선 7일 기준 K3s Portal·뉴스 수집 SLI를 관찰함.
 3. 일일 증적 ConfigMap은 최근 30건을 보관하나 원시 30일 시계열을 대체하지 않음. 30일 기준선이 쌓인 뒤 월간 증적의 누락과 목표 산정 방식을 재검토함.
