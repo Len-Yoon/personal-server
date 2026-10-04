@@ -14,16 +14,16 @@
 
 ### 실행 상태 — 2026-10-04 문서 대조
 
-기준 커밋 `52f0e2a`. 아래 원래 실행 절차의 체크박스는 최초 계획이며, 실제 완료 판정은 이 표를 기준으로 함. 검사 증적은 해당 단계 실행에 한정되며 최종 브랜치 전체 통과를 의미하지 않음.
+기준 커밋 `f66a42a` ([PR #331](https://github.com/Len-Yoon/personal-server/pull/331) 병합). 아래 원래 실행 절차의 체크박스는 최초 계획이며, 실제 완료 판정은 이 표를 기준으로 함. 단계별 검사 건수는 해당 실행 기록으로 보존함.
 
 | 단계 | 구현·검토 상태 | 검증 근거·남은 조건 |
 |---|---|---|
 | Task 1 CI 등록 | 완료 기록 있음 (`854ce53`, `b5d92e8`) | 관련 검사 67건 및 독립 검토 통과. 기존 `infra/k8s/` 분류를 재사용해 좁은 prefix는 추가하지 않음 |
 | Task 2 manifest | 보안 보완·재검토 완료 기록 있음 (`3740d09`, `a147e8c`) | namespace·RBAC·NetworkPolicy·보안 계약 통과. local-path 1Gi는 hard quota 아님 |
-| Task 3 Grafana | 구현·독립 검토 완료 기록 있음 (`838af2a`) | 직접 계약 16건, maintenance 528건, K8s 812건 통과 기록. Helm chart 렌더 미검증 |
+| Task 3 Grafana | 구현·독립 검토 완료 기록 있음 (`838af2a`) | 직접 계약 16건, maintenance 528건, K8s 812건 통과 기록. 당시 Helm chart 렌더는 미검증이었으며 최종 Task 5에서 검증함 |
 | Task 4 전용 도구 | 구현·독립 검토 완료 기록 있음 (`5d13aad`, `2a0a4fe`) | 도구 11건, K8s 823건, maintenance 528건 통과 기록. manifest별 dry-run 순서 테스트 보강 권고 있음 |
-| Task 5 최종 통합 | 미완료 | Ansible CI 통합과 함께 최종 하네스·전체 검사·PR·CI·병합 수행 필요 |
-| N100 적용 | 미수행 | 실제 CNI·Grafana label·로그 조회·디스크 보호 확인 및 운영 적용 승인 필요 |
+| Task 5 최종 통합 | 완료 | chart 88.6.1 Helm 렌더 통과, Ansible CI 통합, datasource `prune: true` 보완, 독립 검토 승인과 PR CI·Trivy 성공 후 `f66a42a` 병합됨 |
+| N100 적용 | 승인된 적용·샘플 조회 검증 완료 | Deployment 3개 1/1·PVC Bound, datasource 등록·Grafana→Loki ready·샘플 로그 조회 통과. 최초 조회 실패 후 무변경 재조회 성공. 화면/API·CNI 원인·retention·hard quota 미검증. [운영 검증 결과](../../reviews/20261004_Loki_Ansible_실습_N100운영검증결과.md) 참조 |
 
 실행기 묶음 옵션은 `--suite`임. 아래 최초 계획의 `--group` 표기는 실제 실행 시 `--suite`로 교정함. 면접 제출 설명은 [DevOps 포트폴리오](../../portfolio-devops.md)를 따름.
 

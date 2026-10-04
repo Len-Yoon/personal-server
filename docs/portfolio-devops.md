@@ -7,14 +7,14 @@
 | 작성 기준일 | 2026-10-04 |
 | 목적 | 면접에서 운영 경험·설계 판단·검증 근거를 설명하는 자료 |
 | 기준 자료 | 저장소 README, 운영 문서, Loki·Ansible 코드 및 작업별 검증 기록 |
-| 개발 기준 | `codex/loki-ansible-lab`, `52f0e2a` 기준 확인 |
-| 비고 | 기존 운영 기록과 개발 브랜치 실습을 구분함. 이번 문서 갱신에서 서버 상태를 재검증하지 않음 |
+| 개발 기준 | [PR #331](https://github.com/Len-Yoon/personal-server/pull/331), 병합 커밋 `f66a42a` |
+| 비고 | 저장소·운영 검증 결과와 미검증 항목을 구분함. [운영 검증 결과](reviews/20261004_Loki_Ansible_실습_N100운영검증결과.md) 참조 |
 
 ## 핵심 요약
 
 Windows N100 한 대의 WSL2에서 K3s와 Docker Compose를 함께 사용하는 개인 서버 프로젝트임. 공개 서비스 경로, 서비스별 실행 주체, 백업·복원 검증, 관측·알림, 변경 검증을 관리함. 단일 호스트의 자원 제약 안에서 중복 쓰기와 복구 실패를 줄이는 운영 절차를 구성한 경험을 설명할 수 있음.
 
-Loki·Alloy 로그 관측과 Ansible localhost 자동화는 후속 실습으로 개발 중임. 현재 운영 성과와 별도로 제시하며, 미병합 코드·정적 검사 결과를 운영 적용이나 실동작 성공으로 설명하지 않음.
+Loki·Alloy 로그 관측과 Ansible localhost 자동화는 구현·CI·Trivy·독립 검토 후 병합하고 승인된 N100 실습 적용을 완료함. 실제 샘플 로그 조회, Ansible 2회차 변경 0건·롤백·재배치와 기존 관측 자원·Portal health 보존을 확인함. Grafana 화면/API 조회, CNI 원인 검증, retention·hard quota는 미검증으로 구분함.
 
 ## 상세 내용
 
@@ -33,17 +33,17 @@ Loki·Alloy 로그 관측과 Ansible localhost 자동화는 후속 실습으로 
 
 | 항목 | 설계·구현 | 확인된 검증 | 남은 조건 |
 |---|---|---|---|
-| Loki·Alloy | 전용 namespace, 샘플 로그 allowlist, namespace 제한 RBAC, 비root 실행, NetworkPolicy 구현됨 | 관리 도구 11건, 해당 단계 K8s 계약 823건·maintenance 528건 통과 기록과 독립 검토 승인 있음 | Helm chart 렌더, 실제 CNI 정책 집행·로그 전송·Grafana 조회 확인 필요 |
-| Grafana 연동 | Loki datasource·샘플 dashboard ConfigMap과 datasource sidecar 값 추가됨 | 관련 직접 계약 16건과 단계별 검토 기록 있음 | 실행 중인 Grafana label 및 sidecar 로드 확인 필요 |
-| Ansible | localhost·loopback 전용 Compose 배치·health·소유 범위 검증 롤백 구현됨 | 관련 테스트 44건 통과 기록 있음 | 마지막 독립 검토에서 count·sort·label 검증의 분리 증명이 부족함. 테스트 보완과 재검토 필요 |
-| CI 통합·병합 | Loki 계약은 기존 K8s 검사 그룹에 등록됨 | Loki 단계별 검증만 확인됨 | Ansible 경로 분류·maintenance 등록, 전체 필수 CI, PR·병합 미완료 |
-| 운영 적용 | 배포 대상·격리·롤백 경계 설계됨 | N100 적용 증적 없음 | N100 동기화·이미지 반입·적용·실동작 검증 미수행 |
+| Loki·Alloy | 전용 namespace, 샘플 로그 allowlist, namespace 제한 RBAC, 비root 실행, NetworkPolicy 구현됨 | Deployment 3개 `1/1`·PVC Bound, 실제 샘플 로그 조회 통과 | 최초 기동 직후 조회 실패 후 무변경 재조회 성공. 제한된 재시도 개선, CNI 원인·retention·hard quota 확인 필요 |
+| Grafana 연동 | Loki datasource·샘플 dashboard ConfigMap과 datasource sidecar 값 추가됨 | UID `loki-lab` 등록 로그·파일 2개 및 Grafana→Loki ready 확인 | 대시보드 화면/API의 실제 로그 표시 조회 미수행 |
+| Ansible | localhost·loopback 전용 Compose 배치·health·소유 범위 검증 롤백 구현됨 | 소유권 조건 우회 변이 20/20 검출. syntax-check 2개·check mode·최초 배치 changed=5·2회차 changed=0·rollback changed=2·재배치 changed=5, 모두 failed=0 | 최종 재배치 후 HTTP 정상. 운영 앱 전체 자동화로 확대하지 않음 |
+| CI 통합·병합 | Loki 계약은 K8s 그룹, Ansible 계약은 maintenance 그룹에 1회 등록됨 | maintenance 546건, 9개 그룹·98개 테스트 파일 배정 검증, PR·main CI·Trivy·독립 검토 및 `f66a42a` 병합됨 | 안전 자동배포는 `blocked_path`로 제외됨 |
+| 운영 적용 | 동일 커밋 동기화·승인된 수동 실습 적용 완료 | 샘플 로그 조회·Ansible 리허설 통과, 독립 사후 검토 APPROVE. Portal 전후 10초 간격 각 3회 정상, monitoring 4 Deployment·2 StatefulSet 준비 상태 유지 | Loki 실제 rollback·Grafana 화면/API·CNI 원인·retention·hard quota 미검증 |
 
-검사 건수는 서로 다른 단계의 실행 기록임. 합산한 고유 테스트 수나 최종 브랜치 전체 통과율로 사용하지 않음. 최신 코드와 운영 상태의 증적은 후속 검증 후 갱신 필요함.
+검사 건수는 서로 다른 단계의 실행 기록임. 합산한 고유 테스트 수로 사용하지 않음. 실행 증적과 미검증 범위는 [운영 검증 결과](reviews/20261004_Loki_Ansible_실습_N100운영검증결과.md)를 따름.
 
 ### 3. 면접 설명 예시
 
-“단일 N100의 WSL2에서 개인 서비스를 운영하며, K3s와 Compose의 실행 주체를 구분하고 SQLite·파일 기반 서비스가 동시에 데이터를 쓰지 않도록 관리했습니다. 백업은 원격 암호화 저장에 더해 격리 복원까지 검증했고, 내부 지표와 외부 health 감시를 함께 사용했습니다. 변경은 PR 검사와 실제 서버 적용 기록을 구분해 추적했습니다. 현재는 별도 namespace의 Loki 샘플 로그 관측과 localhost Ansible 실습을 개발 중이며, 운영 반영과 실동작 검증은 아직 완료하지 않았습니다.”
+“단일 N100의 WSL2에서 개인 서비스를 운영하며, K3s와 Compose의 실행 주체를 구분하고 SQLite·파일 기반 서비스가 동시에 데이터를 쓰지 않도록 관리했습니다. 백업은 원격 암호화 저장에 더해 격리 복원까지 검증했고, 내부 지표와 외부 health 감시를 함께 사용했습니다. 변경은 PR 검사와 실제 서버 적용 기록을 구분해 추적했습니다. 별도 namespace의 Loki 실습에서는 실제 샘플 로그를 조회했고, localhost Ansible 실습에서는 2회차 변경 0건과 롤백·재배치를 확인했습니다. 기존 운영 서비스는 보존했으며, 실습 검증 결과와 아직 확인하지 않은 항목을 분리해 기록했습니다.”
 
 ### 4. 예상 질문과 답변 근거
 
@@ -53,7 +53,7 @@ Loki·Alloy 로그 관측과 Ansible localhost 자동화는 후속 실습으로 
 | 장애가 나면 어떻게 확인하는가? | 외부 health, 내부 지표·알림, 실행 주체와 증적을 대조함 | health 하나의 성공이 모든 기능·데이터의 정상성을 보장하지 않음 |
 | 백업 성공을 어떻게 판단하는가? | 암호화 백업과 격리 복원 결과를 함께 확인함 | 모든 실제 재해 상황과 RTO·RPO를 실측했다고 주장하지 않음 |
 | 왜 Loki를 따로 구성했는가? | 기존 monitoring PVC·제거 도구와의 충돌을 피하고 샘플 로그·권한·삭제 범위를 분리함 | 샘플 실습이며 운영 앱 전체 로그를 수집하지 않음 |
-| Ansible에서 멱등성을 증명했는가? | 두 번째 배치의 changed=0을 성공 기준으로 설계함 | 현재 실제 2회 배치·롤백 리허설은 미수행이므로 목표로 설명함 |
+| Ansible에서 멱등성을 증명했는가? | 같은 playbook의 실제 2회차 `changed=0`·`failed=0`을 확인했고 rollback·재배치도 통과함 | 고정 localhost 샘플 앱에 한정된 검증이며 운영 앱 전체의 멱등성을 증명한 것은 아님 |
 | 설계의 제약은 무엇인가? | 단일 호스트 장애, WSL2 관측 제약, 단일 writer, 미완료 SLI·에러 버짓 산정을 설명함 | [현재 한계](../README.md#현재-한계와-다음-작업) 참조 |
 
 ## 검토 결과
@@ -64,12 +64,11 @@ Loki·Alloy 로그 관측과 Ansible localhost 자동화는 후속 실습으로 
 
 ## 확인 필요 사항
 
-- Ansible 마지막 계약 보완·독립 재검토·CI 등록·구문 검사·check mode·멱등성·롤백 리허설 확인 필요함.
-- Loki Helm 렌더, CNI 집행, Grafana 연동, 호스트 디스크 여유·경보 확인 필요함. local-path PVC 1Gi 요청은 디스크 사용량의 강제 상한이 아님.
+- Loki 실제 rollback·Grafana 화면/API 조회·CNI 규칙 원인·24시간 retention·디스크 경보 확인 필요함. local-path PVC 1Gi 요청은 디스크 사용량의 강제 상한이 아님.
 - 면접 제출 시 PR·병합 커밋과 최신 운영 증적을 다시 대조해야 함.
 
 ## 후속 조치
 
-1. Ansible 계약 검토와 CI 통합을 완료하고 검증된 PR·커밋 링크를 추가함.
-2. 운영 적용 승인 후 실습의 실제 결과와 롤백·멱등성 증적을 갱신함.
+1. Loki 기동 직후 조회 실패에 대해 검증 도구의 제한된 재시도 개선을 별도 작업으로 수행함.
+2. 미검증인 Grafana 화면/API·retention·디스크 경보와 Loki 실제 rollback은 별도 검증 범위에서 확인함.
 3. 면접에서는 문제 → 선택 이유 → 검증 근거 → 한계 순서로 설명함.
