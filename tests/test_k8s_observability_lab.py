@@ -172,6 +172,8 @@ class LokiLabGrafanaTests(unittest.TestCase):
         self.assertEqual(len(manifest["data"]), 1)
         provisioning = yaml.safe_load(next(iter(manifest["data"].values())))
         self.assertEqual(provisioning["apiVersion"], 1)
+        self.assertIs(provisioning.get("prune", False), True,
+                      "Removing provisioning must prune the Grafana datasource during rollback")
         self.assertEqual(provisioning["datasources"], [{
             "name": "Loki Lab", "uid": "loki-lab", "type": "loki",
             "access": "proxy", "url": "http://loki-lab.observability-lab.svc.cluster.local:3100",

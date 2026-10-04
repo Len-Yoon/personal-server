@@ -8,6 +8,7 @@ metadata:
 data:
   loki-lab-datasource.yaml: |
     apiVersion: 1
+    prune: true
     datasources:
       - name: Loki Lab
         uid: loki-lab
