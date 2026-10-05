@@ -3,6 +3,7 @@ import json
 import multiprocessing
 import os
 import sqlite3
+import subprocess
 import tempfile
 import time
 import unittest
@@ -65,6 +66,34 @@ def _record_book_auth_failure_in_process(
 
 
 class BookMemoUiContractTests(unittest.TestCase):
+    def test_draft_client_restores_expired_forms_without_saving_secrets_or_other_forms(self):
+        root = Path(__file__).resolve().parents[2]
+        result = subprocess.run(
+            ["node", "--test", "tests/memo_drafts_client.test.mjs"], cwd=root,
+            env={**os.environ, "MEMO_DRAFT_SERVICE": "book-memo"},
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_public_write_controls_are_disabled_and_login_restores_authenticated_forms(self):
+        with patch.dict(os.environ, {"DELETE_PASSWORD": "test-draft-password"}), tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            from app.services import book_service
+            book = book_service.create_or_get_book({"isbn": "draft-test", "title": "공개 책"})
+            book_service.create_chapters(book["id"], ["공개 목차"])
+            book_service.create_memo(book["id"], None, "공개 메모", "공개 내용", 1)
+            with TestClient(app, base_url="https://books.len.pe.kr") as client:
+                public = client.get(f"/books/{book['id']}")
+                client.post("/auth/login", data={"password": "test-draft-password"}, headers={"Origin": "https://books.len.pe.kr"})
+                authenticated = client.get(f"/books/{book['id']}")
+                helper = client.get("/static/js/form-drafts.js")
+        self.assertIn("공개 내용", public.text)
+        self.assertIn("공개 목차", public.text)
+        self.assertIn("로그인 후 작성", public.text)
+        self.assertIn("<fieldset disabled", public.text)
+        self.assertNotIn("<fieldset disabled", authenticated.text)
+        self.assertIn("data-draft-fields", authenticated.text)
+        self.assertEqual(helper.status_code, 200)
+
     def test_search_results_do_not_push_export_below_the_result_list(self):
         with tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
             with patch("app.main.search_books", return_value=[]):
@@ -351,8 +380,9 @@ class BookMemoUiContractTests(unittest.TestCase):
 
         for response, expected_redirects in ((home, 2), (detail, 1)):
             self.assertIn('const redirectToWriteLogin = () =>', response.text)
-            self.assertGreaterEqual(response.text.count('if (response.status === 401)'), expected_redirects)
-            self.assertIn('next_path=${encodeURIComponent(currentPath)}', response.text)
+            self.assertGreaterEqual(response.text.count('if (window.MemoDrafts.isLoginResponse(response))'), expected_redirects)
+            self.assertIn('window.MemoDrafts.redirectToLogin()', response.text)
+            self.assertIn('window.MemoDrafts.isLoginResponse(response)', response.text)
         self.assertNotIn('const redirectToWriteLogin = () =>', login.text)
 
     def test_unauthenticated_browser_write_redirects_to_login_with_current_path(self):

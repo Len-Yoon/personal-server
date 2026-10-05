@@ -3,6 +3,7 @@ import json
 import multiprocessing
 import os
 import sqlite3
+import subprocess
 import tempfile
 import time
 import unittest
@@ -65,6 +66,32 @@ def _record_youtube_auth_failure_in_process(
 
 
 class YoutubeMemoUiContractTests(unittest.TestCase):
+    def test_draft_client_restores_expired_forms_without_saving_secrets_or_other_forms(self):
+        root = Path(__file__).resolve().parents[2]
+        result = subprocess.run(
+            ["node", "--test", "tests/memo_drafts_client.test.mjs"], cwd=root,
+            env={**os.environ, "MEMO_DRAFT_SERVICE": "youtube-memo"},
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_public_write_controls_are_disabled_and_login_restores_authenticated_forms(self):
+        with patch.dict(os.environ, {"DELETE_PASSWORD": "test-draft-password"}), tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
+            from app.services import memo_service
+            video = memo_service.create_or_get_video("https://www.youtube.com/watch?v=dQw4w9WgXcQ", title_fetcher=lambda *_args: "공개 영상")
+            memo_service.create_memo(video["id"], "공개 메모", "공개 내용")
+            with TestClient(app, base_url="https://youtube.len.pe.kr") as client:
+                public = client.get(f"/videos/{video['id']}")
+                client.post("/auth/login", data={"password": "test-draft-password"}, headers={"Origin": "https://youtube.len.pe.kr"})
+                authenticated = client.get(f"/videos/{video['id']}")
+                helper = client.get("/static/js/form-drafts.js")
+        self.assertIn("공개 내용", public.text)
+        self.assertIn("로그인 후 작성", public.text)
+        self.assertIn("<fieldset disabled", public.text)
+        self.assertNotIn("<fieldset disabled", authenticated.text)
+        self.assertIn("data-draft-fields", authenticated.text)
+        self.assertEqual(helper.status_code, 200)
+
     def assert_portal_security_headers(self, response):
         for name, value in PORTAL_SECURITY_HEADERS.items():
             self.assertEqual(response.headers[name], value)
@@ -227,10 +254,12 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
                 detail = client.get(f"/videos/{video['id']}")
                 login = client.get("/auth/login")
 
-        for response, expected_redirects in ((home, 1), (detail, 2)):
+        for response, expected_redirects in ((home, 1), (detail, 1)):
             self.assertIn('const redirectToWriteLogin = () =>', response.text)
-            self.assertGreaterEqual(response.text.count('if (response.status === 401)'), expected_redirects)
-            self.assertIn('next_path=${encodeURIComponent(currentPath)}', response.text)
+            self.assertGreaterEqual(response.text.count('if (window.MemoDrafts.isLoginResponse(response))'), expected_redirects)
+            self.assertIn('window.MemoDrafts.redirectToLogin()', response.text)
+            self.assertIn('window.MemoDrafts.isLoginResponse(response)', response.text)
+            self.assertIn('/static/js/form-drafts.js', response.text)
         self.assertNotIn('const redirectToWriteLogin = () =>', login.text)
 
     def test_unauthenticated_browser_write_redirects_to_login_with_current_path(self):

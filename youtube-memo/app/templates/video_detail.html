@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="/static/css/style.css?v=20260930-memo-tags-1">
 </head>
-<body>
+<body data-draft-service="youtube-memo" data-write-authenticated="{{ 'true' if write_authenticated else 'false' }}">
 <div class="background-orb orb-one"></div>
 <div class="background-orb orb-two"></div>
 <div class="background-orb orb-three"></div>
@@ -32,7 +32,7 @@
             <button class="home-pill" type="submit">쓰기 로그아웃</button>
         </form>
     {% else %}
-        <a class="home-pill" href="/auth/login?next_path={{ request.url.path }}">쓰기 로그인</a>
+        <a class="home-pill" href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a>
     {% endif %}
 </header>
 
@@ -61,8 +61,14 @@
                     data-confirm-message="이 영상과 메모를 모두 삭제할까요?"
                     data-error-message="영상 삭제에 실패했습니다."
                 >
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
                     <button class="danger-button compact-danger-button" type="submit">영상 삭제</button>
-                </form>
+
+                {% if not write_authenticated %}</fieldset>{% endif %}
+            </form>
             </div>
         </aside>
     </section>
@@ -70,7 +76,11 @@
     <section class="panel">
         <details class="memo-editor">
             <summary>메모 작성</summary>
-            <form action="/videos/{{ video.id }}/memos" method="post">
+            <form action="/videos/{{ video.id }}/memos" method="post" data-draft-fields="memo_title content tags" data-draft-id="memo-new-{{ video.id }}">
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
                 <input
                     type="text"
                     name="memo_title"
@@ -85,6 +95,8 @@
                 ></textarea>
                 <input type="text" name="tags" placeholder="태그 (쉼표로 구분, 최대 5개)" maxlength="160" autocomplete="off">
                 <button type="submit">저장</button>
+
+                {% if not write_authenticated %}</fieldset>{% endif %}
             </form>
         </details>
     </section>
@@ -118,7 +130,11 @@
                             method="post"
                             data-confirm-message="이 메모를 수정할까요?"
                             data-error-message="메모 수정에 실패했습니다."
-                        >
+                         data-draft-fields="memo_title content" data-draft-id="memo-edit-{{ memo.id }}">
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
                             <input
                                 type="text"
                                 name="memo_title"
@@ -127,14 +143,22 @@
                             >
                             <textarea name="content" rows="7" required>{{ memo.content }}</textarea>
                             <button type="submit">수정 저장</button>
-                        </form>
+
+                {% if not write_authenticated %}</fieldset>{% endif %}
+            </form>
                     </details>
                     <details class="memo-edit-panel">
                         <summary>태그 수정</summary>
-                        <form class="protected-edit-form" action="/memos/{{ memo.id }}/tags" method="post" data-confirm-message="태그를 수정할까요?" data-error-message="태그 수정에 실패했습니다.">
+                        <form class="protected-edit-form" action="/memos/{{ memo.id }}/tags" method="post" data-confirm-message="태그를 수정할까요?" data-error-message="태그 수정에 실패했습니다." data-draft-fields="tags" data-draft-id="memo-tags-{{ memo.id }}">
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
                             <input type="text" name="tags" value="{{ memo.tags|join(', ') }}" maxlength="160" aria-label="태그 (쉼표로 구분, 최대 5개)">
                             <button type="submit">태그 저장</button>
-                        </form>
+
+                {% if not write_authenticated %}</fieldset>{% endif %}
+            </form>
                     </details>
                     <form
                         class="protected-delete-form"
@@ -143,8 +167,14 @@
                         data-confirm-message="이 메모를 삭제할까요?"
                         data-error-message="메모 삭제에 실패했습니다."
                     >
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
                         <button class="danger-button" type="submit">삭제</button>
-                    </form>
+
+                {% if not write_authenticated %}</fieldset>{% endif %}
+            </form>
                 </article>
             {% else %}
                 <article class="empty-card">
@@ -160,11 +190,10 @@
     <span>youtube-memo</span>
     <span>Len Private Workspace</span>
 </footer>
+<script src="/static/js/form-drafts.js?v=20261005-login-draft-1"></script>
 <script>
 const redirectToWriteLogin = () => {
-    const currentPath = `${window.location.pathname}${window.location.search}`;
-    const loginUrl = `/auth/login?next_path=${encodeURIComponent(currentPath)}`;
-    window.location.assign(loginUrl);
+    return window.MemoDrafts.redirectToLogin();
 };
 
 document.querySelectorAll(".memo-timestamp").forEach((link) => {
@@ -198,7 +227,7 @@ document.querySelectorAll(".protected-delete-form").forEach((form) => {
                 body: new FormData(form),
             });
 
-            if (response.status === 401) {
+            if (window.MemoDrafts.isLoginResponse(response)) {
                 redirectToWriteLogin();
                 return;
             }
@@ -215,36 +244,6 @@ document.querySelectorAll(".protected-delete-form").forEach((form) => {
     });
 });
 
-document.querySelectorAll(".protected-edit-form").forEach((form) => {
-    form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-
-        if (!window.confirm(form.dataset.confirmMessage || "수정할까요?")) {
-            return;
-        }
-
-        try {
-            const response = await fetch(form.action, {
-                method: "POST",
-                body: new FormData(form),
-            });
-
-            if (response.status === 401) {
-                redirectToWriteLogin();
-                return;
-            }
-
-            if (!response.ok) {
-                window.alert(form.dataset.errorMessage || "수정에 실패했습니다.");
-                return;
-            }
-
-            window.location.href = response.url || window.location.href;
-        } catch (error) {
-            window.alert(form.dataset.errorMessage || "수정에 실패했습니다.");
-        }
-    });
-});
 </script>
 </body>
 </html>

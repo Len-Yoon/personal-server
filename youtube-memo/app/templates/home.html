@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="/static/css/style.css?v=20260930-selected-export-2">
 </head>
-<body class="home-page">
+<body class="home-page" data-draft-service="youtube-memo" data-write-authenticated="{{ 'true' if write_authenticated else 'false' }}">
 <div class="background-orb orb-one"></div>
 <div class="background-orb orb-two"></div>
 <div class="background-orb orb-three"></div>
@@ -32,7 +32,7 @@
             <button class="home-pill" type="submit">쓰기 로그아웃</button>
         </form>
     {% else %}
-        <a class="home-pill" href="/auth/login?next_path={{ request.url.path }}">쓰기 로그인</a>
+        <a class="home-pill" href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a>
     {% endif %}
 </header>
 
@@ -48,7 +48,11 @@
                 <p>YouTube 링크를 붙여넣어 메모장을 엽니다.</p>
             </div>
         </div>
-        <form class="url-form" action="/videos" method="post">
+        <form class="url-form" action="/videos" method="post" data-draft-fields="url" data-draft-id="video-new">
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
             <input
                 type="url"
                 name="url"
@@ -58,7 +62,9 @@
                 autocomplete="off"
             >
             <button type="submit">열기</button>
-        </form>
+
+                {% if not write_authenticated %}</fieldset>{% endif %}
+            </form>
     </section>
 
     <section class="panel export-panel">
@@ -133,9 +139,15 @@
                         data-confirm-message="이 영상과 메모를 모두 삭제할까요?"
                         data-error-message="영상 삭제에 실패했습니다."
                     >
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
                         <input type="hidden" name="redirect_to" value="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
                         <button class="danger-button" type="submit">삭제</button>
-                    </form>
+
+                {% if not write_authenticated %}</fieldset>{% endif %}
+            </form>
                 </article>
             {% else %}
                 <article class="empty-card">
@@ -158,6 +170,7 @@
     <span>youtube-memo</span>
     <span>Len Private Workspace</span>
 </footer>
+<script src="/static/js/form-drafts.js?v=20261005-login-draft-1"></script>
 <script>
 const exportSelectionKey = "youtube-memo-selected-video-ids";
 const exportCheckboxes = [...document.querySelectorAll("[data-export-video-id]")];
@@ -209,7 +222,7 @@ if (exportCheckboxes.length || document.getElementById("selected-export-count"))
         button.disabled = true;
         try {
             const response = await fetch(`/api/export?${params.toString()}`, {credentials: "same-origin"});
-            if (response.status === 401) {
+            if (window.MemoDrafts.isLoginResponse(response)) {
                 redirectToWriteLogin();
                 return;
             }
@@ -247,9 +260,7 @@ document.querySelector("[data-clear-export-on-logout]")?.addEventListener("submi
 });
 
 const redirectToWriteLogin = () => {
-    const currentPath = `${window.location.pathname}${window.location.search}`;
-    const loginUrl = `/auth/login?next_path=${encodeURIComponent(currentPath)}`;
-    window.location.assign(loginUrl);
+    return window.MemoDrafts.redirectToLogin();
 };
 
 document.querySelectorAll(".protected-delete-form").forEach((form) => {
@@ -266,7 +277,7 @@ document.querySelectorAll(".protected-delete-form").forEach((form) => {
                 body: new FormData(form),
             });
 
-            if (response.status === 401) {
+            if (window.MemoDrafts.isLoginResponse(response)) {
                 redirectToWriteLogin();
                 return;
             }

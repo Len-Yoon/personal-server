@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="/static/css/style.css?v=20260930-selected-export-1">
 </head>
-<body class="home-page">
+<body class="home-page" data-draft-service="book-memo" data-write-authenticated="{{ 'true' if write_authenticated else 'false' }}">
 <div class="background-orb orb-one"></div>
 <div class="background-orb orb-two"></div>
 <div class="background-orb orb-three"></div>
@@ -32,7 +32,7 @@
             <button class="home-pill" type="submit">쓰기 로그아웃</button>
         </form>
     {% else %}
-        <a class="home-pill" href="/auth/login?next_path={{ request.url.path }}">쓰기 로그인</a>
+        <a class="home-pill" href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a>
     {% endif %}
 </header>
 
@@ -120,7 +120,11 @@
                             <h3>{{ book.title }}</h3>
                             <p>{{ book.authors }}</p>
                             <p>{{ book.description }}</p>
-                            <form class="book-with-toc-form" action="/books" method="post">
+                            <form class="book-with-toc-form" action="/books" method="post" data-draft-fields="titles" data-draft-id="book-save-{{ book.isbn }}|{{ book.title }}|{{ book.authors }}">
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
                                 {% for key, value in book.items() %}
                                     <input type="hidden" name="{{ key }}" value="{{ value }}">
                                 {% endfor %}
@@ -130,7 +134,9 @@
                                 </div>
                                 <p class="toc-status" aria-live="polite"></p>
                                 <div class="toc-candidates compact" hidden></div>
-                            </form>
+
+                {% if not write_authenticated %}</fieldset>{% endif %}
+            </form>
                         </div>
                     </article>
                 {% else %}
@@ -193,7 +199,11 @@
                     {% if chapters %}
                         <details class="library-chapters" open>
                             <summary>목차 체크와 코멘트</summary>
-                            <form class="library-check-form" action="/books/{{ book.id }}/chapter-statuses" method="post">
+                            <form class="library-check-form" action="/books/{{ book.id }}/chapter-statuses" method="post" data-draft-fields="done_chapter_ids" data-draft-id="chapter-status-{{ book.id }}">
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
                                 <input type="hidden" name="redirect_to" value="/books/{{ book.id }}">
                                 <div class="library-chapter-list">
                                     {% for chapter in chapters %}
@@ -214,10 +224,16 @@
                                     {% endfor %}
                                 </div>
                                 <button type="submit">체크 저장</button>
-                            </form>
 
-                            <form class="library-comment-form" method="post">
-                                <select class="chapter-comment-target" required>
+                {% if not write_authenticated %}</fieldset>{% endif %}
+            </form>
+
+                            <form class="library-comment-form" method="post" data-draft-fields="chapter_id comment" data-draft-id="chapter-comment-{{ book.id }}">
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
+                                <select class="chapter-comment-target" name="chapter_id" required>
                                     <option value="">코멘트 남길 목차 선택</option>
                                     {% for chapter in chapters %}
                                         <option
@@ -231,13 +247,21 @@
                                 <input type="hidden" name="redirect_to" value="/books/{{ book.id }}">
                                 <textarea name="comment" rows="3" placeholder="선택한 목차에 남길 코멘트"></textarea>
                                 <button type="submit">코멘트 저장</button>
-                            </form>
+
+                {% if not write_authenticated %}</fieldset>{% endif %}
+            </form>
                         </details>
                     {% endif %}
                     <form class="protected-delete-form" action="/books/{{ book.id }}/delete" method="post">
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
                         <input type="hidden" name="redirect_to" value="{{ request.url.path }}{% if request.url.query %}?{{ request.url.query }}{% endif %}">
                         <button class="danger-button" type="submit">책 삭제</button>
-                    </form>
+
+                {% if not write_authenticated %}</fieldset>{% endif %}
+            </form>
                 </article>
             {% else %}
                 <article class="empty-card">
@@ -260,11 +284,10 @@
     <span>book-memo</span>
     <span>Len Private Workspace</span>
 </footer>
+<script src="/static/js/form-drafts.js?v=20261005-login-draft-1"></script>
 <script>
 const redirectToWriteLogin = () => {
-    const currentPath = `${window.location.pathname}${window.location.search}`;
-    const loginUrl = `/auth/login?next_path=${encodeURIComponent(currentPath)}`;
-    window.location.assign(loginUrl);
+    return window.MemoDrafts.redirectToLogin();
 };
 
 const selectedExport = document.querySelector("[data-selected-export]");
@@ -315,7 +338,7 @@ if (selectedExport) {
         button.disabled = true;
         try {
             const response = await fetch(`/api/export?${params.toString()}`, {credentials: "same-origin"});
-            if (response.status === 401) { redirectToWriteLogin(); return; }
+            if (window.MemoDrafts.isLoginResponse(response)) { redirectToWriteLogin(); return; }
             if (response.status === 400) {
                 window.alert("선택한 책 중 삭제된 항목이 있습니다. 선택을 해제하고 다시 골라주세요.");
                 return;
@@ -438,7 +461,7 @@ if (selectedExport) {
                     body,
                 });
 
-                if (response.status === 401) {
+            if (window.MemoDrafts.isLoginResponse(response)) {
                     redirectToWriteLogin();
                     return;
                 }
@@ -495,7 +518,7 @@ if (selectedExport) {
                     body: new FormData(form),
                 });
 
-                if (response.status === 401) {
+            if (window.MemoDrafts.isLoginResponse(response)) {
                     redirectToWriteLogin();
                     return;
                 }

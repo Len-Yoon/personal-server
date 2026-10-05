@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="/static/css/style.css?v=20260930-memo-tags-1">
 </head>
-<body>
+<body data-draft-service="book-memo" data-write-authenticated="{{ 'true' if write_authenticated else 'false' }}">
 <div class="background-orb orb-one"></div>
 <div class="background-orb orb-two"></div>
 <div class="background-orb orb-three"></div>
@@ -32,7 +32,7 @@
             <button class="home-pill" type="submit">쓰기 로그아웃</button>
         </form>
     {% else %}
-        <a class="home-pill" href="/auth/login?next_path={{ request.url.path }}">쓰기 로그인</a>
+        <a class="home-pill" href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a>
     {% endif %}
 </header>
 
@@ -56,7 +56,13 @@
                 <a class="text-link" href="{{ book.preview_url }}" target="_blank">책 정보 열기</a>
             {% endif %}
             <form class="book-delete-form protected-delete-form" action="/books/{{ book.id }}/delete" method="post" data-confirm-message="연결된 목차와 메모까지 삭제됩니다. 계속할까요?">
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
                 <button class="danger-button" type="submit">책 삭제</button>
+
+                {% if not write_authenticated %}</fieldset>{% endif %}
             </form>
         </div>
     </section>
@@ -64,30 +70,46 @@
     <section class="panel">
         <details class="editor" open>
             <summary>목차 추가</summary>
-            <form action="/books/{{ book.id }}/chapters" method="post">
+            <form action="/books/{{ book.id }}/chapters" method="post" data-draft-fields="title" data-draft-id="chapter-new-{{ book.id }}">
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
                 <input type="text" name="title" placeholder="예: 1장 시작하기" required autocomplete="off">
                 <button type="submit">추가</button>
+
+                {% if not write_authenticated %}</fieldset>{% endif %}
             </form>
 
             <div class="toc-builder">
-                <textarea id="toc-source" rows="8" placeholder="목차를 여러 줄로 붙여넣으세요. 한 줄이 하나의 후보가 됩니다."></textarea>
+                <textarea id="toc-source" name="toc_source" form="toc-candidate-form" {% if not write_authenticated %}disabled{% endif %} rows="8" placeholder="목차를 여러 줄로 붙여넣으세요. 한 줄이 하나의 후보가 됩니다."></textarea>
                 <div class="toc-actions">
-                    <button type="button" id="toc-fetch-button">목차 자동 찾기</button>
-                    <button type="button" id="toc-build-button">후보 만들기</button>
+                    <button type="button" id="toc-fetch-button" {% if not write_authenticated %}disabled{% endif %}>목차 자동 찾기</button>
+                    <button type="button" id="toc-build-button" {% if not write_authenticated %}disabled{% endif %}>후보 만들기</button>
                     <span id="toc-count" aria-live="polite"></span>
                 </div>
                 <p id="toc-status" class="toc-status" aria-live="polite"></p>
-                <form id="toc-candidate-form" action="/books/{{ book.id }}/chapters/bulk" method="post" hidden>
+                <form id="toc-candidate-form" action="/books/{{ book.id }}/chapters/bulk" method="post" hidden data-draft-fields="toc_source titles" data-draft-id="chapter-bulk-{{ book.id }}">
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
                     <div id="toc-candidates" class="toc-candidates"></div>
                     <button type="submit">선택한 목차 추가</button>
-                </form>
+
+                {% if not write_authenticated %}</fieldset>{% endif %}
+            </form>
             </div>
         </details>
 
         <div class="chapter-list">
             {% for chapter in chapters %}
                 <article class="chapter-card">
-                    <form action="/chapters/{{ chapter.id }}" method="post">
+                    <form action="/chapters/{{ chapter.id }}" method="post" data-draft-fields="is_done comment" data-draft-id="chapter-edit-{{ chapter.id }}">
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
                         <input type="hidden" name="is_done" value="0">
                         <label>
                             <input
@@ -100,10 +122,18 @@
                         </label>
                         <textarea name="comment" rows="3" placeholder="이 장에 대한 코멘트">{{ chapter.comment }}</textarea>
                         <button type="submit">저장</button>
-                    </form>
+
+                {% if not write_authenticated %}</fieldset>{% endif %}
+            </form>
                     <form class="protected-delete-form" action="/chapters/{{ chapter.id }}/delete" method="post" data-confirm-message="이 목차를 삭제할까요?">
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
                         <button class="danger-button" type="submit">삭제</button>
-                    </form>
+
+                {% if not write_authenticated %}</fieldset>{% endif %}
+            </form>
                 </article>
             {% else %}
                 <article class="empty-card">
@@ -117,7 +147,11 @@
     <section class="panel">
         <details class="editor">
             <summary>메모 작성</summary>
-            <form action="/books/{{ book.id }}/memos" method="post">
+            <form action="/books/{{ book.id }}/memos" method="post" data-draft-fields="memo_title chapter_id page tags content" data-draft-id="memo-new-{{ book.id }}">
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
                 <input type="text" name="memo_title" placeholder="메모 제목" autocomplete="off">
                 <div class="memo-meta-grid">
                     <select name="chapter_id">
@@ -132,6 +166,8 @@
                 <input id="new-memo-tags" type="text" name="tags" placeholder="예: 공부, 독서" maxlength="160" autocomplete="off">
                 <textarea name="content" rows="8" placeholder="책을 읽으며 남길 생각을 적어두세요." required></textarea>
                 <button type="submit">저장</button>
+
+                {% if not write_authenticated %}</fieldset>{% endif %}
             </form>
         </details>
 
@@ -156,14 +192,26 @@
                             </div>
                         {% endif %}
                     </details>
-                    <form class="memo-tags-editor" action="/memos/{{ memo.id }}/tags" method="post">
+                    <form class="memo-tags-editor" action="/memos/{{ memo.id }}/tags" method="post" data-draft-fields="tags" data-draft-id="memo-tags-{{ memo.id }}">
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
                         <label for="memo-tags-{{ memo.id }}">태그 수정</label>
                         <input id="memo-tags-{{ memo.id }}" type="text" name="tags" value="{{ memo.tags|join(', ') }}" placeholder="쉼표로 구분" maxlength="160" autocomplete="off">
                         <button type="submit">태그 저장</button>
-                    </form>
+
+                {% if not write_authenticated %}</fieldset>{% endif %}
+            </form>
                     <form class="protected-delete-form" action="/memos/{{ memo.id }}/delete" method="post" data-confirm-message="이 메모를 삭제할까요?">
+                {% if not write_authenticated %}
+                <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
+                <fieldset disabled style="display: contents;">
+                {% endif %}
                         <button class="danger-button" type="submit">삭제</button>
-                    </form>
+
+                {% if not write_authenticated %}</fieldset>{% endif %}
+            </form>
                 </article>
             {% else %}
                 <article class="empty-card">
@@ -179,11 +227,10 @@
     <span>book-memo</span>
     <span>Len Private Workspace</span>
 </footer>
+<script src="/static/js/form-drafts.js?v=20261005-login-draft-1"></script>
 <script>
 const redirectToWriteLogin = () => {
-    const currentPath = `${window.location.pathname}${window.location.search}`;
-    const loginUrl = `/auth/login?next_path=${encodeURIComponent(currentPath)}`;
-    window.location.assign(loginUrl);
+    return window.MemoDrafts.redirectToLogin();
 };
 
     const tocSource = document.querySelector("#toc-source");
@@ -341,7 +388,7 @@ const redirectToWriteLogin = () => {
                     body: new FormData(form),
                 });
 
-                if (response.status === 401) {
+            if (window.MemoDrafts.isLoginResponse(response)) {
                     redirectToWriteLogin();
                     return;
                 }
