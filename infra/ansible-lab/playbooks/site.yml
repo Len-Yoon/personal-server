@@ -208,6 +208,24 @@
         fail_msg: "Run the full site playbook so preflight completes before deployment."
       tags: [deploy]
 
+    - name: Read current owned sample response
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ lab_http_port }}/"
+        status_code: 200
+        return_content: true
+        timeout: 3
+        use_proxy: false
+        follow_redirects: none
+      register: lab_current_response
+      changed_when: false
+      failed_when: false
+      no_log: true
+      when:
+        - not ansible_check_mode
+        - lab_preflight_passed | default(false)
+        - "'sample' in (lab_running_services.stdout_lines | default([]))"
+      tags: [deploy]
+
     - name: Create owned lab directory
       ansible.builtin.file:
         path: "{{ lab_root }}"
@@ -228,6 +246,7 @@
         src: ../templates/index.html.j2
         dest: "{{ lab_root }}/index.html"
         mode: '0644'
+      register: lab_response_render
       when: lab_directory.stat.exists or not ansible_check_mode
       tags: [deploy]
 
@@ -244,6 +263,13 @@
         project_src: "{{ lab_root }}"
         project_name: "{{ lab_project_name }}"
         state: present
+        recreate: >-
+          {{ 'always' if lab_response_render.changed or
+             ('sample' in (lab_running_services.stdout_lines | default([])) and
+              (lab_current_response.status | default(-1) != 200 or
+               lab_current_response.content | default('') !=
+               lookup('ansible.builtin.file', playbook_dir ~ '/../templates/index.html.j2', rstrip=False)))
+             else 'auto' }}
         wait: true
       when: not ansible_check_mode
       tags: [deploy]
