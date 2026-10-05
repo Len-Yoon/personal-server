@@ -26,6 +26,11 @@ class DriftLabTests(unittest.TestCase):
         self.root.mkdir(parents=True)
         (self.root / ".owner").write_text("personal-server-ansible-lab\n")
         self.original = b"ansible lab sample ready\n"
+        self.source_lab = self.home / "source-lab"
+        (self.source_lab / "templates").mkdir(parents=True)
+        self.template = self.source_lab / "templates/index.html.j2"
+        self.template.write_bytes(self.original)
+        self.mod.LAB = self.source_lab
         (self.root / "index.html").write_bytes(self.original)
         (self.root / "compose.yaml").write_text("owned compose fixture\n")
         self.calls = []
@@ -207,6 +212,81 @@ class DriftLabTests(unittest.TestCase):
                 except ProcessLookupError:
                     pass
                 process.communicate()
+
+    def test_crlf_source_and_response_check_and_go_preserve_original_bytes(self):
+        self.original = b"ansible lab sample ready\r\n"
+        self.template.write_bytes(self.original)
+        (self.root / "index.html").write_bytes(self.original)
+        checked = self.mod.run_drill(self.home, self.runner)
+        self.assertEqual(checked["execution"], "NOT_RUN")
+        self.assertEqual((self.root / "index.html").read_bytes(), b"ansible lab sample ready\r\n")
+        def preserve(args):
+            body = (self.root / "index.html").read_bytes()
+            if "--diff" in args and body != self.original:
+                self.assertEqual(body, b"ansible lab sample drift\r\n")
+            return self.runner(args)
+        result = self.mod.run_drill(self.home, preserve, go=True)
+        self.assertEqual(result["execution"], "PASS")
+        self.assertEqual(result["idempotence"], "PASS")
+        self.assertEqual((self.root / "index.html").read_bytes(), b"ansible lab sample ready\r\n")
+
+    def test_crlf_failure_recovers_exact_captured_original(self):
+        self.original = b"ansible lab sample ready\r\n"
+        self.template.write_bytes(self.original)
+        (self.root / "index.html").write_bytes(self.original)
+        def interrupted(args):
+            if "--diff" in args and (self.root / "index.html").read_bytes() != self.original:
+                raise KeyboardInterrupt()
+            return self.runner(args)
+        result = self.mod.run_drill(self.home, interrupted, go=True)
+        self.assertEqual(result.get("recovery"), "PASS")
+        self.assertEqual((self.root / "index.html").read_bytes(), b"ansible lab sample ready\r\n")
+
+    def test_response_must_match_source_bytes_in_both_newline_directions(self):
+        for source, response in ((b"ansible lab sample ready\r\n", b"ansible lab sample ready\n"),
+                                 (b"ansible lab sample ready\n", b"ansible lab sample ready\r\n")):
+            with self.subTest(source=source):
+                self.calls.clear()
+                self.template.write_bytes(source)
+                (self.root / "index.html").write_bytes(response)
+                result = self.mod.run_drill(self.home, self.runner, go=True)
+                self.assertEqual(result["execution"], "FAIL")
+                self.assertEqual(self.calls, [])
+                self.assertEqual((self.root / "index.html").read_bytes(), response)
+
+    def test_unapproved_template_content_is_not_a_new_owned_baseline(self):
+        for content in (b"ansible lab sample ready\nextra\n", b"ansible lab sample ready\r", b"{{ custom }}\n"):
+            with self.subTest(content=content):
+                self.calls.clear()
+                self.template.write_bytes(content)
+                result = self.mod.run_drill(self.home, self.runner, go=True)
+                self.assertEqual(result["execution"], "FAIL")
+                self.assertEqual(self.calls, [])
+
+    def test_runner_uses_real_english_utf8_locale_despite_invalid_inherited_locale(self):
+        code = ("import locale, os; locale.setlocale(locale.LC_ALL, ''); "
+                "print(locale.nl_langinfo(locale.CODESET)); print(os.environ['LC_ALL']); "
+                "print(os.environ.get('LANGUAGE', 'unset')); print(os.environ.get('LC_MESSAGES', 'unset'))")
+        with patch.dict(os.environ, {"LC_ALL": "invalid_user_locale", "LANG": "invalid_user_locale",
+                                     "LANGUAGE": "ko", "LC_MESSAGES": "ko_KR.UTF-8"}):
+            result = self.mod._runner([sys.executable, "-c", code])
+        self.assertEqual(result.returncode, 0)
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines[0].upper().replace("-", ""), "UTF8")
+        self.assertIn(lines[1].lower().replace("-", ""), {"c.utf8", "en_us.utf8"})
+        self.assertEqual(lines[2:], ["unset", "unset"])
+
+    def test_absent_supported_utf8_locale_fails_before_ansible_execution(self):
+        invocations = []
+        def no_locale(args, cwd, env, **kwargs):
+            invocations.append(args)
+            return subprocess.CompletedProcess(args, 0, "C\nPOSIX\n", "")
+        with patch.object(self.mod, "_run_process", no_locale):
+            result = self.mod.run_drill(self.home, self.mod._runner, go=True)
+        self.assertEqual(result["execution"], "FAIL")
+        self.assertEqual(result.get("locale"), "UNAVAILABLE")
+        self.assertEqual(invocations, [["locale", "-a"]])
+        self.assertEqual((self.root / "index.html").read_bytes(), self.original)
 
 
 if __name__ == "__main__":

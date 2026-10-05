@@ -33,11 +33,11 @@ Loki·Alloy 로그 관측과 Ansible localhost 자동화는 구현·CI·Trivy·�
 
 | 항목 | 설계·구현 | 확인된 검증 | 남은 조건 |
 |---|---|---|---|
-| Loki·Alloy | 전용 namespace, 샘플 로그 allowlist, namespace 제한 RBAC, 비root 실행, NetworkPolicy 구현됨 | Deployment 3개 `1/1`·PVC Bound, 실제 샘플 로그 조회 통과 | 최초 조회 실패의 제한 재시도 구현·로컬 검증 완료. 새 도구 N100 적용, CNI 원인·retention·hard quota 확인 필요 |
+| Loki·Alloy | 전용 namespace, 샘플 로그 allowlist, namespace 제한 RBAC, 비root 실행, NetworkPolicy 구현됨 | Deployment 3개 `1/1`·PVC Bound, 실제 샘플 로그 조회 통과. 2026-10-05 데이터 보존 rollback·재설치 및 이전 로그 재조회 성공 | CNI 원인·retention·hard quota 확인 필요 |
 | Grafana 연동 | Loki datasource·샘플 dashboard ConfigMap과 datasource sidecar 값 추가됨 | UID·파일 및 Grafana→Loki ready, 후속 API 등록·proxy 로그 조회 HTTP 200 | 대시보드 화면 렌더 미수행 |
 | Ansible | localhost·loopback 전용 Compose 배치·health·소유 범위 검증 롤백 구현됨 | 소유권 조건 우회 변이 20/20 검출. syntax-check 2개·check mode·최초 배치 changed=5·2회차 changed=0·rollback changed=2·재배치 changed=5, 모두 failed=0 | 최종 재배치 후 HTTP 정상. 운영 앱 전체 자동화로 확대하지 않음 |
 | CI 통합·병합 | Loki 계약은 K8s 그룹, Ansible 계약은 maintenance 그룹에 1회 등록됨 | maintenance 546건, 9개 그룹·98개 테스트 파일 배정 검증, PR·main CI·Trivy·독립 검토 및 `f66a42a` 병합됨 | 안전 자동배포는 `blocked_path`로 제외됨 |
-| 운영 적용 | 기존 `f66a42a` 실습 동기화·적용 완료 | 샘플 로그 조회·Ansible 리허설 통과, 독립 사후 검토 APPROVE. Portal 전후 각 3회 정상, monitoring 준비 상태 유지 | 새 실패·drift 훈련은 미수행. Loki 실제 rollback·화면·CNI 원인·retention·hard quota 미검증 |
+| 운영 적용 | 기존 `f66a42a` 실습 이후 `91cdb26` 동기화 완료 | 격리 실패 배포·HTTP 복구, Loki 데이터 보존 rollback·재설치, SLO image-only 교체 성공. 독립 사후 검토 APPROVE, Portal 전후 각 3회 정상·monitoring 6개 UID·generation 보존 | Ansible drift는 CRLF·locale 호환 문제로 주입 전 차단됨. 수정본의 추가 동기화·실제 훈련 및 다음 SLO 정기 실행 확인 필요 |
 
 검사 건수는 서로 다른 단계의 실행 기록임. 합산한 고유 테스트 수로 사용하지 않음. 실행 증적과 미검증 범위는 [운영 검증 결과](reviews/20261004_Loki_Ansible_실습_N100운영검증결과.md)를 따름.
 
@@ -64,15 +64,15 @@ Loki·Alloy 로그 관측과 Ansible localhost 자동화는 구현·CI·Trivy·�
 
 ## 확인 필요 사항
 
-- Loki 실제 rollback·Grafana 화면 렌더·CNI 규칙 원인·24시간 retention·디스크 경보 확인 필요함. local-path PVC 1Gi 요청은 디스크 사용량의 강제 상한이 아님.
+- Ansible drift 훈련·다음 SLO 정기 실행·Grafana 화면 렌더·CNI 규칙 원인·24시간 retention·디스크 경보 확인 필요함. local-path PVC 1Gi 요청은 디스크 사용량의 강제 상한이 아님.
 - 면접 제출 시 PR·병합 커밋과 최신 운영 증적을 다시 대조해야 함.
 
 ## 후속 조치
 
 ### 후속 검증 도구 고도화
 
-기동 직후 Loki 조회의 제한 재시도, 격리 readiness 실패·정상 HTTP 복구 훈련, Ansible 응답 drift→원복→재실행 무변경 훈련, 읽기 전용 SLO 기간 집계를 추가함. [고도화 검증 결과](reviews/20261005_DevOps실습고도화_검증결과.md)에 로컬 검사·독립 검토·실제 읽기 전용 결과를 구분함. 새 N100 훈련·SLO 이미지 적용은 아직 미수행이며 완료한 운영 성과로 설명하지 않음. 기존 Grafana API의 datasource·dashboard UID와 proxy 샘플 조회는 확인했고 화면 렌더는 미검증임.
+기동 직후 Loki 조회의 제한 재시도, 격리 readiness 실패·정상 HTTP 복구 훈련, Ansible 응답 drift→원복→재실행 무변경 훈련, 읽기 전용 SLO 기간 집계를 추가함. [고도화 검증 결과](reviews/20261005_DevOps실습고도화_검증결과.md)는 당시 로컬·읽기 전용 증적임. 후속 승인으로 실패 배포·Loki rollback·SLO 이미지 교체를 수행했으며, 실제 결과와 Ansible 차단 원인은 [운영 적용 결과](reviews/20261005_DevOps실습_운영적용결과.md)를 따름. Grafana API의 datasource·dashboard UID와 proxy 샘플 조회는 확인했고 화면 렌더는 미검증임.
 
-1. 구현·검증된 Loki 재시도와 실패 배포·Ansible drift 도구를 운영 승인 범위에서 실행함.
-2. 미검증인 Grafana 화면·retention·디스크 경보와 Loki 실제 rollback은 별도 검증 범위에서 확인함.
+1. Ansible CRLF·UTF-8 호환 수정본의 저장소 반영 후 새 SHA 동기화 승인을 확인해 drift 훈련만 이어감. 완료한 실패 배포·Loki rollback·SLO 교체는 반복하지 않음.
+2. 미검증인 다음 SLO 정기 실행·Grafana 화면·retention·디스크 경보는 실제 결과를 추가 확인함.
 3. 면접에서는 문제 → 선택 이유 → 검증 근거 → 한계 순서로 설명함.
