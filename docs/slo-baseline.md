@@ -143,7 +143,7 @@ python3 infra/k8s/tools/slo-evidence-summary.py --input /tmp/slo-records.json --
 
 일일 HTTP 창의 가중 오류 비율은 요청 수 가중치로 계산하되, 창의 겹침·누락이 있으므로 정확한 기간의 서비스 성공률로 사용하지 않음. 일일 p95는 평균하거나 병합하지 않음. 시간 기반 가용성·에러 버짓은 항상 `not_calculable`로 남김. 예정 수집 시각 전 당일을 종료일로 넣지 않으며, 과거 기록 부족을 정상으로 채우지 않음.
 
-실제 30일 집계와 기본 urllib 요청의 HTTP 403 식별자 차이 재현은 [고도화 검증 결과](reviews/20261005_DevOps실습고도화_검증결과.md)를 따름. 새 고정 모니터 User-Agent는 코드만 보완됐으며 운영 이미지 적용 전에는 정기 수집에 반영되지 않음.
+실제 30일 집계와 기본 urllib 요청의 HTTP 403 식별자 차이 재현은 [고도화 검증 결과](reviews/20261005_DevOps실습고도화_검증결과.md)를 따름. 2026-10-05 승인 후 새 고정 모니터 User-Agent가 포함된 이미지를 N100에 반입하고 실제 공개 probe 성공과 CronJob image-only 교체를 확인함. 기존 증적 원본·02:15 KST 일정은 보존했고 수동 수집 Job은 실행하지 않음. 다음 정기 수집 전체 성공은 확인 필요함. [운영 적용 결과](reviews/20261005_DevOps실습_운영적용결과.md)에 digest·증적 hash·검증 범위를 기록함.
 
 1. 공개 Portal workflow의 최근 30일 성공·실패·누락을 수동 집계해 기준선을 기록함.
 2. Prometheus retention을 변경하지 않고, 우선 7일 기준 K3s Portal·뉴스 수집 SLI를 관찰함.

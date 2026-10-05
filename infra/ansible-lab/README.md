@@ -38,6 +38,8 @@ python3 infra/ansible-lab/tools/drift-lab.py --go
 
 기본값·`--check`는 소유 확인과 check mode만 수행함. `--go`는 별도 실습 적용 승인 후 기존 고정 localhost project의 정상 응답 파일만 변경함. drift check/diff → site 원복 → site 재실행 changed=0을 확인함. 운영 앱·Compose 정의·소유 marker는 변경하지 않음. 디렉터리·파일의 symlink/hardlink·다른 소유·추가 파일을 거부함. timeout/interrupt 시 하위 프로세스 종료를 확인한 뒤에만 원복함. 종료 확인이 불가능하면 추가 쓰기를 보류하고 실패 상태를 보고함. 전체 실습 원복이 아닌 실패 중 response drift 원복과 기존 rollback playbook은 구분함.
 
+정상 응답은 고정 템플릿의 승인된 LF 또는 CRLF bytes와 정확히 같아야 함. drift·복구 중 원래 줄바꿈을 보존하고 임의의 템플릿 문구나 source·response 불일치는 거부함. 상속 locale을 그대로 쓰지 않고 설치된 영문 UTF-8 locale을 선택함. 지원 locale이 없으면 `locale=UNAVAILABLE`로 보고하며 실행을 보류함. [운영 검증 결과](../../docs/reviews/20261005_DevOps실습_운영적용결과.md)에서 기존 도구의 차단과 수정본 검증 상태를 구분함.
+
 ## 증적 기록
 
 | 항목 | 기록값 | 비고 |

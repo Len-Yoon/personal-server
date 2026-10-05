@@ -16,8 +16,7 @@ import subprocess
 
 LAB = Path(__file__).resolve().parents[1]
 PROJECT = "personal-server-ansible-lab"
-ORIGINAL = b"ansible lab sample ready\n"
-DRIFT = b"ansible lab sample drift\n"
+APPROVED_RESPONSES = {b"ansible lab sample ready\n", b"ansible lab sample ready\r\n"}
 
 
 class UnsafeLab(Exception):
@@ -26,6 +25,26 @@ class UnsafeLab(Exception):
 
 class UnterminatedProcess(Exception):
     """An Ansible process group was not confirmed stopped; do not recover."""
+
+
+class UnavailableLocale(Exception):
+    """No installed English UTF-8 locale is available for Ansible."""
+
+
+def _expected_response():
+    # The sample is intentionally a static template. Preserve checkout bytes,
+    # while refusing arbitrary template content as a new ownership baseline.
+    fd = os.open(LAB / "templates/index.html.j2", os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 26:
+            raise UnsafeLab()
+        response = os.read(fd, 27)
+        if response not in APPROVED_RESPONSES:
+            raise UnsafeLab()
+        return response
+    finally:
+        os.close(fd)
 
 
 def _regular_fd(root_fd, name, writable=False):
@@ -110,9 +129,28 @@ def _write_fd(fd, content):
 def _runner(args):
     env = os.environ.copy()
     env.pop("ANSIBLE_LOG_PATH", None)
+    # Ignore inherited translation/locale overrides. The locale inventory
+    # probe is ASCII; only the selected installed UTF-8 locale runs Ansible.
+    for name in tuple(env):
+        if name.startswith("LC_") or name in {"LANG", "LANGUAGE"}:
+            env.pop(name)
+    probe_env = {**env, "LC_ALL": "C", "LANG": "C"}
+    try:
+        available = _run_process(["locale", "-a"], LAB, probe_env, timeout=5)
+    except UnterminatedProcess:
+        raise
+    except Exception:
+        raise UnavailableLocale() from None
+    if available.returncode:
+        raise UnavailableLocale()
+    installed = set(available.stdout.splitlines())
+    selected = next((name for name in ("C.UTF-8", "C.utf8", "en_US.UTF-8", "en_US.utf8")
+                     if name in installed), None)
+    if selected is None:
+        raise UnavailableLocale()
     env.update(ANSIBLE_CONFIG=str(LAB / "ansible.cfg"),
                ANSIBLE_STDOUT_CALLBACK="default", ANSIBLE_NOCOLOR="1",
-               LC_ALL="C")
+               LC_ALL=selected, LANG=selected)
     return _run_process(args, LAB, env)
 
 
@@ -158,6 +196,8 @@ def run_drill(home=None, runner=None, *, go=False):
     root_fd = None
     injected = False
     def play(*options):
+        if _expected_response() != original:
+            raise UnsafeLab()
         current_fd = _owned_root(home)
         try:
             original_info, current_info = os.fstat(root_fd), os.fstat(current_fd)
@@ -167,10 +207,12 @@ def run_drill(home=None, runner=None, *, go=False):
             os.close(current_fd)
         return _play(runner, *options)
     try:
+        original = _expected_response()
+        drift = original.replace(b"ready", b"drift")
         root_fd = _owned_root(home)
-        _validate_files(root_fd, {ORIGINAL})
+        _validate_files(root_fd, {original})
         play("--check", "--tags", "preflight")
-        _validate_files(root_fd, {ORIGINAL})
+        _validate_files(root_fd, {original})
         status["ownership"] = "PASS"
         changed, _ = play("--check", "--diff")
         if changed != 0:
@@ -181,7 +223,7 @@ def run_drill(home=None, runner=None, *, go=False):
             return status
         # Mark before the write, ensuring partial write errors reach cleanup.
         injected = True
-        _replace_response(root_fd, {ORIGINAL}, DRIFT)
+        _replace_response(root_fd, {original}, drift)
         changed, output = play("--check", "--diff")
         if changed != 1 or not re.search(
                 r"TASK \[Render sample response\].*?-ansible lab sample drift"
@@ -189,14 +231,14 @@ def run_drill(home=None, runner=None, *, go=False):
                 output, re.DOTALL):
             raise UnsafeLab()
         status["drift_detection"] = "PASS"
-        _validate_files(root_fd, {DRIFT})
+        _validate_files(root_fd, {drift})
         play()
-        _validate_files(root_fd, {ORIGINAL})
+        _validate_files(root_fd, {original})
         status["restoration"] = "PASS"
         changed, _ = play()
         if changed != 0:
             raise UnsafeLab()
-        _validate_files(root_fd, {ORIGINAL})
+        _validate_files(root_fd, {original})
         status["idempotence"] = "PASS"
         status["execution"] = "PASS"
         injected = False
@@ -204,15 +246,19 @@ def run_drill(home=None, runner=None, *, go=False):
         status["process_stop"] = "UNCONFIRMED"
         if injected:
             status["recovery"] = "FAIL"
+    except UnavailableLocale:
+        status["locale"] = "UNAVAILABLE"
+        if injected:
+            status["recovery"] = "FAIL"
     except (Exception, KeyboardInterrupt):
         if injected and root_fd is not None:
             status["recovery"] = "FAIL"
             try:
-                _validate_files(root_fd, {ORIGINAL, DRIFT})
+                _validate_files(root_fd, {original, drift})
                 play("--check", "--tags", "preflight")
-                _replace_response(root_fd, {ORIGINAL, DRIFT}, ORIGINAL)
+                _replace_response(root_fd, {original, drift}, original)
                 play()
-                _validate_files(root_fd, {ORIGINAL})
+                _validate_files(root_fd, {original})
                 status["recovery"] = "PASS"
             except (Exception, KeyboardInterrupt):
                 pass
