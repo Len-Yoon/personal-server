@@ -37,7 +37,7 @@ Loki·Alloy 로그 관측과 Ansible localhost 자동화는 구현·CI·Trivy·�
 | Grafana 연동 | Loki datasource·샘플 dashboard ConfigMap과 datasource sidecar 값 추가됨 | UID·파일 및 Grafana→Loki ready, 후속 API 등록·proxy 로그 조회 HTTP 200 | 대시보드 화면 렌더 미수행 |
 | Ansible | localhost·loopback 전용 Compose 배치·health·소유 범위 검증 롤백 구현됨 | 소유권 조건 우회 변이 20/20 검출. syntax-check 2개·check mode·최초 배치 changed=5·2회차 changed=0·rollback changed=2·재배치 changed=5, 모두 failed=0 | 최종 재배치 후 HTTP 정상. 운영 앱 전체 자동화로 확대하지 않음 |
 | CI 통합·병합 | Loki 계약은 K8s 그룹, Ansible 계약은 maintenance 그룹에 1회 등록됨 | maintenance 546건, 9개 그룹·98개 테스트 파일 배정 검증, PR·main CI·Trivy·독립 검토 및 `f66a42a` 병합됨 | 안전 자동배포는 `blocked_path`로 제외됨 |
-| 운영 적용 | 기존 실습 이후 `91cdb26`·`0789890` 동기화 완료 | 격리 실패 배포·HTTP 복구, Loki 데이터 보존 rollback·재설치, SLO image-only 교체 성공. Portal 전후 각 3회 정상·monitoring 6개 UID·generation 보존 | Ansible 실제 drift 감지는 통과했으나 stale 파일 bind로 원복 실패. 전용 sample 1회 재생성으로 원상복구했고 근본 보완·재훈련 및 다음 SLO 정기 실행 확인 필요 |
+| 운영 적용 | 기존 실습 이후 `91cdb26`·`0789890`·`6a17f5a` 동기화 완료 | 격리 실패 배포·HTTP 복구, Loki 데이터 보존 rollback·재설치, SLO image-only 교체 성공. Ansible 최종 drift 감지·원복·2회차 changed=0과 원본 CRLF·HTTP 보존 확인. Portal 전후 각 3회 정상·monitoring 6개 UID·generation 보존 | `0789890` 최초 훈련 실패 및 sample 1회 수동 복구 이력은 보존함. 다음 SLO 정기 실행 확인 필요 |
 
 검사 건수는 서로 다른 단계의 실행 기록임. 합산한 고유 테스트 수로 사용하지 않음. 실행 증적과 미검증 범위는 [운영 검증 결과](reviews/20261004_Loki_Ansible_실습_N100운영검증결과.md)를 따름.
 
@@ -64,7 +64,7 @@ Loki·Alloy 로그 관측과 Ansible localhost 자동화는 구현·CI·Trivy·�
 
 ## 확인 필요 사항
 
-- Ansible drift 훈련·다음 SLO 정기 실행·Grafana 화면 렌더·CNI 규칙 원인·24시간 retention·디스크 경보 확인 필요함. local-path PVC 1Gi 요청은 디스크 사용량의 강제 상한이 아님.
+- 다음 SLO 정기 실행·Grafana 화면 렌더·CNI 규칙 원인·24시간 retention·디스크 경보 확인 필요함. local-path PVC 1Gi 요청은 디스크 사용량의 강제 상한이 아님. Ansible 임의 시점 강제 중단의 추가 운영 재현은 수행하지 않음.
 - 면접 제출 시 PR·병합 커밋과 최신 운영 증적을 다시 대조해야 함.
 
 ## 후속 조치
@@ -73,6 +73,6 @@ Loki·Alloy 로그 관측과 Ansible localhost 자동화는 구현·CI·Trivy·�
 
 기동 직후 Loki 조회의 제한 재시도, 격리 readiness 실패·정상 HTTP 복구 훈련, Ansible 응답 drift→원복→재실행 무변경 훈련, 읽기 전용 SLO 기간 집계를 추가함. [고도화 검증 결과](reviews/20261005_DevOps실습고도화_검증결과.md)는 당시 로컬·읽기 전용 증적임. 후속 승인으로 실패 배포·Loki rollback·SLO 이미지 교체를 수행했으며, 실제 결과와 Ansible 차단 원인은 [운영 적용 결과](reviews/20261005_DevOps실습_운영적용결과.md)를 따름. Grafana API의 datasource·dashboard UID와 proxy 샘플 조회는 확인했고 화면 렌더는 미검증임.
 
-1. Ansible 파일 bind의 부분 적용 복구 보완을 검증·반영하고 새 SHA 적용 승인 후 drift 훈련을 재검증함. 최초 훈련 실패와 수동 원상복구를 분리하며 완료한 실패 배포·Loki rollback·SLO 교체는 반복하지 않음.
+1. Ansible 파일 bind 보완과 `6a17f5a` 실제 재훈련을 완료함. 최초 실패·수동 복구·최종 성공을 분리해 면접에서 원인 → 최소 수정 → 검증 근거 순으로 설명함. 완료한 실습과 Loki rollback·SLO 교체는 불필요하게 반복하지 않음.
 2. 미검증인 다음 SLO 정기 실행·Grafana 화면·retention·디스크 경보는 실제 결과를 추가 확인함.
 3. 면접에서는 문제 → 선택 이유 → 검증 근거 → 한계 순서로 설명함.
