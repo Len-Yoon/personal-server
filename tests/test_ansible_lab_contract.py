@@ -268,6 +268,88 @@ class AnsibleLabContractTests(unittest.TestCase):
         self.assertTrue(any(task.get("ansible.builtin.uri", {}).get("url") ==
                             "http://127.0.0.1:{{ lab_http_port }}/" for task in verify))
 
+    def test_response_change_recreates_single_file_config_then_becomes_idempotent(self):
+        tasks = self._tasks("site")
+        response_task = next(task for task in tasks
+                             if task.get("ansible.builtin.template", {}).get("dest") == "{{ lab_root }}/index.html")
+        compose_task = next(task for task in tasks if "community.docker.docker_compose_v2" in task)
+        recreate = compose_task["community.docker.docker_compose_v2"].get("recreate", "auto")
+        env = Environment()
+        env.globals["lookup"] = lambda *args, **kwargs: (
+            "ansible lab sample ready\n" if kwargs.get("rstrip", True) is False
+            else "ansible lab sample ready")
+        for changed, expected in ((True, "always"), (False, "auto")):
+            with self.subTest(response_changed=changed):
+                context = {
+                    response_task.get("register", "unregistered_response"): {"changed": changed},
+                    "lab_running_services": {"stdout_lines": ["sample"]},
+                    "lab_current_response": {"status": 200, "content": "ansible lab sample ready\n"},
+                    "playbook_dir": "/approved/playbooks",
+                }
+                actual = env.from_string(recreate).render(context)
+                self.assertEqual(actual, expected)
+
+    def test_check_mode_cannot_recreate_or_probe_the_running_sample(self):
+        env = Environment()
+        for task in self._tasks("site"):
+            if "community.docker.docker_compose_v2" in task or "ansible.builtin.uri" in task:
+                with self.subTest(task=task["name"]):
+                    conditions = task.get("when", "true")
+                    if isinstance(conditions, str):
+                        conditions = [conditions]
+                    context = {"lab_running_services": {"stdout_lines": ["sample"]}, "lab_preflight_passed": True}
+                    self.assertFalse(all(env.compile_expression(clause)(ansible_check_mode=True, **context)
+                                         for clause in conditions))
+                    self.assertTrue(all(env.compile_expression(clause)(ansible_check_mode=False, **context)
+                                        for clause in conditions))
+
+    def test_owned_running_stale_http_recreates_even_when_source_is_unchanged(self):
+        tasks = self._tasks("site")
+        response_task = next(task for task in tasks
+                             if task.get("ansible.builtin.template", {}).get("dest") == "{{ lab_root }}/index.html")
+        compose_task = next(task for task in tasks if "community.docker.docker_compose_v2" in task)
+        probes = [task for task in tasks if task.get("register") == "lab_current_response"]
+        env = Environment()
+        env.globals["lookup"] = lambda *args, **kwargs: (
+            "ansible lab sample ready\n" if kwargs.get("rstrip", True) is False
+            else "ansible lab sample ready")
+        cases = [
+            ({"status": 200, "content": "ansible lab sample ready\n"}, "auto"),
+            ({"status": 200, "content": "ansible lab sample drift\n"}, "always"),
+            ({"status": 200, "content": "ansible lab sample ready\nextra"}, "always"),
+            ({"status": 200, "content": "ansible lab sample ready\r\n"}, "always"),
+            ({"status": -1, "msg": "timeout"}, "always"),
+            ({}, "always"),
+        ]
+        for current, expected in cases:
+            with self.subTest(current=current):
+                context = {
+                    response_task.get("register", "unregistered_response"): {"changed": False},
+                    "lab_running_services": {"stdout_lines": ["sample"]},
+                    "lab_current_response": current,
+                    "playbook_dir": "/approved/playbooks",
+                }
+                recreate = compose_task["community.docker.docker_compose_v2"].get("recreate", "auto")
+                self.assertEqual(env.from_string(recreate).render(context), expected)
+        self.assertEqual(len(probes), 1)
+        probe = probes[0]
+        guards = [env.compile_expression(clause) for clause in probe["when"]]
+        self.assertFalse(all(guard(ansible_check_mode=False, lab_preflight_passed=True,
+                                  lab_running_services={"stdout_lines": []})
+                             for guard in guards))
+        self.assertFalse(all(guard(ansible_check_mode=False, lab_preflight_passed=True,
+                                  lab_running_services={"stdout_lines": ["foreign"]})
+                             for guard in guards))
+        self.assertFalse(all(guard(ansible_check_mode=False, lab_preflight_passed=False,
+                                  lab_running_services={"stdout_lines": ["sample"]})
+                             for guard in guards))
+        self.assertIs(probe["changed_when"], False)
+        self.assertLessEqual(probe["ansible.builtin.uri"]["timeout"], 3)
+        # The full site preflight assertion must precede the current-state read.
+        guarded_at = next(index for index, task in enumerate(tasks)
+                          if "lab_preflight_passed" in str(task.get("ansible.builtin.assert", {})))
+        self.assertLess(guarded_at, tasks.index(probe))
+
     def test_rollback_requires_ownership_before_removal(self):
         tasks = yaml.safe_load((LAB / "playbooks/rollback.yml").read_text(encoding="utf-8"))[0]["tasks"]
         compose_at = next(i for i, task in enumerate(tasks)

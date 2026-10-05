@@ -40,6 +40,8 @@ python3 infra/ansible-lab/tools/drift-lab.py --go
 
 정상 응답은 고정 템플릿의 승인된 LF 또는 CRLF bytes와 정확히 같아야 함. drift·복구 중 원래 줄바꿈을 보존하고 임의의 템플릿 문구나 source·response 불일치는 거부함. 상속 locale을 그대로 쓰지 않고 설치된 영문 UTF-8 locale을 선택함. 지원 locale이 없으면 `locale=UNAVAILABLE`로 보고하며 실행을 보류함. [운영 검증 결과](../../docs/reviews/20261005_DevOps실습_운영적용결과.md)에서 기존 도구의 차단과 수정본 검증 상태를 구분함.
 
+Compose configs의 단일 파일 bind는 template의 atomic rename 후 이전 inode를 계속 참조할 수 있음. 따라서 파일 변경뿐 아니라 소유 확인된 실행 중 sample의 실제 HTTP 응답 불일치도 확인해 해당 sample을 조건부 재생성함. 정상 응답·파일 무변경이면 `recreate=auto`를 유지하고 check mode에서는 HTTP 조회·재생성을 수행하지 않음. 컨테이너 응답까지 확인하지 않고 host 파일 복구만으로 성공 처리하지 않음.
+
 ## 증적 기록
 
 | 항목 | 기록값 | 비고 |
