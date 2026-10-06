@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Configure the existing Portal/executor shared authentication without secret files.
 
-The existing Portal Kubernetes Secret is the canonical source. A Compose
-recreation must use this tool again; ordinary container restarts retain Env.
+The existing Portal Kubernetes Secret is the canonical source. Supported
+recreations use scripts/homeops-auth-run.py; ordinary restarts retain Env.
 No scheduler/bootstrap integration or management POST is performed here.
 """
 from __future__ import annotations

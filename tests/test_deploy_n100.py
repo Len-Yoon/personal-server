@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from tests.test_homeops_auth_bootstrap import secret_reader_fixture
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -214,6 +215,7 @@ class DeployN100Tests(unittest.TestCase):
                 "if [ \"$1\" = network ] && [ \"$2\" = inspect ]; then echo 172.17.0.1; fi\n",
                 encoding="utf-8",
             )
+            (fake_bin / "sudo").write_text(secret_reader_fixture(), encoding="utf-8")
             for tool in fake_bin.iterdir():
                 tool.chmod(0o755)
 

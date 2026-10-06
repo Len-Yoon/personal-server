@@ -43,7 +43,7 @@ EXPECTED_GROUPS["k8s-contracts"] = (*_k8s[:-1], _k8s[-1].replace(
 # Newly added isolated drills and read-only aggregation remain in one owning suite.
 for _name, _modules in (
     ("k8s-contracts", " tests.test_k8s_slo_evidence_summary tests.test_k8s_deployment_rollback_lab"),
-    ("maintenance", " tests.test_ansible_drift_lab tests.test_homeops_auth_configuration tests.test_homeops_auth_runtime"),
+    ("maintenance", " tests.test_ansible_drift_lab tests.test_homeops_auth_configuration tests.test_homeops_auth_runtime tests.test_homeops_auth_supply tests.test_homeops_auth_bootstrap"),
 ):
     _entry = EXPECTED_GROUPS[_name]
     EXPECTED_GROUPS[_name] = (*_entry[:-1], _entry[-1] + _modules)

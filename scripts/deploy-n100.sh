@@ -229,8 +229,10 @@ deploy_runtime_services() {
       else
         set_cutover_homeops_lists
       fi
-      "${bridge_compose[@]}" config --quiet
-      "${bridge_compose[@]}" up -d --build --no-deps --force-recreate $bridge_services
+      python3 "$SCRIPT_DIR/homeops-auth-run.py" --runtime-mode "$PORTAL_RUNTIME_MODE" -- \
+        "${bridge_compose[@]}" config --quiet
+      python3 "$SCRIPT_DIR/homeops-auth-run.py" --runtime-mode "$PORTAL_RUNTIME_MODE" -- \
+        "${bridge_compose[@]}" up -d --build --no-deps --force-recreate $bridge_services
       resolve_crawler_worker_caddy_upstream
       resolve_book_memo_caddy_upstream
       resolve_youtube_memo_caddy_upstream

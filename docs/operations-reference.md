@@ -101,7 +101,11 @@ python3 infra/k8s/tools/homeops-auth-configure.py --go --expected-commit "$(git 
 
 기존 Portal Secret을 인증 원본으로 사용하며 다른 키를 보존함. 실행기 기존 이미지·Compose 파일·네트워크·환경·관리 대상 3개와 Portal 단일 writer를 대조함. 실패 시 이번 작업의 변경만 조건부 원복하며, 원복 중 동시 변경을 발견하면 덮어쓰지 않고 수동 확인을 요구함. 진단은 읽기 전용이며 관리 재시작 POST는 검증에 사용하지 않음.
 
-일반 Docker restart에는 인증 환경값이 유지되지만, 일반 Compose 재생성·기존 부팅 절차는 인증값을 자동 재공급하지 않음. 해당 동작 후 `--check`와 승인된 재구성이 필요함. 부팅·배포 절차 자동 연동은 별도 보호 대상이며 이번 구성 도구의 범위가 아님. Kubernetes Secret 자체를 암호화 저장으로 단정하지 않으며, 암호화·접근 정책 추가 검증은 별도 작업임.
+일반 Docker restart에는 인증 환경값이 유지됨. 후속 승인으로 `scripts/homeops-auth-run.py`를 `windows-bootstrap.sh` 및 `deploy-n100.sh`의 `k3s`·`cutover` 실행기 생성 경로에 연결함. 기존 Portal Secret의 필수 참조·키를 조회하고 Compose 자식 환경에만 공급함. Portal Ready는 요구하지 않지만 Kubernetes API 조회는 필요함. 조회 실패·인증 누락·잘못된 참조·상속 환경의 인증 불일치 시 생성 전에 중단함. 키 생성·회전·Secret 수정은 수행하지 않음.
+
+지원 명령은 `config --quiet` 및 명시된 관리 대상의 `up`으로 제한함. 비밀값을 출력할 수 있는 `config` 렌더링·`exec` 등은 허용하지 않으며 자식 출력도 캡처하여 고정 결과 코드만 표시함. 실패 시 Secret 참조와 읽기 권한을 확인한 뒤 동일 승인 범위에서 재실행함. 도구가 새 권한을 생성하거나 자동 재시도하지 않음.
+
+직접 실행하는 일반 `docker compose`, legacy `compose` 모드, `portal-cutover.sh`의 writer 전환은 자동 공급 대상이 아님. 해당 경로는 별도 운영 절차·승인을 확인해야 함. 전체 bootstrap·공식 수동 배포는 기존 이미지 선택·다른 서비스 재생성 동작도 포함하므로 실행기 단독 검증 명령으로 사용하지 않음. 실서버 검증은 기존 이미지·Compose 파일·프로젝트를 보존한 실행기 1개 재생성으로 한정함. 실제 호스트 재부팅은 미수행임. Kubernetes Secret 암호화·접근 정책의 추가 검증은 별도 작업임.
 
 ## 운영 경계
 
