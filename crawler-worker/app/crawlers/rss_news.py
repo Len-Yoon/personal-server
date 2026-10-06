@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from html import unescape
 from html.parser import HTMLParser
-from urllib.error import URLError
 from urllib.request import Request, urlopen
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -29,17 +28,21 @@ def search_rss_news(
 ) -> list[dict]:
     try:
         import feedparser
-    except ImportError:
-        return []
+    except ImportError as exc:
+        raise OSError("news_source_parser_unavailable") from exc
 
     articles: list[dict] = []
+    successful_feeds = 0
 
     for feed_url in feed_urls:
         try:
             request = Request(feed_url, headers={"User-Agent": USER_AGENT, "Accept": "application/rss+xml,application/xml,text/xml,*/*"})
             with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
                 feed = feedparser.parse(response)
-        except (OSError, TimeoutError, URLError, ValueError, Exception):
+            if not getattr(feed, "version", "") or getattr(feed, "bozo", False):
+                continue
+            successful_feeds += 1
+        except Exception:
             continue
 
         for entry in getattr(feed, "entries", []):
@@ -82,6 +85,9 @@ def search_rss_news(
 
         if len(articles) >= limit:
             break
+
+    if not successful_feeds:
+        raise OSError("news_source_all_feeds_unavailable")
 
     if source_filter:
         normalized_filter = source_filter.casefold()

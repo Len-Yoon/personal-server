@@ -5,7 +5,7 @@
     "requirements": "portal-web/requirements.txt",
     "extra_packages": [],
     "pythonpath": "portal-web",
-    "test_command": "python3 -m unittest tests.test_file_access tests.test_portal_dashboard tests.test_portal_security tests.test_homeops tests.test_homeops_notifier tests.test_portal_http_metrics tests.test_portal_k3s_bridge_contract tests.test_portfolio"
+    "test_command": "python3 -m unittest tests.test_file_access tests.test_portal_failure_boundaries tests.test_portal_dashboard tests.test_portal_security tests.test_homeops tests.test_homeops_managed_scope tests.test_homeops_notifier tests.test_portal_http_metrics tests.test_portal_k3s_bridge_contract tests.test_portfolio"
   },
   {
     "name": "system-agent",
@@ -21,7 +21,7 @@
     "requirements": "crawler-worker/requirements.txt",
     "extra_packages": [],
     "pythonpath": "crawler-worker",
-    "test_command": "python3 -m unittest tests.crawler_worker.test_datetime_format tests.crawler_worker.test_investing_news_rss tests.crawler_worker.test_nasdaq_relevance tests.crawler_worker.test_news_collection_metrics tests.crawler_worker.test_news_collection_status tests.crawler_worker.test_news_scheduler tests.crawler_worker.test_news_service tests.crawler_worker.test_news_routes tests.crawler_worker.test_rss_news tests.crawler_worker.test_telegram_notifier"
+    "test_command": "python3 -m unittest tests.crawler_worker.test_datetime_format tests.crawler_worker.test_failure_boundaries tests.crawler_worker.test_investing_news_rss tests.crawler_worker.test_nasdaq_relevance tests.crawler_worker.test_news_collection_metrics tests.crawler_worker.test_news_collection_status tests.crawler_worker.test_news_scheduler tests.crawler_worker.test_news_service tests.crawler_worker.test_news_routes tests.crawler_worker.test_rss_news tests.crawler_worker.test_telegram_notifier"
   },
   {
     "name": "homeops-executor",
@@ -29,7 +29,7 @@
     "requirements": "homeops-executor/requirements.txt",
     "extra_packages": [],
     "pythonpath": "homeops-executor",
-    "test_command": "python3 -m unittest tests.homeops_executor.test_docker_ops"
+    "test_command": "python3 -m unittest tests.homeops_executor.test_docker_ops tests.homeops_executor.test_managed_scope"
   },
   {
     "name": "youtube-memo",
@@ -37,7 +37,7 @@
     "requirements": "youtube-memo/requirements.txt",
     "extra_packages": ["httpx==0.28.1"],
     "pythonpath": "youtube-memo",
-    "test_command": "python3 -m unittest tests.youtube_memo.test_ui_contract tests.youtube_memo.test_video_titles"
+    "test_command": "python3 -m unittest tests.youtube_memo.test_ui_contract tests.youtube_memo.test_video_titles tests.youtube_memo.test_reliability"
   },
   {
     "name": "book-memo",
@@ -45,7 +45,7 @@
     "requirements": "book-memo/requirements.txt",
     "extra_packages": ["httpx==0.28.1"],
     "pythonpath": "book-memo",
-    "test_command": "python3 -m unittest tests.book_memo.test_book_service tests.book_memo.test_ui_contract"
+    "test_command": "python3 -m unittest tests.book_memo.test_book_service tests.book_memo.test_ui_contract tests.book_memo.test_reliability"
   },
   {
     "name": "car-care-worker",

@@ -122,7 +122,16 @@ def collect_korean_news(
         )
     except Exception:
         _collection_status().record_failure()
-        fresh_articles = category_articles
+        # A failed fetch is not a new observation. Preserve collection metadata
+        # and the notification outbox, and report the archived fallback as stale.
+        return _build_result(
+            category=category, articles=category_articles, limit=limit,
+            cached=bool(category_articles),
+            age_seconds=max(0, int((now - latest_collected_at).total_seconds())) if latest_collected_at else 0,
+            label_resolver=_korean_category_label,
+            description_resolver=_korean_category_description,
+            collection_status="error", stale=True,
+        )
     else:
         _collection_status().record_success()
     stored_articles = [
@@ -211,6 +220,8 @@ def _build_result(
     age_seconds: int,
     label_resolver=None,
     description_resolver=None,
+    collection_status: str | None = None,
+    stale: bool = False,
 ) -> dict[str, Any]:
     label_resolver = label_resolver or _category_label
     description_resolver = description_resolver or _category_description
@@ -232,7 +243,9 @@ def _build_result(
             "hit": cached,
             "age_seconds": age_seconds,
             "ttl_seconds": CACHE_TTL_SECONDS,
+            "stale": stale or (cached and age_seconds >= CACHE_TTL_SECONDS),
         },
+        "collection": {"status": collection_status or ("cached" if cached else "success")},
     }
 
 

@@ -37,6 +37,9 @@ class CarCareStore:
                 "update_id INTEGER PRIMARY KEY, reply_text TEXT NOT NULL, "
                 "processed_at TEXT NOT NULL);"
             )
+            columns = {row[1] for row in db.execute("PRAGMA table_info(vehicle_snapshots)")}
+            if "unknown_warnings_json" not in columns:
+                db.execute("ALTER TABLE vehicle_snapshots ADD COLUMN unknown_warnings_json TEXT NOT NULL DEFAULT '[]'")
 
     def process_command(self, update_id: int, callback: Callable[["_TransactionStore"], ReplyT]) -> ReplyT:
         with self._connect() as db:
@@ -117,23 +120,24 @@ class CarCareStore:
         with self._connection_scope(_connection) as db:
             db.execute(
                 "INSERT INTO vehicle_snapshots "
-                "(id, observed_at, odometer_km, dte_km, warnings_json) "
-                "VALUES (1, ?, ?, ?, ?) "
+                "(id, observed_at, odometer_km, dte_km, warnings_json, unknown_warnings_json) "
+                "VALUES (1, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(id) DO UPDATE SET observed_at = excluded.observed_at, "
                 "odometer_km = excluded.odometer_km, dte_km = excluded.dte_km, "
-                "warnings_json = excluded.warnings_json",
+                "warnings_json = excluded.warnings_json, unknown_warnings_json = excluded.unknown_warnings_json",
                 (
                     observed_at,
                     snapshot.odometer_km,
                     snapshot.dte_km,
                     json.dumps(sorted(snapshot.warnings)),
+                    json.dumps(sorted(snapshot.unknown_warnings)),
                 ),
             )
 
     def load_last_snapshot(self, *, _connection=None) -> VehicleSnapshot | None:
         with self._connection_scope(_connection) as db:
             row = db.execute(
-                "SELECT observed_at, odometer_km, dte_km, warnings_json "
+                "SELECT observed_at, odometer_km, dte_km, warnings_json, unknown_warnings_json "
                 "FROM vehicle_snapshots WHERE id = 1"
             ).fetchone()
         if row is None:
@@ -143,6 +147,7 @@ class CarCareStore:
             odometer_km=row[1],
             dte_km=row[2],
             warnings=frozenset(json.loads(row[3])),
+            unknown_warnings=frozenset(json.loads(row[4])),
         )
 
     def get_alert_state(self, key: str, *, _connection=None) -> str | None:

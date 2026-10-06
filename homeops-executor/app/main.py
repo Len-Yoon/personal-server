@@ -1,7 +1,7 @@
 import os
 import secrets
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Response
 from pydantic import BaseModel
 
 from app.services import docker_ops
@@ -42,9 +42,11 @@ def diagnostics(service: str, x_homeops_executor_secret: str = Header(default=""
 
 
 @app.get("/v1/diagnostics")
-def all_diagnostics(x_homeops_executor_secret: str = Header(default="")):
+def all_diagnostics(response: Response, x_homeops_executor_secret: str = Header(default="")):
     _require_shared_secret(x_homeops_executor_secret)
-    return docker_ops.collect_all_diagnostics()
+    managed = docker_ops.allowed_services()
+    response.headers["X-HomeOps-Managed-Services"] = ",".join(sorted(managed))
+    return docker_ops.collect_all_diagnostics(managed_services=managed)
 
 
 @app.post("/v1/restarts")

@@ -378,11 +378,10 @@ class BookMemoUiContractTests(unittest.TestCase):
                 detail = client.get(f"/books/{book['id']}")
                 login = client.get("/auth/login")
 
-        for response, expected_redirects in ((home, 2), (detail, 1)):
+        for response in (home, detail):
             self.assertIn('const redirectToWriteLogin = () =>', response.text)
-            self.assertGreaterEqual(response.text.count('if (window.MemoDrafts.isLoginResponse(response))'), expected_redirects)
+            self.assertIn('window.MemoDrafts.bindDeleteForm(form)', response.text)
             self.assertIn('window.MemoDrafts.redirectToLogin()', response.text)
-            self.assertIn('window.MemoDrafts.isLoginResponse(response)', response.text)
         self.assertNotIn('const redirectToWriteLogin = () =>', login.text)
 
     def test_unauthenticated_browser_write_redirects_to_login_with_current_path(self):

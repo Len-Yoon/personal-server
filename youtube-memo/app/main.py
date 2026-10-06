@@ -13,6 +13,7 @@ from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from app.services.write_safety import WriteConflict
 
 from app.services.memo_service import (
     DB_PATH,
@@ -165,15 +166,16 @@ def create_video_memo(
     memo_title: str = Form(default=""),
     content: str = Form(...),
     tags: str = Form(default=""),
+    request_id: str = Form(default=""),
 ):
     _require_write_session(request)
     if not get_video(video_id):
         raise HTTPException(status_code=404, detail="Video not found")
 
     try:
-        create_memo(video_id=video_id, title=memo_title, content=content, tags=tags)
+        create_memo(video_id=video_id, title=memo_title, content=content, tags=tags, request_id=request_id)
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=str(error)) from error
 
     return RedirectResponse(
         url=f"/videos/{video_id}",
@@ -182,12 +184,12 @@ def create_video_memo(
 
 
 @app.post("/memos/{memo_id}/tags")
-def update_video_memo_tags(request: Request, memo_id: int, tags: str = Form(default="")):
+def update_video_memo_tags(request: Request, memo_id: int, tags: str = Form(default=""), request_id: str = Form(default="")):
     _require_write_session(request)
     try:
-        video_id = update_memo_tags(memo_id, tags)
+        video_id = update_memo_tags(memo_id, tags, request_id=request_id)
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=str(error)) from error
     if video_id is None:
         raise HTTPException(status_code=404, detail="Memo not found")
     return RedirectResponse(url=f"/videos/{video_id}", status_code=303)
@@ -236,13 +238,16 @@ def update_video_memo(
     memo_id: int,
     memo_title: str = Form(default=""),
     content: str = Form(...),
+    expected_version: int = Form(default=0),
+    request_id: str = Form(default=""),
 ):
     _require_write_session(request)
 
     try:
-        video_id = update_memo(memo_id=memo_id, title=memo_title, content=content)
+        video_id = update_memo(memo_id=memo_id, title=memo_title, content=content,
+                               expected_version=expected_version, request_id=request_id)
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=str(error)) from error
 
     if not video_id:
         raise HTTPException(status_code=404, detail="Memo not found")

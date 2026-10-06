@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.background import BackgroundTask
 from fastapi.templating import Jinja2Templates
 
@@ -179,6 +179,8 @@ def download_files(request: Request, paths: list[str] = Form(...)):
 
     try:
         file_store.validate_download_limits(requested_paths)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise HTTPException(status_code=404, detail="다운로드할 항목을 찾을 수 없습니다.") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -189,15 +191,15 @@ def download_files(request: Request, paths: list[str] = Form(...)):
     try:
         with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             file_store.write_download_archive(archive, requested_paths)
+    except (FileNotFoundError, IsADirectoryError, NotADirectoryError) as exc:
+        archive_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=404, detail="다운로드할 항목을 찾을 수 없습니다.") from exc
     except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
         archive_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="ZIP 파일을 생성할 수 없습니다.") from exc
     except ValueError as exc:
         archive_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except (FileNotFoundError, IsADirectoryError) as exc:
-        archive_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     try:
         append_security_event("files_downloaded", count=len(requested_paths))
@@ -223,6 +225,8 @@ def delete_item(request: Request, path: str = Form(""), delete_password: str = F
 
     try:
         file_store.delete_item(path)
+    except file_store.DeletionAuditError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -241,12 +245,31 @@ def delete_items(
     _require_delete_password(request, delete_password)
 
     try:
-        for path in paths:
-            file_store.delete_item(path)
-    except (ValueError, FileNotFoundError) as exc:
+        validated = file_store.validate_delete_items(paths)
+    except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    return {"ok": True, "redirect": _directory_url(current_path)}
+    deleted = []
+    for index, path in enumerate(validated):
+        try:
+            file_store.delete_item(path)
+            deleted.append(path)
+        except file_store.DeletionAuditError:
+            deleted.append(path)
+            return JSONResponse(status_code=207, content={
+                "ok": False, "deleted": deleted, "failed": validated[index + 1:],
+                "audit_recorded": False,
+                "detail": "삭제한 항목의 보안 기록 저장에 실패하여 나머지 삭제를 중지했습니다. 목록을 확인해주세요.",
+                "redirect": _directory_url(current_path),
+            })
+        except (ValueError, OSError):
+            # A directory may itself have been partially removed. Do not imply
+            # rollback or repeat the request; refresh the authoritative listing.
+            return JSONResponse(status_code=207, content={
+                "ok": False, "deleted": deleted, "failed": validated[index:],
+                "detail": "일부 항목의 삭제를 완료하지 못했습니다. 목록을 새로 확인해주세요.",
+                "redirect": _directory_url(current_path),
+            })
+    return {"ok": True, "deleted": deleted, "failed": [], "redirect": _directory_url(current_path)}
 
 
 def _redirect_to_directory(path: str) -> RedirectResponse:

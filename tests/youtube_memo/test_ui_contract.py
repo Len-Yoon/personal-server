@@ -254,11 +254,10 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
                 detail = client.get(f"/videos/{video['id']}")
                 login = client.get("/auth/login")
 
-        for response, expected_redirects in ((home, 1), (detail, 1)):
+        for response in (home, detail):
             self.assertIn('const redirectToWriteLogin = () =>', response.text)
-            self.assertGreaterEqual(response.text.count('if (window.MemoDrafts.isLoginResponse(response))'), expected_redirects)
+            self.assertIn('window.MemoDrafts.bindDeleteForm(form)', response.text)
             self.assertIn('window.MemoDrafts.redirectToLogin()', response.text)
-            self.assertIn('window.MemoDrafts.isLoginResponse(response)', response.text)
             self.assertIn('/static/js/form-drafts.js', response.text)
         self.assertNotIn('const redirectToWriteLogin = () =>', login.text)
 
@@ -561,7 +560,7 @@ class YoutubeMemoUiContractTests(unittest.TestCase):
                     client.post("/auth/login", data={"password": "session-password"}, headers=headers)
                     updated = client.post(
                         f"/memos/{memo['id']}",
-                        data={"memo_title": "바뀐 제목", "content": "1:23 장면"},
+                        data={"memo_title": "바뀐 제목", "content": "1:23 장면", "expected_version": memo["version"]},
                         headers=headers,
                         follow_redirects=False,
                     )

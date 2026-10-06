@@ -29,6 +29,13 @@ _SECRET_PATTERN = re.compile(r"(?i)(authorization:\s*bearer\s+|api[-_ ]?key[=:]\
 PROJECT_DATA_ROOT = next((parent / "data" for parent in Path(__file__).resolve().parents if (parent / "docker-compose.yml").exists()), Path("/app/data"))
 
 
+class ManagedDiagnostics(list):
+    """Bind the authenticated scope to its response, including after masking."""
+    def __init__(self, values, managed_services: frozenset[str]):
+        super().__init__(values)
+        self.managed_services = managed_services
+
+
 class HomeOpsService:
     def __init__(self, db_path: Path, executor: Any, notifier: Any | None = None, approval_ttl_seconds: int = 300, verification_attempts: int = 5, verification_interval_seconds: float = 2):
         self.db_path, self.executor, self.approval_ttl_seconds = db_path, executor, approval_ttl_seconds
@@ -301,8 +308,28 @@ class HomeOpsService:
         return isinstance(cause, (ConnectionResetError, BrokenPipeError))
 
     def _all_services_healthy(self, diagnostics: list[dict[str, Any]]) -> bool:
-        by_service = {str(item.get("service", "")): item for item in diagnostics}
-        return all(service in by_service and self._unhealthy_reason(by_service[service]) is None for service in ALLOWED_SERVICES)
+        managed, by_service, invalid = self._diagnostics_membership(diagnostics)
+        return not invalid and set(by_service) == managed and all(
+            self._unhealthy_reason(by_service[service]) is None for service in managed
+        )
+
+    def _diagnostics_membership(self, diagnostics):
+        managed = getattr(diagnostics, "managed_services", getattr(self.executor, "managed_services", ALLOWED_SERVICES))
+        if not isinstance(managed, frozenset) or not managed or not managed <= ALLOWED_SERVICES:
+            return ALLOWED_SERVICES, {}, True
+        if diagnostics is None:
+            return managed, {}, False
+        if not isinstance(diagnostics, list):
+            return managed, {}, True
+        by_service = {}
+        for item in diagnostics:
+            if not isinstance(item, dict) or not isinstance(item.get("container"), dict):
+                return managed, {}, True
+            service = item.get("service")
+            if not isinstance(service, str) or service not in managed or service in by_service:
+                return managed, {}, True
+            by_service[service] = item
+        return managed, by_service, False
 
     def _diagnosis_summary(
         self,
@@ -311,16 +338,21 @@ class HomeOpsService:
     ) -> dict[str, Any]:
         healthy: list[str] = []
         unhealthy: list[dict[str, str]] = []
+        managed, by_service, invalid = self._diagnostics_membership(diagnostics)
         if diagnostics is None:
             reason = executor_failure_reason or "실행기 연결 실패"
-            unhealthy = [{"service": service, "reason": reason} for service in sorted(ALLOWED_SERVICES)]
+            unhealthy = [{"service": service, "reason": reason} for service in sorted(managed)]
+        elif invalid:
+            unhealthy = [{"service": service, "reason": "실행기 응답 범위 불일치"} for service in sorted(managed)]
         else:
-            for item in diagnostics:
+            for service, item in by_service.items():
                 reason = self._unhealthy_reason(item)
                 if reason:
-                    unhealthy.append({"service": str(item.get("service", "")), "reason": reason})
+                    unhealthy.append({"service": service, "reason": reason})
                 else:
-                    healthy.append(str(item.get("service", "")))
+                    healthy.append(service)
+            unhealthy.extend({"service": service, "reason": "실행기 응답 없음"}
+                             for service in sorted(managed - by_service.keys()))
         return {"kind": "diagnosis", "created_at": self._now(), "healthy": healthy, "unhealthy": unhealthy}
 
     def _restart_summary(
@@ -330,12 +362,14 @@ class HomeOpsService:
     ) -> dict[str, Any]:
         recovered: list[str] = []
         failed: list[dict[str, str]] = []
+        managed, by_service, invalid = self._diagnostics_membership(diagnostics)
         if diagnostics is None:
             reason = executor_failure_reason or "실행기 연결 실패"
-            failed = [{"service": service, "reason": reason} for service in sorted(ALLOWED_SERVICES)]
+            failed = [{"service": service, "reason": reason} for service in sorted(managed)]
+        elif invalid:
+            failed = [{"service": service, "reason": "실행기 응답 범위 불일치"} for service in sorted(managed)]
         else:
-            by_service = {str(item.get("service", "")): item for item in diagnostics}
-            for service in sorted(ALLOWED_SERVICES):
+            for service in sorted(managed):
                 item = by_service.get(service)
                 if item is None:
                     failed.append({"service": service, "reason": "실행기 응답 없음"})
@@ -473,7 +507,7 @@ class HomeOpsService:
         container = diagnostics.get("container", {})
         if container.get("status") != "running":
             return "중지됨"
-        if container.get("health") not in (None, "none", "healthy"):
+        if container.get("health") not in ("none", "healthy"):
             return "healthcheck 비정상"
         return None
 
@@ -535,6 +569,7 @@ class HomeOpsService:
     @staticmethod
     def _mask(value: Any) -> Any:
         if isinstance(value, str): return _SECRET_PATTERN.sub(r"\1[REDACTED]", value)
+        if isinstance(value, ManagedDiagnostics): return ManagedDiagnostics([HomeOpsService._mask(item) for item in value], value.managed_services)
         if isinstance(value, list): return [HomeOpsService._mask(item) for item in value]
         if isinstance(value, dict): return {key: HomeOpsService._mask(item) for key, item in value.items()}
         return value
@@ -554,6 +589,7 @@ class ExecutorClient:
     def __init__(self):
         self.url = os.getenv("HOMEOPS_EXECUTOR_URL", "http://homeops-executor:8011").rstrip("/")
         self.secret = _executor_shared_secret()
+        self.managed_services = ALLOWED_SERVICES
 
     def diagnostics(self, service: str) -> dict[str, Any]:
         return self._request(f"/v1/diagnostics/{service}")
@@ -571,11 +607,34 @@ class ExecutorClient:
         return bool(self.diagnostics(service).get("container", {}).get("health") == "healthy")
 
     def _request(self, path: str, payload: dict[str, Any] | None = None, method: str | None = None) -> Any:
+        if path == "/v1/diagnostics":
+            # Never reuse an earlier response's smaller scope after a failed fetch.
+            self.managed_services = ALLOWED_SERVICES
         if not self.secret:
             raise OSError("homeops_executor_shared_secret_not_configured")
         data = json.dumps(payload).encode() if payload else None
         request = Request(self.url + path, data=data, headers={"X-HomeOps-Executor-Secret": self.secret, "Content-Type": "application/json"}, method=method)
         with urlopen(request, timeout=5) as response:
+            if path == "/v1/diagnostics":
+                get_all = getattr(response.headers, "get_all", None)
+                if get_all is not None and len(get_all("X-HomeOps-Managed-Services", []) or []) > 1:
+                    raise OSError("homeops_executor_invalid_managed_scope")
+                header = response.headers.get("X-HomeOps-Managed-Services")
+                if header is None:
+                    managed = ALLOWED_SERVICES  # Compatibility with older executors.
+                else:
+                    names = [name.strip() for name in header.split(",")]
+                    managed = frozenset(names)
+                    if not names or not all(names) or len(managed) != len(names) or not managed <= ALLOWED_SERVICES:
+                        raise OSError("homeops_executor_invalid_managed_scope")
+                try:
+                    values = json.loads(response.read().decode())
+                except (ValueError, UnicodeDecodeError) as exc:
+                    raise OSError("homeops_executor_invalid_diagnostics") from exc
+                if not isinstance(values, list):
+                    raise OSError("homeops_executor_invalid_diagnostics")
+                self.managed_services = managed
+                return ManagedDiagnostics(values, managed)
             return json.loads(response.read().decode())
 
 

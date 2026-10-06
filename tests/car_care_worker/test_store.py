@@ -91,9 +91,12 @@ class CarCareStoreTest(unittest.TestCase):
                 ).fetchone()
             )
             after = {
-                table: db.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
+                table: db.execute(
+                    f"SELECT {'id, observed_at, odometer_km, dte_km, warnings_json' if table == 'vehicle_snapshots' else '*'} FROM {table} ORDER BY 1"
+                ).fetchall()
                 for table in before
             }
+            self.assertEqual(db.execute("SELECT unknown_warnings_json FROM vehicle_snapshots").fetchone(), ("[]",))
 
         self.assertEqual(after, before)
         self.assertEqual(
@@ -101,6 +104,7 @@ class CarCareStoreTest(unittest.TestCase):
             MaintenanceRecord("engine_oil", 52340, date(2026, 8, 22)),
         )
         self.assertEqual(legacy_store.get_alert_state("warning:fuel"), "active")
+        self.assertEqual(legacy_store.load_last_snapshot().unknown_warnings, frozenset())
 
     def test_process_command_reuses_reply_and_runs_callback_once(self) -> None:
         calls = []

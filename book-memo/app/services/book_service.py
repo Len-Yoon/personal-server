@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from app.services.datetime_format import format_display_datetime
+from app.services.write_safety import WriteConflict, check_version, init_write_requests, record_result, replay_result
 
 
 PROJECT_DATA_ROOT = next(
@@ -24,6 +25,7 @@ def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS books (
@@ -111,6 +113,9 @@ def init_db() -> None:
             """
         )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_memo_tags_key ON memo_tags (tag_key, memo_id)")
+        if "version" not in {row["name"] for row in connection.execute("PRAGMA table_info(book_chapters)")}:
+            connection.execute("ALTER TABLE book_chapters ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+        init_write_requests(connection)
 
 
 def list_books() -> list[dict[str, Any]]:
@@ -347,7 +352,7 @@ def list_chapters(book_id: int) -> list[dict[str, Any]]:
     return [_row_to_dict(row) for row in rows]
 
 
-def create_chapter(book_id: int, title: str) -> None:
+def create_chapter(book_id: int, title: str, request_id: str = "") -> None:
     init_db()
     title = title.strip()
 
@@ -355,6 +360,10 @@ def create_chapter(book_id: int, title: str) -> None:
         raise ValueError("목차 제목을 입력해주세요.")
 
     with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        payload = [book_id, title]
+        if replay_result(connection, request_id, "chapter-create", payload) is not None:
+            return
         row = connection.execute(
             "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM book_chapters WHERE book_id = ?",
             (book_id,),
@@ -367,6 +376,7 @@ def create_chapter(book_id: int, title: str) -> None:
             (book_id, title, row["next_position"]),
         )
         _sync_book_progress(connection, book_id)
+        record_result(connection, request_id, "chapter-create", payload, book_id)
 
 
 def create_chapters(book_id: int, titles: list[str]) -> int:
@@ -417,77 +427,101 @@ def create_chapters(book_id: int, titles: list[str]) -> int:
     return len(cleaned_titles)
 
 
-def update_chapter(chapter_id: int, is_done: bool, comment: str) -> int | None:
+def update_chapter(chapter_id: int, is_done: bool, comment: str, expected_version: int | None = None, request_id: str = "") -> int | None:
     init_db()
 
     with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        payload = [chapter_id, is_done, comment.strip(), expected_version]
+        replayed = replay_result(connection, request_id, "chapter-edit", payload)
+        if replayed is not None:
+            return replayed
         row = connection.execute(
-            "SELECT book_id FROM book_chapters WHERE id = ?",
+            "SELECT book_id, version FROM book_chapters WHERE id = ?",
             (chapter_id,),
         ).fetchone()
 
         if not row:
             return None
 
+        check_version(row, expected_version)
         book_id = row["book_id"]
         connection.execute(
             """
             UPDATE book_chapters
-            SET is_done = ?, comment = ?, updated_at = CURRENT_TIMESTAMP
+            SET is_done = ?, comment = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
             (1 if is_done else 0, comment.strip(), chapter_id),
         )
         _sync_book_progress(connection, book_id)
+        record_result(connection, request_id, "chapter-edit", payload, book_id)
 
     return book_id
 
 
-def update_chapter_statuses(book_id: int, done_chapter_ids: list[int]) -> None:
+def update_chapter_statuses(book_id: int, done_chapter_ids: list[int], expected_versions: dict[int, int] | None = None, request_id: str = "") -> None:
     init_db()
     done_ids = set(done_chapter_ids)
 
     with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        payload = [book_id, sorted(done_ids), expected_versions]
+        if replay_result(connection, request_id, "chapter-statuses", payload) is not None:
+            return
         rows = connection.execute(
-            "SELECT id FROM book_chapters WHERE book_id = ?",
+            "SELECT id, version FROM book_chapters WHERE book_id = ?",
             (book_id,),
         ).fetchall()
 
+        if expected_versions is not None:
+            if {row["id"] for row in rows} != set(expected_versions):
+                raise WriteConflict("목차가 변경되었습니다. 새로고침해 최신 목차를 확인해주세요.")
+            for row in rows:
+                check_version(row, expected_versions[row["id"]])
         for row in rows:
             connection.execute(
                 """
                 UPDATE book_chapters
-                SET is_done = ?, updated_at = CURRENT_TIMESTAMP
+                SET is_done = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
                 (1 if row["id"] in done_ids else 0, row["id"]),
             )
 
         _sync_book_progress(connection, book_id)
+        record_result(connection, request_id, "chapter-statuses", payload, book_id)
 
 
-def update_chapter_comment(chapter_id: int, comment: str) -> int | None:
+def update_chapter_comment(chapter_id: int, comment: str, expected_version: int | None = None, request_id: str = "") -> int | None:
     init_db()
 
     with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        payload = [chapter_id, comment.strip(), expected_version]
+        replayed = replay_result(connection, request_id, "chapter-comment", payload)
+        if replayed is not None:
+            return replayed
         row = connection.execute(
-            "SELECT book_id FROM book_chapters WHERE id = ?",
+            "SELECT book_id, version FROM book_chapters WHERE id = ?",
             (chapter_id,),
         ).fetchone()
 
         if not row:
             return None
 
+        check_version(row, expected_version)
         book_id = row["book_id"]
         connection.execute(
             """
             UPDATE book_chapters
-            SET comment = ?, updated_at = CURRENT_TIMESTAMP
+            SET comment = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
             (comment.strip(), chapter_id),
         )
         _touch_book(connection, book_id)
+        record_result(connection, request_id, "chapter-comment", payload, book_id)
 
     return book_id
 
@@ -580,10 +614,15 @@ def _parse_tags(value: str) -> list[str]:
     return tags
 
 
-def update_memo_tags(memo_id: int, tags: str) -> int | None:
+def update_memo_tags(memo_id: int, tags: str, request_id: str = "") -> int | None:
     parsed = _parse_tags(tags)
     init_db()
     with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        payload = [memo_id, parsed]
+        replayed = replay_result(connection, request_id, "memo-tags", payload)
+        if replayed is not None:
+            return replayed
         row = connection.execute("SELECT book_id FROM book_memos WHERE id = ?", (memo_id,)).fetchone()
         if not row:
             return None
@@ -593,6 +632,7 @@ def update_memo_tags(memo_id: int, tags: str) -> int | None:
             [(memo_id, tag, tag.casefold(), index) for index, tag in enumerate(parsed)],
         )
         _touch_book(connection, row["book_id"])
+        record_result(connection, request_id, "memo-tags", payload, row["book_id"])
         return row["book_id"]
 
 
@@ -666,6 +706,7 @@ def create_memo(
     content: str,
     page: int,
     tags: str = "",
+    request_id: str = "",
 ) -> None:
     init_db()
     parsed_tags = _parse_tags(tags)
@@ -677,6 +718,9 @@ def create_memo(
 
     with _connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        payload = [book_id, chapter_id, title, content, max(0, page), parsed_tags]
+        if replay_result(connection, request_id, "memo-create", payload) is not None:
+            return
         book_row = connection.execute(
             "SELECT id FROM books WHERE id = ?",
             (book_id,),
@@ -704,6 +748,7 @@ def create_memo(
             [(cursor.lastrowid, tag, tag.casefold(), index) for index, tag in enumerate(parsed_tags)],
         )
         _touch_book(connection, book_id)
+        record_result(connection, request_id, "memo-create", payload, cursor.lastrowid)
 
 
 def delete_memo(memo_id: int) -> int | None:

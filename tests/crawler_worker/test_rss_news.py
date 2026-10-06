@@ -4,6 +4,8 @@ import types
 import unittest
 from datetime import date
 from unittest.mock import patch
+from io import BytesIO
+from urllib.error import URLError
 
 from tests._test_support import prepare_service_import
 
@@ -99,6 +101,56 @@ class RssNewsTests(unittest.TestCase):
         self.assertFalse(
             rss_news._is_today("2026-07-14T14:59:59+00:00", today=date(2026, 7, 15))
         )
+
+
+class RssTransportFailureTests(unittest.TestCase):
+    def setUp(self):
+        prepare_service_import("crawler-worker")
+        sys.modules.pop("feedparser", None)
+        try:
+            importlib.import_module("feedparser")
+        except ImportError:
+            self.skipTest("requires crawler-worker dependency environment")
+        from app.crawlers import rss_news
+        self.rss_news = rss_news
+
+    def collect(self):
+        return self.rss_news.search_rss_news(
+            ["https://example.test/first", "https://example.test/second"],
+            category="KR_IT", source_name="Fixture", provider_name="Fixture RSS")
+
+    def test_all_transport_failures_are_not_a_successful_empty_feed(self):
+        with patch("app.crawlers.rss_news.urlopen", side_effect=URLError("fixture offline")):
+            with self.assertRaises(OSError):
+                self.collect()
+
+    def test_successful_empty_feed_survives_partial_transport_failure(self):
+        empty = b'<rss version="2.0"><channel><title>Fixture</title><link>https://example.test</link><description>empty</description></channel></rss>'
+        with patch("app.crawlers.rss_news.urlopen", side_effect=[URLError("fixture offline"), BytesIO(empty)]):
+            self.assertEqual(self.collect(), [])
+
+    def test_all_malformed_payloads_are_reported_as_unavailable(self):
+        for payload in (b'<html><body>not a feed</body></html>', b'<rss><broken'):
+            with self.subTest(payload=payload):
+                with patch("app.crawlers.rss_news.urlopen", side_effect=lambda *args, **kwargs: BytesIO(payload)):
+                    with self.assertRaises(OSError):
+                        self.collect()
+
+    def test_valid_feed_articles_survive_another_feed_failure(self):
+        xml = b'<rss version="2.0"><channel><title>Fixture</title><link>https://example.test</link><description>valid</description><item><title>Valid article</title><link>https://example.test/article</link></item></channel></rss>'
+        with patch("app.crawlers.rss_news.urlopen", side_effect=[URLError("fixture offline"), BytesIO(xml)]):
+            result = self.collect()
+        self.assertEqual([item["url"] for item in result], ["https://example.test/article"])
+
+    def test_all_valid_empty_feeds_are_a_successful_empty_collection(self):
+        empty = b'<rss version="2.0"><channel><title>Fixture</title><link>https://example.test</link><description>empty</description></channel></rss>'
+        with patch("app.crawlers.rss_news.urlopen", side_effect=lambda *args, **kwargs: BytesIO(empty)):
+            self.assertEqual(self.collect(), [])
+
+    def test_missing_parser_dependency_is_unavailable(self):
+        with patch.dict(sys.modules, {"feedparser": None}):
+            with self.assertRaisesRegex(OSError, "parser_unavailable"):
+                self.collect()
 
 
 if __name__ == "__main__":

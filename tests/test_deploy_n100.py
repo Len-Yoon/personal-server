@@ -114,7 +114,8 @@ class DeployN100Tests(unittest.TestCase):
         commands = "\n".join(entry["test_command"] for entry in CI_TEST_MATRIX)
 
         self.assertIn("tests/run_service_tests.py --github-matrix", CI_WORKFLOW)
-        self.assertIn("tests.test_homeops tests.test_homeops_notifier", commands)
+        self.assertIn("tests.test_homeops", commands.split())
+        self.assertIn("tests.test_homeops_notifier", commands.split())
         self.assertIn("tests.homeops_executor.test_docker_ops", commands)
         self.assertIn("tests.crawler_worker.test_news_routes", commands)
         self.assertIn("tests.test_deploy_n100", commands)

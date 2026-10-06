@@ -110,6 +110,7 @@
                 <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
                 <fieldset disabled style="display: contents;">
                 {% endif %}
+                        <input type="hidden" name="expected_version" value="{{ chapter.version }}">
                         <input type="hidden" name="is_done" value="0">
                         <label>
                             <input
@@ -227,7 +228,7 @@
     <span>book-memo</span>
     <span>Len Private Workspace</span>
 </footer>
-<script src="/static/js/form-drafts.js?v=20261005-login-draft-1"></script>
+<script src="/static/js/form-drafts.js?v=20261006-write-reliability-1"></script>
 <script>
 const redirectToWriteLogin = () => {
     return window.MemoDrafts.redirectToLogin();
@@ -372,38 +373,9 @@ const redirectToWriteLogin = () => {
         }
     });
 
-    document.querySelectorAll(".protected-delete-form").forEach((form) => {
-        form.addEventListener("submit", async (event) => {
-            event.preventDefault();
-
-            const confirmed = window.confirm(form.dataset.confirmMessage || "삭제할까요?");
-
-            if (!confirmed) {
-                return;
-            }
-
-            try {
-                const response = await fetch(form.action, {
-                    method: "POST",
-                    body: new FormData(form),
-                });
-
-            if (window.MemoDrafts.isLoginResponse(response)) {
-                    redirectToWriteLogin();
-                    return;
-                }
-
-                if (!response.ok) {
-                    window.alert("삭제에 실패했습니다.");
-                    return;
-                }
-
-                window.location.href = response.url || "/";
-            } catch (error) {
-                window.alert("삭제에 실패했습니다.");
-            }
-        });
-    });
+document.querySelectorAll(".protected-delete-form").forEach((form) => {
+    window.MemoDrafts.bindDeleteForm(form);
+});
 </script>
 </body>
 </html>

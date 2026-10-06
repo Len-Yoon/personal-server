@@ -15,15 +15,21 @@ def search_books(query: str, limit: int = 12) -> list[dict[str, Any]]:
     if not query:
         return []
 
+    successful_search = False
     for searcher in (_search_aladin, _search_google_books, _search_open_library):
+        if searcher is _search_aladin and not os.getenv("ALADIN_TTB_KEY", "").strip():
+            continue
         try:
             books = searcher(query, limit)
         except requests.RequestException:
             continue
 
+        successful_search = True
         if books:
             return books
 
+    if not successful_search:
+        raise ValueError("도서 검색 서비스를 이용할 수 없습니다. 잠시 후 다시 검색해주세요.")
     return []
 
 

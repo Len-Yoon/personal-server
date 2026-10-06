@@ -3,6 +3,7 @@ import {readFileSync} from "node:fs";
 import {resolve} from "node:path";
 import vm from "node:vm";
 import test from "node:test";
+import {randomUUID} from "node:crypto";
 
 const service = process.env.MEMO_DRAFT_SERVICE;
 assert.ok(["book-memo", "youtube-memo"].includes(service));
@@ -15,7 +16,8 @@ class Element {
         this.dataset = {}; this.listeners = new Map(); this.hidden = false;
     }
     addEventListener(name, callback) { this.listeners.set(name, callback); }
-    append(...children) { this.children.push(...children); }
+    append(...children) { this.children.push(...children); const node = children.find((child) => child.dataset?.draftStatus !== undefined); if (node) this.status = node; }
+    querySelector(selector) { return selector === "[data-draft-status]" ? this.status : null; }
     setAttribute(name, value) { this[name] = value; }
     dispatchEvent(event) { this.listeners.get(event.type)?.(event); }
 }
@@ -31,18 +33,24 @@ function fixture({authenticated = true, storage, action = "/videos/1/memos", id 
     form.getAttribute = (name) => name === "action" ? action : null;
     form.checkValidity = () => true;
     form.closest = () => null;
-    form.querySelector = (selector) => selector === "[data-draft-status]" ? form.status : null;
-    form.append = (element) => { form.status = element; };
+    form.querySelector = (selector) => selector === "[data-draft-status]" ? form.status
+        : selector === "[data-draft-reload]" ? form.children.find((child) => child.dataset.draftReload !== undefined) : null;
+    form.append = (element) => { form.children.push(element); if (element.name) form.elements.push(element); else if (element.dataset.draftStatus !== undefined) form.status = element; };
     const document = {body: {dataset: {draftService: service, writeAuthenticated: String(authenticated)}},
         querySelectorAll(selector) { return selector === "[data-draft-fields]" ? [form] : []; },
         createElement() { return new Element(); },
-        addEventListener(_type, callback) { this.ready = callback; }};
+        listeners: new Map(), addEventListener(type, callback) { if (type === "DOMContentLoaded") this.ready = callback; else this.listeners.set(type, callback); }};
     const window = {document, location, sessionStorage: {
         get length() { return values.size; }, key(index) { return [...values.keys()][index]; },
         getItem(key) { return values.get(key) || null; }, setItem(key, value) { values.set(key, value); },
-        removeItem(key) { values.delete(key); }}, confirm: () => true,
+        removeItem(key) { values.delete(key); }}, confirm: () => true, crypto: {randomUUID},
+        listeners: new Map(), addEventListener(type, callback) { this.listeners.set(type, callback); },
         async fetch() { return {status: 401, ok: false, url: "https://memo.example/write"}; }};
-    class FormData { constructor(target) { this.fields = target.elements.map(({name, value}) => [name, value]); } }
+    class FormData {
+        constructor(target) { this.fields = (target.elements || []).map(({name, value}) => [name, value]); }
+        set(name, value) { this.fields = this.fields.filter(([key]) => key !== name); this.fields.push([name, value]); }
+        get(name) { return this.fields.find(([key]) => key === name)?.[1]; }
+    }
     class Event { constructor(type) { this.type = type; } }
     vm.runInNewContext(script, {window, document, URL, FormData, Event});
     const submit = () => form.listeners.get("submit")({defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }});
@@ -292,4 +300,101 @@ test("existing delete handlers preserve dirty drafts before 401 and login HTML r
             assert.equal(page.window.location.assigned, "/auth/login?next_path=%2Fitems%2F1%3Fpage%3D2");
         }
     }
+});
+
+test("delete success preserves dirty draft and quota failure never repeats a committed delete", async () => {
+    for (const quota of [false, true]) {
+        const page = fixture(); page.boot(); page.form.elements[1].value = "dirty after delete";
+        const deletion = new Element(); deletion.action = "https://memo.example/memos/1/delete";
+        page.window.MemoDrafts.bindDeleteForm?.(deletion);
+        if (quota) page.window.sessionStorage.setItem = () => { throw new Error("quota"); };
+        let deletes = 0;
+        page.window.fetch = async () => { deletes++; return {status: 200, ok: true, url: "https://memo.example/items/1"}; };
+        await deletion.listeners.get("submit")?.({preventDefault() {}});
+        assert.equal(deletes, 1);
+        if (quota) {
+            assert.equal(page.window.location.assigned, undefined);
+            assert.match(deletion.status.textContent, /삭제.*완료/);
+            await deletion.listeners.get("submit")({preventDefault() {}});
+            assert.equal(deletes, 1);
+        } else {
+            assert.match([...page.values.values()].join(""), /dirty after delete/);
+            assert.equal(page.window.location.assigned, "https://memo.example/items/1");
+        }
+    }
+});
+
+test("lost response retries use the same request id through login and changed text gets a new id", async () => {
+    const page = fixture(); page.boot(); const ids = [];
+    page.window.fetch = async (_url, options) => { ids.push(options.body.get("request_id")); throw new Error("lost after commit"); };
+    await page.submit(); await page.submit();
+    assert.match(ids[0], /^[a-f0-9-]{36}$/);
+    assert.equal(ids[1], ids[0]);
+    const resumed = fixture({storage: page.values}); resumed.boot();
+    resumed.window.fetch = async (_url, options) => { ids.push(options.body.get("request_id")); return {status: 401, ok: false}; };
+    await resumed.submit(); assert.equal(ids[2], ids[0]);
+    resumed.form.elements[1].value += " changed";
+    await resumed.submit(); assert.notEqual(ids[3], ids[0]);
+});
+
+test("old draft edit version survives current hidden revision and conflict stays visible", async () => {
+    const first = fixture(); const version = new Element("expected_version", "hidden", "1");
+    first.form.elements.push(version); first.boot(); await first.submit();
+    const resumed = fixture({storage: first.values}); const latest = new Element("expected_version", "hidden", "2");
+    resumed.form.elements.push(latest); resumed.boot();
+    assert.equal(latest.value, "1");
+    resumed.window.fetch = async () => ({status: 409, ok: false, url: "https://memo.example/items/1"});
+    await resumed.submit();
+    assert.match(resumed.form.status.textContent, /다른 화면|충돌|최신/);
+    assert.equal(latest.value, "1");
+    assert.equal(resumed.window.location.assigned, undefined);
+});
+
+test("leaving a dirty editor triggers a browser guard without storing credentials", () => {
+    const page = fixture(); page.boot(); page.form.elements[1].value = "unsaved";
+    let prevented = false;
+    page.window.listeners.get("beforeunload")?.({preventDefault() {prevented=true;}});
+    assert.equal(prevented, true);
+});
+
+test("legacy drafts without a recorded version cannot masquerade as the latest edit", async () => {
+    const first = fixture(); first.boot(); await first.submit();
+    const resumed = fixture({storage: first.values}); const version = new Element("expected_version", "hidden", "3");
+    resumed.form.elements.push(version); resumed.boot();
+    assert.equal(version.value, "0");
+});
+
+test("conflict recovery explicitly discards only this draft and quota failures preserve it", async () => {
+    for (const quota of [false, true]) {
+        const page = fixture(); page.boot();
+        page.window.fetch = async () => ({status: 409, ok: false, url: "https://memo.example/items/1"});
+        await page.submit();
+        page.values.set("unrelated-draft", "leave alone");
+        const button = page.form.querySelector("[data-draft-reload]");
+        assert.ok(button);
+        if (quota) page.window.sessionStorage.removeItem = () => { throw new Error("storage failure"); };
+        button.listeners.get("click")();
+        assert.equal(page.values.get("unrelated-draft"), "leave alone");
+        if (quota) {
+            assert.equal(page.window.location.assigned, undefined);
+            assert.equal(page.values.size, 2);
+        } else {
+            assert.equal(page.values.size, 1);
+            assert.equal(page.window.location.assigned, "https://memo.example/items/1?page=2");
+        }
+    }
+});
+
+test("a new memo entered after a successful save uses a fresh request id", async () => {
+    const page = fixture(); page.boot(); const ids = [];
+    page.window.fetch = async (_url, options) => {
+        ids.push(options.body.get("request_id"));
+        return {status: 200, ok: true, url: "https://memo.example/items/1"};
+    };
+    await page.submit(); await page.submit();
+    assert.equal(ids.length, 1);
+    page.form.elements[1].value = "next memo";
+    await page.submit();
+    assert.equal(ids.length, 2);
+    assert.notEqual(ids[0], ids[1]);
 });

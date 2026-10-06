@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import urlopen
 
 from app.services.datetime_format import format_display_datetime
+from app.services.write_safety import WriteConflict, check_version, init_write_requests, record_result, replay_result
 
 
 PROJECT_DATA_ROOT = Path(__file__).resolve().parents[3] / "data"
@@ -22,6 +23,7 @@ def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS videos (
@@ -64,6 +66,9 @@ def init_db() -> None:
             )"""
         )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_memo_tags_key ON memo_tags (tag_key, memo_id)")
+        if "version" not in {row["name"] for row in connection.execute("PRAGMA table_info(memos)")}:
+            connection.execute("ALTER TABLE memos ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+        init_write_requests(connection)
 
 
 def parse_tags(value: str) -> list[str]:
@@ -235,7 +240,7 @@ def delete_video(video_id: int) -> bool:
     return True
 
 
-def create_memo(video_id: int, title: str, content: str, tags: str = "") -> dict[str, Any]:
+def create_memo(video_id: int, title: str, content: str, tags: str = "", request_id: str = "") -> dict[str, Any]:
     init_db()
 
     title = title.strip() or "제목 없는 메모"
@@ -246,6 +251,14 @@ def create_memo(video_id: int, title: str, content: str, tags: str = "") -> dict
     parsed_tags = parse_tags(tags)
 
     with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        payload = [video_id, title, content, parsed_tags]
+        replayed = replay_result(connection, request_id, "memo-create", payload)
+        if replayed is not None:
+            row = connection.execute("SELECT * FROM memos WHERE id = ?", (replayed,)).fetchone()
+            if not row:
+                raise WriteConflict("이미 저장 후 삭제된 요청입니다. 새 메모는 새 요청으로 저장해주세요.")
+            return _row_to_dict(row)
         connection.execute(
             """
             INSERT INTO memos (video_id, title, content)
@@ -269,6 +282,7 @@ def create_memo(video_id: int, title: str, content: str, tags: str = "") -> dict
             """
         ).fetchone()
         _replace_tags(connection, row["id"], parsed_tags)
+        record_result(connection, request_id, "memo-create", payload, row["id"])
 
     return _row_to_dict(row)
 
@@ -352,15 +366,22 @@ def list_export_records(video_ids: list[int] | None = None) -> list[dict[str, An
     return records
 
 
-def update_memo_tags(memo_id: int, tags: str) -> int | None:
+def update_memo_tags(memo_id: int, tags: str, request_id: str = "") -> int | None:
     init_db()
     parsed_tags = parse_tags(tags)
     with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        payload = [memo_id, parsed_tags]
+        replayed = replay_result(connection, request_id, "memo-tags", payload)
+        if replayed is not None:
+            return replayed
         row = connection.execute("SELECT video_id FROM memos WHERE id = ?", (memo_id,)).fetchone()
         if row is None:
             return None
         _replace_tags(connection, memo_id, parsed_tags)
+        connection.execute("UPDATE memos SET version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (memo_id,))
         connection.execute("UPDATE videos SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (row["video_id"],))
+        record_result(connection, request_id, "memo-tags", payload, row["video_id"])
     return row["video_id"]
 
 
@@ -471,7 +492,7 @@ def delete_memo(memo_id: int) -> int | None:
     return video_id
 
 
-def update_memo(memo_id: int, title: str, content: str) -> int | None:
+def update_memo(memo_id: int, title: str, content: str, expected_version: int | None = None, request_id: str = "") -> int | None:
     init_db()
     title = title.strip() or "제목 없는 메모"
     content = content.strip()
@@ -480,19 +501,25 @@ def update_memo(memo_id: int, title: str, content: str) -> int | None:
         raise ValueError("메모 내용을 입력해주세요.")
 
     with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        payload = [memo_id, title, content, expected_version]
+        replayed = replay_result(connection, request_id, "memo-edit", payload)
+        if replayed is not None:
+            return replayed
         row = connection.execute(
-            "SELECT video_id FROM memos WHERE id = ?",
+            "SELECT video_id, version FROM memos WHERE id = ?",
             (memo_id,),
         ).fetchone()
 
         if not row:
             return None
 
+        check_version(row, expected_version)
         video_id = row["video_id"]
         connection.execute(
             """
             UPDATE memos
-            SET title = ?, content = ?, updated_at = CURRENT_TIMESTAMP
+            SET title = ?, content = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
             (title, content, memo_id),
@@ -505,6 +532,7 @@ def update_memo(memo_id: int, title: str, content: str) -> int | None:
             """,
             (video_id,),
         )
+        record_result(connection, request_id, "memo-edit", payload, video_id)
 
     return video_id
 

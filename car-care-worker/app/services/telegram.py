@@ -148,6 +148,12 @@ class CommandHandler:
             details.append(f"주행 가능 거리: {snapshot.dte_km:,}km")
         else:
             details.append("주행 가능 거리: 확인 필요")
+        if snapshot.unknown_warnings:
+            warning_names = {"engine_oil": "엔진오일", "brake_oil": "브레이크 오일",
+                             "tire_pressure": "타이어 공기압", "washer_fluid": "워셔액", "fuel": "연료"}
+            details.append("경고등 확인 필요: " + ", ".join(
+                warning_names.get(warning, "미확인 항목") for warning in sorted(snapshot.unknown_warnings)
+            ))
         tire_change = store.get_latest_tire_change()
         if tire_change is not None:
             tire_name = {"winter_tires": "윈터타이어", "all_season_tires": "사계절타이어"}[tire_change.tire_type]
@@ -169,6 +175,7 @@ class CommandHandler:
                 odometer_km=odometer_km,
                 dte_km=None if previous is None else previous.dte_km,
                 warnings=frozenset() if previous is None else previous.warnings,
+                unknown_warnings=frozenset() if previous is None else previous.unknown_warnings,
             )
         )
         alerts = self._maintenance_alerts(odometer_km, _today_in_korea(), store)

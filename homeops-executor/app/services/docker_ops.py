@@ -35,9 +35,15 @@ def collect_diagnostics(
     }
 
 
-def collect_all_diagnostics(client: Any | None = None) -> list[dict[str, object]]:
+def collect_all_diagnostics(
+    client: Any | None = None,
+    managed_services: frozenset[str] | None = None,
+) -> list[dict[str, object]]:
     diagnostics: list[dict[str, object]] = []
-    for service in sorted(allowed_services()):
+    managed = allowed_services() if managed_services is None else managed_services
+    if not managed <= DEFAULT_ALLOWED_SERVICES:
+        raise ValueError("service_not_allowed")
+    for service in sorted(managed):
         try:
             diagnostics.append(
                 collect_diagnostics(service, client=client, include_runtime_evidence=False)
