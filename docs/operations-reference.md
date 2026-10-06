@@ -109,6 +109,8 @@ python3 infra/k8s/tools/homeops-auth-configure.py --go --expected-commit "$(git 
 
 ## 운영 경계
 
+[자동 재공급 운영 검증](reviews/20261006_기능실패경계_N100운영적용결과.md#8-homeops-인증-자동-재공급): 부모 인증값 없이 기존 이미지의 실행기 1개를 재생성하여 실제 진단·403 거부·보호 상태·외부 health 15/15를 확인함. Secret·Portal은 변경하지 않았으며 실제 호스트 재부팅 검증을 대체하지 않음.
+
 - Portal은 K3s 단일 writer로만 실행함. Compose Portal과 동시에 실행하지 않음.
 - K3s Portal 전환·rollback·PVC 작업은 `infra/k8s/tools/portal-cutover.sh`의 명시적 운영 절차만 사용함.
 - 자동 배포는 `crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker`의 허용된 변경을 분류함. 현재 K3s runtime state의 `crawler-worker`, `book-memo`, `youtube-memo`는 Compose 안전 배포에서 `safe_cd_skip_k3s_service`로 생략되며, 실제 Compose 배포 대상은 `car-care-worker`임.
