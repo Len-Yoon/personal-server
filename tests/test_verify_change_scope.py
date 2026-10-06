@@ -521,6 +521,19 @@ class VerifyChangeScopeTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(evidence["missing_checks"], [])
 
+    def test_auth_supplier_requires_all_checks_without_allowing_neighbor_scripts(self):
+        path = "scripts/homeops-auth-run.py"
+        required = ("maintenance", "portal", "system-agent", "crawler-worker", "homeops-executor",
+                    "youtube-memo", "book-memo", "car-care-worker")
+        code, evidence = run_scope(path, executed_checks=("maintenance",))
+        self.assertNotEqual(code, 0)
+        self.assertEqual(evidence["required_checks"], list(required))
+        code, evidence = run_scope(path, executed_checks=required)
+        self.assertEqual(code, 0)
+        code, evidence = run_scope("scripts/homeops-auth-run-extra.py", executed_checks=required)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(evidence["blocked_files"], ["scripts/homeops-auth-run-extra.py"])
+
     def test_unknown_change_blocks_review(self):
         code, evidence = run_scope("unknown-area/config.toml")
         self.assertEqual(code, 2)

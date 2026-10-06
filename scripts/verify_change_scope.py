@@ -25,6 +25,7 @@ BLOCKED_PREFIXES = ("caddy/", "scripts/")
 BLOCKED_INFRASTRUCTURE_FILES = {"docker-compose.yml", "docker-compose.n100.yml"}
 APPROVED_RUNTIME_CONFIG_FILES = {"docker-compose.n100.yml", "caddy/Caddyfile"}
 APPROVED_PORTAL_CUTOVER_RUNTIME_FILES = {
+    "scripts/homeops-auth-run.py",
     "docker-compose.yml",
     "docker-compose.portal-bridge.yml",
     "scripts/deploy-n100.sh",

@@ -297,7 +297,8 @@ start_runtime_services() {
         if [ "$(runtime_service_mode "$service")" = compose ]; then compose_services+=" $service"; fi
       done
       bridge_compose=(docker compose -f docker-compose.yml -f docker-compose.n100.yml -f "$PORTAL_BRIDGE_COMPOSE_FILE")
-      "${bridge_compose[@]}" up -d --no-deps --force-recreate $compose_services
+      python3 "$SCRIPT_DIR/homeops-auth-run.py" --runtime-mode "$PORTAL_RUNTIME_MODE" -- \
+        "${bridge_compose[@]}" up -d --no-deps --force-recreate $compose_services
       resolve_crawler_worker_caddy_upstream
       resolve_book_memo_caddy_upstream
       resolve_youtube_memo_caddy_upstream
@@ -317,7 +318,8 @@ start_runtime_services() {
         if [ "$(runtime_service_mode "$service")" = compose ]; then compose_services+=" $service"; fi
       done
       bridge_compose=(docker compose -f docker-compose.yml -f docker-compose.n100.yml -f "$PORTAL_BRIDGE_COMPOSE_FILE")
-      "${bridge_compose[@]}" up -d --no-deps --force-recreate $compose_services
+      python3 "$SCRIPT_DIR/homeops-auth-run.py" --runtime-mode "$PORTAL_RUNTIME_MODE" -- \
+        "${bridge_compose[@]}" up -d --no-deps --force-recreate $compose_services
       resolve_crawler_worker_caddy_upstream
       resolve_book_memo_caddy_upstream
       resolve_youtube_memo_caddy_upstream

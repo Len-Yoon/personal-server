@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from tests.test_homeops_auth_supply import resources
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -302,6 +303,11 @@ class CrawlerRuntimeCaddyTests(unittest.TestCase):
                 "import json, os, sys\n"
                 "args = sys.argv[1:]\n"
                 "with open(os.environ['FAKE_CALLS'], 'a') as log: log.write('sudo ' + ' '.join(args) + '\\n')\n"
+                f"deployment, secret = {resources()!r}\n"
+                "if 'deployment' in args and 'portal-web' in args:\n"
+                "  print(json.dumps(deployment)); sys.exit(0)\n"
+                "if 'secret' in args and 'portal-secrets' in args:\n"
+                "  print(json.dumps(secret)); sys.exit(0)\n"
                 f"fixtures = {fixtures!r}\n"
                 "resource = next((a for a in args if a.startswith(('deployment/', 'service/', 'endpoints/', 'pvc/'))), '')\n"
                 "name = resource.partition('/')[2].removesuffix('-data')\n"
