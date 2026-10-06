@@ -220,10 +220,9 @@ assert os.getenv('HOMEOPS_EXECUTOR_SHARED_SECRET')==expected
 client=ExecutorClient();values=client.all_diagnostics()
 scope=frozenset({'system-agent','caddy','homeops-executor'})
 assert values.managed_services==scope and len(values)==3 and {x['service'] for x in values}==scope
-assert all(x.get('container',{}).get('status')=='running' and x.get('container',{}).get('health')=='healthy' for x in values)
 service=object.__new__(HomeOpsService);service.executor=client
 assert service._all_services_healthy(values)
-print(json.dumps({'portal_auth_match':True,'authenticated_diagnostics':'PASS','membership':'PASS','scope_count':3,'summary_health':'PASS','management_post':'NOT_PERFORMED'}))'''
+print(json.dumps({'portal_auth_match':True,'authenticated_diagnostics':'PASS','membership':'PASS','scope_count':3,'summary_health':'PASS','healthcheck_absent':[x['service'] for x in values if x['container'].get('health')=='none'],'management_post':'NOT_PERFORMED'}))'''
         portal_proof = json.loads(run_command(["sudo", "-n", "k3s", "kubectl", "-n", NAMESPACE, "exec", "-i", pod["metadata"]["name"], "--", "python", "-c", code], input_text=json.dumps({"auth": auth})))
         code = r'''import os,json,sys
 from urllib.request import Request,urlopen
@@ -289,20 +288,28 @@ print(json.dumps({'executor_auth_match':True,'missing_auth_status':403,'wrong_au
             fresh, _ = self.portal()
             if fresh["metadata"]["resourceVersion"] != deployment["metadata"]["resourceVersion"] or self.docker()["Id"] != docker["Id"]:
                 raise OperationError("target_changed_after_preflight")
+            stage = "canonical_secret"
             try:
                 if not encoded:
                     value = base64.b64encode(auth.encode("ascii")).decode("ascii")
                     secret = self.secret_cas(secret["metadata"]["name"], self.contract.secret_patch(secret, value))
                 if executor_needs_update:
+                    stage = "executor_apply"
                     executor_attempted = True
                     run_command(args, environment=environment, timeout=180)
+                    stage = "executor_health"
                     self.wait_executor(docker)
+                stage = "backup_idle"
                 self.no_backup_activity()
                 if patch:
+                    stage = "portal_apply"
                     self.portal_cas(patch)
+                    stage = "portal_rollout"
                     _, pod = self.wait_portal()
                 elif not portal_loaded:
+                    stage = "portal_rollout"
                     _, pod = self.wait_portal()
+                stage = "target_preservation"
                 after, _ = self.portal()
                 if after["metadata"]["uid"] != deployment["metadata"]["uid"] or after["spec"] != expected_spec:
                     raise OperationError("portal_configuration_changed")
@@ -311,6 +318,7 @@ print(json.dumps({'executor_auth_match':True,'missing_auth_status':403,'wrong_au
                 before_other = {k: v for k, v in secret["data"].items() if k != KEY}
                 if other != before_other or decode_auth(current_secret["data"][KEY]) != auth:
                     raise OperationError("secret_changed_concurrently")
+                stage = "authenticated_verification"
                 result = self.verify(auth, pod)
                 return dict(status="PASS", mutation="CONFIGURED", rollback_used=False, **result)
             except Exception:
@@ -342,7 +350,7 @@ print(json.dumps({'executor_auth_match':True,'missing_auth_status':403,'wrong_au
                                 {"op": "remove", "path": "/data/" + KEY}])
                 except Exception:
                     raise OperationError("configuration_failed_recovery_requires_inspection") from None
-                raise OperationError("configuration_failed_rollback_completed") from None
+                raise OperationError("configuration_failed_rollback_completed:" + stage) from None
 
 
 def main(argv=None):

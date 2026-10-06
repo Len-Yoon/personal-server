@@ -4,6 +4,10 @@ import subprocess
 import unittest
 import base64
 import copy
+import io
+import sys
+import types
+from contextlib import redirect_stdout
 from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
@@ -22,6 +26,34 @@ def load_module():
 
 
 class HomeOpsAuthRuntimeTests(unittest.TestCase):
+    def test_live_diagnostic_probe_uses_existing_no_healthcheck_contract(self):
+        module = load_module()
+        scope = frozenset({"system-agent", "caddy", "homeops-executor"})
+        class Diagnostics(list):
+            managed_services = scope
+        values = Diagnostics({"service": name, "container": {"status": "running", "health": "none" if name == "caddy" else "healthy"}} for name in scope)
+        class Client:
+            def all_diagnostics(self):
+                return values
+        class Service:
+            def _all_services_healthy(self, diagnostics):
+                return all(x["container"]["status"] == "running" and x["container"]["health"] in ("none", "healthy") for x in diagnostics)
+        fake = types.ModuleType("app.services.homeops")
+        fake.ExecutorClient, fake.HomeOpsService = Client, Service
+        def execute(args, **kwargs):
+            if args[0] == "docker":
+                return json.dumps({"executor_auth_match": True, "missing_auth_status": 403, "wrong_auth_status": 403})
+            output = io.StringIO()
+            with patch.dict(sys.modules, {"app.services.homeops": fake}), patch.object(sys, "stdin", io.StringIO(kwargs["input_text"])), patch.object(module.os, "getenv", return_value="a" * 64), redirect_stdout(output):
+                exec(args[-1], {})
+            return output.getvalue()
+        configuration = module.Configuration(str(PATH.parents[3]))
+        with patch.object(module, "run_command", side_effect=execute):
+            self.assertEqual(configuration.verify("a" * 64, {"metadata": {"name": "portal"}})["summary_health"], "PASS")
+            values[0]["container"]["health"] = "unhealthy"
+            with self.assertRaises(AssertionError):
+                configuration.verify("a" * 64, {"metadata": {"name": "portal"}})
+
     def test_command_failure_never_reveals_sensitive_stderr_or_input(self):
         module = load_module()
         secret = "test-only-sensitive-input"
