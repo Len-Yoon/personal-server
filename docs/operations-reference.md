@@ -109,6 +109,15 @@ K3s 애플리케이션의 런타임 이미지만 교체하는 운영 절차임. 
 
 대상 rollout 또는 health 검증 실패 시 도구는 직전 immutable digest로 **1회만** rollback을 시도함. 뉴스 10차는 구 버전이 새 outbox를 보존하지 못해 [복구 호환 검토안](reviews/20260921_뉴스복구호환_적용검토안.md)의 중간 이미지를 거쳐 2026-09-22 적용했음. 이는 완료된 전환 이력이며 새 이미지의 rollback 호환성을 자동 보장하지 않음. rollback 실패·상태 불확실·두 번째 시도 필요 상황에서는 자동 재실행하지 않고 운영자가 상태를 확인한 뒤 별도 판단함. 이 절차는 Deployment의 컨테이너 이미지 외에는 변경하지 않으며 PVC, Secret, Caddy, Cloudflare Tunnel, Docker Compose를 생성·수정·삭제·재기동하지 않음.
 
+### 추가형 DB 변경·Compose 이미지 교체 시 확인 기준
+
+- Book·YouTube의 `version`·`write_requests`, 차량의 `unknown_warnings_json`은 앱 초기화의 추가형 변경임. 교체 전에 SQLite online backup·quick_check·기존 컬럼의 행 수/내용 해시와 이전 이미지를 확보함. 이미지 원복은 새 컬럼·테이블 삭제나 DB 백업 덮어쓰기를 포함하지 않음.
+- Windows bind에서는 0700/0600 지정이 실제 제한 권한으로 적용되지 않을 수 있음. 기존 운영 데이터 권한을 임의로 변경하지 않고, 검증된 tmpfs snapshot과 WSL 접근 제한 저장소 등 실제 제한 권한을 확인한 위치에 복원점을 보존함. 인증·OAuth 파일을 복제하지 않음.
+- HomeOps·차량은 기존 Compose 파일·환경 값·권한·마운트·네트워크·port binding을 대조하고 대상만 교체함. HomeOps의 현재 관리 집합을 기본값으로 넓히지 않음. bridge 주소 변수의 기본값과 실제 기존 바인딩이 같다고 가정하지 않으며, Secret·내부 주소를 검사 로그나 신규 파일에 기록하지 않음.
+- Docker ImageId는 저장 엔진에 따라 config digest와 다를 수 있음. archive 체크섬과 실제 manifest/config·RootFS 대조로 확인한 런타임 ID를 사용함. 배열 순서가 무의미한 환경·마운트 비교는 실제 값·중복 환경 이름을 검사한 뒤 정규화함.
+
+이번 기능 보완의 소스·서비스별 이미지·중단/원복·검증 이력은 [2026-10-06 운영 적용 결과](reviews/20261006_기능실패경계_N100운영적용결과.md)를 따름. 후속 작업은 해당 시점의 증적을 현재 실행 상태로 가정하지 않고 다시 읽기 전용 점검함.
+
 ## Book Memo K3s 현재 운영 기준
 
 - `books.len.pe.kr`의 확정 경로는 Cloudflare Tunnel → Caddy → K3s `book-memo` Service이며, K3s Pod만 production writer로 사용함. 중지된 Docker `book-memo`와 동시에 production write를 허용하지 않음.
