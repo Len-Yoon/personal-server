@@ -469,6 +469,9 @@ deleteSelection?.addEventListener("click", async () => {
     }
 
     const result = await response.json();
+    if (!result.ok) {
+        alert(result.detail || "일부 삭제를 완료하지 못했습니다. 목록을 새로 확인합니다.");
+    }
     window.location.href = result.redirect || window.location.href;
 });
 

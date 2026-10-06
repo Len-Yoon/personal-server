@@ -96,8 +96,13 @@ def _observe_vehicle(
         return
     if result.status == "error":
         today = _today_in_korea()
+        message = (
+            "Hyundai 차량 연결 인증이 만료되었거나 거부되었습니다. /현대연결 명령으로 다시 연결하세요."
+            if result.error == "auth"
+            else "Hyundai 차량 상태 조회 오류: API 연결 또는 응답을 확인하세요."
+        )
         if monitor.should_notify_hyundai_error(today) and telegram.send(
-            "Hyundai 차량 상태 조회 오류: API 연결 또는 응답을 확인하세요."
+            message
         ):
             monitor.acknowledge_hyundai_error(today)
         return

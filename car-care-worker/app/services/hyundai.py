@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import fcntl
 import os
 from pathlib import Path
 import secrets
@@ -75,6 +77,7 @@ class HyundaiClient:
         self._api_base_url = api_base_url.rstrip("/")
         self._access_token: str | None = None
         self._access_token_expires_at = 0.0
+        self._last_token_error: str | None = None
 
     @classmethod
     def from_environment(cls) -> "HyundaiClient":
@@ -120,9 +123,15 @@ class HyundaiClient:
     def fetch_snapshot(self) -> HyundaiFetchResult:
         if not all((self._client_id, self._client_secret)):
             return HyundaiFetchResult.disabled()
-        token = self._valid_access_token()
+        try:
+            token = self._valid_access_token()
+        except OSError:
+            return HyundaiFetchResult.failure("request")
+        except ValueError:
+            return HyundaiFetchResult.failure("parse")
         if token is None:
-            return HyundaiFetchResult.disabled()
+            return (HyundaiFetchResult.failure(self._last_token_error or "auth")
+                    if self._load_refresh_token() is not None else HyundaiFetchResult.disabled())
         try:
             car_id = self._vehicle_id or self._resolve_single_car(token)
             if car_id is None:
@@ -132,15 +141,14 @@ class HyundaiClient:
             odometer = _odometer_km(odometer_payload)
             if odometer is None or dte_payload is None:
                 return HyundaiFetchResult.failure("response")
-            warnings = self._fetch_warnings(car_id, token)
-            if warnings is None:
-                return HyundaiFetchResult.failure("response")
+            warnings, unknown_warnings = self._fetch_warnings(car_id, token)
         except (OSError, URLError, HTTPError):
             return HyundaiFetchResult.failure("request")
         except (ValueError, json.JSONDecodeError):
             return HyundaiFetchResult.failure("parse")
         return HyundaiFetchResult.success(
-            VehicleSnapshot(datetime.now(timezone.utc), odometer, _distance_km(dte_payload), frozenset(warnings))
+            VehicleSnapshot(datetime.now(timezone.utc), odometer, _distance_km(dte_payload),
+                            frozenset(warnings), frozenset(unknown_warnings))
         )
 
     def _valid_access_token(self) -> str | None:
@@ -160,20 +168,27 @@ class HyundaiClient:
         car = payload["cars"][0]
         return _clean(car.get("carId")) if isinstance(car, dict) else None
 
-    def _fetch_warnings(self, car_id: str, access_token: str) -> set[str] | None:
+    def _fetch_warnings(self, car_id: str, access_token: str) -> tuple[set[str], set[str]]:
         paths = {"engine_oil": "engineOil", "brake_oil": "breakOil", "washer_fluid": "washerFluid", "fuel": "lowFuel"}
         active: set[str] = set()
+        unknown: set[str] = SUPPORTED_WARNINGS - paths.keys()
         for warning, path in paths.items():
-            payload = self._get_json(f"/car/status/warning/{car_id}/{path}", access_token)
+            try:
+                payload = self._get_json(f"/car/status/warning/{car_id}/{path}", access_token)
+            except (OSError, ValueError):
+                unknown.add(warning)
+                continue
             if not isinstance(payload, dict):
+                unknown.add(warning)
                 continue
             # Some vehicle models return only msgId for an unavailable warning.
             # That must not discard an otherwise valid odometer/DTE observation.
             if not isinstance(payload.get("status"), bool):
+                unknown.add(warning)
                 continue
             if payload["status"] and warning in SUPPORTED_WARNINGS:
                 active.add(warning)
-        return active
+        return active, unknown
 
     def _get_json(self, path: str, access_token: str) -> object:
         request = Request(f"{self._api_base_url}{path}", headers={
@@ -183,6 +198,7 @@ class HyundaiClient:
             return json.loads(response.read().decode("utf-8"))
 
     def _token_request(self, fields: dict[str, str]) -> object | None:
+        self._last_token_error = None
         if not all((self._client_id, self._client_secret)):
             return None
         basic = base64.b64encode(f"{self._client_id}:{self._client_secret}".encode()).decode()
@@ -192,7 +208,11 @@ class HyundaiClient:
         try:
             with urlopen(request, timeout=8) as response:
                 return json.loads(response.read().decode("utf-8"))
-        except (OSError, URLError, HTTPError, ValueError, json.JSONDecodeError):
+        except HTTPError as exc:
+            self._last_token_error = "auth" if exc.code in {400, 401, 403} else "request"
+            return None
+        except (OSError, URLError, ValueError, json.JSONDecodeError):
+            self._last_token_error = "request"
             return None
 
     def _request_data_agreement(self, access_token: str, state: str | None) -> bool:
@@ -220,15 +240,16 @@ class HyundaiClient:
             expires_at = time.time() + float(expires_in)
         except ValueError:
             return False
+        self._save_refresh_token(refresh_token)
         self._access_token = access_token
         self._access_token_expires_at = expires_at
-        self._save_refresh_token(refresh_token)
         return True
 
     def _save_refresh_token(self, refresh_token: str) -> None:
-        payload = self._load_token_file()
-        payload["refresh_token"] = refresh_token
-        self._write_token_file(payload)
+        with self._token_file_lock():
+            payload = self._load_token_file()
+            payload["refresh_token"] = refresh_token
+            self._write_token_file(payload)
 
     def _load_tokens(self) -> _Tokens | None:
         payload = self._load_token_file()
@@ -241,18 +262,32 @@ class HyundaiClient:
         return _clean(self._load_token_file().get("refresh_token"))
 
     def _save_authorization_state(self, state: str) -> None:
-        payload = self._load_token_file()
-        payload.update({"authorization_state": state, "authorization_state_expires_at": time.time() + 600})
-        self._write_token_file(payload)
+        with self._token_file_lock():
+            payload = self._load_token_file()
+            payload.update({"authorization_state": state, "authorization_state_expires_at": time.time() + 600})
+            self._write_token_file(payload)
 
     def _consume_authorization_state(self, state: str | None) -> None:
-        payload = self._load_token_file()
-        expected, expires_at = _clean(payload.get("authorization_state")), payload.get("authorization_state_expires_at")
-        payload.pop("authorization_state", None)
-        payload.pop("authorization_state_expires_at", None)
-        self._write_token_file(payload)
-        if not state or not expected or not isinstance(expires_at, (int, float)) or expires_at <= time.time() or not secrets.compare_digest(state, expected):
-            raise ValueError("invalid authorization state")
+        with self._token_file_lock():
+            payload = self._load_token_file()
+            expected, expires_at = _clean(payload.get("authorization_state")), payload.get("authorization_state_expires_at")
+            if not state or not expected or not isinstance(expires_at, (int, float)) or expires_at <= time.time() or not secrets.compare_digest(state, expected):
+                raise ValueError("invalid authorization state")
+            payload.pop("authorization_state", None)
+            payload.pop("authorization_state_expires_at", None)
+            self._write_token_file(payload)
+
+    @contextmanager
+    def _token_file_lock(self):
+        self._token_store_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self._token_store_path.with_suffix(self._token_store_path.suffix + ".lock")
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        with os.fdopen(descriptor, "a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _load_token_file(self) -> dict:
         try:

@@ -20,7 +20,9 @@
 
             <p data-refresh-status>
                 {{ result.count }}개의 뉴스를 가져왔습니다. ·
-                {% if result.cache.hit %}
+                {% if result.collection and result.collection.status == "error" %}
+                    수집 실패 · 기존 보관 뉴스 표시 · {{ result.cache.age_seconds }}초 전 수집
+                {% elif result.cache.hit %}
                     캐시 사용 중 · {{ result.cache.age_seconds }}초 전 수집
                 {% else %}
                     방금 새로 수집
@@ -281,7 +283,9 @@
 
     function updateStatus(result) {
         const cache = result.cache || {};
-        const freshness = cache.hit
+        const freshness = result.collection && result.collection.status === "error"
+            ? "수집 실패 · 기존 보관 뉴스 표시"
+            : cache.hit
             ? `캐시 사용 중 · ${cache.age_seconds || 0}초 전 수집`
             : "방금 새로 수집";
         status.textContent = `${result.count || 0}개의 뉴스를 가져왔습니다. · ${freshness}`;

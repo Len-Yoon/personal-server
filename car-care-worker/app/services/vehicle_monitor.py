@@ -27,6 +27,8 @@ class VehicleMonitor:
         alerts: list[Alert] = []
         for warning in sorted(SUPPORTED_WARNINGS):
             key = f"warning:{warning}"
+            if warning in snapshot.unknown_warnings:
+                continue
             active = warning in snapshot.warnings
             if active and self._store.get_alert_state(key) != "active":
                 alerts.append(Alert("warning", key, f"경고등 점등: {_warning_name(warning)}"))

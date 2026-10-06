@@ -596,6 +596,8 @@ class HomeOpsTests(unittest.TestCase):
                 {"service": "caddy", "reason": "healthcheck 비정상"},
                 {"service": "book-memo", "reason": "healthcheck 비정상"},
                 {"service": "youtube-memo", "reason": "중지됨"},
+                {"service": "homeops-executor", "reason": "실행기 응답 없음"},
+                {"service": "system-agent", "reason": "실행기 응답 없음"},
             ],
         )
 

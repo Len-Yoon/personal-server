@@ -39,6 +39,7 @@ from app.services.book_service import (
     update_memo_tags,
 )
 from app.services.toc_service import fetch_toc_candidates
+from app.services.write_safety import WriteConflict
 from app.services.host_urls import portal_home_url, request_host_from_headers
 
 
@@ -129,6 +130,7 @@ def home(
     available_tags = list_available_tags()
     active_tag = next((item for item in available_tags if item.casefold() == tag.strip().casefold()), tag.strip())
     total_pages = max(1, (total_books + 23) // 24)
+    chapters_by_book = {book["id"]: list_chapters(book["id"]) for book in books}
 
     return templates.TemplateResponse(
         "home.html",
@@ -143,7 +145,11 @@ def home(
             "total_books": total_books,
             "current_page": current_page,
             "total_pages": total_pages,
-            "chapters_by_book": {book["id"]: list_chapters(book["id"]) for book in books},
+            "chapters_by_book": chapters_by_book,
+            "chapter_versions_by_book": {
+                book["id"]: json.dumps({chapter["id"]: chapter["version"] for chapter in chapters_by_book[book["id"]]})
+                for book in books
+            },
             "error": error,
             "has_aladin_key": bool(os.getenv("ALADIN_TTB_KEY", "").strip()),
             "statuses": ["읽을 예정", "읽는 중", "완료", "보류"],
@@ -269,15 +275,16 @@ def create_book_chapter(
     request: Request,
     book_id: int,
     title: str = Form(...),
+    request_id: str = Form(default=""),
 ):
     _require_write_session(request)
     if not get_book(book_id):
         raise HTTPException(status_code=404, detail="Book not found")
 
     try:
-        create_chapter(book_id=book_id, title=title)
+        create_chapter(book_id=book_id, title=title, request_id=request_id)
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=str(error)) from error
 
     return RedirectResponse(url=f"/books/{book_id}", status_code=303)
 
@@ -306,12 +313,28 @@ def update_book_chapter_statuses(
     book_id: int,
     done_chapter_ids: list[int] = Form(default=[]),
     redirect_to: str = Form(default=""),
+    expected_versions: str = Form(default=""),
+    request_id: str = Form(default=""),
 ):
     _require_write_session(request)
     if not get_book(book_id):
         raise HTTPException(status_code=404, detail="Book not found")
 
-    update_chapter_statuses(book_id=book_id, done_chapter_ids=done_chapter_ids)
+    try:
+        versions = json.loads(expected_versions)
+        if not isinstance(versions, dict) or any(
+            not isinstance(key, str) or not key.isascii() or not key.isdecimal()
+            or not isinstance(value, int) or isinstance(value, bool) or value < 1
+            for key, value in versions.items()
+        ):
+            raise ValueError("invalid versions")
+        parsed_versions = {int(key): value for key, value in versions.items()}
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=409, detail="최신 목차 확인이 필요합니다. 입력을 복사하고 새로고침해주세요.")
+    try:
+        update_chapter_statuses(book_id=book_id, done_chapter_ids=done_chapter_ids, expected_versions=parsed_versions, request_id=request_id)
+    except ValueError as error:
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=str(error)) from error
 
     return RedirectResponse(url=_safe_redirect(redirect_to) or f"/books/{book_id}", status_code=303)
 
@@ -333,13 +356,15 @@ def update_book_chapter(
     is_done: str = Form(default="0"),
     comment: str = Form(default=""),
     redirect_to: str = Form(default=""),
+    expected_version: int = Form(default=0),
+    request_id: str = Form(default=""),
 ):
     _require_write_session(request)
-    book_id = update_chapter(
-        chapter_id=chapter_id,
-        is_done=is_done == "1",
-        comment=comment,
-    )
+    try:
+        book_id = update_chapter(chapter_id=chapter_id, is_done=is_done == "1", comment=comment,
+                                 expected_version=expected_version, request_id=request_id)
+    except ValueError as error:
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=str(error)) from error
 
     if not book_id:
         raise HTTPException(status_code=404, detail="Chapter not found")
@@ -353,9 +378,15 @@ def update_book_chapter_comment(
     chapter_id: int,
     comment: str = Form(default=""),
     redirect_to: str = Form(default=""),
+    expected_version: int = Form(default=0),
+    request_id: str = Form(default=""),
 ):
     _require_write_session(request)
-    book_id = update_chapter_comment(chapter_id=chapter_id, comment=comment)
+    try:
+        book_id = update_chapter_comment(chapter_id=chapter_id, comment=comment,
+                                       expected_version=expected_version, request_id=request_id)
+    except ValueError as error:
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=str(error)) from error
 
     if not book_id:
         raise HTTPException(status_code=404, detail="Chapter not found")
@@ -387,6 +418,7 @@ def create_book_memo(
     content: str = Form(...),
     page: int = Form(default=0),
     tags: str = Form(default=""),
+    request_id: str = Form(default=""),
 ):
     _require_write_session(request)
     if not get_book(book_id):
@@ -400,20 +432,21 @@ def create_book_memo(
             content=content,
             page=page,
             tags=tags,
+            request_id=request_id,
         )
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=str(error)) from error
 
     return RedirectResponse(url=f"/books/{book_id}", status_code=303)
 
 
 @app.post("/memos/{memo_id}/tags")
-def edit_book_memo_tags(request: Request, memo_id: int, tags: str = Form(default="")):
+def edit_book_memo_tags(request: Request, memo_id: int, tags: str = Form(default=""), request_id: str = Form(default="")):
     _require_write_session(request)
     try:
-        book_id = update_memo_tags(memo_id, tags)
+        book_id = update_memo_tags(memo_id, tags, request_id=request_id)
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=str(error)) from error
     if book_id is None:
         raise HTTPException(status_code=404, detail="Memo not found")
     return RedirectResponse(url=f"/books/{book_id}", status_code=303)

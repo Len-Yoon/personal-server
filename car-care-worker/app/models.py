@@ -8,6 +8,7 @@ class VehicleSnapshot:
     odometer_km: int
     dte_km: int | None
     warnings: frozenset[str]
+    unknown_warnings: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)

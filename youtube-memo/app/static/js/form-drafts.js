@@ -2,6 +2,13 @@
     "use strict";
     const prefix = (service) => `${service}:form-draft:v1:`;
     const bindings = [];
+    let navigating = false;
+    const revisionFields = (form) => [...form.elements].filter((field) =>
+        field.type === "hidden" && ["expected_version", "expected_versions"].includes(field.name));
+    const draftData = (binding) => ({version: 1, fields: snapshot(binding.form),
+        revisions: revisionFields(binding.form).map(({name, value}) => ({name, value})),
+        requestId: binding.requestId || "", requestPayload: binding.requestPayload || ""});
+    const navigate = (url) => { navigating = true; global.location.assign(url); };
     const allowedNames = (form) => new Set((form.dataset.draftFields || "").split(/\s+/).filter(Boolean));
     const eligible = (field, names) => names.has(field.name)
         && !/password|token|secret|csrf|auth|session/i.test(field.name)
@@ -24,6 +31,25 @@
             form.append(node);
         }
         node.textContent = message;
+    };
+    const offerConflictRecovery = (binding) => {
+        const form = binding.form;
+        if (form.querySelector("[data-draft-reload]")) return;
+        const button = global.document.createElement("button");
+        button.type = "button"; button.dataset.draftReload = "";
+        button.textContent = "이 폼 초안 버리고 최신 원본 보기";
+        button.addEventListener("click", () => {
+            if (!global.confirm("작성 내용을 복사했나요? 이 폼의 초안을 버리고 최신 원본을 불러옵니다.")) return;
+            try {
+                if (!saveOtherForms(form)) throw new Error("storage unavailable");
+                global.sessionStorage.removeItem(binding.key);
+            } catch (_) {
+                status(form, "초안을 지우지 못했습니다. 입력은 유지됩니다. 내용을 복사하고 다시 시도해주세요.");
+                return;
+            }
+            navigate(global.location.href);
+        });
+        form.append(button);
     };
     const restore = (form, rows) => {
         if (!Array.isArray(rows)) return false;
@@ -72,28 +98,56 @@
     };
     const bindForm = (form, service, authenticated) => {
         const key = formKey(form, service);
+        const binding = {form, key, baseline: JSON.stringify(snapshot(form)), requestId: "", requestPayload: ""};
         if (authenticated) {
             try {
                 const saved = JSON.parse(global.sessionStorage.getItem(key) || "null");
-                if (saved && saved.version === 1) restore(form, saved.fields);
+                if (saved && saved.version === 1) {
+                    restore(form, saved.fields);
+                    revisionFields(form).forEach((field) => {
+                        const row = (Array.isArray(saved.revisions) ? saved.revisions : []).find((item) => item?.name === field.name);
+                        field.value = row && typeof row.value === "string" ? row.value
+                            : field.name === "expected_version" ? "0" : "";
+                    });
+                    if (typeof saved.requestId === "string" && /^[a-f0-9-]{36}$/i.test(saved.requestId)
+                        && typeof saved.requestPayload === "string") {
+                        binding.requestId = saved.requestId; binding.requestPayload = saved.requestPayload;
+                    }
+                }
             } catch (_) { /* Invalid or unavailable tab storage does not overwrite inputs. */ }
-            bindings.push({form, key, baseline: JSON.stringify(snapshot(form))});
+            bindings.push(binding);
         }
         let busy = false;
         let savedOnServer = false;
         form.addEventListener("submit", async (event) => {
             if (event.defaultPrevented) return;
             event.preventDefault();
-            if (busy || savedOnServer) return;
+            if (busy) return;
+            if (savedOnServer) {
+                if (JSON.stringify(snapshot(form)) === binding.baseline) return;
+                savedOnServer = false; binding.requestId = ""; binding.requestPayload = "";
+            }
             if (!authenticated) {
                 status(form, "로그인 후 작성해주세요.");
                 return;
             }
             if (!form.checkValidity()) return;
             if (form.dataset.confirmMessage && !global.confirm(form.dataset.confirmMessage)) return;
+            const payload = JSON.stringify([form.action, snapshot(form), revisionFields(form).map(({name, value}) => [name, value])]);
+            if (!binding.requestId || binding.requestPayload !== payload) {
+                try { binding.requestId = global.crypto.randomUUID(); binding.requestPayload = payload; }
+                catch (_) { status(form, "저장 요청을 준비하지 못했습니다. 내용을 복사하고 다시 시도해주세요."); return; }
+            }
+            let requestField = [...form.elements].find((field) => field.name === "request_id");
+            if (!requestField) {
+                requestField = global.document.createElement("input"); requestField.type = "hidden";
+                requestField.name = "request_id"; form.append(requestField);
+            }
+            requestField.value = binding.requestId;
             const requestBody = new FormData(form);
+            requestBody.set("request_id", binding.requestId);
             try {
-                global.sessionStorage.setItem(key, JSON.stringify({version: 1, fields: snapshot(form)}));
+                global.sessionStorage.setItem(key, JSON.stringify(draftData(binding)));
             } catch (_) { /* A failed draft write must prevent login navigation. */ }
             const disabledStates = [...form.elements].map((field) => [field, field.disabled]);
             disabledStates.forEach(([field]) => { field.disabled = true; });
@@ -108,7 +162,7 @@
                 const destination = new URL(response.url || global.location.href, global.location.href);
                 if (isLoginResponse(response)) {
                     try {
-                        global.sessionStorage.setItem(key, JSON.stringify({version: 1, fields: snapshot(form)}));
+                        global.sessionStorage.setItem(key, JSON.stringify(draftData(binding)));
                     } catch (_) {
                         status(form, "초안을 임시 보관하지 못했습니다. 내용을 복사한 후 로그인해주세요.");
                         return;
@@ -117,12 +171,14 @@
                     return;
                 }
                 if (!response.ok || destination.origin !== global.location.origin) {
-                    status(form, "저장하지 못했습니다. 입력 내용은 유지됩니다. 확인 후 다시 시도해주세요.");
+                    status(form, response.status === 409
+                        ? "저장 충돌이 발생했습니다. 다른 화면에서 수정했거나 요청 내용이 변경되었습니다. 입력을 복사하고 새로고침해 최신 기록을 확인해주세요."
+                        : "저장하지 못했습니다. 입력 내용은 유지됩니다. 확인 후 다시 시도해주세요.");
+                    if (response.status === 409) offerConflictRecovery(binding);
                     return;
                 }
                 savedOnServer = true;
-                const binding = bindings.find((item) => item.form === form);
-                if (binding) binding.baseline = JSON.stringify(snapshot(form));
+                binding.baseline = JSON.stringify(snapshot(form));
                 try { global.sessionStorage.removeItem(key); }
                 catch (_) {
                     status(form, "저장은 완료했지만 임시 초안을 지우지 못했습니다. 다시 제출하지 말고 저장된 기록을 확인해주세요.");
@@ -132,9 +188,9 @@
                     status(form, "저장은 완료했지만 다른 입력을 임시 보관하지 못했습니다. 내용을 복사한 후 저장된 기록을 확인해주세요. 다시 제출하지 마세요.");
                     return;
                 }
-                global.location.assign(destination.href);
+                navigate(destination.href);
             } catch (_) {
-                status(form, "저장하지 못했습니다. 입력 내용은 유지됩니다. 잠시 후 다시 시도해주세요.");
+                status(form, "저장 결과를 확인하지 못했습니다. 입력은 유지되며 같은 요청으로 다시 확인할 수 있습니다.");
             } finally {
                 disabledStates.forEach(([field, disabled]) => { field.disabled = disabled; });
                 busy = false;
@@ -155,7 +211,7 @@
             return false;
         }
         const currentPath = `${global.location.pathname}${global.location.search}`;
-        global.location.assign(`/auth/login?next_path=${encodeURIComponent(currentPath)}`);
+        navigate(`/auth/login?next_path=${encodeURIComponent(currentPath)}`);
         return true;
     };
     const saveOtherForms = (submitted) => {
@@ -164,12 +220,41 @@
                 if (binding.form === submitted) continue;
                 const fields = snapshot(binding.form);
                 if (JSON.stringify(fields) === binding.baseline) continue;
-                global.sessionStorage.setItem(binding.key, JSON.stringify({version: 1, fields}));
+                global.sessionStorage.setItem(binding.key, JSON.stringify(draftData(binding)));
             }
             return true;
         } catch (_) {
             return false;
         }
+    };
+    const bindDeleteForm = (form) => {
+        let busy = false;
+        let completed = false;
+        let destination = "";
+        const finish = () => {
+            if (!saveOtherForms()) {
+                status(form, "삭제는 완료했지만 작성 중 입력을 임시 보관하지 못했습니다. 내용을 복사한 후 이동해주세요. 다시 삭제하지 마세요.");
+                return;
+            }
+            navigate(destination);
+        };
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            if (busy) return;
+            if (completed) { finish(); return; }
+            if (!global.confirm(form.dataset.confirmMessage || "삭제할까요?")) return;
+            busy = true;
+            try {
+                const target = new URL(form.action, global.location.href);
+                if (target.origin !== global.location.origin) throw new Error("invalid delete target");
+                const response = await global.fetch(target.href, {method: "POST", body: new FormData(form), credentials: "same-origin"});
+                if (isLoginResponse(response)) { redirectToLogin(); return; }
+                const url = new URL(response.url || global.location.href, global.location.href);
+                if (!response.ok || url.origin !== global.location.origin) throw new Error("delete failed");
+                completed = true; destination = url.href; finish();
+            } catch (_) { status(form, "삭제 결과를 확인하지 못했습니다. 현재 기록을 확인한 후 다시 시도해주세요."); }
+            finally { busy = false; }
+        });
     };
     const boot = () => {
         const body = global.document.body;
@@ -179,9 +264,21 @@
             bindForm(form, service, body.dataset.writeAuthenticated === "true");
         });
         global.document.querySelectorAll('form[action="/auth/logout"]').forEach((form) => {
-            form.addEventListener("submit", () => clearDrafts(service));
+            form.addEventListener("submit", () => { navigating = true; clearDrafts(service); });
+        });
+        global.addEventListener("beforeunload", (event) => {
+            if (!navigating && bindings.some((binding) => JSON.stringify(snapshot(binding.form)) !== binding.baseline)) {
+                saveOtherForms(); event.preventDefault(); event.returnValue = "";
+            }
+        });
+        global.document.addEventListener("click", (event) => {
+            const link = event.target.closest?.("a[href]");
+            if (!link || !bindings.some((binding) => JSON.stringify(snapshot(binding.form)) !== binding.baseline)) return;
+            if (!saveOtherForms()) {
+                event.preventDefault(); status(bindings[0].form, "입력을 임시 보관하지 못했습니다. 내용을 복사한 후 이동해주세요.");
+            }
         });
     };
-    global.MemoDrafts = {clearDrafts, redirectToLogin, isLoginResponse};
+    global.MemoDrafts = {clearDrafts, redirectToLogin, isLoginResponse, bindDeleteForm};
     global.document.addEventListener("DOMContentLoaded", boot);
 })(window);

@@ -311,6 +311,10 @@ def get_download_item_path(relative_path: str) -> Path:
     return path
 
 
+class DeletionAuditError(OSError):
+    """The item was deleted, but writing its security event failed."""
+
+
 def delete_item(relative_path: str) -> None:
     path = _safe_path(relative_path)
     if path == STORAGE_PATH.resolve():
@@ -339,7 +343,35 @@ def delete_item(relative_path: str) -> None:
                 raise ValueError("일반 파일과 폴더만 삭제할 수 있습니다.")
         finally:
             os.close(target_fd)
-    append_security_event("file_deleted", path=relative_path, item_type=item_type)
+    try:
+        append_security_event("file_deleted", path=relative_path, item_type=item_type)
+    except OSError as exc:
+        raise DeletionAuditError("삭제는 완료되었으나 보안 기록 저장에 실패했습니다.") from exc
+
+
+def validate_delete_items(relative_paths: list[str]) -> list[str]:
+    """Validate the complete batch without changing any filesystem entry.
+
+    This is a preflight, not an atomic filesystem transaction. The caller must
+    still report partial completion if an entry changes during deletion.
+    """
+    paths = list(dict.fromkeys(relative_paths))
+    if not paths or any(not path.strip("/").strip() for path in paths):
+        raise ValueError("삭제할 항목이 없습니다.")
+    resolved = [_safe_path(path) for path in paths]
+    for path in resolved:
+        if path == STORAGE_PATH.resolve():
+            raise ValueError("파일함 루트는 삭제할 수 없습니다.")
+        if any(other != path and other in path.parents for other in resolved):
+            raise ValueError("폴더와 그 안의 항목을 동시에 선택할 수 없습니다.")
+    for path in paths:
+        with _open_storage_item(path) as descriptor:
+            mode = os.fstat(descriptor).st_mode
+            if stat.S_ISDIR(mode):
+                _preflight_directory_fd(descriptor)
+            elif not stat.S_ISREG(mode):
+                raise ValueError("일반 파일과 폴더만 삭제할 수 있습니다.")
+    return paths
 
 
 def format_size(size: int) -> str:
@@ -380,6 +412,8 @@ def _safe_name(name: str) -> str:
     cleaned = Path(name.strip()).name
     if cleaned in {"", ".", ".."}:
         return ""
+    if cleaned.startswith("."):
+        raise ValueError("숨김 이름은 사용할 수 없습니다.")
     return cleaned
 
 
