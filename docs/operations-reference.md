@@ -89,6 +89,20 @@ N100 감시기는 Tunnel 장애의 최초 전환에 직접 Telegram 장애 알�
 
 HomeOps 실행기는 Docker socket을 제한된 allowlist 진단·재시작에만 사용함. Portal 관리자 비밀번호는 실행기 통신에 재사용하지 않으며, 운영자가 사전 설정한 `HOMEOPS_EXECUTOR_SHARED_SECRET`이 비어 있으면 Portal과 실행기 모두 HomeOps 요청을 fail-closed 처리함. 값은 Git·문서·로그·상태 파일에 기록하지 않음.
 
+### HomeOps 공유 인증 확인·제한 구성
+
+`infra/k8s/tools/homeops-auth-configure.py --check`는 기존 Portal Secret·양측 환경·인증된 진단을 읽기 전용으로 확인함. 미설정은 `NOT_CONFIGURED`, 실행기 재동기화 필요는 `EXECUTOR_SYNC_REQUIRED`로 구분함. 실제 구성은 대상·동작에 대한 운영 승인과 PR CI를 통과한 정확한 커밋을 확인한 N100에서만 수행함.
+
+```bash
+python3 infra/k8s/tools/homeops-auth-configure.py --check
+# 아래 명령은 별도 승인된 운영 적용 단계에서만 실행함.
+python3 infra/k8s/tools/homeops-auth-configure.py --go --expected-commit "$(git rev-parse HEAD)"
+```
+
+기존 Portal Secret을 인증 원본으로 사용하며 다른 키를 보존함. 실행기 기존 이미지·Compose 파일·네트워크·환경·관리 대상 3개와 Portal 단일 writer를 대조함. 실패 시 이번 작업의 변경만 조건부 원복하며, 원복 중 동시 변경을 발견하면 덮어쓰지 않고 수동 확인을 요구함. 진단은 읽기 전용이며 관리 재시작 POST는 검증에 사용하지 않음.
+
+일반 Docker restart에는 인증 환경값이 유지되지만, 일반 Compose 재생성·기존 부팅 절차는 인증값을 자동 재공급하지 않음. 해당 동작 후 `--check`와 승인된 재구성이 필요함. 부팅·배포 절차 자동 연동은 별도 보호 대상이며 이번 구성 도구의 범위가 아님. Kubernetes Secret 자체를 암호화 저장으로 단정하지 않으며, 암호화·접근 정책 추가 검증은 별도 작업임.
+
 ## 운영 경계
 
 - Portal은 K3s 단일 writer로만 실행함. Compose Portal과 동시에 실행하지 않음.
