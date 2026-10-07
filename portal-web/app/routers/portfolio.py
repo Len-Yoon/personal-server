@@ -33,8 +33,8 @@ def portfolio_admin(request: Request):
 
     return _disable_cache(
         templates.TemplateResponse(
-            "portfolio_editor.html",
-            {
+            request=request, name="portfolio_editor.html",
+            context={
                 "request": request,
                 "title": "포트폴리오 편집",
                 "content": portfolio_store.load_portfolio_content(),
@@ -91,8 +91,8 @@ def save_portfolio(request: Request, content: str = Form(default="")):
 def render_public_portfolio(request: Request):
     content = portfolio_store.load_portfolio_content()
     return templates.TemplateResponse(
-        "portfolio.html",
-        {
+        request=request, name="portfolio.html",
+        context={
             "request": request,
             "title": "포트폴리오",
             "content": Markup(portfolio_store.render_portfolio_markdown(content)),
@@ -127,8 +127,8 @@ def _require_admin_access(request: Request) -> None:
 
 def _admin_login_response(request: Request, error: str = "", status_code: int = 200):
     return templates.TemplateResponse(
-        "portfolio_login.html",
-        {"request": request, "title": "포트폴리오 관리자", "error": error},
+        request=request, name="portfolio_login.html",
+        context={"request": request, "title": "포트폴리오 관리자", "error": error},
         status_code=status_code,
     )
 

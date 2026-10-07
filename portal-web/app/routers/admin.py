@@ -54,8 +54,8 @@ def admin_status_login(request: Request):
         return _render_authenticated_admin_status(request)
     host = _request_host(request)
     response = templates.TemplateResponse(
-        "admin_status.html",
-        {
+        request=request, name="admin_status.html",
+        context={
             "request": request,
             "title": "관리자 상태",
             "authenticated": False,
@@ -77,8 +77,8 @@ def admin_status_page(request: Request, password: str = Form(default="")):
         elif exc.status_code == 403:
             message = "관리자 비밀번호가 설정되지 않았습니다."
         response = templates.TemplateResponse(
-            "admin_status.html",
-            {
+            request=request, name="admin_status.html",
+            context={
                 "request": request,
                 "title": "관리자 상태",
                 "authenticated": False,
@@ -112,8 +112,8 @@ def _render_authenticated_admin_status(request: Request, issue_homeops_session: 
     )
     context["recovery_events"] = format_recovery_events_for_display(get_recovery_events())
     response = templates.TemplateResponse(
-        "admin_status.html",
-        {
+        request=request, name="admin_status.html",
+        context={
             "request": request,
             "title": "관리자 상태",
             "authenticated": True,

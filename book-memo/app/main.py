@@ -147,8 +147,8 @@ async def home(
     chapters_by_book = {book["id"]: list_chapters(book["id"]) for book in books}
 
     return templates.TemplateResponse(
-        "home.html",
-        {
+        request=request, name="home.html",
+        context={
             "request": request,
             "title": "책 메모장",
             "query": q,
@@ -231,8 +231,8 @@ def book_detail(request: Request, book_id: int):
         raise HTTPException(status_code=404, detail="Book not found")
 
     return templates.TemplateResponse(
-        "book_detail.html",
-        {
+        request=request, name="book_detail.html",
+        context={
             "request": request,
             "title": book["title"],
             "book": book,
@@ -679,8 +679,8 @@ def _prune_write_sessions() -> None:
 
 def _write_login_response(request: Request, error: str = "", status_code: int = 200, next_path: str = ""):
     return templates.TemplateResponse(
-        "auth_login.html",
-        {
+        request=request, name="auth_login.html",
+        context={
             "request": request,
             "title": "책 메모 쓰기 로그인",
             "error": error,

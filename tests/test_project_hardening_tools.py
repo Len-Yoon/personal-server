@@ -33,6 +33,8 @@ class HardeningToolsTests(unittest.TestCase):
             (app/'Dockerfile').write_text('FROM scratch\nCOPY app /app\n')
             (app/'requirements.txt').write_text('')
             (app/'app/main.py').write_text('original')
+            (app/'app/logs').mkdir()
+            (app/'app/logs/.gitkeep').write_bytes(b'\n')
             (app/'data').mkdir();(app/'data/private.sqlite3').write_text('private')
             (app/'.env').write_text('SECRET=private')
             git('add','.');git('commit','-m','fixture');revision=git('rev-parse','HEAD')
@@ -40,8 +42,12 @@ class HardeningToolsTests(unittest.TestCase):
             target=Path(temp)/'context';target.mkdir()
             load('build-verified-image').build_context(root,'book-memo',revision,target)
             self.assertEqual((target/'app/main.py').read_text(),'original')
+            self.assertFalse((target/'app/logs/.gitkeep').exists())
             self.assertFalse((target/'.env').exists());self.assertFalse((target/'data').exists())
             with self.assertRaises(ValueError):load('build-verified-image').build_context(root,'book-memo','main',target)
+            (app/'app/logs/.gitkeep').write_text('private content')
+            git('add','.');git('commit','-m','nonempty placeholder')
+            with self.assertRaises(ValueError):load('build-verified-image').build_context(root,'book-memo',git('rev-parse','HEAD'),target)
 
     def test_publish_never_overwrites_and_removes_partial_pair(self):
         from unittest.mock import patch
@@ -86,12 +92,36 @@ class HardeningToolsTests(unittest.TestCase):
                     target=command[command.index('--output')+1]
                     self.assertTrue(target.startswith('type=oci,dest='))
                     self.assertIn('annotation-manifest-descriptor.io.personal-server.image-ref=personal-server-book-memo:',target)
-                    Path(target.split('dest=',1)[1].split(',',1)[0]).write_bytes(b'fixture OCI')
+                    import io, tarfile
+                    with tarfile.open(target.split('dest=',1)[1].split(',',1)[0], 'w') as archive:
+                        for name, raw in [('oci-layout', b'{"imageLayoutVersion":"1.0.0"}'), ('index.json', b'{"manifests":[]}')]:
+                            member=tarfile.TarInfo(name);member.size=len(raw)
+                            archive.addfile(member, io.BytesIO(raw))
                 else:
                     self.assertEqual(command[:3],['trivy','image','--input'])
+                    self.assertTrue(Path(command[3]).is_dir())
+                    self.assertTrue((Path(command[3])/'oci-layout').is_file())
                     self.assertIn('--exit-code',command)
                     raise subprocess.CalledProcessError(1,command)
             with patch.object(module.argparse.ArgumentParser,'parse_args',return_value=args), patch.object(module,'build_context'), patch.object(module.subprocess,'run',side_effect=runner):
                 with self.assertRaises(subprocess.CalledProcessError):module.main()
             self.assertEqual(len(calls),2)
             self.assertFalse(output.exists());self.assertFalse(output.with_suffix(output.suffix+'.json').exists())
+
+    def test_oci_scan_rejects_traversal_and_links_before_scanner(self):
+        import io, tarfile
+        from unittest.mock import patch
+        for name, link in [('safe/../../escape', False), ('blobs/link', True), ('duplicate', False)]:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);archive_path=root/'image.tar'
+                with tarfile.open(archive_path, 'w') as archive:
+                    member=tarfile.TarInfo(name)
+                    if link:
+                        member.type=tarfile.SYMTYPE;member.linkname='/etc/passwd';archive.addfile(member)
+                    else:
+                        member.size=1;archive.addfile(member, io.BytesIO(b'x'))
+                        if name=='duplicate':archive.addfile(member, io.BytesIO(b'y'))
+                module=load('build-verified-image')
+                with patch.object(module.subprocess, 'run') as runner:
+                    with self.assertRaises(ValueError):module.scan_archive(archive_path,root/'oci')
+                    runner.assert_not_called()

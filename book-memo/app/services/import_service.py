@@ -129,7 +129,7 @@ def install_routes(app, require_write, session_cookie, templates):
     @app.get("/import")
     def import_page(request: Request):
         require_write(request)
-        return templates.TemplateResponse("import_library.html", {"request": request, "title": "JSON 가져오기"})
+        return templates.TemplateResponse(request=request, name="import_library.html", context={"request": request, "title": "JSON 가져오기"})
 
     @app.post("/api/import/preview")
     async def preview(request: Request):

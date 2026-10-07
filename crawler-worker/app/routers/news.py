@@ -68,8 +68,8 @@ templates.env.globals["portal_home_url"] = _portal_home_url
 def home(request: Request):
     collection_status = _collection_status_for_home(_collection_status_snapshot())
     return templates.TemplateResponse(
-        "home.html",
-        {
+        request=request, name="home.html",
+        context={
             "request": request,
             "title": "뉴스 허브",
             "categories": get_korean_categories(),
@@ -105,8 +105,8 @@ def recent_news_page(
         return "/saved?" + urlencode(params)
 
     return templates.TemplateResponse(
-        "saved.html",
-        {
+        request=request, name="saved.html",
+        context={
             "request": request,
             "title": "보관 뉴스",
             "recent_news": recent_news[:page_size],
@@ -132,8 +132,8 @@ def category_page(
     )
 
     return templates.TemplateResponse(
-        "search.html",
-        {
+        request=request, name="search.html",
+        context={
             "request": request,
             "title": result["label"],
             "result": result,

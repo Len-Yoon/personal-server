@@ -29,6 +29,12 @@ def build_context(repo, app, revision, destination):
             relative = path.relative_to(app)
             if not relative.parts or relative.parts[0] not in {'Dockerfile', 'requirements.txt', 'app'}:
                 continue
+            # Tracked empty/single-LF directory placeholders are not assets.
+            # Reject every other hidden path and any placeholder with content.
+            if relative.name == '.gitkeep' and not any(p.startswith('.') for p in relative.parts[:-1]) and member.isfile() and member.size <= 1:
+                with archive.extractfile(member) as placeholder:
+                    if placeholder.read() in (b'', b'\n'):
+                        continue
             if '..' in relative.parts or any(p.startswith('.') for p in relative.parts) or member.issym() or member.islnk():
                 raise ValueError('unsafe_context_member')
             target = destination / relative
@@ -44,6 +50,39 @@ def build_context(repo, app, revision, destination):
                 raise ValueError('unsafe_context_member')
     if not (destination/'Dockerfile').is_file() or not (destination/'requirements.txt').is_file() or not count:
         raise ValueError('incomplete_build_context')
+
+
+def scan_archive(archive_path, destination):
+    """Scan OCI content using Trivy's supported directory input.
+
+    Extract only regular files/directories beneath isolated temporary storage.
+    Links, duplicate paths, traversal and oversized archives fail before scan.
+    """
+    destination.mkdir()
+    seen = set()
+    size = 0
+    with tarfile.open(archive_path) as archive:
+        for member in archive:
+            path = Path(member.name)
+            if path.is_absolute() or '..' in path.parts or not path.parts or path in seen:
+                raise ValueError('unsafe_oci_member')
+            seen.add(path)
+            size += member.size
+            if member.size < 0 or size > 2 * 1024**3 or len(seen) > 10000:
+                raise ValueError('oversized_oci_archive')
+            target = destination / path
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif member.isfile():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.extractfile(member) as source, target.open('xb') as output:
+                    while chunk := source.read(1024 * 1024):
+                        output.write(chunk)
+            else:
+                raise ValueError('unsafe_oci_member')
+    if not (destination / 'oci-layout').is_file() or not (destination / 'index.json').is_file():
+        raise ValueError('incomplete_oci_archive')
+    subprocess.run(['trivy', 'image', '--input', str(destination), '--scanners', 'vuln', '--severity', 'HIGH,CRITICAL', '--exit-code', '1'], check=True)
 
 
 def publish_archive(archive, output, evidence):
@@ -102,7 +141,7 @@ def main():
         build_context(repo, args.app, args.revision, context)
         archive = Path(temp)/'image.tar'
         subprocess.run(['docker', 'buildx', 'build', '--platform', 'linux/amd64', '--provenance=false', '--label', 'org.opencontainers.image.revision='+args.revision, '--tag', image, '--output', 'type=oci,dest='+str(archive)+',annotation-manifest-descriptor.io.personal-server.image-ref='+image, str(context)], check=True)
-        subprocess.run(['trivy', 'image', '--input', str(archive), '--scanners', 'vuln', '--severity', 'HIGH,CRITICAL', '--exit-code', '1'], check=True)
+        scan_archive(archive, Path(temp)/'oci')
         evidence = {'revision': args.revision, 'image': image, 'platform': 'linux/amd64', 'scan': 'passed', 'scope': 'final image OS and library vulnerabilities', 'deployment': 'not_performed'}
         publish_archive(archive, args.output, evidence)
         print('verified_image=PASS')
