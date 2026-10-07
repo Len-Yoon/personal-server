@@ -18,12 +18,13 @@ def render(name: str, image: str) -> dict:
                     'automountServiceAccountToken':False,'restartPolicy':'Never',
                     'securityContext':{'runAsNonRoot':True,'runAsUser':10001,'runAsGroup':10001,'fsGroup':10001,'seccompProfile':{'type':'RuntimeDefault'}},
                     'containers':[{'name':'restore','image':image,'imagePullPolicy':'Never',
-                        'command':['python3','/opt/restore/portal-backup-restore-check.py','--evidence','/run/evidence/evidence','--work-dir','/work','--credential-dir','/run/backup-credentials'],
+                        'command':['python3','/opt/restore/portal-backup-restore-check.py','--evidence','/run/evidence/evidence','--work-dir','/work','--credential-dir','/run/backup-credentials','--config-work-dir','/run/rclone-state'],
                         'securityContext':{'readOnlyRootFilesystem':True,'allowPrivilegeEscalation':False,'capabilities':{'drop':['ALL']}},
                         'resources':{'requests':{'cpu':'100m','memory':'256Mi','ephemeral-storage':'1Gi'},'limits':{'cpu':'1','memory':'1Gi','ephemeral-storage':'11Gi'}},
                         'volumeMounts':[{'name':n,'mountPath':p,**({'readOnly':True} if ro else {})} for n,p,ro in (
-                            ('work','/work',False),('tmp','/tmp',False),('code','/opt/restore',True),('evidence','/run/evidence',True),('credentials','/run/backup-credentials',True))]}],
+                            ('work','/work',False),('tmp','/tmp',False),('rclone-state','/run/rclone-state',False),('code','/opt/restore',True),('evidence','/run/evidence',True),('credentials','/run/backup-credentials',True))]}],
                     'volumes':[{'name':'work','emptyDir':{'sizeLimit':'8Gi'}},{'name':'tmp','emptyDir':{'sizeLimit':'16Mi'}},
+                        {'name':'rclone-state','emptyDir':{'medium':'Memory','sizeLimit':'16Mi'}},
                         {'name':'code','configMap':{'name':name+'-code','defaultMode':292}},
                         {'name':'evidence','configMap':{'name':'portal-pvc-backup-evidence','defaultMode':292,'items':[{'key':'evidence','path':'evidence'}]}},
                         {'name':'credentials','secret':{'secretName':'portal-pvc-backup-runtime','defaultMode':288,'items':[{'key':key,'path':key} for key in ('rclone-config','rclone-config-passphrase','age-identity')]}}]

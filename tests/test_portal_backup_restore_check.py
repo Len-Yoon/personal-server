@@ -27,10 +27,16 @@ class RestoreCheckTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.work = self.root / 'scratch'
         self.work.mkdir()
+        self.config_work = self.root / 'memory'
+        self.config_work.mkdir()
+        self.memory_patch = patch.object(self.mod, 'memory_backed', return_value=True)
+        self.memory_patch.start()
+        self.addCleanup(self.memory_patch.stop)
         self.creds = self.root / 'credentials'
         self.creds.mkdir()
         for name in ('rclone-config', 'rclone-config-passphrase', 'age-identity'):
             (self.creds / name).write_text('PRIVATE-CREDENTIAL')
+        (self.creds / 'rclone-config').write_bytes(b'# Encrypted rclone configuration File\n\nRCLONE_ENCRYPT_V0:\ndummy-encrypted-fixture')
         self.source = self.root / 'source'
         (self.source / 'data/files').mkdir(parents=True)
         (self.source / 'data/portal-web-state').mkdir()
@@ -71,12 +77,15 @@ class RestoreCheckTests(unittest.TestCase):
             raise AssertionError(command)
 
     def run_check(self):
-        return self.mod.check_restore(self.evidence, self.work, self.creds, now=self.now, runner=self.provider)
+        return self.mod.check_restore(self.evidence, self.work, self.creds, config_work_dir=self.config_work, now=self.now, runner=self.provider)
 
     def test_success_downloads_only_and_preserves_authoritative_inputs(self):
         before = self.evidence.read_bytes()
+        original_config = (self.creds / 'rclone-config').read_bytes()
         self.run_check()
         self.assertEqual(self.evidence.read_bytes(), before)
+        self.assertEqual((self.creds / 'rclone-config').read_bytes(), original_config)
+        self.assertEqual(list(self.config_work.iterdir()), [])
         self.assertEqual(list(self.work.iterdir()), [])
         command, kwargs = self.calls[0]
         self.assertEqual(command[-2], 'gdrive:PersonalServer-encrypted-backups/' + self.values['backup_id'] + '.tar.age')
@@ -84,6 +93,100 @@ class RestoreCheckTests(unittest.TestCase):
         self.assertNotIn('PRIVATE-CREDENTIAL', repr(self.calls))
         self.assertEqual(kwargs['env'].keys(), {'PATH', 'HOME', 'LANG'})
         self.assertTrue(all('copyto' in c or c[0] == 'age' for c, _ in self.calls))
+
+    def test_encrypted_config_refresh_is_memory_only_and_preserves_source(self):
+        original = (self.creds / 'rclone-config').read_bytes()
+        def refresh(command, **kwargs):
+            if command[0] == 'rclone':
+                config = Path(command[command.index('--config') + 1])
+                self.assertTrue(config.is_relative_to(self.config_work.resolve()))
+                self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(config.parent.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(config.read_bytes(), original)
+                self.assertIn(str(self.creds / 'rclone-config-passphrase'), command[command.index('--password-command') + 1])
+                config.write_bytes(b'RCLONE_ENCRYPT_V0:\nrefreshed-encrypted-fixture')
+            self.provider(command, **kwargs)
+        self.mod.check_restore(self.evidence, self.work, self.creds,
+                               config_work_dir=self.config_work, now=self.now, runner=refresh)
+        self.assertEqual((self.creds / 'rclone-config').read_bytes(), original)
+        self.assertEqual(list(self.config_work.iterdir()), [])
+
+    def test_plaintext_or_large_config_blocks_provider(self):
+        for raw in (b'[gdrive]\ntype=drive', b'RCLONE_ENCRYPT_V0:\n' + b'x' * self.mod.MAX_CONFIG_BYTES):
+            with self.subTest(size=len(raw)):
+                (self.creds / 'rclone-config').write_bytes(raw)
+                with self.assertRaises(self.mod.RestoreError):
+                    self.run_check()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(list(self.config_work.iterdir()), [])
+
+    def test_provider_plaintext_permission_or_symlink_rewrite_is_rejected(self):
+        for kind in ('plaintext', 'permissions', 'symlink'):
+            with self.subTest(kind=kind):
+                def rewrite(command, **kwargs):
+                    config = Path(command[command.index('--config') + 1])
+                    if kind == 'plaintext':
+                        config.write_bytes(b'[gdrive]\ntoken=PRIVATE-CREDENTIAL')
+                    elif kind == 'permissions':
+                        config.chmod(0o644)
+                    else:
+                        config.unlink()
+                        config.symlink_to(self.creds / 'rclone-config')
+                with self.assertRaises(self.mod.RestoreError):
+                    self.mod.check_restore(self.evidence, self.work, self.creds,
+                                           config_work_dir=self.config_work, now=self.now, runner=rewrite)
+                self.assertEqual(list(self.config_work.iterdir()), [])
+                self.assertEqual(list(self.work.iterdir()), [])
+
+    def test_secret_transition_copies_validated_snapshot_then_fails_closed(self):
+        original = (self.creds / 'rclone-config').read_bytes()
+        read = self.mod.encrypted_config_snapshot
+        transitioned = False
+        def transition(path, **kwargs):
+            nonlocal transitioned
+            raw = read(path, **kwargs)
+            if path == self.creds / 'rclone-config' and not transitioned:
+                transitioned = True
+                replacement = self.creds / 'next'; replacement.write_bytes(b'plaintext-second-generation')
+                replacement.replace(path)
+            return raw
+        copied = []
+        def observe(command, **kwargs):
+            copied.append(Path(command[command.index('--config') + 1]).read_bytes())
+            self.provider(command, **kwargs)
+        with patch.object(self.mod, 'encrypted_config_snapshot', side_effect=transition):
+            with self.assertRaises(self.mod.RestoreError):
+                self.mod.check_restore(self.evidence, self.work, self.creds,
+                                       config_work_dir=self.config_work, now=self.now, runner=observe)
+        self.assertEqual(copied, [original])
+        self.assertEqual(list(self.config_work.iterdir()), [])
+
+    def test_projected_secret_symlink_can_be_read(self):
+        source = self.creds / 'rclone-config'
+        target = self.creds / 'versioned-config'; source.replace(target); source.symlink_to(target.name)
+        self.run_check()
+        self.assertEqual(list(self.config_work.iterdir()), [])
+
+    def test_non_memory_or_overlapping_config_work_directory_blocks_provider(self):
+        with patch.object(self.mod, 'memory_backed', return_value=False):
+            with self.assertRaises(self.mod.RestoreError):self.run_check()
+        for directory in (self.work, self.creds):
+            with self.assertRaises(self.mod.RestoreError):
+                self.mod.check_restore(self.evidence, self.work, self.creds,
+                                       config_work_dir=directory, now=self.now, runner=self.provider)
+        self.assertEqual(self.calls, [])
+
+    def test_memory_mount_selection_rejects_nested_disk_and_parses_escapes(self):
+        mountinfo = self.root / 'mountinfo'
+        mountinfo.write_text('1 0 0:1 / / rw - ext4 root rw\n'
+                            '2 1 0:2 / /run/rclone\\040state rw - tmpfs tmpfs rw\n'
+                            '3 2 0:3 / /run/rclone\\040state/disk rw - ext4 disk rw\n')
+        # Call the unpatched function from a fresh module, not the test fixture's stub.
+        spec = importlib.util.spec_from_file_location('mount_check', SCRIPT)
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        self.assertTrue(module.memory_backed(Path('/run/rclone state/private'), mountinfo))
+        self.assertFalse(module.memory_backed(Path('/run/rclone state/disk/private'), mountinfo))
+        self.assertFalse(module.memory_backed(Path('/work'), mountinfo))
 
     def test_schema_fields_and_strict_freshness(self):
         changes = {'schema_version': '2', 'scope': 'book', 'source_runtime': 'compose-local',
@@ -234,7 +337,7 @@ class RestoreCheckTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_provider_failure_cli_outputs_only_safe_status(self):
-        args = ['--evidence', str(self.evidence), '--work-dir', str(self.work), '--credential-dir', str(self.creds)]
+        args = ['--evidence', str(self.evidence), '--work-dir', str(self.work), '--credential-dir', str(self.creds), '--config-work-dir', str(self.config_work)]
         output = io.StringIO()
         with patch.object(self.mod, 'check_restore', side_effect=RuntimeError('PRIVATE-CREDENTIAL /private/path')):
             with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
@@ -246,7 +349,7 @@ class RestoreCheckTests(unittest.TestCase):
             Path(command[-1]).write_bytes(b'partial')
             raise RuntimeError('PRIVATE-CREDENTIAL')
         with self.assertRaises(RuntimeError):
-            self.mod.check_restore(self.evidence, self.work, self.creds, now=self.now, runner=failed)
+            self.mod.check_restore(self.evidence, self.work, self.creds, config_work_dir=self.config_work, now=self.now, runner=failed)
         self.assertEqual(list(self.work.iterdir()), [])
 
     def test_tar_member_limit(self):
