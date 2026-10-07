@@ -10,6 +10,30 @@ import aiohttp
 from tests._test_support import prepare_service_import
 
 
+async def serve_slow_body(reader, writer, disconnected, handlers):
+    task = asyncio.current_task()
+    handlers.add(task)
+    try:
+        await reader.readuntil(b'\r\n\r\n')
+        writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{"items":[')
+        await writer.drain()
+        await reader.read()
+    except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError):
+        # A deadline can close an accepted connection before HTTP headers arrive.
+        # EOF/reset still proves that the client released this TCP connection.
+        disconnected.append(True)
+    else:
+        disconnected.append(True)
+    finally:
+        writer.close()
+        try:
+            await asyncio.wait_for(writer.wait_closed(), .5)
+        except (ConnectionResetError, BrokenPipeError, asyncio.TimeoutError):
+            pass
+        finally:
+            handlers.discard(task)
+
+
 class BookSearchBudgetTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         prepare_service_import('book-memo')
@@ -64,18 +88,7 @@ class BookSearchBudgetTests(unittest.IsolatedAsyncioTestCase):
         disconnected = []
         handlers = set()
         async def slow_body(reader, writer):
-            task = asyncio.current_task()
-            handlers.add(task)
-            try:
-                await reader.readuntil(b'\r\n\r\n')
-                writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{"items":[')
-                await writer.drain()
-                await reader.read()
-                disconnected.append(True)
-            finally:
-                writer.close()
-                await writer.wait_closed()
-                handlers.discard(task)
+            await serve_slow_body(reader, writer, disconnected, handlers)
         server = await asyncio.start_server(slow_body, '127.0.0.1', 0)
         url = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/search"
         try:
@@ -97,6 +110,44 @@ class BookSearchBudgetTests(unittest.IsolatedAsyncioTestCase):
             for task in tuple(handlers):
                 task.cancel()
             await asyncio.gather(*tuple(handlers), return_exceptions=True)
+
+    async def test_slow_body_fixture_counts_client_eof_before_request_headers(self):
+        disconnected, errors = [], []
+        handlers = set()
+        accepted, finished = asyncio.Event(), asyncio.Event()
+        async def handler(reader, writer):
+            accepted.set()
+            try:
+                await serve_slow_body(reader, writer, disconnected, handlers)
+            except Exception as error:
+                errors.append(error)
+            finally:
+                finished.set()
+        server = await asyncio.start_server(handler, '127.0.0.1', 0)
+        client = None
+        try:
+            before = set(asyncio.all_tasks())
+            _, client = await asyncio.open_connection('127.0.0.1', server.sockets[0].getsockname()[1])
+            await asyncio.wait_for(accepted.wait(), .5)
+            # Close an accepted TCP connection without sending HTTP headers.
+            # CI can reach this exact state when the provider deadline expires.
+            client.close()
+            await asyncio.wait_for(client.wait_closed(), .5)
+            await asyncio.wait_for(finished.wait(), .5)
+            self.assertEqual(len(disconnected), 1)
+            self.assertEqual(errors, [])
+            self.assertFalse(handlers)
+            self.assertFalse(set(asyncio.all_tasks()) - before)
+        finally:
+            if client is not None:
+                client.close()
+                await asyncio.wait_for(client.wait_closed(), .5)
+            server.close()
+            await server.wait_closed()
+            remaining = tuple(handlers)
+            for task in remaining:
+                task.cancel()
+            await asyncio.gather(*remaining, return_exceptions=True)
 
     async def test_dns_deadline_cancels_resolver_work_without_getaddrinfo_threads(self):
         search = self.search

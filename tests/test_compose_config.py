@@ -595,6 +595,17 @@ class ComposeConfigTests(unittest.TestCase):
             self.assertIn("healthcheck:", compose)
             self.assertIn(f"127.0.0.1:{port}", compose)
 
+    def test_system_agent_backup_evidence_mount_is_read_only_and_directory_based(self):
+        compose = (ROOT / "docker-compose.n100.yml").read_text(encoding="utf-8")
+        service = _service_block(compose, "system-agent")
+        self.assertIn("BACKUP_EVIDENCE_PATH=/run/backup-evidence/portal-backup.evidence", service)
+        self.assertIn("source: ${BACKUP_EVIDENCE_DIRECTORY:-./data/system/backup-evidence}", service)
+        self.assertIn("target: /run/backup-evidence", service)
+        self.assertIn("read_only: true", service)
+        self.assertIn("create_host_path: false", service)
+        self.assertNotIn(".kube", service)
+        self.assertNotIn("portal-pvc-backup-runtime", service)
+
     def test_n100_override_removes_service_code_mounts_and_reload(self):
         development_compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         n100_compose = (ROOT / "docker-compose.n100.yml").read_text(encoding="utf-8")

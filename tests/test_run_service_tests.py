@@ -57,7 +57,7 @@ for _name, _modules in (
     ("homeops-executor", " tests.homeops_executor.test_restart_idempotency"),
     ("youtube-memo", " tests.youtube_memo.test_audit_enhancements"),
     ("book-memo", " tests.book_memo.test_audit_enhancements tests.book_memo.test_search_budget"),
-    ("k8s-contracts", " tests.test_project_hardening_tools"),
+    ("k8s-contracts", " tests.test_project_hardening_tools tests.test_portal_backup_evidence_export tests.test_portal_backup_restore_check"),
 ):
     _entry = EXPECTED_GROUPS[_name]
     EXPECTED_GROUPS[_name] = (*_entry[:-1], _entry[-1] + _modules)
