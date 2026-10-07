@@ -5,6 +5,8 @@ import importlib.util
 import io
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -93,6 +95,90 @@ class RestoreCheckTests(unittest.TestCase):
         self.assertNotIn('PRIVATE-CREDENTIAL', repr(self.calls))
         self.assertEqual(kwargs['env'].keys(), {'PATH', 'HOME', 'LANG'})
         self.assertTrue(all('copyto' in c or c[0] == 'age' for c, _ in self.calls))
+
+    def test_single_file_copy_avoids_size_filter_and_keeps_hard_limits(self):
+        # Exact v1.60.1 single-file setup rejects any active size filter.
+        # The N100 local fixture reproduces that fatal path independently.
+        def compatible_provider(command, **kwargs):
+            if command[0] == 'rclone' and '--max-size' in command:
+                raise RuntimeError("can't limit to single files when using filters")
+            self.provider(command, **kwargs)
+        self.mod.check_restore(self.evidence, self.work, self.creds,
+                               config_work_dir=self.config_work, now=self.now,
+                               runner=compatible_provider)
+        command, options = self.calls[0]
+        self.assertNotIn('--max-size', command)
+        self.assertEqual(command[command.index('--max-transfer') + 1],
+                         str(self.mod.MAX_EXTRACT_BYTES + self.mod.MAX_MEMBERS * 1024))
+        self.assertEqual(command[command.index('--cutoff-mode') + 1], 'hard')
+        self.assertEqual(command[command.index('--buffer-size') + 1], '0')
+        self.assertEqual(command[command.index('--multi-thread-streams') + 1], '0')
+        self.assertIs(options['preexec_fn'], self.mod.limit_download_file_size)
+        self.assertNotIn('preexec_fn', self.calls[1][1])
+
+    def test_download_budget_failure_preserves_inputs_and_never_decrypts(self):
+        before_evidence = self.evidence.read_bytes()
+        before_credentials = {path.name: path.read_bytes() for path in self.creds.iterdir()}
+        calls = []
+        def limited_provider(command, **kwargs):
+            calls.append(command)
+            self.assertIs(kwargs['preexec_fn'], self.mod.limit_download_file_size)
+            Path(command[-1]).write_bytes(b'partial-cipher')
+            raise subprocess.CalledProcessError(1, command)
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.mod.check_restore(self.evidence, self.work, self.creds,
+                                   config_work_dir=self.config_work, now=self.now,
+                                   runner=limited_provider)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], 'rclone')
+        self.assertEqual(self.evidence.read_bytes(), before_evidence)
+        self.assertEqual({path.name: path.read_bytes() for path in self.creds.iterdir()}, before_credentials)
+        self.assertEqual(list(self.work.iterdir()), [])
+        self.assertEqual(list(self.config_work.iterdir()), [])
+
+    def test_child_file_limit_preserves_stricter_inherited_soft_and_hard_limits(self):
+        unlimited = self.mod.resource.RLIM_INFINITY
+        cap = self.mod.MAX_DOWNLOAD_BYTES
+        for inherited, expected in [((unlimited, unlimited), (cap, cap)),
+                ((cap + 1, cap + 2), (cap, cap)), ((1024, unlimited), (1024, cap)),
+                ((1024, 2048), (1024, 2048)), ((0, 0), (0, 0))]:
+            with self.subTest(inherited=inherited):
+                with patch.object(self.mod.resource, 'getrlimit', return_value=inherited), \
+                     patch.object(self.mod.resource, 'setrlimit') as setter:
+                    self.mod.limit_download_file_size()
+                setter.assert_called_once_with(self.mod.resource.RLIMIT_FSIZE, expected)
+
+    @unittest.skipUnless(sys.platform.startswith(('linux', 'darwin')), 'POSIX child file limits')
+    def test_real_child_file_budget_accepts_equal_and_rejects_over_limit(self):
+        parent_limit = self.mod.resource.getrlimit(self.mod.resource.RLIMIT_FSIZE)
+        script = ('import pathlib,sys; p=pathlib.Path(sys.argv[1]); '
+                  'p.write_bytes(b"x"*int(sys.argv[2]))')
+        for size in (1024, 1025):
+            with self.subTest(size=size):
+                destination = self.root / ('bounded-' + str(size))
+                with patch.object(self.mod, 'MAX_DOWNLOAD_BYTES', 1024):
+                    result = subprocess.run([sys.executable, '-c', script, str(destination), str(size)],
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL, timeout=10,
+                        preexec_fn=self.mod.limit_download_file_size)
+                self.assertEqual(result.returncode == 0, size == 1024)
+                self.assertLessEqual(destination.stat().st_size, 1024)
+                self.assertEqual(self.mod.resource.getrlimit(self.mod.resource.RLIMIT_FSIZE), parent_limit)
+
+    @unittest.skipUnless(sys.platform.startswith(('linux', 'darwin')), 'POSIX child file limits')
+    def test_real_child_keeps_stricter_inherited_file_limit(self):
+        parent_limit = self.mod.resource.getrlimit(self.mod.resource.RLIMIT_FSIZE)
+        destination = self.root / 'stricter-budget'
+        def child_setup():
+            self.mod.resource.setrlimit(self.mod.resource.RLIMIT_FSIZE, (512, 512))
+            self.mod.limit_download_file_size()
+        result = subprocess.run([sys.executable, '-c',
+                'import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(b"x"*513)', str(destination)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=10, preexec_fn=child_setup)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertLessEqual(destination.stat().st_size, 512)
+        self.assertEqual(self.mod.resource.getrlimit(self.mod.resource.RLIMIT_FSIZE), parent_limit)
 
     def test_encrypted_config_refresh_is_memory_only_and_preserves_source(self):
         original = (self.creds / 'rclone-config').read_bytes()
