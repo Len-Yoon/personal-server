@@ -111,6 +111,7 @@ class PortalPvcBackupCronJobTests(unittest.TestCase):
             {
                 ("personal-server", ("persistentvolumeclaims",), ("portal-web-files-dynamic", "portal-web-state-dynamic")): {"get"},
                 ("personal-server", ("deployments",), ("portal-web",)): {"get", "watch"},
+                ("personal-server", ("pods",), ()): {"list"},
                 ("personal-server", ("deployments/scale",), ("portal-web",)): {"get", "patch"},
                 ("personal-server", ("configmaps",), ("portal-pvc-backup-evidence",)): {"get", "patch"},
                 ("monitoring", ("configmaps",), ("sre-telegram-backup-status",)): {"get", "patch"},
@@ -134,10 +135,17 @@ class PortalPvcBackupCronJobTests(unittest.TestCase):
         init = spec["initContainers"]
         self.assertEqual(len(init), 1)
         self.assertEqual(init[0]["name"], "prepare-writable-scratch")
-        self.assertEqual({mount["name"] for mount in init[0]["volumeMounts"]}, {"work", "tmp"})
+        self.assertEqual({mount["name"] for mount in init[0]["volumeMounts"]}, {"work", "tmp", "rclone-config-work"})
         self.assertIn("chown 10001:10001 /work /tmp", init[0]["command"][-1])
         environment = {item["name"]: item["value"] for item in spec["containers"][0]["env"]}
         self.assertEqual(environment["TMPDIR"], "/work")
+        self.assertEqual(environment["PORTAL_RCLONE_CONFIG_WORK_DIR"], "/run/rclone-config")
+        self.assertNotIn("medium", volumes["work"]["emptyDir"])
+        self.assertNotIn("medium", volumes["tmp"]["emptyDir"])
+        self.assertEqual(volumes["rclone-config-work"]["emptyDir"], {"medium": "Memory", "sizeLimit": "16Mi"})
+        self.assertEqual(init[0]["command"][-1], "chown 10001:10001 /work /tmp /run/rclone-config && chmod 0700 /work /tmp /run/rclone-config")
+        mounts = {mount["name"]: mount for mount in spec["containers"][0]["volumeMounts"]}
+        self.assertEqual(mounts["rclone-config-work"], {"name": "rclone-config-work", "mountPath": "/run/rclone-config"})
         resources = spec["containers"][0]["resources"]
         self.assertEqual(resources["requests"]["ephemeral-storage"], "1Gi")
         self.assertEqual(resources["limits"]["ephemeral-storage"], "11Gi")

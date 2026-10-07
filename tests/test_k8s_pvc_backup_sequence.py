@@ -73,6 +73,74 @@ class SequenceTests(unittest.TestCase):
     def run_sequence(self, api, at=NOW):
         return sequence.run(api, now=lambda: at, sleep=lambda _: None, poll_seconds=0)
 
+    def test_success_refreshes_evidence_after_portal_result_persisted(self):
+        api = FakeAPI()
+        def refresh():
+            self.assertEqual(json.loads(api.state['data']['results'])['portal'], 'passed')
+            self.assertEqual(len(api.created), 1)
+            return True
+        hook = mock.Mock(side_effect=refresh)
+        self.assertEqual(sequence.run(api, now=lambda: NOW, poll_seconds=0, evidence_refresh=hook), 0)
+        hook.assert_called_once_with()
+        self.assertEqual(api.state['data']['portal_evidence_refresh'], 'passed')
+
+    def test_failed_portal_does_not_export_old_evidence(self):
+        api = FakeAPI({'portal': 'Failed'})
+        hook = mock.Mock(return_value=True)
+        self.assertEqual(sequence.run(api, now=lambda: NOW, poll_seconds=0, evidence_refresh=hook), 0)
+        hook.assert_not_called()
+        self.assertNotIn('portal_evidence_refresh', api.state['data'])
+
+    def test_new_day_failure_clears_prior_refresh_success(self):
+        api = FakeAPI({'portal': 'Failed'})
+        api.state['data'].update({'run_date': '2026-09-28', 'portal_evidence_refresh': 'passed'})
+        hook = mock.Mock(return_value=True)
+        self.assertEqual(sequence.run(api, now=lambda: NOW, poll_seconds=0, evidence_refresh=hook), 0)
+        hook.assert_not_called()
+        self.assertNotIn('portal_evidence_refresh', api.state['data'])
+
+    def test_export_failure_preserves_producer_success_and_later_stages(self):
+        api = FakeAPI()
+        hook = mock.Mock(return_value=False)
+        self.assertEqual(sequence.run(api, now=lambda: NOW, poll_seconds=0, evidence_refresh=hook), 0)
+        self.assertEqual(json.loads(api.state['data']['results'])['portal'], 'passed')
+        self.assertEqual(api.state['data']['portal_evidence_refresh'], 'failed')
+        self.assertEqual(len(api.created), 4)
+
+    def test_resume_refreshes_already_passed_portal_without_recreating_job(self):
+        api = FakeAPI()
+        self.assertEqual(self.run_sequence(api), 0)
+        api.created.clear()
+        hook = mock.Mock(return_value=True)
+        self.assertEqual(sequence.run(api, now=lambda: NOW, poll_seconds=0, evidence_refresh=hook), 0)
+        hook.assert_called_once_with()
+        self.assertEqual(api.created, [])
+
+    def test_resume_missing_completed_job_does_not_refresh_or_recreate(self):
+        api = FakeAPI()
+        self.assertEqual(self.run_sequence(api), 0)
+        api.jobs.clear()
+        api.created.clear()
+        hook = mock.Mock(return_value=True)
+        self.assertEqual(sequence.run(api, now=lambda: NOW, poll_seconds=0, evidence_refresh=hook), 0)
+        hook.assert_not_called()
+        self.assertEqual(api.state['data']['portal_evidence_refresh'], 'failed')
+        self.assertEqual(api.created, [])
+
+    def test_export_command_is_bounded_and_does_not_log_provider_output(self):
+        for outcome in [subprocess.CompletedProcess([], 0, b'private output', b'private error'),
+                        subprocess.CompletedProcess([], 1, b'', b'private error'),
+                        subprocess.TimeoutExpired('export', 45)]:
+            with self.subTest(outcome=type(outcome).__name__):
+                kwargs = {'side_effect': outcome} if isinstance(outcome, Exception) else {'return_value': outcome}
+                with mock.patch.object(sequence.subprocess, 'run', **kwargs) as call, mock.patch('builtins.print') as printed:
+                    result = sequence.refresh_portal_evidence()
+                self.assertEqual(call.call_args.kwargs['timeout'], 45)
+                self.assertTrue(call.call_args.kwargs['capture_output'])
+                self.assertIn('--output-dir', call.call_args.args[0])
+                self.assertNotIn('private', str(printed.call_args))
+                self.assertEqual(result, not isinstance(outcome, Exception) and outcome.returncode == 0)
+
     def test_fixed_order_and_state_update(self):
         api = FakeAPI()
         api.state["data"]["active_from"] = "2026-09-29"

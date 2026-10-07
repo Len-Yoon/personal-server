@@ -60,6 +60,7 @@ INIT_SECURITY = {"runAsNonRoot": False, "runAsUser": 0, "runAsGroup": 0,
 PORTAL_ENV = [
     {"name": "PORTAL_BACKUP_EXECUTION_MODE", "value": "in-cluster"},
     {"name": "TMPDIR", "value": "/work"},
+    {"name": "PORTAL_RCLONE_CONFIG_WORK_DIR", "value": "/run/rclone-config"},
     {"name": "PORTAL_RCLONE_CONFIG_FILE", "value": "/run/secrets/portal-backup/rclone-config"},
     {"name": "PORTAL_RCLONE_PASSWORD_COMMAND", "value": "/usr/bin/cat /run/secrets/portal-backup/rclone-config-passphrase"},
 ]
@@ -114,7 +115,7 @@ def validate_security_contract(stage, template, pod, main, image):
             or main.get("envFrom") or main.get("args") or main.get("lifecycle") or main.get("volumeDevices")):
         raise SafetyError(f"{stage}: pod or backup security drift")
     init = pod.get("initContainers", [])
-    expected_init_command = (["/bin/sh", "-ec", "chown 10001:10001 /work /tmp && chmod 0700 /work /tmp"]
+    expected_init_command = (["/bin/sh", "-ec", "chown 10001:10001 /work /tmp /run/rclone-config && chmod 0700 /work /tmp /run/rclone-config"]
                              if stage == "portal" else
                              ["/bin/sh", "-ec", "chown 10001:10001 /work && chmod 0700 /work"])
     if (len(init) != 1 or init[0].get("name") != ("prepare-writable-scratch" if stage == "portal" else "prepare-scratch")
@@ -132,6 +133,7 @@ def validate_security_contract(stage, template, pod, main, image):
     scratch_names = {"work": ("/work", "10Gi")}
     if stage == "portal":
         scratch_names["tmp"] = ("/tmp", "1Gi")
+        scratch_names["rclone-config-work"] = ("/run/rclone-config", "16Mi")
     volumes = pod.get("volumes", [])
     by_name = {volume.get("name"): volume for volume in volumes}
     expected_names = set(source_names) | {credential_name} | set(scratch_names)
@@ -147,7 +149,10 @@ def validate_security_contract(stage, template, pod, main, image):
             or secret["defaultMode"] != 0o444 or secret["items"] != SECRET_ITEMS):
         raise SafetyError(f"{stage}: Secret projection drift")
     for name, (_, size) in scratch_names.items():
-        if by_name[name] != {"name": name, "emptyDir": {"sizeLimit": size}}:
+        expected_empty_dir = {"sizeLimit": size}
+        if stage == "portal" and name == "rclone-config-work":
+            expected_empty_dir["medium"] = "Memory"
+        if by_name[name] != {"name": name, "emptyDir": expected_empty_dir}:
             raise SafetyError(f"{stage}: scratch volume drift")
     expected_mounts = {name: {"name": name, "mountPath": path, "readOnly": True}
                        for name, (_, path) in source_names.items()}
@@ -281,14 +286,19 @@ def check(api):
         return 1
 
 
-def update_state(api, run_date, status, current, results, now):
+def update_state(api, run_date, status, current, results, now, evidence_refresh=None):
     old = api.get_state()
     validate_state_identity(old)
     metadata = old["metadata"]
     data = dict(old.get("data") or {})
+    if data.get("run_date") != run_date:
+        # A prior day's publication is not proof of today's refresh attempt.
+        data.pop("portal_evidence_refresh", None)
     data.update({"run_date": run_date, "status": status, "current": current,
                  "updated_at": now().astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
                  "results": json.dumps(results, sort_keys=True, separators=(",", ":"))})
+    if evidence_refresh is not None:
+        data["portal_evidence_refresh"] = evidence_refresh
     api.patch_state(metadata["resourceVersion"], data)
 
 
@@ -302,7 +312,21 @@ def classify_failure(api, stage, job):
     return "failed_before_runner"
 
 
-def run(api, now=lambda: datetime.now(KST), sleep=time.sleep, poll_seconds=30):
+def refresh_portal_evidence():
+    """Publish unchanged evidence to the existing read-only directory consumer."""
+    try:
+        response = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("export-portal-backup-evidence.py")),
+             "--output-dir", str(Path.home() / ".local/state/personal-server/backup-evidence")],
+            capture_output=True, timeout=45, check=False)
+        passed = response.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        passed = False
+    print("portal_backup_evidence_refresh=" + ("PASS" if passed else "FAIL"))
+    return passed
+
+
+def run(api, now=lambda: datetime.now(KST), sleep=time.sleep, poll_seconds=30, evidence_refresh=None):
     local = now().astimezone(KST)
     run_date = local.date().isoformat()
     results = {stage: "skipped" for stage in ORDER}
@@ -330,6 +354,16 @@ def run(api, now=lambda: datetime.now(KST), sleep=time.sleep, poll_seconds=30):
                 raise SafetyError("active backup Job identity or template mismatch")
         for stage in ORDER:
             if results[stage] != "skipped":
+                if stage == "portal" and results[stage] == "passed" and evidence_refresh is not None:
+                    # Recover a crash between persisted success and publishing.
+                    # Verify the same completed Job; never rerun the producer.
+                    template, digest = templates[stage]
+                    desired = make_job(stage, local.date(), cronjobs[stage], template, digest)
+                    job = api.get_job(desired["metadata"]["name"])
+                    refreshed = (matching_job(job, desired) and terminal(job) == "Complete"
+                                 and evidence_refresh())
+                    update_state(api, run_date, "running", "none", results, now,
+                                 "passed" if refreshed else "failed")
                 continue
             config = STAGES[stage]
             template, digest = templates[stage]
@@ -367,6 +401,10 @@ def run(api, now=lambda: datetime.now(KST), sleep=time.sleep, poll_seconds=30):
                 raise SafetyError(f"{stage}: Job has not reached terminal state")
             results[stage] = "passed" if result == "Complete" else classify_failure(api, stage, job)
             update_state(api, run_date, "running", "none", results, now)
+            if stage == "portal" and results[stage] == "passed" and evidence_refresh is not None:
+                refreshed = evidence_refresh()
+                update_state(api, run_date, "running", "none", results, now,
+                             "passed" if refreshed else "failed")
         update_state(api, run_date, "completed", "none", results, now)
         return 0
     except (APIError, SafetyError, KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
@@ -472,7 +510,7 @@ def main():
         return 2
     try:
         with local_lock():
-            return run(KubectlAPI())
+            return run(KubectlAPI(), evidence_refresh=refresh_portal_evidence)
     except (OSError, BlockingIOError):
         print("PVC backup sequence blocked: local lock unavailable", file=sys.stderr)
         return 1

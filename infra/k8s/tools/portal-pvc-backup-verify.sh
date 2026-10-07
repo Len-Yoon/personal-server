@@ -27,7 +27,9 @@ REMOTE=${PORTAL_BACKUP_REMOTE:-gdrive:PersonalServer-encrypted-backups}
 MAX_AGE=${PORTAL_BACKUP_MAX_AGE_SECONDS:-86400}
 EVIDENCE_REFRESH_WINDOW_SECONDS=${PORTAL_BACKUP_EVIDENCE_REFRESH_WINDOW_SECONDS:-3600}
 READINESS_TIMEOUT_SECONDS=${PORTAL_READINESS_TIMEOUT_SECONDS:-300}
+WRITER_TERMINATION_TIMEOUT_SECONDS=${PORTAL_WRITER_TERMINATION_TIMEOUT_SECONDS:-120}
 RCLONE_PREFLIGHT_TIMEOUT_SECONDS=${PORTAL_RCLONE_TIMEOUT_SECONDS:-30}
+RCLONE_TRANSFER_TIMEOUT_SECONDS=${PORTAL_RCLONE_TRANSFER_TIMEOUT_SECONDS:-3600}
 RCLONE_PREFLIGHT_RETRY_COUNT=${PORTAL_RCLONE_PREFLIGHT_RETRY_COUNT:-1}
 RCLONE_PREFLIGHT_RETRY_BACKOFF_SECONDS=${PORTAL_RCLONE_PREFLIGHT_RETRY_BACKOFF_SECONDS:-5}
 FILES_PVC='portal-web-files-dynamic'
@@ -64,6 +66,124 @@ BACKUP_UPLOAD_STATUS=''
 FAILURE_STAGE=''
 ACTIVE_TIMEOUT_PID=''
 RCLONE_CREDENTIAL_ARGS=()
+RCLONE_CONFIG_SCRATCH=''
+RCLONE_CONFIG_SOURCE_SHA=''
+RCLONE_CONFIG_DIR_ID=''
+RCLONE_CONFIG_HELPER=$(cat <<'PY_RCLONE_CONFIG'
+import hashlib,json,os,pathlib,re,secrets,shutil,signal,stat,sys,tempfile
+MAX_CONFIG_BYTES=1024*1024
+
+def require(value):
+    if not value:raise ValueError('credential validation failed')
+
+def cipher(path,private=False,projected=False):
+    path=pathlib.Path(path)
+    # Resolve one projected Secret generation, then read one final inode snapshot.
+    opened=path.resolve(strict=True) if projected else path
+    fd=os.open(opened,os.O_RDONLY|os.O_NOFOLLOW)
+    with os.fdopen(fd,'rb') as stream:
+        info=os.fstat(stream.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_nlink==1 and 0<info.st_size<=MAX_CONFIG_BYTES)
+        if private:require(info.st_uid==os.geteuid() and stat.S_IMODE(info.st_mode)==0o600)
+        raw=stream.read(MAX_CONFIG_BYTES+1)
+    require(0<len(raw)<=MAX_CONFIG_BYTES)
+    lines=[line.strip() for line in raw.splitlines() if line.strip() and not line.strip().startswith((b'#',b';'))]
+    require(bool(lines) and lines[0]==b'RCLONE_ENCRYPT_V0:')
+    return raw
+
+def directory(path,expected=None):
+    require(path.is_absolute() and not any(p.is_symlink() for p in (path,*path.parents)))
+    info=path.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid==os.geteuid() and stat.S_IMODE(info.st_mode)==0o700)
+    identity=str(info.st_dev)+':'+str(info.st_ino)
+    require(expected is None or identity==expected)
+    return identity
+
+def memory_backed(path,mountinfo=pathlib.Path('/proc/self/mountinfo')):
+    mounts=[]
+    for line in mountinfo.read_text().splitlines():
+        left,right=line.split(' - ',1)
+        mount=pathlib.Path(re.sub(r'\\([0-7]{3})',lambda m:chr(int(m[1],8)),left.split()[4]))
+        if path.is_relative_to(mount):mounts.append((len(mount.parts),right.split()[0]))
+    return bool(mounts) and max(mounts)[1]=='tmpfs'
+
+def marker(folder,identity=None):
+    require(re.fullmatch('rclone-[0-9a-f]{32}',folder.name) is not None)
+    actual=directory(folder,identity or None)
+    fd=os.open(folder/'owner.json',os.O_RDONLY|os.O_NOFOLLOW)
+    with os.fdopen(fd,'rb') as stream:
+        info=os.fstat(stream.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_uid==os.geteuid() and info.st_nlink==1 and stat.S_IMODE(info.st_mode)==0o600 and 0<info.st_size<=1024)
+        raw=stream.read(1025)
+    require(len(raw)<=1024)
+    require(json.loads(raw)=={'run':folder.name,'owner':os.geteuid(),'identity':actual})
+    return actual
+
+def prepare(source,root,requested=None,expected_sha=None):
+    root=pathlib.Path(root);directory(root);require(memory_backed(root))
+    raw=cipher(source,projected=True)
+    digest=hashlib.sha256(raw).hexdigest()
+    require(expected_sha is None or digest==expected_sha)
+    folder=pathlib.Path(requested) if requested else root/('rclone-'+secrets.token_hex(16))
+    require(folder.parent==root and re.fullmatch('rclone-[0-9a-f]{32}',folder.name) is not None)
+    # Cancellation cannot expose payload without first publishing ownership.
+    previous=signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGTERM,signal.SIGINT,signal.SIGHUP})
+    created=False
+    try:
+        folder.mkdir(mode=0o700);created=True
+        identity=directory(folder)
+        fd=os.open(folder/'owner.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'wb') as stream:
+            stream.write(json.dumps({'run':folder.name,'owner':os.geteuid(),'identity':identity}).encode())
+    except BaseException:
+        if created:shutil.rmtree(folder)
+        raise
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK,previous)
+    try:
+        fd=os.open(folder/'rclone.conf',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'wb') as stream:stream.write(raw)
+        require(cipher(folder/'rclone.conf',private=True)==raw)
+        return str(folder),digest,identity
+    except BaseException:
+        cleanup(folder,identity)
+        raise
+
+def verify(source,folder,expected_sha,identity):
+    folder=pathlib.Path(folder)
+    if not folder.exists() and not folder.is_symlink():return
+    marker(folder,identity)
+    require(re.fullmatch('[0-9a-f]{64}',expected_sha) is not None)
+    require(hashlib.sha256(cipher(source,projected=True)).hexdigest()==expected_sha)
+    cipher(folder/'rclone.conf',private=True)
+
+def cleanup(folder,identity):
+    folder=pathlib.Path(folder)
+    if not folder.exists() and not folder.is_symlink():return
+    actual=marker(folder,identity)
+    require(shutil.rmtree.avoids_symlink_attacks)
+    # Keep ownership proof until every child payload has been removed.
+    for child in folder.iterdir():
+        if child.name=='owner.json':continue
+        if child.is_dir() and not child.is_symlink():shutil.rmtree(child)
+        else:child.unlink()
+    marker(folder,actual)
+    previous=signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGTERM,signal.SIGINT,signal.SIGHUP})
+    try:
+        (folder/'owner.json').unlink();folder.rmdir()
+    finally:signal.pthread_sigmask(signal.SIG_SETMASK,previous)
+    require(not folder.exists())
+
+if __name__=='__main__':
+    action=sys.argv[1]
+    if action=='prepare':print('\n'.join(prepare(*sys.argv[2:])))
+    elif action=='prepare-only':prepare(*sys.argv[2:])
+    elif action=='source-sha':print(hashlib.sha256(cipher(sys.argv[2],projected=True)).hexdigest())
+    elif action=='verify':verify(*sys.argv[2:])
+    elif action=='cleanup':cleanup(*sys.argv[2:])
+    else:raise ValueError('credential validation failed')
+PY_RCLONE_CONFIG
+)
 
 usage() { printf '%s\n' "usage: $0 --check|--go" >&2; }
 
@@ -95,9 +215,14 @@ run_timeout_at_deadline() {
 run_timeout_tracked() {
   local seconds=$1 status
   shift
-  # Streaming does not consume stdin, so run it in the background only to let
+  # These commands do not consume stdin; run in the background only to let
   # the controller's signal trap terminate the supervisor immediately.
-  python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" 10 "$@" 9>&- &
+  if [ "${1:-}" = --private-output ]; then
+    shift
+    python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" 10 "$@" 9>&- >>"$DIAGNOSTIC_FILE" 2>&1 &
+  else
+    python3 -c "$TIMEOUT_SUPERVISOR" "$seconds" 10 "$@" 9>&- &
+  fi
   ACTIVE_TIMEOUT_PID=$!
   if wait "$ACTIVE_TIMEOUT_PID"; then
     status=0
@@ -159,10 +284,16 @@ assert_preflight() {
   [ "$READINESS_TIMEOUT_SECONDS" -ge 120 ] && [ "$READINESS_TIMEOUT_SECONDS" -le 600 ] || return 1
   case "$RCLONE_PREFLIGHT_TIMEOUT_SECONDS" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
   [ "$RCLONE_PREFLIGHT_TIMEOUT_SECONDS" -ge 1 ] && [ "$RCLONE_PREFLIGHT_TIMEOUT_SECONDS" -le 30 ] || return 1
+  case "$RCLONE_TRANSFER_TIMEOUT_SECONDS" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
+  [ "$RCLONE_TRANSFER_TIMEOUT_SECONDS" -ge 1 ] && [ "$RCLONE_TRANSFER_TIMEOUT_SECONDS" -le 14400 ] || return 1
   case "$RCLONE_PREFLIGHT_RETRY_COUNT" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
   [ "$RCLONE_PREFLIGHT_RETRY_COUNT" -ge 0 ] && [ "$RCLONE_PREFLIGHT_RETRY_COUNT" -le 1 ] || return 1
   case "$RCLONE_PREFLIGHT_RETRY_BACKOFF_SECONDS" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
   [ "$RCLONE_PREFLIGHT_RETRY_BACKOFF_SECONDS" -ge 1 ] && [ "$RCLONE_PREFLIGHT_RETRY_BACKOFF_SECONDS" -le 30 ] || return 1
+  if [ "$EXECUTION_MODE" = in-cluster ]; then
+    case "$WRITER_TERMINATION_TIMEOUT_SECONDS" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
+    [ "$WRITER_TERMINATION_TIMEOUT_SECONDS" -ge 1 ] && [ "$WRITER_TERMINATION_TIMEOUT_SECONDS" -le 120 ] || return 1
+  fi
   if [ "$EXECUTION_MODE" = host ]; then
     [ -f "$RUNTIME_MARKER" ] && [ -r "$RUNTIME_MARKER" ] || return 1
     [ "$(tr -d '\r\n' < "$RUNTIME_MARKER")" = k3s ] || return 1
@@ -182,6 +313,9 @@ assert_preflight() {
   done
   if [ "$EXECUTION_MODE" = in-cluster ]; then
     load_in_cluster_evidence || return 1
+    FAILURE_STAGE='writer-observation'
+    portal_writer_pod_count "${PORTAL_KUBECTL_TIMEOUT_SECONDS:-120}" >/dev/null || return 1
+    FAILURE_STAGE=''
   fi
 
   local replicas files_phase state_phase
@@ -198,12 +332,26 @@ assert_preflight() {
   [ "$files_phase" = Bound ] && [ "$state_phase" = Bound ]
 }
 
+portal_writer_pod_count() {
+  local seconds=$1 pods
+  pods=$(kctl_with_deadline_timeout "$seconds" -n "$NAMESPACE" get pods -l app.kubernetes.io/name=portal-web -o json) || return 1
+  python3 -c 'import json,sys
+value=json.load(sys.stdin)
+if not isinstance(value,dict) or value.get("kind")!="PodList" or not isinstance(value.get("items"),list):raise ValueError("writer observation failed")
+if any(not isinstance(p,dict) or not isinstance(p.get("metadata"),dict) or not isinstance(p["metadata"].get("name"),str) or not p["metadata"]["name"] for p in value["items"]):raise ValueError("writer observation failed")
+print(len(value["items"]))' <<<"$pods"
+}
+
 wait_for_writer_termination() {
-  local deadline=$((SECONDS + ${PORTAL_WRITER_TERMINATION_TIMEOUT_SECONDS:-120})) available
+  local deadline=$((SECONDS + WRITER_TERMINATION_TIMEOUT_SECONDS)) available pods remaining
   while [ "$SECONDS" -lt "$deadline" ]; do
-    available=$(kctl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o jsonpath='{.status.availableReplicas}') || return 1
+    remaining=$((deadline - SECONDS))
+    available=$(kctl_with_deadline_timeout "$remaining" -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o jsonpath='{.status.availableReplicas}') || return 1
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || return 1
+    pods=$(portal_writer_pod_count "$remaining") || return 1
     available=${available:-0}
-    [ "$available" = 0 ] && return 0
+    [ "$available" = 0 ] && [ "$pods" = 0 ] && return 0
     sleep 1
   done
   return 1
@@ -232,29 +380,50 @@ wait_for_portal_availability() {
   return 1
 }
 
+verify_rclone_config_copy() {
+  [ -z "$RCLONE_CONFIG_SCRATCH" ] || run_unlocked python3 -c "$RCLONE_CONFIG_HELPER" verify "$PORTAL_RCLONE_CONFIG_FILE" "$RCLONE_CONFIG_SCRATCH" "$RCLONE_CONFIG_SOURCE_SHA" "$RCLONE_CONFIG_DIR_ID"
+}
+
+cleanup_rclone_config_copy() {
+  [ -z "$RCLONE_CONFIG_SCRATCH" ] || run_unlocked python3 -c "$RCLONE_CONFIG_HELPER" cleanup "$RCLONE_CONFIG_SCRATCH" "$RCLONE_CONFIG_DIR_ID"
+}
+
 rclone_with_credentials() {
+  local status
   if [ "${#RCLONE_CREDENTIAL_ARGS[@]}" -gt 0 ]; then
-    run_unlocked rclone "${RCLONE_CREDENTIAL_ARGS[@]}" "$@"
+    if run_timeout_tracked "$RCLONE_TRANSFER_TIMEOUT_SECONDS" --private-output bash -c 'exec "$@" 9</dev/null' -- rclone "${RCLONE_CREDENTIAL_ARGS[@]}" "$@"; then status=0; else status=$?; fi
   else
-    run_unlocked rclone "$@"
+    if run_timeout_tracked "$RCLONE_TRANSFER_TIMEOUT_SECONDS" --private-output bash -c 'exec "$@" 9</dev/null' -- rclone "$@"; then status=0; else status=$?; fi
   fi
+  verify_rclone_config_copy || return 1
+  return "$status"
 }
 
 rclone_with_credentials_timeout() {
-  local seconds=$1
+  local seconds=$1 status
   shift
   if [ "${#RCLONE_CREDENTIAL_ARGS[@]}" -gt 0 ]; then
-    run_timeout "$seconds" rclone "${RCLONE_CREDENTIAL_ARGS[@]}" "$@"
+    if run_timeout "$seconds" rclone "${RCLONE_CREDENTIAL_ARGS[@]}" "$@"; then status=0; else status=$?; fi
   else
-    run_timeout "$seconds" rclone "$@"
+    if run_timeout "$seconds" rclone "$@"; then status=0; else status=$?; fi
   fi
+  verify_rclone_config_copy || return 1
+  return "$status"
 }
 
 prepare_rclone_credentials() {
   if [ -n "${PORTAL_RCLONE_CONFIG_FILE:-}" ] || [ -n "${PORTAL_RCLONE_PASSWORD_COMMAND:-}" ]; then
     [ -n "${PORTAL_RCLONE_CONFIG_FILE:-}" ] && [ -r "$PORTAL_RCLONE_CONFIG_FILE" ] || return 1
     [ -n "${PORTAL_RCLONE_PASSWORD_COMMAND:-}" ] || return 1
-    RCLONE_CREDENTIAL_ARGS=(--config "$PORTAL_RCLONE_CONFIG_FILE" --password-command "$PORTAL_RCLONE_PASSWORD_COMMAND")
+    if [ "$EXECUTION_MODE" = in-cluster ]; then
+      [ -n "${PORTAL_RCLONE_CONFIG_WORK_DIR:-}" ] || return 1
+      RCLONE_CONFIG_SOURCE_SHA=$(run_unlocked python3 -c "$RCLONE_CONFIG_HELPER" source-sha "$PORTAL_RCLONE_CONFIG_FILE") || return 1
+      RCLONE_CONFIG_SCRATCH="$PORTAL_RCLONE_CONFIG_WORK_DIR/rclone-$(python3 -c 'import secrets;print(secrets.token_hex(16))')"
+      run_timeout_tracked 30 --private-output python3 -c "$RCLONE_CONFIG_HELPER" prepare-only "$PORTAL_RCLONE_CONFIG_FILE" "$PORTAL_RCLONE_CONFIG_WORK_DIR" "$RCLONE_CONFIG_SCRATCH" "$RCLONE_CONFIG_SOURCE_SHA" || return 1
+      RCLONE_CREDENTIAL_ARGS=(--config "$RCLONE_CONFIG_SCRATCH/rclone.conf" --password-command "$PORTAL_RCLONE_PASSWORD_COMMAND")
+    else
+      RCLONE_CREDENTIAL_ARGS=(--config "$PORTAL_RCLONE_CONFIG_FILE" --password-command "$PORTAL_RCLONE_PASSWORD_COMMAND")
+    fi
     return
   fi
   # Non-automated terminal use keeps rclone's own masked prompt as a fallback.
@@ -459,6 +628,8 @@ cleanup() {
   trap - EXIT
   # A follow-up Ctrl+C must not interrupt reader deletion or Portal restoration.
   trap '' INT TERM HUP
+  if ! verify_rclone_config_copy; then FAILURE_STAGE='remote-credentials'; restore_ok=0; fi
+  if ! cleanup_rclone_config_copy; then FAILURE_STAGE='remote-credentials'; restore_ok=0; fi
   if [ "$READER_CREATED" -eq 1 ]; then
     kctl -n personal-server delete pod "$READER_POD" --ignore-not-found --wait=true >>"$DIAGNOSTIC_FILE" 2>&1 || restore_ok=0
   fi
@@ -539,7 +710,10 @@ case "${1:-}" in
 esac
 on_signal() {
   if [ -n "$ACTIVE_TIMEOUT_PID" ]; then
+    trap '' INT TERM HUP
     kill -TERM "$ACTIVE_TIMEOUT_PID" 2>/dev/null || true
+    wait "$ACTIVE_TIMEOUT_PID" 2>/dev/null || true
+    ACTIVE_TIMEOUT_PID=''
   fi
   exit 130
 }
@@ -599,12 +773,12 @@ age -R "$RECIPIENT" -o "$ciphertext" "$archive" >>"$DIAGNOSTIC_FILE" 2>&1
 artifact_digest="sha256:$(sha256sum "$ciphertext" | awk '{print $1}')"
 remote_object="$REMOTE/portal-${RUN_ID}.tar.age"
 progress remote_upload
-rclone_with_credentials copyto --immutable --log-level ERROR "$ciphertext" "$remote_object" >>"$DIAGNOSTIC_FILE" 2>&1
+rclone_with_credentials copyto --immutable --log-level ERROR "$ciphertext" "$remote_object"
 progress remote_restore
 FAILURE_STAGE='remote_restore'
-rclone_with_credentials copyto --log-level ERROR "$remote_object" "$WORKDIR/download.age" >>"$DIAGNOSTIC_FILE" 2>&1
+rclone_with_credentials copyto --log-level ERROR "$remote_object" "$WORKDIR/download.age"
 [ "$artifact_digest" = "sha256:$(sha256sum "$WORKDIR/download.age" | awk '{print $1}')" ]
-age -d -i "$IDENTITY" -o "$WORKDIR/restore.tar" "$WORKDIR/download.age" >>"$DIAGNOSTIC_FILE" 2>&1
+age -d -i "$IDENTITY" -o "$WORKDIR/restore.tar" "$WORKDIR/download.age"
 tar -C "$restore" -xf "$WORKDIR/restore.tar" >>"$DIAGNOSTIC_FILE" 2>&1
 assert_regular_tree "$restore/data/files"
 assert_regular_tree "$restore/data/portal-web-state"
