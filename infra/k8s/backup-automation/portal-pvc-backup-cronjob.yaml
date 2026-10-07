@@ -15,6 +15,9 @@ rules:
     resources: [persistentvolumeclaims]
     resourceNames: [portal-web-files-dynamic, portal-web-state-dynamic]
     verbs: [get]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list]
   - apiGroups: [apps]
     resources: [deployments]
     resourceNames: [portal-web]
@@ -100,9 +103,9 @@ spec:
             # Prepare only scratch volumes. fsGroup is deliberately omitted because it
             # would let kubelet change ownership/modes on the mounted Portal PVCs.
             - name: prepare-writable-scratch
-              image: personal-server-portal-pvc-backup:task2
+              image: docker.io/library/personal-server-portal-pvc-backup@sha256:ca0efbf2faa5c2f7d0f35e42fcd04e8e7ac71c1d00031a8a8afa02e1200f2153
               imagePullPolicy: Never
-              command: ["/bin/sh", "-ec", "chown 10001:10001 /work /tmp && chmod 0700 /work /tmp"]
+              command: ["/bin/sh", "-ec", "chown 10001:10001 /work /tmp /run/rclone-config && chmod 0700 /work /tmp /run/rclone-config"]
               securityContext:
                 runAsUser: 0
                 runAsGroup: 0
@@ -117,9 +120,11 @@ spec:
                   mountPath: /work
                 - name: tmp
                   mountPath: /tmp
+                - name: rclone-config-work
+                  mountPath: /run/rclone-config
           containers:
             - name: backup
-              image: personal-server-portal-pvc-backup:task2
+              image: docker.io/library/personal-server-portal-pvc-backup@sha256:ca0efbf2faa5c2f7d0f35e42fcd04e8e7ac71c1d00031a8a8afa02e1200f2153
               imagePullPolicy: Never
               command: [/opt/personal-server/portal-pvc-backup-verify.sh, --go]
               env:
@@ -127,6 +132,8 @@ spec:
                   value: in-cluster
                 - name: TMPDIR
                   value: /work
+                - name: PORTAL_RCLONE_CONFIG_WORK_DIR
+                  value: /run/rclone-config
                 - name: PORTAL_RCLONE_CONFIG_FILE
                   value: /run/secrets/portal-backup/rclone-config
                 - name: PORTAL_RCLONE_PASSWORD_COMMAND
@@ -162,6 +169,8 @@ spec:
                   mountPath: /work
                 - name: tmp
                   mountPath: /tmp
+                - name: rclone-config-work
+                  mountPath: /run/rclone-config
           volumes:
             - name: portal-files
               persistentVolumeClaim:
@@ -193,3 +202,7 @@ spec:
             - name: tmp
               emptyDir:
                 sizeLimit: 1Gi
+            - name: rclone-config-work
+              emptyDir:
+                medium: Memory
+                sizeLimit: 16Mi

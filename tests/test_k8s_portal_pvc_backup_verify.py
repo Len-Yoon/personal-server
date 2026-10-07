@@ -1,10 +1,13 @@
 import json
 import os
 import signal
+import shlex
+import fcntl
 import subprocess
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -14,7 +17,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", remote_error="", remote_timeout_attempts=0, rclone_timeout=None, rclone_retry_count=None, rclone_retry_backoff=None, missing_pvc=False, repeat=False, second_runtime=None, second_evidence_remaining=None, second_evidence_age=None, second_fail_at=None, refresh_window=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", readiness_timeout=None, assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host", command_timeout=None):
+    def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", remote_error="", remote_timeout_attempts=0, rclone_timeout=None, rclone_retry_count=None, rclone_retry_backoff=None, missing_pvc=False, repeat=False, second_runtime=None, second_evidence_remaining=None, second_evidence_age=None, second_fail_at=None, refresh_window=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", readiness_timeout=None, assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host", command_timeout=None, writer_termination_timeout=None, rclone_config_work_dir=""):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -57,6 +60,13 @@ if [ "${{PORTAL_FAKE_MISSING_PVC:-}}" = 1 ]; then
   case "$*" in *'get pvc/'*) exit 42 ;; esac
 fi
 case "$*" in
+  *'get pods -l app.kubernetes.io/name=portal-web -o json')
+    if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = pod-list-permission ]; then exit 42; fi
+    if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = pod-list-after-pause ] && [ "$(cat "${{PORTAL_FAKE_AVAILABLE_REPLICAS_FILE}}")" = 0 ]; then exit 42; fi
+    if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = terminating-writer ] || [ "$(cat "${{PORTAL_FAKE_AVAILABLE_REPLICAS_FILE}}")" = 1 ]; then
+      printf '%s\\n' '{{"kind":"PodList","items":[{{"metadata":{{"name":"portal-web-1","deletionTimestamp":"synthetic"}}}}]}}'
+    else printf '%s\\n' '{{"kind":"PodList","items":[]}}'; fi
+    exit 0 ;;
   *'get deployment portal-web -o jsonpath={{.spec.replicas}}') printf '%s\\n' '1'; exit 0 ;;
   *'get pvc/portal-web-files-dynamic -o jsonpath={{.status.phase}}') printf '%s\\n' 'Bound'; exit 0 ;;
   *'get pvc/portal-web-state-dynamic -o jsonpath={{.status.phase}}') printf '%s\\n' 'Bound'; exit 0 ;;
@@ -99,12 +109,17 @@ exit 0
                 "PORTAL_FAKE_HEALTH_STATUS": str(health_status),
                 "PORTAL_FAKE_AVAILABLE_REPLICAS_FILE": str(available_replicas),
                 "PORTAL_RCLONE_CONFIG_FILE": rclone_config_file,
+                "PORTAL_RCLONE_CONFIG_WORK_DIR": rclone_config_work_dir,
+                "PORTAL_FAKE_HOLD_TRANSFER": "1" if send_signal and signal_when == "upload" else "",
+                "PORTAL_FAKE_TRANSFER_WAIT": str(root / "transfer-wait"),
                 "PORTAL_RCLONE_PASSWORD_COMMAND": rclone_password_command,
                 "PORTAL_FAKE_ASSERT_LOCK_FD_CLOSED": "1" if assert_lock_fd_closed else "",
                 "PORTAL_BACKUP_EXECUTION_MODE": execution_mode,
                 "PORTAL_BACKUP_FILES_MOUNT": str(files) if execution_mode == "in-cluster" else "/data/files",
                 "PORTAL_BACKUP_STATE_MOUNT": str(state) if execution_mode == "in-cluster" else "/data/portal-web-state",
             }
+            if writer_termination_timeout is not None:
+                env["PORTAL_WRITER_TERMINATION_TIMEOUT_SECONDS"] = str(writer_termination_timeout)
             if readiness_timeout is not None:
                 env["PORTAL_READINESS_TIMEOUT_SECONDS"] = str(readiness_timeout)
             if refresh_window is not None:
@@ -119,7 +134,7 @@ exit 0
                 env["PORTAL_NAMESPACE"] = namespace
             if send_signal:
                 process = subprocess.Popen(["bash", str(SCRIPT), mode], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                reader_wait = root / ("stream-wait" if signal_when == "stream" else "reader-wait")
+                reader_wait = root / ("stream-wait" if signal_when == "stream" else "transfer-wait" if signal_when == "upload" else "reader-wait")
                 deadline = time.time() + 5
                 while not reader_wait.exists() and time.time() < deadline:
                     time.sleep(0.01)
@@ -142,6 +157,10 @@ exit 0
                     while self.process_is_live(child_pid) and time.time() < deadline:
                         time.sleep(0.01)
                     self.assertFalse(self.process_is_live(child_pid), "interrupted stream child survived")
+                    lock_path = root / "backup-state/portal-pvc-backup.lock"
+                    with lock_path.open("rb") as lock_stream:
+                        fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        fcntl.flock(lock_stream, fcntl.LOCK_UN)
             else:
                 result = subprocess.run(
                     ["bash", str(SCRIPT), mode],
@@ -203,7 +222,7 @@ exit 0
             "sudo",
             f"#!/bin/sh\nprintf '%s\\n' \"sudo $*\" >> '{calls}'\nif [ \"${{1:-}}\" = -n ]; then shift; fi\nif [ \"${{1:-}}\" = -v ]; then exit 0; fi\nexec \"$@\"\n",
         )
-        write("flock", "#!/bin/sh\nif [ \"${PORTAL_FAKE_LOCK_BUSY:-}\" = 1 ]; then exit 1; fi\nexit 0\n")
+        write("flock", "#!/usr/bin/env python3\nimport os,sys,fcntl\nif os.environ.get('PORTAL_FAKE_LOCK_BUSY')=='1':sys.exit(1)\nfcntl.flock(int(sys.argv[-1]),fcntl.LOCK_EX|fcntl.LOCK_NB)\n")
         write(
             "k3s",
             f'''#!/bin/sh
@@ -337,6 +356,11 @@ if [ "${{PORTAL_FAKE_ASSERT_LOCK_FD_CLOSED:-}}" = 1 ] && [ "$operation" = copyto
   [ "$fd_mode" = 0 ] || exit 42
 fi
 if [ "$operation" = lsd ]; then exit 0; fi
+if [ "${{PORTAL_FAKE_HOLD_TRANSFER:-}}" = 1 ] && [ "$operation" = copyto ]; then
+  printf '%s\\n' "$$" > "${{PORTAL_FAKE_STREAM_CHILD_PID}}"
+  touch "${{PORTAL_FAKE_TRANSFER_WAIT}}"
+  exec sleep 60
+fi
 if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = upload ] && [ "$operation" = copyto ]; then
   printf '%s\\n' 'fake-upload-secret /private/noisy/path' >&2
   exit 42
@@ -439,6 +463,44 @@ esac
         wait_call = "get deployment portal-web -o jsonpath={.status.availableReplicas}"
         self.assertIn(wait_call, calls)
         self.assertLess(calls.index("kubectl -n personal-server scale deployment/portal-web --replicas=0"), calls.index(wait_call))
+
+    def test_in_cluster_terminating_writer_blocks_snapshot_even_when_available_is_zero(self):
+        result, calls, _, _ = self.run_tool('--go', execution_mode='in-cluster',
+                                          fail_at='terminating-writer', writer_termination_timeout=1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('scale deployment/portal-web --replicas=0', calls)
+        self.assertIn('scale deployment/portal-web --replicas=1', calls)
+        self.assertNotIn('pvc_snapshot', result.stdout)
+        self.assertNotIn('rclone copyto', calls)
+
+    def test_invalid_writer_deadline_holds_before_pause(self):
+        for value in ("0", "121", "01", "1x"):
+            with self.subTest(value=value):
+                result, calls, _, _ = self.run_tool(execution_mode="in-cluster", writer_termination_timeout=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("scale deployment/portal-web", calls)
+                self.assertNotIn("pvc_snapshot", result.stdout)
+
+    def test_in_cluster_pod_list_permission_failure_holds_before_writer_pause(self):
+        result, calls, _, _ = self.run_tool('--go', execution_mode='in-cluster', fail_at='pod-list-permission')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('scale deployment/portal-web --replicas=0', calls)
+        self.assertNotIn('pvc_snapshot', result.stdout)
+
+    def test_in_cluster_pod_list_failure_after_pause_restores_writer_without_snapshot(self):
+        result, calls, _, _ = self.run_tool('--go', execution_mode='in-cluster', fail_at='pod-list-after-pause')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('scale deployment/portal-web --replicas=1', calls)
+        self.assertNotIn('pvc_snapshot', result.stdout)
+
+    def test_in_cluster_pod_list_is_checked_before_pause_and_empty_gate_after_pause(self):
+        result, calls, _, _ = self.run_tool('--go', execution_mode='in-cluster')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        query='get pods -l app.kubernetes.io/name=portal-web -o json'
+        pause='scale deployment/portal-web --replicas=0'
+        self.assertLess(calls.index(query), calls.index(pause))
+        self.assertGreater(calls.rindex(query), calls.index(pause))
+        self.assertIn('pvc_snapshot', result.stdout)
 
     def test_in_cluster_go_reads_own_mount_without_reader_pod_or_exec(self):
         result, calls, manifest, _ = self.run_tool("--go", execution_mode="in-cluster")
@@ -987,6 +1049,33 @@ esac
         self.assertIn("libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)", text)
         self.assertIn("signal.signal(signal.SIGINT, on_signal)", text)
 
+    def test_parent_only_term_stops_transfer_before_writer_restore_and_releases_lock(self):
+        result, calls, _, evidence = self.run_tool(send_signal=True, signal_when="upload", assert_stream_child_stopped=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("scale deployment/portal-web --replicas=1", calls)
+        self.assertIn("portal_pvc_backup=FAIL", result.stdout)
+        self.assertNotIn("portal_pvc_backup=PASS", result.stdout)
+        self.assertEqual(evidence, "")
+
+    def test_in_cluster_parent_term_stops_upload_cleans_copy_and_preserves_origin(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name).resolve();root.chmod(0o700)
+            source = root / "original";source.write_bytes(b"RCLONE_ENCRYPT_V0:\nsynthetic-original\n")
+            work = root / "config-work";work.mkdir(mode=0o700)
+            harness = root / "verifier.sh"
+            # Unit fixture replaces only the unavailable macOS tmpfs probe.
+            text = SCRIPT.read_text().replace("require(memory_backed(root))", "require(True)")
+            text = text.replace('SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)', "SCRIPT_DIR=" + shlex.quote(str(SCRIPT.parent)))
+            harness.write_text(text)
+            with patch(__name__ + ".SCRIPT", harness):
+                result, calls, _, evidence = self.run_tool(execution_mode="in-cluster", send_signal=True, signal_when="upload", assert_stream_child_stopped=True, rclone_config_file=str(source), rclone_password_command="/usr/bin/true", rclone_config_work_dir=str(work))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("scale deployment/portal-web --replicas=1", calls)
+            self.assertEqual(list(work.iterdir()), [])
+            self.assertEqual(source.read_bytes(), b"RCLONE_ENCRYPT_V0:\nsynthetic-original\n")
+            self.assertNotIn("synthetic-original", result.stdout + result.stderr)
+            self.assertEqual(evidence, "")
+
     def test_signal_terminates_an_in_flight_pvc_stream_process_group(self):
         """Interrupting the controller must also stop its live kubectl stream child."""
         result, _, _, _ = self.run_tool(
@@ -1015,6 +1104,196 @@ esac
         self.assertIn("image: busybox", manifest)
         self.assertIn("restartPolicy: Never", manifest)
         self.assertGreaterEqual(manifest.count("readOnly: true"), 2)
+
+
+class EncryptedConfigScratchTests(unittest.TestCase):
+    def setUp(self):
+        source = SCRIPT.read_text().split("RCLONE_CONFIG_HELPER=$(cat <<'PY_RCLONE_CONFIG'\n", 1)[1].split("\nPY_RCLONE_CONFIG\n)", 1)[0]
+        self.helper = {"__name__": "config_tests"}
+        exec(compile(source, "credential-helper", "exec"), self.helper)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.root.chmod(0o700)
+        self.original = self.root / "original"
+        self.original.write_bytes(b"# encrypted fixture\nRCLONE_ENCRYPT_V0:\nsynthetic-ciphertext\n")
+        self.before = self.original.read_bytes()
+        self.work = self.root / "work"
+        self.work.mkdir(mode=0o700)
+        self.helper["memory_backed"] = lambda path: True
+
+    def prepare(self):
+        folder, digest, identity = self.helper["prepare"](self.original, self.work)
+        return Path(folder), digest, identity
+
+    def test_encrypted_refresh_uses_private_copy_preserves_origin_and_cleans(self):
+        folder, digest, identity = self.prepare()
+        config = folder / "rclone.conf"
+        self.assertEqual(config.read_bytes(), self.before)
+        self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(folder.stat().st_mode & 0o777, 0o700)
+        config.write_bytes(b"RCLONE_ENCRYPT_V0:\nrefreshed-synthetic-ciphertext\n")
+        self.helper["verify"](self.original, folder, digest, identity)
+        self.assertEqual(self.original.read_bytes(), self.before)
+        self.helper["cleanup"](folder, identity)
+        self.assertFalse(folder.exists())
+
+    def test_refresh_rejects_plaintext_mode_symlink_size_and_hardlink(self):
+        for mutation in ("plaintext", "mode", "symlink", "size", "hardlink"):
+            with self.subTest(mutation=mutation):
+                folder, digest, identity = self.prepare()
+                config = folder / "rclone.conf"
+                if mutation == "plaintext": config.write_bytes(b"[gdrive]\ntoken=synthetic\n")
+                elif mutation == "mode": config.chmod(0o644)
+                elif mutation == "symlink": config.unlink(); config.symlink_to(self.original)
+                elif mutation == "size": config.write_bytes(b"x" * (self.helper["MAX_CONFIG_BYTES"] + 1))
+                else: os.link(config, folder / "linked")
+                with self.assertRaises((ValueError, OSError)):
+                    self.helper["verify"](self.original, folder, digest, identity)
+                self.helper["cleanup"](folder, identity)
+                self.assertEqual(self.original.read_bytes(), self.before)
+                self.assertFalse(folder.exists())
+
+    def test_wrong_origin_or_directory_inode_fails_closed(self):
+        folder, digest, identity = self.prepare()
+        self.original.write_bytes(b"RCLONE_ENCRYPT_V0:\nchanged-generation\n")
+        with self.assertRaises(ValueError): self.helper["verify"](self.original, folder, digest, identity)
+        with self.assertRaises(ValueError): self.helper["cleanup"](folder, "0:0")
+        self.assertTrue(folder.exists())
+        self.helper["cleanup"](folder, identity)
+
+    def test_invalid_source_or_nonmemory_root_never_creates_copy(self):
+        for raw in (b"[gdrive]\n", b"x" * (self.helper["MAX_CONFIG_BYTES"] + 1)):
+            self.original.write_bytes(raw)
+            with self.assertRaises(ValueError): self.prepare()
+            self.assertEqual(list(self.work.iterdir()), [])
+        self.original.write_bytes(self.before)
+        self.helper["memory_backed"] = lambda path: False
+        with self.assertRaises(ValueError): self.prepare()
+        self.work.chmod(0o755)
+        self.helper["memory_backed"] = lambda path: True
+        with self.assertRaises(ValueError): self.prepare()
+        self.assertEqual(list(self.work.iterdir()), [])
+
+    def test_projected_secret_resolves_one_generation_and_detects_rotation(self):
+        projected = self.root / "projected"
+        projected.symlink_to(self.original)
+        folder, digest, identity = self.helper["prepare"](projected, self.work)
+        self.assertEqual((Path(folder) / "rclone.conf").read_bytes(), self.before)
+        next_generation = self.root / "next"
+        next_generation.write_bytes(b"RCLONE_ENCRYPT_V0:\nnext-generation\n")
+        projected.unlink(); projected.symlink_to(next_generation)
+        with self.assertRaises(ValueError): self.helper["verify"](projected, folder, digest, identity)
+        self.assertEqual(self.original.read_bytes(), self.before)
+        self.helper["cleanup"](folder, identity)
+
+    def test_real_term_runs_producer_cleanup_and_preserves_original(self):
+        folder, digest, identity = self.prepare()
+        marker = self.root / "ready"
+        prefix = SCRIPT.read_text().split('case "${1:-}" in', 1)[0]
+        harness = self.root / "term-harness.sh"
+        harness.write_text(prefix + "\n" + "\n".join([
+            "MODE=--check",
+            "RCLONE_CONFIG_SCRATCH=" + shlex.quote(str(folder)),
+            "RCLONE_CONFIG_SOURCE_SHA=" + shlex.quote(digest),
+            "RCLONE_CONFIG_DIR_ID=" + shlex.quote(identity),
+            "trap cleanup EXIT",
+            "trap 'exit 130' TERM",
+            "touch " + shlex.quote(str(marker)),
+            "while :; do sleep 0.1; done",
+        ]) + "\n")
+        env = {**os.environ, "PORTAL_RCLONE_CONFIG_FILE": str(self.original), "TMPDIR": str(self.root)}
+        process = subprocess.Popen(["bash", str(harness)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 5
+            while not marker.exists() and process.poll() is None and time.monotonic() < deadline: time.sleep(0.01)
+            self.assertTrue(marker.exists())
+            process.send_signal(signal.SIGTERM)
+            stdout, stderr = process.communicate(timeout=5)
+            self.assertNotEqual(process.returncode, 0)
+            self.assertIn("portal_pvc_backup=FAIL", stdout)
+            self.assertNotIn("synthetic-ciphertext", stdout + stderr)
+            self.assertFalse(folder.exists())
+            self.assertEqual(self.original.read_bytes(), self.before)
+        finally:
+            if process.poll() is None: process.kill()
+            process.communicate()
+
+    def test_pre_registered_path_survives_prepare_cancellation_before_stdout(self):
+        helper_source = SCRIPT.read_text().split("RCLONE_CONFIG_HELPER=$(cat <<'PY_RCLONE_CONFIG'\n", 1)[1].split("\nPY_RCLONE_CONFIG\n)", 1)[0]
+        for group in (False, True):
+            with self.subTest(group=group):
+                marker = self.root / ("ready-group" if group else "ready-parent")
+                modified = helper_source.replace("require(memory_backed(root))", "require(True)")
+                modified = modified.replace("elif action=='prepare-only':prepare(*sys.argv[2:])", "elif action=='prepare-only':\n        prepare(*sys.argv[2:]);pathlib.Path(os.environ['PREPARE_READY']).touch();__import__('time').sleep(60)")
+                prefix = SCRIPT.read_text().split('case "${1:-}" in', 1)[0]
+                harness = self.root / "prepare-term.sh"
+                harness.write_text(prefix + "\n" + "\n".join([
+                    "MODE=--check", "RCLONE_CONFIG_HELPER=" + shlex.quote(modified),
+                    "on_signal() {" + SCRIPT.read_text().split("on_signal() {", 1)[1].split("\n}\n", 1)[0] + "\n}",
+                    "trap cleanup EXIT", "trap on_signal TERM", "prepare_rclone_credentials",
+                ]) + "\n")
+                env = {**os.environ, "PORTAL_BACKUP_EXECUTION_MODE": "in-cluster", "PORTAL_RCLONE_CONFIG_FILE": str(self.original), "PORTAL_RCLONE_PASSWORD_COMMAND": "/usr/bin/true", "PORTAL_RCLONE_CONFIG_WORK_DIR": str(self.work), "TMPDIR": str(self.root), "PREPARE_READY": str(marker)}
+                process = subprocess.Popen(["bash", str(harness)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+                try:
+                    deadline = time.monotonic() + 5
+                    while not marker.exists() and process.poll() is None and time.monotonic() < deadline: time.sleep(0.01)
+                    self.assertTrue(marker.exists())
+                    if group: os.killpg(process.pid, signal.SIGTERM)
+                    else: process.send_signal(signal.SIGTERM)
+                    stdout, stderr = process.communicate(timeout=5)
+                    self.assertNotEqual(process.returncode, 0)
+                    self.assertIn("portal_pvc_backup=FAIL", stdout)
+                    self.assertEqual(list(self.work.iterdir()), [])
+                    self.assertEqual(self.original.read_bytes(), self.before)
+                    self.assertNotIn("synthetic-ciphertext", stdout + stderr)
+                finally:
+                    if process.poll() is None: process.kill()
+                    process.communicate()
+
+    def test_preexisting_foreign_directory_and_marker_mismatch_are_never_deleted(self):
+        folder = self.work / ("rclone-" + "a" * 32)
+        folder.mkdir(mode=0o700)
+        foreign = folder / "foreign";foreign.write_bytes(b"keep")
+        with self.assertRaises(FileExistsError): self.helper["prepare"](self.original, self.work, folder)
+        with self.assertRaises((OSError, ValueError)): self.helper["cleanup"](folder, "")
+        self.assertEqual(foreign.read_bytes(), b"keep")
+        folder2, digest, identity = self.prepare()
+        marker = folder2 / "owner.json";marker.chmod(0o644)
+        with self.assertRaises(ValueError): self.helper["cleanup"](folder2, "")
+        self.assertTrue((folder2 / "rclone.conf").exists())
+        marker.chmod(0o600);self.helper["cleanup"](folder2, "")
+        self.helper["cleanup"](folder2, "")  # nonexistent is a safe no-op.
+
+    def test_partial_cleanup_retains_marker_and_can_resume(self):
+        folder, digest, identity = self.prepare()
+        (folder / "payload2").write_bytes(b"synthetic")
+        original_unlink = Path.unlink
+        def interrupted(path, *args, **kwargs):
+            if path.name == "payload2": raise OSError("synthetic interruption")
+            return original_unlink(path, *args, **kwargs)
+        with patch.object(Path, "unlink", interrupted):
+            with self.assertRaises(OSError): self.helper["cleanup"](folder, identity)
+        self.assertTrue((folder / "owner.json").exists())
+        self.helper["cleanup"](folder, identity)
+        self.assertFalse(folder.exists())
+
+    def test_longest_mount_wins_over_parent_tmpfs(self):
+        source = SCRIPT.read_text().split("RCLONE_CONFIG_HELPER=$(cat <<'PY_RCLONE_CONFIG'\n", 1)[1].split("\nPY_RCLONE_CONFIG\n)", 1)[0]
+        ns = {"__name__": "mount_tests"}; exec(source, ns)
+        info = self.root / "mountinfo"
+        info.write_text("1 0 0:1 / / rw - ext4 disk rw\n2 1 0:2 / /run rw - tmpfs tmpfs rw\n")
+        self.assertTrue(ns["memory_backed"](Path("/run/rclone-config"), info))
+        info.write_text(info.read_text() + "3 2 0:3 / /run/rclone-config rw - ext4 disk rw\n")
+        self.assertFalse(ns["memory_backed"](Path("/run/rclone-config"), info))
+
+    def test_exit_and_term_cleanup_verify_and_remove_before_evidence_publish(self):
+        script = SCRIPT.read_text()
+        cleanup = script.split("cleanup() {", 1)[1].split("\ntrap ", 1)[0]
+        self.assertLess(cleanup.index("verify_rclone_config_copy"), cleanup.index("cleanup_rclone_config_copy"))
+        self.assertLess(cleanup.index("cleanup_rclone_config_copy"), cleanup.index('scale "deployment/$DEPLOYMENT"'))
+        self.assertIn("trap cleanup EXIT", script)
+        self.assertIn("TERM", script.split("on_signal()", 1)[1])
 
 
 if __name__ == "__main__":
