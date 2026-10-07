@@ -19,7 +19,7 @@ EXPECTED_WORKFLOW_ACTIONS = {
 }
 EXPECTED_DOCKERFILE_BASE_IMAGES = {
     "infra/k8s/backup-automation/Dockerfile": (
-        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+        "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
     ),
     "infra/k8s/backup-automation/book-memo/Dockerfile": (
         "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
@@ -185,7 +185,8 @@ class ComposeConfigTests(unittest.TestCase):
         for relative_path, images in actual.items():
             with self.subTest(dockerfile=relative_path):
                 self.assertEqual(len(images), 1)
-                if relative_path.split('/')[0] in ALPINE_APP_SERVICES:
+                if (relative_path.split('/')[0] in ALPINE_APP_SERVICES
+                        or relative_path == 'infra/k8s/backup-automation/Dockerfile'):
                     self.assertRegex(images[0], r"^python:\d+\.\d+-alpine3\.24@sha256:[0-9a-f]{64}$")
                 else:
                     self.assertRegex(images[0], PYTHON_SLIM_IMAGE_DIGEST_PATTERN)
