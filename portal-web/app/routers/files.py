@@ -105,8 +105,8 @@ def files_home(request: Request, path: str = ""):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     return templates.TemplateResponse(
-        "files.html",
-        {
+        request=request, name="files.html",
+        context={
             "request": request,
             "title": "파일함",
             "directory": directory,
@@ -313,8 +313,8 @@ def _file_login_response(
     next_path: str = "",
 ):
     return templates.TemplateResponse(
-        "file_login.html",
-        {
+        request=request, name="file_login.html",
+        context={
             "request": request,
             "title": "파일함 인증",
             "error": error,
@@ -365,7 +365,7 @@ def file_tools(request: Request, q: str = ''):
         trash_items = file_management.list_trash()
     except (ValueError, OSError):
         raise HTTPException(400, '파일 관리 정보를 확인할 수 없습니다.') from None
-    return templates.TemplateResponse('file_tools.html', {'request': request, 'title': '파일 검색·휴지통', 'q': q, 'results': results, 'trash_items': trash_items})
+    return templates.TemplateResponse(request=request, name='file_tools.html', context={'request': request, 'title': '파일 검색·휴지통', 'q': q, 'results': results, 'trash_items': trash_items})
 
 
 @router.post('/move')
@@ -419,7 +419,7 @@ def restore_item(request: Request, item_id: str = Form(...), name: str = Form(''
 def bookmarks_home(request: Request):
     _require_file_access(request)
     from app.services import news_bookmarks
-    return templates.TemplateResponse('news_bookmarks.html', {'request': request, 'title': '개인 기사 보관함', 'bookmarks': news_bookmarks.listing()})
+    return templates.TemplateResponse(request=request, name='news_bookmarks.html', context={'request': request, 'title': '개인 기사 보관함', 'bookmarks': news_bookmarks.listing()})
 
 
 @router.post('/bookmarks')

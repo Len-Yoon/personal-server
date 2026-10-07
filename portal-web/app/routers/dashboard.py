@@ -81,8 +81,8 @@ async def dashboard(request: Request, q: str = "", source: str = "all"):
     ]
 
     return templates.TemplateResponse(
-        "dashboard.html",
-        {
+        request=request, name="dashboard.html",
+        context={
             "request": request,
             "title": "Len의 개인서버",
             "body_class": "atlas-body",

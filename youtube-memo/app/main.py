@@ -119,8 +119,8 @@ def home(request: Request, page: int = Query(default=1, ge=1), tag: str = ""):
     selected_tag = tag.strip()
     videos, total_videos, current_page = list_videos_page(page, tag=selected_tag)
     return templates.TemplateResponse(
-        "home.html",
-        {
+        request=request, name="home.html",
+        context={
             "request": request,
             "title": "유튜브 메모장",
             "videos": videos,
@@ -158,8 +158,8 @@ def video_detail(request: Request, video_id: int):
         raise HTTPException(status_code=404, detail="Video not found")
 
     return templates.TemplateResponse(
-        "video_detail.html",
-        {
+        request=request, name="video_detail.html",
+        context={
             "request": request,
             "title": video["title"],
             "video": video,
@@ -434,8 +434,8 @@ def _prune_write_sessions() -> None:
 
 def _write_login_response(request: Request, error: str = "", status_code: int = 200, next_path: str = ""):
     return templates.TemplateResponse(
-        "auth_login.html",
-        {
+        request=request, name="auth_login.html",
+        context={
             "request": request,
             "title": "유튜브 메모 쓰기 로그인",
             "error": error,

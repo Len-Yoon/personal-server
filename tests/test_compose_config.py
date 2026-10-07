@@ -37,30 +37,31 @@ EXPECTED_DOCKERFILE_BASE_IMAGES = {
         "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
     ),
     "book-memo/Dockerfile": (
-        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+        "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
     ),
     "car-care-worker/Dockerfile": (
         "python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea",
     ),
     "crawler-worker/Dockerfile": (
-        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+        "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
     ),
     "homeops-executor/Dockerfile": (
-        "python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea",
+        "python:3.12-alpine3.24@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4",
     ),
     "portal-web/Dockerfile": (
-        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+        "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
     ),
     "sre-telegram-relay/Dockerfile": (
         "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
     ),
     "system-agent/Dockerfile": (
-        "python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea",
+        "python:3.12-alpine3.24@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4",
     ),
     "youtube-memo/Dockerfile": (
-        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+        "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
     ),
 }
+ALPINE_APP_SERVICES = frozenset({"portal-web", "book-memo", "youtube-memo", "crawler-worker", "homeops-executor", "system-agent"})
 DOCKERFILE_DIGEST_TARGETS = frozenset(
     {
         "book-memo/Dockerfile",
@@ -87,7 +88,7 @@ PYTHON_SLIM_IMAGE_DIGEST_PATTERN = re.compile(
     r"^python:\d+\.\d+-slim@sha256:[0-9a-f]{64}$"
 )
 PYTHON_SLIM_FROM_PATTERN = re.compile(
-    r"^FROM python:(?P<version>\d+\.\d+)-slim@sha256:[0-9a-f]{64}$",
+    r"^FROM python:(?P<version>\d+\.\d+)-(?:slim|alpine3\.24)@sha256:[0-9a-f]{64}$",
     re.MULTILINE,
 )
 USES_LINE_PATTERN = re.compile(r"^\s*(?:-\s+)?uses:\s*(?P<value>.*?)\s*$")
@@ -184,7 +185,10 @@ class ComposeConfigTests(unittest.TestCase):
         for relative_path, images in actual.items():
             with self.subTest(dockerfile=relative_path):
                 self.assertEqual(len(images), 1)
-                self.assertRegex(images[0], PYTHON_SLIM_IMAGE_DIGEST_PATTERN)
+                if relative_path.split('/')[0] in ALPINE_APP_SERVICES:
+                    self.assertRegex(images[0], r"^python:\d+\.\d+-alpine3\.24@sha256:[0-9a-f]{64}$")
+                else:
+                    self.assertRegex(images[0], PYTHON_SLIM_IMAGE_DIGEST_PATTERN)
 
         self.assertEqual(actual, EXPECTED_DOCKERFILE_BASE_IMAGES)
 
@@ -234,9 +238,9 @@ class ComposeConfigTests(unittest.TestCase):
         for service in ("crawler-worker", "youtube-memo", "book-memo"):
             with self.subTest(service=service):
                 dockerfile = (ROOT / service / "Dockerfile").read_text(encoding="utf-8")
-                self.assertIn("addgroup --system --gid 10001 app", dockerfile)
+                self.assertIn("addgroup -S -g 10001 app" if service in ALPINE_APP_SERVICES else "addgroup --system --gid 10001 app", dockerfile)
                 self.assertIn(
-                    "adduser --system --uid 10001 --ingroup app app", dockerfile
+                    "adduser -S -u 10001 -G app app" if service in ALPINE_APP_SERVICES else "adduser --system --uid 10001 --ingroup app app", dockerfile
                 )
                 self.assertIn(
                     "mkdir -p /app/data/logs && chown -R 10001:10001 /app/data",
@@ -257,9 +261,9 @@ class ComposeConfigTests(unittest.TestCase):
         ):
             with self.subTest(service=service):
                 dockerfile = (ROOT / service / "Dockerfile").read_text(encoding="utf-8")
-                self.assertIn("addgroup --system --gid 10001 app", dockerfile)
+                self.assertIn("addgroup -S -g 10001 app" if service in ALPINE_APP_SERVICES else "addgroup --system --gid 10001 app", dockerfile)
                 self.assertIn(
-                    "adduser --system --uid 10001 --ingroup app app", dockerfile
+                    "adduser -S -u 10001 -G app app" if service in ALPINE_APP_SERVICES else "adduser --system --uid 10001 --ingroup app app", dockerfile
                 )
                 self.assertIn("COPY --chown=10001:10001", dockerfile)
                 self.assertIn("USER 10001:10001", dockerfile)
