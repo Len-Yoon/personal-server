@@ -1,0 +1,7 @@
+<!DOCTYPE html>
+<html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>{{ title }}</title><link rel="stylesheet" href="/static/css/style.css?v=20260930-memo-tags-1"></head>
+<body><main class="container"><section class="panel"><a class="text-link" href="/">목록으로 돌아가기</a><h1>JSON 가져오기</h1>
+<p>이 서비스에서 내보낸 JSON 파일을 선택하세요. 최대 2 MiB이며 기존 식별값이 있는 항목과 연결된 메모는 건너뜁니다. 기존 기록은 덮어쓰지 않습니다.</p>
+<label for="import-file">JSON 파일</label><input id="import-file" type="file" accept="application/json,.json"><button id="import-preview" type="button">미리보기</button>
+<p id="import-status" role="status" aria-live="polite"></p><button id="import-commit" type="button" hidden disabled>확인한 항목 가져오기</button>
+</section></main><script src="/static/js/import-library.js?v=20261007-1"></script></body></html>

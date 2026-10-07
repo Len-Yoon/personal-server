@@ -185,3 +185,15 @@ def health():
         "service": "portal-web",
         "status": "ok"
     }
+
+
+@app.get("/ready")
+def ready():
+    from app.services import file_store, security
+    checks = {
+        "storage": file_store.STORAGE_PATH.is_dir() and os.access(file_store.STORAGE_PATH, os.R_OK | os.W_OK | os.X_OK),
+        "auth_state": security.AUTH_RATE_LIMIT_STATE_PATH.parent.is_dir() and os.access(security.AUTH_RATE_LIMIT_STATE_PATH.parent, os.R_OK | os.W_OK | os.X_OK),
+        "credentials": not security.is_production_environment() or all(os.getenv(key, "").strip() for key in ("FILE_MANAGER_ACCESS_PASSWORD", "ADMIN_PASSWORD", "HOMEOPS_EXECUTOR_SHARED_SECRET")),
+    }
+    ok = all(checks.values())
+    return JSONResponse(status_code=200 if ok else 503, content={"service": "portal-web", "status": "ready" if ok else "not_ready", "checks": checks})

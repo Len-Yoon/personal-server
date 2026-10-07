@@ -94,3 +94,12 @@ def health():
         "service": "crawler-worker",
         "status": "ok",
     }
+
+
+@app.get("/ready")
+def ready():
+    from app.services.readiness import readiness_checks
+    checks = readiness_checks()
+    if not all(checks.values()):
+        return JSONResponse({"service": "crawler-worker", "status": "not_ready", "checks": checks}, status_code=503)
+    return {"service": "crawler-worker", "status": "ready", "checks": checks}

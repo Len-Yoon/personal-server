@@ -491,8 +491,8 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
             invalid_records.append(json.dumps(records))
         for raw in invalid_records:
             with self.subTest(raw=raw[:30]):
-                result, payload, _, _ = self.run_runner(evidence=valid_backup_evidence(), slo_records=raw)
-                self.assertEqual(result.returncode, 0, result.stderr)
+                result, payload, _, calls = self.run_runner(evidence=valid_backup_evidence(), slo_records=raw, recovery_timeout="180", fast_recovery_clock=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr + str(payload) + calls)
                 self.assertEqual(payload["data"].get("slo_evidence"), "unobservable")
                 for key in ("slo_days_recorded", "slo_days_ok", "slo_days_unobservable"):
                     self.assertEqual(payload["data"][key], "0")

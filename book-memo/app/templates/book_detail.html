@@ -68,6 +68,23 @@
     </section>
 
     <section class="panel">
+        <details class="editor">
+            <summary>읽기 진행 수정</summary>
+            <form action="/books/{{ book.id }}/progress" method="post" data-draft-fields="reading_status current_page current_chapter progress_percent" data-draft-id="book-progress-{{ book.id }}">
+                <input type="hidden" name="expected_version" value="{{ book.version }}">
+                {% if not write_authenticated %}<p>로그인 후 작성할 수 있습니다.</p><fieldset disabled style="display: contents;">{% endif %}
+                <label>읽기 상태<select name="reading_status">{% for status in statuses %}<option value="{{ status }}" {% if status == book.reading_status %}selected{% endif %}>{{ status }}</option>{% endfor %}</select></label>
+                <label>현재 쪽<input type="number" name="current_page" value="{{ book.current_page }}" min="0"></label>
+                <label>현재 장<input type="text" name="current_chapter" value="{{ book.current_chapter }}" autocomplete="off"></label>
+                <label>진행률 (%)<input type="number" name="progress_percent" value="{{ book.progress_percent }}" min="0" max="100"></label>
+                {% if chapters %}<p>목차가 있으면 표시되는 완료율과 읽기 상태는 목차 완료 상태로 계산됩니다.</p>{% endif %}
+                <button type="submit">진행 저장</button>
+                {% if not write_authenticated %}</fieldset>{% endif %}
+            </form>
+        </details>
+    </section>
+
+    <section class="panel">
         <details class="editor" open>
             <summary>목차 추가</summary>
             <form action="/books/{{ book.id }}/chapters" method="post" data-draft-fields="title" data-draft-id="chapter-new-{{ book.id }}">
@@ -192,6 +209,19 @@
                                 {% for tag in memo.tags %}<a class="memo-tag" href="/?tag={{ tag|urlencode }}">{{ tag }}</a>{% endfor %}
                             </div>
                         {% endif %}
+                    </details>
+                    <details class="editor">
+                        <summary>메모 수정</summary>
+                        <form action="/memos/{{ memo.id }}" method="post" data-draft-fields="memo_title content page chapter_id" data-draft-id="memo-edit-{{ memo.id }}">
+                            <input type="hidden" name="expected_version" value="{{ memo.version }}">
+                            {% if not write_authenticated %}<p>로그인 후 작성할 수 있습니다.</p><fieldset disabled style="display: contents;">{% endif %}
+                            <label>제목<input type="text" name="memo_title" value="{{ memo.title }}" autocomplete="off"></label>
+                            <label>목차<select name="chapter_id"><option value="0">목차 연결 없음</option>{% for chapter in chapters %}<option value="{{ chapter.id }}" {% if chapter.id == memo.chapter_id %}selected{% endif %}>{{ chapter.title }}</option>{% endfor %}</select></label>
+                            <label>쪽<input type="number" name="page" value="{{ memo.page }}" min="0"></label>
+                            <label>내용<textarea name="content" required>{{ memo.content }}</textarea></label>
+                            <button type="submit">메모 저장</button>
+                            {% if not write_authenticated %}</fieldset>{% endif %}
+                        </form>
                     </details>
                     <form class="memo-tags-editor" action="/memos/{{ memo.id }}/tags" method="post" data-draft-fields="tags" data-draft-id="memo-tags-{{ memo.id }}">
                 {% if not write_authenticated %}

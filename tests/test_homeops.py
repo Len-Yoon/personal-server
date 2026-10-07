@@ -43,7 +43,7 @@ class FakeExecutor:
             return result
         return []
 
-    def restart_all(self):
+    def restart_all(self, request_id=None):
         self.restart_all_calls += 1
         if self.restart_all_error:
             raise self.restart_all_error
@@ -562,20 +562,20 @@ class HomeOpsTests(unittest.TestCase):
             def __init__(self):
                 self.requests = []
 
-            def _request(self, path, payload=None, method=None):
-                self.requests.append((path, payload, method))
+            def _request(self, path, payload=None, method=None, request_id=None):
+                self.requests.append((path, payload, method, request_id))
                 return {"path": path}
 
         client = RecordingClient()
 
         diagnostics = client.all_diagnostics()
-        restarts = client.restart_all()
+        restarts = client.restart_all("stable-operation-id")
 
         self.assertEqual(diagnostics, {"path": "/v1/diagnostics"})
         self.assertEqual(restarts, {"path": "/v1/restarts/all"})
         self.assertEqual(
             client.requests,
-            [("/v1/diagnostics", None, None), ("/v1/restarts/all", None, "POST")],
+            [("/v1/diagnostics", None, None, None), ("/v1/restarts/all", None, "POST", "stable-operation-id")],
         )
 
     def test_diagnose_all_groups_healthy_and_normalized_unhealthy_services(self):

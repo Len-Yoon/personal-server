@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 
-import requests
+import aiohttp
 from fastapi.testclient import TestClient
 from tests.book_memo import test_ui_contract
 
@@ -108,13 +108,15 @@ class BookReliabilityTests(unittest.TestCase):
     def test_all_search_failures_are_distinct_from_successful_empty_results(self):
         with tempfile.TemporaryDirectory() as tmp, test_ui_contract.BookMemoUiContractTests().loaded_app(tmp) as app:
             from app.services import book_search
-            with patch.dict(os.environ, {'ALADIN_TTB_KEY': ''}), patch.object(book_search.requests, 'get', side_effect=requests.Timeout('upstream unavailable')):
+            with patch.dict(os.environ, {'ALADIN_TTB_KEY': ''}), patch.object(book_search, '_get_json', side_effect=aiohttp.ClientConnectionError('upstream unavailable')):
                 response = TestClient(app).get('/?q=책')
                 self.assertIn('검색 실패', response.text)
                 self.assertNotIn('검색 결과가 없습니다.', response.text)
+            book_search._CACHE.clear()
             with patch.object(book_search, '_search_aladin', return_value=[]), patch.object(book_search, '_search_google_books', return_value=[]), patch.object(book_search, '_search_open_library', return_value=[]):
                 self.assertEqual(book_search.search_books('책'), [])
-            with patch.object(book_search, '_search_aladin', side_effect=requests.Timeout()), patch.object(book_search, '_search_google_books', return_value=[{'title': '찾은 책'}]):
+            book_search._CACHE.clear()
+            with patch.object(book_search, '_search_aladin', side_effect=aiohttp.ClientConnectionError()), patch.object(book_search, '_search_google_books', return_value=[{'title': '찾은 책'}]):
                 self.assertEqual(book_search.search_books('책'), [{'title': '찾은 책'}])
 
     def test_tag_retry_does_not_reapply_an_older_successful_update(self):

@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="file-section file-tools"><h1>개인 기사 보관함</h1><p><a href="/files">파일함으로</a></p><p>기사 주소와 제목, 개인 메모를 보관합니다. 뉴스 수집 보관 기간과 관계없이 유지되며 기사 원문은 저장하지 않습니다.</p>
+<form class="file-tools-form" action="/files/bookmarks" method="post"><label>기사 주소 <input name="url" type="url" required maxlength="2048"></label><label>제목 <input name="title" required maxlength="500"></label><label>메모 <textarea name="note" maxlength="20000"></textarea></label><button>보관·수정</button></form>
+{% for item in bookmarks %}<article><h2><a href="{{ item.url }}" rel="noopener noreferrer" target="_blank">{{ item.title }}</a></h2><p style="white-space:pre-wrap">{{ item.note }}</p><details><summary>수정</summary><form class="file-tools-form" action="/files/bookmarks" method="post"><input type="hidden" name="url" value="{{ item.url }}"><label>제목 <input name="title" value="{{ item.title }}" required maxlength="500"></label><label>메모 <textarea name="note" maxlength="20000">{{ item.note }}</textarea></label><button>수정</button></form></details><form class="file-tools-form" action="/files/bookmarks/delete" method="post"><input type="hidden" name="bookmark_id" value="{{ item.id }}"><button>보관 해제</button></form></article>{% else %}<p>보관한 기사가 없습니다.</p>{% endfor %}
+</section>
+{% endblock %}

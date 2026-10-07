@@ -49,6 +49,20 @@ for _name, _modules in (
     EXPECTED_GROUPS[_name] = (*_entry[:-1], _entry[-1] + _modules)
 
 
+# The enhancement regressions belong to their service or preparation-tool suite.
+for _name, _modules in (
+    ("portal", " tests.test_file_management tests.test_news_bookmarks"),
+    ("system-agent", " tests.system_agent.test_backup_evidence"),
+    ("crawler-worker", " tests.crawler_worker.test_readiness"),
+    ("homeops-executor", " tests.homeops_executor.test_restart_idempotency"),
+    ("youtube-memo", " tests.youtube_memo.test_audit_enhancements"),
+    ("book-memo", " tests.book_memo.test_audit_enhancements tests.book_memo.test_search_budget"),
+    ("k8s-contracts", " tests.test_project_hardening_tools"),
+):
+    _entry = EXPECTED_GROUPS[_name]
+    EXPECTED_GROUPS[_name] = (*_entry[:-1], _entry[-1] + _modules)
+
+
 class ServiceTestRunnerTests(unittest.TestCase):
     def test_ci_selection_uses_documentation_subset_for_documentation(self):
         mode, names = runner.select_ci_suites(

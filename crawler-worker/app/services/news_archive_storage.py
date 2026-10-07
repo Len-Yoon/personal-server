@@ -66,6 +66,35 @@ def archive_path() -> Path:
     )
 
 
+def validate_archive_payload(data: Any, schema_version: str) -> None:
+    """Validate loader fail-closed structure without writes, migration or logging."""
+    def invalid(reason: str) -> None:
+        raise ValueError(f"news archive {reason}; original preserved")
+
+    if not isinstance(data, dict) or not isinstance(data.get("articles", []), list):
+        invalid("has invalid top-level data")
+    version = data.get("schema_version")
+    if version not in (None, "", schema_version, PREVIOUS_SCHEMA_VERSION):
+        invalid("has unsupported schema")
+    if any(key.startswith("telegram_") and key not in KNOWN_TELEGRAM_FIELDS for key in data):
+        invalid("contains unknown notification fields")
+    for key in ("telegram_pending_articles", "telegram_recent_articles"):
+        value = data.get(key, [])
+        if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+            invalid("has invalid notification data")
+    if not isinstance(data.get("telegram_topic_last_sent_at", {}), dict):
+        invalid("has invalid notification times")
+    raw_outbox = data.get("telegram_outbox", [])
+    # Malformed outbox entries are intentionally ignored by the existing loader.
+    if isinstance(raw_outbox, list):
+        known_event_fields = {"event_id", "kind", "status", "articles", "article_urls", "created_at", "removed_urls", "sent_at"}
+        if any(set(event) - known_event_fields for event in raw_outbox if isinstance(event, dict)):
+            invalid("contains unknown notification event fields")
+    # Legacy migration discards the previous schema's articles, as before.
+    if version != PREVIOUS_SCHEMA_VERSION and not all(isinstance(article, dict) for article in data.get("articles", [])):
+        invalid("has invalid article data")
+
+
 def load_archive(
     path: Path,
     schema_version: str,
@@ -83,26 +112,16 @@ def load_archive(
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         LOGGER.error("news archive unavailable: corrupt JSON; original preserved")
         raise ValueError("news archive is corrupt; original preserved") from exc
-    if not isinstance(data, dict) or not isinstance(data.get("articles", []), list):
-        _invalid_archive("has invalid top-level data")
+    try:
+        validate_archive_payload(data, schema_version)
+    except ValueError as exc:
+        LOGGER.error("news archive unavailable: %s", exc)
+        raise
     version = data.get("schema_version")
-    if version not in (None, "", schema_version, PREVIOUS_SCHEMA_VERSION):
-        _invalid_archive("has unsupported schema")
-    if any(key.startswith("telegram_") and key not in KNOWN_TELEGRAM_FIELDS for key in data):
-        _invalid_archive("contains unknown notification fields")
-    for key in ("telegram_pending_articles", "telegram_recent_articles"):
-        value = data.get(key, [])
-        if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
-            _invalid_archive("has invalid notification data")
-    if not isinstance(data.get("telegram_topic_last_sent_at", {}), dict):
-        _invalid_archive("has invalid notification times")
     raw_outbox = data.get("telegram_outbox", [])
     if not isinstance(raw_outbox, list):
         LOGGER.warning("news archive contains malformed outbox; invalid entries ignored")
         raw_outbox = []
-    known_event_fields = {"event_id", "kind", "status", "articles", "article_urls", "created_at", "removed_urls", "sent_at"}
-    if any(set(event) - known_event_fields for event in raw_outbox if isinstance(event, dict)):
-        _invalid_archive("contains unknown notification event fields")
     if len(notification_outbox(raw_outbox)) != len(raw_outbox):
         LOGGER.warning("news archive contains malformed outbox entries; invalid entries ignored")
     if version == PREVIOUS_SCHEMA_VERSION:
@@ -114,8 +133,6 @@ def load_archive(
     normalized_articles = []
     changed = False
     for article in articles:
-        if not isinstance(article, dict):
-            _invalid_archive("has invalid article data")
         normalized = sanitize_article(article)
         if normalized != article:
             changed = True

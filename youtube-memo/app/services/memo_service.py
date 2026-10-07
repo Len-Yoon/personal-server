@@ -19,11 +19,31 @@ DB_PATH = Path(os.getenv("YOUTUBE_MEMO_DB_PATH", DEFAULT_DB_PATH))
 MEMO_TIMESTAMP_PATTERN = re.compile(r"(?<![\w:])(?:\d{1,2}:\d{2}:\d{2}|\d{1,4}:\d{2})(?![\w:])")
 
 
+def _schema_ready(connection: sqlite3.Connection) -> bool:
+    """Inspect schema without reserving the SQLite writer lock."""
+    required = {'idx_memo_tags_key', 'memo_tags', 'memos', 'videos', 'write_requests', 'idx_videos_home_order', 'idx_memos_video'}
+    present = {row["name"] for row in connection.execute("SELECT name FROM sqlite_master")}
+    if not required <= present:
+        return False
+    return all(
+        "version" in {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for table in ('memos',)
+    )
+
+
 def init_db() -> None:
+    # DB_PATH is resolved at each call so test fixtures and runtime overrides work.
+    # Ordinary reads only inspect the schema; migrations alone acquire the writer.
+    if DB_PATH.is_file():
+        with _connect() as connection:
+            if _schema_ready(connection):
+                return
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     with _connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        if _schema_ready(connection):
+            return
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS videos (

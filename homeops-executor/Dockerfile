@@ -6,7 +6,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 RUN addgroup --system --gid 10001 app \
-    && adduser --system --uid 10001 --ingroup app app
+    && adduser --system --uid 10001 --ingroup app app \
+    && mkdir -p /data/homeops-executor \
+    && chown 10001:10001 /data/homeops-executor
 
 COPY --chown=10001:10001 app ./app
 

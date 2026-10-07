@@ -5,7 +5,7 @@
     "requirements": "portal-web/requirements.txt",
     "extra_packages": [],
     "pythonpath": "portal-web",
-    "test_command": "python3 -m unittest tests.test_file_access tests.test_portal_failure_boundaries tests.test_portal_dashboard tests.test_portal_security tests.test_homeops tests.test_homeops_managed_scope tests.test_homeops_notifier tests.test_portal_http_metrics tests.test_portal_k3s_bridge_contract tests.test_portfolio"
+    "test_command": "python3 -m unittest tests.test_file_access tests.test_portal_failure_boundaries tests.test_portal_dashboard tests.test_portal_security tests.test_homeops tests.test_homeops_managed_scope tests.test_homeops_notifier tests.test_portal_http_metrics tests.test_portal_k3s_bridge_contract tests.test_portfolio tests.test_file_management tests.test_news_bookmarks"
   },
   {
     "name": "system-agent",
@@ -13,7 +13,7 @@
     "requirements": "system-agent/requirements.txt",
     "extra_packages": [],
     "pythonpath": "system-agent",
-    "test_command": "python3 -m unittest tests.system_agent.test_metrics"
+    "test_command": "python3 -m unittest tests.system_agent.test_metrics tests.system_agent.test_backup_evidence"
   },
   {
     "name": "crawler-worker",
@@ -21,7 +21,7 @@
     "requirements": "crawler-worker/requirements.txt",
     "extra_packages": [],
     "pythonpath": "crawler-worker",
-    "test_command": "python3 -m unittest tests.crawler_worker.test_datetime_format tests.crawler_worker.test_failure_boundaries tests.crawler_worker.test_investing_news_rss tests.crawler_worker.test_nasdaq_relevance tests.crawler_worker.test_news_collection_metrics tests.crawler_worker.test_news_collection_status tests.crawler_worker.test_news_scheduler tests.crawler_worker.test_news_service tests.crawler_worker.test_news_routes tests.crawler_worker.test_rss_news tests.crawler_worker.test_telegram_notifier"
+    "test_command": "python3 -m unittest tests.crawler_worker.test_datetime_format tests.crawler_worker.test_failure_boundaries tests.crawler_worker.test_investing_news_rss tests.crawler_worker.test_nasdaq_relevance tests.crawler_worker.test_news_collection_metrics tests.crawler_worker.test_news_collection_status tests.crawler_worker.test_news_scheduler tests.crawler_worker.test_news_service tests.crawler_worker.test_news_routes tests.crawler_worker.test_rss_news tests.crawler_worker.test_telegram_notifier tests.crawler_worker.test_readiness"
   },
   {
     "name": "homeops-executor",
@@ -29,23 +29,27 @@
     "requirements": "homeops-executor/requirements.txt",
     "extra_packages": [],
     "pythonpath": "homeops-executor",
-    "test_command": "python3 -m unittest tests.homeops_executor.test_docker_ops tests.homeops_executor.test_managed_scope"
+    "test_command": "python3 -m unittest tests.homeops_executor.test_docker_ops tests.homeops_executor.test_managed_scope tests.homeops_executor.test_restart_idempotency"
   },
   {
     "name": "youtube-memo",
     "python_version": "3.11",
     "requirements": "youtube-memo/requirements.txt",
-    "extra_packages": ["httpx==0.28.1"],
+    "extra_packages": [
+      "httpx==0.28.1"
+    ],
     "pythonpath": "youtube-memo",
-    "test_command": "python3 -m unittest tests.youtube_memo.test_ui_contract tests.youtube_memo.test_video_titles tests.youtube_memo.test_reliability"
+    "test_command": "python3 -m unittest tests.youtube_memo.test_ui_contract tests.youtube_memo.test_video_titles tests.youtube_memo.test_reliability tests.youtube_memo.test_audit_enhancements"
   },
   {
     "name": "book-memo",
     "python_version": "3.11",
     "requirements": "book-memo/requirements.txt",
-    "extra_packages": ["httpx==0.28.1"],
+    "extra_packages": [
+      "httpx==0.28.1"
+    ],
     "pythonpath": "book-memo",
-    "test_command": "python3 -m unittest tests.book_memo.test_book_service tests.book_memo.test_ui_contract tests.book_memo.test_reliability"
+    "test_command": "python3 -m unittest tests.book_memo.test_book_service tests.book_memo.test_ui_contract tests.book_memo.test_reliability tests.book_memo.test_audit_enhancements tests.book_memo.test_search_budget"
   },
   {
     "name": "car-care-worker",
@@ -59,15 +63,20 @@
     "name": "k8s-contracts",
     "python_version": "3.11",
     "requirements": "",
-    "extra_packages": ["PyYAML"],
+    "extra_packages": [
+      "PyYAML"
+    ],
     "pythonpath": ".",
-    "test_command": "python3 -m unittest tests.test_k8s_monitoring_tools tests.test_k8s_monitoring_values tests.test_k8s_portal_availability_alert tests.test_k8s_portal_backup_verify tests.test_k8s_portal_cutover tests.test_k8s_portal_nodeport_connectivity_smoke tests.test_k8s_portal_pvc_backup_automation tests.test_k8s_portal_pvc_backup_verify tests.test_k8s_portal_secret_shadow_smoke tests.test_k8s_sre_health_audit tests.test_k8s_sre_pod_recovery_lab tests.test_k8s_networkpolicy_smoke tests.test_k8s_sre_telegram_manifests tests.test_k8s_sre_telegram_tools tests.test_k8s_sre_telegram_update tests.test_k8s_transition_runner_artifacts tests.test_k8s_transition_runner_install_tools tests.test_k8s_transition_runner_policy tests.test_k8s_quarterly_sre_audit_cronjob tests.test_k8s_quarterly_sre_audit_automation tests.test_monthly_recovery_drill tests.test_k8s_slo_daily_evidence tests.test_k8s_crawler_worker_migration tests.test_k8s_crawler_pvc_backup tests.test_k8s_service_backup_production_state tests.test_k8s_pvc_backup_sequence tests.test_k8s_pvc_backup_sequence_automation tests.test_k8s_pvc_backup_retention tests.test_k8s_pvc_backup_retention_entrypoints tests.test_k3s_app_image_build tests.test_k3s_app_upgrade tests.test_k3s_app_image_transfer tests.test_k8s_book_memo_migration tests.test_k8s_book_pvc_backup tests.test_k8s_grafana_portal_http_dashboard tests.test_k8s_portal_nonroot tests.test_k8s_portal_pvc_backup_cronjob tests.test_k8s_portal_pvc_backup_cronjob_install tests.test_k8s_youtube_memo_migration tests.test_k8s_youtube_pvc_backup tests.test_validate_backup_evidence tests.test_validate_sre_alertmanager_config tests.test_k8s_observability_lab tests.test_k8s_observability_lab_tools tests.test_k8s_slo_evidence_summary tests.test_k8s_deployment_rollback_lab"
+    "test_command": "python3 -m unittest tests.test_k8s_monitoring_tools tests.test_k8s_monitoring_values tests.test_k8s_portal_availability_alert tests.test_k8s_portal_backup_verify tests.test_k8s_portal_cutover tests.test_k8s_portal_nodeport_connectivity_smoke tests.test_k8s_portal_pvc_backup_automation tests.test_k8s_portal_pvc_backup_verify tests.test_k8s_portal_secret_shadow_smoke tests.test_k8s_sre_health_audit tests.test_k8s_sre_pod_recovery_lab tests.test_k8s_networkpolicy_smoke tests.test_k8s_sre_telegram_manifests tests.test_k8s_sre_telegram_tools tests.test_k8s_sre_telegram_update tests.test_k8s_transition_runner_artifacts tests.test_k8s_transition_runner_install_tools tests.test_k8s_transition_runner_policy tests.test_k8s_quarterly_sre_audit_cronjob tests.test_k8s_quarterly_sre_audit_automation tests.test_monthly_recovery_drill tests.test_k8s_slo_daily_evidence tests.test_k8s_crawler_worker_migration tests.test_k8s_crawler_pvc_backup tests.test_k8s_service_backup_production_state tests.test_k8s_pvc_backup_sequence tests.test_k8s_pvc_backup_sequence_automation tests.test_k8s_pvc_backup_retention tests.test_k8s_pvc_backup_retention_entrypoints tests.test_k3s_app_image_build tests.test_k3s_app_upgrade tests.test_k3s_app_image_transfer tests.test_k8s_book_memo_migration tests.test_k8s_book_pvc_backup tests.test_k8s_grafana_portal_http_dashboard tests.test_k8s_portal_nonroot tests.test_k8s_portal_pvc_backup_cronjob tests.test_k8s_portal_pvc_backup_cronjob_install tests.test_k8s_youtube_memo_migration tests.test_k8s_youtube_pvc_backup tests.test_validate_backup_evidence tests.test_validate_sre_alertmanager_config tests.test_k8s_observability_lab tests.test_k8s_observability_lab_tools tests.test_k8s_slo_evidence_summary tests.test_k8s_deployment_rollback_lab tests.test_project_hardening_tools"
   },
   {
     "name": "maintenance",
     "python_version": "3.11",
     "requirements": "",
-    "extra_packages": ["PyYAML", "Jinja2"],
+    "extra_packages": [
+      "PyYAML",
+      "Jinja2"
+    ],
     "pythonpath": ".",
     "test_command": "python3 -m unittest tests.test_compose_config tests.test_supply_chain_security_workflow tests.test_documentation_index tests.test_documentation_links tests.test_dependabot_config tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_public_uptime_monitor tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements tests.test_python_multipart_security tests.test_runtime_service_deployment_contract tests.test_caddy_portal_upstream tests.test_n100_remote_dev tests.test_n100_safe_deployment tests.test_run_service_tests tests.test_runtime_service_state tests.test_setup_local_test_venvs tests.test_sre_telegram_relay tests.test_ansible_lab_contract tests.test_ansible_drift_lab tests.test_homeops_auth_configuration tests.test_homeops_auth_runtime tests.test_homeops_auth_supply tests.test_homeops_auth_bootstrap"
   }

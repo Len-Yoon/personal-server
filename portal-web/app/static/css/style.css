@@ -1669,3 +1669,15 @@ textarea:focus {
         scroll-behavior: auto !important;
     }
 }
+
+/* File operations and private article forms retain the existing theme. */
+.file-tools h2 { margin-top: 32px; }
+.file-tools a { color: var(--accent); overflow-wrap: anywhere; }
+.file-tools p { color: var(--text-secondary); line-height: 1.65; }
+.file-tools-form { display: flex; flex-wrap: wrap; gap: 16px; align-items: end; margin: 20px 0; }
+.file-tools-form label { display: grid; gap: 8px; flex: 1 1 220px; min-width: 0; }
+.file-tools-form input, .file-tools-form textarea { width: 100%; min-height: 44px; padding: 10px 14px; border: 1px solid var(--card-border); border-radius: 10px; color: var(--text-primary); font: inherit; }
+.file-tools-form textarea { min-height: 110px; resize: vertical; }
+.file-tools-form button { min-height: 44px; padding: 10px 20px; border: 0; border-radius: 10px; background: var(--accent); color: var(--bg-primary); font: inherit; font-weight: 700; cursor: pointer; }
+.file-tools article { margin-top: 24px; border-top: 1px solid var(--card-border); padding-top: 12px; }
+@media (max-width: 600px) { .file-tools-form label, .file-tools-form button { flex-basis: 100%; } }
