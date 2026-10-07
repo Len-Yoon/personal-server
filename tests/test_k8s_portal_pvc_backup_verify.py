@@ -297,9 +297,9 @@ case "$*" in
     exit 0 ;;
   *'exec -i'*'/data/files'*)
     if [ "${{PORTAL_FAKE_HANG_STREAM:-}}" = 1 ]; then
-      touch "${{PORTAL_FAKE_STREAM_WAIT}}"
       sleep 60 &
       echo "$!" > "${{PORTAL_FAKE_STREAM_CHILD_PID}}"
+      touch "${{PORTAL_FAKE_STREAM_WAIT}}"
       wait "$!"
       exit 0
     fi
@@ -1230,7 +1230,10 @@ class EncryptedConfigScratchTests(unittest.TestCase):
             "touch " + shlex.quote(str(marker)),
             "while :; do sleep 0.1; done",
         ]) + "\n")
-        env = {**os.environ, "PORTAL_RCLONE_CONFIG_FILE": str(self.original), "TMPDIR": str(self.root)}
+        env = {**os.environ, "PORTAL_RCLONE_CONFIG_FILE": str(self.original), "TMPDIR": str(self.root),
+               "PORTAL_AGE_RECIPIENT": str(self.root / "recipient"),
+               "PORTAL_AGE_IDENTITY": str(self.root / "identity"),
+               "PORTAL_BACKUP_STATE_DIR": str(self.root / "state")}
         process = subprocess.Popen(["bash", str(harness)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             deadline = time.monotonic() + 5
