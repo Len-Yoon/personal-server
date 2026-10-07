@@ -17,7 +17,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", remote_error="", remote_timeout_attempts=0, rclone_timeout=None, rclone_retry_count=None, rclone_retry_backoff=None, missing_pvc=False, repeat=False, second_runtime=None, second_evidence_remaining=None, second_evidence_age=None, second_fail_at=None, refresh_window=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", readiness_timeout=None, assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host", command_timeout=None, writer_termination_timeout=None, rclone_config_work_dir=""):
+    def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", remote_error="", remote_timeout_attempts=0, rclone_timeout=None, rclone_retry_count=None, rclone_retry_backoff=None, missing_pvc=False, repeat=False, second_runtime=None, second_evidence_remaining=None, second_evidence_age=None, second_fail_at=None, refresh_window=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", readiness_timeout=None, assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host", command_timeout=None, writer_termination_timeout=None, rclone_config_work_dir="", pod_list_kind="PodList"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -62,10 +62,12 @@ fi
 case "$*" in
   *'get pods -l app.kubernetes.io/name=portal-web -o json')
     if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = pod-list-permission ]; then exit 42; fi
+    if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = pod-list-malformed-items ]; then printf '%s\\n' '{{"kind":"List","items":{{}}}}'; exit 0; fi
+    if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = pod-list-malformed-metadata ]; then printf '%s\\n' '{{"kind":"List","items":[{{"metadata":{{"name":""}}}}]}}'; exit 0; fi
     if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = pod-list-after-pause ] && [ "$(cat "${{PORTAL_FAKE_AVAILABLE_REPLICAS_FILE}}")" = 0 ]; then exit 42; fi
     if [ "${{PORTAL_FAKE_FAIL_AT:-}}" = terminating-writer ] || [ "$(cat "${{PORTAL_FAKE_AVAILABLE_REPLICAS_FILE}}")" = 1 ]; then
-      printf '%s\\n' '{{"kind":"PodList","items":[{{"metadata":{{"name":"portal-web-1","deletionTimestamp":"synthetic"}}}}]}}'
-    else printf '%s\\n' '{{"kind":"PodList","items":[]}}'; fi
+      printf '{{"kind":"%s","items":[{{"metadata":{{"name":"portal-web-1","deletionTimestamp":"synthetic"}}}}]}}\\n' "$PORTAL_FAKE_POD_LIST_KIND"
+    else printf '{{"kind":"%s","items":[]}}\\n' "$PORTAL_FAKE_POD_LIST_KIND"; fi
     exit 0 ;;
   *'get deployment portal-web -o jsonpath={{.spec.replicas}}') printf '%s\\n' '1'; exit 0 ;;
   *'get pvc/portal-web-files-dynamic -o jsonpath={{.status.phase}}') printf '%s\\n' 'Bound'; exit 0 ;;
@@ -91,6 +93,7 @@ exit 0
                 "PORTAL_AGE_IDENTITY": str(root / "identity.txt"),
                 "PORTAL_BACKUP_REMOTE": f"fake:{remote}",
                 "PORTAL_FAKE_FAIL_AT": fail_at,
+                "PORTAL_FAKE_POD_LIST_KIND": pod_list_kind,
                 "PORTAL_FAKE_REMOTE_ERROR": remote_error,
                 "PORTAL_FAKE_REMOTE_TIMEOUT_ATTEMPTS": str(remote_timeout_attempts),
                 "PORTAL_FAKE_REMOTE_LSD_COUNT_FILE": str(root / "remote-lsd-count"),
@@ -294,9 +297,9 @@ case "$*" in
     exit 0 ;;
   *'exec -i'*'/data/files'*)
     if [ "${{PORTAL_FAKE_HANG_STREAM:-}}" = 1 ]; then
-      touch "${{PORTAL_FAKE_STREAM_WAIT}}"
       sleep 60 &
       echo "$!" > "${{PORTAL_FAKE_STREAM_CHILD_PID}}"
+      touch "${{PORTAL_FAKE_STREAM_WAIT}}"
       wait "$!"
       exit 0
     fi
@@ -1106,6 +1109,31 @@ esac
         self.assertGreaterEqual(manifest.count("readOnly: true"), 2)
 
 
+    def test_in_cluster_generic_list_completes_backup_and_writer_cycle(self):
+        result, calls, _, evidence = self.run_tool(execution_mode="in-cluster", pod_list_kind="List")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("portal_pvc_backup=PASS", result.stdout)
+        self.assertIn("scale deployment/portal-web --replicas=0", calls)
+        self.assertIn("scale deployment/portal-web --replicas=1", calls)
+        self.assertTrue(evidence)
+
+    def test_generic_list_keeps_terminating_writer_guard(self):
+        result, calls, _, evidence = self.run_tool(execution_mode="in-cluster", pod_list_kind="List", fail_at="terminating-writer", writer_termination_timeout=1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("create -f", calls)
+        self.assertIn("scale deployment/portal-web --replicas=1", calls)
+        self.assertFalse(evidence)
+
+    def test_in_cluster_rejects_wrong_kind_and_malformed_list_before_pause(self):
+        for kind, failure in (("Pod", ""), ("JobList", ""), ("List", "pod-list-malformed-items"), ("List", "pod-list-malformed-metadata")):
+            with self.subTest(kind=kind, failure=failure):
+                result, calls, _, evidence = self.run_tool(execution_mode="in-cluster", pod_list_kind=kind, fail_at=failure)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("portal_pvc_backup_stage=writer-observation", result.stdout)
+                self.assertNotIn("scale deployment/portal-web", calls)
+                self.assertFalse(evidence)
+
+
 class EncryptedConfigScratchTests(unittest.TestCase):
     def setUp(self):
         source = SCRIPT.read_text().split("RCLONE_CONFIG_HELPER=$(cat <<'PY_RCLONE_CONFIG'\n", 1)[1].split("\nPY_RCLONE_CONFIG\n)", 1)[0]
@@ -1202,7 +1230,10 @@ class EncryptedConfigScratchTests(unittest.TestCase):
             "touch " + shlex.quote(str(marker)),
             "while :; do sleep 0.1; done",
         ]) + "\n")
-        env = {**os.environ, "PORTAL_RCLONE_CONFIG_FILE": str(self.original), "TMPDIR": str(self.root)}
+        env = {**os.environ, "PORTAL_RCLONE_CONFIG_FILE": str(self.original), "TMPDIR": str(self.root),
+               "PORTAL_AGE_RECIPIENT": str(self.root / "recipient"),
+               "PORTAL_AGE_IDENTITY": str(self.root / "identity"),
+               "PORTAL_BACKUP_STATE_DIR": str(self.root / "state")}
         process = subprocess.Popen(["bash", str(harness)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             deadline = time.monotonic() + 5

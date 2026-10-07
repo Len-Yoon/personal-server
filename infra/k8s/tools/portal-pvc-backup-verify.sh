@@ -337,7 +337,7 @@ portal_writer_pod_count() {
   pods=$(kctl_with_deadline_timeout "$seconds" -n "$NAMESPACE" get pods -l app.kubernetes.io/name=portal-web -o json) || return 1
   python3 -c 'import json,sys
 value=json.load(sys.stdin)
-if not isinstance(value,dict) or value.get("kind")!="PodList" or not isinstance(value.get("items"),list):raise ValueError("writer observation failed")
+if not isinstance(value,dict) or value.get("kind") not in ("PodList","List") or not isinstance(value.get("items"),list):raise ValueError("writer observation failed")
 if any(not isinstance(p,dict) or not isinstance(p.get("metadata"),dict) or not isinstance(p["metadata"].get("name"),str) or not p["metadata"]["name"] for p in value["items"]):raise ValueError("writer observation failed")
 print(len(value["items"]))' <<<"$pods"
 }
