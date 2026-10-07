@@ -115,7 +115,11 @@ class EvidenceExportTests(unittest.TestCase):
         secrets=[v['secret'] for v in pod['volumes'] if 'secret' in v]
         self.assertEqual(len(secrets),1)
         self.assertEqual({x['key'] for x in secrets[0]['items']},{'rclone-config','rclone-config-passphrase','age-identity'})
+        memory=[v for v in pod['volumes'] if v['name']=='rclone-state']
+        self.assertEqual(memory,[{'name':'rclone-state','emptyDir':{'medium':'Memory','sizeLimit':'16Mi'}}])
         container=pod['containers'][0]
+        self.assertIn('--config-work-dir',container['command'])
+        self.assertIn('/run/rclone-state',container['command'])
         self.assertIs(container['securityContext']['readOnlyRootFilesystem'],True)
         self.assertEqual(container['securityContext']['capabilities']['drop'],['ALL'])
         self.assertTrue(all(m['readOnly'] for m in container['volumeMounts'] if m['name'] in ('code','evidence','credentials')))

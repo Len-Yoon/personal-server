@@ -14,6 +14,7 @@ import re
 import shlex
 import shutil
 import sqlite3
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -21,6 +22,8 @@ import tempfile
 MAX_EXTRACT_BYTES = 2 * 1024 * 1024 * 1024
 MAX_MEMBERS = 100000
 MAX_EVIDENCE_BYTES = 16384
+MAX_CONFIG_BYTES = 1024 * 1024
+ENCRYPTED_CONFIG_HEADER = b'RCLONE_ENCRYPT_V0:'
 REMOTE = 'gdrive:PersonalServer-encrypted-backups'
 EXPECTED = dict(schema_version='1', scope='portal', backup_status='success', encrypted='true',
                 restore_status='success', source_runtime='k3s-pvc',
@@ -36,6 +39,67 @@ class RestoreError(ValueError):
 def require(condition):
     if not condition:
         raise RestoreError('validation failed')
+
+
+def memory_backed(path, mountinfo=Path('/proc/self/mountinfo')):
+    """Require a tmpfs mount, rather than trusting a caller's directory name."""
+    try:
+        mounts = []
+        for line in mountinfo.read_text().splitlines():
+            left, right = line.split(' - ', 1)
+            encoded = left.split()[4]
+            mount = Path(re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), encoded))
+            if path.is_relative_to(mount):
+                mounts.append((len(mount.parts), right.split()[0]))
+        return bool(mounts) and max(mounts)[1] == 'tmpfs'
+    except (OSError, ValueError, IndexError):
+        return False
+
+
+def encrypted_config_snapshot(path, *, allow_symlink=False, private=False):
+    """Read and validate the same bounded inode snapshot that will be copied."""
+    flags = os.O_RDONLY | (0 if allow_symlink else os.O_NOFOLLOW)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise RestoreError('validation failed') from error
+    with os.fdopen(descriptor, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_size <= MAX_CONFIG_BYTES)
+        if private:
+            require(info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o600)
+        raw = stream.read(MAX_CONFIG_BYTES + 1)
+    require(len(raw) <= MAX_CONFIG_BYTES)
+    # rclone permits comments and blank lines before the encryption marker.
+    meaningful = [line.strip() for line in raw.splitlines()
+                  if line.strip() and not line.strip().startswith((b'#', b';'))]
+    require(bool(meaningful) and meaningful[0] == ENCRYPTED_CONFIG_HEADER)
+    return raw
+
+
+def download_with_memory_config(command, runner, config_work_dir, credential_dir, **kwargs):
+    """Only the encrypted config may be updated in disposable memory scratch."""
+    source = credential_dir / 'rclone-config'
+    require(command[0] == 'rclone' and command.count('--config') == 1)
+    index = command.index('--config') + 1
+    require(command[index] == str(source))
+    # Projected Secret files are symlinks. Copy exactly the bytes checked here,
+    # without reopening the source across a projected-volume atomic transition.
+    raw = encrypted_config_snapshot(source, allow_symlink=True)
+    with tempfile.TemporaryDirectory(prefix='rclone-', dir=config_work_dir) as temporary:
+        config = Path(temporary) / 'rclone.conf'
+        descriptor = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, 'wb') as output:
+            output.write(raw)
+        args = list(command)
+        args[index] = str(config)
+        try:
+            runner(args, **kwargs)
+        finally:
+            # Reject plaintext/permissions/link regressions even on a failed
+            # provider call; TemporaryDirectory still removes the private copy.
+            encrypted_config_snapshot(config, private=True)
+            require(encrypted_config_snapshot(source, allow_symlink=True) == raw)
 
 
 def read_pairs(path: Path, limit=MAX_EVIDENCE_BYTES):
@@ -135,7 +199,7 @@ def extract_safe(archive, destination):
                 target.chmod(0o600)
 
 
-def check_restore(evidence, work_dir, credential_dir, remote=REMOTE, *, now=None, runner=None):
+def check_restore(evidence, work_dir, credential_dir, remote=REMOTE, *, config_work_dir=None, now=None, runner=None):
     now = now or datetime.now(timezone.utc)
     values = read_pairs(evidence)
     validate_evidence(values, now)
@@ -144,6 +208,14 @@ def check_restore(evidence, work_dir, credential_dir, remote=REMOTE, *, now=None
     scratch_root = work_dir.resolve()
     require(not evidence.resolve().is_relative_to(scratch_root))
     require(not credential_dir.resolve().is_relative_to(scratch_root))
+    require(config_work_dir is not None and config_work_dir.is_absolute()
+            and config_work_dir.is_dir() and not config_work_dir.is_symlink())
+    config_root = config_work_dir.resolve()
+    require(memory_backed(config_root))
+    require(not config_root.is_relative_to(scratch_root) and not scratch_root.is_relative_to(config_root))
+    require(not credential_dir.resolve().is_relative_to(config_root)
+            and not config_root.is_relative_to(credential_dir.resolve()))
+    require(not evidence.resolve().is_relative_to(config_root))
     for name in ('rclone-config', 'rclone-config-passphrase', 'age-identity'):
         # Kubernetes Secret mounts use symlinks; follow only these read-only inputs.
         require((credential_dir / name).is_file() and (credential_dir / name).stat().st_size > 0)
@@ -154,10 +226,14 @@ def check_restore(evidence, work_dir, credential_dir, remote=REMOTE, *, now=None
         env = {'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
                'HOME': str(scratch), 'LANG': 'C.UTF-8'}
         def run(command):
-            # Credentials stay in their Secret files. Discard provider diagnostics
+            # Passphrase and identity stay in their Secret files. Discard diagnostics
             # because even stderr may include tokens or sensitive internal paths.
-            runner(command, check=True, timeout=300, cwd=scratch, env=env,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+            options = dict(check=True, timeout=300, cwd=scratch, env=env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+            if command[0] == 'rclone':
+                download_with_memory_config(command, runner, config_root, credential_dir, **options)
+            else:
+                runner(command, **options)
         run(['rclone', '--config', str(credential_dir / 'rclone-config'), '--password-command',
              '/usr/bin/cat ' + shlex.quote(str(credential_dir / 'rclone-config-passphrase')),
              'copyto', '--log-level', 'ERROR', '--retries', '1', '--low-level-retries', '1',
@@ -190,10 +266,12 @@ def main(argv=None):
     parser.add_argument('--evidence', type=Path, required=True)
     parser.add_argument('--work-dir', type=Path, required=True)
     parser.add_argument('--credential-dir', type=Path, required=True)
+    parser.add_argument('--config-work-dir', type=Path, required=True)
     parser.add_argument('--remote', default=REMOTE)
     try:
         args = parser.parse_args(argv)
-        check_restore(args.evidence, args.work_dir, args.credential_dir, args.remote)
+        check_restore(args.evidence, args.work_dir, args.credential_dir, args.remote,
+                      config_work_dir=args.config_work_dir)
     except Exception:
         print('portal_backup_restore_check=FAIL')
         return 1
