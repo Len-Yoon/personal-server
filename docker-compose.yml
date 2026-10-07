@@ -46,6 +46,9 @@ services:
       - HOMEOPS_EXECUTOR_SHARED_SECRET=${HOMEOPS_EXECUTOR_SHARED_SECRET:-}
       - HOMEOPS_DOCKER_MANAGED_SERVICES=${HOMEOPS_DOCKER_MANAGED_SERVICES:-portal-web,system-agent,crawler-worker,youtube-memo,book-memo,caddy,homeops-executor}
       - HOMEOPS_DOCKER_HOST=tcp://docker-socket-proxy:2375
+      - HOMEOPS_IDEMPOTENCY_DB_PATH=/data/homeops-executor/restarts.sqlite3
+    volumes:
+      - homeops-restart-state:/data/homeops-executor
     depends_on:
       docker-socket-proxy:
         condition: service_started
@@ -210,3 +213,4 @@ networks:
 
 volumes:
   car-care-oauth:
+  homeops-restart-state:

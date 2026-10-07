@@ -21,11 +21,31 @@ DEFAULT_DB_PATH = PROJECT_DATA_ROOT / "book-memo" / "book_memo.sqlite3"
 DB_PATH = Path(os.getenv("BOOK_MEMO_DB_PATH", DEFAULT_DB_PATH))
 
 
+def _schema_ready(connection: sqlite3.Connection) -> bool:
+    """Inspect schema without reserving the SQLite writer lock."""
+    required = {'books', 'idx_memo_tags_key', 'memo_tags', 'book_memos', 'idx_books_home_order', 'idx_book_chapters_book', 'book_chapters', 'write_requests', 'idx_book_memos_book'}
+    present = {row["name"] for row in connection.execute("SELECT name FROM sqlite_master")}
+    if not required <= present:
+        return False
+    return all(
+        "version" in {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for table in ('books', 'book_chapters', 'book_memos')
+    )
+
+
 def init_db() -> None:
+    # DB_PATH is resolved at each call so test fixtures and runtime overrides work.
+    # Ordinary reads only inspect the schema; migrations alone acquire the writer.
+    if DB_PATH.is_file():
+        with _connect() as connection:
+            if _schema_ready(connection):
+                return
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     with _connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        if _schema_ready(connection):
+            return
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS books (
@@ -113,8 +133,9 @@ def init_db() -> None:
             """
         )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_memo_tags_key ON memo_tags (tag_key, memo_id)")
-        if "version" not in {row["name"] for row in connection.execute("PRAGMA table_info(book_chapters)")}:
-            connection.execute("ALTER TABLE book_chapters ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+        for table in ("books", "book_chapters", "book_memos"):
+            if "version" not in {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
         init_write_requests(connection)
 
 
@@ -313,26 +334,33 @@ def update_progress(
     current_page: int,
     current_chapter: str,
     progress_percent: int,
-) -> None:
+    expected_version: int | None = None,
+    request_id: str = "",
+) -> bool:
     init_db()
-
+    if reading_status not in {"읽을 예정", "읽는 중", "완료", "보류"}:
+        raise ValueError("읽기 상태가 올바르지 않습니다.")
     progress_percent = max(0, min(progress_percent, 100))
     current_page = max(0, current_page)
+    current_chapter = current_chapter.strip()
 
     with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        payload = [book_id, reading_status, current_page, current_chapter, progress_percent, expected_version]
+        if replay_result(connection, request_id, "book-progress", payload) is not None:
+            return True
+        row = connection.execute("SELECT version FROM books WHERE id = ?", (book_id,)).fetchone()
+        if row is None:
+            return False
+        check_version(row, expected_version)
         connection.execute(
-            """
-            UPDATE books
-            SET
-                reading_status = ?,
-                current_page = ?,
-                current_chapter = ?,
-                progress_percent = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (reading_status, current_page, current_chapter.strip(), progress_percent, book_id),
+            """UPDATE books SET reading_status = ?, current_page = ?, current_chapter = ?,
+                progress_percent = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            (reading_status, current_page, current_chapter, progress_percent, book_id),
         )
+        record_result(connection, request_id, "book-progress", payload, book_id)
+    return True
 
 
 def list_chapters(book_id: int) -> list[dict[str, Any]]:
@@ -631,6 +659,7 @@ def update_memo_tags(memo_id: int, tags: str, request_id: str = "") -> int | Non
             "INSERT INTO memo_tags (memo_id, tag, tag_key, position) VALUES (?, ?, ?, ?)",
             [(memo_id, tag, tag.casefold(), index) for index, tag in enumerate(parsed)],
         )
+        connection.execute("UPDATE book_memos SET version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (memo_id,))
         _touch_book(connection, row["book_id"])
         record_result(connection, request_id, "memo-tags", payload, row["book_id"])
         return row["book_id"]
@@ -751,6 +780,41 @@ def create_memo(
         record_result(connection, request_id, "memo-create", payload, cursor.lastrowid)
 
 
+def update_memo(
+    memo_id: int, title: str, content: str, page: int, chapter_id: int | None,
+    expected_version: int | None = None, request_id: str = "",
+) -> int | None:
+    """Edit a saved memo atomically, leaving its tags untouched."""
+    title = title.strip() or "제목 없는 메모"
+    content = content.strip()
+    if not content:
+        raise ValueError("메모 내용을 입력해주세요.")
+    page = max(0, page)
+    init_db()
+    with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        payload = [memo_id, title, content, page, chapter_id, expected_version]
+        replayed = replay_result(connection, request_id, "memo-edit", payload)
+        if replayed is not None:
+            return replayed
+        memo = connection.execute("SELECT book_id, version FROM book_memos WHERE id = ?", (memo_id,)).fetchone()
+        if memo is None:
+            return None
+        check_version(memo, expected_version)
+        if chapter_id is not None:
+            chapter = connection.execute("SELECT book_id FROM book_chapters WHERE id = ?", (chapter_id,)).fetchone()
+            if chapter is None or chapter["book_id"] != memo["book_id"]:
+                raise ValueError("선택한 목차가 책에 속하지 않습니다.")
+        connection.execute(
+            """UPDATE book_memos SET title = ?, content = ?, page = ?, chapter_id = ?,
+               version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+            (title, content, page, chapter_id, memo_id),
+        )
+        _touch_book(connection, memo["book_id"])
+        record_result(connection, request_id, "memo-edit", payload, memo["book_id"])
+        return memo["book_id"]
+
+
 def delete_memo(memo_id: int) -> int | None:
     init_db()
 
@@ -806,6 +870,7 @@ def _sync_book_progress(connection: sqlite3.Connection, book_id: int) -> None:
         SET
             reading_status = ?,
             progress_percent = ?,
+            version = version + 1,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,

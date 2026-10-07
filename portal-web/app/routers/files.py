@@ -354,3 +354,88 @@ def _client_id(request: Request) -> str:
     if forwarded_for:
         return forwarded_for
     return request.client.host if request.client else "unknown"
+
+
+@router.get('/tools')
+def file_tools(request: Request, q: str = ''):
+    _require_file_access(request)
+    from app.services import file_management
+    try:
+        results = file_management.search(q) if q else {'items': [], 'truncated': False}
+        trash_items = file_management.list_trash()
+    except (ValueError, OSError):
+        raise HTTPException(400, '파일 관리 정보를 확인할 수 없습니다.') from None
+    return templates.TemplateResponse('file_tools.html', {'request': request, 'title': '파일 검색·휴지통', 'q': q, 'results': results, 'trash_items': trash_items})
+
+
+@router.post('/move')
+def move_item(request: Request, path: str = Form(...), destination: str = Form(''), name: str = Form('')):
+    _require_file_access(request)
+    from app.services import file_management
+    try:
+        moved = file_management.move(path, destination, name or None)
+    except FileExistsError:
+        raise HTTPException(409, '이미 같은 이름의 항목이 있습니다.') from None
+    except (ValueError, OSError):
+        raise HTTPException(400, '이동할 항목과 대상 폴더를 확인해주세요.') from None
+    return _redirect_to_directory('/'.join(moved.split('/')[:-1]))
+
+
+@router.post('/trash')
+def trash_items(request: Request, paths: list[str] = Form(...), delete_password: str = Form('')):
+    _require_file_access(request)
+    _require_delete_password(request, delete_password)
+    from app.services import file_management
+    try:
+        validated = file_store.validate_delete_items(paths)
+    except (ValueError, OSError):
+        raise HTTPException(400, '선택한 항목을 확인해주세요.') from None
+    moved = []
+    for index, path in enumerate(validated):
+        try:
+            moved.append({'path': path, 'id': file_management.trash(path)})
+        except file_management.TrashCompletedError as exc:
+            moved.append({'path': path, 'id': exc.token})
+            return JSONResponse(status_code=207, content={'ok': False, 'moved': moved, 'failed': validated[index+1:], 'detail': '이동은 완료됐으나 저장 확인에 실패하여 나머지 이동을 중지했습니다. 목록을 확인해주세요.', 'redirect': '/files/tools'})
+        except (ValueError, OSError):
+            return JSONResponse(status_code=207, content={'ok': False, 'moved': moved, 'failed': validated[index:], 'detail': '일부 항목을 휴지통으로 이동하지 못했습니다. 목록을 확인해주세요.', 'redirect': '/files/tools'})
+    return {'ok': True, 'moved': moved, 'redirect': '/files/tools'}
+
+
+@router.post('/restore')
+def restore_item(request: Request, item_id: str = Form(...), name: str = Form('')):
+    _require_file_access(request)
+    from app.services import file_management
+    try:
+        file_management.restore(item_id, name)
+    except FileExistsError:
+        raise HTTPException(409, '복원 위치에 같은 이름이 있습니다. 다른 이름으로 복원해주세요.') from None
+    except (ValueError, OSError, KeyError):
+        raise HTTPException(400, '항목이나 기존 상위 폴더를 확인해주세요.') from None
+    return RedirectResponse('/files/tools', status_code=303)
+
+
+@router.get('/bookmarks')
+def bookmarks_home(request: Request):
+    _require_file_access(request)
+    from app.services import news_bookmarks
+    return templates.TemplateResponse('news_bookmarks.html', {'request': request, 'title': '개인 기사 보관함', 'bookmarks': news_bookmarks.listing()})
+
+
+@router.post('/bookmarks')
+def save_bookmark(request: Request, url: str = Form(...), title: str = Form(...), note: str = Form('')):
+    _require_file_access(request)
+    from app.services import news_bookmarks
+    try:
+        news_bookmarks.save(url, title, note)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return RedirectResponse('/files/bookmarks', status_code=303)
+
+
+@router.post('/bookmarks/delete')
+def delete_bookmark(request: Request, bookmark_id: int = Form(...)):
+    _require_file_access(request)
+    from app.services import news_bookmarks
+    news_bookmarks.delete(bookmark_id)
+    return RedirectResponse('/files/bookmarks', status_code=303)

@@ -54,6 +54,22 @@ def collect_metrics(
     host = _read_host_metrics(host_metrics_path, stale_after_seconds, warnings)
     files = _files_status(data_root / "files")
     backup = _backup_status(data_root / "backups", warnings, backup_stale_after_seconds)
+    from app.services.backup_evidence import parse_evidence, validate_evidence, EvidenceError
+    evidence_path = Path(os.getenv("BACKUP_EVIDENCE_PATH", str(data_root / "backups" / "portal-backup.evidence")))
+    backup["archive_status"] = backup["status_reason"]
+    try:
+        if evidence_path.is_symlink() or not evidence_path.is_file() or evidence_path.stat().st_size > 16384:
+            raise EvidenceError("evidence unavailable")
+        evidence = parse_evidence(evidence_path)
+        validate_evidence(evidence, datetime.now(timezone.utc), backup_stale_after_seconds)
+        backup.update(status="ok", status_reason="backup_verified", verified=True,
+                      scope="portal", source_runtime=evidence["source_runtime"],
+                      backup_completed_at=evidence["backup_completed_at"],
+                      restore_verified_at=evidence["restore_verified_at"],
+                      evidence_expires_at=evidence["evidence_expires_at"])
+    except (EvidenceError, OSError, ValueError):
+        backup.update(status="warning", status_reason="backup_unverified", verified=False, scope="portal")
+        warnings.append("backup_unverified")
     disk = _disk_status(data_root, warnings)
 
     status_checks = [
@@ -305,6 +321,10 @@ def _host_status_detail(host: dict[str, Any]) -> str:
 
 
 def _backup_status_detail(backup: dict[str, Any]) -> str:
+    if backup.get("status_reason") == "backup_unverified":
+        return "암호화·복원 검증 증적 확인 필요"
+    if backup.get("status_reason") == "backup_verified":
+        return "Portal 암호화·복원 검증 완료"
     if backup.get("status_reason") == "backup_missing":
         return "백업 없음"
     if backup.get("status_reason") == "backup_stale":

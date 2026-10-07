@@ -91,3 +91,63 @@ class NewsFailureBoundaryTests(unittest.TestCase):
                 result = archive.collect_korean_news("KR_IT")
         self.assertTrue(result["cache"]["stale"])
         self.assertEqual(result["collection"]["status"], "cached")
+
+
+class CollectionPersistenceBoundaryTests(unittest.TestCase):
+    def test_foreground_persistence_failure_preserves_prior_archive_and_success_timestamp(self):
+        prepare_service_import("crawler-worker")
+        from app.services import news_archive as archive
+        now = datetime(2026, 10, 6, 4, tzinfo=timezone.utc)
+        old = now - timedelta(hours=2)
+        article = {"url": "https://example.test/old", "title": "기존 기사", "category": "KR_IT",
+                   "published_at_sort": old.isoformat(), "collected_at": old.isoformat(),
+                   "expires_at": (old + timedelta(days=7)).isoformat()}
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmp) / "archive.json"), "NEWS_COLLECTION_STATUS_PATH": str(Path(tmp) / "status.json")}):
+            archive._save_archive({"articles": [article], "updated_at": old.isoformat()})
+            archive._load_archive()
+            archive._collection_status().record_success(at=old)
+            before = archive._archive_path().read_bytes()
+            with patch.object(archive, "_now", return_value=now), patch.object(archive, "collect_korean_news_from_sources", return_value=[]), patch.object(archive, "_save_archive", side_effect=OSError("disk unavailable")), patch.object(archive, "_drain_notification_outbox") as notify:
+                result = archive.collect_korean_news("KR_IT", force_refresh=True)
+            self.assertEqual(archive._archive_path().read_bytes(), before)
+            state = archive._collection_status().snapshot()
+        self.assertEqual(result["collection"]["status"], "error")
+        self.assertTrue(result["cache"]["stale"])
+        self.assertEqual(state["last_success_at"], old.isoformat())
+        self.assertEqual(state["consecutive_failures"], 1)
+        notify.assert_not_called()
+
+    def test_background_fetch_and_persistence_failures_do_not_commit_or_mark_success(self):
+        for boundary in ("fetch", "persist"):
+            with self.subTest(boundary=boundary):
+                prepare_service_import("crawler-worker")
+                from app.services import news_archive as archive
+                with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmp) / "archive.json"), "NEWS_COLLECTION_STATUS_PATH": str(Path(tmp) / "status.json")}):
+                    source = patch.object(archive, "collect_korean_news_from_sources", side_effect=OSError("fetch failed")) if boundary == "fetch" else patch.object(archive, "collect_korean_news_from_sources", return_value=[])
+                    with source, patch.object(archive, "_commit_collected_articles", side_effect=OSError("persist failed")) as commit, patch.object(archive, "_drain_notification_outbox") as notify:
+                        archive._refresh_category("KR_WORLD", 24)
+                    state = archive._collection_status().snapshot()
+                    self.assertIsNone(state["last_success_at"])
+                    self.assertEqual(state["consecutive_failures"], 1)
+                    if boundary == "fetch":
+                        commit.assert_not_called()
+                    notify.assert_not_called()
+
+    def test_success_is_recorded_only_after_archive_commit(self):
+        prepare_service_import("crawler-worker")
+        from app.services import news_archive as archive
+        order = []
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"NEWS_ARCHIVE_PATH": str(Path(tmp) / "archive.json"), "NEWS_COLLECTION_STATUS_PATH": str(Path(tmp) / "status.json")}):
+            store = archive._collection_status()
+            original_commit = archive._commit_collected_articles
+            original_success = store.record_success
+            def commit(*args):
+                value = original_commit(*args)
+                order.append("commit")
+                return value
+            def success(*args):
+                order.append("success")
+                return original_success(*args)
+            with patch.object(archive, "collect_korean_news_from_sources", return_value=[]), patch.object(archive, "_commit_collected_articles", side_effect=commit), patch.object(store, "record_success", side_effect=success):
+                archive.collect_korean_news("KR_IT", force_refresh=True)
+        self.assertEqual(order, ["commit", "success"])

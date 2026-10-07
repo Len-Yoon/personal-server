@@ -60,7 +60,7 @@ class HomeOpsService:
         operation_id = self._operation_for_restart(operation_id) or self._create_manual_restart_operation()
         executor_failure_reason = None
         try:
-            diagnostics = self._mask(self.executor.restart_all())
+            diagnostics = self._mask(self.executor.restart_all(operation_id))
         except OSError as exc:
             if self._is_expected_restart_disconnect(exc):
                 diagnostics = self._poll_all_diagnostics()
@@ -415,7 +415,7 @@ class HomeOpsService:
         with self._connect() as conn:
             if requested_operation_id:
                 row = conn.execute(
-                    "SELECT operation_id FROM homeops_operation_runs WHERE operation_id=? AND status='action_required'",
+                    "SELECT operation_id FROM homeops_operation_runs WHERE operation_id=?",
                     (requested_operation_id,),
                 ).fetchone()
             else:
@@ -600,20 +600,23 @@ class ExecutorClient:
     def restart(self, incident_id: str, approval_token: str, service: str) -> dict[str, Any]:
         return self._request("/v1/restarts", {"incident_id": incident_id, "approval_token": approval_token, "action": ALLOWED_ACTION, "service": service})
 
-    def restart_all(self) -> list[dict[str, Any]]:
-        return self._request("/v1/restarts/all", method="POST")
+    def restart_all(self, request_id: str | None = None) -> list[dict[str, Any]]:
+        return self._request("/v1/restarts/all", method="POST", request_id=request_id or str(uuid.uuid4()))
 
     def health(self, service: str) -> bool:
         return bool(self.diagnostics(service).get("container", {}).get("health") == "healthy")
 
-    def _request(self, path: str, payload: dict[str, Any] | None = None, method: str | None = None) -> Any:
+    def _request(self, path: str, payload: dict[str, Any] | None = None, method: str | None = None, request_id: str | None = None) -> Any:
         if path == "/v1/diagnostics":
             # Never reuse an earlier response's smaller scope after a failed fetch.
             self.managed_services = ALLOWED_SERVICES
         if not self.secret:
             raise OSError("homeops_executor_shared_secret_not_configured")
         data = json.dumps(payload).encode() if payload else None
-        request = Request(self.url + path, data=data, headers={"X-HomeOps-Executor-Secret": self.secret, "Content-Type": "application/json"}, method=method)
+        headers = {"X-HomeOps-Executor-Secret": self.secret, "Content-Type": "application/json"}
+        if request_id:
+            headers["X-HomeOps-Request-Id"] = request_id
+        request = Request(self.url + path, data=data, headers=headers, method=method)
         with urlopen(request, timeout=5) as response:
             if path == "/v1/diagnostics":
                 get_all = getattr(response.headers, "get_all", None)

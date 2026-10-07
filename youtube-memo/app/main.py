@@ -1,7 +1,7 @@
 import json
 import os
 import secrets
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
@@ -34,7 +34,20 @@ from app.services.memo_service import (
 from app.services.host_urls import portal_home_url, request_host_from_headers
 from app.services.export_service import export_json, export_markdown
 
-app = FastAPI(title="Youtube Memo")
+from app.services import memo_service
+from app.services.readiness import database_ready
+from app.services.import_service import install_routes as install_import_routes
+
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
+    # Initialize/migrate before readiness probes can gate user traffic.
+    # A schema/storage failure aborts startup rather than advertising readiness.
+    memo_service.init_db()
+    yield
+
+
+app = FastAPI(lifespan=_lifespan, title="Youtube Memo")
 
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 _PUBLIC_ORIGIN = "https://memo.len.pe.kr"
@@ -256,6 +269,14 @@ def update_video_memo(
         url=f"/videos/{video_id}",
         status_code=303,
     )
+
+
+@app.get("/ready")
+def readiness():
+    ready = database_ready(memo_service.DB_PATH, memo_service._schema_ready)
+    return JSONResponse(status_code=200 if ready else 503,
+                        content={"service": 'youtube-memo', "status": "ready" if ready else "unavailable"},
+                        headers={"Cache-Control": "no-store"})
 
 
 @app.get("/health")
@@ -542,3 +563,6 @@ def _client_id(request: Request) -> str:
     if forwarded_for:
         return forwarded_for
     return request.client.host if request.client else "unknown"
+
+
+install_import_routes(app, _require_write_session, WRITE_AUTH_COOKIE, templates)

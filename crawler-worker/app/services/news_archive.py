@@ -77,10 +77,9 @@ def collect_korean_news(
     now = _now()
     with _ARCHIVE_WRITE_LOCK:
         archive = _load_archive()
-        archive, purged = _purge_archive(archive, now)
-        if purged:
-            archive["updated_at"] = _iso(now)
-            _save_archive(archive)
+        # Collection commits retention changes together with new observations;
+        # a failed fetch/save must not modify the prior archive or outbox.
+        archive, _ = _purge_archive(archive, now)
         category_articles = _get_category_articles(archive["articles"], category, today_only=True)
         latest_collected_at = _latest_collected_at(category_articles)
 
@@ -120,6 +119,11 @@ def collect_korean_news(
             category=category,
             limit=limit,
         )
+        stored_articles = [
+            _attach_archive_metadata(article, category=category, now=now)
+            for article in fresh_articles
+        ]
+        archive, new_articles, should_notify = _commit_collected_articles(category, stored_articles, now)
     except Exception:
         _collection_status().record_failure()
         # A failed fetch is not a new observation. Preserve collection metadata
@@ -134,11 +138,6 @@ def collect_korean_news(
         )
     else:
         _collection_status().record_success()
-    stored_articles = [
-        _attach_archive_metadata(article, category=category, now=now)
-        for article in fresh_articles
-    ]
-    archive, new_articles, should_notify = _commit_collected_articles(category, stored_articles, now)
     if should_notify:
         _drain_notification_outbox(now)
 
@@ -306,16 +305,15 @@ def _refresh_category(category: str, limit: int) -> None:
     _collection_status().record_attempt()
     try:
         fresh_articles = collect_korean_news_from_sources(category=category, limit=limit)
+        stored_articles = [
+            _attach_archive_metadata(article, category=category, now=now)
+            for article in fresh_articles
+        ]
+        _, new_articles, should_notify = _commit_collected_articles(category, stored_articles, now)
     except Exception:
         _collection_status().record_failure()
-        fresh_articles = []
-    else:
-        _collection_status().record_success()
-    stored_articles = [
-        _attach_archive_metadata(article, category=category, now=now)
-        for article in fresh_articles
-    ]
-    _, new_articles, should_notify = _commit_collected_articles(category, stored_articles, now)
+        return
+    _collection_status().record_success()
     if should_notify:
         _drain_notification_outbox(now)
 

@@ -2,7 +2,7 @@ import json
 import os
 import re
 import secrets
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app.services.book_search import search_books
+from app.services.book_search import search_books_async as search_books
 from app.services.export_service import export_json, export_markdown, export_records
 from app.services.book_service import (
     DB_PATH,
@@ -37,13 +37,27 @@ from app.services.book_service import (
     update_chapter_statuses,
     update_progress,
     update_memo_tags,
+    update_memo,
 )
 from app.services.toc_service import fetch_toc_candidates
 from app.services.write_safety import WriteConflict
 from app.services.host_urls import portal_home_url, request_host_from_headers
 
 
-app = FastAPI(title="Book Memo")
+from app.services import book_service
+from app.services.readiness import database_ready
+from app.services.import_service import install_routes as install_import_routes
+
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
+    # Initialize/migrate before readiness probes can gate user traffic.
+    # A schema/storage failure aborts startup rather than advertising readiness.
+    book_service.init_db()
+    yield
+
+
+app = FastAPI(lifespan=_lifespan, title="Book Memo")
 
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 _PUBLIC_ORIGIN = "https://books.len.pe.kr"
@@ -111,7 +125,7 @@ templates.env.globals["portal_home_url_for_request"] = _portal_home_url
 
 
 @app.get("/")
-def home(
+async def home(
     request: Request,
     q: str = Query(default=""),
     page: int = Query(default=1, ge=1),
@@ -122,7 +136,7 @@ def home(
 
     if q.strip():
         try:
-            results = search_books(q)
+            results = await search_books(q)
         except Exception as exc:
             error = str(exc)
 
@@ -254,18 +268,23 @@ def update_book_progress(
     current_chapter: str = Form(default=""),
     progress_percent: int = Form(default=0),
     redirect_to: str = Form(default=""),
+    expected_version: int = Form(default=0),
+    request_id: str = Form(default=""),
 ):
     _require_write_session(request)
     if not get_book(book_id):
         raise HTTPException(status_code=404, detail="Book not found")
 
-    update_progress(
-        book_id=book_id,
-        reading_status=reading_status,
-        current_page=current_page,
-        current_chapter=current_chapter,
-        progress_percent=progress_percent,
-    )
+    try:
+        saved = update_progress(
+            book_id=book_id, reading_status=reading_status, current_page=current_page,
+            current_chapter=current_chapter, progress_percent=progress_percent,
+            expected_version=expected_version, request_id=request_id,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=str(error)) from error
+    if not saved:
+        raise HTTPException(status_code=404, detail="Book not found")
 
     return RedirectResponse(url=_safe_redirect(redirect_to) or f"/books/{book_id}", status_code=303)
 
@@ -440,6 +459,23 @@ def create_book_memo(
     return RedirectResponse(url=f"/books/{book_id}", status_code=303)
 
 
+@app.post("/memos/{memo_id}")
+def edit_book_memo(
+    request: Request, memo_id: int, memo_title: str = Form(default=""),
+    content: str = Form(...), page: int = Form(default=0), chapter_id: int = Form(default=0),
+    expected_version: int = Form(default=0), request_id: str = Form(default=""),
+):
+    _require_write_session(request)
+    try:
+        book_id = update_memo(memo_id, memo_title, content, page, chapter_id or None,
+                              expected_version=expected_version, request_id=request_id)
+    except ValueError as error:
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=str(error)) from error
+    if book_id is None:
+        raise HTTPException(status_code=404, detail="Memo not found")
+    return RedirectResponse(url=f"/books/{book_id}", status_code=303)
+
+
 @app.post("/memos/{memo_id}/tags")
 def edit_book_memo_tags(request: Request, memo_id: int, tags: str = Form(default=""), request_id: str = Form(default="")):
     _require_write_session(request)
@@ -465,6 +501,14 @@ def delete_book_memo(
         raise HTTPException(status_code=404, detail="Memo not found")
 
     return RedirectResponse(url=f"/books/{book_id}", status_code=303)
+
+
+@app.get("/ready")
+def readiness():
+    ready = database_ready(book_service.DB_PATH, book_service._schema_ready)
+    return JSONResponse(status_code=200 if ready else 503,
+                        content={"service": 'book-memo', "status": "ready" if ready else "unavailable"},
+                        headers={"Cache-Control": "no-store"})
 
 
 @app.get("/health")
@@ -765,3 +809,6 @@ def _safe_redirect(redirect_to: str) -> str:
         return redirect_to
 
     return ""
+
+
+install_import_routes(app, _require_write_session, WRITE_AUTH_COOKIE, templates)

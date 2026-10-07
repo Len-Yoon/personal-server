@@ -30,7 +30,7 @@
 <section class="file-section">
     <div class="section-header">
         <div>
-            <h2>저장소</h2>
+            <h2>저장소</h2><p><a href="/files/tools">전체 검색·이름 변경·이동·휴지통</a> · <a href="/files/bookmarks">개인 기사 보관함</a></p>
             {% if directory.breadcrumbs %}
                 <p>
                     <a class="breadcrumb-link" href="/files">파일함</a>
@@ -50,7 +50,7 @@
             <button id="download-selection" type="button" disabled>다운로드</button>
             <button id="new-folder" type="button">새 폴더</button>
             <button id="pick-files" type="button">업로드</button>
-            <button id="delete-selection" type="button">삭제</button>
+            <button id="delete-selection" type="button">휴지통으로</button>
             <button id="clear-selection" type="button">선택 해제</button>
         </div>
         <label class="file-search-control" for="file-search">
@@ -449,7 +449,7 @@ deleteSelection?.addEventListener("click", async () => {
     if (!password) {
         return;
     }
-    if (!confirm(`${tiles.length}개 항목을 삭제할까요?`)) {
+    if (!confirm(`${tiles.length}개 항목을 휴지통으로 이동할까요?`)) {
         return;
     }
 
@@ -458,7 +458,7 @@ deleteSelection?.addEventListener("click", async () => {
     formData.append("delete_password", password);
     tiles.forEach((tile) => formData.append("paths", tile.dataset.itemPath));
 
-    const response = await fetch("/files/delete-bulk", {
+    const response = await fetch("/files/trash", {
         method: "POST",
         body: formData,
     });

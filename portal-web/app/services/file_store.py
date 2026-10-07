@@ -231,7 +231,7 @@ def _open_storage_item(relative_path: str) -> Iterator[int]:
     descriptor = os.open(storage_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         for part in Path(relative_path.strip("/")).parts:
-            if part == "..":
+            if part.startswith(".") and part != ".":
                 raise ValueError("허용되지 않는 경로입니다.")
             child = _open_child_fd(descriptor, part)
             os.close(descriptor)
@@ -390,7 +390,7 @@ def _safe_path(relative_path: str) -> Path:
     storage_root = STORAGE_PATH.resolve()
     path = storage_root
     for part in Path(relative_path.strip("/")).parts:
-        if part == "..":
+        if part.startswith(".") and part != ".":
             raise ValueError("허용되지 않는 경로입니다.")
         path = path / part
         if path.is_symlink():

@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="file-section file-tools">
+<h1>파일 검색·휴지통</h1><p><a href="/files">파일함으로</a> · <a href="/files/bookmarks">개인 기사 보관함</a></p>
+<form class="file-tools-form" action="/files/tools" method="get"><label>전체 파일함 이름 검색 <input name="q" value="{{ q }}" maxlength="200" required></label><button>검색</button></form>
+{% if results.truncated %}<p role="status">검색 범위를 초과했습니다. 더 구체적인 이름으로 검색해주세요.</p>{% endif %}
+<ul>{% for item in results["items"] %}<li><a href="{% if item.type == 'folder' %}/files?path={% else %}/files/download?path={% endif %}{{ item.path|urlencode }}">{{ item.path }}</a></li>{% endfor %}</ul>
+<h2>이름 변경·이동</h2><p>대상 폴더는 먼저 만들어주세요. 같은 이름의 항목을 덮어쓰지 않습니다.</p>
+<form class="file-tools-form" action="/files/move" method="post"><label>현재 경로 <input name="path" placeholder="폴더/파일.txt" required></label><label>대상 폴더 <input name="destination" placeholder="비워두면 파일함 루트"></label><label>새 이름 <input name="name" placeholder="비워두면 현재 이름"></label><button>이동·이름 변경</button></form>
+<h2>휴지통</h2><p>파일함의 ‘휴지통으로’로 옮긴 항목을 원래 폴더에 복원합니다. 기존 항목은 덮어쓰지 않습니다. 영구 삭제 API로 삭제한 항목은 복원할 수 없습니다.</p>
+{% for item in trash_items %}<form class="file-tools-form" action="/files/restore" method="post"><p>{{ item.path }} · {{ item.trashed_at }}</p><input type="hidden" name="item_id" value="{{ item.id }}"><label>다른 이름으로 복원 <input name="name" placeholder="비워두면 원래 이름"></label><button>복원</button></form>{% else %}<p>휴지통이 비어 있습니다.</p>{% endfor %}
+</section>
+{% endblock %}

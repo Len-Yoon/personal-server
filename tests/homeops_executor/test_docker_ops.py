@@ -343,11 +343,11 @@ class DockerOpsTests(unittest.TestCase):
         from app.main import app
 
         restarts = [{"service": "homeops-executor", "status": "running", "container": {}}]
-        with patch.dict("os.environ", {"HOMEOPS_EXECUTOR_SHARED_SECRET": "shared"}, clear=False):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"HOMEOPS_EXECUTOR_SHARED_SECRET": "shared", "HOMEOPS_IDEMPOTENCY_DB_PATH": str(Path(tmp) / "restarts.sqlite3")}, clear=False):
             with patch("app.main.docker_ops.restart_all_services", return_value=restarts) as restart_all_services:
                 response = TestClient(app).post(
                     "/v1/restarts/all",
-                    headers={"X-HomeOps-Executor-Secret": "shared"},
+                    headers={"X-HomeOps-Executor-Secret": "shared", "X-HomeOps-Request-Id": "fixture-all"},
                 )
 
         self.assertEqual(response.status_code, 200)
