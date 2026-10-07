@@ -96,6 +96,14 @@ services:
       - --no-access-log
     environment:
       - PYTHONDONTWRITEBYTECODE=1
+      - BACKUP_EVIDENCE_PATH=/run/backup-evidence/portal-backup.evidence
+    volumes:
+      - type: bind
+        source: ${BACKUP_EVIDENCE_DIRECTORY:-./data/system/backup-evidence}
+        target: /run/backup-evidence
+        read_only: true
+        bind:
+          create_host_path: false
     cpus: "0.15"
     mem_limit: 96m
     pids_limit: 96
