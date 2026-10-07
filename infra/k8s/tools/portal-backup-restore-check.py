@@ -11,6 +11,7 @@ import hashlib
 import os
 from pathlib import Path, PurePosixPath
 import re
+import resource
 import shlex
 import shutil
 import sqlite3
@@ -21,6 +22,7 @@ import tempfile
 
 MAX_EXTRACT_BYTES = 2 * 1024 * 1024 * 1024
 MAX_MEMBERS = 100000
+MAX_DOWNLOAD_BYTES = MAX_EXTRACT_BYTES + MAX_MEMBERS * 1024
 MAX_EVIDENCE_BYTES = 16384
 MAX_CONFIG_BYTES = 1024 * 1024
 ENCRYPTED_CONFIG_HEADER = b'RCLONE_ENCRYPT_V0:'
@@ -199,6 +201,18 @@ def extract_safe(archive, destination):
                 target.chmod(0o600)
 
 
+def limit_download_file_size():
+    """Apply the disk-file cap in the standalone CLI's rclone child only.
+
+    preexec_fn runs after fork; never change the verifier parent's limits.
+    Keep any stricter inherited soft/hard cap. This CLI is single threaded.
+    """
+    inherited = resource.getrlimit(resource.RLIMIT_FSIZE)
+    limits = tuple(MAX_DOWNLOAD_BYTES if value == resource.RLIM_INFINITY
+                   else min(value, MAX_DOWNLOAD_BYTES) for value in inherited)
+    resource.setrlimit(resource.RLIMIT_FSIZE, limits)
+
+
 def check_restore(evidence, work_dir, credential_dir, remote=REMOTE, *, config_work_dir=None, now=None, runner=None):
     now = now or datetime.now(timezone.utc)
     values = read_pairs(evidence)
@@ -231,15 +245,17 @@ def check_restore(evidence, work_dir, credential_dir, remote=REMOTE, *, config_w
             options = dict(check=True, timeout=300, cwd=scratch, env=env,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
             if command[0] == 'rclone':
+                options['preexec_fn'] = limit_download_file_size
                 download_with_memory_config(command, runner, config_root, credential_dir, **options)
             else:
                 runner(command, **options)
         run(['rclone', '--config', str(credential_dir / 'rclone-config'), '--password-command',
              '/usr/bin/cat ' + shlex.quote(str(credential_dir / 'rclone-config-passphrase')),
              'copyto', '--log-level', 'ERROR', '--retries', '1', '--low-level-retries', '1',
-             '--max-size', str(MAX_EXTRACT_BYTES + MAX_MEMBERS * 1024),
+             '--max-transfer', str(MAX_DOWNLOAD_BYTES), '--cutoff-mode', 'hard',
+             '--buffer-size', '0', '--multi-thread-streams', '0',
              remote + '/' + values['backup_id'] + '.tar.age', str(ciphertext)])
-        require(ciphertext.is_file() and ciphertext.stat().st_size <= MAX_EXTRACT_BYTES + MAX_MEMBERS * 1024)
+        require(ciphertext.is_file() and ciphertext.stat().st_size <= MAX_DOWNLOAD_BYTES)
         require('sha256:' + file_hash(ciphertext) == values['artifact_digest'])
         run(['age', '-d', '-i', str(credential_dir / 'age-identity'), '-o', str(archive), str(ciphertext)])
         restored = scratch / 'restored'
