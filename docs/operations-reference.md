@@ -34,6 +34,24 @@ Portal PVC는 `portal-web-files-dynamic`, `portal-web-state-dynamic` 두 개이�
 
 ## 운영 상태 확인 기록
 
+### 최신 백업 확인: 2026-10-08
+
+아래는 해당 운영 검증 시점의 결과임. 이번 문서 갱신에서 전체 서비스를 새로 live 조회한 결과로 해석하지 않음. 최신 근거는 [Portal 실패 복구 기록](reviews/20261008_Portal백업_실패복구.md)과 [Production 인증 후속 완료](reviews/20261008_백업장기인증_배포진행현황.md#7-production-인증-및-실패-복구-후속-완료)를 따름.
+
+| 대상 | 실행 주체·확인 결과 | 남은 확인 | 비고 |
+|---|---|---|---|
+| 네 PVC 백업 | 사용자 systemd `personal-server-pvc-backup-sequence.timer` active/enabled, 매일 02:30 KST부터 Portal → Book → YouTube → Crawler 순서 | 수정·인증 교체 후 다음 정기 실행 | 네 개별 CronJob은 `suspend: true`, jobTemplate만 순차 실행에 사용함 |
+| Portal | 02:30 실행의 writer-observation 실패 수정·이미지 적용, 새 인증의 신규 업로드·격리 복원 PASS | 자동 실행의 실제 성공 | 실패 이력을 초기화하거나 기존 Job을 재생성하지 않음 |
+| Google 인증 | Production 게시 후 새 사용자 동의·refresh 및 암호화 설정 한 키 채택 완료 | Google 앱 인증 심사·토큰 영구 유효성은 보장하지 않음 | 다른 Secret 키·사용자 메타데이터 보존, 이전 Testing 후보 미채택 |
+| 증적 소비자 | 새 ID·시각·digest의 공식 atomic export 및 SystemAgent `backup_verified=true` | 다음 실행의 업로드·export 결과를 각각 확인 | 읽기 전용 마운트, 원본 만료 임의 연장 없음 |
+| Book·YouTube·Crawler | 같은 새벽 순차 실행의 세 백업 성공 | 세 서비스 인증의 장기 유지 | Portal 새 인증 전환을 다른 서비스의 인증 변경으로 확대하지 않음 |
+
+상태 확인은 timer/service·소유 Job의 종료·순차 상태 ConfigMap·Portal 증적·소비자 판정을 함께 대조함. 중지된 개별 CronJob의 `lastScheduleTime`만으로 순차 백업 미실행을 판정하지 않음. 설치용 전체 manifest 재적용·기존 상태 초기화·개별 Cron 재활성화는 일상 점검 절차가 아님.
+
+### 과거 조회: 2026-09-23~28
+
+아래 활성 상태와 마지막 성공 시각은 당시 기록이며 현재 백업 스케줄러를 뜻하지 않음. 월간 SRE·SLO의 과거 성공 시각도 최신 live 성공으로 확장하지 않음.
+
 2026-09-23 주 담당이 N100의 CronJob 상태를 읽기 전용으로 조회함. 아래 시각은 서울 기준이며, Kubernetes의 성공 기록은 Telegram 수신이나 백업 내용의 별도 재검증을 의미하지 않음.
 
 | 대상 | 조회 상태 | 일정 | 마지막 성공 | 비고 |
@@ -77,7 +95,7 @@ Loki 로그 관측 실습은 `observability-lab` namespace의 전용 자원과 `
 | 공개 주소 장애 | GitHub Actions 약 5분 간격 health 점검 | Telegram 장애·복구 전환 시 1회. N100 알림과 중복 가능 |
 | N100 기반 구성요소 이상 | `personal-server-autostart`의 Supervisor가 Daemon을 단일 관리하고, Daemon이 3분 간격으로 WSL·K3s·Portal·NodePort·Tunnel 점검 | Tunnel 장애 알림 전송 성공 뒤 정상 복구 전환 시 Telegram 각 1회 |
 | K3s·노드·워크로드 이상 | Prometheus Alertmanager → SRE relay | Telegram |
-| Portal PVC 백업·복원 검증 | K3s `portal-pvc-backup` CronJob | Telegram SRE relay |
+| Portal PVC 백업·복원 검증 | 02:30 순차 실행기의 소유 K3s Job·증적·순차 상태 | Telegram SRE relay |
 | Compose 컨테이너 이상 | HomeOps 진단·제한형 복구 | 관리자 상태·필요 시 Telegram |
 | 뉴스 수집 지연·연속 실패 | Prometheus `NewsCollectionStale` | SRE relay → Telegram |
 

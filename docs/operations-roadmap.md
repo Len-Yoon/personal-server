@@ -5,7 +5,7 @@
 | 항목 | 내용 |
 |---|---|
 | 문서명 | 현재 운영 로드맵 |
-| 기준일 | 2026-10-04 문서 상태 갱신. 기존 운영 검증 시점은 각 증적을 따름 |
+| 기준일 | 2026-10-08 문서 상태 갱신. 기존 운영 검증 시점은 각 증적을 따름 |
 | 기준 자료 | 저장소 운영 문서·검증 도구·문서 계약 테스트 |
 | 목적 | 완료 항목과 후속 운영 개선을 분리해 관리함 |
 | 비고 | 비밀값·운영 데이터·실행 자격 증명은 기록하지 않음 |
@@ -22,7 +22,7 @@
 |---|---|---|---|
 | 공개 상태 감시 | GitHub Actions가 외부에서 네 공개 health를 약 5분 간격으로 확인하고 장애·복구 전환을 알림 | [공개 상태 Telegram 알림](public-uptime-monitor.md) | 완료 |
 | K3s 상태·알림 | Prometheus·Alertmanager·SRE Telegram relay 경계를 점검함 | [K3s 운영](../infra/k8s/README.md), `sre-telegram-verify.sh` | 완료 |
-| Portal 백업 검증 | Portal PVC 백업 CronJob을 매일 실행하며 읽기 전용 증적 점검과 실제 백업 실행을 구분함 | [K3s 운영](../infra/k8s/README.md), `portal-pvc-backup-verify.sh` | 완료 |
+| Portal 백업 검증 | 02:30 단일 순차 timer·중지된 개별 Cron 템플릿으로 운영함. 10월 8일 실패 수정·새 Production 인증의 신규 업로드/격리 복원·소비자 갱신을 확인함 | [최신 복구 기록](reviews/20261008_Portal백업_실패복구.md), [현재 실행 주체](operations-reference.md#운영-상태-확인-기록) | 수동 검증 완료, 다음 자동 실행 확인 필요 |
 | 일일 SLO 증적 | freshness 다중 시계열 집계 보완을 운영 적용하고, 수동 검증 뒤 CronJob 자동 실행을 활성화함 | [뉴스·SLO 운영 적용 검증 결과](reviews/20260922_뉴스_SLO_운영적용_검증결과.md), `slo-daily-evidence.py` | 완료 |
 | Pod 자동복구 실습 | production과 분리된 임시 namespace에서 liveness 실패와 Ready 복구를 확인함 | `sre-pod-recovery-lab.sh` | 완료 |
 | 변경 검증 | 문서·설정 변경 전에 범위와 관련 검사를 확인함 | [Codex 작업 완료 루프](codex-work-loop.md) | 완료 |
@@ -40,16 +40,24 @@
 
 ## 향후 개선 항목
 
+### 다음 백업·인증 확인
+
+| 우선순위 | 항목 | 완료 조건 | 비고 |
+|---|---|---|---|
+| P1 | Portal 수정 후 정기 백업 | 다음 소유 Job 종료·신규 업로드·복원 증적·atomic export·소비자 fresh 확인 | 수동 성공을 정기 실행 성공으로 대체하지 않음 |
+| P2 | 다른 세 백업 인증 | Book·YouTube·Crawler 각 인증 출처·유효성 확인 및 필요 조치의 검증 | 이 문서 갱신으로 자격 증명 변경을 실행하지 않음 |
+| P2 | 전체 서비스 잔여 검증 | [개발 계획](20260921_프로젝트보완_개발계획.md)의 미검증 항목과 실제 증적 대조 | 기능 구현·저장소 반영·운영 성공을 구분함 |
+
 ### Loki·Ansible 후속 실습 상태
 
-`f66a42a` ([PR #331](https://github.com/Len-Yoon/personal-server/pull/331) 병합) 기준 상태임. 저장소 검증 완료와 N100 실동작 검증 결과를 구분함. 면접 설명은 [DevOps 포트폴리오](portfolio-devops.md)를 참조함.
+최초 `f66a42a` ([PR #331](https://github.com/Len-Yoon/personal-server/pull/331) 병합) 실습과 후속 `6a17f5a` 운영 결과를 함께 기록함. 저장소 검증 완료와 N100 실동작 검증 결과를 구분함. 면접 설명은 [DevOps 포트폴리오](portfolio-devops.md)를 참조함.
 
 | 항목 | 현재 상태 | 남은 조건 |
 |---|---|---|
-| Loki·Alloy·Grafana 실습 | N100 3개 Deployment `1/1`·PVC Bound, 실제 샘플 로그 조회·datasource 등록 확인 | 최초 조회 실패 후 무변경 재조회 성공. 화면/API·CNI 원인·retention·hard quota 확인 필요 |
-| Ansible localhost 실습 | syntax-check·check mode·배치·2회차 `changed=0`·롤백·재배치 통과 | 모두 `failed=0`, 최종 loopback HTTP 정상 |
-| 저장소 통합 | PR CI·Trivy·독립 검토 통과 후 `f66a42a` 병합 완료 | 병합 후 CI·Trivy 성공. 자동배포는 `blocked_path`로 제외됨 |
-| N100 실습 적용 | 동일 커밋 동기화·승인된 수동 실습 적용 및 검증 완료 | [운영 검증 결과](reviews/20261004_Loki_Ansible_실습_N100운영검증결과.md). Portal 전후 각 3회 정상, 기존 monitoring 준비 상태 유지 |
+| Loki·Alloy·Grafana 실습 | 최초 실습 후 10월 5일 rollback·재설치·같은 PVC/이전 로그 보존·샘플 조회 완료 | 최초 조회 실패 원인·retention·hard quota 확인 필요 |
+| Ansible localhost 실습 | 최초 실습과 후속 실제 drift 감지·원복·멱등성 재훈련 완료 | 최초 실패·수동 원상복구 이력 유지, 최종 `6a17f5a`의 6개 상태 PASS·changed=0 |
+| 저장소 통합 | 최초 PR #331 `f66a42a`, 후속 PR #333·#334·#335와 최종 `6a17f5a` 반영 완료 | 각 필수 CI·Trivy·독립 검토 통과. 정책상 자동배포 제외와 승인된 수동 적용을 구분함 |
+| N100 실습 적용 | 최초 실습과 후속 정확한 SHA 동기화·최종 재훈련 및 보호 검증 완료 | [최초 결과](reviews/20261004_Loki_Ansible_실습_N100운영검증결과.md), [10월 5일 후속 결과](reviews/20261005_DevOps실습_운영적용결과.md). 최초 실패와 최종 성공을 분리함 |
 
 | 우선순위 | 항목 | 실행 기준 | 완료 조건 |
 |---|---|---|---|
@@ -71,7 +79,7 @@
 
 ## 후속 조치
 
-2026-10-05 후속 실습 검증 도구와 SLO 집계 구현 상태는 [고도화 검증 결과](reviews/20261005_DevOps실습고도화_검증결과.md)를 따름. 기존 실습 배포 성공과 신규 실패·drift 훈련의 실행 미수행을 구분함. 기존 Grafana API의 등록·샘플 로그 조회는 확인함. 신규 운영 적용은 승인된 정확한 SHA·대상·순서로 별도 수행함.
+2026-10-05 후속 실습은 [고도화 검증 결과](reviews/20261005_DevOps실습고도화_검증결과.md)의 코드 준비 뒤 [실제 운영 결과](reviews/20261005_DevOps실습_운영적용결과.md)로 완료함. 격리 실패 배포·Loki 데이터 보존 rollback/재설치·Ansible 실패 후 원상복구와 최종 재훈련·SLO image-only 교체를 확인함. SLO 새 이미지의 다음 정기 collector 전체 성공은 이 실습 결과로 대체하지 않음. 추가 운영 변경은 대상·동작별 승인 범위를 따름.
 
 1. 매월 1일 월간 CronJob 실행 뒤 status ConfigMap과 Telegram relay 결과를 확인함. 수동 실행은 긴급·추가 점검이 필요한 경우에만 사용함.
 2. 매일 백업 결과와 약 5분 간격 공개 감시의 장애·복구 전환은 월간 점검을 기다리지 않고 확인함.

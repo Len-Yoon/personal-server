@@ -8,7 +8,7 @@ N100의 K3s는 현재 Portal·뉴스·YouTube Memo·Book Memo와 모니터링 �
 |---|---:|---|---|
 | 공개 상태 감시 | 약 5분 | 외부에서 공개 health 장애·복구를 신속히 감지함 | GitHub Actions에서 독립 실행하며 월간 감사로 대체하지 않음 |
 | 일별 SLO 증적 | 매일 02:15, 운영 활성·최근 수집 성공 | Prometheus 직전 24시간과 공개 health 교차 확인 증적을 최근 30건 보관함. 세부 건강 항목은 `failed`일 수 있음 | 월간 감사가 고정 ConfigMap을 읽기 전용으로 집계함 |
-| Portal PVC 백업·복원 검증 | 매일 03:00 | 최신 복구 가능 증적을 유지하고 백업 실패를 조기에 감지함 | 별도 CronJob이 실행하며 월간 감사는 증적만 읽기 확인함 |
+| 네 PVC 백업·복원 검증 | 매일 02:30부터 순차 실행 | Portal → Book → YouTube → Crawler의 최신 복구 가능 증적과 실패 상태를 확인함 | 사용자 systemd 순차 timer가 K3s Job을 생성함. 네 개별 CronJob은 중지하며 월간 감사는 증적만 읽기 확인함 |
 | 내부 SRE 통합 점검 | 매월 1일 03:30 | Portal·K3s·백업 증적·격리 복구 훈련을 한 번에 확인함 | `monthly-sre-audit`만 활성화함 |
 | 코드 변경 검증 | 변경 시점 | 변경 영향 범위의 회귀를 병합 전 확인함 | 정기 운영 점검과 별도임 |
 
@@ -45,11 +45,11 @@ python3 infra/k8s/tools/service-pvc-backup-production-state.py --check
 
 `--check`는 목표 필드와 백업 명령·ServiceAccount·PVC/Secret mount·핵심 보안 설정을 확인함. 2026-09-28 뉴스 백업 실패 보완으로 목표 이미지 digest를 먼저 갱신했으므로 승인된 이미지 반입·교체 전에는 이미지 불일치로 실패하는 것이 정상임. CronJob 전체 spec·Secret 내용·이미지의 플랫폼 manifest까지 포괄 감사하는 도구는 아니므로 운영 사전검토에서 별도 확인함. N100 이미지 목록에 고정 alias가 있어도 해당 이미지가 `linux/amd64`로 실행 가능한지는 정기 Job 또는 별도 이미지 검사로 확인 필요함.
 
-### 새벽 순차 백업 전환 목표
+### 새벽 순차 백업 현재 운영 기준
 
-맥 저장소의 [순차 백업 설계](../../docs/superpowers/specs/2026-09-29-sequential-night-backup-design.md)는 네 백업을 서울 시각 02:30에 Portal → Book Memo → YouTube Memo → News Hub 수집기 순서로 실행하도록 정의함. 앞 Job의 최종 종료를 확인한 직후 다음 Job을 시작하며, 실패해도 최종 종료가 확인되면 다음 백업을 시도함. 종료 상태가 불명확하면 중복 백업을 피하기 위해 중단함. 네 개별 CronJob은 중지하고 기존 jobTemplate을 순차 실행에 재사용함. 이 절은 **운영 적용 목표**이며 N100 timer 활성화 또는 첫 야간 백업의 성공을 의미하지 않음.
+맥 저장소의 [순차 백업 설계](../../docs/superpowers/specs/2026-09-29-sequential-night-backup-design.md)는 네 백업을 서울 시각 02:30에 Portal → Book Memo → YouTube Memo → News Hub 수집기 순서로 실행하도록 정의함. 앞 Job의 최종 종료를 확인한 직후 다음 Job을 시작하며, 실패해도 최종 종료가 확인되면 다음 백업을 시도함. 종료 상태가 불명확하면 중복 백업을 피하기 위해 중단함. 네 개별 CronJob은 중지하고 기존 jobTemplate을 순차 실행에 재사용함. 2026-09-29 [순차 운영 전환](../../docs/reviews/20260929_순차PVC백업_N100운영반영결과.md)을 완료했고 9월 30일 첫 네 대상 정기 성공을 확인함. 2026-10-08에도 순차 timer active/enabled와 개별 Cron 중지를 유지함. Portal 실패 수정·Production 새 인증으로 수동 백업·격리 복원·증적 갱신을 완료했으며 수정 후 다음 정기 실행은 아직 미관측임. [최신 검증](../../docs/reviews/20261008_Portal백업_실패복구.md)을 따름.
 
-운영 전환에는 Relay의 순차 실행 상태 감시 적용, 기존 네 CronJob 중지, `pvc-backup-sequence-state` ConfigMap 최초 생성, N100 사용자 systemd 단위 설치·활성화가 필요함. 상태 ConfigMap은 한 번 생성한 뒤 다시 manifest로 적용하면 기존 실행 기록이 초기화될 수 있으므로 재적용하지 않음. 기존 Book·YouTube·Crawler 목표는 위 전용 도구로 제한 적용함. Portal은 현재 CronJob의 UID·resourceVersion·기존 schedule·jobTemplate을 읽기 전용으로 확인한 뒤, UID·resourceVersion 일치 조건의 JSON patch로 `startingDeadlineSeconds: 300`과 `suspend: true`만 변경함. 기존 active Job이 없고 writer·잠금 상태가 정상인지 먼저 확인하며 설치용 전체 manifest는 재적용하지 않음. installer의 `--preflight`는 사용자 systemd·linger·K3s 접근을 확인함. `--activate`는 네 CronJob 중지·시작 마감 300초·기존 Portal timer 및 service 비활성·활성 백업 Job 부재·현재 네 백업 템플릿의 보안 계약·호스트 잠금 획득 가능성을 확인한 뒤 timer를 켬.
+아래 명령은 신규 환경의 전환·재설치 참고이며 이미 활성화된 현재 운영에 반복 실행하지 않음. 운영 전환에는 Relay의 순차 실행 상태 감시 적용, 기존 네 CronJob 중지, `pvc-backup-sequence-state` ConfigMap 최초 생성, N100 사용자 systemd 단위 설치·활성화가 필요함. 상태 ConfigMap은 한 번 생성한 뒤 다시 manifest로 적용하면 기존 실행 기록이 초기화될 수 있으므로 재적용하지 않음. 기존 Book·YouTube·Crawler 목표는 위 전용 도구로 제한 적용함. Portal은 현재 CronJob의 UID·resourceVersion·기존 schedule·jobTemplate을 읽기 전용으로 확인한 뒤, UID·resourceVersion 일치 조건의 JSON patch로 `startingDeadlineSeconds: 300`과 `suspend: true`만 변경함. 기존 active Job이 없고 writer·잠금 상태가 정상인지 먼저 확인하며 설치용 전체 manifest는 재적용하지 않음. installer의 `--preflight`는 사용자 systemd·linger·K3s 접근을 확인함. `--activate`는 네 CronJob 중지·시작 마감 300초·기존 Portal timer 및 service 비활성·활성 백업 Job 부재·현재 네 백업 템플릿의 보안 계약·호스트 잠금 획득 가능성을 확인한 뒤 timer를 켬.
 
 ```bash
 bash infra/k8s/tools/pvc-backup-sequence-automation.sh --preflight
@@ -140,7 +140,9 @@ relay, PrometheusRule, RBAC 경계, Prometheus target 상태를 검증하며 Sec
 
 ## Portal PVC 백업
 
-Portal PVC 백업은 N100의 K3s CronJob으로 운영 중임. 2026-09-27 후속 조회에서 최신 Job 성공과 `portal_pvc_backup=PASS` 증적을 확인했고, 원격 암호문 전체의 SHA-256 재계산 결과가 증적과 일치함. 이 확인은 원격 파일의 무결성 검증이며 공유·접근 권한 감사는 포함하지 않음. 기존 사용자 timer는 비활성 상태로 운영함. 아래는 최초 설치·재설치 절차이며, 초기 CronJob은 `suspend: true` 상태로 배포됨. 새 환경에서는 승인된 Secret Manager 또는 SOPS/age 절차로 사전 시딩된 runtime Secret과 runner image가 준비되기 전에는 활성화하지 않음. 저장소 도구는 Secret 값·rclone 설정·age identity를 생성·입력·출력하지 않음.
+Portal PVC 백업은 현재 02:30 사용자 systemd 순차 실행기가 중지된 K3s CronJob의 jobTemplate으로 생성하는 소유 Job에서 운영함. 개별 `portal-pvc-backup` CronJob은 `suspend: true`이며 03:00의 기존 schedule 필드는 보존만 함. 현재 순차 timer와 과거 Portal 단독 timer를 구분함. 새 인증·실제 신규 백업·격리 복원·소비자 갱신은 [2026-10-08 복구 기록](../../docs/reviews/20261008_Portal백업_실패복구.md)을 따름.
+
+아래는 순차 전환 이전 운영 이력과 신규 환경의 단독 CronJob 설치·재설치 참고 절차임. 현재 순차 운영에 `--apply`·`--activate`를 실행하거나 전체 manifest를 재적용하지 않음. 2026-09-27 후속 조회에서 최신 Job 성공과 `portal_pvc_backup=PASS` 증적을 확인했고, 원격 암호문 전체의 SHA-256 재계산 결과가 증적과 일치함. 이 확인은 원격 파일의 무결성 검증이며 공유·접근 권한 감사는 포함하지 않음. 당시 Portal 단독 사용자 timer는 비활성화함. 현재 활성인 순차 timer와 다른 단위임. 아래는 최초 설치·재설치 절차이며, 초기 CronJob은 `suspend: true` 상태로 배포됨. 새 환경에서는 승인된 Secret Manager 또는 SOPS/age 절차로 사전 시딩된 runtime Secret과 runner image가 준비되기 전에는 활성화하지 않음. 저장소 도구는 Secret 값·rclone 설정·age identity를 생성·입력·출력하지 않음.
 
 백업 도구는 생성한 archive를 `age`로 암호화하고 암호문 파일의 SHA-256을 증적의 `artifact_digest`로 기록함. SHA-256은 암호화 방식이나 복호화 가능성을 뜻하지 않으며, 일일 Job은 원격에서 내려받은 암호문의 해시와 격리 복원 결과도 확인함. 2026-09-27 후속 검사는 별도로 원격 바이트를 다시 읽어 기록된 해시와 비교한 것임.
 
@@ -152,16 +154,17 @@ bash infra/k8s/tools/portal-pvc-backup-cronjob.sh --render
 bash infra/k8s/tools/portal-pvc-backup-verify.sh --check
 ```
 
-운영자 승인 후 `--apply`는 suspended CronJob과 최소 RBAC만 적용함. 기존 systemd timer를 비활성화하고, 수동 실행의 백업·복원 검증 및 Telegram 결과를 확인한 뒤에만 `--activate`로 CronJob을 해제함. 두 scheduler가 동시에 활성화되는 상태는 허용하지 않음.
+운영자 승인 후 `--apply`는 suspended CronJob과 최소 RBAC만 적용함. 신규 단독 운영 환경의 기존 Portal 단독 systemd timer를 비활성화하고, 수동 실행의 백업·복원 검증 및 Telegram 결과를 확인한 뒤에만 `--activate`로 CronJob을 해제함. 두 scheduler가 동시에 활성화되는 상태는 허용하지 않음.
 
 ```bash
 bash infra/k8s/tools/portal-pvc-backup-cronjob.sh --apply
 bash infra/k8s/tools/portal-pvc-backup-cronjob.sh --status
-# 기존 timer가 inactive이고 수동 검증이 성공한 뒤에만 실행함.
+# 신규 단독 운영 환경에서만 사용함. 현재 활성 순차 timer에는 실행하지 않음.
+# 기존 Portal 단독 timer가 inactive이고 수동 검증이 성공한 뒤에만 실행함.
 bash infra/k8s/tools/portal-pvc-backup-cronjob.sh --activate
 ```
 
-CronJob은 매일 03:00 KST에 실행되며, `Forbid` 동시 실행 제한·실패 재시도 없음·read-only PVC mount·고정 ServiceAccount 권한을 사용함. 성공·변경 없음·실패·복원 검증 실패는 Telegram SRE relay로 상태 전환을 전달함. 실행 중 백업이 중단되면 300초 종료 유예 안에서 Portal replica 복구를 시도하며, 복구 상태를 확인해야 함.
+단독 CronJob 설치 방식의 schedule은 매일 03:00 KST이며 현재 순차 운영에서는 중지 상태로 보존함. 단독 CronJob의 `Forbid`는 CronJob 자체 일정에 적용됨. 현재 순차 실행의 중복 방지는 호스트 잠금·상태 잠금·이전 소유 Job의 최종 종료 확인으로 보장함. 백업 Job은 실패 재시도 없음·read-only PVC mount·고정 ServiceAccount 권한을 사용함. 성공·변경 없음·실패·복원 검증 실패는 Telegram SRE relay로 상태 전환을 전달함. 실행 중 백업이 중단되면 300초 종료 유예 안에서 Portal replica 복구를 시도하며, 복구 상태를 확인해야 함.
 
 ## 일별 SLO 증적
 

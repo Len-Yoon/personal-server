@@ -1,6 +1,6 @@
 # 안전한 복구 훈련 절차
 
-스케줄러의 시점별 조회 결과는 [운영 상태 확인 기록](operations-reference.md#운영-상태-확인-기록)을 따름. 본문의 설치 시 suspended 기본값과 과거 수동 성공 기록을 현재 활성 여부와 구분함. 2026-09-27 확인 기준 Portal 백업 CronJob은 활성이고 기존 사용자 timer는 비활성임. 이번 문서 갱신 과정에서 훈련·백업·Job을 실행하지 않음.
+스케줄러의 시점별 조회 결과는 [운영 상태 확인 기록](operations-reference.md#운영-상태-확인-기록)을 따름. 본문의 설치 시 suspended 기본값과 과거 수동 성공 기록을 현재 활성 여부와 구분함. 2026-10-08 최신 확인은 02:30 순차 timer 활성·네 개별 백업 CronJob 중지임. 9월 27일의 Portal 단독 Cron 활성·단독 timer 비활성은 과거 전환 기록임. 새 Production 인증의 수동 백업·격리 복원·증적 소비자 검증은 [최신 복구 결과](reviews/20261008_Portal백업_실패복구.md)를 따름. 이번 문서 갱신 과정에서 훈련·백업·Job을 실행하지 않음.
 
 ## 문서 정보
 
@@ -45,7 +45,7 @@ CronJob은 `Forbid` 동시 실행 제한을 사용하며 설치 시 `suspend: tr
 bash infra/k8s/tools/check-portal-backup-evidence.sh
 ```
 
-성공 기준은 자동 백업 CronJob이 기록한 최신 K3s PVC 백업·복원 증적의 유효성, 암호화 상태, runtime marker가 통과하는 것임. 이 명령은 백업 업로드·복원·원격 저장소 접근을 수행하지 않으며, Secret·rclone 자격 증명을 읽지 않음.
+성공 기준은 순차 실행기의 소유 백업 Job이 기록한 최신 K3s PVC 백업·복원 증적의 유효성, 암호화 상태, runtime marker가 통과하는 것임. 이 명령은 백업 업로드·복원·원격 저장소 접근을 수행하지 않으며, Secret·rclone 자격 증명을 읽지 않음.
 
 2026-09-27에는 별도 읽기 전용 점검으로 원격 암호문 전체의 SHA-256을 재계산해 증적과 일치함을 확인함. 위의 정기 증적 점검 명령이 원격 파일 자체를 매번 다시 읽는다는 뜻은 아님. 원격 공유·접근 권한은 해시 점검과 별개로 확인 필요함.
 
@@ -56,7 +56,7 @@ bash infra/k8s/tools/portal-pvc-backup-cronjob.sh --preflight
 bash infra/k8s/tools/portal-pvc-backup-cronjob.sh --status
 ```
 
-CronJob은 기본 suspended 상태이며, 기존 systemd timer가 inactive이고 수동 백업·복원 검증과 Telegram 결과 확인이 끝난 경우에만 별도 승인으로 활성화함. 단일 스케줄러 원칙에 따라 systemd timer와 CronJob을 동시에 활성화하지 않음.
+현재 순차 실행 상태는 `pvc-backup-sequence-automation.sh --status`로 읽기 점검함. Portal 단독 Cron의 위 상태 조회만으로 순차 백업 성공을 판정하지 않으며 소유 Job·상태 ConfigMap·증적을 함께 확인함. 개별 Cron은 기본 suspended 상태이며 현재 순차 운영에서도 중지를 유지함. 신규 환경의 단독 Cron 설치에 한해서 기존 Portal 단독 systemd timer 비활성·수동 백업/복원·Telegram 검증 후 별도 승인으로 활성화함. 현재 활성 순차 timer를 끄거나 개별 Cron을 재활성화하는 일상 훈련은 수행하지 않음. 단일 스케줄러 원칙을 유지함.
 
 ### 2. SRE Telegram relay·Prometheus 점검
 
