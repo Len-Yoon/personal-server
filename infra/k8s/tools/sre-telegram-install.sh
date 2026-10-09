@@ -114,7 +114,7 @@ manifest_document_count() {
 
 manifest_namespace() {
   local file="$1" document="$2" kind namespace
-  kind=$(manifest_document "$file" "$document" | awk '$1 == "kind:" { print $2; exit }') || return 1
+  kind=$(manifest_document "$file" "$document" | awk '$1 == "kind:" && !found { value=$2; found=1 } END { if (found) print value }') || return 1
   case "$kind" in
     ClusterRole|ClusterRoleBinding)
       printf 'cluster\n'
@@ -124,15 +124,16 @@ manifest_namespace() {
   namespace=$(manifest_document "$file" "$document" | awk '
     /^metadata:[[:space:]]*$/ { in_metadata=1; next }
     in_metadata && /^[^[:space:]]/ { in_metadata=0 }
-    in_metadata && $1 == "namespace:" { print $2; exit }
+    in_metadata && $1 == "namespace:" && !found { value=$2; found=1 }
+    END { if (found) print value }
   ')
   printf '%s\n' "${namespace:-cluster}"
 }
 
 manifest_resource_name() {
   local file="$1" document="$2" kind name
-  kind=$(manifest_document "$file" "$document" | awk '$1 == "kind:" { print $2; exit }') || return 1
-  name=$(manifest_document "$file" "$document" | awk '$1 == "name:" { print $2; exit }') || return 1
+  kind=$(manifest_document "$file" "$document" | awk '$1 == "kind:" && !found { value=$2; found=1 } END { if (found) print value }') || return 1
+  name=$(manifest_document "$file" "$document" | awk '$1 == "name:" && !found { value=$2; found=1 } END { if (found) print value }') || return 1
   [ -n "$kind" ] && [ -n "$name" ] || return 1
   printf '%s-%s\n' "$kind" "$name"
 }

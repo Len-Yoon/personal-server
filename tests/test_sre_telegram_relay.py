@@ -1071,6 +1071,36 @@ class RelayServiceTest(unittest.TestCase):
         self.assertFalse(any("News Hub" in message for message in messages))
         self.assertNotIn("runner_failed", "\n".join(messages))
 
+    def test_sequence_refresh_result_keeps_polling_healthy(self):
+        for refresh in ("passed", "failed"):
+            with self.subTest(refresh=refresh):
+                data = sequence_state(status="completed", current="none",
+                                      results={service: "passed" for service in ("portal", "book", "youtube", "crawler")})
+                data["portal_evidence_refresh"] = refresh
+                k8s = FakeSequenceK8s(data)
+                telegram = FakePollingTelegram([])
+                relay = RelayService(
+                    allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                    sequence_delivery_store=ConfigMapBackupDeliveryStore(
+                        k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                        storage_key="pvc_backup_sequence_delivered_ids"),
+                    now_fn=lambda: datetime(2026, 9, 28, 16, 5, tzinfo=timezone.utc),
+                )
+                run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+                self.assertTrue(relay.is_healthy())
+                self.assertEqual(handle_http_request(relay, method="GET", path="/healthz"), (200, b"ok\n"))
+                self.assertEqual(telegram.sent_messages, [])
+
+    def test_sequence_refresh_result_rejects_invalid_and_unknown_fields(self):
+        for extra in ({"portal_evidence_refresh": "running"}, {"portal_evidence_refresh": ""},
+                      {"portal_evidence_refresh": True}, {"portal_evidence_refresh": None},
+                      {"portal_evidence_refresh": "passed", "unexpected": "passed"}):
+            with self.subTest(extra=extra):
+                data = sequence_state()
+                data.update(extra)
+                with self.assertRaises(ValueError):
+                    relay_main._read_pvc_backup_sequence_state(FakeSequenceK8s(data))
+
     def test_sequence_retention_failure_alert_preserves_backup_success_meaning(self):
         k8s = FakeSequenceK8s(sequence_state(
             status="completed", current="none", results={"book": "retention_failed"},

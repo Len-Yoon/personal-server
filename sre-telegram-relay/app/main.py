@@ -1386,11 +1386,14 @@ def _read_pvc_backup_sequence_state(k8s_client: KubernetesClient) -> dict[str, A
             raise ValueError("invalid backup sequence activation date")
         return {"active_from": active_from, "run_date": None, "deactivated_at": None}
     if (not isinstance(data, dict) or not PVC_BACKUP_SEQUENCE_KEYS <= set(data)
-            or set(data) - PVC_BACKUP_SEQUENCE_KEYS - {"active_from", "deactivated_at"}
+            or set(data) - PVC_BACKUP_SEQUENCE_KEYS - {"active_from", "deactivated_at", "portal_evidence_refresh"}
             or ("active_from" in data and "deactivated_at" in data)):
         raise ValueError("invalid backup sequence state schema")
     if not all(isinstance(value, str) for value in data.values()):
         raise ValueError("invalid backup sequence state fields")
+    if ("portal_evidence_refresh" in data
+            and data["portal_evidence_refresh"] not in {"passed", "failed"}):
+        raise ValueError("invalid backup sequence evidence refresh result")
     if not UTC_ISO8601_TIMESTAMP.fullmatch(data["updated_at"]):
         raise ValueError("invalid backup sequence update time")
     try:
