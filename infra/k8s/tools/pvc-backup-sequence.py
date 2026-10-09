@@ -37,10 +37,10 @@ class Stage:
 
 
 STAGES = {
-    "portal": Stage("portal-pvc-backup", "/opt/personal-server/portal-pvc-backup-verify.sh", "portal-pvc-backup-runtime", ("portal-web-files-dynamic", "portal-web-state-dynamic"), "docker.io/library/personal-server-portal-pvc-backup@sha256:e39bcf9096f603b1e6939f67cceb8653eed35e276dad076d16eeb563c0988452", "sre-telegram-backup-status", "monitoring"),
-    "book": Stage("book-pvc-backup", "/opt/personal-server/book-pvc-backup-verify.py", "book-memo-pvc-backup-runtime", ("book-memo-data",), "docker.io/library/personal-server-book-pvc-backup@sha256:dc46dfdc67145e649029c3fc3d0a76b2dd3480a94ac4d0198df748854ca0bc54", "book-pvc-backup-state"),
-    "youtube": Stage("youtube-pvc-backup", "/opt/personal-server/youtube-pvc-backup-verify.py", "youtube-memo-pvc-backup-runtime", ("youtube-memo-data",), "docker.io/library/personal-server-youtube-pvc-backup@sha256:fb570a295d8a681d9d3990750cd74152bb30a9ce0701ccf34421f9a50c72a4b4", "youtube-pvc-backup-state"),
-    "crawler": Stage("crawler-pvc-backup", "/opt/personal-server/crawler-pvc-backup-verify.py", "crawler-worker-pvc-backup-runtime", ("crawler-worker-data",), "docker.io/library/personal-server-crawler-pvc-backup@sha256:6e49af740101fe47601b48dc1a7da59a201f01e108b770e221bcb5a3b8a62846", "crawler-pvc-backup-state"),
+    "portal": Stage("portal-pvc-backup", "/opt/personal-server/portal-pvc-backup-verify.sh", "portal-pvc-backup-runtime", ("portal-web-files-dynamic", "portal-web-state-dynamic"), "docker.io/library/personal-server-portal-pvc-backup@sha256:4eff685cac663ddb67c25d472f0c216c67b0c6feae4f363f3cae23ae80f8afe2", "sre-telegram-backup-status", "monitoring"),
+    "book": Stage("book-pvc-backup", "/opt/personal-server/book-pvc-backup-verify.py", "book-memo-pvc-backup-runtime", ("book-memo-data",), "docker.io/library/personal-server-book-pvc-backup@sha256:c7353d033082154cd07591bf625056d7645cd205ae26d2744b3513703b2bd37f", "book-pvc-backup-state"),
+    "youtube": Stage("youtube-pvc-backup", "/opt/personal-server/youtube-pvc-backup-verify.py", "youtube-memo-pvc-backup-runtime", ("youtube-memo-data",), "docker.io/library/personal-server-youtube-pvc-backup@sha256:7096699d8066513bdd8ad61c49a897395f1dac7a8a50005dc5dd2ba1b6e6865b", "youtube-pvc-backup-state"),
+    "crawler": Stage("crawler-pvc-backup", "/opt/personal-server/crawler-pvc-backup-verify.py", "crawler-worker-pvc-backup-runtime", ("crawler-worker-data",), "docker.io/library/personal-server-crawler-pvc-backup@sha256:ffecdb317267576fd997b694f7bba6ec132bd1031ec26518ab2001343c86fd2f", "crawler-pvc-backup-state"),
 }
 
 SECRET_ITEMS = [

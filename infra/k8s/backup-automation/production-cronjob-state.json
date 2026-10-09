@@ -8,7 +8,7 @@
       "timeZone": "Asia/Seoul",
       "startingDeadlineSeconds": 300,
       "suspend": true,
-      "image": "docker.io/library/personal-server-book-pvc-backup@sha256:dc46dfdc67145e649029c3fc3d0a76b2dd3480a94ac4d0198df748854ca0bc54"
+      "image": "docker.io/library/personal-server-book-pvc-backup@sha256:c7353d033082154cd07591bf625056d7645cd205ae26d2744b3513703b2bd37f"
     },
     {
       "name": "youtube-pvc-backup",
@@ -16,7 +16,7 @@
       "timeZone": "Asia/Seoul",
       "startingDeadlineSeconds": 300,
       "suspend": true,
-      "image": "docker.io/library/personal-server-youtube-pvc-backup@sha256:fb570a295d8a681d9d3990750cd74152bb30a9ce0701ccf34421f9a50c72a4b4"
+      "image": "docker.io/library/personal-server-youtube-pvc-backup@sha256:7096699d8066513bdd8ad61c49a897395f1dac7a8a50005dc5dd2ba1b6e6865b"
     },
     {
       "name": "crawler-pvc-backup",
@@ -24,7 +24,7 @@
       "timeZone": "Asia/Seoul",
       "startingDeadlineSeconds": 300,
       "suspend": true,
-      "image": "docker.io/library/personal-server-crawler-pvc-backup@sha256:6e49af740101fe47601b48dc1a7da59a201f01e108b770e221bcb5a3b8a62846"
+      "image": "docker.io/library/personal-server-crawler-pvc-backup@sha256:ffecdb317267576fd997b694f7bba6ec132bd1031ec26518ab2001343c86fd2f"
     }
   ]
 }

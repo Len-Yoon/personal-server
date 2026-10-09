@@ -103,7 +103,7 @@ spec:
             # Prepare only scratch volumes. fsGroup is deliberately omitted because it
             # would let kubelet change ownership/modes on the mounted Portal PVCs.
             - name: prepare-writable-scratch
-              image: docker.io/library/personal-server-portal-pvc-backup@sha256:e39bcf9096f603b1e6939f67cceb8653eed35e276dad076d16eeb563c0988452
+              image: docker.io/library/personal-server-portal-pvc-backup@sha256:4eff685cac663ddb67c25d472f0c216c67b0c6feae4f363f3cae23ae80f8afe2
               imagePullPolicy: Never
               command: ["/bin/sh", "-ec", "chown 10001:10001 /work /tmp /run/rclone-config && chmod 0700 /work /tmp /run/rclone-config"]
               securityContext:
@@ -124,7 +124,7 @@ spec:
                   mountPath: /run/rclone-config
           containers:
             - name: backup
-              image: docker.io/library/personal-server-portal-pvc-backup@sha256:e39bcf9096f603b1e6939f67cceb8653eed35e276dad076d16eeb563c0988452
+              image: docker.io/library/personal-server-portal-pvc-backup@sha256:4eff685cac663ddb67c25d472f0c216c67b0c6feae4f363f3cae23ae80f8afe2
               imagePullPolicy: Never
               command: [/opt/personal-server/portal-pvc-backup-verify.sh, --go]
               env:
