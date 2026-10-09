@@ -216,15 +216,17 @@ class BookBackupControllerTests(unittest.TestCase):
                 runner, "wait_for_pods_absent", side_effect=no_pods
             ), patch.object(runner, "wait_for_ready", side_effect=ready), patch.object(
                 runner.tempfile, "TemporaryDirectory", return_value=ScratchDirectory()
-            ):
+            ), patch.object(runner, "run_retention") as retention:
                 if any((fail_remote_restore, fail_remote_preflight, remote_preflight_timeouts > 1,
                         lock_busy, fail_success_patch, fail_scale,
                         pods_stay, fail_writer_recovery, missing_secret, fail_cleanup,
                         replacement_deployment, missing_database)):
                     with self.assertRaises((runner.BackupError, OSError)):
                         runner.run_go()
+                    retention.assert_not_called()
                 else:
                     runner.run_go()
+                    retention.assert_called_once_with(delete=True)
             visible_state = {key: value for key, value in state.items() if key != "rv"}
             return calls, reports, visible_state, remote.read_bytes() if remote.exists() else b""
 

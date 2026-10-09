@@ -29,7 +29,7 @@ def name(days_ago: int, pid: int = 100) -> str:
 
 def entry(file_name: str, *, size: int = 100) -> dict:
     return {
-        "Path": file_name, "Name": file_name, "Size": size, "MimeType": "application/octet-stream",
+        "Path": file_name, "Name": file_name, "ID": "object-" + file_name, "Size": size, "MimeType": "application/octet-stream",
         "ModTime": "2026-09-27T11:00:00Z", "IsDir": False,
     }
 
@@ -70,17 +70,89 @@ class RetentionTests(unittest.TestCase):
             delete=delete, now=NOW,
         )
 
-    def test_preview_and_go_keep_last_seven_and_delete_only_older_than_thirty_days(self):
+    def test_portal_root_preserves_other_service_folders_and_unrelated_files(self):
+        items = [{**entry("portal-" + name(day)), "ModTime": "2026-09-27T11:00:00Z"}
+                 for day in range(10)]
+        items += [{"Name": "book-memo", "Path": "book-memo", "IsDir": True}, entry("keep.txt")]
+        proof = evidence().replace("scope=book-memo", "scope=portal").replace("backup_id=book-", "backup_id=portal-")
+        candidates = self.run_policy(items, service="portal", proof=proof, delete=True)
+        self.assertEqual(set(candidates), {"portal-" + name(8), "portal-" + name(9)})
+        deletes = [argv[-1] for argv, _ in self.calls if "deletefile" in argv]
+        self.assertTrue(all(value.startswith("gdrive:PersonalServer-encrypted-backups/portal-") for value in deletes))
+
+    def test_retention_months_cross_year_and_preserve_exact_three_previous_months(self):
+        now = datetime(2027, 1, 15, 0, tzinfo=timezone.utc)
+        days = [datetime(2026, month, 1, tzinfo=timezone.utc) for month in (9, 10, 11, 12)]
+        items = [(day, day.isoformat(), 1, "unused") for day in reversed(days)]
+        self.assertEqual(self.retention.retained_names(items, now, minimum=0),
+                         {day.isoformat() for day in days[1:]})
+
+    def test_inventory_change_after_first_delete_stops_before_second_delete(self):
+        items = [entry(name(day)) for day in (0, 1, 2, 3, 4, 5, 6, 31, 32, 33)]
+        deleted = []
+        def command(*argv, **kwargs):
+            if "lsjson" in argv:
+                remaining = [item for item in items if item["Name"] not in deleted]
+                if deleted:
+                    remaining[0] = {**remaining[0], "Size": 101}
+                return json.dumps(remaining)
+            deleted.append(argv[-1].rsplit("/", 1)[-1])
+            return ""
+        with self.assertRaises(self.retention.RetentionError):
+            self.retention.run_retention("book-memo", evidence(), ("rclone",), command, delete=True, now=NOW)
+        self.assertEqual(deleted, [name(33)])
+
+    def test_remote_object_identity_change_blocks_deletion_even_when_size_time_match(self):
         items = [entry(name(day)) for day in (0, 1, 2, 3, 4, 5, 6, 31, 32)]
-        self.assertEqual(self.run_policy(items), [name(32), name(31)])
+        listings = 0
+        def command(*argv, **kwargs):
+            nonlocal listings
+            self.assertIn("lsjson", argv)
+            listings += 1
+            changed = [dict(item) for item in items]
+            if listings > 1:
+                changed[-1]["ID"] = "replaced-object"
+            return json.dumps(changed)
+        with self.assertRaises(self.retention.RetentionError):
+            self.retention.run_retention("book-memo", evidence(), ("rclone",), command, delete=True, now=NOW)
+        self.assertEqual(listings, 2)
+
+    def test_tiered_policy_keeps_daily_weekly_monthly_representatives(self):
+        days = list(range(121))
+        candidates = self.run_policy([entry(name(day)) for day in days])
+        kept = set(days) - {day for day in days if name(day) in candidates}
+        self.assertEqual(kept, {0, 1, 2, 3, 4, 5, 6, 7, 14, 21, 28, 35, 58, 89})
+
+    def test_same_day_duplicates_are_removed_but_latest_seven_are_protected(self):
+        items = [entry(name(0, pid=pid)) for pid in range(1, 11)]
+        candidates = self.run_policy(items, proof=evidence(backup_name=name(0, pid=9)))
+        self.assertEqual(len(candidates), 3)
+        self.assertNotIn(name(0, pid=9), candidates)
+
+    def test_korean_midnight_separates_daily_buckets(self):
+        first = "20260926T150001Z-100.tar.age"
+        second = "20260926T145959Z-100.tar.age"
+        items = [entry(name(day)) for day in range(7)] + [entry(first), entry(second)]
+        candidates = self.run_policy(items)
+        # The pure bucket selector must distinguish the two Korean dates.
+        parsed = self.retention._inventory(json.dumps([entry(first), entry(second)]), NOW)
+        self.assertEqual(len(self.retention.retained_names(parsed, NOW, minimum=0)), 2)
+
+    def test_expired_months_removed_but_sparse_history_keeps_seven(self):
+        items = [entry(name(day)) for day in (0, 1, 2, 3, 4, 5, 6, 120, 180)]
+        self.assertEqual(set(self.run_policy(items)), {name(120), name(180)})
+        self.assertEqual(self.run_policy([entry(name(day)) for day in (0, 120, 180)]), [])
+
+    def test_preview_and_go_preserve_monthly_representative(self):
+        items = [entry(name(day)) for day in (0, 1, 2, 3, 4, 5, 6, 31, 32)]
+        self.assertEqual(self.run_policy(items), [name(32)])
         self.assertTrue(all("deletefile" not in call[0] for call in self.calls))
         self.calls.clear()
-        self.assertEqual(self.run_policy(items, delete=True), [name(32), name(31)])
+        self.assertEqual(self.run_policy(items, delete=True), [name(32)])
         delete_calls = [call[0] for call in self.calls if "deletefile" in call[0]]
         self.assertEqual(
             [call[-1] for call in delete_calls],
-            [f"gdrive:PersonalServer-encrypted-backups/book-memo/{name(32)}",
-             f"gdrive:PersonalServer-encrypted-backups/book-memo/{name(31)}"],
+            [f"gdrive:PersonalServer-encrypted-backups/book-memo/{name(32)}"],
         )
 
     def test_old_files_are_kept_when_fewer_than_seven_remain(self):
@@ -93,13 +165,13 @@ class RetentionTests(unittest.TestCase):
 
     def test_service_allowlist_and_fixed_remote_are_enforced(self):
         with self.assertRaises(self.retention.RetentionError):
-            self.run_policy([], service="portal", proof=evidence())
+            self.run_policy([], service="other", proof=evidence())
         self.assertEqual(self.calls, [])
         self.run_policy([entry(name(0))], service="youtube-memo")
         self.assertEqual(self.calls[0][0][-1], "gdrive:PersonalServer-encrypted-backups/youtube-memo")
 
     def test_unexpected_item_blocks_all_deletion(self):
-        valid = [entry(name(day)) for day in (0, 1, 2, 3, 4, 5, 6, 31)]
+        valid = [entry(name(day)) for day in (0, 1, 2, 3, 4, 5, 6, 31, 32)]
         for bad in (entry("readme.txt"), entry("../escape.tar.age"),
                     {**entry(name(32)), "IsDir": True},
                     {**entry(name(32)), "Path": "other/" + name(32)},
@@ -114,14 +186,14 @@ class RetentionTests(unittest.TestCase):
                 self.assertFalse(any("deletefile" in call[0] for call in self.calls))
 
     def test_future_artifact_blocks_deletion(self):
-        items = [entry(name(day)) for day in (0, 1, 2, 3, 4, 5, 6, 31)]
+        items = [entry(name(day)) for day in (0, 1, 2, 3, 4, 5, 6, 31, 32)]
         items.append(entry("20260928T120001Z-100.tar.age"))
         with self.assertRaises(self.retention.RetentionError):
             self.run_policy(items, delete=True)
         self.assertFalse(any("deletefile" in call[0] for call in self.calls))
 
     def test_missing_or_mismatched_or_stale_restore_proof_blocks_deletion(self):
-        items = [entry(name(day)) for day in (0, 1, 2, 3, 4, 5, 6, 31)]
+        items = [entry(name(day)) for day in (0, 1, 2, 3, 4, 5, 6, 31, 32)]
         proofs = (
             "", evidence().replace("restore_status=success", "restore_status=failed"),
             evidence().replace("scope=book-memo", "scope=youtube-memo"),
@@ -150,14 +222,14 @@ class RetentionTests(unittest.TestCase):
             self.assertFalse(any("deletefile" in call[0] for call in self.calls))
 
     def test_inventory_change_before_delete_blocks_permanent_deletion(self):
-        items = [entry(name(day)) for day in (0, 1, 2, 3, 4, 5, 6, 31)]
+        items = [entry(name(day)) for day in (0, 1, 2, 3, 4, 5, 6, 31, 32)]
         listings = 0
         def command(*argv, **kwargs):
             nonlocal listings
             self.calls.append((argv, kwargs))
             if "lsjson" in argv:
                 listings += 1
-                return json.dumps(items if listings == 1 else items + [entry(name(32))])
+                return json.dumps(items if listings == 1 else items + [entry(name(33))])
             raise AssertionError("delete must not be reached")
         with self.assertRaises(self.retention.RetentionError):
             self.retention.run_retention("book-memo", evidence(), ("rclone",), command, delete=True, now=NOW)
@@ -179,7 +251,7 @@ class RetentionTests(unittest.TestCase):
         self.assertIn("--drive-use-trash=false", delete_calls[0])
 
     def test_evidence_expiring_between_preview_and_delete_blocks_deletion(self):
-        items = [entry(name(day)) for day in (0, 1, 2, 3, 4, 5, 6, 31)]
+        items = [entry(name(day)) for day in (0, 1, 2, 3, 4, 5, 6, 31, 32)]
         self.retention._clock = lambda: NOW + timedelta(days=1, seconds=1)
         def command(*argv, **kwargs):
             self.calls.append((argv, kwargs))

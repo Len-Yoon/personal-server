@@ -625,12 +625,11 @@ report_in_cluster_status() {
 }
 
 cleanup() {
-  local status=$? restore_ok=1 availability_status
+  local status=$? restore_ok=1 availability_status retention_failed=0
   trap - EXIT
   # A follow-up Ctrl+C must not interrupt reader deletion or Portal restoration.
   trap '' INT TERM HUP
   if ! verify_rclone_config_copy; then FAILURE_STAGE='remote-credentials'; restore_ok=0; fi
-  if ! cleanup_rclone_config_copy; then FAILURE_STAGE='remote-credentials'; restore_ok=0; fi
   if [ "$READER_CREATED" -eq 1 ]; then
     kctl -n personal-server delete pod "$READER_POD" --ignore-not-found --wait=true >>"$DIAGNOSTIC_FILE" 2>&1 || restore_ok=0
   fi
@@ -656,10 +655,6 @@ cleanup() {
       fi
     fi
     WRITERS_SCALED=0
-  fi
-  if [ "$LOCK_HELD" -eq 1 ]; then
-    exec 9>&-
-    LOCK_HELD=0
   fi
   if [ "$status" -eq 0 ] && [ "$restore_ok" -eq 1 ] && [ "$EVIDENCE_PENDING" -eq 1 ]; then
     FAILURE_STAGE='evidence'
@@ -688,9 +683,40 @@ cleanup() {
       fi
     fi
   fi
-  if ! report_in_cluster_status "$status" "$restore_ok"; then
+  # Only a new, published, restored backup permits deletion. Keep the lock
+  # and credential scratch alive until retention has finished. A retention
+  # failure must never erase a successfully verified backup's evidence.
+  if [ "$status" -eq 0 ] && [ "$restore_ok" -eq 1 ] && [ "$EVIDENCE_PENDING" -eq 1 ]; then
+    if rm -rf -- "$stage" "$restore" && rm -f -- "$archive" "$ciphertext" "$WORKDIR/download.age" "$WORKDIR/restore.tar"; then
+      local -a retention_command=(python3 "$SCRIPT_DIR/pvc_backup_retention.py" --portal-evidence "$EVIDENCE" --remote "$REMOTE" --max-age-seconds "$MAX_AGE" --delete --)
+      if [ "${#RCLONE_CREDENTIAL_ARGS[@]}" -gt 0 ]; then
+        retention_command+=("${RCLONE_CREDENTIAL_ARGS[@]}")
+      fi
+      if verify_rclone_config_copy && run_timeout 600 "${retention_command[@]}" >>"$DIAGNOSTIC_FILE" 2>&1 \
+          && verify_rclone_config_copy; then
+        printf '%s\n' 'pvc_backup_retention=PASS'
+      else
+        retention_failed=1
+        FAILURE_STAGE='retention'
+        printf '%s\n' 'pvc_backup_retention=FAIL'
+      fi
+    else
+      retention_failed=1
+      FAILURE_STAGE='retention-cleanup'
+      printf '%s\n' 'pvc_backup_retention=FAIL'
+    fi
+  fi
+  if ! cleanup_rclone_config_copy; then FAILURE_STAGE='remote-credentials'; restore_ok=0; fi
+  if [ "$retention_failed" -eq 1 ]; then
+    report_in_cluster_status 1 "$restore_ok" || true
+  fi
+  if [ "$retention_failed" -eq 0 ] && ! report_in_cluster_status "$status" "$restore_ok"; then
     [ -n "$FAILURE_STAGE" ] || FAILURE_STAGE='reporting'
     restore_ok=0
+  fi
+  if [ "$LOCK_HELD" -eq 1 ]; then
+    exec 9>&-
+    LOCK_HELD=0
   fi
   if [ "$status" -ne 0 ] || [ "$restore_ok" -ne 1 ]; then
     [ "$MODE" = --check ] || rm -f -- "$EVIDENCE"
@@ -702,6 +728,10 @@ cleanup() {
   rm -rf -- "$WORKDIR"
   [ "$MODE" = --check ] || [ -z "$BACKUP_UPLOAD_STATUS" ] || printf '%s\n' "backup_upload=$BACKUP_UPLOAD_STATUS"
   printf '%s\n' 'portal_pvc_backup=PASS'
+  if [ "$retention_failed" -ne 0 ]; then
+    printf '%s\n' "portal_pvc_backup_stage=$FAILURE_STAGE"
+    exit 1
+  fi
   exit 0
 }
 

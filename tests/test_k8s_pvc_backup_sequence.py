@@ -151,6 +151,53 @@ class SequenceTests(unittest.TestCase):
         self.assertEqual(api.state["data"]["active_from"], "2026-09-29")
         self.assertEqual(json.loads(api.state["data"]["results"]), {s: "passed" for s in sequence.ORDER})
 
+    def test_retention_failure_requires_current_run_verified_backup(self):
+        created = "2026-09-28T17:30:00Z"
+        completed = "2026-09-28T17:31:00Z"
+        proof = "\n".join(("schema_version=1", "scope=book-memo", "backup_status=success",
+                              "restore_status=success", "encrypted=true", "source_runtime=k3s-pvc",
+                              "restore_check=sqlite_quick_check", "restore_path_check=success",
+                              "backup_id=book-current", "backup_completed_at=" + completed,
+                              "restore_verified_at=" + completed,
+                              "artifact_digest=sha256:" + "a" * 64, "source_digest=sha256:" + "b" * 64))
+        valid = {"status": "completed", "stage": "completed", "run_id": "current",
+                 "completed_at": completed, "lock_run_id": "", "evidence": proof,
+                 "retention_status": "failed", "retention_completed_at": "2026-09-28T17:32:00Z"}
+        job = {"metadata": {"creationTimestamp": created}}
+        for changes, expected in (({}, "retention_failed"),
+                                  ({"evidence": ""}, "failed_before_runner"),
+                                  ({"evidence": proof.replace("book-current", "book-old")}, "failed_before_runner"),
+                                  ({"evidence": proof.replace(completed, "2026-09-27T17:31:00Z")}, "failed_before_runner"),
+                                  ({"retention_completed_at": created}, "failed_before_runner"),
+                                  ({"retention_status": "running"}, "failed_before_runner"),
+                                  ({"lock_run_id": "retention-running"}, "failed_before_runner"),
+                                  ({"status": "failed"}, "runner_failed")):
+            with self.subTest(changes=changes):
+                api = FakeAPI()
+                api.get_backup_status = lambda stage: {"data": dict(valid, **changes)}
+                self.assertEqual(sequence.classify_failure(api, "book", job), expected)
+
+    def test_retention_failure_uses_service_specific_proof_and_continues(self):
+        for stage, scope, restore_check in (("book", "book-memo", "sqlite_quick_check"),
+                                             ("youtube", "youtube-memo", "sqlite_quick_check"),
+                                             ("crawler", "crawler-worker", "json_schema_and_optional_sqlite_quick_check")):
+            with self.subTest(stage=stage):
+                data = {"status": "completed", "stage": "completed", "run_id": "current",
+                        "completed_at": "2026-09-28T17:31:00Z", "lock_run_id": "",
+                        "retention_status": "failed", "retention_completed_at": "2026-09-28T17:32:00Z"}
+                proof = {"schema_version": "1", "scope": scope, "backup_status": "success",
+                         "restore_status": "success", "encrypted": "true", "source_runtime": "k3s-pvc",
+                         "restore_check": restore_check, "restore_path_check": "success",
+                         "backup_id": stage + "-current", "backup_completed_at": data["completed_at"],
+                         "restore_verified_at": data["completed_at"], "artifact_digest": "sha256:" + "a" * 64,
+                         "source_digest": "sha256:" + "b" * 64}
+                data["evidence"] = "\n".join(f"{key}={value}" for key, value in proof.items())
+                api = FakeAPI({stage: "Failed"})
+                api.get_backup_status = lambda unused: {"data": data}
+                self.assertEqual(self.run_sequence(api), 0)
+                self.assertEqual(json.loads(api.state["data"]["results"])[stage], "retention_failed")
+                self.assertEqual(len(api.created), 4)
+
     def test_terminal_failure_continues_and_classifies_runner(self):
         api = FakeAPI({"book": "Failed"})
         self.assertEqual(self.run_sequence(api), 0)

@@ -353,7 +353,7 @@ class CrawlerBackupControllerTests(unittest.TestCase):
                 runner, "wait_for_pods_absent", side_effect=no_pods
             ), patch.object(runner, "wait_for_ready", side_effect=ready), patch.object(
                 runner.tempfile, "TemporaryDirectory", return_value=ScratchDirectory()
-            ), patch.object(runner, "create_snapshot", side_effect=snapshot
+            ), patch.object(runner, "run_retention") as retention, patch.object(runner, "create_snapshot", side_effect=snapshot
             ):
                 if any((fail_remote_restore, fail_remote_preflight, remote_preflight_timeouts >= 2,
                         lock_busy, fail_success_patch, fail_scale,
@@ -362,8 +362,10 @@ class CrawlerBackupControllerTests(unittest.TestCase):
                         restore_conflict, restore_replacement)):
                     with self.assertRaises((runner.BackupError, OSError)):
                         runner.run_go()
+                    retention.assert_not_called()
                 else:
                     runner.run_go()
+                    retention.assert_called_once_with(delete=True)
             return calls, reports, state, remote.read_bytes() if remote.exists() else b""
 
     @staticmethod

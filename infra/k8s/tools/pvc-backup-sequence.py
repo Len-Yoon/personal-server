@@ -22,7 +22,7 @@ KST = ZoneInfo("Asia/Seoul")
 NAMESPACE = "personal-server"
 STATE_NAME = "pvc-backup-sequence-state"
 ORDER = ("portal", "book", "youtube", "crawler")
-RESULTS = {"passed", "runner_failed", "failed_before_runner", "skipped"}
+RESULTS = {"passed", "retention_failed", "runner_failed", "failed_before_runner", "skipped"}
 
 
 @dataclass(frozen=True)
@@ -302,10 +302,48 @@ def update_state(api, run_date, status, current, results, now, evidence_refresh=
     api.patch_state(metadata["resourceVersion"], data)
 
 
+def verified_retention_failure(stage, data, created_at):
+    """Distinguish cleanup failure only with same-run, fresh restore proof."""
+    if (stage not in {"book", "youtube", "crawler"} or data.get("status") != "completed"
+            or data.get("stage") != "completed" or data.get("lock_run_id") != ""
+            or data.get("retention_status") != "failed"):
+        return False
+    completed_at = utc_time(data.get("completed_at"))
+    retention_at = utc_time(data.get("retention_completed_at"))
+    if not created_at < completed_at <= retention_at:
+        return False
+    run_id = data.get("run_id")
+    evidence = data.get("evidence")
+    if not isinstance(run_id, str) or not run_id or not isinstance(evidence, str):
+        return False
+    proof = {}
+    for line in evidence.splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or not key or key in proof:
+            return False
+        proof[key] = value
+    scope = {"book": "book-memo", "youtube": "youtube-memo", "crawler": "crawler-worker"}[stage]
+    required = {"schema_version": "1", "scope": scope, "backup_status": "success",
+                "restore_status": "success", "encrypted": "true", "source_runtime": "k3s-pvc",
+                "backup_id": stage + "-" + run_id, "restore_check":
+                    "json_schema_and_optional_sqlite_quick_check" if stage == "crawler" else "sqlite_quick_check",
+                "restore_path_check": "success"}
+    if any(proof.get(key) != value for key, value in required.items()):
+        return False
+    if any(not re.fullmatch(r"sha256:[0-9a-f]{64}", proof.get(key, ""))
+           for key in ("artifact_digest", "source_digest")):
+        return False
+    return (created_at < utc_time(proof.get("backup_completed_at")) <= completed_at
+            and created_at < utc_time(proof.get("restore_verified_at")) <= completed_at)
+
+
 def classify_failure(api, stage, job):
     try:
         data = api.get_backup_status(stage).get("data", {})
-        if data.get("status") in {"failed", "restore_failed"} and utc_time(data.get("completed_at")) > utc_time(job["metadata"].get("creationTimestamp")):
+        created_at = utc_time(job["metadata"].get("creationTimestamp"))
+        if verified_retention_failure(stage, data, created_at):
+            return "retention_failed"
+        if data.get("status") in {"failed", "restore_failed"} and utc_time(data.get("completed_at")) > created_at:
             return "runner_failed"
     except (APIError, SafetyError, AttributeError, TypeError):
         pass

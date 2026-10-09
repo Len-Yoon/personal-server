@@ -1071,6 +1071,40 @@ class RelayServiceTest(unittest.TestCase):
         self.assertFalse(any("News Hub" in message for message in messages))
         self.assertNotIn("runner_failed", "\n".join(messages))
 
+    def test_sequence_retention_failure_alert_preserves_backup_success_meaning(self):
+        k8s = FakeSequenceK8s(sequence_state(
+            status="completed", current="none", results={"book": "retention_failed"},
+        ))
+        telegram = FakePollingTelegram([])
+        relay = RelayService(
+            allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+            sequence_delivery_store=ConfigMapBackupDeliveryStore(
+                k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP,
+                storage_key="pvc_backup_sequence_delivered_ids"),
+            now_fn=lambda: datetime(2026, 9, 28, 16, 5, tzinfo=timezone.utc),
+        )
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        run_polling(relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
+        self.assertEqual(len(telegram.sent_messages), 1)
+        self.assertIn("[백업 정리 실패]", telegram.sent_messages[0][1])
+        self.assertIn("새 백업·복원 검증은 성공", telegram.sent_messages[0][1])
+        self.assertNotIn("새 복구 지점을 확인할 수 없습니다", telegram.sent_messages[0][1])
+
+    def test_portal_retention_stage_failure_uses_cleanup_message(self):
+        for stage in ("retention", "retention-cleanup"):
+            with self.subTest(stage=stage):
+                k8s = FakeBackupStatusK8s({"run_id": "20260905T010203Z-retention", "status": "failed",
+                                          "completed_at": "2026-09-05T01:02:03Z", "stage": stage})
+                relay = RelayService(
+                    allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                    backup_delivery_store=ConfigMapBackupDeliveryStore(
+                        k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP))
+                messages = []
+                self.assertTrue(relay.deliver_backup_report(lambda chat, message: messages.append(message) or True))
+                self.assertEqual(len(messages), 1)
+                self.assertIn("[백업 정리 실패]", messages[0])
+                self.assertNotIn("[백업 실패]", messages[0])
+
     def test_sequence_reader_rejects_malformed_fixed_state(self):
         self.assertTrue(hasattr(relay_main, "_read_pvc_backup_sequence_state"))
         valid = sequence_state()
@@ -1520,6 +1554,17 @@ class RelayServiceTest(unittest.TestCase):
         self.assertNotIn("schema_version", telegram.sent_messages[1][1])
         self.assertIn(CONFIGMAP_BOOK_BACKUP_DELIVERED_RUN_IDS_KEY, k8s.data)
         self.assertNotIn("backup_delivered_run_ids", k8s.data)
+
+    def test_backup_completed_with_retention_fields_remains_valid_report(self):
+        data = {"lock_run_id": "", "evidence": "schema_version=1\nscope=book-memo\nbackup_status=success\nrestore_status=success\n",
+                "run_id": "20260928T010203Z-102", "status": "completed",
+                "completed_at": "2026-09-28T01:02:03Z", "stage": "completed",
+                "retention_status": "failed", "retention_completed_at": "2026-09-28T01:03:03Z"}
+        k8s = FakeBookBackupStatusK8s(data)
+        self.assertEqual(relay_main._read_pvc_backup_report(k8s, "book"),
+                         {"run_id": data["run_id"], "status": "completed"})
+        k8s.backup_data = dict(data, unexpected="untrusted")
+        self.assertIsNone(relay_main._read_pvc_backup_report(k8s, "book"))
 
     def test_book_backup_running_and_malformed_report_do_not_alert(self):
         base = {
