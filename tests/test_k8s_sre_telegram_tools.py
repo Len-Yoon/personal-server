@@ -1,5 +1,6 @@
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -648,6 +649,40 @@ class SreTelegramToolContractTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertTrue(result.stdout.rstrip().endswith("sre_telegram_install=PASS"))
         self.assertIn("create -f", calls)
+
+    def test_install_consumes_manifest_stream_before_header_lookup_finishes(self):
+        # Delay the remaining producer output so a header reader that exits
+        # early deterministically causes BrokenPipe under shell pipefail.
+        real_awk = shutil.which("awk")
+        self.assertIsNotNone(real_awk)
+        slow_awk = f"#!{sys.executable}\n" + "\n".join((
+            "import os, subprocess, sys, time",
+            f"real_awk = {real_awk!r}",
+            "args = sys.argv[1:]",
+            "if len(args) < 2 or args[0] != '-v' or not args[1].startswith('wanted='):",
+            "    os.execv(real_awk, [real_awk, *args])",
+            "result = subprocess.run([real_awk, *args], stdout=subprocess.PIPE)",
+            "try:",
+            "    os.write(1, result.stdout[:256])",
+            "    time.sleep(0.05)",
+            "    remaining = memoryview(result.stdout)[256:]",
+            "    while remaining:",
+            "        remaining = remaining[os.write(1, remaining):]",
+            "except BrokenPipeError:",
+            "    os._exit(141)",
+            "sys.exit(result.returncode)",
+        )) + "\n"
+        original = self.run_tool
+
+        def run_with_delayed_stream(*args, **kwargs):
+            kwargs["stubs"] = {**kwargs.get("stubs", {}), "awk": slow_awk}
+            return original(*args, **kwargs)
+
+        self.run_tool = run_with_delayed_stream
+        try:
+            self.test_install_accepts_containerd_canonical_image_reference_and_creates_resources()
+        finally:
+            self.run_tool = original
 
     def test_install_applies_relay_before_atomic_helm_upgrade_and_rolls_back_namespaced_resources(self):
         result, calls = self.run_tool(
