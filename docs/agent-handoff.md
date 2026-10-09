@@ -6,21 +6,23 @@
 
 | 서비스 | 책임 | 주요 코드 |
 |---|---|---|
-| `portal-web` | 포털, 파일함, 관리자 상태, 포트폴리오 | `portal-web/app/routers/`, `portal-web/app/services/` |
+| `portal-web` | 포털, 파일함·휴지통 복원·개인 기사 보관, 관리자 상태, 포트폴리오 | `portal-web/app/routers/`, `portal-web/app/services/` |
 | `system-agent` | Docker·백업·host metrics 상태 API | `system-agent/app/services/metrics.py` |
 | `homeops-executor` | HomeOps의 제한된 컨테이너 진단·allowlist 재시작 실행 | `homeops-executor/app/` |
 | `crawler-worker` | Investing.com 시장 뉴스·Google News IT·AI 보관, 나스닥 관련성 분류, Telegram 중요 알림 | `crawler-worker/app/services/news_archive.py`, `nasdaq_relevance.py` |
-| `youtube-memo` | YouTube 영상·타임스탬프 메모 | `youtube-memo/app/main.py` |
-| `book-memo` | 책·목차·독서 메모 | `book-memo/app/main.py` |
-| `caddy` | Cloudflare Tunnel에서 전달받아 K3s Portal·Book Memo·YouTube Memo와 Compose News를 분기하는 HTTPS 프록시 | `caddy/Caddyfile` |
+| `youtube-memo` | YouTube 영상·타임스탬프 메모·JSON 가져오기/내보내기 | `youtube-memo/app/main.py` |
+| `book-memo` | 책·목차·독서 메모·JSON 가져오기/내보내기 | `book-memo/app/main.py` |
+| `caddy` | Cloudflare Tunnel에서 전달받아 K3s Portal·Crawler Worker·Book Memo·YouTube Memo를 분기하는 HTTPS 프록시 | `caddy/Caddyfile` |
 
 ## 2. 운영 구조
 
-- Portal·Book Memo·YouTube Memo는 K3s `personal-server` namespace와 PVC 단일 writer로 운영하며, News·차량관리 등 나머지 업무 서비스는 Compose로 운영함.
-- 공개 경로는 Cloudflare Tunnel → Caddy → K3s Portal·Book Memo·YouTube Memo 또는 Compose 서비스임.
-- 기본 변경 흐름은 작업 브랜치 → PR → CI·Agent Review → 병합임. 병합 뒤 main CI와 N100 배포가 성공하고 작업공간이 깨끗한 경우에만 브랜치와 분리 작업공간을 정리함. 상세 절차는 [Codex 작업 완료 루프](codex-work-loop.md)를 따름.
-- `main`에서 실행된 CI가 성공하면 GitHub Actions `Deploy N100` workflow가 Windows self-hosted runner에서 배포하고 서비스 health를 확인함.
+- Portal·Crawler Worker·Book Memo·YouTube Memo는 K3s `personal-server` namespace와 PVC 단일 writer로 운영함. 차량관리·SystemAgent·HomeOps 실행기는 Compose에 유지함.
+- 공개 경로는 Cloudflare Tunnel → Caddy → K3s Portal·Crawler Worker·Book Memo·YouTube Memo임. 차량 OAuth callback은 별도 Tunnel ingress임.
+- 기본 변경 흐름은 작업 브랜치 → PR → CI·Agent Review → 병합임. 병합 뒤 main CI·해당 배포 결과(문서 skip·정책상 제외 포함)를 확인하고 작업공간이 깨끗한 경우에만 브랜치와 분리 작업공간을 정리함. 상세 절차는 [Codex 작업 완료 루프](codex-work-loop.md)를 따름.
+- `main` CI가 성공하면 `Deploy N100`은 변경 경로·runtime 소유권으로 분류함. 허용된 Compose 대상만 자동배포하고 K3s·Portal·보호 경로는 제외함. 일반 문서만 변경하면 skip이며 인프라 보호 경로를 포함하면 `blocked_path`로 제외될 수 있음. 병합을 운영 배포 성공으로 표현하지 않음.
 - `scripts/deploy-n100.sh`는 원격 `origin/main`으로 코드 추적 파일을 맞추므로 N100 작업 디렉터리에서 추적 파일을 직접 수정하지 않음.
+
+네 PVC는 매일 02:30 KST 순차 timer가 중지된 Cron 템플릿에서 Job을 생성함. 개별 Cron을 재활성화하지 않음. 신규 암호화 백업·격리 복원 뒤 일·주·월 보관 정책을 실행하며 최신 7개를 보호함. [현재 검증 기록](reviews/20261009_백업보관정책_보완.md)에 운영 커밋·이미지·정기 실행 결과를 구분함. `/health`는 liveness이며 로컬 데이터·권한 확인용 `/ready`와 별개임.
 
 ## 3. 인증 경계
 
@@ -34,12 +36,12 @@
 
 | 변경 영역 | 반드시 유지할 계약 |
 |---|---|
-| 파일함 | 접근 인증, 업로드 확장자·용량 제한, 경로 안전성, 업로드·다운로드·삭제 흐름 |
+| 파일함 | 접근 인증, 업로드 확장자·용량 제한, 경로 안전성, 업로드·다운로드·삭제 흐름, no-overwrite 이동·휴지통 복원, 개인 기사 인증 경계 |
 | 관리자 상태 | Windows host가 기록한 `captured_at`과 화면 조회 시각을 혼동하지 않음 |
 | 뉴스 | 전망성 기사는 archive, 확정된 시장 충격만 Telegram alert 정책 유지 |
 | 메모 | 공개 읽기와 세션 기반 쓰기 분리, unsafe 요청 Origin 검증 유지 |
 | 공개 서비스 | CSP·보안 헤더·정적 파일 응답 정책 유지 |
-| HomeOps | executor 공유 비밀값, allowlist·`restart_container` 제한, 승인·검증·쿨다운·시간당 한도 유지 |
+| HomeOps | executor 공유 비밀값, allowlist·`restart_container` 제한, 승인·검증·쿨다운·시간당 한도, 재시작 요청 durable claim·재응답 계약 유지 |
 
 ## 5. 검증과 배포
 
