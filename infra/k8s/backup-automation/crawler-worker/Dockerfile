@@ -1,10 +1,11 @@
-FROM python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534
+FROM python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929
 
-RUN apt-get update \
-    && apt-get install --no-install-recommends -y age ca-certificates kubernetes-client rclone \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd --system --gid 10001 crawler-backup \
-    && useradd --system --uid 10001 --gid crawler-backup --no-create-home --home-dir /nonexistent crawler-backup
+RUN apk upgrade --no-cache \
+    && apk add --no-cache age ca-certificates kubectl rclone \
+    && ln -s /bin/cat /usr/bin/cat \
+    && pip install --no-cache-dir setuptools==84.0.0 wheel==0.48.0 \
+    && addgroup -S -g 10001 crawler-backup \
+    && adduser -S -u 10001 -G crawler-backup -H -h /nonexistent crawler-backup
 
 COPY infra/k8s/tools/crawler-pvc-backup-verify.py /opt/personal-server/crawler-pvc-backup-verify.py
 COPY infra/k8s/tools/pvc_backup_retention.py /opt/personal-server/pvc_backup_retention.py

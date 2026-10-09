@@ -139,33 +139,44 @@ exit 0
                 env["PORTAL_NAMESPACE"] = namespace
             if send_signal:
                 process = subprocess.Popen(["bash", str(SCRIPT), mode], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                reader_wait = root / ("stream-wait" if signal_when == "stream" else "transfer-wait" if signal_when == "upload" else "reader-wait")
-                deadline = time.time() + 5
-                while not reader_wait.exists() and time.time() < deadline:
-                    time.sleep(0.01)
-                self.assertTrue(reader_wait.exists(), "signal boundary was not reached")
-                process.send_signal(signal.SIGTERM)
-                if followup_signal:
-                    cleanup_delete_wait = root / "cleanup-delete-wait"
-                    deadline = time.time() + 8
-                    while not cleanup_delete_wait.exists() and time.time() < deadline:
+                try:
+                    reader_wait = root / ("stream-wait" if signal_when == "stream" else "transfer-wait" if signal_when == "upload" else "reader-wait")
+                    deadline = time.monotonic() + 30
+                    while not reader_wait.exists() and process.poll() is None and time.monotonic() < deadline:
                         time.sleep(0.01)
-                    self.assertTrue(cleanup_delete_wait.exists(), "cleanup did not begin reader deletion")
+                    self.assertTrue(reader_wait.exists(), "signal boundary was not reached")
                     process.send_signal(signal.SIGTERM)
-                stdout, stderr = process.communicate(timeout=10)
-                result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
-                if assert_stream_child_stopped:
-                    child_pid_file = root / "stream-child.pid"
-                    self.assertTrue(child_pid_file.exists(), "fake stream child did not start")
-                    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
-                    deadline = time.time() + 2
-                    while self.process_is_live(child_pid) and time.time() < deadline:
-                        time.sleep(0.01)
-                    self.assertFalse(self.process_is_live(child_pid), "interrupted stream child survived")
-                    lock_path = root / "backup-state/portal-pvc-backup.lock"
-                    with lock_path.open("rb") as lock_stream:
-                        fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        fcntl.flock(lock_stream, fcntl.LOCK_UN)
+                    if followup_signal:
+                        cleanup_delete_wait = root / "cleanup-delete-wait"
+                        deadline = time.time() + 8
+                        while not cleanup_delete_wait.exists() and time.time() < deadline:
+                            time.sleep(0.01)
+                        self.assertTrue(cleanup_delete_wait.exists(), "cleanup did not begin reader deletion")
+                        process.send_signal(signal.SIGTERM)
+                    stdout, stderr = process.communicate(timeout=10)
+                    result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+                    if assert_stream_child_stopped:
+                        child_pid_file = root / "stream-child.pid"
+                        self.assertTrue(child_pid_file.exists(), "fake stream child did not start")
+                        child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+                        deadline = time.time() + 2
+                        while self.process_is_live(child_pid) and time.time() < deadline:
+                            time.sleep(0.01)
+                        self.assertFalse(self.process_is_live(child_pid), "interrupted stream child survived")
+                        lock_path = root / "backup-state/portal-pvc-backup.lock"
+                        with lock_path.open("rb") as lock_stream:
+                            fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            fcntl.flock(lock_stream, fcntl.LOCK_UN)
+                finally:
+                    # A failed signal-boundary assertion must not leave a child
+                    # using a fake directory that TemporaryDirectory removes.
+                    if process.poll() is None:
+                        process.send_signal(signal.SIGTERM)
+                        try:
+                            process.communicate(timeout=15)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.communicate(timeout=5)
             else:
                 result = subprocess.run(
                     ["bash", str(SCRIPT), mode],
