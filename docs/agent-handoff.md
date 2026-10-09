@@ -19,7 +19,7 @@
 - Portal·Crawler Worker·Book Memo·YouTube Memo는 K3s `personal-server` namespace와 PVC 단일 writer로 운영함. 차량관리·SystemAgent·HomeOps 실행기는 Compose에 유지함.
 - 공개 경로는 Cloudflare Tunnel → Caddy → K3s Portal·Crawler Worker·Book Memo·YouTube Memo임. 차량 OAuth callback은 별도 Tunnel ingress임.
 - 기본 변경 흐름은 작업 브랜치 → PR → CI·Agent Review → 병합임. 병합 뒤 main CI·해당 배포 결과(문서 skip·정책상 제외 포함)를 확인하고 작업공간이 깨끗한 경우에만 브랜치와 분리 작업공간을 정리함. 상세 절차는 [Codex 작업 완료 루프](codex-work-loop.md)를 따름.
-- `main` CI가 성공하면 `Deploy N100`은 변경 경로·runtime 소유권으로 분류함. 허용된 Compose 대상만 자동배포하고 K3s·Portal·보호 경로는 제외함. 문서 전용 변경은 skip이며 병합을 운영 배포 성공으로 표현하지 않음.
+- `main` CI가 성공하면 `Deploy N100`은 변경 경로·runtime 소유권으로 분류함. 허용된 Compose 대상만 자동배포하고 K3s·Portal·보호 경로는 제외함. 일반 문서만 변경하면 skip이며 인프라 보호 경로를 포함하면 `blocked_path`로 제외될 수 있음. 병합을 운영 배포 성공으로 표현하지 않음.
 - `scripts/deploy-n100.sh`는 원격 `origin/main`으로 코드 추적 파일을 맞추므로 N100 작업 디렉터리에서 추적 파일을 직접 수정하지 않음.
 
 네 PVC는 매일 02:30 KST 순차 timer가 중지된 Cron 템플릿에서 Job을 생성함. 개별 Cron을 재활성화하지 않음. 신규 암호화 백업·격리 복원 뒤 일·주·월 보관 정책을 실행하며 최신 7개를 보호함. [현재 검증 기록](reviews/20261009_백업보관정책_보완.md)에 운영 커밋·이미지·정기 실행 결과를 구분함. `/health`는 liveness이며 로컬 데이터·권한 확인용 `/ready`와 별개임.
