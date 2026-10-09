@@ -5,7 +5,7 @@
 | 항목 | 내용 |
 |---|---|
 | 문서명 | 현재 운영 로드맵 |
-| 기준일 | 2026-10-08 문서 상태 갱신. 기존 운영 검증 시점은 각 증적을 따름 |
+| 기준일 | 2026-10-09 백업 보완 결과 갱신. 기존 운영 검증 시점은 각 증적을 따름 |
 | 기준 자료 | 저장소 운영 문서·검증 도구·문서 계약 테스트 |
 | 목적 | 완료 항목과 후속 운영 개선을 분리해 관리함 |
 | 비고 | 비밀값·운영 데이터·실행 자격 증명은 기록하지 않음 |
@@ -22,7 +22,7 @@
 |---|---|---|---|
 | 공개 상태 감시 | GitHub Actions가 외부에서 네 공개 health를 약 5분 간격으로 확인하고 장애·복구 전환을 알림 | [공개 상태 Telegram 알림](public-uptime-monitor.md) | 완료 |
 | K3s 상태·알림 | Prometheus·Alertmanager·SRE Telegram relay 경계를 점검함 | [K3s 운영](../infra/k8s/README.md), `sre-telegram-verify.sh` | 완료 |
-| Portal 백업 검증 | 02:30 단일 순차 timer·중지된 개별 Cron 템플릿으로 운영함. 10월 8일 실패 수정·새 Production 인증의 신규 업로드/격리 복원·소비자 갱신을 확인함 | [최신 복구 기록](reviews/20261008_Portal백업_실패복구.md), [현재 실행 주체](operations-reference.md#운영-상태-확인-기록) | 수동 검증 완료, 다음 자동 실행 확인 필요 |
+| Portal 백업 검증 | 02:30 단일 순차 timer·중지된 개별 Cron 템플릿으로 운영함. 10월 8일 실패 수정·새 Production 인증의 신규 업로드/격리 복원·소비자 갱신을 확인함 | [최신 복구 기록](reviews/20261009_Portal백업_증적만료보완.md), [현재 실행 주체](operations-reference.md#운영-상태-확인-기록) | 10월 9일 네 자동 Job 성공, Portal 재사용 만료 보완·배포·20:40 신규 백업 검증 이후 별도 복원·소비자 확인 완료. 보완 이후 다음 자동 실행 확인 필요 |
 | 일일 SLO 증적 | freshness 다중 시계열 집계 보완을 운영 적용하고, 수동 검증 뒤 CronJob 자동 실행을 활성화함 | [뉴스·SLO 운영 적용 검증 결과](reviews/20260922_뉴스_SLO_운영적용_검증결과.md), `slo-daily-evidence.py` | 완료 |
 | Pod 자동복구 실습 | production과 분리된 임시 namespace에서 liveness 실패와 Ready 복구를 확인함 | `sre-pod-recovery-lab.sh` | 완료 |
 | 변경 검증 | 문서·설정 변경 전에 범위와 관련 검사를 확인함 | [Codex 작업 완료 루프](codex-work-loop.md) | 완료 |
