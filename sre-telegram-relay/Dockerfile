@@ -1,8 +1,11 @@
-FROM python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534
+FROM python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929
 
 WORKDIR /app
 
-RUN addgroup --system --gid 10001 relay && adduser --system --uid 10001 --ingroup relay relay
+RUN apk upgrade --no-cache \
+    && pip install --no-cache-dir setuptools==84.0.0 wheel==0.48.0 \
+    && addgroup -S -g 10001 relay \
+    && adduser -S -u 10001 -G relay -H -h /nonexistent relay
 COPY --chown=10001:10001 app ./app
 
 USER 10001:10001

@@ -157,7 +157,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: relay
-          image: personal-server-sre-telegram-relay:latest
+          image: docker.io/library/personal-server-sre-telegram-relay@sha256:d9c0da7bb06d02199101e9969475752420a0e89c89c39d362c9de4ad59376cbb
           imagePullPolicy: Never
           ports:
             - name: http

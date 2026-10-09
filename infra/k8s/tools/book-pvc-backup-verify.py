@@ -42,6 +42,10 @@ class BackupError(RuntimeError):
     """A fixed-label backup failure; never includes command diagnostics."""
 
 
+class RetentionStageError(BackupError):
+    """Retention failed after publishing a valid, independently usable backup."""
+
+
 class CommandTimeout(BackupError):
     """An external command exceeded its fixed deadline."""
 
@@ -258,7 +262,7 @@ class BookBackupController:
             "lock_run_id": "" if release else self.run_id,
             "evidence": evidence, "run_id": self.run_id, "status": status,
             "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "stage": stage,
+            "stage": stage, "retention_status": "", "retention_completed_at": "",
         }, lock_expected=self.run_id if self.lock_held else "")
         self.lock_held = not release
 
@@ -407,6 +411,11 @@ def run_go() -> None:
         controller.publish_failure()
         raise operation_error
     controller.publish_success(evidence)
+    try:
+        run_retention(delete=True)
+    except Exception as error:
+        # Backup evidence is already committed. Do not publish backup failure.
+        raise RetentionStageError("automatic retention failed") from error
 
 
 def run_retention(delete: bool) -> None:
@@ -428,23 +437,40 @@ def run_retention(delete: bool) -> None:
             {"op": "test", "path": "/data/evidence", "value": evidence},
             {"op": "test", "path": "/data/run_id", "value": state["run_id"]},
             {"op": "replace", "path": "/data/lock_run_id", "value": lock_id},
+            {"op": "add", "path": "/data/retention_status", "value": "running"},
+            {"op": "add", "path": "/data/retention_completed_at", "value": ""},
         ]
         kubectl("patch", "configmap", STATE_CONFIGMAP, "--type=json",
                 "--patch=" + json.dumps(acquire, separators=(",", ":")))
+    retention_error = None
     try:
         candidates = pvc_backup_retention.run_retention(
             "book-memo", evidence, rclone_args(), run_command, delete=delete
         )
         for name in candidates:
             print("retention_candidate=" + name)
+    except Exception as error:
+        retention_error = error
+        raise
     finally:
         if delete:
             release = [
                 {"op": "test", "path": "/data/lock_run_id", "value": lock_id},
+                {"op": "test", "path": "/data/evidence", "value": evidence},
+                {"op": "test", "path": "/data/run_id", "value": state["run_id"]},
+                {"op": "add", "path": "/data/retention_status", "value":
+                    "failed" if retention_error is not None else "completed"},
+                {"op": "add", "path": "/data/retention_completed_at", "value":
+                    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
                 {"op": "replace", "path": "/data/lock_run_id", "value": ""},
             ]
-            kubectl("patch", "configmap", STATE_CONFIGMAP, "--type=json",
-                    "--patch=" + json.dumps(release, separators=(",", ":")))
+            try:
+                kubectl("patch", "configmap", STATE_CONFIGMAP, "--type=json",
+                        "--patch=" + json.dumps(release, separators=(",", ":")))
+            except Exception as release_error:
+                if retention_error is not None:
+                    raise retention_error from release_error
+                raise
 
 
 def main() -> int:
@@ -473,6 +499,9 @@ def main() -> int:
         run_go()
         print("book_pvc_backup=PASS")
         return 0
+    except RetentionStageError:
+        print("pvc_backup_retention=FAIL", file=sys.stderr)
+        return 1
     except (BackupError, pvc_backup_retention.RetentionError, OSError, ValueError, tarfile.TarError):
         print("book_pvc_backup=FAIL", file=sys.stderr)
         return 1

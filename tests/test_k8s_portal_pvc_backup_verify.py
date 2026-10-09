@@ -139,33 +139,44 @@ exit 0
                 env["PORTAL_NAMESPACE"] = namespace
             if send_signal:
                 process = subprocess.Popen(["bash", str(SCRIPT), mode], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                reader_wait = root / ("stream-wait" if signal_when == "stream" else "transfer-wait" if signal_when == "upload" else "reader-wait")
-                deadline = time.time() + 5
-                while not reader_wait.exists() and time.time() < deadline:
-                    time.sleep(0.01)
-                self.assertTrue(reader_wait.exists(), "signal boundary was not reached")
-                process.send_signal(signal.SIGTERM)
-                if followup_signal:
-                    cleanup_delete_wait = root / "cleanup-delete-wait"
-                    deadline = time.time() + 8
-                    while not cleanup_delete_wait.exists() and time.time() < deadline:
+                try:
+                    reader_wait = root / ("stream-wait" if signal_when == "stream" else "transfer-wait" if signal_when == "upload" else "reader-wait")
+                    deadline = time.monotonic() + 30
+                    while not reader_wait.exists() and process.poll() is None and time.monotonic() < deadline:
                         time.sleep(0.01)
-                    self.assertTrue(cleanup_delete_wait.exists(), "cleanup did not begin reader deletion")
+                    self.assertTrue(reader_wait.exists(), "signal boundary was not reached")
                     process.send_signal(signal.SIGTERM)
-                stdout, stderr = process.communicate(timeout=10)
-                result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
-                if assert_stream_child_stopped:
-                    child_pid_file = root / "stream-child.pid"
-                    self.assertTrue(child_pid_file.exists(), "fake stream child did not start")
-                    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
-                    deadline = time.time() + 2
-                    while self.process_is_live(child_pid) and time.time() < deadline:
-                        time.sleep(0.01)
-                    self.assertFalse(self.process_is_live(child_pid), "interrupted stream child survived")
-                    lock_path = root / "backup-state/portal-pvc-backup.lock"
-                    with lock_path.open("rb") as lock_stream:
-                        fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        fcntl.flock(lock_stream, fcntl.LOCK_UN)
+                    if followup_signal:
+                        cleanup_delete_wait = root / "cleanup-delete-wait"
+                        deadline = time.time() + 8
+                        while not cleanup_delete_wait.exists() and time.time() < deadline:
+                            time.sleep(0.01)
+                        self.assertTrue(cleanup_delete_wait.exists(), "cleanup did not begin reader deletion")
+                        process.send_signal(signal.SIGTERM)
+                    stdout, stderr = process.communicate(timeout=10)
+                    result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+                    if assert_stream_child_stopped:
+                        child_pid_file = root / "stream-child.pid"
+                        self.assertTrue(child_pid_file.exists(), "fake stream child did not start")
+                        child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+                        deadline = time.time() + 2
+                        while self.process_is_live(child_pid) and time.time() < deadline:
+                            time.sleep(0.01)
+                        self.assertFalse(self.process_is_live(child_pid), "interrupted stream child survived")
+                        lock_path = root / "backup-state/portal-pvc-backup.lock"
+                        with lock_path.open("rb") as lock_stream:
+                            fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            fcntl.flock(lock_stream, fcntl.LOCK_UN)
+                finally:
+                    # A failed signal-boundary assertion must not leave a child
+                    # using a fake directory that TemporaryDirectory removes.
+                    if process.poll() is None:
+                        process.send_signal(signal.SIGTERM)
+                        try:
+                            process.communicate(timeout=15)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.communicate(timeout=5)
             else:
                 result = subprocess.run(
                     ["bash", str(SCRIPT), mode],
@@ -215,6 +226,22 @@ exit 0
         except PermissionError:
             return True
         return True
+
+    def test_new_verified_backup_runs_retention_after_writer_restoration(self):
+        result, calls, _, proof = self.run_tool()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("rclone lsjson", calls)
+        self.assertLess(calls.index("scale deployment/portal-web --replicas=1"), calls.index("rclone lsjson"))
+        self.assertIn("pvc_backup_retention=PASS", result.stdout)
+
+    def test_retention_failure_preserves_successful_backup_proof(self):
+        result, calls, _, proof = self.run_tool(fail_at="retention")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("backup_status=success", proof)
+        self.assertIn("restore_status=success", proof)
+        self.assertIn("pvc_backup_retention=FAIL", result.stdout)
+        self.assertIn("portal_pvc_backup_stage=retention", result.stdout)
+        self.assertNotIn("deletefile", calls)
 
     @staticmethod
     def write_fakes(bin_dir, root, calls, manifest, files, state, remote):
@@ -359,6 +386,18 @@ fi
 if [ "${{PORTAL_FAKE_ASSERT_LOCK_FD_CLOSED:-}}" = 1 ] && [ "$operation" = copyto ]; then
   fd_mode=$(python3 -c 'import fcntl, os; print(fcntl.fcntl(9, fcntl.F_GETFL) & os.O_ACCMODE)' 2>/dev/null) || exit 42
   [ "$fd_mode" = 0 ] || exit 42
+fi
+if [ "$operation" = lsjson ]; then
+  [ "${{PORTAL_FAKE_FAIL_AT:-}}" != retention ] || exit 42
+  python3 - '{remote}' <<'INVENTORY'
+import json, sys
+from pathlib import Path
+from datetime import datetime, timezone
+print(json.dumps([dict(Name=p.name, Path=p.name, ID=p.name, Size=p.stat().st_size,
+                      IsDir=False, ModTime=datetime.fromtimestamp(p.stat().st_mtime, timezone.utc).isoformat())
+                  for p in Path(sys.argv[1]).rglob('portal-*.tar.age')]))
+INVENTORY
+  exit 0
 fi
 if [ "$operation" = lsd ]; then exit 0; fi
 if [ "${{PORTAL_FAKE_HOLD_TRANSFER:-}}" = 1 ] && [ "$operation" = copyto ]; then
@@ -599,8 +638,8 @@ esac
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls.count(" copyto"), 2)
-        self.assertEqual(calls.count(f"--config {config_file}"), 3)
-        self.assertEqual(calls.count(f"--password-command /usr/bin/cat {password_file}"), 3)
+        self.assertEqual(calls.count(f"--config {config_file}"), 4)
+        self.assertEqual(calls.count(f"--password-command /usr/bin/cat {password_file}"), 4)
         self.assertNotIn("passphrase", result.stdout + result.stderr)
 
     def run_tool_with_rclone_credentials(self, config_file, password_file, mode):
@@ -1370,11 +1409,14 @@ class EncryptedConfigScratchTests(unittest.TestCase):
         info.write_text(info.read_text() + "3 2 0:3 / /run/rclone-config rw - ext4 disk rw\n")
         self.assertFalse(ns["memory_backed"](Path("/run/rclone-config"), info))
 
-    def test_exit_and_term_cleanup_verify_and_remove_before_evidence_publish(self):
+    def test_exit_and_term_keep_credentials_and_lock_until_retention_finishes(self):
         script = SCRIPT.read_text()
         cleanup = script.split("cleanup() {", 1)[1].split("\ntrap ", 1)[0]
         self.assertLess(cleanup.index("verify_rclone_config_copy"), cleanup.index("cleanup_rclone_config_copy"))
-        self.assertLess(cleanup.index("cleanup_rclone_config_copy"), cleanup.index('scale "deployment/$DEPLOYMENT"'))
+        self.assertLess(cleanup.index('scale "deployment/$DEPLOYMENT"'), cleanup.index("patch_in_cluster_evidence"))
+        self.assertLess(cleanup.index("patch_in_cluster_evidence"), cleanup.index("--portal-evidence"))
+        self.assertLess(cleanup.index("--portal-evidence"), cleanup.index("cleanup_rclone_config_copy"))
+        self.assertLess(cleanup.index("cleanup_rclone_config_copy"), cleanup.index("exec 9>&-"))
         self.assertIn("trap cleanup EXIT", script)
         self.assertIn("TERM", script.split("on_signal()", 1)[1])
 

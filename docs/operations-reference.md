@@ -298,3 +298,7 @@ kubectl -n monitoring apply --dry-run=client -f infra/k8s/sre-telegram/portal-ht
 ```
 
 적용 후에는 일반 Portal 요청을 최소 1회 발생시킨 뒤 Prometheus target의 `portal-web` 수집 상태와 `portal_http_requests_total`, `portal_http_request_duration_seconds` 지표의 존재를 확인함. 초기 요청 전에는 HELP·TYPE 선언만 존재할 수 있음. 값에 인증정보 또는 식별 정보가 포함되면 즉시 적용을 중지하고 외부 노출 없이 원인을 검토함.
+
+### 백업 보관 정책 보완 작업
+
+백업 파일의 누적 용량을 제한하기 위해 최근 일별 7개·이전 4주 구간별 1개·더 오래된 지난 3개월 월별 1개를 보존하는 정책을 구현함. 저장소 반영과 필수 CI는 [PR #357](https://github.com/Len-Yoon/personal-server/pull/357)에서 관리함. 현재 운영 적용·실제 삭제는 미수행이며 기존 매일 02:30 순차 백업을 유지함. 보관 구간·최신 7개 안전 하한·원격 용량 사전 계산·운영 적용 단계는 [백업 보관 정책 보완](reviews/20261009_백업보관정책_보완.md)을 참조함.

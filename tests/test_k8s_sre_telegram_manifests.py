@@ -119,8 +119,8 @@ class SreTelegramManifestContractTests(unittest.TestCase):
         deployment = find_document(load_yaml_documents("base.yaml"), "Deployment", "sre-telegram-relay")
         pod_security = deployment["spec"]["template"]["spec"]["securityContext"]
 
-        self.assertIn("addgroup --system --gid 10001 relay", dockerfile)
-        self.assertIn("adduser --system --uid 10001 --ingroup relay relay", dockerfile)
+        self.assertIn("addgroup -S -g 10001 relay", dockerfile)
+        self.assertIn("adduser -S -u 10001 -G relay -H -h /nonexistent relay", dockerfile)
         self.assertIn("COPY --chown=10001:10001 app ./app", dockerfile)
         self.assertIn("USER 10001:10001", dockerfile)
         self.assertEqual(pod_security["runAsUser"], 10001)

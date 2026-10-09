@@ -675,7 +675,10 @@ class RelayService:
             report = _read_backup_report(self._k8s_client)
             if report is None or self._backup_delivery_store.contains(report["run_id"]):
                 return True
-            if not send_message(self._allowed_chat_id, BACKUP_STATUS_MESSAGES[report["status"]]):
+            message = BACKUP_STATUS_MESSAGES[report["status"]]
+            if report["status"] == "failed" and report["stage"] in {"retention", "retention-cleanup"}:
+                message = "[백업 정리 실패]\n대상: Portal 데이터\n상태: 새 백업·복원 검증은 성공했으나 오래된 백업 정리에 실패했습니다."
+            if not send_message(self._allowed_chat_id, message):
                 return False
             self._backup_delivery_store.save(report["run_id"])
             return True
@@ -783,6 +786,12 @@ class RelayService:
                     run_date = today
             if run_date is not None and state is not None:
                 for service, result in state["results"].items():
+                    if result == "retention_failed":
+                        target = PVC_BACKUP_SEQUENCE_TARGETS[service]
+                        events.append((f"{run_date}-{service}-sequence-result", (
+                            f"[백업 정리 실패]\n대상: {target}\n상태: 새 백업·복원 검증은 성공했으나 오래된 백업 정리에 실패했습니다."
+                        )))
+                        continue
                     if (result != "failed_before_runner"
                             and not (result == "skipped" and state["status"] == "completed")):
                         continue
@@ -1399,7 +1408,7 @@ def _read_pvc_backup_sequence_state(k8s_client: KubernetesClient) -> dict[str, A
             or updated_at.tzinfo is None or updated_at.utcoffset() != timedelta(0)
             or not isinstance(results, dict)
             or any(key not in PVC_BACKUP_SEQUENCE_SERVICES
-                   or value not in {"passed", "runner_failed", "failed_before_runner", "skipped"}
+                   or value not in {"passed", "retention_failed", "runner_failed", "failed_before_runner", "skipped"}
                    for key, value in results.items())):
         raise ValueError("invalid backup sequence state fields")
     return {"run_date": data["run_date"], "status": data["status"],
@@ -1615,9 +1624,9 @@ def _read_pvc_backup_report(k8s_client: KubernetesClient, service: str) -> dict[
         if warning_key[0] == service:
             del _PVC_BACKUP_WARNING_AT[warning_key]
     data = config_map.get("data")
-    if not isinstance(data, dict) or set(data) != PVC_BACKUP_REPORT_KEYS or not all(
-        isinstance(data[key], str) for key in PVC_BACKUP_REPORT_KEYS
-    ):
+    if (not isinstance(data, dict) or not PVC_BACKUP_REPORT_KEYS <= set(data)
+            or set(data) - PVC_BACKUP_REPORT_KEYS - {"retention_status", "retention_completed_at"}
+            or not all(isinstance(value, str) for value in data.values())):
         LOGGER.warning("pvc_backup_report_ignored service=%s reason=invalid_schema", service)
         return None
     run_id, status, completed_at, stage = (data[key] for key in ("run_id", "status", "completed_at", "stage"))

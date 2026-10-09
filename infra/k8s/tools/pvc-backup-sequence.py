@@ -22,7 +22,7 @@ KST = ZoneInfo("Asia/Seoul")
 NAMESPACE = "personal-server"
 STATE_NAME = "pvc-backup-sequence-state"
 ORDER = ("portal", "book", "youtube", "crawler")
-RESULTS = {"passed", "runner_failed", "failed_before_runner", "skipped"}
+RESULTS = {"passed", "retention_failed", "runner_failed", "failed_before_runner", "skipped"}
 
 
 @dataclass(frozen=True)
@@ -37,10 +37,10 @@ class Stage:
 
 
 STAGES = {
-    "portal": Stage("portal-pvc-backup", "/opt/personal-server/portal-pvc-backup-verify.sh", "portal-pvc-backup-runtime", ("portal-web-files-dynamic", "portal-web-state-dynamic"), "docker.io/library/personal-server-portal-pvc-backup@sha256:e39bcf9096f603b1e6939f67cceb8653eed35e276dad076d16eeb563c0988452", "sre-telegram-backup-status", "monitoring"),
-    "book": Stage("book-pvc-backup", "/opt/personal-server/book-pvc-backup-verify.py", "book-memo-pvc-backup-runtime", ("book-memo-data",), "docker.io/library/personal-server-book-pvc-backup@sha256:dc46dfdc67145e649029c3fc3d0a76b2dd3480a94ac4d0198df748854ca0bc54", "book-pvc-backup-state"),
-    "youtube": Stage("youtube-pvc-backup", "/opt/personal-server/youtube-pvc-backup-verify.py", "youtube-memo-pvc-backup-runtime", ("youtube-memo-data",), "docker.io/library/personal-server-youtube-pvc-backup@sha256:fb570a295d8a681d9d3990750cd74152bb30a9ce0701ccf34421f9a50c72a4b4", "youtube-pvc-backup-state"),
-    "crawler": Stage("crawler-pvc-backup", "/opt/personal-server/crawler-pvc-backup-verify.py", "crawler-worker-pvc-backup-runtime", ("crawler-worker-data",), "docker.io/library/personal-server-crawler-pvc-backup@sha256:6e49af740101fe47601b48dc1a7da59a201f01e108b770e221bcb5a3b8a62846", "crawler-pvc-backup-state"),
+    "portal": Stage("portal-pvc-backup", "/opt/personal-server/portal-pvc-backup-verify.sh", "portal-pvc-backup-runtime", ("portal-web-files-dynamic", "portal-web-state-dynamic"), "docker.io/library/personal-server-portal-pvc-backup@sha256:4eff685cac663ddb67c25d472f0c216c67b0c6feae4f363f3cae23ae80f8afe2", "sre-telegram-backup-status", "monitoring"),
+    "book": Stage("book-pvc-backup", "/opt/personal-server/book-pvc-backup-verify.py", "book-memo-pvc-backup-runtime", ("book-memo-data",), "docker.io/library/personal-server-book-pvc-backup@sha256:c7353d033082154cd07591bf625056d7645cd205ae26d2744b3513703b2bd37f", "book-pvc-backup-state"),
+    "youtube": Stage("youtube-pvc-backup", "/opt/personal-server/youtube-pvc-backup-verify.py", "youtube-memo-pvc-backup-runtime", ("youtube-memo-data",), "docker.io/library/personal-server-youtube-pvc-backup@sha256:7096699d8066513bdd8ad61c49a897395f1dac7a8a50005dc5dd2ba1b6e6865b", "youtube-pvc-backup-state"),
+    "crawler": Stage("crawler-pvc-backup", "/opt/personal-server/crawler-pvc-backup-verify.py", "crawler-worker-pvc-backup-runtime", ("crawler-worker-data",), "docker.io/library/personal-server-crawler-pvc-backup@sha256:ffecdb317267576fd997b694f7bba6ec132bd1031ec26518ab2001343c86fd2f", "crawler-pvc-backup-state"),
 }
 
 SECRET_ITEMS = [
@@ -302,10 +302,48 @@ def update_state(api, run_date, status, current, results, now, evidence_refresh=
     api.patch_state(metadata["resourceVersion"], data)
 
 
+def verified_retention_failure(stage, data, created_at):
+    """Distinguish cleanup failure only with same-run, fresh restore proof."""
+    if (stage not in {"book", "youtube", "crawler"} or data.get("status") != "completed"
+            or data.get("stage") != "completed" or data.get("lock_run_id") != ""
+            or data.get("retention_status") != "failed"):
+        return False
+    completed_at = utc_time(data.get("completed_at"))
+    retention_at = utc_time(data.get("retention_completed_at"))
+    if not created_at < completed_at <= retention_at:
+        return False
+    run_id = data.get("run_id")
+    evidence = data.get("evidence")
+    if not isinstance(run_id, str) or not run_id or not isinstance(evidence, str):
+        return False
+    proof = {}
+    for line in evidence.splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or not key or key in proof:
+            return False
+        proof[key] = value
+    scope = {"book": "book-memo", "youtube": "youtube-memo", "crawler": "crawler-worker"}[stage]
+    required = {"schema_version": "1", "scope": scope, "backup_status": "success",
+                "restore_status": "success", "encrypted": "true", "source_runtime": "k3s-pvc",
+                "backup_id": stage + "-" + run_id, "restore_check":
+                    "json_schema_and_optional_sqlite_quick_check" if stage == "crawler" else "sqlite_quick_check",
+                "restore_path_check": "success"}
+    if any(proof.get(key) != value for key, value in required.items()):
+        return False
+    if any(not re.fullmatch(r"sha256:[0-9a-f]{64}", proof.get(key, ""))
+           for key in ("artifact_digest", "source_digest")):
+        return False
+    return (created_at < utc_time(proof.get("backup_completed_at")) <= completed_at
+            and created_at < utc_time(proof.get("restore_verified_at")) <= completed_at)
+
+
 def classify_failure(api, stage, job):
     try:
         data = api.get_backup_status(stage).get("data", {})
-        if data.get("status") in {"failed", "restore_failed"} and utc_time(data.get("completed_at")) > utc_time(job["metadata"].get("creationTimestamp")):
+        created_at = utc_time(job["metadata"].get("creationTimestamp"))
+        if verified_retention_failure(stage, data, created_at):
+            return "retention_failed"
+        if data.get("status") in {"failed", "restore_failed"} and utc_time(data.get("completed_at")) > created_at:
             return "runner_failed"
     except (APIError, SafetyError, AttributeError, TypeError):
         pass

@@ -22,13 +22,13 @@ EXPECTED_DOCKERFILE_BASE_IMAGES = {
         "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
     ),
     "infra/k8s/backup-automation/book-memo/Dockerfile": (
-        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+        "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
     ),
     "infra/k8s/backup-automation/crawler-worker/Dockerfile": (
-        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+        "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
     ),
     "infra/k8s/backup-automation/youtube-memo/Dockerfile": (
-        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+        "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
     ),
     "infra/k8s/slo-evidence/Dockerfile": (
         "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
@@ -52,7 +52,7 @@ EXPECTED_DOCKERFILE_BASE_IMAGES = {
         "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
     ),
     "sre-telegram-relay/Dockerfile": (
-        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+        "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
     ),
     "system-agent/Dockerfile": (
         "python:3.12-alpine3.24@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4",
@@ -186,7 +186,13 @@ class ComposeConfigTests(unittest.TestCase):
             with self.subTest(dockerfile=relative_path):
                 self.assertEqual(len(images), 1)
                 if (relative_path.split('/')[0] in ALPINE_APP_SERVICES
-                        or relative_path == 'infra/k8s/backup-automation/Dockerfile'):
+                        or relative_path in {
+                            'infra/k8s/backup-automation/Dockerfile',
+                            'infra/k8s/backup-automation/book-memo/Dockerfile',
+                            'infra/k8s/backup-automation/crawler-worker/Dockerfile',
+                            'infra/k8s/backup-automation/youtube-memo/Dockerfile',
+                            'sre-telegram-relay/Dockerfile',
+                        }):
                     self.assertRegex(images[0], r"^python:\d+\.\d+-alpine3\.24@sha256:[0-9a-f]{64}$")
                 else:
                     self.assertRegex(images[0], PYTHON_SLIM_IMAGE_DIGEST_PATTERN)

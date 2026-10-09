@@ -9,6 +9,7 @@ RUN apk upgrade --no-cache \
 
 COPY infra/k8s/tools/portal-pvc-backup-verify.sh /opt/personal-server/portal-pvc-backup-verify.sh
 COPY infra/k8s/tools/validate-backup-evidence.py /opt/personal-server/validate-backup-evidence.py
+COPY infra/k8s/tools/pvc_backup_retention.py /opt/personal-server/pvc_backup_retention.py
 RUN chmod 0555 /opt/personal-server/portal-pvc-backup-verify.sh /opt/personal-server/validate-backup-evidence.py
 
 USER 10001:10001
