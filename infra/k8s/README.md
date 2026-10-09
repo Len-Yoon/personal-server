@@ -47,7 +47,7 @@ python3 infra/k8s/tools/service-pvc-backup-production-state.py --check
 
 ### 새벽 순차 백업 현재 운영 기준
 
-맥 저장소의 [순차 백업 설계](../../docs/superpowers/specs/2026-09-29-sequential-night-backup-design.md)는 네 백업을 서울 시각 02:30에 Portal → Book Memo → YouTube Memo → News Hub 수집기 순서로 실행하도록 정의함. 앞 Job의 최종 종료를 확인한 직후 다음 Job을 시작하며, 실패해도 최종 종료가 확인되면 다음 백업을 시도함. 종료 상태가 불명확하면 중복 백업을 피하기 위해 중단함. 네 개별 CronJob은 중지하고 기존 jobTemplate을 순차 실행에 재사용함. 2026-09-29 [순차 운영 전환](../../docs/reviews/20260929_순차PVC백업_N100운영반영결과.md)을 완료했고 9월 30일 첫 네 대상 정기 성공을 확인함. 2026-10-08에도 순차 timer active/enabled와 개별 Cron 중지를 유지함. Portal 실패 수정·Production 새 인증으로 수동 백업·격리 복원·증적 갱신을 완료했으며 수정 후 다음 정기 실행은 아직 미관측임. [최신 검증](../../docs/reviews/20261008_Portal백업_실패복구.md)을 따름.
+맥 저장소의 [순차 백업 설계](../../docs/superpowers/specs/2026-09-29-sequential-night-backup-design.md)는 네 백업을 서울 시각 02:30에 Portal → Book Memo → YouTube Memo → News Hub 수집기 순서로 실행하도록 정의함. 앞 Job의 최종 종료를 확인한 직후 다음 Job을 시작하며, 실패해도 최종 종료가 확인되면 다음 백업을 시도함. 종료 상태가 불명확하면 중복 백업을 피하기 위해 중단함. 네 개별 CronJob은 중지하고 기존 jobTemplate을 순차 실행에 재사용함. 2026-09-29 [순차 운영 전환](../../docs/reviews/20260929_순차PVC백업_N100운영반영결과.md)을 완료했고 9월 30일 첫 네 대상 정기 성공을 확인함. 2026-10-10 새 정책의 첫 정기 실행에서 네 소유 Job이 신규 백업·격리 복원·보관 정리에 성공했고 전체 02:36 completed를 확인함. Portal 증거 export·SystemAgent 최신 판정, 잠금 해제·writer 복귀도 확인함. [정책·이미지·정기 검증](../../docs/reviews/20261009_백업보관정책_보완.md)을 따름.
 
 아래 명령은 신규 환경의 전환·재설치 참고이며 이미 활성화된 현재 운영에 반복 실행하지 않음. 운영 전환에는 Relay의 순차 실행 상태 감시 적용, 기존 네 CronJob 중지, `pvc-backup-sequence-state` ConfigMap 최초 생성, N100 사용자 systemd 단위 설치·활성화가 필요함. 상태 ConfigMap은 한 번 생성한 뒤 다시 manifest로 적용하면 기존 실행 기록이 초기화될 수 있으므로 재적용하지 않음. 기존 Book·YouTube·Crawler 목표는 위 전용 도구로 제한 적용함. Portal은 현재 CronJob의 UID·resourceVersion·기존 schedule·jobTemplate을 읽기 전용으로 확인한 뒤, UID·resourceVersion 일치 조건의 JSON patch로 `startingDeadlineSeconds: 300`과 `suspend: true`만 변경함. 기존 active Job이 없고 writer·잠금 상태가 정상인지 먼저 확인하며 설치용 전체 manifest는 재적용하지 않음. installer의 `--preflight`는 사용자 systemd·linger·K3s 접근을 확인함. `--activate`는 네 CronJob 중지·시작 마감 300초·기존 Portal timer 및 service 비활성·활성 백업 Job 부재·현재 네 백업 템플릿의 보안 계약·호스트 잠금 획득 가능성을 확인한 뒤 timer를 켬.
 
@@ -59,7 +59,7 @@ bash infra/k8s/tools/pvc-backup-sequence-automation.sh --activate
 bash infra/k8s/tools/pvc-backup-sequence-automation.sh --status
 ```
 
-timer는 놓친 시각의 낮 시간 보충 실행을 하지 않음. 조정기는 06:00 이후 새 Job을 시작하지 않지만 이미 시작한 Job은 종료까지 관찰함. 다음 실제 02:30 실행에서 순서·네 복원 검증·Relay 알림을 별도 확인해야 함. 되돌릴 때 `--deactivate`는 먼저 다음 timer 실행을 막음. 실행 중인 service/Job 또는 미완료 상태가 있으면 상태 기록 변경을 거부하므로 종료·결과 확인 뒤 다시 실행해야 명시적 중지 시각이 기록됨. Relay는 중지 후 새 날짜의 실행 누락 감시를 멈추되 이미 시작된 실행의 확정 실패 알림은 유지하며, 활성화 후 상태 ConfigMap 자체가 삭제·초기화된 경우에는 상태 누락을 알림. Book·YouTube·Crawler의 운영 목표 파일도 기존 `suspend: false`로 되돌려 맥에서 검증·반영한 뒤 전용 도구로 조건부 적용하고, Portal은 시작 마감 300초를 유지한 채 UID·resourceVersion 조건부 patch로 재활성화함. 실행 중 Job을 삭제하거나 두 예약 방식을 동시에 활성화하지 않음. 상태 ConfigMap이 `completed`가 아니어서 제한 적용 도구가 차단하면 재실행·강제 변경하지 않고 Job·writer·잠금·증적을 확인한 뒤 별도 수동 조건부 복구 경로를 검토함.
+timer는 놓친 시각의 낮 시간 보충 실행을 하지 않음. 조정기는 06:00 이후 새 Job을 시작하지 않지만 이미 시작한 Job은 종료까지 관찰함. 10월 10일 02:30 실행의 순서·네 신규 복원 검증은 확인 완료함. 이후 실행과 실제 Telegram 수신은 별도 관측함. 되돌릴 때 `--deactivate`는 먼저 다음 timer 실행을 막음. 실행 중인 service/Job 또는 미완료 상태가 있으면 상태 기록 변경을 거부하므로 종료·결과 확인 뒤 다시 실행해야 명시적 중지 시각이 기록됨. Relay는 중지 후 새 날짜의 실행 누락 감시를 멈추되 이미 시작된 실행의 확정 실패 알림은 유지하며, 활성화 후 상태 ConfigMap 자체가 삭제·초기화된 경우에는 상태 누락을 알림. Book·YouTube·Crawler의 운영 목표 파일도 기존 `suspend: false`로 되돌려 맥에서 검증·반영한 뒤 전용 도구로 조건부 적용하고, Portal은 시작 마감 300초를 유지한 채 UID·resourceVersion 조건부 patch로 재활성화함. 실행 중 Job을 삭제하거나 두 예약 방식을 동시에 활성화하지 않음. 상태 ConfigMap이 `completed`가 아니어서 제한 적용 도구가 차단하면 재실행·강제 변경하지 않고 Job·writer·잠금·증적을 확인한 뒤 별도 수동 조건부 복구 경로를 검토함.
 
 ## 빠른 상태 확인
 
@@ -165,6 +165,12 @@ bash infra/k8s/tools/portal-pvc-backup-cronjob.sh --activate
 ```
 
 단독 CronJob 설치 방식의 schedule은 매일 03:00 KST이며 현재 순차 운영에서는 중지 상태로 보존함. 단독 CronJob의 `Forbid`는 CronJob 자체 일정에 적용됨. 현재 순차 실행의 중복 방지는 호스트 잠금·상태 잠금·이전 소유 Job의 최종 종료 확인으로 보장함. 백업 Job은 실패 재시도 없음·read-only PVC mount·고정 ServiceAccount 권한을 사용함. 성공·변경 없음·실패·복원 검증 실패는 Telegram SRE relay로 상태 전환을 전달함. 실행 중 백업이 중단되면 300초 종료 유예 안에서 Portal replica 복구를 시도하며, 복구 상태를 확인해야 함.
+
+### 현재 백업 보관·증거 갱신 기준
+
+네 서비스 모두 새 원격 암호화 백업의 다운로드·복원 검증·평문 정리·증거 게시 후 보관 정책을 실행함. 최근 7일 날짜별 최신 1개, 이전 4개 7일 구간별 최신 1개, 35일 이상 오래된 직전 3개 달의 월별 최신 1개와 전체 최신 7개를 합쳐 보존함. 현재 검증된 최신 파일은 항상 보호하며, 나머지 대상 암호문만 휴지통 없이 영구 삭제함. 삭제 직전 목록과 증거를 재검증하며 불명확한 삭제는 자동 재시도하지 않음.
+
+Portal 증거는 기본 24시간이며 다음 일일 실행과 완료 여유까지 유효하지 않으면 이전 증거를 재사용하지 않음. Portal 성공 이후 순차 실행기가 공식 export로 읽기 전용 소비자 스냅샷을 갱신하고 업로드·export 결과를 분리함. 백업과 보관 정리의 실패도 구분함. 상세 경계는 [보관 정책 검증 기록](../../docs/reviews/20261009_백업보관정책_보완.md)을 따름. 기존 timer·Cron schedule/suspend·Secret·PVC를 이 정책 때문에 재적용하지 않음.
 
 ## 일별 SLO 증적
 
