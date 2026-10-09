@@ -17,7 +17,7 @@ SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
 class PortalPvcBackupVerifyTests(unittest.TestCase):
-    def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", remote_error="", remote_timeout_attempts=0, rclone_timeout=None, rclone_retry_count=None, rclone_retry_backoff=None, missing_pvc=False, repeat=False, second_runtime=None, second_evidence_remaining=None, second_evidence_age=None, second_fail_at=None, refresh_window=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", readiness_timeout=None, assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host", command_timeout=None, writer_termination_timeout=None, rclone_config_work_dir="", pod_list_kind="PodList"):
+    def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", remote_error="", remote_timeout_attempts=0, rclone_timeout=None, rclone_retry_count=None, rclone_retry_backoff=None, missing_pvc=False, repeat=False, second_runtime=None, second_evidence_remaining=None, second_evidence_age=None, second_fail_at=None, refresh_window=None, max_age=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", readiness_timeout=None, assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host", command_timeout=None, writer_termination_timeout=None, rclone_config_work_dir="", pod_list_kind="PodList"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / "bin"
@@ -125,6 +125,8 @@ exit 0
                 env["PORTAL_WRITER_TERMINATION_TIMEOUT_SECONDS"] = str(writer_termination_timeout)
             if readiness_timeout is not None:
                 env["PORTAL_READINESS_TIMEOUT_SECONDS"] = str(readiness_timeout)
+            if max_age is not None:
+                env["PORTAL_BACKUP_MAX_AGE_SECONDS"] = str(max_age)
             if refresh_window is not None:
                 env["PORTAL_BACKUP_EVIDENCE_REFRESH_WINDOW_SECONDS"] = str(refresh_window)
             if rclone_timeout is not None:
@@ -945,7 +947,7 @@ esac
         self.assertNotIn("scale deployment/portal-web", calls)
 
     def test_matching_k3s_pvc_evidence_skips_upload_after_staging(self):
-        result, calls, _, _ = self.run_tool("--go", repeat=True)
+        result, calls, _, _ = self.run_tool("--go", repeat=True, max_age=172800)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("backup_upload=SKIPPED_UNCHANGED", result.stdout)
         self.assertIn("portal_pvc_backup_stage=pvc_snapshot", result.stdout)
@@ -954,10 +956,60 @@ esac
         self.assertGreaterEqual(calls.count("exec -i"), 4)
 
     def test_non_k3s_evidence_is_not_reused(self):
-        result, calls, _, _ = self.run_tool("--go", repeat=True, second_runtime="compose-local")
+        result, calls, _, _ = self.run_tool("--go", repeat=True, max_age=172800, second_runtime="compose-local")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
         self.assertEqual(calls.count("rclone copyto"), 4)
+
+    def test_midday_expiry_requires_new_daily_backup_and_restore(self):
+        """Seven hours of validity cannot cover the next daily backup."""
+        result, calls, _, evidence = self.run_tool(repeat=True, second_evidence_remaining=25200)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
+        self.assertIn("portal_pvc_backup_stage=restore_validation", result.stdout)
+        self.assertEqual(calls.count("rclone copyto"), 4)
+        values = dict(line.split("=", 1) for line in evidence.splitlines())
+        self.assertEqual(values["restore_status"], "success")
+
+    def test_short_override_cannot_reintroduce_daily_freshness_gap(self):
+        result, calls, _, _ = self.run_tool(repeat=True, second_evidence_remaining=25200, refresh_window=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
+        self.assertEqual(calls.count("rclone copyto"), 4)
+
+    def test_reuse_requires_time_for_next_daily_job_to_complete(self):
+        result, calls, _, _ = self.run_tool(repeat=True, max_age=172800, second_evidence_remaining=90000)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
+        self.assertEqual(calls.count("rclone copyto"), 4)
+
+    def test_long_lived_evidence_reuse_respects_daily_completion_boundary(self):
+        for remaining, skipped in ((101340, False), (101460, True)):
+            with self.subTest(remaining=remaining):
+                result, calls, _, _ = self.run_tool(repeat=True, max_age=172800, second_evidence_remaining=remaining)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual("SKIPPED_UNCHANGED" in result.stdout, skipped)
+                self.assertEqual(calls.count("rclone copyto"), 2 if skipped else 4)
+
+    def test_failed_daily_restore_does_not_publish_fresh_evidence(self):
+        result, calls, _, evidence = self.run_tool(repeat=True, second_evidence_remaining=25200, second_fail_at="restore")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
+        self.assertEqual(evidence, "")
+        self.assertIn("scale deployment/portal-web --replicas=1", calls)
+
+    def test_daily_horizon_checks_age_even_with_later_explicit_expiry(self):
+        result, calls, _, _ = self.run_tool(repeat=True, second_evidence_remaining=172800, second_evidence_age=3600)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
+        self.assertEqual(calls.count("rclone copyto"), 4)
+
+    def test_failed_daily_refresh_does_not_publish_fresh_evidence(self):
+        result, calls, _, evidence = self.run_tool(repeat=True, second_evidence_remaining=25200, second_fail_at="upload")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
+        self.assertEqual(evidence, "")
+        self.assertIn("scale deployment/portal-web --replicas=1", calls)
 
     def test_near_expiry_evidence_requires_new_backup_and_restore(self):
         """Reusing evidence that expires eight minutes later must not skip the daily refresh."""
@@ -993,15 +1045,15 @@ esac
 
     def test_future_backup_and_restore_timestamps_are_not_reused(self):
         """Checking only the future refresh deadline must not accept future-dated evidence."""
-        result, calls, _, _ = self.run_tool(repeat=True, second_evidence_age=-300)
+        result, calls, _, _ = self.run_tool(repeat=True, max_age=172800, second_evidence_age=-300)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
         self.assertIn("portal_pvc_backup_stage=restore_validation", result.stdout)
         self.assertEqual(calls.count("rclone copyto"), 4)
 
     def test_refresh_window_override_controls_unchanged_skip(self):
-        """Valid overrides affect reuse while evidence remains outside the configured window."""
-        result, calls, _, _ = self.run_tool(repeat=True, second_evidence_remaining=7200, refresh_window=10800)
+        """A larger completion window can reject otherwise reusable two-day evidence."""
+        result, calls, _, _ = self.run_tool(repeat=True, max_age=172800, refresh_window=86400)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
         self.assertEqual(calls.count("rclone copyto"), 4)

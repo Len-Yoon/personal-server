@@ -540,11 +540,12 @@ stream_pvc_tree() {
 evidence_is_current_k3s_pvc() {
   [ -f "$EVIDENCE" ] || return 1
   python3 "$SCRIPT_DIR/validate-backup-evidence.py" --evidence "$EVIDENCE" --max-age-seconds "$MAX_AGE" >/dev/null 2>&1 || return 1
-  # Reuse must remain valid through the refresh window, including both the
-  # explicit expiry and maximum backup/restore age. Otherwise perform the full
-  # upload and restore verification before producing fresh evidence.
+  # Daily reuse must cover another 24h scheduling interval plus completion
+  # time: the Job deadline is 4h, with 600s observation/cleanup margin. A larger
+  # configured refresh window adds more completion headroom, never less.
+  # Check explicit expiry AND backup/restore age; never extend old evidence.
   local reuse_until evidence_digest evidence_runtime
-  reuse_until=$(python3 -c 'import sys; from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) + timedelta(seconds=int(sys.argv[1]))).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$EVIDENCE_REFRESH_WINDOW_SECONDS") || return 1
+  reuse_until=$(python3 -c 'import sys; from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) + timedelta(seconds=86400 + max(15000, int(sys.argv[1])))).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$EVIDENCE_REFRESH_WINDOW_SECONDS") || return 1
   python3 "$SCRIPT_DIR/validate-backup-evidence.py" --evidence "$EVIDENCE" --max-age-seconds "$MAX_AGE" --now "$reuse_until" >/dev/null 2>&1 || return 1
   evidence_digest=$(awk -F= '$1 == "source_digest" { print $2 }' "$EVIDENCE")
   evidence_runtime=$(awk -F= '$1 == "source_runtime" { print $2 }' "$EVIDENCE")

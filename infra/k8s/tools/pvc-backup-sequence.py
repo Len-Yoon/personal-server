@@ -37,7 +37,7 @@ class Stage:
 
 
 STAGES = {
-    "portal": Stage("portal-pvc-backup", "/opt/personal-server/portal-pvc-backup-verify.sh", "portal-pvc-backup-runtime", ("portal-web-files-dynamic", "portal-web-state-dynamic"), "docker.io/library/personal-server-portal-pvc-backup@sha256:504523e208d34c2f8e39e1bcefb49dfc0eafec14978a692f1d8566a1024aebb6", "sre-telegram-backup-status", "monitoring"),
+    "portal": Stage("portal-pvc-backup", "/opt/personal-server/portal-pvc-backup-verify.sh", "portal-pvc-backup-runtime", ("portal-web-files-dynamic", "portal-web-state-dynamic"), "docker.io/library/personal-server-portal-pvc-backup@sha256:e39bcf9096f603b1e6939f67cceb8653eed35e276dad076d16eeb563c0988452", "sre-telegram-backup-status", "monitoring"),
     "book": Stage("book-pvc-backup", "/opt/personal-server/book-pvc-backup-verify.py", "book-memo-pvc-backup-runtime", ("book-memo-data",), "docker.io/library/personal-server-book-pvc-backup@sha256:dc46dfdc67145e649029c3fc3d0a76b2dd3480a94ac4d0198df748854ca0bc54", "book-pvc-backup-state"),
     "youtube": Stage("youtube-pvc-backup", "/opt/personal-server/youtube-pvc-backup-verify.py", "youtube-memo-pvc-backup-runtime", ("youtube-memo-data",), "docker.io/library/personal-server-youtube-pvc-backup@sha256:fb570a295d8a681d9d3990750cd74152bb30a9ce0701ccf34421f9a50c72a4b4", "youtube-pvc-backup-state"),
     "crawler": Stage("crawler-pvc-backup", "/opt/personal-server/crawler-pvc-backup-verify.py", "crawler-worker-pvc-backup-runtime", ("crawler-worker-data",), "docker.io/library/personal-server-crawler-pvc-backup@sha256:6e49af740101fe47601b48dc1a7da59a201f01e108b770e221bcb5a3b8a62846", "crawler-pvc-backup-state"),
