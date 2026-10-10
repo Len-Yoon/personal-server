@@ -137,6 +137,88 @@ class IngressOnlyPolicyTests(unittest.TestCase):
             self.assertEqual(result.returncode,2)
             self.assertEqual(result.stderr,'ingress_inventory_validation=FAIL\n')
 
+class PreNatIngressCandidateTests(unittest.TestCase):
+    fixture = IngressOnlyPolicyTests.fixture
+    def pre_fixture(self):
+        module,snapshot,inventory=self.fixture('book-memo');stamp=inventory['observed_at'];peer={'ipBlock':{'cidr':'192.0.2.7/32'}}
+        identity={'container_id_sha256':'a'*64,'container_image_sha256':'sha256:'+'b'*64,'started_at':(datetime.now(timezone.utc)-timedelta(days=1)).isoformat(),'network_settings_sha256':'c'*64}
+        proof={'current_identity_sha256':module.digest(identity),'source_sha256':module.digest('192.0.2.7'),'peer_sha256':module.digest(peer),'source_interface':'caddy_container_endpoint','node_uid':inventory['target_node_uid'],'route':'ClusterIP','port':8003,**{k:True for k in ('same_connection_bound','pid_start_inode_bound','http_marker_bound','source_matches_current_endpoint')}}
+        inventory['caddy']={'observed_at':stamp,'status':200,'controlled_request':True,'source_kind':'pre_nat_exact_ip','target_spec_sha256':inventory['spec_sha256'],'target_pod_uid':inventory['target_pod_uid'],'peer':peer,'pre_nat_peer_sha256':module.digest(peer),'source_is_node':False,'current_identity':identity,'pre_nat_proof':proof,'endpoint_stability':'dynamic'}
+        result={'status':'PASS','source_kind':'pre_nat_exact_ip','run_id':'abcdef123456','target':'d'*40,'completed_at':stamp,'reason':'isolated_exact_ip_causal_admission_proven','production_app_count':4,'production_policy_count':0,
+                **{k:True for k in ('owned_cleanup_complete','restored_flow_required','restored_flow_proven','production_postguard_pass','resource_create_attempted')},
+                **{k:False for k in ('caddy_only_identity_isolation','long_term_stable_ip_proven','policy_hook_directly_observed','production_apply_authorized_by_result','production_identity_proven','caddy_static_ipv4_configured','raw_address_output','raw_address_persisted')},
+                **{k:None for k in ('first_failure_sha256','cleanup_failure_reason','postguard_failure_reason')}}
+        diagnostic={'cluster_uid':inventory['cluster_uid'],'node_uid':inventory['target_node_uid'],'run_id':result['run_id'],'tool_sha256':'e'*64,'result':result,'result_sha256':module.digest(result),'current_identity_sha256':module.digest(identity),'peer_sha256':module.digest(peer),'source_sha256':proof['source_sha256'],'server_pod_uid':'isolated-server-pod','service_uid':'isolated-service','route':'ClusterIP','port':8003,'phases':{k:True for k in ('baseline','caddy_denied','exact_ip_allow','unknown_pod_denied','unknown_service_denied')}}
+        inventory['enforcement']={'cluster_uid':inventory['cluster_uid'],'pre_nat_diagnostic':diagnostic}
+        return module,snapshot,inventory
+
+    def test_pre_nat_dynamic_endpoint_is_offline_candidate_with_no_production_authority(self):
+        module,snapshot,inventory=self.pre_fixture();before=deepcopy((snapshot,inventory));result=module.prepare(snapshot,inventory)
+        self.assertEqual(before,(snapshot,inventory));self.assertEqual(result['caddy_source_kind'],'pre_nat_exact_ip')
+        self.assertEqual(result['policy']['spec']['ingress'][0]['from'],[inventory['caddy']['peer']])
+        self.assertTrue(result['offline_candidate_only']);self.assertFalse(result['operating_ready']);self.assertFalse(result['production_apply_authorized'])
+        self.assertEqual(result['stop_reasons'],['dynamic_caddy_endpoint_not_durable_identity'])
+        for field in ('policy_hook_directly_observed','long_term_stable_ip_proven','production_identity_proven','production_apply_succeeded','production_route_proven','caddy_only_isolation'):self.assertFalse(result[field])
+
+    def test_pre_nat_source_identity_peer_interface_target_route_and_unknown_fields_fail_closed(self):
+        module,snapshot,inventory=self.pre_fixture()
+        mutations=[lambda x:x['caddy'].update(post_nat_observed=True),lambda x:x['caddy'].update(endpoint_stability='static'),lambda x:x['caddy'].update(source_kind='unknown'),lambda x:x['caddy'].update(source_is_node=True),lambda x:x['caddy'].update(pre_nat_peer_sha256='0'*64),lambda x:x['caddy'].update(target_pod_uid='isolated-server-pod'),lambda x:x['caddy'].update(target_spec_sha256='0'*64),lambda x:x['caddy']['current_identity'].update(container_id_sha256='invalid'),lambda x:x['caddy']['current_identity'].update(container_image_sha256='other'),lambda x:x['caddy']['current_identity'].update(started_at=datetime.now().isoformat()),lambda x:x['caddy']['current_identity'].update(network_settings_sha256='0'*64),lambda x:x['caddy']['pre_nat_proof'].update(source_interface='node_interface'),lambda x:x['caddy']['pre_nat_proof'].update(source_sha256='0'*64),lambda x:x['caddy']['pre_nat_proof'].update(peer_sha256='0'*64),lambda x:x['caddy']['pre_nat_proof'].update(current_identity_sha256='0'*64),lambda x:x['caddy']['pre_nat_proof'].update(node_uid='wrong-node'),lambda x:x['caddy']['pre_nat_proof'].update(route='NodePort'),lambda x:x['caddy']['pre_nat_proof'].update(port=8000),lambda x:x['caddy']['pre_nat_proof'].update(same_connection_bound=False),lambda x:x['caddy']['pre_nat_proof'].update(http_marker_bound=False),lambda x:x['caddy']['pre_nat_proof'].update(pid_start_inode_bound=False),lambda x:x['caddy']['pre_nat_proof'].update(source_matches_current_endpoint=False),lambda x:x['caddy']['pre_nat_proof'].update(unknown=True)]
+        for mutate in mutations:
+            invalid=deepcopy(inventory);mutate(invalid)
+            with self.subTest(mutation=mutate),self.assertRaises(ValueError):module.prepare(snapshot,invalid)
+        for cidr in ('192.0.2.0/24','::1/128','2001:db8::1/128','169.254.1.1/32','0.0.0.0/32'):
+            invalid=deepcopy(inventory);invalid['caddy']['peer']={'ipBlock':{'cidr':cidr}}
+            with self.subTest(cidr=cidr),self.assertRaises(ValueError):module.prepare(snapshot,invalid)
+
+    def test_pre_nat_diagnostic_must_bind_success_cleanup_unknowns_and_distinct_isolated_target(self):
+        module,snapshot,inventory=self.pre_fixture();diag=inventory['enforcement']['pre_nat_diagnostic']
+        mutations=[lambda d:d.update(cluster_uid='other'),lambda d:d.update(node_uid='other'),lambda d:d.update(run_id='other'),lambda d:d.update(tool_sha256='bad'),lambda d:d.update(result_sha256='0'*64),lambda d:d.update(current_identity_sha256='0'*64),lambda d:d.update(peer_sha256='0'*64),lambda d:d.update(source_sha256='0'*64),lambda d:d.update(server_pod_uid=inventory['target_pod_uid']),lambda d:d.update(service_uid=''),lambda d:d.update(route='NodePort'),lambda d:d.update(port=8002),lambda d:d.update(unknown=True)]
+        for key in diag['phases']:mutations.append(lambda d,k=key:d['phases'].update({k:False}))
+        for mutate in mutations:
+            invalid=deepcopy(inventory);mutate(invalid['enforcement']['pre_nat_diagnostic'])
+            with self.subTest(mutation=mutate),self.assertRaises(ValueError):module.prepare(snapshot,invalid)
+        for key in ('owned_cleanup_complete','restored_flow_proven','production_postguard_pass'):
+            invalid=deepcopy(inventory);d=invalid['enforcement']['pre_nat_diagnostic'];d['result'][key]=False;d['result_sha256']=module.digest(d['result'])
+            with self.subTest(result_flag=key),self.assertRaises(ValueError):module.prepare(snapshot,invalid)
+        for key in ('policy_hook_directly_observed','long_term_stable_ip_proven','production_identity_proven','production_apply_authorized_by_result'):
+            invalid=deepcopy(inventory);d=invalid['enforcement']['pre_nat_diagnostic'];d['result'][key]=True;d['result_sha256']=module.digest(d['result'])
+            with self.subTest(result_flag=key),self.assertRaises(ValueError):module.prepare(snapshot,invalid)
+        invalid=deepcopy(inventory);d=invalid['enforcement']['pre_nat_diagnostic'];d['result']['completed_at']=(datetime.now(timezone.utc)-timedelta(minutes=6)).isoformat();d['result_sha256']=module.digest(d['result'])
+        with self.assertRaises(ValueError):module.prepare(snapshot,invalid)
+
+    def test_pre_nat_current_socket_must_follow_diagnostic_and_flags_are_booleans(self):
+        module,snapshot,inventory=self.pre_fixture()
+        invalid=deepcopy(inventory);invalid['caddy']['observed_at']=(datetime.now(timezone.utc)-timedelta(seconds=2)).isoformat()
+        with self.assertRaises(ValueError):module.prepare(snapshot,invalid)
+        for key in inventory['caddy']['pre_nat_proof']:
+            if type(inventory['caddy']['pre_nat_proof'][key]) is bool:
+                for value in (1,None):
+                    invalid=deepcopy(inventory);invalid['caddy']['pre_nat_proof'][key]=value
+                    with self.subTest(key=key,value=value),self.assertRaises(ValueError):module.prepare(snapshot,invalid)
+        for field in ('caddy','enforcement'):
+            invalid=deepcopy(inventory);invalid[field]=[]
+            with self.subTest(field=field),self.assertRaises(ValueError):module.prepare(snapshot,invalid)
+        for field in ('current_identity','pre_nat_proof'):
+            invalid=deepcopy(inventory);invalid['caddy'][field]=None
+            with self.subTest(field=field),self.assertRaises(ValueError):module.prepare(snapshot,invalid)
+
+    def test_pre_nat_isolation_cannot_be_relabelled_as_portal_or_another_port(self):
+        for app in ('portal-web','youtube-memo','crawler-worker'):
+            module,snapshot,inventory=self.pre_fixture();snapshot['metadata']['name']=app;snapshot['spec']['template']['metadata']['labels']['app.kubernetes.io/name']=app;snapshot['spec']['template']['spec']['containers'][0]['name']=app
+            inventory['spec_sha256']=module.digest(snapshot['spec']);inventory['caddy']['target_spec_sha256']=inventory['spec_sha256']
+            with self.subTest(app=app),self.assertRaises(ValueError):module.prepare(snapshot,inventory)
+
+    def test_pre_nat_cli_is_offline_only_and_never_emits_peer_or_identity_values(self):
+        module,snapshot,inventory=self.pre_fixture()
+        with tempfile.TemporaryDirectory() as temp:
+            s=Path(temp)/'snapshot.json';i=Path(temp)/'inventory.json';s.write_text(json.dumps(snapshot));i.write_text(json.dumps(inventory))
+            result=subprocess.run(['python3',str(ROOT/'infra/k8s/tools/prepare-ingress-networkpolicy.py'),'--snapshot',str(s),'--inventory',str(i)],capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr);out=json.loads(result.stdout);self.assertTrue(out['offline_validation_only']);self.assertFalse(out['operating_ready']);self.assertFalse(out['production_apply_authorized'])
+            for value in ('192.0.2.7','isolated-server-pod','target-node-opaque','sha256:'+('b'*64)):self.assertNotIn(value,result.stdout+result.stderr)
+            description=subprocess.run(['python3',str(ROOT/'infra/k8s/tools/prepare-ingress-networkpolicy.py'),'--describe-input'],capture_output=True,text=True)
+            self.assertIn('pre_nat_exact_ip',description.stdout);self.assertIn('operating_ready',description.stdout)
+
+
 class HardeningToolsTests(unittest.TestCase):
     def hardening_fixture(self):
         image='same@sha256:'+'a'*64
