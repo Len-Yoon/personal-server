@@ -102,6 +102,11 @@ def validate_plan(p):
         require(set(hashes) == {"c1", "c2", "c3"}
                 and all(isinstance(h, str) and SHA.fullmatch(h) for h in hashes.values())
                 and hashes["c1"] == hashes["c3"], "plan_pin_hashes")
+    require(set(p.get("pin_worktree_files", {})) == set(PIN_FILES), "plan_pin_worktree_files")
+    for hashes in p["pin_worktree_files"].values():
+        require(set(hashes) == {"c1", "c2", "c3"}
+                and all(isinstance(h, str) and SHA.fullmatch(h) for h in hashes.values())
+                and hashes["c1"] == hashes["c3"], "plan_pin_worktree_hashes")
     for key in ("allowed_forward_paths", "allowed_inverse_paths"):
         paths = p.get(key)
         require(isinstance(paths, list) and paths and len(paths) == len(set(paths)), "plan_paths")
@@ -163,6 +168,25 @@ def validate_plan(p):
     budget = p.get("budget", {})
     require(budget.get("measured") is True and all(type(budget.get(k)) is int and 0 < budget[k] <= 3600
             for k in ("forward_seconds", "rollback_seconds", "margin_seconds")), "plan_budget")
+
+
+def pin_worktree_hashes(blob):
+    """Only exact reviewed text bytes or its deterministic LF -> CRLF form.
+
+    Git object hashes stay separate from checkout-byte hashes. Never strip,
+    normalize arbitrary text, accept mixed endings, or learn a new live hash.
+    """
+    require(isinstance(blob, bytes) and b"\0" not in blob, "pin_blob_text")
+    try:
+        blob.decode("utf-8")
+    except UnicodeError:
+        raise Blocked("pin_blob_text") from None
+    if b"\r" in blob:
+        remainder = blob.replace(b"\r\n", b"")
+        require(b"\r\n" in blob and b"\r" not in remainder and b"\n" not in remainder,
+                "pin_blob_line_endings")
+        return {digest(blob)}
+    return {digest(blob), digest(blob.replace(b"\n", b"\r\n"))}
 
 
 def transform_spec(spec, reference):
@@ -403,8 +427,10 @@ class NativeBackend:
         require(actual == p["untracked"], "source_untracked_drift")
         phase = {p["c1"]: "c1", p["c2"]: "c2", p["c3"]: "c3"}[expected]
         for path, hashes in p["pin_files"].items():
-            require(digest(self.git("show", expected + ":" + path)) == hashes[phase]
-                    and regular_hash(self.root / path) == hashes[phase], "source_pin_drift")
+            blob = self.git("show", expected + ":" + path)
+            raw_hash = p["pin_worktree_files"][path][phase]
+            require(digest(blob) == hashes[phase] and raw_hash in pin_worktree_hashes(blob)
+                    and regular_hash(self.root / path) == raw_hash, "source_pin_drift")
 
     def commits_guard(self):
         p = self.plan
@@ -419,6 +445,8 @@ class NativeBackend:
             blobs = {k: self.git("show", p[k] + ":" + path) for k in ("c1", "c2", "c3")}
             require(all(digest(blobs[k]) == hashes[k] for k in blobs) and blobs["c1"] == blobs["c3"],
                     "source_blob_hash")
+            require(all(p["pin_worktree_files"][path][k] in pin_worktree_hashes(blobs[k]) for k in blobs),
+                    "source_pin_worktree_contract")
             changed = blobs["c1"]
             for image in p["images"]:
                 old = image["old"]["reference"].split("@", 1)[1].encode()

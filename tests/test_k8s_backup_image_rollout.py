@@ -53,6 +53,7 @@ def fixture():
          "reviews": [{"commit": c * 40, "conclusion": "success", "url": "https://github.com/example/repo/pull/" + c}
                      for c in ("2", "3")],
          "pin_files": {path: {"c1": "a" * 64, "c2": "b" * 64, "c3": "a" * 64} for path in m.PIN_FILES},
+         "pin_worktree_files": {path: {"c1": "a" * 64, "c2": "b" * 64, "c3": "a" * 64} for path in m.PIN_FILES},
          "allowed_forward_paths": list(m.PIN_FILES) + ["infra/k8s/tools/backup-image-rollout.py"],
          "allowed_inverse_paths": list(m.PIN_FILES), "images": [p[0] for p in pairs],
          "untracked": {}, "protected_files": {"/var/lib/personal-server/k3s-runtime-services.state": "a" * 64},
@@ -433,6 +434,7 @@ class NativeContractTests(unittest.TestCase):
             for phase, raw in (("c1", old), ("c2", new), ("c3", old)):
                 blobs[p[phase] + ":" + path] = raw
                 p["pin_files"][path][phase] = m.digest(raw)
+                p["pin_worktree_files"][path][phase] = m.digest(raw)
         def git(*args):
             if args[0] == "fetch":
                 return b""
@@ -624,6 +626,8 @@ class GuardBoundaryTests(unittest.TestCase):
             raw = b"pinned bytes"
             for hashes in p["pin_files"].values():
                 hashes["c1"] = m.digest(raw)
+            for hashes in p["pin_worktree_files"].values():
+                hashes["c1"] = m.digest(raw)
             config = {"hooks": b"core.hookspath\n/synthetic/hooks\0",
                       "fsmonitor": b"core.fsmonitor\ntrue\0"}.get(failure, b"core.fsmonitor\nfalse\0")
             backend.run = Mock(return_value=config)
@@ -697,6 +701,102 @@ class OwnershipProofTests(unittest.TestCase):
             with self.subTest(outcome=type(outcome).__name__), patch.object(m.os, "killpg", side_effect=effects):
                 backend.stop_child(child)
             self.assertEqual(backend.command_termination_unknown, unknown)
+
+
+class PinWorktreeContractTests(unittest.TestCase):
+    def test_all_three_pin_files_and_phases_keep_git_sha_separate_from_crlf_raw_sha(self):
+        b, _, blobs = NativeContractTests().source_fixture()
+        for path in m.PIN_FILES:
+            for phase in ("c1", "c2", "c3"):
+                raw = blobs[b.plan[phase] + ":" + path]
+                observed = m.digest(raw.replace(b"\n", b"\r\n"))
+                self.assertNotEqual(observed, b.plan["pin_files"][path][phase])
+                b.plan["pin_worktree_files"][path][phase] = observed
+        m.validate_plan(b.plan)
+        b.commits_guard()
+        self.assertEqual(b.plan["pin_worktree_files"][m.PIN_FILES[0]]["c1"],
+                         b.plan["pin_worktree_files"][m.PIN_FILES[0]]["c3"])
+
+    def test_source_guard_applies_exact_lf_or_crlf_phase_raw_contract_including_c3(self):
+        for phase in ("c1", "c2", "c3"):
+            for crlf in (False, True):
+                for drift in (False, True):
+                    b, _, blobs = NativeContractTests().source_fixture()
+                    p = b.plan
+                    b.root = Path("/synthetic/repo")
+                    actual = {}
+                    for path in m.PIN_FILES:
+                        for stage in ("c1", "c2", "c3"):
+                            raw = blobs[p[stage] + ":" + path]
+                            raw = raw.replace(b"\n", b"\r\n") if crlf else raw
+                            p["pin_worktree_files"][path][stage] = m.digest(raw)
+                            if stage == phase:
+                                actual[str(b.root / path)] = m.digest(raw + (b"foreign-byte" if drift else b""))
+                    b.run = Mock(return_value=b"core.fsmonitor\nfalse\0")
+                    def git(*args):
+                        if args == ("rev-parse", "--absolute-git-dir"):
+                            return b"/synthetic/git"
+                        if args == ("rev-parse", "HEAD"):
+                            return p[phase].encode()
+                        if args[0] == "branch":
+                            return b"main"
+                        if args[0] == "status" or args[0] == "diff":
+                            return b""
+                        if args[:3] == ("ls-files", "-v", "-z"):
+                            return b"H tracked.py\0"
+                        if args[0] == "ls-files":
+                            return b""
+                        if args[0] == "show":
+                            return blobs[args[1]]
+                        raise AssertionError(args)
+                    b.git = Mock(side_effect=git)
+                    with self.subTest(phase=phase, crlf=crlf, drift=drift), patch.object(m.Path, "exists", return_value=False), \
+                         patch.object(m.Path, "is_symlink", return_value=False), patch.object(m, "regular_hash",
+                             side_effect=lambda path: actual[str(path)]):
+                        if drift:
+                            with self.assertRaisesRegex(m.Blocked, "source_pin_drift"):
+                                b.source_guard(p[phase])
+                        else:
+                            b.source_guard(p[phase])
+
+    def test_missing_extra_path_or_phase_and_inverse_raw_mismatch_are_invalid(self):
+        for failure in ("field", "path_missing", "path_extra", "phase_missing", "phase_extra", "inverse", "not_sha"):
+            p, _ = fixture()
+            if failure == "field":
+                del p["pin_worktree_files"]
+            elif failure == "path_missing":
+                del p["pin_worktree_files"][m.PIN_FILES[0]]
+            elif failure == "path_extra":
+                p["pin_worktree_files"]["other.py"] = dict(p["pin_worktree_files"][m.PIN_FILES[0]])
+            elif failure == "phase_missing":
+                del p["pin_worktree_files"][m.PIN_FILES[0]]["c2"]
+            elif failure == "phase_extra":
+                p["pin_worktree_files"][m.PIN_FILES[0]]["c4"] = "f" * 64
+            elif failure == "inverse":
+                p["pin_worktree_files"][m.PIN_FILES[0]]["c3"] = "f" * 64
+            else:
+                p["pin_worktree_files"][m.PIN_FILES[0]]["c2"] = "not-a-sha"
+            with self.subTest(failure=failure), self.assertRaises(m.Blocked):
+                m.validate_plan(p)
+
+    def test_each_path_and_phase_reject_arbitrary_unbound_raw_hash(self):
+        for path in m.PIN_FILES:
+            for phase in ("c1", "c2", "c3"):
+                b, _, _ = NativeContractTests().source_fixture()
+                b.plan["pin_worktree_files"][path][phase] = "f" * 64
+                with self.subTest(path=path, phase=phase), self.assertRaisesRegex(m.Blocked, "source_pin_worktree_contract"):
+                    b.commits_guard()
+
+    def test_conversion_allows_exact_text_only_and_rejects_invalid_utf8_nul_or_mixed_cr(self):
+        raw = "첫줄\nsecond line\n".encode()
+        expected = {m.digest(raw), m.digest(raw.replace(b"\n", b"\r\n"))}
+        self.assertEqual(m.pin_worktree_hashes(raw), expected)
+        crlf = raw.replace(b"\n", b"\r\n")
+        self.assertEqual(m.pin_worktree_hashes(crlf), {m.digest(crlf)})
+        for invalid in (b"bad\xff\n", b"bad\0\n", b"bare\rvalue", b"mixed\r\nnext\n"):
+            with self.subTest(invalid=invalid), self.assertRaises(m.Blocked):
+                m.pin_worktree_hashes(invalid)
+        self.assertNotIn(m.digest(raw.replace(b"second", b"Second").replace(b"\n", b"\r\n")), expected)
 
 
 if __name__ == "__main__":
