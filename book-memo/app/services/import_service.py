@@ -14,6 +14,8 @@ parse_tags = service._parse_tags
 
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
+from app.services.database_errors import is_database_busy
 
 MAX_IMPORT_BYTES = 2 * 1024 * 1024
 MAX_RECORDS = 1000
@@ -135,7 +137,7 @@ def install_routes(app, require_write, session_cookie, templates):
     async def preview(request: Request):
         require_write(request)
         raw, payload = await _read_payload(request)
-        result = preview_import(payload)
+        result = await run_in_threadpool(preview_import, payload)
         return JSONResponse({**result, "preview_token": _preview_token(raw, request.cookies.get(session_cookie, ""))},
                             headers={"Cache-Control": "no-store"})
 
@@ -145,8 +147,10 @@ def install_routes(app, require_write, session_cookie, templates):
         raw, payload = await _read_payload(request)
         _verify_preview(request.headers.get("X-Import-Preview", ""), raw, request.cookies.get(session_cookie, ""))
         try:
-            result = commit_import(payload)
+            result = await run_in_threadpool(commit_import, payload)
         except (ValueError, sqlite3.Error) as error:
+            if isinstance(error, sqlite3.Error) and is_database_busy(error):
+                raise
             raise HTTPException(status_code=400, detail="가져오지 못했습니다. 기존 기록은 유지됩니다.") from error
         return JSONResponse(result, headers={"Cache-Control": "no-store"})
 

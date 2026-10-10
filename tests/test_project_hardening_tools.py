@@ -3,6 +3,8 @@ import json
 import subprocess
 import tempfile
 import unittest
+from copy import deepcopy
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -13,16 +15,112 @@ def load(name):
     return module
 
 class HardeningToolsTests(unittest.TestCase):
+    def hardening_fixture(self):
+        image='same@sha256:'+'a'*64
+        snapshot={'kind':'Deployment','metadata':{'name':'portal-web','namespace':'personal-server','uid':'opaque','resourceVersion':'3'},'spec':{'strategy':{'type':'Recreate'},'replicas':1,'template':{'metadata':{'labels':{'app.kubernetes.io/name':'portal-web'}},'spec':{'securityContext':{'runAsNonRoot':True,'seccompProfile':{'type':'RuntimeDefault'}},'containers':[{'name':'portal-web','image':image,'resources':{'requests':{'cpu':'75m'}},'readinessProbe':{'httpGet':{'path':'/health','port':8000}},'volumeMounts':[{'name':'data','mountPath':'/data'}, {'name':'tmp','mountPath':'/tmp'}]}], 'volumes':[{'name':'data','persistentVolumeClaim':{'claimName':'portal-data'}},{'name':'tmp','emptyDir':{}}]}}}}
+        evidence={'deployment_uid':'opaque','resource_version':'3','image':image,'observed_at':datetime.now(timezone.utc).isoformat(),'ready':{'path':'/ready','status':200},'read_only_rootfs_verified':True,'baseline':{'duration_seconds':86400,'samples':288,'memory_p95_bytes':64*1024**2,'memory_peak_bytes':100*1024**2,'cpu_p95_millicores':40},'resources':{'requests':{'cpu':'50m','memory':'128Mi'},'limits':{'memory':'256Mi'}}}
+        return snapshot,evidence
+
     def test_guarded_patch_preserves_images_volumes_and_existing_resources(self):
-        snapshot={'kind':'Deployment','metadata':{'name':'portal-web','namespace':'personal-server','uid':'opaque','resourceVersion':'3'},'spec':{'template':{'spec':{'containers':[{'name':'portal-web','image':'same@sha256:123','resources':{'requests':{'cpu':'75m'}},'readinessProbe':{'httpGet':{'path':'/health','port':8000}},'volumeMounts':[{'name':'data','mountPath':'/data'}]}]}}}}
+        snapshot,evidence=self.hardening_fixture()
         before=json.dumps(snapshot,sort_keys=True)
-        result=load('prepare-app-hardening').prepare(snapshot)
+        result=load('prepare-app-hardening').prepare(snapshot,evidence)
         self.assertEqual(json.dumps(snapshot,sort_keys=True),before)
         self.assertEqual([p['op'] for p in result['patch'][:3]],['test']*3)
-        self.assertFalse(any('/image' in p['path'] or '/volume' in p['path'] or p['path'].endswith('/requests/cpu') for p in result['patch']))
+        self.assertFalse(any('/image' in p['path'] or '/volume' in p['path'] or p['path'].endswith('/requests/cpu') for p in result['patch'] if p['op']!='test'))
         self.assertTrue(result['approval_required'])
         snapshot['metadata']['namespace']='monitoring'
-        with self.assertRaises(ValueError):load('prepare-app-hardening').prepare(snapshot)
+        with self.assertRaises(ValueError):load('prepare-app-hardening').prepare(snapshot,evidence)
+
+    def test_hardening_requires_current_image_bound_readiness_and_baseline(self):
+        module=load('prepare-app-hardening')
+        snapshot,evidence=self.hardening_fixture()
+        with self.assertRaises(ValueError):module.prepare(snapshot)
+        for key,value in [('deployment_uid','other'),('resource_version','2'),('image','other@sha256:'+'b'*64),('read_only_rootfs_verified',False),('observed_at',(datetime.now(timezone.utc)-timedelta(days=2)).isoformat()),('ready',{'path':'/health','status':200}),('baseline',{'duration_seconds':60,'samples':1})]:
+            with self.subTest(key=key):
+                invalid=deepcopy(evidence);invalid[key]=value
+                with self.assertRaises(ValueError):module.prepare(snapshot,invalid)
+
+    def test_hardening_rejects_unsafe_resource_decisions_and_missing_probe(self):
+        module=load('prepare-app-hardening')
+        snapshot,evidence=self.hardening_fixture()
+        for resources in [{'requests':{'cpu':'1m','memory':'128Mi'},'limits':{'memory':'256Mi'}},{'requests':{'cpu':'50m','memory':'32Mi'},'limits':{'memory':'256Mi'}},{'requests':{'cpu':'50m','memory':'128Mi'},'limits':{'memory':'128Mi'}},{'requests':{'cpu':'50m','memory':'128Mi'},'limits':{'memory':'0Mi'}},{'requests':{'cpu':'NaN','memory':'128Mi'},'limits':{'memory':'256Mi'}}]:
+            invalid=deepcopy(evidence);invalid['resources']=resources
+            with self.assertRaises(ValueError):module.prepare(snapshot,invalid)
+        del snapshot['spec']['template']['spec']['containers'][0]['readinessProbe']
+        with self.assertRaises(ValueError):module.prepare(snapshot,evidence)
+
+    def test_hardening_uses_explicit_resources_preserves_security_and_does_not_echo_env(self):
+        snapshot,evidence=self.hardening_fixture();container=snapshot['spec']['template']['spec']['containers'][0]
+        container['securityContext']={'runAsUser':10001,'allowPrivilegeEscalation':False}
+        container['env']=[{'name':'PRIVATE_TOKEN','value':'fixture-private-do-not-echo'}]
+        result=load('prepare-app-hardening').prepare(snapshot,evidence)
+        changes=[p for p in result['patch'] if p['op']!='test']
+        self.assertIn({'op':'test','path':'/spec/template/spec/containers/0/image','value':container['image']},result['patch'])
+        self.assertNotIn('fixture-private-do-not-echo',json.dumps(result))
+        self.assertIn({'op':'add','path':'/spec/template/spec/containers/0/resources/limits','value':{'memory':'256Mi'}},changes)
+        self.assertFalse(any(p['path'].endswith('/runAsUser') for p in changes))
+        self.assertTrue(any(p['value']=='/ready' for p in changes))
+        container['securityContext']['allowPrivilegeEscalation']=True
+        with self.assertRaises(ValueError):load('prepare-app-hardening').prepare(snapshot,evidence)
+
+    def test_hardening_rejects_writer_security_image_and_existing_resource_conflicts(self):
+        module=load('prepare-app-hardening');snapshot,evidence=self.hardening_fixture()
+        for mutate in [lambda x:x['spec'].update(strategy={'type':'RollingUpdate'}),lambda x:x['spec'].update(replicas=2),lambda x:x['spec']['template']['spec'].update(securityContext={}),lambda x:x['spec']['template']['spec']['containers'][0].update(securityContext={'privileged':True}),lambda x:x['spec']['template']['spec']['containers'][0].update(image='mutable:latest'),lambda x:x['spec']['template']['spec']['containers'][0].update(resources={'limits':{'memory':'100Mi'}}),lambda x:x['spec']['template']['spec']['containers'][0].update(volumeMounts=[]),lambda x:x['spec']['template']['spec'].update(hostNetwork=True)]:
+            invalid=deepcopy(snapshot);mutate(invalid)
+            with self.assertRaises(ValueError):module.prepare(invalid,evidence)
+
+    def test_hardening_rejects_container_overrides_of_safe_pod_security(self):
+        module=load('prepare-app-hardening');snapshot,evidence=self.hardening_fixture()
+        for override in [{'runAsNonRoot':False}, {'runAsUser':0}, {'seccompProfile':{'type':'Unconfined'}}, {'procMount':'Unmasked'}, {'runAsNonRoot':False,'runAsUser':0,'seccompProfile':{'type':'Unconfined'}}]:
+            with self.subTest(override=override):
+                invalid=deepcopy(snapshot)
+                invalid['spec']['template']['spec']['containers'][0]['securityContext']=override
+                with self.assertRaises(ValueError):module.prepare(invalid,evidence)
+        snapshot['spec']['template']['spec']['containers'][0]['securityContext']={'runAsNonRoot':True,'runAsUser':10001,'seccompProfile':{'type':'RuntimeDefault'}}
+        module.prepare(snapshot,evidence)
+
+    def test_hardening_generates_executable_json_patch_with_image_and_data_unchanged(self):
+        snapshot,evidence=self.hardening_fixture()
+        result=load('prepare-app-hardening').prepare(snapshot,evidence)
+        patched=deepcopy(snapshot)
+        for operation in result['patch']:
+            keys=operation['path'].strip('/').split('/')
+            parent=patched
+            for key in keys[:-1]:parent=parent[int(key)] if isinstance(parent,list) else parent[key]
+            key=int(keys[-1]) if isinstance(parent,list) else keys[-1]
+            if operation['op']=='test':self.assertEqual(parent[key],operation['value'])
+            else:parent[key]=deepcopy(operation['value'])
+        pod=patched['spec']['template']['spec'];container=pod['containers'][0]
+        self.assertEqual(container['readinessProbe']['httpGet'],{'path':'/ready','port':8000})
+        self.assertFalse(pod['automountServiceAccountToken'])
+        self.assertEqual(container['resources']['requests']['cpu'],'75m')
+        self.assertEqual(container['image'],snapshot['spec']['template']['spec']['containers'][0]['image'])
+        self.assertEqual(pod['volumes'],snapshot['spec']['template']['spec']['volumes'])
+
+    def network_fixture(self):
+        snapshot,_=self.hardening_fixture()
+        peer={'namespaceSelector':{'matchLabels':{'kubernetes.io/metadata.name':'monitoring'}},'podSelector':{'matchLabels':{'app.kubernetes.io/name':'prometheus'}}}
+        rule=lambda direction,category,peer,port:{'direction':direction,'category':category,'peer':peer,'ports':[{'protocol':'TCP','port':port}],'evidence':'observed in reviewed read-only inventory'}
+        inventory={'deployment_uid':'opaque','resource_version':'3','observed_at':datetime.now(timezone.utc).isoformat(),'enforcement_smoke_passed':True,'existing_policies':[], 'flow_review_complete':True,'not_applicable':{'fanout':'service has no backend fanout in fixture','backups':'PVC backups are separate pods and never connect to app'},'flows':[rule('Ingress','caddy',{'ipBlock':{'cidr':'192.0.2.4/32'}},8000),rule('Ingress','metrics',peer,8000),rule('Egress','external',{'ipBlock':{'cidr':'198.51.100.0/24'}},443), {'direction':'Egress','category':'dns','peer':{'namespaceSelector':{'matchLabels':{'kubernetes.io/metadata.name':'kube-system'}},'podSelector':{'matchLabels':{'k8s-app':'kube-dns'}}},'ports':[{'protocol':'UDP','port':53},{'protocol':'TCP','port':53}],'evidence':'reviewed resolver endpoints'}]}
+        return snapshot,inventory
+
+    def test_network_policy_is_app_scoped_and_includes_all_reviewed_flows(self):
+        snapshot,inventory=self.network_fixture();before=deepcopy(inventory)
+        result=load('prepare-networkpolicy').prepare(snapshot,inventory)
+        self.assertEqual(inventory,before)
+        policy=result['policy']
+        self.assertEqual(policy['spec']['podSelector'],{'matchLabels':{'app.kubernetes.io/name':'portal-web'}})
+        self.assertEqual(len(policy['spec']['ingress']),2)
+        self.assertEqual(len(policy['spec']['egress']),2)
+        self.assertTrue(result['approval_required'])
+        self.assertNotIn('default-deny',json.dumps(policy))
+
+    def test_network_policy_fails_closed_on_missing_flows_broad_peers_or_policy_overlap(self):
+        module=load('prepare-networkpolicy');snapshot,inventory=self.network_fixture()
+        for mutate in [lambda x:x.update(flow_review_complete=False),lambda x:x.update(enforcement_smoke_passed=False),lambda x:x.update(deployment_uid='other'),lambda x:x.update(existing_policies=[{'metadata':{'name':'unknown'}}]),lambda x:x.update(not_applicable={}),lambda x:x['flows'][0].update(peer={'ipBlock':{'cidr':'0.0.0.0/0'}}),lambda x:x['flows'][0].update(peer={'podSelector':{}}),lambda x:x['flows'][0].update(ports=[]),lambda x:x['flows'][0].update(evidence=''),lambda x:x['flows'][-1]['ports'].pop()]:
+            invalid=deepcopy(inventory);mutate(invalid)
+            with self.assertRaises(ValueError):module.prepare(snapshot,invalid)
 
     def test_exact_git_context_excludes_secrets_data_and_working_changes(self):
         with tempfile.TemporaryDirectory() as temp:

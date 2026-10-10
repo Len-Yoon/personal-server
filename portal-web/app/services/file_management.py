@@ -4,6 +4,12 @@ Linux/Darwin atomic exclusive rename prevents overwriting even with concurrent
 requests. Unsupported kernels fail closed rather than use check-then-rename.
 """
 import ctypes
+import base64
+import fcntl
+import hashlib
+import hmac
+import secrets
+import time
 import errno
 import json
 import os
@@ -12,12 +18,19 @@ import sys
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from app.services import file_store
 
 
 MAX_SEARCH_ENTRIES = 10000
 MAX_SEARCH_RESULTS = 200
+_PURGE_KEY = secrets.token_bytes(32)
+PURGE_PREVIEW_MAX_AGE = 600
+
+
+class SnapshotLimitError(ValueError):
+    """The item remains restorable, but cannot be fully measured safely."""
 
 
 class TrashCompletedError(OSError):
@@ -152,6 +165,8 @@ def _trash_fd():
             pass
         fd = os.open('.trash', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
         try:
+            # Serialize trash, restore and purge across application workers.
+            fcntl.flock(fd, fcntl.LOCK_EX)
             yield fd
         finally:
             os.close(fd)
@@ -184,7 +199,10 @@ def trash(path):
 
 
 def _metadata(fd):
-    meta_fd = os.open('metadata.json', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+    meta_fd = os.open('metadata.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    if not stat.S_ISREG(os.fstat(meta_fd).st_mode):
+        os.close(meta_fd)
+        raise ValueError('휴지통 기록을 확인해주세요.')
     with os.fdopen(meta_fd, 'r') as source:
         value = json.loads(source.read(8193))
     if not isinstance(value, dict) or not isinstance(value.get('path'), str):
@@ -192,30 +210,188 @@ def _metadata(fd):
     _parts(value['path'])
     if not isinstance(value.get('trashed_at'), str):
         raise ValueError('휴지통 기록을 확인해주세요.')
-    return value
+    # Ignore untrusted extra keys: they must never replace the token or stats.
+    return {'path': value['path'], 'trashed_at': value['trashed_at']}
+
+
+def _token(token):
+    if not isinstance(token, str) or len(token) != 32 or any(c not in '0123456789abcdef' for c in token):
+        raise ValueError('휴지통 항목을 확인해주세요.')
+    return token
+
+
+def _tree_snapshot(fd, *, depth=0, budget=None):
+    # No paths are resolved, and every child is opened without following links.
+    budget = [0] if budget is None else budget
+    budget[0] += 1
+    if depth > 64 or budget[0] > 10000:
+        raise SnapshotLimitError('항목이 너무 큽니다. 휴지통을 별도로 점검해주세요.')
+    info = os.fstat(fd)
+    identity = [info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+    if stat.S_ISREG(info.st_mode):
+        return info.st_size, identity
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError('일반 파일과 폴더만 처리할 수 있습니다.')
+    total, children = 0, []
+    names = []
+    with os.scandir(fd) as entries:
+        for entry in entries:
+            if len(names) >= 10000 - budget[0]:
+                raise SnapshotLimitError('항목이 너무 큽니다. 휴지통을 별도로 점검해주세요.')
+            names.append(entry.name)
+    names.sort()
+    for name in names:
+        child = file_store._open_child_fd(fd, name)
+        try:
+            size, snapshot = _tree_snapshot(child, depth=depth+1, budget=budget)
+            total += size
+            children.append([name, snapshot])
+        finally:
+            os.close(child)
+    return total, [identity, children]
+
+
+def _snapshot_digest(fd, metadata, snapshot):
+    entry = os.fstat(fd)
+    return hashlib.sha256(json.dumps([entry.st_dev, entry.st_ino, metadata, snapshot], sort_keys=True).encode()).hexdigest()
+
+
+def _trash_record_fd(fd, token, now, *, allow_incomplete=False):
+    metadata = _metadata(fd)
+    when = datetime.fromisoformat(metadata['trashed_at'])
+    if when.tzinfo is None:
+        raise ValueError('휴지통 시간대를 확인해주세요.')
+    child = file_store._open_child_fd(fd, 'item')
+    try:
+        try:
+            size, snapshot = _tree_snapshot(child)
+            digest = _snapshot_digest(fd, metadata, snapshot)
+        except SnapshotLimitError:
+            if not allow_incomplete or not (stat.S_ISREG(os.fstat(child).st_mode) or stat.S_ISDIR(os.fstat(child).st_mode)):
+                raise
+            size, digest = None, None
+    finally:
+        os.close(child)
+    return {'id': token, **metadata, 'trashed_at_display': when.astimezone(ZoneInfo('Asia/Seoul')).strftime('%Y-%m-%d %H:%M'), 'size_bytes': size, 'purge_allowed': digest is not None, 'age_days': max(0, (now-when).days), '_snapshot': digest}
+
+
+def _trash_record(root, token, now, *, allow_incomplete=False):
+    _token(token)
+    fd = os.open(token, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+    try:
+        return _trash_record_fd(fd, token, now, allow_incomplete=allow_incomplete)
+    finally:
+        os.close(fd)
+
+
+def _trash_records(root, now):
+    records, excluded = [], 0
+    with os.scandir(root) as entries:
+        names = [entry.name for entry in entries]
+    for name in names:
+        try:
+            records.append(_trash_record(root, name, now, allow_incomplete=True))
+        except (OSError, ValueError, KeyError, OverflowError):
+            excluded += 1
+    return sorted(records, key=lambda item: (item['trashed_at'], item['id']), reverse=True), excluded
 
 
 def list_trash():
-    items = []
     with _trash_fd() as root:
-        with os.scandir(root) as entries:
-            for entry in entries:
-                if len(items) >= 1000:
-                    break
-                if len(entry.name) != 32 or any(c not in '0123456789abcdef' for c in entry.name):
-                    continue
+        records, _ = _trash_records(root, datetime.now(timezone.utc))
+    return [{key: value for key, value in item.items() if key != '_snapshot'} for item in records]
+
+
+def trash_page(*, page=1, page_size=50):
+    if type(page) is not int or page < 1 or type(page_size) is not int or not 1 <= page_size <= 200:
+        raise ValueError('페이지 범위를 확인해주세요.')
+    with _trash_fd() as root:
+        items, excluded = _trash_records(root, datetime.now(timezone.utc))
+    total = len(items)
+    pages = max(1, (total+page_size-1)//page_size)
+    page = min(page, pages)
+    return {'items': [{k: v for k, v in item.items() if k != '_snapshot'} for item in items[(page-1)*page_size:page*page_size]], 'total': total, 'pages': pages, 'page': page, 'size_bytes': sum(i['size_bytes'] or 0 for i in items), 'size_complete': excluded == 0 and all(i['purge_allowed'] for i in items), 'excluded': excluded}
+
+
+def _purge_selection(root, item_id, older_than_days, before):
+    if item_id is not None:
+        _token(item_id)
+        items = [_trash_record(root, item_id, datetime.now(timezone.utc))]
+        excluded = 0
+    else:
+        items, excluded = _trash_records(root, datetime.now(timezone.utc))
+        excluded += sum(not item['purge_allowed'] for item in items)
+        items = [item for item in items if item['purge_allowed']]
+    if older_than_days is not None:
+        if type(older_than_days) is not int or not 0 <= older_than_days <= 36500:
+            raise ValueError('보관 일수는 0~36500으로 입력해주세요.')
+        items = [i for i in items if datetime.fromisoformat(i['trashed_at']).timestamp() <= before - older_than_days*86400]
+    return items, excluded
+
+
+def _selection_digest(items):
+    return hashlib.sha256(json.dumps([(i['id'], i['_snapshot']) for i in items]).encode()).hexdigest()
+
+
+def preview_purge(*, item_id=None, older_than_days=None):
+    before = time.time()
+    with _trash_fd() as root:
+        items, excluded = _purge_selection(root, item_id, older_than_days, before)
+    payload = {'item_id': item_id, 'older_than_days': older_than_days, 'before': before, 'digest': _selection_digest(items)}
+    encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+    signature = hmac.new(_PURGE_KEY, encoded.encode(), hashlib.sha256).hexdigest()
+    return {'items': [{k: v for k, v in i.items() if k != '_snapshot'} for i in items], 'count': len(items), 'size_bytes': sum(i['size_bytes'] for i in items), 'excluded': excluded, 'confirmation': encoded + '.' + signature}
+
+
+def confirm_purge(confirmation):
+    try:
+        if len(confirmation) > 2048:
+            raise ValueError
+        encoded, signature = confirmation.split('.')
+        expected = hmac.new(_PURGE_KEY, encoded.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            raise ValueError
+        payload = json.loads(base64.urlsafe_b64decode(encoded))
+        if not 0 <= time.time() - payload['before'] <= PURGE_PREVIEW_MAX_AGE:
+            raise ValueError
+    except (ValueError, KeyError, TypeError):
+        raise ValueError('미리보기가 만료되었거나 올바르지 않습니다. 다시 확인해주세요.') from None
+    deleted = []
+    with _trash_fd() as root:
+        items, _ = _purge_selection(root, payload['item_id'], payload['older_than_days'], payload['before'])
+        if not hmac.compare_digest(_selection_digest(items), payload['digest']):
+            raise ValueError('휴지통 내용이 변경되었습니다. 미리보기를 다시 확인해주세요.')
+        for item in items:
+            token = item['id']
+            fd = None
+            try:
+                fd = os.open(token, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+                # Recheck the item before mutating; external changes fail closed.
+                if _trash_record_fd(fd, token, datetime.now(timezone.utc))['_snapshot'] != item['_snapshot']:
+                    raise ValueError('휴지통 내용이 변경되었습니다.')
+                child = file_store._open_child_fd(fd, 'item')
                 try:
-                    fd = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
-                    try:
-                        metadata = _metadata(fd)
-                        mode = os.stat('item', dir_fd=fd, follow_symlinks=False).st_mode
-                        if stat.S_ISREG(mode) or stat.S_ISDIR(mode):
-                            items.append({'id': entry.name, **metadata})
-                    finally:
-                        os.close(fd)
-                except (OSError, ValueError, KeyError):
-                    continue
-    return sorted(items, key=lambda item: item['trashed_at'], reverse=True)
+                    _, snapshot = _tree_snapshot(child)
+                    if _snapshot_digest(fd, _metadata(fd), snapshot) != item['_snapshot']:
+                        raise ValueError('휴지통 내용이 변경되었습니다.')
+                    if stat.S_ISDIR(os.fstat(child).st_mode):
+                        file_store._preflight_directory_fd(child)
+                        file_store._delete_directory_fd(child)
+                        os.rmdir('item', dir_fd=fd)
+                    else:
+                        os.unlink('item', dir_fd=fd)
+                finally:
+                    os.close(child)
+                deleted.append(token)
+                # Remove only our journal. Unknown siblings are never deleted.
+                os.unlink('metadata.json', dir_fd=fd)
+                os.rmdir(token, dir_fd=root)
+            except (OSError, ValueError):
+                return {'ok': False, 'deleted': deleted, 'failed': [i['id'] for i in items if i['id'] not in deleted], 'detail': '일부 삭제 후 중지됐을 수 있습니다. 목록과 미리보기를 다시 확인해주세요.'}
+            finally:
+                if fd is not None:
+                    os.close(fd)
+    return {'ok': True, 'deleted': deleted, 'failed': []}
 
 
 def restore(token, new_name=''):

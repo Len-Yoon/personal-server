@@ -357,15 +357,15 @@ def _client_id(request: Request) -> str:
 
 
 @router.get('/tools')
-def file_tools(request: Request, q: str = ''):
+def file_tools(request: Request, q: str = '', page: int = 1):
     _require_file_access(request)
     from app.services import file_management
     try:
         results = file_management.search(q) if q else {'items': [], 'truncated': False}
-        trash_items = file_management.list_trash()
+        trash_page = file_management.trash_page(page=page)
     except (ValueError, OSError):
         raise HTTPException(400, '파일 관리 정보를 확인할 수 없습니다.') from None
-    return templates.TemplateResponse(request=request, name='file_tools.html', context={'request': request, 'title': '파일 검색·휴지통', 'q': q, 'results': results, 'trash_items': trash_items})
+    return templates.TemplateResponse(request=request, name='file_tools.html', context={'request': request, 'title': '파일 검색·휴지통', 'q': q, 'results': results, 'trash_items': trash_page['items'], 'trash_page': trash_page})
 
 
 @router.post('/move')
@@ -416,10 +416,14 @@ def restore_item(request: Request, item_id: str = Form(...), name: str = Form(''
 
 
 @router.get('/bookmarks')
-def bookmarks_home(request: Request):
+def bookmarks_home(request: Request, q: str = '', page: int = 1):
     _require_file_access(request)
     from app.services import news_bookmarks
-    return templates.TemplateResponse(request=request, name='news_bookmarks.html', context={'request': request, 'title': '개인 기사 보관함', 'bookmarks': news_bookmarks.listing()})
+    try:
+        result = news_bookmarks.page(q=q, page=page)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return templates.TemplateResponse(request=request, name='news_bookmarks.html', context={'request': request, 'title': '개인 기사 보관함', 'bookmarks': result['items'], 'listing': result})
 
 
 @router.post('/bookmarks')
@@ -439,3 +443,34 @@ def delete_bookmark(request: Request, bookmark_id: int = Form(...)):
     from app.services import news_bookmarks
     news_bookmarks.delete(bookmark_id)
     return RedirectResponse('/files/bookmarks', status_code=303)
+
+
+@router.post('/trash/preview')
+def preview_trash_purge(request: Request, item_id: str = Form(''), older_than_days: str = Form('')):
+    _require_file_access(request)
+    from app.services import file_management
+    try:
+        preview = file_management.preview_purge(item_id=item_id or None, older_than_days=int(older_than_days) if older_than_days else None)
+    except (ValueError, OSError):
+        raise HTTPException(400, '휴지통 항목과 보관 일수를 확인해주세요.') from None
+    return templates.TemplateResponse(request=request, name='file_tools.html', context={'request': request, 'title': '휴지통 영구 삭제 미리보기', 'q': '', 'results': {'items': [], 'truncated': False}, 'trash_items': [], 'trash_page': None, 'purge_preview': preview})
+
+
+@router.post('/trash/purge')
+def purge_trash(request: Request, confirmation: str = Form(...), confirm: str = Form(''), delete_password: str = Form('')):
+    _require_file_access(request)
+    if confirm != '영구 삭제':
+        raise HTTPException(400, '영구 삭제 문구를 입력해 확인해주세요.')
+    _require_delete_password(request, delete_password)
+    from app.services import file_management
+    try:
+        result = file_management.confirm_purge(confirmation)
+    except (ValueError, OSError):
+        raise HTTPException(400, '미리보기가 만료되었거나 휴지통 내용이 변경되었습니다. 다시 확인해주세요.') from None
+    try:
+        append_security_event('trash_purged', count=len(result['deleted']), completed=result['ok'])
+    except OSError:
+        return JSONResponse(status_code=207, content={**result, 'ok': False, 'audit_recorded': False, 'detail': '삭제 결과는 완료 목록을 확인해주세요. 감사 기록 저장에 실패했습니다.'})
+    if not result['ok']:
+        return JSONResponse(status_code=207, content=result)
+    return RedirectResponse('/files/tools', status_code=303)

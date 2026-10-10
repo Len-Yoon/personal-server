@@ -173,7 +173,9 @@
                 if (!response.ok || destination.origin !== global.location.origin) {
                     status(form, response.status === 409
                         ? "저장 충돌이 발생했습니다. 다른 화면에서 수정했거나 요청 내용이 변경되었습니다. 입력을 복사하고 새로고침해 최신 기록을 확인해주세요."
-                        : "저장하지 못했습니다. 입력 내용은 유지됩니다. 확인 후 다시 시도해주세요.");
+                        : response.status === 503
+                            ? "저장소가 사용 중입니다. 입력 내용은 유지됩니다. 잠시 후 다시 저장해주세요."
+                            : "저장하지 못했습니다. 입력 내용은 유지됩니다. 확인 후 다시 시도해주세요.");
                     if (response.status === 409) offerConflictRecovery(binding);
                     return;
                 }

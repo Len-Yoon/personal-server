@@ -309,3 +309,104 @@ Portal cutover는 `operator-only` 절차임. 실행 전 `K3s Secret encryption`�
 bash infra/k8s/tools/portal-cutover.sh --rollback-caddy
 bash infra/k8s/tools/portal-cutover.sh --cleanup-rolledback
 ```
+
+## 앱 resource·readiness·NetworkPolicy 준비
+
+다음 도구는 읽기 전용으로 확보한 Deployment JSON과 검토된 증적을 입력받아 **검토용 JSON만 생성함**. Kubernetes 호출·리소스 적용·이미지 교체·운영 데이터 변경을 수행하지 않음. 기본 resource 수치를 임의로 적용하지 않으며, 장시간 baseline과 실제 `/ready` 응답을 확보하기 전에는 하드닝 준비를 차단함.
+
+| 준비 도구 | 생성 결과 | 필수 확인 사항 |
+|---|---|---|
+| `tools/prepare-app-hardening.py` | 기존 값을 보존하는 JSON Patch와 검토 조건 | 불변 digest, 동일 UID/resourceVersion의 증적, `/ready` HTTP 200, 읽기 전용 rootfs 이미지 검증, writable PVC·`/tmp`, 대표 부하 baseline |
+| `tools/prepare-networkpolicy.py` | 앱 1개에만 적용되는 ingress·egress allowlist | CNI enforcement smoke, 현재 policy 목록, DNS·Caddy·metrics·fanout·외부 API/Drive·backup 흐름 검토 |
+
+```bash
+python3 infra/k8s/tools/prepare-app-hardening.py --describe-input
+python3 infra/k8s/tools/prepare-networkpolicy.py --describe-input
+python3 infra/k8s/tools/prepare-app-hardening.py \
+  --snapshot /tmp/deployment.json --evidence /tmp/hardening-evidence.json
+python3 infra/k8s/tools/prepare-networkpolicy.py \
+  --snapshot /tmp/deployment.json --inventory /tmp/network-inventory.json
+```
+
+출력은 `patch` 또는 `policy`를 포함하는 검토 결과 객체임. 출력 전체를 `kubectl`에 직접 전달하지 않음. 실제 적용 전 기존 승인 범위와 최신 snapshot·증적·노드 여유량·rollback 절차를 다시 확인함. 증적에 실제 내부 IP·계정·Secret 값을 Git에 기록하지 않음.
+
+### 하드닝 증적 형식
+
+아래 값은 형식 설명을 위한 합성 예제이며 운영 측정값이 아님. UID·resourceVersion·image·UTC 시각을 해당 읽기 전용 조회와 일치시켜야 함. `read_only_rootfs_verified`는 해당 digest 이미지의 쓰기 경로를 별도 검증했을 때만 `true`로 설정함.
+
+```json
+{
+  "deployment_uid": "synthetic-uid",
+  "resource_version": "123",
+  "image": "example.invalid/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "observed_at": "2026-10-10T00:00:00+00:00",
+  "ready": {"path": "/ready", "status": 200},
+  "read_only_rootfs_verified": true,
+  "baseline": {
+    "duration_seconds": 86400,
+    "samples": 288,
+    "memory_p95_bytes": 67108864,
+    "memory_peak_bytes": 104857600,
+    "cpu_p95_millicores": 40
+  },
+  "resources": {
+    "requests": {"cpu": "50m", "memory": "128Mi"},
+    "limits": {"memory": "256Mi"}
+  }
+}
+```
+
+| 검증 경계 | 처리 |
+|---|---|
+| 증적 유효기간 | timezone이 있는 ISO 8601 시각을 요구하며 미래 시각 또는 24시간 초과 시 차단함 |
+| baseline | 대표 부하 24시간 이상·288개 이상 표본을 요구함. container 메모리 측정에 tmpfs 사용량을 포함하고, 가져오기·검색·배치 등 최대 부하 경로를 별도 검토함 |
+| request·limit | CPU·memory request는 측정 p95 이상, memory limit은 측정 peak의 1.5배 및 request 이상이어야 함. 이는 OOM 방지 보장이 아니며 노드 allocatable·전체 앱 합계 검토가 필요함 |
+| CPU limit | 입력에서 명시할 때만 추가함. 설정 시 request보다 작은 값은 차단함 |
+| 기존 값 | 기존 resource는 덮어쓰지 않음. 기존 값이 baseline 조건에 미달하면 차단하여 별도 결정을 요구함 |
+| 단일 writer | `Recreate`, replica 0 또는 1만 허용함. 기존 이미지·volume·replica·strategy는 변경하지 않음 |
+| 보안·readiness | 기존 nonroot·RuntimeDefault seccomp를 요구함. 상충하는 securityContext는 자동 덮어쓰지 않음. `/ready`를 지원하는 동일 digest와 rootfs 검증 후 probe path와 누락 보안 필드만 준비함 |
+
+현재 provisioning용 inert 앱 manifest의 `/health` readiness는 유지함. 신규 준비 도구는 **이미 실행 중인 불변 이미지의 `/ready`가 검증된 뒤** 전환 patch를 생성하므로, 구형 이미지를 `/ready`로 먼저 바꾸지 않음.
+
+### NetworkPolicy 증적 형식과 경계
+
+`--describe-input`의 `flow_schema`, `ip_peer_alternative`은 설명용 항목임. 실제 입력은 `flows` 안에 필요한 흐름을 모두 작성함. 다음은 합성된 DNS 흐름 1개를 보여주는 **불완전 예제**이며 다른 범주가 빠져 있으므로 검증을 통과하지 않음.
+
+```json
+{
+  "deployment_uid": "synthetic-uid",
+  "resource_version": "123",
+  "observed_at": "2026-10-10T00:00:00+00:00",
+  "enforcement_smoke_passed": true,
+  "existing_policies": [],
+  "flow_review_complete": true,
+  "not_applicable": {},
+  "flows": [
+    {
+      "direction": "Egress",
+      "category": "dns",
+      "peer": {
+        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
+        "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}
+      },
+      "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}],
+      "evidence": "synthetic read-only resolver inventory reference"
+    }
+  ]
+}
+```
+
+| 범주 | 확인 내용 |
+|---|---|
+| `dns` | 실제 CoreDNS selector 및 UDP·TCP 53을 모두 요구함. 비해당 처리를 허용하지 않음 |
+| `caddy` | 앱 ingress에 실제 관찰된 NodePort/SNAT 이후 source와 대상 port를 사용함. Caddy 호스트 주소만으로 유효 source를 추정하지 않음 |
+| `metrics` | 실제 monitoring namespace·Prometheus pod selector·앱 metrics port를 확인함 |
+| `fanout` | Portal→Book·YouTube·Crawler 등 실제 호출의 source/destination 양쪽 정책을 각각 확인함 |
+| `external` | Drive·YouTube·외부 API·외부 URL 호출의 유지관리 가능한 IP 범위와 TCP/UDP port를 명시함. 표준 NetworkPolicy는 FQDN allowlist를 제공하지 않으며 DNS 허용만으로 외부 API가 열리지 않음 |
+| `backups` | 실제 앱 네트워크를 사용하는 backup 연결을 허용함. 별도 Pod가 PVC만 읽는 경우에는 `not_applicable.backups`에 그 근거를 명시함 |
+
+DNS 외 실제로 해당하지 않는 범주는 `not_applicable`에 비해당 근거를 작성함. 같은 범주에 흐름과 비해당 처리를 동시에 지정하거나, 범주·peer·port·증거를 누락하면 차단함. peer는 정확한 namespace+pod label 또는 CIDR만 허용함. IPv4 `/16`, IPv6 `/48`보다 넓은 범위와 전체 namespace/pod selector는 차단하며, 더 넓은 provider 범위가 필요하면 별도 검토가 필요함. 기존 namespace policy가 하나라도 있으면 additive allow의 영향이 불명확하므로 이 최초 준비 경로를 차단함.
+
+생성 policy는 특정 앱 selector만 대상으로 하므로 namespace 전체 default-deny와 backup Job의 격리를 만들지 않음. 다만 대상 앱의 ingress·egress는 즉시 제한되므로, 서비스별로 DNS·공개 진입·metrics·fanout·외부 API/Drive·backup을 전후 검증하고 실패 시 해당 이름의 policy만 제거하는 rollback을 준비함. 기존 `networkpolicy/portal-allowlist.yaml.tmpl`은 불완전한 역사적 검토 예제이며 그대로 적용하지 않음.
+
+**미수행·확인 필요:** 이번 도구 구현은 운영 baseline 수집·불변 이미지 배포·`/ready` 운영 검증·CIDR/NodePort source 확정·NetworkPolicy 적용을 포함하지 않음. 실제 적용은 장시간 관찰 증적과 최신 조회를 확보하고 해당 운영 승인을 확인한 뒤 순차 진행함.
