@@ -429,3 +429,7 @@ Caddy 증거는 현재 대상 Pod UID와 결합해야 함. `inventory.target_pod
 후속 승인 범위·격리 실측·PR·실제 운영 적용 및 확인 필요 사항은 [운영 보안 잔여 항목 보완](../../docs/reviews/20261010_운영보안_잔여항목_보완.md)에 기록함. 이 절의 준비 도구 존재만으로 운영 적용 완료를 뜻하지 않음.
 
 `prepare-portal-service-routing.py`는 실패가 검증된 기존 Compose alias의 검색·health 여섯 URL만 현재 앱 Service로 바꿈. 환경 목록 전체를 덮어쓰지 않으며 SecretRef·중복 이름·예상 밖 URL은 거부함. 원복은 정확한 여섯 값과 원본 spec 해시를 대조함. 보안 patch와 조합할 때는 라우팅을 적용한 합성 snapshot에서 보안 patch를 생성하고, 같은 UID/RV의 단일 원자적 Patch로 적용함. 역순도 합성 snapshot에서 검증한 하나의 Patch로 처리하여 중간 상태의 운영 적용을 피함.
+
+### 2026-10-11 백업 이미지 전환 준비
+
+실행기 및 설치 참조의 백업 이미지 pin은 동일 초 최신 백업 동률 보존 보완을 포함한 후보로 갱신함. 이는 운영 적용 완료를 의미하지 않으며, suspended CronJob 전체 manifest를 재적용하지 않음. 운영 적용·사전 원복 커밋·실제 첫 정기 실행 여부는 [백업 이미지 운영 적용 기록](../../docs/reviews/20261011_백업이미지_운영적용.md)을 기준으로 확인함.
