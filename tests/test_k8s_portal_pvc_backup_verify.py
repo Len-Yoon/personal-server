@@ -16,6 +16,20 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "infra/k8s/tools/portal-pvc-backup-verify.sh"
 
 
+def safe_backup_stdout(output):
+    """Expose only fixed public statuses in this test's assertion failure."""
+    stages = {"writer_pause", "pvc_snapshot", "remote_upload", "remote_restore", "restore_validation",
+              "writer-observation", "remote_preflight", "remote-credentials", "remote-timeout",
+              "remote-config-password", "remote-path", "remote-auth", "remote-network", "remote-access",
+              "lock", "portal_readiness", "portal-rollout-timeout", "portal-rollout-command",
+              "portal_health", "evidence", "retention", "retention-cleanup", "reporting"}
+    allowed = {"portal_pvc_backup_stage=" + stage for stage in stages}
+    allowed.update({"pvc_backup_retention=PASS", "pvc_backup_retention=FAIL",
+                    "portal_pvc_backup=PASS", "portal_pvc_backup=FAIL",
+                    "backup_upload=UPLOADED", "backup_upload=SKIPPED_UNCHANGED"})
+    return " | ".join(line for line in output.splitlines() if line in allowed)
+
+
 class PortalPvcBackupVerifyTests(unittest.TestCase):
     def run_tool(self, mode="--go", *, runtime="k3s", runtime_marker_present=True, fail_at="", remote_error="", remote_timeout_attempts=0, rclone_timeout=None, rclone_retry_count=None, rclone_retry_backoff=None, missing_pvc=False, repeat=False, second_runtime=None, second_evidence_remaining=None, second_evidence_age=None, second_fail_at=None, refresh_window=None, max_age=None, namespace=None, existing_evidence="", special_entry=False, send_signal=False, followup_signal=False, lock_busy=False, require_urllib=False, health_status=200, rclone_config_file="", rclone_password_command="", readiness_timeout=None, assert_lock_fd_closed=False, hang_stream=False, signal_when="reader", assert_stream_child_stopped=False, execution_mode="host", command_timeout=None, writer_termination_timeout=None, rclone_config_work_dir="", pod_list_kind="PodList"):
         with tempfile.TemporaryDirectory() as directory:
@@ -1069,6 +1083,18 @@ esac
         self.assertNotIn("SKIPPED_UNCHANGED", result.stdout)
         self.assertEqual(calls.count("rclone copyto"), 4)
 
+    def test_failure_diagnostics_include_only_fixed_backup_status_labels(self):
+        output = "\n".join(("portal_pvc_backup_stage=writer_pause",
+                            "private-fixture-value fake:/private/fixture",
+                            "portal_pvc_backup_stage=private-fixture-value",
+                            "pvc_backup_retention=FAIL", "portal_pvc_backup_stage=retention",
+                            "portal_pvc_backup=PASS", "backup_upload=private-fixture-value"))
+        summary = safe_backup_stdout(output)
+        self.assertEqual(summary, "portal_pvc_backup_stage=writer_pause | pvc_backup_retention=FAIL | "
+                         "portal_pvc_backup_stage=retention | portal_pvc_backup=PASS")
+        self.assertNotIn("private-fixture-value", summary)
+        self.assertNotIn("fake:", summary)
+
     def test_in_cluster_repeated_refresh_does_not_wait_on_stale_writer_state(self):
         """A second refresh must observe its own scale-down before its bounded wait."""
         result, calls, _, _ = self.run_tool(
@@ -1078,7 +1104,7 @@ esac
             command_timeout=15,
         )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 0, "stdout_status=" + safe_backup_stdout(result.stdout))
         self.assertEqual(calls.count("scale deployment/portal-web --replicas=0"), 2)
         self.assertEqual(calls.count("scale deployment/portal-web --replicas=1"), 2)
 

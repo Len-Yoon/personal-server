@@ -35,7 +35,7 @@ def entry(file_name: str, *, size: int = 100) -> dict:
 
 
 def evidence(service: str = "book-memo", *, backup_name: str | None = None) -> str:
-    prefix = {"book-memo": "book", "youtube-memo": "youtube", "crawler-worker": "crawler"}[service]
+    prefix = {"book-memo": "book", "youtube-memo": "youtube", "crawler-worker": "crawler", "portal": "portal"}[service]
     newest = backup_name or name(0)
     return "\n".join((
         "schema_version=1", f"scope={service}", "backup_status=success", "encrypted=true",
@@ -124,10 +124,71 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(kept, {0, 1, 2, 3, 4, 5, 6, 7, 14, 21, 28, 35, 58, 89})
 
     def test_same_day_duplicates_are_removed_but_latest_seven_are_protected(self):
-        items = [entry(name(0, pid=pid)) for pid in range(1, 11)]
-        candidates = self.run_policy(items, proof=evidence(backup_name=name(0, pid=9)))
+        # Distinct creation seconds retain the existing seven-archive floor.
+        names = [f"{NOW - timedelta(seconds=offset):%Y%m%dT%H%M%SZ}-100.tar.age"
+                 for offset in range(10)]
+        candidates = self.run_policy([entry(value) for value in names])
         self.assertEqual(len(candidates), 3)
-        self.assertNotIn(name(0, pid=9), candidates)
+        self.assertTrue(set(candidates).isdisjoint(names[:7]))
+
+    def test_verified_same_second_pid_digit_transition_is_allowed_for_every_service(self):
+        for service in ("portal", "book-memo", "youtube-memo", "crawler-worker"):
+            with self.subTest(service=service):
+                self.calls.clear()
+                prefix = "portal-" if service == "portal" else ""
+                old, protected = name(0, 9999), name(0, 10000)
+                items = [{**entry(prefix + old), "ModTime": "2026-09-27T11:59:59.900000Z"},
+                         {**entry(prefix + protected), "ModTime": "2026-09-27T11:59:59.100000Z"}]
+                self.assertEqual(self.run_policy(items, service=service,
+                                 proof=evidence(service, backup_name=protected), delete=True), [])
+                self.assertFalse(any("deletefile" in argv for argv, _ in self.calls))
+
+    def test_all_maximum_timestamp_ties_are_retained_beyond_seven_with_exact_report(self):
+        cohort = [name(0, pid) for pid in range(9991, 10001)]
+        items = [entry(value) for value in cohort] + [entry(name(31)), entry(name(32))]
+        report = {}; deleted = []; remote = list(items)
+        def command(*argv, **kwargs):
+            if "lsjson" in argv: return json.dumps(remote)
+            filename = argv[-1].rsplit("/", 1)[-1]; deleted.append(filename)
+            remote[:] = [item for item in remote if item["Name"] != filename]
+            return ""
+        candidates = self.retention.run_retention("book-memo", evidence(backup_name=cohort[-1]),
+                     ("rclone",), command, delete=True, now=NOW, report=report)
+        self.assertEqual(candidates, [name(32)]); self.assertEqual(deleted, candidates)
+        self.assertTrue(set(cohort).isdisjoint(deleted))
+        self.assertEqual(report, {"total_count": 12, "retained_count": 11, "delete_count": 1,
+                                  "total_bytes": 1200, "retained_bytes": 1100, "delete_bytes": 100})
+
+    def test_protected_older_timestamp_or_missing_from_latest_cohort_blocks_deletion(self):
+        items = [entry(name(day)) for day in (0, 1, 2, 3, 4, 5, 6, 31, 32)]
+        for protected in (name(1), name(0, 999)):
+            with self.subTest(protected=protected):
+                self.calls.clear()
+                with self.assertRaises(self.retention.RetentionError):
+                    self.run_policy(items, proof=evidence(backup_name=protected), delete=True)
+                self.assertFalse(any("deletefile" in argv for argv, _ in self.calls))
+
+    def test_missing_restore_evidence_with_timestamp_ties_blocks_deletion(self):
+        items = [entry(name(0, pid)) for pid in range(9991, 10001)] + [entry(name(32))]
+        with self.assertRaises(self.retention.RetentionError):
+            self.run_policy(items, proof="", delete=True)
+        self.assertEqual(self.calls, [])
+
+    def test_latest_timestamp_cohort_change_before_delete_blocks_all_deletion(self):
+        items = [entry(name(day)) for day in (0, 1, 2, 3, 4, 5, 6, 31, 32)]
+        listings = 0
+        def command(*argv, **kwargs):
+            nonlocal listings
+            self.calls.append((argv, kwargs))
+            if "lsjson" in argv:
+                listings += 1
+                return json.dumps(items if listings == 1 else items + [entry(name(0, 10000))])
+            raise AssertionError("changed tie cohort must block deletion")
+        with self.assertRaises(self.retention.RetentionError):
+            self.retention.run_retention("book-memo", evidence(), ("rclone",), command,
+                                        delete=True, now=NOW)
+        self.assertEqual(listings, 2)
+        self.assertFalse(any("deletefile" in argv for argv, _ in self.calls))
 
     def test_korean_midnight_separates_daily_buckets(self):
         first = "20260926T150001Z-100.tar.age"

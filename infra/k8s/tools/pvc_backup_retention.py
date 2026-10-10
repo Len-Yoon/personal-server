@@ -127,14 +127,24 @@ def _list(remote: str, rclone_argv: tuple[str, ...], command: Callable[..., str]
     return _inventory(raw, now, portal=portal)
 
 
+def _latest_names(inventory: list[tuple[datetime, str, int, str]]) -> set[str]:
+    # Run IDs only record whole seconds. PID spelling and remote ModTime do
+    # not establish which archive was created last within that second.
+    if not inventory:
+        return set()
+    latest = max(item[0] for item in inventory)
+    return {item[1] for item in inventory if item[0] == latest}
+
+
 def retained_names(inventory: list[tuple[datetime, str, int, str]], now: datetime, *, minimum: int = 7) -> set[str]:
     """KST daily 7; preceding four 7-day bands; older previous 3 calendar months.
 
     The newest archive in each occupied bucket is kept. The newest seven
     archives are a safety floor when history is sparse or runs are repeated.
+    All archives tied at the maximum creation second are additionally kept.
     """
     today = now.astimezone(KST).date()
-    selected = {item[1] for item in inventory[:minimum]}
+    selected = {item[1] for item in inventory[:minimum]} | _latest_names(inventory)
     buckets: set[tuple[str, int]] = set()
     for created, filename, _, _ in inventory:
         day = created.astimezone(KST).date()
@@ -178,7 +188,7 @@ def run_retention(
         raise RetentionError("retention remote invalid")
     remote = remote_root if service == "portal" else f"{REMOTE_PARENT}/{service}"
     inventory = _list(remote, rclone_argv, command, now, portal=service == "portal")
-    if inventory[0][1] != protected:
+    if protected not in _latest_names(inventory):
         raise RetentionError("retention evidence does not match latest archive")
     retained = retained_names(inventory, now) | {protected}
     candidates = [item[1] for item in reversed(inventory) if item[1] not in retained]
@@ -199,7 +209,7 @@ def run_retention(
         check_now = check_now.astimezone(timezone.utc)
         expected_latest = _proof(service, evidence, check_now, max_age_seconds)
         current = _list(remote, rclone_argv, command, check_now, portal=service == "portal")
-        if current != inventory or current[0][1] != expected_latest:
+        if current != inventory or expected_latest not in _latest_names(current):
             raise RetentionError("retention remote inventory changed")
         try:
             command(*rclone_argv, "--drive-use-trash=false", "deletefile",
