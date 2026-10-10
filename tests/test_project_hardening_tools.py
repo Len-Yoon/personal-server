@@ -32,6 +32,9 @@ class IngressOnlyPolicyTests(unittest.TestCase):
             inventory['flows'].append({'category':category,'peer':peer,'port':module.PORTS[app],'proof':{'observed_at':stamp,'status':200,'peer_sha256':module.digest(peer),'target_spec_sha256':sha,'source_kind':'pod','source_pod_uid':'source-opaque','source_namespace':namespace,'source_labels':deepcopy(labels),'post_nat_source_matches_pod':True}})
         inventory['not_applicable']={category:'No active flow in reviewed live inventory' for category in {'metrics','fanout'}-set(categories)}
         inventory['caddy']['target_spec_sha256']=sha
+        inventory.update(target_pod_uid='target-pod-opaque',target_node_uid='target-node-opaque')
+        inventory['caddy']['target_pod_uid']='target-pod-opaque'
+        inventory['caddy']['node_exception_proof']={'observed_at':stamp,'target_pod_uid':'target-pod-opaque','source_node_uid':'target-node-opaque','source_matches_target_node_address':True}
         return module,snapshot,inventory
 
     def test_ingress_only_preserves_inputs_and_explicitly_reports_node_limit(self):
@@ -83,6 +86,36 @@ class IngressOnlyPolicyTests(unittest.TestCase):
                 with self.assertRaises(ValueError):module.prepare(snapshot,invalid)
         inventory['caddy']['source_is_node']=True
         with self.assertRaises(ValueError):module.prepare(snapshot,inventory)
+
+    def test_node_exception_requires_fresh_exact_target_node_and_pod_proof(self):
+        module,snapshot,inventory=self.fixture()
+        mutations=[
+            lambda x:x['caddy'].pop('node_exception_proof'),
+            lambda x:x['caddy']['node_exception_proof'].update(source_matches_target_node_address=False),
+            lambda x:x['caddy']['node_exception_proof'].update(source_node_uid='other-node'),
+            lambda x:x['caddy']['node_exception_proof'].update(target_pod_uid='other-pod'),
+            lambda x:x['caddy']['node_exception_proof'].update(observed_at=(datetime.now(timezone.utc)-timedelta(minutes=6)).isoformat()),
+            lambda x:x['caddy']['node_exception_proof'].update(observed_at=datetime.now().isoformat()),
+            lambda x:x.update(target_node_uid=''),
+            lambda x:x.update(target_node_uid=None),
+        ]
+        for mutate in mutations:
+            invalid=deepcopy(inventory);mutate(invalid)
+            with self.subTest(mutation=mutate):
+                with self.assertRaises(ValueError):module.prepare(snapshot,invalid)
+
+    def test_every_caddy_proof_is_bound_to_current_target_pod(self):
+        for kind in ('node','exact_ip'):
+            module,snapshot,inventory=self.fixture()
+            if kind=='exact_ip':
+                peer={'ipBlock':{'cidr':'192.0.2.7/32'}}
+                inventory['caddy'].update(source_kind=kind,peer=peer,post_nat_peer_sha256=module.digest(peer),source_is_node=False)
+            for value in ('other-pod','',None):
+                invalid=deepcopy(inventory);invalid['caddy']['target_pod_uid']=value
+                with self.subTest(kind=kind,value=value):
+                    with self.assertRaises(ValueError):module.prepare(snapshot,invalid)
+            invalid=deepcopy(inventory);invalid.pop('target_pod_uid')
+            with self.assertRaises(ValueError):module.prepare(snapshot,invalid)
 
     def test_ingress_cli_never_emits_policy_peer_or_snapshot_values(self):
         module,snapshot,inventory=self.fixture();peer={'ipBlock':{'cidr':'192.0.2.7/32'}}

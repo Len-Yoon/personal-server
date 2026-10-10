@@ -93,10 +93,22 @@ def prepare(snapshot, inventory, *, now=None):
         raise ValueError('controlled_caddy_post_nat_observation_required')
     if caddy.get('target_spec_sha256') != inventory['spec_sha256']:
         raise ValueError('target_bound_caddy_observation_required')
+    target_pod_uid = inventory.get('target_pod_uid')
+    if not isinstance(target_pod_uid, str) or not target_pod_uid.strip() or caddy.get('target_pod_uid') != target_pod_uid:
+        raise ValueError('current_target_pod_bound_caddy_observation_required')
     ingress = []
     if caddy.get('source_kind') == 'node':
         if inventory.get('acknowledge_node_exception') is not True or caddy.get('source_matches_node_interface') is not True:
             raise ValueError('explicit_node_exception_acknowledgement_required')
+        target_node_uid = inventory.get('target_node_uid')
+        proof = caddy.get('node_exception_proof', {})
+        if (not isinstance(target_node_uid, str) or not target_node_uid.strip()
+                or not isinstance(proof, dict)
+                or proof.get('source_matches_target_node_address') is not True
+                or proof.get('source_node_uid') != target_node_uid
+                or proof.get('target_pod_uid') != target_pod_uid):
+            raise ValueError('exact_target_node_exception_proof_required')
+        _fresh(proof.get('observed_at'), now)
     elif caddy.get('source_kind') == 'exact_ip':
         block = caddy.get('peer', {}).get('ipBlock', {})
         if set(caddy.get('peer', {})) != {'ipBlock'} or set(block) != {'cidr'}:
