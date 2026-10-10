@@ -14,6 +14,96 @@ def load(name):
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
     return module
 
+
+class IngressOnlyPolicyTests(unittest.TestCase):
+    def fixture(self, app='portal-web'):
+        snapshot,_=HardeningToolsTests().hardening_fixture()
+        snapshot['metadata']['name']=app
+        snapshot['spec']['template']['metadata']['labels']['app.kubernetes.io/name']=app
+        snapshot['spec']['template']['spec']['containers'][0]['name']=app
+        module=load('prepare-ingress-networkpolicy');stamp=datetime.now(timezone.utc).isoformat()
+        sha=module.digest(snapshot['spec'])
+        inventory={'deployment_uid':'opaque','resource_version':'3','image':snapshot['spec']['template']['spec']['containers'][0]['image'],'spec_sha256':sha,'observed_at':stamp,'cluster_uid':'cluster-opaque','flow_review_complete':True,'existing_policies':[], 'acknowledge_node_exception':True,'enforcement':{'cluster_uid':'cluster-opaque','observed_at':stamp,**{key:True for key in ('baseline','deny','selective_allow','unknown_pod_denied','cleanup','production_unchanged')}},'caddy':{'observed_at':stamp,'status':200,'controlled_request':True,'post_nat_observed':True,'source_kind':'node','source_matches_node_interface':True},'flows':[],'not_applicable':{}}
+        categories=['metrics'] if app=='portal-web' else ['fanout','metrics'] if app=='crawler-worker' else ['fanout']
+        for category in categories:
+            namespace='monitoring' if category=='metrics' else 'personal-server'
+            labels={'app.kubernetes.io/name':'prometheus' if category=='metrics' else 'portal-web'}
+            peer={'namespaceSelector':{'matchLabels':{'kubernetes.io/metadata.name':namespace}},'podSelector':{'matchLabels':labels}}
+            inventory['flows'].append({'category':category,'peer':peer,'port':module.PORTS[app],'proof':{'observed_at':stamp,'status':200,'peer_sha256':module.digest(peer),'target_spec_sha256':sha,'source_kind':'pod','source_pod_uid':'source-opaque','source_namespace':namespace,'source_labels':deepcopy(labels),'post_nat_source_matches_pod':True}})
+        inventory['not_applicable']={category:'No active flow in reviewed live inventory' for category in {'metrics','fanout'}-set(categories)}
+        inventory['caddy']['target_spec_sha256']=sha
+        return module,snapshot,inventory
+
+    def test_ingress_only_preserves_inputs_and_explicitly_reports_node_limit(self):
+        for app in ('portal-web','book-memo','youtube-memo','crawler-worker'):
+            with self.subTest(app=app):
+                module,snapshot,inventory=self.fixture(app);before=deepcopy((snapshot,inventory))
+                result=module.prepare(snapshot,inventory)
+                self.assertEqual((snapshot,inventory),before)
+                self.assertEqual(result['policy']['spec']['policyTypes'],['Ingress'])
+                self.assertNotIn('egress',result['policy']['spec'])
+                self.assertTrue(result['node_traffic_unrestricted'])
+                self.assertFalse(result['caddy_only_isolation'])
+                self.assertEqual(result['policy']['metadata']['namespace'],'personal-server')
+                self.assertEqual(len(result['policy']['spec']['ingress']),len(inventory['flows']))
+
+    def test_ingress_rejects_unbound_stale_unproven_and_union_evidence(self):
+        module,snapshot,inventory=self.fixture()
+        mutations=[lambda x:x.update(deployment_uid='different'),lambda x:x.update(resource_version='different'),lambda x:x.update(image='other@sha256:'+'b'*64),lambda x:x.update(spec_sha256='b'*64),lambda x:x.update(observed_at=(datetime.now(timezone.utc)-timedelta(minutes=6)).isoformat()),lambda x:x.update(observed_at=datetime.now().isoformat()),lambda x:x.update(existing_policies=[{}]),lambda x:x.update(flow_review_complete=False),lambda x:x.update(acknowledge_node_exception=False),lambda x:x['caddy'].update(post_nat_observed=False),lambda x:x['caddy'].update(status=503),lambda x:x['caddy'].update(source_matches_node_interface=False),lambda x:x['enforcement'].update(unknown_pod_denied=False),lambda x:x['enforcement'].update(cleanup=False),lambda x:x['enforcement'].update(cluster_uid='other'),lambda x:x['flows'][0]['proof'].update(source_pod_uid=''),lambda x:x['flows'][0]['proof'].update(post_nat_source_matches_pod=False),lambda x:x['flows'][0]['proof'].update(target_spec_sha256='b'*64),lambda x:x['flows'][0]['proof'].update(peer_sha256='b'*64),lambda x:x['flows'][0]['proof'].update(source_labels={}),lambda x:x['flows'][0]['proof'].update(status=401),lambda x:x['flows'][0].update(port=443),lambda x:x['flows'][0].update(category='external'),lambda x:x['flows'][0].update(peer={'podSelector':{}})]
+        for mutate in mutations:
+            invalid=deepcopy(inventory);mutate(invalid)
+            with self.subTest(mutation=mutate):
+                with self.assertRaises(ValueError):module.prepare(snapshot,invalid)
+
+    def test_ingress_requires_current_metrics_and_downstream_direct_portal(self):
+        for app,category in [('portal-web','metrics'),('crawler-worker','metrics'),('book-memo','fanout'),('youtube-memo','fanout')]:
+            module,snapshot,inventory=self.fixture(app)
+            inventory['flows']=[f for f in inventory['flows'] if f['category']!=category]
+            inventory['not_applicable'][category]='Host alias bypass is not pod proof'
+            with self.assertRaises(ValueError):module.prepare(snapshot,inventory)
+
+    def test_ingress_rejects_broad_monitoring_label_and_other_target_caddy_proof(self):
+        module,snapshot,inventory=self.fixture()
+        inventory['caddy']['target_spec_sha256']='b'*64
+        with self.assertRaises(ValueError):module.prepare(snapshot,inventory)
+        inventory['caddy']['target_spec_sha256']=inventory['spec_sha256']
+        flow=inventory['flows'][0];labels={'app.kubernetes.io/part-of':'monitoring'}
+        flow['peer']['podSelector']['matchLabels']=labels
+        flow['proof'].update(source_labels=labels,peer_sha256=module.digest(flow['peer']))
+        with self.assertRaises(ValueError):module.prepare(snapshot,inventory)
+
+    def test_exact_caddy_peer_is_single_non_node_address_and_bound(self):
+        module,snapshot,inventory=self.fixture();peer={'ipBlock':{'cidr':'192.0.2.7/32'}}
+        inventory['caddy'].update(source_kind='exact_ip',peer=peer,post_nat_peer_sha256=module.digest(peer),source_is_node=False)
+        result=module.prepare(snapshot,inventory)
+        self.assertEqual(result['policy']['spec']['ingress'][0]['from'],[peer])
+        for cidr in ('0.0.0.0/0','192.0.2.0/24','::/0','::1/128','ff02::1/128'):
+            invalid=deepcopy(inventory);invalid['caddy']['peer']={'ipBlock':{'cidr':cidr}};invalid['caddy']['post_nat_peer_sha256']=module.digest(invalid['caddy']['peer'])
+            with self.subTest(cidr=cidr):
+                with self.assertRaises(ValueError):module.prepare(snapshot,invalid)
+        inventory['caddy']['source_is_node']=True
+        with self.assertRaises(ValueError):module.prepare(snapshot,inventory)
+
+    def test_ingress_cli_never_emits_policy_peer_or_snapshot_values(self):
+        module,snapshot,inventory=self.fixture();peer={'ipBlock':{'cidr':'192.0.2.7/32'}}
+        inventory['caddy'].update(source_kind='exact_ip',peer=peer,post_nat_peer_sha256=module.digest(peer),source_is_node=False)
+        snapshot['spec']['template']['spec']['containers'][0]['env']=[{'name':'PRIVATE_TOKEN','value':'private-fixture-never-echo'}]
+        inventory['spec_sha256']=module.digest(snapshot['spec'])
+        inventory['caddy']['target_spec_sha256']=inventory['spec_sha256']
+        inventory['flows'][0]['proof']['target_spec_sha256']=inventory['spec_sha256']
+        with tempfile.TemporaryDirectory() as temp:
+            s=Path(temp)/'snapshot.json';i=Path(temp)/'inventory.json';s.write_text(json.dumps(snapshot));i.write_text(json.dumps(inventory))
+            command=['python3',str(ROOT/'infra/k8s/tools/prepare-ingress-networkpolicy.py'),'--snapshot',str(s),'--inventory',str(i)]
+            result=subprocess.run(command,capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual(json.loads(result.stdout)['validation'],'PASS')
+            for private in ('192.0.2.7','private-fixture-never-echo','opaque'):
+                self.assertNotIn(private,result.stdout+result.stderr)
+            inventory['caddy']['peer']['ipBlock']['cidr']='private-fixture-never-echo';i.write_text(json.dumps(inventory))
+            result=subprocess.run(command,capture_output=True,text=True)
+            self.assertEqual(result.returncode,2)
+            self.assertEqual(result.stderr,'ingress_inventory_validation=FAIL\n')
+
 class HardeningToolsTests(unittest.TestCase):
     def hardening_fixture(self):
         image='same@sha256:'+'a'*64

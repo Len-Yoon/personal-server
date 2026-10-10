@@ -318,6 +318,9 @@ bash infra/k8s/tools/portal-cutover.sh --cleanup-rolledback
 |---|---|---|
 | `tools/prepare-app-hardening.py` | 기존 값을 보존하는 JSON Patch와 검토 조건 | 불변 digest, 동일 UID/resourceVersion의 증적, `/ready` HTTP 200, 읽기 전용 rootfs 이미지 검증, writable PVC·`/tmp`, 대표 부하 baseline |
 | `tools/prepare-networkpolicy.py` | 앱 1개에만 적용되는 ingress·egress allowlist | CNI enforcement smoke, 현재 policy 목록, DNS·Caddy·metrics·fanout·외부 API/Drive·backup 흐름 검토 |
+| `tools/prepare-portal-hardening.py` | Portal 보안 필드 추가 및 검증된 추가 필드만 제거하는 원복 Patch | fresh UID/RV/image, 동일 이미지의 격리 startup·모든 쓰기 경로·실제 최대 ZIP 및 정리 검증, 백업 잠금·디스크 여유 |
+| `tools/prepare-ingress-networkpolicy.py` | 앱 하나의 수신 통신 정책 검증 | 실제 CNI 차단/허용·fresh snapshot·현재 정책·Caddy NAT/metrics/fanout 증거와 node 예외 검토 |
+| `tools/prepare-portal-service-routing.py` | 실패한 Compose alias 여섯 URL의 현재 Service 전환 및 역patch | Portal Pod에서 기존 여섯 URL 실패·direct 여섯 URL 200, UID/RV/image/spec SHA, 정확한 기존 literal URL |
 
 ```bash
 python3 infra/k8s/tools/prepare-app-hardening.py --describe-input
@@ -409,4 +412,16 @@ DNS 외 실제로 해당하지 않는 범주는 `not_applicable`에 비해당 �
 
 생성 policy는 특정 앱 selector만 대상으로 하므로 namespace 전체 default-deny와 backup Job의 격리를 만들지 않음. 다만 대상 앱의 ingress·egress는 즉시 제한되므로, 서비스별로 DNS·공개 진입·metrics·fanout·외부 API/Drive·backup을 전후 검증하고 실패 시 해당 이름의 policy만 제거하는 rollback을 준비함. 기존 `networkpolicy/portal-allowlist.yaml.tmpl`은 불완전한 역사적 검토 예제이며 그대로 적용하지 않음.
 
-**미수행·확인 필요:** 이번 도구 구현은 운영 baseline 수집·불변 이미지 배포·`/ready` 운영 검증·CIDR/NodePort source 확정·NetworkPolicy 적용을 포함하지 않음. 실제 적용은 장시간 관찰 증적과 최신 조회를 확보하고 해당 운영 승인을 확인한 뒤 순차 진행함.
+**최초 구현 당시 경계:** 위 준비 도구의 존재만으로 운영 baseline·이미지 배포·`/ready`·NodePort source 확정·NetworkPolicy 적용을 뜻하지 않음. 이후 실제 실측·배포와 후속 통신 검증 상태는 아래 링크된 운영 기록을 기준으로 확인함.
+
+### Portal rootfs 및 수신 통신 후속 보완
+
+`prepare-portal-hardening.py`는 기존 nonroot·불변 이미지·단일 writer `Recreate`를 보존하며, 누락된 RuntimeDefault seccomp·권한 상승 금지·capability ALL 제거·읽기 전용 rootfs와 `/tmp` disk emptyDir만 추가함. 기존 이미지·환경·PVC·resources·probe는 변경하지 않음. 기존 `/tmp` mount·volume 이름 또는 보안 값이 충돌하면 차단함. `--rollback-record`는 fresh UID/RV/image와 추가 값·원본 spec 복원 해시를 확인한 뒤 이번 추가 필드만 제거함.
+
+실제 Portal 총 다운로드 한도는 500MiB이며 ZIP은 임시 디스크에 생성됨. 따라서 64MiB tmp 제한은 사용하지 않으며 disk emptyDir에 새로운 `sizeLimit`을 추가하지 않음. 임시 파일은 메모리 tmpfs가 아니고 노드 디스크를 사용함. 노드 여유 공간 및 동일 이미지·동일 메모리 제한의 최대 ZIP 생성/응답/상한 거부/정리 실측이 운영 전제임. 기존 동시 다운로드에 새 용량 제한을 부과하지 않으며 장기 동시 부하와 디스크 소진이 자동으로 방지된다는 의미는 아님.
+
+수신 정책은 `policyTypes: [Ingress]`로만 준비함. 외부 API를 사용하는 송신 통신은 이 정책으로 제한하지 않음. 노드에서 출발한 트래픽 및 노드 NAT를 경유하는 Caddy·Compose alias 경로는 일반 Pod selector의 격리와 구분하여 실제 관측·정책 예외를 기록함. 알려지지 않은 일반 Pod의 직접 접속 차단과 허용된 흐름을 모두 검증하기 전에는 격리 완료로 판정하지 않음. Caddy 전용 격리나 전체 네트워크 격리로 표현하지 않음.
+
+후속 승인 범위·격리 실측·PR·실제 운영 적용 및 확인 필요 사항은 [운영 보안 잔여 항목 보완](../../docs/reviews/20261010_운영보안_잔여항목_보완.md)에 기록함. 이 절의 준비 도구 존재만으로 운영 적용 완료를 뜻하지 않음.
+
+`prepare-portal-service-routing.py`는 실패가 검증된 기존 Compose alias의 검색·health 여섯 URL만 현재 앱 Service로 바꿈. 환경 목록 전체를 덮어쓰지 않으며 SecretRef·중복 이름·예상 밖 URL은 거부함. 원복은 정확한 여섯 값과 원본 spec 해시를 대조함. 보안 patch와 조합할 때는 라우팅을 적용한 합성 snapshot에서 보안 patch를 생성하고, 같은 UID/RV의 단일 원자적 Patch로 적용함. 역순도 합성 snapshot에서 검증한 하나의 Patch로 처리하여 중간 상태의 운영 적용을 피함.
