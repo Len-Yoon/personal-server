@@ -42,3 +42,59 @@ class BookmarkTests(unittest.TestCase):
                 self.service.save(url,'Title','Note')
         self.service.delete(items[0]['id'])
         self.assertEqual(self.service.listing(),[])
+
+    def test_pagination_search_and_literal_sql_characters(self):
+        with self.service._connect() as conn:
+            conn.executemany('INSERT INTO bookmarks(url,title,note,saved_at) VALUES(?,?,?,?)',
+                [(f'https://example.org/{i}', f'기사 {i}', '100%_literal' if i == 0 else 'memo', '2026-01-01T00:00:00+00:00') for i in range(1005)])
+        result = self.service.page(page=21, page_size=50)
+        self.assertEqual(result['total'], 1005)
+        self.assertEqual(len(result['items']), 5)
+        self.assertEqual(self.service.page(q='%_')['total'], 1)
+        self.assertEqual(self.service.page(q="' OR 1=1 --")['total'], 0)
+        self.assertEqual(self.service.page(page=999)['page'], 21)
+        for kwargs in ({'page': 0}, {'page_size': 201}, {'q': 'x'*201}):
+            with self.assertRaises(ValueError):
+                self.service.page(**kwargs)
+        self.client.post('/files/login', data={'password': 'password'}, headers={'Origin': 'http://testserver'})
+        response = self.client.get('/files/bookmarks?page=21')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('1005', response.text)
+        self.assertIn('기사 0', response.text)
+
+    def test_page_count_and_rows_use_one_read_snapshot(self):
+        from contextlib import contextmanager
+        import sqlite3
+        self.service.save('https://example.org/original', 'Original', '')
+        with self.service._connect() as conn:
+            conn.execute('PRAGMA journal_mode=WAL')
+        original_connect = self.service._connect
+        class CountCursor:
+            def __init__(inner, cursor):
+                inner.cursor = cursor
+            def fetchone(inner):
+                count = inner.cursor.fetchone()
+                # Commit a concurrent write after COUNT is consumed, before rows.
+                writer = sqlite3.connect(os.environ['NEWS_BOOKMARK_DB_PATH'])
+                try:
+                    writer.execute('INSERT INTO bookmarks(url,title,note,saved_at) VALUES(?,?,?,?)', ('https://example.org/concurrent', 'Concurrent', '', '2026-01-01T00:00:00+00:00'))
+                    writer.commit()
+                finally:
+                    writer.close()
+                return count
+        class Reader:
+            def __init__(inner, conn):
+                inner.conn = conn
+            def execute(inner, sql, params=()):
+                cursor = inner.conn.execute(sql, params)
+                return CountCursor(cursor) if sql.startswith('SELECT COUNT') else cursor
+        @contextmanager
+        def reader():
+            with original_connect() as conn:
+                yield Reader(conn)
+        with patch.object(self.service, '_connect', reader):
+            result = self.service.page()
+        self.assertEqual(result['total'], 1)
+        self.assertEqual(len(result['items']), 1)
+        self.assertEqual(result['items'][0]['title'], 'Original')
+        self.assertEqual(len(self.service.listing()), 2)

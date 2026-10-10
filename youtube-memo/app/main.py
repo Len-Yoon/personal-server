@@ -1,6 +1,7 @@
 import json
 import os
 import secrets
+import sqlite3
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -35,6 +36,7 @@ from app.services.host_urls import portal_home_url, request_host_from_headers
 from app.services.export_service import export_json, export_markdown
 
 from app.services import memo_service
+from app.services.database_errors import database_error_response
 from app.services.readiness import database_ready
 from app.services.import_service import install_routes as install_import_routes
 
@@ -48,6 +50,7 @@ async def _lifespan(application: FastAPI):
 
 
 app = FastAPI(lifespan=_lifespan, title="Youtube Memo")
+app.add_exception_handler(sqlite3.OperationalError, database_error_response)
 
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 _PUBLIC_ORIGIN = "https://memo.len.pe.kr"

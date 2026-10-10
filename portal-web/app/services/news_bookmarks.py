@@ -41,6 +41,25 @@ def listing():
         return [dict(row) for row in conn.execute('SELECT * FROM bookmarks ORDER BY saved_at DESC,id DESC LIMIT 1000')]
 
 
+def page(*, q='', page=1, page_size=50):
+    if type(page) is not int or page < 1 or type(page_size) is not int or not 1 <= page_size <= 200 or len(q) > 200:
+        raise ValueError('검색어와 페이지 범위를 확인해주세요.')
+    q = q.strip()
+    # Treat wildcard characters as literal text and bind all user input.
+    escaped = q.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+    pattern = '%' + escaped + '%'
+    where = " WHERE title LIKE ? ESCAPE '\\' OR note LIKE ? ESCAPE '\\' OR url LIKE ? ESCAPE '\\'" if q else ''
+    params = (pattern, pattern, pattern) if q else ()
+    with _connect() as conn:
+        # COUNT and rows must share a snapshot even if another writer commits.
+        conn.execute('BEGIN')
+        total = conn.execute('SELECT COUNT(*) FROM bookmarks' + where, params).fetchone()[0]
+        pages = max(1, (total + page_size - 1) // page_size)
+        page = min(page, pages)
+        items = [dict(row) for row in conn.execute('SELECT * FROM bookmarks' + where + ' ORDER BY saved_at DESC,id DESC LIMIT ? OFFSET ?', params + (page_size, (page-1)*page_size))]
+    return {'items': items, 'total': total, 'page': page, 'pages': pages, 'page_size': page_size, 'q': q}
+
+
 def delete(bookmark_id):
     with _connect() as conn:
         conn.execute('DELETE FROM bookmarks WHERE id=?', (bookmark_id,))

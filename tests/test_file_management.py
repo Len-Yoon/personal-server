@@ -147,3 +147,212 @@ class FileManagementTests(unittest.TestCase):
             self.assertFalse(response.json()['ok'])
             self.assertEqual(response.json()['moved'][0]['path'],'memo.txt')
             self.assertEqual(response.json()['failed'],[])
+
+    def test_trash_details_pagination_preview_confirmation_and_staleness(self):
+        token = self.manage.trash('memo.txt')
+        result = self.manage.trash_page(page=999, page_size=1)
+        self.assertEqual(result['total'], 1)
+        self.assertEqual(result['items'][0]['size_bytes'], 9)
+        self.assertGreaterEqual(result['items'][0]['age_days'], 0)
+        preview = self.manage.preview_purge(item_id=token)
+        self.assertEqual(preview['count'], 1)
+        self.assertTrue((self.root/'.trash'/token/'item').exists())
+        with self.assertRaises(ValueError):
+            self.manage.confirm_purge(preview['confirmation'] + 'bad')
+        (self.root/'.trash'/token/'item').write_text('changed')
+        with self.assertRaises(ValueError):
+            self.manage.confirm_purge(preview['confirmation'])
+        fresh = self.manage.preview_purge(item_id=token)
+        self.assertEqual(self.manage.confirm_purge(fresh['confirmation'])['deleted'], [token])
+        self.assertFalse((self.root/'.trash'/token).exists())
+        self.assertEqual(self.manage.list_trash(), [])
+
+    def test_purge_age_cutoff_and_symlink_fail_closed(self):
+        token = self.manage.trash('memo.txt')
+        self.assertEqual(self.manage.preview_purge(older_than_days=30)['count'], 0)
+        target = self.root/'.trash'/token
+        outside = Path(self.temp.name)/'outside-secret'
+        outside.write_text('preserved')
+        (target/'item').unlink()
+        (target/'item').symlink_to(outside)
+        self.assertEqual(self.manage.list_trash(), [])
+        with self.assertRaises((ValueError, OSError)):
+            self.manage.preview_purge(item_id=token)
+        self.assertEqual(outside.read_text(), 'preserved')
+        for value in ('../memo.txt', '.trash', ''):
+            with self.assertRaises(ValueError):
+                self.manage.preview_purge(item_id=value)
+
+    def test_purge_routes_require_auth_csrf_password_and_explicit_confirmation(self):
+        from fastapi.testclient import TestClient
+        token = self.manage.trash('memo.txt')
+        with TestClient(importlib.import_module('app.main').app) as client:
+            headers = {'Origin': 'http://testserver'}
+            self.assertEqual(client.post('/files/trash/preview', data={'item_id': token}, headers=headers).status_code, 401)
+            client.post('/files/login', data={'password': 'fixture-password'}, headers=headers)
+            self.assertEqual(client.post('/files/trash/preview', data={'item_id': token}).status_code, 403)
+            response = client.post('/files/trash/preview', data={'item_id': token}, headers=headers)
+            self.assertEqual(response.status_code, 200)
+            confirmation = self.manage.preview_purge(item_id=token)['confirmation']
+            data = {'confirmation': confirmation, 'delete_password': 'fixture-delete'}
+            self.assertEqual(client.post('/files/trash/purge', data=data, headers=headers).status_code, 400)
+            data['confirm'] = '영구 삭제'
+            data['delete_password'] = 'wrong'
+            self.assertEqual(client.post('/files/trash/purge', data=data, headers=headers).status_code, 403)
+            self.assertTrue((self.root/'.trash'/token/'item').exists())
+            data['delete_password'] = 'fixture-delete'
+            self.assertEqual(client.post('/files/trash/purge', data=data, headers=headers).status_code, 200)
+            self.assertEqual(self.manage.list_trash(), [])
+
+    def test_all_trash_pages_are_accessible_above_1000_entries(self):
+        import json
+        trash = self.root/'.trash'
+        trash.mkdir()
+        for i in range(1005):
+            entry = trash/f'{i:032x}'
+            entry.mkdir()
+            (entry/'metadata.json').write_text(json.dumps({'path': f'{i}.txt', 'trashed_at': '2026-01-01T00:00:00+00:00'}))
+            (entry/'item').write_text('x')
+        result = self.manage.trash_page(page=21)
+        self.assertEqual(result['total'], 1005)
+        self.assertEqual(len(result['items']), 5)
+        self.assertEqual(len(self.manage.list_trash()), 1005)
+        self.assertEqual(self.manage.preview_purge(older_than_days=1)['count'], 1005)
+
+    def test_purge_directory_size_expiration_and_nested_symlink(self):
+        (self.root/'folder/a.txt').write_text('abc')
+        (self.root/'folder/.hidden.txt').write_text('hidden')
+        token = self.manage.trash('folder')
+        self.assertEqual(self.manage.list_trash()[0]['size_bytes'], 9)
+        preview = self.manage.preview_purge(item_id=token)
+        with patch.object(self.manage.time, 'time', return_value=self.manage.time.time()+601):
+            with self.assertRaises(ValueError):
+                self.manage.confirm_purge(preview['confirmation'])
+        target = self.root/'.trash'/token/'item'
+        outside = Path(self.temp.name)/'outside'
+        outside.mkdir()
+        (outside/'private.txt').write_text('secret')
+        (target/'link').symlink_to(outside)
+        with self.assertRaises((ValueError, OSError)):
+            self.manage.preview_purge(item_id=token)
+        self.assertTrue((target/'a.txt').exists())
+        (target/'link').unlink()
+        preview = self.manage.preview_purge(item_id=token)
+        self.assertTrue(self.manage.confirm_purge(preview['confirmation'])['ok'])
+        self.assertEqual((outside/'private.txt').read_text(), 'secret')
+        self.assertFalse(target.exists())
+
+    def test_purge_partial_failure_is_not_reported_as_complete(self):
+        token = self.manage.trash('memo.txt')
+        preview = self.manage.preview_purge(item_id=token)
+        with patch.object(self.manage.os, 'unlink', side_effect=OSError('cannot delete')):
+            result = self.manage.confirm_purge(preview['confirmation'])
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['deleted'], [])
+        self.assertEqual(result['failed'], [token])
+        self.assertEqual((self.root/'.trash'/token/'item').read_text(), 'preserved')
+
+    def test_trash_metadata_cannot_override_token_or_escape_purge(self):
+        import json
+        token = self.manage.trash('memo.txt')
+        metadata = self.root/'.trash'/token/'metadata.json'
+        value = json.loads(metadata.read_text())
+        value.update({'id': '../../folder', 'size_bytes': 0})
+        metadata.write_text(json.dumps(value))
+        preview = self.manage.preview_purge(item_id=token)
+        self.assertEqual(preview['items'][0]['id'], token)
+        self.assertEqual(preview['size_bytes'], 9)
+        self.assertTrue(self.manage.confirm_purge(preview['confirmation'])['ok'])
+        self.assertTrue((self.root/'folder').is_dir())
+
+    def test_hidden_metadata_path_is_never_listed_or_purged(self):
+        import json
+        token = self.manage.trash('memo.txt')
+        metadata = self.root/'.trash'/token/'metadata.json'
+        value = json.loads(metadata.read_text())
+        value['path'] = '.private/secret.txt'
+        metadata.write_text(json.dumps(value))
+        self.assertEqual(self.manage.list_trash(), [])
+        self.assertEqual(self.manage.preview_purge()['count'], 0)
+        self.assertTrue((self.root/'.trash'/token/'item').exists())
+
+    def test_purge_never_deletes_unrecognized_trash_siblings(self):
+        token = self.manage.trash('memo.txt')
+        sibling = self.root/'.trash'/token/'unrecognized'
+        sibling.write_text('preserve')
+        preview = self.manage.preview_purge(item_id=token)
+        result = self.manage.confirm_purge(preview['confirmation'])
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['deleted'], [token])
+        self.assertEqual(result['failed'], [])
+        self.assertEqual(sibling.read_text(), 'preserve')
+
+    def test_purge_replacement_symlink_cannot_follow_outside_trash(self):
+        (self.root/'folder/a.txt').write_text('inside')
+        token = self.manage.trash('folder')
+        preview = self.manage.preview_purge(item_id=token)
+        target = self.root/'.trash'/token/'item'
+        outside = Path(self.temp.name)/'outside'
+        outside.mkdir()
+        (outside/'a.txt').write_text('outside')
+        original = self.store._delete_directory_fd
+        def replace_item(fd):
+            target.rename(target.with_name('retained-item'))
+            target.symlink_to(outside)
+            original(fd)
+        with patch.object(self.store, '_delete_directory_fd', side_effect=replace_item):
+            result = self.manage.confirm_purge(preview['confirmation'])
+        self.assertFalse(result['ok'])
+        self.assertEqual((outside/'a.txt').read_text(), 'outside')
+        self.assertTrue(target.is_symlink())
+
+    def test_tree_snapshot_stops_enumeration_at_remaining_budget(self):
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+        visited = []
+        @contextmanager
+        def entries(_):
+            def generate():
+                for index in range(3):
+                    visited.append(index)
+                    if index == 2:
+                        raise AssertionError('Enumeration continued beyond the budget')
+                    yield SimpleNamespace(name=f'{index}.txt')
+            yield generate()
+        with self.store._open_storage_item('folder') as fd:
+            with patch.object(self.manage.os, 'scandir', entries):
+                with self.assertRaises(ValueError):
+                    self.manage._tree_snapshot(fd, budget=[9998])
+        self.assertEqual(visited, [0, 1])
+
+    def test_tree_snapshot_keeps_normal_name_order_and_size(self):
+        (self.root/'folder/b.txt').write_text('bb')
+        (self.root/'folder/a.txt').write_text('a')
+        with self.store._open_storage_item('folder') as fd:
+            size, snapshot = self.manage._tree_snapshot(fd)
+        self.assertEqual(size, 3)
+        self.assertEqual([child[0] for child in snapshot[1]], ['a.txt', 'b.txt'])
+
+    def test_oversized_trash_stays_visible_restorable_but_not_purgeable(self):
+        for index in range(10000):
+            (self.root/'folder'/f'{index}.txt').write_text('x')
+        token = self.manage.trash('folder')
+        result = self.manage.trash_page()
+        self.assertEqual(result['total'], 1)
+        self.assertFalse(result['size_complete'])
+        self.assertIsNone(result['items'][0]['size_bytes'])
+        self.assertFalse(result['items'][0]['purge_allowed'])
+        with self.assertRaises(self.manage.SnapshotLimitError):
+            self.manage.preview_purge(item_id=token)
+        self.assertEqual(self.manage.preview_purge()['count'], 0)
+        from fastapi.testclient import TestClient
+        with TestClient(importlib.import_module('app.main').app) as client:
+            client.post('/files/login', data={'password': 'fixture-password'}, headers={'Origin': 'http://testserver'})
+            response = client.get('/files/tools')
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('크기 확인 필요', response.text)
+            self.assertIn('확인된 항목만 합산', response.text)
+            self.assertIn('action="/files/restore"', response.text)
+            self.assertNotIn('이 항목 영구 삭제 미리보기', response.text)
+        self.manage.restore(token)
+        self.assertEqual((self.root/'folder/9999.txt').read_text(), 'x')

@@ -398,3 +398,23 @@ test("a new memo entered after a successful save uses a fresh request id", async
     assert.equal(ids.length, 2);
     assert.notEqual(ids[0], ids[1]);
 });
+
+test("database busy preserves draft and revision and retries with the same request id", async () => {
+    const page = fixture();
+    page.form.elements.push(new Element("expected_version", "hidden", "7"));
+    const ids = [];
+    page.window.fetch = async (_url, options) => {
+        ids.push(options.body.get("request_id"));
+        assert.equal(options.body.get("expected_version"), "7");
+        assert.equal(options.body.get("content"), "draft body\nsecond line");
+        return {status: 503, ok: false, url: "https://memo.example/items/1"};
+    };
+    page.boot(); await page.submit();
+    assert.match(page.form.status.textContent, /잠시 후 다시 저장/);
+    assert.equal(page.values.size, 1);
+    assert.equal(page.window.location.assigned, undefined);
+    assert.ok(page.form.elements.every(field => !field.disabled));
+    await page.submit();
+    assert.equal(ids.length, 2);
+    assert.equal(ids[0], ids[1]);
+});
