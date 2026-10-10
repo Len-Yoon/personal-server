@@ -422,6 +422,10 @@ DNS 외 실제로 해당하지 않는 범주는 `not_applicable`에 비해당 �
 
 수신 정책은 `policyTypes: [Ingress]`로만 준비함. 외부 API를 사용하는 송신 통신은 이 정책으로 제한하지 않음. 노드에서 출발한 트래픽 및 노드 NAT를 경유하는 Caddy·Compose alias 경로는 일반 Pod selector의 격리와 구분하여 실제 관측·정책 예외를 기록함. 알려지지 않은 일반 Pod의 직접 접속 차단과 허용된 흐름을 모두 검증하기 전에는 격리 완료로 판정하지 않음. Caddy 전용 격리나 전체 네트워크 격리로 표현하지 않음.
 
+Caddy 증거는 현재 대상 Pod UID와 결합해야 함. `inventory.target_pod_uid`와 `caddy.target_pod_uid`가 일치해야 하며, `source_kind=node`이면 `inventory.target_node_uid`와 최신 `caddy.node_exception_proof`의 `source_node_uid`·`target_pod_uid`·`source_matches_target_node_address=true`까지 확인함. 증거의 `observed_at`은 UTC aware 300초 이내여야 함. 호스트 인터페이스에 속한다는 사실만으로 대상 Pod의 노드 예외로 분류하지 않음. 노드 주소와 다른 출발지는 정확한 제어 요청에 결합한 단일 `/32` 또는 `/128` 증거를 요구하는 기존 `exact_ip` 경로를 사용함.
+
+2026-10-10 후속 적용에서 Portal 연결6개·rootfs 보안은 실제 적용됐으며 통합검색3경로·데이터 보존·외부 health를 확인함. 수신 정책은 검사 도구의 scheduler 필드 보완 후에도 사후 검증 실패로 원복되어 현재 정책0임. 노드 출발지 분류와 PodIP/Service 경로를 추가 진단 중이며, 아래 기록을 최신 상태로 확인함.
+
 후속 승인 범위·격리 실측·PR·실제 운영 적용 및 확인 필요 사항은 [운영 보안 잔여 항목 보완](../../docs/reviews/20261010_운영보안_잔여항목_보완.md)에 기록함. 이 절의 준비 도구 존재만으로 운영 적용 완료를 뜻하지 않음.
 
 `prepare-portal-service-routing.py`는 실패가 검증된 기존 Compose alias의 검색·health 여섯 URL만 현재 앱 Service로 바꿈. 환경 목록 전체를 덮어쓰지 않으며 SecretRef·중복 이름·예상 밖 URL은 거부함. 원복은 정확한 여섯 값과 원본 spec 해시를 대조함. 보안 patch와 조합할 때는 라우팅을 적용한 합성 snapshot에서 보안 patch를 생성하고, 같은 UID/RV의 단일 원자적 Patch로 적용함. 역순도 합성 snapshot에서 검증한 하나의 Patch로 처리하여 중간 상태의 운영 적용을 피함.
