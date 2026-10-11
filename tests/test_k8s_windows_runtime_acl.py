@@ -17,8 +17,11 @@ acl = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(acl)
 
 
-COUNTS = {"total": 25, "files": 23, "directories": 2, "git_unsafe": 17,
+COUNTS = {"total": 27, "files": 8, "directories": 19, "git_unsafe": 18,
           "tracked_unsafe": 0, "ignored_unsafe": 1, "other_owner": 1}
+GIT_DIRECTORIES = [".git/objects", ".git/objects/info", ".git/objects/pack",
+                   ".git/refs", ".git/refs/heads", ".git/refs/tags"]
+GIT_DIRECTORIES += [".git/other" + str(i) for i in range(11)]
 
 
 def scope():
@@ -34,13 +37,17 @@ def entry(path, index, directory=False, explicit=None, owner="S-1-5-21-1"):
             "size": "0", "links": 1, "owner": owner, "group": "S-1-5-32-544",
             "dacl": "oldroot" if path == "" else "|".join(explicit) + ":oldroot",
             "explicit": explicit, "protected": False, "sd": "originalSD:" + path,
-            "unsafe": path.startswith(".git/") or path == "ignored"}
+            "unsafe": (directory and (path == ".git" or path.startswith(".git/"))) or path == "ignored"}
 
 
 def snapshot():
-    paths = ["", ".git"] + list(acl.RUNTIME) + [".git/item" + str(i) for i in range(17)]
-    paths += ["tracked.py", "ignored"]
-    rows = {p: entry(p, i, p in ("", ".git")) for i, p in enumerate(paths)}
+    paths = ["", ".git"] + list(acl.RUNTIME) + GIT_DIRECTORIES
+    paths += ["tracked.py", "ignored", ".git/objects/pack/value", ".git/refs/heads/value"]
+    directories = {"", ".git", *GIT_DIRECTORIES}
+    rows = {p: entry(p, i, p in directories) for i, p in enumerate(paths)}
+    for path in sorted(rows, key=lambda p: (p.count("/"), len(p), p)):
+        if path:
+            rows[path]["dacl"] = "|".join(rows[path]["explicit"]) + ":" + rows[path.rpartition("/")[0]]["dacl"]
     rows["ignored"]["owner"] = "S-1-5-21-999"
     return {"entries": rows, "counts": dict(COUNTS),
             "runtime_hashes": {p: acl.digest(("synthetic content " + p).encode()) for p in acl.RUNTIME},
@@ -77,13 +84,16 @@ class FakeBackend:
             result["entries"][target] = copy.deepcopy(original)
             row = result["entries"][target]
             if target and not row["protected"]:
-                row["dacl"] = "|".join(row["explicit"]) + ":" + result["entries"][""]["dacl"]
+                row["dacl"] = "|".join(row["explicit"]) + ":" + result["entries"][target.rpartition("/")[0]]["dacl"]
                 row["sd"] = "derived:" + row["dacl"]
-        if target == "":
-            for path, child in result["entries"].items():
-                if path and not child["protected"]:
-                    child["dacl"] = "|".join(child["explicit"]) + ":" + row["dacl"]
-                    child["sd"] = "derived:" + child["dacl"]
+        changed = {target}
+        for path in sorted(result["entries"], key=lambda p: (p.count("/"), len(p), p)):
+            child = result["entries"][path]
+            parent = path.rpartition("/")[0]
+            if path and path != target and parent in changed and not child["protected"]:
+                child["dacl"] = "|".join(child["explicit"]) + ":" + result["entries"][parent]["dacl"]
+                child["sd"] = "derived:" + child["dacl"]
+                changed.add(path)
         return result
 
     def set_dacl(self, target, approved):
@@ -150,11 +160,11 @@ class ACLTests(unittest.TestCase):
         sha = self.prepare()
         self.assertFalse(self.backend.writes)
         plan = self.vault.read("plan.dpapi")
-        self.assertEqual(len(plan["steps"]), 22)
+        self.assertEqual(len(plan["steps"]), 23)
         self.assertNotIn("final", plan)
         self.assertNotIn("before", plan["steps"][0])
         self.assertEqual(len(plan["steps"][1]["changes"]), 1)
-        self.assertEqual(acl.snapshot_hash(acl.materialize(plan, 22)), plan["final_sha256"])
+        self.assertEqual(acl.snapshot_hash(acl.materialize(plan, 23)), plan["final_sha256"])
         cipher = self.vault.read_bytes("plan.dpapi")
         self.assertNotIn(b"originalSD", cipher)
         self.assertEqual(acl.digest(cipher), sha)
@@ -164,7 +174,7 @@ class ACLTests(unittest.TestCase):
     def test_forward_and_exact_rollback_preserve_ignored_owner_explicit_content(self):
         initial = self.backend.snapshot()
         sha = self.prepare()
-        self.assertEqual(self.transaction.apply(sha)["targets"], 22)
+        self.assertEqual(self.transaction.apply(sha)["targets"], 23)
         for path in acl.RUNTIME:
             self.assertTrue(self.backend.current["entries"][path]["protected"])
         ignored = self.backend.current["entries"]["ignored"]
@@ -172,7 +182,59 @@ class ACLTests(unittest.TestCase):
         self.assertEqual(ignored["explicit"], initial["entries"]["ignored"]["explicit"])
         self.assertEqual(self.transaction.rollback(sha)["reason"], "rolled_back")
         self.assertTrue(acl.same_snapshot(self.backend.current, initial))
-        self.assertEqual(len(self.backend.writes), 44)
+        self.assertEqual(len(self.backend.writes), 46)
+
+    def test_observed_git_directory_inventory_requires_23_targets(self):
+        targets = acl.validate_snapshot(snapshot(), scope())
+        git = [p for p in targets if p == ".git" or p.startswith(".git/")]
+        self.assertEqual(len(targets), 23)
+        self.assertEqual(len(git), 18)
+        self.assertIn(".git", git)
+        self.assertTrue(all(snapshot()["entries"][p]["kind"] == "directory" for p in git))
+
+    def test_git_directory_contract_rejects_missing_root_or_unsafe_file(self):
+        for kind in ("safe_git_root", "unsafe_git_file"):
+            current = snapshot()
+            if kind == "safe_git_root":
+                current["entries"][".git"]["unsafe"] = False
+            else:
+                current["entries"][".git/other0"].update(kind="file", attributes=32)
+            self.assertBlocked("git_directory_inventory_changed",
+                               lambda: acl.validate_snapshot(current, scope()))
+
+    def test_nested_directory_projection_and_partial_rollback_preserve_owners(self):
+        self.backend.current["entries"][".git"]["owner"] = "S-1-5-18"
+        self.backend.current["entries"][".git/objects"]["owner"] = "S-1-5-32-544"
+        initial = self.backend.snapshot()
+        sha = self.prepare()
+        plan = self.vault.read("plan.dpapi")
+        step = next(s for s in plan["steps"] if s["target"] == ".git/objects")
+        leaf = ".git/objects/pack/value"
+        self.assertIn(leaf, step["changes"])
+        self.assertEqual(step["changes"][leaf]["explicit"], initial["entries"][leaf]["explicit"])
+        self.transaction.apply(sha)
+        original_set = self.backend.set_dacl
+        mixed = []
+        def partial_nested(target, approved):
+            before = self.backend.snapshot()
+            original_set(target, approved)
+            if target == ".git/objects" and not approved["protected"]:
+                self.backend.current["entries"][leaf] = before["entries"][leaf]
+                mixed.append(target)
+        self.backend.set_dacl = partial_nested
+        self.transaction.rollback(sha)
+        self.assertEqual(mixed, [".git/objects"])
+        self.assertIn(leaf, self.backend.writes)
+        self.assertTrue(acl.same_snapshot(self.backend.current, initial))
+
+    def test_protected_nested_git_directory_stops_parent_propagation(self):
+        initial = snapshot()
+        protected = self.backend.project(initial, ".git", None)
+        changed = self.backend.project(protected, "", None)
+        self.assertEqual(changed["entries"][".git/objects/pack/value"],
+                         protected["entries"][".git/objects/pack/value"])
+        self.assertNotEqual(changed["entries"]["ignored"]["dacl"],
+                            protected["entries"]["ignored"]["dacl"])
 
     def test_first_set_has_durable_original_and_intent(self):
         sha = self.prepare()
@@ -349,7 +411,7 @@ class ACLTests(unittest.TestCase):
         self.backend.set_dacl = partial_root
         self.transaction.rollback(sha)
         self.assertTrue(acl.same_snapshot(self.backend.current, snapshot()))
-        self.assertGreater(len(self.backend.writes), 44)
+        self.assertGreater(len(self.backend.writes), 46)
 
     def test_restarted_rollback_keeps_original_git_target_inventory(self):
         sha = self.prepare()
@@ -358,9 +420,10 @@ class ACLTests(unittest.TestCase):
         fresh.current = self.backend.current
         fresh.current["counts"]["git_unsafe"] = 0
         transaction = acl.Transaction(fresh, self.vault)
-        self.assertEqual(transaction.status(sha)["matched"], "step_22")
+        self.assertEqual(transaction.status(sha)["matched"], "step_23")
         transaction.rollback(sha)
         self.assertEqual(len([p for p in fresh.recovery_targets if p.startswith(".git/")]), 17)
+        self.assertIn(".git", fresh.recovery_targets)
         self.assertTrue(acl.same_snapshot(fresh.current, snapshot()))
 
     def test_restart_safe_but_changed_ancestor_blocks_every_phase_before_write(self):
