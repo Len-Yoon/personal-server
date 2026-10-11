@@ -17,15 +17,24 @@ acl = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(acl)
 
 
-COUNTS = {"total": 27, "files": 8, "directories": 19, "git_unsafe": 18,
+COUNTS = {"total": 32, "files": 10, "directories": 22, "git_unsafe": 18,
           "tracked_unsafe": 0, "ignored_unsafe": 1, "other_owner": 1}
 GIT_DIRECTORIES = [".git/objects", ".git/objects/info", ".git/objects/pack",
                    ".git/refs", ".git/refs/heads", ".git/refs/tags"]
 GIT_DIRECTORIES += [".git/other" + str(i) for i in range(11)]
 
 
+MODIFIED_CONTRACT = {"version": "exact_runtime_modified_v1", "entries": [
+    {"path": "data", "kind": "directory"},
+    {"path": "data/system/host-metrics.json", "kind": "file"},
+    {"path": "data/car-care", "kind": "directory"},
+    {"path": "data/car-care/car-care.sqlite3", "kind": "file"},
+]}
+
+
 def scope():
-    return {"schema": 1, "root": "C:\\personal-server", "tracked_paths": ["tracked.py"],
+    return {"schema": 2, "comparison_contract": copy.deepcopy(MODIFIED_CONTRACT),
+            "root": "C:\\personal-server", "tracked_paths": ["tracked.py"],
             "counts": dict(COUNTS), "source_sha256": "1" * 64,
             "fixture_sha256": acl.digest(acl.POWERSHELL.encode())}
 
@@ -42,8 +51,10 @@ def entry(path, index, directory=False, explicit=None, owner="S-1-5-21-1"):
 
 def snapshot():
     paths = ["", ".git"] + list(acl.RUNTIME) + GIT_DIRECTORIES
-    paths += ["tracked.py", "ignored", ".git/objects/pack/value", ".git/refs/heads/value"]
-    directories = {"", ".git", *GIT_DIRECTORIES}
+    paths += ["tracked.py", "ignored", ".git/objects/pack/value", ".git/refs/heads/value",
+              "data", "data/system", "data/system/host-metrics.json",
+              "data/car-care", "data/car-care/car-care.sqlite3"]
+    directories = {"", ".git", *GIT_DIRECTORIES, "data", "data/system", "data/car-care"}
     rows = {p: entry(p, i, p in directories) for i, p in enumerate(paths)}
     for path in sorted(rows, key=lambda p: (p.count("/"), len(p), p)):
         if path:
@@ -102,7 +113,12 @@ class FakeBackend:
             self.on_write(target)
         original = approved if not approved["protected"] else None
         result = self.project(self.current, target, original)
-        result["entries"][target] = copy.deepcopy(approved)
+        # Native SetSecurityInfo changes DACL fields only, even when repairing
+        # a mutable runtime descendant from an older encrypted descriptor.
+        result["entries"][target] = {
+            **self.current["entries"][target],
+            **{field: copy.deepcopy(approved[field]) for field in
+               ("dacl", "explicit", "protected", "sd", "unsafe")}}
         if self.mode == "partial":
             self.mode = None
             paths = [p for p in result["entries"] if p != target]
@@ -155,6 +171,126 @@ class ACLTests(unittest.TestCase):
     def assertBlocked(self, reason, callback):
         with self.assertRaisesRegex(acl.Blocked, "^" + reason + "$"):
             callback()
+
+    def test_exact_four_modified_comparison_preserves_raw_snapshot(self):
+        initial = snapshot()
+        saved = copy.deepcopy(initial)
+        for approved in MODIFIED_CONTRACT["entries"]:
+            current = copy.deepcopy(initial)
+            current["entries"][approved["path"]]["modified"] = "new-runtime-write"
+            with self.subTest(path=approved["path"]):
+                self.assertTrue(acl.same_snapshot(current, initial))
+                self.assertEqual(acl.snapshot_hash(current), acl.snapshot_hash(initial))
+                self.assertEqual(current["entries"][approved["path"]]["modified"], "new-runtime-write")
+        self.assertEqual(initial, saved)
+
+    def test_modified_contract_is_required_fixed_and_versioned(self):
+        approved = scope()
+        self.assertEqual(acl.validate_scope(approved), approved)
+        for field, value in (("schema", 1), ("comparison_contract", {}),
+                             ("comparison_contract", {**MODIFIED_CONTRACT, "version": "other"})):
+            bad = copy.deepcopy(approved)
+            bad[field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(acl.Blocked):
+                acl.validate_scope(bad)
+        bad = copy.deepcopy(approved)
+        bad.pop("comparison_contract")
+        with self.assertRaises(acl.Blocked):
+            acl.validate_scope(bad)
+        bad = copy.deepcopy(approved)
+        bad["comparison_contract"]["entries"].append({"path": "data/other", "kind": "file"})
+        with self.assertRaises(acl.Blocked):
+            acl.validate_scope(bad)
+
+    def test_mutable_modified_expected_kind_is_required(self):
+        for approved in MODIFIED_CONTRACT["entries"]:
+            current = snapshot()
+            current["entries"][approved["path"]]["kind"] = (
+                "file" if approved["kind"] == "directory" else "directory")
+            with self.subTest(path=approved["path"]), self.assertRaises(acl.Blocked):
+                acl.validate_snapshot(current, scope())
+
+    def test_only_exact_modified_fields_are_excluded(self):
+        initial = snapshot()
+        for path in ("data/system", "ignored", "tracked.py", ".git", *acl.RUNTIME):
+            actual = copy.deepcopy(initial)
+            actual["entries"][path]["modified"] = "changed"
+            with self.subTest(path=path):
+                self.assertFalse(acl.same_snapshot(actual, initial))
+        for field, value in (("kind", "directory"), ("size", "123"), ("identity", "other-volume"),
+                             ("created", "new"), ("owner", "S-1-5-21-999"),
+                             ("group", "S-1-5-18"), ("dacl", "foreign"),
+                             ("explicit", ["foreign"]), ("protected", True),
+                             ("links", 2), ("attributes", 99), ("unsafe", True)):
+            actual = copy.deepcopy(initial)
+            actual["entries"]["data/car-care/car-care.sqlite3"][field] = value
+            with self.subTest(field=field):
+                self.assertFalse(acl.same_snapshot(actual, initial))
+        actual = copy.deepcopy(initial)
+        actual["runtime_hashes"][".env"] = "0" * 64
+        self.assertFalse(acl.same_snapshot(actual, initial))
+        actual = copy.deepcopy(initial)
+        actual["entries"]["data/extra"] = entry("data/extra", 999)
+        self.assertFalse(acl.same_snapshot(actual, initial))
+
+    def test_projection_still_rejects_mutable_modified_changes(self):
+        before = snapshot()
+        after = copy.deepcopy(before)
+        after["entries"]["data/system/host-metrics.json"]["modified"] = "new"
+        self.assertBlocked("projection_metadata_changed", lambda: acl.validate_projection(before, after, ""))
+
+    def test_live_modified_apply_status_and_rollback_keep_original_plan(self):
+        sha = self.prepare()
+        cipher = self.vault.read_bytes("plan.dpapi")
+        original = self.vault.read("plan.dpapi")["initial"]
+        for approved in MODIFIED_CONTRACT["entries"]:
+            self.backend.current["entries"][approved["path"]]["modified"] = "live-before-apply"
+        self.transaction.apply(sha)
+        self.assertEqual(self.transaction.status(sha)["matched"], "step_23")
+        for approved in MODIFIED_CONTRACT["entries"]:
+            self.backend.current["entries"][approved["path"]]["modified"] = "live-before-rollback"
+        self.transaction.rollback(sha)
+        self.assertTrue(acl.same_snapshot(self.backend.current, original))
+        self.assertEqual(self.vault.read_bytes("plan.dpapi"), cipher)
+        for approved in MODIFIED_CONTRACT["entries"]:
+            self.assertEqual(original["entries"][approved["path"]]["modified"], "2")
+            self.assertEqual(self.backend.current["entries"][approved["path"]]["modified"], "live-before-rollback")
+
+    def test_partial_rollback_accepts_only_owned_acl_with_live_modified(self):
+        sha = self.prepare()
+        self.backend.mode = "partial"
+        self.assertBlocked("propagation_or_metadata_drift", lambda: self.transaction.apply(sha))
+        for approved in MODIFIED_CONTRACT["entries"]:
+            self.backend.current["entries"][approved["path"]]["modified"] = "live-after-partial"
+        fresh = FakeBackend()
+        fresh.current = copy.deepcopy(self.backend.current)
+        transaction = acl.Transaction(fresh, self.vault)
+        self.assertEqual(transaction.rollback(sha)["reason"], "rolled_back")
+        self.assertTrue(acl.same_snapshot(fresh.current, snapshot()))
+        for approved in MODIFIED_CONTRACT["entries"]:
+            self.assertEqual(fresh.current["entries"][approved["path"]]["modified"], "live-after-partial")
+
+    def test_live_modified_never_masks_foreign_partial_acl(self):
+        sha = self.prepare()
+        self.backend.mode = "partial"
+        self.assertBlocked("propagation_or_metadata_drift", lambda: self.transaction.apply(sha))
+        for approved in MODIFIED_CONTRACT["entries"]:
+            self.backend.current["entries"][approved["path"]]["modified"] = "active-writer"
+        self.backend.current["entries"]["data/car-care/car-care.sqlite3"]["dacl"] = "foreign"
+        writes = list(self.backend.writes)
+        self.assertBlocked("partial_or_foreign_state", lambda: self.transaction.rollback(sha))
+        self.assertEqual(self.backend.writes, writes)
+
+    def test_old_plan_schema_is_not_reinterpreted(self):
+        sha = self.prepare()
+        plan = self.vault.read("plan.dpapi")
+        plan["schema"] = 1
+        old_sha = self.vault.write("plan.dpapi", plan)
+        state = self.vault.read("state.dpapi")
+        state["plan_sha256"] = old_sha
+        self.vault.write("state.dpapi", state)
+        self.assertBlocked("journal_plan_mismatch", lambda: self.transaction.status(old_sha))
+        self.assertFalse(self.backend.writes)
 
     def test_prepare_is_readonly_and_compact_encrypted(self):
         sha = self.prepare()

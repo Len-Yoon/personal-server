@@ -32,7 +32,14 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 
-SCHEMA = 1
+# Schema 2 deliberately rejects plans prepared under the all-mtime-strict contract.
+SCHEMA = 2
+COMPARISON_CONTRACT = {"version": "exact_runtime_modified_v1", "entries": [
+    {"path": "data", "kind": "directory"},
+    {"path": "data/system/host-metrics.json", "kind": "file"},
+    {"path": "data/car-care", "kind": "directory"},
+    {"path": "data/car-care/car-care.sqlite3", "kind": "file"},
+]}
 RUNTIME = (".env", "docker-compose.yml", "docker-compose.n100.yml",
            "docker-compose.portal-bridge.yml")
 EXPECTED_COUNTS = {"total": 6669, "files": 5813, "directories": 856,
@@ -82,9 +89,11 @@ def relative_path(value):
 
 def validate_scope(scope):
     require(set(scope) == {"schema", "root", "tracked_paths", "counts",
-                           "source_sha256", "fixture_sha256"}, "invalid_scope")
+                           "source_sha256", "fixture_sha256", "comparison_contract"}, "invalid_scope")
     require(scope["schema"] == SCHEMA and scope["root"] == "C:\\personal-server",
             "unapproved_root")
+    require(scope["comparison_contract"] == COMPARISON_CONTRACT,
+            "unapproved_comparison_contract")
     require(scope["counts"] == EXPECTED_COUNTS, "unapproved_counts")
     for key in ("source_sha256", "fixture_sha256"):
         require(isinstance(scope[key], str)
@@ -123,6 +132,8 @@ def validate_snapshot(snapshot, scope):
         require(entry["identity"] not in identities, "hardlink_or_identity_alias")
         identities.add(entry["identity"])
         require(entry["links"] == 1 or entry["kind"] == "directory", "hardlink_forbidden")
+    require(all(row["path"] in entries and entries[row["path"]]["kind"] == row["kind"]
+                for row in COMPARISON_CONTRACT["entries"]), "mutable_modified_inventory_changed")
     require(set(snapshot["runtime_hashes"]) == set(RUNTIME), "runtime_inventory_changed")
     for path in RUNTIME:
         require(path in entries and entries[path]["kind"] == "file", "runtime_file_missing")
@@ -139,16 +150,29 @@ def validate_snapshot(snapshot, scope):
     return targets
 
 
+def entry_comparison(path, entry):
+    result = copy.deepcopy(entry)
+    result.pop("sd")
+    # Existing bootstrap metrics and Car Care writers remain active. Only these
+    # exact path/kind pairs may change mtime; no content/metadata setter exists.
+    if any(row["path"] == path and row["kind"] == entry["kind"]
+           for row in COMPARISON_CONTRACT["entries"]):
+        result.pop("modified")
+    return result
+
+
 def security_projection(snapshot):
     """Compare metadata, identity, owner/group, DACL ACE bytes and protection.
 
     SD auto-inheritance/defaulted control bits and unreadable SACL bytes are not
-    independently compared. DACL-only native flags preserve owner/group/SACL.
+    independently compared. Exact COMPARISON_CONTRACT path/kind mtimes are
+    excluded only from comparison; originals remain encrypted in the plan.
+    DACL-only native flags preserve owner/group/SACL.
     """
     result = copy.deepcopy(snapshot)
     result.pop("counts")  # initial scope classification changes as DACLs change
-    for entry in result["entries"].values():
-        entry.pop("sd")
+    result["entries"] = {path: entry_comparison(path, entry)
+                         for path, entry in result["entries"].items()}
     return result
 
 
@@ -187,8 +211,9 @@ def own_partial(actual, before, after):
     if set(actual["entries"]) != set(before["entries"]) or not same_snapshot(
             {**actual, "entries": before["entries"]}, before):
         return False
-    strip = lambda row: {key: value for key, value in row.items() if key != "sd"}
-    return all(strip(entry) in (strip(before["entries"][path]), strip(after["entries"][path]))
+    return all(entry_comparison(path, entry) in
+               (entry_comparison(path, before["entries"][path]),
+                entry_comparison(path, after["entries"][path]))
                for path, entry in actual["entries"].items())
 
 
