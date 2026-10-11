@@ -312,7 +312,7 @@ bash infra/k8s/tools/portal-cutover.sh --cleanup-rolledback
 
 ## 앱 resource·readiness·NetworkPolicy 준비
 
-다음 도구는 읽기 전용으로 확보한 Deployment JSON과 검토된 증적을 입력받아 **검토용 JSON만 생성함**. Kubernetes 호출·리소스 적용·이미지 교체·운영 데이터 변경을 수행하지 않음. 기본 resource 수치를 임의로 적용하지 않으며, 장시간 baseline과 실제 `/ready` 응답을 확보하기 전에는 하드닝 준비를 차단함.
+`prepare-*` 도구는 읽기 전용으로 확보한 Deployment JSON과 검토된 증적을 입력받아 **검토용 JSON만 생성함**. Kubernetes 호출·리소스 적용·이미지 교체·운영 데이터 변경을 수행하지 않음. 기본 resource 수치를 임의로 적용하지 않으며, 장시간 baseline과 실제 `/ready` 응답을 확보하기 전에는 하드닝 준비를 차단함. 아래 Caddy 전환·증거 수집·정책 실행기는 별도의 운영 변경 도구이며 승인된 운영 wrapper에서만 사용함.
 
 | 준비 도구 | 생성 결과 | 필수 확인 사항 |
 |---|---|---|
@@ -320,6 +320,10 @@ bash infra/k8s/tools/portal-cutover.sh --cleanup-rolledback
 | `tools/prepare-networkpolicy.py` | 앱 1개에만 적용되는 ingress·egress allowlist | CNI enforcement smoke, 현재 policy 목록, DNS·Caddy·metrics·fanout·외부 API/Drive·backup 흐름 검토 |
 | `tools/prepare-portal-hardening.py` | Portal 보안 필드 추가 및 검증된 추가 필드만 제거하는 원복 Patch | fresh UID/RV/image, 동일 이미지의 격리 startup·모든 쓰기 경로·실제 최대 ZIP 및 정리 검증, 백업 잠금·디스크 여유 |
 | `tools/prepare-ingress-networkpolicy.py` | 앱 하나의 수신 통신 정책 검증 | 실제 CNI 차단/허용·fresh snapshot·현재 정책·Caddy NAT/metrics/fanout 증거와 node 예외 검토 |
+| `tools/fixed-ingress-operation.py` | 검토한 준비 해시를 입력받는 통합 준비·실행 및 읽기 전용 상태 확인 | 신뢰된 launcher·정확한 CI 커밋·Windows ACL·단일 sequence 잠금·영속 원장, 불명확 상태는 잠금 유지 |
+| `tools/caddy-ingress-transition.py` | 승인된 Caddy 전용 고정 bridge 전환 및 소유 변경 원복 | 운영 wrapper·보호 상태·파일 권한·충돌 주소 검증, 기존 sequence 잠금, 같은 이미지와 공유 bridge 보존 |
+| `tools/fixed-ingress-evidence.py` | 고정 출처의 현재 연결·격리 허용/차단/복구·metrics·fanout 증거 | 현재 Service/Pod UID 및 경로 결합, 소유 임시 자원 정리, 비밀정보·원문 주소 로그 제외 |
+| `tools/fixed-ingress-rollout.py` | 네 앱 수신 정책의 create-only 순차 적용 | 정확한 검증 커밋·신선한 증거·보호 상태·외부 health, UID/spec/RV를 확인한 소유 정책만 원복 |
 | `tools/prepare-portal-service-routing.py` | 실패한 Compose alias 여섯 URL의 현재 Service 전환 및 역patch | Portal Pod에서 기존 여섯 URL 실패·direct 여섯 URL 200, UID/RV/image/spec SHA, 정확한 기존 literal URL |
 
 ```bash
@@ -427,6 +431,10 @@ Caddy 증거는 현재 대상 Pod UID와 결합해야 함. `inventory.target_pod
 2026-10-10 후속 적용에서 Portal 연결6개·rootfs 보안은 실제 적용됐으며 통합검색3경로·데이터 보존·외부 health를 확인함. 수신 정책은 검사 도구의 scheduler 필드 보완 후에도 사후 검증 실패로 원복되어 현재 정책0임. 노드 출발지 분류와 PodIP/Service 경로를 추가 진단 중이며, 아래 기록을 최신 상태로 확인함.
 
 후속 승인 범위·격리 실측·PR·실제 운영 적용 및 확인 필요 사항은 [운영 보안 잔여 항목 보완](../../docs/reviews/20261010_운영보안_잔여항목_보완.md)에 기록함. 이 절의 준비 도구 존재만으로 운영 적용 완료를 뜻하지 않음.
+
+고정 출처 후속 계약 `fixed_pre_nat_ip`는 지속 설정과 현재 Caddy 연결, 해당 Service/Pod, 같은 경로의 별도 격리 실측을 결합함. 기존 동적 주소의 Book 진단 결과를 다른 앱 또는 고정 설정의 운영 증거로 재사용하지 않음. Portal 접속 로그가 비활성화된 환경에서는 소유 HTTP 프로세스와 양쪽 socket을 결합하는 `endpoint_socket_http` 증거를 사용하며 로그 marker 입증과 구분함. 준비 결과 자체는 운영 준비·적용 권한·인증된 Caddy 신원을 부여하지 않음.
+
+실제 적용은 검토된 운영 wrapper와 별도 승인 범위에서만 수행함. Drvfs의 표시 권한만으로 파일 보호를 통과시키지 않으며 현재 Windows ACL 및 파일 식별자를 확인해야 함. 2026-10-11 준비·권한 점검·검증 및 실제 적용 여부는 [고정 출처 통신 차단 정책 기록](../../docs/reviews/20261011_통신차단정책_운영적용.md)을 기준으로 확인함.
 
 `prepare-portal-service-routing.py`는 실패가 검증된 기존 Compose alias의 검색·health 여섯 URL만 현재 앱 Service로 바꿈. 환경 목록 전체를 덮어쓰지 않으며 SecretRef·중복 이름·예상 밖 URL은 거부함. 원복은 정확한 여섯 값과 원본 spec 해시를 대조함. 보안 patch와 조합할 때는 라우팅을 적용한 합성 snapshot에서 보안 patch를 생성하고, 같은 UID/RV의 단일 원자적 Patch로 적용함. 역순도 합성 snapshot에서 검증한 하나의 Patch로 처리하여 중간 상태의 운영 적용을 피함.
 

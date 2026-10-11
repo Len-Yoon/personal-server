@@ -28,7 +28,8 @@ from pathlib import Path
 
 _spec = importlib.util.spec_from_file_location('ingress_snapshot_contract', Path(__file__).with_name('prepare-app-hardening.py'))
 _contract = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_contract)
+_contract_source = Path(__file__).with_name('prepare-app-hardening.py')
+exec(compile(_contract_source.read_bytes(), str(_contract_source), 'exec'), _contract.__dict__)
 PORTS = {'portal-web': 8000, 'book-memo': 8003, 'youtube-memo': 8002, 'crawler-worker': 8001}
 
 
@@ -170,6 +171,129 @@ def _pre_nat_candidate(caddy, smoke, inventory, app, now):
     return {'from': [deepcopy(peer)], 'ports': [{'protocol': 'TCP', 'port': 8003}]}
 
 
+def _fixed_pre_nat_candidate(caddy, smoke, inventory, app, now):
+    """Configured fixed address admission; no identity or deployment authority.
+
+    All observations are supplied by a separately trusted native collector.
+    Hash equality binds observations; it does not authenticate the collector.
+    Disposable enforcement is route/port specific and cannot substitute for
+    later production application and post-application checks.
+    """
+    fields = {'observed_at', 'status', 'controlled_request', 'source_kind',
+              'target_spec_sha256', 'target_pod_uid', 'peer', 'source_is_node',
+              'current_identity', 'fixed_configuration', 'request_proof'}
+    if set(caddy) != fields or caddy['source_is_node'] is not False:
+        raise ValueError('separate_fixed_pre_nat_contract_required')
+    peer = caddy['peer']
+    try:
+        if set(peer) != {'ipBlock'} or set(peer['ipBlock']) != {'cidr'}:
+            raise ValueError()
+        network = ipaddress.ip_network(peer['ipBlock']['cidr'], strict=True)
+        if (network.version != 4 or network.prefixlen != 32 or network.is_unspecified
+                or network.is_multicast or network.is_loopback or network.is_link_local
+                or network.is_reserved):
+            raise ValueError()
+    except (ValueError, TypeError, KeyError):
+        raise ValueError('fixed_single_ipv4_peer_required') from None
+    identity = caddy['current_identity']
+    identity_fields = {'container_id_sha256', 'container_image_sha256', 'started_at', 'network_settings_sha256'}
+    if not isinstance(identity, dict) or set(identity) != identity_fields:
+        raise ValueError('fixed_current_identity_required')
+    for key in identity_fields - {'started_at'}:
+        pattern = 'sha256:[a-f0-9]{64}' if key == 'container_image_sha256' else '[a-f0-9]{64}'
+        if not isinstance(identity[key], str) or not re.fullmatch(pattern, identity[key]):
+            raise ValueError('fixed_current_identity_required')
+    try:
+        started = datetime.fromisoformat(identity['started_at'].replace('Z', '+00:00'))
+        if started.tzinfo is None or started > now:
+            raise ValueError()
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError('fixed_current_start_required') from None
+    config = caddy['fixed_configuration']
+    true_config = {'external_owned_bridge', 'explicit_ipam', 'configured_static_address',
+                   'endpoint_matches_configuration', 'address_outside_dynamic_range',
+                   'non_overlapping_ranges', 'shared_bridge_unchanged', 'same_image_preserved'}
+    hash_config = {'network_id_sha256', 'network_spec_sha256', 'ipam_sha256',
+                   'runtime_config_sha256', 'owner_sha256'}
+    config_fields = true_config | hash_config | {'observed_at', 'source_sha256', 'current_identity_sha256'}
+    if not isinstance(config, dict) or set(config) != config_fields or any(config[k] is not True for k in true_config):
+        raise ValueError('durable_fixed_configuration_required')
+    _fresh(config['observed_at'], now)
+    for key in hash_config:
+        if not isinstance(config[key], str) or not re.fullmatch('[a-f0-9]{64}', config[key]):
+            raise ValueError('fixed_configuration_hashes_required')
+    bindings = {'current_identity_sha256': digest(identity),
+                'source_sha256': digest(str(network.network_address)), 'peer_sha256': digest(peer),
+                'configuration_sha256': digest(config), 'cluster_uid': inventory.get('cluster_uid'),
+                'node_uid': inventory.get('target_node_uid'), 'route': 'ClusterIP', 'port': PORTS[app]}
+    if (not isinstance(bindings['cluster_uid'], str) or not bindings['cluster_uid'].strip()
+            or not isinstance(bindings['node_uid'], str) or not bindings['node_uid'].strip()
+            or config['source_sha256'] != bindings['source_sha256']
+            or config['current_identity_sha256'] != bindings['current_identity_sha256']):
+        raise ValueError('fixed_configuration_identity_binding_required')
+    proof = caddy['request_proof']
+    true_request = {'same_connection_bound', 'pid_start_inode_bound',
+                    'source_matches_current_endpoint', 'route_chosen_source_matches_fixed_address',
+                    'target_endpoint_unchanged'}
+    request_fields = set(bindings) | true_request | {'target_pod_uid', 'service_uid', 'service_spec_sha256',
+                     'proof_method', 'http_marker_bound', 'server_endpoint_socket_bound', 'target_endpoint_sha256'}
+    if (not isinstance(proof, dict) or set(proof) != request_fields
+            or any(proof[k] is not True for k in true_request)
+            or type(proof.get('port')) is not int
+            or any(proof[k] != v for k, v in bindings.items())
+            or proof['target_pod_uid'] != inventory['target_pod_uid']
+            or proof['service_uid'] != inventory.get('target_service_uid')
+            or not isinstance(proof['service_uid'], str) or not proof['service_uid'].strip()
+            or proof['service_spec_sha256'] != inventory.get('target_service_spec_sha256')
+            or not isinstance(proof['service_spec_sha256'], str)
+            or not re.fullmatch('[a-f0-9]{64}', proof['service_spec_sha256'])):
+        raise ValueError('fixed_current_request_route_target_binding_required')
+    if (proof['proof_method'] not in ('access_log_marker', 'endpoint_socket_http')
+            or proof['http_marker_bound'] is not (proof['proof_method'] == 'access_log_marker')
+            or proof['server_endpoint_socket_bound'] is not (proof['proof_method'] == 'endpoint_socket_http')
+            or proof['target_endpoint_sha256'] != inventory.get('target_endpoint_sha256')
+            or not isinstance(proof['target_endpoint_sha256'], str)
+            or not re.fullmatch('[a-f0-9]{64}', proof['target_endpoint_sha256'])):
+        raise ValueError('explicit_current_request_observation_method_required')
+    if set(smoke) != {'cluster_uid', 'fixed_pre_nat_diagnostic'}:
+        raise ValueError('separate_fixed_diagnostic_required')
+    diag = smoke['fixed_pre_nat_diagnostic']
+    diag_fields = set(bindings) | {'run_id', 'tool_sha256', 'server_pod_uid', 'service_uid', 'result', 'result_sha256'}
+    if (not isinstance(diag, dict) or set(diag) != diag_fields
+            or type(diag.get('port')) is not int
+            or any(diag[k] != v for k, v in bindings.items())
+            or not isinstance(diag['run_id'], str) or not re.fullmatch('[a-f0-9]{12}', diag['run_id'])
+            or not isinstance(diag['tool_sha256'], str) or not re.fullmatch('[a-f0-9]{64}', diag['tool_sha256'])
+            or not isinstance(diag['server_pod_uid'], str) or not diag['server_pod_uid'].strip()
+            or not isinstance(diag['service_uid'], str) or not diag['service_uid'].strip()
+            or len({diag['server_pod_uid'], diag['service_uid'], inventory['target_pod_uid'], proof['service_uid']}) != 4):
+        raise ValueError('fixed_isolated_diagnostic_binding_required')
+    result = diag['result']
+    true_result = {'baseline', 'caddy_denied', 'fixed_address_allowed', 'unknown_pod_denied',
+                   'unknown_service_denied', 'restored_flow_proven', 'owned_cleanup_complete', 'production_postguard_pass'}
+    false_result = {'caddy_only_identity_isolation', 'policy_hook_directly_observed',
+                    'production_identity_proven', 'production_apply_succeeded', 'raw_address_output', 'raw_address_persisted'}
+    result_bindings = dict(bindings, server_pod_uid=diag['server_pod_uid'], service_uid=diag['service_uid'])
+    result_fields = true_result | false_result | set(result_bindings) | {'status', 'run_id', 'completed_at', 'source_kind', 'target_commit'}
+    if (not isinstance(result, dict) or set(result) != result_fields
+            or digest(result) != diag['result_sha256'] or result['status'] != 'PASS'
+            or type(result.get('port')) is not int
+            or any(result[k] != v for k, v in result_bindings.items())
+            or result['source_kind'] != 'fixed_pre_nat_ip' or result['run_id'] != diag['run_id']
+            or result['target_commit'] != inventory.get('source_commit')
+            or not isinstance(result['target_commit'], str) or not re.fullmatch('[a-f0-9]{40}', result['target_commit'])
+            or any(result[k] is not True for k in true_result)
+            or any(result[k] is not False for k in false_result)):
+        raise ValueError('successful_fixed_diagnostic_and_cleanup_required')
+    _fresh(result['completed_at'], now)
+    completed = datetime.fromisoformat(result['completed_at'].replace('Z', '+00:00'))
+    configured = datetime.fromisoformat(config['observed_at'].replace('Z', '+00:00'))
+    observed = datetime.fromisoformat(caddy['observed_at'].replace('Z', '+00:00'))
+    if not started <= configured <= completed <= observed:
+        raise ValueError('fixed_configuration_diagnostic_request_order_required')
+    return {'from': [deepcopy(peer)], 'ports': [{'protocol': 'TCP', 'port': PORTS[app]}]}
+
+
 def prepare(snapshot, inventory, *, now=None):
     now = now or datetime.now(timezone.utc)
     meta, pod, _, container = _contract.validate_snapshot(snapshot)
@@ -195,12 +319,13 @@ def prepare(snapshot, inventory, *, now=None):
     if not isinstance(caddy, dict):
         raise ValueError('caddy_object_required')
     pre_nat = caddy.get('source_kind') == 'pre_nat_exact_ip'
-    if not pre_nat:
+    fixed_pre_nat = caddy.get('source_kind') == 'fixed_pre_nat_ip'
+    if not (pre_nat or fixed_pre_nat):
         _fresh(smoke.get('observed_at'), now, 86400)
         if any(smoke.get(key) is not True for key in ('baseline', 'deny', 'selective_allow', 'unknown_pod_denied', 'cleanup', 'production_unchanged')):
             raise ValueError('actual_positive_negative_and_cleanup_smoke_required')
     _fresh(caddy.get('observed_at'), now)
-    if caddy.get('status') != 200 or caddy.get('controlled_request') is not True or not pre_nat and caddy.get('post_nat_observed') is not True:
+    if caddy.get('status') != 200 or caddy.get('controlled_request') is not True or not (pre_nat or fixed_pre_nat) and caddy.get('post_nat_observed') is not True:
         raise ValueError('controlled_caddy_pre_nat_observation_required' if pre_nat else 'controlled_caddy_post_nat_observation_required')
     if caddy.get('target_spec_sha256') != inventory['spec_sha256']:
         raise ValueError('target_bound_caddy_observation_required')
@@ -210,6 +335,8 @@ def prepare(snapshot, inventory, *, now=None):
     ingress = []
     if pre_nat:
         ingress.append(_pre_nat_candidate(caddy, smoke, inventory, meta['name'], now))
+    elif fixed_pre_nat:
+        ingress.append(_fixed_pre_nat_candidate(caddy, smoke, inventory, meta['name'], now))
     elif caddy.get('source_kind') == 'node':
         if inventory.get('acknowledge_node_exception') is not True or caddy.get('source_matches_node_interface') is not True:
             raise ValueError('explicit_node_exception_acknowledgement_required')
@@ -277,6 +404,12 @@ def prepare(snapshot, inventory, *, now=None):
                       production_apply_authorized=False, stop_reasons=['dynamic_caddy_endpoint_not_durable_identity'],
                       policy_hook_directly_observed=False, long_term_stable_ip_proven=False,
                       production_identity_proven=False, production_apply_succeeded=False, production_route_proven=False)
+    if fixed_pre_nat:
+        result.update(caddy_source_kind='fixed_pre_nat_ip', configured_fixed_address_proven=True,
+                      operating_ready=False, production_apply_authorized=False,
+                      policy_hook_directly_observed=False, production_identity_proven=False,
+                      production_apply_succeeded=False, production_route_proven=False,
+                      stop_reasons=['separately_authorized_production_application_and_verification_required'])
     return result
 
 
@@ -287,7 +420,7 @@ def main():
     parser.add_argument('--describe-input', action='store_true')
     args = parser.parse_args()
     if args.describe_input:
-        print(json.dumps({'snapshot': 'fresh Deployment', 'inventory': 'UID/RV/image/spec SHA; cluster-bound positive/negative smoke; controlled Caddy post-NAT source; fresh actual pod source proofs for metrics/fanout; documented exemptions; node exception acknowledgement', 'validation_only': True, 'pre_nat_exact_ip': 'Book ClusterIP:8003 offline candidate only; caddy.pre_nat_proof belongs to the fresh production controlled request, enforcement.pre_nat_diagnostic to a distinct isolated server/Service; identity/socket/peer hashes; canonical JSON result SHA and tool SHA check consistency, not authenticity; trusted collector and review required; positive/negative/restore/cleanup proof; operating_ready=false; production route/apply, NodePort, policy hook and durable identity remain unproven', 'operating_ready': False, 'production_apply_authorized': False, 'policy_output': 'in-memory prepare() only; separately reviewed authorized application required', 'max_flow_age_seconds': 300, 'egress_unchanged': True, 'node_traffic_unrestricted': True, 'caddy_only_isolation': False}, sort_keys=True))
+        print(json.dumps({'snapshot': 'fresh Deployment', 'inventory': 'UID/RV/image/spec SHA; cluster-bound positive/negative smoke; controlled Caddy post-NAT source; fresh actual pod source proofs for metrics/fanout; documented exemptions; node exception acknowledgement', 'validation_only': True, 'pre_nat_exact_ip': 'Book ClusterIP:8003 offline candidate only; caddy.pre_nat_proof belongs to the fresh production controlled request, enforcement.pre_nat_diagnostic to a distinct isolated server/Service; identity/socket/peer hashes; canonical JSON result SHA and tool SHA check consistency, not authenticity; trusted collector and review required; positive/negative/restore/cleanup proof; operating_ready=false; production route/apply, NodePort, policy hook and durable identity remain unproven', 'fixed_pre_nat_ip': 'Separate configured fixed address contract for all four app ClusterIP ports; current owned network/IPAM/runtime configuration and same-process request binding; fresh per-route isolated positive/negative/restore/cleanup evidence; grants no production authority or authenticated Caddy identity', 'operating_ready': False, 'production_apply_authorized': False, 'policy_output': 'in-memory prepare() only; separately reviewed authorized application required', 'max_flow_age_seconds': 300, 'egress_unchanged': True, 'node_traffic_unrestricted': True, 'caddy_only_isolation': False}, sort_keys=True))
         return
     if not args.snapshot or not args.inventory:
         parser.error('--snapshot and --inventory are required')

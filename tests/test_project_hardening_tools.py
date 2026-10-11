@@ -137,6 +137,127 @@ class IngressOnlyPolicyTests(unittest.TestCase):
             self.assertEqual(result.returncode,2)
             self.assertEqual(result.stderr,'ingress_inventory_validation=FAIL\n')
 
+class FixedPreNatIngressTests(unittest.TestCase):
+    fixture = IngressOnlyPolicyTests.fixture
+
+    def fixed_fixture(self, app='book-memo'):
+        module, snapshot, inventory = self.fixture(app)
+        stamp = inventory['observed_at']
+        inventory.update(source_commit='d'*40, target_service_uid='production-service', target_service_spec_sha256='f'*64, target_endpoint_sha256='1'*64)
+        peer = {'ipBlock': {'cidr': '192.0.2.7/32'}}
+        identity = {'container_id_sha256': 'a'*64, 'container_image_sha256': 'sha256:'+'b'*64,
+                    'started_at': (datetime.now(timezone.utc)-timedelta(hours=1)).isoformat(), 'network_settings_sha256': 'c'*64}
+        config = {k: True for k in ('external_owned_bridge', 'explicit_ipam', 'configured_static_address',
+                  'endpoint_matches_configuration', 'address_outside_dynamic_range', 'non_overlapping_ranges',
+                  'shared_bridge_unchanged', 'same_image_preserved')}
+        config.update({k: 'e'*64 for k in ('network_id_sha256', 'network_spec_sha256', 'ipam_sha256', 'runtime_config_sha256', 'owner_sha256')})
+        config.update(observed_at=stamp, source_sha256=module.digest('192.0.2.7'), current_identity_sha256=module.digest(identity))
+        bindings = dict(current_identity_sha256=module.digest(identity), source_sha256=module.digest('192.0.2.7'),
+                        peer_sha256=module.digest(peer), configuration_sha256=module.digest(config),
+                        cluster_uid=inventory['cluster_uid'], node_uid=inventory['target_node_uid'], route='ClusterIP', port=module.PORTS[app])
+        request = dict(bindings, target_pod_uid=inventory['target_pod_uid'], service_uid=inventory['target_service_uid'], service_spec_sha256=inventory['target_service_spec_sha256'])
+        request.update(proof_method='access_log_marker', server_endpoint_socket_bound=False, target_endpoint_unchanged=True, target_endpoint_sha256=inventory['target_endpoint_sha256'])
+        request.update({k: True for k in ('same_connection_bound', 'pid_start_inode_bound', 'http_marker_bound', 'source_matches_current_endpoint', 'route_chosen_source_matches_fixed_address')})
+        caddy = dict(observed_at=stamp, status=200, controlled_request=True, source_kind='fixed_pre_nat_ip',
+                     target_spec_sha256=inventory['spec_sha256'], target_pod_uid=inventory['target_pod_uid'],
+                     peer=peer, source_is_node=False, current_identity=identity, fixed_configuration=config, request_proof=request)
+        result = {k: True for k in ('baseline', 'caddy_denied', 'fixed_address_allowed', 'unknown_pod_denied', 'unknown_service_denied', 'restored_flow_proven', 'owned_cleanup_complete', 'production_postguard_pass')}
+        result.update({k: False for k in ('caddy_only_identity_isolation', 'policy_hook_directly_observed', 'production_identity_proven', 'production_apply_succeeded', 'raw_address_output', 'raw_address_persisted')})
+        result.update(status='PASS', run_id='abcdef123456', completed_at=stamp, source_kind='fixed_pre_nat_ip', target_commit=inventory['source_commit'])
+        result.update(bindings, server_pod_uid='isolated-pod', service_uid='isolated-service')
+        diag = dict(bindings, run_id=result['run_id'], tool_sha256='e'*64, server_pod_uid='isolated-pod', service_uid='isolated-service', result=result, result_sha256=module.digest(result))
+        inventory['caddy'] = caddy
+        inventory['enforcement'] = dict(cluster_uid=inventory['cluster_uid'], fixed_pre_nat_diagnostic=diag)
+        return module, snapshot, inventory
+
+    def test_fixed_contract_covers_each_app_but_grants_no_deployment_authority(self):
+        for app in ('portal-web', 'book-memo', 'youtube-memo', 'crawler-worker'):
+            with self.subTest(app=app):
+                module, snapshot, inventory = self.fixed_fixture(app); before = deepcopy((snapshot, inventory))
+                result = module.prepare(snapshot, inventory)
+                self.assertEqual(before, (snapshot, inventory))
+                self.assertEqual(result['policy']['spec']['ingress'][0], {'from': [inventory['caddy']['peer']], 'ports': [{'protocol': 'TCP', 'port': module.PORTS[app]}]})
+                self.assertTrue(result['configured_fixed_address_proven'])
+                for key in ('operating_ready', 'production_apply_authorized', 'production_apply_succeeded', 'production_identity_proven', 'production_route_proven', 'caddy_only_isolation', 'policy_hook_directly_observed'):
+                    self.assertIs(result[key], False)
+
+    def test_fixed_proofs_cannot_be_dynamic_stale_foreign_or_unbound(self):
+        module, snapshot, inventory = self.fixed_fixture()
+        mutations = [lambda x: x['caddy'].update(source_kind='pre_nat_exact_ip'),
+                     lambda x: x['caddy'].update(post_nat_observed=True),
+                     lambda x: x['caddy']['fixed_configuration'].update(configured_static_address=False),
+                     lambda x: x['caddy']['fixed_configuration'].update(observed_at=(datetime.now(timezone.utc)-timedelta(minutes=6)).isoformat()),
+                     lambda x: x['caddy']['fixed_configuration'].update(endpoint_matches_configuration=False),
+                     lambda x: x['caddy']['fixed_configuration'].update(same_image_preserved=False),
+                     lambda x: x['caddy']['current_identity'].update(container_id_sha256='b'*64),
+                     lambda x: x['caddy']['request_proof'].update(route='NodePort'),
+                     lambda x: x['caddy']['request_proof'].update(port=443),
+                     lambda x: x['caddy']['request_proof'].update(service_uid='foreign'),
+                     lambda x: x['caddy']['request_proof'].update(target_pod_uid='foreign'),
+                     lambda x: x['caddy']['request_proof'].update(route_chosen_source_matches_fixed_address=False),
+                     lambda x: x['caddy']['request_proof'].update(unknown=True),
+                     lambda x: x['enforcement']['fixed_pre_nat_diagnostic'].update(server_pod_uid=x['target_pod_uid']),
+                     lambda x: x['enforcement']['fixed_pre_nat_diagnostic'].update(configuration_sha256='0'*64),
+                     lambda x: x['enforcement']['fixed_pre_nat_diagnostic'].update(port=8000),
+                     lambda x: x.update(target_service_uid=''),
+                     lambda x: x.update(source_commit='other')]
+        for mutate in mutations:
+            invalid = deepcopy(inventory); mutate(invalid)
+            with self.subTest(mutation=mutate), self.assertRaises(ValueError): module.prepare(snapshot, invalid)
+
+    def test_fixed_diagnostic_requires_each_real_phase_and_explicit_limits(self):
+        module, snapshot, inventory = self.fixed_fixture()
+        result = inventory['enforcement']['fixed_pre_nat_diagnostic']['result']
+        for key, value in result.items():
+            if type(value) is not bool: continue
+            invalid = deepcopy(inventory); diag = invalid['enforcement']['fixed_pre_nat_diagnostic']
+            diag['result'][key] = not value; diag['result_sha256'] = module.digest(diag['result'])
+            with self.subTest(phase=key), self.assertRaises(ValueError): module.prepare(snapshot, invalid)
+        for field in ('fixed_configuration', 'request_proof'):
+            for key, value in inventory['caddy'][field].items():
+                if type(value) is not bool: continue
+                invalid = deepcopy(inventory); invalid['caddy'][field][key] = 1
+                with self.subTest(field=field, key=key), self.assertRaises(ValueError): module.prepare(snapshot, invalid)
+        invalid = deepcopy(inventory); diag = invalid['enforcement']['fixed_pre_nat_diagnostic']
+        diag['result']['completed_at'] = (datetime.now(timezone.utc)-timedelta(minutes=6)).isoformat()
+        diag['result_sha256'] = module.digest(diag['result'])
+        with self.assertRaises(ValueError): module.prepare(snapshot, invalid)
+
+    def test_fixed_socket_http_method_is_explicit_and_cannot_claim_server_log_marker(self):
+        module, snapshot, inventory = self.fixed_fixture('portal-web')
+        proof = inventory['caddy']['request_proof']
+        proof.update(proof_method='endpoint_socket_http', http_marker_bound=False, server_endpoint_socket_bound=True)
+        self.assertTrue(module.prepare(snapshot, inventory)['configured_fixed_address_proven'])
+        for changes in ({'http_marker_bound':True}, {'server_endpoint_socket_bound':False}, {'proof_method':'unknown'}, {'target_endpoint_unchanged':False}, {'target_endpoint_sha256':'2'*64}):
+            invalid=deepcopy(inventory);invalid['caddy']['request_proof'].update(changes)
+            with self.subTest(changes=changes), self.assertRaises(ValueError):module.prepare(snapshot,invalid)
+
+    def test_fixed_original_result_cannot_be_transplanted_to_other_app_port(self):
+        module, _, book = self.fixed_fixture('book-memo')
+        for app in ('portal-web', 'youtube-memo', 'crawler-worker'):
+            _, snapshot, other = self.fixed_fixture(app)
+            # Synchronize valid current observations so only original result
+            # route/port binding distinguishes a transplanted causal outcome.
+            other['caddy']['current_identity'] = deepcopy(book['caddy']['current_identity'])
+            other['caddy']['fixed_configuration'] = deepcopy(book['caddy']['fixed_configuration'])
+            for holder in (other['caddy']['request_proof'], other['enforcement']['fixed_pre_nat_diagnostic']):
+                for key in ('current_identity_sha256', 'configuration_sha256'):
+                    holder[key] = book['enforcement']['fixed_pre_nat_diagnostic'][key]
+            diag = other['enforcement']['fixed_pre_nat_diagnostic']
+            diag['result'] = deepcopy(book['enforcement']['fixed_pre_nat_diagnostic']['result'])
+            diag['result_sha256'] = module.digest(diag['result'])
+            with self.subTest(app=app), self.assertRaises(ValueError): module.prepare(snapshot, other)
+
+    def test_fixed_cli_redacts_address_and_current_identity(self):
+        _, snapshot, inventory = self.fixed_fixture()
+        with tempfile.TemporaryDirectory() as temp:
+            a=Path(temp)/'snapshot'; b=Path(temp)/'inventory'; a.write_text(json.dumps(snapshot)); b.write_text(json.dumps(inventory))
+            result = subprocess.run(['python3', str(ROOT/'infra/k8s/tools/prepare-ingress-networkpolicy.py'), '--snapshot', str(a), '--inventory', str(b)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for private in ('192.0.2.7', 'production-service', 'a'*64): self.assertNotIn(private, result.stdout+result.stderr)
+        self.assertFalse(json.loads(result.stdout)['production_apply_authorized'])
+
+
 class PreNatIngressCandidateTests(unittest.TestCase):
     fixture = IngressOnlyPolicyTests.fixture
     def pre_fixture(self):
