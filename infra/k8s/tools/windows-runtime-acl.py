@@ -32,13 +32,15 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 
-# Schema 2 deliberately rejects plans prepared under the all-mtime-strict contract.
-SCHEMA = 2
-COMPARISON_CONTRACT = {"version": "exact_runtime_modified_v1", "entries": [
-    {"path": "data", "kind": "directory"},
-    {"path": "data/system/host-metrics.json", "kind": "file"},
-    {"path": "data/car-care", "kind": "directory"},
-    {"path": "data/car-care/car-care.sqlite3", "kind": "file"},
+# Schema 3 rejects earlier plans before interpreting the narrow live-file contract.
+SCHEMA = 3
+COMPARISON_CONTRACT = {"version": "exact_runtime_live_metadata_v2", "entries": [
+    {"path": "data", "kind": "directory", "fields": ["modified"]},
+    {"path": "data/system/host-metrics.json", "kind": "file", "fields": ["size", "modified"]},
+    {"path": "data/car-care", "kind": "directory", "fields": ["modified"]},
+    {"path": "data/car-care/car-care.sqlite3", "kind": "file", "fields": ["modified"]},
+    {"path": "data/recovery-state.json", "kind": "file", "fields": ["size", "modified"]},
+    {"path": "data/recovery-events.jsonl", "kind": "file", "fields": ["identity", "size", "modified"]},
 ]}
 RUNTIME = (".env", "docker-compose.yml", "docker-compose.n100.yml",
            "docker-compose.portal-bridge.yml")
@@ -47,6 +49,28 @@ EXPECTED_COUNTS = {"total": 6669, "files": 5813, "directories": 856,
                    "ignored_unsafe": 315, "other_owner": 69}
 SAFE_REASON = re.compile(r"^[a-z][a-z0-9_]{0,80}$")
 POWERSHELL_BINARY = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+NATIVE_INVARIANT_STAGES = frozenset({"invariant", "inventory_unpinned_entry",
+    "inventory_identity_mismatch", "inventory_set_mismatch", "row_identity_mismatch", "set_identity_mismatch"})
+NATIVE_DIAGNOSTIC_STAGES = NATIVE_INVARIANT_STAGES | frozenset({"open_read", "open_write",
+    "open_file_information", "row_file_information", "file_information",
+    "get_security_info", "set_security_info"})
+
+
+def native_failure_diagnostic(value):
+    """Copy only bounded, noncredential observations; never trust error text."""
+    if not isinstance(value, dict) or set(value) != {"stage", "win32_error", "path_sha256"}:
+        return None
+    stage, error, path = value["stage"], value["win32_error"], value["path_sha256"]
+    if not isinstance(stage, str) or stage not in NATIVE_DIAGNOSTIC_STAGES:
+        return None
+    if stage in NATIVE_INVARIANT_STAGES:
+        if error is not None:
+            return None
+    elif type(error) is not int or not 0 <= error <= 0xffffffff:
+        return None
+    if path is not None and (not isinstance(path, str) or not re.fullmatch(r"[0-9a-f]{64}", path)):
+        return None
+    return {"stage": stage, "win32_error": error, "path_sha256": path}
 
 
 class Blocked(Exception):
@@ -153,11 +177,13 @@ def validate_snapshot(snapshot, scope):
 def entry_comparison(path, entry):
     result = copy.deepcopy(entry)
     result.pop("sd")
-    # Existing bootstrap metrics and Car Care writers remain active. Only these
-    # exact path/kind pairs may change mtime; no content/metadata setter exists.
-    if any(row["path"] == path and row["kind"] == entry["kind"]
-           for row in COMPARISON_CONTRACT["entries"]):
-        result.pop("modified")
+    # Comparison only: these nonexecutable writers stay active while inherited
+    # ACLs change. Native pinned handles and strict projection checks are intact.
+    for row in COMPARISON_CONTRACT["entries"]:
+        if row["path"] == path and row["kind"] == entry["kind"]:
+            for field in row["fields"]:
+                result.pop(field)
+            break
     return result
 
 
@@ -165,8 +191,9 @@ def security_projection(snapshot):
     """Compare metadata, identity, owner/group, DACL ACE bytes and protection.
 
     SD auto-inheritance/defaulted control bits and unreadable SACL bytes are not
-    independently compared. Exact COMPARISON_CONTRACT path/kind mtimes are
-    excluded only from comparison; originals remain encrypted in the plan.
+    independently compared. Exact COMPARISON_CONTRACT path/kind fields are
+    excluded only from comparison; raw originals remain encrypted in the plan.
+    All other fields, including parent identities, retain strict comparison.
     DACL-only native flags preserve owner/group/SACL.
     """
     result = copy.deepcopy(snapshot)
@@ -630,14 +657,39 @@ public static class BoundAcl {
  static string root, principal;
  static HashSet<string> tracked, runtime;
  public static string Principal {get {return principal;}}
- static void Check(bool value) {if(!value) throw new Exception("native_acl_failure");}
+ static Dictionary<string,object> diagnostic;
+ public static void ResetDiagnostic() {diagnostic=null;}
+ public static Dictionary<string,object> FailureDiagnostic() {return diagnostic;}
+ static string DiagnosticPath(string path) {
+  if(path==null)return null;
+  return HexHash(System.Text.Encoding.UTF8.GetBytes("windows-acl-relative-path-v1\0"+path));
+ }
+ static string RelativeDiagnosticPath(string path) {
+  if(root==null)return null;
+  if(String.Equals(path,root,StringComparison.OrdinalIgnoreCase))return "";
+  if(path.StartsWith(root+"\\",StringComparison.OrdinalIgnoreCase))return path.Substring(root.Length+1).Replace('\\','/');
+  return null; // Ancestors/outside paths are never returned or hashed as relative objects.
+ }
+ static void Fail(string stage,string path,object error) {
+  if(diagnostic==null)diagnostic=new Dictionary<string,object>{{"stage",stage},{"win32_error",error},{"path_sha256",DiagnosticPath(path)}};
+  throw new Exception("native_acl_failure");
+ }
+ static void Check(bool value) {if(!value)Fail("invariant",null,null);}
+ static Info FileInformation(SafeFileHandle handle,string relative=null) {
+  Info info;bool ok=GetFileInformationByHandle(handle,out info);
+  if(!ok) {uint error=unchecked((uint)Marshal.GetLastWin32Error());Fail("file_information",relative,error);}
+  return info;
+ }
  static string NativePath(string p) {return @"\\?\"+p;}
  static string Full(string relative) {return relative.Length==0 ? root : Path.Combine(root,relative.Replace('/','\\'));}
  static SafeFileHandle Open(string p,bool write) {
+  string relative=RelativeDiagnosticPath(p);
   // Explicit rights, never MAXIMUM_ALLOWED. Both read/write sharing permit
   // Windows inheritance propagation; omitting DELETE blocks replacement.
   var h=CreateFile(NativePath(p),0x00020080u | (write?0x00040000u:0),3,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
-  Check(!h.IsInvalid); Info i; Check(GetFileInformationByHandle(h,out i));
+  if(h.IsInvalid) {uint error=unchecked((uint)Marshal.GetLastWin32Error());Fail(write?"open_write":"open_read",relative,error);}
+  Info i;bool ok=GetFileInformationByHandle(h,out i);
+  if(!ok) {uint error=unchecked((uint)Marshal.GetLastWin32Error());Fail("open_file_information",relative,error);}
   Check((i.Attr&1024)==0); return h;
  }
  static string[] Inventory() {
@@ -646,9 +698,9 @@ public static class BoundAcl {
    var parent=pending.Dequeue();
    foreach(var p in Directory.EnumerateFileSystemEntries(Full(parent))) {
     var relative=p.Substring(root.Length+1).Replace('\\','/');
-    Check(handles.ContainsKey(relative));
-    using(var fresh=Open(p,false))Check(Identity(fresh)==Identity(handles[relative]));
-    Info info;Check(GetFileInformationByHandle(handles[relative],out info)&&(info.Attr&1024)==0);
+    if(!handles.ContainsKey(relative))Fail("inventory_unpinned_entry",relative,null);
+    using(var fresh=Open(p,false))if(Identity(fresh)!=Identity(handles[relative]))Fail("inventory_identity_mismatch",relative,null);
+    Info info=FileInformation(handles[relative],relative);Check((info.Attr&1024)==0);
     all.Add(relative); if((info.Attr&16)!=0) pending.Enqueue(relative);
    }
   }
@@ -709,7 +761,7 @@ public static class BoundAcl {
    foreach(var path in Directory.EnumerateFileSystemEntries(Full(parentPath))) {
     string relative=path.Substring(root.Length+1).Replace('\\','/');
     var handle=Open(path,false); // OPEN_REPARSE_POINT and no DELETE before traversal
-    handles.Add(relative,handle);Info info;Check(GetFileInformationByHandle(handle,out info));
+    handles.Add(relative,handle);Info info=FileInformation(handle,relative);
     if((info.Attr&16)!=0)pending.Enqueue(relative);
    }
   }
@@ -721,13 +773,14 @@ public static class BoundAcl {
     Check(Identity(replacement)==old); handles[p].Dispose(); handles[p]=replacement;
    }
   }
-  Check(Inventory().SequenceEqual(handles.Keys.OrderBy(p=>p.Count(c=>c=='/')).ThenBy(p=>p,StringComparer.Ordinal)));
+  if(!Inventory().SequenceEqual(handles.Keys.OrderBy(p=>p.Count(c=>c=='/')).ThenBy(p=>p,StringComparer.Ordinal)))Fail("inventory_set_mismatch",null,null);
  }
- static string Identity(SafeFileHandle h) {Info i;Check(GetFileInformationByHandle(h,out i));return i.Volume.ToString("x8")+":"+i.IndexH.ToString("x8")+i.IndexL.ToString("x8");}
+ static string Identity(SafeFileHandle h) {Info i=FileInformation(h);return i.Volume.ToString("x8")+":"+i.IndexH.ToString("x8")+i.IndexL.ToString("x8");}
  static byte[] Bytes(GenericAcl a) {var b=new byte[a.BinaryLength];a.GetBinaryForm(b,0);return b;}
  static byte[] Bytes(RawSecurityDescriptor a) {var b=new byte[a.BinaryLength];a.GetBinaryForm(b,0);return b;}
- static RawSecurityDescriptor Descriptor(SafeFileHandle h) {
-  IntPtr o,g,d,s,p; Check(GetSecurityInfo(h,1,7,out o,out g,out d,out s,out p)==0);
+ static RawSecurityDescriptor Descriptor(SafeFileHandle h,string relative=null) {
+  IntPtr o,g,d,s,p; uint error=GetSecurityInfo(h,1,7,out o,out g,out d,out s,out p);
+  if(error!=0)Fail("get_security_info",relative,error);
   try {var b=new byte[GetSecurityDescriptorLength(p)];Marshal.Copy(p,b,0,b.Length);return new RawSecurityDescriptor(b,0);}
   finally {LocalFree(p);}
  }
@@ -746,8 +799,10 @@ public static class BoundAcl {
   return unsafeEntry;
  }
  static Dictionary<string,object> Row(string p,SafeFileHandle h) {
-  Info i;Check(GetFileInformationByHandle(h,out i));Check((i.Attr&1024)==0);
-  var sd=Descriptor(h);Check(sd.DiscretionaryAcl!=null); bool bad=Unsafe(sd.DiscretionaryAcl);
+  Info i;bool ok=GetFileInformationByHandle(h,out i);
+  if(!ok) {uint error=unchecked((uint)Marshal.GetLastWin32Error());Fail("row_file_information",p,error);}
+  Check((i.Attr&1024)==0);
+  var sd=Descriptor(h,p);Check(sd.DiscretionaryAcl!=null); bool bad=Unsafe(sd.DiscretionaryAcl);
   return new Dictionary<string,object>{{"identity",Identity(h)},{"kind",(i.Attr&16)!=0?"directory":"file"},
    {"attributes",i.Attr},{"created",((ulong)i.CH<<32|i.CL).ToString()}, {"modified",((ulong)i.MH<<32|i.ML).ToString()},
    {"size",((ulong)i.SizeH<<32|i.SizeL).ToString()},{"links",i.Links},
@@ -757,11 +812,11 @@ public static class BoundAcl {
  }
  public static Dictionary<string,Dictionary<string,object>> Rows() {
   VerifyAncestors();
-  Check(Inventory().SequenceEqual(handles.Keys.OrderBy(p=>p.Count(c=>c=='/')).ThenBy(p=>p,StringComparer.Ordinal)));
+  if(!Inventory().SequenceEqual(handles.Keys.OrderBy(p=>p.Count(c=>c=='/')).ThenBy(p=>p,StringComparer.Ordinal)))Fail("inventory_set_mismatch",null,null);
   var rows=new Dictionary<string,Dictionary<string,object>>(StringComparer.Ordinal);
   foreach(var item in handles) {
    // A fresh path handle must resolve to the pinned object, even on restart.
-   using(var fresh=Open(Full(item.Key),false)) Check(Identity(fresh)==Identity(item.Value));
+   using(var fresh=Open(Full(item.Key),false))if(Identity(fresh)!=Identity(item.Value))Fail("row_identity_mismatch",item.Key,null);
    rows.Add(item.Key,Row(item.Key,item.Value));
   }
   return rows;
@@ -829,18 +884,19 @@ public static class BoundAcl {
  }
  public static void Set(string p,string expectedIdentity,string descriptor) {
   VerifyAncestors();
-  Check(handles.ContainsKey(p)&&Identity(handles[p])==expectedIdentity);
-  using(var fresh=Open(Full(p),false))Check(Identity(fresh)==expectedIdentity);
-  SetHandle(handles[p],From(descriptor));
+  if(!(handles.ContainsKey(p)&&Identity(handles[p])==expectedIdentity))Fail("set_identity_mismatch",p,null);
+  using(var fresh=Open(Full(p),false))if(Identity(fresh)!=expectedIdentity)Fail("set_identity_mismatch",p,null);
+  SetHandle(handles[p],From(descriptor),p);
  }
- static void SetHandle(SafeFileHandle handle,RawSecurityDescriptor sd) {
-  SetHandleFlags(handle,sd,4u|((sd.ControlFlags&ControlFlags.DiscretionaryAclProtected)!=0?0x80000000u:0x20000000u));
+ static void SetHandle(SafeFileHandle handle,RawSecurityDescriptor sd,string relative=null) {
+  SetHandleFlags(handle,sd,4u|((sd.ControlFlags&ControlFlags.DiscretionaryAclProtected)!=0?0x80000000u:0x20000000u),relative);
  }
- static void SetHandleFlags(SafeFileHandle handle,RawSecurityDescriptor sd,uint flags) {
+ static void SetHandleFlags(SafeFileHandle handle,RawSecurityDescriptor sd,uint flags,string relative=null) {
   var bytes=Bytes(sd.DiscretionaryAcl);var pin=GCHandle.Alloc(bytes,GCHandleType.Pinned);
   try {
    // Owner, group and SACL pointers and information bits are always zero.
-   Check(SetSecurityInfo(handle,1,flags,IntPtr.Zero,IntPtr.Zero,pin.AddrOfPinnedObject(),IntPtr.Zero)==0);
+   uint error=SetSecurityInfo(handle,1,flags,IntPtr.Zero,IntPtr.Zero,pin.AddrOfPinnedObject(),IntPtr.Zero);
+   if(error!=0)Fail("set_security_info",relative,error);
   } finally {pin.Free();}
  }
  static Dictionary<string,string> Descriptors(Dictionary<string,Dictionary<string,object>> rows) {
@@ -988,6 +1044,7 @@ $fixtureProject=[System.Func[System.Collections.Generic.Dictionary[string,string
 try {
  while($null -ne ($line=[Console]::In.ReadLine())) {
   try {
+   [BoundAcl]::ResetDiagnostic()
    $q=$json.DeserializeObject($line)
    switch($q.op) {
     'temp_check' {$r=[BoundAcl]::TempCheck()}
@@ -1020,7 +1077,9 @@ try {
    [Console]::Out.WriteLine($json.Serialize($r));[Console]::Out.Flush()
   } catch {
    $reason='native_acl_failure';if($q.op -eq 'fixture'){$reason='native_fixture_'+[BoundAcl]::FixtureStage}
-   [Console]::Out.WriteLine(('{"error":"'+$reason+'"}'));[Console]::Out.Flush()
+   $failure=@{error=$reason};$diagnostic=[BoundAcl]::FailureDiagnostic()
+   if($null -ne $diagnostic){$failure.diagnostic=$diagnostic}
+   [Console]::Out.WriteLine($json.Serialize($failure));[Console]::Out.Flush()
   }
  }
 } finally {[BoundAcl]::Close()}
@@ -1051,9 +1110,11 @@ class NativeBackend:
         self.opened = False
         self.crypto = None
         self.script = POWERSHELL
+        self.last_native_failure = None
 
     def request(self, request, mutation=False):
         require(not self.unknown, "native_process_held")
+        self.last_native_failure = None
         if self.process is None:
             bootstrap = ("[Console]::InputEncoding=New-Object Text.UTF8Encoding($false);"
                          "[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false);"
@@ -1099,7 +1160,10 @@ class NativeBackend:
                                 ("setup", "original_boundary", "temp_canonical", "parent_canonical", "ancestor_open", "ancestor_acl", "create_dir",
                                  "initial_acl", "create_file", "variants", "start", "project", "verify",
                                  "rollback", "partialmix", "dpapi", "cleanup")}
-                            raise Blocked(result["error"] if result["error"] in allowed else "native_acl_failure")
+                            reason = result["error"] if isinstance(result["error"], str) and result["error"] in allowed else "native_acl_failure"
+                            if result["error"] == reason and set(result) == {"error", "diagnostic"}:
+                                self.last_native_failure = native_failure_diagnostic(result["diagnostic"])
+                            raise Blocked(reason)
                         return result
         except Blocked as exc:
             if mutation and exc.reason in ("native_output_limit", "invalid_native_frame"):
@@ -1292,6 +1356,7 @@ def main(argv=None):
     parser.add_argument("--reviewed-sha256")
     args = parser.parse_args(argv)
     backend = vault = None
+    native_closed = False
     try:
         with sequence_lock() as lock:
             backend = NativeBackend(lock)
@@ -1317,9 +1382,14 @@ def main(argv=None):
             finally:
                 # Close while the sequence lease is still held, before success.
                 backend.close()
+                native_closed = True
             print(json.dumps(result, sort_keys=True))
     except (Blocked, OSError, ValueError, KeyError, TypeError) as exc:
-        print(json.dumps({"reason": exc.reason if isinstance(exc, Blocked) else "acl_operation_blocked"}))
+        failure = {"reason": exc.reason if isinstance(exc, Blocked) else "acl_operation_blocked"}
+        diagnostic = native_failure_diagnostic(getattr(backend, "last_native_failure", None)) if native_closed else None
+        if diagnostic is not None:
+            failure["diagnostic"] = diagnostic
+        print(json.dumps(failure))
         return 2
     finally:
         if vault:

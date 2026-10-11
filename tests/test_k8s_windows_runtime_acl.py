@@ -17,7 +17,7 @@ acl = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(acl)
 
 
-COUNTS = {"total": 32, "files": 10, "directories": 22, "git_unsafe": 18,
+COUNTS = {"total": 34, "files": 12, "directories": 22, "git_unsafe": 18,
           "tracked_unsafe": 0, "ignored_unsafe": 1, "other_owner": 1}
 GIT_DIRECTORIES = [".git/objects", ".git/objects/info", ".git/objects/pack",
                    ".git/refs", ".git/refs/heads", ".git/refs/tags"]
@@ -32,8 +32,20 @@ MODIFIED_CONTRACT = {"version": "exact_runtime_modified_v1", "entries": [
 ]}
 
 
+LIVE_PATHS = ("data/recovery-events.jsonl", "data/recovery-state.json",
+              "data/system/host-metrics.json")
+LIVE_CONTRACT = {"version": "exact_runtime_live_metadata_v2", "entries": [
+    {"path": "data", "kind": "directory", "fields": ["modified"]},
+    {"path": "data/system/host-metrics.json", "kind": "file", "fields": ["size", "modified"]},
+    {"path": "data/car-care", "kind": "directory", "fields": ["modified"]},
+    {"path": "data/car-care/car-care.sqlite3", "kind": "file", "fields": ["modified"]},
+    {"path": "data/recovery-state.json", "kind": "file", "fields": ["size", "modified"]},
+    {"path": "data/recovery-events.jsonl", "kind": "file", "fields": ["identity", "size", "modified"]},
+]}
+
+
 def scope():
-    return {"schema": 2, "comparison_contract": copy.deepcopy(MODIFIED_CONTRACT),
+    return {"schema": 3, "comparison_contract": copy.deepcopy(LIVE_CONTRACT),
             "root": "C:\\personal-server", "tracked_paths": ["tracked.py"],
             "counts": dict(COUNTS), "source_sha256": "1" * 64,
             "fixture_sha256": acl.digest(acl.POWERSHELL.encode())}
@@ -53,7 +65,8 @@ def snapshot():
     paths = ["", ".git"] + list(acl.RUNTIME) + GIT_DIRECTORIES
     paths += ["tracked.py", "ignored", ".git/objects/pack/value", ".git/refs/heads/value",
               "data", "data/system", "data/system/host-metrics.json",
-              "data/car-care", "data/car-care/car-care.sqlite3"]
+              "data/car-care", "data/car-care/car-care.sqlite3",
+              "data/recovery-state.json", "data/recovery-events.jsonl"]
     directories = {"", ".git", *GIT_DIRECTORIES, "data", "data/system", "data/car-care"}
     rows = {p: entry(p, i, p in directories) for i, p in enumerate(paths)}
     for path in sorted(rows, key=lambda p: (p.count("/"), len(p), p)):
@@ -172,6 +185,72 @@ class ACLTests(unittest.TestCase):
         with self.assertRaisesRegex(acl.Blocked, "^" + reason + "$"):
             callback()
 
+    def test_schema_three_live_contract_has_only_exact_field_exceptions(self):
+        self.assertEqual(acl.SCHEMA, 3)
+        self.assertEqual(acl.COMPARISON_CONTRACT, LIVE_CONTRACT)
+
+    def test_live_three_fields_share_comparison_hash_and_partial_ownership(self):
+        initial = snapshot()
+        saved = copy.deepcopy(initial)
+        for row in LIVE_CONTRACT["entries"]:
+            for field in row["fields"]:
+                actual = copy.deepcopy(initial)
+                actual["entries"][row["path"]][field] = "live-update"
+                with self.subTest(path=row["path"], field=field):
+                    self.assertTrue(acl.same_snapshot(actual, initial))
+                    self.assertEqual(acl.snapshot_hash(actual), acl.snapshot_hash(initial))
+                    self.assertTrue(acl.own_partial(actual, initial, initial))
+                    self.assertNotEqual(actual, initial)
+        self.assertEqual(initial, saved)
+
+    def test_live_three_other_metadata_and_security_remain_strict(self):
+        initial = snapshot()
+        values = {"identity": "other-volume", "kind": "directory", "attributes": 1024,
+                  "created": "new", "modified": "new", "size": "123", "links": 2,
+                  "owner": "S-1-5-21-999", "group": "S-1-5-18", "dacl": "foreign",
+                  "explicit": ["foreign"], "protected": True, "unsafe": True}
+        for row in LIVE_CONTRACT["entries"]:
+            for field, value in values.items():
+                if field in row["fields"]:
+                    continue
+                actual = copy.deepcopy(initial)
+                actual["entries"][row["path"]][field] = (
+                    "file" if field == "kind" and row["kind"] == "directory" else value)
+                with self.subTest(path=row["path"], field=field):
+                    self.assertFalse(acl.same_snapshot(actual, initial))
+                    self.assertNotEqual(acl.snapshot_hash(actual), acl.snapshot_hash(initial))
+                    self.assertFalse(acl.own_partial(actual, initial, initial))
+        for path in ("", "data/system", "tracked.py", ".git", *acl.RUNTIME):
+            for field in ("identity", "size", "modified"):
+                actual = copy.deepcopy(initial)
+                actual["entries"][path][field] = "unapproved-update"
+                with self.subTest(strict_path=path, field=field):
+                    self.assertFalse(acl.same_snapshot(actual, initial))
+                    self.assertFalse(acl.own_partial(actual, initial, initial))
+
+    def test_live_contract_kind_inventory_and_projection_are_strict(self):
+        for path in LIVE_PATHS:
+            for change in ("missing", "directory", "reparse", "hardlink"):
+                actual = snapshot()
+                if change == "missing":
+                    actual["entries"].pop(path)
+                elif change == "directory":
+                    actual["entries"][path]["kind"] = "directory"
+                elif change == "reparse":
+                    actual["entries"][path]["attributes"] |= 1024
+                else:
+                    actual["entries"][path]["links"] = 2
+                with self.subTest(path=path, change=change), self.assertRaises(acl.Blocked):
+                    acl.validate_snapshot(actual, scope())
+        for row in LIVE_CONTRACT["entries"]:
+            for field in row["fields"]:
+                before = snapshot()
+                after = copy.deepcopy(before)
+                after["entries"][row["path"]][field] = "live-update"
+                with self.subTest(path=row["path"], field=field):
+                    self.assertBlocked("projection_metadata_changed",
+                        lambda: acl.validate_projection(before, after, ""))
+
     def test_exact_four_modified_comparison_preserves_raw_snapshot(self):
         initial = snapshot()
         saved = copy.deepcopy(initial)
@@ -187,8 +266,9 @@ class ACLTests(unittest.TestCase):
     def test_modified_contract_is_required_fixed_and_versioned(self):
         approved = scope()
         self.assertEqual(acl.validate_scope(approved), approved)
-        for field, value in (("schema", 1), ("comparison_contract", {}),
-                             ("comparison_contract", {**MODIFIED_CONTRACT, "version": "other"})):
+        for field, value in (("schema", 1), ("schema", 2), ("comparison_contract", {}),
+                             ("comparison_contract", MODIFIED_CONTRACT),
+                             ("comparison_contract", {**LIVE_CONTRACT, "version": "other"})):
             bad = copy.deepcopy(approved)
             bad[field] = value
             with self.subTest(field=field, value=value), self.assertRaises(acl.Blocked):
@@ -280,6 +360,101 @@ class ACLTests(unittest.TestCase):
         writes = list(self.backend.writes)
         self.assertBlocked("partial_or_foreign_state", lambda: self.transaction.rollback(sha))
         self.assertEqual(self.backend.writes, writes)
+
+    def update_live_three(self, marker):
+        for row in LIVE_CONTRACT["entries"]:
+            for field in row["fields"]:
+                self.backend.current["entries"][row["path"]][field] = marker + ":" + field
+
+    def test_live_three_apply_status_rollback_preserves_raw_plan_and_targets(self):
+        sha = self.prepare()
+        cipher = self.vault.read_bytes("plan.dpapi")
+        raw = self.vault.read("plan.dpapi")
+        original = copy.deepcopy(raw)
+        targets = [step["target"] for step in raw["steps"]]
+        self.assertEqual(len(targets), 23)
+        self.assertFalse(set(targets) & set(LIVE_PATHS))
+        self.assertEqual(raw["schema"], 3)
+        self.assertEqual(raw["scope"]["comparison_contract"], LIVE_CONTRACT)
+        self.update_live_three("before-apply")
+        self.backend.on_write = lambda target: self.update_live_three("during-write")
+        self.assertEqual(self.transaction.apply(sha)["reason"], "applied")
+        self.assertEqual(self.transaction.status(sha)["matched"], "step_23")
+        self.update_live_three("before-rollback")
+        self.assertEqual(self.transaction.rollback(sha)["reason"], "rolled_back")
+        self.assertTrue(acl.same_snapshot(self.backend.current, raw["initial"]))
+        self.assertEqual(self.vault.read_bytes("plan.dpapi"), cipher)
+        self.assertEqual(self.vault.read("plan.dpapi"), original)
+        self.assertFalse(set(self.backend.writes) & set(LIVE_PATHS))
+        for row in LIVE_CONTRACT["entries"]:
+            for field in row["fields"]:
+                self.assertNotEqual(self.backend.current["entries"][row["path"]][field],
+                                    raw["initial"]["entries"][row["path"]][field])
+
+    def test_live_three_partial_rollback_accepts_only_whole_owned_acl(self):
+        sha = self.prepare()
+        cipher = self.vault.read_bytes("plan.dpapi")
+        self.backend.mode = "partial"
+        self.assertBlocked("propagation_or_metadata_drift", lambda: self.transaction.apply(sha))
+        self.update_live_three("after-partial")
+        owned = copy.deepcopy(self.backend.current)
+        # A live update must never license an outside whole-object ACL.
+        for path in LIVE_PATHS:
+            for field, value in (("dacl", "foreign"), ("explicit", ["foreign"]),
+                                 ("owner", "S-1-5-21-999"), ("group", "S-1-5-18")):
+                foreign = copy.deepcopy(owned)
+                foreign["entries"][path][field] = value
+                with self.subTest(path=path, field=field):
+                    self.assertFalse(acl.own_partial(foreign, snapshot(),
+                        acl.materialize(self.vault.read("plan.dpapi"), 1)))
+        self.assertEqual(self.transaction.rollback(sha)["reason"], "rolled_back")
+        self.assertTrue(acl.same_snapshot(self.backend.current, snapshot()))
+        self.assertEqual(self.vault.read_bytes("plan.dpapi"), cipher)
+        for row in LIVE_CONTRACT["entries"]:
+            for field in row["fields"]:
+                self.assertEqual(self.backend.current["entries"][row["path"]][field],
+                                 "after-partial:" + field)
+
+    def test_live_contract_exact_fields_are_part_of_plan_binding(self):
+        for mutate in (
+            lambda rows: rows[1]["fields"].append("identity"),
+            lambda rows: rows[-1]["fields"].append("created"),
+            lambda rows: rows[-1].update(path="data/recovery-events.1.tmp"),
+            lambda rows: rows[-1].update(kind="directory"),
+            lambda rows: rows[-1]["fields"].reverse(),
+        ):
+            bad = scope()
+            mutate(bad["comparison_contract"]["entries"])
+            with self.subTest(contract=bad["comparison_contract"]):
+                self.assertBlocked("unapproved_comparison_contract", lambda: acl.validate_scope(bad))
+        sha = self.prepare()
+        plan = self.vault.read("plan.dpapi")
+        plan["scope"]["comparison_contract"]["entries"][-1]["fields"].append("created")
+        bad_sha = self.vault.write("plan.dpapi", plan)
+        state = self.vault.read("state.dpapi")
+        state["plan_sha256"] = bad_sha
+        self.vault.write("state.dpapi", state)
+        with mock.patch.object(self.backend, "open") as opened:
+            self.assertBlocked("unapproved_comparison_contract", lambda: self.transaction.status(bad_sha))
+            opened.assert_not_called()
+        self.assertFalse(self.backend.writes)
+
+    def test_schema_two_plan_and_state_are_rejected_before_native_open(self):
+        self.prepare()
+        plan = self.vault.read("plan.dpapi")
+        state = self.vault.read("state.dpapi")
+        plan["schema"] = plan["scope"]["schema"] = state["schema"] = 2
+        plan["scope"]["comparison_contract"] = copy.deepcopy(MODIFIED_CONTRACT)
+        old_sha = self.vault.write("plan.dpapi", plan)
+        state["plan_sha256"] = old_sha
+        self.vault.write("state.dpapi", state)
+        original_cipher = self.vault.read_bytes("plan.dpapi")
+        for action in (self.transaction.status, self.transaction.apply, self.transaction.rollback):
+            with self.subTest(action=action.__name__), mock.patch.object(self.backend, "open") as opened:
+                self.assertBlocked("journal_plan_mismatch", lambda: action(old_sha))
+                opened.assert_not_called()
+        self.assertFalse(self.backend.writes)
+        self.assertEqual(self.vault.read_bytes("plan.dpapi"), original_cipher)
 
     def test_old_plan_schema_is_not_reinterpreted(self):
         sha = self.prepare()
@@ -785,6 +960,126 @@ class ACLTests(unittest.TestCase):
                 self.assertBlocked("invalid_project_original",
                                    lambda: native.project({"synthetic": True}, "target", original))
         native.request.assert_not_called()
+
+
+class NativeDiagnosticTests(unittest.TestCase):
+    """Frames and CLI use synthetic pipes/backends; no Windows process starts."""
+    def diagnostic(self, **changes):
+        return {"stage": "set_security_info", "win32_error": 5,
+                "path_sha256": "a" * 64, **changes}
+
+    def request_error(self, diagnostic=None, *, reason="native_acl_failure", extra=None):
+        read_fd, write_fd = os.pipe()
+        input_read, input_write = os.pipe()
+        frame = {"error": reason, **(extra or {})}
+        if diagnostic is not None:
+            frame["diagnostic"] = diagnostic
+        os.write(write_fd, json.dumps(frame).encode() + b"\n")
+        native = object.__new__(acl.NativeBackend)
+        native.process = mock.Mock()
+        native.process.stdin = os.fdopen(input_write, "wb", buffering=0)
+        native.process.stdout = os.fdopen(read_fd, "rb", buffering=0)
+        native.startup, native.unknown, native.timeout = b"", False, 1
+        native.last_native_failure = self.diagnostic(stage="invariant", win32_error=None)
+        try:
+            with self.assertRaises(acl.Blocked) as raised:
+                native.request({"op": "set"}, mutation=True)
+            self.assertEqual(raised.exception.reason, reason if reason == "native_acl_failure" else "native_acl_failure")
+            self.assertFalse(native.unknown)
+            return native.last_native_failure
+        finally:
+            native.process.stdin.close()
+            native.process.stdout.close()
+            os.close(input_read)
+            os.close(write_fd)
+
+    def test_known_error_carries_only_validated_diagnostic_without_changing_reason(self):
+        for code in (0, 5, 2 ** 32 - 1):
+            with self.subTest(code=code):
+                diagnostic = self.diagnostic(win32_error=code)
+                self.assertEqual(self.request_error(diagnostic), diagnostic)
+        logical = self.diagnostic(stage="invariant", win32_error=None, path_sha256=None)
+        self.assertEqual(self.request_error(logical), logical)
+
+    def test_invalid_diagnostic_is_not_trusted_or_exposed(self):
+        for value in ("synthetic_private_token", [], {},
+                      self.diagnostic(stage="synthetic_private_token"),
+                      self.diagnostic(win32_error=True), self.diagnostic(win32_error=-1),
+                      self.diagnostic(win32_error=2 ** 32), self.diagnostic(win32_error="5"),
+                      self.diagnostic(stage="invariant", win32_error=5),
+                      self.diagnostic(path_sha256="C:\\synthetic_private_path"),
+                      self.diagnostic(extra="synthetic_private_token")):
+            with self.subTest(value=value):
+                self.assertIsNone(self.request_error(value))
+
+    def test_absent_or_unrecognized_error_does_not_reuse_old_diagnostic(self):
+        self.assertIsNone(self.request_error())
+        self.assertIsNone(self.request_error(self.diagnostic(), reason="synthetic_private_token"))
+        self.assertIsNone(self.request_error(self.diagnostic(), extra={"private": "synthetic_private_token"}))
+        for error in (None, [], {}, True, 5):
+            with self.subTest(error=error):
+                self.assertIsNone(self.request_error(self.diagnostic(), reason=error))
+
+    def run_main_failure(self, *, close_failure=False, diagnostic=None):
+        events, output = [], []
+        backend = mock.Mock()
+        backend.last_native_failure = self.diagnostic() if diagnostic is None else diagnostic
+        def close():
+            events.append("close")
+            if close_failure:
+                raise acl.Blocked("native_process_termination_unknown")
+        backend.close.side_effect = close
+        transaction = mock.Mock()
+        transaction.status.side_effect = acl.Blocked("native_acl_failure")
+        def capture(value):
+            events.append("print")
+            output.append(json.loads(value))
+        with mock.patch.object(acl, "sequence_lock") as lock, \
+             mock.patch.object(acl, "NativeBackend", return_value=backend), \
+             mock.patch.object(acl, "Vault"), \
+             mock.patch.object(acl, "Transaction", return_value=transaction), \
+             mock.patch("builtins.print", side_effect=capture):
+            lock.return_value.__enter__.return_value = 1
+            result = acl.main(["--status", "--vault", "synthetic-vault"])
+        self.assertEqual(result, 2)
+        self.assertEqual(events, ["close", "print"])
+        return output[0]
+
+    def test_cli_outputs_diagnostic_only_after_successful_close(self):
+        result = self.run_main_failure()
+        self.assertEqual(result, {"reason": "native_acl_failure", "diagnostic": self.diagnostic()})
+        result = self.run_main_failure(close_failure=True)
+        self.assertEqual(result, {"reason": "native_process_termination_unknown"})
+
+    def test_cli_revalidates_cache_and_never_prints_private_values(self):
+        result = self.run_main_failure(diagnostic=self.diagnostic(stage="synthetic_private_token"))
+        self.assertEqual(result, {"reason": "native_acl_failure"})
+
+    def test_source_captures_api_results_and_never_serializes_exception(self):
+        for text in ("uint error=SetSecurityInfo(handle,1,flags", "uint error=GetSecurityInfo(h,1,7",
+                     "Marshal.GetLastWin32Error()", "[BoundAcl]::ResetDiagnostic()",
+                     "[BoundAcl]::FailureDiagnostic()", "windows-acl-relative-path-v1\\0"):
+            self.assertTrue(text in acl.POWERSHELL, text)
+        self.assertFalse("GetLastWin32Error());Fail(\"get_security_info\"" in acl.POWERSHELL)
+        self.assertFalse("GetLastWin32Error());Fail(\"set_security_info\"" in acl.POWERSHELL)
+
+    def test_diagnostic_values_are_detached_and_all_api_stages_are_bounded(self):
+        for stage in acl.NATIVE_DIAGNOSTIC_STAGES:
+            value = self.diagnostic(stage=stage, win32_error=None if stage in acl.NATIVE_INVARIANT_STAGES else 5)
+            result = acl.native_failure_diagnostic(value)
+            self.assertEqual(result, value)
+            self.assertIsNot(result, value)
+        for path in (True, 5, "A" * 64, "a" * 63, "a" * 65):
+            self.assertIsNone(acl.native_failure_diagnostic(self.diagnostic(path_sha256=path)))
+
+    def test_inventory_and_identity_failures_use_fixed_stage_with_no_win32_error(self):
+        for stage in ("inventory_unpinned_entry", "inventory_identity_mismatch", "inventory_set_mismatch",
+                      "row_identity_mismatch", "set_identity_mismatch"):
+            with self.subTest(stage=stage):
+                value = self.diagnostic(stage=stage, win32_error=None)
+                self.assertEqual(self.request_error(value), value)
+                self.assertIsNone(acl.native_failure_diagnostic(self.diagnostic(stage=stage, win32_error=5)))
+                self.assertTrue('Fail("' + stage + '"' in acl.POWERSHELL)
 
 
 if __name__ == "__main__":
