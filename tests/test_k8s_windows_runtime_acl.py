@@ -611,6 +611,45 @@ class ACLTests(unittest.TestCase):
         self.assertIn('FixtureStage="ancestor_acl";AncestorPin(h);', acl.POWERSHELL)
         self.assertNotIn("SetEnvironmentVariable", acl.POWERSHELL)
 
+    def test_native_fixture_requires_actual_powershell_original_boundary_proof(self):
+        nonce = b"n" * 32
+        receipt = {"nonce": nonce.hex(), "binding_sha256": "a" * 64, "objects": 23,
+                   "projection": True, "rollback": True, "partialmix": True,
+                   "content_hashes": True, "dpapi": True, "cleanup": True,
+                   "sacl_contract": "dacl_only_no_privilege_change",
+                   "utc": acl.datetime.now(acl.timezone.utc).isoformat()}
+        for boundary in (None, False):
+            native = object.__new__(acl.NativeBackend)
+            native.opened = False
+            observed = dict(receipt)
+            if boundary is not None:
+                observed["ps_original_boundary"] = boundary
+            native.request = mock.Mock(return_value=observed)
+            with self.subTest(boundary=boundary), mock.patch.object(acl.os, "urandom", return_value=nonce):
+                self.assertBlocked("native_fixture_failed", native.native_self_test)
+        native.request.return_value = {**receipt, "ps_original_boundary": True}
+        with mock.patch.object(acl.os, "urandom", return_value=nonce):
+            self.assertEqual(native.native_self_test()["reason"], "native_fixture_passed")
+
+    def test_native_projection_preserves_null_and_exact_nonempty_restore_descriptor(self):
+        native = object.__new__(acl.NativeBackend)
+        native.request = mock.Mock(return_value={"projected": True})
+        original = {"sd": "nonempty-descriptor-bytes", "owner": "synthetic-owner"}
+        for value in (None, original):
+            native.project({"synthetic": True}, "target", value)
+            sent = native.request.call_args.args[0]
+            self.assertIs(sent["original"], value)
+        self.assertEqual(original["sd"], "nonempty-descriptor-bytes")
+
+    def test_native_projection_rejects_empty_or_missing_restore_before_request(self):
+        native = object.__new__(acl.NativeBackend)
+        native.request = mock.Mock()
+        for original in ({}, {"sd": ""}, {"sd": None}, {"sd": False}, ""):
+            with self.subTest(original=original):
+                self.assertBlocked("invalid_project_original",
+                                   lambda: native.project({"synthetic": True}, "target", original))
+        native.request.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

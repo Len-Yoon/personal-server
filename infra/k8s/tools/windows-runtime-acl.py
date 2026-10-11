@@ -853,8 +853,8 @@ public static class BoundAcl {
   }
   Check(!Directory.Exists(fixture));
  }
- public static Dictionary<string,object> Fixture(string nonce) {
-  Check(handles.Count==0);FixtureStage="parent_canonical";principal=WindowsIdentity.GetCurrent().User.Value;
+ public static Dictionary<string,object> Fixture(string nonce,Func<Dictionary<string,string>,string,object,Dictionary<string,string>> project) {
+  Check(handles.Count==0&&project!=null);FixtureStage="parent_canonical";principal=WindowsIdentity.GetCurrent().User.Value;
   // The system TEMP had untrusted effective DELETE permissions. Choose the
   // existing per-user KnownFolder explicitly; do not change TEMP or any parent
   // ACL, and apply the identical ancestor guard before creating an owned UUID.
@@ -913,11 +913,11 @@ public static class BoundAcl {
    FixtureStage="start";Start(fixture,new string[0],rt,new string[0]);var baseline=Rows();var originalDescriptors=Descriptors(baseline);
    Check(baseline.Count==identities.Count&&baseline.All(x=>identities[x.Key]==(string)x.Value["identity"]));
    var hashes=Hashes();count=baseline.Count;binding=HexHash(System.Text.Encoding.UTF8.GetBytes(principal+"|"+identities[""]));
-   FixtureStage="project";var expected=Project(originalDescriptors,"",null);Set("",identities[""],expected[""]);FixtureStage="verify";Verify(baseline,expected);
-   foreach(var p in rt){expected=Project(expected,p,null);Set(p,identities[p],expected[p]);Verify(baseline,expected);}
-   FixtureStage="rollback";foreach(var p in rt.Reverse()){expected=Project(expected,p,originalDescriptors[p]);Set(p,identities[p],expected[p]);Verify(baseline,expected);}
+   FixtureStage="project";var expected=project(originalDescriptors,"",null);Set("",identities[""],expected[""]);FixtureStage="verify";Verify(baseline,expected);
+   foreach(var p in rt){expected=project(expected,p,null);Set(p,identities[p],expected[p]);Verify(baseline,expected);}
+   FixtureStage="rollback";foreach(var p in rt.Reverse()){expected=project(expected,p,originalDescriptors[p]);Set(p,identities[p],expected[p]);Verify(baseline,expected);}
    var restrictedDescriptors=new Dictionary<string,string>(expected,StringComparer.Ordinal);
-   expected=Project(expected,"",originalDescriptors[""]);Set("",identities[""],expected[""]);Verify(baseline,originalDescriptors);
+   expected=project(expected,"",originalDescriptors[""]);Set("",identities[""],expected[""]);Verify(baseline,originalDescriptors);
    FixtureStage="partialmix";
    foreach(var p in new[]{"case0/value","case1/value"})SetHandleFlags(handles[p],From(restrictedDescriptors[p]),4);
    VerifyMix(baseline,originalDescriptors,restrictedDescriptors);
@@ -942,6 +942,24 @@ $baselineCounts=$null
 $json=New-Object System.Web.Script.Serialization.JavaScriptSerializer
 $json.MaxJsonLength=67108864
 $json.RecursionLimit=100
+function Invoke-DescriptorProjection($Descriptors,$Target,$Original) {
+ # PowerShell binds ordinary $null to String.Empty for a .NET string argument.
+ # Only JSON null means forward restriction; empty/missing restore SD is invalid.
+ $value=[System.Management.Automation.Language.NullString]::Value
+ if($null -ne $Original) {
+  if($Original -isnot [System.Collections.IDictionary] -or $Original.sd -isnot [string] -or [string]::IsNullOrEmpty($Original.sd)){throw 'invalid_project_original'}
+  $value=[string]$Original.sd
+ }
+ return [BoundAcl]::Project($Descriptors,[string]$Target,$value)
+}
+$fixtureProject=[System.Func[System.Collections.Generic.Dictionary[string,string],string,object,System.Collections.Generic.Dictionary[string,string]]]{
+ param($descriptors,$target,$original)
+ # Exercise the same JSON decode and PS-to-.NET call as production, on the
+ # owned fixture only. Non-null rollback SD bytes are never normalized.
+ $wireOriginal=$null;if($null -ne $original){$wireOriginal=@{sd=[string]$original}}
+ $wire=$json.DeserializeObject($json.Serialize(@{original=$wireOriginal}))
+ Invoke-DescriptorProjection $descriptors $target $wire.original
+}
 try {
  while($null -ne ($line=[Console]::In.ReadLine())) {
   try {
@@ -949,14 +967,22 @@ try {
    switch($q.op) {
     'temp_check' {$r=[BoundAcl]::TempCheck()}
     'fixture_parent_check' {$r=[BoundAcl]::FixtureParentCheck()}
-    'fixture' {$r=[BoundAcl]::Fixture([string]$q.nonce)}
+    'fixture' {
+     [BoundAcl]::FixtureStage='original_boundary'
+     $emptyDescriptors=New-Object 'System.Collections.Generic.Dictionary[string,string]'
+     foreach($bad in @(@{sd=''},@{})) {
+      $rejected=$false
+      try {$unused=Invoke-DescriptorProjection $emptyDescriptors '' $bad} catch {if($_.Exception.Message -ne 'invalid_project_original'){throw};$rejected=$true}
+      if(!$rejected){throw 'invalid_project_original_boundary'}
+     }
+     $r=[BoundAcl]::Fixture([string]$q.nonce,$fixtureProject);$r['ps_original_boundary']=$true
+    }
     'open' {[BoundAcl]::Start($q.scope.root,[string[]]$q.scope.tracked_paths,[string[]]$q.runtime,[string[]]$q.targets);$baselineCounts=[BoundAcl]::Counts([BoundAcl]::Rows());$r=@{ok=$true;ancestor_sha256=[BoundAcl]::AncestorSHA}}
     'snapshot' {$r=@{entries=[BoundAcl]::Rows();counts=$baselineCounts;runtime_hashes=[BoundAcl]::Hashes();principal=[BoundAcl]::Principal;projection_contract='win32_private_object_security_v1'}}
     'project' {
      $descriptors=New-Object 'System.Collections.Generic.Dictionary[string,string]'
      foreach($p in $q.snapshot.entries.GetEnumerator()){$descriptors.Add($p.Key,[string]$p.Value.sd)}
-     $original=$null;if($null -ne $q.original){$original=[string]$q.original.sd}
-     $projected=[BoundAcl]::Project($descriptors,[string]$q.target,$original)
+     $projected=Invoke-DescriptorProjection $descriptors $q.target $q.original
      foreach($p in $q.snapshot.entries.GetEnumerator()){$s=[BoundAcl]::Security($projected[$p.Key]);foreach($k in $s.Keys){$p.Value[$k]=$s[$k]}}
      $r=$q.snapshot
     }
@@ -1045,7 +1071,7 @@ class NativeBackend:
                         if "error" in result:
                             allowed = {"native_acl_failure", "native_crypto_failure"} | {
                                 "native_fixture_" + stage for stage in
-                                ("setup", "temp_canonical", "parent_canonical", "ancestor_open", "ancestor_acl", "create_dir",
+                                ("setup", "original_boundary", "temp_canonical", "parent_canonical", "ancestor_open", "ancestor_acl", "create_dir",
                                  "initial_acl", "create_file", "variants", "start", "project", "verify",
                                  "rollback", "partialmix", "dpapi", "cleanup")}
                             raise Blocked(result["error"] if result["error"] in allowed else "native_acl_failure")
@@ -1087,7 +1113,7 @@ class NativeBackend:
         nonce = os.urandom(32).hex()
         receipt = self.request({"op": "fixture", "nonce": nonce}, mutation=True)
         require(receipt.get("nonce") == nonce and all(receipt.get(key) is True for key in
-                ("projection", "rollback", "partialmix", "content_hashes", "dpapi", "cleanup"))
+                ("projection", "rollback", "partialmix", "content_hashes", "dpapi", "cleanup", "ps_original_boundary"))
                 and re.fullmatch(r"[0-9a-f]{64}", receipt.get("binding_sha256", ""))
                 and receipt.get("sacl_contract") == "dacl_only_no_privilege_change",
                 "native_fixture_failed")
@@ -1133,6 +1159,9 @@ class NativeBackend:
         return last
 
     def project(self, snapshot, target, original):
+        if original is not None:
+            require(isinstance(original, dict) and isinstance(original.get("sd"), str)
+                    and bool(original["sd"]), "invalid_project_original")
         return self.request({"op": "project", "snapshot": snapshot,
                              "target": target, "original": original})
 
