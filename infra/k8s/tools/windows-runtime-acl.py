@@ -36,8 +36,8 @@ SCHEMA = 1
 RUNTIME = (".env", "docker-compose.yml", "docker-compose.n100.yml",
            "docker-compose.portal-bridge.yml")
 EXPECTED_COUNTS = {"total": 6669, "files": 5813, "directories": 856,
-                   "git_unsafe": 17, "tracked_unsafe": 0,
-                   "ignored_unsafe": 316, "other_owner": 69}
+                   "git_unsafe": 18, "tracked_unsafe": 0,
+                   "ignored_unsafe": 315, "other_owner": 69}
 SAFE_REASON = re.compile(r"^[a-z][a-z0-9_]{0,80}$")
 POWERSHELL_BINARY = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 
@@ -129,10 +129,13 @@ def validate_snapshot(snapshot, scope):
         require(re.fullmatch(r"[0-9a-f]{64}", snapshot["runtime_hashes"][path] or ""),
                 "invalid_runtime_hash")
     require(all(path in entries for path in scope["tracked_paths"]), "tracked_file_missing")
-    targets = [""] + list(RUNTIME)
-    targets += sorted(path for path, entry in entries.items()
-                      if (path == ".git" or path.startswith(".git/")) and entry["unsafe"])
-    require(len(targets) == 22 and len(set(targets)) == 22, "target_inventory_changed")
+    git_targets = sorted(path for path, entry in entries.items()
+                         if (path == ".git" or path.startswith(".git/")) and entry["unsafe"])
+    require(len(git_targets) == 18 and ".git" in git_targets
+            and all(entries[path]["kind"] == "directory" for path in git_targets),
+            "git_directory_inventory_changed")
+    targets = [""] + list(RUNTIME) + git_targets
+    require(len(targets) == 23 and len(set(targets)) == 23, "target_inventory_changed")
     return targets
 
 
