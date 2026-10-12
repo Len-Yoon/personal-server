@@ -105,6 +105,13 @@ class SourceAclPolicyTests(unittest.TestCase):
         with self.assertRaises(self.m.Blocked):
             self.m.load_legacy(b'raise RuntimeError("must not execute")')
 
+    def test_native_inventory_does_not_reopen_exclusive_directory_by_path(self):
+        script = self.m.POWERSHELL
+        self.assertNotIn('Directory.EnumerateFileSystemEntries(', script)
+        self.assertIn('DirectoryEntries(handles[p])', script)
+        self.assertIn('ReOpenFile(original,0x20080u|(directory?1u:0u)', script)
+        self.assertIn('GetFileInformationByHandleEx(h,first?11:10', script)
+
     def test_exact_dependency_loads_without_reaching_native_or_transaction(self):
         raw = SCRIPT.with_name('windows-runtime-acl.py').read_bytes()
         legacy = self.m.load_legacy(raw)

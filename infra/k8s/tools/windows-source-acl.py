@@ -522,6 +522,8 @@ public static class SourceAcl {
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
  static extern SafeFileHandle CreateFile(string p,uint access,uint share,IntPtr sa,uint creation,uint flags,IntPtr template);
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle h,out Info i);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern SafeFileHandle ReOpenFile(SafeFileHandle h,uint access,uint share,uint flags);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandleEx(SafeFileHandle h,int kind,IntPtr data,uint length);
  [DllImport("advapi32.dll")] static extern uint GetSecurityInfo(SafeFileHandle h,int type,uint flags,out IntPtr o,out IntPtr g,out IntPtr d,out IntPtr s,out IntPtr sd);
  [DllImport("advapi32.dll")] static extern uint SetSecurityInfo(SafeFileHandle h,int type,uint flags,IntPtr o,IntPtr g,IntPtr d,IntPtr s);
  [DllImport("advapi32.dll")] static extern uint GetSecurityDescriptorLength(IntPtr p);
@@ -552,10 +554,17 @@ public static class SourceAcl {
  static Info Information(SafeFileHandle h){Info i;Check(GetFileInformationByHandle(h,out i),"file_information");Check((i.Attr&1024)==0,"reparse");return i;}
  static string Identity(SafeFileHandle h){var i=Information(h);return i.Volume.ToString("x8")+":"+i.IndexH.ToString("x8")+i.IndexL.ToString("x8");}
  static SafeFileHandle Open(string p,bool write=false) {
-  // No DELETE sharing; observer rights never include WRITE_DAC or data read.
-  var h=CreateFile(@"\\?\"+p,0x20080u|(write?0x40000u:0),write?0u:3u,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
-  if(h.IsInvalid){h.Dispose();Check(false,write?"exclusive_open":"read_open");}
-  try{Information(h);return h;}catch{h.Dispose();throw;}
+  // Establish kind on a metadata-only handle. ReOpenFile remains bound to that
+  // same object; LIST is requested only for directories, never as file READ_DATA.
+  var original=CreateFile(@"\\?\"+p,0x20080u,3u,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
+  if(original.IsInvalid){original.Dispose();Check(false,"read_open");}
+  SafeFileHandle h=null;
+  try{var old=Information(original);bool directory=(old.Attr&16)!=0;
+   h=ReOpenFile(original,0x20080u|(directory?1u:0u)|(write?0x40000u:0u),write?0u:3u,0x02200000);
+   Check(!h.IsInvalid,write?"exclusive_open":"read_reopen");var current=Information(h);
+   Check(Identity(original)==Identity(h)&&((current.Attr&16)!=0)==directory&&current.Links==old.Links,"reopen_identity_or_kind");
+   var result=h;h=null;return result;
+  }finally{if(h!=null)h.Dispose();original.Dispose();}
  }
  static byte[] Bytes(RawSecurityDescriptor sd){var b=new byte[sd.BinaryLength];sd.GetBinaryForm(b,0);return b;}
  static RawSecurityDescriptor From(string b){Check(!String.IsNullOrEmpty(b),"invalid_descriptor");return new RawSecurityDescriptor(Convert.FromBase64String(b),0);}
@@ -593,14 +602,53 @@ public static class SourceAcl {
    Check(!handles.Keys.Any(x=>String.Equals(x,p,StringComparison.OrdinalIgnoreCase)),"case_alias");
    Check(!handles.Values.Any(x=>Identity(x)==Identity(h)),"identity_alias");handles.Add(p,h);}catch{h.Dispose();throw;}
  }
+ sealed class DirectoryEntry {public string Name;public ulong Id;public uint Attributes;}
+ static int directoryPages;
+ static List<DirectoryEntry> DirectoryBuffer(IntPtr buffer,int length){
+  var rows=new List<DirectoryEntry>();int offset=0;
+  while(true){
+   Check(offset>=0&&offset<=length-104,"directory_record_bounds");
+   uint next=unchecked((uint)Marshal.ReadInt32(buffer,offset));
+   uint bytes=unchecked((uint)Marshal.ReadInt32(buffer,offset+60));
+   Check(bytes>0&&(bytes&1)==0&&bytes<=510&&bytes<=(uint)(length-offset-104),"directory_name_bounds");
+   Check(next==0||(next%8==0&&next>=104+bytes&&next<=(uint)(length-offset-104)),"directory_next_bounds");
+   string name=Marshal.PtrToStringUni(IntPtr.Add(buffer,offset+104),(int)bytes/2);
+   Check(name.IndexOfAny(new[]{'\0','/','\\',':'})<0&&!name.Any(c=>c<32),"directory_name");
+   new System.Text.UTF8Encoding(false,true).GetBytes(name);
+   if(name!="."&&name!=".."){
+    Check(!name.EndsWith(".")&&!name.EndsWith(" "),"directory_name_alias");
+    uint attributes=unchecked((uint)Marshal.ReadInt32(buffer,offset+56));
+    Check((attributes&1024)==0,"reparse");
+    ulong id=unchecked((ulong)Marshal.ReadInt64(buffer,offset+96));Check(id!=0,"directory_file_id");
+    rows.Add(new DirectoryEntry{Name=name,Id=id,Attributes=attributes});
+   }
+   if(next==0)break;offset+=(int)next;
+  }return rows;
+ }
+ static List<DirectoryEntry> DirectoryEntries(SafeFileHandle h){
+  Check((Information(h).Attr&16)!=0,"directory_required");
+  const int length=4096;var rows=new List<DirectoryEntry>();var names=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+  IntPtr buffer=Marshal.AllocHGlobal(length);
+  try{bool first=true;for(int page=0;page<10000;page++){
+    Marshal.Copy(new byte[length],0,buffer,length);
+    bool ok=GetFileInformationByHandleEx(h,first?11:10,buffer,length);first=false;
+    if(!ok){Check(Marshal.GetLastWin32Error()==18,"directory_enumeration");return rows.OrderBy(x=>x.Name,StringComparer.Ordinal).ToList();}
+    directoryPages++;
+    foreach(var row in DirectoryBuffer(buffer,length)){Check(rows.Count<10000&&names.Add(row.Name),"directory_alias_or_limit");rows.Add(row);}
+   }Check(false,"directory_page_limit");return null;
+  }finally{Marshal.FreeHGlobal(buffer);}
+ }
  static void Walk(string p,bool initial,HashSet<string> found){
   Check(handles.ContainsKey(p)&&(Information(handles[p]).Attr&16)!=0,"directory_required",p);
-  foreach(var path in Directory.EnumerateFileSystemEntries(Full(p)).OrderBy(x=>x,StringComparer.Ordinal)){
-   string rel=path.Substring(root.Length+1).Replace('\\','/');
+  var parent=Information(handles[p]);
+  foreach(var entry in DirectoryEntries(handles[p])){
+   string rel=p.Length==0?entry.Name:p+"/"+entry.Name;string path=Full(rel);
    if(initial)Pin(rel);else Check(handles.ContainsKey(rel),"inventory_new",rel);
    Check(found.Add(rel),"inventory_alias",rel);
    if(rel!=exclusive)using(var fresh=Open(path))Check(Identity(fresh)==Identity(handles[rel]),"identity_drift",rel);
-   if((Information(handles[rel]).Attr&16)!=0)Walk(rel,initial,found);
+   var child=Information(handles[rel]);
+   Check(child.Volume==parent.Volume&&(((ulong)child.IndexH<<32)|child.IndexL)==entry.Id&&((child.Attr^entry.Attributes)&16)==0,"enumerated_identity_or_kind",rel);
+   if((child.Attr&16)!=0)Walk(rel,initial,found);
   }
  }
  static void Inventory(bool initial){
@@ -727,6 +775,21 @@ public static class SourceAcl {
   parentAcl=new RawAcl(2,1);parentAcl.InsertAce(0,new CommonAce(AceFlags.None,AceQualifier.AccessAllowed,0x1f01ff,new SecurityIdentifier("S-1-5-32-545"),false,null));
   parentSd=new RawSecurityDescriptor(ControlFlags.DiscretionaryAclPresent,sd.Owner,sd.Group,null,parentAcl);rejected=false;
   try{SafeParentDescriptor(parentSd);}catch{rejected=true;}Check(rejected,"fixture_untrusted_parent_write_reject");
+  // Exercise the real directory record decoder without touching filesystem ACLs.
+  IntPtr buffer=Marshal.AllocHGlobal(256);try{
+   Marshal.Copy(new byte[256],0,buffer,256);Marshal.WriteInt32(buffer,60,4);Marshal.WriteInt64(buffer,96,9);
+   Marshal.Copy(new[]{'o','k'},0,IntPtr.Add(buffer,104),2);
+   Check(DirectoryBuffer(buffer,256).Single().Name=="ok","fixture_directory_record");
+   foreach(int invalid in new[]{1,104,248}){
+    Marshal.WriteInt32(buffer,0,invalid);rejected=false;try{DirectoryBuffer(buffer,256);}catch{rejected=true;}
+    Check(rejected,"fixture_directory_next_reject");
+   }Marshal.WriteInt32(buffer,0,0);
+   foreach(int invalid in new[]{0,3,512}){
+    Marshal.WriteInt32(buffer,60,invalid);rejected=false;try{DirectoryBuffer(buffer,256);}catch{rejected=true;}
+    Check(rejected,"fixture_directory_length_reject");
+   }Marshal.WriteInt32(buffer,60,4);Marshal.WriteInt16(buffer,104,(short)':');rejected=false;
+   try{DirectoryBuffer(buffer,256);}catch{rejected=true;}Check(rejected,"fixture_directory_name_reject");
+  }finally{Marshal.FreeHGlobal(buffer);}
  }
  static void DeleteOwned(Dictionary<string,string> ids,Dictionary<string,SafeFileHandle> pins){
   foreach(var p in ids.Keys.OrderByDescending(x=>x.Length).ThenBy(x=>x,StringComparer.Ordinal)){
@@ -759,6 +822,8 @@ public static class SourceAcl {
     }
    }
    foreach(var rel in new[]{"target\\outside.txt","target\\nested\\leaf.txt","target\\protected\\leaf.txt","target\\io\\leaf.txt","target\\np\\leaf.txt"})CreateOwned(Path.Combine(fixture,rel),false,ids,ownedPins);
+   // More than one fixed 4KiB directory page, with variable Unicode names.
+   for(int i=0;i<20;i++)CreateOwned(Path.Combine(target,"page-"+i.ToString("D2")+"-"+new string('x',72)+"-한.txt"),false,ids,ownedPins);
    // Metadata-only access may coexist despite share0. Measure that boundary;
    // only a successful open or documented sharing violation is accepted.
    bool selfPinCoexists;
@@ -768,6 +833,8 @@ public static class SourceAcl {
    }
    foreach(var h in ownedPins.Values)h.Dispose();ownedPins.Clear();
    Start(fixture,new[]{"target","target/nested","target/nested/leaf.txt"},new[]{"directory","directory","file"},true);
+   directoryPages=0;var pageNames=DirectoryEntries(handles["target"]).Select(x=>x.Name).ToArray();
+   Check(directoryPages>1&&pageNames.SequenceEqual(DirectoryEntries(handles["target"]).Select(x=>x.Name)),"fixture_directory_restart_pages");
    var initial=Snapshot();Preflight();var current=initial;
    foreach(var p in new[]{"target","target/nested","target/nested/leaf.txt"}){
     var desired=Project(current,p);var next=Set(p,current,Entry(desired,p));Outside(current,next,p);
