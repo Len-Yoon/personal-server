@@ -544,7 +544,11 @@ class WindowsGuardTests(unittest.TestCase):
         guard.runner.return_value = b'{}'
         guard.acl(Path('/mnt/c/personal-server/.env'))
         script = base64.b64decode(guard.runner.call_args.args[0][-1]).decode('utf-16le')
-        self.assertIn('$item.PSIsContainer){$item.Parent}else{$item.Directory}', script)
+        # .Parent returns plain DirectoryInfo without provider PSIsContainer.
+        self.assertNotIn('PSIsContainer', script)
+        self.assertIn('$isDirectory=($item -is [IO.DirectoryInfo])', script)
+        self.assertIn('directory=$isDirectory;rules=$rules', script)
+        self.assertIn('$item=if($isDirectory){$item.Parent}else{$item.Directory}', script)
         guard.root_guard = Mock()
         guard.runner.return_value = json.dumps({'safe': False, 'count': 8, 'acl_sha256': 'a'*64}).encode()
         with self.assertRaisesRegex(m.Blocked, 'execution_input_acl_unsafe'):
@@ -552,6 +556,23 @@ class WindowsGuardTests(unittest.TestCase):
         script = base64.b64decode(guard.runner.call_args.args[0][-1]).decode('utf-16le')
         self.assertIn('Get-ChildItem -LiteralPath $v.git -Force -Recurse', script)
         self.assertNotIn('Set-Acl', script)
+
+    def test_directory_ancestors_require_strict_boolean_type(self):
+        guard = self.guard()
+        guard.check_acl(self.inventory(file=False), Path('/mnt/c/personal-server'))
+        for index in (0, 1):
+            for value in (None, False, 1, 'True'):
+                with self.subTest(index=index, value=value):
+                    observed = self.inventory(file=False)
+                    observed['objects'][index]['directory'] = value
+                    with self.assertRaisesRegex(m.Blocked, 'windows_object_type'):
+                        guard.check_acl(observed, Path('/mnt/c/personal-server'))
+
+    def test_file_target_cannot_be_reported_as_directory(self):
+        observed = self.inventory()
+        observed['objects'][0]['directory'] = True
+        with self.assertRaisesRegex(m.Blocked, 'windows_object_type'):
+            self.guard().check_acl(observed, Path('/mnt/c/personal-server/.env'))
 
     def test_windows_snapshot_collision_inventory_preserves_kwargs_and_filters_defaults(self):
         class Parent:

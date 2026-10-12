@@ -217,12 +217,13 @@ $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $ti=([Security.Principal.NTAccount]'NT SERVICE\TrustedInstaller').Translate([Security.Principal.SecurityIdentifier]).Value
 $rows=@();$item=Get-Item -LiteralPath $path -Force
 while($null -ne $item){
+ $isDirectory=($item -is [IO.DirectoryInfo])
  $acl=Get-Acl -LiteralPath $item.FullName
  $rules=@($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]) | ForEach-Object {
   @{sid=$_.IdentityReference.Value;rights=[int64]$_.FileSystemRights;allow=($_.AccessControlType -eq 'Allow');inherit_only=([int]$_.PropagationFlags -band 2) -ne 0;inherited=$_.IsInherited}
  })
- $rows+=@{path=$item.FullName;owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value;protected=$acl.AreAccessRulesProtected;canonical=$acl.AreAccessRulesCanonical;reparse=([int]$item.Attributes -band 1024) -ne 0;directory=$item.PSIsContainer;rules=$rules}
- $item=if($item.PSIsContainer){$item.Parent}else{$item.Directory}
+ $rows+=@{path=$item.FullName;owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value;protected=$acl.AreAccessRulesProtected;canonical=$acl.AreAccessRulesCanonical;reparse=([int]$item.Attributes -band 1024) -ne 0;directory=$isDirectory;rules=$rules}
+ $item=if($isDirectory){$item.Parent}else{$item.Directory}
 }
 @{current_sid=$sid;trusted_installer_sid=$ti;objects=$rows} | ConvertTo-Json -Depth 7 -Compress
 '''
