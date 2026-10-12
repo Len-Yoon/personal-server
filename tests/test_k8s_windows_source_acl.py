@@ -142,6 +142,20 @@ class SourceAclPolicyTests(unittest.TestCase):
                      'fixture_parent_inherit_only_generic', 'fixture_parent_callback_reject'):
             self.assertIn(case, script)
 
+    def test_owned_fixture_proves_partial_frontier_before_full_rollback(self):
+        script = self.m.POWERSHELL.split('public static Dictionary<string,object> Fixture(string nonce){', 1)[1]
+        partial = script.index('foreach(var p in new[]{"target","target/nested"})')
+        leaf_check = script.index('"fixture_partial_leaf_unchanged"', partial)
+        rollback = script.index('"fixture_partial_rollback"', leaf_check)
+        verified = script.index('partialVerified=true;', rollback)
+        full = script.index('foreach(var p in new[]{"target","target/nested","target/nested/leaf.txt"})', verified)
+        self.assertLess(partial, leaf_check)
+        self.assertLess(leaf_check, rollback)
+        self.assertLess(rollback, verified)
+        self.assertLess(verified, full)
+        self.assertNotIn('Set("target/nested/leaf.txt",current,Entry(initial', script)
+        self.assertIn('{"partialmix",partialVerified}', script)
+
     def test_native_add_type_uses_verified_binary_command_without_manifest(self):
         script = self.m.POWERSHELL.split("using System;", 1)[0]
         self.assertNotIn('.psd1', script)

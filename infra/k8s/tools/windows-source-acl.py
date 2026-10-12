@@ -911,13 +911,21 @@ public static class SourceAcl {
    Start(fixture,new[]{"target","target/nested","target/nested/leaf.txt"},new[]{"directory","directory","file"},true);
    directoryPages=0;var pageNames=DirectoryEntries(handles["target"]).Select(x=>x.Name).ToArray();
    Check(directoryPages>1&&pageNames.SequenceEqual(DirectoryEntries(handles["target"]).Select(x=>x.Name)),"fixture_directory_restart_pages");
-   var initial=Snapshot();Preflight();var current=initial;
+   var initial=Snapshot();Preflight();var current=initial;bool partialVerified=false;
+   // Observe and restore a real forward prefix. The leaf has not been written.
+   foreach(var p in new[]{"target","target/nested"}){
+    var desired=Project(current,p);var next=Set(p,current,Entry(desired,p));Outside(current,next,p);
+    Check(Equal(Entry(next,p),Entry(desired,p)),"fixture_project_actual");current=next;
+   }
+   Check(!Equal(Entry(current,"target"),Entry(initial,"target"))&&!Equal(Entry(current,"target/nested"),Entry(initial,"target/nested"))&&
+         Equal(Entry(current,"target/nested/leaf.txt"),Entry(initial,"target/nested/leaf.txt")),"fixture_partial_leaf_unchanged");
+   foreach(var p in new[]{"target","target/nested"}){
+    var next=Set(p,current,Entry(initial,p));Outside(current,next,p);current=next;
+   }Check(Equal(current,initial),"fixture_partial_rollback");partialVerified=true;
    foreach(var p in new[]{"target","target/nested","target/nested/leaf.txt"}){
     var desired=Project(current,p);var next=Set(p,current,Entry(desired,p));Outside(current,next,p);
     Check(Equal(Entry(next,p),Entry(desired,p)),"fixture_project_actual");current=next;
    }
-   // Actual partial forward frontier: root+nested changed, leaf restored.
-   var partial=Set("target/nested/leaf.txt",current,Entry(initial,"target/nested/leaf.txt"));Outside(current,partial,"target/nested/leaf.txt");current=partial;
    foreach(var p in new[]{"target","target/nested","target/nested/leaf.txt"}){
     var next=Set(p,current,Entry(initial,p));Outside(current,next,p);current=next;
    }Check(Equal(current,initial),"fixture_nested_rollback");
@@ -935,7 +943,7 @@ public static class SourceAcl {
    DeleteOwned(ids,ownedPins);cleaned=true;
    return new Dictionary<string,object>{{"nonce",nonce},{"utc",DateTime.UtcNow.ToString("o")},{"objects",ids.Count},
     {"exclusive_suppression",true},{"protected_flatten",true},{"future_inheritance",true},{"nested_rollback",true},
-    {"partialmix",true},{"outside_preserved",true},{"cleanup",true},{"dpapi",true},{"descriptor_binding",true},{"self_pin_coexists",selfPinCoexists}};
+    {"partialmix",partialVerified},{"outside_preserved",true},{"cleanup",true},{"dpapi",true},{"descriptor_binding",true},{"self_pin_coexists",selfPinCoexists}};
   }finally{
    if(!cleaned){
     // Acquire cleanup pins while the session still holds every existing parent.
