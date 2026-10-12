@@ -152,6 +152,20 @@ def own_partial(actual, before, after):
                for path, value in actual['entries'].items())
 
 
+def validate_module_binding(proof):
+    keys = {'dll_direct_import', 'manifest_import_performed', 'command_binding_verified',
+            'command_module_name_sha256', 'command_assembly_identity_sha256',
+            'command_assembly_location_sha256'}
+    require(type(proof) is dict and set(proof) == keys
+            and proof['dll_direct_import'] is True and proof['manifest_import_performed'] is False
+            and proof['command_binding_verified'] is True, 'invalid_module_binding')
+    require(all(type(proof[key]) is str and re.fullmatch('[0-9a-f]{64}', proof[key])
+                for key in keys if key.endswith('_sha256')), 'invalid_module_binding')
+    identity = 'Microsoft.PowerShell.Commands.Utility, Version=3.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'
+    require(proof['command_assembly_identity_sha256'] == hashlib.sha256(
+        ('windows-source-module-identity-v1\0' + identity).encode()).hexdigest(), 'invalid_module_binding')
+
+
 class SourceAclNativeBackend:
     """Compose the reviewed transport; no legacy filesystem entry point is used."""
     scope_schema = SCHEMA
@@ -193,6 +207,7 @@ class SourceAclNativeBackend:
         stamp = datetime.fromisoformat(result.get('utc', '').replace('Z', '+00:00'))
         require(stamp.tzinfo is not None and abs((datetime.now(timezone.utc)-stamp).total_seconds()) < 300,
                 'fixture_not_fresh')
+        validate_module_binding(result.get('module_binding'))
         result['adapter_sha256'] = hashlib.sha256(POWERSHELL.encode()).hexdigest()
         self.receipt = result
         return {'reason': 'owned_fixture_passed', 'adapter_sha256': hashlib.sha256(POWERSHELL.encode()).hexdigest(),
@@ -210,6 +225,7 @@ class SourceAclNativeBackend:
                 and type(receipt.get('self_pin_coexists')) is bool
                 and type(receipt.get('objects')) is int and 0 < receipt['objects'] <= 100,
                 'invalid_fixture_receipt')
+        validate_module_binding(receipt.get('module_binding'))
         stamp = datetime.fromisoformat(receipt.get('utc', '').replace('Z', '+00:00'))
         require(stamp.tzinfo is not None and abs((datetime.now(timezone.utc)-stamp).total_seconds()) < 300,
                 'fixture_not_fresh')
@@ -500,10 +516,24 @@ POWERSHELL = r'''
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 $PSModuleAutoLoadingPreference='None'
-Microsoft.PowerShell.Core\Import-Module -Name ($PSHOME+'\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -Force
-Microsoft.PowerShell.Utility\Add-Type -AssemblyName System.Web.Extensions
-Microsoft.PowerShell.Utility\Add-Type -AssemblyName System.Security
-Microsoft.PowerShell.Utility\Add-Type -ReferencedAssemblies @('System.dll','System.Core.dll','System.Security.dll','System.Web.Extensions.dll') -TypeDefinition @'
+$sourceUtilityIdentity='Microsoft.PowerShell.Commands.Utility, Version=3.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'
+if($null -eq $global:bindingVerifiedModules -or -not $global:bindingVerifiedModules.ContainsKey('Microsoft.PowerShell.Commands.Utility')){throw 'module_binding_failed'}
+$sourceUtilityProof=$global:bindingVerifiedModules['Microsoft.PowerShell.Commands.Utility']
+$sourceUtilityPath=$sourceUtilityProof.path
+if($sourceUtilityProof.identity -cne $sourceUtilityIdentity -or -not [IO.Path]::IsPathRooted($sourceUtilityPath) -or -not $sourceUtilityPath.EndsWith('.dll',[StringComparison]::OrdinalIgnoreCase)){throw 'module_binding_failed'}
+$sourceUtilityImports=@(Microsoft.PowerShell.Core\Import-Module -Name $sourceUtilityPath -PassThru -Force -ErrorAction Stop)
+if($sourceUtilityImports.Count -ne 1){throw 'module_binding_failed'}
+$sourceUtilityModule=$sourceUtilityImports[0]
+if(-not ($sourceUtilityModule.ModuleType -eq [Management.Automation.ModuleType]::Binary) -or -not [string]::Equals($sourceUtilityModule.Path,$sourceUtilityPath,[StringComparison]::OrdinalIgnoreCase)){throw 'module_binding_failed'}
+$sourceAddTypes=@(Microsoft.PowerShell.Core\Get-Command -Name ($sourceUtilityModule.Name+'\Add-Type') -CommandType Cmdlet -All -ErrorAction Stop)
+if($sourceAddTypes.Count -ne 1){throw 'module_binding_failed'}
+$sourceAddType=$sourceAddTypes[0]
+if(-not ($sourceAddType -is [Management.Automation.CmdletInfo]) -or $sourceAddType.ImplementingType.FullName -cne 'Microsoft.PowerShell.Commands.AddTypeCommand' -or -not ($sourceAddType.ImplementingType.Assembly.FullName -ceq $sourceUtilityIdentity) -or
+ -not [string]::Equals($sourceAddType.ImplementingType.Assembly.Location,$sourceUtilityPath,[StringComparison]::OrdinalIgnoreCase) -or
+ -not [string]::Equals($sourceAddType.Module.Path,$sourceUtilityPath,[StringComparison]::OrdinalIgnoreCase)){throw 'module_binding_failed'}
+& $sourceAddType -AssemblyName System.Web.Extensions
+& $sourceAddType -AssemblyName System.Security
+& $sourceAddType -ReferencedAssemblies @('System.dll','System.Core.dll','System.Security.dll','System.Web.Extensions.dll') -TypeDefinition @'
 using System;
 using System.IO;
 using System.Linq;
@@ -873,6 +903,10 @@ public static class SourceAcl {
  public static void Close(){foreach(var h in handles.Values)h.Dispose();handles.Clear();foreach(var h in ancestors)h.Dispose();ancestors.Clear();ancestorPins.Clear();exclusive=null;}
 }
 '@
+$sourceModuleBinding=@{dll_direct_import=$true;manifest_import_performed=$false;command_binding_verified=$true;
+ command_module_name_sha256=(BindingDigest ([Text.Encoding]::UTF8.GetBytes("windows-source-module-name-v1`0"+$sourceAddType.ModuleName)));
+ command_assembly_identity_sha256=(BindingDigest ([Text.Encoding]::UTF8.GetBytes("windows-source-module-identity-v1`0"+$sourceAddType.ImplementingType.Assembly.FullName)));
+ command_assembly_location_sha256=(BindingDigest ([Text.Encoding]::UTF8.GetBytes("windows-source-module-location-v1`0"+$sourceAddType.ImplementingType.Assembly.Location.ToLowerInvariant())))}
 $json=[System.Web.Script.Serialization.JavaScriptSerializer]::new()
 $json.MaxJsonLength=67108864
 try {
@@ -880,8 +914,8 @@ try {
   try {
    $v=$json.DeserializeObject($line)
    switch([string]$v.op) {
-    'compile' { $result=@{compiled=$true} }
-    'fixture' { $result=[SourceAcl]::Fixture([string]$v.nonce) }
+    'compile' { $result=@{compiled=$true;module_binding=$sourceModuleBinding} }
+    'fixture' { $result=[SourceAcl]::Fixture([string]$v.nonce);$result.Add('module_binding',$sourceModuleBinding) }
     'open' { [SourceAcl]::Start([string]$v.root,[string[]]$v.paths,[string[]]$v.kinds,$false); $result=@{ancestor_sha256=[SourceAcl]::AncestorHash} }
     'snapshot' { $result=[SourceAcl]::Snapshot() }
     'preflight' { [SourceAcl]::Preflight(); $result=@{preflight=$true} }

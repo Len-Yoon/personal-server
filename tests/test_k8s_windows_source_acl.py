@@ -112,12 +112,43 @@ class SourceAclPolicyTests(unittest.TestCase):
         self.assertIn('ReOpenFile(original,0x20080u|(directory?1u:0u)', script)
         self.assertIn('GetFileInformationByHandleEx(h,first?11:10', script)
 
+    def test_native_add_type_uses_verified_binary_command_without_manifest(self):
+        script = self.m.POWERSHELL.split("using System;", 1)[0]
+        self.assertNotIn('.psd1', script)
+        self.assertNotIn('Microsoft.PowerShell.Utility\\Add-Type', script)
+        self.assertIn('$global:bindingVerifiedModules', script)
+        self.assertIn('Microsoft.PowerShell.Core\\Import-Module -Name $sourceUtilityPath -PassThru', script)
+        self.assertIn("$sourceUtilityModule.ModuleType -eq [Management.Automation.ModuleType]::Binary", script)
+        self.assertIn('$sourceAddType.ImplementingType.Assembly.FullName -ceq $sourceUtilityIdentity', script)
+        self.assertIn('$sourceAddType.Module.Path', script)
+        self.assertEqual(script.count('& $sourceAddType -'), 3)
+        self.assertLess(script.index('$sourceAddType.ImplementingType.Assembly.FullName'),
+                        script.index('& $sourceAddType -'))
+
     def test_exact_dependency_loads_without_reaching_native_or_transaction(self):
         raw = SCRIPT.with_name('windows-runtime-acl.py').read_bytes()
         legacy = self.m.load_legacy(raw)
         with (patch.object(legacy.NativeBackend, 'open', side_effect=AssertionError('legacy open')),
               patch.object(legacy.NativeBackend, 'native_self_test', side_effect=AssertionError('legacy fixture'))):
             self.assertEqual(legacy.__name__, '_reviewed_source_acl_dependency')
+
+    def test_module_binding_receipt_requires_actual_binary_command_proof(self):
+        proof = {'dll_direct_import': True, 'manifest_import_performed': False,
+                 'command_binding_verified': True, 'command_module_name_sha256': '1' * 64,
+                 'command_assembly_identity_sha256': self.m.hashlib.sha256(
+                     ('windows-source-module-identity-v1\0' +
+                      'Microsoft.PowerShell.Commands.Utility, Version=3.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35').encode()).hexdigest(),
+                 'command_assembly_location_sha256': '2' * 64}
+        self.m.validate_module_binding(proof)
+        for key, value in [('manifest_import_performed', True), ('dll_direct_import', False),
+                           ('command_binding_verified', False),
+                           ('command_assembly_identity_sha256', '0' * 64),
+                           ('command_module_name_sha256', 'raw-name')]:
+            changed = dict(proof, **{key: value})
+            with self.subTest(key=key), self.assertRaises(self.m.Blocked):
+                self.m.validate_module_binding(changed)
+        with self.assertRaises(self.m.Blocked):
+            self.m.validate_module_binding(None)
 
     def test_fixture_receipt_requires_actual_adapter_fields_and_fresh_time(self):
         backend = object.__new__(self.m.SourceAclNativeBackend)
@@ -128,6 +159,11 @@ class SourceAclPolicyTests(unittest.TestCase):
                     'nested_rollback', 'partialmix', 'outside_preserved', 'cleanup', 'dpapi',
                     'descriptor_binding'):
             receipt[key] = True
+        receipt['module_binding'] = {'dll_direct_import': True, 'manifest_import_performed': False,
+            'command_binding_verified': True, 'command_module_name_sha256': '1' * 64,
+            'command_assembly_identity_sha256': self.m.hashlib.sha256(('windows-source-module-identity-v1\0' +
+                'Microsoft.PowerShell.Commands.Utility, Version=3.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35').encode()).hexdigest(),
+            'command_assembly_location_sha256': '2' * 64}
         with self.assertRaises(self.m.Blocked) as raised:
             backend.attach_fixture_receipt(receipt, self.m.object_hash(receipt))
         self.assertEqual(raised.exception.reason, 'fixture_not_fresh')
