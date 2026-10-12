@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -343,13 +344,16 @@ class PreparationTests(unittest.TestCase):
                 m.image_override_contract(fresh["config"], changed, prepared["image_id"])
 
     def test_git_config_guard_blocks_external_execution_and_includes(self):
-        m.git_config_guard(b"core.attributesfile\n/dev/null\0core.fsmonitor\nfalse\0user.name\nsynthetic\0")
+        m.git_config_guard(b"core.attributesfile\n/dev/null\0core.fsmonitor\nfalse\0user.name\nsynthetic\0credential.helper\n\0core.askpass\n\0")
         for key, value in (("include.path", "/foreign"), ("includeif.gitdir:x.path", "/foreign"),
                 ("filter.attack.clean", "external-command"), ("core.attributesfile", "/foreign"),
                 ("diff.custom.command", "external-command"), ("diff.custom.textconv", "external-command"),
-                ("core.sshcommand", "external-command"), ("core.fsmonitor", "true"), ("core.hookspath", "/foreign")):
-            with self.subTest(key=key), self.assertRaises(m.Blocked):
-                m.git_config_guard((key + "\n" + value + "\0").encode())
+                ("core.sshcommand", "external-command"), ("core.fsmonitor", "true"), ("core.hookspath", "/foreign"),
+                ("core.askpass", "/foreign"), ("http.synthetic.extraheader", "synthetic"),
+                ("url.synthetic.insteadof", "synthetic"), ("gpg.program", "external-command"),
+                ("credential.https://synthetic.helper", ""), ("credential.username", "synthetic")):
+            with self.subTest(key=key), self.assertRaisesRegex(m.Blocked, "git_external_config"):
+                m.git_config_guard((key + "\n" + value + "\0credential.helper\n\0").encode())
 
 
 class ControllerTests(unittest.TestCase):
@@ -444,6 +448,59 @@ class ControllerTests(unittest.TestCase):
 
 
 class NativeSafetyTests(unittest.TestCase):
+    def test_credential_config_requires_final_reset_and_rejects_other_credential_settings(self):
+        m.git_config_guard(b"credential.helper\n!synthetic-shell\0credential.helper\nstore\0credential.helper\n\0")
+        for raw in (b"user.name\nsynthetic\0", b"credential.helper\nstore\0", b"credential.helper\n\0credential.helper\n!late\0",
+                    b"credential.https://synthetic.invalid.helper\n\0credential.helper\n\0",
+                    b"credential.username\nsynthetic\0credential.helper\n\0",
+                    b"core.askpass\n/synthetic/askpass\0credential.helper\n\0"):
+            with self.subTest(raw=raw), self.assertRaises(m.Blocked):
+                m.git_config_guard(raw)
+
+    def test_real_local_credential_helper_and_askpass_are_never_invoked_after_reset(self):
+        # All protocol values, helper programs, stores and config live only in this temp repo.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clean = {key: value for key, value in os.environ.items()
+                     if not key.startswith("GIT_") and key != "SSH_ASKPASS"}
+            clean.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null", GIT_TERMINAL_PROMPT="0")
+            def git(*args, data=None):
+                return subprocess.run(["git", *args], cwd=root, env=clean, input=data,
+                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)
+            git("init", "--quiet")
+            helper, askpass, marker, askmark, store = [root / name for name in
+                ("dummy-helper", "dummy-askpass", "helper-called", "askpass-called", "dummy-store")]
+            helper.write_text("#!/bin/sh\nprintf '%s\\n' \"$1\" >> '" + str(marker) + "'\n"
+                              "if [ \"$1\" = get ]; then printf 'username=dummy\\npassword=dummy\\n'; fi\n")
+            askpass.write_text("#!/bin/sh\nprintf 'called\\n' >> '" + str(askmark) + "'\nprintf 'dummy\\n'\n")
+            helper.chmod(0o700); askpass.chmod(0o700)
+            git("config", "--local", "--add", "credential.helper", "!" + str(helper))
+            challenge = b"protocol=https\nhost=synthetic.invalid\n\n"
+            # Control establishes this local dummy helper really executes exactly once.
+            git("credential", "fill", data=challenge)
+            self.assertEqual(marker.read_text().splitlines(), ["get"]); marker.unlink()
+            git("config", "--local", "--add", "credential.helper", "store --file=" + str(store))
+            backend = object.__new__(m.NativeBackend)
+            backend.root, backend.deadline, backend.command_termination_unknown = root, None, False
+            native_run = backend.run
+            def native_git(*args, data=None):
+                with patch.object(backend, "run", side_effect=lambda command: command):
+                    command = backend.git(*args)
+                return native_run(command, stdin=data)
+            hostile = {"GIT_ASKPASS": str(askpass), "SSH_ASKPASS": str(askpass)}
+            with patch.dict(os.environ, hostile):
+                m.git_config_guard(native_git("config", "--no-includes", "--null", "--list"))
+                with self.assertRaises(m.CommandFailed):native_git("credential", "fill", data=challenge)
+                native_git("credential", "approve", data=challenge[:-1] + b"username=dummy\npassword=dummy\n\n")
+                self.assertTrue(all(os.environ[k] == v for k, v in hostile.items()))
+            self.assertFalse(marker.exists()); self.assertFalse(askmark.exists()); self.assertFalse(store.exists())
+            git("config", "--local", "core.askPass", str(askpass))
+            with self.assertRaises(m.Blocked):
+                m.git_config_guard(native_git("config", "--no-includes", "--null", "--list"))
+            with patch.dict(os.environ, hostile), self.assertRaises(m.CommandFailed):
+                native_git("credential", "fill", data=challenge)
+            self.assertFalse(askmark.exists()); self.assertFalse(marker.exists()); self.assertFalse(store.exists())
+
     def test_git_child_has_isolated_config_without_parent_environment_mutation(self):
         backend = object.__new__(m.NativeBackend)
         backend.root, backend.deadline, backend.command_termination_unknown = Path("/synthetic"), None, False
@@ -454,7 +511,8 @@ class NativeSafetyTests(unittest.TestCase):
                    "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "filter.attack.clean",
                    "GIT_CONFIG_VALUE_0": "external-command", "GIT_TRACE": "/synthetic/trace",
                    "GIT_WORK_TREE": "/synthetic/work-tree", "GIT_INDEX_FILE": "/synthetic/index",
-                   "GIT_OBJECT_DIRECTORY": "/synthetic/objects", "GIT_TRACE2_EVENT": "/synthetic/events"}
+                   "GIT_OBJECT_DIRECTORY": "/synthetic/objects", "GIT_TRACE2_EVENT": "/synthetic/events",
+                   "GIT_ASKPASS": "/synthetic/askpass", "SSH_ASKPASS": "/synthetic/ssh-askpass"}
         with patch.dict(os.environ, hostile), patch.object(m.subprocess, "Popen", return_value=child) as create:
             backend.git("status", "--porcelain")
             self.assertTrue(all(os.environ[key] == value for key, value in hostile.items()))
@@ -463,7 +521,11 @@ class NativeSafetyTests(unittest.TestCase):
             self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
             self.assertEqual(env["GIT_ATTR_NOSYSTEM"], "1")
             self.assertEqual({key for key in env if key.startswith("GIT_")},
-                             {"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_ATTR_NOSYSTEM"})
+                             {"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_ATTR_NOSYSTEM", "GIT_TERMINAL_PROMPT"})
+            self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
+            self.assertNotIn("GIT_ASKPASS", env); self.assertNotIn("SSH_ASKPASS", env)
+            self.assertIn("credential.helper=", create.call_args.args[0])
+            self.assertIn("core.askPass=", create.call_args.args[0])
             self.assertIn("core.attributesFile=/dev/null", create.call_args.args[0])
 
     def test_protected_source_config_guard_precedes_any_git_status(self):

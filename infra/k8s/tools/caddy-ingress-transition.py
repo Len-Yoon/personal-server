@@ -211,19 +211,36 @@ def git_config_guard(raw):
         entries = raw.decode().split("\0")
     except UnicodeError:
         raise Blocked("git_config_encoding") from None
+    helpers = []
     for entry in entries:
         if not entry:
             continue
         key, separator, value = entry.partition("\n")
         key = key.lower()
         require(separator, "git_config_shape")
-        forbidden = (key == "include.path" or key.startswith("includeif.") or key.startswith("filter.")
-            or key in ("core.hookspath", "core.sshcommand", "diff.external", "credential.helper")
+        if key == "credential.helper":
+            helpers.append(value)
+            continue
+        forbidden = (key.startswith(("include.", "includeif.", "filter.", "gpg.", "http.", "credential."))
+            or key in ("core.hookspath", "core.sshcommand", "core.worktree", "core.gitproxy",
+                       "core.alternaterefscommand", "diff.external", "interactive.difffilter", "extensions.partialclone")
+            or key == "core.askpass" and value != ""
+            or key.startswith("url.") and key.endswith((".insteadof", ".pushinsteadof"))
+            or key.startswith("remote.") and key.endswith((".promisor", ".partialclonefilter"))
+            or key in ("commit.gpgsign", "merge.verifysignatures") and value.lower() not in ("false", "0")
             or key.startswith("diff.") and key.endswith((".command", ".textconv"))
             or key.startswith("merge.") and key.endswith(".driver")
             or key == "core.attributesfile" and value != "/dev/null"
             or key == "core.fsmonitor" and value.lower() not in ("false", "0"))
         require(not forbidden, "git_external_config")
+    require(helpers and helpers[-1] == "", "git_credential_reset_required")
+
+
+def isolated_git_env(environ):
+    return {**{key: value for key, value in environ.items()
+               if not key.upper().startswith("GIT_") and key.upper() != "SSH_ASKPASS"},
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0"}
 
 
 def network_spec(network):
@@ -639,9 +656,7 @@ class NativeBackend:
         child = None
         child_options = {}
         if args and args[0] == "git":
-            child_options["env"] = {**{key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
-                                    "GIT_CONFIG_NOSYSTEM": "1",
-                                    "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_ATTR_NOSYSTEM": "1"}
+            child_options["env"] = isolated_git_env(os.environ)
         try:
             child = subprocess.Popen(args, cwd=self.root, stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True, **child_options)
@@ -677,7 +692,7 @@ class NativeBackend:
 
     def git(self, *args):
         return self.run(["git", "--no-optional-locks", "--no-replace-objects", "-c",
-                         "core.attributesFile=/dev/null", *args])
+                         "core.attributesFile=/dev/null", "-c", "credential.helper=", "-c", "core.askPass=", *args])
 
     def guard(self):
         require(not self.command_termination_unknown, "child_termination_unknown")
