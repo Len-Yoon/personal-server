@@ -1081,6 +1081,241 @@ class NativeDiagnosticTests(unittest.TestCase):
                 self.assertIsNone(acl.native_failure_diagnostic(self.diagnostic(stage=stage, win32_error=5)))
                 self.assertTrue('Fail("' + stage + '"' in acl.POWERSHELL)
 
+class ResidualTests(unittest.TestCase):
+    def setUp(self):
+        self.backend = FakeBackend()
+        self.backend.scope_schema = acl.RESIDUAL_SCHEMA
+        for p in acl.READONLY_PATHS:
+            self.backend.current = self.backend.project(self.backend.current, p, None)
+        initial = self.backend.current
+        initial['entries'] = {p: r for p, r in initial['entries'].items()
+                              if p in acl.READONLY_PATHS or p in acl.RUNTIME or acl.residual_path(p)}
+        initial['projection_contract'] = acl.RESIDUAL_PROJECTION
+        rows = initial['entries']
+        counts = dict(COUNTS)
+        counts.update(total=len(rows), files=sum(r['kind'] == 'file' for r in rows.values()),
+                      directories=sum(r['kind'] == 'directory' for r in rows.values()),
+                      ignored_unsafe=0, other_owner=0)
+        initial['counts'] = counts
+        self.git = sorted(p for p, row in rows.items() if acl.residual_path(p) and row['unsafe'])
+        self.prior = mock.patch.object(acl, 'PRIOR_TARGETS_SHA256',
+                                      acl.object_hash([''] + list(acl.RUNTIME) + self.git))
+        self.prior.start()
+        self.scope = dict(schema=4, scope_kind=acl.RESIDUAL_KIND, root='C:\\personal-server',
+                          git_targets=self.git, prior_targets_sha256=acl.PRIOR_TARGETS_SHA256,
+                          counts=counts, source_sha256='1'*64, fixture_sha256=acl.digest(acl.POWERSHELL.encode()),
+                          comparison_contract=copy.deepcopy(acl.RESIDUAL_COMPARISON),
+                          initial_sha256=acl.snapshot_hash(initial), runtime_hashes=dict(initial['runtime_hashes']))
+        self.temp = tempfile.TemporaryDirectory(prefix='.windows-acl-residual-test-', dir=PATH.parents[3].resolve())
+        self.vault = acl.Vault(Path(self.temp.name).resolve() / 'vault', self.backend)
+        self.transaction = acl.ResidualTransaction(self.backend, self.vault)
+
+    def tearDown(self):
+        self.vault.close()
+        self.temp.cleanup()
+        self.prior.stop()
+
+    def prepare(self):
+        return self.transaction.prepare(self.scope)['plan_sha256']
+
+    def test_legacy_backend_cannot_open_residual_scope(self):
+        with self.assertRaisesRegex(acl.Blocked, 'residual_backend_required'):
+            acl.ResidualTransaction(FakeBackend(), self.vault)
+        native = object.__new__(acl.NativeBackend)
+        with self.assertRaisesRegex(acl.Blocked, 'native_scope_schema_mismatch'):
+            native.open(self.scope)
+
+    def test_only_twenty_targets_and_exact_roundtrip(self):
+        readonly = {p: copy.deepcopy(self.backend.current['entries'][p]) for p in acl.READONLY_PATHS}
+        sha = self.prepare()
+        self.assertEqual(self.transaction.apply(sha)['targets'], 20)
+        self.assertEqual(self.backend.writes, list(acl.RESIDUAL_RUNTIME) + self.git)
+        for p, row in readonly.items():
+            self.assertEqual(self.backend.current['entries'][p], row)
+        self.transaction.rollback(sha)
+        self.assertEqual(self.backend.writes[20:], list(reversed(list(acl.RESIDUAL_RUNTIME) + self.git)))
+        self.assertTrue(acl.same_snapshot(self.backend.current, self.vault.read('plan.dpapi')['initial']))
+
+    def test_schema_three_rejected_before_native_open_or_old_journal_read(self):
+        with mock.patch.object(self.backend, 'open') as opened:
+            with self.assertRaisesRegex(acl.Blocked, 'transaction_schema_mismatch'):
+                self.transaction.prepare(scope())
+            opened.assert_not_called()
+        sha = self.prepare()
+        with self.assertRaisesRegex(acl.Blocked, 'journal_plan_mismatch'):
+            acl.Transaction(self.backend, self.vault).load(sha)
+
+    def test_lineage_digest_binds_actual_git_list(self):
+        changed = copy.deepcopy(self.scope)
+        changed['git_targets'][-1] += 'different'
+        changed['git_targets'].sort()
+        with self.assertRaisesRegex(acl.Blocked, 'residual_target_lineage_mismatch'):
+            acl.validate_residual_scope(changed)
+
+    def test_data_inventory_and_git_locks_fail_closed(self):
+        for path in ('data', '.git/index.lock'):
+            changed = copy.deepcopy(self.backend.current)
+            changed['entries'][path] = entry(path, 999)
+            changed['counts']['total'] += 1
+            changed['counts']['files'] += 1
+            approved = copy.deepcopy(self.scope)
+            approved['counts'] = changed['counts']
+            approved['initial_sha256'] = acl.snapshot_hash(changed)
+            with self.subTest(path=path), self.assertRaises(acl.Blocked):
+                acl.validate_residual_snapshot(changed, approved)
+
+    def test_reparse_hardlink_alias_and_wrong_git_kind_rejected(self):
+        for change in ('reparse', 'links', 'identity', 'kind'):
+            current = copy.deepcopy(self.backend.current)
+            row = current['entries']['.git/objects/pack/value']
+            if change == 'reparse': row['attributes'] |= 1024
+            if change == 'links': row['links'] = 2
+            if change == 'identity': row['identity'] = current['entries']['']['identity']
+            if change == 'kind': current['entries']['.git']['kind'] = 'file'
+            approved = copy.deepcopy(self.scope)
+            approved['initial_sha256'] = acl.snapshot_hash(current)
+            with self.subTest(change=change), self.assertRaises(acl.Blocked):
+                acl.validate_residual_snapshot(current, approved)
+
+    def test_readonly_owner_group_acl_metadata_are_pinned(self):
+        sha = self.prepare()
+        for field in ('identity', 'owner', 'group', 'dacl', 'modified'):
+            original = copy.deepcopy(self.backend.current)
+            self.backend.current['entries'][''][field] += 'changed'
+            self.assertFalse(acl.same_snapshot(self.backend.current, original))
+            self.backend.current = original
+        self.backend.current['entries']['.env']['protected'] = False
+        with self.assertRaisesRegex(acl.Blocked, 'preapply_drift'):
+            self.transaction.apply(sha)
+        self.assertEqual(self.backend.writes, [])
+
+    def test_outside_projection_and_runtime_hash_mutation_rejected(self):
+        before = self.backend.current
+        for target in acl.READONLY_PATHS:
+            with self.subTest(target=target), self.assertRaisesRegex(acl.Blocked, 'outside_residual_target'):
+                acl.validate_projection(before, before, target)
+        for field in ('sd', 'dacl', 'owner'):
+            after = self.backend.project(before, acl.RESIDUAL_RUNTIME[0], None)
+            after['entries'][''][field] += 'changed'
+            with self.subTest(field=field), self.assertRaisesRegex(acl.Blocked, 'outside_residual_projection'):
+                acl.validate_projection(before, after, acl.RESIDUAL_RUNTIME[0])
+        after = copy.deepcopy(before)
+        after['runtime_hashes']['.env'] = '0'*64
+        with self.assertRaisesRegex(acl.Blocked, 'projection_content_changed'):
+            acl.validate_projection(before, after, acl.RESIDUAL_RUNTIME[0])
+
+    def test_unknown_write_preserves_intent_and_stops(self):
+        sha = self.prepare()
+        self.backend.mode = 'lost_after'
+        with self.assertRaisesRegex(acl.Blocked, 'native_response_unknown'):
+            self.transaction.apply(sha)
+        state = self.vault.read('state.dpapi')
+        self.assertTrue(state['unknown'])
+        self.assertEqual(state['completed'], 0)
+        self.assertEqual(state['pending']['index'], 0)
+        self.assertEqual(len(self.backend.writes), 1)
+        with self.assertRaisesRegex(acl.Blocked, 'unknown_native_process_held'):
+            self.transaction.rollback(sha)
+
+    def test_tampered_plan_target_rejected_before_setter(self):
+        sha = self.prepare()
+        plan = self.vault.read('plan.dpapi')
+        plan['steps'][0]['target'] = ''
+        sha = self.vault.write('plan.dpapi', plan)
+        state = self.vault.read('state.dpapi');state['plan_sha256'] = sha
+        self.vault.write('state.dpapi', state)
+        with self.assertRaisesRegex(acl.Blocked, 'residual_plan_targets_changed'):
+            self.transaction.apply(sha)
+        self.assertEqual(self.backend.writes, [])
+
+    def test_native_open_rejects_wrong_lineage_before_fixture_or_request(self):
+        native = object.__new__(acl.ResidualNativeBackend)
+        native.native_self_test = mock.Mock()
+        native.request = mock.Mock()
+        changed = copy.deepcopy(self.scope)
+        changed['git_targets'][-1] += 'different'
+        changed['git_targets'].sort()
+        with self.assertRaisesRegex(acl.Blocked, 'residual_target_lineage_mismatch'):
+            native.open(changed)
+        native.native_self_test.assert_not_called()
+        native.request.assert_not_called()
+
+    def test_native_open_requires_full_scope_before_fixture_or_request(self):
+        native = object.__new__(acl.ResidualNativeBackend)
+        native.native_self_test = mock.Mock()
+        native.request = mock.Mock()
+        changed = copy.deepcopy(self.scope)
+        changed['initial_sha256'] = None
+        with self.assertRaisesRegex(acl.Blocked, 'missing_residual_pin'):
+            native.open(changed)
+        native.native_self_test.assert_not_called()
+        native.request.assert_not_called()
+
+    def test_native_residual_receipt_requires_fresh_partialmix_proof(self):
+        from datetime import datetime, timezone
+        for partialmix in (None, False, True):
+            native = object.__new__(acl.ResidualNativeBackend)
+            native.opened = False
+            def respond(request, mutation):
+                receipt = {key: True for key in ('projection', 'rollback', 'content_hashes',
+                            'dpapi', 'cleanup', 'readonly_boundary', 'outside_preserved', 'descriptor_boundary')}
+                receipt.update(nonce=request['nonce'], residual_targets=20, binding_sha256='a'*64,
+                               objects=26, sacl_contract='dacl_only_no_privilege_change',
+                               utc=datetime.now(timezone.utc).isoformat())
+                if partialmix is not None:
+                    receipt['partialmix'] = partialmix
+                return receipt
+            native.request = mock.Mock(side_effect=respond)
+            with self.subTest(partialmix=partialmix):
+                if partialmix is True:
+                    self.assertEqual(native.native_self_test()['reason'], 'native_residual_fixture_passed')
+                else:
+                    with self.assertRaisesRegex(acl.Blocked, 'native_residual_fixture_failed'):
+                        native.native_self_test()
+        fixture = acl.POWERSHELL.split('public static Dictionary<string,object> ResidualFixture(', 1)[1]
+        fixture = fixture.split('public static void Close()', 1)[0]
+        self.assertIn('var repairLeaves=new[]{".git/value",".git/target00/value"};', fixture)
+        self.assertIn('Check(GitPath(p)&&writable.Contains(p)&&!residualTargets.Contains(p));', fixture)
+        self.assertIn('SetHandleFlags(handles[p],From(restrictedDescriptors[p]),4);', fixture)
+        self.assertIn('VerifyMix(baseline,originals,restrictedDescriptors);', fixture)
+        self.assertIn('Set(p,identities[p],originals[p]);VerifyMix(', fixture)
+        self.assertIn('"partialmix",true', fixture)
+
+    def test_native_python_boundaries_reject_without_request(self):
+        native = object.__new__(acl.ResidualNativeBackend)
+        native.residual_targets = frozenset(list(acl.RESIDUAL_RUNTIME) + self.git)
+        native.request = mock.Mock()
+        for target in ('', '.env', 'docker-compose.yml', 'data/recovery.lock'):
+            with self.subTest(target=target), self.assertRaisesRegex(acl.Blocked, 'outside_residual_target'):
+                native.set_dacl(target, {})
+            with self.subTest(project=target), self.assertRaisesRegex(acl.Blocked, 'outside_residual_target'):
+                native.project(self.backend.current, target, None)
+        current = copy.deepcopy(self.backend.current);current['entries']['data'] = entry('data',999)
+        with self.assertRaisesRegex(acl.Blocked, 'outside_residual_inventory'):
+            native.project(current, acl.RESIDUAL_RUNTIME[0], None)
+        native.request.assert_not_called()
+
+    def test_native_fixture_char_literal_backslashes_are_escaped(self):
+        fixture = acl.POWERSHELL.split('public static Dictionary<string,object> ResidualFixture(', 1)[1]
+        fixture = fixture.split('public static void Close()', 1)[0]
+        wrong = "p.Replace('/','" + chr(92) + "')"
+        right = "p.Replace('/','" + chr(92)*2 + "')"
+        self.assertNotIn(wrong, fixture)
+        self.assertEqual(fixture.count(right), 2)
+
+    def test_residual_native_never_calls_whole_tree_start(self):
+        source = acl.POWERSHELL
+        section = source.split('public static void StartResidual(', 1)[1].split('static byte[] Bytes(GenericAce', 1)[0]
+        self.assertIn('pending.Enqueue(".git")', section)
+        self.assertNotIn('pending.Enqueue("")', section)
+        self.assertIn('if(residualTargets.Contains(p)||(GitPath(p)&&!(bool)item.Value["protected"]))', section)
+        self.assertIn('if(write&&residualMode)Check(relative!=null&&ResidualWritable(relative)&&writable.Contains(relative));', source)
+        self.assertIn('if(residualMode)Check(ResidualWritable(p)&&writable.Contains(p));', source)
+        self.assertIn('Check(descriptors.Count==handles.Count&&descriptors.Keys.All(p=>handles.ContainsKey(p)));', source)
+        self.assertIn('"readonly_boundary",true', source)
+        self.assertIn('"outside_preserved",true', source)
+        self.assertIn('"descriptor_boundary",true', source)
+
 
 if __name__ == "__main__":
     unittest.main()
