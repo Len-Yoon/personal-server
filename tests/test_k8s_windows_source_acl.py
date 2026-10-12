@@ -35,6 +35,22 @@ class SourceAclPolicyTests(unittest.TestCase):
         self.assertEqual(after['aces'][:2], before['aces'][:2])
         self.assertFalse(before['protected'])
 
+    def test_flatten_removes_only_exact_inherited_trusted_allow_duplicates(self):
+        deny = {'type': 'deny', 'sid': 'other', 'mask': 2, 'flags': 0}
+        trusted = {'type': 'allow', 'sid': 'trusted', 'mask': 0x1f01ff, 'flags': 3}
+        other = {'type': 'allow', 'sid': 'other', 'mask': 0x1201ff, 'flags': 3}
+        acl = {'protected': False, 'aces': [deny, dict(deny), trusted, dict(trusted), other,
+            dict(trusted, flags=19), dict(trusted, flags=17), dict(trusted, mask=1, flags=19),
+            dict(other, flags=19)]}
+        result = self.m.transform_dacl(acl, {'trusted'})
+        self.assertEqual(len(result['aces']), 8)
+        self.assertEqual(result['aces'][:4], acl['aces'][:4])
+        self.assertEqual(result['aces'][4]['mask'], other['mask'] & ~self.m.UNSAFE_MASK)
+        self.assertEqual(result['aces'][5], dict(trusted, flags=1))
+        self.assertEqual(result['aces'][6], dict(trusted, mask=1))
+        self.assertEqual(result['aces'][7], dict(other, mask=other['mask'] & ~self.m.UNSAFE_MASK))
+        self.assertEqual(acl['aces'][5]['flags'], 19)
+
     def test_inherited_deny_after_explicit_allow_blocks_without_reordering(self):
         acl = self.acl()
         acl['aces'] = [acl['aces'][1], dict(acl['aces'][0], flags=16)]
@@ -122,7 +138,7 @@ class SourceAclPolicyTests(unittest.TestCase):
         target_aces = script.split('static List<Dictionary<string,object>> Aces(', 1)[1].split('static Dictionary<string,object> Row(', 1)[0]
         self.assertIn('c.AccessMask>=0', target_aces)
         self.assertIn('0xf0000000', target_aces)
-        for case in ('fixture_parent_generic_read', 'fixture_parent_generic_all_reject',
+        for case in ('fixture_trusted_inherited_duplicate', 'fixture_parent_generic_read', 'fixture_parent_generic_all_reject',
                      'fixture_parent_inherit_only_generic', 'fixture_parent_callback_reject'):
             self.assertIn(case, script)
 

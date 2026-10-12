@@ -117,6 +117,12 @@ def transform_dacl(acl, trusted):
         row = dict(ace, flags=ace['flags'] & ~16)
         if ace['type'] == 'allow' and ace['sid'] not in trusted:
             row['mask'] &= ~UNSAFE_MASK
+        # The measured owned Windows fixture folds an inherited trusted
+        # Allow into an exact earlier Allow when inheritance is flattened. Preserve explicit duplicates,
+        # all Deny entries and ordering; never merge masks or different flags.
+        if (ace['type'] == 'allow' and ace['sid'] in trusted and ace['flags'] & 16
+                and row in result['aces']):
+            continue
         result['aces'].append(row)
     return result
 
@@ -739,7 +745,12 @@ public static class SourceAcl {
   var sd=From(original);Aces(sd.DiscretionaryAcl);var acl=new RawAcl(sd.DiscretionaryAcl.Revision,sd.DiscretionaryAcl.Count);bool allow=false;
   foreach(CommonAce a in sd.DiscretionaryAcl){Check(!(allow&&a.AceQualifier==AceQualifier.AccessDenied),"flatten_noncanonical");allow|=a.AceQualifier==AceQualifier.AccessAllowed;
    int mask=a.AccessMask;if(a.AceQualifier==AceQualifier.AccessAllowed&&!Trusted(a.SecurityIdentifier.Value))mask&=~0xd0156;
-   acl.InsertAce(acl.Count,new CommonAce(a.AceFlags&~AceFlags.Inherited,a.AceQualifier,mask,a.SecurityIdentifier,false,null));}
+   var aceFlags=a.AceFlags&~AceFlags.Inherited;
+   // Match the measured Windows fold only: an originally inherited trusted
+   // Allow exactly duplicates an earlier flattened Allow. No reordering/OR.
+   if(a.AceQualifier==AceQualifier.AccessAllowed&&Trusted(a.SecurityIdentifier.Value)&&(a.AceFlags&AceFlags.Inherited)!=0&&
+      acl.Cast<CommonAce>().Any(c=>c.AceQualifier==a.AceQualifier&&c.AceFlags==aceFlags&&c.AccessMask==mask&&c.SecurityIdentifier.Value==a.SecurityIdentifier.Value))continue;
+   acl.InsertAce(acl.Count,new CommonAce(aceFlags,a.AceQualifier,mask,a.SecurityIdentifier,false,null));}
   var flags=(sd.ControlFlags|ControlFlags.DiscretionaryAclProtected)&~ControlFlags.DiscretionaryAclAutoInheritRequired;
   return Convert.ToBase64String(Bytes(new RawSecurityDescriptor(flags,sd.Owner,sd.Group,sd.SystemAcl,acl)));
  }
@@ -810,6 +821,13 @@ public static class SourceAcl {
   var reduced=From(Reduce(Convert.ToBase64String(Bytes(sd))));
   Check(Equal(Aces(reduced.DiscretionaryAcl)[0],Aces(acl)[0]),"fixture_deny_preservation");
   var result=(CommonAce)reduced.DiscretionaryAcl[1];Check(result.AccessMask==(allow.AccessMask&~0xd0156)&&(result.AceFlags&AceFlags.Inherited)==0&&(result.AceFlags&AceFlags.InheritOnly)!=0,"fixture_inherit_only_mask");
+  var trustedAce=new CommonAce(AceFlags.ObjectInherit|AceFlags.ContainerInherit,AceQualifier.AccessAllowed,0x1f01ff,new SecurityIdentifier(principal),false,null);
+  var duplicates=new RawAcl(2,5);duplicates.InsertAce(0,deny);duplicates.InsertAce(1,deny);duplicates.InsertAce(2,trustedAce);duplicates.InsertAce(3,trustedAce);
+  duplicates.InsertAce(4,new CommonAce(trustedAce.AceFlags|AceFlags.Inherited,trustedAce.AceQualifier,trustedAce.AccessMask,trustedAce.SecurityIdentifier,false,null));
+  var duplicateSd=new RawSecurityDescriptor(ControlFlags.DiscretionaryAclPresent,sd.Owner,sd.Group,null,duplicates);
+  var deduplicated=From(Reduce(Convert.ToBase64String(Bytes(duplicateSd))));
+  var preserved=new RawAcl(2,4);for(int i=0;i<4;i++)preserved.InsertAce(i,duplicates[i]);
+  Check(deduplicated.DiscretionaryAcl.Count==4&&Equal(Aces(deduplicated.DiscretionaryAcl),Aces(preserved)),"fixture_trusted_inherited_duplicate");
   var bad=new RawAcl(2,2);bad.InsertAce(0,allow);bad.InsertAce(1,deny);var badsd=new RawSecurityDescriptor(ControlFlags.DiscretionaryAclPresent,sd.Owner,sd.Group,null,bad);
   bool rejected=false;try{Reduce(Convert.ToBase64String(Bytes(badsd)));}catch{rejected=true;}Check(rejected,"fixture_deny_reorder_reject");
   bad=new RawAcl(2,1);bad.InsertAce(0,new CommonAce(AceFlags.None,AceQualifier.AccessAllowed,1,new SecurityIdentifier(principal),true,null));
