@@ -552,7 +552,6 @@ public static class SourceAcl {
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
  static extern SafeFileHandle CreateFile(string p,uint access,uint share,IntPtr sa,uint creation,uint flags,IntPtr template);
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle h,out Info i);
- [DllImport("kernel32.dll",SetLastError=true)] static extern SafeFileHandle ReOpenFile(SafeFileHandle h,uint access,uint share,uint flags);
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetFileInformationByHandleEx(SafeFileHandle h,int kind,IntPtr data,uint length);
  [DllImport("advapi32.dll")] static extern uint GetSecurityInfo(SafeFileHandle h,int type,uint flags,out IntPtr o,out IntPtr g,out IntPtr d,out IntPtr s,out IntPtr sd);
  [DllImport("advapi32.dll")] static extern uint SetSecurityInfo(SafeFileHandle h,int type,uint flags,IntPtr o,IntPtr g,IntPtr d,IntPtr s);
@@ -584,17 +583,23 @@ public static class SourceAcl {
  static Info Information(SafeFileHandle h){Info i;Check(GetFileInformationByHandle(h,out i),"file_information");Check((i.Attr&1024)==0,"reparse");return i;}
  static string Identity(SafeFileHandle h){var i=Information(h);return i.Volume.ToString("x8")+":"+i.IndexH.ToString("x8")+i.IndexL.ToString("x8");}
  static SafeFileHandle Open(string p,bool write=false) {
-  // Establish kind on a metadata-only handle. ReOpenFile remains bound to that
-  // same object; LIST is requested only for directories, never as file READ_DATA.
+  // Keep the metadata handle open with delete sharing denied while acquiring
+  // the required access. Validate object identity before using the new handle.
+  // LIST is requested only for directories, never as file READ_DATA.
   var original=CreateFile(@"\\?\"+p,0x20080u,3u,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
   if(original.IsInvalid){original.Dispose();Check(false,"read_open");}
   SafeFileHandle h=null;
   try{var old=Information(original);bool directory=(old.Attr&16)!=0;
-   h=ReOpenFile(original,0x20080u|(directory?1u:0u)|(write?0x40000u:0u),write?0u:3u,0x02200000);
+   h=CreateFile(@"\\?\"+p,0x20080u|(directory?1u:0u)|(write?0x40000u:0u),write?0u:3u,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
    Check(!h.IsInvalid,write?"exclusive_open":"read_reopen");var current=Information(h);
    Check(Identity(original)==Identity(h)&&((current.Attr&16)!=0)==directory&&current.Links==old.Links,"reopen_identity_or_kind");
    var result=h;h=null;return result;
   }finally{if(h!=null)h.Dispose();original.Dispose();}
+ }
+ static SafeFileHandle OpenParent(string p){
+  var h=CreateFile(@"\\?\"+p,0x20080u,3u,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
+  try{Check(!h.IsInvalid,"ancestor_open");Check((Information(h).Attr&16)!=0,"ancestor_directory");return h;}
+  catch{h.Dispose();throw;}
  }
  static byte[] Bytes(RawSecurityDescriptor sd){var b=new byte[sd.BinaryLength];sd.GetBinaryForm(b,0);return b;}
  static RawSecurityDescriptor From(string b){Check(!String.IsNullOrEmpty(b),"invalid_descriptor");return new RawSecurityDescriptor(Convert.FromBase64String(b),0);}
@@ -617,9 +622,23 @@ public static class SourceAcl {
    {"owner",sd.Owner.Value},{"group",sd.Group.Value},{"sd",Convert.ToBase64String(Bytes(sd))},
    {"acl",new Dictionary<string,object>{{"protected",(sd.ControlFlags&ControlFlags.DiscretionaryAclProtected)!=0},{"aces",Aces(sd.DiscretionaryAcl)}}}};
  }
+ static uint ParentAccessMask(int value){
+  uint mask=unchecked((uint)value);
+  if((mask&0x80000000u)!=0)mask=(mask&~0x80000000u)|0x120089u;
+  if((mask&0x40000000u)!=0)mask=(mask&~0x40000000u)|0x120116u;
+  if((mask&0x20000000u)!=0)mask=(mask&~0x20000000u)|0x1200a0u;
+  if((mask&0x10000000u)!=0)mask=(mask&~0x10000000u)|0x1f01ffu;
+  return mask;
+ }
  static void SafeParentDescriptor(RawSecurityDescriptor sd){
-  Check(ParentOwner(sd.Owner.Value),"ancestor_owner");Aces(sd.DiscretionaryAcl);
-  foreach(CommonAce a in sd.DiscretionaryAcl)Check(a.AceQualifier!=AceQualifier.AccessAllowed||(a.AceFlags&AceFlags.InheritOnly)!=0||ParentOwner(a.SecurityIdentifier.Value)||(a.AccessMask&0xd0040)==0,"ancestor_write");
+  Check(ParentOwner(sd.Owner.Value),"ancestor_owner");
+  Check(sd.DiscretionaryAcl!=null&&sd.DiscretionaryAcl.Count>0,"null_dacl");
+  foreach(GenericAce a in sd.DiscretionaryAcl){
+   var c=a as CommonAce;Check(c!=null&&!c.IsCallback&&c.OpaqueLength==0,"unsupported_ace");
+   Check(c.AceQualifier==AceQualifier.AccessAllowed||c.AceQualifier==AceQualifier.AccessDenied,"unsupported_ace");
+   Check(((int)c.AceFlags&~31)==0,"unsupported_mask");uint mask=ParentAccessMask(c.AccessMask);
+   Check(c.AceQualifier!=AceQualifier.AccessAllowed||(c.AceFlags&AceFlags.InheritOnly)!=0||ParentOwner(c.SecurityIdentifier.Value)||(mask&0xd0040u)==0,"ancestor_write");
+  }
  }
  static void SafeParent(SafeFileHandle h){SafeParentDescriptor(Descriptor(h));}
  static string ParentPin(SafeFileHandle h){SafeParent(h);return Identity(h)+":"+Hash(Bytes(Descriptor(h)));}
@@ -705,7 +724,7 @@ public static class SourceAcl {
   // OPEN_REPARSE_POINT before its descendants are enumerated.
   var chain=new List<string>();var parent=Path.GetDirectoryName(root);
   while(!String.IsNullOrEmpty(parent)){chain.Add(parent);var next=Path.GetDirectoryName(parent);if(next==parent)break;parent=next;}
-  chain.Reverse();foreach(var p in chain){var h=Open(p);try{ancestorPins.Add(ParentPin(h));ancestors.Add(h);}catch{h.Dispose();throw;}}
+  chain.Reverse();foreach(var p in chain){var h=OpenParent(p);try{ancestorPins.Add(ParentPin(h));ancestors.Add(h);}catch{h.Dispose();throw;}}
   Pin("");SafeParent(handles[""]);
   if(!fixture)foreach(var p in new[]{".env","docker-compose.yml","docker-compose.n100.yml","docker-compose.portal-bridge.yml"})Pin(p);
   foreach(var p in paths)Pin(p);Inventory(true);Inventory(false);
@@ -805,6 +824,15 @@ public static class SourceAcl {
   parentAcl=new RawAcl(2,1);parentAcl.InsertAce(0,new CommonAce(AceFlags.None,AceQualifier.AccessAllowed,0x1f01ff,new SecurityIdentifier("S-1-5-32-545"),false,null));
   parentSd=new RawSecurityDescriptor(ControlFlags.DiscretionaryAclPresent,sd.Owner,sd.Group,null,parentAcl);rejected=false;
   try{SafeParentDescriptor(parentSd);}catch{rejected=true;}Check(rejected,"fixture_untrusted_parent_write_reject");
+  parentAcl=new RawAcl(2,1);parentAcl.InsertAce(0,new CommonAce(AceFlags.None,AceQualifier.AccessAllowed,unchecked((int)0x80000000u),new SecurityIdentifier("S-1-5-32-545"),false,null));
+  parentSd=new RawSecurityDescriptor(ControlFlags.DiscretionaryAclPresent,sd.Owner,sd.Group,null,parentAcl);SafeParentDescriptor(parentSd);Check(ParentAccessMask(unchecked((int)0x80000000u))==0x120089u,"fixture_parent_generic_read");
+  parentAcl=new RawAcl(2,1);parentAcl.InsertAce(0,new CommonAce(AceFlags.InheritOnly|AceFlags.ContainerInherit,AceQualifier.AccessAllowed,0x10000000,new SecurityIdentifier("S-1-5-32-545"),false,null));
+  parentSd=new RawSecurityDescriptor(ControlFlags.DiscretionaryAclPresent,sd.Owner,sd.Group,null,parentAcl);SafeParentDescriptor(parentSd);Check(ParentAccessMask(0x10000000)==0x1f01ffu,"fixture_parent_inherit_only_generic");
+  ((CommonAce)parentAcl[0]).AceFlags=AceFlags.None;parentSd=new RawSecurityDescriptor(ControlFlags.DiscretionaryAclPresent,sd.Owner,sd.Group,null,parentAcl);rejected=false;
+  try{SafeParentDescriptor(parentSd);}catch{rejected=true;}Check(rejected,"fixture_parent_generic_all_reject");
+  parentAcl=new RawAcl(2,1);parentAcl.InsertAce(0,new CommonAce(AceFlags.None,AceQualifier.AccessAllowed,1,new SecurityIdentifier(principal),true,null));
+  parentSd=new RawSecurityDescriptor(ControlFlags.DiscretionaryAclPresent,sd.Owner,sd.Group,null,parentAcl);rejected=false;
+  try{SafeParentDescriptor(parentSd);}catch{rejected=true;}Check(rejected,"fixture_parent_callback_reject");
   // Exercise the real directory record decoder without touching filesystem ACLs.
   IntPtr buffer=Marshal.AllocHGlobal(256);try{
    Marshal.Copy(new byte[256],0,buffer,256);Marshal.WriteInt32(buffer,60,4);Marshal.WriteInt64(buffer,96,9);
@@ -838,7 +866,7 @@ public static class SourceAcl {
   string fixture=Path.Combine(parent,"codex-source-acl-"+Guid.NewGuid().ToString("N"));bool cleaned=false;
   try{
    var chain=new List<string>();string a=Path.GetFullPath(parent);while(!String.IsNullOrEmpty(a)){chain.Add(a);var next=Path.GetDirectoryName(a);if(next==a)break;a=next;}
-   chain.Reverse();foreach(var p in chain){var h=Open(p);try{SafeParent(h);parentPins.Add(h);}catch{h.Dispose();throw;}}
+   chain.Reverse();foreach(var p in chain){var h=OpenParent(p);try{SafeParent(h);parentPins.Add(h);}catch{h.Dispose();throw;}}
    CreateOwned(fixture,true,ids,ownedPins);ownedPins[fixture].Dispose();ownedPins.Remove(fixture);
    FixtureRaw(fixture,FixtureDescriptor(true,true,false),ids[fixture]);ownedPins.Add(fixture,Open(fixture));
    string target=Path.Combine(fixture,"target");CreateOwned(target,true,ids,ownedPins);ownedPins[target].Dispose();ownedPins.Remove(target);

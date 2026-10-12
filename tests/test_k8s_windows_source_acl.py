@@ -109,8 +109,22 @@ class SourceAclPolicyTests(unittest.TestCase):
         script = self.m.POWERSHELL
         self.assertNotIn('Directory.EnumerateFileSystemEntries(', script)
         self.assertIn('DirectoryEntries(handles[p])', script)
-        self.assertIn('ReOpenFile(original,0x20080u|(directory?1u:0u)', script)
+        self.assertNotIn('ReOpenFile(', script)
+        self.assertIn('CreateFile(@"\\\\?\\"+p,0x20080u|(directory?1u:0u)', script)
+        self.assertIn('Identity(original)==Identity(h)', script)
         self.assertIn('GetFileInformationByHandleEx(h,first?11:10', script)
+
+    def test_ancestor_reads_keep_target_generic_masks_strict(self):
+        script = self.m.POWERSHELL
+        self.assertIn('static SafeFileHandle OpenParent(string p)', script)
+        self.assertEqual(script.count('foreach(var p in chain){var h=OpenParent(p);'), 2)
+        self.assertIn('uint mask=ParentAccessMask(c.AccessMask)', script)
+        target_aces = script.split('static List<Dictionary<string,object>> Aces(', 1)[1].split('static Dictionary<string,object> Row(', 1)[0]
+        self.assertIn('c.AccessMask>=0', target_aces)
+        self.assertIn('0xf0000000', target_aces)
+        for case in ('fixture_parent_generic_read', 'fixture_parent_generic_all_reject',
+                     'fixture_parent_inherit_only_generic', 'fixture_parent_callback_reject'):
+            self.assertIn(case, script)
 
     def test_native_add_type_uses_verified_binary_command_without_manifest(self):
         script = self.m.POWERSHELL.split("using System;", 1)[0]
