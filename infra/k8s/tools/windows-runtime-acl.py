@@ -34,6 +34,13 @@ from datetime import datetime, timezone
 
 # Schema 3 rejects earlier plans before interpreting the narrow live-file contract.
 SCHEMA = 3
+RESIDUAL_SCHEMA = 4
+RESIDUAL_KIND = "residual_git_runtime_v1"
+RESIDUAL_PROJECTION = "win32_private_object_security_residual_v1"
+RESIDUAL_COMPARISON = {"version": "strict_residual_git_runtime_v1", "entries": []}
+PRIOR_TARGETS_SHA256 = "c7c25e03260f92999fc39a6bfc9a1a97211c7bac91865b9603ad75ebb5b8e1e3"
+READONLY_PATHS = ("", ".env", "docker-compose.yml")
+RESIDUAL_RUNTIME = ("docker-compose.n100.yml", "docker-compose.portal-bridge.yml")
 COMPARISON_CONTRACT = {"version": "exact_runtime_live_metadata_v2", "entries": [
     {"path": "data", "kind": "directory", "fields": ["modified"]},
     {"path": "data/system/host-metrics.json", "kind": "file", "fields": ["size", "modified"]},
@@ -111,7 +118,106 @@ def relative_path(value):
     return value
 
 
+def residual_path(path):
+    return path == ".git" or path.startswith(".git/")
+
+
+def residual_counts(snapshot):
+    """Subset classification, matching native Counts; no full-tree claims."""
+    rows = snapshot["entries"]
+    trusted = {snapshot["principal"], "S-1-5-18", "S-1-5-32-544", "S-1-3-0"}
+    return {"total": len(rows),
+            "files": sum(row["kind"] == "file" for row in rows.values()),
+            "directories": sum(row["kind"] == "directory" for row in rows.values()),
+            "git_unsafe": sum(residual_path(p) and row["unsafe"] for p, row in rows.items()),
+            "tracked_unsafe": 0,
+            "ignored_unsafe": sum(bool(p) and not residual_path(p) and row["unsafe"]
+                                  for p, row in rows.items()),
+            "other_owner": sum(row["owner"] not in trusted for row in rows.values())}
+
+
+def validate_residual_scope(scope):
+    require(isinstance(scope, dict) and set(scope) == {
+        "schema", "scope_kind", "root", "git_targets", "prior_targets_sha256",
+        "counts", "source_sha256", "fixture_sha256", "comparison_contract",
+        "initial_sha256", "runtime_hashes"}, "invalid_residual_scope")
+    require(scope["schema"] == RESIDUAL_SCHEMA and scope["scope_kind"] == RESIDUAL_KIND
+            and scope["root"] == "C:\\personal-server", "unapproved_residual_scope")
+    require(scope["comparison_contract"] == RESIDUAL_COMPARISON
+            and scope["prior_targets_sha256"] == PRIOR_TARGETS_SHA256,
+            "unapproved_residual_lineage")
+    for key in ("source_sha256", "fixture_sha256", "initial_sha256"):
+        require(isinstance(scope[key], str) and re.fullmatch(r"[0-9a-f]{64}", scope[key]),
+                "missing_residual_pin")
+    targets = scope["git_targets"]
+    require(isinstance(targets, list) and len(targets) == 18 and ".git" in targets
+            and all(isinstance(p, str) for p in targets)
+            and targets == sorted(set(targets))
+            and len({p.casefold() for p in targets}) == 18, "invalid_residual_targets")
+    for path in targets:
+        relative_path(path)
+        require(residual_path(path), "outside_residual_target")
+    require(object_hash([""] + list(RUNTIME) + targets) == PRIOR_TARGETS_SHA256,
+            "residual_target_lineage_mismatch")
+    counts = scope["counts"]
+    require(isinstance(counts, dict) and set(counts) == set(EXPECTED_COUNTS)
+            and all(type(v) is int and v >= 0 for v in counts.values())
+            and counts["total"] == counts["files"] + counts["directories"]
+            and counts["git_unsafe"] == 18 and counts["tracked_unsafe"] == 0,
+            "invalid_residual_counts")
+    require(isinstance(scope["runtime_hashes"], dict)
+            and set(scope["runtime_hashes"]) == set(RUNTIME)
+            and all(isinstance(v, str) and re.fullmatch(r"[0-9a-f]{64}", v)
+                    for v in scope["runtime_hashes"].values()), "invalid_residual_runtime_hashes")
+    return scope
+
+
+def validate_residual_snapshot(snapshot, scope):
+    validate_residual_scope(scope)
+    # Reuse structural/link/identity checks without introducing live-file exclusions.
+    require(isinstance(snapshot, dict) and set(snapshot) == {
+        "entries", "counts", "runtime_hashes", "principal", "projection_contract"},
+        "invalid_residual_snapshot")
+    require(snapshot["projection_contract"] == RESIDUAL_PROJECTION
+            and snapshot["counts"] == scope["counts"]
+            and snapshot["runtime_hashes"] == scope["runtime_hashes"], "residual_binding_changed")
+    require(isinstance(snapshot["principal"], str)
+            and re.fullmatch(r"S-1-(?:\d+-)*\d+", snapshot["principal"]), "invalid_principal")
+    rows = snapshot["entries"]
+    require(isinstance(rows, dict) and len(rows) == scope["counts"]["total"]
+            and set(READONLY_PATHS) | set(RUNTIME) | set(scope["git_targets"]) <= set(rows),
+            "invalid_residual_inventory")
+    require(all(p in READONLY_PATHS or p in RUNTIME or residual_path(p) for p in rows),
+            "outside_residual_inventory")
+    identities = set()
+    require(len({p.casefold() for p in rows}) == len(rows), "case_alias_inventory")
+    for path, entry in rows.items():
+        if path:
+            relative_path(path)
+            require(path.rpartition("/")[0] in rows, "missing_parent")
+        require(not path.casefold().endswith(".lock"), "git_lock_present")
+        require(set(entry) == {"identity", "kind", "attributes", "created", "modified",
+                              "size", "links", "owner", "group", "dacl", "explicit",
+                              "protected", "sd", "unsafe"}, "invalid_entry")
+        require(entry["kind"] in ("file", "directory") and not entry["attributes"] & 1024,
+                "reparse_point_forbidden")
+        require(entry["identity"] not in identities, "hardlink_or_identity_alias")
+        identities.add(entry["identity"])
+        require(entry["kind"] == "directory" or entry["links"] == 1, "hardlink_forbidden")
+    require(rows[""]["kind"] == "directory"
+            and all(rows[p]["kind"] == "file" for p in RUNTIME), "runtime_file_missing")
+    require(all(rows[p]["protected"] and not rows[p]["unsafe"] for p in READONLY_PATHS),
+            "readonly_prerequisite_failed")
+    actual = sorted(p for p, row in rows.items() if residual_path(p) and row["unsafe"])
+    require(actual == scope["git_targets"]
+            and all(rows[p]["kind"] == "directory" for p in actual), "git_directory_inventory_changed")
+    require(snapshot_hash(snapshot) == scope["initial_sha256"], "residual_initial_pin_mismatch")
+    return list(RESIDUAL_RUNTIME) + scope["git_targets"]
+
+
 def validate_scope(scope):
+    if scope.get("schema") == RESIDUAL_SCHEMA:
+        return validate_residual_scope(scope)
     require(set(scope) == {"schema", "root", "tracked_paths", "counts",
                            "source_sha256", "fixture_sha256", "comparison_contract"}, "invalid_scope")
     require(scope["schema"] == SCHEMA and scope["root"] == "C:\\personal-server",
@@ -133,6 +239,8 @@ def validate_scope(scope):
 
 
 def validate_snapshot(snapshot, scope):
+    if scope.get("schema") == RESIDUAL_SCHEMA:
+        return validate_residual_snapshot(snapshot, scope)
     require(set(snapshot) == {"entries", "counts", "runtime_hashes", "principal",
                              "projection_contract"}, "invalid_snapshot")
     require(snapshot["counts"] == scope["counts"], "scope_counts_changed")
@@ -174,12 +282,12 @@ def validate_snapshot(snapshot, scope):
     return targets
 
 
-def entry_comparison(path, entry):
+def entry_comparison(path, entry, strict=False):
     result = copy.deepcopy(entry)
     result.pop("sd")
     # Comparison only: these nonexecutable writers stay active while inherited
     # ACLs change. Native pinned handles and strict projection checks are intact.
-    for row in COMPARISON_CONTRACT["entries"]:
+    for row in ([] if strict else COMPARISON_CONTRACT["entries"]):
         if row["path"] == path and row["kind"] == entry["kind"]:
             for field in row["fields"]:
                 result.pop(field)
@@ -198,7 +306,7 @@ def security_projection(snapshot):
     """
     result = copy.deepcopy(snapshot)
     result.pop("counts")  # initial scope classification changes as DACLs change
-    result["entries"] = {path: entry_comparison(path, entry)
+    result["entries"] = {path: entry_comparison(path, entry, snapshot["projection_contract"] == RESIDUAL_PROJECTION)
                          for path, entry in result["entries"].items()}
     return result
 
@@ -238,13 +346,20 @@ def own_partial(actual, before, after):
     if set(actual["entries"]) != set(before["entries"]) or not same_snapshot(
             {**actual, "entries": before["entries"]}, before):
         return False
-    return all(entry_comparison(path, entry) in
-               (entry_comparison(path, before["entries"][path]),
-                entry_comparison(path, after["entries"][path]))
+    strict = before["projection_contract"] == RESIDUAL_PROJECTION
+    return all(entry_comparison(path, entry, strict) in
+               (entry_comparison(path, before["entries"][path], strict),
+                entry_comparison(path, after["entries"][path], strict))
                for path, entry in actual["entries"].items())
 
 
 def validate_projection(before, after, target):
+    if before["projection_contract"] == RESIDUAL_PROJECTION:
+        require(target in RESIDUAL_RUNTIME or residual_path(target), "outside_residual_target")
+        require(after["projection_contract"] == RESIDUAL_PROJECTION, "projection_contract_changed")
+        for path, row in before["entries"].items():
+            if path != target and not (residual_path(target) and path.startswith(target + "/")):
+                require(row == after["entries"].get(path), "outside_residual_projection")
     require(set(before["entries"]) == set(after["entries"]), "projection_inventory_changed")
     require(before["runtime_hashes"] == after["runtime_hashes"]
             and before["principal"] == after["principal"], "projection_content_changed")
@@ -396,6 +511,7 @@ class Vault:
 
 
 class Transaction:
+    schema = SCHEMA
     def __init__(self, backend, vault):
         self.backend, self.vault = backend, vault
         self.backend.on_held = self.session_held
@@ -408,6 +524,7 @@ class Transaction:
             self.save(state)
 
     def prepare(self, scope):
+        require(scope.get("schema") == self.schema, "transaction_schema_mismatch")
         validate_scope(scope)
         require(self.backend.lock_owned, "sequence_lock_required")
         require(not self.vault.exists("plan.dpapi") and not self.vault.exists("state.dpapi"),
@@ -425,11 +542,11 @@ class Transaction:
                           "after_sha256": snapshot_hash(projected), "changes": delta(current, projected)})
             current = projected
         require(same_snapshot(self.backend.snapshot(), initial), "prepare_drift")
-        plan = {"schema": SCHEMA, "scope": scope, "initial": initial,
+        plan = {"schema": self.schema, "scope": scope, "initial": initial,
                 "ancestor_sha256": ancestor_sha,
                 "steps": steps, "final_sha256": snapshot_hash(current)}
         plan_sha = self.vault.write("plan.dpapi", plan, exclusive=True)
-        self.vault.write("state.dpapi", {"schema": SCHEMA, "plan_sha256": plan_sha,
+        self.vault.write("state.dpapi", {"schema": self.schema, "plan_sha256": plan_sha,
                          "phase": "prepared", "completed": 0, "pending": None,
                          "unknown": False, "failures": {}} , exclusive=True)
         return {"reason": "prepared", "plan_sha256": plan_sha, "targets": len(targets),
@@ -439,8 +556,9 @@ class Transaction:
         require(re.fullmatch(r"[0-9a-f]{64}", reviewed_sha or ""), "reviewed_plan_required")
         require(digest(self.vault.read_bytes("plan.dpapi")) == reviewed_sha, "plan_pin_mismatch")
         plan, state = self.vault.read("plan.dpapi"), self.vault.read("state.dpapi")
-        require(plan["schema"] == SCHEMA and state["schema"] == SCHEMA
+        require(plan["schema"] == self.schema and state["schema"] == self.schema
                 and state["plan_sha256"] == reviewed_sha, "journal_plan_mismatch")
+        require(plan["scope"].get("schema") == self.schema, "transaction_schema_mismatch")
         validate_scope(plan["scope"])
         targets = validate_snapshot(plan["initial"], plan["scope"])
         require(self.backend.lock_owned, "sequence_lock_required")
@@ -615,6 +733,30 @@ class Transaction:
         return {"reason": "rolled_back", "targets": completed, "plan_sha256": reviewed_sha}
 
 
+class ResidualTransaction(Transaction):
+    """Separate schema/vault; never interprets or upgrades a schema-3 HELD plan."""
+    schema = RESIDUAL_SCHEMA
+
+    def __init__(self, backend, vault):
+        require(getattr(backend, "scope_schema", None) == RESIDUAL_SCHEMA,
+                "residual_backend_required")
+        super().__init__(backend, vault)
+
+    def load(self, reviewed_sha):
+        plan, state = super().load(reviewed_sha)
+        targets = list(RESIDUAL_RUNTIME) + plan["scope"]["git_targets"]
+        require([step["target"] for step in plan["steps"]] == targets,
+                "residual_plan_targets_changed")
+        for index, step in enumerate(plan["steps"]):
+            before = materialize(plan, index)
+            after = with_delta(before, step["changes"])
+            validate_projection(before, after, step["target"])
+            require(snapshot_hash(after) == step["after_sha256"], "plan_delta_mismatch")
+        require(snapshot_hash(materialize(plan, len(targets))) == plan["final_sha256"],
+                "plan_delta_mismatch")
+        return plan, state
+
+
 # Native implementation follows below. No user-controlled PowerShell is evaluated.
 POWERSHELL = r'''
 $ErrorActionPreference='Stop'
@@ -656,6 +798,12 @@ public static class BoundAcl {
  static List<SafeFileHandle> ancestors = new List<SafeFileHandle>();
  static string root, principal;
  static HashSet<string> tracked, runtime;
+ static bool residualMode;
+ static HashSet<string> residualTargets = new HashSet<string>(StringComparer.Ordinal);
+ static HashSet<string> writable = new HashSet<string>(StringComparer.Ordinal);
+ static bool GitPath(string p) {return p==".git"||p.StartsWith(".git/",StringComparison.Ordinal);}
+ static bool ResidualWritable(string p) {return p=="docker-compose.n100.yml"||p=="docker-compose.portal-bridge.yml"||GitPath(p);}
+
  public static string Principal {get {return principal;}}
  static Dictionary<string,object> diagnostic;
  public static void ResetDiagnostic() {diagnostic=null;}
@@ -684,6 +832,7 @@ public static class BoundAcl {
  static string Full(string relative) {return relative.Length==0 ? root : Path.Combine(root,relative.Replace('/','\\'));}
  static SafeFileHandle Open(string p,bool write) {
   string relative=RelativeDiagnosticPath(p);
+  if(write&&residualMode)Check(relative!=null&&ResidualWritable(relative)&&writable.Contains(relative));
   // Explicit rights, never MAXIMUM_ALLOWED. Both read/write sharing permit
   // Windows inheritance propagation; omitting DELETE blocks replacement.
   var h=CreateFile(NativePath(p),0x00020080u | (write?0x00040000u:0),3,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
@@ -693,11 +842,13 @@ public static class BoundAcl {
   Check((i.Attr&1024)==0); return h;
  }
  static string[] Inventory() {
-  var all=new List<string>{""}; var pending=new Queue<string>(); pending.Enqueue("");
+  var all=residualMode?new List<string>{"",".env","docker-compose.yml","docker-compose.n100.yml","docker-compose.portal-bridge.yml",".git"}:new List<string>{""};
+  var pending=new Queue<string>(); pending.Enqueue(residualMode?".git":"");
   while(pending.Count>0) {
    var parent=pending.Dequeue();
    foreach(var p in Directory.EnumerateFileSystemEntries(Full(parent))) {
     var relative=p.Substring(root.Length+1).Replace('\\','/');
+    if(residualMode)Check(GitPath(relative)&&!relative.EndsWith(".lock",StringComparison.OrdinalIgnoreCase));
     if(!handles.ContainsKey(relative))Fail("inventory_unpinned_entry",relative,null);
     using(var fresh=Open(p,false))if(Identity(fresh)!=Identity(handles[relative]))Fail("inventory_identity_mismatch",relative,null);
     Info info=FileInformation(handles[relative],relative);Check((info.Attr&1024)==0);
@@ -775,6 +926,62 @@ public static class BoundAcl {
   }
   if(!Inventory().SequenceEqual(handles.Keys.OrderBy(p=>p.Count(c=>c=='/')).ThenBy(p=>p,StringComparer.Ordinal)))Fail("inventory_set_mismatch",null,null);
  }
+ static void VerifyReadonly() {
+  foreach(var p in new[]{"",".env","docker-compose.yml"}) {
+   var sd=Descriptor(handles[p],p);Check(Trusted(sd.Owner.Value)&&sd.DiscretionaryAcl!=null);
+   Check((sd.ControlFlags&ControlFlags.DiscretionaryAclProtected)!=0);
+   var wanted=Restrict(sd,p.Length==0).DiscretionaryAcl;
+   Check(sd.DiscretionaryAcl.Count==3);
+   var actual=new List<string>();var expected=new List<string>();
+   foreach(GenericAce a in sd.DiscretionaryAcl) {
+    var c=a as CommonAce;Check(c!=null&&!c.IsCallback&&c.OpaqueLength==0);
+    actual.Add(Convert.ToBase64String(Bytes(a)));
+   }
+   foreach(GenericAce a in wanted)expected.Add(Convert.ToBase64String(Bytes(a)));
+   actual.Sort(StringComparer.Ordinal);expected.Sort(StringComparer.Ordinal);
+   Check(actual.SequenceEqual(expected));
+  }
+ }
+ public static void StartResidual(string r,string[] rt,string[] targets) {
+  Check(handles.Count==0&&rt.SequenceEqual(new[]{".env","docker-compose.yml","docker-compose.n100.yml","docker-compose.portal-bridge.yml"}));
+  Check(targets.Length==20&&targets.Distinct(StringComparer.OrdinalIgnoreCase).Count()==20);
+  Check(targets.Take(2).SequenceEqual(new[]{"docker-compose.n100.yml","docker-compose.portal-bridge.yml"}));
+  Check(targets.Skip(2).All(p=>GitPath(p)&&p.Split('/').All(x=>x.Length>0&&x!="."&&x!="..")&&!p.Contains("\\")&&!p.Contains(":"))&&targets.Contains(".git"));
+  root=r.TrimEnd('\\');principal=WindowsIdentity.GetCurrent().User.Value;
+  Check(principal!="S-1-5-18"&&principal!="S-1-5-32-544");
+  tracked=new HashSet<string>(StringComparer.OrdinalIgnoreCase);runtime=new HashSet<string>(rt,StringComparer.OrdinalIgnoreCase);
+  residualTargets=new HashSet<string>(targets,StringComparer.Ordinal);writable.Clear();residualMode=true;
+  var parent=Path.GetDirectoryName(root);
+  while(!String.IsNullOrEmpty(parent)){var h=Open(parent,false);ancestors.Add(h);ancestorPins.Add(AncestorPin(h));var next=Path.GetDirectoryName(parent);if(next==parent)break;parent=next;}
+  AncestorSHA=HexHash(System.Text.Encoding.UTF8.GetBytes(String.Join("|",ancestorPins)));
+  foreach(var p in new[]{"",".env","docker-compose.yml","docker-compose.n100.yml","docker-compose.portal-bridge.yml",".git"})handles.Add(p,Open(Full(p),false));
+  Check((FileInformation(handles[""],"").Attr&16)!=0&&(FileInformation(handles[".git"],".git").Attr&16)!=0);
+  foreach(var p in rt)Check((FileInformation(handles[p],p).Attr&16)==0);
+  var pending=new Queue<string>();pending.Enqueue(".git");
+  while(pending.Count>0) {
+   var parentPath=pending.Dequeue();
+   foreach(var path in Directory.EnumerateFileSystemEntries(Full(parentPath))) {
+    string relative=path.Substring(root.Length+1).Replace('\\','/');
+    Check(GitPath(relative)&&!relative.EndsWith(".lock",StringComparison.OrdinalIgnoreCase));
+    var h=Open(path,false);handles.Add(relative,h);if((FileInformation(h,relative).Attr&16)!=0)pending.Enqueue(relative);
+   }
+  }
+  VerifyReadonly();var initial=Rows();var ids=new HashSet<string>(StringComparer.Ordinal);
+  foreach(var item in initial) {
+   Check(ids.Add((string)item.Value["identity"]));
+   Check((string)item.Value["kind"]=="directory"||Convert.ToUInt32(item.Value["links"])==1);
+   if(residualTargets.Contains(item.Key)&&GitPath(item.Key))Check((string)item.Value["kind"]=="directory");
+  }
+  Check(residualTargets.All(p=>handles.ContainsKey(p)));
+  foreach(var item in initial) {
+   string p=item.Key;
+   if(residualTargets.Contains(p)||(GitPath(p)&&!(bool)item.Value["protected"])) {
+    writable.Add(p);var replacement=Open(Full(p),true);Check(Identity(replacement)==Identity(handles[p]));handles[p].Dispose();handles[p]=replacement;
+   }
+  }
+  Rows();
+ }
+ static byte[] Bytes(GenericAce a) {var b=new byte[a.BinaryLength];a.GetBinaryForm(b,0);return b;}
  static string Identity(SafeFileHandle h) {Info i=FileInformation(h);return i.Volume.ToString("x8")+":"+i.IndexH.ToString("x8")+i.IndexL.ToString("x8");}
  static byte[] Bytes(GenericAcl a) {var b=new byte[a.BinaryLength];a.GetBinaryForm(b,0);return b;}
  static byte[] Bytes(RawSecurityDescriptor a) {var b=new byte[a.BinaryLength];a.GetBinaryForm(b,0);return b;}
@@ -812,6 +1019,7 @@ public static class BoundAcl {
  }
  public static Dictionary<string,Dictionary<string,object>> Rows() {
   VerifyAncestors();
+  if(residualMode)VerifyReadonly();
   if(!Inventory().SequenceEqual(handles.Keys.OrderBy(p=>p.Count(c=>c=='/')).ThenBy(p=>p,StringComparer.Ordinal)))Fail("inventory_set_mismatch",null,null);
   var rows=new Dictionary<string,Dictionary<string,object>>(StringComparer.Ordinal);
   foreach(var item in handles) {
@@ -862,6 +1070,10 @@ public static class BoundAcl {
   finally {DestroyPrivateObjectSecurity(ref result);}
  }
  public static Dictionary<string,string> Project(Dictionary<string,string> descriptors,string target,string original) {
+  if(residualMode) {
+   Check(residualTargets.Contains(target)&&writable.Contains(target));
+   Check(descriptors.Count==handles.Count&&descriptors.Keys.All(p=>handles.ContainsKey(p)));
+  }
   var result=new Dictionary<string,string>(descriptors,StringComparer.Ordinal);
   Check(handles.ContainsKey(target)); var sd=From(original??descriptors[target]);
   bool dir=Directory.Exists(Full(target));
@@ -883,7 +1095,9 @@ public static class BoundAcl {
    {"explicit",Explicit(sd.DiscretionaryAcl)},{"protected",(sd.ControlFlags&ControlFlags.DiscretionaryAclProtected)!=0},{"unsafe",Unsafe(sd.DiscretionaryAcl)}};
  }
  public static void Set(string p,string expectedIdentity,string descriptor) {
+  if(residualMode)Check(ResidualWritable(p)&&writable.Contains(p));
   VerifyAncestors();
+  if(residualMode)VerifyReadonly();
   if(!(handles.ContainsKey(p)&&Identity(handles[p])==expectedIdentity))Fail("set_identity_mismatch",p,null);
   using(var fresh=Open(Full(p),false))if(Identity(fresh)!=expectedIdentity)Fail("set_identity_mismatch",p,null);
   SetHandle(handles[p],From(descriptor),p);
@@ -1016,10 +1230,73 @@ public static class BoundAcl {
   }
   return new Dictionary<string,object>{{"nonce",nonce},{"binding_sha256",binding},{"objects",count},{"projection",true},{"rollback",true},{"partialmix",true},{"content_hashes",true},{"dpapi",true},{"cleanup",cleanup},{"sacl_contract","dacl_only_no_privilege_change"},{"utc",DateTimeOffset.UtcNow.ToString("o")}};
  }
- public static void Close() {foreach(var h in handles.Values)h.Dispose();handles.Clear();foreach(var h in ancestors)h.Dispose();ancestors.Clear();ancestorPins.Clear();}
+ public static Dictionary<string,object> ResidualFixture(string nonce,Func<Dictionary<string,string>,string,object,Dictionary<string,string>> project) {
+  Check(handles.Count==0&&project!=null);FixtureStage="parent_canonical";principal=WindowsIdentity.GetCurrent().User.Value;
+  string temp=FixtureParent();Check(temp.StartsWith(@"C:\",StringComparison.OrdinalIgnoreCase)&&!temp.StartsWith(@"C:\personal-server",StringComparison.OrdinalIgnoreCase));
+  var parents=new List<SafeFileHandle>();var setup=new Dictionary<string,SafeFileHandle>(StringComparer.Ordinal);
+  var identities=new Dictionary<string,string>(StringComparer.Ordinal);
+  string fixture=Path.Combine(temp,"personal-server-acl-fixture-"+Guid.NewGuid().ToString("N"));
+  bool cleanup=false;string binding=null;int count=0;
+  Action<string> dir=p=>{FixtureStage="create_dir";string full=p==""?fixture:Path.Combine(fixture,p.Replace('/','\\'));Check(CreateDirectory(NativePath(full),IntPtr.Zero));var h=Open(full,true);setup.Add(p,h);identities.Add(p,Identity(h));};
+  Action<string> file=p=>{FixtureStage="create_file";var h=CreateFile(NativePath(Path.Combine(fixture,p.Replace('/','\\'))),0x40060080,3,IntPtr.Zero,1,0x02200000,IntPtr.Zero);Check(!h.IsInvalid);setup.Add(p,h);identities.Add(p,Identity(h));byte[] b=System.Text.Encoding.UTF8.GetBytes("nonsecret-residual-fixture");uint written;Check(WriteFile(h,b,(uint)b.Length,out written,IntPtr.Zero)&&written==b.Length&&FlushFileBuffers(h));};
+  try {
+   string ancestor=temp;while(!String.IsNullOrEmpty(ancestor)){FixtureStage="ancestor_open";var h=Open(ancestor,false);parents.Add(h);FixtureStage="ancestor_acl";AncestorPin(h);string next=Path.GetDirectoryName(ancestor);if(next==ancestor)break;ancestor=next;}
+   dir("");SetHandle(setup[""],Restrict(Descriptor(setup[""]),true));
+   var rt=new[]{".env","docker-compose.yml","docker-compose.n100.yml","docker-compose.portal-bridge.yml"};
+   foreach(var p in rt)file(p);
+   foreach(var p in new[]{".env","docker-compose.yml"})SetHandle(setup[p],Restrict(Descriptor(setup[p]),false));
+   dir("data");file("data/recovery.lock");
+   dir(".git");var git=new List<string>{".git"};
+   for(int i=0;i<17;i++){string p=".git/target"+i.ToString("D2");dir(p);git.Add(p);}
+   foreach(var p in git) {
+    var sd=Descriptor(setup[p]);var a=new RawAcl(2,sd.DiscretionaryAcl.Count+1);
+    a.InsertAce(0,new CommonAce(AceFlags.ContainerInherit|AceFlags.ObjectInherit,AceQualifier.AccessAllowed,0x120116,new SecurityIdentifier("S-1-5-21-0-0-0-1001"),false,null));
+    foreach(GenericAce ace in sd.DiscretionaryAcl)a.InsertAce(a.Count,ace.Copy());
+    SetHandle(setup[p],new RawSecurityDescriptor(ControlFlags.DiscretionaryAclPresent|ControlFlags.SelfRelative,sd.Owner,sd.Group,null,a));
+   }
+   file(".git/value");file(".git/target00/value");
+   var outside=new Dictionary<string,string>{{"data",Convert.ToBase64String(Bytes(Descriptor(setup["data"])))},{"data/recovery.lock",Convert.ToBase64String(Bytes(Descriptor(setup["data/recovery.lock"])))}};
+   var targets=new[]{"docker-compose.n100.yml","docker-compose.portal-bridge.yml"}.Concat(git.OrderBy(p=>p,StringComparer.Ordinal)).ToArray();
+   FixtureStage="start";StartResidual(fixture,rt,targets);var baseline=Rows();var originals=Descriptors(baseline);
+   Check(!handles.ContainsKey("data")&&!handles.ContainsKey("data/recovery.lock")&&baseline.Count==identities.Count-2);
+   var hashes=Hashes();count=baseline.Count;binding=HexHash(System.Text.Encoding.UTF8.GetBytes(principal+"|"+identities[""]));
+   foreach(var p in new[]{"",".env","docker-compose.yml"}) {
+    bool blocked=false;try{using(var unused=Open(Full(p),true)){}}catch{blocked=true;}Check(blocked);
+    blocked=false;try{Set(p,identities[p],originals[p]);}catch{blocked=true;}Check(blocked);
+    blocked=false;try{project(originals,p,null);}catch{blocked=true;}Check(blocked);
+    blocked=false;try{project(originals,p,originals[p]);}catch{blocked=true;}Check(blocked);
+   }
+   bool foreignBlocked=false;try{var foreign=new Dictionary<string,string>(originals,StringComparer.Ordinal);foreign.Add("data",outside["data"]);project(foreign,targets[0],null);}catch{foreignBlocked=true;}Check(foreignBlocked);
+   FixtureStage="project";var expected=new Dictionary<string,string>(originals,StringComparer.Ordinal);
+   foreach(var p in targets){expected=project(expected,p,null);Set(p,identities[p],expected[p]);FixtureStage="verify";Verify(baseline,expected);}
+   var restrictedDescriptors=new Dictionary<string,string>(expected,StringComparer.Ordinal);
+   FixtureStage="rollback";foreach(var p in targets.Reverse()){expected=project(expected,p,originals[p]);Set(p,identities[p],expected[p]);Verify(baseline,expected);}
+   Verify(baseline,originals);
+   FixtureStage="partialmix";
+   var repairLeaves=new[]{".git/value",".git/target00/value"};
+   foreach(var p in repairLeaves) {
+    Check(GitPath(p)&&writable.Contains(p)&&!residualTargets.Contains(p));
+    Check((From(originals[p]).ControlFlags&ControlFlags.DiscretionaryAclProtected)==0);
+    Check(Convert.ToBase64String(Bytes(From(originals[p]).DiscretionaryAcl))!=Convert.ToBase64String(Bytes(From(restrictedDescriptors[p]).DiscretionaryAcl)));
+    SetHandleFlags(handles[p],From(restrictedDescriptors[p]),4);
+   }
+   VerifyMix(baseline,originals,restrictedDescriptors);
+   foreach(var p in repairLeaves){Set(p,identities[p],originals[p]);VerifyMix(baseline,originals,restrictedDescriptors);}
+   Verify(baseline,originals);Check(Hashes().All(x=>hashes[x.Key]==x.Value));
+   foreach(var item in outside)Check(Convert.ToBase64String(Bytes(Descriptor(setup[item.Key])))==item.Value&&Identity(setup[item.Key])==identities[item.Key]);
+   FixtureStage="dpapi";var plain=System.Text.Encoding.UTF8.GetBytes("nonsecret-residual-dpapi");var entropy=System.Text.Encoding.ASCII.GetBytes("personal-server-windows-acl-v1");var cipher=ProtectedData.Protect(plain,entropy,DataProtectionScope.CurrentUser);Check(!plain.SequenceEqual(cipher)&&ProtectedData.Unprotect(cipher,entropy,DataProtectionScope.CurrentUser).SequenceEqual(plain));
+  } finally {
+   Close();foreach(var h in setup.Values)h.Dispose();string stage=FixtureStage;
+   try{if(identities.Count>0){FixtureStage="cleanup";Cleanup(fixture,identities);cleanup=true;FixtureStage=stage;}}
+   finally{foreach(var h in parents)h.Dispose();}
+  }
+  return new Dictionary<string,object>{{"nonce",nonce},{"binding_sha256",binding},{"objects",count},{"projection",true},{"rollback",true},{"partialmix",true},{"content_hashes",true},{"dpapi",true},{"cleanup",cleanup},{"readonly_boundary",true},{"outside_preserved",true},{"descriptor_boundary",true},{"residual_targets",20},{"sacl_contract","dacl_only_no_privilege_change"},{"utc",DateTimeOffset.UtcNow.ToString("o")}};
+ }
+ public static void Close() {foreach(var h in handles.Values)h.Dispose();handles.Clear();foreach(var h in ancestors)h.Dispose();ancestors.Clear();ancestorPins.Clear();residualMode=false;residualTargets.Clear();writable.Clear();}
 }
 '@
 $baselineCounts=$null
+$projectionContract='win32_private_object_security_v1'
 $json=New-Object System.Web.Script.Serialization.JavaScriptSerializer
 $json.MaxJsonLength=67108864
 $json.RecursionLimit=100
@@ -1060,7 +1337,9 @@ try {
      $r=[BoundAcl]::Fixture([string]$q.nonce,$fixtureProject);$r['ps_original_boundary']=$true
     }
     'open' {[BoundAcl]::Start($q.scope.root,[string[]]$q.scope.tracked_paths,[string[]]$q.runtime,[string[]]$q.targets);$baselineCounts=[BoundAcl]::Counts([BoundAcl]::Rows());$r=@{ok=$true;ancestor_sha256=[BoundAcl]::AncestorSHA}}
-    'snapshot' {$r=@{entries=[BoundAcl]::Rows();counts=$baselineCounts;runtime_hashes=[BoundAcl]::Hashes();principal=[BoundAcl]::Principal;projection_contract='win32_private_object_security_v1'}}
+    'fixture_residual' {$r=[BoundAcl]::ResidualFixture([string]$q.nonce,$fixtureProject)}
+    'open_residual' {[BoundAcl]::StartResidual($q.scope.root,[string[]]$q.runtime,[string[]]$q.targets);$baselineCounts=[BoundAcl]::Counts([BoundAcl]::Rows());$projectionContract='win32_private_object_security_residual_v1';$r=@{ok=$true;ancestor_sha256=[BoundAcl]::AncestorSHA}}
+    'snapshot' {$r=@{entries=[BoundAcl]::Rows();counts=$baselineCounts;runtime_hashes=[BoundAcl]::Hashes();principal=[BoundAcl]::Principal;projection_contract=$projectionContract}}
     'project' {
      $descriptors=New-Object 'System.Collections.Generic.Dictionary[string,string]'
      foreach($p in $q.snapshot.entries.GetEnumerator()){$descriptors.Add($p.Key,[string]$p.Value.sd)}
@@ -1076,7 +1355,7 @@ try {
    }
    [Console]::Out.WriteLine($json.Serialize($r));[Console]::Out.Flush()
   } catch {
-   $reason='native_acl_failure';if($q.op -eq 'fixture'){$reason='native_fixture_'+[BoundAcl]::FixtureStage}
+   $reason='native_acl_failure';if($q.op -eq 'fixture' -or $q.op -eq 'fixture_residual'){$reason='native_fixture_'+[BoundAcl]::FixtureStage}
    $failure=@{error=$reason};$diagnostic=[BoundAcl]::FailureDiagnostic()
    if($null -ne $diagnostic){$failure.diagnostic=$diagnostic}
    [Console]::Out.WriteLine($json.Serialize($failure));[Console]::Out.Flush()
@@ -1093,6 +1372,8 @@ class NativeBackend:
     flag claims that a Windows fixture passed. An unknown adapter process blocks
     every further request and all recovery writes across restart.
     """
+    scope_schema = SCHEMA
+
     def __init__(self, lock_fd, *, guard=None, timeout=180):
         info = os.fstat(lock_fd)
         require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
@@ -1177,6 +1458,7 @@ class NativeBackend:
             raise Blocked("native_adapter_unavailable") from None
 
     def open(self, scope):
+        require(scope.get("schema") == SCHEMA, "native_scope_schema_mismatch")
         if not self.opened:
             require(scope["fixture_sha256"] == digest(POWERSHELL.encode("utf-8")),
                     "fixture_adapter_pin_mismatch")
@@ -1326,6 +1608,66 @@ class NativeBackend:
             require(returncode == 0, "native_process_failed")
 
 
+class ResidualNativeBackend(NativeBackend):
+    """Restricted handles/namespace; no full-tree open or schema-3 fixture receipt."""
+    scope_schema = RESIDUAL_SCHEMA
+    def open(self, scope):
+        validate_residual_scope(scope)
+        if not self.opened:
+            require(scope.get("schema") == RESIDUAL_SCHEMA
+                    and scope.get("scope_kind") == RESIDUAL_KIND
+                    and scope.get("root") == "C:\\personal-server", "unapproved_residual_scope")
+            require(scope["fixture_sha256"] == digest(POWERSHELL.encode()),
+                    "fixture_adapter_pin_mismatch")
+            targets = list(RESIDUAL_RUNTIME) + scope["git_targets"]
+            require(len(targets) == 20 and len(set(targets)) == 20
+                    and all(residual_path(p) for p in scope["git_targets"]), "invalid_residual_targets")
+            if self.guard:
+                self.check_guard(scope)
+            self.native_self_test()
+            opened = self.request({"op": "open_residual", "scope": scope,
+                                   "runtime": list(RUNTIME), "targets": targets})
+            require(re.fullmatch(r"[0-9a-f]{64}", opened.get("ancestor_sha256", "")),
+                    "ancestor_guard_missing")
+            self.ancestor_sha256 = opened["ancestor_sha256"]
+            self.residual_targets = frozenset(targets)
+            self.opened = True
+            self.mutation_authorized = self.guard is not None and self.receipt is not None
+
+    def native_self_test(self):
+        require(not self.opened, "fixture_before_root_only")
+        nonce = os.urandom(32).hex()
+        receipt = self.request({"op": "fixture_residual", "nonce": nonce}, mutation=True)
+        require(receipt.get("nonce") == nonce and receipt.get("residual_targets") == 20
+                and all(receipt.get(key) is True for key in
+                        ("projection", "rollback", "partialmix", "content_hashes", "dpapi", "cleanup",
+                         "readonly_boundary", "outside_preserved", "descriptor_boundary"))
+                and re.fullmatch(r"[0-9a-f]{64}", receipt.get("binding_sha256", ""))
+                and receipt.get("sacl_contract") == "dacl_only_no_privilege_change",
+                "native_residual_fixture_failed")
+        timestamp = datetime.fromisoformat(receipt["utc"].replace("Z", "+00:00"))
+        require(timestamp.tzinfo is not None
+                and abs((datetime.now(timezone.utc) - timestamp).total_seconds()) < 300,
+                "stale_native_fixture")
+        receipt["adapter_sha256"] = digest(POWERSHELL.encode())
+        self.receipt = receipt
+        return {"reason": "native_residual_fixture_passed", "objects": receipt["objects"],
+                "adapter_sha256": receipt["adapter_sha256"], "receipt_sha256": object_hash(receipt)}
+
+    def project(self, snapshot, target, original):
+        require(target in self.residual_targets, "outside_residual_target")
+        require(snapshot.get("projection_contract") == RESIDUAL_PROJECTION
+                and all(p in READONLY_PATHS or p in RUNTIME or residual_path(p)
+                        for p in snapshot["entries"]), "outside_residual_inventory")
+        projected = super().project(snapshot, target, original)
+        validate_projection(snapshot, projected, target)
+        return projected
+
+    def set_dacl(self, target, entry):
+        require(target in RESIDUAL_RUNTIME or residual_path(target), "outside_residual_target")
+        return super().set_dacl(target, entry)
+
+
 CRYPTO_POWERSHELL = r'''
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName System.Security
@@ -1350,6 +1692,8 @@ def main(argv=None):
     mode.add_argument("--rollback", action="store_true")
     mode.add_argument("--status", action="store_true")
     mode.add_argument("--native-self-test", action="store_true")
+    mode.add_argument("--native-residual-self-test", action="store_true")
+    parser.add_argument("--residual", action="store_true")
     mode.add_argument("--native-temp-check", action="store_true")
     mode.add_argument("--native-fixture-parent-check", action="store_true")
     parser.add_argument("--vault")
@@ -1359,9 +1703,9 @@ def main(argv=None):
     native_closed = False
     try:
         with sequence_lock() as lock:
-            backend = NativeBackend(lock)
+            backend = (ResidualNativeBackend if args.residual or args.native_residual_self_test else NativeBackend)(lock)
             try:
-                if args.native_self_test:
+                if args.native_self_test or args.native_residual_self_test:
                     result = backend.native_self_test()
                 elif args.native_temp_check:
                     result = backend.native_temp_check()
@@ -1370,7 +1714,7 @@ def main(argv=None):
                 else:
                     require(args.vault is not None, "vault_required")
                     vault = Vault(args.vault, backend)
-                    transaction = Transaction(backend, vault)
+                    transaction = (ResidualTransaction if args.residual else Transaction)(backend, vault)
                     if args.prepare:
                         result = transaction.prepare(json.load(sys.stdin))
                     elif args.apply:
