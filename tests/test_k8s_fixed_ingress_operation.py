@@ -2,6 +2,7 @@
 from contextlib import contextmanager, redirect_stdout
 from copy import deepcopy
 import base64
+import gzip
 import importlib.util
 import io
 import json
@@ -556,6 +557,40 @@ class WindowsGuardTests(unittest.TestCase):
         script = base64.b64decode(guard.runner.call_args.args[0][-1]).decode('utf-16le')
         self.assertIn('Get-ChildItem -LiteralPath $v.git -Force -Recurse', script)
         self.assertNotIn('Set-Acl', script)
+
+    def test_bulk_acl_733_paths_use_bounded_deterministic_data_roundtrip(self):
+        guard = self.guard()
+        guard.root_guard = Mock()
+        paths = [Path('/mnt/c/personal-server/infra/k8s/synthetic-group-%02d/input-%03d.py' %
+                      (i // 20, i)) for i in range(733)]
+        guard.runner.return_value = json.dumps({'safe': True, 'count': 900,
+                                                'acl_sha256': 'a' * 64}).encode()
+        self.assertEqual(guard.execution_inputs_guard(paths), 'a' * 64)
+        args = guard.runner.call_args.args[0]
+        self.assertLess(sum(len(arg.encode('utf-16le')) // 2 + 3 for arg in args), 30000)
+        script = base64.b64decode(args[-1]).decode('utf-16le')
+        encoded = script.split("[Convert]::FromBase64String('", 1)[1].split("'", 1)[0]
+        payload = gzip.decompress(base64.b64decode(encoded))
+        self.assertEqual(payload, m.canonical({'paths': [guard.windows_path(p) for p in paths],
+            'git': guard.windows_path(guard.root / '.git')}))
+        self.assertEqual(base64.b64decode(encoded)[4:8], b'\0' * 4)  # gzip mtime=0
+        self.assertIn('[IO.Compression.GZipStream]', script)
+        self.assertIn('$reader.Dispose()', script)
+        self.assertIn('$gzip.Dispose()', script)
+        self.assertIn('$stream.Dispose()', script)
+        self.assertIn('Get-ChildItem -LiteralPath $v.git -Force -Recurse', script)
+        self.assertIn("$item.FullName.ToLowerInvariant()+'|'+$acl.Sddl+'|'+[int]$item.Attributes", script)
+        guard.execution_inputs_guard(paths)
+        self.assertEqual(guard.runner.call_args.args[0], args)
+
+    def test_bulk_acl_command_budget_fails_before_runner_for_incompressible_paths(self):
+        guard = self.guard()
+        guard.root_guard = Mock()
+        paths = [Path('/mnt/c/personal-server/' + m.sha(str(i).encode()) + '.py')
+                 for i in range(3000)]
+        with self.assertRaisesRegex(m.Blocked, 'windows_command_size_limit'):
+            guard.execution_inputs_guard(paths)
+        guard.runner.assert_not_called()
 
     def test_directory_ancestors_require_strict_boolean_type(self):
         guard = self.guard()

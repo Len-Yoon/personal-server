@@ -11,6 +11,7 @@ status is read-only and never attempts recovery mutations.
 import argparse
 from contextlib import ExitStack
 from datetime import datetime, timezone
+import gzip
 import hashlib
 import importlib.util
 import ipaddress
@@ -315,9 +316,20 @@ while($null -ne $item){
         """
         self.root_guard()
         fixed = [self.windows_path(path) for path in paths]
-        encoded = base64.b64encode(canonical({'paths': fixed, 'git': self.windows_path(self.root / '.git')})).decode()
+        encoded = base64.b64encode(gzip.compress(canonical(
+            {'paths': fixed, 'git': self.windows_path(self.root / '.git')}), mtime=0)).decode()
         script = r'''$ErrorActionPreference='Stop'
-$v=([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(''' + "'" + encoded + "'" + r'''))) | ConvertFrom-Json
+$stream=$null;$gzip=$null;$reader=$null
+try{
+ $stream=[IO.MemoryStream]::new([byte[]][Convert]::FromBase64String(''' + "'" + encoded + "'" + r'''))
+ $gzip=[IO.Compression.GZipStream]::new($stream,[IO.Compression.CompressionMode]::Decompress)
+ $reader=[IO.StreamReader]::new($gzip,[Text.Encoding]::UTF8)
+ $v=$reader.ReadToEnd() | ConvertFrom-Json
+}finally{
+ try{if($null -ne $reader){$reader.Dispose()}}finally{
+  try{if($null -ne $gzip){$gzip.Dispose()}}finally{if($null -ne $stream){$stream.Dispose()}}
+ }
+}
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $trusted=@($sid,'S-1-5-18','S-1-5-32-544');$safe=$true;$lines=@()
 $items=@(Get-Item -LiteralPath $v.git -Force)+@(Get-ChildItem -LiteralPath $v.git -Force -Recurse)
@@ -336,6 +348,9 @@ $bytes=[Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))
 $hash=([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes))).Replace('-','').ToLowerInvariant()
 @{safe=$safe;count=$items.Count;acl_sha256=$hash} | ConvertTo-Json -Compress
 '''
+        # Reserve fixed argv/quoting/NUL headroom below Windows' 32767-unit limit.
+        require(len(base64.b64encode(script.encode('utf-16le'))) + 128 <= 30000,
+                'windows_command_size_limit')
         value = ps_json(self.runner, script)
         require(value.get('safe') is True and type(value.get('count')) is int and
                 value['count'] >= len(paths) + 1 and isinstance(value.get('acl_sha256'), str) and
