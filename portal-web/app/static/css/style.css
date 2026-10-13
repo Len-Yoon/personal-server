@@ -1681,3 +1681,15 @@ textarea:focus {
 .file-tools-form button { min-height: 44px; padding: 10px 20px; border: 0; border-radius: 10px; background: var(--accent); color: var(--bg-primary); font: inherit; font-weight: 700; cursor: pointer; }
 .file-tools article { margin-top: 24px; border-top: 1px solid var(--card-border); padding-top: 12px; }
 @media (max-width: 600px) { .file-tools-form label, .file-tools-form button { flex-basis: 100%; } }
+
+/* Evidence timestamps remain readable on narrow administrator screens. */
+.backup-status-grid {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+}
+.backup-status-grid .metric-tile strong {
+    font-size: 16px;
+}
+#upload-progress {
+    width: 320px;
+    max-width: 100%;
+}

@@ -95,6 +95,20 @@
             </div>
         </section>
 
+        <section class="ops-section admin-section" aria-labelledby="backup-status-title">
+            <div class="section-header"><div>
+                <h2 id="backup-status-title">Portal 백업 상태</h2>
+                <p>기존 백업·복원 검증 증적을 표시합니다. 시각은 한국 시간입니다.</p>
+            </div></div>
+            <p role="status">{{ backup_status.label }}</p>
+            <div class="metric-grid backup-status-grid">
+                <div class="metric-tile"><span>마지막 백업 완료</span><strong>{{ backup_status.backup_at }}</strong></div>
+                <div class="metric-tile"><span>마지막 복원 검증</span><strong>{{ backup_status.restore_at }}</strong></div>
+                <div class="metric-tile"><span>증적 유효 기한</span><strong>{{ backup_status.expires_at }}</strong></div>
+            </div>
+            <p>Book·YouTube·Crawler 상태는 이 Portal 전용 증적에 포함되지 않습니다.</p>
+        </section>
+
         <section class="ops-section admin-section" aria-labelledby="recovery-events-title">
             <div class="section-header">
                 <div>

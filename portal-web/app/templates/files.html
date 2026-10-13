@@ -71,6 +71,10 @@
         <span class="selection-summary"><strong id="selected-count">0</strong>개 선택됨</span>
         <input id="file-upload-input" type="file" multiple hidden>
     </div>
+    <div id="upload-feedback" hidden>
+        <progress id="upload-progress" max="100" value="0" aria-label="업로드 전송 진행률"></progress>
+        <p id="upload-status" role="status" aria-live="polite"></p>
+    </div>
     <p id="file-search-status" class="file-search-status" role="status" aria-live="polite"></p>
 
     {% if directory.parent_path is not none %}
@@ -143,6 +147,7 @@
     </div>
 </section>
 
+<script src="/static/js/portal-ux.js"></script>
 <script>
 const dropZone = document.querySelector(".drop-zone");
 const fileGrid = document.querySelector(".file-grid");
@@ -475,28 +480,14 @@ deleteSelection?.addEventListener("click", async () => {
     window.location.href = result.redirect || window.location.href;
 });
 
-async function uploadFiles(files, targetPath) {
-    const formData = new FormData();
-    formData.append("path", targetPath);
-    files.forEach((file) => formData.append("uploads", file));
-    dropZone?.classList.add("uploading");
-
-    try {
-        const response = await fetch("/files/uploads", {
-            method: "POST",
-            body: formData,
-        });
-
-        if (!response.ok) {
-            throw new Error("upload failed");
-        }
-
-        window.location.reload();
-    } catch (error) {
-        alert("업로드에 실패했습니다.");
-        dropZone?.classList.remove("uploading");
-    }
-}
+const uploadFiles = PortalUX.createUploader({
+    dropZone,
+    progress: document.querySelector("#upload-progress"),
+    status: document.querySelector("#upload-status"),
+    feedback: document.querySelector("#upload-feedback"),
+    input: fileInput,
+    button: document.querySelector("#pick-files"),
+});
 
 updateSelectionToolbar();
 </script>
