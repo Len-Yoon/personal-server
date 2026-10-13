@@ -1,0 +1,2 @@
+-r ../../portal-web/requirements.txt
+playwright==1.63.0

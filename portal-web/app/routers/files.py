@@ -80,7 +80,7 @@ def file_login(request: Request, password: str = Form(""), next_path: str = Form
         create_auth_session("file_access", FILE_ACCESS_MAX_AGE),
         httponly=True,
         samesite="lax",
-        secure=is_production_environment(),
+        secure=is_production_environment() or request.url.scheme == "https" or request.url.hostname in {"len.pe.kr", "file.len.pe.kr", "admin.len.pe.kr"},
         path="/files",
         max_age=FILE_ACCESS_MAX_AGE,
     )
@@ -291,7 +291,10 @@ def _file_access_password() -> str:
 
 def _file_access_required() -> bool:
     configured = os.getenv("FILE_MANAGER_AUTH_REQUIRED", "").strip().lower()
-    return is_production_environment() or configured in {"1", "true", "yes", "on"}
+    # Only an explicitly selected local environment may opt out. Missing or
+    # misspelled production configuration must never expose the file store.
+    local = os.getenv("APP_ENV", "").strip().lower() in {"development", "test"}
+    return not (local and configured in {"0", "false", "no", "off"})
 
 
 def _has_file_access(request: Request) -> bool:

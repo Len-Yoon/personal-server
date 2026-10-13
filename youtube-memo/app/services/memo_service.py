@@ -21,7 +21,7 @@ MEMO_TIMESTAMP_PATTERN = re.compile(r"(?<![\w:])(?:\d{1,2}:\d{2}:\d{2}|\d{1,4}:\
 
 def _schema_ready(connection: sqlite3.Connection) -> bool:
     """Inspect schema without reserving the SQLite writer lock."""
-    required = {'idx_memo_tags_key', 'memo_tags', 'memos', 'videos', 'write_requests', 'idx_videos_home_order', 'idx_memos_video'}
+    required = {'idx_memo_revisions_parent', 'idx_deleted_memos_parent', 'memo_revisions', 'deleted_memos', 'idx_memo_revisions_lookup', 'idx_memo_tags_key', 'memo_tags', 'memos', 'videos', 'write_requests', 'idx_videos_home_order', 'idx_memos_video'}
     present = {row["name"] for row in connection.execute("SELECT name FROM sqlite_master")}
     if not required <= present:
         return False
@@ -88,6 +88,26 @@ def init_db() -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_memo_tags_key ON memo_tags (tag_key, memo_id)")
         if "version" not in {row["name"] for row in connection.execute("PRAGMA table_info(memos)")}:
             connection.execute("ALTER TABLE memos ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+        connection.execute("""CREATE TABLE IF NOT EXISTS memo_revisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            memo_id INTEGER NOT NULL,
+            video_id INTEGER NOT NULL,
+            snapshot TEXT NOT NULL,
+            saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
+        )""")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_memo_revisions_lookup ON memo_revisions (memo_id, id DESC)")
+        connection.execute("""CREATE TABLE IF NOT EXISTS deleted_memos (
+            memo_id INTEGER PRIMARY KEY,
+            video_id INTEGER NOT NULL,
+            snapshot TEXT NOT NULL,
+            tags TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            deleted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
+        )""")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_memo_revisions_parent ON memo_revisions (video_id, id DESC)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_deleted_memos_parent ON deleted_memos (video_id, deleted_at DESC, memo_id DESC)")
         init_write_requests(connection)
 
 
@@ -483,33 +503,27 @@ def search_videos_and_memos(query: str, limit: int = 5) -> list[dict[str, Any]]:
     ]
 
 
-def delete_memo(memo_id: int) -> int | None:
+def delete_memo(memo_id: int, expected_version: int | None = None, request_id: str = "") -> int | None:
     init_db()
-
     with _connect() as connection:
-        row = connection.execute(
-            "SELECT video_id FROM memos WHERE id = ?",
-            (memo_id,),
-        ).fetchone()
-
-        if not row:
+        connection.execute("BEGIN IMMEDIATE")
+        payload = [memo_id, expected_version]
+        replayed = replay_result(connection, request_id, "memo-delete", payload)
+        if replayed is not None:
+            return replayed
+        row = connection.execute("SELECT * FROM memos WHERE id = ?", (memo_id,)).fetchone()
+        if row is None:
             return None
-
-        video_id = row["video_id"]
+        check_version(row, expected_version)
+        tags = [dict(tag) for tag in connection.execute("SELECT * FROM memo_tags WHERE memo_id = ? ORDER BY position", (memo_id,))]
         connection.execute(
-            "DELETE FROM memos WHERE id = ?",
-            (memo_id,),
+            "INSERT INTO deleted_memos (memo_id, video_id, snapshot, tags, version) VALUES (?, ?, ?, ?, ?)",
+            (memo_id, row["video_id"], json.dumps(dict(row)), json.dumps(tags), row["version"] + 1),
         )
-        connection.execute(
-            """
-            UPDATE videos
-            SET updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (video_id,),
-        )
-
-    return video_id
+        connection.execute("DELETE FROM memos WHERE id = ?", (memo_id,))
+        connection.execute("UPDATE videos SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (row["video_id"],))
+        record_result(connection, request_id, "memo-delete", payload, row["video_id"])
+        return row["video_id"]
 
 
 def update_memo(memo_id: int, title: str, content: str, expected_version: int | None = None, request_id: str = "") -> int | None:
@@ -527,7 +541,7 @@ def update_memo(memo_id: int, title: str, content: str, expected_version: int | 
         if replayed is not None:
             return replayed
         row = connection.execute(
-            "SELECT video_id, version FROM memos WHERE id = ?",
+            "SELECT * FROM memos WHERE id = ?",
             (memo_id,),
         ).fetchone()
 
@@ -536,6 +550,7 @@ def update_memo(memo_id: int, title: str, content: str, expected_version: int | 
 
         check_version(row, expected_version)
         video_id = row["video_id"]
+        _save_memo_revision(connection, row)
         connection.execute(
             """
             UPDATE memos
@@ -615,3 +630,87 @@ def _connect() -> Iterator[sqlite3.Connection]:
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return dict(row)
+
+
+def _save_memo_revision(connection: sqlite3.Connection, row: sqlite3.Row) -> None:
+    """Keep the last 50 pre-edit snapshots; deleted memos have no expiry."""
+    connection.execute(
+        "INSERT INTO memo_revisions (memo_id, video_id, snapshot) VALUES (?, ?, ?)",
+        (row["id"], row["video_id"], json.dumps(dict(row))),
+    )
+    connection.execute(
+        "DELETE FROM memo_revisions WHERE memo_id = ? AND id NOT IN "
+        "(SELECT id FROM memo_revisions WHERE memo_id = ? ORDER BY id DESC LIMIT 50)",
+        (row["id"], row["id"]),
+    )
+
+
+def memo_recovery_state(parent_id: int) -> tuple[dict[int, list[dict[str, Any]]], list[dict[str, Any]]]:
+    init_db()
+    with _connect() as connection:
+        connection.execute("BEGIN")
+        revisions = connection.execute("SELECT * FROM memo_revisions WHERE video_id = ? ORDER BY id DESC", (parent_id,)).fetchall()
+        deleted = connection.execute("SELECT * FROM deleted_memos WHERE video_id = ? ORDER BY deleted_at DESC, memo_id DESC", (parent_id,)).fetchall()
+    history: dict[int, list[dict[str, Any]]] = {}
+    for row in revisions:
+        history.setdefault(row["memo_id"], []).append({**json.loads(row["snapshot"]), "display_saved_at": format_display_datetime(row["saved_at"]), "revision_id": row["id"]})
+    return history, [{**json.loads(row["snapshot"]), "version": row["version"], "display_deleted_at": format_display_datetime(row["deleted_at"])} for row in deleted]
+
+
+def restore_memo(memo_id: int, expected_version: int, request_id: str = "") -> int | None:
+    init_db()
+    with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        payload = [memo_id, expected_version]
+        replayed = replay_result(connection, request_id, "memo-restore", payload)
+        if replayed is not None:
+            return replayed
+        row = connection.execute("SELECT * FROM deleted_memos WHERE memo_id = ?", (memo_id,)).fetchone()
+        if row is None:
+            return None
+        check_version(row, expected_version if expected_version is not None else 0)
+        snapshot = json.loads(row["snapshot"])
+        snapshot["version"] = row["version"] + 1
+        columns = "id,video_id,title,content,created_at,updated_at,version".split(",")
+        connection.execute(
+            "INSERT INTO memos (" + ",".join(columns) + ") VALUES (" + ",".join("?" for _ in columns) + ")",
+            [snapshot[column] for column in columns],
+        )
+        connection.execute("UPDATE memos SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (memo_id,))
+        for tag in json.loads(row["tags"]):
+            connection.execute("INSERT INTO memo_tags (memo_id, tag, tag_key, position) VALUES (?, ?, ?, ?)",
+                               (memo_id, tag["tag"], tag["tag_key"], tag["position"]))
+        connection.execute("DELETE FROM deleted_memos WHERE memo_id = ?", (memo_id,))
+        connection.execute("UPDATE videos SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (row["video_id"],))
+        record_result(connection, request_id, "memo-restore", payload, row["video_id"])
+        return row["video_id"]
+
+
+def restore_memo_revision(memo_id: int, revision_id: int, expected_version: int, request_id: str = "") -> int | None:
+    """Restore a prior body while saving the current body in the same transaction."""
+    init_db()
+    with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        payload = [memo_id, revision_id, expected_version]
+        replayed = replay_result(connection, request_id, "memo-revision-restore", payload)
+        if replayed is not None:
+            return replayed
+        memo = connection.execute("SELECT * FROM memos WHERE id = ?", (memo_id,)).fetchone()
+        if memo is None:
+            return None
+        check_version(memo, expected_version if expected_version is not None else 0)
+        revision = connection.execute(
+            "SELECT snapshot FROM memo_revisions WHERE id = ? AND memo_id = ? AND video_id = ?",
+            (revision_id, memo_id, memo["video_id"]),
+        ).fetchone()
+        if revision is None:
+            return None
+        snapshot = json.loads(revision["snapshot"])
+        _save_memo_revision(connection, memo)
+        connection.execute(
+            "UPDATE memos SET title = ?, content = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (snapshot["title"], snapshot["content"], memo_id),
+        )
+        connection.execute("UPDATE videos SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (memo["video_id"],))
+        record_result(connection, request_id, "memo-revision-restore", payload, memo["video_id"])
+        return memo["video_id"]

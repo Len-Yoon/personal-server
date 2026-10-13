@@ -25,7 +25,7 @@ from app.services.security import (
     record_auth_failure,
     security_status,
 )
-from app.services.system_status import get_dashboard_status, get_recovery_events, get_service_health
+from app.services.system_status import get_dashboard_status, get_recovery_events, get_service_health, get_service_backups
 
 router = APIRouter()
 templates = Jinja2Templates(directory=Path(__file__).resolve().parents[1] / "templates")
@@ -99,6 +99,7 @@ def _render_authenticated_admin_status(request: Request, issue_homeops_session: 
         system_status=system_status,
         service_health=get_service_health(),
         security=security_status(),
+        service_backups=get_service_backups(),
     )
     homeops = get_homeops_service()
     context["homeops_summary"] = homeops.latest_summary()

@@ -47,6 +47,7 @@ CONFIGMAP_PVC_SEQUENCE_ACTIVE_FROM_KEY = "pvc_backup_sequence_active_from"
 CONFIGMAP_QUARTERLY_AUDIT_DELIVERED_RUN_IDS_KEY = "quarterly_audit_delivered_run_ids"
 MAX_BACKUP_DELIVERED_RUN_IDS = 128
 PVC_BACKUP_STALE_AFTER = timedelta(hours=5)
+_BACKUP_VIEW_SLOTS = threading.BoundedSemaphore(2)
 PVC_BACKUP_WARNING_INTERVAL_SECONDS = 60 * 60
 _PVC_BACKUP_WARNING_AT: dict[tuple[str, str, int | None], float] = {}
 MAX_QUARTERLY_AUDIT_DELIVERED_RUN_IDS = 128
@@ -1040,6 +1041,15 @@ def handle_http_request(
     """Apply the relay's HTTP contract independently from the socket server."""
     if method == "GET" and path == "/healthz":
         return (200, b"ok\n") if relay.is_healthy() else (503, b"unavailable\n")
+    if method == "GET" and path == "/backup-status":
+        if not _BACKUP_VIEW_SLOTS.acquire(blocking=False):
+            return 503, b'{"detail":"backup status unavailable"}'
+        try:
+            return 200, json.dumps(service_backup_summaries(relay._k8s_client)).encode("utf-8")
+        except Exception:
+            return 503, b'{"detail":"backup status unavailable"}'
+        finally:
+            _BACKUP_VIEW_SLOTS.release()
     if method != "POST" or path != "/alertmanager":
         return 404, b"not found\n"
 
@@ -1065,7 +1075,7 @@ def create_http_handler(relay: RelayService) -> type[BaseHTTPRequestHandler]:
     class RelayRequestHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             status, body = handle_http_request(relay, method="GET", path=self.path)
-            self._respond(status, body, "text/plain; charset=utf-8")
+            self._respond(status, body, "application/json; charset=utf-8" if self.path == "/backup-status" else "text/plain; charset=utf-8")
 
         def do_POST(self) -> None:  # noqa: N802
             if self.path != "/alertmanager":
@@ -1096,6 +1106,7 @@ def create_http_handler(relay: RelayService) -> type[BaseHTTPRequestHandler]:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
 
@@ -1759,6 +1770,49 @@ def _alert_fingerprint(alert: dict[str, Any]) -> str:
 def _alert_state_key(fingerprint: str) -> str:
     return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
 
+
+
+def service_backup_summaries(k8s_client, now=None):
+    """Read fixed state objects and publish only display-safe proof fields.
+
+    This does not create backups, refresh evidence expiry or grant the Portal
+    Kubernetes credentials. Each service is independently fail-closed.
+    """
+    now = now or datetime.now(timezone.utc)
+    result = {}
+    for service, spec in PVC_BACKUP_SERVICES.items():
+        row = {'scope': spec.scope, 'verified': False, 'status_reason': 'backup_unverified'}
+        try:
+            doc = k8s_client.get_config_map(BOOK_BACKUP_NAMESPACE, spec.configmap)
+            data = doc.get('data', {})
+            if not isinstance(data, dict) or data.get('status') != 'completed' or data.get('stage') != 'completed' or data.get('lock_run_id') != '':
+                result[service] = row
+                continue
+            raw = data.get('evidence')
+            if not isinstance(raw, str) or not 0 < len(raw.encode()) <= 16384:
+                raise ValueError('invalid evidence')
+            values = {}
+            allowed = {'schema_version','scope','backup_status','encrypted','restore_status','backup_completed_at','restore_verified_at','evidence_expires_at','backup_id','artifact_digest','source_digest','source_runtime','restore_check','restore_path_check'}
+            for line in raw.splitlines():
+                if not line: continue  # Producers terminate evidence with a newline.
+                key, separator, value = line.partition('=')
+                if not separator or key not in allowed or key in values or not value or value != value.strip():
+                    raise ValueError('invalid evidence')
+                values[key] = value
+            run_id = data.get('run_id', '')
+            if not isinstance(run_id, str) or not SAFE_BOOK_BACKUP_RUN_ID.fullmatch(run_id):raise ValueError('invalid run')
+            expected = {'backup_id':service+'-'+run_id,'schema_version':'1','scope':spec.scope,'backup_status':'success','encrypted':'true','restore_status':'success','source_runtime':'k3s-pvc','restore_path_check':'success','restore_check':('json_schema_and_optional_sqlite_quick_check' if service=='crawler' else 'sqlite_quick_check')}
+            if any(values.get(k) != v for k,v in expected.items()):raise ValueError('invalid proof')
+            if any(not re.fullmatch(r'sha256:[0-9a-f]{64}',values.get(k,'')) for k in ['artifact_digest','source_digest']):raise ValueError('missing digest')
+            times = [datetime.strptime(values[k],'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc) for k in ['backup_completed_at','restore_verified_at','evidence_expires_at']]
+            completed = datetime.strptime(data['completed_at'],'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+            if not times[0] <= times[1] <= completed <= now or times[2] <= times[1] or times[2] - times[1] > timedelta(days=1):raise ValueError('invalid chronology')
+            row.update({k:values[k] for k in ['backup_completed_at','restore_verified_at','evidence_expires_at']})
+            row.update(verified=times[2]>now, status_reason='backup_verified' if times[2]>now else 'backup_expired')
+        except (OSError, URLError, ValueError, TypeError, KeyError, OverflowError):
+            pass  # One broken service must not hide the other services.
+        result[service] = row
+    return result
 
 if __name__ == "__main__":
     main()

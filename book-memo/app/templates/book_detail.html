@@ -234,11 +234,27 @@
 
                 {% if not write_authenticated %}</fieldset>{% endif %}
             </form>
+                    {% if write_authenticated %}
+                    <details class="memo-edit-panel">
+                        <summary>수정 이력 (최근 50회)</summary>
+                        {% for revision in memo_history.get(memo.id, []) %}
+                        <article><small>{{ revision.display_saved_at }} · 버전 {{ revision.version }}</small><strong>{{ revision.title }}</strong><p style="white-space: pre-wrap;">{{ revision.content }}</p>
+                            <form action="/memos/{{ memo.id }}/revisions/{{ revision.revision_id }}/restore" method="post">
+                                <input type="hidden" name="expected_version" value="{{ memo.version }}">
+                                <input type="hidden" name="request_id" value="{{ new_request_id() }}">
+                                <button type="submit" {% if not write_authenticated %}disabled{% endif %}>이전 본문으로 되돌리기</button>
+                            </form>
+                        </article>
+                        {% else %}<p>저장된 수정 이력이 없습니다.</p>{% endfor %}
+                    </details>
+                    {% endif %}
                     <form class="protected-delete-form" action="/memos/{{ memo.id }}/delete" method="post" data-confirm-message="이 메모를 삭제할까요?">
                 {% if not write_authenticated %}
                 <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
                 <fieldset disabled style="display: contents;">
                 {% endif %}
+                        <input type="hidden" name="expected_version" value="{{ memo.version }}">
+                        <input type="hidden" name="request_id" value="{{ new_request_id() }}">
                         <button class="danger-button" type="submit">삭제</button>
 
                 {% if not write_authenticated %}</fieldset>{% endif %}
@@ -252,6 +268,23 @@
             {% endfor %}
         </div>
     </section>
+
+    {% if write_authenticated %}
+    <section class="panel">
+        <h2>삭제한 메모 복구</h2>
+        <p>메모만 복구할 수 있습니다. 책·영상 전체 삭제는 복구할 수 없습니다. 삭제한 메모는 자동으로 지우지 않습니다.</p>
+        {% for memo in deleted_memos %}
+        <article class="memo-card"><strong>{{ memo.title }}</strong><small>{{ memo.display_deleted_at }}</small><p style="white-space: pre-wrap;">{{ memo.content }}</p>
+            <form action="/memos/{{ memo.id }}/restore" method="post">
+                <input type="hidden" name="expected_version" value="{{ memo.version }}">
+                <input type="hidden" name="request_id" value="{{ new_request_id() }}">
+                <button type="submit" {% if not write_authenticated %}disabled{% endif %}>메모 복구</button>
+                {% if not write_authenticated %}<p>쓰기 로그인 후 복구할 수 있습니다.</p>{% endif %}
+            </form>
+        </article>
+        {% else %}<p>삭제한 메모가 없습니다.</p>{% endfor %}
+    </section>
+    {% endif %}
 </main>
 
 <footer class="footer">
