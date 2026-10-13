@@ -53,9 +53,16 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
+          # Idle observation is ~50Mi/4m; allow headroom for collection bursts.
+          resources:
+            requests:
+              cpu: 25m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: http
           livenessProbe:
             httpGet:

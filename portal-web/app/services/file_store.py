@@ -1,4 +1,7 @@
 import errno
+import fcntl
+import shutil
+from threading import RLock
 import os
 import stat
 import time
@@ -21,6 +24,56 @@ PROJECT_DATA_ROOT = next(
 DEFAULT_STORAGE_PATH = PROJECT_DATA_ROOT / "files"
 STORAGE_PATH = Path(os.getenv("FILE_STORAGE_PATH", DEFAULT_STORAGE_PATH))
 CHUNK_SIZE = 1024 * 1024
+STORAGE_QUOTA_BYTES = max(1, int(os.getenv("FILE_STORAGE_QUOTA_MB", "1024"))) * CHUNK_SIZE
+MIN_FREE_BYTES = max(1, int(os.getenv("FILE_MIN_FREE_MB", "64"))) * CHUNK_SIZE
+_UPLOAD_LOCK = RLock()
+_QUOTA_SCAN_LIMIT = 100000
+
+
+def _storage_bytes(fd: int, counter: list[int]) -> int:
+    total = 0
+    for name in os.listdir(fd):
+        counter[0] += 1
+        if counter[0] > _QUOTA_SCAN_LIMIT:
+            raise ValueError("저장 용량을 안전하게 확인할 수 없습니다.")
+        child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        try:
+            info = os.fstat(child)
+            if stat.S_ISDIR(info.st_mode):
+                total += _storage_bytes(child, counter)
+            elif stat.S_ISREG(info.st_mode):
+                total += info.st_size
+            else:
+                raise ValueError("저장 용량을 안전하게 확인할 수 없습니다.")
+        finally:
+            os.close(child)
+    return total
+
+
+@contextmanager
+def _upload_budget():
+    # Serialize threads and processes across the complete multi-file operation.
+    # Hidden trash is real occupied storage and is deliberately counted.
+    with _UPLOAD_LOCK, _open_storage_item("") as root_fd:
+        # Lock the directory inode itself; no user-visible lock artifact and no
+        # replaceable lock pathname. All workers open the same storage root.
+        fcntl.flock(root_fd, fcntl.LOCK_EX)
+        try:
+            used = _storage_bytes(root_fd, [0])
+        except OSError as error:
+            raise ValueError("저장 공간을 안전하게 확인할 수 없습니다.") from error
+        try:
+            yield [used]
+        finally:
+            fcntl.flock(root_fd, fcntl.LOCK_UN)
+
+
+def _reserve_upload_bytes(budget: list[int], size: int) -> None:
+    if budget[0] + size > STORAGE_QUOTA_BYTES:
+        raise ValueError("파일함 전체 용량 제한을 초과합니다. 불필요한 파일을 정리해주세요.")
+    if shutil.disk_usage(STORAGE_PATH).free - size < MIN_FREE_BYTES:
+        raise ValueError("디스크 여유 공간이 부족합니다. 파일 정리 후 다시 시도해주세요.")
+    budget[0] += size
 MAX_UPLOAD_BYTES = int(os.getenv("FILE_MAX_UPLOAD_MB", "25")) * CHUNK_SIZE
 MAX_UPLOAD_FILES = int(os.getenv("FILE_MAX_UPLOAD_FILES", "10"))
 MAX_UPLOAD_TOTAL_BYTES = int(os.getenv("FILE_MAX_UPLOAD_TOTAL_MB", "30")) * CHUNK_SIZE
@@ -85,6 +138,12 @@ def get_directory(relative_path: str = "") -> dict[str, Any]:
 
 def save_upload(relative_path: str, upload: Any) -> int:
     ensure_storage()
+    with _upload_budget() as budget:
+        return _save_upload(relative_path, upload, budget)
+
+
+def _save_upload(relative_path: str, upload: Any, budget: list[int]) -> int:
+    ensure_storage()
     directory = _safe_path(relative_path)
     if not directory.is_dir():
         raise NotADirectoryError("업로드할 폴더가 아닙니다.")
@@ -110,6 +169,7 @@ def save_upload(relative_path: str, upload: Any) -> int:
                 size += len(chunk)
                 if size > MAX_UPLOAD_BYTES:
                     raise ValueError(f"파일은 {MAX_UPLOAD_BYTES // CHUNK_SIZE}MB 이하만 업로드할 수 있습니다.")
+                _reserve_upload_bytes(budget, len(chunk))
                 output.write(chunk)
     except Exception:
         if destination.exists():
@@ -132,13 +192,21 @@ def save_upload(relative_path: str, upload: Any) -> int:
 def save_uploads(relative_path: str, uploads: list[Any]) -> int:
     if len(uploads) > MAX_UPLOAD_FILES:
         raise ValueError(f"한 번에 최대 {MAX_UPLOAD_FILES}개 파일만 업로드할 수 있습니다.")
+    ensure_storage()
+    with _upload_budget() as budget:
+        return _save_uploads(relative_path, uploads, budget)
+
+
+def _save_uploads(relative_path: str, uploads: list[Any], budget: list[int]) -> int:
+    if len(uploads) > MAX_UPLOAD_FILES:
+        raise ValueError(f"한 번에 최대 {MAX_UPLOAD_FILES}개 파일만 업로드할 수 있습니다.")
 
     saved_count = 0
     total_size = 0
     saved_paths: list[Path] = []
     try:
         for upload in uploads:
-            size = save_upload(relative_path, upload)
+            size = _save_upload(relative_path, upload, budget)
             saved_count += 1
             total_size += size
             saved_paths.append(_safe_path(str(Path(relative_path) / _safe_name(upload.filename or ""))))

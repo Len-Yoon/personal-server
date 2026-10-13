@@ -400,12 +400,16 @@ try:
         "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
         "capabilities": {"drop": ["ALL"]},
     })
-    def exact_http_probe(value):
+    require(container.get("resources") == {
+        "requests": {"cpu": "25m", "memory": "128Mi"},
+        "limits": {"memory": "512Mi"},
+    })
+    def exact_http_probe(value, path="/health"):
         return value in (
-            {"path": "/health", "port": "http"},
-            {"path": "/health", "port": "http", "scheme": "HTTP"},
+            {"path": path, "port": "http"},
+            {"path": path, "port": "http", "scheme": "HTTP"},
         )
-    require(exact_http_probe(container.get("readinessProbe", {}).get("httpGet"))
+    require(exact_http_probe(container.get("readinessProbe", {}).get("httpGet"), "/ready")
             and exact_http_probe(container.get("livenessProbe", {}).get("httpGet")))
     volumes = {volume["name"]: volume for volume in pod.get("volumes", [])}
     require(len(pod.get("volumes", [])) == 2 and set(volumes) == {CLAIM, "tmp"})

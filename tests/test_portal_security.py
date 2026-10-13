@@ -245,7 +245,6 @@ class PortalSecurityTests(unittest.TestCase):
             destination = Path(tempdir) / "files" / "memo.txt"
             payloads = [b"first payload", b"second payload"]
             start_gate = threading.Barrier(2)
-            gate = threading.Barrier(2)
             successes = []
             conflicts = []
             worker_errors = []
@@ -255,7 +254,7 @@ class PortalSecurityTests(unittest.TestCase):
             def synchronized_open(path, mode="r", *args, **kwargs):
                 if path.resolve() == destination.resolve() and mode in {"wb", "xb"}:
                     open_calls.append(mode)
-                    gate.wait(timeout=5)
+                    # Upload budget serializes the complete write operation.
                 return original_open(path, mode, *args, **kwargs)
 
             def upload_worker(payload):

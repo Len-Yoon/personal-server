@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import unicodedata
@@ -23,7 +24,7 @@ DB_PATH = Path(os.getenv("BOOK_MEMO_DB_PATH", DEFAULT_DB_PATH))
 
 def _schema_ready(connection: sqlite3.Connection) -> bool:
     """Inspect schema without reserving the SQLite writer lock."""
-    required = {'books', 'idx_memo_tags_key', 'memo_tags', 'book_memos', 'idx_books_home_order', 'idx_book_chapters_book', 'book_chapters', 'write_requests', 'idx_book_memos_book'}
+    required = {'idx_memo_revisions_parent', 'idx_deleted_memos_parent', 'memo_revisions', 'deleted_memos', 'idx_memo_revisions_lookup', 'books', 'idx_memo_tags_key', 'memo_tags', 'book_memos', 'idx_books_home_order', 'idx_book_chapters_book', 'book_chapters', 'write_requests', 'idx_book_memos_book'}
     present = {row["name"] for row in connection.execute("SELECT name FROM sqlite_master")}
     if not required <= present:
         return False
@@ -136,6 +137,26 @@ def init_db() -> None:
         for table in ("books", "book_chapters", "book_memos"):
             if "version" not in {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}:
                 connection.execute(f"ALTER TABLE {table} ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+        connection.execute("""CREATE TABLE IF NOT EXISTS memo_revisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            memo_id INTEGER NOT NULL,
+            book_id INTEGER NOT NULL,
+            snapshot TEXT NOT NULL,
+            saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )""")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_memo_revisions_lookup ON memo_revisions (memo_id, id DESC)")
+        connection.execute("""CREATE TABLE IF NOT EXISTS deleted_memos (
+            memo_id INTEGER PRIMARY KEY,
+            book_id INTEGER NOT NULL,
+            snapshot TEXT NOT NULL,
+            tags TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            deleted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )""")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_memo_revisions_parent ON memo_revisions (book_id, id DESC)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_deleted_memos_parent ON deleted_memos (book_id, deleted_at DESC, memo_id DESC)")
         init_write_requests(connection)
 
 
@@ -797,7 +818,7 @@ def update_memo(
         replayed = replay_result(connection, request_id, "memo-edit", payload)
         if replayed is not None:
             return replayed
-        memo = connection.execute("SELECT book_id, version FROM book_memos WHERE id = ?", (memo_id,)).fetchone()
+        memo = connection.execute("SELECT * FROM book_memos WHERE id = ?", (memo_id,)).fetchone()
         if memo is None:
             return None
         check_version(memo, expected_version)
@@ -805,6 +826,7 @@ def update_memo(
             chapter = connection.execute("SELECT book_id FROM book_chapters WHERE id = ?", (chapter_id,)).fetchone()
             if chapter is None or chapter["book_id"] != memo["book_id"]:
                 raise ValueError("선택한 목차가 책에 속하지 않습니다.")
+        _save_memo_revision(connection, memo)
         connection.execute(
             """UPDATE book_memos SET title = ?, content = ?, page = ?, chapter_id = ?,
                version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
@@ -815,23 +837,27 @@ def update_memo(
         return memo["book_id"]
 
 
-def delete_memo(memo_id: int) -> int | None:
+def delete_memo(memo_id: int, expected_version: int | None = None, request_id: str = "") -> int | None:
     init_db()
-
     with _connect() as connection:
-        row = connection.execute(
-            "SELECT book_id FROM book_memos WHERE id = ?",
-            (memo_id,),
-        ).fetchone()
-
-        if not row:
+        connection.execute("BEGIN IMMEDIATE")
+        payload = [memo_id, expected_version]
+        replayed = replay_result(connection, request_id, "memo-delete", payload)
+        if replayed is not None:
+            return replayed
+        row = connection.execute("SELECT * FROM book_memos WHERE id = ?", (memo_id,)).fetchone()
+        if row is None:
             return None
-
-        book_id = row["book_id"]
+        check_version(row, expected_version)
+        tags = [dict(tag) for tag in connection.execute("SELECT * FROM memo_tags WHERE memo_id = ? ORDER BY position", (memo_id,))]
+        connection.execute(
+            "INSERT INTO deleted_memos (memo_id, book_id, snapshot, tags, version) VALUES (?, ?, ?, ?, ?)",
+            (memo_id, row["book_id"], json.dumps(dict(row)), json.dumps(tags), row["version"] + 1),
+        )
         connection.execute("DELETE FROM book_memos WHERE id = ?", (memo_id,))
-        _touch_book(connection, book_id)
-
-    return book_id
+        connection.execute("UPDATE books SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (row["book_id"],))
+        record_result(connection, request_id, "memo-delete", payload, row["book_id"])
+        return row["book_id"]
 
 
 def _touch_book(connection: sqlite3.Connection, book_id: int) -> None:
@@ -932,3 +958,96 @@ def _connect() -> Iterator[sqlite3.Connection]:
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return dict(row)
+
+
+def _save_memo_revision(connection: sqlite3.Connection, row: sqlite3.Row) -> None:
+    """Keep the last 50 pre-edit snapshots; deleted memos have no expiry."""
+    connection.execute(
+        "INSERT INTO memo_revisions (memo_id, book_id, snapshot) VALUES (?, ?, ?)",
+        (row["id"], row["book_id"], json.dumps(dict(row))),
+    )
+    connection.execute(
+        "DELETE FROM memo_revisions WHERE memo_id = ? AND id NOT IN "
+        "(SELECT id FROM memo_revisions WHERE memo_id = ? ORDER BY id DESC LIMIT 50)",
+        (row["id"], row["id"]),
+    )
+
+
+def memo_recovery_state(parent_id: int) -> tuple[dict[int, list[dict[str, Any]]], list[dict[str, Any]]]:
+    init_db()
+    with _connect() as connection:
+        connection.execute("BEGIN")
+        revisions = connection.execute("SELECT * FROM memo_revisions WHERE book_id = ? ORDER BY id DESC", (parent_id,)).fetchall()
+        deleted = connection.execute("SELECT * FROM deleted_memos WHERE book_id = ? ORDER BY deleted_at DESC, memo_id DESC", (parent_id,)).fetchall()
+    history: dict[int, list[dict[str, Any]]] = {}
+    for row in revisions:
+        history.setdefault(row["memo_id"], []).append({**json.loads(row["snapshot"]), "display_saved_at": format_display_datetime(row["saved_at"]), "revision_id": row["id"]})
+    return history, [{**json.loads(row["snapshot"]), "version": row["version"], "display_deleted_at": format_display_datetime(row["deleted_at"])} for row in deleted]
+
+
+def restore_memo(memo_id: int, expected_version: int, request_id: str = "") -> int | None:
+    init_db()
+    with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        payload = [memo_id, expected_version]
+        replayed = replay_result(connection, request_id, "memo-restore", payload)
+        if replayed is not None:
+            return replayed
+        row = connection.execute("SELECT * FROM deleted_memos WHERE memo_id = ?", (memo_id,)).fetchone()
+        if row is None:
+            return None
+        check_version(row, expected_version if expected_version is not None else 0)
+        snapshot = json.loads(row["snapshot"])
+        snapshot["version"] = row["version"] + 1
+        if snapshot["chapter_id"] is not None:
+            chapter = connection.execute("SELECT book_id FROM book_chapters WHERE id = ?", (snapshot["chapter_id"],)).fetchone()
+            if chapter is None or chapter["book_id"] != snapshot["book_id"]:
+                snapshot["chapter_id"] = None
+        columns = "id,book_id,chapter_id,title,content,page,created_at,updated_at,version".split(",")
+        connection.execute(
+            "INSERT INTO book_memos (" + ",".join(columns) + ") VALUES (" + ",".join("?" for _ in columns) + ")",
+            [snapshot[column] for column in columns],
+        )
+        connection.execute("UPDATE book_memos SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (memo_id,))
+        for tag in json.loads(row["tags"]):
+            connection.execute("INSERT INTO memo_tags (memo_id, tag, tag_key, position) VALUES (?, ?, ?, ?)",
+                               (memo_id, tag["tag"], tag["tag_key"], tag["position"]))
+        connection.execute("DELETE FROM deleted_memos WHERE memo_id = ?", (memo_id,))
+        connection.execute("UPDATE books SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (row["book_id"],))
+        record_result(connection, request_id, "memo-restore", payload, row["book_id"])
+        return row["book_id"]
+
+
+def restore_memo_revision(memo_id: int, revision_id: int, expected_version: int, request_id: str = "") -> int | None:
+    """Restore a prior body while saving the current body in the same transaction."""
+    init_db()
+    with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        payload = [memo_id, revision_id, expected_version]
+        replayed = replay_result(connection, request_id, "memo-revision-restore", payload)
+        if replayed is not None:
+            return replayed
+        memo = connection.execute("SELECT * FROM book_memos WHERE id = ?", (memo_id,)).fetchone()
+        if memo is None:
+            return None
+        check_version(memo, expected_version if expected_version is not None else 0)
+        revision = connection.execute(
+            "SELECT snapshot FROM memo_revisions WHERE id = ? AND memo_id = ? AND book_id = ?",
+            (revision_id, memo_id, memo["book_id"]),
+        ).fetchone()
+        if revision is None:
+            return None
+        snapshot = json.loads(revision["snapshot"])
+        chapter_id = snapshot["chapter_id"]
+        if chapter_id is not None:
+            chapter = connection.execute("SELECT book_id FROM book_chapters WHERE id = ?", (chapter_id,)).fetchone()
+            if chapter is None or chapter["book_id"] != memo["book_id"]:
+                chapter_id = None
+        _save_memo_revision(connection, memo)
+        connection.execute(
+            "UPDATE book_memos SET title = ?, content = ?, page = ?, chapter_id = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (snapshot["title"], snapshot["content"], snapshot["page"], chapter_id, memo_id),
+        )
+        connection.execute("UPDATE books SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (memo["book_id"],))
+        record_result(connection, request_id, "memo-revision-restore", payload, memo["book_id"])
+        return memo["book_id"]

@@ -1,3 +1,4 @@
+from uuid import uuid4
 import json
 import os
 import secrets
@@ -25,6 +26,9 @@ from app.services.memo_service import (
     embed_url,
     get_video,
     list_memos,
+    memo_recovery_state,
+    restore_memo,
+    restore_memo_revision,
     list_available_tags,
     list_export_records,
     list_videos_page,
@@ -96,6 +100,7 @@ async def apply_browser_security(request: Request, call_next):
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
+templates.env.globals["new_request_id"] = lambda: uuid4().hex
 AUTH_RATE_LIMIT_MAX_FAILURES = int(os.getenv("AUTH_RATE_LIMIT_MAX_FAILURES", "5"))
 AUTH_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("AUTH_RATE_LIMIT_WINDOW_SECONDS", "300"))
 AUTH_RATE_LIMIT_STATE_PATH = Path(
@@ -160,6 +165,8 @@ def video_detail(request: Request, video_id: int):
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
+    write_authenticated = _has_write_session(request)
+    memo_history, deleted_memos = memo_recovery_state(video_id) if write_authenticated else ({}, [])
     return templates.TemplateResponse(
         request=request, name="video_detail.html",
         context={
@@ -169,8 +176,10 @@ def video_detail(request: Request, video_id: int):
             "embed_url": embed_url(video["youtube_id"]),
             "video_watch_url": f"https://www.youtube.com/watch?v={quote(video['youtube_id'], safe='')}",
             "memos": list_memos(video_id),
+            "memo_history": memo_history,
+            "deleted_memos": deleted_memos,
             "portal_home_url": portal_home_url(request_host_from_headers(request.headers)),
-            "write_authenticated": _has_write_session(request),
+            "write_authenticated": write_authenticated,
         },
     )
 
@@ -234,10 +243,15 @@ def delete_saved_video(
 def delete_video_memo(
     request: Request,
     memo_id: int,
+    expected_version: int | None = Form(default=None),
+    request_id: str = Form(default=""),
 ):
     _require_write_session(request)
 
-    video_id = delete_memo(memo_id)
+    try:
+        video_id = delete_memo(memo_id, expected_version=expected_version, request_id=request_id)
+    except ValueError as error:
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=str(error)) from error
 
     if not video_id:
         raise HTTPException(status_code=404, detail="Memo not found")
@@ -569,3 +583,27 @@ def _client_id(request: Request) -> str:
 
 
 install_import_routes(app, _require_write_session, WRITE_AUTH_COOKIE, templates)
+
+
+@app.post("/memos/{memo_id}/restore")
+def restore_deleted_memo(request: Request, memo_id: int, expected_version: int = Form(default=0), request_id: str = Form(default="")):
+    _require_write_session(request)
+    try:
+        parent_id = restore_memo(memo_id, expected_version=expected_version, request_id=request_id)
+    except ValueError as error:
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=str(error)) from error
+    if parent_id is None:
+        raise HTTPException(status_code=404, detail="Deleted memo not found")
+    return RedirectResponse(url=f"/videos/{parent_id}", status_code=303)
+
+
+@app.post("/memos/{memo_id}/revisions/{revision_id}/restore")
+def restore_previous_memo_body(request: Request, memo_id: int, revision_id: int, expected_version: int = Form(default=0), request_id: str = Form(default="")):
+    _require_write_session(request)
+    try:
+        parent_id = restore_memo_revision(memo_id, revision_id, expected_version=expected_version, request_id=request_id)
+    except ValueError as error:
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=str(error)) from error
+    if parent_id is None:
+        raise HTTPException(status_code=404, detail="Memo revision not found")
+    return RedirectResponse(url=f"/videos/{parent_id}", status_code=303)

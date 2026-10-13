@@ -205,10 +205,10 @@ if (metadata.get("name") != "crawler-worker" or metadata.get("namespace") != "pe
         or len(containers) != 1):
     raise SystemExit(1)
 container = containers[0]
-def exact_http_probe(value):
+def exact_http_probe(value, path="/health"):
     return value in (
-        {"path": "/health", "port": "http"},
-        {"path": "/health", "port": "http", "scheme": "HTTP"},
+        {"path": path, "port": "http"},
+        {"path": path, "port": "http", "scheme": "HTTP"},
     )
 def exact_service_ports(value):
     return value in (
@@ -223,7 +223,11 @@ if (container.get("name") != "crawler-worker" or container.get("image") != image
             "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
             "capabilities": {"drop": ["ALL"]},
         }
-        or not exact_http_probe(container.get("readinessProbe", {}).get("httpGet"))
+        or container.get("resources") != {
+            "requests": {"cpu": "25m", "memory": "128Mi"},
+            "limits": {"memory": "512Mi"},
+        }
+        or not exact_http_probe(container.get("readinessProbe", {}).get("httpGet"), "/ready")
         or not exact_http_probe(container.get("livenessProbe", {}).get("httpGet"))
         or container.get("volumeMounts") != [
             {"name": "crawler-worker-data", "mountPath": "/data/crawler-worker"},

@@ -1,3 +1,4 @@
+from uuid import uuid4
 import json
 import os
 import re
@@ -32,6 +33,9 @@ from app.services.book_service import (
     list_available_tags,
     list_chapters,
     list_memos,
+    memo_recovery_state,
+    restore_memo,
+    restore_memo_revision,
     search_books_and_memos,
     update_chapter,
     update_chapter_comment,
@@ -106,6 +110,7 @@ async def apply_browser_security(request: Request, call_next):
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
+templates.env.globals["new_request_id"] = lambda: uuid4().hex
 AUTH_RATE_LIMIT_MAX_FAILURES = int(os.getenv("AUTH_RATE_LIMIT_MAX_FAILURES", "5"))
 AUTH_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("AUTH_RATE_LIMIT_WINDOW_SECONDS", "300"))
 AUTH_RATE_LIMIT_STATE_PATH = Path(
@@ -233,6 +238,8 @@ def book_detail(request: Request, book_id: int):
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
 
+    write_authenticated = _has_write_session(request)
+    memo_history, deleted_memos = memo_recovery_state(book_id) if write_authenticated else ({}, [])
     return templates.TemplateResponse(
         request=request, name="book_detail.html",
         context={
@@ -241,9 +248,11 @@ def book_detail(request: Request, book_id: int):
             "book": book,
             "chapters": list_chapters(book_id),
             "memos": list_memos(book_id),
+            "memo_history": memo_history,
+            "deleted_memos": deleted_memos,
             "statuses": ["읽을 예정", "읽는 중", "완료", "보류"],
             "portal_home_url": portal_home_url(request_host_from_headers(request.headers)),
-            "write_authenticated": _has_write_session(request),
+            "write_authenticated": write_authenticated,
         },
     )
 
@@ -495,10 +504,15 @@ def edit_book_memo_tags(request: Request, memo_id: int, tags: str = Form(default
 def delete_book_memo(
     request: Request,
     memo_id: int,
+    expected_version: int | None = Form(default=None),
+    request_id: str = Form(default=""),
 ):
     _require_write_session(request)
 
-    book_id = delete_memo(memo_id)
+    try:
+        book_id = delete_memo(memo_id, expected_version=expected_version, request_id=request_id)
+    except ValueError as error:
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=str(error)) from error
 
     if not book_id:
         raise HTTPException(status_code=404, detail="Memo not found")
@@ -815,3 +829,27 @@ def _safe_redirect(redirect_to: str) -> str:
 
 
 install_import_routes(app, _require_write_session, WRITE_AUTH_COOKIE, templates)
+
+
+@app.post("/memos/{memo_id}/restore")
+def restore_deleted_memo(request: Request, memo_id: int, expected_version: int = Form(default=0), request_id: str = Form(default="")):
+    _require_write_session(request)
+    try:
+        parent_id = restore_memo(memo_id, expected_version=expected_version, request_id=request_id)
+    except ValueError as error:
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=str(error)) from error
+    if parent_id is None:
+        raise HTTPException(status_code=404, detail="Deleted memo not found")
+    return RedirectResponse(url=f"/books/{parent_id}", status_code=303)
+
+
+@app.post("/memos/{memo_id}/revisions/{revision_id}/restore")
+def restore_previous_memo_body(request: Request, memo_id: int, revision_id: int, expected_version: int = Form(default=0), request_id: str = Form(default="")):
+    _require_write_session(request)
+    try:
+        parent_id = restore_memo_revision(memo_id, revision_id, expected_version=expected_version, request_id=request_id)
+    except ValueError as error:
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=str(error)) from error
+    if parent_id is None:
+        raise HTTPException(status_code=404, detail="Memo revision not found")
+    return RedirectResponse(url=f"/books/{parent_id}", status_code=303)

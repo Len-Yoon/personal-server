@@ -76,6 +76,15 @@ class CrawlerWorkerCutoverTests(unittest.TestCase):
             deployed["spec"]["template"]["spec"]["containers"][0]["env"] = [
                 {"name": "NEWS_DB_PATH", "value": "/tmp/override.sqlite3"},
             ]
+        resource_container = deployed["spec"]["template"]["spec"]["containers"][0]
+        if scenario == "resources_missing":
+            resource_container.pop("resources", None)
+        elif scenario == "resources_limits_missing":
+            resource_container["resources"].pop("limits")
+        elif scenario == "resources_requests_changed":
+            resource_container["resources"]["requests"]["cpu"] = "1m"
+        elif scenario == "resources_extra_cpu_limit":
+            resource_container["resources"]["limits"]["cpu"] = "100m"
         fixture["deployment"] = deployed
         (base / "fixture").write_text(json.dumps(fixture))
         mock = r'''import json, os, pathlib, sqlite3, subprocess, sys
@@ -379,6 +388,15 @@ else: fail()
                 self.assertNotIn('"stop"', calls.read_text())
                 self.assertEqual(self.last_state["compose"], "running")
 
+    def test_resource_contract_rejects_missing_or_changed_values_before_writer_stop(self):
+        for scenario in ("resources_missing", "resources_limits_missing", "resources_requests_changed", "resources_extra_cpu_limit"):
+            with self.subTest(scenario=scenario):
+                result, calls = self.run_cutover("--go", scenario=scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, "crawler_worker_cutover=FAIL stage=deployment\n")
+                self.assertNotIn('"stop"', calls.read_text())
+                self.assertEqual(self.last_state["compose"], "running")
+
     def test_mutable_or_foreign_image_is_rejected_without_external_calls(self):
         for image in ("personal-server-crawler-worker:latest", "portal-web@sha256:" + "a"*64):
             with self.subTest(image=image):
@@ -613,14 +631,23 @@ def deployment_document():
       "containers": [{"name": "crawler-worker", "image": fixture["image"], "imagePullPolicy": "Never",
         "envFrom": [{"secretRef": {"name": "crawler-worker-runtime"}}],
         "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}},
-        "readinessProbe": {"httpGet": {"path": "/health", "port": "http"}},
+        "resources": {"requests": {"cpu": "25m", "memory": "128Mi"}, "limits": {"memory": "512Mi"}},
+        "readinessProbe": {"httpGet": {"path": "/ready", "port": "http"}},
         "livenessProbe": {"httpGet": {"path": "/health", "port": "http"}},
         "volumeMounts": [{"name": "crawler-worker-data", "mountPath": "/data/crawler-worker"}, {"name": "tmp", "mountPath": "/tmp"}]}],
       "volumes": [{"name": "crawler-worker-data", "persistentVolumeClaim": {"claimName": "crawler-worker-data"}}, {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"}}]}}}}
     if fixture["existing_mutation"] == "wrong_image":
         document["spec"]["template"]["spec"]["containers"][0]["image"] = "personal-server-crawler-worker:mutable"
+    container = document["spec"]["template"]["spec"]["containers"][0]
+    if fixture["existing_mutation"] == "resources_missing":
+        container.pop("resources", None)
+    elif fixture["existing_mutation"] == "resources_limits_missing":
+        container["resources"].pop("limits")
+    elif fixture["existing_mutation"] == "resources_requests_changed":
+        container["resources"]["requests"]["memory"] = "64Mi"
+    elif fixture["existing_mutation"] == "resources_extra_cpu_limit":
+        container["resources"]["limits"]["cpu"] = "100m"
     if fixture["existing_api_defaults"]:
-        container = document["spec"]["template"]["spec"]["containers"][0]
         container["readinessProbe"]["httpGet"]["scheme"] = "HTTP"
         container["livenessProbe"]["httpGet"]["scheme"] = "HTTP"
     return document
@@ -927,6 +954,19 @@ sys.exit(1)
                 self.assertIsNone(self.last_prepare_fixture["binder"])
                 self.assertNotIn("--raw=", calls)
 
+    def test_bind_existing_rejects_missing_or_changed_resource_contract_without_binder(self):
+        image = "docker.io/library/personal-server-crawler-worker@sha256:" + "a" * 64
+        for mutation in ("resources_missing", "resources_limits_missing", "resources_requests_changed", "resources_extra_cpu_limit"):
+            with self.subTest(mutation=mutation):
+                result, calls = self.run_prepare(
+                    "--bind-existing", "--image", image,
+                    existing_prepared=True, existing_mutation=mutation,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, "crawler_worker_prepare=FAIL stage=existing\n")
+                self.assertIsNone(self.last_prepare_fixture["binder"])
+                self.assertNotIn("--raw=", calls)
+
     def test_prepare_rejects_combined_create_and_bind_existing_modes_without_external_calls(self):
         image = "docker.io/library/personal-server-crawler-worker@sha256:" + "a" * 64
         result, calls = self.run_prepare(
@@ -1042,8 +1082,9 @@ class CrawlerWorkerManifestTests(unittest.TestCase):
             {"name": "crawler-worker-data", "persistentVolumeClaim": {"claimName": "crawler-worker-data"}},
         )
         self.assertEqual(volumes["tmp"]["emptyDir"]["medium"], "Memory")
-        self.assertEqual(container["readinessProbe"]["httpGet"], {"path": "/health", "port": "http"})
+        self.assertEqual(container["readinessProbe"]["httpGet"], {"path": "/ready", "port": "http"})
         self.assertEqual(container["livenessProbe"]["httpGet"], {"path": "/health", "port": "http"})
+        self.assertEqual(container["resources"], {"requests": {"cpu": "25m", "memory": "128Mi"}, "limits": {"memory": "512Mi"}})
         self.assertNotIn("env", container)
         self.assertEqual(container["envFrom"], [{"secretRef": {"name": "crawler-worker-runtime"}}])
         self.assertEqual(service["metadata"]["labels"]["app.kubernetes.io/name"], "crawler-worker")

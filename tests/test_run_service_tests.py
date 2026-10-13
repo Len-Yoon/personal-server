@@ -63,6 +63,17 @@ for _name, _modules in (
     EXPECTED_GROUPS[_name] = (*_entry[:-1], _entry[-1] + _modules)
 
 
+# Practical improvements retain the existing owners and nine-suite boundary.
+for _name, _modules in (
+    ("portal", " tests.test_portal_improvements"),
+    ("book-memo", " tests.book_memo.test_memo_recovery"),
+    ("youtube-memo", " tests.youtube_memo.test_memo_recovery"),
+    ("maintenance", " tests.test_backup_status_view"),
+):
+    _entry = EXPECTED_GROUPS[_name]
+    EXPECTED_GROUPS[_name] = (*_entry[:-1], _entry[-1] + _modules)
+
+
 class ServiceTestRunnerTests(unittest.TestCase):
     def test_ci_selection_uses_documentation_subset_for_documentation(self):
         mode, names = runner.select_ci_suites(

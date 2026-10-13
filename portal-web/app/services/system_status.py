@@ -145,3 +145,19 @@ def _unavailable_status() -> dict[str, Any]:
 
 def _truthy(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_service_backups(timeout: float = 1.5) -> dict[str, Any]:
+    """Read an internal, secret-free Relay view; never query Kubernetes here."""
+    if not os.getenv("BACKUP_STATUS_URL") and not os.getenv("KUBERNETES_SERVICE_HOST"):
+        return {}  # Standalone development has no Kubernetes Relay.
+    url = os.getenv("BACKUP_STATUS_URL", "http://sre-telegram-relay.monitoring.svc.cluster.local:8080/backup-status")
+    try:
+        with urlopen(url, timeout=timeout) as response:
+            raw = response.read(32769)
+            if len(raw) > 32768:
+                return {}
+            values = json.loads(raw)
+            return values if isinstance(values, dict) else {}
+    except (OSError, URLError, ValueError):
+        return {}

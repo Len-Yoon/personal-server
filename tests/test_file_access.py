@@ -245,8 +245,8 @@ class FileAccessTests(unittest.TestCase):
     def test_file_manager_policy_allows_passwordless_local_development_only(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ.pop("APP_ENV", None)
-            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["APP_ENV"] = "development"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "false"
             os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
 
             import app.main as main
@@ -357,8 +357,8 @@ class FileAccessTests(unittest.TestCase):
     def test_bulk_upload_rejects_too_many_files_without_saving_any(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ.pop("APP_ENV", None)
-            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["APP_ENV"] = "development"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "false"
             os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
             os.environ["FILE_MAX_UPLOAD_FILES"] = "1"
             import app.main as main
@@ -382,8 +382,8 @@ class FileAccessTests(unittest.TestCase):
     def test_bulk_upload_cleans_previous_files_when_total_limit_is_exceeded(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ.pop("APP_ENV", None)
-            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["APP_ENV"] = "development"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "false"
             storage_path = Path(tempdir) / "files"
             os.environ["FILE_STORAGE_PATH"] = str(storage_path)
             os.environ["FILE_MAX_UPLOAD_TOTAL_MB"] = "1"
@@ -408,8 +408,8 @@ class FileAccessTests(unittest.TestCase):
     def test_bulk_upload_conflict_rolls_back_only_request_files_and_preserves_existing_file(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ.pop("APP_ENV", None)
-            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["APP_ENV"] = "development"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "false"
             storage_path = Path(tempdir) / "files"
             storage_path.mkdir()
             existing_file = storage_path / "two.txt"
@@ -438,8 +438,8 @@ class FileAccessTests(unittest.TestCase):
     def test_bulk_download_rejects_file_count_before_creating_archive(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ.pop("APP_ENV", None)
-            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["APP_ENV"] = "development"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "false"
             storage_path = Path(tempdir) / "files"
             storage_path.mkdir()
             (storage_path / "one.txt").write_text("1")
@@ -464,8 +464,8 @@ class FileAccessTests(unittest.TestCase):
     def test_bulk_download_rejects_original_total_size(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ.pop("APP_ENV", None)
-            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["APP_ENV"] = "development"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "false"
             storage_path = Path(tempdir) / "files"
             storage_path.mkdir()
             (storage_path / "large.txt").write_bytes(b"x" * (2 * 1024 * 1024))
@@ -514,8 +514,8 @@ class FileAccessTests(unittest.TestCase):
     def test_bulk_download_removes_archive_when_zip_creation_fails(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ.pop("APP_ENV", None)
-            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["APP_ENV"] = "development"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "false"
             storage_path = Path(tempdir) / "files"
             storage_path.mkdir()
             (storage_path / "one.txt").write_text("1")
@@ -541,8 +541,8 @@ class FileAccessTests(unittest.TestCase):
     def test_listing_omits_symlink_entries(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ.pop("APP_ENV", None)
-            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["APP_ENV"] = "development"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "false"
             os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
             storage_path = Path(tempdir) / "files"
             storage_path.mkdir()
@@ -564,8 +564,8 @@ class FileAccessTests(unittest.TestCase):
     def test_nested_file_symlink_blocks_bulk_download_without_archive(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ.pop("APP_ENV", None)
-            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["APP_ENV"] = "development"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "false"
             os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
             storage_path = Path(tempdir) / "files"
             folder = storage_path / "folder"
@@ -593,8 +593,8 @@ class FileAccessTests(unittest.TestCase):
     def test_nested_directory_symlink_blocks_delete_before_any_mutation(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ.pop("APP_ENV", None)
-            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["APP_ENV"] = "development"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "false"
             os.environ["DELETE_PASSWORD"] = "delete-test"
             os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
             storage_path = Path(tempdir) / "files"
@@ -626,8 +626,8 @@ class FileAccessTests(unittest.TestCase):
     def test_upload_endpoints_reject_content_length_excess_with_413(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ.pop("APP_ENV", None)
-            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["APP_ENV"] = "development"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "false"
             os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
             os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
             os.environ["FILE_MAX_UPLOAD_MB"] = "1"
@@ -655,8 +655,8 @@ class FileAccessTests(unittest.TestCase):
     def test_upload_rejects_stream_without_content_length_at_receive_limit(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ.pop("APP_ENV", None)
-            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["APP_ENV"] = "development"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "false"
             os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
             os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
             os.environ["FILE_MAX_UPLOAD_TOTAL_MB"] = "1"
@@ -685,8 +685,8 @@ class FileAccessTests(unittest.TestCase):
     def test_cross_origin_upload_is_rejected_before_body_limit(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ.pop("APP_ENV", None)
-            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["APP_ENV"] = "development"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "false"
             os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
             os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
             os.environ["FILE_MAX_UPLOAD_MB"] = "1"
@@ -707,8 +707,8 @@ class FileAccessTests(unittest.TestCase):
     def test_upload_limit_response_keeps_security_headers(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ.pop("APP_ENV", None)
-            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["APP_ENV"] = "development"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "false"
             os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
             os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
             os.environ["FILE_MAX_UPLOAD_MB"] = "1"
@@ -729,8 +729,8 @@ class FileAccessTests(unittest.TestCase):
     def test_upload_endpoints_preserve_small_requests(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ.pop("APP_ENV", None)
-            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["APP_ENV"] = "development"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "false"
             os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
             storage_path = Path(tempdir) / "files"
             os.environ["FILE_STORAGE_PATH"] = str(storage_path)
@@ -760,8 +760,8 @@ class FileAccessTests(unittest.TestCase):
     def test_zip_rejects_file_swapped_to_external_symlink_after_scan(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ.pop("APP_ENV", None)
-            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["APP_ENV"] = "development"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "false"
             os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
             storage = Path(tempdir) / "files"
             folder = storage / "folder"
@@ -837,8 +837,8 @@ class FileAccessTests(unittest.TestCase):
     def test_zip_checks_actual_file_size_after_preflight(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ.pop("APP_ENV", None)
-            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["APP_ENV"] = "development"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "false"
             os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
             storage = Path(tempdir) / "files"
             storage.mkdir()
@@ -869,8 +869,8 @@ class FileAccessTests(unittest.TestCase):
     def test_zip_checks_actual_file_count_after_preflight(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
-            os.environ.pop("APP_ENV", None)
-            os.environ.pop("FILE_MANAGER_AUTH_REQUIRED", None)
+            os.environ["APP_ENV"] = "development"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "false"
             os.environ["SECURITY_LOG_PATH"] = str(Path(tempdir) / "security.log")
             storage = Path(tempdir) / "files"
             folder = storage / "folder"

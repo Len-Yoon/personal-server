@@ -5,7 +5,7 @@
     "requirements": "portal-web/requirements.txt",
     "extra_packages": [],
     "pythonpath": "portal-web",
-    "test_command": "python3 -m unittest tests.test_file_access tests.test_portal_failure_boundaries tests.test_portal_dashboard tests.test_portal_security tests.test_homeops tests.test_homeops_managed_scope tests.test_homeops_notifier tests.test_portal_http_metrics tests.test_portal_k3s_bridge_contract tests.test_portfolio tests.test_file_management tests.test_news_bookmarks"
+    "test_command": "python3 -m unittest tests.test_file_access tests.test_portal_failure_boundaries tests.test_portal_dashboard tests.test_portal_security tests.test_homeops tests.test_homeops_managed_scope tests.test_homeops_notifier tests.test_portal_http_metrics tests.test_portal_k3s_bridge_contract tests.test_portfolio tests.test_file_management tests.test_news_bookmarks tests.test_portal_improvements"
   },
   {
     "name": "system-agent",
@@ -39,7 +39,7 @@
       "httpx==0.28.1"
     ],
     "pythonpath": "youtube-memo",
-    "test_command": "python3 -m unittest tests.youtube_memo.test_ui_contract tests.youtube_memo.test_video_titles tests.youtube_memo.test_reliability tests.youtube_memo.test_audit_enhancements"
+    "test_command": "python3 -m unittest tests.youtube_memo.test_ui_contract tests.youtube_memo.test_video_titles tests.youtube_memo.test_reliability tests.youtube_memo.test_audit_enhancements tests.youtube_memo.test_memo_recovery"
   },
   {
     "name": "book-memo",
@@ -49,7 +49,7 @@
       "httpx==0.28.1"
     ],
     "pythonpath": "book-memo",
-    "test_command": "python3 -m unittest tests.book_memo.test_book_service tests.book_memo.test_ui_contract tests.book_memo.test_reliability tests.book_memo.test_audit_enhancements tests.book_memo.test_search_budget"
+    "test_command": "python3 -m unittest tests.book_memo.test_book_service tests.book_memo.test_ui_contract tests.book_memo.test_reliability tests.book_memo.test_audit_enhancements tests.book_memo.test_search_budget tests.book_memo.test_memo_recovery"
   },
   {
     "name": "car-care-worker",
@@ -78,6 +78,6 @@
       "Jinja2"
     ],
     "pythonpath": ".",
-    "test_command": "python3 -m unittest tests.test_compose_config tests.test_supply_chain_security_workflow tests.test_documentation_index tests.test_documentation_links tests.test_dependabot_config tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_public_uptime_monitor tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements tests.test_python_multipart_security tests.test_runtime_service_deployment_contract tests.test_caddy_portal_upstream tests.test_n100_remote_dev tests.test_n100_safe_deployment tests.test_run_service_tests tests.test_runtime_service_state tests.test_setup_local_test_venvs tests.test_sre_telegram_relay tests.test_ansible_lab_contract tests.test_ansible_drift_lab tests.test_homeops_auth_configuration tests.test_homeops_auth_runtime tests.test_homeops_auth_supply tests.test_homeops_auth_bootstrap"
+    "test_command": "python3 -m unittest tests.test_compose_config tests.test_supply_chain_security_workflow tests.test_documentation_index tests.test_documentation_links tests.test_dependabot_config tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_public_uptime_monitor tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements tests.test_python_multipart_security tests.test_runtime_service_deployment_contract tests.test_caddy_portal_upstream tests.test_n100_remote_dev tests.test_n100_safe_deployment tests.test_run_service_tests tests.test_runtime_service_state tests.test_setup_local_test_venvs tests.test_sre_telegram_relay tests.test_ansible_lab_contract tests.test_ansible_drift_lab tests.test_homeops_auth_configuration tests.test_homeops_auth_runtime tests.test_homeops_auth_supply tests.test_homeops_auth_bootstrap tests.test_backup_status_view"
   }
 ]
