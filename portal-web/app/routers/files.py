@@ -134,7 +134,7 @@ def upload_file(request: Request, path: str = Form(""), upload: UploadFile = Fil
 def upload_files(request: Request, path: str = Form(""), uploads: list[UploadFile] = File(...)):
     _require_file_access(request)
     try:
-        file_store.save_uploads(path, uploads)
+        saved_count = file_store.save_uploads(path, uploads)
     except FileExistsError as exc:
         append_security_event("file_upload_blocked", path=path, reason=str(exc))
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -142,6 +142,8 @@ def upload_files(request: Request, path: str = Form(""), uploads: list[UploadFil
         append_security_event("file_upload_blocked", path=path, reason=str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    if request.headers.get("accept") == "application/json":
+        return JSONResponse({"uploaded": True, "count": saved_count}, headers={"Cache-Control": "no-store"})
     return _redirect_to_directory(path)
 
 

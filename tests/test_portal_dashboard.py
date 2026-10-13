@@ -998,5 +998,158 @@ class PortalDashboardTests(unittest.TestCase):
             os.environ.pop("ADMIN_STATUS_PASSWORD", None)
 
 
+class PortalUsabilityTests(unittest.TestCase):
+    def test_backup_display_requires_current_ordered_portal_evidence(self):
+        from datetime import datetime, timezone
+        module = _load_service_contract_module("portal-web", "admin_status")
+        now = datetime(2026, 10, 13, 0, 0, tzinfo=timezone.utc)
+        evidence = dict(scope="portal", verified=True, status_reason="backup_verified",
+                        backup_completed_at="2026-10-12T17:30:00Z",
+                        restore_verified_at="2026-10-12T17:38:00Z",
+                        evidence_expires_at="2026-10-13T17:38:00Z")
+        display = module.backup_status_for_display(evidence, now)
+        self.assertEqual(display["backup_at"], "2026-10-13 02:30")
+        self.assertTrue(display["label"].startswith("정상"))
+        for changes in ({"verified": "true"}, {"scope": "all"}, {"verified": False},
+                        {"status_reason": "backup_recent"}, {"restore_verified_at": "2026-10-12T17:00:00Z"},
+                        {"backup_completed_at": "2026-10-14T00:00:00Z"},
+                        {"evidence_expires_at": "2026-10-12T18:00:00Z"},
+                        {"backup_completed_at": "bad"}, {"backup_completed_at": "2026-10-12T17:30:00"},
+                        {"evidence_expires_at": "9999-12-31T23:59:59Z"}):
+            with self.subTest(changes=changes):
+                self.assertFalse(module.backup_status_for_display({**evidence, **changes}, now)["label"].startswith("정상"))
+        for missing in (None, {}, {"exists": True, "latest_name": "recent"}, "invalid"):
+            self.assertEqual(module.backup_status_for_display(missing, now)["backup_at"], "미제공")
+
+    def test_retry_only_calls_requested_source_and_escapes_results(self):
+        from unittest.mock import AsyncMock
+        app = PortalDashboardTests().load_app()
+        result = {"books": {"status": "ok", "items": [{"title": "<script>alert(1)</script>",
+                   "url": "https://books.example/item", "description": "test"}]}}
+        with TestClient(app) as client, patch("app.routers.dashboard.search_all", new_callable=AsyncMock, return_value=result) as search:
+            response = client.get("/search/retry", params={"source": "books", "q": " test "})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(search.await_args.kwargs["source"], "books")
+            self.assertIn("&lt;script&gt;", response.text)
+            self.assertNotIn("<script>alert", response.text)
+            self.assertIn('data-search-source="books"', response.text)
+            self.assertNotIn('data-search-source="news"', response.text)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            search.reset_mock()
+            for params in ({"source": "all", "q": "test"}, {"source": "books", "q": " "},
+                           {"source": "unknown", "q": "test"}, {"source": "books", "q": "x" * 501}):
+                self.assertIn(client.get("/search/retry", params=params).status_code, {400, 422})
+            search.assert_not_awaited()
+
+    def test_failed_retry_keeps_retry_control(self):
+        from unittest.mock import AsyncMock
+        app = PortalDashboardTests().load_app()
+        with TestClient(app) as client, patch("app.routers.dashboard.search_all", new_callable=AsyncMock,
+                return_value={"news": {"status": "unavailable", "items": []}}):
+            response = client.get("/search/retry?source=news&q=test")
+        self.assertIn("data-search-retry", response.text)
+        self.assertIn("현재 응답 없음", response.text)
+
+    def test_upload_json_ack_only_after_storage_and_legacy_redirect_preserved(self):
+        app = PortalDashboardTests().load_app()
+        with TestClient(app) as client, patch("app.routers.files._require_file_access"), patch("app.routers.files.file_store.save_uploads", return_value=1) as save:
+            response = client.post("/files/uploads", headers={"Accept": "application/json", "Origin": "http://testserver"}, files={"uploads": ("a.txt", b"test")})
+            self.assertEqual(response.json(), {"uploaded": True, "count": 1})
+            save.assert_called_once()
+            legacy = client.post("/files/uploads", headers={"Origin": "http://testserver"}, files={"uploads": ("a.txt", b"test")}, follow_redirects=False)
+            self.assertEqual(legacy.status_code, 303)
+            save.side_effect = FileExistsError("이미 같은 이름의 파일이 있습니다.")
+            blocked = client.post("/files/uploads", headers={"Accept": "application/json", "Origin": "http://testserver"}, files={"uploads": ("a.txt", b"test")})
+            self.assertEqual(blocked.status_code, 409)
+            self.assertNotIn("uploaded", blocked.json())
+
+    def test_browser_helpers_use_same_origin_relative_urls_behind_https_proxy(self):
+        app = PortalDashboardTests().load_app()
+        with TestClient(app) as client, patch("app.routers.files._has_file_access", return_value=True):
+            for path in ("/", "/files"):
+                response = client.get(path, headers={"Host": "len.pe.kr", "X-Forwarded-Proto": "https"})
+                self.assertEqual(response.status_code, 200)
+                self.assertIn('<script src="/static/js/portal-ux.js"></script>', response.text)
+                self.assertNotIn('src="http://len.pe.kr/static/js/portal-ux.js"', response.text)
+
+    def test_backup_details_hidden_without_admin_authentication(self):
+        with patch.dict(os.environ, {"ADMIN_STATUS_PASSWORD": "test-password"}):
+            app = PortalDashboardTests().load_app()
+            with TestClient(app) as client, patch("app.routers.admin.get_dashboard_status") as metrics:
+                response = client.get("/admin/status")
+            metrics.assert_not_called()
+            self.assertNotIn('id="backup-status-title"', response.text)
+
+    def test_browser_upload_and_retry_behavior(self):
+        import shutil
+        import subprocess
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js unavailable for browser helper regression")
+        script = r'''
+const assert = require('node:assert/strict');
+const ux = require('./portal-web/app/static/js/portal-ux.js');
+let reloads = 0;
+global.location = {href: 'https://portal.example/files', origin: 'https://portal.example', reload: () => reloads++};
+let lastXHR;
+global.XMLHttpRequest = class {
+ constructor() { this.upload = {}; lastXHR = this; }
+ open(method, path) { assert.equal(method, 'POST'); assert.equal(path, '/files/uploads'); }
+ setRequestHeader(key, value) { assert.equal(key, 'Accept'); assert.equal(value, 'application/json'); }
+ send() {}
+};
+(async () => {
+const progress = {value: 0, removeAttribute() {delete this.value;}};
+const status = {textContent: ''}; const feedback = {hidden: true};
+const button = {disabled: false}; const input = {disabled: false, value: 'chosen'};
+const upload = ux.createUploader({progress, status, feedback, button, input});
+const file = new Blob(['test']);
+const pending = upload([file], 'folder');
+const xhr = lastXHR;
+assert.equal(button.disabled, true);
+assert.equal(await upload([file], ''), false);
+assert.equal(lastXHR, xhr);
+xhr.upload.onprogress({lengthComputable: true, loaded: 50, total: 100});
+assert.equal(progress.value, 50);
+xhr.upload.onprogress({lengthComputable: true, loaded: 100, total: 100});
+assert.match(status.textContent, /서버 저장 확인/); assert.equal(reloads, 0);
+xhr.status = 401; xhr.responseText = '{}'; xhr.onload();
+assert.equal(await pending, false); assert.match(status.textContent, /인증/);
+assert.equal(button.disabled, false); assert.equal(input.value, '');
+const success = upload([file], '');
+lastXHR.status = 200; lastXHR.responseText = '{"uploaded":true}'; lastXHR.responseURL = location.href;
+lastXHR.onload(); assert.equal(await success, false); assert.equal(reloads, 0);
+const saved = upload([file], '');
+lastXHR.status = 200; lastXHR.responseText = '{"uploaded":true}'; lastXHR.responseURL = 'https://portal.example/files/uploads';
+lastXHR.onload(); assert.equal(await saved, true); assert.equal(reloads, 1);
+const timeout = upload([file], ''); lastXHR.ontimeout(); assert.equal(await timeout, false);
+assert.match(status.textContent, /저장 여부/); assert.equal(button.disabled, false);
+assert.match(ux.uploadError(400, '파일은 10MB 이하만 업로드할 수 있습니다.'), /10MB/);
+assert.match(ux.uploadError(409), /같은 이름/);
+assert.doesNotMatch(ux.uploadError(400, '/secret/path token'), /secret/);
+assert.doesNotMatch(ux.uploadError(500, '/secret/path token'), /secret/);
+let listener, calls = 0, replaced = 0;
+const retryButton = {disabled: false, closest: () => group};
+const retryStatus = {textContent: ''};
+const group = {dataset: {searchSource:'books', searchQuery:'original'}, querySelector: () => retryStatus, replaceWith: () => replaced++};
+const otherGroup = {items:['keep']};
+const replacement = {matches: () => true, dataset:{searchSource:'books'}};
+const doc = {addEventListener: (_, fn) => listener = fn, createElement: () => ({content:{firstElementChild:replacement,childElementCount:1}})};
+ux.bindSearchRetries(doc);
+let complete;
+global.fetch = url => { calls++; assert.match(url, /source=books&q=original/); return new Promise(resolve => complete=resolve); };
+const event = {target:{closest:() => retryButton}};
+const retry = listener(event); await listener(event); assert.equal(calls, 1);
+complete({ok:true, redirected:false, headers:{get:()=> 'text/html'}, text:async()=>'<section></section>'});
+await retry; assert.equal(replaced, 1); assert.deepEqual(otherGroup.items, ['keep']);
+retryButton.disabled = false; global.fetch = async () => {throw Error('down');};
+await listener(event); assert.equal(retryButton.disabled, false); assert.match(retryStatus.textContent, /다시 시도/);
+assert.equal(replaced, 1);
+})().catch(error => {console.error(error); process.exitCode=1;});
+'''
+        result = subprocess.run([node, "-e", script], cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

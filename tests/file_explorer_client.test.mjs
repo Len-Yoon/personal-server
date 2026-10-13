@@ -137,6 +137,8 @@ function bootFileExplorer(savedView = "list") {
     };
     globalThis.window = { location: { href: "" } };
 
+    eval(readFileSync(resolve("portal-web/app/static/js/portal-ux.js"), "utf8"));
+    globalThis.PortalUX = window.PortalUX;
     eval(clientScript);
     return { dropZone, elements, fileGrid, folder, icons, list, report };
 }

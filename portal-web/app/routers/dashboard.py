@@ -3,7 +3,7 @@ import ipaddress
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
@@ -16,8 +16,23 @@ router = APIRouter()
 templates = Jinja2Templates(directory=Path(__file__).resolve().parents[1] / "templates")
 
 
+@router.get("/search/retry")
+async def retry_search(request: Request, source: str, q: str = Query(min_length=1, max_length=500)):
+    if source not in SEARCH_SOURCES or not q.strip() or is_portfolio_host(request):
+        raise HTTPException(status_code=400, detail="검색 대상과 검색어를 확인해주세요.")
+    host = _request_host(request)
+    base_urls = service_base_urls(host)
+    results = await search_all(q, source=source, public_base_urls=base_urls,
+                               local_base_urls=base_urls, prefer_local=_is_local_host(host))
+    return templates.TemplateResponse(
+        request=request, name="search_group.html",
+        context={"group": source, "payload": results[source], "query": q.strip()},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @router.get("/")
-async def dashboard(request: Request, q: str = "", source: str = "all"):
+async def dashboard(request: Request, q: str = Query(default="", max_length=500), source: str = "all"):
     host = _request_host(request)
     if is_portfolio_host(request):
         return await run_in_threadpool(render_public_portfolio, request)
