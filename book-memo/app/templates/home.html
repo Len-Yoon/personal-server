@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <title>{{ title }}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="/static/css/style.css?v=20260930-selected-export-1">
+    <link rel="stylesheet" href="/static/css/style.css?v=20261013-import-layout-1">
 </head>
 <body class="home-page" data-draft-service="book-memo" data-write-authenticated="{{ 'true' if write_authenticated else 'false' }}">
 <div class="background-orb orb-one"></div>
@@ -37,13 +37,13 @@
 </header>
 
 <main class="container">
-    {% if write_authenticated %}
-    <a class="text-link" href="/import">JSON 가져오기</a>
-    {% else %}
-    <a class="text-link" href="/auth/login?next_path=%2Fimport">로그인 후 가져오기</a>
-    {% endif %}
     <section class="hero home-hero">
         <h1>책 메모장</h1>
+        {% if write_authenticated %}
+            <a class="text-link import-link" href="/import">JSON 가져오기</a>
+        {% else %}
+            <a class="text-link import-link" href="/auth/login?next_path=%2Fimport">로그인 후 가져오기</a>
+        {% endif %}
     </section>
 
     <section class="panel search-panel">

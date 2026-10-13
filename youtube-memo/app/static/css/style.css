@@ -885,3 +885,127 @@ textarea:focus {
         scroll-behavior: auto !important;
     }
 }
+
+/* Keep import controls aligned without changing the other editors. */
+.home-hero {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 20px;
+}
+
+.home-hero .import-link {
+    flex-shrink: 0;
+}
+
+.import-heading {
+    margin: 24px 0 12px;
+    font-size: clamp(28px, 3vw, 36px);
+}
+
+.import-description {
+    margin: 0 0 24px;
+    color: var(--text-secondary);
+    line-height: 1.7;
+}
+
+.import-field-label {
+    display: block;
+    margin-bottom: 10px;
+    font-weight: 700;
+}
+
+.import-controls {
+    display: flex;
+    align-items: stretch;
+    gap: 12px;
+}
+
+.import-controls input[type="file"] {
+    flex: 1 1 0;
+    width: 100%;
+    min-width: 0;
+    height: 52px;
+    padding: 7px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    color: var(--text-secondary);
+    font: inherit;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.import-controls input[type="file"]::file-selector-button {
+    height: 36px;
+    margin-right: 12px;
+    padding: 0 14px;
+    border: 1px solid rgba(56, 189, 248, 0.38);
+    border-radius: 10px;
+    background: rgba(14, 165, 233, 0.18);
+    color: #e0f2fe;
+    font: inherit;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.import-page button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    min-height: 52px;
+    padding: 0 20px;
+    border: 1px solid rgba(56, 189, 248, 0.38);
+    border-radius: var(--radius-md);
+    background: rgba(14, 165, 233, 0.18);
+    color: #e0f2fe;
+    font: inherit;
+    font-weight: 800;
+    cursor: pointer;
+}
+
+.import-page button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.import-page [hidden] {
+    display: none !important;
+}
+
+.import-status {
+    margin: 16px 0;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+}
+
+.import-status:empty {
+    margin: 0;
+}
+
+.import-page button:focus-visible,
+.home-hero .import-link:focus-visible {
+    outline: 3px solid var(--accent);
+    outline-offset: 4px;
+}
+
+@media (max-width: 600px) {
+    .home-hero {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 16px;
+    }
+
+    .import-controls {
+        flex-direction: column;
+    }
+
+    .import-controls input[type="file"] {
+        flex-basis: auto;
+    }
+
+    .import-page button {
+        width: 100%;
+    }
+}
