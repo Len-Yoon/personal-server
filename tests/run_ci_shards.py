@@ -5,6 +5,7 @@ import argparse
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -42,10 +43,14 @@ def partition(modules, count):
     inventory = {}
     for module in modules:
         _, inventory[module] = collect([module])
-    for module in sorted(modules, key=lambda name: (-len(inventory[name]), name)):
+    timings = json.loads((ROOT / "tests/k8s_shard_timings.json").read_text())["module_seconds"]
+    if not isinstance(timings, dict) or any(type(value) not in (int, float) or not math.isfinite(value) or value < 0 for value in timings.values()):
+        raise ValueError("invalid shard scheduling estimates")
+    weights = {module: max(0.001, timings.get(module, len(inventory[module]))) for module in modules}
+    for module in sorted(modules, key=lambda name: (-weights[name], name)):
         index = min(range(count), key=lambda slot: sizes[slot])
         groups[index].append(module)
-        sizes[index] += len(inventory[module])
+        sizes[index] += weights[module]
     return [group for group in groups if group], inventory
 
 

@@ -162,7 +162,7 @@ jobs:
           python3 -m pip install -r portal-web/requirements.txt -r book-memo/requirements.txt -r youtube-memo/requirements.txt -r tests/browser/requirements.browser.txt
           python3 -m playwright install --with-deps chromium
       - name: Run Portal browser regression
-        run: python3 tests/browser/run_smoke.py
+        run: python3 tests/browser/run_smoke.py --artifacts browser-artifacts/portal
       - name: Run Book and YouTube browser regressions
         run: python3 tests/browser/run_memo_smoke.py --artifacts browser-artifacts
       - name: Upload browser failure evidence

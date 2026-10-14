@@ -39,3 +39,14 @@ class MemoBrowserSmokeContracts(unittest.TestCase):
             self.assertEqual([call.args[0] for call in run.call_args_list], ['book-memo', 'youtube-memo'])
         with patch.object(module, 'run_service', return_value=2):
             self.assertEqual(module.main(['--service', 'book-memo']), 2)
+
+
+class PortalBrowserSmokeContracts(unittest.TestCase):
+    def test_portal_cli_accepts_artifacts_but_rejects_external_url(self):
+        spec = importlib.util.spec_from_file_location('portal_browser_smoke', ROOT / 'tests/browser/run_smoke.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(module.argument_parser().parse_args(['--artifacts', 'browser-artifacts/portal']).artifacts,
+                         Path('browser-artifacts/portal'))
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            module.argument_parser().parse_args(['--url', 'https://len.pe.kr'])
