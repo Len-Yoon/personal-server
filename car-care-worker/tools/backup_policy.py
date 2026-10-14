@@ -1,6 +1,6 @@
 """Local-only car backup identity, journal, lock, and tiered retention policy."""
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
 import json
@@ -10,12 +10,12 @@ import re
 import sqlite3
 import stat
 import tempfile
-from zoneinfo import ZoneInfo
 
 SCOPE = 'car-care-db-only'
 ID = re.compile(r'car-care-(\d{8}T\d{6}Z)-[a-f0-9]{16}')
 SHA = re.compile(r'[a-f0-9]{64}')
-KST = ZoneInfo('Asia/Seoul')
+# Modern backup timestamps use Korea's fixed UTC+09; minimal images need no tzdata.
+KST = timezone(timedelta(hours=9), 'Asia/Seoul')
 
 
 def require(value):

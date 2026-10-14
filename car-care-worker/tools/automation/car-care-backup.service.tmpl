@@ -1,0 +1,12 @@
+[Unit]
+Description=Car database backup after the shared sequential backup lock
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO_ROOT@
+UMask=0077
+ExecStart=/usr/bin/python3 @REPO_ROOT@/car-care-worker/tools/automation/schedule.py --go --image @BACKUP_IMAGE@ --image-id @BACKUP_IMAGE_ID@
+TimeoutStartSec=14400
+TimeoutStopSec=1800
+Restart=no

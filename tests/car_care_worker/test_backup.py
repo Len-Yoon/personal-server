@@ -400,3 +400,202 @@ class CarCareBackupTests(unittest.TestCase):
         first = self.execute()
         with self.assertRaises(ValueError):
             BACKUP.POLICY.retention_plan([dict(first, deleted=['../portal'])])
+
+
+SCHEDULE_SPEC = importlib.util.spec_from_file_location('car_schedule', ROOT/'car-care-worker/tools/automation/schedule.py')
+SCHEDULE = importlib.util.module_from_spec(SCHEDULE_SPEC)
+SCHEDULE_SPEC.loader.exec_module(SCHEDULE)
+POD_RUNNER_SPEC = importlib.util.spec_from_file_location('car_pod_runner', ROOT/'car-care-worker/tools/automation/pod_runner.py')
+POD_RUNNER = importlib.util.module_from_spec(POD_RUNNER_SPEC)
+POD_RUNNER_SPEC.loader.exec_module(POD_RUNNER)
+
+
+class CarBackupScheduleTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.state = Path(self.temp.name)
+        self.state.chmod(0o700)
+        (self.state/'evidence').mkdir(mode=0o700)
+        self.now = datetime.now(timezone.utc)
+        self.image = 'docker.io/library/personal-server-portal-pvc-backup@sha256:'+'a'*64
+        self.image_id = 'sha256:'+'b'*64
+        self.desired = SCHEDULE.manifest(self.now.date(), self.image, self.image_id,
+                                         self.state, self.state/'source', 'c'*64)
+        self.created = []
+        self.existing = None
+        self.active = False
+        test = self
+        class FakeAPI:
+            def get(self, name):
+                return test.existing
+            def active_backups(self):
+                return test.active
+            def create(self, pod):
+                test.created.append(pod)
+                test.existing = json.loads(json.dumps(pod))
+                test.existing['metadata']['uid'] = 'fixture-pod'
+                test.existing['status'] = dict(phase='Succeeded', containerStatuses=[dict(
+                    restartCount=0, imageID='docker-pullable://fixture@'+test.image_id,
+                    state=dict(terminated=dict(exitCode=0)))])
+        self.api = FakeAPI()
+        self.proof = dict(schema_version=1, scope='car-care-db-only', status='success',
+            backup_id=self.now.strftime('car-care-%Y%m%dT%H%M%SZ-')+'d'*16,
+            remote_upload_status='confirmed', restore_verified=True, finished_at=self.now.isoformat(),
+            restore_verified_at=self.now.isoformat(), artifact_sha256='e'*64, snapshot_sha256='f'*64)
+        BACKUP.POLICY.persist(self.state/'evidence'/(self.proof['backup_id']+'.json'), self.proof, initial=True)
+
+    def run_schedule(self):
+        return SCHEDULE.run(self.api, self.state, self.desired,
+                            now=lambda: self.now-timedelta(seconds=1), sleep=lambda _: None, poll_seconds=0)
+
+    def test_same_date_reentry_does_not_recreate_or_repeat_backup(self):
+        first = self.run_schedule()
+        second = self.run_schedule()
+        self.assertEqual(first['status'], 'success')
+        self.assertEqual(second['backup_id'], self.proof['backup_id'])
+        self.assertEqual(len(self.created), 1)
+
+    def test_lost_create_response_reconciles_once(self):
+        create = self.api.create
+        def lost(pod):
+            create(pod)
+            raise subprocess.TimeoutExpired('fixture', 30)
+        self.api.create = lost
+        self.assertEqual(self.run_schedule()['status'], 'success')
+        self.assertEqual(len(self.created), 1)
+
+    def test_missing_pod_after_intent_never_recreated(self):
+        def absent(pod):
+            self.created.append(pod)
+            raise subprocess.TimeoutExpired('fixture', 30)
+        self.api.create = absent
+        with self.assertRaises(ValueError):
+            self.run_schedule()
+        with self.assertRaises(ValueError):
+            self.run_schedule()
+        self.assertEqual(len(self.created), 1)
+
+    def test_other_backup_active_blocks_before_create(self):
+        self.active = True
+        with self.assertRaises(ValueError):
+            self.run_schedule()
+        self.assertEqual(self.created, [])
+        self.assertEqual(list(self.state.glob('scheduled-*.json')), [])
+
+    def test_unresolved_prior_day_blocks_new_date(self):
+        BACKUP.POLICY.persist(self.state/'scheduled-2020-01-01.json', dict(status='uncertain'), initial=True)
+        with self.assertRaises(ValueError):
+            self.run_schedule()
+        self.assertEqual(self.created, [])
+
+    def test_failed_or_restarted_or_wrong_image_pod_blocks(self):
+        for mutation in ('failed','restart','image','init','lifecycle','envFrom','args','volumeDevices',
+                         'privileged','procMount','runAsUser','capabilities'):
+            with self.subTest(mutation=mutation):
+                self.created.clear()
+                self.existing = None
+                for path in self.state.glob('scheduled-*.json'):
+                    path.unlink()
+                create = type(self.api).create.__get__(self.api)
+                def tamper(pod):
+                    create(pod)
+                    if mutation == 'failed': self.existing['status']['phase'] = 'Failed'
+                    if mutation == 'restart': self.existing['status']['containerStatuses'][0]['restartCount'] = 1
+                    if mutation == 'image': self.existing['status']['containerStatuses'][0]['imageID'] = 'sha256:bad'
+                    if mutation == 'init': self.existing['spec']['initContainers'] = [dict(name='unknown')]
+                    main = self.existing['spec']['containers'][0]
+                    if mutation in ('lifecycle','envFrom','args','volumeDevices'): main[mutation] = ['unknown']
+                    if mutation == 'privileged': main['securityContext']['privileged'] = True
+                    if mutation == 'procMount': main['securityContext']['procMount'] = 'Unmasked'
+                    if mutation == 'runAsUser': main['securityContext']['runAsUser'] = 0
+                    if mutation == 'capabilities': main['securityContext']['capabilities']['add'] = ['SYS_ADMIN']
+                self.api.create = tamper
+                with self.assertRaises(ValueError):
+                    self.run_schedule()
+                self.assertEqual(len(self.created), 1)
+
+    def test_remote_uncertain_evidence_is_not_a_new_success(self):
+        path = next((self.state/'evidence').glob('*.json'))
+        BACKUP.POLICY.persist(path, dict(self.proof, remote_upload_status='uncertain', status='failure'))
+        with self.assertRaises(ValueError):
+            self.run_schedule()
+        result = json.loads(next(self.state.glob('scheduled-*.json')).read_text())
+        self.assertEqual(result['status'], 'uncertain')
+
+    def test_skip_preserves_old_restore_time_in_persistent_evidence(self):
+        path = next((self.state/'evidence').glob('*.json'))
+        proof = dict(self.proof, status='skipped_unchanged', restore_verified=False)
+        proof.pop('restore_verified_at')
+        BACKUP.POLICY.persist(path, proof)
+        result = self.run_schedule()
+        self.assertEqual(result['status'], 'skipped_unchanged')
+        self.assertNotIn('restore_verified_at', result)
+
+    def test_source_and_credentials_are_readonly_and_only_evidence_is_writable(self):
+        pod = self.desired['spec']
+        self.assertFalse(pod['automountServiceAccountToken'])
+        self.assertEqual(pod['restartPolicy'], 'Never')
+        mounts = {v['name']: v for v in pod['containers'][0]['volumeMounts']}
+        self.assertTrue(all(mounts[n]['readOnly'] for n in ('credentials','database','source')))
+        self.assertEqual(mounts['state']['mountPath'], '/state/evidence')
+        volumes = {v['name']:v for v in pod['volumes']}
+        self.assertEqual(volumes['state']['hostPath']['path'], str(self.state/'evidence'))
+        self.assertEqual(volumes['credentials']['secret']['secretName'], 'portal-pvc-backup-runtime')
+        self.assertEqual(volumes['work']['emptyDir']['medium'], 'Memory')
+        self.assertNotIn('--retention-go', json.dumps(pod))
+
+    def test_weekly_restore_is_forced_on_sunday_or_after_seven_days(self):
+        monday = datetime(2026,10,12, tzinfo=timezone.utc)
+        record = dict(self.proof, backup_id='car-care-20261012T000000Z-'+'a'*16,
+                      restore_verified_at=monday.isoformat(), finished_at=monday.isoformat())
+        self.assertFalse(POD_RUNNER.force_restore([record], monday+timedelta(days=1)))
+        self.assertTrue(POD_RUNNER.force_restore([record], monday+timedelta(days=6)))
+        self.assertTrue(POD_RUNNER.force_restore([record], monday+timedelta(days=7)))
+        self.assertTrue(POD_RUNNER.force_restore([], monday))
+
+    def test_failure_alert_routes_through_fixed_existing_pipeline(self):
+        payload = SCHEDULE.alert_payload(True, self.now)[0]
+        self.assertEqual(payload['labels'], dict(alertname='CarCareBackupFailed', service='car-care-worker', severity='critical'))
+        self.assertGreater(datetime.fromisoformat(payload['endsAt']), self.now)
+        resolved = SCHEDULE.alert_payload(False, self.now)[0]
+        self.assertEqual(resolved['endsAt'], self.now.isoformat())
+        self.assertEqual(SCHEDULE.ALERT_PATH, '/api/v1/namespaces/monitoring/services/http:personal-server-monitoring-alertmanager:http-web/proxy/api/v2/alerts')
+
+    def test_shared_lock_reused_and_no_service_restart_or_catchup(self):
+        called = []
+        class Lock:
+            def __enter__(self): called.append('acquire')
+            def __exit__(self, *args): called.append('release')
+        with patch.object(SCHEDULE.SEQUENCE, 'local_lock', return_value=Lock()):
+            with SCHEDULE.wait_shared_lock(): called.append('work')
+        self.assertEqual(called, ['acquire','work','release'])
+        folder = ROOT/'car-care-worker/tools/automation'
+        service = (folder/'car-care-backup.service.tmpl').read_text()
+        timer = (folder/'car-care-backup.timer.tmpl').read_text()
+        self.assertIn('Restart=no', service)
+        self.assertIn('05:30:00 Asia/Seoul', timer)
+        self.assertIn('Persistent=false', timer)
+
+    def test_notification_failure_does_not_rerun_successful_backup(self):
+        from contextlib import nullcontext
+        import sys
+        class NotifyFailure:
+            def call(self, args, body=None):
+                raise ValueError('fixture notification unavailable')
+        argv = ['schedule.py','--go','--image',self.image,'--image-id',self.image_id]
+        result = dict(day=self.now.astimezone(SCHEDULE.KST).date().isoformat(), status='success', backup_id=self.proof['backup_id'])
+        with patch.object(sys,'argv',argv), patch.object(SCHEDULE,'Kubernetes',return_value=NotifyFailure()), \
+             patch.object(SCHEDULE,'wait_shared_lock',return_value=nullcontext()), \
+             patch.object(SCHEDULE,'finish_before_stop',return_value=nullcontext()), \
+             patch.object(SCHEDULE,'state_directory',return_value=self.state), \
+             patch.object(SCHEDULE,'canonical_source',return_value=('a'*40,'c'*64,self.state/'source')), \
+             patch.object(SCHEDULE,'run',return_value=result) as run, patch('builtins.print'):
+            self.assertEqual(SCHEDULE.main(), 1)
+        run.assert_called_once()
+        notification = json.loads(next(self.state.glob('notification-*.json')).read_text())
+        self.assertEqual(notification['backup_status'], 'success')
+        self.assertEqual(notification['alert_status'], 'failure')
+        journal = json.loads(next(self.state.glob('scheduled-*.json')).read_text())
+        self.assertEqual(journal['status'], 'success')
+        self.assertEqual(journal['alert_status'], 'failure')
