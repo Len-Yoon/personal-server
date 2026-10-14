@@ -24,13 +24,13 @@ N100의 K3s는 현재 Portal·뉴스·YouTube Memo·Book Memo와 모니터링 �
 
 Portal은 K3s PVC를 상태 저장소로 사용하며, Compose `portal-web`은 동시에 실행하지 않음. Caddy는 `host.docker.internal:30080` NodePort를 통해 K3s Portal로 전달함. K3s runtime에서는 `.env`의 `PORTAL_UPSTREAM=host.docker.internal:30080` 설정이 필요하며, Compose runtime에서는 이 값을 `portal-web:8000`으로 유지하거나 비워 Compose 기본값을 사용함. Portal cutover는 이 값을 자동으로 전환하므로 수동 변경 대신 해당 절차를 사용함.
 
-2026-09-27 기준 Crawler·Book·YouTube·Portal의 A2·A4·A5 이미지 적용과 외부 health 검증은 [최신 고도화 적용 결과](../../docs/20260921_프로젝트보완_개발계획.md#2026-09-27-a2a4a5-고도화-및-n100-적용-결과)를 따름. 2026-09-28 Book·YouTube·Crawler PVC 백업 CronJob은 수동 백업·격리 복원 성공 뒤 [자동 실행을 활성화](../../docs/reviews/20260928_서비스별_PVC_백업_자동실행_적용결과.md)함. 그러나 같은 날 13:00 뉴스 백업의 첫 정기 Job은 사전 점검에서 실패했으며, 원인과 수정 후보·미적용 상태는 [운영 반영 사전검토](../../docs/reviews/20260928_Book_SLO_뉴스백업_운영반영_사전검토.md)에 기록함. 뉴스 10차의 과거 보류와 후속 적용은 각각 [당시 K3s 앱 배포 결과](../../docs/reviews/20260921_K3s앱배포_검증결과.md)와 [뉴스·SLO 운영 적용 결과](../../docs/reviews/20260922_뉴스_SLO_운영적용_검증결과.md)에 기록됨. 초기 manifest의 `replicas: 0`·sentinel image는 현재 운영 상태를 나타내지 않으므로 재적용하지 않음.
+그러나 같은 날 13:00 뉴스 백업의 첫 정기 Job은 사전 점검에서 실패했으며, 원인과 수정 후보·미적용 상태는 [운영 반영 사전검토](../../docs/reviews/20260928_Book_SLO_뉴스백업_운영반영_사전검토.md)에 기록함. 뉴스 10차의 과거 보류와 후속 적용은 각각 [당시 K3s 앱 배포 결과](../../docs/reviews/20260921_K3s앱배포_검증결과.md)와 [뉴스·SLO 운영 적용 결과](../../docs/reviews/20260922_뉴스_SLO_운영적용_검증결과.md)에 기록됨. 초기 manifest의 `replicas: 0`·sentinel image는 현재 운영 상태를 나타내지 않으므로 재적용하지 않음.
 
 ### 서비스별 PVC 백업 운영 목표 상태
 
 Book·YouTube·Crawler 백업 CronJob의 맥 저장소 기준 운영 상태는 [production-cronjob-state.json](backup-automation/production-cronjob-state.json)에 기록함. 세 `*-pvc-backup-cronjob.yaml`은 최초 설치용 `suspend: true`·sentinel 이미지이므로 활성 운영 CronJob에 전체 적용하지 않음. 목표 파일은 일정·시간대·시작 마감·활성 상태·고정 이미지 digest를 보관하며 Secret 값은 포함하지 않음.
 
-2026-09-28 최종 승인에 따라 이 목표 상태를 N100에서 [검증](../../docs/reviews/20260928_백업운영목표상태_동기화결과.md)함. 세 CronJob이 이미 목표와 같아 적용 명령은 쓰기 0건으로 종료됨. 이후 변경에도 아래 절차와 최종 운영 승인 기준을 유지함.
+세 CronJob이 이미 목표와 같아 적용 명령은 쓰기 0건으로 종료됨. 이후 변경에도 아래 절차와 최종 운영 승인 기준을 유지함.
 
 맥에서 변경·테스트 → 기능 브랜치 PR·CI → `main` 병합을 마친 뒤, **N100 운영 적용은 별도 최종 승인**을 받고 정확한 커밋으로 fast-forward함. N100 WSL의 저장소 루트에서 아래 순서로 확인함. `--check`는 읽기 전용이며 목표와 실제 값이 다르면 실패함. `--apply`는 사전 승인된 대상 커밋과 깨끗한 추적 작업공간을 요구하고, 세 CronJob의 `startingDeadlineSeconds`와 `suspend`만 조건부 patch함. 이미지가 목표와 다르면 이미지 반입·교체 절차를 별도로 검토하며 이 도구로 수정하지 않음.
 
@@ -44,13 +44,13 @@ python3 infra/k8s/tools/service-pvc-backup-production-state.py --check
 
 도구는 Job 실행 중·writer/PVC/백업 증적/Relay 이상·예정 시각 직후 300초·이미지 미반입·동시 수정 충돌을 차단함. JSON Patch의 UID·resourceVersion 조건과 server dry-run 뒤 실제 적용하며, 이미 일치하면 쓰기 0건임. 여러 대상 중 일부만 적용된 뒤 실패하면 재실행이나 rollback을 자동으로 하지 않고 실제 상태를 다시 조회함. 적용 후 Portal 및 변경 서비스의 외부 health를 10초 간격 3회 확인하고, 다음 정기 실행의 성공은 별도 증적으로 검증함. 이 도구는 Secret·PVC·ConfigMap·RBAC·Deployment를 쓰지 않음.
 
-`--check`는 목표 필드와 백업 명령·ServiceAccount·PVC/Secret mount·핵심 보안 설정을 확인함. 2026-09-28 뉴스 백업 실패 보완으로 목표 이미지 digest를 먼저 갱신했으므로 승인된 이미지 반입·교체 전에는 이미지 불일치로 실패하는 것이 정상임. CronJob 전체 spec·Secret 내용·이미지의 플랫폼 manifest까지 포괄 감사하는 도구는 아니므로 운영 사전검토에서 별도 확인함. N100 이미지 목록에 고정 alias가 있어도 해당 이미지가 `linux/amd64`로 실행 가능한지는 정기 Job 또는 별도 이미지 검사로 확인 필요함.
+`--check`는 목표 필드와 백업 명령·ServiceAccount·PVC/Secret mount·핵심 보안 설정을 확인함. CronJob 전체 spec·Secret 내용·이미지의 플랫폼 manifest까지 포괄 감사하는 도구는 아니므로 운영 사전검토에서 별도 확인함. N100 이미지 목록에 고정 alias가 있어도 해당 이미지가 `linux/amd64`로 실행 가능한지는 정기 Job 또는 별도 이미지 검사로 확인 필요함.
 
 ### 새벽 순차 백업 현재 운영 기준
 
-2026-10-14 후속 적용으로 기존 네 단계가 모두 성공한 뒤 차량 DB를 연결함. 별도05:30 차량 timer는해제했고02:30 기존timer만 백업을 시작함. 차량 보관 정리·5분 누락 감지와 인증 관리자 상태도 운영 적용됨. 아래 네 PVC 설계·최초 설치 설명은 기존 네 단계에 대한 계약이며, 첫 다섯 단계 정기 실행은10/15 02:30 관찰 전임. [현재 백업 안내](../../docs/operations-reference.md#차량-db-백업과-자동-보관)를 참조함.
+별도05:30 차량 timer는해제했고02:30 기존timer만 백업을 시작함. 차량 보관 정리·5분 누락 감지와 인증 관리자 상태도 운영 적용됨. [현재 백업 안내](../../docs/operations-reference.md#차량-db-백업과-자동-보관)를 참조함.
 
-맥 저장소의 [순차 백업 설계](../../docs/superpowers/specs/2026-09-29-sequential-night-backup-design.md)는 네 백업을 서울 시각 02:30에 Portal → Book Memo → YouTube Memo → News Hub 수집기 순서로 실행하도록 정의함. 앞 Job의 최종 종료를 확인한 직후 다음 Job을 시작하며, 실패해도 최종 종료가 확인되면 다음 백업을 시도함. 종료 상태가 불명확하면 중복 백업을 피하기 위해 중단함. 네 개별 CronJob은 중지하고 기존 jobTemplate을 순차 실행에 재사용함. 2026-09-29 [순차 운영 전환](../../docs/reviews/20260929_순차PVC백업_N100운영반영결과.md)을 완료했고 9월 30일 첫 네 대상 정기 성공을 확인함. 2026-10-10 새 정책의 첫 정기 실행에서 네 소유 Job이 신규 백업·격리 복원·보관 정리에 성공했고 전체 02:36 completed를 확인함. Portal 증거 export·SystemAgent 최신 판정, 잠금 해제·writer 복귀도 확인함. [정책·이미지·정기 검증](../../docs/reviews/20261009_백업보관정책_보완.md)을 따름.
+맥 저장소의 [순차 백업 설계](../../docs/superpowers/specs/2026-09-29-sequential-night-backup-design.md)는 네 백업을 서울 시각 02:30에 Portal → Book Memo → YouTube Memo → News Hub 수집기 순서로 실행하도록 정의함. 앞 Job의 최종 종료를 확인한 직후 다음 Job을 시작하며, 실패해도 최종 종료가 확인되면 다음 백업을 시도함. 종료 상태가 불명확하면 중복 백업을 피하기 위해 중단함. 네 개별 CronJob은 중지하고 기존 jobTemplate을 순차 실행에 재사용함. Portal 증거 export·SystemAgent 최신 판정, 잠금 해제·writer 복귀도 확인함. [정책·이미지·정기 검증](../../docs/reviews/20261009_백업보관정책_보완.md)을 따름.
 
 아래 명령은 신규 환경의 전환·재설치 참고이며 이미 활성화된 현재 운영에 반복 실행하지 않음. 운영 전환에는 Relay의 순차 실행 상태 감시 적용, 기존 네 CronJob 중지, `pvc-backup-sequence-state` ConfigMap 최초 생성, N100 사용자 systemd 단위 설치·활성화가 필요함. 상태 ConfigMap은 한 번 생성한 뒤 다시 manifest로 적용하면 기존 실행 기록이 초기화될 수 있으므로 재적용하지 않음. 기존 Book·YouTube·Crawler 목표는 위 전용 도구로 제한 적용함. Portal은 현재 CronJob의 UID·resourceVersion·기존 schedule·jobTemplate을 읽기 전용으로 확인한 뒤, UID·resourceVersion 일치 조건의 JSON patch로 `startingDeadlineSeconds: 300`과 `suspend: true`만 변경함. 기존 active Job이 없고 writer·잠금 상태가 정상인지 먼저 확인하며 설치용 전체 manifest는 재적용하지 않음. installer의 `--preflight`는 사용자 systemd·linger·K3s 접근을 확인함. `--activate`는 네 CronJob 중지·시작 마감 300초·기존 Portal timer 및 service 비활성·활성 백업 Job 부재·현재 네 백업 템플릿의 보안 계약·호스트 잠금 획득 가능성을 확인한 뒤 timer를 켬.
 
@@ -62,7 +62,7 @@ bash infra/k8s/tools/pvc-backup-sequence-automation.sh --activate
 bash infra/k8s/tools/pvc-backup-sequence-automation.sh --status
 ```
 
-timer는 놓친 시각의 낮 시간 보충 실행을 하지 않음. 조정기는 06:00 이후 새 Job을 시작하지 않지만 이미 시작한 Job은 종료까지 관찰함. 10월 10일 02:30 실행의 순서·네 신규 복원 검증은 확인 완료함. 이후 실행과 실제 Telegram 수신은 별도 관측함. 되돌릴 때 `--deactivate`는 먼저 다음 timer 실행을 막음. 실행 중인 service/Job 또는 미완료 상태가 있으면 상태 기록 변경을 거부하므로 종료·결과 확인 뒤 다시 실행해야 명시적 중지 시각이 기록됨. Relay는 중지 후 새 날짜의 실행 누락 감시를 멈추되 이미 시작된 실행의 확정 실패 알림은 유지하며, 활성화 후 상태 ConfigMap 자체가 삭제·초기화된 경우에는 상태 누락을 알림. Book·YouTube·Crawler의 운영 목표 파일도 기존 `suspend: false`로 되돌려 맥에서 검증·반영한 뒤 전용 도구로 조건부 적용하고, Portal은 시작 마감 300초를 유지한 채 UID·resourceVersion 조건부 patch로 재활성화함. 실행 중 Job을 삭제하거나 두 예약 방식을 동시에 활성화하지 않음. 상태 ConfigMap이 `completed`가 아니어서 제한 적용 도구가 차단하면 재실행·강제 변경하지 않고 Job·writer·잠금·증적을 확인한 뒤 별도 수동 조건부 복구 경로를 검토함.
+timer는 놓친 시각의 낮 시간 보충 실행을 하지 않음. 조정기는 06:00 이후 새 Job을 시작하지 않지만 이미 시작한 Job은 종료까지 관찰함. 이후 실행과 실제 Telegram 수신은 별도 관측함. 되돌릴 때 `--deactivate`는 먼저 다음 timer 실행을 막음. 실행 중인 service/Job 또는 미완료 상태가 있으면 상태 기록 변경을 거부하므로 종료·결과 확인 뒤 다시 실행해야 명시적 중지 시각이 기록됨. Relay는 중지 후 새 날짜의 실행 누락 감시를 멈추되 이미 시작된 실행의 확정 실패 알림은 유지하며, 활성화 후 상태 ConfigMap 자체가 삭제·초기화된 경우에는 상태 누락을 알림. Book·YouTube·Crawler의 운영 목표 파일도 기존 `suspend: false`로 되돌려 맥에서 검증·반영한 뒤 전용 도구로 조건부 적용하고, Portal은 시작 마감 300초를 유지한 채 UID·resourceVersion 조건부 patch로 재활성화함. 실행 중 Job을 삭제하거나 두 예약 방식을 동시에 활성화하지 않음. 상태 ConfigMap이 `completed`가 아니어서 제한 적용 도구가 차단하면 재실행·강제 변경하지 않고 Job·writer·잠금·증적을 확인한 뒤 별도 수동 조건부 복구 경로를 검토함.
 
 ## 빠른 상태 확인
 
@@ -143,11 +143,11 @@ relay, PrometheusRule, RBAC 경계, Prometheus target 상태를 검증하며 Sec
 
 ## Portal PVC 백업
 
-Portal PVC 백업은 현재 02:30 사용자 systemd 순차 실행기가 중지된 K3s CronJob의 jobTemplate으로 생성하는 소유 Job에서 운영함. 개별 `portal-pvc-backup` CronJob은 `suspend: true`이며 03:00의 기존 schedule 필드는 보존만 함. 현재 순차 timer와 과거 Portal 단독 timer를 구분함. 새 인증·실제 신규 백업·격리 복원·소비자 갱신은 [2026-10-08 복구 기록](../../docs/reviews/20261008_Portal백업_실패복구.md)을 따름.
+Portal PVC 백업은 현재 02:30 사용자 systemd 순차 실행기가 중지된 K3s CronJob의 jobTemplate으로 생성하는 소유 Job에서 운영함. 개별 `portal-pvc-backup` CronJob은 `suspend: true`이며 03:00의 기존 schedule 필드는 보존만 함. 현재 순차 timer와 과거 Portal 단독 timer를 구분함.
 
-아래는 순차 전환 이전 운영 이력과 신규 환경의 단독 CronJob 설치·재설치 참고 절차임. 현재 순차 운영에 `--apply`·`--activate`를 실행하거나 전체 manifest를 재적용하지 않음. 2026-09-27 후속 조회에서 최신 Job 성공과 `portal_pvc_backup=PASS` 증적을 확인했고, 원격 암호문 전체의 SHA-256 재계산 결과가 증적과 일치함. 이 확인은 원격 파일의 무결성 검증이며 공유·접근 권한 감사는 포함하지 않음. 당시 Portal 단독 사용자 timer는 비활성화함. 현재 활성인 순차 timer와 다른 단위임. 아래는 최초 설치·재설치 절차이며, 초기 CronJob은 `suspend: true` 상태로 배포됨. 새 환경에서는 승인된 Secret Manager 또는 SOPS/age 절차로 사전 시딩된 runtime Secret과 runner image가 준비되기 전에는 활성화하지 않음. 저장소 도구는 Secret 값·rclone 설정·age identity를 생성·입력·출력하지 않음.
+아래는 순차 전환 이전 운영 이력과 신규 환경의 단독 CronJob 설치·재설치 참고 절차임. 현재 순차 운영에 `--apply`·`--activate`를 실행하거나 전체 manifest를 재적용하지 않음. 이 확인은 원격 파일의 무결성 검증이며 공유·접근 권한 감사는 포함하지 않음. 당시 Portal 단독 사용자 timer는 비활성화함. 현재 활성인 순차 timer와 다른 단위임. 아래는 최초 설치·재설치 절차이며, 초기 CronJob은 `suspend: true` 상태로 배포됨. 새 환경에서는 승인된 Secret Manager 또는 SOPS/age 절차로 사전 시딩된 runtime Secret과 runner image가 준비되기 전에는 활성화하지 않음. 저장소 도구는 Secret 값·rclone 설정·age identity를 생성·입력·출력하지 않음.
 
-백업 도구는 생성한 archive를 `age`로 암호화하고 암호문 파일의 SHA-256을 증적의 `artifact_digest`로 기록함. SHA-256은 암호화 방식이나 복호화 가능성을 뜻하지 않으며, 일일 Job은 원격에서 내려받은 암호문의 해시와 격리 복원 결과도 확인함. 2026-09-27 후속 검사는 별도로 원격 바이트를 다시 읽어 기록된 해시와 비교한 것임.
+백업 도구는 생성한 archive를 `age`로 암호화하고 암호문 파일의 SHA-256을 증적의 `artifact_digest`로 기록함. SHA-256은 암호화 방식이나 복호화 가능성을 뜻하지 않으며, 일일 Job은 원격에서 내려받은 암호문의 해시와 격리 복원 결과도 확인함.
 
 전환 전에는 아래 읽기 점검과 client-side render를 실행함. `--preflight`는 Secret **이름과 key 이름만** 확인하고, Portal PVC가 `Bound`·`ReadWriteOnce` mount 계약을 충족하는지 확인함.
 
@@ -177,23 +177,22 @@ Portal 증거는 기본 24시간이며 다음 일일 실행과 완료 여유까�
 
 ## 일별 SLO 증적
 
-`slo-daily-evidence` CronJob은 서울 기준 매일 02:15에 실행하도록 정의됨. 2026-09-22에 freshness 다중 시계열 집계 수정 collector를 반입하고 수동 Job 1회 검증을 완료했으며, 수동 검증 뒤 별도 승인으로 N100 CronJob을 `suspend: false`로 활성화함. 당일 증적은 `ok`로 검증됐음. [SLO 원인 분석](../../docs/reviews/20260921_SLO증적실패_원인분석.md)과 [운영 적용 검증 결과](../../docs/reviews/20260922_뉴스_SLO_운영적용_검증결과.md)를 참조함. `monitoring/slo-daily-evidence` ConfigMap의 `records.json`에 날짜별 검증 기록을 최대 30건 보관함. 같은 날짜의 재수집은 해당 기록을 교체함. Prometheus retention은 변경하지 않으며, 결측·질의 오류는 `unobservable`로 기록하고 Job이 실패함. 공개 health 비-200은 `failed`로 기록하며 관측 자체가 성공했다면 Job 실패로 취급하지 않음.
+`slo-daily-evidence` CronJob은 서울 기준 매일 02:15에 실행하도록 정의됨. 당일 증적은 `ok`로 검증됐음. [SLO 원인 분석](../../docs/reviews/20260921_SLO증적실패_원인분석.md)과 [운영 적용 검증 결과](../../docs/reviews/20260922_뉴스_SLO_운영적용_검증결과.md)를 참조함. `monitoring/slo-daily-evidence` ConfigMap의 `records.json`에 날짜별 검증 기록을 최대 30건 보관함. 같은 날짜의 재수집은 해당 기록을 교체함. Prometheus retention은 변경하지 않으며, 결측·질의 오류는 `unobservable`로 기록하고 Job이 실패함. 공개 health 비-200은 `failed`로 기록하며 관측 자체가 성공했다면 Job 실패로 취급하지 않음.
 
-2026-09-28 읽기 점검에서 Job은 증적 수집에 성공했으나 공개 health·Portal Ready·뉴스 freshness 세부 값은 `failed`였음. [사전검토](../../docs/reviews/20260928_Book_SLO_뉴스백업_운영반영_사전검토.md)의 새 이미지는 앞으로 공개 health의 비-200 상태 코드만 Job 로그에 남기며, 기존 판정과 증적은 바꾸지 않음. 과거 실패 원인은 확인 필요임.
+[사전검토](../../docs/reviews/20260928_Book_SLO_뉴스백업_운영반영_사전검토.md)의 새 이미지는 앞으로 공개 health의 비-200 상태 코드만 Job 로그에 남기며, 기존 판정과 증적은 바꾸지 않음. 과거 실패 원인은 확인 필요임.
 
 실행 권한은 고정 증적 ConfigMap의 `get`, `patch`로 제한함. CronJob은 동시 실행 금지, 재시도 없음, 최대 180초 실행, non-root, read-only root filesystem, capability 전체 제거 및 크기가 제한된 `/tmp`만 사용함. Secret·PVC·host volume을 mount하지 않으며 Portal·K3s 복구 또는 배포 차단을 수행하지 않음.
 
 다음은 운영자 승인 후 N100에서 수행할 적용 순서임. 저장소 병합만으로 운영 적용 또는 자동 실행이 완료되지 않음.
 
-1. 맥 저장소에서 먼저 테스트하고 Linux AMD64 OCI archive를 빌드함. archive SHA-256과 OCI manifest digest·플랫폼을 대조한 뒤 최종 운영 승인 후 N100에 전송·검증·반입함. 2026-09-28 후보의 이미지 참조와 해시는 [사전검토](../../docs/reviews/20260928_Book_SLO_뉴스백업_운영반영_사전검토.md)를 따름. N100에서 소스를 새로 빌드하지 않음.
+1. 맥 저장소에서 먼저 테스트하고 Linux AMD64 OCI archive를 빌드함. archive SHA-256과 OCI manifest digest·플랫폼을 대조한 뒤 최종 운영 승인 후 N100에 전송·검증·반입함. N100에서 소스를 새로 빌드하지 않음.
 
    ```bash
    # 맥: 변경한 소스와 Dockerfile을 함께 고정한 linux/amd64 OCI archive 생성
    docker buildx build --provenance=false --platform linux/amd64 \
      --tag personal-server-slo-evidence:20260928-http-status \
      --file infra/k8s/slo-evidence/Dockerfile \
-     --output type=oci,dest=data/build-artifacts/20260928-book-slo-news/slo-evidence-20260928-http-status.oci.tar,annotation-manifest-descriptor.io.personal-server.image-ref=personal-server-slo-evidence:20260928-http-status .
-   ```
+     --output type=oci,dest=data/build-artifacts/20260928-book-slo-news/slo-evidence-20260928-http-status.oci.tar,annotation-manifest-descriptor.io.personal-server.image-ref=personal-server-slo-evidence:20260928-http-status . ```
 
 2. 최초 설치 시에만 전체 manifest를 적용함. `monitoring/slo-daily-evidence`가 이미 존재하면 `records.json: []`가 포함된 ConfigMap을 다시 적용하지 않음. **기존 활성 CronJob 갱신에는 설치용 `suspend: true` manifest도 재적용하지 않고 이미지 필드만 현재 값 일치 조건으로 변경함.** 기존 증적과 일정·활성 상태를 보존하고, 실행 중인 Job이 있으면 종료 확인 전 변경·수동 재실행하지 않음. 조회 실패를 리소스 부재로 취급하지 않음.
 
@@ -211,8 +210,7 @@ Portal 증거는 기본 24시간이며 다음 일일 실행과 완료 여유까�
    sudo k3s kubectl -n monitoring wait --for=condition=complete "job/$slo_job" --timeout=240s
    ```
 
-4. Job 성공 및 이번 실행 날짜의 증적 존재를 확인함. ConfigMap은 원문 출력 없이 수집기의 `validate_record`로 고정 필드·자료형·UTC 시각·수치 범위를 검증하고, 날짜 중복 없음·최대 30건·날짜 내림차순도 확인함. 실패 또는 관측 불가 결과는 성공으로 보정하지 않음. 기존 활성 CronJob 갱신에서 수동 검증이 실패하면 추가 변경을 중단하고 실제 상태를 조회하며, 기존 자동 실행의 중단 여부는 별도 판단함.
-5. **최초 설치 시에만** 수동 Job 성공과 증적 검증 뒤 일일 자동 실행을 활성화함. 기존 활성 CronJob 갱신에서는 활성 상태를 변경하지 않음. 외부 health는 `https://len.pe.kr/health`를 10초 간격으로 3회 호출해 모두 HTTP 200인지 확인함. 명시적으로 자동 수집을 중단하기로 결정한 경우에만 CronJob을 suspend하며 증적 ConfigMap은 삭제하지 않음.
+4. Job 성공 및 이번 실행 날짜의 증적 존재를 확인함. ConfigMap은 원문 출력 없이 수집기의 `validate_record`로 고정 필드·자료형·UTC 시각·수치 범위를 검증하고, 날짜 중복 없음·최대 30건·날짜 내림차순도 확인함. 실패 또는 관측 불가 결과는 성공으로 보정하지 않음. 기존 활성 CronJob 갱신에서 수동 검증이 실패하면 추가 변경을 중단하고 실제 상태를 조회하며, 기존 자동 실행의 중단 여부는 별도 판단함. 5. **최초 설치 시에만** 수동 Job 성공과 증적 검증 뒤 일일 자동 실행을 활성화함. 기존 활성 CronJob 갱신에서는 활성 상태를 변경하지 않음. 외부 health는 `https://len.pe.kr/health`를 10초 간격으로 3회 호출해 모두 HTTP 200인지 확인함. 명시적으로 자동 수집을 중단하기로 결정한 경우에만 CronJob을 suspend하며 증적 ConfigMap은 삭제하지 않음.
 
    ```bash
    sudo k3s kubectl -n monitoring patch cronjob slo-daily-evidence --type=merge -p '{"spec":{"suspend":false}}'
@@ -236,13 +234,7 @@ bash infra/k8s/tools/quarterly-sre-audit-automation.sh --status
 
 `--install`은 host 단일 실행 lock을 먼저 획득한 뒤 아래 순서로만 수행함.
 
-1. preflight와 client-side render를 수행하고, `monitoring` namespace의 모든 `monthly-sre-audit-*`, `quarterly-sre-audit-*` Job이 `Complete=True` 또는 `Failed=True` 종료 condition을 가진 상태인지 확인함. Job 목록 조회 오류 또는 종료 미확정 Job이 있으면 manifest를 적용하지 않고 중단하며, 이 단계에서는 기존 CronJob schedule·상태를 변경하지 않음.
-2. 새 월간 CronJob, 기존 분기·validation CronJob의 `suspend: true` 상태와 최소 권한 RBAC를 적용하고 suspended 상태를 확인함.
-3. `monitoring/sre-telegram-quarterly-audit-status` ConfigMap이 없을 때만 비밀값 없는 빈 결과 필드를 생성함. 기존 ConfigMap 데이터는 덮어쓰지 않음.
-4. 기존 사용자 `personal-server-quarterly-sre-audit.timer`가 존재하면 `disable --now`로 중지·비활성화함. 이어서 legacy `personal-server-quarterly-sre-audit.service`가 실행 중이 아닌지 확인함. 서비스 상태가 `inactive` 또는 `failed`인 경우에도 `MainPID=0`일 때만 통과시키며, 실행 중이거나 전환 중인 상태 또는 `MainPID`가 0이 아니면 강제 종료하지 않고 설치를 차단함.
-5. 수동 Job 생성 직전에 월간·기존 분기·validation Job의 종료 condition을 다시 확인함. 재시도 시 이전 실행의 종료가 확정되지 않았거나 상태 조회가 불확실하면 두 번째 Job을 생성하지 않음.
-6. 새 월간 CronJob에서 고유 이름의 수동 Job을 생성하고 완료 성공을 대기함.
-7. `monitoring/sre-telegram-quarterly-audit-status`의 기존 `status=passed` 계약과 relay 전달을 확인한 뒤에만 새 월간 CronJob suspend를 해제함. 기존 분기·validation CronJob은 suspended 상태를 유지함.
+1. preflight와 client-side render를 수행하고, `monitoring` namespace의 모든 `monthly-sre-audit-*`, `quarterly-sre-audit-*` Job이 `Complete=True` 또는 `Failed=True` 종료 condition을 가진 상태인지 확인함. Job 목록 조회 오류 또는 종료 미확정 Job이 있으면 manifest를 적용하지 않고 중단하며, 이 단계에서는 기존 CronJob schedule·상태를 변경하지 않음. 2. 새 월간 CronJob, 기존 분기·validation CronJob의 `suspend: true` 상태와 최소 권한 RBAC를 적용하고 suspended 상태를 확인함. 3. `monitoring/sre-telegram-quarterly-audit-status` ConfigMap이 없을 때만 비밀값 없는 빈 결과 필드를 생성함. 기존 ConfigMap 데이터는 덮어쓰지 않음. 4. 기존 사용자 `personal-server-quarterly-sre-audit.timer`가 존재하면 `disable --now`로 중지·비활성화함. 이어서 legacy `personal-server-quarterly-sre-audit.service`가 실행 중이 아닌지 확인함. 서비스 상태가 `inactive` 또는 `failed`인 경우에도 `MainPID=0`일 때만 통과시키며, 실행 중이거나 전환 중인 상태 또는 `MainPID`가 0이 아니면 강제 종료하지 않고 설치를 차단함. 5. 수동 Job 생성 직전에 월간·기존 분기·validation Job의 종료 condition을 다시 확인함. 재시도 시 이전 실행의 종료가 확정되지 않았거나 상태 조회가 불확실하면 두 번째 Job을 생성하지 않음. 6. 새 월간 CronJob에서 고유 이름의 수동 Job을 생성하고 완료 성공을 대기함. 7. `monitoring/sre-telegram-quarterly-audit-status`의 기존 `status=passed` 계약과 relay 전달을 확인한 뒤에만 새 월간 CronJob suspend를 해제함. 기존 분기·validation CronJob은 suspended 상태를 유지함.
 
 lock 경합, Job 목록 조회 오류 또는 종료 미확정 Job으로 manifest 적용 전 차단되면 기존 CronJob schedule·상태는 변경하지 않음. suspended CronJob 적용 이후 legacy service 활성, 수동 Job 실패, 상태 ConfigMap 조회 실패 또는 상태 미확인으로 차단되면 CronJob은 suspended 상태를 유지함. 기존 systemd service·timer template은 이력 보존 목적으로만 남아 있으며, 신규 설치 또는 실행 경로에서 설치·사용하지 않음.
 
@@ -260,9 +252,7 @@ lock 경합, Job 목록 조회 오류 또는 종료 미확정 Job으로 manifest
 
 실제 적용 시 운영자는 `--install`이 생성한 수동 Job 1회가 성공한 뒤 다음 세 가지를 모두 직접 확인해야 함.
 
-1. ConfigMap 기록에 세 단계 결과와 종합 결과가 남았는지 확인함.
-2. 고정 `sre-recovery-lab/sre-pod-recovery` Deployment의 `.spec.replicas=0`으로 정리 요청이 반영되었는지 확인함. Pod는 정상 종료 유예 동안 남을 수 있으며, Kubernetes가 비동기로 종료함. 고정 namespace와 Deployment 자체는 삭제하지 않음.
-3. 기존 SRE Telegram relay를 통해 요약 메시지가 수신되었는지 확인함.
+1. ConfigMap 기록에 세 단계 결과와 종합 결과가 남았는지 확인함. 2. 고정 `sre-recovery-lab/sre-pod-recovery` Deployment의 `.spec.replicas=0`으로 정리 요청이 반영되었는지 확인함. Pod는 정상 종료 유예 동안 남을 수 있으며, Kubernetes가 비동기로 종료함. 고정 namespace와 Deployment 자체는 삭제하지 않음. 3. 기존 SRE Telegram relay를 통해 요약 메시지가 수신되었는지 확인함.
 
 Telegram 수신을 확인하기 전에는 월간 점검 적용 또는 알림 정상으로 판단하지 않음. `--status`는 새 월간 CronJob의 suspend 상태와 ConfigMap의 `run_id`, `status`, `completed_at`, `health_audit`, `backup_check`, `recovery_lab`만 출력하므로 Secret 값은 포함하지 않음. `completed_at`은 서울 기준 `YYYY-MM-DD HH:MM`으로 표시됨. 수동 Job 직후에는 `run_id`와 완료 시각이 해당 실행 결과인지 확인 필요함.
 
@@ -284,17 +274,14 @@ bash infra/k8s/tools/portal-cutover.sh --switch-caddy
 
 ## SRE Pod 자동복구 실습
 
-운영자 전용 실습은 `sre-pod-recovery-lab.sh`로 실행하며, production Portal과 별도의 namespace를 사용함.
-실습 리소스는 sre-recovery-lab-<run-id> namespace에만 생성된다.
+운영자 전용 실습은 `sre-pod-recovery-lab.sh`로 실행하며, production Portal과 별도의 namespace를 사용함. 실습 리소스는 sre-recovery-lab-<run-id> namespace에만 생성된다.
 
 ```bash
 bash infra/k8s/tools/sre-pod-recovery-lab.sh --run
 bash infra/k8s/tools/sre-pod-recovery-lab.sh --cleanup <run-id>
 ```
 
-성공 결과에는 liveness 실패 뒤 `restartCount`가 증가한 사실과 Pod가 `Ready` 조건으로 복구됨이 포함됨.
-이 실습은 다른 namespace, Portal, Compose, Caddy, scheduler를 변경하거나 재시작하지 않는다.
-운영 대상은 변경하지 않는다.
+성공 결과에는 liveness 실패 뒤 `restartCount`가 증가한 사실과 Pod가 `Ready` 조건으로 복구됨이 포함됨. 이 실습은 다른 namespace, Portal, Compose, Caddy, scheduler를 변경하거나 재시작하지 않는다. 운영 대상은 변경하지 않는다.
 
 ## 운영 경계
 
@@ -315,12 +302,8 @@ bash infra/k8s/tools/portal-cutover.sh --cleanup-rolledback
 
 ## 현재 앱·백업 운영 상태
 
-최신 변경은2026-10-14 23:11 [Portal·Relay 운영 적용](../../docs/20260921_프로젝트보완_개발계획.md#2026-10-14-2311-관리자-차량-백업-표시-운영-적용)을 우선함. 정확9653713 소스의 두 이미지·관리자 차량 표시·원본 복원시각·기존 데이터와 일정 보존을 확인함. 다음 다섯 단계 자동 실행과 기간 만료 사본의 실제 삭제는 아직 관찰 전임. 아래10/13·10/12 점검은 당시 근거임.
+Portal·Book·YouTube·Crawler는 K3s에서 단일 writer로 운영함. Portal·Relay의 차량 백업 관리자 표시와 기존 데이터·일정 보존을 검증함. 네 PVC 백업 뒤 차량을 연결한 전체 정기 실행과 기간 만료 사본의 실제 자동 삭제는 추가 관찰이 필요함.
 
-2026-10-13 필수 점검에서 네 앱의 외부 health 12/12, `/ready` 네 곳, 첫 화면 네 곳과 Book·YouTube 검색 응답을 확인함. 네 앱은 각 1개 Running·Ready이며 재시작·OOM 기록이 없음. 실행 이미지의 빌드 커밋과 최신 저장소의 해당 앱 디렉터리 차이는 0임. 실제 데이터 저장·삭제는 이번에 시험하지 않음.
+Portal은 읽기 전용 rootfs와 임시 디스크 설정을 사용함. 통신 차단 NetworkPolicy는 미적용 상태이며 추가 Windows 권한·Caddy 전환·정책 작업은 중지 상태임. 문서 안내를 새 운영 변경 승인으로 사용하지 않음.
 
-Portal 연결 여섯 경로·읽기 전용 rootfs·임시 디스크 설정은 실제 적용된 상태로 유지함. [Portal 적용 결과](../../docs/reviews/20261010_운영보안_잔여항목_보완.md)에 적용 당시 검증과 최신 점검 범위를 구분함. 운영 NetworkPolicy는 0개이며 통신 차단이 강제된 상태로 표현하지 않음. 중지한 Caddy 전환·추가 권한 변경·정책 적용의 실행 안내는 제거함.
-
-네 백업 이미지는 2026-10-11 06:58 전환됐으며, 2026-10-12 02:30~02:38 순차 백업에서 네 단계의 백업·복원 검증·보존 처리가 성공함. 잠금 해제·단일 writer·Ready 회복을 확인함. 이 결과는10/12 당시 검증이며 후속 일자의 성공을 대신하지 않음. [백업 이미지 운영 적용 기록](../../docs/reviews/20261011_백업이미지_운영적용.md)을 참조함. 개별 CronJob 네 개는 suspend 상태로 유지하고 기존 02:30 순차 실행을 사용하며, 활성 CronJob에 전체 manifest를 다시 적용하지 않음.
-
-기존 실제 Windows 권한 변경과 암호화 복구 기록은 [완료·복구 기록](../../docs/reviews/20261012_Windows권한_잔여복구.md)에 보존함. 문서 수정은 추가 운영 변경이나 복구 승인을 부여하지 않음. 현재 상태의 상세 근거와 작업 기준은 [프로젝트 현황](../../docs/20260921_프로젝트보완_개발계획.md#2026-10-13-현재-상태와-작업-범위)을 따름.
+현재 백업·감시 계약은 [운영 참조](../../docs/operations-reference.md), 남은 검증과 승인 경계는 [현재 개발 상태](../../docs/20260921_프로젝트보완_개발계획.md)를 따름.
