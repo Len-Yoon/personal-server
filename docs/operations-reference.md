@@ -96,6 +96,23 @@ Grafana, Prometheus, Telegram relay, Portal PVC 백업은 [K3s 운영 문서](..
 
 Loki 로그 관측 실습은 `observability-lab` namespace의 전용 자원과 `monitoring`의 전용 Grafana ConfigMap 2개만 대상으로 함. 적용·검증·명시적 롤백 명령 및 PVC 보존 기준은 [K3s 운영 문서의 Loki 실습 절](../infra/k8s/README.md#loki-로그-관측-실습)을 따름. [PR #331](https://github.com/Len-Yoon/personal-server/pull/331)의 CI·Trivy·독립 검토 통과 후 `f66a42a`로 병합되었으며, 승인된 N100 적용과 샘플 로그 조회·Ansible 멱등성·롤백 검증을 완료함. [운영 검증 결과](reviews/20261004_Loki_Ansible_실습_N100운영검증결과.md)에 최초 조회 실패와 미검증 항목을 분리 기록함.
 
+## 차량 DB 백업과 자동 보관
+
+2026-10-14 23:11 실제 적용 기록 기준임. [배포 검증·소스·이미지 기록](20260921_프로젝트보완_개발계획.md#2026-10-14-2311-관리자-차량-백업-표시-운영-적용)과 [차량 자동화 상세 안내](../car-care-worker/tools/automation/README.md)를 참조함.
+
+| 항목 | 현재 적용 기준 | 비고 |
+|---|---|---|
+| 일정 | 매일02:30 KST Portal→Book→YouTube→Crawler→차량 DB | 별도05:30 차량 timer는disabled/inactive. 기존 네 단계 모두 성공한 뒤 차량 호출 |
+| 대상 | 차량관리 SQLite DB만 기존 전용 원격 폴더에 암호화 보관 | OAuth·자격 증명 데이터는 백업 대상 제외 |
+| 변경 없음 | 논리 내용이 같으면 업로드·원격 정리 생략 | 일요일에는 실제 업로드·재다운로드·격리 복원 검증 |
+| 원격 보관 | 일간7·주간4·월간3 구간별 최신본과 전체 최신7개 안전 하한 | 같은 초 동률 보존. 새 백업·복원 성공 뒤 정확 계획/현재 inventory/암호문 digest/최신 실복원 검증 후 삭제 |
+| 실행 기록 | 30일 지난 성공 Pod·완료journal 쌍만 검사당 최대1개 정리 | 최신·실패·불확실 기록, 백업/보관 증적·삭제 기록 보존 |
+| 누락 감지 | 서버user timer5분,09:00 이후 당일 미완료 통보 | 백업 재실행 없음. 최초02:30 이후 활성화한 날은 다음날부터 판정 |
+| 상태 표시 | 인증 관리자 화면에서 차량 DB 원본 증적·최근 실행·정리 결과 표시 | 복원 증거는원본시각+8일. 관측·변경 없음 시각으로 유효 기간 연장하지 않음 |
+| 잠금 | 기존 공유잠금 사용, 생산 중 모니터 게시·알림·정리 유예 | 잠금이 비정상적으로 계속 점유되면 누락 알림도 지연될 수 있음 |
+| 실제 확인 | 두 원격 사본 보존·삭제0, 실제 인증 화면/API 정상·비인증 상세 숨김 | Portal 외부·Relay 내부 health각10초 간격3회 정상 |
+| 확인 필요 | 10/15 02:30 첫 다섯 단계 정기 실행·기간 경과 실제 삭제·Telegram 단말 수신 | 서버 자동 감시이며 매일 ChatGPT 점검 불필요 |
+
 ## 장애 알림과 복구
 
 | 신호 | 감지 방식 | 알림 |
@@ -104,6 +121,7 @@ Loki 로그 관측 실습은 `observability-lab` namespace의 전용 자원과 `
 | N100 기반 구성요소 이상 | `personal-server-autostart`의 Supervisor가 Daemon을 단일 관리하고, Daemon이 3분 간격으로 WSL·K3s·Portal·NodePort·Tunnel 점검 | Tunnel 장애 알림 전송 성공 뒤 정상 복구 전환 시 Telegram 각 1회 |
 | K3s·노드·워크로드 이상 | Prometheus Alertmanager → SRE relay | Telegram |
 | Portal PVC 백업·복원 검증 | 02:30 순차 실행기의 소유 K3s Job·증적·순차 상태 | Telegram SRE relay |
+| 차량 DB 백업 실패·누락 | 차량 완료journal·복원 증적 및5분 모니터 | 기존 Alertmanager→SRE relay. 실제 단말 수신은 별도 확인 |
 | Compose 컨테이너 이상 | HomeOps 진단·제한형 복구 | 관리자 상태·필요 시 Telegram |
 | 뉴스 수집 지연·연속 실패 | Prometheus `NewsCollectionStale` | SRE relay → Telegram |
 
