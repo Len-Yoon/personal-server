@@ -26,12 +26,12 @@ ROOT = Path(__file__).resolve().parents[2]
 def completed_write(page, url, action):
     """Observe the specific write response, independent of DOM reload timing."""
     with page.expect_response(lambda response: response.url == url and response.request.method == 'POST') as pending:
-        with page.expect_request_finished(lambda request: request.url == url and request.method == 'POST'):
-            action()
+        action()
     response = pending.value
-    assert response.ok, f'write request failed: {urlsplit(url).path} HTTP {response.status}'
+    assert response.ok and response.status == 200, f'write request failed: {urlsplit(url).path} HTTP {response.status}'
     # Product JS reloads immediately; response bodies may be evicted on navigation.
-    # Correlate the completed HTTP write, then verify persisted state below.
+    # Routes write before responding; verify the persisted bytes and DOM below.
+    # Immediate reload can abort requestfinished, so it is not a success signal.
     return response.status
 
 

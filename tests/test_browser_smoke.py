@@ -71,7 +71,7 @@ class PortalBrowserSmokeContracts(unittest.TestCase):
                 events.append('delivered-' + self.name)
             @property
             def value(self):
-                if 'delivered-request' not in events or events[-1] != 'delivered-response':
+                if not events or events[-1] != 'delivered-response':
                     raise AssertionError('response read before delivery')
                 return response
         class Page:
@@ -80,14 +80,12 @@ class PortalBrowserSmokeContracts(unittest.TestCase):
                 self_test.assertFalse(predicate(SimpleNamespace(url=response.url, request=SimpleNamespace(method='GET'))))
                 self_test.assertFalse(predicate(SimpleNamespace(url='https://len.pe.kr/files/trash', request=response.request)))
                 return Pending('response')
-            def expect_request_finished(self, predicate):
-                self_test.assertTrue(predicate(response.request))
-                self_test.assertFalse(predicate(SimpleNamespace(url=response.url, method='GET')))
-                return Pending('request')
+            def expect_request_finished(self, *_):
+                raise AssertionError('reload may abort requestfinished; do not await it')
         self_test = self
         result = module.completed_write(Page(), response.url, lambda: events.append('action'))
         self.assertEqual(result, 200)
-        self.assertEqual(events, ['armed-response', 'armed-request', 'action', 'delivered-request', 'delivered-response'])
-        response.ok, response.status = False, 500
-        with self.assertRaisesRegex(AssertionError, 'HTTP 500'):
-            module.completed_write(Page(), response.url, lambda: events.append('action'))
+        self.assertEqual(events, ['armed-response', 'action', 'delivered-response'])
+        for response.ok, response.status in [(False, 500), (True, 207)]:
+            with self.assertRaisesRegex(AssertionError, f'HTTP {response.status}'):
+                module.completed_write(Page(), response.url, lambda: events.append('action'))
