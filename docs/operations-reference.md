@@ -34,52 +34,9 @@ Portal PVC는 `portal-web-files-dynamic`, `portal-web-state-dynamic` 두 개이�
 
 ## 운영 상태 확인 기록
 
-### 최신 백업 확인: 2026-10-10
+운영 판정은 현재 Job·원본 백업/복원 증적·만료·공유잠금·단일 writer·Ready와 외부 health를 함께 대조함. 코드 병합·Job 종료·업로드 성공만으로 복원 가능성과 알림 수신을 확정하지 않음. 백업 생성 시각과 상태 조회 시각을 구분하며 다음 정기 실행까지 유효하지 않은 이전 증거는 재사용하지 않음.
 
-새 보관 정책의 첫 02:30 정기 실행을 07:25 이후 읽기 전용 조회로 확인함. Portal → Book → YouTube → Crawler 네 Job 모두 Complete, 신규 백업·원격 복원·보관 정리 PASS, 전체 상태는 02:36 completed임. 네 백업 증거는 해당 Job 시작 이후 생성됐고 조회 시 유효하며, Portal 증거 export와 SystemAgent `backup_verified=true`의 최신 시각이 일치함. 잠금은 모두 해제되고 네 writer Ready=1·Relay available=1, 외부 health 12/12 HTTP 200임. 순차 service `Result=success/ExecMainStatus=0`, timer active·다음 실행 2026-10-11 02:30 확인함. [상세 Job·만료 시각·보관 정책](reviews/20261009_백업보관정책_보완.md)을 따름. 인증의 영구 유효성·Telegram 단말 수신·원격 공유 권한 감사는 이 성공으로 확정하지 않음.
-
-### 이전 증적 만료 보완 확인: 2026-10-09
-
-2026-10-09 20:13 실제 조회에서 당일 02:30 순차 실행 네 Job 모두 Complete, 전체 02:37 completed를 확인함. Book·YouTube·Crawler는 당일 새 백업·격리 복원 성공·증적 유효함. Portal은 변경 없음으로 10월 8일 09:26 증적을 재사용했고 10월 9일 09:26 만료되어 그 조회 시점의 유효성은 실패함. 기존 1시간 재사용창을 다음 일일 실행과 완료 여유까지 검사하도록 보완·운영 적용했으며, 코드·이미지·운영 적용 단계는 [증적 만료 보완 기록](reviews/20261009_Portal백업_증적만료보완.md)을 따름. 당일 실행 성공을 현재 증적 유효성과 혼동하지 않음. 20:40 신규 백업과 생산자 복원 검증 후 20:41 수동 Job 종료를 확인하고, 이후 별도 격리 복원·공식 export·소비자 backup_verified=true를 확인함. 새 Portal 증적 만료는 2026-10-10 20:40이며 최종 네 서비스 증적 모두 유효함. 이후 2026-10-10 정기 실행 관측 결과는 위 최신 절을 따름.
-
-### 이전 수동 복구 확인: 2026-10-08
-
-아래는 해당 운영 검증 시점의 결과임. 이번 문서 갱신에서 전체 서비스를 새로 live 조회한 결과로 해석하지 않음. 최신 근거는 [Portal 실패 복구 기록](reviews/20261008_Portal백업_실패복구.md)과 [Production 인증 후속 완료](reviews/20261008_백업장기인증_배포진행현황.md#7-production-인증-및-실패-복구-후속-완료)를 따름.
-
-| 대상 | 실행 주체·확인 결과 | 남은 확인 | 비고 |
-|---|---|---|---|
-| 네 PVC 백업 | 사용자 systemd `personal-server-pvc-backup-sequence.timer` active/enabled, 매일 02:30 KST부터 Portal → Book → YouTube → Crawler 순서 | 수정·인증 교체 후 다음 정기 실행 | 네 개별 CronJob은 `suspend: true`, jobTemplate만 순차 실행에 사용함 |
-| Portal | 02:30 실행의 writer-observation 실패 수정·이미지 적용, 새 인증의 신규 업로드·격리 복원 PASS | 자동 실행의 실제 성공 | 실패 이력을 초기화하거나 기존 Job을 재생성하지 않음 |
-| Google 인증 | Production 게시 후 새 사용자 동의·refresh 및 암호화 설정 한 키 채택 완료 | Google 앱 인증 심사·토큰 영구 유효성은 보장하지 않음 | 다른 Secret 키·사용자 메타데이터 보존, 이전 Testing 후보 미채택 |
-| 증적 소비자 | 새 ID·시각·digest의 공식 atomic export 및 SystemAgent `backup_verified=true` | 다음 실행의 업로드·export 결과를 각각 확인 | 읽기 전용 마운트, 원본 만료 임의 연장 없음 |
-| Book·YouTube·Crawler | 같은 새벽 순차 실행의 세 백업 성공 | 세 서비스 인증의 장기 유지 | Portal 새 인증 전환을 다른 서비스의 인증 변경으로 확대하지 않음 |
-
-상태 확인은 timer/service·소유 Job의 종료·순차 상태 ConfigMap·Portal 증적·소비자 판정을 함께 대조함. 중지된 개별 CronJob의 `lastScheduleTime`만으로 순차 백업 미실행을 판정하지 않음. 설치용 전체 manifest 재적용·기존 상태 초기화·개별 Cron 재활성화는 일상 점검 절차가 아님.
-
-### 과거 조회: 2026-09-23~28
-
-아래 활성 상태와 마지막 성공 시각은 당시 기록이며 현재 백업 스케줄러를 뜻하지 않음. 월간 SRE·SLO의 과거 성공 시각도 최신 live 성공으로 확장하지 않음.
-
-2026-09-23 주 담당이 N100의 CronJob 상태를 읽기 전용으로 조회함. 아래 시각은 서울 기준이며, Kubernetes의 성공 기록은 Telegram 수신이나 백업 내용의 별도 재검증을 의미하지 않음.
-
-| 대상 | 조회 상태 | 일정 | 마지막 성공 | 비고 |
-|---|---|---|---|---|
-| Portal PVC 백업 | CronJob 활성 | 매일 03:00 | 2026-09-23 03:10 | 최신 Job `SuccessCriteriaMet` |
-| 월간 SRE 통합 점검 | CronJob 활성 | 매월 1일 03:30 | 2026-09-16 14:01 | 과거 성공 기록 |
-| 분기 SRE 점검 | CronJob 중지 | 기존 분기 일정 보존 | 2026-09-14 21:16 | 자동 실행 안 함 |
-| 일일 SLO 증적 | CronJob 활성 | 매일 02:15 | 2026-09-23 02:15 | freshness 집계 보완 적용 뒤 최신 Job `SuccessCriteriaMet` |
-
-확인 경로는 각각 `personal-server/portal-pvc-backup`, `monitoring/monthly-sre-audit`, `monitoring/quarterly-sre-audit`, `monitoring/slo-daily-evidence`의 spec.suspend와 status.lastSuccessfulTime임. 2026-09-23 조회에서 Portal 백업과 SLO CronJob은 모두 활성이고 active Job 없이 최신 Job이 `SuccessCriteriaMet`으로 종료됨. SLO 실패 원인과 보완 내용은 [원인 분석](reviews/20260921_SLO증적실패_원인분석.md), 운영 반영 근거는 [뉴스·SLO 운영 적용 검증 결과](reviews/20260922_뉴스_SLO_운영적용_검증결과.md)를 따름.
-
-2026-09-27 후속 조회에서 Portal 백업 Job은 성공, active Job은 0으로 확인함. 최신 백업 증적은 `portal_pvc_backup=PASS`였고, 해당 원격 암호문 전체의 SHA-256을 읽기 전용으로 재계산하여 증적의 `artifact_digest`와 일치함을 확인함. 원격 저장소의 공유·접근 권한은 이 해시 검사로 확인되지 않으므로 **확인 필요**로 유지함. 다른 CronJob의 마지막 성공 시각은 위 2026-09-23 조회 이후 이 문서에서 재확인하지 않음.
-
-2026-09-28 Book·YouTube·Crawler PVC는 N100에서 각각 원격 암호화 백업과 격리 복원을 수동 Job으로 검증함. 세 Job의 성공 증적·잠금 해제·단일 writer·PVC Bound·외부 health를 확인함. 이후 세 CronJob에 시작 마감 300초를 적용하고 자동 실행을 활성화함. 활성화 직후 신규 Job은 없었으며 writer·잠금·외부 health가 유지됨. 다음 정기 실행 성공과 실패 알림 최종 수신은 확인 필요. Portal 정기 백업 상태는 변경하지 않음. [수동 검증 결과](reviews/20260928_서비스별_PVC_백업_N100_수동검증결과.md)와 [자동 실행 적용 결과](reviews/20260928_서비스별_PVC_백업_자동실행_적용결과.md)를 따름.
-
-2026-09-28 읽기 전용 조사에서 Crawler 정기 백업 Job 실패는 확인됐으나 Relay 전달 기록은 없었음. K3s Job 목록 항목에 `apiVersion`·`kind`가 생략된 경우 기존 Relay 필터가 해당 Job을 제외하는 원인을 확인함. 맥 저장소에서 목록 항목의 두 필드가 생략돼도 소유 CronJob UID·실패 조건을 검증하도록 수정하고, Book·YouTube·Crawler 정기 백업이 각각 04:00·08:30·13:00 KST 이후 30분 내 시작되지 않으면 서비스별로 하루 한 번 알리는 감시를 추가함. 감시 시작일은 첫 실행 다음 날로 저장해 설치 전 중지된 일정을 소급해 오보하지 않으며, 장애 복구 시 전날까지 확인함. 현재 중지된 CronJob은 대상에서 제외하고 리소스 누락·설정 불일치는 감시 오류로 처리함. 단일 `lastScheduleTime`만으로는 전날 누락 후 오늘 실행된 경우나 과거 중지 상태를 재구성할 수 없어 그 구간은 **확인 필요**임. 이후 사용자 승인으로 [N100 Relay 이미지를 적용](reviews/20260928_백업미실행감시_N100운영반영결과.md)했고 기존 알림 상태 보존·Pod 목표 imageID·외부 health를 확인함. 과거 Crawler 실패 알림은 Telegram API 수락과 전달 기록까지 확인했으며 단말 수신은 **확인 필요**임. 후속 조사에서 수동 Book 진단 Job이 CronJob 소유 관계만으로 정기 실패로 오분류된 것을 확인함. 정기 Job에만 있는 예약 시각 annotation으로 구분하고, 실패 알림에 실제 예약 시각(KST)을 표시하도록 저장소를 보완함. [N100 Relay 운영 적용·검증](reviews/20260928_백업알림오분류_N100운영적용결과.md)을 완료했으며, 9월 29일 Book·YouTube 첫 정기 백업과 Crawler 다음 정기 백업 결과는 확인 필요함.
-
-같은 날 맥 저장소에 세 CronJob의 [운영 목표 상태](../infra/k8s/backup-automation/production-cronjob-state.json)와 제한 적용 도구를 반영하고 N100을 해당 구현 커밋으로 fast-forward함. N100의 목표 검증은 통과했고 기존 값과 일치하여 CronJob 쓰기는 0건이었음. 독립 운영 검토와 네 서비스 외부 health 12/12 HTTP 200을 확인함. [동기화 결과](reviews/20260928_백업운영목표상태_동기화결과.md)에 범위와 잔여 확인 사항을 기록함.
-
-저장소의 `suspend: true`, 앱 `replicas: 0`, sentinel image는 초기 적용용 안전 기본값임. 현재 실행 상태나 운영 미적용을 단독으로 증명하지 않음. 저장소 병합, 운영 동기화, 이미지 교체, 자동 실행 활성화, 실제 검증을 각각 기록함. Portal·뉴스의 2026-09-21 이미지 적용 근거는 [배포 검증 결과](reviews/20260921_앱배포_검증결과.md), 후속 Book·Portal 교체는 [K3s 앱 배포 결과](reviews/20260921_K3s앱배포_검증결과.md), 차량 교체는 [차량 배포 결과](reviews/20260921_차량배포_검증결과.md)를 따름. 뉴스 10차 목표 이미지는 2026-09-22에 적용했으며 SLO collector도 같은 운영 검증에서 갱신함. 2026-09-27 A2·A4·A5 이미지 교체와 A3 검색 코드의 Portal 실행 확인은 [최신 고도화 적용 결과](20260921_프로젝트보완_개발계획.md#2026-09-27-a2a4a5-고도화-및-n100-적용-결과)를 따름.
+[백업 운영 기준](#차량-db-백업과-자동-보관)과 [현재 확인 필요 사항](20260921_프로젝트보완_개발계획.md#확인-필요-사항)을 기준으로 점검함.
 
 ## 일상 상태 확인
 
@@ -94,11 +51,11 @@ bash infra/k8s/tools/sre-health-audit.sh
 
 Grafana, Prometheus, Telegram relay, Portal PVC 백업은 [K3s 운영 문서](../infra/k8s/README.md)를 따름.
 
-Loki 로그 관측 실습은 `observability-lab` namespace의 전용 자원과 `monitoring`의 전용 Grafana ConfigMap 2개만 대상으로 함. 적용·검증·명시적 롤백 명령 및 PVC 보존 기준은 [K3s 운영 문서의 Loki 실습 절](../infra/k8s/README.md#loki-로그-관측-실습)을 따름. [PR #331](https://github.com/Len-Yoon/personal-server/pull/331)의 CI·Trivy·독립 검토 통과 후 `f66a42a`로 병합되었으며, 승인된 N100 적용과 샘플 로그 조회·Ansible 멱등성·롤백 검증을 완료함. [운영 검증 결과](reviews/20261004_Loki_Ansible_실습_N100운영검증결과.md)에 최초 조회 실패와 미검증 항목을 분리 기록함.
+Loki 로그 관측 실습은 `observability-lab` namespace의 전용 자원과 `monitoring`의 전용 Grafana ConfigMap 2개만 대상으로 함. 적용·검증·명시적 롤백 명령 및 PVC 보존 기준은 [K3s 운영 문서의 Loki 실습 절](../infra/k8s/README.md#loki-로그-관측-실습)을 따름. [운영 검증 결과](reviews/20261004_Loki_Ansible_실습_N100운영검증결과.md)에 최초 조회 실패와 미검증 항목을 분리 기록함.
 
 ## 차량 DB 백업과 자동 보관
 
-2026-10-14 23:11 실제 적용 기록 기준임. [배포 검증·소스·이미지 기록](20260921_프로젝트보완_개발계획.md#2026-10-14-2311-관리자-차량-백업-표시-운영-적용)과 [차량 자동화 상세 안내](../car-care-worker/tools/automation/README.md)를 참조함.
+현재 적용된 백업·보관·감시 기준임. [현재 검증 상태](20260921_프로젝트보완_개발계획.md)와 [차량 자동화 상세 안내](../car-care-worker/tools/automation/README.md)를 참조함.
 
 | 항목 | 현재 적용 기준 | 비고 |
 |---|---|---|
@@ -110,8 +67,8 @@ Loki 로그 관측 실습은 `observability-lab` namespace의 전용 자원과 `
 | 누락 감지 | 서버user timer5분,09:00 이후 당일 미완료 통보 | 백업 재실행 없음. 최초02:30 이후 활성화한 날은 다음날부터 판정 |
 | 상태 표시 | 인증 관리자 화면에서 차량 DB 원본 증적·최근 실행·정리 결과 표시 | 복원 증거는원본시각+8일. 관측·변경 없음 시각으로 유효 기간 연장하지 않음 |
 | 잠금 | 기존 공유잠금 사용, 생산 중 모니터 게시·알림·정리 유예 | 잠금이 비정상적으로 계속 점유되면 누락 알림도 지연될 수 있음 |
-| 실제 확인 | 두 원격 사본 보존·삭제0, 실제 인증 화면/API 정상·비인증 상세 숨김 | Portal 외부·Relay 내부 health각10초 간격3회 정상 |
-| 확인 필요 | 10/15 02:30 첫 다섯 단계 정기 실행·기간 경과 실제 삭제·Telegram 단말 수신 | 서버 자동 감시이며 매일 ChatGPT 점검 불필요 |
+| 실제 확인 | 원격 암호문 digest·최신본 복원·인증 화면/API 정상·비인증 상세 숨김 | Portal 외부·Relay 내부 health각10초 간격3회 정상 |
+| 확인 필요 | 차량을 포함한 첫 다섯 단계 정기 실행·기간 경과 실제 삭제·Telegram 단말 수신 | 서버 자동 감시이며 매일 ChatGPT 점검 불필요 |
 
 ## 장애 알림과 복구
 
@@ -163,15 +120,11 @@ python3 infra/k8s/tools/homeops-auth-configure.py --go --expected-commit "$(git 
 
 ## K3s 애플리케이션 이미지 교체 절차
 
-K3s 애플리케이션의 런타임 이미지만 교체하는 운영 절차임. 실제 적용은 서비스별 별도 승인 후 운영자가 수행하며, 저장소 변경 또는 CI 통과를 운영 적용 완료로 간주하지 않음. 검증된 이미지 digest·소스 커밋·archive 체크섬은 배포 증적에 기록할 수 있음. Secret 값·내부 IP·개인 접속 경로는 기록하지 않음. 현재 공식 upgrade 도구 지원 대상은 `portal-web`, `crawler-worker`, `book-memo`임. YouTube는 이 도구의 지원 대상이 아니며, [검증된 이미지 단일 필드 조건부 변경 절차](reviews/20260930_뉴스보관함_메모내보내기_N100운영반영결과.md)를 따른 사례가 있음. Book의 이전 2026-09-21 전환 절차와 현재 이미지 교체 도구는 구분함.
+K3s 애플리케이션의 런타임 이미지만 교체하는 운영 절차임. 실제 적용은 서비스별 별도 승인 후 운영자가 수행하며, 저장소 변경 또는 CI 통과를 운영 적용 완료로 간주하지 않음. 검증된 이미지 digest·소스 커밋·archive 체크섬은 배포 증적에 기록할 수 있음. Secret 값·내부 IP·개인 접속 경로는 기록하지 않음. 현재 공식 upgrade 도구 지원 대상은 `portal-web`, `crawler-worker`, `book-memo`임. YouTube는 이 도구의 지원 대상이 아니며, [검증된 이미지 단일 필드 조건부 변경 절차](reviews/20260930_뉴스보관함_메모내보내기_N100운영반영결과.md)를 따른 사례가 있음.
 
-1. macOS에서 `k3s-app-image-build.sh`로 대상 애플리케이션의 Linux AMD64 OCI archive를 생성함. `latest`가 아닌 immutable tag만 사용하고 archive SHA-256을 확인함.
-2. N100에서 대상 애플리케이션명을 명시한 별도 운영 승인을 받은 후에만 `k3s-app-image-import.sh --go`로 archive와 SHA-256을 검증하여 반입함. importer가 출력한 canonical immutable digest 별칭만 이후 단계의 이미지 입력으로 사용함.
-3. `k3s-app-upgrade.sh --check`으로 Deployment readiness, Service·Endpoint, 반입된 Linux AMD64 digest 이미지와 현재 애플리케이션 health를 읽기 전용으로 확인함.
-4. `k3s-app-upgrade.sh --go`는 check 성공 이후에도 대상 애플리케이션명을 명시한 별도 운영 승인을 받은 경우에만 실행함. 실행 시 현재 immutable digest를 `--expected-current-image`으로 지정하여 변경 전 이미지가 예상과 일치할 때만 patch함.
-5. rollout과 대상 애플리케이션 health를 확인한 뒤 다시 `--check`으로 결과를 검증함. Portal 교체는 Pod 내부 health와 공개 Portal health를 10초 간격으로 3회 모두 HTTP 200으로 확인함.
+1. macOS에서 `k3s-app-image-build.sh`로 대상 애플리케이션의 Linux AMD64 OCI archive를 생성함. `latest`가 아닌 immutable tag만 사용하고 archive SHA-256을 확인함. 2. N100에서 대상 애플리케이션명을 명시한 별도 운영 승인을 받은 후에만 `k3s-app-image-import.sh --go`로 archive와 SHA-256을 검증하여 반입함. importer가 출력한 canonical immutable digest 별칭만 이후 단계의 이미지 입력으로 사용함. 3. `k3s-app-upgrade.sh --check`으로 Deployment readiness, Service·Endpoint, 반입된 Linux AMD64 digest 이미지와 현재 애플리케이션 health를 읽기 전용으로 확인함. 4. `k3s-app-upgrade.sh --go`는 check 성공 이후에도 대상 애플리케이션명을 명시한 별도 운영 승인을 받은 경우에만 실행함. 실행 시 현재 immutable digest를 `--expected-current-image`으로 지정하여 변경 전 이미지가 예상과 일치할 때만 patch함. 5. rollout과 대상 애플리케이션 health를 확인한 뒤 다시 `--check`으로 결과를 검증함. Portal 교체는 Pod 내부 health와 공개 Portal health를 10초 간격으로 3회 모두 HTTP 200으로 확인함.
 
-대상 rollout 또는 health 검증 실패 시 도구는 직전 immutable digest로 **1회만** rollback을 시도함. 뉴스 10차는 구 버전이 새 outbox를 보존하지 못해 [복구 호환 검토안](reviews/20260921_뉴스복구호환_적용검토안.md)의 중간 이미지를 거쳐 2026-09-22 적용했음. 이는 완료된 전환 이력이며 새 이미지의 rollback 호환성을 자동 보장하지 않음. rollback 실패·상태 불확실·두 번째 시도 필요 상황에서는 자동 재실행하지 않고 운영자가 상태를 확인한 뒤 별도 판단함. 이 절차는 Deployment의 컨테이너 이미지 외에는 변경하지 않으며 PVC, Secret, Caddy, Cloudflare Tunnel, Docker Compose를 생성·수정·삭제·재기동하지 않음.
+대상 rollout 또는 health 검증 실패 시 도구는 직전 immutable digest로 **1회만** rollback을 시도함. 이는 완료된 전환 이력이며 새 이미지의 rollback 호환성을 자동 보장하지 않음. rollback 실패·상태 불확실·두 번째 시도 필요 상황에서는 자동 재실행하지 않고 운영자가 상태를 확인한 뒤 별도 판단함. 이 절차는 Deployment의 컨테이너 이미지 외에는 변경하지 않으며 PVC, Secret, Caddy, Cloudflare Tunnel, Docker Compose를 생성·수정·삭제·재기동하지 않음.
 
 ### 추가형 DB 변경·Compose 이미지 교체 시 확인 기준
 
@@ -180,7 +133,7 @@ K3s 애플리케이션의 런타임 이미지만 교체하는 운영 절차임. 
 - HomeOps·차량은 기존 Compose 파일·환경 값·권한·마운트·네트워크·port binding을 대조하고 대상만 교체함. HomeOps의 현재 관리 집합을 기본값으로 넓히지 않음. bridge 주소 변수의 기본값과 실제 기존 바인딩이 같다고 가정하지 않으며, Secret·내부 주소를 검사 로그나 신규 파일에 기록하지 않음.
 - Docker ImageId는 저장 엔진에 따라 config digest와 다를 수 있음. archive 체크섬과 실제 manifest/config·RootFS 대조로 확인한 런타임 ID를 사용함. 배열 순서가 무의미한 환경·마운트 비교는 실제 값·중복 환경 이름을 검사한 뒤 정규화함.
 
-이번 기능 보완의 소스·서비스별 이미지·중단/원복·검증 이력은 [2026-10-06 운영 적용 결과](reviews/20261006_기능실패경계_N100운영적용결과.md)를 따름. 후속 작업은 해당 시점의 증적을 현재 실행 상태로 가정하지 않고 다시 읽기 전용 점검함.
+후속 작업은 해당 시점의 증적을 현재 실행 상태로 가정하지 않고 다시 읽기 전용 점검함.
 
 ## Book Memo K3s 현재 운영 기준
 
@@ -197,11 +150,7 @@ K3s 애플리케이션의 런타임 이미지만 교체하는 운영 절차임. 
 
 준비·전환 순서는 다음과 같음.
 
-1. 검증된 Linux AMD64 OCI 이미지를 `k3s-app-image-import.sh --go`로 반입하고, 성공 출력의 canonical digest 별칭을 다음 단계 입력으로 사용함.
-2. 운영자가 기존 런타임 설정과 동일한 `book-memo-runtime` Secret을 사전 시딩함. Secret 값은 조회·출력·복제하지 않음.
-3. 별도 승인 후 `book-memo-prepare.sh --go --image docker.io/library/personal-server-book-memo@sha256:<digest>`를 실행함. 이 도구만 importer가 등록·검증한 canonical immutable digest 별칭을 sentinel에 메모리에서 치환하고 PVC·Deployment·Service를 replica 0으로 생성함. 이미 정확히 준비된 세 리소스가 있는 경우에는 `--bind-existing --image ...`만 사용하여 리소스 생성·수정 없이 PVC 바인딩만 수행함. 두 모드는 함께 지정할 수 없음. `WaitForFirstConsumer` StorageClass에서는 PVC 바인딩만을 위해 동일 digest 이미지의 임시 비작성 Pod를 생성함. 이 Pod는 서비스 계정 토큰·환경 변수·Secret을 사용하지 않고, read-only PVC만 mount한 상태로 짧게 대기한 뒤 소유 label과 UID를 재확인해 삭제함. 앱 writer 기동·원본 데이터 읽기·데이터 복사는 수행하지 않음.
-4. `book-memo-cutover.sh --check`으로 writer 부재·PVC·이미지·Deployment 계약을 읽기 전용 검증함.
-5. 별도 전환 승인 후에만 `book-memo-cutover.sh --go`를 실행함.
+1. 검증된 Linux AMD64 OCI 이미지를 `k3s-app-image-import.sh --go`로 반입하고, 성공 출력의 canonical digest 별칭을 다음 단계 입력으로 사용함. 2. 운영자가 기존 런타임 설정과 동일한 `book-memo-runtime` Secret을 사전 시딩함. Secret 값은 조회·출력·복제하지 않음. 3. 별도 승인 후 `book-memo-prepare.sh --go --image docker.io/library/personal-server-book-memo@sha256:<digest>`를 실행함. 이 도구만 importer가 등록·검증한 canonical immutable digest 별칭을 sentinel에 메모리에서 치환하고 PVC·Deployment·Service를 replica 0으로 생성함. 이미 정확히 준비된 세 리소스가 있는 경우에는 `--bind-existing --image ...`만 사용하여 리소스 생성·수정 없이 PVC 바인딩만 수행함. 두 모드는 함께 지정할 수 없음. `WaitForFirstConsumer` StorageClass에서는 PVC 바인딩만을 위해 동일 digest 이미지의 임시 비작성 Pod를 생성함. 이 Pod는 서비스 계정 토큰·환경 변수·Secret을 사용하지 않고, read-only PVC만 mount한 상태로 짧게 대기한 뒤 소유 label과 UID를 재확인해 삭제함. 앱 writer 기동·원본 데이터 읽기·데이터 복사는 수행하지 않음. 4. `book-memo-cutover.sh --check`으로 writer 부재·PVC·이미지·Deployment 계약을 읽기 전용 검증함. 5. 별도 전환 승인 후에만 `book-memo-cutover.sh --go`를 실행함.
 
 준비 도구는 Docker·원본 데이터·Secret 값을 읽거나 변경하지 않으며 replica를 1로 올리지 않음. 임시 Pod는 server dry-run 결과에서 단일 컨테이너·init/ephemeral container 없음·lifecycle 없음·비작성 보안 계약을 먼저 검증한 뒤에만 실제 생성함. 생성 응답이 불확실하면 이름·소유 label·UID를 다시 확인한 경우에만 UID 사전조건 삭제를 시도하며, 그렇지 않으면 다른 Pod를 삭제하지 않고 복구 필요 상태로 중단함. 임시 PVC 바인딩 Pod가 Ready 또는 PVC Bound가 되지 않거나 소유권·UID가 달라지면 기존 PVC·Deployment·Service를 삭제하지 않고 중단함. `--go`는 기존 PVC·Deployment·Service 중 하나라도 있으면 중단하고, `--bind-existing`은 세 리소스의 안전 계약·replica 0·writer Pod 부재를 모두 확인한 경우에만 수행함.
 
@@ -226,8 +175,7 @@ K3s 애플리케이션의 런타임 이미지만 교체하는 운영 절차임. 
 - Docker 원본 `data/youtube-memo`는 롤백·증적 자산으로 보존함. 일상 정리·자동 배포·이미지 정리에서 삭제하지 않음.
 - 정적 `infra/k8s/apps/youtube-memo.yaml`은 초기 준비용 sentinel manifest임. 현재 production Deployment·Service·PVC에 정적 `youtube-memo.yaml`을 재적용하지 않음.
 - Docker Compose의 `youtube-memo` 서비스 정의는 검증된 롤백 자산으로 유지함. Caddy는 중지된 Docker rollback 컨테이너의 healthy 상태를 기다리지 않도록 `youtube-memo` Compose `depends_on`을 사용하지 않음.
-- K3s에서 새 쓰기가 발생한 이후에는 Docker를 단순 재기동하지 않음. Docker 원본과 PVC 데이터가 같은지 확인되지 않은 상태의 rollback은 데이터 분기로 이어질 수 있음.
-- 상세 설계와 구현 절차는 과거 전환 기록으로 `docs/superpowers/specs/2026-09-17-youtube-memo-k3s-cutover-design.md` 및 `docs/superpowers/plans/2026-09-17-youtube-memo-k3s-cutover.md`를 참조함.
+- K3s에서 새 쓰기가 발생한 이후에는 Docker를 단순 재기동하지 않음.
 
 ## 뉴스 수집 K3s 현재 운영 기준
 
@@ -239,13 +187,7 @@ K3s 애플리케이션의 런타임 이미지만 교체하는 운영 절차임. 
 
 아래 절차는 완료된 이전의 전환 기록임. 현재 K3s production writer를 다시 전환하거나 정적 manifest를 재적용하는 데 사용하지 않음.
 
-1. Docker health와 K3s writer 부재를 확인하고, `news_archive.json`·`news_collection_status.json`을 포함한 데이터 디렉터리 구조를 검증함. 자동 배포·HomeOps 복구·다른 운영자의 수동 재시작이 전환 중 실행되지 않도록 유지보수 구간을 확보하고 진행 중 작업 종료를 확인함.
-2. 새 HomeOps 이미지에 N100 override의 runtime state 디렉터리 read-only mount를 적용함. 이 단계는 `homeops-executor`만 `--no-deps`로 갱신하며 Caddy·crawler 전체 배포를 실행하지 않음. `/var/lib/personal-server`와 state 파일은 root 소유·group/other 쓰기 금지를 유지함. 디렉터리 mount로 파일의 원자적 교체도 실행 중 프로세스에 반영됨.
-3. Docker crawler 중지 **이전**에 root 소유 runtime state marker를 `crawler-worker=k3s`로 갱신함. Books·YouTube 값은 유지함. 이 설정은 Docker를 중지하지 않으며 자동 재기동 대상에서만 제외함. 실행 중 HomeOps의 `allowed_services()`에서 crawler가 제외됨을 확인함. cutover `--go`는 이 제외 상태를 실제 컨테이너에서 조회할 수 없거나 crawler가 허용되면 Docker를 중지하기 전에 실패함.
-4. Docker crawler를 중지해 scheduler와 HTTP writer를 함께 멈춤. 빈 PVC에 전체 디렉터리를 한 번만 복사하고 원본·PVC의 전체 디렉터리 SHA-256 digest를 비교함. SQLite 파일이 실제 존재하면 `quick_check`도 확인함.
-5. digest가 일치할 때만 K3s Deployment를 replica 1로 확장함. rollout 이후 Docker 중지와 HomeOps 제외 상태를 다시 검증함. Docker가 재활성화되면 성공을 반환하지 않으며 두 writer를 멈춘 뒤 데이터가 같은 경우에만 Docker 복구를 허용함. 데이터가 달라졌으면 둘 다 중지하고 수동 판단이 필요함.
-6. K3s Deployment rollout, Service·Endpoint·PVC readiness와 인증된 native metrics target을 확인함. Caddy upstream을 조회·검증하여 적용하고 Caddy 내부 health를 확인한 뒤 Tunnel의 뉴스 ingress를 Caddy 경로로 단일 전환함.
-7. 외부 health 3회를 모두 확인하고 유지보수를 해제함. HomeOps는 매 작업과 Docker restart 직전에 marker를 재조회하며 K3s 소유 서비스를 제외함. marker 누락·오염·권한 이상 시 crawler·Books·YouTube Docker 재시작을 차단함. 전환 실패 후 Docker로 복구됐더라도 marker는 자동으로 compose로 되돌리지 않으며 데이터·writer 상태를 확인한 운영자가 결정함.
+1. Docker health와 K3s writer 부재를 확인하고, `news_archive.json`·`news_collection_status.json`을 포함한 데이터 디렉터리 구조를 검증함. 자동 배포·HomeOps 복구·다른 운영자의 수동 재시작이 전환 중 실행되지 않도록 유지보수 구간을 확보하고 진행 중 작업 종료를 확인함. 2. 새 HomeOps 이미지에 N100 override의 runtime state 디렉터리 read-only mount를 적용함. 이 단계는 `homeops-executor`만 `--no-deps`로 갱신하며 Caddy·crawler 전체 배포를 실행하지 않음. `/var/lib/personal-server`와 state 파일은 root 소유·group/other 쓰기 금지를 유지함. 디렉터리 mount로 파일의 원자적 교체도 실행 중 프로세스에 반영됨. 3. Docker crawler 중지 **이전**에 root 소유 runtime state marker를 `crawler-worker=k3s`로 갱신함. Books·YouTube 값은 유지함. 이 설정은 Docker를 중지하지 않으며 자동 재기동 대상에서만 제외함. 실행 중 HomeOps의 `allowed_services()`에서 crawler가 제외됨을 확인함. cutover `--go`는 이 제외 상태를 실제 컨테이너에서 조회할 수 없거나 crawler가 허용되면 Docker를 중지하기 전에 실패함. 4. Docker crawler를 중지해 scheduler와 HTTP writer를 함께 멈춤. 빈 PVC에 전체 디렉터리를 한 번만 복사하고 원본·PVC의 전체 디렉터리 SHA-256 digest를 비교함. SQLite 파일이 실제 존재하면 `quick_check`도 확인함. 5. digest가 일치할 때만 K3s Deployment를 replica 1로 확장함. rollout 이후 Docker 중지와 HomeOps 제외 상태를 다시 검증함. Docker가 재활성화되면 성공을 반환하지 않으며 두 writer를 멈춘 뒤 데이터가 같은 경우에만 Docker 복구를 허용함. 데이터가 달라졌으면 둘 다 중지하고 수동 판단이 필요함. 6. K3s Deployment rollout, Service·Endpoint·PVC readiness와 인증된 native metrics target을 확인함. Caddy upstream을 조회·검증하여 적용하고 Caddy 내부 health를 확인한 뒤 Tunnel의 뉴스 ingress를 Caddy 경로로 단일 전환함. 7. 외부 health 3회를 모두 확인하고 유지보수를 해제함. HomeOps는 매 작업과 Docker restart 직전에 marker를 재조회하며 K3s 소유 서비스를 제외함. marker 누락·오염·권한 이상 시 crawler·Books·YouTube Docker 재시작을 차단함. 전환 실패 후 Docker로 복구됐더라도 marker는 자동으로 compose로 되돌리지 않으며 데이터·writer 상태를 확인한 운영자가 결정함.
 
 현재 K3s에서 새 수집 상태가 기록된 이후 Docker를 단순 재기동하는 rollback은 허용하지 않음. Docker와 PVC 데이터의 단일 source of truth가 다시 확인되지 않은 경우 데이터 분기 위험이 있으므로, 공개 경로만 즉시 되돌리거나 Docker writer를 재기동하지 않음. 향후 rollback은 별도 승인과 데이터 동등성 검증이 필요함.
 
@@ -259,10 +201,7 @@ Crawler 관측성 manifest `infra/k8s/sre-telegram/crawler-news-observability.ya
 
 검증 순서:
 
-1. crawler 상태 파일의 최근 시도·성공·실패 횟수를 확인함.
-2. 인증된 내부 metrics 응답에 고정 지표만 노출되는지 확인함.
-3. Prometheus에서 `NewsCollectionStale`의 수집·평가 상태를 확인함.
-4. Alertmanager → SRE relay의 장애·복구 한국어 메시지를 확인함.
+1. crawler 상태 파일의 최근 시도·성공·실패 횟수를 확인함. 2. 인증된 내부 metrics 응답에 고정 지표만 노출되는지 확인함. 3. Prometheus에서 `NewsCollectionStale`의 수집·평가 상태를 확인함. 4. Alertmanager → SRE relay의 장애·복구 한국어 메시지를 확인함.
 
 적용 전후 검증 명령은 다음 리소스와 키만 확인하며 Secret 값은 출력하지 않음.
 
@@ -323,4 +262,4 @@ kubectl -n monitoring apply --dry-run=client -f infra/k8s/sre-telegram/portal-ht
 
 ### 백업 보관 정책 보완 작업
 
-백업 파일의 누적 용량을 제한하기 위해 최근 일별 7개·이전 4주 구간별 1개·더 오래된 지난 3개월 월별 1개를 보존하는 정책을 구현함. 저장소 반영과 필수 CI는 [PR #357](https://github.com/Len-Yoon/personal-server/pull/357)에서 관리함. 2026-10-10 N100 `bf7a05a230a773d848eed505b560ba8db9d16570`에 운영 적용하고 네 서비스의 신규 백업·원격 복원·보관 정리를 검증함. [PR #358](https://github.com/Len-Yoon/personal-server/pull/358)의 Relay 호환 수정도 반영함. 기존 매일 02:30 순차 백업을 유지하며 2026-10-10 첫 정기 실행의 네 백업·복원·보관 정리 성공을 확인함. 보관 구간·최신 7개 안전 하한·원격 용량 사전 계산·운영 적용 단계는 [백업 보관 정책 보완](reviews/20261009_백업보관정책_보완.md)을 참조함.
+백업 파일의 누적 용량을 제한하기 위해 최근 일별 7개·이전 4주 구간별 1개·더 오래된 지난 3개월 월별 1개를 보존하는 정책을 구현함. 보관 구간·최신 7개 안전 하한·원격 용량 사전 계산·운영 적용 단계는 [백업 보관 정책 보완](reviews/20261009_백업보관정책_보완.md)을 참조함.
