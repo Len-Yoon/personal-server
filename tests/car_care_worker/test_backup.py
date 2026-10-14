@@ -784,3 +784,331 @@ class CarBackupAlertTransportTests(unittest.TestCase):
         self.assertIsInstance(handlers[1], SCHEDULE.NoAlertRedirect)
         with self.assertRaises(ValueError):
             handlers[1].redirect_request(None, None, None, None, None, None)
+
+
+MONITOR_SPEC = importlib.util.spec_from_file_location('car_monitor', ROOT/'car-care-worker/tools/automation/monitor.py')
+MONITOR = importlib.util.module_from_spec(MONITOR_SPEC)
+MONITOR_SPEC.loader.exec_module(MONITOR)
+
+
+class CarBackupOperationsTests(unittest.TestCase):
+    setUp = CarBackupScheduleTests.setUp
+    run_schedule = CarBackupScheduleTests.run_schedule
+
+    def ready(self):
+        result = self.run_schedule()
+        path = self.state/'evidence'/(self.proof['backup_id']+'.json')
+        self.proof['content_sha256'] = '0'*64
+        BACKUP.POLICY.persist(path, self.proof)
+        BACKUP.POLICY.persist(self.state/'activation.json', dict(activated_at=(self.now-timedelta(days=2)).isoformat()))
+        return result
+
+    def test_monitor_state_has_only_contract_fields_and_original_restore_time(self):
+        self.ready()
+        value = MONITOR.snapshot(self.state, self.now)
+        self.assertEqual(set(value), {'schema_version','scope','observed_at','last_attempt','proof','retention'})
+        self.assertEqual(value['proof']['restore_verified_at'], self.proof['restore_verified_at'])
+        self.assertNotIn(str(self.state), json.dumps(value))
+        self.assertIsNone(value['retention'])
+
+    def test_monitor_missing_after_nine_and_activation_guard(self):
+        self.ready()
+        local = self.now.astimezone(SCHEDULE.KST)
+        before = local.replace(hour=8,minute=59)
+        after = local.replace(hour=9,minute=0)
+        empty = dict(last_attempt=None)
+        self.assertFalse(MONITOR.missed(self.state, empty, before))
+        self.assertTrue(MONITOR.missed(self.state, empty, after))
+        BACKUP.POLICY.persist(self.state/'activation.json', dict(activated_at=local.replace(hour=6).isoformat()))
+        self.assertFalse(MONITOR.missed(self.state, empty, after))
+        self.assertTrue(MONITOR.missed(self.state, empty, after+timedelta(days=1)))
+        self.assertFalse(MONITOR.missed(self.state, dict(last_attempt=dict(day=after.date().isoformat(),status='retention_failed')), after+timedelta(days=0)))
+
+    def test_configmap_cas_changes_only_status_json(self):
+        calls = []
+        class API:
+            def call(self, args, body=None, missing=False):
+                calls.append((args,body))
+                if 'get' in args:
+                    return dict(kind='ConfigMap',metadata=dict(name=MONITOR.STATE_NAME,namespace=SCHEDULE.NAMESPACE,uid='fixture',resourceVersion='7'),data=dict(status_json='old',protected='preserve'))
+        MONITOR.publish(API(), dict(schema_version=1))
+        args = calls[-1][0]
+        patch = json.loads(args[args.index('-p')+1])
+        self.assertEqual([p['path'] for p in patch], ['/metadata/uid','/metadata/resourceVersion','/data/status_json'])
+        self.assertEqual(patch[-1]['op'], 'add')
+
+    def test_configmap_lost_create_response_is_only_read_back(self):
+        calls = []
+        value = dict(schema_version=1)
+        class API:
+            def call(self,args,body=None,missing=False):
+                calls.append(args)
+                if 'create' in args: raise TimeoutError('fixture')
+                if missing: return None
+                return dict(data=dict(status_json=json.dumps(value,sort_keys=True,separators=(',',':'))))
+        MONITOR.publish(API(), value)
+        self.assertEqual(sum('create' in args for args in calls),1)
+
+    def test_retention_record_does_not_count_as_backup_attempt(self):
+        create = self.api.create
+        def append(pod):
+            create(pod)
+            record = dict(self.proof, backup_id=self.now.strftime('car-care-%Y%m%dT%H%M%SZ-')+'1'*16,
+                          operation='retention', status='no_op', restore_verified=False,
+                          remote_upload_status='not_attempted', remote_delete_status='not_attempted',deleted=[],kept_count=1)
+            BACKUP.POLICY.persist(self.state/'evidence'/(record['backup_id']+'.json'),record,initial=True)
+        self.api.create = append
+        self.assertEqual(self.run_schedule()['status'], 'success')
+
+    def test_known_retention_failure_preserves_backup_success_as_terminal(self):
+        create = self.api.create
+        def append(pod):
+            create(pod)
+            self.existing['status']['phase'] = 'Failed'
+            self.existing['status']['containerStatuses'][0]['state']['terminated']['exitCode'] = 1
+            record = dict(self.proof, backup_id=self.now.strftime('car-care-%Y%m%dT%H%M%SZ-')+'1'*16,
+                          operation='retention',status='failure',restore_verified=False,remote_delete_status='not_attempted',deleted=[],kept_count=1)
+            BACKUP.POLICY.persist(self.state/'evidence'/(record['backup_id']+'.json'),record,initial=True)
+        self.api.create = append
+        result = self.run_schedule()
+        self.assertEqual(result['status'], 'retention_failed')
+        self.assertEqual(result['backup_id'], self.proof['backup_id'])
+        self.assertEqual(self.run_schedule()['status'], 'retention_failed')
+        self.assertEqual(len(self.created),1)
+
+    def test_monitor_rejects_naive_activation_and_public_evidence(self):
+        self.ready()
+        BACKUP.POLICY.persist(self.state/'activation.json', dict(activated_at='2026-10-14T12:00:00'))
+        with self.assertRaises(ValueError): MONITOR.missed(self.state, dict(last_attempt=None),self.now)
+        (self.state/'evidence').chmod(0o755)
+        with self.assertRaises(ValueError): MONITOR.snapshot(self.state,self.now)
+
+    def test_monitor_never_invokes_backup_or_pod_creation(self):
+        self.ready()
+        from contextlib import nullcontext
+        import sys
+        api = unittest.mock.Mock()
+        with patch.object(sys,'argv',['monitor.py','--go']), \
+             patch.object(MONITOR.SCHEDULE,'state_directory',return_value=self.state), \
+             patch.object(MONITOR.SCHEDULE,'Kubernetes',return_value=api), \
+             patch.object(MONITOR.SCHEDULE.SEQUENCE,'local_lock',return_value=nullcontext()), \
+             patch.object(MONITOR,'cleanup',return_value=0), \
+             patch.object(MONITOR,'publish'), patch.object(MONITOR.SCHEDULE,'run') as run, \
+             patch.object(BACKUP,'execute') as execute, patch('builtins.print'):
+            self.assertEqual(MONITOR.main(), 0)
+        run.assert_not_called()
+        execute.assert_not_called()
+        api.create.assert_not_called()
+
+    def test_no_op_retention_contacts_no_remote(self):
+        # This class uses pure fixture state; execute via the original helper tests.
+        original = CarCareBackupTests('test_retention_single_last_copy_never_deleted')
+        original.setUp()
+        self.addCleanup(original.doCleanups)
+        original.execute()
+        count = len(original.calls)
+        plan = original.retain()
+        result = original.retain(delete=True,expected_plan_sha256=plan['plan_sha256'],confirm_remote=BACKUP.REMOTE,runner=original.retention_runner)
+        self.assertEqual(result['deleted'],[])
+        self.assertEqual(len(original.calls),count)
+        records = BACKUP.POLICY.read_records(original.evidence)
+        retained = [r for r in records if r.get('operation')=='retention']
+        self.assertEqual(retained[0]['status'],'no_op')
+
+    def old_pair(self):
+        self.ready()
+        day = self.now.astimezone(SCHEDULE.KST).date()-timedelta(days=40)
+        created = self.now-timedelta(days=40)
+        proof = dict(self.proof, backup_id=created.strftime('car-care-%Y%m%dT%H%M%SZ-')+'2'*16,
+                     finished_at=created.isoformat(), restore_verified_at=created.isoformat())
+        BACKUP.POLICY.persist(self.state/'evidence'/(proof['backup_id']+'.json'),proof,initial=True)
+        pod = SCHEDULE.manifest(day,self.image,self.image_id,self.state,self.state/('source-'+'c'*64),'c'*64)
+        pod['metadata']['uid'] = 'old-fixture-pod'
+        pod['status'] = dict(phase='Succeeded',containerStatuses=[dict(restartCount=0,imageID=self.image_id,state=dict(terminated=dict(exitCode=0)))])
+        journal = dict(schema_version=1,day=day.isoformat(),status='success',stage='complete',backup_id=proof['backup_id'],
+                       finished_at=created.isoformat(),pod_uid='old-fixture-pod',source_sha256='c'*64,image=self.image)
+        path=self.state/('scheduled-'+day.isoformat()+'.json')
+        BACKUP.POLICY.persist(path,journal,initial=True)
+        return pod,path,proof
+
+    def test_cleanup_only_old_verified_success_pair_preserves_backup_evidence(self):
+        pod,path,proof=self.old_pair()
+        calls=[]
+        class API:
+            exists=True
+            def get(self,name): return pod if self.exists else None
+            def delete_pod(self,name,uid):
+                calls.append((name,dict(preconditions=dict(uid=uid))))
+                self.exists=False
+        self.assertEqual(MONITOR.cleanup(API(),self.state,self.now),1)
+        self.assertFalse(path.exists())
+        self.assertTrue((self.state/'evidence'/(proof['backup_id']+'.json')).exists())
+        self.assertEqual(calls[0][1]['preconditions'],dict(uid='old-fixture-pod'))
+        self.assertTrue(list(self.state.glob('scheduled-*.json')))
+
+    def test_cleanup_uid_drift_or_failed_pod_preserves_everything(self):
+        pod,path,proof=self.old_pair()
+        for field in ('uid','phase'):
+            candidate=json.loads(json.dumps(pod))
+            if field=='uid': candidate['metadata']['uid']='changed'
+            else: candidate['status']['phase']='Failed'
+            api=unittest.mock.Mock()
+            api.get.return_value=candidate
+            with self.subTest(field=field),self.assertRaises(ValueError): MONITOR.cleanup(api,self.state,self.now)
+            api.call.assert_not_called()
+            self.assertTrue(path.exists())
+
+
+class CarBackupNewOperationBoundariesTests(unittest.TestCase):
+    def test_pod_retention_only_after_new_actual_success(self):
+        import unittest.mock as mock
+        for status,count in [('success',2),('skipped_unchanged',0)]:
+            with self.subTest(status=status), patch.object(POD_RUNNER,'Path') as path, \
+                 patch.object(POD_RUNNER.BACKUP,'preflight'), \
+                 patch.object(POD_RUNNER.BACKUP.POLICY,'read_records',return_value=[]), \
+                 patch.object(POD_RUNNER.BACKUP.POLICY,'require_resolved'), \
+                 patch.object(POD_RUNNER,'force_restore',return_value=True), \
+                 patch.object(POD_RUNNER.BACKUP,'execute',return_value=dict(status=status)), \
+                 patch.object(POD_RUNNER.BACKUP,'retain',return_value=dict(plan_sha256='a'*64)) as retain, \
+                 patch('builtins.print'):
+                self.assertEqual(POD_RUNNER.main(),0)
+                self.assertEqual(retain.call_count,count)
+                if count:
+                    self.assertEqual(retain.call_args.kwargs['confirm_remote'],BACKUP.REMOTE)
+                    self.assertEqual(retain.call_args.kwargs['expected_plan_sha256'],'a'*64)
+                    self.assertTrue(retain.call_args.kwargs['delete'])
+
+    def test_uid_delete_uses_json_and_fixed_car_path(self):
+        transport = CarBackupAlertTransportTests('test_json_post_is_fixed_local_scoped_and_process_is_reaped')
+        process = transport.process()
+        self.addCleanup(transport.doCleanups)
+        observed=[]
+        payload=dict(apiVersion='v1',kind='DeleteOptions',preconditions=dict(uid='fixture-uid'))
+        path='/api/v1/namespaces/personal-server/pods/car-care-backup-20260101'
+        def opener(request,timeout):
+            observed.append(request)
+            return transport.response()
+        with patch.object(SCHEDULE.subprocess,'Popen',return_value=process) as popen:
+            SCHEDULE.proxy_json_request(path,'DELETE',payload,opener=opener)
+        self.assertEqual(observed[0].get_method(),'DELETE')
+        self.assertEqual(observed[0].get_header('Content-type'),'application/json')
+        self.assertEqual(json.loads(observed[0].data),payload)
+        self.assertIn('--accept-paths=^'+SCHEDULE.re.escape(path)+'$',popen.call_args.args[0])
+        self.assertTrue(process.terminated)
+        self.assertTrue(process.stdout.closed)
+
+    def test_proxy_rejects_non_car_delete_and_missing_uid_before_process(self):
+        payload=dict(apiVersion='v1',kind='DeleteOptions',preconditions=dict(uid='fixture-uid'))
+        for path,body in [('/api/v1/namespaces/personal-server/pods/book-pvc-backup',payload),
+                          ('/api/v1/namespaces/personal-server/pods/car-care-backup-20260101',dict(payload,preconditions={})),
+                          (SCHEDULE.ALERT_PATH,payload)]:
+            with self.subTest(path=path),patch.object(SCHEDULE.subprocess,'Popen') as popen,self.assertRaises(ValueError):
+                SCHEDULE.proxy_json_request(path,'DELETE',body)
+            popen.assert_not_called()
+
+    def test_busy_monitor_defers_without_publish_alert_or_backup(self):
+        fixture=CarBackupOperationsTests('test_monitor_never_invokes_backup_or_pod_creation')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.ready()
+        from contextlib import contextmanager
+        import sys
+        @contextmanager
+        def busy(): raise BlockingIOError('fixture'); yield
+        with patch.object(sys,'argv',['monitor.py','--go']), \
+             patch.object(MONITOR.SCHEDULE,'state_directory',return_value=fixture.state), \
+             patch.object(MONITOR.SCHEDULE,'Kubernetes') as api, \
+             patch.object(MONITOR.SCHEDULE.SEQUENCE,'local_lock',side_effect=busy), \
+             patch.object(MONITOR,'publish') as publish,patch.object(MONITOR,'snapshot') as snapshot, \
+             patch('builtins.print'):
+            self.assertEqual(MONITOR.main(),0)
+        snapshot.assert_not_called()
+        publish.assert_not_called()
+        api.return_value.notify.assert_not_called()
+        result=json.loads((fixture.state/'monitor-result.json').read_text())
+        self.assertEqual(result['publish_status'],'deferred')
+        self.assertEqual(result['alert_status'],'not_attempted')
+
+    def test_cleanup_lost_response_then_missing_pod_reconciles_without_retry(self):
+        fixture=CarBackupOperationsTests('test_cleanup_only_old_verified_success_pair_preserves_backup_evidence')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        pod,path,proof=fixture.old_pair()
+        class API:
+            exists=True
+            deleted=0
+            def get(self,name): return pod if self.exists else None
+            def delete_pod(self,name,uid):
+                self.deleted+=1
+                raise TimeoutError('fixture')
+        api=API()
+        with self.assertRaises(ValueError): MONITOR.cleanup(api,fixture.state,fixture.now)
+        self.assertTrue(path.exists())
+        with self.assertRaises(ValueError): MONITOR.cleanup(api,fixture.state,fixture.now)
+        self.assertEqual(api.deleted,1)
+        api.exists=False
+        self.assertEqual(MONITOR.cleanup(api,fixture.state,fixture.now),1)
+        self.assertFalse(path.exists())
+        self.assertEqual(api.deleted,1)
+        self.assertTrue((fixture.state/'evidence'/(proof['backup_id']+'.json')).exists())
+
+
+class CarBackupCleanupDeleteCapTests(unittest.TestCase):
+    def test_first_pending_delete_stops_before_second_old_pod(self):
+        fixture=CarBackupOperationsTests('test_cleanup_only_old_verified_success_pair_preserves_backup_evidence')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        first,path,proof=fixture.old_pair()
+        second=json.loads(json.dumps(first))
+        first_day=datetime.strptime(first['metadata']['name'][-8:],'%Y%m%d').date()
+        second_day=first_day+timedelta(days=1)
+        second['metadata']['name']='car-care-backup-'+second_day.strftime('%Y%m%d')
+        second['metadata']['labels']['personal-server/backup-date']=second_day.isoformat()
+        second['metadata']['uid']='second-old-fixture'
+        second_journal=json.loads(path.read_text())
+        second_journal.update(day=second_day.isoformat(),pod_uid='second-old-fixture')
+        second_journal['finished_at']=(fixture.now-timedelta(days=39)).isoformat()
+        second_path=fixture.state/('scheduled-'+second_day.isoformat()+'.json')
+        BACKUP.POLICY.persist(second_path,second_journal,initial=True)
+        pods={pod['metadata']['name']:pod for pod in (first,second)}
+        class API:
+            deleted=[]
+            def get(self,name): return pods.get(name)
+            def delete_pod(self,name,uid): self.deleted.append((name,uid))
+        api=API()
+        self.assertEqual(MONITOR.cleanup(api,fixture.state,fixture.now),0)
+        self.assertEqual(api.deleted,[(first['metadata']['name'],'old-fixture-pod')])
+        self.assertTrue(path.exists())
+        self.assertTrue(second_path.exists())
+        self.assertTrue((fixture.state/'evidence'/(proof['backup_id']+'.json')).exists())
+
+
+class CarBackupCleanupCrashIntentTests(unittest.TestCase):
+    def test_crash_after_accepted_delete_leaves_durable_reconcile_only_intent(self):
+        fixture=CarBackupOperationsTests('test_cleanup_only_old_verified_success_pair_preserves_backup_evidence')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        pod,path,proof=fixture.old_pair()
+        day=json.loads(path.read_text())['day']
+        intent_path=fixture.state/('cleanup-'+day+'.json')
+        class API:
+            submitted=0
+            exists=True
+            def get(self,name): return pod if self.exists else None
+            def delete_pod(self,name,uid):
+                self.submitted+=1
+                # Persist is fsynced by POLICY.persist before external acceptance.
+                intent=MONITOR.SCHEDULE.read_journal(intent_path)
+                fixture.assertEqual(intent['status'],'deleting')
+                raise SystemExit('simulated termination after accepted DELETE')
+        api=API()
+        with self.assertRaises(SystemExit): MONITOR.cleanup(api,fixture.state,fixture.now)
+        self.assertEqual(MONITOR.SCHEDULE.read_journal(intent_path)['status'],'deleting')
+        self.assertTrue(path.exists())
+        self.assertEqual(MONITOR.cleanup(api,fixture.state,fixture.now),0)
+        self.assertEqual(api.submitted,1)
+        api.exists=False
+        self.assertEqual(MONITOR.cleanup(api,fixture.state,fixture.now),1)
+        self.assertEqual(api.submitted,1)
+        self.assertFalse(path.exists())
+        self.assertTrue((fixture.state/'evidence'/(proof['backup_id']+'.json')).exists())

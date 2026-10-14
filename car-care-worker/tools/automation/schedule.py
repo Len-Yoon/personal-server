@@ -177,6 +177,10 @@ class Kubernetes:
     def notify(self, payload):
         send_alert(payload)
 
+    def delete_pod(self, name, uid):
+        return proxy_json_request('/api/v1/namespaces/'+NAMESPACE+'/pods/'+name, 'DELETE',
+                                  dict(apiVersion='v1',kind='DeleteOptions',preconditions=dict(uid=uid)))
+
     def active_backups(self):
         jobs = self.call(['-n',NAMESPACE,'get','jobs','-o','json'])['items']
         pods = self.call(['-n',NAMESPACE,'get','pods','-o','json'])['items']
@@ -189,12 +193,22 @@ class NoAlertRedirect(HTTPRedirectHandler):
         raise ValueError('car alert redirect rejected')
 
 
-def send_alert(payload, *, opener=None):
-    """One JSON POST through a short-lived, loopback-only, path-limited proxy."""
+def proxy_json_request(path, method, payload, *, opener=None):
+    """Fixed alert POST or fixed car-Pod UID-precondition DELETE only."""
+    if method == 'POST':
+        require(path == ALERT_PATH)
+    else:
+        require(method == 'DELETE' and re.fullmatch(r'/api/v1/namespaces/personal-server/pods/car-care-backup-[0-9]{8}', path))
+        require(isinstance(payload, dict) and set(payload) == {'apiVersion','kind','preconditions'}
+                and payload['apiVersion'] == 'v1' and payload['kind'] == 'DeleteOptions'
+                and isinstance(payload['preconditions'], dict) and set(payload['preconditions']) == {'uid'}
+                and isinstance(payload['preconditions']['uid'], str)
+                and re.fullmatch(r'[a-zA-Z0-9-]{1,64}', payload['preconditions']['uid']))
+    blocked = '|'.join(v for v in ('GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS','TRACE','CONNECT') if v != method)
     command = ['sudo','-n','k3s','kubectl','proxy','--port=0','--address=127.0.0.1',
                '--accept-hosts=^127\\.0\\.0\\.1$',
-               '--accept-paths=^'+re.escape(ALERT_PATH)+'$',
-               '--reject-methods=^(GET|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|CONNECT)$']
+               '--accept-paths=^'+re.escape(path)+'$',
+               '--reject-methods=^('+blocked+')$']
     process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                stderr=subprocess.DEVNULL, start_new_session=True)
     try:
@@ -214,14 +228,15 @@ def send_alert(payload, *, opener=None):
         require(match is not None)
         port = int(match[1])
         require(1 <= port <= 65535)
-        request = Request('http://127.0.0.1:'+str(port)+ALERT_PATH,
+        request = Request('http://127.0.0.1:'+str(port)+path,
                           data=json.dumps(payload).encode('utf-8'),
-                          headers={'Content-Type':'application/json'}, method='POST')
+                          headers={'Content-Type':'application/json'}, method=method)
         # Ignore ambient HTTP_PROXY and refuse redirects outside this fixed URL.
         opener = opener or build_opener(ProxyHandler({}), NoAlertRedirect()).open
         with opener(request, timeout=10) as response:
             require(200 <= response.status < 300)
-            require(len(response.read(4097)) <= 4096)
+            limit = 4096 if method == 'POST' else 16384
+            require(len(response.read(limit+1)) <= limit)
     finally:
         try:
             if process.poll() is None:
@@ -234,6 +249,10 @@ def send_alert(payload, *, opener=None):
         finally:
             process.stdout.close()
 
+
+
+def send_alert(payload, *, opener=None):
+    return proxy_json_request(ALERT_PATH, 'POST', payload, opener=opener)
 
 
 def alert_payload(failed, now):
@@ -278,13 +297,13 @@ def run(api, state, desired, *, now=lambda: datetime.now(timezone.utc), sleep=ti
     for path in state.glob('scheduled-*.json'):
         require(not path.is_symlink())
         prior = read_journal(path)
-        require(path == journal or prior.get('status') in ('success','skipped_unchanged'))
+        require(path == journal or prior.get('status') in ('success','skipped_unchanged','retention_failed'))
     existing = api.get(desired['metadata']['name'])
     if journal.exists():
         record = read_journal(journal)
         require(record.get('source_sha256') == desired['metadata']['annotations']['personal-server/source-sha256'])
         require(record.get('image') == desired['spec']['containers'][0]['image'])
-        if record.get('status') in ('success','skipped_unchanged'):
+        if record.get('status') in ('success','skipped_unchanged','retention_failed'):
             return record
         require(existing is not None)  # Never recreate a lost/failed operation.
     else:
@@ -320,15 +339,21 @@ def run(api, state, desired, *, now=lambda: datetime.now(timezone.utc), sleep=ti
     containers = status.get('containerStatuses',[])
     require(len(containers)==1 and containers[0].get('restartCount')==0
             and containers[0].get('imageID','').endswith(desired['metadata']['annotations']['personal-server/image-id']))
-    require(status['phase']=='Succeeded' and containers[0].get('state',{}).get('terminated',{}).get('exitCode') == 0)
+    exit_code = containers[0].get('state',{}).get('terminated',{}).get('exitCode')
     records = POLICY.read_records(state/'evidence')
     POLICY.require_resolved(records)
-    attempts = [r for r in records if r.get('finished_at') and POLICY.timestamp(r['finished_at']) >= POLICY.timestamp(record['started_at'])]
+    recent = [r for r in records if r.get('finished_at') and POLICY.timestamp(r['finished_at']) >= POLICY.timestamp(record['started_at'])]
+    attempts = [r for r in recent if r.get('operation', 'backup') == 'backup']
+    retention = [r for r in recent if r.get('operation') == 'retention']
+    require(len(retention) <= 1)
     require(len(attempts)==1)
     proof = attempts[0]
     require(proof.get('status') in ('success','skipped_unchanged'))
     require(proof['status']!='success' or proof.get('restore_verified') is True)
-    record.update(status=proof['status'], stage='complete', backup_id=proof['backup_id'], finished_at=now().isoformat())
+    retention_failed = bool(retention and retention[0].get('status') == 'failure')
+    require((status['phase'] == 'Succeeded' and exit_code == 0 and not retention_failed) or
+            (status['phase'] == 'Failed' and exit_code == 1 and retention_failed and proof['status'] == 'success'))
+    record.update(status='retention_failed' if retention_failed else proof['status'], stage='complete', backup_id=proof['backup_id'], finished_at=now().isoformat())
     POLICY.persist(journal, record)
     return record
 
@@ -354,7 +379,7 @@ def main():
         print('car_care_schedule=BLOCKED')
     alert_ok = True
     try:
-        api.notify(alert_payload(result is None, datetime.now(timezone.utc)))
+        api.notify(alert_payload(result is None or result['status'] == 'retention_failed', datetime.now(timezone.utc)))
     except Exception:
         alert_ok = False
         print('car_care_schedule_alert=FAIL')
@@ -367,7 +392,7 @@ def main():
         result['alert_status'] = 'success' if alert_ok else 'failure'
         POLICY.persist(state/('scheduled-'+result['day']+'.json'), result)
         print('car_care_schedule='+result['status'].upper())
-    return 0 if result is not None and alert_ok else 1
+    return 0 if result is not None and result['status'] != 'retention_failed' and alert_ok else 1
 
 
 if __name__ == '__main__':

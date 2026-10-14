@@ -1,0 +1,11 @@
+[Unit]
+Description=Car backup evidence publishing and missed-run monitor
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO_ROOT@
+UMask=0077
+ExecStart=/usr/bin/python3 @REPO_ROOT@/car-care-worker/tools/automation/monitor.py --go
+TimeoutStartSec=240
+Restart=no

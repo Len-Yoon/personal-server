@@ -58,7 +58,7 @@ class SreTelegramManifestContractTests(unittest.TestCase):
         self.assertEqual(role["metadata"]["namespace"], "personal-server")
         self.assertEqual(role["rules"], [{
             "apiGroups": [""], "resources": ["configmaps"],
-            "resourceNames": ["book-pvc-backup-state", "youtube-pvc-backup-state", "crawler-pvc-backup-state"],
+            "resourceNames": ["book-pvc-backup-state", "youtube-pvc-backup-state", "crawler-pvc-backup-state", "car-care-backup-state"],
             "verbs": ["get"],
         }])
         self.assertEqual(binding["metadata"]["namespace"], "personal-server")
