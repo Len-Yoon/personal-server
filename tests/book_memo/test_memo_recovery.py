@@ -209,3 +209,75 @@ class MemoRecoveryTests(unittest.TestCase):
                     public_again = client.get(url)
                     self.assertNotIn('private-history-marker', public_again.text)
                     self.assertNotIn('private-deleted-marker', public_again.text)
+
+    def test_trash_pages_measure_stored_utf8_json_and_cleanup_is_atomic_retry_safe(self):
+        with tempfile.TemporaryDirectory() as tmp, self.loaded(tmp):
+            from app.services import book_service as service
+            parent, memo = self.seed(service)
+            self.edit(service, memo, '수정 내용', 1)
+            service.delete_memo(memo['id'], expected_version=2)
+            with service._connect() as db:
+                original = db.execute('SELECT * FROM deleted_memos').fetchone()
+                # Exercise UTF-8 byte counts with unescaped Korean stored JSON.
+                import json
+                snapshot = json.dumps(json.loads(original['snapshot']), ensure_ascii=False)
+                db.execute('UPDATE deleted_memos SET snapshot = ?', (snapshot,))
+                for number in range(100, 122):
+                    body = json.loads(snapshot)
+                    body['id'] = number
+                    db.execute('INSERT INTO deleted_memos (memo_id, book_id, snapshot, tags, version) VALUES (?, ?, ?, ?, ?)',
+                               (number, parent['id'], json.dumps(body, ensure_ascii=False), original['tags'], 3))
+                expected_bytes = db.execute('SELECT SUM(length(CAST(snapshot AS BLOB)) + length(CAST(tags AS BLOB))) FROM deleted_memos').fetchone()[0]
+            summary = service.memo_trash_summary(parent['id'], page=99)
+            self.assertEqual((summary['total_count'], summary['page'], summary['pages'], summary['total_bytes']), (23, 2, 2, expected_bytes))
+            self.assertEqual(len(service.memo_recovery_state(parent['id'])[1]), 20)
+            self.assertEqual(len(service.memo_recovery_state(parent['id'], trash_page=2)[1]), 3)
+            with self.assertRaises(service.WriteConflict):
+                service.purge_deleted_memos(parent['id'], [(memo['id'], 3), (100, 2)], uuid4().hex)
+            self.assertEqual(service.memo_trash_summary(parent['id'])['total_count'], 23)
+            for selected in [[], [(memo['id'], 3)] * 2, [(100, 3)] * 21, [(True, 3)], [(100, None)], [(999, 3)]]:
+                with self.assertRaises(ValueError):
+                    service.purge_deleted_memos(parent['id'], selected, uuid4().hex)
+            other_parent = service.create_or_get_book({'isbn': 'other-trash', 'title': '다른 책'})
+            with self.assertRaises(service.WriteConflict):
+                service.purge_deleted_memos(other_parent['id'], [(memo['id'], 3)], uuid4().hex)
+            self.assertEqual(service.memo_trash_summary(other_parent['id']),
+                             {'total_count': 0, 'total_bytes': 0, 'page': 1, 'pages': 1, 'page_size': 20})
+            with self.assertRaises(ValueError):
+                service.purge_deleted_memos(parent['id'], [(memo['id'], 3)], '')
+            with patch.object(service, 'record_result', side_effect=RuntimeError('failure after deletion')):
+                with self.assertRaises(RuntimeError):
+                    service.purge_deleted_memos(parent['id'], [(memo['id'], 3)], uuid4().hex)
+            self.assertEqual(service.memo_trash_summary(parent['id'])['total_count'], 23)
+            token = uuid4().hex
+            self.assertEqual(service.purge_deleted_memos(parent['id'], [(memo['id'], 3)], token), parent['id'])
+            self.assertEqual(service.purge_deleted_memos(parent['id'], [(memo['id'], 3)], token), parent['id'])
+            with self.assertRaises(service.WriteConflict):
+                service.purge_deleted_memos(parent['id'], [(100, 3)], token)
+            with service._connect() as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM memo_revisions WHERE memo_id = ?', (memo['id'],)).fetchone()[0], 0)
+            self.assertEqual(service.memo_trash_summary(parent['id'])['total_count'], 22)
+
+    def test_trash_cleanup_requires_auth_origin_and_valid_selection(self):
+        import json
+        origin = 'https://book.len.pe.kr'
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'DELETE_PASSWORD': 'test'}), self.loaded(tmp) as app:
+            from app.services import book_service as service
+            parent, memo = self.seed(service)
+            service.delete_memo(memo['id'], expected_version=1)
+            url = f'/books/{parent["id"]}/trash/purge'
+            data = {'selection': json.dumps([[memo['id'], 2]]), 'request_id': uuid4().hex}
+            headers = {'Origin': origin}
+            with TestClient(app, base_url=origin) as client:
+                self.assertEqual(client.post(url, data=data, headers=headers).status_code, 401)
+                client.post('/auth/login', data={'password': 'test'}, headers=headers)
+                self.assertEqual(client.post(url, data=data, headers={'Origin': 'https://evil.invalid'}).status_code, 403)
+                for selection in ['{}', 'null', '[[1]]', '[[true, 2]]', 'not-json']:
+                    self.assertEqual(client.post(url, data={**data, 'selection': selection}, headers=headers).status_code, 400)
+                self.assertEqual(client.post(url, data={'selection': data['selection']}, headers=headers).status_code, 400)
+                self.assertEqual(client.post(url, data={**data, 'selection': json.dumps([[memo['id'], 1]])}, headers=headers).status_code, 409)
+                html = client.get(f'/books/{parent["id"]}').text
+                self.assertIn('영구 삭제', html)
+                self.assertIn('JSON 저장 내용', html)
+                self.assertEqual(client.post(url, data=data, headers=headers, follow_redirects=False).status_code, 303)
+                self.assertEqual(client.post(url, data=data, headers=headers, follow_redirects=False).status_code, 303)

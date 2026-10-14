@@ -34,6 +34,8 @@ from app.services.book_service import (
     list_chapters,
     list_memos,
     memo_recovery_state,
+    memo_trash_summary,
+    purge_deleted_memos,
     restore_memo,
     restore_memo_revision,
     search_books_and_memos,
@@ -232,14 +234,19 @@ def get_unsaved_book_toc_candidates(
 
 
 @app.get("/books/{book_id}")
-def book_detail(request: Request, book_id: int):
+def book_detail(request: Request, book_id: int, trash_page: int = 1):
     book = get_book(book_id)
 
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
 
     write_authenticated = _has_write_session(request)
-    memo_history, deleted_memos = memo_recovery_state(book_id) if write_authenticated else ({}, [])
+    trash_summary = memo_trash_summary(book_id, trash_page) if write_authenticated else None
+    if write_authenticated:
+        memo_history, deleted_memos = (memo_recovery_state(book_id) if trash_summary["page"] == 1
+                                       else memo_recovery_state(book_id, trash_page=trash_summary["page"]))
+    else:
+        memo_history, deleted_memos = {}, []
     return templates.TemplateResponse(
         request=request, name="book_detail.html",
         context={
@@ -250,6 +257,7 @@ def book_detail(request: Request, book_id: int):
             "memos": list_memos(book_id),
             "memo_history": memo_history,
             "deleted_memos": deleted_memos,
+            "trash_summary": trash_summary,
             "statuses": ["읽을 예정", "읽는 중", "완료", "보류"],
             "portal_home_url": portal_home_url(request_host_from_headers(request.headers)),
             "write_authenticated": write_authenticated,
@@ -829,6 +837,18 @@ def _safe_redirect(redirect_to: str) -> str:
 
 
 install_import_routes(app, _require_write_session, WRITE_AUTH_COOKIE, templates)
+
+
+@app.post("/books/{book_id}/trash/purge")
+def purge_memo_trash(request: Request, book_id: int, selection: str = Form(default=""), request_id: str = Form(default="")):
+    _require_write_session(request)
+    try:
+        selected = json.loads(selection)
+        purge_deleted_memos(book_id, selected, request_id)
+    except ValueError as error:
+        message = str(error) if not isinstance(error, json.JSONDecodeError) else "선택한 메모 정보가 올바르지 않습니다."
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=message) from error
+    return RedirectResponse(url=f"/books/{book_id}#memo-trash", status_code=303)
 
 
 @app.post("/memos/{memo_id}/restore")

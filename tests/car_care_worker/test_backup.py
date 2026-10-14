@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 import importlib.util
 import json
 from pathlib import Path
@@ -49,9 +50,9 @@ class CarCareBackupTests(unittest.TestCase):
             else:
                 self.remote[destination] = Path(source).read_bytes()
 
-    def execute(self, runner=None):
+    def execute(self, runner=None, **kwargs):
         with patch.object(BACKUP.HELPERS, 'memory_backed', return_value=True), patch.object(BACKUP.shutil, 'which', return_value='/fixture/bin'):
-            return BACKUP.execute(self.database, self.credentials, self.scratch, self.evidence, runner or self.runner)
+            return BACKUP.execute(self.database, self.credentials, self.scratch, self.evidence, runner or self.runner, **kwargs)
 
     def test_committed_wal_snapshot_and_remote_roundtrip_preserve_original(self):
         before = self.database.read_bytes()
@@ -75,7 +76,7 @@ class CarCareBackupTests(unittest.TestCase):
                 Path(args[-1]).write_bytes(b'broken')
         with self.assertRaises(ValueError):
             self.execute(corrupt)
-        record = json.loads(next(self.evidence.iterdir()).read_text())
+        record = json.loads(next(self.evidence.glob("car-care-*.json")).read_text())
         self.assertEqual(record['status'], 'failure')
         self.assertEqual(record['stage'], 'download')
         self.assertTrue(record['remote_uploaded'])
@@ -87,9 +88,9 @@ class CarCareBackupTests(unittest.TestCase):
             raise subprocess.CalledProcessError(1, args, stderr='private-token')
         with self.assertRaises(subprocess.CalledProcessError):
             self.execute(fail)
-        evidence = next(self.evidence.iterdir()).read_text()
+        evidence = next(self.evidence.glob("car-care-*.json")).read_text()
         self.assertNotIn('private-token', evidence)
-        self.assertIn('"status": "failure"', evidence)
+        self.assertEqual(json.loads(evidence)['status'], 'failure')
 
     def test_unknown_oauth_table_is_rejected_without_external_call(self):
         self.connection.execute('CREATE TABLE oauth_tokens(token TEXT)')
@@ -136,9 +137,266 @@ class CarCareBackupTests(unittest.TestCase):
                 Path(args[args.index('--config') + 1]).write_text('[gdrive]\ntoken = must-not-persist\n')
         with self.assertRaises(ValueError):
             self.execute(refresh)
-        record = json.loads(next(self.evidence.iterdir()).read_text())
+        record = json.loads(next(self.evidence.glob("car-care-*.json")).read_text())
         self.assertEqual(record['status'], 'failure')
         self.assertEqual(record['remote_upload_status'], 'uncertain')
         self.assertFalse(record['restore_verified'])
         self.assertEqual(list(self.scratch.iterdir()), [])
         self.assertEqual((self.credentials / 'rclone-config').read_text(), 'RCLONE_ENCRYPT_V0:\nfixture-encrypted\n')
+
+    def test_unchanged_skips_without_refreshing_restore_proof(self):
+        first = self.execute(if_changed=True)
+        calls = len(self.calls)
+        second = self.execute(if_changed=True)
+        self.assertEqual(second['status'], 'skipped_unchanged')
+        self.assertEqual(len(self.calls), calls)
+        self.assertFalse(second['restore_verified'])
+        self.assertEqual(second['previous_restore_verified_at'], first['restore_verified_at'])
+        self.assertNotIn('restore_verified_at', second)
+        self.assertEqual(second['previous_backup_id'], first['backup_id'])
+
+    def test_logical_fingerprint_ignores_vacuum_but_detects_committed_wal(self):
+        first = self.execute(if_changed=True)
+        self.connection.execute('VACUUM')
+        self.assertEqual(self.execute(if_changed=True)['status'], 'skipped_unchanged')
+        self.connection.execute("UPDATE maintenance_records SET value='changed'")
+        self.connection.commit()
+        result = self.execute(if_changed=True)
+        self.assertEqual(result['status'], 'success')
+        self.assertNotEqual(result['content_sha256'], first['content_sha256'])
+
+    def test_go_without_change_detection_still_uploads_once(self):
+        self.execute()
+        self.execute()
+        self.assertEqual(len(self.remote), 2)
+
+    def test_uncertain_upload_blocks_future_attempt_without_retry(self):
+        def uncertain(args):
+            self.runner(args)
+            if 'copyto' in args and not args[-2].startswith('gdrive:'):
+                raise subprocess.TimeoutExpired(args, 120)
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.execute(uncertain)
+        calls = len(self.calls)
+        with self.assertRaises(ValueError):
+            self.execute()
+        self.assertEqual(len(self.calls), calls)
+        records = [json.loads(p.read_text()) for p in self.evidence.glob('car-care-*.json')]
+        self.assertEqual(len(records), 2)
+        self.assertEqual({r['stage'] for r in records}, {'upload', 'unresolved_remote'})
+
+    def test_lock_blocks_overlapping_execution(self):
+        with BACKUP.POLICY.execution_lock(self.evidence):
+            with self.assertRaises(BlockingIOError):
+                self.execute()
+        self.assertEqual(self.calls, [])
+
+    def test_retention_plan_keeps_same_second_ties_and_latest_proof(self):
+        now = datetime(2026, 10, 14, tzinfo=timezone.utc)
+        records = []
+        for i in range(100):
+            created = now - timedelta(days=i)
+            backup_id = created.strftime('car-care-%Y%m%dT%H%M%SZ-') + f'{i:016x}'
+            records.append(dict(scope='car-care-db-only', status='success', backup_id=backup_id,
+                remote_upload_status='confirmed', restore_verified=True,
+                restore_verified_at=created.isoformat(), finished_at=created.isoformat(),
+                artifact_sha256='a'*64, snapshot_sha256='b'*64))
+        tie = dict(records[35], backup_id=records[35]['backup_id'][:-16] + 'f'*16)
+        records.append(tie)
+        plan = BACKUP.POLICY.retention_plan(records, now=now)
+        self.assertTrue(plan['delete'])
+        self.assertIn(records[0]['backup_id'] + '.sqlite3.age', plan['keep'])
+        self.assertEqual(plan['policy'], {'daily': 7, 'weekly': 4, 'monthly': 3})
+        retained = set(plan['keep'])
+        self.assertIn(tie['backup_id']+'.sqlite3.age', retained)
+        self.assertEqual(tie['backup_id']+'.sqlite3.age' in retained,
+                         records[35]['backup_id']+'.sqlite3.age' in retained)
+
+    def test_retention_rejects_cross_scope_and_malformed_identity(self):
+        first = self.execute()
+        for key, value in [('scope', 'portal'), ('backup_id', '../car-care'), ('artifact_sha256', 'bad')]:
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                BACKUP.POLICY.retention_plan([dict(first, **{key: value})])
+
+    def test_upload_intent_is_durable_before_provider_called(self):
+        def observe(args):
+            if 'copyto' in args and not args[-2].startswith('gdrive:'):
+                current = json.loads(next(self.evidence.glob('car-care-*.json')).read_text())
+                self.assertEqual(current['remote_upload_status'], 'uncertain')
+                self.assertEqual(current['stage'], 'upload')
+            self.runner(args)
+        self.execute(observe)
+
+    def retain(self, **kwargs):
+        with patch.object(BACKUP.HELPERS, 'memory_backed', return_value=True), patch.object(BACKUP.shutil, 'which', return_value='/fixture/bin'):
+            return BACKUP.retain(self.database, self.credentials, self.scratch, self.evidence, **kwargs)
+
+    def history(self):
+        """A recent recoverable anchor and an expired ciphertext with real digests."""
+        latest = self.execute()
+        older = dict(latest)
+        old_time = datetime.now(timezone.utc) - timedelta(days=200)
+        older['backup_id'] = old_time.strftime('car-care-%Y%m%dT%H%M%SZ-') + '0'*16
+        older['finished_at'] = older['restore_verified_at'] = old_time.isoformat()
+        name = older['backup_id']+'.sqlite3.age'
+        self.remote[BACKUP.REMOTE+'/'+name] = next(iter(self.remote.values()))
+        BACKUP.POLICY.persist(self.evidence/(older['backup_id']+'.json'), older, initial=True)
+        # Eight recent proofs ensure the old object is outside the seven-copy floor.
+        for offset in range(1, 8):
+            record = dict(latest)
+            date = datetime.now(timezone.utc) - timedelta(days=offset)
+            record['backup_id'] = date.strftime('car-care-%Y%m%dT%H%M%SZ-') + f'{offset:016x}'
+            record['finished_at'] = record['restore_verified_at'] = date.isoformat()
+            self.remote[BACKUP.REMOTE+'/'+record['backup_id']+'.sqlite3.age'] = next(iter(self.remote.values()))
+            BACKUP.POLICY.persist(self.evidence/(record['backup_id']+'.json'), record, initial=True)
+        return latest, older
+
+    def retention_runner(self, args, **kwargs):
+        if 'lsjson' in args:
+            self.calls.append(args)
+            items = [dict(Name=key.rsplit('/', 1)[1], Path=key.rsplit('/', 1)[1], IsDir=False,
+                          Size=len(value), ID=key.rsplit('/', 1)[1], ModTime='2026-01-01T00:00:00+00:00')
+                     for key, value in sorted(self.remote.items())]
+            kwargs['stdout'].write(json.dumps(items).encode())
+        elif 'deletefile' in args:
+            self.calls.append(args)
+            del self.remote[args[-1]]
+        else:
+            self.runner(args)
+
+    def test_retention_plan_is_offline_and_execution_requires_exact_confirmation(self):
+        self.history()
+        count = len(self.calls)
+        plan = self.retain()
+        self.assertEqual(len(self.calls), count)
+        self.assertTrue(plan['delete'])
+        for options in [dict(), dict(expected_plan_sha256='bad', confirm_remote=BACKUP.REMOTE),
+                        dict(expected_plan_sha256=plan['plan_sha256'], confirm_remote=BACKUP.REMOTE+'/../portal')]:
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                self.retain(delete=True, **options)
+        self.assertEqual(len(self.calls), count)
+
+    def test_retention_restores_anchor_verifies_candidate_and_preserves_last_copy(self):
+        latest, older = self.history()
+        plan = self.retain()
+        result = self.retain(delete=True, expected_plan_sha256=plan['plan_sha256'],
+                             confirm_remote=BACKUP.REMOTE, runner=self.retention_runner)
+        self.assertIn(older['backup_id']+'.sqlite3.age', result['deleted'])
+        self.assertIn(BACKUP.REMOTE+'/'+latest['backup_id']+'.sqlite3.age', self.remote)
+        self.assertGreaterEqual(len(self.remote), 7)
+        self.assertEqual(self.retain()['delete'], [])
+        self.assertEqual(list(self.scratch.iterdir()), [])
+
+    def test_retention_unknown_object_and_digest_mismatch_block_delete(self):
+        latest, older = self.history()
+        plan = self.retain()
+        remote = BACKUP.REMOTE+'/'+older['backup_id']+'.sqlite3.age'
+        original = self.remote[remote]
+        self.remote[remote] = b'corrupt'
+        with self.assertRaises(ValueError):
+            self.retain(delete=True, expected_plan_sha256=plan['plan_sha256'],
+                        confirm_remote=BACKUP.REMOTE, runner=self.retention_runner)
+        self.assertFalse(any('deletefile' in args for args in self.calls))
+        self.remote[remote] = original
+        self.remote[BACKUP.REMOTE+'/other-service.sqlite3.age'] = original
+        with self.assertRaises(ValueError):
+            self.retain(delete=True, expected_plan_sha256=plan['plan_sha256'],
+                        confirm_remote=BACKUP.REMOTE, runner=self.retention_runner)
+        self.assertFalse(any('deletefile' in args for args in self.calls))
+
+    def test_retention_uncertain_delete_stops_later_upload_and_retry(self):
+        self.history()
+        plan = self.retain()
+        def uncertain(args, **kwargs):
+            self.retention_runner(args, **kwargs)
+            if 'deletefile' in args:
+                raise subprocess.TimeoutExpired(args, 120)
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.retain(delete=True, expected_plan_sha256=plan['plan_sha256'],
+                        confirm_remote=BACKUP.REMOTE, runner=uncertain)
+        count = len(self.calls)
+        with self.assertRaises(ValueError):
+            self.execute()
+        with self.assertRaises(ValueError):
+            self.retain(delete=True, expected_plan_sha256=plan['plan_sha256'],
+                        confirm_remote=BACKUP.REMOTE, runner=self.retention_runner)
+        self.assertEqual(len(self.calls), count)
+
+    def test_stale_restore_proof_blocks_retention_without_remote_call(self):
+        self.history()
+        for path in self.evidence.glob('car-care-*.json'):
+            record = json.loads(path.read_text())
+            if record['status'] == 'success':
+                date = datetime.now(timezone.utc)-timedelta(days=2)
+                # The freshest archive is also aged so it remains valid evidence.
+                if BACKUP.POLICY.created(record['backup_id']) > date:
+                    new_id = date.strftime('car-care-%Y%m%dT%H%M%SZ-')+record['backup_id'][-16:]
+                    record['backup_id'] = new_id
+                    record['finished_at'] = record['restore_verified_at'] = date.isoformat()
+                    path.unlink()
+                    BACKUP.POLICY.persist(self.evidence/(new_id+'.json'), record, initial=True)
+        plan = self.retain()
+        count = len(self.calls)
+        with self.assertRaises(ValueError):
+            self.retain(delete=True, expected_plan_sha256=plan['plan_sha256'],
+                        confirm_remote=BACKUP.REMOTE, runner=self.retention_runner)
+        self.assertEqual(len(self.calls), count)
+
+    def test_inactive_templates_do_not_enable_or_delete(self):
+        template = ROOT/'car-care-worker/tools/automation'
+        service = (template/'car-care-backup.service.disabled').read_text()
+        timer = (template/'car-care-backup.timer.disabled').read_text()
+        self.assertIn('--go --if-changed', service)
+        self.assertNotIn('--retention-go', service)
+        self.assertNotIn('\n[Install]', service + timer)
+        self.assertIn('Persistent=false', timer)
+        self.assertIn('@APPROVED_ACTIVATION_MARKER@', service)
+
+    def test_retention_duplicate_remote_identity_blocks_delete(self):
+        self.history()
+        plan = self.retain()
+        def duplicate(args, **kwargs):
+            if 'lsjson' in args:
+                self.calls.append(args)
+                key = next(iter(self.remote))
+                name = key.rsplit('/', 1)[1]
+                item = dict(Name=name, Path=name, IsDir=False, Size=len(self.remote[key]),
+                            ID='fixture', ModTime='2026-01-01T00:00:00+00:00')
+                kwargs['stdout'].write(json.dumps([item, item]).encode())
+            else:
+                self.retention_runner(args, **kwargs)
+        with self.assertRaises(ValueError):
+            self.retain(delete=True, expected_plan_sha256=plan['plan_sha256'],
+                        confirm_remote=BACKUP.REMOTE, runner=duplicate)
+        self.assertFalse(any('deletefile' in args for args in self.calls))
+
+    def test_remote_inventory_change_between_digest_and_delete_blocks_mutation(self):
+        self.history()
+        plan = self.retain()
+        lists = []
+        def changed(args, **kwargs):
+            if 'lsjson' in args:
+                lists.append(True)
+                if len(lists) == 2:
+                    key = next(iter(self.remote))
+                    self.remote[key] += b'changed'
+            self.retention_runner(args, **kwargs)
+        with self.assertRaises(ValueError):
+            self.retain(delete=True, expected_plan_sha256=plan['plan_sha256'],
+                        confirm_remote=BACKUP.REMOTE, runner=changed)
+        self.assertFalse(any('deletefile' in args for args in self.calls))
+
+    def test_retention_single_last_copy_never_deleted(self):
+        self.execute()
+        plan = self.retain()
+        self.assertEqual(plan['delete'], [])
+        result = self.retain(delete=True, expected_plan_sha256=plan['plan_sha256'],
+                             confirm_remote=BACKUP.REMOTE, runner=self.retention_runner)
+        self.assertEqual(result['deleted'], [])
+        self.assertEqual(len(self.remote), 1)
+        self.assertFalse(any('deletefile' in args for args in self.calls))
+
+    def test_malformed_local_deletion_tombstone_is_rejected(self):
+        first = self.execute()
+        with self.assertRaises(ValueError):
+            BACKUP.POLICY.retention_plan([dict(first, deleted=['../portal'])])

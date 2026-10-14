@@ -1,0 +1,11 @@
+# INACTIVE TEMPLATE. No [Install] section: this cannot enable a schedule.
+# Example only; validate completion of the existing 02:30 KST four-service
+# sequential backup before deciding the installation schedule.
+[Unit]
+Description=Inactive car database backup schedule proposal
+ConditionPathExists=@APPROVED_ACTIVATION_MARKER@
+
+[Timer]
+OnCalendar=*-*-* 05:30:00 Asia/Seoul
+Persistent=false
+Unit=car-care-backup.service

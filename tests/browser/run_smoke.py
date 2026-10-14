@@ -6,6 +6,7 @@ Setup: pip install -r tests/browser/requirements.browser.txt
 Run:   python tests/browser/run_smoke.py
 No URL option exists: the runner owns a loopback server and disposable state.
 """
+import argparse
 from contextlib import closing
 import json
 import os
@@ -15,10 +16,23 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def completed_write(page, url, action):
+    """Observe the specific write response, independent of DOM reload timing."""
+    with page.expect_response(lambda response: response.url == url and response.request.method == 'POST') as pending:
+        action()
+    response = pending.value
+    assert response.ok and response.status == 200, f'write request failed: {urlsplit(url).path} HTTP {response.status}'
+    # Product JS reloads immediately; response bodies may be evicted on navigation.
+    # Routes write before responding; verify the persisted bytes and DOM below.
+    # Immediate reload can abort requestfinished, so it is not a success signal.
+    return response.status
 
 
 def smoke(page, base, scratch, expect):
@@ -30,12 +44,16 @@ def smoke(page, base, scratch, expect):
     page.locator('#file-manager-password').fill('smoke-access-only')
     page.get_by_role('button', name='파일함 들어가기').click()
     expect(page.locator('#file-upload-input')).to_be_attached()
-    page.locator('#file-upload-input').set_input_files({
+    # The DOM can appear while the external helper still blocks inline handlers.
+    page.wait_for_function("() => typeof uploadFiles === 'function'")
+    completed_write(page, base + '/files/uploads', lambda: page.locator('#file-upload-input').set_input_files({
         'name': 'smoke-upload.txt', 'mimeType': 'text/plain', 'buffer': b'isolated browser fixture',
-    })
+    }))
     tile = page.locator('[data-item-path="smoke-upload.txt"]')
     expect(tile).to_be_visible()
-    assert (scratch / 'files/smoke-upload.txt').read_bytes() == b'isolated browser fixture'
+    assert (scratch / 'files/smoke-upload.txt').read_bytes() == b'isolated browser fixture', 'uploaded file content mismatch'
+    # Upload reloads the document; wait for its new handlers before deleting.
+    page.wait_for_function("() => typeof uploadFiles === 'function'")
     tile.click()
     def answer(dialog):
         if dialog.type == 'prompt':
@@ -45,12 +63,13 @@ def smoke(page, base, scratch, expect):
         else:
             dialog.dismiss()
     page.on('dialog', answer)
-    page.locator('#delete-selection').click()
+    completed_write(page, base + '/files/trash', lambda: page.locator('#delete-selection').click())
     expect(tile).to_have_count(0)
-    assert not (scratch / 'files/smoke-upload.txt').exists()
+    assert not (scratch / 'files/smoke-upload.txt').exists(), 'deleted tile disappeared but file remains'
     entries = list((scratch / 'files/.trash').glob('*/metadata.json'))
-    assert len(entries) == 1 and json.loads(entries[0].read_text())['path'] == 'smoke-upload.txt'
-    assert (entries[0].parent / 'item').read_bytes() == b'isolated browser fixture'
+    assert len(entries) == 1, f'expected one trash entry, found {len(entries)}'
+    assert json.loads(entries[0].read_text())['path'] == 'smoke-upload.txt', 'trash metadata path mismatch'
+    assert (entries[0].parent / 'item').read_bytes() == b'isolated browser fixture', 'trashed file content mismatch'
     page.goto(base + '/?q=fixture&source=all')
     news = page.locator('[data-search-source="news"]')
     expect(news.get_by_role('status')).to_have_text('현재 응답 없음')
@@ -60,7 +79,14 @@ def smoke(page, base, scratch, expect):
     expect(news.locator('[data-search-retry]')).to_have_count(0)
 
 
-def main():
+def argument_parser():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--artifacts', type=Path, help='save synthetic failure screenshot and HTML here')
+    return parser
+
+
+def main(argv=None):
+    args = argument_parser().parse_args(argv)
     try:
         from playwright.sync_api import sync_playwright, expect
     except ImportError:
@@ -95,18 +121,28 @@ def main():
                 browser = playwright.chromium.launch(headless=True,
                     executable_path=os.environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE'))
                 try:
-                    context = browser.new_context()
+                    context = browser.new_context(service_workers='block')
                     # Browser-origin requests can reach only this owned server.
                     context.route('**/*', lambda route: route.continue_()
-                                  if urlsplit(route.request.url).netloc == f'127.0.0.1:{port}' else route.abort())
+                                  if (urlsplit(route.request.url).scheme == 'http' and
+                                      urlsplit(route.request.url).netloc == f'127.0.0.1:{port}') else route.abort())
                     page = context.new_page()
-                    smoke(page, base, scratch, expect)
+                    try:
+                        smoke(page, base, scratch, expect)
+                    except Exception:
+                        if args.artifacts is not None:
+                            args.artifacts.mkdir(parents=True, exist_ok=True)
+                            page.screenshot(path=str(args.artifacts / 'failure.png'), full_page=True)
+                            (args.artifacts / 'failure.html').write_text(page.content(), encoding='utf-8')
+                            (args.artifacts / 'failure.txt').write_text(traceback.format_exc(), encoding='utf-8')
+                        raise
                 finally:
                     browser.close()
             print('portal_browser_smoke=PASS login=PASS upload=PASS trash=PASS search_retry=PASS isolated=true')
             return 0
         except Exception as error:
-            print(f'portal_browser_smoke=FAIL type={type(error).__name__}')
+            print(f'portal_browser_smoke=FAIL type={type(error).__name__} reason={error}')
+            traceback.print_exc()
             return 1
         finally:
             process.terminate()
