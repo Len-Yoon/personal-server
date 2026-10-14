@@ -1,0 +1,4 @@
+# ExecStartPost runs after the coordinator exits and releases the shared lock.
+# The helper checks all four same-day results before starting the car service.
+[Service]
+ExecStartPost=/usr/bin/python3 @REPO_ROOT@/car-care-worker/tools/automation/after_sequence.py --go
