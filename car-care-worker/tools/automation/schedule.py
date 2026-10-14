@@ -10,10 +10,12 @@ import os
 from pathlib import Path
 import re
 import signal
+import selectors
 import stat
 import subprocess
 import sys
 import time
+from urllib.request import Request, build_opener, HTTPRedirectHandler, ProxyHandler
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -172,11 +174,66 @@ class Kubernetes:
     def create(self, pod):
         return self.call(['-n',NAMESPACE,'create','-f','-','-o','json'], pod)
 
+    def notify(self, payload):
+        send_alert(payload)
+
     def active_backups(self):
         jobs = self.call(['-n',NAMESPACE,'get','jobs','-o','json'])['items']
         pods = self.call(['-n',NAMESPACE,'get','pods','-o','json'])['items']
         return any(j.get('status',{}).get('active',0) for j in jobs if 'backup' in j['metadata']['name']) or any(
             'backup' in p['metadata']['name'] and p.get('status',{}).get('phase') not in ('Succeeded','Failed') for p in pods)
+
+
+class NoAlertRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        raise ValueError('car alert redirect rejected')
+
+
+def send_alert(payload, *, opener=None):
+    """One JSON POST through a short-lived, loopback-only, path-limited proxy."""
+    command = ['sudo','-n','k3s','kubectl','proxy','--port=0','--address=127.0.0.1',
+               '--accept-hosts=^127\\.0\\.0\\.1$',
+               '--accept-paths=^'+re.escape(ALERT_PATH)+'$',
+               '--reject-methods=^(GET|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|CONNECT)$']
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        deadline = time.monotonic()+10
+        banner = bytearray()
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while b'\n' not in banner:
+                remaining = deadline-time.monotonic()
+                require(remaining > 0 and process.poll() is None)
+                require(selector.select(remaining))
+                chunk = os.read(process.stdout.fileno(), 256)
+                require(chunk)
+                banner.extend(chunk)
+                require(len(banner) <= 4096)
+        match = re.fullmatch(rb'Starting to serve on 127\.0\.0\.1:([0-9]{1,5})\r?\n', bytes(banner))
+        require(match is not None)
+        port = int(match[1])
+        require(1 <= port <= 65535)
+        request = Request('http://127.0.0.1:'+str(port)+ALERT_PATH,
+                          data=json.dumps(payload).encode('utf-8'),
+                          headers={'Content-Type':'application/json'}, method='POST')
+        # Ignore ambient HTTP_PROXY and refuse redirects outside this fixed URL.
+        opener = opener or build_opener(ProxyHandler({}), NoAlertRedirect()).open
+        with opener(request, timeout=10) as response:
+            require(200 <= response.status < 300)
+            require(len(response.read(4097)) <= 4096)
+    finally:
+        try:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        finally:
+            process.stdout.close()
+
 
 
 def alert_payload(failed, now):
@@ -297,7 +354,7 @@ def main():
         print('car_care_schedule=BLOCKED')
     alert_ok = True
     try:
-        api.call(['create','--raw',ALERT_PATH,'-f','-'], alert_payload(result is None, datetime.now(timezone.utc)))
+        api.notify(alert_payload(result is None, datetime.now(timezone.utc)))
     except Exception:
         alert_ok = False
         print('car_care_schedule_alert=FAIL')

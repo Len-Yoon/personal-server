@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -581,7 +582,7 @@ class CarBackupScheduleTests(unittest.TestCase):
         from contextlib import nullcontext
         import sys
         class NotifyFailure:
-            def call(self, args, body=None):
+            def notify(self, body):
                 raise ValueError('fixture notification unavailable')
         argv = ['schedule.py','--go','--image',self.image,'--image-id',self.image_id]
         result = dict(day=self.now.astimezone(SCHEDULE.KST).date().isoformat(), status='success', backup_id=self.proof['backup_id'])
@@ -599,3 +600,147 @@ class CarBackupScheduleTests(unittest.TestCase):
         journal = json.loads(next(self.state.glob('scheduled-*.json')).read_text())
         self.assertEqual(journal['status'], 'success')
         self.assertEqual(journal['alert_status'], 'failure')
+
+
+class CarBackupAlertTransportTests(unittest.TestCase):
+    def process(self, banner=b'Starting to serve on 127.0.0.1:32123\n', *, stubborn=False):
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, banner)
+        os.close(write_fd)
+        class Process:
+            stdout = os.fdopen(read_fd, 'rb', buffering=0)
+            returncode = None
+            terminated = False
+            killed = False
+            def poll(self): return self.returncode
+            def terminate(self): self.terminated = True
+            def kill(self): self.killed = True
+            def wait(self, timeout=None):
+                if stubborn and not self.killed:
+                    raise subprocess.TimeoutExpired('fixture', timeout)
+                self.returncode = 0
+                return 0
+        process = Process()
+        self.addCleanup(lambda: process.stdout.close())
+        return process
+
+    def response(self, status=200, data=b''):
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self, limit): return data[:limit]
+        response = Response()
+        response.status = status
+        return response
+
+    def test_json_post_is_fixed_local_scoped_and_process_is_reaped(self):
+        process = self.process()
+        requests = []
+        def opener(request, timeout):
+            requests.append(request)
+            self.assertEqual(timeout, 10)
+            return self.response()
+        with patch.object(SCHEDULE.subprocess, 'Popen', return_value=process) as start:
+            SCHEDULE.send_alert([dict(labels=dict(service='car-care-worker'))], opener=opener)
+        command = start.call_args.args[0]
+        self.assertEqual(command[:5], ['sudo','-n','k3s','kubectl','proxy'])
+        self.assertIn('--address=127.0.0.1', command)
+        self.assertIn('--port=0', command)
+        self.assertIn('--accept-paths=^'+SCHEDULE.re.escape(SCHEDULE.ALERT_PATH)+'$', command)
+        self.assertEqual(requests[0].full_url, 'http://127.0.0.1:32123'+SCHEDULE.ALERT_PATH)
+        self.assertEqual(requests[0].get_method(), 'POST')
+        self.assertEqual(requests[0].get_header('Content-type'), 'application/json')
+        self.assertEqual(json.loads(requests[0].data), [dict(labels=dict(service='car-care-worker'))])
+        self.assertTrue(process.terminated)
+        self.assertEqual(process.returncode, 0)
+        self.assertTrue(process.stdout.closed)
+
+    def test_http_failure_is_not_retried_and_proxy_is_cleaned(self):
+        process = self.process()
+        calls = []
+        def fail(request, timeout):
+            calls.append(request)
+            raise TimeoutError('fixture')
+        with patch.object(SCHEDULE.subprocess, 'Popen', return_value=process), self.assertRaises(TimeoutError):
+            SCHEDULE.send_alert([], opener=fail)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(process.terminated)
+        self.assertEqual(process.returncode, 0)
+
+    def test_startup_invalid_host_or_oversized_banner_fails_before_http(self):
+        for banner in (b'Starting to serve on 0.0.0.0:32123\n', b'x'*4097):
+            with self.subTest(banner= banner[:40]):
+                process = self.process(banner)
+                with patch.object(SCHEDULE.subprocess, 'Popen', return_value=process), \
+                     patch.object(SCHEDULE,'build_opener') as opener, self.assertRaises(ValueError):
+                    SCHEDULE.send_alert([], opener=opener)
+                opener.assert_not_called()
+                self.assertTrue(process.terminated)
+                self.assertEqual(process.returncode, 0)
+
+    def test_non_2xx_or_oversized_response_fails_and_reaps(self):
+        for response in (self.response(status=503), self.response(data=b'x'*4097)):
+            with self.subTest(status=response.status):
+                process = self.process()
+                with patch.object(SCHEDULE.subprocess, 'Popen', return_value=process), self.assertRaises(ValueError):
+                    SCHEDULE.send_alert([], opener=lambda *args, **kw: response)
+                self.assertTrue(process.terminated)
+                self.assertEqual(process.returncode, 0)
+
+    def test_stubborn_child_is_killed_and_waited(self):
+        process = self.process(stubborn=True)
+        with patch.object(SCHEDULE.subprocess, 'Popen', return_value=process):
+            SCHEDULE.send_alert([], opener=lambda *args, **kw: self.response())
+        self.assertTrue(process.terminated)
+        self.assertTrue(process.killed)
+        self.assertEqual(process.returncode, 0)
+
+    def test_startup_timeout_cleans_child_without_post(self):
+        process = self.process(b'')
+        # Keep the writer open so startup waits instead of observing EOF.
+        read_fd, write_fd = os.pipe()
+        self.addCleanup(os.close, write_fd)
+        process.stdout.close()
+        process.stdout = os.fdopen(read_fd, 'rb', buffering=0)
+        class NotReady:
+            def __enter__(self): return self
+            def __exit__(self,*args): pass
+            def register(self,*args): pass
+            def select(self,timeout): return []
+        with patch.object(SCHEDULE.subprocess,'Popen',return_value=process), \
+             patch.object(SCHEDULE.selectors,'DefaultSelector',return_value=NotReady()), \
+             patch.object(SCHEDULE,'build_opener') as opener, self.assertRaises(ValueError):
+            SCHEDULE.send_alert([], opener=opener)
+        opener.assert_not_called()
+        self.assertTrue(process.terminated)
+        self.assertEqual(process.returncode, 0)
+
+    def test_actual_child_process_is_reaped_on_http_failure(self):
+        import sys
+        process = subprocess.Popen([sys.executable, '-u', '-c',
+            "import time; print('Starting to serve on 127.0.0.1:32123'); time.sleep(60)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+        def cleanup():
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            process.stdout.close()
+        self.addCleanup(cleanup)
+        def failed(*args, **kwargs): raise TimeoutError('fixture')
+        with patch.object(SCHEDULE.subprocess, 'Popen', return_value=process), self.assertRaises(TimeoutError):
+            SCHEDULE.send_alert([], opener=failed)
+        self.assertIsNotNone(process.poll())
+        self.assertTrue(process.stdout.closed)
+
+    def test_default_opener_disables_proxy_environment_and_redirects(self):
+        process = self.process()
+        with patch.object(SCHEDULE.subprocess,'Popen',return_value=process), \
+             patch.object(SCHEDULE,'build_opener') as build:
+            build.return_value.open.return_value = self.response()
+            SCHEDULE.send_alert([])
+        handlers = build.call_args.args
+        self.assertEqual(handlers[0].proxies, {})
+        self.assertIsInstance(handlers[1], SCHEDULE.NoAlertRedirect)
+        with self.assertRaises(ValueError):
+            handlers[1].redirect_request(None, None, None, None, None, None)
