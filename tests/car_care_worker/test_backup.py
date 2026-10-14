@@ -578,6 +578,46 @@ class CarBackupScheduleTests(unittest.TestCase):
         self.assertIn('05:30:00 Asia/Seoul', timer)
         self.assertIn('Persistent=false', timer)
 
+    def test_sequential_hook_waits_for_car_and_preserves_existing_backup_contract(self):
+        folder = ROOT/'car-care-worker/tools/automation'
+        hook = (folder/'pvc-backup-sequence-car-care.conf.tmpl').read_text()
+        settings = [line.strip() for line in hook.splitlines() if line.strip() and not line.startswith('#')]
+        self.assertEqual(settings, ['[Service]',
+            'ExecStartPost=/usr/bin/python3 @REPO_ROOT@/car-care-worker/tools/automation/after_sequence.py --go'])
+        self.assertNotIn('--no-block', hook)
+        self.assertNotIn('ExecStart=', hook)
+        sequence = (ROOT/'infra/k8s/backup-automation/pvc-backup-sequence.service.tmpl').read_text()
+        self.assertIn('pvc-backup-sequence.py --go', sequence)
+        self.assertIn('TimeoutStartSec=36000', sequence)
+        self.assertEqual(SCHEDULE.SEQUENCE.ORDER, ('portal','book','youtube','crawler'))
+        timer = (ROOT/'infra/k8s/backup-automation/pvc-backup-sequence.timer.tmpl').read_text()
+        self.assertIn('02:30:00 Asia/Seoul', timer)
+        self.assertIn('Restart=no', (folder/'car-care-backup.service.tmpl').read_text())
+
+    def test_sequence_hook_rejects_failed_missing_or_stale_results(self):
+        helper_path = ROOT/'car-care-worker/tools/automation/after_sequence.py'
+        spec = importlib.util.spec_from_file_location('after_sequence_test', helper_path)
+        helper = importlib.util.module_from_spec(spec)
+        sys_path = list(__import__('sys').path)
+        try:
+            spec.loader.exec_module(helper)
+        finally:
+            __import__('sys').path[:] = sys_path
+        now = datetime(2026,10,15,0,0,tzinfo=timezone.utc)
+        state = dict(metadata=dict(name='pvc-backup-sequence-state', namespace='personal-server', resourceVersion='1'),
+            data=dict(status='completed', current='none', run_date='2026-10-15',
+                updated_at='2026-10-14T17:40:00Z',
+                results=json.dumps({s:'passed' for s in helper.SEQUENCE.ORDER})))
+        helper.validate_completed(state, now)
+        for field, value in [('status','running'),('current','crawler'),('run_date','2026-10-14'),
+                ('updated_at','2026-10-14T17:00:00Z'),('updated_at','2026-10-15T00:02:00Z'),
+                ('results',json.dumps(dict(portal='passed',book='passed',youtube='passed',crawler='runner_failed'))),
+                ('results',json.dumps(dict(portal='passed',book='passed',youtube='passed')))]:
+            with self.subTest(field=field,value=value):
+                bad = dict(state, data={**state['data'],field:value})
+                with self.assertRaises((ValueError, helper.SEQUENCE.SafetyError)):
+                    helper.validate_completed(bad, now)
+
     def test_notification_failure_does_not_rerun_successful_backup(self):
         from contextlib import nullcontext
         import sys

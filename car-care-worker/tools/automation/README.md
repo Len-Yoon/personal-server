@@ -3,8 +3,8 @@
 | 구분 | 내용 | 비고 |
 |---|---|---|
 | 승인 범위 | 2026-10-14 차량 신규 일정 설치·활성화가 승인됨 | 실제 설치·수동 검증 결과는 개발 계획의 운영 기록 기준으로 확인함 |
-| 실행 방식 | user systemd → 차량 전용 host controller → 일자별 단일 K3s Pod | 기존 bootstrap·공용 scheduler·네 백업 일정 변경 없음 |
-| 일정 | 매일 05:30 KST | Portal → Book → YouTube → Crawler의 기존 02:30 순차 실행 뒤 배치함 |
+| 실행 방식 | user systemd → 차량 전용 host controller → 일자별 단일 K3s Pod | 기존 bootstrap·네 PVC 백업의 시간·실행기 유지, 순차 service 완료 후 차량 연결 |
+| 일정 | 매일 02:30 KST 시작, Portal → Book → YouTube → Crawler → 차량 DB | 별도05:30 차량 timer는 disabled/inactive로 유지함 |
 | 겹침 회피 | 기존 `pvc-backup-sequence.py`의 `local_lock()`을 그대로 재사용함. 최대 3시간 대기 후 차단함 | 잠금 획득 뒤에도 다른 active backup Job/Pod가 있으면 새 차량 Pod를 만들지 않음 |
 | 변경 감지 | 일반 실행은 `--go --if-changed`, 일요일 또는 실제 복원 검증 후 7일 이상 경과 시 `--go` 강제 실행함 | 변경 없어도 주간 실제 암호화·업로드·동일 객체 재다운로드·복원 SHA 검증 수행 |
 | 원본 | `/mnt/c/personal-server/data/car-care`를 readOnly hostPath로 mount함 | 차량 DB만 대상, OAuth·차량 자격 증명 데이터 제외 |
@@ -22,16 +22,17 @@
 
 ## 설치 대상과 실행 인터페이스
 
-- 설치 대상은 `car-care-backup.service.tmpl`과 `car-care-backup.timer.tmpl`임. 파일명은 각각 `personal-server-car-care-backup.service`, `personal-server-car-care-backup.timer`로 등록함.
+- 차량 service는 `car-care-backup.service.tmpl`을 `personal-server-car-care-backup.service`로 등록함. `pvc-backup-sequence-car-care.conf.tmpl`은 기존 user unit의 `personal-server-pvc-backup-sequence.service.d/50-car-care.conf`에 등록함. 기존 네 단계가 성공해 공유 잠금을 해제한 뒤 `after_sequence.py`가 같은 KST 날짜·completed·네 단계 모두passed·완료 시각을 검증한 뒤 blocking `ExecStartPost`로 차량 service를 실행하며, 차량 결과까지 순차 service의 결과에 반영함. 앞 단계 실패 시 차량을 호출하지 않음.
+- 이전 `car-care-backup.timer.tmpl`은05:30 분리 일정의 역사적 참고이며 현재 설치·활성화하지 않음. 이미 등록된 차량 timer는 disable --now로 해제하고 파일은 보존함.02:30 기존 timer만 활성 유지함.
 - `@REPO_ROOT@`, `@BACKUP_IMAGE@`, `@BACKUP_IMAGE_ID@`를 실제 검증한 값으로 치환함. image는 기존 Portal 백업 도구 이미지의 OCI index digest, image ID는 실제 플랫폼 child manifest digest로 각각 확인함.
 - host controller 명령은 `python3 car-care-worker/tools/automation/schedule.py --go --image <고정 이미지 digest> --image-id <플랫폼 manifest digest>`임. Secret 값이나 외부 자격 증명 인자는 받지 않음.
-- `.disabled` 파일은 이전 직접 실행 방식의 비활성 참고 템플릿이며 설치하지 않음. 신규 `.tmpl` 설치 후에도 기존 네 서비스 일정은 수정하지 않음.
+- `.disabled` 파일은 이전 직접 실행 방식의 비활성 참고 템플릿이며 설치하지 않음. 기존 네 서비스 timer·CronJob·실행기는 수정하지 않고 service drop-in으로 마지막 차량 호출만 연결함.
 
 ## 사전 확인과 운영 증거
 
 1. CI를 통과한 정확한 커밋을 N100에 fast-forward 동기화하고 canonical source·줄바꿈·image index/child manifest를 확인함. 이미지 pull policy는 `Never`로 유지함.
 2. 차량 원본과 evidence의 uid1000 소유권·0700 경로, 기존 네 백업의 완료·복원 증거·공유잠금 해제·active backup 없음, 기존 Secret 존재와 Alertmanager service proxy 접근을 읽기 전용으로 확인함.
-3. 최초 승인된 수동 스케줄 실행에서 실제 Pod 결과·고유 backup ID·암호화·동일 객체 복원 SHA·원본 차량 worker 보존·보호 리소스 보존을 확인한 뒤 timer를 활성화함. 다음 실행 시각과 user linger·WSL 예약 실행 환경을 확인함.
+3. 최초 승인된 수동 스케줄 실행에서 실제 Pod 결과·고유 backup ID·암호화·동일 객체 복원 SHA·원본 차량 worker 보존·보호 리소스 보존을 확인한 뒤 기존02:30 service에 후속 호출을 연결함. 차량05:30 timer 해제·02:30 다음 실행 시각·user linger와 기존 서비스 비실행 상태를 확인함.
 4. 시간은 UTC 인식 ISO 8601로 저장하며 일정·날짜 판단은 KST를 사용함. Pod의 현대 백업 날짜 KST는 UTC+09 고정값으로 계산하여 최소 이미지의 tzdata 설치에 의존하지 않음.
 5. 완료·실패 Pod와 날짜별 intent를 보존함. 성공 Pod도 현재 자동 삭제하지 않음. 일별 하나씩 남으므로 장기 보관 정리는 별도 운영 판단이 필요함.
 6. `uncertain` 증적과 실패 Pod는 원격 실제 객체·실행 이력을 대조하기 전 수정·삭제하지 않음. 동일 날짜 재진입은 이미 완료된 결과를 재사용하며 새 PASS 시각이나 새 업로드를 만들지 않음.
