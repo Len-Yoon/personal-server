@@ -203,11 +203,20 @@
     </section>
 
     {% if write_authenticated %}
-    <section class="panel">
+    <section class="panel" id="memo-trash">
         <h2>삭제한 메모 복구</h2>
+        <p>총 {{ trash_summary.total_count }}개 · JSON 저장 내용 {{ trash_summary.total_bytes }}바이트 (DB 파일 크기와 다름)</p>
+        <form id="memo-trash-purge" action="/videos/{{ video.id }}/trash/purge" method="post">
+            <input type="hidden" name="selection" value="[]">
+            <input type="hidden" name="request_id" value="{{ new_request_id() }}">
+            <button type="submit" disabled>선택한 메모 영구 삭제</button>
+            <p>한 번에 최대 20개를 선택할 수 있습니다. 영구 삭제하면 메모와 수정 이력을 복구할 수 없습니다.</p>
+        </form>
         <p>메모만 복구할 수 있습니다. 책·영상 전체 삭제는 복구할 수 없습니다. 삭제한 메모는 자동으로 지우지 않습니다.</p>
         {% for memo in deleted_memos %}
-        <article class="memo-card"><strong>{{ memo.title }}</strong><small>{{ memo.display_deleted_at }}</small><p style="white-space: pre-wrap;">{{ memo.content }}</p>
+        <article class="memo-card">
+            <label><input type="checkbox" class="memo-trash-select" style="width: 18px; height: 18px; padding: 0; vertical-align: middle;" data-memo-id="{{ memo.id }}" data-version="{{ memo.version }}"> 영구 삭제 대상으로 선택</label>
+            <strong>{{ memo.title }}</strong><small>{{ memo.display_deleted_at }} · {{ memo.stored_bytes }}바이트</small><p style="white-space: pre-wrap;">{{ memo.content }}</p>
             <form action="/memos/{{ memo.id }}/restore" method="post">
                 <input type="hidden" name="expected_version" value="{{ memo.version }}">
                 <input type="hidden" name="request_id" value="{{ new_request_id() }}">
@@ -216,6 +225,11 @@
             </form>
         </article>
         {% else %}<p>삭제한 메모가 없습니다.</p>{% endfor %}
+        <nav aria-label="휴지통 페이지">
+            {% if trash_summary.page > 1 %}<a href="/videos/{{ video.id }}?trash_page={{ trash_summary.page - 1 }}#memo-trash">이전</a>{% endif %}
+            <span>{{ trash_summary.page }} / {{ trash_summary.pages }} 페이지</span>
+            {% if trash_summary.page < trash_summary.pages %}<a href="/videos/{{ video.id }}?trash_page={{ trash_summary.page + 1 }}#memo-trash">다음</a>{% endif %}
+        </nav>
     </section>
     {% endif %}
 </main>
@@ -224,6 +238,7 @@
     <span>youtube-memo</span>
     <span>Len Private Workspace</span>
 </footer>
+<script src="/static/js/memo-trash.js?v=20261014-1"></script>
 <script src="/static/js/form-drafts.js?v=20261006-write-reliability-1"></script>
 <script>
 const redirectToWriteLogin = () => {

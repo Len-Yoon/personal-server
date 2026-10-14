@@ -74,6 +74,10 @@ for _name, _modules in (
     EXPECTED_GROUPS[_name] = (*_entry[:-1], _entry[-1] + _modules)
 
 
+_maintenance = EXPECTED_GROUPS["maintenance"]
+EXPECTED_GROUPS["maintenance"] = (*_maintenance[:-1], _maintenance[-1] + " tests.test_browser_smoke")
+
+
 class ServiceTestRunnerTests(unittest.TestCase):
     def test_ci_selection_uses_documentation_subset_for_documentation(self):
         mode, names = runner.select_ci_suites(
@@ -360,3 +364,65 @@ class ServiceTestRunnerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ShardedRunnerTests(unittest.TestCase):
+    def test_partitions_keep_whole_modules_and_exact_case_ids(self):
+        from tests import run_ci_shards as shards
+        modules = ['tests.test_run_service_tests', 'tests.test_browser_smoke']
+        groups, inventory = shards.partition(modules, 4)
+        self.assertCountEqual([module for group in groups for module in group], modules)
+        _, expected = shards.collect(modules)
+        shards.verify_coverage(expected, [case for group in groups for module in group for case in inventory[module]])
+
+    def test_coverage_rejects_missing_duplicate_and_unexpected_cases(self):
+        from tests import run_ci_shards as shards
+        for actual in [['a'], ['a', 'a', 'b'], ['a', 'c']]:
+            with self.assertRaises(ValueError):
+                shards.verify_coverage(['a', 'b'], actual)
+
+    def test_collection_errors_fail_closed(self):
+        from tests import run_ci_shards as shards
+        with self.assertRaises(ValueError):
+            shards.collect(['tests.nonexistent_shard_fixture'])
+
+    def test_worker_propagates_test_and_fixture_failures_and_records_coverage(self):
+        from tests import run_ci_shards as shards
+        class BrokenCase(unittest.TestCase):
+            def runTest(self):
+                self.fail('intentional shard failure')
+        class BrokenFixture(unittest.TestCase):
+            @classmethod
+            def setUpClass(cls):
+                raise RuntimeError('intentional fixture failure')
+            def runTest(self):
+                pass
+        with tempfile.TemporaryDirectory() as directory:
+            for case in [BrokenCase(), BrokenFixture()]:
+                output = Path(directory) / 'result.json'
+                with mock.patch.object(shards, 'collect', return_value=(unittest.TestSuite([case]), [case.id()])), redirect_stderr(StringIO()):
+                    self.assertEqual(shards.worker(['fixture'], output), 1)
+                self.assertFalse(json.loads(output.read_text())['success'])
+
+    def test_aggregate_propagates_failed_worker_with_complete_coverage(self):
+        from tests import run_ci_shards as shards
+        def failed_process(command, **kwargs):
+            output = Path(command[command.index('--worker-output') + 1])
+            output.write_text(json.dumps({'executed_ids': ['fixture.case'], 'success': False}))
+            return subprocess.CompletedProcess(command, 1)
+        with mock.patch.object(shards, 'collect', return_value=(None, ['fixture.case'])), \
+             mock.patch.object(shards, 'partition', return_value=([['fixture']], {})), \
+             mock.patch.object(shards.subprocess, 'run', side_effect=failed_process), redirect_stdout(StringIO()):
+            self.assertEqual(shards.run(['fixture'], 1, None), 1)
+
+    def test_missing_worker_report_fails_and_preserves_evidence(self):
+        from tests import run_ci_shards as shards
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'coverage.json'
+            with mock.patch.object(shards, 'collect', return_value=(None, ['fixture.case'])), \
+                 mock.patch.object(shards, 'partition', return_value=([['fixture']], {})), \
+                 mock.patch.object(shards.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)), redirect_stdout(StringIO()):
+                self.assertEqual(shards.run(['fixture'], 1, output), 1)
+            report = json.loads(output.read_text())
+            self.assertFalse(report['success'])
+            self.assertIsNotNone(report['coverage_error'])

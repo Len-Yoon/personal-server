@@ -27,6 +27,8 @@ from app.services.memo_service import (
     get_video,
     list_memos,
     memo_recovery_state,
+    memo_trash_summary,
+    purge_deleted_memos,
     restore_memo,
     restore_memo_revision,
     list_available_tags,
@@ -159,14 +161,19 @@ def create_video(request: Request, url: str = Form(...)):
 
 
 @app.get("/videos/{video_id}")
-def video_detail(request: Request, video_id: int):
+def video_detail(request: Request, video_id: int, trash_page: int = 1):
     video = get_video(video_id)
 
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
     write_authenticated = _has_write_session(request)
-    memo_history, deleted_memos = memo_recovery_state(video_id) if write_authenticated else ({}, [])
+    trash_summary = memo_trash_summary(video_id, trash_page) if write_authenticated else None
+    if write_authenticated:
+        memo_history, deleted_memos = (memo_recovery_state(video_id) if trash_summary["page"] == 1
+                                       else memo_recovery_state(video_id, trash_page=trash_summary["page"]))
+    else:
+        memo_history, deleted_memos = {}, []
     return templates.TemplateResponse(
         request=request, name="video_detail.html",
         context={
@@ -178,6 +185,7 @@ def video_detail(request: Request, video_id: int):
             "memos": list_memos(video_id),
             "memo_history": memo_history,
             "deleted_memos": deleted_memos,
+            "trash_summary": trash_summary,
             "portal_home_url": portal_home_url(request_host_from_headers(request.headers)),
             "write_authenticated": write_authenticated,
         },
@@ -583,6 +591,18 @@ def _client_id(request: Request) -> str:
 
 
 install_import_routes(app, _require_write_session, WRITE_AUTH_COOKIE, templates)
+
+
+@app.post("/videos/{video_id}/trash/purge")
+def purge_memo_trash(request: Request, video_id: int, selection: str = Form(default=""), request_id: str = Form(default="")):
+    _require_write_session(request)
+    try:
+        selected = json.loads(selection)
+        purge_deleted_memos(video_id, selected, request_id)
+    except ValueError as error:
+        message = str(error) if not isinstance(error, json.JSONDecodeError) else "선택한 메모 정보가 올바르지 않습니다."
+        raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=message) from error
+    return RedirectResponse(url=f"/videos/{video_id}#memo-trash", status_code=303)
 
 
 @app.post("/memos/{memo_id}/restore")

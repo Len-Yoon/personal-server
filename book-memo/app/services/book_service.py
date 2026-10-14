@@ -973,16 +973,66 @@ def _save_memo_revision(connection: sqlite3.Connection, row: sqlite3.Row) -> Non
     )
 
 
-def memo_recovery_state(parent_id: int) -> tuple[dict[int, list[dict[str, Any]]], list[dict[str, Any]]]:
+def memo_recovery_state(parent_id: int, trash_page: int = 1) -> tuple[dict[int, list[dict[str, Any]]], list[dict[str, Any]]]:
     init_db()
     with _connect() as connection:
         connection.execute("BEGIN")
         revisions = connection.execute("SELECT * FROM memo_revisions WHERE book_id = ? ORDER BY id DESC", (parent_id,)).fetchall()
-        deleted = connection.execute("SELECT * FROM deleted_memos WHERE book_id = ? ORDER BY deleted_at DESC, memo_id DESC", (parent_id,)).fetchall()
+        deleted = connection.execute("SELECT * FROM deleted_memos WHERE book_id = ? ORDER BY deleted_at DESC, memo_id DESC LIMIT 20 OFFSET ?", (parent_id, (max(1, trash_page) - 1) * 20)).fetchall()
     history: dict[int, list[dict[str, Any]]] = {}
     for row in revisions:
         history.setdefault(row["memo_id"], []).append({**json.loads(row["snapshot"]), "display_saved_at": format_display_datetime(row["saved_at"]), "revision_id": row["id"]})
-    return history, [{**json.loads(row["snapshot"]), "version": row["version"], "display_deleted_at": format_display_datetime(row["deleted_at"])} for row in deleted]
+    return history, [{**json.loads(row["snapshot"]), "version": row["version"], "display_deleted_at": format_display_datetime(row["deleted_at"]), "stored_bytes": len(row["snapshot"].encode("utf-8")) + len(row["tags"].encode("utf-8"))} for row in deleted]
+
+
+def memo_trash_summary(parent_id: int, page: int = 1) -> dict[str, int]:
+    """Measure persisted JSON UTF-8 bytes, not SQLite file size or disk space."""
+    init_db()
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) AS count, COALESCE(SUM(length(CAST(snapshot AS BLOB)) + "
+            "length(CAST(tags AS BLOB))), 0) AS bytes FROM deleted_memos WHERE book_id = ?",
+            (parent_id,),
+        ).fetchone()
+    pages = max(1, (row["count"] + 19) // 20)
+    return {"total_count": row["count"], "total_bytes": row["bytes"],
+            "page": min(max(1, page), pages), "pages": pages, "page_size": 20}
+
+
+def purge_deleted_memos(parent_id: int, selection: list[tuple[int, int]], request_id: str) -> int:
+    """Validate the entire selection before permanently deleting any record."""
+    if not request_id:
+        raise ValueError("영구 삭제 요청 식별자가 필요합니다.")
+    if not isinstance(selection, list) or not 1 <= len(selection) <= 20:
+        raise ValueError("영구 삭제할 메모를 1개 이상 20개 이하 선택해주세요.")
+    selected: dict[int, int] = {}
+    for item in selection:
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            raise ValueError("선택한 메모 정보가 올바르지 않습니다.")
+        memo_id, version = item
+        if any(type(value) is not int or value < 1 for value in (memo_id, version)) or memo_id in selected:
+            raise ValueError("메모 ID와 버전은 중복 없는 양의 정수여야 합니다.")
+        selected[memo_id] = version
+    init_db()
+    payload = [parent_id, sorted(selected.items())]
+    with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        replayed = replay_result(connection, request_id, "memo-trash-purge", payload)
+        if replayed is not None:
+            return replayed
+        for memo_id, version in selected.items():
+            row = connection.execute(
+                "SELECT version FROM deleted_memos WHERE memo_id = ? AND book_id = ?",
+                (memo_id, parent_id),
+            ).fetchone()
+            if row is None:
+                raise WriteConflict("선택한 메모가 변경되었습니다. 새로고침한 뒤 다시 선택해주세요.")
+            check_version(row, version)
+        for memo_id in selected:
+            connection.execute("DELETE FROM memo_revisions WHERE memo_id = ? AND book_id = ?", (memo_id, parent_id))
+            connection.execute("DELETE FROM deleted_memos WHERE memo_id = ? AND book_id = ?", (memo_id, parent_id))
+        record_result(connection, request_id, "memo-trash-purge", payload, parent_id)
+    return parent_id
 
 
 def restore_memo(memo_id: int, expected_version: int, request_id: str = "") -> int | None:

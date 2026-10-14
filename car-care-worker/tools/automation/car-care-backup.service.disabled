@@ -1,0 +1,21 @@
+# INACTIVE TEMPLATE. Substitute every @...@ after separate deployment approval.
+# This file is deliberately not a .service and has no [Install] section.
+[Unit]
+Description=Car database encrypted backup and exact-object restore verification
+ConditionPathExists=@APPROVED_ACTIVATION_MARKER@
+
+[Service]
+Type=oneshot
+User=1000
+Group=1000
+UMask=0077
+RuntimeDirectory=car-care-backup
+RuntimeDirectoryMode=0700
+ExecStartPre=/usr/bin/python3 @REPOSITORY@/car-care-worker/tools/backup.py --check --database @DATABASE@ --credentials @REGISTERED_CREDENTIAL_DIRECTORY@ --scratch /run/car-care-backup --evidence @EVIDENCE_DIRECTORY@
+ExecStart=/usr/bin/python3 @REPOSITORY@/car-care-worker/tools/backup.py --go --if-changed --database @DATABASE@ --credentials @REGISTERED_CREDENTIAL_DIRECTORY@ --scratch /run/car-care-backup --evidence @EVIDENCE_DIRECTORY@
+TimeoutStartSec=900
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/car-care-backup @EVIDENCE_DIRECTORY@
+PrivateTmp=true
