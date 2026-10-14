@@ -112,6 +112,8 @@
                 <h3>{{ backup.name }} 백업 상태</h3>
                 <p role="status">{{ backup.label }}</p>
                 <p>백업 {{ backup.backup_at }} · 복원 검증 {{ backup.restore_at }} · 유효 기한 {{ backup.expires_at }}</p>
+                {% if backup.attempt_at is defined %}<p>최근 실행 {{ backup.attempt_at }} · {{ backup.attempt_status }}</p>{% endif %}
+                {% if backup.retention_status is defined %}<p>백업 보존 정리 {{ backup.retention_status }} · 삭제 개수 {{ backup.retention_deleted_count }}</p>{% endif %}
             </div>
             {% endfor %}
         </section>

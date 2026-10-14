@@ -55,7 +55,7 @@ class PortalImprovementsTests(unittest.TestCase):
         self.assertTrue(backup_status_for_display(proof,now,'book-memo')['label'].startswith('정상'))
         self.assertFalse(backup_status_for_display(proof,now,'youtube-memo')['label'].startswith('정상'))
         context=build_admin_status_context({},[],{})
-        self.assertEqual(len(context['service_backups']),3)
+        self.assertEqual([row['name'] for row in context['service_backups']], ['Book','YouTube','Crawler','차량 DB'])
         self.assertTrue(all('확인 필요' in row['label'] for row in context['service_backups']))
 
     def test_quota_rejects_symlinks_without_touching_target(self):

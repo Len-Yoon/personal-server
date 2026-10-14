@@ -30,6 +30,10 @@ def main():
     BACKUP.POLICY.require_resolved(records)
     record = BACKUP.execute(Path('/input/car-care.sqlite3'), Path('/credentials'), scratch, evidence,
                             if_changed=not force_restore(records, datetime.now(timezone.utc)))
+    if record['status'] == 'success':
+        plan = BACKUP.retain(Path('/input/car-care.sqlite3'), Path('/credentials'), scratch, evidence)
+        BACKUP.retain(Path('/input/car-care.sqlite3'), Path('/credentials'), scratch, evidence,
+                      delete=True, expected_plan_sha256=plan['plan_sha256'], confirm_remote=BACKUP.REMOTE)
     print('car_care_backup=SKIP_UNCHANGED' if record['status'] == 'skipped_unchanged'
           else 'car_care_backup=PASS remote_restore=verified')
     return 0

@@ -1,0 +1,12 @@
+[Unit]
+Description=Check car backup evidence every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=false
+AccuracySec=30s
+Unit=personal-server-car-care-backup-monitor.service
+
+[Install]
+WantedBy=timers.target

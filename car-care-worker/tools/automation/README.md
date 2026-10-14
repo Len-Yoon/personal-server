@@ -18,7 +18,7 @@
 | 불명확 결과 | 이전 일자의 미완료 intent 또는 upload/delete uncertain이 있으면 후속 실행을 차단함 | 자동 재시도·증적 삭제·Pod 재생성 없음 |
 | 실패 알림 | 기존 Alertmanager Kubernetes service proxy → 기존 SRE relay 경로를 사용함 | `CarCareBackupFailed`, `service=car-care-worker`, `severity=critical`, 고정 정제 문구만 전송 |
 | 알림 실패 | backup 상태와 별도로 `alert_status` 및 `notification-날짜.json`에 기록함. 전체 exit code는 실패로 처리함 | 성공 백업을 실패 백업으로 바꾸거나 원격 업로드를 반복하지 않음 |
-| 보관 삭제 | 새 일정에는 `--retention-go`를 포함하지 않음 | 이번 활성화 범위에 원격 삭제 승인 없음 |
+| 보관 삭제 | 실제 신규 업로드·복원 성공 후 일간7·주간4·월간3 정책을 자동 적용함 | 최신7개/동률 보존·정확 planSHA·inventory·digest·최신 실복원 확인 후 car 폴더만 삭제 |
 
 ## 설치 대상과 실행 인터페이스
 
@@ -34,13 +34,22 @@
 2. 차량 원본과 evidence의 uid1000 소유권·0700 경로, 기존 네 백업의 완료·복원 증거·공유잠금 해제·active backup 없음, 기존 Secret 존재와 Alertmanager service proxy 접근을 읽기 전용으로 확인함.
 3. 최초 승인된 수동 스케줄 실행에서 실제 Pod 결과·고유 backup ID·암호화·동일 객체 복원 SHA·원본 차량 worker 보존·보호 리소스 보존을 확인한 뒤 기존02:30 service에 후속 호출을 연결함. 차량05:30 timer 해제·02:30 다음 실행 시각·user linger와 기존 서비스 비실행 상태를 확인함.
 4. 시간은 UTC 인식 ISO 8601로 저장하며 일정·날짜 판단은 KST를 사용함. Pod의 현대 백업 날짜 KST는 UTC+09 고정값으로 계산하여 최소 이미지의 tzdata 설치에 의존하지 않음.
-5. 완료·실패 Pod와 날짜별 intent를 보존함. 성공 Pod도 현재 자동 삭제하지 않음. 일별 하나씩 남으므로 장기 보관 정리는 별도 운영 판단이 필요함.
+5.30일 지난 성공 Pod·완료scheduled journal 쌍은 UID·명세·날짜·참조증적을 검증한 후5분 검사마다 최대1개만 정리함. 실제 삭제 직전에 fsync intent를 기록하고 응답 불명확 시 새 DELETE 없이 조회로만 확인함. 최신·실패·불확실 기록과 모든 backup/retention evidence·삭제 tombstone은 보존함.
 6. `uncertain` 증적과 실패 Pod는 원격 실제 객체·실행 이력을 대조하기 전 수정·삭제하지 않음. 동일 날짜 재진입은 이미 완료된 결과를 재사용하며 새 PASS 시각이나 새 업로드를 만들지 않음.
 
 ## 수동 백업과 보관 계획
 
 기존 `backup.py --check`는 읽기 전용·원격 미접속, `--go`는 매번 한 번 업로드·복원 검증, `--go --if-changed`는 논리 내용이 같으면 `SKIP_UNCHANGED`를 기록함. 모든 명령에 `--database`, `--credentials`, `--scratch`, `--evidence`를 명시해야 함. 수동 실행도 동일한 영속 evidence 디렉터리를 사용하고 스케줄러의 공유잠금을 확보해야 함.
 
-보관 기본안은 일간7·이후 주간4·이전 월간3 기간별 최신본에 최신7개 안전 하한과 같은 초의 동률 보존을 추가함. `--retention-plan`은 로컬 증적만 읽으며 실제 삭제는 별도 명시 승인 후 정확한 계획 SHA·remote 확인, 최신24h 증적·최신본 실복원·암호문 digest·원격 inventory 확인을 모두 통과해야 함. 새 timer는 보관 삭제를 자동 실행하지 않음.
+보관 기본안은 일간7·이후 주간4·이전 월간3 기간별 최신본에 최신7개 안전 하한과 같은 초의 동률 보존을 추가함. `--retention-plan`은 로컬 증적만 읽으며 실제 삭제는 별도 명시 승인 후 정확한 계획 SHA·remote 확인, 최신24h 증적·최신본 실복원·암호문 digest·원격 inventory 확인을 모두 통과해야 함. 최신 사용자 요청으로 차량 정기 실행에는 위 안전 검증을 통과한 보관 삭제를 포함함. 변경 없음인 날에는 실행하지 않고, 삭제 후보가 없으면 no_op 기록만 남기며 원격 통신하지 않음.
 
 독립 외부 writer가 inventory 검사 직후 동일 이름을 교체하는 경쟁은 로컬 flock으로 제거할 수 없으므로, 이 차량 원격 경로의 단일 writer를 유지해야 함.
+
+
+## 누락 감지와 관리자 상태
+
+`car-care-backup-monitor.service.tmpl`과 timer를 user unit의 `personal-server-car-care-backup-monitor.service/timer`로 등록함.5분마다 완료journal·실제proof·정리 결과를 읽어 고정 `personal-server/car-care-backup-state`의 `data.status_json`만 CAS로 갱신함. 최초 activation.json에는 실제 활성 UTC시각을 저장함.02:30 이후 활성화한 날은 다음날부터09:00 미완료를 누락으로 통보함. 성공과변경없음·백업완료/정리실패·미완료를 분리하며 백업 자체는 실행하지 않음.
+
+공유 잠금이 점유되면 DEFERRED로 게시·알림·정리를 유예함. OS나 서비스 hang으로 잠금이 계속 유지되면 누락 알림도 지연될 수 있음. 기존 실행 제한 시간을 유지하고 강제 재시작은 추가하지 않음. 실제 복원 증거의 유효 기간은 원본restore_verified_at에서8일이며, observe/skip시각으로 연장하지 않음.
+
+Relay 읽기 권한은 carstate 이름get만 추가하고 Portal은 인증된 관리자 화면에서 Relay의 정제 결과만 읽음. Secret·파일 경로·원격 객체 ID·자격 증명 값은 상태 API에 게시하지 않음. 이번 원격 삭제 대상은 차량 폴더의 검증된 이전 사본뿐이며 다른 서비스 데이터와 백업을 포함하지 않음.

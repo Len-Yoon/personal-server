@@ -1021,6 +1021,86 @@ class PortalUsabilityTests(unittest.TestCase):
         for missing in (None, {}, {"exists": True, "latest_name": "recent"}, "invalid"):
             self.assertEqual(module.backup_status_for_display(missing, now)["backup_at"], "미제공")
 
+    def test_car_backup_display_keeps_skip_attempt_separate_from_proof(self):
+        from datetime import datetime, timezone
+        module = _load_service_contract_module("portal-web", "admin_status")
+        now = datetime(2026, 10, 14, 0, 0, tzinfo=timezone.utc)
+        evidence = dict(scope="car-care-db-only", verified=True, status_reason="backup_verified",
+                        backup_completed_at="2026-10-12T17:39:00Z",
+                        restore_verified_at="2026-10-12T17:38:00Z",
+                        evidence_expires_at="2026-10-20T17:38:00Z",
+                        last_attempt_at="2026-10-13T17:30:00Z", last_attempt_status="skipped_unchanged",
+                        retention_status="success", retention_deleted_count=2, secret="must-not-display")
+        display = module.backup_status_for_display(evidence, now, "car-care-db-only")
+        self.assertEqual(display["backup_at"], "2026-10-13 02:39")
+        self.assertEqual(display["restore_at"], "2026-10-13 02:38")
+        self.assertEqual(display["attempt_at"], "2026-10-14 02:30")
+        self.assertEqual(display["attempt_status"], "변경 없음")
+        self.assertEqual(display["retention_deleted_count"], "2")
+        self.assertNotIn("secret", display)
+        self.assertTrue(display["label"].startswith("정상"))
+        retention_failure = module.backup_status_for_display(
+            {**evidence, "last_attempt_status": "retention_failed", "retention_status": "failure"}, now, "car-care-db-only")
+        self.assertTrue(retention_failure["label"].startswith("정상"))
+        self.assertEqual(retention_failure["attempt_status"], "백업 완료 · 정리 실패")
+        self.assertEqual(retention_failure["retention_status"], "확인 필요")
+        expired = module.backup_status_for_display(evidence, datetime(2026, 10, 21, tzinfo=timezone.utc), "car-care-db-only")
+        self.assertEqual(expired["label"], "확인 필요 · 복원 증적 만료")
+        for changes in ({"scope": "all"}, {"backup_completed_at": "bad"},
+                        {"backup_completed_at": "2026-10-12T17:30:00Z"},
+                        {"restore_verified_at": "2026-10-15T00:00:00Z"},
+                        {"evidence_expires_at": "2027-10-20T17:38:00Z"},
+                        {"verified": "true"}, {"status_reason": "backup_unverified"}):
+            with self.subTest(changes=changes):
+                invalid = module.backup_status_for_display({**evidence, **changes}, now, "car-care-db-only")
+                self.assertTrue(invalid["label"].startswith("확인 필요"))
+        for changes in ({"last_attempt_at": "bad"}, {"last_attempt_at": "2026-10-15T00:00:00Z"},
+                        {"last_attempt_at": "2026-10-13T17:30:00"}, {"last_attempt_status": "<script>"},
+                        {"last_attempt_status": []}, {"retention_status": "<script>"},
+                        {"retention_deleted_count": True}, {"retention_deleted_count": -1},
+                        {"retention_deleted_count": 10001}):
+            with self.subTest(changes=changes):
+                invalid = module.backup_status_for_display({**evidence, **changes}, now, "car-care-db-only")
+                if "last_attempt" in next(iter(changes)):
+                    self.assertEqual(invalid["attempt_status"], "확인 필요")
+                elif "retention_status" in changes:
+                    self.assertEqual(invalid["retention_status"], "확인 필요")
+                else:
+                    self.assertEqual(invalid["retention_deleted_count"], "확인 필요")
+        unverified = module.backup_status_for_display({**evidence, "backup_completed_at": None}, now, "car-care-db-only")
+        self.assertEqual(unverified["backup_at"], "미제공")
+        self.assertEqual(unverified["attempt_status"], "변경 없음")
+
+    def test_admin_backup_rows_preserve_existing_services_and_add_car_database(self):
+        module = _load_service_contract_module("portal-web", "admin_status")
+        context = module.build_admin_status_context({}, [], {}, {"car-care": {
+            "scope": "car-care-db-only", "last_attempt_at": "2026-01-01T00:00:00Z",
+            "last_attempt_status": "skipped_unchanged", "retention_status": "no_op",
+            "retention_deleted_count": 0}})
+        self.assertEqual([row["name"] for row in context["service_backups"]], ["Book", "YouTube", "Crawler", "차량 DB"])
+        car = context["service_backups"][-1]
+        self.assertEqual(car["attempt_status"], "변경 없음")
+        self.assertEqual(car["retention_status"], "대상 없음")
+        self.assertEqual(car["retention_deleted_count"], "0")
+        self.assertTrue(context["backup_status"]["label"].startswith("확인 필요"))
+
+    def test_authenticated_admin_renders_car_attempt_and_retention_details(self):
+        with patch.dict(os.environ, {"ADMIN_STATUS_PASSWORD": "test-password"}):
+            app = PortalDashboardTests().load_app()
+            backups = {"car-care": {
+                "scope": "car-care-db-only", "last_attempt_at": "2026-01-01T00:00:00Z",
+                "last_attempt_status": "skipped_unchanged", "retention_status": "success",
+                "retention_deleted_count": 2, "secret": "must-not-display"}}
+            with TestClient(app) as client, patch("app.routers.admin.get_service_backups", return_value=backups):
+                response = client.post("/admin/status", data={"password": "test-password"},
+                                       headers={"Origin": "http://testserver"})
+            self.assertEqual(response.status_code, 200)
+            for name in ("Portal", "Book", "YouTube", "Crawler", "차량 DB"):
+                self.assertIn(f"{name} 백업 상태", response.text)
+            self.assertIn("최근 실행 2026-01-01 09:00 · 변경 없음", response.text)
+            self.assertIn("백업 보존 정리 정상 · 삭제 개수 2", response.text)
+            self.assertNotIn("must-not-display", response.text)
+
     def test_retry_only_calls_requested_source_and_escapes_results(self):
         from unittest.mock import AsyncMock
         app = PortalDashboardTests().load_app()

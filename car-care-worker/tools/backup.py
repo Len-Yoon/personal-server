@@ -248,13 +248,18 @@ def retain(database, credentials, scratch, evidence, *, delete=False,
         require(confirm_remote == REMOTE and expected_plan_sha256 == plan['plan_sha256'])
         proofs = {r['backup_id']+'.sqlite3.age': r for r in POLICY.successful(records, now)}
         protected = proofs[plan['protected']]
-        require((now - POLICY.timestamp(protected.get('restore_verified_at', protected['finished_at']))).total_seconds() <= 86400)
+        if plan['delete']:
+            require((now - POLICY.timestamp(protected.get('restore_verified_at', protected['finished_at']))).total_seconds() <= 86400)
         backup_id = now.strftime('car-care-%Y%m%dT%H%M%SZ-') + secrets.token_hex(8)
         path = evidence / (backup_id + '.json')
         record = dict(schema_version=1, scope=POLICY.SCOPE, backup_id=backup_id, operation='retention',
                       status='failure', stage='inventory', deleted=[], remote_delete_status='not_attempted',
-                      plan_sha256=plan['plan_sha256'], restore_verified=False)
+                      plan_sha256=plan['plan_sha256'], restore_verified=False, kept_count=len(plan['keep']))
         POLICY.persist(path, record, initial=True)
+        if not plan['delete']:
+            record.update(status='no_op', stage='complete', finished_at=datetime.now(timezone.utc).isoformat())
+            POLICY.persist(path, record)
+            return dict(plan, deleted=[])
         try:
             with tempfile.TemporaryDirectory(prefix='car-care-retention-', dir=scratch) as temporary:
                 work = Path(temporary)

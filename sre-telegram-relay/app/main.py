@@ -63,6 +63,8 @@ ALERT_PRESENTATIONS = {
     "PortalHttpP95LatencyHigh": ("Portal HTTP p95 응답 지연", "Portal 화면 응답이 느릴 수 있음"),
 }
 ALERT_TARGETS_BY_NAME = {
+    "CarCareBackupFailed": "차량 DB 백업",
+    "CarCareBackupMissed": "차량 DB 백업",
     "NewsCollectionStale": "News Hub 뉴스 수집기",
     "PortalUnavailable": "Portal",
     "PortalHttp5xxErrorRateHigh": "Portal",
@@ -1772,6 +1774,102 @@ def _alert_state_key(fingerprint: str) -> str:
 
 
 
+CAR_BACKUP_STATE = "car-care-backup-state"
+CAR_BACKUP_SCOPE = "car-care-db-only"
+
+
+def car_backup_summary(k8s_client, now):
+    """Read bounded host evidence without publishing identifiers or credentials."""
+    row = dict(scope=CAR_BACKUP_SCOPE, verified=False, status_reason='backup_unverified')
+
+    def timestamp(value):
+        if not isinstance(value, str) or len(value) > 40:
+            raise ValueError('invalid car timestamp')
+        parsed = datetime.fromisoformat(value.replace('Z','+00:00'))
+        if parsed.tzinfo is None or parsed > now:
+            raise ValueError('invalid car timestamp')
+        return parsed.astimezone(timezone.utc)
+
+    try:
+        document = k8s_client.get_config_map(BOOK_BACKUP_NAMESPACE, CAR_BACKUP_STATE)
+        metadata = document.get('metadata', {})
+        if metadata.get('name') != CAR_BACKUP_STATE or metadata.get('namespace') != BOOK_BACKUP_NAMESPACE:
+            raise ValueError('wrong car state')
+        raw = document.get('data', {}).get('status_json')
+        if not isinstance(raw, str) or not 0 < len(raw.encode()) <= 16384:
+            raise ValueError('invalid car state size')
+        def unique_object(pairs):
+            value = dict(pairs)
+            if len(value) != len(pairs):
+                raise ValueError('duplicate car state field')
+            return value
+        data = json.loads(raw, object_pairs_hook=unique_object)
+        if (not isinstance(data, dict) or set(data) != {'schema_version','scope','observed_at','last_attempt','proof','retention'}
+                or type(data['schema_version']) is not int or data['schema_version'] != 1
+                or data['scope'] != CAR_BACKUP_SCOPE):
+            raise ValueError('invalid car state contract')
+        observed = timestamp(data['observed_at'])
+        if now-observed > timedelta(minutes=10):
+            raise ValueError('stale car observer')
+        attempt = data['last_attempt']
+        attempt_ok = False
+        if attempt is not None:
+            if (not isinstance(attempt, dict) or set(attempt) != {'day','status','finished_at'}
+                    or attempt['status'] not in {'success','skipped_unchanged','retention_failed','failure','uncertain'}):
+                raise ValueError('invalid car attempt')
+            day = datetime.strptime(attempt['day'], '%Y-%m-%d').date()
+            local = observed.astimezone(PVC_BACKUP_TIME_ZONE)
+            if day > local.date():
+                raise ValueError('future car attempt')
+            finished = timestamp(attempt['finished_at']) if attempt['finished_at'] is not None else None
+            if finished is not None:
+                if finished > observed or finished.astimezone(PVC_BACKUP_TIME_ZONE).date() < day:
+                    raise ValueError('invalid car completion')
+                row.update(last_attempt_at=finished.isoformat(), last_attempt_status=attempt['status'])
+                attempt_ok = (attempt['status'] in {'success','skipped_unchanged','retention_failed'}
+                              and observed-finished <= timedelta(hours=36)
+                              and (day == local.date() or local.hour < 9))
+            else:
+                row['last_attempt_status'] = attempt['status']
+        retention = data['retention']
+        if retention is not None:
+            if (not isinstance(retention, dict) or set(retention) != {'status','finished_at','deleted_count','kept_count'}
+                    or retention['status'] not in {'success','no_op','failure','uncertain','not_run'}
+                    or any(type(retention[k]) is not int or not 0 <= retention[k] <= 10000
+                           for k in ['deleted_count','kept_count'])):
+                raise ValueError('invalid car retention')
+            if timestamp(retention['finished_at']) > observed:
+                raise ValueError('future car retention')
+            row.update(retention_status=retention['status'], retention_deleted_count=retention['deleted_count'])
+        proof = data['proof']
+        if proof is None:
+            return row
+        keys = {'backup_id','artifact_sha256','content_sha256','snapshot_sha256','finished_at',
+                'restore_verified_at','restore_verified','remote_upload_status','status'}
+        if (not isinstance(proof, dict) or set(proof) != keys or proof['restore_verified'] is not True
+                or proof['remote_upload_status'] != 'confirmed' or proof['status'] != 'success'
+                or not isinstance(proof['backup_id'],str)
+                or not re.fullmatch(r'car-care-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{16}',proof['backup_id'])
+                or any(not isinstance(proof[k],str) or not re.fullmatch('[a-f0-9]{64}',proof[k])
+                       for k in ['artifact_sha256','content_sha256','snapshot_sha256'])):
+            raise ValueError('invalid car restore proof')
+        created = datetime.strptime(proof['backup_id'][9:25], '%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc)
+        restored = timestamp(proof['restore_verified_at'])
+        completed = timestamp(proof['finished_at'])
+        if not created <= restored <= completed <= observed:
+            raise ValueError('invalid car proof chronology')
+        expires = restored+timedelta(days=8)
+        row.update(backup_completed_at=completed.isoformat(), restore_verified_at=restored.isoformat(),
+                   evidence_expires_at=expires.isoformat())
+        row.update(verified=attempt_ok and expires>now,
+                   status_reason='backup_verified' if attempt_ok and expires>now else
+                   'backup_expired' if expires<=now else 'backup_missed')
+    except (OSError, URLError, ValueError, TypeError, KeyError, OverflowError, AttributeError):
+        row['verified'] = False
+        row['status_reason'] = 'backup_unverified'
+    return row
+
+
 def service_backup_summaries(k8s_client, now=None):
     """Read fixed state objects and publish only display-safe proof fields.
 
@@ -1812,6 +1910,7 @@ def service_backup_summaries(k8s_client, now=None):
         except (OSError, URLError, ValueError, TypeError, KeyError, OverflowError):
             pass  # One broken service must not hide the other services.
         result[service] = row
+    result['car-care'] = car_backup_summary(k8s_client, now)
     return result
 
 if __name__ == "__main__":
