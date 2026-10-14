@@ -44,12 +44,16 @@ def smoke(page, base, scratch, expect):
     page.locator('#file-manager-password').fill('smoke-access-only')
     page.get_by_role('button', name='파일함 들어가기').click()
     expect(page.locator('#file-upload-input')).to_be_attached()
+    # The DOM can appear while the external helper still blocks inline handlers.
+    page.wait_for_function("typeof uploadFiles === 'function'")
     completed_write(page, base + '/files/uploads', lambda: page.locator('#file-upload-input').set_input_files({
         'name': 'smoke-upload.txt', 'mimeType': 'text/plain', 'buffer': b'isolated browser fixture',
     }))
     tile = page.locator('[data-item-path="smoke-upload.txt"]')
     expect(tile).to_be_visible()
     assert (scratch / 'files/smoke-upload.txt').read_bytes() == b'isolated browser fixture', 'uploaded file content mismatch'
+    # Upload reloads the document; wait for its new handlers before deleting.
+    page.wait_for_function("typeof uploadFiles === 'function'")
     tile.click()
     def answer(dialog):
         if dialog.type == 'prompt':
