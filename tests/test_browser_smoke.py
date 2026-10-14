@@ -50,3 +50,44 @@ class PortalBrowserSmokeContracts(unittest.TestCase):
                          Path('browser-artifacts/portal'))
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             module.argument_parser().parse_args(['--url', 'https://len.pe.kr'])
+
+
+    def test_portal_write_waits_for_matching_post_response_before_reading_result(self):
+        from types import SimpleNamespace
+        spec = importlib.util.spec_from_file_location('portal_browser_write', ROOT / 'tests/browser/run_smoke.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        events = []
+        response = SimpleNamespace(url='http://127.0.0.1:12345/files/trash',
+                                   request=SimpleNamespace(url='http://127.0.0.1:12345/files/trash', method='POST'),
+                                   status=200, ok=True)
+        class Pending:
+            def __init__(self, name):
+                self.name = name
+            def __enter__(self):
+                events.append('armed-' + self.name)
+                return self
+            def __exit__(self, *_):
+                events.append('delivered-' + self.name)
+            @property
+            def value(self):
+                if 'delivered-request' not in events or events[-1] != 'delivered-response':
+                    raise AssertionError('response read before delivery')
+                return response
+        class Page:
+            def expect_response(self, predicate):
+                self_test.assertTrue(predicate(response))
+                self_test.assertFalse(predicate(SimpleNamespace(url=response.url, request=SimpleNamespace(method='GET'))))
+                self_test.assertFalse(predicate(SimpleNamespace(url='https://len.pe.kr/files/trash', request=response.request)))
+                return Pending('response')
+            def expect_request_finished(self, predicate):
+                self_test.assertTrue(predicate(response.request))
+                self_test.assertFalse(predicate(SimpleNamespace(url=response.url, method='GET')))
+                return Pending('request')
+        self_test = self
+        result = module.completed_write(Page(), response.url, lambda: events.append('action'))
+        self.assertEqual(result, 200)
+        self.assertEqual(events, ['armed-response', 'armed-request', 'action', 'delivered-request', 'delivered-response'])
+        response.ok, response.status = False, 500
+        with self.assertRaisesRegex(AssertionError, 'HTTP 500'):
+            module.completed_write(Page(), response.url, lambda: events.append('action'))

@@ -23,6 +23,18 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def completed_write(page, url, action):
+    """Observe the specific write response, independent of DOM reload timing."""
+    with page.expect_response(lambda response: response.url == url and response.request.method == 'POST') as pending:
+        with page.expect_request_finished(lambda request: request.url == url and request.method == 'POST'):
+            action()
+    response = pending.value
+    assert response.ok, f'write request failed: {urlsplit(url).path} HTTP {response.status}'
+    # Product JS reloads immediately; response bodies may be evicted on navigation.
+    # Correlate the completed HTTP write, then verify persisted state below.
+    return response.status
+
+
 def smoke(page, base, scratch, expect):
     page.goto(base + '/files')
     expect(page.locator('#file-manager-password')).to_be_visible()
@@ -32,9 +44,9 @@ def smoke(page, base, scratch, expect):
     page.locator('#file-manager-password').fill('smoke-access-only')
     page.get_by_role('button', name='파일함 들어가기').click()
     expect(page.locator('#file-upload-input')).to_be_attached()
-    page.locator('#file-upload-input').set_input_files({
+    completed_write(page, base + '/files/uploads', lambda: page.locator('#file-upload-input').set_input_files({
         'name': 'smoke-upload.txt', 'mimeType': 'text/plain', 'buffer': b'isolated browser fixture',
-    })
+    }))
     tile = page.locator('[data-item-path="smoke-upload.txt"]')
     expect(tile).to_be_visible()
     assert (scratch / 'files/smoke-upload.txt').read_bytes() == b'isolated browser fixture', 'uploaded file content mismatch'
@@ -47,7 +59,7 @@ def smoke(page, base, scratch, expect):
         else:
             dialog.dismiss()
     page.on('dialog', answer)
-    page.locator('#delete-selection').click()
+    completed_write(page, base + '/files/trash', lambda: page.locator('#delete-selection').click())
     expect(tile).to_have_count(0)
     assert not (scratch / 'files/smoke-upload.txt').exists(), 'deleted tile disappeared but file remains'
     entries = list((scratch / 'files/.trash').glob('*/metadata.json'))

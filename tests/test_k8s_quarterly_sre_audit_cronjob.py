@@ -499,12 +499,15 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 self.assertNotIn("sensitive-source-error", result.stdout + result.stderr + json.dumps(payload))
 
     def test_runner_slo_read_failure_is_unobservable_and_validation_mode_skips_read(self):
-        result, payload, _, _ = self.run_runner(evidence=valid_backup_evidence(), scenario="slo-configmap-fail")
+        # This tests SLO read handling, not host scheduling within a 2-second
+        # recovery deadline. Use the existing controlled Bash clock so parallel
+        # workers cannot turn machine contention into an audit failure.
+        result, payload, _, _ = self.run_runner(evidence=valid_backup_evidence(), scenario="slo-configmap-fail", recovery_timeout="180", fast_recovery_clock=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(payload["data"].get("slo_evidence"), "unobservable")
         self.assertEqual(payload["data"]["slo_days_recorded"], "0")
         self.assertNotIn("sensitive-source-error", result.stdout + result.stderr)
-        result, _, diagnostics, calls = self.run_runner(evidence=valid_backup_evidence(), report_mode="validation")
+        result, _, diagnostics, calls = self.run_runner(evidence=valid_backup_evidence(), report_mode="validation", recovery_timeout="180", fast_recovery_clock=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("slo-daily-evidence", calls)
         self.assertNotIn("slo_evidence", diagnostics["data"])
