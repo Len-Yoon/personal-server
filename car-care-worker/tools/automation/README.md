@@ -1,28 +1,45 @@
-# 차량 DB 백업 자동 실행 준비
+# 차량 DB 자동 백업 운영
 
 | 구분 | 내용 | 비고 |
 |---|---|---|
-| 상태 | 비활성 실행 템플릿만 제공함 | 설치·활성화·운영 실행 미수행 |
-| 대상 | 차량 SQLite DB만 snapshot·암호화·동일 원격 객체 다운로드·복원 SHA 검증함 | OAuth·차량 자격 증명 데이터 제외 |
-| 기존 명령 | `--check`는 읽기 전용·원격 미접속, `--go`는 매번 1회 업로드·복원 검증함 | 기존 인터페이스 유지 |
-| 변경 감지 | `--go --if-changed`는 snapshot의 스키마·타입별 행 내용 fingerprint가 마지막 복원 검증본과 같으면 건너뜀 | VACUUM 등 파일 배치만 바뀐 경우 제외 |
-| 건너뜀 증적 | `skipped_unchanged`와 이전 백업 ID·이전 복원 검증 시각만 기록함 | 새 PASS·새 복원 시각으로 갱신하지 않음 |
-| 동시 실행 | 증적 디렉터리의 `flock`으로 백업·보관 실행을 직렬화함 | 동일 차량 DB에는 동일 증적 디렉터리를 사용해야 함 |
-| 원격 불명확 | upload/delete 직전 intent를 fsync하고, 결과 불명확 시 후속 업로드·삭제를 차단함 | 자동 재시도·자동 증적 삭제 없음 |
-| 보관 기본값 | 일간 7개·이후 주간 4개·이전 월간 3개 기간별 최신본, 최신 7개 안전 하한, 같은 초의 동률 모두 보존함 | `--retention-plan`은 로컬 증적만 읽음 |
-| 원격 삭제 | `--retention-go --expected-plan-sha256 <계획 해시> --confirm-retention-remote gdrive:PersonalServer-encrypted-backups/car-care`로 별도 실행함 | 기본 백업·타이머에는 삭제 옵션 없음 |
-| 삭제 검증 | 정확한 scope·이름·원격 ID/크기/시각·암호문 digest·직전 inventory를 확인함. 최신 사본을 실제로 재다운로드·복원한 뒤 삭제함 | 마지막 사본·최신 사본 삭제 차단 |
-| 증적 신선도 | 삭제에는 최근 24시간 이내의 기존 복원 검증본이 필요함 | 변경 없는 skip은 유효 기간을 연장하지 않음. 필요 시 승인된 `--go`로 재검증 필요 |
+| 승인 범위 | 2026-10-14 차량 신규 일정 설치·활성화가 승인됨 | 실제 설치·수동 검증 결과는 개발 계획의 운영 기록 기준으로 확인함 |
+| 실행 방식 | user systemd → 차량 전용 host controller → 일자별 단일 K3s Pod | 기존 bootstrap·공용 scheduler·네 백업 일정 변경 없음 |
+| 일정 | 매일 05:30 KST | Portal → Book → YouTube → Crawler의 기존 02:30 순차 실행 뒤 배치함 |
+| 겹침 회피 | 기존 `pvc-backup-sequence.py`의 `local_lock()`을 그대로 재사용함. 최대 3시간 대기 후 차단함 | 잠금 획득 뒤에도 다른 active backup Job/Pod가 있으면 새 차량 Pod를 만들지 않음 |
+| 변경 감지 | 일반 실행은 `--go --if-changed`, 일요일 또는 실제 복원 검증 후 7일 이상 경과 시 `--go` 강제 실행함 | 변경 없어도 주간 실제 암호화·업로드·동일 객체 재다운로드·복원 SHA 검증 수행 |
+| 원본 | `/mnt/c/personal-server/data/car-care`를 readOnly hostPath로 mount함 | 차량 DB만 대상, OAuth·차량 자격 증명 데이터 제외 |
+| 자격 증명 | 기존 `personal-server/portal-pvc-backup-runtime` Secret을 Pod에 직접 projection함 | 평문 config·환경 파일·호스트 Secret 복제 없음 |
+| 공개 소스 | canonical Git blob의 LF·현재 작업 파일 내용을 대조한 뒤 사용자 전용 디렉터리에 stage하여 readOnly mount함 | 차량 backup/policy/Pod runner·공용 복원 helper 네 파일만 포함 |
+| 실행 권한 | uid/gid1000, privilege escalation 금지, capability 전체 제거, readOnly root filesystem | ServiceAccount token mount 비활성 |
+| scratch | Memory emptyDir 아래 실행 사용자 소유 0700 하위 디렉터리 | inherited setgid를 제거함. age/rclone 작업물은 disposable memory에서만 생성함 |
+| 영속 증적 | `~/.local/state/personal-server/car-care-backup/evidence`만 Pod에 writable mount함 | source·controller journal 경로는 Pod에 writable 노출하지 않음 |
+| 재시작 | `Restart=no`, Pod `restartPolicy: Never`, 일자별 고정 이름·영속 create intent 사용함 | 생성 응답이 유실되면 조회만 수행하며 같은 작업을 다시 만들지 않음 |
+| 중단 | SIGTERM/SIGINT는 Pod terminal까지 처리 지연함. 종료 대기 1800초로 공유잠금을 유지함 | 강제 kill은 피하고 원격 실제 상태·Pod·증적을 먼저 대조해야 함 |
+| 불명확 결과 | 이전 일자의 미완료 intent 또는 upload/delete uncertain이 있으면 후속 실행을 차단함 | 자동 재시도·증적 삭제·Pod 재생성 없음 |
+| 실패 알림 | 기존 Alertmanager Kubernetes service proxy → 기존 SRE relay 경로를 사용함 | `CarCareBackupFailed`, `service=car-care-worker`, `severity=critical`, 고정 정제 문구만 전송 |
+| 알림 실패 | backup 상태와 별도로 `alert_status` 및 `notification-날짜.json`에 기록함. 전체 exit code는 실패로 처리함 | 성공 백업을 실패 백업으로 바꾸거나 원격 업로드를 반복하지 않음 |
+| 보관 삭제 | 새 일정에는 `--retention-go`를 포함하지 않음 | 이번 활성화 범위에 원격 삭제 승인 없음 |
 
-모든 명령은 기존과 같이 `--database`, `--credentials`, `--scratch`, `--evidence` 네 경로를 명시해야 함. credentials는 사전 등록된 age/rclone 파일을 참조하며 평문 설정·환경 파일로 복제하지 않음. scratch는 memory filesystem·실행 사용자 소유 0700, evidence는 실행 사용자 소유 0700이어야 함. SQLite 원본은 읽기 전용이며 대상 파일명은 `car-care.sqlite3`이어야 함.
+## 설치 대상과 실행 인터페이스
 
-## 설치 전 확인 사항
+- 설치 대상은 `car-care-backup.service.tmpl`과 `car-care-backup.timer.tmpl`임. 파일명은 각각 `personal-server-car-care-backup.service`, `personal-server-car-care-backup.timer`로 등록함.
+- `@REPO_ROOT@`, `@BACKUP_IMAGE@`, `@BACKUP_IMAGE_ID@`를 실제 검증한 값으로 치환함. image는 기존 Portal 백업 도구 이미지의 OCI index digest, image ID는 실제 플랫폼 child manifest digest로 각각 확인함.
+- host controller 명령은 `python3 car-care-worker/tools/automation/schedule.py --go --image <고정 이미지 digest> --image-id <플랫폼 manifest digest>`임. Secret 값이나 외부 자격 증명 인자는 받지 않음.
+- `.disabled` 파일은 이전 직접 실행 방식의 비활성 참고 템플릿이며 설치하지 않음. 신규 `.tmpl` 설치 후에도 기존 네 서비스 일정은 수정하지 않음.
 
-1. 최종 운영 승인에 정확한 커밋·대상 DB·등록 자격 증명 참조·실행 사용자·증적 경로·설치/활성화 동작을 포함해야 함. 이전 일회성 수동 실행 승인은 재사용하지 않음.
-2. 기존 Portal → Book → YouTube → Crawler의 02:30 KST 순차 백업 완료 시각을 확인해야 함. 05:30은 제안 시각이며, 기존 스케줄은 수정하지 않음.
-3. 모든 `@...@`를 검증된 값으로 치환하고, source의 canonical Git blob 및 줄바꿈·이미지 digest를 확인해야 함. 템플릿의 `.disabled` 파일을 그대로 등록하지 않음.
-4. 실제 mount의 소유자·0700 디렉터리·tmpfs 여부·자격 증명 유효 수명(최소 900초)을 확인하고 동일 옵션의 `--check`를 먼저 수행해야 함. `RuntimeDirectory`가 적합하지 않은 런타임에서는 scratch/evidence를 각각 사용자 소유 0700으로 준비해야 함.
-5. 수동 업로드·동일 객체 복원 검증과 독립 운영 검토·외부 health를 완료한 뒤 별도 승인 범위의 설치·활성화를 수행해야 함. N100 접속·새 Pod·업로드·삭제·타이머 등록은 이 저장소 변경에 포함되지 않음.
-6. `uncertain` 증적은 원격 실제 객체·실행 이력을 대조하기 전 수정·삭제하지 않아야 함. 복구·재개 판단은 별도 운영 범위로 처리하며 이 도구는 자동 재개하지 않음.
+## 사전 확인과 운영 증거
 
-원격 inventory에 미확인 객체·이름 중복·누락이 있거나 digest가 바뀌면 삭제하지 않음. 증적을 잃어버린 원격 객체는 자동 삭제 대상으로 편입하지 않음. 독립 외부 writer가 inventory 검사 직후 동일 이름을 교체하는 경쟁은 로컬 `flock`만으로 제거할 수 없으므로, 설치 전에 이 차량 백업 원격 경로의 단일 writer를 확인해야 함.
+1. CI를 통과한 정확한 커밋을 N100에 fast-forward 동기화하고 canonical source·줄바꿈·image index/child manifest를 확인함. 이미지 pull policy는 `Never`로 유지함.
+2. 차량 원본과 evidence의 uid1000 소유권·0700 경로, 기존 네 백업의 완료·복원 증거·공유잠금 해제·active backup 없음, 기존 Secret 존재와 Alertmanager service proxy 접근을 읽기 전용으로 확인함.
+3. 최초 승인된 수동 스케줄 실행에서 실제 Pod 결과·고유 backup ID·암호화·동일 객체 복원 SHA·원본 차량 worker 보존·보호 리소스 보존을 확인한 뒤 timer를 활성화함. 다음 실행 시각과 user linger·WSL 예약 실행 환경을 확인함.
+4. 시간은 UTC 인식 ISO 8601로 저장하며 일정·날짜 판단은 KST를 사용함. Pod의 현대 백업 날짜 KST는 UTC+09 고정값으로 계산하여 최소 이미지의 tzdata 설치에 의존하지 않음.
+5. 완료·실패 Pod와 날짜별 intent를 보존함. 성공 Pod도 현재 자동 삭제하지 않음. 일별 하나씩 남으므로 장기 보관 정리는 별도 운영 판단이 필요함.
+6. `uncertain` 증적과 실패 Pod는 원격 실제 객체·실행 이력을 대조하기 전 수정·삭제하지 않음. 동일 날짜 재진입은 이미 완료된 결과를 재사용하며 새 PASS 시각이나 새 업로드를 만들지 않음.
+
+## 수동 백업과 보관 계획
+
+기존 `backup.py --check`는 읽기 전용·원격 미접속, `--go`는 매번 한 번 업로드·복원 검증, `--go --if-changed`는 논리 내용이 같으면 `SKIP_UNCHANGED`를 기록함. 모든 명령에 `--database`, `--credentials`, `--scratch`, `--evidence`를 명시해야 함. 수동 실행도 동일한 영속 evidence 디렉터리를 사용하고 스케줄러의 공유잠금을 확보해야 함.
+
+보관 기본안은 일간7·이후 주간4·이전 월간3 기간별 최신본에 최신7개 안전 하한과 같은 초의 동률 보존을 추가함. `--retention-plan`은 로컬 증적만 읽으며 실제 삭제는 별도 명시 승인 후 정확한 계획 SHA·remote 확인, 최신24h 증적·최신본 실복원·암호문 digest·원격 inventory 확인을 모두 통과해야 함. 새 timer는 보관 삭제를 자동 실행하지 않음.
+
+독립 외부 writer가 inventory 검사 직후 동일 이름을 교체하는 경쟁은 로컬 flock으로 제거할 수 없으므로, 이 차량 원격 경로의 단일 writer를 유지해야 함.
