@@ -28,39 +28,55 @@
 
 ## 주요 화면
 
-서비스별 이미지를 **1440 × 1000** 프레임으로 통일하고, 기능과 입력 도구를 읽을 수 있도록 한 장씩 표시했습니다. 공개 웹 4개와 인증 화면 2개는 현재 서비스에서 다시 촬영했습니다. Grafana·Telegram은 기존 실제 촬영 예시로 구분합니다. 화면에 보이는 수치는 촬영 당시 값이며 실시간 상태를 의미하지 않습니다. [이미지별 범위와 검증 기준](docs/images/README.md)
+서비스 이름 옆 화살표를 누르면 설명과 이미지가 펼쳐집니다. 이미지는 **1440 × 1000** 크기이며 촬영 당시 화면입니다. [촬영 범위·기존 예시 안내](docs/images/README.md)
 
-### Portal · 서비스 허브와 전체 검색
+<details>
+<summary>Portal · 서비스 허브와 전체 검색</summary>
 
 서비스 이동과 뉴스·유튜브·책 검색 대상을 한곳에서 선택합니다.
 
 <img src="docs/images/portal-dashboard.png" alt="현재 Portal의 서비스 카드와 검색 대상 선택" width="100%">
 
-### News Hub · 수집 최신성과 주제별 뉴스
+</details>
+
+<details>
+<summary>News Hub · 수집 최신성과 주제별 뉴스</summary>
 
 마지막 정상 수집 시각과 상태를 확인하고 세계 경제·IT·AI 뉴스로 이동합니다.
 
 <img src="docs/images/news-hub.png" alt="현재 뉴스 허브의 수집 최신성과 세계 경제 IT AI 주제" width="100%">
 
-### Book Memo · 책장과 기록 관리
+</details>
+
+<details>
+<summary>Book Memo · 책장과 기록 관리</summary>
 
 책 검색·진행률·목차 진입점과 로그인 후 가져오기·내보내기 위치를 확인합니다. 긴 목차는 화면에서 접어 책장이 보이도록 촬영했습니다.
 
 <img src="docs/images/book-memo.png" alt="현재 Book Memo의 정렬된 가져오기 버튼 검색 내보내기와 책장" width="100%">
 
-### YouTube Memo · 영상과 메모 관리
+</details>
+
+<details>
+<summary>YouTube Memo · 영상과 메모 관리</summary>
 
 영상 등록·저장 목록과 가져오기·내보내기 위치를 확인합니다. 쓰기는 로그인 뒤 사용할 수 있습니다.
 
 <img src="docs/images/youtube-memo.png" alt="현재 YouTube Memo의 영상 등록 가져오기 내보내기와 영상 목록" width="100%">
 
-### 파일함 · 파일 작업 도구
+</details>
+
+<details>
+<summary>파일함 · 파일 작업 도구</summary>
 
 업로드·검색·정렬·이동·휴지통과 개인 기사 보관 진입점을 제공합니다. 인증된 실제 화면의 도구 구간을 사용하며 개인 파일 내용은 포함하지 않습니다.
 
 <img src="docs/images/file-manager.png" alt="현재 파일함의 인증된 업로드와 파일 관리 도구" width="100%">
 
-### 관리자 상태 · 서버와 백업
+</details>
+
+<details>
+<summary>관리자 상태 · 서버와 백업</summary>
 
 서버 상태와 서비스별 백업·복원 증거를 확인합니다. 내부 주소와 보안 이벤트의 상세 목록은 제외합니다.
 
@@ -68,11 +84,16 @@
 
 <img src="docs/images/admin-backup-status.png" alt="현재 관리자 화면의 Portal Book YouTube Crawler 차량 DB 백업 및 복원 증거" width="100%">
 
-### 차량관리 · Telegram 알림 예시
+</details>
+
+<details>
+<summary>차량관리 · Telegram 알림 예시</summary>
 
 운행 기록·주행거리·소모품 정비 안내를 Telegram으로 제공합니다. 아래 이미지는 기존 실제 메시지 예시이며 현재 차량 상태나 신규 백업 성공을 나타내지 않습니다.
 
 <img src="docs/images/car-care-telegram-status.png" alt="차량관리 Telegram의 기존 운행 및 정비 알림 예시" width="100%">
+
+</details>
 
 ## 구조와 기술 선택
 
