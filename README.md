@@ -28,36 +28,69 @@
 
 ## 주요 화면
 
-실제 서비스 화면입니다. 화면별 촬영 시점과 표시 범위는 [이미지 목록](docs/images/README.md)에 정리했습니다.
+서비스별 이미지를 **1440 × 1000** 프레임으로 통일하고, 기능과 입력 도구를 읽을 수 있도록 한 장씩 표시했습니다. 공개 웹 4개와 인증 화면 2개는 현재 서비스에서 다시 촬영했습니다. Grafana·Telegram은 기존 실제 촬영 예시로 구분합니다. 화면에 보이는 수치는 촬영 당시 값이며 실시간 상태를 의미하지 않습니다. [이미지별 범위와 검증 기준](docs/images/README.md)
 
-| Investing.com 뉴스 수집 | 차량 관리 Telegram |
-|---|---|
-| RSS 수집 결과, Telegram 알림 분류, 원문 이동이 가능한 기사 목록을 확인함.<br><br><img src="docs/images/news-hub.png" alt="Investing.com 뉴스 수집 결과와 기사 목록" width="460"> | 운행 기록과 누적 주행거리, 주행 가능 거리, 소모품 정비 시점을 Telegram으로 확인함.<br><br><img src="docs/images/car-care-telegram-status.png" alt="Telegram 차량 관리 운행 및 정비 상태" width="460"> |
+### Portal · 서비스 허브와 전체 검색
 
-| YouTube Memo | Book Memo |
-|---|---|
-| 영상 링크 등록과 저장된 영상별 메모 수를 확인함.<br><br><img src="docs/images/youtube-memo.png" alt="YouTube Memo 영상 등록과 저장된 영상 목록" width="460"> | 책 검색, 내 책장, 목차 체크, 장별 코멘트 기록을 한 화면에서 확인함.<br><br><img src="docs/images/book-memo.png" alt="Book Memo 책장과 목차 체크 및 코멘트 기능" width="460"> |
+서비스 이동과 뉴스·유튜브·책 검색 대상을 한곳에서 선택합니다.
 
-| 파일함 | 관리자 상태 |
-|---|---|
-| 파일·폴더 생성, 업로드, 다운로드, 검색, 정렬과 선택 삭제를 지원함.<br><br><img src="docs/images/file-manager.png" alt="파일함의 파일 목록과 업로드 및 검색 기능" width="460"> | 서버 자원, 서비스 Health, 승인형 HomeOps 조치 이력을 확인함.<br><br><img src="docs/images/admin-status.png" alt="관리자 상태와 HomeOps 운영 보조" width="360"> |
+<img src="docs/images/portal-dashboard.png" alt="현재 Portal의 서비스 카드와 검색 대상 선택" width="100%">
 
+### News Hub · 수집 최신성과 주제별 뉴스
 
-<br>
+마지막 정상 수집 시각과 상태를 확인하고 세계 경제·IT·AI 뉴스로 이동합니다.
+
+<img src="docs/images/news-hub.png" alt="현재 뉴스 허브의 수집 최신성과 세계 경제 IT AI 주제" width="100%">
+
+### Book Memo · 책장과 기록 관리
+
+책 검색·진행률·목차 진입점과 로그인 후 가져오기·내보내기 위치를 확인합니다. 긴 목차는 화면에서 접어 책장이 보이도록 촬영했습니다.
+
+<img src="docs/images/book-memo.png" alt="현재 Book Memo의 정렬된 가져오기 버튼 검색 내보내기와 책장" width="100%">
+
+### YouTube Memo · 영상과 메모 관리
+
+영상 등록·저장 목록과 가져오기·내보내기 위치를 확인합니다. 쓰기는 로그인 뒤 사용할 수 있습니다.
+
+<img src="docs/images/youtube-memo.png" alt="현재 YouTube Memo의 영상 등록 가져오기 내보내기와 영상 목록" width="100%">
+
+### 파일함 · 파일 작업 도구
+
+업로드·검색·정렬·이동·휴지통과 개인 기사 보관 진입점을 제공합니다. 인증된 실제 화면의 도구 구간을 사용하며 개인 파일 내용은 포함하지 않습니다.
+
+<img src="docs/images/file-manager.png" alt="현재 파일함의 인증된 업로드와 파일 관리 도구" width="100%">
+
+### 관리자 상태 · 서버와 백업
+
+서버 상태와 서비스별 백업·복원 증거를 확인합니다. 내부 주소와 보안 이벤트의 상세 목록은 제외합니다.
+
+<img src="docs/images/admin-status.png" alt="현재 관리자 화면의 서버 자원과 서비스 상태" width="100%">
+
+<img src="docs/images/admin-backup-status.png" alt="현재 관리자 화면의 Portal Book YouTube Crawler 차량 DB 백업 및 복원 증거" width="100%">
+
+### 차량관리 · Telegram 알림 예시
+
+운행 기록·주행거리·소모품 정비 안내를 Telegram으로 제공합니다. 아래 이미지는 기존 실제 메시지 예시이며 현재 차량 상태나 신규 백업 성공을 나타내지 않습니다.
+
+<img src="docs/images/car-care-telegram-status.png" alt="차량관리 Telegram의 기존 운행 및 정비 알림 예시" width="100%">
 
 ## 구조와 기술 선택
 
 ![Personal Server 현재 운영 구조](docs/images/personal-server-architecture-v2.svg)
 
-외부 웹 요청은 Cloudflare Tunnel과 Caddy를 거쳐 K3s 서비스로 전달됩니다. 차량 OAuth callback은 별도 Tunnel 경로입니다. 구성도는 서비스 배치도이며 백업 보관 구간이나 검증 결과를 나타내지는 않습니다.
+외부 웹 요청은 Cloudflare Tunnel → Compose의 Caddy → K3s Service로 전달됩니다. Portal은 NodePort로 진입하고, 뉴스·책·영상은 각각의 K3s Service가 처리합니다. 차량 OAuth callback은 Caddy를 거치지 않는 별도 Tunnel 경로입니다. 구성도는 실제 실행 중인 서비스·저장소·timer와 코드에 정의된 데이터 흐름을 대조해 작성했습니다.
+
+K3s의 웹 앱 4개와 Compose의 차량관리·SystemAgent·HomeOps는 역할을 나눠 운영합니다. 백업은 단일 timer가 Portal → Book → YouTube → Crawler → 차량 DB 순으로 실행하며, 차량 백업 감시 결과는 고정 ConfigMap → Relay → Portal 관리자 화면으로 전달됩니다. 개별 실행의 성공 여부는 구성도와 별도로 실제 복원 증거를 확인합니다.
 
 | 영역 | 기술 | 선택 이유 |
 |---|---|---|
 | 웹·API | Python, FastAPI, Jinja2, JavaScript | 서비스별 요청 처리와 서버 렌더링을 구성하고 필요한 화면 동작만 브라우저에서 처리 |
 | 저장 | SQLite, JSON, 파일 시스템 | 개인 데이터 규모에서 별도 DB 서버 부담을 줄이고 서비스별 데이터를 분리 |
-| 실행 | Windows, Ubuntu WSL2, Docker, K3s | 단일 호스트에서 웹 앱과 호스트 운영 작업을 역할별로 분리 |
+| 실행 | Windows N100, Ubuntu WSL2, K3s, Docker Compose | 웹 앱 4개는 Deployment·readiness·PVC로 관리하고 차량 연동·호스트 상태·허용 조치는 Compose에 분리 |
 | 외부 접근 | Cloudflare Tunnel, Caddy | 공개 호스트별 요청과 내부 서비스 실행 위치를 연결 |
-| 관측·알림 | Prometheus, Grafana, Alertmanager, Telegram | 내부 상태와 외부 접근 장애를 함께 확인 |
+| 관측·알림 | Prometheus, Grafana, Alertmanager, SRE Relay, Telegram | 내부 지표·수집 중단·백업 누락과 외부 health를 구분해 감시하고 알림 전달 |
+| 백업·복구 | systemd user timer, Kubernetes Job, 암호화 Google Drive | 단일 잠금과 순차 실행으로 부하·중복 writer를 제한하고 원격 사본의 격리 복원 뒤 보존 정리 |
+| 상태 연결 | SystemAgent, HomeOps, 고정 ConfigMap·Relay 내부 API | Portal에서 운영 지표·허용 조치·차량 백업 상태를 조회하되 자격 증명이나 차량 원문은 노출하지 않음 |
 | 배포·보안 | GitHub Actions, unittest, Trivy | 변경 영향에 따른 검사, 이미지 보안 검사, 배포 대상 제한 |
 
 ### 서비스와 저장소를 나눈 이유
@@ -131,7 +164,7 @@ Portal·Book·YouTube·Crawler는 K3s의 Deployment·Service·readiness·PVC를 
 
 ### 모니터링 화면
 
-아래는 N100에서 촬영한 Grafana 화면입니다. WSL2 환경에 맞춰 node-exporter를 비활성화한 구성이라 상단의 일부 CPU·메모리 사용률 패널은 `No data`로 표시됩니다. 조회 가능한 그래프와 누락된 지표를 구분해 사용하고 있습니다.
+아래는 N100에서 촬영한 기존 Grafana 화면 예시입니다. 현재 수치의 증거로 사용하지 않습니다. WSL2 환경에 맞춰 node-exporter를 비활성화한 구성이라 상단의 일부 CPU·메모리 사용률 패널은 `No data`로 표시됩니다. 조회 가능한 그래프와 누락된 지표를 구분해 사용하고 있습니다.
 
 ![Grafana K3s 모니터링 화면](docs/images/grafana-k3s-overview.png)
 
@@ -156,7 +189,7 @@ CI 산출물과 운영 증적은 90일 보관하며, 장기 보관이 필요한 
 
 단일 N100과 WSL2 구성이라 호스트 장애를 견디는 다중 노드 고가용성은 제공하지 않습니다. SQLite·파일 기반 단일 writer를 전제로 하며 다중 쓰기 인스턴스 확장에는 저장 구조 변경이 필요합니다. Grafana 일부 호스트 지표는 수집되지 않으며 운영 통신 차단 정책은 미적용 상태입니다.
 
-메모 재시도 보호는 지정된 쓰기 경로에 적용됩니다. 탭 종료 후 초안 복구나 모든 중간 데이터 변경의 복원은 보장하지 않습니다. SLI·에러 버짓·RTO/RPO의 종합 실측과 인증의 장기 유지·Telegram 단말 수신은 추가 확인이 필요합니다. 차량을 포함한 첫 전체 정기 실행과 기간 만료 사본의 실제 자동 삭제는 아직 관찰 전으로 구분합니다.
+메모 재시도 보호는 지정된 쓰기 경로에 적용됩니다. 탭 종료 후 초안 복구나 모든 중간 데이터 변경의 복원은 보장하지 않습니다. SLI·에러 버짓·RTO/RPO의 종합 실측과 인증의 장기 유지·Telegram 단말 수신은 추가 확인이 필요합니다. 차량을 포함한 정기 실행과 기간 만료 사본의 실제 자동 삭제는 이미지나 CI 대신 각 실행 기록·복원 증거·삭제 결과를 대조해 판단합니다.
 
 ## 빠른 상태 확인
 

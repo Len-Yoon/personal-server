@@ -1,107 +1,71 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1660" viewBox="0 0 1440 1660" role="img" aria-labelledby="title desc">
-  <title id="title">Personal Server 현재 운영 구조</title>
-  <desc id="desc">Cloudflare Tunnel에서 WSL loopback Caddy를 거쳐 K3s Portal, News, YouTube Memo, Book Memo Service와 서비스별 PVC로 전달되는 현재 공개 경로 및 운영 보조 구성도</desc>
-  <defs>
-    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0 0 L0 10 L10 5 z" fill="#64748b"/></marker>
-    <style>
-      .title{font:700 42px 'Apple SD Gothic Neo','Noto Sans KR','Malgun Gothic',Arial,sans-serif;fill:#10213d}
-      .subtitle{font:400 19px 'Apple SD Gothic Neo','Noto Sans KR','Malgun Gothic',Arial,sans-serif;fill:#52627a}
-      .section{font:700 24px 'Apple SD Gothic Neo','Noto Sans KR','Malgun Gothic',Arial,sans-serif;fill:#1f3557}
-      .card-title{font:700 20px 'Apple SD Gothic Neo','Noto Sans KR','Malgun Gothic',Arial,sans-serif;fill:#13233c}
-      .card-body{font:400 16px 'Apple SD Gothic Neo','Noto Sans KR','Malgun Gothic',Arial,sans-serif;fill:#38506f}
-      .note{font:400 15px 'Apple SD Gothic Neo','Noto Sans KR','Malgun Gothic',Arial,sans-serif;fill:#52627a}
-      .small{font:400 14px 'Apple SD Gothic Neo','Noto Sans KR','Malgun Gothic',Arial,sans-serif;fill:#52627a}
-      .route{stroke:#64748b;stroke-width:3;fill:none;marker-end:url(#arrow)}
-      .k3s-route{stroke:#059669;stroke-width:3;fill:none;marker-end:url(#arrow)}
-      .private{stroke:#a855f7;stroke-width:3;fill:none;marker-end:url(#arrow)}
-    </style>
-  </defs>
-
-  <rect width="1440" height="1660" fill="#f8fafc"/>
-  <text x="70" y="76" class="title">Personal Server 현재 운영 구조</text>
-  <text x="70" y="112" class="subtitle">공개 경로 · K3s 단일 writer · 서비스별 데이터 · 운영 보조 구성</text>
-
-  <rect x="55" y="150" width="1330" height="635" rx="24" fill="#ffffff" stroke="#cbd5e1" stroke-width="2"/>
-  <text x="85" y="198" class="section">01 · 공개 서비스 경로</text>
-
-  <rect x="95" y="245" width="220" height="105" rx="16" fill="#dbeafe" stroke="#2563eb" stroke-width="2.5"/>
-  <text x="205" y="287" text-anchor="middle" class="card-title">Internet</text>
-  <text x="205" y="317" text-anchor="middle" class="card-body">공개 사용자</text>
-
-  <rect x="390" y="245" width="250" height="105" rx="16" fill="#fff7ed" stroke="#f97316" stroke-width="2.5"/>
-  <text x="515" y="287" text-anchor="middle" class="card-title">Cloudflare Tunnel</text>
-  <text x="515" y="317" text-anchor="middle" class="card-body">호스트별 ingress 분기</text>
-  <path d="M315 298 H390" class="route"/>
-
-  <rect x="715" y="245" width="265" height="105" rx="16" fill="#fef3c7" stroke="#d97706" stroke-width="2.5"/>
-  <text x="847" y="287" text-anchor="middle" class="card-title">WSL loopback Caddy</text>
-  <text x="847" y="317" text-anchor="middle" class="card-body">TLS 종료 · K3s upstream 연결</text>
-  <path d="M640 298 H715" class="route"/>
-
-  <rect x="1055" y="245" width="285" height="105" rx="16" fill="#dcfce7" stroke="#16a34a" stroke-width="2.5"/>
-  <text x="1197" y="287" text-anchor="middle" class="card-title">K3s Service</text>
-  <text x="1197" y="317" text-anchor="middle" class="card-body">준비된 Pod로만 요청 전달</text>
-  <path d="M980 298 H1055" class="k3s-route"/>
-
-  <text x="600" y="395" class="note">Cloudflare Tunnel → Caddy → K3s Service</text>
-  <text x="600" y="423" class="card-body">Portal · News · YouTube · Books</text>
-
-  <rect x="95" y="465" width="1245" height="120" rx="18" fill="#f0fdf4" stroke="#86efac" stroke-width="2"/>
-  <text x="125" y="505" class="card-title">K3s 공개 앱 · 단일 writer</text>
-  <text x="125" y="538" class="card-body">portal-web Service</text>
-  <text x="405" y="538" class="card-body">crawler-worker Service</text>
-  <text x="725" y="538" class="card-body">youtube-memo Service</text>
-  <text x="1050" y="538" class="card-body">book-memo Service</text>
-  <path d="M1197 350 V465" class="k3s-route"/>
-
-  <rect x="95" y="620" width="1245" height="115" rx="18" fill="#eff6ff" stroke="#93c5fd" stroke-width="2"/>
-  <text x="125" y="660" class="card-title">서비스별 PVC · 단일 writer</text>
-  <text x="125" y="696" class="card-body">Portal PVC · Crawler PVC · YouTube PVC · Book PVC</text>
-  <text x="125" y="720" class="note">Pod가 교체되어도 서비스 데이터는 각 PVC에 유지됨</text>
-  <path d="M718 585 V620" class="k3s-route"/>
-
-  <rect x="95" y="375" width="405" height="65" rx="15" fill="#faf5ff" stroke="#a855f7" stroke-width="2.5"/>
-  <text x="297" y="403" text-anchor="middle" class="card-title">차량 OAuth callback</text>
-  <text x="297" y="426" text-anchor="middle" class="small">별도 ingress · 비공개 callback upstream</text>
-  <path d="M515 350 V407 H500" class="private"/>
-
-  <rect x="55" y="830" width="1330" height="360" rx="24" fill="#eff6ff" stroke="#2563eb" stroke-width="2.5"/>
-  <text x="85" y="878" class="section">02 · Windows N100 · WSL2 실행 환경</text>
-  <text x="85" y="908" class="note">공개 웹 앱은 K3s가 관리하고, 프록시·차량관리·운영 보조는 Compose로 분리함</text>
-
-  <rect x="85" y="950" width="785" height="185" rx="20" fill="#ffffff" stroke="#60a5fa" stroke-width="2.5"/>
-  <text x="115" y="995" class="section">K3s · 공개 앱 실행</text>
-  <text x="115" y="1030" class="card-body">portal-web · crawler-worker · youtube-memo · book-memo</text>
-  <text x="115" y="1060" class="note">Deployment · Service · readiness · 서비스별 PVC</text>
-  <text x="115" y="1090" class="note">각 앱은 하나의 production writer만 유지함</text>
-
-  <rect x="905" y="950" width="435" height="185" rx="20" fill="#ffffff" stroke="#4ade80" stroke-width="2.5"/>
-  <text x="935" y="995" class="section">Docker Compose · 운영 보조</text>
-  <text x="935" y="1030" class="card-body">Caddy · 차량관리 · HomeOps</text>
-  <text x="935" y="1060" class="note">배포 스크립트가 조회한 upstream을 Caddy에 전달</text>
-  <text x="935" y="1090" class="note">K3s 전환 서비스의 Docker writer는 중지 상태임</text>
-
-  <text x="70" y="1255" class="section">03 · 운영 · 관측 · 데이터 보호</text>
-
-  <rect x="55" y="1285" width="625" height="155" rx="20" fill="#eef2ff" stroke="#6366f1" stroke-width="2.5"/>
-  <text x="85" y="1328" class="section">N100 제한형 자동복구</text>
-  <text x="85" y="1364" class="card-body">KeepAlive → Supervisor → Daemon</text>
-  <text x="85" y="1392" class="note">WSL · K3s · Portal · Tunnel 상태 점검 · 구성요소별 최대 3회</text>
-  <text x="85" y="1418" class="note">NodePort 이상은 Tunnel 복구 제외</text>
-
-  <rect x="715" y="1285" width="625" height="155" rx="20" fill="#ecfdf5" stroke="#059669" stroke-width="2.5"/>
-  <text x="745" y="1328" class="section">내부 관측 · 알림</text>
-  <text x="745" y="1364" class="card-body">Prometheus → Grafana</text>
-  <text x="745" y="1392" class="note">NewsCollectionStale → Alertmanager → SRE relay → Telegram</text>
-  <text x="745" y="1418" class="note">뉴스 수집 지연은 감지·알림만 수행하고 자동복구하지 않음</text>
-
-  <rect x="55" y="1475" width="625" height="145" rx="20" fill="#faf5ff" stroke="#a855f7" stroke-width="2.5"/>
-  <text x="85" y="1518" class="section">외부 상태 점검</text>
-  <text x="85" y="1553" class="card-body">GitHub Actions · 약 5분 공개 health</text>
-  <text x="85" y="1583" class="note">Portal · News · YouTube · Books의 장애·복구 전환 확인</text>
-
-  <rect x="715" y="1475" width="625" height="145" rx="20" fill="#fff7ed" stroke="#ea580c" stroke-width="2.5"/>
-  <text x="745" y="1518" class="section">백업 · 월간 운영 점검</text>
-  <text x="745" y="1553" class="card-body">4서비스 02:30 순차 백업·복원 검증</text>
-  <text x="745" y="1583" class="note">월간 SRE 통합 점검 · 기존 Telegram relay</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1000" viewBox="0 0 1440 1000" role="img" aria-labelledby="title desc"><title id="title">Personal Server 현재 운영 구조와 데이터 흐름</title><desc id="desc">Windows N100의 WSL2 안에서 K3s 웹 앱과 Compose 운영 도구를 분리하고 다섯 단계 순차 백업 및 관측 경로를 연결한 구성도</desc><defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#59c6da"/></marker></defs><style>text{font-family:Arial,'Apple SD Gothic Neo','Noto Sans KR',sans-serif;fill:#e7edf7}.title{font-size:32px;font-weight:700}.heading{font-size:23px;font-weight:700}.body{font-size:20px}.small{font-size:17px;fill:#b9c8dd}.tag{fill:#69d8df;font-size:17px;font-weight:700}</style><rect width="1440" height="1000" rx="20" fill="#0c1424"/>
+<text x="36" y="48" class="title">Personal Server · 운영 구조와 데이터 흐름</text>
+<text x="36" y="79" class="small">단일 N100 / Windows + Ubuntu WSL2 · 실행 위치와 데이터 소유권을 구분</text>
+<rect x="36" y="103" width="1368" height="99" rx="12" fill="#15243b" stroke="#345371"/>
+<text x="58" y="134" class="tag">공개 웹 요청</text>
+<text x="58" y="168" class="heading">Cloudflare Tunnel → Caddy → K3s Service</text>
+<text x="720" y="133" class="body">Portal · News · YouTube · Books</text>
+<text x="720" y="166" class="body">차량 OAuth callback → 비공개 callback upstream</text>
+<rect x="36" y="220" width="1368" height="343" rx="12" fill="#101e31" stroke="#345371"/>
+<text x="56" y="251" class="heading">Ubuntu WSL2 · 앱 배치와 영속 데이터</text>
+<rect x="56" y="275" width="269" height="253" rx="12" fill="#15243b" stroke="#345371"/>
+<text x="76" y="308" class="tag">Docker Compose</text>
+<text x="76" y="345" class="heading">Caddy</text>
+<text x="76" y="376" class="body">호스트별 reverse proxy</text>
+<text x="76" y="409" class="body">운영 upstream → K3s</text>
+<text x="76" y="444" class="small">Portal 진입: NodePort</text>
+<text x="76" y="478" class="small">배포 도구가 대상 주소 확인</text>
+<text x="76" y="507" class="small">Docker socket proxy</text>
+<path d="M326,366 L356,366" fill="none" stroke="#59c6da" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="359" y="275" width="650" height="253" rx="12" fill="#142c3d" stroke="#408399"/>
+<text x="379" y="308" class="tag">K3s · personal-server · 앱별 1개 writer</text>
+<rect x="379" y="326" width="294" height="65" rx="12" fill="#102131" stroke="#345371"/>
+<text x="391" y="352" class="body">portal-web Service</text>
+<text x="391" y="377" class="small">파일함 · 검색 · 관리자 상태</text>
+<rect x="696" y="326" width="294" height="65" rx="12" fill="#102131" stroke="#345371"/>
+<text x="708" y="352" class="body">crawler-worker Service</text>
+<text x="708" y="377" class="small">뉴스 수집 · 저장 · 검색</text>
+<rect x="379" y="402" width="294" height="65" rx="12" fill="#102131" stroke="#345371"/>
+<text x="391" y="428" class="body">youtube-memo Service</text>
+<text x="391" y="453" class="small">영상 · 타임스탬프 메모</text>
+<rect x="696" y="402" width="294" height="65" rx="12" fill="#102131" stroke="#345371"/>
+<text x="708" y="428" class="body">book-memo Service</text>
+<text x="708" y="453" class="small">책장 · 목차 · 독서 메모</text>
+<text x="379" y="494" class="body">서비스별 PVC · 단일 writer</text>
+<text x="379" y="518" class="small">Portal PVC · Crawler PVC · YouTube PVC · Book PVC</text>
+<rect x="1030" y="275" width="354" height="253" rx="12" fill="#15243b" stroke="#345371"/>
+<text x="1050" y="308" class="tag">Docker Compose · 보조 실행</text>
+<text x="1050" y="347" class="heading">car-care-worker</text>
+<text x="1050" y="379" class="small">차량 API · Telegram · 차량 DB</text>
+<text x="1050" y="417" class="heading">SystemAgent · HomeOps</text>
+<text x="1050" y="449" class="small">자원 조회 · 허용 대상 진단/조치</text>
+<text x="1050" y="488" class="small">runtime marker로 중복 기동 차단</text>
+<text x="56" y="550" class="small">현재 운영 앱/monitoring 통신 차단 정책 미적용 · Loki/Alloy는 별도 격리 실습</text>
+<rect x="36" y="581" width="1368" height="183" rx="12" fill="#122b33" stroke="#3a7d84"/>
+<text x="56" y="614" class="heading">매일 02:30 KST · 하나의 timer가 순서대로 실행</text>
+<rect x="56" y="633" width="246" height="43" rx="12" fill="#10212c" stroke="#3a7d84"/>
+<text x="74" y="662" class="body">1. Portal</text>
+<path d="M303,654 L321,654" fill="none" stroke="#59c6da" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="323" y="633" width="246" height="43" rx="12" fill="#10212c" stroke="#3a7d84"/>
+<text x="341" y="662" class="body">2. Book</text>
+<path d="M570,654 L588,654" fill="none" stroke="#59c6da" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="590" y="633" width="246" height="43" rx="12" fill="#10212c" stroke="#3a7d84"/>
+<text x="608" y="662" class="body">3. YouTube</text>
+<path d="M837,654 L855,654" fill="none" stroke="#59c6da" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="857" y="633" width="246" height="43" rx="12" fill="#10212c" stroke="#3a7d84"/>
+<text x="875" y="662" class="body">4. Crawler</text>
+<path d="M1104,654 L1122,654" fill="none" stroke="#59c6da" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="1124" y="633" width="246" height="43" rx="12" fill="#10212c" stroke="#3a7d84"/>
+<text x="1142" y="662" class="body">5. 차량 DB</text>
+<text x="56" y="706" class="body">앞 단계 성공 후 다음 단계 · 잠금 → 암호화 Drive 업로드 → 재다운로드·격리 복원 → 보존 정리</text>
+<text x="56" y="739" class="small">차량 DB: 동일 내용 건너뜀 / 주기적 실제 검증 · 일 7 / 주 4 / 월 3 + 최신 7개 안전 하한</text>
+<rect x="36" y="782" width="1368" height="182" rx="12" fill="#15243b" stroke="#345371"/>
+<text x="56" y="815" class="heading">관측과 백업 상태 전달</text>
+<text x="56" y="851" class="body">Prometheus → Grafana</text>
+<text x="56" y="880" class="small">NewsCollectionStale → Alertmanager → SRE relay → Telegram</text>
+<text x="56" y="910" class="small">월간 SRE 통합 점검 · Loki / Alloy / Ansible은 실습 범위</text>
+<text x="760" y="851" class="body">차량 5분 감시 → 고정 ConfigMap → Relay → Portal</text>
+<text x="760" y="880" class="body">GitHub Actions · 약 5분 공개 health</text>
+<text x="760" y="910" class="small">CI/Trivy 통과 ≠ 운영 배포 · K3s 이미지 교체는 승인 범위</text>
+<text x="56" y="943" class="small">NodePort 이상은 Tunnel 복구 제외 · 단일 호스트 장애를 견디는 HA 구성 아님</text>
 </svg>
