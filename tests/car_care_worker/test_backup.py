@@ -283,6 +283,8 @@ class CarCareBackupTests(unittest.TestCase):
         result = self.retain(delete=True, expected_plan_sha256=plan['plan_sha256'],
                              confirm_remote=BACKUP.REMOTE, runner=self.retention_runner)
         self.assertIn(older['backup_id']+'.sqlite3.age', result['deleted'])
+        retained = [r for r in BACKUP.POLICY.read_records(self.evidence) if r.get('operation') == 'retention'][-1]
+        self.assertGreater(retained['reclaimed_bytes'], 0)
         self.assertIn(BACKUP.REMOTE+'/'+latest['backup_id']+'.sqlite3.age', self.remote)
         self.assertGreaterEqual(len(self.remote), 7)
         self.assertEqual(self.retain()['delete'], [])
@@ -811,6 +813,28 @@ class CarBackupOperationsTests(unittest.TestCase):
         self.assertNotIn(str(self.state), json.dumps(value))
         self.assertIsNone(value['retention'])
 
+    def test_monitor_cleanup_bytes_and_reason_roundtrip_to_relay(self):
+        import sys
+        self.ready()
+        identity = self.now.strftime('car-care-%Y%m%dT%H%M%SZ-') + '9'*16
+        record = dict(schema_version=1, scope=BACKUP.POLICY.SCOPE, backup_id=identity,
+                      operation='retention', status='no_op', restore_verified=False,
+                      remote_upload_status='not_attempted', remote_delete_status='not_attempted',
+                      deleted=[], kept_count=1, reclaimed_bytes=0, finished_at=self.now.isoformat())
+        BACKUP.POLICY.persist(self.state/'evidence'/(identity+'.json'), record, initial=True)
+        value = MONITOR.snapshot(self.state, self.now)
+        spec = importlib.util.spec_from_file_location('car_monitor_roundtrip_relay', ROOT/'sre-telegram-relay/app/main.py')
+        relay = importlib.util.module_from_spec(spec); sys.modules[spec.name] = relay; spec.loader.exec_module(relay)
+        class API:
+            def get_config_map(self, namespace, name):
+                return dict(metadata=dict(name=name, namespace=namespace), data=dict(status_json=json.dumps(value)))
+        row = relay.car_backup_summary(API(), self.now)
+        self.assertEqual(row['retention_reclaimed_bytes'], 0)
+        self.assertEqual(row['retention_reason'], 'none')
+        self.assertEqual(row['retention_kept_count'], 1)
+        self.assertEqual(row['restore_verified_at'], value['proof']['restore_verified_at'])
+        self.assertNotIn('backup_id', row)
+
     def test_monitor_missing_after_nine_and_activation_guard(self):
         self.ready()
         local = self.now.astimezone(SCHEDULE.KST)
@@ -914,6 +938,7 @@ class CarBackupOperationsTests(unittest.TestCase):
         records = BACKUP.POLICY.read_records(original.evidence)
         retained = [r for r in records if r.get('operation')=='retention']
         self.assertEqual(retained[0]['status'],'no_op')
+        self.assertEqual(retained[0]['reclaimed_bytes'], 0)
 
     def old_pair(self):
         self.ready()

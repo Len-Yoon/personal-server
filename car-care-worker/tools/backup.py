@@ -254,7 +254,7 @@ def retain(database, credentials, scratch, evidence, *, delete=False,
         path = evidence / (backup_id + '.json')
         record = dict(schema_version=1, scope=POLICY.SCOPE, backup_id=backup_id, operation='retention',
                       status='failure', stage='inventory', deleted=[], remote_delete_status='not_attempted',
-                      plan_sha256=plan['plan_sha256'], restore_verified=False, kept_count=len(plan['keep']))
+                      plan_sha256=plan['plan_sha256'], restore_verified=False, kept_count=len(plan['keep']), reclaimed_bytes=0)
         POLICY.persist(path, record, initial=True)
         if not plan['delete']:
             record.update(status='no_op', stage='complete', finished_at=datetime.now(timezone.utc).isoformat())
@@ -283,6 +283,7 @@ def retain(database, credentials, scratch, evidence, *, delete=False,
                     expected = dict(inventory)
                     del expected[name]
                     require(remote_inventory(credentials, scratch, work, runner) == expected)
+                    record['reclaimed_bytes'] += inventory[name]['Size']
                     inventory = expected
                     record['deleted'].append(name)
                     record.update(remote_delete_status='confirmed')
@@ -290,6 +291,10 @@ def retain(database, credentials, scratch, evidence, *, delete=False,
                     POLICY.persist(path, record)
                 record.update(status='success', stage='complete')
         finally:
+            if record['status'] == 'failure':
+                record['failure_reason'] = {'inventory': 'inventory_invalid',
+                    'protected_restore': 'protected_restore_failed', 'candidate_digest': 'candidate_verification_failed',
+                    'delete': 'deletion_unconfirmed'}.get(record['stage'], 'cleanup_failed')
             record['finished_at'] = datetime.now(timezone.utc).isoformat()
             POLICY.persist(path, record)
         return dict(plan, deleted=record['deleted'])

@@ -85,6 +85,16 @@ def snapshot(state, now):
         POLICY.successful(records, now)
         retention = dict(status=raw['status'], finished_at=raw['finished_at'],
                          deleted_count=len(deleted), kept_count=raw['kept_count'])
+        if 'reclaimed_bytes' in raw:
+            require(type(raw['reclaimed_bytes']) is int and 0 <= raw['reclaimed_bytes'] <= 2**53-1)
+            retention['reclaimed_bytes'] = raw['reclaimed_bytes']
+        reason = raw.get('failure_reason', 'unknown') if raw['status'] == 'failure' else 'none'
+        require(reason in {'none','unknown','inventory_invalid','protected_restore_failed',
+                           'candidate_verification_failed','deletion_unconfirmed','cleanup_failed'})
+        retention['reason'] = reason
+        if raw['status'] == 'failure':
+            # Failed commands can have changed remote state without confirmation.
+            retention['kept_count'] = None
     value = dict(schema_version=1, scope=POLICY.SCOPE, observed_at=now.isoformat(),
                  last_attempt=attempt, proof=proof, retention=retention)
     require(len(POLICY.canonical(value)) <= 16384)

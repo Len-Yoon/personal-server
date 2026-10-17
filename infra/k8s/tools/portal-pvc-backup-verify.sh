@@ -601,6 +601,29 @@ PY
   kctl -n "$STATUS_NAMESPACE" patch configmap "$STATUS_CONFIGMAP" --type=json --patch "$patch" >>"$DIAGNOSTIC_FILE" 2>&1
 }
 
+report_in_cluster_retention() {
+  [ "$EXECUTION_MODE" = in-cluster ] || return 0
+  local patch
+  patch=$(python3 - "$WORKDIR/retention-summary.json" "$1" <<'PYREPORT'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+value = dict(schema_version=1, status="failure", reason="cleanup_failed", finished_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+             kept_count=None, deleted_count=None, reclaimed_bytes=None)
+source = Path(sys.argv[1])
+if source.is_file():
+    value = json.loads(source.read_text())
+if sys.argv[2] != "0":
+    value.update(status="failure", kept_count=None)
+    if value.get("reason") == "none":
+        value["reason"] = "cleanup_failed"
+print(json.dumps([{"op":"add", "path":"/data/retention_summary", "value":json.dumps(value, separators=(",", ":"))}], separators=(",", ":")))
+PYREPORT
+) || return 1
+  kctl -n "$STATUS_NAMESPACE" patch configmap "$STATUS_CONFIGMAP" --type=json --patch "$patch" >>"$DIAGNOSTIC_FILE" 2>&1
+}
+
 report_in_cluster_status() {
   local exit_code=$1 restore_ok=$2 report_status report_stage
   [ "$EXECUTION_MODE" = in-cluster ] && [ "$MODE" = --go ] || return 0
@@ -688,7 +711,7 @@ cleanup() {
   # failure must never erase a successfully verified backup's evidence.
   if [ "$status" -eq 0 ] && [ "$restore_ok" -eq 1 ] && [ "$EVIDENCE_PENDING" -eq 1 ]; then
     if rm -rf -- "$stage" "$restore" && rm -f -- "$archive" "$ciphertext" "$WORKDIR/download.age" "$WORKDIR/restore.tar"; then
-      local -a retention_command=(python3 "$SCRIPT_DIR/pvc_backup_retention.py" --portal-evidence "$EVIDENCE" --remote "$REMOTE" --max-age-seconds "$MAX_AGE" --delete --)
+      local -a retention_command=(python3 "$SCRIPT_DIR/pvc_backup_retention.py" --portal-evidence "$EVIDENCE" --remote "$REMOTE" --max-age-seconds "$MAX_AGE" --report-file "$WORKDIR/retention-summary.json" --delete --)
       if [ "${#RCLONE_CREDENTIAL_ARGS[@]}" -gt 0 ]; then
         retention_command+=("${RCLONE_CREDENTIAL_ARGS[@]}")
       fi
@@ -704,6 +727,10 @@ cleanup() {
       retention_failed=1
       FAILURE_STAGE='retention-cleanup'
       printf '%s\n' 'pvc_backup_retention=FAIL'
+    fi
+    if ! report_in_cluster_retention "$retention_failed"; then
+      retention_failed=1
+      FAILURE_STAGE='retention-reporting'
     fi
   fi
   if ! cleanup_rclone_config_copy; then FAILURE_STAGE='remote-credentials'; restore_ok=0; fi

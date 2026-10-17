@@ -128,6 +128,10 @@ class RetentionEntrypointTests(unittest.TestCase):
                         runner.run_retention(delete=True)
                 self.assertEqual(state["stage"], "completed")
                 self.assertEqual(state["retention_status"], "failed")
+                summary = json.loads(state["retention_summary"])
+                self.assertEqual(summary["status"], "failure")
+                self.assertIsNone(summary["kept_count"])
+                self.assertIsNone(summary["deleted_count"])
                 self.assertTrue(state["retention_completed_at"].endswith("Z"))
                 for key in ("status", "lock_run_id", "run_id", "evidence"):
                     self.assertEqual(state[key], original[key])
