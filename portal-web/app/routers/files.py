@@ -18,7 +18,7 @@ from app.services.security import (
     clear_auth_failures,
     create_auth_session,
     has_auth_session,
-    is_production_environment,
+    requires_secure_cookie,
     record_auth_failure,
 )
 
@@ -80,7 +80,7 @@ def file_login(request: Request, password: str = Form(""), next_path: str = Form
         create_auth_session("file_access", FILE_ACCESS_MAX_AGE),
         httponly=True,
         samesite="lax",
-        secure=is_production_environment() or request.url.scheme == "https" or request.url.hostname in {"len.pe.kr", "file.len.pe.kr", "admin.len.pe.kr"},
+        secure=requires_secure_cookie(request),
         path="/files",
         max_age=FILE_ACCESS_MAX_AGE,
     )

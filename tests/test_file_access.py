@@ -181,6 +181,25 @@ class FileAccessTests(unittest.TestCase):
                 self.assertEqual(files_page.status_code, 200)
                 self.assertIn("저장소", files_page.text)
 
+    def test_public_alias_file_cookie_is_secure_without_production_flag(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            os.environ["APP_ENV"] = ""
+            os.environ["FILE_MANAGER_ACCESS_PASSWORD"] = "test-file-password"
+            os.environ["FILE_MANAGER_AUTH_REQUIRED"] = "true"
+            os.environ["FILE_STORAGE_PATH"] = str(Path(tempdir) / "files")
+            import app.main as main
+            from fastapi.testclient import TestClient
+            app = importlib.reload(main).app
+            with TestClient(app, base_url="http://portal.len.pe.kr") as client:
+                response = client.post(
+                    "/files/login", data={"password": "test-file-password"},
+                    headers={"Origin": "http://portal.len.pe.kr"}, follow_redirects=False,
+                )
+            self.assertEqual(response.status_code, 303)
+            self.assertIn("secure", response.headers["set-cookie"].lower())
+            self.assertIn("httponly", response.headers["set-cookie"].lower())
+
     def test_production_file_login_uses_secure_server_side_session_cookie(self):
         with tempfile.TemporaryDirectory() as tempdir:
             prepare_service_import("portal-web")
