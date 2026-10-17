@@ -66,7 +66,7 @@ for _name, _modules in (
 # Practical improvements retain the existing owners and nine-suite boundary.
 for _name, _modules in (
     ("portal", " tests.test_portal_improvements tests.test_search_performance_lab"),
-    ("book-memo", " tests.book_memo.test_memo_recovery"),
+    ("book-memo", " tests.book_memo.test_memo_recovery tests.test_incident_sqlite_actor tests.test_incident_recovery_lab"),
     ("youtube-memo", " tests.youtube_memo.test_memo_recovery"),
     ("maintenance", " tests.test_backup_status_view"),
 ):

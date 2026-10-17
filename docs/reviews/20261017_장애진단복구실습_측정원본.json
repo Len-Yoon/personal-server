@@ -1,0 +1,735 @@
+{
+  "schema_version": 1,
+  "valid": true,
+  "reason": "ok",
+  "cases": [
+    {
+      "scenario": "dependency_timeout",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.09587591699892073,
+          "at": "2026-10-17T12:05:47.156466+00:00"
+        },
+        {
+          "event": "fault_applied",
+          "elapsed_seconds": 0.10605629199926625,
+          "at": "2026-10-17T12:05:47.166643+00:00"
+        },
+        {
+          "event": "failure_observed",
+          "elapsed_seconds": 1.6270632919986383,
+          "at": "2026-10-17T12:05:48.687696+00:00"
+        },
+        {
+          "event": "cause_evidence_verified",
+          "elapsed_seconds": 1.6270750420007971,
+          "at": "2026-10-17T12:05:48.687707+00:00"
+        },
+        {
+          "event": "recovery_action_started",
+          "elapsed_seconds": 1.6270764590008184,
+          "at": "2026-10-17T12:05:48.687708+00:00"
+        },
+        {
+          "event": "recovery_action_completed",
+          "elapsed_seconds": 1.6381702500002575,
+          "at": "2026-10-17T12:05:48.698803+00:00"
+        },
+        {
+          "event": "recovery_verified",
+          "elapsed_seconds": 1.6604814999991504,
+          "at": "2026-10-17T12:05:48.721115+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 1.683948916997906,
+          "at": "2026-10-17T12:05:48.744584+00:00"
+        }
+      ],
+      "observations": {
+        "baseline": {
+          "statuses": [
+            "ok",
+            "ok",
+            "ok"
+          ],
+          "valid": true
+        },
+        "failure": {
+          "statuses": [
+            "ok",
+            "ok",
+            "unavailable"
+          ],
+          "valid": true
+        },
+        "recovery": {
+          "statuses": [
+            "ok",
+            "ok",
+            "ok"
+          ],
+          "valid": true
+        }
+      },
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "timings": {
+        "detection_seconds": 1.521006999999372,
+        "automatic_cause_check_seconds": 1.1750002158805728e-05,
+        "recovery_check_seconds": 0.03340504099833197
+      },
+      "children_exited_cleanly": true,
+      "repeat": 1
+    },
+    {
+      "scenario": "dependency_timeout",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.09600487500210875,
+          "at": "2026-10-17T12:05:48.840772+00:00"
+        },
+        {
+          "event": "fault_applied",
+          "elapsed_seconds": 0.10713295800087508,
+          "at": "2026-10-17T12:05:48.851895+00:00"
+        },
+        {
+          "event": "failure_observed",
+          "elapsed_seconds": 1.6276655000001483,
+          "at": "2026-10-17T12:05:50.372475+00:00"
+        },
+        {
+          "event": "cause_evidence_verified",
+          "elapsed_seconds": 1.627674041003047,
+          "at": "2026-10-17T12:05:50.372481+00:00"
+        },
+        {
+          "event": "recovery_action_started",
+          "elapsed_seconds": 1.6276755409999168,
+          "at": "2026-10-17T12:05:50.372483+00:00"
+        },
+        {
+          "event": "recovery_action_completed",
+          "elapsed_seconds": 1.6389028330013389,
+          "at": "2026-10-17T12:05:50.383711+00:00"
+        },
+        {
+          "event": "recovery_verified",
+          "elapsed_seconds": 1.6614371659998142,
+          "at": "2026-10-17T12:05:50.406247+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 1.6839727500009758,
+          "at": "2026-10-17T12:05:50.428783+00:00"
+        }
+      ],
+      "observations": {
+        "baseline": {
+          "statuses": [
+            "ok",
+            "ok",
+            "ok"
+          ],
+          "valid": true
+        },
+        "failure": {
+          "statuses": [
+            "ok",
+            "ok",
+            "unavailable"
+          ],
+          "valid": true
+        },
+        "recovery": {
+          "statuses": [
+            "ok",
+            "ok",
+            "ok"
+          ],
+          "valid": true
+        }
+      },
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "timings": {
+        "detection_seconds": 1.5205325419992732,
+        "automatic_cause_check_seconds": 8.541002898709849e-06,
+        "recovery_check_seconds": 0.03376162499989732
+      },
+      "children_exited_cleanly": true,
+      "repeat": 2
+    },
+    {
+      "scenario": "dependency_timeout",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.09239341599823092,
+          "at": "2026-10-17T12:05:50.521374+00:00"
+        },
+        {
+          "event": "fault_applied",
+          "elapsed_seconds": 0.1034708330007561,
+          "at": "2026-10-17T12:05:50.532449+00:00"
+        },
+        {
+          "event": "failure_observed",
+          "elapsed_seconds": 1.624086083000293,
+          "at": "2026-10-17T12:05:52.053110+00:00"
+        },
+        {
+          "event": "cause_evidence_verified",
+          "elapsed_seconds": 1.6240951660001883,
+          "at": "2026-10-17T12:05:52.053118+00:00"
+        },
+        {
+          "event": "recovery_action_started",
+          "elapsed_seconds": 1.6240967079975235,
+          "at": "2026-10-17T12:05:52.053119+00:00"
+        },
+        {
+          "event": "recovery_action_completed",
+          "elapsed_seconds": 1.6350638330004585,
+          "at": "2026-10-17T12:05:52.064088+00:00"
+        },
+        {
+          "event": "recovery_verified",
+          "elapsed_seconds": 1.659130207997805,
+          "at": "2026-10-17T12:05:52.088156+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 1.6845129159992211,
+          "at": "2026-10-17T12:05:52.113539+00:00"
+        }
+      ],
+      "observations": {
+        "baseline": {
+          "statuses": [
+            "ok",
+            "ok",
+            "ok"
+          ],
+          "valid": true
+        },
+        "failure": {
+          "statuses": [
+            "ok",
+            "ok",
+            "unavailable"
+          ],
+          "valid": true
+        },
+        "recovery": {
+          "statuses": [
+            "ok",
+            "ok",
+            "ok"
+          ],
+          "valid": true
+        }
+      },
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "timings": {
+        "detection_seconds": 1.520615249999537,
+        "automatic_cause_check_seconds": 9.082999895326793e-06,
+        "recovery_check_seconds": 0.03503350000028149
+      },
+      "children_exited_cleanly": true,
+      "repeat": 3
+    },
+    {
+      "scenario": "sqlite_busy",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.05655170799946063,
+          "at": "2026-10-17T12:05:52.170366+00:00"
+        },
+        {
+          "event": "fault_applied",
+          "elapsed_seconds": 0.1075823749997653,
+          "at": "2026-10-17T12:05:52.221398+00:00"
+        },
+        {
+          "event": "failure_observed",
+          "elapsed_seconds": 5.313999750000221,
+          "at": "2026-10-17T12:05:57.427972+00:00"
+        },
+        {
+          "event": "cause_evidence_verified",
+          "elapsed_seconds": 5.315282291001495,
+          "at": "2026-10-17T12:05:57.429252+00:00"
+        },
+        {
+          "event": "recovery_action_started",
+          "elapsed_seconds": 5.315292457999021,
+          "at": "2026-10-17T12:05:57.429261+00:00"
+        },
+        {
+          "event": "recovery_action_completed",
+          "elapsed_seconds": 5.3314517910002905,
+          "at": "2026-10-17T12:05:57.445423+00:00"
+        },
+        {
+          "event": "recovery_verified",
+          "elapsed_seconds": 5.3355623749994265,
+          "at": "2026-10-17T12:05:57.449533+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 5.346642000000429,
+          "at": "2026-10-17T12:05:57.460614+00:00"
+        }
+      ],
+      "observations": {
+        "baseline": {
+          "snapshot_hash": "eed93d4ea421accc6578aeda47b26a5716b3b6635a515b351a52e3774dd38497",
+          "page_count": 21,
+          "page_size": 4096
+        },
+        "failure": {
+          "error_code": 5,
+          "unchanged": true
+        },
+        "recovery": {
+          "data_preserved": true,
+          "exactly_once": true,
+          "integrity_ok": true,
+          "version": 2
+        }
+      },
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "timings": {
+        "detection_seconds": 5.206417375000456,
+        "automatic_cause_check_seconds": 0.0012825410012737848,
+        "recovery_check_seconds": 0.020269917000405258
+      },
+      "children_exited_cleanly": true,
+      "repeat": 1
+    },
+    {
+      "scenario": "sqlite_busy",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.07717683300143108,
+          "at": "2026-10-17T12:05:57.538406+00:00"
+        },
+        {
+          "event": "fault_applied",
+          "elapsed_seconds": 0.13569179200203507,
+          "at": "2026-10-17T12:05:57.596920+00:00"
+        },
+        {
+          "event": "failure_observed",
+          "elapsed_seconds": 5.3544977080018725,
+          "at": "2026-10-17T12:06:02.815885+00:00"
+        },
+        {
+          "event": "cause_evidence_verified",
+          "elapsed_seconds": 5.356261917000666,
+          "at": "2026-10-17T12:06:02.817645+00:00"
+        },
+        {
+          "event": "recovery_action_started",
+          "elapsed_seconds": 5.356274750000011,
+          "at": "2026-10-17T12:06:02.817656+00:00"
+        },
+        {
+          "event": "recovery_action_completed",
+          "elapsed_seconds": 5.372967750001408,
+          "at": "2026-10-17T12:06:02.834352+00:00"
+        },
+        {
+          "event": "recovery_verified",
+          "elapsed_seconds": 5.376658832999965,
+          "at": "2026-10-17T12:06:02.838042+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 5.389585500000976,
+          "at": "2026-10-17T12:06:02.850969+00:00"
+        }
+      ],
+      "observations": {
+        "baseline": {
+          "snapshot_hash": "8d746f02cb5b4e690263535b4abb2c76ce9e5d7f0969851ec12e3a82c70bfc43",
+          "page_count": 21,
+          "page_size": 4096
+        },
+        "failure": {
+          "error_code": 5,
+          "unchanged": true
+        },
+        "recovery": {
+          "data_preserved": true,
+          "exactly_once": true,
+          "integrity_ok": true,
+          "version": 2
+        }
+      },
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "timings": {
+        "detection_seconds": 5.2188059159998375,
+        "automatic_cause_check_seconds": 0.0017642089987930376,
+        "recovery_check_seconds": 0.020384082999953534
+      },
+      "children_exited_cleanly": true,
+      "repeat": 2
+    },
+    {
+      "scenario": "sqlite_busy",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.06953812500069034,
+          "at": "2026-10-17T12:06:02.921056+00:00"
+        },
+        {
+          "event": "fault_applied",
+          "elapsed_seconds": 0.12077370900078677,
+          "at": "2026-10-17T12:06:02.972297+00:00"
+        },
+        {
+          "event": "failure_observed",
+          "elapsed_seconds": 5.330392874999234,
+          "at": "2026-10-17T12:06:08.182074+00:00"
+        },
+        {
+          "event": "cause_evidence_verified",
+          "elapsed_seconds": 5.332612292000704,
+          "at": "2026-10-17T12:06:08.184285+00:00"
+        },
+        {
+          "event": "recovery_action_started",
+          "elapsed_seconds": 5.33262512500005,
+          "at": "2026-10-17T12:06:08.184297+00:00"
+        },
+        {
+          "event": "recovery_action_completed",
+          "elapsed_seconds": 5.354577083999175,
+          "at": "2026-10-17T12:06:08.206251+00:00"
+        },
+        {
+          "event": "recovery_verified",
+          "elapsed_seconds": 5.360152499997639,
+          "at": "2026-10-17T12:06:08.211825+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 5.3721453750004,
+          "at": "2026-10-17T12:06:08.223819+00:00"
+        }
+      ],
+      "observations": {
+        "baseline": {
+          "snapshot_hash": "377e67b73500b1a6a8d46758cc5e93f33600c97f4c61acfb0104f698beee3d28",
+          "page_count": 21,
+          "page_size": 4096
+        },
+        "failure": {
+          "error_code": 5,
+          "unchanged": true
+        },
+        "recovery": {
+          "data_preserved": true,
+          "exactly_once": true,
+          "integrity_ok": true,
+          "version": 2
+        }
+      },
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "timings": {
+        "detection_seconds": 5.209619165998447,
+        "automatic_cause_check_seconds": 0.002219417001469992,
+        "recovery_check_seconds": 0.027527374997589504
+      },
+      "children_exited_cleanly": true,
+      "repeat": 3
+    },
+    {
+      "scenario": "sqlite_full",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.06520924999858835,
+          "at": "2026-10-17T12:06:08.289568+00:00"
+        },
+        {
+          "event": "fault_applied",
+          "elapsed_seconds": 0.06568979100120487,
+          "at": "2026-10-17T12:06:08.290045+00:00"
+        },
+        {
+          "event": "failure_observed",
+          "elapsed_seconds": 0.06623820800086833,
+          "at": "2026-10-17T12:06:08.290594+00:00"
+        },
+        {
+          "event": "cause_evidence_verified",
+          "elapsed_seconds": 0.06651216599857435,
+          "at": "2026-10-17T12:06:08.290868+00:00"
+        },
+        {
+          "event": "recovery_action_started",
+          "elapsed_seconds": 0.06651725000119768,
+          "at": "2026-10-17T12:06:08.290872+00:00"
+        },
+        {
+          "event": "recovery_action_completed",
+          "elapsed_seconds": 0.06685724999988452,
+          "at": "2026-10-17T12:06:08.291213+00:00"
+        },
+        {
+          "event": "recovery_verified",
+          "elapsed_seconds": 0.06913250000070548,
+          "at": "2026-10-17T12:06:08.293488+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 0.0759332909983641,
+          "at": "2026-10-17T12:06:08.300290+00:00"
+        }
+      ],
+      "observations": {
+        "baseline": {
+          "snapshot_hash": "103f47fa95d19a0de0f3063655971f46e19a6827cb177176cb6aada1f9579546",
+          "page_count": 21,
+          "page_size": 4096
+        },
+        "capacity": {
+          "page_count": 21,
+          "page_size": 4096,
+          "max_page_count": 21
+        },
+        "failure": {
+          "error_code": 13,
+          "unchanged": true
+        },
+        "recovery": {
+          "data_preserved": true,
+          "exactly_once": true,
+          "integrity_ok": true,
+          "version": 2
+        }
+      },
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "timings": {
+        "detection_seconds": 0.0005484169996634591,
+        "automatic_cause_check_seconds": 0.00027395799770602025,
+        "recovery_check_seconds": 0.002615249999507796
+      },
+      "children_exited_cleanly": true,
+      "repeat": 1
+    },
+    {
+      "scenario": "sqlite_full",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.053966874998877756,
+          "at": "2026-10-17T12:06:08.354685+00:00"
+        },
+        {
+          "event": "fault_applied",
+          "elapsed_seconds": 0.054467707999720005,
+          "at": "2026-10-17T12:06:08.355183+00:00"
+        },
+        {
+          "event": "failure_observed",
+          "elapsed_seconds": 0.055052125000656815,
+          "at": "2026-10-17T12:06:08.355767+00:00"
+        },
+        {
+          "event": "cause_evidence_verified",
+          "elapsed_seconds": 0.05532816599952639,
+          "at": "2026-10-17T12:06:08.356043+00:00"
+        },
+        {
+          "event": "recovery_action_started",
+          "elapsed_seconds": 0.055331249997834675,
+          "at": "2026-10-17T12:06:08.356046+00:00"
+        },
+        {
+          "event": "recovery_action_completed",
+          "elapsed_seconds": 0.05569900000045891,
+          "at": "2026-10-17T12:06:08.356414+00:00"
+        },
+        {
+          "event": "recovery_verified",
+          "elapsed_seconds": 0.057918957998481346,
+          "at": "2026-10-17T12:06:08.358634+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 0.06484841600104119,
+          "at": "2026-10-17T12:06:08.365564+00:00"
+        }
+      ],
+      "observations": {
+        "baseline": {
+          "snapshot_hash": "103f47fa95d19a0de0f3063655971f46e19a6827cb177176cb6aada1f9579546",
+          "page_count": 21,
+          "page_size": 4096
+        },
+        "capacity": {
+          "page_count": 21,
+          "page_size": 4096,
+          "max_page_count": 21
+        },
+        "failure": {
+          "error_code": 13,
+          "unchanged": true
+        },
+        "recovery": {
+          "data_preserved": true,
+          "exactly_once": true,
+          "integrity_ok": true,
+          "version": 2
+        }
+      },
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "timings": {
+        "detection_seconds": 0.0005844170009368099,
+        "automatic_cause_check_seconds": 0.00027604099886957556,
+        "recovery_check_seconds": 0.0025877080006466713
+      },
+      "children_exited_cleanly": true,
+      "repeat": 2
+    },
+    {
+      "scenario": "sqlite_full",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.054273083002044586,
+          "at": "2026-10-17T12:06:08.420292+00:00"
+        },
+        {
+          "event": "fault_applied",
+          "elapsed_seconds": 0.05467083300027298,
+          "at": "2026-10-17T12:06:08.420686+00:00"
+        },
+        {
+          "event": "failure_observed",
+          "elapsed_seconds": 0.05525266600307077,
+          "at": "2026-10-17T12:06:08.421268+00:00"
+        },
+        {
+          "event": "cause_evidence_verified",
+          "elapsed_seconds": 0.055498208002973115,
+          "at": "2026-10-17T12:06:08.421513+00:00"
+        },
+        {
+          "event": "recovery_action_started",
+          "elapsed_seconds": 0.055501791001006495,
+          "at": "2026-10-17T12:06:08.421517+00:00"
+        },
+        {
+          "event": "recovery_action_completed",
+          "elapsed_seconds": 0.05584195800111047,
+          "at": "2026-10-17T12:06:08.421857+00:00"
+        },
+        {
+          "event": "recovery_verified",
+          "elapsed_seconds": 0.05807587500021327,
+          "at": "2026-10-17T12:06:08.424091+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 0.06469229100184748,
+          "at": "2026-10-17T12:06:08.430708+00:00"
+        }
+      ],
+      "observations": {
+        "baseline": {
+          "snapshot_hash": "103f47fa95d19a0de0f3063655971f46e19a6827cb177176cb6aada1f9579546",
+          "page_count": 21,
+          "page_size": 4096
+        },
+        "capacity": {
+          "page_count": 21,
+          "page_size": 4096,
+          "max_page_count": 21
+        },
+        "failure": {
+          "error_code": 13,
+          "unchanged": true
+        },
+        "recovery": {
+          "data_preserved": true,
+          "exactly_once": true,
+          "integrity_ok": true,
+          "version": 2
+        }
+      },
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "timings": {
+        "detection_seconds": 0.0005818330027977936,
+        "automatic_cause_check_seconds": 0.0002455419999023434,
+        "recovery_check_seconds": 0.0025740839992067777
+      },
+      "children_exited_cleanly": true,
+      "repeat": 3
+    }
+  ],
+  "scope": "automated_local_known_faults_not_production_MTTR_RTO_RPO",
+  "started_at": "2026-10-17T12:05:47.037487+00:00",
+  "remaining_cases": 0,
+  "configuration": {
+    "scenarios": [
+      "dependency_timeout",
+      "sqlite_busy",
+      "sqlite_full"
+    ],
+    "repeats": 3,
+    "deadline_seconds": 180
+  },
+  "environment": {
+    "git_sha": "399baefe92b4ed39e559c2d0f8f902a03ef9b1a4",
+    "dirty": false,
+    "python": "3.11.9",
+    "sqlite": "3.45.1",
+    "httpx": "0.28.1",
+    "os": "Darwin",
+    "architecture": "arm64",
+    "source_hashes": {
+      "book-memo/tools/incident_recovery_lab.py": "f7f6bc38c7b02ccca25c36ead47c11370f16c01ecde4fb88642101ff90056abd",
+      "book-memo/tools/incident_sqlite.py": "c48205430c0900c8020ebe10bb2654492a3ee4f972cd2510d148e03858874664",
+      "book-memo/tools/incident_search.py": "0ac6f78b6b55d661307e11345dba6a3d17b04180c2cdded2ca12af45badf0a60",
+      "book-memo/app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+      "portal-web/app/services/global_search.py": "c934a33caa0e16113751fd8af161a4afbc97bc68960b2e1b90d1abb0f36b8500"
+    }
+  },
+  "finished_at": "2026-10-17T12:06:08.431125+00:00"
+}
