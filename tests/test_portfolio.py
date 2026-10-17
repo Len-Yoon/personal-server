@@ -242,6 +242,19 @@ class PortfolioRoutesTests(unittest.TestCase):
         self.assertIn("포트폴리오 관리자", response.text)
         self.assertEqual(response.headers["cache-control"], "no-store, no-cache, must-revalidate, max-age=0")
 
+    def test_public_host_login_cookie_is_secure_without_production_flag(self):
+        from fastapi.testclient import TestClient
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"APP_ENV": ""}):
+            with TestClient(self.app, base_url="http://portfolio.len.pe.kr") as client:
+                response = client.post(
+                    "/admin/login", data={"password": "test-portfolio-password"},
+                    headers={"Origin": "https://portfolio.len.pe.kr"}, follow_redirects=False,
+                )
+        self.assertEqual(response.status_code, 303)
+        self.assertIn("secure", response.headers["set-cookie"].lower())
+        self.assertIn("httponly", response.headers["set-cookie"].lower())
+
     def test_production_login_sets_random_scoped_session_cookie_and_allows_save(self):
         from fastapi.testclient import TestClient
 

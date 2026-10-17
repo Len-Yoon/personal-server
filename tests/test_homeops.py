@@ -1090,6 +1090,30 @@ class HomeOpsTests(unittest.TestCase):
         self.assertEqual(self.executor.all_diagnostics_calls, 0)
         self.assertEqual(self.executor.restart_all_calls, 0)
 
+    def test_admin_cookie_uses_secure_transport_without_production_flag(self):
+        from fastapi.testclient import TestClient
+        from app.services import security
+        cases = [
+            ("http://len.pe.kr", "https://len.pe.kr", True),
+            ("http://admin.len.pe.kr", "https://admin.len.pe.kr", True),
+            ("http://portal.len.pe.kr", "http://portal.len.pe.kr", True),
+            ("https://testserver", "https://testserver", True),
+            ("http://testserver", "http://testserver", False),
+        ]
+        with patch.dict(os.environ, {"APP_ENV": "", "ADMIN_STATUS_PASSWORD": "secret"}), \
+                patch.object(security, "LOG_PATH", Path(self.tempdir.name) / "security-events.txt"), \
+                patch.object(security, "AUTH_RATE_LIMIT_STATE_PATH", Path(self.tempdir.name) / "auth-state.json"):
+            app = self._portal_app()
+            with patch("app.routers.admin.get_homeops_service", return_value=self.service):
+                for base_url, origin, expected in cases:
+                    with self.subTest(base_url=base_url), TestClient(app, base_url=base_url) as client:
+                        response = client.post("/admin/status", data={"password": "secret"}, headers={"Origin": origin})
+                    self.assertEqual(response.status_code, 200)
+                    cookie = response.headers["set-cookie"].lower()
+                    self.assertEqual("secure" in cookie, expected)
+                    self.assertIn("httponly", cookie)
+                    self.assertIn("samesite=lax", cookie)
+
     def _portal_app(self):
         prepare_service_import("portal-web")
         import app.main as main

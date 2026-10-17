@@ -14,7 +14,7 @@ from app.services.security import (
     clear_auth_failures,
     create_auth_session,
     has_auth_session,
-    is_production_environment,
+    requires_secure_cookie,
     record_auth_failure,
 )
 
@@ -72,7 +72,7 @@ def portfolio_admin_login(request: Request, password: str = Form(default="")):
         PORTFOLIO_ADMIN_COOKIE,
         create_auth_session("portfolio_admin", PORTFOLIO_ADMIN_MAX_AGE),
         httponly=True,
-        secure=is_production_environment(),
+        secure=requires_secure_cookie(request),
         samesite="lax",
         path="/admin",
         max_age=PORTFOLIO_ADMIN_MAX_AGE,

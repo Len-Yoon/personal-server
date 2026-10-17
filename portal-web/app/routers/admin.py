@@ -21,7 +21,7 @@ from app.services.security import (
     clear_auth_failures,
     create_auth_session,
     has_auth_session,
-    is_production_environment,
+    requires_secure_cookie,
     record_auth_failure,
     security_status,
 )
@@ -133,7 +133,7 @@ def _render_authenticated_admin_status(request: Request, issue_homeops_session: 
             max_age=900,
             httponly=True,
             samesite="lax",
-            secure=is_production_environment(),
+            secure=requires_secure_cookie(request),
         )
     return _disable_cache(response)
 

@@ -157,6 +157,17 @@ def is_production_environment() -> bool:
     return os.getenv("APP_ENV", "").strip().lower() == "production"
 
 
+def requires_secure_cookie(request: Any) -> bool:
+    """Keep public HTTPS sessions secure even behind an HTTP reverse proxy."""
+    hostname = (request.url.hostname or "").lower()
+    return (
+        is_production_environment()
+        or request.url.scheme == "https"
+        or hostname == "len.pe.kr"
+        or hostname.endswith(".len.pe.kr")
+    )
+
+
 def read_recent_events(limit: int = 8) -> list[dict[str, Any]]:
     events = []
     for log_path in _list_daily_logs():
