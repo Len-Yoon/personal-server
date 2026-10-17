@@ -592,6 +592,16 @@ class RelayServiceTest(unittest.TestCase):
                 self.assertEqual(telegram.sent_messages, [])
                 self.assertEqual(k8s.data, {})
 
+    def test_disk_capacity_alerts_have_secret_free_korean_presentation(self):
+        relay = RelayService(allowed_chat_id="123", k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
+        for name, title in (("NodeDiskPressure", "노드 디스크 공간 압박"), ("PVCSpaceLow", "저장 공간 부족")):
+            message = relay._format_alert("firing", [{"labels": {"alertname": name,
+                "instance": "private-host", "node": "private-node", "persistentvolumeclaim": "private-volume"}}])
+            self.assertIn(title, message)
+            self.assertNotIn("private-host", message)
+            self.assertNotIn("private-node", message)
+            self.assertNotIn("private-volume", message)
+
     def test_news_collection_alert_has_korean_secret_free_presentation(self):
         relay = RelayService(
             allowed_chat_id="123",

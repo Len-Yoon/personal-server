@@ -1021,6 +1021,25 @@ class PortalUsabilityTests(unittest.TestCase):
         for missing in (None, {}, {"exists": True, "latest_name": "recent"}, "invalid"):
             self.assertEqual(module.backup_status_for_display(missing, now)["backup_at"], "미제공")
 
+    def test_cleanup_reason_and_unknown_counts_render_for_each_service(self):
+        from datetime import datetime, timezone
+        module = _load_service_contract_module("portal-web", "admin_status")
+        now = datetime(2026, 10, 14, tzinfo=timezone.utc)
+        for scope in ("portal", "book-memo", "youtube-memo", "crawler-worker", "car-care-db-only"):
+            with self.subTest(scope=scope):
+                value = dict(scope=scope, retention_status="failure", retention_reason="deletion_unconfirmed",
+                             retention_kept_count=None, retention_deleted_count=1, retention_reclaimed_bytes=1024,
+                             retention_completed_at="2026-10-13T00:00:00Z")
+                row = module.backup_status_for_display(value, now, scope)
+                self.assertEqual(row["retention_reason"], "삭제 확인 불가")
+                self.assertEqual(row["retention_kept_count"], "확인 필요")
+                self.assertEqual(row["retention_deleted_count"], "1")
+                self.assertEqual(row["retention_reclaimed_bytes"], "1024")
+                self.assertEqual(row["retention_at"], "2026-10-13 09:00")
+                self.assertEqual(row["backup_at"], "미제공")
+                value["retention_reason"] = "private-path token"
+                self.assertEqual(module.backup_status_for_display(value, now, scope)["retention_reason"], "확인 필요")
+
     def test_car_backup_display_keeps_skip_attempt_separate_from_proof(self):
         from datetime import datetime, timezone
         module = _load_service_contract_module("portal-web", "admin_status")
@@ -1043,7 +1062,7 @@ class PortalUsabilityTests(unittest.TestCase):
             {**evidence, "last_attempt_status": "retention_failed", "retention_status": "failure"}, now, "car-care-db-only")
         self.assertTrue(retention_failure["label"].startswith("정상"))
         self.assertEqual(retention_failure["attempt_status"], "백업 완료 · 정리 실패")
-        self.assertEqual(retention_failure["retention_status"], "확인 필요")
+        self.assertEqual(retention_failure["retention_status"], "실패 · 확인 필요")
         expired = module.backup_status_for_display(evidence, datetime(2026, 10, 21, tzinfo=timezone.utc), "car-care-db-only")
         self.assertEqual(expired["label"], "확인 필요 · 복원 증적 만료")
         for changes in ({"scope": "all"}, {"backup_completed_at": "bad"},
@@ -1098,7 +1117,7 @@ class PortalUsabilityTests(unittest.TestCase):
             for name in ("Portal", "Book", "YouTube", "Crawler", "차량 DB"):
                 self.assertIn(f"{name} 백업 상태", response.text)
             self.assertIn("최근 실행 2026-01-01 09:00 · 변경 없음", response.text)
-            self.assertIn("백업 보존 정리 정상 · 삭제 개수 2", response.text)
+            self.assertIn("백업 보존 정리 정상 · 정리 시각 미제공 · 보존 개수 확인 필요 · 확정 삭제 개수 2 · 확정 회수 공간 확인 필요 bytes", response.text)
             self.assertNotIn("must-not-display", response.text)
 
     def test_retry_only_calls_requested_source_and_escapes_results(self):

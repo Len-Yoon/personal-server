@@ -57,6 +57,8 @@ ALERT_PRESENTATIONS = {
     "PortalUnavailable": ("Portal 접속 불가", "웹사이트가 열리지 않을 수 있음"),
     "DeploymentUnavailable": ("서비스 실행 수 부족", "일부 기능이 정상 동작하지 않을 수 있음"),
     "PVCNotBound": ("데이터 저장소 연결 실패", "저장된 데이터에 접근하지 못할 수 있음"),
+    "NodeDiskPressure": ("노드 디스크 공간 압박", "데이터 저장과 서비스 실행에 영향을 줄 수 있음"),
+    "PVCSpaceLow": ("저장 공간 부족", "데이터 저장이 실패할 수 있음"),
     "PrometheusTargetDown": ("상태 수집 대상 응답 없음", "해당 서비스의 상태를 확인하지 못할 수 있음"),
     "NewsCollectionStale": ("뉴스 수집 지연 또는 실패", "최신 뉴스가 갱신되지 않을 수 있음"),
     "PortalHttp5xxErrorRateHigh": ("Portal HTTP 5xx 오류율 높음", "일부 요청이 정상 처리되지 않을 수 있음"),
@@ -1341,7 +1343,7 @@ def _read_backup_report(k8s_client: KubernetesClient) -> dict[str, str] | None:
         LOGGER.warning("backup_report_ignored reason=unavailable error_type=%s", type(exc).__name__)
         return None
     data = config_map.get("data")
-    if not isinstance(data, dict) or set(data) != BACKUP_REPORT_KEYS:
+    if not isinstance(data, dict) or set(data) - {"retention_summary"} != BACKUP_REPORT_KEYS:
         LOGGER.warning("backup_report_ignored reason=invalid_keys")
         return None
     if not all(isinstance(data[key], str) for key in BACKUP_REPORT_KEYS):
@@ -1641,7 +1643,7 @@ def _read_pvc_backup_report(k8s_client: KubernetesClient, service: str) -> dict[
             del _PVC_BACKUP_WARNING_AT[warning_key]
     data = config_map.get("data")
     if (not isinstance(data, dict) or not PVC_BACKUP_REPORT_KEYS <= set(data)
-            or set(data) - PVC_BACKUP_REPORT_KEYS - {"retention_status", "retention_completed_at"}
+            or set(data) - PVC_BACKUP_REPORT_KEYS - {"retention_status", "retention_completed_at", "retention_summary"}
             or not all(isinstance(value, str) for value in data.values())):
         LOGGER.warning("pvc_backup_report_ignored service=%s reason=invalid_schema", service)
         return None
@@ -1778,6 +1780,52 @@ CAR_BACKUP_STATE = "car-care-backup-state"
 CAR_BACKUP_SCOPE = "car-care-db-only"
 
 
+RETENTION_REASONS = frozenset({"none", "unknown", "cleanup_failed", "evidence_expired", "inventory_changed",
+    "listing_failed", "deletion_failed", "deletion_unconfirmed", "evidence_mismatch", "inventory_invalid",
+    "protected_restore_failed", "candidate_verification_failed"})
+
+
+def retention_summary_for_display(raw, now):
+    """Validate independent cleanup evidence and expose only bounded public fields."""
+    try:
+        if not isinstance(raw, str) or not 0 < len(raw.encode()) <= 2048:
+            return {}
+        def unique(pairs):
+            value = dict(pairs)
+            if len(value) != len(pairs):
+                raise ValueError("duplicate cleanup key")
+            return value
+        value = json.loads(raw, object_pairs_hook=unique)
+        keys = {"schema_version", "status", "finished_at", "kept_count", "deleted_count", "reclaimed_bytes"}
+        if (not isinstance(value, dict) or set(value) - {"reason"} != keys
+                or type(value["schema_version"]) is not int or value["schema_version"] != 1
+                or value["status"] not in {"success", "failure"}
+                or not _is_utc_timestamp(value["finished_at"])):
+            return {}
+        finished = datetime.strptime(value["finished_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        if finished > now:
+            return {}
+        reason = value.get("reason", "unknown")
+        if not isinstance(reason, str) or reason not in RETENTION_REASONS:
+            return {}
+        if "reason" in value and ((value["status"] == "success" and reason != "none")
+                                  or (value["status"] == "failure" and reason == "none")):
+            return {}
+        counts = ("kept_count", "deleted_count", "reclaimed_bytes")
+        for key in counts:
+            count = value[key]
+            limit = 2**53-1 if key == "reclaimed_bytes" else 10000
+            if count is None and value["status"] == "failure":
+                continue
+            if type(count) is not int or not 0 <= count <= limit:
+                return {}
+        return {"retention_status": value["status"], "retention_completed_at": value["finished_at"],
+                "retention_reason": reason,
+                **{"retention_"+key: value[key] for key in counts}}
+    except (ValueError, TypeError, OverflowError):
+        return {}
+
+
 def car_backup_summary(k8s_client, now):
     """Read bounded host evidence without publishing identifiers or credentials."""
     row = dict(scope=CAR_BACKUP_SCOPE, verified=False, status_reason='backup_unverified')
@@ -1833,14 +1881,27 @@ def car_backup_summary(k8s_client, now):
                 row['last_attempt_status'] = attempt['status']
         retention = data['retention']
         if retention is not None:
-            if (not isinstance(retention, dict) or set(retention) != {'status','finished_at','deleted_count','kept_count'}
+            if (not isinstance(retention, dict) or set(retention) - {'reclaimed_bytes', 'reason'} != {'status','finished_at','deleted_count','kept_count'}
                     or retention['status'] not in {'success','no_op','failure','uncertain','not_run'}
-                    or any(type(retention[k]) is not int or not 0 <= retention[k] <= 10000
+                    or any(not (retention[k] is None and retention['status'] == 'failure')
+                           and (type(retention[k]) is not int or not 0 <= retention[k] <= 10000)
                            for k in ['deleted_count','kept_count'])):
                 raise ValueError('invalid car retention')
             if timestamp(retention['finished_at']) > observed:
                 raise ValueError('future car retention')
-            row.update(retention_status=retention['status'], retention_deleted_count=retention['deleted_count'])
+            reason = retention.get('reason', 'unknown')
+            if not isinstance(reason, str) or reason not in RETENTION_REASONS:
+                raise ValueError('invalid car cleanup reason')
+            if 'reason' in retention and ((retention['status'] in {'success','no_op'} and reason != 'none')
+                                          or (retention['status'] == 'failure' and reason == 'none')):
+                raise ValueError('inconsistent car cleanup reason')
+            reclaimed = retention.get('reclaimed_bytes')
+            if reclaimed is not None and (type(reclaimed) is not int or not 0 <= reclaimed <= 2**53-1):
+                raise ValueError('invalid car reclaimed bytes')
+            row.update(retention_status=retention['status'], retention_deleted_count=retention['deleted_count'],
+                       retention_kept_count=None if retention['status'] == 'failure' else retention['kept_count'],
+                       retention_reclaimed_bytes=reclaimed,
+                       retention_completed_at=retention['finished_at'], retention_reason=reason)
         proof = data['proof']
         if proof is None:
             return row
@@ -1883,6 +1944,8 @@ def service_backup_summaries(k8s_client, now=None):
         try:
             doc = k8s_client.get_config_map(BOOK_BACKUP_NAMESPACE, spec.configmap)
             data = doc.get('data', {})
+            if isinstance(data, dict):
+                row.update(retention_summary_for_display(data.get('retention_summary'), now))
             if not isinstance(data, dict) or data.get('status') != 'completed' or data.get('stage') != 'completed' or data.get('lock_run_id') != '':
                 result[service] = row
                 continue
@@ -1910,6 +1973,15 @@ def service_backup_summaries(k8s_client, now=None):
         except (OSError, URLError, ValueError, TypeError, KeyError, OverflowError):
             pass  # One broken service must not hide the other services.
         result[service] = row
+    portal = {'scope': 'portal'}
+    try:
+        document = k8s_client.get_config_map(RELAY_NAMESPACE, BACKUP_STATUS_CONFIGMAP)
+        data = document.get('data', {})
+        if isinstance(data, dict):
+            portal.update(retention_summary_for_display(data.get('retention_summary'), now))
+    except (OSError, URLError, ValueError, TypeError, KeyError):
+        pass
+    result['portal'] = portal
     result['car-care'] = car_backup_summary(k8s_client, now)
     return result
 

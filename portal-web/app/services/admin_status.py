@@ -61,12 +61,14 @@ def format_recovery_events_for_display(events: list[dict[str, Any]]) -> list[dic
 def backup_status_for_display(backup: Any, now: datetime | None = None, expected_scope: str = "portal") -> dict[str, str]:
     """Display validated proof timestamps and allowlisted operation details."""
     result = {"label": "확인 필요 · 유효한 복원 증적 없음", "backup_at": "미제공",
-              "restore_at": "미제공", "expires_at": "미제공"}
+              "restore_at": "미제공", "expires_at": "미제공",
+              "retention_status": "확인 필요", "retention_at": "미제공", "retention_reason": "확인 필요",
+              "retention_kept_count": "확인 필요", "retention_deleted_count": "확인 필요",
+              "retention_reclaimed_bytes": "확인 필요"}
     if not isinstance(backup, dict) or backup.get("scope") != expected_scope:
         return result
     now = now or datetime.now(timezone.utc)
-    if expected_scope == "car-care-db-only":
-        result.update(_car_backup_operation_for_display(backup, now))
+    result.update(_backup_operation_for_display(backup, now))
     fields = ("backup_completed_at", "restore_verified_at", "evidence_expires_at")
     times = []
     formatted = {}
@@ -98,9 +100,10 @@ def backup_status_for_display(backup: Any, now: datetime | None = None, expected
     return result
 
 
-def _car_backup_operation_for_display(backup: dict[str, Any], now: datetime) -> dict[str, str]:
+def _backup_operation_for_display(backup: dict[str, Any], now: datetime) -> dict[str, str]:
     """Keep attempts separate from proof and do not echo arbitrary Relay values."""
     result: dict[str, str] = {}
+    backup = backup if isinstance(backup, dict) else {}
     if "last_attempt_at" in backup or "last_attempt_status" in backup:
         result.update(attempt_at="확인 필요", attempt_status="확인 필요")
         try:
@@ -115,16 +118,35 @@ def _car_backup_operation_for_display(backup: dict[str, Any], now: datetime) -> 
                     result["attempt_status"] = labels.get(status, "확인 필요")
         except (ValueError, OverflowError):
             pass
-    if "retention_status" in backup or "retention_deleted_count" in backup:
-        result.update(retention_status="확인 필요", retention_deleted_count="확인 필요")
-        status = backup.get("retention_status")
-        labels = {"success": "정상", "no_op": "대상 없음", "failure": "확인 필요",
-                  "uncertain": "확인 필요", "not_run": "미실행"}
-        if isinstance(status, str):
-            result["retention_status"] = labels.get(status, "확인 필요")
-        count = backup.get("retention_deleted_count")
-        if type(count) is int and 0 <= count <= 10_000:
-            result["retention_deleted_count"] = str(count)
+    result.update(retention_status="확인 필요", retention_deleted_count="확인 필요",
+                  retention_kept_count="확인 필요", retention_reclaimed_bytes="확인 필요",
+                  retention_at="미제공", retention_reason="확인 필요")
+    status = backup.get("retention_status")
+    labels = {"success": "정상", "no_op": "대상 없음", "failure": "실패 · 확인 필요",
+              "uncertain": "확인 필요", "not_run": "미실행"}
+    if isinstance(status, str):
+        result["retention_status"] = labels.get(status, "확인 필요")
+    reasons = {"none": "없음", "unknown": "확인 필요", "cleanup_failed": "정리 실패",
+               "evidence_expired": "최신 백업 증적 만료", "evidence_mismatch": "최신 백업 증적 불일치",
+               "inventory_changed": "원격 목록 변경", "listing_failed": "원격 목록 조회 실패",
+               "deletion_failed": "원격 삭제 명령 실패", "deletion_unconfirmed": "삭제 확인 불가",
+               "inventory_invalid": "원격 목록 검증 실패", "protected_restore_failed": "보존 백업 복원 검증 실패",
+               "candidate_verification_failed": "삭제 후보 검증 실패"}
+    reason = backup.get("retention_reason")
+    if isinstance(reason, str):
+        result["retention_reason"] = reasons.get(reason, "확인 필요")
+    for key in ("retention_deleted_count", "retention_kept_count", "retention_reclaimed_bytes"):
+        count = backup.get(key)
+        limit = 2**53-1 if key == "retention_reclaimed_bytes" else 10000
+        if type(count) is int and 0 <= count <= limit:
+            result[key] = str(count)
+    raw = backup.get("retention_completed_at")
+    try:
+        finished = datetime.fromisoformat(raw.replace("Z", "+00:00")) if isinstance(raw, str) else None
+        if finished is not None and finished.tzinfo is not None and finished <= now:
+            result["retention_at"] = finished.astimezone(SEOUL_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+    except (ValueError, OverflowError):
+        pass
     return result
 
 
@@ -135,9 +157,13 @@ def build_admin_status_context(
     service_backups: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     warnings = system_status.get("warnings") or []
+    portal_cleanup = (service_backups or {}).get("portal")
+    if not isinstance(portal_cleanup, dict) or portal_cleanup.get("scope") != "portal":
+        portal_cleanup = {}
     return {
         "system_status": system_status,
-        "backup_status": backup_status_for_display(system_status.get("backup")),
+        "backup_status": {**backup_status_for_display(system_status.get("backup")),
+                          **_backup_operation_for_display(portal_cleanup, datetime.now(timezone.utc))},
         "service_backups": [
             {"name": name, **backup_status_for_display((service_backups or {}).get(key), expected_scope=scope)}
             for key, name, scope in [("book", "Book", "book-memo"), ("youtube", "YouTube", "youtube-memo"), ("crawler", "Crawler", "crawler-worker"), ("car-care", "차량 DB", "car-care-db-only")]

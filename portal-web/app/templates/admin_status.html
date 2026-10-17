@@ -106,6 +106,7 @@
                 <div class="metric-tile"><span>마지막 복원 검증</span><strong>{{ backup_status.restore_at }}</strong></div>
                 <div class="metric-tile"><span>증적 유효 기한</span><strong>{{ backup_status.expires_at }}</strong></div>
             </div>
+            <p>백업 보존 정리 {{ backup_status.retention_status }} · 정리 시각 {{ backup_status.retention_at }} · 보존 개수 {{ backup_status.retention_kept_count }} · 확정 삭제 개수 {{ backup_status.retention_deleted_count }} · 확정 회수 공간 {{ backup_status.retention_reclaimed_bytes }} bytes · 사유 {{ backup_status.retention_reason }}</p>
             <p>각 서비스의 기존 증적을 개별 확인합니다. 미제공·만료는 정상으로 표시하지 않습니다.</p>
             {% for backup in service_backups %}
             <div class="ops-panel">
@@ -113,7 +114,7 @@
                 <p role="status">{{ backup.label }}</p>
                 <p>백업 {{ backup.backup_at }} · 복원 검증 {{ backup.restore_at }} · 유효 기한 {{ backup.expires_at }}</p>
                 {% if backup.attempt_at is defined %}<p>최근 실행 {{ backup.attempt_at }} · {{ backup.attempt_status }}</p>{% endif %}
-                {% if backup.retention_status is defined %}<p>백업 보존 정리 {{ backup.retention_status }} · 삭제 개수 {{ backup.retention_deleted_count }}</p>{% endif %}
+                <p>백업 보존 정리 {{ backup.retention_status }} · 정리 시각 {{ backup.retention_at }} · 보존 개수 {{ backup.retention_kept_count }} · 확정 삭제 개수 {{ backup.retention_deleted_count }} · 확정 회수 공간 {{ backup.retention_reclaimed_bytes }} bytes · 사유 {{ backup.retention_reason }}</p>
             </div>
             {% endfor %}
         </section>
