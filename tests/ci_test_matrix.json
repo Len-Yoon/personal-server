@@ -5,7 +5,7 @@
     "requirements": "portal-web/requirements.txt",
     "extra_packages": [],
     "pythonpath": "portal-web",
-    "test_command": "python3 -m unittest tests.test_file_access tests.test_portal_failure_boundaries tests.test_portal_dashboard tests.test_portal_security tests.test_homeops tests.test_homeops_managed_scope tests.test_homeops_notifier tests.test_portal_http_metrics tests.test_portal_k3s_bridge_contract tests.test_portfolio tests.test_file_management tests.test_news_bookmarks tests.test_portal_improvements"
+    "test_command": "python3 -m unittest tests.test_file_access tests.test_portal_failure_boundaries tests.test_portal_dashboard tests.test_portal_security tests.test_homeops tests.test_homeops_managed_scope tests.test_homeops_notifier tests.test_portal_http_metrics tests.test_portal_k3s_bridge_contract tests.test_portfolio tests.test_file_management tests.test_news_bookmarks tests.test_portal_improvements tests.test_search_performance_lab"
   },
   {
     "name": "system-agent",
