@@ -93,3 +93,25 @@ spec:
           annotations:
             summary: "뉴스 수집 지연 또는 연속 실패"
             description: "뉴스 수집이 최근 30분 동안 성공하지 않았거나 3회 연속 실패함"
+        - alert: NodeDiskPressure
+          expr: kube_node_status_condition{condition="DiskPressure",status="true"} == 1
+          for: 5m
+          labels:
+            severity: warning
+            sre_telegram: "true"
+          annotations:
+            summary: "노드 디스크 압박"
+            description: "K3s 노드 DiskPressure 상태가 5분 동안 지속됨"
+        - alert: PVCSpaceLow
+          expr: >-
+            (min by (namespace, persistentvolumeclaim) (kubelet_volume_stats_available_bytes{namespace=~"monitoring|personal-server"})
+            / max by (namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{namespace=~"monitoring|personal-server"}) < 0.15)
+            and on (namespace, persistentvolumeclaim)
+            (max by (namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{namespace=~"monitoring|personal-server"}) > 0)
+          for: 10m
+          labels:
+            severity: warning
+            sre_telegram: "true"
+          annotations:
+            summary: "PVC 가용 공간 부족"
+            description: "수집 가능한 PVC 지표에서 가용 공간 15% 미만 상태가 10분 동안 지속됨"

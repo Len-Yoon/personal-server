@@ -1,4 +1,8 @@
 import os
+import importlib.util
+import json
+from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 import subprocess
 import tempfile
 import unittest
@@ -9,6 +13,108 @@ ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "infra/k8s/tools"
 SCRIPT = ROOT / "infra/k8s/tools/monitoring-preflight.sh"
 DASHBOARD_MANIFEST = ROOT / "infra/k8s/monitoring/portal-http-dashboard.yaml"
+
+
+class MonitoringDiskAuditTests(unittest.TestCase):
+    def load_audit(self):
+        spec = importlib.util.spec_from_file_location("monitoring_disk_audit", TOOLS / "monitoring-disk-audit.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def fixture(self, *, missing_pvc=False, low=False, pressure=False, drift=False,
+                missing_label=False, missing_node=False, malformed=False):
+        module = self.load_audit()
+        calls = []
+        def fetch(arguments):
+            calls.append(arguments)
+            if arguments == ["get", "nodes", "-o", "json"]:
+                return {"items": [{"metadata": {"name": "fixture-node"}}]}
+            if arguments[:1] == ["-n"]:
+                return {"items": [{"metadata": {"name": "fixture-claim"}, "status": {"phase": "Bound"}}]}
+            self.assertEqual(arguments[:2], ["get", "--raw"])
+            parsed = urlsplit(arguments[2])
+            if parsed.path.endswith("/rules"):
+                rules = [{"type": "alerting", "name": name, "query": expression,
+                          "duration": seconds, "health": "ok",
+                          "labels": {"sre_telegram": "true", "severity": "warning"}}
+                         for name, expression, seconds in (("NodeDiskPressure", module.NODE_EXPRESSION, 300),
+                                                           ("PVCSpaceLow", module.PVC_EXPRESSION, 600))]
+                if drift:
+                    rules[1]["query"] = "vector(0)"
+                if missing_label:
+                    rules[1]["labels"].pop("sre_telegram")
+                return {"status": "success", "data": {"groups": [{"rules": rules}]}}
+            expression = parse_qs(parsed.query)["query"][0]
+            result = []
+            if expression.startswith("kubelet_volume_stats_"):
+                for namespace in module.NAMESPACES:
+                    if missing_pvc and namespace == "personal-server":
+                        continue
+                    value = 100 if "capacity_bytes" in expression else (14 if low else 80)
+                    result.append({"metric": {"namespace": namespace, "persistentvolumeclaim": "fixture-claim"},
+                                   "value": [0, "NaN" if malformed else str(value)]})
+            if expression.startswith("kube_node_status_condition") and not missing_node:
+                result = [{"metric": {"node": "fixture-node"}, "value": [0, "1" if pressure else "0"]}]
+            return {"status": "success", "data": {"resultType": "vector", "result": result}}
+        with patch.object(module, "read_json", side_effect=fetch):
+            report = module.audit()
+        return report, calls
+
+    def test_audit_distinguishes_observed_pvc_node_coverage_from_host_gap_and_delivery(self):
+        report, calls = self.fixture()
+        self.assertEqual(report["pvc"], {"bound": 2, "covered": 2, "low_space": 0, "metrics": "PASS", "rule": "PASS"})
+        self.assertEqual(report["node"]["metrics"], "PASS")
+        self.assertEqual(report["node"]["rule"], "PASS")
+        self.assertEqual(report["host_filesystem"]["coverage"], "GAP")
+        self.assertEqual(report["notification_delivery"], "NOT_TESTED")
+        self.assertEqual(report["monitoring_disk_audit"], "GAP")
+        self.assertTrue(all(arguments[:1] == ["get"] or arguments[2:3] == ["get"] for arguments in calls))
+
+    def test_missing_pvc_or_node_metrics_remain_gaps(self):
+        report, _ = self.fixture(missing_pvc=True)
+        self.assertEqual(report["pvc"]["covered"], 1)
+        self.assertEqual(report["pvc"]["metrics"], "GAP")
+        report, _ = self.fixture(missing_node=True)
+        self.assertEqual(report["node"]["metrics"], "GAP")
+
+    def test_loaded_rule_drift_or_missing_telegram_label_is_a_gap(self):
+        for options in ({"drift": True}, {"missing_label": True}):
+            report, _ = self.fixture(**options)
+            self.assertEqual(report["pvc"]["rule"], "GAP")
+
+    def test_audit_reports_observed_low_space_and_pressure_without_firing_alerts(self):
+        report, _ = self.fixture(low=True, pressure=True)
+        self.assertEqual(report["pvc"]["low_space"], 2)
+        self.assertEqual(report["node"]["disk_pressure"], 1)
+
+    def test_invalid_numeric_metric_evidence_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.fixture(malformed=True)
+
+    def test_rule_expressions_match_manifest_and_existing_telegram_route(self):
+        import yaml
+        module = self.load_audit()
+        manifest = yaml.safe_load((ROOT / "infra/k8s/sre-telegram/prometheus-rule.yaml").read_text())
+        rules = {rule["alert"]: rule for group in manifest["spec"]["groups"] for rule in group["rules"]}
+        for name, expression in (("NodeDiskPressure", module.NODE_EXPRESSION), ("PVCSpaceLow", module.PVC_EXPRESSION)):
+            self.assertEqual("".join(rules[name]["expr"].split()), "".join(expression.split()))
+            self.assertEqual(rules[name]["labels"]["sre_telegram"], "true")
+
+    def test_cli_failure_and_gaps_are_nonzero_without_private_output(self):
+        module = self.load_audit()
+        from contextlib import redirect_stdout
+        import io
+        for error in (ValueError("private-address"), AttributeError("private-evidence"),
+                      IndexError("private-sample"), subprocess.CalledProcessError(1, ["private-path"])):
+            output = io.StringIO()
+            with patch.object(module, "audit", side_effect=error), patch.object(module.sys, "argv", ["audit"]), redirect_stdout(output):
+                self.assertEqual(module.main(), 2)
+            self.assertNotIn("private", output.getvalue())
+            self.assertEqual(json.loads(output.getvalue())["monitoring_disk_audit"], "FAIL")
+        output = io.StringIO()
+        with patch.object(module, "audit", return_value={"monitoring_disk_audit": "GAP"}), patch.object(module.sys, "argv", ["audit"]), redirect_stdout(output):
+            self.assertEqual(module.main(), 1)
 
 
 class MonitoringPreflightBehaviorTest(unittest.TestCase):

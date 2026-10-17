@@ -364,7 +364,21 @@ class SreTelegramManifestContractTests(unittest.TestCase):
             },
         ]
 
-        self.assertEqual(len(rules), 8)
+        expected_rules.extend([
+            {
+                "alert": "NodeDiskPressure",
+                "expr": 'kube_node_status_condition{condition="DiskPressure",status="true"} == 1',
+                "for": "5m",
+                "labels": {"severity": "warning", "sre_telegram": "true"},
+            },
+            {
+                "alert": "PVCSpaceLow",
+                "expr": '(min by (namespace, persistentvolumeclaim) (kubelet_volume_stats_available_bytes{namespace=~"monitoring|personal-server"}) / max by (namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{namespace=~"monitoring|personal-server"}) < 0.15) and on (namespace, persistentvolumeclaim) (max by (namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes{namespace=~"monitoring|personal-server"}) > 0)',
+                "for": "10m",
+                "labels": {"severity": "warning", "sre_telegram": "true"},
+            },
+        ])
+        self.assertEqual(len(rules), 10)
         self.assertEqual(
             [{key: item[key] for key in ("alert", "expr", "labels")} for item in rules[:1]],
             [expected_rules[0]],
