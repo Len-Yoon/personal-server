@@ -1,0 +1,1470 @@
+{
+  "schema_version": 1,
+  "valid": true,
+  "reason": "ok",
+  "cases": [
+    {
+      "scenario": "redeploy",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "releases_verified",
+          "elapsed_seconds": 0.05634158300017589,
+          "at": "2026-10-17T12:39:34.649768+00:00"
+        },
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.3333138330017391,
+          "at": "2026-10-17T12:39:34.926744+00:00"
+        },
+        {
+          "event": "candidate_preflight_verified",
+          "elapsed_seconds": 0.33438787500199396,
+          "at": "2026-10-17T12:39:34.927818+00:00"
+        },
+        {
+          "event": "previous_stopped",
+          "elapsed_seconds": 0.5604400830015948,
+          "at": "2026-10-17T12:39:35.153879+00:00"
+        },
+        {
+          "event": "candidate_started",
+          "elapsed_seconds": 0.8047778330001165,
+          "at": "2026-10-17T12:39:35.398225+00:00"
+        },
+        {
+          "event": "candidate_ready",
+          "elapsed_seconds": 0.828110624999681,
+          "at": "2026-10-17T12:39:35.421556+00:00"
+        },
+        {
+          "event": "data_verified",
+          "elapsed_seconds": 0.8500041670013161,
+          "at": "2026-10-17T12:39:35.443450+00:00"
+        },
+        {
+          "event": "final_actor_stopped",
+          "elapsed_seconds": 1.054713833000278,
+          "at": "2026-10-17T12:39:35.648170+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 1.057687332999194,
+          "at": "2026-10-17T12:39:35.651139+00:00"
+        }
+      ],
+      "releases": {
+        "baseline": {
+          "files": {
+            "Dockerfile": "72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea",
+            "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/data/logs/.gitkeep": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/main.py": "1e68b054ef1b794e983cab313638494a1384de21e23e36ea26398755d732e041",
+            "app/services/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/services/book_search.py": "37b0c9c1be04a5d28a1b25df4269df4de6ca787139ce8043307cccb53f43cb3f",
+            "app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+            "app/services/database_errors.py": "42778a9e45a5ab89b5e91dd9bef197b0c5fc2d34cbf519aebedb145b79ed92f8",
+            "app/services/datetime_format.py": "5de929b3680ff89d58fd5f8a9eb7f97134d8cbf02ccdff990efb1d4979f4d405",
+            "app/services/export_service.py": "dfcd9f718eb3fdf0c7df55423ca65d99ed8e7867f5602bc466a160daa5342c2d",
+            "app/services/host_urls.py": "017732ec14cd83c934312a0afe200d182a350aff16e69cbe7765fabb091c934c",
+            "app/services/import_service.py": "8c1bbe113524e3f948bbf931b9a0c11b1d9cabc360f017ec394bb16e04337d8a",
+            "app/services/readiness.py": "007f451e68d06a748d4d64fac774e14436f614f37fb8e0c6a87d6d656012c739",
+            "app/services/toc_service.py": "d16b69432dc630110419ca05743608dd0ef1d5ec7ea69cd7f56a005f518ea8cb",
+            "app/services/write_safety.py": "f160ff88080a913a8c2861f96a1c58b469128c91e6b4129dbd0a1974a7fbc7e2",
+            "app/static/css/style.css": "5479b6125217f029241ece69b5991d9a0902a44a289afdf2d6378e1bf5ea1ee2",
+            "app/static/js/form-drafts.js": "b78d2b89983a1688a7868d876825a9e71bc5b6f1d712a3ea5d69bc6bd5616f08",
+            "app/static/js/import-library.js": "156333d2820220c3319a588b9591b4af1b4aeab8178843045ca73a08540a8851",
+            "app/static/js/memo-trash.js": "ee4c26143e1d87bc776386f34f33c4a6566624970ba97380a96003633d8c22fb",
+            "app/templates/auth_login.html": "a2b5b59b7969878c0473e47ca9716dddf019865d2e8b0a9b5c21917211b75b91",
+            "app/templates/book_detail.html": "cd39eb255c5686ce9708842b62e621aa89d040052d16ed0531975edf110f1e20",
+            "app/templates/home.html": "3a961f2eae5a382015adbe5102c1208cce9886085575433551775a98f9361e10",
+            "app/templates/import_library.html": "23104a9283c752d15b3e635e790ca41e12c709ded5d4d6e215928aa0eef22b11",
+            "requirements.txt": "2d9e7841e67b28b73a824b1ef617bfccc4edd23037db76740c9285835a2e9624"
+          },
+          "payload_digest": "dafd714a30158f94f85ac2c50a2c0b287f8b37d66a1c49ae21caef84839fb7ac",
+          "readiness_path": "/ready",
+          "release_digest": "af04dcb8d59d33827bd06c8fb4bfce86ba90e82fa237064f69b91c0065a56a66",
+          "release_id": "baseline",
+          "schema_version": 1,
+          "service": "book-memo",
+          "source_commit": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5"
+        },
+        "candidate": {
+          "files": {
+            "Dockerfile": "72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea",
+            "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/data/logs/.gitkeep": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/main.py": "1e68b054ef1b794e983cab313638494a1384de21e23e36ea26398755d732e041",
+            "app/services/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/services/book_search.py": "37b0c9c1be04a5d28a1b25df4269df4de6ca787139ce8043307cccb53f43cb3f",
+            "app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+            "app/services/database_errors.py": "42778a9e45a5ab89b5e91dd9bef197b0c5fc2d34cbf519aebedb145b79ed92f8",
+            "app/services/datetime_format.py": "5de929b3680ff89d58fd5f8a9eb7f97134d8cbf02ccdff990efb1d4979f4d405",
+            "app/services/export_service.py": "dfcd9f718eb3fdf0c7df55423ca65d99ed8e7867f5602bc466a160daa5342c2d",
+            "app/services/host_urls.py": "017732ec14cd83c934312a0afe200d182a350aff16e69cbe7765fabb091c934c",
+            "app/services/import_service.py": "8c1bbe113524e3f948bbf931b9a0c11b1d9cabc360f017ec394bb16e04337d8a",
+            "app/services/readiness.py": "007f451e68d06a748d4d64fac774e14436f614f37fb8e0c6a87d6d656012c739",
+            "app/services/toc_service.py": "d16b69432dc630110419ca05743608dd0ef1d5ec7ea69cd7f56a005f518ea8cb",
+            "app/services/write_safety.py": "f160ff88080a913a8c2861f96a1c58b469128c91e6b4129dbd0a1974a7fbc7e2",
+            "app/static/css/style.css": "5479b6125217f029241ece69b5991d9a0902a44a289afdf2d6378e1bf5ea1ee2",
+            "app/static/js/form-drafts.js": "b78d2b89983a1688a7868d876825a9e71bc5b6f1d712a3ea5d69bc6bd5616f08",
+            "app/static/js/import-library.js": "156333d2820220c3319a588b9591b4af1b4aeab8178843045ca73a08540a8851",
+            "app/static/js/memo-trash.js": "ee4c26143e1d87bc776386f34f33c4a6566624970ba97380a96003633d8c22fb",
+            "app/templates/auth_login.html": "a2b5b59b7969878c0473e47ca9716dddf019865d2e8b0a9b5c21917211b75b91",
+            "app/templates/book_detail.html": "cd39eb255c5686ce9708842b62e621aa89d040052d16ed0531975edf110f1e20",
+            "app/templates/home.html": "3a961f2eae5a382015adbe5102c1208cce9886085575433551775a98f9361e10",
+            "app/templates/import_library.html": "23104a9283c752d15b3e635e790ca41e12c709ded5d4d6e215928aa0eef22b11",
+            "requirements.txt": "2d9e7841e67b28b73a824b1ef617bfccc4edd23037db76740c9285835a2e9624"
+          },
+          "payload_digest": "dafd714a30158f94f85ac2c50a2c0b287f8b37d66a1c49ae21caef84839fb7ac",
+          "readiness_path": "/ready",
+          "release_digest": "eb0241969d8e0597f8e4ebd540a488ba095cdbf2ca6a624328d63c325b4d2139",
+          "release_id": "candidate",
+          "schema_version": 1,
+          "service": "book-memo",
+          "source_commit": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5"
+        }
+      },
+      "observations": {
+        "baseline_snapshot": {
+          "snapshot_hash": "b4772d0b962e70791857ed067aedf9ef04acaa11f73ba3792d83b049481fc35d",
+          "integrity_ok": true,
+          "fixture_valid": true,
+          "book_count": 1,
+          "memo_count": 1
+        },
+        "baseline_probe": {
+          "health_status": 200,
+          "readiness_status": 200,
+          "valid": true
+        },
+        "candidate_probe": {
+          "health_status": 200,
+          "readiness_status": 200,
+          "valid": true
+        }
+      },
+      "deployment_succeeded": true,
+      "rollback_succeeded": null,
+      "rollback_attempts": 0,
+      "starts": 2,
+      "active_release": "candidate",
+      "data_preserved": true,
+      "functional_read_ok": true,
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "children_exited_cleanly": true,
+      "timings": {
+        "total_seconds": 1.057694499999343
+      },
+      "repeat": 1
+    },
+    {
+      "scenario": "redeploy",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "releases_verified",
+          "elapsed_seconds": 0.06086137500096811,
+          "at": "2026-10-17T12:39:35.712287+00:00"
+        },
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.3306841670018912,
+          "at": "2026-10-17T12:39:35.982117+00:00"
+        },
+        {
+          "event": "candidate_preflight_verified",
+          "elapsed_seconds": 0.3317869169986807,
+          "at": "2026-10-17T12:39:35.983218+00:00"
+        },
+        {
+          "event": "previous_stopped",
+          "elapsed_seconds": 0.5690681670021149,
+          "at": "2026-10-17T12:39:36.220508+00:00"
+        },
+        {
+          "event": "candidate_started",
+          "elapsed_seconds": 0.8250942080012464,
+          "at": "2026-10-17T12:39:36.476542+00:00"
+        },
+        {
+          "event": "candidate_ready",
+          "elapsed_seconds": 0.8476889170015056,
+          "at": "2026-10-17T12:39:36.499136+00:00"
+        },
+        {
+          "event": "data_verified",
+          "elapsed_seconds": 0.8688299169989477,
+          "at": "2026-10-17T12:39:36.520277+00:00"
+        },
+        {
+          "event": "final_actor_stopped",
+          "elapsed_seconds": 1.0780955000009271,
+          "at": "2026-10-17T12:39:36.729550+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 1.0810214580014872,
+          "at": "2026-10-17T12:39:36.732475+00:00"
+        }
+      ],
+      "releases": {
+        "baseline": {
+          "files": {
+            "Dockerfile": "72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea",
+            "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/data/logs/.gitkeep": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/main.py": "1e68b054ef1b794e983cab313638494a1384de21e23e36ea26398755d732e041",
+            "app/services/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/services/book_search.py": "37b0c9c1be04a5d28a1b25df4269df4de6ca787139ce8043307cccb53f43cb3f",
+            "app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+            "app/services/database_errors.py": "42778a9e45a5ab89b5e91dd9bef197b0c5fc2d34cbf519aebedb145b79ed92f8",
+            "app/services/datetime_format.py": "5de929b3680ff89d58fd5f8a9eb7f97134d8cbf02ccdff990efb1d4979f4d405",
+            "app/services/export_service.py": "dfcd9f718eb3fdf0c7df55423ca65d99ed8e7867f5602bc466a160daa5342c2d",
+            "app/services/host_urls.py": "017732ec14cd83c934312a0afe200d182a350aff16e69cbe7765fabb091c934c",
+            "app/services/import_service.py": "8c1bbe113524e3f948bbf931b9a0c11b1d9cabc360f017ec394bb16e04337d8a",
+            "app/services/readiness.py": "007f451e68d06a748d4d64fac774e14436f614f37fb8e0c6a87d6d656012c739",
+            "app/services/toc_service.py": "d16b69432dc630110419ca05743608dd0ef1d5ec7ea69cd7f56a005f518ea8cb",
+            "app/services/write_safety.py": "f160ff88080a913a8c2861f96a1c58b469128c91e6b4129dbd0a1974a7fbc7e2",
+            "app/static/css/style.css": "5479b6125217f029241ece69b5991d9a0902a44a289afdf2d6378e1bf5ea1ee2",
+            "app/static/js/form-drafts.js": "b78d2b89983a1688a7868d876825a9e71bc5b6f1d712a3ea5d69bc6bd5616f08",
+            "app/static/js/import-library.js": "156333d2820220c3319a588b9591b4af1b4aeab8178843045ca73a08540a8851",
+            "app/static/js/memo-trash.js": "ee4c26143e1d87bc776386f34f33c4a6566624970ba97380a96003633d8c22fb",
+            "app/templates/auth_login.html": "a2b5b59b7969878c0473e47ca9716dddf019865d2e8b0a9b5c21917211b75b91",
+            "app/templates/book_detail.html": "cd39eb255c5686ce9708842b62e621aa89d040052d16ed0531975edf110f1e20",
+            "app/templates/home.html": "3a961f2eae5a382015adbe5102c1208cce9886085575433551775a98f9361e10",
+            "app/templates/import_library.html": "23104a9283c752d15b3e635e790ca41e12c709ded5d4d6e215928aa0eef22b11",
+            "requirements.txt": "2d9e7841e67b28b73a824b1ef617bfccc4edd23037db76740c9285835a2e9624"
+          },
+          "payload_digest": "dafd714a30158f94f85ac2c50a2c0b287f8b37d66a1c49ae21caef84839fb7ac",
+          "readiness_path": "/ready",
+          "release_digest": "af04dcb8d59d33827bd06c8fb4bfce86ba90e82fa237064f69b91c0065a56a66",
+          "release_id": "baseline",
+          "schema_version": 1,
+          "service": "book-memo",
+          "source_commit": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5"
+        },
+        "candidate": {
+          "files": {
+            "Dockerfile": "72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea",
+            "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/data/logs/.gitkeep": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/main.py": "1e68b054ef1b794e983cab313638494a1384de21e23e36ea26398755d732e041",
+            "app/services/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/services/book_search.py": "37b0c9c1be04a5d28a1b25df4269df4de6ca787139ce8043307cccb53f43cb3f",
+            "app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+            "app/services/database_errors.py": "42778a9e45a5ab89b5e91dd9bef197b0c5fc2d34cbf519aebedb145b79ed92f8",
+            "app/services/datetime_format.py": "5de929b3680ff89d58fd5f8a9eb7f97134d8cbf02ccdff990efb1d4979f4d405",
+            "app/services/export_service.py": "dfcd9f718eb3fdf0c7df55423ca65d99ed8e7867f5602bc466a160daa5342c2d",
+            "app/services/host_urls.py": "017732ec14cd83c934312a0afe200d182a350aff16e69cbe7765fabb091c934c",
+            "app/services/import_service.py": "8c1bbe113524e3f948bbf931b9a0c11b1d9cabc360f017ec394bb16e04337d8a",
+            "app/services/readiness.py": "007f451e68d06a748d4d64fac774e14436f614f37fb8e0c6a87d6d656012c739",
+            "app/services/toc_service.py": "d16b69432dc630110419ca05743608dd0ef1d5ec7ea69cd7f56a005f518ea8cb",
+            "app/services/write_safety.py": "f160ff88080a913a8c2861f96a1c58b469128c91e6b4129dbd0a1974a7fbc7e2",
+            "app/static/css/style.css": "5479b6125217f029241ece69b5991d9a0902a44a289afdf2d6378e1bf5ea1ee2",
+            "app/static/js/form-drafts.js": "b78d2b89983a1688a7868d876825a9e71bc5b6f1d712a3ea5d69bc6bd5616f08",
+            "app/static/js/import-library.js": "156333d2820220c3319a588b9591b4af1b4aeab8178843045ca73a08540a8851",
+            "app/static/js/memo-trash.js": "ee4c26143e1d87bc776386f34f33c4a6566624970ba97380a96003633d8c22fb",
+            "app/templates/auth_login.html": "a2b5b59b7969878c0473e47ca9716dddf019865d2e8b0a9b5c21917211b75b91",
+            "app/templates/book_detail.html": "cd39eb255c5686ce9708842b62e621aa89d040052d16ed0531975edf110f1e20",
+            "app/templates/home.html": "3a961f2eae5a382015adbe5102c1208cce9886085575433551775a98f9361e10",
+            "app/templates/import_library.html": "23104a9283c752d15b3e635e790ca41e12c709ded5d4d6e215928aa0eef22b11",
+            "requirements.txt": "2d9e7841e67b28b73a824b1ef617bfccc4edd23037db76740c9285835a2e9624"
+          },
+          "payload_digest": "dafd714a30158f94f85ac2c50a2c0b287f8b37d66a1c49ae21caef84839fb7ac",
+          "readiness_path": "/ready",
+          "release_digest": "eb0241969d8e0597f8e4ebd540a488ba095cdbf2ca6a624328d63c325b4d2139",
+          "release_id": "candidate",
+          "schema_version": 1,
+          "service": "book-memo",
+          "source_commit": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5"
+        }
+      },
+      "observations": {
+        "baseline_snapshot": {
+          "snapshot_hash": "35777f7ff5fa4a4888cd8b733e775ddb03b3993b1ce41e1558ef80bbe36651a4",
+          "integrity_ok": true,
+          "fixture_valid": true,
+          "book_count": 1,
+          "memo_count": 1
+        },
+        "baseline_probe": {
+          "health_status": 200,
+          "readiness_status": 200,
+          "valid": true
+        },
+        "candidate_probe": {
+          "health_status": 200,
+          "readiness_status": 200,
+          "valid": true
+        }
+      },
+      "deployment_succeeded": true,
+      "rollback_succeeded": null,
+      "rollback_attempts": 0,
+      "starts": 2,
+      "active_release": "candidate",
+      "data_preserved": true,
+      "functional_read_ok": true,
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "children_exited_cleanly": true,
+      "timings": {
+        "total_seconds": 1.0810256250006205
+      },
+      "repeat": 2
+    },
+    {
+      "scenario": "redeploy",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "releases_verified",
+          "elapsed_seconds": 0.05973579199780943,
+          "at": "2026-10-17T12:39:36.792526+00:00"
+        },
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.3423210000000836,
+          "at": "2026-10-17T12:39:37.075119+00:00"
+        },
+        {
+          "event": "candidate_preflight_verified",
+          "elapsed_seconds": 0.34352470899830223,
+          "at": "2026-10-17T12:39:37.076321+00:00"
+        },
+        {
+          "event": "previous_stopped",
+          "elapsed_seconds": 0.5611091669998132,
+          "at": "2026-10-17T12:39:37.293913+00:00"
+        },
+        {
+          "event": "candidate_started",
+          "elapsed_seconds": 0.822121999997762,
+          "at": "2026-10-17T12:39:37.554973+00:00"
+        },
+        {
+          "event": "candidate_ready",
+          "elapsed_seconds": 0.8446382920010365,
+          "at": "2026-10-17T12:39:37.577449+00:00"
+        },
+        {
+          "event": "data_verified",
+          "elapsed_seconds": 0.8668874590002815,
+          "at": "2026-10-17T12:39:37.599699+00:00"
+        },
+        {
+          "event": "final_actor_stopped",
+          "elapsed_seconds": 1.0763063339982182,
+          "at": "2026-10-17T12:39:37.809126+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 1.0793112499995914,
+          "at": "2026-10-17T12:39:37.812129+00:00"
+        }
+      ],
+      "releases": {
+        "baseline": {
+          "files": {
+            "Dockerfile": "72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea",
+            "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/data/logs/.gitkeep": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/main.py": "1e68b054ef1b794e983cab313638494a1384de21e23e36ea26398755d732e041",
+            "app/services/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/services/book_search.py": "37b0c9c1be04a5d28a1b25df4269df4de6ca787139ce8043307cccb53f43cb3f",
+            "app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+            "app/services/database_errors.py": "42778a9e45a5ab89b5e91dd9bef197b0c5fc2d34cbf519aebedb145b79ed92f8",
+            "app/services/datetime_format.py": "5de929b3680ff89d58fd5f8a9eb7f97134d8cbf02ccdff990efb1d4979f4d405",
+            "app/services/export_service.py": "dfcd9f718eb3fdf0c7df55423ca65d99ed8e7867f5602bc466a160daa5342c2d",
+            "app/services/host_urls.py": "017732ec14cd83c934312a0afe200d182a350aff16e69cbe7765fabb091c934c",
+            "app/services/import_service.py": "8c1bbe113524e3f948bbf931b9a0c11b1d9cabc360f017ec394bb16e04337d8a",
+            "app/services/readiness.py": "007f451e68d06a748d4d64fac774e14436f614f37fb8e0c6a87d6d656012c739",
+            "app/services/toc_service.py": "d16b69432dc630110419ca05743608dd0ef1d5ec7ea69cd7f56a005f518ea8cb",
+            "app/services/write_safety.py": "f160ff88080a913a8c2861f96a1c58b469128c91e6b4129dbd0a1974a7fbc7e2",
+            "app/static/css/style.css": "5479b6125217f029241ece69b5991d9a0902a44a289afdf2d6378e1bf5ea1ee2",
+            "app/static/js/form-drafts.js": "b78d2b89983a1688a7868d876825a9e71bc5b6f1d712a3ea5d69bc6bd5616f08",
+            "app/static/js/import-library.js": "156333d2820220c3319a588b9591b4af1b4aeab8178843045ca73a08540a8851",
+            "app/static/js/memo-trash.js": "ee4c26143e1d87bc776386f34f33c4a6566624970ba97380a96003633d8c22fb",
+            "app/templates/auth_login.html": "a2b5b59b7969878c0473e47ca9716dddf019865d2e8b0a9b5c21917211b75b91",
+            "app/templates/book_detail.html": "cd39eb255c5686ce9708842b62e621aa89d040052d16ed0531975edf110f1e20",
+            "app/templates/home.html": "3a961f2eae5a382015adbe5102c1208cce9886085575433551775a98f9361e10",
+            "app/templates/import_library.html": "23104a9283c752d15b3e635e790ca41e12c709ded5d4d6e215928aa0eef22b11",
+            "requirements.txt": "2d9e7841e67b28b73a824b1ef617bfccc4edd23037db76740c9285835a2e9624"
+          },
+          "payload_digest": "dafd714a30158f94f85ac2c50a2c0b287f8b37d66a1c49ae21caef84839fb7ac",
+          "readiness_path": "/ready",
+          "release_digest": "af04dcb8d59d33827bd06c8fb4bfce86ba90e82fa237064f69b91c0065a56a66",
+          "release_id": "baseline",
+          "schema_version": 1,
+          "service": "book-memo",
+          "source_commit": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5"
+        },
+        "candidate": {
+          "files": {
+            "Dockerfile": "72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea",
+            "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/data/logs/.gitkeep": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/main.py": "1e68b054ef1b794e983cab313638494a1384de21e23e36ea26398755d732e041",
+            "app/services/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/services/book_search.py": "37b0c9c1be04a5d28a1b25df4269df4de6ca787139ce8043307cccb53f43cb3f",
+            "app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+            "app/services/database_errors.py": "42778a9e45a5ab89b5e91dd9bef197b0c5fc2d34cbf519aebedb145b79ed92f8",
+            "app/services/datetime_format.py": "5de929b3680ff89d58fd5f8a9eb7f97134d8cbf02ccdff990efb1d4979f4d405",
+            "app/services/export_service.py": "dfcd9f718eb3fdf0c7df55423ca65d99ed8e7867f5602bc466a160daa5342c2d",
+            "app/services/host_urls.py": "017732ec14cd83c934312a0afe200d182a350aff16e69cbe7765fabb091c934c",
+            "app/services/import_service.py": "8c1bbe113524e3f948bbf931b9a0c11b1d9cabc360f017ec394bb16e04337d8a",
+            "app/services/readiness.py": "007f451e68d06a748d4d64fac774e14436f614f37fb8e0c6a87d6d656012c739",
+            "app/services/toc_service.py": "d16b69432dc630110419ca05743608dd0ef1d5ec7ea69cd7f56a005f518ea8cb",
+            "app/services/write_safety.py": "f160ff88080a913a8c2861f96a1c58b469128c91e6b4129dbd0a1974a7fbc7e2",
+            "app/static/css/style.css": "5479b6125217f029241ece69b5991d9a0902a44a289afdf2d6378e1bf5ea1ee2",
+            "app/static/js/form-drafts.js": "b78d2b89983a1688a7868d876825a9e71bc5b6f1d712a3ea5d69bc6bd5616f08",
+            "app/static/js/import-library.js": "156333d2820220c3319a588b9591b4af1b4aeab8178843045ca73a08540a8851",
+            "app/static/js/memo-trash.js": "ee4c26143e1d87bc776386f34f33c4a6566624970ba97380a96003633d8c22fb",
+            "app/templates/auth_login.html": "a2b5b59b7969878c0473e47ca9716dddf019865d2e8b0a9b5c21917211b75b91",
+            "app/templates/book_detail.html": "cd39eb255c5686ce9708842b62e621aa89d040052d16ed0531975edf110f1e20",
+            "app/templates/home.html": "3a961f2eae5a382015adbe5102c1208cce9886085575433551775a98f9361e10",
+            "app/templates/import_library.html": "23104a9283c752d15b3e635e790ca41e12c709ded5d4d6e215928aa0eef22b11",
+            "requirements.txt": "2d9e7841e67b28b73a824b1ef617bfccc4edd23037db76740c9285835a2e9624"
+          },
+          "payload_digest": "dafd714a30158f94f85ac2c50a2c0b287f8b37d66a1c49ae21caef84839fb7ac",
+          "readiness_path": "/ready",
+          "release_digest": "eb0241969d8e0597f8e4ebd540a488ba095cdbf2ca6a624328d63c325b4d2139",
+          "release_id": "candidate",
+          "schema_version": 1,
+          "service": "book-memo",
+          "source_commit": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5"
+        }
+      },
+      "observations": {
+        "baseline_snapshot": {
+          "snapshot_hash": "bd0660ea752759e0ca98007f4df099018e3bc31f2096d7263c8fbb65534e7963",
+          "integrity_ok": true,
+          "fixture_valid": true,
+          "book_count": 1,
+          "memo_count": 1
+        },
+        "baseline_probe": {
+          "health_status": 200,
+          "readiness_status": 200,
+          "valid": true
+        },
+        "candidate_probe": {
+          "health_status": 200,
+          "readiness_status": 200,
+          "valid": true
+        }
+      },
+      "deployment_succeeded": true,
+      "rollback_succeeded": null,
+      "rollback_attempts": 0,
+      "starts": 2,
+      "active_release": "candidate",
+      "data_preserved": true,
+      "functional_read_ok": true,
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "children_exited_cleanly": true,
+      "timings": {
+        "total_seconds": 1.079317458999867
+      },
+      "repeat": 3
+    },
+    {
+      "scenario": "readiness_failure",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "releases_verified",
+          "elapsed_seconds": 0.0574798749985348,
+          "at": "2026-10-17T12:39:37.870011+00:00"
+        },
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.3269809579978755,
+          "at": "2026-10-17T12:39:38.139520+00:00"
+        },
+        {
+          "event": "candidate_preflight_verified",
+          "elapsed_seconds": 0.3280954159999965,
+          "at": "2026-10-17T12:39:38.140633+00:00"
+        },
+        {
+          "event": "previous_stopped",
+          "elapsed_seconds": 0.5630971249993308,
+          "at": "2026-10-17T12:39:38.375644+00:00"
+        },
+        {
+          "event": "candidate_started",
+          "elapsed_seconds": 0.8048584159987513,
+          "at": "2026-10-17T12:39:38.617413+00:00"
+        },
+        {
+          "event": "candidate_readiness_rejected",
+          "elapsed_seconds": 0.8265251659977366,
+          "at": "2026-10-17T12:39:38.639078+00:00"
+        },
+        {
+          "event": "candidate_stopped",
+          "elapsed_seconds": 1.0650486659978924,
+          "at": "2026-10-17T12:39:38.877610+00:00"
+        },
+        {
+          "event": "rollback_started",
+          "elapsed_seconds": 1.065059458000178,
+          "at": "2026-10-17T12:39:38.877619+00:00"
+        },
+        {
+          "event": "rollback_ready",
+          "elapsed_seconds": 1.3392717499991704,
+          "at": "2026-10-17T12:39:39.151841+00:00"
+        },
+        {
+          "event": "data_verified",
+          "elapsed_seconds": 1.3652459160002763,
+          "at": "2026-10-17T12:39:39.177815+00:00"
+        },
+        {
+          "event": "rollback_verified",
+          "elapsed_seconds": 1.3652505409991136,
+          "at": "2026-10-17T12:39:39.177819+00:00"
+        },
+        {
+          "event": "final_actor_stopped",
+          "elapsed_seconds": 1.5708560829989437,
+          "at": "2026-10-17T12:39:39.383432+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 1.5736562499987485,
+          "at": "2026-10-17T12:39:39.386231+00:00"
+        }
+      ],
+      "releases": {
+        "baseline": {
+          "files": {
+            "Dockerfile": "72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea",
+            "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/data/logs/.gitkeep": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/main.py": "1e68b054ef1b794e983cab313638494a1384de21e23e36ea26398755d732e041",
+            "app/services/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/services/book_search.py": "37b0c9c1be04a5d28a1b25df4269df4de6ca787139ce8043307cccb53f43cb3f",
+            "app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+            "app/services/database_errors.py": "42778a9e45a5ab89b5e91dd9bef197b0c5fc2d34cbf519aebedb145b79ed92f8",
+            "app/services/datetime_format.py": "5de929b3680ff89d58fd5f8a9eb7f97134d8cbf02ccdff990efb1d4979f4d405",
+            "app/services/export_service.py": "dfcd9f718eb3fdf0c7df55423ca65d99ed8e7867f5602bc466a160daa5342c2d",
+            "app/services/host_urls.py": "017732ec14cd83c934312a0afe200d182a350aff16e69cbe7765fabb091c934c",
+            "app/services/import_service.py": "8c1bbe113524e3f948bbf931b9a0c11b1d9cabc360f017ec394bb16e04337d8a",
+            "app/services/readiness.py": "007f451e68d06a748d4d64fac774e14436f614f37fb8e0c6a87d6d656012c739",
+            "app/services/toc_service.py": "d16b69432dc630110419ca05743608dd0ef1d5ec7ea69cd7f56a005f518ea8cb",
+            "app/services/write_safety.py": "f160ff88080a913a8c2861f96a1c58b469128c91e6b4129dbd0a1974a7fbc7e2",
+            "app/static/css/style.css": "5479b6125217f029241ece69b5991d9a0902a44a289afdf2d6378e1bf5ea1ee2",
+            "app/static/js/form-drafts.js": "b78d2b89983a1688a7868d876825a9e71bc5b6f1d712a3ea5d69bc6bd5616f08",
+            "app/static/js/import-library.js": "156333d2820220c3319a588b9591b4af1b4aeab8178843045ca73a08540a8851",
+            "app/static/js/memo-trash.js": "ee4c26143e1d87bc776386f34f33c4a6566624970ba97380a96003633d8c22fb",
+            "app/templates/auth_login.html": "a2b5b59b7969878c0473e47ca9716dddf019865d2e8b0a9b5c21917211b75b91",
+            "app/templates/book_detail.html": "cd39eb255c5686ce9708842b62e621aa89d040052d16ed0531975edf110f1e20",
+            "app/templates/home.html": "3a961f2eae5a382015adbe5102c1208cce9886085575433551775a98f9361e10",
+            "app/templates/import_library.html": "23104a9283c752d15b3e635e790ca41e12c709ded5d4d6e215928aa0eef22b11",
+            "requirements.txt": "2d9e7841e67b28b73a824b1ef617bfccc4edd23037db76740c9285835a2e9624"
+          },
+          "payload_digest": "dafd714a30158f94f85ac2c50a2c0b287f8b37d66a1c49ae21caef84839fb7ac",
+          "readiness_path": "/ready",
+          "release_digest": "af04dcb8d59d33827bd06c8fb4bfce86ba90e82fa237064f69b91c0065a56a66",
+          "release_id": "baseline",
+          "schema_version": 1,
+          "service": "book-memo",
+          "source_commit": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5"
+        },
+        "candidate": {
+          "files": {
+            "Dockerfile": "72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea",
+            "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/data/logs/.gitkeep": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/main.py": "1e68b054ef1b794e983cab313638494a1384de21e23e36ea26398755d732e041",
+            "app/services/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/services/book_search.py": "37b0c9c1be04a5d28a1b25df4269df4de6ca787139ce8043307cccb53f43cb3f",
+            "app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+            "app/services/database_errors.py": "42778a9e45a5ab89b5e91dd9bef197b0c5fc2d34cbf519aebedb145b79ed92f8",
+            "app/services/datetime_format.py": "5de929b3680ff89d58fd5f8a9eb7f97134d8cbf02ccdff990efb1d4979f4d405",
+            "app/services/export_service.py": "dfcd9f718eb3fdf0c7df55423ca65d99ed8e7867f5602bc466a160daa5342c2d",
+            "app/services/host_urls.py": "017732ec14cd83c934312a0afe200d182a350aff16e69cbe7765fabb091c934c",
+            "app/services/import_service.py": "8c1bbe113524e3f948bbf931b9a0c11b1d9cabc360f017ec394bb16e04337d8a",
+            "app/services/readiness.py": "007f451e68d06a748d4d64fac774e14436f614f37fb8e0c6a87d6d656012c739",
+            "app/services/toc_service.py": "d16b69432dc630110419ca05743608dd0ef1d5ec7ea69cd7f56a005f518ea8cb",
+            "app/services/write_safety.py": "f160ff88080a913a8c2861f96a1c58b469128c91e6b4129dbd0a1974a7fbc7e2",
+            "app/static/css/style.css": "5479b6125217f029241ece69b5991d9a0902a44a289afdf2d6378e1bf5ea1ee2",
+            "app/static/js/form-drafts.js": "b78d2b89983a1688a7868d876825a9e71bc5b6f1d712a3ea5d69bc6bd5616f08",
+            "app/static/js/import-library.js": "156333d2820220c3319a588b9591b4af1b4aeab8178843045ca73a08540a8851",
+            "app/static/js/memo-trash.js": "ee4c26143e1d87bc776386f34f33c4a6566624970ba97380a96003633d8c22fb",
+            "app/templates/auth_login.html": "a2b5b59b7969878c0473e47ca9716dddf019865d2e8b0a9b5c21917211b75b91",
+            "app/templates/book_detail.html": "cd39eb255c5686ce9708842b62e621aa89d040052d16ed0531975edf110f1e20",
+            "app/templates/home.html": "3a961f2eae5a382015adbe5102c1208cce9886085575433551775a98f9361e10",
+            "app/templates/import_library.html": "23104a9283c752d15b3e635e790ca41e12c709ded5d4d6e215928aa0eef22b11",
+            "requirements.txt": "2d9e7841e67b28b73a824b1ef617bfccc4edd23037db76740c9285835a2e9624"
+          },
+          "payload_digest": "dafd714a30158f94f85ac2c50a2c0b287f8b37d66a1c49ae21caef84839fb7ac",
+          "readiness_path": "/__lab_missing_readiness",
+          "release_digest": "5603e19303edc305307995a995f4bd6ff4433314e77e80b3795bec6b4eb4deb5",
+          "release_id": "unready",
+          "schema_version": 1,
+          "service": "book-memo",
+          "source_commit": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5"
+        }
+      },
+      "observations": {
+        "baseline_snapshot": {
+          "snapshot_hash": "68af09d9962e53d044d71ac56454b64054eebd25db3312d52ef0fc6bb82b39b4",
+          "integrity_ok": true,
+          "fixture_valid": true,
+          "book_count": 1,
+          "memo_count": 1
+        },
+        "baseline_probe": {
+          "health_status": 200,
+          "readiness_status": 200,
+          "valid": true
+        },
+        "candidate_probe": {
+          "health_status": 200,
+          "readiness_status": 404,
+          "valid": false
+        },
+        "rollback_probe": {
+          "health_status": 200,
+          "readiness_status": 200,
+          "valid": true
+        }
+      },
+      "deployment_succeeded": false,
+      "rollback_succeeded": true,
+      "rollback_attempts": 1,
+      "starts": 3,
+      "active_release": "baseline",
+      "data_preserved": true,
+      "functional_read_ok": true,
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "children_exited_cleanly": true,
+      "timings": {
+        "total_seconds": 1.573660457997903
+      },
+      "repeat": 1
+    },
+    {
+      "scenario": "readiness_failure",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "releases_verified",
+          "elapsed_seconds": 0.05857612500039977,
+          "at": "2026-10-17T12:39:39.445315+00:00"
+        },
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.3301791249978123,
+          "at": "2026-10-17T12:39:39.716926+00:00"
+        },
+        {
+          "event": "candidate_preflight_verified",
+          "elapsed_seconds": 0.3313046250004845,
+          "at": "2026-10-17T12:39:39.718050+00:00"
+        },
+        {
+          "event": "previous_stopped",
+          "elapsed_seconds": 0.543399624999438,
+          "at": "2026-10-17T12:39:39.930154+00:00"
+        },
+        {
+          "event": "candidate_started",
+          "elapsed_seconds": 0.7870052920006856,
+          "at": "2026-10-17T12:39:40.173768+00:00"
+        },
+        {
+          "event": "candidate_readiness_rejected",
+          "elapsed_seconds": 0.8090573749977921,
+          "at": "2026-10-17T12:39:40.195817+00:00"
+        },
+        {
+          "event": "candidate_stopped",
+          "elapsed_seconds": 1.0208591249975143,
+          "at": "2026-10-17T12:39:40.407627+00:00"
+        },
+        {
+          "event": "rollback_started",
+          "elapsed_seconds": 1.020870249998552,
+          "at": "2026-10-17T12:39:40.407636+00:00"
+        },
+        {
+          "event": "rollback_ready",
+          "elapsed_seconds": 1.3253052920008486,
+          "at": "2026-10-17T12:39:40.712082+00:00"
+        },
+        {
+          "event": "data_verified",
+          "elapsed_seconds": 1.3469702919974225,
+          "at": "2026-10-17T12:39:40.733746+00:00"
+        },
+        {
+          "event": "rollback_verified",
+          "elapsed_seconds": 1.346974959000363,
+          "at": "2026-10-17T12:39:40.733750+00:00"
+        },
+        {
+          "event": "final_actor_stopped",
+          "elapsed_seconds": 1.556420041997626,
+          "at": "2026-10-17T12:39:40.943204+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 1.5592601249991276,
+          "at": "2026-10-17T12:39:40.946042+00:00"
+        }
+      ],
+      "releases": {
+        "baseline": {
+          "files": {
+            "Dockerfile": "72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea",
+            "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/data/logs/.gitkeep": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/main.py": "1e68b054ef1b794e983cab313638494a1384de21e23e36ea26398755d732e041",
+            "app/services/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/services/book_search.py": "37b0c9c1be04a5d28a1b25df4269df4de6ca787139ce8043307cccb53f43cb3f",
+            "app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+            "app/services/database_errors.py": "42778a9e45a5ab89b5e91dd9bef197b0c5fc2d34cbf519aebedb145b79ed92f8",
+            "app/services/datetime_format.py": "5de929b3680ff89d58fd5f8a9eb7f97134d8cbf02ccdff990efb1d4979f4d405",
+            "app/services/export_service.py": "dfcd9f718eb3fdf0c7df55423ca65d99ed8e7867f5602bc466a160daa5342c2d",
+            "app/services/host_urls.py": "017732ec14cd83c934312a0afe200d182a350aff16e69cbe7765fabb091c934c",
+            "app/services/import_service.py": "8c1bbe113524e3f948bbf931b9a0c11b1d9cabc360f017ec394bb16e04337d8a",
+            "app/services/readiness.py": "007f451e68d06a748d4d64fac774e14436f614f37fb8e0c6a87d6d656012c739",
+            "app/services/toc_service.py": "d16b69432dc630110419ca05743608dd0ef1d5ec7ea69cd7f56a005f518ea8cb",
+            "app/services/write_safety.py": "f160ff88080a913a8c2861f96a1c58b469128c91e6b4129dbd0a1974a7fbc7e2",
+            "app/static/css/style.css": "5479b6125217f029241ece69b5991d9a0902a44a289afdf2d6378e1bf5ea1ee2",
+            "app/static/js/form-drafts.js": "b78d2b89983a1688a7868d876825a9e71bc5b6f1d712a3ea5d69bc6bd5616f08",
+            "app/static/js/import-library.js": "156333d2820220c3319a588b9591b4af1b4aeab8178843045ca73a08540a8851",
+            "app/static/js/memo-trash.js": "ee4c26143e1d87bc776386f34f33c4a6566624970ba97380a96003633d8c22fb",
+            "app/templates/auth_login.html": "a2b5b59b7969878c0473e47ca9716dddf019865d2e8b0a9b5c21917211b75b91",
+            "app/templates/book_detail.html": "cd39eb255c5686ce9708842b62e621aa89d040052d16ed0531975edf110f1e20",
+            "app/templates/home.html": "3a961f2eae5a382015adbe5102c1208cce9886085575433551775a98f9361e10",
+            "app/templates/import_library.html": "23104a9283c752d15b3e635e790ca41e12c709ded5d4d6e215928aa0eef22b11",
+            "requirements.txt": "2d9e7841e67b28b73a824b1ef617bfccc4edd23037db76740c9285835a2e9624"
+          },
+          "payload_digest": "dafd714a30158f94f85ac2c50a2c0b287f8b37d66a1c49ae21caef84839fb7ac",
+          "readiness_path": "/ready",
+          "release_digest": "af04dcb8d59d33827bd06c8fb4bfce86ba90e82fa237064f69b91c0065a56a66",
+          "release_id": "baseline",
+          "schema_version": 1,
+          "service": "book-memo",
+          "source_commit": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5"
+        },
+        "candidate": {
+          "files": {
+            "Dockerfile": "72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea",
+            "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/data/logs/.gitkeep": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/main.py": "1e68b054ef1b794e983cab313638494a1384de21e23e36ea26398755d732e041",
+            "app/services/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/services/book_search.py": "37b0c9c1be04a5d28a1b25df4269df4de6ca787139ce8043307cccb53f43cb3f",
+            "app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+            "app/services/database_errors.py": "42778a9e45a5ab89b5e91dd9bef197b0c5fc2d34cbf519aebedb145b79ed92f8",
+            "app/services/datetime_format.py": "5de929b3680ff89d58fd5f8a9eb7f97134d8cbf02ccdff990efb1d4979f4d405",
+            "app/services/export_service.py": "dfcd9f718eb3fdf0c7df55423ca65d99ed8e7867f5602bc466a160daa5342c2d",
+            "app/services/host_urls.py": "017732ec14cd83c934312a0afe200d182a350aff16e69cbe7765fabb091c934c",
+            "app/services/import_service.py": "8c1bbe113524e3f948bbf931b9a0c11b1d9cabc360f017ec394bb16e04337d8a",
+            "app/services/readiness.py": "007f451e68d06a748d4d64fac774e14436f614f37fb8e0c6a87d6d656012c739",
+            "app/services/toc_service.py": "d16b69432dc630110419ca05743608dd0ef1d5ec7ea69cd7f56a005f518ea8cb",
+            "app/services/write_safety.py": "f160ff88080a913a8c2861f96a1c58b469128c91e6b4129dbd0a1974a7fbc7e2",
+            "app/static/css/style.css": "5479b6125217f029241ece69b5991d9a0902a44a289afdf2d6378e1bf5ea1ee2",
+            "app/static/js/form-drafts.js": "b78d2b89983a1688a7868d876825a9e71bc5b6f1d712a3ea5d69bc6bd5616f08",
+            "app/static/js/import-library.js": "156333d2820220c3319a588b9591b4af1b4aeab8178843045ca73a08540a8851",
+            "app/static/js/memo-trash.js": "ee4c26143e1d87bc776386f34f33c4a6566624970ba97380a96003633d8c22fb",
+            "app/templates/auth_login.html": "a2b5b59b7969878c0473e47ca9716dddf019865d2e8b0a9b5c21917211b75b91",
+            "app/templates/book_detail.html": "cd39eb255c5686ce9708842b62e621aa89d040052d16ed0531975edf110f1e20",
+            "app/templates/home.html": "3a961f2eae5a382015adbe5102c1208cce9886085575433551775a98f9361e10",
+            "app/templates/import_library.html": "23104a9283c752d15b3e635e790ca41e12c709ded5d4d6e215928aa0eef22b11",
+            "requirements.txt": "2d9e7841e67b28b73a824b1ef617bfccc4edd23037db76740c9285835a2e9624"
+          },
+          "payload_digest": "dafd714a30158f94f85ac2c50a2c0b287f8b37d66a1c49ae21caef84839fb7ac",
+          "readiness_path": "/__lab_missing_readiness",
+          "release_digest": "5603e19303edc305307995a995f4bd6ff4433314e77e80b3795bec6b4eb4deb5",
+          "release_id": "unready",
+          "schema_version": 1,
+          "service": "book-memo",
+          "source_commit": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5"
+        }
+      },
+      "observations": {
+        "baseline_snapshot": {
+          "snapshot_hash": "86881aeb01287292f9a68acbe6c36f81b401ee87e389af55caa7708834494bf7",
+          "integrity_ok": true,
+          "fixture_valid": true,
+          "book_count": 1,
+          "memo_count": 1
+        },
+        "baseline_probe": {
+          "health_status": 200,
+          "readiness_status": 200,
+          "valid": true
+        },
+        "candidate_probe": {
+          "health_status": 200,
+          "readiness_status": 404,
+          "valid": false
+        },
+        "rollback_probe": {
+          "health_status": 200,
+          "readiness_status": 200,
+          "valid": true
+        }
+      },
+      "deployment_succeeded": false,
+      "rollback_succeeded": true,
+      "rollback_attempts": 1,
+      "starts": 3,
+      "active_release": "baseline",
+      "data_preserved": true,
+      "functional_read_ok": true,
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "children_exited_cleanly": true,
+      "timings": {
+        "total_seconds": 1.5592643339987262
+      },
+      "repeat": 2
+    },
+    {
+      "scenario": "readiness_failure",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "releases_verified",
+          "elapsed_seconds": 0.05704433400023845,
+          "at": "2026-10-17T12:39:41.003674+00:00"
+        },
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.32599558400033857,
+          "at": "2026-10-17T12:39:41.272633+00:00"
+        },
+        {
+          "event": "candidate_preflight_verified",
+          "elapsed_seconds": 0.32708562500192784,
+          "at": "2026-10-17T12:39:41.273721+00:00"
+        },
+        {
+          "event": "previous_stopped",
+          "elapsed_seconds": 0.559586292001768,
+          "at": "2026-10-17T12:39:41.506231+00:00"
+        },
+        {
+          "event": "candidate_started",
+          "elapsed_seconds": 0.8050742920022458,
+          "at": "2026-10-17T12:39:41.751727+00:00"
+        },
+        {
+          "event": "candidate_readiness_rejected",
+          "elapsed_seconds": 0.8310635000016191,
+          "at": "2026-10-17T12:39:41.777714+00:00"
+        },
+        {
+          "event": "candidate_stopped",
+          "elapsed_seconds": 1.0544003750001139,
+          "at": "2026-10-17T12:39:42.001060+00:00"
+        },
+        {
+          "event": "rollback_started",
+          "elapsed_seconds": 1.0544130000016594,
+          "at": "2026-10-17T12:39:42.001070+00:00"
+        },
+        {
+          "event": "rollback_ready",
+          "elapsed_seconds": 1.3228201670026465,
+          "at": "2026-10-17T12:39:42.269487+00:00"
+        },
+        {
+          "event": "data_verified",
+          "elapsed_seconds": 1.3446980840017204,
+          "at": "2026-10-17T12:39:42.291365+00:00"
+        },
+        {
+          "event": "rollback_verified",
+          "elapsed_seconds": 1.3447051250004733,
+          "at": "2026-10-17T12:39:42.291371+00:00"
+        },
+        {
+          "event": "final_actor_stopped",
+          "elapsed_seconds": 1.554120500000863,
+          "at": "2026-10-17T12:39:42.500795+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 1.5570792500002426,
+          "at": "2026-10-17T12:39:42.503752+00:00"
+        }
+      ],
+      "releases": {
+        "baseline": {
+          "files": {
+            "Dockerfile": "72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea",
+            "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/data/logs/.gitkeep": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/main.py": "1e68b054ef1b794e983cab313638494a1384de21e23e36ea26398755d732e041",
+            "app/services/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/services/book_search.py": "37b0c9c1be04a5d28a1b25df4269df4de6ca787139ce8043307cccb53f43cb3f",
+            "app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+            "app/services/database_errors.py": "42778a9e45a5ab89b5e91dd9bef197b0c5fc2d34cbf519aebedb145b79ed92f8",
+            "app/services/datetime_format.py": "5de929b3680ff89d58fd5f8a9eb7f97134d8cbf02ccdff990efb1d4979f4d405",
+            "app/services/export_service.py": "dfcd9f718eb3fdf0c7df55423ca65d99ed8e7867f5602bc466a160daa5342c2d",
+            "app/services/host_urls.py": "017732ec14cd83c934312a0afe200d182a350aff16e69cbe7765fabb091c934c",
+            "app/services/import_service.py": "8c1bbe113524e3f948bbf931b9a0c11b1d9cabc360f017ec394bb16e04337d8a",
+            "app/services/readiness.py": "007f451e68d06a748d4d64fac774e14436f614f37fb8e0c6a87d6d656012c739",
+            "app/services/toc_service.py": "d16b69432dc630110419ca05743608dd0ef1d5ec7ea69cd7f56a005f518ea8cb",
+            "app/services/write_safety.py": "f160ff88080a913a8c2861f96a1c58b469128c91e6b4129dbd0a1974a7fbc7e2",
+            "app/static/css/style.css": "5479b6125217f029241ece69b5991d9a0902a44a289afdf2d6378e1bf5ea1ee2",
+            "app/static/js/form-drafts.js": "b78d2b89983a1688a7868d876825a9e71bc5b6f1d712a3ea5d69bc6bd5616f08",
+            "app/static/js/import-library.js": "156333d2820220c3319a588b9591b4af1b4aeab8178843045ca73a08540a8851",
+            "app/static/js/memo-trash.js": "ee4c26143e1d87bc776386f34f33c4a6566624970ba97380a96003633d8c22fb",
+            "app/templates/auth_login.html": "a2b5b59b7969878c0473e47ca9716dddf019865d2e8b0a9b5c21917211b75b91",
+            "app/templates/book_detail.html": "cd39eb255c5686ce9708842b62e621aa89d040052d16ed0531975edf110f1e20",
+            "app/templates/home.html": "3a961f2eae5a382015adbe5102c1208cce9886085575433551775a98f9361e10",
+            "app/templates/import_library.html": "23104a9283c752d15b3e635e790ca41e12c709ded5d4d6e215928aa0eef22b11",
+            "requirements.txt": "2d9e7841e67b28b73a824b1ef617bfccc4edd23037db76740c9285835a2e9624"
+          },
+          "payload_digest": "dafd714a30158f94f85ac2c50a2c0b287f8b37d66a1c49ae21caef84839fb7ac",
+          "readiness_path": "/ready",
+          "release_digest": "af04dcb8d59d33827bd06c8fb4bfce86ba90e82fa237064f69b91c0065a56a66",
+          "release_id": "baseline",
+          "schema_version": 1,
+          "service": "book-memo",
+          "source_commit": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5"
+        },
+        "candidate": {
+          "files": {
+            "Dockerfile": "72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea",
+            "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/data/logs/.gitkeep": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/main.py": "1e68b054ef1b794e983cab313638494a1384de21e23e36ea26398755d732e041",
+            "app/services/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/services/book_search.py": "37b0c9c1be04a5d28a1b25df4269df4de6ca787139ce8043307cccb53f43cb3f",
+            "app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+            "app/services/database_errors.py": "42778a9e45a5ab89b5e91dd9bef197b0c5fc2d34cbf519aebedb145b79ed92f8",
+            "app/services/datetime_format.py": "5de929b3680ff89d58fd5f8a9eb7f97134d8cbf02ccdff990efb1d4979f4d405",
+            "app/services/export_service.py": "dfcd9f718eb3fdf0c7df55423ca65d99ed8e7867f5602bc466a160daa5342c2d",
+            "app/services/host_urls.py": "017732ec14cd83c934312a0afe200d182a350aff16e69cbe7765fabb091c934c",
+            "app/services/import_service.py": "8c1bbe113524e3f948bbf931b9a0c11b1d9cabc360f017ec394bb16e04337d8a",
+            "app/services/readiness.py": "007f451e68d06a748d4d64fac774e14436f614f37fb8e0c6a87d6d656012c739",
+            "app/services/toc_service.py": "d16b69432dc630110419ca05743608dd0ef1d5ec7ea69cd7f56a005f518ea8cb",
+            "app/services/write_safety.py": "f160ff88080a913a8c2861f96a1c58b469128c91e6b4129dbd0a1974a7fbc7e2",
+            "app/static/css/style.css": "5479b6125217f029241ece69b5991d9a0902a44a289afdf2d6378e1bf5ea1ee2",
+            "app/static/js/form-drafts.js": "b78d2b89983a1688a7868d876825a9e71bc5b6f1d712a3ea5d69bc6bd5616f08",
+            "app/static/js/import-library.js": "156333d2820220c3319a588b9591b4af1b4aeab8178843045ca73a08540a8851",
+            "app/static/js/memo-trash.js": "ee4c26143e1d87bc776386f34f33c4a6566624970ba97380a96003633d8c22fb",
+            "app/templates/auth_login.html": "a2b5b59b7969878c0473e47ca9716dddf019865d2e8b0a9b5c21917211b75b91",
+            "app/templates/book_detail.html": "cd39eb255c5686ce9708842b62e621aa89d040052d16ed0531975edf110f1e20",
+            "app/templates/home.html": "3a961f2eae5a382015adbe5102c1208cce9886085575433551775a98f9361e10",
+            "app/templates/import_library.html": "23104a9283c752d15b3e635e790ca41e12c709ded5d4d6e215928aa0eef22b11",
+            "requirements.txt": "2d9e7841e67b28b73a824b1ef617bfccc4edd23037db76740c9285835a2e9624"
+          },
+          "payload_digest": "dafd714a30158f94f85ac2c50a2c0b287f8b37d66a1c49ae21caef84839fb7ac",
+          "readiness_path": "/__lab_missing_readiness",
+          "release_digest": "5603e19303edc305307995a995f4bd6ff4433314e77e80b3795bec6b4eb4deb5",
+          "release_id": "unready",
+          "schema_version": 1,
+          "service": "book-memo",
+          "source_commit": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5"
+        }
+      },
+      "observations": {
+        "baseline_snapshot": {
+          "snapshot_hash": "a9166a0bb1a177def4b6506c3fdc434b3a3c14024542eb4cd47eceb31e56da28",
+          "integrity_ok": true,
+          "fixture_valid": true,
+          "book_count": 1,
+          "memo_count": 1
+        },
+        "baseline_probe": {
+          "health_status": 200,
+          "readiness_status": 200,
+          "valid": true
+        },
+        "candidate_probe": {
+          "health_status": 200,
+          "readiness_status": 404,
+          "valid": false
+        },
+        "rollback_probe": {
+          "health_status": 200,
+          "readiness_status": 200,
+          "valid": true
+        }
+      },
+      "deployment_succeeded": false,
+      "rollback_succeeded": true,
+      "rollback_attempts": 1,
+      "starts": 3,
+      "active_release": "baseline",
+      "data_preserved": true,
+      "functional_read_ok": true,
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "children_exited_cleanly": true,
+      "timings": {
+        "total_seconds": 1.5570833340025274
+      },
+      "repeat": 3
+    },
+    {
+      "scenario": "artifact_tamper",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "releases_verified",
+          "elapsed_seconds": 0.0574895829995512,
+          "at": "2026-10-17T12:39:42.561914+00:00"
+        },
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.3270824579994951,
+          "at": "2026-10-17T12:39:42.831514+00:00"
+        },
+        {
+          "event": "candidate_preflight_rejected",
+          "elapsed_seconds": 0.32824233299834304,
+          "at": "2026-10-17T12:39:42.832672+00:00"
+        },
+        {
+          "event": "data_verified",
+          "elapsed_seconds": 0.35953470800086507,
+          "at": "2026-10-17T12:39:42.863966+00:00"
+        },
+        {
+          "event": "final_actor_stopped",
+          "elapsed_seconds": 0.554219749999902,
+          "at": "2026-10-17T12:39:43.058658+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 0.5572056249984598,
+          "at": "2026-10-17T12:39:43.061643+00:00"
+        }
+      ],
+      "releases": {
+        "baseline": {
+          "files": {
+            "Dockerfile": "72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea",
+            "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/data/logs/.gitkeep": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/main.py": "1e68b054ef1b794e983cab313638494a1384de21e23e36ea26398755d732e041",
+            "app/services/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/services/book_search.py": "37b0c9c1be04a5d28a1b25df4269df4de6ca787139ce8043307cccb53f43cb3f",
+            "app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+            "app/services/database_errors.py": "42778a9e45a5ab89b5e91dd9bef197b0c5fc2d34cbf519aebedb145b79ed92f8",
+            "app/services/datetime_format.py": "5de929b3680ff89d58fd5f8a9eb7f97134d8cbf02ccdff990efb1d4979f4d405",
+            "app/services/export_service.py": "dfcd9f718eb3fdf0c7df55423ca65d99ed8e7867f5602bc466a160daa5342c2d",
+            "app/services/host_urls.py": "017732ec14cd83c934312a0afe200d182a350aff16e69cbe7765fabb091c934c",
+            "app/services/import_service.py": "8c1bbe113524e3f948bbf931b9a0c11b1d9cabc360f017ec394bb16e04337d8a",
+            "app/services/readiness.py": "007f451e68d06a748d4d64fac774e14436f614f37fb8e0c6a87d6d656012c739",
+            "app/services/toc_service.py": "d16b69432dc630110419ca05743608dd0ef1d5ec7ea69cd7f56a005f518ea8cb",
+            "app/services/write_safety.py": "f160ff88080a913a8c2861f96a1c58b469128c91e6b4129dbd0a1974a7fbc7e2",
+            "app/static/css/style.css": "5479b6125217f029241ece69b5991d9a0902a44a289afdf2d6378e1bf5ea1ee2",
+            "app/static/js/form-drafts.js": "b78d2b89983a1688a7868d876825a9e71bc5b6f1d712a3ea5d69bc6bd5616f08",
+            "app/static/js/import-library.js": "156333d2820220c3319a588b9591b4af1b4aeab8178843045ca73a08540a8851",
+            "app/static/js/memo-trash.js": "ee4c26143e1d87bc776386f34f33c4a6566624970ba97380a96003633d8c22fb",
+            "app/templates/auth_login.html": "a2b5b59b7969878c0473e47ca9716dddf019865d2e8b0a9b5c21917211b75b91",
+            "app/templates/book_detail.html": "cd39eb255c5686ce9708842b62e621aa89d040052d16ed0531975edf110f1e20",
+            "app/templates/home.html": "3a961f2eae5a382015adbe5102c1208cce9886085575433551775a98f9361e10",
+            "app/templates/import_library.html": "23104a9283c752d15b3e635e790ca41e12c709ded5d4d6e215928aa0eef22b11",
+            "requirements.txt": "2d9e7841e67b28b73a824b1ef617bfccc4edd23037db76740c9285835a2e9624"
+          },
+          "payload_digest": "dafd714a30158f94f85ac2c50a2c0b287f8b37d66a1c49ae21caef84839fb7ac",
+          "readiness_path": "/ready",
+          "release_digest": "af04dcb8d59d33827bd06c8fb4bfce86ba90e82fa237064f69b91c0065a56a66",
+          "release_id": "baseline",
+          "schema_version": 1,
+          "service": "book-memo",
+          "source_commit": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5"
+        },
+        "candidate": {
+          "files": {
+            "Dockerfile": "72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea",
+            "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/data/logs/.gitkeep": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/main.py": "1e68b054ef1b794e983cab313638494a1384de21e23e36ea26398755d732e041",
+            "app/services/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/services/book_search.py": "37b0c9c1be04a5d28a1b25df4269df4de6ca787139ce8043307cccb53f43cb3f",
+            "app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+            "app/services/database_errors.py": "42778a9e45a5ab89b5e91dd9bef197b0c5fc2d34cbf519aebedb145b79ed92f8",
+            "app/services/datetime_format.py": "5de929b3680ff89d58fd5f8a9eb7f97134d8cbf02ccdff990efb1d4979f4d405",
+            "app/services/export_service.py": "dfcd9f718eb3fdf0c7df55423ca65d99ed8e7867f5602bc466a160daa5342c2d",
+            "app/services/host_urls.py": "017732ec14cd83c934312a0afe200d182a350aff16e69cbe7765fabb091c934c",
+            "app/services/import_service.py": "8c1bbe113524e3f948bbf931b9a0c11b1d9cabc360f017ec394bb16e04337d8a",
+            "app/services/readiness.py": "007f451e68d06a748d4d64fac774e14436f614f37fb8e0c6a87d6d656012c739",
+            "app/services/toc_service.py": "d16b69432dc630110419ca05743608dd0ef1d5ec7ea69cd7f56a005f518ea8cb",
+            "app/services/write_safety.py": "f160ff88080a913a8c2861f96a1c58b469128c91e6b4129dbd0a1974a7fbc7e2",
+            "app/static/css/style.css": "5479b6125217f029241ece69b5991d9a0902a44a289afdf2d6378e1bf5ea1ee2",
+            "app/static/js/form-drafts.js": "b78d2b89983a1688a7868d876825a9e71bc5b6f1d712a3ea5d69bc6bd5616f08",
+            "app/static/js/import-library.js": "156333d2820220c3319a588b9591b4af1b4aeab8178843045ca73a08540a8851",
+            "app/static/js/memo-trash.js": "ee4c26143e1d87bc776386f34f33c4a6566624970ba97380a96003633d8c22fb",
+            "app/templates/auth_login.html": "a2b5b59b7969878c0473e47ca9716dddf019865d2e8b0a9b5c21917211b75b91",
+            "app/templates/book_detail.html": "cd39eb255c5686ce9708842b62e621aa89d040052d16ed0531975edf110f1e20",
+            "app/templates/home.html": "3a961f2eae5a382015adbe5102c1208cce9886085575433551775a98f9361e10",
+            "app/templates/import_library.html": "23104a9283c752d15b3e635e790ca41e12c709ded5d4d6e215928aa0eef22b11",
+            "requirements.txt": "2d9e7841e67b28b73a824b1ef617bfccc4edd23037db76740c9285835a2e9624"
+          },
+          "payload_digest": "dafd714a30158f94f85ac2c50a2c0b287f8b37d66a1c49ae21caef84839fb7ac",
+          "readiness_path": "/ready",
+          "release_digest": "eb0241969d8e0597f8e4ebd540a488ba095cdbf2ca6a624328d63c325b4d2139",
+          "release_id": "candidate",
+          "schema_version": 1,
+          "service": "book-memo",
+          "source_commit": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5"
+        }
+      },
+      "observations": {
+        "baseline_snapshot": {
+          "snapshot_hash": "152f6765160ff1373cd017904a1f45610d400c6ea645a8427d317f393833a898",
+          "integrity_ok": true,
+          "fixture_valid": true,
+          "book_count": 1,
+          "memo_count": 1
+        },
+        "baseline_probe": {
+          "health_status": 200,
+          "readiness_status": 200,
+          "valid": true
+        },
+        "preflight_rejected": true
+      },
+      "deployment_succeeded": false,
+      "rollback_succeeded": null,
+      "rollback_attempts": 0,
+      "starts": 1,
+      "active_release": "baseline",
+      "data_preserved": true,
+      "functional_read_ok": true,
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "children_exited_cleanly": true,
+      "timings": {
+        "total_seconds": 0.5572109169988835
+      },
+      "repeat": 1
+    },
+    {
+      "scenario": "artifact_tamper",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "releases_verified",
+          "elapsed_seconds": 0.05774370899962378,
+          "at": "2026-10-17T12:39:43.120153+00:00"
+        },
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.32559595899874694,
+          "at": "2026-10-17T12:39:43.388012+00:00"
+        },
+        {
+          "event": "candidate_preflight_rejected",
+          "elapsed_seconds": 0.32685399999900255,
+          "at": "2026-10-17T12:39:43.389269+00:00"
+        },
+        {
+          "event": "data_verified",
+          "elapsed_seconds": 0.35767775000203983,
+          "at": "2026-10-17T12:39:43.420094+00:00"
+        },
+        {
+          "event": "final_actor_stopped",
+          "elapsed_seconds": 0.5527967090019956,
+          "at": "2026-10-17T12:39:43.615220+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 0.5556979169996339,
+          "at": "2026-10-17T12:39:43.618120+00:00"
+        }
+      ],
+      "releases": {
+        "baseline": {
+          "files": {
+            "Dockerfile": "72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea",
+            "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/data/logs/.gitkeep": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/main.py": "1e68b054ef1b794e983cab313638494a1384de21e23e36ea26398755d732e041",
+            "app/services/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/services/book_search.py": "37b0c9c1be04a5d28a1b25df4269df4de6ca787139ce8043307cccb53f43cb3f",
+            "app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+            "app/services/database_errors.py": "42778a9e45a5ab89b5e91dd9bef197b0c5fc2d34cbf519aebedb145b79ed92f8",
+            "app/services/datetime_format.py": "5de929b3680ff89d58fd5f8a9eb7f97134d8cbf02ccdff990efb1d4979f4d405",
+            "app/services/export_service.py": "dfcd9f718eb3fdf0c7df55423ca65d99ed8e7867f5602bc466a160daa5342c2d",
+            "app/services/host_urls.py": "017732ec14cd83c934312a0afe200d182a350aff16e69cbe7765fabb091c934c",
+            "app/services/import_service.py": "8c1bbe113524e3f948bbf931b9a0c11b1d9cabc360f017ec394bb16e04337d8a",
+            "app/services/readiness.py": "007f451e68d06a748d4d64fac774e14436f614f37fb8e0c6a87d6d656012c739",
+            "app/services/toc_service.py": "d16b69432dc630110419ca05743608dd0ef1d5ec7ea69cd7f56a005f518ea8cb",
+            "app/services/write_safety.py": "f160ff88080a913a8c2861f96a1c58b469128c91e6b4129dbd0a1974a7fbc7e2",
+            "app/static/css/style.css": "5479b6125217f029241ece69b5991d9a0902a44a289afdf2d6378e1bf5ea1ee2",
+            "app/static/js/form-drafts.js": "b78d2b89983a1688a7868d876825a9e71bc5b6f1d712a3ea5d69bc6bd5616f08",
+            "app/static/js/import-library.js": "156333d2820220c3319a588b9591b4af1b4aeab8178843045ca73a08540a8851",
+            "app/static/js/memo-trash.js": "ee4c26143e1d87bc776386f34f33c4a6566624970ba97380a96003633d8c22fb",
+            "app/templates/auth_login.html": "a2b5b59b7969878c0473e47ca9716dddf019865d2e8b0a9b5c21917211b75b91",
+            "app/templates/book_detail.html": "cd39eb255c5686ce9708842b62e621aa89d040052d16ed0531975edf110f1e20",
+            "app/templates/home.html": "3a961f2eae5a382015adbe5102c1208cce9886085575433551775a98f9361e10",
+            "app/templates/import_library.html": "23104a9283c752d15b3e635e790ca41e12c709ded5d4d6e215928aa0eef22b11",
+            "requirements.txt": "2d9e7841e67b28b73a824b1ef617bfccc4edd23037db76740c9285835a2e9624"
+          },
+          "payload_digest": "dafd714a30158f94f85ac2c50a2c0b287f8b37d66a1c49ae21caef84839fb7ac",
+          "readiness_path": "/ready",
+          "release_digest": "af04dcb8d59d33827bd06c8fb4bfce86ba90e82fa237064f69b91c0065a56a66",
+          "release_id": "baseline",
+          "schema_version": 1,
+          "service": "book-memo",
+          "source_commit": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5"
+        },
+        "candidate": {
+          "files": {
+            "Dockerfile": "72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea",
+            "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/data/logs/.gitkeep": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/main.py": "1e68b054ef1b794e983cab313638494a1384de21e23e36ea26398755d732e041",
+            "app/services/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/services/book_search.py": "37b0c9c1be04a5d28a1b25df4269df4de6ca787139ce8043307cccb53f43cb3f",
+            "app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+            "app/services/database_errors.py": "42778a9e45a5ab89b5e91dd9bef197b0c5fc2d34cbf519aebedb145b79ed92f8",
+            "app/services/datetime_format.py": "5de929b3680ff89d58fd5f8a9eb7f97134d8cbf02ccdff990efb1d4979f4d405",
+            "app/services/export_service.py": "dfcd9f718eb3fdf0c7df55423ca65d99ed8e7867f5602bc466a160daa5342c2d",
+            "app/services/host_urls.py": "017732ec14cd83c934312a0afe200d182a350aff16e69cbe7765fabb091c934c",
+            "app/services/import_service.py": "8c1bbe113524e3f948bbf931b9a0c11b1d9cabc360f017ec394bb16e04337d8a",
+            "app/services/readiness.py": "007f451e68d06a748d4d64fac774e14436f614f37fb8e0c6a87d6d656012c739",
+            "app/services/toc_service.py": "d16b69432dc630110419ca05743608dd0ef1d5ec7ea69cd7f56a005f518ea8cb",
+            "app/services/write_safety.py": "f160ff88080a913a8c2861f96a1c58b469128c91e6b4129dbd0a1974a7fbc7e2",
+            "app/static/css/style.css": "5479b6125217f029241ece69b5991d9a0902a44a289afdf2d6378e1bf5ea1ee2",
+            "app/static/js/form-drafts.js": "b78d2b89983a1688a7868d876825a9e71bc5b6f1d712a3ea5d69bc6bd5616f08",
+            "app/static/js/import-library.js": "156333d2820220c3319a588b9591b4af1b4aeab8178843045ca73a08540a8851",
+            "app/static/js/memo-trash.js": "ee4c26143e1d87bc776386f34f33c4a6566624970ba97380a96003633d8c22fb",
+            "app/templates/auth_login.html": "a2b5b59b7969878c0473e47ca9716dddf019865d2e8b0a9b5c21917211b75b91",
+            "app/templates/book_detail.html": "cd39eb255c5686ce9708842b62e621aa89d040052d16ed0531975edf110f1e20",
+            "app/templates/home.html": "3a961f2eae5a382015adbe5102c1208cce9886085575433551775a98f9361e10",
+            "app/templates/import_library.html": "23104a9283c752d15b3e635e790ca41e12c709ded5d4d6e215928aa0eef22b11",
+            "requirements.txt": "2d9e7841e67b28b73a824b1ef617bfccc4edd23037db76740c9285835a2e9624"
+          },
+          "payload_digest": "dafd714a30158f94f85ac2c50a2c0b287f8b37d66a1c49ae21caef84839fb7ac",
+          "readiness_path": "/ready",
+          "release_digest": "eb0241969d8e0597f8e4ebd540a488ba095cdbf2ca6a624328d63c325b4d2139",
+          "release_id": "candidate",
+          "schema_version": 1,
+          "service": "book-memo",
+          "source_commit": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5"
+        }
+      },
+      "observations": {
+        "baseline_snapshot": {
+          "snapshot_hash": "2be384b4dd61fa1f29d98372bf76ce5ad7b2e599281f35af27859d0975610056",
+          "integrity_ok": true,
+          "fixture_valid": true,
+          "book_count": 1,
+          "memo_count": 1
+        },
+        "baseline_probe": {
+          "health_status": 200,
+          "readiness_status": 200,
+          "valid": true
+        },
+        "preflight_rejected": true
+      },
+      "deployment_succeeded": false,
+      "rollback_succeeded": null,
+      "rollback_attempts": 0,
+      "starts": 1,
+      "active_release": "baseline",
+      "data_preserved": true,
+      "functional_read_ok": true,
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "children_exited_cleanly": true,
+      "timings": {
+        "total_seconds": 0.5557038750011998
+      },
+      "repeat": 2
+    },
+    {
+      "scenario": "artifact_tamper",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "releases_verified",
+          "elapsed_seconds": 0.06042958400212228,
+          "at": "2026-10-17T12:39:43.679375+00:00"
+        },
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.3287670839999919,
+          "at": "2026-10-17T12:39:43.947719+00:00"
+        },
+        {
+          "event": "candidate_preflight_rejected",
+          "elapsed_seconds": 0.3299151669998537,
+          "at": "2026-10-17T12:39:43.948865+00:00"
+        },
+        {
+          "event": "data_verified",
+          "elapsed_seconds": 0.3606279590021586,
+          "at": "2026-10-17T12:39:43.979579+00:00"
+        },
+        {
+          "event": "final_actor_stopped",
+          "elapsed_seconds": 0.5533732920011971,
+          "at": "2026-10-17T12:39:44.172331+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 0.5562347920022148,
+          "at": "2026-10-17T12:39:44.175192+00:00"
+        }
+      ],
+      "releases": {
+        "baseline": {
+          "files": {
+            "Dockerfile": "72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea",
+            "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/data/logs/.gitkeep": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/main.py": "1e68b054ef1b794e983cab313638494a1384de21e23e36ea26398755d732e041",
+            "app/services/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/services/book_search.py": "37b0c9c1be04a5d28a1b25df4269df4de6ca787139ce8043307cccb53f43cb3f",
+            "app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+            "app/services/database_errors.py": "42778a9e45a5ab89b5e91dd9bef197b0c5fc2d34cbf519aebedb145b79ed92f8",
+            "app/services/datetime_format.py": "5de929b3680ff89d58fd5f8a9eb7f97134d8cbf02ccdff990efb1d4979f4d405",
+            "app/services/export_service.py": "dfcd9f718eb3fdf0c7df55423ca65d99ed8e7867f5602bc466a160daa5342c2d",
+            "app/services/host_urls.py": "017732ec14cd83c934312a0afe200d182a350aff16e69cbe7765fabb091c934c",
+            "app/services/import_service.py": "8c1bbe113524e3f948bbf931b9a0c11b1d9cabc360f017ec394bb16e04337d8a",
+            "app/services/readiness.py": "007f451e68d06a748d4d64fac774e14436f614f37fb8e0c6a87d6d656012c739",
+            "app/services/toc_service.py": "d16b69432dc630110419ca05743608dd0ef1d5ec7ea69cd7f56a005f518ea8cb",
+            "app/services/write_safety.py": "f160ff88080a913a8c2861f96a1c58b469128c91e6b4129dbd0a1974a7fbc7e2",
+            "app/static/css/style.css": "5479b6125217f029241ece69b5991d9a0902a44a289afdf2d6378e1bf5ea1ee2",
+            "app/static/js/form-drafts.js": "b78d2b89983a1688a7868d876825a9e71bc5b6f1d712a3ea5d69bc6bd5616f08",
+            "app/static/js/import-library.js": "156333d2820220c3319a588b9591b4af1b4aeab8178843045ca73a08540a8851",
+            "app/static/js/memo-trash.js": "ee4c26143e1d87bc776386f34f33c4a6566624970ba97380a96003633d8c22fb",
+            "app/templates/auth_login.html": "a2b5b59b7969878c0473e47ca9716dddf019865d2e8b0a9b5c21917211b75b91",
+            "app/templates/book_detail.html": "cd39eb255c5686ce9708842b62e621aa89d040052d16ed0531975edf110f1e20",
+            "app/templates/home.html": "3a961f2eae5a382015adbe5102c1208cce9886085575433551775a98f9361e10",
+            "app/templates/import_library.html": "23104a9283c752d15b3e635e790ca41e12c709ded5d4d6e215928aa0eef22b11",
+            "requirements.txt": "2d9e7841e67b28b73a824b1ef617bfccc4edd23037db76740c9285835a2e9624"
+          },
+          "payload_digest": "dafd714a30158f94f85ac2c50a2c0b287f8b37d66a1c49ae21caef84839fb7ac",
+          "readiness_path": "/ready",
+          "release_digest": "af04dcb8d59d33827bd06c8fb4bfce86ba90e82fa237064f69b91c0065a56a66",
+          "release_id": "baseline",
+          "schema_version": 1,
+          "service": "book-memo",
+          "source_commit": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5"
+        },
+        "candidate": {
+          "files": {
+            "Dockerfile": "72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea",
+            "app/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/data/logs/.gitkeep": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/main.py": "1e68b054ef1b794e983cab313638494a1384de21e23e36ea26398755d732e041",
+            "app/services/__init__.py": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+            "app/services/book_search.py": "37b0c9c1be04a5d28a1b25df4269df4de6ca787139ce8043307cccb53f43cb3f",
+            "app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+            "app/services/database_errors.py": "42778a9e45a5ab89b5e91dd9bef197b0c5fc2d34cbf519aebedb145b79ed92f8",
+            "app/services/datetime_format.py": "5de929b3680ff89d58fd5f8a9eb7f97134d8cbf02ccdff990efb1d4979f4d405",
+            "app/services/export_service.py": "dfcd9f718eb3fdf0c7df55423ca65d99ed8e7867f5602bc466a160daa5342c2d",
+            "app/services/host_urls.py": "017732ec14cd83c934312a0afe200d182a350aff16e69cbe7765fabb091c934c",
+            "app/services/import_service.py": "8c1bbe113524e3f948bbf931b9a0c11b1d9cabc360f017ec394bb16e04337d8a",
+            "app/services/readiness.py": "007f451e68d06a748d4d64fac774e14436f614f37fb8e0c6a87d6d656012c739",
+            "app/services/toc_service.py": "d16b69432dc630110419ca05743608dd0ef1d5ec7ea69cd7f56a005f518ea8cb",
+            "app/services/write_safety.py": "f160ff88080a913a8c2861f96a1c58b469128c91e6b4129dbd0a1974a7fbc7e2",
+            "app/static/css/style.css": "5479b6125217f029241ece69b5991d9a0902a44a289afdf2d6378e1bf5ea1ee2",
+            "app/static/js/form-drafts.js": "b78d2b89983a1688a7868d876825a9e71bc5b6f1d712a3ea5d69bc6bd5616f08",
+            "app/static/js/import-library.js": "156333d2820220c3319a588b9591b4af1b4aeab8178843045ca73a08540a8851",
+            "app/static/js/memo-trash.js": "ee4c26143e1d87bc776386f34f33c4a6566624970ba97380a96003633d8c22fb",
+            "app/templates/auth_login.html": "a2b5b59b7969878c0473e47ca9716dddf019865d2e8b0a9b5c21917211b75b91",
+            "app/templates/book_detail.html": "cd39eb255c5686ce9708842b62e621aa89d040052d16ed0531975edf110f1e20",
+            "app/templates/home.html": "3a961f2eae5a382015adbe5102c1208cce9886085575433551775a98f9361e10",
+            "app/templates/import_library.html": "23104a9283c752d15b3e635e790ca41e12c709ded5d4d6e215928aa0eef22b11",
+            "requirements.txt": "2d9e7841e67b28b73a824b1ef617bfccc4edd23037db76740c9285835a2e9624"
+          },
+          "payload_digest": "dafd714a30158f94f85ac2c50a2c0b287f8b37d66a1c49ae21caef84839fb7ac",
+          "readiness_path": "/ready",
+          "release_digest": "eb0241969d8e0597f8e4ebd540a488ba095cdbf2ca6a624328d63c325b4d2139",
+          "release_id": "candidate",
+          "schema_version": 1,
+          "service": "book-memo",
+          "source_commit": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5"
+        }
+      },
+      "observations": {
+        "baseline_snapshot": {
+          "snapshot_hash": "2be384b4dd61fa1f29d98372bf76ce5ad7b2e599281f35af27859d0975610056",
+          "integrity_ok": true,
+          "fixture_valid": true,
+          "book_count": 1,
+          "memo_count": 1
+        },
+        "baseline_probe": {
+          "health_status": 200,
+          "readiness_status": 200,
+          "valid": true
+        },
+        "preflight_rejected": true
+      },
+      "deployment_succeeded": false,
+      "rollback_succeeded": null,
+      "rollback_attempts": 0,
+      "starts": 1,
+      "active_release": "baseline",
+      "data_preserved": true,
+      "functional_read_ok": true,
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "children_exited_cleanly": true,
+      "timings": {
+        "total_seconds": 0.5562387499994657
+      },
+      "repeat": 3
+    }
+  ],
+  "scope": "same_source_local_process_redeployment_not_production_or_container_rollout",
+  "started_at": "2026-10-17T12:39:34.569520+00:00",
+  "remaining_cases": 0,
+  "configuration": {
+    "scenarios": [
+      "redeploy",
+      "readiness_failure",
+      "artifact_tamper"
+    ],
+    "repeats": 3,
+    "deadline_seconds": 180
+  },
+  "environment": {
+    "git_sha": "9743bfb6006fdb18cc3657dddf9d17fa34fd23d5",
+    "dirty": false,
+    "python": "3.11.9",
+    "sqlite": "3.45.1",
+    "os": "Darwin",
+    "architecture": "arm64",
+    "packages": {
+      "fastapi": "0.142.2",
+      "uvicorn": "0.34.0",
+      "httpx": "0.28.1"
+    },
+    "source_hashes": {
+      "book-memo/tools/deployment_standard_lab.py": "1e2a328e87897b277aee623aa89f5e5caf1b1099e7d0f32cba29f5321b91a9ac",
+      "book-memo/tools/release_actor.py": "a1abc26ab85d44e4980c07551aaecd1302d31808768be133c3ad98d037f86a1c",
+      "book-memo/tools/release_artifact.py": "289623fb0efbb3a670d076a48e279ae8f9d6a712a711bf23059b8ccb0229a389",
+      "book-memo/tools/incident_recovery_lab.py": "f7f6bc38c7b02ccca25c36ead47c11370f16c01ecde4fb88642101ff90056abd"
+    }
+  },
+  "finished_at": "2026-10-17T12:39:44.176079+00:00"
+}
