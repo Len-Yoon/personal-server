@@ -1,4 +1,8 @@
 import unittest
+import os
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -38,6 +42,9 @@ class MonitoringValuesContractTests(unittest.TestCase):
         spec = load_values()["prometheus"]["prometheusSpec"]
 
         self.assertEqual(spec["retention"], "7d")
+        self.assertEqual(spec["retentionSize"], "3GB")
+        # Prometheus uses binary GB; leave 40% of the request for WAL/head/compaction.
+        self.assertLessEqual(3 * 1024**3, 0.6 * 5 * 1024**3)
         self.assertEqual(
             spec["storageSpec"]["volumeClaimTemplate"]["spec"]["storageClassName"],
             "local-path",
@@ -54,6 +61,23 @@ class MonitoringValuesContractTests(unittest.TestCase):
             ],
             "keep",
         )
+
+    def test_disk_rules_evaluate_threshold_duration_and_recovery_with_promtool(self):
+        promtool = os.environ.get("PROMTOOL") or shutil.which("promtool")
+        if not promtool:
+            self.skipTest("promtool is required to execute PromQL rule fixtures")
+        manifest = yaml.safe_load((ROOT / "infra/k8s/sre-telegram/prometheus-rule.yaml").read_text())
+        rules = [rule for group in manifest["spec"]["groups"] for rule in group["rules"]
+                 if rule["alert"] in {"NodeDiskPressure", "PVCSpaceLow"}]
+        self.assertEqual(len(rules), 2)
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / "disk-alerts.rules.yaml").write_text(yaml.safe_dump({"groups": [{"name": "disk", "rules": rules}]}, allow_unicode=True))
+            fixture = base / "disk-alerts.test.yaml"
+            fixture.write_text((ROOT / "tests/fixtures/monitoring-disk-alerts.test.yaml").read_text())
+            result = subprocess.run([promtool, "test", "rules", str(fixture)], cwd=base,
+                                    capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_values_set_kube_state_metrics_resources(self):
         resources = load_values()["kube-state-metrics"]["resources"]

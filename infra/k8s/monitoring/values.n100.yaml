@@ -42,6 +42,9 @@ grafana:
 prometheus:
   prometheusSpec:
     retention: 7d
+    # A 3Gi retention target leaves 2Gi headroom for WAL/head/compaction.
+    # local-path requests do not enforce a host filesystem quota.
+    retentionSize: 3GB
     resources:
       requests:
         cpu: 250m

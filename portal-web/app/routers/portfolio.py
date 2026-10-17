@@ -3,7 +3,7 @@ import secrets
 from pathlib import Path
 
 from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from markupsafe import Markup
 
@@ -31,17 +31,18 @@ def portfolio_admin(request: Request):
     if not _has_admin_access(request):
         return _disable_cache(_admin_login_response(request))
 
-    return _disable_cache(
-        templates.TemplateResponse(
-            request=request, name="portfolio_editor.html",
-            context={
-                "request": request,
-                "title": "포트폴리오 편집",
-                "content": portfolio_store.load_portfolio_content(),
-                "preview": Markup(portfolio_store.render_portfolio_markdown(portfolio_store.load_portfolio_content())),
-            },
-        )
-    )
+    content, revision = portfolio_store.load_portfolio_snapshot()
+    return _editor_response(request, content, revision)
+
+
+def _editor_response(request, content, revision, *, error="", current_content=None, status_code=200):
+    return _disable_cache(templates.TemplateResponse(
+        request=request, name="portfolio_editor.html",
+        context={"request": request, "title": "포트폴리오 편집", "content": content,
+                 "revision": revision, "preview": Markup(portfolio_store.render_portfolio_markdown(content)),
+                 "error": error, "current_content": current_content}, status_code=status_code,
+    ))
+
 
 
 @router.post("/admin/login")
@@ -80,12 +81,25 @@ def portfolio_admin_login(request: Request, password: str = Form(default="")):
 
 
 @router.post("/admin/save")
-def save_portfolio(request: Request, content: str = Form(default="")):
+def save_portfolio(request: Request, content: str = Form(default=""), expected_revision: str = Form(default="")):
     _require_portfolio_host(request)
     _require_admin_access(request)
-    portfolio_store.save_portfolio_content(content)
+    wants_json = "application/json" in request.headers.get("accept", "").lower()
+    try:
+        revision = portfolio_store.save_portfolio_content(content, expected_revision=expected_revision)
+    except portfolio_store.PortfolioConflict as conflict:
+        if wants_json:
+            return _disable_cache(JSONResponse(status_code=409, content={
+                "detail": str(conflict), "current_content": conflict.current_content,
+                "current_revision": conflict.current_revision,
+            }))
+        return _editor_response(request, content, conflict.current_revision, error=str(conflict),
+                                current_content=conflict.current_content, status_code=409)
     append_security_event("portfolio_content_saved", client=_client_id(request), length=len(content))
+    if wants_json:
+        return _disable_cache(JSONResponse(content={"status": "saved", "revision": revision}))
     return _disable_cache(RedirectResponse(url="/admin", status_code=303))
+
 
 
 def render_public_portfolio(request: Request):

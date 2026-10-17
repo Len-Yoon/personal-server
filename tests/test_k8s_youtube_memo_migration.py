@@ -64,6 +64,13 @@ class YouTubeMemoCutoverTests(unittest.TestCase):
             deployed["spec"]["template"]["spec"]["containers"][0]["env"] = [
                 {"name": "YOUTUBE_MEMO_DB_PATH", "value": "/tmp/override.sqlite3"},
             ]
+        container = deployed["spec"]["template"]["spec"]["containers"][0]
+        if scenario == "legacy_readiness":
+            container["readinessProbe"]["httpGet"]["path"] = "/health"
+        if scenario == "invalid_readiness":
+            container["readinessProbe"]["httpGet"]["path"] = "/unexpected"
+        if scenario == "invalid_liveness":
+            container["livenessProbe"]["httpGet"]["path"] = "/ready"
         fixture["deployment"] = deployed
         (base / "fixture").write_text(json.dumps(fixture))
         mock = r'''import json, os, pathlib, sqlite3, subprocess, sys
@@ -219,6 +226,20 @@ else: fail()
         self.assertIn("youtube_memo_cutover=FAIL", result.stderr)
         self.assertNotIn('"create"', calls.read_text())
         self.assertEqual(list(self.last_target.iterdir()), [])
+
+    def test_probe_contract_keeps_legacy_readiness_compatible_without_mutation(self):
+        result, calls = self.run_cutover("--check", scenario="legacy_readiness")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('"patch"', calls.read_text())
+        self.assertNotIn('"scale"', calls.read_text())
+
+    def test_invalid_probe_paths_block_before_any_writer_transition(self):
+        for scenario in ("invalid_readiness", "invalid_liveness"):
+            with self.subTest(scenario=scenario):
+                result, calls = self.run_cutover("--go", scenario=scenario)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn('"stop"', calls.read_text())
+                self.assertNotIn('"scale"', calls.read_text())
 
     def test_combined_go_and_rollback_is_rejected_without_external_calls(self):
         result, calls = self.run_cutover("--go", "--rollback")
@@ -455,6 +476,10 @@ def deployment_document():
       "volumes": [{"name": "youtube-memo-data", "persistentVolumeClaim": {"claimName": "youtube-memo-data"}}, {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"}}]}}}}
     if fixture["existing_mutation"] == "wrong_image":
         document["spec"]["template"]["spec"]["containers"][0]["image"] = "personal-server-youtube-memo:mutable"
+    if fixture["existing_mutation"] == "ready_probe":
+        document["spec"]["template"]["spec"]["containers"][0]["readinessProbe"]["httpGet"]["path"] = "/ready"
+    if fixture["existing_mutation"] == "invalid_probe":
+        document["spec"]["template"]["spec"]["containers"][0]["readinessProbe"]["httpGet"]["path"] = "/unexpected"
     if fixture["existing_api_defaults"]:
         container = document["spec"]["template"]["spec"]["containers"][0]
         container["readinessProbe"]["httpGet"]["scheme"] = "HTTP"
@@ -529,6 +554,10 @@ if command[:2] == ["create", "--dry-run=server"]:
     pvc = {"kind": "PersistentVolumeClaim", "metadata": {"name": "youtube-memo-data", "namespace": "personal-server"}, "spec": {"accessModes": ["ReadWriteOnce"]}}
     deployment = {"kind": "Deployment", "metadata": {"name": "youtube-memo", "namespace": "personal-server"}, "spec": {"replicas": 0, "template": {"spec": {"containers": [{"image": fixture["image"], "volumeMounts": [{"name": "youtube-memo-data", "mountPath": "/data/youtube-memo"}, {"name": "tmp", "mountPath": "/tmp"}]}], "volumes": [{"name": "youtube-memo-data", "persistentVolumeClaim": {"claimName": "youtube-memo-data"}}, {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"}}]}}}}
     service = {"kind": "Service", "metadata": {"name": "youtube-memo", "namespace": "personal-server"}, "spec": {"selector": {"app.kubernetes.io/name": "youtube-memo"}}}
+    deployment["spec"]["template"]["spec"]["containers"][0].update({
+        "readinessProbe": {"httpGet": {"path": "/ready", "port": "http"}},
+        "livenessProbe": {"httpGet": {"path": "/health", "port": "http"}},
+    })
     items = [pvc, deployment, service]
     if fixture["unexpected_dry_run_resource"]:
         items.append({"kind": "ConfigMap", "metadata": {"name": "foreign", "namespace": "personal-server"}})
@@ -750,9 +779,17 @@ sys.exit(1)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, "youtube_memo_prepare=PASS\n")
 
+    def test_bind_existing_accepts_ready_probe_without_recreating_base_resources(self):
+        image = "docker.io/library/personal-server-youtube-memo@sha256:" + "a" * 64
+        result, calls = self.run_prepare("--bind-existing", "--image", image,
+                                         existing_prepared=True, existing_mutation="ready_probe")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(any(json.loads(line)[-3:] == ["create", "-f", "-"]
+                             for line in calls.splitlines()))
+
     def test_bind_existing_rejects_missing_mutated_or_writer_resources_without_binder(self):
         image = "docker.io/library/personal-server-youtube-memo@sha256:" + "a" * 64
-        for mutation in ("missing_deployment", "wrong_image", "bad_service", "writer_pod"):
+        for mutation in ("missing_deployment", "wrong_image", "bad_service", "writer_pod", "invalid_probe"):
             with self.subTest(mutation=mutation):
                 result, calls = self.run_prepare(
                     "--bind-existing", "--image", image,
@@ -878,7 +915,7 @@ class YouTubeMemoManifestTests(unittest.TestCase):
             {"name": "youtube-memo-data", "persistentVolumeClaim": {"claimName": "youtube-memo-data"}},
         )
         self.assertEqual(volumes["tmp"]["emptyDir"]["medium"], "Memory")
-        self.assertEqual(container["readinessProbe"]["httpGet"], {"path": "/health", "port": "http"})
+        self.assertEqual(container["readinessProbe"]["httpGet"], {"path": "/ready", "port": "http"})
         self.assertEqual(container["livenessProbe"]["httpGet"], {"path": "/health", "port": "http"})
         self.assertNotIn("env", container)
         self.assertEqual(container["envFrom"], [{"secretRef": {"name": "youtube-memo-runtime"}}])

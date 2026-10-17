@@ -70,6 +70,59 @@ class RetentionTests(unittest.TestCase):
             delete=delete, now=NOW,
         )
 
+    def test_execution_summary_requires_confirmed_remote_absence(self):
+        items = [entry(name(day)) for day in range(10)]
+        report = {}
+        def command(*argv, **kwargs):
+            if "lsjson" in argv:
+                return json.dumps(items)
+            return ""  # Provider says success but still contains the object.
+        with self.assertRaises(self.retention.RetentionError):
+            self.retention.run_retention("book-memo", evidence(), ("rclone",), command,
+                                         delete=True, now=NOW, report=report)
+        self.assertEqual(report.get("deleted_count"), 0)
+        self.assertEqual(report.get("reclaimed_bytes"), 0)
+
+    def test_partial_failure_retains_only_confirmed_deletions_and_bytes(self):
+        items = [entry(name(day), size=100 + day) for day in range(10)]
+        report = {}; deletes = 0
+        def command(*argv, **kwargs):
+            nonlocal deletes
+            if "lsjson" in argv:
+                return json.dumps(items)
+            deletes += 1
+            if deletes == 2:
+                raise OSError("provider failure")
+            items[:] = [item for item in items if item["Name"] != argv[-1].rsplit("/", 1)[-1]]
+            return ""
+        with self.assertRaises(self.retention.RetentionError):
+            self.retention.run_retention("book-memo", evidence(), ("rclone",), command,
+                                         delete=True, now=NOW, report=report)
+        summary = self.retention.execution_summary(report, failed=True)
+        self.assertEqual(summary["deleted_count"], 1)
+        self.assertEqual(summary["reclaimed_bytes"], 109)
+        self.assertIsNone(summary["kept_count"])
+        self.assertEqual(summary["status"], "failure")
+        self.assertEqual(self.retention.failure_reason(self.retention.RetentionError("retention remote deletion failed")), "deletion_failed")
+        self.assertEqual(self.retention.failure_reason(OSError("secret-path token")), "cleanup_failed")
+
+    def test_success_summary_is_measured_and_preview_is_not_execution(self):
+        items = [entry(name(day), size=100 + day) for day in range(10)]
+        def command(*argv, **kwargs):
+            if "lsjson" in argv:
+                return json.dumps(items)
+            items[:] = [item for item in items if item["Name"] != argv[-1].rsplit("/", 1)[-1]]
+            return ""
+        report = {}
+        self.retention.run_retention("book-memo", evidence(), ("rclone",), command,
+                                     now=NOW, report=report)
+        self.assertIsNone(report.get("deleted_count"))
+        self.retention.run_retention("book-memo", evidence(), ("rclone",), command,
+                                     delete=True, now=NOW, report=report)
+        self.assertEqual(report["deleted_count"], 2)
+        self.assertEqual(report["kept_count"], 8)
+        self.assertEqual(report["reclaimed_bytes"], 217)
+
     def test_portal_root_preserves_other_service_folders_and_unrelated_files(self):
         items = [{**entry("portal-" + name(day)), "ModTime": "2026-09-27T11:00:00Z"}
                  for day in range(10)]
@@ -157,7 +210,8 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(candidates, [name(32)]); self.assertEqual(deleted, candidates)
         self.assertTrue(set(cohort).isdisjoint(deleted))
         self.assertEqual(report, {"total_count": 12, "retained_count": 11, "delete_count": 1,
-                                  "total_bytes": 1200, "retained_bytes": 1100, "delete_bytes": 100})
+                                  "total_bytes": 1200, "retained_bytes": 1100, "delete_bytes": 100,
+                                  "kept_count": 11, "deleted_count": 1, "reclaimed_bytes": 100})
 
     def test_protected_older_timestamp_or_missing_from_latest_cohort_blocks_deletion(self):
         items = [entry(name(day)) for day in (0, 1, 2, 3, 4, 5, 6, 31, 32)]

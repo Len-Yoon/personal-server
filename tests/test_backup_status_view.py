@@ -22,6 +22,45 @@ class BackupStatusViewTests(unittest.TestCase):
                 return {'data':{'status':status,'stage':'completed','lock_run_id':'','evidence':raw,'run_id':'20261013T000000Z-42','completed_at':'2026-10-13T00:02:00Z'}}
         return relay.service_backup_summaries(API(),datetime(2026,10,13,1,tzinfo=timezone.utc))
 
+    def test_cleanup_summary_separate_from_proof_and_allowlisted(self):
+        now = datetime(2026,10,13,1,tzinfo=timezone.utc)
+        value = dict(schema_version=1, status="success", finished_at="2026-10-13T00:03:00Z",
+                     kept_count=8, deleted_count=2, reclaimed_bytes=217)
+        row = relay.retention_summary_for_display(json.dumps(value), now)
+        self.assertEqual(row["retention_kept_count"], 8)
+        self.assertEqual(row["retention_reclaimed_bytes"], 217)
+        for key, invalid in [("deleted_count", True), ("reclaimed_bytes", -1),
+                             ("finished_at", "2026-10-14T00:00:00Z"), ("path", "secret")]:
+            bad = dict(value); bad[key] = invalid
+            self.assertEqual(relay.retention_summary_for_display(json.dumps(bad), now), {})
+        value.update(status="failure", kept_count=None, deleted_count=None, reclaimed_bytes=None)
+        row = relay.retention_summary_for_display(json.dumps(value), now)
+        self.assertIsNone(row["retention_deleted_count"])
+        self.assertEqual(row["retention_status"], "failure")
+        self.assertEqual(row["retention_reason"], "unknown")
+        value["reason"] = "deletion_unconfirmed"
+        self.assertEqual(relay.retention_summary_for_display(json.dumps(value), now)["retention_reason"], "deletion_unconfirmed")
+        for invalid in ("private-path", "none", [], True):
+            value["reason"] = invalid
+            self.assertEqual(relay.retention_summary_for_display(json.dumps(value), now), {})
+
+    def test_all_pvc_services_and_portal_publish_independent_cleanup_without_proof(self):
+        now = datetime(2026,10,13,1,tzinfo=timezone.utc)
+        value = dict(schema_version=1, status="failure", finished_at="2026-10-13T00:03:00Z",
+                     kept_count=None, deleted_count=2, reclaimed_bytes=217)
+        class API:
+            def get_config_map(self, namespace, name):
+                return {"data": {"retention_summary": json.dumps(value)}}
+        rows = relay.service_backup_summaries(API(), now)
+        for key in ("portal", "book", "youtube", "crawler"):
+            with self.subTest(service=key):
+                self.assertEqual(rows[key]["retention_status"], "failure")
+                self.assertEqual(rows[key]["retention_deleted_count"], 2)
+                self.assertEqual(rows[key]["retention_reclaimed_bytes"], 217)
+                self.assertIsNone(rows[key]["retention_kept_count"])
+                self.assertNotIn("backup_completed_at", rows[key])
+                self.assertNotIn("evidence", rows[key])
+
     def test_valid_proof_exposes_only_display_fields(self):
         rows=self.view(self.evidence());self.assertTrue(rows['book']['verified']);self.assertFalse(rows['youtube']['verified'])
         self.assertNotIn('artifact_digest',rows['book']);self.assertNotIn('backup_id',rows['book'])
@@ -49,6 +88,22 @@ class CarBackupStatusViewTests(unittest.TestCase):
                 if name != 'car-care-backup-state':raise OSError('unavailable')
                 return dict(metadata=dict(name=name,namespace=namespace),data=dict(status_json=json.dumps(payload)))
         return relay.service_backup_summaries(API(),self.now)['car-care']
+
+    def test_car_cleanup_accepts_old_evidence_and_preserves_confirmed_partial_totals(self):
+        old = self.view(self.payload())
+        self.assertIsNone(old['retention_reclaimed_bytes'])
+        self.assertEqual(old['retention_kept_count'], 2)
+        value = self.payload()
+        value['retention'].update(status='failure', kept_count=None, deleted_count=1, reclaimed_bytes=1024)
+        row = self.view(value)
+        self.assertTrue(row['verified'])
+        self.assertEqual(row['retention_deleted_count'], 1)
+        self.assertEqual(row['retention_reclaimed_bytes'], 1024)
+        self.assertIsNone(row['retention_kept_count'])
+        self.assertEqual(row['restore_verified_at'], old['restore_verified_at'])
+        for invalid in (True, -1, 2**53):
+            value['retention']['reclaimed_bytes'] = invalid
+            self.assertFalse(self.view(value)['verified'])
 
     def test_unchanged_attempt_preserves_original_proof_times(self):
         row=self.view(self.payload())

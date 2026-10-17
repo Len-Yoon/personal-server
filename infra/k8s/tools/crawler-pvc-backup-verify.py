@@ -296,7 +296,7 @@ class CrawlerBackupController:
             "lock_run_id": "" if release else self.run_id,
             "evidence": evidence, "run_id": self.run_id, "status": status,
             "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "stage": stage, "retention_status": "", "retention_completed_at": "",
+            "stage": stage, "retention_status": "", "retention_completed_at": "", "retention_summary": "",
         }, lock_expected=self.run_id if self.lock_held else "")
         self.lock_held = not release
 
@@ -446,15 +446,17 @@ def run_retention(delete: bool) -> None:
             {"op": "test", "path": "/data/evidence", "value": evidence},
             {"op": "test", "path": "/data/run_id", "value": state["run_id"]},
             {"op": "replace", "path": "/data/lock_run_id", "value": lock_id},
+            {"op": "add", "path": "/data/retention_summary", "value": ""},
             {"op": "add", "path": "/data/retention_status", "value": "running"},
             {"op": "add", "path": "/data/retention_completed_at", "value": ""},
         ]
         kubectl("patch", "configmap", STATE_CONFIGMAP, "--type=json",
                 "--patch=" + json.dumps(acquire, separators=(",", ":")))
     retention_error = None
+    retention_report = {}
     try:
         candidates = pvc_backup_retention.run_retention(
-            "crawler-worker", evidence, rclone_args(), run_command, delete=delete
+            "crawler-worker", evidence, rclone_args(), run_command, delete=delete, report=retention_report
         )
         for name in candidates:
             print("retention_candidate=" + name)
@@ -471,6 +473,10 @@ def run_retention(delete: bool) -> None:
                     "failed" if retention_error is not None else "completed"},
                 {"op": "add", "path": "/data/retention_completed_at", "value":
                     datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
+                {"op": "add", "path": "/data/retention_summary", "value": json.dumps(
+                    pvc_backup_retention.execution_summary(retention_report, failed=retention_error is not None,
+                        reason=pvc_backup_retention.failure_reason(retention_error)),
+                    separators=(",", ":"))},
                 {"op": "replace", "path": "/data/lock_run_id", "value": ""},
             ]
             try:

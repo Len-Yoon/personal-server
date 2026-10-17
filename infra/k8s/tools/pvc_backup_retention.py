@@ -177,6 +177,8 @@ def run_retention(
     if (not isinstance(service, str) or service not in SERVICES or
             not isinstance(rclone_argv, tuple) or not rclone_argv or type(delete) is not bool):
         raise RetentionError("retention arguments invalid")
+    if report is not None:
+        report.update(kept_count=None, deleted_count=None, reclaimed_bytes=None)
     now = now or _clock()
     if now.tzinfo is None:
         raise RetentionError("retention clock invalid")
@@ -199,6 +201,10 @@ def run_retention(
                       delete_bytes=sum(item[2] for item in inventory if item[1] not in retained))
     if not delete:
         return candidates
+    deleted_bytes = 0
+    deleted_count = 0
+    if report is not None:
+        report.update(deleted_count=0, reclaimed_bytes=0)
     for filename in candidates:
         # A fresh inventory before each irreversible operation catches most
         # concurrent Drive changes, including duplicate names in My Drive.
@@ -216,8 +222,43 @@ def run_retention(
                     f"{remote}/{filename}", timeout=120)
         except Exception as error:
             raise RetentionError("retention remote deletion failed") from error
-        inventory = [item for item in inventory if item[1] != filename]
+        expected = [item for item in inventory if item[1] != filename]
+        # Report reclaimed space only after an independent listing confirms absence.
+        current = _list(remote, rclone_argv, command, _clock(), portal=service == "portal")
+        if current != expected:
+            raise RetentionError("retention remote deletion unconfirmed")
+        deleted_bytes += next(item[2] for item in inventory if item[1] == filename)
+        deleted_count += 1
+        inventory = expected
+        if report is not None:
+            report.update(deleted_count=deleted_count, reclaimed_bytes=deleted_bytes)
+    if report is not None:
+        report.update(kept_count=len(inventory), deleted_count=deleted_count, reclaimed_bytes=deleted_bytes)
     return candidates
+
+
+def failure_reason(error: Exception | None) -> str:
+    # Only our fixed labels may classify an error; never publish exception text.
+    reasons = {
+        "retention evidence expired": "evidence_expired",
+        "retention remote inventory changed": "inventory_changed",
+        "retention remote listing failed": "listing_failed",
+        "retention remote deletion failed": "deletion_failed",
+        "retention remote deletion unconfirmed": "deletion_unconfirmed",
+        "retention evidence does not match latest archive": "evidence_mismatch",
+    }
+    if isinstance(error, RetentionError) and len(error.args) == 1 and isinstance(error.args[0], str):
+        return reasons.get(error.args[0], "cleanup_failed")
+    return "cleanup_failed"
+
+
+def execution_summary(report: dict, *, failed: bool, reason: str = "cleanup_failed") -> dict:
+    """Bounded public execution evidence, independent of backup proof timestamps."""
+    counts = {key: None if failed and key == "kept_count" else report.get(key)
+              for key in ("kept_count", "deleted_count", "reclaimed_bytes")}
+    return dict(schema_version=1, status="failure" if failed else "success",
+                reason=reason if failed else "none",
+                finished_at=_clock().astimezone(timezone.utc).strftime(TIME), **counts)
 
 
 def main() -> int:
@@ -231,6 +272,7 @@ def main() -> int:
     parser.add_argument("--remote", required=True)
     parser.add_argument("--delete", action="store_true")
     parser.add_argument("--max-age-seconds", type=int, default=86400)
+    parser.add_argument("--report-file")
     parser.add_argument("rclone_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     argv = args.rclone_args
@@ -239,15 +281,22 @@ def main() -> int:
     def command(*command_argv, timeout):
         return subprocess.run(command_argv, check=True, text=True, stdout=subprocess.PIPE,
                               stderr=subprocess.DEVNULL, timeout=timeout).stdout
+    report = {}
+    failed = True
+    reason = "cleanup_failed"
     try:
-        report = {}
         candidates = run_retention(args.service, Path(args.evidence).read_text(),
                                    ("rclone", *argv), command, delete=args.delete, remote_root=args.remote, report=report, max_age_seconds=args.max_age_seconds)
+        failed = False
         print(json.dumps(report, sort_keys=True))
         return 0
-    except (RetentionError, OSError, ValueError):
+    except (RetentionError, OSError, ValueError) as error:
+        reason = failure_reason(error)
         print("pvc_backup_retention=FAIL")
         return 1
+    finally:
+        if args.report_file and args.delete:
+            Path(args.report_file).write_text(json.dumps(execution_summary(report, failed=failed, reason=reason), sort_keys=True))
 
 
 if __name__ == "__main__":

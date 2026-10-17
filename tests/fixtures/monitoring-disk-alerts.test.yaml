@@ -1,0 +1,71 @@
+rule_files:
+- disk-alerts.rules.yaml
+evaluation_interval: 1m
+tests:
+- name: disk-warning-threshold-hold-and-recovery
+  interval: 1m
+  input_series:
+  - series: kube_node_status_condition{node="fixture-node",condition="DiskPressure",status="true"}
+    values: 1x10 0x4
+  - series: kubelet_volume_stats_available_bytes{namespace="monitoring",persistentvolumeclaim="prometheus"}
+    values: 14x10 50x4
+  - series: kubelet_volume_stats_capacity_bytes{namespace="monitoring",persistentvolumeclaim="prometheus"}
+    values: 100x15
+  - series: kubelet_volume_stats_available_bytes{namespace="personal-server",persistentvolumeclaim="boundary"}
+    values: 15x15
+  - series: kubelet_volume_stats_capacity_bytes{namespace="personal-server",persistentvolumeclaim="boundary"}
+    values: 100x15
+  - series: kubelet_volume_stats_available_bytes{namespace="personal-server",persistentvolumeclaim="zero"}
+    values: '0x15'
+  - series: kubelet_volume_stats_capacity_bytes{namespace="personal-server",persistentvolumeclaim="zero"}
+    values: '0x15'
+  - series: kubelet_volume_stats_available_bytes{namespace="other",persistentvolumeclaim="excluded"}
+    values: 1x15
+  - series: kubelet_volume_stats_capacity_bytes{namespace="other",persistentvolumeclaim="excluded"}
+    values: 100x15
+  alert_rule_test:
+  - eval_time: 4m
+    alertname: NodeDiskPressure
+    exp_alerts: []
+  - eval_time: 5m
+    alertname: NodeDiskPressure
+    exp_alerts:
+    - exp_labels:
+        node: fixture-node
+        condition: DiskPressure
+        status: 'true'
+        severity: warning
+        sre_telegram: 'true'
+      exp_annotations:
+        summary: 노드 디스크 압박
+        description: K3s 노드 DiskPressure 상태가 5분 동안 지속됨
+  - eval_time: 9m
+    alertname: PVCSpaceLow
+    exp_alerts: []
+  - eval_time: 10m
+    alertname: PVCSpaceLow
+    exp_alerts:
+    - exp_labels:
+        namespace: monitoring
+        persistentvolumeclaim: prometheus
+        severity: warning
+        sre_telegram: 'true'
+      exp_annotations:
+        summary: PVC 가용 공간 부족
+        description: 수집 가능한 PVC 지표에서 가용 공간 15% 미만 상태가 10분 동안 지속됨
+  - eval_time: 11m
+    alertname: PVCSpaceLow
+    exp_alerts: []
+  - eval_time: 11m
+    alertname: NodeDiskPressure
+    exp_alerts: []
+- name: missing-metrics-do-not-prove-healthy-disk
+  interval: 1m
+  input_series: []
+  alert_rule_test:
+  - eval_time: 15m
+    alertname: NodeDiskPressure
+    exp_alerts: []
+  - eval_time: 15m
+    alertname: PVCSpaceLow
+    exp_alerts: []

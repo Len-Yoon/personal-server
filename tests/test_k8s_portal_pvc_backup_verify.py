@@ -521,6 +521,15 @@ esac
         wait_call = "get deployment portal-web -o jsonpath={.status.availableReplicas}"
         self.assertIn(wait_call, calls)
         self.assertLess(calls.index("kubectl -n personal-server scale deployment/portal-web --replicas=0"), calls.index(wait_call))
+        report_line = next(line for line in calls.splitlines()
+                           if "patch configmap sre-telegram-backup-status" in line and "/data/retention_summary" in line)
+        operations = json.loads(report_line.split("--patch ", 1)[1])
+        summary = json.loads(next(op["value"] for op in operations if op["path"] == "/data/retention_summary"))
+        self.assertEqual(set(summary), {"schema_version", "status", "finished_at", "kept_count", "deleted_count", "reclaimed_bytes", "reason"})
+        self.assertEqual(summary["status"], "success")
+        self.assertEqual(summary["deleted_count"], 0)
+        self.assertEqual(summary["reclaimed_bytes"], 0)
+        self.assertGreaterEqual(summary["kept_count"], 1)
 
     def test_in_cluster_terminating_writer_blocks_snapshot_even_when_available_is_zero(self):
         result, calls, _, _ = self.run_tool('--go', execution_mode='in-cluster',

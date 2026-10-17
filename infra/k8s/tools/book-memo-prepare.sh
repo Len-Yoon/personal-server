@@ -121,6 +121,11 @@ if pod.get("initContainers") or pod.get("ephemeralContainers"):
     raise SystemExit(1)
 if containers[0].get("image") != expected_image:
     raise SystemExit(1)
+for probe_name, path in (("readinessProbe", "/ready"), ("livenessProbe", "/health")):
+    if containers[0].get(probe_name, {}).get("httpGet") not in (
+            {"path": path, "port": "http"},
+            {"path": path, "port": "http", "scheme": "HTTP"}):
+        raise SystemExit(1)
 if containers[0].get("volumeMounts") != [
     {"name": "book-memo-data", "mountPath": "/data/book-memo"},
     {"name": "tmp", "mountPath": "/tmp"},
@@ -205,10 +210,10 @@ if (metadata.get("name") != "book-memo" or metadata.get("namespace") != "persona
         or len(containers) != 1):
     raise SystemExit(1)
 container = containers[0]
-def exact_http_probe(value):
+def exact_http_probe(value, path="/health"):
     return value in (
-        {"path": "/health", "port": "http"},
-        {"path": "/health", "port": "http", "scheme": "HTTP"},
+        {"path": path, "port": "http"},
+        {"path": path, "port": "http", "scheme": "HTTP"},
     )
 def exact_service_ports(value):
     return value in (
@@ -223,7 +228,9 @@ if (container.get("name") != "book-memo" or container.get("image") != image
             "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
             "capabilities": {"drop": ["ALL"]},
         }
-        or not exact_http_probe(container.get("readinessProbe", {}).get("httpGet"))
+        # Existing inert resources may predate /ready; inspection never rewrites them.
+        or not any(exact_http_probe(container.get("readinessProbe", {}).get("httpGet"), path)
+                   for path in ("/ready", "/health"))
         or not exact_http_probe(container.get("livenessProbe", {}).get("httpGet"))
         or container.get("volumeMounts") != [
             {"name": "book-memo-data", "mountPath": "/data/book-memo"},
