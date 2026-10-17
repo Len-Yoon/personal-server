@@ -320,6 +320,13 @@ try:
     require(len(pod["containers"]) == 1)
     container = pod["containers"][0]
     require(container["name"] == APP and container["image"] == image and container["imagePullPolicy"] == "Never")
+    def exact_http_probe(value, path):
+        return value in ({"path": path, "port": "http"},
+                         {"path": path, "port": "http", "scheme": "HTTP"})
+    # Readiness inspection accepts the historical /health contract for rollback.
+    require(any(exact_http_probe(container.get("readinessProbe", {}).get("httpGet"), path)
+                for path in ("/ready", "/health"))
+            and exact_http_probe(container.get("livenessProbe", {}).get("httpGet"), "/health"))
     volumes = {volume["name"]: volume for volume in pod.get("volumes", [])}
     require(len(pod.get("volumes", [])) == 2 and set(volumes) == {CLAIM, "tmp"})
     require(volumes[CLAIM] == {"name": CLAIM, "persistentVolumeClaim": {"claimName": CLAIM}})
