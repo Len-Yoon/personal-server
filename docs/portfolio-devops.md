@@ -45,10 +45,10 @@ Loki·Alloy·Grafana는 격리 namespace에서 샘플 로그 조회와 API 등�
 | 단계·주제 | 확인한 결과 | 코드·원본 | 범위·비고 |
 |---|---|---|---|
 | 1. 통합 검색 성능 | 36셀·1,080개 표본, timeout·503에서 다른 두 소스 결과 유지 | [도구](../portal-web/tools/search_performance_lab.py), [원본](reviews/20261017_통합검색성능실습_측정원본.json), [해석](reviews/20261017_통합검색성능실습_검증결과.md) | 실제 검색 함수와 고정 HTTP 샘플의 로컬 측정, 운영 최대 RPS·성능 개선 아님 |
-| 2. 장애 진단·복구 | timeout·SQLite BUSY·FULL 각 3회, 실패 원자성·복구 후 동일 요청 단일 적용·정리 확인 | [도구](../book-memo/tools/incident_recovery_lab.py), [원본](reviews/20261017_장애진단복구실습_측정원본.json), [DB 잠금 사례](reviews/20261018_DB잠금_사례보고서.md) | 알려진 장애의 자동 검사, 사람의 RCA·MTTR 아님 |
+| 2. 장애 진단·복구 | timeout·SQLite BUSY·FULL 각 3회, 실패 원자성·복구 후 동일 요청 단일 적용·정리 확인 | [도구](../book-memo/tools/incident_recovery_lab.py), [원본](reviews/20261017_장애진단복구실습_측정원본.json), [DB 잠금 사례](reviews/20261018_DB잠금_사례보고서.md), [신규 잠금 1회 원본](reviews/20261018_DB잠금_측정원본.json) | 신규 잠금 1회도 별도 통과함. 알려진 장애의 자동 검사, 사람의 RCA·MTTR 아님 |
 | 3. 배포 표준화 | 실제 Book HTTP·readiness, 정상 교체 3회·실패 후 롤백 3회·변조 차단 3회 | [도구](../book-memo/tools/deployment_standard_lab.py), [원본](reviews/20261017_배포표준화실습_측정원본.json), [해석](reviews/20261017_배포표준화실습_검증결과.md) | 기존 결과는 같은 앱 payload의 프로세스 교체, 두 코드 버전 Docker·운영 배포 아님 |
 
-두 코드 버전 Docker 실습은 신규 원본 확인 전 완료 주장을 보류함. 직접 학습은 [DB 잠금 실습지](20261018_DB잠금_실습지.md)를 작성하고 [면접 답변](20261018_DevOps_면접답변.md)의 범위·한계와 대조함.
+추가 Docker 실습은 서로 다른 앱 코드 `d0a60639`→`c8759902`로 upgrade·왕복·readiness 실패 각 3회, 총 9회를 통과함. [도구](../book-memo/tools/container_release_lab.py)와 [원본](reviews/20261018_컨테이너버전교체_측정원본.json)에서 실제 소스 해시·OpenAPI 차이·로컬 image ID를 연결함. v2 쓰기 뒤 v1 읽기·쓰기를 확인했으며 두 앱 버전 컨테이너는 동시에 구동하지 않음. 동일 현행 Dockerfile·의존성을 사용한 schema 불변 경로의 로컬 검증이며 과거 전체 환경·HTTP 쓰기 인증·운영 배포·무중단 전환은 미검증임. 직접 학습은 [DB 잠금 실습지](20261018_DB잠금_실습지.md)를 작성하고 [면접 답변](20261018_DevOps_면접답변.md)의 범위·한계와 대조함.
 
 ## 면접 소개 예시
 
