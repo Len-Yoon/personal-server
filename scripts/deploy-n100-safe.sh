@@ -547,13 +547,50 @@ health_check() {
   "$HEALTH_SCRIPT" "$@"
 }
 
-record_healthy_revision() {
-  local state_temp
-
+validate_healthy_revision() {
   [[ ! -L "$STATE_FILE" ]] || return 1
+  if [[ -e "$STATE_FILE" ]]; then
+    [[ -f "$STATE_FILE" ]] || return 1
+    local previous
+    previous="$(<"$STATE_FILE")"
+    is_revision "$previous" || return 1
+    git merge-base --is-ancestor "$previous" origin/main || return 1
+  fi
+}
+
+record_healthy_revision() {
+  local state_temp previous
+
+  validate_healthy_revision || return 1
+  if [[ -f "$STATE_FILE" ]]; then
+    previous="$(<"$STATE_FILE")"
+    # A queued, source-equivalent release must not move the checkpoint backward.
+    if git merge-base --is-ancestor "$1" "$previous"; then
+      return 0
+    fi
+    git merge-base --is-ancestor "$previous" "$1" || return 1
+  fi
   state_temp="$(mktemp "$STATE_DIR/.last-healthy-revision.XXXXXX")" || return 1
   printf '%s\n' "$1" > "$state_temp"
   mv -f -- "$state_temp" "$STATE_FILE"
+}
+
+select_unchanged_services() {
+  local expected_sha="$1" latest_sha="$2" services_csv="$3"
+  local selection_directory classifier selected
+  [[ "$expected_sha" != "$latest_sha" ]] || return 0
+  # Evaluate the complete downstream diff with the exact CI-verified policy.
+  # The helper can remove changed services, but cannot add deployment authority.
+  selection_directory="$(mktemp -d)" || return 1
+  HEALTH_DIRECTORIES+=("$selection_directory")
+  classifier="$selection_directory/classify-n100-safe-deployment.py"
+  HEALTH_SCRIPTS+=("$classifier")
+  git show "$expected_sha:scripts/classify-n100-safe-deployment.py" > "$classifier" || return 1
+  selected="$(python3 "$classifier" --base "$expected_sha" --head "$latest_sha" --subtract-services "$services_csv")" || return 1
+  PARSED_SERVICES=()
+  if [[ -n "$selected" ]]; then
+    parse_services_csv "$selected" || return 1
+  fi
 }
 
 main() {
@@ -580,8 +617,14 @@ main() {
   git fetch --prune origin
   git merge-base --is-ancestor "$expected_sha" origin/main
   origin_main_sha="$(git rev-parse origin/main)"
-  [[ "$expected_sha" == "$origin_main_sha" ]] || return 1
+  is_revision "$origin_main_sha" || return 1
+  select_unchanged_services "$expected_sha" "$origin_main_sha" "$2" || return 1
+  if [[ "${#PARSED_SERVICES[@]}" -eq 0 ]]; then
+    printf '%s\n' 'safe_cd_stage=skip reason=superseded' >&2
+    return 0
+  fi
   prepare_state_directories || return 1
+  validate_healthy_revision || return 1
   refresh_deploy_services "${PARSED_SERVICES[@]}" || return 1
   if [[ "${#DEPLOY_SERVICES[@]}" -eq 0 ]]; then
     printf '%s\n' 'safe_cd_stage=skip reason=k3s_runtime_service' >&2

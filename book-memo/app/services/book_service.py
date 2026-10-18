@@ -445,6 +445,7 @@ def create_chapters(book_id: int, titles: list[str]) -> int:
         raise ValueError("추가할 목차를 선택해주세요.")
 
     with _connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
         existing_rows = connection.execute(
             "SELECT title FROM book_chapters WHERE book_id = ?",
             (book_id,),
@@ -663,18 +664,19 @@ def _parse_tags(value: str) -> list[str]:
     return tags
 
 
-def update_memo_tags(memo_id: int, tags: str, request_id: str = "") -> int | None:
+def update_memo_tags(memo_id: int, tags: str, request_id: str = "", expected_version: int | None = None) -> int | None:
     parsed = _parse_tags(tags)
     init_db()
     with _connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
-        payload = [memo_id, parsed]
+        payload = [memo_id, parsed, expected_version]
         replayed = replay_result(connection, request_id, "memo-tags", payload)
         if replayed is not None:
             return replayed
-        row = connection.execute("SELECT book_id FROM book_memos WHERE id = ?", (memo_id,)).fetchone()
+        row = connection.execute("SELECT book_id, version FROM book_memos WHERE id = ?", (memo_id,)).fetchone()
         if not row:
             return None
+        check_version(row, expected_version)
         connection.execute("DELETE FROM memo_tags WHERE memo_id = ?", (memo_id,))
         connection.executemany(
             "INSERT INTO memo_tags (memo_id, tag, tag_key, position) VALUES (?, ?, ?, ?)",

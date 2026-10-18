@@ -6,11 +6,11 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from app.main import DEFAULT_DATABASE_PATH, HYUNDAI_INTERVAL_SECONDS, _database_path, run_once
+from app.main import DEFAULT_DATABASE_PATH, HYUNDAI_INTERVAL_SECONDS, _database_path, _handle_updates, run_once
 from app.models import VehicleSnapshot
 from app.services.hyundai import HyundaiFetchResult
 from app.services.store import CarCareStore
-from app.services.telegram import CommandHandler, TelegramUpdate
+from app.services.telegram import CommandHandler, TelegramClient, TelegramUpdate
 from app.services.maintenance import Alert
 from app.services.vehicle_monitor import VehicleMonitor
 
@@ -75,6 +75,54 @@ class _StoppingHandler(_HandlerFake):
 
 
 class RunOnceTests(unittest.TestCase):
+    def test_out_of_range_odometer_commands_do_not_stop_following_commands(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = CarCareStore(Path(directory) / "car-care.sqlite3")
+            store.initialize()
+            handler = CommandHandler(store, "123")
+            telegram = TelegramClient("fixture-token", "123")
+            updates = [
+                TelegramUpdate("123", "/주행거리 9223372036854775808", 1),
+                TelegramUpdate("123", "/정비완료 엔진오일 10000000", 2),
+                TelegramUpdate("123", "/주행거리 52340", 3),
+            ]
+            with patch.object(telegram, "poll", return_value=updates), patch.object(telegram, "send", return_value=True) as send:
+                self.assertEqual(_handle_updates(handler, telegram, None), 4)
+            self.assertEqual(store.load_last_snapshot().odometer_km, 52340)
+            self.assertIsNone(store.get_maintenance("engine_oil"))
+            self.assertTrue(all("사용법" in call.args[0] for call in send.call_args_list[:2]))
+
+    def test_non_text_updates_advance_offset_without_sending_responses(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = CarCareStore(Path(directory) / "car-care.sqlite3")
+            store.initialize()
+            client = TelegramClient("fixture-token", "123")
+            payload = {"ok": True, "result": [
+                {"update_id": 7, "message": {"chat": {"id": 123}, "photo": [{}]}},
+                {"update_id": 8, "callback_query": {}},
+            ]}
+            with patch.object(client, "_post", return_value=payload), patch.object(client, "send") as send:
+                self.assertEqual(_handle_updates(CommandHandler(store, "123"), client, 7), 9)
+                send.assert_not_called()
+
+    def test_non_text_ack_does_not_skip_failed_command_response(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = CarCareStore(Path(directory) / "car-care.sqlite3")
+            store.initialize()
+            client = TelegramClient("fixture-token", "123")
+            payload = {"ok": True, "result": [
+                {"update_id": 7, "message": {"chat": {"id": 123}, "photo": [{}]}},
+                {"update_id": 8, "message": {"chat": {"id": 123}, "text": "/주행거리 52340"}},
+                {"update_id": 9, "message": {"chat": {"id": 123}, "photo": [{}]}},
+            ]}
+            with patch.object(client, "_post", return_value=payload), patch.object(client, "send", return_value=False):
+                self.assertEqual(_handle_updates(CommandHandler(store, "123"), client, 7), 8)
+            self.assertEqual(store.load_last_snapshot().odometer_km, 52340)
+            with patch.object(client, "_post", return_value=payload), patch.object(client, "send", return_value=True):
+                self.assertEqual(_handle_updates(CommandHandler(store, "123"), client, 8), 10)
+            with store._connect() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM telegram_command_results").fetchone()[0], 1)
+
     def test_run_once_sends_seasonal_alert_without_waiting_for_hyundai_data(self) -> None:
         class SeasonalMonitor(_MonitorFake):
             def observe_seasonal_reminders(self, _today: date) -> list[Alert]:

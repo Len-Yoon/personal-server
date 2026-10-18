@@ -11,6 +11,54 @@ from tests.youtube_memo import test_ui_contract
 
 
 class YoutubeReliabilityTests(unittest.TestCase):
+    def test_all_url_forms_validate_ids_before_fetch_and_export_remains_importable(self):
+        import json
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as tmp, test_ui_contract.YoutubeMemoUiContractTests().loaded_app(tmp):
+            from app.services import memo_service as service, import_service, export_service
+            fetch = Mock(return_value='영상')
+            for path in ['https://youtu.be/x', 'https://youtube.com/watch?v=x', 'https://youtube.com/embed/x', 'https://youtube.com/shorts/x', 'https://youtube.com/live/x', 'https://youtube.com/watch?v=dQw4w9WgXcQextra', 'https://youtube.com/watch?v=abcdefghij!']:
+                with self.subTest(path=path), self.assertRaises(ValueError):
+                    service.create_or_get_video(path, title_fetcher=fetch)
+            fetch.assert_not_called()
+            for path in ['dQw4w9WgXcQ', 'https://youtu.be/dQw4w9WgXcQ', 'https://youtube.com/watch?v=dQw4w9WgXcQ', 'https://youtube.com/embed/dQw4w9WgXcQ', 'https://youtube.com/shorts/dQw4w9WgXcQ', 'https://youtube.com/live/dQw4w9WgXcQ']:
+                service.create_or_get_video(path, title_fetcher=fetch)
+            payload = json.loads(export_service.export_json(service.list_export_records()))
+            import_service.validate_payload(payload)
+            self.assertEqual(len(payload['records']), 1)
+
+    def test_tag_stale_form_conflicts_and_preserves_latest_tags(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'DELETE_PASSWORD': 'test'}), test_ui_contract.YoutubeMemoUiContractTests().loaded_app(tmp) as app:
+            from app.services import memo_service as service
+            video = service.create_or_get_video('https://youtu.be/dQw4w9WgXcQ', title_fetcher=lambda *_: '영상')
+            memo = service.create_memo(video['id'], '메모', '본문')
+            with TestClient(app, base_url='https://memo.len.pe.kr') as client:
+                headers = {'Origin': 'https://memo.len.pe.kr'}
+                client.post('/auth/login', data={'password': 'test'}, headers=headers)
+                page = client.get(f"/videos/{video['id']}").text
+                tag_form = re.search(r'<form[^>]*action="/memos/' + str(memo['id']) + r'/tags"[^>]*>(.*?)</form>', page, re.S).group(1)
+                self.assertIn('name="expected_version" value="1"', tag_form)
+                path = f"/memos/{memo['id']}/tags"
+                first = {'tags': '최신', 'expected_version': '1', 'request_id': 'c'*32}
+                self.assertEqual(client.post(path, data=first, headers=headers, follow_redirects=False).status_code, 303)
+                stale = {'tags': '오래된 입력', 'expected_version': '1', 'request_id': 'd'*32}
+                self.assertEqual(client.post(path, data=stale, headers=headers).status_code, 409)
+                self.assertEqual(client.post(path, data={'tags': '누락'}, headers=headers).status_code, 409)
+                self.assertEqual(client.post(path, data=first, headers=headers, follow_redirects=False).status_code, 303)
+                self.assertEqual(service.list_memos(video['id'])[0]['tags'], ['최신'])
+
+    def test_unicode_password_attempt_is_rejected_and_counted_and_unicode_password_can_login(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'DELETE_PASSWORD': 'test'}), test_ui_contract.YoutubeMemoUiContractTests().loaded_app(tmp) as app:
+            import app.main as main
+            with TestClient(app, base_url='https://memo.len.pe.kr', raise_server_exceptions=False) as client:
+                headers = {'Origin': 'https://memo.len.pe.kr'}
+                response = client.post('/auth/login', data={'password': '잘못된암호'}, headers=headers)
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(sum(len(rows) for rows in main._AUTH_FAILURES.values()), 1)
+                with patch.dict(os.environ, {'DELETE_PASSWORD': '정상암호'}):
+                    response = client.post('/auth/login', data={'password': '정상암호'}, headers=headers, follow_redirects=False)
+                self.assertEqual(response.status_code, 303)
+
     def test_old_schema_and_parallel_retry_rollback_preserve_original_rows(self):
         with tempfile.TemporaryDirectory() as tmp, test_ui_contract.YoutubeMemoUiContractTests().loaded_app(tmp):
             from app.services import memo_service as service
@@ -81,8 +129,8 @@ class YoutubeReliabilityTests(unittest.TestCase):
                 headers = {'Origin': 'https://youtube.len.pe.kr'}
                 client.post('/auth/login', data={'password': 'test'}, headers=headers)
                 path = f"/memos/{memo['id']}/tags"
-                first = {'tags': '이전', 'request_id': 'a'*32}
-                newer = {'tags': '최신', 'request_id': 'b'*32}
+                first = {'tags': '이전', 'expected_version': '1', 'request_id': 'a'*32}
+                newer = {'tags': '최신', 'expected_version': '2', 'request_id': 'b'*32}
                 for body in [first, newer, first]:
                     self.assertEqual(client.post(path, data=body, headers=headers, follow_redirects=False).status_code, 303)
                 final = service.list_memos(video['id'])[0]

@@ -61,6 +61,11 @@ class DeployN100Tests(unittest.TestCase):
         self.assertNotIn("bash ./scripts/deploy-n100.sh", WORKFLOW)
         self.assertNotIn("N100_SSH_KEY", WORKFLOW)
 
+    def test_deploy_queue_preserves_pending_disjoint_service_releases(self):
+        deploy_job = WORKFLOW.split("\n  deploy:", maxsplit=1)[1]
+        self.assertIn("cancel-in-progress: false", deploy_job)
+        self.assertIn("queue: max", deploy_job)
+
     def test_workflow_passes_verified_push_sha_and_selected_services_to_safe_script(self):
         deploy_job = WORKFLOW.split("\n  deploy:", maxsplit=1)[1]
 

@@ -9,6 +9,7 @@ from markupsafe import Markup
 
 from app.services import portfolio_store
 from app.services.security import (
+    password_matches,
     append_security_event,
     auth_rate_limited,
     clear_auth_failures,
@@ -58,7 +59,7 @@ def portfolio_admin_login(request: Request, password: str = Form(default="")):
         append_security_event("portfolio_admin_password_missing", client=client)
         return _disable_cache(_admin_login_response(request, "관리자 비밀번호가 설정되지 않았습니다.", 403))
 
-    if not secrets.compare_digest(password, configured_password):
+    if not password_matches(password, configured_password):
         if record_auth_failure("portfolio_admin", client):
             append_security_event("portfolio_admin_rate_limited", client=client)
             return _disable_cache(_admin_login_response(request, "인증 실패가 반복되어 잠시 후 다시 시도해주세요.", 429))

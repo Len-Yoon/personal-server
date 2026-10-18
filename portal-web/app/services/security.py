@@ -157,6 +157,19 @@ def is_production_environment() -> bool:
     return os.getenv("APP_ENV", "").strip().lower() == "production"
 
 
+def admin_password() -> str:
+    return (os.getenv("ADMIN_STATUS_PASSWORD", "").strip()
+            or os.getenv("FILE_MANAGER_PASSWORD", "").strip()
+            or os.getenv("DELETE_PASSWORD", "").strip())
+
+
+def password_matches(provided: str, configured: str) -> bool:
+    try:
+        return secrets.compare_digest(provided.encode("utf-8"), configured.encode("utf-8"))
+    except (AttributeError, UnicodeError):
+        return False
+
+
 def requires_secure_cookie(request: Any) -> bool:
     """Keep public HTTPS sessions secure even behind an HTTP reverse proxy."""
     hostname = (request.url.hostname or "").lower()

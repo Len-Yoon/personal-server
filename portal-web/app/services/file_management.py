@@ -95,6 +95,7 @@ def _check_source(fd, name, new_name=None):
         os.close(child)
 
 
+@file_store.storage_mutation
 def move(path, destination='', new_name=None):
     parts = _parts(path)
     target_parts = _parts(destination, root=True)
@@ -172,6 +173,7 @@ def _trash_fd():
             os.close(fd)
 
 
+@file_store.storage_mutation
 def trash(path):
     _parts(path)
     token = uuid.uuid4().hex
@@ -343,6 +345,7 @@ def preview_purge(*, item_id=None, older_than_days=None):
     return {'items': [{k: v for k, v in i.items() if k != '_snapshot'} for i in items], 'count': len(items), 'size_bytes': sum(i['size_bytes'] for i in items), 'excluded': excluded, 'confirmation': encoded + '.' + signature}
 
 
+@file_store.storage_mutation
 def confirm_purge(confirmation):
     try:
         if len(confirmation) > 2048:
@@ -394,6 +397,7 @@ def confirm_purge(confirmation):
     return {'ok': True, 'deleted': deleted, 'failed': []}
 
 
+@file_store.storage_mutation
 def restore(token, new_name=''):
     if len(token) != 32 or any(c not in '0123456789abcdef' for c in token):
         raise ValueError('휴지통 항목을 확인해주세요.')

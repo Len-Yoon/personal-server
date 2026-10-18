@@ -66,15 +66,17 @@ Runner Windows 서비스도 WSL2를 설치한 Windows 사용자 계정으로 실
 runs-on: [self-hosted, Windows, X64]
 ```
 
-1. 개발 PC에서 기능 브랜치를 push하고 PR CI·Agent Review를 통과시킨 뒤, 사용자 승인으로 PR을 `main`에 병합합니다. `main` CI가 실패하거나 취소되면 N100에 배포하지 않습니다.
+1. 개발 PC에서 기능 브랜치를 push하고 PR CI·Agent Review를 통과시킨 뒤 `main`에 병합합니다. 일반 개발의 저장소 반영 승인은 유지하며, 운영 자동배포가 발생하면 병합 직전에 배포 승인을 확인합니다. `main` CI가 실패하거나 취소되면 N100에 배포하지 않습니다.
 2. 변경 분류 job은 push event의 정확한 `before` SHA와 `github.sha`를 사용합니다. `before` SHA가 없거나 초기화 값이면 fail-closed로 중단합니다. GitHub API는 정확히 `github.sha`와 일치하는 `CI` push run을 최대 10분 대기하고, 성공하지 않으면 중단합니다. CI 성공 후 `before`부터 `github.sha`까지 전체 변경 경로를 GitHub-hosted runner에서 검사합니다. 이 job이 먼저 실행되므로 차단 변경은 N100 runner를 사용하지 않음.
 3. 문서만 변경된 경우에는 `skip`으로 끝납니다. 허용 서비스 코드만 변경된 경우에는 해당 서비스 이름만 선택됩니다. 허용 범위와 차단 범위가 섞이면 `blocked`로 성공적으로 배포 생략하며, N100 runner를 할당하지 않음.
 4. `deploy`일 때에만 N100 Runner가 `N100_SAFE_DEPLOY_SHA`와 선택된 서비스 목록을 WSL에 전달합니다.
-5. `scripts/deploy-n100-safe.sh`는 해당 SHA가 `origin/main`의 조상이며 현재 최신 `origin/main` SHA와 정확히 일치하는지 확인합니다. 더 최신 main이 있으면 안전하게 중단합니다. `git checkout`과 `git reset --hard`는 사용하지 않음.
+5. `scripts/deploy-n100-safe.sh`는 정확히 CI가 성공한 해당 SHA가 `origin/main`의 조상인지 확인합니다. 최신 main과 다르면 해당 SHA부터 최신 main까지의 전체 변경을 같은 SHA의 분류기로 재검사합니다. 문서 변경은 기존 대상을 유지하고, 후속 변경 서비스는 원래 대상에서 차감만 합니다. 보호·불명 경로 또는 유효하지 않은 diff는 배포 전에 차단합니다. 대상이 전부 대체됐으면 `reason=superseded`로 저장 상태 변경 없이 생략합니다. 남은 서비스는 최신 main과 빌드 입력이 같으며, 검증되지 않은 최신 소스로 바꾸지 않고 원래 SHA를 배포합니다. `git checkout`과 `git reset --hard`는 사용하지 않음.
 6. 배포할 revision의 선택 서비스 소스(`Dockerfile`, `requirements.txt`, `app/`)만 `git archive`로 runner 전용 release 디렉터리에 추출합니다. 임시 Compose override는 해당 release를 build context로만 사용하며 runtime `/app` source bind mount는 만들지 않습니다. 운영 작업공간의 Compose 파일·`.env`·`data`와 기존 데이터·로그 mount는 그대로 유지합니다.
 7. 선택한 서비스의 Compose 설정, 컨테이너 health, loopback `/health`가 최대 90초 동안 모두 정상인지 확인합니다.
-8. 첫 배포 또는 health 확인이 성공하면 그 SHA를 마지막 정상 revision으로 기록합니다.
+8. health 확인이 성공하면 그 SHA를 마지막 정상 revision으로 기록합니다. 기존 정상 기록은 배포 전에 형식·조상을 검증하며, 늦게 실행된 이전 SHA는 더 새로운 정상 기록을 과거로 되돌리지 않습니다.
 9. 새 revision의 health가 실패하고 직전 정상 revision이 있으면, 그 revision의 독립 release 디렉터리로 한 번만 배포·health 확인하여 복구합니다. 복구까지 실패하면 workflow는 실패로 끝남.
+
+배포 job은 `cancel-in-progress: false`, `queue: max`로 직렬 처리하며 최대 100개 pending 실행을 보존합니다. 한도를 넘는 실행·사용자 취소·실패한 CI의 변경을 자동 회수하는 기능은 아닙니다. exact SHA의 CI가 실패하면 후속 문서 CI 성공으로 대신하지 않습니다. 전역 정상 revision은 서비스별 실제 이미지 원장의 대체물이 아니므로 복수 Compose 서비스의 정확한 rollback 기준 분리는 별도 개선 항목입니다.
 
 ### 자동 배포 허용 서비스
 

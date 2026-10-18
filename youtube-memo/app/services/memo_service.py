@@ -406,18 +406,19 @@ def list_export_records(video_ids: list[int] | None = None) -> list[dict[str, An
     return records
 
 
-def update_memo_tags(memo_id: int, tags: str, request_id: str = "") -> int | None:
+def update_memo_tags(memo_id: int, tags: str, request_id: str = "", expected_version: int | None = None) -> int | None:
     init_db()
     parsed_tags = parse_tags(tags)
     with _connect() as connection:
         connection.execute("BEGIN IMMEDIATE")
-        payload = [memo_id, parsed_tags]
+        payload = [memo_id, parsed_tags, expected_version]
         replayed = replay_result(connection, request_id, "memo-tags", payload)
         if replayed is not None:
             return replayed
-        row = connection.execute("SELECT video_id FROM memos WHERE id = ?", (memo_id,)).fetchone()
+        row = connection.execute("SELECT video_id, version FROM memos WHERE id = ?", (memo_id,)).fetchone()
         if row is None:
             return None
+        check_version(row, expected_version)
         _replace_tags(connection, memo_id, parsed_tags)
         connection.execute("UPDATE memos SET version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (memo_id,))
         connection.execute("UPDATE videos SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (row["video_id"],))
@@ -574,28 +575,21 @@ def update_memo(memo_id: int, title: str, content: str, expected_version: int | 
 
 def extract_youtube_id(url: str) -> str:
     value = url.strip()
-
     if re.fullmatch(r"[A-Za-z0-9_-]{11}", value):
         return value
 
     parsed = urlparse(value)
-    host = parsed.netloc.lower().replace("www.", "")
-
+    host = parsed.netloc.lower().removeprefix("www.")
+    candidate = ""
     if host == "youtu.be":
-        return parsed.path.strip("/").split("/")[0]
-
-    if host in {"youtube.com", "m.youtube.com", "music.youtube.com"}:
-        query_id = parse_qs(parsed.query).get("v", [""])[0]
-
-        if query_id:
-            return query_id
-
-        parts = [part for part in parsed.path.split("/") if part]
-
-        if len(parts) >= 2 and parts[0] in {"embed", "shorts", "live"}:
-            return parts[1]
-
-    return ""
+        candidate = parsed.path.strip("/").split("/")[0]
+    elif host in {"youtube.com", "m.youtube.com", "music.youtube.com"}:
+        candidate = parse_qs(parsed.query).get("v", [""])[0]
+        if not candidate:
+            parts = [part for part in parsed.path.split("/") if part]
+            if len(parts) >= 2 and parts[0] in {"embed", "shorts", "live"}:
+                candidate = parts[1]
+    return candidate if re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate) else ""
 
 
 def embed_url(youtube_id: str) -> str:

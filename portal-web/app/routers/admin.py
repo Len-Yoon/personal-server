@@ -15,6 +15,8 @@ from app.services.admin_status import (
 from app.services.homeops import ALLOWED_SERVICES, get_homeops_service
 from app.services.host_urls import portal_home_url
 from app.services.security import (
+    password_matches,
+    admin_password,
     append_security_event,
     append_user_event,
     auth_rate_limited,
@@ -197,11 +199,7 @@ async def admin_user_event(request: Request, payload: dict = Body(default_factor
 
 
 def _require_security_password(request: Request, password: str) -> None:
-    configured_password = (
-        os.getenv("ADMIN_STATUS_PASSWORD", "").strip()
-        or os.getenv("FILE_MANAGER_PASSWORD", "").strip()
-        or os.getenv("DELETE_PASSWORD", "").strip()
-    )
+    configured_password = admin_password()
     client = _client_id(request)
     if auth_rate_limited("security_dashboard", client):
         append_security_event("security_dashboard_rate_limited", client=client)
@@ -209,7 +207,7 @@ def _require_security_password(request: Request, password: str) -> None:
     if not configured_password:
         append_security_event("security_dashboard_blocked", reason="password_not_configured")
         raise HTTPException(status_code=403, detail="관리자 비밀번호가 설정되지 않았습니다.")
-    if not secrets.compare_digest(password, configured_password):
+    if not password_matches(password, configured_password):
         if record_auth_failure("security_dashboard", client):
             append_security_event("security_dashboard_rate_limited", client=client)
             raise HTTPException(status_code=429, detail="관리자 인증 실패가 반복되어 잠시 후 다시 시도해주세요.")

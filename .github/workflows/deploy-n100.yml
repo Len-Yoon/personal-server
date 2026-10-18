@@ -81,6 +81,7 @@ jobs:
     concurrency:
       group: deploy-n100-${{ github.ref }}
       cancel-in-progress: false
+      queue: max
 
     steps:
       - name: Verify N100 deployment directory
