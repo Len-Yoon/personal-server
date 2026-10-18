@@ -287,7 +287,7 @@ data_is_owned_by() {
   local gid="$5"
 
   run_data_ownership_inspector "$service" "$mount_type" "$source" "$uid:$gid" \
-    /bin/sh -ec "first=\"\$(find /data -xdev \\( ! -uid $uid -o ! -gid $gid \\) -print -quit)\" || exit \$?; test -z \"\$first\""
+    /bin/sh -ec "first=\"\$(find /data -xdev \\( ! -user $uid -o ! -group $gid \\) -print -quit)\" || exit \$?; test -z \"\$first\""
 }
 
 capture_data_ownership() {
