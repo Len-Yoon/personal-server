@@ -275,6 +275,13 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         volume_compose_name: str = "car-care-oauth",
         oauth_mount_type: str = "volume",
         oauth_mount_destination: str = "/data/oauth",
+        car_image_id: str = "sha256:" + "c" * 64,
+        car_image_available: bool = True,
+        car_container_changed: bool = False,
+        car_missing_after_up_failure: bool = False,
+        car_list_fails: bool = False,
+        car_stop_fails: bool = False,
+        car_foreign_after_up: bool = False,
         rejected_sha: str | None = None,
         origin_main_sha: str | None = None,
         downstream_changes: bytes = b"M\0scripts/untrusted.sh\0",
@@ -329,6 +336,10 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
             root_ownership_counter = Path(directory) / "root-ownership-counter"
             app_ownership_counter = Path(directory) / "app-ownership-counter"
             compose_override_copy = Path(directory) / "compose-override"
+            car_stopped = Path(directory) / "car-stopped"
+            car_inspections = Path(directory) / "car-inspections"
+            car_image = Path(directory) / "car-image"
+            car_missing = Path(directory) / "car-missing"
             runtime_state_directory = Path(directory) / "runtime-states"
             runtime_state_directory.mkdir()
             configured_runtime_states = runtime_states or (
@@ -378,13 +389,16 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "    [ \"$previous\" = -f ] && compose_file=\"$argument\"\n"
                 "    previous=\"$argument\"\n"
                 "  done\n"
+                "  case \"$*\" in *'config --images car-care-worker'*) printf 'personal-server-car-care-worker:latest\\n'; exit 0 ;; esac\n"
                 "  case \"$*\" in *'config --quiet'*) cp \"$compose_file\" \"${FAKE_COMPOSE_OVERRIDE_COPY}\" ;; esac\n"
                 f"  count=0; [ -f '{compose_counter}' ] && count=$(cat '{compose_counter}')\n"
                 "  count=$((count + 1)); printf '%s' \"$count\" > '"
                 f"{compose_counter}'\n"
                 "  result=$(printf '%s' \"${FAKE_COMPOSE_RESULTS:-0}\" | cut -d, -f \"$count\")\n"
                 "  [ -n \"$result\" ] || result=0\n"
-                "  [ \"$result\" = 0 ] || exit \"$result\"\n"
+                f"  if [ \"$result\" != 0 ]; then case \"$*\" in *'up -d --no-build --no-deps car-care-worker'*) [ \"${{FAKE_CAR_MISSING_AFTER_UP_FAILURE}}\" != 1 ] || touch '{car_missing}' ;; esac; exit \"$result\"; fi\n"
+                f"  case \"$*\" in *'up -d --no-build --no-deps car-care-worker'*) rm -f '{car_stopped}' '{car_missing}'; awk '/    image: / {{print $2}}' \"$compose_file\" > '{car_image}' ;; esac\n"
+                f"  case \"$*\" in *'up -d --no-build --no-deps car-care-worker'*) if [ \"${{FAKE_CAR_FOREIGN_AFTER_UP}}\" = 1 ]; then printf 'sha256:%064d\\n' 9 > '{car_image}'; fi ;; esac\n"
                 "fi\n"
                 "if [ \"$1\" = run ]; then\n"
                 "  case \"$*\" in\n"
@@ -410,12 +424,24 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "fi\n"
                 "if [ \"$1\" = inspect ]; then\n"
                 "  case \"$*\" in\n"
-                "    *'.State.Running'*) printf 'true\\n' ;;\n"
+                f"    *'.State.Running'*) if [ \"${{4:-}}\" = car-care-worker ] && [ -f '{car_stopped}' ]; then printf 'false\\n'; else printf 'true\\n'; fi ;;\n"
+                f"    *'{{{{.Image}}}}'*) if [ -s '{car_image}' ]; then cat '{car_image}'; else printf '%s\\n' \"${{FAKE_CAR_IMAGE_ID}}\"; fi ;;\n"
+                f"    *'{{{{.Id}}}}'*) if [ -f '{car_inspections}' ] && [ \"${{FAKE_CAR_CONTAINER_CHANGED}}\" = 1 ]; then printf '%064d\\n' 2; else printf '%064d\\n' 1; fi; touch '{car_inspections}' ;;\n"
                 "    *'.State.Health.Status'*) printf '%s\\n' \"${FAKE_INSPECT_STATUS:-healthy}\" ;;\n"
                 "    *'.Mounts'*) printf '%s\\t%s\\t%s\\n' \"${FAKE_OAUTH_MOUNT_TYPE}\" \"${FAKE_OAUTH_VOLUME_NAME}\" \"${FAKE_OAUTH_MOUNT_DESTINATION}\" ;;\n"
                 "    *'com.docker.compose.project'*) printf '%s\\n' \"${FAKE_CONTAINER_COMPOSE_PROJECT}\" ;;\n"
                 "    *) exit 1 ;;\n"
                 "  esac\n"
+                "fi\n"
+                "if [ \"$1\" = image ] && [ \"$2\" = inspect ]; then\n"
+                "  [ \"${FAKE_CAR_IMAGE_AVAILABLE}\" = 1 ] || exit 1\n"
+                "  if [ \"${5:-}\" = personal-server-car-care-worker:latest ]; then printf 'sha256:%064d\\n' 3; else printf '%s\\n' \"${FAKE_CAR_IMAGE_ID}\"; fi\n"
+                "fi\n"
+                f"if [ \"$1\" = stop ] && [ \"${{2:-}}\" = car-care-worker ]; then if [ \"${{FAKE_CAR_STOP_FAILS}}\" = 1 ] && [ -s '{car_image}' ]; then exit 1; fi; touch '{car_stopped}'; fi\n"
+                f"if [ \"$1\" = start ] && [ \"${{2:-}}\" = car-care-worker ]; then rm -f '{car_stopped}'; fi\n"
+                "if [ \"$1\" = ps ]; then\n"
+                "  [ \"${FAKE_CAR_LIST_FAILS}\" != 1 ] || exit 1\n"
+                f"  [ -f '{car_missing}' ] || printf '%064d\\n' 1\n"
                 "fi\n"
                 "if [ \"$1\" = volume ] && [ \"$2\" = inspect ]; then\n"
                 "  case \"$*\" in\n"
@@ -475,6 +501,13 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "FAKE_VOLUME_COMPOSE_NAME": volume_compose_name,
                 "FAKE_OAUTH_MOUNT_TYPE": oauth_mount_type,
                 "FAKE_OAUTH_MOUNT_DESTINATION": oauth_mount_destination,
+                "FAKE_CAR_IMAGE_ID": car_image_id,
+                "FAKE_CAR_IMAGE_AVAILABLE": "1" if car_image_available else "0",
+                "FAKE_CAR_CONTAINER_CHANGED": "1" if car_container_changed else "0",
+                "FAKE_CAR_MISSING_AFTER_UP_FAILURE": "1" if car_missing_after_up_failure else "0",
+                "FAKE_CAR_LIST_FAILS": "1" if car_list_fails else "0",
+                "FAKE_CAR_STOP_FAILS": "1" if car_stop_fails else "0",
+                "FAKE_CAR_FOREIGN_AFTER_UP": "1" if car_foreign_after_up else "0",
                 "FAKE_ORIGIN_MAIN_SHA": origin_main_sha or expected_sha,
                 "FAKE_RELEASE_SOURCE": str(source),
                 "FAKE_HEALTH_SCRIPT": str(SAFE_HEALTH_SCRIPT),
@@ -811,6 +844,111 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertIn(f"git archive --format=tar {self.OLD_SHA}", calls)
         self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
         self.assertEqual(result.stderr.count("safe_cd_stage=rollback"), 1)
+
+    def test_car_only_failure_restores_actual_image_instead_of_global_checkpoint(self):
+        result, calls, state = self.run_safe_deploy(
+            services=("car-care-worker",), previous_sha=self.OLD_SHA,
+            health_results=(1, 0), app_ownership_results=(0,),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(state, self.OLD_SHA + "\n")
+        self.assertEqual(calls.count("git archive"), 1)
+        self.assertNotIn(f"git archive --format=tar {self.OLD_SHA}", calls)
+        self.assertEqual(calls.count("build car-care-worker"), 1)
+        self.assertEqual(calls.count("up -d --no-build --no-deps car-care-worker"), 2)
+        self.assertIn("image: sha256:" + "c" * 64, result.compose_override)
+        self.assertIn("pull_policy: never", result.compose_override)
+        self.assertNotIn("volumes:", result.compose_override)
+        self.assertIn("safe_cd_rollback=restored_previous_image target_deployment=failed", result.stderr)
+
+    def test_car_only_rollback_does_not_require_a_global_checkpoint(self):
+        result, calls, state = self.run_safe_deploy(
+            services=("car-care-worker",), health_results=(1, 0), app_ownership_results=(0,),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNone(state)
+        self.assertEqual(calls.count("git archive"), 1)
+        self.assertIn("safe_cd_rollback=restored_previous_image", result.stderr)
+
+    def test_car_only_invalid_or_missing_previous_image_refuses_before_build(self):
+        for options in ({"car_image_id": "latest"}, {"car_image_available": False}):
+            with self.subTest(options=options):
+                result, calls, _ = self.run_safe_deploy(services=("car-care-worker",), **options)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("docker compose", calls)
+                self.assertNotIn("docker stop", calls)
+
+    def test_car_replaced_during_build_is_not_stopped_or_changed(self):
+        result, calls, _ = self.run_safe_deploy(
+            services=("car-care-worker",), car_container_changed=True, app_ownership_results=(0,),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls.count("build car-care-worker"), 1)
+        self.assertNotIn("docker stop", calls)
+        self.assertNotIn("chown --recursive", calls)
+        self.assertNotIn("up -d", calls)
+
+    def test_car_only_rollback_health_failure_returns_failure_without_rebuilding(self):
+        result, calls, state = self.run_safe_deploy(
+            services=("car-care-worker",), previous_sha=self.OLD_SHA,
+            health_results=(1, 1), app_ownership_results=(0,),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls.count("git archive"), 1)
+        self.assertEqual(result.stderr.count("safe_cd_stage=rollback"), 1)
+        self.assertEqual(state, self.OLD_SHA + "\n")
+        self.assertIn("safe_cd_rollback=failed target_deployment=failed", result.stderr)
+
+    def test_car_only_compose_failure_restores_actual_image_without_rebuilding(self):
+        result, calls, _ = self.run_safe_deploy(
+            services=("car-care-worker",), previous_sha=self.OLD_SHA,
+            compose_results=(0, 0, 1, 0, 0), app_ownership_results=(0,),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls.count("build car-care-worker"), 1)
+        self.assertIn("safe_cd_rollback=restored_previous_image", result.stderr)
+
+    def test_car_removed_by_failed_up_is_restored_from_actual_image(self):
+        result, calls, _ = self.run_safe_deploy(
+            services=("car-care-worker",), compose_results=(0, 0, 1, 0, 0),
+            app_ownership_results=(0,), car_missing_after_up_failure=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("safe_cd_rollback=restored_previous_image", result.stderr)
+        self.assertEqual(calls.count("up -d --no-build --no-deps car-care-worker"), 2)
+
+    def test_car_rollback_refuses_uncertain_api_or_failed_writer_stop(self):
+        for options in ({"car_list_fails": True}, {"car_stop_fails": True}):
+            with self.subTest(options=options):
+                result, calls, _ = self.run_safe_deploy(
+                    services=("car-care-worker",), health_results=(1,),
+                    app_ownership_results=(0,), **options,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("safe_cd_rollback=restored_previous_image", result.stderr)
+                self.assertEqual(calls.count("up -d --no-build --no-deps car-care-worker"), 1)
+
+    def test_car_foreign_image_after_up_is_neither_accepted_nor_stopped(self):
+        result, calls, state = self.run_safe_deploy(
+            services=("car-care-worker",), previous_sha=self.OLD_SHA,
+            car_foreign_after_up=True, app_ownership_results=(0,),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(state, self.OLD_SHA + "\n")
+        self.assertEqual(calls.count("docker stop car-care-worker"), 1)
+        self.assertEqual(calls.count("up -d --no-build --no-deps car-care-worker"), 1)
+        self.assertNotIn("safe_cd_rollback=restored_previous_image", result.stderr)
+
+    def test_mixed_car_request_keeps_existing_revision_rollback_policy(self):
+        result, calls, state = self.run_safe_deploy(
+            services=("car-care-worker", "crawler-worker"), previous_sha=self.OLD_SHA,
+            health_results=(1, 0), app_ownership_results=(0,),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(state, self.OLD_SHA + "\n")
+        self.assertIn(f"git archive --format=tar {self.OLD_SHA}", calls)
+        self.assertEqual(calls.count("git archive"), 2)
+        self.assertNotIn("docker image inspect", calls)
 
     def test_release_build_context_is_used_without_runtime_source_mount_for_deploy_and_rollback(self):
         result, calls, _ = self.run_safe_deploy(
