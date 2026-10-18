@@ -74,7 +74,8 @@ runs-on: [self-hosted, Windows, X64]
 6. 배포할 revision의 선택 서비스 소스(`Dockerfile`, `requirements.txt`, `app/`)만 `git archive`로 runner 전용 release 디렉터리에 추출합니다. 임시 Compose override는 해당 release를 build context로만 사용하며 runtime `/app` source bind mount는 만들지 않습니다. 운영 작업공간의 Compose 파일·`.env`·`data`와 기존 데이터·로그 mount는 그대로 유지합니다.
 7. 선택한 서비스의 Compose 설정, 컨테이너 health, loopback `/health`가 최대 90초 동안 모두 정상인지 확인합니다.
 8. health 확인이 성공하면 그 SHA를 마지막 정상 revision으로 기록합니다. 기존 정상 기록은 배포 전에 형식·조상을 검증하며, 늦게 실행된 이전 SHA는 더 새로운 정상 기록을 과거로 되돌리지 않습니다.
-9. 새 revision의 health가 실패하고 직전 정상 revision이 있으면, 그 revision의 독립 release 디렉터리로 한 번만 배포·health 확인하여 복구합니다. 복구까지 실패하면 workflow는 실패로 끝남.
+9. 최초 요청이 `car-care-worker` 한 개이면 build 전 실행 중인 healthy 컨테이너 ID와 실제 immutable image ID를 확인하고, stop 직전 같은 컨테이너·이미지인지 다시 확인합니다. build한 target도 image ID로 고정하며, 실패 시 target writer 중지를 확인한 뒤 배포 직전의 실제 이미지를 `pull_policy: never`, `--no-build --no-deps`로 복구합니다. 전역 정상 revision의 다른 차량 코드를 재빌드하지 않으며, 복구 health가 성공해도 목표 배포는 실패로 반환하고 정상 revision을 전진시키지 않습니다. API 상태가 불확실하거나 다른 이미지가 실행 중이면 추가 교체를 중단합니다.
+10. 다른 서비스 또는 혼합 요청은 기존 방식대로 새 revision의 health가 실패하고 직전 정상 revision이 있으면 그 revision의 독립 release 디렉터리로 한 번만 배포·health 확인하여 복구합니다. 복구까지 실패하면 workflow는 실패로 끝남.
 
 배포 job은 `cancel-in-progress: false`, `queue: max`로 직렬 처리하며 최대 100개 pending 실행을 보존합니다. 한도를 넘는 실행·사용자 취소·실패한 CI의 변경을 자동 회수하는 기능은 아닙니다. exact SHA의 CI가 실패하면 후속 문서 CI 성공으로 대신하지 않습니다. 전역 정상 revision은 서비스별 실제 이미지 원장의 대체물이 아니므로 복수 Compose 서비스의 정확한 rollback 기준 분리는 별도 개선 항목입니다.
 
@@ -110,7 +111,7 @@ GitHub 저장소의 `Actions → Deploy N100`에서 실행 결과를 확인합�
 | `safe_cd_stage=preflight` | SHA, 서비스 목록 또는 N100 작업공간 사전조건을 확인하지 못함 | Actions 로그와 N100 Runner 상태 확인 필요 |
 | `safe_cd_stage=deploy` | 선택 서비스의 Compose 배포가 실패함 | N100 Compose 상태와 해당 서비스 로그 확인 필요 |
 | `safe_cd_stage=health` | 컨테이너 또는 loopback health 확인이 실패함 | 해당 서비스의 health endpoint 및 로그 확인 필요 |
-| `safe_cd_stage=rollback` | 새 revision 실패 후 직전 정상 revision 복구를 시도함 | 복구 성공 여부를 확인하고 실패 시 수동 복구 필요 |
+| `safe_cd_stage=rollback` | 새 revision 실패 후 차량 단독 요청은 실제 직전 이미지, 다른 요청은 직전 정상 revision 복구를 시도함 | 복구 성공 여부를 확인하고 실패 시 수동 복구 필요 |
 
 N100에서 Runner가 `Offline`이면 `services.msc`에서 저장소에 연결된 Actions Runner 서비스를 확인합니다.
 

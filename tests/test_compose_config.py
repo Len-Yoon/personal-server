@@ -40,7 +40,7 @@ EXPECTED_DOCKERFILE_BASE_IMAGES = {
         "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
     ),
     "car-care-worker/Dockerfile": (
-        "python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea",
+        "python:3.12-alpine3.24@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4",
     ),
     "crawler-worker/Dockerfile": (
         "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
@@ -61,7 +61,7 @@ EXPECTED_DOCKERFILE_BASE_IMAGES = {
         "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
     ),
 }
-ALPINE_APP_SERVICES = frozenset({"portal-web", "book-memo", "youtube-memo", "crawler-worker", "homeops-executor", "system-agent"})
+ALPINE_APP_SERVICES = frozenset({"portal-web", "book-memo", "youtube-memo", "crawler-worker", "homeops-executor", "system-agent", "car-care-worker"})
 DOCKERFILE_DIGEST_TARGETS = frozenset(
     {
         "book-memo/Dockerfile",

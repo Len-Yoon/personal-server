@@ -29,6 +29,10 @@ OWNERSHIP_SNAPSHOTS=()
 OWNERSHIP_SNAPSHOTS_VERIFIED=0
 PAUSED_SERVICES=()
 TARGET_SERVICES_STARTED=0
+CAR_ONLY_ROLLBACK=0
+PREVIOUS_CAR_IMAGE=''
+PREVIOUS_CAR_CONTAINER=''
+TARGET_CAR_IMAGE=''
 
 cleanup_generated_resources() {
   local override health_script health_directory snapshot
@@ -502,10 +506,23 @@ deploy_revision() {
     -f "$PROJECT_ROOT/docker-compose.yml" \
     -f "$PROJECT_ROOT/docker-compose.n100.yml" \
     -f "$COMPOSE_OVERRIDE" build "${DEPLOY_SERVICES[@]}" || return 1
+  if [[ "$CAR_ONLY_ROLLBACK" -eq 1 ]]; then
+    local target_image_ref
+    target_image_ref="$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" \
+      -f "$PROJECT_ROOT/docker-compose.n100.yml" -f "$COMPOSE_OVERRIDE" \
+      config --images car-care-worker)" || return 1
+    [[ -n "$target_image_ref" && "$target_image_ref" != *$'\n'* ]] || return 1
+    TARGET_CAR_IMAGE="$(docker image inspect --format '{{.Id}}' "$target_image_ref")" || return 1
+    [[ "$TARGET_CAR_IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+    printf '    image: %s\n    pull_policy: never\n' "$TARGET_CAR_IMAGE" >> "$COMPOSE_OVERRIDE" || return 1
+  fi
   refresh_deploy_services "${requested_services[@]}" || return 1
   [[ "${#DEPLOY_SERVICES[@]}" -gt 0 ]] || return 2
   if [[ "$align_data_ownership" == true ]]; then
     preflight_service_data_ownership "${DEPLOY_SERVICES[@]}" || return 1
+    if [[ "$CAR_ONLY_ROLLBACK" -eq 1 ]]; then
+      current_car_is_unchanged || return 1
+    fi
     pause_service_writers "${DEPLOY_SERVICES[@]}" || return 1
     align_service_data_ownership "${DEPLOY_SERVICES[@]}" || return 1
     TARGET_SERVICES_STARTED=1
@@ -516,6 +533,62 @@ deploy_revision() {
     -f "$PROJECT_ROOT/docker-compose.yml" \
     -f "$PROJECT_ROOT/docker-compose.n100.yml" \
     -f "$COMPOSE_OVERRIDE" up -d --no-build --no-deps "${DEPLOY_SERVICES[@]}"
+}
+
+capture_current_car_image() {
+  local inspected_image
+  [[ "$(docker inspect --format '{{.State.Running}}' car-care-worker)" == true ]] || return 1
+  [[ "$(docker inspect --format '{{.State.Health.Status}}' car-care-worker)" == healthy ]] || return 1
+  PREVIOUS_CAR_CONTAINER="$(docker inspect --format '{{.Id}}' car-care-worker)" || return 1
+  PREVIOUS_CAR_IMAGE="$(docker inspect --format '{{.Image}}' car-care-worker)" || return 1
+  [[ "$PREVIOUS_CAR_CONTAINER" =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ "$PREVIOUS_CAR_IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  inspected_image="$(docker image inspect --format '{{.Id}}' "$PREVIOUS_CAR_IMAGE")" || return 1
+  [[ "$inspected_image" == "$PREVIOUS_CAR_IMAGE" ]]
+}
+
+current_car_is_unchanged() {
+  [[ "$(docker inspect --format '{{.Id}}' car-care-worker)" == "$PREVIOUS_CAR_CONTAINER" ]] || return 1
+  [[ "$(docker inspect --format '{{.Image}}' car-care-worker)" == "$PREVIOUS_CAR_IMAGE" ]] || return 1
+  [[ "$(docker inspect --format '{{.State.Running}}' car-care-worker)" == true ]] || return 1
+  [[ "$(docker inspect --format '{{.State.Health.Status}}' car-care-worker)" == healthy ]]
+}
+
+deployed_image_is_expected() {
+  [[ "$CAR_ONLY_ROLLBACK" -eq 1 ]] || return 0
+  [[ "$(docker inspect --format '{{.Image}}' car-care-worker)" == "$TARGET_CAR_IMAGE" ]]
+}
+
+restore_previous_car_image() {
+  local inspected_image existing
+  [[ "$CAR_ONLY_ROLLBACK" -eq 1 ]] || return 1
+  [[ "${#DEPLOY_SERVICES[@]}" -eq 1 && "${DEPLOY_SERVICES[0]}" == car-care-worker ]] || return 1
+  existing="$(docker ps -a --no-trunc --filter 'name=^/car-care-worker$' --format '{{.ID}}')" || return 1
+  if [[ -n "$existing" ]]; then
+    [[ "$(docker inspect --format '{{.State.Running}}' car-care-worker)" == false ]] || return 1
+  fi
+  inspected_image="$(docker image inspect --format '{{.Id}}' "$PREVIOUS_CAR_IMAGE")" || return 1
+  [[ "$inspected_image" == "$PREVIOUS_CAR_IMAGE" ]] || return 1
+  COMPOSE_OVERRIDE="$(mktemp "$OVERRIDES_DIR/car-rollback.XXXXXX")" || return 1
+  COMPOSE_OVERRIDES+=("$COMPOSE_OVERRIDE")
+  printf 'services:\n  car-care-worker:\n    image: %s\n    pull_policy: never\n' "$PREVIOUS_CAR_IMAGE" > "$COMPOSE_OVERRIDE" || return 1
+  docker compose -f "$PROJECT_ROOT/docker-compose.yml" \
+    -f "$PROJECT_ROOT/docker-compose.n100.yml" -f "$COMPOSE_OVERRIDE" config --quiet || return 1
+  docker compose -f "$PROJECT_ROOT/docker-compose.yml" \
+    -f "$PROJECT_ROOT/docker-compose.n100.yml" -f "$COMPOSE_OVERRIDE" \
+    up -d --no-build --no-deps car-care-worker || return 1
+  [[ "$(docker inspect --format '{{.Image}}' car-care-worker)" == "$PREVIOUS_CAR_IMAGE" ]]
+}
+
+stop_failed_car_writer() {
+  local existing current_image
+  existing="$(docker ps -a --no-trunc --filter 'name=^/car-care-worker$' --format '{{.ID}}')" || return 1
+  [[ -n "$existing" ]] || return 0
+  [[ "$existing" =~ ^[0-9a-f]{64}$ ]] || return 1
+  current_image="$(docker inspect --format '{{.Image}}' car-care-worker)" || return 1
+  [[ "$current_image" == "$PREVIOUS_CAR_IMAGE" || "$current_image" == "$TARGET_CAR_IMAGE" ]] || return 1
+  docker stop car-care-worker >/dev/null || return 1
+  [[ "$(docker inspect --format '{{.State.Running}}' car-care-worker)" == false ]]
 }
 
 prepare_health_script() {
@@ -601,6 +674,9 @@ main() {
   printf '%s\n' 'safe_cd_stage=preflight' >&2
   is_revision "$expected_sha" || return 1
   parse_services_csv "$2" || return 1
+  if [[ "$2" == car-care-worker ]]; then
+    CAR_ONLY_ROLLBACK=1
+  fi
   [[ -d "$PROJECT_ROOT/.git" ]] || return 1
   [[ -f "$PROJECT_ROOT/docker-compose.yml" ]] || return 1
   [[ -f "$PROJECT_ROOT/docker-compose.n100.yml" ]] || return 1
@@ -625,13 +701,18 @@ main() {
   fi
   prepare_state_directories || return 1
   validate_healthy_revision || return 1
+  # A car-only release restores its actual running image, not a global source
+  # checkpoint that may describe an unrelated service.
+  if [[ "$CAR_ONLY_ROLLBACK" -eq 1 ]]; then
+    capture_current_car_image || return 1
+  fi
   refresh_deploy_services "${PARSED_SERVICES[@]}" || return 1
   if [[ "${#DEPLOY_SERVICES[@]}" -eq 0 ]]; then
     printf '%s\n' 'safe_cd_stage=skip reason=k3s_runtime_service' >&2
     return 0
   fi
 
-  if deploy_revision "$expected_sha" true "${PARSED_SERVICES[@]}" && health_check "$expected_sha" "${DEPLOY_SERVICES[@]}"; then
+  if deploy_revision "$expected_sha" true "${PARSED_SERVICES[@]}" && health_check "$expected_sha" "${DEPLOY_SERVICES[@]}" && deployed_image_is_expected; then
     record_healthy_revision "$expected_sha"
     OWNERSHIP_SNAPSHOTS_VERIFIED=1
     return 0
@@ -639,10 +720,23 @@ main() {
 
   refresh_deploy_services "${PARSED_SERVICES[@]}" || return 1
   [[ "${#DEPLOY_SERVICES[@]}" -gt 0 ]] || return 1
-  stop_target_service_writers "${DEPLOY_SERVICES[@]}" || return 1
+  if [[ "$CAR_ONLY_ROLLBACK" -eq 1 && "$TARGET_SERVICES_STARTED" -eq 1 ]]; then
+    stop_failed_car_writer || return 1
+  else
+    stop_target_service_writers "${DEPLOY_SERVICES[@]}" || return 1
+  fi
   restore_root_owned_data_for_rollback || return 1
   if [[ "$TARGET_SERVICES_STARTED" -eq 0 ]]; then
     resume_paused_service_writers || return 1
+    return 1
+  fi
+  if [[ "$CAR_ONLY_ROLLBACK" -eq 1 ]]; then
+    printf '%s\n' 'safe_cd_stage=rollback' >&2
+    if restore_previous_car_image && health_check "$expected_sha" car-care-worker; then
+      printf '%s\n' 'safe_cd_rollback=restored_previous_image target_deployment=failed' >&2
+    else
+      printf '%s\n' 'safe_cd_rollback=failed target_deployment=failed' >&2
+    fi
     return 1
   fi
   [[ -f "$STATE_FILE" ]] || return 1
