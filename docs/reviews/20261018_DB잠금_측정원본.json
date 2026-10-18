@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "valid": true,
+  "reason": "ok",
+  "cases": [
+    {
+      "scenario": "sqlite_busy",
+      "valid": true,
+      "reason": "ok",
+      "events": [
+        {
+          "event": "baseline_verified",
+          "elapsed_seconds": 0.06830700000864454,
+          "at": "2026-10-18T02:28:53.050245+00:00"
+        },
+        {
+          "event": "fault_applied",
+          "elapsed_seconds": 0.12254179200681392,
+          "at": "2026-10-18T02:28:53.104478+00:00"
+        },
+        {
+          "event": "failure_observed",
+          "elapsed_seconds": 5.322815375009668,
+          "at": "2026-10-18T02:28:58.304744+00:00"
+        },
+        {
+          "event": "cause_evidence_verified",
+          "elapsed_seconds": 5.324514250009088,
+          "at": "2026-10-18T02:28:58.306439+00:00"
+        },
+        {
+          "event": "recovery_action_started",
+          "elapsed_seconds": 5.324524833005853,
+          "at": "2026-10-18T02:28:58.306449+00:00"
+        },
+        {
+          "event": "recovery_action_completed",
+          "elapsed_seconds": 5.346788042006665,
+          "at": "2026-10-18T02:28:58.328716+00:00"
+        },
+        {
+          "event": "recovery_verified",
+          "elapsed_seconds": 5.35277333301201,
+          "at": "2026-10-18T02:28:58.334698+00:00"
+        },
+        {
+          "event": "cleanup_verified",
+          "elapsed_seconds": 5.366251042010845,
+          "at": "2026-10-18T02:28:58.348176+00:00"
+        }
+      ],
+      "observations": {
+        "baseline": {
+          "snapshot_hash": "874271ab64aa8825c7cf4e45f21a28b886c6941919fa455f321965261341de1f",
+          "page_count": 21,
+          "page_size": 4096
+        },
+        "failure": {
+          "error_code": 5,
+          "unchanged": true
+        },
+        "recovery": {
+          "data_preserved": true,
+          "exactly_once": true,
+          "integrity_ok": true,
+          "version": 2
+        }
+      },
+      "cleanup_ok": true,
+      "fixture_removed": true,
+      "timings": {
+        "detection_seconds": 5.200273583002854,
+        "automatic_cause_check_seconds": 0.001698874999419786,
+        "recovery_check_seconds": 0.028248500006156974
+      },
+      "children_exited_cleanly": true,
+      "repeat": 1
+    }
+  ],
+  "scope": "automated_local_known_faults_not_production_MTTR_RTO_RPO",
+  "started_at": "2026-10-18T02:28:52.954667+00:00",
+  "remaining_cases": 0,
+  "configuration": {
+    "scenarios": [
+      "sqlite_busy"
+    ],
+    "repeats": 1,
+    "deadline_seconds": 60.0
+  },
+  "environment": {
+    "git_sha": "c8759902dbcd61cacf73ce9aeaf2da07b74e1a53",
+    "dirty": false,
+    "python": "3.11.9",
+    "sqlite": "3.45.1",
+    "httpx": "0.28.1",
+    "os": "Darwin",
+    "architecture": "arm64",
+    "source_hashes": {
+      "book-memo/tools/incident_recovery_lab.py": "f7f6bc38c7b02ccca25c36ead47c11370f16c01ecde4fb88642101ff90056abd",
+      "book-memo/tools/incident_sqlite.py": "c48205430c0900c8020ebe10bb2654492a3ee4f972cd2510d148e03858874664",
+      "book-memo/tools/incident_search.py": "0ac6f78b6b55d661307e11345dba6a3d17b04180c2cdded2ca12af45badf0a60",
+      "book-memo/app/services/book_service.py": "32c6b55a17531d48ebd8a69f34129897b562a2dfc6d8bd9edd4895b924a31a65",
+      "portal-web/app/services/global_search.py": "c934a33caa0e16113751fd8af161a4afbc97bc68960b2e1b90d1abb0f36b8500"
+    }
+  },
+  "finished_at": "2026-10-18T02:28:58.348417+00:00"
+}
