@@ -37,6 +37,9 @@
 | [통합 검색 로컬 성능 실습](search-performance-lab.md) | 실제 검색 함수의 부하·부분 실패·지연 측정과 운영 용량 해석의 한계 |
 | [로컬 장애 진단·복구 실습](incident-recovery-lab.md) | 실제 검색 지연·SQLite 잠금·페이지 제한, 복구·보존·정리와 시간선 |
 | [로컬 배포 표준화 실습](deployment-standard-lab.md) | 실제 앱 재배포·릴리스 해시·readiness 실패·1회 롤백·변조 차단 |
+| [DB 잠금 진단 실습지](20261018_DB잠금_실습지.md) | 직접 작성할 가설·진단 기록과 별도 참고 해설 |
+| [DevOps 면접 답변](20261018_DevOps_면접답변.md) | 확인된 프로젝트 근거·답변·과장 방지 경계 |
+| [실제 두 버전 컨테이너 실습](container-release-lab.md) | Book 코드 버전 교체·역방향 데이터 호환·readiness 실패 롤백 |
 | [문서 이미지 목록](images/README.md) | 구성도·스크린샷의 용도와 표시 범위 |
 
 ## 문서 갱신 원칙
