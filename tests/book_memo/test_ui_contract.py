@@ -119,9 +119,9 @@ class BookMemoUiContractTests(unittest.TestCase):
                     home = client.get("/?tag=공부")
                     detail = client.get(f"/books/{tagged['id']}")
                     headers = {"Origin": "https://memo.len.pe.kr"}
-                    blocked = client.post(f"/memos/{memo_id}/tags", data={"tags": "새 태그"}, headers=headers)
+                    blocked = client.post(f"/memos/{memo_id}/tags", data={"tags": "새 태그", "expected_version": "1"}, headers=headers)
                     client.post("/auth/login", data={"password": "session-password"}, headers=headers)
-                    updated = client.post(f"/memos/{memo_id}/tags", data={"tags": "새 태그"}, headers=headers, follow_redirects=False)
+                    updated = client.post(f"/memos/{memo_id}/tags", data={"tags": "새 태그", "expected_version": "1"}, headers=headers, follow_redirects=False)
                     filtered = client.get("/?tag=새 태그")
         finally:
             if previous_password is None:

@@ -824,9 +824,9 @@ class YoutubeTagsSearchTests(unittest.TestCase):
                 with TestClient(app, base_url="https://memo.len.pe.kr") as client:
                     headers = {"Origin": "https://memo.len.pe.kr"}
                     self.assertEqual(client.get("/?tag=기존").status_code, 200)
-                    self.assertEqual(client.post(f"/memos/{memo['id']}/tags", data={"tags": "새태그"}, headers=headers).status_code, 401)
+                    self.assertEqual(client.post(f"/memos/{memo['id']}/tags", data={"tags": "새태그", "expected_version": "1"}, headers=headers).status_code, 401)
                     client.post("/auth/login", data={"password": "test-session-password"}, headers=headers)
-                    updated = client.post(f"/memos/{memo['id']}/tags", data={"tags": "새태그"}, headers=headers, follow_redirects=False)
+                    updated = client.post(f"/memos/{memo['id']}/tags", data={"tags": "새태그", "expected_version": "1"}, headers=headers, follow_redirects=False)
                     self.assertEqual(updated.status_code, 303)
                     self.assertIn("#새태그", client.get(f"/videos/{video['id']}").text)
                     self.assertIn("영상", client.get("/?tag=새태그").text)

@@ -22,7 +22,7 @@ def search_rss_news(
     category: str,
     source_name: str,
     provider_name: str,
-    limit: int = 20,
+    limit: int | None = 20,
     source_filter: str = "",
     today_only: bool = False,
 ) -> list[dict]:
@@ -83,7 +83,7 @@ def search_rss_news(
                 }
             )
 
-        if len(articles) >= limit:
+        if limit is not None and len(articles) >= limit:
             break
 
     if not successful_feeds:

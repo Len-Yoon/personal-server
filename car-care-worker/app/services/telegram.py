@@ -15,12 +15,14 @@ from app.services.store import CarCareStore
 TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 POLL_TIMEOUT_SECONDS = 5
 REQUEST_TIMEOUT_SECONDS = 10
+# Accept practical vehicle readings while keeping all values inside SQLite INTEGER.
+MAX_ODOMETER_KM = 9_999_999
 
 
 @dataclass(frozen=True)
 class TelegramUpdate:
     chat_id: str
-    text: str
+    text: str | None
     update_id: int | None = None
 
 
@@ -53,23 +55,22 @@ class TelegramClient:
         for item in result:
             if not isinstance(item, dict):
                 continue
-            message = item.get("message", {})
-            if not isinstance(message, dict):
-                continue
-            text = message.get("text")
-            chat = message.get("chat", {})
-            if not isinstance(chat, dict):
-                continue
-            chat_id = chat.get("id")
             update_id = item.get("update_id")
-            if (
-                isinstance(text, str)
-                and chat_id is not None
-                and isinstance(update_id, int)
-                and not isinstance(update_id, bool)
-                and update_id >= 0
-            ):
-                updates.append(TelegramUpdate(str(chat_id), text, update_id))
+            if not _is_idempotent_update_id(update_id):
+                continue
+            message = item.get("message")
+            message = message if isinstance(message, dict) else {}
+            chat = message.get("chat")
+            chat = chat if isinstance(chat, dict) else {}
+            chat_id = chat.get("id")
+            text = message.get("text")
+            # Keep ignored update IDs in order so the poll loop can acknowledge
+            # them without skipping a later command whose reply failed.
+            updates.append(TelegramUpdate(
+                str(chat_id) if chat_id is not None else "",
+                text if isinstance(text, str) and chat_id is not None else None,
+                update_id,
+            ))
         return updates
 
     def send(self, text: str) -> bool:
@@ -106,7 +107,7 @@ class CommandHandler:
         self._hyundai_oauth = hyundai_oauth
 
     def handle_update(self, update: TelegramUpdate) -> str | None:
-        if update.chat_id != self._allowed_chat_id:
+        if update.chat_id != self._allowed_chat_id or update.text is None:
             return None
         command = update.text.strip().split(maxsplit=1)[0].split("@", 1)[0] if update.text.strip() else ""
         if command == "/현대연결":
@@ -252,7 +253,7 @@ class CommandHandler:
             odometer_km = int(value)
         except ValueError:
             return None
-        return odometer_km if odometer_km >= 0 else None
+        return odometer_km if 0 <= odometer_km <= MAX_ODOMETER_KM else None
 
     @staticmethod
     def _maintenance_list() -> str:

@@ -224,6 +224,7 @@
                         </form>
                     </details>
                     <form class="memo-tags-editor" action="/memos/{{ memo.id }}/tags" method="post" data-draft-fields="tags" data-draft-id="memo-tags-{{ memo.id }}">
+                        <input type="hidden" name="expected_version" value="{{ memo.version }}">
                 {% if not write_authenticated %}
                 <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
                 <fieldset disabled style="display: contents;">

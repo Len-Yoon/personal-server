@@ -217,7 +217,7 @@ class TelegramClientTests(unittest.TestCase):
         with patch("app.services.telegram.urlopen", return_value=Response()) as mocked_urlopen:
             updates = TelegramClient("bot-token", "123").poll(offset=7)
 
-        self.assertEqual(updates, [TelegramUpdate("123", "/차량", update_id=7)])
+        self.assertEqual(updates, [TelegramUpdate("123", "/차량", update_id=7), TelegramUpdate("123", None, update_id=8)])
         request = mocked_urlopen.call_args.args[0]
         self.assertIn("getUpdates", request.full_url)
         self.assertEqual(json.loads(request.data), {"offset": 7, "timeout": 5})
@@ -254,7 +254,7 @@ class TelegramClientTests(unittest.TestCase):
             self.assertEqual(client.poll(offset=None), [])
             updates = client.poll(offset=None)
 
-        self.assertEqual(updates, [TelegramUpdate("123", "/차량", update_id=2)])
+        self.assertEqual(updates, [TelegramUpdate("", None, update_id=1), TelegramUpdate("123", "/차량", update_id=2)])
 
     def test_send_posts_to_configured_chat_with_eight_second_timeout(self) -> None:
         class Response:

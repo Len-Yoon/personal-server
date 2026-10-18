@@ -3,7 +3,7 @@ import sys
 import types
 import unittest
 from datetime import date, datetime
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 from tests._test_support import prepare_service_import
@@ -19,6 +19,23 @@ class InvestingNewsRssTests(unittest.TestCase):
 
     def tearDown(self):
         sys.modules.pop("feedparser", None)
+
+    def test_later_feed_is_collected_after_earlier_articles_fail_market_filter(self):
+        module = self.reload_module()
+        today = datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
+        first = types.SimpleNamespace(version="rss20", bozo=False, entries=[
+            types.SimpleNamespace(title=f"국내 기업 소식 {index}", link=f"https://example.test/local/{index}", published=today)
+            for index in range(24)
+        ])
+        second = types.SimpleNamespace(version="rss20", bozo=False, entries=[
+            types.SimpleNamespace(title="미국 연준 금리 인하 결정", link="https://example.test/fed", published=today),
+            types.SimpleNamespace(title="나스닥 증시 상승", link="https://example.test/nasdaq", published=today),
+        ])
+        empty = types.SimpleNamespace(version="rss20", bozo=False, entries=[])
+        with patch("app.crawlers.rss_news.urlopen", return_value=MagicMock()), patch("feedparser.parse", side_effect=[first, second, empty], create=True) as parse:
+            articles = module.search_investing_news_rss(limit=1)
+        self.assertEqual([article["url"] for article in articles], ["https://example.test/fed"])
+        self.assertEqual(parse.call_count, 3)
 
     def test_today_filter_uses_korean_date(self):
         module = self.reload_module()

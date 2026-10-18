@@ -7,6 +7,7 @@ import stat
 import time
 import zipfile
 from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -51,21 +52,35 @@ def _storage_bytes(fd: int, counter: list[int]) -> int:
 
 
 @contextmanager
-def _upload_budget():
-    # Serialize threads and processes across the complete multi-file operation.
-    # Hidden trash is real occupied storage and is deliberately counted.
+def storage_mutation_lock():
+    # Upload cleanup and all namespace changes share one stable directory lock.
+    # Always acquire this before the trash lock, including across processes.
+    ensure_storage()
     with _UPLOAD_LOCK, _open_storage_item("") as root_fd:
-        # Lock the directory inode itself; no user-visible lock artifact and no
-        # replaceable lock pathname. All workers open the same storage root.
         fcntl.flock(root_fd, fcntl.LOCK_EX)
+        try:
+            yield root_fd
+        finally:
+            fcntl.flock(root_fd, fcntl.LOCK_UN)
+
+
+def storage_mutation(function):
+    @wraps(function)
+    def locked(*args, **kwargs):
+        with storage_mutation_lock():
+            return function(*args, **kwargs)
+    return locked
+
+
+@contextmanager
+def _upload_budget():
+    # Hidden trash is real occupied storage and is deliberately counted.
+    with storage_mutation_lock() as root_fd:
         try:
             used = _storage_bytes(root_fd, [0])
         except OSError as error:
             raise ValueError("저장 공간을 안전하게 확인할 수 없습니다.") from error
-        try:
-            yield [used]
-        finally:
-            fcntl.flock(root_fd, fcntl.LOCK_UN)
+        yield [used]
 
 
 def _reserve_upload_bytes(budget: list[int], size: int) -> None:
@@ -355,6 +370,7 @@ def _delete_directory_fd(directory_fd: int) -> None:
             os.close(child_fd)
 
 
+@storage_mutation
 def create_directory(relative_path: str, name: str) -> None:
     ensure_storage()
     directory_name = _safe_name(name)
@@ -383,6 +399,7 @@ class DeletionAuditError(OSError):
     """The item was deleted, but writing its security event failed."""
 
 
+@storage_mutation
 def delete_item(relative_path: str) -> None:
     path = _safe_path(relative_path)
     if path == STORAGE_PATH.resolve():

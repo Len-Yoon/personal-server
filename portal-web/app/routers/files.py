@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 from app.services import file_store
 from app.services.host_urls import portal_home_url, request_host_from_headers
 from app.services.security import (
+    password_matches,
     append_security_event,
     auth_rate_limited,
     clear_auth_failures,
@@ -55,7 +56,7 @@ def file_login(request: Request, password: str = Form(""), next_path: str = Form
             next_path=next_path,
         )
 
-    if not secrets.compare_digest(password, configured_password):
+    if not password_matches(password, configured_password):
         if record_auth_failure("file_access", client):
             append_security_event("file_access_rate_limited", client=client)
             return _file_login_response(
@@ -345,7 +346,7 @@ def _require_delete_password(request: Request, password: str) -> None:
         append_security_event("delete_password_missing_config")
         raise HTTPException(status_code=403, detail="삭제 비밀번호가 설정되지 않았습니다.")
 
-    if not secrets.compare_digest(password, configured_password):
+    if not password_matches(password, configured_password):
         if record_auth_failure("file_delete", client):
             append_security_event("delete_password_rate_limited", client=client)
             raise HTTPException(status_code=429, detail="삭제 비밀번호 실패가 반복되어 잠시 후 다시 시도해주세요.")

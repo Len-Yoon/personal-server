@@ -211,6 +211,16 @@ class N100SafeDeploymentClassifierTests(unittest.TestCase):
         self.assertEqual(paths, ["crawler-worker/.env", "crawler-worker/app/new.py"])
         self.assertEqual(run.call_args.args[0][1:5], ["diff", "--name-status", "-z", "--find-renames"])
 
+    def test_superseding_commits_only_remove_changed_target_services(self):
+        requested = ('car-care-worker', 'book-memo')
+        self.assertEqual(classifier.remaining_services(requested, ['README.md']), requested)
+        self.assertEqual(classifier.remaining_services(requested, ['youtube-memo/app/main.py']), requested)
+        self.assertEqual(classifier.remaining_services(requested, ['car-care-worker/app/main.py']), ('book-memo',))
+        self.assertEqual(classifier.remaining_services(requested, ['car-care-worker/app/main.py', 'book-memo/Dockerfile']), ())
+        for path in ['portal-web/app/main.py', 'scripts/untrusted.sh', 'car-care-worker/app/data/secrets.py']:
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                classifier.remaining_services(requested, [path])
+
     def test_sensitive_components_inside_allowlisted_service_are_blocked(self):
         paths = (
             "crawler-worker/credentials/config.yaml",
@@ -267,6 +277,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         oauth_mount_destination: str = "/data/oauth",
         rejected_sha: str | None = None,
         origin_main_sha: str | None = None,
+        downstream_changes: bytes = b"M\0scripts/untrusted.sh\0",
         capture_release_permissions: bool = False,
         runtime_state: str | None = None,
         runtime_states: tuple[str, ...] | None = None,
@@ -310,6 +321,8 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
             fake_bin = Path(directory) / "bin"
             fake_bin.mkdir()
             calls = Path(directory) / "calls"
+            downstream_diff = Path(directory) / "downstream-diff"
+            downstream_diff.write_bytes(downstream_changes)
             health_counter = Path(directory) / "health-counter"
             compose_counter = Path(directory) / "compose-counter"
             docker_run_counter = Path(directory) / "docker-run-counter"
@@ -333,7 +346,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 fake_bin / "git",
                 "#!/bin/sh\n"
                 f"printf 'git %s\\n' \"$*\" >> '{calls}'\n"
-                "if [ \"$1\" = merge-base ]; then\n"
+                "if [ \"$1\" = merge-base ]; then\n"                "  if [ \"$3\" = \"${FAKE_EXPECTED_SHA}\" ] && [ \"$4\" = \"${FAKE_PREVIOUS_SHA}\" ] && [ \"$4\" != \"${FAKE_ORIGIN_MAIN_SHA}\" ]; then exit 1; fi\n"
                 "  if [ -n \"${FAKE_REJECT_SHA:-}\" ] && [ \"$3\" = \"$FAKE_REJECT_SHA\" ]; then exit 1; fi\n"
                 "fi\n"
                 "if [ \"$1\" = rev-parse ] && [ \"$2\" = origin/main ]; then\n"
@@ -341,6 +354,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "fi\n"
                 "if [ \"$1\" = show ]; then\n"
                 "  case \"$2\" in\n"
+                "    *classify-n100-safe-deployment.py) cat \"${FAKE_CLASSIFIER}\" ;;\n"
                 "    *verify-n100-safe-deployment-health.sh) cat \"${FAKE_HEALTH_SCRIPT}\" ;;\n"
                 "    *runtime-service-state.sh) cat \"${FAKE_RUNTIME_STATE_HELPER}\" ;;\n"
                 "    *runtime-service-state-reader.py) cat \"${FAKE_RUNTIME_STATE_READER}\" ;;\n"
@@ -348,6 +362,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "  esac\n"
                 "  exit 0\n"
                 "fi\n"
+                "if [ \"$1\" = diff ]; then cat \"${FAKE_DOWNSTREAM_DIFF}\"; exit 0; fi\n"
                 "if [ \"$1\" = archive ]; then\n"
                 "  exec /usr/bin/tar -C \"${FAKE_RELEASE_SOURCE}\" -cf - crawler-worker youtube-memo book-memo car-care-worker\n"
                 "fi\n"
@@ -426,6 +441,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 fake_bin / "python3",
                 "#!/bin/sh\n"
                 "case \"${1:-}\" in\n"
+                f"  *classify-n100-safe-deployment.py) exec '{sys.executable}' \"$@\" ;;\n"
                 "  *runtime-service-state-reader.py)\n"
                 "    if [ \"${3:-}\" = --require-explicit ] && [ \"${FAKE_RUNTIME_STATE_MISSING:-0}\" = 1 ]; then exit 1; fi\n"
                 "    count=0; [ -f \"${FAKE_RUNTIME_STATE_COUNTER}\" ] && count=$(cat \"${FAKE_RUNTIME_STATE_COUNTER}\")\n"
@@ -441,6 +457,10 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
                 "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
                 "N100_SAFE_DEPLOY_PROJECT_ROOT": str(root),
                 "N100_SAFE_DEPLOY_STATE_DIR": str(state_dir),
+                "FAKE_EXPECTED_SHA": expected_sha,
+                "FAKE_PREVIOUS_SHA": previous_sha or "",
+                "FAKE_DOWNSTREAM_DIFF": str(downstream_diff),
+                "FAKE_CLASSIFIER": str(MODULE_PATH),
                 "FAKE_HEALTH_RESULTS": ",".join(map(str, health_results)),
                 "FAKE_COMPOSE_RESULTS": ",".join(map(str, compose_results)),
                 "FAKE_DOCKER_RUN_RESULTS": ",".join(map(str, docker_run_results)),
@@ -871,7 +891,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
             previous_sha="not-a-revision", health_results=(1,)
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(calls.count("git archive"), 1)
+        self.assertEqual(calls.count("git archive"), 0)
         self.assertNotIn("safe_cd_stage=rollback", result.stderr)
 
     def test_saved_revision_that_is_not_an_origin_main_ancestor_never_rolls_back(self):
@@ -879,7 +899,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
             previous_sha=self.OLD_SHA, health_results=(1,), rejected_sha=self.OLD_SHA
         )
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(calls.count("git archive"), 1)
+        self.assertEqual(calls.count("git archive"), 0)
         self.assertNotIn("safe_cd_stage=rollback", result.stderr)
         self.assertEqual(saved_state, f"{self.OLD_SHA}\n")
 
@@ -893,6 +913,43 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
         self.assertNotIn("docker compose", invalid_sha_calls)
         self.assertNotIn("docker compose", invalid_service_calls)
 
+    def test_older_equivalent_release_does_not_regress_healthy_checkpoint(self):
+        result, calls, state = self.run_safe_deploy(origin_main_sha=self.OLD_SHA, previous_sha=self.OLD_SHA, downstream_changes=b'M\0README.md\0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('build crawler-worker', calls)
+        self.assertEqual(state, f'{self.OLD_SHA}\n')
+
+    def test_documentation_push_does_not_cancel_verified_service_release(self):
+        result, calls, state = self.run_safe_deploy(origin_main_sha=self.OLD_SHA, downstream_changes=b'M\0README.md\0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('git archive', calls)
+        self.assertEqual(state, f"{self.NEW_SHA}\n")
+
+    def test_disjoint_followup_service_does_not_cancel_original_release(self):
+        result, calls, state = self.run_safe_deploy(origin_main_sha=self.OLD_SHA, downstream_changes=b'M\0book-memo/app/main.py\0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('build crawler-worker', calls)
+        self.assertNotIn('build book-memo', calls)
+
+    def test_followup_service_code_supersedes_only_overlapping_targets(self):
+        result, calls, state = self.run_safe_deploy(services=('crawler-worker', 'book-memo'), origin_main_sha=self.OLD_SHA, downstream_changes=b'M\0book-memo/app/main.py\0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('build crawler-worker', calls)
+        self.assertNotIn('build book-memo', calls)
+
+    def test_fully_superseded_release_does_not_build_or_change_healthy_revision(self):
+        result, calls, state = self.run_safe_deploy(origin_main_sha=self.OLD_SHA, downstream_changes=b'M\0crawler-worker/app/main.py\0', previous_sha=self.OLD_SHA)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('reason=superseded', result.stderr)
+        self.assertNotIn('docker ', calls)
+        self.assertEqual(state, f"{self.OLD_SHA}\n")
+
+    def test_rename_from_protected_downstream_path_refuses_release(self):
+        result, calls, state = self.run_safe_deploy(origin_main_sha=self.OLD_SHA, downstream_changes=b'R100\0portal-web/app/main.py\0book-memo/app/main.py\0')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('git archive', calls)
+        self.assertNotIn('docker ', calls)
+
     def test_stale_expected_sha_refuses_before_archive_or_docker(self):
         result, calls, _ = self.run_safe_deploy(origin_main_sha=self.OLD_SHA)
         self.assertNotEqual(result.returncode, 0)
@@ -905,6 +962,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
             fake_bin = Path(directory) / "bin"
             fake_bin.mkdir()
             calls = Path(directory) / "calls"
+
             self._write_executable(
                 fake_bin / "docker",
                 "#!/bin/sh\n"
@@ -937,6 +995,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
             fake_bin = Path(directory) / "bin"
             fake_bin.mkdir()
             calls = Path(directory) / "calls"
+
             self._write_executable(
                 fake_bin / "docker",
                 "#!/bin/sh\n"
@@ -975,6 +1034,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
             fake_bin = Path(directory) / "bin"
             fake_bin.mkdir()
             calls = Path(directory) / "calls"
+
             self._write_executable(
                 fake_bin / "docker",
                 "#!/bin/sh\n"
@@ -1013,6 +1073,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
             fake_bin = Path(directory) / "bin"
             fake_bin.mkdir()
             calls = Path(directory) / "calls"
+
             counter = Path(directory) / "inspect-counter"
             self._write_executable(
                 fake_bin / "docker",
@@ -1050,6 +1111,7 @@ class N100SafeDeploymentScriptTests(unittest.TestCase):
             fake_bin = Path(directory) / "bin"
             fake_bin.mkdir()
             calls = Path(directory) / "calls"
+
             self._write_executable(
                 fake_bin / "docker",
                 "#!/bin/sh\n"

@@ -13,6 +13,64 @@ from tests.book_memo import test_ui_contract
 
 
 class BookReliabilityTests(unittest.TestCase):
+    def test_parallel_bulk_chapters_do_not_duplicate_titles_or_positions(self):
+        from contextlib import contextmanager
+        from threading import Barrier
+        with tempfile.TemporaryDirectory() as tmp, test_ui_contract.BookMemoUiContractTests().loaded_app(tmp):
+            from app.services import book_service as service
+            book = service.create_or_get_book({'isbn': 'bulk-parallel', 'title': '책'})
+            connect = service._connect
+            barrier = Barrier(2)
+            class ObserveConnection:
+                def __init__(self, connection): self.connection = connection
+                def execute(self, sql, *args):
+                    cursor = self.connection.execute(sql, *args)
+                    # Expose the old read-before-write race without blocking a locked transaction.
+                    if 'MAX(position)' in sql and not self.connection.in_transaction:
+                        barrier.wait(timeout=5)
+                    return cursor
+                def __getattr__(self, name): return getattr(self.connection, name)
+            @contextmanager
+            def observed_connect():
+                with connect() as connection: yield ObserveConnection(connection)
+            with patch.object(service, '_connect', observed_connect), ThreadPoolExecutor(max_workers=2) as pool:
+                counts = list(pool.map(lambda _: service.create_chapters(book['id'], ['목차']), range(2)))
+            self.assertEqual(sorted(counts), [0, 1])
+            self.assertEqual([(row['title'], row['position']) for row in service.list_chapters(book['id'])], [('목차', 1)])
+
+    def test_tag_stale_form_conflicts_and_preserves_latest_tags(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'DELETE_PASSWORD': 'test'}), test_ui_contract.BookMemoUiContractTests().loaded_app(tmp) as app:
+            from app.services import book_service as service
+            book = service.create_or_get_book({'isbn': 'audit', 'title': '책'})
+            service.create_memo(book['id'], None, '메모', '본문', 0)
+            memo = service.list_memos(book['id'])[0]
+            with TestClient(app, base_url='https://books.len.pe.kr') as client:
+                headers = {'Origin': 'https://books.len.pe.kr'}
+                client.post('/auth/login', data={'password': 'test'}, headers=headers)
+                page = client.get(f"/books/{book['id']}").text
+                tag_form = re.search(r'<form[^>]*action="/memos/' + str(memo['id']) + r'/tags"[^>]*>(.*?)</form>', page, re.S).group(1)
+                self.assertIn('name="expected_version" value="1"', tag_form)
+                path = f"/memos/{memo['id']}/tags"
+                first = {'tags': '최신', 'expected_version': '1', 'request_id': 'c'*32}
+                self.assertEqual(client.post(path, data=first, headers=headers, follow_redirects=False).status_code, 303)
+                stale = {'tags': '오래된 입력', 'expected_version': '1', 'request_id': 'd'*32}
+                self.assertEqual(client.post(path, data=stale, headers=headers).status_code, 409)
+                self.assertEqual(client.post(path, data={'tags': '누락'}, headers=headers).status_code, 409)
+                self.assertEqual(client.post(path, data=first, headers=headers, follow_redirects=False).status_code, 303)
+                self.assertEqual(service.list_memos(book['id'])[0]['tags'], ['최신'])
+
+    def test_unicode_password_attempt_is_rejected_and_counted_and_unicode_password_can_login(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'DELETE_PASSWORD': 'test'}), test_ui_contract.BookMemoUiContractTests().loaded_app(tmp) as app:
+            import app.main as main
+            with TestClient(app, base_url='https://books.len.pe.kr', raise_server_exceptions=False) as client:
+                headers = {'Origin': 'https://books.len.pe.kr'}
+                response = client.post('/auth/login', data={'password': '잘못된암호'}, headers=headers)
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(sum(len(rows) for rows in main._AUTH_FAILURES.values()), 1)
+                with patch.dict(os.environ, {'DELETE_PASSWORD': '정상암호'}):
+                    response = client.post('/auth/login', data={'password': '정상암호'}, headers=headers, follow_redirects=False)
+                self.assertEqual(response.status_code, 303)
+
     def test_old_schema_parallel_init_and_retry_preserve_data_atomically(self):
         with tempfile.TemporaryDirectory() as tmp, test_ui_contract.BookMemoUiContractTests().loaded_app(tmp):
             from app.services import book_service as service
@@ -128,7 +186,7 @@ class BookReliabilityTests(unittest.TestCase):
             with TestClient(app, base_url='https://books.len.pe.kr') as client:
                 headers = {'Origin': 'https://books.len.pe.kr'}
                 client.post('/auth/login', data={'password': 'test'}, headers=headers)
-                for body in [{'tags': '이전', 'request_id': 'a'*32}, {'tags': '최신', 'request_id': 'b'*32}, {'tags': '이전', 'request_id': 'a'*32}]:
+                for body in [{'tags': '이전', 'expected_version': '1', 'request_id': 'a'*32}, {'tags': '최신', 'expected_version': '2', 'request_id': 'b'*32}, {'tags': '이전', 'expected_version': '1', 'request_id': 'a'*32}]:
                     self.assertEqual(client.post(f'/memos/{memo_id}/tags', data=body, headers=headers, follow_redirects=False).status_code, 303)
                 self.assertEqual(service.list_memos(book['id'])[0]['tags'], ['최신'])
 

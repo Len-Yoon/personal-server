@@ -497,10 +497,10 @@ def edit_book_memo(
 
 
 @app.post("/memos/{memo_id}/tags")
-def edit_book_memo_tags(request: Request, memo_id: int, tags: str = Form(default=""), request_id: str = Form(default="")):
+def edit_book_memo_tags(request: Request, memo_id: int, tags: str = Form(default=""), request_id: str = Form(default=""), expected_version: int = Form(default=0)):
     _require_write_session(request)
     try:
-        book_id = update_memo_tags(memo_id, tags, request_id=request_id)
+        book_id = update_memo_tags(memo_id, tags, request_id=request_id, expected_version=expected_version)
     except ValueError as error:
         raise HTTPException(status_code=409 if isinstance(error, WriteConflict) else 400, detail=str(error)) from error
     if book_id is None:
@@ -603,7 +603,7 @@ def write_login(request: Request, password: str = Form(default=""), next_path: s
     if not configured_password:
         return _write_login_response(request, "쓰기 비밀번호가 설정되지 않았습니다.", 403, safe_next_path)
 
-    if not secrets.compare_digest(password, configured_password):
+    if not secrets.compare_digest(password.encode("utf-8"), configured_password.encode("utf-8")):
         if _record_auth_failure(client):
             return _write_login_response(request, "비밀번호 실패가 반복되어 잠시 후 다시 시도해주세요.", 429, safe_next_path)
         return _write_login_response(request, "비밀번호가 올바르지 않습니다.", 403, safe_next_path)
@@ -640,7 +640,7 @@ def _require_delete_password(request: Request, password: str) -> None:
     if not configured_password:
         raise HTTPException(status_code=403, detail="삭제 비밀번호가 설정되지 않았습니다.")
 
-    if not secrets.compare_digest(password, configured_password):
+    if not secrets.compare_digest(password.encode("utf-8"), configured_password.encode("utf-8")):
         if _record_auth_failure(client):
             raise HTTPException(status_code=429, detail="비밀번호 실패가 반복되어 잠시 후 다시 시도해주세요.")
         raise HTTPException(status_code=403, detail="삭제 비밀번호가 올바르지 않습니다.")

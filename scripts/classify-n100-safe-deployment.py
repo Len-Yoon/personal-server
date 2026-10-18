@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Iterable, Literal, Sequence
 
@@ -166,6 +167,16 @@ def classify_changed_paths(paths: Iterable[str]) -> DeploymentDecision:
     return DeploymentDecision("skip", (), REASON_DOCUMENTATION)
 
 
+def remaining_services(requested: Sequence[str], downstream_paths: Iterable[str]) -> tuple[str, ...]:
+    """Only subtract superseded services; never grant new deployment targets."""
+    if not requested or len(set(requested)) != len(requested) or any(service not in SAFE_SERVICES for service in requested):
+        raise ValueError("invalid requested deployment services")
+    downstream = classify_changed_paths(downstream_paths)
+    if downstream.action == "blocked":
+        raise ValueError("downstream changes require explicit deployment review")
+    return tuple(service for service in requested if service not in downstream.services)
+
+
 def _changed_paths(base: str, head: str) -> list[str]:
     result = subprocess.run(
         ["git", "diff", "--name-status", "-z", "--find-renames", f"{base}..{head}"],
@@ -199,9 +210,20 @@ def main(argv: Sequence[str] | None = None, *, changed_paths: Iterable[str] | No
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", required=True)
     parser.add_argument("--head", required=True)
-    parser.add_argument("--github-output", required=True)
+    parser.add_argument("--github-output")
+    parser.add_argument("--subtract-services")
     args = parser.parse_args(argv)
     paths = list(changed_paths) if changed_paths is not None else _changed_paths(args.base, args.head)
+    if args.subtract_services is not None:
+        try:
+            selected = remaining_services(args.subtract_services.split(","), paths)
+        except ValueError:
+            print("safe_cd_stage=preflight reason=downstream_blocked", file=sys.stderr)
+            return 1
+        print(",".join(selected))
+        return 0
+    if not args.github_output:
+        parser.error("--github-output is required for classification")
     decision = classify_changed_paths(paths)
     _write_github_output(args.github_output, decision)
     print(f"action={decision.action} services={','.join(decision.services)} reason={decision.reason}")

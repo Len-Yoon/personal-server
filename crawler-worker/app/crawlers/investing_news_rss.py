@@ -36,7 +36,9 @@ def search_investing_news_rss(limit: int = 50) -> list[dict]:
         category="INVESTING",
         source_name=INVESTING_SOURCE,
         provider_name="Investing.com RSS",
-        limit=max(limit, 8),
+        # These feeds must be filtered for date and market topic before the
+        # caller limit is applied; raw entries can all be ineligible.
+        limit=None,
         source_filter=INVESTING_SOURCE,
     )
     cleaned_articles = _clean_articles(direct_articles)
