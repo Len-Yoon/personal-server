@@ -696,11 +696,14 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
             evidence=valid_backup_evidence(),
             report_mode="validation",
             patch_fails=True,
+            recovery_timeout="180", fast_recovery_clock=True,
         )
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIsNone(payload)
         self.assertEqual(diagnostics["data"]["result"], "passed")
+        self.assertEqual(diagnostics["data"]["failure_stage"], "none")
+        self.assertEqual(diagnostics["data"]["cleanup_status"], "passed")
         self.assertIn("patch configmap sre-quarterly-audit-diagnostics", calls)
         self.assertNotIn("patch configmap sre-telegram-quarterly-audit-status", calls)
 
