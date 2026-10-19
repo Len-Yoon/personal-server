@@ -182,8 +182,14 @@ def merge_records(existing: list, record: dict) -> list:
     validated = {}
     for item in existing:
         checked = validate_record(item)
+        previous = validated.get(checked["date"])
+        if previous is not None and previous.get("criteria_version") != checked.get("criteria_version"):
+            raise ValueError("conflicting criteria for an existing date")
         validated[checked["date"]] = checked
     replacement = validate_record(record)
+    previous = validated.get(replacement["date"])
+    if previous is not None and previous.get("criteria_version") != replacement.get("criteria_version"):
+        raise ValueError("cannot replace an existing date with different criteria")
     validated[replacement["date"]] = replacement
     merged = list(validated.values())
     merged.sort(key=lambda item: item["date"], reverse=True)

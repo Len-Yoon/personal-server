@@ -204,6 +204,25 @@ class SloDailyEvidenceValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             module.validate_record(dict(new, criteria_version="unreviewed"))
 
+    def test_same_day_criteria_change_cannot_patch_retained_evidence(self):
+        old = {"date": "2026-08-30", **valid_fields()}
+        new = {**old, "criteria_version": "freshness-1800-v1"}
+        for existing_rows, replacement in (([old], new), ([new], old), ([old, new], new)):
+            with self.subTest(existing_versions=[row.get("criteria_version") for row in existing_rows]):
+                calls = []
+
+                def fake_run(command, **unused):
+                    calls.append(command)
+                    self.assertIn("get", command)
+                    return subprocess.CompletedProcess(command, 0, json.dumps({
+                        "data": {"records.json": json.dumps(existing_rows)},
+                    }), "")
+
+                with self.assertRaises(RuntimeError):
+                    module.update_configmap(replacement, subprocess_run=fake_run)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual([module.validate_record(row) for row in existing_rows], existing_rows)
+
     def test_validate_record_rejects_invalid_date_and_non_utc_timestamp(self):
         for record in (
             {"date": "2026-02-30", **valid_fields()},
