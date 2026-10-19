@@ -1,0 +1,161 @@
+rule_files:
+  - host-disk-alerts.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: low-space-holds-ten-minutes-and-clears-on-recovery
+    interval: 1m
+    input_series:
+      - series: personal_server_host_disk_available_bytes{host="windows",volume="C:"}
+        values: '149x12 200x8'
+      - series: personal_server_host_disk_capacity_bytes{host="windows",volume="C:"}
+        values: '1000x21'
+      - series: personal_server_host_disk_collection_ok{host="windows",volume="C:"}
+        values: '1x21'
+      - series: personal_server_host_disk_sample_timestamp_seconds{host="windows",volume="C:"}
+        values: '0+60x21'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: HostDiskSpaceLow
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: HostDiskSpaceLow
+        exp_alerts:
+          - &low_alert
+            exp_labels:
+              host: windows
+              volume: 'C:'
+              severity: warning
+              sre_telegram: 'true'
+            exp_annotations:
+              summary: Windows 호스트 디스크 가용 공간 부족
+              description: '검증된 C: 가용 공간 15% 미만 상태가 10분 동안 지속됨'
+      - eval_time: 12m
+        alertname: HostDiskSpaceLow
+        exp_alerts: [*low_alert]
+      - eval_time: 13m
+        alertname: HostDiskSpaceLow
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: HostDiskMetricsStale
+        exp_alerts: []
+
+  - name: exact-fifteen-percent-is-not-low-space
+    interval: 1m
+    input_series:
+      - series: personal_server_host_disk_available_bytes{host="windows",volume="C:"}
+        values: '150x21'
+      - series: personal_server_host_disk_capacity_bytes{host="windows",volume="C:"}
+        values: '1000x21'
+      - series: personal_server_host_disk_collection_ok{host="windows",volume="C:"}
+        values: '1x21'
+      - series: personal_server_host_disk_sample_timestamp_seconds{host="windows",volume="C:"}
+        values: '0+60x21'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HostDiskSpaceLow
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: HostDiskSpaceLow
+        exp_alerts: []
+
+  - name: invalid-collection-suppresses-low-space-and-alerts-on-invalidity
+    interval: 1m
+    input_series:
+      - series: personal_server_host_disk_available_bytes{host="windows",volume="C:"}
+        values: '100x21'
+      - series: personal_server_host_disk_capacity_bytes{host="windows",volume="C:"}
+        values: '1000x21'
+      - series: personal_server_host_disk_collection_ok{host="windows",volume="C:"}
+        values: '0x10 1x10'
+      - series: personal_server_host_disk_sample_timestamp_seconds{host="windows",volume="C:"}
+        values: '0+60x21'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: HostDiskMetricsStale
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: HostDiskMetricsStale
+        exp_alerts:
+          - &stale_alert
+            exp_labels:
+              host: windows
+              volume: 'C:'
+              severity: warning
+              sre_telegram: 'true'
+            exp_annotations:
+              summary: Windows 호스트 디스크 수집 중단
+              description: 검증된 원본 지표가 없거나 35분 넘게 갱신되지 않은 상태가 5분 지속됨
+      - eval_time: 10m
+        alertname: HostDiskSpaceLow
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: HostDiskMetricsStale
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: HostDiskSpaceLow
+        exp_alerts: []
+
+  - name: frozen-source-clock-has-strict-thirty-five-minute-boundary-and-recovers
+    interval: 1m
+    input_series:
+      - series: personal_server_host_disk_available_bytes{host="windows",volume="C:"}
+        values: '149x53'
+      - series: personal_server_host_disk_capacity_bytes{host="windows",volume="C:"}
+        values: '1000x53'
+      - series: personal_server_host_disk_collection_ok{host="windows",volume="C:"}
+        values: '1x53'
+      - series: personal_server_host_disk_sample_timestamp_seconds{host="windows",volume="C:"}
+        values: '0x41 2520+60x11'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: HostDiskMetricsStale
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: HostDiskSpaceLow
+        exp_alerts: [*low_alert]
+      - eval_time: 36m
+        alertname: HostDiskSpaceLow
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: HostDiskMetricsStale
+        exp_alerts: []
+      - eval_time: 41m
+        alertname: HostDiskMetricsStale
+        exp_alerts: [*stale_alert]
+      - eval_time: 42m
+        alertname: HostDiskMetricsStale
+        exp_alerts: []
+      - eval_time: 42m
+        alertname: HostDiskSpaceLow
+        exp_alerts: []
+      - eval_time: 52m
+        alertname: HostDiskSpaceLow
+        exp_alerts: [*low_alert]
+
+  - name: absent-from-start-fires-after-five-minutes-and-clears-when-fresh
+    interval: 1m
+    input_series:
+      - series: personal_server_host_disk_available_bytes{host="windows",volume="C:"}
+        values: '_ _ _ _ _ _ 200x10'
+      - series: personal_server_host_disk_capacity_bytes{host="windows",volume="C:"}
+        values: '_ _ _ _ _ _ 1000x10'
+      - series: personal_server_host_disk_collection_ok{host="windows",volume="C:"}
+        values: '_ _ _ _ _ _ 1x10'
+      - series: personal_server_host_disk_sample_timestamp_seconds{host="windows",volume="C:"}
+        values: '_ _ _ _ _ _ 360+60x10'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: HostDiskMetricsStale
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: HostDiskMetricsStale
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: HostDiskMetricsStale
+        exp_alerts: [*stale_alert]
+      - eval_time: 6m
+        alertname: HostDiskMetricsStale
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: HostDiskSpaceLow
+        exp_alerts: []

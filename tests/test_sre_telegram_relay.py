@@ -602,6 +602,97 @@ class RelayServiceTest(unittest.TestCase):
             self.assertNotIn("private-node", message)
             self.assertNotIn("private-volume", message)
 
+    def test_host_disk_alerts_use_fixed_presentations_without_external_metadata(self):
+        relay = RelayService(k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
+        presentations = {
+            "HostDiskSpaceLow": "Windows 호스트 디스크 가용 공간 부족",
+            "HostDiskMetricsStale": "Windows 호스트 디스크 수집 중단",
+        }
+        for name, title in presentations.items():
+            for status, heading in (("firing", "[장애 감지]"), ("resolved", "[복구 확인]")):
+                with self.subTest(name=name, status=status):
+                    message = relay._format_alert(status, [{
+                        "labels": {"alertname": name, "instance": "private-host-address",
+                                   "volume": "private-volume", "deployment": "portal-web",
+                                   "injected": "arbitrary-label"},
+                        "annotations": {"summary": "arbitrary-summary", "description": "arbitrary-description"},
+                    }])
+                    self.assertTrue(message.startswith(heading))
+                    self.assertIn("문제: " + title, message)
+                    self.assertIn("대상: Windows 호스트 디스크", message)
+                    for forbidden in ("private-host-address", "private-volume", "arbitrary-label",
+                                      "arbitrary-summary", "arbitrary-description", "대상: Portal"):
+                        self.assertNotIn(forbidden, message)
+
+    def test_host_disk_notification_test_has_test_only_firing_and_ended_headings(self):
+        relay = RelayService(k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
+        alert = {"labels": {"alertname": "HostDiskNotificationTest", "instance": "private-host-address",
+                            "volume": "private-volume", "injected": "portal-web"},
+                 "annotations": {"summary": "arbitrary-summary"}}
+        for status, heading in (("firing", "[알림 시험]"), ("resolved", "[알림 시험 종료]")):
+            with self.subTest(status=status):
+                message = relay._format_alert(status, [alert])
+                self.assertTrue(message.startswith(heading))
+                self.assertIn("Windows 호스트 디스크 알림 시험", message)
+                self.assertIn("운영 장애가 아님", message)
+                self.assertIn("대상: Windows 호스트 디스크", message)
+                self.assertNotIn("정상으로 돌아왔습니다", message)
+                for forbidden in ("private-host-address", "private-volume", "arbitrary-summary", "대상: Portal"):
+                    self.assertNotIn(forbidden, message)
+
+    def test_mixed_host_test_and_real_alerts_preserve_operational_heading(self):
+        relay = RelayService(k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
+        test = {"labels": {"alertname": "HostDiskNotificationTest"}}
+        real = {"labels": {"alertname": "HostDiskSpaceLow"}}
+        for status, heading in (("firing", "[장애 감지]"), ("resolved", "[복구 확인]")):
+            for alerts in ([test, real], [real, test], [test] * relay_main.MAX_ALERT_ITEMS + [real]):
+                with self.subTest(status=status, real_first=alerts[0] is real, count=len(alerts)):
+                    message = relay._format_alert(status, alerts)
+                    self.assertTrue(message.startswith(heading))
+                    self.assertIn("Windows 호스트 디스크 알림 시험", message)
+                    self.assertIn("운영 장애가 아님", message)
+
+    def test_host_disk_test_failed_callback_retries_before_persisting_and_deduplicates_resolve(self):
+        k8s = FakeConfigMapK8s()
+        store = ConfigMapAlertStateStore(k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP)
+        deliveries = []
+        responses = iter((False, True, False, True))
+
+        def callback(message):
+            deliveries.append(message)
+            return next(responses)
+
+        relay = RelayService(alertmanager_auth_token="expected", k8s_client=k8s,
+                             prometheus_client=FakePrometheus(), alert_state_store=store,
+                             alert_callback=callback)
+
+        def request(status, authorization="Bearer expected"):
+            body = json.dumps({"status": status, "alerts": [{"fingerprint": "host-disk-test-fixture",
+                              "labels": {"alertname": "HostDiskNotificationTest"}}]}).encode()
+            return handle_http_request(relay, method="POST", path="/alertmanager",
+                                       authorization=authorization, content_length=str(len(body)), body=body)
+
+        self.assertEqual(request("firing", "Bearer wrong"), (401, b"unauthorized\n"))
+        self.assertEqual(deliveries, [])
+        self.assertIsNone(store.load("host-disk-test-fixture"))
+        with self.assertLogs("app.main", level="WARNING"):
+            self.assertEqual(request("firing"), (503, b"delivery failed\n"))
+        self.assertIsNone(store.load("host-disk-test-fixture"))
+        self.assertEqual(request("firing")[0], 200)
+        self.assertEqual(store.load("host-disk-test-fixture")[0], "firing")
+        self.assertEqual(request("firing"), (200, b"duplicate suppressed\n"))
+        with self.assertLogs("app.main", level="WARNING"):
+            self.assertEqual(request("resolved"), (503, b"delivery failed\n"))
+        self.assertEqual(store.load("host-disk-test-fixture")[0], "firing")
+        self.assertEqual(request("resolved")[0], 200)
+        self.assertEqual(store.load("host-disk-test-fixture")[0], "resolved")
+        restarted = ConfigMapAlertStateStore(k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP)
+        self.assertEqual(restarted.load("host-disk-test-fixture")[0], "resolved")
+        self.assertEqual(request("resolved"), (200, b"duplicate suppressed\n"))
+        self.assertEqual(len(deliveries), 4)
+        self.assertTrue(all(message.startswith("[알림 시험]") for message in deliveries[:2]))
+        self.assertTrue(all(message.startswith("[알림 시험 종료]") for message in deliveries[2:]))
+
     def test_news_collection_alert_has_korean_secret_free_presentation(self):
         relay = RelayService(
             allowed_chat_id="123",

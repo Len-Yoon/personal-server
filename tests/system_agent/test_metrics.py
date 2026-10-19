@@ -319,3 +319,75 @@ class SystemAgentMetricsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostDiskPrometheusTests(unittest.TestCase):
+    def render(self, mutation=None, raw=None):
+        prepare_service_import('system-agent')
+        from app.services.host_disk_metrics import render_host_disk_metrics
+        self.now = datetime(2026, 10, 19, 0, 0, tzinfo=timezone.utc)
+        self.payload = {'captured_at': self.now.isoformat(), 'host_disk': {
+            'source': 'windows-cim', 'volume': 'C:', 'total_bytes': 1000,
+            'available_bytes': 700}, 'private': 'never-export-this'}
+        if mutation:
+            mutation(self.payload)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'host.json'
+            path.write_text(raw if raw is not None else json.dumps(self.payload))
+            return render_host_disk_metrics(path, self.now)
+
+    def test_identified_capacity_and_original_measurement_time_are_exported(self):
+        text = self.render()
+        self.assertIn('capacity_bytes{host="windows",volume="C:"} 1000', text)
+        self.assertIn('available_bytes{host="windows",volume="C:"} 700', text)
+        self.assertIn(f'sample_timestamp_seconds{{host="windows",volume="C:"}} {self.now.timestamp()}', text)
+        self.assertIn('collection_ok{host="windows",volume="C:"} 1', text)
+        self.assertNotIn('never-export', text)
+
+    def test_invalid_source_capacity_or_time_never_becomes_zero_space_or_healthy(self):
+        mutations = [
+            lambda p: p.update(host_disk=[]),
+            lambda p: p['host_disk'].update(source='untrusted-private-host'),
+            lambda p: p['host_disk'].update(volume='private-path'),
+            lambda p: p['host_disk'].update(total_bytes=0),
+            lambda p: p['host_disk'].update(available_bytes=-1),
+            lambda p: p['host_disk'].update(available_bytes=1001),
+            lambda p: p['host_disk'].update(available_bytes=True),
+            lambda p: p['host_disk'].update(total_bytes=float('nan')),
+            lambda p: p.update(captured_at='2026-10-19T01:00:00+00:00'),
+            lambda p: p.update(captured_at='2026-10-19T00:00:00'),
+        ]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                text = self.render(mutation)
+                self.assertIn('collection_ok{host="windows",volume="C:"} 0', text)
+                self.assertNotIn('available_bytes', text)
+                self.assertNotIn('capacity_bytes', text)
+                self.assertNotIn('private', text)
+        for raw in ('[]', 'null', '{', 'x' * 16385):
+            text = self.render(raw=raw)
+            self.assertNotIn('available_bytes', text)
+            self.assertIn('collection_ok{host="windows",volume="C:"} 0', text)
+
+    def test_stale_source_keeps_its_original_timestamp_and_marks_collection_failed(self):
+        text = self.render(lambda p: p.update(captured_at=(self.now - timedelta(seconds=2101)).isoformat()))
+        self.assertIn('collection_ok{host="windows",volume="C:"} 0', text)
+        self.assertIn(str((self.now - timedelta(seconds=2101)).timestamp()), text)
+        self.assertNotIn(str(self.now.timestamp()), text)
+
+    def test_missing_source_is_unhealthy_and_endpoint_preserves_existing_json_contract(self):
+        prepare_service_import('system-agent')
+        from app.services.host_disk_metrics import render_host_disk_metrics
+        from app.main import app
+        from fastapi.testclient import TestClient
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'absent'
+            text = render_host_disk_metrics(path)
+            self.assertIn('collection_ok{host="windows",volume="C:"} 0', text)
+            with patch.dict(os.environ, {'HOST_METRICS_PATH': str(path)}), TestClient(app) as client:
+                response = client.get('/internal/metrics')
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.headers['content-type'].startswith('text/plain; version=0.0.4'))
+                self.assertEqual(response.text, text)
+                self.assertIsInstance(client.get('/metrics/demo').json(), dict)
