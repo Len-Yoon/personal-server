@@ -78,6 +78,11 @@ def summarize_records(records, end_date, days=30):
     unobservable_days = sum(item['overall'] == 'unobservable' for item in selected.values())
     return {
         'schema_version': 1,
+        'criteria': {
+            'record_counts': {version: sum(item.get('criteria_version', 'legacy-freshness-900') == version for item in selected.values())
+                              for version in ('legacy-freshness-900', 'freshness-1800-v1')},
+            'mixed': len({item.get('criteria_version', 'legacy-freshness-900') for item in selected.values()}) > 1,
+        },
         'period': {'start_date': start.isoformat(), 'end_date': end_date.isoformat(),
                    'days': days, 'timezone': 'Asia/Seoul'},
         'present_days': len(selected), 'missing_dates': missing_dates,

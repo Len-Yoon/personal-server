@@ -389,7 +389,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         result, payload, _, calls = self.run_runner(evidence=valid_backup_evidence())
 
         self.assertEqual(result.returncode, 0, f"{result.stderr}\n{calls}")
-        self.assertEqual(set(payload["data"]), {"run_id", "status", "completed_at", "health_audit", "backup_check", "recovery_lab", "health_check", "backup_evidence", "slo_evidence", "slo_days_recorded", "slo_days_ok", "slo_days_unobservable"})
+        self.assertEqual(set(payload["data"]), {"run_id", "status", "completed_at", "health_audit", "backup_check", "recovery_lab", "health_check", "backup_evidence", "slo_evidence", "slo_days_recorded", "slo_days_ok", "slo_days_unobservable", "slo_evidence_reason", "slo_criteria"})
         stale_configmap = {
             "data": {
                 "health_check": "passed",
@@ -430,7 +430,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             {key: value for key, value in payload["data"].items() if key.startswith("slo_")},
-            {"slo_evidence": "passed", "slo_days_recorded": "30", "slo_days_ok": "30", "slo_days_unobservable": "0"},
+            {"slo_evidence": "passed", "slo_days_recorded": "30", "slo_days_ok": "30", "slo_days_unobservable": "0", "slo_evidence_reason": "none", "slo_criteria": "legacy_900"},
         )
         evidence_calls = [line for line in calls.splitlines() if "slo-daily-evidence" in line]
         self.assertEqual(len(evidence_calls), 1)
@@ -495,7 +495,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         for field, invalid in (
             ("date", "2026-02-30"), ("collected_at", "2026-09-01T02:00:00+09:00"),
             ("overall", "passed"), ("public_health", []), ("missing", ["sensitive-source-error"]),
-            ("portal_http", None), ("unexpected", "sensitive-source-error"),
+            ("portal_http", None), ("unexpected", "sensitive-source-error"), ("criteria_version", "unreviewed"),
         ):
             records = valid_slo_records()
             records[0][field] = invalid
@@ -510,8 +510,29 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr + str(payload) + calls)
                 self.assertEqual(payload["data"].get("slo_evidence"), "unobservable")
                 for key in ("slo_days_recorded", "slo_days_ok", "slo_days_unobservable"):
-                    self.assertEqual(payload["data"][key], "0")
+                    self.assertEqual(payload["data"][key], "unknown")
+                self.assertEqual(payload["data"]["slo_evidence_reason"], "invalid_records")
                 self.assertNotIn("sensitive-source-error", result.stdout + result.stderr + json.dumps(payload))
+
+    def test_runner_accepts_versioned_and_legacy_evidence_without_changing_counts(self):
+        records = valid_slo_records()
+        records[0]['criteria_version'] = 'freshness-1800-v1'
+        result, payload, _, _ = self.run_runner(
+            evidence=valid_backup_evidence(), slo_records=json.dumps(records), recovery_timeout="180", fast_recovery_clock=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload['data']['slo_days_recorded'], '30')
+        self.assertEqual(payload['data']['slo_evidence_reason'], 'none')
+        self.assertEqual(payload['data']['slo_criteria'], 'mixed')
+        self.assertEqual(payload['data']['slo_evidence'], 'unobservable')
+
+    def test_runner_empty_slo_records_remain_known_zero(self):
+        result, payload, _, _ = self.run_runner(
+            evidence=valid_backup_evidence(), slo_records="[]", recovery_timeout="180", fast_recovery_clock=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(payload["data"]["slo_days_recorded"], "0")
+        self.assertEqual(payload["data"]["slo_evidence_reason"], "none")
 
     def test_runner_slo_read_failure_is_unobservable_and_validation_mode_skips_read(self):
         # This tests SLO read handling, not host scheduling within a 2-second
@@ -520,7 +541,8 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         result, payload, _, _ = self.run_runner(evidence=valid_backup_evidence(), scenario="slo-configmap-fail", recovery_timeout="180", fast_recovery_clock=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(payload["data"].get("slo_evidence"), "unobservable")
-        self.assertEqual(payload["data"]["slo_days_recorded"], "0")
+        self.assertEqual(payload["data"]["slo_days_recorded"], "unknown")
+        self.assertEqual(payload["data"]["slo_evidence_reason"], "read_failed")
         self.assertNotIn("sensitive-source-error", result.stdout + result.stderr)
         result, _, diagnostics, calls = self.run_runner(evidence=valid_backup_evidence(), report_mode="validation", recovery_timeout="180", fast_recovery_clock=True)
         self.assertEqual(result.returncode, 0, result.stderr)

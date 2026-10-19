@@ -32,7 +32,7 @@ EXPECTED_DOCKERFILE_BASE_IMAGES = {
         "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
     ),
     "infra/k8s/slo-evidence/Dockerfile": (
-        "python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534",
+        "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
     ),
     "infra/k8s/sre-audit-automation/Dockerfile": (
         "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
@@ -193,6 +193,7 @@ class ComposeConfigTests(unittest.TestCase):
                             'infra/k8s/backup-automation/crawler-worker/Dockerfile',
                             'infra/k8s/backup-automation/youtube-memo/Dockerfile',
                             'infra/k8s/sre-audit-automation/Dockerfile',
+                            'infra/k8s/slo-evidence/Dockerfile',
                             'sre-telegram-relay/Dockerfile',
                         }):
                     self.assertRegex(images[0], r"^python:\d+\.\d+-alpine3\.24@sha256:[0-9a-f]{64}$")

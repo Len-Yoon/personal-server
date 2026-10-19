@@ -57,6 +57,15 @@ class SloEvidenceSummaryTests(unittest.TestCase):
         self.assertEqual(result['slo_budget']['reason'], 'daily_evidence_is_not_time_series')
         self.assertNotIn('availability_percent', result)
 
+    def test_mixed_criteria_are_explicit_without_rewriting_old_records(self):
+        old = record('2026-10-03')
+        new = record('2026-10-04', criteria_version='freshness-1800-v1')
+        summary = self.module().summarize_records([old, new], date(2026, 10, 4), 2)
+        self.assertTrue(summary['criteria']['mixed'])
+        self.assertEqual(summary['criteria']['record_counts'], {'legacy-freshness-900': 1, 'freshness-1800-v1': 1})
+        self.assertNotIn('criteria_version', old)
+        self.assertEqual(summary['slo_budget']['status'], 'not_calculable')
+
     def test_empty_records_have_no_success_ratio(self):
         result = self.module().summarize_records([], date(2026, 10, 4), 30)
         self.assertEqual(result['coverage_percent'], 0)

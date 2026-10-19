@@ -19,9 +19,11 @@ health_audit=failed
 backup_check=failed
 recovery_lab=failed
 slo_evidence=unobservable
-slo_days_recorded=0
-slo_days_ok=0
-slo_days_unobservable=0
+slo_days_recorded=unknown
+slo_days_ok=unknown
+slo_days_unobservable=unknown
+slo_evidence_reason=not_collected
+slo_criteria=unknown
 validation_failure_stage=none
 cleanup_status=not_run
 RUN_ID="audit-$$"
@@ -157,7 +159,7 @@ report_status() {
   completed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ) || return 1
   case "$REPORT_MODE" in
     official)
-      payload=$(printf '{"data":{"run_id":"%s","status":"%s","completed_at":"%s","health_audit":"%s","backup_check":"%s","recovery_lab":"%s","slo_evidence":"%s","slo_days_recorded":"%s","slo_days_ok":"%s","slo_days_unobservable":"%s","health_check":null,"backup_evidence":null}}' "$RUN_ID" "$overall" "$completed_at" "$health_audit" "$backup_check" "$recovery_lab" "$slo_evidence" "$slo_days_recorded" "$slo_days_ok" "$slo_days_unobservable") || return 1
+      payload=$(printf '{"data":{"run_id":"%s","status":"%s","completed_at":"%s","health_audit":"%s","backup_check":"%s","recovery_lab":"%s","slo_evidence":"%s","slo_evidence_reason":"%s","slo_criteria":"%s","slo_days_recorded":"%s","slo_days_ok":"%s","slo_days_unobservable":"%s","health_check":null,"backup_evidence":null}}' "$RUN_ID" "$overall" "$completed_at" "$health_audit" "$backup_check" "$recovery_lab" "$slo_evidence" "$slo_evidence_reason" "$slo_criteria" "$slo_days_recorded" "$slo_days_ok" "$slo_days_unobservable") || return 1
       kubectl -n "$STATUS_NAMESPACE" patch configmap "$STATUS_CONFIGMAP" --type merge --patch "$payload" >/dev/null 2>&1 || return 1
       ;;
     validation)
@@ -234,6 +236,7 @@ check_backup_evidence() {
 
 read_slo_evidence() {
   local evidence_file summary
+  slo_evidence_reason=read_failed
   evidence_file=$(mktemp /tmp/monthly-slo-evidence.XXXXXX) || return 1
   chmod 0600 "$evidence_file" || { rm -f -- "$evidence_file"; return 1; }
   if ! kubectl -n monitoring get configmap slo-daily-evidence \
@@ -241,6 +244,7 @@ read_slo_evidence() {
     rm -f -- "$evidence_file"
     return 1
   fi
+  slo_evidence_reason=invalid_records
   if ! summary=$(python3 - "$evidence_file" 2>/dev/null <<'PY'
 from datetime import date, datetime, timedelta, timezone
 import json
@@ -279,9 +283,12 @@ try:
     records = json.loads(raw, object_pairs_hook=unique_object)
     require(isinstance(records, list) and len(records) <= 30)
     dates = set()
+    versions = set()
     ok_days = unknown_days = 0
     for record in records:
-        require(isinstance(record, dict) and set(record) == FIELDS)
+        require(isinstance(record, dict) and set(record) in (FIELDS, FIELDS | {"criteria_version"}))
+        require("criteria_version" not in record or record["criteria_version"] == "freshness-1800-v1")
+        versions.add("freshness_1800" if "criteria_version" in record else "legacy_900")
         day = record["date"]
         require(isinstance(day, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day))
         date.fromisoformat(day)
@@ -317,8 +324,9 @@ try:
         ok_days += not missing and all(record[field] == "ok" for field in STATUS_FIELDS)
     today = datetime.now(ZoneInfo("Asia/Seoul")).date()
     required_dates = {(today - timedelta(days=offset)).isoformat() for offset in range(30)}
-    result = "unobservable" if dates != required_dates or unknown_days else "passed" if ok_days == 30 else "failed"
-    print(result, len(records), ok_days, unknown_days)
+    criteria = "mixed" if len(versions) > 1 else next(iter(versions), "empty")
+    result = "unobservable" if dates != required_dates or unknown_days or criteria == "mixed" else "passed" if ok_days == 30 else "failed"
+    print(result, len(records), ok_days, unknown_days, criteria)
 except (ValueError, TypeError, KeyError, OSError, OverflowError, RecursionError):
     sys.exit(1)
 PY
@@ -327,7 +335,8 @@ PY
     return 1
   fi
   rm -f -- "$evidence_file"
-  read -r slo_evidence slo_days_recorded slo_days_ok slo_days_unobservable <<<"$summary"
+  read -r slo_evidence slo_days_recorded slo_days_ok slo_days_unobservable slo_criteria <<<"$summary"
+  slo_evidence_reason=none
 }
 
 check_recovery_lab() {

@@ -1701,7 +1701,9 @@ def _read_quarterly_audit_report(k8s_client: KubernetesClient) -> dict[str, str]
         return None
     data = config_map.get("data") if isinstance(config_map, dict) else None
     if not isinstance(data, dict) or frozenset(data) not in {
-        QUARTERLY_AUDIT_REPORT_KEYS, QUARTERLY_AUDIT_REPORT_KEYS | SLO_SUMMARY_KEYS
+        QUARTERLY_AUDIT_REPORT_KEYS, QUARTERLY_AUDIT_REPORT_KEYS | SLO_SUMMARY_KEYS,
+        QUARTERLY_AUDIT_REPORT_KEYS | SLO_SUMMARY_KEYS | {"slo_evidence_reason"},
+        QUARTERLY_AUDIT_REPORT_KEYS | SLO_SUMMARY_KEYS | {"slo_evidence_reason", "slo_criteria"},
     }:
         LOGGER.warning("quarterly_audit_report_ignored reason=invalid_keys")
         return None
@@ -1728,11 +1730,30 @@ def _read_quarterly_audit_report(k8s_client: KubernetesClient) -> dict[str, str]
         return None
     if "slo_evidence" in data:
         count_keys = ("slo_days_recorded", "slo_days_ok", "slo_days_unobservable")
+        reason = data.get("slo_evidence_reason", "none")
+        criteria = data.get("slo_criteria")
+        if criteria is not None and criteria not in {"unknown", "empty", "legacy_900", "freshness_1800", "mixed"}:
+            LOGGER.warning("quarterly_audit_report_ignored reason=invalid_slo_criteria")
+            return None
+        if reason in {"not_collected", "read_failed", "invalid_records"}:
+            if (data["slo_evidence"] != "unobservable" or any(data[key] != "unknown" for key in count_keys)
+                    or criteria not in (None, "unknown")):
+                LOGGER.warning("quarterly_audit_report_ignored reason=inconsistent_slo_unavailable")
+                return None
+            return data
+        if reason != "none":
+            LOGGER.warning("quarterly_audit_report_ignored reason=invalid_slo_reason")
+            return None
         if any(re.fullmatch(r"(?:[0-9]|[12][0-9]|30)", data[key]) is None for key in count_keys):
             LOGGER.warning("quarterly_audit_report_ignored reason=invalid_slo_counts")
             return None
         recorded, ok, unknown = (int(data[key]) for key in count_keys)
-        expected_result = "unobservable" if recorded < 30 or unknown else "passed" if ok == 30 else "failed"
+        if (criteria == "unknown" or (criteria == "empty" and recorded != 0)
+                or (criteria in {"legacy_900", "freshness_1800", "mixed"} and recorded == 0)
+                or (criteria == "mixed" and data["slo_evidence"] != "unobservable")):
+            LOGGER.warning("quarterly_audit_report_ignored reason=inconsistent_slo_criteria")
+            return None
+        expected_result = "unobservable" if recorded < 30 or unknown or criteria == "mixed" else "passed" if ok == 30 else "failed"
         # Counts cannot establish date coverage; the producer may mark healthy records unobservable.
         if ok + unknown > recorded or data["slo_evidence"] not in {expected_result, "unobservable"}:
             LOGGER.warning("quarterly_audit_report_ignored reason=inconsistent_slo_summary")
@@ -1750,11 +1771,21 @@ def _format_quarterly_audit_message(report: dict[str, str]) -> str:
     slo_lines = []
     if "slo_evidence" in report:
         slo_result = {"passed": "통과", "failed": "실패", "unobservable": "관측 불가"}[report["slo_evidence"]]
-        slo_lines = [
-            f"SLO 증적: {slo_result}",
-            f"수집 {report['slo_days_recorded']}/30일, 정상 {report['slo_days_ok']}일, "
-            f"관측 불가 {report['slo_days_unobservable']}일",
-        ]
+        reason = report.get("slo_evidence_reason", "none")
+        if reason != "none":
+            reason_text = {"not_collected": "집계 미실행", "read_failed": "증적 읽기 실패", "invalid_records": "증적 형식 검증 실패"}[reason]
+            slo_lines = [f"SLO 증적: {slo_result}", f"수집·정상·관측 불가 일수: 확인 불가 ({reason_text})"]
+        else:
+            slo_lines = [
+                f"SLO 증적: {slo_result}",
+                f"수집 {report['slo_days_recorded']}/30일, 정상 {report['slo_days_ok']}일, "
+                f"관측 불가 {report['slo_days_unobservable']}일",
+            ]
+        if report.get("slo_criteria") in {"legacy_900", "freshness_1800", "mixed"}:
+            criteria_label = {"legacy_900": "신선도 15분", "freshness_1800": "신선도 30분", "mixed": "신선도 15분·30분 혼합, 동일 기준 30일 아님"}[report["slo_criteria"]]
+            slo_lines.append(f"판정 기준: {criteria_label}")
+        if report["status"] == "passed" and report["slo_evidence"] != "passed":
+            action = "조치: SLO 증적의 관측 불가·기준 미충족 원인 확인 필요"
     return "\n".join(
         [
             f"[분기 SRE 점검 {result}]",
