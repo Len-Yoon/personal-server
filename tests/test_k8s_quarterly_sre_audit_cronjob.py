@@ -789,7 +789,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         for forbidden in ("sudo", "docker", "hostpath", "privileged", "persistentvolumeclaim"):
             self.assertNotIn(forbidden, text)
         self.assertRegex(DOCKERFILE.read_text(encoding="utf-8"), re.compile(r"^FROM .+@sha256:[0-9a-f]{64}$", re.MULTILINE))
-        self.assertIn("kubernetes-client", DOCKERFILE.read_text(encoding="utf-8"))
+        self.assertIn("coreutils kubectl tzdata", DOCKERFILE.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
