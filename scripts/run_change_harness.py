@@ -11,8 +11,10 @@ from typing import Iterable
 
 try:
     from scripts.verify_change_scope import SERVICE_PREFIXES
+    from scripts.review_provenance import EvidenceError, review_evidence
 except ModuleNotFoundError:  # Direct execution sets sys.path to scripts/.
     from verify_change_scope import SERVICE_PREFIXES
+    from review_provenance import EvidenceError, review_evidence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -109,6 +111,9 @@ def _run_policy(
 def build_evidence(
     paths: list[str], *, input_format: str = "paths", check_results: Iterable[str] = (),
     input_contents: bytes | None = None,
+    require_independent_review: bool = False, review_base: str | None = None,
+    review_head: str = "HEAD", review_sessions: Iterable[Path] = (),
+    review_receipt: Path | None = None,
 ) -> tuple[int, dict]:
     try:
         results = _parse_check_results(check_results)
@@ -145,6 +150,27 @@ def build_evidence(
     else:
         work_status = "ready_for_review"
 
+    review = None
+    sessions = list(review_sessions)
+    review_requested = require_independent_review or review_base is not None or bool(sessions) or review_receipt is not None or review_head != "HEAD"
+    if review_requested:
+        if review_base is None or not sessions:
+            review = {"status": "incomplete", "reasons": [
+                *(["review_base_missing"] if review_base is None else []),
+                *(["review_sessions_missing"] if not sessions else []),
+            ]}
+        else:
+            try:
+                review = review_evidence(REPO_ROOT, policy_evidence["changed_files"], review_base,
+                                         review_head, sessions, review_receipt)
+            except (EvidenceError, OSError, UnicodeError, ValueError, TypeError):
+                # Do not reflect session contents, command text or secret paths.
+                return 1, _input_error_evidence(ValueError("independent_review_evidence_invalid"))
+        if review["status"] != "passed":
+            reasons.extend(review["reasons"])
+            if work_status == "ready_for_review":
+                work_status = "independent_review_incomplete"
+
     ready = work_status == "ready_for_review"
     evidence = {
         "schema_version": "1",
@@ -164,6 +190,7 @@ def build_evidence(
             "unclassified_files": policy_evidence["unclassified_files"],
         },
     }
+    evidence["independent_review"] = review or {"status": "not_requested"}
     return (0 if ready else 2), evidence
 
 
@@ -178,6 +205,11 @@ def format_agent_context(evidence: dict) -> str:
     """Return a compact, prompt-safe summary of the harness evidence."""
     summary = evidence["summary"]
     lines = [f"Work status: {evidence['work_status']}"]
+    if evidence.get("independent_review", {}).get("status") not in {None, "not_requested"}:
+        review = evidence["independent_review"]
+        lines.append(f"Independent review: {review['status']}")
+        if review.get("reasons"):
+            lines.append("Review reasons: " + ", ".join(review["reasons"]))
     for label, key in (
         ("Required checks", "required_checks"),
         ("Missing checks", "missing_checks"),
@@ -194,6 +226,8 @@ def format_agent_context(evidence: dict) -> str:
         action = "Fix the failed checks and rerun with --check-result values."
     elif evidence["work_status"] == "blocked":
         action = "Resolve the blocked or unclassified paths before continuing."
+    elif evidence["work_status"] == "independent_review_incomplete":
+        action = "Obtain independent review of the current target and rerun with its matching receipt."
     elif evidence["work_status"] == "ready_for_review":
         action = "Request human review."
     else:
@@ -214,6 +248,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--check-result", action="append", default=[])
     parser.add_argument("--agent-context", action="store_true")
+    parser.add_argument("--require-independent-review", action="store_true")
+    parser.add_argument("--review-base")
+    parser.add_argument("--review-head", default="HEAD")
+    parser.add_argument("--review-session", action="append", type=Path, default=[])
+    parser.add_argument("--review-receipt", type=Path)
     return parser.parse_args()
 
 
@@ -232,6 +271,11 @@ def main() -> int:
             input_contents=args.input.read_bytes()
             if args.input_format == "git-name-status-z"
             else None,
+            require_independent_review=args.require_independent_review,
+            review_base=args.review_base,
+            review_head=args.review_head,
+            review_sessions=args.review_session,
+            review_receipt=args.review_receipt,
         )
         if args.agent_context:
             print(format_agent_context(evidence))
