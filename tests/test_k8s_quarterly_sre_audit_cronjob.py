@@ -464,9 +464,15 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
                     records[0]["public_health"] = "failed"
                 if kind == "zero_requests":
                     records[0]["portal_http"] = {"requests": 0, "server_errors": 0, "server_error_ratio": None, "p95_seconds": None}
-                result, payload, _, _ = self.run_runner(evidence=valid_backup_evidence(), slo_records=json.dumps(records))
+                # SLO classification does not depend on a host completing
+                # recovery polling within two wall-clock seconds under load.
+                result, payload, _, _ = self.run_runner(
+                    evidence=valid_backup_evidence(), slo_records=json.dumps(records),
+                    recovery_timeout="180", fast_recovery_clock=True,
+                )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(payload["data"]["status"], "passed")
+                self.assertEqual(payload["data"]["recovery_lab"], "passed")
                 self.assertEqual(payload["data"].get("slo_evidence"), expected)
                 self.assertEqual(payload["data"]["slo_days_recorded"], str(count))
                 self.assertEqual(payload["data"]["slo_days_ok"], ok_days)

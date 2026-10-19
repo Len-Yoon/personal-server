@@ -99,6 +99,7 @@ class QuarterlySreAuditAutomationTests(unittest.TestCase):
         relay_delivery_retry_seconds="",
         record_sleep=False,
         manifest_padding_lines=0,
+        process_timeout=None,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -288,6 +289,7 @@ printf '%s\\n' "sleep $*" >> "{calls}"
                 text=True,
                 capture_output=True,
                 check=False,
+                timeout=process_timeout,
             )
             return result, calls.read_text(encoding="utf-8") if calls.exists() else ""
 
@@ -541,21 +543,26 @@ printf '%s\\n' "sleep $*" >> "{calls}"
                 self.assertNotIn("create job monthly-sre-audit-manual-", calls)
 
     def test_failed_terminal_manual_job_returns_promptly_and_keeps_cronjob_suspended(self):
-        started_at = time.monotonic()
         result, calls = self.run_tool(
             "--install",
             manual_job="failed_terminal",
             manual_job_wait_delay_seconds=2,
+            record_sleep=True,
+            process_timeout=30,
         )
-        elapsed_seconds = time.monotonic() - started_at
 
         self.assertNotEqual(result.returncode, 0)
-        # The fake client has a two-second delayed wait path; allow process
-        # startup variance while still proving terminal failure does not wait
-        # for the configured 20-minute manual-job deadline.
-        self.assertLess(elapsed_seconds, 5, result.stderr)
+        # Observe the terminal-state contract directly; process startup under
+        # parallel load must not become a five-second performance assertion.
+        # The outer timeout still bounds an accidental twenty-minute retry.
         self.assertIn("get job monthly-sre-audit-manual-", calls)
         self.assertNotIn("wait --for=condition=complete job/quarterly-sre-audit-manual-", calls)
+        self.assertNotIn("wait --for=condition=complete job/monthly-sre-audit-manual-", calls)
+        self.assertFalse(any(call.startswith("sleep ") for call in calls.splitlines()))
+        terminal_reads = [call for call in calls.splitlines()
+                          if "get job monthly-sre-audit-manual-" in call
+                          and "jsonpath={range .status.conditions" in call]
+        self.assertEqual(len(terminal_reads), 1)
         manual_job_creations = [
             call
             for call in calls.splitlines()
