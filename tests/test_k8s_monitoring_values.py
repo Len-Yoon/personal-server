@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 import importlib.util
 from datetime import datetime, timezone
 import os
@@ -11,6 +12,15 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def find_promtool():
+    promtool = os.environ.get("PROMTOOL") or shutil.which("promtool")
+    if promtool:
+        return promtool
+    if os.environ.get("REQUIRE_PROMTOOL") == "1":
+        raise AssertionError("promtool is required in CI; PromQL checks must not be skipped")
+    raise unittest.SkipTest("promtool is required to execute PromQL rule fixtures")
 
 
 def load_values():
@@ -65,9 +75,7 @@ class MonitoringValuesContractTests(unittest.TestCase):
         )
 
     def test_disk_rules_evaluate_threshold_duration_and_recovery_with_promtool(self):
-        promtool = os.environ.get("PROMTOOL") or shutil.which("promtool")
-        if not promtool:
-            self.skipTest("promtool is required to execute PromQL rule fixtures")
+        promtool = find_promtool()
         manifest = yaml.safe_load((ROOT / "infra/k8s/sre-telegram/prometheus-rule.yaml").read_text())
         rules = [rule for group in manifest["spec"]["groups"] for rule in group["rules"]
                  if rule["alert"] in {"NodeDiskPressure", "PVCSpaceLow"}]
@@ -82,9 +90,7 @@ class MonitoringValuesContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_host_disk_rules_and_expiring_notification_evaluate_with_promtool(self):
-        promtool = os.environ.get("PROMTOOL") or shutil.which("promtool")
-        if not promtool:
-            self.skipTest("promtool is required to execute PromQL rule fixtures")
+        promtool = find_promtool()
         documents = yaml.safe_load_all(
             (ROOT / "infra/k8s/sre-telegram/host-disk-observability.yaml").read_text()
         )
@@ -133,6 +139,18 @@ class MonitoringValuesContractTests(unittest.TestCase):
                 capture_output=True, text=True, check=False,
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_missing_promtool_fails_when_ci_requires_it(self):
+        with patch.dict(os.environ, {"REQUIRE_PROMTOOL": "1"}, clear=True), patch.object(shutil, "which", return_value=None):
+            for test in (self.test_disk_rules_evaluate_threshold_duration_and_recovery_with_promtool,
+                         self.test_host_disk_rules_and_expiring_notification_evaluate_with_promtool):
+                with self.subTest(test=test.__name__), self.assertRaisesRegex(AssertionError, "must not be skipped"):
+                    test()
+
+    def test_local_missing_promtool_remains_an_explicit_skip(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(shutil, "which", return_value=None):
+            with self.assertRaises(unittest.SkipTest):
+                find_promtool()
 
     def test_values_set_kube_state_metrics_resources(self):
         resources = load_values()["kube-state-metrics"]["resources"]
