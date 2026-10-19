@@ -340,7 +340,8 @@ def _daily_log_path(target: datetime) -> Path:
 
 
 def _list_daily_logs(limit: int | None = None) -> list[Path]:
-    if not LOG_PATH.parent.exists():
+    directory = LOG_PATH.parent if LOG_PATH.suffix else LOG_PATH
+    if not directory.exists():
         return []
 
     if LOG_PATH.suffix:
@@ -348,5 +349,5 @@ def _list_daily_logs(limit: int | None = None) -> list[Path]:
     else:
         pattern = "security-events-*.txt"
 
-    logs = sorted(LOG_PATH.parent.glob(pattern), reverse=True)
+    logs = sorted(directory.glob(pattern), reverse=True)
     return logs[:limit] if limit else logs
