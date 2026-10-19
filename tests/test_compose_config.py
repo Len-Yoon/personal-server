@@ -488,7 +488,7 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn("  test:\n    needs: [scope, matrix]\n    if: always()", workflow)
         self.assertIn("matrix: ${{ fromJSON(needs.matrix.outputs.include) }}", workflow)
         self.assertIn('json.dumps({"include": include}, separators=(",", ":"))', workflow)
-        self.assertIn("  summary:\n    needs: [scope, matrix, test, browser]\n    if: always()", workflow)
+        self.assertIn("  summary:\n    needs: [scope, matrix, test, browser, quality]\n    if: always()", workflow)
         self.assertIn("--test-result \"${{ needs.test.result }}\"", workflow)
         self.assertIn("--executed-checks", workflow)
         self.assertIn("mapfile -t executed_checks < selected-checks.txt", workflow)
@@ -527,13 +527,30 @@ class ComposeConfigTests(unittest.TestCase):
     def test_ci_runs_browser_and_enforces_its_failure_without_dropping_suites(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn("python3 tests/run_ci_shards.py --workers 4 --evidence k8s-shards.json", workflow)
-        self.assertIn("${{ matrix.test_command }}", workflow)
+        self.assertIn('python3 tests/run_ci_tests.py --suite "${{ matrix.name }}" --evidence unit-test-results.json --fail-on-skip', workflow)
         self.assertIn("python3 tests/browser/run_smoke.py", workflow)
         self.assertIn("python3 tests/browser/run_memo_smoke.py --artifacts browser-artifacts", workflow)
         self.assertIn("if: needs.matrix.outputs.mode != 'documentation'", workflow)
         self.assertIn('test "${{ needs.browser.result }}" = "success"', workflow)
         self.assertIn('test "${{ needs.browser.result }}" = "skipped"', workflow)
         self.assertIn("python3 -m playwright install --with-deps chromium", workflow)
+
+    def test_ci_enforces_strict_test_results_and_verification_quality(self):
+        jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
+        unit = next(step for step in jobs["test"]["steps"] if step["name"] == "Run unit tests")
+        self.assertIn("--evidence k8s-shards.json --fail-on-skip", unit["run"])
+        self.assertIn('--evidence unit-test-results.json --fail-on-skip', unit["run"])
+        self.assertNotIn("continue-on-error", unit)
+        quality = jobs["quality"]
+        self.assertEqual(quality["if"], "needs.matrix.outputs.mode != 'documentation'")
+        self.assertIn("quality", jobs["summary"]["needs"])
+        step = next(step for step in quality["steps"] if step["name"] == "Check branch coverage and mutation detection")
+        self.assertEqual(step["run"], "python3 scripts/run_verification_quality.py --output-dir verification-quality-artifacts")
+        self.assertNotIn("continue-on-error", step)
+        self.assertNotIn("continue-on-error", quality)
+        summary = next(step["run"] for step in jobs["summary"]["steps"] if step["name"] == "Enforce policy and service test results")
+        self.assertIn('test "${{ needs.quality.result }}" = "success"', summary)
+        self.assertIn('test "${{ needs.quality.result }}" = "skipped"', summary)
 
     def test_ci_has_dedicated_k8s_contract_check(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
