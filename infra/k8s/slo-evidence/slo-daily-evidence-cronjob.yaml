@@ -69,7 +69,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: collector
-              image: docker.io/library/personal-server-slo-evidence@sha256:fbd961f9b0903aa0ded1f6368673bde1838301fb92d30e4b59dbea7561ea3fdb
+              image: docker.io/library/personal-server-slo-evidence@sha256:9338e2a279d674d206685b9007a674659d6e9d3f53ee2669d66175098c1c772d
               imagePullPolicy: Never
               env:
                 - name: PROMETHEUS_URL
