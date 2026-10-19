@@ -18,8 +18,9 @@ class Cluster:
         self.role = {'metadata': {'name': TOOL.ROLE, 'namespace': 'monitoring', 'uid': UID, 'resourceVersion': '100'},
                      'rules': [{'apiGroups': [''], 'resources': ['configmaps'],
                                 'resourceNames': ['sre-telegram-quarterly-audit-status'], 'verbs': ['get', 'patch']}]}
-        self.binding = {'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': TOOL.ROLE},
+        self.binding = {'metadata': {'name': TOOL.ROLE}, 'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': TOOL.ROLE},
                         'subjects': [{'kind': 'ServiceAccount', 'name': TOOL.SERVICE_ACCOUNT, 'namespace': 'monitoring'}]}
+        self.other_bindings = []
         self.jobs = []
         self.writes = []
         self.calls = []
@@ -47,7 +48,7 @@ class Cluster:
             return subprocess.CompletedProcess(args, 0 if value == 'yes' else 1, value + '\n', '')
         else:
             kind = args[args.index('get') + 1]
-            value = {'role': self.role, 'rolebinding': self.binding, 'jobs': {'items': self.jobs}}[kind]
+            value = {'role': self.role, 'rolebinding': self.binding, 'rolebindings': {'items': [self.binding, *self.other_bindings]}, 'jobs': {'items': self.jobs}}[kind]
         return subprocess.CompletedProcess(args, 0, json.dumps(value), '')
 
 
@@ -67,7 +68,7 @@ class AuditReadAccessTests(unittest.TestCase):
         self.assertTrue(any('auth' in command for command in cluster.calls))
 
     def test_uid_rule_binding_and_active_job_drift_block_before_mutation(self):
-        for case in ('uid', 'rules', 'binding', 'extra_subject', 'active'):
+        for case in ('uid', 'rules', 'binding', 'extra_subject', 'extra_binding', 'active'):
             with self.subTest(case=case):
                 cluster = Cluster()
                 approved_hash = TOOL.rules_hash(cluster.role['rules'])
@@ -79,6 +80,11 @@ class AuditReadAccessTests(unittest.TestCase):
                     cluster.binding['roleRef']['name'] = 'foreign'
                 elif case == 'extra_subject':
                     cluster.binding['subjects'].append({'kind': 'ServiceAccount', 'name': 'foreign', 'namespace': 'monitoring'})
+                elif case == 'extra_binding':
+                    extra = copy.deepcopy(cluster.binding)
+                    extra['metadata']['name'] = 'foreign-binding'
+                    extra['subjects'][0]['name'] = 'foreign'
+                    cluster.other_bindings.append(extra)
                 else:
                     cluster.jobs = [{'spec': {'template': {'spec': {'serviceAccountName': TOOL.SERVICE_ACCOUNT}}}}]
                 with self.assertRaises(ValueError):

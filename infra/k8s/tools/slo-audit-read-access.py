@@ -46,6 +46,11 @@ def inspect(*, run=subprocess.run):
         raise ValueError('unexpected_role')
     if not binding_valid(read('rolebinding', ROLE, run=run)):
         raise ValueError('unexpected_binding')
+    bindings = read('rolebindings', run=run)['items']
+    linked = [binding for binding in bindings if binding.get('roleRef') ==
+              {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': ROLE}]
+    if len(linked) != 1 or linked[0].get('metadata', {}).get('name') != ROLE or not binding_valid(linked[0]):
+        raise ValueError('unexpected_role_recipients')
     return role
 
 
