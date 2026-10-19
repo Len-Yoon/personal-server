@@ -147,12 +147,30 @@ class VerificationQualityTests(unittest.TestCase):
                              "num_branches": 158, "covered_branches": 157},
                  "missing_lines": [471], "missing_branches": [[465, 471]]}
         floors = {name: {"statement_min": 99, "branch_min": 99,
+                        "baseline_counts": {"num_statements": 388, "num_branches": 158},
                         "expected_missing_lines": [471],
                         "expected_missing_branches": [[465, 471]]}}
         report = {"meta": {"branch_coverage": True}, "files": {name: entry}}
         self.assertEqual(quality.coverage_verdict(report, floors)[1], [])
         for change in ({"missing_lines": [470]}, {"missing_branches": [[465, 470]]},
                        {"missing_lines": []}, {"missing_branches": []}):
+            with self.subTest(change=change):
+                report["files"][name] = {**entry, **change}
+                self.assertTrue(quality.coverage_verdict(report, floors)[1])
+
+    def test_exclusions_and_denominator_changes_cannot_manufacture_full_coverage(self):
+        name = "production.py"
+        entry = {"summary": {"num_statements": 2, "covered_lines": 2,
+                             "num_branches": 2, "covered_branches": 2},
+                 "excluded_lines": [], "missing_lines": [], "missing_branches": []}
+        floors = {name: {"statement_min": 100, "branch_min": 100,
+                        "baseline_counts": {"num_statements": 2, "num_branches": 2},
+                        "expected_missing_lines": [], "expected_missing_branches": []}}
+        report = {"meta": {"branch_coverage": True}, "files": {name: entry}}
+        self.assertEqual(quality.coverage_verdict(report, floors)[1], [])
+        for change in ({"excluded_lines": [3]},
+                       {"summary": {**entry["summary"], "num_statements": 1, "covered_lines": 1}},
+                       {"summary": {**entry["summary"], "num_branches": 1, "covered_branches": 1}}):
             with self.subTest(change=change):
                 report["files"][name] = {**entry, **change}
                 self.assertTrue(quality.coverage_verdict(report, floors)[1])

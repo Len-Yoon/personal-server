@@ -273,4 +273,3 @@ class FileStoreFullPathsTests(unittest.TestCase):
                 self.store._safe_path('raced')
         self.assertTrue(candidate.is_symlink())
         self.assertEqual(sentinel.read_bytes(), b'outside preserved')
-

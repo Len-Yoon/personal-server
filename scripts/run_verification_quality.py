@@ -164,6 +164,12 @@ def coverage_verdict(report: dict, targets: dict) -> tuple[dict, list[str]]:
         branch = 100 * summary.get("covered_branches", 0) / branches if branches else None
         measured[name] = {**data, "statement_percent": stmt, "branch_percent": branch,
                           "thresholds": thresholds}
+        if "expected_missing_lines" in thresholds:
+            if data.get("excluded_lines"):
+                failures.append(f"excluded production lines: {name}")
+            baseline = thresholds.get("baseline_counts", {})
+            if any(summary.get(key) != baseline.get(key) for key in ("num_statements", "num_branches")):
+                failures.append(f"production coverage denominator drift: {name}")
         # Keep structurally unreachable code in the measured denominator. Match
         # every remaining line/arc exactly; never hide new gaps behind a floor.
         for key in ("missing_lines", "missing_branches"):
