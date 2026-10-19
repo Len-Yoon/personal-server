@@ -85,15 +85,15 @@ Book·YouTube 신규 기본 manifest와 생성 검증은 readiness `/ready`, liv
 
 Prometheus의 실제 로드된 보관 설정은 `1w or 3GiB`이며 7일과 `retentionSize: 3GB` 중 먼저 도달하는 기준으로 보관함. 요청 용량 5Gi의 일부를 WAL·head·compaction에 남기지만 local-path PVC 요청 값은 호스트 디스크 강제 할당량이 아니며 정확히 7일 보존을 보장하지 않음. Loki 실습의 24시간 retention도 즉시 삭제·디스크 사용량 상한을 뜻하지 않음.
 
-`NodeDiskPressure`는 DiskPressure 5분 지속, `PVCSpaceLow`는 사용 가능 공간 15% 미만 10분 지속 시 기존 `sre_telegram=true` 경로로 전달하도록 정의함. 규칙 정의와 실제 알림 수신은 별개임. `python3 infra/k8s/tools/monitoring-disk-audit.py`는 읽기 전용으로 로드된 규칙·식·지속 시간·라벨·Bound PVC/노드 지표를 대조함. 미제공은 GAP(exit 1), 읽기·증거 오류는 FAIL(exit 2)로 반환함. WSL 호스트 filesystem의 실제 디스크·mount 식별 coverage는 아직 검증되지 않아 GAP이며 Telegram 단말 수신은 NOT_TESTED로 남김. 현재 노드·PVC 지표와 두 경보 로드는 확인됨. Windows·WSL 공간의 수동 실측은 연속 호스트 지표 coverage를 대신하지 않음. 부분 지표나 규칙의 성공을 전체 coverage 성공으로 확대하지 않음.
+`NodeDiskPressure`는 DiskPressure 5분 지속, `PVCSpaceLow`는 사용 가능 공간 15% 미만 10분 지속 시 기존 `sre_telegram=true` 경로로 전달하도록 정의함. 규칙 정의와 실제 알림 수신은 별개임. `python3 infra/k8s/tools/monitoring-disk-audit.py`는 읽기 전용으로 Windows C:와 Bound PVC/노드 지표·전용 target·실제 로드된 규칙/식/기간/라벨을 대조함. 미제공은 GAP(exit 1), 읽기·증거 오류는 FAIL(exit 2)로 반환함. 현재 Windows C:·노드·PVC coverage는 PASS임. WSL root 전체의 실제 디스크·mount를 식별하는 직접 용량 감시는 이번 범위가 아니며 기존 노드/PVC 신호와 구분함. 읽기 전용 audit 자체는 알림을 보내지 않아 notification_delivery=NOT_TESTED를 유지하며, 아래 별도 시험의 실제 전송 증적 및 사용자 단말 수신과 구분함. 부분 지표나 수동 실측을 전체 호스트 coverage로 확대하지 않음.
 
-### Windows 호스트 디스크 경보 보완 준비
+### Windows 호스트 디스크 경보 운영
 
-2026-10-19 읽기 전용 실측에서 Windows C: 공간은 정상이나 Prometheus 수집·경보 연결이 없는 공백을 확인함. WSL ext4의 노드/PVC 지표로 Windows C: 상태를 대신 판정하지 않음. 기존 Windows collector→host-metrics.json→system-agent 경로에 출처·고정 볼륨·총량/가용 bytes를 추가하고 기존 private bridge를 EndpointSlice ServiceMonitor로 수집하는 코드를 준비함. 무효·누락·미래·노후 자료는 collection_ok=0으로 표시하고 원본 수집시각을 scrape 시각으로 덮어쓰지 않음.
+2026-10-19 읽기 전용 실측에서 Windows C: 공간은 정상이나 Prometheus 수집·경보 연결이 없는 공백을 확인함. WSL ext4의 노드/PVC 지표로 Windows C: 상태를 대신 판정하지 않음. 기존 Windows collector→host-metrics.json→system-agent 경로에 출처·고정 볼륨·총량/가용 bytes를 추가하고 기존 private bridge를 EndpointSlice ServiceMonitor로 수집함. 무효·누락·미래·노후 자료는 collection_ok=0으로 표시하고 원본 수집시각을 scrape 시각으로 덮어쓰지 않음.
 
-전용 `HostDiskSpaceLow`는 fresh 원본의 C: 가용 15% 미만 10분, `HostDiskMetricsStale`은 자료 미제공/무효/35분 초과 노후가 5분 지속되면 기존 SRE 경로로 전달하도록 준비함. 원본 수집만 멈추는 경우 탐지까지 최대 약 40분과 평가·전송 지연이 걸리며, C: 이외 볼륨과 WSL root 전체의 직접 용량 감시는 이번 범위가 아님. 기존 노드/PVC 경보는 유지함. 전용 `HostDiskNotificationTest` 생성 도구는 실행 시점 기준 최대 5분 내 만료하는 시험 조건만 준비하며 Kubernetes·Telegram을 호출하지 않음. 실제 시험은 운영 승인 후 바로 생성·적용하고 발화·복구·정확한 시험 자원 제거를 확인함. 시험 메시지는 운영 장애가 아님을 고정 문구로 표시함. Telegram API 수락과 사용자 단말 실제 수신은 구분함.
+전용 `HostDiskSpaceLow`는 fresh 원본의 C: 가용 15% 미만 10분, `HostDiskMetricsStale`은 자료 미제공/무효/35분 초과 노후가 5분 지속되면 기존 SRE 경로로 전달함. 원본 수집만 멈추는 경우 탐지까지 최대 약 40분과 평가·전송 지연이 걸리며, C: 이외 볼륨과 WSL root 전체의 직접 용량 감시는 이번 범위가 아님. 기존 노드/PVC 경보는 유지함. 전용 `HostDiskNotificationTest` 생성 도구는 실행 시점 기준 최대 5분 내 만료하는 시험 조건만 준비하며 Kubernetes·Telegram을 호출하지 않음. 실제 시험은 운영 승인 후 바로 생성·적용하고 발화·복구·정확한 시험 자원 제거를 확인함. 시험 메시지는 운영 장애가 아님을 고정 문구로 표시함. Telegram API 수락과 사용자 단말 실제 수신은 구분함.
 
-현재 운영에는 아직 적용하지 않았으며 [개발 계획의 승인 범위와 성공 기준](20260921_프로젝트보완_개발계획.md#호스트-디스크-감시경보-전달-보완)을 따름. 기존 supervisor·예약 작업·백업 일정·Secret·PVC·Caddy는 변경하지 않음.
+2026-10-19 사용자 승인 후 검증된 소스·이미지, Windows child 수집기, 전용 ServiceMonitor·Rule을 운영 반영함. 정확한 한 target UP·fresh C: 지표와 호스트/노드/PVC 규칙 audit PASS를 확인함. 자동 만료 시험에서 발생·종료 Telegram API 수락과 Relay 원장 기록을 각각 확인한 뒤 정확한 UID/resourceVersion 조건으로 시험 Rule을 제거함. 발생·종료 메시지 모두 사용자 단말에서 실제 수신했음을 사용자 응답으로 확인함. [개발 계획의 승인 범위와 성공 기준](20260921_프로젝트보완_개발계획.md#호스트-디스크-감시경보-전달-보완)을 따름. 기존 supervisor·예약 작업·백업 일정·자격 증명 Secret·PVC·Caddy를 보존함. 새 수집 설정에 따른 기존 Prometheus 소유 생성 설정 Secret만 Operator가 자동 갱신했으며 소유 CR·UID/type·생성 설정 키를 확인함.
 
 ### 백업 보관 정리 결과
 
