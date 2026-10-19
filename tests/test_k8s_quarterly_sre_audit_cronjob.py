@@ -88,6 +88,13 @@ def recovery_deployment():
 
 
 class QuarterlySreAuditCronJobTests(unittest.TestCase):
+    def test_audit_image_updates_existing_os_packages_and_build_tool_vulnerabilities(self):
+        source = DOCKERFILE.read_text(encoding="utf-8")
+        self.assertLess(source.index("apt-get update"), source.index("apt-get upgrade -y"))
+        self.assertLess(source.index("apt-get upgrade -y"), source.index("apt-get install"))
+        self.assertIn("setuptools==84.0.0 wheel==0.48.0", source)
+        self.assertIn("USER 10001:10001", source)
+
     def test_monthly_audit_is_the_only_scheduled_internal_audit(self):
         monthly = monthly_cronjob()
         spec = monthly["spec"]
