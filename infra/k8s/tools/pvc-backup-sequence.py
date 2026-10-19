@@ -36,8 +36,9 @@ class Stage:
     status_namespace: str = NAMESPACE
 
 
+# Portal's init/main template images must change together with this digest.
 STAGES = {
-    "portal": Stage("portal-pvc-backup", "/opt/personal-server/portal-pvc-backup-verify.sh", "portal-pvc-backup-runtime", ("portal-web-files-dynamic", "portal-web-state-dynamic"), "docker.io/library/personal-server-portal-pvc-backup@sha256:bb5b719139c4bfdfce6a6ba8b44fabfe4957fb5e183bb4f4b8ba1af423451e1c", "sre-telegram-backup-status", "monitoring"),
+    "portal": Stage("portal-pvc-backup", "/opt/personal-server/portal-pvc-backup-verify.sh", "portal-pvc-backup-runtime", ("portal-web-files-dynamic", "portal-web-state-dynamic"), "docker.io/library/personal-server-portal-pvc-backup@sha256:ddd4988b88655f6ce1881d163588b9247e380759198a3fb358553293bd9be670", "sre-telegram-backup-status", "monitoring"),
     "book": Stage("book-pvc-backup", "/opt/personal-server/book-pvc-backup-verify.py", "book-memo-pvc-backup-runtime", ("book-memo-data",), "docker.io/library/personal-server-book-pvc-backup@sha256:2474ed60dcd3b62303a3f31f390dabc00521796738d9a1c22520456ba3016a0f", "book-pvc-backup-state"),
     "youtube": Stage("youtube-pvc-backup", "/opt/personal-server/youtube-pvc-backup-verify.py", "youtube-memo-pvc-backup-runtime", ("youtube-memo-data",), "docker.io/library/personal-server-youtube-pvc-backup@sha256:112fb013cfc3ead26793089098070ce6bbfb7708a29934d61104db2d794cf6e3", "youtube-pvc-backup-state"),
     "crawler": Stage("crawler-pvc-backup", "/opt/personal-server/crawler-pvc-backup-verify.py", "crawler-worker-pvc-backup-runtime", ("crawler-worker-data",), "docker.io/library/personal-server-crawler-pvc-backup@sha256:b2722da15fadd98bee430ef1b943d19b1185c48526457fd7f08d19138283ecda", "crawler-pvc-backup-state"),
