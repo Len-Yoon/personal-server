@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "coverage_version": "7.16.2",
+  "timeout_seconds": 120,
+  "baseline": {
+    "commit": "713f5d8e62bf1d199f85870707894cd39c72c461",
+    "note": "36 existing explicitly selected tests, all passing with zero skips. Floors truncate measured percentages to two decimal places; no discretionary reduction. File totals are a bounded regression floor, not evidence of full coverage. Critical function floors additionally enforced. Executed/missing lines and branch arcs are emitted, including large untested download/deletion areas in file_store and auth expiry/error paths.",
+    "environment": "CPython 3.11 / Darwin arm64; coverage 7.16.2; isolated code-only fixture; no operational resources."
+  },
+  "targets": {
+    "portal-web/app/services/security.py": {
+      "statement_min": 77.38,
+      "branch_min": 55.76,
+      "baseline_counts": {
+        "covered_lines": 154,
+        "num_statements": 199,
+        "covered_branches": 29,
+        "num_branches": 52
+      },
+      "functions": {
+        "auth_rate_limited": {
+          "statement_min": 80.0,
+          "branch_min": 50.0,
+          "baseline_counts": {
+            "covered_lines": 4,
+            "num_statements": 5,
+            "covered_branches": 1,
+            "num_branches": 2
+          }
+        }
+      }
+    },
+    "portal-web/app/services/file_store.py": {
+      "statement_min": 63.14,
+      "branch_min": 37.97,
+      "baseline_counts": {
+        "covered_lines": 245,
+        "num_statements": 388,
+        "covered_branches": 60,
+        "num_branches": 158
+      },
+      "functions": {
+        "_save_upload": {
+          "statement_min": 94.28,
+          "branch_min": 70.0,
+          "baseline_counts": {
+            "covered_lines": 33,
+            "num_statements": 35,
+            "covered_branches": 7,
+            "num_branches": 10
+          }
+        }
+      }
+    },
+    "infra/k8s/tools/validate-backup-evidence.py": {
+      "statement_min": 91.2,
+      "branch_min": 85.0,
+      "baseline_counts": {
+        "covered_lines": 83,
+        "num_statements": 91,
+        "covered_branches": 34,
+        "num_branches": 40
+      },
+      "functions": {
+        "validate_evidence": {
+          "statement_min": 89.28,
+          "branch_min": 87.5,
+          "baseline_counts": {
+            "covered_lines": 25,
+            "num_statements": 28,
+            "covered_branches": 21,
+            "num_branches": 24
+          }
+        }
+      }
+    }
+  },
+  "test_ids": [
+    "tests.test_portal_security.PortalSecurityTests.test_daily_log_path_includes_date",
+    "tests.test_portal_security.PortalSecurityTests.test_security_headers_allow_only_known_external_media_hosts",
+    "tests.test_portal_security.PortalSecurityTests.test_upload_extension_policy_blocks_script",
+    "tests.test_portal_security.PortalSecurityTests.test_safe_path_blocks_escape",
+    "tests.test_portal_security.PortalSecurityTests.test_safe_path_rejects_symlink_component_inside_storage",
+    "tests.test_portal_security.PortalSecurityTests.test_save_upload_rejects_existing_file",
+    "tests.test_portal_security.PortalSecurityTests.test_concurrent_same_name_upload_has_one_winner_and_preserves_winner_payload",
+    "tests.test_portal_security.PortalSecurityTests.test_upload_size_failure_removes_only_new_file",
+    "tests.test_portal_security.PortalSecurityTests.test_upload_read_failure_removes_only_new_file",
+    "tests.test_portal_security.PortalSecurityTests.test_auth_rate_limit_blocks_repeated_failures",
+    "tests.test_portal_security.PortalSecurityTests.test_auth_rate_limit_records_survive_security_service_restart",
+    "tests.test_portal_security.PortalSecurityTests.test_auth_sessions_evict_oldest_entry_at_configured_bound",
+    "tests.test_portal_security.PortalSecurityTests.test_auth_session_cap_holds_during_concurrent_session_creation",
+    "tests.test_portal_security.PortalSecurityTests.test_append_user_event_allows_known_click_events",
+    "tests.test_portal_security.PortalSecurityTests.test_security_event_preserves_full_kst_timestamp_in_log_and_returns_compact_display",
+    "tests.test_portal_security.PortalSecurityTests.test_read_recent_events_normalizes_legacy_kst_timestamp",
+    "tests.test_file_access.FileAccessTests.test_upload_removes_file_when_security_event_recording_fails",
+    "tests.test_file_access.FileAccessTests.test_delete_rejects_directory_swapped_to_external_symlink_after_scan",
+    "tests.test_file_management.FileManagementTests.test_recursive_search_excludes_links_and_hidden_data",
+    "tests.test_file_management.FileManagementTests.test_exclusive_move_and_rename_preserve_data",
+    "tests.test_file_management.FileManagementTests.test_blocked_extension_and_descendant_moves_are_rejected",
+    "tests.test_file_management.FileManagementTests.test_hidden_trash_is_inaccessible_through_existing_apis",
+    "tests.test_file_management.FileManagementTests.test_folder_roundtrip",
+    "tests.test_validate_backup_evidence.ValidateBackupEvidenceTests.test_valid_required_and_optional_evidence_passes",
+    "tests.test_validate_backup_evidence.ValidateBackupEvidenceTests.test_valid_source_digest_is_accepted",
+    "tests.test_validate_backup_evidence.ValidateBackupEvidenceTests.test_rejects_evidence_without_source_runtime",
+    "tests.test_validate_backup_evidence.ValidateBackupEvidenceTests.test_accepts_only_known_source_runtime_values",
+    "tests.test_validate_backup_evidence.ValidateBackupEvidenceTests.test_rejects_unencrypted_or_unsuccessful_restore",
+    "tests.test_validate_backup_evidence.ValidateBackupEvidenceTests.test_rejects_stale_and_future_times",
+    "tests.test_validate_backup_evidence.ValidateBackupEvidenceTests.test_rejects_restore_evidence_that_predates_its_backup",
+    "tests.test_validate_backup_evidence.ValidateBackupEvidenceTests.test_rejects_duplicate_unknown_blank_and_comment_lines",
+    "tests.test_validate_backup_evidence.ValidateBackupEvidenceTests.test_rejects_invalid_timestamp_scope_and_backup_identifier",
+    "tests.test_portal_improvements.PortalImprovementsTests.test_quota_includes_trash_and_preserves_existing_content",
+    "tests.test_portal_improvements.PortalImprovementsTests.test_disk_reserve_blocks_and_cleans_partial_upload",
+    "tests.test_portal_improvements.PortalImprovementsTests.test_bulk_quota_failure_rolls_back_only_this_request",
+    "tests.test_portal_improvements.PortalImprovementsTests.test_quota_rejects_symlinks_without_touching_target"
+  ],
+  "mutants": [
+    {
+      "id": "auth-rate-limit-boundary",
+      "target": "portal-web/app/services/security.py",
+      "before": "return len(_AUTH_FAILURES.get((scope, identifier), [])) >= AUTH_RATE_LIMIT_MAX_FAILURES",
+      "after": "return len(_AUTH_FAILURES.get((scope, identifier), [])) > AUTH_RATE_LIMIT_MAX_FAILURES",
+      "test_ids": [
+        "tests.test_portal_security.PortalSecurityTests.test_auth_rate_limit_blocks_repeated_failures"
+      ]
+    },
+    {
+      "id": "upload-size-limit",
+      "target": "portal-web/app/services/file_store.py",
+      "before": "if size > MAX_UPLOAD_BYTES:",
+      "after": "if False:  # bounded quality mutant: disabled upload size guard",
+      "test_ids": [
+        "tests.test_portal_security.PortalSecurityTests.test_upload_size_failure_removes_only_new_file"
+      ]
+    },
+    {
+      "id": "backup-encryption-proof",
+      "target": "infra/k8s/tools/validate-backup-evidence.py",
+      "before": "\"encrypted\": \"true\",",
+      "after": "\"encrypted\": values[\"encrypted\"],",
+      "test_ids": [
+        "tests.test_validate_backup_evidence.ValidateBackupEvidenceTests.test_rejects_unencrypted_or_unsuccessful_restore"
+      ]
+    }
+  ]
+}

@@ -150,10 +150,17 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ matrix.name }}" == "k8s-contracts" ]]; then
-            python3 tests/run_ci_shards.py --workers 4 --evidence k8s-shards.json
+            python3 tests/run_ci_shards.py --workers 4 --evidence k8s-shards.json --fail-on-skip
           else
-            ${{ matrix.test_command }}
+            python3 tests/run_ci_tests.py --suite "${{ matrix.name }}" --evidence unit-test-results.json --fail-on-skip
           fi
+
+      - name: Upload unit test outcomes
+        if: always() && matrix.name != 'k8s-contracts'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-results-${{ matrix.name }}
+          path: unit-test-results.json
 
       - name: Upload K8s coverage and timings
         if: always() && matrix.name == 'k8s-contracts'
@@ -161,6 +168,29 @@ jobs:
         with:
           name: k8s-shard-evidence
           path: k8s-shards.json
+
+  quality:
+    needs: [scope, matrix]
+    if: needs.matrix.outputs.mode != 'documentation'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Install verification quality dependencies
+        run: python3 -m pip install -r portal-web/requirements.txt -r tests/requirements.quality.txt PyYAML
+      - name: Check branch coverage and mutation detection
+        run: python3 scripts/run_verification_quality.py --output-dir verification-quality-artifacts
+      - name: Upload verification quality evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verification-quality-evidence
+          path: verification-quality-artifacts
 
   browser:
     needs: [scope, matrix]
@@ -196,7 +226,7 @@ jobs:
           path: browser-artifacts
 
   summary:
-    needs: [scope, matrix, test, browser]
+    needs: [scope, matrix, test, browser, quality]
     if: always()
     runs-on: ubuntu-latest
 
@@ -280,6 +310,7 @@ jobs:
             echo
             echo "- Policy status: \`${{ steps.evidence.outputs.policy_status }}\`"
             echo "- Service test result: \`${{ needs.test.result }}\`"
+            echo "- Verification quality result: \`${{ needs.quality.result }}\`"
             echo "- Selected CI mode: \`${{ needs.matrix.outputs.mode }}\`"
             echo "- Selected suites: \`${{ needs.matrix.outputs.selected_checks }}\`"
             echo "- Missing checks: \`$missing_checks\`"
@@ -308,6 +339,8 @@ jobs:
           test "${{ needs.test.result }}" = "success"
           if [[ "${{ needs.matrix.outputs.mode }}" == "documentation" ]]; then
             test "${{ needs.browser.result }}" = "skipped"
+            test "${{ needs.quality.result }}" = "skipped"
           else
             test "${{ needs.browser.result }}" = "success"
+            test "${{ needs.quality.result }}" = "success"
           fi

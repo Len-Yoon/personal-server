@@ -48,6 +48,7 @@ POLICY_MAINTENANCE_FILES = {
     "scripts/verify_change_scope.py",
     "scripts/run_change_harness.py",
     "scripts/review_provenance.py",
+    "scripts/run_verification_quality.py",
     "scripts/record_token_measurement.py",
     "scripts/setup-local-test-venvs.py",
     "scripts/summarize_token_measurements.py",

@@ -100,6 +100,30 @@ python3 scripts/summarize_token_measurements.py --input <측정기록.jsonl>
 
 CI는 변경 목록과 서비스 테스트 결과로 정책 증적을 생성·보관함. CI summary job은 같은 변경 목록으로 하네스를 실행해 구조화 JSON과 `--agent-context` 요약을 artifact에 함께 보관함. 다만 하네스의 `ready_for_review`는 사람 검토 가능 상태이며 CI 성공, PR 승인 또는 배포 승인을 뜻하지 않음. CI가 모델 토큰 사용량을 자동 수집하지 않으므로 실제 토큰 절감률은 로컬 측정 기록을 별도 집계해야 함.
 
+### 2.6 테스트 건너뜀·분기·변이 검증
+
+선택된 CI 테스트 묶음은 일반 실행기 `tests/run_ci_tests.py`와 K8s 실행기 `tests/run_ci_shards.py`에 `--fail-on-skip`을 전달함. 메서드·subtest·모듈/클래스 fixture의 skip, expected failure, unexpected success, 빈 수집과 실행 ID 누락·중복은 성공으로 처리하지 않음. 로컬 기본 실행의 선택적 skip과 문서 전용 변경의 검사 묶음 선택은 유지함. 플랫폼·의존성이 맞지 않아 발생한 CI skip은 환경을 보완하며 허용 목록으로 숨기지 않음.
+
+| 증거 | 확인 내용 | 한계 |
+|---|---|---|
+| `test-results-<묶음>` | 수집/실행 ID, skip·실패·오류의 이유, strict 모드와 성공 여부 | 등록된 테스트의 실행 증거이며 코드 경로 전체의 검증률이 아님 |
+| `k8s-shard-evidence` | 같은 결과를 각 worker와 집계에서 대조함 | worker 누락·잘못된 보고서는 실패함 |
+| `verification-quality-evidence` | `coverage.json`, `quality.json`, `quality.txt`의 원본·문장/분기·변이 결과 | 아래에 고정한 일부 위험 경계의 검사임 |
+
+`quality` CI job은 문서 전용 변경을 제외한 변경에서 필수 실행하며, summary가 결과 성공을 요구함. 실패 시에도 artifact 업로드를 시도함. 분기 측정은 [coverage.py의 branch 방식](https://coverage.readthedocs.io/en/7.16.2/branch.html)을 사용하고, 도구 버전·기존 테스트 ID·측정 대상·하한은 [고정 설정](../tests/verification_quality.json)과 [고정 의존성](../tests/requirements.quality.txt)에서 대조함.
+
+```sh
+python3 tests/run_ci_tests.py --suite maintenance --evidence /tmp/maintenance-results.json --fail-on-skip
+python3 tests/run_ci_shards.py --workers 4 --evidence /tmp/k8s-results.json --fail-on-skip
+python3 scripts/run_verification_quality.py --output-dir /tmp/verification-quality
+```
+
+품질 도구는 인증·업로드 저장소·백업 증적 검증의 실제 소스를 명시한 코드 allowlist로만 임시 복사함. 운영 환경 변수·HOME·데이터·자격 증명을 복사하지 않고, 테스트 환경의 저장·로그 경로를 임시 디렉터리로 지정하며 네트워크 연결을 차단함. 원본 해시를 전후 대조하고 종료 시 임시 복사를 정리함.
+
+분기 증거에는 파일 전체와 핵심 함수의 문장/분기 실측값, 실행되지 않은 행·분기 arc를 함께 남김. 하한은 기록한 최초 baseline의 회귀 방지 기준이며 완전 검증 목표가 아님. 특히 저장소 파일의 다운로드·삭제 등 선택한 검사 밖의 분기는 여전히 미검증으로 표시함. 수치를 높이기 위해 코드·분기를 제외하거나 미실행 부분을 성공으로 간주하지 않음.
+
+변이는 인증 제한의 경계 조건, 업로드 크기 제한, 백업 암호화 증적 조건을 대상으로 함. 변경 없는 baseline과 각 변이의 동일 테스트가 먼저 성공해야 하며, 원본을 바꾸지 않은 임시 복사에만 한정된 변이를 적용함. 기존 테스트의 assertion failure로 탐지된 경우만 `killed`로 판정함. 생존·수집/실행 오류·skip·timeout·원본 변경은 각각 실패로 처리하며, 세 변이 탐지가 모든 가능한 결함을 탐지한다는 의미는 아님. 구현자의 실행 결과와 최종 독립 검토자의 원본 대조를 구분해 기록함.
+
 ## 3. CI artifact 확인 방법
 
 1. GitHub Actions의 해당 CI 실행을 열고 커밋 또는 PR과 연결된 실행인지 확인함.
