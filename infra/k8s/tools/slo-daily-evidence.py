@@ -34,6 +34,7 @@ EVIDENCE_CONFIGMAP = "slo-daily-evidence"
 PROMETHEUS_URL = "http://prometheus-operated.monitoring.svc:9090/api/v1/query"
 PUBLIC_HEALTH_URL = "https://len.pe.kr/health"
 REQUEST_TIMEOUT_SECONDS = 10
+CRITERIA_VERSION = "freshness-1800-v1"
 
 _QUERY_PORTAL_HTTP_REQUESTS = "sum(increase(portal_http_requests_total[24h]))"
 _QUERY_PORTAL_HTTP_ERRORS = (
@@ -49,7 +50,7 @@ _QUERY_PORTAL_READY = (
 )
 _QUERY_CRAWLER_FRESHNESS = (
     "min(min_over_time(((crawler_news_collection_initialized == bool 1) * "
-    "(time() - crawler_news_collection_last_success_timestamp_seconds <= bool 900) * "
+    "(time() - crawler_news_collection_last_success_timestamp_seconds <= bool 1800) * "
     "(crawler_news_collection_consecutive_failures < bool 3))[24h:]))"
 )
 _QUERY_SOURCES = {
@@ -159,7 +160,10 @@ def validate_record(record: dict) -> dict:
     if any((status == "unobservable") != (field in missing_set) for field, status in statuses.items()):
         raise ValueError("unobservable statuses must reflect missing sources")
 
+    if "criteria_version" in record and record["criteria_version"] != CRITERIA_VERSION:
+        raise ValueError("unsupported criteria_version")
     return {
+        **({"criteria_version": CRITERIA_VERSION} if "criteria_version" in record else {}),
         "date": record_date,
         "collected_at": collected_at,
         "overall": overall,
@@ -299,6 +303,7 @@ def collect_record(
     portal_ready = status_for(_QUERY_PORTAL_READY, "portal_ready")
     crawler_freshness = status_for(_QUERY_CRAWLER_FRESHNESS, "crawler_freshness")
     record = {
+        "criteria_version": CRITERIA_VERSION,
         "date": collected_at.astimezone(ZoneInfo("Asia/Seoul")).date().isoformat(),
         "collected_at": collected_at.isoformat().replace("+00:00", "Z"),
         "overall": "unobservable" if missing else "ok",

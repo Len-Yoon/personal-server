@@ -3,6 +3,8 @@ import io
 import json
 import math
 import subprocess
+import shutil
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
@@ -99,9 +101,10 @@ class SloDailyEvidenceManifestTests(unittest.TestCase):
     def test_image_has_collector_runtime_dependencies_and_nonroot_entrypoint(self):
         self.assertTrue(DOCKERFILE.is_file(), "daily evidence Dockerfile is missing")
         source = DOCKERFILE.read_text()
-        self.assertIn("FROM python:3.11-slim@sha256:", source)
+        self.assertEqual(source.splitlines()[0], (ROOT / "infra/k8s/sre-audit-automation/Dockerfile").read_text().splitlines()[0])
         self.assertIn("ca-certificates", source)
-        self.assertIn("kubernetes-client", source)
+        self.assertIn("kubectl tzdata", source)
+        self.assertIn("apk upgrade --no-cache", source)
         self.assertIn("USER 10001:10001", source)
         copies = [line.split() for line in source.splitlines() if line.startswith("COPY ")]
         self.assertEqual(copies, [[
@@ -190,6 +193,16 @@ class SloDailyEvidenceValidationTests(unittest.TestCase):
             "portal_http", "crawler_freshness", "missing",
         })
         self.assertNotIn("extra", result)
+
+    def test_merge_preserves_legacy_and_versioned_criteria_without_relabeling_history(self):
+        old = {"date": "2026-08-29", **valid_fields()}
+        new = {"date": "2026-08-30", **valid_fields(), "criteria_version": "freshness-1800-v1"}
+        merged = module.merge_records([old], new)
+        self.assertEqual(merged[0]["criteria_version"], "freshness-1800-v1")
+        self.assertNotIn("criteria_version", merged[1])
+        self.assertNotIn("criteria_version", old)
+        with self.assertRaises(ValueError):
+            module.validate_record(dict(new, criteria_version="unreviewed"))
 
     def test_validate_record_rejects_invalid_date_and_non_utc_timestamp(self):
         for record in (
@@ -313,13 +326,38 @@ class SloDailyEvidenceCollectionTests(unittest.TestCase):
             1,
         )
 
+    def test_freshness_real_promql_allows_normal_cadence_but_preserves_faults(self):
+        self.assertIsNotNone(shutil.which('promtool'), 'promtool is required for temporal freshness verification')
+        cases = [('cadence15m', '0+900x100', '1+0x100', '0+0x100', 1),
+                 ('delay905s', '-905+900x100', '1+0x100', '0+0x100', 1),
+                 ('stale1801s', '-1801+900x100', '1+0x100', '0+0x100', 0),
+                 ('failures3', '0+900x100', '1+0x100', '3+0x100', 0),
+                 ('uninitialized', '0+900x100', '0+0x100', '0+0x100', 0)]
+        tests = []
+        for name, timestamp, initialized, failures, expected in cases:
+            base_age = 905 if name == 'delay905s' else 1801 if name == 'stale1801s' else 0
+            timestamp = ' '.join(str((sample // 30) * 900 - base_age) for sample in range(2881))
+            initialized = '0+0x2880' if name == 'uninitialized' else '1+0x2880'
+            failures = '3+0x2880' if name == 'failures3' else '0+0x2880'
+            tests.append({'name': name, 'interval': '30s', 'input_series': [
+                {'series': 'crawler_news_collection_last_success_timestamp_seconds{instance="current"}', 'values': timestamp},
+                {'series': 'crawler_news_collection_initialized{instance="current"}', 'values': initialized},
+                {'series': 'crawler_news_collection_consecutive_failures{instance="current"}', 'values': failures},
+            ], 'promql_expr_test': [{'expr': module._QUERY_CRAWLER_FRESHNESS, 'eval_time': '24h',
+                                    'exp_samples': [{'labels': '{}', 'value': expected}]}]})
+        with tempfile.TemporaryDirectory() as temp:
+            fixture = Path(temp) / 'freshness.yaml'
+            fixture.write_text(yaml.safe_dump({'rule_files': [], 'evaluation_interval': '1m', 'tests': tests}))
+            result = subprocess.run(['promtool', 'test', 'rules', str(fixture)], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_crawler_query_uses_numeric_bool_multiplication_for_stale_conditions(self):
         query = module._QUERY_CRAWLER_FRESHNESS
 
         self.assertEqual(
             query,
             "min(min_over_time(((crawler_news_collection_initialized == bool 1) * "
-            "(time() - crawler_news_collection_last_success_timestamp_seconds <= bool 900) * "
+            "(time() - crawler_news_collection_last_success_timestamp_seconds <= bool 1800) * "
             "(crawler_news_collection_consecutive_failures < bool 3))[24h:]))",
         )
 
