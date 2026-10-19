@@ -75,7 +75,9 @@ for _name, _modules in (
 
 
 _maintenance = EXPECTED_GROUPS["maintenance"]
-EXPECTED_GROUPS["maintenance"] = (*_maintenance[:-1], _maintenance[-1] + " tests.test_browser_smoke")
+EXPECTED_GROUPS["maintenance"] = (*_maintenance[:-1], (_maintenance[-1] + " tests.test_browser_smoke").replace(
+    "tests.test_run_service_tests", "tests.test_run_service_tests tests.test_verification_quality",
+))
 
 
 class ServiceTestRunnerTests(unittest.TestCase):
@@ -426,3 +428,161 @@ class ShardedRunnerTests(unittest.TestCase):
             report = json.loads(output.read_text())
             self.assertFalse(report['success'])
             self.assertIsNotNone(report['coverage_error'])
+
+
+class StrictCIOutcomeTests(unittest.TestCase):
+    def run_cases(self, cases, strict=True):
+        from tests.ci_test_results import RecordedResult, outcome
+        expected = [case.id() for case in cases]
+        result = unittest.TextTestRunner(stream=StringIO(), resultclass=RecordedResult).run(unittest.TestSuite(cases))
+        return outcome(result, expected, strict)
+
+    def test_normal_and_real_failure_have_explicit_evidence(self):
+        class Passing(unittest.TestCase):
+            def runTest(self):
+                pass
+        class Failing(unittest.TestCase):
+            def runTest(self):
+                self.fail('injected real failure')
+        self.assertTrue(self.run_cases([Passing()])['success'])
+        report = self.run_cases([Failing()])
+        self.assertFalse(report['success'])
+        self.assertIn('injected real failure', report['failures'][0]['reason'])
+
+    def test_skip_and_subtest_skip_fail_strict_but_preserve_local_optional_behavior(self):
+        class Skipped(unittest.TestCase):
+            def runTest(self):
+                self.skipTest('injected optional dependency')
+        class SubtestSkipped(unittest.TestCase):
+            def runTest(self):
+                with self.subTest(number=7):
+                    self.skipTest('injected subtest skip')
+        for case_type in (Skipped, SubtestSkipped):
+            with self.subTest(case=case_type.__name__):
+                report = self.run_cases([case_type()])
+                self.assertFalse(report['success'])
+                self.assertIn('injected', report['skipped'][0]['reason'])
+                self.assertIn(case_type.__name__, report['skipped'][0]['id'])
+                self.assertTrue(self.run_cases([case_type()], strict=False)['success'])
+
+    def test_expected_failure_and_unexpected_success_are_not_green_in_ci(self):
+        class ExpectedFailure(unittest.TestCase):
+            @unittest.expectedFailure
+            def runTest(self):
+                self.fail('injected expected failure')
+        class UnexpectedSuccess(unittest.TestCase):
+            @unittest.expectedFailure
+            def runTest(self):
+                pass
+        for case_type, key in ((ExpectedFailure, 'expected_failures'), (UnexpectedSuccess, 'unexpected_successes')):
+            report = self.run_cases([case_type()])
+            self.assertFalse(report['success'])
+            self.assertEqual(len(report[key]), 1)
+            self.assertIn(case_type.__name__, report[key][0]['id'])
+
+    def test_class_and_module_fixture_skips_keep_reason_and_missing_ids(self):
+        import types
+        from tests import run_ci_shards as shards
+        module = types.ModuleType('ci_fixture_skip')
+        exec('import unittest\nclass Case(unittest.TestCase):\n def test_case(self): pass\n', module.__dict__)
+        for fixture in ('setUpModule', 'setUpClass'):
+            def skip(*args):
+                raise unittest.SkipTest('injected fixture skip')
+            if fixture == 'setUpModule':
+                module.setUpModule = skip
+            else:
+                del module.setUpModule
+                module.Case.setUpClass = classmethod(skip)
+            with mock.patch.dict(sys.modules, {'ci_fixture_skip': module}), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'evidence.json'
+                with redirect_stderr(StringIO()):
+                    self.assertEqual(shards.worker(['ci_fixture_skip'], path, fail_on_skip=True), 1)
+                report = json.loads(path.read_text())
+                self.assertEqual(report['executed_ids'], [])
+                self.assertEqual(len(report['expected_ids']), 1)
+                self.assertEqual(report['skipped'][0]['reason'], 'injected fixture skip')
+                self.assertIn(fixture, report['skipped'][0]['id'])
+
+    def test_empty_duplicate_and_missing_execution_fail(self):
+        from tests.ci_test_results import inventory, verify_coverage
+        class Passing(unittest.TestCase):
+            def runTest(self):
+                pass
+        for suite in (unittest.TestSuite(), unittest.TestSuite([Passing(), Passing()])):
+            with self.assertRaisesRegex(ValueError, 'empty or contains duplicate'):
+                inventory(suite, unittest.TestLoader())
+        for expected, actual in (([], []), (['case'], []), (['case'], ['case', 'case']), (['case'], ['other'])):
+            with self.assertRaises(ValueError):
+                verify_coverage(expected, actual)
+
+    def test_aggregate_propagates_skip_even_if_worker_claims_success(self):
+        from tests import run_ci_shards as shards
+        def skipped_process(command, **kwargs):
+            self.assertIn('--fail-on-skip', command)
+            output = Path(command[command.index('--worker-output') + 1])
+            output.write_text(json.dumps({'executed_ids': ['case'], 'success': True, 'skipped': [{'id': 'case', 'reason': 'injected skip'}]}))
+            return subprocess.CompletedProcess(command, 0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'evidence.json'
+            with mock.patch.object(shards, 'collect', return_value=(None, ['case'])), \
+                 mock.patch.object(shards, 'partition', return_value=([['fixture']], {})), \
+                 mock.patch.object(shards.subprocess, 'run', side_effect=skipped_process), redirect_stdout(StringIO()):
+                self.assertEqual(shards.run(['fixture'], 1, path, fail_on_skip=True), 1)
+            self.assertEqual(json.loads(path.read_text())['skipped'][0]['reason'], 'injected skip')
+
+    def test_malformed_worker_report_is_failure_with_structured_reason(self):
+        from tests import run_ci_shards as shards
+        for payload in ('invalid JSON', '[]', '{"success": true, "executed_ids": null}'):
+            def malformed_process(command, **kwargs):
+                output = Path(command[command.index('--worker-output') + 1])
+                output.write_text(payload)
+                return subprocess.CompletedProcess(command, 0)
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'evidence.json'
+                with mock.patch.object(shards, 'collect', return_value=(None, ['case'])), \
+                     mock.patch.object(shards, 'partition', return_value=([['fixture']], {})), \
+                     mock.patch.object(shards.subprocess, 'run', side_effect=malformed_process), redirect_stdout(StringIO()):
+                    self.assertEqual(shards.run(['fixture'], 1, path, fail_on_skip=True), 1)
+                self.assertIn('report_error', json.loads(path.read_text())['workers'][0])
+
+    def test_non_k8s_wrapper_records_failure_collection_and_skip(self):
+        from tests import run_ci_tests as ci
+        class Skipped(unittest.TestCase):
+            def runTest(self):
+                self.skipTest('injected wrapper skip')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'nested' / 'evidence.json'
+            with mock.patch.object(ci, 'collect', return_value=(unittest.TestSuite([Skipped()]), [Skipped().id()])), redirect_stderr(StringIO()):
+                self.assertEqual(ci.run('documentation', path, True), 1)
+            self.assertEqual(json.loads(path.read_text())['skipped'][0]['reason'], 'injected wrapper skip')
+            with mock.patch.object(ci, 'collect', side_effect=ValueError('injected collection error')):
+                self.assertEqual(ci.run('maintenance', path, True), 1)
+            self.assertIn('injected collection error', json.loads(path.read_text())['collection_error'])
+            self.assertEqual(ci.run('not-a-suite', path, True), 1)
+            self.assertIn('unknown CI suite', json.loads(path.read_text())['collection_error'])
+
+    def test_wrapper_accepts_each_matrix_name_and_documentation_without_changing_import_path(self):
+        from tests import run_ci_tests as ci
+        class Passing(unittest.TestCase):
+            def runTest(self):
+                pass
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'evidence.json'
+            for name in [entry['name'] for entry in runner.load_matrix()] + ['documentation']:
+                original_path = sys.path[:]
+                with mock.patch.object(ci, 'collect', return_value=(unittest.TestSuite([Passing()]), [Passing().id()])), redirect_stderr(StringIO()):
+                    self.assertEqual(ci.run(name, path, True), 0)
+                self.assertEqual(sys.path, original_path)
+                self.assertEqual(json.loads(path.read_text())['suite'], name)
+
+    def test_discover_preserves_top_level_module_ids_and_fixture_semantics(self):
+        from tests import run_ci_tests as ci
+        loader = mock.Mock()
+        case = unittest.FunctionTestCase(lambda: None)
+        loader.discover.return_value = unittest.TestSuite([case])
+        loader.errors = []
+        with mock.patch.object(ci.unittest, 'TestLoader', return_value=loader):
+            _, ids = ci.collect('python3 -m unittest discover -s tests/car_care_worker')
+        loader.discover.assert_called_once_with(str(ROOT / 'tests/car_care_worker'))
+        loader.loadTestsFromNames.assert_not_called()
+        self.assertEqual(ids, [case.id()])

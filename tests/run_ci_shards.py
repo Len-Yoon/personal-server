@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import json
 import math
@@ -15,25 +14,13 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-
-
-def cases(suite):
-    for item in suite:
-        if isinstance(item, unittest.TestSuite):
-            yield from cases(item)
-        else:
-            yield item
+from tests.ci_test_results import RecordedResult, cases, inventory, outcome, verify_coverage, write_evidence
 
 
 def collect(modules):
     loader = unittest.TestLoader()
     loaded = loader.loadTestsFromNames(modules)
-    if loader.errors:
-        raise ValueError("unittest collection failed: " + "\n".join(loader.errors))
-    ids = [case.id() for case in cases(loaded)]
-    if not ids or len(ids) != len(set(ids)):
-        raise ValueError("test collection is empty or contains duplicate case IDs")
-    return loaded, ids
+    return loaded, inventory(loaded, loader)
 
 
 def partition(modules, count):
@@ -54,22 +41,7 @@ def partition(modules, count):
     return [group for group in groups if group], inventory
 
 
-def verify_coverage(expected, observed):
-    if Counter(expected) != Counter(observed) or len(observed) != len(set(observed)):
-        raise ValueError("shard case coverage is missing, duplicated or unexpected")
-
-
-class RecordedResult(unittest.TextTestResult):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.executed = []
-
-    def startTest(self, test):
-        self.executed.append(test.id())
-        super().startTest(test)
-
-
-def worker(modules, output, preload=None):
+def worker(modules, output, preload=None, fail_on_skip=False):
     # The serial runner imports every module before executing any test. Preserve
     # that import context (some legacy tool tests register sibling imports).
     if preload:
@@ -77,20 +49,13 @@ def worker(modules, output, preload=None):
     suite, expected = collect(modules)
     started = time.monotonic()
     result = unittest.TextTestRunner(verbosity=1, resultclass=RecordedResult).run(suite)
-    # A failing module fixture must fail even when it prevented test startTest calls.
-    success = result.wasSuccessful()
-    try:
-        verify_coverage(expected, result.executed)
-    except ValueError:
-        success = False
-    Path(output).write_text(json.dumps({
-        "modules": modules, "expected_ids": expected, "executed_ids": result.executed,
-        "success": success, "seconds": time.monotonic() - started,
-    }), encoding="utf-8")
-    return 0 if success else 1
+    report = outcome(result, expected, fail_on_skip)
+    report.update(modules=modules, seconds=time.monotonic() - started, fail_on_skip=fail_on_skip)
+    write_evidence(output, report)
+    return 0 if report["success"] else 1
 
 
-def run(modules, count, evidence):
+def run(modules, count, evidence, fail_on_skip=False):
     _, expected = collect(modules)
     groups, _ = partition(modules, count)
     started = time.monotonic()
@@ -99,9 +64,22 @@ def run(modules, count, evidence):
         def launch(pair):
             index, group = pair
             output = Path(scratch) / f"{index}.json"
-            result = subprocess.run([sys.executable, str(Path(__file__).resolve()),
-                                     "--worker-output", str(output), *group], cwd=ROOT)
-            report = json.loads(output.read_text()) if output.exists() else {}
+            command = [sys.executable, str(Path(__file__).resolve()), "--worker-output", str(output)]
+            if fail_on_skip:
+                command.append("--fail-on-skip")
+            result = subprocess.run([*command, *group], cwd=ROOT)
+            try:
+                report = json.loads(output.read_text())
+                if not isinstance(report, dict):
+                    raise ValueError("worker report must be an object")
+                if not isinstance(report.get("executed_ids"), list) or any(not isinstance(item, str) for item in report["executed_ids"]):
+                    raise ValueError("worker report has invalid executed IDs")
+                for key in ("skipped", "expected_failures", "unexpected_successes", "failures", "errors"):
+                    entries = report.get(key, [])
+                    if not isinstance(entries, list) or any(not isinstance(item, dict) or not isinstance(item.get("id"), str) or not isinstance(item.get("reason"), str) for item in entries):
+                        raise ValueError(f"worker report has invalid {key}")
+            except (OSError, ValueError) as error:
+                report = {"success": False, "report_error": str(error)}
             return result.returncode, report
         with ThreadPoolExecutor(max_workers=count) as pool:
             reports = list(pool.map(launch, enumerate(groups)))
@@ -111,12 +89,14 @@ def run(modules, count, evidence):
         verify_coverage(expected, observed)
     except ValueError as error:
         coverage_error = str(error)
+    anomalies = {key: [item for _, report in reports for item in report.get(key, [])]
+                 for key in ("skipped", "expected_failures", "unexpected_successes", "failures", "errors")}
     success = coverage_error is None and all(code == 0 and report.get("success") is True for code, report in reports)
+    success = success and not (fail_on_skip and (anomalies["skipped"] or anomalies["expected_failures"] or anomalies["unexpected_successes"]))
     result = {"success": success, "expected_ids": expected, "executed_ids": observed,
               "seconds": time.monotonic() - started, "coverage_error": coverage_error,
-              "workers": [report for _, report in reports]}
-    if evidence:
-        Path(evidence).write_text(json.dumps(result, indent=2), encoding="utf-8")
+              "workers": [report for _, report in reports], "fail_on_skip": fail_on_skip, **anomalies}
+    write_evidence(evidence, result)
     print(f"K8s shards: {len(observed)} cases, {len(groups)} workers, "
           f"{result['seconds']:.2f}s, success={success}")
     return 0 if success else 1
@@ -127,6 +107,7 @@ def main():
     parser.add_argument("--workers", type=int, choices=(1, 2, 4), default=4)
     parser.add_argument("--evidence")
     parser.add_argument("--worker-output")
+    parser.add_argument("--fail-on-skip", action="store_true")
     parser.add_argument("modules", nargs="*")
     args = parser.parse_args()
     try:
@@ -139,10 +120,11 @@ def main():
         if args.worker_output:
             if not args.modules or not set(args.modules) <= set(modules):
                 raise ValueError("unexpected worker modules")
-            return worker(args.modules, args.worker_output, modules)
-        return run(modules, args.workers, args.evidence)
+            return worker(args.modules, args.worker_output, modules, args.fail_on_skip)
+        return run(modules, args.workers, args.evidence, args.fail_on_skip)
     except (ValueError, OSError) as error:
         print(f"K8s shard verification failed: {error}", file=sys.stderr)
+        write_evidence(args.worker_output or args.evidence, {"success": False, "collection_error": str(error)})
         return 1
 
 
