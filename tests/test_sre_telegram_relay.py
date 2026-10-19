@@ -525,6 +525,44 @@ class RelayServiceTest(unittest.TestCase):
                 self.assertIn(f"수집 {recorded}/30일, 정상 {ok}일, 관측 불가 {unknown}일", message)
                 self.assertNotIn(audit_data["run_id"], message)
                 self.assertNotIn(audit_data["completed_at"], message)
+                if result != "passed":
+                    self.assertNotIn("추가 조치 없음", message)
+
+    def test_quarterly_audit_unknown_counts_explain_failure_and_are_deduplicated(self):
+        for reason, explanation in (("read_failed", "증적 읽기 실패"), ("invalid_records", "증적 형식 검증 실패"), ("not_collected", "집계 미실행")):
+            with self.subTest(reason=reason):
+                report = {
+                    "run_id": "20261019T010203Z-audit", "status": "passed",
+                    "completed_at": "2026-10-19T01:02:03Z", "health_audit": "passed",
+                    "backup_check": "passed", "recovery_lab": "passed", "slo_evidence": "unobservable",
+                    "slo_days_recorded": "unknown", "slo_days_ok": "unknown",
+                    "slo_days_unobservable": "unknown", "slo_evidence_reason": reason,
+                }
+                k8s = FakeQuarterlyAuditStatusK8s(report)
+                telegram = FakePollingTelegram([])
+                relay = RelayService(allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                    quarterly_audit_delivery_store=ConfigMapQuarterlyAuditDeliveryStore(k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP))
+                self.assertTrue(relay.deliver_quarterly_audit_report(telegram.send_message))
+                relay.deliver_quarterly_audit_report(telegram.send_message)
+                self.assertEqual(len(telegram.sent_messages), 1)
+                message = telegram.sent_messages[0][1]
+                self.assertIn(explanation, message)
+                self.assertIn("일수: 확인 불가", message)
+                self.assertNotIn("수집 0/30", message)
+                self.assertNotIn("추가 조치 없음", message)
+
+    def test_quarterly_audit_mixed_criteria_are_visible_and_not_full_period_pass(self):
+        report = {"run_id": "20261019T010203Z-mixed", "status": "passed",
+                  "completed_at": "2026-10-19T01:02:03Z", "health_audit": "passed",
+                  "backup_check": "passed", "recovery_lab": "passed", "slo_evidence": "unobservable",
+                  "slo_days_recorded": "30", "slo_days_ok": "30", "slo_days_unobservable": "0",
+                  "slo_evidence_reason": "none", "slo_criteria": "mixed"}
+        client = FakeQuarterlyAuditStatusK8s(report)
+        checked = relay_main._read_quarterly_audit_report(client)
+        self.assertIsNotNone(checked)
+        self.assertIn("15분·30분 혼합", relay_main._format_quarterly_audit_message(checked))
+        client.audit_data["slo_evidence"] = "passed"
+        self.assertIsNone(relay_main._read_quarterly_audit_report(client))
 
     def test_quarterly_audit_rejects_partial_unknown_and_malformed_slo_summaries(self):
         valid = {
@@ -542,6 +580,11 @@ class RelayServiceTest(unittest.TestCase):
             {"slo_days_ok": 30}, {"slo_days_unobservable": "1"},
             {"slo_days_recorded": "29"}, {"slo_days_ok": "29"},
             {"slo_evidence": "failed"},
+            {"slo_evidence_reason": "private-raw-record"},
+            {"slo_evidence_reason": "read_failed"},
+            {"slo_days_recorded": "unknown", "slo_evidence": "unobservable"},
+            {"slo_evidence_reason": "none", "slo_days_recorded": "unknown"},
+            {"slo_evidence_reason": "read_failed", "slo_evidence": "passed", "slo_days_recorded": "unknown", "slo_days_ok": "unknown", "slo_days_unobservable": "unknown"},
             {"slo_evidence": "unobservable", "slo_days_recorded": "29"},
             {"slo_evidence": "unobservable", "slo_days_unobservable": "1"},
             {"slo_evidence": "unobservable", "slo_days_recorded": "31"},
