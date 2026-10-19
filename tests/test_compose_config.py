@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+import yaml
 from pathlib import Path
 
 
@@ -539,6 +540,49 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn("if: join(matrix.extra_packages, '') != ''", workflow)
         self.assertIn("python3 -m pip install ${{ join(matrix.extra_packages, ' ') }}", workflow)
         self.assertNotIn("Install K3s contract dependencies", workflow)
+
+    def test_ci_installs_verified_promtool_before_required_promql_tests(self):
+        job = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["test"]
+        steps = job["steps"]
+        install = next(step for step in steps if step["name"] == "Install pinned promtool")
+        run = next(step for step in steps if step["name"] == "Run unit tests")
+        self.assertEqual(install["if"], "matrix.name == 'k8s-contracts'")
+        self.assertLess(steps.index(install), steps.index(run))
+        self.assertEqual(install["env"]["PROMETHEUS_VERSION"], "3.15.0")
+        self.assertEqual(install["env"]["PROMTOOL_ARCHIVE_SHA256"], "2a542df32eac02ee17b9d844fb2aa1de00dafa5476579ba8a3ba862e9d572ea0")
+        script = install["run"]
+        self.assertIn("https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/${archive}", script)
+        self.assertIn("set -euo pipefail", script)
+        self.assertIn("sha256sum --check --strict -", script)
+        self.assertLess(script.index("sha256sum"), script.index("tar -xzf"))
+        self.assertIn('echo "$RUNNER_TEMP" >> "$GITHUB_PATH"', script)
+        self.assertIn('"$RUNNER_TEMP/promtool" --version', script)
+        self.assertNotIn("continue-on-error", install)
+        self.assertNotIn("continue-on-error", run)
+        self.assertNotIn("continue-on-error", job)
+        self.assertEqual(run["env"]["REQUIRE_PROMTOOL"], "${{ matrix.name == 'k8s-contracts' && '1' || '0' }}")
+
+    def test_ci_promtool_install_stops_before_extraction_on_download_or_checksum_failure(self):
+        steps = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["test"]["steps"]
+        step = next(step for step in steps if step["name"] == "Install pinned promtool")
+        for failure, expected in (("curl", ["curl"]), ("sha256sum", ["curl", "sha256sum"])):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                commands = base / "bin"
+                commands.mkdir()
+                for name in ("curl", "sha256sum", "tar", "install"):
+                    stub = commands / name
+                    stub.write_text(f'#!/bin/sh\necho {name} >> "$EXEC_TRACE"\n[ "$FAIL_STAGE" != "{name}" ]\n')
+                    stub.chmod(0o755)
+                trace = base / "trace"
+                env = {**os.environ, **step["env"], "PATH": str(commands) + os.pathsep + os.environ["PATH"],
+                       "FAIL_STAGE": failure, "EXEC_TRACE": str(trace), "RUNNER_TEMP": str(base),
+                       "GITHUB_PATH": str(base / "github-path")}
+                result = subprocess.run(["bash", "-c", step["run"]], env=env, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(trace.read_text().splitlines(), expected)
+                self.assertFalse((base / "promtool").exists())
+                self.assertFalse((base / "github-path").exists())
 
     def test_ci_selects_suites_and_records_only_executed_checks(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
