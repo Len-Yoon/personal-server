@@ -90,8 +90,10 @@ def recovery_deployment():
 class QuarterlySreAuditCronJobTests(unittest.TestCase):
     def test_audit_image_updates_existing_os_packages_and_build_tool_vulnerabilities(self):
         source = DOCKERFILE.read_text(encoding="utf-8")
-        self.assertLess(source.index("apt-get update"), source.index("apt-get upgrade -y"))
-        self.assertLess(source.index("apt-get upgrade -y"), source.index("apt-get install"))
+        self.assertEqual(source.splitlines()[0],
+                         (ROOT / "infra/k8s/backup-automation/Dockerfile").read_text().splitlines()[0])
+        self.assertLess(source.index("apk upgrade --no-cache"), source.index("apk add --no-cache"))
+        self.assertIn("bash ca-certificates coreutils kubectl tzdata", source)
         self.assertIn("setuptools==84.0.0 wheel==0.48.0", source)
         self.assertIn("USER 10001:10001", source)
 
@@ -787,7 +789,7 @@ class QuarterlySreAuditCronJobTests(unittest.TestCase):
         for forbidden in ("sudo", "docker", "hostpath", "privileged", "persistentvolumeclaim"):
             self.assertNotIn(forbidden, text)
         self.assertRegex(DOCKERFILE.read_text(encoding="utf-8"), re.compile(r"^FROM .+@sha256:[0-9a-f]{64}$", re.MULTILINE))
-        self.assertIn("kubernetes-client", DOCKERFILE.read_text(encoding="utf-8"))
+        self.assertIn("coreutils kubectl tzdata", DOCKERFILE.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
