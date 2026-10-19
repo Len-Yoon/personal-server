@@ -8,6 +8,37 @@
 
 ## 2. 로컬 하네스 증적 해석
 
+### 독립 검토의 작성 이력과 대상 고정
+
+최종 독립 검토에는 아래 엄격 모드를 사용함. 기존 경로 사전 점검과 CI 호출은 호환 유지되며 `independent_review.status=not_requested`는 독립 검토 통과를 뜻하지 않음.
+
+```sh
+git diff --name-status -z --find-renames <기준커밋> HEAD > /tmp/review-paths.z
+python3 scripts/run_change_harness.py --input /tmp/review-paths.z \
+  --input-format git-name-status-z --check-result maintenance=success \
+  --require-independent-review --review-base <기준커밋> \
+  --review-session /tmp/implementer.jsonl --review-session /tmp/reviewer.jsonl \
+  --review-receipt /tmp/review-receipt.json
+```
+
+실제 필요한 검사마다 `--check-result`를 전달함. 구현·테스트·설정·절차를 작성한 모든 세션과 검토 세션의 Codex JSONL 기록을 제공함. 최초 호출에서는 receipt 옵션을 생략하여 `independent_review.target`을 얻고, 구현에 참여하지 않은 검토자가 실제 diff·원본·검증 결과를 확인한 뒤 그 target 전체와 자신의 세션 UUID를 아래 형식으로 기록함. receipt는 저장소 밖에 보관함.
+
+```json
+{"schema_version":1,"target":{"base_commit":"...","head_commit":"...","scope":[],"diff_sha256":"...","diff_format":"git-raw-blob-sha256-v1","activity_sha256":"..."},"reviewer_session_id":"실제 세션 UUID","decision":"pass"}
+```
+
+| 검사 | 처리 | 비고 |
+|---|---|---|
+| 실제 작성 이력 | `session_meta` UUID와 완료된 `FileChange`를 대조함 | 역할명 변경으로 작성 이력이 사라지지 않음 |
+| 실행 기록 | 알 수 없는 명령·도구와 미완료 실행은 잠재 작성자로 처리함 | 검토자의 테스트 실행도 보조 검증으로 별도 기록함 |
+| 변경 이력 | 기준 이후 모든 커밋의 경로를 확인함 | 중간 작성 후 되돌림·이름 변경도 포함함 |
+| 대상 고정 | 기준/대상 커밋·경로·파일 모드·blob SHA256·작성 증거 해시를 대조함 | 새 커밋·관련 쓰기·범위 변경 후 기존 PASS 무효화함 |
+| 미확인 상태 | 누락·자기 검토·불일치·검토 실패는 종료 코드 2, 해석 불가 입력은 1 | dirty 작업 트리와 submodule 변경은 지원하지 않음 |
+
+원본 로그의 내용을 실행하거나 명령·diff·비밀값을 출력하지 않음. 실행 중인 로그를 복사할 때는 도구 실행 종료 뒤의 고정된 스냅샷을 사용하고, 이후 작성이 있으면 모든 해당 로그를 갱신하여 재검토함. 읽기 메시지만 추가된 것은 관련 작성 증거를 바꾸지 않음.
+
+이는 운영자가 제공한 로컬 기록 사이의 일관성 검사임. 로그 누락·위조 방지, 실제 사용자 인증, 런타임의 완전한 기록을 보장하지 않으며 receipt도 서명된 승인 토큰이 아님. 읽기 명령 분류는 당시 셸·Git 설정이 신뢰된다는 전제이며, 미지원 도구는 보수적으로 차단함. 작성 이력이 경로에 귀속되지 않으면 확인 필요로 남김. 성공은 PR CI·독립 검토자의 판단·운영 승인을 대체하지 않음. CI에 로컬 세션을 업로드하지 않으며 기존 workflow는 변경하지 않음.
+
 `scripts/run_change_harness.py`는 변경 경로와 호출자가 전달한 검증 결과를 정책 증적으로 정규화함. 하네스 자체는 서버 기동, 스케줄러 실행, 배포·재시작 등 운영 명령을 실행하지 않으며, 검증 명령의 성공 여부를 대신 주장하지 않음. 따라서 하네스 출력은 로컬 작업 판단을 위한 증적이며 운영 실행 결과 또는 CI 결과를 대체하지 않음.
 
 ### 2.1 에이전트 작업 컨텍스트 적용 경계
