@@ -1,12 +1,10 @@
-FROM python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534
+FROM python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929
 
-RUN apt-get update \
-    && apt-get upgrade -y \
-    && apt-get install --no-install-recommends -y bash ca-certificates coreutils kubernetes-client \
-    && rm -rf /var/lib/apt/lists/* \
+RUN apk upgrade --no-cache \
+    && apk add --no-cache bash ca-certificates coreutils kubectl tzdata \
     && pip install --no-cache-dir setuptools==84.0.0 wheel==0.48.0 \
-    && groupadd --system --gid 10001 sre-audit \
-    && useradd --system --uid 10001 --gid sre-audit --no-create-home --home-dir /nonexistent sre-audit
+    && addgroup -S -g 10001 sre-audit \
+    && adduser -S -u 10001 -G sre-audit -H -h /nonexistent sre-audit
 
 COPY infra/k8s/tools/quarterly-sre-audit-runner.sh /opt/personal-server/quarterly-sre-audit-runner.sh
 COPY infra/k8s/tools/validate-backup-evidence.py /opt/personal-server/validate-backup-evidence.py
