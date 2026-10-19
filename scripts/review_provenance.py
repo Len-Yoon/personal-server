@@ -112,7 +112,7 @@ def _inside(repo: Path, name: str) -> str | None:
 
 def _read_command(command: str) -> bool:
     """Conservative classification only; never execute recorded commands."""
-    if any(c in command for c in ("$", "`", ">", "<", "\\", "\0")):
+    if any(c in command for c in ("$", "`", ">", "<", "\\", "\0", "(", ")")):
         return False
     try:
         tokens = shlex.shlex(command, posix=True, punctuation_chars=";&|\n")

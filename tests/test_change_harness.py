@@ -427,7 +427,7 @@ class IndependentReviewEvidenceTests(unittest.TestCase):
         self.assertEqual(self.review()["status"], "passed")
 
     def test_unknown_shell_execution_is_conservatively_a_writer(self):
-        for command in ["python3 tool.py", "sed -i s/a/b/ README.md", "cat README.md > changed", "git diff --output=README.md", "git cat-file --filters HEAD:README.md", "git log --show-signature", "rg --hostname-bin tool word", "rg --pre tool word", "cat $(touch README.md)"]:
+        for command in ["python3 tool.py", "sed -i s/a/b/ README.md", "cat README.md > changed", "git diff --output=README.md", "git cat-file --filters HEAD:README.md", "git log --show-signature", "rg --hostname-bin tool word", "rg --pre tool word", "cat $(touch README.md)", "cat =(touch README.md)"]:
             with self.subTest(command=command):
                 self.reviewer_log = self.session("reviewer", self.reviewer)
                 self.sessions[1] = self.reviewer_log
