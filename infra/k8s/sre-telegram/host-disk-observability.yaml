@@ -1,0 +1,61 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: windows-host-disk
+  namespace: monitoring
+  labels:
+    release: personal-server-monitoring
+spec:
+  serviceDiscoveryRole: EndpointSlice
+  namespaceSelector:
+    matchNames: [personal-server]
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: portal-compose-bridge
+  endpoints:
+    - port: http
+      path: /internal/metrics
+      interval: 30s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_service_name]
+          regex: compose-system-agent
+          action: keep
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: windows-host-disk
+  namespace: monitoring
+  labels:
+    release: personal-server-monitoring
+spec:
+  groups:
+    - name: windows-host-disk
+      rules:
+        - alert: HostDiskSpaceLow
+          expr: >-
+            (personal_server_host_disk_available_bytes{host="windows",volume="C:"}
+            / personal_server_host_disk_capacity_bytes{host="windows",volume="C:"} < 0.15)
+            and on (host, volume)
+            (personal_server_host_disk_collection_ok{host="windows",volume="C:"} == 1)
+            and on (host, volume)
+            (time() - personal_server_host_disk_sample_timestamp_seconds{host="windows",volume="C:"} <= 2100)
+          for: 10m
+          labels:
+            severity: warning
+            sre_telegram: "true"
+          annotations:
+            summary: "Windows 호스트 디스크 가용 공간 부족"
+            description: "검증된 C: 가용 공간 15% 미만 상태가 10분 동안 지속됨"
+        - alert: HostDiskMetricsStale
+          expr: >-
+            (personal_server_host_disk_collection_ok{host="windows",volume="C:"} == 0)
+            or (time() - personal_server_host_disk_sample_timestamp_seconds{host="windows",volume="C:"} > 2100)
+            or absent(personal_server_host_disk_collection_ok{host="windows",volume="C:"})
+          for: 5m
+          labels:
+            severity: warning
+            sre_telegram: "true"
+          annotations:
+            summary: "Windows 호스트 디스크 수집 중단"
+            description: "검증된 원본 지표가 없거나 35분 넘게 갱신되지 않은 상태가 5분 지속됨"

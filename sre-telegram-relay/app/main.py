@@ -59,6 +59,9 @@ ALERT_PRESENTATIONS = {
     "PVCNotBound": ("데이터 저장소 연결 실패", "저장된 데이터에 접근하지 못할 수 있음"),
     "NodeDiskPressure": ("노드 디스크 공간 압박", "데이터 저장과 서비스 실행에 영향을 줄 수 있음"),
     "PVCSpaceLow": ("저장 공간 부족", "데이터 저장이 실패할 수 있음"),
+    "HostDiskSpaceLow": ("Windows 호스트 디스크 가용 공간 부족", "호스트의 데이터 저장과 서비스 실행에 영향을 줄 수 있음"),
+    "HostDiskMetricsStale": ("Windows 호스트 디스크 수집 중단", "호스트 디스크의 가용 공간을 확인할 수 없음"),
+    "HostDiskNotificationTest": ("Windows 호스트 디스크 알림 시험", "알림 전달 확인을 위한 시험이며 운영 장애가 아님"),
     "PrometheusTargetDown": ("상태 수집 대상 응답 없음", "해당 서비스의 상태를 확인하지 못할 수 있음"),
     "NewsCollectionStale": ("뉴스 수집 지연 또는 실패", "최신 뉴스가 갱신되지 않을 수 있음"),
     "PortalHttp5xxErrorRateHigh": ("Portal HTTP 5xx 오류율 높음", "일부 요청이 정상 처리되지 않을 수 있음"),
@@ -72,6 +75,9 @@ ALERT_TARGETS_BY_NAME = {
     "PortalHttp5xxErrorRateHigh": "Portal",
     "PortalHttpP95LatencyHigh": "Portal",
     "PrometheusTargetDown": "Kubernetes 상태 수집",
+    "HostDiskSpaceLow": "Windows 호스트 디스크",
+    "HostDiskMetricsStale": "Windows 호스트 디스크",
+    "HostDiskNotificationTest": "Windows 호스트 디스크",
 }
 WORKLOAD_TARGETS = (
     ("portal-web", "Portal"),
@@ -937,6 +943,13 @@ class RelayService:
 
     def _format_alert(self, status: str, alerts: list[Any]) -> str:
         heading = "[장애 감지]" if status == "firing" else "[복구 확인]"
+        test_only = bool(alerts) and all(
+            isinstance(alert, dict) and isinstance(alert.get("labels"), dict)
+            and alert["labels"].get("alertname") == "HostDiskNotificationTest"
+            for alert in alerts
+        )
+        if test_only:
+            heading = "[알림 시험]" if status == "firing" else "[알림 시험 종료]"
         entries: list[str] = []
         for alert in alerts[:MAX_ALERT_ITEMS]:
             if not isinstance(alert, dict):
@@ -947,7 +960,9 @@ class RelayService:
             presentation = ALERT_PRESENTATIONS.get(alert_name) if isinstance(alert_name, str) else None
             problem, impact = presentation or ("운영 상태 경고", "상태 확인이 필요합니다.")
             target = _format_alert_target(safe_labels, alert_name)
-            if status == "firing" and alert_name == "NewsCollectionStale":
+            if alert_name == "HostDiskNotificationTest":
+                state = "알림 전송 경로를 시험 중입니다." if status == "firing" else "알림 시험이 종료되었습니다."
+            elif status == "firing" and alert_name == "NewsCollectionStale":
                 state = "다음 수집 상태를 확인 중입니다."
             else:
                 state = "상태를 확인 중입니다." if status == "firing" else "정상으로 돌아왔습니다."

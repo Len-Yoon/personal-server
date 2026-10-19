@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
 
 from app.services.metrics import collect_metrics, demo_metrics
 
@@ -32,6 +33,13 @@ def metrics():
 @app.get("/metrics/demo")
 def metrics_demo():
     return demo_metrics()
+
+
+@app.get("/internal/metrics", response_class=PlainTextResponse)
+def prometheus_metrics():
+    from app.services.host_disk_metrics import render_host_disk_metrics
+    return PlainTextResponse(render_host_disk_metrics(),
+                             media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 @app.get("/recovery-events")

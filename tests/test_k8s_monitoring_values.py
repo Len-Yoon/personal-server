@@ -1,4 +1,6 @@
 import unittest
+import importlib.util
+from datetime import datetime, timezone
 import os
 import shutil
 import subprocess
@@ -77,6 +79,59 @@ class MonitoringValuesContractTests(unittest.TestCase):
             fixture.write_text((ROOT / "tests/fixtures/monitoring-disk-alerts.test.yaml").read_text())
             result = subprocess.run([promtool, "test", "rules", str(fixture)], cwd=base,
                                     capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_host_disk_rules_and_expiring_notification_evaluate_with_promtool(self):
+        promtool = os.environ.get("PROMTOOL") or shutil.which("promtool")
+        if not promtool:
+            self.skipTest("promtool is required to execute PromQL rule fixtures")
+        documents = yaml.safe_load_all(
+            (ROOT / "infra/k8s/sre-telegram/host-disk-observability.yaml").read_text()
+        )
+        manifest = next(doc for doc in documents if doc["kind"] == "PrometheusRule")
+        rules = [rule for group in manifest["spec"]["groups"] for rule in group["rules"]]
+        self.assertEqual({rule["alert"] for rule in rules}, {"HostDiskSpaceLow", "HostDiskMetricsStale"})
+        spec = importlib.util.spec_from_file_location(
+            "host_disk_notification_fixture", ROOT / "infra/k8s/tools/host-disk-notification-plan.py"
+        )
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        test_id = "012345abcdef"
+        planned = helper.plan(now=datetime(1970, 1, 1, tzinfo=timezone.utc), duration=240, test_id=test_id)
+        notification_rule = planned["spec"]["groups"][0]["rules"][0]
+        expected_notification = {
+            "exp_labels": {"severity": "warning", "sre_telegram": "true", "validation_id": test_id},
+            "exp_annotations": notification_rule["annotations"],
+        }
+        dynamic_fixture = {
+            "rule_files": ["notification-test.rules.yaml"],
+            "evaluation_interval": "15s",
+            "tests": [{
+                "name": "notification-fires-immediately-and-expires-at-four-minutes",
+                "interval": "15s", "input_series": [],
+                "alert_rule_test": [
+                    {"eval_time": at, "alertname": "HostDiskNotificationTest", "exp_alerts": alerts}
+                    for at, alerts in [("0m", [expected_notification]),
+                                       ("3m45s", [expected_notification]), ("4m", []), ("5m", [])]
+                ],
+            }],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / "host-disk-alerts.rules.yaml").write_text(
+                yaml.safe_dump({"groups": manifest["spec"]["groups"]}, allow_unicode=True)
+            )
+            fixture = base / "host-disk-alerts.test.yaml"
+            fixture.write_text((ROOT / "tests/fixtures/host-disk-alerts.test.yaml").read_text())
+            (base / "notification-test.rules.yaml").write_text(
+                yaml.safe_dump({"groups": planned["spec"]["groups"]}, allow_unicode=True)
+            )
+            notification_fixture = base / "notification-test.test.yaml"
+            notification_fixture.write_text(yaml.safe_dump(dynamic_fixture, allow_unicode=True))
+            result = subprocess.run(
+                [promtool, "test", "rules", str(fixture), str(notification_fixture)], cwd=base,
+                capture_output=True, text=True, check=False,
+            )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_values_set_kube_state_metrics_resources(self):

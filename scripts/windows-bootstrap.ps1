@@ -342,6 +342,12 @@ function Update-HostMetrics {
         memory_percent = $memoryPercent
         disk_percent = $diskPercent
         uptime_seconds = [Math]::Round(((Get-Date) - $os.LastBootUpTime).TotalSeconds)
+        host_disk = [ordered]@{
+            source = "windows-cim"
+            volume = [string]$disk.DeviceID
+            total_bytes = [long]$disk.Size
+            available_bytes = [long]$disk.FreeSpace
+        }
     }
 
     $payload | ConvertTo-Json -Depth 3 | Set-Content -Path $metricsPath -Encoding utf8

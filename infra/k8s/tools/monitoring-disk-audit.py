@@ -22,6 +22,19 @@ PVC_EXPRESSION = (
     'and on (namespace, persistentvolumeclaim) '
     '(max by (namespace, persistentvolumeclaim) (kubelet_volume_stats_capacity_bytes' + SELECTOR + ') > 0)'
 )
+HOST_SELECTOR = '{host="windows",volume="C:"}'
+HOST_PREFIX = "personal_server_host_disk_"
+HOST_LOW_EXPRESSION = (
+    '(personal_server_host_disk_available_bytes' + HOST_SELECTOR
+    + ' / personal_server_host_disk_capacity_bytes' + HOST_SELECTOR + ' < 0.15) '
+    'and on (host, volume) (personal_server_host_disk_collection_ok' + HOST_SELECTOR + ' == 1) '
+    'and on (host, volume) (time() - personal_server_host_disk_sample_timestamp_seconds' + HOST_SELECTOR + ' <= 2100)'
+)
+HOST_STALE_EXPRESSION = (
+    '(personal_server_host_disk_collection_ok' + HOST_SELECTOR + ' == 0) '
+    'or (time() - personal_server_host_disk_sample_timestamp_seconds' + HOST_SELECTOR + ' > 2100) '
+    'or absent(personal_server_host_disk_collection_ok' + HOST_SELECTOR + ')'
+)
 
 
 def read_json(arguments):
@@ -72,6 +85,36 @@ def rule_status(rules, name, expression, duration):
     ) else "GAP"
 
 
+def host_disk_status(rules):
+    """Require the dedicated private scrape and fresh, identified source data."""
+    fields = ("collection_ok", "sample_timestamp_seconds", "capacity_bytes", "available_bytes")
+    measurements = {field: vector(HOST_PREFIX + field + HOST_SELECTOR, ("host", "volume"))
+                    for field in fields}
+    key = ("windows", "C:")
+    exact = all(set(data) == {key} and len(data[key]) == 1 for data in measurements.values())
+    valid = False
+    low = 0
+    if exact:
+        values = {field: data[key][0] for field, data in measurements.items()}
+        age = datetime.now(timezone.utc).timestamp() - values["sample_timestamp_seconds"]
+        valid = (values["collection_ok"] == 1 and -60 <= age <= 2100
+                 and 0 <= values["available_bytes"] <= values["capacity_bytes"]
+                 and values["capacity_bytes"] > 0)
+        low = int(valid and values["available_bytes"] / values["capacity_bytes"] < 0.15)
+    targets = [t for t in api("targets", state="active")["activeTargets"]
+               if t.get("scrapePool") == "serviceMonitor/monitoring/windows-host-disk/0"]
+    scrape = (len(targets) == 1 and targets[0].get("health") == "up"
+              and targets[0].get("labels", {}).get("service") == "compose-system-agent"
+              and targets[0].get("labels", {}).get("namespace") == "personal-server")
+    low_rule = rule_status(rules, "HostDiskSpaceLow", HOST_LOW_EXPRESSION, 600)
+    stale_rule = rule_status(rules, "HostDiskMetricsStale", HOST_STALE_EXPRESSION, 300)
+    covered = valid and scrape and low_rule == stale_rule == "PASS"
+    return {"coverage": "PASS" if covered else "GAP", "metrics": "PASS" if valid else "GAP",
+            "scrape": "PASS" if scrape else "GAP", "low_space": low,
+            "rules": {"space_low": low_rule, "source_stale": stale_rule},
+            "scope": "windows_c_volume", "wsl_filesystem": "separate_node_and_pvc_signals"}
+
+
 def audit():
     expected_pvcs = set()
     for namespace in NAMESPACES:
@@ -84,9 +127,8 @@ def audit():
     available = vector("kubelet_volume_stats_available_bytes" + SELECTOR, ("namespace", "persistentvolumeclaim"))
     capacity = vector("kubelet_volume_stats_capacity_bytes" + SELECTOR, ("namespace", "persistentvolumeclaim"))
     pressure = vector('kube_node_status_condition{condition="DiskPressure",status="true"}', ("node",))
-    # Read the signal, but do not infer physical-host identity/mount coverage from
-    # an arbitrary exporter instance. WSL nodeExporter is intentionally disabled.
-    host = vector('node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}', ("instance", "mountpoint"))
+    # Windows C: has its own identified source; WSL node/PVC signals are separate.
+    host = host_disk_status(rules)
     covered = {key for key in expected_pvcs if key in available and key in capacity
                and max(capacity[key]) > 0 and min(available[key]) <= max(capacity[key])}
     low = sum(min(available[key]) / max(capacity[key]) < 0.15 for key in covered)
@@ -94,16 +136,19 @@ def audit():
     disk_pressure = sum(max(pressure[key]) == 1 for key in node_covered)
     pvc_metrics = "PASS" if expected_pvcs and covered == expected_pvcs else "GAP"
     node_metrics = "PASS" if expected_nodes and node_covered == expected_nodes else "GAP"
+    complete = (pvc_metrics == node_metrics == host["coverage"] == "PASS"
+                and rule_status(rules, "PVCSpaceLow", PVC_EXPRESSION, 600) == "PASS"
+                and rule_status(rules, "NodeDiskPressure", NODE_EXPRESSION, 300) == "PASS")
+    status = "GAP" if not complete else ("WARNING" if low or disk_pressure or host["low_space"] else "PASS")
     return {
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "pvc": {"bound": len(expected_pvcs), "covered": len(covered), "low_space": low,
                 "metrics": pvc_metrics, "rule": rule_status(rules, "PVCSpaceLow", PVC_EXPRESSION, 600)},
         "node": {"expected": len(expected_nodes), "covered": len(node_covered), "disk_pressure": disk_pressure,
                  "metrics": node_metrics, "rule": rule_status(rules, "NodeDiskPressure", NODE_EXPRESSION, 300)},
-        "host_filesystem": {"observed_series": len(host), "coverage": "GAP",
-                            "reason": "host_identity_and_mount_coverage_not_validated"},
+        "host_filesystem": host,
         "notification_delivery": "NOT_TESTED",
-        "monitoring_disk_audit": "GAP",
+        "monitoring_disk_audit": status,
     }
 
 
@@ -118,7 +163,7 @@ def main():
         print(json.dumps({"monitoring_disk_audit": "FAIL", "reason": "evidence_unavailable_or_invalid"}))
         return 2
     print(json.dumps(report, sort_keys=True))
-    return 1  # Host disk coverage is not established by the current WSL stack.
+    return 0 if report["monitoring_disk_audit"] == "PASS" else 1
 
 
 if __name__ == "__main__":

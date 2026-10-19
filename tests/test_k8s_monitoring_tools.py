@@ -1,6 +1,7 @@
 import os
 import importlib.util
 import json
+from datetime import datetime, timezone
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 import subprocess
@@ -23,7 +24,8 @@ class MonitoringDiskAuditTests(unittest.TestCase):
         return module
 
     def fixture(self, *, missing_pvc=False, low=False, pressure=False, drift=False,
-                missing_label=False, missing_node=False, malformed=False):
+                missing_label=False, missing_node=False, malformed=False, host=False,
+                host_stale=False, host_duplicate=False, host_bad_capacity=False, target_down=False):
         module = self.load_audit()
         calls = []
         def fetch(arguments):
@@ -34,12 +36,24 @@ class MonitoringDiskAuditTests(unittest.TestCase):
                 return {"items": [{"metadata": {"name": "fixture-claim"}, "status": {"phase": "Bound"}}]}
             self.assertEqual(arguments[:2], ["get", "--raw"])
             parsed = urlsplit(arguments[2])
+            if parsed.path.endswith("/targets"):
+                targets = [{"scrapePool": "serviceMonitor/monitoring/windows-host-disk/0",
+                            "health": "down" if target_down else "up",
+                            "labels": {"service": "compose-system-agent", "namespace": "personal-server"}}] if host else []
+                return {"status": "success", "data": {"activeTargets": targets}}
             if parsed.path.endswith("/rules"):
                 rules = [{"type": "alerting", "name": name, "query": expression,
                           "duration": seconds, "health": "ok",
                           "labels": {"sre_telegram": "true", "severity": "warning"}}
                          for name, expression, seconds in (("NodeDiskPressure", module.NODE_EXPRESSION, 300),
                                                            ("PVCSpaceLow", module.PVC_EXPRESSION, 600))]
+                if host:
+                    rules += [{"type": "alerting", "name": name, "query": expression,
+                               "duration": duration, "health": "ok",
+                               "labels": {"sre_telegram": "true", "severity": "warning"}}
+                              for name, expression, duration in (
+                                  ("HostDiskSpaceLow", module.HOST_LOW_EXPRESSION, 600),
+                                  ("HostDiskMetricsStale", module.HOST_STALE_EXPRESSION, 300))]
                 if drift:
                     rules[1]["query"] = "vector(0)"
                 if missing_label:
@@ -54,6 +68,12 @@ class MonitoringDiskAuditTests(unittest.TestCase):
                     value = 100 if "capacity_bytes" in expression else (14 if low else 80)
                     result.append({"metric": {"namespace": namespace, "persistentvolumeclaim": "fixture-claim"},
                                    "value": [0, "NaN" if malformed else str(value)]})
+            if host and expression.startswith(module.HOST_PREFIX):
+                field = expression[len(module.HOST_PREFIX):].split('{')[0]
+                values = {"collection_ok": 1, "sample_timestamp_seconds": datetime.now(timezone.utc).timestamp() - (2101 if host_stale else 0),
+                          "capacity_bytes": 0 if host_bad_capacity else 100, "available_bytes": 80}
+                sample = {"metric": {"host": "windows", "volume": "C:"}, "value": [0, str(values[field])]}
+                result = [sample] * (2 if host_duplicate else 1)
             if expression.startswith("kube_node_status_condition") and not missing_node:
                 result = [{"metric": {"node": "fixture-node"}, "value": [0, "1" if pressure else "0"]}]
             return {"status": "success", "data": {"resultType": "vector", "result": result}}
@@ -70,6 +90,31 @@ class MonitoringDiskAuditTests(unittest.TestCase):
         self.assertEqual(report["notification_delivery"], "NOT_TESTED")
         self.assertEqual(report["monitoring_disk_audit"], "GAP")
         self.assertTrue(all(arguments[:1] == ["get"] or arguments[2:3] == ["get"] for arguments in calls))
+
+    def test_complete_host_coverage_requires_fresh_unique_valid_series_and_dedicated_scrape(self):
+        report, _ = self.fixture(host=True)
+        self.assertEqual(report["host_filesystem"]["coverage"], "PASS")
+        self.assertEqual(report["monitoring_disk_audit"], "PASS")
+        self.assertEqual(report["notification_delivery"], "NOT_TESTED")
+        for options in ({"host_stale": True}, {"host_duplicate": True},
+                        {"host_bad_capacity": True}, {"target_down": True}):
+            with self.subTest(options=options):
+                report, _ = self.fixture(host=True, **options)
+                self.assertEqual(report["host_filesystem"]["coverage"], "GAP")
+                self.assertEqual(report["monitoring_disk_audit"], "GAP")
+        report, _ = self.fixture(host=True, low=True)
+        self.assertEqual(report["monitoring_disk_audit"], "WARNING")
+
+    def test_host_rules_match_manifest_and_bridge_filter_keeps_only_agent(self):
+        import yaml
+        module = self.load_audit()
+        monitor, manifest = list(yaml.safe_load_all((ROOT / "infra/k8s/sre-telegram/host-disk-observability.yaml").read_text()))
+        rules = {r["alert"]: r for r in manifest["spec"]["groups"][0]["rules"]}
+        for name, expression in (("HostDiskSpaceLow", module.HOST_LOW_EXPRESSION), ("HostDiskMetricsStale", module.HOST_STALE_EXPRESSION)):
+            self.assertEqual(''.join(rules[name]["expr"].split()), ''.join(expression.split()))
+            self.assertEqual(rules[name]["labels"]["sre_telegram"], "true")
+        self.assertEqual(monitor["spec"]["endpoints"][0]["relabelings"], [
+            {"sourceLabels": ["__meta_kubernetes_service_name"], "regex": "compose-system-agent", "action": "keep"}])
 
     def test_missing_pvc_or_node_metrics_remain_gaps(self):
         report, _ = self.fixture(missing_pvc=True)
@@ -719,3 +764,40 @@ class MonitoringToolsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostDiskNotificationPlanTests(unittest.TestCase):
+    def load_plan(self):
+        spec = importlib.util.spec_from_file_location('host_disk_notification_plan', TOOLS / 'host-disk-notification-plan.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_plan_is_bounded_fixed_scope_and_does_not_contact_production(self):
+        module = self.load_plan()
+        now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+        plan = module.plan(now, test_id='012345abcdef')
+        self.assertEqual(plan['metadata']['namespace'], 'monitoring')
+        self.assertEqual(plan['metadata']['name'], 'host-disk-notification-test-012345abcdef')
+        rule = plan['spec']['groups'][0]['rules'][0]
+        self.assertEqual(rule['alert'], 'HostDiskNotificationTest')
+        self.assertEqual(rule['for'], '0s')
+        self.assertIn(str(int(now.timestamp()) + 240), rule['expr'])
+        self.assertEqual(rule['labels']['sre_telegram'], 'true')
+        # Preparation is pure and cannot invoke kubectl, Telegram, or subprocesses.
+        source = (TOOLS / 'host-disk-notification-plan.py').read_text()
+        self.assertNotIn('import subprocess', source)
+        self.assertNotIn('import urllib', source)
+        self.assertNotIn('--go', source)
+
+    def test_invalid_windows_and_untrusted_ids_are_rejected(self):
+        module = self.load_plan()
+        now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+        for duration in (0, 119, 301, True, float('inf')):
+            with self.assertRaises(ValueError):
+                module.plan(now, duration=duration)
+        for test_id in ('private-address', '../anything', '012345ABCDEF', '0' * 13):
+            with self.assertRaises(ValueError):
+                module.plan(now, test_id=test_id)
+        with self.assertRaises(ValueError):
+            module.plan(now.replace(tzinfo=None))
