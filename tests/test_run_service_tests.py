@@ -80,6 +80,15 @@ EXPECTED_GROUPS["maintenance"] = (*_maintenance[:-1], (_maintenance[-1] + " test
 ))
 
 
+# Full boundary regressions remain in the existing service/tool owning suites.
+for _name, _modules in (
+    ("portal", " tests.test_security_full_paths tests.test_file_store_full_paths"),
+    ("k8s-contracts", " tests.test_backup_full_paths"),
+):
+    _entry = EXPECTED_GROUPS[_name]
+    EXPECTED_GROUPS[_name] = (*_entry[:-1], _entry[-1] + _modules)
+
+
 class ServiceTestRunnerTests(unittest.TestCase):
     def test_ci_selection_uses_documentation_subset_for_documentation(self):
         mode, names = runner.select_ci_suites(

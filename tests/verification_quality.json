@@ -3,76 +3,93 @@
   "coverage_version": "7.16.2",
   "timeout_seconds": 120,
   "baseline": {
-    "commit": "713f5d8e62bf1d199f85870707894cd39c72c461",
-    "note": "36 existing explicitly selected tests, all passing with zero skips. Floors truncate measured percentages to two decimal places; no discretionary reduction. File totals are a bounded regression floor, not evidence of full coverage. Critical function floors additionally enforced. Executed/missing lines and branch arcs are emitted, including large untested download/deletion areas in file_store and auth expiry/error paths.",
-    "environment": "CPython 3.11 / Darwin arm64; coverage 7.16.2; isolated code-only fixture; no operational resources."
+    "commit": "2aa95d2d9f006eb3cb5caa0efc7b4ca19ea662bd",
+    "note": "All measured statements/branches in the three fixed targets are exercised except one structurally unreachable format_size fallback. Missing lines/arcs remain in the denominator and must match exactly; source SHA256 pins the proof. No exclusion pragmas. Defensive decoder/type and OS-error seams use explicit test injection; line/arc coverage does not mean all condition combinations or production integration.",
+    "environment": "CPython3.11;coverage7.16.2;isolated code-only fixture;no operational resources."
   },
   "targets": {
     "portal-web/app/services/security.py": {
-      "statement_min": 77.38,
-      "branch_min": 55.76,
+      "statement_min": 100,
+      "branch_min": 100,
       "baseline_counts": {
-        "covered_lines": 154,
-        "num_statements": 199,
-        "covered_branches": 29,
+        "covered_lines": 200,
+        "num_statements": 200,
+        "covered_branches": 52,
         "num_branches": 52
       },
       "functions": {
         "auth_rate_limited": {
-          "statement_min": 80.0,
-          "branch_min": 50.0,
+          "statement_min": 100,
+          "branch_min": 100,
           "baseline_counts": {
-            "covered_lines": 4,
+            "covered_lines": 5,
             "num_statements": 5,
-            "covered_branches": 1,
+            "covered_branches": 2,
             "num_branches": 2
           }
         }
-      }
+      },
+      "expected_missing_lines": [],
+      "expected_missing_branches": []
     },
     "portal-web/app/services/file_store.py": {
-      "statement_min": 63.14,
-      "branch_min": 37.97,
+      "statement_min": 99.74,
+      "branch_min": 99.36,
       "baseline_counts": {
-        "covered_lines": 245,
+        "covered_lines": 387,
         "num_statements": 388,
-        "covered_branches": 60,
+        "covered_branches": 157,
         "num_branches": 158
       },
       "functions": {
         "_save_upload": {
-          "statement_min": 94.28,
-          "branch_min": 70.0,
+          "statement_min": 100,
+          "branch_min": 100,
           "baseline_counts": {
-            "covered_lines": 33,
+            "covered_lines": 35,
             "num_statements": 35,
-            "covered_branches": 7,
+            "covered_branches": 10,
             "num_branches": 10
           }
         }
+      },
+      "expected_missing_lines": [
+        471
+      ],
+      "expected_missing_branches": [
+        [
+          465,
+          471
+        ]
+      ],
+      "unreachable_proof": {
+        "source_sha256": "54838b8e3c09d11b3fec25408c624df500aad5137cc5c3d2fbdf10b91160d8de",
+        "reason": "format_size iterates the nonempty fixed units list through TB. Every earlier unit either returns or advances; TB always returns because unit == units[-1], so loop exhaustion and fallback line471 are unreachable for normal numeric inputs. No source rewrite, fake float/units, coverage exclusion or denominator adjustment."
       }
     },
     "infra/k8s/tools/validate-backup-evidence.py": {
-      "statement_min": 91.2,
-      "branch_min": 85.0,
+      "statement_min": 100,
+      "branch_min": 100,
       "baseline_counts": {
-        "covered_lines": 83,
+        "covered_lines": 91,
         "num_statements": 91,
-        "covered_branches": 34,
+        "covered_branches": 40,
         "num_branches": 40
       },
       "functions": {
         "validate_evidence": {
-          "statement_min": 89.28,
-          "branch_min": 87.5,
+          "statement_min": 100,
+          "branch_min": 100,
           "baseline_counts": {
-            "covered_lines": 25,
+            "covered_lines": 28,
             "num_statements": 28,
-            "covered_branches": 21,
+            "covered_branches": 24,
             "num_branches": 24
           }
         }
-      }
+      },
+      "expected_missing_lines": [],
+      "expected_missing_branches": []
     }
   },
   "test_ids": [
@@ -111,7 +128,35 @@
     "tests.test_portal_improvements.PortalImprovementsTests.test_quota_includes_trash_and_preserves_existing_content",
     "tests.test_portal_improvements.PortalImprovementsTests.test_disk_reserve_blocks_and_cleans_partial_upload",
     "tests.test_portal_improvements.PortalImprovementsTests.test_bulk_quota_failure_rolls_back_only_this_request",
-    "tests.test_portal_improvements.PortalImprovementsTests.test_quota_rejects_symlinks_without_touching_target"
+    "tests.test_portal_improvements.PortalImprovementsTests.test_quota_rejects_symlinks_without_touching_target",
+    "tests.test_backup_full_paths.BackupFullPathsTests.test_default_clock_and_zero_age_boundary_accept_current_evidence",
+    "tests.test_backup_full_paths.BackupFullPathsTests.test_invalid_optional_proofs_are_rejected_individually",
+    "tests.test_backup_full_paths.BackupFullPathsTests.test_negative_max_age_fails_before_reading_evidence",
+    "tests.test_backup_full_paths.BackupFullPathsTests.test_non_utf8_evidence_fails_closed_without_traceback_or_file_change",
+    "tests.test_backup_full_paths.BackupFullPathsTests.test_unreadable_or_incomplete_evidence_is_rejected_without_writing",
+    "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_delete_preflight_nested_cleanup_and_audit_failure",
+    "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_directory_listing_paths_names_and_sizes",
+    "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_download_archives_contents_limits_and_timestamp",
+    "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_path_resolution_rechecks_containment_after_symlink_race",
+    "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_special_files_and_symlinks_preserve_unrelated_data",
+    "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_storage_budget_counts_hidden_nested_files_and_rejects_unsafe_entries",
+    "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_upload_failures_remove_only_new_files",
+    "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_upload_read_error_after_external_removal_keeps_other_data",
+    "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_upload_success_validation_and_existing_data",
+    "tests.test_security_full_paths.SecurityFullPathsTests.test_clear_failure_preserves_other_scopes_and_skips_unchanged_write",
+    "tests.test_security_full_paths.SecurityFullPathsTests.test_cookie_policy_covers_proxy_public_hosts_and_local_http",
+    "tests.test_security_full_paths.SecurityFullPathsTests.test_expired_failures_are_pruned_and_persisted_by_reads_and_clear",
+    "tests.test_security_full_paths.SecurityFullPathsTests.test_log_directory_mode_and_missing_parent",
+    "tests.test_security_full_paths.SecurityFullPathsTests.test_password_fallbacks_and_encoding_failures",
+    "tests.test_security_full_paths.SecurityFullPathsTests.test_persistence_failure_preserves_existing_state_and_removes_temporary_file",
+    "tests.test_security_full_paths.SecurityFullPathsTests.test_rate_limit_persists_scopes_and_stops_at_limit",
+    "tests.test_security_full_paths.SecurityFullPathsTests.test_reader_defensively_ignores_non_string_mapping_keys",
+    "tests.test_security_full_paths.SecurityFullPathsTests.test_recent_events_skip_corruption_bound_reads_and_keep_non_object_records",
+    "tests.test_security_full_paths.SecurityFullPathsTests.test_security_status_reports_policy_and_header_names",
+    "tests.test_security_full_paths.SecurityFullPathsTests.test_session_expiry_boundary_is_inclusive",
+    "tests.test_security_full_paths.SecurityFullPathsTests.test_sessions_retry_collision_check_scope_expiry_and_evict_oldest",
+    "tests.test_security_full_paths.SecurityFullPathsTests.test_state_reader_rejects_corrupt_and_malformed_entries",
+    "tests.test_security_full_paths.SecurityFullPathsTests.test_user_events_clean_details_filter_fields_and_preserve_append_history"
   ],
   "mutants": [
     {

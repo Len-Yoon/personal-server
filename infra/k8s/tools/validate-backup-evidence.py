@@ -46,7 +46,7 @@ def parse_timestamp(value: str, key: str) -> datetime:
 def parse_evidence(path: Path) -> dict[str, str]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as error:
+    except (OSError, UnicodeError) as error:
         raise EvidenceError("evidence file cannot be read") from error
 
     values: dict[str, str] = {}

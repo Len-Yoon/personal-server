@@ -23,6 +23,8 @@ COPY_ALLOWLIST = (
     "scripts/run_verification_quality.py", "tests/__init__.py", "tests/_test_support.py",
     "tests/test_portal_security.py", "tests/test_file_access.py", "tests/test_file_management.py",
     "tests/test_validate_backup_evidence.py", "tests/test_portal_improvements.py",
+    "tests/test_security_full_paths.py", "tests/test_file_store_full_paths.py",
+    "tests/test_backup_full_paths.py",
     "portal-web/app/services/__init__.py",
     "portal-web/app/services/security.py", "portal-web/app/services/file_store.py",
     "portal-web/app/services/admin_status.py", "portal-web/app/services/file_management.py",
@@ -113,6 +115,21 @@ def validate_config(config: dict) -> None:
         floors_valid(floors)
         if not floors.get("functions"):
             raise ValueError("each production target requires a critical function floor")
+        lines = floors.get("expected_missing_lines")
+        arcs = floors.get("expected_missing_branches")
+        if (not isinstance(lines, list) or any(type(line) is not int or line <= 0 for line in lines)
+                or len(lines) != len(set(lines)) or not isinstance(arcs, list)
+                or any(not isinstance(arc, list) or len(arc) != 2
+                       or any(type(value) is not int or value == 0 for value in arc) for arc in arcs)
+                or len(arcs) != len({tuple(arc) for arc in arcs})):
+            raise ValueError("every target requires exact missing line/branch lists")
+        proof = floors.get("unreachable_proof")
+        if lines or arcs:
+            if (not isinstance(proof, dict) or not isinstance(proof.get("reason"), str)
+                    or not proof["reason"].strip() or not isinstance(proof.get("source_sha256"), str)
+                    or len(proof["source_sha256"]) != 64
+                    or any(char not in "0123456789abcdef" for char in proof["source_sha256"])):
+                raise ValueError("remaining gaps require a source-bound unreachable proof")
     if type(config["timeout_seconds"]) is not int or not 1 <= config["timeout_seconds"] <= 300:
         raise ValueError("timeout must be an integer in [1,300]")
     if not config["test_ids"] or len(config["test_ids"]) != len(set(config["test_ids"])):
@@ -147,6 +164,18 @@ def coverage_verdict(report: dict, targets: dict) -> tuple[dict, list[str]]:
         branch = 100 * summary.get("covered_branches", 0) / branches if branches else None
         measured[name] = {**data, "statement_percent": stmt, "branch_percent": branch,
                           "thresholds": thresholds}
+        if "expected_missing_lines" in thresholds:
+            if data.get("excluded_lines"):
+                failures.append(f"excluded production lines: {name}")
+            baseline = thresholds.get("baseline_counts", {})
+            if any(summary.get(key) != baseline.get(key) for key in ("num_statements", "num_branches")):
+                failures.append(f"production coverage denominator drift: {name}")
+        # Keep structurally unreachable code in the measured denominator. Match
+        # every remaining line/arc exactly; never hide new gaps behind a floor.
+        for key in ("missing_lines", "missing_branches"):
+            expected = thresholds.get(f"expected_{key}")
+            if expected is not None and sorted(data.get(key, [])) != sorted(expected):
+                failures.append(f"unexpected {key}: {name}")
         if stmt is None or stmt < thresholds["statement_min"]:
             failures.append(f"statement floor: {name}")
         if branch is None or branch < thresholds["branch_min"]:
@@ -264,6 +293,10 @@ def run_quality(source: Path, config: dict, output: Path) -> int:
         if coverage.__version__ != config["coverage_version"]:
             raise ValueError("install the pinned tests/requirements.quality.txt coverage version")
         validate_config(config)
+        for name, thresholds in config["targets"].items():
+            proof = thresholds.get("unreachable_proof")
+            if proof and digest(source / name) != proof["source_sha256"]:
+                raise ValueError(f"unreachable source proof is stale: {name}")
         baseline = execute_fixture(source, config, config["test_ids"])
         report["baseline"] = baseline
         if baseline["status"] != "pass":

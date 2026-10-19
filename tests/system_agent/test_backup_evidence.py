@@ -9,6 +9,22 @@ from tests._test_support import prepare_service_import
 
 
 class BackupEvidenceTests(unittest.TestCase):
+    def test_non_utf8_evidence_reports_warning_and_preserves_original(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prepare_service_import('system-agent')
+            root = Path(directory)
+            evidence = root / 'evidence'
+            original = b'scope=portal\n\xff\xfe'
+            evidence.write_bytes(original)
+            validator = importlib.import_module('app.services.backup_evidence')
+            with self.assertRaisesRegex(validator.EvidenceError, 'cannot be read'):
+                validator.parse_evidence(evidence)
+            with patch.dict(os.environ, {'BACKUP_EVIDENCE_PATH': str(evidence)}):
+                metrics = importlib.import_module('app.services.metrics').collect_metrics(data_root=root)
+            self.assertFalse(metrics['backup']['verified'])
+            self.assertEqual(metrics['backup']['status'], 'warning')
+            self.assertEqual(evidence.read_bytes(), original)
+
     def test_recent_directory_is_not_a_verified_backup(self):
         with tempfile.TemporaryDirectory() as temp:
             prepare_service_import('system-agent')
