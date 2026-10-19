@@ -560,7 +560,8 @@ printf '%s\\n' "sleep $*" >> "{calls}"
         self.assertNotIn("wait --for=condition=complete job/monthly-sre-audit-manual-", calls)
         self.assertFalse(any(call.startswith("sleep ") for call in calls.splitlines()))
         terminal_reads = [call for call in calls.splitlines()
-                          if "get job monthly-sre-audit-manual-" in call
+                          if call.startswith("k3s ")
+                          and "get job monthly-sre-audit-manual-" in call
                           and "jsonpath={range .status.conditions" in call]
         self.assertEqual(len(terminal_reads), 1)
         manual_job_creations = [
