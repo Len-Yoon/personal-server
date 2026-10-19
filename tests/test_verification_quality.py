@@ -141,6 +141,45 @@ class VerificationQualityTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 quality.validate_config(config)
 
+    def test_exact_missing_arcs_detect_regression_even_above_percentage_floor(self):
+        name = "production.py"
+        entry = {"summary": {"num_statements": 388, "covered_lines": 387,
+                             "num_branches": 158, "covered_branches": 157},
+                 "missing_lines": [471], "missing_branches": [[465, 471]]}
+        floors = {name: {"statement_min": 99, "branch_min": 99,
+                        "expected_missing_lines": [471],
+                        "expected_missing_branches": [[465, 471]]}}
+        report = {"meta": {"branch_coverage": True}, "files": {name: entry}}
+        self.assertEqual(quality.coverage_verdict(report, floors)[1], [])
+        for change in ({"missing_lines": [470]}, {"missing_branches": [[465, 470]]},
+                       {"missing_lines": []}, {"missing_branches": []}):
+            with self.subTest(change=change):
+                report["files"][name] = {**entry, **change}
+                self.assertTrue(quality.coverage_verdict(report, floors)[1])
+
+    def test_missing_path_contracts_require_lists_and_source_bound_proofs(self):
+        for key, value in (("expected_missing_lines", None), ("expected_missing_lines", [True]),
+                           ("expected_missing_lines", [471, 471]),
+                           ("expected_missing_branches", [[1]]),
+                           ("expected_missing_branches", [[1, 2], [1, 2]]),
+                           ("unreachable_proof", {}),
+                           ("unreachable_proof", {"reason": "unreachable", "source_sha256": "x" * 64})):
+            config = json.loads((ROOT / "tests/verification_quality.json").read_text())
+            config["targets"][quality.TARGETS[1]][key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                quality.validate_config(config)
+
+    def test_stale_unreachable_source_proof_blocks_before_execution(self):
+        config = json.loads((ROOT / "tests/verification_quality.json").read_text())
+        config["targets"][quality.TARGETS[1]]["unreachable_proof"]["source_sha256"] = "0" * 64
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict("sys.modules", {"coverage": SimpleNamespace(__version__=config["coverage_version"])}), \
+                patch.object(quality, "execute_fixture") as execute:
+            self.assertEqual(quality.run_quality(ROOT, config, Path(directory)), 1)
+            execute.assert_not_called()
+            report = json.loads((Path(directory) / "quality.json").read_text())
+            self.assertIn("unreachable source proof is stale", report["failures"][0])
+
     def test_dependency_and_report_exceptions_always_write_failed_artifact(self):
         config = json.loads((ROOT / "tests/verification_quality.json").read_text())
         for exception in (ImportError("missing dependency"), TypeError("bad worker record"), RuntimeError("coverage API")):
@@ -174,7 +213,8 @@ class VerificationQualityTests(unittest.TestCase):
                 patch.object(quality, "execute_fixture", side_effect=[
                     baseline.copy(), {"status": "pass"}, {"status": "killed"},
                     {"status": "pass"}, {"status": "killed"}, {"status": "pass"}, {"status": "killed"},
-                ]), patch.object(quality, "digest", side_effect=["original"] * len(quality.COPY_ALLOWLIST) + ["changed"]):
+                ]), patch.object(quality, "digest", side_effect=["original"] * len(quality.COPY_ALLOWLIST) + [
+                    config["targets"][quality.TARGETS[1]]["unreachable_proof"]["source_sha256"], "changed"]):
             self.assertEqual(quality.run_quality(ROOT, config, Path(directory)), 1)
             report = json.loads((Path(directory) / "quality.json").read_text())
             self.assertFalse(report["original_unchanged"])
