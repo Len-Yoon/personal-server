@@ -93,7 +93,7 @@ Prometheus의 실제 로드된 보관 설정은 `1w or 3GiB`이며 7일과 `rete
 
 전용 `HostDiskSpaceLow`는 fresh 원본의 C: 가용 15% 미만 10분, `HostDiskMetricsStale`은 자료 미제공/무효/35분 초과 노후가 5분 지속되면 기존 SRE 경로로 전달함. 원본 수집만 멈추는 경우 탐지까지 최대 약 40분과 평가·전송 지연이 걸리며, C: 이외 볼륨과 WSL root 전체의 직접 용량 감시는 이번 범위가 아님. 기존 노드/PVC 경보는 유지함. 전용 `HostDiskNotificationTest` 생성 도구는 실행 시점 기준 최대 5분 내 만료하는 시험 조건만 준비하며 Kubernetes·Telegram을 호출하지 않음. 실제 시험은 운영 승인 후 바로 생성·적용하고 발화·복구·정확한 시험 자원 제거를 확인함. 시험 메시지는 운영 장애가 아님을 고정 문구로 표시함. Telegram API 수락과 사용자 단말 실제 수신은 구분함.
 
-2026-10-19 사용자 승인 후 검증된 소스·이미지, Windows child 수집기, 전용 ServiceMonitor·Rule을 운영 반영함. 정확한 한 target UP·fresh C: 지표와 호스트/노드/PVC 규칙 audit PASS를 확인함. 자동 만료 시험에서 발생·종료 Telegram API 수락과 Relay 원장 기록을 각각 확인한 뒤 정확한 UID/resourceVersion 조건으로 시험 Rule을 제거함. 사용자 단말의 실제 수신은 별도 확인 필요함. [개발 계획의 승인 범위와 성공 기준](20260921_프로젝트보완_개발계획.md#호스트-디스크-감시경보-전달-보완)을 따름. 기존 supervisor·예약 작업·백업 일정·자격 증명 Secret·PVC·Caddy를 보존함. 새 수집 설정에 따른 기존 Prometheus 소유 생성 설정 Secret만 Operator가 자동 갱신했으며 소유 CR·UID/type·생성 설정 키를 확인함.
+2026-10-19 사용자 승인 후 검증된 소스·이미지, Windows child 수집기, 전용 ServiceMonitor·Rule을 운영 반영함. 정확한 한 target UP·fresh C: 지표와 호스트/노드/PVC 규칙 audit PASS를 확인함. 자동 만료 시험에서 발생·종료 Telegram API 수락과 Relay 원장 기록을 각각 확인한 뒤 정확한 UID/resourceVersion 조건으로 시험 Rule을 제거함. 발생·종료 메시지 모두 사용자 단말에서 실제 수신했음을 사용자 응답으로 확인함. [개발 계획의 승인 범위와 성공 기준](20260921_프로젝트보완_개발계획.md#호스트-디스크-감시경보-전달-보완)을 따름. 기존 supervisor·예약 작업·백업 일정·자격 증명 Secret·PVC·Caddy를 보존함. 새 수집 설정에 따른 기존 Prometheus 소유 생성 설정 Secret만 Operator가 자동 갱신했으며 소유 CR·UID/type·생성 설정 키를 확인함.
 
 ### 백업 보관 정리 결과
 
