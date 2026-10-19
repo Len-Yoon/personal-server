@@ -121,9 +121,32 @@ jobs:
         if: join(matrix.extra_packages, '') != ''
         run: python3 -m pip install ${{ join(matrix.extra_packages, ' ') }}
 
+      - name: Install pinned promtool
+        if: matrix.name == 'k8s-contracts'
+        env:
+          PROMETHEUS_VERSION: '3.15.0'
+          PROMTOOL_ARCHIVE_SHA256: '2a542df32eac02ee17b9d844fb2aa1de00dafa5476579ba8a3ba862e9d572ea0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+          scratch="$(mktemp -d)"
+          trap 'rm -rf "$scratch"' EXIT
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --retry 3 --connect-timeout 10 --max-time 120 \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/${archive}" \
+            -o "$scratch/$archive"
+          printf '%s  %s\n' "$PROMTOOL_ARCHIVE_SHA256" "$scratch/$archive" | sha256sum --check --strict -
+          tar -xzf "$scratch/$archive" -C "$scratch" --no-same-owner --no-same-permissions \
+            "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool"
+          install -m 0755 "$scratch/prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool" "$RUNNER_TEMP/promtool"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/promtool" --version
+
       - name: Run unit tests
         env:
           PYTHONPATH: ${{ matrix.pythonpath }}
+          REQUIRE_PROMTOOL: ${{ matrix.name == 'k8s-contracts' && '1' || '0' }}
         shell: bash
         run: |
           if [[ "${{ matrix.name }}" == "k8s-contracts" ]]; then
