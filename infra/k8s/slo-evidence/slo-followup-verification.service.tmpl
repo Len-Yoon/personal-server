@@ -1,0 +1,18 @@
+[Unit]
+Description=One-time SLO evidence verification @DATE@
+CollectMode=inactive-or-failed
+StartLimitIntervalSec=4200
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+ExecCondition=/usr/bin/python3 -B %h/.local/lib/personal-server/slo-followup-verification/@PROGRAM_SHA256@.py due --target-date @DATE@ --expected-program-sha256 @PROGRAM_SHA256@
+ExecStart=/usr/bin/python3 -B %h/.local/lib/personal-server/slo-followup-verification/@PROGRAM_SHA256@.py run --target-date @DATE@ --expected-program-sha256 @PROGRAM_SHA256@
+WorkingDirectory=%h
+TimeoutStartSec=4200
+Restart=on-failure
+RestartSec=30
+UMask=0077
+
+[Install]
+WantedBy=default.target

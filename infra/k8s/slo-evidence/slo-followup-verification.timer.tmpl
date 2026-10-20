@@ -1,0 +1,12 @@
+[Unit]
+Description=One-time SLO evidence verification @DATE@
+
+[Timer]
+OnCalendar=@CALENDAR@
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=true
+Unit=personal-server-slo-followup-@ID@.service
+
+[Install]
+WantedBy=timers.target
