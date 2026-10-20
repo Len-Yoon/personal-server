@@ -340,7 +340,7 @@ def main() -> int:
                 "name": "documentation",
                 "python_version": "3.11",
                 "requirements": "",
-                "extra_packages": [],
+                "extra_packages": ["PyYAML"],
                 "pythonpath": ".",
                 "test_command": DOCUMENTATION_COMMAND,
             }]
