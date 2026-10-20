@@ -165,6 +165,7 @@ class ServiceTestRunnerTests(unittest.TestCase):
         self.assertEqual(selection["selected_checks"], ["documentation"])
         self.assertEqual([entry["name"] for entry in selection["include"]], ["documentation"])
         self.assertEqual(selection["include"][0]["test_command"], runner.DOCUMENTATION_COMMAND)
+        self.assertIn("PyYAML", selection["include"][0]["extra_packages"])
         for module in (
             "tests.test_deploy_n100", "tests.test_token_measurements",
             "tests.test_n100_remote_dev", "tests.test_n100_safe_deployment",
