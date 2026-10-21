@@ -692,6 +692,7 @@ class RelayService:
             message = _format_backup_report_message(report)
             if not send_message(self._allowed_chat_id, message):
                 return False
+            _log_notification_delivery_receipt("portal_backup", report, message)
             self._backup_delivery_store.save(report["run_id"])
             return True
 
@@ -845,7 +846,8 @@ class RelayService:
             if report is None or self._quarterly_audit_delivery_store.contains(report["run_id"]):
                 return True
             try:
-                delivered = send_message(self._allowed_chat_id, _format_quarterly_audit_message(report))
+                message = _format_quarterly_audit_message(report)
+                delivered = send_message(self._allowed_chat_id, message)
             except Exception as exc:
                 self.mark_unhealthy()
                 LOGGER.warning(
@@ -857,6 +859,7 @@ class RelayService:
                 self.mark_unhealthy()
                 LOGGER.warning("quarterly_audit_delivery_failed reason=send_message_rejected")
                 return False
+            _log_notification_delivery_receipt("quarterly_audit", report, message)
             try:
                 self._quarterly_audit_delivery_store.save(report["run_id"])
             except Exception as exc:
@@ -1207,6 +1210,8 @@ def _poll_once(relay: RelayService, telegram_client: TelegramClient, allowed_cha
 def main() -> None:
     from http.server import ThreadingHTTPServer
 
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
     token = _read_configured_secret("TELEGRAM_BOT_TOKEN_FILE")
     allowed_chat_id = _read_configured_secret("ALLOWED_CHAT_ID_FILE")
     alertmanager_auth_token = _read_configured_secret("ALERTMANAGER_AUTH_TOKEN_FILE")
@@ -1386,6 +1391,27 @@ def _read_backup_report(k8s_client: KubernetesClient) -> dict[str, str] | None:
         LOGGER.warning("backup_report_ignored reason=inconsistent_status_stage")
         return None
     return {"run_id": run_id, "status": status, "completed_at": completed_at, "stage": stage}
+
+
+def _log_notification_delivery_receipt(kind: str, report: dict[str, str], message: str) -> None:
+    """Record API acceptance hashes without affecting delivery or exposing payloads."""
+    try:
+        receipt = {
+            "schema_version": 1,
+            "kind": kind,
+            "run_id": report["run_id"],
+            "report_sha256": hashlib.sha256(json.dumps(
+                report, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")).hexdigest(),
+            "message_sha256": hashlib.sha256(message.encode("utf-8")).hexdigest(),
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+        }
+        LOGGER.info("notification_delivery_receipt %s", json.dumps(
+            receipt, sort_keys=True, separators=(",", ":")
+        ))
+    except Exception:
+        # Logging must not turn an accepted send into a retry or skip dedupe persistence.
+        pass
 
 
 def _format_backup_report_message(report: dict[str, str]) -> str:

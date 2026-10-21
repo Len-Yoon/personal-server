@@ -1,4 +1,6 @@
+import hashlib
 import json
+import subprocess
 import sys
 import threading
 import unittest
@@ -326,6 +328,162 @@ class ControlledTelegramClient(TelegramClient):
 
     def _post(self, method, payload):
         return self._response
+
+
+class NotificationDeliveryReceiptTest(unittest.TestCase):
+    def make_delivery(self, kind, report=None):
+        if report is None:
+            report = {"run_id": "20261021T010203Z-receipt", "completed_at": "2026-10-21T01:02:03Z"}
+            if kind == "portal_backup":
+                report.update(status="completed", stage="completed")
+            else:
+                report.update(status="passed", health_audit="passed", backup_check="passed", recovery_lab="passed")
+        if kind == "portal_backup":
+            k8s = FakeBackupStatusK8s(report)
+            store = ConfigMapBackupDeliveryStore(k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP)
+            option = {"backup_delivery_store": store}
+            method = "deliver_backup_report"
+        else:
+            k8s = FakeQuarterlyAuditStatusK8s(report)
+            store = ConfigMapQuarterlyAuditDeliveryStore(k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP)
+            option = {"quarterly_audit_delivery_store": store}
+            method = "deliver_quarterly_audit_report"
+        relay = RelayService(allowed_chat_id="private-chat", k8s_client=k8s,
+                             prometheus_client=FakePrometheus(), **option)
+        return getattr(relay, method), store, report
+
+    def test_receipts_hash_actual_payload_and_validated_report_for_all_format_branches(self):
+        cases = []
+        for status, stage in (("completed", "completed"), ("unchanged", "unchanged"),
+                              ("failed", "restore-verify"), ("restore_failed", "restore-verify"),
+                              ("failed", "retention"), ("failed", "retention-cleanup"),
+                              ("restore_failed", "portal-health")):
+            cases.append(("portal_backup", {"status": status, "stage": stage}))
+        for fields in ({"status": "passed"}, {"status": "failed", "health_audit": "failed"},
+                       {"slo_evidence": "passed", "slo_days_recorded": "30", "slo_days_ok": "30",
+                        "slo_days_unobservable": "0", "slo_criteria": "freshness_1800", "slo_evidence_reason": "none"},
+                       {"slo_evidence": "unobservable", "slo_evidence_reason": "read_failed",
+                        "slo_days_recorded": "unknown", "slo_days_ok": "unknown",
+                        "slo_days_unobservable": "unknown"}):
+            cases.append(("quarterly_audit", fields))
+        for kind, fields in cases:
+            with self.subTest(kind=kind, fields=fields):
+                _, _, report = self.make_delivery(kind)
+                report.update(fields)
+                deliver, store, report = self.make_delivery(kind, report)
+                messages = []
+                def send(chat, message):
+                    self.assertFalse(store.contains(report["run_id"]))
+                    messages.append((chat, message))
+                    return True
+                before = datetime.now(timezone.utc)
+                with patch.object(relay_main.LOGGER, "info") as log:
+                    def capture(_template, encoded):
+                        self.assertFalse(store.contains(report["run_id"]))
+                    log.side_effect = capture
+                    self.assertTrue(deliver(send))
+                    self.assertTrue(deliver(send))
+                after = datetime.now(timezone.utc)
+                self.assertEqual(len(messages), 1)
+                log.assert_called_once()
+                template, encoded = log.call_args.args
+                self.assertEqual(template, "notification_delivery_receipt %s")
+                receipt = json.loads(encoded)
+                self.assertEqual(set(receipt), {"schema_version", "kind", "run_id", "report_sha256", "message_sha256", "sent_at"})
+                self.assertEqual(receipt["schema_version"], 1)
+                self.assertEqual(receipt["kind"], kind)
+                self.assertEqual(receipt["run_id"], report["run_id"])
+                self.assertEqual(receipt["report_sha256"], hashlib.sha256(json.dumps(
+                    report, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")).hexdigest())
+                self.assertEqual(receipt["message_sha256"], hashlib.sha256(messages[0][1].encode("utf-8")).hexdigest())
+                sent_at = datetime.fromisoformat(receipt["sent_at"])
+                self.assertEqual(sent_at.utcoffset(), timedelta(0))
+                self.assertLessEqual(before, sent_at)
+                self.assertLessEqual(sent_at, after)
+                self.assertEqual(encoded, json.dumps(receipt, sort_keys=True, separators=(",", ":")))
+                for private in ("private-chat", messages[0][1], report["completed_at"], "health_audit", "stage"):
+                    self.assertNotIn(private, encoded)
+                self.assertTrue(store.contains(report["run_id"]))
+
+    def test_runtime_main_enables_receipt_output_on_stderr_with_default_logging(self):
+        script = """
+import json
+from unittest.mock import patch
+from app import main
+try:
+    with patch.object(main, "_read_configured_secret", side_effect=SystemExit):
+        main.main()
+except SystemExit:
+    pass
+main._log_notification_delivery_receipt("portal_backup", {"run_id": "safe-run"}, "비공개 메시지")
+"""
+        result = subprocess.run([sys.executable, "-c", script],
+                                cwd=REPO_ROOT / "sre-telegram-relay", capture_output=True,
+                                text=True, check=True)
+        self.assertEqual(result.stdout, "")
+        lines = result.stderr.splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("notification_delivery_receipt "))
+        receipt = json.loads(lines[0].split(" ", 1)[1])
+        self.assertEqual(receipt["kind"], "portal_backup")
+        self.assertEqual(receipt["run_id"], "safe-run")
+        self.assertEqual(receipt["message_sha256"], hashlib.sha256("비공개 메시지".encode("utf-8")).hexdigest())
+        self.assertNotIn("비공개 메시지", result.stderr)
+
+    def test_rejected_or_exceptional_callbacks_never_emit_receipts_or_save_delivery(self):
+        for kind in ("portal_backup", "quarterly_audit"):
+            for raises in (False, True):
+                with self.subTest(kind=kind, raises=raises):
+                    deliver, store, report = self.make_delivery(kind)
+                    def send(_chat, _message):
+                        if raises:
+                            raise RuntimeError("private-token")
+                        return False
+                    with patch.object(relay_main.LOGGER, "info") as info:
+                        if raises and kind == "portal_backup":
+                            with self.assertRaises(RuntimeError):
+                                deliver(send)
+                        else:
+                            self.assertFalse(deliver(send))
+                    info.assert_not_called()
+                    self.assertFalse(store.contains(report["run_id"]))
+
+    def test_invalid_reports_never_emit_receipts(self):
+        for kind in ("portal_backup", "quarterly_audit"):
+            deliver, _, report = self.make_delivery(kind)
+            report["status"] = "private-token"
+            deliver, store, _ = self.make_delivery(kind, report)
+            with patch.object(relay_main.LOGGER, "info") as info, patch.object(relay_main.LOGGER, "warning") as warning:
+                self.assertTrue(deliver(lambda *_: self.fail("invalid report sent")))
+            info.assert_not_called()
+            self.assertNotIn("private-token", str(warning.call_args_list))
+            self.assertFalse(store.contains(report["run_id"]))
+
+    def test_receipt_logging_failure_keeps_successful_delivery_and_deduplication(self):
+        for kind in ("portal_backup", "quarterly_audit"):
+            with self.subTest(kind=kind):
+                deliver, store, report = self.make_delivery(kind)
+                messages = []
+                with patch.object(relay_main.LOGGER, "info", side_effect=RuntimeError("private-token")) as log:
+                    self.assertTrue(deliver(lambda chat, message: messages.append(message) or True))
+                    self.assertTrue(deliver(lambda chat, message: self.fail("duplicate send")))
+                self.assertEqual(len(messages), 1)
+                self.assertEqual(log.call_count, 1)
+                self.assertTrue(store.contains(report["run_id"]))
+
+    def test_receipt_precedes_state_write_failure_after_accepted_send(self):
+        for kind in ("portal_backup", "quarterly_audit"):
+            with self.subTest(kind=kind):
+                deliver, store, report = self.make_delivery(kind)
+                with patch.object(store, "save", side_effect=OSError("private-token")), patch.object(relay_main.LOGGER, "info") as info:
+                    if kind == "portal_backup":
+                        with self.assertRaises(OSError):
+                            deliver(lambda *_: True)
+                    else:
+                        self.assertFalse(deliver(lambda *_: True))
+                info.assert_called_once()
+                self.assertFalse(store.contains(report["run_id"]))
 
 
 class RelayServiceTest(unittest.TestCase):
