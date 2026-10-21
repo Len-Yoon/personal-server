@@ -1211,6 +1211,7 @@ def main() -> None:
     from http.server import ThreadingHTTPServer
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    _log_notification_receipt_session_start()
 
     token = _read_configured_secret("TELEGRAM_BOT_TOKEN_FILE")
     allowed_chat_id = _read_configured_secret("ALLOWED_CHAT_ID_FILE")
@@ -1391,6 +1392,18 @@ def _read_backup_report(k8s_client: KubernetesClient) -> dict[str, str] | None:
         LOGGER.warning("backup_report_ignored reason=inconsistent_status_stage")
         return None
     return {"run_id": run_id, "status": status, "completed_at": completed_at, "stage": stage}
+
+
+def _log_notification_receipt_session_start() -> None:
+    """Mark the start of retained receipt logs without affecting relay startup."""
+    try:
+        marker = {"schema_version": 1, "started_at": datetime.now(timezone.utc).isoformat()}
+        LOGGER.info("notification_receipt_session_start %s", json.dumps(
+            marker, sort_keys=True, separators=(",", ":")
+        ))
+    except Exception:
+        # Receipt observability must not prevent startup or delivery.
+        pass
 
 
 def _log_notification_delivery_receipt(kind: str, report: dict[str, str], message: str) -> None:

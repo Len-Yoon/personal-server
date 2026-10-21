@@ -30,6 +30,8 @@ N100 일회성 작업은 자연 실행 뒤 실제 receipt와 정규화된 보고
 
 `notification_delivery_receipt` 로그는 schema_version, kind, run_id, report_sha256, message_sha256, sent_at만 포함함. 같은 보고서에 대한 중복 receipt·시간 불일치·해시 불일치는 통과시키지 않음. report_sha256는 relay 검증기가 반환한 정규화된 dict의 canonical JSON 기준이며 원본 ConfigMap data 전체의 해시와 다를 수 있음.
 
+로그는 같은 Pod의 전체 실행 세션을 읽음. 첫 유효 레코드에 정확히 한 개의 시작 marker가 있어야 하며 컨테이너 시작 시각과 인접해야 함. 시작 marker가 로그 회전 등으로 소실되면 확인 필요임. 상한보다 1바이트 더 요청하고 원시 bytes 길이를 먼저 검사하므로 CRLF 정규화·공백 제거·다중 바이트 때문에 잘린 창을 완전한 증거로 오인하지 않음. 원시 로그가 2MB 한도 이상이면 통과시키지 않음.
+
 | 검증 경계 | 필수 근거 | 비고 |
 |---|---|---|
 | 실행 relay | Deployment UID·전체 명세, 소유 ReplicaSet→Pod, 단일 Ready·재시작 0·고정 imageID·app 소스 해시 | 전송 당시 로그를 읽는 같은 Pod로 제한 |
@@ -48,6 +50,8 @@ N100 일회성 작업은 자연 실행 뒤 실제 receipt와 정규화된 보고
 설치는 명시 `--go`와 검토된 계획 해시를 요구함. main CI를 통과한 정확한 소스와 새 relay 이미지 적용 뒤 읽기 전용 prepare로 계획을 생성하고, 설치 직전에 relay·Cron·기존 순차 unit 지문을 다시 확인함. 현재 사용자·기존 linger·정상 user manager·활성화 여유 120초가 필요함. 이미 있는 작업·unit·결과는 덮어쓰지 않음. 활성화 응답이 불명확하면 실행 비활성 확인 전 파일을 삭제하지 않음.
 
 검증 결과는 private JSON에 즉시 보존함. 백업 확인 후 결과 메시지 1건, 감사 확인 및 정리 후 최종 메시지 1건을 기존 relay 자격 증명으로 전송함. 자격 증명은 relay 컨테이너 안 메모리에서만 사용하며 외부 파일·환경 변수에 복제하지 않음. 전송 시도 marker를 먼저 저장하고 API 응답 불명 시 중복 재전송하지 않으며 로컬 결과에 unconfirmed를 보존함.
+
+전송 시도 marker 직후 중단된 경우에도 재개 시 attempted를 unconfirmed로 바꾸고 다시 전송하지 않음. 알림 결과가 미확인이어도 검증 증거 JSON을 보존하며 원래 정리 범위를 수행함.
 
 두 대상이 통과하거나 확인 기한이 끝나면 해당 작업의 service/timer·enable 링크·timer 상태·계획 파일·잠금만 정리함. 지문별 코드와 최종 증거 JSON은 보존함. 저장 계획·프로그램·unit hash 또는 소유권·정리 경계가 다르면 삭제를 중단함. 정리 도중 중단되면 durable 결과로 재개하며 사용자 파일·기존 원장·CronJob·서비스·Secret·PVC·운영 데이터는 삭제하거나 수정하지 않음.
 

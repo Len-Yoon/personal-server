@@ -25,7 +25,8 @@ class Fixture:
         self.dep = {"metadata": {"uid": "relay"}, "spec": {"replicas": 1, "strategy": {"type": "Recreate"},
                     "template": {"spec": {"containers": [{"image": self.image}]}}}}
         self.relaypod = {"metadata": {"name": "relay-pod", "uid": "relay-pod-uid", "ownerReferences": self.owner("ReplicaSet", "rs")},
-                         "status": {"phase": "Running", "containerStatuses": [{"ready": True, "restartCount": 0, "imageID": self.image}]}}
+                         "status": {"phase": "Running", "containerStatuses": [{"ready": True, "restartCount": 0, "imageID": self.image,
+                         "state": {"running": {"startedAt": self.at.isoformat()}}}]}}
         self.crons = {}; self.jobs = {}; self.pods = {}; self.cms = {}; self.expected = {}; self.logs = {}; self.calls = []
         self.plan = {"schema_version": 1, "created_at": self.at.isoformat(), "targets": M.targets(self.at),
                      "program_sha256": M.S.file_hash(Path(M.__file__).read_bytes()), "support_sha256": M.SUPPORT_HASH,
@@ -53,7 +54,7 @@ class Fixture:
             self.expected[kind] = expected
             receipt = {"schema_version": 1, "kind": kind, **{k: expected[k] for k in ["run_id", "report_sha256", "message_sha256"]},
                        "sent_at": (target + timedelta(seconds=62)).isoformat()}
-            self.logs[kind] = M.PREFIX + json.dumps(receipt)
+            self.logs[kind] = M.SESSION_PREFIX + json.dumps({"schema_version": 1, "started_at": self.at.isoformat()}) + "\n" + M.PREFIX + json.dumps(receipt)
             annotations = {"batch.kubernetes.io/cronjob-scheduled-timestamp": target.isoformat()}
             labels = {}
             job_name = "monthly-sre-audit-123"
@@ -98,8 +99,9 @@ class Fixture:
     def execute(self, argv, value=None):
         self.calls.append((argv, value))
         if "logs" in argv:
-            target = next(v for v in argv if v.startswith("--since-time="))[13:]
-            return self.logs[next(k for k, t in self.plan["targets"].items() if t == target)]
+            # Production returns the whole same-Pod session; both natural sends may exist.
+            marker = self.logs["portal_backup"].splitlines()[0]
+            return marker + "\n" + "\n".join(line for text in self.logs.values() for line in text.splitlines() if not line.startswith(M.SESSION_PREFIX))
         if M.EXPECTED_CODE in argv:
             return json.dumps(self.expected[json.loads(value)["kind"]])
         if "exec" in argv:
@@ -184,19 +186,41 @@ class NotificationFollowupEvidenceTests(unittest.TestCase):
             M.inspect("portal_backup", self.f.plan, read=self.f.read, execute=self.f.execute)
 
     def test_log_command_checks_raw_bytes_before_stripping_whitespace(self):
-        response = subprocess.CompletedProcess([], 0, stdout=" " * (M.LOG_LIMIT + 1), stderr="")
+        response = subprocess.CompletedProcess([], 0, stdout=b" " * (M.LOG_LIMIT + 1), stderr=b"")
         with patch.object(M.subprocess, "run", return_value=response):
             with self.assertRaisesRegex(M.S.Failed, "receipt_logs_incomplete"):
                 M.command([*M.S.KUBE, "logs", "pod", "--limit-bytes=" + str(M.LOG_LIMIT + 1)])
 
+    def test_raw_crlf_bytes_are_not_normalized_before_log_limit_check(self):
+        real_run = subprocess.run
+        def emit_crlf(argv, **kwargs):
+            self.assertNotIn("text", kwargs)
+            return real_run([sys.executable, "-c", "import os;os.write(1,b'\\r\\n'*1000000)"], **kwargs)
+        with patch.object(M.subprocess, "run", side_effect=emit_crlf):
+            with self.assertRaisesRegex(M.S.Failed, "receipt_logs_incomplete"):
+                M.command([*M.S.KUBE, "logs", "pod", "--limit-bytes=" + str(M.LOG_LIMIT + 1)])
+
+    def test_rotated_session_missing_or_wrong_start_marker_never_passes(self):
+        pod = self.f.relaypod
+        with self.assertRaises(M.Pending):
+            M.verify_log_session(self.f.logs["portal_backup"].splitlines()[-1], pod)
+        marker = M.SESSION_PREFIX + json.dumps({"schema_version": 1, "started_at": "2026-10-22T00:00:00+00:00"})
+        with self.assertRaisesRegex(M.S.Failed, "log_session_mismatch"):
+            M.verify_log_session(marker, pod)
+        original = self.f.logs["portal_backup"].splitlines()[0]
+        with self.assertRaises(M.Pending):
+            M.verify_log_session("cut-leading-record\n" + original, pod)
+        with self.assertRaisesRegex(M.S.Failed, "log_session_mismatch"):
+            M.verify_log_session(original + "\n" + original, pod)
+
     def test_tampered_duplicate_or_late_receipts_are_not_success(self):
-        kind = "quarterly_audit"; original = self.f.logs[kind]
+        kind = "quarterly_audit"; session, original = self.f.logs[kind].splitlines()
         for mutate in [lambda r: r.update(message_sha256="e" * 64), lambda r: r.update(report_sha256="e" * 64),
                        lambda r: r.update(sent_at="2026-11-01T03:00:00+00:00"), lambda r: r.update(extra="value")]:
-            value = json.loads(original[len(M.PREFIX):]); mutate(value); self.f.logs[kind] = M.PREFIX + json.dumps(value)
+            value = json.loads(original[len(M.PREFIX):]); mutate(value); self.f.logs[kind] = session + "\n" + M.PREFIX + json.dumps(value)
             with self.assertRaises(M.S.Failed):
                 M.inspect(kind, self.f.plan, read=self.f.read, execute=self.f.execute)
-        self.f.logs[kind] = original + "\n" + original
+        self.f.logs[kind] = session + "\n" + original + "\n" + original
         with self.assertRaisesRegex(M.S.Failed, "duplicate_receipt"):
             M.inspect(kind, self.f.plan, read=self.f.read, execute=self.f.execute)
 

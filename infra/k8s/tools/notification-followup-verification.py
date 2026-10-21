@@ -28,6 +28,7 @@ LEDGERS = {"portal_backup": "backup_delivered_run_ids", "quarterly_audit": "quar
 CRONS = {"portal_backup": ("personal-server", "portal-pvc-backup"), "quarterly_audit": ("monitoring", "monthly-sre-audit")}
 SEQUENCE = "personal-server-pvc-backup-sequence"
 PREFIX = "notification_delivery_receipt "
+SESSION_PREFIX = "notification_receipt_session_start "
 HEX = re.compile(r"[a-f0-9]{64}")
 LOG_LIMIT = 2_000_000
 EXPECTED_CODE = '''import hashlib,json,sys
@@ -51,12 +52,15 @@ def command(args, value=None):
     if args[:len(S.KUBE) + 1] == [*S.KUBE, "logs"]:
         # Preserve raw whitespace for the byte-limit sentinel; S.command strips it.
         try:
-            response = subprocess.run(args, input=value, capture_output=True, text=True, timeout=30)
+            response = subprocess.run(args, input=value.encode() if value is not None else None, capture_output=True, timeout=30)
         except (OSError, subprocess.SubprocessError):
             raise S.Failed("receipt_logs_unavailable") from None
-        require(response.returncode == 0 and len(response.stdout.encode("utf-8")) < LOG_LIMIT,
+        require(response.returncode == 0 and isinstance(response.stdout, bytes) and len(response.stdout) < LOG_LIMIT,
                 "receipt_logs_incomplete")
-        return response.stdout
+        try:
+            return response.stdout.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            raise S.Failed("receipt_logs_invalid_encoding") from None
     return S.command(args, value)
 
 
@@ -166,6 +170,24 @@ def matched_receipt(logs, kind, expected, target, deadline):
     return matches[0]
 
 
+def verify_log_session(logs, pod):
+    markers = []
+    lines = [line for line in logs.splitlines() if line]
+    if not lines or not lines[0].startswith(SESSION_PREFIX):
+        raise Pending()
+    for line in lines:
+        if line.startswith(SESSION_PREFIX):
+            value = json.loads(line[len(SESSION_PREFIX):])
+            require(isinstance(value, dict) and set(value) == {"schema_version", "started_at"}
+                    and type(value["schema_version"]) is int and value["schema_version"] == 1, "invalid_log_session")
+            markers.append(stamp(value["started_at"]))
+    if not markers:
+        raise Pending()
+    started = stamp(pod["status"]["containerStatuses"][0]["state"]["running"]["startedAt"])
+    require(len(markers) == 1 and timedelta(0) <= markers[0] - started <= timedelta(seconds=30), "log_session_mismatch")
+    return markers[0].isoformat()
+
+
 def natural_job(kind, plan, report, *, read=get, execute=command):
     target = stamp(plan["targets"][kind])
     ns, name = CRONS[kind]
@@ -241,15 +263,16 @@ def inspect(kind, plan, *, read=get, execute=command):
     require(expected["wording"] is True, "new_wording_missing")
     require(expected["status"] in ({"completed", "unchanged"} if kind == "portal_backup" else {"passed", "failed"}), "producer_failed")
     source = natural_job(kind, plan, expected, read=read, execute=execute)
-    logs = execute([*S.KUBE, "logs", pod["metadata"]["name"], "--since-time=" + target.isoformat(),
-                    "--limit-bytes=" + str(LOG_LIMIT + 1)])
+    logs = execute([*S.KUBE, "logs", pod["metadata"]["name"], "--limit-bytes=" + str(LOG_LIMIT + 1)])
     require(len(logs.encode("utf-8")) < LOG_LIMIT, "receipt_logs_incomplete")
+    session_start = verify_log_session(logs, pod)
     receipt = matched_receipt(logs, kind, expected, target, deadline)
+    require(stamp(receipt["sent_at"]) >= stamp(session_start), "receipt_before_session")
     ledger = json.loads(read("configmap", "monitoring", "sre-telegram-relay-state")["data"][LEDGERS[kind]])
     require(isinstance(ledger, list) and expected["run_id"] in ledger, "delivery_ledger_missing")
     return {"status": "passed", "receipt": receipt, "source": source, "relay_pod_uid": pod["metadata"]["uid"],
             "relay_image_id": plan["relay_image_id"], "producer_status": expected["status"],
-            "completed_at": expected["completed_at"], "human_receipt": "unverified"}
+            "completed_at": expected["completed_at"], "session_start": session_start, "human_receipt": "unverified"}
 
 
 def layout(task_id, home=None):
@@ -286,7 +309,7 @@ def validate_observation(kind, value, plan):
     if value.get("status") == "unconfirmed":
         require(value == {"status": "unconfirmed", "reason": "evidence_deadline_expired"}, "invalid_unconfirmed_observation")
         return
-    keys = {"status", "receipt", "source", "relay_pod_uid", "relay_image_id", "producer_status", "completed_at", "human_receipt"}
+    keys = {"status", "receipt", "source", "relay_pod_uid", "relay_image_id", "producer_status", "completed_at", "session_start", "human_receipt"}
     require(set(value) == keys and value["status"] == "passed" and value["human_receipt"] == "unverified", "invalid_pass_observation")
     require(value["relay_image_id"] == plan["relay_image_id"] and isinstance(value["relay_pod_uid"], str)
             and 0 < len(value["relay_pod_uid"]) <= 100, "invalid_observed_relay")
@@ -300,6 +323,7 @@ def validate_observation(kind, value, plan):
     target = stamp(plan["targets"][kind])
     expected = {**{k: receipt[k] for k in ("run_id", "report_sha256", "message_sha256")}, "completed_at": value["completed_at"]}
     matched_receipt(PREFIX + json.dumps(receipt), kind, expected, target, target + timedelta(hours=1))
+    require(stamp(value["session_start"]) <= stamp(receipt["sent_at"]), "receipt_before_session")
 
 
 def validate_result(result, task_id, paths):

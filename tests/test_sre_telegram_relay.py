@@ -418,18 +418,42 @@ except SystemExit:
     pass
 main._log_notification_delivery_receipt("portal_backup", {"run_id": "safe-run"}, "비공개 메시지")
 """
+        before = datetime.now(timezone.utc)
         result = subprocess.run([sys.executable, "-c", script],
                                 cwd=REPO_ROOT / "sre-telegram-relay", capture_output=True,
                                 text=True, check=True)
+        after = datetime.now(timezone.utc)
         self.assertEqual(result.stdout, "")
         lines = result.stderr.splitlines()
-        self.assertEqual(len(lines), 1)
-        self.assertTrue(lines[0].startswith("notification_delivery_receipt "))
-        receipt = json.loads(lines[0].split(" ", 1)[1])
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith("notification_receipt_session_start "))
+        marker_json = lines[0].split(" ", 1)[1]
+        marker = json.loads(marker_json)
+        self.assertEqual(set(marker), {"schema_version", "started_at"})
+        self.assertEqual(marker["schema_version"], 1)
+        self.assertEqual(marker_json, json.dumps(marker, sort_keys=True, separators=(",", ":")))
+        started_at = datetime.fromisoformat(marker["started_at"])
+        self.assertEqual(started_at.utcoffset(), timedelta(0))
+        self.assertLessEqual(before, started_at)
+        self.assertLessEqual(started_at, after)
+        self.assertTrue(lines[1].startswith("notification_delivery_receipt "))
+        receipt = json.loads(lines[1].split(" ", 1)[1])
         self.assertEqual(receipt["kind"], "portal_backup")
         self.assertEqual(receipt["run_id"], "safe-run")
         self.assertEqual(receipt["message_sha256"], hashlib.sha256("비공개 메시지".encode("utf-8")).hexdigest())
         self.assertNotIn("비공개 메시지", result.stderr)
+        for private in ("TELEGRAM_BOT_TOKEN_FILE", "ALLOWED_CHAT_ID_FILE", "ALERTMANAGER_AUTH_TOKEN_FILE"):
+            self.assertNotIn(private, result.stderr)
+
+    def test_startup_marker_logging_failure_still_reaches_secret_configuration(self):
+        with patch.object(relay_main.LOGGER, "info", side_effect=RuntimeError("private-token")) as info, patch.object(
+            relay_main, "_read_configured_secret", side_effect=SystemExit
+        ) as secret, patch.object(relay_main.logging, "basicConfig"):
+            with self.assertRaises(SystemExit):
+                relay_main.main()
+        info.assert_called_once()
+        self.assertEqual(info.call_args.args[0], "notification_receipt_session_start %s")
+        secret.assert_called_once_with("TELEGRAM_BOT_TOKEN_FILE")
 
     def test_rejected_or_exceptional_callbacks_never_emit_receipts_or_save_delivery(self):
         for kind in ("portal_backup", "quarterly_audit"):
