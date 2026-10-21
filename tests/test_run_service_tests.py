@@ -84,7 +84,7 @@ EXPECTED_GROUPS["maintenance"] = (*_maintenance[:-1], (_maintenance[-1] + " test
 for _name, _modules in (
     ("portal", " tests.test_security_full_paths tests.test_file_store_full_paths"),
     ("k8s-contracts", " tests.test_backup_full_paths"),
-    ("k8s-contracts", " tests.test_slo_audit_read_access tests.test_k8s_slo_followup_verification"),
+    ("k8s-contracts", " tests.test_slo_audit_read_access tests.test_k8s_slo_followup_verification tests.test_k8s_notification_followup_verification"),
 ):
     _entry = EXPECTED_GROUPS[_name]
     EXPECTED_GROUPS[_name] = (*_entry[:-1], _entry[-1] + _modules)
