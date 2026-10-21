@@ -31,6 +31,11 @@ def record(day, *, version=False):
 
 class SloFollowupVerificationTests(unittest.TestCase):
     def setUp(self):
+        # Production diagnostics are separately injected below; ordinary recovery
+        # tests must never contact a real cluster or Prometheus endpoint.
+        diagnostic = mock.patch.object(TOOL, "read_portal_context", return_value=TOOL.unknown_portal_context())
+        self.diagnostic = diagnostic.start()
+        self.addCleanup(diagnostic.stop)
         target = date.fromisoformat(DAY)
         self.rows = [record((target - timedelta(days=i)).isoformat()) for i in range(1, 31)]
         self.podspec = {"serviceAccountName": "slo-daily-evidence", "restartPolicy": "Never",
@@ -549,6 +554,194 @@ class SloFollowupVerificationTests(unittest.TestCase):
         with mock.patch.object(TOOL, "install") as install, mock.patch("sys.stderr"):
             self.assertEqual(TOOL.main(["install", "--target-date", DAY]), 1)
         install.assert_not_called()
+
+    def test_diagnostic_failure_does_not_block_verified_cleanup_or_send(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve()
+            self.install_fixture(home)
+            self.diagnostic.side_effect = RuntimeError("private error")
+            result = self.run_fixture(home)
+            self.assertEqual((result["verification"], result["cleanup"], result["delivery"]),
+                             ("passed", "passed", "accepted"))
+            self.assertEqual(result["portal_context"], TOOL.unknown_portal_context())
+            self.assertNotIn("private error", TOOL.message(result))
+
+    def test_late_success_preserves_cleanup_time_instead_of_running_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve()
+            self.install_fixture(home)
+            result = TOOL.run_task(DAY, home=home, now=lambda: TOOL.times(DAY)["deadline"] - timedelta(seconds=30),
+                                   get=self.get, execute=lambda args, value=None: "slo_followup_delivery=PASS")
+            self.diagnostic.assert_not_called()
+            self.assertEqual((result["verification"], result["cleanup"], result["delivery"]), ("passed", "passed", "accepted"))
+
+
+class PortalAvailabilityContextTests(unittest.TestCase):
+    def setUp(self):
+        self.at = datetime(2026, 10, 20, 17, 15, 3, tzinfo=timezone.utc)
+        self.row = record(DAY, version=True)
+        self.deployment = {"metadata": {"uid": "deployment-uid", "creationTimestamp": "2026-09-01T00:00:00Z", "generation": 3},
+                           "spec": {"replicas": 1}, "status": {"observedGeneration": 3, "readyReplicas": 1, "availableReplicas": 1}}
+        spec = {"serviceAccountName": "portal-pvc-backup", "containers": [{"name": "backup", "image": "fixed@sha256:abc"}]}
+        self.cron = {"metadata": {"uid": "backup-cron-uid", "creationTimestamp": "2026-09-01T00:00:00Z"},
+                     "spec": {"jobTemplate": {"spec": {"template": {"spec": spec}}}}}
+        self.av = self.matrix()
+        self.de = self.matrix()
+        self.av["data"]["result"][0]["values"][30][1] = "0"
+        self.av["data"]["result"][0]["values"][31][1] = "0"
+        self.de["data"]["result"][0]["values"][30][1] = "0"
+        first = self.av["data"]["result"][0]["values"][30][0]
+        last = self.av["data"]["result"][0]["values"][31][0]
+        self.jobs = [{"metadata": {"uid": "backup-job-uid", "ownerReferences": [{"kind": "CronJob", "uid": "backup-cron-uid", "controller": True}]},
+                      "spec": {"template": {"spec": copy.deepcopy(spec)}},
+                      "status": {"startTime": datetime.fromtimestamp(first - 30, timezone.utc).isoformat(),
+                                 "completionTime": datetime.fromtimestamp(last + 120, timezone.utc).isoformat(), "succeeded": 1,
+                                 "conditions": [{"type": "Complete", "status": "True"}]}}]
+
+    def matrix(self):
+        return {"status": "success", "data": {"resultType": "matrix", "result": [{
+            "metric": {"namespace": "personal-server", "deployment": "portal-web"},
+            "values": [[self.at.timestamp() - 86400 + i * 30, "1"] for i in range(1, 2881)]}]}}
+
+    def classify(self):
+        return TOOL.classify_portal_context(self.row, self.deployment, self.cron, self.jobs,
+                                            self.av, self.de, self.at + timedelta(minutes=5))
+
+    def test_successful_backup_including_readiness_lag_is_explained(self):
+        result = self.classify()
+        self.assertEqual((result["current"], result["history"], result["zero_samples"]), ("available", "backup_overlap", 2))
+        self.assertEqual(self.row["portal_ready"], "failed")
+        lines = "\n".join(TOOL.portal_context_lines(result))
+        self.assertIn("백업 계획 정지·복귀 구간과 일치", lines)
+        self.assertIn("2026-10-21 02:20 KST 기준", lines)
+        self.assertIn("원시 SLO 판정은 유지", lines)
+
+    def test_recurrence_after_recovery_is_not_hidden_by_same_backup_job(self):
+        self.av["data"]["result"][0]["values"][33][1] = "0"
+        self.assertEqual(self.classify()["history"], "unexplained")
+
+    def test_unavailability_before_pause_anchor_is_not_planned(self):
+        self.av["data"]["result"][0]["values"][29][1] = "0"
+        self.assertEqual(self.classify()["history"], "unexplained")
+
+    def test_missing_failed_foreign_or_changed_backup_is_unknown(self):
+        original = copy.deepcopy(self.jobs)
+        for mutation in (lambda: self.jobs.clear(),
+                         lambda: self.jobs[0]["status"].update(failed=1),
+                         lambda: self.jobs[0]["status"].update(conditions=[]),
+                         lambda: self.jobs[0]["metadata"]["ownerReferences"][0].update(uid="different"),
+                         lambda: self.jobs[0]["metadata"]["ownerReferences"].append({"controller": True}),
+                         lambda: self.jobs[0]["spec"]["template"]["spec"].update(serviceAccountName="other"),
+                         lambda: self.jobs[0]["status"].update(completionTime="2026-10-20T18:00:00Z")):
+            self.jobs = copy.deepcopy(original)
+            mutation()
+            with self.subTest(job=self.jobs):
+                self.assertEqual(self.classify()["history"], "unknown")
+
+    def test_current_unavailability_is_separate_from_historical_backup(self):
+        self.deployment["status"].update(availableReplicas=0, readyReplicas=0)
+        result = self.classify()
+        self.assertEqual((result["history"], result["current"]), ("backup_overlap", "unavailable"))
+        self.assertIn("장애 여부 확인 필요", "\n".join(TOOL.portal_context_lines(result)))
+
+    def test_duplicate_overlapping_backup_jobs_do_not_prove_planned_pause(self):
+        self.jobs.append(copy.deepcopy(self.jobs[0]))
+        self.jobs[1]["metadata"]["uid"] = "second-job"
+        self.assertEqual(self.classify()["history"], "unknown")
+
+    def test_scaled_multiple_writers_during_pause_are_not_explained_as_backup(self):
+        self.de["data"]["result"][0]["values"][31][1] = "2"
+        self.assertEqual(self.classify()["history"], "unknown")
+        self.deployment["spec"]["replicas"] = 2
+        with self.assertRaisesRegex(TOOL.Failed, "invalid_deployment_status"):
+            self.classify()
+
+    def test_warning_or_info_partial_responses_are_not_positive_evidence(self):
+        for key in ("warnings", "infos"):
+            with self.subTest(key=key):
+                self.av[key] = ["partial data"]
+                with self.assertRaisesRegex(TOOL.Failed, "incomplete_diagnostic_matrix"):
+                    self.classify()
+                del self.av[key]
+
+    def test_no_zero_samples_with_failed_raw_record_is_conflicting(self):
+        self.av = self.matrix()
+        with self.assertRaisesRegex(TOOL.Failed, "raw_diagnostic_conflict"):
+            self.classify()
+        self.row["portal_ready"] = "ok"
+        self.assertEqual(self.classify()["history"], "none")
+
+    def test_raw_ok_cannot_be_reconciled_with_zero(self):
+        self.row["portal_ready"] = "ok"
+        with self.assertRaisesRegex(TOOL.Failed, "raw_diagnostic_conflict"):
+            self.classify()
+
+    def test_matrix_rejects_gaps_repeated_future_nan_and_multiple_series(self):
+        original = copy.deepcopy(self.av)
+        for mutation in (lambda: self.av["data"]["result"][0]["values"].__delitem__(slice(2, 8)),
+                         lambda: self.av["data"]["result"][0]["values"].__delitem__(slice(0, 4)),
+                         lambda: self.av["data"]["result"][0]["values"][3].__setitem__(0, self.at.timestamp()+1),
+                         lambda: self.av["data"]["result"][0]["values"][0].__setitem__(1, "NaN"),
+                         lambda: self.av["data"]["result"].append(copy.deepcopy(self.av["data"]["result"][0]))):
+            self.av = copy.deepcopy(original)
+            mutation()
+            with self.assertRaises(TOOL.Failed):
+                self.classify()
+
+    def test_desired_and_available_must_have_same_scrape_timestamps(self):
+        self.de["data"]["result"][0]["values"][10][0] += 1
+        with self.assertRaisesRegex(TOOL.Failed, "diagnostic_timestamp_mismatch"):
+            self.classify()
+
+    def test_recreation_stale_generation_and_old_record_are_unknown(self):
+        self.deployment["status"]["observedGeneration"] = 2
+        with self.assertRaisesRegex(TOOL.Failed, "stale_deployment_status"):
+            self.classify()
+        self.deployment["status"]["observedGeneration"] = 3
+        self.deployment["metadata"]["creationTimestamp"] = self.at.isoformat()
+        with self.assertRaisesRegex(TOOL.Failed, "deployment_identity_changed"):
+            self.classify()
+        self.deployment["metadata"]["creationTimestamp"] = "2026-09-01T00:00:00Z"
+        self.row["collected_at"] = (self.at - timedelta(days=2)).isoformat()
+        with self.assertRaisesRegex(TOOL.Failed, "stale_diagnostic_record"):
+            self.classify()
+
+    def test_read_failure_is_fixed_unknown_without_raw_labels_or_errors(self):
+        get = mock.Mock(side_effect=RuntimeError("private-address secret-value"))
+        result = TOOL.read_portal_context(self.row, get=get, query=mock.Mock(), now=self.at)
+        self.assertEqual(result, TOOL.unknown_portal_context())
+        self.assertNotIn("secret-value", json.dumps(result))
+
+    def test_read_uses_fixed_resources_and_record_timestamp(self):
+        def get(kind, name=None):
+            return {"deployment": self.deployment, "cronjob": self.cron, "jobs": {"items": self.jobs}}[kind]
+        calls = []
+        def query(name, at):
+            calls.append((name, at))
+            return self.av if name == "available" else self.de
+        result = TOOL.read_portal_context(self.row, get=get, query=query, now=self.at + timedelta(minutes=5))
+        self.assertEqual(result["history"], "backup_overlap")
+        self.assertEqual(calls, [("available", self.at), ("desired", self.at)])
+
+    def test_diagnostic_get_cannot_access_secrets_or_mutate(self):
+        with mock.patch.object(TOOL, "command") as call:
+            with self.assertRaisesRegex(TOOL.Failed, "invalid_diagnostic_resource"):
+                TOOL.portal_get("secret", "runtime")
+            call.assert_not_called()
+            call.return_value = "{}"
+            TOOL.portal_get("deployment", "portal-web")
+            args = call.call_args.args[0]
+            self.assertIn("personal-server", args)
+            self.assertEqual(args[args.index("get")+1], "deployment")
+
+    def test_diagnostic_command_has_short_deadline_and_response_limit(self):
+        with mock.patch.object(TOOL.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "{}", "")) as call:
+            self.assertEqual(TOOL.diagnostic_command([*TOOL.KUBE, "get", "--raw", "fixed"]), "{}")
+            self.assertEqual(call.call_args.kwargs["timeout"], 8)
+            self.assertIn("--request-timeout=5s", call.call_args.args[0])
+        with mock.patch.object(TOOL, "command", return_value="x" * 2_000_001):
+            with self.assertRaisesRegex(TOOL.Failed, "diagnostic_response_too_large"):
+                TOOL.diagnostic_command(["fixed"])
 
 
 if __name__ == "__main__":

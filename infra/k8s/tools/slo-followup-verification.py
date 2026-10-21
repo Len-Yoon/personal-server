@@ -13,6 +13,7 @@ from datetime import date, datetime, time, timedelta, timezone
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -22,6 +23,7 @@ import stat
 import subprocess
 import sys
 import time as clock
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 sys.dont_write_bytecode = True
@@ -98,6 +100,163 @@ def kube(kind, name=None):
         return json.loads(command([*KUBE, "get", kind, *([name] if name else []), "-o", "json"]))
     except (ValueError, TypeError):
         raise Failed("invalid_api_response") from None
+
+
+PORTAL_METRICS = {name: 'kube_deployment_' + metric +
+                 '{namespace="personal-server",deployment="portal-web"}'
+                 for name, metric in (("available", "status_replicas_available"), ("desired", "spec_replicas"))}
+PORTAL_PROXY = "/api/v1/namespaces/monitoring/services/http:personal-server-monitoring-prometheus:9090/proxy/api/v1/query?"
+
+
+def diagnostic_command(args):
+    # Five reads at most: 40s total, with no retries. Preserve cleanup/send time.
+    def bounded_run(argv, **kwargs):
+        return subprocess.run(argv, **{**kwargs, "timeout": 8})
+    raw = command(["--request-timeout=5s" if a == "--request-timeout=10s" else a for a in args], run=bounded_run)
+    require(len(raw) <= 2_000_000, "diagnostic_response_too_large")
+    return raw
+
+
+def portal_get(kind, name=None):
+    require((kind, name) in {("deployment", "portal-web"), ("cronjob", "portal-pvc-backup"),
+                            ("jobs", None)}, "invalid_diagnostic_resource")
+    return json.loads(diagnostic_command([*KUBE[:-1], "personal-server", "get", kind,
+                                          *([name] if name else []), "-o", "json"]))
+
+
+def portal_matrix(name, at):
+    require(name in PORTAL_METRICS, "invalid_diagnostic_query")
+    query = urlencode({"query": PORTAL_METRICS[name] + "[24h]", "time": at.timestamp()})
+    raw = diagnostic_command([*KUBE, "get", "--raw", PORTAL_PROXY + query])
+    return json.loads(raw)
+
+
+def unknown_portal_context():
+    return {"current": "unknown", "history": "unknown", "checked_at": None, "zero_samples": None}
+
+
+def diagnostic_samples(payload, end):
+    require(payload.get("status") == "success" and payload.get("data", {}).get("resultType") == "matrix",
+            "invalid_diagnostic_matrix")
+    require(not payload.get("warnings") and not payload.get("infos"), "incomplete_diagnostic_matrix")
+    series = payload["data"]["result"]
+    require(isinstance(series, list) and len(series) == 1, "ambiguous_diagnostic_series")
+    require(series[0].get("metric", {}).get("namespace") == "personal-server" and
+            series[0]["metric"].get("deployment") == "portal-web", "invalid_diagnostic_series")
+    values = series[0]["values"]
+    require(isinstance(values, list) and 2 <= len(values) <= 10000, "invalid_diagnostic_samples")
+    result = []
+    for pair in values:
+        require(isinstance(pair, list) and len(pair) == 2 and type(pair[0]) in (int, float),
+                "invalid_diagnostic_samples")
+        require(isinstance(pair[1], str), "invalid_diagnostic_samples")
+        stamp, value = float(pair[0]), float(pair[1])
+        require(math.isfinite(stamp) and math.isfinite(value) and value >= 0 and value.is_integer() and
+                end - 86400 <= stamp <= end and (not result or 0 < stamp - result[-1][0] <= 90),
+                "diagnostic_sample_gap")
+        result.append((stamp, int(value)))
+    require(result[0][0] - (end - 86400) <= 90 and end - result[-1][0] <= 90, "diagnostic_sample_gap")
+    return result
+
+
+def classify_portal_context(record, deployment, cron, jobs, available_payload, desired_payload, checked_at):
+    """Explain observed unavailability; never rewrite raw records or exempt SLO failures."""
+    result = unknown_portal_context()
+    result["checked_at"] = checked_at.astimezone(timezone.utc).isoformat()
+    observed = timestamp(record["collected_at"])
+    require(timedelta(0) <= checked_at - observed <= timedelta(hours=36), "stale_diagnostic_record")
+    require(record["portal_ready"] in {"ok", "failed", "unobservable"}, "invalid_diagnostic_record")
+    meta, spec, status = deployment["metadata"], deployment["spec"], deployment["status"]
+    require(not meta.get("deletionTimestamp") and type(meta["generation"]) is int and
+            type(status.get("observedGeneration")) is int and
+            status["observedGeneration"] >= meta["generation"], "stale_deployment_status")
+    wanted = spec.get("replicas")
+    ready, available = status.get("readyReplicas", 0), status.get("availableReplicas", 0)
+    require(all(type(v) is int and v in (0, 1) for v in (wanted, ready, available)), "invalid_deployment_status")
+    result["current"] = "available" if wanted > 0 and ready >= wanted and available >= wanted else "unavailable"
+    # A recreated deployment cannot explain an older name-only metric series.
+    require(timestamp(meta["creationTimestamp"]) <= observed - timedelta(hours=24), "deployment_identity_changed")
+    av = diagnostic_samples(available_payload, observed.timestamp())
+    de = diagnostic_samples(desired_payload, observed.timestamp())
+    require([t for t, _ in av] == [t for t, _ in de], "diagnostic_timestamp_mismatch")
+    require(record["portal_ready"] != "unobservable", "raw_portal_unobservable")
+    zero_count = sum(v == 0 for _, v in av)
+    require((record["portal_ready"] == "failed") == (zero_count > 0), "raw_diagnostic_conflict")
+    result["zero_samples"] = zero_count
+    if not zero_count:
+        result["history"] = "none"
+        return result
+    require(not cron["metadata"].get("deletionTimestamp") and
+            timestamp(cron["metadata"]["creationTimestamp"]) <= observed - timedelta(hours=24),
+            "cron_identity_changed")
+    require(isinstance(jobs, list) and len(jobs) <= 200, "invalid_diagnostic_jobs")
+    windows = []
+    expected_spec = cron["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+    for job in jobs:
+        refs = job.get("metadata", {}).get("ownerReferences", [])
+        controllers = [r for r in refs if r.get("controller") is True]
+        if len(controllers) != 1:
+            continue
+        parent = controllers[0]
+        if parent.get("kind") != "CronJob" or parent.get("uid") != cron["metadata"]["uid"]:
+            continue
+        js = job.get("status", {})
+        conditions = js.get("conditions", [])
+        if (job.get("metadata", {}).get("deletionTimestamp") or type(js.get("succeeded")) is not int or js["succeeded"] != 1 or
+                js.get("failed", 0) or js.get("active", 0) or
+                not any(c.get("type") == "Complete" and c.get("status") == "True" for c in conditions) or
+                any(c.get("type") in {"Failed", "FailureTarget"} and c.get("status") == "True" for c in conditions)):
+            continue
+        if job.get("spec", {}).get("template", {}).get("spec") != expected_spec:
+            continue
+        started, ended = timestamp(js["startTime"]), timestamp(js["completionTime"])
+        if observed - timedelta(hours=24) <= started <= ended <= observed and ended - started <= timedelta(hours=5):
+            windows.append((started.timestamp(), ended.timestamp()))
+    # Recognize one continuous unavailable run, including restart readiness lag.
+    # A recovered sample closes it: later failures need their own pause anchor.
+    runs = []
+    for i, (stamp, value) in enumerate(av):
+        if value == 0:
+            if not runs or i != runs[-1][-1] + 1:
+                runs.append([])
+            runs[-1].append(i)
+    matched = []
+    for run in runs:
+        first, last = run[0], run[-1]
+        matched.append(de[first][1] == 0 and all(de[i][1] in (0, 1) for i in run) and
+                       sum(start <= av[first][0] <= av[last][0] <= end for start, end in windows) == 1)
+    if all(matched):
+        result["history"] = "backup_overlap"
+    elif any(de[run[0]][1] > 0 for run, covered in zip(runs, matched) if not covered):
+        result["history"] = "unexplained"
+    return result
+
+
+def read_portal_context(record, *, get=portal_get, query=portal_matrix, now=None):
+    """Bounded read-only diagnostics; unavailable evidence cannot break delivery."""
+    try:
+        at = timestamp(record["collected_at"])
+        return classify_portal_context(record, get("deployment", "portal-web"),
+                                       get("cronjob", "portal-pvc-backup"), get("jobs")["items"],
+                                       query("available", at), query("desired", at),
+                                       now or datetime.now(timezone.utc))
+    except Exception:
+        return unknown_portal_context()
+
+
+def portal_context_lines(value):
+    if not isinstance(value, dict):
+        value = unknown_portal_context()
+    history = {"backup_overlap": "백업 계획 정지·복귀 구간과 일치", "unexplained": "계획 백업으로 설명되지 않는 무가용 관측·장애 확인 필요",
+               "none": "무가용 표본 없음", "unknown": "원인 확인 필요 (진단 근거 부족)"}
+    current = {"available": "가용 복제본 정상", "unavailable": "가용 복제본 부족·장애 여부 확인 필요", "unknown": "확인 필요"}
+    try:
+        checked = timestamp(value.get("checked_at")).astimezone(KST).strftime("%Y-%m-%d %H:%M KST")
+    except Exception:
+        checked = "시각 확인 불가"
+    return ["Portal 과거 24시간: " + history.get(value.get("history"), history["unknown"]),
+            "Portal 조회 상태: " + current.get(value.get("current"), current["unknown"]) + " (" + checked + " 기준)",
+            "백업 구간 일치는 관측 설명이며 원시 SLO 판정은 유지합니다."]
 
 
 def layout(day, home=None):
@@ -477,7 +636,9 @@ def message(result):
         row = result["new_record"]
         lines += ["기존 29개 기록: 전체 필드 보존", "보관 만료: " + result["expired_dates"][0] + " 1건",
                   "측정 결과: 공개 health=" + row["public_health"] + ", Portal=" + row["portal_ready"] +
-                  ", Crawler=" + row["crawler_freshness"], "수집 성공은 과거 30일 SLO 통과를 뜻하지 않습니다."]
+                  ", Crawler=" + row["crawler_freshness"],
+                  *portal_context_lines(result.get("portal_context")),
+                  "수집 성공은 과거 30일 SLO 통과를 뜻하지 않습니다."]
     lines += ["임시 예약·파일 정리: " + ("완료" if result["cleanup"] == "passed" else "확인 필요"),
               "결과 증거는 N100에 보존합니다."]
     return "\n".join(lines)
@@ -582,6 +743,13 @@ def resume_task(day, *, paths, home=None, now=None, sleep=clock.sleep, get=kube,
             result.update(verification="failed", reason=str(error))
         except Exception:
             result.update(verification="unconfirmed", reason="verification_unavailable")
+        if result["verification"] == "passed":
+            try:
+                result["portal_context"] = (read_portal_context(result["new_record"])
+                                            if now() < times(day)["deadline"] - timedelta(seconds=45)
+                                            else unknown_portal_context())
+            except Exception:
+                result["portal_context"] = unknown_portal_context()
         result["phase"] = "cleanup"
         atomic_result(paths["result"], result)
     if result["phase"] == "cleanup":
