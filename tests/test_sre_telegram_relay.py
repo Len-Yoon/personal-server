@@ -523,10 +523,31 @@ class RelayServiceTest(unittest.TestCase):
                 self.assertIn("[분기 SRE 점검 완료]", message)
                 self.assertIn(f"SLO 증적: {label}", message)
                 self.assertIn(f"수집 {recorded}/30일, 정상 {ok}일, 관측 불가 {unknown}일", message)
+                self.assertIn("SLO는 과거 관측이며 계획된 백업 정지가 포함될 수 있습니다.", message)
+                self.assertIn("현재 상태 점검과 별도입니다.", message)
+                self.assertNotIn("계획 정지 후 가용 상태 복귀 확인", message)
                 self.assertNotIn(audit_data["run_id"], message)
                 self.assertNotIn(audit_data["completed_at"], message)
                 if result != "passed":
                     self.assertNotIn("추가 조치 없음", message)
+
+    def test_quarterly_current_health_failure_is_not_explained_away_by_historical_slo(self):
+        for slo_result, ok in (("passed", "30"), ("failed", "29")):
+            with self.subTest(slo_result=slo_result):
+                data = {"run_id": "20261021T010203Z-health-failed", "status": "failed",
+                        "completed_at": "2026-10-21T01:02:03Z", "health_audit": "failed",
+                        "backup_check": "passed", "recovery_lab": "passed", "slo_evidence": slo_result,
+                        "slo_days_recorded": "30", "slo_days_ok": ok, "slo_days_unobservable": "0"}
+                report = relay_main._read_quarterly_audit_report(FakeQuarterlyAuditStatusK8s(data))
+                self.assertIsNotNone(report)
+                message = relay_main._format_quarterly_audit_message(report)
+                self.assertIn("[분기 SRE 점검 실패]", message)
+                self.assertIn("상태 점검: 실패", message)
+                self.assertIn("실패 항목이 있으면 운영 문서에 따라 확인 필요", message)
+                self.assertIn(f"정상 {ok}일", message)
+                self.assertIn("계획된 백업 정지가 포함될 수 있습니다.", message)
+                self.assertNotIn("추가 조치 없음", message)
+                self.assertNotIn("계획 정지 후 가용 상태 복귀 확인", message)
 
     def test_quarterly_audit_unknown_counts_explain_failure_and_are_deduplicated(self):
         for reason, explanation in (("read_failed", "증적 읽기 실패"), ("invalid_records", "증적 형식 검증 실패"), ("not_collected", "집계 미실행")):
@@ -807,11 +828,13 @@ class RelayServiceTest(unittest.TestCase):
         self.assertFalse(store.contains("run-0"))
 
     def test_backup_report_delivers_each_allowed_status_once_and_persists_run_id(self):
+        returned = "\nPortal: 백업을 위한 계획 정지 후 가용 상태 복귀 확인\n복귀 확인은 백업 완료 시각 기준입니다."
+        unconfirmed = "\n구분: 계획 정지 정상 종료 확인 전 또는 서비스 상태 별도 확인 필요"
         expected_messages = {
-            "completed": "[백업 완료]\n상태: 암호화 백업과 복원 검증을 완료했습니다.\n대상: Portal 데이터",
-            "unchanged": "[백업 확인] 변경 없음\n상태: 백업 대상에 변경이 없습니다.\n대상: Portal 데이터",
-            "failed": "[백업 실패]\n상태: 백업 실행에 실패했습니다.\n대상: Portal 데이터",
-            "restore_failed": "[복원 검증 실패]\n상태: 복원 검증 또는 Portal 준비 상태 확인에 실패했습니다.\n대상: Portal 데이터",
+            "completed": "[백업 완료]\n상태: 암호화 백업과 복원 검증을 완료했습니다.\n대상: Portal 데이터" + returned,
+            "unchanged": "[백업 확인] 변경 없음\n상태: 백업 대상에 변경이 없습니다.\n대상: Portal 데이터" + returned,
+            "failed": "[백업 실패]\n상태: 백업 실행에 실패했습니다.\n대상: Portal 데이터" + unconfirmed,
+            "restore_failed": "[복원 검증 실패]\n상태: 백업의 복원 검증에 실패했습니다.\n대상: Portal 데이터" + unconfirmed,
         }
         for status, expected_message in expected_messages.items():
             with self.subTest(status=status):
@@ -820,7 +843,7 @@ class RelayServiceTest(unittest.TestCase):
                         "run_id": f"20260905T010203Z-{status}",
                         "status": status,
                         "completed_at": "2026-09-05T01:02:03Z",
-                        "stage": "restore-verify",
+                        "stage": status if status in {"completed", "unchanged"} else "restore-verify",
                     }
                 )
                 telegram = FakePollingTelegram([])
@@ -845,6 +868,41 @@ class RelayServiceTest(unittest.TestCase):
                 run_polling(restarted_relay, telegram, "123", max_cycles=1, sleep_fn=lambda _: None)
 
                 self.assertEqual(telegram.sent_messages, [("123", expected_message)])
+
+    def test_backup_success_stage_contradictions_and_legacy_success_are_not_delivered(self):
+        pairs = [(status, stage) for status in ("completed", "unchanged")
+                 for stage in ("portal-readiness", "portal_readiness", "portal-health", "restore-verify")]
+        pairs.extend((("completed", "unchanged"), ("unchanged", "completed"),
+                      ("failed", "completed"), ("restore_failed", "unchanged")))
+        for status, stage in pairs:
+            with self.subTest(status=status, stage=stage):
+                report = {"run_id": "20261021T010203Z-contradiction", "status": status,
+                          "completed_at": "2026-10-21T01:02:03Z", "stage": stage}
+                k8s = FakeBackupStatusK8s(report)
+                store = ConfigMapBackupDeliveryStore(k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP)
+                relay = RelayService(allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                                     backup_delivery_store=store)
+                messages = []
+                self.assertTrue(relay.deliver_backup_report(lambda chat, message: messages.append(message) or True))
+                self.assertEqual(messages, [])
+                self.assertFalse(store.contains(report["run_id"]))
+
+    def test_backup_failures_distinguish_return_check_from_remote_restore_without_current_outage_claim(self):
+        for stage in ("portal-readiness", "portal-rollout-timeout", "portal-rollout-command", "portal-health",
+                      "remote-restore", "restore-validation", "restore-verify"):
+            with self.subTest(stage=stage):
+                k8s = FakeBackupStatusK8s({"run_id": "20261021T010203Z-failed", "status": "restore_failed",
+                                          "completed_at": "2026-10-21T01:02:03Z", "stage": stage})
+                relay = RelayService(allowed_chat_id="123", k8s_client=k8s, prometheus_client=FakePrometheus(),
+                    backup_delivery_store=ConfigMapBackupDeliveryStore(k8s, namespace=RELAY_NAMESPACE, name=RELAY_STATE_CONFIGMAP))
+                messages = []
+                relay.deliver_backup_report(lambda chat, message: messages.append(message) or True)
+                relay.deliver_backup_report(lambda chat, message: messages.append(message) or True)
+                self.assertEqual(len(messages), 1)
+                self.assertIn("[Portal 복귀 확인 실패]" if stage.startswith("portal-") else "[복원 검증 실패]", messages[0])
+                self.assertIn("서비스 상태 별도 확인 필요", messages[0])
+                self.assertNotIn("계획 정지 후 가용 상태 복귀 확인", messages[0])
+                self.assertNotIn("Portal 접속 불가", messages[0])
 
     def test_sequence_missing_today_alerts_once_at_0300_kst_across_restart(self):
         self.assertTrue(hasattr(RelayService, "deliver_pvc_backup_sequence_alerts"))
@@ -1278,6 +1336,8 @@ class RelayServiceTest(unittest.TestCase):
                 self.assertEqual(len(messages), 1)
                 self.assertIn("[백업 정리 실패]", messages[0])
                 self.assertNotIn("[백업 실패]", messages[0])
+                self.assertIn("새 백업·복원 검증은 성공", messages[0])
+                self.assertNotIn("계획 정지 후 가용 상태 복귀 확인", messages[0])
 
     def test_sequence_reader_rejects_malformed_fixed_state(self):
         self.assertTrue(hasattr(relay_main, "_read_pvc_backup_sequence_state"))
@@ -1941,7 +2001,7 @@ class RelayServiceTest(unittest.TestCase):
                 "run_id": "20260905T010203Z-retry",
                 "status": "completed",
                 "completed_at": "2026-09-05T01:02:03Z",
-                "stage": "restore-verify",
+                "stage": "completed",
             }
         )
         store = FailOnceBackupDeliveryStore()
@@ -2115,6 +2175,7 @@ class RelayServiceTest(unittest.TestCase):
         self.assertIn("상태: 상태를 확인 중입니다.", reply)
         self.assertNotIn("상태: 다음 수집 상태를 확인 중입니다.", reply)
         self.assertNotIn("PortalUnavailable", reply)
+        self.assertNotIn("계획 정지", reply)
 
     def test_portal_http_alerts_use_portal_specific_presentations(self):
         relay = RelayService(

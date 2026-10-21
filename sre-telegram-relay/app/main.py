@@ -89,8 +89,11 @@ BACKUP_STATUS_MESSAGES = {
     "completed": "[백업 완료]\n상태: 암호화 백업과 복원 검증을 완료했습니다.\n대상: Portal 데이터",
     "unchanged": "[백업 확인] 변경 없음\n상태: 백업 대상에 변경이 없습니다.\n대상: Portal 데이터",
     "failed": "[백업 실패]\n상태: 백업 실행에 실패했습니다.\n대상: Portal 데이터",
-    "restore_failed": "[복원 검증 실패]\n상태: 복원 검증 또는 Portal 준비 상태 확인에 실패했습니다.\n대상: Portal 데이터",
+    "restore_failed": "[복원 검증 실패]\n상태: 백업의 복원 검증에 실패했습니다.\n대상: Portal 데이터",
 }
+PORTAL_RETURN_FAILURE_STAGES = frozenset({
+    "portal-readiness", "portal-rollout-timeout", "portal-rollout-command", "portal-health",
+})
 
 
 class _PvcBackupService(NamedTuple):
@@ -686,9 +689,7 @@ class RelayService:
             report = _read_backup_report(self._k8s_client)
             if report is None or self._backup_delivery_store.contains(report["run_id"]):
                 return True
-            message = BACKUP_STATUS_MESSAGES[report["status"]]
-            if report["status"] == "failed" and report["stage"] in {"retention", "retention-cleanup"}:
-                message = "[백업 정리 실패]\n대상: Portal 데이터\n상태: 새 백업·복원 검증은 성공했으나 오래된 백업 정리에 실패했습니다."
+            message = _format_backup_report_message(report)
             if not send_message(self._allowed_chat_id, message):
                 return False
             self._backup_delivery_store.save(report["run_id"])
@@ -1380,7 +1381,25 @@ def _read_backup_report(k8s_client: KubernetesClient) -> dict[str, str] | None:
     if not SAFE_BACKUP_STAGE.fullmatch(stage):
         LOGGER.warning("backup_report_ignored reason=invalid_stage")
         return None
+    if ((status in {"completed", "unchanged"} and stage != status)
+            or (status in {"failed", "restore_failed"} and stage in {"completed", "unchanged"})):
+        LOGGER.warning("backup_report_ignored reason=inconsistent_status_stage")
+        return None
     return {"run_id": run_id, "status": status, "completed_at": completed_at, "stage": stage}
+
+
+def _format_backup_report_message(report: dict[str, str]) -> str:
+    """Describe only the outcome established at the validated backup completion time."""
+    status, stage = report["status"], report["stage"]
+    message = BACKUP_STATUS_MESSAGES[status]
+    if status in {"completed", "unchanged"}:
+        return (message + "\nPortal: 백업을 위한 계획 정지 후 가용 상태 복귀 확인"
+                "\n복귀 확인은 백업 완료 시각 기준입니다.")
+    if status == "failed" and stage in {"retention", "retention-cleanup"}:
+        message = "[백업 정리 실패]\n대상: Portal 데이터\n상태: 새 백업·복원 검증은 성공했으나 오래된 백업 정리에 실패했습니다."
+    elif stage in PORTAL_RETURN_FAILURE_STAGES:
+        message = "[Portal 복귀 확인 실패]\n상태: 백업 후 Portal 가용 상태 복귀 확인에 실패했습니다.\n대상: Portal"
+    return message + "\n구분: 계획 정지 정상 종료 확인 전 또는 서비스 상태 별도 확인 필요"
 
 
 def _read_pvc_backup_sequence_state(k8s_client: KubernetesClient) -> dict[str, Any] | None:
@@ -1784,6 +1803,10 @@ def _format_quarterly_audit_message(report: dict[str, str]) -> str:
         if report.get("slo_criteria") in {"legacy_900", "freshness_1800", "mixed"}:
             criteria_label = {"legacy_900": "신선도 15분", "freshness_1800": "신선도 30분", "mixed": "신선도 15분·30분 혼합, 동일 기준 30일 아님"}[report["slo_criteria"]]
             slo_lines.append(f"판정 기준: {criteria_label}")
+        slo_lines.extend([
+            "SLO는 과거 관측이며 계획된 백업 정지가 포함될 수 있습니다.",
+            "현재 상태 점검과 별도입니다.",
+        ])
         if report["status"] == "passed" and report["slo_evidence"] != "passed":
             action = "조치: SLO 증적의 관측 불가·기준 미충족 원인 확인 필요"
     return "\n".join(
