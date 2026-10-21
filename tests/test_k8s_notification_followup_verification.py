@@ -173,6 +173,22 @@ class NotificationFollowupEvidenceTests(unittest.TestCase):
         with self.assertRaises(M.Pending):
             M.inspect("portal_backup", self.f.plan, read=self.f.read, execute=self.f.execute)
 
+    def test_truncated_log_window_with_one_visible_receipt_never_passes(self):
+        # The first of two accepted sends could have been cut out by Kubernetes.
+        receipt = self.f.logs["portal_backup"]
+        self.f.logs["portal_backup"] = "x" * (M.LOG_LIMIT - len(receipt.encode()) - 1) + "\n" + receipt
+        with self.assertRaisesRegex(M.S.Failed, "receipt_logs_incomplete"):
+            M.inspect("portal_backup", self.f.plan, read=self.f.read, execute=self.f.execute)
+        self.f.logs["portal_backup"] = "가" * M.LOG_LIMIT + "\n" + receipt
+        with self.assertRaisesRegex(M.S.Failed, "receipt_logs_incomplete"):
+            M.inspect("portal_backup", self.f.plan, read=self.f.read, execute=self.f.execute)
+
+    def test_log_command_checks_raw_bytes_before_stripping_whitespace(self):
+        response = subprocess.CompletedProcess([], 0, stdout=" " * (M.LOG_LIMIT + 1), stderr="")
+        with patch.object(M.subprocess, "run", return_value=response):
+            with self.assertRaisesRegex(M.S.Failed, "receipt_logs_incomplete"):
+                M.command([*M.S.KUBE, "logs", "pod", "--limit-bytes=" + str(M.LOG_LIMIT + 1)])
+
     def test_tampered_duplicate_or_late_receipts_are_not_success(self):
         kind = "quarterly_audit"; original = self.f.logs[kind]
         for mutate in [lambda r: r.update(message_sha256="e" * 64), lambda r: r.update(report_sha256="e" * 64),
@@ -306,6 +322,18 @@ class NotificationFollowupLifecycleTests(unittest.TestCase):
             self.assertEqual(first["notifications"]["portal_backup"], "unconfirmed")
             M.run_task(f.plan["task_id"], **kwargs)
             self.assertEqual(len(sends), 1)
+
+    def test_crash_after_send_marker_resumes_as_unconfirmed_without_retry(self):
+        f = Fixture()
+        with tempfile.TemporaryDirectory(dir=Path(tempfile.gettempdir()).resolve()) as home:
+            self.install(home, f)
+            M.run_task(f.plan["task_id"], home=home, clock_now=lambda: f.at, execute=f.execute)
+            paths = M.layout(f.plan["task_id"], home); saved = json.loads(paths["result"].read_text())
+            saved["observations"]["portal_backup"] = f.observation("portal_backup")
+            saved["notifications"]["portal_backup"] = "attempted"; M.S.atomic_result(paths["result"], saved)
+            result = M.run_task(f.plan["task_id"], home=home, clock_now=lambda: f.at,
+                                deliver=lambda *a, **kw: self.fail("must not resend after ambiguous attempt"), execute=f.execute)
+            self.assertEqual(result["notifications"]["portal_backup"], "unconfirmed")
 
     def test_cleanup_drift_preserves_user_file_and_partial_cleanup_can_resume(self):
         f = Fixture()

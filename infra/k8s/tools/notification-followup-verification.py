@@ -29,6 +29,7 @@ CRONS = {"portal_backup": ("personal-server", "portal-pvc-backup"), "quarterly_a
 SEQUENCE = "personal-server-pvc-backup-sequence"
 PREFIX = "notification_delivery_receipt "
 HEX = re.compile(r"[a-f0-9]{64}")
+LOG_LIMIT = 2_000_000
 EXPECTED_CODE = '''import hashlib,json,sys
 from app.main import _read_backup_report,_read_quarterly_audit_report,_format_backup_report_message,_format_quarterly_audit_message
 p=json.load(sys.stdin)
@@ -47,6 +48,15 @@ class Pending(Exception):
 
 
 def command(args, value=None):
+    if args[:len(S.KUBE) + 1] == [*S.KUBE, "logs"]:
+        # Preserve raw whitespace for the byte-limit sentinel; S.command strips it.
+        try:
+            response = subprocess.run(args, input=value, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            raise S.Failed("receipt_logs_unavailable") from None
+        require(response.returncode == 0 and len(response.stdout.encode("utf-8")) < LOG_LIMIT,
+                "receipt_logs_incomplete")
+        return response.stdout
     return S.command(args, value)
 
 
@@ -231,7 +241,9 @@ def inspect(kind, plan, *, read=get, execute=command):
     require(expected["wording"] is True, "new_wording_missing")
     require(expected["status"] in ({"completed", "unchanged"} if kind == "portal_backup" else {"passed", "failed"}), "producer_failed")
     source = natural_job(kind, plan, expected, read=read, execute=execute)
-    logs = execute([*S.KUBE, "logs", pod["metadata"]["name"], "--since-time=" + target.isoformat(), "--limit-bytes=2000000"])
+    logs = execute([*S.KUBE, "logs", pod["metadata"]["name"], "--since-time=" + target.isoformat(),
+                    "--limit-bytes=" + str(LOG_LIMIT + 1)])
+    require(len(logs.encode("utf-8")) < LOG_LIMIT, "receipt_logs_incomplete")
     receipt = matched_receipt(logs, kind, expected, target, deadline)
     ledger = json.loads(read("configmap", "monitoring", "sre-telegram-relay-state")["data"][LEDGERS[kind]])
     require(isinstance(ledger, list) and expected["run_id"] in ledger, "delivery_ledger_missing")
@@ -416,6 +428,11 @@ def run_task(task_id, *, home=None, clock_now=now, sleep=time.sleep, observe=ins
             result = {"schema_version": 1, "task_id": task_id, "plan": plan, "observations": {}, "notifications": {}, "cleanup": "pending"}
             S.atomic_result(paths["result"], result)
         validate_result(result, task_id, paths)
+        # A crash after the marker leaves acceptance unknown, never permission to resend.
+        for kind, state in result["notifications"].items():
+            if state == "attempted":
+                result["notifications"][kind] = "unconfirmed"
+                S.atomic_result(paths["result"], result)
         plan = result["plan"]
         for kind in KINDS:
             target = stamp(plan["targets"][kind]); deadline = target + timedelta(hours=1)
