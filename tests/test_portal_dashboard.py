@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import importlib.util
+import io
 import json
 import os
 import socket
@@ -198,6 +199,114 @@ class PortalDashboardTests(unittest.TestCase):
             {"name": "뉴스 허브", "status": "unavailable", "url": "http://crawler-worker:8001/health"},
             services,
         )
+
+    def test_service_health_malformed_response_does_not_hide_other_services(self):
+        system_status = self.reload_system_status("")
+        invalid_bodies = (
+            b"[]", b"null", b"1", b"true", b'"ok"', b"\xff",
+            b'{"status":true}', b'{"status":[]}', b'{"status":{}}',
+            b'{"status":null}', b'{"status":""}',
+            b'{"status":"' + b'x' * 65 + b'"}',
+            b'[' * 1500 + b'0' + b']' * 1500,
+            b'{"unused":' + b'1' * 5000 + b'}',
+        )
+        for body in invalid_bodies:
+            with self.subTest(body=body[:40]):
+                responses = [io.BytesIO(body), io.BytesIO(b'{"status":"ok"}'),
+                             io.BytesIO(b'{}'), io.BytesIO(b'{"status":"degraded"}')]
+                with patch.object(system_status, "urlopen", side_effect=responses):
+                    services = system_status.get_service_health()
+                self.assertEqual([item["status"] for item in services],
+                                 ["unavailable", "ok", "unknown", "degraded"])
+
+    def test_service_health_partial_http_body_is_unavailable(self):
+        from http.client import IncompleteRead
+
+        system_status = self.reload_system_status("")
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.side_effect = IncompleteRead(b"partial", 20)
+        with patch.object(system_status, "urlopen", return_value=response):
+            services = system_status.get_service_health()
+        self.assertEqual([item["status"] for item in services], ["unavailable"] * 4)
+
+    def test_service_health_rejects_incomplete_http_framing_with_real_parser(self):
+        from http.client import HTTPResponse
+
+        system_status = self.reload_system_status("")
+        body = b'{"status":"ok"}'
+        chunk = format(len(body), "x").encode() + b"\r\n" + body + b"\r\n"
+
+        class MemorySocket:
+            def __init__(self, raw):
+                self.raw = raw
+
+            def makefile(self, *args):
+                return io.BytesIO(self.raw)
+
+        cases = [
+            (b"Content-Length: " + str(len(body)).encode() + b"\r\n", body, "ok"),
+            (b"Content-Length: 100\r\n", body, "unavailable"),
+            (b"Transfer-Encoding: chunked\r\n", chunk + b"0\r\n\r\n", "ok"),
+            (b"Transfer-Encoding: chunked\r\n", chunk, "unavailable"),
+        ]
+        for headers, payload, expected in cases:
+            with self.subTest(headers=headers, payload=payload):
+                response = HTTPResponse(MemorySocket(b"HTTP/1.1 200 OK\r\n" + headers + b"\r\n" + payload))
+                response.begin()
+                with patch.object(system_status, "urlopen", return_value=response):
+                    result = system_status._check_service({"name": "sample", "url": "http://health.test"}, 1)
+                self.assertEqual(result["status"], expected)
+
+    def test_service_health_body_read_is_bounded_and_overflow_rejected(self):
+        system_status = self.reload_system_status("")
+        limit = 16 * 1024
+
+        class TrackingResponse(io.BytesIO):
+            def read(self, size=-1):
+                self.requested_size = size
+                return super().read(size)
+
+        for size, expected in [(limit, "ok"), (limit + 1, "unavailable")]:
+            with self.subTest(size=size):
+                body = b'{"status":"ok"}'
+                response = TrackingResponse(body + b" " * (size - len(body)))
+                with patch.object(system_status, "urlopen", return_value=response):
+                    result = system_status._check_service({"name": "sample", "url": "http://health.test"}, 1)
+                self.assertEqual(result["status"], expected)
+                self.assertEqual(response.requested_size, limit + 1)
+
+    def test_admin_health_results_remain_visible_after_one_malformed_service(self):
+        system_status = self.reload_system_status("")
+        responses = [io.BytesIO(b"[]"), io.BytesIO(b'{"status":"ok"}'),
+                     io.BytesIO(b'{}'), io.BytesIO(b'{"status":"raw-status-must-not-appear"}')]
+        with patch.object(system_status, "urlopen", side_effect=responses):
+            services = system_status.get_service_health()
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+            "ADMIN_STATUS_PASSWORD": "test-health-password", "DEMO_MODE": "true",
+            "AUTH_RATE_LIMIT_STATE_PATH": str(Path(directory) / "auth.json"),
+            "SECURITY_LOG_PATH": str(Path(directory) / "security.log"),
+        }):
+            app = self.load_app()
+            from app.routers import admin
+
+            with patch.object(admin, "get_service_health", return_value=services), \
+                 patch.object(admin, "get_dashboard_status", return_value=system_status._demo_status()), \
+                 patch.object(admin, "get_service_backups", return_value={}), \
+                 patch.object(admin, "get_recovery_events", return_value=[]), \
+                 patch.object(admin, "get_homeops_service") as homeops:
+                homeops.return_value.latest_summary.return_value = {}
+                homeops.return_value.operation_history.return_value = []
+                with TestClient(app) as client:
+                    response = client.post("/admin/status", data={"password": "test-health-password"},
+                                           headers={"Origin": "http://testserver"})
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("뉴스 허브 · 연결·응답 확인 필요", response.text)
+            self.assertIn("유튜브 메모 · 정상", response.text)
+            self.assertIn("책 메모 · 상태 확인 필요", response.text)
+            self.assertIn("시스템 상태 · 상태 확인 필요", response.text)
+            self.assertNotIn("raw-status-must-not-appear", response.text)
+            self.assertNotIn("http://crawler-worker:8001/health", response.text)
 
     def test_recovery_events_incomplete_bridge_body_returns_empty_list(self):
         """Fails if a partial system-agent response breaks the administrator status page."""

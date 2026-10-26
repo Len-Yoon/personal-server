@@ -9,6 +9,7 @@ import json
 DEFAULT_AGENT_URL = "http://system-agent:8010"
 RECOVERY_EVENT_FIELDS = ("timestamp", "component", "event", "status", "action")
 RECOVERY_EVENT_LIMIT = 10
+HEALTH_RESPONSE_MAX_BYTES = 16 * 1024
 
 
 def _service_health_targets() -> list[dict[str, str]]:
@@ -107,8 +108,20 @@ def get_recovery_events(agent_url: str | None = None, timeout: float = 1.0) -> l
 def _check_service(target: dict[str, str], timeout: float) -> dict[str, Any]:
     try:
         with urlopen(target["url"], timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (OSError, URLError, json.JSONDecodeError):
+            raw = response.read(HEALTH_RESPONSE_MAX_BYTES + 1)
+            remaining = getattr(response, "length", None)
+        # Bounded HTTPResponse.read() does not raise for a short Content-Length body.
+        if isinstance(remaining, int) and remaining > 0:
+            raise ValueError("incomplete health response")
+        if len(raw) > HEALTH_RESPONSE_MAX_BYTES:
+            raise ValueError("health response exceeds limit")
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("health response must be an object")
+        status = payload.get("status", "unknown")
+        if not isinstance(status, str) or not status.strip() or len(status) > 64:
+            raise ValueError("invalid health status")
+    except (OSError, URLError, UnicodeError, HTTPException, ValueError, RecursionError):
         return {
             "name": target["name"],
             "status": "unavailable",
@@ -116,7 +129,7 @@ def _check_service(target: dict[str, str], timeout: float) -> dict[str, Any]:
         }
     return {
         "name": target["name"],
-        "status": payload.get("status", "unknown"),
+        "status": status,
         "url": target["url"],
     }
 
