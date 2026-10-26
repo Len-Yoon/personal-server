@@ -122,6 +122,199 @@ class FileStoreFullPathsTests(unittest.TestCase):
                     function()
         self.assertEqual(sentinel.read_bytes(), b'preserved')
 
+    def test_upload_read_failure_preserves_replacement_entries(self):
+        for kind in ('file', 'directory', 'symlink'):
+            with self.subTest(kind=kind):
+                name = f'{kind}.txt'
+                target = self.root / name
+                moved = self.root / f'moved-{name}'
+                sentinel = self.file(f'sentinel-{name}', b'valuable')
+                stream = io.BytesIO(b'partial upload')
+
+                def read(size):
+                    chunk = stream.read(size)
+                    if chunk:
+                        return chunk
+                    target.rename(moved)
+                    if kind == 'file':
+                        target.write_bytes(b'replacement')
+                    elif kind == 'directory':
+                        target.mkdir()
+                        (target / 'keep.txt').write_bytes(b'replacement')
+                    else:
+                        target.symlink_to(sentinel)
+                    raise OSError('stream failed')
+
+                upload = self.upload(name)
+                upload.file = SimpleNamespace(read=read)
+                with self.assertRaisesRegex(OSError, 'stream failed'):
+                    self.store.save_upload('', upload)
+                self.assertEqual(moved.read_bytes(), b'partial upload')
+                self.assertEqual(sentinel.read_bytes(), b'valuable')
+                if kind == 'directory':
+                    self.assertEqual((target / 'keep.txt').read_bytes(), b'replacement')
+                else:
+                    self.assertEqual(target.read_bytes(), b'valuable' if kind == 'symlink' else b'replacement')
+
+    def test_upload_audit_failure_preserves_replacement_file(self):
+        target = self.root / 'upload.txt'
+        moved = self.root / 'moved.txt'
+
+        def fail_audit(*args, **kwargs):
+            target.rename(moved)
+            target.write_bytes(b'replacement')
+            raise OSError('audit failed')
+
+        self.audit.side_effect = fail_audit
+        with self.assertRaisesRegex(OSError, 'audit failed'):
+            self.store.save_upload('', self.upload())
+        self.assertEqual(target.read_bytes(), b'replacement')
+        self.assertEqual(moved.read_bytes(), b'payload')
+
+    def test_bulk_failure_preserves_prior_upload_replacement(self):
+        for when in ('audit', 'next_read'):
+            with self.subTest(when=when):
+                first_name = f'{when}.txt'
+                target = self.root / first_name
+                moved = self.root / f'moved-{first_name}'
+
+                def replace():
+                    target.rename(moved)
+                    target.write_bytes(b'valuable replacement')
+
+                def audit(*args, **kwargs):
+                    if when == 'audit':
+                        replace()
+
+                def fail_read(size):
+                    if when == 'next_read':
+                        replace()
+                    raise OSError('second stream failed')
+
+                self.audit.side_effect = audit
+                second = self.upload(f'second-{when}.txt')
+                second.file = SimpleNamespace(read=fail_read)
+                with self.assertRaisesRegex(OSError, 'second stream failed'):
+                    self.store.save_uploads('', [self.upload(first_name), second])
+                self.assertEqual(target.read_bytes(), b'valuable replacement')
+                self.assertEqual(moved.read_bytes(), b'payload')
+                self.assertFalse((self.root / second.filename).exists())
+
+    def test_upload_failure_uses_original_parent_directory(self):
+        parent = self.root / 'folder'
+        parent.mkdir()
+        moved = self.root / 'moved-folder'
+
+        def fail_read(size):
+            parent.rename(moved)
+            parent.mkdir()
+            (parent / 'upload.txt').write_bytes(b'valuable replacement')
+            raise OSError('stream failed')
+
+        upload = self.upload()
+        upload.file = SimpleNamespace(read=fail_read)
+        with self.assertRaisesRegex(OSError, 'stream failed'):
+            self.store.save_upload('folder', upload)
+        self.assertEqual((parent / 'upload.txt').read_bytes(), b'valuable replacement')
+        self.assertFalse((moved / 'upload.txt').exists())
+
+    def test_upload_descriptors_close_after_success_and_failure(self):
+        original_open = os.open
+        descriptors = []
+
+        def track_open(path, flags, *args, **kwargs):
+            descriptor = original_open(path, flags, *args, **kwargs)
+            if flags & os.O_CREAT:
+                descriptors.append(descriptor)
+            return descriptor
+
+        with patch.object(self.store.os, 'open', side_effect=track_open):
+            self.store.save_upload('', self.upload('one.txt'))
+            self.store.save_uploads('', [self.upload('two.txt'), self.upload('three.txt')])
+            with patch.object(self.store, 'MAX_UPLOAD_TOTAL_BYTES', 1):
+                with self.assertRaises(ValueError):
+                    self.store.save_uploads('', [self.upload('failed.txt')])
+        self.assertEqual(len(descriptors), 4)
+        for descriptor in set(descriptors):
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+        self.assertFalse((self.root / 'failed.txt').exists())
+
+    def test_bulk_keeps_unlinked_upload_inode_open_until_rollback(self):
+        original_open = os.open
+        descriptors = []
+        created = []
+
+        def track_open(path, flags, *args, **kwargs):
+            descriptor = original_open(path, flags, *args, **kwargs)
+            if flags & os.O_CREAT:
+                descriptors.append(descriptor)
+            return descriptor
+
+        def audit(*args, **kwargs):
+            created.append(os.fstat(descriptors[0]))
+            (self.root / 'first.txt').unlink()
+            (self.root / 'first.txt').write_bytes(b'replacement')
+
+        def fail_read(size):
+            current = os.fstat(descriptors[0])
+            self.assertEqual((current.st_dev, current.st_ino), (created[0].st_dev, created[0].st_ino))
+            self.assertEqual(current.st_nlink, 0)
+            self.assertNotEqual(descriptors[0], descriptors[1])
+            raise OSError('second stream failed')
+
+        self.audit.side_effect = audit
+        second = self.upload('second.txt')
+        second.file = SimpleNamespace(read=fail_read)
+        with patch.object(self.store.os, 'open', side_effect=track_open):
+            with self.assertRaisesRegex(OSError, 'second stream failed'):
+                self.store.save_uploads('', [self.upload('first.txt'), second])
+        self.assertEqual((self.root / 'first.txt').read_bytes(), b'replacement')
+        self.assertFalse((self.root / 'second.txt').exists())
+        for descriptor in descriptors:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+
+    def test_upload_wrapper_failures_cleanup_owned_file_and_close_descriptor(self):
+        original_open = os.open
+        original_fdopen = os.fdopen
+        sentinel = self.file()
+        for failure in ('construction', 'close'):
+            with self.subTest(failure=failure):
+                descriptors = []
+
+                def track_open(path, flags, *args, **kwargs):
+                    descriptor = original_open(path, flags, *args, **kwargs)
+                    if flags & os.O_CREAT:
+                        descriptors.append(descriptor)
+                    return descriptor
+
+                class CloseFailure:
+                    def __init__(self, output):
+                        self.output = output
+
+                    def __enter__(self):
+                        return self.output.__enter__()
+
+                    def __exit__(self, *args):
+                        self.output.__exit__(*args)
+                        raise OSError('buffer close failed')
+
+                def fdopen(*args, **kwargs):
+                    if failure == 'construction':
+                        raise OSError('buffer construction failed')
+                    return CloseFailure(original_fdopen(*args, **kwargs))
+
+                with patch.object(self.store.os, 'open', side_effect=track_open), patch.object(self.store.os, 'fdopen', side_effect=fdopen):
+                    with self.assertRaisesRegex(OSError, f'buffer {failure} failed'):
+                        self.store.save_upload('', self.upload())
+                self.assertFalse((self.root / 'upload.txt').exists())
+                self.assertEqual(sentinel.read_bytes(), b'preserved')
+                self.audit.assert_not_called()
+                self.assertEqual(len(descriptors), 1)
+                with self.assertRaises(OSError):
+                    os.fstat(descriptors[0])
+
     def test_storage_budget_counts_hidden_nested_files_and_rejects_unsafe_entries(self):
         self.file('.trash/nested.txt', b'abc')
         with self.store._upload_budget() as budget:

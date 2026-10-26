@@ -249,13 +249,13 @@ class PortalSecurityTests(unittest.TestCase):
             conflicts = []
             worker_errors = []
             open_calls = []
-            original_open = file_store.Path.open
+            original_open = file_store.os.open
 
-            def synchronized_open(path, mode="r", *args, **kwargs):
-                if path.resolve() == destination.resolve() and mode in {"wb", "xb"}:
-                    open_calls.append(mode)
+            def synchronized_open(path, flags, *args, **kwargs):
+                if path == "memo.txt" and flags & os.O_CREAT:
+                    open_calls.append((flags, os.fstat(kwargs["dir_fd"]).st_ino))
                     # Upload budget serializes the complete write operation.
-                return original_open(path, mode, *args, **kwargs)
+                return original_open(path, flags, *args, **kwargs)
 
             def upload_worker(payload):
                 upload = SimpleNamespace(
@@ -273,7 +273,7 @@ class PortalSecurityTests(unittest.TestCase):
                     worker_errors.append(error)
 
             with patch.object(file_store, "append_security_event"):
-                with patch.object(file_store.Path, "open", synchronized_open):
+                with patch.object(file_store.os, "open", synchronized_open):
                     workers = [threading.Thread(target=upload_worker, args=(payload,)) for payload in payloads]
                     for worker in workers:
                         worker.start()
@@ -282,6 +282,8 @@ class PortalSecurityTests(unittest.TestCase):
 
             self.assertFalse(worker_errors)
             self.assertEqual(len(open_calls), 2, open_calls)
+            self.assertTrue(all(flags & os.O_EXCL and flags & os.O_NOFOLLOW for flags, _ in open_calls))
+            self.assertTrue(all(inode == destination.parent.stat().st_ino for _, inode in open_calls))
             self.assertTrue(all(not worker.is_alive() for worker in workers))
             self.assertEqual(len(successes), 1)
             self.assertEqual(len(conflicts), 1)
