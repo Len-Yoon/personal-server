@@ -6,7 +6,7 @@ import os
 import stat
 import time
 import zipfile
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from functools import wraps
 from pathlib import Path
 from typing import Any, Iterator
@@ -154,10 +154,23 @@ def get_directory(relative_path: str = "") -> dict[str, Any]:
 def save_upload(relative_path: str, upload: Any) -> int:
     ensure_storage()
     with _upload_budget() as budget:
-        return _save_upload(relative_path, upload, budget)
+        with _save_upload(relative_path, upload, budget) as size:
+            return size
 
 
-def _save_upload(relative_path: str, upload: Any, budget: list[int]) -> int:
+def _remove_owned_upload(parent_fd: int, filename: str, created: os.stat_result) -> None:
+    # The open file keeps this inode alive until rollback (including bulk uploads).
+    # App namespace mutations share storage_mutation_lock; outside writers do not.
+    try:
+        current = os.stat(filename, dir_fd=parent_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
+            os.unlink(filename, dir_fd=parent_fd)
+    except FileNotFoundError:
+        pass
+
+
+@contextmanager
+def _save_upload(relative_path: str, upload: Any, budget: list[int]) -> Iterator[int]:
     ensure_storage()
     directory = _safe_path(relative_path)
     if not directory.is_dir():
@@ -168,40 +181,43 @@ def _save_upload(relative_path: str, upload: Any, budget: list[int]) -> int:
         raise ValueError("파일 이름이 비어 있습니다.")
     _validate_upload_name(filename)
 
-    destination = _safe_path(str(Path(relative_path) / filename))
-    size = 0
-    try:
-        output = destination.open("xb")
-    except FileExistsError:
-        raise FileExistsError("이미 같은 이름의 파일이 있습니다.") from None
-
-    try:
-        with output:
-            while True:
-                chunk = upload.file.read(CHUNK_SIZE)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > MAX_UPLOAD_BYTES:
-                    raise ValueError(f"파일은 {MAX_UPLOAD_BYTES // CHUNK_SIZE}MB 이하만 업로드할 수 있습니다.")
-                _reserve_upload_bytes(budget, len(chunk))
-                output.write(chunk)
-    except Exception:
-        if destination.exists():
-            destination.unlink()
-        raise
-
-    try:
-        append_security_event(
-            "file_uploaded",
-            path=str(Path(relative_path) / filename),
-            size=size,
-            content_type=getattr(upload, "content_type", ""),
-        )
-    except Exception:
-        destination.unlink(missing_ok=True)
-        raise
-    return size
+    _safe_path(str(Path(relative_path) / filename))
+    with _open_storage_item(relative_path) as parent_fd:
+        try:
+            descriptor = os.open(
+                filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o666, dir_fd=parent_fd,
+            )
+        except FileExistsError:
+            raise FileExistsError("이미 같은 이름의 파일이 있습니다.") from None
+        try:
+            created = os.fstat(descriptor)
+            size = 0
+            try:
+                # Keep the original FD pinned through buffered close, audit and
+                # bulk rollback; each owner closes only its own resource once.
+                with os.fdopen(descriptor, "wb", closefd=False) as output:
+                    while True:
+                        chunk = upload.file.read(CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > MAX_UPLOAD_BYTES:
+                            raise ValueError(f"파일은 {MAX_UPLOAD_BYTES // CHUNK_SIZE}MB 이하만 업로드할 수 있습니다.")
+                        _reserve_upload_bytes(budget, len(chunk))
+                        output.write(chunk)
+                append_security_event(
+                    "file_uploaded",
+                    path=str(Path(relative_path) / filename),
+                    size=size,
+                    content_type=getattr(upload, "content_type", ""),
+                )
+                yield size
+            except Exception:
+                _remove_owned_upload(parent_fd, filename, created)
+                raise
+        finally:
+            os.close(descriptor)
 
 
 def save_uploads(relative_path: str, uploads: list[Any]) -> int:
@@ -218,21 +234,15 @@ def _save_uploads(relative_path: str, uploads: list[Any], budget: list[int]) -> 
 
     saved_count = 0
     total_size = 0
-    saved_paths: list[Path] = []
-    try:
+    with ExitStack() as pending_uploads:
         for upload in uploads:
-            size = _save_upload(relative_path, upload, budget)
+            size = pending_uploads.enter_context(_save_upload(relative_path, upload, budget))
             saved_count += 1
             total_size += size
-            saved_paths.append(_safe_path(str(Path(relative_path) / _safe_name(upload.filename or ""))))
             if total_size > MAX_UPLOAD_TOTAL_BYTES:
                 raise ValueError(
                     f"일괄 업로드 파일의 합계는 {MAX_UPLOAD_TOTAL_BYTES // CHUNK_SIZE}MB 이하만 허용됩니다."
                 )
-    except Exception:
-        for saved_path in saved_paths:
-            saved_path.unlink(missing_ok=True)
-        raise
     return saved_count
 
 

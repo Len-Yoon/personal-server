@@ -4,7 +4,7 @@
   "timeout_seconds": 120,
   "baseline": {
     "commit": "2aa95d2d9f006eb3cb5caa0efc7b4ca19ea662bd",
-    "note": "All measured statements/branches in the three fixed targets are exercised except one structurally unreachable format_size fallback. Missing lines/arcs remain in the denominator and must match exactly; source SHA256 pins the proof. No exclusion pragmas. Defensive decoder/type and OS-error seams use explicit test injection; line/arc coverage does not mean all condition combinations or production integration.",
+    "note": "All measured statements/branches in the three fixed targets are exercised except one structurally unreachable format_size fallback. Missing lines/arcs remain in the denominator and must match exactly; source SHA256 pins the proof. No exclusion pragmas. Defensive decoder/type and OS-error seams use explicit test injection; line/arc coverage does not mean all condition combinations or production integration. Upload ownership revision adds retained file/directory descriptor rollback tests. File-store branches reduce from 158 to 156; floor 99.35 is the rounded-down measured 155/156, with the same sole unreachable fallback and exact missing arc/source/denominator checks. Upload write/cleanup/bulk critical functions each require 100 percent.",
     "environment": "CPython3.11;coverage7.16.2;isolated code-only fixture;no operational resources."
   },
   "targets": {
@@ -34,37 +34,57 @@
     },
     "portal-web/app/services/file_store.py": {
       "statement_min": 99.74,
-      "branch_min": 99.36,
+      "branch_min": 99.35,
       "baseline_counts": {
-        "covered_lines": 387,
-        "num_statements": 388,
-        "covered_branches": 157,
-        "num_branches": 158
+        "covered_lines": 389,
+        "num_statements": 390,
+        "covered_branches": 155,
+        "num_branches": 156
       },
       "functions": {
         "_save_upload": {
           "statement_min": 100,
           "branch_min": 100,
           "baseline_counts": {
-            "covered_lines": 35,
-            "num_statements": 35,
-            "covered_branches": 10,
-            "num_branches": 10
+            "covered_lines": 34,
+            "num_statements": 34,
+            "covered_branches": 8,
+            "num_branches": 8
+          }
+        },
+        "_remove_owned_upload": {
+          "statement_min": 100,
+          "branch_min": 100,
+          "baseline_counts": {
+            "covered_lines": 6,
+            "num_statements": 6,
+            "covered_branches": 2,
+            "num_branches": 2
+          }
+        },
+        "_save_uploads": {
+          "statement_min": 100,
+          "branch_min": 100,
+          "baseline_counts": {
+            "covered_lines": 12,
+            "num_statements": 12,
+            "covered_branches": 6,
+            "num_branches": 6
           }
         }
       },
       "expected_missing_lines": [
-        471
+        481
       ],
       "expected_missing_branches": [
         [
-          465,
-          471
+          475,
+          481
         ]
       ],
       "unreachable_proof": {
-        "source_sha256": "54838b8e3c09d11b3fec25408c624df500aad5137cc5c3d2fbdf10b91160d8de",
-        "reason": "format_size iterates the nonempty fixed units list through TB. Every earlier unit either returns or advances; TB always returns because unit == units[-1], so loop exhaustion and fallback line471 are unreachable for normal numeric inputs. No source rewrite, fake float/units, coverage exclusion or denominator adjustment."
+        "source_sha256": "89faa9c84e0894704c7956fa2e371a4f66551bc8514960f287946c7387ad9c5c",
+        "reason": "format_size iterates the nonempty fixed units list through TB. Every earlier unit either returns or advances; TB always returns because unit == units[-1], so loop exhaustion and fallback line481 are unreachable for normal numeric inputs. No source rewrite, fake float/units, coverage exclusion or denominator adjustment."
       }
     },
     "infra/k8s/tools/validate-backup-evidence.py": {
@@ -156,7 +176,14 @@
     "tests.test_security_full_paths.SecurityFullPathsTests.test_session_expiry_boundary_is_inclusive",
     "tests.test_security_full_paths.SecurityFullPathsTests.test_sessions_retry_collision_check_scope_expiry_and_evict_oldest",
     "tests.test_security_full_paths.SecurityFullPathsTests.test_state_reader_rejects_corrupt_and_malformed_entries",
-    "tests.test_security_full_paths.SecurityFullPathsTests.test_user_events_clean_details_filter_fields_and_preserve_append_history"
+    "tests.test_security_full_paths.SecurityFullPathsTests.test_user_events_clean_details_filter_fields_and_preserve_append_history",
+    "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_upload_read_failure_preserves_replacement_entries",
+    "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_upload_audit_failure_preserves_replacement_file",
+    "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_bulk_failure_preserves_prior_upload_replacement",
+    "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_upload_failure_uses_original_parent_directory",
+    "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_upload_descriptors_close_after_success_and_failure",
+    "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_bulk_keeps_unlinked_upload_inode_open_until_rollback",
+    "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_upload_wrapper_failures_cleanup_owned_file_and_close_descriptor"
   ],
   "mutants": [
     {
