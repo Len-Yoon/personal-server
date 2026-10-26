@@ -230,6 +230,34 @@ class PortalDashboardTests(unittest.TestCase):
             services = system_status.get_service_health()
         self.assertEqual([item["status"] for item in services], ["unavailable"] * 4)
 
+    def test_service_health_rejects_incomplete_http_framing_with_real_parser(self):
+        from http.client import HTTPResponse
+
+        system_status = self.reload_system_status("")
+        body = b'{"status":"ok"}'
+        chunk = format(len(body), "x").encode() + b"\r\n" + body + b"\r\n"
+
+        class MemorySocket:
+            def __init__(self, raw):
+                self.raw = raw
+
+            def makefile(self, *args):
+                return io.BytesIO(self.raw)
+
+        cases = [
+            (b"Content-Length: " + str(len(body)).encode() + b"\r\n", body, "ok"),
+            (b"Content-Length: 100\r\n", body, "unavailable"),
+            (b"Transfer-Encoding: chunked\r\n", chunk + b"0\r\n\r\n", "ok"),
+            (b"Transfer-Encoding: chunked\r\n", chunk, "unavailable"),
+        ]
+        for headers, payload, expected in cases:
+            with self.subTest(headers=headers, payload=payload):
+                response = HTTPResponse(MemorySocket(b"HTTP/1.1 200 OK\r\n" + headers + b"\r\n" + payload))
+                response.begin()
+                with patch.object(system_status, "urlopen", return_value=response):
+                    result = system_status._check_service({"name": "sample", "url": "http://health.test"}, 1)
+                self.assertEqual(result["status"], expected)
+
     def test_service_health_body_read_is_bounded_and_overflow_rejected(self):
         system_status = self.reload_system_status("")
         limit = 16 * 1024

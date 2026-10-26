@@ -109,6 +109,10 @@ def _check_service(target: dict[str, str], timeout: float) -> dict[str, Any]:
     try:
         with urlopen(target["url"], timeout=timeout) as response:
             raw = response.read(HEALTH_RESPONSE_MAX_BYTES + 1)
+            remaining = getattr(response, "length", None)
+        # Bounded HTTPResponse.read() does not raise for a short Content-Length body.
+        if isinstance(remaining, int) and remaining > 0:
+            raise ValueError("incomplete health response")
         if len(raw) > HEALTH_RESPONSE_MAX_BYTES:
             raise ValueError("health response exceeds limit")
         payload = json.loads(raw.decode("utf-8"))
