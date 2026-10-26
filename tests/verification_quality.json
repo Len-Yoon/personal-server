@@ -5,7 +5,7 @@
   "baseline": {
     "commit": "2aa95d2d9f006eb3cb5caa0efc7b4ca19ea662bd",
     "note": "All measured statements/branches in the three fixed targets are exercised except one structurally unreachable format_size fallback. Missing lines/arcs remain in the denominator and must match exactly; source SHA256 pins the proof. No exclusion pragmas. Defensive decoder/type and OS-error seams use explicit test injection; line/arc coverage does not mean all condition combinations or production integration. Upload ownership revision adds retained file/directory descriptor rollback tests. File-store branches reduce from 158 to 156; floor 99.35 is the rounded-down measured 155/156, with the same sole unreachable fallback and exact missing arc/source/denominator checks. Upload write/cleanup/bulk critical functions each require 100 percent.",
-    "environment": "CPython3.11;coverage7.16.2;isolated code-only fixture;no operational resources."
+    "environment": "CPython3.11;coverage7.16.2;isolated code-only fixture;no operational resources. Current upload ownership baseline:71 tests, source SHA256 pinned below; commit retains original baseline provenance."
   },
   "targets": {
     "portal-web/app/services/security.py": {
