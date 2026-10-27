@@ -684,5 +684,253 @@ class SloObservationArchiveTests(unittest.TestCase):
                 self.assertNotIn(str(folder), error.getvalue())
 
 
+class SloObservationHealthTests(unittest.TestCase):
+    def module(self):
+        path = ROOT / 'infra/k8s/tools/slo-observation-health.py'
+        spec = importlib.util.spec_from_file_location('observation_health', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def prepared(self, root):
+        module = self.module()
+        folder = Path(root) / 'archive'
+        module.ARCHIVE.initialize(folder)
+        module.ARCHIVE.archive(SloObservationArchiveTests().payload(), folder, today=date(2026, 10, 28))
+        return module, folder
+
+    def test_verified_capsule_does_not_imply_search_or_replica_coverage(self):
+        with tempfile.TemporaryDirectory() as root:
+            module, folder = self.prepared(root)
+            before = {p.name: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in folder.iterdir()}
+            out = module.snapshot(folder, required_from=date(2026, 10, 26), today=date(2026, 10, 28))
+            self.assertEqual(out['present_days'], 1)
+            self.assertEqual(out['partial_replica_days'], 1)
+            self.assertEqual(out['search_series_unobserved_days'], 1)
+            self.assertEqual(out['latest_preserved_day_timestamp_seconds'], 1792972800)
+            self.assertGreater(out['stored_bytes'], 0)
+            self.assertGreater(out['filesystem_available_bytes'], 0)
+            after = {p.name: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes()) for p in folder.iterdir()}
+            self.assertEqual(before, after)
+
+    def test_readonly_monitor_never_creates_missing_lock_or_archive(self):
+        with tempfile.TemporaryDirectory() as root:
+            module = self.module()
+            folder = Path(root) / 'archive'
+            with self.assertRaises(FileNotFoundError):
+                module.snapshot(folder, required_from=date(2026, 10, 26))
+            self.assertFalse(folder.exists())
+            module.ARCHIVE.initialize(folder)
+            with self.assertRaises(FileNotFoundError):
+                module.snapshot(folder, required_from=date(2026, 10, 26))
+            self.assertEqual([p.name for p in folder.iterdir()], ['.owner'])
+
+    def test_reader_never_takes_a_lock_or_blocks_existing_exclusive_writer(self):
+        import os
+        with tempfile.TemporaryDirectory() as root:
+            module, folder = self.prepared(root)
+            directory, lock = module.ARCHIVE.open_archive(folder)
+            try:
+                self.assertEqual(module.snapshot(folder, required_from=date(2026, 10, 26))['present_days'], 1)
+                self.assertEqual(module.worker(folder, date(2026, 10, 26))[0], 'verified')
+            finally:
+                os.close(lock); os.close(directory)
+            directory, lock = module.open_readonly(folder)
+            try:
+                self.assertEqual(module.snapshot(folder, required_from=date(2026, 10, 26))['present_days'], 1)
+                writer_directory, writer_lock = module.ARCHIVE.open_archive(folder)
+                os.close(writer_lock); os.close(writer_directory)
+            finally:
+                os.close(lock); os.close(directory)
+
+    def test_overlapping_real_writer_succeeds_and_reader_reports_retry(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as root:
+            module, folder = self.prepared(root)
+            original = module.ARCHIVE.entries
+            written = []
+            def entries(*args, **kwargs):
+                if not written:
+                    written.append(True)
+                    module.ARCHIVE.archive(SloObservationArchiveTests().payload('2026-10-27'), folder,
+                                          today=date(2026, 10, 28))
+                return original(*args, **kwargs)
+            with patch.object(module.ARCHIVE, 'entries', side_effect=entries):
+                with self.assertRaises(module.ConcurrentChange):
+                    module.snapshot(folder, required_from=date(2026, 10, 26), today=date(2026, 10, 28))
+            self.assertTrue((folder / '2026-10-27.json.gz').is_file())
+            self.assertEqual(module.snapshot(folder, required_from=date(2026, 10, 26), today=date(2026, 10, 28))['present_days'], 2)
+
+    def test_recent_pending_is_retry_but_stale_pending_unknown_files_and_corruption_fail(self):
+        import os
+        with tempfile.TemporaryDirectory() as root:
+            module, folder = self.prepared(root)
+            pending = folder / ('.pending-' + 'a' * 32)
+            pending.write_bytes(b'pending'); pending.chmod(0o600)
+            with self.assertRaises(module.ConcurrentChange):
+                module.snapshot(folder, required_from=date(2026, 10, 26))
+            self.assertEqual(module.worker(folder, date(2026, 10, 26)), ('busy', None))
+            os.utime(pending, (1, 1))
+            self.assertEqual(module.worker(folder, date(2026, 10, 26)), ('invalid', None))
+            pending.unlink()
+            (folder / 'unknown').write_bytes(b'unknown')
+            self.assertEqual(module.worker(folder, date(2026, 10, 26)), ('invalid', None))
+
+    def test_current_directory_identity_replacement_is_retry(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as root:
+            module, folder = self.prepared(root)
+            original = module.ARCHIVE.entries
+            def entries(*args, **kwargs):
+                rows = original(*args, **kwargs)
+                folder.rename(Path(root) / 'old')
+                folder.mkdir(mode=0o700)
+                return rows
+            with patch.object(module.ARCHIVE, 'entries', side_effect=entries):
+                with self.assertRaises(module.ConcurrentChange):
+                    module.snapshot(folder, required_from=date(2026, 10, 26))
+
+    def test_deleted_historical_file_is_missing_even_with_latest_present(self):
+        with tempfile.TemporaryDirectory() as root:
+            module, folder = self.prepared(root)
+            module.ARCHIVE.archive(SloObservationArchiveTests().payload('2026-10-27'), folder,
+                                  today=date(2026, 10, 28))
+            out = module.snapshot(folder, required_from=date(2026, 10, 26), today=date(2026, 10, 28))
+            self.assertEqual((out['required_days'], out['missing_required_days']), (2, 0))
+            (folder / '2026-10-26.json.gz').unlink()
+            after = module.snapshot(folder, required_from=date(2026, 10, 26), today=date(2026, 10, 28))
+            self.assertEqual(after['latest_preserved_day_timestamp_seconds'], out['latest_preserved_day_timestamp_seconds'])
+            self.assertEqual((after['required_days'], after['missing_required_days']), (2, 1))
+
+    def test_required_window_has_no_invented_initial_history_and_honors_grace_and_retention(self):
+        from datetime import datetime, timezone
+        with tempfile.TemporaryDirectory() as root:
+            module, folder = self.prepared(root)
+            before = module.snapshot(folder, required_from=date(2026, 10, 26), now=datetime(2026, 10, 28, 0, 44, tzinfo=timezone.utc))
+            after = module.snapshot(folder, required_from=date(2026, 10, 26), now=datetime(2026, 10, 28, 0, 45, tzinfo=timezone.utc))
+            self.assertEqual((before['required_days'], before['missing_required_days']), (1, 0))
+            self.assertEqual((after['required_days'], after['missing_required_days']), (2, 1))
+            later = module.snapshot(folder, required_from=date(2026, 10, 26), today=date(2026, 12, 10))
+            self.assertEqual((later['required_days'], later['missing_required_days']), (35, 35))
+            with self.assertRaises(ValueError):
+                module.snapshot(folder, required_from=date(2026, 10, 29), today=date(2026, 10, 28))
+
+    def test_corrupt_capsule_is_fixed_failure_without_path_or_payload_disclosure(self):
+        with tempfile.TemporaryDirectory() as root:
+            module, folder = self.prepared(root)
+            (folder / '2026-10-26.json.gz').write_bytes(b'private-bad-gzip-never-echo')
+            self.assertEqual(module.worker(folder, date(2026, 10, 26)), ('invalid', None))
+            result = subprocess.run([sys.executable, str(ROOT / 'infra/k8s/tools/slo-observation-health.py'),
+                                     '--snapshot', '--directory', str(folder), '--required-from', '2026-10-26'], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, '{"status":"invalid"}\n')
+            self.assertEqual(result.stderr, '')
+
+    def test_worker_timeout_and_malformed_output_fail_closed(self):
+        from unittest.mock import patch
+        module = self.module()
+        with patch.object(module.subprocess, 'run', side_effect=subprocess.TimeoutExpired('private', 25)):
+            self.assertEqual(module.worker('unused', date(2026, 10, 26)), ('invalid', None))
+        for result in (subprocess.CompletedProcess([], 0, b'{}', b''),
+                       subprocess.CompletedProcess([], 0, b'{}', b'private-error'),
+                       subprocess.CompletedProcess([], 3, b'{}', b'')):
+            with patch.object(module.subprocess, 'run', return_value=result):
+                self.assertEqual(module.worker('unused', date(2026, 10, 26)), ('invalid', None))
+
+    def test_busy_does_not_refresh_integrity_success_time_and_error_clears_data(self):
+        module = self.module()
+        now = [1000]
+        answers = [('verified', {'present_days': 1}), ('busy', None), ('invalid', None)]
+        monitor = module.Collector('unused', date(2026, 10, 26), reader=lambda _path, _start: answers.pop(0), clock=lambda: now[0])
+        initial = monitor.render().decode()
+        self.assertIn('slo_observation_archive_verification_success 0\n', initial)
+        self.assertNotIn('slo_observation_archive_present_days', initial)
+        monitor.refresh(); now[0] = 2000; monitor.refresh()
+        self.assertEqual(monitor.last_verified, 1000)
+        self.assertEqual(monitor.busy, 1)
+        self.assertEqual(monitor.success, 1)
+        monitor.refresh()
+        self.assertEqual(monitor.last_verified, 1000)
+        self.assertEqual(monitor.success, 0)
+        self.assertNotIn('slo_observation_archive_present_days', monitor.render().decode())
+
+    def test_concurrent_refresh_cannot_start_second_whole_archive_read(self):
+        module = self.module()
+        calls = []
+        monitor = module.Collector('unused', date(2026, 10, 26), reader=lambda _path, _start: (calls.append(1), None))
+        monitor.running.acquire()
+        try:
+            monitor.refresh()
+        finally:
+            monitor.running.release()
+        self.assertEqual(calls, [])
+
+    def test_monitor_manifest_is_readonly_internal_and_never_mutates_collector(self):
+        import yaml
+        docs = list(yaml.safe_load_all((ROOT / 'infra/k8s/slo-evidence/archive/health-monitor.yaml').read_text()))
+        deployment = next(d for d in docs if d['kind'] == 'Deployment')
+        pod = deployment['spec']['template']['spec']
+        self.assertFalse(pod['automountServiceAccountToken'])
+        self.assertNotIn('serviceAccountName', pod)
+        self.assertNotIn('fsGroup', pod['securityContext'])
+        self.assertEqual(pod['securityContext']['runAsUser'], 10001)
+        self.assertEqual(pod['volumes'], [{'name': 'archive', 'persistentVolumeClaim': {'claimName': 'slo-observation-archive', 'readOnly': True}}])
+        container = pod['containers'][0]
+        self.assertTrue(container['volumeMounts'][0]['readOnly'])
+        self.assertTrue(container['securityContext']['readOnlyRootFilesystem'])
+        self.assertFalse(container['securityContext']['allowPrivilegeEscalation'])
+        self.assertNotIn('env', container)
+        self.assertEqual(container['securityContext']['capabilities']['drop'], ['ALL'])
+        self.assertFalse(any(d['kind'] in ('CronJob', 'PersistentVolumeClaim', 'Secret', 'Service', 'Ingress') for d in docs))
+
+    def test_archive_health_alerts_use_real_promtool(self):
+        import shutil
+        import yaml
+        promtool = shutil.which('promtool')
+        self.assertIsNotNone(promtool, 'promtool required; no silent skip')
+        docs = list(yaml.safe_load_all((ROOT / 'infra/k8s/slo-evidence/archive/health-monitor.yaml').read_text()))
+        groups = next(d['spec']['groups'] for d in docs if d['kind'] == 'PrometheusRule')
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            (base / 'health-rules.yaml').write_text(yaml.safe_dump({'groups': groups}))
+            (base / 'health-test.yaml').write_text((ROOT / 'tests/fixtures/observation-health-alerts.test.yaml').read_text())
+            result = subprocess.run([promtool, 'test', 'rules', 'health-test.yaml'], cwd=base, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_rendered_code_is_exact_source_bound_immutable_and_ro_without_rebuilding_image(self):
+        import hashlib
+        module = self.module()
+        image = 'docker.io/library/personal-server-slo-observation-archive@sha256:' + 'a' * 64
+        docs = module.render(image, date(2026, 10, 26))['items']
+        code = next(d for d in docs if d['kind'] == 'ConfigMap' and d.get('immutable'))
+        source = (ROOT / 'infra/k8s/tools/slo-observation-health.py').read_bytes()
+        sha = hashlib.sha256(source).hexdigest()
+        self.assertEqual(code['data']['slo-observation-health.py'].encode(), source)
+        self.assertEqual(code['metadata']['annotations']['personal-server/health-code-sha256'], sha)
+        self.assertTrue(code['metadata']['name'].endswith(sha[:16]))
+        pod = next(d for d in docs if d['kind'] == 'Deployment')['spec']['template']
+        self.assertEqual(pod['metadata']['annotations']['personal-server/health-code-sha256'], sha)
+        self.assertEqual(pod['spec']['containers'][0]['image'], image)
+        self.assertTrue(all(m['readOnly'] for m in pod['spec']['containers'][0]['volumeMounts']))
+        self.assertEqual(pod['spec']['volumes'][1]['configMap']['name'], code['metadata']['name'])
+        self.assertEqual(pod['spec']['containers'][0]['args'][-2:], ['--required-from', '2026-10-26'])
+        for invalid in ('image:latest', image[:-1], image.replace('archive', 'other')):
+            with self.assertRaises(ValueError):
+                module.render(invalid, date(2026, 10, 26))
+
+    def test_archive_dashboard_does_not_convert_missing_data_to_success_or_claim_coverage(self):
+        import yaml
+        docs = list(yaml.safe_load_all((ROOT / 'infra/k8s/slo-evidence/archive/health-monitor.yaml').read_text()))
+        dashboard = next(d for d in docs if d['kind'] == 'ConfigMap')
+        config = json.loads(dashboard['data']['slo-observation-health.json'])
+        self.assertEqual(config['timezone'], 'utc')
+        self.assertEqual(len(config['panels']), 9)
+        for panel in config['panels']:
+            self.assertTrue(panel['targets'][0]['instant'])
+            self.assertEqual(panel['options']['reduceOptions']['calcs'], ['last'])
+            self.assertNotIn('or vector(0)', panel['targets'][0]['expr'])
+            self.assertEqual(panel['fieldConfig']['defaults']['noValue'], '확인 필요')
+
+
 if __name__ == '__main__':
     unittest.main()

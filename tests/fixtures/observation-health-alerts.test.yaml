@@ -1,0 +1,206 @@
+rule_files:
+- health-rules.yaml
+evaluation_interval: 1m
+tests:
+- name: unverified and corrupt require sustained failure
+  interval: 1m
+  input_series:
+  - series: slo_observation_archive_verification_success{namespace="monitoring",pod="health"}
+    values: 0+0x30
+  - series: slo_observation_archive_last_verified_timestamp_seconds{namespace="monitoring",pod="health"}
+    values: 0+60x30
+  alert_rule_test:
+  - eval_time: 9m
+    alertname: ObservationArchiveVerificationUnhealthy
+    exp_alerts: []
+  - eval_time: 10m
+    alertname: ObservationArchiveVerificationUnhealthy
+    exp_alerts:
+    - exp_labels:
+        namespace: monitoring
+        pod: health
+        severity: warning
+        sre_telegram: 'true'
+      exp_annotations: &id001
+        summary: 관측 보존 파일 검증 실패 또는 지연
+        description: 읽기 전용 무결성 검증이 실패했거나 최근 성공이 15분보다 오래된 상태가 10분 지속됨. 잠금 경합은 별도 지표로
+          구분함.
+- name: busy preserves old success but cannot hide stale integrity
+  interval: 1m
+  input_series:
+  - series: slo_observation_archive_verification_success{namespace="monitoring",pod="health"}
+    values: 1+0x35
+  - series: slo_observation_archive_verification_busy{namespace="monitoring",pod="health"}
+    values: 1+0x35
+  - series: slo_observation_archive_last_verified_timestamp_seconds{namespace="monitoring",pod="health"}
+    values: 0+0x35
+  alert_rule_test:
+  - eval_time: 10m
+    alertname: ObservationArchiveVerificationUnhealthy
+    exp_alerts: []
+  - eval_time: 25m
+    alertname: ObservationArchiveVerificationUnhealthy
+    exp_alerts: []
+  - eval_time: 26m
+    alertname: ObservationArchiveVerificationUnhealthy
+    exp_alerts:
+    - exp_labels:
+        namespace: monitoring
+        pod: health
+        severity: warning
+        sre_telegram: 'true'
+      exp_annotations: *id001
+- name: day grace and sustained missing then recovery
+  interval: 1m
+  input_series:
+  - series: slo_observation_archive_verification_success{namespace="monitoring",pod="health"}
+    values: 1+0x3005
+  - series: slo_observation_archive_last_verified_timestamp_seconds{namespace="monitoring",pod="health"}
+    values: 0+60x3005
+  - series: slo_observation_archive_latest_preserved_day_timestamp_seconds{namespace="monitoring",pod="health"}
+    values: 0+0x2940 86400+0x64
+  - series: slo_observation_archive_missing_required_days{namespace="monitoring",pod="health"}
+    values: 0+0x2924 1+0x15 0+0x64
+  alert_rule_test:
+  - eval_time: 48h40m
+    alertname: ObservationArchiveDayMissing
+    exp_alerts: []
+  - eval_time: 48h59m
+    alertname: ObservationArchiveDayMissing
+    exp_alerts: []
+  - eval_time: 49h
+    alertname: ObservationArchiveDayMissing
+    exp_alerts:
+    - exp_labels:
+        namespace: monitoring
+        pod: health
+        severity: warning
+        sre_telegram: 'true'
+      exp_annotations: &id002
+        summary: 보존 의무 일자의 관측 파일 누락
+        description: 고정 시작일 이후 최대 35일에서 누락된 파일 또는 지연 허용 후 전일 파일 부재를 15분 확인함. 09:10
+          KST 수집에 09:45까지 허용하며 시작 전 미보유 기간을 실패로 채우지 않음.
+  - eval_time: 49h2m
+    alertname: ObservationArchiveDayMissing
+    exp_alerts: []
+- name: logical quota threshold and recovery
+  interval: 1m
+  input_series:
+  - series: slo_observation_archive_stored_bytes{namespace="monitoring",pod="health"}
+    values: 900+0x10 950+0x11 200+0x10
+  - series: slo_observation_archive_quota_bytes{namespace="monitoring",pod="health"}
+    values: 1000+0x35
+  alert_rule_test:
+  - eval_time: 10m
+    alertname: ObservationArchiveQuotaNearFull
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: ObservationArchiveQuotaNearFull
+    exp_alerts: []
+  - eval_time: 21m
+    alertname: ObservationArchiveQuotaNearFull
+    exp_alerts:
+    - exp_labels:
+        namespace: monitoring
+        pod: health
+        severity: warning
+        sre_telegram: 'true'
+      exp_annotations:
+        summary: 관측 보존 도구의 논리 용량 한도 임박
+        description: 검증된 파일 크기가 도구의 384MiB 논리 한도 중 90%를 초과함. 기존 PVC 물리 공간 부족 알림과 구분함.
+  - eval_time: 23m
+    alertname: ObservationArchiveQuotaNearFull
+    exp_alerts: []
+- name: missing integrity-derived data does not claim day health
+  interval: 1m
+  input_series:
+  - series: slo_observation_archive_verification_success{namespace="monitoring",pod="health"}
+    values: 0+0x3005
+  - series: slo_observation_archive_latest_preserved_day_timestamp_seconds{namespace="monitoring",pod="health"}
+    values: 0+0x3005
+  alert_rule_test:
+  - eval_time: 49h
+    alertname: ObservationArchiveDayMissing
+    exp_alerts: []
+- name: ready deployment without scrape target is detected
+  interval: 1m
+  input_series:
+  - series: kube_deployment_spec_replicas{namespace="monitoring",deployment="slo-observation-health"}
+    values: 1+0x20
+  alert_rule_test:
+  - eval_time: 9m
+    alertname: ObservationArchiveScrapeMissing
+    exp_alerts: []
+  - eval_time: 10m
+    alertname: ObservationArchiveScrapeMissing
+    exp_alerts:
+    - exp_labels:
+        namespace: monitoring
+        deployment: slo-observation-health
+        severity: warning
+        sre_telegram: 'true'
+      exp_annotations:
+        summary: 관측 보존 검증기의 수집 연결 누락
+        description: 검증기 Deployment가 요구되지만 Prometheus 수집 대상이 10분 동안 없음. 이미 존재하는 target의
+          DOWN은 기존 공통 알림에서 처리함.
+- name: present down target uses existing generic target alert
+  interval: 1m
+  input_series:
+  - series: kube_deployment_spec_replicas{namespace="monitoring",deployment="slo-observation-health"}
+    values: 1+0x20
+  - series: up{namespace="monitoring",component="slo-observation-health"}
+    values: 0+0x20
+  alert_rule_test:
+  - eval_time: 15m
+    alertname: ObservationArchiveScrapeMissing
+    exp_alerts: []
+- name: healthy verified state
+  interval: 1m
+  input_series:
+  - series: slo_observation_archive_verification_success{namespace="monitoring",pod="health"}
+    values: 1+0x3005
+  - series: slo_observation_archive_last_verified_timestamp_seconds{namespace="monitoring",pod="health"}
+    values: 0+60x3005
+  - series: slo_observation_archive_latest_preserved_day_timestamp_seconds{namespace="monitoring",pod="health"}
+    values: 86400+0x3005
+  - series: slo_observation_archive_stored_bytes{namespace="monitoring",pod="health"}
+    values: 200+0x3005
+  - series: slo_observation_archive_quota_bytes{namespace="monitoring",pod="health"}
+    values: 1000+0x3005
+  - series: slo_observation_archive_missing_required_days{namespace="monitoring",pod="health"}
+    values: 0+0x3005
+  alert_rule_test:
+  - eval_time: 49h
+    alertname: ObservationArchiveVerificationUnhealthy
+    exp_alerts: []
+  - eval_time: 49h
+    alertname: ObservationArchiveDayMissing
+    exp_alerts: []
+  - eval_time: 49h
+    alertname: ObservationArchiveQuotaNearFull
+    exp_alerts: []
+- name: historical deletion is detected with latest day still present
+  interval: 1m
+  input_series:
+  - series: slo_observation_archive_verification_success{namespace="monitoring",pod="health"}
+    values: 1+0x30
+  - series: slo_observation_archive_latest_preserved_day_timestamp_seconds{namespace="monitoring",pod="health"}
+    values: 86400+0x30
+  - series: slo_observation_archive_missing_required_days{namespace="monitoring",pod="health"}
+    values: 1+0x15 0+0x15
+  alert_rule_test:
+  - eval_time: 14m
+    alertname: ObservationArchiveDayMissing
+    exp_alerts: []
+  - eval_time: 15m
+    alertname: ObservationArchiveDayMissing
+    exp_alerts:
+    - exp_labels:
+        namespace: monitoring
+        pod: health
+        severity: warning
+        sre_telegram: 'true'
+      exp_annotations: *id002
+  - eval_time: 17m
+    alertname: ObservationArchiveDayMissing
+    exp_alerts: []
