@@ -460,7 +460,9 @@ class PortalDashboardTests(unittest.TestCase):
     def test_search_deadline_interrupts_real_http_drip_body(self):
         prepare_service_import("portal-web")
         from app.services import global_search
+        from app.services.global_search import SearchMetrics
 
+        metrics = SearchMetrics()
         stop = threading.Event()
 
         class Handler(BaseHTTPRequestHandler):
@@ -495,11 +497,16 @@ class PortalDashboardTests(unittest.TestCase):
         try:
             with patch.dict(os.environ, environment), patch.object(
                 global_search, "SEARCH_BUDGET_SECONDS", 0.15
-            ):
+            ), patch.object(global_search, "SEARCH_METRICS", metrics):
                 results = asyncio.run(global_search.search_all("drip"))
             self.assertEqual(results["news"]["status"], "unavailable")
             self.assertEqual(results["youtube"]["status"], "ok")
             self.assertEqual(results["books"]["status"], "ok")
+            self.assertIn('portal_search_requests_total{outcome="partial"} 1', metrics.render())
+            self.assertIn(
+                'portal_search_source_requests_total{outcome="timeout",source="news"} 1',
+                metrics.render(),
+            )
         finally:
             stop.set()
             server.shutdown()

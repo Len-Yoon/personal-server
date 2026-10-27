@@ -119,3 +119,73 @@ except Exception:
     print(json.dumps({'probe_error':'fixed_probe_failed'}))
     sys.exit(1)
 '''
+
+# Reuse the fixed database/HTTP/state definitions without its CLI dispatcher.
+# Only synthetic, bounded table rows cross the container boundary; never SQL.
+RESTORE_SCRIPT = PROBE_SCRIPT.rsplit('\ntry:\n', 1)[0] + r'''
+import base64
+
+def transfer(op):
+    if os.getuid()!=10001 or os.getgid()!=10001 or os.environ.get('BOOK_MEMO_DB_PATH')!='/app/data/fixture.sqlite3':
+        raise ValueError('restore_identity')
+    from app.services import book_service as service
+    database(service)
+    if op=='export' and len(sys.argv)==2:
+        observed=state(service)
+        if not observed['content_valid'] or observed['memo_version']!=1 or observed['book_count']!=1 or observed['memo_count']!=1:
+            raise ValueError('synthetic_snapshot_required')
+        with service._connect() as db:
+            tables={name:[list(row) for row in db.execute('SELECT * FROM '+name+' ORDER BY rowid')] for name in TABLES}
+            schema=[list(row) for row in db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name')]
+        payload={'schema_version':1,'tables':tables,'schema':schema,'state':observed}
+        if len(json.dumps(payload,sort_keys=True,separators=(',',':')).encode())>65536:
+            raise ValueError('snapshot_size')
+        return payload
+    if op!='restore' or len(sys.argv)!=3 or len(sys.argv[2])>87384:
+        raise ValueError('restore_operation')
+    raw=base64.b64decode(sys.argv[2],validate=True)
+    if not 1<=len(raw)<=65536:
+        raise ValueError('snapshot_size')
+    payload=json.loads(raw)
+    if (not isinstance(payload,dict) or set(payload)!={'schema_version','tables','schema','state'}
+            or type(payload['schema_version']) is not int or payload['schema_version']!=1
+            or not isinstance(payload['tables'],dict) or set(payload['tables'])!=set(TABLES)
+            or digest(payload['tables'])!=payload['state'].get('snapshot_hash')
+            or digest(payload['schema'])!=payload['state'].get('schema_hash')):
+        raise ValueError('snapshot_structure')
+    with service._connect() as db:
+        schema=[list(row) for row in db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name')]
+        if schema!=payload['schema'] or any(db.execute('SELECT count(*) FROM '+name).fetchone()[0] for name in TABLES):
+            raise ValueError('destination_not_empty_or_schema_changed')
+        columns={name:len(db.execute('PRAGMA table_info('+name+')').fetchall()) for name in TABLES}
+        for name,rows in payload['tables'].items():
+            if not isinstance(rows,list) or len(rows)>50:
+                raise ValueError('snapshot_rows')
+            for row in rows:
+                if not isinstance(row,list) or len(row)!=columns[name] or any(
+                        not (cell is None or type(cell) is int or isinstance(cell,str) and len(cell)<=4096) for cell in row):
+                    raise ValueError('snapshot_cell')
+        db.execute('PRAGMA foreign_keys=OFF')
+        db.execute('BEGIN IMMEDIATE')
+        try:
+            for name in TABLES:
+                if name=='sqlite_sequence':db.execute('DELETE FROM sqlite_sequence')
+                rows=payload['tables'][name]
+                if rows:db.executemany('INSERT INTO '+name+' VALUES ('+','.join('?' for _ in range(columns[name]))+')',rows)
+            actual={name:[list(row) for row in db.execute('SELECT * FROM '+name+' ORDER BY rowid')] for name in TABLES}
+            if (actual!=payload['tables'] or db.execute('PRAGMA integrity_check').fetchone()[0]!='ok'
+                    or db.execute('PRAGMA foreign_key_check').fetchall()):
+                raise ValueError('restored_snapshot_invalid')
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+    return state(service)
+
+try:
+    result=transfer(sys.argv[1] if len(sys.argv)>1 else '')
+    print(json.dumps(result,sort_keys=True,separators=(',',':'),allow_nan=False))
+except Exception:
+    print(json.dumps({'probe_error':'fixed_restore_probe_failed'}))
+    sys.exit(1)
+'''

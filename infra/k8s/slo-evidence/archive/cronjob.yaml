@@ -1,0 +1,76 @@
+# New installation only. Render a verified immutable image before activation.
+# Existing monitoring/collector resources are not updated by this manifest.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: slo-observation-archive
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: slo-observation-archive
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: slo-observation-archive
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: slo-observation-archive
+spec:
+  schedule: "10 9 * * *"
+  timeZone: Asia/Seoul
+  suspend: true
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 1800
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 180
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: slo-observation-archive
+        spec:
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          terminationGracePeriodSeconds: 20
+          nodeSelector:
+            kubernetes.io/arch: amd64
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: archive
+              image: personal-server-slo-observation-archive:pending
+              imagePullPolicy: Never
+              args: [--collect, --directory, /archive/observations, --initialize, --prune]
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: "1"
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              volumeMounts:
+                - name: archive
+                  mountPath: /archive
+          volumes:
+            - name: archive
+              persistentVolumeClaim:
+                claimName: slo-observation-archive

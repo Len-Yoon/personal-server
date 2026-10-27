@@ -19,6 +19,9 @@ EXPECTED_WORKFLOW_ACTIONS = {
     "actions/github-script": ("f28e40c7f34bde8b3046d885e986cb6290c5673b", "v7"),
 }
 EXPECTED_DOCKERFILE_BASE_IMAGES = {
+    "infra/k8s/slo-evidence/archive/Dockerfile": (
+        "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
+    ),
     "infra/k8s/backup-automation/Dockerfile": (
         "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
     ),
@@ -65,6 +68,7 @@ EXPECTED_DOCKERFILE_BASE_IMAGES = {
 ALPINE_APP_SERVICES = frozenset({"portal-web", "book-memo", "youtube-memo", "crawler-worker", "homeops-executor", "system-agent", "car-care-worker"})
 DOCKERFILE_DIGEST_TARGETS = frozenset(
     {
+        "infra/k8s/slo-evidence/archive/Dockerfile",
         "book-memo/Dockerfile",
         "car-care-worker/Dockerfile",
         "crawler-worker/Dockerfile",
@@ -165,7 +169,7 @@ class ComposeConfigTests(unittest.TestCase):
             if ".worktrees" not in path.relative_to(ROOT).parts
         }
         self.assertEqual(DOCKERFILE_DIGEST_POLICY_EXCLUSIONS, {"caddy/Dockerfile"})
-        self.assertEqual(len(DOCKERFILE_DIGEST_TARGETS), 14)
+        self.assertEqual(len(DOCKERFILE_DIGEST_TARGETS), 15)
         self.assertIn("sre-telegram-relay/Dockerfile", DOCKERFILE_DIGEST_TARGETS)
         self.assertEqual(set(EXPECTED_DOCKERFILE_BASE_IMAGES), DOCKERFILE_DIGEST_TARGETS)
         self.assertEqual(
@@ -194,6 +198,7 @@ class ComposeConfigTests(unittest.TestCase):
                             'infra/k8s/backup-automation/youtube-memo/Dockerfile',
                             'infra/k8s/sre-audit-automation/Dockerfile',
                             'infra/k8s/slo-evidence/Dockerfile',
+                            'infra/k8s/slo-evidence/archive/Dockerfile',
                             'sre-telegram-relay/Dockerfile',
                         }):
                     self.assertRegex(images[0], r"^python:\d+\.\d+-alpine3\.24@sha256:[0-9a-f]{64}$")
@@ -361,6 +366,89 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn("## Codex 작업 완료 루프", instructions)
         self.assertIn("docs/codex-work-loop.md", instructions)
         self.assertIn("## Skill routing", instructions)
+
+    def test_reliability_validation_keeps_hosted_source_and_credential_boundaries(self):
+        import ast
+
+        text = (ROOT / '.github/workflows/reliability-validation.yml').read_text()
+        workflow = yaml.safe_load(text)
+        self.assertEqual(workflow['permissions'], {'contents': 'read'})
+        events = workflow.get('on', workflow.get(True))
+        self.assertEqual(set(events), {'pull_request', 'push'})
+        self.assertEqual(events['push']['branches'], ['main'])
+        dependencies = {'portal-web/**', 'book-memo/app/**', 'book-memo/tools/**',
+                        'book-memo/Dockerfile', 'book-memo/requirements.txt',
+                        'infra/k8s/tools/slo-observation-archive.py',
+                        'infra/k8s/tools/slo-sample-summary.py',
+                        'infra/k8s/slo-evidence/archive/**'}
+        for event in events.values():
+            self.assertTrue(dependencies <= set(event['paths']))
+        job = workflow['jobs']['isolated-release-validation']
+        self.assertEqual(job['runs-on'], 'ubuntu-latest')
+        self.assertLessEqual(job['timeout-minutes'], 45)
+        self.assertIn('head.repo.full_name == github.repository', job['if'])
+        checkout = next(step for step in job['steps'] if step.get('uses', '').startswith('actions/checkout@'))
+        self.assertIs(checkout['with']['persist-credentials'], False)
+        self.assertEqual(checkout['with']['ref'], '${{ env.SOURCE_SHA }}')
+        self.assertEqual(job['env']['SOURCE_SHA'], '${{ github.event.pull_request.head.sha || github.sha }}')
+        self.assertNotIn('secrets.', text)
+        self.assertNotIn('self-hosted', text)
+        self.assertNotIn('ignore-unfixed', text)
+        self.assertNotIn('skip-db-update', text)
+        self.assertRegex(text, r'moby/buildkit:[^\s]+@sha256:[0-9a-f]{64}')
+        build = next(step['run'] for step in job['steps'] if step['name'].startswith('Build source-bound'))
+        embedded = build.split("<<'PYTHON'\n", 1)[1].rsplit('\nPYTHON', 1)[0]
+        ast.parse(embedded)
+        scanner = next(step for step in job['steps'] if step['name'].startswith('Scan the exact'))
+        self.assertRegex(scanner['env']['TRIVY_SHA256'], r'^[0-9a-f]{64}$')
+        self.assertIn('--severity HIGH,CRITICAL', scanner['run'])
+        self.assertIn('--exit-code 1', scanner['run'])
+        self.assertIn('images/$app.oci-layout', scanner['run'])
+
+    def test_reliability_oci_layout_preserves_bytes_and_rejects_unsafe_archives(self):
+        import ast
+        import hashlib
+        import io
+        import shutil
+        import tarfile
+
+        workflow = yaml.safe_load((ROOT / '.github/workflows/reliability-validation.yml').read_text())
+        step = next(step for step in workflow['jobs']['isolated-release-validation']['steps']
+                    if step['name'].startswith('Build source-bound'))
+        tree = ast.parse(step['run'].split("<<'PYTHON'\n", 1)[1].rsplit('\nPYTHON', 1)[0])
+        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                     and node.name in {'sha_file', 'prepare_oci_layout'}]
+        self.assertEqual(len(functions), 2)
+        namespace = {'hashlib': hashlib, 're': re, 'shutil': shutil}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), '<oci-layout>', 'exec'), namespace)
+        blob = b'original layer bytes'
+        digest = hashlib.sha256(blob).hexdigest()
+        cases = [('valid', 'blobs/sha256/' + digest, blob, None),
+                 ('traversal', '../outside', b'x', None),
+                 ('absolute', '/outside', b'x', None),
+                 ('link', 'index.json', b'', tarfile.SYMTYPE),
+                 ('hardlink', 'index.json', b'', tarfile.LNKTYPE),
+                 ('bad_digest', 'blobs/sha256/' + '0' * 64, blob, None)]
+        for label, name, payload, kind in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                archive_bytes = io.BytesIO()
+                with tarfile.open(fileobj=archive_bytes, mode='w') as archive:
+                    member = tarfile.TarInfo(name)
+                    member.size = len(payload)
+                    if kind:
+                        member.type = kind
+                        member.linkname = '../outside'
+                    archive.addfile(member, io.BytesIO(payload))
+                archive_bytes.seek(0)
+                destination = Path(directory) / 'layout'
+                with tarfile.open(fileobj=archive_bytes) as archive:
+                    if label == 'valid':
+                        namespace['prepare_oci_layout'](archive, destination)
+                        self.assertEqual((destination / name).read_bytes(), blob)
+                    else:
+                        with self.assertRaises(AssertionError):
+                            namespace['prepare_oci_layout'](archive, destination)
+                self.assertFalse((Path(directory) / 'outside').exists())
 
     def test_agent_review_workflow_enforces_pull_request_policy(self):
         workflow = (ROOT / ".github" / "workflows" / "agent-review.yml").read_text(encoding="utf-8")

@@ -6,6 +6,7 @@ host data, or discovers resources for deletion beyond its own registered names.
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import math
 import os
@@ -469,6 +470,49 @@ class LocalDocker:
             return result
         except (ValueError, TypeError):
             raise RuntimeError(ERROR) from None
+
+    def _snapshot_transfer(self, container: str, operation: str, payload=None) -> dict:
+        """Fixed synthetic data transfer; no caller SQL, filesystem path or URL."""
+        data = self._container(container)
+        _, record = self._record(container)
+        self._verify_runtime(data, record)
+        if not data.get('State', {}).get('Running') or operation not in ('export', 'restore'):
+            _fail()
+        from container_probe import RESTORE_SCRIPT
+        args = ['exec', data['Id'], 'python', '-c', RESTORE_SCRIPT, operation]
+        if operation == 'restore':
+            if not isinstance(payload, dict):
+                _fail()
+            encoded = _canonical(payload)
+            if not 1 <= len(encoded) <= 65536:
+                _fail()
+            args.append(base64.b64encode(encoded).decode('ascii'))
+        try:
+            result = json.loads(self._run(args, limit=131072))
+            if not isinstance(result, dict) or 'probe_error' in result:
+                _fail()
+            return result
+        except (ValueError, TypeError):
+            raise RuntimeError(ERROR) from None
+
+    def export_snapshot(self, container: str) -> dict:
+        return self._snapshot_transfer(container, 'export')
+
+    def restore_snapshot(self, container: str, payload: dict) -> dict:
+        return self._snapshot_transfer(container, 'restore', payload)
+
+    def restore_evidence(self, container: str) -> dict:
+        """Return only bounded runtime identity/mount proof, without environment."""
+        data = self._container(container)
+        _, record = self._record(container)
+        self._verify_runtime(data, record)
+        volume = self._inspect('volume', record['volume'])
+        if volume.get('Name') != record['volume'] or not self._owned(volume.get('Labels')):
+            _fail()
+        return {'container_id': data['Id'], 'image_id': data['Image'],
+                'volume_name': record['volume'], 'mount_volume_names': [item['Name'] for item in data['Mounts']],
+                'owner_verified': True, 'user': data['Config']['User'], 'network': 'none',
+                'readonly_root': True, 'published_ports': False}
 
     def cleanup(self) -> dict:
         """A fresh cleanup budget remains available after cancellation/failure."""

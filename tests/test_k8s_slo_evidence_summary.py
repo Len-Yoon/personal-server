@@ -324,5 +324,365 @@ class SloSampleSummaryTests(unittest.TestCase):
                 self.assertEqual(result.stderr.strip(), 'slo_sample_summary=FAIL reason=invalid_input')
 
 
+class SloObservationArchiveTests(unittest.TestCase):
+    def module(self):
+        path = ROOT / 'infra/k8s/tools/slo-observation-archive.py'
+        spec = importlib.util.spec_from_file_location('slo_archive', path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def payload(self, day='2026-10-26', complete=False):
+        from datetime import datetime, timezone
+        start = int(datetime.fromisoformat(day).replace(tzinfo=timezone.utc).timestamp())
+        queries = {}
+        for name in ('available', 'desired', 'available_timestamp', 'desired_timestamp'):
+            points = 5760 if complete else 3
+            values = [[start + i * 15, str(start + i * 15 if name.endswith('_timestamp') else 1)]
+                      for i in range(points)]
+            queries[name] = {'status': 'success', 'data': {'resultType': 'matrix', 'result': [
+                {'metric': {'namespace': 'personal-server', 'deployment': 'portal-web',
+                            'private_label': 'never-retain-internal-source'}, 'values': values}]}}
+        return {'schema_version': 1, 'start': start, 'end': start + 86400 - 15,
+                'step_seconds': 15, 'queries': queries}
+
+    def test_partial_grid_is_immutable_and_gaps_are_not_backfilled(self):
+        module = self.module()
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / 'archive'; module.initialize(folder)
+            original = self.payload()
+            one = module.archive(original, folder, today=date(2026, 10, 28))
+            self.assertEqual(one['status'], 'partial')
+            self.assertEqual(one['summary']['samples']['unknown'], 5757)
+            repeated = module.archive(original, folder, today=date(2026, 10, 28))
+            self.assertTrue(repeated['idempotent'])
+            changed = self.payload()
+            changed['queries']['available']['data']['result'][0]['values'][0][1] = '0'
+            before = (folder / '2026-10-26.json.gz').read_bytes()
+            with self.assertRaises(ValueError):
+                module.archive(changed, folder, today=date(2026, 10, 28))
+            self.assertEqual((folder / '2026-10-26.json.gz').read_bytes(), before)
+            out = module.verify(folder, today=date(2026, 10, 28))
+            self.assertEqual(out['partial_dates'], ['2026-10-26'])
+            self.assertIn('2026-10-27', out['missing_dates'])
+
+    def test_complete_grid_retains_original_timestamp_and_drops_raw_labels(self):
+        import gzip
+        module = self.module()
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / 'archive'; module.initialize(folder)
+            value = self.payload(complete=True)
+            out = module.archive(value, folder, today=date(2026, 10, 28))
+            self.assertEqual(out['status'], 'complete')
+            raw = gzip.decompress((folder / '2026-10-26.json.gz').read_bytes())
+            self.assertNotIn(b'never-retain-internal-source', raw)
+            saved = json.loads(raw)['payload']
+            self.assertEqual(saved['queries']['available_timestamp']['data']['result'][0]['values'],
+                             value['queries']['available_timestamp']['data']['result'][0]['values'])
+            self.assertEqual(module.verify(folder, today=date(2026, 10, 28))['partial_dates'], [])
+
+    def test_initialize_will_not_claim_existing_user_directory(self):
+        module = self.module()
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'user'; path.mkdir(); sentinel = path / 'keep'; sentinel.write_text('keep')
+            with self.assertRaises(FileExistsError):
+                module.initialize(path)
+            self.assertEqual(sentinel.read_text(), 'keep')
+            with self.assertRaises((OSError, ValueError)):
+                module.archive(self.payload(), path, today=date(2026, 10, 28))
+
+    def test_corruption_symlinks_hardlinks_and_unknown_files_block_writes(self):
+        import os
+        module = self.module()
+        for kind in ('corrupt', 'symlink', 'hardlink', 'unknown'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
+                folder = Path(temp) / 'archive'; module.initialize(folder)
+                module.archive(self.payload(), folder, today=date(2026, 10, 28))
+                path = folder / '2026-10-26.json.gz'
+                sentinel = Path(temp) / 'keep'; sentinel.write_bytes(b'keep')
+                if kind == 'corrupt':
+                    path.write_bytes(b'corrupt')
+                elif kind == 'symlink':
+                    path.unlink(); path.symlink_to(sentinel)
+                elif kind == 'hardlink':
+                    path.unlink(); os.link(sentinel, path)
+                else:
+                    (folder / 'user-file').write_text('user')
+                with self.assertRaises((OSError, ValueError, EOFError)):
+                    module.archive(self.payload('2026-10-27'), folder, today=date(2026, 10, 28))
+                self.assertFalse((folder / '2026-10-27.json.gz').exists())
+                self.assertEqual(sentinel.read_bytes(), b'keep')
+
+    def test_digest_tamper_and_gzip_bomb_are_rejected(self):
+        import gzip
+        module = self.module()
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / 'archive'; module.initialize(folder)
+            module.archive(self.payload(), folder, today=date(2026, 10, 28))
+            path = folder / '2026-10-26.json.gz'
+            capsule = json.loads(gzip.decompress(path.read_bytes()))
+            capsule['payload_sha256'] = '0' * 64
+            path.write_bytes(gzip.compress(json.dumps(capsule).encode()))
+            with self.assertRaises(ValueError):
+                module.verify(folder, today=date(2026, 10, 28))
+            path.write_bytes(gzip.compress(b' ' * (module.LIMIT + 1)))
+            with self.assertRaises(ValueError):
+                module.verify(folder, today=date(2026, 10, 28))
+
+    def test_expiry_prune_removes_only_verified_days_older_than_boundary(self):
+        module = self.module()
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / 'archive'; module.initialize(folder)
+            for day in ('2026-10-26', '2026-10-27'):
+                module.archive(self.payload(day), folder, today=date(2026, 10, 28))
+            out = module.archive(self.payload('2026-11-30'), folder, today=date(2026, 12, 1), prune=True)
+            self.assertEqual(out['expired_removed'], 1)
+            self.assertFalse((folder / '2026-10-26.json.gz').exists())
+            self.assertTrue((folder / '2026-10-27.json.gz').exists())
+
+    def test_new_write_failure_preserves_previous_archive_and_cleans_pending(self):
+        from unittest.mock import patch
+        module = self.module()
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / 'archive'; module.initialize(folder)
+            module.archive(self.payload(), folder, today=date(2026, 10, 28))
+            before = (folder / '2026-10-26.json.gz').read_bytes()
+            with patch.object(module.os, 'link', side_effect=OSError('never-echo-this')):
+                with self.assertRaises(OSError):
+                    module.archive(self.payload('2026-10-27'), folder, today=date(2026, 10, 28), prune=True)
+            self.assertEqual((folder / '2026-10-26.json.gz').read_bytes(), before)
+            self.assertEqual(sorted(x.name for x in folder.iterdir()), ['.lock', '.owner', '2026-10-26.json.gz'])
+
+    def test_quota_and_free_space_fail_closed_without_new_file(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        module = self.module()
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / 'archive'; module.initialize(folder)
+            with patch.object(module, 'QUOTA', 1):
+                with self.assertRaises(ValueError):
+                    module.archive(self.payload(), folder, today=date(2026, 10, 28))
+            with patch.object(module.os, 'fstatvfs', return_value=SimpleNamespace(f_bavail=0, f_frsize=4096)):
+                with self.assertRaises(ValueError):
+                    module.archive(self.payload(), folder, today=date(2026, 10, 28))
+            self.assertFalse((folder / '2026-10-26.json.gz').exists())
+
+    def test_lock_blocks_duplicate_writer(self):
+        module = self.module()
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / 'archive'; module.initialize(folder)
+            fd, lock = module.open_archive(folder)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    module.archive(self.payload(), folder, today=date(2026, 10, 28))
+            finally:
+                module.os.close(lock); module.os.close(fd)
+
+    def test_partial_days_and_today_are_not_silently_normalized(self):
+        module = self.module()
+        for mutation in ('today', 'start', 'end'):
+            p = self.payload()
+            if mutation == 'start':
+                p['start'] += 15
+            elif mutation == 'end':
+                p['end'] -= 15
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                module.checked_payload(p, date(2026, 10, 26) if mutation == 'today' else date(2026, 10, 28))
+
+    def test_collector_uses_completed_grid_and_bounded_read1_without_redirects(self):
+        from unittest.mock import patch
+        import io
+        module = self.module()
+        payload = self.payload()
+        responses = []
+        for name in module._ANALYZER.QUERIES:
+            class Response(io.BytesIO):
+                pass
+            responses.append(Response(json.dumps(payload['queries'][name]).encode()))
+        for _ in range(2):
+            responses.append(Response(json.dumps({'status': 'success', 'data': {'resultType': 'matrix', 'result': []}}).encode()))
+        with patch.object(module, 'urlopen', side_effect=responses) as request:
+            actual = module.collect(date(2026, 10, 26))
+        self.assertEqual(actual['end'] - actual['start'], 86400 - 15)
+        self.assertEqual(request.call_count, 6)
+        for call in request.call_args_list:
+            self.assertLessEqual(call.kwargs['timeout'], 10)
+        with self.assertRaises(ValueError):
+            module.NoRedirect().redirect_request(None, None, 302, '', {}, 'http://other.example')
+        for url in ('https://user:secret@localhost', 'https://outside.example', 'file:///tmp/input',
+                    'http://localhost/?secret=never-echo-this'):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                module.collect(date(2026, 10, 26), url)
+
+    def test_collector_deadline_and_large_response_abort(self):
+        from unittest.mock import patch
+        import io
+        module = self.module()
+        with patch.object(module.time, 'monotonic', side_effect=[0, 46]):
+            with self.assertRaises(TimeoutError):
+                module.collect(date(2026, 10, 26))
+        with patch.object(module, 'urlopen', return_value=io.BytesIO(b' ' * (module.LIMIT + 1))):
+            with self.assertRaises(ValueError):
+                module.collect(date(2026, 10, 26))
+
+    def test_cli_partial_returns_two_and_does_not_leak_raw_labels(self):
+        script = ROOT / 'infra/k8s/tools/slo-observation-archive.py'
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / 'input.json'; source.write_text(json.dumps(self.payload()))
+            folder = Path(temp) / 'archive'
+            out = subprocess.run([sys.executable, str(script), '--input', str(source),
+                                  '--directory', str(folder), '--initialize'], capture_output=True, text=True)
+            self.assertEqual(out.returncode, 2, out.stderr)
+            self.assertEqual(json.loads(out.stdout)['status'], 'partial')
+            self.assertNotIn('never-retain-internal-source', out.stdout + out.stderr)
+            source.write_text('{"private":"never-echo-this",')
+            out = subprocess.run([sys.executable, str(script), '--input', str(source),
+                                  '--directory', str(folder)], capture_output=True, text=True)
+            self.assertEqual(out.returncode, 1)
+            self.assertNotIn('never-echo-this', out.stdout + out.stderr)
+            self.assertNotIn(str(source), out.stderr)
+
+    def search(self, payload):
+        start = payload['start']
+        labels = {'outcome': 'complete', 'namespace': 'personal-server',
+                  'private_label': 'never-retain-internal-source'}
+        payload['search'] = {'step_seconds': 60,
+            'values': {'status': 'success', 'data': {'resultType': 'matrix', 'result': [
+                {'metric': {'__name__': 'portal_search_requests_total', **labels},
+                 'values': [[start, '0'], [start + 60, '1']]}]}},
+            'timestamps': {'status': 'success', 'data': {'resultType': 'matrix', 'result': [
+                {'metric': dict(labels), 'values': [[start, str(start)], [start + 60, str(start + 59)]]}]}}}
+        return payload
+
+    def test_search_counter_reset_source_times_and_zero_values_survive_archive(self):
+        import gzip
+        module = self.module()
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / 'archive'; module.initialize(folder)
+            payload = self.search(self.payload())
+            original = json.dumps(payload, sort_keys=True)
+            out = module.archive(payload, folder, today=date(2026, 10, 28))
+            self.assertEqual(out['summary']['search_archive']['status'], 'preserved')
+            raw = gzip.decompress((folder / '2026-10-26.json.gz').read_bytes())
+            self.assertNotIn(b'never-retain-internal-source', raw)
+            stored = json.loads(raw)['payload']['search']
+            self.assertEqual(stored['values']['data']['result'][0]['values'],
+                             payload['search']['values']['data']['result'][0]['values'])
+            self.assertEqual(stored['timestamps']['data']['result'][0]['values'],
+                             payload['search']['timestamps']['data']['result'][0]['values'])
+            self.assertEqual(json.dumps(payload, sort_keys=True), original)
+            self.assertEqual(module.verify(folder, today=date(2026, 10, 28))['search_unobserved_dates'], [])
+
+    def test_missing_search_timestamps_are_preserved_as_unobserved_not_filled(self):
+        module = self.module()
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / 'archive'; module.initialize(folder)
+            payload = self.search(self.payload())
+            payload['search']['timestamps']['data']['result'] = []
+            out = module.archive(payload, folder, today=date(2026, 10, 28))
+            self.assertEqual(out['summary']['search_archive']['status'], 'empty_or_missing')
+            self.assertEqual(module.verify(folder, today=date(2026, 10, 28))['search_unobserved_dates'], ['2026-10-26'])
+
+    def test_search_scope_cardinality_grid_and_metric_labels_are_bounded(self):
+        module = self.module()
+        for kind in ('source', 'scope', 'family', 'duplicate', 'off_grid', 'too_many'):
+            payload = self.search(self.payload())
+            response = payload['search']['values']
+            row = response['data']['result'][0]
+            if kind == 'source':
+                row['metric']['source'] = 'private-unbounded-source'
+            elif kind == 'scope':
+                row['metric']['namespace'] = 'other'
+            elif kind == 'family':
+                row['metric']['__name__'] = 'private_metric'
+            elif kind == 'duplicate':
+                response['data']['result'].append(row)
+            elif kind == 'off_grid':
+                row['values'][1][0] += 1
+            else:
+                response['data']['result'] *= 129
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                module.checked_payload(payload, date(2026, 10, 28))
+
+    def test_prometheus_normalized_bucket_labels_remain_bounded(self):
+        module = self.module()
+        for label, wanted in (('1.0', '1'), ('5.0', '5'), ('10.0', '10'), ('+Inf', '+Inf')):
+            payload = self.search(self.payload())
+            for key in ('values', 'timestamps'):
+                row = payload['search'][key]['data']['result'][0]
+                row['metric'] = {'method': 'GET', 'route': '/search', 'le': label}
+                if key == 'values':
+                    row['metric']['__name__'] = 'portal_http_request_duration_seconds_bucket'
+            _, clean, _ = module.checked_payload(payload, date(2026, 10, 28))
+            self.assertEqual(clean['search']['values']['data']['result'][0]['metric']['le'], wanted)
+
+    def test_prune_recovers_full_old_store_without_incoming_snapshot(self):
+        from unittest.mock import patch
+        module = self.module()
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / 'archive'; module.initialize(folder)
+            module.archive(self.payload(), folder, today=date(2026, 10, 28))
+            with patch.object(module, 'QUOTA', 1):
+                self.assertEqual(module.prune_expired(folder, today=date(2026, 12, 1))['expired_removed'], 1)
+            self.assertEqual(module.verify(folder, today=date(2026, 12, 1))['present_days'], 0)
+            with self.assertRaises(ValueError):
+                module.archive(self.payload(), folder, today=date(2026, 12, 1), prune=True)
+            self.assertFalse((folder / '2026-10-26.json.gz').exists())
+
+    def test_expired_replacement_is_preserved_instead_of_deleted(self):
+        from unittest.mock import patch
+        module = self.module()
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / 'archive'; module.initialize(folder)
+            module.archive(self.payload(), folder, today=date(2026, 10, 28))
+            real = module.entries
+            def replace(directory, today, held=None, enforce_quota=True):
+                result = real(directory, today, held, enforce_quota)
+                target = folder / '2026-10-26.json.gz'
+                target.unlink(); target.write_bytes(b'keep-new-file')
+                return result
+            with patch.object(module, 'entries', side_effect=replace):
+                with self.assertRaises(ValueError):
+                    module.prune_expired(folder, today=date(2026, 12, 1))
+            self.assertEqual((folder / '2026-10-26.json.gz').read_bytes(), b'keep-new-file')
+
+    def test_installation_stays_suspended_without_secret_or_api_token_mounts(self):
+        import yaml
+        path = ROOT / 'infra/k8s/slo-evidence/archive/cronjob.yaml'
+        pvc, cron = list(yaml.safe_load_all(path.read_text()))
+        self.assertEqual(pvc['kind'], 'PersistentVolumeClaim')
+        self.assertTrue(cron['spec']['suspend'])
+        self.assertEqual(cron['spec']['concurrencyPolicy'], 'Forbid')
+        pod = cron['spec']['jobTemplate']['spec']['template']['spec']
+        self.assertFalse(pod['automountServiceAccountToken'])
+        self.assertEqual(pod['securityContext']['runAsUser'], 10001)
+        self.assertEqual(len(pod['volumes']), 1)
+        self.assertNotIn('secret', pod['volumes'][0])
+        container = pod['containers'][0]
+        self.assertTrue(container['securityContext']['readOnlyRootFilesystem'])
+        self.assertEqual(container['imagePullPolicy'], 'Never')
+        self.assertNotIn('envFrom', container)
+
+    def test_cli_deflate_and_http_protocol_errors_never_echo_source_details(self):
+        from unittest.mock import patch
+        from contextlib import redirect_stdout, redirect_stderr
+        from http.client import IncompleteRead, BadStatusLine
+        import io
+        module = self.module()
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / 'archive'; module.initialize(folder)
+            (folder / '2026-10-26.json.gz').write_bytes(bytes.fromhex('1f8b0800000000000003') + b'\xff' * 20)
+            error = io.StringIO()
+            with redirect_stderr(error), redirect_stdout(io.StringIO()):
+                self.assertEqual(module.main(['--verify', '--directory', str(folder)]), 1)
+            self.assertEqual(error.getvalue().strip(), 'slo_observation_archive=FAIL reason=invalid_input_or_storage')
+            for exception in (IncompleteRead(b'never-echo-this', 100), BadStatusLine('never-echo-this')):
+                error = io.StringIO()
+                with patch.object(module, 'urlopen', side_effect=exception), redirect_stderr(error), redirect_stdout(io.StringIO()):
+                    self.assertEqual(module.main(['--collect', '--date', '2026-10-26', '--directory', str(folder)]), 1)
+                self.assertNotIn('never-echo-this', error.getvalue())
+                self.assertNotIn(str(folder), error.getvalue())
+
+
 if __name__ == '__main__':
     unittest.main()

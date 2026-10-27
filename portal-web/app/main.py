@@ -10,6 +10,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.routers import admin, dashboard, files, portfolio
 from app.services.http_metrics import HttpMetrics
+from app.services.global_search import SEARCH_METRICS
 from app.services.security import SECURITY_HEADERS
 
 app = FastAPI(title="Personal Server Portal")
@@ -174,7 +175,7 @@ def internal_metrics(request: Request):
     if not configured_token or not hmac.compare_digest(authorization, f"Bearer {configured_token}"):
         return PlainTextResponse("Not Found\n", status_code=404)
     return Response(
-        content=_HTTP_METRICS.render(),
+        content=_HTTP_METRICS.render() + SEARCH_METRICS.render(),
         headers={"content-type": "text/plain; version=0.0.4"},
     )
 

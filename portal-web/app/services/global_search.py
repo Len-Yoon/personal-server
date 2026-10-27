@@ -1,10 +1,11 @@
 import asyncio
 import os
+from collections import Counter
+from threading import RLock
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
 import httpx
-
 
 DEFAULT_ENDPOINTS = {
     "news": "http://crawler-worker:8001/api/search",
@@ -13,6 +14,60 @@ DEFAULT_ENDPOINTS = {
 }
 SEARCH_BUDGET_SECONDS = 1.5
 SEARCH_SOURCES = ("news", "youtube", "books")
+SOURCE_OUTCOMES = (
+    "ok", "timeout", "http_error", "invalid_response", "transport_error", "internal_error", "cancelled",
+)
+REQUEST_OUTCOMES = ("complete", "partial", "failed", "cancelled")
+
+
+class SearchMetrics:
+    """Process-local counters; stdlib-only to retain standalone lab loading."""
+
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._sources: Counter[tuple[str, str]] = Counter({
+            (source, outcome): 0
+            for source in SEARCH_SOURCES for outcome in SOURCE_OUTCOMES
+        })
+        self._requests: Counter[str] = Counter({outcome: 0 for outcome in REQUEST_OUTCOMES})
+
+    def record(self, outcomes: dict[str, str], *, cancelled: bool = False) -> None:
+        if not outcomes or any(
+            source not in SEARCH_SOURCES or outcome not in SOURCE_OUTCOMES
+            for source, outcome in outcomes.items()
+        ):
+            raise ValueError("invalid search metric labels")
+        successful = sum(value == "ok" for value in outcomes.values())
+        outcome = "complete" if successful == len(outcomes) else "partial" if successful else "failed"
+        if cancelled:
+            outcome = "cancelled"
+        with self._lock:
+            self._requests[outcome] += 1
+            for source, result in outcomes.items():
+                self._sources[(source, result)] += 1
+
+    def render(self) -> str:
+        with self._lock:
+            requests = dict(self._requests)
+            sources = dict(self._sources)
+        lines = [
+            "# HELP portal_search_requests_total Real nonblank search executions by completeness of requested sources.",
+            "# TYPE portal_search_requests_total counter",
+        ]
+        for outcome, count in sorted(requests.items()):
+            lines.append(f'portal_search_requests_total{{outcome="{outcome}"}} {count}')
+        lines.extend([
+            "# HELP portal_search_source_requests_total Requested search source outcomes, including deadline timeouts.",
+            "# TYPE portal_search_source_requests_total counter",
+        ])
+        for (source, outcome), count in sorted(sources.items()):
+            lines.append(
+                f'portal_search_source_requests_total{{outcome="{outcome}",source="{source}"}} {count}'
+            )
+        return "\n".join(lines) + "\n"
+
+
+SEARCH_METRICS = SearchMetrics()
 
 
 async def search_all(
@@ -46,25 +101,43 @@ async def _search_parallel(
     sources: tuple[str, ...],
 ) -> dict[str, dict[str, object]]:
     results = {name: {"items": [], "status": "unavailable"} for name in sources}
-    async with httpx.AsyncClient(timeout=SEARCH_BUDGET_SECONDS, follow_redirects=True) as client:
-        tasks = {
-            name: asyncio.create_task(_fetch_results(
-                client, name, _endpoint(name), query, limit,
-                public_base_urls, local_base_urls, prefer_local,
-            ))
-            for name in sources
-        }
-        try:
-            done, _ = await asyncio.wait(tasks.values(), timeout=SEARCH_BUDGET_SECONDS)
-            for name, task in tasks.items():
-                if task in done:
-                    results[name] = task.result()
-        finally:
-            # Drain cancellations before closing the client or the event loop.
-            for task in tasks.values():
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks.values(), return_exceptions=True)
+    outcomes = {name: "internal_error" for name in sources}
+    cancelled = False
+    try:
+        async with httpx.AsyncClient(timeout=SEARCH_BUDGET_SECONDS, follow_redirects=True) as client:
+            tasks = {
+                name: asyncio.create_task(_fetch_results(
+                    client, name, _endpoint(name), query, limit,
+                    public_base_urls, local_base_urls, prefer_local,
+                ))
+                for name in sources
+            }
+            try:
+                await asyncio.wait(tasks.values(), timeout=SEARCH_BUDGET_SECONDS)
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            finally:
+                # Freeze outcomes before draining: a late result after cancellation
+                # must not turn an expired request into a successful observation.
+                for name, task in tasks.items():
+                    if not task.done() or task.cancelled():
+                        outcomes[name] = "cancelled" if cancelled else "timeout"
+                        task.cancel()
+                    else:
+                        try:
+                            results[name], outcomes[name] = task.result()
+                        except Exception:
+                            outcomes[name] = "internal_error"
+                await asyncio.gather(*tasks.values(), return_exceptions=True)
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
+    except Exception:
+        # Client setup/teardown failures retain the public degraded-result contract.
+        pass
+    finally:
+        SEARCH_METRICS.record(outcomes, cancelled=cancelled)
     return results
 
 
@@ -82,7 +155,7 @@ async def _fetch_results(
     public_base_urls: dict[str, str] | None = None,
     local_base_urls: dict[str, str] | None = None,
     prefer_local: bool = False,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], str]:
     url = f"{endpoint}?{urlencode({'q': query, 'limit': limit})}"
     try:
         response = await client.get(url)
@@ -105,9 +178,18 @@ async def _fetch_results(
                 for item in results
             ],
             "status": "ok",
-        }
+        }, "ok"
+    except httpx.TimeoutException:
+        outcome = "timeout"
+    except httpx.HTTPStatusError:
+        outcome = "http_error"
+    except httpx.RequestError:
+        outcome = "transport_error"
+    except ValueError:
+        outcome = "invalid_response"
     except Exception:
-        return {"items": [], "status": "unavailable"}
+        outcome = "internal_error"
+    return {"items": [], "status": "unavailable"}, outcome
 
 
 def _normalize_result_url(
