@@ -45,7 +45,7 @@
 
 | 대상 | SLI | 데이터 원본 | 제안 SLO | 30일 에러 버짓 | 상태 |
 |---|---|---|---:|---:|---|
-| 공개 Portal | 완료된 외부 health 점검 중 `https://len.pe.kr/health`가 성공한 비율 | GitHub Actions `Public Portal Uptime Monitor` | 99.5% | 약 43회 점검 실패 또는 약 215분 | 30일 관측 누락으로 산정 보류 |
+| 공개 Portal | 완료된 Portal 개별 외부 health 점검의 성공 비율 초안 | GitHub Actions `Public Portal Uptime Monitor` | 99.5% | 약 43회 점검 실패 또는 약 215분 | 현재 4종 묶음 단계·관측 누락으로 Portal 개별 SLO 산정 보류 |
 | K3s Portal | Prometheus 관측값 중 `portal-web`의 available replica가 1 이상인 비율 | kube-state-metrics | 99.5% | 약 216분 | 30일 원시 지표 미보존·계획 정지 해석 보류 |
 | 뉴스 수집 | 초기화된 뉴스 수집이 30분 이내 성공했고 연속 실패도 3회 미만인 관측 비율 | `crawler_news_collection_*` metrics | 99.0% | 약 432분 | 30일 원시 지표 미보존 |
 | Compose 웹 서비스 | HTTP 성공률 및 p95 응답시간 | 없음 | 확정하지 않음 | 산정 불가 | 2차 계측 필요 |
@@ -60,8 +60,9 @@
 SLI = 성공한 외부 health 점검 횟수 / 완료된 외부 health 점검 횟수 × 100
 ```
 
-- 성공: workflow의 `Check public Portal health` 단계가 성공한 경우임.
-- 실패: 해당 단계가 실패한 경우임.
+- 현재 workflow의 단계 이름은 `Check public service health`이며 Portal·News·YouTube·Book 4종을 한 단계에서 조회함. 단계 성공은 네 curl 요청이 모두 성공했다는 근거이나, 단계 실패만으로 Portal 개별 실패를 확정할 수 없음.
+- 단계는 `continue-on-error: true`이므로 workflow 전체 success를 health 단계 성공으로 대용하지 않음. 단계의 표시 conclusion과 원시 outcome도 구분함. 기존 후속 script에 렌더링된 `steps.health.outcome` 로그 등 직접 증거로 4종 묶음 결과를 대조하며 원시 근거가 없으면 확인 필요로 남김.
+- curl은 HTTP 오류/접속 실패를 검사하지만 JSON status·본문·업무 기능 성공을 검증하지 않음. Portal 개별 SLI는 별도 서비스별 증거가 있는 범위에서만 산정함. 목표 초안·운영 workflow는 이번 문서 보완으로 변경하지 않음.
 - 관측 불가: workflow 자체가 실행되지 않았거나 결과를 조회할 수 없는 경우임. 성공률에서 제외하지 않고 별도 누락 건수로 기록함.
 
 ### 2. K3s Portal Ready 가용성
@@ -140,6 +141,12 @@ Portal 홈의 검색 질의가 있는 `GET /` 요청은 Prometheus에서 고정�
 - 99.5%와 99.0% 목표는 현재 운영 신호를 바탕으로 한 초안이며, 30일 기준선 수집 뒤 조정 필요함.
 
 ## 후속 조치
+
+### 2026-10-27 표본 범위·복원 준비 보완
+
+[검색 SLI 정의](20261027_Portal검색_SLI정의.md)에 HTTP 성공·5xx·p95·의존 검색 완전성의 분자·분모·누락 조건을 구분함. 새 [표본 분석 도구](../infra/k8s/tools/slo-sample-summary.py)는 저장한 replica/원본 timestamp matrix를 읽어 누락·신선도·원시 실패를 분리하며 정확한 중단 시간·에러 버짓은 계산하지 않음.
+
+실제 7일 요청 구간은 60초 간격 평가 10,081개 중 7,946개만 유효하며 missing 2,135개임. 실효 보존은 `1w or 3GiB`, 가장 오래된 저장 시각은 10/21 21:00 KST로 확인함. 설정이 7일이어도 요청한 7일 전체 관측이 확보된 것은 아니므로 coverage 78.8215%를 함께 표시하고 기간 성공률은 보류함. [통합 검증 기록](reviews/20261027_V1_신뢰성고도화_검증결과.md)에 실제 자료·실패 보완·운영 미변경·미완료 경계를 기록함.
 
 ### 2026-10-05 읽기 전용 집계 보강
 
