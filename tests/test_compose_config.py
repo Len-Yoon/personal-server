@@ -367,6 +367,43 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn("docs/codex-work-loop.md", instructions)
         self.assertIn("## Skill routing", instructions)
 
+    def test_reliability_validation_keeps_hosted_source_and_credential_boundaries(self):
+        import ast
+
+        text = (ROOT / '.github/workflows/reliability-validation.yml').read_text()
+        workflow = yaml.safe_load(text)
+        self.assertEqual(workflow['permissions'], {'contents': 'read'})
+        events = workflow.get('on', workflow.get(True))
+        self.assertEqual(set(events), {'pull_request', 'push'})
+        self.assertEqual(events['push']['branches'], ['main'])
+        dependencies = {'portal-web/**', 'book-memo/app/**', 'book-memo/tools/**',
+                        'book-memo/Dockerfile', 'book-memo/requirements.txt',
+                        'infra/k8s/tools/slo-observation-archive.py',
+                        'infra/k8s/tools/slo-sample-summary.py',
+                        'infra/k8s/slo-evidence/archive/**'}
+        for event in events.values():
+            self.assertTrue(dependencies <= set(event['paths']))
+        job = workflow['jobs']['isolated-release-validation']
+        self.assertEqual(job['runs-on'], 'ubuntu-latest')
+        self.assertLessEqual(job['timeout-minutes'], 45)
+        self.assertIn('head.repo.full_name == github.repository', job['if'])
+        checkout = next(step for step in job['steps'] if step.get('uses', '').startswith('actions/checkout@'))
+        self.assertIs(checkout['with']['persist-credentials'], False)
+        self.assertEqual(checkout['with']['ref'], '${{ env.SOURCE_SHA }}')
+        self.assertEqual(job['env']['SOURCE_SHA'], '${{ github.event.pull_request.head.sha || github.sha }}')
+        self.assertNotIn('secrets.', text)
+        self.assertNotIn('self-hosted', text)
+        self.assertNotIn('ignore-unfixed', text)
+        self.assertNotIn('skip-db-update', text)
+        self.assertRegex(text, r'moby/buildkit:[^\s]+@sha256:[0-9a-f]{64}')
+        build = next(step['run'] for step in job['steps'] if step['name'].startswith('Build source-bound'))
+        embedded = build.split("<<'PYTHON'\n", 1)[1].rsplit('\nPYTHON', 1)[0]
+        ast.parse(embedded)
+        scanner = next(step for step in job['steps'] if step['name'].startswith('Scan the exact'))
+        self.assertRegex(scanner['env']['TRIVY_SHA256'], r'^[0-9a-f]{64}$')
+        self.assertIn('--severity HIGH,CRITICAL', scanner['run'])
+        self.assertIn('--exit-code 1', scanner['run'])
+
     def test_agent_review_workflow_enforces_pull_request_policy(self):
         workflow = (ROOT / ".github" / "workflows" / "agent-review.yml").read_text(encoding="utf-8")
 

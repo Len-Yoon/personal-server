@@ -1,0 +1,232 @@
+name: Reliability release validation
+permissions:
+  contents: read
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/reliability-validation.yml'
+      - 'portal-web/**'
+      - 'book-memo/app/**'
+      - 'book-memo/tools/**'
+      - 'book-memo/Dockerfile'
+      - 'book-memo/requirements.txt'
+      - 'infra/k8s/tools/slo-observation-archive.py'
+      - 'infra/k8s/tools/slo-sample-summary.py'
+      - 'infra/k8s/slo-evidence/archive/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/reliability-validation.yml'
+      - 'portal-web/**'
+      - 'book-memo/app/**'
+      - 'book-memo/tools/**'
+      - 'book-memo/Dockerfile'
+      - 'book-memo/requirements.txt'
+      - 'infra/k8s/tools/slo-observation-archive.py'
+      - 'infra/k8s/tools/slo-sample-summary.py'
+      - 'infra/k8s/slo-evidence/archive/**'
+concurrency:
+  group: reliability-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+jobs:
+  isolated-release-validation:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      BUILDER_NAME: reliability-${{ github.run_id }}-${{ github.run_attempt }}
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Check out exact source without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Validate source and create an owned local builder
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          [[ "$(docker context inspect default --format '{{.Endpoints.docker.Host}}')" == 'unix:///var/run/docker.sock' ]]
+          mkdir -m 700 "$RUNNER_TEMP/reliability"
+          docker --context default buildx create --name "$BUILDER_NAME" --driver docker-container \
+            --driver-opt image=moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea --use unix:///var/run/docker.sock
+      - name: Restore synthetic Book data into a fresh volume and container
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B book-memo/tools/independent_restore_lab.py --run --deadline 600 \
+            --output "$RUNNER_TEMP/reliability/restore.json" \
+            --jsonl "$RUNNER_TEMP/reliability/restore.jsonl" \
+            > "$RUNNER_TEMP/reliability/restore.log" 2>&1
+      - name: Build source-bound AMD64 OCI images and probe matching configurations
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PYTHON'
+          import subprocess,json,pathlib,hashlib,tarfile,os,tempfile,stat
+          repo=pathlib.Path(os.environ['GITHUB_WORKSPACE']);out=pathlib.Path(os.environ['RUNNER_TEMP'])/'reliability'/'images';out.mkdir(mode=0o700)
+          docker='/usr/bin/docker';env={'PATH':os.defpath+':/usr/local/bin:/opt/homebrew/bin','HOME':str(pathlib.Path.home()),'LC_ALL':'C'}
+          def cmd(args,**kw):return subprocess.run([docker]+args,capture_output=True,text=True,env=env,timeout=30,**kw)
+          ctx=cmd(['context','show']);assert ctx.returncode==0;context=ctx.stdout.strip()
+          endpoint=cmd(['context','inspect',context,'--format','{{.Endpoints.docker.Host}}']);assert endpoint.returncode==0 and endpoint.stdout.strip().startswith('unix://')
+          builder=cmd(['--context',context,'buildx','inspect',os.environ['BUILDER_NAME']]);assert builder.returncode==0
+          lines=[line.strip() for line in builder.stdout.splitlines()]
+          drivers=[line.split(':',1)[1].strip() for line in lines if line.startswith('Driver:')]
+          endpoints=[line.split(':',1)[1].strip() for line in lines if line.startswith('Endpoint:')]
+          assert len(drivers)==1 and drivers[0] in ('docker','docker-container') and endpoints
+          for ep in endpoints:
+           if ep.startswith('unix://'):assert ep==endpoint.stdout.strip()
+           else:
+            q=cmd(['context','inspect',ep,'--format','{{.Endpoints.docker.Host}}']);assert q.returncode==0 and q.stdout.strip()==endpoint.stdout.strip()
+          owner=os.environ['GITHUB_RUN_ID']+'-'+os.environ['GITHUB_RUN_ATTEMPT'];assert owner.replace('-','').isdigit()
+          source=subprocess.check_output(['git','rev-parse','HEAD'],cwd=repo,text=True).strip();assert not subprocess.check_output(['git','status','--porcelain'],cwd=repo,text=True)
+          def sha_file(p):
+           h=hashlib.sha256()
+           with p.open('rb') as f:
+            for chunk in iter(lambda:f.read(1024*1024),b''):h.update(chunk)
+           return h.hexdigest()
+          for app in ['portal-web','slo-observation-archive']:
+           target=out/(app+'.oci.tar');docker_archive=out/(app+'.docker.tar');assert not target.exists() and not docker_archive.exists()
+           tag='personal-server-'+app+':'+source
+           with tempfile.TemporaryDirectory(prefix='phase2-image-context-') as scratch:
+            root=pathlib.Path(scratch);files={}
+            if app=='portal-web':
+             records=subprocess.check_output(['git','ls-tree','-r',source,'--','portal-web'],cwd=repo,text=True).splitlines()
+             selected=[]
+             for line in records:
+              meta,path=line.split('\t');assert meta.split()[0] in ('100644','100755');selected.append((path,path.removeprefix('portal-web/')))
+             dockerfile='Dockerfile'
+            else:
+             selected=[(p,p) for p in ['infra/k8s/slo-evidence/archive/Dockerfile','infra/k8s/tools/slo-sample-summary.py','infra/k8s/tools/slo-observation-archive.py']];dockerfile=selected[0][0]
+            for path,relative in selected:
+             assert '..' not in pathlib.PurePosixPath(relative).parts
+             data=subprocess.check_output(['git','show',source+':'+path],cwd=repo);files[path]=hashlib.sha256(data).hexdigest()
+             dest=root/relative;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(data)
+            assert sum((p.stat().st_size for p in root.rglob('*') if p.is_file()))<32*1024*1024
+            args=[docker,'--context',context,'buildx','build','--builder',os.environ['BUILDER_NAME'],'--label','ci.reliability.owner='+owner,'--provenance=false','--platform','linux/amd64','--label','org.opencontainers.image.revision='+source,'--tag',tag,'--file',str(root/dockerfile),'--output','type=oci,dest='+str(target)+',annotation-manifest-descriptor.io.personal-server.image-ref='+tag,'--output','type=docker,dest='+str(docker_archive),str(root)]
+            with (out/(app+'-build.log')).open('w') as stream:r=subprocess.run(args,env=env,stdout=stream,stderr=subprocess.STDOUT,timeout=600)
+            if r.returncode:print(json.dumps({'app':app,'build':'FAIL'}),flush=True);raise SystemExit(1)
+           with tarfile.open(target) as archive:
+            members=archive.getmembers();names=[x.name for x in members];assert len(set(names))==len(names)
+            def blob(descriptor,retain=True):
+             algo,key=descriptor['digest'].split(':');assert algo=='sha256' and len(key)==64
+             member=archive.getmember('blobs/sha256/'+key);assert member.isfile() and member.size==descriptor['size'] and member.size<1024*1024*1024
+             h=hashlib.sha256();parts=[]
+             with archive.extractfile(member) as f:
+              for block in iter(lambda:f.read(1024*1024),b''):h.update(block);parts.append(block) if retain else None
+             assert h.hexdigest()==key;return b''.join(parts)
+            idx=json.load(archive.extractfile('index.json'));assert len(idx['manifests'])==1
+            descriptor=idx['manifests'][0];manifest=json.loads(blob(descriptor));config=json.loads(blob(manifest['config']))
+            assert config['architecture']=='amd64' and config['os']=='linux' and config['config']['Labels']['org.opencontainers.image.revision']==source
+            for layer in manifest['layers']:blob(layer,False)
+            record={'source':source,'image':tag,'platform':'linux/amd64','archive_sha256':sha_file(target),'manifest_digest':descriptor['digest'],'config_digest':manifest['config']['digest'],'source_files':files}
+            (out/(app+'.json')).write_text(json.dumps(record,indent=2))
+            print(json.dumps({'app':app,'build':'PASS','manifest':record['manifest_digest'],'source':source}),flush=True)
+           assert config['config']['User']=='10001:10001' and config['config']['Labels']['ci.reliability.owner']==owner
+           load_attempted=False;create_attempted=False;cid=None;name='reliability-'+owner+'-'+app
+           def inspect_owned(target):
+            r=cmd(['container','inspect',target]);assert r.returncode==0
+            v=json.loads(r.stdout)[0]
+            assert len(v['Id'])==64 and all(c in '0123456789abcdef' for c in v['Id'])
+            assert v['Name']=='/'+name and v['Config']['Labels']['ci.reliability.owner']==owner and v['Image']==manifest['config']['digest']
+            assert cid is None or v['Id']==cid
+            assert v['Config']['User']=='10001:10001' and v['HostConfig']['NetworkMode']=='none' and v['HostConfig']['ReadonlyRootfs'] and not v['HostConfig']['PortBindings']
+            return v
+           try:
+            load_attempted=True;r=cmd(['load','--input',str(docker_archive)]);assert r.returncode==0
+            r=cmd(['image','inspect',tag]);assert r.returncode==0
+            assert json.loads(r.stdout)[0]['Id']==manifest['config']['digest']
+            if app=='portal-web':
+             probe="from app.services.global_search import SearchMetrics; m=SearchMetrics(); assert len([v for v in m.render().splitlines() if v and not v.startswith('#')])==25; m.record({'news':'ok','youtube':'timeout','books':'ok'}); assert 'outcome=\"partial\"} 1' in m.render(); print('packaged_search_counter=PASS')"
+            else:
+             probe="import runpy,subprocess,sys,json; p='/opt/observations/slo-observation-archive.py'; m=runpy.run_path(p); m['initialize']('/tmp/private-archive'); r=subprocess.run([sys.executable,'-B',p,'--directory','/tmp/private-archive','--verify'],capture_output=True,text=True,timeout=10); assert r.returncode==0; v=json.loads(r.stdout); assert v['present_days']==0 and len(v['missing_dates'])==35 and v['slo_budget']=='not_calculable'; print('empty_private_archive_cli=PASS')"
+            create_attempted=True
+            r=cmd(['create','--name',name,'--label','ci.reliability.owner='+owner,'--network','none','--user','10001:10001','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','64','--memory','256m','--cpus','1','--env','PYTHONDONTWRITEBYTECODE=1','--tmpfs','/tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777','--entrypoint','python3',manifest['config']['digest'],'-B','-c',probe]);assert r.returncode==0
+            cid=r.stdout.strip();assert len(cid)==64 and all(c in '0123456789abcdef' for c in cid);inspect_owned(cid)
+            r=cmd(['start','-a',cid]);(out/(app+'-runtime.log')).write_text(r.stdout+r.stderr);assert r.returncode==0
+            v=inspect_owned(cid);assert not v['State']['Running'] and v['State']['ExitCode']==0
+            record['runtime_probe']='packaged_search_counter' if app=='portal-web' else 'empty_private_archive_cli'
+            record['runtime_config_digest']=v['Image'];assert v['Image']==manifest['config']['digest']
+           finally:
+            cleanup={'status':'unconfirmed','container_create_attempted':create_attempted,'image_load_attempted':load_attempted,'errors':[]}
+            try:
+             if create_attempted:
+              r=cmd(['container','ls','-aq','--no-trunc','--filter','name=^/'+name+'$']);assert r.returncode==0
+              found=r.stdout.split();assert len(found)<=1
+              if found:
+               v=inspect_owned(found[0]);cid=v['Id']
+               if v['State']['Running']:
+                r=cmd(['stop','--time','5',cid]);assert r.returncode==0;assert not inspect_owned(cid)['State']['Running']
+               r=cmd(['rm',cid]);assert r.returncode==0
+              r=cmd(['container','ls','-aq','--no-trunc','--filter','name=^/'+name+'$']);assert r.returncode==0 and not r.stdout.strip()
+            except BaseException:
+             cleanup['errors'].append('container_cleanup_unconfirmed')
+            try:
+             if load_attempted:
+              r=cmd(['image','ls','-q','--no-trunc','--filter','reference='+tag]);assert r.returncode==0
+              found=r.stdout.split();assert len(found)<=1
+              if found:
+               r=cmd(['image','inspect',tag]);assert r.returncode==0;v=json.loads(r.stdout)[0]
+               assert v['Id']==manifest['config']['digest'] and v['Config']['Labels']['ci.reliability.owner']==owner
+               r=cmd(['image','rm',tag]);assert r.returncode==0
+              r=cmd(['image','ls','-q','--no-trunc','--filter','reference='+tag]);assert r.returncode==0 and not r.stdout.strip()
+            except BaseException:
+             cleanup['errors'].append('image_cleanup_unconfirmed')
+            if not cleanup['errors']:cleanup['status']='PASS'
+            (out/(app+'-cleanup.json')).write_text(json.dumps(cleanup,indent=2))
+            if cleanup['errors']:raise RuntimeError('owned_cleanup_unconfirmed')
+           record['runtime_probe_status']='PASS';record['owned_runtime_cleanup']='PASS'
+           (out/(app+'.json')).write_text(json.dumps(record,indent=2))
+          PYTHON
+      - name: Scan the exact OCI archives with a pinned official tool
+        env:
+          TRIVY_VERSION: '0.76.1'
+          TRIVY_SHA256: 'c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -m 700 "$RUNNER_TEMP/reliability/tools"
+          archive="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --connect-timeout 10 --max-time 120 \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${archive}" \
+            -o "$RUNNER_TEMP/reliability/tools/$archive"
+          printf '%s  %s\n' "$TRIVY_SHA256" "$RUNNER_TEMP/reliability/tools/$archive" | sha256sum --check --strict -
+          tar -xzf "$RUNNER_TEMP/reliability/tools/$archive" -C "$RUNNER_TEMP/reliability/tools" --no-same-owner --no-same-permissions trivy
+          chmod 700 "$RUNNER_TEMP/reliability/tools/trivy"
+          for app in portal-web slo-observation-archive; do
+            "$RUNNER_TEMP/reliability/tools/trivy" image --timeout 5m \
+              --cache-dir "$RUNNER_TEMP/reliability/trivy-cache" \
+              --input "$RUNNER_TEMP/reliability/images/$app.oci.tar" \
+              --scanners vuln --severity HIGH,CRITICAL --format json --exit-code 1 \
+              --output "$RUNNER_TEMP/reliability/images/$app-trivy.json"
+          done
+      - name: Remove only this run's builder
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BUILDER_NAME" =~ ^reliability-[0-9]+-[0-9]+$ ]]
+          docker --context default buildx rm "$BUILDER_NAME"
+      - name: Preserve validation evidence and exact OCI archives
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: reliability-release-${{ env.SOURCE_SHA }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/reliability/restore.json
+            ${{ runner.temp }}/reliability/restore.jsonl
+            ${{ runner.temp }}/reliability/restore.log
+            ${{ runner.temp }}/reliability/images/*.json
+            ${{ runner.temp }}/reliability/images/*.log
+            ${{ runner.temp }}/reliability/images/*.oci.tar
