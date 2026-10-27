@@ -19,6 +19,9 @@ EXPECTED_WORKFLOW_ACTIONS = {
     "actions/github-script": ("f28e40c7f34bde8b3046d885e986cb6290c5673b", "v7"),
 }
 EXPECTED_DOCKERFILE_BASE_IMAGES = {
+    "infra/k8s/slo-evidence/archive/Dockerfile": (
+        "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
+    ),
     "infra/k8s/backup-automation/Dockerfile": (
         "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
     ),
@@ -65,6 +68,7 @@ EXPECTED_DOCKERFILE_BASE_IMAGES = {
 ALPINE_APP_SERVICES = frozenset({"portal-web", "book-memo", "youtube-memo", "crawler-worker", "homeops-executor", "system-agent", "car-care-worker"})
 DOCKERFILE_DIGEST_TARGETS = frozenset(
     {
+        "infra/k8s/slo-evidence/archive/Dockerfile",
         "book-memo/Dockerfile",
         "car-care-worker/Dockerfile",
         "crawler-worker/Dockerfile",
@@ -165,7 +169,7 @@ class ComposeConfigTests(unittest.TestCase):
             if ".worktrees" not in path.relative_to(ROOT).parts
         }
         self.assertEqual(DOCKERFILE_DIGEST_POLICY_EXCLUSIONS, {"caddy/Dockerfile"})
-        self.assertEqual(len(DOCKERFILE_DIGEST_TARGETS), 14)
+        self.assertEqual(len(DOCKERFILE_DIGEST_TARGETS), 15)
         self.assertIn("sre-telegram-relay/Dockerfile", DOCKERFILE_DIGEST_TARGETS)
         self.assertEqual(set(EXPECTED_DOCKERFILE_BASE_IMAGES), DOCKERFILE_DIGEST_TARGETS)
         self.assertEqual(
@@ -194,6 +198,7 @@ class ComposeConfigTests(unittest.TestCase):
                             'infra/k8s/backup-automation/youtube-memo/Dockerfile',
                             'infra/k8s/sre-audit-automation/Dockerfile',
                             'infra/k8s/slo-evidence/Dockerfile',
+                            'infra/k8s/slo-evidence/archive/Dockerfile',
                             'sre-telegram-relay/Dockerfile',
                         }):
                     self.assertRegex(images[0], r"^python:\d+\.\d+-alpine3\.24@sha256:[0-9a-f]{64}$")

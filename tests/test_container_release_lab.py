@@ -218,3 +218,189 @@ class ContainerContextTests(unittest.TestCase):
                 self.assertEqual((contexts/'v1/requirements.txt').read_text(),'new==2')
                 self.assertEqual(first['files']['Dockerfile'],second['files']['Dockerfile'])
                 with self.assertRaises(ValueError):lab.prepare_context(contexts/'v1',old,new,time.monotonic()+10,lambda:False)
+
+
+def restore_module():
+    module()
+    return importlib.import_module('independent_restore_lab')
+
+
+class RestoreDocker(FakeDocker):
+    wrong_mount=False
+    wrong_uid=False
+    corrupt_restore=False
+    restore_failure=False
+    def payload(self):
+        lab=restore_module()
+        tables={name:[] for name in lab.TABLES};tables['books']=[[1,'synthetic']]
+        schema=[['table','books','books','CREATE TABLE books(id,name)']]
+        state=super().probe(self.active[0],'snapshot')
+        state['snapshot_hash']=lab.digest(tables);state['schema_hash']=lab.digest(schema)
+        return {'schema_version':1,'tables':tables,'schema':schema,'state':state}
+    def export_snapshot(self,container):return self.payload()
+    def probe(self,container,op):
+        result=super().probe(container,op)
+        if op in ('seed','snapshot') and self.volumes[self.active[1]]==1:
+            result=self.payload()['state']
+        return result
+    def restore_snapshot(self,container,payload):
+        self.calls.append(('restore',container))
+        if self.restore_failure:raise RuntimeError('fixture_restore_failed')
+        self.volumes[self.active[1]]=1
+        result=self.probe(container,'snapshot')
+        if self.corrupt_restore:result['snapshot_hash']='f'*64
+        return result
+    def restore_evidence(self,container):
+        _,volume,role=self.active
+        return {'container_id':container,'image_id':self.images[role]['id'],'volume_name':volume,
+                'mount_volume_names':['volume0' if self.wrong_mount and volume=='volume1' else volume],
+                'owner_verified':True,'user':'0:0' if self.wrong_uid else '10001:10001',
+                'network':'none','readonly_root':True,'published_ports':False}
+
+
+class IndependentRestoreTests(unittest.TestCase):
+    def setUp(self):
+        RestoreDocker.instances=[]
+        RestoreDocker.cleanup_ok=True
+        for name in ('wrong_mount','wrong_uid','corrupt_restore','restore_failure','fail_stop','fail_rollback','schema_drift','wrong_identity'):
+            setattr(RestoreDocker,name,False)
+    def run_fake(self,interrupted=lambda:False):
+        lab=restore_module()
+        with patch.object(lab,'prepare_context',side_effect=lambda path,commit,build_commit,*args:descriptor('v2',commit,build_commit)):
+            return lab.run_lab(time.monotonic()+20,interrupted,engine_factory=RestoreDocker)
+    def test_restore_uses_fresh_destination_and_accounts_lost_ack_write(self):
+        report=self.run_fake()
+        self.assertTrue(report['valid'],report)
+        self.assertNotEqual(report['source']['container_id'],report['destination']['container_id'])
+        self.assertNotEqual(report['source']['volume_name'],report['destination']['volume_name'])
+        self.assertNotIn(report['source']['volume_name'],report['destination']['mount_volume_names'])
+        self.assertEqual(report['recovery']['lost_acknowledged_writes'],1)
+        self.assertEqual(report['restored_state']['memo_version'],1)
+        self.assertEqual(report['additional_acknowledged_write']['state']['memo_version'],2)
+        self.assertGreaterEqual(report['recovery']['rto_seconds'],0)
+        self.assertTrue(report['cleanup']['ok'] and report['fixture_removed'])
+        self.assertEqual(report['image_archive_export_import'],'not_exercised')
+    def test_restore_wrong_uid_or_source_mount_fails_closed(self):
+        for name in ('wrong_uid','wrong_mount'):
+            with self.subTest(name=name):
+                setattr(RestoreDocker,name,True)
+                report=self.run_fake()
+                self.assertFalse(report['valid'])
+                self.assertFalse(any(call[0]=='restore' for call in RestoreDocker.instances[-1].calls))
+                setattr(RestoreDocker,name,False)
+    def test_restore_corrupt_or_failed_restore_still_cleans_owned_resources(self):
+        for name in ('corrupt_restore','restore_failure'):
+            with self.subTest(name=name):
+                setattr(RestoreDocker,name,True)
+                report=self.run_fake()
+                self.assertFalse(report['valid'])
+                self.assertTrue(report['cleanup']['ok'] and report['fixture_removed'])
+                self.assertEqual(len([c for c in RestoreDocker.instances[-1].calls if c[0]=='restore']),1)
+                setattr(RestoreDocker,name,False)
+    def test_tampered_bundle_is_rejected_before_destination_creation(self):
+        lab=restore_module();original=lab.read_bundle
+        def tamper(path,expected):
+            path.write_bytes(path.read_bytes()+b' ')
+            return original(path,expected)
+        with patch.object(lab,'read_bundle',side_effect=tamper):report=self.run_fake()
+        self.assertFalse(report['valid']);self.assertEqual(report['reason'],'snapshot_bundle_hash_mismatch')
+        self.assertEqual(len(RestoreDocker.instances[-1].volumes),1)
+        self.assertTrue(report['cleanup']['ok'])
+    def test_corrupt_release_artifact_is_rejected_before_source_creation(self):
+        original=RestoreDocker.build
+        def corrupt(engine,*args):
+            image=original(engine,*args);image['main_sha']='f'*64;return image
+        with patch.object(RestoreDocker,'build',corrupt):report=self.run_fake()
+        self.assertFalse(report['valid']);self.assertEqual(report['reason'],'image_provenance_mismatch')
+        self.assertFalse(RestoreDocker.instances[-1].volumes)
+    def test_restore_cleanup_failure_preserves_fixture_and_fails(self):
+        lab=restore_module();RestoreDocker.cleanup_ok=False
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/'owned';root.mkdir()
+            with patch.object(lab.tempfile,'mkdtemp',return_value=str(root)):report=self.run_fake()
+            self.assertFalse(report['valid']);self.assertEqual(report['reason'],'cleanup_failed')
+            self.assertTrue(root.exists());self.assertFalse(report['fixture_removed'])
+    def test_report_write_failure_never_bypasses_owned_cleanup(self):
+        lab=restore_module()
+        for failed_stage in ('additional_write_acknowledged','cleanup','finished'):
+            with self.subTest(stage=failed_stage):
+                stages=[]
+                def broken_progress(report):
+                    stages.append(report['stage'])
+                    if report['stage']==failed_stage:raise OSError('fixture_disk_full')
+                with patch.object(lab,'prepare_context',side_effect=lambda path,commit,build_commit,*args:descriptor('v2',commit,build_commit)):
+                    report=lab.run_lab(time.monotonic()+20,lambda:False,broken_progress,RestoreDocker)
+                self.assertFalse(report['valid']);self.assertTrue(report['reporting_failed'])
+                self.assertEqual(report['reason'],'report_output_failed')
+                self.assertTrue(report['cleanup']['ok'] and report['fixture_removed'])
+                self.assertIsNone(RestoreDocker.instances[-1].active)
+                self.assertIn('cleanup',stages);self.assertIn('finished',stages)
+    def test_bundle_rejects_link_boolean_version_and_bad_hash(self):
+        lab=restore_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp)/'data';p.write_text('{}');link=Path(tmp)/'link';link.symlink_to(p)
+            with self.assertRaises(lab.Stopped):lab.read_bundle(link,lab.digest({}))
+        for payload in ({'schema_version':True}, {'schema_version':1,'tables':{},'schema':[],'state':{}}):
+            with self.assertRaises(lab.Stopped):lab.verify_payload(payload)
+    def test_restore_cli_deadline_records_json_and_jsonl_without_docker(self):
+        cli=TOOLS/'independent_restore_lab.py'
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'report.json';events=Path(tmp)/'events.jsonl'
+            result=subprocess.run([sys.executable,str(cli),'--run','--output',str(out),'--jsonl',str(events),'--deadline','.000001'],capture_output=True,text=True)
+            self.assertNotEqual(result.returncode,0)
+            report=json.loads(out.read_text());self.assertEqual(report['reason'],'deadline')
+            self.assertTrue(all(json.loads(line)['valid'] is False for line in events.read_text().splitlines()))
+    def test_restore_probe_rejects_nonfixture_uid_and_host_database(self):
+        from container_probe import RESTORE_SCRIPT
+        with tempfile.TemporaryDirectory() as tmp:
+            db=Path(tmp)/'db'
+            result=subprocess.run([sys.executable,'-c',RESTORE_SCRIPT,'export'],env={'PATH':os.defpath,'BOOK_MEMO_DB_PATH':str(db)},capture_output=True,text=True)
+            self.assertNotEqual(result.returncode,0);self.assertFalse(db.exists())
+            self.assertEqual(json.loads(result.stdout),{'probe_error':'fixed_restore_probe_failed'})
+    def test_fixed_restore_transaction_preserves_exact_data_and_rolls_back_bad_foreign_key(self):
+        # The transfer algorithm runs against real isolated SQLite files. Only
+        # the container path/UID boundary is replaced here; Docker proves it live.
+        script=r'''
+import base64,copy,hashlib,json,os,sys,tempfile
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0,sys.argv[1]);sys.path.insert(0,sys.argv[2])
+from container_probe import RESTORE_SCRIPT
+from app.services import book_service as service
+namespace={}
+exec(RESTORE_SCRIPT.rsplit('\ntry:\n',1)[0],namespace)
+def encode(value):return base64.b64encode(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).decode()
+with tempfile.TemporaryDirectory() as tmp:
+    root=Path(tmp)
+    namespace['database']=lambda module: module.DB_PATH.parent==root or (_ for _ in ()).throw(ValueError('fixture_boundary'))
+    with patch.dict(os.environ,{'BOOK_MEMO_DB_PATH':'/app/data/fixture.sqlite3'}),patch('os.getuid',return_value=10001),patch('os.getgid',return_value=10001):
+        service.DB_PATH=root/'source.sqlite3';service.init_db()
+        namespace['execute']('seed')
+        sys.argv=['probe','export'];payload=namespace['transfer']('export')
+        service.DB_PATH=root/'restore.sqlite3';service.init_db()
+        sys.argv=['probe','restore',encode(payload)];restored=namespace['transfer']('restore')
+        assert restored==payload['state'],(restored,payload['state'])
+        service.DB_PATH=root/'rollback.sqlite3';service.init_db()
+        bad=copy.deepcopy(payload);bad['tables']['book_memos'][0][1]=999
+        bad['state']['snapshot_hash']=namespace['digest'](bad['tables'])
+        sys.argv=['probe','restore',encode(bad)]
+        try:namespace['transfer']('restore')
+        except ValueError:pass
+        else:raise AssertionError('foreign key damage accepted')
+        with service._connect() as db:
+            assert all(db.execute('SELECT count(*) FROM '+name).fetchone()[0]==0 for name in namespace['TABLES'])
+print('fixture_transfer=PASS')
+'''
+        result=subprocess.run([sys.executable,'-c',script,str(TOOLS),str(ROOT/'book-memo')],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(result.stdout.strip(),'fixture_transfer=PASS')
+    def test_transfer_adapter_rechecks_runtime_and_never_executes_foreign_container(self):
+        from container_runtime import LocalDocker
+        runtime=LocalDocker.__new__(LocalDocker)
+        with patch.object(runtime,'_container',side_effect=RuntimeError('wrong_owner')),patch.object(runtime,'_run') as execute:
+            with self.assertRaises(RuntimeError):runtime.export_snapshot('foreign')
+            with self.assertRaises(RuntimeError):runtime.restore_snapshot('foreign',{})
+            execute.assert_not_called()
+        with patch.object(runtime,'_container',return_value={'Id':'a'*64,'State':{'Running':True}}),patch.object(runtime,'_record',return_value=('owned',{})),patch.object(runtime,'_verify_runtime',side_effect=RuntimeError('wrong_uid')),patch.object(runtime,'_run') as execute:
+            with self.assertRaises(RuntimeError):runtime.restore_snapshot('a'*64,{})
+            execute.assert_not_called()
