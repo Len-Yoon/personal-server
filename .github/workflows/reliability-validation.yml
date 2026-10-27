@@ -71,7 +71,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -B - <<'PYTHON'
-          import subprocess,json,pathlib,hashlib,tarfile,os,tempfile,stat
+          import subprocess,json,pathlib,hashlib,tarfile,os,tempfile,re,shutil
           repo=pathlib.Path(os.environ['GITHUB_WORKSPACE']);out=pathlib.Path(os.environ['RUNNER_TEMP'])/'reliability'/'images';out.mkdir(mode=0o700)
           docker='/usr/bin/docker';env={'PATH':os.defpath+':/usr/local/bin:/opt/homebrew/bin','HOME':str(pathlib.Path.home()),'LC_ALL':'C'}
           def cmd(args,**kw):return subprocess.run([docker]+args,capture_output=True,text=True,env=env,timeout=30,**kw)
@@ -93,6 +93,23 @@ jobs:
            with p.open('rb') as f:
             for chunk in iter(lambda:f.read(1024*1024),b''):h.update(chunk)
            return h.hexdigest()
+          def prepare_oci_layout(archive, output):
+           members=archive.getmembers()
+           assert len(members)<256 and sum(m.size for m in members)<2*1024**3
+           assert len({m.name for m in members})==len(members)
+           for m in members:
+            name=m.name.rstrip('/')
+            if m.isdir():
+             assert name in ('blobs','blobs/sha256')
+            else:
+             assert m.isfile() and (name in ('index.json','oci-layout') or re.fullmatch('blobs/sha256/[0-9a-f]{64}',name))
+             assert m.size<1024**3 and (name.startswith('blobs/') or m.size<1024*1024)
+           output.mkdir(mode=0o700)
+           for m in members:
+            if m.isdir():continue
+            name=m.name.rstrip('/');dest=output/name;dest.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+            with archive.extractfile(m) as src,dest.open('xb') as dst:shutil.copyfileobj(src,dst,1024*1024)
+            if name.startswith('blobs/'):assert sha_file(dest)==dest.name
           for app in ['portal-web','slo-observation-archive']:
            target=out/(app+'.oci.tar');docker_archive=out/(app+'.docker.tar');assert not target.exists() and not docker_archive.exists()
            tag='personal-server-'+app+':'+source
@@ -127,6 +144,7 @@ jobs:
             descriptor=idx['manifests'][0];manifest=json.loads(blob(descriptor));config=json.loads(blob(manifest['config']))
             assert config['architecture']=='amd64' and config['os']=='linux' and config['config']['Labels']['org.opencontainers.image.revision']==source
             for layer in manifest['layers']:blob(layer,False)
+            prepare_oci_layout(archive,out/(app+'.oci-layout'))
             record={'source':source,'image':tag,'platform':'linux/amd64','archive_sha256':sha_file(target),'manifest_digest':descriptor['digest'],'config_digest':manifest['config']['digest'],'source_files':files}
             (out/(app+'.json')).write_text(json.dumps(record,indent=2))
             print(json.dumps({'app':app,'build':'PASS','manifest':record['manifest_digest'],'source':source}),flush=True)
@@ -205,7 +223,7 @@ jobs:
           for app in portal-web slo-observation-archive; do
             "$RUNNER_TEMP/reliability/tools/trivy" image --timeout 5m \
               --cache-dir "$RUNNER_TEMP/reliability/trivy-cache" \
-              --input "$RUNNER_TEMP/reliability/images/$app.oci.tar" \
+              --input "$RUNNER_TEMP/reliability/images/$app.oci-layout" \
               --scanners vuln --severity HIGH,CRITICAL --format json --exit-code 1 \
               --output "$RUNNER_TEMP/reliability/images/$app-trivy.json"
           done

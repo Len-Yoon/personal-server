@@ -403,6 +403,52 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertRegex(scanner['env']['TRIVY_SHA256'], r'^[0-9a-f]{64}$')
         self.assertIn('--severity HIGH,CRITICAL', scanner['run'])
         self.assertIn('--exit-code 1', scanner['run'])
+        self.assertIn('images/$app.oci-layout', scanner['run'])
+
+    def test_reliability_oci_layout_preserves_bytes_and_rejects_unsafe_archives(self):
+        import ast
+        import hashlib
+        import io
+        import shutil
+        import tarfile
+
+        workflow = yaml.safe_load((ROOT / '.github/workflows/reliability-validation.yml').read_text())
+        step = next(step for step in workflow['jobs']['isolated-release-validation']['steps']
+                    if step['name'].startswith('Build source-bound'))
+        tree = ast.parse(step['run'].split("<<'PYTHON'\n", 1)[1].rsplit('\nPYTHON', 1)[0])
+        functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                     and node.name in {'sha_file', 'prepare_oci_layout'}]
+        self.assertEqual(len(functions), 2)
+        namespace = {'hashlib': hashlib, 're': re, 'shutil': shutil}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), '<oci-layout>', 'exec'), namespace)
+        blob = b'original layer bytes'
+        digest = hashlib.sha256(blob).hexdigest()
+        cases = [('valid', 'blobs/sha256/' + digest, blob, None),
+                 ('traversal', '../outside', b'x', None),
+                 ('absolute', '/outside', b'x', None),
+                 ('link', 'index.json', b'', tarfile.SYMTYPE),
+                 ('hardlink', 'index.json', b'', tarfile.LNKTYPE),
+                 ('bad_digest', 'blobs/sha256/' + '0' * 64, blob, None)]
+        for label, name, payload, kind in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                archive_bytes = io.BytesIO()
+                with tarfile.open(fileobj=archive_bytes, mode='w') as archive:
+                    member = tarfile.TarInfo(name)
+                    member.size = len(payload)
+                    if kind:
+                        member.type = kind
+                        member.linkname = '../outside'
+                    archive.addfile(member, io.BytesIO(payload))
+                archive_bytes.seek(0)
+                destination = Path(directory) / 'layout'
+                with tarfile.open(fileobj=archive_bytes) as archive:
+                    if label == 'valid':
+                        namespace['prepare_oci_layout'](archive, destination)
+                        self.assertEqual((destination / name).read_bytes(), blob)
+                    else:
+                        with self.assertRaises(AssertionError):
+                            namespace['prepare_oci_layout'](archive, destination)
+                self.assertFalse((Path(directory) / 'outside').exists())
 
     def test_agent_review_workflow_enforces_pull_request_policy(self):
         workflow = (ROOT / ".github" / "workflows" / "agent-review.yml").read_text(encoding="utf-8")
