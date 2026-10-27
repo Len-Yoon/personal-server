@@ -1,0 +1,46 @@
+# Repository preparation only; N100 application requires separate deployment approval.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: portal-search-observability
+  namespace: monitoring
+  labels:
+    release: personal-server-monitoring
+spec:
+  groups:
+  - name: portal-search-observability
+    rules:
+    - alert: PortalSearchDegraded
+      expr: ((sum(max by (namespace, pod, outcome) (increase(portal_search_requests_total{namespace="personal-server",outcome=~"partial|failed"}[10m])))
+        / sum(max by (namespace, pod, outcome) (increase(portal_search_requests_total{namespace="personal-server",outcome=~"complete|partial|failed"}[10m]))))
+        > 0.20 and sum(max by (namespace, pod, outcome) (increase(portal_search_requests_total{namespace="personal-server",outcome=~"complete|partial|failed"}[10m])))
+        >= 20) unless on() ((max by (namespace, pod) (kube_pod_status_ready{namespace="personal-server",pod=~"portal-web-.*",condition="true"}
+        == 1)) unless on(namespace, pod) ((count by (namespace, pod) (count by (namespace,
+        pod, outcome) (portal_search_requests_total{namespace="personal-server",outcome=~"complete|partial|failed|cancelled"}))
+        == 4) and on(namespace, pod) (count by (namespace, pod) (count by (namespace,
+        pod, source, outcome) (portal_search_source_requests_total{namespace="personal-server",source=~"news|youtube|books",outcome=~"ok|timeout|http_error|invalid_response|transport_error|internal_error|cancelled"}))
+        == 21)))
+      for: 10m
+      labels:
+        severity: warning
+        sre_telegram: 'true'
+      annotations:
+        summary: Portal 검색 결과 불완전 증가
+        description: 최근 10분 취소 제외 검색 20건 이상에서 partial/failed 비율 20% 초과가 10분 지속됨. 잠정
+          운영 임계값이며 정식 SLO 아님.
+    - alert: PortalSearchInstrumentationMissing
+      expr: ((max by (namespace, pod) (kube_pod_status_ready{namespace="personal-server",pod=~"portal-web-.*",condition="true"}
+        == 1)) and on(namespace, pod) (max by (namespace, pod) (up{namespace="personal-server",service="portal-web"}
+        == 1))) unless on(namespace, pod) ((count by (namespace, pod) (count by (namespace,
+        pod, outcome) (portal_search_requests_total{namespace="personal-server",outcome=~"complete|partial|failed|cancelled"}))
+        == 4) and on(namespace, pod) (count by (namespace, pod) (count by (namespace,
+        pod, source, outcome) (portal_search_source_requests_total{namespace="personal-server",source=~"news|youtube|books",outcome=~"ok|timeout|http_error|invalid_response|transport_error|internal_error|cancelled"}))
+        == 21))
+      for: 10m
+      labels:
+        severity: warning
+        sre_telegram: 'true'
+      annotations:
+        summary: Portal 검색 계측 누락
+        description: Ready이며 scrape UP인 Portal Pod에서 고정 요청 4종 또는 소스 21종 계측이 10분 동안
+          불완전함. 검색 무트래픽은 누락으로 분류하지 않음.

@@ -1,0 +1,195 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: portal-search-observability
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  portal-search-observability.json: |
+    {
+      "annotations": {
+        "list": []
+      },
+      "editable": false,
+      "panels": [
+        {
+          "id": 1,
+          "title": "검색 완전 응답 비율",
+          "description": "요청한 소스가 모두 성공한 검색 / 취소 제외 검색. 10분 무트래픽 또는 계측 누락은 데이터 없음. 정식 SLO 아님. 동일 Pod의 중복 scrape는 outcome별 increase 최댓값으로 한 번만 집계하고 서로 다른 Pod는 합산함.",
+          "type": "stat",
+          "datasource": "Prometheus",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 0
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "noValue": "데이터 없음"
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "instant": true,
+              "expr": "((sum(max by (namespace, pod, outcome) (increase(portal_search_requests_total{namespace=\"personal-server\",outcome=\"complete\"}[10m]))) / sum(max by (namespace, pod, outcome) (increase(portal_search_requests_total{namespace=\"personal-server\",outcome=~\"complete|partial|failed\"}[10m])))) and (sum(max by (namespace, pod, outcome) (increase(portal_search_requests_total{namespace=\"personal-server\",outcome=~\"complete|partial|failed\"}[10m]))) > 0)) unless on() ((max by (namespace, pod) (kube_pod_status_ready{namespace=\"personal-server\",pod=~\"portal-web-.*\",condition=\"true\"} == 1)) unless on(namespace, pod) ((count by (namespace, pod) (count by (namespace, pod, outcome) (portal_search_requests_total{namespace=\"personal-server\",outcome=~\"complete|partial|failed|cancelled\"})) == 4) and on(namespace, pod) (count by (namespace, pod) (count by (namespace, pod, source, outcome) (portal_search_source_requests_total{namespace=\"personal-server\",source=~\"news|youtube|books\",outcome=~\"ok|timeout|http_error|invalid_response|transport_error|internal_error|cancelled\"})) == 21)))",
+              "datasource": "Prometheus"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "last"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none"
+          }
+        },
+        {
+          "id": 2,
+          "title": "검색 결과별 요청 수",
+          "description": "실제 nonblank 검색 실행 수. cancelled는 별도로 표시함. 동일 Pod의 중복 scrape는 outcome별 increase 최댓값으로 한 번만 집계하고 서로 다른 Pod는 합산함.",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 0
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "noValue": "데이터 없음"
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (outcome) (max by (namespace, pod, outcome) (increase(portal_search_requests_total{namespace=\"personal-server\",outcome=~\"complete|partial|failed|cancelled\"}[10m])))",
+              "datasource": "Prometheus",
+              "legendFormat": "{{outcome}}"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "title": "소스별 오류 및 시간 초과",
+          "description": "요청된 소스별 실패 원인. cancelled는 오류에서 제외함. 동일 Pod의 중복 scrape는 outcome별 increase 최댓값으로 한 번만 집계하고 서로 다른 Pod는 합산함.",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "noValue": "데이터 없음"
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (source, outcome) (max by (namespace, pod, source, outcome) (increase(portal_search_source_requests_total{namespace=\"personal-server\",source=~\"news|youtube|books\",outcome=~\"timeout|http_error|invalid_response|transport_error|internal_error\"}[10m])))",
+              "datasource": "Prometheus",
+              "legendFormat": "{{source}} / {{outcome}}"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "title": "검색 HTTP p95 응답 시간",
+          "description": "nonblank q의 GET 검색 HTTP 경로 지연임. HTTP 계측은 demo 응답·예외 처리·취소의 기록 경계가 실제 검색 실행 완전성 계측과 다름. 동일 Pod의 중복 scrape는 버킷별 rate 최댓값으로 한 번만 집계함.",
+          "type": "stat",
+          "datasource": "Prometheus",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "noValue": "데이터 없음"
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "histogram_quantile(0.95, sum by (le) (max by (namespace, pod, method, route, le) (rate(portal_http_request_duration_seconds_bucket{namespace=\"personal-server\",method=\"GET\",route=\"/search\"}[10m])))) and (sum(max by (namespace, pod, method, route) (rate(portal_http_request_duration_seconds_count{namespace=\"personal-server\",method=\"GET\",route=\"/search\"}[10m]))) > 0)",
+              "datasource": "Prometheus"
+            }
+          ],
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "last"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none"
+          }
+        },
+        {
+          "id": 5,
+          "title": "검색 계측 누락 Ready Pod",
+          "description": "Ready Pod마다 고정 요청 outcome 4개 및 소스/outcome 조합 21개 존재 여부. 1=불완전, 0=완전. Ready 지표 자체가 없으면 데이터 없음. 요청량 0도 정상 계측임.",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 16
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "noValue": "데이터 없음"
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "((max by (namespace, pod) (kube_pod_status_ready{namespace=\"personal-server\",pod=~\"portal-web-.*\",condition=\"true\"} == 1)) unless on(namespace, pod) ((count by (namespace, pod) (count by (namespace, pod, outcome) (portal_search_requests_total{namespace=\"personal-server\",outcome=~\"complete|partial|failed|cancelled\"})) == 4) and on(namespace, pod) (count by (namespace, pod) (count by (namespace, pod, source, outcome) (portal_search_source_requests_total{namespace=\"personal-server\",source=~\"news|youtube|books\",outcome=~\"ok|timeout|http_error|invalid_response|transport_error|internal_error|cancelled\"})) == 21))) or on(namespace, pod) ((max by (namespace, pod) (kube_pod_status_ready{namespace=\"personal-server\",pod=~\"portal-web-.*\",condition=\"true\"} == 1)) * 0)",
+              "datasource": "Prometheus",
+              "legendFormat": "{{pod}}"
+            }
+          ]
+        }
+      ],
+      "schemaVersion": 39,
+      "tags": [
+        "portal",
+        "search",
+        "observability"
+      ],
+      "templating": {
+        "list": []
+      },
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
+      "timezone": "browser",
+      "title": "Portal 검색 관측성",
+      "uid": "portal-search-observability",
+      "version": 1
+    }

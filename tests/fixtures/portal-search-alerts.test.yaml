@@ -1,0 +1,1384 @@
+fuzzy_compare: true
+rule_files:
+- portal-search.rules.yaml
+evaluation_interval: 1m
+tests:
+- name: normal-search-and-complete-fixed-instrumentation
+  interval: 1m
+  input_series:
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="complete"}
+    values: 0+10x45
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="partial"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="failed"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="cancelled"}
+    values: '0x45'
+  - &id001
+    series: kube_pod_status_ready{namespace="personal-server",pod="portal-web-fixture",condition="true"}
+    values: 1x45
+  - &id002
+    series: up{namespace="personal-server",pod="portal-web-fixture",service="portal-web"}
+    values: 1x45
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts: []
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 20m
+    exp_samples:
+    - labels: portal_search_dashboard_test_1
+      value: 1
+- name: idle-search-keeps-instrumentation-but-no-success-ratio
+  interval: 1m
+  input_series:
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="complete"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="partial"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="failed"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="cancelled"}
+    values: '0x45'
+  - *id001
+  - *id002
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts: []
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 20m
+    exp_samples: []
+  - expr: portal_search_dashboard_test_4
+    eval_time: 20m
+    exp_samples: []
+- name: cancelled-only-is-neither-failure-nor-denominator
+  interval: 1m
+  input_series:
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="complete"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="partial"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="failed"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="cancelled"}
+    values: 0+100x45
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="cancelled"}
+    values: '0x45'
+  - *id001
+  - *id002
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts: []
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 20m
+    exp_samples: []
+- name: all-metrics-missing-ready-and-scrape-up
+  interval: 1m
+  input_series:
+  - *id001
+  - *id002
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        sre_telegram: 'true'
+        namespace: personal-server
+        pod: portal-web-fixture
+      exp_annotations: &id003
+        summary: Portal 검색 계측 누락
+        description: Ready이며 scrape UP인 Portal Pod에서 고정 요청 4종 또는 소스 21종 계측이 10분 동안
+          불완전함. 검색 무트래픽은 누락으로 분류하지 않음.
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 20m
+    exp_samples: []
+  - expr: portal_search_dashboard_test_5
+    eval_time: 20m
+    exp_samples:
+    - labels: portal_search_dashboard_test_5{namespace="personal-server",pod="portal-web-fixture"}
+      value: 1
+- name: partial-source-instrumentation-with-traffic-must-not-show-complete-ratio
+  interval: 1m
+  input_series:
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="complete"}
+    values: 0+10x45
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="partial"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="failed"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="internal_error"}
+    values: '0x45'
+  - *id001
+  - *id002
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        sre_telegram: 'true'
+        namespace: personal-server
+        pod: portal-web-fixture
+      exp_annotations: *id003
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 20m
+    exp_samples: []
+- name: target-down-is-owned-by-existing-target-alert
+  interval: 1m
+  input_series:
+  - *id001
+  - series: up{namespace="personal-server",pod="portal-web-fixture",service="portal-web"}
+    values: '0x45'
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts: []
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 20m
+    exp_samples: []
+- name: not-ready-is-owned-by-existing-availability-alert
+  interval: 1m
+  input_series:
+  - series: kube_pod_status_ready{namespace="personal-server",pod="portal-web-fixture",condition="true"}
+    values: '0x45'
+  - *id002
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts: []
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 20m
+    exp_samples: []
+- name: low-sample-failures-are-not-actionable
+  interval: 1m
+  input_series:
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="complete"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="partial"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="failed"}
+    values: 0+1x45
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="cancelled"}
+    values: '0x45'
+  - *id001
+  - *id002
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts: []
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 20m
+    exp_samples:
+    - labels: portal_search_dashboard_test_1
+      value: 0
+- name: counter-reset-preserves-complete-ratio
+  interval: 1m
+  input_series:
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="complete"}
+    values: 0+10x10 0+10x34
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="partial"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="failed"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="cancelled"}
+    values: '0x45'
+  - *id001
+  - *id002
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts: []
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 20m
+    exp_samples:
+    - labels: portal_search_dashboard_test_1
+      value: 1
+- name: sustained-degradation-hold-and-recovery
+  interval: 1m
+  input_series:
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="complete"}
+    values: 0x22 0+10x22
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="partial"}
+    values: 0+10x22 220x22
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="failed"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="cancelled"}
+    values: '0x45'
+  - *id001
+  - *id002
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: PortalSearchDegraded
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        sre_telegram: 'true'
+      exp_annotations:
+        summary: Portal 검색 결과 불완전 증가
+        description: 최근 10분 취소 제외 검색 20건 이상에서 partial/failed 비율 20% 초과가 10분 지속됨. 잠정
+          운영 임계값이며 정식 SLO 아님.
+  - eval_time: 20m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts: []
+  - eval_time: 10m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  - eval_time: 40m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 20m
+    exp_samples:
+    - labels: portal_search_dashboard_test_1
+      value: 0
+- name: complete-series-missing
+  interval: 1m
+  input_series:
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="partial"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="failed"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="cancelled"}
+    values: '0x45'
+  - *id001
+  - *id002
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        sre_telegram: 'true'
+        namespace: personal-server
+        pod: portal-web-fixture
+      exp_annotations: *id003
+  - eval_time: 9m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts: []
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 20m
+    exp_samples: []
+- name: stale-instrumentation-and-recovery
+  interval: 1m
+  input_series:
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="complete"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="partial"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="failed"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="ok"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="timeout"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="http_error"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="invalid_response"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="transport_error"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="internal_error"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="cancelled"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="ok"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="timeout"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="http_error"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="invalid_response"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="transport_error"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="internal_error"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="cancelled"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="ok"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="timeout"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="http_error"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="invalid_response"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="transport_error"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="internal_error"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="cancelled"}
+    values: 0x5 stale _ _ _ _ _ _ _ _ _ _ _ _ _ _ 0x24
+  - *id001
+  - *id002
+  alert_rule_test:
+  - eval_time: 16m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  - eval_time: 16m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        sre_telegram: 'true'
+        namespace: personal-server
+        pod: portal-web-fixture
+      exp_annotations: *id003
+  - eval_time: 25m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts: []
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 16m
+    exp_samples: []
+- name: dashboard-source-timeout-and-p95-behavior
+  interval: 1m
+  input_series:
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="complete"}
+    values: 0+10x45
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="partial"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="failed"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="timeout"}
+    values: 0+10x45
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="cancelled"}
+    values: '0x45'
+  - *id001
+  - *id002
+  - series: portal_http_request_duration_seconds_bucket{namespace="personal-server",method="GET",route="/search",le="1"}
+    values: 0+95x45
+  - series: portal_http_request_duration_seconds_bucket{namespace="personal-server",method="GET",route="/search",le="2"}
+    values: 0+100x45
+  - series: portal_http_request_duration_seconds_bucket{namespace="personal-server",method="GET",route="/search",le="+Inf"}
+    values: 0+100x45
+  - series: portal_http_request_duration_seconds_count{namespace="personal-server",method="GET",route="/search"}
+    values: 0+100x45
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts: []
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 20m
+    exp_samples:
+    - labels: portal_search_dashboard_test_1
+      value: 1
+  - expr: portal_search_dashboard_test_4
+    eval_time: 20m
+    exp_samples:
+    - labels: portal_search_dashboard_test_4
+      value: 1
+  - expr: portal_search_dashboard_test_3{source="news",outcome="timeout"}
+    eval_time: 20m
+    exp_samples:
+    - labels: portal_search_dashboard_test_3{source="news",outcome="timeout"}
+      value: 100
+  - expr: portal_search_dashboard_test_5
+    eval_time: 20m
+    exp_samples:
+    - labels: portal_search_dashboard_test_5{namespace="personal-server",pod="portal-web-fixture"}
+      value: 0
+- name: no-telemetry-is-unknown-not-healthy
+  interval: 1m
+  input_series: []
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts: []
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 20m
+    exp_samples: []
+  - expr: portal_search_dashboard_test_4
+    eval_time: 20m
+    exp_samples: []
+- name: exact-twenty-percent-boundary-is-not-degraded
+  interval: 1m
+  input_series:
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="complete"}
+    values: 0+8x45
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="partial"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="failed"}
+    values: 0+2x45
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="cancelled"}
+    values: '0x45'
+  - series: kube_pod_status_ready{namespace="personal-server",pod="portal-web-fixture",condition="true"}
+    values: 1x45
+  - series: up{namespace="personal-server",pod="portal-web-fixture",service="portal-web"}
+    values: 1x45
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts: []
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 20m
+    exp_samples:
+    - labels: portal_search_dashboard_test_1
+      value: 0.8
+- name: missing-instrumentation-does-not-prove-search-degradation
+  interval: 1m
+  input_series:
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="complete"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="partial"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="failed"}
+    values: 0+10x45
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="internal_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="cancelled"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="ok"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="timeout"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="http_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="invalid_response"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="transport_error"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="internal_error"}
+    values: '0x45'
+  - series: kube_pod_status_ready{namespace="personal-server",pod="portal-web-fixture",condition="true"}
+    values: 1x45
+  - series: up{namespace="personal-server",pod="portal-web-fixture",service="portal-web"}
+    values: 1x45
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        sre_telegram: 'true'
+        namespace: personal-server
+        pod: portal-web-fixture
+      exp_annotations:
+        summary: Portal 검색 계측 누락
+        description: Ready이며 scrape UP인 Portal Pod에서 고정 요청 4종 또는 소스 21종 계측이 10분 동안
+          불완전함. 검색 무트래픽은 누락으로 분류하지 않음.
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 20m
+    exp_samples: []
+- name: duplicate-scrape-targets-do-not-double-sample-gate-or-outcome-counts
+  interval: 1m
+  input_series:
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="complete",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="complete",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="partial",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="partial",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="failed",job="scrape-a",instance="endpoint-a"}
+    values: 0+1x45
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="failed",job="scrape-b",instance="endpoint-b"}
+    values: 0+1x45
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="cancelled",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="cancelled",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="ok",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="ok",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="timeout",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="timeout",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="http_error",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="http_error",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="invalid_response",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="invalid_response",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="transport_error",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="transport_error",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="internal_error",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="internal_error",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="cancelled",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="cancelled",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="ok",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="ok",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="timeout",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="timeout",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="http_error",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="http_error",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="invalid_response",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="invalid_response",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="transport_error",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="transport_error",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="internal_error",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="internal_error",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="cancelled",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="cancelled",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="ok",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="ok",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="timeout",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="timeout",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="http_error",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="http_error",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="invalid_response",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="invalid_response",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="transport_error",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="transport_error",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="internal_error",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="internal_error",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="cancelled",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="cancelled",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: kube_pod_status_ready{namespace="personal-server",pod="portal-web-fixture",condition="true"}
+    values: 1x45
+  - series: up{namespace="personal-server",pod="portal-web-fixture",service="portal-web"}
+    values: 1x45
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts: []
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 20m
+    exp_samples:
+    - labels: portal_search_dashboard_test_1
+      value: 0
+  - expr: portal_search_dashboard_test_2{outcome="failed"}
+    eval_time: 20m
+    exp_samples:
+    - labels: portal_search_dashboard_test_2{outcome="failed"}
+      value: 10
+- name: different-pods-retain-real-traffic-and-meet-sample-gate
+  interval: 1m
+  input_series:
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="complete",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",outcome="complete",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="partial",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",outcome="partial",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="failed",job="scrape-a",instance="endpoint-a"}
+    values: 0+1x45
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",outcome="failed",job="scrape-b",instance="endpoint-b"}
+    values: 0+1x45
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="cancelled",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",outcome="cancelled",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="ok",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="news",outcome="ok",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="timeout",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="news",outcome="timeout",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="http_error",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="news",outcome="http_error",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="invalid_response",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="news",outcome="invalid_response",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="transport_error",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="news",outcome="transport_error",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="internal_error",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="news",outcome="internal_error",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="cancelled",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="news",outcome="cancelled",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="ok",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="youtube",outcome="ok",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="timeout",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="youtube",outcome="timeout",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="http_error",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="youtube",outcome="http_error",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="invalid_response",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="youtube",outcome="invalid_response",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="transport_error",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="youtube",outcome="transport_error",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="internal_error",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="youtube",outcome="internal_error",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="cancelled",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="youtube",outcome="cancelled",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="ok",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="books",outcome="ok",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="timeout",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="books",outcome="timeout",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="http_error",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="books",outcome="http_error",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="invalid_response",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="books",outcome="invalid_response",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="transport_error",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="books",outcome="transport_error",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="internal_error",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="books",outcome="internal_error",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="cancelled",job="scrape-a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-second",service="portal-web",source="books",outcome="cancelled",job="scrape-b",instance="endpoint-b"}
+    values: '0x45'
+  - series: kube_pod_status_ready{namespace="personal-server",pod="portal-web-fixture",condition="true"}
+    values: 1x45
+  - series: up{namespace="personal-server",pod="portal-web-fixture",service="portal-web"}
+    values: 1x45
+  - series: kube_pod_status_ready{namespace="personal-server",pod="portal-web-second",condition="true"}
+    values: 1x45
+  - series: up{namespace="personal-server",pod="portal-web-second",service="portal-web"}
+    values: 1x45
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: PortalSearchDegraded
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        sre_telegram: 'true'
+      exp_annotations:
+        summary: Portal 검색 결과 불완전 증가
+        description: 최근 10분 취소 제외 검색 20건 이상에서 partial/failed 비율 20% 초과가 10분 지속됨. 잠정
+          운영 임계값이며 정식 SLO 아님.
+  - eval_time: 20m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts: []
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 20m
+    exp_samples:
+    - labels: portal_search_dashboard_test_1
+      value: 0
+  - expr: portal_search_dashboard_test_2{outcome="failed"}
+    eval_time: 20m
+    exp_samples:
+    - labels: portal_search_dashboard_test_2{outcome="failed"}
+      value: 20
+- name: duplicate-histogram-and-source-counters-preserve-dashboard-values
+  interval: 1m
+  input_series:
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="complete",job="a",instance="endpoint-a"}
+    values: 0+10x45
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="complete",job="b",instance="endpoint-b"}
+    values: 0+10x45
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="partial",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="partial",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="failed",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="failed",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="cancelled",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",outcome="cancelled",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="ok",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="ok",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="timeout",job="a",instance="endpoint-a"}
+    values: 0+10x45
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="timeout",job="b",instance="endpoint-b"}
+    values: 0+10x45
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="http_error",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="http_error",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="invalid_response",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="invalid_response",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="transport_error",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="transport_error",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="internal_error",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="internal_error",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="cancelled",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="news",outcome="cancelled",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="ok",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="ok",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="timeout",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="timeout",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="http_error",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="http_error",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="invalid_response",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="invalid_response",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="transport_error",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="transport_error",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="internal_error",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="internal_error",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="cancelled",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="youtube",outcome="cancelled",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="ok",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="ok",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="timeout",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="timeout",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="http_error",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="http_error",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="invalid_response",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="invalid_response",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="transport_error",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="transport_error",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="internal_error",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="internal_error",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="cancelled",job="a",instance="endpoint-a"}
+    values: '0x45'
+  - series: portal_search_source_requests_total{namespace="personal-server",pod="portal-web-fixture",service="portal-web",source="books",outcome="cancelled",job="b",instance="endpoint-b"}
+    values: '0x45'
+  - series: kube_pod_status_ready{namespace="personal-server",pod="portal-web-fixture",condition="true"}
+    values: 1x45
+  - series: up{namespace="personal-server",pod="portal-web-fixture",service="portal-web"}
+    values: 1x45
+  - series: portal_http_request_duration_seconds_bucket{namespace="personal-server",method="GET",route="/search",le="1",job="a",instance="endpoint-a"}
+    values: 0+95x45
+  - series: portal_http_request_duration_seconds_bucket{namespace="personal-server",method="GET",route="/search",le="1",job="b",instance="endpoint-b"}
+    values: 0+95x45
+  - series: portal_http_request_duration_seconds_bucket{namespace="personal-server",method="GET",route="/search",le="2",job="a",instance="endpoint-a"}
+    values: 0+100x45
+  - series: portal_http_request_duration_seconds_bucket{namespace="personal-server",method="GET",route="/search",le="2",job="b",instance="endpoint-b"}
+    values: 0+100x45
+  - series: portal_http_request_duration_seconds_bucket{namespace="personal-server",method="GET",route="/search",le="+Inf",job="a",instance="endpoint-a"}
+    values: 0+100x45
+  - series: portal_http_request_duration_seconds_bucket{namespace="personal-server",method="GET",route="/search",le="+Inf",job="b",instance="endpoint-b"}
+    values: 0+100x45
+  - series: portal_http_request_duration_seconds_count{namespace="personal-server",method="GET",route="/search",job="a",instance="endpoint-a"}
+    values: 0+100x45
+  - series: portal_http_request_duration_seconds_count{namespace="personal-server",method="GET",route="/search",job="b",instance="endpoint-b"}
+    values: 0+100x45
+  - series: portal_http_request_duration_seconds_bucket{namespace="personal-server",pod="portal-web-second",method="GET",route="/search",le="1",job="single",instance="endpoint-c"}
+    values: 0+0x45
+  - series: portal_http_request_duration_seconds_bucket{namespace="personal-server",pod="portal-web-second",method="GET",route="/search",le="2",job="single",instance="endpoint-c"}
+    values: 0+100x45
+  - series: portal_http_request_duration_seconds_bucket{namespace="personal-server",pod="portal-web-second",method="GET",route="/search",le="+Inf",job="single",instance="endpoint-c"}
+    values: 0+100x45
+  - series: portal_http_request_duration_seconds_count{namespace="personal-server",pod="portal-web-second",method="GET",route="/search",job="single",instance="endpoint-c"}
+    values: 0+100x45
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: PortalSearchDegraded
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: PortalSearchInstrumentationMissing
+    exp_alerts: []
+  promql_expr_test:
+  - expr: portal_search_dashboard_test_1
+    eval_time: 20m
+    exp_samples:
+    - labels: portal_search_dashboard_test_1
+      value: 1
+  - expr: portal_search_dashboard_test_4
+    eval_time: 20m
+    exp_samples:
+    - labels: portal_search_dashboard_test_4
+      value: 1.9047619047619047
+  - expr: portal_search_dashboard_test_3{source="news",outcome="timeout"}
+    eval_time: 20m
+    exp_samples:
+    - labels: portal_search_dashboard_test_3{source="news",outcome="timeout"}
+      value: 100
+  - expr: portal_search_dashboard_test_5
+    eval_time: 20m
+    exp_samples:
+    - labels: portal_search_dashboard_test_5{namespace="personal-server",pod="portal-web-fixture"}
+      value: 0
