@@ -66,6 +66,12 @@ ALERT_PRESENTATIONS = {
     "NewsCollectionStale": ("뉴스 수집 지연 또는 실패", "최신 뉴스가 갱신되지 않을 수 있음"),
     "PortalHttp5xxErrorRateHigh": ("Portal HTTP 5xx 오류율 높음", "일부 요청이 정상 처리되지 않을 수 있음"),
     "PortalHttpP95LatencyHigh": ("Portal HTTP p95 응답 지연", "Portal 화면 응답이 느릴 수 있음"),
+    "PortalSearchDegraded": ("검색 결과 누락 또는 조회 실패 증가", "통합 검색 결과가 불완전할 수 있음"),
+    "PortalSearchInstrumentationMissing": ("검색 상태 지표 누락", "검색 품질을 정확히 판단할 수 없음"),
+    "ObservationArchiveScrapeMissing": ("관측 보존 검증기의 수집 연결 누락", "관측 원본의 보존 상태를 확인할 수 없음"),
+    "ObservationArchiveVerificationUnhealthy": ("관측 원본 검증 실패 또는 지연", "보존 자료의 무결성을 확인할 수 없음"),
+    "ObservationArchiveDayMissing": ("필수 일자의 관측 원본 누락", "신뢰성 분석에 필요한 기록이 빠질 수 있음"),
+    "ObservationArchiveQuotaNearFull": ("관측 원본의 논리 용량 한도 임박", "다음 관측 원본의 보존이 실패할 수 있음"),
 }
 ALERT_TARGETS_BY_NAME = {
     "CarCareBackupFailed": "차량 DB 백업",
@@ -78,6 +84,12 @@ ALERT_TARGETS_BY_NAME = {
     "HostDiskSpaceLow": "Windows 호스트 디스크",
     "HostDiskMetricsStale": "Windows 호스트 디스크",
     "HostDiskNotificationTest": "Windows 호스트 디스크",
+    "PortalSearchDegraded": "Portal 검색",
+    "PortalSearchInstrumentationMissing": "Portal 검색",
+    "ObservationArchiveScrapeMissing": "관측 보존 감시",
+    "ObservationArchiveVerificationUnhealthy": "관측 원본 보존",
+    "ObservationArchiveDayMissing": "관측 원본 보존",
+    "ObservationArchiveQuotaNearFull": "관측 원본 보존",
 }
 WORKLOAD_TARGETS = (
     ("portal-web", "Portal"),
