@@ -56,6 +56,25 @@ histogram_quantile(0.95,
 python3 infra/k8s/tools/slo-sample-summary.py --input /tmp/portal-sample-input.json
 ```
 
+### 실패·미관측 평가 표본의 상세 조회
+
+`--episodes`를 지정하면 기존 요약에 `episodes`를 추가함. 기본 실행의 JSON과 보존 파일의 기존 요약 계약은 변경하지 않음.
+
+```sh
+python3 infra/k8s/tools/slo-sample-summary.py --input /tmp/portal-sample-input.json --episodes
+```
+
+| 필드·경계 | 의미 | 비고 |
+|---|---|---|
+| status·reason | bad/unknown 및 고정된 표본 판정 사유 | available_below_one·missing·nonfinite·future_timestamp·stale, 장애 원인 아님 |
+| first_sample_at·last_sample_at | 구간에 포함된 첫·마지막 평가 표본의 UTC 시각, 양 끝 포함 | 실제 장애 시작·종료·지속 시간 아님 |
+| sample_count | 같은 상태·사유로 연속된 평가 표본 수 | 정상 표본이나 다른 상태·사유를 만나면 구간 분리 |
+| desired_zero_unavailable_candidates | 구간 안에서 desired=0·available=0인 신선한 표본 수 | 구간 전체를 계획 정지로 확정하거나 원시 실패에서 제외하지 않음 |
+| 관측 실패 | 기존 missing→nonfinite→replica 검증→future→stale 판정 순서 유지 | unknown을 bad나 정상으로 치환하지 않음 |
+| 입력·출력 보호 | 기존 최대32MiB·7일·15초 이상 grid 제약 유지, 상태·고정 사유·시각·개수만 출력 | label·원본 replica 값·내부 주소·원시 오류를 새 출력에 복사하지 않음 |
+
+새 옵션은 오프라인 조사 기능이며 수집·경보·SLO 목표를 활성화하지 않음. [실제 보존 원본 분석](reviews/20261028_관측실패표본_분석고도화.md)에서 기존 요약 일치·원본 불변과 시각 해석 한계를 구분함.
+
 ## 4. 검토 결과
 
 2026-10-27 후속 구현은 [검색·관측·격리 복원 기록](reviews/20261027_신뢰성3종고도화_배포전검증.md)을 따름. 요청4/소스결과21 고정 series를 초기0으로 노출하고 실제 요청만 계수함. 호출자 취소와 서비스 시간 초과·부분 실패를 구분하며 단독 검색 실습 로더를 유지함. 프로세스 재시작 시 counter가 초기화되므로 increase/reset·수집 누락 대조가 필요함.

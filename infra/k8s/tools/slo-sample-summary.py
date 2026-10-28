@@ -70,7 +70,27 @@ def _matrix(response, start, end, step):
     return points
 
 
-def summarize_samples(payload):
+def _classify_sample(matrices, index, at):
+    if any(index not in matrices[key] for key in QUERIES):
+        return 'unknown', 'missing', False
+    available, desired, available_at, desired_at = (matrices[key][index] for key in QUERIES)
+    if any(not math.isfinite(value) for value in (available, desired, available_at, desired_at)):
+        return 'unknown', 'nonfinite', False
+    if any(value < 0 or not value.is_integer() for value in (available, desired)):
+        raise ValueError('invalid_replica_count')
+    ages = (at - available_at, at - desired_at)
+    if min(ages) < 0:
+        return 'unknown', 'future_timestamp', False
+    if max(ages) > FRESHNESS_SECONDS:
+        return 'unknown', 'stale', False
+    if available < 1:
+        return 'bad', 'available_below_one', desired == 0
+    return 'good', None, False
+
+
+def summarize_samples(payload, *, include_episodes=False):
+    if type(include_episodes) is not bool:
+        raise ValueError('invalid_options')
     if not isinstance(payload, dict) or type(payload.get('schema_version')) is not int or payload['schema_version'] != 1:
         raise ValueError('invalid_schema')
     start, end, step = (payload.get(key) for key in ('start', 'end', 'step_seconds'))
@@ -93,29 +113,31 @@ def summarize_samples(payload):
     count = (end - start) // step + 1
     good = bad = stop_candidates = 0
     unknown = {reason: 0 for reason in ('missing', 'nonfinite', 'stale', 'future_timestamp')}
+    episodes = []
+    active = None
     for index in range(count):
-        if any(index not in matrices[key] for key in QUERIES):
-            unknown['missing'] += 1
-            continue
-        available, desired, available_at, desired_at = (matrices[key][index] for key in QUERIES)
-        if any(not math.isfinite(value) for value in (available, desired, available_at, desired_at)):
-            unknown['nonfinite'] += 1
-            continue
-        if any(value < 0 or not value.is_integer() for value in (available, desired)):
-            raise ValueError('invalid_replica_count')
         at = start + index * step
-        ages = (at - available_at, at - desired_at)
-        if min(ages) < 0:
-            unknown['future_timestamp'] += 1
-            continue
-        if max(ages) > FRESHNESS_SECONDS:
-            unknown['stale'] += 1
-            continue
-        good += available >= 1
-        bad += available < 1
-        stop_candidates += desired == 0 and available == 0
+        status, reason, candidate = _classify_sample(matrices, index, at)
+        good += status == 'good'
+        bad += status == 'bad'
+        stop_candidates += candidate
+        if status == 'unknown':
+            unknown[reason] += 1
+        if include_episodes:
+            if status == 'good':
+                active = None
+            else:
+                timestamp = datetime.fromtimestamp(at, timezone.utc).isoformat()
+                if active is None or (active['status'], active['reason']) != (status, reason):
+                    active = {'status': status, 'reason': reason, 'first_sample_at': timestamp,
+                              'last_sample_at': timestamp, 'sample_count': 0,
+                              'desired_zero_unavailable_candidates': 0}
+                    episodes.append(active)
+                active['last_sample_at'] = timestamp
+                active['sample_count'] += 1
+                active['desired_zero_unavailable_candidates'] += candidate
     observed = good + bad
-    return {
+    result = {
         'schema_version': 1,
         'period': period,
         'samples': {'expected': count, 'observed': observed, 'good': good, 'bad': bad,
@@ -128,18 +150,23 @@ def summarize_samples(payload):
         'planned_stop_policy': 'candidates_are_not_exempt_from_raw_failure',
         'slo_budget': {'status': 'not_calculable', 'reason': 'sample_grid_is_not_exact_duration'},
     }
+    if include_episodes:
+        result['episodes'] = episodes
+    return result
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--input', required=True)
+    parser.add_argument('--episodes', action='store_true',
+                        help='Include contiguous bad/unknown evaluation samples; never outage duration.')
     args = parser.parse_args(argv)
     try:
         with Path(args.input).open('rb') as stream:
             raw = stream.read(INPUT_LIMIT + 1)
         if len(raw) > INPUT_LIMIT:
             raise ValueError('input_too_large')
-        result = summarize_samples(json.loads(raw))
+        result = summarize_samples(json.loads(raw), include_episodes=args.episodes)
         print(json.dumps(result, sort_keys=True, allow_nan=False))
         return 0
     except (OSError, TypeError, ValueError, KeyError, OverflowError, RecursionError):
