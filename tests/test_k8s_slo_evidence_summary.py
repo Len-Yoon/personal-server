@@ -188,6 +188,85 @@ class SloSampleSummaryTests(unittest.TestCase):
     def points(self, payload, name):
         return payload['queries'][name]['data']['result'][0]['values']
 
+    def test_episode_reasons_split_without_losing_bad_or_unknown_samples(self):
+        p = self.payload()
+        p['end'] = p['start'] + 120
+        for name in p['queries']:
+            self.points(p, name)[:] = [
+                [p['start'] + i * 15, str(p['start'] + i * 15 if name.endswith('_timestamp') else 1)]
+                for i in range(9)]
+        for index in (0, 1, 8):
+            self.points(p, 'available')[index][1] = '0'
+        self.points(p, 'desired')[0][1] = '0'
+        self.points(p, 'available_timestamp')[5][1] = str(p['start'] + 75 - 61)
+        self.points(p, 'desired_timestamp')[6][1] = str(p['start'] + 91)
+        self.points(p, 'available')[7][1] = 'NaN'
+        self.points(p, 'desired')[3:5] = []
+        before = json.dumps(p, sort_keys=True)
+        default = self.module().summarize_samples(p)
+        result = self.module().summarize_samples(p, include_episodes=True)
+        episodes = result.pop('episodes')
+        self.assertEqual(result, default)
+        self.assertNotIn('episodes', default)
+        self.assertEqual([e['reason'] for e in episodes], [
+            'available_below_one', 'missing', 'stale', 'future_timestamp',
+            'nonfinite', 'available_below_one'])
+        self.assertEqual([e['sample_count'] for e in episodes], [2, 2, 1, 1, 1, 1])
+        for status in ('bad', 'unknown'):
+            self.assertEqual(sum(e['sample_count'] for e in episodes if e['status'] == status),
+                             result['samples'][status])
+        self.assertEqual(episodes[0]['desired_zero_unavailable_candidates'], 1)
+        self.assertEqual(episodes[-1]['first_sample_at'], episodes[-1]['last_sample_at'])
+        self.assertTrue(all(e['first_sample_at'].endswith('+00:00') for e in episodes))
+        self.assertEqual(json.dumps(p, sort_keys=True), before)
+
+    def test_good_samples_close_episodes_and_all_good_has_empty_episodes(self):
+        p = self.payload()
+        self.assertEqual(self.module().summarize_samples(p, include_episodes=True)['episodes'], [])
+        for index in (0, 2):
+            self.points(p, 'available')[index][1] = '0'
+        result = self.module().summarize_samples(p, include_episodes=True)
+        episodes = result['episodes']
+        self.assertEqual([e['sample_count'] for e in episodes], [1, 1])
+        self.assertNotEqual(episodes[0]['last_sample_at'], episodes[1]['first_sample_at'])
+        self.assertEqual(set(episodes[0]), {'status', 'reason', 'first_sample_at',
+            'last_sample_at', 'sample_count', 'desired_zero_unavailable_candidates'})
+        self.assertEqual(result['slo_budget']['status'], 'not_calculable')
+
+    def test_unknown_episode_priority_matches_existing_classification(self):
+        p = self.payload()
+        self.points(p, 'available')[0][1] = 'NaN'
+        self.points(p, 'desired_timestamp')[0][1] = str(p['start'] + 1)
+        self.points(p, 'available')[1][1] = '0'
+        self.points(p, 'desired')[1][1] = 'NaN'
+        out = self.module().summarize_samples(p, include_episodes=True)
+        self.assertEqual(out['episodes'][0]['reason'], 'nonfinite')
+        self.assertEqual(out['episodes'][0]['sample_count'], 2)
+        self.assertEqual(out['samples']['bad'], 0)
+
+    def test_episode_cli_preserves_input_and_suppresses_metadata(self):
+        script = ROOT / 'infra/k8s/tools/slo-sample-summary.py'
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'private-input.json'
+            p = self.payload()
+            self.points(p, 'available')[0][1] = '0'
+            for response in p['queries'].values():
+                response['data']['result'][0]['metric']['private_label'] = 'never-echo-this'
+            raw = json.dumps(p)
+            path.write_text(raw)
+            result = subprocess.run([sys.executable, str(script), '--input', str(path), '--episodes'],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)['episodes'][0]['sample_count'], 1)
+            self.assertNotIn('never-echo-this', result.stdout + result.stderr)
+            self.assertEqual(path.read_text(), raw)
+            path.write_text('{"secret":"never-echo-this",')
+            bad = subprocess.run([sys.executable, str(script), '--input', str(path), '--episodes'],
+                                 capture_output=True, text=True)
+            self.assertEqual(bad.returncode, 1)
+            self.assertEqual(bad.stderr.strip(), 'slo_sample_summary=FAIL reason=invalid_input')
+            self.assertNotIn(str(path), bad.stdout + bad.stderr)
+
     def test_complete_success_grid_still_has_no_duration_or_budget_claim(self):
         p = self.payload()
         before = json.dumps(p, sort_keys=True)
