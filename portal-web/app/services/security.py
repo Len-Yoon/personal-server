@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import fcntl
 
 from app.services.admin_status import format_status_checked_at
+from app.services.session_store import SQLiteSessionStore
 
 
 PROJECT_DATA_ROOT = next(
@@ -30,6 +31,11 @@ AUTH_RATE_LIMIT_STATE_PATH = Path(
     or LOG_PATH.parent / "auth-rate-limit-state.json"
 )
 AUTH_SESSION_MAX_ENTRIES = max(1, int(os.getenv("AUTH_SESSION_MAX_ENTRIES", "1024")))
+
+AUTH_SESSION_STORE = (
+    SQLiteSessionStore(Path(os.environ["AUTH_SESSION_STATE_PATH"].strip()), AUTH_SESSION_MAX_ENTRIES)
+    if os.getenv("AUTH_SESSION_STATE_PATH", "").strip() else None
+)
 
 _AUTH_FAILURES: dict[tuple[str, str], list[datetime]] = {}
 _AUTH_SESSIONS: dict[str, tuple[str, datetime]] = {}
@@ -130,6 +136,8 @@ def clear_auth_failures(scope: str, identifier: str) -> None:
 
 
 def create_auth_session(scope: str, max_age_seconds: int) -> str:
+    if AUTH_SESSION_STORE is not None:
+        return AUTH_SESSION_STORE.create(scope, max_age_seconds)
     with _AUTH_SESSIONS_LOCK:
         _prune_expired_auth_sessions()
         while len(_AUTH_SESSIONS) >= AUTH_SESSION_MAX_ENTRIES:
@@ -147,6 +155,8 @@ def create_auth_session(scope: str, max_age_seconds: int) -> str:
 
 
 def has_auth_session(scope: str, token: str) -> bool:
+    if AUTH_SESSION_STORE is not None:
+        return AUTH_SESSION_STORE.validate(scope, token)
     with _AUTH_SESSIONS_LOCK:
         _prune_expired_auth_sessions()
         session = _AUTH_SESSIONS.get(token)

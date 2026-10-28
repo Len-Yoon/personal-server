@@ -4,7 +4,7 @@
   "timeout_seconds": 120,
   "baseline": {
     "commit": "2aa95d2d9f006eb3cb5caa0efc7b4ca19ea662bd",
-    "note": "All measured statements/branches in the three fixed targets are exercised except one structurally unreachable format_size fallback. Missing lines/arcs remain in the denominator and must match exactly; source SHA256 pins the proof. No exclusion pragmas. Defensive decoder/type and OS-error seams use explicit test injection; line/arc coverage does not mean all condition combinations or production integration. Upload ownership revision adds retained file/directory descriptor rollback tests. File-store branches reduce from 158 to 156; floor 99.35 is the rounded-down measured 155/156, with the same sole unreachable fallback and exact missing arc/source/denominator checks. Upload write/cleanup/bulk critical functions each require 100 percent.",
+    "note": "All measured statements/branches in the three fixed targets are exercised except one structurally unreachable format_size fallback. Missing lines/arcs remain in the denominator and must match exactly; source SHA256 pins the proof. No exclusion pragmas. Defensive decoder/type and OS-error seams use explicit test injection; line/arc coverage does not mean all condition combinations or production integration. Upload ownership revision adds retained file/directory descriptor rollback tests. File-store branches reduce from 158 to 156; floor 99.35 is the rounded-down measured 155/156, with the same sole unreachable fallback and exact missing arc/source/denominator checks. Upload write/cleanup/bulk critical functions each require 100 percent. Shared-session dispatch adds six statements and four branches in security.py; measured 206/206 statements and 56/56 branches remain fully covered without lowering floors.",
     "environment": "CPython3.11;coverage7.16.2;isolated code-only fixture;no operational resources. Current upload ownership baseline:71 tests, source SHA256 pinned below; commit retains original baseline provenance."
   },
   "targets": {
@@ -12,10 +12,10 @@
       "statement_min": 100,
       "branch_min": 100,
       "baseline_counts": {
-        "covered_lines": 200,
-        "num_statements": 200,
-        "covered_branches": 52,
-        "num_branches": 52
+        "covered_lines": 206,
+        "num_statements": 206,
+        "covered_branches": 56,
+        "num_branches": 56
       },
       "functions": {
         "auth_rate_limited": {
@@ -183,7 +183,15 @@
     "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_upload_failure_uses_original_parent_directory",
     "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_upload_descriptors_close_after_success_and_failure",
     "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_bulk_keeps_unlinked_upload_inode_open_until_rollback",
-    "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_upload_wrapper_failures_cleanup_owned_file_and_close_descriptor"
+    "tests.test_file_store_full_paths.FileStoreFullPathsTests.test_upload_wrapper_failures_cleanup_owned_file_and_close_descriptor",
+    "tests.test_portal_security.PortalSecurityTests.test_shared_auth_sessions_survive_reload_and_processes_without_plaintext",
+    "tests.test_portal_security.PortalSecurityTests.test_shared_auth_sessions_preserve_fixed_ttl_boundary_and_prune",
+    "tests.test_portal_security.PortalSecurityTests.test_shared_session_failures_never_fall_back_to_memory",
+    "tests.test_portal_security.PortalSecurityTests.test_shared_session_readiness_checks_writer_schema_and_private_path",
+    "tests.test_portal_security.PortalSecurityTests.test_shared_session_path_rejects_symlinks_public_files_and_relative_paths",
+    "tests.test_portal_security.PortalSecurityTests.test_shared_session_collision_rollback_and_real_writer_lock_fail_closed",
+    "tests.test_portal_security.PortalSecurityTests.test_shared_session_rejects_untrusted_sidecars_and_writable_parent",
+    "tests.test_portal_security.PortalSecurityTests.test_shared_confirmations_are_scoped_payload_bound_single_use_and_separate_cap"
   ],
   "mutants": [
     {

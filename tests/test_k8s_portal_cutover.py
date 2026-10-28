@@ -1507,3 +1507,81 @@ restore_writers_after_switch_failure''',
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PortalContinuityRolloutPlanTests(unittest.TestCase):
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('portal_continuity_plan', ROOT / 'infra/k8s/tools/portal-continuity-rollout.py')
+        self.plan = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.plan)
+        self.image = 'fixture.invalid/portal@sha256:' + 'a' * 64
+        self.deployment = {'kind': 'Deployment', 'metadata': {'name': 'portal-web', 'namespace': 'personal-server', 'uid': 'fixture-uid', 'resourceVersion': '1'}, 'spec': {'replicas': 1, 'template': {'metadata': {'labels': self.plan.LABEL}, 'spec': {'securityContext': {'runAsUser': 10001}, 'containers': [{'name': 'portal-web', 'image': 'fixture.invalid/portal@sha256:' + 'b' * 64, 'imagePullPolicy': 'Never', 'env': [{'name': 'EXISTING_SECRET', 'value': 'fixture-secret-must-not-be-emitted'}]}], 'volumes': [{'name': name, 'persistentVolumeClaim': {'claimName': name}} for name in sorted(self.plan.CLAIMS)]}}}}
+        self.pvcs, self.pvs = {'items': []}, {'items': []}
+        for index, name in enumerate(sorted(self.plan.CLAIMS)):
+            uid = 'fixture-claim-' + str(index)
+            volume = 'fixture-volume-' + str(index)
+            self.pvcs['items'].append({'metadata': {'name': name, 'namespace': 'personal-server', 'uid': uid}, 'spec': {'volumeName': volume, 'accessModes': ['ReadWriteOnce']}, 'status': {'phase': 'Bound'}})
+            self.pvs['items'].append({'metadata': {'name': volume}, 'status': {'phase': 'Bound'}, 'spec': {'hostPath': {'path': '/fixture/local'}, 'claimRef': {'namespace': 'personal-server', 'name': name, 'uid': uid}, 'nodeAffinity': {'required': {'nodeSelectorTerms': [{'matchExpressions': [{'key': 'kubernetes.io/hostname', 'operator': 'In', 'values': ['fixture-node']}]}]}}}})
+
+    @staticmethod
+    def apply_patch(value, patch):
+        import copy
+        result = copy.deepcopy(value)
+        for operation in patch:
+            parts = [p.replace('~1', '/').replace('~0', '~') for p in operation['path'].split('/')[1:]]
+            parent = result
+            for part in parts[:-1]:
+                parent = parent[int(part)] if isinstance(parent, list) else parent[part]
+            key = parts[-1]
+            if operation['op'] == 'test':
+                actual = parent[int(key)] if isinstance(parent, list) else parent[key]
+                if actual != operation['value']:
+                    raise ValueError('precondition changed')
+            elif isinstance(parent, list):
+                if key == '-': parent.append(operation['value'])
+                else: parent[int(key)] = operation['value']
+            else:
+                parent[key] = operation['value']
+        return result
+
+    def test_plan_preserves_runtime_values_and_renders_future_compatible_rollout(self):
+        patch = self.plan.prepare_patch(self.deployment, self.pvcs, self.pvs, self.image)
+        self.assertNotIn('fixture-secret-must-not-be-emitted', __import__('json').dumps(patch))
+        result = self.apply_patch(self.deployment, patch)
+        self.assertEqual(result['spec']['strategy']['rollingUpdate'], {'maxUnavailable': 0, 'maxSurge': 1})
+        pod = result['spec']['template']['spec']
+        self.assertEqual(pod['containers'][0]['readinessProbe']['httpGet']['path'], '/ready')
+        self.assertEqual(pod['terminationGracePeriodSeconds'], 330)
+        self.assertEqual(pod['containers'][0]['env'][0]['value'], 'fixture-secret-must-not-be-emitted')
+        second = self.plan.prepare_patch(result, self.pvcs, self.pvs, self.image)
+        repeated = self.apply_patch(result, second)
+        self.assertEqual(repeated['spec'], result['spec'])
+        changed = __import__('copy').deepcopy(self.deployment)
+        changed['metadata']['resourceVersion'] = '2'
+        with self.assertRaises(ValueError): self.apply_patch(changed, patch)
+
+    def test_read_write_once_pod_network_volumes_and_mismatched_claims_are_rejected(self):
+        import copy
+        for mutation in ['rwop', 'network', 'claim', 'node', 'unbound']:
+            claims, volumes = copy.deepcopy(self.pvcs), copy.deepcopy(self.pvs)
+            if mutation == 'rwop': claims['items'][0]['spec']['accessModes'] = ['ReadWriteOncePod']
+            if mutation == 'network': volumes['items'][0]['spec']['nfs'] = {'server': 'fixture.invalid', 'path': '/fixture'}
+            if mutation == 'claim': volumes['items'][0]['spec']['claimRef']['uid'] = 'different-claim'
+            if mutation == 'node': volumes['items'][0]['spec']['nodeAffinity']['required']['nodeSelectorTerms'][0]['matchExpressions'][0]['values'] = ['different-node']
+            if mutation == 'unbound': claims['items'][0]['status']['phase'] = 'Pending'
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                self.plan.prepare_patch(self.deployment, claims, volumes, self.image)
+
+    def test_online_backup_patch_preserves_security_and_suspended_schedule(self):
+        import yaml
+        cronjob = next(v for v in yaml.safe_load_all((ROOT / 'infra/k8s/backup-automation/portal-pvc-backup-cronjob.yaml').read_text()) if v.get('kind') == 'CronJob')
+        cronjob['metadata'].update(uid='fixture-backup', resourceVersion='1')
+        patch = self.plan.prepare_backup_patch(cronjob, self.image)
+        result = self.apply_patch(cronjob, patch)
+        self.assertTrue(result['spec']['suspend'])
+        pod = result['spec']['jobTemplate']['spec']['template']['spec']
+        self.assertEqual(pod['containers'][0]['image'], pod['initContainers'][0]['image'])
+        for mount in pod['containers'][0]['volumeMounts'][:2]: self.assertTrue(mount['readOnly'])
+        cronjob['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['securityContext']['allowPrivilegeEscalation'] = True
+        with self.assertRaises(ValueError): self.plan.prepare_backup_patch(cronjob, self.image)

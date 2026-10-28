@@ -73,6 +73,95 @@ class SequenceTests(unittest.TestCase):
     def run_sequence(self, api, at=NOW):
         return sequence.run(api, now=lambda: at, sleep=lambda _: None, poll_seconds=0)
 
+    ONLINE_IMAGE = "registry.example/backup/portal@sha256:" + "a" * 64
+
+    def online_api(self):
+        api = FakeAPI()
+        pod = api.cronjobs["portal"]["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+        for container in pod["containers"] + pod["initContainers"]:
+            container["image"] = self.ONLINE_IMAGE
+        pod["containers"][0]["env"].append({"name": "PORTAL_BACKUP_SNAPSHOT_MODE", "value": "online"})
+        return api
+
+    def test_online_image_requires_explicit_matching_flag_and_environment(self):
+        original_env = copy.deepcopy(sequence.PORTAL_ENV)
+        original_stages = copy.deepcopy(sequence.STAGES)
+        api = self.online_api()
+        self.assertEqual(sequence.check(api), 1)
+        self.assertEqual(sequence.check(FakeAPI(), online_image=self.ONLINE_IMAGE), 1)
+        self.assertEqual(sequence.check(api, online_image=self.ONLINE_IMAGE), 0)
+        self.assertEqual(sequence.PORTAL_ENV, original_env)
+        self.assertEqual(sequence.STAGES, original_stages)
+        self.assertEqual(sequence.check(FakeAPI()), 0)
+        self.assertEqual(api.created, [])
+        self.assertEqual(api.state_writes, [])
+
+    def test_online_contract_rejects_missing_duplicate_extra_env_and_init_image_drift(self):
+        for change in ("missing", "duplicate", "extra", "wrong-value", "init-image", "main-image"):
+            with self.subTest(change=change):
+                api = self.online_api()
+                pod = api.cronjobs["portal"]["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+                env = pod["containers"][0]["env"]
+                if change == "missing":
+                    env.pop()
+                elif change == "duplicate":
+                    env.append(copy.deepcopy(env[-1]))
+                elif change == "extra":
+                    env.append({"name": "UNAPPROVED", "value": "1"})
+                elif change == "wrong-value":
+                    env[-1]["value"] = "quiesced"
+                else:
+                    pod["initContainers" if change == "init-image" else "containers"][0]["image"] = sequence.STAGES["portal"].image
+                self.assertEqual(sequence.check(api, online_image=self.ONLINE_IMAGE), 1)
+                self.assertEqual(api.created, [])
+
+    def test_online_option_preserves_every_other_stage_contract(self):
+        for stage in sequence.ORDER[1:]:
+            api = self.online_api()
+            self.assertEqual(sequence.validate_cronjob(stage, api.cronjobs[stage]),
+                             sequence.validate_cronjob(stage, api.cronjobs[stage], self.ONLINE_IMAGE))
+            pod = api.cronjobs[stage]["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+            pod["containers"][0]["image"] = self.ONLINE_IMAGE
+            self.assertEqual(sequence.check(api, online_image=self.ONLINE_IMAGE), 1)
+            api = self.online_api()
+            pod = api.cronjobs[stage]["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+            pod["containers"][0]["env"] = [{"name": "PORTAL_BACKUP_SNAPSHOT_MODE", "value": "online"}]
+            self.assertEqual(sequence.check(api, online_image=self.ONLINE_IMAGE), 1)
+
+    def test_online_run_validates_then_creates_only_exact_configured_templates(self):
+        api = self.online_api()
+        self.assertEqual(sequence.run(api, now=lambda: NOW, sleep=lambda _: None, poll_seconds=0,
+                                      online_image=self.ONLINE_IMAGE), 0)
+        self.assertEqual(len(api.created), 4)
+        for stage in sequence.ORDER:
+            job = api.jobs[f"{sequence.STAGES[stage].name}-20260929"]
+            pod = job["spec"]["template"]["spec"]
+            expected = self.ONLINE_IMAGE if stage == "portal" else sequence.STAGES[stage].image
+            self.assertEqual(pod["containers"][0]["image"], expected)
+            self.assertEqual(pod["initContainers"][0]["image"], expected)
+
+    def test_online_cli_rejects_invalid_digest_before_api_or_lock(self):
+        for image in ("", "repo:latest", "repo@sha256:" + "a" * 63, "repo@sha256:" + "g" * 64,
+                      "repo@sha256:" + "a" * 65, "repo@sha256:" + "A" * 64, "https://repo@sha256:" + "a" * 64):
+            with self.subTest(image=image), mock.patch.object(sequence.sys, "argv", ["sequence", "--go", "--portal-online-image", image]), mock.patch.object(sequence, "KubectlAPI") as api, mock.patch.object(sequence, "local_lock") as lock:
+                self.assertEqual(sequence.main(), 2)
+                api.assert_not_called()
+                lock.assert_not_called()
+        with mock.patch.object(sequence.sys, "argv", ["sequence", "--check-lock", "--portal-online-image", self.ONLINE_IMAGE]), mock.patch.object(sequence, "local_lock") as lock:
+            self.assertEqual(sequence.main(), 2)
+            lock.assert_not_called()
+
+    def test_online_cli_passes_explicit_image_to_check_and_run(self):
+        for mode in ("--check", "--go"):
+            with self.subTest(mode=mode), mock.patch.object(sequence.sys, "argv", ["sequence", mode, "--portal-online-image", self.ONLINE_IMAGE]), mock.patch.object(sequence, "KubectlAPI") as api, mock.patch.object(sequence, "local_lock"), mock.patch.object(sequence, "check", return_value=0) as check, mock.patch.object(sequence, "run", return_value=0) as run:
+                self.assertEqual(sequence.main(), 0)
+                if mode == "--check":
+                    check.assert_called_once_with(api.return_value, online_image=self.ONLINE_IMAGE)
+                    run.assert_not_called()
+                else:
+                    run.assert_called_once_with(api.return_value, evidence_refresh=sequence.refresh_portal_evidence, online_image=self.ONLINE_IMAGE)
+                    check.assert_not_called()
+
     def test_success_refreshes_evidence_after_portal_result_persisted(self):
         api = FakeAPI()
         def refresh():
@@ -475,6 +564,20 @@ class SequenceTests(unittest.TestCase):
         self.assertEqual(self.run_sequence(api), 0)
         self.assertEqual(self.run_sequence(api), 0)
         self.assertEqual(len(api.created), 4)
+
+
+class OnlineSequenceEnvironmentTests(unittest.TestCase):
+    def test_known_quiesced_digest_cannot_be_marked_online_even_with_an_alias(self):
+        digest = sequence.STAGES['portal'].image.split('@sha256:')[1]
+        for value in [sequence.STAGES['portal'].image, 'fixture.invalid/alias@sha256:' + digest]:
+            with self.subTest(value=value), self.assertRaises(sequence.SafetyError):
+                sequence.portal_online_image(value)
+
+    def test_service_only_environment_pins_expected_online_image(self):
+        image = 'fixture.invalid/portal-backup@sha256:' + 'a' * 64
+        with mock.patch.dict(os.environ, {'PORTAL_BACKUP_ONLINE_IMAGE': image}), mock.patch.object(sequence.sys, 'argv', ['sequence', '--check']), mock.patch.object(sequence, 'KubectlAPI'), mock.patch.object(sequence, 'check', return_value=0) as check:
+            self.assertEqual(sequence.main(), 0)
+            self.assertEqual(check.call_args.kwargs['online_image'], image)
 
 
 if __name__ == "__main__":
