@@ -277,6 +277,32 @@ class PortalOnlineSnapshotTests(unittest.TestCase):
                     self.assertEqual(restored.execute("SELECT value FROM ack").fetchall(), [("before capture",), ("live write",)])
                 self.assertFalse(Path(str(self.output / "portal-web-state" / name) + "-wal").exists())
 
+    def test_prior_deployment_sqlite_recovery_point_is_preserved(self):
+        import hashlib
+        import sqlite3
+        from contextlib import closing
+        name = hashlib.sha256(b"/var/lib/portal/homeops.sqlite3").hexdigest() + ".sqlite3"
+        archive = self.state / ".deploy-backups" / "07c8f81" / name
+        archive.parent.mkdir(parents=True)
+        with closing(sqlite3.connect(archive)) as db:
+            db.execute("CREATE TABLE accepted(value TEXT)")
+            db.execute("INSERT INTO accepted VALUES ('prior recovery point')")
+            db.commit()
+        self.capture()
+        restored = self.output / "portal-web-state" / archive.relative_to(self.state)
+        with closing(sqlite3.connect(restored)) as db:
+            self.assertEqual(db.execute("PRAGMA quick_check").fetchone(), ("ok",))
+            self.assertEqual(db.execute("SELECT value FROM accepted").fetchone(), ("prior recovery point",))
+        self.assertTrue(archive.exists())
+
+    def test_deployment_archive_accepts_only_known_database_paths(self):
+        from pathlib import Path
+        for name, directory in [(".deploy-backups/not-a-commit", True),
+                                (".deploy-backups/07c8f81/" + "0" * 64 + ".sqlite3", False),
+                                (".deploy-backups/07c8f81/arbitrary.json", False)]:
+            with self.subTest(name=name):
+                self.assertIsNone(self.tool.state_kind(Path(name), directory))
+
     def test_unknown_mutable_state_and_symlink_are_rejected_without_output(self):
         (self.state / "unknown").write_bytes(b"mutable")
         with self.assertRaises(self.tool.CaptureError):

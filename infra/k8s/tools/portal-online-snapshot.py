@@ -9,6 +9,7 @@ import argparse
 from contextlib import ExitStack, closing
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -55,7 +56,13 @@ def state_kind(path, directory=False):
     name = path.as_posix()
     databases = {"homeops.sqlite3", "news-bookmarks.sqlite3", "auth/session-state.sqlite3"}
     if directory:
-        return "directory" if name in {"auth", "security-events.txt"} else None
+        return "directory" if name in {"auth", "security-events.txt", ".deploy-backups"} or re.fullmatch(r"\.deploy-backups/[a-f0-9]{7,40}", name) else None
+    # Preserve earlier deployment recovery points using SQLite's backup API too.
+    archived = re.fullmatch(r"\.deploy-backups/[a-f0-9]{7,40}/([a-f0-9]{64})\.sqlite3(-wal|-shm|-journal)?", name)
+    if archived:
+        known_paths = {hashlib.sha256(("/var/lib/portal/" + db).encode()).hexdigest() for db in databases}
+        if archived[1] in known_paths:
+            return "skip" if archived[2] else "database"
     if name in databases:
         return "database"
     if any(name == db + suffix for db in databases for suffix in ("-wal", "-shm", "-journal")):
