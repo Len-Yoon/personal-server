@@ -2382,6 +2382,58 @@ class RelayServiceTest(unittest.TestCase):
                 self.assertNotIn("문제: 운영 상태 경고", reply)
                 self.assertIn("상태: 상태를 확인 중입니다.", reply)
 
+    def test_search_and_archive_webhooks_have_specific_safe_delivery_and_deduplication(self):
+        cases = (
+            ("PortalSearchDegraded", "검색 결과 누락 또는 조회 실패 증가", "통합 검색 결과가 불완전할 수 있음", "Portal 검색"),
+            ("PortalSearchInstrumentationMissing", "검색 상태 지표 누락", "검색 품질을 정확히 판단할 수 없음", "Portal 검색"),
+            ("ObservationArchiveScrapeMissing", "관측 보존 검증기의 수집 연결 누락", "관측 원본의 보존 상태를 확인할 수 없음", "관측 보존 감시"),
+            ("ObservationArchiveVerificationUnhealthy", "관측 원본 검증 실패 또는 지연", "보존 자료의 무결성을 확인할 수 없음", "관측 원본 보존"),
+            ("ObservationArchiveDayMissing", "필수 일자의 관측 원본 누락", "신뢰성 분석에 필요한 기록이 빠질 수 있음", "관측 원본 보존"),
+            ("ObservationArchiveQuotaNearFull", "관측 원본의 논리 용량 한도 임박", "다음 관측 원본의 보존이 실패할 수 있음", "관측 원본 보존"),
+        )
+        for name, problem, impact, target in cases:
+            with self.subTest(alertname=name):
+                sent = []
+                relay = RelayService(
+                    alertmanager_auth_token="presentation-contract-token",
+                    k8s_client=FakeK8s(), prometheus_client=FakePrometheus(),
+                    alert_callback=lambda message: sent.append(message) is None,
+                )
+                alert = {"fingerprint": "presentation-contract-" + name,
+                         "labels": {"alertname": name, "deployment": "portal-web",
+                                    "instance": "private-target", "extra": "opaque-label"},
+                         "annotations": {"summary": "opaque-summary", "description": "opaque-description"}}
+                for state, heading in (("firing", "[장애 감지]"), ("resolved", "[복구 확인]")):
+                    status, reply = relay.handle_alert(
+                        {"status": state, "alerts": [alert]}, "Bearer presentation-contract-token")
+                    self.assertEqual(status, 200)
+                    self.assertTrue(reply.startswith(heading))
+                    self.assertIn("문제: " + problem, reply)
+                    self.assertIn("영향: " + impact, reply)
+                    self.assertIn("대상: " + target, reply)
+                    self.assertNotIn("문제: 운영 상태 경고", reply)
+                    for private in ("private-target", "opaque-label", "opaque-summary",
+                                    "opaque-description", "presentation-contract-token"):
+                        self.assertNotIn(private, reply)
+                    previous_count = len(sent)
+                    self.assertEqual(relay.handle_alert(
+                        {"status": state, "alerts": [alert]}, "Bearer presentation-contract-token"),
+                        (200, "duplicate suppressed"))
+                    self.assertEqual(len(sent), previous_count)
+                self.assertEqual(len(sent), 2)
+
+    def test_new_monitoring_alert_names_are_bound_to_installed_rule_sources(self):
+        import re
+        paths = ("infra/k8s/sre-telegram/portal-search-rule.yaml",
+                 "infra/k8s/slo-evidence/archive/health-monitor.yaml")
+        names = set()
+        for path in paths:
+            names.update(re.findall(r"^\s*- alert:\s*(\w+)\s*$", (REPO_ROOT / path).read_text(), re.MULTILINE))
+        self.assertEqual(len(names), 6)
+        for name in names:
+            self.assertIn(name, relay_main.ALERT_PRESENTATIONS)
+            self.assertIn(name, relay_main.ALERT_TARGETS_BY_NAME)
+
     def test_resolved_alert_is_formatted(self):
         relay = RelayService(alertmanager_auth_token="expected", k8s_client=FakeK8s(), prometheus_client=FakePrometheus())
 
