@@ -154,8 +154,11 @@ async def _search_yes24(query: str, limit: int) -> list[dict[str, Any]]:
             raise ValueError("YES24 검색 항목 형식 오류")
         item_id = str(item.get("itemId") or "")
         isbn = str(item.get("isbn13") or item.get("isbn10") or "").strip()
-        if not item_id.isdigit() or not isbn or not item.get("title"):
+        if not item_id.isascii() or not item_id.isdigit() or not item.get("title"):
             raise ValueError("YES24 검색 필수 정보 누락")
+        # Sets and other valid catalogue products may have no ISBN. Keep a
+        # provider-qualified identifier rather than dropping the entire page.
+        isbn = isbn or f"yes24:{item_id}"
         detail = item.get("contentDetail") or {}
         if not isinstance(detail, dict):
             raise ValueError("YES24 도서 소개 형식 오류")

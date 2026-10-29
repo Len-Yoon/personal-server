@@ -224,6 +224,25 @@ class Yes24ContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn('fixture-key', str(error.exception))
             self.assertFalse(search._CACHE)
 
+    async def test_mixed_catalogue_without_isbn_preserves_whole_result_page(self):
+        items = [
+            {'itemId': 123, 'title': '손자병법', 'isbn13': '9781234567890'},
+            {'itemId': 456, 'title': '손자병법 세트', 'isbn13': None, 'isbn10': ''},
+            {'itemId': 789, 'title': '다른 판본', 'isbn10': '0306406152'},
+        ]
+        payload = {'success': True, 'errorCode': None, 'data': {'items': items}}
+        with patch.dict(os.environ, {'YES24_API_KEY': 'fixture-key'}), patch.object(self.search, '_get_json', AsyncMock(return_value=payload)):
+            books = await self.search.search_books_async('손자병법')
+        self.assertEqual([book['isbn'] for book in books], ['9781234567890', 'yes24:456', '0306406152'])
+        self.assertEqual(books[1]['external_id'], '456')
+        self.assertTrue(all(book['source'] == 'yes24' for book in books))
+
+    async def test_missing_product_id_remains_a_provider_error(self):
+        payload = {'success': True, 'errorCode': None, 'data': {'items': [{'title': '제목만 있는 비정상 응답'}]}}
+        with patch.dict(os.environ, {'YES24_API_KEY': 'fixture-key'}), patch.object(self.search, '_get_json', AsyncMock(return_value=payload)):
+            with self.assertRaises(ValueError):
+                await self.search._search_yes24('책', 12)
+
     async def test_rotated_key_does_not_reuse_old_cache(self):
         search = self.search
         provider = AsyncMock(return_value=[{'title': '책'}])
