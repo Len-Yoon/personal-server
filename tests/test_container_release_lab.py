@@ -230,6 +230,20 @@ class RestoreDocker(FakeDocker):
     wrong_uid=False
     corrupt_restore=False
     restore_failure=False
+    def export_image(self,image,path):
+        self.calls.append(('export_image',image['id']))
+        path.write_bytes(b'owned-image-fixture')
+        return {'sha256':restore_module().hashlib.sha256(path.read_bytes()).hexdigest(),
+                'size_bytes':path.stat().st_size,'image_id':image['id'],'tag':'owned-fixture:v2'}
+    def discard_source(self,container,volume,image):
+        self.calls.append(('discard_source',container,volume))
+        self.discarded_volume=volume
+        return {'container_absent':True,'volume_absent':True,'image_absent':True,'build_layer_cache_purged':False}
+    def import_image(self,image,path,expected):
+        self.calls.append(('import_image',image['id']))
+        if restore_module().hashlib.sha256(path.read_bytes()).hexdigest()!=expected['sha256']:
+            raise RuntimeError('archive_mismatch')
+        return dict(image)
     def payload(self):
         lab=restore_module()
         tables={name:[] for name in lab.TABLES};tables['books']=[[1,'synthetic']]
@@ -264,10 +278,43 @@ class IndependentRestoreTests(unittest.TestCase):
         RestoreDocker.cleanup_ok=True
         for name in ('wrong_mount','wrong_uid','corrupt_restore','restore_failure','fail_stop','fail_rollback','schema_drift','wrong_identity'):
             setattr(RestoreDocker,name,False)
-    def run_fake(self,interrupted=lambda:False):
+    def run_fake(self,interrupted=lambda:False,*,cold_assets=False,progress=None):
         lab=restore_module()
         with patch.object(lab,'prepare_context',side_effect=lambda path,commit,build_commit,*args:descriptor('v2',commit,build_commit)):
-            return lab.run_lab(time.monotonic()+20,interrupted,engine_factory=RestoreDocker)
+            return lab.run_lab(time.monotonic()+20,interrupted,progress,engine_factory=RestoreDocker,cold_assets=cold_assets)
+    def test_exported_assets_recovery_removes_source_and_measures_full_timeline(self):
+        report=self.run_fake(cold_assets=True)
+        self.assertTrue(report['valid'],report)
+        self.assertEqual(report['image_archive_export_import'],'verified_same_daemon_source_image_removed')
+        self.assertEqual(report['recovery']['lost_acknowledged_write_ids'],['memo_v2'])
+        self.assertEqual(report['recovery']['recovered_acknowledged_write_ids'],['seed_memo_v1'])
+        self.assertEqual(report['recovery']['lost_acknowledged_writes'],1)
+        self.assertGreaterEqual(report['recovery']['preparation_and_recovery_seconds'],report['recovery']['rto_seconds'])
+        stages=[event['event'] for event in report['events']]
+        for before,after in [('image_and_configuration_assets_exported','simulated_source_loss_confirmed'),
+                             ('simulated_source_loss_confirmed','source_owned_resources_removed'),
+                             ('source_owned_resources_removed','image_archive_reimported'),
+                             ('image_archive_reimported','fresh_destination_verified')]:
+            self.assertLess(stages.index(before),stages.index(after))
+        self.assertFalse(report['source_removal']['build_layer_cache_purged'])
+        self.assertIn('not_physical_host_loss',report['limits'])
+    def test_exported_assets_failure_still_cleans_and_never_starts_destination(self):
+        for method in ('export_image','discard_source','import_image'):
+            with self.subTest(method=method),patch.object(RestoreDocker,method,side_effect=RuntimeError('fixture_failure')):
+                report=self.run_fake(cold_assets=True)
+                self.assertFalse(report['valid'])
+                self.assertTrue(report['cleanup']['ok'] and report['fixture_removed'])
+                self.assertLessEqual(len([call for call in RestoreDocker.instances[-1].calls if call[0]=='start']),1)
+    def test_configuration_tamper_stops_before_image_import(self):
+        original=RestoreDocker.export_image
+        def tamper(engine,image,path):
+            result=original(engine,image,path)
+            (path.parent/'configuration.json').write_text('{}')
+            return result
+        with patch.object(RestoreDocker,'export_image',tamper):report=self.run_fake(cold_assets=True)
+        self.assertFalse(report['valid']);self.assertEqual(report['reason'],'configuration_bundle_mismatch')
+        self.assertFalse(any(call[0]=='import_image' for call in RestoreDocker.instances[-1].calls))
+        self.assertTrue(report['cleanup']['ok'] and report['fixture_removed'])
     def test_restore_uses_fresh_destination_and_accounts_lost_ack_write(self):
         report=self.run_fake()
         self.assertTrue(report['valid'],report)

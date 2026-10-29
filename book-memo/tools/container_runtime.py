@@ -12,10 +12,13 @@ import math
 import os
 from pathlib import Path, PurePosixPath
 import re
+import resource
 import selectors
 import signal
+import shutil
 import stat
 import subprocess
+import tarfile
 import time
 from typing import Callable
 
@@ -30,6 +33,7 @@ _IMAGE = re.compile(r'sha256:[0-9a-f]{64}\Z')
 _NAME = re.compile(r'(?:[A-Za-z0-9_][A-Za-z0-9_.-]*|\.gitkeep)\Z')
 DOCKERFILE_BYTES = (Path(__file__).resolve().parents[1] / 'Dockerfile').read_bytes()
 DOCKERFILE_SHA = '72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea'
+ARCHIVE_LIMIT = 1024 * 1024 * 1024
 
 
 def _canonical(value: dict) -> bytes:
@@ -114,7 +118,7 @@ class LocalDocker:
         except Exception:
             raise RuntimeError(ERROR) from None
 
-    def _run(self, args: list[str], *, cap=15, limit=2 * 1024 * 1024, cleanup=False) -> str:
+    def _run(self, args: list[str], *, cap=15, limit=2 * 1024 * 1024, cleanup=False, bounded_file=None) -> str:
         """Bound both running time and buffered output; reap cancelled children."""
         process = None
         try:
@@ -124,12 +128,16 @@ class LocalDocker:
                 command += ['--host', self._endpoint]
             command += args
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                       env=self._env, stdin=subprocess.DEVNULL, start_new_session=True)
+                                       env=self._env, stdin=subprocess.DEVNULL, start_new_session=True,
+                                       preexec_fn=(lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (ARCHIVE_LIMIT, ARCHIVE_LIMIT)))
+                                       if bounded_file is not None else None)
             output = bytearray()
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
                 while True:
                     self._budget(cleanup)
+                    if bounded_file is not None and bounded_file.exists() and bounded_file.stat().st_size > ARCHIVE_LIMIT:
+                        _fail()
                     if time.monotonic() >= deadline:
                         _fail()
                     if not selector.select(min(.05, max(.001, deadline - time.monotonic()))):
@@ -341,6 +349,201 @@ class LocalDocker:
         if data.get('Name') != name or not self._owned(data.get('Labels')):
             _fail()
         return name
+
+    def _archive_path(self, path, *, new=False):
+        path = Path(path)
+        parent = path.parent.resolve(strict=True)
+        marker = parent / '.container-lab-owner'
+        if (path.parent != parent or path.name != 'image.tar' or marker.is_symlink()
+                or not marker.is_file() or marker.read_text() != self.owner):
+            _fail()
+        if new:
+            if path.exists() or path.is_symlink() or shutil.disk_usage(parent).free < 2 * ARCHIVE_LIMIT:
+                _fail()
+        else:
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or not 0 < info.st_size <= ARCHIVE_LIMIT:
+                _fail()
+        return path
+
+    def _archive_digest(self, path):
+        value = hashlib.sha256()
+        with path.open('rb') as source:
+            for block in iter(lambda: source.read(1024 * 1024), b''):
+                self._budget()
+                value.update(block)
+        return value.hexdigest()
+
+    def verify_image_archive(self, path, image, expected):
+        """Inspect bounded metadata without extracting any archive member."""
+        try:
+            path = self._archive_path(path)
+            tag = f'ps-book-version-{self.owner}:{image["role"]}'
+            if (image not in self._images.values() or expected.get('tag') != tag
+                    or expected.get('image_id') != image['id']
+                    or path.stat().st_size != expected.get('size_bytes')
+                    or self._archive_digest(path) != expected.get('sha256')):
+                _fail()
+            with tarfile.open(path, 'r:') as archive:
+                members = {}
+                total = 0
+                for member in archive:
+                    self._budget()
+                    name = PurePosixPath(member.name)
+                    if (name.is_absolute() or '..' in name.parts or member.name in members
+                            or not (member.isfile() or member.isdir()) or member.size < 0):
+                        _fail()
+                    total += member.size
+                    if total > ARCHIVE_LIMIT or len(members) >= 4096:
+                        _fail()
+                    members[member.name] = member
+                def json_member(name):
+                    member = members.get(name)
+                    if member is None or not member.isfile() or not 0 < member.size <= 2 * 1024 * 1024:
+                        _fail()
+                    return json.load(archive.extractfile(member))
+                manifest = json_member('manifest.json')
+                if (not isinstance(manifest, list) or len(manifest) != 1
+                        or manifest[0].get('RepoTags') != [tag]):
+                    _fail()
+                item = manifest[0]
+                config_name = item['Config']
+                config = json_member(config_name)
+                config_raw = archive.extractfile(members[config_name]).read()
+                if ('sha256:' + hashlib.sha256(config_raw).hexdigest() != image['id']
+                        or not self._owned(config.get('config', {}).get('Labels'))
+                        or config.get('config', {}).get('User') != '10001:10001'
+                        or not isinstance(item.get('Layers'), list)
+                        or not item['Layers'] or any(name not in members or not members[name].isfile() for name in item['Layers'])):
+                    _fail()
+                def member_digest(name):
+                    value = hashlib.sha256()
+                    with archive.extractfile(members[name]) as source:
+                        for block in iter(lambda: source.read(1024 * 1024), b''):
+                            self._budget()
+                            value.update(block)
+                    return 'sha256:' + value.hexdigest()
+                # An OCI index is another loader entry point. Pin its entire
+                # descriptor graph to exactly the Docker manifest's config and
+                # layers; checking only reference annotations is insufficient.
+                if 'index.json' in members:
+                    index = json_member('index.json')
+                    layer_digests = [member_digest(name) for name in item['Layers']]
+                    def descriptor_member(descriptor):
+                        if set(descriptor) - {'mediaType', 'digest', 'size', 'annotations', 'platform'}:
+                            _fail()
+                        identity = descriptor.get('digest', '')
+                        if not _IMAGE.fullmatch(identity):
+                            _fail()
+                        name = 'blobs/sha256/' + identity[7:]
+                        member = members.get(name)
+                        if (member is None or not member.isfile() or type(descriptor.get('size')) is not int
+                                or member.size != descriptor['size'] or member_digest(name) != identity):
+                            _fail()
+                        for key, value in descriptor.get('annotations', {}).items():
+                            if (key == 'io.containerd.image.name'
+                                    and value not in (tag, 'docker.io/library/' + tag)):
+                                _fail()
+                            if (key == 'org.opencontainers.image.ref.name'
+                                    and value not in (tag, 'docker.io/library/' + tag, image['role'])):
+                                _fail()
+                        return name
+                    for depth in range(8):
+                        entries = index.get('manifests')
+                        if index.get('schemaVersion') != 2 or not isinstance(entries, list) or len(entries) != 1:
+                            _fail()
+                        descriptor = entries[0]
+                        name = descriptor_member(descriptor)
+                        media = descriptor.get('mediaType')
+                        document = json_member(name)
+                        if media in ('application/vnd.oci.image.index.v1+json', 'application/vnd.docker.distribution.manifest.list.v2+json'):
+                            index = document
+                            continue
+                        if (media not in ('application/vnd.oci.image.manifest.v1+json', 'application/vnd.docker.distribution.manifest.v2+json')
+                                or document.get('schemaVersion') != 2 or 'subject' in document or 'artifactType' in document
+                                or document.get('config', {}).get('digest') != image['id']
+                                or not isinstance(document.get('layers'), list)
+                                or [layer.get('digest') for layer in document['layers']] != layer_digests):
+                            _fail()
+                        descriptor_member(document['config'])
+                        for layer in document['layers']:
+                            descriptor_member(layer)
+                        break
+                    else:
+                        _fail()
+                if 'repositories' in members:
+                    repositories = json_member('repositories')
+                    repository, role = tag.rsplit(':', 1)
+                    if set(repositories) != {repository} or set(repositories[repository]) != {role}:
+                        _fail()
+            return dict(expected)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, tarfile.TarError):
+            raise RuntimeError(ERROR) from None
+
+    def export_image(self, image, path):
+        if self._closed or image not in self._images.values():
+            _fail()
+        path = self._archive_path(path, new=True)
+        tag = f'ps-book-version-{self.owner}:{image["role"]}'
+        data = self._inspect('image', tag)
+        if data.get('Id') != image['id'] or not self._owned(data.get('Config', {}).get('Labels')):
+            _fail()
+        # File output avoids buffering a potentially large archive in memory.
+        self._run(['image', 'save', '--output', str(path), tag], cap=120, limit=65536, bounded_file=path)
+        path = self._archive_path(path)
+        expected = {'sha256': self._archive_digest(path), 'size_bytes': path.stat().st_size,
+                    'image_id': image['id'], 'tag': tag}
+        return self.verify_image_archive(path, image, expected)
+
+    def discard_source(self, container, volume, image):
+        """Remove only this invocation's stopped source and unshared image."""
+        name, record = self._record(container)
+        tag = f'ps-book-version-{self.owner}:{image["role"]}'
+        if (self._closed or record['volume'] != volume or record['image'] != image
+                or not record.get('clean') or volume not in self._volumes or self._images.get(tag) != image):
+            _fail()
+        data = self._container(container)
+        state = data.get('State', {})
+        if state.get('Running') is not False or state.get('Pid') != 0:
+            _fail()
+        volume_data = self._inspect('volume', volume)
+        image_data = self._inspect('image', tag)
+        if (volume_data.get('Name') != volume or not self._owned(volume_data.get('Labels'))
+                or image_data.get('Id') != image['id'] or not self._owned(image_data.get('Config', {}).get('Labels'))
+                or image_data.get('RepoTags') != [tag] or image_data.get('RepoDigests') != []):
+            _fail()
+        self._run(['container', 'rm', data['Id']])
+        if self._present('container', name):
+            _fail()
+        del self._containers[name]
+        self._run(['volume', 'rm', volume])
+        if self._present('volume', volume):
+            _fail()
+        del self._volumes[volume]
+        self._run(['image', 'rm', '--no-prune', tag])
+        if self._present('image', tag) or self._image_id_present(image['id']):
+            _fail()
+        return {'container_absent': True, 'volume_absent': True, 'image_absent': True,
+                'build_layer_cache_purged': False}
+
+    def import_image(self, image, path, expected):
+        if self._closed:
+            _fail()
+        self.verify_image_archive(path, image, expected)
+        tag = expected['tag']
+        if self._present('image', tag) or self._image_id_present(image['id']):
+            _fail()
+        # Registration survives source deletion, so an uncertain load response
+        # is reconciled by the existing ownership-scoped cleanup path.
+        self._unknown_builds.add(tag)
+        self._run(['image', 'load', '--input', str(path)], cap=120, limit=65536)
+        data = self._inspect('image', tag)
+        labels = data.get('Config', {}).get('Labels', {})
+        if (data.get('Id') != image['id'] or data.get('RepoTags') != [tag] or data.get('RepoDigests') != []
+                or not self._owned(labels) or any(labels.get(key) != value for key, value in self._build_labels[tag].items())):
+            _fail()
+        self._unknown_builds.discard(tag)
+        return dict(image)
 
     def _record(self, identity):
         if not isinstance(identity, str):

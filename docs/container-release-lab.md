@@ -38,6 +38,19 @@
 | 이미지 | Git provenance·전체 context hash·실행 파일 hash·실제 route 차이·로컬 image config ID | registry manifest digest와 구분 |
 | 정리 | 기록된 이름/ID와 owner label 대조 후 컨테이너→volume→이미지 | force·prune 없음 |
 
+### 3.1 내보낸 자산으로 복구하는 추가 실습
+
+기존 `independent_restore_lab.py`의 선택 모드는 합성 snapshot·고정 설정·소유 이미지 tar를 준비한 뒤, 같은 실행이 만든 source 컨테이너·볼륨·이미지를 제거하고 자산만 재검증하여 fresh 자원을 복구함. 기존 기본 모드는 유지함. tar는 추출하지 않고 소유 태그·config ID·OCI descriptor 그래프·내용 해시·용량을 검사한 뒤 반입함. 기본 이미지·build/layer cache와 같은 Docker daemon·맥은 남으므로 실제 호스트 소실 DR과 구분함.
+
+```sh
+.venv/book-memo/bin/python book-memo/tools/independent_restore_lab.py \
+  --run --cold-assets --deadline 900 \
+  --output /tmp/owned-assets-recovery-new.json \
+  --jsonl /tmp/owned-assets-recovery-new.jsonl
+```
+
+두 출력은 기존 파일이 없는 경로를 사용함. 준비 시간과 확인된 source 정지→소유 자원 제거→자산 재검증·이미지 반입→fresh 앱 준비·정확한 복원·실제 읽기까지의 시간을 분리함. 이미 승인 응답을 받은 합성 논리 수정 목록과 복원 버전을 대조하여 복구/손실 항목을 기록함. 운영 데이터·키·PVC·새 VM·상시 스케줄러는 사용하지 않으며, 사용자 직접 진단이나 운영 RTO/RPO로 합산하지 않음.
+
 ## 4. 검토 결과
 
 Docker 경계와 시나리오 회귀는 Docker를 격리한 단위 검사로 수행함. 실제 Docker 실행은 세 시나리오 각3회, 총9회 통과함. 컨테이너24개·volume9개·소유 이미지2개 제거와 잔여0을 확인함. [검증 결과](reviews/20261018_컨테이너버전교체_검증결과.md)와 [측정 원본](reviews/20261018_컨테이너버전교체_측정원본.json)에 소스·전이·데이터·정리·한계를 기록함. 최종 독립 원본 대조와 저장소 CI는 해당 PR에서 확인함. 전용 CLI 프로세스 그룹을 회수하며 다른 이미지 tag/digest 참조는 보존함. 빌드 완료가 불명확하면 잔여 상태를 실패로 기록함.
