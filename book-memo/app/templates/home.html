@@ -137,9 +137,10 @@
                                     <input type="hidden" name="{{ key }}" value="{{ value }}">
                                 {% endfor %}
                                 <div class="toc-actions">
-                                    <button class="load-result-toc" type="button">목차 불러오기</button>
+                                    <button class="load-result-toc" type="button">YES24 목차 미리보기</button>
                                     <button type="submit">선택 목차와 저장</button>
                                 </div>
+                                <p>목차 미리보기에서 원하는 항목을 선택한 뒤 저장하세요. 미리보기만으로 저장되지 않으며, 선택이 없으면 책만 저장됩니다.</p>
                                 <p class="toc-status" aria-live="polite"></p>
                                 <div class="toc-candidates compact" hidden></div>
 
@@ -393,6 +394,13 @@ if (selectedExport) {
         return /^(?:(?:제\s*)?\d+\s*(?:부|편|장)(?=\s|$)|(?:part|chapter)\s+\d+\b|\d{1,2}\s*[.)]\s+\S|[IVXLCDM]+\.\s+\S|프롤로그|에필로그|서문|들어가며|마치며|부록)/i.test(line);
     };
 
+    const updateTocSelectionCount = (container) => {
+        const count = container.querySelector("[data-toc-selection-count]");
+        if (!count) return;
+        const fields = [...container.querySelectorAll("input[name='titles']")];
+        count.textContent = `선택 ${fields.filter((field) => field.checked).length}개 / 전체 ${fields.length}개`;
+    };
+
     const setTocSelection = (container, mode) => {
         container.querySelectorAll("input[name='titles']").forEach((checkbox) => {
             if (mode === "all") {
@@ -403,6 +411,8 @@ if (selectedExport) {
                 checkbox.checked = shouldSelectTocByDefault(checkbox.value);
             }
         });
+        updateTocSelectionCount(container);
+        container.dispatchEvent(new Event("change", {bubbles: true}));
     };
 
     const appendTocSelectionControls = (container) => {
@@ -421,10 +431,19 @@ if (selectedExport) {
             controls.append(button);
         });
 
+        const count = document.createElement("span");
+        count.dataset.tocSelectionCount = "";
+        count.setAttribute("aria-live", "polite");
+        controls.append(count);
         container.append(controls);
+        if (!container.dataset.tocSelectionBound) {
+            container.addEventListener("change", () => updateTocSelectionCount(container));
+            container.dataset.tocSelectionBound = "true";
+        }
     };
 
     const renderCandidates = (container, candidates) => {
+        const previousSelection = new Map([...container.querySelectorAll("input[name='titles']")].map((field) => [field.value, field.checked]));
         container.innerHTML = "";
         container.hidden = candidates.length === 0;
 
@@ -440,7 +459,7 @@ if (selectedExport) {
             checkbox.type = "checkbox";
             checkbox.name = "titles";
             checkbox.value = title;
-            checkbox.checked = shouldSelectTocByDefault(title);
+            checkbox.checked = previousSelection.has(title) ? previousSelection.get(title) : shouldSelectTocByDefault(title);
 
             const text = document.createElement("span");
             text.textContent = `${index + 1}. ${title}`;
@@ -448,12 +467,21 @@ if (selectedExport) {
             row.append(checkbox, text);
             container.append(row);
         });
+        updateTocSelectionCount(container);
     };
 
     document.querySelectorAll(".book-with-toc-form").forEach((form) => {
         const loadButton = form.querySelector(".load-result-toc");
         const status = form.querySelector(".toc-status");
         const candidates = form.querySelector(".toc-candidates");
+
+        // form-drafts.js restores submitted candidates before this listener runs.
+        document.addEventListener("DOMContentLoaded", () => {
+            if (candidates.querySelectorAll("input[name='titles']").length) {
+                if (!candidates.querySelector("[data-toc-selection-count]")) appendTocSelectionControls(candidates);
+                updateTocSelectionCount(candidates);
+            }
+        });
 
         loadButton?.addEventListener("click", async () => {
             loadButton.disabled = true;
@@ -489,6 +517,7 @@ if (selectedExport) {
                 status.textContent = lines.length
                     ? `${data.source || "외부 서점"}에서 ${lines.length}개 목차 후보를 가져왔습니다.`
                     : "자동으로 찾은 목차가 없습니다. 책 상세에서 직접 추가할 수 있습니다.";
+                if (data.truncated) status.textContent += " 목차가 많아 앞 500개만 표시합니다. YES24 원문도 확인해주세요.";
                 if (lines.length && data.source_url) {
                     const link = document.createElement("a");
                     link.href = data.source_url;
@@ -498,8 +527,7 @@ if (selectedExport) {
                     status.appendChild(link);
                 }
             } catch (error) {
-                status.textContent = "목차를 가져오지 못했습니다. 책은 저장한 뒤 직접 목차를 추가할 수 있습니다.";
-                renderCandidates(candidates, []);
+                status.textContent = "목차 미리보기를 가져오지 못했습니다. 기존 선택은 유지됩니다. 잠시 후 다시 시도해주세요.";
             } finally {
                 loadButton.disabled = false;
             }

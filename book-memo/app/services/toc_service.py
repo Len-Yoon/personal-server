@@ -29,7 +29,7 @@ def _content_isbn13(value: str) -> str:
     return ""
 
 
-def fetch_toc_candidates(book: dict[str, Any], limit: int = 120) -> dict[str, Any]:
+def fetch_toc_candidates(book: dict[str, Any], limit: int = 500) -> dict[str, Any]:
     key = api_key()
     if not key:
         raise ValueError("목차 조회를 사용하려면 YES24 API 키를 설정해주세요.")
@@ -61,11 +61,16 @@ def fetch_toc_candidates(book: dict[str, Any], limit: int = 120) -> dict[str, An
                 data = response_data(payload).get("data")
                 if not isinstance(data, dict) or not isinstance(data.get("contents"), str):
                     raise ValueError("YES24 목차 응답 형식 오류")
-                candidates = _normalize_toc_lines(data["contents"], limit)
+                candidates = _normalize_toc_lines(data["contents"], limit + 1)
+                truncated = len(candidates) > limit
+                candidates = candidates[:limit]
                 source_url = product_url(data.get("itemId")) if candidates else ""
     except (requests.RequestException, ValueError, TypeError):
         raise ValueError("YES24 목차를 불러올 수 없습니다. API 키와 이용 상태를 확인해주세요.") from None
-    return {"source": "YES24" if candidates else "", "candidates": candidates, "source_url": source_url}
+    result = {"source": "YES24" if candidates else "", "candidates": candidates, "source_url": source_url}
+    if truncated:
+        result["truncated"] = True
+    return result
 
 
 def _normalize_toc_lines(toc_html: str, limit: int) -> list[str]:

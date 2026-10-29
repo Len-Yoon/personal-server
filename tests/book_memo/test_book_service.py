@@ -475,6 +475,17 @@ class Yes24TocTests(unittest.TestCase):
         _, session = self.request(200, {'success': True, 'errorCode': None, 'data': {'data': {'itemId': 123, 'contents': '1장 시작'}}}, {'source': 'yes24', 'external_id': '123', 'isbn': '1234567890'})
         self.assertEqual(session.get.call_args.kwargs['params']['searchType'], 'ItemId')
 
+    def test_long_api_toc_keeps_last_chapter_beyond_old_120_limit(self):
+        lines = [f"{index}장 목차" for index in range(1, 421)]
+        result, _ = self.request(200, {"success": True, "data": {"data": {"itemId": 123, "contents": "\n".join(lines)}}})
+        self.assertEqual(result["candidates"], lines)
+
+    def test_oversized_toc_marks_partial_preview_instead_of_silently_cutting(self):
+        lines = [f"{index}장 목차" for index in range(1, 502)]
+        result, _ = self.request(200, {"success": True, "data": {"data": {"itemId": 123, "contents": "\n".join(lines)}}})
+        self.assertEqual(result["candidates"], lines[:500])
+        self.assertTrue(result["truncated"])
+
     def test_absent_toc_is_empty_but_provider_errors_remain_errors(self):
         for code in ('GOODS_001', 'GOODS_002'):
             result, _ = self.request(404, {'success': False, 'errorCode': code})
