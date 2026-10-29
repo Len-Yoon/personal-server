@@ -13,6 +13,12 @@ on:
       - 'infra/k8s/tools/slo-observation-archive.py'
       - 'infra/k8s/tools/slo-sample-summary.py'
       - 'infra/k8s/slo-evidence/archive/**'
+      - 'infra/k8s/backup-automation/Dockerfile'
+      - 'infra/k8s/tools/portal-online-snapshot.py'
+      - 'infra/k8s/tools/portal-online-backup-runtime-lab.py'
+      - 'infra/k8s/tools/portal-pvc-backup-verify.sh'
+      - 'infra/k8s/tools/validate-backup-evidence.py'
+      - 'infra/k8s/tools/pvc_backup_retention.py'
   push:
     branches: [main]
     paths:
@@ -25,6 +31,12 @@ on:
       - 'infra/k8s/tools/slo-observation-archive.py'
       - 'infra/k8s/tools/slo-sample-summary.py'
       - 'infra/k8s/slo-evidence/archive/**'
+      - 'infra/k8s/backup-automation/Dockerfile'
+      - 'infra/k8s/tools/portal-online-snapshot.py'
+      - 'infra/k8s/tools/portal-online-backup-runtime-lab.py'
+      - 'infra/k8s/tools/portal-pvc-backup-verify.sh'
+      - 'infra/k8s/tools/validate-backup-evidence.py'
+      - 'infra/k8s/tools/pvc_backup_retention.py'
 concurrency:
   group: reliability-validation-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
@@ -110,7 +122,7 @@ jobs:
             name=m.name.rstrip('/');dest=output/name;dest.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
             with archive.extractfile(m) as src,dest.open('xb') as dst:shutil.copyfileobj(src,dst,1024*1024)
             if name.startswith('blobs/'):assert sha_file(dest)==dest.name
-          for app in ['portal-web','slo-observation-archive']:
+          for app in ['portal-web','slo-observation-archive','portal-pvc-backup']:
            target=out/(app+'.oci.tar');docker_archive=out/(app+'.docker.tar');assert not target.exists() and not docker_archive.exists()
            tag='personal-server-'+app+':'+source
            with tempfile.TemporaryDirectory(prefix='phase2-image-context-') as scratch:
@@ -121,6 +133,8 @@ jobs:
              for line in records:
               meta,path=line.split('\t');assert meta.split()[0] in ('100644','100755');selected.append((path,path.removeprefix('portal-web/')))
              dockerfile='Dockerfile'
+            elif app=='portal-pvc-backup':
+             selected=[(p,p) for p in ['infra/k8s/backup-automation/Dockerfile','infra/k8s/tools/portal-pvc-backup-verify.sh','infra/k8s/tools/portal-online-snapshot.py','infra/k8s/tools/validate-backup-evidence.py','infra/k8s/tools/pvc_backup_retention.py']];dockerfile=selected[0][0]
             else:
              selected=[(p,p) for p in ['infra/k8s/slo-evidence/archive/Dockerfile','infra/k8s/tools/slo-sample-summary.py','infra/k8s/tools/slo-observation-archive.py']];dockerfile=selected[0][0]
             for path,relative in selected:
@@ -163,7 +177,9 @@ jobs:
             r=cmd(['image','inspect',tag]);assert r.returncode==0
             assert json.loads(r.stdout)[0]['Id']==manifest['config']['digest']
             if app=='portal-web':
-             probe="from app.services.global_search import SearchMetrics; m=SearchMetrics(); assert len([v for v in m.render().splitlines() if v and not v.startswith('#')])==25; m.record({'news':'ok','youtube':'timeout','books':'ok'}); assert 'outcome=\"partial\"} 1' in m.render(); print('packaged_search_counter=PASS')"
+             probe='import asyncio,json,os,pathlib,sqlite3,tempfile\nwith tempfile.TemporaryDirectory(dir=\'/tmp\') as fixture:\n root=pathlib.Path(fixture);files=root/\'files\';state=root/\'state\';auth=state/\'auth\'\n files.mkdir(mode=0o700);state.mkdir(mode=0o700);auth.mkdir(mode=0o700)\n os.environ.clear()\n os.environ.update({\'APP_ENV\':\'production\',\'FILE_MANAGER_ACCESS_PASSWORD\':\'fixture-access-only\',\'ADMIN_STATUS_PASSWORD\':\'fixture-admin-only\',\'HOMEOPS_EXECUTOR_SHARED_SECRET\':\'fixture-executor-only\',\'FILE_STORAGE_PATH\':str(files),\'AUTH_SESSION_STATE_PATH\':str(auth/\'session-state.sqlite3\'),\'SECURITY_LOG_PATH\':str(state/\'security-events.txt\'),\'AUTH_RATE_LIMIT_STATE_PATH\':str(state/\'auth-rate-limit-state.json\'),\'HOMEOPS_DB_PATH\':str(state/\'homeops.sqlite3\'),\'NEWS_BOOKMARK_DB_PATH\':str(state/\'news-bookmarks.sqlite3\'),\'PORTFOLIO_CONTENT_PATH\':str(files/\'.portfolio/portfolio.md\')})\n from app.services.session_store import SQLiteSessionStore,sqlite_wal_is_patched\n assert sqlite_wal_is_patched()\n from app.main import app,portal_lifespan,ready\n from app.services import security\n async def check_startup():\n  async with portal_lifespan(app):\n   store=security.AUTH_SESSION_STORE\n   assert store is not None and store._keeper is not None\n   assert ready().status_code==200\n   token=store.create(\'file_access\',60)\n   assert store.validate(\'file_access\',token) and not store.validate(\'portfolio_admin\',token)\n   sibling=SQLiteSessionStore(auth/\'session-state.sqlite3\')\n   assert sibling.validate(\'file_access\',token) and not sibling.validate(\'portfolio_admin\',token)\n   sibling.close()\n  assert store._keeper is None\n asyncio.run(check_startup())\n from app.services.global_search import SearchMetrics\n metrics=SearchMetrics()\n assert len([v for v in metrics.render().splitlines() if v and not v.startswith(\'#\')])==25\n metrics.record({\'news\':\'ok\',\'youtube\':\'timeout\',\'books\':\'ok\'})\n assert \'outcome="partial"} 1\' in metrics.render()\n print(json.dumps({\'packaged_search_counter\':\'PASS\',\'packaged_production_startup\':\'PASS\',\'packaged_ready\':\'PASS\',\'packaged_shared_session_scopes\':\'PASS\',\'packaged_lifespan_close\':\'PASS\',\'sqlite_version\':sqlite3.sqlite_version,\'sqlite_wal_reset_fixed\':True},sort_keys=True))\n'
+            elif app=='portal-pvc-backup':
+             probe="import ast,pathlib,sqlite3,json; v=sqlite3.sqlite_version_info; assert v>=(3,51,3) or (3,50,7)<=v<(3,51,0) or (3,44,6)<=v<(3,45,0); ast.parse(pathlib.Path('/opt/personal-server/portal-online-snapshot.py').read_text()); print(json.dumps({'packaged_online_snapshot':'PASS','sqlite_version':sqlite3.sqlite_version,'sqlite_wal_reset_fixed':True}))"
             else:
              probe="import runpy,subprocess,sys,json; p='/opt/observations/slo-observation-archive.py'; m=runpy.run_path(p); m['initialize']('/tmp/private-archive'); r=subprocess.run([sys.executable,'-B',p,'--directory','/tmp/private-archive','--verify'],capture_output=True,text=True,timeout=10); assert r.returncode==0; v=json.loads(r.stdout); assert v['present_days']==0 and len(v['missing_dates'])==35 and v['slo_budget']=='not_calculable'; print('empty_private_archive_cli=PASS')"
             create_attempted=True
@@ -171,7 +187,17 @@ jobs:
             cid=r.stdout.strip();assert len(cid)==64 and all(c in '0123456789abcdef' for c in cid);inspect_owned(cid)
             r=cmd(['start','-a',cid]);(out/(app+'-runtime.log')).write_text(r.stdout+r.stderr);assert r.returncode==0
             v=inspect_owned(cid);assert not v['State']['Running'] and v['State']['ExitCode']==0
-            record['runtime_probe']='packaged_search_counter' if app=='portal-web' else 'empty_private_archive_cli'
+            if app=='portal-web':
+             packaged=json.loads(r.stdout)
+             assert packaged['packaged_production_startup']=='PASS' and packaged['packaged_ready']=='PASS' and packaged['packaged_shared_session_scopes']=='PASS' and packaged['packaged_lifespan_close']=='PASS' and packaged['sqlite_wal_reset_fixed'] is True
+             record.update({key:packaged[key] for key in ('packaged_production_startup','packaged_ready','packaged_shared_session_scopes','packaged_lifespan_close','sqlite_version','sqlite_wal_reset_fixed')})
+            if app=='portal-pvc-backup':
+             runtime_evidence=out/(app+'-readonly-runtime.json')
+             r=subprocess.run(['python3','-B',str(repo/'infra/k8s/tools/portal-online-backup-runtime-lab.py'),'--image-config',manifest['config']['digest'],'--source-sha',source,'--run-id',os.environ['GITHUB_RUN_ID'],'--attempt',os.environ['GITHUB_RUN_ATTEMPT'],'--output',str(runtime_evidence)],capture_output=True,text=True,timeout=65)
+             assert r.returncode==0
+             ro=json.loads(runtime_evidence.read_text());assert ro['status']=='PASS' and ro['cleanup']=='PASS' and ro['source_sha']==source and ro['image_config']==manifest['config']['digest']
+             record['readonly_runtime_status']='PASS'
+            record['runtime_probe']={'portal-web':'packaged_search_counter','slo-observation-archive':'empty_private_archive_cli','portal-pvc-backup':'packaged_online_snapshot'}[app]
             record['runtime_config_digest']=v['Image'];assert v['Image']==manifest['config']['digest']
            finally:
             cleanup={'status':'unconfirmed','container_create_attempted':create_attempted,'image_load_attempted':load_attempted,'errors':[]}
@@ -220,7 +246,7 @@ jobs:
           printf '%s  %s\n' "$TRIVY_SHA256" "$RUNNER_TEMP/reliability/tools/$archive" | sha256sum --check --strict -
           tar -xzf "$RUNNER_TEMP/reliability/tools/$archive" -C "$RUNNER_TEMP/reliability/tools" --no-same-owner --no-same-permissions trivy
           chmod 700 "$RUNNER_TEMP/reliability/tools/trivy"
-          for app in portal-web slo-observation-archive; do
+          for app in portal-web slo-observation-archive portal-pvc-backup; do
             "$RUNNER_TEMP/reliability/tools/trivy" image --timeout 5m \
               --cache-dir "$RUNNER_TEMP/reliability/trivy-cache" \
               --input "$RUNNER_TEMP/reliability/images/$app.oci-layout" \

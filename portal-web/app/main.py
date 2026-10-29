@@ -1,5 +1,6 @@
 import hmac
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
 
@@ -13,7 +14,23 @@ from app.services.http_metrics import HttpMetrics
 from app.services.global_search import SEARCH_METRICS
 from app.services.security import SECURITY_HEADERS
 
-app = FastAPI(title="Personal Server Portal")
+@asynccontextmanager
+async def portal_lifespan(_app):
+    from app.services import security
+    from app.services.session_store import shared_wal_runtime_allowed
+    store = security.AUTH_SESSION_STORE
+    if store is not None:
+        if not shared_wal_runtime_allowed():
+            raise RuntimeError("unsupported_sqlite_for_shared_wal")
+        store.start()
+    try:
+        yield
+    finally:
+        if store is not None:
+            store.close()
+
+
+app = FastAPI(title="Personal Server Portal", lifespan=portal_lifespan)
 APP_DIR = Path(__file__).resolve().parent
 PORTFOLIO_ALLOWED_PATHS = {"/", "/admin", "/admin/login", "/admin/save"}
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
@@ -191,9 +208,11 @@ def health():
 @app.get("/ready")
 def ready():
     from app.services import file_store, security
+    from app.services.session_store import shared_wal_runtime_allowed
     checks = {
         "storage": file_store.STORAGE_PATH.is_dir() and os.access(file_store.STORAGE_PATH, os.R_OK | os.W_OK | os.X_OK),
         "auth_state": security.AUTH_RATE_LIMIT_STATE_PATH.parent.is_dir() and os.access(security.AUTH_RATE_LIMIT_STATE_PATH.parent, os.R_OK | os.W_OK | os.X_OK),
+        "shared_sessions": security.AUTH_SESSION_STORE is None or (shared_wal_runtime_allowed() and security.AUTH_SESSION_STORE.ready()),
         "credentials": not security.is_production_environment() or all((os.getenv("FILE_MANAGER_ACCESS_PASSWORD", "").strip(), security.admin_password(), os.getenv("HOMEOPS_EXECUTOR_SHARED_SECRET", "").strip())),
     }
     ok = all(checks.values())

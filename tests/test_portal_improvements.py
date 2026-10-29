@@ -209,3 +209,15 @@ class PortalImprovementsTests(unittest.TestCase):
                 for worker in workers:
                     if worker.is_alive():worker.terminate();worker.join()
                 queue.close()
+
+
+    def test_shared_session_storage_must_be_ready_before_accepting_traffic(self):
+        import json
+        from app import main
+        from app.services import file_store, security
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(file_store, 'STORAGE_PATH', root), patch.object(security, 'AUTH_RATE_LIMIT_STATE_PATH', root / 'auth.json'), patch.object(security, 'AUTH_SESSION_STORE', SimpleNamespace(ready=lambda: False)), patch.dict(os.environ, {'APP_ENV': 'development'}):
+                response = main.ready()
+                self.assertEqual(response.status_code, 503)
+                self.assertFalse(json.loads(response.body)['checks']['shared_sessions'])

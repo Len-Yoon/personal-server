@@ -3,6 +3,7 @@ from io import BytesIO
 import json
 import multiprocessing
 import os
+import sqlite3
 import tempfile
 import threading
 import time
@@ -41,8 +42,17 @@ def _record_auth_failure_in_process(
     security.record_auth_failure("files", "127.0.0.1")
 
 
+def _create_shared_session(path: str, output) -> None:
+    prepare_service_import("portal-web")
+    from app.services.session_store import SQLiteSessionStore
+
+    output.put(SQLiteSessionStore(Path(path), 2).create("file_access", 60))
+
+
 class PortalSecurityTests(unittest.TestCase):
     _ENV_KEYS = (
+        "AUTH_SESSION_STATE_PATH",
+        "AUTH_SESSION_MAX_ENTRIES",
         "AUTH_RATE_LIMIT_STATE_PATH",
         "FILE_STORAGE_PATH",
         "SECURITY_LOG_PATH",
@@ -400,6 +410,174 @@ class PortalSecurityTests(unittest.TestCase):
                 sum(security.has_auth_session("files", token) for token in issued_sessions),
                 1,
             )
+
+    def test_shared_auth_sessions_survive_reload_and_processes_without_plaintext(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            state_path = Path(tempdir).resolve() / "auth" / "sessions.sqlite3"
+            os.environ["AUTH_SESSION_STATE_PATH"] = str(state_path)
+            security = self.reload_security(tempdir)
+            token = security.create_auth_session("file_access", 60)
+            self.assertTrue(importlib.reload(security).has_auth_session("file_access", token))
+            self.assertFalse(security.has_auth_session("portfolio_admin", token))
+            self.assertFalse(security.has_auth_session("file_access", "unknown"))
+            context = multiprocessing.get_context("spawn")
+            output = context.Queue()
+            workers = [context.Process(target=_create_shared_session, args=(str(state_path), output)) for _ in range(3)]
+            for worker in workers:
+                worker.start()
+            tokens = [output.get(timeout=10) for _ in workers]
+            for worker in workers:
+                worker.join(timeout=10)
+                self.assertEqual(worker.exitcode, 0)
+            output.close()
+            self.assertEqual(sum(security.has_auth_session("file_access", issued) for issued in tokens), 2)
+            for path in state_path.parent.iterdir():
+                data = path.read_bytes()
+                for issued in [token, *tokens]:
+                    self.assertNotIn(issued.encode(), data)
+            self.assertEqual(state_path.stat().st_mode & 0o777, 0o600)
+
+    def test_shared_auth_sessions_preserve_fixed_ttl_boundary_and_prune(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            os.environ["AUTH_SESSION_STATE_PATH"] = str(Path(tempdir).resolve() / "sessions.sqlite3")
+            security = self.reload_security(tempdir)
+            from app.services import session_store
+            with patch.object(session_store.time, "time", return_value=100):
+                token = security.create_auth_session("file_access", 10)
+            with patch.object(session_store.time, "time", return_value=110):
+                self.assertTrue(security.has_auth_session("file_access", token))
+            with patch.object(session_store.time, "time", return_value=110.001):
+                self.assertFalse(security.has_auth_session("file_access", token))
+                security.create_auth_session("homeops_admin", 20)
+            with sqlite3.connect(security.AUTH_SESSION_STORE.path) as connection:
+                self.assertEqual(connection.execute("SELECT count(*) FROM sessions").fetchone()[0], 1)
+
+    def test_shared_confirmations_are_scoped_payload_bound_single_use_and_separate_cap(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            os.environ["AUTH_SESSION_STATE_PATH"] = str(Path(tempdir).resolve() / "sessions.sqlite3")
+            os.environ["AUTH_SESSION_MAX_ENTRIES"] = "1"
+            security = self.reload_security(tempdir)
+            store = security.AUTH_SESSION_STORE
+            login = security.create_auth_session("file_access", 60)
+            old = store.create_confirmation("purge", "one", 60)
+            token = store.create_confirmation("purge", "two", 60)
+            self.assertTrue(security.has_auth_session("file_access", login))
+            self.assertFalse(store.consume_confirmation("purge", "one", old))
+            self.assertFalse(store.consume_confirmation("other", "two", token))
+            self.assertFalse(store.consume_confirmation("purge", "tampered", token))
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                self.assertEqual(list(pool.map(lambda _: store.consume_confirmation("purge", "two", token), range(2))).count(True), 1)
+            from app.services import session_store
+            with patch.object(session_store.time, "time", return_value=100):
+                expired = store.create_confirmation("purge", "two", 1)
+            with patch.object(session_store.time, "time", return_value=102):
+                self.assertFalse(store.consume_confirmation("purge", "two", expired))
+            for path in store.path.parent.iterdir():
+                self.assertNotIn(token.encode(), path.read_bytes())
+                self.assertNotIn(b"two", path.read_bytes())
+
+    def test_shared_session_failures_never_fall_back_to_memory(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            os.environ["AUTH_SESSION_STATE_PATH"] = str(Path(tempdir).resolve() / "sessions.sqlite3")
+            security = self.reload_security(tempdir)
+            store = security.AUTH_SESSION_STORE
+            self.assertFalse(security.has_auth_session("file_access", "missing"))
+            self.assertFalse(store.consume_confirmation("purge", "payload", "missing"))
+            self.assertFalse(store.path.exists())
+            token = security.create_auth_session("file_access", 60)
+            for invalid in (None, "", "x" * 513, "\ud800"):
+                self.assertFalse(store.validate("file_access", invalid))
+                self.assertFalse(store.consume_confirmation("purge", "payload", invalid))
+            with patch.object(store, "_connect", side_effect=sqlite3.OperationalError("locked")):
+                self.assertFalse(security.has_auth_session("file_access", token))
+                self.assertFalse(store.consume_confirmation("purge", "payload", token))
+                with self.assertRaises(sqlite3.OperationalError):
+                    security.create_auth_session("file_access", 60)
+            self.assertEqual(security._AUTH_SESSIONS, {})
+            store.path.write_bytes(b"corrupt")
+            self.assertFalse(store.validate("file_access", token))
+
+    def test_shared_session_collision_rollback_and_real_writer_lock_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            from app.services import session_store
+            store = session_store.SQLiteSessionStore(Path(tempdir).resolve() / "sessions.sqlite3", 2)
+            with patch.object(session_store.secrets, "token_urlsafe", return_value="same"):
+                first = store.create("file_access", 60)
+            with patch.object(session_store.secrets, "token_urlsafe", side_effect=["same", "fresh"]):
+                self.assertEqual(store.create("file_access", 60), "fresh")
+            # A failed transaction must roll back its cap eviction as well.
+            with patch.object(session_store.secrets, "token_urlsafe", return_value="fresh"):
+                with self.assertRaises(RuntimeError):
+                    store.create("file_access", 60)
+            self.assertTrue(store.validate("file_access", first))
+            with sqlite3.connect(store.path, timeout=0) as lock:
+                lock.execute("BEGIN IMMEDIATE")
+                self.assertTrue(store.validate("file_access", first))
+                self.assertFalse(store.consume_confirmation("purge", "payload", "token"))
+                with self.assertRaises(sqlite3.OperationalError):
+                    store.create("file_access", 60)
+            self.assertTrue(store.validate("file_access", first))
+
+    def test_shared_session_readiness_checks_writer_schema_and_private_path(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            from app.services.session_store import SQLiteSessionStore
+            store = SQLiteSessionStore(Path(tempdir).resolve() / "auth" / "sessions.sqlite3")
+            self.assertTrue(store.ready())
+            self.assertTrue(store.ready())
+            with sqlite3.connect(store.path, timeout=0) as lock:
+                lock.execute("BEGIN IMMEDIATE")
+                self.assertFalse(store.ready())
+            with sqlite3.connect(store.path) as connection:
+                self.assertEqual(connection.execute("SELECT count(*) FROM sessions").fetchone()[0], 0)
+                connection.execute("DROP TABLE confirmations")
+                connection.execute("CREATE TABLE confirmations (wrong TEXT)")
+            self.assertFalse(store.ready())
+            store.path.chmod(0o644)
+            self.assertFalse(store.ready())
+
+    def test_shared_session_rejects_untrusted_sidecars_and_writable_parent(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            from app.services.session_store import SQLiteSessionStore
+            root = Path(tempdir).resolve()
+            store = SQLiteSessionStore(root / "sessions.sqlite3")
+            self.assertTrue(store.ready())
+            target = root / "unrelated"
+            target.write_bytes(b"preserve")
+            for suffix in ("-wal", "-shm", "-journal"):
+                sidecar = Path(f"{store.path}{suffix}")
+                sidecar.symlink_to(target)
+                self.assertFalse(store.ready())
+                self.assertFalse(store.validate("file_access", "token"))
+                sidecar.unlink()
+            root.chmod(0o777)
+            self.assertFalse(store.ready())
+            root.chmod(0o700)
+            self.assertEqual(target.read_bytes(), b"preserve")
+
+    def test_shared_session_path_rejects_symlinks_public_files_and_relative_paths(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            prepare_service_import("portal-web")
+            from app.services.session_store import SQLiteSessionStore
+            root = Path(tempdir).resolve()
+            target = root / "target"
+            target.mkdir()
+            link = root / "link"
+            link.symlink_to(target, target_is_directory=True)
+            public = root / "public.sqlite3"
+            public.touch(mode=0o644)
+            file_link = root / "file-link"
+            file_link.symlink_to(public)
+            for path in (link / "sessions.sqlite3", public, file_link, Path("relative.sqlite3"), public / "child"):
+                store = SQLiteSessionStore(path)
+                with self.assertRaises((ValueError, OSError)):
+                    store.create("file_access", 60)
+                self.assertFalse(store.validate("file_access", "token"))
+            self.assertEqual(list(target.iterdir()), [])
+            self.assertEqual(public.read_bytes(), b"")
 
     def test_auth_rate_limit_keeps_all_concurrent_process_failures(self):
         with tempfile.TemporaryDirectory() as tempdir:

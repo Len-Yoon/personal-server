@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run the four existing PVC backup CronJob templates in a safe fixed order."""
 
+import argparse
 import fcntl
 import copy
 import os
@@ -101,8 +102,20 @@ def canonical_hash(template_spec):
     return hashlib.sha256(raw).hexdigest()
 
 
-def validate_security_contract(stage, template, pod, main, image):
+def portal_online_image(value):
+    if not isinstance(value, str) or not re.fullmatch(
+            r"(?:[a-z0-9.-]+(?::[0-9]+)?/)?[a-z0-9]+(?:[._/-]+[a-z0-9]+)*@sha256:[0-9a-f]{64}", value):
+        raise SafetyError("Portal online image must be an explicit repository digest")
+    if value.rsplit("@sha256:", 1)[1] == STAGES["portal"].image.rsplit("@sha256:", 1)[1]:
+        raise SafetyError("the known legacy image does not support online capture")
+    return value
+
+
+def validate_security_contract(stage, template, pod, main, image, online_image=None):
     config = STAGES[stage]
+    expected_env = PORTAL_ENV if stage == "portal" else []
+    if stage == "portal" and online_image is not None:
+        expected_env = PORTAL_ENV + [{"name": "PORTAL_BACKUP_SNAPSHOT_MODE", "value": "online"}]
     if (template.get("ttlSecondsAfterFinished") != 86400
             or template.get("parallelism") not in (None, 1)
             or template.get("completions") not in (None, 1)
@@ -112,7 +125,7 @@ def validate_security_contract(stage, template, pod, main, image):
                    ("hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace"))
             or pod.get("nodeName") or pod.get("automountServiceAccountToken") is False
             or main.get("securityContext") != BACKUP_SECURITY
-            or main.get("env", []) != (PORTAL_ENV if stage == "portal" else [])
+            or main.get("env", []) != expected_env
             or main.get("envFrom") or main.get("args") or main.get("lifecycle") or main.get("volumeDevices")):
         raise SafetyError(f"{stage}: pod or backup security drift")
     init = pod.get("initContainers", [])
@@ -168,7 +181,9 @@ def validate_security_contract(stage, template, pod, main, image):
         raise SafetyError(f"{stage}: init mount drift")
 
 
-def validate_cronjob(stage, cronjob):
+def validate_cronjob(stage, cronjob, online_image=None):
+    if online_image is not None:
+        portal_online_image(online_image)
     config = STAGES[stage]
     metadata = cronjob.get("metadata", {})
     spec = cronjob.get("spec", {})
@@ -186,12 +201,12 @@ def validate_cronjob(stage, cronjob):
         raise SafetyError(f"{stage}: Job execution template mismatch")
     main = containers[0]
     image = main.get("image")
-    image_ok = image == config.image
+    image_ok = image == (online_image if stage == "portal" and online_image is not None else config.image)
     if (main.get("name") != "backup" or not image_ok or main.get("imagePullPolicy") != "Never"
             or main.get("command") != [config.command, "--go"]
             or main.get("securityContext", {}).get("allowPrivilegeEscalation") is not False):
         raise SafetyError(f"{stage}: backup container mismatch")
-    validate_security_contract(stage, template, pod, main, image)
+    validate_security_contract(stage, template, pod, main, image, online_image)
     return template, canonical_hash(template)
 
 
@@ -273,12 +288,12 @@ def backup_jobs_without_terminal(api):
     return active
 
 
-def check(api):
+def check(api, online_image=None):
     """Read-only preactivation check; active_from is intentionally optional."""
     try:
         validate_state_identity(api.get_state())
         for stage in ORDER:
-            validate_cronjob(stage, api.get_cronjob(stage))
+            validate_cronjob(stage, api.get_cronjob(stage), online_image)
         if backup_jobs_without_terminal(api):
             raise SafetyError("active backup Job exists")
         return 0
@@ -365,7 +380,7 @@ def refresh_portal_evidence():
     return passed
 
 
-def run(api, now=lambda: datetime.now(KST), sleep=time.sleep, poll_seconds=30, evidence_refresh=None):
+def run(api, now=lambda: datetime.now(KST), sleep=time.sleep, poll_seconds=30, evidence_refresh=None, online_image=None):
     local = now().astimezone(KST)
     run_date = local.date().isoformat()
     results = {stage: "skipped" for stage in ORDER}
@@ -379,7 +394,7 @@ def run(api, now=lambda: datetime.now(KST), sleep=time.sleep, poll_seconds=30, e
             raise SafetyError("before activation date")
         results = load_results(state, run_date)
         cronjobs = {stage: api.get_cronjob(stage) for stage in ORDER}
-        templates = {stage: validate_cronjob(stage, cronjobs[stage]) for stage in ORDER}
+        templates = {stage: validate_cronjob(stage, cronjobs[stage], online_image) for stage in ORDER}
         active_jobs = backup_jobs_without_terminal(api)
         if active_jobs:
             current = state.get("data", {}).get("current") if state.get("data", {}).get("run_date") == run_date else None
@@ -535,21 +550,31 @@ def local_lock(home=None):
 
 
 def main():
-    if sys.argv[1:] == ["--check"]:
-        return check(KubectlAPI())
-    if sys.argv[1:] == ["--check-lock"]:
+    parser = argparse.ArgumentParser(add_help=False)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--check", action="store_true")
+    mode.add_argument("--check-lock", action="store_true")
+    mode.add_argument("--go", action="store_true")
+    parser.add_argument("--portal-online-image", default=os.environ.get("PORTAL_BACKUP_ONLINE_IMAGE"))
+    try:
+        args = parser.parse_args()
+        image = portal_online_image(args.portal_online_image) if args.portal_online_image is not None else None
+        if args.check_lock and image is not None:
+            raise SafetyError("online image only applies to check or go")
+    except (SystemExit, SafetyError):
+        return 2
+    if args.check:
+        return check(KubectlAPI(), online_image=image)
+    if args.check_lock:
         try:
             with local_lock():
                 return 0
         except OSError:
             print("PVC backup sequence lock check blocked", file=sys.stderr)
             return 1
-    if sys.argv[1:] != ["--go"]:
-        print("usage: pvc-backup-sequence.py --check|--check-lock|--go", file=sys.stderr)
-        return 2
     try:
         with local_lock():
-            return run(KubectlAPI(), evidence_refresh=refresh_portal_evidence)
+            return run(KubectlAPI(), evidence_refresh=refresh_portal_evidence, online_image=image)
     except (OSError, BlockingIOError):
         print("PVC backup sequence blocked: local lock unavailable", file=sys.stderr)
         return 1

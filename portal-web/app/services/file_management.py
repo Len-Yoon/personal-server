@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from app.services import file_store
+from app.services import file_store, security
 
 
 MAX_SEARCH_ENTRIES = 10000
@@ -341,7 +341,12 @@ def preview_purge(*, item_id=None, older_than_days=None):
         items, excluded = _purge_selection(root, item_id, older_than_days, before)
     payload = {'item_id': item_id, 'older_than_days': older_than_days, 'before': before, 'digest': _selection_digest(items)}
     encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
-    signature = hmac.new(_PURGE_KEY, encoded.encode(), hashlib.sha256).hexdigest()
+    shared_store = security.AUTH_SESSION_STORE
+    signature = (
+        shared_store.create_confirmation('file_purge', encoded, PURGE_PREVIEW_MAX_AGE)
+        if shared_store is not None
+        else hmac.new(_PURGE_KEY, encoded.encode(), hashlib.sha256).hexdigest()
+    )
     return {'items': [{k: v for k, v in i.items() if k != '_snapshot'} for i in items], 'count': len(items), 'size_bytes': sum(i['size_bytes'] for i in items), 'excluded': excluded, 'confirmation': encoded + '.' + signature}
 
 
@@ -351,8 +356,15 @@ def confirm_purge(confirmation):
         if len(confirmation) > 2048:
             raise ValueError
         encoded, signature = confirmation.split('.')
-        expected = hmac.new(_PURGE_KEY, encoded.encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(signature, expected):
+        shared_store = security.AUTH_SESSION_STORE
+        # Claim and commit before touching the filesystem. No DB transaction is
+        # held while inspecting/deleting a potentially large trash selection.
+        valid = (
+            shared_store.consume_confirmation('file_purge', encoded, signature)
+            if shared_store is not None
+            else hmac.compare_digest(signature, hmac.new(_PURGE_KEY, encoded.encode(), hashlib.sha256).hexdigest())
+        )
+        if not valid:
             raise ValueError
         payload = json.loads(base64.urlsafe_b64decode(encoded))
         if not 0 <= time.time() - payload['before'] <= PURGE_PREVIEW_MAX_AGE:

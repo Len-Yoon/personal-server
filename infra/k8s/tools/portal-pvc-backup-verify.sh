@@ -12,6 +12,12 @@ case "$EXECUTION_MODE" in
   host|in-cluster) ;;
   *) printf '%s\n' 'portal_pvc_backup=FAIL' >&2; exit 2 ;;
 esac
+SNAPSHOT_MODE=${PORTAL_BACKUP_SNAPSHOT_MODE:-quiesced}
+case "$SNAPSHOT_MODE" in
+  quiesced) ;;
+  online) [ "$EXECUTION_MODE" = in-cluster ] || { printf '%s\n' 'portal_pvc_backup=FAIL' >&2; exit 2; } ;;
+  *) printf '%s\n' 'portal_pvc_backup=FAIL' >&2; exit 2 ;;
+esac
 if [ "$EXECUTION_MODE" = in-cluster ]; then
   RUNTIME_MARKER=${PORTAL_RUNTIME_MARKER:-/work/data/portal-runtime.mode}
   EVIDENCE=${PORTAL_BACKUP_EVIDENCE:-/work/.portal-backup-verified}
@@ -311,6 +317,17 @@ assert_preflight() {
   for command_name in "${required_commands[@]}"; do
     command -v "$command_name" >/dev/null || return 1
   done
+  if [ "$SNAPSHOT_MODE" = online ]; then
+    [ -r "$SCRIPT_DIR/portal-online-snapshot.py" ] || return 1
+    # Kernel-enforced read-only mounts also prohibit SQLite SHM creation.
+    python3 - "$FILES_MOUNT" "$STATE_MOUNT" <<'PYREADONLY' || return 1
+import os,sys
+for path in sys.argv[1:]:
+    if not os.statvfs(path).f_flag & os.ST_RDONLY:
+        raise SystemExit(1)
+PYREADONLY
+    [ "$(kctl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o 'jsonpath={.spec.template.metadata.annotations.portal\.personal-server/continuity-version}')" = 1 ] || return 1
+  fi
   if [ "$EXECUTION_MODE" = in-cluster ]; then
     load_in_cluster_evidence || return 1
     FAILURE_STAGE='writer-observation'
@@ -794,6 +811,13 @@ FAILURE_STAGE=''
 stage="$WORKDIR/stage"
 restore="$WORKDIR/restore"
 mkdir -p -- "$stage/data" "$restore"
+if [ "$SNAPSHOT_MODE" = online ]; then
+  # Never set WRITERS_SCALED in this branch: failure must leave Portal serving.
+  progress pvc_snapshot
+  python3 "$SCRIPT_DIR/portal-online-snapshot.py" capture \
+    --files-root "$FILES_MOUNT" --state-root "$STATE_MOUNT" \
+    --output "$stage/data" >>"$DIAGNOSTIC_FILE" 2>&1
+else
 ORIGINAL_REPLICAS=$(kctl -n "$NAMESPACE" get deployment "$DEPLOYMENT" -o jsonpath='{.spec.replicas}')
 case "$ORIGINAL_REPLICAS" in ''|*[!0-9]*) exit 1 ;; esac
 # Mark restoration as required before the scale request: timeout/failure is ambiguous.
@@ -811,6 +835,7 @@ if [ "$EXECUTION_MODE" = host ]; then
 fi
 stream_pvc_tree "$FILES_MOUNT" "$stage/data/files"
 stream_pvc_tree "$STATE_MOUNT" "$stage/data/portal-web-state"
+fi
 sqlite3 "$stage/data/portal-web-state/homeops.sqlite3" 'PRAGMA quick_check;' 2>>"$DIAGNOSTIC_FILE" | grep -Fxq ok
 assert_regular_tree "$stage/data/files"
 assert_regular_tree "$stage/data/portal-web-state"
@@ -826,6 +851,20 @@ fi
 printf '%s\n' "source_runtime=k3s-pvc" "source_digest=$SOURCE_DIGEST" > "$stage/manifest.txt"
 archive="$WORKDIR/portal-${RUN_ID}.tar"
 ciphertext="$archive.age"
+online_space_guard() {
+  [ "$SNAPSHOT_MODE" = online ] || return 0
+  local previous_stage=$FAILURE_STAGE
+  FAILURE_STAGE='online_space'
+  python3 - "$stage/data" "$WORKDIR" "$1" <<'PYSPACE'
+import os,shutil,sys
+from pathlib import Path
+size=sum(p.stat().st_size for p in Path(sys.argv[1]).rglob('*') if p.is_file())
+required=size*int(sys.argv[3])+256*1024**2
+if shutil.disk_usage(sys.argv[2]).free < required:raise SystemExit(1)
+PYSPACE
+  FAILURE_STAGE=$previous_stage
+}
+online_space_guard 5
 tar -C "$stage" -cf "$archive" data manifest.txt >>"$DIAGNOSTIC_FILE" 2>&1
 age -R "$RECIPIENT" -o "$ciphertext" "$archive" >>"$DIAGNOSTIC_FILE" 2>&1
 artifact_digest="sha256:$(sha256sum "$ciphertext" | awk '{print $1}')"
@@ -834,9 +873,12 @@ progress remote_upload
 rclone_with_credentials copyto --immutable --log-level ERROR "$ciphertext" "$remote_object"
 progress remote_restore
 FAILURE_STAGE='remote_restore'
+online_space_guard 3
 rclone_with_credentials copyto --log-level ERROR "$remote_object" "$WORKDIR/download.age"
 [ "$artifact_digest" = "sha256:$(sha256sum "$WORKDIR/download.age" | awk '{print $1}')" ]
+online_space_guard 2
 age -d -i "$IDENTITY" -o "$WORKDIR/restore.tar" "$WORKDIR/download.age"
+online_space_guard 1
 tar -C "$restore" -xf "$WORKDIR/restore.tar" >>"$DIAGNOSTIC_FILE" 2>&1
 assert_regular_tree "$restore/data/files"
 assert_regular_tree "$restore/data/portal-web-state"
