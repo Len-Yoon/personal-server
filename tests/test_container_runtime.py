@@ -1,10 +1,12 @@
 """Local Docker lab protocol and ownership boundaries; no engine required."""
 import hashlib
+import io
 import importlib.util
 import json
 import os
 from pathlib import Path
 import tempfile
+import tarfile
 import subprocess
 import sys
 import time
@@ -61,6 +63,134 @@ class RuntimeTests(unittest.TestCase):
 
     def runtime(self):
         return self.module.LocalDocker(self.owner, time.monotonic() + 60, lambda: False)
+
+    def archive(self,runtime,*,tags=None,link=False,wrong_owner=False):
+        tag=f'ps-book-version-{self.owner}:v2'
+        labels={self.module.OWNER_LABEL:'foreign' if wrong_owner else self.owner,
+                self.module.KIND_LABEL:self.module.KIND}
+        config=self.module._canonical({'config':{'Labels':labels,'User':'10001:10001'}})
+        image={'id':'sha256:'+hashlib.sha256(config).hexdigest(),'role':'v2'}
+        runtime._images[tag]=image
+        runtime._build_labels[tag]=labels
+        path=self.parent/'image.tar'
+        contents={'manifest.json':json.dumps([{'Config':'config.json','Layers':['layer.tar'],
+                    'RepoTags':tags if tags is not None else [tag]}]).encode(),
+                  'config.json':config,'layer.tar':b'layer-fixture'}
+        with tarfile.open(path,'w') as archive:
+            for name,data in contents.items():
+                member=tarfile.TarInfo(name);member.size=len(data)
+                archive.addfile(member,io.BytesIO(data))
+            if link:
+                member=tarfile.TarInfo('bad-link');member.type=tarfile.SYMTYPE;member.linkname='/tmp/foreign'
+                archive.addfile(member)
+        expected={'tag':tag,'image_id':image['id'],'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
+                  'size_bytes':path.stat().st_size}
+        return image,path,expected
+
+    def test_archive_validates_owned_single_image_without_extracting(self):
+        runtime=self.runtime();image,path,expected=self.archive(runtime)
+        self.assertEqual(runtime.verify_image_archive(path,image,expected),expected)
+        self.assertEqual(set(item.name for item in self.parent.iterdir()),{'.container-lab-owner','image.tar'})
+        path.write_bytes(path.read_bytes()+b'changed')
+        with self.assertRaises(RuntimeError):runtime.verify_image_archive(path,image,expected)
+
+    def test_archive_rejects_foreign_tags_links_and_owner_before_load(self):
+        for options in ({'tags':['foreign:latest']},{'link':True},{'wrong_owner':True}):
+            with self.subTest(options=options):
+                runtime=self.runtime();image,path,expected=self.archive(runtime,**options)
+                with self.assertRaises(RuntimeError):runtime.import_image(image,path,expected)
+                self.assertFalse(any(call[:2]==['image','load'] for call in self.calls))
+
+    def test_archive_existing_tag_prevents_import_and_uncertain_load_is_tracked(self):
+        runtime=self.runtime();image,path,expected=self.archive(runtime)
+        self.answers[tuple(runtime._list_args('image',expected['tag']))]=image['id']
+        with self.assertRaises(RuntimeError):runtime.import_image(image,path,expected)
+        self.assertFalse(any(call[:2]==['image','load'] for call in self.calls))
+        self.answers[tuple(runtime._list_args('image',expected['tag']))]=''
+        self.answers[('image','load','--input',str(path))]=RuntimeError('lost_response')
+        with self.assertRaises(RuntimeError):runtime.import_image(image,path,expected)
+        self.assertIn(expected['tag'],runtime._unknown_builds)
+
+    def test_import_pinned_owned_image_clears_uncertain_load_marker(self):
+        runtime=self.runtime();image,path,expected=self.archive(runtime)
+        self.answers[('image','inspect',expected['tag'])]=json.dumps([{'Id':image['id'],
+            'Config':{'Labels':runtime._build_labels[expected['tag']]},
+            'RepoTags':[expected['tag']],'RepoDigests':[]}])
+        self.assertEqual(runtime.import_image(image,path,expected),image)
+        self.assertFalse(runtime._unknown_builds)
+        self.assertIn(['image','load','--input',str(path)],self.calls)
+
+    def test_archive_writer_file_limit_is_inherited_by_child_process(self):
+        runtime=self.runtime();self.run_patch.stop()
+        runtime._binary=sys.executable;runtime._endpoint=None
+        path=self.parent/'image.tar'
+        script=f'from pathlib import Path; Path({str(path)!r}).write_bytes(b"x"*8192)'
+        with patch.object(self.module,'ARCHIVE_LIMIT',4096):
+            with self.assertRaises(RuntimeError):runtime._run(['-c',script],cap=2,bounded_file=path)
+        self.assertLessEqual(path.stat().st_size,4096)
+
+    def test_export_checks_free_space_and_existing_archive_before_save(self):
+        runtime=self.runtime();image,path,expected=self.archive(runtime)
+        with self.assertRaises(RuntimeError):runtime.export_image(image,path)
+        path.unlink()
+        with patch.object(self.module.shutil,'disk_usage',return_value=type('Disk',(),{'free':1})()):
+            with self.assertRaises(RuntimeError):runtime.export_image(image,path)
+        self.assertFalse(any(call[:2]==['image','save'] for call in self.calls))
+
+    def test_oci_index_graph_must_match_the_single_pinned_image(self):
+        annotation_cases = [({},False), ({'io.containerd.image.name':'v2'},True),
+                            ({'org.opencontainers.image.ref.name':'v2'},False),
+                            ({'io.containerd.image.name':f'ps-book-version-{self.owner}:v2'},False),
+                            ({'io.containerd.image.name':f'docker.io/library/ps-book-version-{self.owner}:v2'},False),
+                            ({'io.containerd.image.name':'foreign:latest'},True),
+                            ({'org.opencontainers.image.ref.name':'foreign:latest'},True)]
+        for wrong_config,annotations,reject in [(False,annotations,reject) for annotations,reject in annotation_cases]+[(True,{},True)]:
+            with self.subTest(wrong_config=wrong_config,annotations=annotations):
+                runtime=self.runtime();image,path,expected=self.archive(runtime)
+                with tarfile.open(path) as source:
+                    contents={member.name:source.extractfile(member).read() for member in source}
+                def blob(data):
+                    identity=hashlib.sha256(data).hexdigest()
+                    contents['blobs/sha256/'+identity]=data
+                    return {'digest':'sha256:'+identity,'size':len(data)}
+                config=blob(contents['config.json'] if not wrong_config else b'{"foreign":"image"}')
+                layer=blob(contents['layer.tar'])
+                manifest={'schemaVersion':2,'config':config,'layers':[layer]}
+                reference=blob(json.dumps(manifest).encode())
+                reference['mediaType']='application/vnd.oci.image.manifest.v1+json'
+                reference['annotations']=annotations
+                contents['index.json']=json.dumps({'schemaVersion':2,'manifests':[reference]}).encode()
+                with tarfile.open(path,'w') as output:
+                    for name,data in contents.items():
+                        member=tarfile.TarInfo(name);member.size=len(data);output.addfile(member,io.BytesIO(data))
+                expected.update(sha256=hashlib.sha256(path.read_bytes()).hexdigest(),size_bytes=path.stat().st_size)
+                if reject:
+                    with self.assertRaises(RuntimeError):runtime.verify_image_archive(path,image,expected)
+                else:self.assertEqual(runtime.verify_image_archive(path,image,expected),expected)
+
+    def test_discard_source_removes_only_stopped_owned_unshared_resources(self):
+        for foreign_tag in (False,True):
+            with self.subTest(foreign_tag=foreign_tag):
+                runtime=self.runtime();image,path,expected=self.archive(runtime)
+                tag=expected['tag'];volume='owned-volume';identity='c'*64;name='owned-source'
+                labels=runtime._labels()
+                runtime._volumes[volume]=None
+                runtime._containers[name]={'id':identity,'volume':volume,'image':image,'role':'v2','clean':True}
+                data={'Id':identity,'State':{'Running':False,'Pid':0}}
+                self.answers[('volume','inspect',volume)]=json.dumps([{'Name':volume,'Labels':labels}])
+                self.answers[('image','inspect',tag)]=json.dumps([{'Id':image['id'],'Config':{'Labels':labels},
+                    'RepoTags':[tag,'foreign:latest'] if foreign_tag else [tag],'RepoDigests':[]}])
+                self.calls.clear()
+                with patch.object(runtime,'_container',return_value=data):
+                    if foreign_tag:
+                        with self.assertRaises(RuntimeError):runtime.discard_source(identity,volume,image)
+                        self.assertFalse(any(call[1]=='rm' for call in self.calls))
+                    else:
+                        result=runtime.discard_source(identity,volume,image)
+                        self.assertTrue(result['container_absent'] and result['volume_absent'] and result['image_absent'])
+                        self.assertFalse(runtime._containers or runtime._volumes)
+                        self.assertIn(tag,runtime._images)
+                        self.assertTrue(all('--force' not in call for call in self.calls))
 
     def test_local_context_and_sanitized_environment(self):
         runtime = self.runtime()

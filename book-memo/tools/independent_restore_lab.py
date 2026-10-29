@@ -2,7 +2,8 @@
 """Restore synthetic Book data into a fresh owned local container and volume.
 
 This is a same-daemon fixture exercise, not N100 DR, physical HA, or a service
-RTO/RPO guarantee. Image archive export/import is not exercised.
+RTO/RPO guarantee. Optional --cold-assets exports and reloads an owned image;
+the same daemon, build/layer cache and physical host remain available.
 """
 import argparse
 from datetime import datetime, timezone
@@ -91,7 +92,7 @@ def runtime_evidence(engine, container, volume, image):
     return evidence
 
 
-def run_lab(deadline, interrupted, progress=None, engine_factory=None):
+def run_lab(deadline, interrupted, progress=None, engine_factory=None, cold_assets=False):
     report = {'schema_version': 1, 'valid': False, 'reason': 'initialization', 'stage': 'initialization',
               'scope': 'same_local_daemon_fresh_container_volume_synthetic_fixture_only',
               'started_at': utc(), 'events': [], 'fixture_removed': False,
@@ -103,10 +104,13 @@ def run_lab(deadline, interrupted, progress=None, engine_factory=None):
               'cleanup': {'ok': False}}
     engine = None
     root = None
+    started_tick = time.monotonic()
 
     def save(stage, *, required=True):
         report['stage'] = stage
         report['events'].append({'event': stage, 'at': utc()})
+        if cold_assets:
+            report['events'][-1]['elapsed_seconds'] = time.monotonic() - started_tick
         if progress is not None:
             try:
                 progress(report)
@@ -137,6 +141,17 @@ def run_lab(deadline, interrupted, progress=None, engine_factory=None):
             raise Stopped('image_provenance_mismatch')
         report['release_bundle'] = {'image': image, 'release_payload_sha256': context['payload_digest'],
                                     'configuration': dict(CONFIG), 'configuration_sha256': digest(CONFIG)}
+        if cold_assets:
+            report.update(scope='same_local_daemon_exported_assets_fresh_resources_synthetic_fixture_only',
+                          image_supply='verified_owned_image_archive',
+                          image_archive_export_import='pending',
+                          source_loss='owned_source_container_volume_image_removed_cache_and_host_retained')
+            config_path = root / 'configuration.json'
+            config_path.write_bytes(_canonical(CONFIG))
+            archive_path = root / 'image.tar'
+            report['image_archive'] = engine.export_image(image, archive_path)
+            report['release_bundle']['image_archive'] = dict(report['image_archive'])
+            save('image_and_configuration_assets_exported')
         save('release_built')
         source_volume = engine.volume()
         source = engine.start(image, source_volume, 'v2')
@@ -167,6 +182,12 @@ def run_lab(deadline, interrupted, progress=None, engine_factory=None):
             raise Stopped('additional_write_not_acknowledged')
         report['additional_acknowledged_write'] = {'ack_at': additional_ack_at, 'state': acknowledged,
                                                   'unique_write_count': 1, 'request_replay_verified': True}
+        if cold_assets:
+            report['known_acknowledged_writes'] = [
+                {'id': 'seed_memo_v1', 'version': snapshot['memo_version'], 'ack_at': included_ack_at},
+                {'id': 'memo_v2', 'version': acknowledged['memo_version'], 'ack_at': additional_ack_at}]
+            report['acknowledgement_scope'] = 'fixed_synthetic_logical_memo_mutations_seed_v1_and_idempotent_v2'
+            report['preparation_seconds'] = time.monotonic() - started_tick
         save('additional_write_acknowledged')
         engine.stop(source)
         loss_tick = time.monotonic()
@@ -175,6 +196,23 @@ def run_lab(deadline, interrupted, progress=None, engine_factory=None):
         report['rto_definition'] = 'confirmed_source_stopped_to_fresh_destination_ready_read_and_exact_snapshot_verified'
         save('simulated_source_loss_confirmed')
         budget(deadline, interrupted)
+        if cold_assets:
+            report['source_removal'] = engine.discard_source(source, source_volume, image)
+            if not all(report['source_removal'].get(key) is True for key in ('container_absent', 'volume_absent', 'image_absent')):
+                raise Stopped('source_removal_not_verified')
+            save('source_owned_resources_removed')
+            # Recovery reads the serialized fixed configuration, never ambient
+            # environment or a configuration from the source runtime.
+            info = config_path.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > LIMIT
+                    or config_path.read_bytes() != _canonical(CONFIG)
+                    or digest(json.loads(config_path.read_bytes())) != report['release_bundle']['configuration_sha256']):
+                raise Stopped('configuration_bundle_mismatch')
+            save('configuration_asset_verified')
+            image = engine.import_image(image, archive_path, report['image_archive'])
+            report['image_archive_export_import'] = 'verified_same_daemon_source_image_removed'
+            save('image_archive_reimported')
+            report['rto_definition'] = 'confirmed_source_stopped_through_owned_resource_removal_asset_verification_image_import_fresh_destination_ready_read_and_exact_snapshot_verified'
         # This is the only recovery input: pinned release/config metadata plus
         # a verified serialized snapshot. The old DB is never mounted or read.
         recovered_payload = read_bundle(bundle_path, bundle_digest)
@@ -211,6 +249,13 @@ def run_lab(deadline, interrupted, progress=None, engine_factory=None):
                               'lost_acknowledged_writes': 1, 'restored_memo_version': 1,
                               'latest_source_memo_version': 2,
                               'rpo_scope': 'observed_synthetic_ack_write_gap_not_production_guarantee'}
+        if cold_assets:
+            recovered = [item for item in report['known_acknowledged_writes'] if item['version'] <= final['memo_version']]
+            lost = [item for item in report['known_acknowledged_writes'] if item['version'] > final['memo_version']]
+            report['recovery'].update(recovered_acknowledged_write_ids=[item['id'] for item in recovered],
+                                      lost_acknowledged_write_ids=[item['id'] for item in lost],
+                                      lost_acknowledged_writes=len(lost),
+                                      preparation_and_recovery_seconds=time.monotonic() - started_tick)
         save('restored_exact_snapshot_ready_and_read_verified')
         engine.stop(destination)
         budget(deadline, interrupted)
@@ -250,6 +295,7 @@ def run_lab(deadline, interrupted, progress=None, engine_factory=None):
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', action='store_true')
+    parser.add_argument('--cold-assets', action='store_true', help='reload verified owned image/config/snapshot after source removal; same daemon/cache/host remain')
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--jsonl', required=True, type=Path)
     parser.add_argument('--deadline', type=float, default=600)
@@ -278,7 +324,7 @@ def main(argv=None):
                 events.write(json.dumps({'at': utc(), 'stage': report['stage'], 'valid': report['valid'],
                                          'reason': report['reason']}, sort_keys=True, allow_nan=False) + '\n')
                 events.flush()
-            report = run_lab(time.monotonic() + args.deadline, lambda: interrupted, save)
+            report = run_lab(time.monotonic() + args.deadline, lambda: interrupted, save, cold_assets=args.cold_assets)
     except OSError:
         print('independent_restore_lab=FAIL reason=output_unavailable')
         return 1
