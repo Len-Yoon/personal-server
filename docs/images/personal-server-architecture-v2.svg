@@ -18,7 +18,7 @@
 <text x="76" y="507" class="small">Docker socket proxy</text>
 <path d="M326,366 L356,366" fill="none" stroke="#59c6da" stroke-width="2" marker-end="url(#arrow)"/>
 <rect x="359" y="275" width="650" height="253" rx="12" fill="#142c3d" stroke="#408399"/>
-<text x="379" y="308" class="tag">K3s · personal-server · 앱별 1개 writer</text>
+<text x="379" y="308" class="tag">K3s · personal-server · 앱별 writer 경계</text>
 <rect x="379" y="326" width="294" height="65" rx="12" fill="#102131" stroke="#345371"/>
 <text x="391" y="352" class="body">portal-web Service</text>
 <text x="391" y="377" class="small">파일함 · 검색 · 관리자 상태</text>
@@ -30,9 +30,10 @@
 <text x="391" y="453" class="small">영상 · 타임스탬프 메모</text>
 <rect x="696" y="402" width="294" height="65" rx="12" fill="#102131" stroke="#345371"/>
 <text x="708" y="428" class="body">book-memo Service</text>
-<text x="708" y="453" class="small">책장 · 목차 · 독서 메모</text>
-<text x="379" y="494" class="body">서비스별 PVC · 단일 writer</text>
-<text x="379" y="518" class="small">Portal PVC · Crawler PVC · YouTube PVC · Book PVC</text>
+<text x="708" y="453" class="small">YES24 검색 · 목차 선택 · 메모</text>
+<text x="379" y="485" class="small">Portal: 평상시 1개 · 교체 중 최대 2개 · 공유 세션</text>
+<text x="379" y="505" class="small">Book·YouTube·Crawler: 단일 writer</text>
+<text x="379" y="523" class="small" style="font-size:15px">Portal PVC · Crawler PVC · YouTube PVC · Book PVC</text>
 <rect x="1030" y="275" width="354" height="253" rx="12" fill="#15243b" stroke="#345371"/>
 <text x="1050" y="308" class="tag">Docker Compose · 보조 실행</text>
 <text x="1050" y="347" class="heading">car-care-worker</text>
@@ -44,7 +45,7 @@
 <rect x="36" y="581" width="1368" height="183" rx="12" fill="#122b33" stroke="#3a7d84"/>
 <text x="56" y="614" class="heading">매일 02:30 KST · 하나의 timer가 순서대로 실행</text>
 <rect x="56" y="633" width="246" height="43" rx="12" fill="#10212c" stroke="#3a7d84"/>
-<text x="74" y="662" class="body">1. Portal</text>
+<text x="74" y="662" class="body">1. Portal (온라인)</text>
 <path d="M303,654 L321,654" fill="none" stroke="#59c6da" stroke-width="2" marker-end="url(#arrow)"/>
 <rect x="323" y="633" width="246" height="43" rx="12" fill="#10212c" stroke="#3a7d84"/>
 <text x="341" y="662" class="body">2. Book</text>

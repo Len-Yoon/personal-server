@@ -15,7 +15,7 @@
 | 영역 | 구현·운영 범위 |
 |---|---|
 | 애플리케이션 | FastAPI API, 서버 렌더링 화면, 서비스 통합 검색, 파일·메모·기사·차량 데이터 관리 |
-| 데이터 보호 | SQLite 트랜잭션, 요청 중복 방지, 편집 충돌 검사, 파일 배타적 생성, 단일 writer |
+| 데이터 보호 | SQLite 트랜잭션, 요청 중복 방지, 편집 충돌 검사, 파일 배타적 생성, 앱별 writer 경계·Portal 공유 상태 |
 | 운영 | K3s·Compose 실행 위치 구분, 이미지 배포·원복, 상태 검사, 제한형 복구 |
 | 관측과 복구 | 내부 지표·외부 health, 장애 알림, 암호화 백업·격리 복원, 보관 정리·누락 감지 |
 | 검증 | 서비스별 회귀 테스트, 브라우저 검사, 운영 도구 계약 검사, CI·보안 검사 |
@@ -28,13 +28,13 @@
 | 파일함 | 다중 업로드, 폴더·파일 검색/이동/이름 변경, ZIP 다운로드, 휴지통·충돌 방지 복원, 개인 기사 보관 |
 | News Hub | RSS 뉴스 수집·검색·보관, Telegram 알림 분류, 수집 최신성 확인 |
 | YouTube Memo | 영상 등록, 타임스탬프 메모, 편집·태그·페이지 이동, JSON/Markdown 내보내기·선택 내보내기·JSON 가져오기·휴지통 |
-| Book Memo | 책 검색·책장, 목차 체크·코멘트·메모, 편집·페이지 이동, JSON/Markdown 내보내기·선택 내보내기·JSON 가져오기·휴지통 |
+| Book Memo | YES24 도서 검색·목차 미리보기·선택 저장, 책장·진행률·코멘트·메모, JSON/Markdown 내보내기·선택 내보내기·JSON 가져오기·휴지통 |
 | 차량관리 | Hyundai 연동, 운행 기록·주행거리·정비 주기 관리, Telegram 명령과 운행 종료 알림 |
 | HomeOps | 허용된 대상의 진단·승인형 조치, 재시작 요청 중복 방지, 실행 이력 |
 
 ## 주요 화면
 
-서비스 이름 옆 화살표를 누르면 설명과 이미지가 펼쳐집니다. 이미지는 **1440 × 1000** 크기이며 촬영 당시 화면입니다. [촬영 범위·기존 예시 안내](docs/images/README.md)
+서비스 이름 옆 화살표를 누르면 설명과 이미지가 펼쳐집니다. 이미지는 **1440 × 1000** 크기이며 조회 시점의 상태입니다. 서비스 화면은 2026-10-29, Grafana는 2026-10-30에 다시 촬영했으며, 과거 Telegram 예시는 별도로 표시했습니다. [촬영 범위·기존 예시 안내](docs/images/README.md)
 
 <details>
 <summary>Portal · 서비스 허브와 전체 검색</summary>
@@ -57,9 +57,13 @@
 <details>
 <summary>Book Memo · 책장과 기록 관리</summary>
 
-책 검색·진행률·목차 진입점과 로그인 후 가져오기·내보내기 위치를 확인합니다. 긴 목차는 화면에서 접어 책장이 보이도록 촬영했습니다.
+YES24 도서 검색과 로그인 후 가져오기·선택 내보내기 위치를 확인합니다. 개인 책장 대신 공개 도서의 검색 결과를 촬영했습니다.
 
-<img src="docs/images/book-memo.png" alt="현재 Book Memo의 정렬된 가져오기 버튼 검색 내보내기와 책장" width="100%">
+<img src="docs/images/book-memo.png" alt="2026-10-29 Book Memo의 YES24 도서 검색과 가져오기·내보내기" width="100%">
+
+목차는 미리보기에서 원하는 항목을 골라 저장합니다. 실제 조회한 332개 후보 중 화면에 보이는 구간이며, 최대 500개를 넘으면 부분 표시 안내가 나옵니다. 촬영 중에는 책·목차를 저장하지 않았습니다.
+
+<img src="docs/images/book-toc-preview.png" alt="YES24 목차 미리보기의 출처 링크·선택 개수·목차 체크박스" width="100%">
 
 </details>
 
@@ -107,7 +111,7 @@
 
 외부 웹 요청은 Cloudflare Tunnel → Compose의 Caddy → K3s Service로 전달됩니다. Portal은 NodePort로 진입하고, 뉴스·책·영상은 각각의 K3s Service가 처리합니다. 차량 OAuth callback은 Caddy를 거치지 않는 별도 Tunnel 경로입니다. 구성도는 실제 실행 중인 서비스·저장소·timer와 코드에 정의된 데이터 흐름을 대조해 작성했습니다.
 
-K3s의 웹 앱 4개와 Compose의 차량관리·SystemAgent·HomeOps는 역할을 나눠 운영합니다. 백업은 단일 timer가 Portal → Book → YouTube → Crawler → 차량 DB 순으로 실행하며, 차량 백업 감시 결과는 고정 ConfigMap → Relay → Portal 관리자 화면으로 전달됩니다. 개별 실행의 성공 여부는 구성도와 별도로 실제 복원 증거를 확인합니다.
+K3s의 웹 앱 4개와 Compose의 차량관리·SystemAgent·HomeOps는 역할을 나눠 운영합니다. Portal은 평상시 1개 replica이며 승인된 롤링 교체 중 최대 2개를 허용하고 공유 세션·파일 쓰기 조정을 사용합니다. Book·YouTube·Crawler는 단일 writer를 유지합니다. 백업은 단일 timer가 Portal 온라인 snapshot → Book → YouTube → Crawler → 차량 DB 순으로 실행하며, 차량 백업 감시 결과는 고정 ConfigMap → Relay → Portal 관리자 화면으로 전달됩니다. 개별 실행의 성공 여부는 구성도와 별도로 실제 복원 증거를 확인합니다.
 
 | 영역 | 기술 | 선택 이유 |
 |---|---|---|
@@ -166,6 +170,8 @@ Portal·Book·YouTube·Crawler는 K3s의 Deployment·Service·readiness·PVC를 
 
 배포와 복구 전에 runtime marker와 실제 서비스 상태를 대조합니다. 표시가 누락·중복되거나 신뢰할 수 없으면 작업을 중단하고 K3s 소유 서비스는 Docker 동작에서 제외합니다. N100 제한형 자동복구와 HomeOps는 허용 대상·조건·실행 간격·횟수 제한을 사용합니다.
 
+Portal은 공유 세션·파일 쓰기 조정·온라인 snapshot을 검증한 별도 범위에서 롤링 교체를 사용합니다. Book·YouTube·Crawler의 단일 writer 제약과 구분하며, 단일 호스트의 일반적인 다중 writer 확장을 의미하지 않습니다.
+
 근거: [실행 위치 검사](scripts/runtime-service-state-reader.py), [HomeOps 동작](homeops-executor/app/services/docker_ops.py), [실행 위치 계약](tests/test_runtime_service_state.py)
 
 ### 6. 백업 파일 존재와 실제 복구 가능성 구분
@@ -180,7 +186,7 @@ Portal·Book·YouTube·Crawler는 K3s의 Deployment·Service·readiness·PVC를 
 
 | 항목 | 현재 운영 방식 |
 |---|---|
-| 백업 순서 | 매일 02:30 KST Portal→Book→YouTube→Crawler→차량 DB. 기존 네 단계가 모두 성공한 뒤 차량 호출 |
+| 백업 순서 | 매일 02:30 KST Portal 온라인 snapshot→Book→YouTube→Crawler→차량 DB. 기존 네 단계가 모두 성공한 뒤 차량 호출 |
 | 변경 감지 | 차량 DB 내용이 같으면 업로드·원격 정리 생략. 일요일에는 실제 백업·복원 검증 |
 | 차량 보관 | 일간 7·주간 4·월간 3 및 최신 7개 안전 하한. 성공 실행 기록은 30일 후 정리하되 최신·실패·불확실 기록과 증적 보존 |
 | 백업 누락 | 서버가 5분마다 완료 기록 확인,09:00 이후 당일 미완료 통보. 공유잠금 점유 시 유예 |
@@ -191,7 +197,7 @@ Portal·Book·YouTube·Crawler는 K3s의 Deployment·Service·readiness·PVC를 
 
 ### 모니터링 화면
 
-아래는 N100에서 촬영한 기존 Grafana 화면 예시입니다. 현재 수치의 증거로 사용하지 않습니다. WSL2 환경에 맞춰 node-exporter를 비활성화한 구성이라 상단의 일부 CPU·메모리 사용률 패널은 `No data`로 표시됩니다. 조회 가능한 그래프와 누락된 지표를 구분해 사용하고 있습니다.
+아래는 실제 N100 Grafana 대시보드를 다시 조회한 화면입니다. 자원 요청·제한과 CPU 추이를 확인했으며, 일부 사용률·CPU Quota 패널의 `No data`도 원본대로 남겼습니다. WSL2의 node-exporter 비활성화와 패널별 수집 한계를 구분하며, 촬영 시점의 수치를 지속 가용성 증거로 확대하지 않습니다.
 
 ![Grafana K3s 모니터링 화면](docs/images/grafana-k3s-overview.png)
 
@@ -214,9 +220,9 @@ CI 산출물과 운영 증적은 90일 보관하며, 장기 보관이 필요한 
 
 ## 현재 한계와 검증 범위
 
-단일 N100과 WSL2 구성이라 호스트 장애를 견디는 다중 노드 고가용성은 제공하지 않습니다. SQLite·파일 기반 단일 writer를 전제로 하며 다중 쓰기 인스턴스 확장에는 저장 구조 변경이 필요합니다. Grafana 일부 호스트 지표는 수집되지 않으며 운영 통신 차단 정책은 미적용 상태입니다.
+단일 N100과 WSL2 구성이라 호스트 장애를 견디는 다중 노드 고가용성은 제공하지 않습니다. Book·YouTube·Crawler는 단일 writer를 유지하며, Portal의 동시 쓰기는 같은 호스트의 제한된 롤링 교체·공유 상태 검증 범위입니다. 일반적인 다중 호스트 쓰기 확장과 구분합니다. Grafana 일부 호스트 지표는 수집되지 않으며 운영 통신 차단 정책은 미적용 상태입니다.
 
-메모 재시도 보호는 지정된 쓰기 경로에 적용됩니다. 탭 종료 후 초안 복구나 모든 중간 데이터 변경의 복원은 보장하지 않습니다. SLI·에러 버짓·RTO/RPO의 종합 실측과 인증의 장기 유지·Telegram 단말 수신은 추가 확인이 필요합니다. 차량을 포함한 정기 실행과 기간 만료 사본의 실제 자동 삭제는 이미지나 CI 대신 각 실행 기록·복원 증거·삭제 결과를 대조해 판단합니다.
+메모 재시도 보호는 지정된 쓰기 경로에 적용됩니다. 탭 종료 후 초안 복구나 모든 중간 데이터 변경의 복원은 보장하지 않습니다. SLI·에러 버짓·전체 RTO/RPO의 종합 실측과 인증의 장기 유지는 추가 확인이 필요합니다. 합성 경보의 전송·시험 메시지의 Telegram 단말 수신은 확인했으며 실제 장애의 자연 발생 시 동작은 별도 관찰합니다. 차량을 포함한 정기 실행과 기간 만료 사본의 실제 자동 삭제는 이미지나 CI 대신 각 실행 기록·복원 증거·삭제 결과를 대조해 판단합니다.
 
 ## 빠른 상태 확인
 
