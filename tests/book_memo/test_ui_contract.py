@@ -75,6 +75,11 @@ class BookMemoUiContractTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_toc_preview_selection_count_failure_and_empty_state_in_both_screens(self):
+        root = Path(__file__).resolve().parents[2]
+        result = subprocess.run(["node", "--test", "tests/book_memo/toc_preview_client.test.mjs"], cwd=root, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_public_write_controls_are_disabled_and_login_restores_authenticated_forms(self):
         with patch.dict(os.environ, {"DELETE_PASSWORD": "test-draft-password"}), tempfile.TemporaryDirectory() as tempdir, self.loaded_app(tempdir) as app:
             from app.services import book_service

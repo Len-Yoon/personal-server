@@ -28,6 +28,29 @@ class BookReliabilityTests(unittest.TestCase):
                 self.assertEqual(fetch.call_args.args[0]['external_id'], '123')
                 self.assertEqual(fetch.call_args.args[0]['source'], 'yes24')
 
+    def test_toc_preview_does_not_save_and_only_selected_lines_are_added(self):
+        with patch.dict(os.environ, {"DELETE_PASSWORD": "toc-preview-fixture"}), tempfile.TemporaryDirectory() as tmp, test_ui_contract.BookMemoUiContractTests().loaded_app(tmp) as app:
+            from app.services import book_service as service
+            client = TestClient(app, base_url="https://books.len.pe.kr", headers={"Origin": "https://books.len.pe.kr"})
+            candidates = [f"{index}장 미리보기" for index in range(1, 421)]
+            with patch("app.main.fetch_toc_candidates", return_value={"source": "YES24", "candidates": candidates}) as fetch:
+                preview = client.post("/toc-candidates", data={"isbn": "9781234567890"})
+                self.assertEqual(preview.status_code, 200)
+                self.assertEqual(preview.json()["candidates"][-1], candidates[-1])
+                self.assertFalse(service.DB_PATH.exists(), "목차 미리보기는 DB를 만들거나 저장하지 않음")
+                login = client.post("/auth/login", data={"password": "toc-preview-fixture"}, follow_redirects=False)
+                self.assertEqual(login.status_code, 303)
+                saved = client.post("/books", data={"isbn": "9781234567890", "title": "선택한 책", "titles": [candidates[0], candidates[-1]]}, follow_redirects=False)
+                self.assertEqual(saved.status_code, 303)
+                book_id = int(saved.headers["location"].split("/")[-1])
+                self.assertEqual([row["title"] for row in service.list_chapters(book_id)], [candidates[0], candidates[-1]])
+                fetch.assert_called_once()
+                service.create_memo(book_id, chapter_id=None, title="기존", content="보존", page=0)
+                before = service.list_chapters(book_id)
+                client.get(f"/books/{book_id}/toc-candidates")
+                self.assertEqual(service.list_chapters(book_id), before)
+                self.assertEqual(service.list_memos(book_id)[0]["content"], "보존")
+
     def test_parallel_bulk_chapters_do_not_duplicate_titles_or_positions(self):
         from contextlib import contextmanager
         from threading import Barrier

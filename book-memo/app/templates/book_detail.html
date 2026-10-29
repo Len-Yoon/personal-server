@@ -101,7 +101,7 @@
             <div class="toc-builder">
                 <textarea id="toc-source" name="toc_source" form="toc-candidate-form" {% if not write_authenticated %}disabled{% endif %} rows="8" placeholder="목차를 여러 줄로 붙여넣으세요. 한 줄이 하나의 후보가 됩니다."></textarea>
                 <div class="toc-actions">
-                    <button type="button" id="toc-fetch-button" {% if not write_authenticated %}disabled{% endif %}>목차 자동 찾기</button>
+                    <button type="button" id="toc-fetch-button" {% if not write_authenticated %}disabled{% endif %}>YES24 목차 미리보기</button>
                     <button type="button" id="toc-build-button" {% if not write_authenticated %}disabled{% endif %}>후보 만들기</button>
                     <span id="toc-count" aria-live="polite"></span>
                 </div>
@@ -344,6 +344,13 @@ const redirectToWriteLogin = () => {
         return /^(?:(?:제\s*)?\d+\s*(?:부|편|장)(?=\s|$)|(?:part|chapter)\s+\d+\b|\d{1,2}\s*[.)]\s+\S|[IVXLCDM]+\.\s+\S|프롤로그|에필로그|서문|들어가며|마치며|부록)/i.test(line);
     };
 
+    const updateTocSelectionCount = (container) => {
+        const count = container.querySelector("[data-toc-selection-count]");
+        if (!count) return;
+        const fields = [...container.querySelectorAll("input[name='titles']")];
+        count.textContent = `선택 ${fields.filter((field) => field.checked).length}개 / 전체 ${fields.length}개`;
+    };
+
     const setTocSelection = (mode) => {
         tocCandidates.querySelectorAll("input[name='titles']").forEach((checkbox) => {
             if (mode === "all") {
@@ -354,6 +361,8 @@ const redirectToWriteLogin = () => {
                 checkbox.checked = shouldSelectTocByDefault(checkbox.value);
             }
         });
+        updateTocSelectionCount(tocCandidates);
+        tocCandidates.dispatchEvent(new Event("change", {bubbles: true}));
     };
 
     const appendTocSelectionControls = () => {
@@ -372,10 +381,19 @@ const redirectToWriteLogin = () => {
             controls.append(button);
         });
 
+        const count = document.createElement("span");
+        count.dataset.tocSelectionCount = "";
+        count.setAttribute("aria-live", "polite");
+        controls.append(count);
         tocCandidates.append(controls);
+        if (!tocCandidates.dataset.tocSelectionBound) {
+            tocCandidates.addEventListener("change", () => updateTocSelectionCount(tocCandidates));
+            tocCandidates.dataset.tocSelectionBound = "true";
+        }
     };
 
     const renderTocCandidates = (lines, source = "") => {
+        const previousSelection = new Map([...tocCandidates.querySelectorAll("input[name='titles']")].map((field) => [field.value, field.checked]));
         tocCandidates.innerHTML = "";
         tocCount.textContent = lines.length ? `${lines.length}개 후보` : "후보 없음";
         tocCandidateForm.hidden = lines.length === 0;
@@ -396,7 +414,7 @@ const redirectToWriteLogin = () => {
             checkbox.type = "checkbox";
             checkbox.name = "titles";
             checkbox.value = line;
-            checkbox.checked = shouldSelectTocByDefault(line);
+            checkbox.checked = previousSelection.has(line) ? previousSelection.get(line) : shouldSelectTocByDefault(line);
 
             const text = document.createElement("span");
             text.textContent = `${index + 1}. ${line}`;
@@ -404,7 +422,16 @@ const redirectToWriteLogin = () => {
             row.append(checkbox, text);
             tocCandidates.append(row);
         });
+        updateTocSelectionCount(tocCandidates);
     };
+
+    // form-drafts.js registers its synchronous DOMContentLoaded restore first.
+    document.addEventListener("DOMContentLoaded", () => {
+        if (tocCandidates.querySelectorAll("input[name='titles']").length) {
+            if (!tocCandidates.querySelector("[data-toc-selection-count]")) appendTocSelectionControls();
+            updateTocSelectionCount(tocCandidates);
+        }
+    });
 
     tocBuildButton?.addEventListener("click", () => {
         const seen = new Set();
@@ -438,13 +465,14 @@ const redirectToWriteLogin = () => {
             const lines = data.candidates || [];
 
             if (!lines.length) {
-                tocStatus.textContent = "자동으로 찾은 목차가 없습니다. 아래 칸에 목차를 붙여넣어 후보를 만들어주세요.";
                 renderTocCandidates([]);
+                tocStatus.textContent = "YES24에 제공된 목차가 없습니다. 아래 칸에 목차를 붙여넣어 후보를 만들어주세요.";
                 return;
             }
 
             tocSource.value = lines.join("\n");
             renderTocCandidates(lines, data.source || "외부 서점");
+            if (data.truncated) tocStatus.textContent += " 목차가 많아 앞 500개만 표시합니다. YES24 원문도 확인해주세요.";
             if (data.source_url) {
                 const link = document.createElement("a");
                 link.href = data.source_url;
