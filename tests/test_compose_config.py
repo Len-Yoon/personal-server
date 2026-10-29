@@ -572,13 +572,13 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertNotIn("git diff --name-only", workflow)
         self.assertIn("--input-format git-name-status-z", workflow)
         self.assertIn("agent-loop-evidence", workflow)
-        self.assertIn("  matrix:\n    needs: scope\n    if: always()", workflow)
+        self.assertNotIn("\n  matrix:\n", workflow)
         self.assertIn("python3 tests/run_service_tests.py --github-matrix", workflow)
         self.assertIn("include: ${{ steps.generate.outputs.include }}", workflow)
-        self.assertIn("  test:\n    needs: [scope, matrix]\n    if: always()", workflow)
-        self.assertIn("matrix: ${{ fromJSON(needs.matrix.outputs.include) }}", workflow)
+        self.assertIn("  test:\n    needs: scope\n    if: always()", workflow)
+        self.assertIn("matrix: ${{ fromJSON(needs.scope.outputs.include) }}", workflow)
         self.assertIn('json.dumps({"include": include}, separators=(",", ":"))', workflow)
-        self.assertIn("  summary:\n    needs: [scope, matrix, test, browser, quality]\n    if: always()", workflow)
+        self.assertIn("  summary:\n    needs: [scope, test, browser, quality]\n    if: always()", workflow)
         self.assertIn("--test-result \"${{ needs.test.result }}\"", workflow)
         self.assertIn("--executed-checks", workflow)
         self.assertIn("mapfile -t executed_checks < selected-checks.txt", workflow)
@@ -586,8 +586,8 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn("scripts/run_change_harness.py", workflow)
         self.assertIn("agent-loop-harness.json", workflow)
         self.assertIn("agent-loop-harness-context.md", workflow)
-        self.assertIn("--agent-context", workflow)
-        self.assertIn('if [[ "$harness_status" -ne "$context_status" ]]; then', workflow)
+        self.assertEqual(workflow.count("python3 scripts/run_change_harness.py"), 1)
+        self.assertIn("print(format_agent_context(evidence))", workflow)
         self.assertIn('test "${{ steps.evidence.outputs.harness_status }}" -eq 0', workflow)
         self.assertIn('test "${{ steps.evidence.outputs.context_status }}" -eq 0', workflow)
         self.assertIn('test "${{ needs.test.result }}" = "success"', workflow)
@@ -620,7 +620,7 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn('python3 tests/run_ci_tests.py --suite "${{ matrix.name }}" --evidence unit-test-results.json --fail-on-skip', workflow)
         self.assertIn("python3 tests/browser/run_smoke.py", workflow)
         self.assertIn("python3 tests/browser/run_memo_smoke.py --artifacts browser-artifacts", workflow)
-        self.assertIn("if: needs.matrix.outputs.mode != 'documentation'", workflow)
+        self.assertIn("if: needs.scope.outputs.mode != 'documentation'", workflow)
         self.assertIn('test "${{ needs.browser.result }}" = "success"', workflow)
         self.assertIn('test "${{ needs.browser.result }}" = "skipped"', workflow)
         self.assertIn("python3 -m playwright install --with-deps chromium", workflow)
@@ -632,7 +632,7 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn('--evidence unit-test-results.json --fail-on-skip', unit["run"])
         self.assertNotIn("continue-on-error", unit)
         quality = jobs["quality"]
-        self.assertEqual(quality["if"], "needs.matrix.outputs.mode != 'documentation'")
+        self.assertEqual(quality["if"], "needs.scope.outputs.mode != 'documentation'")
         self.assertIn("quality", jobs["summary"]["needs"])
         step = next(step for step in quality["steps"] if step["name"] == "Check branch coverage and mutation detection")
         self.assertEqual(step["run"], "python3 scripts/run_verification_quality.py --output-dir verification-quality-artifacts")
@@ -694,10 +694,9 @@ class ComposeConfigTests(unittest.TestCase):
     def test_ci_selects_suites_and_records_only_executed_checks(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("--scope-evidence agent-loop-scope.json", workflow)
-        self.assertIn("selection: ${{ steps.select.outputs.selection }}", workflow)
-        self.assertIn("CI_SELECTION: ${{ needs.scope.outputs.selection }}", workflow)
+        self.assertIn('Path("ci-selection.json").read_text(encoding="utf-8")', workflow)
         self.assertIn("selected_checks: ${{ steps.generate.outputs.selected_checks }}", workflow)
-        self.assertIn("CI_SELECTED_CHECKS_JSON: ${{ needs.matrix.outputs.selected_checks }}", workflow)
+        self.assertIn("CI_SELECTED_CHECKS_JSON: ${{ needs.scope.outputs.selected_checks }}", workflow)
         self.assertIn('check_results+=(--check-result "$check=success")', workflow)
         self.assertNotIn("--check-result portal=success", workflow)
 
@@ -712,12 +711,81 @@ class ComposeConfigTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "github-output"
-            env = {**os.environ, "CI_SELECTION": json.dumps(selection), "GITHUB_OUTPUT": str(output)}
-            completed = subprocess.run(["bash", "-e"], input=script, text=True, capture_output=True, env=env)
+            (Path(directory) / "ci-selection.json").write_text(json.dumps(selection))
+            env = {**os.environ, "GITHUB_OUTPUT": str(output)}
+            completed = subprocess.run(["bash", "-e"], input=script, text=True, capture_output=True, env=env, cwd=directory)
             self.assertEqual(completed.returncode, 0, completed.stderr)
             values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
         self.assertEqual(json.loads(values["include"]), {"include": selection["include"]})
         self.assertEqual(json.loads(values["selected_checks"]), ["documentation"])
+
+    def test_ci_matrix_rejects_empty_inconsistent_and_malformed_selection(self):
+        jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
+        step = next(s for s in jobs["scope"]["steps"] if s["name"] == "Generate CI test matrix")
+        for value in ('{', json.dumps({"include": [], "selected_checks": []}),
+                      json.dumps({"include": [{"name": "portal"}], "selected_checks": ["maintenance"]})):
+            with self.subTest(selection=value), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                (base / "ci-selection.json").write_text(value)
+                output = base / "output"
+                result = subprocess.run(["bash", "-e"], input=step["run"], text=True,
+                                        capture_output=True, cwd=base,
+                                        env={**os.environ, "GITHUB_OUTPUT": str(output)})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(output.read_text(), "")
+
+    def test_ci_renders_context_from_the_same_json_without_rechecking_policy(self):
+        from scripts.run_change_harness import format_agent_context, run_harness
+        jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
+        build = next(s["run"] for s in jobs["summary"]["steps"] if s["name"] == "Build agent-loop evidence")
+        renderer = build[build.index("python3 - <<'PY' > agent-loop-harness-context.md"):]
+        for _, evidence in (run_harness(["README.md"]), run_harness(["unknown-file.xyz"])):
+            with self.subTest(status=evidence["work_status"]), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                (base / "agent-loop-harness.json").write_text(json.dumps(evidence))
+                env = {**os.environ, "PYTHONPATH": str(ROOT), "GITHUB_OUTPUT": str(base / "output")}
+                result = subprocess.run(["bash", "-e"], input=renderer, text=True,
+                                        capture_output=True, cwd=base, env=env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((base / "agent-loop-harness-context.md").read_text(),
+                                 format_agent_context(evidence) + "\n")
+                self.assertIn("context_status=0", (base / "output").read_text())
+        for broken_output in (False, True):
+            with self.subTest(broken_output=broken_output), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                (base / "agent-loop-harness.json").write_text("invalid JSON")
+                if broken_output:
+                    (base / "agent-loop-harness-context.md").mkdir()
+                env = {**os.environ, "PYTHONPATH": str(ROOT), "GITHUB_OUTPUT": str(base / "output")}
+                result = subprocess.run(["bash", "-e"], input="set +e\n" + renderer,
+                                        text=True, capture_output=True, cwd=base, env=env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                status = dict(line.split("=", 1) for line in (base / "output").read_text().splitlines())
+                self.assertNotEqual(status["context_status"], "0")
+
+    def test_ci_final_gate_rejects_dependency_and_artifact_failures(self):
+        jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
+        script = next(s["run"] for s in jobs["summary"]["steps"] if s["name"] == "Enforce policy and service test results")
+        healthy = {"steps.evidence.outputs.policy_status": "0", "steps.evidence.outputs.harness_status": "0",
+                   "steps.evidence.outputs.context_status": "0", "needs.scope.result": "success",
+                   "needs.test.result": "success", "needs.scope.outputs.mode": "full",
+                   "needs.browser.result": "success", "needs.quality.result": "success"}
+        scenarios = [({**healthy}, True), ({**healthy, "needs.scope.outputs.mode": "documentation",
+                      "needs.browser.result": "skipped", "needs.quality.result": "skipped"}, True)]
+        for key in ("needs.browser.result", "needs.quality.result"):
+            scenarios.append(({**scenarios[1][0], key: "success"}, False))
+        for key in healthy:
+            if key == "needs.scope.outputs.mode":
+                continue
+            for value in (("1", "2", "") if key.startswith("steps.") else ("failure", "cancelled", "skipped", "")):
+                scenarios.append(({**healthy, key: value}, False))
+        for values, expected in scenarios:
+            rendered = script
+            for key, value in values.items():
+                rendered = rendered.replace("${{ " + key + " }}", value)
+            with self.subTest(values=values):
+                result = subprocess.run(["bash", "-e"], input=rendered, text=True, capture_output=True)
+                self.assertEqual(result.returncode == 0, expected, result.stderr)
 
     def test_ci_matrix_matches_service_docker_python_versions(self):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
