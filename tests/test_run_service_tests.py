@@ -361,6 +361,28 @@ class ServiceTestRunnerTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("invalid choice", result.stderr)
 
+    def test_local_k8s_uses_existing_strict_ci_workers_and_its_interpreter(self):
+        entry = next(item for item in runner.load_matrix() if item["name"] == "k8s-contracts")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            python = root / "k8s-contracts/bin/python"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            python.chmod(0o755)
+            command, environment = runner.command_for(entry, root)
+        self.assertEqual(command, [str(python), str(ROOT / "tests/run_ci_shards.py"),
+                                   "--workers", "4", "--fail-on-skip"])
+        self.assertEqual(environment["PYTHONPATH"], str(ROOT))
+        with mock.patch.object(runner.subprocess, "run", return_value=subprocess.CompletedProcess(command, 1)), \
+             redirect_stdout(StringIO()):
+            self.assertEqual(runner.run_suite(entry, False), 1)
+
+    def test_local_k8s_dry_run_does_not_fall_back_to_serial_unittest(self):
+        result = self.run_runner("--dry-run", "--suite", "k8s-contracts")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("tests/run_ci_shards.py --workers 4 --fail-on-skip", result.stdout)
+        self.assertNotIn(" -m unittest ", result.stdout)
+
     def test_runner_continues_after_a_group_failure_and_returns_failure(self):
         """Fails if one broken Python group hides later group results."""
         matrix = [

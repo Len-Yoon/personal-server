@@ -15,7 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       policy_status: ${{ steps.classify.outputs.policy_status }}
-      selection: ${{ steps.select.outputs.selection }}
+      include: ${{ steps.generate.outputs.include }}
+      selected_checks: ${{ steps.generate.outputs.selected_checks }}
+      mode: ${{ steps.generate.outputs.mode }}
 
     steps:
       - name: Check out repository
@@ -61,31 +63,17 @@ jobs:
             agent-loop-scope.json
 
       - name: Select CI suites
-        id: select
         run: |
           python3 tests/run_service_tests.py --github-matrix --scope-evidence agent-loop-scope.json --changes-input changed-files.nul > ci-selection.json
-          echo "selection=$(cat ci-selection.json)" >> "$GITHUB_OUTPUT"
 
-  matrix:
-    needs: scope
-    if: always()
-    runs-on: ubuntu-latest
-    outputs:
-      include: ${{ steps.generate.outputs.include }}
-      selected_checks: ${{ steps.generate.outputs.selected_checks }}
-      mode: ${{ steps.generate.outputs.mode }}
-
-    steps:
       - name: Generate CI test matrix
         id: generate
-        env:
-          CI_SELECTION: ${{ needs.scope.outputs.selection }}
         run: |
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json
-          import os
+          from pathlib import Path
 
-          selection = json.loads(os.environ["CI_SELECTION"])
+          selection = json.loads(Path("ci-selection.json").read_text(encoding="utf-8"))
           include = selection["include"]
           selected = selection["selected_checks"]
           if not include or [entry["name"] for entry in include] != selected:
@@ -96,13 +84,13 @@ jobs:
           PY
 
   test:
-    needs: [scope, matrix]
+    needs: scope
     if: always()
     runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.matrix.outputs.include) }}
+      matrix: ${{ fromJSON(needs.scope.outputs.include) }}
 
     steps:
       - name: Check out repository
@@ -170,8 +158,8 @@ jobs:
           path: k8s-shards.json
 
   quality:
-    needs: [scope, matrix]
-    if: needs.matrix.outputs.mode != 'documentation'
+    needs: scope
+    if: needs.scope.outputs.mode != 'documentation'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -193,8 +181,8 @@ jobs:
           path: verification-quality-artifacts
 
   browser:
-    needs: [scope, matrix]
-    if: needs.matrix.outputs.mode != 'documentation'
+    needs: scope
+    if: needs.scope.outputs.mode != 'documentation'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -226,7 +214,7 @@ jobs:
           path: browser-artifacts
 
   summary:
-    needs: [scope, matrix, test, browser, quality]
+    needs: [scope, test, browser, quality]
     if: always()
     runs-on: ubuntu-latest
 
@@ -244,7 +232,7 @@ jobs:
         id: evidence
         shell: bash
         env:
-          CI_SELECTED_CHECKS_JSON: ${{ needs.matrix.outputs.selected_checks }}
+          CI_SELECTED_CHECKS_JSON: ${{ needs.scope.outputs.selected_checks }}
         run: |
           set +e
           check_results=()
@@ -288,17 +276,16 @@ jobs:
           harness_status=$?
           echo "harness_status=$harness_status" >> "$GITHUB_OUTPUT"
 
-          python3 scripts/run_change_harness.py \
-            --input changed-files.nul \
-            --input-format git-name-status-z \
-            "${check_results[@]}" \
-            --agent-context \
-            > agent-loop-harness-context.md
+          python3 - <<'PY' > agent-loop-harness-context.md
+          import json
+          from pathlib import Path
+          from scripts.run_change_harness import format_agent_context
+
+          evidence = json.loads(Path("agent-loop-harness.json").read_text(encoding="utf-8"))
+          print(format_agent_context(evidence))
+          PY
           context_status=$?
           echo "context_status=$context_status" >> "$GITHUB_OUTPUT"
-          if [[ "$harness_status" -ne "$context_status" ]]; then
-            exit 1
-          fi
           exit 0
 
       - name: Write GitHub Step Summary
@@ -311,8 +298,8 @@ jobs:
             echo "- Policy status: \`${{ steps.evidence.outputs.policy_status }}\`"
             echo "- Service test result: \`${{ needs.test.result }}\`"
             echo "- Verification quality result: \`${{ needs.quality.result }}\`"
-            echo "- Selected CI mode: \`${{ needs.matrix.outputs.mode }}\`"
-            echo "- Selected suites: \`${{ needs.matrix.outputs.selected_checks }}\`"
+            echo "- Selected CI mode: \`${{ needs.scope.outputs.mode }}\`"
+            echo "- Selected suites: \`${{ needs.scope.outputs.selected_checks }}\`"
             echo "- Missing checks: \`$missing_checks\`"
             echo "- Harness status: \`${{ steps.evidence.outputs.harness_status }}\`"
             echo
@@ -336,8 +323,9 @@ jobs:
           test "${{ steps.evidence.outputs.policy_status }}" -eq 0
           test "${{ steps.evidence.outputs.harness_status }}" -eq 0
           test "${{ steps.evidence.outputs.context_status }}" -eq 0
+          test "${{ needs.scope.result }}" = "success"
           test "${{ needs.test.result }}" = "success"
-          if [[ "${{ needs.matrix.outputs.mode }}" == "documentation" ]]; then
+          if [[ "${{ needs.scope.outputs.mode }}" == "documentation" ]]; then
             test "${{ needs.browser.result }}" = "skipped"
             test "${{ needs.quality.result }}" = "skipped"
           else
