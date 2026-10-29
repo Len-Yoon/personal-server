@@ -74,7 +74,7 @@ _SECURITY_HEADERS = {
     "Content-Security-Policy": (
         "default-src 'self'; script-src 'self' 'unsafe-inline'; "
         "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data: https://img.youtube.com https://image.aladin.co.kr "
+        "img-src 'self' data: https://img.youtube.com https://image.aladin.co.kr https://image.yes24.com "
         "https://books.google.com https://covers.openlibrary.org; "
         "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
         "base-uri 'self'; form-action 'self'; frame-src 'self' https://www.youtube.com"
@@ -175,7 +175,7 @@ async def home(
                 for book in books
             },
             "error": error,
-            "has_aladin_key": bool(os.getenv("ALADIN_TTB_KEY", "").strip()),
+            "has_yes24_key": bool(os.getenv("YES24_API_KEY", "").strip()),
             "statuses": ["읽을 예정", "읽는 중", "완료", "보류"],
             "portal_home_url": portal_home_url(request_host_from_headers(request.headers)),
             "write_authenticated": _has_write_session(request),
@@ -224,13 +224,13 @@ def create_book(
 def get_unsaved_book_toc_candidates(
     isbn: str = Form(default=""),
     title: str = Form(default=""),
+    external_id: str = Form(default=""),
+    source: str = Form(default=""),
 ):
-    return fetch_toc_candidates(
-        {
-            "isbn": isbn,
-            "title": title,
-        }
-    )
+    try:
+        return fetch_toc_candidates({"isbn": isbn, "title": title, "external_id": external_id, "source": source})
+    except ValueError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from None
 
 
 @app.get("/books/{book_id}")
@@ -385,7 +385,10 @@ def get_book_toc_candidates(book_id: int):
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
 
-    return fetch_toc_candidates(book)
+    try:
+        return fetch_toc_candidates(book)
+    except ValueError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from None
 
 
 @app.post("/chapters/{chapter_id}")

@@ -1,121 +1,71 @@
 import html
+import json
 import re
 from typing import Any
-from urllib.parse import urljoin
 
 import requests
 
 
-YES24_SEARCH_URL = "https://www.yes24.com/Product/Search"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.6,en;q=0.5",
-}
+from app.services.yes24 import api_key, response_data, product_url
+
+YES24_CONTENT_URL = "https://apis.yes24.com/v1/goods/content"
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
-def fetch_toc_candidates(book: dict[str, Any], limit: int = 120) -> dict[str, Any]:
-    candidates = _fetch_yes24_toc(book, limit)
-
-    if candidates:
-        return {
-            "source": "YES24",
-            "candidates": candidates,
-        }
-
-    return {
-        "source": "",
-        "candidates": [],
-    }
-
-
-def _fetch_yes24_toc(book: dict[str, Any], limit: int) -> list[str]:
-    query = (book.get("isbn") or "").strip() or (book.get("title") or "").strip()
-
-    if not query:
-        return []
-
-    search_response = requests.get(
-        YES24_SEARCH_URL,
-        params={
-            "domain": "ALL",
-            "query": query,
-        },
-        headers=HEADERS,
-        timeout=8,
-    )
-    search_response.raise_for_status()
-
-    detail_url = _extract_yes24_detail_url(search_response.text, book.get("isbn", ""))
-
-    if not detail_url:
-        return []
-
-    detail_response = requests.get(detail_url, headers=HEADERS, timeout=8)
-    detail_response.raise_for_status()
-
-    toc_html = _extract_yes24_toc_html(detail_response.text)
-
-    if not toc_html:
-        return []
-
-    return _normalize_toc_lines(toc_html, limit)
-
-
-def _extract_yes24_detail_url(page: str, isbn: str = "") -> str:
-    isbn = isbn.strip()
-    fallback_url = ""
-
-    for match in re.finditer(r"<a\b[^>]*>", page, re.IGNORECASE):
-        tag = match.group(0)
-
-        if "gd_name" not in tag:
+def _content_isbn13(value: str) -> str:
+    for token in value.split():
+        if re.fullmatch(r"[0-9]{13}", token):
+            return token
+    for token in value.upper().split():
+        if not re.fullmatch(r"[0-9]{9}[0-9X]", token):
             continue
-
-        href_match = re.search(r'href=["\']([^"\']+)["\']', tag, re.IGNORECASE)
-
-        if not href_match:
+        digits = [int(char) if char != "X" else 10 for char in token]
+        if sum((10 - index) * digit for index, digit in enumerate(digits)) % 11:
             continue
-
-        detail_url = urljoin("https://www.yes24.com", html.unescape(href_match.group(1)))
-
-        if not fallback_url:
-            fallback_url = detail_url
-
-        context = page[max(0, match.start() - 800):match.end() + 800]
-
-        if isbn and isbn in context:
-            return detail_url
-
-    if fallback_url:
-        return fallback_url
-
-    match = re.search(r'href=["\']([^"\']*/product/goods/\d+)["\']', page, re.IGNORECASE)
-
-    if match:
-        return urljoin("https://www.yes24.com", html.unescape(match.group(1)))
-
+        prefix = "978" + token[:9]
+        check = (-sum(int(char) * (1 if index % 2 == 0 else 3)
+                      for index, char in enumerate(prefix))) % 10
+        return prefix + str(check)
     return ""
 
 
-def _extract_yes24_toc_html(page: str) -> str:
-    section_start = page.find('id="infoset_toc"')
-
-    if section_start == -1:
-        return ""
-
-    next_section = page.find('id="infoset_', section_start + len('id="infoset_toc"'))
-    toc_section = page[section_start:next_section if next_section != -1 else section_start + 50000]
-    textarea = re.search(
-        r'<textarea[^>]*class="txtContentText"[^>]*>([\s\S]*?)</textarea>',
-        toc_section,
-        re.IGNORECASE,
-    )
-
-    if textarea:
-        return textarea.group(1)
-
-    return toc_section
+def fetch_toc_candidates(book: dict[str, Any], limit: int = 120) -> dict[str, Any]:
+    key = api_key()
+    if not key:
+        raise ValueError("목차 조회를 사용하려면 YES24 API 키를 설정해주세요.")
+    isbn = _content_isbn13(str(book.get("isbn") or "").strip())
+    item_id = str(book.get("external_id") or "").strip()
+    if book.get("source") == "yes24" and item_id.isdigit():
+        params = {"searchType": "ItemId", "query": item_id}
+    elif re.fullmatch(r"[0-9]{13}", isbn):
+        params = {"searchType": "ISBN13", "query": isbn}
+    else:
+        return {"source": "", "candidates": []}
+    try:
+        with requests.Session() as session:
+            session.trust_env = False
+            with session.get(YES24_CONTENT_URL, params=params, headers={"X-Api-Key": key},
+                             timeout=(3, 8), allow_redirects=False, stream=True) as response:
+                chunks = []
+                size = 0
+                for chunk in response.iter_content(16384):
+                    size += len(chunk)
+                    if size > MAX_RESPONSE_BYTES:
+                        raise ValueError("YES24 응답이 너무 큽니다.")
+                    chunks.append(chunk)
+                payload = json.loads(b"".join(chunks))
+                if response.status_code == 404 and isinstance(payload, dict) and payload.get("errorCode") in {"GOODS_001", "GOODS_002"}:
+                    return {"source": "", "candidates": []}
+                if response.status_code != 200:
+                    raise ValueError("YES24 목차 조회 실패")
+                data = response_data(payload).get("data")
+                if not isinstance(data, dict) or not isinstance(data.get("contents"), str):
+                    raise ValueError("YES24 목차 응답 형식 오류")
+                candidates = _normalize_toc_lines(data["contents"], limit)
+                source_url = product_url(data.get("itemId")) if candidates else ""
+    except (requests.RequestException, ValueError, TypeError):
+        raise ValueError("YES24 목차를 불러올 수 없습니다. API 키와 이용 상태를 확인해주세요.") from None
+    return {"source": "YES24" if candidates else "", "candidates": candidates, "source_url": source_url}
 
 
 def _normalize_toc_lines(toc_html: str, limit: int) -> list[str]:

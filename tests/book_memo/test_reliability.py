@@ -13,6 +13,21 @@ from tests.book_memo import test_ui_contract
 
 
 class BookReliabilityTests(unittest.TestCase):
+    def test_yes24_toc_failure_is_a_safe_json_error_for_both_routes(self):
+        with tempfile.TemporaryDirectory() as tmp, test_ui_contract.BookMemoUiContractTests().loaded_app(tmp) as app:
+            from app.services import book_service as service
+            book = service.create_or_get_book({'isbn': '9781234567890', 'title': '손자병법'})
+            with patch('app.main.fetch_toc_candidates', side_effect=ValueError('YES24 API 키를 설정해주세요.')):
+                client = TestClient(app, headers={'Origin': 'http://testserver'})
+                for response in (client.post('/toc-candidates', data={'isbn': book['isbn']}),
+                                 client.get(f"/books/{book['id']}/toc-candidates")):
+                    self.assertEqual(response.status_code, 503)
+                    self.assertIn('YES24', response.json()['detail'])
+            with patch('app.main.fetch_toc_candidates', return_value={'source': 'YES24', 'candidates': []}) as fetch:
+                client.post('/toc-candidates', data={'isbn': '1234567890', 'external_id': '123', 'source': 'yes24'})
+                self.assertEqual(fetch.call_args.args[0]['external_id'], '123')
+                self.assertEqual(fetch.call_args.args[0]['source'], 'yes24')
+
     def test_parallel_bulk_chapters_do_not_duplicate_titles_or_positions(self):
         from contextlib import contextmanager
         from threading import Barrier
@@ -164,17 +179,18 @@ class BookReliabilityTests(unittest.TestCase):
             self.assertEqual(html_module.unescape(versions.group(1)), '{"1": 1}')
 
     def test_all_search_failures_are_distinct_from_successful_empty_results(self):
+        """Provider failures must not be presented as a book with no matches."""
         with tempfile.TemporaryDirectory() as tmp, test_ui_contract.BookMemoUiContractTests().loaded_app(tmp) as app:
             from app.services import book_search
-            with patch.dict(os.environ, {'ALADIN_TTB_KEY': ''}), patch.object(book_search, '_get_json', side_effect=aiohttp.ClientConnectionError('upstream unavailable')):
+            with patch.dict(os.environ, {'YES24_API_KEY': ''}), patch.object(book_search, '_get_json', side_effect=aiohttp.ClientConnectionError('upstream unavailable')):
                 response = TestClient(app).get('/?q=책')
                 self.assertIn('검색 실패', response.text)
                 self.assertNotIn('검색 결과가 없습니다.', response.text)
             book_search._CACHE.clear()
-            with patch.object(book_search, '_search_aladin', return_value=[]), patch.object(book_search, '_search_google_books', return_value=[]), patch.object(book_search, '_search_open_library', return_value=[]):
+            with patch.object(book_search, '_search_yes24', return_value=[]), patch.object(book_search, '_search_google_books', return_value=[]), patch.object(book_search, '_search_open_library', return_value=[]):
                 self.assertEqual(book_search.search_books('책'), [])
             book_search._CACHE.clear()
-            with patch.object(book_search, '_search_aladin', side_effect=aiohttp.ClientConnectionError()), patch.object(book_search, '_search_google_books', return_value=[{'title': '찾은 책'}]):
+            with patch.object(book_search, '_search_yes24', side_effect=aiohttp.ClientConnectionError()), patch.object(book_search, '_search_google_books', return_value=[{'title': '찾은 책'}]):
                 self.assertEqual(book_search.search_books('책'), [{'title': '찾은 책'}])
 
     def test_tag_retry_does_not_reapply_an_older_successful_update(self):
