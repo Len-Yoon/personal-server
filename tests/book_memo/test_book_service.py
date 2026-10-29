@@ -404,7 +404,7 @@ class BookMemoServiceTests(unittest.TestCase):
             self.assertEqual(book_service.list_memos(book["id"]), [])
 
     def test_search_books_falls_back_to_google_books(self):
-        os.environ.pop("ALADIN_TTB_KEY", None)
+        os.environ.pop("YES24_API_KEY", None)
         book_search = self.reload_book_search()
 
         google_result = [
@@ -422,7 +422,7 @@ class BookMemoServiceTests(unittest.TestCase):
             }
         ]
 
-        with patch.object(book_search, "_search_aladin", return_value=[]), patch.object(
+        with patch.object(book_search, "_search_yes24", return_value=[]), patch.object(
             book_search, "_search_google_books", return_value=google_result
         ), patch.object(book_search, "_search_open_library", return_value=[]):
             books = book_search.search_books("샘플")
@@ -435,3 +435,61 @@ class BookMemoServiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Yes24TocTests(unittest.TestCase):
+    def test_legacy_isbn10_is_converted_without_title_guessing(self):
+        prepare_service_import('book-memo')
+        from app.services.toc_service import _content_isbn13
+        self.assertEqual(_content_isbn13('0306406152'), '9780306406157')
+        self.assertEqual(_content_isbn13('080442957X'), '9780804429573')
+        self.assertEqual(_content_isbn13('0306406151'), '')
+        self.assertEqual(_content_isbn13('0306406152 9780306406157'), '9780306406157')
+
+    def setUp(self):
+        prepare_service_import('book-memo')
+        from app.services import toc_service
+        self.toc = importlib.reload(toc_service)
+
+    def request(self, status, payload, book=None):
+        from unittest.mock import MagicMock
+        import json
+        response = MagicMock()
+        response.status_code = status
+        response.iter_content.return_value = [json.dumps(payload).encode()]
+        session = MagicMock()
+        session.get.return_value.__enter__.return_value = response
+        with patch.dict(os.environ, {'YES24_API_KEY': 'fixture-key'}), patch.object(self.toc.requests, 'Session') as factory:
+            factory.return_value.__enter__.return_value = session
+            result = self.toc.fetch_toc_candidates(book or {'isbn': '9781234567890'})
+        return result, session
+
+    def test_content_api_normalizes_lines_and_keeps_legacy_isbn_lookup(self):
+        result, session = self.request(200, {'success': True, 'errorCode': None, 'data': {'data': {'itemId': 123, 'contents': '목차\n1장 시작<br>2장 끝\n1장 시작'}}})
+        self.assertEqual(result, {'source': 'YES24', 'candidates': ['1장 시작', '2장 끝'], 'source_url': 'https://www.yes24.com/product/goods/123'})
+        kwargs = session.get.call_args.kwargs
+        self.assertEqual(kwargs['params'], {'searchType': 'ISBN13', 'query': '9781234567890'})
+        self.assertEqual(kwargs['headers'], {'X-Api-Key': 'fixture-key'})
+        self.assertFalse(kwargs['allow_redirects'])
+        self.assertFalse(session.trust_env)
+        _, session = self.request(200, {'success': True, 'errorCode': None, 'data': {'data': {'itemId': 123, 'contents': '1장 시작'}}}, {'source': 'yes24', 'external_id': '123', 'isbn': '1234567890'})
+        self.assertEqual(session.get.call_args.kwargs['params']['searchType'], 'ItemId')
+
+    def test_absent_toc_is_empty_but_provider_errors_remain_errors(self):
+        for code in ('GOODS_001', 'GOODS_002'):
+            result, _ = self.request(404, {'success': False, 'errorCode': code})
+            self.assertEqual(result['candidates'], [])
+        for status, payload in [(404, {'errorCode': 'SEARCH_002'}), (429, {}), (401, {}), (200, {'success': False, 'message': 'fixture-key'}), (200, {'success': True, 'data': {'data': []}})]:
+            with self.subTest(status=status, payload=payload):
+                with self.assertRaises(ValueError) as error:
+                    self.request(status, payload)
+                self.assertNotIn('fixture-key', str(error.exception))
+
+    def test_key_missing_and_unknown_isbn_never_scrape_or_request(self):
+        with patch.dict(os.environ, {'YES24_API_KEY': ''}), patch.object(self.toc.requests, 'Session') as session:
+            with self.assertRaisesRegex(ValueError, 'API 키'):
+                self.toc.fetch_toc_candidates({'isbn': '9781234567890'})
+            session.assert_not_called()
+        with patch.dict(os.environ, {'YES24_API_KEY': 'fixture-key'}), patch.object(self.toc.requests, 'Session') as session:
+            self.assertEqual(self.toc.fetch_toc_candidates({'isbn': '/works/OL123', 'title': '추정금지'})['candidates'], [])
+            session.assert_not_called()

@@ -71,9 +71,9 @@
             <p class="error-text">검색 실패: {{ error }}</p>
         {% endif %}
 
-        {% if query and not has_aladin_key %}
+        {% if query and not has_yes24_key %}
             <p class="notice-text">
-                국내 도서 검색 품질을 높이려면 .env에 ALADIN_TTB_KEY를 추가해주세요.
+                YES24 검색을 사용하려면 서버에 YES24 API 키를 설정해주세요.
                 현재는 Google Books와 Open Library fallback만 사용합니다.
             </p>
         {% endif %}
@@ -125,6 +125,9 @@
                             <h3>{{ book.title }}</h3>
                             <p>{{ book.authors }}</p>
                             <p>{{ book.description }}</p>
+                            {% if book.source == 'yes24' %}
+                                <a class="text-link" href="{{ book.preview_url }}" target="_blank" rel="noopener noreferrer">도서 정보 제공: YES24</a>
+                            {% endif %}
                             <form class="book-with-toc-form" action="/books" method="post" data-draft-fields="titles" data-draft-id="book-save-{{ book.isbn }}|{{ book.title }}|{{ book.authors }}">
                 {% if not write_authenticated %}
                 <p>로그인 후 작성할 수 있습니다. <a href="/auth/login?next_path={{ (request.url.path ~ ('?' ~ request.url.query if request.url.query else ''))|urlencode }}">쓰기 로그인</a></p>
@@ -147,7 +150,7 @@
                 {% else %}
                     <article class="empty-card">
                         <h3>검색 결과가 없습니다.</h3>
-                        <p>다른 키워드나 ISBN으로 다시 검색해보세요. 국내 책은 알라딘 API 키가 있으면 더 잘 검색됩니다.</p>
+                        <p>다른 키워드나 ISBN으로 다시 검색해보세요.</p>
                     </article>
                 {% endfor %}
             </div>
@@ -459,6 +462,8 @@ if (selectedExport) {
             const body = new URLSearchParams();
             body.set("isbn", form.querySelector("input[name='isbn']")?.value || "");
             body.set("title", form.querySelector("input[name='title']")?.value || "");
+            body.set("external_id", form.querySelector("input[name='external_id']")?.value || "");
+            body.set("source", form.querySelector("input[name='source']")?.value || "");
 
             try {
                 const response = await fetch("/toc-candidates", {
@@ -484,6 +489,14 @@ if (selectedExport) {
                 status.textContent = lines.length
                     ? `${data.source || "외부 서점"}에서 ${lines.length}개 목차 후보를 가져왔습니다.`
                     : "자동으로 찾은 목차가 없습니다. 책 상세에서 직접 추가할 수 있습니다.";
+                if (lines.length && data.source_url) {
+                    const link = document.createElement("a");
+                    link.href = data.source_url;
+                    link.textContent = " YES24 도서 정보";
+                    link.target = "_blank";
+                    link.rel = "noopener noreferrer";
+                    status.appendChild(link);
+                }
             } catch (error) {
                 status.textContent = "목차를 가져오지 못했습니다. 책은 저장한 뒤 직접 목차를 추가할 수 있습니다.";
                 renderCandidates(candidates, []);
