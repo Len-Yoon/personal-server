@@ -281,6 +281,9 @@ def command_for(entry: dict[str, object], venv_root: Path = DEFAULT_VENV_ROOT) -
     command = shlex.split(str(entry["test_command"]))
     venv_python = venv_root / str(entry["name"]) / "bin" / "python"
     command[0] = str(venv_python) if venv_python.is_file() and os.access(venv_python, os.X_OK) else f"python{entry['python_version']}"
+    if entry["name"] == "k8s-contracts":
+        command = [command[0], str(ROOT / "tests/run_ci_shards.py"),
+                   "--workers", "4", "--fail-on-skip"]
     environment = {
         "PATH": os.environ.get("PATH", os.defpath),
         "PYTHONPATH": str(ROOT / str(entry["pythonpath"])),
