@@ -1,38 +1,10 @@
 alertmanager:
   enabled: false
 
-# WSL2 CPU/memory collection needs only read-only /proc and /sys, not host root.
+# Keep the full Helm exporter disabled on WSL2. CPU/memory-only collection is
+# independently managed by node-exporter.n100.yaml without any host mounts.
 nodeExporter:
-  enabled: true
-
-prometheus-node-exporter:
-  hostRootFsMount:
-    enabled: false
-  hostNetwork: false
-  hostPID: false
-  hostIPC: false
-  extraArgs:
-    - --collector.disable-defaults
-    - --collector.cpu
-    - --collector.meminfo
-  image:
-    # Official development image pinned by digest; not a stable release.
-    # The chart appends -distroless to this tag.
-    tag: master
-    digest: sha256:2aeca551ca3cb8c90f11fee9bcdf9859725c48f272d478aa79b9bbc48eda13ed
-  containerSecurityContext:
-    readOnlyRootFilesystem: true
-    runAsNonRoot: true
-    allowPrivilegeEscalation: false
-    capabilities:
-      drop: [ALL]
-  resources:
-    requests:
-      cpu: 25m
-      memory: 32Mi
-    limits:
-      cpu: 100m
-      memory: 64Mi
+  enabled: false
 
 defaultRules:
   rules:

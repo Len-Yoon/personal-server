@@ -4,14 +4,14 @@
 
 | 항목 | 내용 | 비고 |
 |---|---|---|
-| 기준 | kube-prometheus-stack 88.6.1 / node-exporter 차트 4.56.1 | 기존 release 전체 upgrade 제외 |
+| 기준 | 기존 kube-prometheus-stack 88.6.1의 scrape·node.rules | 별도 Git 소유 최소 exporter, 기존 release 전체 upgrade 제외 |
 | 목적 | 단일 Cluster의 CPU·메모리 사용률 결측 복구 | Windows 물리 호스트가 아닌 WSL2 노드 범위 |
 | 승인 | 실제 WSL 검증·운영 적용·문제 시 원복과 결과 확인 | 이번 수집기 추가에 한정 |
 | 추가 승인 | 고정된 공식 개발 이미지로 시험 후 적용 | 안정 이미지의 신규 HIGH 15건 발견 후 별도 수용 |
 
 ## 핵심 요약
 
-공유 host root 마운트를 제거하고 CPU·meminfo collector만 활성화함. hostNetwork·hostPID·hostIPC를 사용하지 않고 `/proc`·`/sys`만 읽기 전용으로 제공함. 현재는 구현·오프라인 검증 단계이며 실제 WSL 시험·운영 적용 결과는 아래 절과 해당 PR에 확정 기록함.
+호스트 볼륨을 전혀 마운트하지 않고 CPU·meminfo collector만 활성화함. hostNetwork·hostPID·hostIPC를 사용하지 않으며 일반 컨테이너의 `/proc`·`/sys` 경로를 읽음. WSL 커널 전체 통계와 일치하는지는 실제 WSL 원본 대조를 통과해야 확정함. 현재는 구현·오프라인 검증 단계이며 실제 WSL 시험·운영 적용 결과는 아래 절과 해당 PR에 확정 기록함.
 
 ## 상세 내용
 
@@ -24,19 +24,19 @@
 | 수집 | CPU·meminfo만 활성화 | 기존 node-exporter alerting/추가 recording 활성화 없음 |
 | 자원 | 요청 25m/32Mi, 제한 100m/64Mi | filesystem·network collector는 비활성 |
 | 운영 추가 | monitoring의 동일 이름 `personal-server-monitoring-prometheus-node-exporter`인 SA·Service·DaemonSet·ServiceMonitor | 정확한 4개 신규 자원만 생성 |
-| 보호 | 기존 앱·PVC·백업 일정·인증 Secret·Grafana 대시보드·Caddy·Tunnel 보존 | Prometheus operator의 사전 식별된 scrape-config Secret 자동 갱신만 필요 |
+| 보호 | 호스트 볼륨 0개, 기존 앱·PVC·백업 일정·인증 Secret·Grafana 대시보드·Caddy·Tunnel 보존 | Prometheus operator의 사전 식별된 scrape-config Secret 자동 갱신만 필요 |
 
 ### 적용·원복 절차
 
 1. 최신 main의 검사 통과 소스·변경 경로·이미지 신원을 고정하고 독립 검토함.
 2. N100 main의 추적 clean·hook·기존 미추적 파일과 신규 대상 부재를 확인한 뒤 정확한 검증 커밋으로 fast-forward함. 강제 reset·덮어쓰기 없음.
-3. 운영 Pod와 동일한 이미지·args·보안·RO 마운트를 사용하는 소유 임시 Pod/SA로 실제 WSL 수집을 시험함. 원본 `/proc`의 CPU·메모리와 대조한 뒤 임시 자원의 UID 소멸을 확인함.
+3. 운영 Pod와 동일한 이미지·args·보안·마운트 없는 설정을 사용하는 소유 임시 Pod/SA로 실제 WSL 수집을 시험함. 원본 `/proc`의 CPU·메모리와 대조한 뒤 임시 자원의 UID 소멸을 확인함. 컨테이너 한도에 가상화된 값이면 운영 적용하지 않음.
 4. 성공한 후보만 SA → Service → DaemonSet → ServiceMonitor 순서로 신규 생성함. 기존 자원의 동명 덮어쓰기를 거부하며 UID·spec fingerprint를 기록함.
 5. scrape UP·CPU/meminfo 성공·기존 CPU/메모리 recording·실제 Grafana 패널을 확인함. rate 워밍업은 제한된 시간 안에서 기다림.
 6. 실패 시 이번에 생성한 정확한 UID의 ServiceMonitor → DaemonSet/소유 Pod → Service → SA만 UID/RV 조건으로 삭제함. 일반 종료 유예를 사용하고 실제 소멸과 기존 서비스 상태를 확인함. 삭제 응답이 유실돼도 동일 UID의 삭제 진행 상태를 먼저 조회하며 무조건 재삭제하지 않음.
 7. Portal/Book 외부 health는 전후 각각 10초 이상 간격 3회 확인함. 수집기는 외부 endpoint를 만들지 않으므로 내부 metrics와 Grafana에서 별도 확인함.
 
-현재 제한 적용은 Helm release revision·manifest를 변경하지 않음. 생성 자원에는 기존 release의 정확한 소유 메타데이터를 유지하고 Git values와 렌더 결과를 대조함. 현재 Helm rollback/uninstall이 이 추가 자원을 정리한다고 가정하지 않으며, 이번 원복은 위 UID 조건부 절차를 사용함. 향후 전체 Helm upgrade는 별도 작업임.
+현재 제한 적용은 Helm release revision·manifest를 변경하지 않음. 표준 Helm node-exporter는 계속 비활성화하고 신규 4개 자원은 Git 소유로 분리하며 Helm 소유 annotation을 붙이지 않음. 기존 Helm rollback/uninstall이 이 자원을 정리한다고 가정하지 않으며 이번 원복은 위 UID 조건부 절차를 사용함. 향후 Helm exporter를 켜면 동명 Git 자원과 소유권 충돌이 발생할 수 있으므로 별도 이관 검토가 필요함.
 
 ## 검토 결과
 
@@ -45,6 +45,7 @@
 | 로컬 전체 검사 | 9개 묶음 PASS | 이후 최종 이미지·최신 main 영향 범위 131개 재검증 PASS |
 | 후보 이미지 | HIGH 0 / CRITICAL 0 | 안정 v1.12.1-distroless는 HIGH 15로 미실행 |
 | 이미지 신원 | index·AMD64 manifest·config blob 내용 해시 대조 PASS | 개발 이미지 수용 별도 승인 완료 |
+| 설정 보안 | 최초 hostPath 안은 CI KSV-0121 HIGH로 미병합·미실행 | 예외 처리 없이 호스트 마운트 0개로 축소, 최종 CI 확인 필요 |
 | 독립 검토 | 진행 중 | 구성 구현자와 다른 Sol high가 source·절차·사후 원본 검토 |
 | 실제 WSL·운영 | 준비 중 | 미수행 결과를 PASS로 표현하지 않음 |
 

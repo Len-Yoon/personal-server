@@ -160,22 +160,15 @@ class MonitoringValuesContractTests(unittest.TestCase):
         self.assertTrue(resources["requests"])
         self.assertTrue(resources["limits"])
 
-    def test_values_limit_wsl_node_exporter_to_cpu_and_memory(self):
+    def test_values_keep_full_helm_exporter_disabled_for_mount_free_collector(self):
         values = load_values()
-
-        self.assertIs(values["nodeExporter"]["enabled"], True)
-        exporter = values["prometheus-node-exporter"]
-        self.assertIs(exporter["hostRootFsMount"]["enabled"], False)
-        self.assertIs(exporter["hostNetwork"], False)
-        self.assertIs(exporter["hostPID"], False)
-        self.assertEqual(exporter["extraArgs"], [
-            "--collector.disable-defaults", "--collector.cpu", "--collector.meminfo",
-        ])
+        self.assertIs(values["nodeExporter"]["enabled"], False)
+        self.assertNotIn("prometheus-node-exporter", values)
         self.assertNotIn("node", values["defaultRules"]["rules"])
         self.assertIs(values["defaultRules"]["rules"]["nodeExporterAlerting"], False)
         self.assertIs(values["defaultRules"]["rules"]["nodeExporterRecording"], False)
 
-    def test_node_exporter_manifest_has_only_adoptable_monitoring_resources(self):
+    def test_node_exporter_manifest_has_only_git_owned_monitoring_resources(self):
         documents = list(yaml.safe_load_all(
             (ROOT / "infra/k8s/monitoring/node-exporter.n100.yaml").read_text()
         ))
@@ -192,10 +185,11 @@ class MonitoringValuesContractTests(unittest.TestCase):
                 metadata = doc["metadata"]
                 self.assertEqual(metadata["namespace"], "monitoring")
                 self.assertEqual(metadata["name"], "personal-server-monitoring-prometheus-node-exporter")
-                self.assertEqual(metadata["labels"]["app.kubernetes.io/managed-by"], "Helm")
+                self.assertEqual(metadata["labels"]["app.kubernetes.io/managed-by"], "personal-server")
+                self.assertEqual(metadata["labels"]["app.kubernetes.io/version"], "master")
+                self.assertNotIn("helm.sh/chart", metadata["labels"])
                 self.assertEqual(metadata["labels"]["release"], "personal-server-monitoring")
-                self.assertEqual(metadata["annotations"]["meta.helm.sh/release-name"], "personal-server-monitoring")
-                self.assertEqual(metadata["annotations"]["meta.helm.sh/release-namespace"], "monitoring")
+                self.assertFalse(any(key.startswith("meta.helm.sh/") for key in metadata.get("annotations", {})))
         self.assertIs(resources["ServiceAccount"]["automountServiceAccountToken"], False)
         pod = resources["DaemonSet"]["spec"]["template"]
         service = resources["Service"]["spec"]
@@ -224,33 +218,26 @@ class MonitoringValuesContractTests(unittest.TestCase):
         self.assertEqual(len(pod["containers"]), 1)
         container = pod["containers"][0]
         self.assertRegex(container["image"], r"^quay\.io/prometheus/node-exporter:[^@]+@sha256:[0-9a-f]{64}$")
-        image = load_values()["prometheus-node-exporter"]["image"]
-        self.assertEqual(image["tag"], "master")
-        self.assertEqual(container["image"], f"quay.io/prometheus/node-exporter:{image['tag']}-distroless@{image['digest']}")
+        self.assertEqual(container["image"], "quay.io/prometheus/node-exporter:master-distroless@sha256:2aeca551ca3cb8c90f11fee9bcdf9859725c48f272d478aa79b9bbc48eda13ed")
         security = container["securityContext"]
         self.assertIs(security["readOnlyRootFilesystem"], True)
         self.assertIs(security["runAsNonRoot"], True)
         self.assertIs(security["allowPrivilegeEscalation"], False)
         self.assertFalse(security.get("privileged", False))
         self.assertEqual(security["capabilities"], {"drop": ["ALL"]})
-        self.assertEqual({volume["name"]: volume["hostPath"]["path"] for volume in pod["volumes"]}, {"proc": "/proc", "sys": "/sys"})
-        self.assertEqual(container["volumeMounts"], [
-            {"name": "proc", "mountPath": "/host/proc", "readOnly": True},
-            {"name": "sys", "mountPath": "/host/sys", "readOnly": True},
-        ])
+        self.assertFalse(pod.get("volumes"))
+        self.assertFalse(container.get("volumeMounts"))
+        self.assertFalse(container.get("volumeDevices"))
         self.assertFalse(any("hostPort" in port for port in container["ports"]))
         collector_args = [arg for arg in container["args"] if arg.startswith("--collector.")]
         self.assertEqual(collector_args, ["--collector.disable-defaults", "--collector.cpu", "--collector.meminfo"])
-        self.assertIn("--path.procfs=/host/proc", container["args"])
-        self.assertIn("--path.sysfs=/host/sys", container["args"])
+        self.assertIn("--path.procfs=/proc", container["args"])
+        self.assertIn("--path.sysfs=/sys", container["args"])
         self.assertFalse(any(arg.startswith("--path.rootfs") for arg in container["args"]))
         self.assertEqual(container["resources"], {
             "requests": {"cpu": "25m", "memory": "32Mi"},
             "limits": {"cpu": "100m", "memory": "64Mi"},
         })
-
-    def test_exporter_does_not_join_host_ipc_namespace(self):
-        self.assertIs(load_values()["prometheus-node-exporter"]["hostIPC"], False)
 
     def test_values_disable_only_unavailable_k3s_control_plane_alerts(self):
         values = load_values()

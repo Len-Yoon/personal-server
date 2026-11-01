@@ -1,24 +1,19 @@
-# Generated from kube-prometheus-stack 88.6.1 (prometheus-node-exporter 4.56.1)
-# using values.n100.yaml; only the four node-exporter resources are included.
-# Helm ownership permits a later upgrade with the same values to adopt these resources.
-# The current Helm revision does not include this surgical addition; rollback uses exact resource UIDs.
+# Git-owned CPU/memory-only exporter; the full Helm exporter remains disabled.
+# No host mounts or host namespaces. WSL VM aggregate metrics require live validation.
+# Official development image pinned by digest; not a stable release.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: personal-server-monitoring-prometheus-node-exporter
   namespace: monitoring
   labels:
-    helm.sh/chart: prometheus-node-exporter-4.56.1
-    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/managed-by: personal-server
     app.kubernetes.io/component: metrics
     app.kubernetes.io/part-of: prometheus-node-exporter
     app.kubernetes.io/name: prometheus-node-exporter
     app.kubernetes.io/instance: personal-server-monitoring
-    app.kubernetes.io/version: 1.12.1
+    app.kubernetes.io/version: master
     release: personal-server-monitoring
-  annotations:
-    meta.helm.sh/release-name: personal-server-monitoring
-    meta.helm.sh/release-namespace: monitoring
 automountServiceAccountToken: false
 ---
 apiVersion: v1
@@ -27,19 +22,16 @@ metadata:
   name: personal-server-monitoring-prometheus-node-exporter
   namespace: monitoring
   labels:
-    helm.sh/chart: prometheus-node-exporter-4.56.1
-    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/managed-by: personal-server
     app.kubernetes.io/component: metrics
     app.kubernetes.io/part-of: prometheus-node-exporter
     app.kubernetes.io/name: prometheus-node-exporter
     app.kubernetes.io/instance: personal-server-monitoring
-    app.kubernetes.io/version: 1.12.1
+    app.kubernetes.io/version: master
     release: personal-server-monitoring
     jobLabel: node-exporter
   annotations:
     prometheus.io/scrape: 'true'
-    meta.helm.sh/release-name: personal-server-monitoring
-    meta.helm.sh/release-namespace: monitoring
 spec:
   type: ClusterIP
   ports:
@@ -57,17 +49,13 @@ metadata:
   name: personal-server-monitoring-prometheus-node-exporter
   namespace: monitoring
   labels:
-    helm.sh/chart: prometheus-node-exporter-4.56.1
-    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/managed-by: personal-server
     app.kubernetes.io/component: metrics
     app.kubernetes.io/part-of: prometheus-node-exporter
     app.kubernetes.io/name: prometheus-node-exporter
     app.kubernetes.io/instance: personal-server-monitoring
-    app.kubernetes.io/version: 1.12.1
+    app.kubernetes.io/version: master
     release: personal-server-monitoring
-  annotations:
-    meta.helm.sh/release-name: personal-server-monitoring
-    meta.helm.sh/release-namespace: monitoring
 spec:
   selector:
     matchLabels:
@@ -83,13 +71,12 @@ spec:
       annotations:
         cluster-autoscaler.kubernetes.io/safe-to-evict: 'true'
       labels:
-        helm.sh/chart: prometheus-node-exporter-4.56.1
-        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/managed-by: personal-server
         app.kubernetes.io/component: metrics
         app.kubernetes.io/part-of: prometheus-node-exporter
         app.kubernetes.io/name: prometheus-node-exporter
         app.kubernetes.io/instance: personal-server-monitoring
-        app.kubernetes.io/version: 1.12.1
+        app.kubernetes.io/version: master
         release: personal-server-monitoring
         jobLabel: node-exporter
     spec:
@@ -105,8 +92,8 @@ spec:
         image: quay.io/prometheus/node-exporter:master-distroless@sha256:2aeca551ca3cb8c90f11fee9bcdf9859725c48f272d478aa79b9bbc48eda13ed
         imagePullPolicy: IfNotPresent
         args:
-        - --path.procfs=/host/proc
-        - --path.sysfs=/host/sys
+        - --path.procfs=/proc
+        - --path.sysfs=/sys
         - --web.listen-address=[$(HOST_IP)]:9100
         - --collector.disable-defaults
         - --collector.cpu
@@ -154,13 +141,6 @@ spec:
           requests:
             cpu: 25m
             memory: 32Mi
-        volumeMounts:
-        - name: proc
-          mountPath: /host/proc
-          readOnly: true
-        - name: sys
-          mountPath: /host/sys
-          readOnly: true
       hostNetwork: false
       hostPID: false
       hostIPC: false
@@ -182,13 +162,6 @@ spec:
       tolerations:
       - effect: NoSchedule
         operator: Exists
-      volumes:
-      - name: proc
-        hostPath:
-          path: /proc
-      - name: sys
-        hostPath:
-          path: /sys
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -196,17 +169,13 @@ metadata:
   name: personal-server-monitoring-prometheus-node-exporter
   namespace: monitoring
   labels:
-    helm.sh/chart: prometheus-node-exporter-4.56.1
-    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/managed-by: personal-server
     app.kubernetes.io/component: metrics
     app.kubernetes.io/part-of: prometheus-node-exporter
     app.kubernetes.io/name: prometheus-node-exporter
     app.kubernetes.io/instance: personal-server-monitoring
-    app.kubernetes.io/version: 1.12.1
+    app.kubernetes.io/version: master
     release: personal-server-monitoring
-  annotations:
-    meta.helm.sh/release-name: personal-server-monitoring
-    meta.helm.sh/release-namespace: monitoring
 spec:
   jobLabel: jobLabel
   selector:
