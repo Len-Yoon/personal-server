@@ -249,6 +249,9 @@ class MonitoringValuesContractTests(unittest.TestCase):
             "limits": {"cpu": "100m", "memory": "64Mi"},
         })
 
+    def test_exporter_does_not_join_host_ipc_namespace(self):
+        self.assertIs(load_values()["prometheus-node-exporter"]["hostIPC"], False)
+
     def test_values_disable_only_unavailable_k3s_control_plane_alerts(self):
         values = load_values()
         disabled = values["defaultRules"]["disabled"]

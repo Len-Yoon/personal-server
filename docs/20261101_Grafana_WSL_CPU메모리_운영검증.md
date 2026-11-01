@@ -11,7 +11,7 @@
 
 ## 핵심 요약
 
-공유 host root 마운트를 제거하고 CPU·meminfo collector만 활성화함. hostNetwork·hostPID를 사용하지 않고 `/proc`·`/sys`만 읽기 전용으로 제공함. 현재는 구현·오프라인 검증 단계이며 실제 WSL 시험·운영 적용 결과는 아래 절과 해당 PR에 확정 기록함.
+공유 host root 마운트를 제거하고 CPU·meminfo collector만 활성화함. hostNetwork·hostPID·hostIPC를 사용하지 않고 `/proc`·`/sys`만 읽기 전용으로 제공함. 현재는 구현·오프라인 검증 단계이며 실제 WSL 시험·운영 적용 결과는 아래 절과 해당 PR에 확정 기록함.
 
 ## 상세 내용
 
@@ -33,7 +33,7 @@
 3. 운영 Pod와 동일한 이미지·args·보안·RO 마운트를 사용하는 소유 임시 Pod/SA로 실제 WSL 수집을 시험함. 원본 `/proc`의 CPU·메모리와 대조한 뒤 임시 자원의 UID 소멸을 확인함.
 4. 성공한 후보만 SA → Service → DaemonSet → ServiceMonitor 순서로 신규 생성함. 기존 자원의 동명 덮어쓰기를 거부하며 UID·spec fingerprint를 기록함.
 5. scrape UP·CPU/meminfo 성공·기존 CPU/메모리 recording·실제 Grafana 패널을 확인함. rate 워밍업은 제한된 시간 안에서 기다림.
-6. 실패 시 이번에 생성한 정확한 UID의 ServiceMonitor → DaemonSet/소유 Pod → Service → SA만 UID/RV 조건으로 삭제함. 일반 종료 유예를 사용하고 실제 소멸과 기존 서비스 상태를 확인함.
+6. 실패 시 이번에 생성한 정확한 UID의 ServiceMonitor → DaemonSet/소유 Pod → Service → SA만 UID/RV 조건으로 삭제함. 일반 종료 유예를 사용하고 실제 소멸과 기존 서비스 상태를 확인함. 삭제 응답이 유실돼도 동일 UID의 삭제 진행 상태를 먼저 조회하며 무조건 재삭제하지 않음.
 7. Portal/Book 외부 health는 전후 각각 10초 이상 간격 3회 확인함. 수집기는 외부 endpoint를 만들지 않으므로 내부 metrics와 Grafana에서 별도 확인함.
 
 현재 제한 적용은 Helm release revision·manifest를 변경하지 않음. 생성 자원에는 기존 release의 정확한 소유 메타데이터를 유지하고 Git values와 렌더 결과를 대조함. 현재 Helm rollback/uninstall이 이 추가 자원을 정리한다고 가정하지 않으며, 이번 원복은 위 UID 조건부 절차를 사용함. 향후 전체 Helm upgrade는 별도 작업임.

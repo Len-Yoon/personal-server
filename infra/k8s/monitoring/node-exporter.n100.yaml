@@ -1,6 +1,7 @@
 # Generated from kube-prometheus-stack 88.6.1 (prometheus-node-exporter 4.56.1)
 # using values.n100.yaml; only the four node-exporter resources are included.
 # Helm ownership permits a later upgrade with the same values to adopt these resources.
+# The current Helm revision does not include this surgical addition; rollback uses exact resource UIDs.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

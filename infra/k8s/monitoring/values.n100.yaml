@@ -10,6 +10,7 @@ prometheus-node-exporter:
     enabled: false
   hostNetwork: false
   hostPID: false
+  hostIPC: false
   extraArgs:
     - --collector.disable-defaults
     - --collector.cpu
