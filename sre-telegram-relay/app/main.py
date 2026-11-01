@@ -1840,16 +1840,28 @@ def _format_quarterly_audit_message(report: dict[str, str]) -> str:
     action = "조치: 실패 항목이 있으면 운영 문서에 따라 확인 필요" if report["status"] == "failed" else "조치: 추가 조치 없음"
     slo_lines = []
     if "slo_evidence" in report:
-        slo_result = {"passed": "통과", "failed": "실패", "unobservable": "관측 불가"}[report["slo_evidence"]]
         reason = report.get("slo_evidence_reason", "none")
         if reason != "none":
             reason_text = {"not_collected": "집계 미실행", "read_failed": "증적 읽기 실패", "invalid_records": "증적 형식 검증 실패"}[reason]
-            slo_lines = [f"SLO 증적: {slo_result}", f"수집·정상·관측 불가 일수: 확인 불가 ({reason_text})"]
+            slo_lines = [f"SLO 평가: 판단 보류 ({reason_text})", "일일 기록·전체 상태 조건 충족·데이터 미관측 일수: 확인 불가"]
         else:
+            if report["slo_evidence"] == "unobservable":
+                pending_reasons = []
+                if report.get("slo_criteria") == "mixed":
+                    pending_reasons.append("동일 기준 30일 미충족")
+                if int(report["slo_days_recorded"]) < 30:
+                    pending_reasons.append("일일 기록 30일 미충족")
+                if int(report["slo_days_unobservable"]) > 0:
+                    pending_reasons.append("데이터 미관측 포함")
+                if not pending_reasons:
+                    pending_reasons.append("평가 기간 검증 미충족")
+                slo_result = f"판단 보류 ({', '.join(pending_reasons)})"
+            else:
+                slo_result = {"passed": "통과", "failed": "기준 미충족"}[report["slo_evidence"]]
             slo_lines = [
-                f"SLO 증적: {slo_result}",
-                f"수집 {report['slo_days_recorded']}/30일, 정상 {report['slo_days_ok']}일, "
-                f"관측 불가 {report['slo_days_unobservable']}일",
+                f"SLO 평가: {slo_result}",
+                f"일일 기록 {report['slo_days_recorded']}/30일, 전체 상태 조건 충족 {report['slo_days_ok']}일, "
+                f"데이터 미관측 {report['slo_days_unobservable']}일",
             ]
         if report.get("slo_criteria") in {"legacy_900", "freshness_1800", "mixed"}:
             criteria_label = {"legacy_900": "신선도 15분", "freshness_1800": "신선도 30분", "mixed": "신선도 15분·30분 혼합, 동일 기준 30일 아님"}[report["slo_criteria"]]
@@ -1859,10 +1871,10 @@ def _format_quarterly_audit_message(report: dict[str, str]) -> str:
             "현재 상태 점검과 별도입니다.",
         ])
         if report["status"] == "passed" and report["slo_evidence"] != "passed":
-            action = "조치: SLO 증적의 관측 불가·기준 미충족 원인 확인 필요"
+            action = "조치: SLO 기준 미충족 원인 확인 필요" if report["slo_evidence"] == "failed" else "조치: SLO 판단 보류 사유 확인 필요"
     return "\n".join(
         [
-            f"[분기 SRE 점검 {result}]",
+            f"[월간 SRE 점검 {result}]",
             f"상태 점검: {health}",
             f"백업 검증 상태: {backup}",
             f"격리 Pod 복구 훈련: {recovery}",
