@@ -197,7 +197,7 @@ Portal은 공유 세션·파일 쓰기 조정·온라인 snapshot을 검증한 �
 
 ### 모니터링 화면
 
-아래는 단일 N100에 맞는 `Kubernetes / Compute Resources / Cluster` 대시보드입니다. 자원 요청·제한과 네임스페이스별 CPU Quota 표는 정상 표시됩니다. CPU·메모리 사용률 두 패널은 WSL2에서 node-exporter를 비활성화하여 `No data`입니다. 기존 Multi-Cluster 화면은 현재 없는 `cluster` 라벨로 표를 합쳐 비어 보였으므로 단일 Cluster 화면으로 정정했습니다. 컨테이너 사용량과 호스트 전체 사용률은 구분하며, 촬영 시점의 수치를 지속 가용성 증거로 확대하지 않습니다.
+아래는 단일 N100에 맞는 `Kubernetes / Compute Resources / Cluster` 대시보드입니다. 2026-11-01 CPU·meminfo만 수집하는 최소 node-exporter를 실제 WSL에서 검증한 뒤 운영 적용해 CPU·메모리 사용률의 `No data`를 해소했습니다. 사용률은 Windows 물리 호스트가 아닌 WSL2 Linux 노드 기준이며, 자원 요청·제한과 네임스페이스별 CPU Quota 표도 정상 표시됩니다. [WSL 원본 대조·운영 검증 결과](docs/20261101_Grafana_WSL_CPU메모리_운영검증.md)에 고정 개발 이미지·보안 경계·실제 적용 근거를 구분했습니다. 촬영 시점의 수치를 지속 가용성 증거로 확대하지 않습니다.
 
 ![Grafana K3s 모니터링 화면](docs/images/grafana-k3s-overview.png)
 
