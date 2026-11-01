@@ -1,7 +1,8 @@
 alertmanager:
   enabled: false
 
-# WSL2 does not provide the shared host-root mount required by node-exporter.
+# Keep the full Helm exporter disabled on WSL2. CPU/memory-only collection is
+# independently managed by node-exporter.n100.yaml without any host mounts.
 nodeExporter:
   enabled: false
 
