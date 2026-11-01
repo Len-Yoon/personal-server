@@ -1,0 +1,219 @@
+# Generated from kube-prometheus-stack 88.6.1 (prometheus-node-exporter 4.56.1)
+# using values.n100.yaml; only the four node-exporter resources are included.
+# Helm ownership permits a later upgrade with the same values to adopt these resources.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: personal-server-monitoring-prometheus-node-exporter
+  namespace: monitoring
+  labels:
+    helm.sh/chart: prometheus-node-exporter-4.56.1
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: metrics
+    app.kubernetes.io/part-of: prometheus-node-exporter
+    app.kubernetes.io/name: prometheus-node-exporter
+    app.kubernetes.io/instance: personal-server-monitoring
+    app.kubernetes.io/version: 1.12.1
+    release: personal-server-monitoring
+  annotations:
+    meta.helm.sh/release-name: personal-server-monitoring
+    meta.helm.sh/release-namespace: monitoring
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: personal-server-monitoring-prometheus-node-exporter
+  namespace: monitoring
+  labels:
+    helm.sh/chart: prometheus-node-exporter-4.56.1
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: metrics
+    app.kubernetes.io/part-of: prometheus-node-exporter
+    app.kubernetes.io/name: prometheus-node-exporter
+    app.kubernetes.io/instance: personal-server-monitoring
+    app.kubernetes.io/version: 1.12.1
+    release: personal-server-monitoring
+    jobLabel: node-exporter
+  annotations:
+    prometheus.io/scrape: 'true'
+    meta.helm.sh/release-name: personal-server-monitoring
+    meta.helm.sh/release-namespace: monitoring
+spec:
+  type: ClusterIP
+  ports:
+  - port: 9100
+    targetPort: 9100
+    protocol: TCP
+    name: http-metrics
+  selector:
+    app.kubernetes.io/name: prometheus-node-exporter
+    app.kubernetes.io/instance: personal-server-monitoring
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: personal-server-monitoring-prometheus-node-exporter
+  namespace: monitoring
+  labels:
+    helm.sh/chart: prometheus-node-exporter-4.56.1
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: metrics
+    app.kubernetes.io/part-of: prometheus-node-exporter
+    app.kubernetes.io/name: prometheus-node-exporter
+    app.kubernetes.io/instance: personal-server-monitoring
+    app.kubernetes.io/version: 1.12.1
+    release: personal-server-monitoring
+  annotations:
+    meta.helm.sh/release-name: personal-server-monitoring
+    meta.helm.sh/release-namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-node-exporter
+      app.kubernetes.io/instance: personal-server-monitoring
+  revisionHistoryLimit: 10
+  updateStrategy:
+    rollingUpdate:
+      maxUnavailable: 1
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: 'true'
+      labels:
+        helm.sh/chart: prometheus-node-exporter-4.56.1
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/component: metrics
+        app.kubernetes.io/part-of: prometheus-node-exporter
+        app.kubernetes.io/name: prometheus-node-exporter
+        app.kubernetes.io/instance: personal-server-monitoring
+        app.kubernetes.io/version: 1.12.1
+        release: personal-server-monitoring
+        jobLabel: node-exporter
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 65534
+        runAsGroup: 65534
+        runAsNonRoot: true
+        runAsUser: 65534
+      serviceAccountName: personal-server-monitoring-prometheus-node-exporter
+      containers:
+      - name: node-exporter
+        image: quay.io/prometheus/node-exporter:master-distroless@sha256:2aeca551ca3cb8c90f11fee9bcdf9859725c48f272d478aa79b9bbc48eda13ed
+        imagePullPolicy: IfNotPresent
+        args:
+        - --path.procfs=/host/proc
+        - --path.sysfs=/host/sys
+        - --web.listen-address=[$(HOST_IP)]:9100
+        - --collector.disable-defaults
+        - --collector.cpu
+        - --collector.meminfo
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+        env:
+        - name: HOST_IP
+          value: 0.0.0.0
+        ports:
+        - name: http-metrics
+          containerPort: 9100
+          protocol: TCP
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            httpHeaders: null
+            path: /
+            port: http-metrics
+            scheme: HTTP
+          initialDelaySeconds: 0
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            httpHeaders: null
+            path: /
+            port: http-metrics
+            scheme: HTTP
+          initialDelaySeconds: 0
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 25m
+            memory: 32Mi
+        volumeMounts:
+        - name: proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: sys
+          mountPath: /host/sys
+          readOnly: true
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: eks.amazonaws.com/compute-type
+                operator: NotIn
+                values:
+                - fargate
+              - key: type
+                operator: NotIn
+                values:
+                - virtual-kubelet
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+      volumes:
+      - name: proc
+        hostPath:
+          path: /proc
+      - name: sys
+        hostPath:
+          path: /sys
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: personal-server-monitoring-prometheus-node-exporter
+  namespace: monitoring
+  labels:
+    helm.sh/chart: prometheus-node-exporter-4.56.1
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: metrics
+    app.kubernetes.io/part-of: prometheus-node-exporter
+    app.kubernetes.io/name: prometheus-node-exporter
+    app.kubernetes.io/instance: personal-server-monitoring
+    app.kubernetes.io/version: 1.12.1
+    release: personal-server-monitoring
+  annotations:
+    meta.helm.sh/release-name: personal-server-monitoring
+    meta.helm.sh/release-namespace: monitoring
+spec:
+  jobLabel: jobLabel
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-node-exporter
+      app.kubernetes.io/instance: personal-server-monitoring
+  attachMetadata:
+    node: false
+  endpoints:
+  - port: http-metrics
+    scheme: http
