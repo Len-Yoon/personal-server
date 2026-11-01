@@ -624,7 +624,7 @@ class RelayServiceTest(unittest.TestCase):
                     "backup_check": "passed",
                     "recovery_lab": "passed",
                 },
-                "[분기 SRE 점검 완료]",
+                "[월간 SRE 점검 완료]",
             ),
             (
                 {
@@ -635,7 +635,7 @@ class RelayServiceTest(unittest.TestCase):
                     "backup_check": "failed",
                     "recovery_lab": "passed",
                 },
-                "[분기 SRE 점검 실패]",
+                "[월간 SRE 점검 실패]",
             ),
         )
         for audit_data, heading in reports:
@@ -665,6 +665,7 @@ class RelayServiceTest(unittest.TestCase):
                 self.assertEqual(len(telegram.sent_messages), 1)
                 message = telegram.sent_messages[0][1]
                 self.assertIn(heading, message)
+                self.assertNotIn("[분기 SRE 점검", message)
                 self.assertIn("상태 점검: 통과", message)
                 self.assertIn("백업 검증 상태: " + ("실패" if audit_data["backup_check"] == "failed" else "통과"), message)
                 self.assertIn("격리 Pod 복구 훈련: 통과", message)
@@ -674,12 +675,14 @@ class RelayServiceTest(unittest.TestCase):
     def test_quarterly_audit_accepts_complete_slo_summary_and_preserves_delivery_deduplication(self):
         for result, recorded, ok, unknown, label in (
             ("passed", "30", "30", "0", "통과"),
-            ("failed", "30", "29", "0", "실패"),
-            ("unobservable", "30", "29", "1", "관측 불가"),
+            ("failed", "30", "29", "0", "기준 미충족"),
+            ("unobservable", "30", "29", "1", "판단 보류 (데이터 미관측 포함)"),
             # Stale, gapped, or future dates invalidate coverage despite all records being healthy.
-            ("unobservable", "30", "30", "0", "관측 불가"),
-            ("unobservable", "3", "3", "0", "관측 불가"),
-            ("unobservable", "0", "0", "0", "관측 불가"),
+            ("unobservable", "30", "30", "0", "판단 보류 (평가 기간 검증 미충족)"),
+            ("unobservable", "30", "2", "0", "판단 보류 (평가 기간 검증 미충족)"),
+            ("unobservable", "3", "3", "0", "판단 보류 (일일 기록 30일 미충족)"),
+            ("unobservable", "3", "2", "1", "판단 보류 (일일 기록 30일 미충족, 데이터 미관측 포함)"),
+            ("unobservable", "0", "0", "0", "판단 보류 (일일 기록 30일 미충족)"),
         ):
             with self.subTest(result=result, recorded=recorded, unknown=unknown):
                 audit_data = {
@@ -702,9 +705,10 @@ class RelayServiceTest(unittest.TestCase):
                 relay.deliver_quarterly_audit_report(telegram.send_message)
                 self.assertEqual(len(telegram.sent_messages), 1)
                 message = telegram.sent_messages[0][1]
-                self.assertIn("[분기 SRE 점검 완료]", message)
-                self.assertIn(f"SLO 증적: {label}", message)
-                self.assertIn(f"수집 {recorded}/30일, 정상 {ok}일, 관측 불가 {unknown}일", message)
+                self.assertIn("[월간 SRE 점검 완료]", message)
+                self.assertIn(f"SLO 평가: {label}", message)
+                self.assertIn(f"일일 기록 {recorded}/30일, 전체 상태 조건 충족 {ok}일, 데이터 미관측 {unknown}일", message)
+                self.assertNotIn("관측 불가", message)
                 self.assertIn("SLO는 과거 관측이며 계획된 백업 정지가 포함될 수 있습니다.", message)
                 self.assertIn("현재 상태 점검과 별도입니다.", message)
                 self.assertNotIn("계획 정지 후 가용 상태 복귀 확인", message)
@@ -714,19 +718,23 @@ class RelayServiceTest(unittest.TestCase):
                     self.assertNotIn("추가 조치 없음", message)
 
     def test_quarterly_current_health_failure_is_not_explained_away_by_historical_slo(self):
-        for slo_result, ok in (("passed", "30"), ("failed", "29")):
-            with self.subTest(slo_result=slo_result):
+        for slo_result, ok, criteria in (("passed", "30", "freshness_1800"),
+                                         ("failed", "29", "freshness_1800"),
+                                         ("unobservable", "2", "mixed"),
+                                         ("unobservable", "30", "freshness_1800")):
+            with self.subTest(slo_result=slo_result, criteria=criteria):
                 data = {"run_id": "20261021T010203Z-health-failed", "status": "failed",
                         "completed_at": "2026-10-21T01:02:03Z", "health_audit": "failed",
                         "backup_check": "passed", "recovery_lab": "passed", "slo_evidence": slo_result,
-                        "slo_days_recorded": "30", "slo_days_ok": ok, "slo_days_unobservable": "0"}
+                        "slo_days_recorded": "30", "slo_days_ok": ok, "slo_days_unobservable": "0",
+                        "slo_criteria": criteria, "slo_evidence_reason": "none"}
                 report = relay_main._read_quarterly_audit_report(FakeQuarterlyAuditStatusK8s(data))
                 self.assertIsNotNone(report)
                 message = relay_main._format_quarterly_audit_message(report)
-                self.assertIn("[분기 SRE 점검 실패]", message)
+                self.assertIn("[월간 SRE 점검 실패]", message)
                 self.assertIn("상태 점검: 실패", message)
                 self.assertIn("실패 항목이 있으면 운영 문서에 따라 확인 필요", message)
-                self.assertIn(f"정상 {ok}일", message)
+                self.assertIn(f"전체 상태 조건 충족 {ok}일", message)
                 self.assertIn("계획된 백업 정지가 포함될 수 있습니다.", message)
                 self.assertNotIn("추가 조치 없음", message)
                 self.assertNotIn("계획 정지 후 가용 상태 복귀 확인", message)
@@ -750,8 +758,10 @@ class RelayServiceTest(unittest.TestCase):
                 self.assertEqual(len(telegram.sent_messages), 1)
                 message = telegram.sent_messages[0][1]
                 self.assertIn(explanation, message)
+                self.assertIn(f"SLO 평가: 판단 보류 ({explanation})", message)
                 self.assertIn("일수: 확인 불가", message)
-                self.assertNotIn("수집 0/30", message)
+                self.assertNotIn("일일 기록 0/30", message)
+                self.assertNotIn("데이터 미관측 0일", message)
                 self.assertNotIn("추가 조치 없음", message)
 
     def test_quarterly_audit_mixed_criteria_are_visible_and_not_full_period_pass(self):
@@ -763,7 +773,26 @@ class RelayServiceTest(unittest.TestCase):
         client = FakeQuarterlyAuditStatusK8s(report)
         checked = relay_main._read_quarterly_audit_report(client)
         self.assertIsNotNone(checked)
-        self.assertIn("15분·30분 혼합", relay_main._format_quarterly_audit_message(checked))
+        message = relay_main._format_quarterly_audit_message(checked)
+        self.assertIn("15분·30분 혼합", message)
+        self.assertIn("SLO 평가: 판단 보류 (동일 기준 30일 미충족)", message)
+        self.assertIn("일일 기록 30/30일, 전체 상태 조건 충족 30일, 데이터 미관측 0일", message)
+        self.assertNotIn("관측 불가", message)
+        self.assertNotIn("추가 조치 없음", message)
+        for recorded, ok, unknown, pending in (
+            ("30", "2", "0", "동일 기준 30일 미충족"),
+            ("30", "28", "1", "동일 기준 30일 미충족, 데이터 미관측 포함"),
+            ("3", "2", "1", "동일 기준 30일 미충족, 일일 기록 30일 미충족, 데이터 미관측 포함"),
+        ):
+            with self.subTest(recorded=recorded, ok=ok, unknown=unknown):
+                combined_report = dict(report, slo_days_recorded=recorded, slo_days_ok=ok,
+                                       slo_days_unobservable=unknown)
+                checked = relay_main._read_quarterly_audit_report(FakeQuarterlyAuditStatusK8s(combined_report))
+                self.assertIsNotNone(checked)
+                message = relay_main._format_quarterly_audit_message(checked)
+                self.assertIn(f"SLO 평가: 판단 보류 ({pending})", message)
+                self.assertIn(f"일일 기록 {recorded}/30일, 전체 상태 조건 충족 {ok}일, 데이터 미관측 {unknown}일", message)
+                self.assertNotIn("관측 불가", message)
         client.audit_data["slo_evidence"] = "passed"
         self.assertIsNone(relay_main._read_quarterly_audit_report(client))
 
