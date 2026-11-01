@@ -34,7 +34,7 @@
 
 ## 주요 화면
 
-서비스 이름 옆 화살표를 누르면 설명과 이미지가 펼쳐집니다. 이미지는 **1440 × 1000** 크기이며 조회 시점의 상태입니다. 서비스 화면은 2026-10-29, Grafana는 2026-10-30에 다시 촬영했으며, 과거 Telegram 예시는 별도로 표시했습니다. [촬영 범위·기존 예시 안내](docs/images/README.md)
+서비스 이름 옆 화살표를 누르면 설명과 이미지가 펼쳐집니다. 이미지는 **1440 × 1000** 크기이며 조회 시점의 상태입니다. 서비스 화면은 2026-10-29, Grafana는 2026-11-01에 다시 촬영했으며, 과거 Telegram 예시는 별도로 표시했습니다. [촬영 범위·기존 예시 안내](docs/images/README.md)
 
 <details>
 <summary>Portal · 서비스 허브와 전체 검색</summary>
@@ -197,7 +197,7 @@ Portal은 공유 세션·파일 쓰기 조정·온라인 snapshot을 검증한 �
 
 ### 모니터링 화면
 
-아래는 실제 N100 Grafana 대시보드를 다시 조회한 화면입니다. 자원 요청·제한과 CPU 추이를 확인했으며, 일부 사용률·CPU Quota 패널의 `No data`도 원본대로 남겼습니다. WSL2의 node-exporter 비활성화와 패널별 수집 한계를 구분하며, 촬영 시점의 수치를 지속 가용성 증거로 확대하지 않습니다.
+아래는 단일 N100에 맞는 `Kubernetes / Compute Resources / Cluster` 대시보드입니다. 자원 요청·제한과 네임스페이스별 CPU Quota 표는 정상 표시됩니다. CPU·메모리 사용률 두 패널은 WSL2에서 node-exporter를 비활성화하여 `No data`입니다. 기존 Multi-Cluster 화면은 현재 없는 `cluster` 라벨로 표를 합쳐 비어 보였으므로 단일 Cluster 화면으로 정정했습니다. 컨테이너 사용량과 호스트 전체 사용률은 구분하며, 촬영 시점의 수치를 지속 가용성 증거로 확대하지 않습니다.
 
 ![Grafana K3s 모니터링 화면](docs/images/grafana-k3s-overview.png)
 
