@@ -1,3 +1,4 @@
+# Keep this Git source aligned with the reviewed dashboard data-state policy.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,64 +9,222 @@ metadata:
 data:
   portal-http-observability.json: |
     {
-      "annotations": {"list": []},
+      "annotations": {
+        "list": []
+      },
       "editable": false,
       "panels": [
         {
+          "id": 9000,
+          "type": "text",
+          "title": "데이터가 비어 있을 때",
+          "description": "검색 비율·지연은 해당 조회 기간에 **실제 검색 표본**이 있어야 계산됩니다. 무트래픽과 수집·계측 누락을 구분하려면 검색 요청 수, 계측 누락 Ready Pod 및 수집 상태를 함께 확인하세요. 빈 값을 성공률 100%나 지연 0으로 표시하지 않습니다.",
+          "gridPos": {
+            "h": 4,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          },
+          "options": {
+            "mode": "markdown",
+            "content": "검색 비율·지연은 해당 조회 기간에 **실제 검색 표본**이 있어야 계산됩니다. 무트래픽과 수집·계측 누락을 구분하려면 검색 요청 수, 계측 누락 Ready Pod 및 수집 상태를 함께 확인하세요. 빈 값을 성공률 100%나 지연 0으로 표시하지 않습니다."
+          }
+        },
+        {
           "datasource": "Prometheus",
-          "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
-          "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0},
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 6,
+            "x": 0,
+            "y": 4
+          },
           "id": 1,
-          "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
-          "targets": [{"datasource": "Prometheus", "expr": "sum(increase(portal_http_requests_total[5m]))", "refId": "A"}],
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            }
+          },
+          "targets": [
+            {
+              "datasource": "Prometheus",
+              "expr": "sum(increase(portal_http_requests_total[5m]))",
+              "refId": "A"
+            }
+          ],
           "title": "최근 5분 요청 수",
           "type": "stat"
         },
         {
           "datasource": "Prometheus",
-          "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
-          "gridPos": {"h": 8, "w": 6, "x": 6, "y": 0},
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 6,
+            "x": 6,
+            "y": 4
+          },
           "id": 2,
-          "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true},
-          "targets": [{"datasource": "Prometheus", "expr": "sum by (status_code) (increase(portal_http_requests_total[5m]))", "legendFormat": "{{status_code}}", "refId": "A"}],
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "targets": [
+            {
+              "datasource": "Prometheus",
+              "expr": "sum by (status_code) (increase(portal_http_requests_total[5m]))",
+              "legendFormat": "{{status_code}}",
+              "refId": "A"
+            }
+          ],
           "title": "상태 코드별 요청 수",
           "type": "timeseries"
         },
         {
           "datasource": "Prometheus",
-          "fieldConfig": {"defaults": {"decimals": 2, "unit": "percentunit"}, "overrides": []},
-          "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0},
+          "fieldConfig": {
+            "defaults": {
+              "decimals": 2,
+              "unit": "percentunit"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 6,
+            "x": 12,
+            "y": 4
+          },
           "id": 3,
-          "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
-          "targets": [{"datasource": "Prometheus", "expr": "(sum(rate(portal_http_requests_total{status_code=~\"5..\"}[5m])) / clamp_min(sum(rate(portal_http_requests_total[5m])), 1)) or vector(0)", "refId": "A"}],
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            }
+          },
+          "targets": [
+            {
+              "datasource": "Prometheus",
+              "expr": "(sum(rate(portal_http_requests_total{status_code=~\"5..\"}[5m])) / clamp_min(sum(rate(portal_http_requests_total[5m])), 1)) or vector(0)",
+              "refId": "A"
+            }
+          ],
           "title": "5xx 오류 비율",
           "type": "stat"
         },
         {
           "datasource": "Prometheus",
-          "fieldConfig": {"defaults": {"decimals": 3, "unit": "s"}, "overrides": []},
-          "gridPos": {"h": 8, "w": 6, "x": 18, "y": 0},
+          "fieldConfig": {
+            "defaults": {
+              "decimals": 3,
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 6,
+            "x": 18,
+            "y": 4
+          },
           "id": 4,
-          "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
-          "targets": [{"datasource": "Prometheus", "expr": "histogram_quantile(0.95, sum by (le) (rate(portal_http_request_duration_seconds_bucket[5m])))", "refId": "A"}],
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            }
+          },
+          "targets": [
+            {
+              "datasource": "Prometheus",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(portal_http_request_duration_seconds_bucket[5m])))",
+              "refId": "A"
+            }
+          ],
           "title": "p95 응답 시간",
           "type": "stat"
         },
         {
           "datasource": "Prometheus",
-          "fieldConfig": {"defaults": {"decimals": 3, "unit": "s"}, "overrides": []},
-          "gridPos": {"h": 8, "w": 6, "x": 0, "y": 8},
+          "fieldConfig": {
+            "defaults": {
+              "decimals": 3,
+              "unit": "s",
+              "noValue": "검색 표본 없음 · 계측 상태 확인"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 6,
+            "x": 0,
+            "y": 12
+          },
           "id": 5,
-          "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
-          "targets": [{"datasource": "Prometheus", "expr": "histogram_quantile(0.95, sum by (le) (rate(portal_http_request_duration_seconds_bucket{method=\"GET\",route=\"/search\"}[5m])))", "refId": "A"}],
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "reduceOptions": {
+              "calcs": [
+                "last"
+              ],
+              "fields": "",
+              "values": false
+            }
+          },
+          "targets": [
+            {
+              "datasource": "Prometheus",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(portal_http_request_duration_seconds_bucket{method=\"GET\",route=\"/search\"}[5m])))",
+              "refId": "A",
+              "instant": true,
+              "range": false
+            }
+          ],
           "title": "검색 p95 응답 시간",
           "type": "stat"
         }
       ],
       "schemaVersion": 39,
-      "tags": ["portal", "http", "observability"],
-      "templating": {"list": []},
-      "time": {"from": "now-6h", "to": "now"},
+      "tags": [
+        "portal",
+        "http",
+        "observability"
+      ],
+      "templating": {
+        "list": []
+      },
+      "time": {
+        "from": "now-6h",
+        "to": "now"
+      },
       "timezone": "browser",
       "title": "Portal HTTP 관측성",
       "uid": "portal-http-observability",

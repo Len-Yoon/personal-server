@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "namespace": "monitoring",
+  "targets": {
+    "personal-server-monitoring-apiserver": {
+      "key": "apiserver.json",
+      "dashboard_uid": "09ec8aa1e996d6ffcd6817bbaff4db1b",
+      "helm_owned": true,
+      "source_sha256": "1891073d64317b3dc75250a7abf8785c3d77881197103cc50f27701e8b29a0d1",
+      "after_sha256": "e8e0f609868307919f32b631d8419e79b0745904a405172bb5eecbe8ebcfe4c1"
+    },
+    "personal-server-monitoring-cluster-total": {
+      "key": "cluster-total.json",
+      "dashboard_uid": "ff635a025bcfea7bc3dd4f508990a3e9",
+      "helm_owned": true,
+      "source_sha256": "16050eab6715edc0a997b494211a6da86ce5bc68bfecc844e8db6da19457614e",
+      "after_sha256": "cf392ea65b5f725758eeffcb822601f1d35a83f1ed9548961b0cba31feff4cb8"
+    },
+    "personal-server-monitoring-controller-manager": {
+      "key": "controller-manager.json",
+      "dashboard_uid": "72e0e05bef5099e5f049b05fdc429ed4",
+      "helm_owned": true,
+      "source_sha256": "cba00d9e8e8850e14d4a140791ec86fe9064ff31b4ba1fe6df87cb7c9f84df77",
+      "after_sha256": "baa3a3472cc1ea584b8cf39259ec095f8a2026de5905aabed628ccc9136e15e7"
+    },
+    "personal-server-monitoring-etcd": {
+      "key": "etcd.json",
+      "dashboard_uid": "c2f4e12cdf69feb95caa41a5a1b423d9",
+      "helm_owned": true,
+      "source_sha256": "15cc56262f74763fd3827ca3526488b9e09e395ecb4801eabceec32d983427a6",
+      "after_sha256": "0f1e7a5b46b086f7676e638d40e529621a6fa93cd1103ab5bef0aebaa96552fc"
+    },
+    "personal-server-monitoring-k8s-coredns": {
+      "key": "k8s-coredns.json",
+      "dashboard_uid": "vkQ0UHxik",
+      "helm_owned": true,
+      "source_sha256": "2dc9c79886558aca00b7e1485117916ce29ade018fcc84efb8ee6b55552dbd43",
+      "after_sha256": "ce2f21b7aeb5879b0fedea1f9266947f7823f6b85f295f1a49869469b7acb987"
+    },
+    "personal-server-monitoring-k8s-resources-multicluster": {
+      "key": "k8s-resources-multicluster.json",
+      "dashboard_uid": "b59e6c9f2fcbe2e16d77fc492374cc4f",
+      "helm_owned": true,
+      "source_sha256": "18d51c9dd34679353afc2820c202b06e6389b2386c2894e33e44b8a66a7edc49",
+      "after_sha256": "a7c1f0dfab4400f7c6e33eefc1914886b94c4f3d5ff3d304d888b2d7319eca43"
+    },
+    "personal-server-monitoring-k8s-resources-namespace": {
+      "key": "k8s-resources-namespace.json",
+      "dashboard_uid": "85a562078cdf77779eaa1add43ccec1e",
+      "helm_owned": true,
+      "source_sha256": "91cf8f61062f1afc849ac5c4ce9585adf00b1d57bb5ad4bcff12f4d9153dff08",
+      "after_sha256": "da5a4e2c25151edb00a9f900273579efdff76bea28666a162f6e594c0f61dfa8"
+    },
+    "personal-server-monitoring-k8s-resources-pod": {
+      "key": "k8s-resources-pod.json",
+      "dashboard_uid": "6581e46e4e5c7ba40a07646395ef7b23",
+      "helm_owned": true,
+      "source_sha256": "ba01d92c28dc135dcece868a0807d8e2413e398d1621ab3bf544673a4d8698b4",
+      "after_sha256": "82a3a8e863f03688dfd6eda6187c51dfa2ce00d6ceee424edbcad7a5185b9a73"
+    },
+    "personal-server-monitoring-k8s-resources-workload": {
+      "key": "k8s-resources-workload.json",
+      "dashboard_uid": "a164a7f0339f99e89cea5cb47e9be617",
+      "helm_owned": true,
+      "source_sha256": "872be8c2cd11c1acc4c42a1cfa1380342b81206237d925290dd4380a8a761cb9",
+      "after_sha256": "1d2e0465ecd26a515b20d50ff2e42456278e8781cfe883a3763ad76732efe53a"
+    },
+    "personal-server-monitoring-k8s-resources-workloads-namespace": {
+      "key": "k8s-resources-workloads-namespace.json",
+      "dashboard_uid": "a87fb0d919ec0ea5f6543124e16c42a5",
+      "helm_owned": true,
+      "source_sha256": "21563f99879905b928afa6856172394ed501512bad705c1a09d7df0502f73255",
+      "after_sha256": "14bb0e8f21b0dbdb75e50458b52dc4fd37df62a3e07528f585a3c200d01fcb9e"
+    },
+    "personal-server-monitoring-kubelet": {
+      "key": "kubelet.json",
+      "dashboard_uid": "3138fa155d5915769fbded898ac09fd9",
+      "helm_owned": true,
+      "source_sha256": "e4f47cbdd862f103730765160a1d1ed6872ebe27a6ee4bb646d63c1229ee2162",
+      "after_sha256": "26b5a780d8adc1ac57679486f7139cafa4e1a566cc25721240b3e0fbadc3322a"
+    },
+    "personal-server-monitoring-namespace-by-pod": {
+      "key": "namespace-by-pod.json",
+      "dashboard_uid": "8b7a8b326d7a6f1f04244066368c67af",
+      "helm_owned": true,
+      "source_sha256": "32b3d0e17642ab8b496cec606e6ad5b438672e81fbf0ecc3259ef63c29f42d21",
+      "after_sha256": "38a0d9e2c183213bee856c1799e41c0e0718b57852457ca17b0ec03f25eb61c2"
+    },
+    "personal-server-monitoring-namespace-by-workload": {
+      "key": "namespace-by-workload.json",
+      "dashboard_uid": "bbb2a765a623ae38130206c7d94a160f",
+      "helm_owned": true,
+      "source_sha256": "2a82c1508bcf389ccf5e2df1f9cfcd51c45628314db27426d5470163b5321efc",
+      "after_sha256": "4cf1a6d245994ec82c62d4b71e3c4d80046e21381148a65b353a115bdcb56dc1"
+    },
+    "personal-server-monitoring-pod-total": {
+      "key": "pod-total.json",
+      "dashboard_uid": "7a18067ce943a40ae25454675c19ff5c",
+      "helm_owned": true,
+      "source_sha256": "483a956a70d33045888fa9b44583cd6f3607976ab012f4043514f88f6d7baa9a",
+      "after_sha256": "3e72e7248bed2a362efd2da1ab4010d06e99399b1e9f3c7415e2beba7fd69418"
+    },
+    "personal-server-monitoring-proxy": {
+      "key": "proxy.json",
+      "dashboard_uid": "632e265de029684c40b21cb76bca4f94",
+      "helm_owned": true,
+      "source_sha256": "34879b303b88bf731c1ed90162e0685f5c06481881da87f1cab5aca136bdfaa5",
+      "after_sha256": "d179101cc916f090c4e2277165dbe1b1009c0c6a8d44ea0ef638d5cd5b3d7991"
+    },
+    "personal-server-monitoring-scheduler": {
+      "key": "scheduler.json",
+      "dashboard_uid": "2e6b6a3b4bddf1427b3a55aa1311c656",
+      "helm_owned": true,
+      "source_sha256": "5786a1f64cb16fcb61922812e629a05230438eb73517163f845f94ff06eedae8",
+      "after_sha256": "f956426dad8921b8d8d9c3e1eab97b604d9b92872cd7c577613f0b2daad7a89e"
+    },
+    "personal-server-monitoring-workload-total": {
+      "key": "workload-total.json",
+      "dashboard_uid": "728bf77cc1166d2f3133bf25846876cc",
+      "helm_owned": true,
+      "source_sha256": "70af278e8f4666f53da379fce662c438cecca1399cd8df699aa30771375124db",
+      "after_sha256": "4fdbac945bdcde4e1bcfed7868234cf3ffd6e728b9137ed7f1dffab0edcfb143"
+    },
+    "portal-http-observability": {
+      "key": "portal-http-observability.json",
+      "dashboard_uid": "portal-http-observability",
+      "helm_owned": false,
+      "source_sha256": "aa17e120202d14d5ecf7dd5643a1b61bbcc3d310d685ba75a1c085f067304694",
+      "after_sha256": "0f28ffe0adb0b5c9855ff39c424fa40a240b234c473a3d2e7ce6b38de013a50a"
+    },
+    "portal-search-observability": {
+      "key": "portal-search-observability.json",
+      "dashboard_uid": "portal-search-observability",
+      "helm_owned": false,
+      "source_sha256": "d05dae2ba7cd9e7e6be52dbbadb5e22f97dbc997be87e7c34c68d958029ba191",
+      "after_sha256": "770580329fdf670834792b02d51c2b44eb7d9af9f42ae0521c4b7935c139383f"
+    }
+  }
+}
