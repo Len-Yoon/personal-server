@@ -4,6 +4,7 @@
 Only allowlisted ConfigMap data scalar spans are replaced. All other input bytes,
 including Secrets, annotations, comments and document separators, are preserved.
 No manifest content or parser exceptions may be printed on failure.
+Git preserves LF here so WSL can execute the shebang after a Windows checkout.
 """
 from __future__ import annotations
 

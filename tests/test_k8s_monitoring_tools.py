@@ -288,6 +288,40 @@ class MonitoringPreflightBehaviorTest(unittest.TestCase):
 class MonitoringToolsTest(unittest.TestCase):
     DASHBOARD_MANIFEST = str(ROOT / "infra/k8s/monitoring/portal-http-dashboard.yaml")
 
+    def test_post_renderer_executes_after_windows_autocrlf_checkout(self):
+        relative = Path("infra/k8s/tools/monitoring-dashboard-post-renderer.py")
+        attributes = relative.with_name(".gitattributes")
+        module = relative.with_name("monitoring-dashboard-data-states.py")
+        policy = Path("infra/k8s/monitoring/dashboard-data-states.json")
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            for path in (attributes, relative, module, policy):
+                target = checkout / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((ROOT / path).read_bytes())
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", "-c", "core.autocrlf=true", *args], cwd=checkout,
+                    capture_output=True, check=True,
+                    env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
+                         "GIT_CONFIG_SYSTEM": os.devnull},
+                )
+
+            git("init", "--quiet")
+            git("add", str(attributes), str(relative), str(module), str(policy))
+            git("-c", "user.name=checkout-test", "-c", "user.email=checkout@example.invalid",
+                "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture")
+            executable = checkout / relative
+            executable.unlink()
+            git("checkout", "HEAD", "--", str(relative))
+            executable.chmod(0o755)
+            self.assertEqual(executable.read_bytes().split(b"\n", 1)[0], b"#!/usr/bin/env python3")
+            result = subprocess.run([str(executable)], input=b"", capture_output=True, check=False)
+            # Missing manifest is rejected by Python, rather than failing to launch its interpreter.
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(b"monitoring_dashboard_post_renderer=FAIL", result.stderr)
+
     def run_tool(self, name, *args, stubs=None, env_overrides=None):
         with tempfile.TemporaryDirectory() as directory:
             directory_path = Path(directory)
