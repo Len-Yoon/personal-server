@@ -578,12 +578,18 @@ class SloObservationArchiveTests(unittest.TestCase):
             class Response(io.BytesIO):
                 pass
             responses.append(Response(json.dumps(payload['queries'][name]).encode()))
-        for _ in range(2):
+        for _ in range(8):
             responses.append(Response(json.dumps({'status': 'success', 'data': {'resultType': 'matrix', 'result': []}}).encode()))
         with patch.object(module, 'urlopen', side_effect=responses) as request:
             actual = module.collect(date(2026, 10, 26))
         self.assertEqual(actual['end'] - actual['start'], 86400 - 15)
-        self.assertEqual(request.call_count, 6)
+        self.assertEqual(request.call_count, 12)
+        from urllib.parse import urlsplit, parse_qs
+        queries = [parse_qs(urlsplit(call.args[0]).query)['query'][0] for call in request.call_args_list]
+        for family in module.NEWS_FAMILIES:
+            selector = 'crawler_news_collection_' + family + '{namespace="personal-server"}'
+            self.assertIn(selector, queries)
+            self.assertIn('timestamp(' + selector + ')', queries)
         for call in request.call_args_list:
             self.assertLessEqual(call.kwargs['timeout'], 10)
         with self.assertRaises(ValueError):
@@ -695,6 +701,148 @@ class SloObservationArchiveTests(unittest.TestCase):
             _, clean, _ = module.checked_payload(payload, date(2026, 10, 28))
             self.assertEqual(clean['search']['values']['data']['result'][0]['metric']['le'], wanted)
 
+    def news(self, payload, *, complete=True):
+        start = payload['start']
+        queries = {}
+        for family in ('initialized', 'last_success_timestamp_seconds', 'consecutive_failures'):
+            queries[family] = {}
+            for kind in ('values', 'timestamps'):
+                name = 'crawler_news_collection_' + family
+                labels = {'namespace': 'personal-server', 'instance': 'private-source'}
+                if kind == 'values':
+                    labels['__name__'] = name
+                values = [[start + i * 60, str(start + i * 60 if kind == 'timestamps' or family == 'last_success_timestamp_seconds'
+                                               else 1 if family == 'initialized' else 0)]
+                          for i in range(1440 if complete else 3)]
+                queries[family][kind] = {'status': 'success', 'data': {'resultType': 'matrix', 'result': [
+                    {'metric': labels, 'values': values}]}}
+        payload['news'] = {'step_seconds': 60, 'queries': queries}
+        return payload
+
+    def test_news_bad_values_preserved_without_policy_judgment_and_legacy_immutable(self):
+        import gzip
+        module = self.module()
+        payload = self.news(self.payload(complete=True))
+        payload['news']['queries']['initialized']['values']['data']['result'][0]['values'][0][1] = '0'
+        payload['news']['queries']['consecutive_failures']['values']['data']['result'][0]['values'][1][1] = '3'
+        # Even a future last-success value is raw evidence; this tool never evaluates news policy.
+        payload['news']['queries']['last_success_timestamp_seconds']['values']['data']['result'][0]['values'][2][1] = str(payload['end'] + 100)
+        before = json.dumps(payload, sort_keys=True)
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / 'archive'; module.initialize(folder)
+            result = module.archive(payload, folder, today=date(2026, 10, 28))
+            self.assertEqual(result['status'], 'complete')
+            self.assertEqual(result['summary']['news_archive']['samples']['observed'], 1440)
+            raw = gzip.decompress((folder / '2026-10-26.json.gz').read_bytes())
+            self.assertNotIn(b'private-source', raw)
+            saved = json.loads(raw)['payload']['news']
+            for family, queries in payload['news']['queries'].items():
+                for kind in ('values', 'timestamps'):
+                    self.assertEqual(saved['queries'][family][kind]['data']['result'][0]['values'],
+                                     queries[kind]['data']['result'][0]['values'])
+            self.assertEqual(module.verify(folder, today=date(2026, 10, 28))['news_unobserved_dates'], [])
+            self.assertTrue(module.archive(payload, folder, today=date(2026, 10, 28))['idempotent'])
+            module.archive(self.payload('2026-10-27'), folder, today=date(2026, 10, 28))
+            legacy = (folder / '2026-10-27.json.gz').read_bytes()
+            self.assertEqual(module.verify(folder, today=date(2026, 10, 28))['news_unobserved_dates'], ['2026-10-27'])
+            with self.assertRaisesRegex(ValueError, 'immutable_day_conflict'):
+                module.archive(self.news(self.payload('2026-10-27')), folder, today=date(2026, 10, 28))
+            self.assertEqual((folder / '2026-10-27.json.gz').read_bytes(), legacy)
+        self.assertEqual(json.dumps(payload, sort_keys=True), before)
+
+    def test_news_missing_stale_nonfinite_future_and_ambiguous_are_unknown(self):
+        import copy
+        module = self.module()
+        for reason in ('missing', 'stale', 'nonfinite', 'future_timestamp', 'ambiguous_sources'):
+            payload = self.news(self.payload(complete=True))
+            row = payload['news']['queries']['initialized']['timestamps']['data']['result'][0]
+            if reason == 'missing':
+                row['values'].pop(0)
+            elif reason == 'stale':
+                row['values'][0][1] = str(payload['start'] - 61)
+            elif reason == 'nonfinite':
+                row['values'][0][1] = 'NaN'
+            elif reason == 'future_timestamp':
+                row['values'][0][1] = str(payload['start'] + 1)
+            else:
+                extra = copy.deepcopy(row); extra['metric']['instance'] = 'another-private-source'
+                extra['values'] = extra['values'][:1]
+                payload['news']['queries']['initialized']['timestamps']['data']['result'].append(extra)
+            _, clean, summary = module.checked_payload(payload, date(2026, 10, 28))
+            news = summary['news_archive']
+            self.assertEqual(news['status'], 'partial', reason)
+            self.assertEqual(news['samples']['observed'], 1439, reason)
+            self.assertEqual(news['samples']['unknown_reasons'][reason], 1, reason)
+            self.assertEqual(news['semantics'], 'raw_metric_source_sample_coverage_not_news_slo')
+            self.assertEqual(clean['news']['queries']['initialized']['timestamps']['data']['result'][0]['values'], row['values'])
+
+    def test_news_source_freshness_boundary_and_nonfinite_strings(self):
+        module = self.module()
+        for age, observed in ((0, 1440), (60, 1440), (61, 1439)):
+            payload = self.news(self.payload())
+            row = payload['news']['queries']['initialized']['timestamps']['data']['result'][0]
+            row['values'][0][1] = str(payload['start'] - age)
+            summary = module.checked_payload(payload, date(2026, 10, 28))[2]['news_archive']
+            self.assertEqual(summary['samples']['observed'], observed)
+        for value in ('NaN', '+Inf', '-Inf'):
+            payload = self.news(self.payload())
+            row = payload['news']['queries']['consecutive_failures']['values']['data']['result'][0]
+            row['values'][0][1] = value
+            _, clean, summary = module.checked_payload(payload, date(2026, 10, 28))
+            self.assertEqual(summary['news_archive']['samples']['unknown_reasons']['nonfinite'], 1)
+            self.assertEqual(clean['news']['queries']['consecutive_failures']['values']['data']['result'][0]['values'][0][1], value)
+
+    def test_news_rotation_and_empty_responses_do_not_invent_samples(self):
+        import copy
+        module = self.module()
+        payload = self.news(self.payload(complete=True))
+        for queries in payload['news']['queries'].values():
+            for response in queries.values():
+                row = response['data']['result'][0]
+                extra = copy.deepcopy(row); extra['metric']['instance'] = 'replacement'
+                extra['values'] = extra['values'][720:]; row['values'] = row['values'][:720]
+                response['data']['result'].append(extra)
+        self.assertEqual(module.checked_payload(payload, date(2026, 10, 28))[2]['news_archive']['status'], 'preserved')
+        for queries in payload['news']['queries'].values():
+            for response in queries.values():
+                response['data']['result'] = []
+        summary = module.checked_payload(payload, date(2026, 10, 28))[2]['news_archive']
+        self.assertEqual(summary['status'], 'empty_or_missing')
+        self.assertEqual(summary['samples']['unknown_reasons']['missing'], 1440)
+
+    def test_news_malformed_scope_cardinality_values_and_stored_labels_rejected(self):
+        module = self.module()
+        for case in ('scope', 'family', 'duplicate', 'cardinality', 'grid', 'negative', 'initialized', 'fraction', 'numeric_nan', 'warning'):
+            payload = self.news(self.payload(), complete=False)
+            response = payload['news']['queries']['initialized' if case != 'fraction' else 'consecutive_failures']['values']
+            row = response['data']['result'][0]
+            if case == 'scope': row['metric']['namespace'] = 'other'
+            elif case == 'family': row['metric']['__name__'] = 'unknown_metric'
+            elif case == 'duplicate': response['data']['result'].append(row)
+            elif case == 'cardinality': response['data']['result'] *= 17
+            elif case == 'grid': row['values'][0][0] += 1
+            elif case == 'negative': row['values'][0][1] = '-1'
+            elif case == 'initialized': row['values'][0][1] = '2'
+            elif case == 'fraction': row['values'][0][1] = '0.5'
+            elif case == 'numeric_nan': row['values'][0][1] = float('nan')
+            else: response['warnings'] = ['private-warning']
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                module.checked_payload(payload, date(2026, 10, 28))
+        payload = self.news(self.payload())
+        _, clean, _ = module.checked_payload(payload, date(2026, 10, 28))
+        clean['news']['queries']['initialized']['values']['data']['result'][0]['metric']['private'] = 'never-retain'
+        with self.assertRaises(ValueError):
+            module.news_block(clean['news'], clean['start'], stored=True)
+
+    def test_collector_cumulative_response_budget_is_enforced_before_next_parse(self):
+        from unittest.mock import patch
+        import io
+        module = self.module()
+        response = json.dumps(self.payload()['queries']['available']).encode()
+        with patch.object(module, 'COLLECTION_LIMIT', len(response) + 1), patch.object(module, 'urlopen', side_effect=lambda *a, **k: io.BytesIO(response)):
+            with self.assertRaises(ValueError):
+                module.collect(date(2026, 10, 26))
+
     def test_prune_recovers_full_old_store_without_incoming_snapshot(self):
         from unittest.mock import patch
         module = self.module()
@@ -786,6 +934,7 @@ class SloObservationHealthTests(unittest.TestCase):
             self.assertEqual(out['present_days'], 1)
             self.assertEqual(out['partial_replica_days'], 1)
             self.assertEqual(out['search_series_unobserved_days'], 1)
+            self.assertEqual(out['news_series_unobserved_days'], 1)
             self.assertEqual(out['latest_preserved_day_timestamp_seconds'], 1792972800)
             self.assertGreater(out['stored_bytes'], 0)
             self.assertGreater(out['filesystem_available_bytes'], 0)
