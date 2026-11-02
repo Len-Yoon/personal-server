@@ -12,11 +12,13 @@
 
 실제 운영 전 조회에서 Git 설치 values와 운영 release의 차이를 확인하여 적용을 보류함. 운영 Alertmanager는 enabled=true·replica 1인데 Git values는 false이므로, 기존 업그레이드 옵션을 그대로 실행하면 정상 알림 구성을 제거할 수 있음. `--upgrade`에서만 설치 values 재입력을 제거하고 저장 release config를 재사용하도록 보완함. 실제 Git 동기화와 Helm 쓰기는 이 사전 조회 단계에서 수행하지 않음.
 
+이후 PR #473의 검증 main `4b8726132c9cd9a71d7ccda5e0cd24b5ac55d40c`으로 N100 fast-forward 동기화를 완료하고 기존 미추적 파일 2개의 byte·mode를 보존함. revision 6·대시보드 19개·102개 manifest 자원·hook 7개의 snapshot을 완료했으나 최종 dry-run 실행이 실패함. N100의 `core.autocrlf=true` 체크아웃에서 Python post-renderer의 shebang까지 CRLF가 된 것을 확인하여, 도구 디렉터리의 `.gitattributes`로 해당 실행 파일 하나만 LF를 고정하고 실제 Git 체크아웃 후 실행 회귀를 추가함. 실제 Helm 업그레이드 쓰기는 아직 수행하지 않음.
+
 ## 상세 내용
 
 | 경계 | 처리 | 비고 |
 |---|---|---|
-| 현재 상태 | Git 8d6c996 clean·기존 미추적 파일 2개·Helm revision 6 deployed | 새 검증 source main으로 fast-forward 예정 |
+| 현재 상태 | Git 4b87261 clean·기존 미추적 파일 2개 보존·Helm revision 6 deployed | LF 보완의 PR/main CI 후 새 source로 fast-forward 예정 |
 | values 차이 | Alertmanager true→false, datasource 선택·retentionSize 추가 차이 | 값은 공개 가능한 bool만 기록, 그 외 원문 미저장 |
 | 보완 | --upgrade는 --reuse-values만 사용 | --apply/오프라인 렌더는 기존 설치 values 유지 |
 | 적용 계획 | 실제 server dry-run의 config·manifest·hooks와 live 자원 직접 대조 | 미검토 서비스/Secret/PVC/이미지·수집 변경 차단 |
@@ -30,8 +32,8 @@
 | 사전 조회 | 17개 UP·Grafana DB 정상 | 운영 쓰기 0 |
 | 소스 보완 회귀 | 관련 73개·K8s 1,555개·maintenance 731개 PASS | 변경 영향 없는 7개 서비스는 source15bbfc9의 동일 소스 성공 결과 재사용. 필수 PR/main CI는 그대로 수행 |
 | 사전 server dry-run | config hash 동일·102개 identity 유지·hook 정의 차이 0 | 저장 manifest 차이는 17개 단일 data key이며 현재 live의 수정본과 모두 일치. 최종 source/plan은 실행 직전 다시 대조 |
-| 소스 독립 검토 | 최종 커밋 고정 중 | 검증 main 확정 전 N100 source 변경 없음 |
-| 임시 적용/원복 도구 | fixture 33개·별도 전문 재검토 PASS | 새 source·최종 실제 plan에 대한 실행 판정은 별도. 원시 Secret·Helm 값/manifest를 파일로 복제하지 않음 |
+| 소스 독립 검토 | PR #473 최종 고정 diff PASS·PR/main CI 통과·병합 완료 | LF 보완의 고정 커밋·전문 검토는 별도 수행 |
+| 임시 적용/원복 도구 | fixture 41개·별도 전문 재검토 PASS | 실제 Helm CLI가 생략한 chart/labels는 같은 revision의 저장 기록과 메모리에서 교차 대조하도록 보완. 새 source·최종 실제 plan 실행 판정은 별도 |
 
 ## 확인 필요 사항
 
