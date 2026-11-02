@@ -2,6 +2,8 @@
 
 **다음 할 일:** [주차별 고도화·직접 학습 계획](docs/20261026_V1_고도화학습계획.md)에서 현재 단계·첫 과제·완료 기준을 확인함. 전체 시작 순서는 V2 정상 상태·요청 추적 → V1 읽기 점검이며, 사용자 직접 1주차 수행은 확인 필요함.
 
+**고도화 완료 범위(2026-11-02):** YES24 검색·목차 미리보기와 Grafana CPU·메모리/결측 보완은 N100에 적용했고, 모니터링 Helm revision 7에서 대시보드 수정 보존을 확인했습니다. 별도 Linux VM의 합성 Book 소실·복원 훈련도 완료했습니다. 다음 운영 평가 과제는 동일 기준 30일 SLO 근거 확인이며, 전체 서비스 재해 복구와 이중화는 별도 확장 범위입니다. [완료·남은 과제](docs/20260921_프로젝트보완_개발계획.md#현재-고도화-완료범위와-남은-과제)를 참조합니다.
+
 **V1 · 실제 서비스 운영·유지보수 프로젝트**입니다. 기존 저장소 주소와 운영 구성을 유지하며 서비스 개선·버그 수정을 계속합니다.
 
 **[Personal Server V2](https://github.com/Len-Yoon/personal-server-v2)**는 Kubernetes·GitOps·장애 진단·복구를 연습하는 별도 프로젝트입니다. V2는 우선 맥북의 격리된 로컬 환경에서 개발·검증하며, N100 운영 배포나 V1 운영 데이터 사용은 포함하지 않습니다. V2의 구축·운영 실적은 실제 검증 결과가 확보된 범위에서 별도로 기록합니다.
@@ -112,6 +114,8 @@ YES24 도서 검색과 로그인 후 가져오기·선택 내보내기 위치를
 외부 웹 요청은 Cloudflare Tunnel → Compose의 Caddy → K3s Service로 전달됩니다. Portal은 NodePort로 진입하고, 뉴스·책·영상은 각각의 K3s Service가 처리합니다. 차량 OAuth callback은 Caddy를 거치지 않는 별도 Tunnel 경로입니다. 구성도는 실제 실행 중인 서비스·저장소·timer와 코드에 정의된 데이터 흐름을 대조해 작성했습니다.
 
 K3s의 웹 앱 4개와 Compose의 차량관리·SystemAgent·HomeOps는 역할을 나눠 운영합니다. Portal은 평상시 1개 replica이며 승인된 롤링 교체 중 최대 2개를 허용하고 공유 세션·파일 쓰기 조정을 사용합니다. Book·YouTube·Crawler는 단일 writer를 유지합니다. 백업은 단일 timer가 Portal 온라인 snapshot → Book → YouTube → Crawler → 차량 DB 순으로 실행하며, 차량 백업 감시 결과는 고정 ConfigMap → Relay → Portal 관리자 화면으로 전달됩니다. 개별 실행의 성공 여부는 구성도와 별도로 실제 복원 증거를 확인합니다.
+
+Helm 관리 대상은 Prometheus·Grafana·Alertmanager의 모니터링 차트 release 하나입니다. Portal·Book·YouTube·Crawler 앱은 개별 Kubernetes YAML로 관리합니다. WSL 수집기 4개 자원과 Portal 대시보드 2개도 Git YAML 소유를 유지하며, 이번 Helm 적용이 전체 시스템의 Helm 전환을 의미하지는 않습니다. [관리 범위와 운영 검증](docs/20261102_Grafana_Helm운영검증.md)을 참조합니다.
 
 | 영역 | 기술 | 선택 이유 |
 |---|---|---|
