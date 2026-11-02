@@ -23,12 +23,14 @@
 | 안전 실패 | 중복·alias·잘못된 YAML/정책·상한 초과 거부 | 전체 검증 성공 전 stdout 출력 없음, 고정 오류 문구 |
 | 기존 live-CAS 계약 | 기본 build_plan의 19개·owner 검증 유지 | Helm 렌더 전용 옵션에서만 17개·렌더 label 검증 |
 | 신규 설치 | 기존 --apply의 namespace 존재 거부 유지 | 최초 설치 실패 정리와 기존 release 업그레이드 실패를 구분 |
-| 기존 release | 명시 --upgrade, deployed 상태·동일 이름/namespace/chart 확인 | 재사용 values+Git values, 고정 post-renderer·wait |
+| 기존 release | 명시 --upgrade, deployed 상태·동일 이름/namespace/chart 확인 | 운영 values 재사용, 고정 post-renderer·wait. 아래 후속 사전 검증 참조 |
 | 실패 처리 | 기존 release 삭제·옛 revision 자동 복귀 없음 | 실패는 부분 적용 가능, 상태 확인과 승인된 복구 필요 |
 
 Helm 공식 [post-renderer 계약과 유의사항](https://helm.sh/docs/topics/advanced/#post-rendering)에 따라 모든 변경 주체가 같은 renderer를 사용해야 함. 직접 Helm 호출에서 flag를 생략하거나 과거 revision으로 rollback하면 수동 수정 전 대시보드가 돌아올 수 있음. 고정 차트 88.6.1과 검토한 원본을 지원하며, 다른 차트로 올릴 때는 차트 pin·원본 hash·결과를 함께 재검토함.
 
 `--render-upgrade`는 `helm template --is-upgrade`이며 실제 release의 저장 values나 클러스터 admission을 반영하지 않음. 실제 운영 승인 전에는 저장 values를 메모리에서 합친 최종 desired manifest와 현재 자원 차이, dashboard 19개 원본·복구 기준을 준비해야 함.
+
+후속 실제 운영 승인에 따른 사전 조회에서 저장소 설치 values의 Alertmanager=false와 운영 release의 Alertmanager=true 등 차이를 발견함. 운영 변경 전에 `--upgrade`에서만 Git values 재입력을 제거하여 현재 release config를 유지하도록 보완함. 설치/오프라인 렌더용 values는 유지하며 실제 운영 범위·새 검증·업그레이드/복구 결과는 [운영 검증 기록](20261102_Grafana_Helm운영검증.md)에 구분함. 위 오프라인 실증은 PR #471 시점의 결과이며 그때 수행하지 않은 실제 업그레이드 증거로 확대하지 않음.
 
 ## 검토 결과
 

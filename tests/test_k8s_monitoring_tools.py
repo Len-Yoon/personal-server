@@ -662,6 +662,11 @@ class MonitoringToolsTest(unittest.TestCase):
         self.assertIn("helm status personal-server-monitoring --namespace monitoring --output json", calls)
         self.assertIn("helm upgrade personal-server-monitoring prometheus-community/kube-prometheus-stack --namespace monitoring --version 88.6.1 --reuse-values", calls)
         self.assertIn("--post-renderer " + str(TOOLS / "monitoring-dashboard-post-renderer.py"), calls)
+        upgrade = next(line for line in calls.splitlines() if line.startswith("helm upgrade "))
+        # Fresh-install Git values can disable an active Alertmanager or reset
+        # runtime retention/datasource choices. Upgrades preserve release values.
+        self.assertNotIn("--values", upgrade)
+        self.assertNotIn("--set", upgrade)
         for forbidden in ("--atomic", "--install", "uninstall", "UNEXPECTED_MUTATION"):
             self.assertNotIn(forbidden, calls)
 
