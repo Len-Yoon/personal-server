@@ -186,11 +186,12 @@ def transform_dashboard(original: dict) -> dict:
     return dashboard
 
 
-def build_plan(configmaps: list[dict]) -> list[dict]:
+def build_plan(configmaps: list[dict], *, helm_rendered: bool = False) -> list[dict]:
     require(isinstance(configmaps, list), "configmap_list_required")
-    selected = {cm["metadata"]["name"]: cm for cm in configmaps if cm.get("metadata", {}).get("name") in TARGETS}
-    require(len(selected) == len(TARGETS), "target_configmap_missing")
-    require(sum(cm.get("metadata", {}).get("name") in TARGETS for cm in configmaps) == len(TARGETS), "duplicate_configmap")
+    targets = {name: spec for name, spec in TARGETS.items() if not helm_rendered or spec["helm_owned"]}
+    selected = {cm["metadata"]["name"]: cm for cm in configmaps if cm.get("metadata", {}).get("name") in targets}
+    require(len(selected) == len(targets), "target_configmap_missing")
+    require(sum(cm.get("metadata", {}).get("name") in targets for cm in configmaps) == len(targets), "duplicate_configmap")
     seen = set()
     for cm in configmaps:
         for value in cm.get("data", {}).values():
@@ -202,12 +203,23 @@ def build_plan(configmaps: list[dict]) -> list[dict]:
                 require(document["uid"] not in seen, "duplicate_dashboard_uid")
                 seen.add(document["uid"])
     plan = []
-    for name, spec in TARGETS.items():
+    for name, spec in targets.items():
         cm = selected[name]
         metadata = cm["metadata"]
         require(metadata.get("namespace") == "monitoring" and metadata.get("labels", {}).get("grafana_dashboard") == "1", "configmap_profile_changed")
         owner = metadata.get("annotations", {}).get("meta.helm.sh/release-name")
-        require((owner == "personal-server-monitoring") if spec["helm_owned"] else owner is None, "configmap_owner_changed")
+        if helm_rendered:
+            require(cm.get("apiVersion") == "v1" and cm.get("kind") == "ConfigMap", "configmap_api_changed")
+            require(owner in (None, "personal-server-monitoring"), "configmap_owner_changed")
+            labels = metadata["labels"]
+            require(all(labels.get(key) == expected for key, expected in {
+                "app.kubernetes.io/managed-by": "Helm",
+                "app.kubernetes.io/instance": "personal-server-monitoring",
+                "release": "personal-server-monitoring",
+                "chart": "kube-prometheus-stack-88.6.1",
+            }.items()), "rendered_configmap_profile_changed")
+        else:
+            require((owner == "personal-server-monitoring") if spec["helm_owned"] else owner is None, "configmap_owner_changed")
         before = cm.get("data", {}).get(spec["key"])
         require(isinstance(before, str), "dashboard_key_missing")
         original = json.loads(before)

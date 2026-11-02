@@ -90,6 +90,16 @@ bash infra/k8s/tools/monitoring-verify.sh
 
 `monitoring-install.sh --apply`와 제거 명령은 운영자 승인 후에만 실행함. Grafana와 Prometheus PVC는 기본 제거에서 보존함.
 
+### 대시보드를 보존하는 Helm 렌더·업그레이드
+
+Helm 3와 Python 3/PyYAML이 필요함. 저장소 루트에서 `monitoring-install.sh --render` 또는 `--render-upgrade`로 설치/업그레이드용 렌더를 검증함. 후자는 `--is-upgrade`를 사용하지만 운영의 저장된 values를 읽지 않는 오프라인 렌더임. stdout은 Secret을 포함할 수 있는 전체 YAML이고 성공 상태는 stderr이므로 Git·공유 로그에 남기지 않음.
+
+실제 운영 승인을 받고 정확한 검증 커밋을 동기화한 뒤에만 `bash infra/k8s/tools/monitoring-install.sh --upgrade`를 사용함. 이 경로는 기존 deployed release·이름·namespace·차트 88.6.1을 확인하고 `--reuse-values`와 저장소 values를 함께 적용함. 신규 설치용 `--apply`는 기존 namespace 거부를 유지함. 두 실행 및 두 렌더 모두 같은 `monitoring-dashboard-post-renderer.py`를 사용하여 Helm 소유 대시보드 17개 data 값만 변환함. Portal 두 대시보드는 기존 Git YAML 소유를 유지함.
+
+모든 운영자의 Helm 변경은 이 경로로 통일함. post-renderer 없는 직접 Helm 호출은 수정을 보존하지 못함. 다른 차트 버전·대시보드 원본·release profile이면 검사를 중단하며, 차트 pin과 원본/결과 정책을 함께 검토·검증해야 함. 정책 검사를 생략하거나 실패를 무시하지 않음.
+
+최초 운영 업그레이드 전에는 실제 저장 values와 최종 manifest 차이, 현재 대시보드 19개 원본과 검증된 복구 revision을 준비함. 과거 Helm revision은 수동 수정 이전 manifest일 수 있음. `--upgrade`는 기존 release를 삭제하거나 옛 revision으로 자동 복귀하지 않으며, 실패 시 부분 적용 가능성이 있으므로 상태·대시보드 key를 조회하고 승인된 복구 절차로 처리함. [검증 범위와 미수행 운영 단계](../../docs/20261102_Grafana_Helm지속성_검증.md)를 참조함.
+
 ## Loki 로그 관측 실습
 
 `observability-lab`의 Loki·Alloy·비민감 샘플 앱과 `monitoring`의 전용 Grafana ConfigMap 2개는 `observability-lab.sh`로만 관리함. 기존 monitoring Helm release와 운영 서비스 로그 수집 범위는 변경하지 않음. 아래 명령은 N100 운영 적용 승인과 정확한 커밋 동기화 이후에만 실행함. `CURRENT_CONTEXT`에는 `sudo k3s kubectl config current-context`의 실제 값을 입력함.
