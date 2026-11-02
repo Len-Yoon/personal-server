@@ -639,6 +639,72 @@ class MonitoringToolsTest(unittest.TestCase):
             calls,
         )
         self.assertNotIn("upgrade", calls)
+        self.assertIn("--post-renderer " + str(TOOLS / "monitoring-dashboard-post-renderer.py"), calls)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("monitoring_install=PASS", result.stderr)
+
+    def upgrade_stubs(self, *, status=None, listing=None, upgrade_exit=0):
+        status = status if status is not None else {"name": "personal-server-monitoring", "namespace": "monitoring", "info": {"status": "deployed"}}
+        listing = listing if listing is not None else [{"name": "personal-server-monitoring", "namespace": "monitoring", "status": "deployed", "chart": "kube-prometheus-stack-88.6.1"}]
+        return {
+            "preflight": "#!/bin/sh\nprintf 'monitoring_preflight=PASS\\n'\n",
+            "helm": "#!/bin/sh\nprintf 'helm %s\\n' \"$*\" >> \"$CALLS\"\ncase \"$1\" in\n"
+            + "status) printf '%s\\n' '" + json.dumps(status) + "';;\n"
+            + "list) printf '%s\\n' '" + json.dumps(listing) + "';;\n"
+            + "upgrade) exit " + str(upgrade_exit) + ";;\n*) exit 1;;\nesac\n",
+            "sudo": "#!/bin/sh\nprintf 'UNEXPECTED_MUTATION\\n' >> \"$CALLS\"\nexit 1\n",
+        }
+
+    def test_existing_release_upgrade_always_uses_renderer_and_retains_values(self):
+        result, calls = self.run_tool("monitoring-install.sh", "--upgrade", stubs=self.upgrade_stubs(),
+                                      env_overrides={"MONITORING_PREFLIGHT_SCRIPT": "preflight"})
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("helm status personal-server-monitoring --namespace monitoring --output json", calls)
+        self.assertIn("helm upgrade personal-server-monitoring prometheus-community/kube-prometheus-stack --namespace monitoring --version 88.6.1 --reuse-values", calls)
+        self.assertIn("--post-renderer " + str(TOOLS / "monitoring-dashboard-post-renderer.py"), calls)
+        for forbidden in ("--atomic", "--install", "uninstall", "UNEXPECTED_MUTATION"):
+            self.assertNotIn(forbidden, calls)
+
+    def test_upgrade_release_identity_status_and_chart_are_fail_closed(self):
+        bad_statuses = [{}, {"name": "other", "namespace": "monitoring", "info": {"status": "deployed"}},
+                        {"name": "personal-server-monitoring", "namespace": "other", "info": {"status": "deployed"}},
+                        {"name": "personal-server-monitoring", "namespace": "monitoring", "info": {"status": "pending-upgrade"}}]
+        bad_lists = [[], [{"name": "other"}], [{"name": "personal-server-monitoring", "namespace": "monitoring", "status": "deployed", "chart": "kube-prometheus-stack-99.0.0"}]]
+        for status, listing in [(s, None) for s in bad_statuses] + [(None, s) for s in bad_lists]:
+            with self.subTest(status=status, listing=listing):
+                result, calls = self.run_tool("monitoring-install.sh", "--upgrade", stubs=self.upgrade_stubs(status=status, listing=listing),
+                                              env_overrides={"MONITORING_PREFLIGHT_SCRIPT": "preflight"})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("helm upgrade ", calls)
+                self.assertNotIn("UNEXPECTED_MUTATION", calls)
+
+    def test_failed_upgrade_never_deletes_or_reverts_existing_release(self):
+        result, calls = self.run_tool("monitoring-install.sh", "--upgrade", stubs=self.upgrade_stubs(upgrade_exit=1),
+                                      env_overrides={"MONITORING_PREFLIGHT_SCRIPT": "preflight"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("monitoring_install=FAIL", result.stderr)
+        self.assertIn("helm upgrade ", calls)
+        for forbidden in ("uninstall", "rollback", "delete", "UNEXPECTED_MUTATION"):
+            self.assertNotIn(forbidden, calls)
+
+    def test_upgrade_render_uses_upgrade_semantics_without_cluster_commands(self):
+        result, calls = self.run_tool("monitoring-install.sh", "--render-upgrade", stubs={
+            "helm": "#!/bin/sh\nprintf 'helm %s\\n' \"$*\" >> \"$CALLS\"\nexit 0\n"})
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--is-upgrade", calls)
+        self.assertIn("--post-renderer ", calls)
+        self.assertNotIn("helm upgrade ", calls)
+        self.assertNotIn("sudo", calls)
+
+    def test_renderer_dependency_failure_precedes_all_helm_or_cluster_calls(self):
+        for mode in ("--render", "--render-upgrade", "--apply", "--upgrade"):
+            with self.subTest(mode=mode):
+                stubs = self.upgrade_stubs()
+                stubs["python3"] = "#!/bin/sh\nexit 1\n"
+                result, calls = self.run_tool("monitoring-install.sh", mode, stubs=stubs,
+                                              env_overrides={"MONITORING_PREFLIGHT_SCRIPT": "preflight"})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, "")
 
     def test_verify_fails_when_grafana_service_is_not_cluster_ip(self):
         result, _ = self.run_tool(
