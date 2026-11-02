@@ -94,7 +94,7 @@ bash infra/k8s/tools/monitoring-verify.sh
 
 Helm 3와 Python 3/PyYAML이 필요함. 저장소 루트에서 `monitoring-install.sh --render` 또는 `--render-upgrade`로 설치/업그레이드용 렌더를 검증함. 후자는 `--is-upgrade`를 사용하지만 운영의 저장된 values를 읽지 않는 오프라인 렌더임. stdout은 Secret을 포함할 수 있는 전체 YAML이고 성공 상태는 stderr이므로 Git·공유 로그에 남기지 않음.
 
-실제 운영 승인을 받고 정확한 검증 커밋을 동기화한 뒤에만 `bash infra/k8s/tools/monitoring-install.sh --upgrade`를 사용함. 이 경로는 기존 deployed release·이름·namespace·차트 88.6.1을 확인하고 `--reuse-values`와 저장소 values를 함께 적용함. 신규 설치용 `--apply`는 기존 namespace 거부를 유지함. 두 실행 및 두 렌더 모두 같은 `monitoring-dashboard-post-renderer.py`를 사용하여 Helm 소유 대시보드 17개 data 값만 변환함. Portal 두 대시보드는 기존 Git YAML 소유를 유지함.
+실제 운영 승인을 받고 정확한 검증 커밋을 동기화한 뒤에만 `bash infra/k8s/tools/monitoring-install.sh --upgrade`를 사용함. 이 경로는 기존 deployed release·이름·namespace·차트 88.6.1을 확인하고 `--reuse-values`로 운영 release 값을 유지함. 신규 설치용 values를 다시 입력하지 않으며, 운영 값 변경은 별도 검토 대상임. 신규 설치용 `--apply`는 기존 namespace 거부를 유지함. 두 실행 및 두 렌더 모두 같은 `monitoring-dashboard-post-renderer.py`를 사용하여 Helm 소유 대시보드 17개 data 값만 변환함. Portal 두 대시보드는 기존 Git YAML 소유를 유지함.
 
 모든 운영자의 Helm 변경은 이 경로로 통일함. post-renderer 없는 직접 Helm 호출은 수정을 보존하지 못함. 다른 차트 버전·대시보드 원본·release profile이면 검사를 중단하며, 차트 pin과 원본/결과 정책을 함께 검토·검증해야 함. 정책 검사를 생략하거나 실패를 무시하지 않음.
 

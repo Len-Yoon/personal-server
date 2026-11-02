@@ -90,7 +90,7 @@ main() {
       # A historical Helm rollback may predate the manual dashboard corrections.
       # Never uninstall/delete or auto-rollback an existing monitoring release.
       if helm upgrade "$RELEASE" "$CHART" --namespace "$NAMESPACE" --version "$VERSION" \
-        --reuse-values --values "$VALUES" --wait --timeout 10m --post-renderer "$POST_RENDERER"; then
+        --reuse-values --wait --timeout 10m --post-renderer "$POST_RENDERER"; then
         printf '%s\n' "monitoring_install=PASS"
         return 0
       fi
