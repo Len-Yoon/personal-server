@@ -1,4 +1,4 @@
-# 프로젝트 이미지 안내
+# V1 프로젝트 이미지 안내
 
 ## 표시 기준
 
@@ -18,7 +18,15 @@
 | [백업 상태](admin-backup-status.png) | Portal·Book·YouTube·Crawler·차량 DB 백업·복원 증거 | 2026-10-29 같은 관리자 화면의 백업 영역 | 원본 시각·상태·보관 수 유지 |
 | [Grafana](grafana-k3s-overview.png) | WSL2 CPU·메모리 사용률·단일 Cluster 자원·CPU Quota 표 | 2026-11-01 22:33 운영 적용 후 정확한 제목·UID로 실제 조회 | WSL 원본 대조 후 사용률 2개 결측 해소. Windows 물리 호스트 지표 아님 |
 | [차량 Telegram](car-care-telegram-status.png) | 운행·정비 알림 형식 | 기존 9월 실제 촬영 예시 보존 | 현재 차량 상태 아님, 추가 명령·메시지 전송 없음 |
-| [운영 구성도](personal-server-architecture-v2.svg) | 공개 경로·K3s/Compose 배치·앱별 writer 경계·순차 백업·관측 | 현재 코드·실제 Portal replicas/롤링 전략·운영 기록과 대조 | Portal 평상시 1개·교체 중 최대 2개, 공유 세션·온라인 백업 반영 |
+| [운영 구성도](personal-server-architecture-v2.svg) | 공개 경로·K3s/Compose 배치·앱별 writer 경계·순차 백업·관측 | 2026-11-03 코드·Portal 롤링 전략·운영 기록과 대조 | Portal 평상시 1개·교체 중 최대 2개, 공유 세션·온라인 백업·모니터링 Helm 관리 반영 |
+
+## 2026-11-03 면접 문서 반영 점검
+
+- PNG 10개는 기존 실제 캡처이며 파일·크기·비율·내용을 보존함. 같은 크기의 모음 이미지와 개별 원본으로 기능·가독성·민감정보 노출 범위를 대조함.
+- Grafana PNG는 11월 1일 화면임. 11월 2일 기본 namespace·결측 안내·Helm revision 7 반영 뒤의 화면이라고 표시하지 않으며, 후속 결과는 [결측 안내 기록](../20261102_Grafana_결측안내_운영검증.md)·[Helm 운영 기록](../20261102_Grafana_Helm운영검증.md)으로 연결함.
+- SVG는 실제 서비스 화면이 아닌 설명용 구성도임. 11월 3일 문서 대조일·차량 callback 별도 경로·모니터링 Helm 관리·WSL 지표 범위를 보완함. 문서의 `<img>` 전체 폭·1440×1000 원본 비율과 실제 SVG 렌더를 확인함.
+- V2는 별도 저장소의 [구성도](https://github.com/Len-Yoon/personal-server-v2/blob/main/docs/images/v2-platform-architecture.svg)로 구분함. V1 캡처를 V2 실행 화면으로 재사용하지 않음.
+- 새 운영 화면 조회·인증·데이터 저장·백업 실행·서비스 배포는 수행하지 않음. 사용자 화면을 생성형 이미지로 재현해 실제 검증 증거처럼 표시하지 않음.
 
 ## 원본과 공개 범위
 

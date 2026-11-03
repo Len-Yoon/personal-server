@@ -1,11 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1000" viewBox="0 0 1440 1000" role="img" aria-labelledby="title desc"><title id="title">Personal Server 현재 운영 구조와 데이터 흐름</title><desc id="desc">Windows N100의 WSL2 안에서 K3s 웹 앱과 Compose 운영 도구를 분리하고 다섯 단계 순차 백업 및 관측 경로를 연결한 구성도</desc><defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#59c6da"/></marker></defs><style>text{font-family:Arial,'Apple SD Gothic Neo','Noto Sans KR',sans-serif;fill:#e7edf7}.title{font-size:32px;font-weight:700}.heading{font-size:23px;font-weight:700}.body{font-size:20px}.small{font-size:17px;fill:#b9c8dd}.tag{fill:#69d8df;font-size:17px;font-weight:700}</style><rect width="1440" height="1000" rx="20" fill="#0c1424"/>
-<text x="36" y="48" class="title">Personal Server · 운영 구조와 데이터 흐름</text>
-<text x="36" y="79" class="small">단일 N100 / Windows + Ubuntu WSL2 · 실행 위치와 데이터 소유권을 구분</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1000" viewBox="0 0 1440 1000" role="img" aria-labelledby="title desc"><title id="title">Personal Server V1 운영 구조와 데이터 흐름</title><desc id="desc">Windows N100의 WSL2 안에서 K3s 웹 앱과 Compose 운영 도구를 분리하고 다섯 단계 순차 백업 및 관측 경로를 연결한 구성도</desc><defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#59c6da"/></marker></defs><style>text{font-family:Arial,'Apple SD Gothic Neo','Noto Sans KR',sans-serif;fill:#e7edf7}.title{font-size:32px;font-weight:700}.heading{font-size:23px;font-weight:700}.body{font-size:20px}.small{font-size:17px;fill:#b9c8dd}.tag{fill:#69d8df;font-size:17px;font-weight:700}</style><rect width="1440" height="1000" rx="20" fill="#0c1424"/>
+<text x="36" y="48" class="title">Personal Server V1 · 운영 구조와 데이터 흐름</text>
+<text x="36" y="79" class="small">2026-11-03 문서 대조 · 단일 N100 / Windows + Ubuntu WSL2 · 실시간 상태판 아님</text>
 <rect x="36" y="103" width="1368" height="99" rx="12" fill="#15243b" stroke="#345371"/>
 <text x="58" y="134" class="tag">공개 웹 요청</text>
 <text x="58" y="168" class="heading">Cloudflare Tunnel → Caddy → K3s Service</text>
 <text x="720" y="133" class="body">Portal · News · YouTube · Books</text>
-<text x="720" y="166" class="body">차량 OAuth callback → 비공개 callback upstream</text>
+<text x="720" y="163" class="small">차량 OAuth callback → 비공개 callback upstream</text>
+<text x="720" y="187" class="small">별도 Tunnel 경로 · Caddy 미경유</text>
 <rect x="36" y="220" width="1368" height="343" rx="12" fill="#101e31" stroke="#345371"/>
 <text x="56" y="251" class="heading">Ubuntu WSL2 · 앱 배치와 영속 데이터</text>
 <rect x="56" y="275" width="269" height="253" rx="12" fill="#15243b" stroke="#345371"/>
@@ -41,7 +42,7 @@
 <text x="1050" y="417" class="heading">SystemAgent · HomeOps</text>
 <text x="1050" y="449" class="small">자원 조회 · 허용 대상 진단/조치</text>
 <text x="1050" y="488" class="small">runtime marker로 중복 기동 차단</text>
-<text x="56" y="550" class="small">현재 운영 앱/monitoring 통신 차단 정책 미적용 · Loki/Alloy는 별도 격리 실습</text>
+<text x="56" y="550" class="small">운영 앱/monitoring 통신 차단 정책 미적용 · Loki/Alloy는 별도 격리 실습</text>
 <rect x="36" y="581" width="1368" height="183" rx="12" fill="#122b33" stroke="#3a7d84"/>
 <text x="56" y="614" class="heading">매일 02:30 KST · 하나의 timer가 순서대로 실행</text>
 <rect x="56" y="633" width="246" height="43" rx="12" fill="#10212c" stroke="#3a7d84"/>
@@ -62,9 +63,10 @@
 <text x="56" y="739" class="small">차량 DB: 동일 내용 건너뜀 / 주기적 실제 검증 · 일 7 / 주 4 / 월 3 + 최신 7개 안전 하한</text>
 <rect x="36" y="782" width="1368" height="182" rx="12" fill="#15243b" stroke="#345371"/>
 <text x="56" y="815" class="heading">관측과 백업 상태 전달</text>
-<text x="56" y="851" class="body">Prometheus → Grafana</text>
+<text x="56" y="851" class="body">Prometheus → Grafana · 모니터링 Helm 관리</text>
 <text x="56" y="880" class="small">NewsCollectionStale → Alertmanager → SRE relay → Telegram</text>
-<text x="56" y="910" class="small">월간 SRE 통합 점검 · Loki / Alloy / Ansible은 실습 범위</text>
+<text x="56" y="908" class="small">월간 SRE 통합 점검 · Loki / Alloy / Ansible은 실습 범위</text>
+<text x="760" y="936" class="small">WSL CPU·메모리 / 결측 안내 · Helm revision 7 보존 검증</text>
 <text x="760" y="851" class="body">차량 5분 감시 → 고정 ConfigMap → Relay → Portal</text>
 <text x="760" y="880" class="body">GitHub Actions · 약 5분 공개 health</text>
 <text x="760" y="910" class="small">CI/Trivy 통과 ≠ 운영 배포 · K3s 이미지 교체는 승인 범위</text>
