@@ -20,7 +20,7 @@
 
 저장소의 앱·운영 도구 Dockerfile 12개는 모두 `USER 10001:10001`을 지정함. 실제 실행 이미지와 데이터 접근 권한은 서비스별 배포 증적으로 확인함. Caddy는 내부 80·443 포트 binding에 필요한 `NET_BIND_SERVICE` capability만 사용함.
 
-Portal PVC는 `portal-web-files-dynamic`, `portal-web-state-dynamic` 두 개이며 K3s 단일 writer만 연결함. Portal non-root 이미지 교체 전에는 두 PVC의 UID/GID `10001:10001` 읽기·쓰기·디렉터리 접근 권한을 확인함. 권한 불충족 시 Deployment를 변경하지 않으며, PVC 권한 정렬은 자동화하지 않고 별도 운영 승인 아래 최소 범위로 수행함.
+Portal PVC는 `portal-web-files-dynamic`, `portal-web-state-dynamic` 두 개임. Portal은 평상시 K3s 1개로 실행하며, 공유 세션·파일 쓰기 조정·온라인 snapshot을 검증한 승인 범위의 롤링 교체 중 최대 2개를 허용함. Book·YouTube·Crawler의 K3s 단일 writer 기준과 구분하며 Compose Portal을 동시에 실행하지 않음. Portal non-root 이미지 교체 전에는 두 PVC의 UID/GID `10001:10001` 읽기·쓰기·디렉터리 접근 권한을 확인함. 권한 불충족 시 Deployment를 변경하지 않으며, PVC 권한 정렬은 자동화하지 않고 별도 운영 승인 아래 최소 범위로 수행함.
 
 ## 공개 도메인
 
@@ -34,7 +34,7 @@ Portal PVC는 `portal-web-files-dynamic`, `portal-web-state-dynamic` 두 개이�
 
 ## 운영 상태 확인 기록
 
-운영 판정은 현재 Job·원본 백업/복원 증적·만료·공유잠금·단일 writer·Ready와 외부 health를 함께 대조함. 코드 병합·Job 종료·업로드 성공만으로 복원 가능성과 알림 수신을 확정하지 않음. 백업 생성 시각과 상태 조회 시각을 구분하며 다음 정기 실행까지 유효하지 않은 이전 증거는 재사용하지 않음.
+운영 판정은 현재 Job·원본 백업/복원 증적·만료·공유잠금·앱별 writer 경계·Ready와 외부 health를 함께 대조함. 코드 병합·Job 종료·업로드 성공만으로 복원 가능성과 알림 수신을 확정하지 않음. 백업 생성 시각과 상태 조회 시각을 구분하며 다음 정기 실행까지 유효하지 않은 이전 증거는 재사용하지 않음.
 
 [백업 운영 기준](#차량-db-백업과-자동-보관)과 [현재 확인 필요 사항](20260921_프로젝트보완_개발계획.md#확인-필요-사항)을 기준으로 점검함.
 
@@ -143,7 +143,7 @@ python3 infra/k8s/tools/homeops-auth-configure.py --go --expected-commit "$(git 
 
 [자동 재공급 운영 검증](reviews/20261006_기능실패경계_N100운영적용결과.md#8-homeops-인증-자동-재공급): 부모 인증값 없이 기존 이미지의 실행기 1개를 재생성하여 실제 진단·403 거부·보호 상태·외부 health 15/15를 확인함. Secret·Portal은 변경하지 않았으며 실제 호스트 재부팅 검증을 대체하지 않음.
 
-- Portal은 K3s 단일 writer로만 실행함. Compose Portal과 동시에 실행하지 않음.
+- Portal은 평상시 K3s 1개, 승인된 제한 롤링 교체 중 최대 2개로 실행함. 공유 세션·쓰기 조정·온라인 snapshot 검증 범위이며 일반 다중 writer 확장이 아님. Compose Portal과 동시에 실행하지 않음.
 - K3s Portal 전환·rollback·PVC 작업은 `infra/k8s/tools/portal-cutover.sh`의 명시적 운영 절차만 사용함.
 - 자동 배포는 `crawler-worker`, `youtube-memo`, `book-memo`, `car-care-worker`의 허용된 변경을 분류함. 현재 K3s runtime state의 `crawler-worker`, `book-memo`, `youtube-memo`는 Compose 안전 배포에서 `safe_cd_skip_k3s_service`로 생략되며, 실제 Compose 배포 대상은 `car-care-worker`임.
 - Caddy, Cloudflare Tunnel, K3s Secret·PVC, `.env`, `data/`, Portal은 자동 배포에서 제외함.

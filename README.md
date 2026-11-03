@@ -1,14 +1,17 @@
 # Personal Server V1
 
-**다음 할 일:** [주차별 고도화·직접 학습 계획](docs/20261026_V1_고도화학습계획.md)에서 현재 단계·첫 과제·완료 기준을 확인함. 전체 시작 순서는 V2 정상 상태·요청 추적 → V1 읽기 점검이며, 사용자 직접 1주차 수행은 확인 필요함.
+단일 N100에서 개인 데이터 서비스를 운영하며 **배포 중 데이터 보호, 서비스별 실패 처리, 관측과 복구 가능성**을 다루는 프로젝트입니다. 웹 앱은 K3s, 차량·호스트 보조 작업은 Docker Compose로 나누고 실행 주체가 겹치지 않도록 관리합니다.
 
-**고도화 완료 범위(2026-11-02):** YES24 검색·목차 미리보기와 Grafana CPU·메모리/결측 보완은 N100에 적용했고, 모니터링 Helm revision 7에서 대시보드 수정 보존을 확인했습니다. 별도 Linux VM의 합성 Book 소실·복원 훈련도 완료했습니다. 다음 운영 평가 과제는 동일 기준 30일 SLO 근거 확인이며, 전체 서비스 재해 복구와 이중화는 별도 확장 범위입니다. [완료·남은 과제](docs/20260921_프로젝트보완_개발계획.md#현재-고도화-완료범위와-남은-과제)를 참조합니다.
+**면접관용 안내:** [1분 소개·설계 판단·검증 사례·예상 질문](docs/portfolio-devops.md) → 아래 구성도와 주요 화면 → 연결된 코드·운영 기록 순서로 볼 수 있습니다. [공개 소개 원문](docs/portfolio-content.md)과 [상세 면접 답변](docs/20261018_DevOps_면접답변.md)도 제공합니다.
 
-**V1 · 실제 서비스 운영·유지보수 프로젝트**입니다. 기존 저장소 주소와 운영 구성을 유지하며 서비스 개선·버그 수정을 계속합니다.
+| 구분 | 설명 | 근거·범위 |
+|---|---|---|
+| V1 | 실제 서비스 운영·유지보수 | 단일 N100·Windows·Ubuntu WSL2, 물리 HA 아님 |
+| V2 | [별도 Kubernetes·GitOps 실습](https://github.com/Len-Yoon/personal-server-v2) | 맥북 전용 환경·별도 실습 데이터, V1 운영 이전 아님 |
+| 최근 운영 보완 | YES24 검색·목차, Grafana WSL 지표·결측 안내, 모니터링 Helm revision 7, 뉴스 원시 관측 보존 확장 | 2026-11-03까지의 [완료·남은 과제](docs/20260921_프로젝트보완_개발계획.md#현재-고도화-완료범위와-남은-과제) 기록 기준. 오늘 전체 운영 상태를 새로 측정한 결과 아님 |
+| 별도 복구 실습 | Linux VM·디스크 소실 후 새 VM에서 합성 Book 복원 | 운영 N100·실제 데이터·물리 호스트 복구와 구분 |
 
-**[Personal Server V2](https://github.com/Len-Yoon/personal-server-v2)**는 Kubernetes·GitOps·장애 진단·복구를 연습하는 별도 프로젝트입니다. V2는 우선 맥북의 격리된 로컬 환경에서 개발·검증하며, N100 운영 배포나 V1 운영 데이터 사용은 포함하지 않습니다. V2의 구축·운영 실적은 실제 검증 결과가 확보된 범위에서 별도로 기록합니다.
-
-개인 데이터를 관리하는 서비스를 직접 만들고, 단일 N100 서버에서 배포·장애 감지·백업·복구까지 운영하는 프로젝트입니다. 파일·책·영상·뉴스·차량 정보를 한곳에서 사용할 수 있도록 구성하고, 데이터 보존과 실패 처리에 중점을 뒀습니다.
+구현·자동 검증·독립 검토·운영 적용·사용자 직접 실습을 구분합니다. 에이전트 도움으로 작성·검증한 부분을 개인의 수동 장애 대응 경험으로 바꾸지 않습니다. 직접 학습은 [주차별 고도화·직접 학습 계획](docs/20261026_V1_고도화학습계획.md)의 현재 단계·첫 과제·완료 기준을 따르며, 전체 시작 순서는 V2 정상 상태·요청 추적 → V1 읽기 점검입니다. 사용자 직접 1주차 수행은 확인 필요함.
 
 ## 프로젝트 목표와 담당 범위
 
@@ -36,14 +39,14 @@
 
 ## 주요 화면
 
-서비스 이름 옆 화살표를 누르면 설명과 이미지가 펼쳐집니다. 이미지는 **1440 × 1000** 크기이며 조회 시점의 상태입니다. 서비스 화면은 2026-10-29, Grafana는 2026-11-01에 다시 촬영했으며, 과거 Telegram 예시는 별도로 표시했습니다. [촬영 범위·기존 예시 안내](docs/images/README.md)
+서비스 이름 옆 화살표를 누르면 설명과 이미지가 펼쳐집니다. 이미지는 **1440 × 1000** 크기이며 조회 시점의 상태입니다. 서비스 화면은 2026-10-29, Grafana는 2026-11-01에 다시 촬영했으며, 과거 Telegram 예시는 별도로 표시했습니다. Grafana 캡처는 11월 2일의 결측 안내·기본 필터·Helm 업그레이드 이전 화면으로, 해당 후속 결과는 운영 기록으로 확인합니다. [촬영 범위·기존 예시 안내](docs/images/README.md)
 
 <details>
 <summary>Portal · 서비스 허브와 전체 검색</summary>
 
 서비스 이동과 뉴스·유튜브·책 검색 대상을 한곳에서 선택합니다.
 
-<img src="docs/images/portal-dashboard.png" alt="현재 Portal의 서비스 카드와 검색 대상 선택" width="100%">
+<img src="docs/images/portal-dashboard.png" alt="2026-10-29 Portal의 서비스 카드와 검색 대상 선택" width="100%">
 
 </details>
 
@@ -52,7 +55,7 @@
 
 마지막 정상 수집 시각과 상태를 확인하고 세계 경제·IT·AI 뉴스로 이동합니다.
 
-<img src="docs/images/news-hub.png" alt="현재 뉴스 허브의 수집 최신성과 세계 경제 IT AI 주제" width="100%">
+<img src="docs/images/news-hub.png" alt="2026-10-29 뉴스 허브의 수집 최신성과 세계 경제 IT AI 주제" width="100%">
 
 </details>
 
@@ -74,7 +77,7 @@ YES24 도서 검색과 로그인 후 가져오기·선택 내보내기 위치를
 
 영상 등록·저장 목록과 가져오기·내보내기 위치를 확인합니다. 쓰기는 로그인 뒤 사용할 수 있습니다.
 
-<img src="docs/images/youtube-memo.png" alt="현재 YouTube Memo의 영상 등록 가져오기 내보내기와 영상 목록" width="100%">
+<img src="docs/images/youtube-memo.png" alt="2026-10-29 YouTube Memo의 영상 등록 가져오기 내보내기와 영상 목록" width="100%">
 
 </details>
 
@@ -83,7 +86,7 @@ YES24 도서 검색과 로그인 후 가져오기·선택 내보내기 위치를
 
 업로드·검색·정렬·이동·휴지통과 개인 기사 보관 진입점을 제공합니다. 인증된 실제 화면의 도구 구간을 사용하며 개인 파일 내용은 포함하지 않습니다.
 
-<img src="docs/images/file-manager.png" alt="현재 파일함의 인증된 업로드와 파일 관리 도구" width="100%">
+<img src="docs/images/file-manager.png" alt="2026-10-29 파일함의 인증된 업로드와 파일 관리 도구" width="100%">
 
 </details>
 
@@ -92,9 +95,9 @@ YES24 도서 검색과 로그인 후 가져오기·선택 내보내기 위치를
 
 서버 상태와 서비스별 백업·복원 증거를 확인합니다. 내부 주소와 보안 이벤트의 상세 목록은 제외합니다.
 
-<img src="docs/images/admin-status.png" alt="현재 관리자 화면의 서버 자원과 서비스 상태" width="100%">
+<img src="docs/images/admin-status.png" alt="2026-10-29 관리자 화면의 서버 자원과 서비스 상태" width="100%">
 
-<img src="docs/images/admin-backup-status.png" alt="현재 관리자 화면의 Portal Book YouTube Crawler 차량 DB 백업 및 복원 증거" width="100%">
+<img src="docs/images/admin-backup-status.png" alt="2026-10-29 관리자 화면의 Portal Book YouTube Crawler 차량 DB 백업 및 복원 증거" width="100%">
 
 </details>
 
@@ -109,9 +112,9 @@ YES24 도서 검색과 로그인 후 가져오기·선택 내보내기 위치를
 
 ## 구조와 기술 선택
 
-![Personal Server 현재 운영 구조](docs/images/personal-server-architecture-v2.svg)
+![Personal Server 운영 구조·데이터 흐름](docs/images/personal-server-architecture-v2.svg)
 
-외부 웹 요청은 Cloudflare Tunnel → Compose의 Caddy → K3s Service로 전달됩니다. Portal은 NodePort로 진입하고, 뉴스·책·영상은 각각의 K3s Service가 처리합니다. 차량 OAuth callback은 Caddy를 거치지 않는 별도 Tunnel 경로입니다. 구성도는 실제 실행 중인 서비스·저장소·timer와 코드에 정의된 데이터 흐름을 대조해 작성했습니다.
+외부 웹 요청은 Cloudflare Tunnel → Compose의 Caddy → K3s Service로 전달됩니다. Portal은 NodePort로 진입하고, 뉴스·책·영상은 각각의 K3s Service가 처리합니다. 차량 OAuth callback은 Caddy를 거치지 않는 별도 Tunnel 경로입니다. 구성도는 운영 기록·서비스 설정·저장소·timer와 코드에 정의된 데이터 흐름을 대조해 작성했습니다. 2026-11-03 문서 대조 기준이며 실시간 상태판은 아닙니다.
 
 K3s의 웹 앱 4개와 Compose의 차량관리·SystemAgent·HomeOps는 역할을 나눠 운영합니다. Portal은 평상시 1개 replica이며 승인된 롤링 교체 중 최대 2개를 허용하고 공유 세션·파일 쓰기 조정을 사용합니다. Book·YouTube·Crawler는 단일 writer를 유지합니다. 백업은 단일 timer가 Portal 온라인 snapshot → Book → YouTube → Crawler → 차량 DB 순으로 실행하며, 차량 백업 감시 결과는 고정 ConfigMap → Relay → Portal 관리자 화면으로 전달됩니다. 개별 실행의 성공 여부는 구성도와 별도로 실제 복원 증거를 확인합니다.
 
@@ -224,7 +227,7 @@ CI 산출물과 운영 증적은 90일 보관하며, 장기 보관이 필요한 
 
 ## 현재 한계와 검증 범위
 
-단일 N100과 WSL2 구성이라 호스트 장애를 견디는 다중 노드 고가용성은 제공하지 않습니다. Book·YouTube·Crawler는 단일 writer를 유지하며, Portal의 동시 쓰기는 같은 호스트의 제한된 롤링 교체·공유 상태 검증 범위입니다. 일반적인 다중 호스트 쓰기 확장과 구분합니다. Grafana 일부 호스트 지표는 수집되지 않으며 운영 통신 차단 정책은 미적용 상태입니다.
+단일 N100과 WSL2 구성이라 호스트 장애를 견디는 다중 노드 고가용성은 제공하지 않습니다. Book·YouTube·Crawler는 단일 writer를 유지하며, Portal의 동시 쓰기는 같은 호스트의 제한된 롤링 교체·공유 상태 검증 범위입니다. 일반적인 다중 호스트 쓰기 확장과 구분합니다. WSL CPU·메모리와 Windows C:·노드/PVC 디스크 관측은 검증된 범위를 구분하며, 모든 호스트 지표를 수집하는 구성은 아닙니다. 운영 통신 차단 정책은 미적용 상태입니다.
 
 메모 재시도 보호는 지정된 쓰기 경로에 적용됩니다. 탭 종료 후 초안 복구나 모든 중간 데이터 변경의 복원은 보장하지 않습니다. SLI·에러 버짓·전체 RTO/RPO의 종합 실측과 인증의 장기 유지는 추가 확인이 필요합니다. 합성 경보의 전송·시험 메시지의 Telegram 단말 수신은 확인했으며 실제 장애의 자연 발생 시 동작은 별도 관찰합니다. 차량을 포함한 정기 실행과 기간 만료 사본의 실제 자동 삭제는 이미지나 CI 대신 각 실행 기록·복원 증거·삭제 결과를 대조해 판단합니다.
 
