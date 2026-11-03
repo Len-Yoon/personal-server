@@ -26,6 +26,8 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, build_opener
 
 LIMIT = 8 * 1024 * 1024
+COLLECTION_LIMIT = 16 * 1024 * 1024
+NEWS_FAMILIES = ('initialized', 'last_success_timestamp_seconds', 'consecutive_failures')
 QUOTA = 384 * 1024 * 1024
 RESERVE = 64 * 1024 * 1024
 RETENTION_DAYS = 35
@@ -138,6 +140,99 @@ def search_block(block, start, *, stored=False):
                         'semantics': 'raw_counter_and_source_timestamp_samples_not_period_slo'}
 
 
+def news_block(block, start, *, stored=False):
+    """Preserve gauges; coverage describes source samples, never news SLO state."""
+    if (not isinstance(block, dict) or set(block) != {'step_seconds', 'queries'}
+            or type(block['step_seconds']) is not int or block['step_seconds'] != 60
+            or not isinstance(block['queries'], dict) or set(block['queries']) != set(NEWS_FAMILIES)):
+        raise ValueError('invalid_news_block')
+    clean = {'step_seconds': 60, 'queries': {}}
+    grids = {}
+    point_count = 0
+    for family in NEWS_FAMILIES:
+        queries = block['queries'][family]
+        if not isinstance(queries, dict) or set(queries) != {'values', 'timestamps'}:
+            raise ValueError('invalid_news_queries')
+        clean['queries'][family] = {}
+        name = 'crawler_news_collection_' + family
+        for kind in ('values', 'timestamps'):
+            response = queries[kind]
+            if (not isinstance(response, dict) or response.get('status') != 'success'
+                    or response.get('warnings') or response.get('infos')):
+                raise ValueError('invalid_news_response')
+            data = response.get('data')
+            if (not isinstance(data, dict) or data.get('resultType') != 'matrix'
+                    or not isinstance(data.get('result'), list) or len(data['result']) > 16):
+                raise ValueError('invalid_news_matrix')
+            rows, seen, grid = [], set(), {}
+            for row in data['result']:
+                if (not isinstance(row, dict) or not isinstance(row.get('metric'), dict)
+                        or not isinstance(row.get('values'), list) or len(row['values']) > 1440):
+                    raise ValueError('invalid_news_series')
+                labels = row['metric']
+                if (any(not isinstance(k, str) or not isinstance(v, str) for k, v in labels.items())
+                        or labels.get('__name__', name) != name):
+                    raise ValueError('invalid_news_labels')
+                if stored:
+                    if (set(labels) != {'__name__', 'origin_sha256'}
+                            or not re.fullmatch('[0-9a-f]{64}', labels['origin_sha256'])):
+                        raise ValueError('unsanitized_news')
+                    origin = labels['origin_sha256']
+                else:
+                    if labels.get('namespace') != 'personal-server':
+                        raise ValueError('invalid_news_scope')
+                    origin = digest(canonical({k: v for k, v in labels.items() if k != '__name__'}))
+                if origin in seen:
+                    raise ValueError('duplicate_news_series')
+                seen.add(origin)
+                previous = -1
+                for pair in row['values']:
+                    if not isinstance(pair, list) or len(pair) != 2:
+                        raise ValueError('invalid_news_point')
+                    at, value = (_ANALYZER._number(v) for v in pair)
+                    offset = (at - start) / 60
+                    if (not math.isfinite(at) or not 0 <= offset <= 1439
+                            or abs(offset - round(offset)) > 1e-7 or round(offset) <= previous):
+                        raise ValueError('invalid_news_grid')
+                    if math.isfinite(value):
+                        if (value < 0 or (kind == 'values' and
+                                ((family == 'initialized' and value not in (0, 1))
+                                 or (family == 'consecutive_failures' and not value.is_integer())))):
+                            raise ValueError('invalid_news_value')
+                    elif not isinstance(pair[1], str):
+                        raise ValueError('invalid_news_number')
+                    previous = round(offset)
+                    grid.setdefault(previous, {})[origin] = value
+                point_count += len(row['values'])
+                rows.append({'metric': {'__name__': name, 'origin_sha256': origin}, 'values': row['values']})
+            grids[(family, kind)] = grid
+            clean['queries'][family][kind] = {'status': 'success', 'data': {'resultType': 'matrix', 'result': rows}}
+    reasons = dict.fromkeys(('missing', 'nonfinite', 'stale', 'future_timestamp', 'ambiguous_sources'), 0)
+    observed = 0
+    for index in range(1440):
+        origins = set().union(*(grid.get(index, {}) for grid in grids.values()))
+        if len(origins) > 1:
+            reason = 'ambiguous_sources'
+        elif not origins or any(set(grid.get(index, {})) != origins for grid in grids.values()):
+            reason = 'missing'
+        else:
+            origin = next(iter(origins))
+            values = [grid[index][origin] for grid in grids.values()]
+            timestamps = [grids[(family, 'timestamps')][index][origin] for family in NEWS_FAMILIES]
+            ages = [start + index * 60 - value for value in timestamps]
+            reason = ('nonfinite' if any(not math.isfinite(v) for v in values) else
+                      'future_timestamp' if min(ages) < 0 else 'stale' if max(ages) > 60 else None)
+        if reason:
+            reasons[reason] += 1
+        else:
+            observed += 1
+    return clean, {'status': 'preserved' if observed == 1440 else 'partial' if point_count else 'empty_or_missing',
+                   'samples': {'expected': 1440, 'observed': observed, 'unknown': 1440 - observed,
+                               'unknown_reasons': reasons},
+                   'source_sample_freshness_seconds': 60,
+                   'semantics': 'raw_metric_source_sample_coverage_not_news_slo'}
+
+
 def checked_payload(payload, today):
     summary = _ANALYZER.summarize_samples(payload)
     start, end, step = (payload[k] for k in ('start', 'end', 'step_seconds'))
@@ -161,6 +256,10 @@ def checked_payload(payload, today):
         clean['search'], summary['search_archive'] = search_block(payload['search'], start)
     else:
         summary['search_archive'] = {'status': 'not_collected'}
+    if 'news' in payload:
+        clean['news'], summary['news_archive'] = news_block(payload['news'], start)
+    else:
+        summary['news_archive'] = {'status': 'not_collected'}
     if len(canonical(clean)) > LIMIT - 4096:
         raise ValueError('too_large')
     return day, clean, summary
@@ -259,6 +358,10 @@ def entries(directory, today, held=None, enforce_quota=True):
             _, summary['search_archive'] = search_block(payload['search'], start, stored=True)
         else:
             summary['search_archive'] = {'status': 'not_collected'}
+        if 'news' in payload:
+            _, summary['news_archive'] = news_block(payload['news'], start, stored=True)
+        else:
+            summary['news_archive'] = {'status': 'not_collected'}
         if start % 86400 or 86400 % step or end != start + 86400 - step or day >= today:
             raise ValueError('not_daily_grid')
         if capsule['date'] != day.isoformat() or name != day.isoformat() + '.json.gz' or digest(canonical(payload)) != capsule['payload_sha256']:
@@ -333,7 +436,8 @@ def archive(payload, path, *, today=None, prune=False):
             os.unlink(pending, dir_fd=directory); pending = None
             os.fsync(directory)
         incomplete_search = 'search' in clean and summary['search_archive']['status'] != 'preserved'
-        return {'status': 'partial' if summary['samples']['unknown'] or incomplete_search else 'complete',
+        incomplete_news = 'news' in clean and summary['news_archive']['status'] != 'preserved'
+        return {'status': 'partial' if summary['samples']['unknown'] or incomplete_search or incomplete_news else 'complete',
                 'date': day.isoformat(), 'idempotent': bool(same), 'expired_removed': deleted,
                 'payload_sha256': capsule['payload_sha256'], 'summary': summary}
     finally:
@@ -365,6 +469,7 @@ def verify(path, *, today=None):
                 'missing_dates': [x.isoformat() for x in wanted if x not in dates],
                 'partial_dates': [x['date'].isoformat() for x in rows if x['summary']['samples']['unknown']],
                 'search_unobserved_dates': [x['date'].isoformat() for x in rows if x['summary']['search_archive']['status'] != 'preserved'],
+                'news_unobserved_dates': [x['date'].isoformat() for x in rows if x['summary']['news_archive']['status'] != 'preserved'],
                 'bytes': sum(x['bytes'] for x in rows), 'slo_budget': 'not_calculable'}
     finally:
         os.close(lock); os.close(directory)
@@ -382,8 +487,17 @@ def collect(day, base=DEFAULT_URL):
     deadline = time.monotonic() + 45
     names = list(_ANALYZER.QUERIES) + ['search_values', 'search_timestamps']
     payload['search'] = {'step_seconds': 60}
+    payload['news'] = {'step_seconds': 60, 'queries': {family: {} for family in NEWS_FAMILIES}}
+    names += ['news_' + family + ':' + kind for family in NEWS_FAMILIES for kind in ('values', 'timestamps')]
+    collected_bytes = 0
     for name in names:
-        if name.startswith('search_'):
+        if name.startswith('news_'):
+            family, kind = name.removeprefix('news_').split(':')
+            query = 'crawler_news_collection_' + family + '{namespace="personal-server"}'
+            step = 60
+            if kind == 'timestamps':
+                query = 'timestamp(' + query + ')'
+        elif name.startswith('search_'):
             query = '({__name__=~"portal_search_requests_total|portal_search_source_requests_total",namespace="personal-server"} or {__name__=~"portal_http_requests_total|portal_http_request_duration_seconds_bucket",namespace="personal-server",method="GET",route="/search"})'
             step = 60
             if name == 'search_timestamps':
@@ -406,9 +520,12 @@ def collect(day, base=DEFAULT_URL):
                 if not chunk:
                     break
                 raw.extend(chunk)
-                if len(raw) > LIMIT:
+                collected_bytes += len(chunk)
+                if len(raw) > LIMIT or collected_bytes > COLLECTION_LIMIT:
                     raise ValueError('too_large')
-        if name.startswith('search_'):
+        if name.startswith('news_'):
+            payload['news']['queries'][family][kind] = json.loads(raw)
+        elif name.startswith('search_'):
             payload['search'][name.removeprefix('search_')] = json.loads(raw)
         else:
             payload['queries'][name] = json.loads(raw)

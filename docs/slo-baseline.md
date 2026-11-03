@@ -19,6 +19,26 @@
 
 2026-11-02 21:30~21:44 KST 후속 읽기에서 최근 일일 기록 30/30일·미수집/미관측 0일을 확인함. freshness 기준은 이전 17행·현재 13행이 혼재하며, 원시 보존은 10/26~11/1 UTC의 필요 7일 전부 존재함. 최신 일일 판정은 공개 health·Portal Ready·Crawler 모두 ok이고 현재 Portal desired/Ready/available은 각 1임. 검색 원본은 10/26 하루 empty_or_missing이고 이후 6일은 preserved임. 수집·보존은 정상 범위이나 동일 기준 30일 또는 시간 기반 SLO·에러 버짓 완료로 판정하지 않음. [후속 실측·계속 관측할 조건](reviews/20261027_V1_SLO기록_읽기점검.md#7-2026-11-02-중복-제외-후-실제-slo-누적-점검)을 기준으로 기존 수집을 유지함.
 
+### 뉴스 원시 보존 확장 — 운영 미적용
+
+위 운영 archive의 원시 보존 범위는 Portal replica와 검색임. 뉴스 freshness는 일일 판정만 있어 기간을 기다리는 것으로 뉴스의 시간 기반 30일 SLO를 계산할 수 없음. 기존 archive/health 도구에 아래 선택 블록을 추가함. 현재 N100의 archive에는 아직 이 확장 코드가 적용되지 않았으며 기존 7일 자료에 뉴스 원본이 생겼다고 간주하지 않음.
+
+| 경계 | 확장 내용 | 비고 |
+|---|---|---|
+| 원본 지표 | initialized·last_success_timestamp_seconds·consecutive_failures 세 gauge, 각 원본 sample timestamp | namespace=personal-server, 60초 평가 격자. 메트릭별 값/시각 6개 분리 질의 |
+| 보존 형식 | 기존 capsule의 선택 news 블록, __name__을 제외한 공통 원본 라벨의 SHA256으로 지표 간 source 연결 | 실제 라벨 값·내부 주소를 저장하지 않음. 기존 capsule byte/hash·불변성 유지 |
+| 표본 범위 | expected/observed/unknown 및 missing·nonfinite·stale·future_timestamp·ambiguous_sources | 원본 sample 시각의 신선도 한계는 60초임. raw source coverage이며 뉴스 정상률/SLO 판정이 아님. initialized=0·연속 실패 증가도 원문 보존 |
+| 수치·회전 | NaN/Inf 문자열은 보존하되 unknown, JSON 비유한 숫자·부적절한 범위/격자/중복은 거부 | 단일 source 교체와 동시에 겹친 source의 모호함을 구분함. 서비스 상태 정책 1800초/실패3회는 그대로임 |
+| 자원 상한 | 단일 응답/최종 보관 8MiB, 전체 HTTP 읽기 16MiB, 협력 deadline45초 | 기존 quota384MiB·reserve64MiB·retention35일 유지. 새 프로세스·수집 일정·경보 없음 |
+| 구형 자료 | news 미포함은 not_collected, verify에 news_unobserved_dates 추가 | 과거 파일을 재작성하지 않음. 기존 날짜를 새 news로 다시 수집하면 immutable conflict로 거부될 수 있음 |
+| health | news_series_unobserved_days 지표 추가 | 새 경보나 자동복구에 연결하지 않음. 과거 자료가 미포함인 날도 포함함 |
+
+뉴스가 포함된 새 파일은 먼저 안전하게 보존한 뒤 coverage가 불완전하면 partial·exit2가 될 수 있고 Kubernetes Job은 Failed로 보일 수 있음. 파일 저장 오류·불완전한 관측·실제 뉴스 수집 실패를 같은 의미로 해석하지 않음.
+
+운영 적용에는 **news 대응 archive 모듈이 든 새 이미지와 이번 health.py를 담은 source-bound ConfigMap 조합**이 필요함. 이미지의 archive 모듈을 사용하는 기존 구조이므로 health ConfigMap만 바꾸는 적용은 지원하지 않음. collector CronJob과 health Deployment가 사용할 검증 이미지 및 코드 ConfigMap/참조 변경을 함께 준비하고, 실행 중 archive Job·기존 잠금·불변 파일을 보존하는 운영 범위를 별도 승인 직전에 확정함. 이번 저장소 변경은 N100 동기화·이미지 반입·리소스 적용·자동 실행 변경을 포함하지 않음.
+
+실제 지표 세 종류는 이번 읽기에서 각각 1개 시계열, 동일한 source 라벨 집합과 namespace를 확인함. 새 코드의 자체 검사·독립 검토·전체 회귀·이미지 검증 결과는 이번 기능 PR에 기록하며, 운영에서 뉴스 원본을 처음 보존한 날짜는 적용 이후 실제 결과로만 확정함.
+
 현재 관측 원본은 공개 health, K3s Portal Ready, 뉴스 freshness와 Portal HTTP 요청 수·오류·지연시간 지표임. Portal HTTP 계측은 구현·운영 반영되었으며 다른 Compose 서비스에 같은 계측이 있다고 가정하지 않음. 이 문서의 30일 목표값은 여전히 초안임. 일일 SLO 수집기는 freshness 다중 시계열 집계 보완을 운영 적용하고 자동 실행을 활성화했으며, 2026-09-23 예약 실행이 성공함. [원인 분석](reviews/20260921_SLO증적실패_원인분석.md)과 [운영 적용 검증 결과](reviews/20260922_뉴스_SLO_운영적용_검증결과.md)를 구분해 참조함.
 
 2026-09-27 읽기 전용 점검에서 일일 증적은 9월 16~27일의 12건만 확인됐고, 공개 감시 workflow는 9월 24~26일 각각 6·6·7회 실행됨. 5분 간격의 30일 전체 관측을 전제로 한 성공률·에러 버짓은 현재 산정할 수 없음. 최신 일일 기록의 `public_health`, `portal_ready`, `crawler_freshness`는 모두 `failed`였으나 현재 공개 Portal health의 별도 1회 조회는 HTTP 200이었음. 일일 기록이 과거 24시간 구간을 평가한다는 점과 현재 상태를 구분함. 당시 공개 health 응답 코드는 증적에 저장되지 않아 확인 필요함.

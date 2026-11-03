@@ -27,7 +27,7 @@ SPEC.loader.exec_module(ARCHIVE)
 PREFIX = 'slo_observation_archive_'
 FIELDS = frozenset(('present_days', 'stored_bytes', 'filesystem_available_bytes',
                     'latest_preserved_day_timestamp_seconds', 'partial_replica_days',
-                    'search_series_unobserved_days', 'required_days', 'missing_required_days'))
+                    'search_series_unobserved_days', 'news_series_unobserved_days', 'required_days', 'missing_required_days'))
 
 
 class ConcurrentChange(RuntimeError):
@@ -120,6 +120,7 @@ def snapshot(path, *, required_from, today=None, now=None):
                 'latest_preserved_day_timestamp_seconds': latest,
                 'partial_replica_days': sum(bool(r['summary']['samples']['unknown']) for r in rows),
                 'search_series_unobserved_days': sum(r['summary']['search_archive']['status'] != 'preserved' for r in rows),
+                'news_series_unobserved_days': sum(r['summary']['news_archive']['status'] != 'preserved' for r in rows),
                 'required_days': len(wanted), 'missing_required_days': len(wanted - observed)}
     finally:
         os.close(lock)
