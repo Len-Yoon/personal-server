@@ -110,7 +110,7 @@ CI는 변경 목록과 서비스 테스트 결과로 정책 증적을 생성·�
 | `k8s-shard-evidence` | 같은 결과를 각 worker와 집계에서 대조함 | worker 누락·잘못된 보고서는 실패함 |
 | `verification-quality-evidence` | `coverage.json`, `quality.json`, `quality.txt`의 원본·문장/분기·변이 결과 | 아래에 고정한 일부 위험 경계의 검사임 |
 
-`quality` CI job은 문서 전용 변경을 제외한 변경에서 필수 실행하며, summary가 결과 성공을 요구함. 실패 시에도 artifact 업로드를 시도함. 분기 측정은 [coverage.py의 branch 방식](https://coverage.readthedocs.io/en/7.16.2/branch.html)을 사용하고, 도구 버전·기존 테스트 ID·측정 대상·하한은 [고정 설정](../tests/verification_quality.json)과 [고정 의존성](../tests/requirements.quality.txt)에서 대조함.
+`quality` CI job은 Portal 단일 서비스 변경과 전체 검사 범위에서 필수 실행함. 브라우저 검사는 단일 서비스 범위에서 Portal·Book·YouTube 중 해당 서비스만 실행함. 문서 전용 변경과 관련 없는 단일 서비스 변경은 두 작업을 계획적으로 생략하며, 공용·인프라·의존성·미분류 변경은 전체 검사를 유지함. summary는 선택된 작업의 성공과 예정된 생략을 구분하고 필수 작업의 누락·실패·취소·잘못된 선택을 거부함. 실패 시에도 artifact 업로드를 시도함. 분기 측정은 [coverage.py의 branch 방식](https://coverage.readthedocs.io/en/7.16.2/branch.html)을 사용하고, 도구 버전·기존 테스트 ID·측정 대상·하한은 [고정 설정](../tests/verification_quality.json)과 [고정 의존성](../tests/requirements.quality.txt)에서 대조함.
 
 ```sh
 python3 tests/run_ci_tests.py --suite maintenance --evidence /tmp/maintenance-results.json --fail-on-skip

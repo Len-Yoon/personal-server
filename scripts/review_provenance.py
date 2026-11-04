@@ -152,10 +152,24 @@ def _read_command(command: str) -> bool:
 def collect_activity(repo: Path, sessions: list[Path], history: set[str]) -> dict:
     identities, events, written, contributors = {}, {}, set(), set()
     potential = set()
-    def record(principal, event_id, value):
+    mcp_identities, event_kinds = {}, {}
+    def record(principal, event_id, value, mcp_kind=None, mcp_identity=None):
         if not isinstance(event_id, str) or not event_id or len(event_id) > 1024:
             raise EvidenceError("review_event_id_invalid")
-        key, digest = (principal, event_id), _hash(value)
+        execution_key = (principal, event_id)
+        kinds = event_kinds.setdefault(execution_key, set())
+        if kinds and ((mcp_kind is None) != (None in kinds)):
+            raise EvidenceError("review_event_id_reused")
+        if mcp_kind is not None:
+            identity = _hash(mcp_identity)
+            if execution_key in mcp_identities and mcp_identities[execution_key] != identity:
+                raise EvidenceError("review_event_id_reused")
+            mcp_identities[execution_key] = identity
+        kinds.add(mcp_kind)
+        # A request and its completion are distinct raw records of one MCP
+        # execution. Retain both, including completion results, after matching
+        # their exact tool identity and decoded arguments above.
+        key, digest = (principal, event_id, mcp_kind or "event"), _hash(value)
         if key in events and events[key] != digest:
             raise EvidenceError("review_event_id_reused")
         events[key] = digest
@@ -266,7 +280,26 @@ def collect_activity(repo: Path, sessions: list[Path], history: set[str]) -> dic
                         "request_user_input", "request_user_input_async"}
                 ):
                     potential.add(principal)
-                    record(principal, event.get("id", payload.get("call_id")), ["unsupported_execution", event or payload])
+                    mcp_kind, mcp_identity = None, None
+                    if event.get("type") == "McpToolCall":
+                        server, tool, arguments = event.get("server"), event.get("tool"), event.get("arguments")
+                        if (isinstance(server, str) and server and isinstance(tool, str)
+                                and tool and all(tool.split(".")) and isinstance(arguments, dict)):
+                            mcp_kind, mcp_identity = "mcp_completion", [server, tool, arguments]
+                    elif (item.get("type") == "response_item" and payload.get("type") == "function_call"
+                          and isinstance(payload.get("namespace"), str)
+                          and payload["namespace"].startswith("mcp__")):
+                        try:
+                            arguments = json.loads(payload["arguments"])
+                        except (ValueError, KeyError, TypeError):
+                            arguments = None
+                        parts = payload["namespace"].split("__")
+                        if (isinstance(arguments, dict) and isinstance(payload.get("name"), str)
+                                and payload["name"] and all(parts)):
+                            tool = ".".join([*parts[2:], payload["name"]])
+                            mcp_kind, mcp_identity = "mcp_request", [parts[1], tool, arguments]
+                    record(principal, event.get("id", payload.get("call_id")),
+                           ["unsupported_execution", event or payload], mcp_kind, mcp_identity)
         if principal is None:
             raise EvidenceError("review_identity_missing")
         for event_id, digest in pending.items():

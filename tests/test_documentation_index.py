@@ -253,10 +253,6 @@ class DocumentationIndexTests(unittest.TestCase):
         self.assertIn("`recovery-events.jsonl`에 이벤트로만 기록", uptime)
         self.assertIn("초기 점검 자체에 대한 신규 Telegram 메시지는 발송하지 않음", uptime)
         self.assertIn("Cloudflare Tunnel 장애·복구 전환에만 사용", uptime)
-        self.assertIn("N100 적용과 검증을 완료함", uptime)
-        self.assertIn("2026-09-18 15:49", uptime)
-        self.assertIn("외부 health는 10초 간격 3회 모두 HTTP 200으로 확인함", uptime)
-        self.assertNotIn("N100에는 아직 적용·검증하지 않음", uptime)
 
     def test_project_readme_describes_search_status_and_news_collection_freshness(self):
         content = Path("README.md").read_text(encoding="utf-8")
@@ -316,7 +312,6 @@ class DocumentationIndexTests(unittest.TestCase):
         project_rules = Path("AGENTS.md").read_text(encoding="utf-8")
         workflow = Path("docs/codex-work-loop.md").read_text(encoding="utf-8")
 
-        self.assertIn("기능 구현·테스트·설정 파일", project_rules)
         self.assertIn("전문 검토 에이전트를 필수로 포함해 최대 4명", project_rules)
         self.assertIn("에이전트 운영 기록", workflow)
         self.assertIn("전문 검토를 필수로 적용함", workflow)

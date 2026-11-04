@@ -11,7 +11,9 @@
     "name": "system-agent",
     "python_version": "3.12",
     "requirements": "system-agent/requirements.txt",
-    "extra_packages": [],
+    "extra_packages": [
+      "httpx==0.28.1"
+    ],
     "pythonpath": "system-agent",
     "test_command": "python3 -m unittest tests.system_agent.test_metrics tests.system_agent.test_backup_evidence"
   },
@@ -19,7 +21,9 @@
     "name": "crawler-worker",
     "python_version": "3.11",
     "requirements": "crawler-worker/requirements.txt",
-    "extra_packages": [],
+    "extra_packages": [
+      "httpx==0.28.1"
+    ],
     "pythonpath": "crawler-worker",
     "test_command": "python3 -m unittest tests.crawler_worker.test_datetime_format tests.crawler_worker.test_failure_boundaries tests.crawler_worker.test_investing_news_rss tests.crawler_worker.test_nasdaq_relevance tests.crawler_worker.test_news_collection_metrics tests.crawler_worker.test_news_collection_status tests.crawler_worker.test_news_scheduler tests.crawler_worker.test_news_service tests.crawler_worker.test_news_routes tests.crawler_worker.test_rss_news tests.crawler_worker.test_telegram_notifier tests.crawler_worker.test_readiness"
   },
@@ -27,7 +31,9 @@
     "name": "homeops-executor",
     "python_version": "3.12",
     "requirements": "homeops-executor/requirements.txt",
-    "extra_packages": [],
+    "extra_packages": [
+      "httpx==0.28.1"
+    ],
     "pythonpath": "homeops-executor",
     "test_command": "python3 -m unittest tests.homeops_executor.test_docker_ops tests.homeops_executor.test_managed_scope tests.homeops_executor.test_restart_idempotency"
   },

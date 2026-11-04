@@ -1,10 +1,21 @@
 import importlib
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 from tests._test_support import prepare_service_import
+
+
+class FileExplorerClientTests(unittest.TestCase):
+    def test_file_explorer_client_behaviors(self):
+        result = subprocess.run(
+            ["node", "--test", "tests/file_explorer_client.test.mjs"],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class FileManagementTests(unittest.TestCase):

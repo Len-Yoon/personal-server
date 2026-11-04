@@ -3,6 +3,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+import shutil
 from pathlib import Path
 from tests.test_homeops_auth_bootstrap import secret_reader_fixture
 
@@ -20,6 +21,74 @@ CRAWLER_REQUIREMENTS = (ROOT / "crawler-worker" / "requirements.txt").read_text(
 
 
 class DeployN100Tests(unittest.TestCase):
+    REVISION = "a" * 40
+
+    def prepare_deploy(self, root, fake_bin):
+        shutil.copytree(ROOT / "scripts", root / "scripts")
+        contract = root / "infra" / "k8s" / "tools"
+        contract.mkdir(parents=True)
+        shutil.copy2(ROOT / "infra" / "k8s" / "tools" / "homeops-auth-contract.py", contract)
+        (fake_bin / "git").write_text(
+            "#!/bin/sh\ncase \"$*\" in\n"
+            f"'rev-parse --show-toplevel') printf '%s\\n' '{root}' ;;\n"
+            "'symbolic-ref --quiet --short HEAD') printf 'main\\n' ;;\n"
+            f"'rev-parse HEAD'|'rev-parse refs/remotes/origin/main') printf '{self.REVISION}\\n' ;;\n"
+            "'status --porcelain --untracked-files=normal') exit 0 ;;\n"
+            "*) exit 1 ;;\nesac\n", encoding="utf-8",
+        )
+
+    def test_manual_deploy_guards_preserve_real_git_and_files_before_docker(self):
+        for scenario in ("missing", "malformed", "wrong_revision", "branch", "detached",
+                         "remote", "staged", "unstaged", "untracked", "mixed_checkout",
+                         "missing_env", "missing_data", "ready"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                shutil.copytree(ROOT / "scripts", root / "scripts")
+                (root / ".gitignore").write_text(".env\ndata/\nbin/\ncalls\n")
+                (root / ".env").write_text("fixture=true\n")
+                (root / "data").mkdir()
+                (root / "sentinel").write_text("original\n")
+                fake_bin = root / "bin"
+                fake_bin.mkdir()
+                calls = root / "calls"
+                (fake_bin / "docker").write_text(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\nexit 42\n")
+                (fake_bin / "docker").chmod(0o755)
+
+                def git(*args):
+                    return subprocess.check_output(["git", "-C", str(root), *args], stderr=subprocess.DEVNULL, text=True).strip()
+
+                git("init", "-b", "main")
+                git("add", ".")
+                git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                    "-c", "core.hooksPath=/dev/null", "commit", "-m", "fixture")
+                revision = git("rev-parse", "HEAD")
+                git("update-ref", "refs/remotes/origin/main", revision)
+                args = [str(root), revision]
+                script = root / "scripts" / "deploy-n100.sh"
+                if scenario == "missing": args.pop()
+                elif scenario == "malformed": args[-1] = "main"
+                elif scenario == "wrong_revision": args[-1] = "0" * 40
+                elif scenario == "branch": git("checkout", "-b", "feature")
+                elif scenario == "detached": git("checkout", "--detach")
+                elif scenario == "remote": git("update-ref", "-d", "refs/remotes/origin/main")
+                elif scenario in ("staged", "unstaged"):
+                    (root / "sentinel").write_text("preserve this change\n")
+                    if scenario == "staged": git("add", "sentinel")
+                elif scenario == "untracked": (root / "untracked").write_text("preserve this file\n")
+                elif scenario == "mixed_checkout": script = ROOT / "scripts" / "deploy-n100.sh"
+                elif scenario == "missing_env": (root / ".env").unlink()
+                elif scenario == "missing_data": (root / "data").rmdir()
+                before = (git("rev-parse", "HEAD"), git("status", "--porcelain"), (root / "sentinel").read_bytes())
+                result = subprocess.run(["bash", str(script), *args], capture_output=True, text=True,
+                    env={**os.environ, "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+                         "CALLS": str(calls), "DOCKER_WAIT_ATTEMPTS": "1", "DOCKER_WAIT_SECONDS": "0"})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls.exists(), scenario == "ready", result.stderr)
+                if scenario == "ready": self.assertEqual(calls.read_text(), "info\n")
+                self.assertEqual(before, (git("rev-parse", "HEAD"), git("status", "--porcelain"), (root / "sentinel").read_bytes()))
+                if scenario == "untracked": self.assertEqual((root / "untracked").read_text(), "preserve this file\n")
+
     def test_deploy_workflow_classifies_the_exact_push_range_before_runner_allocation(self):
         changes_job = WORKFLOW.split("\n  deploy:", maxsplit=1)[0]
 
@@ -127,10 +196,12 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("tests.test_deploy_n100", commands)
 
     def test_homeops_executor_test_client_dependency_is_pinned(self):
-        self.assertIn("httpx==0.28.1", HOMEOPS_REQUIREMENTS)
+        self.assertNotIn("httpx", HOMEOPS_REQUIREMENTS)
+        self.assertIn("httpx==0.28.1", next(item for item in CI_TEST_MATRIX if item["name"] == "homeops-executor")["extra_packages"])
 
     def test_crawler_worker_test_client_dependency_is_pinned(self):
-        self.assertIn("httpx==0.28.1", CRAWLER_REQUIREMENTS)
+        self.assertNotIn("httpx", CRAWLER_REQUIREMENTS)
+        self.assertIn("httpx==0.28.1", next(item for item in CI_TEST_MATRIX if item["name"] == "crawler-worker")["extra_packages"])
 
     def test_deploy_workflow_delegates_health_and_rollback_to_safe_entrypoint(self):
         deploy_job = WORKFLOW.split("\n  deploy:", maxsplit=1)[1]
@@ -213,7 +284,7 @@ class DeployN100Tests(unittest.TestCase):
             calls = root / "calls"
             fake_bin = root / "bin"
             fake_bin.mkdir()
-            (fake_bin / "git").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            self.prepare_deploy(root, fake_bin)
             (fake_bin / "docker").write_text(
                 "#!/bin/sh\n"
                 f"printf '%s|%s\\n' \"${{DOCKER_BRIDGE_GATEWAY:-unset}}\" \"$*\" >> '{calls}'\n"
@@ -225,7 +296,7 @@ class DeployN100Tests(unittest.TestCase):
                 tool.chmod(0o755)
 
             result = subprocess.run(
-                ["bash", str(ROOT / "scripts" / "deploy-n100.sh"), str(root)],
+                ["bash", str(root / "scripts" / "deploy-n100.sh"), str(root), self.REVISION],
                 env={**os.environ, "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"]},
                 capture_output=True,
                 text=True,
@@ -252,7 +323,7 @@ class DeployN100Tests(unittest.TestCase):
             calls = root / "calls"
             fake_bin = root / "bin"
             fake_bin.mkdir()
-            (fake_bin / "git").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            self.prepare_deploy(root, fake_bin)
             (fake_bin / "python3").write_text(
                 "#!/bin/sh\n"
                 "printf '%s\\n' crawler-worker=compose youtube-memo=compose book-memo=k3s\n",
@@ -284,7 +355,7 @@ class DeployN100Tests(unittest.TestCase):
                 tool.chmod(0o755)
 
             result = subprocess.run(
-                ["bash", str(ROOT / "scripts" / "deploy-n100.sh"), str(root)],
+                ["bash", str(root / "scripts" / "deploy-n100.sh"), str(root), self.REVISION],
                 env={**os.environ, "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"]},
                 capture_output=True,
                 text=True,
@@ -312,7 +383,7 @@ class DeployN100Tests(unittest.TestCase):
             calls = root / "calls"
             fake_bin = root / "bin"
             fake_bin.mkdir()
-            (fake_bin / "git").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            self.prepare_deploy(root, fake_bin)
             (fake_bin / "python3").write_text(
                 "#!/bin/sh\n"
                 "printf '%s\\n' crawler-worker=compose youtube-memo=k3s book-memo=k3s\n",
@@ -349,7 +420,7 @@ class DeployN100Tests(unittest.TestCase):
                 tool.chmod(0o755)
 
             result = subprocess.run(
-                ["bash", str(ROOT / "scripts" / "deploy-n100.sh"), str(root)],
+                ["bash", str(root / "scripts" / "deploy-n100.sh"), str(root), self.REVISION],
                 env={**os.environ, "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"]},
                 capture_output=True,
                 text=True,
@@ -379,7 +450,7 @@ class DeployN100Tests(unittest.TestCase):
             calls = root / "calls"
             fake_bin = root / "bin"
             fake_bin.mkdir()
-            (fake_bin / "git").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            self.prepare_deploy(root, fake_bin)
             (fake_bin / "python3").write_text(
                 "#!/bin/sh\n"
                 "printf '%s\\n' crawler-worker=compose youtube-memo=k3s book-memo=compose\n",
@@ -401,7 +472,7 @@ class DeployN100Tests(unittest.TestCase):
                 tool.chmod(0o755)
 
             result = subprocess.run(
-                ["bash", str(ROOT / "scripts" / "deploy-n100.sh"), str(root)],
+                ["bash", str(root / "scripts" / "deploy-n100.sh"), str(root), self.REVISION],
                 env={**os.environ, "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"]},
                 capture_output=True,
                 text=True,
@@ -436,7 +507,7 @@ class DeployN100Tests(unittest.TestCase):
             calls = root / "calls"
             fake_bin = root / "bin"
             fake_bin.mkdir()
-            (fake_bin / "git").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            self.prepare_deploy(root, fake_bin)
             (fake_bin / "docker").write_text(
                 "#!/bin/sh\n"
                 f"printf '%s\\n' \"$*\" >> '{calls}'\n",
@@ -446,7 +517,7 @@ class DeployN100Tests(unittest.TestCase):
                 tool.chmod(0o755)
 
             result = subprocess.run(
-                ["bash", str(ROOT / "scripts" / "deploy-n100.sh"), str(root)],
+                ["bash", str(root / "scripts" / "deploy-n100.sh"), str(root), self.REVISION],
                 env={**os.environ, "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"]},
                 capture_output=True,
                 text=True,
@@ -469,14 +540,14 @@ class DeployN100Tests(unittest.TestCase):
         self.assertIn("Verify N100 deployment directory", WORKFLOW)
         self.assertIn("if not exist", WORKFLOW)
 
-    def test_deploy_script_resets_and_restarts_compose_stack(self):
+    def test_deploy_script_preserves_source_and_restarts_explicit_compose_services(self):
         self.assertNotIn(b"\r\n", (ROOT / "scripts" / "deploy-n100.sh").read_bytes())
-        self.assertIn('test -d "$PROJECT_ROOT/.git"', SCRIPT)
+        self.assertIn("git rev-parse --show-toplevel", SCRIPT)
         self.assertIn('test -f "$PROJECT_ROOT/.env"', SCRIPT)
         self.assertIn('test -d "$PROJECT_ROOT/data"', SCRIPT)
         self.assertIn("docker compose -f docker-compose.yml -f docker-compose.n100.yml config", SCRIPT)
-        self.assertIn("git fetch --prune origin", SCRIPT)
-        self.assertIn("git reset --hard origin/main", SCRIPT)
+        self.assertNotIn("git fetch", SCRIPT)
+        self.assertNotIn("git reset", SCRIPT)
         self.assertIn("wait_for_docker", SCRIPT)
         self.assertIn("docker info", SCRIPT)
         self.assertIn("DOCKER_WAIT_ATTEMPTS", SCRIPT)

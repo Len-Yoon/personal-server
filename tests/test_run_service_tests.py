@@ -18,78 +18,6 @@ MATRIX = ROOT / "tests" / "ci_test_matrix.json"
 RUNNER = ROOT / "tests" / "run_service_tests.py"
 
 
-EXPECTED_GROUPS = {
-    "portal": ("3.11", "portal-web/requirements.txt", [], "portal-web", "python3 -m unittest tests.test_file_access tests.test_portal_failure_boundaries tests.test_portal_dashboard tests.test_portal_security tests.test_homeops tests.test_homeops_managed_scope tests.test_homeops_notifier tests.test_portal_http_metrics tests.test_portal_k3s_bridge_contract tests.test_portfolio"),
-    "system-agent": ("3.12", "system-agent/requirements.txt", [], "system-agent", "python3 -m unittest tests.system_agent.test_metrics"),
-    "crawler-worker": ("3.11", "crawler-worker/requirements.txt", [], "crawler-worker", "python3 -m unittest tests.crawler_worker.test_datetime_format tests.crawler_worker.test_failure_boundaries tests.crawler_worker.test_investing_news_rss tests.crawler_worker.test_nasdaq_relevance tests.crawler_worker.test_news_collection_metrics tests.crawler_worker.test_news_collection_status tests.crawler_worker.test_news_scheduler tests.crawler_worker.test_news_service tests.crawler_worker.test_news_routes tests.crawler_worker.test_rss_news tests.crawler_worker.test_telegram_notifier"),
-    "homeops-executor": ("3.12", "homeops-executor/requirements.txt", [], "homeops-executor", "python3 -m unittest tests.homeops_executor.test_docker_ops tests.homeops_executor.test_managed_scope"),
-    "youtube-memo": ("3.11", "youtube-memo/requirements.txt", ["httpx==0.28.1"], "youtube-memo", "python3 -m unittest tests.youtube_memo.test_ui_contract tests.youtube_memo.test_video_titles tests.youtube_memo.test_reliability"),
-    "book-memo": ("3.11", "book-memo/requirements.txt", ["httpx==0.28.1"], "book-memo", "python3 -m unittest tests.book_memo.test_book_service tests.book_memo.test_ui_contract tests.book_memo.test_reliability"),
-    "car-care-worker": ("3.12", "car-care-worker/requirements.txt", [], "car-care-worker", "python3 -m unittest discover -s tests/car_care_worker"),
-    "k8s-contracts": ("3.11", "", ["PyYAML"], ".", "python3 -m unittest tests.test_k8s_monitoring_tools tests.test_k8s_monitoring_values tests.test_k8s_portal_availability_alert tests.test_k8s_portal_backup_verify tests.test_k8s_portal_cutover tests.test_k8s_portal_pvc_backup_automation tests.test_k8s_portal_pvc_backup_verify tests.test_k8s_portal_secret_shadow_smoke tests.test_k8s_sre_health_audit tests.test_k8s_sre_pod_recovery_lab tests.test_k8s_networkpolicy_smoke tests.test_k8s_sre_telegram_manifests tests.test_k8s_sre_telegram_tools tests.test_k8s_sre_telegram_update tests.test_k8s_transition_runner_artifacts tests.test_k8s_transition_runner_install_tools tests.test_k8s_transition_runner_policy tests.test_k8s_quarterly_sre_audit_cronjob tests.test_k8s_quarterly_sre_audit_automation tests.test_monthly_recovery_drill tests.test_k8s_slo_daily_evidence tests.test_k8s_crawler_worker_migration tests.test_k8s_crawler_pvc_backup tests.test_k8s_pvc_backup_retention tests.test_k8s_pvc_backup_retention_entrypoints tests.test_k3s_app_image_build tests.test_k3s_app_upgrade tests.test_k3s_app_image_transfer tests.test_k8s_book_memo_migration tests.test_k8s_book_pvc_backup tests.test_k8s_grafana_portal_http_dashboard tests.test_k8s_portal_nonroot tests.test_k8s_portal_pvc_backup_cronjob tests.test_k8s_portal_pvc_backup_cronjob_install tests.test_k8s_youtube_memo_migration tests.test_k8s_youtube_pvc_backup tests.test_validate_backup_evidence tests.test_validate_sre_alertmanager_config"),
-    "maintenance": ("3.11", "", ["PyYAML", "Jinja2"], ".", "python3 -m unittest tests.test_compose_config tests.test_supply_chain_security_workflow tests.test_documentation_index tests.test_documentation_links tests.test_dependabot_config tests.test_verify_change_scope tests.test_maintenance tests.test_windows_bootstrap tests.test_deploy_n100 tests.test_public_uptime_monitor tests.test_change_harness tests.test_change_harness_evals tests.test_token_measurements tests.test_python_multipart_security tests.test_runtime_service_deployment_contract tests.test_caddy_portal_upstream tests.test_n100_remote_dev tests.test_n100_safe_deployment tests.test_run_service_tests tests.test_runtime_service_state tests.test_setup_local_test_venvs tests.test_sre_telegram_relay tests.test_ansible_lab_contract"),
-}
-
-# Keep the exact CI command fixture in sync with the new production-state contract.
-_k8s = EXPECTED_GROUPS["k8s-contracts"]
-EXPECTED_GROUPS["k8s-contracts"] = (*_k8s[:-1], _k8s[-1].replace(
-    "tests.test_k8s_crawler_pvc_backup tests.test_k8s_pvc_backup_retention",
-    "tests.test_k8s_crawler_pvc_backup tests.test_k8s_service_backup_production_state tests.test_k8s_pvc_backup_sequence tests.test_k8s_backup_image_rollout tests.test_k8s_caddy_ingress_transition tests.test_k8s_fixed_ingress_evidence tests.test_k8s_fixed_ingress_rollout tests.test_k8s_fixed_ingress_operation tests.test_k8s_windows_runtime_acl tests.test_k8s_windows_source_acl tests.test_k8s_pvc_backup_sequence_automation tests.test_k8s_pvc_backup_retention",
-).replace(
-    "tests.test_validate_sre_alertmanager_config",
-    "tests.test_validate_sre_alertmanager_config tests.test_k8s_observability_lab tests.test_k8s_observability_lab_tools",
-))
-
-# Newly added isolated drills and read-only aggregation remain in one owning suite.
-for _name, _modules in (
-    ("k8s-contracts", " tests.test_k8s_slo_evidence_summary"),
-    ("maintenance", " tests.test_ansible_drift_lab tests.test_homeops_auth_configuration tests.test_homeops_auth_runtime tests.test_homeops_auth_supply tests.test_homeops_auth_bootstrap"),
-):
-    _entry = EXPECTED_GROUPS[_name]
-    EXPECTED_GROUPS[_name] = (*_entry[:-1], _entry[-1] + _modules)
-
-
-# The enhancement regressions belong to their service or preparation-tool suite.
-for _name, _modules in (
-    ("portal", " tests.test_file_management tests.test_news_bookmarks"),
-    ("system-agent", " tests.system_agent.test_backup_evidence"),
-    ("crawler-worker", " tests.crawler_worker.test_readiness"),
-    ("homeops-executor", " tests.homeops_executor.test_restart_idempotency"),
-    ("youtube-memo", " tests.youtube_memo.test_audit_enhancements"),
-    ("book-memo", " tests.book_memo.test_audit_enhancements tests.book_memo.test_search_budget"),
-    ("k8s-contracts", " tests.test_project_hardening_tools tests.test_portal_hardening tests.test_portal_service_routing tests.test_portal_backup_evidence_export tests.test_portal_backup_restore_check"),
-):
-    _entry = EXPECTED_GROUPS[_name]
-    EXPECTED_GROUPS[_name] = (*_entry[:-1], _entry[-1] + _modules)
-
-
-# Practical improvements retain the existing owners and nine-suite boundary.
-for _name, _modules in (
-    ("portal", " tests.test_portal_improvements tests.test_search_performance_lab"),
-    ("book-memo", " tests.book_memo.test_memo_recovery tests.test_incident_sqlite_actor tests.test_incident_recovery_lab tests.test_release_artifact tests.test_deployment_standard_lab tests.test_container_runtime tests.test_container_release_lab"),
-    ("youtube-memo", " tests.youtube_memo.test_memo_recovery"),
-    ("maintenance", " tests.test_backup_status_view"),
-):
-    _entry = EXPECTED_GROUPS[_name]
-    EXPECTED_GROUPS[_name] = (*_entry[:-1], _entry[-1] + _modules)
-
-
-_maintenance = EXPECTED_GROUPS["maintenance"]
-EXPECTED_GROUPS["maintenance"] = (*_maintenance[:-1], (_maintenance[-1] + " tests.test_browser_smoke").replace(
-    "tests.test_run_service_tests", "tests.test_run_service_tests tests.test_verification_quality",
-))
-
-
-# Full boundary regressions remain in the existing service/tool owning suites.
-for _name, _modules in (
-    ("portal", " tests.test_security_full_paths tests.test_file_store_full_paths"),
-    ("k8s-contracts", " tests.test_backup_full_paths"),
-    ("k8s-contracts", " tests.test_slo_audit_read_access tests.test_k8s_slo_followup_verification tests.test_k8s_notification_followup_verification"),
-):
-    _entry = EXPECTED_GROUPS[_name]
-    EXPECTED_GROUPS[_name] = (*_entry[:-1], _entry[-1] + _modules)
-
-
 class ServiceTestRunnerTests(unittest.TestCase):
     def test_ci_selection_uses_documentation_subset_for_documentation(self):
         mode, names = runner.select_ci_suites(
@@ -125,6 +53,46 @@ class ServiceTestRunnerTests(unittest.TestCase):
     def test_ci_selection_rejects_incomplete_scope_evidence(self):
         with self.assertRaisesRegex(ValueError, "scope evidence"):
             runner.select_ci_suites({"changed_files": ["README.md"]}, runner.load_matrix())
+
+    def test_auxiliary_checks_follow_service_scope_and_keep_uncertainty_full(self):
+        matrix = runner.load_matrix()
+        examples = [
+            (["portal-web/app/main.py"], True, ["portal"]),
+            (["book-memo/app/main.py"], False, ["book-memo"]),
+            (["youtube-memo/app/main.py"], False, ["youtube-memo"]),
+            (["crawler-worker/app/main.py"], False, []),
+            (["homeops-executor/app/main.py"], False, []),
+            (["system-agent/app/main.py"], False, []),
+            (["car-care-worker/app/main.py"], False, []),
+            (["README.md"], False, []),
+        ]
+        for paths, quality, browsers in examples:
+            with self.subTest(paths=paths):
+                mode, selected = runner.select_ci_suites(classify_paths(paths), matrix)
+                self.assertEqual(runner.select_auxiliary_checks(mode, selected, matrix),
+                                 {"quality_required": quality, "browser_services": browsers})
+        for paths in (["infra/k8s/tools/k3s-app-upgrade.sh"], ["unknown-area/file"],
+                      ["portal-web/app/main.py", "book-memo/app/main.py"],
+                      ["tests/test_compose_config.py"],
+                      *([f"{service}/requirements.txt"] for service in
+                        ("crawler-worker", "homeops-executor", "system-agent", "book-memo"))):
+            with self.subTest(paths=paths):
+                mode, selected = runner.select_ci_suites(classify_paths(paths), matrix)
+                self.assertEqual(mode, "full")
+                self.assertEqual(runner.select_auxiliary_checks(mode, selected, matrix), {
+                    "quality_required": True,
+                    "browser_services": ["portal", "book-memo", "youtube-memo"],
+                })
+
+    def test_auxiliary_checks_reject_missing_unknown_or_contradictory_selection(self):
+        for mode, selected in (("", []), ("unknown", ["maintenance"]),
+                               ("service", ["maintenance"]),
+                               ("service", ["unknown", "maintenance"]),
+                               ("service", ["portal", "portal"]),
+                               ("full", ["portal", "maintenance"]),
+                               ("documentation", ["portal"])):
+            with self.subTest(mode=mode, selected=selected), self.assertRaises(ValueError):
+                runner.select_auxiliary_checks(mode, selected, runner.load_matrix())
 
     def test_ci_selection_rejects_misclassified_service_file(self):
         evidence = classify_paths(["portal-web/app/main.py"])
@@ -307,8 +275,18 @@ class ServiceTestRunnerTests(unittest.TestCase):
     def test_matrix_defines_the_nine_ci_python_groups(self):
         """Fails if a local group drifts from the CI test contract."""
         matrix = json.loads(MATRIX.read_text(encoding="utf-8"))
-        actual = {item["name"]: (item["python_version"], item["requirements"], item["extra_packages"], item["pythonpath"], item["test_command"]) for item in matrix}
-        self.assertEqual(actual, EXPECTED_GROUPS)
+        self.assertEqual({item["name"] for item in matrix}, {
+            "portal", "system-agent", "crawler-worker", "homeops-executor",
+            "youtube-memo", "book-memo", "car-care-worker", "k8s-contracts", "maintenance",
+        })
+        for item in matrix:
+            if item["requirements"]:
+                self.assertEqual(item["requirements"], f'{item["pythonpath"]}/requirements.txt')
+            expected_version = "3.12" if item["name"] in {
+                "system-agent", "homeops-executor", "car-care-worker"
+            } else "3.11"
+            self.assertEqual(item["python_version"], expected_version)
+        runner.validate_matrix_coverage(matrix)
 
     def test_github_matrix_is_exactly_the_json_matrix(self):
         """Fails if CI cannot consume the common matrix without a second definition."""

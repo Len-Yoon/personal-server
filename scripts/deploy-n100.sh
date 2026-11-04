@@ -10,15 +10,31 @@ if [[ ! -d "$PROJECT_ROOT" ]]; then
 fi
 
 PROJECT_ROOT="$(cd "$PROJECT_ROOT" && pwd)"
-
-source "$SCRIPT_DIR/runtime-service-state.sh"
-
-test -d "$PROJECT_ROOT/.git" || { echo "Git 저장소가 아닙니다: $PROJECT_ROOT" >&2; exit 1; }
+APPROVED_REVISION="${2:-}"
+if [[ $# -ne 2 || ! "$APPROVED_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "사용법: deploy-n100.sh <저장소> <CI 성공과 배포 승인을 확인한 40자리 커밋>" >&2
+  exit 1
+fi
+cd "$PROJECT_ROOT"
+if [[ "$SCRIPT_DIR" != "$PROJECT_ROOT/scripts" ||
+      "$(git rev-parse --show-toplevel 2>/dev/null)" != "$PROJECT_ROOT" ||
+      "$(git symbolic-ref --quiet --short HEAD)" != main ||
+      "$(git rev-parse HEAD)" != "$APPROVED_REVISION" ||
+      "$(git rev-parse refs/remotes/origin/main)" != "$APPROVED_REVISION" ]]; then
+  echo "승인 커밋으로 동기화된 main 저장소에서 해당 저장소의 배포 도구를 실행해야 합니다." >&2
+  exit 1
+fi
+# Never synchronize or discard files from a deployment entrypoint. Untracked
+# build inputs also require review; leave every file intact when refusing.
+if ! workspace_status=$(git status --porcelain --untracked-files=normal) || [[ -n "$workspace_status" ]]; then
+  echo "작업공간 변경이 있어 배포를 중단합니다. 파일을 자동 정리하거나 덮어쓰지 않습니다." >&2
+  exit 1
+fi
 test -f "$PROJECT_ROOT/.env" || { echo ".env가 없습니다: $PROJECT_ROOT/.env" >&2; exit 1; }
 test -d "$PROJECT_ROOT/data" || { echo "data 디렉터리가 없습니다: $PROJECT_ROOT/data" >&2; exit 1; }
 command -v docker >/dev/null 2>&1 || { echo "docker 명령을 찾을 수 없습니다." >&2; exit 1; }
 
-cd "$PROJECT_ROOT"
+source "$SCRIPT_DIR/runtime-service-state.sh"
 
 DOCKER_WAIT_ATTEMPTS="${DOCKER_WAIT_ATTEMPTS:-18}"
 DOCKER_WAIT_SECONDS="${DOCKER_WAIT_SECONDS:-10}"
@@ -244,8 +260,6 @@ deploy_runtime_services() {
 wait_for_docker
 docker compose version >/dev/null
 
-git fetch --prune origin
-git reset --hard origin/main
 load_portal_runtime_mode
 load_runtime_service_modes
 deploy_runtime_services

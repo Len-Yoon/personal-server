@@ -3,6 +3,10 @@ import importlib.util
 from pathlib import Path
 from contextlib import redirect_stderr
 import io
+import json
+import os
+import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -17,6 +21,45 @@ def runner():
 
 
 class MemoBrowserSmokeContracts(unittest.TestCase):
+    def test_ci_runs_only_selected_memo_browsers_and_propagates_failure(self):
+        import yaml
+        jobs = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())['jobs']
+        step = next(step for step in jobs['browser']['steps']
+                    if step['name'] == 'Run Book and YouTube browser regressions')
+        portal = next(step for step in jobs['browser']['steps']
+                      if step['name'] == 'Run Portal browser regression')
+        self.assertEqual(jobs['browser']['if'], "needs.scope.outputs.browser_required == 'true'")
+        self.assertEqual(portal['if'], "contains(fromJSON(needs.scope.outputs.browser_services), 'portal')")
+        self.assertEqual(step['if'], "contains(fromJSON(needs.scope.outputs.browser_services), 'book-memo') || contains(fromJSON(needs.scope.outputs.browser_services), 'youtube-memo')")
+        for services, failure, expected in ((['book-memo'], False, 0),
+                                            (['youtube-memo'], False, 0),
+                                            (['portal', 'book-memo', 'youtube-memo'], False, 0),
+                                            (['book-memo'], True, 1),
+                                            (['portal'], False, 1),
+                                            (['external-service'], False, 1),
+                                            (['book-memo', 'book-memo'], False, 1)):
+            with self.subTest(services=services, failure=failure), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                runner_path = base / 'tests/browser/run_memo_smoke.py'
+                runner_path.parent.mkdir(parents=True)
+                runner_path.write_text(
+                    'import json, os, pathlib, sys\n'
+                    'pathlib.Path("arguments.json").write_text(json.dumps(sys.argv[1:]))\n'
+                    'raise SystemExit(int(os.environ["FAIL_BROWSER"]))\n')
+                result = subprocess.run(['bash', '-e'], input=step['run'], cwd=base,
+                                        env={**os.environ, 'BROWSER_SERVICES': json.dumps(services),
+                                             'FAIL_BROWSER': str(int(failure))},
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, expected == 0, result.stderr)
+                arguments = base / 'arguments.json'
+                if set(services) <= {'portal', 'book-memo', 'youtube-memo'} and services != ['portal'] and len(set(services)) == len(services):
+                    self.assertEqual(json.loads(arguments.read_text()),
+                                     ['--artifacts', 'browser-artifacts',
+                                      *[value for service in services if service != 'portal'
+                                        for value in ('--service', service)]])
+                else:
+                    self.assertFalse(arguments.exists())
+
     def test_only_exact_owned_http_origin_is_allowed(self):
         module = runner()
         base = 'http://127.0.0.1:12345'

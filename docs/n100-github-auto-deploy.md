@@ -128,11 +128,13 @@ Windows 작업 스케줄러 설정은 이 workflow와 별개로 유지됩니다.
 
 N100 PVC 백업용 rclone 자격 증명 등록은 별도의 일회성 수동 작업임. 입력값은 화면·로그·Git에 남기지 않으며, 등록 과정과 실행 과정에서 마스킹되어야 함. 이 자동 배포 workflow는 자격 증명을 읽거나 등록하지 않음.
 
-자동 배포 제외 대상 또는 긴급 수동 배포가 필요할 때는 승인된 운영 절차를 사용합니다. 기존 수동 Compose 배포가 필요한 경우에는 다음 명령을 사용합니다.
+자동 배포 제외 대상 또는 긴급 수동 배포가 필요할 때는 대상·동작이 승인된 운영 절차를 사용함. 기존 수동 Compose 배포 도구는 소스를 가져오거나 덮어쓰지 않음. 먼저 운영자가 정확한 커밋의 CI 성공·배포 승인·작업공간·hook을 확인하고 검증된 fast-forward 동기화를 별도로 완료해야 함. 아래 `승인된_40자리_커밋`은 그 커밋으로 대체함.
 
 ```powershell
-wsl.exe -d Ubuntu-24.04 -- bash -lc "cd /mnt/c/personal-server && bash ./scripts/deploy-n100.sh"
+wsl.exe -d Ubuntu-24.04 -- bash -lc "cd /mnt/c/personal-server && bash ./scripts/deploy-n100.sh /mnt/c/personal-server 승인된_40자리_커밋"
 ```
+
+도구는 해당 checkout의 실행기인지, `main`·`HEAD`·로컬 `origin/main`이 지정 커밋과 일치하는지, 추적·미추적 변경이 없는지 확인한 뒤 Docker에 접근함. 조건 불충족 시 파일과 서비스는 그대로 두고 중단함. 로컬 remote-tracking ref 대조는 원격 최신성이나 CI 성공을 증명하지 않으며, 운영자의 사전 확인을 대체하지 않음. 기존 K3s writer 제외·인증 공급·Caddy 경계는 유지함.
 
 ## 관련 파일
 

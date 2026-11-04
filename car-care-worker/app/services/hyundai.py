@@ -322,19 +322,3 @@ def _distance_km(payload: object) -> int | None:
         return None
     factors = {0: 0.0003048, 1: 1, 2: 0.001, 3: 1.609344}
     return int(value * factors[unit]) if unit in factors else None
-
-
-def _first_int(payload: dict, *names: str) -> int | None:
-    for name in names:
-        value = payload.get(name)
-        if isinstance(value, int) and not isinstance(value, bool):
-            return value
-    return None
-
-
-def _supported_warnings(raw_warnings: object) -> frozenset[str]:
-    if isinstance(raw_warnings, dict):
-        return frozenset(key for key, active in raw_warnings.items() if active and key in SUPPORTED_WARNINGS)
-    if isinstance(raw_warnings, list):
-        return frozenset(item for item in raw_warnings if isinstance(item, str) and item in SUPPORTED_WARNINGS)
-    return frozenset()
