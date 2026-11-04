@@ -619,8 +619,8 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn("python3 tests/run_ci_shards.py --workers 4 --evidence k8s-shards.json", workflow)
         self.assertIn('python3 tests/run_ci_tests.py --suite "${{ matrix.name }}" --evidence unit-test-results.json --fail-on-skip', workflow)
         self.assertIn("python3 tests/browser/run_smoke.py", workflow)
-        self.assertIn("python3 tests/browser/run_memo_smoke.py --artifacts browser-artifacts", workflow)
-        self.assertIn("if: needs.scope.outputs.mode != 'documentation'", workflow)
+        self.assertIn('"tests/browser/run_memo_smoke.py", "--artifacts", "browser-artifacts"', workflow)
+        self.assertIn("if: needs.scope.outputs.browser_required == 'true'", workflow)
         self.assertIn('test "${{ needs.browser.result }}" = "success"', workflow)
         self.assertIn('test "${{ needs.browser.result }}" = "skipped"', workflow)
         self.assertIn("python3 -m playwright install --with-deps chromium", workflow)
@@ -632,7 +632,7 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn('--evidence unit-test-results.json --fail-on-skip', unit["run"])
         self.assertNotIn("continue-on-error", unit)
         quality = jobs["quality"]
-        self.assertEqual(quality["if"], "needs.scope.outputs.mode != 'documentation'")
+        self.assertEqual(quality["if"], "needs.scope.outputs.quality_required == 'true'")
         self.assertIn("quality", jobs["summary"]["needs"])
         step = next(step for step in quality["steps"] if step["name"] == "Check branch coverage and mutation detection")
         self.assertEqual(step["run"], "python3 scripts/run_verification_quality.py --output-dir verification-quality-artifacts")
@@ -712,7 +712,7 @@ class ComposeConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "github-output"
             (Path(directory) / "ci-selection.json").write_text(json.dumps(selection))
-            env = {**os.environ, "GITHUB_OUTPUT": str(output)}
+            env = {**os.environ, "GITHUB_OUTPUT": str(output), "PYTHONPATH": str(ROOT)}
             completed = subprocess.run(["bash", "-e"], input=script, text=True, capture_output=True, env=env, cwd=directory)
             self.assertEqual(completed.returncode, 0, completed.stderr)
             values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
@@ -730,9 +730,42 @@ class ComposeConfigTests(unittest.TestCase):
                 output = base / "output"
                 result = subprocess.run(["bash", "-e"], input=step["run"], text=True,
                                         capture_output=True, cwd=base,
-                                        env={**os.environ, "GITHUB_OUTPUT": str(output)})
+                                        env={**os.environ, "GITHUB_OUTPUT": str(output), "PYTHONPATH": str(ROOT)})
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(output.read_text(), "")
+
+    def test_ci_matrix_outputs_match_required_auxiliary_jobs(self):
+        from tests import run_service_tests as runner
+        from scripts.verify_change_scope import classify_paths
+
+        jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
+        step = next(s for s in jobs["scope"]["steps"] if s["name"] == "Generate CI test matrix")
+        matrix = runner.load_matrix()
+        for path, quality, browsers in (
+            ("README.md", False, []),
+            ("portal-web/app/main.py", True, ["portal"]),
+            ("book-memo/app/main.py", False, ["book-memo"]),
+            ("youtube-memo/app/main.py", False, ["youtube-memo"]),
+            ("crawler-worker/app/main.py", False, []),
+            ("system-agent/app/main.py", False, []),
+            ("crawler-worker/requirements.txt", True, ["portal", "book-memo", "youtube-memo"]),
+            ("unclassified-file", True, ["portal", "book-memo", "youtube-memo"]),
+        ):
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as directory:
+                mode, selected = runner.select_ci_suites(classify_paths([path]), matrix)
+                selection = {"mode": mode, "selected_checks": selected,
+                             "include": [{"name": name} for name in selected]}
+                base = Path(directory)
+                (base / "ci-selection.json").write_text(json.dumps(selection))
+                output = base / "output"
+                result = subprocess.run(["bash", "-e"], input=step["run"], text=True,
+                                        capture_output=True, cwd=base,
+                                        env={**os.environ, "GITHUB_OUTPUT": str(output), "PYTHONPATH": str(ROOT)})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+                self.assertEqual(json.loads(values["quality_required"]), quality)
+                self.assertEqual(json.loads(values["browser_required"]), bool(browsers))
+                self.assertEqual(json.loads(values["browser_services"]), browsers)
 
     def test_ci_renders_context_from_the_same_json_without_rechecking_policy(self):
         from scripts.run_change_harness import format_agent_context, run_harness
@@ -768,15 +801,17 @@ class ComposeConfigTests(unittest.TestCase):
         script = next(s["run"] for s in jobs["summary"]["steps"] if s["name"] == "Enforce policy and service test results")
         healthy = {"steps.evidence.outputs.policy_status": "0", "steps.evidence.outputs.harness_status": "0",
                    "steps.evidence.outputs.context_status": "0", "needs.scope.result": "success",
-                   "needs.test.result": "success", "needs.scope.outputs.mode": "full",
+                   "needs.test.result": "success", "needs.scope.outputs.browser_required": "true",
+                   "needs.scope.outputs.quality_required": "true",
                    "needs.browser.result": "success", "needs.quality.result": "success"}
-        scenarios = [({**healthy}, True), ({**healthy, "needs.scope.outputs.mode": "documentation",
-                      "needs.browser.result": "skipped", "needs.quality.result": "skipped"}, True)]
+        scenarios = [({**healthy}, True), ({**healthy, "needs.scope.outputs.browser_required": "false",
+                      "needs.scope.outputs.quality_required": "false",
+                      "needs.browser.result": "skipped", "needs.quality.result": "skipped"}, True),
+                     ({**healthy, "needs.scope.outputs.quality_required": "false",
+                       "needs.quality.result": "skipped"}, True)]
         for key in ("needs.browser.result", "needs.quality.result"):
             scenarios.append(({**scenarios[1][0], key: "success"}, False))
         for key in healthy:
-            if key == "needs.scope.outputs.mode":
-                continue
             for value in (("1", "2", "") if key.startswith("steps.") else ("failure", "cancelled", "skipped", "")):
                 scenarios.append(({**healthy, key: value}, False))
         for values, expected in scenarios:

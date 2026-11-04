@@ -129,6 +129,7 @@ class Runtime:
         self.containers = []
         self.mounts = {}
         self.cleaning = False
+        self.failure = None
 
     def docker(self, arguments, *, allow_failure=False):
         remaining = (self.cleanup_deadline if self.cleaning else self.deadline) - self.clock()
@@ -139,6 +140,15 @@ class Runtime:
         except (OSError, subprocess.TimeoutExpired):
             raise SafetyError("Docker operation unavailable") from None
         if not allow_failure:
+            if result.returncode and self.failure is None:
+                # Preserve only fixed classifications, never Docker output,
+                # fixture contents, paths, or inherited environment values.
+                kinds = ("AssertionError", "PermissionError", "OperationalError", "CaptureError", "MemoryError")
+                kind = next((name for name in kinds if re.search(r"\b" + name + r"\b", result.stderr)), "unknown")
+                lines = re.findall(r'File "<string>", line ([0-9]+)', result.stderr)
+                self.failure = {"operation": arguments[0] if arguments[0] in {"create", "start", "exec", "container", "image", "context", "wait"} else "other",
+                                "returncode": result.returncode, "exception": kind,
+                                "probe_line": int(lines[-1]) if lines else None}
             check(result.returncode == 0)
         return result
 
@@ -208,13 +218,16 @@ def run(args, *, execute=subprocess.run):
     temporary.chmod(0o777)
     writer = None
     try:
+        evidence["phase"] = "preflight"
         runtime.preflight()
         # Probe before starting any WAL writer; reject unpatched runtime images.
+        evidence["phase"] = "sqlite_probe"
         probe = runtime.create(temporary, "probe", SQLITE_PROBE)
         sqlite_probe = json.loads(runtime.docker(["start", "-a", probe]).stdout)
         evidence["sqlite_version"] = sqlite_probe["sqlite_version"]
         evidence["sqlite_wal_reset_fixed"] = sqlite_wal_reset_fixed(evidence["sqlite_version"])
         check(evidence["sqlite_wal_reset_fixed"])
+        evidence["phase"] = "writer_start"
         writer = runtime.create(temporary, "writer", WRITER)
         runtime.docker(["start", writer])
         for _ in range(60):
@@ -227,8 +240,11 @@ def run(args, *, execute=subprocess.run):
         evidence["writer_sqlite_version"] = json.loads(ready.stdout)["sqlite_version"]
         check(evidence["writer_sqlite_version"] == evidence["sqlite_version"] and sqlite_wal_reset_fixed(evidence["writer_sqlite_version"]))
         for case in ("active", "idle", "closed"):
+            evidence["phase"] = "reader_create_" + case
             reader = runtime.create(temporary, "reader", READER, case)
+            evidence["phase"] = "reader_start_" + case
             output = runtime.docker(["start", "-a", reader])
+            evidence["phase"] = "reader_verify_" + case
             value = json.loads(output.stdout)
             check(value["case"] == case and value["source_readonly"] is True)
             check(value["sqlite_version"] == evidence["sqlite_version"] and sqlite_wal_reset_fixed(value["sqlite_version"]))
@@ -236,10 +252,14 @@ def run(args, *, execute=subprocess.run):
             check(runtime.inspect_owned(reader)["State"]["ExitCode"] == 0)
             evidence["cases"].append(value)
         # The same RW writer must still be able to commit after all RO readers.
+        evidence["phase"] = "writer_recovery"
         runtime.docker(["exec", writer, "python3", "-c", "import sqlite3; c=sqlite3.connect('/source/closed/state/homeops.sqlite3');c.execute('INSERT INTO records VALUES (2)');c.commit();c.close()"])
         evidence["rw_writer_recovered"] = True
         evidence["status"] = "PASS"
+        evidence["phase"] = "complete"
     finally:
+        if isinstance(runtime.failure, dict):
+            evidence["failure"] = dict(runtime.failure)
         # Ask the owner UID to close all databases and remove its private fixtures.
         runtime.cleaning = True
         cleanup_ok = True

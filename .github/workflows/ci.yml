@@ -18,6 +18,9 @@ jobs:
       include: ${{ steps.generate.outputs.include }}
       selected_checks: ${{ steps.generate.outputs.selected_checks }}
       mode: ${{ steps.generate.outputs.mode }}
+      quality_required: ${{ steps.generate.outputs.quality_required }}
+      browser_required: ${{ steps.generate.outputs.browser_required }}
+      browser_services: ${{ steps.generate.outputs.browser_services }}
 
     steps:
       - name: Check out repository
@@ -72,15 +75,20 @@ jobs:
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json
           from pathlib import Path
+          from tests.run_service_tests import load_matrix, select_auxiliary_checks
 
           selection = json.loads(Path("ci-selection.json").read_text(encoding="utf-8"))
           include = selection["include"]
           selected = selection["selected_checks"]
           if not include or [entry["name"] for entry in include] != selected:
               raise SystemExit("CI selection is empty or inconsistent")
+          auxiliary = select_auxiliary_checks(selection["mode"], selected, load_matrix())
           print("include=" + json.dumps({"include": include}, separators=(",", ":")))
           print("selected_checks=" + json.dumps(selected, separators=(",", ":")))
           print("mode=" + selection["mode"])
+          print("quality_required=" + json.dumps(auxiliary["quality_required"]))
+          print("browser_required=" + json.dumps(bool(auxiliary["browser_services"])))
+          print("browser_services=" + json.dumps(auxiliary["browser_services"], separators=(",", ":")))
           PY
 
   test:
@@ -159,7 +167,7 @@ jobs:
 
   quality:
     needs: scope
-    if: needs.scope.outputs.mode != 'documentation'
+    if: needs.scope.outputs.quality_required == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -182,7 +190,7 @@ jobs:
 
   browser:
     needs: scope
-    if: needs.scope.outputs.mode != 'documentation'
+    if: needs.scope.outputs.browser_required == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -203,9 +211,27 @@ jobs:
           python3 -m pip install -r portal-web/requirements.txt -r book-memo/requirements.txt -r youtube-memo/requirements.txt -r tests/browser/requirements.browser.txt
           python3 -m playwright install --with-deps chromium
       - name: Run Portal browser regression
+        if: contains(fromJSON(needs.scope.outputs.browser_services), 'portal')
         run: python3 tests/browser/run_smoke.py --artifacts browser-artifacts/portal
       - name: Run Book and YouTube browser regressions
-        run: python3 tests/browser/run_memo_smoke.py --artifacts browser-artifacts
+        if: contains(fromJSON(needs.scope.outputs.browser_services), 'book-memo') || contains(fromJSON(needs.scope.outputs.browser_services), 'youtube-memo')
+        env:
+          BROWSER_SERVICES: ${{ needs.scope.outputs.browser_services }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          services = json.loads(os.environ["BROWSER_SERVICES"])
+          if not isinstance(services, list) or not services or len(services) != len(set(services)) or not set(services) <= {"portal", "book-memo", "youtube-memo"}:
+              raise SystemExit("Invalid browser service selection")
+          arguments = [argument for service in services if service != "portal" for argument in ("--service", service)]
+          if not arguments:
+              raise SystemExit("No memo browser service selected")
+          subprocess.run([sys.executable, "tests/browser/run_memo_smoke.py", "--artifacts", "browser-artifacts", *arguments], check=True)
+          PY
       - name: Upload browser failure evidence
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -325,10 +351,13 @@ jobs:
           test "${{ steps.evidence.outputs.context_status }}" -eq 0
           test "${{ needs.scope.result }}" = "success"
           test "${{ needs.test.result }}" = "success"
-          if [[ "${{ needs.scope.outputs.mode }}" == "documentation" ]]; then
-            test "${{ needs.browser.result }}" = "skipped"
-            test "${{ needs.quality.result }}" = "skipped"
-          else
-            test "${{ needs.browser.result }}" = "success"
-            test "${{ needs.quality.result }}" = "success"
-          fi
+          case "${{ needs.scope.outputs.browser_required }}" in
+            true) test "${{ needs.browser.result }}" = "success" ;;
+            false) test "${{ needs.browser.result }}" = "skipped" ;;
+            *) exit 1 ;;
+          esac
+          case "${{ needs.scope.outputs.quality_required }}" in
+            true) test "${{ needs.quality.result }}" = "success" ;;
+            false) test "${{ needs.quality.result }}" = "skipped" ;;
+            *) exit 1 ;;
+          esac

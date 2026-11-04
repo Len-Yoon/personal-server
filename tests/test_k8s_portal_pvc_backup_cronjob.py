@@ -479,6 +479,29 @@ class PortalReadonlyRuntimeLabSafetyTests(unittest.TestCase):
         self.assertTrue(self.tool.WRITER.startswith(self.tool.SQLITE_GATE))
         self.assertTrue(self.tool.READER.startswith(self.tool.SQLITE_GATE))
 
+    def test_docker_failure_preserves_only_safe_classification(self):
+        from subprocess import CompletedProcess
+        from unittest.mock import Mock
+        error = 'PRIVATE-CREDENTIAL /private/fixture\n  File "<string>", line 42\nAssertionError: private content'
+        execute = Mock(return_value=CompletedProcess([], 1, "PRIVATE-STDOUT", error))
+        runtime = self.tool.Runtime(self.args, execute=execute)
+        with self.assertRaises(self.tool.SafetyError):
+            runtime.docker(["start", "-a", "private-container-name"])
+        self.assertEqual(runtime.failure, {"operation": "start", "returncode": 1,
+                                          "exception": "AssertionError", "probe_line": 42})
+        self.assertNotIn("PRIVATE", str(runtime.failure))
+        execute.return_value = CompletedProcess([], 2, "", "PermissionError")
+        with self.assertRaises(self.tool.SafetyError):
+            runtime.docker(["container", "rm", "private-container-name"])
+        self.assertEqual(runtime.failure["exception"], "AssertionError")
+
+    def test_expected_readiness_failure_does_not_replace_diagnostics(self):
+        from subprocess import CompletedProcess
+        from unittest.mock import Mock
+        runtime = self.tool.Runtime(self.args, execute=Mock(return_value=CompletedProcess([], 1, "", "PermissionError")))
+        runtime.docker(["exec", "fixture"], allow_failure=True)
+        self.assertIsNone(runtime.failure)
+
     def test_unpatched_image_stops_before_writer_and_records_public_version(self):
         import json
         import tempfile

@@ -282,7 +282,13 @@ class CrawlerRuntimeCaddyTests(unittest.TestCase):
                 "youtube-memo": {"ip": "192.0.2.11", "port": "8002"},
                 "book-memo": {"ip": "192.0.2.10", "port": "8003"},
             }
-            (fake_bin / "git").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            if script == "deploy-n100.sh":
+                from tests.test_deploy_n100 import DeployN100Tests
+                DeployN100Tests().prepare_deploy(root, fake_bin)
+                command = ["bash", str(root / "scripts" / script), str(root), DeployN100Tests.REVISION]
+            else:
+                (fake_bin / "git").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                command = ["bash", str(ROOT / "scripts" / script), str(root)]
             (fake_bin / "python3").write_text(
                 "#!/bin/sh\n"
                 "case \"$1\" in\n"
@@ -332,7 +338,7 @@ class CrawlerRuntimeCaddyTests(unittest.TestCase):
             for tool in fake_bin.iterdir():
                 tool.chmod(0o755)
             result = subprocess.run(
-                ["bash", str(ROOT / "scripts" / script), str(root)],
+                command,
                 env={
                     **os.environ,
                     "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],

@@ -1,6 +1,7 @@
 import importlib
 import importlib.util
 import os
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -25,6 +26,14 @@ PORTAL_SECURITY_HEADERS = {
 
 
 class CrawlerWorkerNewsRouteTests(unittest.TestCase):
+    def test_auto_refresh_client_datetime_behaviors(self):
+        result = subprocess.run(
+            ["node", "--test", "tests/news_auto_refresh_client.test.mjs"],
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def assert_portal_security_headers(self, response):
         for name, value in PORTAL_SECURITY_HEADERS.items():
             self.assertEqual(response.headers[name], value)

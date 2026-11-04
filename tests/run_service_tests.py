@@ -259,6 +259,26 @@ def select_ci_suites(
     return full
 
 
+def select_auxiliary_checks(mode: str, selected: list[str], matrix: list[dict[str, object]]) -> dict[str, object]:
+    """Keep browser/quality scope aligned with the validated Python suite selection."""
+    all_names = [str(entry["name"]) for entry in matrix]
+    if mode == "full" and selected == all_names:
+        services = {"portal", "book-memo", "youtube-memo"}
+        quality = True
+    elif mode == "documentation" and selected == ["documentation"]:
+        services = set()
+        quality = False
+    elif (mode == "service" and len(selected) == 2 and len(set(selected)) == 2
+          and "maintenance" in selected and set(selected) <= set(all_names)
+          and len(set(selected) & set(SERVICE_PREFIXES.values())) == 1):
+        services = set(selected) & {"portal", "book-memo", "youtube-memo"}
+        quality = "portal" in services
+    else:
+        raise ValueError("auxiliary checks require a valid CI selection")
+    return {"quality_required": quality,
+            "browser_services": [name for name in ("portal", "book-memo", "youtube-memo") if name in services]}
+
+
 def parse_args(matrix: list[dict[str, object]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", choices=[entry["name"] for entry in matrix], action="append")

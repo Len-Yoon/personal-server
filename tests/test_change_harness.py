@@ -346,6 +346,88 @@ class IndependentReviewEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(EvidenceError, "review_event_id_reused"):
             self.approve()
 
+    def mcp_request(self, log, *, call_id="mcp-call", namespace="mcp__cua_repl", name="js", arguments=None):
+        with log.open("a") as stream:
+            stream.write(json.dumps({"type": "response_item", "payload": {
+                "type": "function_call", "call_id": call_id, "namespace": namespace,
+                "name": name, "arguments": json.dumps({"code": "fixture"} if arguments is None else arguments),
+            }}) + "\n")
+
+    def mcp_completion(self, log, *, call_id="mcp-call", server="cua_repl", tool="js",
+                       arguments=None, result="fixture-result"):
+        self.append(log, {"type": "McpToolCall", "id": call_id, "server": server,
+                          "tool": tool, "arguments": {"code": "fixture"} if arguments is None else arguments,
+                          "status": "completed", "result": result})
+
+    def test_matching_mcp_dual_representation_is_accepted_in_either_order(self):
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse):
+                log = self.session("mcp-pair", str(uuid.uuid4()))
+                calls = [self.mcp_request, self.mcp_completion]
+                for call in reversed(calls) if reverse else calls:
+                    call(log)
+                activity = collect_activity(self.repo, [log], set())
+                self.assertEqual(activity["contributors"], activity["session_ids"])
+
+    def test_mcp_namespace_preserves_double_separator_and_tool_prefix(self):
+        self.mcp_request(self.reviewer_log, namespace="mcp__codex_apps__github", name="fetch_pr")
+        self.mcp_completion(self.reviewer_log, server="codex_apps", tool="github.fetch_pr")
+        activity = collect_activity(self.repo, self.sessions, {"README.md"})
+        self.assertIn(self.reviewer, activity["potential_writers"])
+        log = self.session("mcp-ambiguous", str(uuid.uuid4()))
+        self.mcp_request(log, namespace="mcp__codex_apps__github", name="fetch_pr")
+        self.mcp_completion(log, server="codex_apps__github", tool="fetch_pr")
+        with self.assertRaisesRegex(EvidenceError, "review_event_id_reused"):
+            collect_activity(self.repo, [log], set())
+
+    def test_mcp_pair_changed_identity_or_arguments_is_rejected(self):
+        variants = ({"arguments": {"code": "changed"}}, {"tool": "other"}, {"server": "other"})
+        for variant in variants:
+            with self.subTest(variant=variant):
+                log = self.session("mcp-conflict", str(uuid.uuid4()))
+                self.mcp_request(log)
+                self.mcp_completion(log, **variant)
+                with self.assertRaisesRegex(EvidenceError, "review_event_id_reused"):
+                    collect_activity(self.repo, [log], set())
+
+    def test_mcp_same_representation_id_reuse_still_rejects_changed_raw_record(self):
+        for kind in ("request", "completion"):
+            with self.subTest(kind=kind):
+                log = self.session("mcp-reuse", str(uuid.uuid4()))
+                if kind == "request":
+                    self.mcp_request(log)
+                    self.mcp_request(log, arguments={"code": "changed"})
+                else:
+                    self.mcp_completion(log)
+                    self.mcp_completion(log, result="changed-result")
+                with self.assertRaisesRegex(EvidenceError, "review_event_id_reused"):
+                    collect_activity(self.repo, [log], set())
+
+    def test_mcp_completion_result_remains_bound_to_activity_hash(self):
+        log = self.session("mcp-result", str(uuid.uuid4()))
+        self.mcp_request(log)
+        self.mcp_completion(log)
+        original = collect_activity(self.repo, [log], set())["activity_sha256"]
+        lines = log.read_text().splitlines()
+        completion = json.loads(lines[-1])
+        completion["payload"]["item"]["result"] = "changed-result"
+        log.write_text("\n".join([*lines[:-1], json.dumps(completion)]) + "\n")
+        self.assertNotEqual(original, collect_activity(self.repo, [log], set())["activity_sha256"])
+
+    def test_unpaired_mcp_request_or_completion_remains_potential_writer(self):
+        for call in (self.mcp_request, self.mcp_completion):
+            with self.subTest(kind=call.__name__):
+                log = self.session("mcp-unpaired", str(uuid.uuid4()))
+                call(log)
+                activity = collect_activity(self.repo, [log], set())
+                self.assertEqual(activity["potential_writers"], activity["session_ids"])
+
+    def test_matching_mcp_pair_cannot_establish_independent_reviewer(self):
+        self.mcp_request(self.reviewer_log)
+        self.mcp_completion(self.reviewer_log)
+        self.approve()
+        self.assertIn("reviewer_contributed_to_change", self.review()["reasons"])
+
     def test_same_principal_under_an_alias_cannot_pass(self):
         alias = self.session("another-name", self.author)
         self.sessions.append(alias)
