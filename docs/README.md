@@ -15,7 +15,7 @@
 | [운영 상태 확인 기록](operations-reference.md#운영-상태-확인-기록) | 02:30 순차 백업·Portal 인증 복구의 최신 확인과 SRE·SLO 과거 조회 구분 |
 | [컨테이너 실행 권한](operations-reference.md#컨테이너-실행-권한) | non-root 실행 계정과 Portal PVC 사전검증 기준 |
 | [N100 운영 환경](n100-mt4-setup.md) | Windows·WSL2 자동 시작, 제한형 자동복구, 재부팅 뒤 확인, 자원 점검 |
-| [WSL 메모리 상한 조정](20261105_WSL메모리상한_조정기록.md) | 5GB 감축 시도 원복·WSL 종료 지연·자동 재부팅·서비스 복구 결과 |
+| [WSL 메모리 상한 조정](20261105_WSL메모리상한_조정기록.md) | 앞선 원복 경과와 새 승인 4GB 압력 기준 초과→5GB 실효 적용·서비스/자동복구 복원·잔여 확인 사항 |
 | [K3s·모니터링·백업](../infra/k8s/README.md) | Portal K3s, Grafana, Telegram SRE relay, PVC 백업 |
 | [Book Memo K3s 현재 운영 기준](operations-reference.md#book-memo-k3s-현재-운영-기준) | 확정 공개 경로, runtime state marker, 롤백 자산 보존, 정적 manifest 재적용 금지 확인 |
 | [YouTube Memo K3s 현재 운영 기준](operations-reference.md#youtube-memo-k3s-현재-운영-기준) | 확정 공개 경로, runtime state marker, 롤백 자산 보존, 정적 manifest 재적용 금지 확인 |
