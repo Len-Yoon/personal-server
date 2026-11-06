@@ -1,0 +1,9 @@
+FROM @APP_BASE_IMAGE@
+WORKDIR /opt/ha
+RUN apk add --no-cache postgresql17-client \
+    && pip install --no-cache-dir 'cryptography==46.0.5' 'psycopg[binary]==3.3.8'
+RUN addgroup -S -g 10001 app && adduser -S -u 10001 -G app app
+COPY _ha/ /opt/ha/
+ENV PYTHONPATH=/opt/ha PYTHONDONTWRITEBYTECODE=1
+USER 10001:10001
+CMD ["python", "-m", "ha_runtime.backup_cli", "--help"]

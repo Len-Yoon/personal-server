@@ -44,6 +44,19 @@ $EmergencyRebootLastAt = $null
 $EmergencyRebootCauseComponent = $null
 $EmergencyRebootCooldownStateValid = $true
 $TunnelAlertDownNotified = $false
+function Assert-HaLegacyAllowed {
+    # Presence is a durable exclusion, including malformed/unreadable ownership
+    # records. Only the separately approved HA rollback may remove this marker.
+    $marker = Join-Path $RecoveryStateDirectory "ha-controller-owner.json"
+    try {
+        if (Test-Path -LiteralPath $marker -ErrorAction Stop) {
+            throw "HA controller owns recovery; legacy mutation is blocked."
+        }
+    } catch {
+        throw "HA ownership cannot be excluded; legacy mutation is blocked."
+    }
+}
+
 function Write-Info([string]$Message) {
     Write-Host $Message
 }
@@ -89,6 +102,7 @@ function Invoke-WslWithTimeout([string[]]$Arguments, [string]$Operation, [switch
 }
 
 function Invoke-WslCommand {
+    Assert-HaLegacyAllowed
     if ($ProjectRoot -match "^(?<drive>[A-Za-z]):[\\/](?<rest>.*)$") {
         $wslProjectRoot = "/mnt/$($Matches.drive.ToLower())/$($Matches.rest -replace '\\', '/')"
     } else {
@@ -300,6 +314,7 @@ function Invoke-PostBootRecoveryCheck {
 }
 
 function Start-CloudflareTunnel([switch]$ForceRestart) {
+    Assert-HaLegacyAllowed
     if (Test-CloudflareTunnelService) {
         if (Test-CloudflareTunnelRunning) {
             if (-not $ForceRestart) {
@@ -355,6 +370,7 @@ function Update-HostMetrics {
 }
 
 function Start-PersonalServerStack {
+    Assert-HaLegacyAllowed
     for ($attempt = 1; $attempt -le 10; $attempt++) {
         try {
             Invoke-WslCommand
@@ -656,6 +672,7 @@ function Test-RecoveryActionNeeded([string]$Component) {
 }
 
 function Invoke-TargetedRecovery([string]$Component) {
+    Assert-HaLegacyAllowed
     Write-Info "Targeted recovery requested for $Component."
     switch ($Component) {
         "keepalive" {
@@ -917,6 +934,7 @@ function Test-EmergencyRebootEligible([string]$Component) {
 }
 
 function Request-EmergencyReboot([string]$Component) {
+    Assert-HaLegacyAllowed
     if ($Component -notin @("keepalive", "k3s")) {
         return $false
     }
@@ -1090,6 +1108,7 @@ function Install-SupervisorTask([string]$RunAsUser) {
 }
 
 function Install-ScheduledTask {
+    Assert-HaLegacyAllowed
     Install-EmergencyRebootTask
     $runAsUser = "$env:USERDOMAIN\$env:USERNAME"
     Install-KeepAliveTask -RunAsUser $runAsUser
