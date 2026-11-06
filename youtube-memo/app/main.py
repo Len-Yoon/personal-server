@@ -1,5 +1,9 @@
 from uuid import uuid4
 import json
+import hashlib
+import re
+from contextvars import ContextVar
+from app.services import ha_backend
 import os
 import secrets
 import sqlite3
@@ -115,6 +119,7 @@ WRITE_AUTH_MAX_AGE = int(os.getenv("MEMO_WRITE_SESSION_MAX_AGE", str(8 * 60 * 60
 AUTH_SESSION_MAX_ENTRIES = max(1, int(os.getenv("AUTH_SESSION_MAX_ENTRIES", "1024")))
 _WRITE_SESSIONS: dict[str, datetime] = {}
 _WRITE_SESSIONS_LOCK = RLock()
+_HA_AUTH_STATE = ContextVar('ha_auth_state', default=None)
 
 
 def _portal_home_url(request: Request) -> str:
@@ -422,33 +427,56 @@ def _browser_return_path(request: Request) -> str:
     return _safe_redirect(path) or "/"
 
 
+@contextmanager
+def _write_session_state():
+    with _WRITE_SESSIONS_LOCK:
+        if not ha_backend.enabled():
+            yield
+            return
+        with ha_backend.runtime().state_transaction(ha_backend.SERVICE, "write-sessions", {}) as state:
+            _WRITE_SESSIONS.clear()
+            for token, value in state.items():
+                if not isinstance(token, str) or not re.fullmatch("[0-9a-f]{64}", token):
+                    raise ha_backend.runtime().DatabaseUnavailable("invalid_shared_session_state")
+                parsed = _parse_auth_failure_timestamp(value)
+                if parsed is not None:
+                    _WRITE_SESSIONS[token] = parsed
+            yield
+            state.clear()
+            state.update({token: expiry.isoformat() for token, expiry in _WRITE_SESSIONS.items()})
+
+
+def _write_session_key(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest() if ha_backend.enabled() else token
+
+
 def _has_write_session(request: Request) -> bool:
     token = request.cookies.get(WRITE_AUTH_COOKIE, "")
     if not token:
         return False
-    with _WRITE_SESSIONS_LOCK:
+    with _write_session_state():
         _prune_write_sessions()
-        return token in _WRITE_SESSIONS
+        return _write_session_key(token) in _WRITE_SESSIONS
 
 
 def _create_write_session() -> str:
-    with _WRITE_SESSIONS_LOCK:
+    with _write_session_state():
         _prune_write_sessions()
         while len(_WRITE_SESSIONS) >= AUTH_SESSION_MAX_ENTRIES:
             oldest_token = min(_WRITE_SESSIONS, key=_WRITE_SESSIONS.get)
             _WRITE_SESSIONS.pop(oldest_token, None)
         token = secrets.token_urlsafe(32)
-        while token in _WRITE_SESSIONS:
+        while _write_session_key(token) in _WRITE_SESSIONS:
             token = secrets.token_urlsafe(32)
-        _WRITE_SESSIONS[token] = datetime.now(timezone.utc) + timedelta(seconds=WRITE_AUTH_MAX_AGE)
+        _WRITE_SESSIONS[_write_session_key(token)] = datetime.now(timezone.utc) + timedelta(seconds=WRITE_AUTH_MAX_AGE)
         return token
 
 
 def _revoke_write_session(token: str) -> None:
     if not token:
         return
-    with _WRITE_SESSIONS_LOCK:
-        _WRITE_SESSIONS.pop(token, None)
+    with _write_session_state():
+        _WRITE_SESSIONS.pop(_write_session_key(token), None)
 
 
 def _prune_write_sessions() -> None:
@@ -510,6 +538,14 @@ def _clear_auth_failures(client: str) -> None:
 
 @contextmanager
 def _auth_rate_limit_lock():
+    if ha_backend.enabled():
+        with _WRITE_SESSIONS_LOCK, ha_backend.runtime().state_transaction(ha_backend.SERVICE, "auth-rate-limit", {}) as state:
+            token = _HA_AUTH_STATE.set(state)
+            try:
+                yield
+            finally:
+                _HA_AUTH_STATE.reset(token)
+        return
     lock_path = AUTH_RATE_LIMIT_STATE_PATH.with_name(f".{AUTH_RATE_LIMIT_STATE_PATH.name}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as lock_file:
@@ -522,10 +558,13 @@ def _auth_rate_limit_lock():
 
 def _reload_auth_failures() -> None:
     _AUTH_FAILURES.clear()
-    try:
-        raw_state = json.loads(AUTH_RATE_LIMIT_STATE_PATH.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return
+    if ha_backend.enabled():
+        raw_state = _HA_AUTH_STATE.get()
+    else:
+        try:
+            raw_state = json.loads(AUTH_RATE_LIMIT_STATE_PATH.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return
 
     if not isinstance(raw_state, dict):
         return
@@ -569,6 +608,13 @@ def _persist_auth_failures() -> None:
         client: [failed_at.isoformat() for failed_at in failures]
         for client, failures in _AUTH_FAILURES.items()
     }
+    if ha_backend.enabled():
+        shared = _HA_AUTH_STATE.get()
+        if shared is None:
+            raise ha_backend.runtime().DatabaseUnavailable("Shared auth state requires a transaction")
+        shared.clear()
+        shared.update(state)
+        return
     temporary_path = AUTH_RATE_LIMIT_STATE_PATH.with_name(
         f".{AUTH_RATE_LIMIT_STATE_PATH.name}.{secrets.token_hex(8)}.tmp"
     )

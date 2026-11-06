@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from app.services import file_store, security
+from app.services import file_store, security, ha_files
 
 
 MAX_SEARCH_ENTRIES = 10000
@@ -115,6 +115,8 @@ def move(path, destination='', new_name=None):
 
 
 def search(query):
+    if ha_files.enabled():
+        return ha_files.search(query)
     query = query.strip().casefold()
     if not query or len(query) > 200:
         raise ValueError('검색어는 1~200자로 입력해주세요.')
@@ -299,12 +301,16 @@ def _trash_records(root, now):
 
 
 def list_trash():
+    if ha_files.enabled():
+        return ha_files.list_trash()
     with _trash_fd() as root:
         records, _ = _trash_records(root, datetime.now(timezone.utc))
     return [{key: value for key, value in item.items() if key != '_snapshot'} for item in records]
 
 
 def trash_page(*, page=1, page_size=50):
+    if ha_files.enabled():
+        return ha_files.trash_page(page=page, page_size=page_size)
     if type(page) is not int or page < 1 or type(page_size) is not int or not 1 <= page_size <= 200:
         raise ValueError('페이지 범위를 확인해주세요.')
     with _trash_fd() as root:
@@ -336,6 +342,8 @@ def _selection_digest(items):
 
 
 def preview_purge(*, item_id=None, older_than_days=None):
+    if ha_files.enabled():
+        return ha_files.preview_purge(item_id=item_id, older_than_days=older_than_days)
     before = time.time()
     with _trash_fd() as root:
         items, excluded = _purge_selection(root, item_id, older_than_days, before)

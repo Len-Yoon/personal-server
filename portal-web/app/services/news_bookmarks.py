@@ -5,10 +5,16 @@ from datetime import datetime, timezone
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
+from app.services.ha_backend import runtime
 
 
 @contextmanager
 def _connect():
+    if (backend := runtime()) is not None:
+        backend.require_schema("portal-web", "bookmarks", ["bookmarks"])
+        with backend.connect("portal-web", "bookmarks") as connection:
+            yield connection
+        return
     # Kept outside the file download root and public news archive.
     path = Path(os.getenv('NEWS_BOOKMARK_DB_PATH', '/var/lib/portal/news-bookmarks.sqlite3'))
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -49,6 +55,8 @@ def page(*, q='', page=1, page_size=50):
     escaped = q.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
     pattern = '%' + escaped + '%'
     where = " WHERE title LIKE ? ESCAPE '\\' OR note LIKE ? ESCAPE '\\' OR url LIKE ? ESCAPE '\\'" if q else ''
+    if runtime() is not None:
+        where = where.replace(" LIKE ", " ILIKE ")
     params = (pattern, pattern, pattern) if q else ()
     with _connect() as conn:
         # COUNT and rows must share a snapshot even if another writer commits.

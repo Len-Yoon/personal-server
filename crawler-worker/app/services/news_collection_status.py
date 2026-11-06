@@ -7,6 +7,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any
+from contextlib import contextmanager
+from threading import local
+from app.services.ha_backend import runtime
 
 
 _STATUS_KEYS = (
@@ -26,9 +29,24 @@ class NewsCollectionStatusStore:
     def __init__(self, path: str | Path | None = None) -> None:
         self._path = Path(path or _default_path())
         self._lock = Lock()
+        self._ha_state = local()
+
+    @contextmanager
+    def _transaction(self):
+        with self._lock:
+            backend = runtime()
+            if backend is None:
+                yield
+                return
+            with backend.state_transaction("crawler-worker", "collection_status", _default_state()) as state:
+                self._ha_state.payload = state
+                try:
+                    yield
+                finally:
+                    del self._ha_state.payload
 
     def record_attempt(self, at: datetime | None = None) -> None:
-        with self._lock:
+        with self._transaction():
             state = self._load()
             state["initialized"] = True
             if state["first_attempt_at"] is None:
@@ -37,7 +55,7 @@ class NewsCollectionStatusStore:
             self._save(state)
 
     def record_success(self, at: datetime | None = None) -> None:
-        with self._lock:
+        with self._transaction():
             state = self._load()
             state["initialized"] = True
             state["last_success_at"] = _iso(at or _now())
@@ -45,7 +63,7 @@ class NewsCollectionStatusStore:
             self._save(state)
 
     def record_failure(self, at: datetime | None = None) -> None:
-        with self._lock:
+        with self._transaction():
             state = self._load()
             state["initialized"] = True
             state["last_failure_at"] = _iso(at or _now())
@@ -59,6 +77,14 @@ class NewsCollectionStatusStore:
 
     def _load(self) -> dict[str, Any]:
         state = _default_state()
+        if (backend := runtime()) is not None:
+            payload = getattr(self._ha_state, "payload", None)
+            if payload is None:
+                payload = backend.read_state("crawler-worker", "collection_status", state)
+            if not isinstance(payload, dict):
+                raise backend.DatabaseUnavailable("invalid_collection_state")
+            state.update(payload)
+            return state
         try:
             payload = json.loads(self._path.read_text(encoding="utf-8"))
         except (FileNotFoundError, OSError, ValueError, TypeError):
@@ -78,6 +104,13 @@ class NewsCollectionStatusStore:
         return state
 
     def _save(self, state: dict[str, Any]) -> None:
+        if runtime() is not None:
+            payload = getattr(self._ha_state, "payload", None)
+            if payload is None:
+                raise RuntimeError("collection state write requires transaction")
+            payload.clear()
+            payload.update(state)
+            return
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             fd, temporary = tempfile.mkstemp(prefix=f".{self._path.name}.", dir=self._path.parent)

@@ -8,6 +8,7 @@ from pathlib import Path
 import signal
 from threading import Event
 import time
+import uuid
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,8 @@ from app.services.oauth_callback import HyundaiOAuthCallbackServer
 from app.services.store import CarCareStore
 from app.services.telegram import CommandHandler, TelegramClient, TelegramUpdate
 from app.services.vehicle_monitor import VehicleMonitor
+from app.services.ha_backend import runtime
+from contextlib import nullcontext
 
 
 POLL_INTERVAL_SECONDS = 5
@@ -59,11 +62,13 @@ def run_once(
     stopped: Event | None = None,
 ) -> int | None:
     """Process received commands and one Hyundai vehicle observation."""
-    next_offset = _handle_updates(handler, telegram, offset, stopped)
-    if stopped is not None and stopped.is_set():
+    backend = runtime()
+    with backend.worker_scope("car-care-worker") if backend is not None else nullcontext():
+        next_offset = _handle_updates(handler, telegram, offset, stopped)
+        if stopped is not None and stopped.is_set():
+            return next_offset
+        _observe_vehicle(telegram, hyundai, monitor)
         return next_offset
-    _observe_vehicle(telegram, hyundai, monitor)
-    return next_offset
 
 
 def _handle_updates(
@@ -72,24 +77,49 @@ def _handle_updates(
     offset: int | None,
     stopped: Event | None = None,
 ) -> int | None:
+    backend = runtime()
+    if backend is not None:
+        saved = backend.read_state("car-care-worker", "worker_offset", {})
+        offset = saved.get("offset", offset)
     next_offset = offset
     for update in telegram.poll(offset):
         response = handler.handle_update(update)
-        if response and not telegram.send(response):
+        if response and not _send_command_reply(telegram, response, update.update_id):
             break
         if update.update_id is not None:
             candidate = update.update_id + 1
             next_offset = candidate if next_offset is None else max(next_offset, candidate)
+            if backend is not None:
+                backend.write_state("car-care-worker", "worker_offset", {"offset": next_offset})
         if stopped is not None and stopped.is_set():
             break
     return next_offset
+
+
+def _send_command_reply(telegram, response: str, update_id: int | None) -> bool:
+    backend = runtime()
+    if backend is None:
+        return telegram.send(response)
+    if update_id is None:
+        raise RuntimeError("HA command delivery requires update identity")
+    key = f"reply:{update_id}"
+    with backend.state_transaction("car-care-worker", key, {}) as state:
+        if state.get("status") in {"uncertain", "sent"}:
+            return True
+        state["status"] = "uncertain"
+    sent = telegram.send(response)
+    if sent:
+        backend.write_state("car-care-worker", key, {"status": "sent"})
+    return sent
 
 
 def _observe_vehicle(
     telegram: _TelegramGateway, hyundai: _HyundaiGateway, monitor: _VehicleMonitor
 ) -> None:
     for alert in monitor.observe_seasonal_reminders(_today_in_korea()):
-        if telegram.send(alert.text):
+        if runtime() is not None:
+            _send_observation(telegram, alert.text, lambda: monitor.acknowledge(alert))
+        elif telegram.send(alert.text):
             monitor.acknowledge(alert)
     result = hyundai.fetch_snapshot()
     if result.status == "disabled":
@@ -101,16 +131,30 @@ def _observe_vehicle(
             if result.error == "auth"
             else "Hyundai 차량 상태 조회 오류: API 연결 또는 응답을 확인하세요."
         )
-        if monitor.should_notify_hyundai_error(today) and telegram.send(
-            message
-        ):
-            monitor.acknowledge_hyundai_error(today)
+        if monitor.should_notify_hyundai_error(today):
+            if runtime() is not None:
+                _send_observation(telegram, message, lambda: monitor.acknowledge_hyundai_error(today))
+            elif telegram.send(message):
+                monitor.acknowledge_hyundai_error(today)
         return
     if result.snapshot is None:
         return
     for alert in monitor.observe(result.snapshot):
-        if telegram.send(alert.text):
+        if runtime() is not None:
+            _send_observation(telegram, alert.text, lambda: monitor.acknowledge(alert))
+        elif telegram.send(alert.text):
             monitor.acknowledge(alert)
+
+
+def _send_observation(telegram, text: str, acknowledge) -> None:
+    backend = runtime()
+    key = f"observation_delivery:{uuid.uuid4().hex}"
+    backend.write_state("car-care-worker", key, {"status": "uncertain"})
+    # Advance the durable observation before the provider. Its delivery remains
+    # uncertain on either a provider error or a missing database acknowledgement.
+    acknowledge()
+    if telegram.send(text):
+        backend.write_state("car-care-worker", key, {"status": "sent"})
 
 
 def _today_in_korea() -> date:
@@ -119,9 +163,12 @@ def _today_in_korea() -> date:
 
 def main() -> None:
     database_path = _database_path()
-    database_path.parent.mkdir(parents=True, exist_ok=True)
+    if runtime() is None:
+        database_path.parent.mkdir(parents=True, exist_ok=True)
     store = CarCareStore(database_path)
-    store.initialize()
+    schema_ready = runtime() is None
+    if schema_ready:
+        store.initialize()
 
     telegram = TelegramClient.from_environment()
     if telegram is None:
@@ -141,12 +188,22 @@ def main() -> None:
     next_hyundai_at = time.monotonic()
     try:
         while not stopped.is_set():
-            offset = _handle_updates(handler, telegram, offset, stopped)
-            if stopped.is_set():
-                break
-            if time.monotonic() >= next_hyundai_at:
-                _observe_vehicle(telegram, hyundai, monitor)
-                next_hyundai_at = time.monotonic() + HYUNDAI_INTERVAL_SECONDS
+            backend = runtime()
+            try:
+                with backend.worker_scope("car-care-worker") if backend is not None else nullcontext():
+                    if not schema_ready:
+                        store.initialize()
+                        schema_ready = True
+                    offset = _handle_updates(handler, telegram, offset, stopped)
+                    if stopped.is_set():
+                        break
+                    if time.monotonic() >= next_hyundai_at:
+                        _observe_vehicle(telegram, hyundai, monitor)
+                        next_hyundai_at = time.monotonic() + HYUNDAI_INTERVAL_SECONDS
+            except Exception as exc:
+                if backend is None or not isinstance(exc, backend.DatabaseUnavailable):
+                    raise
+                # A standby remains alive, but never polls, refreshes or sends.
             stopped.wait(POLL_INTERVAL_SECONDS)
     finally:
         callback_server.stop()

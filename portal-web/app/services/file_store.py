@@ -11,6 +11,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Iterator
 
+from app.services import ha_files
 from app.services.security import append_security_event
 
 
@@ -53,6 +54,10 @@ def _storage_bytes(fd: int, counter: list[int]) -> int:
 
 @contextmanager
 def storage_mutation_lock():
+    if ha_files.enabled():
+        with ha_files._state(mutate=True) as state:
+            yield state
+        return
     # Upload cleanup and all namespace changes share one stable directory lock.
     # Always acquire this before the trash lock, including across processes.
     ensure_storage()
@@ -67,6 +72,8 @@ def storage_mutation_lock():
 def storage_mutation(function):
     @wraps(function)
     def locked(*args, **kwargs):
+        if ha_files.enabled():
+            return getattr(ha_files, function.__name__)(*args, **kwargs)
         with storage_mutation_lock():
             return function(*args, **kwargs)
     return locked
@@ -110,10 +117,14 @@ ALLOWED_EXTENSIONS = {
 
 
 def ensure_storage() -> None:
+    if ha_files.enabled():
+        return ha_files.ensure_storage()
     STORAGE_PATH.mkdir(parents=True, exist_ok=True)
 
 
 def get_directory(relative_path: str = "") -> dict[str, Any]:
+    if ha_files.enabled():
+        return ha_files.get_directory(relative_path)
     ensure_storage()
     current_path = _safe_path(relative_path)
     if not current_path.exists():
@@ -152,6 +163,8 @@ def get_directory(relative_path: str = "") -> dict[str, Any]:
 
 
 def save_upload(relative_path: str, upload: Any) -> int:
+    if ha_files.enabled():
+        return ha_files.save_uploads(relative_path, [upload], single=True)
     ensure_storage()
     with _upload_budget() as budget:
         with _save_upload(relative_path, upload, budget) as size:
@@ -221,6 +234,8 @@ def _save_upload(relative_path: str, upload: Any, budget: list[int]) -> Iterator
 
 
 def save_uploads(relative_path: str, uploads: list[Any]) -> int:
+    if ha_files.enabled():
+        return ha_files.save_uploads(relative_path, uploads)
     if len(uploads) > MAX_UPLOAD_FILES:
         raise ValueError(f"한 번에 최대 {MAX_UPLOAD_FILES}개 파일만 업로드할 수 있습니다.")
     ensure_storage()
@@ -247,6 +262,8 @@ def _save_uploads(relative_path: str, uploads: list[Any], budget: list[int]) -> 
 
 
 def validate_download_limits(relative_paths: list[str]) -> None:
+    if ha_files.enabled():
+        return ha_files.validate_download_limits(relative_paths)
     file_count = 0
     total_size = 0
     for relative_path in relative_paths:
@@ -267,12 +284,17 @@ def validate_download_limits(relative_paths: list[str]) -> None:
 
 
 def iter_download_files(directory: Path) -> Iterator[Path]:
+    if ha_files.enabled():
+        yield from ha_files.iter_download_files(directory)
+        return
     for child in _checked_descendants(directory):
         if child.is_file():
             yield child
 
 
 def write_download_archive(archive: zipfile.ZipFile, relative_paths: list[str]) -> None:
+    if ha_files.enabled():
+        return ha_files.write_download_archive(archive, relative_paths)
     file_count = 0
     total_size = 0
 
@@ -320,6 +342,8 @@ def write_download_archive(archive: zipfile.ZipFile, relative_paths: list[str]) 
 
 @contextmanager
 def _open_storage_item(relative_path: str) -> Iterator[int]:
+    if ha_files.enabled():
+        raise ha_files._unavailable()
     storage_root = STORAGE_PATH.resolve()
     descriptor = os.open(storage_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -392,6 +416,8 @@ def create_directory(relative_path: str, name: str) -> None:
 
 
 def get_download_path(relative_path: str) -> Path:
+    if ha_files.enabled():
+        return ha_files.get_download_path(relative_path)
     path = _safe_path(relative_path)
     if not path.exists() or not path.is_file():
         raise FileNotFoundError("파일을 찾을 수 없습니다.")
@@ -399,6 +425,8 @@ def get_download_path(relative_path: str) -> Path:
 
 
 def get_download_item_path(relative_path: str) -> Path:
+    if ha_files.enabled():
+        return ha_files.get_download_item_path(relative_path)
     path = _safe_path(relative_path)
     if not path.exists():
         raise FileNotFoundError("다운로드할 파일 또는 폴더를 찾을 수 없습니다.")
@@ -445,6 +473,8 @@ def delete_item(relative_path: str) -> None:
 
 
 def validate_delete_items(relative_paths: list[str]) -> list[str]:
+    if ha_files.enabled():
+        return ha_files.validate_delete_items(relative_paths)
     """Validate the complete batch without changing any filesystem entry.
 
     This is a preflight, not an atomic filesystem transaction. The caller must

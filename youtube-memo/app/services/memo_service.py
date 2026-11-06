@@ -9,6 +9,7 @@ from typing import Any, Callable, Iterator
 from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import urlopen
 
+from app.services import ha_backend
 from app.services.datetime_format import format_display_datetime
 from app.services.write_safety import WriteConflict, check_version, init_write_requests, record_result, replay_result
 
@@ -32,6 +33,9 @@ def _schema_ready(connection: sqlite3.Connection) -> bool:
 
 
 def init_db() -> None:
+    if ha_backend.enabled():
+        ha_backend.require_schema()
+        return
     # DB_PATH is resolved at each call so test fixtures and runtime overrides work.
     # Ordinary reads only inspect the schema; migrations alone acquire the writer.
     if DB_PATH.is_file():
@@ -41,7 +45,7 @@ def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         if _schema_ready(connection):
             return
         connection.execute(
@@ -291,7 +295,7 @@ def create_memo(video_id: int, title: str, content: str, tags: str = "", request
     parsed_tags = parse_tags(tags)
 
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         payload = [video_id, title, content, parsed_tags]
         replayed = replay_result(connection, request_id, "memo-create", payload)
         if replayed is not None:
@@ -299,7 +303,7 @@ def create_memo(video_id: int, title: str, content: str, tags: str = "", request
             if not row:
                 raise WriteConflict("이미 저장 후 삭제된 요청입니다. 새 메모는 새 요청으로 저장해주세요.")
             return _row_to_dict(row)
-        connection.execute(
+        cursor = connection.execute(
             """
             INSERT INTO memos (video_id, title, content)
             VALUES (?, ?, ?)
@@ -315,11 +319,8 @@ def create_memo(video_id: int, title: str, content: str, tags: str = "", request
             (video_id,),
         )
         row = connection.execute(
-            """
-            SELECT *
-            FROM memos
-            WHERE id = last_insert_rowid()
-            """
+            "SELECT * FROM memos WHERE id = ?",
+            (cursor.lastrowid,),
         ).fetchone()
         _replace_tags(connection, row["id"], parsed_tags)
         record_result(connection, request_id, "memo-create", payload, row["id"])
@@ -410,7 +411,7 @@ def update_memo_tags(memo_id: int, tags: str, request_id: str = "", expected_ver
     init_db()
     parsed_tags = parse_tags(tags)
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         payload = [memo_id, parsed_tags, expected_version]
         replayed = replay_result(connection, request_id, "memo-tags", payload)
         if replayed is not None:
@@ -461,7 +462,7 @@ def search_videos_and_memos(query: str, limit: int = 5) -> list[dict[str, Any]]:
     keyword = f"%{escaped_query}%"
     with _connect() as connection:
         rows = connection.execute(
-            """
+            ha_backend.search_sql("""
             WITH matches AS (
                 SELECT videos.id AS video_id, videos.title AS video_title,
                     videos.url AS video_url, videos.updated_at AS video_updated,
@@ -488,7 +489,7 @@ def search_videos_and_memos(query: str, limit: int = 5) -> list[dict[str, Any]]:
             )
             SELECT * FROM ranked WHERE video_rank = 1
             ORDER BY rank, video_updated DESC, video_id DESC LIMIT ?
-            """,
+            """),
             (query, query, keyword, keyword, keyword, keyword, keyword, keyword, keyword, keyword, keyword, limit),
         ).fetchall()
 
@@ -507,7 +508,7 @@ def search_videos_and_memos(query: str, limit: int = 5) -> list[dict[str, Any]]:
 def delete_memo(memo_id: int, expected_version: int | None = None, request_id: str = "") -> int | None:
     init_db()
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         payload = [memo_id, expected_version]
         replayed = replay_result(connection, request_id, "memo-delete", payload)
         if replayed is not None:
@@ -536,7 +537,7 @@ def update_memo(memo_id: int, title: str, content: str, expected_version: int | 
         raise ValueError("메모 내용을 입력해주세요.")
 
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         payload = [memo_id, title, content, expected_version]
         replayed = replay_result(connection, request_id, "memo-edit", payload)
         if replayed is not None:
@@ -609,6 +610,10 @@ def _snippet(value: str, query: str = "", limit: int = 140) -> str:
 
 @contextmanager
 def _connect() -> Iterator[sqlite3.Connection]:
+    if ha_backend.enabled():
+        with ha_backend.runtime().connect(ha_backend.SERVICE) as connection:
+            yield connection
+        return
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
@@ -656,8 +661,11 @@ def memo_trash_summary(parent_id: int, page: int = 1) -> dict[str, int]:
     init_db()
     with _connect() as connection:
         row = connection.execute(
-            "SELECT COUNT(*) AS count, COALESCE(SUM(length(CAST(snapshot AS BLOB)) + "
-            "length(CAST(tags AS BLOB))), 0) AS bytes FROM deleted_memos WHERE video_id = ?",
+            ("SELECT COUNT(*) AS count, COALESCE(SUM(octet_length(snapshot) + "
+             "octet_length(tags)), 0) AS bytes FROM deleted_memos WHERE video_id = ?"
+             if ha_backend.enabled() else
+             "SELECT COUNT(*) AS count, COALESCE(SUM(length(CAST(snapshot AS BLOB)) + "
+            "length(CAST(tags AS BLOB))), 0) AS bytes FROM deleted_memos WHERE video_id = ?"),
             (parent_id,),
         ).fetchone()
     pages = max(1, (row["count"] + 19) // 20)
@@ -682,7 +690,7 @@ def purge_deleted_memos(parent_id: int, selection: list[tuple[int, int]], reques
     init_db()
     payload = [parent_id, sorted(selected.items())]
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         replayed = replay_result(connection, request_id, "memo-trash-purge", payload)
         if replayed is not None:
             return replayed
@@ -704,7 +712,7 @@ def purge_deleted_memos(parent_id: int, selection: list[tuple[int, int]], reques
 def restore_memo(memo_id: int, expected_version: int, request_id: str = "") -> int | None:
     init_db()
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         payload = [memo_id, expected_version]
         replayed = replay_result(connection, request_id, "memo-restore", payload)
         if replayed is not None:
@@ -734,7 +742,7 @@ def restore_memo_revision(memo_id: int, revision_id: int, expected_version: int,
     """Restore a prior body while saving the current body in the same transaction."""
     init_db()
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         payload = [memo_id, revision_id, expected_version]
         replayed = replay_result(connection, request_id, "memo-revision-restore", payload)
         if replayed is not None:

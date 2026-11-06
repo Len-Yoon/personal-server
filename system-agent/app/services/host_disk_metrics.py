@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.services.metrics import DEFAULT_HOST_METRICS_PATH, DEFAULT_HOST_METRICS_STALE_SECONDS
+from app.services.ha_backend import runtime
 
 LABELS = '{host="windows",volume="C:"}'
 PREFIX = "personal_server_host_disk_"
@@ -18,10 +19,18 @@ def render_host_disk_metrics(path: Path | None = None, now: datetime | None = No
     now = now if now is not None else datetime.now(timezone.utc)
     samples = []
     healthy = False
+    labels = LABELS
+    backend = runtime()
+    if backend is not None:
+        # node_id comes from the validated A/B configuration, never the file.
+        identity = backend.node_id()
+        labels = '{node_id=' + json.dumps(identity) + ',host="windows",volume="C:"}'
     try:
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 16384:
             raise ValueError("invalid_source")
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        if backend is not None and payload.get("node_id") != identity:
+            raise ValueError("unverified_node")
         disk = payload["host_disk"]
         if disk["source"] != "windows-cim" or disk["volume"] != "C:":
             raise ValueError("unverified_volume")
@@ -43,5 +52,5 @@ def render_host_disk_metrics(path: Path | None = None, now: datetime | None = No
         # Private paths, host names and malformed values never reach metric labels.
         pass
     samples.append(("collection_ok", int(healthy)))
-    return "".join(f"# TYPE {PREFIX}{name} gauge\n{PREFIX}{name}{LABELS} {value}\n"
+    return "".join(f"# TYPE {PREFIX}{name} gauge\n{PREFIX}{name}{labels} {value}\n"
                    for name, value in samples)

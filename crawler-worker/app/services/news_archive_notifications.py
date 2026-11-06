@@ -27,7 +27,7 @@ def notification_outbox(value: Any) -> list[dict[str, Any]]:
         urls = [str(article.get("url", "")).strip() for article in articles]
         if not event_id or event_id in seen_ids or kind not in {"alert", "digest"}:
             continue
-        if status not in {"pending", "sent"} or not articles or not all(urls):
+        if status not in {"pending", "sent", "uncertain"} or not articles or not all(urls):
             continue
         normalized_event = {
             "event_id": event_id,

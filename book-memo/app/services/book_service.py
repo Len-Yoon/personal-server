@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+from app.services import ha_backend
 from app.services.datetime_format import format_display_datetime
 from app.services.write_safety import WriteConflict, check_version, init_write_requests, record_result, replay_result
 
@@ -35,6 +36,9 @@ def _schema_ready(connection: sqlite3.Connection) -> bool:
 
 
 def init_db() -> None:
+    if ha_backend.enabled():
+        ha_backend.require_schema()
+        return
     # DB_PATH is resolved at each call so test fixtures and runtime overrides work.
     # Ordinary reads only inspect the schema; migrations alone acquire the writer.
     if DB_PATH.is_file():
@@ -44,7 +48,7 @@ def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         if _schema_ready(connection):
             return
         connection.execute(
@@ -366,7 +370,7 @@ def update_progress(
     current_chapter = current_chapter.strip()
 
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         payload = [book_id, reading_status, current_page, current_chapter, progress_percent, expected_version]
         if replay_result(connection, request_id, "book-progress", payload) is not None:
             return True
@@ -409,7 +413,7 @@ def create_chapter(book_id: int, title: str, request_id: str = "") -> None:
         raise ValueError("목차 제목을 입력해주세요.")
 
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         payload = [book_id, title]
         if replay_result(connection, request_id, "chapter-create", payload) is not None:
             return
@@ -445,7 +449,7 @@ def create_chapters(book_id: int, titles: list[str]) -> int:
         raise ValueError("추가할 목차를 선택해주세요.")
 
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         existing_rows = connection.execute(
             "SELECT title FROM book_chapters WHERE book_id = ?",
             (book_id,),
@@ -481,7 +485,7 @@ def update_chapter(chapter_id: int, is_done: bool, comment: str, expected_versio
     init_db()
 
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         payload = [chapter_id, is_done, comment.strip(), expected_version]
         replayed = replay_result(connection, request_id, "chapter-edit", payload)
         if replayed is not None:
@@ -515,7 +519,7 @@ def update_chapter_statuses(book_id: int, done_chapter_ids: list[int], expected_
     done_ids = set(done_chapter_ids)
 
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         payload = [book_id, sorted(done_ids), expected_versions]
         if replay_result(connection, request_id, "chapter-statuses", payload) is not None:
             return
@@ -547,7 +551,7 @@ def update_chapter_comment(chapter_id: int, comment: str, expected_version: int 
     init_db()
 
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         payload = [chapter_id, comment.strip(), expected_version]
         replayed = replay_result(connection, request_id, "chapter-comment", payload)
         if replayed is not None:
@@ -668,7 +672,7 @@ def update_memo_tags(memo_id: int, tags: str, request_id: str = "", expected_ver
     parsed = _parse_tags(tags)
     init_db()
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         payload = [memo_id, parsed, expected_version]
         replayed = replay_result(connection, request_id, "memo-tags", payload)
         if replayed is not None:
@@ -698,7 +702,7 @@ def search_books_and_memos(query: str, limit: int = 5) -> list[dict[str, Any]]:
     keyword = f"%{escaped_query}%"
     with _connect() as connection:
         rows = connection.execute(
-            """
+            ha_backend.search_sql("""
             WITH candidates AS (
                 SELECT
                     books.id AS book_id,
@@ -735,7 +739,7 @@ def search_books_and_memos(query: str, limit: int = 5) -> list[dict[str, Any]]:
             FROM ranked WHERE hit_rank = 1
             ORDER BY relevance, book_updated_at DESC, memo_created_at DESC, book_id DESC
             LIMIT ?
-            """,
+            """),
             (query, query, keyword, keyword, keyword, keyword, keyword, keyword, keyword, keyword, keyword, limit),
         ).fetchall()
 
@@ -769,7 +773,7 @@ def create_memo(
         raise ValueError("메모 내용을 입력해주세요.")
 
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         payload = [book_id, chapter_id, title, content, max(0, page), parsed_tags]
         if replay_result(connection, request_id, "memo-create", payload) is not None:
             return
@@ -815,7 +819,7 @@ def update_memo(
     page = max(0, page)
     init_db()
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         payload = [memo_id, title, content, page, chapter_id, expected_version]
         replayed = replay_result(connection, request_id, "memo-edit", payload)
         if replayed is not None:
@@ -842,7 +846,7 @@ def update_memo(
 def delete_memo(memo_id: int, expected_version: int | None = None, request_id: str = "") -> int | None:
     init_db()
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         payload = [memo_id, expected_version]
         replayed = replay_result(connection, request_id, "memo-delete", payload)
         if replayed is not None:
@@ -945,6 +949,10 @@ def _snippet(value: str, limit: int = 140, query: str = "") -> str:
 
 @contextmanager
 def _connect() -> Iterator[sqlite3.Connection]:
+    if ha_backend.enabled():
+        with ha_backend.runtime().connect(ha_backend.SERVICE) as connection:
+            yield connection
+        return
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
@@ -992,8 +1000,11 @@ def memo_trash_summary(parent_id: int, page: int = 1) -> dict[str, int]:
     init_db()
     with _connect() as connection:
         row = connection.execute(
-            "SELECT COUNT(*) AS count, COALESCE(SUM(length(CAST(snapshot AS BLOB)) + "
-            "length(CAST(tags AS BLOB))), 0) AS bytes FROM deleted_memos WHERE book_id = ?",
+            ("SELECT COUNT(*) AS count, COALESCE(SUM(octet_length(snapshot) + "
+             "octet_length(tags)), 0) AS bytes FROM deleted_memos WHERE book_id = ?"
+             if ha_backend.enabled() else
+             "SELECT COUNT(*) AS count, COALESCE(SUM(length(CAST(snapshot AS BLOB)) + "
+            "length(CAST(tags AS BLOB))), 0) AS bytes FROM deleted_memos WHERE book_id = ?"),
             (parent_id,),
         ).fetchone()
     pages = max(1, (row["count"] + 19) // 20)
@@ -1018,7 +1029,7 @@ def purge_deleted_memos(parent_id: int, selection: list[tuple[int, int]], reques
     init_db()
     payload = [parent_id, sorted(selected.items())]
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         replayed = replay_result(connection, request_id, "memo-trash-purge", payload)
         if replayed is not None:
             return replayed
@@ -1040,7 +1051,7 @@ def purge_deleted_memos(parent_id: int, selection: list[tuple[int, int]], reques
 def restore_memo(memo_id: int, expected_version: int, request_id: str = "") -> int | None:
     init_db()
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         payload = [memo_id, expected_version]
         replayed = replay_result(connection, request_id, "memo-restore", payload)
         if replayed is not None:
@@ -1074,7 +1085,7 @@ def restore_memo_revision(memo_id: int, revision_id: int, expected_version: int,
     """Restore a prior body while saving the current body in the same transaction."""
     init_db()
     with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         payload = [memo_id, revision_id, expected_version]
         replayed = replay_result(connection, request_id, "memo-revision-restore", payload)
         if replayed is not None:

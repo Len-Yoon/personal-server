@@ -10,12 +10,14 @@ import os
 from pathlib import Path
 import secrets
 import time
+from threading import local
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from app.models import VehicleSnapshot
 from app.services.vehicle_monitor import SUPPORTED_WARNINGS
+from app.services.ha_backend import runtime
 
 
 DEFAULT_OAUTH_BASE_URL = "https://prd.kr-ccapi.hyundai.com/api/v1/user/oauth2"
@@ -78,6 +80,7 @@ class HyundaiClient:
         self._access_token: str | None = None
         self._access_token_expires_at = 0.0
         self._last_token_error: str | None = None
+        self._ha_tokens = local()
 
     @classmethod
     def from_environment(cls) -> "HyundaiClient":
@@ -100,12 +103,20 @@ class HyundaiClient:
 
     def begin_authorization(self) -> str:
         """Create and persist one short-lived CSRF state for the public callback."""
+        if (backend := runtime()) is not None:
+            backend.require_worker("car-care-worker")
         state = secrets.token_urlsafe(32)
         self._save_authorization_state(state)
         return self.authorization_url(state)
 
     def complete_authorization(self, code: str, state: str | None = None) -> str:
         """Exchange an account-redirect authorization code and persist its token pair."""
+        if (backend := runtime()) is not None:
+            with backend.worker_scope("car-care-worker"):
+                return self._complete_authorization(code, state)
+        return self._complete_authorization(code, state)
+
+    def _complete_authorization(self, code: str, state: str | None) -> str:
         self._consume_authorization_state(state)
         if not self.exchange_authorization_code(code):
             raise OSError("Hyundai token exchange failed")
@@ -152,12 +163,34 @@ class HyundaiClient:
         )
 
     def _valid_access_token(self) -> str | None:
+        if (backend := runtime()) is not None:
+            with backend.worker_scope("car-care-worker"):
+                return self._refresh_ha_access_token(backend)
+        return self._legacy_access_token()
+
+    def _legacy_access_token(self) -> str | None:
         if self._access_token and self._access_token_expires_at > time.time() + 60:
             return self._access_token
         refresh_token = self._load_refresh_token()
         if refresh_token is None or not self._save_tokens_from_payload(
             self._token_request({"grant_type": "refresh_token", "refresh_token": refresh_token})
         ):
+            return None
+        return self._access_token
+
+    def _refresh_ha_access_token(self, backend) -> str | None:
+        if self._access_token and self._access_token_expires_at > time.time() + 60:
+            return self._access_token
+        with backend.state_transaction("car-care-worker", "hyundai_tokens", {}) as payload:
+            if payload.get("refresh_uncertain"):
+                raise OSError("Hyundai refresh outcome requires reconciliation")
+            refresh_token = _clean(payload.get("refresh_token"))
+            if refresh_token is None:
+                return None
+            payload["refresh_uncertain"] = True
+        # The uncertainty fence is committed before rotating the provider token.
+        result = self._token_request({"grant_type": "refresh_token", "refresh_token": refresh_token})
+        if not self._save_tokens_from_payload(result):
             return None
         return self._access_token
 
@@ -249,6 +282,7 @@ class HyundaiClient:
         with self._token_file_lock():
             payload = self._load_token_file()
             payload["refresh_token"] = refresh_token
+            payload.pop("refresh_uncertain", None)
             self._write_token_file(payload)
 
     def _load_tokens(self) -> _Tokens | None:
@@ -279,6 +313,14 @@ class HyundaiClient:
 
     @contextmanager
     def _token_file_lock(self):
+        if (backend := runtime()) is not None:
+            with backend.state_transaction("car-care-worker", "hyundai_tokens", {}) as payload:
+                self._ha_tokens.payload = payload
+                try:
+                    yield
+                finally:
+                    del self._ha_tokens.payload
+            return
         self._token_store_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self._token_store_path.with_suffix(self._token_store_path.suffix + ".lock")
         descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
@@ -290,6 +332,11 @@ class HyundaiClient:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _load_token_file(self) -> dict:
+        if (backend := runtime()) is not None:
+            payload = getattr(self._ha_tokens, "payload", None)
+            if payload is None:
+                payload = backend.read_state("car-care-worker", "hyundai_tokens", {})
+            return dict(payload)
         try:
             payload = json.loads(self._token_store_path.read_text(encoding="utf-8"))
         except (OSError, ValueError, json.JSONDecodeError):
@@ -297,6 +344,13 @@ class HyundaiClient:
         return payload if isinstance(payload, dict) else {}
 
     def _write_token_file(self, payload: dict) -> None:
+        if runtime() is not None:
+            target = getattr(self._ha_tokens, "payload", None)
+            if target is None:
+                raise RuntimeError("token write requires transaction")
+            target.clear()
+            target.update(payload)
+            return
         self._token_store_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = self._token_store_path.with_suffix(self._token_store_path.suffix + ".tmp")
         temporary_path.write_text(json.dumps(payload), encoding="utf-8")

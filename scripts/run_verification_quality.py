@@ -25,9 +25,11 @@ COPY_ALLOWLIST = (
     "tests/test_validate_backup_evidence.py", "tests/test_portal_improvements.py",
     "tests/test_security_full_paths.py", "tests/test_file_store_full_paths.py",
     "tests/test_backup_full_paths.py",
+    "tests/test_ha_quality_paths.py",
     "portal-web/app/services/__init__.py",
     "portal-web/app/services/security.py", "portal-web/app/services/file_store.py",
     "portal-web/app/services/session_store.py",
+    "portal-web/app/services/ha_backend.py", "portal-web/app/services/ha_files.py",
     "portal-web/app/services/admin_status.py", "portal-web/app/services/file_management.py",
     "infra/k8s/tools/validate-backup-evidence.py",
 )

@@ -13,6 +13,7 @@ from app.routers import admin, dashboard, files, portfolio
 from app.services.http_metrics import HttpMetrics
 from app.services.global_search import SEARCH_METRICS
 from app.services.security import SECURITY_HEADERS
+from app.services.ha_backend import runtime
 
 @asynccontextmanager
 async def portal_lifespan(_app):
@@ -20,7 +21,7 @@ async def portal_lifespan(_app):
     from app.services.session_store import shared_wal_runtime_allowed
     store = security.AUTH_SESSION_STORE
     if store is not None:
-        if not shared_wal_runtime_allowed():
+        if not getattr(store, "is_postgres", False) and not shared_wal_runtime_allowed():
             raise RuntimeError("unsupported_sqlite_for_shared_wal")
         store.start()
     try:
@@ -31,6 +32,8 @@ async def portal_lifespan(_app):
 
 
 app = FastAPI(title="Personal Server Portal", lifespan=portal_lifespan)
+if runtime() is not None:
+    runtime().register_fastapi(app)
 APP_DIR = Path(__file__).resolve().parent
 PORTFOLIO_ALLOWED_PATHS = {"/", "/admin", "/admin/login", "/admin/save"}
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
@@ -209,6 +212,14 @@ def health():
 def ready():
     from app.services import file_store, security
     from app.services.session_store import shared_wal_runtime_allowed
+    if (backend := runtime()) is not None:
+        try:
+            backend.require_schema("portal-web", "state", ["shared_state"])
+            file_store.ensure_storage()
+            ok = security.AUTH_SESSION_STORE is not None and security.AUTH_SESSION_STORE.ready()
+        except Exception:
+            ok = False
+        return JSONResponse(status_code=200 if ok else 503, content={"service": "portal-web", "status": "ready" if ok else "not_ready", "node_id": backend.node_id()})
     checks = {
         "storage": file_store.STORAGE_PATH.is_dir() and os.access(file_store.STORAGE_PATH, os.R_OK | os.W_OK | os.X_OK),
         "auth_state": security.AUTH_RATE_LIMIT_STATE_PATH.parent.is_dir() and os.access(security.AUTH_RATE_LIMIT_STATE_PATH.parent, os.R_OK | os.W_OK | os.X_OK),

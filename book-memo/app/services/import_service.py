@@ -1,3 +1,4 @@
+from app.services import ha_backend
 """Authenticated, bounded JSON import with a session-bound preview contract."""
 import hashlib
 import hmac
@@ -240,7 +241,7 @@ def commit_import(payload):
     service.init_db()
     imported = skipped = 0
     with service._connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
+        ha_backend.begin_write(connection)
         for book in payload["records"]:
             if connection.execute("SELECT 1 FROM books WHERE isbn = ?", (book["isbn"],)).fetchone():
                 skipped += 1

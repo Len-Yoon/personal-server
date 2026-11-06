@@ -6,6 +6,10 @@ from pathlib import Path
 
 def database_ready(path: Path, schema_ready) -> bool:
     try:
+        if "HA_PG_CONFIG" in os.environ:
+            from app.services import ha_backend
+            ha_backend.require_schema()
+            return True
         if not path.is_file() or not os.access(path, os.R_OK | os.W_OK) or not os.access(path.parent, os.W_OK):
             return False
         storage = os.statvfs(path.parent)
