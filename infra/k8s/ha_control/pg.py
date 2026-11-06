@@ -181,7 +181,33 @@ class PgBackend:
             return  # The one durable promotion intent may publish new history.
         self._recorded_primary(value, state)
 
+    def _best_effort_revoke(self, state):
+        self.validated = None
+        try:
+            self.bind(state)
+            self._local_metadata_write(state["target"], state)
+        except Exception:
+            # Loss of connectivity/role lock may leave the previously issued
+            # lease live until its DB-clock expiry. Never claim instant close.
+            pass
+
     def _local_metadata(self, node, state, *, promoted=False):
+        if not promoted:
+            # Revocation must remain available when host observation fails.
+            return self._local_metadata_write(node, state)
+        started = time.monotonic()
+        try:
+            if not self.fenced(state):
+                _deny("positive_fence_required")
+            self._local_metadata_write(node, state, promoted=True)
+            confirmed = self.fenced(state)
+            if not confirmed or time.monotonic() - started > PROOF_SECONDS:
+                _deny("fresh_legacy_guard_required")
+        except Exception:
+            self._best_effort_revoke(state)
+            raise
+
+    def _local_metadata_write(self, node, state, *, promoted=False):
         with self._connection(node) as connection:
             connection.execute("BEGIN")
             connection.execute("SET LOCAL synchronous_commit=local")
@@ -252,10 +278,20 @@ class PgBackend:
             value = self._observe(connection, state["target"], state)
             if value["recovery"]:
                 self._candidate(value, state)
+                started = time.monotonic()
+                if not self.fenced(state):
+                    _deny("positive_fence_required")
                 try:
                     connection.execute("SELECT pg_promote(true,1)")
                 except Exception:
                     pass  # Reconcile the actual recovery state, never repeat.
+                try:
+                    confirmed = self.fenced(state)
+                    if not confirmed or time.monotonic() - started > PROOF_SECONDS:
+                        _deny("fresh_legacy_guard_required")
+                except Exception:
+                    self._best_effort_revoke(state)
+                    raise
         if not self.promoted(state):
             _deny("promotion_unconfirmed")
 
@@ -336,6 +372,15 @@ class PgBackend:
             _deny("closed_authority_requires_explicit_open")
 
     def _fresh(self, state, *, lease=False, shared=False):
+        if shared and not lease:
+            _deny("shared_lock_only_for_lease_renewal")
+        try:
+            self._fresh_observation(state, lease=lease, shared=shared)
+        except Exception:
+            self._best_effort_revoke(state)
+            raise
+
+    def _fresh_observation(self, state, *, lease=False, shared=False):
         self.bind(state)
         if shared and not lease:
             _deny("shared_lock_only_for_lease_renewal")

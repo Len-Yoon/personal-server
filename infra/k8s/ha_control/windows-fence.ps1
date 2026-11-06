@@ -3,6 +3,7 @@ param([Parameter(Mandatory=$true)][string]$Plan,
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 $locks = @()
+$script:haControlRoot = $PSScriptRoot
 
 function Assert-PrivateDirectory([string]$Path) {
     $directory = Get-Item -LiteralPath $Path -Force
@@ -66,6 +67,7 @@ function Read-PrivateJson([string]$Path) {
     $verified = Read-PrivateBytes $Path
     $parsed = [Text.Encoding]::UTF8.GetString($verified.bytes).TrimStart([char]0xFEFF) | ConvertFrom-Json
     $parsed | Add-Member -NotePropertyName verified_sha256 -NotePropertyValue $verified.verified_sha256 -Force
+    $parsed | Add-Member -NotePropertyName verified_raw_base64 -NotePropertyValue ([Convert]::ToBase64String($verified.bytes)) -Force
     return $parsed
 }
 
@@ -170,7 +172,7 @@ function Test-Fenced {
 try {
     if (-not $Go -or [Environment]::OSVersion.Platform -ne "Win32NT") { throw "native_approval_required" }
     $script:config = Read-PrivateJson $Plan
-    $approved = Read-PrivateJson $Approval
+    $script:approved = Read-PrivateJson $Approval
     Assert-PrivateDirectory ([IO.Path]::GetDirectoryName($Plan))
     $journal = Join-Path ([IO.Path]::GetDirectoryName($Plan)) "controller-state.json"
     if (Test-Path -LiteralPath $journal -ErrorAction Stop) { [void](Read-PrivateBytes $journal) }
@@ -185,13 +187,30 @@ try {
         [string]$approved.expires_at -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,7})?Z$' -or
         $approved.action -notin @("fence", "ha-transition") -or [DateTimeOffset]::Parse($approved.expires_at) -le [DateTimeOffset]::UtcNow -or
         [DateTimeOffset]::Parse($approved.expires_at) -gt [DateTimeOffset]::UtcNow.AddHours(24)) { throw "approval_mismatch" }
+    $bundle = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+    $manifest = Read-PrivateJson (Join-Path $bundle 'source-manifest.json')
+    $helper = Read-PrivateBytes (Join-Path $PSScriptRoot 'windows-legacy-guard.ps1')
+    $selfCode = Read-PrivateBytes $PSCommandPath
+    if ($manifest.verified_sha256 -ne $script:config.controller_bundle_sha256 -or
+        $manifest.source_commit -ne $script:config.source_commit -or
+        $selfCode.verified_sha256 -ne $manifest.bundle_files.'files/ha_control/windows-fence.ps1' -or
+        $helper.verified_sha256 -ne $manifest.bundle_files.'files/ha_control/windows-legacy-guard.ps1' -or
+        $helper.verified_sha256 -ne $script:config.windows_guard_sha256) {throw 'legacy_guard_source_unverified'}
+    . ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString($helper.bytes)))
+    Assert-LegacyBundle
     Assert-Quiescent
+    $random=New-Object byte[] 32
+    $rng=[Security.Cryptography.RandomNumberGenerator]::Create()
+    try {$rng.GetBytes($random)} finally {$rng.Dispose()}
+    $startupNonce=[BitConverter]::ToString($random).Replace('-','').ToLowerInvariant()
+    [void](Get-LegacyWriterProof $startupNonce)
     foreach ($name in @("supervisor.lock", "daemon.lock", "recovery.lock")) {
         $path = Join-Path (Join-Path $script:config.legacy_root "data") $name
         $locks += [IO.File]::Open($path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Write, [IO.FileShare]::None)
     }
-    @{guard="ready";plan_sha256=$hash;approval_sha256=$approved.verified_sha256;approval_action=$approved.action} | ConvertTo-Json -Compress
+    @{guard="ready";plan_sha256=$hash;approval_sha256=$approved.verified_sha256;approval_action=$approved.action;legacy_guard_schema=1} | ConvertTo-Json -Compress
     while ($null -ne ($line = [Console]::ReadLine())) {
+        $observed=[Diagnostics.Stopwatch]::StartNew()
         if ($line.Length -gt 4096) { throw "invalid_fence_request" }
         Assert-Quiescent
         $request = $line | ConvertFrom-Json
@@ -200,12 +219,19 @@ try {
             [DateTimeOffset]::Parse($approved.expires_at) -le [DateTimeOffset]::UtcNow) { throw "invalid_fence_request" }
         $fenced = Test-Fenced
         if ($request.action -eq "fence" -and -not $fenced) {
+            [void](Get-LegacyWriterProof $request.nonce)
             if ($script:config.resource.kind -eq "wsl-containers") {
                 foreach ($id in $script:config.resource.container_ids) { [void](Invoke-OwnedDocker @("container", "stop", "--time", "10", [string]$id)) }
             } else { Stop-VM -Id ([Guid]::Parse($script:config.resource.vm_id)) -TurnOff -Force -Confirm:$false }
+            # A stop can take longer than a read proof. It never authorizes PG
+            # promotion; the caller must obtain a new bounded observe receipt.
+            $observed.Restart()
             $fenced = Test-Fenced
         }
-        @{status="ok";fenced=$fenced;node=$request.node;generation=$request.generation;nonce=$request.nonce} | ConvertTo-Json -Compress
+        $legacyProof=Get-LegacyWriterProof $request.nonce
+        Assert-Quiescent
+        Assert-LegacyDeadline $observed
+        @{status="ok";fenced=$fenced;node=$request.node;generation=$request.generation;nonce=$request.nonce;legacy_guard=$legacyProof} | ConvertTo-Json -Depth 6 -Compress
     }
 } catch {
     # Never emit command output, paths, configuration or native exception text.

@@ -30,6 +30,7 @@ def run():
         plan_data = plan
         guard_entries = 0
         guard_exits = 0
+        observation_available = True
         @contextmanager
         def guard(self):
             self.guard_entries += 1
@@ -37,7 +38,10 @@ def run():
                 yield
             finally:
                 self.guard_exits += 1
-        def fenced(self, state): return True
+        def fenced(self, state):
+            if not self.observation_available:
+                raise TransitionBlocked("legacy_writer_guard_unverified")
+            return True
         def fence(self, state): raise AssertionError("actual_host_fence_must_be_external")
     backend = PgBackend("/fixture/controller-plan.json", "/fixture/controller-approval.json", fence=LocalFenceDouble())
     state = dict(cluster=cluster, generation=epoch, old="A", target="B", timeline=1, phase="validating", attempts=1)
@@ -95,6 +99,21 @@ def run():
             raise TransitionBlocked("expired_authority_renewed")
         backend.arm(state)
         backend.assert_ready(state)
+        backend.fence_adapter.observation_available = False
+        try:
+            backend.renew(state)
+        except TransitionBlocked as error:
+            if str(error) != "legacy_writer_guard_unverified":
+                raise
+        else:
+            raise TransitionBlocked("lost_guard_renewed_authority")
+        with psycopg.connect(**admin, autocommit=True) as connection:
+            revoked = connection.execute("SELECT NOT writes_open AND NOT history_safe AND expires_at<clock_timestamp() FROM ha.control").fetchone()[0]
+        if not revoked or backend.validated is not None:
+            raise TransitionBlocked("lost_guard_authority_not_revoked")
+        backend.fence_adapter.observation_available = True
+        backend.arm(state)
+        backend.assert_ready(state)
         backend.close(state)
     if backend.fence_adapter.guard_entries != 1 or backend.fence_adapter.guard_exits != 1:
         raise TransitionBlocked("guard_scope_changed")
@@ -104,6 +123,7 @@ def run():
             "exclusive_role_change_denied": exclusive_denied, "closed_renew_denied": closed_denied,
             "expired_renew_denied": expired_denied, "explicit_arm_reopened": True,
             "single_guard_scope": True,
+            "lost_guard_renew_denied_and_real_pg_revoked": revoked,
             "probe_rows_primary_and_partner": counts}
 
 

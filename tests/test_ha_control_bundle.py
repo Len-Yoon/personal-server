@@ -120,7 +120,9 @@ class ControlBundleTest(unittest.TestCase):
         with patch.object(cli, "__file__", current):
             cli.validate_bundle(plan)
             for key, value in (("controller_bundle_sha256", "0" * 64), ("source_commit", "0" * 40),
-                               ("controller_code_sha256", "0" * 64), ("native_windows_code_sha256", "0" * 64)):
+                               ("controller_code_sha256", "0" * 64), ("native_windows_code_sha256", "0" * 64),
+                               ("legacy_linux_sha256", "0" * 64), ("legacy_guard_code_sha256", "0" * 64),
+                               ("windows_guard_sha256", "0" * 64)):
                 with self.subTest(binding=key), self.assertRaises(TransitionBlocked):
                     cli.validate_bundle(dict(plan, **{key: value}))
         with self.assertRaisesRegex(TransitionBlocked, "approved_controller_bundle_required"):

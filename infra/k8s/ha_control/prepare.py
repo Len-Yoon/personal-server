@@ -9,7 +9,8 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[3]
 SOURCES = tuple("infra/k8s/ha_control/" + name for name in (
-    "__init__.py", "controller.py", "windows.py", "pg.py", "cli.py", "prepare.py", "windows-fence.ps1")) + (
+    "__init__.py", "controller.py", "windows.py", "pg.py", "cli.py", "prepare.py", "windows-fence.ps1",
+    "windows-legacy-guard.ps1", "legacy_guard.py", "legacy_linux.py", "launcher.py")) + (
     "scripts/windows-bootstrap.ps1", "infra/k8s/ha_runtime/schema.sql")
 TARGETS = {source: source.removeprefix("infra/k8s/") if source.startswith("infra/k8s/") else source for source in SOURCES}
 REQUIREMENTS = b"psycopg[binary]==3.3.8\n"
@@ -60,16 +61,24 @@ def templates(commit, bindings):
             "bootstrap_sha256": bindings["source_bootstrap_sha256"],
             "native_windows_code_sha256": bindings["native_windows_code_sha256"],
             "controller_code_sha256": bindings["controller_code_sha256"], "cluster": None, "node": None,
+            "legacy_linux_sha256": bindings["legacy_linux_sha256"],
+            "legacy_guard_code_sha256": bindings["legacy_guard_code_sha256"],
+            "windows_guard_sha256": bindings["windows_guard_sha256"],
+            "guard_python": {"path": None, "sha256": None},
+            "legacy_guard": {"schema_version": 1, "windows": None,
+                             "linux": {"distribution": None, "reader_user": None, "spec": None}},
             "generation": None, "timeline": None, "system_id": None, "legacy_root": None, "boot_ticks": None,
             "resource": {"kind": None, "distribution": None, "engine_id": None, "container_ids": None,
                          "image_ids": None, "vm_id": None, "new_standby": None},
             "pg_nodes": {"A": dict(endpoint), "B": dict(endpoint)}}
     status = {"ready": False, "production_deployed": False, "source_commit": commit,
               "requires": ["native_windows_acceptance", "real_owned_resource_ids", "explicit_user_approval",
-                           "private_plan_and_authority_ACLs", "TLS_and_passfile_references"],
+                           "private_plan_and_authority_ACLs", "TLS_and_passfile_references",
+                           "complete_frozen_legacy_graph", "source_bound_live_guard_under_two_seconds"],
               "bindings": bindings,
-              "approval_actions": {"fence": "owned-resource stop only; no PostgreSQL transition",
+              "approval_actions": {"fence": "unsupported by this guard: standalone observer acceptance required; no PostgreSQL transition",
                                    "ha-transition": "explicit full HA transition scope; separately approved"},
+              "standalone_fence_supported": False,
               "execution_performed": False, "approval_issued": False}
     result = {"native-plan.template.json": encode(plan), "readiness.json": encode(status)}
     for action in ("fence", "ha-transition"):
@@ -99,10 +108,14 @@ def prepare(commit, output):
                 "generated_requirements_sha256": sha(REQUIREMENTS)}
     manifest["source_bootstrap_sha256"] = manifest["source_files"]["scripts/windows-bootstrap.ps1"]
     native = {key: value for key, value in manifest["source_files"].items()
-              if key.endswith(("windows.py", "windows-fence.ps1", "windows-bootstrap.ps1"))}
+              if key.endswith(("windows.py", "windows-fence.ps1", "windows-bootstrap.ps1", "windows-legacy-guard.ps1", "legacy_guard.py", "legacy_linux.py"))}
     manifest["native_windows_code_sha256"] = sha(encode(native))
     manifest["controller_code_sha256"] = sha(encode(manifest["source_files"]))
-    bindings = {key: manifest[key] for key in ("source_bootstrap_sha256", "native_windows_code_sha256", "controller_code_sha256")}
+    for field, source in (("legacy_linux_sha256", "legacy_linux.py"), ("legacy_guard_code_sha256", "legacy_guard.py"),
+                          ("windows_guard_sha256", "windows-legacy-guard.ps1")):
+        manifest[field] = manifest["source_files"]["infra/k8s/ha_control/" + source]
+    bindings = {key: manifest[key] for key in ("source_bootstrap_sha256", "native_windows_code_sha256", "controller_code_sha256",
+                                             "legacy_linux_sha256", "legacy_guard_code_sha256", "windows_guard_sha256")}
     rendered = {"files/" + TARGETS[key]: value for key, value in files.items()}
     rendered["files/requirements.txt"] = REQUIREMENTS
     rendered.update(templates(commit, bindings))
@@ -141,10 +154,13 @@ def verify(bundle, expected_manifest_sha256=None):
         if manifest["source_files"][source] != actual["files/" + TARGETS[source]]:
             raise BundleError("source_file_binding_mismatch")
     native = {key: value for key, value in manifest["source_files"].items()
-              if key.endswith(("windows.py", "windows-fence.ps1", "windows-bootstrap.ps1"))}
+              if key.endswith(("windows.py", "windows-fence.ps1", "windows-bootstrap.ps1", "windows-legacy-guard.ps1", "legacy_guard.py", "legacy_linux.py"))}
     expected = {"source_bootstrap_sha256": manifest["source_files"]["scripts/windows-bootstrap.ps1"],
                 "native_windows_code_sha256": sha(encode(native)),
                 "controller_code_sha256": sha(encode(manifest["source_files"]))}
+    for field, source in (("legacy_linux_sha256", "legacy_linux.py"), ("legacy_guard_code_sha256", "legacy_guard.py"),
+                          ("windows_guard_sha256", "windows-legacy-guard.ps1")):
+        expected[field] = manifest["source_files"]["infra/k8s/ha_control/" + source]
     if (any(manifest[key] != value for key, value in expected.items())
             or manifest["generated_requirements_sha256"] != sha(REQUIREMENTS)
             or actual["files/requirements.txt"] != sha(REQUIREMENTS)):
