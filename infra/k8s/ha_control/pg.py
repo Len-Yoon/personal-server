@@ -164,6 +164,23 @@ class PgBackend:
                 or value["epoch"] >= state["generation"]):
             _deny("promotion_candidate_mismatch")
 
+    @staticmethod
+    def _recorded_primary(value, state):
+        if (value["recovery"] or value["primary"] != state["target"] or value["partner"] != state["old"]
+                or value["epoch"] != state["generation"] or value["timeline"] != value["actual_timeline"]
+                or value["actual_timeline"] <= state["timeline"]):
+            _deny("recorded_primary_history_required")
+
+    def _promoted_history(self, value, state):
+        self._promotion_intent(state)
+        if value["actual_timeline"] <= state["timeline"]:
+            _deny("promoted_timeline_required")
+        if (state["phase"] == "promoting" and value["epoch"] < state["generation"]
+                and value["primary"] == state["old"] and value["partner"] == state["target"]
+                and value["timeline"] == state["timeline"]):
+            return  # The one durable promotion intent may publish new history.
+        self._recorded_primary(value, state)
+
     def _local_metadata(self, node, state, *, promoted=False):
         with self._connection(node) as connection:
             connection.execute("BEGIN")
@@ -173,9 +190,13 @@ class PgBackend:
             if value["recovery"]:
                 _deny("primary_metadata_required")
             if promoted:
-                if value["actual_timeline"] <= state["timeline"]:
-                    _deny("promoted_timeline_required")
-                connection.execute("UPDATE ha.control SET primary_node=%s,partner=%s,timeline=%s,epoch=%s,revision=GREATEST(revision+1,%s),serving=ARRAY[%s]::text[],worker=%s,writes_open=false,history_safe=false,expires_at=clock_timestamp()-interval '1 second' WHERE singleton=1", (state["target"], state["old"], value["actual_timeline"], state["generation"], state["generation"], state["target"], state["target"]))
+                self._promoted_history(value, state)
+                if state["phase"] == "promoting":
+                    connection.execute("UPDATE ha.control SET primary_node=%s,partner=%s,timeline=%s,epoch=%s,revision=GREATEST(revision+1,%s),serving=ARRAY[%s]::text[],worker=%s,writes_open=false,history_safe=false,expires_at=clock_timestamp()-interval '1 second' WHERE singleton=1", (state["target"], state["old"], value["actual_timeline"], state["generation"], state["generation"], state["target"], state["target"]))
+                else:
+                    # Rejoin/validation/ready may revoke a lease, but must never
+                    # adopt a later fork using an older transition approval.
+                    connection.execute("UPDATE ha.control SET writes_open=false,history_safe=false,expires_at=clock_timestamp()-interval '1 second',revision=revision+1 WHERE singleton=1")
             else:
                 connection.execute("UPDATE ha.control SET writes_open=false,history_safe=false,expires_at=clock_timestamp()-interval '1 second',revision=revision+1 WHERE singleton=1")
             connection.execute("COMMIT")
@@ -188,7 +209,7 @@ class PgBackend:
             # Highest priority after a lost pg_promote response: close the real
             # primary before attempting old-host or replay observations.
             self._local_metadata(state["target"], state)
-            self._promotion_intent(state)
+            self._promoted_history(candidate, state)
             self._local_metadata(state["target"], state, promoted=True)
             return
         self._candidate(candidate, state)
@@ -218,6 +239,7 @@ class PgBackend:
         if value["recovery"]:
             self._candidate(value, state)
             return False
+        self._promoted_history(value, state)
         self._local_metadata(state["target"], state, promoted=True)
         return True
 
@@ -303,8 +325,20 @@ class PgBackend:
             timer.cancel()
             timer.join()
 
-    def _fresh(self, state, *, lease=False):
+    @staticmethod
+    def _authority_stamp(value):
+        return tuple(value[k] for k in ("cluster", "epoch", "revision", "primary", "partner", "timeline",
+                                        "serving", "worker", "mode", "writes", "history"))
+
+    @staticmethod
+    def _require_open(value):
+        if not value["writes"] or not value["history"] or not 0 < value["remaining"] <= LEASE_SECONDS:
+            _deny("closed_authority_requires_explicit_open")
+
+    def _fresh(self, state, *, lease=False, shared=False):
         self.bind(state)
+        if shared and not lease:
+            _deny("shared_lock_only_for_lease_renewal")
         started = time.monotonic()
         if not self.fenced(state):
             _deny("positive_fence_required")
@@ -312,12 +346,19 @@ class PgBackend:
         with self._connection(state["target"]) as primary, self._connection(state["old"]) as peer:
             before, replica = self._observe(primary, state["target"], state), self._observe(peer, state["old"], state)
             self._pair(before, replica, state)
+            if shared:
+                self._require_open(before)
+                self._require_open(replica)
             for suffix in ("", ":flush"):
                 primary.execute("BEGIN")
                 primary.execute("SET LOCAL synchronous_commit=on")
-                primary.execute("SELECT pg_advisory_xact_lock(%s)", (ROLE_LOCK,))
+                primary.execute("SELECT pg_advisory_xact_lock_shared(%s)" if shared else "SELECT pg_advisory_xact_lock(%s)", (ROLE_LOCK,))
                 current = self._observe(primary, state["target"], state)
                 self._pair(current, self._observe(peer, state["old"], state), state)
+                if shared:
+                    self._require_open(current)
+                    if self._authority_stamp(current) != self._authority_stamp(before):
+                        _deny("authority_changed_during_renewal")
                 if not suffix:
                     # These are ephemeral controller observations, never app
                     # receipts/barriers. Bound retention inside the same role
@@ -325,12 +366,23 @@ class PgBackend:
                     primary.execute("DELETE FROM ha.controller_probes WHERE nonce<>%s AND nonce<>%s", (nonce, nonce + ":flush"))
                 primary.execute("INSERT INTO ha.controller_probes(nonce,generation) VALUES(%s,%s)", (nonce + suffix, state["generation"]))
                 if lease and suffix == ":flush":
-                    primary.execute("UPDATE ha.control SET serving=ARRAY[%s]::text[],worker=%s,writes_open=true,history_safe=true,expires_at=clock_timestamp()+interval '5 seconds' WHERE singleton=1 AND epoch=%s AND primary_node=%s", (state["target"], state["target"], state["generation"], state["target"]))
+                    if shared:
+                        # A shared worker permit freezes role membership but
+                        # must coexist with TTL renewal. Match the complete
+                        # observed generation and live lease, and change ONLY
+                        # its expiry; this can never reopen a closed authority.
+                        updated = primary.execute("UPDATE ha.control SET expires_at=clock_timestamp()+interval '5 seconds' WHERE singleton=1 AND cluster=%s AND epoch=%s AND revision=%s AND primary_node=%s AND partner=%s AND timeline=%s AND serving=%s::text[] AND worker=%s AND mode=%s AND writes_open=true AND history_safe=true AND expires_at>clock_timestamp()", (before["cluster"], before["epoch"], before["revision"], before["primary"], before["partner"], before["timeline"], before["serving"], before["worker"], before["mode"]))
+                        if updated.rowcount != 1:
+                            _deny("authority_changed_during_renewal")
+                    else:
+                        primary.execute("UPDATE ha.control SET serving=ARRAY[%s]::text[],worker=%s,writes_open=true,history_safe=true,expires_at=clock_timestamp()+interval '5 seconds' WHERE singleton=1 AND epoch=%s AND primary_node=%s", (state["target"], state["target"], state["generation"], state["target"]))
                 self._commit(primary)
                 if not suffix:
                     watermark = self._lsn(primary.execute("SELECT pg_current_wal_insert_lsn()::text").fetchone()[0])
             after, replica = self._observe(primary, state["target"], state), self._observe(peer, state["old"], state)
             self._pair(after, replica, state)
+            if shared and self._authority_stamp(after) != self._authority_stamp(before):
+                _deny("authority_changed_during_renewal")
             if any(after[k] != before[k] for k in ("revision", "serving", "worker", "mode")) or (not lease and any(after[k] != before[k] for k in ("writes", "history"))):
                 _deny("authority_changed_during_proof")
             rows = [c.execute("SELECT generation FROM ha.controller_probes WHERE nonce=%s", (nonce + ":flush",)).fetchone() for c in (primary, peer)]
@@ -359,11 +411,45 @@ class PgBackend:
             # A replication response may be lost after local commit. Revoke the
             # lease locally rather than trusting a failed proof or response.
             try:
-                self._local_metadata(state["target"], state, promoted=True)
+                self._local_metadata(state["target"], state)
             except Exception:
                 pass
             raise
 
     def assert_ready(self, state):
+        self.renew(state)
+
+    def arm(self, state):
+        """Explicitly start serving a recorded ready generation after expiry.
+
+        The caller keeps the same approved host guard/controller lock through
+        this exclusive rearming and the subsequent shared-renewal serve loop.
+        """
+        self.bind(state)
+        self.validated = None
+        if state["phase"] != "ready":
+            _deny("ready_transition_required")
+        if not self.fenced(state):
+            _deny("positive_fence_required")
+        current = self._read(state["target"], state)
+        try:
+            self._recorded_primary(current, state)
+        except TransitionBlocked:
+            # Revoke an unexpected writer without rewriting its epoch/timeline.
+            self._local_metadata(state["target"], state)
+            raise
+        if current["writes"] and current["history"] and 0 < current["remaining"] <= LEASE_SECONDS:
+            self.renew(state)
+            return
+        self.close(state)
         self.validate(state)
         self.open(state)
+
+    def renew(self, state):
+        """Extend an already open lease without revoking long worker permits.
+
+        Closed/expired authority requires explicit validate/open under the
+        exclusive role lock; lease serving never performs that transition.
+        """
+        self.validated = None
+        self._fresh(state, lease=True, shared=True)

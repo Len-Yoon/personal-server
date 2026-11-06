@@ -35,6 +35,8 @@ def validate_bundle(plan):
 
 
 def run(args):
+    if getattr(args, "arm", False) and args.command != "serve":
+        raise TransitionBlocked("arm_only_for_serve")
     plan = Path(args.plan)
     journal = Path(args.journal) if args.journal else plan.parent / "controller-state.json"
     if (not plan.is_absolute() or not journal.is_absolute() or journal != plan.parent / "controller-state.json"
@@ -63,9 +65,11 @@ def run(args):
             if state["phase"] != "ready":
                 raise TransitionBlocked("ready_transition_required")
             try:
+                if getattr(args, "arm", False):
+                    backend.arm(state)
                 while True:
                     started = time.monotonic()
-                    backend.assert_ready(state)
+                    backend.renew(state)
                     time.sleep(max(0, 1 - (time.monotonic() - started)))
             finally:
                 # Best-effort immediate close; guard loss or outage is covered
@@ -82,6 +86,7 @@ def main(argv=None):
     parser.add_argument("--plan", required=True)
     parser.add_argument("--approval", required=True)
     parser.add_argument("--journal")
+    parser.add_argument("--arm", action="store_true", help="explicitly rearm the recorded ready generation before serving")
     args = parser.parse_args(argv)
     try:
         result = run(args)

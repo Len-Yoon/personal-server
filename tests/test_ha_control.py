@@ -147,7 +147,7 @@ class ControlTests(unittest.TestCase):
 
     def test_windows_fence_has_exact_inventory_engine_and_legacy_barriers(self):
         source = (ROOT / "infra/k8s/ha_control/windows-fence.ps1").read_text()
-        for text in ("Sort-Object -Unique", "Compare-Object $expected $observed", "unix:///var/run/docker.sock", "owned_engine_mismatch", "ha-controller-owner.json", "bootstrap_sha256", "legacy_process_running", "shutdown_state_unverified", '"supervisor.lock", "daemon.lock", "recovery.lock"'):
+        for text in ("Sort-Object -Unique", "Compare-Object $expected $observed", "unix:///var/run/docker.sock", "owned_engine_mismatch", "ha-controller-owner.json", "bootstrap_sha256", "legacy_process_running", "shutdown_state_unverified", '"supervisor.lock", "daemon.lock", "recovery.lock"', "Assert-PrivateDirectory", "PropagationFlags]::InheritOnly", "ChangePermissions", "TakeOwnership"):
             self.assertIn(text, source)
         self.assertNotIn("Restart-Computer", source)
         self.assertNotIn("wsl --shutdown", source)

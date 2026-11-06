@@ -4,6 +4,20 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 $locks = @()
 
+function Assert-PrivateDirectory([string]$Path) {
+    $directory = Get-Item -LiteralPath $Path -Force
+    if (-not $directory.PSIsContainer -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "private_directory_required" }
+    $allowed = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, "S-1-5-18", "S-1-5-32-544")
+    $acl = Get-Acl -LiteralPath $Path
+    $owner = (New-Object Security.Principal.NTAccount($acl.Owner)).Translate([Security.Principal.SecurityIdentifier]).Value
+    if ($owner -notin $allowed) { throw "private_directory_owner_required" }
+    # Include InheritOnly ACEs here: a new journal/temp inherits them.
+    foreach ($rule in $acl.Access) {
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($rule.AccessControlType -eq "Allow" -and $sid -notin $allowed) { throw "private_directory_acl_required" }
+    }
+}
+
 function Read-PrivateBytes([string]$Path) {
     if (-not [IO.Path]::IsPathRooted($Path)) { throw "private_configuration_required" }
     $item = Get-Item -LiteralPath $Path -Force
@@ -24,8 +38,12 @@ function Read-PrivateBytes([string]$Path) {
     $parent = $item.Directory
     while ($null -ne $parent) {
         foreach ($rule in (Get-Acl -LiteralPath $parent.FullName).Access) {
+            if ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
             $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-            $write = [Security.AccessControl.FileSystemRights]::Write -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::Delete
+            # AddFile/AddDirectory on an ancestor permits new siblings, not
+            # replacement of an existing private child. Reject path replacement
+            # and ACL/owner takeover; all reparse points were rejected above.
+            $write = [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
             if ($rule.AccessControlType -eq "Allow" -and $sid -notin $allowed -and ($rule.FileSystemRights -band $write)) { throw "private_parent_acl_required" }
         }
         $parent = $parent.Parent
@@ -153,6 +171,7 @@ try {
     if (-not $Go -or [Environment]::OSVersion.Platform -ne "Win32NT") { throw "native_approval_required" }
     $script:config = Read-PrivateJson $Plan
     $approved = Read-PrivateJson $Approval
+    Assert-PrivateDirectory ([IO.Path]::GetDirectoryName($Plan))
     $journal = Join-Path ([IO.Path]::GetDirectoryName($Plan)) "controller-state.json"
     if (Test-Path -LiteralPath $journal -ErrorAction Stop) { [void](Read-PrivateBytes $journal) }
     foreach ($node in @("A", "B")) {

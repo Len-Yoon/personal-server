@@ -65,10 +65,11 @@ class PGControlTests(unittest.TestCase):
     def fake_connection(self, node):
         yield self.primary if node == "B" else self.peer
 
-    def prepare_fresh(self, *, lease=False, peer_lsn="0/20", bad_nonce=False):
+    def prepare_fresh(self, *, lease=False, peer_lsn="0/20", bad_nonce=False, opened=False, update_rows=1):
         self.primary, self.peer = MagicMock(), MagicMock()
         def execute(query, params=None):
             result = MagicMock()
+            result.rowcount = update_rows
             if "SELECT pg_current_wal_insert_lsn" in query:
                 result.fetchone.return_value = ("0/10",)
             elif "SELECT generation FROM" in query:
@@ -78,7 +79,7 @@ class PGControlTests(unittest.TestCase):
             return result
         self.primary.execute.side_effect = execute
         self.peer.execute.side_effect = execute
-        before = [self.observation(), self.observation("A", recovery=True)]
+        before = [self.observation(opened=opened), self.observation("A", recovery=True, opened=opened)]
         sequence = before * 3 + [self.observation(opened=lease), dict(self.observation("A", recovery=True, opened=lease), replay=peer_lsn)]
         return patch.object(self.backend, "_connection", side_effect=self.fake_connection), patch.object(self.backend, "_observe", side_effect=deepcopy(sequence))
 
@@ -210,7 +211,7 @@ class PGControlTests(unittest.TestCase):
         retained = {"earlier-attempt", "earlier-attempt:flush"}
         seen_attempts = []
         for _ in range(3):
-            connections, observations = self.prepare_fresh(lease=True)
+            connections, observations = self.prepare_fresh(lease=True, opened=True)
             original_execute = self.primary.execute.side_effect
             def execute(query, params=None):
                 if query.startswith("DELETE FROM ha.controller_probes"):
@@ -223,7 +224,7 @@ class PGControlTests(unittest.TestCase):
                 return original_execute(query, params)
             self.primary.execute.side_effect = execute
             with connections, observations, patch.object(self.backend, "_commit", side_effect=lambda c: c.execute("COMMIT")):
-                self.backend._fresh(self.state, lease=True)
+                self.backend.renew(self.state)
             self.assertEqual(retained, set(seen_attempts[-1]))
             self.assertEqual(len(retained), 2)
             calls = self.primary.execute.call_args_list
@@ -237,6 +238,7 @@ class PGControlTests(unittest.TestCase):
             self.assertLess(first_insert, first_commit)
             self.assertEqual(sum(query.startswith("DELETE FROM") for query in queries), 1)
             self.assertEqual(sum(query.startswith("INSERT INTO ha.controller_probes") for query in queries), 2)
+            self.assertEqual(queries.count("SELECT pg_advisory_xact_lock_shared(%s)"), 2)
             # Both observations still verify the exact current :flush nonce.
             for connection in (self.primary, self.peer):
                 reads = [call for call in connection.execute.call_args_list if "SELECT generation FROM ha.controller_probes" in call.args[0]]
@@ -263,6 +265,72 @@ class PGControlTests(unittest.TestCase):
         updates = [c for c in self.primary.execute.call_args_list if "UPDATE ha.control" in c.args[0]]
         self.assertEqual(len(updates), 1)
         self.assertIn("interval '5 seconds'", updates[0].args[0])
+        self.assertFalse(any("pg_advisory_xact_lock_shared" in call.args[0] for call in self.primary.execute.call_args_list))
+
+    def test_long_worker_shared_permit_coexists_with_expiry_only_renewal(self):
+        connections, observations = self.prepare_fresh(lease=True, opened=True)
+        original_execute = self.primary.execute.side_effect
+        worker_shared_permit_held = True
+        def execute(query, params=None):
+            if worker_shared_permit_held and query == "SELECT pg_advisory_xact_lock(%s)":
+                raise TransitionBlocked("exclusive_role_change_blocked_by_worker")
+            return original_execute(query, params)
+        self.primary.execute.side_effect = execute
+        with connections, observations, patch.object(self.backend, "_commit", side_effect=lambda c: c.execute("COMMIT")):
+            self.backend.renew(self.state)
+        calls = self.primary.execute.call_args_list
+        queries = [call.args[0] for call in calls]
+        self.assertEqual(queries.count("SELECT pg_advisory_xact_lock_shared(%s)"), 2)
+        self.assertNotIn("SELECT pg_advisory_xact_lock(%s)", queries)
+        cleanup = next(i for i, query in enumerate(queries) if query.startswith("DELETE FROM ha.controller_probes"))
+        self.assertLess(queries.index("SELECT pg_advisory_xact_lock_shared(%s)"), cleanup)
+        update = next(call for call in calls if call.args[0].startswith("UPDATE ha.control"))
+        assignment, predicate = update.args[0].split(" WHERE ")
+        self.assertEqual(assignment, "UPDATE ha.control SET expires_at=clock_timestamp()+interval '5 seconds'")
+        for column in ("cluster", "epoch", "revision", "primary_node", "partner", "timeline", "serving", "worker", "mode"):
+            self.assertIn(column + "=%s", predicate)
+        self.assertIn("writes_open=true AND history_safe=true AND expires_at>clock_timestamp()", predicate)
+        self.assertEqual(update.args[1], ("synthetic", 7, 9, "B", "A", 2, ["B"], "B", "AS"))
+        self.assertIsNotNone(self.backend.validated)
+
+    def test_shared_renewal_never_reopens_closed_or_expired_authority(self):
+        for opened, expired in ((False, False), (True, True)):
+            connections, observations = self.prepare_fresh(lease=True, opened=opened)
+            if expired:
+                values = [dict(self.observation(opened=True), remaining=0), dict(self.observation("A", recovery=True, opened=True), remaining=0)]
+                observations = patch.object(self.backend, "_observe", side_effect=values)
+            with connections, observations, patch.object(self.backend, "_commit") as commit:
+                with self.assertRaisesRegex(TransitionBlocked, "closed_authority_requires_explicit_open"):
+                    self.backend.renew(self.state)
+                commit.assert_not_called()
+            self.assertFalse(any(call.args[0].startswith(("UPDATE", "INSERT", "DELETE")) for call in self.primary.execute.call_args_list))
+            self.assertIsNone(self.backend.validated)
+
+    def test_shared_renewal_requires_exact_current_authority_and_one_updated_row(self):
+        connections, observations = self.prepare_fresh(lease=True, opened=True, update_rows=0)
+        with connections, observations, patch.object(self.backend, "_commit") as commit:
+            with self.assertRaisesRegex(TransitionBlocked, "authority_changed_during_renewal"):
+                self.backend.renew(self.state)
+            self.assertEqual(commit.call_count, 1)
+        self.assertIsNone(self.backend.validated)
+        connections, _ = self.prepare_fresh(lease=True, opened=True)
+        values = [self.observation(opened=True), self.observation("A", recovery=True, opened=True),
+                  dict(self.observation(opened=True), revision=10), dict(self.observation("A", recovery=True, opened=True), revision=10)]
+        with connections, patch.object(self.backend, "_observe", side_effect=values), patch.object(self.backend, "_commit") as commit:
+            with self.assertRaisesRegex(TransitionBlocked, "authority_changed_during_renewal"):
+                self.backend.renew(self.state)
+            commit.assert_not_called()
+
+    def test_shared_role_lock_cannot_be_requested_for_initial_validation(self):
+        with patch.object(self.backend, "_connection") as connection:
+            with self.assertRaisesRegex(TransitionBlocked, "shared_lock_only_for_lease_renewal"):
+                self.backend._fresh(self.state, shared=True)
+            connection.assert_not_called()
+        with patch.object(self.backend, "renew") as renew, patch.object(self.backend, "validate") as validate, patch.object(self.backend, "open") as reopen:
+            self.backend.assert_ready(self.state)
+            renew.assert_called_once_with(self.state)
+            validate.assert_not_called()
+            reopen.assert_not_called()
 
     def test_cli_refuses_any_journal_outside_the_verified_plan_directory(self):
         args = SimpleNamespace(plan=str(self.root / "plan.json"), approval=str(self.root / "approval.json"),
@@ -293,7 +361,108 @@ class PGControlTests(unittest.TestCase):
         with patch("ha_control.pg.time.monotonic", return_value=100), patch.object(self.backend, "_fresh", side_effect=TransitionBlocked("fresh_replication_proof_required")), patch.object(self.backend, "_local_metadata") as close:
             with self.assertRaisesRegex(TransitionBlocked, "fresh_replication_proof_required"):
                 self.backend.open(self.state)
-        close.assert_called_once_with("B", self.state, promoted=True)
+        close.assert_called_once_with("B", self.state)
+
+    def test_only_durable_promoting_phase_can_publish_the_new_timeline(self):
+        self.primary, self.peer = MagicMock(), MagicMock()
+        newly_promoted = dict(self.candidate(), recovery=False, actual_timeline=2)
+        with patch.object(self.backend, "_connection", side_effect=self.fake_connection), patch.object(self.backend, "_observe", return_value=newly_promoted):
+            self.backend._local_metadata("B", dict(self.state, phase="promoting"), promoted=True)
+        self.assertTrue(any("SET primary_node=" in call.args[0] for call in self.primary.execute.call_args_list))
+        self.primary.reset_mock()
+        with patch.object(self.backend, "_connection", side_effect=self.fake_connection), patch.object(self.backend, "_observe", return_value=newly_promoted):
+            with self.assertRaisesRegex(TransitionBlocked, "recorded_primary_history_required"):
+                self.backend._local_metadata("B", dict(self.state, phase="ready"), promoted=True)
+        self.assertFalse(any(call.args[0].startswith("UPDATE") for call in self.primary.execute.call_args_list))
+        self.primary.reset_mock()
+        with patch.object(self.backend, "_connection", side_effect=self.fake_connection), patch.object(self.backend, "_observe", return_value=self.observation()):
+            self.backend._local_metadata("B", dict(self.state, phase="ready"), promoted=True)
+        updates = [call.args[0] for call in self.primary.execute.call_args_list if call.args[0].startswith("UPDATE")]
+        self.assertEqual(len(updates), 1)
+        self.assertIn("SET writes_open=false,history_safe=false", updates[0])
+        self.assertNotIn("primary_node=", updates[0])
+        self.assertNotIn("timeline=", updates[0])
+        self.assertNotIn("epoch=", updates[0])
+
+    def test_recorded_later_phase_closes_unexpected_fork_without_adopting_it(self):
+        for phase in ("ready", "rejoining", "validating"):
+            for changes in ({"actual_timeline": 3}, {"epoch": 6}, {"primary": "A"}):
+                with self.subTest(phase=phase, changed=list(changes)), patch.object(self.backend, "_read", return_value=dict(self.observation(), **changes)), patch.object(self.backend, "_local_metadata") as metadata:
+                    with self.assertRaisesRegex(TransitionBlocked, "recorded_primary_history_required"):
+                        self.backend.close(dict(self.state, phase=phase))
+                    metadata.assert_called_once_with("B", dict(self.state, phase=phase))
+        with patch.object(self.backend, "_read", return_value=dict(self.observation(), actual_timeline=3)), patch.object(self.backend, "_local_metadata") as metadata, patch.object(self.backend, "validate") as validate, patch.object(self.backend, "open") as reopen:
+            with self.assertRaisesRegex(TransitionBlocked, "recorded_primary_history_required"):
+                self.backend.arm(dict(self.state, phase="ready"))
+            metadata.assert_called_once_with("B", dict(self.state, phase="ready"))
+            validate.assert_not_called()
+            reopen.assert_not_called()
+
+    def test_explicit_arm_renews_an_already_open_recorded_generation(self):
+        with patch.object(self.backend, "_read", return_value=self.observation(opened=True)), patch.object(self.backend, "renew") as renew, patch.object(self.backend, "close") as close, patch.object(self.backend, "validate") as validate, patch.object(self.backend, "open") as reopen:
+            self.backend.arm(dict(self.state, phase="ready"))
+            renew.assert_called_once_with(dict(self.state, phase="ready"))
+            close.assert_not_called()
+            validate.assert_not_called()
+            reopen.assert_not_called()
+
+    def test_explicit_arm_reopens_expired_generation_with_exclusive_fresh_proofs(self):
+        connections, _ = self.prepare_fresh(lease=True)
+        closed = [self.observation(), self.observation("A", recovery=True)]
+        opened = [self.observation(opened=True), self.observation("A", recovery=True, opened=True)]
+        sequence = closed * 4 + closed * 3 + opened
+        events = []
+        original_validate, original_open = self.backend.validate, self.backend.open
+        def validate(state):
+            events.append("validate")
+            original_validate(state)
+        def reopen(state):
+            events.append("open")
+            original_open(state)
+        with connections, patch.object(self.backend, "_observe", side_effect=deepcopy(sequence)), patch.object(self.backend, "_read", return_value=dict(self.observation(opened=True), remaining=-1)), patch.object(self.backend, "close", side_effect=lambda state: events.append("close")), patch.object(self.backend, "validate", side_effect=validate), patch.object(self.backend, "open", side_effect=reopen), patch.object(self.backend, "_commit"):
+            self.backend.arm(dict(self.state, phase="ready"))
+        self.assertEqual(events, ["close", "validate", "open"])
+        queries = [call.args[0] for call in self.primary.execute.call_args_list]
+        self.assertEqual(queries.count("SELECT pg_advisory_xact_lock(%s)"), 4)
+        self.assertNotIn("SELECT pg_advisory_xact_lock_shared(%s)", queries)
+        self.assertEqual(sum(query.startswith("UPDATE ha.control SET serving=") for query in queries), 1)
+
+    def test_cli_arm_is_explicit_serve_only_and_keeps_same_guard_and_lock(self):
+        from ha_control.controller import Journal, exclusive
+        path = self.root / "controller-state.json"
+        Journal(path).save(dict(self.state, phase="ready"))
+        args = SimpleNamespace(plan=str(self.root / "plan.json"), approval=str(self.root / "approval.json"), journal=None, command="serve", arm=True)
+        events = []
+        def action(name):
+            def call(state):
+                events.append(name)
+                self.assertGreater(self.backend.depth, 1)
+                self.assertEqual(self.fence.enters, 1)
+                if sys.platform != "win32":
+                    with self.assertRaisesRegex(TransitionBlocked, "controller_lock_unavailable"):
+                        with exclusive(path.with_suffix(".lock")):
+                            pass
+            return call
+        with patch("ha_control.cli.validate_bundle"), patch("ha_control.cli.PgBackend", return_value=self.backend), patch.object(self.backend, "arm", side_effect=action("arm")) as arm, patch.object(self.backend, "renew", side_effect=action("renew")), patch.object(self.backend, "close", side_effect=action("close")), patch("ha_control.cli.time.sleep", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                cli.run(args)
+            arm.assert_called_once()
+        self.assertEqual(events, ["arm", "renew", "close"])
+        for command in ("initialize", "advance"):
+            with patch("ha_control.cli.PgBackend") as backend:
+                with self.assertRaisesRegex(TransitionBlocked, "arm_only_for_serve"):
+                    cli.run(SimpleNamespace(**dict(vars(args), command=command)))
+                backend.assert_not_called()
+
+    def test_default_serve_does_not_rearm_an_expired_generation(self):
+        from ha_control.controller import Journal
+        path = self.root / "controller-state.json"
+        Journal(path).save(dict(self.state, phase="ready"))
+        args = SimpleNamespace(plan=str(self.root / "plan.json"), approval=str(self.root / "approval.json"), journal=None, command="serve")
+        with patch("ha_control.cli.validate_bundle"), patch("ha_control.cli.PgBackend", return_value=self.backend), patch.object(self.backend, "renew", side_effect=TransitionBlocked("closed_authority_requires_explicit_open")), patch.object(self.backend, "arm") as arm, patch.object(self.backend, "close"):
+            with self.assertRaisesRegex(TransitionBlocked, "closed_authority_requires_explicit_open"):
+                cli.run(args)
+            arm.assert_not_called()
 
     def test_serve_keeps_host_guard_and_controller_lock_until_lease_is_closed(self):
         from ha_control.controller import Journal, exclusive
@@ -307,7 +476,7 @@ class PGControlTests(unittest.TestCase):
                 with self.assertRaisesRegex(TransitionBlocked, "controller_lock_unavailable"):
                     with exclusive(path.with_suffix(".lock")):
                         pass
-        with patch("ha_control.cli.validate_bundle"), patch("ha_control.cli.PgBackend", return_value=self.backend), patch.object(self.backend, "assert_ready", side_effect=ready), patch.object(self.backend, "close") as close, patch("ha_control.cli.time.sleep", side_effect=KeyboardInterrupt):
+        with patch("ha_control.cli.validate_bundle"), patch("ha_control.cli.PgBackend", return_value=self.backend), patch.object(self.backend, "renew", side_effect=ready), patch.object(self.backend, "close") as close, patch("ha_control.cli.time.sleep", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 cli.run(args)
         close.assert_called_once()
