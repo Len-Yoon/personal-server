@@ -303,7 +303,8 @@ class PGControlTests(unittest.TestCase):
                 with self.assertRaisesRegex(TransitionBlocked, "closed_authority_requires_explicit_open"):
                     self.backend.renew(self.state)
                 commit.assert_not_called()
-            self.assertFalse(any(call.args[0].startswith(("UPDATE", "INSERT", "DELETE")) for call in self.primary.execute.call_args_list))
+            writes = [call.args[0] for call in self.primary.execute.call_args_list if call.args[0].startswith(("UPDATE", "INSERT", "DELETE"))]
+            self.assertTrue(all(query.startswith("UPDATE ha.control SET writes_open=false,history_safe=false") for query in writes))
             self.assertIsNone(self.backend.validated)
 
     def test_shared_renewal_requires_exact_current_authority_and_one_updated_row(self):
@@ -363,6 +364,38 @@ class PGControlTests(unittest.TestCase):
                 self.backend.open(self.state)
         close.assert_called_once_with("B", self.state)
 
+    def test_lost_guard_during_renewal_attempts_revocation_and_clears_cached_proof(self):
+        connections, observations = self.prepare_fresh(lease=True, opened=True)
+        self.backend.validated = ("synthetic", 7, "B", 2, 100)
+        with connections, observations, patch.object(self.backend, "fenced", side_effect=[True, False]), patch.object(self.backend, "_local_metadata_write") as close:
+            with self.assertRaisesRegex(TransitionBlocked, "fresh_replication_proof_required"):
+                self.backend.renew(self.state)
+        close.assert_called_once_with("B", self.state)
+        self.assertIsNone(self.backend.validated)
+
+    def test_guard_unavailable_before_renewal_does_not_prevent_safe_revocation(self):
+        with patch.object(self.backend, "fenced", side_effect=TransitionBlocked("windows_guard_lost")), patch.object(self.backend, "_local_metadata_write") as close:
+            with self.assertRaisesRegex(TransitionBlocked, "windows_guard_lost"):
+                self.backend.renew(self.state)
+            close.assert_called_once_with("B", self.state)
+            close.reset_mock()
+            self.backend._local_metadata("B", self.state)
+            close.assert_called_once_with("B", self.state)
+
+    def test_failed_revocation_preserves_original_failure_and_never_reports_success(self):
+        with patch.object(self.backend, "fenced", side_effect=TransitionBlocked("windows_guard_lost")), patch.object(self.backend, "_local_metadata_write", side_effect=OSError("unavailable")):
+            with self.assertRaisesRegex(TransitionBlocked, "windows_guard_lost"):
+                self.backend.renew(self.state)
+        self.assertIsNone(self.backend.validated)
+
+    def test_promoted_history_publication_requires_post_guard_and_whole_deadline(self):
+        for answers, clock in (([True, False], [10]), ([True, True], [10, 12.001])):
+            with patch.object(self.backend, "fenced", side_effect=answers), patch.object(self.backend, "_local_metadata_write") as write, patch("ha_control.pg.time.monotonic", side_effect=clock):
+                with self.assertRaisesRegex(TransitionBlocked, "fresh_legacy_guard_required"):
+                    self.backend._local_metadata("B", self.state, promoted=True)
+                self.assertEqual(write.call_count, 2)
+                self.assertEqual(write.call_args_list[-1].kwargs, {})
+
     def test_only_durable_promoting_phase_can_publish_the_new_timeline(self):
         self.primary, self.peer = MagicMock(), MagicMock()
         newly_promoted = dict(self.candidate(), recovery=False, actual_timeline=2)
@@ -373,7 +406,10 @@ class PGControlTests(unittest.TestCase):
         with patch.object(self.backend, "_connection", side_effect=self.fake_connection), patch.object(self.backend, "_observe", return_value=newly_promoted):
             with self.assertRaisesRegex(TransitionBlocked, "recorded_primary_history_required"):
                 self.backend._local_metadata("B", dict(self.state, phase="ready"), promoted=True)
-        self.assertFalse(any(call.args[0].startswith("UPDATE") for call in self.primary.execute.call_args_list))
+        updates = [call.args[0] for call in self.primary.execute.call_args_list if call.args[0].startswith("UPDATE")]
+        self.assertEqual(len(updates), 1)
+        self.assertIn("SET writes_open=false,history_safe=false", updates[0])
+        self.assertNotIn("primary_node=", updates[0])
         self.primary.reset_mock()
         with patch.object(self.backend, "_connection", side_effect=self.fake_connection), patch.object(self.backend, "_observe", return_value=self.observation()):
             self.backend._local_metadata("B", dict(self.state, phase="ready"), promoted=True)

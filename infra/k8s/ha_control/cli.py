@@ -26,7 +26,8 @@ def validate_bundle(plan):
             raise TransitionBlocked("readonly_controller_manifest_required")
         result = verify(bundle, expected_manifest_sha256=plan["controller_bundle_sha256"])
         if (result["source_commit"] != plan["source_commit"]
-                or any(result[key] != plan[key] for key in ("native_windows_code_sha256", "controller_code_sha256"))):
+                or any(result[key] != plan[key] for key in ("native_windows_code_sha256", "controller_code_sha256",
+                                                           "legacy_linux_sha256", "legacy_guard_code_sha256", "windows_guard_sha256"))):
             raise TransitionBlocked("approved_controller_source_mismatch")
     except TransitionBlocked:
         raise
