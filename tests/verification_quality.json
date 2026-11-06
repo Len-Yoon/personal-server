@@ -4,18 +4,18 @@
   "timeout_seconds": 120,
   "baseline": {
     "commit": "2aa95d2d9f006eb3cb5caa0efc7b4ca19ea662bd",
-    "note": "All measured statements/branches in the three fixed targets are exercised except one structurally unreachable format_size fallback. Missing lines/arcs remain in the denominator and must match exactly; source SHA256 pins the proof. No exclusion pragmas. Defensive decoder/type and OS-error seams use explicit test injection; line/arc coverage does not mean all condition combinations or production integration. Upload ownership revision adds retained file/directory descriptor rollback tests. File-store branches reduce from 158 to 156; floor 99.35 is the rounded-down measured 155/156, with the same sole unreachable fallback and exact missing arc/source/denominator checks. Upload write/cleanup/bulk critical functions each require 100 percent. Shared-session dispatch adds six statements and four branches in security.py; measured 206/206 statements and 56/56 branches remain fully covered without lowering floors.",
-    "environment": "CPython3.11;coverage7.16.2;isolated code-only fixture;no operational resources. Current upload ownership baseline:71 tests, source SHA256 pinned below; commit retains original baseline provenance."
+    "note": "All measured statements/branches in the three fixed targets are exercised except one structurally unreachable format_size fallback. Missing lines/arcs remain in the denominator and must match exactly; source SHA256 pins the proof. No exclusion pragmas. Defensive decoder/type and OS-error seams use explicit test injection; line/arc coverage does not mean all condition combinations or production integration. Upload write/cleanup/bulk critical functions each require 100 percent. HA dispatch is exercised through the actual security/session/file APIs with a commit-or-rollback PG boundary double and real immutable local object operations. Security measures 232/232 statements and 70/70 branches. File-store measures 420/421 statements and 181/182 branches; its sole unreachable fallback moved to line511/arc505-to-511. All existing floors are retained. Actual TLS/PG/replication/provider integration is separate evidence, not inferred from this fixture.",
+    "environment": "CPython3.11;coverage7.16.2;isolated code-only fixture;no operational resources. Current HA dispatch baseline:83 tests, source SHA256 pinned below; commit retains original baseline provenance."
   },
   "targets": {
     "portal-web/app/services/security.py": {
       "statement_min": 100,
       "branch_min": 100,
       "baseline_counts": {
-        "covered_lines": 206,
-        "num_statements": 206,
-        "covered_branches": 56,
-        "num_branches": 56
+        "covered_lines": 232,
+        "num_statements": 232,
+        "covered_branches": 70,
+        "num_branches": 70
       },
       "functions": {
         "auth_rate_limited": {
@@ -36,10 +36,10 @@
       "statement_min": 99.74,
       "branch_min": 99.35,
       "baseline_counts": {
-        "covered_lines": 389,
-        "num_statements": 390,
-        "covered_branches": 155,
-        "num_branches": 156
+        "covered_lines": 420,
+        "num_statements": 421,
+        "covered_branches": 181,
+        "num_branches": 182
       },
       "functions": {
         "_save_upload": {
@@ -74,17 +74,17 @@
         }
       },
       "expected_missing_lines": [
-        481
+        511
       ],
       "expected_missing_branches": [
         [
-          475,
-          481
+          505,
+          511
         ]
       ],
       "unreachable_proof": {
-        "source_sha256": "89faa9c84e0894704c7956fa2e371a4f66551bc8514960f287946c7387ad9c5c",
-        "reason": "format_size iterates the nonempty fixed units list through TB. Every earlier unit either returns or advances; TB always returns because unit == units[-1], so loop exhaustion and fallback line481 are unreachable for normal numeric inputs. No source rewrite, fake float/units, coverage exclusion or denominator adjustment."
+        "source_sha256": "f0b4afb6fe434ceeb8e192adf56e487a16687e02bebc4fa97bd6ff61afa13b53",
+        "reason": "format_size iterates the nonempty fixed units list through TB. Every earlier unit either returns or advances; TB always returns because unit == units[-1], so loop exhaustion and fallback line511 are unreachable for normal numeric inputs. No source rewrite, fake float/units, coverage exclusion or denominator adjustment."
       }
     },
     "infra/k8s/tools/validate-backup-evidence.py": {
@@ -191,7 +191,11 @@
     "tests.test_portal_security.PortalSecurityTests.test_shared_session_path_rejects_symlinks_public_files_and_relative_paths",
     "tests.test_portal_security.PortalSecurityTests.test_shared_session_collision_rollback_and_real_writer_lock_fail_closed",
     "tests.test_portal_security.PortalSecurityTests.test_shared_session_rejects_untrusted_sidecars_and_writable_parent",
-    "tests.test_portal_security.PortalSecurityTests.test_shared_confirmations_are_scoped_payload_bound_single_use_and_separate_cap"
+    "tests.test_portal_security.PortalSecurityTests.test_shared_confirmations_are_scoped_payload_bound_single_use_and_separate_cap",
+    "tests.test_ha_quality_paths.HaQualityPathsTests.test_shared_auth_sessions_and_failures_do_not_use_local_state",
+    "tests.test_ha_quality_paths.HaQualityPathsTests.test_shared_security_events_are_bounded_and_read_newest_first",
+    "tests.test_ha_quality_paths.HaQualityPathsTests.test_shared_auth_requires_transaction_and_restores_state_after_failure",
+    "tests.test_ha_quality_paths.HaQualityPathsTests.test_file_dispatch_preserves_bytes_namespace_and_protected_failure"
   ],
   "mutants": [
     {

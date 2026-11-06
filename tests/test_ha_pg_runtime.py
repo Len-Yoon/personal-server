@@ -26,6 +26,7 @@ class PGGuardTests(unittest.TestCase):
             rendered = runner.render_runner(base)
             self.assertTrue(rendered.startswith("FROM " + base + "\n"))
             self.assertNotIn("@APP_BASE_IMAGE@", rendered)
+            self.assertIn("USER 10001:10001", rendered)
             self.assertEqual(runner.approved_base("311" if service == "portal-web" else "312"), base)
         for base in ("python:latest", "python:3.11-alpine3.24", "untrusted@sha256:" + "a" * 64):
             with self.assertRaises(runner.FixtureError):

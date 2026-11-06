@@ -252,8 +252,8 @@ class Fixture:
             self.docker("cp", str(self.directory / "fixture") + "/.", runner + ":/fixture")
             self.docker("start", runner)
             # docker cp may retain the Mac owner's numeric uid. These are
-            # disposable synthetic credentials owned by this root-only runner.
-            self.docker("exec", runner, "chown", "-R", "0:0", "/fixture")
+            # disposable synthetic credentials owned by the unprivileged runner.
+            self.docker("exec", "--user", "0:0", runner, "chown", "-R", "10001:10001", "/fixture")
             self.runners[group] = runner
 
     def execute(self, service, node, phase):
