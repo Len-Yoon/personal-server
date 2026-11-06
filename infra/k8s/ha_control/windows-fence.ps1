@@ -163,6 +163,7 @@ try {
     if ($script:config.schema_version -ne 1 -or $script:config.cluster -notmatch '^[a-zA-Z0-9_-]{1,100}$' -or $script:config.node -notin @("A", "B") -or
         [long]$script:config.generation -lt 1 -or $script:config.source_commit -notmatch '^[0-9a-f]{40}$' -or
         $approved.plan_sha256 -ne $hash -or $approved.source_commit -ne $script:config.source_commit -or
+        [string]$approved.expires_at -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,7})?Z$' -or
         $approved.action -notin @("fence", "ha-transition") -or [DateTimeOffset]::Parse($approved.expires_at) -le [DateTimeOffset]::UtcNow -or
         [DateTimeOffset]::Parse($approved.expires_at) -gt [DateTimeOffset]::UtcNow.AddHours(24)) { throw "approval_mismatch" }
     Assert-Quiescent
