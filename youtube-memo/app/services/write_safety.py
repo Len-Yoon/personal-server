@@ -2,6 +2,7 @@
 import hashlib
 import json
 import sqlite3
+from app.services import ha_backend
 from uuid import UUID
 
 
@@ -42,6 +43,8 @@ def replay_result(connection, request_id: str, operation: str, payload: object) 
         return None
     if row["operation"] != operation or row["payload_hash"] != payload_hash(payload):
         raise WriteConflict("같은 저장 요청의 내용이 변경되었습니다. 입력을 확인하고 새 요청으로 저장해주세요.")
+    if ha_backend.enabled():
+        connection.protect_replay()
     return row["result_id"]
 
 

@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from app.services.ha_backend import runtime, worker_operation
 
 
 ALLOWED_SERVICES = frozenset({"portal-web", "system-agent", "crawler-worker", "youtube-memo", "book-memo", "caddy", "homeops-executor"})
@@ -41,7 +42,8 @@ class HomeOpsService:
         self.db_path, self.executor, self.approval_ttl_seconds = db_path, executor, approval_ttl_seconds
         self.notifier = notifier
         self.verification_attempts, self.verification_interval_seconds = verification_attempts, verification_interval_seconds
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if runtime() is None:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
     def diagnose_all(self) -> dict[str, Any]:
@@ -56,6 +58,7 @@ class HomeOpsService:
         self._save_latest_summary(summary)
         return summary
 
+    @worker_operation
     def restart_all(self, operation_id: str | None = None) -> dict[str, Any]:
         operation_id = self._operation_for_restart(operation_id) or self._create_manual_restart_operation()
         executor_failure_reason = None
@@ -78,7 +81,8 @@ class HomeOpsService:
         return summary
 
     def latest_summary(self) -> dict[str, Any] | None:
-        self._complete_due_pending_restart()
+        if runtime() is None or runtime().worker_owned("portal-web"):
+            self._complete_due_pending_restart()
         with self._connect() as conn:
             row = conn.execute("SELECT summary FROM latest_homeops_summary WHERE singleton_id=1").fetchone()
         return json.loads(row[0]) if row else None
@@ -122,6 +126,7 @@ class HomeOpsService:
                 )
         return history
 
+    @worker_operation
     def create_diagnosis(self, service: str, record_healthy: bool = True) -> dict[str, Any]:
         self._require_service(service)
         diagnostics = self._mask(self.executor.diagnostics(service))
@@ -132,7 +137,7 @@ class HomeOpsService:
         auto_reserved = False
         limit_notification = False
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("BEGIN" if runtime() is not None else "BEGIN IMMEDIATE")
             now = self._now()
             self._expire_stale_approvals(conn, now)
             observation = conn.execute("SELECT consecutive_unhealthy FROM service_observations WHERE service=?", (service,)).fetchone()
@@ -212,7 +217,7 @@ class HomeOpsService:
         token = secrets.token_urlsafe(32)
         expiry = (datetime.now(timezone.utc) + timedelta(seconds=self.approval_ttl_seconds)).isoformat()
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("BEGIN" if runtime() is not None else "BEGIN IMMEDIATE")
             self._expire_stale_approvals(conn, self._now())
             service_row = conn.execute("SELECT service FROM incidents WHERE incident_id=? AND status='proposed'", (incident_id,)).fetchone()
             if not service_row or conn.execute("SELECT 1 FROM incidents WHERE service=? AND status IN ('approved', 'executing')", (service_row[0],)).fetchone():
@@ -223,9 +228,10 @@ class HomeOpsService:
             conn.execute("INSERT INTO approval_tokens VALUES (?, ?, ?, NULL)", (incident_id, self._hash(token), expiry))
         return {"status": "approved", "approval_token": token}
 
+    @worker_operation
     def execute_approved_incident(self, incident_id: str) -> dict[str, str]:
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("BEGIN" if runtime() is not None else "BEGIN IMMEDIATE")
             now = self._now()
             self._expire_stale_approvals(conn, now)
             row = conn.execute("SELECT service,status FROM incidents WHERE incident_id=?", (incident_id,)).fetchone()
@@ -256,6 +262,7 @@ class HomeOpsService:
         )
         return {"status": status, "incident_id": incident_id}
 
+    @worker_operation
     def observe_host_memory(self, memory_percent: Any) -> None:
         try:
             percent = float(memory_percent)
@@ -528,6 +535,9 @@ class HomeOpsService:
             )
 
     def _initialize(self) -> None:
+        if (backend := runtime()) is not None:
+            backend.require_schema("portal-web", "homeops", ["incidents", "approval_tokens", "service_observations", "alert_states", "latest_homeops_summary", "homeops_operation_runs", "homeops_operation_events"])
+            return
         with self._connect() as conn:
             conn.execute("CREATE TABLE IF NOT EXISTS incidents (incident_id TEXT PRIMARY KEY, service TEXT, status TEXT, created_at TEXT, diagnostics TEXT, proposal TEXT, approved_by TEXT, completed_at TEXT)")
             conn.execute("CREATE TABLE IF NOT EXISTS approval_tokens (incident_id TEXT PRIMARY KEY, token_hash TEXT, expires_at TEXT, consumed_at TEXT)")
@@ -556,6 +566,8 @@ class HomeOpsService:
         )
 
     def _connect(self):
+        if (backend := runtime()) is not None:
+            return backend.connect("portal-web", "homeops")
         return sqlite3.connect(self.db_path, timeout=5)
 
     @staticmethod
@@ -578,8 +590,19 @@ class HomeOpsService:
     def _require_service(service: str) -> None:
         if service not in ALLOWED_SERVICES: raise ValueError("service_not_allowed")
 
+    @worker_operation
     def _notify(self, event_type: str, details: dict[str, Any]) -> None:
         if self.notifier:
+            if (backend := runtime()) is not None:
+                identity = hashlib.sha256(json.dumps([event_type, details], sort_keys=True, default=str).encode()).hexdigest()
+                with backend.state_transaction("portal-web", "notify:" + identity, {}) as state:
+                    if state.get("status") in {"uncertain", "sent"}:
+                        return
+                    state["status"] = "uncertain"
+                notification_details = dict(details, admin_url=os.getenv("HOMEOPS_ADMIN_URL", "").strip())
+                self.notifier.send(event_type, notification_details)
+                backend.write_state("portal-web", "notify:" + identity, {"status": "sent"})
+                return
             notification_details = dict(details)
             notification_details.setdefault("admin_url", os.getenv("HOMEOPS_ADMIN_URL", "").strip())
             self.notifier.send(event_type, notification_details)
@@ -607,6 +630,15 @@ class ExecutorClient:
         return bool(self.diagnostics(service).get("container", {}).get("health") == "healthy")
 
     def _request(self, path: str, payload: dict[str, Any] | None = None, method: str | None = None, request_id: str | None = None) -> Any:
+        target = None
+        target_url = self.url
+        if (backend := runtime()) is not None:
+            target = os.getenv("HA_HOMEOPS_TARGET_NODE")
+            target_url = os.getenv("HA_HOMEOPS_EXECUTOR_URL_" + (target or ""), "").rstrip("/")
+            if target not in {"A", "B"} or not target_url:
+                raise backend.DatabaseUnavailable("explicit_homeops_target_required")
+            if payload is not None:
+                payload = dict(payload, target_node=target)
         if path == "/v1/diagnostics":
             # Never reuse an earlier response's smaller scope after a failed fetch.
             self.managed_services = ALLOWED_SERVICES
@@ -614,9 +646,11 @@ class ExecutorClient:
             raise OSError("homeops_executor_shared_secret_not_configured")
         data = json.dumps(payload).encode() if payload else None
         headers = {"X-HomeOps-Executor-Secret": self.secret, "Content-Type": "application/json"}
+        if target is not None:
+            headers["X-HomeOps-Target-Node"] = target
         if request_id:
             headers["X-HomeOps-Request-Id"] = request_id
-        request = Request(self.url + path, data=data, headers=headers, method=method)
+        request = Request(target_url + path, data=data, headers=headers, method=method)
         with urlopen(request, timeout=5) as response:
             if path == "/v1/diagnostics":
                 get_all = getattr(response.headers, "get_all", None)

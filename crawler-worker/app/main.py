@@ -11,6 +11,7 @@ from app.routers import news
 from app.services.news_scheduler import InvestingNewsScheduler
 from app.services.news_collection_metrics import render_metrics
 from app.services.news_collection_status import NewsCollectionStatusStore
+from app.services.ha_backend import runtime
 
 
 @asynccontextmanager
@@ -24,6 +25,8 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Global Market News Hub", lifespan=lifespan)
+if (backend := runtime()) is not None:
+    backend.register_fastapi(app)
 
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 _PUBLIC_ORIGIN = "https://news.len.pe.kr"

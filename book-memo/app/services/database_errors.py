@@ -1,4 +1,5 @@
 """Stable SQLite contention responses without exposing storage details."""
+from app.services import ha_backend
 import re
 import sqlite3
 from html import escape
@@ -29,6 +30,9 @@ def is_database_busy(error: sqlite3.Error) -> bool:
 
 
 async def database_error_response(request: Request, error: sqlite3.OperationalError):
+    if ha_backend.enabled() and isinstance(error, ha_backend.runtime().DatabaseUnavailable):
+        return JSONResponse({"detail": "저장소가 일시적으로 준비되지 않았습니다.", "code": "database_unavailable"},
+                            status_code=503, headers={"Cache-Control": "no-store", "Retry-After": "2"})
     if not is_database_busy(error):
         return JSONResponse({"detail": "저장소 작업을 완료하지 못했습니다.", "code": "database_unavailable"},
                             status_code=500, headers={"Cache-Control": "no-store"})

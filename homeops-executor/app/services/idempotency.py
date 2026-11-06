@@ -9,6 +9,7 @@ from pathlib import Path
 import sqlite3
 import time
 from typing import Any
+from app.services.ha_backend import runtime
 
 
 class ClaimError(Exception):
@@ -48,6 +49,8 @@ class RestartStore:
             connection.close()
 
     def claim(self, request_id: str, digest: str) -> dict[str, Any] | None:
+        if (backend := runtime()) is not None:
+            return self._ha_claim(backend, request_id, digest)
         rejection = None
         result = None
         try:
@@ -82,6 +85,13 @@ class RestartStore:
             raise ClaimError("restart_state_unavailable", 503) from exc
 
     def complete(self, request_id: str, result: dict[str, Any]) -> None:
+        if (backend := runtime()) is not None:
+            with backend.state_transaction("homeops-executor", "restart_claims", {}) as state:
+                row = state.get(request_id)
+                if not isinstance(row, dict) or row.get("state") != "inflight":
+                    raise ClaimError("restart_outcome_unknown")
+                row.update(state="completed", result=result)
+            return
         try:
             with self._connect() as connection:
                 updated = connection.execute("UPDATE restart_claims SET state='completed', result=? WHERE request_id=? AND state='inflight'", (json.dumps(result, sort_keys=True), request_id)).rowcount
@@ -92,6 +102,14 @@ class RestartStore:
 
     def ready(self) -> bool:
         """Read-only local check; never create a database as a readiness probe."""
+        if (backend := runtime()) is not None:
+            try:
+                state = backend.read_state("homeops-executor", "restart_claims", {})
+                return len(state) < self.capacity and all(
+                    isinstance(row, dict) and row.get("state") in {"inflight", "completed", "expired"}
+                    for row in state.values())
+            except Exception:
+                return False
         try:
             if not self.path.is_absolute() or not self.path.parent.is_dir():
                 return False
@@ -110,3 +128,36 @@ class RestartStore:
             return count < self.capacity and valid_states == 0
         except (sqlite3.Error, OSError, ValueError):
             return False
+
+    def _ha_claim(self, backend, request_id: str, digest: str) -> dict[str, Any] | None:
+        rejection = None
+        result = None
+        with backend.state_transaction("homeops-executor", "restart_claims", {}) as state:
+            if not isinstance(state, dict) or any(
+                not isinstance(item, dict) or not isinstance(item.get("created_at"), (int, float))
+                or item.get("state") not in {"inflight", "completed", "expired"}
+                for item in state.values()
+            ):
+                raise ClaimError("restart_state_unavailable", 503)
+            for item in state.values():
+                if item.get("state") == "completed" and item["created_at"] < time.time() - self.ttl:
+                    item.update(state="expired", result=None)
+            row = state.get(request_id)
+            if row is not None:
+                if row.get("payload_hash") != digest:
+                    rejection = ClaimError("restart_request_conflict")
+                elif row.get("state") == "expired":
+                    rejection = ClaimError("restart_request_expired")
+                elif row.get("state") != "completed":
+                    rejection = ClaimError("restart_outcome_unknown")
+                elif not isinstance(row.get("result"), dict):
+                    rejection = ClaimError("restart_state_unavailable", 503)
+                else:
+                    result = row["result"]
+            elif len(state) >= self.capacity:
+                rejection = ClaimError("restart_state_capacity", 503)
+            else:
+                state[request_id] = {"payload_hash": digest, "state": "inflight", "created_at": time.time(), "result": None}
+        if rejection:
+            raise rejection
+        return result

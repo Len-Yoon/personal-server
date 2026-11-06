@@ -1,0 +1,11 @@
+FROM @APP_BASE_IMAGE@
+ARG SERVICE_GROUP
+LABEL org.opencontainers.image.title="Isolated seven-application PG integration fixture"
+WORKDIR /source
+COPY requirements/ /requirements/
+RUN apk add --no-cache 'sqlite-libs>=3.51.3' \
+    && pip install --no-cache-dir -r /requirements/runtime.txt
+RUN SERVICE_GROUP="$SERVICE_GROUP" python -c "import os,subprocess; services=os.environ['SERVICE_GROUP'].split(','); [(subprocess.run(['python','-m','venv','/venvs/'+s],check=True),subprocess.run(['/venvs/'+s+'/bin/pip','install','--no-cache-dir','-r','/requirements/'+s+'.txt','-r','/requirements/runtime.txt'],check=True)) for s in services]"
+COPY source/ /source/
+# This is a disposable test runner, never a production application image.
+CMD ["sleep", "infinity"]

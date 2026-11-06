@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from typing import Protocol
 from urllib.parse import parse_qs, urlparse
+from app.services.ha_backend import runtime
 
 
 class HyundaiAuthorizationCompleter(Protocol):
@@ -71,6 +72,12 @@ class HyundaiOAuthCallbackServer:
                     return
                 except OSError:
                     self._respond(HTTPStatus.BAD_GATEWAY, "현대 인증 처리에 실패했습니다. 다시 시도하세요.")
+                    return
+                except Exception as exc:
+                    backend = runtime()
+                    if backend is None or not isinstance(exc, backend.DatabaseUnavailable):
+                        raise
+                    self._respond(HTTPStatus.SERVICE_UNAVAILABLE, "인증 저장소 또는 실행 권한을 확인하세요.")
                     return
                 message = result if isinstance(result, str) else "현대 차량 연결이 완료되었습니다. Telegram으로 돌아가세요."
                 self._respond(HTTPStatus.OK, message)

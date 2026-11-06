@@ -180,6 +180,88 @@ class SQLiteSessionStore:
             return False
 
 
+class PostgresSessionStore:
+    """Shared one-time sessions; only token hashes enter the PG payload."""
+    is_postgres = True
+
+    def __init__(self, max_entries=1024):
+        self.max_entries = max(1, max_entries)
+
+    @staticmethod
+    def _backend():
+        from app.services.ha_backend import runtime
+        return runtime()
+
+    def ready(self):
+        try:
+            self._backend().require_schema("portal-web", "state", ["shared_state"])
+            value = self._backend().read_state("portal-web", "auth_sessions", {"sessions": {}, "confirmations": {}})
+            return isinstance(value, dict) and all(isinstance(value.get(table), dict) for table in ("sessions", "confirmations"))
+        except (OSError, ValueError, sqlite3.Error):
+            return False
+
+    def start(self):
+        if not self.ready():
+            raise RuntimeError("shared_session_state_unavailable")
+
+    def close(self):
+        pass
+
+    def _create(self, table, scope, payload, max_age_seconds):
+        with self._backend().state_transaction("portal-web", "auth_sessions", {"sessions": {}, "confirmations": {}}) as state:
+            entries = state[table]
+            now = time.time()
+            for token_hash in list(entries):
+                if entries[token_hash]["expires_at"] < now:
+                    del entries[token_hash]
+            while len(entries) >= self.max_entries:
+                del entries[min(entries, key=lambda key: (entries[key]["expires_at"], key))]
+            for _ in range(8):
+                token = secrets.token_urlsafe(32)
+                token_hash = SQLiteSessionStore._hash(token)
+                if token_hash not in entries:
+                    entries[token_hash] = {"scope": scope, "payload_hash": SQLiteSessionStore._hash(payload), "expires_at": now + max_age_seconds}
+                    break
+            else:
+                raise RuntimeError("unable_to_issue_unique_session")
+        return token
+
+    def create(self, scope, max_age_seconds):
+        return self._create("sessions", scope, "", max_age_seconds)
+
+    def create_confirmation(self, scope, payload, max_age_seconds):
+        return self._create("confirmations", scope, payload, max_age_seconds)
+
+    def validate(self, scope, token):
+        if not isinstance(token, str) or not token or len(token) > 512:
+            return False
+        try:
+            state = self._backend().read_state("portal-web", "auth_sessions", {"sessions": {}, "confirmations": {}})
+            row = state["sessions"].get(SQLiteSessionStore._hash(token))
+            return bool(row and row["scope"] == scope and row["expires_at"] >= time.time())
+        except (OSError, ValueError, sqlite3.Error, KeyError, TypeError):
+            return False
+
+    def consume_confirmation(self, scope, payload, token):
+        if not isinstance(token, str) or not token or len(token) > 512:
+            return False
+        try:
+            with self._backend().state_transaction("portal-web", "auth_sessions", {"sessions": {}, "confirmations": {}}) as state:
+                key = SQLiteSessionStore._hash(token)
+                row = state["confirmations"].get(key)
+                consumed = bool(row and row["scope"] == scope and row["payload_hash"] == SQLiteSessionStore._hash(payload) and row["expires_at"] >= time.time())
+                if consumed:
+                    del state["confirmations"][key]
+            return consumed
+        except (OSError, ValueError, sqlite3.Error, KeyError, TypeError):
+            return False
+
+    def revoke_all(self):
+        with self._backend().state_transaction("portal-web", "auth_sessions", {"sessions": {}, "confirmations": {}}) as state:
+            state["sessions"].clear()
+            state["confirmations"].clear()
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Explicitly revoke shared sessions and confirmations.")

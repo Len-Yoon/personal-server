@@ -2,7 +2,8 @@ import os
 from http.client import HTTPException
 from typing import Any
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import urlopen, Request
+from app.services.ha_backend import runtime
 import json
 
 
@@ -10,6 +11,16 @@ DEFAULT_AGENT_URL = "http://system-agent:8010"
 RECOVERY_EVENT_FIELDS = ("timestamp", "component", "event", "status", "action")
 RECOVERY_EVENT_LIMIT = 10
 HEALTH_RESPONSE_MAX_BYTES = 16 * 1024
+
+
+def _agent_request(agent_url, path):
+    if (backend := runtime()) is None:
+        return f"{agent_url.rstrip('/')}{path}"
+    target = os.getenv("HA_SYSTEM_TARGET_NODE")
+    endpoint = os.getenv("HA_SYSTEM_AGENT_URL_" + (target or ""), "").rstrip("/")
+    if target not in {"A", "B"} or not endpoint:
+        raise backend.DatabaseUnavailable("explicit_system_target_required")
+    return Request(endpoint + path, headers={"X-HA-Target-Node": target})
 
 
 def _service_health_targets() -> list[dict[str, str]]:
@@ -29,7 +40,7 @@ def get_dashboard_status(agent_url: str | None = None, timeout: float = 1.5) -> 
     agent_url = agent_url or os.getenv("SYSTEM_AGENT_URL", DEFAULT_AGENT_URL)
 
     try:
-        with urlopen(f"{agent_url.rstrip('/')}/metrics", timeout=timeout) as response:
+        with urlopen(_agent_request(agent_url, "/metrics"), timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except (OSError, URLError, json.JSONDecodeError):
         return _unavailable_status()
@@ -87,7 +98,7 @@ def get_recovery_events(agent_url: str | None = None, timeout: float = 1.0) -> l
 
     agent_url = agent_url or os.getenv("SYSTEM_AGENT_URL", DEFAULT_AGENT_URL)
     try:
-        with urlopen(f"{agent_url.rstrip('/')}/recovery-events", timeout=timeout) as response:
+        with urlopen(_agent_request(agent_url, "/recovery-events"), timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, URLError, UnicodeError, HTTPException, json.JSONDecodeError):
         return []

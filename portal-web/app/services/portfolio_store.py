@@ -5,6 +5,7 @@ import re
 import tempfile
 from pathlib import Path
 from threading import RLock
+from app.services.ha_backend import runtime
 
 from markdown_it import MarkdownIt
 
@@ -30,6 +31,8 @@ def _revision(content: str) -> str:
 
 def load_portfolio_content() -> str:
     """Return the saved portfolio source, or an empty document before first save."""
+    if (backend := runtime()) is not None:
+        return backend.read_state("portal-web", "portfolio", {"content": ""})["content"]
     try:
         return PORTFOLIO_CONTENT_PATH.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -46,6 +49,14 @@ def save_portfolio_content(content: str, *, expected_revision: str) -> str:
     """Compare and atomically replace under thread and inter-process locks."""
     # HTML form encodings can send CRLF; snapshots use universal LF newlines.
     content = content.replace("\r\n", "\n").replace("\r", "\n")
+    if (backend := runtime()) is not None:
+        with backend.state_transaction("portal-web", "portfolio", {"content": ""}) as state:
+            current = state["content"]
+            revision = _revision(current)
+            if not re.fullmatch(r"[a-f0-9]{64}", expected_revision or "") or (expected_revision != revision and content != current):
+                raise PortfolioConflict(current, revision)
+            state["content"] = content
+        return _revision(content)
     PORTFOLIO_CONTENT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _SAVE_LOCK:
         directory_fd = os.open(PORTFOLIO_CONTENT_PATH.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)

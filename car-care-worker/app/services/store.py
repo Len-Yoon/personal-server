@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable, Iterator, TypeVar
 
 from app.models import MaintenanceRecord, TireChangeRecord, VehicleSnapshot
+from app.services.ha_backend import runtime
 
 
 ReplyT = TypeVar("ReplyT")
@@ -18,9 +19,17 @@ class CarCareStore:
         self._path = path
 
     def _connect(self) -> sqlite3.Connection:
+        if (backend := runtime()) is not None:
+            return backend.connect("car-care-worker")
         return sqlite3.connect(self._path)
 
     def initialize(self) -> None:
+        if (backend := runtime()) is not None:
+            backend.require_schema("car-care-worker", "main", {
+                "maintenance_records", "vehicle_snapshots", "alert_states",
+                "tire_changes", "telegram_command_results",
+            })
+            return
         with self._connect() as db:
             db.executescript(
                 "CREATE TABLE IF NOT EXISTS maintenance_records ("
@@ -43,7 +52,10 @@ class CarCareStore:
 
     def process_command(self, update_id: int, callback: Callable[["_TransactionStore"], ReplyT]) -> ReplyT:
         with self._connect() as db:
-            db.execute("BEGIN IMMEDIATE")
+            if runtime() is None:
+                db.execute("BEGIN IMMEDIATE")
+            else:
+                db.protect_replay()
             row = db.execute(
                 "SELECT reply_text FROM telegram_command_results WHERE update_id = ?",
                 (update_id,),

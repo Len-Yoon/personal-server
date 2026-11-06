@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 import re
-from threading import Lock, RLock, Thread
+from contextlib import contextmanager
+from threading import Lock, RLock, Thread, local
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,8 @@ from app.services.news_archive_storage import (
 )
 from app.services.news_sources import collect_korean_news_from_sources
 from app.services.news_collection_status import NewsCollectionStatusStore
+from app.services.ha_backend import runtime, worker_operation
+from app.services.news_archive_storage import empty_archive, validate_archive_payload
 from app.services.telegram_notifier import (
     notify_market_news_digest,
     notify_new_investing_articles,
@@ -51,6 +54,22 @@ _REFRESH_WORK_LOCK = Lock()
 _REFRESHING_CATEGORIES: set[str] = set()
 _COLLECTION_STATUS: NewsCollectionStatusStore | None = None
 _COLLECTION_STATUS_PATH: str | None = None
+_HA_ARCHIVE = local()
+
+
+@contextmanager
+def _archive_transaction():
+    with _ARCHIVE_WRITE_LOCK:
+        backend = runtime()
+        if backend is None or hasattr(_HA_ARCHIVE, "payload"):
+            yield
+            return
+        with backend.state_transaction("crawler-worker", "archive", empty_archive()) as payload:
+            _HA_ARCHIVE.payload = payload
+            try:
+                yield
+            finally:
+                del _HA_ARCHIVE.payload
 
 
 def _collection_status() -> NewsCollectionStatusStore:
@@ -73,9 +92,34 @@ def collect_korean_news(
     limit: int = 24,
     force_refresh: bool = False,
 ) -> dict[str, Any]:
+    backend = runtime()
+    if backend is not None and not backend.worker_owned("crawler-worker"):
+        category = _normalize_korean_category(category)
+        now = _now()
+        # A serving peer may read the shared archive without taking a worker
+        # permit, scheduling collection, repairing state or dispatching alerts.
+        archive, _ = _purge_archive(_load_archive(), now)
+        articles = _get_category_articles(archive["articles"], category, today_only=True)
+        latest = _latest_collected_at(articles)
+        if not articles:
+            raise backend.DatabaseUnavailable("worker_cache_unavailable")
+        return _build_result(
+            category, articles, limit, cached=True,
+            age_seconds=max(0, int((now - latest).total_seconds())) if latest else CACHE_TTL_SECONDS,
+            label_resolver=_korean_category_label, description_resolver=_korean_category_description,
+        )
+    return _collect_korean_news_owned(category, limit, force_refresh)
+
+
+@worker_operation
+def _collect_korean_news_owned(
+    category: str,
+    limit: int = 24,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
     category = _normalize_korean_category(category)
     now = _now()
-    with _ARCHIVE_WRITE_LOCK:
+    with _archive_transaction():
         archive = _load_archive()
         # Collection commits retention changes together with new observations;
         # a failed fetch/save must not modify the prior archive or outbox.
@@ -99,7 +143,9 @@ def collect_korean_news(
                 description_resolver=_korean_category_description,
             )
 
-        if category_articles and not force_refresh:
+        # A background PG refresh would contend with this thread's worker
+        # permit. Refresh inline after releasing the archive transaction instead.
+        if category_articles and not force_refresh and runtime() is None:
             _schedule_refresh(category, limit)
             return _build_result(
                 category=category,
@@ -165,11 +211,11 @@ def list_recent_news(
     offset: int = 0,
     sort_by_collected: bool = False,
 ) -> list[dict[str, Any]]:
-    with _ARCHIVE_WRITE_LOCK:
+    with _archive_transaction():
         now = _now()
         archive = _load_archive()
         archive, purged = _purge_archive(archive, now)
-        if purged:
+        if purged and runtime() is None:
             archive["updated_at"] = _iso(now)
             _save_archive(archive)
         articles = _dedupe_by_url(archive["articles"])
@@ -263,6 +309,14 @@ def _relevance_summary(articles: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def _load_archive() -> dict[str, Any]:
+    if (backend := runtime()) is not None:
+        payload = getattr(_HA_ARCHIVE, "payload", None)
+        if payload is None:
+            payload = backend.read_state("crawler-worker", "archive", empty_archive())
+        validate_archive_payload(payload, ARCHIVE_SCHEMA_VERSION)
+        if payload.get("schema_version") not in (None, "", ARCHIVE_SCHEMA_VERSION):
+            raise ValueError("news archive requires offline migration")
+        return dict(payload, articles=list(payload.get("articles", [])))
     return _load_archive_from_storage(
         _archive_path(),
         ARCHIVE_SCHEMA_VERSION,
@@ -275,6 +329,14 @@ def _load_archive() -> dict[str, Any]:
 
 
 def _save_archive(archive: dict[str, Any]) -> None:
+    if runtime() is not None:
+        payload = getattr(_HA_ARCHIVE, "payload", None)
+        if payload is None:
+            raise RuntimeError("archive write requires transaction")
+        archive["schema_version"] = ARCHIVE_SCHEMA_VERSION
+        payload.clear()
+        payload.update(archive)
+        return
     _save_archive_to_storage(
         archive,
         _archive_path(),
@@ -300,6 +362,7 @@ def _schedule_refresh(category: str, limit: int) -> None:
     Thread(target=_run, daemon=True).start()
 
 
+@worker_operation
 def _refresh_category(category: str, limit: int) -> None:
     now = _now()
     _collection_status().record_attempt()
@@ -321,7 +384,7 @@ def _refresh_category(category: str, limit: int) -> None:
 def _commit_collected_articles(
     category: str, stored_articles: list[dict[str, Any]], now: datetime
 ) -> tuple[dict[str, Any], list[dict[str, Any]], bool]:
-    with _ARCHIVE_WRITE_LOCK:
+    with _archive_transaction():
         archive = _load_archive()
         archive, _ = _purge_archive(archive, now)
         new_articles = _new_articles(archive["articles"], stored_articles)
@@ -435,9 +498,10 @@ def _queue_and_send_general_digest(now: datetime) -> None:
     _drain_notification_outbox(now)
 
 
+@worker_operation
 def _drain_notification_outbox(now: datetime) -> None:
     with _NOTIFICATION_LOCK:
-        with _ARCHIVE_WRITE_LOCK:
+        with _archive_transaction():
             archive = _load_archive()
             outbox = _prune_sent_events(_notification_outbox(archive.get("telegram_outbox", [])), now)
             archive["telegram_outbox"] = outbox
@@ -449,7 +513,7 @@ def _drain_notification_outbox(now: datetime) -> None:
             if not _send_pending_event(event_id, now):
                 return
 
-        with _ARCHIVE_WRITE_LOCK:
+        with _archive_transaction():
             archive = _load_archive()
             event = _create_pending_digest_event(
                 archive, _notification_outbox(archive.get("telegram_outbox", [])), now
@@ -466,14 +530,24 @@ def _drain_notification_outbox(now: datetime) -> None:
             _send_pending_event(digest_event_id, now)
 
 
+@worker_operation
 def _send_pending_event(event_id: str, now: datetime) -> bool:
-    with _ARCHIVE_WRITE_LOCK:
+    with _archive_transaction():
         archive = _load_archive()
         event = next(
             (item for item in _notification_outbox(archive.get("telegram_outbox", []))
              if item["event_id"] == event_id and item["status"] == "pending"),
             None,
         )
+        if event is not None and runtime() is not None:
+            # Commit the uncertainty marker before invoking a remote provider.
+            # A crash or an ambiguous acknowledgement never permits replay.
+            event["status"] = "uncertain"
+            archive["telegram_outbox"] = [
+                event if item.get("event_id") == event_id else item
+                for item in archive.get("telegram_outbox", [])
+            ]
+            _save_archive(archive)
     if event is None:
         return True
     if event["kind"] == "alert":
@@ -482,7 +556,7 @@ def _send_pending_event(event_id: str, now: datetime) -> bool:
         sent = notify_market_news_digest(event["articles"])
     if not sent:
         return False
-    with _ARCHIVE_WRITE_LOCK:
+    with _archive_transaction():
         archive = _load_archive()
         archive["telegram_outbox"] = _ack_notification_event(
             _notification_outbox(archive.get("telegram_outbox", [])), event, now
@@ -501,7 +575,7 @@ def _create_pending_digest_event(
     if last_digest_at and now - last_digest_at < DIGEST_INTERVAL:
         return None
     reserved_urls = {
-        url for event in outbox if event["kind"] == "digest" and event["status"] == "pending"
+        url for event in outbox if event["kind"] == "digest" and event["status"] in {"pending", "uncertain"}
         for url in event["article_urls"]
     }
     pending = [
@@ -529,7 +603,7 @@ def _ack_notification_event(
 ) -> list[dict[str, Any]]:
     acknowledged = []
     for current in outbox:
-        if current["event_id"] == event["event_id"] and current["status"] == "pending":
+        if current["event_id"] == event["event_id"] and current["status"] in {"pending", "uncertain"}:
             current = dict(current, status="sent", sent_at=_iso(now))
         acknowledged.append(current)
     return _prune_sent_events(acknowledged, now)

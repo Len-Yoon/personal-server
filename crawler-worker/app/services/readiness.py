@@ -6,6 +6,7 @@ from pathlib import Path
 from app.services.news_archive import ARCHIVE_SCHEMA_VERSION
 from app.services.news_archive_storage import archive_path, validate_archive_payload
 from app.services.news_collection_status import _default_path
+from app.services.ha_backend import runtime
 
 
 def _state_available(path: Path, *, archive: bool = False) -> bool:
@@ -34,5 +35,20 @@ def _state_available(path: Path, *, archive: bool = False) -> bool:
 
 
 def readiness_checks() -> dict[str, bool]:
+    if (backend := runtime()) is not None:
+        try:
+            payload = backend.read_state("crawler-worker", "archive", {})
+            validate_archive_payload(payload, ARCHIVE_SCHEMA_VERSION)
+            status = backend.read_state("crawler-worker", "collection_status", {})
+            if not isinstance(status, dict):
+                raise ValueError("invalid collection state")
+            for key in ("failures_total", "consecutive_failures"):
+                if key in status and (type(status[key]) is not int or status[key] < 0):
+                    raise ValueError("invalid collection counter")
+            if "initialized" in status and not isinstance(status["initialized"], bool):
+                raise ValueError("invalid collection status")
+            return {"archive_state": True, "collection_state": True}
+        except Exception:
+            return {"archive_state": False, "collection_state": False}
     return {"archive_state": _state_available(archive_path(), archive=True),
             "collection_state": _state_available(Path(_default_path()))}

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import json
+from app.services.ha_backend import runtime
 
 
 PROJECT_DATA_ROOT = next(
@@ -100,7 +101,7 @@ def collect_metrics(
     ]
     overall_status = _highest_status(check["status"] for check in status_checks)
 
-    return {
+    result = {
         "demo_mode": False,
         "overall_status": overall_status,
         "captured_at": datetime.now(timezone.utc).isoformat(),
@@ -112,6 +113,9 @@ def collect_metrics(
         "status_checks": status_checks,
         "warnings": warnings,
     }
+    if (backend := runtime()) is not None:
+        result["node_id"] = backend.node_id()
+    return result
 
 
 def demo_metrics() -> dict[str, Any]:
@@ -188,6 +192,11 @@ def _read_host_metrics(
             "disk_percent": None,
             "uptime_seconds": None,
         }
+
+    if (backend := runtime()) is not None and (not isinstance(payload, dict) or payload.get("node_id") != backend.node_id()):
+        warnings.append("host_node_unverified")
+        return {"source": "unverified", "status": "warning", "status_reason": "host_node_unverified",
+                "cpu_percent": None, "memory_percent": None, "disk_percent": None, "uptime_seconds": None}
 
     captured_at = _parse_datetime(str(payload.get("captured_at", "")))
     if not captured_at:
@@ -309,6 +318,8 @@ def _highest_status(statuses: Any) -> str:
 
 
 def _host_status_detail(host: dict[str, Any]) -> str:
+    if host.get("status_reason") == "host_node_unverified":
+        return "노드 확인 필요"
     if host.get("status_reason") == "host_metrics_missing":
         return "메트릭 없음"
     if host.get("status_reason") == "host_metrics_invalid":

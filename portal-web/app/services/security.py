@@ -11,7 +11,8 @@ from zoneinfo import ZoneInfo
 import fcntl
 
 from app.services.admin_status import format_status_checked_at
-from app.services.session_store import SQLiteSessionStore
+from app.services.session_store import SQLiteSessionStore, PostgresSessionStore
+from app.services.ha_backend import runtime
 
 
 PROJECT_DATA_ROOT = next(
@@ -36,6 +37,9 @@ AUTH_SESSION_STORE = (
     SQLiteSessionStore(Path(os.environ["AUTH_SESSION_STATE_PATH"].strip()), AUTH_SESSION_MAX_ENTRIES)
     if os.getenv("AUTH_SESSION_STATE_PATH", "").strip() else None
 )
+if runtime() is not None:
+    AUTH_SESSION_STORE = PostgresSessionStore(AUTH_SESSION_MAX_ENTRIES)
+_HA_AUTH_STATE = None
 
 _AUTH_FAILURES: dict[tuple[str, str], list[datetime]] = {}
 _AUTH_SESSIONS: dict[str, tuple[str, datetime]] = {}
@@ -72,6 +76,11 @@ SECURITY_HEADERS = {
 
 def append_security_event(event: str, **details: Any) -> None:
     now = datetime.now(LOG_TIMEZONE)
+    if (backend := runtime()) is not None:
+        with backend.state_transaction("portal-web", "security_events", {"events": []}) as state:
+            state["events"].append({"timestamp": now.isoformat(), "event": event, "details": details})
+            state["events"] = state["events"][-500:]
+        return
     log_path = _daily_log_path(now)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -192,6 +201,8 @@ def requires_secure_cookie(request: Any) -> bool:
 
 
 def read_recent_events(limit: int = 8) -> list[dict[str, Any]]:
+    if (backend := runtime()) is not None:
+        return list(reversed(backend.read_state("portal-web", "security_events", {"events": []})["events"][-limit:]))
     events = []
     for log_path in _list_daily_logs():
         lines = log_path.read_text(encoding="utf-8").splitlines()
@@ -243,6 +254,16 @@ def _blocked_extensions() -> set[str]:
 
 @contextmanager
 def _auth_rate_limit_lock():
+    global _HA_AUTH_STATE
+    if (backend := runtime()) is not None:
+        # The PG transaction holds the complete load/check/modify/save boundary.
+        with _AUTH_SESSIONS_LOCK, backend.state_transaction("portal-web", "auth_failures", {}) as state:
+            _HA_AUTH_STATE = state
+            try:
+                yield
+            finally:
+                _HA_AUTH_STATE = None
+        return
     lock_path = AUTH_RATE_LIMIT_STATE_PATH.with_name(f".{AUTH_RATE_LIMIT_STATE_PATH.name}.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as lock_file:
@@ -260,7 +281,10 @@ def _reload_auth_failures() -> None:
 
 def _read_auth_failures() -> dict[tuple[str, str], list[datetime]]:
     try:
-        raw_state = json.loads(AUTH_RATE_LIMIT_STATE_PATH.read_text(encoding="utf-8"))
+        if runtime() is not None:
+            raw_state = _HA_AUTH_STATE if _HA_AUTH_STATE is not None else runtime().read_state("portal-web", "auth_failures", {})
+        else:
+            raw_state = json.loads(AUTH_RATE_LIMIT_STATE_PATH.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return {}
 
@@ -311,6 +335,13 @@ def _persist_auth_failures() -> None:
     state: dict[str, dict[str, list[str]]] = {}
     for (scope, identifier), failures in _AUTH_FAILURES.items():
         state.setdefault(scope, {})[identifier] = [failed_at.isoformat() for failed_at in failures]
+
+    if runtime() is not None:
+        if _HA_AUTH_STATE is None:
+            raise runtime().DatabaseUnavailable("auth_state_transaction_required")
+        _HA_AUTH_STATE.clear()
+        _HA_AUTH_STATE.update(state)
+        return
 
     temporary_path = AUTH_RATE_LIMIT_STATE_PATH.with_name(
         f".{AUTH_RATE_LIMIT_STATE_PATH.name}.{secrets.token_hex(8)}.tmp"
