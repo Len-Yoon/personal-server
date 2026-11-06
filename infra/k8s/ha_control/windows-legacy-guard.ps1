@@ -333,7 +333,7 @@ function Assert-LegacyBundle {
                 [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership}
             if ($rule.AccessControlType -eq 'Allow' -and $sid -notin $allowed -and ($rule.FileSystemRights -band $mask)) {throw 'legacy_python_unverified'}
         }
-        $entry=if($entry.PSIsContainer){$entry.Parent}else{$entry.Directory}
+        $entry=if($entry -is [IO.DirectoryInfo]){$entry.Parent}else{$entry.Directory}
     }
 }
 
