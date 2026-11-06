@@ -1,4 +1,4 @@
-# 7개 앱 HA 릴리스 패키지
+# 7개 앱·백업 도구 HA 릴리스 패키지
 
 운영 Dockerfile·Compose·K3s·CI를 수정하거나 원격 배포를 수행하지 않는 별도 빌더임.
 현재 운영 활성화 상태와 무관하게 패키징만 수행하며, 운영 활성화에는 별도 승인된 controller 설정·fencing·복구 검증이 필요함.
@@ -14,17 +14,18 @@ python3 infra/k8s/ha-package/build.py verify --bundle /tmp/ha-release
 |---|---|---|
 | 원본 | 지정 커밋의 Git blob만 읽음 | 작업 트리 변경은 포함하지 않음 |
 | 앱 | Portal·Book·YouTube·Crawler·CarCare·HomeOps·System Agent | 릴리스 ID 하나로 묶음 |
+| 별도 백업 도구 | `ha-backup-utility` 이미지에 PostgreSQL 17 client·cryptography 50.0.0·psycopg 3.3.8을 포함함 | setuptools 84.0.0·wheel 0.48.0 사용. 기존 앱 이미지에 백업 전용 의존성을 추가하지 않음 |
 | 베이스 | 원본 Dockerfile의 literal SHA256 고정 Python 3.11/3.12 Alpine | ARG·다단계·root USER·템플릿 변조는 차단함 |
 | 원본 보존 | 의존성·CMD·환경·디렉터리·USER를 유지하고 공유 runtime·canonical contract·고정 psycopg를 추가함 | HomeOps Docker socket 권한은 기존 실행 설정을 별도 검토함 |
 | 컨텍스트 | 앱 Python·명시된 정적 자산 확장자·requirements·공유 runtime·계약만 포함함 | 숨김 경로·키·DB·data·secret 제외함 |
 | 로컬 빌드 | Mac OrbStack의 사용자별 정확한 Unix socket만 허용함 | linux/amd64, 소유 UUID label, 원격 Docker 환경 무시함 |
 | 효율 | 원본 의존성 설치 단계 캐시를 재사용함 | all-seven 순차 빌드, 별도 venv fixture 이미지 아님 |
-| smoke | 실제 7개 이미지에서 비root·psycopg 버전·runtime import·앱 전체 구문·기본 비활성 상태 검사함 | 격리 네트워크·읽기 전용·권한 제거 실행, DB 통합 검증은 별도임 |
+| smoke | 실제 앱 7개와 백업 도구 1개에서 비root·고정 버전·runtime import·원본 파일 해시·기본 비활성 상태 검사함 | 백업 도구는 PostgreSQL client 버전·승인 없이 도움말 실행까지 검사함. 격리 네트워크·읽기 전용·권한 제거 실행, DB 통합 검증은 별도임 |
 | 무결성 | 원본 파일 manifest·서비스 계약→release ID→생성 release.json 포함 bundle_files→이미지 revision/release label→config digest→layer digest→archive SHA256 연결함 | Docker archive manifest 해시이며 registry manifest digest는 게시 전 미생성임 |
 | 배포 계획 | deployment-plan.json은 실행되지 않는 검토 항목과 후속 순서임 | 실제 Secret·mount·apply 명령을 생성하거나 활성화하지 않음 |
 
 출력의 `source-manifest.json`과 검토한 release ID를 함께 보존해야 함. 해시는 무결성 검사용이며 서명·신뢰 배포 채널을 대신하지 않음.
-`verify`는 전체 7개 이미지 archive를 요구하며 일부 성공을 전체 성공으로 처리하지 않음.
+`verify`는 앱 7개와 백업 도구 1개의 전체 8개 이미지 archive를 요구하며 일부 성공을 전체 성공으로 처리하지 않음.
 빌드 실패 시 부분 출력은 검토용으로 보존하고 새 출력 경로에서 다시 준비함. 전역 Docker 정책·운영 이미지·컨테이너를 정리하지 않음.
 로컬 빌드 이미지와 archive는 자동 삭제하지 않으며 승인된 반입·검증 또는 명시적인 로컬 정리 이후 제거함.
 

@@ -88,7 +88,8 @@ class PackageTest(unittest.TestCase):
         context = self.bundle / "contexts" / package.UTILITY
         dockerfile = (context / "Dockerfile").read_text()
         self.assertIn("postgresql17-client", dockerfile)
-        self.assertIn("cryptography==46.0.5", dockerfile)
+        self.assertIn("cryptography==50.0.0", dockerfile)
+        self.assertIn("setuptools==84.0.0 wheel==0.48.0", dockerfile)
         self.assertIn("psycopg[binary]==3.3.8", dockerfile)
         self.assertIn("USER 10001:10001", dockerfile)
         self.assertIn('["python", "-m", "ha_runtime.backup_cli", "--help"]', dockerfile)
@@ -99,7 +100,7 @@ class PackageTest(unittest.TestCase):
         self.assertEqual(release, json.loads((self.bundle / "contexts/portal-web/_ha/ha_runtime/release.json").read_text()))
         for service in package.SERVICES:
             original = (self.bundle / "contexts" / service / "Dockerfile").read_text()
-            self.assertNotIn("cryptography==46.0.5", original)
+            self.assertNotIn("cryptography==50.0.0", original)
             self.assertNotIn("postgresql17-client", original)
         self.assertEqual(package.verify_source(self.bundle), manifest)
 

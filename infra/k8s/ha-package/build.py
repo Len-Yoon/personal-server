@@ -122,7 +122,8 @@ def utility_recipe(files):
     template = files["infra/k8s/ha-package/Utility.Dockerfile.template"].decode()
     expected = ("FROM @APP_BASE_IMAGE@\nWORKDIR /opt/ha\n"
                 "RUN apk add --no-cache postgresql17-client \\\n"
-                "    && pip install --no-cache-dir 'cryptography==46.0.5' 'psycopg[binary]==3.3.8'\n"
+                "    && pip install --no-cache-dir setuptools==84.0.0 wheel==0.48.0 \\\n"
+                "    && pip install --no-cache-dir 'cryptography==50.0.0' 'psycopg[binary]==3.3.8'\n"
                 "RUN addgroup -S -g 10001 app && adduser -S -u 10001 -G app app\n"
                 "COPY _ha/ /opt/ha/\nENV PYTHONPATH=/opt/ha PYTHONDONTWRITEBYTECODE=1\n"
                 "USER 10001:10001\nCMD [\"python\", \"-m\", \"ha_runtime.backup_cli\", \"--help\"]\n")
@@ -328,7 +329,9 @@ def build(bundle):
                          "assert all(hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()==h for p,h in expected.items()); "
                          "print('package_smoke=PASS')")
         if service == UTILITY:
-            service_smoke = ("import cryptography,subprocess; assert cryptography.__version__=='46.0.5'; "
+            service_smoke = ("import cryptography,subprocess; from importlib.metadata import version; "
+                             "assert cryptography.__version__=='50.0.0'; "
+                             "assert version('setuptools')=='84.0.0'; assert version('wheel')=='0.48.0'; "
                              "assert all(subprocess.check_output([tool,'--version'],text=True).startswith(tool+' (PostgreSQL) 17.') "
                              "for tool in ['pg_dump','pg_restore']); " + service_smoke)
         result = docker.call("run", "--rm", "--pull=never", "--network=none", "--read-only",
