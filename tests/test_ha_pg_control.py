@@ -206,6 +206,43 @@ class PGControlTests(unittest.TestCase):
         self.assertEqual(locks, [(ROLE_LOCK,), (ROLE_LOCK,)])
         self.assertIsNotNone(self.backend.validated)
 
+    def test_repeated_renewals_bound_only_ephemeral_nonces_under_role_lock(self):
+        retained = {"earlier-attempt", "earlier-attempt:flush"}
+        seen_attempts = []
+        for _ in range(3):
+            connections, observations = self.prepare_fresh(lease=True)
+            original_execute = self.primary.execute.side_effect
+            def execute(query, params=None):
+                if query.startswith("DELETE FROM ha.controller_probes"):
+                    self.assertEqual(len(params), 2)
+                    self.assertEqual(params[1], params[0] + ":flush")
+                    retained.intersection_update(params)
+                    seen_attempts.append(params)
+                elif query.startswith("INSERT INTO ha.controller_probes"):
+                    retained.add(params[0])
+                return original_execute(query, params)
+            self.primary.execute.side_effect = execute
+            with connections, observations, patch.object(self.backend, "_commit", side_effect=lambda c: c.execute("COMMIT")):
+                self.backend._fresh(self.state, lease=True)
+            self.assertEqual(retained, set(seen_attempts[-1]))
+            self.assertEqual(len(retained), 2)
+            calls = self.primary.execute.call_args_list
+            queries = [call.args[0] for call in calls]
+            cleanup = next(i for i, query in enumerate(queries) if query.startswith("DELETE FROM"))
+            first_lock = next(i for i, query in enumerate(queries) if "pg_advisory_xact_lock" in query)
+            first_insert = next(i for i, query in enumerate(queries) if query.startswith("INSERT INTO"))
+            first_commit = queries.index("COMMIT")
+            self.assertLess(first_lock, cleanup)
+            self.assertLess(cleanup, first_insert)
+            self.assertLess(first_insert, first_commit)
+            self.assertEqual(sum(query.startswith("DELETE FROM") for query in queries), 1)
+            self.assertEqual(sum(query.startswith("INSERT INTO ha.controller_probes") for query in queries), 2)
+            # Both observations still verify the exact current :flush nonce.
+            for connection in (self.primary, self.peer):
+                reads = [call for call in connection.execute.call_args_list if "SELECT generation FROM ha.controller_probes" in call.args[0]]
+                self.assertEqual(reads[-1].args[1], (seen_attempts[-1][1],))
+        self.assertEqual(len({attempt[0] for attempt in seen_attempts}), 3)
+
     def test_stale_replay_missing_nonce_or_deadline_never_arms_authority(self):
         for options in ({"peer_lsn": "0/1"}, {"bad_nonce": True}, {}):
             connections, observations = self.prepare_fresh(**options)

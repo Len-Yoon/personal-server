@@ -318,6 +318,11 @@ class PgBackend:
                 primary.execute("SELECT pg_advisory_xact_lock(%s)", (ROLE_LOCK,))
                 current = self._observe(primary, state["target"], state)
                 self._pair(current, self._observe(peer, state["old"], state), state)
+                if not suffix:
+                    # These are ephemeral controller observations, never app
+                    # receipts/barriers. Bound retention inside the same role
+                    # lock as the first new nonce, preserving only this attempt.
+                    primary.execute("DELETE FROM ha.controller_probes WHERE nonce<>%s AND nonce<>%s", (nonce, nonce + ":flush"))
                 primary.execute("INSERT INTO ha.controller_probes(nonce,generation) VALUES(%s,%s)", (nonce + suffix, state["generation"]))
                 if lease and suffix == ":flush":
                     primary.execute("UPDATE ha.control SET serving=ARRAY[%s]::text[],worker=%s,writes_open=true,history_safe=true,expires_at=clock_timestamp()+interval '5 seconds' WHERE singleton=1 AND epoch=%s AND primary_node=%s", (state["target"], state["target"], state["generation"], state["target"]))
