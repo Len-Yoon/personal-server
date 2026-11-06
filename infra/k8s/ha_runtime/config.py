@@ -1,4 +1,5 @@
-"""Explicit opt-in for isolated development; never silently fall back to SQLite."""
+"""Fail-closed HA configuration; production requires a private release-bound approval."""
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -36,25 +37,102 @@ def _private(path):
     return candidate
 
 
+def _authority_file(path):
+    """App-readable approval authority must be outside the app's write boundary."""
+    candidate = Path(path)
+    info = candidate.lstat()
+    if (not candidate.is_absolute() or os.geteuid() == 0
+            or not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) not in {0o440, 0o444}):
+        raise DatabaseUnavailable("trusted_activation_authority_required")
+    for parent in candidate.parents:
+        parent_info = parent.lstat()
+        if (not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != 0
+                or parent_info.st_mode & 0o022):
+            raise DatabaseUnavailable("trusted_activation_authority_required")
+    return candidate
+
+
+def _release():
+    path = _authority_file(Path(__file__).with_name("release.json"))
+    value = json.loads(path.read_text())
+    if (set(value) != {"source_commit", "release_id", "source_files_sha256"}
+            or not re.fullmatch(r"[0-9a-f]{40}", value["source_commit"])
+            or any(not re.fullmatch(r"[0-9a-f]{64}", value[key]) for key in ("release_id", "source_files_sha256"))):
+        raise DatabaseUnavailable("packaged_release_required")
+    return value
+
+
+def _approved(payload):
+    if os.getenv("APP_ENV") != "production":
+        raise DatabaseUnavailable("production_ha_not_armed")
+    release = _release()
+    approval = json.loads(_authority_file(os.environ["HA_PG_ACTIVATION"]).read_text())
+    identities = {"cluster", "system_id", "node", "service", "primary_node", "primary", "partner"} | set(release)
+    if (set(payload) != identities | {"scope"}
+            or set(approval) != identities | {"action", "expires", "nodes"}
+            or approval["action"] != "activate-ha"
+            or any(payload[key] != approval[key] for key in identities)
+            or any(payload[key] != value for key, value in release.items())):
+        raise DatabaseUnavailable("activation_identity_mismatch")
+    # Explicit UTC, bounded remaining lifetime: stale or open-ended grants fail.
+    if not isinstance(approval["expires"], str) or not approval["expires"].endswith("Z"):
+        raise DatabaseUnavailable("activation_expiry_required")
+    expiry = datetime.fromisoformat(approval["expires"].removesuffix("Z") + "+00:00")
+    now = datetime.now(timezone.utc)
+    if expiry.utcoffset() != timedelta(0) or not now < expiry <= now + timedelta(hours=24):
+        raise DatabaseUnavailable("activation_expired_or_unbounded")
+    nodes = approval["nodes"]
+    if (not isinstance(nodes, dict) or set(nodes) != {"A", "B"} or nodes["A"] == nodes["B"]
+            or any(not isinstance(host, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", host)
+                   for host in nodes.values())
+            or not isinstance(payload["system_id"], str)
+            or not re.fullmatch(r"[1-9][0-9]{0,19}", payload["system_id"])):
+        raise DatabaseUnavailable("activation_nodes_required")
+    return nodes
+
+
 def load(service=None):
     try:
-        if (os.getenv("HA_LOCAL_RUNTIME") != "1"
-                or os.getenv("APP_ENV") not in {"test", "development"}):
+        environment = os.getenv("APP_ENV")
+        if (environment not in {"test", "development", "production"}
+                or (environment == "production" and not os.getenv("HA_PG_ACTIVATION"))
+                or (environment in {"test", "development"} and os.getenv("HA_LOCAL_RUNTIME") != "1")):
             raise DatabaseUnavailable("production_ha_not_armed")
         payload = json.loads(_private(os.environ["HA_PG_CONFIG"]).read_text())
-        if (payload["scope"] != "local-isolated" or payload["node"] not in {"A", "B"}
+        if payload["scope"] == "local-isolated":
+            if (os.getenv("HA_LOCAL_RUNTIME") != "1"
+                    or os.getenv("APP_ENV") not in {"test", "development"}):
+                raise DatabaseUnavailable("production_ha_not_armed")
+            nodes = {"A": "ha-a", "B": "ha-b"}
+        elif payload["scope"] == "n100-approved":
+            nodes = _approved(payload)
+        else:
+            raise DatabaseUnavailable("configuration_scope_mismatch")
+        if (payload["node"] not in {"A", "B"}
                 or payload["service"] not in SERVICES or (service and payload["service"] != service)
                 or not re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", payload["cluster"])):
             raise DatabaseUnavailable("configuration_identity_mismatch")
-        for endpoint, expected in (("primary", "ha-a"), ("partner", "ha-b")):
+        primary_node = payload.get("primary_node", "A")
+        if primary_node not in {"A", "B"}:
+            raise DatabaseUnavailable("invalid_primary_mapping")
+        for endpoint, expected in (("primary", nodes[primary_node]),
+                                   ("partner", nodes["B" if primary_node == "A" else "A"])):
             value = payload[endpoint]
             if (value["host"] != expected or value.get("port", 5432) != 5432
                     or value["sslmode"] != "verify-full" or "password" in value
                     or set(value) - {"host", "port", "dbname", "user", "sslmode", "sslrootcert", "passfile"}):
-                raise DatabaseUnavailable("authenticated_local_endpoint_required")
+                raise DatabaseUnavailable("authenticated_endpoint_required")
+            if payload["scope"] == "n100-approved" and (
+                    not isinstance(value.get("dbname"), str) or not value["dbname"]
+                    or not isinstance(value.get("user"), str) or not value["user"]):
+                raise DatabaseUnavailable("authenticated_endpoint_identity_required")
             _private(value["passfile"])
             ca = Path(value["sslrootcert"])
-            if not ca.is_absolute() or ca.is_symlink() or not ca.is_file():
+            if (not ca.is_absolute() or ca.is_symlink() or not ca.is_file()
+                    or any(parent.is_symlink() for parent in ca.parents)
+                    or (payload["scope"] == "n100-approved" and (ca.stat().st_mode & 0o022
+                         or ca.stat().st_uid not in {0, os.geteuid()}))):
                 raise DatabaseUnavailable("trusted_ca_required")
         return payload
     except DatabaseUnavailable:

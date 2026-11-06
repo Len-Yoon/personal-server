@@ -1,0 +1,6 @@
+@ORIGINAL_ROOT_SECTION@
+# Shared HA runtime is packaged but activation requires separately approved config.
+COPY _ha/ /opt/ha/
+RUN pip install --no-cache-dir 'psycopg[binary]==3.3.8'
+ENV PYTHONPATH=/opt/ha
+@ORIGINAL_USER_SECTION@

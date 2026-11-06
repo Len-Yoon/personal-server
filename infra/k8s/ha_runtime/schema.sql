@@ -12,6 +12,8 @@ CREATE TABLE ha.control (
     expires_at timestamptz NOT NULL
 );
 CREATE TABLE ha.identities (role_name text PRIMARY KEY, service text NOT NULL, node text NOT NULL);
+-- Host coordinator only; application roles never receive table privileges.
+CREATE TABLE ha.controller_probes (nonce text PRIMARY KEY, generation bigint NOT NULL);
 REVOKE ALL ON ALL TABLES IN SCHEMA ha FROM PUBLIC;
 
 CREATE FUNCTION ha.observe() RETURNS jsonb

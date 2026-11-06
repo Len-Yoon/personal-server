@@ -69,6 +69,7 @@ class Fixture:
                         self.report["failure_location"] = {
                             "error_class": diagnostic.get("error_class"),
                             "runtime_reason": diagnostic.get("runtime_reason"),
+                            "check_reason": diagnostic.get("reason"),
                             "frames": [{key: frame[key] for key in ("file", "function", "line") if key in frame}
                                        for frame in frames if isinstance(frame, dict)],
                         }
@@ -141,22 +142,26 @@ class Fixture:
                 self.passwords[service.replace("-", "_") + "_" + node] = secrets.token_urlsafe(32)
         (fixture / "postgres-password").write_text(self.passwords["postgres"])
         (fixture / "postgres-password").chmod(0o600)
-        (fixture / "repl.pgpass").write_text("ha-a:5432:replication:ha_repl:" + self.passwords["ha_repl"] + "\n")
+        (fixture / "repl.pgpass").write_text("ha-a:5432:replication:ha_repl:" + self.passwords["ha_repl"] + "\nha-b:5432:replication:ha_repl:" + self.passwords["ha_repl"] + "\n")
         (fixture / "repl.pgpass").chmod(0o600)
         self.network = self.docker("network", "create", "--internal", "--label", self.label, "ha-app-" + self.owner)
         self.owned("network", self.network)
         self.image = self.docker("image", "inspect", "postgres:17-bookworm", "--format", "{{.Id}}")
 
-    def start_pg(self, node):
+    def start_pg(self, node, source=None):
         fixture = self.directory / "fixture"
         if node == "A":
             command = "chown 999:999 /tmp/server.key /tmp/server.crt /tmp/pgpassword; exec docker-entrypoint.sh postgres \"$@\""
         tuning = ["-c", "cluster_name=ha_" + node, "-c", "ssl=on", "-c", "ssl_cert_file=/tmp/server.crt", "-c", "ssl_key_file=/tmp/server.key",
                   "-c", "shared_buffers=32MB", "-c", "max_connections=40", "-c", "wal_level=replica", "-c", "max_wal_senders=4", "-c", "max_wal_size=64MB", "-c", "min_wal_size=32MB",
                   "-c", "wal_sender_timeout=2000", "-c", "wal_receiver_timeout=2000", "-c", "wal_retrieve_retry_interval=1000"]
-        if node == "B":
+        if node == "B" or source:
             # Keep shell argument boundaries exact; no dynamic credentials in it.
             command = "chown 999:999 /tmp/server.key /tmp/server.crt /tmp/repl.pgpass; exec gosu postgres bash -ceu 'pg_basebackup -d \"host=ha-a user=ha_repl sslmode=verify-full sslrootcert=/tmp/ca.crt passfile=/tmp/repl.pgpass application_name=ha_b\" -D /var/lib/postgresql/data -R -X stream --checkpoint=fast; exec postgres -D /var/lib/postgresql/data \"$@\"' -- \"$@\""
+            if source:
+                if source not in {"A", "B"} or source == node:
+                    raise FixtureError("invalid_replication_source")
+                command = command.replace("host=ha-a", "host=ha-" + source.lower()).replace("application_name=ha_b", "application_name=ha_" + node.lower())
         identifier = self.docker("create", "--pull=never", "--label", self.label, "--network", self.network, "--network-alias", "ha-" + node.lower(),
                                  "--memory", "384m", "--cpus", "1", "--tmpfs", "/var/lib/postgresql/data:rw,uid=999,gid=999,mode=0700,size=256m",
                                  "-e", "POSTGRES_PASSWORD_FILE=/tmp/pgpassword", "-e", "POSTGRES_INITDB_ARGS=--data-checksums", "--entrypoint", "bash", self.image,
@@ -192,7 +197,7 @@ class Fixture:
         self.report["authenticated_sync_pair"] = True
         self.configurations()
 
-    def configurations(self):
+    def configurations(self, primary_node="A"):
         fixture = self.directory / "fixture"
         for role, password in self.passwords.items():
             path = fixture / (role + ".pgpass")
@@ -200,13 +205,13 @@ class Fixture:
             path.chmod(0o600)
         def endpoint(role, host):
             return {"host": host, "port": 5432, "dbname": "ha", "user": role, "sslmode": "verify-full", "sslrootcert": "/fixture/ca.crt", "passfile": "/fixture/" + role + ".pgpass"}
-        (fixture / "admin.json").write_text(json.dumps(endpoint("postgres", "ha-a")))
+        (fixture / "admin.json").write_text(json.dumps(endpoint("postgres", "ha-" + primary_node.lower())))
         (fixture / "admin.json").chmod(0o600)
         for service in SERVICES:
             for node in ("A", "B"):
                 role = service.replace("-", "_") + "_" + node.lower()
-                value = {"scope": "local-isolated", "cluster": self.cluster, "system_id": self.system_id, "node": node, "service": service,
-                         "primary": endpoint(role, "ha-a"), "partner": endpoint(role, "ha-b")}
+                value = {"scope": "local-isolated", "cluster": self.cluster, "system_id": self.system_id, "node": node, "service": service, "primary_node": primary_node,
+                         "primary": endpoint(role, "ha-" + primary_node.lower()), "partner": endpoint(role, "ha-" + ("b" if primary_node == "A" else "a"))}
                 path = fixture / "config" / (service + "-" + node + ".json")
                 path.write_text(json.dumps(value))
                 path.chmod(0o600)
@@ -227,6 +232,7 @@ class Fixture:
                 if path.is_file() and not path.is_symlink() and "__pycache__" not in path.parts and (path.suffix == ".py" or relative.parts[0] in {"static", "templates"}):
                     files.append(path)
         files += [p for p in (ROOT / "infra/k8s/ha_runtime").iterdir() if p.is_file() and p.suffix in {".py", ".sql"}]
+        files += [p for p in (ROOT / "infra/k8s/ha_control").iterdir() if p.is_file() and p.suffix in {".py", ".ps1"}]
         files += [p for p in (ROOT / "infra/k8s/ha-lab").iterdir() if p.is_file() and p.suffix in {".py", ".txt"}]
         files.append(ROOT / "infra/k8s/tools/n100_ha_contract.py")
         files += [ROOT / "infra/k8s/ha-lab/Dockerfile.template", ROOT / "portal-web/Dockerfile", ROOT / "system-agent/Dockerfile"]
