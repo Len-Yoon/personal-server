@@ -42,6 +42,8 @@ TCB_EXES = frozenset({"/init", "/usr/lib/systemd/systemd", "/usr/lib/systemd/sys
 OS_PACKAGES = {"apt-daily.service": ("apt",), "apt-daily.timer": ("apt",), "apt-daily-upgrade.service": ("apt",), "apt-daily-upgrade.timer": ("apt",), "dpkg-db-backup.service": ("dpkg",), "dpkg-db-backup.timer": ("dpkg",), "rsyslog.service": ("rsyslog",), "syslog.socket": ("rsyslog", "systemd"), "ssh.service": ("openssh-server",), "sshd.service": ("openssh-server",), "ssh.socket": ("openssh-server",), "dbus.service": ("dbus", "dbus-daemon"), "dbus.socket": ("dbus", "dbus-daemon"), "cron.service": ("cron",), "user@.service": ("systemd",), "user-runtime-dir@.service": ("systemd",)}
 SYSTEMD_OS_PACKAGES = ("systemd", "systemd-resolved", "systemd-timesyncd", "udev")
 UNIT_PROPERTIES = frozenset({"Id", "MainPID", "Leader", "ControlGroup", "FragmentPath", "DropInPaths", "UnitFileState", "ActiveState", "SubState", "Restart", "ExecStart", "ExecStartPre", "ExecStartPost", "ExecStop", "ExecReload", "Environment", "EnvironmentFiles", "User", "Group", "SupplementaryGroups", "Triggers", "TriggeredBy", "Wants", "Requires", "PartOf", "BindsTo", "Conflicts", "Before", "After", "OnFailure", "OnSuccess", "TimersMonotonic", "TimersCalendar", "OnClockChange", "OnTimezoneChange", "Unit", "Paths", "Listen", "Accept", "BusName", "Delegate", "DynamicUser", "RootDirectory", "RootImage", "PrivateUsers", "PrivateNetwork", "NoNewPrivileges", "CapabilityBoundingSet", "AmbientCapabilities", "ReadWritePaths", "ReadOnlyPaths", "BindPaths", "BindReadOnlyPaths", "ExecMainPID"})
+ACTIVATION_PROPERTIES = frozenset({"Wants", "Requires", "Requisite", "BindsTo", "Upholds", "ConsistsOf", "Triggers", "OnFailure", "OnSuccess", "Unit", "PropagatesReloadTo"})
+UNIT_PROPERTIES |= ACTIVATION_PROPERTIES
 # A newly discoverable kind may be an external reconciler. It is unsupported,
 # rather than silently omitted. API discovery and ALL supported objects are
 # pinned, including storage/volume/RBAC/credential relationships.
@@ -998,7 +1000,7 @@ def os_activation_units(budget, registry, configurations):
     for name, properties in registry.items():
         local_name = properties.get("Id", name)
         template = re.sub(r"@[0-9]+\.", "@.", local_name)
-        packages = OS_PACKAGES.get(template, SYSTEMD_OS_PACKAGES if local_name.startswith("systemd-") else ())
+        packages = OS_PACKAGES.get(template, SYSTEMD_OS_PACKAGES if local_name.startswith("systemd-") or local_name.endswith((".target", ".slice")) else ())
         if not packages or properties.get("DropInPaths") or properties.get("EnvironmentFiles"):
             continue
         fragment = properties.get("FragmentPath")
@@ -1019,19 +1021,37 @@ def os_activation_units(budget, registry, configurations):
         if valid:
             approved.add(name)
             evidence[name] = {"fragment": proof, "commands": commands, "unit_sha256": digest(properties), "files_sha256": digest(configurations.get(name, {}))}
-    # A timer/socket/OS service cannot be exempt while it activates an app unit.
-    changed = True
-    while changed:
-        changed = False
-        for name in list(approved):
-            values = registry[name]
-            manager = "user:" + str(values["_manager_uid"]) + ":" if "_manager_uid" in values else ""
-            related = {manager + item for item in " ".join(values.get(k, "") for k in ("Triggers", "OnFailure", "OnSuccess", "Unit")).split()}
-            if any(unit.endswith((".service", ".timer", ".socket", ".path")) and unit not in approved for unit in related):
-                approved.remove(name)
-                evidence.pop(name, None)
-                changed = True
+    # Dependency closure is checked after real daemon/MainPID discovery, so a
+    # packaged target may reach another exactly registered runtime TCB daemon.
     return approved, evidence
+
+
+def validate_activation_closure(registry, provider_units):
+    """Every activation destination must itself be a verified provider unit.
+
+    Package-proven targets/slices and observed daemon units are the entire
+    allowlist. A disabled app is still startable by Wants/Requires/Upholds.
+    Before/After are ordering edges and deliberately do not confer activation.
+    """
+    pending, visited = list(provider_units), set()
+    while pending:
+        name = pending.pop()
+        if name in visited:
+            continue
+        if name not in registry or name not in provider_units:
+            deny("unsupported_os_activation_dependency")
+        visited.add(name)
+        values = registry[name]
+        manager = "user:" + str(values["_manager_uid"]) + ":" if "_manager_uid" in values else ""
+        for field in ACTIVATION_PROPERTIES:
+            value = values.get(field, "")
+            if type(value) is not str:
+                deny("unsupported_os_activation_dependency")
+            for destination in value.split():
+                target = manager + destination
+                if target not in provider_units or target not in registry:
+                    deny("unsupported_os_activation_dependency")
+                pending.append(target)
 
 
 def collect_cron(budget):
@@ -1305,6 +1325,7 @@ def _collect_snapshot(budget, mounts):
     if set(docker_ids) & set(kube_ids):
         deny("ambiguous_runtime_process_identity")
     processes, tcb, process_resources, tcb_units, joined = collect_processes(budget, registry, {**docker_ids, **kube_ids}, os_units)
+    validate_activation_closure(registry, os_units | tcb_units)
     processes = {"instances": processes, "provider_configuration": provider_configuration(budget)}
     pod_ids = {o["metadata"]["uid"] for o in kubernetes["objects"] if o["kind"] == "Pod"}
     actual_containers = resources + [r for r in kube_resources if r["id"] in pod_ids]

@@ -369,6 +369,42 @@ class GraphTests(unittest.TestCase):
                 approved, _ = graph.os_activation_units(FakeBudget(), {"apt-daily.service": properties}, {})
                 self.assertEqual(approved, set())
 
+    def test_package_unit_custom_wants_requires_and_upholds_links_cannot_start_disabled_app(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            os_unit, app_unit = root / "apt-daily.service", root / "legacy-app.service"
+            os_unit.write_text("[Service]\nType=oneshot\n")
+            app_unit.write_text("[Service]\nExecStart=/unverified/app-writer\n")
+            original = os_unit.read_bytes()
+            for suffix, property_name in (("wants", "Wants"), ("requires", "Requires"), ("upholds", "Upholds")):
+                directory = root / (os_unit.name + "." + suffix)
+                directory.mkdir()
+                (directory / app_unit.name).symlink_to(app_unit)
+                # These are the actual loaded dependency names systemctl show
+                # returns for link-based dependencies. Fragment bytes stay the
+                # original package's bytes; disabled does not prevent starts.
+                observed_dependencies = " ".join(path.name for path in directory.iterdir())
+                registry = {os_unit.name: {"Id": os_unit.name, property_name: observed_dependencies}, app_unit.name: {"Id": app_unit.name, "ActiveState": "inactive", "UnitFileState": "disabled"}}
+                self.assertEqual(os_unit.read_bytes(), original)
+                with self.subTest(edge=property_name), self.assertRaisesRegex(graph.Blocked, "unsupported_os_activation_dependency"):
+                    graph.validate_activation_closure(registry, {os_unit.name})
+            self.assertIn("Upholds", graph.UNIT_PROPERTIES)
+
+    def test_activation_target_transitive_unknown_and_ordering_edges_are_distinct(self):
+        registry = {"os.service": {"Wants": "os.target", "Before": "legacy.service", "After": "legacy.service"}, "os.target": {"Requires": "legacy.service"}, "legacy.service": {"ActiveState": "inactive", "UnitFileState": "disabled"}}
+        with self.assertRaisesRegex(graph.Blocked, "unsupported_os_activation_dependency"):
+            graph.validate_activation_closure(registry, {"os.service", "os.target"})
+        registry["os.target"] = {"Requires": "unknown.target"}
+        with self.assertRaisesRegex(graph.Blocked, "unsupported_os_activation_dependency"):
+            graph.validate_activation_closure(registry, {"os.service", "os.target"})
+        registry["os.target"] = {"Requires": "os.service"}
+        graph.validate_activation_closure(registry, {"os.service", "os.target"})
+        # The same rule applies to the complete registered user-manager graph.
+        user = {"user:1000:os.service": {"_manager_uid": 1000, "Upholds": "app.service"}, "user:1000:app.service": {"_manager_uid": 1000, "UnitFileState": "disabled"}}
+        with self.assertRaisesRegex(graph.Blocked, "unsupported_os_activation_dependency"):
+            graph.validate_activation_closure(user, {"user:1000:os.service"})
+
     def test_self_expiry_kills_and_reaps_query_group_and_restores_signal_handlers(self):
         import signal
         import subprocess
