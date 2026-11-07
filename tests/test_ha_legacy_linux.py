@@ -292,6 +292,46 @@ class GraphTests(unittest.TestCase):
         self.assertTrue(cap["management"])
 
     @patch.object(graph, "verify_kubeconfig", new=lambda budget: None)
+    def test_all_kubernetes_queries_block_disk_cache_and_keep_static_tls(self):
+        commands = []
+        namespace = {"kind": "Namespace", "metadata": {"name": "kube-system", "uid": self.snapshot["kube_system_uid"]}}
+        class FakeBudget:
+            def command(self, args):
+                commands.append(args)
+                if "api-resources" in args:
+                    return b"namespaces\nwidgets.example.invalid\n"
+                if "customresourcedefinitions.apiextensions.k8s.io" in args:
+                    return json.dumps({"items": [{"spec": {"names": {"plural": "widgets", "kind": "Widget"}, "group": "example.invalid"}}]}).encode()
+                return json.dumps({"items": [namespace]}).encode()
+        result = graph.collect_kubernetes(FakeBudget())
+        self.assertEqual(result[0], self.snapshot["kube_system_uid"])
+        self.assertEqual(len(commands), 3)
+        for command in commands:
+            self.assertEqual(command.count("--cache-dir=/proc/self/fd/0"), 1)
+            self.assertIn("--kubeconfig=/dev/null", command)
+            self.assertIn("--client-key=/var/lib/rancher/k3s/server/tls/client-admin.key", command)
+            self.assertIn("--certificate-authority=/var/lib/rancher/k3s/server/tls/server-ca.crt", command)
+            self.assertIn("--request-timeout=1s", command)
+        namespace["kind"] = "Widget"
+        with self.assertRaisesRegex(graph.Blocked, "custom_reconciler_instance_unsupported"):
+            graph.collect_kubernetes(FakeBudget())
+
+    def test_provider_child_stdin_is_non_directory_and_cannot_use_caller_input(self):
+        import subprocess
+        original = subprocess.Popen
+        captured = []
+        def substitute(argv, **kwargs):
+            captured.append(kwargs)
+            # Exercise the real Budget.command pipe, environment and lifecycle
+            # with a harmless child; only the executable is substituted.
+            return original([sys.executable, "-c", "import os,stat; print(stat.S_ISCHR(os.fstat(0).st_mode), os.read(0,1)==b'')"], **kwargs)
+        metadata = SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o755)
+        with patch.object(graph.Path, "resolve", return_value=Path("/trusted/provider")), patch.object(graph.Path, "stat", return_value=metadata), patch.object(graph.subprocess, "Popen", side_effect=substitute):
+            self.assertEqual(graph.Budget().command(["/usr/local/bin/k3s", "kubectl"]), b"True True\n")
+        self.assertEqual(captured[0]["stdin"], subprocess.DEVNULL)
+        self.assertEqual(captured[0]["env"]["HOME"], "/nonexistent")
+
+    @patch.object(graph, "verify_kubeconfig", new=lambda budget: None)
     def test_collector_consumes_real_kubernetes_shapes_with_metrics_backing_identity(self):
         pod, objects = self.readonly_pod()
         pod["status"] = {"phase": "Running", "podIP": "192.0.2.1", "containerStatuses": [{"name": "reader", "imageID": "sha256:" + "a" * 64, "state": {"running": {"startedAt": "fixture"}}}]}

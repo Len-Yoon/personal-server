@@ -738,7 +738,10 @@ def verify_kubeconfig(budget):
 
 def collect_kubernetes(budget):
     verify_kubeconfig(budget)
-    prefix = ["/usr/local/bin/k3s", "kubectl", "--kubeconfig=/dev/null", "--server=https://127.0.0.1:6443", "--certificate-authority=/var/lib/rancher/k3s/server/tls/server-ca.crt", "--client-certificate=/var/lib/rancher/k3s/server/tls/client-admin.crt", "--client-key=/var/lib/rancher/k3s/server/tls/client-admin.key", "--request-timeout=1s"]
+    # Budget.command binds child fd 0 to DEVNULL. On Linux this non-directory
+    # prevents kubectl's discovery/HTTP cache from creating persistent files,
+    # including when the reader runs as root. An empty cache-dir uses defaults.
+    prefix = ["/usr/local/bin/k3s", "kubectl", "--cache-dir=/proc/self/fd/0", "--kubeconfig=/dev/null", "--server=https://127.0.0.1:6443", "--certificate-authority=/var/lib/rancher/k3s/server/tls/server-ca.crt", "--client-certificate=/var/lib/rancher/k3s/server/tls/client-admin.crt", "--client-key=/var/lib/rancher/k3s/server/tls/client-admin.key", "--request-timeout=1s"]
     discovery = budget.command(prefix + ["api-resources", "--verbs=list", "-o", "name"]).decode().splitlines()
     if len(set(discovery)) != len(discovery) or not discovery or any(not re.fullmatch(r"[a-z][a-z0-9.-]{0,252}", name) for name in discovery):
         deny("unsupported_kubernetes_provider")
