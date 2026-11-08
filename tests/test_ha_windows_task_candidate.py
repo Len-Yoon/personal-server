@@ -223,6 +223,10 @@ $bad=@(
  $good.Replace('<Command>private.exe</Command>','<Command><Nested/></Command>'),
  $good.Replace('<Exec>','<Unknown>').Replace('</Exec>','</Unknown>'),
  $good.Replace('</Exec>','</Exec>nonwhitespace'),
+ $good.Replace('</Task>','<![CDATA[unexpected]]></Task>'),
+ $good.Replace('</Actions>','<![CDATA[unexpected]]></Actions>'),
+ $good.Replace('</Exec>','<![CDATA[unexpected]]></Exec>'),
+ (MakeTask 'com' 3 $true 5).Xml.Replace('</ComHandler>','<![CDATA[unexpected]]></ComHandler>'),
  $good.Replace('</Actions>','</Actions><Unknown/>'),
  $good.Replace('</Task>',''),
  ('x'*1048577)

@@ -53,7 +53,7 @@ function Read-HaTaskCandidateXml([string]$Xml,$Watch,[int]$DeadlineMilliseconds,
         if($node -is [Xml.XmlElement]){
             if($node.LocalName -cnotin @('RegistrationInfo','Triggers','Principals','Settings','Data','Actions') -or $sections.ContainsKey($node.LocalName)){throw 'candidate_unsupported'}
             $sections[$node.LocalName]=$true
-        } elseif($node -is [Xml.XmlText] -and -not [string]::IsNullOrWhiteSpace($node.Value)){throw 'candidate_unsupported'}
+        } elseif(($node -is [Xml.XmlText] -or $node -is [Xml.XmlCDataSection]) -and -not [string]::IsNullOrWhiteSpace($node.Value)){throw 'candidate_unsupported'}
     }
     if($root.SelectNodes('t:Settings',$manager).Count -gt 1){throw 'candidate_unsupported'}
     $enabledNodes=$root.SelectNodes('t:Settings/t:Enabled',$manager)
@@ -69,7 +69,7 @@ function Read-HaTaskCandidateXml([string]$Xml,$Watch,[int]$DeadlineMilliseconds,
     foreach($action in $containers[0].ChildNodes){
         Assert-HaTaskCandidateDeadline $Watch $DeadlineMilliseconds
         if($action -isnot [Xml.XmlElement]){
-            if($action -is [Xml.XmlText] -and -not [string]::IsNullOrWhiteSpace($action.Value)){throw 'candidate_unsupported'}
+            if(($action -is [Xml.XmlText] -or $action -is [Xml.XmlCDataSection]) -and -not [string]::IsNullOrWhiteSpace($action.Value)){throw 'candidate_unsupported'}
             continue
         }
         if($actions.Count -ge 1024 -or $Budget.actions -ge 4096){throw 'candidate_unsupported'}
@@ -82,7 +82,7 @@ function Read-HaTaskCandidateXml([string]$Xml,$Watch,[int]$DeadlineMilliseconds,
         $fields=@{}
         foreach($field in $action.ChildNodes){
             if($field -isnot [Xml.XmlElement]){
-                if($field -is [Xml.XmlText] -and -not [string]::IsNullOrWhiteSpace($field.Value)){throw 'candidate_unsupported'}
+                if(($field -is [Xml.XmlText] -or $field -is [Xml.XmlCDataSection]) -and -not [string]::IsNullOrWhiteSpace($field.Value)){throw 'candidate_unsupported'}
                 continue
             }
             if($field.LocalName -cnotin $allowed -or $fields.ContainsKey($field.LocalName) -or $field.SelectNodes('*').Count){throw 'candidate_unsupported'}
