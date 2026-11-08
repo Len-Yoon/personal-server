@@ -14,8 +14,9 @@ FIXTURE = r'''
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 . $env:HA_CANDIDATE_DRIVER
-function MakeTask($Name='PRIVATE_TASK',$State=1,$Enabled=$false,$Type=0){
- [pscustomobject]@{Name=$Name;State=$State;Xml='<Task><Triggers/><Principals/><Settings/><Actions/></Task>';Definition=[pscustomobject]@{Settings=[pscustomobject]@{Enabled=$Enabled};Actions=@([pscustomobject]@{Type=$Type;Path='private.exe';Arguments='PRIVATE_ARGUMENT';WorkingDirectory='PRIVATE_DIRECTORY';ClassId='PRIVATE_CLSID'})}}
+function MakeTask($Name='PRIVATE_TASK',$State=1,$Enabled=$false,$Type=0,$Folder='\'){
+ if(-not $Folder.EndsWith('\')){$Folder+='\'}
+ [pscustomobject]@{Name=$Name;Path=($Folder+$Name);State=$State;Xml='<Task><Triggers/><Principals/><Settings/><Actions/></Task>';Definition=[pscustomobject]@{Settings=[pscustomobject]@{Enabled=$Enabled};Actions=@([pscustomobject]@{Type=$Type;Path='private.exe';Arguments='PRIVATE_ARGUMENT';WorkingDirectory='PRIVATE_DIRECTORY';ClassId='PRIVATE_CLSID'})}}
 }
 function MakeFolder($Path,$Tasks,$Children){
  $f=[pscustomobject]@{Path=$Path;Tasks=$Tasks;Children=$Children}
@@ -42,7 +43,7 @@ class WindowsTaskCandidateTests(unittest.TestCase):
 
     def test_hidden_disabled_nested_com_full_projection_and_order(self):
         value = json.loads(self.ps(r'''
-$a=MakeTask 'z';$b=MakeTask 'A' 3 $true 5
+$a=MakeTask 'z' -Folder '\nested';$b=MakeTask 'A' 3 $true 5
 $child=MakeFolder '\nested' @($a) @()
 $root=MakeFolder '\' @($b) @($child)
 $r=@(Get-HaTaskCandidateRecords $root ([Diagnostics.Stopwatch]::StartNew()))
@@ -71,7 +72,7 @@ function Assert-LegacyDeadline($Watch){}
 function Test-LegacyProviderCode($Command){return $false}
 function Get-LegacyCodeHash($Command){return ('a'*64)}
 function Get-LegacyReferenceHashes($Arguments,$WorkingDirectory){return ($Arguments+':'+$WorkingDirectory)}
-$com=MakeTask 'python-hidden'
+$com=MakeTask 'python-hidden' -Folder '\nested'
 $com.Definition.Actions+=@([pscustomobject]@{Type=0;Path='second.exe';Arguments='SECOND';WorkingDirectory=''})
 $converted=ConvertFrom-HaTaskCandidate $com '\nested'
 $reference=[pscustomobject]@{TaskName=$com.Name;TaskPath='\nested\';State='Disabled';Settings=[pscustomobject]@{Enabled=$false};Actions=@($com.Definition.Actions|ForEach-Object {[pscustomobject]@{Execute=$_.Path;Arguments=$_.Arguments;WorkingDirectory=$_.WorkingDirectory}})}
@@ -180,6 +181,24 @@ Invoke-HaTaskCandidate|ConvertTo-Json -Compress
         self.assertIsNone(value['task_count'])
         self.assertIsNone(value['action_count'])
         self.assertIs(value['ready'], False)
+
+    def test_registered_identity_must_match_folder_and_name(self):
+        self.assertEqual(self.ps(r'''
+$blocked=0
+$task=MakeTask 'expected' -Folder '\old'
+try{ConvertFrom-HaTaskCandidate $task '\other'|Out-Null}catch{if($_.Exception.Message -ceq 'candidate_unsupported'){$blocked++}}
+$task.Path='\old\renamed'
+try{ConvertFrom-HaTaskCandidate $task '\old'|Out-Null}catch{if($_.Exception.Message -ceq 'candidate_unsupported'){$blocked++}}
+foreach($name in @('',' ','nested\task','nested/task','.', '..',("bad"+[char]0+'name'))){
+ $task=MakeTask $name
+ try{ConvertFrom-HaTaskCandidate $task '\'|Out-Null}catch{if($_.Exception.Message -ceq 'candidate_unsupported'){$blocked++}}
+}
+if($blocked -ne 9){throw 'identity_mismatch_accepted'}
+$task=MakeTask 'Expected' -Folder '\Nested';$task.Path='\NESTED\EXPECTED'
+$record=ConvertFrom-HaTaskCandidate $task '\nested'
+if($record.TaskPath -cne '\nested\' -or $record.TaskName -cne 'Expected'){throw 'identity_case_changed'}
+'identity-checked'
+''').strip(), 'identity-checked')
 
     def test_cli_refuses_unbounded_execution(self):
         result = subprocess.run([self.pwsh, '-NoProfile', '-NonInteractive', '-File', str(DRIVER)], capture_output=True, timeout=5)

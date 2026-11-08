@@ -25,8 +25,18 @@ function ConvertFrom-HaTaskCandidate($Task,[string]$FolderPath,$Watch=([Diagnost
     # Xml is retained verbatim; native Export-ScheduledTask byte equivalence is
     # NOT established by this projection and remains a separate acceptance gate.
     Assert-HaTaskCandidateDeadline $Watch $DeadlineMilliseconds
-    $name=[string]$Task.Name;$xml=[string]$Task.Xml
+    $name=[string]$Task.Name;$registeredPath=[string]$Task.Path
+    # Compare the registered identity before retaining any task payload. A task
+    # moved/renamed during enumeration must not inherit its old folder identity.
+    if([string]::IsNullOrWhiteSpace($name) -or $name -in @('.','..') -or
+        $name -match '[\\/\x00-\x1f]' -or -not $FolderPath.StartsWith('\') -or
+        $FolderPath -match '[/\x00-\x1f]' -or $FolderPath.Contains('\\') -or
+        @($FolderPath.Split('\') | Where-Object {$_ -in @('.','..')}).Count -gt 0){throw 'candidate_unsupported'}
+    if(-not $FolderPath.EndsWith('\')){$FolderPath+='\'}
+    if(-not [StringComparer]::OrdinalIgnoreCase.Equals($registeredPath,($FolderPath+$name))){throw 'candidate_unsupported'}
+    $xml=[string]$Task.Xml
     Add-HaTaskCandidateCharacters $name $Budget
+    Add-HaTaskCandidateCharacters $registeredPath $Budget
     Add-HaTaskCandidateCharacters $xml $Budget 1048576
     Add-HaTaskCandidateCharacters $FolderPath $Budget
     $states=@('Unknown','Disabled','Queued','Ready','Running')
@@ -52,7 +62,6 @@ function ConvertFrom-HaTaskCandidate($Task,[string]$FolderPath,$Watch=([Diagnost
         Assert-HaTaskCandidateDeadline $Watch $DeadlineMilliseconds
     }
     if($actions.Count -gt 1024){throw 'candidate_unsupported'}
-    if(-not $FolderPath.EndsWith('\')){$FolderPath+='\'}
     if([string]::IsNullOrEmpty($name) -or [string]::IsNullOrEmpty($xml) -or $actions.Count -eq 0 -or $xml.Length -gt 1048576){throw 'candidate_unsupported'}
     return [pscustomobject]@{TaskName=$name;TaskPath=$FolderPath;State=$states[$state];Settings=[pscustomobject]@{Enabled=$enabled};Actions=$actions;CandidateXml=$xml}
 }
