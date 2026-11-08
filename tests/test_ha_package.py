@@ -63,6 +63,10 @@ class PackageTest(unittest.TestCase):
             self.assertTrue(rendered.endswith(original[original.index("USER "):].rstrip() + "\n"))
             self.assertNotIn("ARG ", rendered)
             self.assertIn("psycopg[binary]==3.3.8", rendered)
+            self.assertEqual(rendered.count(package.APK_SECURITY_UPDATE), 1)
+            self.assertLess(rendered.index(package.APK_SECURITY_UPDATE), rendered.index("USER 10001:10001"))
+            self.assertEqual((self.bundle / "contexts" / service / "requirements.txt").read_bytes(),
+                             (self.root / service / "requirements.txt").read_bytes())
             self.assertTrue((self.bundle / "contexts" / service / "_ha/tools/n100_ha_contract.py").is_file())
             self.assertEqual(package.verify_source(self.bundle), manifest)
         plan = json.loads((self.bundle / "deployment-plan.json").read_text())
@@ -91,6 +95,8 @@ class PackageTest(unittest.TestCase):
         self.assertIn("cryptography==50.0.0", dockerfile)
         self.assertIn("setuptools==84.0.0 wheel==0.48.0", dockerfile)
         self.assertIn("psycopg[binary]==3.3.8", dockerfile)
+        self.assertEqual(dockerfile.count(package.APK_SECURITY_UPDATE), 1)
+        self.assertLess(dockerfile.index(package.APK_SECURITY_UPDATE), dockerfile.index("USER 10001:10001"))
         self.assertIn("USER 10001:10001", dockerfile)
         self.assertIn('["python", "-m", "ha_runtime.backup_cli", "--help"]', dockerfile)
         self.assertEqual(set(path.name for path in context.iterdir()), {"Dockerfile", "_ha"})
@@ -149,6 +155,61 @@ class PackageTest(unittest.TestCase):
         package.prepare(self.commit, self.bundle)
         with self.assertRaises(package.PackageError):
             package.prepare(self.commit, self.bundle)
+
+    def test_security_template_missing_lowered_or_extended_instructions_rejected(self):
+        files = package.snapshot(self.commit)
+        app_template = files["infra/k8s/ha-package/Dockerfile.template"].decode()
+        utility_template = files["infra/k8s/ha-package/Utility.Dockerfile.template"].decode()
+        original = files["portal-web/Dockerfile"].decode()
+        for template, utility in [(app_template, False), (utility_template, True)]:
+            mutations = [template.replace(package.APK_SECURITY_UPDATE, ""),
+                         template.replace("--no-cache --upgrade", "--no-cache --allow-untrusted --upgrade"),
+                         template.replace("'zlib>=1.3.2-r1'", "'zlib>=1.3.2-r1' && echo unapproved")]
+            for name, minimum in package.APK_MINIMUMS.items():
+                mutations += [template.replace("'" + name + ">=" + minimum + "'", ""),
+                              template.replace("'" + name + ">=" + minimum + "'",
+                                               "'" + name + ">=" + minimum.rsplit("r", 1)[0] + "r0'")]
+            for mutated in mutations:
+                with self.subTest(utility=utility, template=mutated):
+                    with self.assertRaisesRegex(package.PackageError, "invalid_.*template"):
+                        if utility:
+                            package.utility_recipe(files | {"infra/k8s/ha-package/Utility.Dockerfile.template": mutated.encode()})
+                        else:
+                            package.render(original, mutated)
+
+    def test_apk_security_smoke_uses_installed_database_and_native_comparison(self):
+        expected = {"musl": "1.2.6-r3", "musl-utils": "1.2.6-r3", "zlib": "1.3.2-r1"}
+        self.assertEqual(package.APK_MINIMUMS, expected)
+        def check(versions, comparisons):
+            database = "\n\n".join("P:" + name + "\nV:" + version for name, version in versions.items())
+            with patch.object(Path, "read_text", return_value=database) as read, patch.object(
+                    subprocess, "check_output", side_effect=comparisons) as command:
+                exec(package.apk_security_smoke(), {})
+                read.assert_called_once_with()
+                self.assertEqual([call.args[0] for call in command.call_args_list], [
+                    ["/sbin/apk", "version", "-t", versions[name], minimum] for name, minimum in expected.items()])
+        check(expected, ["=\n", "=\n", "=\n"])
+        check({"musl": "1.2.6-r10", "musl-utils": "1.2.6-r10", "zlib": "1.3.3-r0"}, [">\n"] * 3)
+        for versions, comparisons in [(expected, ["<\n"]), (expected, ["unknown\n"]),
+                                      ({"musl": "1.2.6-r3"}, ["=\n"])]:
+            with self.subTest(versions=versions, comparisons=comparisons):
+                database = "\n\n".join("P:" + name + "\nV:" + version for name, version in versions.items())
+                with patch.object(Path, "read_text", return_value=database), patch.object(
+                        subprocess, "check_output", side_effect=comparisons):
+                    with self.assertRaises(AssertionError):
+                        exec(package.apk_security_smoke(), {})
+
+    def test_security_instruction_tampering_rejected_even_when_manifest_rehashed(self):
+        manifest = package.prepare(self.commit, self.bundle)
+        target = self.bundle / "contexts/portal-web/Dockerfile"
+        target.chmod(0o600)
+        target.write_text(target.read_text().replace("musl>=1.2.6-r3", "musl>=1.2.6-r2"))
+        manifest["bundle_files"]["portal-web/Dockerfile"] = package.sha(target.read_bytes())
+        source_manifest = self.bundle / "source-manifest.json"
+        source_manifest.chmod(0o600)
+        source_manifest.write_bytes(package.encode(manifest))
+        with self.assertRaisesRegex(package.PackageError, "rendered_source_binding"):
+            package.verify_source(self.bundle)
 
     def test_source_symlink_rejected(self):
         (self.root / "portal-web/app/link.py").symlink_to("main.py")

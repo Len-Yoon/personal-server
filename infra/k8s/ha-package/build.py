@@ -18,6 +18,8 @@ UTILITY = "ha-backup-utility"
 OWNER = "personal-server.ha-package"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 BASE = re.compile(r"python:3\.(?:11|12)-alpine3\.24@sha256:[0-9a-f]{64}")
+APK_MINIMUMS = {"musl": "1.2.6-r3", "musl-utils": "1.2.6-r3", "zlib": "1.3.2-r1"}
+APK_SECURITY_UPDATE = "RUN apk add --no-cache --upgrade 'musl>=1.2.6-r3' 'musl-utils>=1.2.6-r3' 'zlib>=1.3.2-r1'\n"
 
 
 class PackageError(RuntimeError):
@@ -98,6 +100,7 @@ def render(original, template):
         raise PackageError("invalid_package_template")
     # Only fixed additive instructions are permitted; drift fails closed.
     expected = ("@ORIGINAL_ROOT_SECTION@\n# Shared HA runtime is packaged but activation requires separately approved config.\n"
+                + APK_SECURITY_UPDATE +
                 "COPY _ha/ /opt/ha/\nRUN pip install --no-cache-dir 'psycopg[binary]==3.3.8'\n"
                 "ENV PYTHONPATH=/opt/ha\n@ORIGINAL_USER_SECTION@\n")
     if template != expected:
@@ -121,6 +124,7 @@ def inventory(directory):
 def utility_recipe(files):
     template = files["infra/k8s/ha-package/Utility.Dockerfile.template"].decode()
     expected = ("FROM @APP_BASE_IMAGE@\nWORKDIR /opt/ha\n"
+                + APK_SECURITY_UPDATE +
                 "RUN apk add --no-cache postgresql17-client \\\n"
                 "    && pip install --no-cache-dir setuptools==84.0.0 wheel==0.48.0 \\\n"
                 "    && pip install --no-cache-dir 'cryptography==50.0.0' 'psycopg[binary]==3.3.8'\n"
@@ -278,6 +282,18 @@ def archive_binding(path, expected_id):
             "image_config_digest": expected_id}
 
 
+def apk_security_smoke():
+    # Read only the image's installed APK database; use APK's native version
+    # ordering rather than lexical comparison, repository queries or a shell.
+    return ("import pathlib,subprocess; "
+            "records=[dict(line.split(':',1) for line in record.splitlines() if ':' in line) "
+            "for record in pathlib.Path('/lib/apk/db/installed').read_text().split('\\n\\n')]; "
+            "versions={r['P']:r['V'] for r in records if 'P' in r and 'V' in r}; "
+            "assert all(name in versions and subprocess.check_output("
+            "['/sbin/apk','version','-t',versions[name],minimum],text=True).strip() in ('=','>') "
+            "for name,minimum in " + repr(APK_MINIMUMS) + ".items()); ")
+
+
 def build(bundle):
     manifest = verify_source(bundle)
     if (bundle / "images").exists() or (bundle / "image-bindings.json").exists():
@@ -288,7 +304,7 @@ def build(bundle):
     output.mkdir()
     evidence = {"release_id": manifest["release_id"], "source_commit": manifest["source_commit"],
                 "owner": owner, "images": {}, "utilities": {}, "production_deployed": False}
-    smoke = ("import os,sys,pathlib,hashlib,json,psycopg,ha_runtime; "
+    smoke = (apk_security_smoke() + "import os,sys,pathlib,hashlib,json,psycopg,ha_runtime; "
              "assert os.getuid()==10001; assert not ha_runtime.enabled(); "
              "assert psycopg.__version__=='3.3.8'; "
              "[compile(p.read_bytes(),str(p),'exec') for p in pathlib.Path('/app/app').rglob('*.py')]; "

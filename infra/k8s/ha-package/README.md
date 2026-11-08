@@ -16,11 +16,12 @@ python3 infra/k8s/ha-package/build.py verify --bundle /tmp/ha-release
 | 앱 | Portal·Book·YouTube·Crawler·CarCare·HomeOps·System Agent | 릴리스 ID 하나로 묶음 |
 | 별도 백업 도구 | `ha-backup-utility` 이미지에 PostgreSQL 17 client·cryptography 50.0.0·psycopg 3.3.8을 포함함 | setuptools 84.0.0·wheel 0.48.0 사용. 기존 앱 이미지에 백업 전용 의존성을 추가하지 않음 |
 | 베이스 | 원본 Dockerfile의 literal SHA256 고정 Python 3.11/3.12 Alpine | ARG·다단계·root USER·템플릿 변조는 차단함 |
+| OS 보안 하한 | HA 앱 7개와 백업 도구만 `musl`·`musl-utils` ≥ `1.2.6-r3`, `zlib` ≥ `1.3.2-r1`로 업그레이드함 | Alpine 3.24의 기존 서명 검증·저장소를 사용함. 원본 운영 Dockerfile·베이스 digest·pip 요구사항은 유지함 |
 | 원본 보존 | 의존성·CMD·환경·디렉터리·USER를 유지하고 공유 runtime·canonical contract·고정 psycopg를 추가함 | HomeOps Docker socket 권한은 기존 실행 설정을 별도 검토함 |
 | 컨텍스트 | 앱 Python·명시된 정적 자산 확장자·requirements·공유 runtime·계약만 포함함 | 숨김 경로·키·DB·data·secret 제외함 |
 | 로컬 빌드 | Mac OrbStack의 사용자별 정확한 Unix socket만 허용함 | linux/amd64, 소유 UUID label, 원격 Docker 환경 무시함 |
 | 효율 | 원본 의존성 설치 단계 캐시를 재사용함 | all-seven 순차 빌드, 별도 venv fixture 이미지 아님 |
-| smoke | 실제 앱 7개와 백업 도구 1개에서 비root·고정 버전·runtime import·원본 파일 해시·기본 비활성 상태 검사함 | 백업 도구는 PostgreSQL client 버전·승인 없이 도움말 실행까지 검사함. 격리 네트워크·읽기 전용·권한 제거 실행, DB 통합 검증은 별도임 |
+| smoke | 실제 앱 7개와 백업 도구 1개에서 비root·고정 버전·Python compilation·proof import·원본 파일 해시·기본 비활성 상태 검사함 | 설치된 APK DB와 `apk version -t`로 OS 보안 하한도 검증함. 백업 도구는 PostgreSQL client 버전·승인 없이 도움말 실행까지 검사함. 격리 네트워크·읽기 전용·권한 제거 실행이며 서비스 HTTP·DB 통합 검증은 별도임 |
 | 무결성 | 원본 파일 manifest·서비스 계약→release ID→생성 release.json 포함 bundle_files→이미지 revision/release label→config digest→layer digest→archive SHA256 연결함 | Docker archive manifest 해시이며 registry manifest digest는 게시 전 미생성임 |
 | 배포 계획 | deployment-plan.json은 실행되지 않는 검토 항목과 후속 순서임 | 실제 Secret·mount·apply 명령을 생성하거나 활성화하지 않음 |
 
@@ -28,6 +29,7 @@ python3 infra/k8s/ha-package/build.py verify --bundle /tmp/ha-release
 `verify`는 앱 7개와 백업 도구 1개의 전체 8개 이미지 archive를 요구하며 일부 성공을 전체 성공으로 처리하지 않음.
 빌드 실패 시 부분 출력은 검토용으로 보존하고 새 출력 경로에서 다시 준비함. 전역 Docker 정책·운영 이미지·컨테이너를 정리하지 않음.
 로컬 빌드 이미지와 archive는 자동 삭제하지 않으며 승인된 반입·검증 또는 명시적인 로컬 정리 이후 제거함.
+OS 버전 하한 충족만으로 취약점 검사가 완료되지는 않음. 새 이미지 archive를 유효한 DB로 별도 검사해야 하며, 기존 이미지·만료 DB의 검사 결과를 새 릴리스 수용 근거로 재사용하지 않음.
 
 ## 운영 활성화 입력 계약
 
