@@ -16,7 +16,11 @@ Set-StrictMode -Version Latest
 . $env:HA_CANDIDATE_DRIVER
 function MakeTask($Name='PRIVATE_TASK',$State=1,$Enabled=$false,$Type=0,$Folder='\'){
  if(-not $Folder.EndsWith('\')){$Folder+='\'}
- [pscustomobject]@{Name=$Name;Path=($Folder+$Name);State=$State;Xml='<Task><Triggers/><Principals/><Settings/><Actions/></Task>';Definition=[pscustomobject]@{Settings=[pscustomobject]@{Enabled=$Enabled};Actions=@([pscustomobject]@{Type=$Type;Path='private.exe';Arguments='PRIVATE_ARGUMENT';WorkingDirectory='PRIVATE_DIRECTORY';ClassId='PRIVATE_CLSID'})}}
+ $actionXml='<Exec><Command>private.exe</Command><Arguments>PRIVATE_ARGUMENT</Arguments><WorkingDirectory>PRIVATE_DIRECTORY</WorkingDirectory></Exec>'
+ if($Type -eq 5){$actionXml='<ComHandler><ClassId>PRIVATE_CLSID</ClassId></ComHandler>'}
+ elseif($Type -ne 0){$actionXml='<Unsupported/>'}
+ $xml='<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers/><Principals/><Settings><Enabled>'+$Enabled.ToString().ToLowerInvariant()+'</Enabled></Settings><Actions>'+$actionXml+'</Actions></Task>'
+ [pscustomobject]@{Name=$Name;Path=($Folder+$Name);State=$State;Xml=$xml;Definition=[pscustomobject]@{Settings=[pscustomobject]@{Enabled=$Enabled};Actions=@([pscustomobject]@{Type=$Type;Path='private.exe';Arguments='PRIVATE_ARGUMENT';WorkingDirectory='PRIVATE_DIRECTORY';ClassId='PRIVATE_CLSID'})}}
 }
 function MakeFolder($Path,$Tasks,$Children){
  $f=[pscustomobject]@{Path=$Path;Tasks=$Tasks;Children=$Children}
@@ -74,6 +78,7 @@ function Get-LegacyCodeHash($Command){return ('a'*64)}
 function Get-LegacyReferenceHashes($Arguments,$WorkingDirectory){return ($Arguments+':'+$WorkingDirectory)}
 $com=MakeTask 'python-hidden' -Folder '\nested'
 $com.Definition.Actions+=@([pscustomobject]@{Type=0;Path='second.exe';Arguments='SECOND';WorkingDirectory=''})
+$com.Xml=$com.Xml.Replace('</Actions>','<Exec><Command>second.exe</Command><Arguments>SECOND</Arguments></Exec></Actions>')
 $converted=ConvertFrom-HaTaskCandidate $com '\nested'
 $reference=[pscustomobject]@{TaskName=$com.Name;TaskPath='\nested\';State='Disabled';Settings=[pscustomobject]@{Enabled=$false};Actions=@($com.Definition.Actions|ForEach-Object {[pscustomobject]@{Execute=$_.Path;Arguments=$_.Arguments;WorkingDirectory=$_.WorkingDirectory}})}
 function Export-ScheduledTask($TaskName,$TaskPath,$ErrorAction){return $com.Xml}
@@ -141,14 +146,14 @@ Invoke-HaTaskCandidate|ConvertTo-Json -Compress
     def test_aggregate_metadata_and_action_limits_before_retaining_records(self):
         self.assertEqual(self.ps(r'''
 $blocked=0
-$a=MakeTask 'a';$b=MakeTask 'b';$a.Xml='x'*1048576;$b.Xml='x'*1048576
+$a=MakeTask 'a';$b=MakeTask 'b'
+foreach($task in @($a,$b)){$task.Xml=$task.Xml.Replace('</Task>',('<Data>'+('x'*(1048576-$task.Xml.Length-13))+'</Data></Task>'))}
 try{Get-HaTaskCandidateRecords (MakeFolder '\' @($a,$b) @()) ([Diagnostics.Stopwatch]::StartNew()) 10000|Out-Null}catch{if($_.Exception.Message -ceq 'candidate_unsupported'){$blocked++}}
 # Small fields and XML share one character budget, across all actions/tasks.
 $budget=@{characters=2097150;actions=0}
 try{ConvertFrom-HaTaskCandidate (MakeTask) '\' ([Diagnostics.Stopwatch]::StartNew()) 2000 $budget|Out-Null}catch{if($_.Exception.Message -ceq 'candidate_unsupported'){$blocked++}}
-$task=MakeTask;$sentinel=[pscustomobject]@{}
-$sentinel|Add-Member ScriptProperty Type {throw 'PRIVATE_ACTION_READ_AFTER_LIMIT'}
-$task.Definition.Actions=@($task.Definition.Actions[0],$sentinel)
+$task=MakeTask
+$task.Xml=$task.Xml.Replace('</Actions>','<Exec><Command>second.exe</Command></Exec></Actions>')
 $budget=@{characters=0;actions=4095}
 try{ConvertFrom-HaTaskCandidate $task '\' ([Diagnostics.Stopwatch]::StartNew()) 2000 $budget|Out-Null}catch{if($_.Exception.Message -ceq 'candidate_unsupported'){$blocked++}}
 if($blocked -ne 3){throw 'aggregate_limit_failed'}
@@ -157,9 +162,7 @@ if($blocked -ne 3){throw 'aggregate_limit_failed'}
 
     def test_action_deadline_and_final_action_count_cannot_report_late_success(self):
         value = json.loads(self.ps(r'''
-$task=MakeTask;$action=$task.Definition.Actions[0]
-$action.PSObject.Properties.Remove('Type')
-$action|Add-Member ScriptProperty Type {Start-Sleep -Milliseconds 30;return 0}
+$task=MakeTask;$task|Add-Member -Force ScriptProperty Xml {Start-Sleep -Milliseconds 30;return '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Actions><Exec><Command>x</Command></Exec></Actions></Task>'}
 $blocked=$false
 try{ConvertFrom-HaTaskCandidate $task '\' ([Diagnostics.Stopwatch]::StartNew()) 20|Out-Null}catch{$blocked=($_.Exception.Message -ceq 'candidate_deadline')}
 if(-not $blocked){throw 'action_deadline_lost'}
@@ -181,6 +184,57 @@ Invoke-HaTaskCandidate|ConvertTo-Json -Compress
         self.assertIsNone(value['task_count'])
         self.assertIsNone(value['action_count'])
         self.assertIs(value['ready'], False)
+
+    def test_xml_defaults_boolean_and_exact_text_without_definition_rpc(self):
+        self.assertEqual(self.ps(r'''
+$task=MakeTask
+$script:xmlReads=0;$script:rawXml=$task.Xml
+$task|Add-Member -Force ScriptProperty Xml {$script:xmlReads++;return $script:rawXml}
+$task|Add-Member -Force ScriptProperty Definition {throw 'PRIVATE_DEFINITION_RPC'}
+$r=ConvertFrom-HaTaskCandidate $task '\'
+if($script:xmlReads -ne 1 -or $r.CandidateXml -cne $script:rawXml){throw 'rpc_or_raw_xml_changed'}
+$ns='http://schemas.microsoft.com/windows/2004/02/mit/task'
+foreach($boolean in @('true','false','1','0')){
+ $script:rawXml='<Task xmlns="'+$ns+'"><Settings><Enabled> '+$boolean+' </Enabled></Settings><Actions><Exec><Command> a&amp;b.exe </Command><Arguments> &quot;q&quot; &#xA; </Arguments><WorkingDirectory> c&amp;d </WorkingDirectory></Exec></Actions></Task>'
+ $r=ConvertFrom-HaTaskCandidate $task '\'
+ if($r.Settings.Enabled -ne ($boolean -in @('true','1'))){throw 'boolean_changed'}
+ if($r.Actions[0].Execute -cne ' a&b.exe ' -or $r.Actions[0].Arguments -cne (' "q" '+[char]10+' ') -or $r.Actions[0].WorkingDirectory -cne ' c&d '){throw 'text_changed'}
+}
+foreach($settingsXml in @('','<Settings/>')){
+ $script:rawXml='<Task xmlns="'+$ns+'">'+$settingsXml+'<Actions><Exec><Command>x</Command></Exec></Actions></Task>'
+ $r=ConvertFrom-HaTaskCandidate $task '\'
+ if(-not $r.Settings.Enabled -or $r.Actions[0].Arguments -cne '' -or $r.Actions[0].WorkingDirectory -cne ''){throw 'xsd_default_changed'}
+}
+'xml-semantics-preserved'
+''').strip(), 'xml-semantics-preserved')
+
+    def test_unsafe_malformed_unknown_and_duplicate_xml_fail_closed(self):
+        self.assertEqual(self.ps(r'''
+$task=MakeTask;$good=$task.Xml
+$bad=@(
+ '<!DOCTYPE Task [<!ENTITY private SYSTEM "file:///PRIVATE_PATH">]>'+ $good.Replace('private.exe','&private;'),
+ $good.Replace('http://schemas.microsoft.com/windows/2004/02/mit/task','urn:unknown'),
+ $good.Replace('<Task ','<Wrong ').Replace('</Task>','</Wrong>'),
+ $good.Replace('<Exec>','<Exec xmlns="urn:unknown">'),
+ $good.Replace('</Settings>','<Enabled>true</Enabled></Settings>'),
+ $good.Replace('<Enabled>false</Enabled>','<Enabled>yes</Enabled>'),
+ $good.Replace('</Settings>','</Settings><Settings/>'),
+ $good.Replace('</Arguments>','</Arguments><Arguments>duplicate</Arguments>'),
+ $good.Replace('<Command>private.exe</Command>','<Command><Nested/></Command>'),
+ $good.Replace('<Exec>','<Unknown>').Replace('</Exec>','</Unknown>'),
+ $good.Replace('</Exec>','</Exec>nonwhitespace'),
+ $good.Replace('</Actions>','</Actions><Unknown/>'),
+ $good.Replace('</Task>',''),
+ ('x'*1048577)
+)
+$blocked=0
+foreach($xml in $bad){
+ $task.Xml=$xml
+ try{ConvertFrom-HaTaskCandidate $task '\'|Out-Null}catch{if($_.Exception.Message -ceq 'candidate_unsupported'){$blocked++}}
+}
+if($blocked -ne $bad.Count){throw 'unsafe_xml_accepted'}
+'xml-rejected'
+''').strip(), 'xml-rejected')
 
     def test_registered_identity_must_match_folder_and_name(self):
         self.assertEqual(self.ps(r'''

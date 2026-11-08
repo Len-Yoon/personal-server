@@ -20,6 +20,89 @@ function Add-HaTaskCandidateCharacters([string]$Text,$Budget,[int]$IndividualLim
     $Budget.characters+=$Text.Length
 }
 
+function Read-HaTaskCandidateXml([string]$Xml,$Watch,[int]$DeadlineMilliseconds,$Budget) {
+    # XSD defaults/mapping: https://learn.microsoft.com/en-us/windows/win32/taskschd/task-scheduler-schema
+    # This is a conservative projection, not full XSD/native equivalence proof.
+    # Settings/Enabled is optional with default true in Microsoft's complete XSD.
+    $reader=$null;$textReader=$null
+    try {
+        $settings=[Xml.XmlReaderSettings]::new()
+        $settings.DtdProcessing=[Xml.DtdProcessing]::Prohibit
+        $settings.XmlResolver=$null
+        $settings.MaxCharactersInDocument=1048576
+        $settings.MaxCharactersFromEntities=0
+        $textReader=[IO.StringReader]::new($Xml)
+        $reader=[Xml.XmlReader]::Create($textReader,$settings)
+        $document=[Xml.XmlDocument]::new();$document.XmlResolver=$null;$document.PreserveWhitespace=$true
+        $document.Load($reader)
+    } catch {throw 'candidate_unsupported'}
+    finally {if($null -ne $reader){$reader.Dispose()};if($null -ne $textReader){$textReader.Dispose()}}
+    Assert-HaTaskCandidateDeadline $Watch $DeadlineMilliseconds
+    $ns='http://schemas.microsoft.com/windows/2004/02/mit/task'
+    $root=$document.DocumentElement
+    if($null -eq $root -or $root.LocalName -cne 'Task' -or $root.NamespaceURI -cne $ns){throw 'candidate_unsupported'}
+    $nodes=$document.GetElementsByTagName('*')
+    if($nodes.Count -gt 32768){throw 'candidate_unsupported'}
+    foreach($node in $nodes){
+        Assert-HaTaskCandidateDeadline $Watch $DeadlineMilliseconds
+        if($node.NamespaceURI -cne $ns){throw 'candidate_unsupported'}
+    }
+    $manager=[Xml.XmlNamespaceManager]::new($document.NameTable);$manager.AddNamespace('t',$ns)
+    $sections=@{}
+    foreach($node in $root.ChildNodes){
+        if($node -is [Xml.XmlElement]){
+            if($node.LocalName -cnotin @('RegistrationInfo','Triggers','Principals','Settings','Data','Actions') -or $sections.ContainsKey($node.LocalName)){throw 'candidate_unsupported'}
+            $sections[$node.LocalName]=$true
+        } elseif($node -is [Xml.XmlText] -and -not [string]::IsNullOrWhiteSpace($node.Value)){throw 'candidate_unsupported'}
+    }
+    if($root.SelectNodes('t:Settings',$manager).Count -gt 1){throw 'candidate_unsupported'}
+    $enabledNodes=$root.SelectNodes('t:Settings/t:Enabled',$manager)
+    if($enabledNodes.Count -gt 1){throw 'candidate_unsupported'}
+    $enabled=$true
+    if($enabledNodes.Count -eq 1){
+        if($enabledNodes[0].SelectNodes('*').Count){throw 'candidate_unsupported'}
+        try {$enabled=[Xml.XmlConvert]::ToBoolean($enabledNodes[0].InnerText.Trim())}catch {throw 'candidate_unsupported'}
+    }
+    $containers=$root.SelectNodes('t:Actions',$manager)
+    if($containers.Count -ne 1){throw 'candidate_unsupported'}
+    $actions=@()
+    foreach($action in $containers[0].ChildNodes){
+        Assert-HaTaskCandidateDeadline $Watch $DeadlineMilliseconds
+        if($action -isnot [Xml.XmlElement]){
+            if($action -is [Xml.XmlText] -and -not [string]::IsNullOrWhiteSpace($action.Value)){throw 'candidate_unsupported'}
+            continue
+        }
+        if($actions.Count -ge 1024 -or $Budget.actions -ge 4096){throw 'candidate_unsupported'}
+        $Budget.actions++
+        switch -CaseSensitive ($action.LocalName){
+            'Exec' {$allowed=@('Command','Arguments','WorkingDirectory');$required='Command'}
+            'ComHandler' {$allowed=@('ClassId','Data');$required='ClassId'}
+            default {throw 'candidate_unsupported'}
+        }
+        $fields=@{}
+        foreach($field in $action.ChildNodes){
+            if($field -isnot [Xml.XmlElement]){
+                if($field -is [Xml.XmlText] -and -not [string]::IsNullOrWhiteSpace($field.Value)){throw 'candidate_unsupported'}
+                continue
+            }
+            if($field.LocalName -cnotin $allowed -or $fields.ContainsKey($field.LocalName) -or $field.SelectNodes('*').Count){throw 'candidate_unsupported'}
+            $value=$field.InnerText
+            Add-HaTaskCandidateCharacters $value $Budget
+            $fields[$field.LocalName]=$value
+        }
+        if(-not $fields.ContainsKey($required) -or [string]::IsNullOrEmpty($fields[$required])){throw 'candidate_unsupported'}
+        if($action.LocalName -ceq 'Exec'){
+            $arguments='';$workingDirectory=''
+            if($fields.ContainsKey('Arguments')){$arguments=$fields['Arguments']}
+            if($fields.ContainsKey('WorkingDirectory')){$workingDirectory=$fields['WorkingDirectory']}
+            $actions+=,[pscustomobject]@{Execute=$fields['Command'];Arguments=$arguments;WorkingDirectory=$workingDirectory}
+        } else {$actions+=,[pscustomobject]@{ClassId=$fields['ClassId']}}
+        Assert-HaTaskCandidateDeadline $Watch $DeadlineMilliseconds
+    }
+    if($actions.Count -eq 0){throw 'candidate_unsupported'}
+    return @{Enabled=$enabled;Actions=$actions}
+}
+
 function ConvertFrom-HaTaskCandidate($Task,[string]$FolderPath,$Watch=([Diagnostics.Stopwatch]::StartNew()),[int]$DeadlineMilliseconds=2000,$Budget=(@{characters=0;actions=0})) {
     # These are precisely the properties consumed by the original task loop.
     # Xml is retained verbatim; native Export-ScheduledTask byte equivalence is
@@ -42,26 +125,9 @@ function ConvertFrom-HaTaskCandidate($Task,[string]$FolderPath,$Watch=([Diagnost
     $states=@('Unknown','Disabled','Queued','Ready','Running')
     $state=[int]$Task.State
     if($state -lt 0 -or $state -ge $states.Count){throw 'candidate_unsupported'}
-    $definition=$Task.Definition
-    $enabled=$definition.Settings.Enabled
-    if($enabled -isnot [bool]){throw 'candidate_unsupported'}
-    $actions=@()
-    foreach($action in $definition.Actions){
-        Assert-HaTaskCandidateDeadline $Watch $DeadlineMilliseconds
-        if($actions.Count -ge 1024 -or $Budget.actions -ge 4096){throw 'candidate_unsupported'}
-        $Budget.actions++
-        switch([int]$action.Type){
-            0 {
-                $execute=[string]$action.Path;$arguments=[string]$action.Arguments;$workingDirectory=[string]$action.WorkingDirectory
-                foreach($text in @($execute,$arguments,$workingDirectory)){Add-HaTaskCandidateCharacters $text $Budget}
-                $actions+=,[pscustomobject]@{Execute=$execute;Arguments=$arguments;WorkingDirectory=$workingDirectory}
-            }
-            5 {$classId=[string]$action.ClassId;Add-HaTaskCandidateCharacters $classId $Budget;$actions+=,[pscustomobject]@{ClassId=$classId}}
-            default {throw 'candidate_unsupported'}
-        }
-        Assert-HaTaskCandidateDeadline $Watch $DeadlineMilliseconds
-    }
-    if($actions.Count -gt 1024){throw 'candidate_unsupported'}
+    # Exactly one Xml read replaces Definition/Settings/action-property RPCs.
+    $projection=Read-HaTaskCandidateXml $xml $Watch $DeadlineMilliseconds $Budget
+    $enabled=$projection.Enabled;$actions=$projection.Actions
     if([string]::IsNullOrEmpty($name) -or [string]::IsNullOrEmpty($xml) -or $actions.Count -eq 0 -or $xml.Length -gt 1048576){throw 'candidate_unsupported'}
     return [pscustomobject]@{TaskName=$name;TaskPath=$FolderPath;State=$states[$state];Settings=[pscustomobject]@{Enabled=$enabled};Actions=$actions;CandidateXml=$xml}
 }
