@@ -156,6 +156,47 @@ class FilesystemDiagnosticTests(unittest.TestCase):
         self.assertNotIn('PRIVATE_', json.dumps(value))
         DIAG.validate(value, DIAG.APPROVED_SOURCE_SHA256)
 
+    def test_nsfs_opaque_root_is_metadata_only_and_other_relative_roots_stay_blocked(self):
+        handle = 'net:[123456]'
+        line = '7 1 0:9 ' + handle + ' /PRIVATE_NAMESPACE rw - nsfs PRIVATE_NSFS rw\n'
+        entry = DIAG.parse_mountinfo(line, self.graph.Budget())[0]
+        self.assertEqual(entry['root'], handle)
+        self.assertFalse(entry['root'].startswith('/'))
+        row = DIAG.classify(entry, 'single_visible_mount', 'bind')
+        self.assertEqual(row['filesystem'], 'nsfs')
+        self.assertEqual(row['backend'], 'not_9p')
+        self.assertNotIn(handle, json.dumps(row))
+        for fs in ('ext4', '9p', 'tmpfs', 'PRIVATE_UNKNOWN'):
+            with self.subTest(fs=fs), self.assertRaisesRegex(DIAG.DiagnosticError, 'invalid_mountinfo'):
+                DIAG.parse_mountinfo(line.replace(' - nsfs ', ' - ' + fs + ' '), self.graph.Budget())
+
+    def test_nsfs_namespace_root_shape_point_and_size_remain_bounded(self):
+        invalid = ('relative', 'net:[]', 'net:[abc]', 'net:[-1]', 'net:[1]/child',
+                   'net:[1]suffix', 'NET:[1]', 'n' * 33 + ':[1]', 'net:[' + '1' * 21 + ']')
+        for root in invalid:
+            with self.subTest(root=root), self.assertRaisesRegex(DIAG.DiagnosticError, 'invalid_mountinfo'):
+                DIAG.parse_mountinfo('7 1 0:9 ' + root + ' /PRIVATE rw - nsfs PRIVATE rw', self.graph.Budget())
+        for root, point, source in (('net:[1]', 'relative', 'PRIVATE'),
+                                    ('net:[1]', '/PRIVATE', 'x' * 8193)):
+            with self.assertRaisesRegex(DIAG.DiagnosticError, 'invalid_mountinfo'):
+                DIAG.parse_mountinfo('7 1 0:9 ' + root + ' ' + point + ' rw - nsfs ' + source + ' rw', self.graph.Budget())
+        for fs in ('ext4', '9p'):
+            entry = DIAG.parse_mountinfo('7 1 0:9 / /PRIVATE rw - ' + fs + ' PRIVATE rw', self.graph.Budget())[0]
+            self.assertEqual(entry['filesystem'], fs)
+
+    def test_full_synthetic_scan_accepts_unrelated_nsfs_without_handle_output(self):
+        self.mountinfo += ('7 1 0:9 net:[123456] /PRIVATE_NAMESPACE rw - nsfs PRIVATE rw\n').encode()
+        self.final_mountinfo = self.mountinfo
+        value = self.scan()
+        self.assertEqual(value['status'], 'measured')
+        self.assertEqual(value['docker_queries'], 7)
+        self.assertEqual(value['first_9p']['backend'], 'drvfs_declared')
+        self.assertFalse(value['supports'])
+        self.assertEqual(value['alias_identity'], 'unverified')
+        self.assertNotIn('123456', json.dumps(value))
+        self.assertNotIn('PRIVATE', json.dumps(value))
+        DIAG.validate(value, DIAG.APPROVED_SOURCE_SHA256)
+
     def test_mount_and_docker_changes_reject_every_partial_classification(self):
         self.final_mountinfo = self.mountinfo + b'5 1 0:9 / /new rw - tmpfs PRIVATE rw\n'
         value = self.scan()

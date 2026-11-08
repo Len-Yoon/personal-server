@@ -240,6 +240,54 @@ if($blocked -ne $bad.Count){throw 'unsafe_xml_accepted'}
 'xml-rejected'
 ''').strip(), 'xml-rejected')
 
+    def test_batch_namespace_check_matches_each_original_element_position(self):
+        self.assertEqual(self.ps(r'''
+$ns='http://schemas.microsoft.com/windows/2004/02/mit/task'
+$xml='<Task xmlns="'+$ns+'"><Triggers>'+('<Node/>'*240)+'</Triggers><Actions><Exec><Command>x</Command></Exec></Actions></Task>'
+$document=[Xml.XmlDocument]::new();$document.LoadXml($xml)
+$nodes=$document.GetElementsByTagName('*')
+$originalCount=$nodes.Count
+foreach($index in 0..($originalCount-1)){
+ $changed=[Xml.XmlDocument]::new();$changed.LoadXml($xml)
+ $node=$changed.GetElementsByTagName('*')[$index]
+ $replacement=$changed.CreateElement($node.LocalName,'urn:unknown')
+ # Preserve descendants while changing precisely one element's namespace.
+ while($node.HasChildNodes){[void]$replacement.AppendChild($node.FirstChild)}
+ [void]$node.ParentNode.ReplaceChild($replacement,$node)
+ $referenceRejected=$false
+ foreach($originalNode in $changed.GetElementsByTagName('*')){if($originalNode.NamespaceURI -cne $ns){$referenceRejected=$true;break}}
+ $candidateRejected=$false
+ try{Assert-HaTaskCandidateXmlNamespace $changed ([Diagnostics.Stopwatch]::StartNew()) 2000}catch{$candidateRejected=($_.Exception.Message -ceq 'candidate_unsupported')}
+ if(-not $referenceRejected -or $referenceRejected -ne $candidateRejected){throw 'namespace_predicate_changed'}
+}
+# A successful batch query preserves the verbatim XML and action projection.
+$task=MakeTask;$task.Xml=$xml
+$record=ConvertFrom-HaTaskCandidate $task '\'
+if($record.CandidateXml -cne $xml -or $record.Actions[0].Execute -cne 'x'){throw 'batch_projection_changed'}
+# Count calls rather than timing a synthetic fixture: batching always uses two.
+$script:checks=0
+function Assert-HaTaskCandidateDeadline($Watch,$DeadlineMilliseconds){$script:checks++}
+Assert-HaTaskCandidateXmlNamespace $document ([Diagnostics.Stopwatch]::StartNew()) 2000
+if($script:checks -ne 2 -or $originalCount -le 200){throw 'batch_check_count_changed'}
+'namespace-predicate-equal'
+''').strip(), 'namespace-predicate-equal')
+
+    def test_batch_namespace_node_cap_and_late_result_fail_closed(self):
+        self.assertEqual(self.ps(r'''
+$ns='http://schemas.microsoft.com/windows/2004/02/mit/task'
+$document=[Xml.XmlDocument]::new();$document.LoadXml(('<Task xmlns="'+$ns+'">'+('<Node/>'*32767)+'</Task>'))
+Assert-HaTaskCandidateXmlNamespace $document ([Diagnostics.Stopwatch]::StartNew()) 2000
+[void]$document.DocumentElement.AppendChild($document.CreateElement('Node',$ns))
+$blocked=0
+try{Assert-HaTaskCandidateXmlNamespace $document ([Diagnostics.Stopwatch]::StartNew()) 2000}catch{if($_.Exception.Message -ceq 'candidate_unsupported'){$blocked++}}
+$slow=[pscustomobject]@{}
+$slow|Add-Member ScriptMethod GetElementsByTagName {param($name) return [pscustomobject]@{Count=1}}
+$slow|Add-Member ScriptMethod SelectSingleNode {param($xpath) Start-Sleep -Milliseconds 30;return $null}
+try{Assert-HaTaskCandidateXmlNamespace $slow ([Diagnostics.Stopwatch]::StartNew()) 20}catch{if($_.Exception.Message -ceq 'candidate_deadline'){$blocked++}}
+if($blocked -ne 2){throw 'batch_bounds_lost'}
+'namespace-bounded'
+''').strip(), 'namespace-bounded')
+
     def test_registered_identity_must_match_folder_and_name(self):
         self.assertEqual(self.ps(r'''
 $blocked=0

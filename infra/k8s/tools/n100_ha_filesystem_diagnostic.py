@@ -33,7 +33,7 @@ MOUNT_LIMIT = 16384
 ROW_LIMIT = 48
 CLASSES = {
     'mount_type': {'bind', 'volume', 'tmpfs', 'other'},
-    'filesystem': {'ext2', 'ext3', 'ext4', 'xfs', 'btrfs', 'tmpfs', '9p', 'drvfs', 'virtiofs', 'other'},
+    'filesystem': {'ext2', 'ext3', 'ext4', 'xfs', 'btrfs', 'tmpfs', '9p', 'drvfs', 'virtiofs', 'nsfs', 'other'},
     'backend': {'not_9p', 'drvfs_declared', 'unknown'},
     'cache': {'not_9p', 'unspecified', 'none', 'readahead', 'mmap', 'loose', 'fscache', 'other_numeric', 'unknown'},
     'transport': {'not_9p', 'unix', 'tcp', 'fd', 'virtio', 'rdma', 'usbg', 'unknown'},
@@ -124,7 +124,12 @@ def parse_mountinfo(payload, budget):
             _deny('invalid_mountinfo')
         ids.add(identifier)
         root, point = _unescape(fields[3]), _unescape(fields[4])
-        if not root.startswith('/') or not point.startswith('/') or any(len(v) > 8192 for v in fields):
+        # Linux nsfs_show_path emits an opaque namespace handle, not a path:
+        # github.com/torvalds/linux/blob/v6.6/fs/nsfs.c (also ns_dname).
+        # proc_namespace.c uses show_path for root and seq_path_root for point.
+        # Keep this private handle unchanged; never convert it to a coordinate.
+        namespace_root = fields[separator + 1] == 'nsfs' and re.fullmatch(r'[a-z][a-z0-9_]{0,31}:\[[0-9]{1,20}\]', root)
+        if (not root.startswith('/') and not namespace_root) or not point.startswith('/') or any(len(v) > 8192 for v in fields):
             _deny('invalid_mountinfo')
         optional = fields[6:separator]
         if any(not re.fullmatch(r'[A-Za-z0-9_.-]+(?::[A-Za-z0-9_.-]+)?', v) for v in optional):

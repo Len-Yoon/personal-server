@@ -20,6 +20,17 @@ function Add-HaTaskCandidateCharacters([string]$Text,$Budget,[int]$IndividualLim
     $Budget.characters+=$Text.Length
 }
 
+function Assert-HaTaskCandidateXmlNamespace($Document,$Watch,[int]$DeadlineMilliseconds) {
+    Assert-HaTaskCandidateDeadline $Watch $DeadlineMilliseconds
+    $nodes=$Document.GetElementsByTagName('*')
+    if($nodes.Count -gt 32768){throw 'candidate_unsupported'}
+    # The fixed XPath checks every descendant element, including unrelated task
+    # metadata. Run it in .NET instead of one PowerShell call per XML element.
+    $foreign=$Document.SelectSingleNode("//*[namespace-uri() != 'http://schemas.microsoft.com/windows/2004/02/mit/task']")
+    Assert-HaTaskCandidateDeadline $Watch $DeadlineMilliseconds
+    if($null -ne $foreign){throw 'candidate_unsupported'}
+}
+
 function Read-HaTaskCandidateXml([string]$Xml,$Watch,[int]$DeadlineMilliseconds,$Budget) {
     # XSD defaults/mapping: https://learn.microsoft.com/en-us/windows/win32/taskschd/task-scheduler-schema
     # This is a conservative projection, not full XSD/native equivalence proof.
@@ -41,12 +52,7 @@ function Read-HaTaskCandidateXml([string]$Xml,$Watch,[int]$DeadlineMilliseconds,
     $ns='http://schemas.microsoft.com/windows/2004/02/mit/task'
     $root=$document.DocumentElement
     if($null -eq $root -or $root.LocalName -cne 'Task' -or $root.NamespaceURI -cne $ns){throw 'candidate_unsupported'}
-    $nodes=$document.GetElementsByTagName('*')
-    if($nodes.Count -gt 32768){throw 'candidate_unsupported'}
-    foreach($node in $nodes){
-        Assert-HaTaskCandidateDeadline $Watch $DeadlineMilliseconds
-        if($node.NamespaceURI -cne $ns){throw 'candidate_unsupported'}
-    }
+    Assert-HaTaskCandidateXmlNamespace $document $Watch $DeadlineMilliseconds
     $manager=[Xml.XmlNamespaceManager]::new($document.NameTable);$manager.AddNamespace('t',$ns)
     $sections=@{}
     foreach($node in $root.ChildNodes){
