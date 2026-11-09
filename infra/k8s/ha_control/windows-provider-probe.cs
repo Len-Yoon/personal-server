@@ -34,6 +34,14 @@ namespace HaProviderProbeV1 {
   // or E_ACCESSDENIED is usable only after a valid operation was attempted.
   public static bool AccessDenied(uint code){return code==32769||code==0x80041003||code==0x80070005;}
   public static bool AuthorizationDenial(bool attempted,uint code){return attempted&&AccessDenied(code);}
+  // Hyper-V v2 uses VirtualSystemType, not the v1 SettingType property.
+  // https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/msvm-settingsdefinestate
+  // https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/msvm-virtualsystemsettingdata
+  public static bool CurrentSetting(string type,string identifier,string expected){
+   return type=="Microsoft:Hyper-V:System:Realized"&&identifier!=null&&expected!=null&&
+    Regex.IsMatch(identifier,"\\A[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\\z")&&
+    String.Equals(identifier,expected,StringComparison.OrdinalIgnoreCase);
+  }
  }
 #if !PORTABLE_FIXTURE
  public sealed class Probe : ServiceBase {
@@ -58,7 +66,7 @@ namespace HaProviderProbeV1 {
      foreach(ManagementObject vm in found)using(vm){
       ManagementObject settings=null;
       using(var related=vm.GetRelated("Msvm_VirtualSystemSettingData","Msvm_SettingsDefineState",null,null,null,null,false,null)){
-       foreach(ManagementObject candidate in related){if(Convert.ToUInt16(candidate["SettingType"])==3){if(settings!=null)throw new InvalidOperationException();settings=candidate;}else candidate.Dispose();}
+       foreach(ManagementObject candidate in related){if(Settings.CurrentSetting(candidate["VirtualSystemType"] as string,candidate["VirtualSystemIdentifier"] as string,cfg.Values["vm_id"])){if(settings!=null)throw new InvalidOperationException();settings=candidate;}else candidate.Dispose();}
       }
       if(settings==null)throw new InvalidOperationException();
       using(settings){

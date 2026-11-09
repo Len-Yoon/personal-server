@@ -60,6 +60,33 @@ def file_record(value, suffix):
          and type(value.get('sha256')) is str and HEX.fullmatch(value['sha256']))
 
 
+def tree_files(root):
+    """Inspect every entry through no-follow directory descriptors, before reads."""
+    root=Path(root).absolute()
+    need(not any(p.is_symlink() for p in (root,*root.parents)) and root.is_dir(),'plain_bundle_directory_required')
+    result=set();count=0
+    pending=[(os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW),Path())]
+    try:
+        while pending:
+            descriptor,relative=pending.pop()
+            try:
+                with os.scandir(descriptor) as entries:
+                    for entry in entries:
+                        count+=1;need(count<=4096,'bundle_entry_limit')
+                        info=entry.stat(follow_symlinks=False)
+                        path=relative/entry.name
+                        if stat.S_ISDIR(info.st_mode):
+                            child=os.open(entry.name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=descriptor)
+                            pending.append((child,path))
+                        else:
+                            need(stat.S_ISREG(info.st_mode) and info.st_nlink==1,'bundle_nonregular_entry')
+                            result.add(str(path))
+            finally:os.close(descriptor)
+    finally:
+        for descriptor,_ in pending:os.close(descriptor)
+    return result
+
+
 def source_url(value, hosts):
     need(type(value) is str)
     url = urlsplit(value)
@@ -278,6 +305,7 @@ def prepare(lock_path, inputs, output):
 
 def verify(bundle):
     bundle = Path(bundle).absolute()
+    actual = tree_files(bundle)
     manifest = json.loads(regular(bundle/'manifest.json').read_bytes())
     need(set(manifest) == {'schema_version','source_commit','installation_id','node','source_files','files',
          'production_deployed','writer_authority_issued','full_seven_app_restore_verified','os_conversion_verified',
@@ -300,7 +328,6 @@ def verify(bundle):
         need(type(name) is str and not name.startswith('/') and '..' not in Path(name).parts
              and type(expected) is str and HEX.fullmatch(expected),'manifest_path_invalid')
         need(digest(regular(bundle/name)) == expected,'bundle_hash_mismatch')
-    actual = {str(p.relative_to(bundle)) for p in bundle.rglob('*') if not p.is_dir()}
     need(actual == set(manifest['files'])|{'manifest.json'},'bundle_inventory_mismatch')
     expected_generated = pg_files(lock)
     for name,raw in expected_generated.items():

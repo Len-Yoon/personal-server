@@ -142,6 +142,17 @@ class BootstrapTests(unittest.TestCase):
             target=bundle/'generated/postgresql.conf';target.chmod(0o600);target.write_text('changed')
             with self.assertRaises(B.BootstrapError):B.verify(bundle)
 
+    def test_unlisted_directory_symlink_is_rejected_before_reading_bundle_contents(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name).resolve();bundle=root/'bundle';bundle.mkdir();outside=root/'outside';outside.mkdir()
+            (outside/'private.txt').write_text('synthetic_private_value')
+            (bundle/'unlisted').symlink_to(outside,target_is_directory=True)
+            with patch.object(B,'digest') as read:
+                with self.assertRaises(B.BootstrapError):B.verify(bundle)
+                read.assert_not_called()
+            (bundle/'unlisted').unlink();B.os.mkfifo(bundle/'fifo')
+            with self.assertRaises(B.BootstrapError):B.tree_files(bundle)
+
     def test_install_requires_independent_manifest_hash_before_any_mutation(self):
         with tempfile.TemporaryDirectory() as name:
             bundle=Path(name).resolve();(bundle/'manifest.json').write_text('{}')

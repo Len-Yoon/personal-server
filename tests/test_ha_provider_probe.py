@@ -61,6 +61,21 @@ foreach($path in @('C:\Private\probe.exe anything','"C:\Private\probe.exe" anyth
 }
 if(Test-ProbeServiceImagePath 'C:\Program Files\probe.exe' 'C:\Program Files\probe.exe'){throw 'ambiguous_unquoted_path_accepted'}
 if(-not (Test-ProbeServiceImagePath '"C:\Program Files\probe.exe"' 'C:\Program Files\probe.exe')){throw 'quoted_path_rejected'}
+$frame=[pscustomobject]@{scope='owned_vm_provider_role_probe';schema_version=1;operation='settings';stage='target_query';attempted=$false;complete=$false;authorized=$false;authorization_denied=$false;administrator=$false;hyperv_role=$false}
+if(-not (Test-ProbeNoOperation $frame 'settings' $false)){throw 'known_no_operation_not_recognized'}
+foreach($field in @('attempted','complete','authorized','authorization_denied','administrator','hyperv_role')){
+ $copy=$frame.PSObject.Copy();$copy.$field=$true
+ if(Test-ProbeNoOperation $copy 'settings' $false){throw 'attempt_or_unverified_identity_discarded'}
+ $copy=$frame.PSObject.Copy();$copy.$field='false'
+ if(Test-ProbeNoOperation $copy 'settings' $false){throw 'string_boolean_accepted'}
+}
+if(Test-ProbeNoOperation $frame 'power_off' $false){throw 'different_operation_accepted'}
+foreach($field in @('scope','operation','stage')){
+ $copy=$frame.PSObject.Copy();$copy.$field=@($copy.$field)
+ if(Test-ProbeNoOperation $copy 'settings' $false){throw 'array_protocol_field_accepted'}
+}
+$copy=$frame.PSObject.Copy();$copy.schema_version=$true
+if(Test-ProbeNoOperation $copy 'settings' $false){throw 'boolean_schema_accepted'}
 foreach($id in @($null,'',[Guid]::Empty,[Guid]::Empty.ToString())){
  if(-not (Test-ProbeDisconnectedNic ([pscustomobject]@{SwitchName='';SwitchId=$id}))){throw 'disconnected_adapter_rejected'}
 }
@@ -95,6 +110,14 @@ Add-Type -Path $env:PROBE_SOURCE -CompilerOptions '/define:PORTABLE_FIXTURE'
 $text="format=ha-provider-probe-v1`nservice_name=HaProbe_0123456789abcdef`nservice_sid=S-1-5-80-1-2-3-4-5`ninstallation_id=$('a'*64)`nvm_id=11111111-1111-1111-1111-111111111111`noperation=settings`nexpected_hyperv_role=false`n"
 $cfg=[HaProviderProbeV1.Settings]::new($text)
 if($cfg.Marker() -cne ('ha-owned-provider-probe:'+('a'*64))){throw 'not_fixed_owned_marker'}
+$id='abcdef12-abcd-abcd-abcd-abcdefabcdef'
+if(-not [HaProviderProbeV1.Settings]::CurrentSetting('Microsoft:Hyper-V:System:Realized',$id.ToUpperInvariant(),$id)){throw 'v2_current_setting_rejected'}
+foreach($type in @('Microsoft:Hyper-V:System:Planned','Microsoft:Hyper-V:Snapshot:Realized','microsoft:hyper-v:system:realized',$null)){
+ if([HaProviderProbeV1.Settings]::CurrentSetting($type,$id,$id)){throw 'non_current_setting_accepted'}
+}
+foreach($identifier in @($null,(' '+$id),('{'+$id+'}'),'11111111-1111-1111-1111-111111111111')){
+ if([HaProviderProbeV1.Settings]::CurrentSetting('Microsoft:Hyper-V:System:Realized',$identifier,$id)){throw 'different_or_malformed_system_accepted'}
+}
 foreach($code in @([uint32]32769,[uint32]2147749891,[uint32]2147942405)){
  if(-not [HaProviderProbeV1.Settings]::AuthorizationDenial($true,$code)){throw 'denial_not_classified'}
  if([HaProviderProbeV1.Settings]::AuthorizationDenial($false,$code)){throw 'query_failure_counted_as_method_denial'}
