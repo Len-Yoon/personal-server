@@ -46,7 +46,7 @@ namespace TypedFixtures {
  }
  public sealed class WmiRows : N100HaTypedCandidateV1.IWmiRows {
   public System.Collections.Generic.List<WmiRow> Values=new System.Collections.Generic.List<WmiRow>();
-  public int MoveDelay;public int ThrowAfter=-1;public int Disposed;public int IteratorDisposed;public int MoveCalls;public bool IteratorDisposeThrows;public bool DisposeThrows;
+  public int MoveDelay;public int ThrowAfter=-1;public int Disposed;public int IteratorDisposed;public int MoveCalls;public bool IteratorDisposeThrows;public bool DisposeThrows;public bool EnumeratorThrows;
   public int Count {get{throw new System.Exception("PRIVATE_COUNT_FORBIDDEN");}}
   sealed class Iterator : System.Collections.Generic.IEnumerator<N100HaTypedCandidateV1.IWmiRow> {
    readonly WmiRows rows;int index=-1;public Iterator(WmiRows owner){rows=owner;}
@@ -56,13 +56,13 @@ namespace TypedFixtures {
    public void Reset(){throw new System.Exception("PRIVATE_RESET_FORBIDDEN");}
    public void Dispose(){rows.IteratorDisposed++;if(rows.IteratorDisposeThrows)throw new System.Exception("PRIVATE_ITERATOR_DISPOSE");}
   }
-  public System.Collections.Generic.IEnumerator<N100HaTypedCandidateV1.IWmiRow> GetEnumerator(){return new Iterator(this);}
+  public System.Collections.Generic.IEnumerator<N100HaTypedCandidateV1.IWmiRow> GetEnumerator(){if(EnumeratorThrows)throw new System.Exception("PRIVATE_ENUMERATOR");return new Iterator(this);}
   System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator(){return GetEnumerator();}
   public void Dispose(){Disposed++;if(DisposeThrows)throw new System.Exception("PRIVATE_ROWS_DISPOSE");}
  }
  public sealed class WmiReader : N100HaTypedCandidateV1.IWmiReader {
-  public WmiRows Services=new WmiRows();public WmiRows Processes=new WmiRows();public WmiRows Boot=new WmiRows();public int Disposed;
-  public N100HaTypedCandidateV1.IWmiRows Query(N100HaTypedCandidateV1.WmiKind kind){Trace.Calls.Add(kind.ToString());switch(kind){case N100HaTypedCandidateV1.WmiKind.Services:return Services;case N100HaTypedCandidateV1.WmiKind.Processes:return Processes;case N100HaTypedCandidateV1.WmiKind.Boot:return Boot;default:throw new System.Exception("PRIVATE_KIND");}}
+  public WmiRows Services=new WmiRows();public WmiRows Processes=new WmiRows();public WmiRows Boot=new WmiRows();public int Disposed;public string ThrowQuery;
+  public N100HaTypedCandidateV1.IWmiRows Query(N100HaTypedCandidateV1.WmiKind kind){Trace.Calls.Add(kind.ToString());if(kind.ToString()==ThrowQuery)throw new System.Exception("PRIVATE_QUERY");switch(kind){case N100HaTypedCandidateV1.WmiKind.Services:return Services;case N100HaTypedCandidateV1.WmiKind.Processes:return Processes;case N100HaTypedCandidateV1.WmiKind.Boot:return Boot;default:throw new System.Exception("PRIVATE_KIND");}}
   public void Dispose(){Disposed++;}
  }
  public sealed class ComWmiProperty {public object Value {get;set;}public int CIMType {get;set;}public bool IsArray {get;set;}}
@@ -86,6 +86,37 @@ namespace TypedFixtures {
  public sealed class ComWmiService {
   public ComWmiRows Rows;public string LastQuery;public string LastLanguage;public int LastFlags;
   public object ExecQuery(string query,string language,int flags){LastQuery=query;LastLanguage=language;LastFlags=flags;return Rows;}
+ }
+ // Full documented optional arities, not the abbreviated 2/0/3-argument
+ // methods used by earlier fixtures. These managed doubles perform no COM,
+ // connections, registration, enumeration, credential lookup or native calls.
+ // https://learn.microsoft.com/en-us/windows/win32/wmisdk/swbemlocator-connectserver
+ // https://learn.microsoft.com/en-us/windows/win32/taskschd/taskservice-connect
+ // https://learn.microsoft.com/en-us/windows/win32/wmisdk/swbemservices-execquery
+ public sealed class DefaultArity {
+  public object[] Last;public int Calls;
+  public object ConnectServer(string server=".",string space="",string user="",string password="",string locale="",string authority="",int flags=0,object context=null){Last=new object[]{server,space,user,password,locale,authority,flags,context};Calls++;return "recorded";}
+  public void Connect(object server=null,object user=null,object domain=null,object password=null){Last=new object[]{server,user,domain,password};Calls++;}
+  public object ExecQuery(string query,string language="WQL",int flags=16,object context=null){Last=new object[]{query,language,flags,context};Calls++;return "recorded";}
+ }
+ public sealed class OptionalArity {
+  public object[] Last;public int Calls;
+  public object ConnectServer([System.Runtime.InteropServices.Optional] object server,[System.Runtime.InteropServices.Optional] object space,[System.Runtime.InteropServices.Optional] object user,[System.Runtime.InteropServices.Optional] object password,[System.Runtime.InteropServices.Optional] object locale,[System.Runtime.InteropServices.Optional] object authority,[System.Runtime.InteropServices.Optional] object flags,[System.Runtime.InteropServices.Optional] object context){Last=new object[]{server,space,user,password,locale,authority,flags,context};Calls++;return "recorded";}
+  public void Connect([System.Runtime.InteropServices.Optional] object server,[System.Runtime.InteropServices.Optional] object user,[System.Runtime.InteropServices.Optional] object domain,[System.Runtime.InteropServices.Optional] object password){Last=new object[]{server,user,domain,password};Calls++;}
+  public object ExecQuery(string query,[System.Runtime.InteropServices.Optional] object language,[System.Runtime.InteropServices.Optional] object flags,[System.Runtime.InteropServices.Optional] object context){Last=new object[]{query,language,flags,context};Calls++;return "recorded";}
+ }
+ public static class ArityProbe {
+  public static object ExactHelper(object target,string method,object[] arguments){return typeof(N100HaTypedCandidateV1.Collector).GetMethod("Call",System.Reflection.BindingFlags.Static|System.Reflection.BindingFlags.NonPublic).Invoke(null,new object[]{target,method,arguments});}
+  public static bool NegativeControl(object target,string method,object[] arguments){try{target.GetType().InvokeMember(method,System.Reflection.BindingFlags.InvokeMethod,null,target,arguments,System.Globalization.CultureInfo.InvariantCulture);return false;}catch(System.MissingMethodException){return true;}}
+ }
+ public static class PhaseProbe {
+  // Same-assembly fixture for first-capture semantics; no COM or native factory.
+  public static string First(N100HaTypedCandidateV1.FailurePhase phase){
+   var budget=new N100HaTypedCandidateV1.Budget(2000);
+   try{budget.At(phase,delegate{throw new System.Exception("PRIVATE_FIRST");});}catch{}
+   try{budget.At(N100HaTypedCandidateV1.FailurePhase.cleanup,delegate{throw new System.Exception("PRIVATE_SECOND");});}catch{}
+   return budget.FailurePhase;
+  }
  }
 }
 '''
@@ -402,6 +433,70 @@ if($rows.Disposed -ne 2){throw 'late_iterator_not_disposed'}
 'fixed-native-boundary'
 ''').strip(), 'fixed-native-boundary')
 
+    def test_exact_call_helper_full_optional_arities_and_negative_control(self):
+        self.assertEqual(self.ps(r'''
+foreach($optionalOnly in @($false,$true)){
+ $target=$(if($optionalOnly){[TypedFixtures.OptionalArity]::new()}else{[TypedFixtures.DefaultArity]::new()})
+ $arguments=[object[]]@('.','root\cimv2')
+ if(-not [TypedFixtures.ArityProbe]::NegativeControl($target,'ConnectServer',$arguments) -or $target.Calls -ne 0){throw 'negative_control_not_sensitive'}
+ [void][TypedFixtures.ArityProbe]::ExactHelper($target,'ConnectServer',$arguments)
+ if($target.Last.Length -ne 8 -or $target.Last[0] -cne '.' -or $target.Last[1] -cne 'root\cimv2'){throw 'connectserver_arity_changed'}
+ foreach($index in 2..7){
+  if($optionalOnly){if(-not [object]::ReferenceEquals($target.Last[$index],[Reflection.Missing]::Value)){throw 'optional_missing_changed'}}
+  elseif($index -lt 6){if($target.Last[$index] -cne ''){throw 'default_credentials_changed'}}
+  elseif($index -eq 6){if($target.Last[$index] -ne 0){throw 'security_flags_changed'}}
+  elseif($null -ne $target.Last[$index]){throw 'context_changed'}
+ }
+ if(-not [TypedFixtures.ArityProbe]::NegativeControl($target,'Connect',[object[]]@())){throw 'connect_control_not_sensitive'}
+ [void][TypedFixtures.ArityProbe]::ExactHelper($target,'Connect',[object[]]@())
+ if($target.Last.Length -ne 4){throw 'task_connect_arity_changed'}
+ foreach($value in $target.Last){
+  if($optionalOnly){if(-not [object]::ReferenceEquals($value,[Reflection.Missing]::Value)){throw 'task_credentials_changed'}}
+  elseif($null -ne $value){throw 'task_credentials_changed'}
+ }
+ $query='SELECT LastBootUpTime FROM Win32_OperatingSystem';$arguments=[object[]]@($query,'WQL',[int]48)
+ if(-not [TypedFixtures.ArityProbe]::NegativeControl($target,'ExecQuery',$arguments)){throw 'exec_control_not_sensitive'}
+ [void][TypedFixtures.ArityProbe]::ExactHelper($target,'ExecQuery',$arguments)
+ if($target.Last.Length -ne 4 -or $target.Last[0] -cne $query -or $target.Last[1] -cne 'WQL' -or $target.Last[2] -ne 48){throw 'exec_query_changed'}
+ if($optionalOnly){if(-not [object]::ReferenceEquals($target.Last[3],[Reflection.Missing]::Value)){throw 'exec_optional_context_changed'}}
+ elseif($null -ne $target.Last[3]){throw 'exec_context_changed'}
+ if($target.Calls -ne 3){throw 'unexpected_calls'}
+}
+'full-optional-arities-pass'
+''').strip(), 'full-optional-arities-pass')
+
+    def test_first_caught_phase_survives_cleanup_and_closed_enum(self):
+        self.assertEqual(self.ps(r'''
+foreach($phase in [Enum]::GetValues([N100HaTypedCandidateV1.FailurePhase])){
+ if($phase -eq [N100HaTypedCandidateV1.FailurePhase]::none){continue}
+ if([TypedFixtures.PhaseProbe]::First($phase) -cne $phase.ToString()){throw 'first_capture_changed'}
+}
+foreach($kind in @('Services','Processes','Boot')){
+ $prefix=switch($kind){'Services'{'services'};'Processes'{'processes'};'Boot'{'boot'}}
+ foreach($failure in @('query','enumerator','fields','cleanup')){
+  $fixture=MakeBasic;$rows=$fixture.reader.$kind;$budget=[N100HaTypedCandidateV1.Budget]::new(2000)
+  switch($failure){
+   'query'{$fixture.reader.ThrowQuery=$kind;if($kind -ceq 'Services'){$fixture.folder.DisposeThrows=$true};$expected=$prefix+'_query'}
+   'enumerator'{$rows.EnumeratorThrows=$true;$rows.DisposeThrows=$true;$expected=$prefix+'_enumerator'}
+   'fields'{$rows.Values[0].ThrowField=$(if($kind -ceq 'Boot'){'LastBootUpTime'}elseif($kind -ceq 'Services'){'PathName'}else{'CommandLine'});$rows.IteratorDisposeThrows=$true;$expected=$prefix+'_fields'}
+   'cleanup'{$rows.IteratorDisposeThrows=$true;$rows.DisposeThrows=$true;$expected='cleanup'}
+  }
+  try{[N100HaTypedCandidateV1.Collector]::ReadBasic($fixture.reader,$fixture.folder,$budget)|Out-Null;throw 'failure_lost'}catch{}
+  if($budget.FailurePhase -cne $expected){throw ('wrong_fixed_phase_'+$failure)}
+ }
+}
+$fixture=MakeBasic;$fixture.reader.Services.MoveDelay=30;$fixture.reader.Services.DisposeThrows=$true;$budget=[N100HaTypedCandidateV1.Budget]::new(20)
+try{[N100HaTypedCandidateV1.Collector]::ReadBasic($fixture.reader,$fixture.folder,$budget)|Out-Null}catch{}
+if($budget.FailurePhase -cne 'services_enumerator'){throw 'late_yield_phase_lost'}
+$fixture=MakeBasic;$fixture.folder.TaskDelay=30;$fixture.folder.DisposeThrows=$true;$budget=[N100HaTypedCandidateV1.Budget]::new(20)
+try{[N100HaTypedCandidateV1.Collector]::ReadBasic($fixture.reader,$fixture.folder,$budget)|Out-Null}catch{}
+if($budget.FailurePhase -cne 'task_read'){throw 'task_phase_lost'}
+$fixture=MakeBasic;$budget=[N100HaTypedCandidateV1.Budget]::new(2000)
+[N100HaTypedCandidateV1.Collector]::ReadBasic($fixture.reader,$fixture.folder,$budget)|Out-Null
+if($budget.FailurePhase -cne 'none'){throw 'success_phase_changed'}
+'first-caught-phase-preserved'
+''').strip(), 'first-caught-phase-preserved')
+
     def test_basic_bridge_scope_is_not_a_complete_observation(self):
         prefix = r'''
 $ErrorActionPreference='Stop'
@@ -422,6 +517,7 @@ $basic=Invoke-HaWindowsTypedCandidate $source $pin 'basic'
         self.assertIs(basic['authority'], False)
         self.assertIs(basic['ready'], False)
         self.assertEqual(basic['equivalence'], 'unknown')
+        self.assertEqual((basic['failure_phase'], basic['phase_semantics']), ('unknown', 'first-caught-phase'))
         for key in ('service_count', 'process_count', 'boot_count', 'task_count', 'action_count'):
             self.assertIsNone(basic[key])
 

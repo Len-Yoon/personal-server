@@ -15,6 +15,11 @@ using System.Text;
 using System.Xml;
 
 namespace N100HaTypedCandidateV1 {
+    // Closed diagnostic labels, never provider text or a root-cause assertion.
+    public enum FailurePhase { none, wmi_locator, wmi_connect, task_service, task_connect,
+        services_query, services_enumerator, services_fields, task_read,
+        processes_query, processes_enumerator, processes_fields,
+        boot_query, boot_enumerator, boot_fields, cleanup, unknown }
     public sealed class Blocked : Exception {
         public readonly string Reason;
         public Blocked(string reason) : base(reason) { Reason = reason; }
@@ -23,7 +28,12 @@ namespace N100HaTypedCandidateV1 {
         readonly Stopwatch watch = Stopwatch.StartNew();
         readonly int milliseconds;
         int characters;
+        FailurePhase first=N100HaTypedCandidateV1.FailurePhase.none;
         public int Actions;
+        public string FailurePhase {get{return first.ToString();}}
+        internal void Capture(FailurePhase phase) {if(first==N100HaTypedCandidateV1.FailurePhase.none)first=phase;}
+        internal T At<T>(FailurePhase phase,Func<T> operation) {try{return operation();}catch {Capture(phase);throw;}}
+        internal void At(FailurePhase phase,Action operation) {try{operation();}catch {Capture(phase);throw;}}
         public Budget(int limit) { if(limit < 1 || limit > 2000) throw new Blocked("input_rejected"); milliseconds=limit; }
         public double Elapsed { get { return watch.Elapsed.TotalMilliseconds; } }
         public void Check() { if(Elapsed >= milliseconds) throw new Blocked("deadline_exceeded"); }
@@ -59,6 +69,8 @@ namespace N100HaTypedCandidateV1 {
         public string CandidateXml { get; set; }
     }
     public sealed class Measurement {
+        public string FailurePhase {get;internal set;}
+        public string PhaseSemantics {get{return "first-caught-phase";}}
         public string Status { get; set; }
         public string Reason { get; set; }
         public int? TaskCount { get; set; }
@@ -89,6 +101,8 @@ namespace N100HaTypedCandidateV1 {
         public List<ProcessRecord> Processes {get;set;}public BootRecord Boot {get;set;}
     }
     public sealed class BasicMeasurement {
+        public string FailurePhase {get;internal set;}
+        public string PhaseSemantics {get{return "first-caught-phase";}}
         public string Status {get;set;}public string Reason {get;set;}
         public int? ServiceCount {get;set;}public int? TaskCount {get;set;}public int? ActionCount {get;set;}
         public int? ProcessCount {get;set;}public int? BootCount {get;set;}public double ElapsedMilliseconds {get;set;}
@@ -112,6 +126,9 @@ namespace N100HaTypedCandidateV1 {
         static string[] Fields(WmiKind kind) {
             switch(kind) {case WmiKind.Services:return ServiceFields;case WmiKind.Processes:return ProcessFields;case WmiKind.Boot:return BootFields;default:throw new Blocked("unsupported_metadata");}
         }
+        static FailurePhase QueryPhase(WmiKind kind){return kind==WmiKind.Services ? FailurePhase.services_query : kind==WmiKind.Processes ? FailurePhase.processes_query : FailurePhase.boot_query;}
+        static FailurePhase EnumPhase(WmiKind kind){return kind==WmiKind.Services ? FailurePhase.services_enumerator : kind==WmiKind.Processes ? FailurePhase.processes_enumerator : FailurePhase.boot_enumerator;}
+        static FailurePhase FieldPhase(WmiKind kind){return kind==WmiKind.Services ? FailurePhase.services_fields : kind==WmiKind.Processes ? FailurePhase.processes_fields : FailurePhase.boot_fields;}
         static WmiProperty Property(IWmiRow row,string name,int type,Budget budget) {
             budget.Check();WmiProperty property;
             try { property=row.Read(name); } catch(Blocked){throw;} catch {throw new Blocked("query_failed");}
@@ -167,16 +184,17 @@ namespace N100HaTypedCandidateV1 {
         static List<T> Rows<T>(IWmiReader reader,WmiKind kind,Budget budget,Func<IWmiRow,Budget,T> project) {
             IWmiRows rows=null;IEnumerator<IWmiRow> iterator=null;var result=new List<T>();
             try {
-                budget.Check();rows=reader.Query(kind);budget.Check();iterator=rows.GetEnumerator();budget.Check();
+                budget.At(QueryPhase(kind),delegate {budget.Check();rows=reader.Query(kind);budget.Check();});
+                budget.At(EnumPhase(kind),delegate {iterator=rows.GetEnumerator();budget.Check();});
                 while(true) {
-                    budget.Check();bool more=iterator.MoveNext();budget.Check();if(!more) break;
-                    var row=iterator.Current;
-                    try {budget.Check();if(result.Count>=4096) Unsupported();result.Add(project(row,budget));budget.Check();}
-                    finally {if(row!=null) row.Dispose();}
+                    bool more=budget.At(EnumPhase(kind),delegate {budget.Check();bool value=iterator.MoveNext();budget.Check();return value;});if(!more) break;
+                    var row=budget.At(EnumPhase(kind),delegate{return iterator.Current;});
+                    try {budget.At(FieldPhase(kind),delegate {budget.Check();if(result.Count>=4096) Unsupported();result.Add(project(row,budget));budget.Check();});}
+                    finally {budget.At(FailurePhase.cleanup,delegate {if(row!=null) row.Dispose();});}
                 }
             } catch(Blocked){throw;}catch {throw new Blocked("query_failed");}
-            finally {DisposeAll(new IDisposable[]{iterator,rows});}
-            budget.Check();return result;
+            finally {budget.At(FailurePhase.cleanup,delegate {DisposeAll(new IDisposable[]{iterator,rows});});}
+            budget.At(EnumPhase(kind),delegate {budget.Check();});return result;
         }
         public static BasicRecords ReadBasic(IWmiReader reader,IFolder tasks,Budget budget) {
             // Basic raw batch only: registry/code/signature/startup/identity and
@@ -184,13 +202,14 @@ namespace N100HaTypedCandidateV1 {
             bool tasksStarted=false;
             try {
                 var services=Rows(reader,WmiKind.Services,budget,ProjectService);
-                services.Sort(delegate(ServiceRecord a,ServiceRecord b){return StringComparer.CurrentCulture.Compare(a.Name,b.Name);});budget.Check();
+                budget.At(FailurePhase.services_fields,delegate {services.Sort(delegate(ServiceRecord a,ServiceRecord b){return StringComparer.CurrentCulture.Compare(a.Name,b.Name);});budget.Check();});
                 tasksStarted=true;var taskRecords=ReadAll(tasks,budget);
                 var processes=Rows(reader,WmiKind.Processes,budget,ProjectProcess);
-                processes.Sort(delegate(ProcessRecord a,ProcessRecord b){return Nullable.Compare(a.ProcessId,b.ProcessId);});budget.Check();
-                var boot=Rows(reader,WmiKind.Boot,budget,ProjectBoot);if(boot.Count!=1) Unsupported();budget.Check();
+                budget.At(FailurePhase.processes_fields,delegate {processes.Sort(delegate(ProcessRecord a,ProcessRecord b){return Nullable.Compare(a.ProcessId,b.ProcessId);});budget.Check();});
+                var boot=Rows(reader,WmiKind.Boot,budget,ProjectBoot);budget.At(FailurePhase.boot_fields,delegate {if(boot.Count!=1) Unsupported();budget.Check();});
                 return new BasicRecords {Services=services,Tasks=taskRecords,Processes=processes,Boot=boot[0]};
-            } finally {if(!tasksStarted && tasks!=null)tasks.Dispose();}
+            } catch {budget.Capture(FailurePhase.unknown);throw;}
+            finally {budget.At(FailurePhase.cleanup,delegate {if(!tasksStarted && tasks!=null)tasks.Dispose();});}
         }
         static List<XmlElement> Elements(XmlNode node) {
             var result=new List<XmlElement>();
@@ -294,23 +313,26 @@ namespace N100HaTypedCandidateV1 {
                                 if(result.Count>=4096 || !keys.Add(record.TaskPath+record.TaskName)) Unsupported();
                                 result.Add(record);budget.Check();
                             }
-                        } finally { DisposeAll(tasks); }
+                        } catch {budget.Capture(FailurePhase.task_read);throw;}
+                        finally {budget.At(FailurePhase.cleanup,delegate {DisposeAll(tasks);});}
                         var children=folder.GetFolders(0);
                         try {
                             budget.Check();
                             foreach(var child in children) {budget.Check();if(pending.Count>=4096) Unsupported();pending.Enqueue(child);}
                         } catch {
                             var unqueued=new List<IDisposable>();foreach(var child in children) if(!pending.Contains(child)) unqueued.Add(child);
-                            DisposeAll(unqueued);throw;
+                            budget.Capture(FailurePhase.task_read);budget.At(FailurePhase.cleanup,delegate {DisposeAll(unqueued);});throw;
                         }
-                    } finally { folder.Dispose(); }
+                    } catch {budget.Capture(FailurePhase.task_read);throw;}
+                    finally {budget.At(FailurePhase.cleanup,delegate {folder.Dispose();});}
                 }
                 result.Sort(delegate(TaskRecord a,TaskRecord b) { int order=StringComparer.CurrentCulture.Compare(a.TaskPath,b.TaskPath);return order!=0 ? order : StringComparer.CurrentCulture.Compare(a.TaskName,b.TaskName); });
-            } finally {
+            } catch {budget.Capture(FailurePhase.task_read);throw;}
+            finally {
                 // Drain first so one failed Dispose cannot strand later handles.
-                var remaining=new List<IDisposable>();while(pending.Count>0) remaining.Add(pending.Dequeue());DisposeAll(remaining);
+                var remaining=new List<IDisposable>();while(pending.Count>0) remaining.Add(pending.Dequeue());budget.At(FailurePhase.cleanup,delegate {DisposeAll(remaining);});
             }
-            budget.Check();return result;
+            budget.At(FailurePhase.task_read,delegate {budget.Check();});return result;
         }
         // Reflection is restricted to these fixed read members; no caller member
         // names, host, credentials, task execution or registration APIs exist.
@@ -336,9 +358,10 @@ namespace N100HaTypedCandidateV1 {
                     int expected=(name=="ProcessId" || name=="ParentProcessId" || name=="SessionId") ? 19 : (name=="CreationDate" || name=="LastBootUpTime") ? 101 : 8;
                     if(type!=expected || !(array is bool) || (bool)array) Unsupported();
                     object data=Get(property,"Value");budget.Check();
-                    if(data!=null && Marshal.IsComObject(data)){Release(data);Unsupported();}
+                    if(data!=null && Marshal.IsComObject(data)){budget.At(FailurePhase.cleanup,delegate {Release(data);});Unsupported();}
                     return new WmiProperty(data,type,false);
-                } finally {ReleaseAll(property,properties);}
+                } catch {budget.Capture(FieldPhase(kind));throw;}
+                finally {budget.At(FailurePhase.cleanup,delegate {ReleaseAll(property,properties);});}
             }
             public void Dispose(){var old=value;value=null;Release(old);}
         }
@@ -346,9 +369,12 @@ namespace N100HaTypedCandidateV1 {
             object value;readonly WmiKind kind;readonly Budget budget;bool enumerated;
             public NativeWmiRows(object rows,WmiKind queryKind,Budget requestBudget){value=rows;kind=queryKind;budget=requestBudget;}
             public IEnumerator<IWmiRow> GetEnumerator(){
-                if(enumerated) Unsupported();enumerated=true;budget.Check();
-                var iterator=((IEnumerable)value).GetEnumerator();
-                try {budget.Check();return new NativeWmiIterator(iterator,kind,budget);}catch {Release(iterator);throw;}
+                return budget.At(EnumPhase(kind),delegate {
+                    if(enumerated) Unsupported();enumerated=true;budget.Check();
+                    var iterator=((IEnumerable)value).GetEnumerator();
+                    try {budget.Check();return (IEnumerator<IWmiRow>)new NativeWmiIterator(iterator,kind,budget);}
+                    catch {budget.Capture(EnumPhase(kind));budget.At(FailurePhase.cleanup,delegate {Release(iterator);});throw;}
+                });
             }
             IEnumerator IEnumerable.GetEnumerator(){return GetEnumerator();}
             public void Dispose(){var old=value;value=null;Release(old);}
@@ -359,12 +385,14 @@ namespace N100HaTypedCandidateV1 {
             public IWmiRow Current {get{return current;}}
             object IEnumerator.Current {get{return Current;}}
             public bool MoveNext(){
-                if(current!=null){current.Dispose();current=null;}
+                if(current!=null){budget.At(FailurePhase.cleanup,delegate {current.Dispose();current=null;});}
+                return budget.At(EnumPhase(kind),delegate {
                 budget.Check();bool more=iterator.MoveNext();
                 // Retain the returned COM row before the deadline check so the
                 // finally path can release a late successful MoveNext result.
                 if(more) current=new NativeWmiRow(iterator.Current,kind,budget);
                 budget.Check();return more;
+                });
             }
             public void Reset(){throw new Blocked("unsupported_metadata");}
             public void Dispose(){
@@ -377,9 +405,9 @@ namespace N100HaTypedCandidateV1 {
             public NativeWmiReader(Budget requestBudget){
                 budget=requestBudget;
                 try {
-                    budget.Check();locator=Activator.CreateInstance(Type.GetTypeFromProgID("WbemScripting.SWbemLocator",true));budget.Check();
-                    service=Call(locator,"ConnectServer",".","root\\cimv2");budget.Check();
-                } catch {Dispose();throw;}
+                    budget.At(FailurePhase.wmi_locator,delegate {budget.Check();locator=Activator.CreateInstance(Type.GetTypeFromProgID("WbemScripting.SWbemLocator",true));budget.Check();});
+                    budget.At(FailurePhase.wmi_connect,delegate {service=Call(locator,"ConnectServer",".","root\\cimv2");budget.Check();});
+                } catch {budget.Capture(FailurePhase.unknown);budget.At(FailurePhase.cleanup,delegate {Dispose();});throw;}
             }
             public IWmiRows Query(WmiKind kind){
                 string query;
@@ -393,7 +421,8 @@ namespace N100HaTypedCandidateV1 {
                 try {
                     budget.Check();rows=Call(service,"ExecQuery",query,"WQL",48);budget.Check();
                     var result=new NativeWmiRows(rows,kind,budget);rows=null;return result;
-                } finally {Release(rows);}
+                } catch {budget.Capture(QueryPhase(kind));throw;}
+                finally {budget.At(FailurePhase.cleanup,delegate {Release(rows);});}
             }
             public void Dispose(){var a=service;var b=locator;service=null;locator=null;ReleaseAll(a,b);}
         }
@@ -415,8 +444,9 @@ namespace N100HaTypedCandidateV1 {
                     int count=Convert.ToInt32(Get(collection,"Count"),CultureInfo.InvariantCulture);budget.Check();
                     if(count<0 || count>4096) Unsupported();
                     for(int i=1;i<=count;i++) {budget.Check();result.Add(new NativeTask(Item(collection,i)));budget.Check();}
-                    var completed=collection;collection=null;Release(completed);budget.Check();return result;
-                } catch { DisposeAll(result);throw; } finally { Release(collection); }
+                    var completed=collection;collection=null;budget.At(FailurePhase.cleanup,delegate {Release(completed);});budget.Check();return result;
+                } catch {budget.Capture(FailurePhase.task_read);budget.At(FailurePhase.cleanup,delegate {DisposeAll(result);});throw;}
+                finally {budget.At(FailurePhase.cleanup,delegate {Release(collection);});}
             }
             public IList<IFolder> GetFolders(int flags) {
                 var result=new List<IFolder>();object collection=null;
@@ -425,8 +455,9 @@ namespace N100HaTypedCandidateV1 {
                     int count=Convert.ToInt32(Get(collection,"Count"),CultureInfo.InvariantCulture);budget.Check();
                     if(count<0 || count>4096) Unsupported();
                     for(int i=1;i<=count;i++) {budget.Check();result.Add(new NativeFolder(Item(collection,i),budget));budget.Check();}
-                    var completed=collection;collection=null;Release(completed);budget.Check();return result;
-                } catch { DisposeAll(result);throw; } finally { Release(collection); }
+                    var completed=collection;collection=null;budget.At(FailurePhase.cleanup,delegate {Release(completed);});budget.Check();return result;
+                } catch {budget.Capture(FailurePhase.task_read);budget.At(FailurePhase.cleanup,delegate {DisposeAll(result);});throw;}
+                finally {budget.At(FailurePhase.cleanup,delegate {Release(collection);});}
             }
             public void Dispose() { var old=value;value=null;Release(old); }
         }
@@ -436,20 +467,21 @@ namespace N100HaTypedCandidateV1 {
             bool complete=false;
             try {
                 if(Environment.OSVersion.Platform!=PlatformID.Win32NT) throw new Blocked("native_windows_required");
-                var type=Type.GetTypeFromProgID("Schedule.Service",true);service=Activator.CreateInstance(type);
-                Call(service,"Connect");budget.Check();
-                var records=ReadAll(new NativeFolder(Call(service,"GetFolder","\\"),budget),budget);
+                budget.At(FailurePhase.task_service,delegate {var type=Type.GetTypeFromProgID("Schedule.Service",true);service=Activator.CreateInstance(type);});
+                budget.At(FailurePhase.task_connect,delegate {Call(service,"Connect");budget.Check();});
+                var records=ReadAll(new NativeFolder(budget.At(FailurePhase.task_read,delegate {return Call(service,"GetFolder","\\");}),budget),budget);
                 int actions=0;foreach(var record in records) {budget.Check();actions+=record.Actions.Count;}
                 result.TaskCount=records.Count;result.ActionCount=actions;complete=true;
-            } catch(Blocked error) { result.Reason=error.Reason; }
-            catch { result.Reason="query_failed"; }
-            finally { try {Release(service);}catch {complete=false;result.Reason="query_failed";} }
-            if(complete) {try {budget.Check();result.Status="measured";result.Reason="none";}catch(Blocked error){result.Reason=error.Reason;} }
+            } catch(Blocked error) {budget.Capture(FailurePhase.unknown);result.Reason=error.Reason;}
+            catch {budget.Capture(FailurePhase.unknown);result.Reason="query_failed";}
+            finally {try {budget.At(FailurePhase.cleanup,delegate {Release(service);});}catch {complete=false;result.Reason="query_failed";} }
+            if(complete) {try {budget.At(FailurePhase.task_read,delegate {budget.Check();});result.Status="measured";result.Reason="none";}catch(Blocked error){result.Reason=error.Reason;} }
             if(result.Status!="measured") {result.TaskCount=null;result.ActionCount=null;}
             result.ElapsedMilliseconds=budget.Elapsed;
             if(result.Status=="measured" && result.ElapsedMilliseconds>=2000) {
-                result.Status="blocked";result.Reason="deadline_exceeded";result.TaskCount=null;result.ActionCount=null;
+                budget.Capture(FailurePhase.task_read);result.Status="blocked";result.Reason="deadline_exceeded";result.TaskCount=null;result.ActionCount=null;
             }
+            result.FailurePhase=budget.FailurePhase;
             return result;
         }
         public static BasicMeasurement CollectBasic() {
@@ -458,19 +490,19 @@ namespace N100HaTypedCandidateV1 {
             try {
                 if(Environment.OSVersion.Platform!=PlatformID.Win32NT) throw new Blocked("native_windows_required");
                 reader=new NativeWmiReader(budget);
-                budget.Check();service=Activator.CreateInstance(Type.GetTypeFromProgID("Schedule.Service",true));budget.Check();
-                Call(service,"Connect");budget.Check();
-                var records=ReadBasic(reader,new NativeFolder(Call(service,"GetFolder","\\"),budget),budget);
+                budget.At(FailurePhase.task_service,delegate {budget.Check();service=Activator.CreateInstance(Type.GetTypeFromProgID("Schedule.Service",true));budget.Check();});
+                budget.At(FailurePhase.task_connect,delegate {Call(service,"Connect");budget.Check();});
+                var records=ReadBasic(reader,new NativeFolder(budget.At(FailurePhase.task_read,delegate {return Call(service,"GetFolder","\\");}),budget),budget);
                 result.ServiceCount=records.Services.Count;result.TaskCount=records.Tasks.Count;
                 int actions=0;foreach(var task in records.Tasks){budget.Check();actions+=task.Actions.Count;}
                 result.ActionCount=actions;result.ProcessCount=records.Processes.Count;result.BootCount=1;complete=true;
-            }catch(Blocked error){result.Reason=error.Reason;}catch {result.Reason="query_failed";}
-            finally {try {try {if(reader!=null)reader.Dispose();}finally {Release(service);}}catch {complete=false;result.Reason="query_failed";} }
-            if(complete){try {budget.Check();result.Status="measured";result.Reason="none";}catch(Blocked error){result.Reason=error.Reason;} }
+            }catch(Blocked error){budget.Capture(FailurePhase.unknown);result.Reason=error.Reason;}catch {budget.Capture(FailurePhase.unknown);result.Reason="query_failed";}
+            finally {try {budget.At(FailurePhase.cleanup,delegate {try {if(reader!=null)reader.Dispose();}finally {Release(service);}});}catch {complete=false;result.Reason="query_failed";} }
+            if(complete){try {budget.At(FailurePhase.unknown,delegate {budget.Check();});result.Status="measured";result.Reason="none";}catch(Blocked error){result.Reason=error.Reason;} }
             result.ElapsedMilliseconds=budget.Elapsed;
-            if(result.Status=="measured" && result.ElapsedMilliseconds>=2000){result.Status="blocked";result.Reason="deadline_exceeded";}
+            if(result.Status=="measured" && result.ElapsedMilliseconds>=2000){budget.Capture(FailurePhase.unknown);result.Status="blocked";result.Reason="deadline_exceeded";}
             if(result.Status!="measured"){result.ServiceCount=null;result.TaskCount=null;result.ActionCount=null;result.ProcessCount=null;result.BootCount=null;}
-            return result;
+            result.FailurePhase=budget.FailurePhase;return result;
         }
     }
 }

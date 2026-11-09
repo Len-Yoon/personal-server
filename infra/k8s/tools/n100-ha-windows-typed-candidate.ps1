@@ -5,7 +5,7 @@ $ProgressPreference='SilentlyContinue'
 Set-StrictMode -Version Latest
 
 function Invoke-HaWindowsTypedCandidate([string]$Source,[string]$ExpectedSha256,[string]$Scope='tasks') {
-    $approved='e25ca7413992a28978587c8d5f4a10390fd82f4895726685d09c5061d73544cc'
+    $approved='2ee4c876b5805875960e24dbf31f4a136373b96a60ef071c0091607e6c25c62e'
     $preparation=[Diagnostics.Stopwatch]::StartNew()
     $request=[Diagnostics.Stopwatch]::StartNew()
     $report=$null;$reason='source_rejected';$status='blocked'
@@ -32,8 +32,8 @@ function Invoke-HaWindowsTypedCandidate([string]$Source,[string]$ExpectedSha256,
     } catch {
         # Never emit compiler/native exceptions, provider records or source text.
     } finally {$preparation.Stop();$request.Stop()}
-    $count=$null;$actions=$null;$elapsed=$null
-    if($null -ne $report){$count=$report.TaskCount;$actions=$report.ActionCount;$elapsed=$report.ElapsedMilliseconds}
+    $count=$null;$actions=$null;$elapsed=$null;$failurePhase='none'
+    if($null -ne $report){$count=$report.TaskCount;$actions=$report.ActionCount;$elapsed=$report.ElapsedMilliseconds;$failurePhase=$report.FailurePhase}
     $services=$null;$processes=$null;$boots=$null
     if($Scope -ceq 'basic' -and $null -ne $report){$services=$report.ServiceCount;$processes=$report.ProcessCount;$boots=$report.BootCount}
     $scopeName='local-task-enumeration-only';$kind='ha-windows-typed-task-candidate'
@@ -41,6 +41,7 @@ function Invoke-HaWindowsTypedCandidate([string]$Source,[string]$ExpectedSha256,
     return [ordered]@{schema_version=1;kind=$kind;authority=$false;ready=$false;
         equivalence='unknown';scope=$scopeName;source_sha256=$approved;
         status=$status;reason=$reason;task_count=$count;action_count=$actions;
+        failure_phase=$failurePhase;phase_semantics='first-caught-phase';
         service_count=$services;process_count=$processes;boot_count=$boots;
         preparation_elapsed_ms=$preparation.Elapsed.TotalMilliseconds;collection_elapsed_ms=$elapsed;
         request_elapsed_ms=$request.Elapsed.TotalMilliseconds;deadline_ms=2000;
