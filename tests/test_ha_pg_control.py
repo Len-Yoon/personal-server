@@ -255,6 +255,38 @@ class PGControlTests(unittest.TestCase):
             self.assertIsNone(self.backend.validated)
             self.assertFalse(any("UPDATE ha.control" in c.args[0] for c in self.primary.execute.call_args_list))
 
+    def test_two_host_observations_and_database_share_one_total_deadline(self):
+        # Synthetic latency on the actual PG proof path, not native performance
+        # evidence. Each component fits two seconds even when their sum does not.
+        for host_seconds, accepted in ((0.7, True), (0.9, False)):
+            with self.subTest(host_seconds=host_seconds):
+                self.backend.validated = None
+                connections, observations = self.prepare_fresh()
+                clock = [100.0]
+                phases = []
+                def fenced(state):
+                    self.assertEqual(state, self.state)
+                    phases.append("host")
+                    clock[0] += host_seconds
+                    return True
+                def commit(connection):
+                    self.assertIs(connection, self.primary)
+                    phases.append("sync_commit")
+                    clock[0] += 0.2
+                with connections, observations, patch.object(self.backend, "fenced", side_effect=fenced), patch.object(
+                        self.backend, "_commit", side_effect=commit), patch(
+                        "ha_control.pg.time.monotonic", side_effect=lambda: clock[0]):
+                    if accepted:
+                        self.backend._fresh_observation(self.state)
+                        self.assertIsNotNone(self.backend.validated)
+                    else:
+                        with self.assertRaisesRegex(TransitionBlocked, "fresh_replication_proof_required"):
+                            self.backend._fresh_observation(self.state)
+                        self.assertIsNone(self.backend.validated)
+                self.assertEqual(phases, ["host", "sync_commit", "sync_commit", "host"])
+                self.assertFalse(any("UPDATE ha.control" in call.args[0]
+                                     for call in self.primary.execute.call_args_list))
+
     def test_open_requires_fresh_validation_and_rechecks_every_replication_fact(self):
         with self.assertRaisesRegex(TransitionBlocked, "fresh_replication_proof_required"):
             self.backend.open(self.state)
