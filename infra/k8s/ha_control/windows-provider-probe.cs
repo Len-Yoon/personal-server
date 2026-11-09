@@ -40,6 +40,12 @@ namespace HaProviderProbeV1 {
   // or E_ACCESSDENIED is usable only after a valid operation was attempted.
   public static bool AccessDenied(uint code){return code==32769||code==0x80041003||code==0x80070005;}
   public static bool AuthorizationDenial(bool attempted,uint code){return attempted&&AccessDenied(code);}
+  public static bool NativeRelativeTarget(bool instance,string actualClass,string expectedClass,string server,string ns,string full,string relative,string source){
+   // Windows maps an implicit local server to "." even for a relative path.
+   // Reject explicit prefixes through both the namespace and full-path checks.
+   return instance&&!String.IsNullOrEmpty(source)&&!String.IsNullOrEmpty(expectedClass)&&actualClass==expectedClass&&(String.IsNullOrEmpty(server)||server==".")&&
+    String.IsNullOrEmpty(ns)&&full==relative&&relative==source;
+  }
   // Hyper-V v2 uses VirtualSystemType, not the v1 SettingType property.
   // https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/msvm-settingsdefinestate
   // https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/msvm-virtualsystemsettingdata
@@ -81,7 +87,7 @@ namespace HaProviderProbeV1 {
   protected override void OnStop(){stopped=true;}
   static ManagementPath BoundPath(string text,string className){
    var path=new ManagementPath(text);
-   if(!path.IsInstance||path.ClassName!=className||!String.IsNullOrEmpty(path.Server)||!String.IsNullOrEmpty(path.NamespacePath)||path.RelativePath!=text)throw new InvalidOperationException();
+   if(!Settings.NativeRelativeTarget(path.IsInstance,path.ClassName,className,path.Server,path.NamespacePath,path.Path,path.RelativePath,text))throw new InvalidOperationException();
    return path;
   }
   byte[] ReadPayload(){

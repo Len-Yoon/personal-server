@@ -143,6 +143,18 @@ $blocked=$false;try{[HaProviderProbeV1.TargetDescriptor]::new(($descriptor+'x'),
 if(-not $blocked){throw 'external_descriptor_pin_ignored'}
 $id='abcdef12-abcd-abcd-abcd-abcdefabcdef'
 if(-not [HaProviderProbeV1.Settings]::CurrentSetting('Microsoft:Hyper-V:System:Realized',$id.ToUpperInvariant(),$id)){throw 'v2_current_setting_rejected'}
+$relative='Msvm_ComputerSystem.Name="'+$id+'"'
+foreach($server in @('', '.')){
+ if(-not [HaProviderProbeV1.Settings]::NativeRelativeTarget($true,'Msvm_ComputerSystem','Msvm_ComputerSystem',$server,'',$relative,$relative,$relative)){throw 'implicit_local_path_rejected'}
+}
+foreach($server in @('localhost','remote','127.0.0.1','..')){
+ if([HaProviderProbeV1.Settings]::NativeRelativeTarget($true,'Msvm_ComputerSystem','Msvm_ComputerSystem',$server,'',$relative,$relative,$relative)){throw 'unverified_server_accepted'}
+}
+if([HaProviderProbeV1.Settings]::NativeRelativeTarget($true,'Msvm_ComputerSystem','Msvm_ComputerSystem','.','root\virtualization\v2',$relative,$relative,$relative)){throw 'explicit_namespace_accepted'}
+if([HaProviderProbeV1.Settings]::NativeRelativeTarget($true,'Msvm_ComputerSystem','Msvm_ComputerSystem','.','',('\\.\root\virtualization\v2:'+$relative),$relative,$relative)){throw 'explicit_full_path_accepted'}
+if([HaProviderProbeV1.Settings]::NativeRelativeTarget($false,'Msvm_ComputerSystem','Msvm_ComputerSystem','.','',$relative,$relative,$relative)){throw 'class_path_accepted'}
+if([HaProviderProbeV1.Settings]::NativeRelativeTarget($true,'OtherClass','Msvm_ComputerSystem','.','',$relative,$relative,$relative)){throw 'other_class_accepted'}
+if([HaProviderProbeV1.Settings]::NativeRelativeTarget($true,'Msvm_ComputerSystem','Msvm_ComputerSystem','.','',$relative,$relative,($relative+'x'))){throw 'different_source_path_accepted'}
 foreach($type in @('Microsoft:Hyper-V:System:Planned','Microsoft:Hyper-V:Snapshot:Realized','microsoft:hyper-v:system:realized',$null)){
  if([HaProviderProbeV1.Settings]::CurrentSetting($type,$id,$id)){throw 'non_current_setting_accepted'}
 }
@@ -177,9 +189,7 @@ foreach($bad in @($text.Replace('operation=settings','operation=shell'),$text.Re
         self.assertIn('try{answer=target.InvokeMethod(method,input,invoke);}',flow)
         self.assertIn('}catch{complete=false;}',flow)
         self.assertIn('if(operation=="settings"&&authorized&&cfg.Values["expected_hyperv_role"]=="true")',flow)
-        self.assertIn('!path.IsInstance',source)
-        self.assertIn('!String.IsNullOrEmpty(path.Server)',source)
-        self.assertIn('!String.IsNullOrEmpty(path.NamespacePath)',source)
+        self.assertIn('Settings.NativeRelativeTarget(path.IsInstance,path.ClassName,className,path.Server,path.NamespacePath,path.Path,path.RelativePath,text)',source)
         parent=(ROOT/'infra/k8s/ha_control/windows-provider-acceptance.ps1').read_text()
         operations=parent[parent.index('$positive=$fixtures[1]'):parent.index('$complete=$true')]
         expected=["'positive_power_on'","'positive_settings'","'negative_settings'","'negative_power_off'","'positive_power_off'"]
