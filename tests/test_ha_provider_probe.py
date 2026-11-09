@@ -49,9 +49,9 @@ $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($env:PROBE_INSTALLER,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'parse_failed'}
 . $env:PROBE_INSTALLER
-$nativeFrame=[pscustomobject]@{scope='owned_vm_provider_role_probe';schema_version=1;process_id=12;process_start_ticks='639298437494210749';operation='settings';stage='valid_operation';attempted=$true;complete=$false;authorized=$true;authorization_denied=$false;return_code=0;administrator=$false;hyperv_role=$true;settings_serialized_value_present=$true;settings_readback_verified=$false}
+$nativeFrame=[pscustomobject]@{scope='owned_vm_provider_role_probe';schema_version=2;process_id=12;process_start_ticks='639298437494210749';operation='settings';stage='valid_operation';attempted=$true;complete=$false;authorized=$true;authorization_denied=$false;return_code=0;administrator=$false;hyperv_role=$true;settings_serialized_value_present=$true;settings_readback_verified=$false;native_target_paths_bound=$true;method_result_verified=$true;target_descriptor_sha256=('a'*64);settings_payload_sha256=('b'*64)}
 Assert-ProbeResultShape $nativeFrame
-foreach($field in @('settings_serialized_value_present','settings_readback_verified','return_code','process_start_ticks')){
+foreach($field in @('settings_serialized_value_present','settings_readback_verified','return_code','process_start_ticks','target_descriptor_sha256','settings_payload_sha256','native_target_paths_bound','method_result_verified')){
  $copy=$nativeFrame.PSObject.Copy();$copy.$field=@($copy.$field)
  $blocked=$false;try{Assert-ProbeResultShape $copy}catch{$blocked=$true}
  if(-not $blocked){throw 'diagnostic_type_confusion_accepted'}
@@ -71,7 +71,7 @@ foreach($path in @('C:\Private\probe.exe anything','"C:\Private\probe.exe" anyth
 }
 if(Test-ProbeServiceImagePath 'C:\Program Files\probe.exe' 'C:\Program Files\probe.exe'){throw 'ambiguous_unquoted_path_accepted'}
 if(-not (Test-ProbeServiceImagePath '"C:\Program Files\probe.exe"' 'C:\Program Files\probe.exe')){throw 'quoted_path_rejected'}
-$frame=[pscustomobject]@{scope='owned_vm_provider_role_probe';schema_version=1;operation='settings';stage='target_query';attempted=$false;complete=$false;authorized=$false;authorization_denied=$false;administrator=$false;hyperv_role=$false}
+$frame=[pscustomobject]@{scope='owned_vm_provider_role_probe';schema_version=2;operation='settings';stage='schema_query';attempted=$false;complete=$false;authorized=$false;authorization_denied=$false;administrator=$false;hyperv_role=$false}
 if(-not (Test-ProbeNoOperation $frame 'settings' $false)){throw 'known_no_operation_not_recognized'}
 foreach($field in @('attempted','complete','authorized','authorization_denied','administrator','hyperv_role')){
  $copy=$frame.PSObject.Copy();$copy.$field=$true
@@ -117,9 +117,30 @@ foreach($forbidden in @('Set-Acl','Restart-Computer','Set-NetIPAddress','New-Net
         script=r'''
 $ErrorActionPreference='Stop'
 Add-Type -Path $env:PROBE_SOURCE -CompilerOptions '/define:PORTABLE_FIXTURE'
-$text="format=ha-provider-probe-v1`nservice_name=HaProbe_0123456789abcdef`nservice_sid=S-1-5-80-1-2-3-4-5`ninstallation_id=$('a'*64)`nvm_id=11111111-1111-1111-1111-111111111111`noperation=settings`nexpected_hyperv_role=false`n"
+$vm='11111111-1111-1111-1111-111111111111'
+$payload=[Text.Encoding]::UTF8.GetBytes(('ha-owned-provider-probe:'+('a'*64)+':tested '+$vm))
+$payloadHash=[HaProviderProbeV1.Settings]::Hash($payload)
+$service=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('Msvm_VirtualSystemManagementService.Name="service"'))
+$target=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('Msvm_VirtualSystemSettingData.InstanceID="Microsoft:config"'))
+$descriptor="format=ha-provider-target-v2`ninstallation_id=$('a'*64)`nvm_id=$vm`nsettings_virtual_system_type=Microsoft:Hyper-V:System:Realized`nsettings_virtual_system_identifier=$vm`nsettings_service_path_b64=$service`nsettings_target_path_b64=$target`nsettings_payload_sha256=$payloadHash`nsettings_payload_bytes=$($payload.Length)`n"
+$descriptorBytes=[Text.Encoding]::UTF8.GetBytes($descriptor)
+$descriptorHash=[HaProviderProbeV1.Settings]::Hash($descriptorBytes)
+$descriptorB64=[Convert]::ToBase64String($descriptorBytes)
+$text="format=ha-provider-probe-v2`nservice_name=HaProbe_0123456789abcdef`nservice_sid=S-1-5-80-1-2-3-4-5`ninstallation_id=$('a'*64)`nvm_id=11111111-1111-1111-1111-111111111111`noperation=settings`nexpected_hyperv_role=false`ntarget_descriptor_b64=$descriptorB64`ntarget_descriptor_sha256=$descriptorHash`n"
 $cfg=[HaProviderProbeV1.Settings]::new($text)
 if($cfg.Marker() -cne ('ha-owned-provider-probe:'+('a'*64))){throw 'not_fixed_owned_marker'}
+if($cfg.Descriptor.VerifyPayload($payload,$cfg.Marker()) -cne [Text.Encoding]::UTF8.GetString($payload)){throw 'payload_not_exact'}
+foreach($bad in @([Text.Encoding]::UTF8.GetBytes('changed'),($payload+[byte]0))){
+ $blocked=$false;try{$cfg.Descriptor.VerifyPayload($bad,$cfg.Marker())|Out-Null}catch{$blocked=$true}
+ if(-not $blocked){throw 'payload_tampering_accepted'}
+}
+foreach($bad in @($descriptor.Replace('vm_id='+$vm,'vm_id=22222222-2222-2222-2222-222222222222'),$descriptor.Replace('Realized','Planned'),($descriptor+"extra=1`n"),$descriptor.Replace('settings_payload_bytes='+$payload.Length,'settings_payload_bytes=1048577'))){
+ $hash=[HaProviderProbeV1.Settings]::Hash([Text.Encoding]::UTF8.GetBytes($bad))
+ $blocked=$false;try{[HaProviderProbeV1.TargetDescriptor]::new($bad,$hash,('a'*64),$vm)|Out-Null}catch{$blocked=$true}
+ if(-not $blocked){throw 'wrong_descriptor_identity_accepted'}
+}
+$blocked=$false;try{[HaProviderProbeV1.TargetDescriptor]::new(($descriptor+'x'),$descriptorHash,('a'*64),$vm)|Out-Null}catch{$blocked=$true}
+if(-not $blocked){throw 'external_descriptor_pin_ignored'}
 $id='abcdef12-abcd-abcd-abcd-abcdefabcdef'
 if(-not [HaProviderProbeV1.Settings]::CurrentSetting('Microsoft:Hyper-V:System:Realized',$id.ToUpperInvariant(),$id)){throw 'v2_current_setting_rejected'}
 foreach($type in @('Microsoft:Hyper-V:System:Planned','Microsoft:Hyper-V:Snapshot:Realized','microsoft:hyper-v:system:realized',$null)){
@@ -144,6 +165,30 @@ foreach($bad in @($text.Replace('operation=settings','operation=shell'),$text.Re
         result=subprocess.run([pwsh,'-NoProfile','-NonInteractive','-Command',script],env=env,capture_output=True,timeout=20)
         self.assertEqual(result.returncode,0,result.stderr.decode(errors='replace'))
         self.assertEqual(result.stdout.decode().strip(),'portable-grammar-only')
+
+    def test_direct_call_has_no_target_query_and_denial_is_exec_only(self):
+        source=SOURCE.read_text()
+        flow=source[source.index('stage="input_validation"'):source.index('if(stopped){complete=false;authorized=false;denied=false;}')]
+        self.assertNotIn('ManagementObjectSearcher',flow)
+        self.assertNotIn('GetRelated(',flow)
+        self.assertIn('schema.GetMethodParameters(method)',flow)
+        self.assertNotIn('target.GetMethodParameters',flow)
+        self.assertIn('stage="valid_operation";attempted=true;',flow)
+        self.assertIn('try{answer=target.InvokeMethod(method,input,invoke);}',flow)
+        self.assertIn('}catch{complete=false;}',flow)
+        self.assertIn('if(operation=="settings"&&authorized&&cfg.Values["expected_hyperv_role"]=="true")',flow)
+        self.assertIn('!path.IsInstance',source)
+        self.assertIn('!String.IsNullOrEmpty(path.Server)',source)
+        self.assertIn('!String.IsNullOrEmpty(path.NamespacePath)',source)
+        parent=(ROOT/'infra/k8s/ha_control/windows-provider-acceptance.ps1').read_text()
+        operations=parent[parent.index('$positive=$fixtures[1]'):parent.index('$complete=$true')]
+        expected=["'positive_power_on'","'positive_settings'","'negative_settings'","'negative_power_off'","'positive_power_off'"]
+        offsets=[operations.index(item) for item in expected]
+        self.assertEqual(offsets,sorted(offsets))
+        self.assertEqual(parent.count('GetText([Management.TextFormat]::WmiDtd20)'),1)
+        self.assertIn('Write-ProbePayload $dir $sids[$i]',parent)
+        self.assertIn('FileMode]::CreateNew',parent)
+        self.assertIn('SetAccessRuleProtection($true,$false)',parent)
 
 
 if __name__=='__main__':

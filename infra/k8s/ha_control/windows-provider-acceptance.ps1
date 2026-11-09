@@ -23,25 +23,26 @@ function Test-ProbeServiceImagePath([string]$Actual,[string]$Expected){
 function Test-ProbeNoOperation($Result,[string]$Operation,[bool]$ExpectedHyperv){
     if($Result.scope -isnot [string] -or $Result.operation -isnot [string] -or $Result.stage -isnot [string] -or
         ($Result.schema_version -isnot [int] -and $Result.schema_version -isnot [long]) -or
-        $Result.scope -cne 'owned_vm_provider_role_probe' -or $Result.schema_version -ne 1 -or $Result.operation -cne $Operation){return $false}
+        $Result.scope -cne 'owned_vm_provider_role_probe' -or $Result.schema_version -ne 2 -or $Result.operation -cne $Operation){return $false}
     foreach($field in @('attempted','complete','authorized','authorization_denied','administrator','hyperv_role')){if($Result.$field -isnot [bool]){return $false}}
     return (-not $Result.attempted -and -not $Result.complete -and -not $Result.authorized -and -not $Result.authorization_denied -and
-        -not $Result.administrator -and $Result.hyperv_role -eq $ExpectedHyperv -and $Result.stage -cin @('identity','target_query','valid_operation'))
+        -not $Result.administrator -and $Result.hyperv_role -eq $ExpectedHyperv -and $Result.stage -cin @('identity','input_validation','schema_query','valid_operation'))
 }
 function Assert-ProbeResultShape($Result){
-    $keys=@('schema_version','scope','process_id','process_start_ticks','operation','stage','attempted','complete','authorized','authorization_denied','return_code','administrator','hyperv_role','settings_serialized_value_present','settings_readback_verified')
+    $keys=@('schema_version','scope','process_id','process_start_ticks','operation','stage','attempted','complete','authorized','authorization_denied','return_code','administrator','hyperv_role','settings_serialized_value_present','settings_readback_verified','native_target_paths_bound','method_result_verified','target_descriptor_sha256','settings_payload_sha256')
     if((($Result.PSObject.Properties.Name|Sort-Object -CaseSensitive)-join ',') -cne (($keys|Sort-Object -CaseSensitive)-join ',')){throw 'fixture_result_unverified'}
-    foreach($field in @('attempted','complete','authorized','authorization_denied','administrator','hyperv_role','settings_serialized_value_present','settings_readback_verified')){
+    foreach($field in @('attempted','complete','authorized','authorization_denied','administrator','hyperv_role','settings_serialized_value_present','settings_readback_verified','native_target_paths_bound','method_result_verified')){
         if($Result.$field -isnot [bool]){throw 'fixture_result_unverified'}
     }
+    foreach($field in @('target_descriptor_sha256','settings_payload_sha256')){if($Result.$field -isnot [string] -or $Result.$field -cnotmatch '^[0-9a-f]{64}$'){throw 'fixture_result_unverified'}}
     foreach($field in @('schema_version','process_id','return_code')){
         if($Result.$field -isnot [int] -and $Result.$field -isnot [long]){throw 'fixture_result_unverified'}
     }
-    if($Result.schema_version -ne 1 -or $Result.process_id -le 0 -or $Result.process_id -gt [int]::MaxValue -or
+    if($Result.schema_version -ne 2 -or $Result.process_id -le 0 -or $Result.process_id -gt [int]::MaxValue -or
         $Result.return_code -lt 0 -or $Result.return_code -gt [uint32]::MaxValue -or
         $Result.scope -isnot [string] -or $Result.scope -cne 'owned_vm_provider_role_probe' -or
         $Result.operation -isnot [string] -or $Result.operation -cnotin @('settings','power_on','power_off') -or
-        $Result.stage -isnot [string] -or $Result.stage -cnotin @('identity','target_query','valid_operation') -or
+        $Result.stage -isnot [string] -or $Result.stage -cnotin @('identity','input_validation','schema_query','valid_operation') -or
         $Result.process_start_ticks -isnot [string] -or $Result.process_start_ticks -cnotmatch '^[0-9]{15,20}$'){throw 'fixture_result_unverified'}
 }
 function Test-ProbeDisconnectedNic($Nic){
@@ -116,7 +117,7 @@ function Invoke-ProbeOperation($Fixture,[string]$Operation){
     if($service.Status -ne 'Stopped'){throw 'fixture_service_not_stopped'}
     $output=Join-Path $Fixture.root 'result\probe.json'
     if(Test-Path -LiteralPath $output){throw 'fixture_result_exists'}
-    $text="format=ha-provider-probe-v1`nservice_name=$($Fixture.name)`nservice_sid=$($Fixture.sid)`ninstallation_id=$script:installation`nvm_id=$script:vmId`noperation=$Operation`nexpected_hyperv_role=$($Fixture.role)`n"
+    $text="format=ha-provider-probe-v2`nservice_name=$($Fixture.name)`nservice_sid=$($Fixture.sid)`ninstallation_id=$script:installation`nvm_id=$script:vmId`noperation=$Operation`nexpected_hyperv_role=$($Fixture.role)`ntarget_descriptor_b64=$script:targetDescriptorB64`ntarget_descriptor_sha256=$script:targetDescriptorSha256`n"
     [IO.File]::WriteAllText((Join-Path $Fixture.root 'probe.args'),$text,[Text.UTF8Encoding]::new($false))
     # A fast one-shot may already have stopped when StartService returns. Do
     # not repeat it: reconcile the pinned service state and its exact result.
@@ -139,6 +140,7 @@ function Invoke-ProbeOperation($Fixture,[string]$Operation){
     Add-ProbeProcess $Fixture $result.process_id $result.process_start_ticks
     Wait-ProbeProcesses $Fixture
     Assert-ProbeResultShape $result
+    if($result.target_descriptor_sha256 -cne $script:targetDescriptorSha256 -or $result.settings_payload_sha256 -cne $script:settingsPayloadSha256){throw 'fixture_result_unverified'}
     # Preserve an exact-source failed query's diagnostic after its process has
     # exited. No query denial counts as a method authorization denial. Only a
     # verified attempted=false frame can clear the pending-operation barrier.
@@ -149,9 +151,10 @@ function Invoke-ProbeOperation($Fixture,[string]$Operation){
         }
         throw 'fixture_service_incomplete'
     }
-    if($result.scope -cne 'owned_vm_provider_role_probe' -or $result.schema_version -ne 1 -or
+    if($result.scope -cne 'owned_vm_provider_role_probe' -or $result.schema_version -ne 2 -or
         $result.operation -cne $Operation -or $result.attempted -ne $true -or $result.complete -ne $true -or
-        $result.administrator -ne $false -or $result.hyperv_role -ne ($Fixture.role -ceq 'true')){throw 'fixture_result_unverified'}
+        $result.administrator -ne $false -or $result.hyperv_role -ne ($Fixture.role -ceq 'true') -or
+        -not $result.native_target_paths_bound -or -not $result.method_result_verified){throw 'fixture_result_unverified'}
     if($Fixture.role -ceq 'true'){
         if($result.authorized -ne $true -or $result.authorization_denied -ne $false -or $result.return_code -ne 0){throw 'positive_control_failed'}
         if($Operation -ceq 'settings' -and (-not $result.settings_serialized_value_present -or -not $result.settings_readback_verified)){throw 'positive_control_failed'}
@@ -165,9 +168,63 @@ function Invoke-ProbeOperation($Fixture,[string]$Operation){
 }
 function Test-ProbeTarget{
     $vm=Get-VM -Id $script:vmId -ErrorAction Stop
-    if($vm.Name -cne $script:vmName -or $vm.Notes -cne ('ha-owned-provider-probe:'+$script:installation) -or
+    if($vm.Generation -ne 2 -or $vm.Name -cne $script:vmName -or $vm.Notes -cne ('ha-owned-provider-probe:'+$script:installation) -or
         @(Get-VMHardDiskDrive -VM $vm).Count -ne 0 -or @(Get-VMNetworkAdapter -VM $vm|Where-Object {-not (Test-ProbeDisconnectedNic $_)}).Count -ne 0){throw 'fixture_vm_ownership_changed'}
     return $vm
+}
+function New-ProbeTargetDescriptor {
+    # ROOT/admin makes one typed payload from the actual owned current setting.
+    # Both isolated service tokens receive exactly these bytes, not a query recipe.
+    $vm=Test-ProbeTarget
+    if($vm.State -ne 'Off'){throw 'fixture_vm_ownership_changed'}
+    Add-Type -AssemblyName System.Management
+    $scope=[Management.ManagementScope]::new('\\.\root\virtualization\v2');$scope.Connect()
+    $search=[Management.ManagementObjectSearcher]::new($scope,[Management.ObjectQuery]::new("SELECT * FROM Msvm_ComputerSystem WHERE Name='$script:vmId'"))
+    $found=$search.Get();$setting=$null;$service=$null;$related=$null;$services=$null;$serviceSearch=$null
+    try{
+        if($found.Count -ne 1){throw 'fixture_vm_ownership_changed'}
+        foreach($item in $found){
+            $related=$item.GetRelated('Msvm_VirtualSystemSettingData','Msvm_SettingsDefineState',$null,$null,$null,$null,$false,$null)
+            foreach($candidate in $related){
+                if([string]$candidate['VirtualSystemType'] -ceq 'Microsoft:Hyper-V:System:Realized' -and [string]$candidate['VirtualSystemIdentifier'] -ieq $script:vmId){
+                    if($null -ne $setting){throw 'fixture_vm_ownership_changed'}
+                    $setting=$candidate
+                }
+            }
+        }
+        if($null -eq $setting -or @($setting['Notes']).Count -ne 1 -or [string]$setting['Notes'][0] -cne ('ha-owned-provider-probe:'+$script:installation)){throw 'fixture_vm_ownership_changed'}
+        $serviceSearch=[Management.ManagementObjectSearcher]::new($scope,[Management.ObjectQuery]::new('SELECT * FROM Msvm_VirtualSystemManagementService'))
+        $services=$serviceSearch.Get()
+        if($services.Count -ne 1){throw 'fixture_vm_ownership_changed'}
+        foreach($candidate in $services){$service=$candidate}
+        $setting['Notes']=[string[]]@('ha-owned-provider-probe:'+$script:installation+':tested')
+        $script:settingsPayload=[Text.UTF8Encoding]::new($false,$true).GetBytes($setting.GetText([Management.TextFormat]::WmiDtd20))
+        if($script:settingsPayload.Length -lt 1 -or $script:settingsPayload.Length -gt 1048576){throw 'fixture_result_unverified'}
+        $script:settingsPayloadSha256=Get-ProbeHash $script:settingsPayload
+        $svc=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($service.Path.RelativePath))
+        $target=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($setting.Path.RelativePath))
+        $descriptor="format=ha-provider-target-v2`ninstallation_id=$script:installation`nvm_id=$script:vmId`nsettings_virtual_system_type=Microsoft:Hyper-V:System:Realized`nsettings_virtual_system_identifier=$($setting['VirtualSystemIdentifier'])`nsettings_service_path_b64=$svc`nsettings_target_path_b64=$target`nsettings_payload_sha256=$script:settingsPayloadSha256`nsettings_payload_bytes=$($script:settingsPayload.Length)`n"
+        $descriptorBytes=[Text.Encoding]::UTF8.GetBytes($descriptor)
+        $script:targetDescriptorB64=[Convert]::ToBase64String($descriptorBytes)
+        $script:targetDescriptorSha256=Get-ProbeHash $descriptorBytes
+    }finally{
+        if($null -ne $related){foreach($item in $related){$item.Dispose()};$related.Dispose()}
+        if($null -ne $services){foreach($item in $services){$item.Dispose()};$services.Dispose()}
+        foreach($item in $found){$item.Dispose()};$found.Dispose();$search.Dispose()
+        if($null -ne $serviceSearch){$serviceSearch.Dispose()}
+    }
+}
+function Write-ProbePayload([string]$Root,[string]$Sid){
+    $file=[IO.FileStream]::new((Join-Path $Root 'settings.xml'),[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try{$file.Write($script:settingsPayload,0,$script:settingsPayload.Length);$file.Flush($true)}finally{$file.Dispose()}
+    $acl=[Security.AccessControl.FileSecurity]::new();$acl.SetAccessRuleProtection($true,$false)
+    $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+    foreach($owner in @('S-1-5-18','S-1-5-32-544')){$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($owner),'FullControl','Allow'))}
+    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new($Sid),'ReadAndExecute','Allow'))
+    [IO.File]::SetAccessControl((Join-Path $Root 'settings.xml'),$acl)
+    # Parent root has only Admin/System full control and this one SID RX.
+    # Child result directory is the sole location writable by that service.
+    if((Get-ProbeHash ([IO.File]::ReadAllBytes((Join-Path $Root 'settings.xml')))) -cne $script:settingsPayloadSha256){throw 'fixture_result_unverified'}
 }
 function Invoke-ProviderAcceptance {
     if(-not $Go -or [Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or -not [Environment]::Is64BitProcess -or
@@ -194,7 +251,7 @@ function Invoke-ProviderAcceptance {
     $null=New-ProbeDirectory $script:root $sids
     $journal=Join-Path $script:root 'ownership.json'
     $record=[ordered]@{schema_version=1;installation_id=$script:installation;source_commit=$SourceCommit;probe_source_sha256=$ProbeSourceSha256;artifact_sha256=$ArtifactSha256;boot_ticks=$bootBefore;namespace_descriptor_sha256=$namespaceBefore;vm_id=$null;service_names=$names;phase='fixture_vm_creation';complete=$false}
-    $failureType=$null;$failureReason=$null;$record['settings_readback']=$null
+    $failureType=$null;$failureReason=$null;$record['settings_readback']=$null;$record['target_descriptor_sha256']=$null;$record['settings_payload_sha256']=$null;$record['positive_negative_dataset_identical']=$false
     [IO.File]::WriteAllText($journal,($record|ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
     try{
         $config=Join-Path $script:root 'vm';$null=New-ProbeDirectory $config
@@ -206,10 +263,16 @@ function Invoke-ProviderAcceptance {
         Set-VMProcessor -VM $vm -Count 1 -Maximum 10
         Set-ProbePhase $record $journal 'fixture_target_validation'
         $null=Test-ProbeTarget
+        New-ProbeTargetDescriptor
+        $record['target_descriptor_sha256']=$script:targetDescriptorSha256
+        $record['settings_payload_sha256']=$script:settingsPayloadSha256
+        $record['settings_payload_bytes']=$script:settingsPayload.Length
+        $record['positive_negative_dataset_identical']=$true
         Set-ProbePhase $record $journal 'fixture_service_creation'
         for($i=0;$i -lt 2;$i++){
             $role=if($i -eq 0){'false'}else{'true'};$dir=Join-Path $script:root ('service'+$i)
             $null=New-ProbeDirectory $dir @($sids[$i]);$null=New-ProbeDirectory (Join-Path $dir 'result') @() $sids[$i]
+            Write-ProbePayload $dir $sids[$i]
             $exe=Join-Path $dir 'probe.exe';[IO.File]::WriteAllBytes($exe,$bytes)
             $fixture=[pscustomobject]@{name=$names[$i];sid=$sids[$i];root=$dir;role=$role;processes=@{}};$fixtures+=@($fixture)
             Invoke-ProbeSc @('create',$fixture.name,'binPath=',('"'+$exe+'"'),'start=','demand','obj=',('NT SERVICE\'+$fixture.name))
@@ -219,14 +282,16 @@ function Invoke-ProviderAcceptance {
             if($role -ceq 'true'){Add-LocalGroupMember -SID 'S-1-5-32-578' -Member $fixture.sid}
         }
         $positive=$fixtures[1];$negative=$fixtures[0]
+        Set-ProbePhase $record $journal 'positive_power_on'
+        $results+=@(Invoke-ProbeOperation $positive 'power_on')
+        if((Test-ProbeTarget).State -ne 'Running'){throw 'positive_power_not_applied'}
         Set-ProbePhase $record $journal 'positive_settings'
         $results+=@(Invoke-ProbeOperation $positive 'settings')
         $vm=Get-VM -Id $script:vmId
+        if($vm.State -ne 'Running'){throw 'positive_power_not_applied'}
         $record['settings_readback']=[ordered]@{notes_length=([string]$vm.Notes).Length;original_marker_exact=($vm.Notes -ceq ('ha-owned-provider-probe:'+$script:installation));tested_marker_exact=($vm.Notes -ceq ('ha-owned-provider-probe:'+$script:installation+':tested'));notes_sha256=(Get-ProbeHash ([Text.Encoding]::UTF8.GetBytes([string]$vm.Notes)))}
         if($vm.Notes -cne ('ha-owned-provider-probe:'+$script:installation+':tested')){throw 'positive_settings_not_applied'}
         Set-VM -VM $vm -Notes ('ha-owned-provider-probe:'+$script:installation)
-        Set-ProbePhase $record $journal 'positive_power_on'
-        $results+=@(Invoke-ProbeOperation $positive 'power_on')
         if((Test-ProbeTarget).State -ne 'Running'){throw 'positive_power_not_applied'}
         Set-ProbePhase $record $journal 'negative_settings'
         $results+=@(Invoke-ProbeOperation $negative 'settings')
@@ -293,7 +358,7 @@ function Invoke-ProviderAcceptance {
         # recursively delete a directory after a failed/ambiguous remote step.
         [ordered]@{scope='fresh_disconnected_vm_provider_role_acceptance';source_commit=$SourceCommit;probe_source_sha256=$ProbeSourceSha256;artifact_sha256=$ArtifactSha256;
             complete=$complete;cleanup_verified=$clean;phase=$record.phase;failure_type=$failureType;failure_reason=$failureReason;namespace_descriptor_unchanged=($namespaceBefore -ceq $namespaceAfter);namespace_acl_write_performed=$false;
-            namespace_sacl_acceptance=$false;boot_unchanged=($bootBefore -ceq $bootAfter);production_transition=$false;results=$results;probe_diagnostics=$script:probeDiagnostics;settings_readback=$record.settings_readback}|ConvertTo-Json -Depth 6 -Compress
+            namespace_sacl_acceptance=$false;boot_unchanged=($bootBefore -ceq $bootAfter);production_transition=$false;results=$results;probe_diagnostics=$script:probeDiagnostics;settings_readback=$record.settings_readback;target_descriptor_sha256=$record.target_descriptor_sha256;settings_payload_sha256=$record.settings_payload_sha256;positive_negative_dataset_identical=$record.positive_negative_dataset_identical}|ConvertTo-Json -Depth 6 -Compress
     }
 }
 if($MyInvocation.InvocationName -ne '.'){Invoke-ProviderAcceptance}

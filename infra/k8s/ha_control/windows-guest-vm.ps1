@@ -33,12 +33,18 @@ function Get-GuestVmNames($Spec){
     $prefix='N100HA_'+$Spec.installation_id.Substring(0,16)
     return [pscustomobject]@{vm=($prefix+'_'+$Spec.node);switch=($prefix+'_data');pipe=('\\.\pipe\'+$prefix+'_'+$Spec.node+'_com1')}
 }
+function Get-GuestVmParent($Entry){
+    # Parent returns a raw CLR object; provider-added PSIsContainer is absent.
+    if($Entry -is [IO.DirectoryInfo]){return $Entry.Parent}
+    if($Entry -is [IO.FileInfo]){return $Entry.Directory}
+    throw 'guest_vm_path_type_rejected'
+}
 function Assert-GuestVmPath([string]$Path){
     if($Path -cnotmatch '^[A-Za-z]:\\' -or $Path.Substring(2).Contains(':') -or $Path -match '(^|\\)\.\.?($|\\)' -or $Path -match '[ .](\\|$)' -or $Path.Contains('/')){throw 'guest_vm_path_rejected'}
     $entry=Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     while($null -ne $entry){
         if($entry.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'guest_vm_reparse_rejected'}
-        $entry=if($entry.PSIsContainer){$entry.Parent}else{$entry.Directory}
+        $entry=Get-GuestVmParent $entry
     }
 }
 function Assert-GuestVmPrivate([string]$Path,[string]$VmSid='',[bool]$VmWriter=$false){
