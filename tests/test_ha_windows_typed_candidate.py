@@ -71,13 +71,14 @@ namespace TypedFixtures {
   public ComWmiProperty this[string name]{get{return Values[name];}}
  }
  public sealed class ComWmiRow {public ComWmiProperties Properties_ {get;set;}}
- public sealed class ComWmiRows {
-  public object Row;public int MoveDelay;public int PropertyReads;public int NextCalls;public int ForbiddenCalls;public int Disposed;public bool DisposeThrows;public string Mode="normal";
+ public sealed class ComWmiRows : N100HaTypedCandidateV1.IWbemObjectSetFirstGetter {
+  public object Row;public int MoveDelay;public int PropertyReads;public int ProjectionReads;public int NextCalls;public int ForbiddenCalls;public int Disposed;public bool DisposeThrows;public string Mode="normal";
   public int Count {get{throw new System.Exception("PRIVATE_NATIVE_COUNT_FORBIDDEN");}}
   // Deliberately does not implement managed IEnumerable. Only the official
   // DISPID_NEWENUM(-4) property and a standard IEnumVARIANT are provided.
   [System.Runtime.InteropServices.DispId(-4)]
-  public object _NewEnum {get{PropertyReads++;if(Mode=="newenum-fault")throw new System.Exception("PRIVATE_NEWENUM");if(Mode=="mapped-ienumerator")return new MappedIterator(this);return new Iterator(this);}}
+  public object _NewEnum {get{ProjectionReads++;return new MappedIterator(this);}}
+  object N100HaTypedCandidateV1.IWbemObjectSetFirstGetter.NewEnum {get{PropertyReads++;if(Mode=="newenum-fault")throw new System.Exception("PRIVATE_NEWENUM");if(Mode=="mapped-ienumerator")return new MappedIterator(this);if(Mode=="wrong-return-type")return "invalid";return new Iterator(this);}}
   sealed class MappedIterator : System.Collections.IEnumerator,System.IDisposable {
    readonly ComWmiRows owner;public MappedIterator(ComWmiRows rows){owner=rows;}
    public object Current{get{owner.ForbiddenCalls++;throw new System.Exception("PRIVATE_FALLBACK_CURRENT");}}
@@ -115,6 +116,9 @@ namespace TypedFixtures {
   public ComWmiRows Rows;public string LastQuery;public string LastLanguage;public int LastFlags;
   public object ExecQuery(string query,string language,int flags){LastQuery=query;LastLanguage=language;LastFlags=flags;return Rows;}
  }
+ [System.Runtime.InteropServices.ComImport,System.Runtime.InteropServices.Guid("00000000-0000-0000-0000-000000000001"),System.Runtime.InteropServices.InterfaceType(System.Runtime.InteropServices.ComInterfaceType.InterfaceIsDual)]
+ public interface WrongObjectSetGetter { [System.Runtime.InteropServices.DispId(-4)] object NewEnum{[return:System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.IUnknown)]get;} }
+ public sealed class WrongObjectSet : WrongObjectSetGetter {public int Reads;public object NewEnum{get{Reads++;throw new System.Exception("PRIVATE_WRONG_IID");}}}
  // Full documented optional arities, not the abbreviated 2/0/3-argument
  // methods used by earlier fixtures. These managed doubles perform no COM,
  // connections, registration, enumeration, credential lookup or native calls.
@@ -148,6 +152,13 @@ namespace TypedFixtures {
  }
  public static class VariantProbe {
   public static bool OldCastFails(object value){try{((System.Collections.IEnumerable)value).GetEnumerator();return false;}catch(System.InvalidCastException){return true;}}
+  // Models the documented CLR reflection DISPID_NEWENUM projection in a
+  // managed fixture; it is not a Windows COM-stub execution or acceptance.
+  public static bool ReflectionProjectionRejected(object value){
+   object projected=value.GetType().InvokeMember("_NewEnum",System.Reflection.BindingFlags.GetProperty,null,value,null,System.Globalization.CultureInfo.InvariantCulture);
+   try{return projected is System.Collections.IEnumerator && !(projected is System.Runtime.InteropServices.ComTypes.IEnumVARIANT);}
+   finally {var disposable=projected as System.IDisposable;if(disposable!=null)disposable.Dispose();}
+  }
  }
 }
 '''
@@ -469,7 +480,7 @@ if($iterator.GetType().GetField('fetched',[Reflection.BindingFlags]'Instance,Non
     def test_newenum_contract_without_ienumerable_and_faulty_next_results(self):
         self.assertEqual(self.ps(r'''
 $nativeType=[N100HaTypedCandidateV1.Collector].GetNestedType('NativeWmiRows',[Reflection.BindingFlags]::NonPublic)
-foreach($mode in @('normal','ok-empty','false-row','false-dirty','ok-null','failed-row','bad-count','unknown-success','throw-row','missing-fetched','false-missing-fetched','newenum-fault','mapped-ienumerator')){
+foreach($mode in @('normal','ok-empty','false-row','false-dirty','ok-null','failed-row','bad-count','unknown-success','throw-row','missing-fetched','false-missing-fetched','newenum-fault','mapped-ienumerator','wrong-return-type')){
  $rows=[TypedFixtures.ComWmiRows]::new();$rows.Row=[TypedFixtures.ComWmiRow]::new();$rows.Mode=$mode
  if(-not [TypedFixtures.VariantProbe]::OldCastFails($rows) -or $rows.PropertyReads -ne 0){throw 'old_cast_gap_not_reproduced'}
  $budget=[N100HaTypedCandidateV1.Budget]::new(2000)
@@ -485,11 +496,45 @@ foreach($mode in @('normal','ok-empty','false-row','false-dirty','ok-null','fail
   if($iterator.GetType().GetField('fetched',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($iterator) -ne [IntPtr]::Zero -or $null -ne $iterator.Current){throw 'variant_cleanup_lost'}
  }
  $adapter.Dispose()
- if($mode -cne 'newenum-fault' -and $rows.Disposed -ne 1){throw 'owned_enum_not_closed'}
- if($rows.PropertyReads -ne 1 -or $rows.ForbiddenCalls -ne 0 -or $rows.NextCalls -gt 1){throw 'fallback_or_retry_detected'}
+ if($mode -cnotin @('newenum-fault','wrong-return-type') -and $rows.Disposed -ne 1){throw 'owned_enum_not_closed'}
+ if($rows.PropertyReads -ne 1 -or $rows.ProjectionReads -ne 0 -or $rows.ForbiddenCalls -ne 0 -or $rows.NextCalls -gt 1){throw 'fallback_or_retry_detected'}
 }
 'newenum-contract-checked'
 ''').strip(), 'newenum-contract-checked')
+
+    def test_dual_first_getter_metadata_and_projection_model(self):
+        self.assertEqual(self.ps(r'''
+$view=[N100HaTypedCandidateV1.IWbemObjectSetFirstGetter]
+if(-not $view.IsImport -or $view.GUID.ToString() -cne '76a6415f-cb41-11d1-8b02-00600806d9b6'){throw 'imported_iid_changed'}
+$interface=$view.GetCustomAttributes([Runtime.InteropServices.InterfaceTypeAttribute],$false)[0]
+if($interface.Value -ne [Runtime.InteropServices.ComInterfaceType]::InterfaceIsDual){throw 'dispatch_only_view'}
+$methods=@($view.GetMethods([Reflection.BindingFlags]'Public,Instance,DeclaredOnly'))
+$properties=@($view.GetProperties())
+if($methods.Count -ne 1 -or $methods[0].Name -cne 'get_NewEnum' -or $methods[0].ReturnType -ne [object] -or $properties.Count -ne 1 -or $properties[0].CanWrite){throw 'not_first_getter_only'}
+if($properties[0].GetCustomAttributes([Runtime.InteropServices.DispIdAttribute],$false)[0].Value -ne -4){throw 'dispid_changed'}
+if($methods[0].ReturnParameter.GetCustomAttributes([Runtime.InteropServices.MarshalAsAttribute],$false)[0].Value -ne [Runtime.InteropServices.UnmanagedType]::IUnknown){throw 'return_marshaler_changed'}
+# This is a managed projection model informed by official CLR source, not an
+# execution of the CLR4 native COM stub. The typed getter is used by the real
+# adapter; the reflection-facing property deliberately models IEnumerator.
+$projection=[TypedFixtures.ComWmiRows]::new()
+if(-not [TypedFixtures.VariantProbe]::ReflectionProjectionRejected($projection) -or $projection.ProjectionReads -ne 1 -or $projection.PropertyReads -ne 0 -or $projection.Disposed -ne 1){throw 'projection_gap_not_demonstrated'}
+$nativeType=[N100HaTypedCandidateV1.Collector].GetNestedType('NativeWmiRows',[Reflection.BindingFlags]::NonPublic)
+$rows=[TypedFixtures.ComWmiRows]::new();$rows.Row=[TypedFixtures.ComWmiRow]::new();$budget=[N100HaTypedCandidateV1.Budget]::new(2000)
+$adapter=[Activator]::CreateInstance($nativeType,[Reflection.BindingFlags]'Instance,Public,NonPublic',$null,@($rows,[N100HaTypedCandidateV1.WmiKind]::Services,$budget),$null)
+$iterator=$adapter.GetEnumerator()
+if(-not $iterator.MoveNext() -or $iterator.MoveNext()){throw 'dual_rows_or_eof_changed'}
+$iterator.Dispose()
+if($rows.ProjectionReads -ne 0 -or $rows.PropertyReads -ne 1 -or $rows.Disposed -ne 1 -or -not [object]::ReferenceEquals($nativeType.GetField('value',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($adapter),$rows)){throw 'borrowed_view_ownership_changed'}
+$adapter.Dispose()
+foreach($invalid in @([object]::new(),[TypedFixtures.WrongObjectSet]::new())){
+ $budget=[N100HaTypedCandidateV1.Budget]::new(2000)
+ $adapter=[Activator]::CreateInstance($nativeType,[Reflection.BindingFlags]'Instance,Public,NonPublic',$null,@($invalid,[N100HaTypedCandidateV1.WmiKind]::Services,$budget),$null)
+ if((Reason {$adapter.GetEnumerator()}) -cne 'query_failed' -or $budget.FailurePhase -cne 'services_enumerator'){throw 'wrong_interface_accepted'}
+ if($invalid -is [TypedFixtures.WrongObjectSet] -and $invalid.Reads -ne 0){throw 'wrong_iid_getter_called'}
+ $adapter.Dispose()
+}
+'dual-contract-model-checked'
+''').strip(), 'dual-contract-model-checked')
 
     def test_exact_call_helper_full_optional_arities_and_negative_control(self):
         self.assertEqual(self.ps(r'''

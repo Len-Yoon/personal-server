@@ -85,6 +85,22 @@ namespace N100HaTypedCandidateV1 {
     public interface IWmiRow : IDisposable { WmiProperty Read(string name); }
     public interface IWmiRows : IEnumerable<IWmiRow>, IDisposable { }
     public interface IWmiReader : IDisposable { IWmiRows Query(WmiKind kind); }
+    // First-getter-only view, NOT a declaration of the complete object set.
+    // Official ISWbemObjectSet is dual and its first member is _NewEnum:
+    // HRESULT _NewEnum([out, retval] IUnknown**). The first dual slot follows
+    // IUnknown/IDispatch's seven slots. No other object-set member is exposed.
+    // https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/um/WbemDisp.Idl
+    // Reflection's DISPID_NEWENUM return handling projects to IEnumerator;
+    // InterfaceIsIDispatch can forward back to InvokeMember. Use the dual
+    // vtable getter and explicit IUnknown marshaling instead, not a fallback.
+    // https://raw.githubusercontent.com/dotnet/coreclr/master/src/vm/interoputil.cpp
+    // https://raw.githubusercontent.com/dotnet/runtime/main/src/coreclr/vm/clrtocomcall.cpp
+    // https://raw.githubusercontent.com/microsoft/referencesource/main/mscorlib/system/rttype.cs
+    [ComImport,Guid("76A6415F-CB41-11D1-8B02-00600806D9B6"),InterfaceType(ComInterfaceType.InterfaceIsDual)]
+    public interface IWbemObjectSetFirstGetter {
+        [DispId(-4)]
+        object NewEnum { [return:MarshalAs(UnmanagedType.IUnknown)] get; }
+    }
     public sealed class ServiceRecord {
         public string Name {get;set;}public string PathName {get;set;}public string StartName {get;set;}
         public string StartMode {get;set;}public string ServiceType {get;set;}public string State {get;set;}
@@ -377,11 +393,11 @@ namespace N100HaTypedCandidateV1 {
             public IEnumerator<IWmiRow> GetEnumerator(){
                 return budget.At(EnumPhase(kind),delegate {
                     if(enumerated) Unsupported();enumerated=true;budget.Check();
-                    // ISWbemObjectSet._NewEnum is [DISPID_NEWENUM(-4), propget]
-                    // returning IUnknown; the collection need not be managed
-                    // IEnumerable. No automatic IEnumerator fallback is used.
-                    // https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/um/WbemDisp.Idl
-                    object iterator=Get(value,"_NewEnum");
+                    // Borrow the collection's typed view. Its RCW is already
+                    // owned by NativeWmiRows: never release this alias separately.
+                    var view=value as IWbemObjectSetFirstGetter;
+                    if(view==null)throw new Blocked("query_failed");
+                    object iterator=view.NewEnum;
                     try {
                         budget.Check();
                         var variant=iterator as System.Runtime.InteropServices.ComTypes.IEnumVARIANT;

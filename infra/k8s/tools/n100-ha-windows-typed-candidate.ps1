@@ -5,7 +5,7 @@ $ProgressPreference='SilentlyContinue'
 Set-StrictMode -Version Latest
 
 function Invoke-HaWindowsTypedCandidate([string]$Source,[string]$ExpectedSha256,[string]$Scope='tasks') {
-    $approved='ec088f8e543dad1689ef055d0d32f1b446b34958e3f2151a420ffd59ed1ec1ac'
+    $approved='5a1865faee0b1e502ea16b54642601615b40a43ff5ea0a562ae729789b46ca98'
     $preparation=[Diagnostics.Stopwatch]::StartNew()
     $request=[Diagnostics.Stopwatch]::StartNew()
     $report=$null;$reason='source_rejected';$status='blocked'
