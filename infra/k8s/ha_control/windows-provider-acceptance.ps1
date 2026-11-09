@@ -20,6 +20,14 @@ function Test-ProbeServiceImagePath([string]$Actual,[string]$Expected){
     if([string]::IsNullOrEmpty($Expected) -or $Expected.Contains('"')){return $false}
     return ($Actual -ceq ('"'+$Expected+'"') -or ($Expected -notmatch '\s' -and $Actual -ceq $Expected))
 }
+function Test-ProbeNoOperation($Result,[string]$Operation,[bool]$ExpectedHyperv){
+    if($Result.scope -isnot [string] -or $Result.operation -isnot [string] -or $Result.stage -isnot [string] -or
+        ($Result.schema_version -isnot [int] -and $Result.schema_version -isnot [long]) -or
+        $Result.scope -cne 'owned_vm_provider_role_probe' -or $Result.schema_version -ne 1 -or $Result.operation -cne $Operation){return $false}
+    foreach($field in @('attempted','complete','authorized','authorization_denied','administrator','hyperv_role')){if($Result.$field -isnot [bool]){return $false}}
+    return (-not $Result.attempted -and -not $Result.complete -and -not $Result.authorized -and -not $Result.authorization_denied -and
+        -not $Result.administrator -and $Result.hyperv_role -eq $ExpectedHyperv -and $Result.stage -cin @('identity','target_query','valid_operation'))
+}
 function Test-ProbeDisconnectedNic($Nic){
     # An unattached adapter may expose null/empty SwitchId rather than Guid.Empty.
     # Both independent switch fields must prove disconnection; unknown IDs fail.
@@ -110,10 +118,19 @@ function Invoke-ProbeOperation($Fixture,[string]$Operation){
     }while($service.Status -ne 'Stopped' -and $watch.Elapsed.TotalSeconds -lt 20)
     if($service.Status -ne 'Stopped'){throw 'fixture_service_timeout'}
     $state=Get-CimInstance Win32_Service -Filter ("Name='"+$Fixture.name+"'")
-    if($state.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $output)){throw 'fixture_service_incomplete'}
+    if(-not (Test-Path -LiteralPath $output)){throw 'fixture_service_incomplete'}
     $result=[IO.File]::ReadAllText($output)|ConvertFrom-Json
     Add-ProbeProcess $Fixture $result.process_id $result.process_start_ticks
     Wait-ProbeProcesses $Fixture
+    # Preserve an exact-source failed query's diagnostic after its process has
+    # exited. No query denial counts as a method authorization denial. Only a
+    # verified attempted=false frame can clear the pending-operation barrier.
+    if($state.ExitCode -ne 0 -or $result.complete -ne $true){
+        if(Test-ProbeNoOperation $result $Operation ($Fixture.role -ceq 'true')){
+            $script:pendingOperation=$false;$script:probeDiagnostics+=@($result)
+        }
+        throw 'fixture_service_incomplete'
+    }
     if($result.scope -cne 'owned_vm_provider_role_probe' -or $result.schema_version -ne 1 -or
         $result.operation -cne $Operation -or $result.attempted -ne $true -or $result.complete -ne $true -or
         $result.administrator -ne $false -or $result.hyperv_role -ne ($Fixture.role -ceq 'true')){throw 'fixture_result_unverified'}
@@ -146,7 +163,7 @@ function Invoke-ProviderAcceptance {
     if((Get-Item -LiteralPath $base -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'fixture_parent_reparse'}
     $script:installation=([Guid]::NewGuid().ToString('N')+[Guid]::NewGuid().ToString('N'))
     $short=$script:installation.Substring(0,16);$script:root=Join-Path $base ('HaProbe_'+$short)
-    $script:vmName='HaProbeVM_'+$short;$script:vmId=$null;$script:pendingOperation=$false;$fixtures=@();$results=@();$complete=$false;$clean=$true
+    $script:vmName='HaProbeVM_'+$short;$script:vmId=$null;$script:pendingOperation=$false;$script:probeDiagnostics=@();$fixtures=@();$results=@();$complete=$false;$clean=$true
     $namespaceBefore=Get-ProbeNamespaceHash
     $bootBefore=$os.LastBootUpTime.ToUniversalTime().Ticks.ToString()
     $adminsBefore=@(Get-LocalGroupMember -SID 'S-1-5-32-544'|ForEach-Object{$_.SID.Value}|Sort-Object)
@@ -256,7 +273,7 @@ function Invoke-ProviderAcceptance {
         # recursively delete a directory after a failed/ambiguous remote step.
         [ordered]@{scope='fresh_disconnected_vm_provider_role_acceptance';source_commit=$SourceCommit;probe_source_sha256=$ProbeSourceSha256;artifact_sha256=$ArtifactSha256;
             complete=$complete;cleanup_verified=$clean;phase=$record.phase;failure_type=$failureType;failure_reason=$failureReason;namespace_descriptor_unchanged=($namespaceBefore -ceq $namespaceAfter);namespace_acl_write_performed=$false;
-            namespace_sacl_acceptance=$false;boot_unchanged=($bootBefore -ceq $bootAfter);production_transition=$false;results=$results}|ConvertTo-Json -Depth 6 -Compress
+            namespace_sacl_acceptance=$false;boot_unchanged=($bootBefore -ceq $bootAfter);production_transition=$false;results=$results;probe_diagnostics=$script:probeDiagnostics}|ConvertTo-Json -Depth 6 -Compress
     }
 }
 if($MyInvocation.InvocationName -ne '.'){Invoke-ProviderAcceptance}
