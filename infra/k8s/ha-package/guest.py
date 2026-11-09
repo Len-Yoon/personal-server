@@ -8,7 +8,7 @@ import re
 
 SERVICES = ('portal-web','book-memo','youtube-memo','crawler-worker','car-care-worker','homeops-executor','system-agent')
 PORTS = dict(zip(SERVICES,(8000,8003,8002,8001,8015,8011,8010)))
-IMAGE = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[0-9a-f]{64}')
+IMAGE = re.compile(r'(?:sha256:[0-9a-f]{64}|[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[0-9a-f]{64})')
 HEX = re.compile(r'[0-9a-f]{64}')
 ROOT = '/etc/n100-ha'
 RUN = '/run/n100-ha'
@@ -124,15 +124,22 @@ def render(spec):
         config += [f'backend app_{service}',f'  server app unix@/run/ha-ingress/{service}/http.sock maxconn 16 maxqueue 16']
     sequence=['verify source/image/plan and installation identities',
         'provision fresh guest directories, immutable config, separate ingress CA and private keys',
-        'restore seven services and PostgreSQL blobs while writer authority remains closed',
+        'request explicit operational approval before legacy shutdown, fencing, route or writer transition and issuance of installed authority',
+        'complete approved legacy writer decommission and provider credential revocation or durable actor fencing; capture the final consistent snapshot',
+        'restore all seven services and PostgreSQL blobs from that final consistent snapshot while writer authority remains closed',
         'start gateway; wait for all 21 fixed Unix sockets; start broker; start seven apps; start ingress',
         'verify Linux uid/network/mount/credential isolation and both PostgreSQL peers',
         'verify Windows Hpre + PostgreSQL authority/peer + Hpost total <=2 seconds',
-        'verify each application readiness and unresolved external effects before opening writer authority',
-        'request final operational approval before V1 shutdown, fencing, route or writer transition']
+        'verify closed-state application health and unresolved external effects before the approved writer open',
+        'after the approved writer open and route transition verify every application readiness and external health; use forward recovery after accepted writes']
     review={'schema_version':1,'source_commit':spec['source_commit'],'installation_id':spec['installation_id'],
         'node':spec['node'],'runtime_ownership_file':'crawler-worker=compose\nyoutube-memo=compose\nbook-memo=compose\n','production_deployed':False,'operating_authority_issued':False,
         'ready_for_service_transition':False,'directories':directories,'sequence':sequence,
+        'legacy_enrollment_verified':False,
+        'enrollment_boundary':'Legacy decommission and exclusive provider credential ownership are trusted enrollment prerequisites; this offline renderer does not verify production actors or revoke their credentials.',
+        'frontend_upstream_contract':{service:{'address':spec['guest_ip']+':10443',
+            'http_host':service+'.ha.internal','tls_server_name':service+'.ha.internal',
+            'tls_verify_required':True,'client_certificate_required':True} for service in SERVICES},
         'portal_scratch':'640 MiB on-demand tmpfs supports one default 500 MiB archive plus a 32 MiB snapshot and upload overhead. Concurrent peak memory and free space require target-host acceptance.',
         'docker_engine_requirements':{'storage_driver':'overlay2','image_store':'classic','configure_before_import':True},
         'ingress_key_requirements':{'server.pem':{'uid':10004,'gid':10004,'mode':'0400','contents':'server certificate chain and private key combined PEM'},'clients-ca.crt':{'uid':0,'mode':'0444'},'application_mounts_contain_ingress_keys':False},

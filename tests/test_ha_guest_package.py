@@ -77,6 +77,21 @@ class GuestLayoutTest(unittest.TestCase):
             value=fixture();change(value)
             with self.subTest(value=value),self.assertRaises(guest.LayoutError):guest.render(value)
 
+    def test_offline_config_ids_are_exact_and_mutable_or_malformed_references_rejected(self):
+        value=fixture()
+        value['images']={name:'sha256:'+format(index+1,'064x') for index,name in enumerate(value['images'])}
+        compose,_,_=guest.render(value)
+        for name in guest.SERVICES:
+            self.assertEqual(compose['services'][name]['image'],value['images'][name])
+            self.assertEqual(compose['services'][name]['pull_policy'],'never')
+        self.assertEqual(compose['services']['ha-network']['image'],value['images']['ha-backup-utility'])
+        self.assertEqual(compose['services']['ha-broker']['image'],value['images']['ha-backup-utility'])
+        self.assertEqual(compose['services']['ha-ingress']['image'],value['images']['ha-ingress-utility'])
+        for invalid in ('portal:latest','portal:fixed','a'*64,'sha256:abc','sha256:'+'g'*64,
+                        'sha256:'+'A'*64,'sha512:'+'a'*64,'sha256:'+'a'*65,'sha256:'+'a'*64+'\n'):
+            changed=fixture();changed['images']['portal-web']=invalid
+            with self.subTest(image=invalid),self.assertRaises(guest.LayoutError):guest.render(changed)
+
     def test_original_argv_comes_from_actual_seven_dockerfiles(self):
         compose,_,_=guest.render(fixture())
         import json

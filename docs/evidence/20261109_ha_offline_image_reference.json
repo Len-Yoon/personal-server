@@ -1,0 +1,71 @@
+{
+  "actual_container_image": "sha256:fecfda45924cfe0e2a31da208baba715161fd3bf9c8a7404e3ab045e5c4b09a1",
+  "captured_container_id": "b233052f13c2df23df6d02b3a7a03189f1ab66423ae73f1675efdb0a5310dff3",
+  "compose_config_sha256": "f1e36715cc53e138b988822d361fb96a33876f4f7c8438ac6a3cb4e46da63639",
+  "daemon_id": "dae5aef4-01e7-45f3-9097-34da492996fe",
+  "error": null,
+  "fixture_source_path": "/private/var/tmp/codex-ha-01a1add8/compose-local-configid-fixture.py",
+  "fixture_source_sha256": "f7d3bb9bfadcd4d8b4ea6fcedd993f75bd9a4a1bc4a7a28794a9ac19e2e57eb8",
+  "image_config_id": "sha256:fecfda45924cfe0e2a31da208baba715161fd3bf9c8a7404e3ab045e5c4b09a1",
+  "inventory_after": {
+    "containers": [],
+    "images": [
+      "sha256:22fc00b66906c6bc68745a6a124cc910a5e223773d4940b46a11b4f48ff34651",
+      "sha256:2f7f5f338cf3539d713dc3294ee6ede043abafd555070f7d0a1c7d0742b2946e",
+      "sha256:5cef5de43dbad5df173dee9b6bdd6c3170dec93f2df135dd506d8d2574e91ed9",
+      "sha256:6b209cb8da6ee21ea351e0043de363198d35cf3aa6120c738e748644e61653f7",
+      "sha256:6b3d3aca038b4c9e5e156a1ceee7a69b4c1f5277e4454e8e3f80c5ce07a3880f",
+      "sha256:7e88104f8d2a232143c9f031e9bb82fa79201cdcb9512417e69845a6a0b47155",
+      "sha256:9779a3cdab790b618666e1c9f41f168fd684ba032e2806219a04c9c51b44af35",
+      "sha256:99dd0027c8fb50c5f3fceb3081d22ac8ff82c39992e77c2603d59b94e77a2bac",
+      "sha256:a2add62db615d119804fa2281a1c4c33bf11c36e67bcef2b3089e1d2f732b2a0",
+      "sha256:cac5189a918bca97e34958f546d95d977aec873ee48d34dbfd48cc78ea1e09b8",
+      "sha256:fecfda45924cfe0e2a31da208baba715161fd3bf9c8a7404e3ab045e5c4b09a1"
+    ],
+    "networks": [
+      "792a4d4f7e6cf4066d24dd9399f5f98ed9844a13c7ce8a8cacb8c06f16bdac7b",
+      "7eb7f1608d510f34e338a7898a8887db97d5aa0ea80827ed7ba72362fd060e18",
+      "f865f88cb39bd4014ade65bc3dd7dbdfcd48b0791118cbfb2f8ec646e4045a8c"
+    ],
+    "volumes": []
+  },
+  "inventory_before": {
+    "containers": [],
+    "images": [
+      "sha256:22fc00b66906c6bc68745a6a124cc910a5e223773d4940b46a11b4f48ff34651",
+      "sha256:2f7f5f338cf3539d713dc3294ee6ede043abafd555070f7d0a1c7d0742b2946e",
+      "sha256:5cef5de43dbad5df173dee9b6bdd6c3170dec93f2df135dd506d8d2574e91ed9",
+      "sha256:6b209cb8da6ee21ea351e0043de363198d35cf3aa6120c738e748644e61653f7",
+      "sha256:6b3d3aca038b4c9e5e156a1ceee7a69b4c1f5277e4454e8e3f80c5ce07a3880f",
+      "sha256:7e88104f8d2a232143c9f031e9bb82fa79201cdcb9512417e69845a6a0b47155",
+      "sha256:9779a3cdab790b618666e1c9f41f168fd684ba032e2806219a04c9c51b44af35",
+      "sha256:99dd0027c8fb50c5f3fceb3081d22ac8ff82c39992e77c2603d59b94e77a2bac",
+      "sha256:a2add62db615d119804fa2281a1c4c33bf11c36e67bcef2b3089e1d2f732b2a0",
+      "sha256:cac5189a918bca97e34958f546d95d977aec873ee48d34dbfd48cc78ea1e09b8",
+      "sha256:fecfda45924cfe0e2a31da208baba715161fd3bf9c8a7404e3ab045e5c4b09a1"
+    ],
+    "networks": [
+      "792a4d4f7e6cf4066d24dd9399f5f98ed9844a13c7ce8a8cacb8c06f16bdac7b",
+      "7eb7f1608d510f34e338a7898a8887db97d5aa0ea80827ed7ba72362fd060e18",
+      "f865f88cb39bd4014ade65bc3dd7dbdfcd48b0791118cbfb2f8ec646e4045a8c"
+    ],
+    "volumes": []
+  },
+  "owned_exact_cleanup": true,
+  "owner": "62efa55a-6724-4986-857d-c1b36dedc72c",
+  "production_access": false,
+  "project": "ha-local-id-62efa55a67244986857dc1b36dedc72c",
+  "project_uuid_labels_verified": true,
+  "protected_inventory_unchanged": true,
+  "pull_executed": false,
+  "registry_access": false,
+  "runtime_context": "colima-codex-ha-01a1add8",
+  "scope": "local_compose_raw_config_id_only",
+  "source_sha256": {
+    "infra/k8s/ha-package/guest.py": "399653988c361306aab6571a1addc28488a470d9c84f022d2556e400f73b7c20",
+    "tests/test_ha_guest_package.py": "6d3a901865c964d38f7b9aaa849973e8d7142350509a8a7d5e6bdd01f3c435e6"
+  },
+  "status": "PASS",
+  "unknown_local_id_denied_without_pull": true,
+  "version_command_exit_code": 0
+}
