@@ -1,0 +1,6 @@
+{
+  "old_sha256": "b0b4979631f51ff8a56dc103f0be3e9d574f96305296dfd0b78a0bf078419156",
+  "new_sha256": "857cf72a93c55ae5d2d627fcb9a32b583c420233837493a47ef2cf5c53d1eb9e",
+  "python_ast_identical": true,
+  "change": "remove final blank line only"
+}

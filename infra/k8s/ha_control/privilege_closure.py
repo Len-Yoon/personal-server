@@ -134,4 +134,3 @@ def privilege_closures_unsafe(admin, identities):
 
 def privilege_closure_unsafe(admin, role, service):
     return privilege_closures_unsafe(admin, [(role, service)])
-
