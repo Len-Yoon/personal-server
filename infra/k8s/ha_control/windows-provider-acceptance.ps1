@@ -23,13 +23,13 @@ function Test-ProbeServiceImagePath([string]$Actual,[string]$Expected){
 function Test-ProbeNoOperation($Result,[string]$Operation,[bool]$ExpectedHyperv){
     if($Result.scope -isnot [string] -or $Result.operation -isnot [string] -or $Result.stage -isnot [string] -or
         ($Result.schema_version -isnot [int] -and $Result.schema_version -isnot [long]) -or
-        $Result.scope -cne 'owned_vm_provider_role_probe' -or $Result.schema_version -ne 3 -or $Result.operation -cne $Operation){return $false}
+        $Result.scope -cne 'owned_vm_provider_role_probe' -or $Result.schema_version -ne 4 -or $Result.operation -cne $Operation){return $false}
     foreach($field in @('attempted','complete','authorized','authorization_denied','administrator','hyperv_role')){if($Result.$field -isnot [bool]){return $false}}
     return (-not $Result.attempted -and -not $Result.complete -and -not $Result.authorized -and -not $Result.authorization_denied -and
         -not $Result.administrator -and $Result.hyperv_role -eq $ExpectedHyperv -and $Result.stage -cin @('identity','input_validation','schema_query','valid_operation'))
 }
 function Assert-ProbeResultShape($Result){
-    $keys=@('schema_version','scope','process_id','process_start_ticks','operation','stage','attempted','complete','authorized','authorization_denied','return_code','administrator','hyperv_role','settings_serialized_value_present','settings_readback_verified','native_target_paths_bound','method_result_verified','target_descriptor_sha256','settings_payload_sha256','settings_current_path_sha256','settings_current_instance_sha256','settings_current_association_verified')
+    $keys=@('schema_version','scope','process_id','process_start_ticks','operation','stage','attempted','complete','authorized','authorization_denied','return_code','administrator','hyperv_role','settings_serialized_value_present','settings_readback_verified','native_target_paths_bound','method_result_verified','target_descriptor_sha256','settings_payload_sha256','settings_current_path_sha256','settings_current_instance_sha256','settings_current_association_verified','exception_kind','exception_scope','exception_hresult')
     if((($Result.PSObject.Properties.Name|Sort-Object -CaseSensitive)-join ',') -cne (($keys|Sort-Object -CaseSensitive)-join ',')){throw 'fixture_result_unverified'}
     foreach($field in @('attempted','complete','authorized','authorization_denied','administrator','hyperv_role','settings_serialized_value_present','settings_readback_verified','native_target_paths_bound','method_result_verified','settings_current_association_verified')){
         if($Result.$field -isnot [bool]){throw 'fixture_result_unverified'}
@@ -38,15 +38,27 @@ function Assert-ProbeResultShape($Result){
         if($Result.$field -isnot [string] -or ($Result.operation -ceq 'settings' -and $Result.$field -cnotmatch '^[0-9a-f]{64}$') -or ($Result.operation -cne 'settings' -and $Result.$field -cne '')){throw 'fixture_result_unverified'}
     }
     foreach($field in @('settings_current_path_sha256','settings_current_instance_sha256')){if($Result.$field -isnot [string] -or ($Result.$field -cne '' -and $Result.$field -cnotmatch '^[0-9a-f]{64}$') -or ($Result.operation -cne 'settings' -and $Result.$field -cne '')){throw 'fixture_result_unverified'}}
-    foreach($field in @('schema_version','process_id','return_code')){
+    foreach($field in @('schema_version','process_id','return_code','exception_hresult')){
         if($Result.$field -isnot [int] -and $Result.$field -isnot [long]){throw 'fixture_result_unverified'}
     }
-    if($Result.schema_version -ne 3 -or $Result.process_id -le 0 -or $Result.process_id -gt [int]::MaxValue -or
+    if($Result.schema_version -ne 4 -or $Result.process_id -le 0 -or $Result.process_id -gt [int]::MaxValue -or
         $Result.return_code -lt 0 -or $Result.return_code -gt [uint32]::MaxValue -or
+        $Result.exception_hresult -lt 0 -or $Result.exception_hresult -gt [uint32]::MaxValue -or
+        $Result.exception_kind -isnot [string] -or $Result.exception_kind -cnotin @('none','management','com','unauthorized_access','other') -or
+        $Result.exception_scope -isnot [string] -or $Result.exception_scope -cnotin @('none','invoke','outside_invoke') -or
         $Result.scope -isnot [string] -or $Result.scope -cne 'owned_vm_provider_role_probe' -or
         $Result.operation -isnot [string] -or $Result.operation -cnotin @('settings','power_on','power_off') -or
         $Result.stage -isnot [string] -or $Result.stage -cnotin @('identity','input_validation','schema_query','valid_operation') -or
         $Result.process_start_ticks -isnot [string] -or $Result.process_start_ticks -cnotmatch '^[0-9]{15,20}$'){throw 'fixture_result_unverified'}
+    if(($Result.exception_scope -ceq 'none' -and ($Result.exception_kind -cne 'none' -or $Result.exception_hresult -ne 0)) -or
+        ($Result.exception_scope -cne 'none' -and $Result.exception_kind -ceq 'none') -or
+        ($Result.exception_scope -ceq 'invoke' -and (-not $Result.attempted -or $Result.stage -cne 'valid_operation')) -or
+        ($Result.exception_scope -ceq 'outside_invoke' -and ($Result.complete -or $Result.authorization_denied)) -or
+        ($Result.authorization_denied -and (-not $Result.attempted -or -not $Result.method_result_verified -or $Result.return_code -notin @(32769,2147749891,2147942405)))){throw 'fixture_result_unverified'}
+    if($Result.authorization_denied -and $Result.exception_scope -ceq 'invoke'){
+        if($Result.exception_kind -cnotin @('management','com','unauthorized_access') -or
+            ($Result.exception_kind -ceq 'unauthorized_access' -and ($Result.exception_hresult -ne 2147942405 -or $Result.return_code -ne 2147942405))){throw 'fixture_result_unverified'}
+    }
 }
 function Test-ProbeDisconnectedNic($Nic){
     # An unattached adapter may expose null/empty SwitchId rather than Guid.Empty.
@@ -123,7 +135,7 @@ function Invoke-ProbeOperation($Fixture,[string]$Operation){
     $descriptor=if($Operation -ceq 'settings'){$script:targetDescriptorB64}else{''}
     $descriptorSha=if($Operation -ceq 'settings'){$script:targetDescriptorSha256}else{''}
     $payloadSha=if($Operation -ceq 'settings'){$script:settingsPayloadSha256}else{''}
-    $text="format=ha-provider-probe-v3`nservice_name=$($Fixture.name)`nservice_sid=$($Fixture.sid)`ninstallation_id=$script:installation`nvm_id=$script:vmId`noperation=$Operation`nexpected_hyperv_role=$($Fixture.role)`ntarget_descriptor_b64=$descriptor`ntarget_descriptor_sha256=$descriptorSha`n"
+    $text="format=ha-provider-probe-v4`nservice_name=$($Fixture.name)`nservice_sid=$($Fixture.sid)`ninstallation_id=$script:installation`nvm_id=$script:vmId`noperation=$Operation`nexpected_hyperv_role=$($Fixture.role)`ntarget_descriptor_b64=$descriptor`ntarget_descriptor_sha256=$descriptorSha`n"
     [IO.File]::WriteAllText((Join-Path $Fixture.root 'probe.args'),$text,[Text.UTF8Encoding]::new($false))
     # A fast one-shot may already have stopped when StartService returns. Do
     # not repeat it: reconcile the pinned service state and its exact result.
@@ -157,7 +169,7 @@ function Invoke-ProbeOperation($Fixture,[string]$Operation){
         }
         throw 'fixture_service_incomplete'
     }
-    if($result.scope -cne 'owned_vm_provider_role_probe' -or $result.schema_version -ne 3 -or
+    if($result.scope -cne 'owned_vm_provider_role_probe' -or $result.schema_version -ne 4 -or
         $result.operation -cne $Operation -or $result.attempted -ne $true -or $result.complete -ne $true -or
         $result.administrator -ne $false -or $result.hyperv_role -ne ($Fixture.role -ceq 'true') -or
         -not $result.native_target_paths_bound -or -not $result.method_result_verified){throw 'fixture_result_unverified'}

@@ -24,7 +24,7 @@ namespace HaProviderProbeV1 {
    string[] lines=text.Split('\n');if(lines.Length!=Keys.Length+1||lines[Keys.Length]!="")throw new InvalidOperationException();
    Values=new Dictionary<string,string>(StringComparer.Ordinal);
    for(int i=0;i<Keys.Length;i++){string p=Keys[i]+"=";if(!lines[i].StartsWith(p,StringComparison.Ordinal))throw new InvalidOperationException();Values.Add(Keys[i],lines[i].Substring(p.Length));}
-   if(Values["format"]!="ha-provider-probe-v3"||!Regex.IsMatch(Values["service_name"],"\\AHaProbe_[0-9a-f]{16}\\z")||
+   if(Values["format"]!="ha-provider-probe-v4"||!Regex.IsMatch(Values["service_name"],"\\AHaProbe_[0-9a-f]{16}\\z")||
       !Regex.IsMatch(Values["service_sid"],"\\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\\z")||
       !Regex.IsMatch(Values["installation_id"],"\\A[0-9a-f]{64}\\z")||
       !Regex.IsMatch(Values["vm_id"],"\\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\\z")||
@@ -41,6 +41,32 @@ namespace HaProviderProbeV1 {
   // or E_ACCESSDENIED is usable only after a valid operation was attempted.
   public static bool AccessDenied(uint code){return code==32769||code==0x80041003||code==0x80070005;}
   public static bool AuthorizationDenial(bool attempted,uint code){return attempted&&AccessDenied(code);}
+  // COM interop maps E_ACCESSDENIED to UnauthorizedAccessException, not always
+  // COMException. Exact type/code checks apply ONLY to the InvokeMethod catch.
+  // https://learn.microsoft.com/en-us/dotnet/standard/exceptions/handling-com-interop-exceptions
+  public static string ExceptionKind(Exception error){
+   if(error==null)return "none";
+   Type type=error.GetType();
+#if !PORTABLE_FIXTURE
+   if(type==typeof(ManagementException))return "management";
+#endif
+   if(type==typeof(System.Runtime.InteropServices.COMException))return "com";
+   if(type==typeof(UnauthorizedAccessException))return "unauthorized_access";
+   return "other";
+  }
+  public static uint ExceptionCode(Exception error){
+#if !PORTABLE_FIXTURE
+   if(error.GetType()==typeof(ManagementException))return unchecked((uint)((ManagementException)error).ErrorCode);
+#endif
+   return unchecked((uint)error.HResult);
+  }
+  public static bool KnownInvokeException(Exception error){
+   string kind=ExceptionKind(error);
+   return kind=="management"||kind=="com"||(kind=="unauthorized_access"&&ExceptionCode(error)==0x80070005);
+  }
+  public static bool InvokeExceptionDenial(bool attempted,Exception error){
+   return attempted&&KnownInvokeException(error)&&AccessDenied(ExceptionCode(error));
+  }
   public static bool NativeRelativeTarget(bool instance,string actualClass,string expectedClass,string server,string ns,string full,string relative,string source){
    // Windows maps an implicit local server to "." even for a relative path.
    // Reject explicit prefixes through both the namespace and full-path checks.
@@ -118,7 +144,7 @@ namespace HaProviderProbeV1 {
   void RunProbe(){
    bool attempted=false,complete=false,authorized=false,admin=false,role=false;
    bool settingsSerialized=false,settingsReadback=false,pathsBound=false,methodResult=false,denied=false,currentAssociation=false;string currentPathHash="",currentInstanceHash="";uint code=0xffffffff;
-   string stage="identity";
+   string stage="identity",exceptionKind="none",exceptionScope="none";uint exceptionHresult=0;
    try {
     using(var id=WindowsIdentity.GetCurrent()){
      var principal=new WindowsPrincipal(id);admin=principal.IsInRole(new SecurityIdentifier("S-1-5-32-544"));role=principal.IsInRole(new SecurityIdentifier("S-1-5-32-578"));
@@ -154,8 +180,11 @@ namespace HaProviderProbeV1 {
      // Only an exception thrown by this actual ExecMethod call can establish
      // HRESULT denial. Job/readback query errors remain incomplete/unknown.
      try{answer=target.InvokeMethod(method,input,invoke);}
-     catch(ManagementException error){code=unchecked((uint)error.ErrorCode);methodResult=true;denied=Settings.AuthorizationDenial(attempted,code);complete=denied;}
-     catch(System.Runtime.InteropServices.COMException error){code=unchecked((uint)error.ErrorCode);methodResult=true;denied=Settings.AuthorizationDenial(attempted,code);complete=denied;}
+     catch(Exception error){
+      exceptionKind=Settings.ExceptionKind(error);exceptionHresult=unchecked((uint)error.HResult);exceptionScope="invoke";
+      methodResult=Settings.KnownInvokeException(error);code=methodResult?Settings.ExceptionCode(error):0xffffffff;
+      denied=Settings.InvokeExceptionDenial(attempted,error);complete=denied;
+     }
      if(answer!=null)using(answer){
       code=Convert.ToUInt32(answer["ReturnValue"]);methodResult=true;
       denied=Settings.AuthorizationDenial(attempted,code);complete=denied;
@@ -190,11 +219,14 @@ namespace HaProviderProbeV1 {
       }
      }
     }
-   }catch{complete=false;}
+   }catch(Exception error){
+    exceptionKind=Settings.ExceptionKind(error);exceptionHresult=unchecked((uint)error.HResult);exceptionScope="outside_invoke";
+    denied=false;complete=false;
+   }
    if(stopped){complete=false;authorized=false;denied=false;}
    try{
     var process=Process.GetCurrentProcess();
-    string json="{\"schema_version\":3,\"scope\":\"owned_vm_provider_role_probe\",\"process_id\":"+process.Id+",\"process_start_ticks\":\""+process.StartTime.ToUniversalTime().Ticks+"\",\"operation\":\""+cfg.Values["operation"]+"\",\"stage\":\""+stage+"\",\"attempted\":"+attempted.ToString().ToLowerInvariant()+",\"complete\":"+complete.ToString().ToLowerInvariant()+",\"authorized\":"+authorized.ToString().ToLowerInvariant()+",\"authorization_denied\":"+denied.ToString().ToLowerInvariant()+",\"return_code\":"+code+",\"administrator\":"+admin.ToString().ToLowerInvariant()+",\"hyperv_role\":"+role.ToString().ToLowerInvariant()+",\"settings_serialized_value_present\":"+settingsSerialized.ToString().ToLowerInvariant()+",\"settings_readback_verified\":"+settingsReadback.ToString().ToLowerInvariant()+",\"native_target_paths_bound\":"+pathsBound.ToString().ToLowerInvariant()+",\"method_result_verified\":"+methodResult.ToString().ToLowerInvariant()+",\"target_descriptor_sha256\":\""+cfg.Values["target_descriptor_sha256"]+"\",\"settings_payload_sha256\":\""+(cfg.Descriptor==null?"":cfg.Descriptor.Values["settings_payload_sha256"])+"\",\"settings_current_path_sha256\":\""+currentPathHash+"\",\"settings_current_instance_sha256\":\""+currentInstanceHash+"\",\"settings_current_association_verified\":"+currentAssociation.ToString().ToLowerInvariant()+"}\n";
+    string json="{\"schema_version\":4,\"scope\":\"owned_vm_provider_role_probe\",\"process_id\":"+process.Id+",\"process_start_ticks\":\""+process.StartTime.ToUniversalTime().Ticks+"\",\"operation\":\""+cfg.Values["operation"]+"\",\"stage\":\""+stage+"\",\"attempted\":"+attempted.ToString().ToLowerInvariant()+",\"complete\":"+complete.ToString().ToLowerInvariant()+",\"authorized\":"+authorized.ToString().ToLowerInvariant()+",\"authorization_denied\":"+denied.ToString().ToLowerInvariant()+",\"return_code\":"+code+",\"administrator\":"+admin.ToString().ToLowerInvariant()+",\"hyperv_role\":"+role.ToString().ToLowerInvariant()+",\"settings_serialized_value_present\":"+settingsSerialized.ToString().ToLowerInvariant()+",\"settings_readback_verified\":"+settingsReadback.ToString().ToLowerInvariant()+",\"native_target_paths_bound\":"+pathsBound.ToString().ToLowerInvariant()+",\"method_result_verified\":"+methodResult.ToString().ToLowerInvariant()+",\"target_descriptor_sha256\":\""+cfg.Values["target_descriptor_sha256"]+"\",\"settings_payload_sha256\":\""+(cfg.Descriptor==null?"":cfg.Descriptor.Values["settings_payload_sha256"])+"\",\"settings_current_path_sha256\":\""+currentPathHash+"\",\"settings_current_instance_sha256\":\""+currentInstanceHash+"\",\"settings_current_association_verified\":"+currentAssociation.ToString().ToLowerInvariant()+",\"exception_kind\":\""+exceptionKind+"\",\"exception_scope\":\""+exceptionScope+"\",\"exception_hresult\":"+exceptionHresult+"}\n";
     using(var file=new FileStream(output,FileMode.CreateNew,FileAccess.Write,FileShare.None)){byte[] bytes=Encoding.UTF8.GetBytes(json);file.Write(bytes,0,bytes.Length);file.Flush(true);}
     ExitCode=complete?0:1;
    }catch{ExitCode=1;}
