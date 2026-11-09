@@ -71,17 +71,45 @@ namespace TypedFixtures {
   public ComWmiProperty this[string name]{get{return Values[name];}}
  }
  public sealed class ComWmiRow {public ComWmiProperties Properties_ {get;set;}}
- public sealed class ComWmiRows : System.Collections.IEnumerable {
-  public object Row;public int MoveDelay;public int Disposed;
+ public sealed class ComWmiRows {
+  public object Row;public int MoveDelay;public int PropertyReads;public int NextCalls;public int ForbiddenCalls;public int Disposed;public bool DisposeThrows;public string Mode="normal";
   public int Count {get{throw new System.Exception("PRIVATE_NATIVE_COUNT_FORBIDDEN");}}
-  sealed class Iterator : System.Collections.IEnumerator,System.IDisposable {
-   readonly ComWmiRows owner;int index=-1;public Iterator(ComWmiRows rows){owner=rows;}
-   public object Current{get{return owner.Row;}}
-   public bool MoveNext(){if(owner.MoveDelay>0)System.Threading.Thread.Sleep(owner.MoveDelay);index++;return index==0;}
-   public void Reset(){throw new System.Exception("PRIVATE_NATIVE_RESET");}
+  // Deliberately does not implement managed IEnumerable. Only the official
+  // DISPID_NEWENUM(-4) property and a standard IEnumVARIANT are provided.
+  [System.Runtime.InteropServices.DispId(-4)]
+  public object _NewEnum {get{PropertyReads++;if(Mode=="newenum-fault")throw new System.Exception("PRIVATE_NEWENUM");if(Mode=="mapped-ienumerator")return new MappedIterator(this);return new Iterator(this);}}
+  sealed class MappedIterator : System.Collections.IEnumerator,System.IDisposable {
+   readonly ComWmiRows owner;public MappedIterator(ComWmiRows rows){owner=rows;}
+   public object Current{get{owner.ForbiddenCalls++;throw new System.Exception("PRIVATE_FALLBACK_CURRENT");}}
+   public bool MoveNext(){owner.ForbiddenCalls++;throw new System.Exception("PRIVATE_FALLBACK_NEXT");}
+   public void Reset(){owner.ForbiddenCalls++;throw new System.Exception("PRIVATE_FALLBACK_RESET");}
    public void Dispose(){owner.Disposed++;}
   }
-  public System.Collections.IEnumerator GetEnumerator(){return new Iterator(this);}
+  sealed class Iterator : System.Runtime.InteropServices.ComTypes.IEnumVARIANT,System.IDisposable {
+   readonly ComWmiRows owner;int index=-1;public Iterator(ComWmiRows rows){owner=rows;}
+   public int Next(int celt,object[] values,System.IntPtr fetched){
+    owner.NextCalls++;if(celt!=1 || values.Length!=1 || fetched==System.IntPtr.Zero)throw new System.Exception("PRIVATE_NEXT_ABI");
+    if(owner.MoveDelay>0)System.Threading.Thread.Sleep(owner.MoveDelay);index++;
+    int hr=index==0 ? 0 : 1;int count=index==0 ? 1 : 0;values[0]=index==0 ? owner.Row : null;
+    switch(owner.Mode){
+     case "ok-empty":hr=0;count=0;values[0]=null;break;
+     case "false-row":hr=1;count=1;values[0]=owner.Row;break;
+     case "false-dirty":hr=1;count=0;values[0]=owner.Row;break;
+     case "ok-null":hr=0;count=1;values[0]=null;break;
+     case "failed-row":hr=unchecked((int)0x80004005);count=1;values[0]=owner.Row;break;
+     case "bad-count":hr=0;count=2;values[0]=owner.Row;break;
+     case "unknown-success":hr=2;count=0;values[0]=null;break;
+     case "false-missing-fetched":hr=1;count=0;values[0]=null;break;
+    }
+    if(owner.Mode!="missing-fetched" && owner.Mode!="false-missing-fetched")System.Runtime.InteropServices.Marshal.WriteInt32(fetched,count);
+    if(owner.Mode=="throw-row")throw new System.Runtime.InteropServices.COMException("PRIVATE_NEXT_FAULT",unchecked((int)0x80004005));
+    return hr;
+   }
+   public int Reset(){owner.ForbiddenCalls++;throw new System.Exception("PRIVATE_NATIVE_RESET");}
+   public int Skip(int count){owner.ForbiddenCalls++;throw new System.Exception("PRIVATE_NATIVE_SKIP");}
+   public System.Runtime.InteropServices.ComTypes.IEnumVARIANT Clone(){owner.ForbiddenCalls++;throw new System.Exception("PRIVATE_NATIVE_CLONE");}
+   public void Dispose(){owner.Disposed++;if(owner.DisposeThrows)throw new System.Exception("PRIVATE_ENUM_DISPOSE");}
+  }
  }
  public sealed class ComWmiService {
   public ComWmiRows Rows;public string LastQuery;public string LastLanguage;public int LastFlags;
@@ -117,6 +145,9 @@ namespace TypedFixtures {
    try{budget.At(N100HaTypedCandidateV1.FailurePhase.cleanup,delegate{throw new System.Exception("PRIVATE_SECOND");});}catch{}
    return budget.FailurePhase;
   }
+ }
+ public static class VariantProbe {
+  public static bool OldCastFails(object value){try{((System.Collections.IEnumerable)value).GetEnumerator();return false;}catch(System.InvalidCastException){return true;}}
  }
 }
 '''
@@ -419,9 +450,11 @@ foreach($kind in @('Services','Processes','Boot')){
  $result=$native.Query($kindValue);$iterator=$result.GetEnumerator()
  if(-not $iterator.MoveNext()){throw 'row_missing'}
  foreach($name in $fixture.Values.Keys){$p=$iterator.Current.Read($name);if($p.CimType -ne $fixture.Values[$name].CimType -or $p.Value -cne $fixture.Values[$name].Value){throw 'native_field_changed'}}
+ if($iterator.MoveNext() -or $iterator.MoveNext()){throw 'eof_changed'}
  $iterator.Dispose();$result.Dispose()
  $expected=switch($kind){'Services'{'SELECT Name,PathName,StartName,StartMode,ServiceType,State,ProcessId FROM Win32_Service'};'Processes'{'SELECT ProcessId,ParentProcessId,Name,CommandLine,ExecutablePath,CreationDate,SessionId FROM Win32_Process'};'Boot'{'SELECT LastBootUpTime FROM Win32_OperatingSystem'}}
- if($service.LastQuery -cne $expected -or $service.LastLanguage -cne 'WQL' -or $service.LastFlags -ne 48 -or $rows.Disposed -ne 1){throw 'fixed_query_or_forward_cleanup_changed'}
+ if($service.LastQuery -cne $expected -or $service.LastLanguage -cne 'WQL' -or $service.LastFlags -ne 48 -or $rows.PropertyReads -ne 1 -or $rows.NextCalls -ne 2 -or $rows.ForbiddenCalls -ne 0 -or $rows.Disposed -ne 1){throw 'fixed_query_or_forward_cleanup_changed'}
+ if($iterator.GetType().GetField('fetched',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($iterator) -ne [IntPtr]::Zero){throw 'fetched_pointer_not_freed'}
 }
 # Real private adapter MoveNext checks and releases even a late successful row.
 $rows.MoveDelay=30
@@ -429,9 +462,34 @@ $nativeType.GetField('budget',[Reflection.BindingFlags]'Instance,NonPublic').Set
 $result=$native.Query([N100HaTypedCandidateV1.WmiKind]::Boot);$iterator=$result.GetEnumerator()
 if((Reason {$iterator.MoveNext()}) -cne 'deadline_exceeded'){throw 'native_late_row_accepted'}
 $iterator.Dispose();$result.Dispose()
-if($rows.Disposed -ne 2){throw 'late_iterator_not_disposed'}
+if($iterator.GetType().GetField('fetched',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($iterator) -ne [IntPtr]::Zero -or $rows.PropertyReads -ne 2 -or $rows.ForbiddenCalls -ne 0 -or $rows.Disposed -ne 2){throw 'late_iterator_not_disposed'}
 'fixed-native-boundary'
 ''').strip(), 'fixed-native-boundary')
+
+    def test_newenum_contract_without_ienumerable_and_faulty_next_results(self):
+        self.assertEqual(self.ps(r'''
+$nativeType=[N100HaTypedCandidateV1.Collector].GetNestedType('NativeWmiRows',[Reflection.BindingFlags]::NonPublic)
+foreach($mode in @('normal','ok-empty','false-row','false-dirty','ok-null','failed-row','bad-count','unknown-success','throw-row','missing-fetched','false-missing-fetched','newenum-fault','mapped-ienumerator')){
+ $rows=[TypedFixtures.ComWmiRows]::new();$rows.Row=[TypedFixtures.ComWmiRow]::new();$rows.Mode=$mode
+ if(-not [TypedFixtures.VariantProbe]::OldCastFails($rows) -or $rows.PropertyReads -ne 0){throw 'old_cast_gap_not_reproduced'}
+ $budget=[N100HaTypedCandidateV1.Budget]::new(2000)
+ $adapter=[Activator]::CreateInstance($nativeType,[Reflection.BindingFlags]'Instance,Public,NonPublic',$null,@($rows,[N100HaTypedCandidateV1.WmiKind]::Services,$budget),$null)
+ $iterator=$null;$failed=$false
+ try{$iterator=$adapter.GetEnumerator();$more=$iterator.MoveNext();if($mode -ceq 'normal' -and -not $more){throw 'valid_row_lost'}}catch{$failed=$true}
+ if(($mode -ceq 'normal') -eq $failed){throw 'next_contract_changed'}
+ if($mode -cne 'normal' -and $budget.FailurePhase -cne 'services_enumerator'){throw 'fault_phase_changed'}
+ if($null -ne $iterator){
+  if($mode -cne 'normal' -and $null -ne $iterator.Current){throw 'partial_row_retained'}
+  $rows.DisposeThrows=$true
+  try{$iterator.Dispose()}catch{}
+  if($iterator.GetType().GetField('fetched',[Reflection.BindingFlags]'Instance,NonPublic').GetValue($iterator) -ne [IntPtr]::Zero -or $null -ne $iterator.Current){throw 'variant_cleanup_lost'}
+ }
+ $adapter.Dispose()
+ if($mode -cne 'newenum-fault' -and $rows.Disposed -ne 1){throw 'owned_enum_not_closed'}
+ if($rows.PropertyReads -ne 1 -or $rows.ForbiddenCalls -ne 0 -or $rows.NextCalls -gt 1){throw 'fallback_or_retry_detected'}
+}
+'newenum-contract-checked'
+''').strip(), 'newenum-contract-checked')
 
     def test_exact_call_helper_full_optional_arities_and_negative_control(self):
         self.assertEqual(self.ps(r'''

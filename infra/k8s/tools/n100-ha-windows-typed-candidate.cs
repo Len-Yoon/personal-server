@@ -340,6 +340,12 @@ namespace N100HaTypedCandidateV1 {
         static object Call(object value,string name,params object[] args) { return value.GetType().InvokeMember(name,BindingFlags.InvokeMethod|BindingFlags.OptionalParamBinding,null,value,args,CultureInfo.InvariantCulture); }
         static object Item(object value,int index) { return value.GetType().InvokeMember("Item",BindingFlags.GetProperty,null,value,new object[]{index},CultureInfo.InvariantCulture); }
         static void Release(object value) { if(value!=null && Marshal.IsComObject(value)) Marshal.FinalReleaseComObject(value); }
+        static void ReleaseEnumerator(object value) {
+            // A CLR-projected managed IEnumerator is not accepted as an ABI
+            // fallback, but its owned IDisposable wrapper must still be closed.
+            if(value!=null && !Marshal.IsComObject(value)) {var disposable=value as IDisposable;if(disposable!=null)disposable.Dispose();}
+            else Release(value);
+        }
         static void ReleaseAll(params object[] values) {
             bool failed=false;foreach(var value in values)try {Release(value);}catch {failed=true;}
             if(failed)throw new Blocked("query_failed");
@@ -371,33 +377,64 @@ namespace N100HaTypedCandidateV1 {
             public IEnumerator<IWmiRow> GetEnumerator(){
                 return budget.At(EnumPhase(kind),delegate {
                     if(enumerated) Unsupported();enumerated=true;budget.Check();
-                    var iterator=((IEnumerable)value).GetEnumerator();
-                    try {budget.Check();return (IEnumerator<IWmiRow>)new NativeWmiIterator(iterator,kind,budget);}
-                    catch {budget.Capture(EnumPhase(kind));budget.At(FailurePhase.cleanup,delegate {Release(iterator);});throw;}
+                    // ISWbemObjectSet._NewEnum is [DISPID_NEWENUM(-4), propget]
+                    // returning IUnknown; the collection need not be managed
+                    // IEnumerable. No automatic IEnumerator fallback is used.
+                    // https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/um/WbemDisp.Idl
+                    object iterator=Get(value,"_NewEnum");
+                    try {
+                        budget.Check();
+                        var variant=iterator as System.Runtime.InteropServices.ComTypes.IEnumVARIANT;
+                        if(variant==null)throw new Blocked("query_failed");
+                        return (IEnumerator<IWmiRow>)new NativeWmiIterator(variant,kind,budget);
+                    }
+                    catch {budget.Capture(EnumPhase(kind));budget.At(FailurePhase.cleanup,delegate {ReleaseEnumerator(iterator);});throw;}
                 });
             }
             IEnumerator IEnumerable.GetEnumerator(){return GetEnumerator();}
             public void Dispose(){var old=value;value=null;Release(old);}
         }
         sealed class NativeWmiIterator : IEnumerator<IWmiRow> {
-            IEnumerator iterator;IWmiRow current;readonly WmiKind kind;readonly Budget budget;
-            public NativeWmiIterator(IEnumerator source,WmiKind queryKind,Budget requestBudget){iterator=source;kind=queryKind;budget=requestBudget;}
+            System.Runtime.InteropServices.ComTypes.IEnumVARIANT iterator;
+            IntPtr fetched;bool ended;IWmiRow current;readonly WmiKind kind;readonly Budget budget;
+            public NativeWmiIterator(System.Runtime.InteropServices.ComTypes.IEnumVARIANT source,WmiKind queryKind,Budget requestBudget){iterator=source;kind=queryKind;budget=requestBudget;fetched=Marshal.AllocCoTaskMem(sizeof(int));}
             public IWmiRow Current {get{return current;}}
             object IEnumerator.Current {get{return Current;}}
             public bool MoveNext(){
                 if(current!=null){budget.At(FailurePhase.cleanup,delegate {current.Dispose();current=null;});}
                 return budget.At(EnumPhase(kind),delegate {
-                budget.Check();bool more=iterator.MoveNext();
-                // Retain the returned COM row before the deadline check so the
-                // finally path can release a late successful MoveNext result.
-                if(more) current=new NativeWmiRow(iterator.Current,kind,budget);
-                budget.Check();return more;
+                    budget.Check();if(ended)return false;
+                    var values=new object[1];
+                    try {
+                        // A provider must explicitly write 0 or 1. A zero
+                        // initializer would mistake an untouched EOF output
+                        // for a valid S_FALSE/fetched=0 result.
+                        Marshal.WriteInt32(fetched,-1);
+                        // Only Next(1) is permitted. Preserve HRESULT and the
+                        // fetched count independently; partial/faulty results
+                        // are never accepted as EOF or as a successful row.
+                        int hr=iterator.Next(1,values,fetched);
+                        int count=Marshal.ReadInt32(fetched);
+                        if(values[0]!=null){current=new NativeWmiRow(values[0],kind,budget);values[0]=null;}
+                        budget.Check();
+                        if(hr==0 && count==1 && current!=null)return true;
+                        if(hr==1 && count==0 && current==null){ended=true;return false;}
+                        throw new Blocked("query_failed");
+                    } catch {
+                        budget.Capture(EnumPhase(kind));
+                        budget.At(FailurePhase.cleanup,delegate {
+                            try {if(current!=null){current.Dispose();current=null;}}
+                            finally {Release(values[0]);values[0]=null;}
+                        });
+                        throw;
+                    }
                 });
             }
             public void Reset(){throw new Blocked("unsupported_metadata");}
             public void Dispose(){
-                var row=current;current=null;var old=iterator;iterator=null;
-                try {if(row!=null)row.Dispose();}finally {try {var disposable=old as IDisposable;if(disposable!=null)disposable.Dispose();}finally {Release(old);}}
+                var row=current;current=null;var old=iterator;iterator=null;var pointer=fetched;fetched=IntPtr.Zero;
+                try {if(row!=null)row.Dispose();}
+                finally {try {ReleaseEnumerator(old);}finally {if(pointer!=IntPtr.Zero)Marshal.FreeCoTaskMem(pointer);}}
             }
         }
         sealed class NativeWmiReader : IWmiReader {
