@@ -6,9 +6,20 @@ Set-StrictMode -Version Latest
 function Get-GuestVmHash([byte[]]$Bytes){$h=[Security.Cryptography.SHA256]::Create();try{return [BitConverter]::ToString($h.ComputeHash($Bytes)).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}}
 function Get-GuestVmStreamHash($Stream){$h=[Security.Cryptography.SHA256]::Create();try{return [BitConverter]::ToString($h.ComputeHash($Stream)).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}}
 function Assert-GuestVmKeys($Value,[string[]]$Keys){if((($Value.PSObject.Properties.Name|Sort-Object -CaseSensitive)-join ',') -cne (($Keys|Sort-Object -CaseSensitive)-join ',')){throw 'guest_vm_shape_rejected'}}
+function ConvertTo-GuestVmDiskIdentifier($Value){
+    # Get-VHD returns GUID objects or uppercase strings depending on the native provider.
+    # Accept only a nonzero D-format GUID, then bind its value in canonical lowercase.
+    if($Value -isnot [string] -and $Value -isnot [Guid]){throw 'guest_vm_disk_identifier_rejected'}
+    $text=$Value.ToString();$guid=[Guid]::Empty
+    if($text.Length -ne 36 -or $text -cnotmatch '^[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$' -or -not [Guid]::TryParseExact($text,'D',[ref]$guid) -or $guid -eq [Guid]::Empty){throw 'guest_vm_disk_identifier_rejected'}
+    return $guid.ToString('D')
+}
 function Assert-GuestVmSpec($Value){
-    Assert-GuestVmKeys $Value @('schema_version','source_commit','stage_source_commit','seed_source_commit','installation_id','stage_manifest_sha256','seed_iso_sha256','seed_iso_bytes','node','mac_address','optional_egress_nic','egress_mac_address','peer_prepared_receipt_sha256')
-    if(($Value.schema_version -isnot [int] -and $Value.schema_version -isnot [long]) -or $Value.schema_version -ne 1 -or
+    $fields=@('schema_version','source_commit','stage_source_commit','seed_source_commit','installation_id','stage_manifest_sha256','seed_iso_sha256','seed_iso_bytes','node','mac_address','optional_egress_nic','egress_mac_address','peer_prepared_receipt_sha256')
+    if(($Value.schema_version -isnot [int] -and $Value.schema_version -isnot [long]) -or $Value.schema_version -notin @(1,2)){throw 'guest_vm_identity_rejected'}
+    if($Value.schema_version -eq 2){$fields+=@('creation_method','node_image')}
+    Assert-GuestVmKeys $Value $fields
+    if(
         $Value.source_commit -isnot [string] -or $Value.source_commit -cnotmatch '^[0-9a-f]{40}$' -or
         $Value.stage_source_commit -isnot [string] -or $Value.stage_source_commit -cnotmatch '^[0-9a-f]{40}$' -or $Value.seed_source_commit -isnot [string] -or $Value.seed_source_commit -cnotmatch '^[0-9a-f]{40}$' -or
         $Value.installation_id -isnot [string] -or $Value.installation_id -cnotmatch '^[0-9a-f]{64}$'){throw 'guest_vm_identity_rejected'}
@@ -18,14 +29,28 @@ function Assert-GuestVmSpec($Value){
     if($Value.mac_address -isnot [string] -or $Value.mac_address -cnotmatch '^02[0-9A-F]{10}$'){throw 'guest_vm_mac_rejected'}
     if($Value.egress_mac_address -isnot [string] -or ($Value.optional_egress_nic -and ($Value.egress_mac_address -cnotmatch '^02[0-9A-F]{10}$' -or $Value.egress_mac_address -ceq $Value.mac_address)) -or (-not $Value.optional_egress_nic -and $Value.egress_mac_address -cne '')){throw 'guest_vm_egress_mac_rejected'}
     if($Value.peer_prepared_receipt_sha256 -isnot [string] -or ($Value.node -ceq 'A' -and $Value.peer_prepared_receipt_sha256 -cne '') -or ($Value.node -ceq 'B' -and $Value.peer_prepared_receipt_sha256 -cnotmatch '^[0-9a-f]{64}$')){throw 'guest_vm_peer_pin_required'}
+    if($Value.schema_version -eq 2){
+        if($Value.creation_method -isnot [string] -or $Value.creation_method -cne 'verified-node-image-copy-v1'){throw 'guest_vm_creation_method_rejected'}
+        $image=$Value.node_image
+        Assert-GuestVmKeys $image @('filename','sha256','bytes','disk_identifier','source_qcow_sha256','conversion_receipt_sha256','tool_version','tool_sha256')
+        foreach($key in @('sha256','source_qcow_sha256','conversion_receipt_sha256','tool_sha256')){if($image.$key -isnot [string] -or $image.$key -cnotmatch '^[0-9a-f]{64}$'){throw 'guest_vm_node_image_hash_rejected'}}
+        if($image.filename -isnot [string] -or $image.filename -cne ('node-'+$Value.node+'.vhdx') -or ($image.bytes -isnot [int] -and $image.bytes -isnot [long]) -or $image.bytes -lt 1048576 -or $image.bytes -gt 8589934592 -or
+            $image.disk_identifier -isnot [string] -or
+            $image.tool_version -isnot [string] -or $image.tool_version -cnotmatch '^qemu-img version [0-9]+\.[0-9]+\.[0-9]+$' -or
+            $image.source_qcow_sha256 -cne '04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94'){throw 'guest_vm_node_image_rejected'}
+        $null=ConvertTo-GuestVmDiskIdentifier $image.disk_identifier
+    }
     return $Value
 }
 function Read-GuestVmSpec{
     if($Manifest -isnot [string] -or $Manifest.Length -gt 32768 -or $ManifestSha256 -cnotmatch '^[0-9a-f]{64}$'){throw 'guest_vm_manifest_pin_required'}
     $bytes=[Convert]::FromBase64String($Manifest)
     $text=([Text.UTF8Encoding]::new($false,$true)).GetString($bytes)
+    # Every accepted key/value alphabet is escape-free. Reject before JSON decoding
+    # so Unicode-escaped duplicate keys cannot bypass the literal key inventory.
+    if($text.Contains('\')){throw 'guest_vm_duplicate_or_escaped_keys'}
     $keys=@([regex]::Matches($text,'"([A-Za-z_][A-Za-z0-9_]*)"\s*:')|ForEach-Object{$_.Groups[1].Value})
-    if($keys.Count -ne 13 -or @($keys|Select-Object -Unique).Count -ne 13){throw 'guest_vm_duplicate_or_escaped_keys'}
+    if($keys.Count -notin @(13,23) -or @($keys|Select-Object -Unique).Count -ne $keys.Count){throw 'guest_vm_duplicate_or_escaped_keys'}
     if((Get-GuestVmHash $bytes) -cne $ManifestSha256){throw 'guest_vm_manifest_changed'}
     return Assert-GuestVmSpec ($text|ConvertFrom-Json)
 }
@@ -96,6 +121,19 @@ function Open-GuestVmPinned([string]$Path,[string]$Hash,[long]$Size,[string]$VmS
     $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
     try{if(($Size -ge 0 -and $stream.Length -ne $Size) -or (Get-GuestVmStreamHash $stream) -cne $Hash -or (Get-GuestVmFileIdentity $Path $VmSid $VmWriter) -cne $identity){throw 'guest_vm_file_pin_changed'};$stream.Position=0;return $stream}catch{$stream.Dispose();throw}
 }
+function Open-GuestVmNodeImage([string]$Root,$Spec){
+    # The manifest pins both the transported image and its conversion evidence.
+    # Unlike schema1's generic base clone, this image already has a node-specific VPD83 ID.
+    $image=$Spec.node_image;$path=Join-Path $Root $image.filename
+    $receipt=Open-GuestVmPinned (Join-Path $Root ('node-'+$Spec.node+'-conversion-receipt.json')) $image.conversion_receipt_sha256 -1
+    try{if($receipt.Length -lt 2 -or $receipt.Length -gt 32768){throw 'guest_vm_conversion_receipt_limit'}}finally{$receipt.Dispose()}
+    $stream=Open-GuestVmPinned $path $image.sha256 $image.bytes
+    try{
+        $disk=Get-VHD -Path $path;Assert-GuestVmDisk $disk
+        if((ConvertTo-GuestVmDiskIdentifier $disk.DiskIdentifier) -cne (ConvertTo-GuestVmDiskIdentifier $image.disk_identifier)){throw 'guest_vm_node_image_identifier_changed'}
+        return $stream
+    }catch{$stream.Dispose();throw}
+}
 function New-GuestVmPrivateDirectory([string]$Path){
     if(Test-Path -LiteralPath $Path){throw 'guest_vm_directory_exists'}
     $acl=[Security.AccessControl.DirectorySecurity]::new();$acl.SetAccessRuleProtection($true,$false);$acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
@@ -112,7 +150,7 @@ function Add-GuestVmEvent([string]$Event,$Data){
     $script:guestVmSequence++
     Write-GuestVmRecord $script:guestVmJournal ([ordered]@{sequence=$script:guestVmSequence;event=$Event;data=$Data}) $false
 }
-function Assert-GuestVmDisk($Disk,[bool]$AllowAttached=$false){if($Disk.VhdFormat -ne 'VHDX' -or $Disk.VhdType -ne 'Dynamic' -or $Disk.ParentPath -or [long]$Disk.Size -ne 25769803776 -or ($Disk.Attached -and -not $AllowAttached) -or [string]::IsNullOrEmpty([string]$Disk.DiskIdentifier)){throw 'guest_vm_independent_disk_required'}}
+function Assert-GuestVmDisk($Disk,[bool]$AllowAttached=$false){if($Disk.VhdFormat -ne 'VHDX' -or $Disk.VhdType -ne 'Dynamic' -or $Disk.ParentPath -or [long]$Disk.Size -ne 25769803776 -or ($Disk.Attached -and -not $AllowAttached) -or [string]::IsNullOrEmpty([string]$Disk.DiskIdentifier)){throw 'guest_vm_independent_disk_required'};$null=ConvertTo-GuestVmDiskIdentifier $Disk.DiskIdentifier}
 function Test-GuestVmDisconnectedNic($Nic){
     if($null -eq $Nic -or $null -eq $Nic.PSObject.Properties['SwitchName'] -or $null -eq $Nic.PSObject.Properties['SwitchId']){return $false}
     if(($null -ne $Nic.SwitchName -and $Nic.SwitchName -isnot [string]) -or ($null -ne $Nic.SwitchId -and $Nic.SwitchId -isnot [string] -and $Nic.SwitchId -isnot [Guid])){return $false}
@@ -148,6 +186,7 @@ function Assert-GuestVmPrepared($Spec,$Names,$Pins,[string]$GuestRoot,[string]$D
         $Pins.vm_id -isnot [string] -or $Pins.vm_id -cnotmatch '^[0-9a-f-]{36}$' -or $Pins.switch_id -isnot [string] -or $Pins.switch_id -cnotmatch '^[0-9a-f-]{36}$'){throw 'guest_vm_pin_rejected'}
     foreach($key in @('installation_id','source_commit','stage_source_commit','seed_source_commit','node','manifest_sha256','stage_manifest_sha256','vm_id','vm_name','switch_id','switch_name','config_path','disk_path','disk_sha256','disk_identity','disk_identifier','seed_path','seed_sha256','seed_identity','mac_address','com1_pipe','egress_mac_address','peer_prepared_receipt_sha256','switch_owner_manifest_sha256')){if($Pins.$key -isnot [string]){throw 'guest_vm_pin_type_rejected'}}
     if($Pins.optional_egress_nic -isnot [bool] -or $Pins.disk_sha256 -cnotmatch '^[0-9a-f]{64}$' -or $Pins.switch_owner_manifest_sha256 -cnotmatch '^[0-9a-f]{64}$' -or ($Spec.node -ceq 'A' -and $Pins.switch_owner_manifest_sha256 -cne $ExpectedManifestSha256)){throw 'guest_vm_pin_type_rejected'}
+    if($null -ne $Spec.PSObject.Properties['schema_version'] -and $Spec.schema_version -eq 2 -and ((ConvertTo-GuestVmDiskIdentifier $Pins.disk_identifier) -cne (ConvertTo-GuestVmDiskIdentifier $Spec.node_image.disk_identifier) -or $Pins.disk_sha256 -cne $Spec.node_image.sha256)){throw 'guest_vm_node_image_pin_changed'}
     $vm=Get-VM -Id ([Guid]$Pins.vm_id) -ErrorAction Stop
     if($vm.Id.ToString() -cne $Pins.vm_id -or $vm.Name -cne $Names.vm -or $vm.Generation -ne 2 -or ($vm.State -ne 'Off' -and -not ($PeerReadOnly -and $vm.State -eq 'Running')) -or $vm.Path -ine $Pins.config_path -or
         $vm.Notes -cne ('ha-owned-guest-v1:'+$Spec.installation_id+':'+$ExpectedManifestSha256) -or $vm.AutomaticStartAction -ne 'Nothing' -or $vm.AutomaticStopAction -ne 'TurnOff' -or $vm.CheckpointType -ne 'Disabled' -or $vm.AutomaticCheckpointsEnabled){throw 'guest_vm_identity_changed'}
@@ -162,7 +201,7 @@ function Assert-GuestVmPrepared($Spec,$Names,$Pins,[string]$GuestRoot,[string]$D
     if($drives.Count -ne 1 -or $drives[0].Path -ine $DiskPath -or $dvd.Count -ne 1 -or $dvd[0].Path -ine $IsoPath){throw 'guest_vm_media_changed'}
     $vmSid=Get-GuestVmSid $Pins.vm_id
     $disk=Get-VHD -Path $DiskPath;Assert-GuestVmDisk $disk $PeerReadOnly
-    if($disk.DiskIdentifier.ToString() -cne $Pins.disk_identifier -or (Get-GuestVmFileIdentity $DiskPath $vmSid $true $PeerReadOnly) -cne $Pins.disk_identity -or (Get-GuestVmFileIdentity $IsoPath $vmSid $false) -cne $Pins.seed_identity){throw 'guest_vm_media_identity_changed'}
+    if((ConvertTo-GuestVmDiskIdentifier $disk.DiskIdentifier) -cne (ConvertTo-GuestVmDiskIdentifier $Pins.disk_identifier) -or (Get-GuestVmFileIdentity $DiskPath $vmSid $true $PeerReadOnly) -cne $Pins.disk_identity -or (Get-GuestVmFileIdentity $IsoPath $vmSid $false) -cne $Pins.seed_identity){throw 'guest_vm_media_identity_changed'}
     # A running peer's disk contents are mutable. Inspect its immutable identity,
     # never obtain an exclusive handle or compare its obsolete pre-boot hash.
     if(-not $PeerReadOnly){$d=Open-GuestVmPinned $DiskPath $Pins.disk_sha256 -1 $vmSid $true;$d.Dispose()}
@@ -179,6 +218,8 @@ function Get-GuestVmPeer([string]$Root,$Spec){
     if($pins.node -cne 'A' -or $pins.installation_id -cne $Spec.installation_id -or $pins.source_commit -cne $Spec.source_commit -or $pins.stage_source_commit -cne $Spec.stage_source_commit -or $pins.seed_source_commit -cne $Spec.seed_source_commit -or $pins.stage_manifest_sha256 -cne $Spec.stage_manifest_sha256 -or $pins.manifest_sha256 -isnot [string] -or $pins.manifest_sha256 -cnotmatch '^[0-9a-f]{64}$'){throw 'guest_vm_peer_component_changed'}
     $peerRoot=Join-Path $Root 'guest-A';$peerDisk=Join-Path $peerRoot 'guest-A.vhdx';$peerIso=Join-Path $Root 'seed-A.iso'
     $isoBytes=(Get-Item -LiteralPath $peerIso -Force).Length
+    # This is an installed-state projection, not a claim about A's creation method.
+    # The caller pins A's original receipt/manifest SHA, all 25 pins and actual VM/media identity.
     $peerSpec=[pscustomobject]@{schema_version=1;source_commit=$Spec.source_commit;stage_source_commit=$Spec.stage_source_commit;seed_source_commit=$Spec.seed_source_commit;installation_id=$Spec.installation_id;stage_manifest_sha256=$Spec.stage_manifest_sha256;seed_iso_sha256=$pins.seed_sha256;seed_iso_bytes=$isoBytes;node='A';mac_address=$pins.mac_address;optional_egress_nic=$pins.optional_egress_nic;egress_mac_address=$pins.egress_mac_address;peer_prepared_receipt_sha256=''}
     $null=Assert-GuestVmSpec $peerSpec
     $peerMacs=@($peerSpec.mac_address);if($peerSpec.optional_egress_nic){$peerMacs+=@($peerSpec.egress_mac_address)}
@@ -215,7 +256,7 @@ function Invoke-GuestVm{
     $parent=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
     $root=Join-Path $parent ('N100HA_'+$spec.installation_id.Substring(0,24));Assert-GuestVmPrivate $root
     $stagePath=Join-Path $root 'stage-manifest.json';$stageStream=Open-GuestVmPinned $stagePath $spec.stage_manifest_sha256 -1
-    $isoStream=$null;$baseStream=$null
+    $isoStream=$null;$baseStream=$null;$nodeStream=$null
     try{
         if($stageStream.Length -gt 32768){throw 'guest_vm_stage_limit'};$reader=[IO.StreamReader]::new($stageStream,[Text.UTF8Encoding]::new($false,$true),$false,1024,$true);try{$stage=$reader.ReadToEnd()|ConvertFrom-Json}finally{$reader.Dispose()}
         Assert-GuestVmKeys $stage @('schema_version','source_commit','installation_id','compressed_sha256','compressed_bytes','vhdx_sha256','vhdx_bytes')
@@ -256,20 +297,30 @@ function Invoke-GuestVm{
         if((Test-Path -LiteralPath $guestRoot) -or (Test-Path -LiteralPath $journal) -or (Test-Path -LiteralPath $preparedPath)){throw 'guest_vm_existing_partial_manual_reconcile'}
         $base=Join-Path $root 'base.vhdx';$baseStream=Open-GuestVmPinned $base $stage.vhdx_sha256 $stage.vhdx_bytes
         Assert-GuestVmDisk (Get-VHD -Path $base)
+        $copySource=$baseStream;$copyHash=$stage.vhdx_sha256;$copyBytes=$stage.vhdx_bytes;$copySourcePath=$base
+        if($spec.schema_version -eq 2){
+            $nodeStream=Open-GuestVmNodeImage $root $spec;$copySource=$nodeStream;$copyHash=$spec.node_image.sha256;$copyBytes=$spec.node_image.bytes;$copySourcePath=Join-Path $root $spec.node_image.filename
+            if((ConvertTo-GuestVmDiskIdentifier $spec.node_image.disk_identifier) -ceq (ConvertTo-GuestVmDiskIdentifier (Get-VHD -Path $base).DiskIdentifier) -or ($spec.node -ceq 'B' -and (ConvertTo-GuestVmDiskIdentifier $spec.node_image.disk_identifier) -ceq (ConvertTo-GuestVmDiskIdentifier $peer.pins.disk_identifier))){throw 'guest_vm_node_image_identifier_collision'}
+        }
         $drive=[IO.DriveInfo]::new([IO.Path]::GetPathRoot($root));if($drive.AvailableFreeSpace -lt (25769803776+10737418240)){throw 'guest_vm_disk_reserve_failed'}
         $script:guestVmJournal=$journal;$script:guestVmSequence=1
         Write-GuestVmRecord $journal ([ordered]@{sequence=1;event='intent';data=@{installation_id=$spec.installation_id;source_commit=$spec.source_commit;stage_source_commit=$spec.stage_source_commit;seed_source_commit=$spec.seed_source_commit;node=$spec.node;manifest_sha256=$ManifestSha256;stage_manifest_sha256=$spec.stage_manifest_sha256;seed_sha256=$spec.seed_iso_sha256;vm_name=$names.vm;switch_name=$names.switch;config_path=$guestRoot;disk_path=$diskPath;com1_pipe=$names.pipe;egress_mac_address=$spec.egress_mac_address;peer_prepared_receipt_sha256=$spec.peer_prepared_receipt_sha256}}) $true
         Add-GuestVmEvent 'create_private_directory' @{};New-GuestVmPrivateDirectory $guestRoot
-        Add-GuestVmEvent 'copy_independent_disk' @{}
+        $copyEvidence=@{}
+        if($spec.schema_version -eq 2){$copyEvidence=@{creation_method=$spec.creation_method;node_image=$spec.node_image}}
+        Add-GuestVmEvent 'copy_independent_disk' $copyEvidence
         $copy=[IO.File]::Open($diskPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
-        try{$baseStream.CopyTo($copy,1048576);$copy.Flush($true)}finally{$copy.Dispose()}
-        $copied=Open-GuestVmPinned $diskPath $stage.vhdx_sha256 $stage.vhdx_bytes;$copied.Dispose()
+        try{$copySource.CopyTo($copy,1048576);$copy.Flush($true)}finally{$copy.Dispose()}
+        $copied=Open-GuestVmPinned $diskPath $copyHash $copyBytes;$copied.Dispose()
+        if((Get-GuestVmFileIdentity $diskPath) -ceq (Get-GuestVmFileIdentity $copySourcePath) -or (Get-GuestVmFileIdentity $diskPath) -ceq (Get-GuestVmFileIdentity $base)){throw 'guest_vm_copy_file_identity_collision'}
         $disk=Get-VHD -Path $diskPath;Assert-GuestVmDisk $disk
         # The fresh byte copy duplicates its source identifier. Only this new copy may be reset.
-        if($disk.DiskIdentifier -eq (Get-VHD -Path $base).DiskIdentifier){Add-GuestVmEvent 'reset_new_copy_disk_identifier' @{};Set-VHD -Path $diskPath -ResetDiskIdentifier -ErrorAction Stop}
+        if($spec.schema_version -eq 1){
+            if((ConvertTo-GuestVmDiskIdentifier $disk.DiskIdentifier) -ceq (ConvertTo-GuestVmDiskIdentifier (Get-VHD -Path $base).DiskIdentifier)){Add-GuestVmEvent 'reset_new_copy_disk_identifier' @{};Set-VHD -Path $diskPath -ResetDiskIdentifier -ErrorAction Stop}
+        }elseif((ConvertTo-GuestVmDiskIdentifier $disk.DiskIdentifier) -cne (ConvertTo-GuestVmDiskIdentifier $spec.node_image.disk_identifier)){throw 'guest_vm_node_image_identifier_changed'}
         $disk=Get-VHD -Path $diskPath;Assert-GuestVmDisk $disk
-        if($disk.DiskIdentifier -eq (Get-VHD -Path $base).DiskIdentifier){throw 'guest_vm_duplicate_disk_identifier'}
-        if($spec.node -ceq 'B' -and $disk.DiskIdentifier.ToString() -ceq $peer.pins.disk_identifier){throw 'guest_vm_peer_disk_identifier_collision'}
+        if((ConvertTo-GuestVmDiskIdentifier $disk.DiskIdentifier) -ceq (ConvertTo-GuestVmDiskIdentifier (Get-VHD -Path $base).DiskIdentifier)){throw 'guest_vm_duplicate_disk_identifier'}
+        if($spec.node -ceq 'B' -and (ConvertTo-GuestVmDiskIdentifier $disk.DiskIdentifier) -ceq (ConvertTo-GuestVmDiskIdentifier $peer.pins.disk_identifier)){throw 'guest_vm_peer_disk_identifier_collision'}
         $diskHashStream=[IO.File]::OpenRead($diskPath);try{$diskHash=Get-GuestVmStreamHash $diskHashStream}finally{$diskHashStream.Dispose()}
         $switchOwner=$ManifestSha256
         if($spec.node -ceq 'A'){
@@ -311,14 +362,14 @@ function Invoke-GuestVm{
         Add-GuestVmEvent 'grant_owned_vm_data_access' @{vm_id=$vm.Id.ToString()}
         Grant-GuestVmDataAccess $diskPath $vmSid $true
         Grant-GuestVmDataAccess $isoPath $vmSid $false
-        $pins=[ordered]@{installation_id=$spec.installation_id;source_commit=$spec.source_commit;stage_source_commit=$spec.stage_source_commit;seed_source_commit=$spec.seed_source_commit;node=$spec.node;manifest_sha256=$ManifestSha256;stage_manifest_sha256=$spec.stage_manifest_sha256;vm_id=$vm.Id.ToString();vm_name=$names.vm;switch_id=$switch.Id.ToString();switch_name=$names.switch;config_path=$vm.Path;disk_path=$diskPath;disk_sha256=$diskHash;disk_identity=(Get-GuestVmFileIdentity $diskPath $vmSid $true);disk_identifier=$disk.DiskIdentifier.ToString();seed_path=$isoPath;seed_sha256=$spec.seed_iso_sha256;seed_identity=(Get-GuestVmFileIdentity $isoPath $vmSid $false);mac_address=$spec.mac_address;com1_pipe=$names.pipe;optional_egress_nic=$spec.optional_egress_nic;egress_mac_address=$spec.egress_mac_address;peer_prepared_receipt_sha256=$spec.peer_prepared_receipt_sha256;switch_owner_manifest_sha256=$switchOwner}
+        $pins=[ordered]@{installation_id=$spec.installation_id;source_commit=$spec.source_commit;stage_source_commit=$spec.stage_source_commit;seed_source_commit=$spec.seed_source_commit;node=$spec.node;manifest_sha256=$ManifestSha256;stage_manifest_sha256=$spec.stage_manifest_sha256;vm_id=$vm.Id.ToString();vm_name=$names.vm;switch_id=$switch.Id.ToString();switch_name=$names.switch;config_path=$vm.Path;disk_path=$diskPath;disk_sha256=$diskHash;disk_identity=(Get-GuestVmFileIdentity $diskPath $vmSid $true);disk_identifier=(ConvertTo-GuestVmDiskIdentifier $disk.DiskIdentifier);seed_path=$isoPath;seed_sha256=$spec.seed_iso_sha256;seed_identity=(Get-GuestVmFileIdentity $isoPath $vmSid $false);mac_address=$spec.mac_address;com1_pipe=$names.pipe;optional_egress_nic=$spec.optional_egress_nic;egress_mac_address=$spec.egress_mac_address;peer_prepared_receipt_sha256=$spec.peer_prepared_receipt_sha256;switch_owner_manifest_sha256=$switchOwner}
         if($spec.node -ceq 'B'){$peer=Get-GuestVmPeer $root $spec;if($peer.pins.switch_id -cne $pins.switch_id -or $peer.pins.manifest_sha256 -cne $switchOwner){throw 'guest_vm_peer_switch_changed'}}
         $null=Assert-GuestVmPrepared $spec $names ([pscustomobject]$pins) $guestRoot $diskPath $isoPath
         Add-GuestVmEvent 'prepared' $pins
         Write-GuestVmRecord $preparedPath ([ordered]@{schema_version=1;prepared=$true;pins=$pins}) $true
         Assert-GuestVmPrivate $preparedPath
         [ordered]@{scope='fresh_owned_guest';node=$spec.node;vm_id=$vm.Id.ToString();switch_id=$switch.Id.ToString();manifest_sha256=$ManifestSha256;journal_sha256=(Get-GuestVmHash ([IO.File]::ReadAllBytes($journal)));prepared_receipt_sha256=(Get-GuestVmHash ([IO.File]::ReadAllBytes($preparedPath)));prepared=$true;started=$false;production_transition=$false}|ConvertTo-Json -Compress
-    }finally{if($null -ne $baseStream){$baseStream.Dispose()};if($null -ne $isoStream){$isoStream.Dispose()};$stageStream.Dispose()}
+    }finally{if($null -ne $nodeStream){$nodeStream.Dispose()};if($null -ne $baseStream){$baseStream.Dispose()};if($null -ne $isoStream){$isoStream.Dispose()};$stageStream.Dispose()}
 }
 if($MyInvocation.InvocationName -ne '.'){
     try{Invoke-GuestVm}catch{throw 'guest_vm_rejected_preserve_partial_manual_reconcile'}

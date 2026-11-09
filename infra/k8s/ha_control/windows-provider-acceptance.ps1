@@ -23,22 +23,25 @@ function Test-ProbeServiceImagePath([string]$Actual,[string]$Expected){
 function Test-ProbeNoOperation($Result,[string]$Operation,[bool]$ExpectedHyperv){
     if($Result.scope -isnot [string] -or $Result.operation -isnot [string] -or $Result.stage -isnot [string] -or
         ($Result.schema_version -isnot [int] -and $Result.schema_version -isnot [long]) -or
-        $Result.scope -cne 'owned_vm_provider_role_probe' -or $Result.schema_version -ne 2 -or $Result.operation -cne $Operation){return $false}
+        $Result.scope -cne 'owned_vm_provider_role_probe' -or $Result.schema_version -ne 3 -or $Result.operation -cne $Operation){return $false}
     foreach($field in @('attempted','complete','authorized','authorization_denied','administrator','hyperv_role')){if($Result.$field -isnot [bool]){return $false}}
     return (-not $Result.attempted -and -not $Result.complete -and -not $Result.authorized -and -not $Result.authorization_denied -and
         -not $Result.administrator -and $Result.hyperv_role -eq $ExpectedHyperv -and $Result.stage -cin @('identity','input_validation','schema_query','valid_operation'))
 }
 function Assert-ProbeResultShape($Result){
-    $keys=@('schema_version','scope','process_id','process_start_ticks','operation','stage','attempted','complete','authorized','authorization_denied','return_code','administrator','hyperv_role','settings_serialized_value_present','settings_readback_verified','native_target_paths_bound','method_result_verified','target_descriptor_sha256','settings_payload_sha256')
+    $keys=@('schema_version','scope','process_id','process_start_ticks','operation','stage','attempted','complete','authorized','authorization_denied','return_code','administrator','hyperv_role','settings_serialized_value_present','settings_readback_verified','native_target_paths_bound','method_result_verified','target_descriptor_sha256','settings_payload_sha256','settings_current_path_sha256','settings_current_instance_sha256','settings_current_association_verified')
     if((($Result.PSObject.Properties.Name|Sort-Object -CaseSensitive)-join ',') -cne (($keys|Sort-Object -CaseSensitive)-join ',')){throw 'fixture_result_unverified'}
-    foreach($field in @('attempted','complete','authorized','authorization_denied','administrator','hyperv_role','settings_serialized_value_present','settings_readback_verified','native_target_paths_bound','method_result_verified')){
+    foreach($field in @('attempted','complete','authorized','authorization_denied','administrator','hyperv_role','settings_serialized_value_present','settings_readback_verified','native_target_paths_bound','method_result_verified','settings_current_association_verified')){
         if($Result.$field -isnot [bool]){throw 'fixture_result_unverified'}
     }
-    foreach($field in @('target_descriptor_sha256','settings_payload_sha256')){if($Result.$field -isnot [string] -or $Result.$field -cnotmatch '^[0-9a-f]{64}$'){throw 'fixture_result_unverified'}}
+    foreach($field in @('target_descriptor_sha256','settings_payload_sha256')){
+        if($Result.$field -isnot [string] -or ($Result.operation -ceq 'settings' -and $Result.$field -cnotmatch '^[0-9a-f]{64}$') -or ($Result.operation -cne 'settings' -and $Result.$field -cne '')){throw 'fixture_result_unverified'}
+    }
+    foreach($field in @('settings_current_path_sha256','settings_current_instance_sha256')){if($Result.$field -isnot [string] -or ($Result.$field -cne '' -and $Result.$field -cnotmatch '^[0-9a-f]{64}$') -or ($Result.operation -cne 'settings' -and $Result.$field -cne '')){throw 'fixture_result_unverified'}}
     foreach($field in @('schema_version','process_id','return_code')){
         if($Result.$field -isnot [int] -and $Result.$field -isnot [long]){throw 'fixture_result_unverified'}
     }
-    if($Result.schema_version -ne 2 -or $Result.process_id -le 0 -or $Result.process_id -gt [int]::MaxValue -or
+    if($Result.schema_version -ne 3 -or $Result.process_id -le 0 -or $Result.process_id -gt [int]::MaxValue -or
         $Result.return_code -lt 0 -or $Result.return_code -gt [uint32]::MaxValue -or
         $Result.scope -isnot [string] -or $Result.scope -cne 'owned_vm_provider_role_probe' -or
         $Result.operation -isnot [string] -or $Result.operation -cnotin @('settings','power_on','power_off') -or
@@ -68,7 +71,7 @@ function Get-ProbeFailureReason([string]$Message){
 }
 function Set-ProbePhase($Record,[string]$Journal,[string]$Phase){
     $Record['phase']=$Phase
-    [IO.File]::WriteAllText($Journal,($Record|ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($Journal,($Record|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
 }
 function New-ProbeDirectory([string]$Path,[string[]]$Readers=@(),[string]$Writer=''){
     if(Test-Path -LiteralPath $Path){throw 'fixture_path_exists'}
@@ -117,7 +120,10 @@ function Invoke-ProbeOperation($Fixture,[string]$Operation){
     if($service.Status -ne 'Stopped'){throw 'fixture_service_not_stopped'}
     $output=Join-Path $Fixture.root 'result\probe.json'
     if(Test-Path -LiteralPath $output){throw 'fixture_result_exists'}
-    $text="format=ha-provider-probe-v2`nservice_name=$($Fixture.name)`nservice_sid=$($Fixture.sid)`ninstallation_id=$script:installation`nvm_id=$script:vmId`noperation=$Operation`nexpected_hyperv_role=$($Fixture.role)`ntarget_descriptor_b64=$script:targetDescriptorB64`ntarget_descriptor_sha256=$script:targetDescriptorSha256`n"
+    $descriptor=if($Operation -ceq 'settings'){$script:targetDescriptorB64}else{''}
+    $descriptorSha=if($Operation -ceq 'settings'){$script:targetDescriptorSha256}else{''}
+    $payloadSha=if($Operation -ceq 'settings'){$script:settingsPayloadSha256}else{''}
+    $text="format=ha-provider-probe-v3`nservice_name=$($Fixture.name)`nservice_sid=$($Fixture.sid)`ninstallation_id=$script:installation`nvm_id=$script:vmId`noperation=$Operation`nexpected_hyperv_role=$($Fixture.role)`ntarget_descriptor_b64=$descriptor`ntarget_descriptor_sha256=$descriptorSha`n"
     [IO.File]::WriteAllText((Join-Path $Fixture.root 'probe.args'),$text,[Text.UTF8Encoding]::new($false))
     # A fast one-shot may already have stopped when StartService returns. Do
     # not repeat it: reconcile the pinned service state and its exact result.
@@ -140,7 +146,7 @@ function Invoke-ProbeOperation($Fixture,[string]$Operation){
     Add-ProbeProcess $Fixture $result.process_id $result.process_start_ticks
     Wait-ProbeProcesses $Fixture
     Assert-ProbeResultShape $result
-    if($result.target_descriptor_sha256 -cne $script:targetDescriptorSha256 -or $result.settings_payload_sha256 -cne $script:settingsPayloadSha256){throw 'fixture_result_unverified'}
+    if($result.target_descriptor_sha256 -cne $descriptorSha -or $result.settings_payload_sha256 -cne $payloadSha){throw 'fixture_result_unverified'}
     # Preserve an exact-source failed query's diagnostic after its process has
     # exited. No query denial counts as a method authorization denial. Only a
     # verified attempted=false frame can clear the pending-operation barrier.
@@ -151,13 +157,13 @@ function Invoke-ProbeOperation($Fixture,[string]$Operation){
         }
         throw 'fixture_service_incomplete'
     }
-    if($result.scope -cne 'owned_vm_provider_role_probe' -or $result.schema_version -ne 2 -or
+    if($result.scope -cne 'owned_vm_provider_role_probe' -or $result.schema_version -ne 3 -or
         $result.operation -cne $Operation -or $result.attempted -ne $true -or $result.complete -ne $true -or
         $result.administrator -ne $false -or $result.hyperv_role -ne ($Fixture.role -ceq 'true') -or
         -not $result.native_target_paths_bound -or -not $result.method_result_verified){throw 'fixture_result_unverified'}
     if($Fixture.role -ceq 'true'){
         if($result.authorized -ne $true -or $result.authorization_denied -ne $false -or $result.return_code -ne 0){throw 'positive_control_failed'}
-        if($Operation -ceq 'settings' -and (-not $result.settings_serialized_value_present -or -not $result.settings_readback_verified)){throw 'positive_control_failed'}
+        if($Operation -ceq 'settings' -and (-not $result.settings_serialized_value_present -or -not $result.settings_readback_verified -or -not $result.settings_current_association_verified -or $result.settings_current_path_sha256 -cne $script:settingsTargetPathSha256 -or $result.settings_current_instance_sha256 -cne $script:settingsInstanceSha256)){throw 'positive_control_failed'}
     }elseif($result.authorization_denied -ne $true -or $result.authorized -ne $false){throw 'provider_role_bypass'}
     $script:pendingOperation=$false
     # Move only this exact one-shot result into an administrator-only receipt.
@@ -176,7 +182,7 @@ function New-ProbeTargetDescriptor {
     # ROOT/admin makes one typed payload from the actual owned current setting.
     # Both isolated service tokens receive exactly these bytes, not a query recipe.
     $vm=Test-ProbeTarget
-    if($vm.State -ne 'Off'){throw 'fixture_vm_ownership_changed'}
+    if($vm.State -ne 'Running'){throw 'fixture_vm_ownership_changed'}
     Add-Type -AssemblyName System.Management
     $scope=[Management.ManagementScope]::new('\\.\root\virtualization\v2');$scope.Connect()
     $search=[Management.ManagementObjectSearcher]::new($scope,[Management.ObjectQuery]::new("SELECT * FROM Msvm_ComputerSystem WHERE Name='$script:vmId'"))
@@ -202,8 +208,10 @@ function New-ProbeTargetDescriptor {
         if($script:settingsPayload.Length -lt 1 -or $script:settingsPayload.Length -gt 1048576){throw 'fixture_result_unverified'}
         $script:settingsPayloadSha256=Get-ProbeHash $script:settingsPayload
         $svc=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($service.Path.RelativePath))
+        $script:settingsTargetPathSha256=Get-ProbeHash ([Text.Encoding]::UTF8.GetBytes($setting.Path.RelativePath))
+        $script:settingsInstanceSha256=Get-ProbeHash ([Text.Encoding]::UTF8.GetBytes([string]$setting['InstanceID']))
         $target=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($setting.Path.RelativePath))
-        $descriptor="format=ha-provider-target-v2`ninstallation_id=$script:installation`nvm_id=$script:vmId`nsettings_virtual_system_type=Microsoft:Hyper-V:System:Realized`nsettings_virtual_system_identifier=$($setting['VirtualSystemIdentifier'])`nsettings_service_path_b64=$svc`nsettings_target_path_b64=$target`nsettings_payload_sha256=$script:settingsPayloadSha256`nsettings_payload_bytes=$($script:settingsPayload.Length)`n"
+        $descriptor="format=ha-provider-target-v3`ninstallation_id=$script:installation`nvm_id=$script:vmId`nsettings_vm_state=Running`nsettings_virtual_system_type=Microsoft:Hyper-V:System:Realized`nsettings_virtual_system_identifier=$($setting['VirtualSystemIdentifier'])`nsettings_service_path_b64=$svc`nsettings_target_path_b64=$target`nsettings_payload_sha256=$script:settingsPayloadSha256`nsettings_payload_bytes=$($script:settingsPayload.Length)`n"
         $descriptorBytes=[Text.Encoding]::UTF8.GetBytes($descriptor)
         $script:targetDescriptorB64=[Convert]::ToBase64String($descriptorBytes)
         $script:targetDescriptorSha256=Get-ProbeHash $descriptorBytes
@@ -212,6 +220,41 @@ function New-ProbeTargetDescriptor {
         if($null -ne $services){foreach($item in $services){$item.Dispose()};$services.Dispose()}
         foreach($item in $found){$item.Dispose()};$found.Dispose();$search.Dispose()
         if($null -ne $serviceSearch){$serviceSearch.Dispose()}
+    }
+}
+function Test-ProbeCurrentSettingsExact($Observation,[bool]$Tested){
+    foreach($field in @('current_path_exact','current_instance_exact','original_marker_exact','tested_marker_exact')){if($Observation[$field] -isnot [bool]){return $false}}
+    foreach($field in @('current_path_sha256','current_instance_sha256')){if($Observation[$field] -isnot [string] -or $Observation[$field] -cnotmatch '^[0-9a-f]{64}$'){return $false}}
+    return ($Observation.current_path_exact -and $Observation.current_instance_exact -and
+        $Observation.tested_marker_exact -eq $Tested -and $Observation.original_marker_exact -eq (-not $Tested))
+}
+function Get-ProbeCurrentSettingsObservation {
+    # Independent ROOT read of the current association. No path/notes are emitted.
+    $scope=[Management.ManagementScope]::new('\\.\root\virtualization\v2');$scope.Connect()
+    $search=[Management.ManagementObjectSearcher]::new($scope,[Management.ObjectQuery]::new("SELECT * FROM Msvm_ComputerSystem WHERE Name='$script:vmId'"))
+    $found=$search.Get();$related=$null;$result=$null;$count=0
+    try{
+        if($found.Count -ne 1){throw 'fixture_vm_ownership_changed'}
+        foreach($vm in $found){
+            if([uint32]$vm['EnabledState'] -ne 2){throw 'fixture_vm_ownership_changed'}
+            $related=$vm.GetRelated('Msvm_VirtualSystemSettingData','Msvm_SettingsDefineState',$null,$null,$null,$null,$false,$null)
+            foreach($setting in $related){
+                if([string]$setting['VirtualSystemType'] -ceq 'Microsoft:Hyper-V:System:Realized' -and [string]$setting['VirtualSystemIdentifier'] -ieq $script:vmId){
+                    $count++;$notes=@($setting['Notes'])
+                    $pathHash=Get-ProbeHash ([Text.Encoding]::UTF8.GetBytes($setting.Path.RelativePath))
+                    $instanceHash=Get-ProbeHash ([Text.Encoding]::UTF8.GetBytes([string]$setting['InstanceID']))
+                    $result=[ordered]@{current_path_sha256=$pathHash;current_instance_sha256=$instanceHash;
+                        current_path_exact=($pathHash -ceq $script:settingsTargetPathSha256);current_instance_exact=($instanceHash -ceq $script:settingsInstanceSha256);
+                        original_marker_exact=($notes.Count -eq 1 -and [string]$notes[0] -ceq ('ha-owned-provider-probe:'+$script:installation));
+                        tested_marker_exact=($notes.Count -eq 1 -and [string]$notes[0] -ceq ('ha-owned-provider-probe:'+$script:installation+':tested'))}
+                }
+            }
+        }
+        if($count -ne 1){throw 'fixture_vm_ownership_changed'}
+        return $result
+    }finally{
+        if($null -ne $related){foreach($item in $related){$item.Dispose()};$related.Dispose()}
+        foreach($item in $found){$item.Dispose()};$found.Dispose();$search.Dispose()
     }
 }
 function Write-ProbePayload([string]$Root,[string]$Sid){
@@ -252,7 +295,7 @@ function Invoke-ProviderAcceptance {
     $journal=Join-Path $script:root 'ownership.json'
     $record=[ordered]@{schema_version=1;installation_id=$script:installation;source_commit=$SourceCommit;probe_source_sha256=$ProbeSourceSha256;artifact_sha256=$ArtifactSha256;boot_ticks=$bootBefore;namespace_descriptor_sha256=$namespaceBefore;vm_id=$null;service_names=$names;phase='fixture_vm_creation';complete=$false}
     $failureType=$null;$failureReason=$null;$record['settings_readback']=$null;$record['target_descriptor_sha256']=$null;$record['settings_payload_sha256']=$null;$record['positive_negative_dataset_identical']=$false
-    [IO.File]::WriteAllText($journal,($record|ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($journal,($record|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
     try{
         $config=Join-Path $script:root 'vm';$null=New-ProbeDirectory $config
         $vm=New-VM -Name $script:vmName -Generation 2 -MemoryStartupBytes 256MB -NoVHD -Path $config
@@ -263,16 +306,10 @@ function Invoke-ProviderAcceptance {
         Set-VMProcessor -VM $vm -Count 1 -Maximum 10
         Set-ProbePhase $record $journal 'fixture_target_validation'
         $null=Test-ProbeTarget
-        New-ProbeTargetDescriptor
-        $record['target_descriptor_sha256']=$script:targetDescriptorSha256
-        $record['settings_payload_sha256']=$script:settingsPayloadSha256
-        $record['settings_payload_bytes']=$script:settingsPayload.Length
-        $record['positive_negative_dataset_identical']=$true
         Set-ProbePhase $record $journal 'fixture_service_creation'
         for($i=0;$i -lt 2;$i++){
             $role=if($i -eq 0){'false'}else{'true'};$dir=Join-Path $script:root ('service'+$i)
             $null=New-ProbeDirectory $dir @($sids[$i]);$null=New-ProbeDirectory (Join-Path $dir 'result') @() $sids[$i]
-            Write-ProbePayload $dir $sids[$i]
             $exe=Join-Path $dir 'probe.exe';[IO.File]::WriteAllBytes($exe,$bytes)
             $fixture=[pscustomobject]@{name=$names[$i];sid=$sids[$i];root=$dir;role=$role;processes=@{}};$fixtures+=@($fixture)
             Invoke-ProbeSc @('create',$fixture.name,'binPath=',('"'+$exe+'"'),'start=','demand','obj=',('NT SERVICE\'+$fixture.name))
@@ -285,16 +322,32 @@ function Invoke-ProviderAcceptance {
         Set-ProbePhase $record $journal 'positive_power_on'
         $results+=@(Invoke-ProbeOperation $positive 'power_on')
         if((Test-ProbeTarget).State -ne 'Running'){throw 'positive_power_not_applied'}
+        New-ProbeTargetDescriptor
+        $record['target_descriptor_sha256']=$script:targetDescriptorSha256
+        $record['settings_payload_sha256']=$script:settingsPayloadSha256
+        $record['settings_payload_bytes']=$script:settingsPayload.Length
+        $record['positive_negative_dataset_identical']=$true
+        $record['settings_input_state']='Running'
+        $record['settings_target_path_sha256']=$script:settingsTargetPathSha256
+        $record['settings_instance_sha256']=$script:settingsInstanceSha256
+        foreach($fixture in $fixtures){Write-ProbePayload $fixture.root $fixture.sid}
         Set-ProbePhase $record $journal 'positive_settings'
         $results+=@(Invoke-ProbeOperation $positive 'settings')
         $vm=Get-VM -Id $script:vmId
         if($vm.State -ne 'Running'){throw 'positive_power_not_applied'}
-        $record['settings_readback']=[ordered]@{notes_length=([string]$vm.Notes).Length;original_marker_exact=($vm.Notes -ceq ('ha-owned-provider-probe:'+$script:installation));tested_marker_exact=($vm.Notes -ceq ('ha-owned-provider-probe:'+$script:installation+':tested'));notes_sha256=(Get-ProbeHash ([Text.Encoding]::UTF8.GetBytes([string]$vm.Notes)))}
-        if($vm.Notes -cne ('ha-owned-provider-probe:'+$script:installation+':tested')){throw 'positive_settings_not_applied'}
+        $fresh=Get-ProbeCurrentSettingsObservation
+        $record['settings_readback']=[ordered]@{wmi_current=$fresh;notes_length=([string]$vm.Notes).Length;original_marker_exact=($vm.Notes -ceq ('ha-owned-provider-probe:'+$script:installation));tested_marker_exact=($vm.Notes -ceq ('ha-owned-provider-probe:'+$script:installation+':tested'));notes_sha256=(Get-ProbeHash ([Text.Encoding]::UTF8.GetBytes([string]$vm.Notes)))}
+        if(-not (Test-ProbeCurrentSettingsExact $fresh $true) -or $vm.Notes -cne ('ha-owned-provider-probe:'+$script:installation+':tested')){throw 'positive_settings_not_applied'}
         Set-VM -VM $vm -Notes ('ha-owned-provider-probe:'+$script:installation)
+        $reset=Get-ProbeCurrentSettingsObservation
+        $record['settings_reset_readback']=$reset
+        if(-not (Test-ProbeCurrentSettingsExact $reset $false)){throw 'fixture_vm_ownership_changed'}
         if((Test-ProbeTarget).State -ne 'Running'){throw 'positive_power_not_applied'}
         Set-ProbePhase $record $journal 'negative_settings'
         $results+=@(Invoke-ProbeOperation $negative 'settings')
+        $negativeReadback=Get-ProbeCurrentSettingsObservation
+        $record['negative_settings_readback']=$negativeReadback
+        if(-not (Test-ProbeCurrentSettingsExact $negativeReadback $false)){throw 'negative_settings_changed_state'}
         if((Test-ProbeTarget).State -ne 'Running'){throw 'negative_settings_changed_state'}
         Set-ProbePhase $record $journal 'negative_power_off'
         $results+=@(Invoke-ProbeOperation $negative 'power_off')
@@ -353,7 +406,7 @@ function Invoke-ProviderAcceptance {
         if(($beforeVm -join ',') -cne ($afterVm -join ',') -or ($beforeMembers -join ',') -cne ($afterMembers -join ',')){$clean=$false}
         $record.complete=$complete;$record['cleanup_verified']=$clean
         $record['failure_type']=$failureType;$record['failure_reason']=$failureReason
-        [IO.File]::WriteAllText($journal,($record|ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($journal,($record|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
         # Leave the private receipts/configuration for reconciliation. Never
         # recursively delete a directory after a failed/ambiguous remote step.
         [ordered]@{scope='fresh_disconnected_vm_provider_role_acceptance';source_commit=$SourceCommit;probe_source_sha256=$ProbeSourceSha256;artifact_sha256=$ArtifactSha256;

@@ -546,6 +546,19 @@ $script:race=$false
 $snapshot=Get-EnforcedVmSnapshot $config $policy ([Diagnostics.Stopwatch]::StartNew())
 if(-not $snapshot.fenced){throw 'off_vm_lost'}
 if($script:trace.Count -ne 2 -or $config.windows_enforced.vm_config_root -notin $script:trace -or $config.windows_enforced.disks[0].path -notin $script:trace){throw 'missing_data_acl_checks'}
+$originalId=$config.windows_enforced.disks[0].disk_id
+foreach($native in @('7B0A3FEB-04CF-5C40-85BD-CFD50B85AB9D','F3602945-C7E3-8846-9FC2-5011BDDDFA1D')){
+ $config.windows_enforced.disks[0].disk_id=$native.ToLowerInvariant();$script:vhd.DiskIdentifier=$native
+ $snapshot=Get-EnforcedVmSnapshot $config $policy ([Diagnostics.Stopwatch]::StartNew())
+ if(-not $snapshot.fenced -or (ConvertTo-EnforcedDiskIdentifier $native) -cne (ConvertTo-EnforcedDiskIdentifier ([Guid]$native))){throw 'native_uppercase_identity_failed'}
+}
+$config.windows_enforced.disks[0].disk_id=$originalId
+foreach($bad in @($null,$true,7,[Guid]::Empty,'00000000-0000-0000-0000-000000000000','{7B0A3FEB-04CF-5C40-85BD-CFD50B85AB9D}','7B0A3FEB04CF5C4085BDCFD50B85AB9D','not-a-guid')){
+ $script:vhd.DiskIdentifier=$bad;$closed=$false
+ try{$null=Get-EnforcedVmSnapshot $config $policy ([Diagnostics.Stopwatch]::StartNew())}catch{$closed=$true}
+ if(-not $closed){throw 'malformed_native_identifier_accepted'}
+}
+$script:vhd.DiskIdentifier=[Guid]$originalId
 $blocked=0
 $script:vm.AutomaticStartAction='Start'
 try{Get-EnforcedVmSnapshot $config $policy ([Diagnostics.Stopwatch]::StartNew())|Out-Null}catch{$blocked++}
