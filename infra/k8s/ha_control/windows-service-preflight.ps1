@@ -11,8 +11,14 @@ function Assert-PreflightMask([string]$Sid,[long]$Mask,[string[]]$Writers,[strin
     if(($mask -band $writeMask) -ne 0 -and $Sid -notin $Writers){throw 'preflight_writer_rejected'}
     if($Private -and ($mask -band 2415919105) -ne 0 -and $Sid -notin $Readers){throw 'preflight_reader_rejected'}
 }
-function Assert-PreflightDescriptor($Descriptor,[string[]]$Writers,[string[]]$Readers,[bool]$Private,[bool]$Ancestor){
-    if($null -eq $Descriptor.Owner -or $Descriptor.Owner.Value -notin $Writers -or $null -eq $Descriptor.DiscretionaryAcl -or $Descriptor.DiscretionaryAcl.Count -eq 0){throw 'preflight_acl_rejected'}
+function Get-PreflightOsVolumeRoot{return [IO.Path]::GetPathRoot([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows))}
+function Test-PreflightOsRootOwner([string]$Owner,[string]$Path,[bool]$Ancestor){
+    return ($Owner -ceq 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464' -and
+        $Ancestor -and $Path -cmatch '^[A-Za-z]:\\$' -and $Path -ieq (Get-PreflightOsVolumeRoot))
+}
+function Assert-PreflightDescriptor($Descriptor,[string[]]$Writers,[string[]]$Readers,[bool]$Private,[bool]$Ancestor,[bool]$OsRootOwner=$false){
+    if($null -eq $Descriptor.Owner -or ($Descriptor.Owner.Value -notin $Writers -and
+        -not ($OsRootOwner -and $Descriptor.Owner.Value -ceq 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')) -or $null -eq $Descriptor.DiscretionaryAcl -or $Descriptor.DiscretionaryAcl.Count -eq 0){throw 'preflight_acl_rejected'}
     foreach($ace in $Descriptor.DiscretionaryAcl){
         if($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback){throw 'preflight_acl_rejected'}
         if($ace.AceFlags -band [Security.AccessControl.AceFlags]::InheritOnly){continue}
@@ -24,7 +30,8 @@ function Assert-PreflightDescriptor($Descriptor,[string[]]$Writers,[string[]]$Re
 function Assert-PreflightEntry($Entry,$Writers,$Readers,[bool]$Private,[bool]$Ancestor){
     if($Entry.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'preflight_reparse_rejected'}
     $acl=Get-Acl -LiteralPath $Entry.FullName -ErrorAction Stop
-    Assert-PreflightDescriptor ([Security.AccessControl.RawSecurityDescriptor]::new($acl.Sddl)) $Writers $Readers $Private $Ancestor
+    $descriptor=[Security.AccessControl.RawSecurityDescriptor]::new($acl.Sddl)
+    Assert-PreflightDescriptor $descriptor $Writers $Readers $Private $Ancestor (Test-PreflightOsRootOwner $descriptor.Owner.Value $Entry.FullName $Ancestor)
 }
 function Test-EnforcedServicePreflight {
     if((Get-PreflightPlatform) -ne [PlatformID]::Win32NT){throw 'native_preflight_required'}

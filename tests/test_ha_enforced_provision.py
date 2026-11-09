@@ -36,6 +36,34 @@ def pe():
 
 
 class EnforcedProvisionTests(unittest.TestCase):
+    def test_preflight_owner_exception_is_exact_os_root_ancestor_only(self):
+        pwsh=shutil.which('pwsh') or '/private/tmp/n100-ha-powershell/runtime/pwsh'
+        env=dict(os.environ, PREFLIGHT=str(ROOT/'infra/k8s/ha_control/windows-service-preflight.ps1'))
+        script=r'''
+$ErrorActionPreference='Stop'
+. $env:PREFLIGHT
+function Get-PreflightOsVolumeRoot{return 'C:\'}
+$ti='S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+if(-not (Test-PreflightOsRootOwner $ti 'c:\' $true)){throw 'os_root_rejected'}
+foreach($case in @(@($ti,'C:\',$false),@($ti,'C:\Private',$true),@($ti,'D:\',$true),@($ti,'C:\..\',$true),@('S-1-1-0','C:\',$true))){
+ if(Test-PreflightOsRootOwner $case[0] $case[1] ([bool]$case[2])){throw 'unsafe_owner_exception'}
+}
+$blocked=$false
+try{Assert-PreflightMask 'S-1-1-0' 262144 @('S-1-5-18') @('S-1-5-18') $false $true}catch{$blocked=$true}
+if(-not $blocked){throw 'unsafe_ace_bypassed'}
+# Parse the real call site without claiming native ACL execution on macOS.
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:PREFLIGHT,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'parse_failed'}
+$entry=$ast.Find({param($a) $a -is [Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -ceq 'Assert-PreflightEntry'},$true)
+$calls=@($entry.FindAll({param($a) $a -is [Management.Automation.Language.CommandAst] -and $a.GetCommandName() -ceq 'Test-PreflightOsRootOwner'},$true))
+if($calls.Count -ne 1 -or $calls[0].Extent.Text -cne 'Test-PreflightOsRootOwner $descriptor.Owner.Value $Entry.FullName $Ancestor'){throw 'owner_context_not_connected'}
+'owner-context-only'
+'''
+        result=subprocess.run([pwsh,'-NoProfile','-NonInteractive','-Command',script],env=env,capture_output=True,timeout=20)
+        self.assertEqual(result.returncode,0,result.stderr.decode(errors='replace'))
+        self.assertEqual(result.stdout.decode().strip(),'owner-context-only')
+
     def test_exact_args_and_no_command_input(self):
         good=settings()
         raw=P.render_args(good)
@@ -68,6 +96,16 @@ if($initialize.CommandLine().EndsWith('--arm')){throw 'initialize_armed'}
 $advance=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=advance'))
 if($advance.CommandLine() -cne $expected.Replace(' serve ',' advance ').Replace(' --arm','')){throw 'advance_not_exact_fixed_command'}
 if($advance.CommandLine().EndsWith('--arm')){throw 'advance_armed'}
+$ti='S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+if(-not [EnforcedServiceV1.Settings]::IsTrustedOsRootOwner($ti,'c:\','C:\',2)){throw 'os_root_owner_rejected'}
+foreach($case in @(@($ti,'C:\','C:\',0),@($ti,'C:\','C:\',1),@($ti,'C:\Private','C:\',3),@($ti,'D:\','C:\',3),@($ti,'C:\..\','C:\',3),@('S-1-1-0','C:\','C:\',3))){
+ if([EnforcedServiceV1.Settings]::IsTrustedOsRootOwner($case[0],$case[1],$case[2],[int]$case[3])){throw 'unsafe_owner_exception'}
+}
+foreach($mode in @('initialize','advance')){
+ if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,0) -ne 0){throw 'successful_oneshot_failed'}
+ if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,1) -ne 1){throw 'failed_oneshot_succeeded'}
+}
+foreach($mode in @('serve','unknown')){if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,0) -ne 1){throw 'unexpected_exit_succeeded'}}
 'managed-grammar-only'
 '''
         result=subprocess.run([pwsh,'-NoProfile','-NonInteractive','-Command',script],env=env,capture_output=True,timeout=20)

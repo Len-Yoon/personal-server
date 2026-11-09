@@ -88,6 +88,21 @@ def adapter(replies=()):
 
 
 class EnforcedWindowsTests(unittest.TestCase):
+    def test_trusted_installer_owner_is_only_a_higher_os_volume_root(self):
+        body=r'''
+function Get-EnforcedOsVolumeRoot{return 'C:\'}
+$ti='S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+if(-not (Test-EnforcedOsRootOwner $ti 'c:\' 2)){throw 'os_root_rejected'}
+foreach($case in @(@($ti,'C:\',0),@($ti,'C:\',1),@($ti,'C:\Private',3),@($ti,'D:\',3),@($ti,'C:\..\',3),@('S-1-1-0','C:\',3))){
+ if(Test-EnforcedOsRootOwner $case[0] $case[1] ([int]$case[2])){throw 'unsafe_owner_exception'}
+}
+$denied=$false
+try{Assert-EnforcedAllowedMask $ti 268435456 @('S-1-5-18','S-1-5-32-544') 1343029590}catch{$denied=$true}
+if(-not $denied){throw 'owner_exception_granted_write_ace'}
+'owner-only-root-context'
+'''
+        self.assertEqual(self.ps(body).strip(), 'owner-only-root-context')
+
     @classmethod
     def setUpClass(cls):
         cls.pwsh = shutil.which('pwsh') or '/private/tmp/n100-ha-powershell/runtime/pwsh'

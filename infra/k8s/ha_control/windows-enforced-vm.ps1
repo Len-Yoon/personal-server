@@ -80,8 +80,14 @@ public static class EnforcedVmNativeV1 {
 function Assert-EnforcedAllowedMask([string]$Sid,[long]$Mask,[string[]]$Allowed,[long]$RestrictedMask) {
     if((($Mask -band 4294967295) -band $RestrictedMask) -ne 0 -and $Sid -notin $Allowed){throw 'enforced_acl_rejected'}
 }
-function Assert-EnforcedDescriptor($Descriptor,[string[]]$Writers,[long]$WriteMask,[bool]$IgnoreInheritOnly=$false) {
-    if($null -eq $Descriptor.Owner -or $Descriptor.Owner.Value -notin $Writers -or
+function Get-EnforcedOsVolumeRoot {return [IO.Path]::GetPathRoot([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows))}
+function Test-EnforcedOsRootOwner([string]$Owner,[string]$Path,[int]$Depth) {
+    return ($Owner -ceq 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464' -and
+        $Depth -gt 1 -and $Path -cmatch '^[A-Za-z]:\\$' -and $Path -ieq (Get-EnforcedOsVolumeRoot))
+}
+function Assert-EnforcedDescriptor($Descriptor,[string[]]$Writers,[long]$WriteMask,[bool]$IgnoreInheritOnly=$false,[bool]$OsRootOwner=$false) {
+    if($null -eq $Descriptor.Owner -or ($Descriptor.Owner.Value -notin $Writers -and
+            -not ($OsRootOwner -and $Descriptor.Owner.Value -ceq 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')) -or
         $null -eq $Descriptor.DiscretionaryAcl -or $Descriptor.DiscretionaryAcl.Count -eq 0){throw 'enforced_acl_rejected'}
     foreach($ace in $Descriptor.DiscretionaryAcl){
         if($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback){throw 'enforced_acl_rejected'}
@@ -104,7 +110,7 @@ function Assert-EnforcedPath([string]$Path,[string[]]$Writers) {
         # protected child; still deny delete-child, deletion and owner/DACL
         # takeover, and ignore ACEs that do not apply to that ancestor itself.
         if($depth -le 1){Assert-EnforcedDescriptor $descriptor $Writers 1343029590}
-        else {Assert-EnforcedDescriptor $descriptor $Writers 269287488 $true}
+        else {Assert-EnforcedDescriptor $descriptor $Writers 269287488 $true (Test-EnforcedOsRootOwner $descriptor.Owner.Value $entry.FullName $depth)}
         $entry=if($entry -is [IO.DirectoryInfo]){$entry.Parent}else{$entry.Directory}
         $depth++
     }
