@@ -59,7 +59,7 @@ class GatewayPolicyTests(unittest.TestCase):
             with self.assertRaises(gateway.NetworkUnavailable):gateway.load_targets('/unused','a'*64)
 
     def test_user_owned_or_unpinned_policy_never_becomes_trusted(self):
-        with tempfile.TemporaryDirectory(dir='/private/tmp') as directory:
+        with tempfile.TemporaryDirectory(prefix='ha-') as directory:
             path=Path(directory)/'policy';path.write_text('{}');path.chmod(0o444)
             with self.assertRaises(gateway.NetworkUnavailable):gateway.load_targets(path,'a'*64)
             link=Path(directory)/'link';link.symlink_to(path)
@@ -77,7 +77,7 @@ class GatewayPolicyTests(unittest.TestCase):
             with self.assertRaises(gateway.NetworkUnavailable):gateway.peer_uid(stream,10001)
 
     def test_existing_socket_objects_not_deleted_and_cleanup_requires_same_inode(self):
-        with tempfile.TemporaryDirectory(dir='/private/tmp') as directory:
+        with tempfile.TemporaryDirectory(prefix='ha-') as directory:
             path=Path(directory)/'channel.sock'
             server,captured=gateway.create_unix(path,os.geteuid(),os.getegid())
             try:
@@ -91,7 +91,7 @@ class GatewayPolicyTests(unittest.TestCase):
 
 class GatewayTransportTests(unittest.TestCase):
     def test_three_fixed_tcp_to_unix_routes_forward_binary_and_preserve_half_close(self):
-        with tempfile.TemporaryDirectory(dir='/private/tmp') as directory:
+        with tempfile.TemporaryDirectory(prefix='ha-') as directory:
             routes={};servers=[];threads=[];clients=[];forwarder=None
             try:
                 for index in range(3):
@@ -116,7 +116,7 @@ class GatewayTransportTests(unittest.TestCase):
                 if forwarder:self.assertFalse(forwarder.streams)
 
     def test_unix_ingress_only_connects_fixed_loopback_and_denied_peer_has_zero_connects(self):
-        with tempfile.TemporaryDirectory(dir='/private/tmp') as directory:
+        with tempfile.TemporaryDirectory(prefix='ha-') as directory:
             target=socket.socket();target.bind(('127.0.0.1',0));target.listen(1)
             thread=echo_once(target,b'ingress:')
             path=Path(directory)/'http.sock';listener=socket.socket(socket.AF_UNIX);listener.bind(str(path));listener.listen(4);listener.setblocking(False)
