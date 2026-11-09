@@ -50,7 +50,8 @@ namespace HaProviderProbeV1 {
   protected override void OnStart(string[] args){if(args.Length!=0||stopped)throw new InvalidOperationException();ThreadPool.QueueUserWorkItem(delegate{RunProbe();});}
   protected override void OnStop(){stopped=true;}
   void RunProbe(){
-   bool attempted=false,complete=false,authorized=false,admin=false,role=false;uint code=0xffffffff;
+   bool attempted=false,complete=false,authorized=false,admin=false,role=false;
+   bool settingsSerialized=false,settingsReadback=false;uint code=0xffffffff;
    string stage="identity";
    try {
     using(var id=WindowsIdentity.GetCurrent()){
@@ -83,7 +84,12 @@ namespace HaProviderProbeV1 {
          answer=null;
          foreach(ManagementObject service in services)using(service){
           using(var input=service.GetMethodParameters("ModifySystemSettings")){
-           settings["Notes"]=new string[]{cfg.Marker()+":tested"};input["SystemSettings"]=settings.GetText(TextFormat.CimDtd20);
+           settings["Notes"]=new string[]{cfg.Marker()+":tested"};
+           // The Microsoft v2 C# sample uses the embedded-object WMI format.
+           string serialized=settings.GetText(TextFormat.WmiDtd20);
+           settingsSerialized=serialized.IndexOf(cfg.Marker()+":tested",StringComparison.Ordinal)>=0;
+           if(!settingsSerialized)throw new InvalidOperationException();
+           input["SystemSettings"]=serialized;
            if(stopped)throw new InvalidOperationException();attempted=true;
            answer=service.InvokeMethod("ModifySystemSettings",input,invoke);
           }
@@ -108,6 +114,14 @@ namespace HaProviderProbeV1 {
         }
        }
        authorized=code==0;complete=authorized||Settings.AuthorizationDenial(attempted,code);
+       if(operation=="settings"&&authorized){
+        // Read a new provider object, never the modified in-memory instance.
+        using(var readback=new ManagementObject(scope,settings.Path,null)){
+         readback.Get();string[] actual=readback["Notes"] as string[];
+         settingsReadback=actual!=null&&actual.Length==1&&actual[0]==cfg.Marker()+":tested";
+        }
+        if(!settingsReadback)complete=false;
+       }
       }
      }
     }
@@ -117,7 +131,7 @@ namespace HaProviderProbeV1 {
    if(stopped){complete=false;authorized=false;}
    try{
     var process=Process.GetCurrentProcess();
-    string json="{\"schema_version\":1,\"scope\":\"owned_vm_provider_role_probe\",\"process_id\":"+process.Id+",\"process_start_ticks\":\""+process.StartTime.ToUniversalTime().Ticks+"\",\"operation\":\""+cfg.Values["operation"]+"\",\"stage\":\""+stage+"\",\"attempted\":"+attempted.ToString().ToLowerInvariant()+",\"complete\":"+complete.ToString().ToLowerInvariant()+",\"authorized\":"+authorized.ToString().ToLowerInvariant()+",\"authorization_denied\":"+Settings.AuthorizationDenial(attempted,code).ToString().ToLowerInvariant()+",\"return_code\":"+code+",\"administrator\":"+admin.ToString().ToLowerInvariant()+",\"hyperv_role\":"+role.ToString().ToLowerInvariant()+"}\n";
+    string json="{\"schema_version\":1,\"scope\":\"owned_vm_provider_role_probe\",\"process_id\":"+process.Id+",\"process_start_ticks\":\""+process.StartTime.ToUniversalTime().Ticks+"\",\"operation\":\""+cfg.Values["operation"]+"\",\"stage\":\""+stage+"\",\"attempted\":"+attempted.ToString().ToLowerInvariant()+",\"complete\":"+complete.ToString().ToLowerInvariant()+",\"authorized\":"+authorized.ToString().ToLowerInvariant()+",\"authorization_denied\":"+Settings.AuthorizationDenial(attempted,code).ToString().ToLowerInvariant()+",\"return_code\":"+code+",\"administrator\":"+admin.ToString().ToLowerInvariant()+",\"hyperv_role\":"+role.ToString().ToLowerInvariant()+",\"settings_serialized_value_present\":"+settingsSerialized.ToString().ToLowerInvariant()+",\"settings_readback_verified\":"+settingsReadback.ToString().ToLowerInvariant()+"}\n";
     using(var file=new FileStream(output,FileMode.CreateNew,FileAccess.Write,FileShare.None)){byte[] bytes=Encoding.UTF8.GetBytes(json);file.Write(bytes,0,bytes.Length);file.Flush(true);}
     ExitCode=complete?0:1;
    }catch{ExitCode=1;}

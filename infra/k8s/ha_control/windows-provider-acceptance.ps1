@@ -28,6 +28,22 @@ function Test-ProbeNoOperation($Result,[string]$Operation,[bool]$ExpectedHyperv)
     return (-not $Result.attempted -and -not $Result.complete -and -not $Result.authorized -and -not $Result.authorization_denied -and
         -not $Result.administrator -and $Result.hyperv_role -eq $ExpectedHyperv -and $Result.stage -cin @('identity','target_query','valid_operation'))
 }
+function Assert-ProbeResultShape($Result){
+    $keys=@('schema_version','scope','process_id','process_start_ticks','operation','stage','attempted','complete','authorized','authorization_denied','return_code','administrator','hyperv_role','settings_serialized_value_present','settings_readback_verified')
+    if((($Result.PSObject.Properties.Name|Sort-Object -CaseSensitive)-join ',') -cne (($keys|Sort-Object -CaseSensitive)-join ',')){throw 'fixture_result_unverified'}
+    foreach($field in @('attempted','complete','authorized','authorization_denied','administrator','hyperv_role','settings_serialized_value_present','settings_readback_verified')){
+        if($Result.$field -isnot [bool]){throw 'fixture_result_unverified'}
+    }
+    foreach($field in @('schema_version','process_id','return_code')){
+        if($Result.$field -isnot [int] -and $Result.$field -isnot [long]){throw 'fixture_result_unverified'}
+    }
+    if($Result.schema_version -ne 1 -or $Result.process_id -le 0 -or $Result.process_id -gt [int]::MaxValue -or
+        $Result.return_code -lt 0 -or $Result.return_code -gt [uint32]::MaxValue -or
+        $Result.scope -isnot [string] -or $Result.scope -cne 'owned_vm_provider_role_probe' -or
+        $Result.operation -isnot [string] -or $Result.operation -cnotin @('settings','power_on','power_off') -or
+        $Result.stage -isnot [string] -or $Result.stage -cnotin @('identity','target_query','valid_operation') -or
+        $Result.process_start_ticks -isnot [string] -or $Result.process_start_ticks -cnotmatch '^[0-9]{15,20}$'){throw 'fixture_result_unverified'}
+}
 function Test-ProbeDisconnectedNic($Nic){
     # An unattached adapter may expose null/empty SwitchId rather than Guid.Empty.
     # Both independent switch fields must prove disconnection; unknown IDs fail.
@@ -122,12 +138,14 @@ function Invoke-ProbeOperation($Fixture,[string]$Operation){
     $result=[IO.File]::ReadAllText($output)|ConvertFrom-Json
     Add-ProbeProcess $Fixture $result.process_id $result.process_start_ticks
     Wait-ProbeProcesses $Fixture
+    Assert-ProbeResultShape $result
     # Preserve an exact-source failed query's diagnostic after its process has
     # exited. No query denial counts as a method authorization denial. Only a
     # verified attempted=false frame can clear the pending-operation barrier.
     if($state.ExitCode -ne 0 -or $result.complete -ne $true){
+        $script:probeDiagnostics+=@($result)
         if(Test-ProbeNoOperation $result $Operation ($Fixture.role -ceq 'true')){
-            $script:pendingOperation=$false;$script:probeDiagnostics+=@($result)
+            $script:pendingOperation=$false
         }
         throw 'fixture_service_incomplete'
     }
@@ -136,6 +154,7 @@ function Invoke-ProbeOperation($Fixture,[string]$Operation){
         $result.administrator -ne $false -or $result.hyperv_role -ne ($Fixture.role -ceq 'true')){throw 'fixture_result_unverified'}
     if($Fixture.role -ceq 'true'){
         if($result.authorized -ne $true -or $result.authorization_denied -ne $false -or $result.return_code -ne 0){throw 'positive_control_failed'}
+        if($Operation -ceq 'settings' -and (-not $result.settings_serialized_value_present -or -not $result.settings_readback_verified)){throw 'positive_control_failed'}
     }elseif($result.authorization_denied -ne $true -or $result.authorized -ne $false){throw 'provider_role_bypass'}
     $script:pendingOperation=$false
     # Move only this exact one-shot result into an administrator-only receipt.
@@ -175,7 +194,7 @@ function Invoke-ProviderAcceptance {
     $null=New-ProbeDirectory $script:root $sids
     $journal=Join-Path $script:root 'ownership.json'
     $record=[ordered]@{schema_version=1;installation_id=$script:installation;source_commit=$SourceCommit;probe_source_sha256=$ProbeSourceSha256;artifact_sha256=$ArtifactSha256;boot_ticks=$bootBefore;namespace_descriptor_sha256=$namespaceBefore;vm_id=$null;service_names=$names;phase='fixture_vm_creation';complete=$false}
-    $failureType=$null;$failureReason=$null
+    $failureType=$null;$failureReason=$null;$record['settings_readback']=$null
     [IO.File]::WriteAllText($journal,($record|ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
     try{
         $config=Join-Path $script:root 'vm';$null=New-ProbeDirectory $config
@@ -203,6 +222,7 @@ function Invoke-ProviderAcceptance {
         Set-ProbePhase $record $journal 'positive_settings'
         $results+=@(Invoke-ProbeOperation $positive 'settings')
         $vm=Get-VM -Id $script:vmId
+        $record['settings_readback']=[ordered]@{notes_length=([string]$vm.Notes).Length;original_marker_exact=($vm.Notes -ceq ('ha-owned-provider-probe:'+$script:installation));tested_marker_exact=($vm.Notes -ceq ('ha-owned-provider-probe:'+$script:installation+':tested'));notes_sha256=(Get-ProbeHash ([Text.Encoding]::UTF8.GetBytes([string]$vm.Notes)))}
         if($vm.Notes -cne ('ha-owned-provider-probe:'+$script:installation+':tested')){throw 'positive_settings_not_applied'}
         Set-VM -VM $vm -Notes ('ha-owned-provider-probe:'+$script:installation)
         Set-ProbePhase $record $journal 'positive_power_on'
@@ -273,7 +293,7 @@ function Invoke-ProviderAcceptance {
         # recursively delete a directory after a failed/ambiguous remote step.
         [ordered]@{scope='fresh_disconnected_vm_provider_role_acceptance';source_commit=$SourceCommit;probe_source_sha256=$ProbeSourceSha256;artifact_sha256=$ArtifactSha256;
             complete=$complete;cleanup_verified=$clean;phase=$record.phase;failure_type=$failureType;failure_reason=$failureReason;namespace_descriptor_unchanged=($namespaceBefore -ceq $namespaceAfter);namespace_acl_write_performed=$false;
-            namespace_sacl_acceptance=$false;boot_unchanged=($bootBefore -ceq $bootAfter);production_transition=$false;results=$results;probe_diagnostics=$script:probeDiagnostics}|ConvertTo-Json -Depth 6 -Compress
+            namespace_sacl_acceptance=$false;boot_unchanged=($bootBefore -ceq $bootAfter);production_transition=$false;results=$results;probe_diagnostics=$script:probeDiagnostics;settings_readback=$record.settings_readback}|ConvertTo-Json -Depth 6 -Compress
     }
 }
 if($MyInvocation.InvocationName -ne '.'){Invoke-ProviderAcceptance}
