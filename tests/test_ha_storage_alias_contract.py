@@ -173,6 +173,62 @@ class AliasContractTest(unittest.TestCase):
         request = fixture(); request['states'][0]['owner'] = 'a1'
         self.blocked(request, 'owner_unavailable')
 
+    def state_with_child(self):
+        request = fixture(); child = deepcopy(request['handles'][0]); child['id'] = 'part'
+        child['before'].update(root=child['before']['root'] + '/part', inode=1000)
+        child['after'] = deepcopy(child['before']); request['handles'].append(child)
+        state = request['footprints'][0]; state['members'].append('part')
+        state['directories'][0]['children'].append('part')
+        state['directories'].append(dict(directory='part', children=[]))
+        return request
+
+    def test_partial_child_overlap_does_not_cover_whole_state(self):
+        request = self.state_with_child()
+        request['footprints'].append(dict(id='partial', root='part', members=['part'],
+                                          directories=[dict(directory='part', children=[])], unresolved=[]))
+        request['edges'][0]['target'] = 'partial'
+        self.blocked(request, 'owner_write_coverage_incomplete')
+
+    def test_same_root_id_with_missing_state_member_does_not_cover(self):
+        request = self.state_with_child()
+        request['footprints'].append(dict(id='partial', root='h0', members=['h0'],
+                                          directories=[dict(directory='h0', children=[])], unresolved=[]))
+        request['edges'][0]['target'] = 'partial'
+        self.blocked(request, 'owner_write_coverage_incomplete')
+
+    def test_sidecar_creation_parent_not_covered_by_child_write(self):
+        request = self.state_with_child()
+        # Other categories retain full write coverage; only the absent
+        # sidecar's creation-parent footprint is broader than the write scope.
+        request['footprints'].append(dict(id='partial', root='part', members=['part'],
+                                          directories=[dict(directory='part', children=[])], unresolved=[]))
+        for state in request['states']:
+            if state['owner'] == 'a0' and state['category'] != 'sidecar_parent':
+                state['footprint'] = 'partial'
+        request['edges'][0]['target'] = 'partial'
+        self.blocked(request, 'owner_write_coverage_incomplete')
+
+    def test_closed_whole_ancestor_covers_state_subtree(self):
+        request = self.state_with_child()
+        request['footprints'].append(dict(id='subtree', root='part', members=['part'],
+                                          directories=[dict(directory='part', children=[])], unresolved=[]))
+        for state in request['states']:
+            if state['owner'] == 'a0':
+                state['footprint'] = 'subtree'
+        report = self.run_model(request)
+        self.assertEqual(report['status'], 'modeled_safe', report)
+
+    def test_same_directory_inconsistent_children_cannot_attest_subtree(self):
+        request = self.state_with_child()
+        partial = dict(id='partial', root='h0', members=['h0'],
+                       directories=[dict(directory='h0', children=[])], unresolved=[])
+        request['footprints'].append(partial)
+        # Writer sees a child omitted by the state's allegedly complete tree.
+        for state in request['states']:
+            if state['owner'] == 'a0':
+                state['footprint'] = 'partial'
+        self.blocked(request, 'owner_write_coverage_incomplete')
+
     def test_reading_oauth_or_auth_state_is_a_credential_capability(self):
         for category in ['oauth_state', 'security_state', 'auth_state']:
             request = fixture(); state = next(s for s in request['states'] if s['category'] == category)

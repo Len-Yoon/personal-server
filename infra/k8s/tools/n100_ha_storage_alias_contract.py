@@ -179,6 +179,42 @@ def footprint_relation(left, right, handles, closed, tick):
     return 'disjoint'
 
 
+def covers_footprint(writer, state, handles, closed, tick):
+    """Whole modeled write coverage, stronger than sharing any single inode.
+
+    A directory ID cannot attest its descendants. Require closed Linux trees,
+    canonical root containment and every state member in the writer's tree.
+    Duplicate directory observations must also enumerate identical children.
+    """
+    if not closed[writer['id']] or not closed[state['id']]:
+        return False
+    a = handles[writer['root']]['before']; b = handles[state['root']]['before']
+    if (a['kind'] != 'directory' or b['kind'] != 'directory'
+            or not same_domain(a, b) or not ancestor(a['root'], b['root'])):
+        return False
+    def key(identifier):
+        return tuple(sorted(handles[identifier]['before'].items()))
+    def members(footprint):
+        result = {}
+        for identifier in footprint['members']:
+            tick()
+            identity_key = key(identifier)
+            if identity_key in result:
+                return None
+            result[identity_key] = identifier
+        return result
+    available = members(writer); required = members(state)
+    if available is None or required is None or not required.keys() <= available.keys():
+        return False
+    writer_children = {key(row['directory']): {key(child) for child in row['children']}
+                       for row in writer['directories']}
+    for row in state['directories']:
+        tick()
+        if writer_children.get(key(row['directory'])) != {key(child) for child in row['children']}:
+            return False
+    return True
+
+
 def model(request, nonce, source, now, tick):
     exact(request, {'schema_version', 'kind', 'nonce', 'source_sha256', 'session', 'observed_from',
                     'observed_until', 'deadline', 'providers', 'handles', 'footprints', 'actors', 'edges', 'states'})
@@ -278,7 +314,8 @@ def model(request, nonce, source, now, tick):
                 if relation == 'overlap':
                     require(actor == state['owner'], 'credential_read_capability' if edge['kind'] == 'read'
                             else 'competing_writer_or_recreator')
-                    if edge['kind'] == 'write':
+                    if (edge['kind'] == 'write' and covers_footprint(footprints[edge['target']],
+                                                                   footprints[state['footprint']], handles, closed, tick)):
                         owner_writes.add((state['service'], state['category']))
     require(owner_writes == covered, 'owner_write_coverage_incomplete')
     # A non-owner with credentials/management of an owner has equivalent write
