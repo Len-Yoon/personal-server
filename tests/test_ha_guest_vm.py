@@ -69,6 +69,8 @@ $good.node='B';$good.peer_prepared_receipt_sha256='7'*64;$null=Assert-GuestVmSpe
 $good.egress_mac_address=$good.mac_address;$closed=$false;try{$null=Assert-GuestVmSpec $good}catch{$closed=$true};if(-not $closed){throw 'duplicate_egress_mac'}
 $duplicate=('{"schema_version":1,'+($good|ConvertTo-Json -Compress).Substring(1));$raw=[Text.Encoding]::UTF8.GetBytes($duplicate);$Manifest=[Convert]::ToBase64String($raw);$ManifestSha256=Get-GuestVmHash $raw
 $closed=$false;try{$null=Read-GuestVmSpec}catch{$closed=$true};if(-not $closed){throw 'duplicate_accepted'}
+$escaped=('{"\u0073chema_version":1,'+($good|ConvertTo-Json -Compress).Substring(1));$raw=[Text.Encoding]::UTF8.GetBytes($escaped);$Manifest=[Convert]::ToBase64String($raw);$ManifestSha256=Get-GuestVmHash $raw
+$closed=$false;try{$null=Read-GuestVmSpec}catch{if($_.Exception.Message -cne 'guest_vm_duplicate_or_escaped_keys'){throw};$closed=$true};if(-not $closed){throw 'legacy_unicode_duplicate_accepted'}
 ''')
 
     def test_disconnected_nic_and_independent_disk_are_not_guessed(self):
@@ -82,6 +84,71 @@ Assert-GuestVmDisk $disk
 foreach($case in @(@('Size',21474836480),@('Attached',$true),@('ParentPath','parent.vhdx'),@('VhdType','Differencing'))){
  $bad=($disk|ConvertTo-Json -Compress)|ConvertFrom-Json;$bad.($case[0])=$case[1];$closed=$false;try{Assert-GuestVmDisk $bad}catch{$closed=$true};if(-not $closed){throw 'unsafe_disk'}
 }
+''')
+
+    def test_schema2_exact_node_image_types_and_nested_duplicate_rejection(self):
+        self.ps(r'''
+$good=[pscustomobject][ordered]@{schema_version=2;source_commit=('a'*40);stage_source_commit=('e'*40);seed_source_commit=('f'*40);installation_id=('b'*64);stage_manifest_sha256=('c'*64);seed_iso_sha256=('d'*64);seed_iso_bytes=32768;node='A';mac_address='02123456789A';optional_egress_nic=$false;egress_mac_address='';peer_prepared_receipt_sha256='';creation_method='verified-node-image-copy-v1';node_image=[pscustomobject][ordered]@{filename='node-A.vhdx';sha256=('1'*64);bytes=1048576;disk_identifier='12345678-1234-1234-1234-123456789abc';source_qcow_sha256='04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94';conversion_receipt_sha256=('2'*64);tool_version='qemu-img version 11.1.3';tool_sha256=('3'*64)}}
+$null=Assert-GuestVmSpec $good
+$raw=[Text.Encoding]::UTF8.GetBytes(($good|ConvertTo-Json -Depth 5 -Compress));$Manifest=[Convert]::ToBase64String($raw);$ManifestSha256=Get-GuestVmHash $raw;$null=Read-GuestVmSpec
+foreach($case in @(@('filename','node-B.vhdx'),@('filename','../node-A.vhdx'),@('bytes',1048576.0),@('bytes',8589934593),@('disk_identifier','00000000-0000-0000-0000-000000000000'),@('disk_identifier','{12345678-1234-1234-1234-123456789abc}'),@('sha256',('A'*64)),@('source_qcow_sha256',('4'*64)),@('tool_version','qemu-img version latest'),@('tool_sha256',$true),@('conversion_receipt_sha256',''))){
+ $bad=($good|ConvertTo-Json -Depth 5 -Compress)|ConvertFrom-Json;$bad.node_image.($case[0])=$case[1];$closed=$false;try{$null=Assert-GuestVmSpec $bad}catch{$closed=$true};if(-not $closed){throw 'node_image_invalid_accepted'}
+}
+foreach($method in @('copy','verified-node-image-copy-v2',$true)){$bad=($good|ConvertTo-Json -Depth 5 -Compress)|ConvertFrom-Json;$bad.creation_method=$method;$closed=$false;try{$null=Assert-GuestVmSpec $bad}catch{$closed=$true};if(-not $closed){throw 'method_accepted'}}
+$duplicate=($good|ConvertTo-Json -Depth 5 -Compress).Replace('"filename":','"sha256":"'+('1'*64)+'","filename":');$raw=[Text.Encoding]::UTF8.GetBytes($duplicate);$Manifest=[Convert]::ToBase64String($raw);$ManifestSha256=Get-GuestVmHash $raw;$closed=$false;try{$null=Read-GuestVmSpec}catch{$closed=$true};if(-not $closed){throw 'nested_duplicate_accepted'}
+foreach($escaped in @(
+ ($good|ConvertTo-Json -Depth 5 -Compress).Replace('"filename":','"\u0073ha256":"'+('9'*64)+'","filename":'),
+ ($good|ConvertTo-Json -Depth 5 -Compress).Replace('"node":"A"','"node":"\u0041"')
+)){
+ $raw=[Text.Encoding]::UTF8.GetBytes($escaped);$Manifest=[Convert]::ToBase64String($raw);$ManifestSha256=Get-GuestVmHash $raw;$closed=$false
+ try{$null=Read-GuestVmSpec}catch{if($_.Exception.Message -cne 'guest_vm_duplicate_or_escaped_keys'){throw};$closed=$true};if(-not $closed){throw 'unicode_escape_accepted'}
+}
+$good.node_image.disk_identifier=$good.node_image.disk_identifier.ToUpperInvariant();$null=Assert-GuestVmSpec $good
+$good.node='B';$good.node_image.filename='node-B.vhdx';$good.peer_prepared_receipt_sha256='7'*64;$null=Assert-GuestVmSpec $good
+''')
+
+    def test_node_image_opener_checks_actual_hash_size_acl_format_and_guid(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.ps(r'''
+$root=$env:FIXTURE;$path=Join-Path $root 'node-A.vhdx';$receipt=Join-Path $root 'node-A-conversion-receipt.json'
+[IO.File]::WriteAllBytes($path,([byte[]]@(1,2,3,4)));[IO.File]::WriteAllText($receipt,'{}')
+$spec=[pscustomobject]@{node='A';node_image=[pscustomobject]@{filename='node-A.vhdx';sha256=(Get-GuestVmHash ([IO.File]::ReadAllBytes($path)));bytes=4;disk_identifier='7b0a3feb-04cf-5c40-85bd-cfd50b85ab9d';conversion_receipt_sha256=(Get-GuestVmHash ([IO.File]::ReadAllBytes($receipt)))}}
+$script:bad='';function Get-GuestVmFileIdentity([string]$Path){if($script:bad -ceq 'acl'){throw 'private_acl_rejected'};return $Path}
+function Get-VHD([string]$Path){return [pscustomobject]@{VhdFormat=$(if($script:bad -ceq 'format'){'VHD'}else{'VHDX'});VhdType='Dynamic';ParentPath=$(if($script:bad -ceq 'parent'){'foreign'}else{''});Size=25769803776;Attached=($script:bad -ceq 'attached');DiskIdentifier=$(if($script:bad -ceq 'guid'){[Guid]::Empty}else{$spec.node_image.disk_identifier.ToUpperInvariant()})}}
+$stream=Open-GuestVmNodeImage $root $spec;try{if($stream.Position -ne 0 -or $stream.ReadByte() -ne 1){throw 'input_stream_not_pinned'}}finally{$stream.Dispose()}
+foreach($case in @('acl','format','parent','attached','guid','hash','size','receipt')){
+ $script:bad=$case;$oldHash=$spec.node_image.sha256;$oldBytes=$spec.node_image.bytes;$oldReceipt=$spec.node_image.conversion_receipt_sha256
+ if($case -ceq 'hash'){$spec.node_image.sha256='0'*64};if($case -ceq 'size'){$spec.node_image.bytes=5};if($case -ceq 'receipt'){$spec.node_image.conversion_receipt_sha256='0'*64}
+ $closed=$false;try{$s=Open-GuestVmNodeImage $root $spec;$s.Dispose()}catch{$closed=$true};if(-not $closed){throw 'untrusted_node_input_accepted'}
+ $spec.node_image.sha256=$oldHash;$spec.node_image.bytes=$oldBytes;$spec.node_image.conversion_receipt_sha256=$oldReceipt
+}
+# Failed verification must release its own handles; this fixture can be reopened exclusively.
+$s=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);$s.Dispose()
+''',FIXTURE=folder)
+
+    def test_native_uppercase_guid_values_are_canonical_without_type_coercion(self):
+        self.ps(r'''
+# These are the two actual native Get-VHD string values, not Guid.ToString mocks.
+foreach($native in @('7B0A3FEB-04CF-5C40-85BD-CFD50B85AB9D','F3602945-C7E3-8846-9FC2-5011BDDDFA1D')){
+ $disk=[pscustomobject]@{VhdFormat='VHDX';VhdType='Dynamic';ParentPath='';Size=25769803776;Attached=$false;DiskIdentifier=$native}
+ Assert-GuestVmDisk $disk
+ $canonical=ConvertTo-GuestVmDiskIdentifier $disk.DiskIdentifier
+ if($canonical -cne $native.ToLowerInvariant() -or $canonical -cne (ConvertTo-GuestVmDiskIdentifier ([Guid]$native))){throw 'native_guid_not_canonical'}
+ # Case variation must still identify the same disk for clone/peer collisions.
+ if((ConvertTo-GuestVmDiskIdentifier $native) -cne (ConvertTo-GuestVmDiskIdentifier $canonical)){throw 'case_variation_evades_collision'}
+}
+foreach($bad in @($null,$true,7,[Guid]::Empty,'00000000-0000-0000-0000-000000000000','{7B0A3FEB-04CF-5C40-85BD-CFD50B85AB9D}','7B0A3FEB04CF5C4085BDCFD50B85AB9D',' 7B0A3FEB-04CF-5C40-85BD-CFD50B85AB9D')){
+ $closed=$false;try{$null=ConvertTo-GuestVmDiskIdentifier $bad}catch{$closed=$true};if(-not $closed){throw 'noncanonical_guid_shape_accepted'}
+}
+''')
+
+    def test_reset_is_exclusively_legacy_schema1_and_strong_identity_is_preserved(self):
+        self.ps(r'''
+$t=$null;$e=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($env:GUEST_VM_SOURCE,[ref]$t,[ref]$e);if($e.Count){throw 'parse_failed'}
+$resets=@($ast.FindAll({param($a)$a -is [Management.Automation.Language.CommandAst] -and $a.GetCommandName() -ceq 'Set-VHD'},$true));if($resets.Count -ne 1){throw 'reset_path_changed'}
+$branch=$resets[0].Parent;$found=$false;while($branch){if($branch -is [Management.Automation.Language.IfStatementAst] -and $branch.Extent.Text.StartsWith('if($spec.schema_version -eq 1)')){$found=$true};$branch=$branch.Parent};if(-not $found){throw 'schema2_can_reset'}
+$text=[IO.File]::ReadAllText($env:GUEST_VM_SOURCE)
+foreach($required in @('guest_vm_copy_file_identity_collision','guest_vm_node_image_identifier_collision','guest_vm_peer_disk_identifier_collision','guest_vm_node_image_pin_changed','guest_vm_duplicate_disk_identifier','Get-GuestVmParent','ReaderReadySha256')){if(-not $text.Contains($required)){throw 'strong_identity_removed'}}
 ''')
 
     def test_write_ahead_journal_durable_create_new_and_partial_rejected(self):
@@ -119,6 +186,12 @@ function Get-VMFirmware{return $script:fw};function Get-VMComPort{return $script
 function Get-GuestVmFileIdentity([string]$Path){if($Path.EndsWith('.vhdx')){return 'disk-id'};return 'seed-id'}
 function Open-GuestVmPinned {return [IO.MemoryStream]::new()};function Assert-GuestVmPrivate {}
 $null=Assert-GuestVmPrepared $spec $names $pins $root $disk $iso
+$pins.disk_identifier='7b0a3feb-04cf-5c40-85bd-cfd50b85ab9d';$script:vhd.DiskIdentifier='7B0A3FEB-04CF-5C40-85BD-CFD50B85AB9D'
+$spec|Add-Member schema_version 2;$spec|Add-Member node_image ([pscustomobject]@{disk_identifier=$pins.disk_identifier.ToUpperInvariant();sha256=$pins.disk_sha256})
+$null=Assert-GuestVmPrepared $spec $names $pins $root $disk $iso
+foreach($field in @('sha256','disk_identifier')){$prior=$spec.node_image.$field;$spec.node_image.$field='9'*64;$closed=$false;try{$null=Assert-GuestVmPrepared $spec $names $pins $root $disk $iso}catch{$closed=$true};$spec.node_image.$field=$prior;if(-not $closed){throw 'node_image_manifest_detached_from_receipt'}}
+$spec.PSObject.Properties.Remove('schema_version');$spec.PSObject.Properties.Remove('node_image')
+$pins.disk_identifier='33333333-3333-3333-3333-333333333333';$script:vhd.DiskIdentifier=[Guid]$pins.disk_identifier
 foreach($case in @(@('vm','Notes','other'),@('vm','State','Running'),@('sw','SwitchType','External'),@('cpu','Maximum',100),@('mem','Maximum',2147483648),@('nic','MacAddress','02123456789B'),@('hdd','Path','C:\Other.vhdx'),@('vhd','ParentPath','other.vhdx'),@('fw','SecureBoot','Off'),@('port','Path','other-pipe'))){
  $object=Get-Variable -Name $case[0] -Scope Script -ValueOnly;$prior=$object.($case[1]);$object.($case[1])=$case[2];$closed=$false
  try{$null=Assert-GuestVmPrepared $spec $names $pins $root $disk $iso}catch{$closed=$true};$object.($case[1])=$prior;if(-not $closed){throw 'changed_vm_accepted'}
@@ -139,6 +212,8 @@ function Read-GuestVmPreparedReceipt{return [pscustomobject]@{schema_version=1;p
 function Get-Item{return [pscustomobject]@{Length=32768}}
 $ManifestSha256='4'*64
 $peer=Get-GuestVmPeer 'C:\Private' $b;if($peer.switch.Id.ToString() -cne $switchId){throw 'wrong_switch_adopted'}
+$b|Add-Member schema_version 2;$b|Add-Member creation_method 'verified-node-image-copy-v1';$b|Add-Member node_image ([pscustomobject]@{filename='node-B.vhdx';disk_identifier='44444444-4444-4444-4444-444444444444'})
+$peer=Get-GuestVmPeer 'C:\Private' $b;if($peer.pins.manifest_sha256 -cne $pins.manifest_sha256 -or $peer.pins.disk_identifier -cne $pins.disk_identifier){throw 'schema2_peer_receipt_identity_lost'}
 $b.stage_source_commit='9'*40;$closed=$false;try{$null=Get-GuestVmPeer 'C:\Private' $b}catch{$closed=$true};if(-not $closed){throw 'peer_component_mismatch'}
 ''')
 
