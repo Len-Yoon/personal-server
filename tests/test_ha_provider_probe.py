@@ -49,6 +49,16 @@ $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($env:PROBE_INSTALLER,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'parse_failed'}
 . $env:PROBE_INSTALLER
+$nativeFrame=[pscustomobject]@{scope='owned_vm_provider_role_probe';schema_version=1;process_id=12;process_start_ticks='639298437494210749';operation='settings';stage='valid_operation';attempted=$true;complete=$false;authorized=$true;authorization_denied=$false;return_code=0;administrator=$false;hyperv_role=$true;settings_serialized_value_present=$true;settings_readback_verified=$false}
+Assert-ProbeResultShape $nativeFrame
+foreach($field in @('settings_serialized_value_present','settings_readback_verified','return_code','process_start_ticks')){
+ $copy=$nativeFrame.PSObject.Copy();$copy.$field=@($copy.$field)
+ $blocked=$false;try{Assert-ProbeResultShape $copy}catch{$blocked=$true}
+ if(-not $blocked){throw 'diagnostic_type_confusion_accepted'}
+}
+$copy=$nativeFrame.PSObject.Copy();$copy|Add-Member NoteProperty extra 'untrusted'
+$blocked=$false;try{Assert-ProbeResultShape $copy}catch{$blocked=$true}
+if(-not $blocked){throw 'unbounded_diagnostic_fields_accepted'}
 $names=@(Get-ProbeServiceNames ('0123456789abcdef'+'fedcba9876543210'+('a'*32)))
 if($names.Count -ne 2 -or $names[0] -cne 'HaProbe_0123456789abcdef' -or $names[1] -cne 'HaProbe_fedcba9876543210'){throw 'service_names_collapsed'}
 $blocked=$false;try{Get-ProbeServiceNames ('a'*64)|Out-Null}catch{$blocked=$true}
