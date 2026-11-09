@@ -24,13 +24,14 @@ namespace HaProviderProbeV1 {
    string[] lines=text.Split('\n');if(lines.Length!=Keys.Length+1||lines[Keys.Length]!="")throw new InvalidOperationException();
    Values=new Dictionary<string,string>(StringComparer.Ordinal);
    for(int i=0;i<Keys.Length;i++){string p=Keys[i]+"=";if(!lines[i].StartsWith(p,StringComparison.Ordinal))throw new InvalidOperationException();Values.Add(Keys[i],lines[i].Substring(p.Length));}
-   if(Values["format"]!="ha-provider-probe-v2"||!Regex.IsMatch(Values["service_name"],"\\AHaProbe_[0-9a-f]{16}\\z")||
+   if(Values["format"]!="ha-provider-probe-v3"||!Regex.IsMatch(Values["service_name"],"\\AHaProbe_[0-9a-f]{16}\\z")||
       !Regex.IsMatch(Values["service_sid"],"\\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\\z")||
       !Regex.IsMatch(Values["installation_id"],"\\A[0-9a-f]{64}\\z")||
       !Regex.IsMatch(Values["vm_id"],"\\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\\z")||
       (Values["operation"]!="power_on"&&Values["operation"]!="power_off"&&Values["operation"]!="settings")||
       (Values["expected_hyperv_role"]!="true"&&Values["expected_hyperv_role"]!="false"))throw new InvalidOperationException();
-   Descriptor=new TargetDescriptor(Decode(Values["target_descriptor_b64"]),Values["target_descriptor_sha256"],Values["installation_id"],Values["vm_id"]);
+   if(Values["operation"]=="settings")Descriptor=new TargetDescriptor(Decode(Values["target_descriptor_b64"]),Values["target_descriptor_sha256"],Values["installation_id"],Values["vm_id"]);
+   else if(Values["target_descriptor_b64"]!=""||Values["target_descriptor_sha256"]!="")throw new InvalidOperationException();
   }
   public readonly TargetDescriptor Descriptor;
   public static string Hash(byte[] bytes){using(var h=SHA256.Create())return BitConverter.ToString(h.ComputeHash(bytes)).Replace("-","").ToLowerInvariant();}
@@ -49,6 +50,9 @@ namespace HaProviderProbeV1 {
   // Hyper-V v2 uses VirtualSystemType, not the v1 SettingType property.
   // https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/msvm-settingsdefinestate
   // https://learn.microsoft.com/en-us/windows/win32/hyperv_v2/msvm-virtualsystemsettingdata
+  public static bool CurrentReadback(string type,string identifier,string expected,string actualPath,string expectedPath,string[] notes,string marker){
+   return CurrentSetting(type,identifier,expected)&&String.Equals(actualPath,expectedPath,StringComparison.Ordinal)&&notes!=null&&notes.Length==1&&notes[0]==marker+":tested";
+  }
   public static bool CurrentSetting(string type,string identifier,string expected){
    return type=="Microsoft:Hyper-V:System:Realized"&&identifier!=null&&expected!=null&&
     Regex.IsMatch(identifier,"\\A[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\\z")&&
@@ -57,14 +61,14 @@ namespace HaProviderProbeV1 {
  }
  public sealed class TargetDescriptor {
   public readonly Dictionary<string,string> Values;
-  static readonly string[] Keys={"format","installation_id","vm_id","settings_virtual_system_type","settings_virtual_system_identifier","settings_service_path_b64","settings_target_path_b64","settings_payload_sha256","settings_payload_bytes"};
+  static readonly string[] Keys={"format","installation_id","vm_id","settings_vm_state","settings_virtual_system_type","settings_virtual_system_identifier","settings_service_path_b64","settings_target_path_b64","settings_payload_sha256","settings_payload_bytes"};
   public TargetDescriptor(string text,string hash,string installation,string vm){
    if(text==null||text.Length>8192||text.IndexOf('\r')>=0||text.IndexOf('\0')>=0||!Regex.IsMatch(hash,"\\A[0-9a-f]{64}\\z")||Settings.Hash(Encoding.UTF8.GetBytes(text))!=hash)throw new InvalidOperationException();
    string[] lines=text.Split('\n');if(lines.Length!=Keys.Length+1||lines[Keys.Length]!="")throw new InvalidOperationException();
    Values=new Dictionary<string,string>(StringComparer.Ordinal);
    for(int i=0;i<Keys.Length;i++){string p=Keys[i]+"=";if(!lines[i].StartsWith(p,StringComparison.Ordinal))throw new InvalidOperationException();Values.Add(Keys[i],lines[i].Substring(p.Length));}
    int size;
-   if(Values["format"]!="ha-provider-target-v2"||Values["installation_id"]!=installation||Values["vm_id"]!=vm||
+   if(Values["format"]!="ha-provider-target-v3"||Values["installation_id"]!=installation||Values["vm_id"]!=vm||Values["settings_vm_state"]!="Running"||
       !Settings.CurrentSetting(Values["settings_virtual_system_type"],Values["settings_virtual_system_identifier"],vm)||
       !Regex.IsMatch(Values["settings_payload_sha256"],"\\A[0-9a-f]{64}\\z")||
       !Regex.IsMatch(Values["settings_payload_bytes"],"\\A[1-9][0-9]{0,6}\\z")||!Int32.TryParse(Values["settings_payload_bytes"],out size)||size>1048576)throw new InvalidOperationException();
@@ -113,7 +117,7 @@ namespace HaProviderProbeV1 {
   }
   void RunProbe(){
    bool attempted=false,complete=false,authorized=false,admin=false,role=false;
-   bool settingsSerialized=false,settingsReadback=false,pathsBound=false,methodResult=false,denied=false;uint code=0xffffffff;
+   bool settingsSerialized=false,settingsReadback=false,pathsBound=false,methodResult=false,denied=false,currentAssociation=false;string currentPathHash="",currentInstanceHash="";uint code=0xffffffff;
    string stage="identity";
    try {
     using(var id=WindowsIdentity.GetCurrent()){
@@ -121,17 +125,20 @@ namespace HaProviderProbeV1 {
      if(id.User.Value!=cfg.Values["service_sid"]||Process.GetCurrentProcess().SessionId!=0||admin||role!=(cfg.Values["expected_hyperv_role"]=="true"))throw new InvalidOperationException();
     }
     stage="input_validation";
-    var descriptor=cfg.Descriptor;
-    string serialized=descriptor.VerifyPayload(ReadPayload(),cfg.Marker());
-    settingsSerialized=true;
-    var servicePath=BoundPath(Settings.Decode(descriptor.Values["settings_service_path_b64"]),"Msvm_VirtualSystemManagementService");
-    var settingsPath=BoundPath(Settings.Decode(descriptor.Values["settings_target_path_b64"]),"Msvm_VirtualSystemSettingData");
+    string operation=cfg.Values["operation"],serialized=null;
+    ManagementPath servicePath=null,settingsPath=null;
     var vmPath=BoundPath("Msvm_ComputerSystem.CreationClassName=\"Msvm_ComputerSystem\",Name=\""+cfg.Values["vm_id"]+"\"","Msvm_ComputerSystem");
+    if(operation=="settings"){
+     var descriptor=cfg.Descriptor;
+     serialized=descriptor.VerifyPayload(ReadPayload(),cfg.Marker());settingsSerialized=true;
+     servicePath=BoundPath(Settings.Decode(descriptor.Values["settings_service_path_b64"]),"Msvm_VirtualSystemManagementService");
+     settingsPath=BoundPath(Settings.Decode(descriptor.Values["settings_target_path_b64"]),"Msvm_VirtualSystemSettingData");
+    }
     pathsBound=true;
     stage="schema_query";
     var options=new ConnectionOptions();options.EnablePrivileges=false;options.Timeout=TimeSpan.FromSeconds(5);
     var scope=new ManagementScope(@"\\.\root\virtualization\v2",options);scope.Connect();
-    string operation=cfg.Values["operation"],className=operation=="settings"?"Msvm_VirtualSystemManagementService":"Msvm_ComputerSystem";
+    string className=operation=="settings"?"Msvm_VirtualSystemManagementService":"Msvm_ComputerSystem";
     string method=operation=="settings"?"ModifySystemSettings":"RequestStateChange";
     // Class metadata only. Never instance.Get/GetRelated/GetMethodParameters
     // on the target before Invoke: a query denial is not method authorization.
@@ -161,9 +168,23 @@ namespace HaProviderProbeV1 {
       }
       authorized=code==0;complete=authorized||denied;
       if(operation=="settings"&&authorized&&cfg.Values["expected_hyperv_role"]=="true"){
-       using(var readback=new ManagementObject(scope,settingsPath,null)){
-        readback.Get();string[] actual=readback["Notes"] as string[];
-        settingsReadback=Settings.CurrentSetting(readback["VirtualSystemType"] as string,readback["VirtualSystemIdentifier"] as string,cfg.Values["vm_id"])&&actual!=null&&actual.Length==1&&actual[0]==cfg.Marker()+":tested";
+       // A fresh object at an old path alone is insufficient after a power
+       // transition. Resolve the current association again, only after Exec.
+       using(var search=new ManagementObjectSearcher(scope,new ObjectQuery("SELECT * FROM Msvm_ComputerSystem WHERE Name='"+cfg.Values["vm_id"]+"'")))
+       using(var found=search.Get()){
+        if(found.Count!=1)throw new InvalidOperationException();int current=0;
+        foreach(ManagementObject vm in found)using(vm){
+         if(Convert.ToUInt32(vm["EnabledState"])!=2)throw new InvalidOperationException();
+         using(var related=vm.GetRelated("Msvm_VirtualSystemSettingData","Msvm_SettingsDefineState",null,null,null,null,false,null)){
+          foreach(ManagementObject readback in related)using(readback){
+           if(Settings.CurrentSetting(readback["VirtualSystemType"] as string,readback["VirtualSystemIdentifier"] as string,cfg.Values["vm_id"])){
+            current++;currentPathHash=Settings.Hash(Encoding.UTF8.GetBytes(readback.Path.RelativePath));currentInstanceHash=Settings.Hash(Encoding.UTF8.GetBytes(Convert.ToString(readback["InstanceID"])));currentAssociation=readback.Path.RelativePath==settingsPath.RelativePath;
+            settingsReadback=Settings.CurrentReadback(readback["VirtualSystemType"] as string,readback["VirtualSystemIdentifier"] as string,cfg.Values["vm_id"],readback.Path.RelativePath,settingsPath.RelativePath,readback["Notes"] as string[],cfg.Marker());
+           }
+          }
+         }
+        }
+        if(current!=1){settingsReadback=false;currentAssociation=false;}
        }
        if(!settingsReadback)complete=false;
       }
@@ -173,7 +194,7 @@ namespace HaProviderProbeV1 {
    if(stopped){complete=false;authorized=false;denied=false;}
    try{
     var process=Process.GetCurrentProcess();
-    string json="{\"schema_version\":2,\"scope\":\"owned_vm_provider_role_probe\",\"process_id\":"+process.Id+",\"process_start_ticks\":\""+process.StartTime.ToUniversalTime().Ticks+"\",\"operation\":\""+cfg.Values["operation"]+"\",\"stage\":\""+stage+"\",\"attempted\":"+attempted.ToString().ToLowerInvariant()+",\"complete\":"+complete.ToString().ToLowerInvariant()+",\"authorized\":"+authorized.ToString().ToLowerInvariant()+",\"authorization_denied\":"+denied.ToString().ToLowerInvariant()+",\"return_code\":"+code+",\"administrator\":"+admin.ToString().ToLowerInvariant()+",\"hyperv_role\":"+role.ToString().ToLowerInvariant()+",\"settings_serialized_value_present\":"+settingsSerialized.ToString().ToLowerInvariant()+",\"settings_readback_verified\":"+settingsReadback.ToString().ToLowerInvariant()+",\"native_target_paths_bound\":"+pathsBound.ToString().ToLowerInvariant()+",\"method_result_verified\":"+methodResult.ToString().ToLowerInvariant()+",\"target_descriptor_sha256\":\""+cfg.Values["target_descriptor_sha256"]+"\",\"settings_payload_sha256\":\""+cfg.Descriptor.Values["settings_payload_sha256"]+"\"}\n";
+    string json="{\"schema_version\":3,\"scope\":\"owned_vm_provider_role_probe\",\"process_id\":"+process.Id+",\"process_start_ticks\":\""+process.StartTime.ToUniversalTime().Ticks+"\",\"operation\":\""+cfg.Values["operation"]+"\",\"stage\":\""+stage+"\",\"attempted\":"+attempted.ToString().ToLowerInvariant()+",\"complete\":"+complete.ToString().ToLowerInvariant()+",\"authorized\":"+authorized.ToString().ToLowerInvariant()+",\"authorization_denied\":"+denied.ToString().ToLowerInvariant()+",\"return_code\":"+code+",\"administrator\":"+admin.ToString().ToLowerInvariant()+",\"hyperv_role\":"+role.ToString().ToLowerInvariant()+",\"settings_serialized_value_present\":"+settingsSerialized.ToString().ToLowerInvariant()+",\"settings_readback_verified\":"+settingsReadback.ToString().ToLowerInvariant()+",\"native_target_paths_bound\":"+pathsBound.ToString().ToLowerInvariant()+",\"method_result_verified\":"+methodResult.ToString().ToLowerInvariant()+",\"target_descriptor_sha256\":\""+cfg.Values["target_descriptor_sha256"]+"\",\"settings_payload_sha256\":\""+(cfg.Descriptor==null?"":cfg.Descriptor.Values["settings_payload_sha256"])+"\",\"settings_current_path_sha256\":\""+currentPathHash+"\",\"settings_current_instance_sha256\":\""+currentInstanceHash+"\",\"settings_current_association_verified\":"+currentAssociation.ToString().ToLowerInvariant()+"}\n";
     using(var file=new FileStream(output,FileMode.CreateNew,FileAccess.Write,FileShare.None)){byte[] bytes=Encoding.UTF8.GetBytes(json);file.Write(bytes,0,bytes.Length);file.Flush(true);}
     ExitCode=complete?0:1;
    }catch{ExitCode=1;}
