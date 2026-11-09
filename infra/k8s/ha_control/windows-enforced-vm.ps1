@@ -11,6 +11,14 @@ function Get-EnforcedHash([byte[]]$Bytes) {
     $sha=[Security.Cryptography.SHA256]::Create()
     try{return [BitConverter]::ToString($sha.ComputeHash($Bytes)).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
 }
+function ConvertTo-EnforcedDiskIdentifier($Value) {
+    # Native providers expose either Guid or uppercase string. No RPC or I/O:
+    # only one bounded D-format parse per disk in the existing two-second read.
+    if($Value -isnot [string] -and $Value -isnot [Guid]){throw 'vhd_identifier_rejected'}
+    $text=$Value.ToString();$guid=[Guid]::Empty
+    if($text.Length -ne 36 -or $text -cnotmatch '^[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$' -or -not [Guid]::TryParseExact($text,'D',[ref]$guid) -or $guid -eq [Guid]::Empty){throw 'vhd_identifier_rejected'}
+    return $guid.ToString('D')
+}
 function New-EnforcedNonce([long]$Sequence) {
     $bytes=New-Object byte[] 24;$random=[Security.Cryptography.RandomNumberGenerator]::Create()
     try{$random.GetBytes($bytes)}finally{$random.Dispose()}
@@ -379,7 +387,7 @@ function Get-EnforcedVmSnapshot($Config,$Policy,$Watch) {
         Assert-EnforcedPath $disk.path $dataWriters
         Assert-EnforcedDataReaders $disk.path $dataReaders $dataWriters $Watch
         $vhd=Get-VHD -Path $disk.path -ErrorAction Stop
-        if($vhd.DiskIdentifier.ToString() -cne $disk.disk_id -or -not [string]::IsNullOrEmpty($vhd.ParentPath)){throw 'vhd_identity_changed'}
+        if((ConvertTo-EnforcedDiskIdentifier $vhd.DiskIdentifier) -cne $disk.disk_id -or -not [string]::IsNullOrEmpty($vhd.ParentPath)){throw 'vhd_identity_changed'}
         $identity=Get-EnforcedHash ([Text.Encoding]::UTF8.GetBytes((Get-EnforcedFileIdentity $disk.path)))
         if($identity -cne $disk.file_identity_sha256){throw 'vhd_file_changed'}
         Assert-EnforcedDeadline $Watch
