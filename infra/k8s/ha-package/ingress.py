@@ -9,19 +9,21 @@ import uuid
 
 _spec=importlib.util.spec_from_file_location('ha_app_package',Path(__file__).with_name('build.py'))
 P=importlib.util.module_from_spec(_spec);_spec.loader.exec_module(P)
-SOURCES=('caddy/Dockerfile','infra/k8s/ha-package/Ingress.Dockerfile.template')
+SOURCES=('portal-web/Dockerfile','infra/k8s/ha-package/Ingress.Dockerfile.template')
 OWNER='personal-server.ha-ingress-package'
 
 
 def recipe(files):
-    bases=re.findall(r'^FROM (caddy:[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64})$',files[SOURCES[0]].decode(),re.M)
-    expected=('FROM @CADDY_BASE_IMAGE@\n'
-        'RUN setcap -r /usr/bin/caddy && test -z "$(getcap /usr/bin/caddy)"\n'
-        'USER 10004:10004\nENTRYPOINT ["/usr/bin/caddy"]\n'
-        'CMD ["run", "--config", "/etc/ha-ingress/Caddyfile", "--adapter", "caddyfile"]\n')
+    bases=re.findall(r'^FROM (python:3\.11-alpine3\.24@sha256:[0-9a-f]{64})$',files[SOURCES[0]].decode(),re.M)
+    expected=('FROM @APP_BASE_IMAGE@\n'
+        'RUN apk add --no-cache --upgrade musl=1.2.6-r3 musl-utils=1.2.6-r3 zlib=1.4-r0 libssl3=3.5.9-r0 libcrypto3=3.5.9-r0 haproxy=3.4.7-r0 \\\n'
+        '    && mkdir -p /usr/share/ha-ingress \\\n'
+        '    && apk info -v | LC_ALL=C sort > /usr/share/ha-ingress/apk-inventory.txt\n'
+        'USER 10004:10004\nENTRYPOINT ["/usr/sbin/haproxy"]\n'
+        'CMD ["-W", "-db", "-f", "/etc/ha-ingress/haproxy.cfg"]\n')
     if len(bases)!=1 or files[SOURCES[1]].decode()!=expected:
         raise P.PackageError('invalid_ingress_template')
-    return expected.replace('@CADDY_BASE_IMAGE@',bases[0]),bases[0]
+    return expected.replace('@APP_BASE_IMAGE@',bases[0]),bases[0]
 
 
 def snapshot(commit):
@@ -70,20 +72,22 @@ def build(output,context):
         'personal-server.ha-release='+manifest['release_id'],'-t',tag,str(output),timeout=300)
     image=json.loads(docker.call('image','inspect',tag))[0];config=image['Config']
     if (image['Architecture']!='amd64' or image['Os']!='linux' or config['User']!='10004:10004'
-            or config['Entrypoint']!=['/usr/bin/caddy'] or config['Labels'].get(OWNER)!=owner
+            or config['Entrypoint']!=['/usr/sbin/haproxy'] or config['Cmd']!=['-W','-db','-f','/etc/ha-ingress/haproxy.cfg'] or config['Labels'].get(OWNER)!=owner
             or config['Labels'].get('org.opencontainers.image.revision')!=manifest['source_commit']
             or config['Labels'].get('personal-server.ha-release')!=manifest['release_id']):
         raise P.PackageError('ingress_image_binding_mismatch')
     common=['run','--rm','--pull=never','--network=none','--read-only','--cap-drop=ALL',
         '--security-opt=no-new-privileges:true','--label',OWNER+'='+owner]
-    version=docker.call(*common,image['Id'],'version')
-    caps=docker.call(*common,'--entrypoint','/usr/sbin/getcap',image['Id'],'/usr/bin/caddy')
-    if not version.startswith('v'+manifest['base'].split(':')[1].split('@')[0]) or caps:
+    version=docker.call(*common,image['Id'],'-vv')
+    attributes=json.loads(docker.call(*common,'--entrypoint','python',image['Id'],'-c',"import json,os;print(json.dumps(os.listxattr('/usr/sbin/haproxy')))"))
+    if 'security.capability' in attributes:raise P.PackageError('ingress_file_capabilities_forbidden')
+    inventory=docker.call(*common,'--entrypoint','/bin/cat',image['Id'],'/usr/share/ha-ingress/apk-inventory.txt')
+    if not version.startswith('HAProxy version 3.4.7') or 'haproxy-3.4.7-r0' not in inventory.splitlines():
         raise P.PackageError('ingress_unprivileged_smoke_failed')
     docker.call('image','save','--output',str(output/'image.tar'),image['Id'],timeout=180)
     receipt=P.archive_binding(output/'image.tar',image['Id'])
     receipt.update(source_commit=manifest['source_commit'],release_id=manifest['release_id'],owner=owner,
-        tag=tag,smoke='PASS',file_capabilities='',user='10004:10004',version=version,
+        tag=tag,smoke='PASS',file_capabilities='',apk_inventory=inventory,apk_inventory_sha256=P.sha((inventory+'\n').encode()),user='10004:10004',version=version,
         production_deployed=False,local_runtime_context=context)
     (output/'image-bindings.json').write_bytes(P.encode(receipt));(output/'image-bindings.json').chmod(0o444)
     (output/'image.tar').chmod(0o444)
@@ -101,11 +105,23 @@ def verify(output):
         index=json.load(archive.extractfile('manifest.json'))[0]
         config=json.load(archive.extractfile(index['Config']))['config']
     labels=config.get('Labels',{})
-    if (config.get('User')!='10004:10004' or config.get('Entrypoint')!=['/usr/bin/caddy']
+    if (config.get('User')!='10004:10004' or config.get('Entrypoint')!=['/usr/sbin/haproxy'] or config.get('Cmd')!=['-W','-db','-f','/etc/ha-ingress/haproxy.cfg']
             or labels.get(OWNER)!=receipt['owner']
             or labels.get('org.opencontainers.image.revision')!=manifest['source_commit']
             or labels.get('personal-server.ha-release')!=manifest['release_id']):
         raise P.PackageError('ingress_archive_config_mismatch')
+    import io
+    inventory=None
+    with tarfile.open(output/'image.tar') as archive:
+        for layer in index['Layers']:
+            with tarfile.open(fileobj=io.BytesIO(archive.extractfile(layer).read())) as contents:
+                for member in contents:
+                    if member.name.lstrip('./')=='usr/share/ha-ingress/apk-inventory.txt':
+                        if not member.isfile():raise P.PackageError('ingress_inventory_invalid')
+                        inventory=contents.extractfile(member).read()
+    if (inventory is None or P.sha(inventory)!=receipt.get('apk_inventory_sha256')
+            or inventory.decode().strip()!=receipt.get('apk_inventory')):
+        raise P.PackageError('ingress_inventory_binding_mismatch')
     return {'source_commit':manifest['source_commit'],'verified':True,'production_deployed':False}
 
 

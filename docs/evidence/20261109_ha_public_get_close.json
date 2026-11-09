@@ -1,0 +1,21 @@
+{
+  "actual_executor_application": false,
+  "actual_gets": 4,
+  "actual_provider_calls": 0,
+  "complete_bodies": 2,
+  "declared_length_truncation_denied": 2,
+  "production_access": false,
+  "protocols": [
+    "HTTP/1.0",
+    "HTTP/1.1_connection_close"
+  ],
+  "public_dns_and_numeric_ip_pin_verified": false,
+  "retries": 0,
+  "scope": "actual_local_mtls_public_get_body_framing_only",
+  "source_sha256": {
+    "infra/k8s/ha_egress/read_provider.py": "e9041143befb4049fbca73ab16815b5c748ed7471a21dc006e4e9dc4be8d0d16",
+    "tests/test_ha_egress_transport.py": "80f6f16a0bc224c142d6cb489c3dd0f0ae9d0cabe91cb484494fe629718dcbd4",
+    "tests/test_ha_read_provider.py": "954ad04e577b794436fc7d7b39c6656ae5a0fe11359c207bac6ce37dd2eb108d"
+  },
+  "status": "PASS"
+}

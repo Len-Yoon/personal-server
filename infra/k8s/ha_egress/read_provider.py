@@ -179,6 +179,12 @@ def _fetch(host,path,headers,*,timeout,deadline):
         chunks = []
         size = 0
         while True:
+            # A complete close-delimited response may already have closed sock.
+            if response.isclosed() is True:
+                _remaining(timeout,deadline)
+                if type(response.length) is int and response.length > 0:
+                    raise PublicReadUnavailable()
+                break
             sock.settimeout(_remaining(timeout,deadline))
             chunk = response.read1(min(65536,MAX_BODY+1-size))
             _remaining(timeout,deadline)
@@ -186,6 +192,8 @@ def _fetch(host,path,headers,*,timeout,deadline):
             if size>MAX_BODY:
                 raise PublicReadUnavailable()
             if not chunk:
+                if type(response.length) is int and response.length > 0:
+                    raise PublicReadUnavailable()
                 break
             chunks.append(chunk)
         return response.status,{'Content-Type':content_type},b''.join(chunks),None

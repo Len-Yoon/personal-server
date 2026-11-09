@@ -1,12 +1,18 @@
-"""TCB public GET boundary; all DNS, TLS and provider transports are doubles."""
+"""TCB public GET boundary doubles and separate actual local mTLS body framing."""
 import base64
 import io
+import hashlib
+import http.client
+from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import json
 from pathlib import Path
 import socket
 import os
 import tempfile
 import sys
+import ssl
+import threading
+import time
 import unittest
 from unittest.mock import MagicMock,patch
 
@@ -197,6 +203,75 @@ class PublicGetTests(unittest.TestCase):
 
 class PublicReadError(OSError):
     pass
+
+
+class PublicGetLocalTLSFramingTests(unittest.TestCase):
+    """Real mTLS/HTTPResponse body framing, with DNS and dial boundaries injected.
+
+    This establishes no public DNS, numeric-IP pinning, provider API, production
+    ownership or actual Executor acceptance. Those policies stay separately tested.
+    """
+    def test_http10_and_connection_close_complete_body_and_truncated_length_no_retry(self):
+        from tests import test_ha_egress_transport as fixture
+        tls=fixture.TransportTest(methodName='runTest');tls.setUp()
+        self.addCleanup(tls.doCleanups)
+        state={'gets':0,'truncate':False}
+        body=b'{"fixture":"complete-json"}'
+        case=self
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version='HTTP/1.0'
+            def log_message(self,*_):pass
+            def do_GET(self):
+                state['gets']+=1
+                case.assertEqual(self.path,'/books/v1/volumes?q=fixture&maxResults=12&printType=books&langRestrict=ko')
+                case.assertEqual(self.headers.get('Accept-Encoding'),'identity')
+                self.send_response(200);self.send_header('Content-Type','application/json')
+                self.send_header('Content-Length',str(len(body)+(9 if state['truncate'] else 0)))
+                self.send_header('Connection','close');self.close_connection=True
+                self.end_headers();self.wfile.write(body)
+        server_context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.minimum_version=ssl.TLSVersion.TLSv1_3;server_context.verify_mode=ssl.CERT_REQUIRED
+        server_context.load_verify_locations(cafile=tls.root/'ca.pem')
+        server_context.load_cert_chain(tls.root/'server.pem',tls.root/'server.key')
+        server=ThreadingHTTPServer(('127.0.0.1',0),Handler);server.daemon_threads=True
+        server.socket=server_context.wrap_socket(server.socket,server_side=True)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        def close():
+            server.shutdown();server.server_close();thread.join(3)
+        self.addCleanup(close)
+        context=ssl.create_default_context(cafile=tls.root/'ca.pem')
+        context.minimum_version=ssl.TLSVersion.TLSv1_3
+        context.load_cert_chain(tls.root/'client.pem',tls.root/'client.key')
+        def dial(host,address,timeout,deadline):
+            self.assertEqual(host,'www.googleapis.com')
+            self.assertEqual(address,(socket.AF_INET,'127.0.0.1'))
+            return http.client.HTTPSConnection('localhost',server.server_port,context=context,
+                timeout=provider._remaining(timeout,deadline))
+        adapter=provider.PublicGet('book-memo')
+        with patch.object(provider,'_resolve',return_value=(socket.AF_INET,'127.0.0.1')) as resolve, \
+                patch.object(provider,'_PinnedHTTPS',side_effect=dial) as pinned:
+            for protocol in ('HTTP/1.0','HTTP/1.1'):
+                with self.subTest(protocol=protocol):
+                    Handler.protocol_version=protocol
+                    state['truncate']=False;before=state['gets']
+                    result=adapter({'url':GOOGLE,'headers':{}},timeout=1,deadline=time.monotonic()+1)
+                    self.assertEqual(base64.b64decode(result.result['body_b64']),body)
+                    self.assertEqual(state['gets'],before+1)
+                    state['truncate']=True;before=state['gets']
+                    with self.assertRaisesRegex(provider.PublicReadUnavailable,'^public_read_provider_unavailable$'):
+                        adapter({'url':GOOGLE,'headers':{}},timeout=1,deadline=time.monotonic()+1)
+                    self.assertEqual(state['gets'],before+1)
+            self.assertEqual(resolve.call_count,4);self.assertEqual(pinned.call_count,4)
+        root=Path(__file__).resolve().parents[1]
+        sources=('infra/k8s/ha_egress/read_provider.py','tests/test_ha_read_provider.py','tests/test_ha_egress_transport.py')
+        report={'scope':'actual_local_mtls_public_get_body_framing_only','status':'PASS',
+                'protocols':['HTTP/1.0','HTTP/1.1_connection_close'],'complete_bodies':2,
+                'declared_length_truncation_denied':2,'actual_gets':state['gets'],'retries':0,
+                'public_dns_and_numeric_ip_pin_verified':False,'actual_provider_calls':0,
+                'production_access':False,'actual_executor_application':False,
+                'source_sha256':{name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in sources}}
+        target=root/'build/ha-predeploy-evidence/public-get-close-receipt.json'
+        target.parent.mkdir(parents=True,exist_ok=True);target.write_text(json.dumps(report,sort_keys=True,indent=2))
 
 
 if __name__=='__main__':unittest.main()

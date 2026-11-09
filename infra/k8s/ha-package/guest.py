@@ -51,7 +51,7 @@ def render(spec):
         require(ip.version==4 and ip.is_private and not (ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved))
     require(spec['pg_a']!=spec['pg_b'])
     images=spec['images']
-    require(type(images) is dict and set(images)==set(SERVICES)|{'ha-backup-utility','caddy'})
+    require(type(images) is dict and set(images)==set(SERVICES)|{'ha-backup-utility','ha-ingress-utility'})
     require(all(type(value) is str and IMAGE.fullmatch(value) for value in images.values()))
     require(type(spec['docker_gid']) is int and 1<=spec['docker_gid']<=65535 and spec['docker_gid'] not in {10001,10002,10003,10004})
     env=spec['app_environment']
@@ -102,20 +102,26 @@ def render(spec):
             '--expected-sha256',spec['broker_sha256'],'--authority','/etc/ha-broker/authority.json'],
         volumes=[mount(ROOT+'/broker','/etc/ha-broker'),mount('/var/run/docker.sock','/var/run/docker.sock')])
     services['ha-broker']=broker
-    caddy=base(images['caddy'],'10004:10004')
-    caddy.update(network_mode='host',entrypoint=['/usr/bin/caddy'],command=['run','--config','/etc/ha-ingress/Caddyfile','--adapter','caddyfile'],
-        volumes=[mount(ROOT+'/ingress','/etc/ha-ingress'),mount(RUN+'/ingress','/run/ha-ingress')],
-        tmpfs=['/tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777',
-               '/data:rw,noexec,nosuid,nodev,size=16m,uid=10004,gid=10004,mode=0700',
-               '/config:rw,noexec,nosuid,nodev,size=16m,uid=10004,gid=10004,mode=0700'])
-    services['ha-ingress']=caddy
-    caddyfile=['{','  admin off','  auto_https off','}']
+    ingress=base(images['ha-ingress-utility'],'10004:10004')
+    ingress.update(network_mode='host',entrypoint=['/usr/sbin/haproxy'],
+        command=['-W','-db','-f','/etc/ha-ingress/haproxy.cfg'],
+        volumes=[mount(ROOT+'/ingress','/etc/ha-ingress'),mount(RUN+'/ingress','/run/ha-ingress')])
+    services['ha-ingress']=ingress
+    config=['global','  maxconn 128','  nbthread 1','  hard-stop-after 5s',
+        '  ssl-default-bind-options ssl-min-ver TLSv1.3',
+        'defaults','  mode http','  no log','  option http-server-close',
+        '  timeout connect 2s','  timeout client 15s','  timeout server 15s',
+        '  timeout http-request 5s','  timeout http-keep-alive 2s','  timeout queue 2s',
+        'frontend fixed_ingress',
+        f'  bind {spec["guest_ip"]}:10443 ssl crt /etc/ha-ingress/server.pem ca-file /etc/ha-ingress/clients-ca.crt verify required',
+        '  http-request deny deny_status 403 unless { req.hdr_cnt(host) eq 1 }']
     for service in SERVICES:
-        caddyfile += [f'https://{service}.ha.internal:10443 {{',f'  bind {spec["guest_ip"]}',
-          '  tls /etc/ha-ingress/server.crt /etc/ha-ingress/server.key {',
-          '    protocols tls1.3','    client_auth {','      mode require_and_verify',
-          '      trust_pool file /etc/ha-ingress/clients-ca.crt','    }','  }',
-          f'  reverse_proxy unix//run/ha-ingress/{service}/http.sock', '}']
+        config += [f'  acl host_{service} hdr(host),lower -m str {service}.ha.internal {service}.ha.internal:10443']
+    config += ['  http-request deny deny_status 403 unless '+' or '.join('host_'+service for service in SERVICES)]
+    for service in SERVICES:
+        config += [f'  use_backend app_{service} if host_{service}']
+    for service in SERVICES:
+        config += [f'backend app_{service}',f'  server app unix@/run/ha-ingress/{service}/http.sock maxconn 16 maxqueue 16']
     sequence=['verify source/image/plan and installation identities',
         'provision fresh guest directories, immutable config, separate ingress CA and private keys',
         'restore seven services and PostgreSQL blobs while writer authority remains closed',
@@ -129,10 +135,11 @@ def render(spec):
         'ready_for_service_transition':False,'directories':directories,'sequence':sequence,
         'portal_scratch':'640 MiB on-demand tmpfs supports one default 500 MiB archive plus a 32 MiB snapshot and upload overhead. Concurrent peak memory and free space require target-host acceptance.',
         'docker_engine_requirements':{'storage_driver':'overlay2','image_store':'classic','configure_before_import':True},
+        'ingress_key_requirements':{'server.pem':{'uid':10004,'gid':10004,'mode':'0400','contents':'server certificate chain and private key combined PEM'},'clients-ca.crt':{'uid':0,'mode':'0444'},'application_mounts_contain_ingress_keys':False},
         'ingress_health':'Static ingress is not writer readiness. Route activation requires fresh DB lease and all application readiness.',
         'rollback':'Before new writes, preserve V1 rollback. After accepted writes/effects, use forward recovery and reconcile uncertain effects.',
         'retired_guest':'Fenced old VM stays off. A fresh standby supplies synchronous replay; never restart the fenced writer to satisfy peer checks.'}
-    return {'name':'n100-ha-'+spec['installation_id'][:12],'services':services},'\n'.join(caddyfile)+'\n',review
+    return {'name':'n100-ha-'+spec['installation_id'][:12],'services':services},'\n'.join(config)+'\n',review
 
 
 def main():
@@ -140,9 +147,9 @@ def main():
     parser.add_argument('--spec',required=True);parser.add_argument('--output',required=True)
     args=parser.parse_args()
     spec=json.loads(Path(args.spec).read_text())
-    compose,caddy,review=render(spec)
+    compose,haproxy,review=render(spec)
     output=Path(args.output);output.mkdir(mode=0o700,parents=False,exist_ok=False)
-    for name,value in [('compose.json',compose),('review.json',review),('Caddyfile',caddy)]:
+    for name,value in [('compose.json',compose),('review.json',review),('haproxy.cfg',haproxy)]:
         path=output/name
         path.write_text(value if isinstance(value,str) else json.dumps(value,sort_keys=True,indent=2)+'\n')
         path.chmod(0o444)

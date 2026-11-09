@@ -12,7 +12,7 @@ guest=importlib.util.module_from_spec(spec);spec.loader.exec_module(guest)
 def fixture():
     return {'schema_version':1,'source_commit':'a'*40,'installation_id':'b'*64,'node':'A',
         'guest_ip':'192.0.2.10','pg_a':'192.0.2.10','pg_b':'192.0.2.11',
-        'images':{name:'fixture.invalid/'+name+'@sha256:'+'c'*64 for name in (*guest.SERVICES,'ha-backup-utility','caddy')},
+        'images':{name:'fixture.invalid/'+name+'@sha256:'+'c'*64 for name in (*guest.SERVICES,'ha-backup-utility','ha-ingress-utility')},
         'gateway_sha256':'d'*64,'broker_sha256':'e'*64,'docker_gid':999,
         'app_environment':{'car-care-worker':{'CAR_CARE_TELEGRAM_CHAT_ID':'fixture'},
             'homeops-executor':{'HOMEOPS_EXECUTOR_SHARED_SECRET_SHA256':'f'*64,
@@ -22,7 +22,7 @@ def fixture():
 class GuestLayoutTest(unittest.TestCase):
     def test_seven_apps_have_only_fixed_capabilities_and_no_external_network(self):
         value=fixture();original=copy.deepcopy(value)
-        compose,caddy,review=guest.render(value)
+        compose,haproxy,review=guest.render(value)
         self.assertEqual(value,original)
         self.assertEqual(set(compose['services']),set(guest.SERVICES)|{'ha-network','ha-broker','ha-ingress'})
         for name in guest.SERVICES:
@@ -36,7 +36,7 @@ class GuestLayoutTest(unittest.TestCase):
             self.assertEqual([m['read_only'] for m in mounts],[True,True,False])
             self.assertTrue(all(not m['bind']['create_host_path'] for m in mounts))
             self.assertEqual(app['extra_hosts']['ha-broker'],'127.0.0.4')
-            self.assertIn('unix//run/ha-ingress/'+name+'/http.sock',caddy)
+            self.assertIn('unix@/run/ha-ingress/'+name+'/http.sock',haproxy)
         self.assertIn('size=640m',compose['services']['portal-web']['tmpfs'][0])
         self.assertFalse(review['ready_for_service_transition'])
         self.assertFalse(review['operating_authority_issued'])
@@ -44,14 +44,22 @@ class GuestLayoutTest(unittest.TestCase):
         self.assertIn('fresh DB lease',review['ingress_health'])
 
     def test_trusted_components_are_separate_and_private_keys_not_app_mounted(self):
-        compose,caddy,review=guest.render(fixture());services=compose['services']
+        compose,haproxy,review=guest.render(fixture());services=compose['services']
         self.assertEqual(services['ha-broker']['user'],'10002:10002')
         self.assertEqual(services['ha-network']['user'],'10003:10001')
         self.assertEqual(services['ha-ingress']['user'],'10004:10004')
-        self.assertEqual(services['ha-ingress']['entrypoint'],['/usr/bin/caddy'])
-        self.assertEqual(services['ha-ingress']['command'][0],'run')
-        self.assertIn('require_and_verify',caddy);self.assertIn('admin off',caddy)
-        self.assertNotIn('0.0.0.0',caddy)
+        self.assertEqual(services['ha-ingress']['entrypoint'],['/usr/sbin/haproxy'])
+        self.assertEqual(services['ha-ingress']['command'],['-W','-db','-f','/etc/ha-ingress/haproxy.cfg'])
+        self.assertIn('verify required',haproxy);self.assertIn('ssl-min-ver TLSv1.3',haproxy)
+        self.assertIn('  no log',haproxy);self.assertNotIn('stats socket',haproxy);self.assertNotIn('daemon',haproxy)
+        self.assertNotIn('0.0.0.0',haproxy)
+        self.assertIn('bind 192.0.2.10:10443 ssl',haproxy)
+        self.assertIn('http-request deny deny_status 403 unless',haproxy)
+        self.assertIn('req.hdr_cnt(host) eq 1',haproxy)
+        self.assertEqual(haproxy.count('  use_backend '),7)
+        self.assertEqual(haproxy.count('  server app unix@'),7)
+        self.assertEqual(review['ingress_key_requirements']['server.pem']['mode'],'0400')
+        self.assertFalse(review['ingress_key_requirements']['application_mounts_contain_ingress_keys'])
         self.assertEqual(services['ha-broker']['extra_hosts']['ha-a'],'192.0.2.10')
         for service in guest.SERVICES:
             self.assertEqual(services['ha-broker']['extra_hosts'][service+'.ha.internal'],'192.0.2.10')
@@ -85,14 +93,17 @@ class IngressPackageTest(unittest.TestCase):
         self.ingress=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.ingress)
         self.files={name:(ROOT/name).read_bytes() for name in self.ingress.SOURCES}
 
-    def test_file_capabilities_removed_before_running_without_capabilities(self):
+    def test_signed_pinned_haproxy_has_fixed_foreground_command_and_inventory(self):
         recipe,base=self.ingress.recipe(self.files)
-        self.assertIn('setcap -r /usr/bin/caddy',recipe)
-        self.assertIn('test -z "$(getcap /usr/bin/caddy)"',recipe)
-        self.assertLess(recipe.index('setcap -r'),recipe.index('USER 10004:10004'))
-        self.assertIn('@sha256:',base)
-        self.assertIn('ENTRYPOINT ["/usr/bin/caddy"]',recipe)
-        self.assertNotIn('EXPOSE',recipe)
+        self.assertIn('apk add --no-cache --upgrade',recipe)
+        for package in ('haproxy=3.4.7-r0','musl=1.2.6-r3','musl-utils=1.2.6-r3','zlib=1.4-r0','libssl3=3.5.9-r0','libcrypto3=3.5.9-r0'):
+            self.assertIn(package,recipe)
+        self.assertIn('apk info -v | LC_ALL=C sort',recipe)
+        self.assertIn('python:3.11-alpine3.24@sha256:',base)
+        self.assertIn('USER 10004:10004',recipe)
+        self.assertIn('ENTRYPOINT ["/usr/sbin/haproxy"]',recipe)
+        self.assertIn('CMD ["-W", "-db", "-f", "/etc/ha-ingress/haproxy.cfg"]',recipe)
+        self.assertNotIn('EXPOSE',recipe);self.assertNotIn('allow-untrusted',recipe)
         altered=dict(self.files);altered[self.ingress.SOURCES[1]]+=b'RUN arbitrary\n'
         with self.assertRaises(self.ingress.P.PackageError):self.ingress.recipe(altered)
 
