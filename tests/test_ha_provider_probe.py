@@ -19,6 +19,19 @@ $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($env:PROBE_INSTALLER,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'parse_failed'}
 . $env:PROBE_INSTALLER
+foreach($id in @($null,'',[Guid]::Empty,[Guid]::Empty.ToString())){
+ if(-not (Test-ProbeDisconnectedNic ([pscustomobject]@{SwitchName='';SwitchId=$id}))){throw 'disconnected_adapter_rejected'}
+}
+foreach($nic in @([pscustomobject]@{SwitchName='existing';SwitchId=$null},[pscustomobject]@{SwitchName='';SwitchId='11111111-1111-1111-1111-111111111111'},[pscustomobject]@{SwitchName='';SwitchId='unknown'})){
+ if(Test-ProbeDisconnectedNic $nic){throw 'connected_or_unknown_adapter_accepted'}
+}
+foreach($nic in @($null,[pscustomobject]@{SwitchId=''},[pscustomobject]@{SwitchName=''},[pscustomobject]@{SwitchName=@();SwitchId=''},[pscustomobject]@{SwitchName='';SwitchId=@()},[pscustomobject]@{SwitchName=[pscustomobject]@{};SwitchId=''},[pscustomobject]@{SwitchName=' ';SwitchId=''},[pscustomobject]@{SwitchName='';SwitchId=' '})){
+ if(Test-ProbeDisconnectedNic $nic){throw 'malformed_adapter_accepted'}
+}
+if((Get-ProbeFailureReason 'fixture_vm_ownership_changed') -cne 'fixture_vm_ownership_changed'){throw 'fixed_reason_lost'}
+foreach($message in @('sensitive_internal_account','Fixture_vm_ownership_changed','some secret','C:\private')){
+ if((Get-ProbeFailureReason $message) -cne 'unclassified_runtime_error'){throw 'external_exception_reflected'}
+}
 $blocked=$false;try{Invoke-ProviderAcceptance}catch{$blocked=$true}
 if(-not $blocked){throw 'unapproved_execution_accepted'}
 $commands=@($ast.FindAll({param($a) $a -is [Management.Automation.Language.CommandAst]},$true)|ForEach-Object{$_.GetCommandName()})
