@@ -9,6 +9,17 @@ function Get-ProbeServiceSid([string]$Name){
     try{$bytes=$h.ComputeHash([Text.Encoding]::Unicode.GetBytes($Name.ToUpperInvariant()))}finally{$h.Dispose()}
     return 'S-1-5-80-'+((0..4|ForEach-Object{[BitConverter]::ToUInt32($bytes,4*$_).ToString()})-join '-')
 }
+function Get-ProbeServiceNames([string]$Installation){
+    if($Installation -cnotmatch '^[0-9a-f]{64}$'){throw 'fixture_service_names_invalid'}
+    $names=@(('HaProbe_'+$Installation.Substring(0,16)),('HaProbe_'+$Installation.Substring(16,16)))
+    if($names.Count -ne 2 -or @($names|Select-Object -Unique).Count -ne 2 -or
+        @($names|Where-Object{$_ -cnotmatch '^HaProbe_[0-9a-f]{16}$'}).Count){throw 'fixture_service_names_invalid'}
+    return $names
+}
+function Test-ProbeServiceImagePath([string]$Actual,[string]$Expected){
+    if([string]::IsNullOrEmpty($Expected) -or $Expected.Contains('"')){return $false}
+    return ($Actual -ceq ('"'+$Expected+'"') -or ($Expected -notmatch '\s' -and $Actual -ceq $Expected))
+}
 function Test-ProbeDisconnectedNic($Nic){
     # An unattached adapter may expose null/empty SwitchId rather than Guid.Empty.
     # Both independent switch fields must prove disconnection; unknown IDs fail.
@@ -26,7 +37,7 @@ function Get-ProbeFailureReason([string]$Message){
         'fixture_artifact_pin_failed','fixture_memory_reserve_failed','fixture_parent_reparse','fixture_service_collision',
         'fixture_service_sid_mismatch','positive_settings_not_applied','positive_power_not_applied',
         'negative_settings_changed_state','negative_power_changed_state','positive_stop_not_applied',
-        'fixture_service_ownership_changed','fixture_service_delete_unverified')
+        'fixture_service_ownership_changed','fixture_service_delete_unverified','fixture_service_names_invalid')
     if($Message -cin $codes){return $Message}
     return 'unclassified_runtime_error'
 }
@@ -141,7 +152,7 @@ function Invoke-ProviderAcceptance {
     $adminsBefore=@(Get-LocalGroupMember -SID 'S-1-5-32-544'|ForEach-Object{$_.SID.Value}|Sort-Object)
     $beforeVm=@(Get-VM|ForEach-Object{$_.Id.ToString()}|Sort-Object)
     $beforeMembers=@(Get-LocalGroupMember -SID 'S-1-5-32-578'|ForEach-Object{$_.SID.Value}|Sort-Object)
-    $names=@('HaProbe_'+$short,('HaProbe_'+$script:installation.Substring(16,16)))
+    $names=@(Get-ProbeServiceNames $script:installation)
     $sids=@($names|ForEach-Object{Get-ProbeServiceSid $_})
     if(@($names|Where-Object{Get-Service -Name $_ -ErrorAction SilentlyContinue}).Count){throw 'fixture_service_collision'}
     $null=New-ProbeDirectory $script:root $sids
@@ -208,7 +219,7 @@ function Invoke-ProviderAcceptance {
                 $service=Get-Service -Name $fixture.name -ErrorAction SilentlyContinue
                 if($null -ne $service){
                     $actual=Get-CimInstance Win32_Service -Filter ("Name='"+$fixture.name+"'")
-                    if($actual.StartName -ine ('NT SERVICE\'+$fixture.name) -or $actual.PathName -cne ('"'+(Join-Path $fixture.root 'probe.exe')+'"')){throw 'fixture_service_ownership_changed'}
+                    if($actual.StartName -ine ('NT SERVICE\'+$fixture.name) -or -not (Test-ProbeServiceImagePath $actual.PathName (Join-Path $fixture.root 'probe.exe'))){throw 'fixture_service_ownership_changed'}
                     if($service.Status -ne 'Stopped'){Stop-Service -Name $fixture.name}
                     Wait-ProbeProcesses $fixture
                     Invoke-ProbeSc @('delete',$fixture.name)

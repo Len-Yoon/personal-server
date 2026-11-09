@@ -10,6 +10,36 @@ SOURCE=ROOT/'infra/k8s/ha_control/windows-provider-probe.cs'
 
 
 class ProviderProbeTests(unittest.TestCase):
+    def test_reconciliation_is_unarmed_and_cannot_start_or_stop_resources(self):
+        pwsh=shutil.which('pwsh') or '/private/tmp/n100-ha-powershell/runtime/pwsh'
+        env=dict(os.environ, CLEANUP=str(ROOT/'infra/k8s/ha_control/windows-provider-cleanup.ps1'))
+        script=r'''
+$ErrorActionPreference='Stop'
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:CLEANUP,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'parse_failed'}
+. $env:CLEANUP
+$blocked=$false;try{Invoke-ProviderCleanup}catch{$blocked=$true}
+if(-not $blocked){throw 'unarmed_cleanup_accepted'}
+$commands=@($ast.FindAll({param($a) $a -is [Management.Automation.Language.CommandAst]},$true)|ForEach-Object{$_.GetCommandName()})
+foreach($forbidden in @('Start-VM','Stop-VM','Set-VM','New-VM','Start-Service','Stop-Service','New-Service','Restart-Computer','Remove-Item','Set-Acl','Add-LocalGroupMember','Remove-LocalGroupMember')){
+ if($forbidden -in $commands){throw 'reconciliation_scope_expanded'}
+}
+$names=@(Get-CleanupExpectedNames ('0123456789abcdef'+'fedcba9876543210'+('a'*32)))
+if($names.Count -ne 2 -or $names[0] -cne 'HaProbe_0123456789abcdef' -or $names[1] -cne 'HaProbe_fedcba9876543210'){throw 'names_not_exact'}
+if(-not (Test-CleanupServicePath 'C:\Private\probe.exe' 'C:\Private\probe.exe')){throw 'same_path_rejected'}
+if(Test-CleanupServicePath 'C:\Private\probe.exe -x' 'C:\Private\probe.exe'){throw 'command_input_accepted'}
+if(Test-CleanupServicePath 'C:\Program Files\probe.exe' 'C:\Program Files\probe.exe'){throw 'ambiguous_path_accepted'}
+if(-not (Test-CleanupDisconnectedNic ([pscustomobject]@{SwitchName='';SwitchId=$null}))){throw 'disconnected_rejected'}
+foreach($nic in @([pscustomobject]@{SwitchName='connected';SwitchId=$null},[pscustomobject]@{SwitchName='';SwitchId=@()},[pscustomobject]@{SwitchName='';SwitchId='unknown'})){
+ if(Test-CleanupDisconnectedNic $nic){throw 'unknown_or_connected_accepted'}
+}
+'parsed-unarmed-cleanup-only'
+'''
+        result=subprocess.run([pwsh,'-NoProfile','-NonInteractive','-Command',script],env=env,capture_output=True,timeout=20)
+        self.assertEqual(result.returncode,0,result.stderr.decode(errors='replace'))
+        self.assertEqual(result.stdout.decode().strip(),'parsed-unarmed-cleanup-only')
+
     def test_installer_real_powershell_parse_has_explicit_intent(self):
         pwsh=shutil.which('pwsh') or '/private/tmp/n100-ha-powershell/runtime/pwsh'
         env=dict(os.environ, PROBE_INSTALLER=str(ROOT/'infra/k8s/ha_control/windows-provider-acceptance.ps1'))
@@ -19,6 +49,18 @@ $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($env:PROBE_INSTALLER,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'parse_failed'}
 . $env:PROBE_INSTALLER
+$names=@(Get-ProbeServiceNames ('0123456789abcdef'+'fedcba9876543210'+('a'*32)))
+if($names.Count -ne 2 -or $names[0] -cne 'HaProbe_0123456789abcdef' -or $names[1] -cne 'HaProbe_fedcba9876543210'){throw 'service_names_collapsed'}
+$blocked=$false;try{Get-ProbeServiceNames ('a'*64)|Out-Null}catch{$blocked=$true}
+if(-not $blocked){throw 'duplicate_service_names_accepted'}
+foreach($path in @('C:\Private\probe.exe','"C:\Private\probe.exe"')){
+ if(-not (Test-ProbeServiceImagePath $path 'C:\Private\probe.exe')){throw 'same_single_exe_rejected'}
+}
+foreach($path in @('C:\Private\probe.exe anything','"C:\Private\probe.exe" anything','C:\Private\other.exe','C:\Program Files\probe.exe')){
+ if(Test-ProbeServiceImagePath $path 'C:\Private\probe.exe'){throw 'different_argv_accepted'}
+}
+if(Test-ProbeServiceImagePath 'C:\Program Files\probe.exe' 'C:\Program Files\probe.exe'){throw 'ambiguous_unquoted_path_accepted'}
+if(-not (Test-ProbeServiceImagePath '"C:\Program Files\probe.exe"' 'C:\Program Files\probe.exe')){throw 'quoted_path_rejected'}
 foreach($id in @($null,'',[Guid]::Empty,[Guid]::Empty.ToString())){
  if(-not (Test-ProbeDisconnectedNic ([pscustomobject]@{SwitchName='';SwitchId=$id}))){throw 'disconnected_adapter_rejected'}
 }
