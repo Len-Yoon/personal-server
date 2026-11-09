@@ -278,6 +278,19 @@ class PackageTest(unittest.TestCase):
             with self.assertRaisesRegex(package.PackageError, "mac_orbstack_only"):
                 package.LocalDocker()
 
+    def test_archive_builder_rejects_manifest_id_image_store_before_build(self):
+        endpoint='unix://'+str(Path.home()/'.orbstack/run/docker.sock')
+        context=json.dumps([{'Name':'orbstack','Endpoints':{'docker':{'Host':endpoint}}}])
+        for driver in ('overlayfs','overlay2'):
+            with patch.object(package.platform,'system',return_value='Darwin'), \
+                 patch.object(package.LocalDocker,'call',side_effect=[context,'daemon-fixture',driver]) as call:
+                if driver=='overlayfs':
+                    with self.assertRaisesRegex(package.PackageError,'classic_image_store_required'):
+                        package.LocalDocker()
+                else:
+                    self.assertEqual(package.LocalDocker().daemon_id,'daemon-fixture')
+                self.assertEqual(call.call_count,3)
+
 
 if __name__ == "__main__":
     unittest.main()

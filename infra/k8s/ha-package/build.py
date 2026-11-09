@@ -276,6 +276,8 @@ class LocalDocker:
         self.daemon_id = self.call("info", "--format", "{{.ID}}", timeout=10)
         if not re.fullmatch(r'[A-Za-z0-9:_.-]{1,128}', self.daemon_id):
             raise PackageError('local_daemon_identity_required')
+        if self.call('info','--format','{{.Driver}}',timeout=10) != 'overlay2':
+            raise PackageError('classic_image_store_required')
 
     def call(self, *args, timeout=60):
         if self.daemon_id is not None:

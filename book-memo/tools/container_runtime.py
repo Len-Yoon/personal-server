@@ -32,7 +32,7 @@ _HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 _IMAGE = re.compile(r'sha256:[0-9a-f]{64}\Z')
 _NAME = re.compile(r'(?:[A-Za-z0-9_][A-Za-z0-9_.-]*|\.gitkeep)\Z')
 DOCKERFILE_BYTES = (Path(__file__).resolve().parents[1] / 'Dockerfile').read_bytes()
-DOCKERFILE_SHA = '72842b9e27b9eee85c1e1add2821bedb3055315c713e2a8396615912cf1675ea'
+DOCKERFILE_SHA = 'c53138b05f99f00e6dc9f0aa015db21d6eab9a8830bf98e027223cedf83ebd19'
 ARCHIVE_LIMIT = 1024 * 1024 * 1024
 
 

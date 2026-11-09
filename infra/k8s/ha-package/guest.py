@@ -128,6 +128,7 @@ def render(spec):
         'node':spec['node'],'runtime_ownership_file':'crawler-worker=compose\nyoutube-memo=compose\nbook-memo=compose\n','production_deployed':False,'operating_authority_issued':False,
         'ready_for_service_transition':False,'directories':directories,'sequence':sequence,
         'portal_scratch':'640 MiB on-demand tmpfs supports one default 500 MiB archive plus a 32 MiB snapshot and upload overhead. Concurrent peak memory and free space require target-host acceptance.',
+        'docker_engine_requirements':{'storage_driver':'overlay2','image_store':'classic','configure_before_import':True},
         'ingress_health':'Static ingress is not writer readiness. Route activation requires fresh DB lease and all application readiness.',
         'rollback':'Before new writes, preserve V1 rollback. After accepted writes/effects, use forward recovery and reconcile uncertain effects.',
         'retired_guest':'Fenced old VM stays off. A fresh standby supplies synchronous replay; never restart the fenced writer to satisfy peer checks.'}
