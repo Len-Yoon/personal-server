@@ -17,6 +17,7 @@ def recipe(files):
     bases=re.findall(r'^FROM (python:3\.11-alpine3\.24@sha256:[0-9a-f]{64})$',files[SOURCES[0]].decode(),re.M)
     expected=('FROM @APP_BASE_IMAGE@\n'
         'RUN apk add --no-cache --upgrade musl=1.2.6-r3 musl-utils=1.2.6-r3 zlib=1.4-r0 libssl3=3.5.9-r0 libcrypto3=3.5.9-r0 haproxy=3.4.7-r0 \\\n'
+        '    && python -m pip uninstall --yes setuptools wheel pip \\\n'
         '    && mkdir -p /usr/share/ha-ingress \\\n'
         '    && apk info -v | LC_ALL=C sort > /usr/share/ha-ingress/apk-inventory.txt\n'
         'USER 10004:10004\nENTRYPOINT ["/usr/sbin/haproxy"]\n'
@@ -79,7 +80,7 @@ def build(output,context):
     common=['run','--rm','--pull=never','--network=none','--read-only','--cap-drop=ALL',
         '--security-opt=no-new-privileges:true','--label',OWNER+'='+owner]
     version=docker.call(*common,image['Id'],'-vv')
-    attributes=json.loads(docker.call(*common,'--entrypoint','python',image['Id'],'-c',"import json,os;print(json.dumps(os.listxattr('/usr/sbin/haproxy')))"))
+    attributes=json.loads(docker.call(*common,'--entrypoint','python',image['Id'],'-c',"import json,os,importlib.util;assert all(importlib.util.find_spec(name) is None for name in ['pip','setuptools','wheel']);print(json.dumps(os.listxattr('/usr/sbin/haproxy')))"))
     if 'security.capability' in attributes:raise P.PackageError('ingress_file_capabilities_forbidden')
     inventory=docker.call(*common,'--entrypoint','/bin/cat',image['Id'],'/usr/share/ha-ingress/apk-inventory.txt')
     if not version.startswith('HAProxy version 3.4.7') or 'haproxy-3.4.7-r0' not in inventory.splitlines():
