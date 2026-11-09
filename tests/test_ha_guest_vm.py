@@ -21,6 +21,28 @@ class GuestVmTests(unittest.TestCase):
         self.assertEqual(value.returncode,0,value.stderr)
         return value.stdout.strip()
 
+    def test_ancestor_walk_accepts_raw_clr_parents_without_provider_properties(self):
+        with tempfile.TemporaryDirectory() as name:
+            path=Path(name)/'child'/'leaf.bin'
+            path.parent.mkdir()
+            path.write_bytes(b'fixture')
+            result=self.ps(r'''
+Set-StrictMode -Version Latest
+$item=Get-Item -LiteralPath $env:GUEST_PARENT_FIXTURE
+$directory=Get-GuestVmParent $item
+if($directory -isnot [IO.DirectoryInfo]){throw 'file_parent_not_directory'}
+$raw=Get-GuestVmParent $directory
+if($null -ne $raw.PSObject.Properties['PSIsContainer']){throw 'fixture_did_not_exercise_raw_parent'}
+$count=0
+while($null -ne $raw){$count++;if($count -gt 64){throw 'ancestor_cycle'};$raw=Get-GuestVmParent $raw}
+if($count -lt 2){throw 'ancestor_walk_truncated'}
+$blocked=$false
+try{Get-GuestVmParent ([pscustomobject]@{PSIsContainer=$true;Parent='foreign'})|Out-Null}catch{$blocked=$true}
+if(-not $blocked){throw 'nonfilesystem_parent_accepted'}
+'raw-clr-ancestor-walk'
+''',GUEST_PARENT_FIXTURE=str(path))
+            self.assertEqual(result,'raw-clr-ancestor-walk')
+
     def test_native_intent_and_module_import_have_no_side_effects(self):
         result=self.ps(r'''
 function Get-VM {throw 'native_rpc_must_not_run'}
