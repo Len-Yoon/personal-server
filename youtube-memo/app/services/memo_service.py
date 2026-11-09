@@ -182,7 +182,18 @@ def create_or_get_video(
 def fetch_youtube_title(youtube_id: str, url: str) -> str:
     oembed_url = f"https://www.youtube.com/oembed?url={quote(url, safe='')}&format=json"
     try:
-        with urlopen(oembed_url, timeout=3) as response:
+        broker = False
+        if 'HA_PG_CONFIG' in os.environ:
+            from ha_egress.http_read import enabled
+            broker = enabled('youtube-memo')
+        if broker:
+            from ha_egress.http_read import get
+            response_context = get('youtube-memo',oembed_url)
+        else:
+            response_context = urlopen(oembed_url,timeout=3)
+        with response_context as response:
+            if broker and response.status != 200:
+                return ""
             payload = json.loads(response.read().decode("utf-8"))
     except Exception:
         return ""

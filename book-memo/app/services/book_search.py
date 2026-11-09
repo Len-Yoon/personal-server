@@ -4,8 +4,10 @@ import inspect
 import hashlib
 import html
 import json
+import os
 import time
 from collections import OrderedDict
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from threading import RLock
 from typing import Any
@@ -29,6 +31,7 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _CACHE = OrderedDict()
 _CACHE_LOCK = RLock()
 _CLIENT = ContextVar("book_search_client")
+_BROKER = ContextVar("book_search_broker",default=False)
 
 
 def _cache_get(key):
@@ -63,9 +66,13 @@ async def search_books_async(query: str, limit: int = 12) -> list[dict[str, Any]
     if len(query) > MAX_QUERY_LENGTH:
         raise ValueError("검색어는 500자 이내로 입력해주세요.")
     limit = max(1, min(limit, 40))
-    yes24_key = api_key()
-    yes24_enabled = bool(yes24_key)
-    key = (query, limit, hashlib.sha256(yes24_key.encode()).hexdigest())
+    try:
+        broker = _broker_enabled()
+    except (OSError,ImportError,ValueError):
+        raise ValueError('도서 검색 서비스를 이용할 수 없습니다. 잠시 후 다시 검색해주세요.') from None
+    yes24_key = '' if broker else api_key()
+    yes24_enabled = broker or bool(yes24_key)
+    key = (query, limit, 'broker' if broker else hashlib.sha256(yes24_key.encode()).hexdigest())
     cached = _cache_get(key)
     if cached is not None:
         return cached
@@ -73,13 +80,14 @@ async def search_books_async(query: str, limit: int = 12) -> list[dict[str, Any]
     primary_failed = False
     books = []
     # c-ares DNS is cancellable and does not leave getaddrinfo executor work behind.
-    resolver = aiohttp.AsyncResolver()
+    resolver = None if broker else aiohttp.AsyncResolver()
+    broker_context = _BROKER.set(broker)
     try:
-        async with aiohttp.ClientSession(
+        async with (_broker_session() if broker else aiohttp.ClientSession(
             connector=aiohttp.TCPConnector(resolver=resolver, limit=3),
             timeout=aiohttp.ClientTimeout(total=SEARCH_BUDGET_SECONDS),
             trust_env=False,
-        ) as client:
+        )) as client:
             context = _CLIENT.set(client)
             try:
                 async with asyncio.timeout(SEARCH_BUDGET_SECONDS):
@@ -93,7 +101,7 @@ async def search_books_async(query: str, limit: int = 12) -> list[dict[str, Any]
                                 if not isinstance(candidate, list) or any(not isinstance(book, dict) for book in candidate):
                                     raise ValueError("invalid books")
                                 books = candidate[:limit]
-                        except (aiohttp.ClientError, TimeoutError, ValueError, TypeError, KeyError, AttributeError):
+                        except (aiohttp.ClientError, OSError, TimeoutError, ValueError, TypeError, KeyError, AttributeError):
                             if searcher is _search_yes24:
                                 primary_failed = True
                             continue
@@ -105,7 +113,9 @@ async def search_books_async(query: str, limit: int = 12) -> list[dict[str, Any]
             finally:
                 _CLIENT.reset(context)
     finally:
-        await resolver.close()
+        _BROKER.reset(broker_context)
+        if resolver is not None:
+            await resolver.close()
     if primary_failed and not books:
         raise ValueError("YES24 도서 검색에 실패했습니다. API 키와 이용 한도를 확인해주세요.")
     if not successful_search:
@@ -114,35 +124,59 @@ async def search_books_async(query: str, limit: int = 12) -> list[dict[str, Any]
     return books
 
 
-async def _get_json(url, params, headers=None):
-    async with _CLIENT.get().get(url, params=params, headers=headers, allow_redirects=False) as response:
+def _broker_enabled():
+    if 'HA_PG_CONFIG' not in os.environ:
+        return False
+    from ha_egress.http_read import enabled
+    return enabled('book-memo')
+
+
+@asynccontextmanager
+async def _broker_session():
+    # The isolated application never instantiates a direct HTTP/DNS client.
+    yield None
+
+
+def _decode_json(status,url,raw):
+    if status != 200 and not (url == YES24_SEARCH_URL and status == 404):
+        raise ValueError('도서 검색 제공자 응답 오류')
+    payload = json.loads(raw)
+    if not isinstance(payload,dict):
+        raise ValueError('검색 응답 형식이 올바르지 않습니다.')
+    if status == 404:
+        if payload.get('success') is False and payload.get('errorCode') == 'SEARCH_001':
+            return {'success':True,'errorCode':None,'data':{'items':[]}}
+        raise ValueError('YES24 검색 제공자 오류')
+    return payload
+
+
+async def _get_json(url,params,headers=None):
+    if _BROKER.get():
+        from ha_egress.http_read import async_get
+        response = await async_get('book-memo',url,params=params,headers=headers,
+                                   timeout=PROVIDER_BUDGET_SECONDS)
+        return _decode_json(response.status,url,response.content)
+    async with _CLIENT.get().get(url,params=params,headers=headers,allow_redirects=False) as response:
         if response.status != 200 and not (url == YES24_SEARCH_URL and response.status == 404):
-            raise ValueError("도서 검색 제공자 응답 오류")
+            raise ValueError('도서 검색 제공자 응답 오류')
         size = 0
         chunks = []
         async for chunk in response.content.iter_chunked(16384):
             size += len(chunk)
             if size > MAX_RESPONSE_BYTES:
-                raise ValueError("검색 응답이 너무 큽니다.")
+                raise ValueError('검색 응답이 너무 큽니다.')
             chunks.append(chunk)
-        payload = json.loads(b"".join(chunks))
-        if not isinstance(payload, dict):
-            raise ValueError("검색 응답 형식이 올바르지 않습니다.")
-        if response.status == 404:
-            if payload.get("success") is False and payload.get("errorCode") == "SEARCH_001":
-                return {"success": True, "errorCode": None, "data": {"items": []}}
-            raise ValueError("YES24 검색 제공자 오류")
-        return payload
+        return _decode_json(response.status,url,b''.join(chunks))
 
 
 async def _search_yes24(query: str, limit: int) -> list[dict[str, Any]]:
-    key = api_key()
-    if not key:
+    key = '' if _BROKER.get() else api_key()
+    if not key and not _BROKER.get():
         return []
     payload = await _get_json(
         YES24_SEARCH_URL,
         params={"query": query, "category": "BOOK", "page": 1, "pageSize": limit},
-        headers={"X-Api-Key": key},
+        headers=None if _BROKER.get() else {"X-Api-Key": key},
     )
     data = response_data(payload)
     items = data.get("items")

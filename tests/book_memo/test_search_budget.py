@@ -287,3 +287,34 @@ class Yes24ContractTests(unittest.IsolatedAsyncioTestCase):
             await runner.cleanup()
         self.assertTrue(all(key == 'fixture-key' for _, key, _ in seen))
         self.assertTrue(all('ttbkey' not in query and 'key' not in query for _, _, query in seen))
+
+
+
+class BrokerBookReadTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        prepare_service_import('book-memo')
+        from app.services import book_search
+        self.search=importlib.reload(book_search)
+
+    async def test_signed_search_uses_yes24_without_app_key_or_direct_http_session(self):
+        import json,sys
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        payload={'success':True,'errorCode':None,'data':{'items':[{'itemId':123,'title':'book'}]}}
+        fake=SimpleNamespace(enabled=MagicMock(return_value=True),async_get=AsyncMock(return_value=SimpleNamespace(status=200,content=json.dumps(payload).encode())))
+        with patch.dict(os.environ,{'HA_PG_CONFIG':'signed','YES24_API_KEY':''}),patch.dict(sys.modules,{'ha_egress.http_read':fake}),patch.object(self.search,'api_key',side_effect=AssertionError('app key forbidden')),patch.object(self.search.aiohttp,'ClientSession') as raw,patch.object(self.search.aiohttp,'AsyncResolver') as dns:
+            books=await self.search.search_books_async('broker-book')
+            self.assertEqual(books[0]['title'],'book')
+            self.assertEqual(fake.async_get.call_args.args,('book-memo',self.search.YES24_SEARCH_URL))
+            self.assertIsNone(fake.async_get.call_args.kwargs['headers'])
+            raw.assert_not_called();dns.assert_not_called()
+
+    async def test_broker_failure_can_only_try_other_broker_gets(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        fake=SimpleNamespace(enabled=MagicMock(return_value=True),async_get=AsyncMock(side_effect=OSError('unavailable')))
+        with patch.dict(os.environ,{'HA_PG_CONFIG':'signed','YES24_API_KEY':'must-not-fallback'}),patch.dict(sys.modules,{'ha_egress.http_read':fake}),patch.object(self.search.aiohttp,'ClientSession') as raw:
+            with self.assertRaises(ValueError):await self.search.search_books_async('failed-broker')
+            self.assertEqual(fake.async_get.call_count,3)
+            raw.assert_not_called()

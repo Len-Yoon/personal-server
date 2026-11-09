@@ -1,0 +1,10 @@
+{
+  "boot_time_utc": "2026-11-05T07:25:17.5005130Z",
+  "checked_at": "2026-11-09T11:49:58.792670+00:00",
+  "free_memory_kib": 6477196,
+  "hyperv_state": "Disabled",
+  "mutations": 0,
+  "scope": "readonly_predeployment_baseline",
+  "total_memory_kib": 16511864,
+  "vmms_status": "absent_or_unavailable"
+}

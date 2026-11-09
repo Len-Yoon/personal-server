@@ -15,6 +15,16 @@ class HomeOpsTelegramNotifier:
     """Best-effort alert delivery that never blocks HomeOps recovery."""
 
     def send(self, event_type: str, details: dict[str, Any]) -> bool:
+        # Route before checking legacy credentials: the broker owns the token.
+        try:
+            if 'HA_PG_CONFIG' in os.environ:
+                from ha_egress.client import configuration, route
+                if configuration('portal-web') is not None:
+                    result = route('portal-web', 'portal.telegram.send', {'text': self._message(event_type, details)})
+                    return (type(result) is dict and set(result) == {'message_id'}
+                            and type(result['message_id']) is int and result['message_id'] > 0)
+        except (OSError, ImportError, ValueError):
+            return False
         token = os.getenv("HOMEOPS_TELEGRAM_BOT_TOKEN", "").strip()
         chat_id = os.getenv("HOMEOPS_TELEGRAM_CHAT_ID", "").strip()
         if not token or not chat_id:

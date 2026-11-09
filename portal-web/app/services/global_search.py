@@ -104,7 +104,12 @@ async def _search_parallel(
     outcomes = {name: "internal_error" for name in sources}
     cancelled = False
     try:
-        async with httpx.AsyncClient(timeout=SEARCH_BUDGET_SECONDS, follow_redirects=True) as client:
+        selected = None
+        if 'HA_PG_CONFIG' in os.environ:
+            from app.services import ha_reads
+            if ha_reads.enabled():selected = ha_reads.SearchClient()
+        if selected is None:selected = httpx.AsyncClient(timeout=SEARCH_BUDGET_SECONDS, follow_redirects=True)
+        async with selected as client:
             tasks = {
                 name: asyncio.create_task(_fetch_results(
                     client, name, _endpoint(name), query, limit,
@@ -158,9 +163,12 @@ async def _fetch_results(
 ) -> tuple[dict[str, object], str]:
     url = f"{endpoint}?{urlencode({'q': query, 'limit': limit})}"
     try:
-        response = await client.get(url)
-        response.raise_for_status()
-        payload = response.json()
+        if type(client).__module__ == 'app.services.ha_reads':
+            payload = await client.get_source(name,query,limit)
+        else:
+            response = await client.get(url)
+            response.raise_for_status()
+            payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("invalid search payload")
         results = payload.get("results")

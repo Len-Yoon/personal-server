@@ -16,6 +16,97 @@ sys.path.insert(0, str(ROOT / "infra/k8s"))
 from ha_runtime import config, db, migrate, proof
 
 
+class FixtureRuntimeContextTests(unittest.TestCase):
+    def setUp(self):
+        spec=importlib.util.spec_from_file_location('ha_fixture_context_runner',ROOT/'infra/k8s/ha-lab/run.py')
+        self.runner=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.runner)
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.directory=Path(self.temp.name)
+        self.platform=patch.object(self.runner.sys,'platform','darwin');self.platform.start();self.addCleanup(self.platform.stop)
+
+    def endpoint(self,context):
+        if context=='orbstack':return 'unix://'+str(Path.home()/'.orbstack/run/docker.sock')
+        return 'unix://'+str(Path.home()/'.colima'/context.removeprefix('colima-')/'docker.sock')
+
+    def response(self,context,host=None):
+        return json.dumps([{'Name':context,'Endpoints':{'docker':{'Host':host or self.endpoint(context)}}}])
+
+    def test_only_explicit_local_contexts_and_no_default_context_mutation(self):
+        context='colima-codex-ha-01a1add8'
+        fixture=self.runner.Fixture(self.directory,runtime_context=context)
+        with patch.object(self.runner.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout='ok',stderr='')) as run:
+            with patch.dict(os.environ,{'DOCKER_HOST':'tcp://remote','DOCKER_CONTEXT':'remote'}):
+                fixture=self.runner.Fixture(self.directory,runtime_context=context)
+                fixture.docker('version')
+            self.assertEqual(run.call_args.args[0],['docker','--context',context,'version'])
+            self.assertFalse(any(key.startswith('DOCKER_') for key in run.call_args.kwargs['env']))
+        self.assertEqual(self.runner.Fixture(self.directory).context,'orbstack')
+        for value in ('default','remote','tcp://daemon','colima','colima-default','colima-codex-ha-01a1add8/../x',
+                      'colima-codex-ha-ABCDEF01','--context=orbstack',None):
+            with self.assertRaisesRegex(self.runner.FixtureError,'local_context_required'):
+                self.runner.Fixture(self.directory,runtime_context=value)
+
+    def test_runtime_identity_available_before_creation_and_copy_cannot_change_pin(self):
+        for context in ('orbstack','colima-codex-ha-01a1add8'):
+            fixture=self.runner.Fixture(self.directory,runtime_context=context)
+            with patch.object(fixture,'docker',side_effect=[self.response(context),'daemon-123']) as docker:
+                marker=fixture.validate_runtime()
+            self.assertEqual(marker['context'],context);self.assertEqual(marker['daemon_id'],'daemon-123')
+            self.assertRegex(marker['local_socket_sha256'],'^[0-9a-f]{64}$')
+            marker['daemon_id']='changed'
+            self.assertEqual(fixture.runtime_identity['daemon_id'],'daemon-123')
+            self.assertEqual(fixture.report['runtime_identity'],fixture.runtime_identity)
+            self.assertFalse((self.directory/'fixture').exists())
+            self.assertEqual([call.args for call in docker.call_args_list],[('context','inspect',context),('info','--format','{{.ID}}')])
+
+    def test_remote_alias_other_profile_or_wrong_context_rejected_before_creation(self):
+        context='colima-codex-ha-01a1add8'
+        cases=[self.response(context,'tcp://127.0.0.1:2375'),
+               self.response(context,'unix:///private/tmp/alias.sock'),
+               self.response(context,'unix://'+str(Path.home()/'.colima/default/docker.sock')),
+               self.response('orbstack'),json.dumps([])]
+        for value in cases:
+            fixture=self.runner.Fixture(self.directory,runtime_context=context)
+            with patch.object(fixture,'docker',return_value=value) as docker,patch.object(self.runner.subprocess,'run') as process:
+                with self.assertRaisesRegex(self.runner.FixtureError,'local_context_required'):fixture.prepare()
+                self.assertEqual(docker.call_count,1);process.assert_not_called()
+                self.assertTrue(fixture.cleanup())
+            self.assertIsNone(fixture.runtime_identity)
+            self.assertFalse((self.directory/'fixture').exists())
+
+    def test_changed_daemon_blocks_prepare_and_cleanup_without_resource_commands(self):
+        context='colima-codex-ha-01a1add8';fixture=self.runner.Fixture(self.directory,runtime_context=context)
+        with patch.object(fixture,'docker',side_effect=[self.response(context),'original']):fixture.validate_runtime()
+        for action in ('prepare','cleanup'):
+            with patch.object(fixture,'docker',side_effect=[self.response(context),'replacement']) as docker:
+                if action=='prepare':
+                    with self.assertRaisesRegex(self.runner.FixtureError,'fixture_runtime_identity_changed'):fixture.prepare()
+                else:self.assertFalse(fixture.cleanup())
+                self.assertEqual([call.args[0] for call in docker.call_args_list],['context','info'])
+        self.assertEqual(fixture.runtime_identity['daemon_id'],'original')
+        self.assertFalse((self.directory/'fixture').exists())
+
+    def test_cleanup_keeps_uuid_label_scope_after_same_daemon_revalidation(self):
+        context='colima-codex-ha-01a1add8';fixture=self.runner.Fixture(self.directory,runtime_context=context)
+        with patch.object(fixture,'docker',side_effect=[self.response(context),'original']):fixture.validate_runtime()
+        with patch.object(fixture,'docker',side_effect=[self.response(context),'original','','','']) as docker:
+            self.assertTrue(fixture.cleanup())
+        for call in docker.call_args_list[2:]:
+            self.assertIn('label='+fixture.label,call.args)
+        self.assertFalse(any(call.args[0] in {'rm','start','restart','prune'} for call in docker.call_args_list))
+
+    def test_nonmac_and_unavailable_daemon_cannot_create_or_cleanup_resources(self):
+        fixture=self.runner.Fixture(self.directory)
+        with patch.object(self.runner.sys,'platform','linux'),patch.object(fixture,'docker') as docker:
+            with self.assertRaisesRegex(self.runner.FixtureError,'mac_local_context_required'):fixture.prepare()
+            self.assertTrue(fixture.cleanup());docker.assert_not_called()
+        for daemon in ('','space separated','private\nvalue'):
+            fixture=self.runner.Fixture(self.directory)
+            with patch.object(fixture,'docker',side_effect=[self.response('orbstack'),daemon]):
+                with self.assertRaisesRegex(self.runner.FixtureError,'local_daemon_identity_required'):fixture.validate_runtime()
+                self.assertTrue(fixture.cleanup())
+
+
 class PGGuardTests(unittest.TestCase):
     def test_fixture_renders_literal_pinned_existing_app_base(self):
         spec = importlib.util.spec_from_file_location("ha_fixture_runner", ROOT / "infra/k8s/ha-lab/run.py")
@@ -37,6 +128,17 @@ class PGGuardTests(unittest.TestCase):
         for declarations in ("ARG BASE_IMAGE\nFROM ${BASE_IMAGE}", "FROM python:latest\nFROM python:latest"):
             with patch.object(Path, "read_text", return_value=declarations), self.assertRaises(runner.FixtureError):
                 runner.approved_base("311")
+
+    def test_proof_admission_diagnostic_keeps_only_static_contract_reason(self):
+        before={'node':'A','primary':'A'};connection=MagicMock()
+        for reason,expected in [('not_serving_owner','not_serving_owner'),
+                                ('authority_expired_or_invalid','authority_expired_or_invalid'),
+                                ('private arbitrary text','invalid_authority')]:
+            with patch.object(proof,'observe',return_value=before),patch.object(proof,'_generation',return_value=()), \
+                 patch.object(proof,'authority'),patch.object(proof.contract,'require_serving_owner',side_effect=proof.contract.AdmissionDenied(reason)):
+                with self.assertRaisesRegex(config.DatabaseUnavailable,'^replication_admission_denied:'+expected+'$'):
+                    proof.protect(connection,{'service':'portal-web','node':'A'},'fixture',None,before)
+            connection.execute.assert_not_called()
 
     def test_commit_installs_and_joins_driver_cancel_deadline(self):
         connection = MagicMock()

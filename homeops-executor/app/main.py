@@ -1,5 +1,6 @@
 import os
 import secrets
+import hashlib
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Response
 from pydantic import BaseModel, Field
@@ -36,6 +37,19 @@ def _operation_scope():
 
 
 def _require_shared_secret(provided: str) -> None:
+    digest = os.getenv('HOMEOPS_EXECUTOR_SHARED_SECRET_SHA256', '').strip()
+    if digest:
+        if (len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest)
+                or not provided or not secrets.compare_digest(hashlib.sha256(provided.encode()).hexdigest(), digest)):
+            raise HTTPException(status_code=403, detail='executor_access_denied')
+        return
+    if 'HA_PG_CONFIG' in os.environ:
+        from ha_egress.client import configuration
+        try:
+            if configuration('homeops-executor') is not None:
+                raise HTTPException(status_code=403, detail='executor_access_denied')
+        except OSError:
+            raise HTTPException(status_code=403, detail='executor_access_denied') from None
     configured = _executor_shared_secret()
     if not configured or not secrets.compare_digest(provided, configured):
         raise HTTPException(status_code=403, detail="executor_access_denied")
@@ -43,6 +57,20 @@ def _require_shared_secret(provided: str) -> None:
 
 def _executor_shared_secret() -> str:
     return os.getenv("HOMEOPS_EXECUTOR_SHARED_SECRET", "").strip()
+
+
+def _auth_configured():
+    digest = os.getenv('HOMEOPS_EXECUTOR_SHARED_SECRET_SHA256', '').strip()
+    if digest:
+        return len(digest) == 64 and all(c in '0123456789abcdef' for c in digest)
+    if 'HA_PG_CONFIG' in os.environ:
+        from ha_egress.client import configuration
+        try:
+            if configuration('homeops-executor') is not None:
+                return False
+        except OSError:
+            return False
+    return bool(_executor_shared_secret())
 
 
 @app.get("/health")
@@ -53,7 +81,7 @@ def health():
 @app.get("/ready")
 def ready():
     checks = {
-        "shared_auth": bool(_executor_shared_secret()),
+        "shared_auth": _auth_configured(),
         "runtime_contract": runtime_contract_valid() and bool(docker_ops.allowed_services()),
         "restart_state": RestartStore().ready(),
     }

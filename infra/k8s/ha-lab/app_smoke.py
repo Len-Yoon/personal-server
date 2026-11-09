@@ -7,6 +7,11 @@ from pathlib import Path
 import sys
 from unittest.mock import Mock, patch
 
+RUN_TAG=os.getenv('HA_SMOKE_RUN_TAG','')
+if RUN_TAG not in {'','recovered'}:raise ValueError('invalid_synthetic_run_tag')
+
+def tagged(value):return value+('-'+RUN_TAG if RUN_TAG else '')
+
 SERVICES = ("crawler-worker", "car-care-worker", "homeops-executor", "system-agent")
 
 
@@ -49,24 +54,30 @@ def car_care(node, root):
         calls = []
         def command(transaction):
             calls.append(True)
-            transaction.set_alert_state("smoke:" + node, "active")
+            transaction.set_alert_state("smoke:" + tagged(node), "active")
             return "synthetic pg reply"
-        update_id = 8000 + (1 if node == "A" else 2)
+        update_id = 8000 + (1 if node == "A" else 2) + (100 if RUN_TAG else 0)
+        if RUN_TAG:
+            old=store.process_command(update_id-100,lambda _: (_ for _ in ()).throw(AssertionError("restored_command_reexecuted")))
+            check(old=="synthetic pg reply","restored_command_receipt_replayed")
         first = store.process_command(update_id, command)
         second = store.process_command(update_id, command)
         check(first == second and len(calls) == 1, "command_exact_replay")
         client = HyundaiClient(token_store_path=root / "must-not-exist-token.json")
         check(bool(client._load_refresh_token()), "oauth_migration_shared")
-        client._save_authorization_state("synthetic-state-" + node)
+        client._save_authorization_state("synthetic-state-" + tagged(node))
         second_client = HyundaiClient(token_store_path=root / "also-must-not-exist-token.json")
-        second_client._consume_authorization_state("synthetic-state-" + node)
+        second_client._consume_authorization_state("synthetic-state-" + tagged(node))
         try:
-            client._consume_authorization_state("synthetic-state-" + node)
+            client._consume_authorization_state("synthetic-state-" + tagged(node))
         except ValueError:
             pass
         else:
             raise AssertionError("oauth_state_one_time")
         telegram = Mock()
+        if RUN_TAG:
+            check(main._send_command_reply(telegram,"synthetic reply",update_id-100),"restored_uncertain_reply_not_replayed")
+            telegram.send.assert_not_called()
         telegram.send.side_effect = OSError("synthetic ambiguous provider")
         try:
             main._send_command_reply(telegram, "synthetic reply", update_id)
@@ -96,7 +107,7 @@ def crawler(node, root):
             check(backend.read_state("crawler-worker", "archive", {}) == before, "serving_peer_no_repair")
             return 2
         now = datetime.now(timezone.utc)
-        article = {"url": "https://fixture.invalid/smoke-" + node, "title": "Synthetic PG article",
+        article = {"url": "https://fixture.invalid/smoke-" + tagged(node), "title": "Synthetic PG article",
                    "published_at_sort": now.isoformat()}
         fetch.return_value = [article]
         result = news_archive.collect_korean_news("KR_WORLD", force_refresh=True)
@@ -107,8 +118,13 @@ def crawler(node, root):
     check(status.snapshot()["custom_metadata"] == {"retained": True}, "status_unknown_fields_preserved")
     check(backend.read_state("crawler-worker", "archive", {})["custom_metadata"] == {"retained": True}, "archive_unknown_fields_preserved")
     now = datetime.now(timezone.utc)
-    pending_article = {"url": "https://fixture.invalid/uncertain-" + node, "title": "Synthetic uncertain article"}
+    pending_article = {"url": "https://fixture.invalid/uncertain-" + tagged(node), "title": "Synthetic uncertain article"}
     event = notification_event("alert", [pending_article], now.isoformat())
+    if RUN_TAG:
+        old_event=notification_event("alert",[{"url":"https://fixture.invalid/uncertain-"+node}],now.isoformat())
+        with backend.worker_scope("crawler-worker"),patch.object(news_archive,"notify_new_investing_articles") as old_send:
+            check(news_archive._send_pending_event(old_event["event_id"],now),"restored_outbox_uncertain_not_replayed")
+            old_send.assert_not_called()
     with backend.worker_scope("crawler-worker"):
         with news_archive._archive_transaction():
             archive = news_archive._load_archive()
@@ -140,17 +156,22 @@ def homeops(node, root):
     else:
         raise AssertionError("legacy_uncertainty_not_replayed")
     headers = {"X-HomeOps-Executor-Secret": "synthetic-lab-shared-secret"}
-    payload = {"incident_id": "smoke-restart-" + node, "approval_token": "synthetic-lab-approval",
+    payload = {"incident_id": "smoke-restart-" + tagged(node), "approval_token": "synthetic-lab-approval",
                "action": "restart_container", "service": "system-agent", "target_node": node}
     with patch.dict(os.environ, {"HOMEOPS_EXECUTOR_SHARED_SECRET": headers["X-HomeOps-Executor-Secret"]}), patch.object(main.docker_ops, "allowed_services", return_value={"system-agent"}), patch.object(main.docker_ops, "restart_service", return_value={"status": "running"}) as effect, TestClient(main.app) as client:
         for target in (None, "B" if node == "A" else "A"):
             check(client.post("/v1/restarts", headers=headers, json=dict(payload, target_node=target)).status_code == 403, "explicit_target_required")
         check(effect.call_count == 0, "target_rejection_no_effect")
+        if RUN_TAG:
+            old_payload=dict(payload,incident_id="smoke-restart-"+node)
+            check(client.post("/v1/restarts",headers=headers,json=old_payload).status_code==200,"restored_restart_receipt_replayed")
+            check(client.post("/v1/restarts",headers=headers,json=dict(payload,incident_id="smoke-uncertain-"+node)).status_code==409,"restored_uncertain_restart_denied")
+            effect.assert_not_called()
         first = client.post("/v1/restarts", headers=headers, json=payload)
         second = client.post("/v1/restarts", headers=headers, json=payload)
         check(first.status_code == second.status_code == 200 and first.json() == second.json(), "restart_complete_replay")
         check(effect.call_count == 1, "restart_effect_once")
-        uncertain = dict(payload, incident_id="smoke-uncertain-" + node)
+        uncertain = dict(payload, incident_id="smoke-uncertain-" + tagged(node))
         effect.reset_mock()
         effect.side_effect = OSError("synthetic ambiguous actuator")
         check(client.post("/v1/restarts", headers=headers, json=uncertain).status_code == 503, "actuator_unknown_response")
@@ -218,7 +239,7 @@ def run(service, node):
                     "checks": blocked(service, node, root)}
     checks = {"car-care-worker": car_care, "crawler-worker": crawler,
               "homeops-executor": homeops, "system-agent": system_agent}[service](node, root)
-    return {"pass": True, "service": service, "node": node, "checks": checks}
+    return {"pass": True, "service": service, "node": node, "checks": checks,"synthetic_run_tag":RUN_TAG,"restored_prior_receipts_checked":bool(RUN_TAG) and service in {"crawler-worker","car-care-worker","homeops-executor"}}
 
 
 def main():

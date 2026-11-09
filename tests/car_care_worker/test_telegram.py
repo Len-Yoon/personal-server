@@ -1,9 +1,10 @@
 from datetime import date, datetime, timezone
 import json
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from app.models import VehicleSnapshot
 from app.services.store import CarCareStore
@@ -274,6 +275,41 @@ class TelegramClientTests(unittest.TestCase):
         self.assertIn("sendMessage", request.full_url)
         self.assertEqual(json.loads(request.data), {"chat_id": "123", "text": "점검 완료"})
         self.assertEqual(mocked_urlopen.call_args.kwargs["timeout"], 8)
+
+
+    def test_broker_client_without_token_uses_typed_send_poll_and_sanitized_updates(self):
+        from types import SimpleNamespace
+        fake=SimpleNamespace(configuration=MagicMock(return_value={}),route=MagicMock())
+        with patch.dict('os.environ',{'HA_PG_CONFIG':'signed','CAR_CARE_TELEGRAM_BOT_TOKEN':'','CAR_CARE_TELEGRAM_CHAT_ID':'123'}), patch.dict(sys.modules,{'ha_egress.client':fake}), patch('app.services.telegram.urlopen') as raw:
+            client=TelegramClient.from_environment()
+            self.assertIsNotNone(client)
+            fake.route.return_value={'message_id':9}
+            self.assertTrue(client.send('hello'))
+            fake.route.assert_called_with('car-care-worker','car.telegram.send',{'text':'hello'})
+            fake.route.return_value={'updates':[{'chat_id':'123','text':'/차량','update_id':8},{'chat_id':'','text':None,'update_id':9}]}
+            self.assertEqual(client.poll(8),[TelegramUpdate('123','/차량',8),TelegramUpdate('',None,9)])
+            fake.route.assert_called_with('car-care-worker','car.telegram.poll',{'offset':8})
+            # Once selected, a broker client cannot turn into a raw-token client.
+            fake.configuration.return_value=None;fake.route.return_value=None
+            self.assertFalse(client.send('hello'))
+            self.assertEqual(client.poll(8),[])
+            fake.route.side_effect=OSError('uncertain')
+            self.assertFalse(client.send('hello'));self.assertEqual(client.poll(8),[])
+            raw.assert_not_called()
+
+    def test_broker_poll_rejects_malformed_or_out_of_order_projection(self):
+        from types import SimpleNamespace
+        fake=SimpleNamespace(configuration=MagicMock(return_value={}),route=MagicMock())
+        cases=[{'updates':[{'chat_id':'123','text':'x','update_id':True}]},
+               {'updates':[{'chat_id':'123','text':'x','update_id':1}]},
+               {'updates':[{'chat_id':'123','text':'x','update_id':8,'token':'private'}]},
+               {'updates':[{'chat_id':'123','text':'x','update_id':8},{'chat_id':'123','text':'x','update_id':8}]}]
+        with patch.dict('os.environ',{'HA_PG_CONFIG':'signed'}),patch.dict(sys.modules,{'ha_egress.client':fake}),patch('app.services.telegram.urlopen') as raw:
+            client=TelegramClient('legacy','123')
+            for value in cases:
+                fake.route.return_value=value
+                self.assertEqual(client.poll(8),[])
+            raw.assert_not_called()
 
 
 if __name__ == "__main__":

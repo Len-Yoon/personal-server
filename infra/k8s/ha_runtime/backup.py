@@ -180,20 +180,55 @@ def _open(ciphertext, key):
 def _schemas(connection):
     if connection.execute("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'").fetchone()[0]:
         _fail("isolated_backup_schema_mismatch")
-    names = [r[0] for r in connection.execute("SELECT nspname FROM pg_namespace WHERE nspname NOT LIKE 'pg_%' AND nspname NOT IN ('public','information_schema') ORDER BY nspname").fetchall()]
+    names = [r[0] for r in connection.execute("SELECT nspname FROM pg_namespace WHERE left(nspname,3)<>'pg_' AND nspname NOT IN ('public','information_schema') ORDER BY nspname").fetchall()]
     prefixes = tuple("s_" + s.replace("-", "_") + "_" for s in SERVICES)
-    if "ha" not in names or any(n != "ha" and not n.startswith(prefixes) for n in names):
+    if "ha" not in names or any(n not in {"ha", "ha_effects"} and not n.startswith(prefixes) for n in names):
         _fail("isolated_backup_schema_mismatch")
+    if "ha_effects" in names:
+        # Preserve unresolved effects and the old binding through restoration.
+        # Storage acceptance is separate from live epoch/system activation.
+        from .effects import validate_storage_catalog
+        validate_storage_catalog(connection)
     if any(not any(n.startswith("s_" + s.replace("-", "_") + "_") for n in names) for s in SERVICES):
         _fail("backup_requires_all_seven_services")
     return names
+
+
+def _broker_role_requirements(connection, schemas):
+    if 'ha_effects' not in schemas:
+        return []
+    rows = connection.execute('SELECT broker_role::text FROM ha_effects.binding WHERE singleton=1').fetchall()
+    if (len(rows) != 1 or type(rows[0][0]) is not str
+            or not re.fullmatch(r'[a-z][a-z0-9_]{0,62}', rows[0][0])):
+        _fail('backup_effects_role_inventory_invalid')
+    return [{'name': rows[0][0], 'login': True, 'inherit': False, 'superuser': False,
+             'create_role': False, 'create_db': False, 'replication': False, 'bypass_rls': False}]
+
+
+def _check_broker_role_requirements(connection, manifest):
+    """Require preprovisioned restricted roles; never bootstrap roles/passwords."""
+    declared = manifest.get('required_broker_roles', [])
+    includes_effects = 'ha_effects' in manifest.get('logical', {}).get('schemas', [])
+    if type(declared) is not list or len(declared) != int(includes_effects):
+        _fail('restore_effects_role_inventory_invalid')
+    fields = {'name', 'login', 'inherit', 'superuser', 'create_role', 'create_db', 'replication', 'bypass_rls'}
+    for role in declared:
+        if (type(role) is not dict or set(role) != fields or type(role['name']) is not str
+                or not re.fullmatch(r'[a-z][a-z0-9_]{0,62}', role['name'])
+                or role['login'] is not True or any(role[key] is not False for key in fields - {'name','login'})):
+            _fail('restore_effects_role_inventory_invalid')
+        actual = connection.execute('''SELECT rolcanlogin,rolinherit,rolsuper,rolcreaterole,rolcreatedb,rolreplication,rolbypassrls,
+            NOT EXISTS(SELECT 1 FROM pg_auth_members m WHERE m.member=r.oid OR m.roleid=r.oid)
+            FROM pg_roles r WHERE rolname=%s''', (role['name'],)).fetchone()
+        if actual != (True,False,False,False,False,False,False,True):
+            _fail('restore_broker_role_preprovision_required')
 
 
 def logical_manifest(connection):
     """Compare every table row, sequence high watermark and schema contract."""
     from psycopg import sql
     schemas = _schemas(connection)
-    tables, sequences, functions, privileges = {}, {}, {}, {}
+    tables, sequences, functions, privileges, triggers, policies = {}, {}, {}, {}, {}, {}
     for schema in schemas:
         for (table,) in connection.execute("SELECT tablename FROM pg_tables WHERE schemaname=%s ORDER BY tablename", (schema,)):
             name = schema + "." + table
@@ -203,6 +238,9 @@ def logical_manifest(connection):
             indexes = connection.execute("SELECT indexname,indexdef FROM pg_indexes WHERE schemaname=%s AND tablename=%s ORDER BY indexname", (schema, table)).fetchall()
             tables[name] = {"rows": len(rows), "sha256": digest(sorted(digest(r[0]) for r in rows)), "columns": columns, "constraints": constraints, "indexes": indexes}
             privileges[name] = connection.execute("SELECT grantor,grantee,privilege_type,is_grantable FROM information_schema.table_privileges WHERE table_schema=%s AND table_name=%s ORDER BY grantor,grantee,privilege_type,is_grantable", (schema, table)).fetchall()
+            triggers[name] = connection.execute("SELECT t.tgname,t.tgenabled,pg_get_triggerdef(t.oid) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relname=%s AND NOT t.tgisinternal ORDER BY t.tgname", (schema, table)).fetchall()
+            tables[name]['row_security'] = connection.execute('SELECT c.relrowsecurity,c.relforcerowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relname=%s',(schema,table)).fetchone()
+            policies[name] = connection.execute('SELECT policyname,permissive,roles,cmd,qual,with_check FROM pg_policies WHERE schemaname=%s AND tablename=%s ORDER BY policyname',(schema,table)).fetchall()
         for (sequence,) in connection.execute("SELECT sequencename FROM pg_sequences WHERE schemaname=%s ORDER BY sequencename", (schema,)):
             state = connection.execute(sql.SQL("SELECT last_value,is_called FROM {}.{}").format(sql.Identifier(schema), sql.Identifier(sequence))).fetchone()
             parameters = connection.execute("SELECT data_type,start_value,min_value,max_value,increment_by,cycle,cache_size FROM pg_sequences WHERE schemaname=%s AND sequencename=%s", (schema, sequence)).fetchone()
@@ -210,7 +248,36 @@ def logical_manifest(connection):
         for name, definition in connection.execute("SELECT p.proname,pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=%s ORDER BY p.proname,p.oid", (schema,)):
             functions.setdefault(schema + "." + name, []).append(definition)
     # Normalize tuples, dates and driver values exactly as persisted in JSON.
-    return json.loads(json.dumps({"schemas": schemas, "tables": tables, "sequences": sequences, "functions": functions, "privileges": privileges}, sort_keys=True, default=str))
+    return json.loads(json.dumps({"schemas": schemas, "tables": tables, "sequences": sequences, "functions": functions, "privileges": privileges, "triggers": triggers, "policies": policies}, sort_keys=True, default=str))
+
+
+def _blob_backend(connection):
+    if connection.execute("SELECT to_regclass('ha.enforced_namespaces') IS NOT NULL").fetchone() != (True,):
+        return 'filesystem'
+    row = connection.execute("SELECT definition_sha256 FROM ha.enforced_namespaces WHERE schema_name='s_portal_web_state'").fetchone()
+    if row is None:
+        return 'filesystem'
+    from .enforcement import definition_sha256
+    if row != (definition_sha256(),):
+        _fail('backup_enforcement_definition_mismatch')
+    return 'postgresql'
+
+
+def _pg_blob(connection, identifier, size):
+    from .blobs import CHUNK_BYTES, MAX_BLOB_BYTES
+    if not HEX.fullmatch(identifier) or type(size) is not int or not 0 <= size <= MAX_BLOB_BYTES:
+        _fail('backup_blob_invalid')
+    count = (size + CHUNK_BYTES - 1) // CHUNK_BYTES
+    row = connection.execute('SELECT size,chunk_count FROM s_portal_web_state.ha_blob_objects WHERE sha256=%s', (identifier,)).fetchone()
+    if row != (size,count):
+        _fail('backup_blob_unavailable')
+    rows = connection.execute('SELECT ordinal,payload FROM s_portal_web_state.ha_blob_chunks WHERE sha256=%s ORDER BY ordinal', (identifier,)).fetchall()
+    if len(rows) != count or any(ordinal != index or len(value) != min(CHUNK_BYTES,size-index*CHUNK_BYTES) for index,(ordinal,value) in enumerate(rows)):
+        _fail('backup_blob_invalid')
+    value = b''.join(bytes(payload) for _,payload in rows)
+    if len(value) != size or hashlib.sha256(value).hexdigest() != identifier:
+        _fail('backup_blob_hash_mismatch')
+    return value
 
 
 def object_references(connection):
@@ -326,19 +393,21 @@ def create_backup(admin, object_root, artifact_path, key_path, *, expected_clust
                 _fail("backup_observed_identity_mismatch")
             snapshot = connection.execute("SELECT pg_export_snapshot()").fetchone()[0]
             logical, objects = logical_manifest(connection), object_references(connection)
+            backend = _blob_backend(connection)
             dump = Path(temporary) / "database.dump"
             _pg_tool("pg_dump", admin, dump, snapshot)
             if dump.stat().st_size > MAX_BYTES:
                 _fail("backup_size_limit")
             dump_bytes = dump.read_bytes()
             manifest = {"format": 1, "scope": "n100-approved" if approval else "local-isolated", "cluster": control[0], "epoch": control[1], "revision": control[2], "system_id": system_id,
-                        "control": control_row, "logical": logical, "objects": objects, "dump_sha256": hashlib.sha256(dump_bytes).hexdigest(), "blob_gc": "disabled-pins-retained"}
+                        "control": control_row, "logical": logical, "objects": objects, "dump_sha256": hashlib.sha256(dump_bytes).hexdigest(), "blob_gc": "disabled-pins-retained", "blob_backend": backend}
+            manifest['required_broker_roles'] = _broker_role_requirements(connection, schemas)
             buffer = io.BytesIO()
             with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
                 archive.writestr("manifest.json", json.dumps(manifest, sort_keys=True).encode())
                 archive.writestr("database.dump", dump_bytes)
                 for sha, size in objects.items():
-                    archive.writestr("objects/" + sha, _blob(root, sha, size))
+                    archive.writestr("objects/" + sha, _pg_blob(connection,sha,size) if backend=='postgresql' else _blob(root, sha, size))
                     if buffer.tell() > MAX_BYTES:
                         _fail("backup_size_limit")
             encrypted = _seal(buffer.getvalue(), key)
@@ -365,7 +434,7 @@ def _unpack(payload):
             if len(set(names)) != len(names) or sum(m.file_size for m in members) > MAX_BYTES or "manifest.json" not in names or "database.dump" not in names:
                 _fail("backup_archive_invalid")
             manifest = json.loads(archive.read("manifest.json"))
-            if manifest.get("format") != 1 or manifest.get("scope") not in {"local-isolated", "n100-approved"} or not isinstance(manifest.get("objects"), dict):
+            if manifest.get("format") != 1 or manifest.get("scope") not in {"local-isolated", "n100-approved"} or not isinstance(manifest.get("objects"), dict) or manifest.get('blob_backend','filesystem') not in {'filesystem','postgresql'}:
                 _fail("backup_archive_invalid")
             objects = manifest["objects"]
             if set(names) != {"manifest.json", "database.dump", *("objects/" + s for s in objects)}:
@@ -408,7 +477,7 @@ def restore_backup(admin, object_root, artifact_path, key_path, *, expected_clus
         _fail("empty_restore_object_root_required")
     try:
         with _connect(admin) as connection:
-            count = connection.execute("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname<>'information_schema'").fetchone()[0]
+            count = connection.execute("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE left(n.nspname,3)<>'pg_' AND n.nspname<>'information_schema'").fetchone()[0]
             if count or connection.execute("SELECT pg_is_in_recovery()").fetchone()[0]:
                 _fail("empty_restore_database_required")
             system_id = connection.execute("SELECT system_identifier::text FROM pg_control_system()").fetchone()[0]
@@ -420,13 +489,29 @@ def restore_backup(admin, object_root, artifact_path, key_path, *, expected_clus
             others = connection.execute("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()").fetchone()[0]
             if others:
                 _fail("quiesced_restore_database_required")
+            _check_broker_role_requirements(connection, manifest)
             with tempfile.TemporaryDirectory(dir=artifact.parent) as temporary:
                 path = Path(temporary) / "database.dump"
                 path.write_bytes(dump)
                 path.chmod(0o600)
                 _restore_database(admin, path)
             restored = logical_manifest(connection)
+            if _broker_role_requirements(connection, restored['schemas']) != manifest.get('required_broker_roles', []):
+                _fail('restore_effects_role_inventory_invalid')
             expected = manifest["logical"]
+            if 'triggers' not in expected:
+                # Older filesystem-only archives predate trigger inventories.
+                # Never waive enforcement verification for a PG-blob archive.
+                if manifest.get('blob_backend','filesystem') != 'filesystem':
+                    _fail('restore_enforcement_inventory_required')
+                restored.pop('triggers',None)
+            if 'policies' not in expected:
+                if manifest.get('blob_backend','filesystem') != 'filesystem':
+                    _fail('restore_enforcement_inventory_required')
+                restored.pop('policies',None)
+                for name,value in restored['tables'].items():
+                    if 'row_security' not in expected['tables'][name]:
+                        value.pop('row_security',None)
             current_control = connection.execute("SELECT to_jsonb(c),expires_at<clock_timestamp() FROM ha.control c WHERE singleton=1").fetchone()
             row, expired = current_control
             old = manifest["control"]
@@ -441,8 +526,12 @@ def restore_backup(admin, object_root, artifact_path, key_path, *, expected_clus
             if restored != expected or object_references(connection) != manifest["objects"]:
                 _fail("restore_logical_mismatch")
             for sha, value in blobs.items():
-                _write_new(root / sha, value, 0o400)
-                _blob(root, sha, len(value))
+                if manifest.get('blob_backend','filesystem') == 'postgresql':
+                    if _pg_blob(connection,sha,len(value)) != value:
+                        _fail('restore_blob_mismatch')
+                else:
+                    _write_new(root / sha, value, 0o400)
+                    _blob(root, sha, len(value))
             return {"pass": True, "all_services": 7, "tables": len(restored["tables"]), "sequences": len(restored["sequences"]), "objects": len(blobs), "logical_sha256": digest(restored), "prior_identity_preserved": True, "fresh_system_id": True, "authority_closed": True, "old_generation_invalidated": True}
     except DatabaseUnavailable:
         raise

@@ -1,6 +1,7 @@
 import importlib
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -78,6 +79,27 @@ class YoutubeVideoTitleTests(unittest.TestCase):
             self.assertEqual(video_id, video["id"])
             self.assertEqual(memos[0]["title"], "수정 제목")
             self.assertEqual(memos[0]["content"], "수정 내용")
+
+
+
+class BrokerYoutubeReadTests(unittest.TestCase):
+    def test_oembed_uses_broker_and_failure_never_uses_direct_urlopen(self):
+        from io import BytesIO
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock,patch
+        prepare_service_import('youtube-memo')
+        from app.services import memo_service
+        reply=BytesIO(b'{"title":"broker title"}');reply.status=200
+        fake=SimpleNamespace(enabled=MagicMock(return_value=True),get=MagicMock(return_value=reply))
+        with patch.dict(os.environ,{'HA_PG_CONFIG':'signed'}),patch.dict(sys.modules,{'ha_egress.http_read':fake}),patch.object(memo_service,'urlopen') as raw:
+            self.assertEqual(memo_service.fetch_youtube_title('dQw4w9WgXcQ','https://www.youtube.com/watch?v=dQw4w9WgXcQ'),'broker title')
+            self.assertEqual(fake.get.call_args.args[0],'youtube-memo')
+            not_found=BytesIO(b'{"title":"must not accept a 404 title"}');not_found.status=404
+            fake.get.return_value=not_found
+            self.assertEqual(memo_service.fetch_youtube_title('dQw4w9WgXcQ','https://www.youtube.com/watch?v=dQw4w9WgXcQ'),'')
+            fake.get.side_effect=OSError('unavailable')
+            self.assertEqual(memo_service.fetch_youtube_title('dQw4w9WgXcQ','https://www.youtube.com/watch?v=dQw4w9WgXcQ'),'')
+            raw.assert_not_called()
 
 
 if __name__ == "__main__":

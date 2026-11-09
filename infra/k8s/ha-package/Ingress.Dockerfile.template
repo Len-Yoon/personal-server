@@ -1,0 +1,5 @@
+FROM @CADDY_BASE_IMAGE@
+RUN setcap -r /usr/bin/caddy && test -z "$(getcap /usr/bin/caddy)"
+USER 10004:10004
+ENTRYPOINT ["/usr/bin/caddy"]
+CMD ["run", "--config", "/etc/ha-ingress/Caddyfile", "--adapter", "caddyfile"]

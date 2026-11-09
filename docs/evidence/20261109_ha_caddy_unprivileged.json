@@ -1,0 +1,16 @@
+{
+  "adapted_sha256": "c44353f3335887a3de5e2d7cbe98f1ad28a18cf236442862caf6808e799a101e",
+  "file_capabilities_removed": true,
+  "owned_container_removed": true,
+  "owned_image_removed": true,
+  "production_access": false,
+  "ready_for_service_transition": false,
+  "scope": "working_tree_guest_caddy_actual_unprivileged_parser",
+  "servers": 1,
+  "source_files": {
+    "caddy/Dockerfile": "8f3761a6b4ef8bc59679502b9aac98b3955419cebb8b98294c1421e611016f43",
+    "infra/k8s/ha-package/Ingress.Dockerfile.template": "60915b61316067b07ffd80062122bd6cd58c8289e3e7e9c1280ad792d834489d",
+    "infra/k8s/ha-package/guest.py": "802cb563721899522feb57fbb62a153f6a1df6893ebb96e595e27e34a8f14be2"
+  },
+  "status": "PASS"
+}

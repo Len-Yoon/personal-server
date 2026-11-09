@@ -1,0 +1,132 @@
+{
+  "excluded_unintegrated_runtime": [
+    "effects.py"
+  ],
+  "live_pinned_source_drift": false,
+  "owned_fixture_removed": true,
+  "pinned_runtime_files": {
+    "infra/k8s/ha_control/privilege_closure.py": "66c9c54ed4fc65c0b36e1cb7ad11ce58a17acefa0da4de2df6bae4f20e837856",
+    "infra/k8s/ha_runtime/__init__.py": "90041076a5d487a55d515ee4eef3c1d4e1428b6c714119bf9fbef78e78fb53a1",
+    "infra/k8s/ha_runtime/backup.py": "dc45af7966ee10cb1a5f947ca296a66d5a226c736bbefd081d6c16b4101beb47",
+    "infra/k8s/ha_runtime/backup_cli.py": "6c930e50d32a3a57cd3cd12ea669f1f0fa77a04d5e4d3bbeb985b625ba515fcf",
+    "infra/k8s/ha_runtime/blobs.py": "6e3bcfc84323dfdedfdd5eb76281fd2f884190c4bda944aa3950ab438df6102b",
+    "infra/k8s/ha_runtime/config.py": "0bf39f1d233c2fd01893447135a6b37afb509b72c08c05895a5dff7b9e796854",
+    "infra/k8s/ha_runtime/db.py": "ac8830578bf09df92a52931d2b5b0d3a1818d4dd0e29f95f3f2d3ac0cf95af20",
+    "infra/k8s/ha_runtime/enforcement.py": "d951978bd534cd72804f5b0fcbf041e95d919efd3c5e0a2139eb8fed6b3b5b62",
+    "infra/k8s/ha_runtime/enforcement.sql": "78f2fa2fa1af307f139bc2c3158bd9b84d468d0acc33d7e413d28c3367c0fd56",
+    "infra/k8s/ha_runtime/migrate.py": "ab5ca9be635939a1411f9fee013cf4f603e50ab605f8b818f845ded24def2753",
+    "infra/k8s/ha_runtime/proof.py": "c352f0d54dda0b03738d2b0b4ce9d079d65257a61d15063a4527a5a8106d022c",
+    "infra/k8s/ha_runtime/schema.sql": "cc51f0a28de79f94fdf8e38c658695e122b3c124cc3b640cfafe5c77379222d1"
+  },
+  "production_access": false,
+  "ready": false,
+  "runtime_sha256": "51f2b2ca7900f36f430ef1689ce72b6cd47bc2c3cfacb90f0a9414b24dab30c5",
+  "scope": "owned_mac_enforced_apps_restore_only",
+  "source_sha256": "40dc731080a450c73f91e862c420acebdeba7f856045a1e3aa751fe3c4377215",
+  "status": "PASS",
+  "steps": {
+    "direct_sql_enforcement": {
+      "full_backup_restore": "not_executed_in_this_smoke",
+      "production_deployed": false,
+      "ready": false,
+      "results": {
+        "active_writer_allows_same_authority_shared_renewal": true,
+        "actual_blob_and_namespace_rollback": true,
+        "actual_sync_peer_blob_bytes_match": true,
+        "all_existing_namespaces_guarded": 13,
+        "atomic_batch_rejects_partial_namespace_grants": true,
+        "catalog_dml_secret_reads_schema_create_serverfile_exec_lo_owner_rejected": 20,
+        "closed_and_null_serving_reads_fail_closed": true,
+        "closed_expired_wrong_node_denied": true,
+        "copy_from_rls_always_rejected": true,
+        "direct_and_public_alter_system_and_superuser_set_acl_rejected": 4,
+        "early_immediate_constraints_allow_prior_admitted_commit_after_expiry_limit": true,
+        "expired_new_statement_after_delayed_commit_denied": true,
+        "failed_batch_restores_public_and_explicit_settings_update_acl": true,
+        "five_authority_tables_non_tcb_owner_grants_public_column_and_effective_role_rejected": 12,
+        "injected_postcommit_proof_failure_keeps_atomic_data_without_success": true,
+        "outside_namespace_table_column_sequence_schema_database_closure": 8,
+        "pg_settings_update_denied_but_ordinary_session_set_preserved": true,
+        "pg_temp_catalog_shadow_denied": true,
+        "pgxevil_literal_prefix_does_not_escape_closure": true,
+        "public_column_privilege_bad_owner_and_failed_install_rollback": true,
+        "read_committed_savepoint_and_generation_lock": true,
+        "repeatable_read_mutation_rejected": true,
+        "same_node_stale_role_denied_fresh_role_admitted": true,
+        "truncate_ddl_role_sequence_large_object_and_2pc_denied": true,
+        "two_phase_transactions_disabled": true,
+        "valid_raw_insert_cte_upsert": true
+      },
+      "scope": "owned_mac_pg_fixture_only",
+      "status": "PASS",
+      "windows_or_hyperv_validated": false
+    },
+    "seed-book-memo": {
+      "checks": {
+        "json_state_preserved": true,
+        "sqlite_rows_preserved": true,
+        "tables": 7
+      },
+      "phase": "seed",
+      "service": "book-memo",
+      "status": "PASS"
+    },
+    "seed-car-care-worker": {
+      "frozen_sources": true,
+      "manifest_sha256": "d82457c163c5d18e5429db207481b6ea53ea881afb0da7766c90c5eae0f9bab1",
+      "pass": true,
+      "rows": 6,
+      "service": "car-care-worker",
+      "state_keys": 1,
+      "tables": 5
+    },
+    "seed-crawler-worker": {
+      "frozen_sources": true,
+      "manifest_sha256": "34cb96df950f7350839a759d21685b0fa7983bc5fb6e38cf12fad88a8f74ac80",
+      "pass": true,
+      "rows": 0,
+      "service": "crawler-worker",
+      "state_keys": 2,
+      "tables": 0
+    },
+    "seed-homeops-executor": {
+      "frozen_sources": true,
+      "manifest_sha256": "a0e4517163c3b5057a25c1f5ddf06050a611f7af3aeb0a9843574f047488d9ab",
+      "pass": true,
+      "rows": 0,
+      "service": "homeops-executor",
+      "state_keys": 1,
+      "tables": 0
+    },
+    "seed-portal-web": {
+      "checks": {
+        "hashed_sessions_preserved": true,
+        "json_state_preserved": true,
+        "ordinary_file_hash_preserved": true,
+        "sqlite_components_preserved": 2
+      },
+      "phase": "seed",
+      "service": "portal-web",
+      "status": "PASS"
+    },
+    "seed-system-agent": {
+      "frozen_sources": true,
+      "manifest_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "pass": true,
+      "rows": 0,
+      "service": "system-agent",
+      "state_keys": 0,
+      "tables": 0
+    },
+    "seed-youtube-memo": {
+      "checks": {
+        "json_state_preserved": true,
+        "sqlite_rows_preserved": true,
+        "tables": 6
+      },
+      "phase": "seed",
+      "service": "youtube-memo",
+      "status": "PASS"
+    }
+  }
+}

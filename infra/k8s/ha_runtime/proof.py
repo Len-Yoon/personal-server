@@ -180,6 +180,14 @@ def protect(connection, config, schema, binding, original):
         raise DatabaseUnavailable("fresh_replication_proof_unavailable:" + rejection)
     except DatabaseUnavailable:
         raise
+    except contract.AdmissionDenied as error:
+        # Contract reasons are static labels; never surface arbitrary exception text.
+        known = {'invalid_clock','invalid_cluster','invalid_generation','invalid_db_pair',
+                 'invalid_worker','invalid_serving','invalid_mode','invalid_as_owners',
+                 'invalid_write_state','authority_expired_or_invalid','invalid_service_or_node',
+                 'explicit_matching_target_required','unexpected_target','not_serving_owner','not_effect_owner'}
+        reason = str(error) if str(error) in known else 'invalid_authority'
+        raise DatabaseUnavailable('replication_admission_denied:' + reason) from None
     except (psycopg.Error, KeyError, TypeError, ValueError) as error:
         raise DatabaseUnavailable("replication_observation_failed:" + type(error).__name__) from None
     finally:

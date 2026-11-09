@@ -1,0 +1,26 @@
+{
+  "actual_provider_calls": 0,
+  "calls": {
+    "executor_http": 4,
+    "internal_inspect": 0,
+    "internal_restart": 4,
+    "outer": 4
+  },
+  "complete_json_success": 4,
+  "declared_length_truncation_denied": 4,
+  "json_http_calls": 4,
+  "production_access": false,
+  "protocols": [
+    "HTTP/1.0",
+    "HTTP/1.1"
+  ],
+  "scope": "actual_local_mtls_http_connection_close",
+  "source_sha256": {
+    "infra/k8s/ha_egress/executor_provider.py": "ab517b85c7829a7f952f07f5b9ff63b1f3048d654dac6b4c0315c9e199467cce",
+    "infra/k8s/ha_egress/hyundai_provider.py": "f32f4972c723b7e7aea908d408c829a18899761443864719ce3ca765ccc4ea5c",
+    "infra/k8s/ha_egress/providers.py": "259b28a718fc003018ee6d0d0b1b4c28241967f37ab69139aaf8f9b2c8766af3",
+    "tests/test_ha_nested_broker.py": "48a0c07aece15b4da9e53ccafaaff41f0dc12aa542f64dd4ed9e8ba7a31e98af"
+  },
+  "status": "PASS",
+  "truncated_requests_retried": 0
+}
