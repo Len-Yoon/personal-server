@@ -26,6 +26,11 @@ def collect_diagnostics(
     client: Any | None = None,
     include_runtime_evidence: bool = True,
 ) -> dict[str, object]:
+    _require_allowed_service(service)
+    from app.services.ha_docker import call
+    result = call(service, 'inspect')
+    if result is not None:
+        return result
     container = _get_container(service, client)
     logs = _decode_logs(container.logs(tail=100, timestamps=False)) if include_runtime_evidence else []
     return {
@@ -56,6 +61,11 @@ def collect_all_diagnostics(
 
 
 def restart_service(service: str, client: Any | None = None) -> dict[str, object]:
+    _require_allowed_service(service)
+    from app.services.ha_docker import call
+    result = call(service, 'restart')
+    if result is not None:
+        return result
     container = _get_container(service, client)
     _require_allowed_service(service)
     container.restart(timeout=10)

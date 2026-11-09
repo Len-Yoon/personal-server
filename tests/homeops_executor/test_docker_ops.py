@@ -479,5 +479,37 @@ class RuntimeMarkerDockerOpsTests(unittest.TestCase):
                 self.ops.restart_service('crawler-worker', client=FakeDockerClient())
 
 
+    def test_broker_restart_and_inspect_keep_scope_and_never_open_raw_docker(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        prepare_service_import('homeops-executor')
+        from app.services import docker_ops
+        fake=SimpleNamespace(configuration=MagicMock(return_value={}),route=MagicMock(return_value={'service':'crawler-worker','status':'running','health':'healthy','started_at':'2026-11-09T00:00:00Z'}))
+        with patch.dict(os.environ,{'HA_PG_CONFIG':'signed','HOMEOPS_DOCKER_MANAGED_SERVICES':'crawler-worker'}),patch.dict(sys.modules,{'ha_egress.client':fake}),patch.object(docker_ops,'_docker_client') as raw:
+            restarted=docker_ops.restart_service('crawler-worker')
+            self.assertEqual(restarted['status'],'running')
+            fake.route.assert_called_with('homeops-executor','executor.docker.restart.crawler-worker',{})
+            diagnostics=docker_ops.collect_diagnostics('crawler-worker')
+            self.assertEqual(diagnostics['logs'],[])
+            self.assertIsNone(diagnostics['container']['cpu_percent'])
+            fake.route.assert_called_with('homeops-executor','executor.docker.inspect.crawler-worker',{})
+            fake.route.side_effect=OSError('uncertain')
+            with self.assertRaises(OSError):docker_ops.restart_service('crawler-worker')
+            with self.assertRaises(OSError):docker_ops.collect_diagnostics('crawler-worker')
+            with self.assertRaisesRegex(ValueError,'service_not_allowed'):docker_ops.restart_service('book-memo')
+            raw.assert_not_called()
+
+    def test_broker_does_not_accept_none_projection_or_protected_caddy(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        prepare_service_import('homeops-executor')
+        from app.services import docker_ops
+        fake=SimpleNamespace(configuration=MagicMock(return_value={}),route=MagicMock(return_value=None))
+        with patch.dict(os.environ,{'HA_PG_CONFIG':'signed','HOMEOPS_DOCKER_MANAGED_SERVICES':'crawler-worker,caddy'}),patch.dict(sys.modules,{'ha_egress.client':fake}),patch.object(docker_ops,'_docker_client') as raw:
+            with self.assertRaises(OSError):docker_ops.restart_service('crawler-worker')
+            with self.assertRaisesRegex(ValueError,'service_not_allowed'):docker_ops.restart_service('caddy')
+            raw.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

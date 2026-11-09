@@ -118,6 +118,11 @@ class Connection:
         self.identity_columns = {}
         self.hasher = hashlib.sha256()
         try:
+            if self.config.get("profile") == "enforced-vm-v1":
+                ready = self.raw.execute("SELECT ha.enforced_session_ready(%s::name,%s)",
+                                         (self.schema, self.config["enforcement_sha256"])).fetchone()
+                if ready != (True,):
+                    raise DatabaseUnavailable("server_enforcement_required")
             self.raw.execute("SELECT pg_advisory_lock_shared(%s)", (ROLE_LOCK,))
             self.original = proof.observe(self.raw, self.config)
             _admit(self.original, self.config)
@@ -307,6 +312,14 @@ def state_transaction(service, key, default):
         if outer:
             connection.close()
             groups.pop(service, None)
+
+
+def active_state_connection(service):
+    """Only the current state transaction may attach atomic PG file chunks."""
+    group = getattr(_LOCAL, "states", {}).get(service)
+    if not group or group["failed"] or group["connection"].closed:
+        raise DatabaseUnavailable("active_state_transaction_required")
+    return group["connection"]
 
 
 def read_state(service, key, default):

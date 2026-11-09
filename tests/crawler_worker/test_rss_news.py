@@ -153,5 +153,26 @@ class RssTransportFailureTests(unittest.TestCase):
                 self.collect()
 
 
+
+class BrokerRssReadTests(unittest.TestCase):
+    def test_rss_uses_broker_and_failure_never_uses_direct_urlopen(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        prepare_service_import('crawler-worker')
+        from app.crawlers import rss_news
+        parser=SimpleNamespace(parse=MagicMock(return_value=SimpleNamespace(version='rss20',bozo=False,entries=[])))
+        reply=BytesIO(b'<rss/>');reply.status=200
+        fake=SimpleNamespace(enabled=MagicMock(return_value=True),get=MagicMock(return_value=reply))
+        with patch.dict('os.environ',{'HA_PG_CONFIG':'signed'}),patch.dict(sys.modules,{'feedparser':parser,'ha_egress.http_read':fake}),patch.object(rss_news,'urlopen') as raw:
+            self.assertEqual(rss_news.search_rss_news(['https://kr.investing.com/rss/news_14.rss'],'INVESTING','source','provider'),[])
+            self.assertEqual(fake.get.call_args.args[0],'crawler-worker')
+            self.assertEqual(set(fake.get.call_args.kwargs['headers']),{'User-Agent','Accept'})
+            not_found=BytesIO(b'<rss/>');not_found.status=404;fake.get.return_value=not_found
+            with self.assertRaises(OSError):rss_news.search_rss_news(['https://kr.investing.com/rss/news_14.rss'],'INVESTING','source','provider')
+            fake.get.side_effect=OSError('unavailable')
+            with self.assertRaises(OSError):rss_news.search_rss_news(['https://kr.investing.com/rss/news_14.rss'],'INVESTING','source','provider')
+            raw.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

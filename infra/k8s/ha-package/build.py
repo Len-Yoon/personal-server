@@ -16,6 +16,16 @@ SERVICES = ("portal-web", "book-memo", "youtube-memo", "crawler-worker",
             "car-care-worker", "homeops-executor", "system-agent")
 UTILITY = "ha-backup-utility"
 OWNER = "personal-server.ha-package"
+CONTROL_RUNTIME = frozenset({"infra/k8s/ha_control/__init__.py",
+                             "infra/k8s/ha_control/privilege_closure.py"})
+EGRESS_RUNTIME = frozenset("infra/k8s/ha_egress/" + name for name in
+    ("__init__.py", "client.py", "http_read.py", "socket_gateway.py", "app_entrypoint.py"))
+EGRESS_BROKER = frozenset({"infra/k8s/ha_egress/server.py", "infra/k8s/ha_egress/providers.py", "infra/k8s/ha_egress/docker_provider.py",
+                             "infra/k8s/ha_egress/hyundai_provider.py", "infra/k8s/ha_egress/executor_provider.py",
+                             "infra/k8s/ha_egress/read_provider.py", "infra/k8s/ha_egress/internal_provider.py", "infra/k8s/ha_egress/boot.py"})
+CAR_PROVIDER_FILES = frozenset("car-care-worker/app/" + name for name in
+    ("__init__.py", "models.py", "services/__init__.py", "services/hyundai.py",
+     "services/ha_backend.py", "services/vehicle_types.py"))
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 BASE = re.compile(r"python:3\.(?:11|12)-alpine3\.24@sha256:[0-9a-f]{64}")
 APK_MINIMUMS = {"musl": "1.2.6-r3", "musl-utils": "1.2.6-r3", "zlib": "1.3.2-r1"}
@@ -56,7 +66,7 @@ def allowed(path):
                 p.suffix == ".py" or (rest[1] in {"templates", "static"}
                                      and p.suffix.lower() in {".html", ".css", ".js", ".svg", ".png", ".jpg", ".jpeg", ".ico", ".webp", ".woff", ".woff2", ".ttf"})))
     return (len(p.parts) == 4 and p.parts[:3] == ("infra", "k8s", "ha_runtime")
-            and p.suffix in {".py", ".sql"}) or path in {
+            and p.suffix in {".py", ".sql"}) or path in CONTROL_RUNTIME | EGRESS_RUNTIME | EGRESS_BROKER or path in {
                 "infra/k8s/tools/n100_ha_contract.py", "infra/k8s/ha-package/Dockerfile.template",
                 "infra/k8s/ha-package/Utility.Dockerfile.template"}
 
@@ -83,6 +93,7 @@ def snapshot(commit):
                  "infra/k8s/ha_runtime/backup.py", "infra/k8s/ha_runtime/backup_cli.py",
                  "infra/k8s/tools/n100_ha_contract.py", "infra/k8s/ha-package/Dockerfile.template",
                  "infra/k8s/ha-package/Utility.Dockerfile.template"}
+    required |= CONTROL_RUNTIME | EGRESS_RUNTIME | EGRESS_BROKER | CAR_PROVIDER_FILES
     if not required <= result.keys():
         raise PackageError("source_snapshot_incomplete")
     return result
@@ -157,7 +168,7 @@ def prepare(commit, output):
         for name, data in files.items():
             if name.startswith(service + "/") and name != service + "/Dockerfile":
                 target = context / name.removeprefix(service + "/")
-            elif name.startswith("infra/k8s/ha_runtime/") or name == "infra/k8s/tools/n100_ha_contract.py":
+            elif name.startswith("infra/k8s/ha_runtime/") or name in CONTROL_RUNTIME | EGRESS_RUNTIME or name == "infra/k8s/tools/n100_ha_contract.py":
                 target = context / "_ha" / name.removeprefix("infra/k8s/")
             else:
                 continue
@@ -171,8 +182,12 @@ def prepare(commit, output):
     rendered, base = utility_recipe(files)
     (context / "Dockerfile").write_text(rendered)
     for name, data in files.items():
-        if name.startswith("infra/k8s/ha_runtime/") or name == "infra/k8s/tools/n100_ha_contract.py":
+        if name.startswith("infra/k8s/ha_runtime/") or name in CONTROL_RUNTIME | EGRESS_RUNTIME | EGRESS_BROKER or name == "infra/k8s/tools/n100_ha_contract.py":
             target = context / "_ha" / name.removeprefix("infra/k8s/")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        elif name in CAR_PROVIDER_FILES:
+            target = context / "_ha/_providers/car" / name.removeprefix("car-care-worker/")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
     manifest["utilities"][UTILITY] = {"base": base, "user": "10001:10001", "dockerfile_sha256": sha(rendered.encode())}
@@ -224,7 +239,7 @@ def verify_source(bundle):
         for name, data in files.items():
             if name.startswith(service + "/") and name != service + "/Dockerfile":
                 expected[service + "/" + name.removeprefix(service + "/")] = sha(data)
-            elif name.startswith("infra/k8s/ha_runtime/") or name == "infra/k8s/tools/n100_ha_contract.py":
+            elif name.startswith("infra/k8s/ha_runtime/") or name in CONTROL_RUNTIME | EGRESS_RUNTIME or name == "infra/k8s/tools/n100_ha_contract.py":
                 expected[service + "/_ha/" + name.removeprefix("infra/k8s/")] = sha(data)
     utility_dockerfile, utility_base = utility_recipe(files)
     if manifest.get("utilities") != {UTILITY: {"base": utility_base, "user": "10001:10001", "dockerfile_sha256": sha(utility_dockerfile.encode())}}:
@@ -232,24 +247,45 @@ def verify_source(bundle):
     expected[UTILITY + "/Dockerfile"] = sha(utility_dockerfile.encode())
     expected[UTILITY + "/_ha/ha_runtime/release.json"] = sha(generated)
     for name, data in files.items():
-        if name.startswith("infra/k8s/ha_runtime/") or name == "infra/k8s/tools/n100_ha_contract.py":
+        if name.startswith("infra/k8s/ha_runtime/") or name in CONTROL_RUNTIME | EGRESS_RUNTIME | EGRESS_BROKER or name == "infra/k8s/tools/n100_ha_contract.py":
             expected[UTILITY + "/_ha/" + name.removeprefix("infra/k8s/")] = sha(data)
+        elif name in CAR_PROVIDER_FILES:
+            expected[UTILITY + "/_ha/_providers/car/" + name.removeprefix("car-care-worker/")] = sha(data)
     if expected != manifest["bundle_files"]:
         raise PackageError("rendered_source_binding_mismatch")
     return manifest
 
 
 class LocalDocker:
-    def __init__(self):
+    def __init__(self, runtime_context='orbstack'):
         if platform.system() != "Darwin":
             raise PackageError("mac_orbstack_only")
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("DOCKER_")}
-        context = json.loads(self.call("context", "inspect", "orbstack"))
-        if context[0]["Endpoints"]["docker"]["Host"] != "unix://" + str(Path.home() / ".orbstack/run/docker.sock"):
+        if runtime_context == 'orbstack':
+            endpoint = Path.home() / '.orbstack/run/docker.sock'
+        elif re.fullmatch(r'colima-codex-ha-[a-z0-9]{8}', runtime_context):
+            endpoint = Path.home() / '.colima' / runtime_context.removeprefix('colima-') / 'docker.sock'
+        else:
+            raise PackageError('isolated_local_socket_required')
+        self.runtime_context = runtime_context
+        self.daemon_id = None
+        context = json.loads(self.call("context", "inspect", runtime_context))
+        if (len(context) != 1 or context[0].get('Name') != runtime_context
+                or context[0]["Endpoints"]["docker"]["Host"] != "unix://" + str(endpoint)):
             raise PackageError("isolated_local_socket_required")
+        self.daemon_id = self.call("info", "--format", "{{.ID}}", timeout=10)
+        if not re.fullmatch(r'[A-Za-z0-9:_.-]{1,128}', self.daemon_id):
+            raise PackageError('local_daemon_identity_required')
+        if self.call('info','--format','{{.Driver}}',timeout=10) != 'overlay2':
+            raise PackageError('classic_image_store_required')
 
     def call(self, *args, timeout=60):
-        result = subprocess.run(["docker", "--context", "orbstack", *args], env=self.env,
+        if self.daemon_id is not None:
+            probe = subprocess.run(["docker", "--context", self.runtime_context, "info", "--format", "{{.ID}}"],
+                                   env=self.env,capture_output=True,text=True,timeout=10)
+            if probe.returncode or probe.stdout.strip() != self.daemon_id:
+                raise PackageError('local_daemon_identity_changed')
+        result = subprocess.run(["docker", "--context", self.runtime_context, *args], env=self.env,
                                 capture_output=True, text=True, timeout=timeout)
         if result.returncode:
             raise PackageError("local_docker_" + args[0] + "_failed")
@@ -294,16 +330,17 @@ def apk_security_smoke():
             "for name,minimum in " + repr(APK_MINIMUMS) + ".items()); ")
 
 
-def build(bundle):
+def build(bundle, *, runtime_context='orbstack'):
     manifest = verify_source(bundle)
     if (bundle / "images").exists() or (bundle / "image-bindings.json").exists():
         raise PackageError("new_build_required")
-    docker = LocalDocker()
+    docker = LocalDocker(runtime_context)
     owner = str(uuid.uuid4())
     output = bundle / "images"
     output.mkdir()
     evidence = {"release_id": manifest["release_id"], "source_commit": manifest["source_commit"],
-                "owner": owner, "images": {}, "utilities": {}, "production_deployed": False}
+                "owner": owner, "images": {}, "utilities": {}, "production_deployed": False,
+                "local_runtime_context": runtime_context}
     smoke = (apk_security_smoke() + "import os,sys,pathlib,hashlib,json,psycopg,ha_runtime; "
              "assert os.getuid()==10001; assert not ha_runtime.enabled(); "
              "assert psycopg.__version__=='3.3.8'; "
@@ -400,14 +437,18 @@ def main():
     prepare_parser.add_argument("--commit", required=True)
     prepare_parser.add_argument("--output", type=Path, required=True)
     for name in ("build", "verify", "verify-source"):
-        sub.add_parser(name).add_argument("--bundle", type=Path, required=True)
+        child = sub.add_parser(name)
+        child.add_argument("--bundle", type=Path, required=True)
+        if name == 'build':
+            child.add_argument('--docker-context',default='orbstack')
     args = parser.parse_args()
     try:
         if args.command == "prepare":
             result = prepare(args.commit, args.output)
             result = {"release_id": result["release_id"], "source_commit": result["source_commit"], "prepared": True}
         else:
-            result = {"build": build, "verify": verify, "verify-source": verify_source}[args.command](args.bundle)
+            result = (build(args.bundle,runtime_context=args.docker_context) if args.command == 'build'
+                      else {"verify": verify, "verify-source": verify_source}[args.command](args.bundle))
             if args.command != "verify":
                 result = {"release_id": result["release_id"], "verified": True, "production_deployed": False}
         print(json.dumps(result, sort_keys=True))

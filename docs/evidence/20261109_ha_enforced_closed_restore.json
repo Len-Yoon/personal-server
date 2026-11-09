@@ -1,0 +1,288 @@
+{
+  "excluded_unintegrated_runtime": [
+    "effects.py"
+  ],
+  "live_pinned_source_drift": false,
+  "owned_fixture_removed": true,
+  "pinned_runtime_files": {
+    "infra/k8s/ha_control/privilege_closure.py": "66c9c54ed4fc65c0b36e1cb7ad11ce58a17acefa0da4de2df6bae4f20e837856",
+    "infra/k8s/ha_runtime/__init__.py": "90041076a5d487a55d515ee4eef3c1d4e1428b6c714119bf9fbef78e78fb53a1",
+    "infra/k8s/ha_runtime/backup.py": "dc45af7966ee10cb1a5f947ca296a66d5a226c736bbefd081d6c16b4101beb47",
+    "infra/k8s/ha_runtime/backup_cli.py": "6c930e50d32a3a57cd3cd12ea669f1f0fa77a04d5e4d3bbeb985b625ba515fcf",
+    "infra/k8s/ha_runtime/blobs.py": "6e3bcfc84323dfdedfdd5eb76281fd2f884190c4bda944aa3950ab438df6102b",
+    "infra/k8s/ha_runtime/config.py": "0bf39f1d233c2fd01893447135a6b37afb509b72c08c05895a5dff7b9e796854",
+    "infra/k8s/ha_runtime/db.py": "ac8830578bf09df92a52931d2b5b0d3a1818d4dd0e29f95f3f2d3ac0cf95af20",
+    "infra/k8s/ha_runtime/enforcement.py": "d951978bd534cd72804f5b0fcbf041e95d919efd3c5e0a2139eb8fed6b3b5b62",
+    "infra/k8s/ha_runtime/enforcement.sql": "78f2fa2fa1af307f139bc2c3158bd9b84d468d0acc33d7e413d28c3367c0fd56",
+    "infra/k8s/ha_runtime/migrate.py": "ab5ca9be635939a1411f9fee013cf4f603e50ab605f8b818f845ded24def2753",
+    "infra/k8s/ha_runtime/proof.py": "c352f0d54dda0b03738d2b0b4ce9d079d65257a61d15063a4527a5a8106d022c",
+    "infra/k8s/ha_runtime/schema.sql": "cc51f0a28de79f94fdf8e38c658695e122b3c124cc3b640cfafe5c77379222d1"
+  },
+  "production_access": false,
+  "ready": false,
+  "runtime_sha256": "51f2b2ca7900f36f430ef1689ce72b6cd47bc2c3cfacb90f0a9414b24dab30c5",
+  "scope": "owned_mac_enforced_apps_restore_only",
+  "source_sha256": "d4c2ac9f78d3d3dfde0eb07a6c768adb1fa4295644c594bda2502a2c5071a0ab",
+  "status": "PASS",
+  "steps": {
+    "advance-311": {
+      "fresh_roles": 14,
+      "next_generation_installed_before_switch": true
+    },
+    "backup-311": {
+      "all_services": 7,
+      "artifact_sha256": "1ecbd3a20452ba9ad3a15e5af012243c3bf80e1b7dfebd022d1deaa9199e2827",
+      "logical_sha256": "4f62774045389d83269989f828140aaea1f6807c80aab4ee7646e199005fb899",
+      "objects": 1,
+      "pass": true,
+      "pins_retained": true,
+      "postgresql_blob_backend": true,
+      "sequences": 15,
+      "tables": 64,
+      "tampered_artifact_refused": true
+    },
+    "closed-311": {
+      "authority_closed": true,
+      "lease_seconds": 0
+    },
+    "configure-311": {
+      "configured_services": 7
+    },
+    "configure-312": {
+      "configured_services": 7
+    },
+    "configure-next-311": {
+      "configured_services": 7
+    },
+    "configure-next-312": {
+      "configured_services": 7
+    },
+    "enforced-A-book-memo": {
+      "checks": {
+        "migration_verified": true,
+        "native_search": true,
+        "node": "A",
+        "retry_verified": true,
+        "session_shared": true
+      },
+      "phase": "smoke",
+      "service": "book-memo",
+      "status": "PASS"
+    },
+    "enforced-A-car-care-worker": {
+      "checks": 10,
+      "node": "A",
+      "pass": true,
+      "service": "car-care-worker"
+    },
+    "enforced-A-crawler-worker": {
+      "checks": 8,
+      "node": "A",
+      "pass": true,
+      "service": "crawler-worker"
+    },
+    "enforced-A-homeops-executor": {
+      "checks": 10,
+      "node": "A",
+      "pass": true,
+      "service": "homeops-executor"
+    },
+    "enforced-A-portal-web": {
+      "checks": {
+        "files_shared": true,
+        "namespace_version": 8,
+        "node": "A",
+        "sessions_shared": true,
+        "sqlite_components_verified": 2
+      },
+      "phase": "smoke",
+      "service": "portal-web",
+      "status": "PASS"
+    },
+    "enforced-A-system-agent": {
+      "checks": 6,
+      "node": "A",
+      "pass": true,
+      "service": "system-agent"
+    },
+    "enforced-A-youtube-memo": {
+      "checks": {
+        "migration_verified": true,
+        "native_search": true,
+        "node": "A",
+        "retry_verified": true,
+        "session_shared": true
+      },
+      "phase": "smoke",
+      "service": "youtube-memo",
+      "status": "PASS"
+    },
+    "enforced-B-book-memo": {
+      "checks": {
+        "migration_verified": true,
+        "native_search": true,
+        "node": "B",
+        "retry_verified": true,
+        "session_shared": true
+      },
+      "phase": "smoke",
+      "service": "book-memo",
+      "status": "PASS"
+    },
+    "enforced-B-car-care-worker": {
+      "checks": 10,
+      "node": "B",
+      "pass": true,
+      "service": "car-care-worker"
+    },
+    "enforced-B-crawler-worker": {
+      "checks": 8,
+      "node": "B",
+      "pass": true,
+      "service": "crawler-worker"
+    },
+    "enforced-B-homeops-executor": {
+      "checks": 10,
+      "node": "B",
+      "pass": true,
+      "service": "homeops-executor"
+    },
+    "enforced-B-portal-web": {
+      "checks": {
+        "files_shared": true,
+        "namespace_version": 8,
+        "node": "B",
+        "sessions_shared": true,
+        "sqlite_components_verified": 2
+      },
+      "phase": "smoke",
+      "service": "portal-web",
+      "status": "PASS"
+    },
+    "enforced-B-system-agent": {
+      "checks": 6,
+      "node": "B",
+      "pass": true,
+      "service": "system-agent"
+    },
+    "enforced-B-youtube-memo": {
+      "checks": {
+        "migration_verified": true,
+        "native_search": true,
+        "node": "B",
+        "retry_verified": true,
+        "session_shared": true
+      },
+      "phase": "smoke",
+      "service": "youtube-memo",
+      "status": "PASS"
+    },
+    "fresh-empty-system": {
+      "different_system_id": true,
+      "source_pair_removed": true
+    },
+    "install-311": {
+      "guarded_namespaces": 12,
+      "imported_verified_references": 1,
+      "original_namespace_and_fs_preserved": true
+    },
+    "lease-A-311": {
+      "authority_closed": false,
+      "lease_seconds": 4
+    },
+    "lease-B-311": {
+      "authority_closed": false,
+      "lease_seconds": 4
+    },
+    "old-runtime-permit": {
+      "old_node_denied": true,
+      "status": "PASS"
+    },
+    "provision-311": {
+      "preprovisioned_roles": 29
+    },
+    "restore-311": {
+      "all_services": 7,
+      "authority_closed": true,
+      "closed_roles_read_and_write_denied": 28,
+      "fresh_system_id": true,
+      "logical_sha256": "4f62774045389d83269989f828140aaea1f6807c80aab4ee7646e199005fb899",
+      "objects": 1,
+      "old_generation_invalidated": true,
+      "pass": true,
+      "prior_identity_preserved": true,
+      "sequences": 15,
+      "tables": 64
+    },
+    "seed-book-memo": {
+      "checks": {
+        "json_state_preserved": true,
+        "sqlite_rows_preserved": true,
+        "tables": 7
+      },
+      "phase": "seed",
+      "service": "book-memo",
+      "status": "PASS"
+    },
+    "seed-car-care-worker": {
+      "frozen_sources": true,
+      "manifest_sha256": "4a7aa7835a059857c5551fadd6d60c526384997d3d9dbae4d32d7d03034e53f6",
+      "pass": true,
+      "rows": 6,
+      "service": "car-care-worker",
+      "state_keys": 1,
+      "tables": 5
+    },
+    "seed-crawler-worker": {
+      "frozen_sources": true,
+      "manifest_sha256": "c8506ebad575b4d7bfa40ae6f8ea155b39b9b8341d6cd7fbf6e0476024266b9d",
+      "pass": true,
+      "rows": 0,
+      "service": "crawler-worker",
+      "state_keys": 2,
+      "tables": 0
+    },
+    "seed-homeops-executor": {
+      "frozen_sources": true,
+      "manifest_sha256": "a54db5516b3c600afb8d1bb3b33d1242327c549f7e4fd275ead33bf3a6850c88",
+      "pass": true,
+      "rows": 0,
+      "service": "homeops-executor",
+      "state_keys": 1,
+      "tables": 0
+    },
+    "seed-portal-web": {
+      "checks": {
+        "hashed_sessions_preserved": true,
+        "json_state_preserved": true,
+        "ordinary_file_hash_preserved": true,
+        "sqlite_components_preserved": 2
+      },
+      "phase": "seed",
+      "service": "portal-web",
+      "status": "PASS"
+    },
+    "seed-system-agent": {
+      "frozen_sources": true,
+      "manifest_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "pass": true,
+      "rows": 0,
+      "service": "system-agent",
+      "state_keys": 0,
+      "tables": 0
+    },
+    "seed-youtube-memo": {
+      "checks": {
+        "json_state_preserved": true,
+        "sqlite_rows_preserved": true,
+        "tables": 6
+      },
+      "phase": "seed",
+      "service": "youtube-memo",
+      "status": "PASS"
+    },
+    "stale-311": {
+      "closed_roles_read_and_write_denied": 28
+    }
+  }
+}

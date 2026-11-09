@@ -22,6 +22,14 @@ import traceback
 from types import SimpleNamespace
 from unittest.mock import patch
 import zipfile
+import uuid
+
+RUN_TAG=os.getenv("HA_SMOKE_RUN_TAG","")
+if RUN_TAG not in {"","recovered"}:raise ValueError("invalid_synthetic_run_tag")
+
+def tagged(value):return value+("-"+RUN_TAG if RUN_TAG else "")
+
+def request_tag(value):return str(uuid.uuid5(uuid.NAMESPACE_URL,"synthetic-fixture:"+RUN_TAG+":"+value)) if RUN_TAG else value
 
 SERVICES = ("portal-web", "book-memo", "youtube-memo")
 SOURCE = Path(__file__).resolve().parents[3]
@@ -125,8 +133,8 @@ def _memo_api(service):
 
 def _create_parent(service, repository, *, new=False):
     if service == "book-memo":
-        return repository.create_or_get_book({"isbn": "fixture-new" if new else "fixture-preserved", "title": "Fixture Book", "authors": "Fixture"})
-    video = "AAAAAAAAAAB" if new else "AAAAAAAAAAA"
+        return repository.create_or_get_book({"isbn": tagged("fixture-new") if new else "fixture-preserved", "title": "Fixture Book", "authors": "Fixture"})
+    video = ("AAAAAAAAAAC" if RUN_TAG else "AAAAAAAAAAB") if new else "AAAAAAAAAAA"
     return repository.create_or_get_video("https://www.youtube.com/watch?v=" + video,
                                           title_fetcher=lambda *_: "Fixture Video")
 
@@ -248,22 +256,27 @@ def smoke_memo(service, node):
     recovered = repository.memo_recovery_state(parent)[1]
     check(any(row["id"] == fixture["deleted_id"] for row in recovered), "deleted_memo_preserved")
     if node == "A":
+        if RUN_TAG:
+            old_parent=fixture["smoke_parent_id"]
+            old_rows=repository.list_memos(old_parent)
+            old=_create_memo(service,repository,old_parent,SMOKE_REQUEST,"smoke","protected")
+            check(old["id"]==fixture["smoke_memo_id"] and repository.list_memos(old_parent)==old_rows,"restored_memo_receipt_replays_without_mutation")
         child = _create_parent(service, repository, new=True)
         check(child["id"] > fixture["high_water"], "deleted_identity_highwater_preserved")
-        created = _create_memo(service, repository, child["id"], SMOKE_REQUEST, "smoke", "protected")
-        _create_memo(service, repository, child["id"], SMOKE_REQUEST, "smoke", "protected")
+        created = _create_memo(service, repository, child["id"], request_tag(SMOKE_REQUEST), "smoke", "protected")
+        _create_memo(service, repository, child["id"], request_tag(SMOKE_REQUEST), "smoke", "protected")
         check(len(repository.list_memos(child["id"])) == 1, "same_request_retry_no_duplicate")
-        _edit_memo(service, repository, created, "changed", request="00000000-0000-0000-0000-000000000022")
+        _edit_memo(service, repository, created, "changed", request=request_tag("00000000-0000-0000-0000-000000000022"))
         from app.services.write_safety import WriteConflict
         try:
-            _edit_memo(service, repository, created, "stale", request="00000000-0000-0000-0000-000000000023")
+            _edit_memo(service, repository, created, "stale", request=request_tag("00000000-0000-0000-0000-000000000023"))
         except WriteConflict:
             pass
         else:
             raise AssertionError("stale_version_must_conflict")
         fixture["smoke_parent_id"], fixture["smoke_memo_id"] = child["id"], created["id"]
         fixture["shared_token"] = main._create_write_session()
-        main._record_auth_failure("cross-node-client")
+        main._record_auth_failure(tagged("cross-node-client"))
         _write_fixture(service, fixture)
     else:
         check(_memo_session(main, fixture["shared_token"]), "new_session_survives_node_change")
@@ -272,7 +285,7 @@ def smoke_memo(service, node):
         main._AUTH_FAILURES.clear()
         with main._auth_rate_limit_lock():
             main._reload_auth_failures()
-            check(len(main._AUTH_FAILURES.get("cross-node-client", [])) == 1, "auth_failure_shared_across_nodes")
+            check(len(main._AUTH_FAILURES.get(tagged("cross-node-client"), [])) == 1, "auth_failure_shared_across_nodes")
     search = repository.search_books_and_memos if service == "book-memo" else repository.search_videos_and_memos
     check(bool(search("fixture")), "native_pg_search")
     check(repository.memo_trash_summary(parent)["total_count"] == 1, "native_pg_json_byte_summary")
@@ -305,14 +318,17 @@ def smoke_portal(root, node):
     homeops = HomeOpsService(root / "unused.sqlite3", SimpleNamespace())
     check(any(row["operation_id"] == fixture["operation_id"] for row in homeops.operation_history()), "homeops_journal_preserved")
     content, revision = portfolio_store.load_portfolio_snapshot()
-    check(content == ("# Fixture portfolio" if node == "A" else "# Fixture changed"), "portfolio_json_preserved")
+    check(content == ("# Fixture portfolio" if node == "A" and not RUN_TAG else ("# Fixture changed" if node == "A" else tagged("# Fixture changed"))), "portfolio_json_preserved")
     attachment = file_store.get_download_path("documents/preserved.txt")
     check(hashlib.sha256(attachment.read_bytes()).hexdigest() == fixture["attachment_hash"], "attachment_hash_preserved")
     if node == "A":
+        if RUN_TAG:
+            check(not security.AUTH_SESSION_STORE.consume_confirmation("fixture","payload",fixture["confirmation"]),"restored_confirmation_stays_consumed")
+            fixture["confirmation"]=security.AUTH_SESSION_STORE.create_confirmation("fixture","payload",3600)
         check(security.AUTH_SESSION_STORE.consume_confirmation("fixture", "payload", fixture["confirmation"]), "legacy_confirmation_consumed")
         check(not security.AUTH_SESSION_STORE.consume_confirmation("fixture", "payload", fixture["confirmation"]), "confirmation_one_time")
-        changed_revision = portfolio_store.save_portfolio_content("# Fixture changed", expected_revision=revision)
-        check(portfolio_store.save_portfolio_content("# Fixture changed", expected_revision=revision) == changed_revision,
+        changed_revision = portfolio_store.save_portfolio_content(tagged("# Fixture changed"), expected_revision=revision)
+        check(portfolio_store.save_portfolio_content(tagged("# Fixture changed"), expected_revision=revision) == changed_revision,
               "portfolio_lost_response_retry")
         try:
             portfolio_store.save_portfolio_content("# stale", expected_revision=revision)
@@ -320,11 +336,11 @@ def smoke_portal(root, node):
             pass
         else:
             raise AssertionError("portfolio_stale_version_conflict")
-        file_store.save_upload("documents", SimpleNamespace(filename="new.txt", content_type="text/plain", file=io.BytesIO(b"new protected blob")))
+        file_store.save_upload("documents", SimpleNamespace(filename=tagged("new")+".txt", content_type="text/plain", file=io.BytesIO(b"new protected blob"+RUN_TAG.encode())))
         from app.services import file_management
-        token = file_management.trash("documents/new.txt")
-        check(file_management.restore(token) == "documents/new.txt", "trash_restore_roundtrip")
-        token = file_management.trash("documents/new.txt")
+        token = file_management.trash("documents/"+tagged("new")+".txt")
+        check(file_management.restore(token) == "documents/"+tagged("new")+".txt", "trash_restore_roundtrip")
+        token = file_management.trash("documents/"+tagged("new")+".txt")
         preview = file_management.preview_purge(item_id=token)
         check(file_management.confirm_purge(preview["confirmation"])["ok"], "trash_purge_metadata_commit")
         try:
@@ -336,7 +352,7 @@ def smoke_portal(root, node):
         fixture["shared_token"] = security.create_auth_session("file_access", 3600)
         _write_fixture("portal-web", fixture)
     else:
-        check(portfolio_store.load_portfolio_content() == "# Fixture changed", "portfolio_commit_survives_node_change")
+        check(portfolio_store.load_portfolio_content() == tagged("# Fixture changed"), "portfolio_commit_survives_node_change")
         check(security.has_auth_session("file_access", fixture["shared_token"]), "new_session_survives_node_change")
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w") as archive:

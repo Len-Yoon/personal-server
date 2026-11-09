@@ -1,0 +1,23 @@
+{
+  "artifact_bytes": 14848,
+  "artifact_sha256": "c6c231bcaebd626e05441c26e1367d7083c143d7cb6f81140592be036acf747d",
+  "compiler": {
+    "Microsoft.CodeAnalysis.CSharp.dll": "ec29e5326dc488c271b90e300336291c1f5efd8d032b6b2354986fa7755e5e54",
+    "Microsoft.CodeAnalysis.dll": "00d326c8aa099ab8372c91892a50ec630ae21dd3bf01e64b64f1d828724fdd63"
+  },
+  "deterministic_outputs": 2,
+  "native_accepted": false,
+  "output_kind": "ConsoleApplication",
+  "pins_sha256": "80b4d9a8eaa1f2bdc8e408c60162f3512af35ff266041e12c426d80283379e44",
+  "platform": "AnyCPU",
+  "production_access": false,
+  "references": {
+    "System.Core.dll": "94a1fc97eb0d36f13acd209bb7207da504c8be10caf7e5096b2c46e671dc6fe2",
+    "System.ServiceProcess.dll": "21b013050b46016f8e6d9e92a2986e32e3cfb19487dce05d672d4a3ab7edf00c",
+    "System.dll": "2fe343569f794f2ca92ee14a41875571a9f21bf92637b8f8ee86306534209cca",
+    "mscorlib.dll": "6b35530467b914b0b195146ca1d1485ddd219afaad6461103f16f54e952f75a9"
+  },
+  "scope": "offline_metadata_compile_only",
+  "source_sha256": "689e76e4c978c3dad3d8b7487e27373f9ef81918f02c7cc485750e372d11e325",
+  "target": ".NETFramework,Version=v4.8"
+}

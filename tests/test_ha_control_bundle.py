@@ -148,5 +148,35 @@ class ControlBundleTest(unittest.TestCase):
                 cli.validate_bundle(plan)
 
 
+    def test_effects_transitive_import_closure_and_exact_template_binding(self):
+        bundle.prepare(self.commit,self.output)
+        manifest=json.loads((self.output/'source-manifest.json').read_text())
+        plan=json.loads((self.output/'enforced-plan.template.json').read_text())
+        expected=bundle.effects_runtime_sha256(manifest['source_files'])
+        self.assertEqual(manifest['effects_runtime_sha256'],expected)
+        self.assertEqual(plan['pg_enforcement']['effects'],{'code_sha256':expected,'broker_role':None})
+        self.assertTrue(set(bundle.EFFECTS_SOURCES).issubset(bundle.SOURCES))
+        actual=Path(self.temp.name)/'real-files'
+        for source in bundle.SOURCES:
+            target=actual/bundle.TARGETS[source]
+            target.parent.mkdir(parents=True,exist_ok=True)
+            target.write_bytes((ROOT/source).read_bytes())
+        code="import sys;sys.path.insert(0,sys.argv[1]);from ha_control.pg import PgBackend;assert 'ha_runtime' not in sys.modules;from ha_runtime.effects import validate_catalog;from ha_runtime.enforcement import install_namespace"
+        subprocess.run([sys.executable,'-I','-c',code,str(actual)],check=True,capture_output=True)
+
+    def test_cli_rejects_effects_binding_mismatch_or_missing_runtime_closure(self):
+        result=bundle.prepare(self.commit,self.output)
+        plan=json.loads((self.output/'enforced-plan.template.json').read_text())
+        plan['controller_bundle_sha256']=result['manifest_sha256']
+        current=str((self.output/'files/ha_control/cli.py').resolve())
+        with patch.object(cli,'__file__',current):
+            cli.validate_bundle(plan)
+            plan['pg_enforcement']['effects']['code_sha256']='0'*64
+            with self.assertRaisesRegex(TransitionBlocked,'approved_enforcement_source_mismatch'):
+                cli.validate_bundle(plan)
+            plan['pg_enforcement'].pop('effects')
+            with self.assertRaises(TransitionBlocked):cli.validate_bundle(plan)
+
+
 if __name__ == "__main__":
     unittest.main()

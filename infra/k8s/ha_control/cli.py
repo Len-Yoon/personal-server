@@ -29,6 +29,12 @@ def validate_bundle(plan):
                 or any(result[key] != plan[key] for key in ("native_windows_code_sha256", "controller_code_sha256",
                                                            "legacy_linux_sha256", "legacy_guard_code_sha256", "windows_guard_sha256"))):
             raise TransitionBlocked("approved_controller_source_mismatch")
+        if plan.get('profile')=='enforced-vm-v1' and (
+                plan['windows_enforced']['adapter_sha256']!=result['enforced_adapter_sha256']
+                or plan['windows_enforced']['driver_sha256']!=result['enforced_driver_sha256']
+                or plan['pg_enforcement']['definition_sha256']!=result['enforced_definition_sha256']
+                or plan['pg_enforcement']['effects']['code_sha256']!=result['effects_runtime_sha256']):
+            raise TransitionBlocked('approved_enforcement_source_mismatch')
     except TransitionBlocked:
         raise
     except (BundleError, OSError, ValueError, KeyError, TypeError, IndexError):
@@ -39,13 +45,19 @@ def run(args):
     if getattr(args, "arm", False) and args.command != "serve":
         raise TransitionBlocked("arm_only_for_serve")
     plan = Path(args.plan)
-    journal = Path(args.journal) if args.journal else plan.parent / "controller-state.json"
-    if (not plan.is_absolute() or not journal.is_absolute() or journal != plan.parent / "controller-state.json"
-            or journal.is_symlink()):
+    journal = Path(args.journal) if args.journal else None
+    allowed_journals = {plan.parent / "controller-state.json", plan.parent / "journal/controller-state.json"}
+    if (not plan.is_absolute() or (journal is not None and
+            (not journal.is_absolute() or journal not in allowed_journals or journal.is_symlink()))):
         raise TransitionBlocked("plan_bound_journal_required")
     backend = PgBackend(plan, Path(args.approval))
     with backend.guard():
         p = backend.plan
+        expected = plan.parent / ("journal/controller-state.json" if p.get("profile") == "enforced-vm-v1"
+                                  else "controller-state.json")
+        journal = expected if journal is None else journal
+        if journal != expected or journal.is_symlink() or journal.parent.is_symlink() or not journal.parent.is_dir():
+            raise TransitionBlocked("plan_bound_journal_required")
         validate_bundle(p)
         control = Controller(journal, backend)
         if args.command == "initialize":

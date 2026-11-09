@@ -1,0 +1,65 @@
+{
+  "apk_inventory_sha256": "52e8bc1af7e58b09c5d2e372682707e1bdd47238c33b669b470ae62c2daf7214",
+  "config_parse": true,
+  "config_sha256": "92bd0fd7053bd01ebf6b85940edc40c9b259064b1b43dae7fb1b5b49365bc651",
+  "echo_counts": {
+    "book-memo": 1,
+    "car-care-worker": 1,
+    "crawler-worker": 1,
+    "homeops-executor": 1,
+    "portal-web": 1,
+    "system-agent": 1,
+    "youtube-memo": 1
+  },
+  "error": null,
+  "fixture_source_sha256": "1890e5f2ad56e737ab30c02f81ef7aa5ab50b2dbae28e4490fa5f08364105c85",
+  "image_archive_sha256": "c943fdf56accc33387887837069de7fa42f456f522ac68d675e2836f474927ee",
+  "image_id": "sha256:fecfda45924cfe0e2a31da208baba715161fd3bf9c8a7404e3ab045e5c4b09a1",
+  "image_layer_diff_ids": [
+    "sha256:74d97c428c51a828f9051a7a40a53ff1fc99e54fc30323ce36760701b0b7f711",
+    "sha256:4171c9d20f04f74a901913b3d0d334e6792181a585b620e4459eade4b8b00c0e",
+    "sha256:742c6e0d10bd9771a317ddda10442e552ff650ee687deb8158a392c605a63f0e",
+    "sha256:b2d7fd49226614d6556552eb74c24ebf6688138a55e1a28689057e495c29846b",
+    "sha256:8cd3c2ddeb6d2f33a54c98705d4ee2905bb265898b3f12b564300e51949b716c"
+  ],
+  "ingress_mounts_readonly": true,
+  "kernel_status": {
+    "CapBnd": "0000000000000000",
+    "Gid": "10004\t10004\t10004\t10004",
+    "NoNewPrivs": "1",
+    "Uid": "10004\t10004\t10004\t10004"
+  },
+  "logs_sha256": "269e6866532455632cba1f3d1dd70e2693ebc3c1fdc9dcfab2dd463ab715f6bd",
+  "owned_runtime_resources_removed": true,
+  "package_builder_smoke": {
+    "haproxy_file_capabilities_absent": true,
+    "pip_setuptools_wheel_find_spec_all_none": true,
+    "stdlib_available": true
+  },
+  "private_fixture_keys_removed": true,
+  "production_access": false,
+  "protected_inventory_unchanged": true,
+  "provider_calls": 0,
+  "request_secrets_absent_from_logs": true,
+  "scope": "local_haproxy_mtls_seven_unix_echo_only",
+  "server_pem_metadata": [
+    10004,
+    10004,
+    "0o400"
+  ],
+  "source_commit": "ef5415b2aaf5a6144be0a55caaa1a3e6d51233a0",
+  "source_sha256": {
+    "infra/k8s/ha-package/Ingress.Dockerfile.template": "b915bd57ae6765ac71acc364e2a7d29f0c4ec0d1936629c3d47082805879372a",
+    "infra/k8s/ha-package/guest.py": "709f13ba4930c614a9cb7ce9ac8a736dc6912ada39321727ae2a04f288794753",
+    "infra/k8s/ha-package/ingress.py": "b83112d824eef9a8073407b74b1f5827229dbd7dbace4174b2fc55c8e051e990",
+    "tests/test_ha_guest_package.py": "0e746d73c9558e409bdda48e4d047e17309f03542319e32a8d14f864bb243808"
+  },
+  "status": "PASS",
+  "tls_checks": {
+    "no_certificate_denied": true,
+    "seven_host_unix_roundtrips": 7,
+    "tls13": true,
+    "unknown_host_denied": true
+  },
+  "user": "10004:10004"
+}

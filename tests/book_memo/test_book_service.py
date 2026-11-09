@@ -433,6 +433,26 @@ class BookMemoServiceTests(unittest.TestCase):
         self.assertEqual(books[0]["thumbnail"], "https://example.com/thumb.jpg")
 
 
+
+class BrokerTocReadTests(unittest.TestCase):
+    def test_tokenless_toc_and_broker_error_never_create_direct_requests_session(self):
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        prepare_service_import('book-memo')
+        from app.services import toc_service
+        response=MagicMock();response.__enter__.return_value=response;response.status_code=200
+        response.iter_content.return_value=[json.dumps({'success':True,'errorCode':None,'data':{'data':{'contents':'chapter one<br>chapter two','itemId':123}}}).encode()]
+        fake=SimpleNamespace(enabled=MagicMock(return_value=True),get=MagicMock(return_value=response))
+        with patch.dict(os.environ,{'HA_PG_CONFIG':'signed','YES24_API_KEY':''}),patch.dict(sys.modules,{'ha_egress.http_read':fake}),patch.object(toc_service,'api_key',side_effect=AssertionError('app key forbidden')),patch.object(toc_service.requests,'Session') as raw:
+            result=toc_service.fetch_toc_candidates({'source':'yes24','external_id':'123'})
+            self.assertEqual(result['candidates'],['chapter one','chapter two'])
+            fake.get.assert_called_once_with('book-memo',toc_service.YES24_CONTENT_URL,params={'searchType':'ItemId','query':'123'})
+            fake.get.side_effect=OSError('unavailable')
+            with self.assertRaises(ValueError):toc_service.fetch_toc_candidates({'source':'yes24','external_id':'123'})
+            raw.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
 

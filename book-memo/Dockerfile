@@ -11,7 +11,8 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir setuptools==84.0.0 wheel==0.48.0 \
+RUN apk add --no-cache --upgrade 'musl>=1.2.6-r3' 'musl-utils>=1.2.6-r3' 'zlib>=1.3.2-r1' \
+    && pip install --no-cache-dir setuptools==84.0.0 wheel==0.48.0 \
     && pip install --no-cache-dir -r requirements.txt
 
 RUN addgroup -S -g 10001 app && adduser -S -u 10001 -G app app

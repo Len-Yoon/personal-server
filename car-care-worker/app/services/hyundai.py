@@ -16,7 +16,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from app.models import VehicleSnapshot
-from app.services.vehicle_monitor import SUPPORTED_WARNINGS
+from app.services.vehicle_types import SUPPORTED_WARNINGS
 from app.services.ha_backend import runtime
 
 
@@ -69,6 +69,8 @@ class HyundaiClient:
         token_store_path: Path | str | None = None,
         oauth_base_url: str = DEFAULT_OAUTH_BASE_URL,
         api_base_url: str = DEFAULT_API_BASE_URL,
+        state_backend=None,
+        request_transport=None,
     ) -> None:
         self._client_id = _clean(client_id)
         self._client_secret = _clean(client_secret)
@@ -81,9 +83,24 @@ class HyundaiClient:
         self._access_token_expires_at = 0.0
         self._last_token_error: str | None = None
         self._ha_tokens = local()
+        self._state_backend = state_backend
+        self._request_transport = request_transport
+
+    def _backend(self):
+        return self._state_backend if self._state_backend is not None else runtime()
+
+    def _open(self, request, *, timeout):
+        if self._request_transport is not None:
+            return self._request_transport(request, timeout=timeout)
+        return urlopen(request, timeout=timeout)
 
     @classmethod
     def from_environment(cls) -> "HyundaiClient":
+        if 'HA_PG_CONFIG' in os.environ:
+            from ha_egress.client import configuration
+            if configuration('car-care-worker') is not None:
+                from app.services.ha_hyundai import BrokerHyundaiClient
+                return BrokerHyundaiClient()
         return cls(
             client_id=os.getenv("HYUNDAI_CLIENT_ID"),
             client_secret=os.getenv("HYUNDAI_CLIENT_SECRET"),
@@ -103,7 +120,7 @@ class HyundaiClient:
 
     def begin_authorization(self) -> str:
         """Create and persist one short-lived CSRF state for the public callback."""
-        if (backend := runtime()) is not None:
+        if (backend := self._backend()) is not None:
             backend.require_worker("car-care-worker")
         state = secrets.token_urlsafe(32)
         self._save_authorization_state(state)
@@ -111,7 +128,7 @@ class HyundaiClient:
 
     def complete_authorization(self, code: str, state: str | None = None) -> str:
         """Exchange an account-redirect authorization code and persist its token pair."""
-        if (backend := runtime()) is not None:
+        if (backend := self._backend()) is not None:
             with backend.worker_scope("car-care-worker"):
                 return self._complete_authorization(code, state)
         return self._complete_authorization(code, state)
@@ -163,7 +180,7 @@ class HyundaiClient:
         )
 
     def _valid_access_token(self) -> str | None:
-        if (backend := runtime()) is not None:
+        if (backend := self._backend()) is not None:
             with backend.worker_scope("car-care-worker"):
                 return self._refresh_ha_access_token(backend)
         return self._legacy_access_token()
@@ -227,7 +244,7 @@ class HyundaiClient:
         request = Request(f"{self._api_base_url}{path}", headers={
             "Authorization": f"Bearer {access_token}", "Content-Type": "application/json",
         }, method="GET")
-        with urlopen(request, timeout=8) as response:
+        with self._open(request, timeout=8) as response:
             return json.loads(response.read().decode("utf-8"))
 
     def _token_request(self, fields: dict[str, str]) -> object | None:
@@ -239,7 +256,7 @@ class HyundaiClient:
             "Authorization": f"Basic {basic}", "Content-Type": "application/x-www-form-urlencoded",
         }, method="POST")
         try:
-            with urlopen(request, timeout=8) as response:
+            with self._open(request, timeout=8) as response:
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             self._last_token_error = "auth" if exc.code in {400, 401, 403} else "request"
@@ -258,7 +275,7 @@ class HyundaiClient:
             method="POST",
         )
         try:
-            with urlopen(request, timeout=8):
+            with self._open(request, timeout=8):
                 return True
         except (OSError, URLError, HTTPError):
             return False
@@ -313,7 +330,7 @@ class HyundaiClient:
 
     @contextmanager
     def _token_file_lock(self):
-        if (backend := runtime()) is not None:
+        if (backend := self._backend()) is not None:
             with backend.state_transaction("car-care-worker", "hyundai_tokens", {}) as payload:
                 self._ha_tokens.payload = payload
                 try:
@@ -332,7 +349,7 @@ class HyundaiClient:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _load_token_file(self) -> dict:
-        if (backend := runtime()) is not None:
+        if (backend := self._backend()) is not None:
             payload = getattr(self._ha_tokens, "payload", None)
             if payload is None:
                 payload = backend.read_state("car-care-worker", "hyundai_tokens", {})
@@ -344,7 +361,7 @@ class HyundaiClient:
         return payload if isinstance(payload, dict) else {}
 
     def _write_token_file(self, payload: dict) -> None:
-        if runtime() is not None:
+        if self._backend() is not None:
             target = getattr(self._ha_tokens, "payload", None)
             if target is None:
                 raise RuntimeError("token write requires transaction")

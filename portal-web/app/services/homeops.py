@@ -630,6 +630,40 @@ class ExecutorClient:
         return bool(self.diagnostics(service).get("container", {}).get("health") == "healthy")
 
     def _request(self, path: str, payload: dict[str, Any] | None = None, method: str | None = None, request_id: str | None = None) -> Any:
+        if 'HA_PG_CONFIG' in os.environ:
+            from ha_egress.client import configuration, route
+            if configuration('portal-web') is not None:
+                target = os.getenv('HA_HOMEOPS_TARGET_NODE')
+                if target not in {'A','B'} or target != runtime().node_id():
+                    raise OSError('explicit_homeops_target_required')
+                if path == '/v1/diagnostics' or path.startswith('/v1/diagnostics/'):
+                    self.managed_services = ALLOWED_SERVICES
+                    service = path.removeprefix('/v1/diagnostics/').strip('/') if path != '/v1/diagnostics' else None
+                    if service is not None and service not in ALLOWED_SERVICES:
+                        raise OSError('homeops_executor_invalid_managed_scope')
+                    result = route('portal-web','portal.executor.diagnose',{'service':service})
+                elif (path == '/v1/restarts' and type(payload) is dict
+                        and set(payload) == {'incident_id','approval_token','action','service'}
+                        and payload['action'] == ALLOWED_ACTION):
+                    result = route('portal-web','portal.executor.restart',
+                        {key:payload[key] for key in ('incident_id','approval_token','service')},
+                        request_id=payload['incident_id'])
+                elif path == '/v1/restarts/all' and method == 'POST' and request_id:
+                    result = route('portal-web','portal.executor.restart_all',{'request_id':request_id},request_id=request_id)
+                else:
+                    raise OSError('homeops_executor_invalid_broker_operation')
+                if (type(result) is not dict or set(result) != {'value','managed_services'}
+                        or type(result['managed_services']) is not list or not result['managed_services']
+                        or any(type(name) is not str for name in result['managed_services'])
+                        or len(set(result['managed_services'])) != len(result['managed_services'])
+                        or not set(result['managed_services']) <= ALLOWED_SERVICES):
+                    raise OSError('homeops_executor_invalid_managed_scope')
+                self.managed_services = frozenset(result['managed_services'])
+                if path == '/v1/diagnostics':
+                    if type(result['value']) is not list:
+                        raise OSError('homeops_executor_invalid_diagnostics')
+                    return ManagedDiagnostics(result['value'],self.managed_services)
+                return result['value']
         target = None
         target_url = self.url
         if (backend := runtime()) is not None:

@@ -34,14 +34,27 @@ class TelegramClient:
     def __init__(self, token: str, chat_id: str) -> None:
         self._token = token
         self._chat_id = str(chat_id)
+        self._broker = False
 
     @classmethod
     def from_environment(cls) -> "TelegramClient | None":
+        from app.services import ha_telegram
+        if ha_telegram.enabled():
+            client = cls('', os.getenv('CAR_CARE_TELEGRAM_CHAT_ID', ''))
+            client._broker = True
+            return client
         token = os.getenv("CAR_CARE_TELEGRAM_BOT_TOKEN", "")
         chat_id = os.getenv("CAR_CARE_TELEGRAM_CHAT_ID", "")
         return cls(token, chat_id) if token and chat_id else None
 
     def poll(self, offset: int | None) -> list[TelegramUpdate]:
+        from app.services import ha_telegram
+        try:
+            if self._broker or ha_telegram.enabled():
+                self._broker = True
+                return ha_telegram.poll(offset)
+        except (OSError, ImportError, ValueError):
+            return []
         payload: dict[str, int] = {"timeout": POLL_TIMEOUT_SECONDS}
         if offset is not None:
             payload["offset"] = offset
@@ -74,6 +87,13 @@ class TelegramClient:
         return updates
 
     def send(self, text: str) -> bool:
+        from app.services import ha_telegram
+        try:
+            if self._broker or ha_telegram.enabled():
+                self._broker = True
+                return ha_telegram.send(text)
+        except (OSError, ImportError, ValueError):
+            return False
         data = self._post("sendMessage", {"chat_id": self._chat_id, "text": text}, timeout=8)
         return bool(data and data.get("ok"))
 

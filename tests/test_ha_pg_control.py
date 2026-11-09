@@ -373,6 +373,30 @@ class PGControlTests(unittest.TestCase):
                 cli.run(args)
             backend.assert_not_called()
 
+    def test_enforced_cli_persists_only_in_precreated_mutable_journal_root(self):
+        backend = MagicMock()
+        backend.plan = dict(self.plan, profile="enforced-vm-v1")
+        args = SimpleNamespace(plan=str(self.root / "plan.json"), approval=str(self.root / "approval.json"),
+                               journal=None, command="initialize")
+        with patch("ha_control.cli.PgBackend", return_value=backend), patch("ha_control.cli.validate_bundle"):
+            with self.assertRaisesRegex(TransitionBlocked, "plan_bound_journal_required"):
+                cli.run(args)
+            self.assertFalse((self.root / "journal").exists())
+            (self.root / "journal").mkdir(mode=0o700)
+            result = cli.run(args)
+            self.assertEqual(result["phase"], "fencing")
+            self.assertTrue((self.root / "journal/controller-state.json").is_file())
+            self.assertFalse((self.root / "controller-state.json").exists())
+            args.journal = str(self.root / "controller-state.json")
+            with self.assertRaisesRegex(TransitionBlocked, "plan_bound_journal_required"):
+                cli.run(args)
+            args.journal = None
+            (self.root / "journal/controller-state.json").unlink()
+            (self.root / "journal").rename(self.root / "other-journal")
+            (self.root / "journal").symlink_to(self.root / "other-journal", target_is_directory=True)
+            with self.assertRaisesRegex(TransitionBlocked, "plan_bound_journal_required"):
+                cli.run(args)
+
     def test_cli_validates_bundle_after_private_guard_before_controller_or_db_call(self):
         args = SimpleNamespace(plan=str(self.root / "plan.json"), approval=str(self.root / "approval.json"),
                                journal=None, command="initialize")
@@ -558,6 +582,111 @@ class PGControlTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertNotIn("private endpoint", output.getvalue())
         self.assertIn("controller_outcome_unknown", output.getvalue())
+
+    def enforced_plan(self):
+        import hashlib
+        from ha_control.prepare import EFFECTS_SOURCES, TARGETS, effects_runtime_sha256
+        from ha_control.pg import ENFORCED_SERVICES
+        services = sorted(ENFORCED_SERVICES)
+        sources = {path:hashlib.sha256((ROOT/'infra/k8s'/TARGETS[path]).read_bytes()).hexdigest()
+                   for path in EFFECTS_SOURCES}
+        self.plan.update(profile='enforced-vm-v1',schema_version=2,source_commit='c'*40,
+                         pg_enforcement={'definition_sha256':hashlib.sha256((ROOT/'infra/k8s/ha_runtime/enforcement.sql').read_bytes()).hexdigest(),
+                            'effects':{'code_sha256':effects_runtime_sha256(sources),'broker_role':'ha_broker'},
+                            'role_sets':{node:{service:'app_'+str(index)+'_'+node.lower() for index,service in enumerate(services)} for node in ('A','B')},
+                            'namespace_tables':{'s_'+service.replace('-','_')+'_main':{'service':service,'tables':['shared_state']} for service in services}})
+        self.fence.plan_sha256='d'*64
+        return self.plan
+
+    def test_enforced_plan_requires_exact_effects_closure_broker_and_raw_plan_pin(self):
+        plan=self.enforced_plan()
+        self.backend._plan()
+        for replacement in ({}, {'broker_role':'ha_broker'}, {'code_sha256':'0'*64,'broker_role':'ha_broker'},
+                            dict(plan['pg_enforcement']['effects'],broker_role='bad;role')):
+            original=plan['pg_enforcement']['effects'];plan['pg_enforcement']['effects']=replacement
+            with self.assertRaises(TransitionBlocked):self.backend._plan()
+            plan['pg_enforcement']['effects']=original
+        del self.fence.plan_sha256
+        with self.assertRaisesRegex(TransitionBlocked,'enforced_effects_plan_required'):self.backend._plan()
+
+    def test_effects_observation_rejects_missing_storage_and_every_binding_mismatch(self):
+        from ha_runtime import effects
+        self.enforced_plan()
+        expected=('synthetic','123','c'*40,'d'*64,'ha_broker')
+        raw=MagicMock();raw.execute.return_value.fetchall.return_value=[expected]
+        with patch.object(effects,'validate_catalog') as validate:
+            self.backend._effects_observation(raw)
+            self.assertEqual(validate.call_args.args[1].plan_sha256,'d'*64)
+            for index in range(5):
+                mismatch=list(expected);mismatch[index]='different'
+                raw.execute.return_value.fetchall.return_value=[tuple(mismatch)]
+                with self.assertRaisesRegex(TransitionBlocked,'external_effect_controller_binding_mismatch'):
+                    self.backend._effects_observation(raw)
+        with patch.object(effects,'validate_catalog',side_effect=OSError('missing ledger')):
+            with self.assertRaisesRegex(TransitionBlocked,'external_effect_controller_catalog_unverified'):
+                self.backend._effects_observation(raw)
+
+    def test_real_observe_requires_effects_catalog_even_for_closed_authority(self):
+        self.enforced_plan()
+        raw=MagicMock()
+        with patch.object(self.backend,'_enforced_observation'), patch.object(self.backend,'_effects_observation',side_effect=TransitionBlocked('missing_effects')) as observe:
+            with self.assertRaisesRegex(TransitionBlocked,'missing_effects'):
+                self.backend._observe(raw,'B',self.state)
+            observe.assert_called_once_with(raw)
+        raw.execute.assert_not_called()
+
+    def effect_connections(self, *, unresolved=None, peer_unresolved=None, replay='0/20', **options):
+        connections,observations=self.prepare_fresh(**options)
+        for connection,value in ((self.primary,unresolved),(self.peer,peer_unresolved)):
+            original=connection.execute.side_effect
+            def execute(query,params=None,original=original,value=value):
+                if 'SELECT pg_last_wal_replay_lsn()' in query:
+                    return SimpleNamespace(fetchone=lambda:(replay,))
+                if 'SELECT 1 FROM ha_effects.ledger' in query:
+                    # Represent each actual persisted state named by the query.
+                    found=value is not None and "'"+value+"'" in query
+                    return SimpleNamespace(fetchone=lambda:(1,) if found else None)
+                return original(query,params)
+            connection.execute.side_effect=execute
+        return connections,observations
+
+    def test_initial_open_rejects_any_unresolved_state_on_either_node_before_update(self):
+        self.enforced_plan()
+        for state in ('pending','inflight','uncertain'):
+            for where in ('unresolved','peer_unresolved'):
+                connections,observations=self.effect_connections(lease=True,**{where:state})
+                with connections,observations,patch.object(self.backend,'_commit'):
+                    with self.assertRaisesRegex(TransitionBlocked,'external_effect_controller_unresolved'):
+                        self.backend._fresh_observation(self.state,lease=True)
+                queries=[call.args[0] for call in self.primary.execute.call_args_list]
+                self.assertFalse(any('UPDATE ha.control SET serving' in query for query in queries))
+                self.assertTrue(any('SELECT 1 FROM ha_effects.ledger' in call.args[0] for call in self.peer.execute.call_args_list))
+
+    def test_completed_open_passes_only_after_exclusive_lock_and_peer_watermark(self):
+        self.enforced_plan()
+        connections,observations=self.effect_connections(lease=True,unresolved='completed',peer_unresolved='completed')
+        with connections,observations,patch.object(self.backend,'_commit'):
+            self.backend._fresh_observation(self.state,lease=True)
+        queries=[call.args[0] for call in self.primary.execute.call_args_list]
+        gate=next(index for index,query in enumerate(queries) if 'SELECT 1 FROM ha_effects.ledger' in query)
+        locks=[index for index,query in enumerate(queries) if 'pg_advisory_xact_lock(%s)' in query]
+        opening=next(index for index,query in enumerate(queries) if 'UPDATE ha.control SET serving' in query)
+        self.assertLess(locks[-1],gate);self.assertLess(gate,opening)
+        connections,observations=self.effect_connections(lease=True,replay='0/0')
+        with connections,observations,patch.object(self.backend,'_commit'):
+            with self.assertRaisesRegex(TransitionBlocked,'external_effect_controller_peer_unproven'):
+                self.backend._fresh_observation(self.state,lease=True)
+        self.assertFalse(any('UPDATE ha.control SET serving' in call.args[0] for call in self.primary.execute.call_args_list))
+
+    def test_shared_renew_and_closed_validation_do_not_gate_normal_inflight(self):
+        self.enforced_plan()
+        for shared,lease in ((True,True),(False,False)):
+            connections,observations=self.effect_connections(lease=lease,opened=shared,unresolved='inflight',peer_unresolved='pending')
+            with connections,observations,patch.object(self.backend,'_commit'),patch.object(self.backend,'_effects_open_gate') as gate:
+                self.backend._fresh_observation(self.state,lease=lease,shared=shared)
+                gate.assert_not_called()
+            self.assertFalse(any('SELECT 1 FROM ha_effects.ledger' in call.args[0] for call in self.primary.execute.call_args_list))
+
 
 
 if __name__ == "__main__":

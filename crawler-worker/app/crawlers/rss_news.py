@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from html import unescape
 from html.parser import HTMLParser
 from urllib.request import Request, urlopen
@@ -31,13 +33,24 @@ def search_rss_news(
     except ImportError as exc:
         raise OSError("news_source_parser_unavailable") from exc
 
+    broker = False
+    if 'HA_PG_CONFIG' in os.environ:
+        from ha_egress.http_read import enabled
+        broker = enabled('crawler-worker')
     articles: list[dict] = []
     successful_feeds = 0
 
     for feed_url in feed_urls:
         try:
             request = Request(feed_url, headers={"User-Agent": USER_AGENT, "Accept": "application/rss+xml,application/xml,text/xml,*/*"})
-            with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            if broker:
+                from ha_egress.http_read import get
+                response_context = get('crawler-worker',feed_url,headers={'User-Agent':USER_AGENT,'Accept':'application/rss+xml,application/xml,text/xml,*/*'})
+            else:
+                response_context = urlopen(request,timeout=REQUEST_TIMEOUT_SECONDS)
+            with response_context as response:
+                if broker and response.status != 200:
+                    raise OSError('news_source_unavailable')
                 feed = feedparser.parse(response)
             if not getattr(feed, "version", "") or getattr(feed, "bozo", False):
                 continue

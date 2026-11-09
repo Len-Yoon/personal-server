@@ -11,24 +11,32 @@ REQUEST_TIMEOUT_SECONDS = 8
 
 
 def notify_new_investing_articles(articles: list[dict]) -> int:
+    try:
+        broker = _broker_enabled()
+    except (OSError, ImportError, ValueError):
+        return 0
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat_id:
+    if not broker and (not token or not chat_id):
         return 0
 
     sent_count = 0
     for article in articles:
         if not _is_alert_article(article):
             continue
-        if _send_article(token, chat_id, article):
+        if _send_article(token, chat_id, article, broker=broker):
             sent_count += 1
     return sent_count
 
 
 def notify_market_news_digest(articles: list[dict]) -> bool:
+    try:
+        broker = _broker_enabled()
+    except (OSError, ImportError, ValueError):
+        return False
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat_id or not articles:
+    if not articles or (not broker and (not token or not chat_id)):
         return False
 
     lines = ["[시장 뉴스 요약]"]
@@ -47,6 +55,8 @@ def notify_market_news_digest(articles: list[dict]) -> bool:
         "text": "\n".join(lines),
         "disable_web_page_preview": True,
     }
+    if broker:
+        return _broker_send(payload['text'])
     request = Request(
         f"{TELEGRAM_API_BASE_URL}/bot{token}/sendMessage",
         data=json.dumps(payload).encode("utf-8"),
@@ -69,7 +79,7 @@ def _is_alert_article(article: dict) -> bool:
     )
 
 
-def _send_article(token: str, chat_id: str, article: dict) -> bool:
+def _send_article(token: str, chat_id: str, article: dict, *, broker: bool = False) -> bool:
     title = str(article.get("title_ko") or article.get("title") or "새 뉴스").strip()
     url = str(article.get("url") or "").strip()
     relevance = article["nasdaq_relevance"]
@@ -87,6 +97,8 @@ def _send_article(token: str, chat_id: str, article: dict) -> bool:
         "text": f"[나스닥 중요 알림]\n{title}\n이유: {reason}\n출처: {source} · {published_at}\n{url}",
         "disable_web_page_preview": True,
     }
+    if broker:
+        return _broker_send(payload['text'])
     request = Request(
         f"{TELEGRAM_API_BASE_URL}/bot{token}/sendMessage",
         data=json.dumps(payload).encode("utf-8"),
@@ -97,4 +109,21 @@ def _send_article(token: str, chat_id: str, article: dict) -> bool:
         with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS):
             return True
     except (OSError, TimeoutError, URLError, ValueError):
+        return False
+
+
+def _broker_enabled() -> bool:
+    if 'HA_PG_CONFIG' not in os.environ:
+        return False
+    from ha_egress.client import configuration
+    return configuration('crawler-worker') is not None
+
+
+def _broker_send(text: str) -> bool:
+    try:
+        from ha_egress.client import route
+        result = route('crawler-worker', 'crawler.telegram.send', {'text': text})
+        return (type(result) is dict and set(result) == {'message_id'}
+                and type(result['message_id']) is int and result['message_id'] > 0)
+    except (OSError, ImportError, ValueError):
         return False

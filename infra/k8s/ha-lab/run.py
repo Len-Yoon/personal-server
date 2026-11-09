@@ -13,6 +13,7 @@ from pathlib import Path
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -49,7 +50,12 @@ def approved_base(group):
 
 
 class Fixture:
-    def __init__(self, directory):
+    def __init__(self, directory, *, runtime_context='orbstack'):
+        if (type(runtime_context) is not str or
+                (runtime_context != 'orbstack' and not re.fullmatch(r'colima-codex-ha-[a-z0-9]{8}', runtime_context))):
+            raise FixtureError('local_context_required')
+        self.context = runtime_context
+        self._runtime_identity = None
         self.directory = directory
         self.environment = {k: v for k, v in os.environ.items() if not k.startswith("DOCKER_")}
         self.owner = str(uuid.uuid4())
@@ -58,7 +64,7 @@ class Fixture:
         self.report = {"scope": "local_actual_apps_pg_only", "production_access": False, "services": {}}
 
     def docker(self, *args, input=None, timeout=60):
-        result = subprocess.run(["docker", "--context", "orbstack", *args], input=input,
+        result = subprocess.run(["docker", "--context", self.context, *args], input=input,
                                 env=self.environment, text=True, capture_output=True, timeout=timeout)
         if result.returncode:
             if args[0] == "exec":
@@ -80,6 +86,43 @@ class Fixture:
                           if s.lower() in result.stderr.lower()]
             raise FixtureError(self.phase + ":" + args[0] + ":" + ",".join(categories))
         return (result.stdout + (result.stderr if args[0] == "logs" else "")).strip()
+
+    @property
+    def runtime_identity(self):
+        """Read-only copy for durable owner markers, before any resources exist."""
+        return None if self._runtime_identity is None else dict(self._runtime_identity)
+
+    def validate_runtime(self):
+        """Read-only Mac/local socket/daemon pin; never changes Docker context."""
+        if sys.platform != 'darwin':
+            raise FixtureError('mac_local_context_required')
+        try:
+            context = self.context
+            if context == 'orbstack':
+                expected = Path.home() / '.orbstack/run/docker.sock'
+            elif re.fullmatch(r'colima-codex-ha-[a-z0-9]{8}', context):
+                expected = Path.home() / '.colima' / context.removeprefix('colima-') / 'docker.sock'
+            else:
+                raise FixtureError('local_context_required')
+            contexts = json.loads(self.docker('context', 'inspect', context, timeout=10))
+            if (type(contexts) is not list or len(contexts) != 1 or type(contexts[0]) is not dict
+                    or contexts[0].get('Name') != context
+                    or contexts[0]['Endpoints']['docker']['Host'] != 'unix://' + str(expected)):
+                raise FixtureError('local_context_required')
+            daemon = self.docker('info', '--format', '{{.ID}}', timeout=10)
+            if not re.fullmatch(r'[A-Za-z0-9:_.-]{1,128}', daemon):
+                raise FixtureError('local_daemon_identity_required')
+            identity = {'context': context, 'daemon_id': daemon,
+                        'local_socket_sha256': hashlib.sha256(str(expected).encode()).hexdigest()}
+            if self._runtime_identity is not None and self._runtime_identity != identity:
+                raise FixtureError('fixture_runtime_identity_changed')
+            self._runtime_identity = identity
+            self.report['runtime_identity'] = self.runtime_identity
+            return self.runtime_identity
+        except FixtureError:
+            raise
+        except Exception:
+            raise FixtureError('local_context_required') from None
 
     def owned(self, kind, identifier):
         value = json.loads(self.docker(kind, "inspect", identifier))[0]
@@ -123,9 +166,7 @@ class Fixture:
         key.chmod(0o600)
 
     def prepare(self):
-        contexts = json.loads(self.docker("context", "inspect", "orbstack"))
-        if contexts[0]["Endpoints"]["docker"]["Host"] != "unix://" + str(Path.home() / ".orbstack/run/docker.sock"):
-            raise FixtureError("local_context_required")
+        self.validate_runtime()
         fixture = self.directory / "fixture"
         fixture.mkdir(mode=0o700)
         (fixture / "config").mkdir(mode=0o700)
@@ -336,6 +377,14 @@ class Fixture:
         self.report["driver_faults"].append(check("reprotected"))
 
     def cleanup(self):
+        # A failed preflight cannot have created resources. A changed daemon
+        # must never redirect cleanup, even when a fixture UUID is available.
+        if self._runtime_identity is None:
+            return True
+        try:
+            self.validate_runtime()
+        except Exception:
+            return False
         failed = False
         for kind, listing, removal in (
             ("container", ("ps", "-aq", "--no-trunc"), ("rm", "-f", "-v")),

@@ -1,0 +1,36 @@
+{
+  "actual_executor_application": false,
+  "actual_pg_ledger": false,
+  "actual_provider_calls": 0,
+  "all_four_simultaneous_inner_success_guaranteed": false,
+  "calls": {
+    "executor_http": 6,
+    "internal_inspect": 7,
+    "internal_restart": 3,
+    "outer": 6
+  },
+  "internal_operation_guard_denied": true,
+  "internal_overflow_denied_before_dispatch": 1,
+  "internal_saturated_handlers": 2,
+  "internal_workers": 2,
+  "mutual_cross_certificate_denials": 2,
+  "nested_executor_release": "one_at_a_time_after_four_outer_slots_occupied",
+  "outer_saturated": true,
+  "production_access": false,
+  "production_authority_file_ownership": false,
+  "public_workers": 4,
+  "scope": "actual_local_nested_mtls_transport_only",
+  "source_sha256": {
+    "infra/k8s/ha_egress/boot.py": "90c8de5f7242a4d5192ffaa17ba1aafda6cf02dee6ea0b651395cccaa2dc5603",
+    "infra/k8s/ha_egress/client.py": "7959e52e51e5cde8e64a262428f9f5c2a5935a0114f084b7b14af97f8d8ad34e",
+    "infra/k8s/ha_egress/executor_provider.py": "ab517b85c7829a7f952f07f5b9ff63b1f3048d654dac6b4c0315c9e199467cce",
+    "infra/k8s/ha_egress/hyundai_provider.py": "f32f4972c723b7e7aea908d408c829a18899761443864719ce3ca765ccc4ea5c",
+    "infra/k8s/ha_egress/server.py": "a6c4bcefa91409c82b8ee69be245e1d72bfde340f51590992f86ce460f217598",
+    "infra/k8s/ha_runtime/effects.py": "0869b41ec08ac6313eaf4574bffb7d7c7f0e08dffd5c8dbdb176a1289e3ce7f9",
+    "tests/test_ha_egress_transport.py": "80f6f16a0bc224c142d6cb489c3dd0f0ae9d0cabe91cb484494fe629718dcbd4",
+    "tests/test_ha_nested_broker.py": "48a0c07aece15b4da9e53ccafaaff41f0dc12aa542f64dd4ed9e8ba7a31e98af"
+  },
+  "status": "PASS",
+  "unknown_result_retries": 0,
+  "windows_whole_transition_verified": false
+}

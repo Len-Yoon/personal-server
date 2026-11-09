@@ -34,7 +34,7 @@ class PackageTest(unittest.TestCase):
                 target = self.root / service / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(data)
-        for name in ("infra/k8s/ha_runtime/__init__.py", "infra/k8s/ha_runtime/schema.sql",
+        for name in (*package.CAR_PROVIDER_FILES, *package.CONTROL_RUNTIME, *package.EGRESS_RUNTIME, *package.EGRESS_BROKER, "infra/k8s/ha_runtime/__init__.py", "infra/k8s/ha_runtime/schema.sql",
                      "infra/k8s/ha_runtime/backup.py", "infra/k8s/ha_runtime/backup_cli.py",
                      "infra/k8s/tools/n100_ha_contract.py", "infra/k8s/ha-package/Dockerfile.template",
                      "infra/k8s/ha-package/Utility.Dockerfile.template"):
@@ -72,6 +72,35 @@ class PackageTest(unittest.TestCase):
         plan = json.loads((self.bundle / "deployment-plan.json").read_text())
         self.assertFalse(plan["production_deployed"])
         self.assertIn("approved_controller", plan["activation"])
+
+    def test_packaged_canonical_runtime_imports_without_controller_sources(self):
+        # Commit the real runtime, then import from each isolated generated context.
+        for source in (ROOT / "infra/k8s/ha_runtime").iterdir():
+            if source.suffix in {".py", ".sql"}:
+                (self.root / "infra/k8s/ha_runtime" / source.name).write_bytes(source.read_bytes())
+        self.git("add", ".")
+        self.git("-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "real runtime")
+        commit = self.git("rev-parse", "HEAD").strip()
+        manifest = package.prepare(commit, self.bundle)
+        self.assertEqual(package.verify_source(self.bundle), manifest)
+        import sys
+        for service in (*package.SERVICES, package.UTILITY):
+            context = self.bundle / "contexts" / service / "_ha"
+            self.assertEqual({p.name for p in (context / "ha_egress").iterdir()},
+                             {Path(name).name for name in package.EGRESS_RUNTIME | package.EGRESS_BROKER} if service == package.UTILITY
+                             else {Path(name).name for name in package.EGRESS_RUNTIME})
+            self.assertEqual({p.name for p in (context / "ha_control").iterdir()},
+                             {"__init__.py", "privilege_closure.py"})
+            subprocess.run([sys.executable, "-I", "-c",
+                "import sys;sys.path.insert(0,sys.argv[1]);"
+                "import ha_runtime.enforcement;import ha_control.privilege_closure;import ha_egress.client;import ha_egress.http_read;import ha_egress.app_entrypoint",
+                str(context)], check=True, capture_output=True)
+            if service == package.UTILITY:
+                subprocess.run([sys.executable, '-I', '-c',
+                    'import sys;sys.path.insert(0,sys.argv[1]);'
+                    'from ha_egress.hyundai_provider import canonical_client_type;'
+                    'assert canonical_client_type().__name__ == "HyundaiClient"', str(context)],
+                    check=True, capture_output=True)
 
     def test_commit_objects_ignore_dirty_worktree_and_credentials(self):
         (self.root / "portal-web/app/main.py").write_text("value = 'dirty'\n")
@@ -248,6 +277,19 @@ class PackageTest(unittest.TestCase):
         with patch.object(package.platform, "system", return_value="Linux"):
             with self.assertRaisesRegex(package.PackageError, "mac_orbstack_only"):
                 package.LocalDocker()
+
+    def test_archive_builder_rejects_manifest_id_image_store_before_build(self):
+        endpoint='unix://'+str(Path.home()/'.orbstack/run/docker.sock')
+        context=json.dumps([{'Name':'orbstack','Endpoints':{'docker':{'Host':endpoint}}}])
+        for driver in ('overlayfs','overlay2'):
+            with patch.object(package.platform,'system',return_value='Darwin'), \
+                 patch.object(package.LocalDocker,'call',side_effect=[context,'daemon-fixture',driver]) as call:
+                if driver=='overlayfs':
+                    with self.assertRaisesRegex(package.PackageError,'classic_image_store_required'):
+                        package.LocalDocker()
+                else:
+                    self.assertEqual(package.LocalDocker().daemon_id,'daemon-fixture')
+                self.assertEqual(call.call_count,3)
 
 
 if __name__ == "__main__":

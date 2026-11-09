@@ -1,5 +1,6 @@
 import importlib
 import json
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -45,6 +46,19 @@ class HomeOpsTelegramNotifierTests(unittest.TestCase):
 
         self.assertFalse(sent)
         mocked_urlopen.assert_not_called()
+
+
+    def test_signed_broker_sends_without_token_and_never_uses_raw_fallback(self):
+        from types import SimpleNamespace
+        module=self.reload_module();fake=SimpleNamespace(configuration=MagicMock(return_value={}),route=MagicMock(return_value={'message_id':8}))
+        with patch.dict('os.environ',{'HA_PG_CONFIG':'signed','HOMEOPS_TELEGRAM_BOT_TOKEN':'','HOMEOPS_TELEGRAM_CHAT_ID':''}), patch.dict(sys.modules,{'ha_egress.client':fake}), patch.object(module,'urlopen') as raw:
+            self.assertTrue(module.HomeOpsTelegramNotifier().send('container_restart_started',{'service':'book-memo'}))
+            fake.route.assert_called_once_with('portal-web','portal.telegram.send',{'text':'[HomeOps] 컨테이너 재시작 시작\n서비스: book-memo'})
+            fake.route.side_effect=OSError('uncertain')
+            self.assertFalse(module.HomeOpsTelegramNotifier().send('container_restart_started',{}))
+            fake.route.side_effect=None;fake.route.return_value=None
+            self.assertFalse(module.HomeOpsTelegramNotifier().send('container_restart_started',{}))
+            raw.assert_not_called()
 
 
 if __name__ == "__main__":

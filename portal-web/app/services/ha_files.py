@@ -1,7 +1,8 @@
 """Isolated HA attachment namespace backed by PG and immutable shared blobs.
 
-Only the local experiment is armed. Published blobs are retained after namespace
-deletion: backup pinning and garbage collection are deliberately not implemented.
+The approved enforced-vm-v1 profile uses PG chunks in the namespace transaction.
+The older local experiment keeps its filesystem backend. Neither backend runs
+blob garbage collection when namespace/trash entries are removed.
 """
 import copy
 import hashlib
@@ -15,6 +16,7 @@ import stat
 import sys
 import tempfile
 import time
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -23,6 +25,7 @@ import zipfile
 SERVICE = "portal-web"
 STATE_KEY = "file-namespace"
 MAX_ENTRIES = 10000
+_STORAGE = threading.local()
 _RESERVED = {"pgdata", "pg_wal", "pg_xlog", "pg_version", "postgresql.conf", "pg_hba.conf", "id_rsa", "id_ed25519", "credentials", "credentials.json"}
 _PRIVATE_EXTENSIONS = {".db", ".sqlite", ".sqlite3", ".wal", ".shm", ".key", ".pem", ".p12", ".pfx"}
 
@@ -47,9 +50,13 @@ def _unavailable():
 
 def _guard():
     from ha_runtime.config import load
-    load(SERVICE)
+    config = load(SERVICE)
+    if (os.environ.get('APP_ENV') == 'production' and isinstance(config, dict)
+            and config.get('profile') == 'enforced-vm-v1'):
+        return config  # Server readiness is checked inside the state transaction.
     if os.environ.get("APP_ENV") not in {"test", "development"} or os.environ.get("HA_LOCAL_RUNTIME") != "1":
         raise _unavailable()
+    return config
 
 
 def _path(path, *, root=False):
@@ -116,11 +123,20 @@ def _audit(state, event, paths):
 
 @contextmanager
 def _state(*, mutate=False):
-    _guard()
+    config = _guard()
+    pg = isinstance(config, dict) and config.get('profile') == 'enforced-vm-v1'
     with runtime().state_transaction(SERVICE, STATE_KEY, _default()) as state:
+        if pg:
+            from ha_runtime import blobs
+            blobs.require_ready(SERVICE)
         _validate(state)
         before = copy.deepcopy(state) if mutate else None
-        yield state
+        previous = getattr(_STORAGE, 'pg', False)
+        _STORAGE.pg = pg
+        try:
+            yield state
+        finally:
+            _STORAGE.pg = previous
         if mutate and state != before:
             state["version"] += 1
             _validate(state)
@@ -128,7 +144,9 @@ def _state(*, mutate=False):
 
 @contextmanager
 def _root():
-    _guard()
+    config = _guard()
+    if isinstance(config, dict) and config.get('profile') == 'enforced-vm-v1':
+        raise _unavailable()
     value = os.environ.get("HA_FILE_OBJECT_ROOT", "")
     path = Path(value)
     if not value or not path.is_absolute() or ".." in path.parts:
@@ -159,8 +177,22 @@ def _root():
 
 
 def ensure_storage():
+    config = _guard()
+    if isinstance(config, dict) and config.get('profile') == 'enforced-vm-v1':
+        with _state():
+            pass
+        return
     with _root():
         pass
+
+
+@contextmanager
+def _blob_root():
+    if getattr(_STORAGE, 'pg', False):
+        yield None, None
+    else:
+        with _root() as root:
+            yield root
 
 
 def _entry(state, path, *, directory=False):
@@ -214,6 +246,21 @@ def _verify_blob(root_fd, entry):
 
 def _publish(root_fd, root_path, upload, used, total):
     store = _store()
+    if getattr(_STORAGE, 'pg', False):
+        from ha_runtime import blobs
+        maximum = min(store.MAX_UPLOAD_BYTES, store.STORAGE_QUOTA_BYTES - used, blobs.MAX_BLOB_BYTES)
+        if total is not None:
+            maximum = min(maximum, store.MAX_UPLOAD_TOTAL_BYTES - total)
+        def validate(prefix):
+            if (prefix.startswith(b'SQLite format 3\x00') or prefix[:4] in (bytes.fromhex('377f0682'), bytes.fromhex('377f0683'))
+                    or b'PRIVATE KEY-----' in prefix):
+                raise ValueError('운영 데이터와 개인 키는 업로드할 수 없습니다.')
+        if maximum < 0:
+            raise ValueError('파일함 전체 용량 제한을 초과합니다.')
+        result = blobs.put(SERVICE, upload.file, max_bytes=maximum,
+                           max_namespace_bytes=min(store.STORAGE_QUOTA_BYTES, blobs.MAX_NAMESPACE_BYTES),
+                           validate_prefix=validate)
+        return dict(type='file', **result, content_type=str(getattr(upload, 'content_type', '') or '')[:255], modified_at=time.time())
     temporary = "." + secrets.token_hex(24) + ".tmp"
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=root_fd)
     digest, size, first = hashlib.sha256(), 0, b""
@@ -273,7 +320,7 @@ def save_uploads(path, uploads, *, single=False):
     with _state(mutate=True) as state:
         _entry(state, path, directory=True)
         used = _occupied(state)
-        with _root() as (root_fd, root_path):
+        with _blob_root() as (root_fd, root_path):
             for upload in uploads:
                 name = store._safe_name(upload.filename or "")
                 _name(name)
@@ -360,6 +407,14 @@ def _download_snapshot(root_fd, entry):
     # an anonymous local inode, retain a read-only FD, and serve that FD path.
     # Namespace changes, shared-path swaps and later shared-inode mutation
     # cannot change bytes after validation or resurrect a deleted blob path.
+    if getattr(_STORAGE, 'pg', False):
+        from ha_runtime import blobs
+        payload = blobs.get(SERVICE, entry['sha256'], entry['size'])
+        with tempfile.TemporaryFile() as snapshot:
+            snapshot.write(payload); snapshot.flush(); snapshot.seek(0)
+            os.fchmod(snapshot.fileno(), 0o400)
+            fd_path = ('/proc/self/fd/' if sys.platform == 'linux' else '/dev/fd/') + str(snapshot.fileno())
+            return os.open(fd_path, os.O_RDONLY)
     source = _verify_blob(root_fd, entry)
     try:
         with tempfile.TemporaryFile() as snapshot:
@@ -386,9 +441,9 @@ def get_download_path(path):
         entry = _entry(state, path)
         if entry["type"] != "file":
             raise FileNotFoundError("파일을 찾을 수 없습니다.")
-        with _root() as (root_fd, root_path):
+        with _blob_root() as (root_fd, root_path):
             descriptor = _download_snapshot(root_fd, entry)
-            result = DownloadPath(root_path / entry["sha256"])
+            result = DownloadPath((root_path or Path('/pg-blob-snapshot')) / entry["sha256"])
             result._descriptor = descriptor
             result.download_name = path.rsplit("/", 1)[-1]
             return result
@@ -449,7 +504,7 @@ def write_download_archive(archive, paths):
         selected = _selected(state, paths)
         if len(selected) > store.MAX_DOWNLOAD_FILES or sum(entry["size"] for _, entry in selected) > store.MAX_DOWNLOAD_TOTAL_BYTES:
             raise ValueError("일괄 다운로드 제한을 초과합니다.")
-        with _root() as (root_fd, _):
+        with _blob_root() as (root_fd, _):
             for path, entry in selected:
                 descriptor = _download_snapshot(root_fd, entry)
                 modified = time.localtime(entry.get("modified_at", 0))[:6]

@@ -126,5 +126,30 @@ class TelegramNotifierTests(unittest.TestCase):
         self.assertIn("국제유가 WTI 상승", payload["text"])
 
 
+    def test_broker_send_precedes_token_check_and_never_falls_back(self):
+        from types import SimpleNamespace
+        module=self.reload_module()
+        article={'title':'alert','url':'https://example.invalid/a','nasdaq_relevance':{'level':'alert','reasons':['rate']}}
+        fake=SimpleNamespace(configuration=MagicMock(return_value={}),route=MagicMock(return_value={'message_id':7}))
+        with patch.dict('os.environ',{'HA_PG_CONFIG':'signed-fixture','TELEGRAM_BOT_TOKEN':'','TELEGRAM_CHAT_ID':''}), patch.dict(sys.modules,{'ha_egress.client':fake}), patch.object(module,'urlopen') as raw:
+            self.assertEqual(module.notify_new_investing_articles([article]),1)
+            self.assertTrue(module.notify_market_news_digest([article]))
+            self.assertTrue(all(call.args[0:2]==('crawler-worker','crawler.telegram.send') for call in fake.route.call_args_list))
+            self.assertTrue(all(set(call.args[2])=={'text'} for call in fake.route.call_args_list))
+            fake.route.side_effect=OSError('broker uncertain')
+            self.assertEqual(module.notify_new_investing_articles([article]),0)
+            self.assertFalse(module.notify_market_news_digest([article]))
+            fake.route.side_effect=None;fake.route.return_value=None
+            self.assertFalse(module.notify_market_news_digest([article]))
+            raw.assert_not_called()
+
+    def test_broker_configuration_failure_cannot_use_present_legacy_credentials(self):
+        from types import SimpleNamespace
+        module=self.reload_module();fake=SimpleNamespace(configuration=MagicMock(side_effect=OSError('bad binding')))
+        with patch.dict('os.environ',{'HA_PG_CONFIG':'bad','TELEGRAM_BOT_TOKEN':'legacy','TELEGRAM_CHAT_ID':'123'}), patch.dict(sys.modules,{'ha_egress.client':fake}), patch.object(module,'urlopen') as raw:
+            self.assertFalse(module.notify_market_news_digest([{'title':'x','url':'https://example.invalid'}]))
+            raw.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

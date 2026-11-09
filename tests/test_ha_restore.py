@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +18,37 @@ from ha_runtime import backup_cli
 
 
 class RestoreArtifactTests(unittest.TestCase):
+    def test_effects_backup_requires_storage_acceptance_and_preserves_namespace(self):
+        connection = MagicMock()
+        names = ['ha', 'ha_effects'] + ['s_' + service.replace('-', '_') + '_state' for service in backup.SERVICES]
+        connection.execute.return_value.fetchone.return_value = (0,)
+        connection.execute.return_value.fetchall.return_value = [(name,) for name in names]
+        with patch('ha_runtime.effects.validate_storage_catalog') as validate:
+            self.assertEqual(backup._schemas(connection), names)
+            validate.assert_called_once_with(connection)
+        names.append('pgxevil')
+        connection.execute.return_value.fetchall.return_value = [(name,) for name in names]
+        with self.assertRaisesRegex(DatabaseUnavailable, 'isolated_backup_schema_mismatch'):
+            backup._schemas(connection)
+
+    def test_broker_role_restore_requires_preprovision_and_never_creates_roles(self):
+        connection = MagicMock()
+        connection.execute.return_value.fetchall.return_value = [('fixture_broker',)]
+        required = backup._broker_role_requirements(connection, ['ha', 'ha_effects'])
+        manifest = {'logical': {'schemas': ['ha', 'ha_effects']}, 'required_broker_roles': required}
+        valid = (True, False, False, False, False, False, False, True)
+        connection.execute.return_value.fetchone.return_value = valid
+        backup._check_broker_role_requirements(connection, manifest)
+        for invalid in (None, (True, True, False, False, False, False, False, True),
+                        (True, False, True, False, False, False, False, True), valid[:-1] + (False,)):
+            connection.execute.return_value.fetchone.return_value = invalid
+            with self.assertRaisesRegex(DatabaseUnavailable, 'restore_broker_role_preprovision_required'):
+                backup._check_broker_role_requirements(connection, manifest)
+        self.assertTrue(all(call.args[0].lstrip().startswith('SELECT') for call in connection.execute.call_args_list))
+        with self.assertRaisesRegex(DatabaseUnavailable, 'restore_effects_role_inventory_invalid'):
+            backup._check_broker_role_requirements(connection, {'logical': {'schemas': ['ha_effects']}})
+        backup._check_broker_role_requirements(connection, {'logical': {'schemas': ['ha']}})
+
     def test_aes_gcm_requires_correct_key_nonce_header_and_complete_tag(self):
         key = os.urandom(32)
         encrypted = backup._seal(b"synthetic protected fixture", key)

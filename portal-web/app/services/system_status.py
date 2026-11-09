@@ -4,6 +4,7 @@ from typing import Any
 from urllib.error import URLError
 from urllib.request import urlopen, Request
 from app.services.ha_backend import runtime
+from app.services import ha_reads
 import json
 
 
@@ -40,6 +41,10 @@ def get_dashboard_status(agent_url: str | None = None, timeout: float = 1.5) -> 
     agent_url = agent_url or os.getenv("SYSTEM_AGENT_URL", DEFAULT_AGENT_URL)
 
     try:
+        if ha_reads.enabled():
+            value=ha_reads.read("system","/metrics")
+            if type(value) is not dict:raise OSError("internal_read_unavailable")
+            return value
         with urlopen(_agent_request(agent_url, "/metrics"), timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except (OSError, URLError, json.JSONDecodeError):
@@ -98,8 +103,11 @@ def get_recovery_events(agent_url: str | None = None, timeout: float = 1.0) -> l
 
     agent_url = agent_url or os.getenv("SYSTEM_AGENT_URL", DEFAULT_AGENT_URL)
     try:
-        with urlopen(_agent_request(agent_url, "/recovery-events"), timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        if ha_reads.enabled():
+            payload=ha_reads.read("system","/recovery-events")
+        else:
+            with urlopen(_agent_request(agent_url, "/recovery-events"), timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
     except (OSError, URLError, UnicodeError, HTTPException, json.JSONDecodeError):
         return []
 
@@ -118,9 +126,14 @@ def get_recovery_events(agent_url: str | None = None, timeout: float = 1.0) -> l
 
 def _check_service(target: dict[str, str], timeout: float) -> dict[str, Any]:
     try:
-        with urlopen(target["url"], timeout=timeout) as response:
-            raw = response.read(HEALTH_RESPONSE_MAX_BYTES + 1)
-            remaining = getattr(response, "length", None)
+        if ha_reads.enabled():
+            names={"뉴스 허브":"news","유튜브 메모":"youtube","책 메모":"books","시스템 상태":"system"}
+            payload=ha_reads.read(names[target["name"]],"/health")
+            raw=json.dumps(payload,allow_nan=False).encode();remaining=None
+        else:
+            with urlopen(target["url"], timeout=timeout) as response:
+                raw = response.read(HEALTH_RESPONSE_MAX_BYTES + 1)
+                remaining = getattr(response, "length", None)
         # Bounded HTTPResponse.read() does not raise for a short Content-Length body.
         if isinstance(remaining, int) and remaining > 0:
             raise ValueError("incomplete health response")

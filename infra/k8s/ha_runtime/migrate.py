@@ -22,16 +22,23 @@ def create_namespace(admin, service, component="main"):
     admin.execute("CREATE TABLE ha_barriers(attempt text PRIMARY KEY,receipt text NOT NULL REFERENCES ha_receipts(receipt),epoch bigint NOT NULL)")
     if component == "state":
         admin.execute("CREATE TABLE shared_state(key text PRIMARY KEY,payload jsonb NOT NULL,version bigint NOT NULL)")
+        if service == "portal-web":
+            from .blobs import setup_namespace
+            setup_namespace(admin, schema)
     return schema
 
 
-def grant_namespace(admin, schema, roles):
+def grant_namespace(admin, schema, roles, *, enforced_service=None, enforced_generation=None):
     from psycopg import sql
+    if enforced_service is not None:
+        # Never publish DML privileges before the closed-authority installation.
+        from .enforcement import install_namespace
+        return install_namespace(admin, schema, enforced_service, roles, generation=enforced_generation)
     for role in roles:
         admin.execute(sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(sql.Identifier(schema), sql.Identifier(role)))
         for table in admin.execute("SELECT tablename FROM pg_tables WHERE schemaname=%s", (schema,)).fetchall():
             name = table[0]
-            permissions = "SELECT,INSERT" if name in {"ha_receipts", "ha_barriers"} else "SELECT,INSERT,UPDATE,DELETE"
+            permissions = "SELECT,INSERT" if name in {"ha_receipts", "ha_barriers", "ha_blob_objects", "ha_blob_chunks"} else "SELECT,INSERT,UPDATE,DELETE"
             admin.execute(sql.SQL("GRANT " + permissions + " ON {}.{} TO {}").format(sql.Identifier(schema), sql.Identifier(name), sql.Identifier(role)))
         admin.execute(sql.SQL("GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA {} TO {}").format(sql.Identifier(schema), sql.Identifier(role)))
 

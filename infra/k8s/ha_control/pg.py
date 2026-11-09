@@ -5,6 +5,8 @@ threshold, destructive PGDATA clone, generic operator SQL or credential export
 is implemented. All database/transport failures are static fail-closed labels.
 """
 from contextlib import contextmanager
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -20,6 +22,7 @@ from .windows import WindowsFence
 ROLE_LOCK = 7142026110601
 LEASE_SECONDS = 5
 PROOF_SECONDS = 2
+ENFORCED_SERVICES = frozenset({'portal-web','book-memo','youtube-memo','crawler-worker','car-care-worker','homeops-executor','system-agent'})
 
 
 def _deny(reason):
@@ -41,7 +44,27 @@ def _private_file(value):
 
 class PgBackend:
     def __init__(self, plan, approval, *, fence=None):
-        self.fence_adapter = fence if fence is not None else WindowsFence(plan, approval)
+        if fence is not None:
+            self.fence_adapter = fence
+        else:
+            from .legacy_guard import pairs
+            try:
+                raw = _private_file(plan).read_bytes()
+                if len(raw)>1048576:
+                    _deny('private_configuration_required')
+                candidate = json.loads(raw,object_pairs_hook=pairs)
+                profile = candidate.get('profile')
+                if profile is None:
+                    self.fence_adapter = WindowsFence(plan, approval)
+                elif profile == 'enforced-vm-v1':
+                    from .enforced_windows import EnforcedWindowsFence
+                    self.fence_adapter = EnforcedWindowsFence(plan,approval)
+                else:
+                    _deny('unsupported_fence_profile')
+            except TransitionBlocked:
+                raise
+            except Exception:
+                _deny('private_configuration_required')
         self.plan_path = Path(plan)
         self.depth = 0
         self.plan = None
@@ -97,6 +120,64 @@ class PgBackend:
             _private_file(endpoint["sslrootcert"])
         if value["pg_nodes"]["A"] == value["pg_nodes"]["B"]:
             _deny("distinct_pg_endpoints_required")
+        if value.get('profile') is not None:
+            contract = value.get('pg_enforcement')
+            expected = hashlib.sha256((Path(__file__).parent.parent/'ha_runtime/enforcement.sql').read_bytes()).hexdigest()
+            if (value.get('profile')!='enforced-vm-v1' or value.get('schema_version')!=2
+                    or not isinstance(contract,dict) or set(contract)!={'definition_sha256','role_sets','namespace_tables','effects'}
+                    or contract['definition_sha256']!=expected or not isinstance(contract['role_sets'],dict)
+                    or set(contract['role_sets'])!={'A','B'}):
+                _deny('enforced_pg_plan_required')
+            from .prepare import EFFECTS_SOURCES, TARGETS, effects_runtime_sha256
+            try:
+                source_files = {path: hashlib.sha256((Path(__file__).parents[1] / TARGETS[path]).read_bytes()).hexdigest()
+                                for path in EFFECTS_SOURCES}
+                effects = contract['effects']
+                if (type(effects) is not dict or set(effects) != {'code_sha256','broker_role'}
+                        or effects['code_sha256'] != effects_runtime_sha256(source_files)
+                        or type(effects['broker_role']) is not str
+                        or not re.fullmatch('[a-z][a-z0-9_]{0,62}', effects['broker_role'])
+                        or not re.fullmatch('[0-9a-f]{40}', str(value.get('source_commit','')))
+                        or not re.fullmatch('[0-9a-f]{64}', str(getattr(self.fence_adapter,'plan_sha256','')))):
+                    _deny('enforced_effects_plan_required')
+            except TransitionBlocked:
+                raise
+            except Exception:
+                _deny('enforced_effects_plan_required')
+            self._namespace_contract(contract['namespace_tables'])
+            roles=[]
+            for identities in contract['role_sets'].values():
+                if not isinstance(identities,dict) or set(identities)!=ENFORCED_SERVICES:
+                    _deny('all_service_generation_roles_required')
+                for role in identities.values():
+                    if not isinstance(role,str) or not re.fullmatch('[a-z][a-z0-9_]{0,62}',role):
+                        _deny('all_service_generation_roles_required')
+                    roles.append(role)
+            if effects['broker_role'] in roles:
+                _deny('distinct_effects_broker_role_required')
+            if len(set(roles))!=14:
+                _deny('distinct_generation_roles_required')
+        return value
+
+    @staticmethod
+    def _namespace_contract(value):
+        if not isinstance(value,dict) or not 7 <= len(value) <= 256:
+            _deny('exact_namespace_table_plan_required')
+        services=set()
+        total=0
+        for schema,item in value.items():
+            if (not isinstance(schema,str) or not re.fullmatch(r's_[a-z][a-z0-9_]{1,60}',schema)
+                    or not isinstance(item,dict) or set(item)!={'service','tables'}
+                    or not isinstance(item['service'],str) or item['service'] not in ENFORCED_SERVICES
+                    or not schema.startswith('s_'+item['service'].replace('-','_')+'_')
+                    or not isinstance(item['tables'],list) or not 1 <= len(item['tables']) <= 512
+                    or any(not isinstance(table,str) or not re.fullmatch(r'[a-z][a-z0-9_]{0,62}',table) for table in item['tables'])
+                    or item['tables']!=sorted(set(item['tables']))):
+                _deny('exact_namespace_table_plan_required')
+            services.add(item['service'])
+            total+=len(item['tables'])
+        if services!=ENFORCED_SERVICES or total>4096:
+            _deny('exact_namespace_table_plan_required')
         return value
 
     def bind(self, state):
@@ -131,6 +212,9 @@ class PgBackend:
                 connection.close()
 
     def _observe(self, connection, node, state):
+        if self.plan.get('profile')=='enforced-vm-v1':
+            self._enforced_observation(connection,state)
+            self._effects_observation(connection)
         value = connection.execute("""SELECT jsonb_build_object(
             'cluster',c.cluster,'epoch',c.epoch,'revision',c.revision,
             'primary',c.primary_node,'partner',c.partner,'timeline',c.timeline,
@@ -153,6 +237,99 @@ class PgBackend:
                 or type(value.get("epoch")) is not int or value["epoch"] > state["generation"]):
             _deny("pg_identity_mismatch")
         return value
+
+    def _enforced_observation(self, connection, state):
+        """Live server catalog/permit checks, inside the existing shared budget."""
+        contract=self.plan['pg_enforcement']
+        expected=self._namespace_contract(contract['namespace_tables'])
+        rows=connection.execute('''SELECT n.schema_name::text,n.service,n.definition_sha256,n.system_id,
+            (s.oid IS NOT NULL AND owner.rolsuper
+             AND EXISTS(SELECT 1 FROM pg_catalog.pg_namespace ns JOIN pg_catalog.pg_roles r ON r.oid=ns.nspowner
+                WHERE ns.nspname='ha' AND r.rolsuper)
+             AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.relnamespace=s.oid
+                AND c.relkind IN ('r','p','f','v','m') AND
+                    (c.relkind<>'r' OR c.relpersistence<>'p' OR NOT c.relrowsecurity OR NOT c.relforcerowsecurity
+                    OR NOT EXISTS(SELECT 1 FROM pg_catalog.pg_roles r WHERE r.oid=c.relowner AND r.rolsuper)
+                    OR NOT EXISTS(SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid=c.oid AND t.tgname='ha_enforced_write'
+                        AND t.tgenabled='A' AND t.tgfoid='ha.enforced_write_guard()'::regprocedure
+                AND t.tgtype=62 AND t.tgqual IS NULL AND t.tgattr::text='' AND t.tgnargs=0)
+                    OR NOT EXISTS(SELECT 1 FROM pg_catalog.pg_trigger t WHERE t.tgrelid=c.oid AND t.tgname='ha_enforced_commit'
+                        AND t.tgenabled='A' AND t.tgfoid='ha.enforced_write_guard()'::regprocedure
+                AND t.tgtype=29 AND t.tgdeferrable AND t.tginitdeferred
+                AND t.tgqual IS NULL AND t.tgattr::text='' AND t.tgnargs=0)))
+             AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid=c.relnamespace
+                JOIN pg_catalog.pg_roles r ON r.oid=c.relowner WHERE ns.nspname='ha'
+                AND c.relname IN ('enforced_namespaces','enforced_roles') AND (c.relkind<>'r' OR NOT r.rolsuper))
+             AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace ns ON ns.oid=p.pronamespace
+                JOIN pg_catalog.pg_roles r ON r.oid=p.proowner WHERE ns.nspname='ha'
+                AND p.proname IN ('observe','require_enforced_writer','enforced_write_guard','enforced_read_allowed',
+                    'enforced_session_ready','enforced_vm_blob_ready','enforced_blob_quota','enforced_blob_complete') AND NOT r.rolsuper)),
+            ARRAY(SELECT c.relname::text FROM pg_catalog.pg_class c WHERE c.relnamespace=s.oid
+                AND c.relkind IN ('r','p','f','v','m') ORDER BY c.relname)
+            FROM ha.enforced_namespaces n
+            LEFT JOIN pg_catalog.pg_namespace s ON s.nspname=n.schema_name
+            LEFT JOIN pg_catalog.pg_roles owner ON owner.oid=s.nspowner''').fetchall()
+        if (len(rows)!=len(expected) or {r[0] for r in rows}!=set(expected)
+                or any(r[2]!=contract['definition_sha256'] or r[3]!=str(self.plan['system_id'])
+                    or r[4] is not True or not r[5]
+                    or expected[r[0]]!={'service':r[1],'tables':r[5]} for r in rows)):
+            _deny('server_enforcement_unverified')
+        policies=connection.execute('''SELECT e.role_name::text,e.service,e.node,e.generation,
+            r.rolsuper OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication OR r.rolbypassrls
+            OR EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members m WHERE m.member=r.oid OR m.roleid=r.oid)
+            FROM ha.enforced_roles e JOIN pg_catalog.pg_roles r ON r.rolname=e.role_name
+            JOIN ha.identities i ON i.role_name=e.role_name AND i.service=e.service AND i.node=e.node
+            WHERE e.generation=%s''',(state['generation'],)).fetchall()
+        if any(type(generation) is not int or generation!=state['generation'] or type(unsafe) is not bool
+               for _,_,_,generation,unsafe in policies):
+            _deny('generation_role_enforcement_unverified')
+        actual={(service,logical_node):role for role,service,logical_node,generation,unsafe in policies if unsafe is False}
+        wanted={(service,logical_node):role for logical_node,services in contract['role_sets'].items() for service,role in services.items()}
+        if actual!=wanted or len(policies)!=14:
+            _deny('generation_role_enforcement_unverified')
+        from .privilege_closure import privilege_closures_unsafe
+        if privilege_closures_unsafe(connection,[(role,service) for (service,_),role in wanted.items()]):
+            _deny('generation_role_privilege_closure_unverified')
+
+    def _effects_observation(self, connection):
+        """Read actual storage, app ACLs and exact approved ledger binding."""
+        try:
+            from ha_runtime.effects import Binding, validate_catalog
+            contract = self.plan['pg_enforcement']['effects']
+            expected = (self.plan['cluster'], str(self.plan['system_id']), self.plan['source_commit'],
+                        self.fence_adapter.plan_sha256, contract['broker_role'])
+            binding = Binding(*expected, broker_instance='0' * 64)
+            binding.validate()
+            # validate_catalog includes validate_storage_catalog: no table names
+            # or a matching binding row alone constitute storage acceptance.
+            validate_catalog(connection, binding)
+            rows = connection.execute('SELECT cluster,system_id,source_commit,plan_sha256,broker_role FROM ha_effects.binding').fetchall()
+            if rows != [expected]:
+                _deny('external_effect_controller_binding_mismatch')
+        except TransitionBlocked:
+            raise
+        except Exception:
+            _deny('external_effect_controller_catalog_unverified')
+
+    def _effects_open_gate(self, primary, peer, watermark):
+        """Only inside the exclusive ROLE_LOCK immediately before lease open.
+
+        The first synchronous nonce commit supplies this attempt's watermark;
+        reject a lagging peer and every unresolved record on either node. A
+        shared renewal must never call this gate for a normal inflight effect.
+        """
+        try:
+            replay = peer.execute('SELECT pg_last_wal_replay_lsn()::text').fetchone()
+            if not replay or self._lsn(replay[0]) < watermark:
+                _deny('external_effect_controller_peer_unproven')
+            query = "SELECT 1 FROM ha_effects.ledger WHERE state IN ('pending','inflight','uncertain') LIMIT 1"
+            unresolved = [connection.execute(query).fetchone() for connection in (primary, peer)]
+            if any(row is not None for row in unresolved):
+                _deny('external_effect_controller_unresolved')
+        except TransitionBlocked:
+            raise
+        except Exception:
+            _deny('external_effect_controller_ledger_unavailable')
 
     def _read(self, node, state):
         with self._connection(node) as connection:
@@ -420,6 +597,8 @@ class PgBackend:
                         if updated.rowcount != 1:
                             _deny("authority_changed_during_renewal")
                     else:
+                        if self.plan.get('profile') == 'enforced-vm-v1':
+                            self._effects_open_gate(primary, peer, watermark)
                         primary.execute("UPDATE ha.control SET serving=ARRAY[%s]::text[],worker=%s,writes_open=true,history_safe=true,expires_at=clock_timestamp()+interval '5 seconds' WHERE singleton=1 AND epoch=%s AND primary_node=%s", (state["target"], state["target"], state["generation"], state["target"]))
                 self._commit(primary)
                 if not suffix:

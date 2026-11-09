@@ -1,0 +1,59 @@
+{
+  "all_seven_apps_verified": false,
+  "base_image": "python:3.11-alpine3.24@sha256:d9368b3a5ac59afea7b5d4f2e2aea0941dbf9fdee9c369c5bec00b98244bc929",
+  "caddy_uid_ingress_binary_halfclose": true,
+  "dockerfile_sha256": "74c958f5c7106becfc787f40f4c266b5f88aa1514ff96e85aa9f9d68cf487c49",
+  "error": null,
+  "eth0_entrypoint_refused_before_child": true,
+  "linux_checks": {
+    "capability_readonly": true,
+    "direct_tcp_denied": 2,
+    "gateway_peer_uid_verified": 10003,
+    "gid": 10001,
+    "groups": [
+      10001,
+      10004
+    ],
+    "interfaces": [
+      "lo"
+    ],
+    "kernel_status": {
+      "CapAmb": "0000000000000000",
+      "CapBnd": "0000000000000000",
+      "CapEff": "0000000000000000",
+      "CapInh": "0000000000000000",
+      "CapPrm": "0000000000000000",
+      "NoNewPrivs": "1"
+    },
+    "production_config_loaded": true,
+    "readonly_unlink_denied": true,
+    "root_readonly": true,
+    "three_binary_halfclose_paths": true,
+    "uid": 10001
+  },
+  "owned_fixture_removed": true,
+  "production_access": false,
+  "protected_resource_inventory_unchanged": true,
+  "provider_calls": 0,
+  "scope": "local_linux_representative_book_memo_echo_only",
+  "source_sha256": {
+    "infra/k8s/ha-lab/network_smoke.py": "b9d56fb36894aa18b60e37a0acaddcba33fe5338947928fd5faa22c6c80989b0",
+    "infra/k8s/ha_control/__init__.py": "e0465d591cacd4a24ad67422fd7786fd1e7c4b5dc314dc0016e136f64e21c01e",
+    "infra/k8s/ha_control/privilege_closure.py": "b0b4979631f51ff8a56dc103f0be3e9d574f96305296dfd0b78a0bf078419156",
+    "infra/k8s/ha_egress/__init__.py": "0241d9c8da2b5226f9206f5140319c373373e89a4957efae2ef7028174e21554",
+    "infra/k8s/ha_egress/app_entrypoint.py": "fa3bafa2338c42b7ef9afb768eb05cfb1a0f579561fd44a4a215dcb8d37f25b1",
+    "infra/k8s/ha_egress/client.py": "7959e52e51e5cde8e64a262428f9f5c2a5935a0114f084b7b14af97f8d8ad34e",
+    "infra/k8s/ha_egress/socket_gateway.py": "4c80ab9a01354ca1edca1aac252e4443d688436795858499e04ed30bbf74c08e",
+    "infra/k8s/ha_runtime/__init__.py": "90041076a5d487a55d515ee4eef3c1d4e1428b6c714119bf9fbef78e78fb53a1",
+    "infra/k8s/ha_runtime/config.py": "1d475dfb1b8b4d468b40af61901c17195168cb99863123072516e36116fe43c0",
+    "infra/k8s/ha_runtime/db.py": "ac8830578bf09df92a52931d2b5b0d3a1818d4dd0e29f95f3f2d3ac0cf95af20",
+    "infra/k8s/ha_runtime/enforcement.py": "d951978bd534cd72804f5b0fcbf041e95d919efd3c5e0a2139eb8fed6b3b5b62",
+    "infra/k8s/ha_runtime/enforcement.sql": "78f2fa2fa1af307f139bc2c3158bd9b84d468d0acc33d7e413d28c3367c0fd56",
+    "infra/k8s/ha_runtime/proof.py": "6ac77f21359e5f002b414a3b496c74bae54e834c5d26852c91c50de98bce91fa",
+    "infra/k8s/tools/n100_ha_contract.py": "53307396032b8412fca4d402a252236226b376d7978cb22092994d7fabbc9d9a"
+  },
+  "status": "PASS",
+  "tls_verified": false,
+  "windows_whole_transition_verified": false,
+  "wrong_peer_uid_denied": 2
+}

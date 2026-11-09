@@ -4,9 +4,9 @@ from zoneinfo import ZoneInfo
 from app.models import VehicleSnapshot
 from app.services.maintenance import Alert, MAINTENANCE_RULES, evaluate_maintenance
 from app.services.store import CarCareStore
+from app.services.vehicle_types import SUPPORTED_WARNINGS
 
 
-SUPPORTED_WARNINGS = {"engine_oil", "brake_oil", "tire_pressure", "washer_fluid", "fuel"}
 DTE_ALERT_THRESHOLDS = (100, 50)
 
 

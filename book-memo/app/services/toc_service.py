@@ -1,5 +1,7 @@
 import html
 import json
+import os
+from contextlib import nullcontext
 import re
 from typing import Any
 
@@ -30,8 +32,15 @@ def _content_isbn13(value: str) -> str:
 
 
 def fetch_toc_candidates(book: dict[str, Any], limit: int = 500) -> dict[str, Any]:
-    key = api_key()
-    if not key:
+    try:
+        broker = False
+        if 'HA_PG_CONFIG' in os.environ:
+            from ha_egress.http_read import enabled
+            broker = enabled('book-memo')
+    except (OSError,ImportError,ValueError):
+        raise ValueError('YES24 목차를 불러올 수 없습니다. API 키와 이용 상태를 확인해주세요.') from None
+    key = '' if broker else api_key()
+    if not key and not broker:
         raise ValueError("목차 조회를 사용하려면 YES24 API 키를 설정해주세요.")
     isbn = _content_isbn13(str(book.get("isbn") or "").strip())
     item_id = str(book.get("external_id") or "").strip()
@@ -42,10 +51,15 @@ def fetch_toc_candidates(book: dict[str, Any], limit: int = 500) -> dict[str, An
     else:
         return {"source": "", "candidates": []}
     try:
-        with requests.Session() as session:
-            session.trust_env = False
-            with session.get(YES24_CONTENT_URL, params=params, headers={"X-Api-Key": key},
-                             timeout=(3, 8), allow_redirects=False, stream=True) as response:
+        with (nullcontext(None) if broker else requests.Session()) as session:
+            if broker:
+                from ha_egress.http_read import get
+                response_context = get('book-memo',YES24_CONTENT_URL,params=params)
+            else:
+                session.trust_env = False
+                response_context = session.get(YES24_CONTENT_URL,params=params,headers={'X-Api-Key':key},
+                                               timeout=(3,8),allow_redirects=False,stream=True)
+            with response_context as response:
                 chunks = []
                 size = 0
                 for chunk in response.iter_content(16384):
@@ -65,7 +79,7 @@ def fetch_toc_candidates(book: dict[str, Any], limit: int = 500) -> dict[str, An
                 truncated = len(candidates) > limit
                 candidates = candidates[:limit]
                 source_url = product_url(data.get("itemId")) if candidates else ""
-    except (requests.RequestException, ValueError, TypeError):
+    except (requests.RequestException,OSError,ImportError,ValueError,TypeError):
         raise ValueError("YES24 목차를 불러올 수 없습니다. API 키와 이용 상태를 확인해주세요.") from None
     result = {"source": "YES24" if candidates else "", "candidates": candidates, "source_url": source_url}
     if truncated:

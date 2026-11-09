@@ -68,20 +68,45 @@ def _approved(payload):
         raise DatabaseUnavailable("production_ha_not_armed")
     release = _release()
     approval = json.loads(_authority_file(os.environ["HA_PG_ACTIVATION"]).read_text())
+    if type(approval) is not dict:
+        raise DatabaseUnavailable('invalid_activation_authority')
+    installed = payload.get('profile') == 'enforced-vm-v1' and approval.get('schema_version') == 3
     identities = {"cluster", "system_id", "node", "service", "primary_node", "primary", "partner"} | set(release)
+    if payload.get("profile") == "enforced-vm-v1":
+        identities |= {"profile", "enforcement_sha256", "effects"}
+        try:
+            from ha_egress.client import BrokerUnavailable, validate_binding
+        except ImportError:
+            raise DatabaseUnavailable("activation_effects_binding_required") from None
+        try:
+            validate_binding(payload.get("effects"))
+            for key in ("ca", "certificate"):
+                _authority_file(payload["effects"][key])
+            _private(payload["effects"]["key"])
+        except (BrokerUnavailable, OSError, ValueError, KeyError, TypeError):
+            raise DatabaseUnavailable("activation_effects_binding_required") from None
+    if installed:
+        if (payload.get('scope') != 'n100-approved' or type(payload.get('generation')) is not int
+                or payload['generation'] < 1):
+            raise DatabaseUnavailable('installed_authority_invalid')
+        identities |= {'installation_id','generation'}
+        validate_installed_authority(approval, payload.get('installation_id'))
+    authority_fields = ({'schema_version','action','authority_kind','installed_at','nodes'}
+                        if installed else {'action','expires','nodes'})
     if (set(payload) != identities | {"scope"}
-            or set(approval) != identities | {"action", "expires", "nodes"}
+            or set(approval) != identities | authority_fields
             or approval["action"] != "activate-ha"
             or any(payload[key] != approval[key] for key in identities)
             or any(payload[key] != value for key, value in release.items())):
         raise DatabaseUnavailable("activation_identity_mismatch")
     # Explicit UTC, bounded remaining lifetime: stale or open-ended grants fail.
-    if not isinstance(approval["expires"], str) or not approval["expires"].endswith("Z"):
-        raise DatabaseUnavailable("activation_expiry_required")
-    expiry = datetime.fromisoformat(approval["expires"].removesuffix("Z") + "+00:00")
-    now = datetime.now(timezone.utc)
-    if expiry.utcoffset() != timedelta(0) or not now < expiry <= now + timedelta(hours=24):
-        raise DatabaseUnavailable("activation_expired_or_unbounded")
+    if not installed:
+        if not isinstance(approval["expires"], str) or not approval["expires"].endswith("Z"):
+            raise DatabaseUnavailable("activation_expiry_required")
+        expiry = datetime.fromisoformat(approval["expires"].removesuffix("Z") + "+00:00")
+        now = datetime.now(timezone.utc)
+        if expiry.utcoffset() != timedelta(0) or not now < expiry <= now + timedelta(hours=24):
+            raise DatabaseUnavailable("activation_expired_or_unbounded")
     nodes = approval["nodes"]
     if (not isinstance(nodes, dict) or set(nodes) != {"A", "B"} or nodes["A"] == nodes["B"]
             or any(not isinstance(host, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", host)
@@ -92,6 +117,27 @@ def _approved(payload):
     return nodes
 
 
+def validate_installed_authority(value, installation_id):
+    """Validate the permanent same-plan installation envelope, not a live lease.
+
+    Only a trusted owner can issue the containing authority file. Native boot
+    checks and the DB lease remain responsible for current execution authority.
+    """
+    try:
+        if (type(value) is not dict or type(value.get('schema_version')) is not int or value['schema_version'] != 3
+                or value.get('authority_kind') != 'installed-runtime'
+                or type(installation_id) is not str or not re.fullmatch(r'[0-9a-f]{64}', installation_id)
+                or value.get('installation_id') != installation_id
+                or 'expires' in value or 'expires_at' in value
+                or type(value.get('installed_at')) is not str or not value['installed_at'].endswith('Z')):
+            raise ValueError()
+        stamp = datetime.fromisoformat(value['installed_at'].removesuffix('Z') + '+00:00')
+        if stamp.utcoffset() != timedelta(0) or stamp > datetime.now(timezone.utc):
+            raise ValueError()
+    except (ValueError, TypeError, KeyError):
+        raise DatabaseUnavailable('installed_authority_invalid') from None
+
+
 def load(service=None):
     try:
         environment = os.getenv("APP_ENV")
@@ -100,6 +146,10 @@ def load(service=None):
                 or (environment in {"test", "development"} and os.getenv("HA_LOCAL_RUNTIME") != "1")):
             raise DatabaseUnavailable("production_ha_not_armed")
         payload = json.loads(_private(os.environ["HA_PG_CONFIG"]).read_text())
+        if "profile" in payload:
+            from .enforcement import PROFILE, definition_sha256
+            if payload["profile"] != PROFILE or payload.get("enforcement_sha256") != definition_sha256():
+                raise DatabaseUnavailable("enforced_profile_binding_required")
         if payload["scope"] == "local-isolated":
             if (os.getenv("HA_LOCAL_RUNTIME") != "1"
                     or os.getenv("APP_ENV") not in {"test", "development"}):

@@ -10,8 +10,15 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[3]
 SOURCES = tuple("infra/k8s/ha_control/" + name for name in (
     "__init__.py", "controller.py", "windows.py", "pg.py", "cli.py", "prepare.py", "windows-fence.ps1",
-    "windows-legacy-guard.ps1", "legacy_guard.py", "legacy_linux.py", "launcher.py")) + (
-    "scripts/windows-bootstrap.ps1", "infra/k8s/ha_runtime/schema.sql")
+    "windows-legacy-guard.ps1", "legacy_guard.py", "legacy_linux.py", "launcher.py",
+    "enforced_windows.py", "windows-enforced-vm.ps1", "windows-service-host.cs", "provision_enforced.py", "build-service-host.ps1", "windows-service-preflight.ps1", "privilege_closure.py")) + (
+    "scripts/windows-bootstrap.ps1", "infra/k8s/ha_runtime/schema.sql", "infra/k8s/ha_runtime/enforcement.sql")
+# Complete lazy effects import closure, with canonical paths retained in hashes.
+EFFECTS_SOURCES = tuple("infra/k8s/ha_runtime/" + name for name in (
+    "__init__.py", "config.py", "db.py", "proof.py", "effects.py", "enforcement.py",
+    "schema.sql", "enforcement.sql")) + (
+    "infra/k8s/ha_control/privilege_closure.py", "infra/k8s/tools/n100_ha_contract.py")
+SOURCES = tuple(dict.fromkeys((*SOURCES, *EFFECTS_SOURCES)))
 TARGETS = {source: source.removeprefix("infra/k8s/") if source.startswith("infra/k8s/") else source for source in SOURCES}
 REQUIREMENTS = b"psycopg[binary]==3.3.8\n"
 
@@ -26,6 +33,10 @@ def sha(data):
 
 def encode(value):
     return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
+
+
+def effects_runtime_sha256(source_files):
+    return sha(encode({path: source_files[path] for path in EFFECTS_SOURCES}))
 
 
 def git(*args):
@@ -80,10 +91,28 @@ def templates(commit, bindings):
                                    "ha-transition": "explicit full HA transition scope; separately approved"},
               "standalone_fence_supported": False,
               "execution_performed": False, "approval_issued": False}
+    status["enforced_install_privilege_scope"] = {"target":"pg_catalog.pg_settings","privilege":"UPDATE table and columns only","principals":"PUBLIC and registered application roles only","transaction":"atomic closed-authority install; rollback on failure","production_applied":False}
     result = {"native-plan.template.json": encode(plan), "readiness.json": encode(status)}
     for action in ("fence", "ha-transition"):
         result[action + "-approval.template.json"] = encode({
             "action": action, "source_commit": commit, "plan_sha256": None, "expires_at": None})
+    enforced=dict(plan, schema_version=2,profile='enforced-vm-v1',installation_id=None,
+        pg_enforcement={'definition_sha256':bindings['enforced_definition_sha256'],'namespace_tables':{},
+            'effects':{'code_sha256':bindings['effects_runtime_sha256'],'broker_role':None},
+            'role_sets':{node:{service:None for service in ('portal-web','book-memo','youtube-memo','crawler-worker','car-care-worker','homeops-executor','system-agent')} for node in ('A','B')}},
+        windows_enforced={key:None for key in ('driver_sha256','adapter_sha256','policy_path','policy_sha256',
+            'service_name','service_sid','boot_ticks','session_id','python_path','python_sha256','launcher_path',
+            'launcher_sha256','service_image_sha256','vm_id','vm_notes_sha256','vm_config_root','disks')})
+    enforced['windows_enforced'].update(driver_sha256=bindings['enforced_driver_sha256'],
+                                      adapter_sha256=bindings['enforced_adapter_sha256'],disks=[])
+    result['enforced-plan.template.json']=encode(enforced)
+    result['enforced-approval.template.json']=encode({'schema_version':2,'profile':'enforced-vm-v1',
+        'source_commit':commit,'plan_sha256':None,'policy_sha256':None,'action':'ha-transition','expires_at':None})
+    # Template only: issuing installation identity/authority belongs to a
+    # separately approved TCB administrator installation step.
+    result['enforced-installed-authority.template.json']=encode({'schema_version':3,'profile':'enforced-vm-v1',
+        'action':'ha-transition','authority_kind':'installed-runtime','installation_id':None,'installed_at':None,
+        'plan_sha256':None,'source_commit':commit,'policy_sha256':None})
     return result
 
 
@@ -108,14 +137,20 @@ def prepare(commit, output):
                 "generated_requirements_sha256": sha(REQUIREMENTS)}
     manifest["source_bootstrap_sha256"] = manifest["source_files"]["scripts/windows-bootstrap.ps1"]
     native = {key: value for key, value in manifest["source_files"].items()
-              if key.endswith(("windows.py", "windows-fence.ps1", "windows-bootstrap.ps1", "windows-legacy-guard.ps1", "legacy_guard.py", "legacy_linux.py"))}
+              if key.endswith(("windows.py", "windows-fence.ps1", "windows-enforced-vm.ps1", "windows-service-host.cs", "provision_enforced.py", "windows-service-preflight.ps1", "windows-bootstrap.ps1", "windows-legacy-guard.ps1", "legacy_guard.py", "legacy_linux.py"))}
     manifest["native_windows_code_sha256"] = sha(encode(native))
     manifest["controller_code_sha256"] = sha(encode(manifest["source_files"]))
+    manifest["effects_runtime_sha256"] = effects_runtime_sha256(manifest["source_files"])
     for field, source in (("legacy_linux_sha256", "legacy_linux.py"), ("legacy_guard_code_sha256", "legacy_guard.py"),
                           ("windows_guard_sha256", "windows-legacy-guard.ps1")):
         manifest[field] = manifest["source_files"]["infra/k8s/ha_control/" + source]
+    for field,source in (('enforced_adapter_sha256','infra/k8s/ha_control/enforced_windows.py'),
+                         ('enforced_driver_sha256','infra/k8s/ha_control/windows-enforced-vm.ps1'),
+                         ('enforced_definition_sha256','infra/k8s/ha_runtime/enforcement.sql')):
+        manifest[field]=manifest['source_files'][source]
     bindings = {key: manifest[key] for key in ("source_bootstrap_sha256", "native_windows_code_sha256", "controller_code_sha256",
-                                             "legacy_linux_sha256", "legacy_guard_code_sha256", "windows_guard_sha256")}
+                                             "legacy_linux_sha256", "legacy_guard_code_sha256", "windows_guard_sha256",
+                                             "enforced_adapter_sha256","enforced_driver_sha256","enforced_definition_sha256","effects_runtime_sha256")}
     rendered = {"files/" + TARGETS[key]: value for key, value in files.items()}
     rendered["files/requirements.txt"] = REQUIREMENTS
     rendered.update(templates(commit, bindings))
@@ -154,13 +189,18 @@ def verify(bundle, expected_manifest_sha256=None):
         if manifest["source_files"][source] != actual["files/" + TARGETS[source]]:
             raise BundleError("source_file_binding_mismatch")
     native = {key: value for key, value in manifest["source_files"].items()
-              if key.endswith(("windows.py", "windows-fence.ps1", "windows-bootstrap.ps1", "windows-legacy-guard.ps1", "legacy_guard.py", "legacy_linux.py"))}
+              if key.endswith(("windows.py", "windows-fence.ps1", "windows-enforced-vm.ps1", "windows-service-host.cs", "provision_enforced.py", "windows-service-preflight.ps1", "windows-bootstrap.ps1", "windows-legacy-guard.ps1", "legacy_guard.py", "legacy_linux.py"))}
     expected = {"source_bootstrap_sha256": manifest["source_files"]["scripts/windows-bootstrap.ps1"],
                 "native_windows_code_sha256": sha(encode(native)),
-                "controller_code_sha256": sha(encode(manifest["source_files"]))}
+                "controller_code_sha256": sha(encode(manifest["source_files"])),
+                "effects_runtime_sha256": effects_runtime_sha256(manifest["source_files"])}
     for field, source in (("legacy_linux_sha256", "legacy_linux.py"), ("legacy_guard_code_sha256", "legacy_guard.py"),
                           ("windows_guard_sha256", "windows-legacy-guard.ps1")):
         expected[field] = manifest["source_files"]["infra/k8s/ha_control/" + source]
+    for field,source in (('enforced_adapter_sha256','infra/k8s/ha_control/enforced_windows.py'),
+                         ('enforced_driver_sha256','infra/k8s/ha_control/windows-enforced-vm.ps1'),
+                         ('enforced_definition_sha256','infra/k8s/ha_runtime/enforcement.sql')):
+        expected[field]=manifest['source_files'][source]
     if (any(manifest[key] != value for key, value in expected.items())
             or manifest["generated_requirements_sha256"] != sha(REQUIREMENTS)
             or actual["files/requirements.txt"] != sha(REQUIREMENTS)):
