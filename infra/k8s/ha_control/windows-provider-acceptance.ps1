@@ -9,6 +9,31 @@ function Get-ProbeServiceSid([string]$Name){
     try{$bytes=$h.ComputeHash([Text.Encoding]::Unicode.GetBytes($Name.ToUpperInvariant()))}finally{$h.Dispose()}
     return 'S-1-5-80-'+((0..4|ForEach-Object{[BitConverter]::ToUInt32($bytes,4*$_).ToString()})-join '-')
 }
+function Test-ProbeDisconnectedNic($Nic){
+    # An unattached adapter may expose null/empty SwitchId rather than Guid.Empty.
+    # Both independent switch fields must prove disconnection; unknown IDs fail.
+    if($null -eq $Nic -or $null -eq $Nic.PSObject.Properties['SwitchName'] -or $null -eq $Nic.PSObject.Properties['SwitchId']){return $false}
+    if(($null -ne $Nic.SwitchName -and $Nic.SwitchName -isnot [string]) -or
+        ($null -ne $Nic.SwitchId -and $Nic.SwitchId -isnot [string] -and $Nic.SwitchId -isnot [Guid])){return $false}
+    return ([string]::IsNullOrEmpty([string]$Nic.SwitchName) -and
+        ([string]::IsNullOrEmpty([string]$Nic.SwitchId) -or [string]$Nic.SwitchId -ieq [Guid]::Empty.ToString()))
+}
+function Get-ProbeFailureReason([string]$Message){
+    $codes=@('fixture_path_exists','fixture_service_operation_failed','fixture_namespace_read_failed',
+        'fixture_process_unverified','fixture_process_exit_unverified','fixture_service_not_stopped','fixture_result_exists',
+        'fixture_service_timeout','fixture_service_incomplete','fixture_result_unverified','positive_control_failed',
+        'provider_role_bypass','fixture_vm_ownership_changed','native_fixture_intent_required','trusted_admin_required',
+        'fixture_artifact_pin_failed','fixture_memory_reserve_failed','fixture_parent_reparse','fixture_service_collision',
+        'fixture_service_sid_mismatch','positive_settings_not_applied','positive_power_not_applied',
+        'negative_settings_changed_state','negative_power_changed_state','positive_stop_not_applied',
+        'fixture_service_ownership_changed','fixture_service_delete_unverified')
+    if($Message -cin $codes){return $Message}
+    return 'unclassified_runtime_error'
+}
+function Set-ProbePhase($Record,[string]$Journal,[string]$Phase){
+    $Record['phase']=$Phase
+    [IO.File]::WriteAllText($Journal,($Record|ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
+}
 function New-ProbeDirectory([string]$Path,[string[]]$Readers=@(),[string]$Writer=''){
     if(Test-Path -LiteralPath $Path){throw 'fixture_path_exists'}
     $acl=[Security.AccessControl.DirectorySecurity]::new();$acl.SetAccessRuleProtection($true,$false)
@@ -94,7 +119,7 @@ function Invoke-ProbeOperation($Fixture,[string]$Operation){
 function Test-ProbeTarget{
     $vm=Get-VM -Id $script:vmId -ErrorAction Stop
     if($vm.Name -cne $script:vmName -or $vm.Notes -cne ('ha-owned-provider-probe:'+$script:installation) -or
-        @(Get-VMHardDiskDrive -VM $vm).Count -ne 0 -or @(Get-VMNetworkAdapter -VM $vm|Where-Object {$_.SwitchId -ne [Guid]::Empty}).Count -ne 0){throw 'fixture_vm_ownership_changed'}
+        @(Get-VMHardDiskDrive -VM $vm).Count -ne 0 -or @(Get-VMNetworkAdapter -VM $vm|Where-Object {-not (Test-ProbeDisconnectedNic $_)}).Count -ne 0){throw 'fixture_vm_ownership_changed'}
     return $vm
 }
 function Invoke-ProviderAcceptance {
@@ -121,16 +146,20 @@ function Invoke-ProviderAcceptance {
     if(@($names|Where-Object{Get-Service -Name $_ -ErrorAction SilentlyContinue}).Count){throw 'fixture_service_collision'}
     $null=New-ProbeDirectory $script:root $sids
     $journal=Join-Path $script:root 'ownership.json'
-    $record=[ordered]@{schema_version=1;installation_id=$script:installation;source_commit=$SourceCommit;probe_source_sha256=$ProbeSourceSha256;artifact_sha256=$ArtifactSha256;boot_ticks=$bootBefore;namespace_descriptor_sha256=$namespaceBefore;vm_id=$null;service_names=$names;complete=$false}
+    $record=[ordered]@{schema_version=1;installation_id=$script:installation;source_commit=$SourceCommit;probe_source_sha256=$ProbeSourceSha256;artifact_sha256=$ArtifactSha256;boot_ticks=$bootBefore;namespace_descriptor_sha256=$namespaceBefore;vm_id=$null;service_names=$names;phase='fixture_vm_creation';complete=$false}
+    $failureType=$null;$failureReason=$null
     [IO.File]::WriteAllText($journal,($record|ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
     try{
         $config=Join-Path $script:root 'vm';$null=New-ProbeDirectory $config
         $vm=New-VM -Name $script:vmName -Generation 2 -MemoryStartupBytes 256MB -NoVHD -Path $config
         $script:vmId=$vm.Id.ToString();$record.vm_id=$script:vmId
-        [IO.File]::WriteAllText($journal,($record|ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
+        Set-ProbePhase $record $journal 'fixture_vm_policy'
         Set-VM -VM $vm -Notes ('ha-owned-provider-probe:'+$script:installation) -AutomaticStartAction Nothing -AutomaticStopAction TurnOff -CheckpointType Disabled
+        Set-ProbePhase $record $journal 'fixture_cpu_bound'
         Set-VMProcessor -VM $vm -Count 1 -Maximum 10
+        Set-ProbePhase $record $journal 'fixture_target_validation'
         $null=Test-ProbeTarget
+        Set-ProbePhase $record $journal 'fixture_service_creation'
         for($i=0;$i -lt 2;$i++){
             $role=if($i -eq 0){'false'}else{'true'};$dir=Join-Path $script:root ('service'+$i)
             $null=New-ProbeDirectory $dir @($sids[$i]);$null=New-ProbeDirectory (Join-Path $dir 'result') @() $sids[$i]
@@ -143,19 +172,28 @@ function Invoke-ProviderAcceptance {
             if($role -ceq 'true'){Add-LocalGroupMember -SID 'S-1-5-32-578' -Member $fixture.sid}
         }
         $positive=$fixtures[1];$negative=$fixtures[0]
+        Set-ProbePhase $record $journal 'positive_settings'
         $results+=@(Invoke-ProbeOperation $positive 'settings')
         $vm=Get-VM -Id $script:vmId
         if($vm.Notes -cne ('ha-owned-provider-probe:'+$script:installation+':tested')){throw 'positive_settings_not_applied'}
         Set-VM -VM $vm -Notes ('ha-owned-provider-probe:'+$script:installation)
+        Set-ProbePhase $record $journal 'positive_power_on'
         $results+=@(Invoke-ProbeOperation $positive 'power_on')
         if((Test-ProbeTarget).State -ne 'Running'){throw 'positive_power_not_applied'}
+        Set-ProbePhase $record $journal 'negative_settings'
         $results+=@(Invoke-ProbeOperation $negative 'settings')
         if((Test-ProbeTarget).State -ne 'Running'){throw 'negative_settings_changed_state'}
+        Set-ProbePhase $record $journal 'negative_power_off'
         $results+=@(Invoke-ProbeOperation $negative 'power_off')
         if((Test-ProbeTarget).State -ne 'Running'){throw 'negative_power_changed_state'}
+        Set-ProbePhase $record $journal 'positive_power_off'
         $results+=@(Invoke-ProbeOperation $positive 'power_off')
         if((Test-ProbeTarget).State -ne 'Off'){throw 'positive_stop_not_applied'}
     $complete=$true
+    }catch{
+        $failureType=$_.Exception.GetType().Name
+        $failureReason=Get-ProbeFailureReason $_.Exception.Message
+        throw
     }finally{
         foreach($fixture in $fixtures){
             # Revoke only our fresh group membership even if process waiting
@@ -201,11 +239,12 @@ function Invoke-ProviderAcceptance {
         if($namespaceBefore -cne $namespaceAfter -or ($adminsBefore -join ',') -cne ($adminsAfter -join ',') -or $bootBefore -cne $bootAfter){$clean=$false}
         if(($beforeVm -join ',') -cne ($afterVm -join ',') -or ($beforeMembers -join ',') -cne ($afterMembers -join ',')){$clean=$false}
         $record.complete=$complete;$record['cleanup_verified']=$clean
+        $record['failure_type']=$failureType;$record['failure_reason']=$failureReason
         [IO.File]::WriteAllText($journal,($record|ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
         # Leave the private receipts/configuration for reconciliation. Never
         # recursively delete a directory after a failed/ambiguous remote step.
         [ordered]@{scope='fresh_disconnected_vm_provider_role_acceptance';source_commit=$SourceCommit;probe_source_sha256=$ProbeSourceSha256;artifact_sha256=$ArtifactSha256;
-            complete=$complete;cleanup_verified=$clean;namespace_descriptor_unchanged=($namespaceBefore -ceq $namespaceAfter);namespace_acl_write_performed=$false;
+            complete=$complete;cleanup_verified=$clean;phase=$record.phase;failure_type=$failureType;failure_reason=$failureReason;namespace_descriptor_unchanged=($namespaceBefore -ceq $namespaceAfter);namespace_acl_write_performed=$false;
             namespace_sacl_acceptance=$false;boot_unchanged=($bootBefore -ceq $bootAfter);production_transition=$false;results=$results}|ConvertTo-Json -Depth 6 -Compress
     }
 }
