@@ -592,7 +592,7 @@ if((Get-GuestVmHash ([IO.File]::ReadAllBytes($journal))) -cne $JournalSha256){th
         self.ps(r'''
 Initialize-GuestVmNative
 +foreach($managed in @($false,$true)){foreach($directory in @($false,$true)){
- if([HaGuestVmSealV1]::ShareMode($managed,$directory) -ne $(if($managed -and -not $directory){7}else{1})){throw 'native_share_mode_mixed'}
+ if([HaGuestVmSealV1]::ShareMode($managed,$directory) -ne $(if($directory){3}elseif($managed){7}else{1})){throw 'native_share_mode_mixed'}
 }}
 foreach($role in @('private','config','disk','seed')){foreach($directory in @($false,$true)){
  $target=[pscustomobject]@{role=$role;directory=$directory}

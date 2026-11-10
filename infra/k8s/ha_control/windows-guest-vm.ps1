@@ -196,13 +196,15 @@ public sealed class HaGuestVmSealV1 : IDisposable {
  public HaGuestVmSealV1(string path,bool isDirectory,bool managedConfig){
   directory=isDirectory;
   // Media: retained READ_DATA|WRITE_DAC + shareRead denies data writers/replacement.
+  // Directories: shareRead|shareWrite permits trusted child receipt creation/rename;
+  // no shareDelete keeps the leased directory from replacement. ACLs still gate writers.
   // Managed config files only: share7 coexists with HostHypervisorTCB writers;
   // this is not a proof of foreign-writer absence. Never force-close handles.
   handle=CreateFile(path,0x80040000,ShareMode(managedConfig,directory),IntPtr.Zero,3,0x02200000,IntPtr.Zero);
   if(handle.IsInvalid){int error=Marshal.GetLastWin32Error();handle.Dispose();throw new InvalidOperationException("guest_vm_seal_open_"+error);}
   try{Info i=ReadInfo();Need(((i.Attr&0x10)!=0)==directory);if(!directory)stream=new System.IO.FileStream(handle,System.IO.FileAccess.Read,1048576,false);}catch{Dispose();throw;}
  }
- public static uint ShareMode(bool managedConfig,bool isDirectory){return managedConfig&&!isDirectory?7u:1u;}
+ public static uint ShareMode(bool managedConfig,bool isDirectory){return isDirectory?3u:(managedConfig?7u:1u);}
  Info ReadInfo(){Need(!disposed);Info i;Need(GetFileInformationByHandle(handle,out i)&&(i.Attr&0x400)==0&&i.Links==1);return i;}
  public string Identity(){Info i=ReadInfo();return i.Volume.ToString("x8")+":"+i.IndexHigh.ToString("x8")+i.IndexLow.ToString("x8");}
  public long Bytes(){Info i=ReadInfo();return directory?0:(long)(((ulong)i.High<<32)|i.Low);}
