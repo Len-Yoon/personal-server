@@ -280,6 +280,53 @@ $null=[HaGuestVmJsonV1]::Object('{"objects":[{"sha256":"a"}]}',1024)
 foreach($bad in @('{"objects":[{"sha256":"a","sha256":"b"}]}','{"objects":[{"sha256":"a","SHA256":"b"}]}','{"objects":[{"sha256":"a","\u0073ha256":"b"}]}')){$closed=$false;try{$null=[HaGuestVmJsonV1]::Object($bad,1024)}catch{$closed=$true};if(-not $closed){throw 'request_duplicate_accepted'}}
 ''')
 
+    def test_private_parent_capability_is_verified_removal_input_never_final_authority(self):
+        self.ps(r'''
+Initialize-GuestVmNative
+$cap='S-1-15-3-1024-2268835264-3721307629-241982045-173645152-1490879176-104643441-2915960892-1612460704'
+foreach($role in @('private','disk','seed')){
+ foreach($mask in @(2032127,1180063,1179785)){
+  if(-not [HaGuestVmSealV1]::CapabilityRuleAllowed($role,$cap,$cap,$mask,31,$true,$false)){throw 'known_removal_input_rejected'}
+ }
+ $rows=[HaGuestVmSealV1]::ManagedPolicy('S-1-5-83-1-2-3-4-5',$role,$cap,$true)
+ if(@($rows|Where-Object{$_ -like 'S-1-15-*'}).Count){throw 'removed_capability_retained'}
+}
+foreach($args in @(
+ @('private','S-1-15-3-foreign',$cap,2032127,0,$true,$false),
+ @('private',$cap,$cap,268435456,0,$true,$false),
+ @('private',$cap,$cap,2032127,0,$false,$false),
+ @('private',$cap,$cap,2032127,0,$true,$true),
+ @('unknown',$cap,$cap,2032127,0,$true,$false),
+ @('config',$cap,$cap,2032127,8,$true,$false),
+ @('config',$cap,$cap,1180063,0,$true,$false)
+)){
+ if([HaGuestVmSealV1]::CapabilityRuleAllowed($args[0],$args[1],$args[2],$args[3],$args[4],$args[5],$args[6])){throw 'unverified_capability_accepted'}
+}
+# Exercise the product inventory entry for the actual rejected private role.
+function Assert-GuestVmConfigProfile {return $true}
+function Get-GuestVmSealTargets {return ,@([pscustomobject]@{path='owned';relative_path='guest-A';role='private';directory=$true})}
+function Get-GuestVmCurrentSid {return 'S-1-5-32-544'}
+$script:bound=$false;$script:sealed=$false
+function Open-GuestVmSealHandle {
+ $h=[pscustomobject]@{}
+ $h|Add-Member ScriptMethod Identity {return '00000001:0000000000000001'}
+ $h|Add-Member ScriptMethod Bytes {return 0};$h|Add-Member ScriptMethod Hash {return ''}
+ $h|Add-Member ScriptMethod SddlHash {return ('a'*64)}
+ $h|Add-Member ScriptMethod Owner {return 'S-1-5-32-544'}
+ $h|Add-Member ScriptMethod BindProfile {param($name,$sid,$role)if($name -cne 'windows-managed-config-v1' -or $sid -cne $cap -or $role -cne 'private'){throw 'wrong_profile_binding'};$script:bound=$true}
+ $h|Add-Member ScriptMethod HasUnverifiedCapability {return $true}
+ $h|Add-Member ScriptMethod Seal {$script:sealed=$true}
+ $h|Add-Member ScriptMethod Dispose {}
+ return $h
+}
+$profile=[pscustomobject]@{name='windows-managed-config-v1';capability_sid=$cap}
+$sessions=Open-GuestVmSealInventory 'root' ([pscustomobject]@{}) ([pscustomobject]@{}) $null $profile
+try{if(-not $script:bound -or $script:sealed){throw 'private_removal_not_verified_before_mutation'}}finally{foreach($s in $sessions){$s.handle.Dispose()}}
+# Absence of the explicit profile still rejects the same capability.
+$closed=$false;try{$null=Open-GuestVmSealInventory 'root' ([pscustomobject]@{}) ([pscustomobject]@{}) $null}catch{if($_.Exception.Message -cne 'guest_vm_capability_proof_required'){throw};$closed=$true}
+if(-not $closed -or $script:sealed){throw 'strict_private_policy_relaxed'}
+''')
+
     def test_retained_inventory_rejects_identity_content_acl_and_foreign_writer_before_seal(self):
         setup=r'''
 Initialize-GuestVmNative

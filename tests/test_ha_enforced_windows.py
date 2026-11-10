@@ -88,6 +88,23 @@ def adapter(replies=()):
 
 
 class EnforcedWindowsTests(unittest.TestCase):
+    def test_service_control_rights_reject_pause_custom_control_and_generic_execute(self):
+        self.assertEqual(self.ps(r'''
+$mask=Get-EnforcedServiceControlMask
+$trusted=@('S-1-5-18','S-1-5-32-544',$config.windows_enforced.service_sid)
+$foreign='S-1-5-11'
+foreach($right in @(2,16,32,64,256,536870912,268435456,1073741824,65536,262144,524288)){
+ $closed=$false
+ try{Assert-EnforcedAllowedMask $foreign $right $trusted $mask}catch{if($_.Exception.Message -cne 'enforced_acl_rejected'){throw};$closed=$true}
+ if(-not $closed){throw 'foreign_service_controller_accepted'}
+ foreach($sid in $trusted){Assert-EnforcedAllowedMask $sid $right $trusted $mask}
+}
+foreach($read in @(1,4,8,128,131072,131213)){
+ Assert-EnforcedAllowedMask $foreign $read $trusted $mask
+}
+'service-controls-closed'
+''').strip(), 'service-controls-closed')
+
     def test_trusted_installer_owner_is_only_a_higher_os_volume_root(self):
         body=r'''
 function Get-EnforcedOsVolumeRoot{return 'C:\'}

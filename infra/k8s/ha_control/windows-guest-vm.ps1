@@ -170,14 +170,22 @@ public sealed class HaGuestVmSealV1 : IDisposable {
   foreach(System.Security.AccessControl.GenericAce item in sd.DiscretionaryAcl){var ace=item as System.Security.AccessControl.KnownAce;if(ace!=null&&ace.SecurityIdentifier.Value.StartsWith("S-1-15-",StringComparison.Ordinal))return true;}
   return false;
  }
+ public static bool CapabilityRuleAllowed(string role,string sid,string expectedSid,int mask,int flags,bool allow,bool callback){
+  if(role!="private"&&role!="config"&&role!="disk"&&role!="seed")return false;
+  if(sid!=expectedSid||!allow||callback)return false;
+  if(role=="config")return mask==2032127&&(flags&12)==0;
+  // Known Windows capability on an owned parent/media is removal input only.
+  // It is never retained by ManagedPolicy for these roles.
+  return mask==2032127||mask==1180063||mask==1179785;
+ }
  public void BindProfile(string name,string expectedSid,string role){
-  Need(name=="windows-managed-config-v1"&&expectedSid==VmWorkerCapability());
+  Need(name=="windows-managed-config-v1"&&expectedSid==VmWorkerCapability()&&(role=="private"||role=="config"||role=="disk"||role=="seed"));
   managedProfile=false;capabilitySid=expectedSid;preserveCapability=false;capabilityInheritance=System.Security.AccessControl.InheritanceFlags.None;
   var sd=Descriptor();Need(sd.DiscretionaryAcl!=null);
   foreach(System.Security.AccessControl.GenericAce item in sd.DiscretionaryAcl){var ace=item as System.Security.AccessControl.KnownAce;if(ace==null)throw new InvalidOperationException("config_ace_rejected");
    if(ace.SecurityIdentifier.Value.StartsWith("S-1-15-",StringComparison.Ordinal)){
     var common=ace as System.Security.AccessControl.CommonAce;
-    Need(common!=null&&!common.IsCallback&&common.AceQualifier==System.Security.AccessControl.AceQualifier.AccessAllowed&&ace.SecurityIdentifier.Value==expectedSid&&(role=="config"?ace.AccessMask==2032127:(ace.AccessMask==2032127||ace.AccessMask==1180063||ace.AccessMask==1179785)));
+    Need(common!=null&&CapabilityRuleAllowed(role,ace.SecurityIdentifier.Value,expectedSid,ace.AccessMask,(int)common.AceFlags,common.AceQualifier==System.Security.AccessControl.AceQualifier.AccessAllowed,common.IsCallback));
     if(role=="config"){
      Need((common.AceFlags&(System.Security.AccessControl.AceFlags.InheritOnly|System.Security.AccessControl.AceFlags.NoPropagateInherit))==0);
      preserveCapability=true;
@@ -484,7 +492,7 @@ function Open-GuestVmSealInventory([string]$Root,$Spec,$Pins,$Expected,$ConfigPr
             $handle=Open-GuestVmSealHandle $target.path $target.directory (Test-GuestVmManagedConfigTarget $target $ConfigProfile)
             $sessions.Add([pscustomobject]@{handle=$handle;target=$target;before=$null})
             $row=Get-GuestVmHandleRow $handle $target;Assert-GuestVmSealRow $row $target
-            if($null -ne $ConfigProfile -and $target.role -cne 'private'){$handle.BindProfile($ConfigProfile.name,$ConfigProfile.capability_sid,$target.role)}
+            if($null -ne $ConfigProfile){$handle.BindProfile($ConfigProfile.name,$ConfigProfile.capability_sid,$target.role)}
             elseif($handle.HasUnverifiedCapability()){throw 'guest_vm_capability_proof_required'}
             $owner=$handle.Owner();if($owner -cnotin @('S-1-5-18','S-1-5-32-544',(Get-GuestVmCurrentSid))){throw 'guest_vm_seal_owner_rejected'}
             if($null -ne $Expected){Assert-GuestVmSameSealRow $row $Expected[$i]}
