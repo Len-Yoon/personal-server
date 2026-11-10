@@ -74,7 +74,9 @@ namespace HaGuestComV1 {
   public static void Keys(Dictionary<string,object> value,string[] expected){Require(value.Count==expected.Length,"guest_com_shape_rejected");foreach(string key in expected)Require(value.ContainsKey(key),"guest_com_shape_rejected");}
   public static string Hash(byte[] bytes){using(var h=SHA256.Create())return BitConverter.ToString(h.ComputeHash(bytes)).Replace("-","").ToLowerInvariant();}
   public static bool TrustedSid(string sid,string caller){return sid=="S-1-5-18"||sid=="S-1-5-32-544"||sid==caller;}
-  public static bool AllowPipeAce(string sid,uint mask,string caller){const uint read=0x80000000U|0x00100000U|0x00020000U|0x00000001U|0x00000008U|0x00000080U;return TrustedSid(sid,caller)||(mask&~read)==0;}
+  public static bool VirtualMachineSid(string sid){if(!Match(sid,"S-1-5-83-1(?:-(?:0|[1-9][0-9]{0,9})){4}"))return false;string[] parts=sid.Split('-');bool nonzero=false;for(int i=5;i<parts.Length;i++){uint value;if(!UInt32.TryParse(parts[i],out value))return false;nonzero|=value!=0;}return nonzero;}
+  public static bool TrustedPipeSid(string sid,string caller,string vmSid){return TrustedSid(sid,caller)||(VirtualMachineSid(vmSid)&&sid==vmSid);}
+  public static bool AllowPipeAce(string sid,uint mask,string caller,string vmSid){const uint read=0x80000000U|0x00100000U|0x00020000U|0x00000001U|0x00000008U|0x00000080U;return TrustedPipeSid(sid,caller,vmSid)||(mask&~read)==0;}
   public static string Fingerprint(string text){
    Require(text!=null&&Match(text,"ssh-ed25519 [A-Za-z0-9+/]{68}"),"guest_com_public_key_rejected");
    byte[] raw;try{raw=Convert.FromBase64String(text.Substring(12));}catch{throw new InvalidOperationException("guest_com_public_key_rejected");}
@@ -101,7 +103,7 @@ namespace HaGuestComV1 {
    if(value.ContainsKey("server_public_key"))Require(Fingerprint(Text(value,"server_public_key"))==Text(value,"server_key_fingerprint"),"guest_com_fingerprint_mismatch");
    return value;
   }
-  public static void ProcessBinding(uint vmPid,uint serverPid,uint retainedPid,long before,long after,bool alive,string image,string expected,string owner){Require(vmPid>0&&vmPid==serverPid&&vmPid==retainedPid&&before>0&&before==after&&alive&&String.Equals(image,expected,StringComparison.OrdinalIgnoreCase)&&owner=="S-1-5-18","guest_com_vmwp_binding_rejected");}
+  public static void ProcessBinding(uint vmPid,uint serverPid,uint retainedPid,long before,long after,bool alive,string image,string expected,string owner,string expectedVmSid){Require(vmPid>0&&vmPid==serverPid&&vmPid==retainedPid&&before>0&&before==after&&alive&&String.Equals(image,expected,StringComparison.OrdinalIgnoreCase)&&VirtualMachineSid(expectedVmSid)&&owner==expectedVmSid,"guest_com_vmwp_binding_rejected");}
  }
  public sealed class Framer {
   int matched;bool discard;readonly List<byte> candidate=new List<byte>();public long Bytes{get;private set;}public int Lines{get;private set;}
@@ -133,12 +135,12 @@ namespace HaGuestComV1 {
   [DllImport("advapi32.dll",SetLastError=true)]static extern bool GetTokenInformation(IntPtr token,int kind,IntPtr output,int length,out int needed);
   [StructLayout(LayoutKind.Sequential)]struct SidAndAttributes{public IntPtr Sid;public uint Attributes;}
   public static string ProcessOwner(IntPtr process){IntPtr token;Rules.Require(OpenProcessToken(process,8,out token),"guest_com_process_token_unknown");try{int length;GetTokenInformation(token,1,IntPtr.Zero,0,out length);Rules.Require(length>0&&length<=4096,"guest_com_process_token_unknown");IntPtr data=Marshal.AllocHGlobal(length);try{Rules.Require(GetTokenInformation(token,1,data,length,out length),"guest_com_process_token_unknown");return new SecurityIdentifier(((SidAndAttributes)Marshal.PtrToStructure(data,typeof(SidAndAttributes))).Sid).Value;}finally{Marshal.FreeHGlobal(data);}}finally{CloseHandle(token);}}
-  public static string Acl(SafeHandle handle,int kind,string caller,bool pipe){
+  public static string Acl(SafeHandle handle,int kind,string caller,bool pipe,string vmSid=""){
    IntPtr owner,group,dacl,sacl,descriptor;uint code=GetSecurityInfo(handle,kind,5,out owner,out group,out dacl,out sacl,out descriptor);
    if(code!=0||descriptor==IntPtr.Zero){if(descriptor!=IntPtr.Zero)LocalFree(descriptor);throw new InvalidOperationException("guest_com_acl_unknown");}try{
     uint size=GetSecurityDescriptorLength(descriptor);Rules.Require(size>0&&size<=65536,"guest_com_acl_unknown");byte[] raw=new byte[size];Marshal.Copy(descriptor,raw,0,raw.Length);var sd=new RawSecurityDescriptor(raw,0);
-    Rules.Require(sd.Owner!=null&&Rules.TrustedSid(sd.Owner.Value,caller)&&sd.DiscretionaryAcl!=null&&sd.DiscretionaryAcl.Count>0,"guest_com_acl_owner_rejected");
-    foreach(GenericAce ace in sd.DiscretionaryAcl){var item=ace as CommonAce;Rules.Require(item!=null&&!item.IsCallback,"guest_com_acl_type_rejected");if(item.AceQualifier==AceQualifier.AccessAllowed){uint mask=unchecked((uint)item.AccessMask);Rules.Require(pipe?Rules.AllowPipeAce(item.SecurityIdentifier.Value,mask,caller):Rules.TrustedSid(item.SecurityIdentifier.Value,caller)||mask==0,"guest_com_acl_write_rejected");}else Rules.Require(item.AceQualifier==AceQualifier.AccessDenied,"guest_com_acl_type_rejected");}
+    Rules.Require(sd.Owner!=null&&(pipe?Rules.TrustedPipeSid(sd.Owner.Value,caller,vmSid):Rules.TrustedSid(sd.Owner.Value,caller))&&sd.DiscretionaryAcl!=null&&sd.DiscretionaryAcl.Count>0,"guest_com_acl_owner_rejected");
+    foreach(GenericAce ace in sd.DiscretionaryAcl){var item=ace as CommonAce;Rules.Require(item!=null&&!item.IsCallback,"guest_com_acl_type_rejected");if(item.AceQualifier==AceQualifier.AccessAllowed){uint mask=unchecked((uint)item.AccessMask);Rules.Require(pipe?Rules.AllowPipeAce(item.SecurityIdentifier.Value,mask,caller,vmSid):Rules.TrustedSid(item.SecurityIdentifier.Value,caller)||mask==0,"guest_com_acl_write_rejected");}else Rules.Require(item.AceQualifier==AceQualifier.AccessDenied,"guest_com_acl_type_rejected");}
     return Rules.Hash(Encoding.UTF8.GetBytes(sd.GetSddlForm(AccessControlSections.Owner|AccessControlSections.Access)));
    }finally{LocalFree(descriptor);}
   }
@@ -157,17 +159,17 @@ namespace HaGuestComV1 {
   public void Dispose(){stream.Dispose();}
  }
  public sealed class ProcessLease:IDisposable {
-  IntPtr handle;public readonly uint Pid;public readonly long StartTicks;readonly string expected;
-  public ProcessLease(uint pid,string image){Pid=pid;expected=image;handle=Native.OpenProcess(0x00101000U,false,pid);Rules.Require(handle!=IntPtr.Zero,"guest_com_vmwp_query_denied");try{StartTicks=Start();AssertAlive();}catch{Dispose();throw;}}
+  IntPtr handle;public readonly uint Pid;public readonly long StartTicks;readonly string expected,vmSid;
+  public ProcessLease(uint pid,string image,string expectedVmSid){Rules.Require(Rules.VirtualMachineSid(expectedVmSid),"guest_com_vm_sid_rejected");Pid=pid;expected=image;vmSid=expectedVmSid;handle=Native.OpenProcess(0x00101000U,false,pid);Rules.Require(handle!=IntPtr.Zero,"guest_com_vmwp_query_denied");try{StartTicks=Start();AssertAlive();}catch{Dispose();throw;}}
   long Start(){Native.Time a,b,c,d;Rules.Require(Native.GetProcessTimes(handle,out a,out b,out c,out d),"guest_com_vmwp_time_unknown");return DateTime.FromFileTimeUtc(a.Value()).Ticks;}
-  public void AssertAlive(){var path=new StringBuilder(32768);uint length=(uint)path.Capacity;Rules.Require(Native.QueryFullProcessImageName(handle,0,path,ref length),"guest_com_vmwp_image_unknown");Rules.ProcessBinding(Pid,Pid,Pid,StartTicks,Start(),Native.WaitForSingleObject(handle,0)==258,path.ToString(),expected,Native.ProcessOwner(handle));}
+  public void AssertAlive(){var path=new StringBuilder(32768);uint length=(uint)path.Capacity;Rules.Require(Native.QueryFullProcessImageName(handle,0,path,ref length),"guest_com_vmwp_image_unknown");Rules.ProcessBinding(Pid,Pid,Pid,StartTicks,Start(),Native.WaitForSingleObject(handle,0)==258,path.ToString(),expected,Native.ProcessOwner(handle),vmSid);}
   public void Dispose(){if(handle!=IntPtr.Zero){Native.CloseHandle(handle);handle=IntPtr.Zero;}}
  }
  public sealed class Reader:IDisposable {
   readonly NamedPipeClientStream pipe;readonly byte[] buffer=new byte[4096];Task<int> pending;string acl;
   public Reader(string name,int timeout){pipe=new NamedPipeClientStream(".",name,PipeDirection.In,PipeOptions.Asynchronous,TokenImpersonationLevel.Anonymous);try{pipe.Connect(timeout);}catch{pipe.Dispose();throw;}}
   public static Reader TryConnect(string name,int timeout){try{return new Reader(name,timeout);}catch(TimeoutException){return null;}catch(IOException){return null;}}
-  public void Verify(uint expected,string caller){Rules.Require(Native.PipePid(pipe.SafePipeHandle)==expected,"guest_com_pipe_server_mismatch");string current=Native.Acl(pipe.SafePipeHandle,6,caller,true);if(acl==null)acl=current;Rules.Require(acl==current,"guest_com_pipe_acl_changed");}
+  public void Verify(uint expected,string caller,string vmSid){Rules.Require(Rules.VirtualMachineSid(vmSid)&&Native.PipePid(pipe.SafePipeHandle)==expected,"guest_com_pipe_server_mismatch");string current=Native.Acl(pipe.SafePipeHandle,6,caller,true,vmSid);if(acl==null)acl=current;Rules.Require(acl==current,"guest_com_pipe_acl_changed");}
   public byte[] Read(int timeout){if(pending==null)pending=pipe.ReadAsync(buffer,0,buffer.Length);if(Task.WaitAny(new Task[]{pending},timeout)<0)return null;int size;try{size=pending.GetAwaiter().GetResult();}catch(IOException){pending=null;return new byte[0];}catch(ObjectDisposedException){pending=null;return new byte[0];}pending=null;if(size==0)return new byte[0];byte[] result=new byte[size];Buffer.BlockCopy(buffer,0,result,0,size);return result;}
   public void Dispose(){pipe.Dispose();if(pending!=null){try{pending.Wait(100);}catch{}pending=null;}}
  }
@@ -247,8 +249,10 @@ function Get-GuestComVm($Spec,$Pins){
     $vm=Get-VM -Id ([Guid]$Spec['vm_id']) -ErrorAction Stop
     if($vm.Id.Guid -ine $Spec['vm_id'] -or $vm.Generation -ne 2 -or $vm.Name -cne $Pins['vm_name'] -or $vm.Notes -cne ('ha-owned-guest-v1:'+$Spec['installation_id']+':'+$Pins['manifest_sha256'])){throw 'guest_com_current_vm_identity_mismatch'}
     if($vm.Path -ine $Pins['config_path']){throw 'guest_com_current_config_path_changed'}
-    $allPorts=@(Get-VMComPort -VM $vm);$ports=@($allPorts|Where-Object{$_.Number -eq 1})
-    if($ports.Count -ne 1 -or $ports[0].Path -cne $Pins['com1_pipe'] -or @($allPorts|Where-Object{$_.Number -ne 1 -and $_.Path}).Count -ne 0){throw 'guest_com_current_com_path_changed'}
+    $allPorts=@(Get-VMComPort -VM $vm);$ports=@($allPorts|Where-Object{$_.Name -ceq 'COM 1'});$otherPorts=@($allPorts|Where-Object{$_.Name -ceq 'COM 2'})
+    if($allPorts.Count -ne 2 -or $ports.Count -ne 1 -or $otherPorts.Count -ne 1 -or
+        @($allPorts|Where-Object{[string]$_.VMId -ine $Spec['vm_id']}).Count -ne 0 -or
+        $ports[0].Path -cne $Pins['com1_pipe'] -or $otherPorts[0].Path -notin @($null,'')){throw 'guest_com_current_com_path_changed'}
     $switch=Get-VMSwitch -Id ([Guid]$Pins['switch_id'])
     if($switch.Id.Guid -ine $Pins['switch_id'] -or $switch.Name -cne $Pins['switch_name'] -or [string]$switch.SwitchType -cne 'Internal' -or $switch.Notes -cne ('ha-owned-guest-v1:'+$Spec['installation_id']+':'+$Pins['switch_owner_manifest_sha256'])){throw 'guest_com_current_switch_mismatch'}
     $nics=@(Get-VMNetworkAdapter -VM $vm);$ha=@($nics|Where-Object{$_.Name -ceq 'ha-data'})
@@ -299,6 +303,8 @@ function Invoke-GuestComReceipt{
         $file=[HaGuestComV1.PrivateFile]::new($path,$spec['prepared_receipt_sha256'],$caller)
         $pins=Read-GuestComPrepared $file $spec $root
         $initial=Get-GuestComVm $spec $pins
+        $vmSid=([Security.Principal.NTAccount]::new('NT VIRTUAL MACHINE\'+$spec['vm_id'])).Translate([Security.Principal.SecurityIdentifier]).Value
+        if(-not [HaGuestComV1.Rules]::VirtualMachineSid($vmSid)){throw 'guest_com_vm_sid_rejected'}
         if($initial.State -cne 'Off' -or $initial.Pid -ne 0){throw 'guest_com_reader_requires_fresh_off_vm'}
         $readyHash=New-GuestComReaderReady $spec $pins $root $caller
         $frame=[HaGuestComV1.Framer]::new();$clock=[Diagnostics.Stopwatch]::StartNew();$connections=0
@@ -306,14 +312,14 @@ function Invoke-GuestComReceipt{
             $file.AssertUnchanged();$current=Get-GuestComVm $spec $pins
             if(-not $current.Running){if($null -ne $process){throw 'guest_com_vm_stopped_after_connection'};Start-Sleep -Milliseconds 200;continue}
             if($current.Pid -eq 0){if($null -ne $process){throw 'guest_com_vmwp_unknown'};Start-Sleep -Milliseconds 200;continue}
-            if($null -eq $process){$process=[HaGuestComV1.ProcessLease]::new($current.Pid,(Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'vmwp.exe'))}
+            if($null -eq $process){$process=[HaGuestComV1.ProcessLease]::new($current.Pid,(Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'vmwp.exe'),$vmSid)}
             if($process.Pid -ne $current.Pid){throw 'guest_com_vmwp_replaced'}
             $process.AssertAlive()
             if($null -eq $reader){
                 if($connections -ge 2){throw 'guest_com_reconnect_limit'}
                 $reader=[HaGuestComV1.Reader]::TryConnect($pins['com1_pipe'].Substring(9),500)
                 if($null -eq $reader){continue}
-                $connections++;$frame.ResetConnection();$reader.Verify($process.Pid,$caller)
+                $connections++;$frame.ResetConnection();$reader.Verify($process.Pid,$caller,$vmSid)
             }
             $chunk=$null
             try{$chunk=$reader.Read(500)}catch [IO.IOException]{$reader.Dispose();$reader=$null;continue}
@@ -322,7 +328,7 @@ function Invoke-GuestComReceipt{
             $payload=$frame.Feed($chunk,$chunk.Length)
             if($null -eq $payload){continue}
             $guest=[HaGuestComV1.Rules]::Receipt($payload,$spec)
-            $reader.Verify($process.Pid,$caller);$process.AssertAlive();$after=Get-GuestComVm $spec $pins
+            $reader.Verify($process.Pid,$caller,$vmSid);$process.AssertAlive();$after=Get-GuestComVm $spec $pins
             if(-not $after.Running -or $after.Pid -ne $process.Pid){throw 'guest_com_vmwp_changed_after_receipt'}
             $file.AssertUnchanged();Assert-GuestComAncestors $path $root $caller
             if($clock.Elapsed.TotalSeconds -ge $spec['timeout_seconds']){throw 'guest_com_timeout_unknown'}

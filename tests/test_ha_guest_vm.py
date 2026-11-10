@@ -1,5 +1,7 @@
 """Pure PowerShell contracts and bounded mutation graph; no Windows runtime claim."""
 import os
+import json
+import hashlib
 from pathlib import Path
 import shutil
 import subprocess
@@ -52,6 +54,19 @@ if(-not $blocked){throw 'native_boundary_open'}
 'pure-native-boundary'
 ''')
         self.assertEqual(result,'pure-native-boundary')
+
+    def test_actual_sdk_com_names_without_number_require_two_exact_bound_ports(self):
+        self.ps(r'''
+$id='11111111-1111-1111-1111-111111111111';$pipe='\\.\pipe\fixture'
+$one=[pscustomobject]@{Name='COM 1';Id='sdk-one';VMId=[Guid]$id;Path=$pipe}
+$two=[pscustomobject]@{Name='COM 2';Id='sdk-two';VMId=$id.ToUpperInvariant();Path=''}
+Assert-GuestVmComPorts @($one,$two) $id $pipe
+if($one.PSObject.Properties['Number']){throw 'fixture_invented_number'}
+foreach($case in @(@('Name','COM 1'),@('Name','COM2'),@('Id','sdk-one'),@('VMId','22222222-2222-2222-2222-222222222222'),@('Path','other-pipe'))){
+ $old=$two.($case[0]);$two.($case[0])=$case[1];$closed=$false;try{Assert-GuestVmComPorts @($one,$two) $id $pipe}catch{$closed=$true};$two.($case[0])=$old;if(-not $closed){throw 'wrong_or_duplicate_com_accepted'}
+}
+foreach($ports in @(@($one),@($one,$two,$two))){$closed=$false;try{Assert-GuestVmComPorts $ports $id $pipe}catch{$closed=$true};if(-not $closed){throw 'com_count_changed_accepted'}}
+''')
 
     def test_flat_manifest_types_pins_names_and_duplicate_keys(self):
         self.ps(r'''
@@ -148,6 +163,9 @@ $t=$null;$e=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($env:G
 $resets=@($ast.FindAll({param($a)$a -is [Management.Automation.Language.CommandAst] -and $a.GetCommandName() -ceq 'Set-VHD'},$true));if($resets.Count -ne 1){throw 'reset_path_changed'}
 $branch=$resets[0].Parent;$found=$false;while($branch){if($branch -is [Management.Automation.Language.IfStatementAst] -and $branch.Extent.Text.StartsWith('if($spec.schema_version -eq 1)')){$found=$true};$branch=$branch.Parent};if(-not $found){throw 'schema2_can_reset'}
 $text=[IO.File]::ReadAllText($env:GUEST_VM_SOURCE)
+if(-not $text.Contains('-NoVHD -Path $guestRoot -SwitchName') -or $text.Contains('-NoVHD -Path (Join-Path $guestRoot $names.vm)')){throw 'native_vmname_wrapper_duplicated'}
+if(-not $text.Contains('CreateFile(path,0x80040000,ShareMode(managedConfig,directory),') -or $text.IndexOf('Need(managedProfile||!HasUnverifiedCapability())') -gt $text.IndexOf('uint error=SetSecurityInfo')){throw 'media_lock_or_capability_guard_missing'}
+if($text.Contains('ForceClose') -or $text.Contains('Stop-Service')){throw 'foreign_writer_force_closed'}
 foreach($required in @('guest_vm_copy_file_identity_collision','guest_vm_node_image_identifier_collision','guest_vm_peer_disk_identifier_collision','guest_vm_node_image_pin_changed','guest_vm_duplicate_disk_identifier','Get-GuestVmParent','ReaderReadySha256')){if(-not $text.Contains($required)){throw 'strong_identity_removed'}}
 ''')
 
@@ -179,10 +197,10 @@ $script:nic=[pscustomobject]@{Name='ha-data';DynamicMacAddressEnabled=$false;Mac
 $script:hdd=[pscustomobject]@{Path=$disk;Id='drive-id'};$script:dvd=[pscustomobject]@{Path=$iso}
 $script:vhd=[pscustomobject]@{VhdFormat='VHDX';VhdType='Dynamic';ParentPath='';Size=25769803776;Attached=$false;DiskIdentifier=[Guid]$pins.disk_identifier}
 $script:fw=[pscustomobject]@{SecureBoot='On';SecureBootTemplate='MicrosoftUEFICertificateAuthority';BootOrder=@([pscustomobject]@{Device=$script:hdd})}
-$script:port=[pscustomobject]@{Number=1;Path=$names.pipe}
+$script:port=[pscustomobject]@{Name='COM 1';Id='fixture-com-one';VMId=[Guid]$vmId;Path=$names.pipe};$script:port2=[pscustomobject]@{Name='COM 2';Id='fixture-com-two';VMId=[Guid]$vmId;Path=''}
 function Get-VM {return $script:vm};function Get-VMSwitch{return $script:sw};function Get-VMProcessor{return $script:cpu};function Get-VMMemory{return $script:mem}
 function Get-VMNetworkAdapter{if($null -ne $script:egress){return @($script:nic,$script:egress)};return $script:nic};function Get-VMHardDiskDrive{return $script:hdd};function Get-VMDvdDrive{return $script:dvd};function Get-VHD{return $script:vhd}
-function Get-VMFirmware{return $script:fw};function Get-VMComPort{return $script:port};function Get-GuestVmSid{return 'owned-vm-sid'}
+function Get-VMFirmware{return $script:fw};function Get-VMComPort{return @($script:port,$script:port2)};function Get-GuestVmSid{return 'owned-vm-sid'}
 function Get-GuestVmFileIdentity([string]$Path){if($Path.EndsWith('.vhdx')){return 'disk-id'};return 'seed-id'}
 function Open-GuestVmPinned {return [IO.MemoryStream]::new()};function Assert-GuestVmPrivate {}
 $null=Assert-GuestVmPrepared $spec $names $pins $root $disk $iso
@@ -247,6 +265,191 @@ foreach($value in @($true,'1',1.0,2)){$script:frame.schema_version=$value;$close
 
     def test_native_metadata_helper_compiles_without_invoking_windows_apis(self):
         self.ps("Initialize-GuestVmNative; if(-not ('HaGuestVmFileV1' -as [type])){throw 'compile_failed'}")
+
+    def test_seal_role_policy_and_json_duplicate_parser_are_portable(self):
+        self.ps(r'''
+Initialize-GuestVmNative
+$sid='S-1-5-83-1-2-3-4-5'
+foreach($role in @('config','disk','seed')){
+ $rows=[HaGuestVmSealV1]::Policy($sid,$role)
+ if($rows.Count -ne 3 -or $rows[0] -cne 'S-1-5-32-544|2032127' -or $rows[1] -cne 'S-1-5-18|2032127' -or $rows[2] -cne ($sid+'|'+$(if($role -ceq 'seed'){'1179785'}elseif($role -ceq 'disk'){'1180063'}else{'2032127'}))){throw 'role_policy_not_exact'}
+}
+if([HaGuestVmSealV1]::Policy('','private').Count -ne 2){throw 'private_parent_granted_vm_access'}
+foreach($bad in @('S-1-5-83-0','S-1-15-3-1','S-1-5-18')){$closed=$false;try{$null=[HaGuestVmSealV1]::Policy($bad,'config')}catch{$closed=$true};if(-not $closed){throw 'global_or_capability_sid_accepted'}}
+$null=[HaGuestVmJsonV1]::Object('{"objects":[{"sha256":"a"}]}',1024)
+foreach($bad in @('{"objects":[{"sha256":"a","sha256":"b"}]}','{"objects":[{"sha256":"a","SHA256":"b"}]}','{"objects":[{"sha256":"a","\u0073ha256":"b"}]}')){$closed=$false;try{$null=[HaGuestVmJsonV1]::Object($bad,1024)}catch{$closed=$true};if(-not $closed){throw 'request_duplicate_accepted'}}
+''')
+
+    def test_retained_inventory_rejects_identity_content_acl_and_foreign_writer_before_seal(self):
+        setup=r'''
+Initialize-GuestVmNative
+$script:trace=[Collections.Generic.List[string]]::new();$script:handles=[Collections.Generic.List[object]]::new();$script:bad=''
+$spec=[pscustomobject]@{seed_iso_bytes=4};$pins=[pscustomobject]@{disk_identity='00000001:0000000000000002';disk_sha256=('d'*64);seed_identity='00000001:0000000000000003';seed_sha256=('e'*64)}
+$script:targets=@([pscustomobject]@{path='parent';relative_path='guest-A';role='private';directory=$true},[pscustomobject]@{path='disk';relative_path='guest-A/guest-A.vhdx';role='disk';directory=$false},[pscustomobject]@{path='seed';relative_path='seed-A.iso';role='seed';directory=$false})
+function Get-GuestVmSealTargets{return ,$script:targets};function Get-GuestVmCurrentSid{return 'S-1-5-32-544'}
+function Add-GuestVmEvent($Event,$Data){$script:trace.Add($Event+':'+$Data.relative_path)}
+function Open-GuestVmSealHandle([string]$Path,[bool]$Directory){
+ if($script:bad -ceq 'writer' -and $Path -ceq 'seed'){throw 'guest_vm_seal_open_32'}
+ $index=@('parent','disk','seed').IndexOf($Path)+1
+ $h=[pscustomobject]@{id=('00000001:'+([long]$index).ToString('x16'));fileBytes=$(if($Directory){0}else{4});fileHash=$(if($Directory){''}elseif($Path -ceq 'disk'){'d'*64}else{'e'*64});sddl=('a'*64);closed=$false;isCanonical=$false;path=$Path}
+ $h|Add-Member ScriptMethod Identity {return $this.id};$h|Add-Member ScriptMethod Bytes {return $this.fileBytes};$h|Add-Member ScriptMethod Hash {return $this.fileHash};$h|Add-Member ScriptMethod SddlHash {return $this.sddl};$h|Add-Member ScriptMethod Owner {return 'S-1-5-32-544'}
+ $h|Add-Member ScriptMethod HasUnverifiedCapability {return ($script:bad -ceq 'capability' -and $this.path -ceq 'disk')}
+ $h|Add-Member ScriptMethod Canonical {param($sid,$role)return $this.isCanonical}
+ $h|Add-Member ScriptMethod Seal {param($sid,$role)$this.isCanonical=$true;$this.sddl='f'*64;if($script:bad -ceq 'during-seal'){$this.id='00000001:0000000000000009'}}
+ $h|Add-Member ScriptMethod Dispose {$this.closed=$true};$script:handles.Add($h);return $h
+}
+$s=Open-GuestVmSealInventory 'root' $spec $pins $null;$expected=@($s|ForEach-Object{$_.before});foreach($session in $s){$session.handle.Dispose()};$script:handles.Clear()
+'''
+        self.ps(setup+r'''
+foreach($field in @('identity','sha256','bytes','sddl_sha256','role','relative_path')){
+ $bad=($expected|ConvertTo-Json -Depth 5 -Compress)|ConvertFrom-Json
+ $bad[1].$field=$(if($field -ceq 'bytes'){5}else{'wrong'})
+ $closed=$false;try{$s=Open-GuestVmSealInventory 'root' $spec $pins $bad;foreach($v in $s){$v.handle.Dispose()}}catch{$closed=$true}
+ if(-not $closed -or $script:trace.Count -ne 0 -or @($script:handles|Where-Object{-not $_.closed}).Count){throw 'unverified_object_adopted'};$script:handles.Clear()
+}
+foreach($case in @('writer','capability')){
+ $script:bad=$case;$closed=$false;try{$s=Open-GuestVmSealInventory 'root' $spec $pins $expected}catch{$closed=$true}
+ if(-not $closed -or $script:trace.Count -ne 0 -or @($script:handles|Where-Object{-not $_.closed}).Count){throw 'unsafe_inventory_modified'};$script:handles.Clear()
+}
+$script:bad='';$s=Open-GuestVmSealInventory 'root' $spec $pins $expected
+function Get-GuestVmFreshSealIdentity([string]$Path){if($script:bad -ceq 'replacement'){return '00000001:0000000000000099'};return @{'disk'=$pins.disk_identity;'seed'=$pins.seed_identity}[$Path]}
+Assert-GuestVmSealInventoryComplete 'root' $spec $pins $s
+$script:bad='replacement';$closed=$false;try{Assert-GuestVmSealInventoryComplete 'root' $spec $pins $s}catch{if($_.Exception.Message -cne 'guest_vm_seal_path_replaced'){throw};$closed=$true};if(-not $closed){throw 'unlinked_retained_handle_adopted'};$script:bad=''
+try{$sealed=Invoke-GuestVmSealInventory $s 'S-1-5-83-1-2-3-4-5';if($sealed.Count -ne 3 -or $script:trace[0] -cne 'seal_exact_owned_object:seed-A.iso' -or $script:trace[2] -cne 'seal_exact_owned_object:guest-A'){throw 'parent_sealed_before_child'}}finally{foreach($v in $s){$v.handle.Dispose()}}
+$script:bad='during-seal';$s=Open-GuestVmSealInventory 'root' $spec $pins $expected;$closed=$false
+try{$null=Invoke-GuestVmSealInventory $s 'S-1-5-83-1-2-3-4-5'}catch{$closed=$true}finally{foreach($v in $s){$v.handle.Dispose()}};if(-not $closed){throw 'post_seal_identity_changed_accepted'}
+''')
+
+    def test_finalize_rejects_replay_and_source_before_native_or_acl(self):
+        self.ps(r'''
+function Join-Path([string]$Path,[string]$ChildPath){return $Path+'\'+$ChildPath}
+$script:existing=$true;$script:trace=0
+function Test-Path{return $script:existing};function Read-GuestVmJsonPinned{return $script:request};function Get-GuestVmScriptHash{return ('f'*64)}
+function Assert-GuestVmPrepared{$script:trace++;throw 'must_not_reach_native'}
+$FinalizationRequestSha256='1'*64;$JournalSha256='2'*64;$ManifestSha256='3'*64;$FinalizerSourceCommit='a'*40
+$spec=[pscustomobject]@{source_commit=('b'*40);installation_id=('c'*64);node='A'}
+$script:request=[pscustomobject]@{schema_version=1;finalizer_source_commit=$FinalizerSourceCommit;finalizer_script_sha256=('f'*64);original_source_commit=$spec.source_commit;original_manifest_sha256=$ManifestSha256;original_journal_sha256=$JournalSha256;installation_id=$spec.installation_id;node='A';root_identity='id';root_sddl_sha256=('d'*64);pins=[pscustomobject]@{};objects=@()}
+$closed=$false;try{Invoke-GuestVmFinalize 'root' $spec $null 'guest' 'disk' 'iso' 'journal' 'prepared'}catch{if($_.Exception.Message -cne 'guest_vm_finalize_existing_partial'){throw};$closed=$true};if(-not $closed -or $script:trace){throw 'finalize_replayed'}
+$script:existing=$false
+foreach($key in @('finalizer_source_commit','finalizer_script_sha256','original_source_commit','original_manifest_sha256','original_journal_sha256','installation_id','node')){
+ $old=$script:request.$key;$script:request.$key='wrong';$closed=$false
+ try{Invoke-GuestVmFinalize 'root' $spec $null 'guest' 'disk' 'iso' 'journal' 'prepared'}catch{if($_.Exception.Message -cne 'guest_vm_finalize_source_rejected'){throw};$closed=$true};$script:request.$key=$old
+ if(-not $closed -or $script:trace){throw 'source_pin_checked_after_native'}
+}
+''')
+
+    def test_seal_checks_length_before_any_content_hash(self):
+        self.ps(r'''
+$target=[pscustomobject]@{role='disk';directory=$false}
+$handle=[pscustomobject]@{}
+$handle|Add-Member ScriptMethod Bytes {return [long]8589934593}
+$handle|Add-Member ScriptMethod Hash {throw 'oversize_file_was_hashed'}
+$closed=$false;try{$null=Get-GuestVmHandleRow $handle $target}catch{if($_.Exception.Message -cne 'guest_vm_seal_size_limit'){throw};$closed=$true}
+if(-not $closed){throw 'oversize_handle_adopted'}
+''')
+
+    def test_finalizer_source_hash_binds_the_loaded_file(self):
+        self.ps(r'''
+if((Get-GuestVmScriptHash) -cne (Get-GuestVmHash ([IO.File]::ReadAllBytes($env:GUEST_VM_SOURCE)))){throw 'finalizer_source_hash_not_own_file'}
+''')
+
+    def finalize_roundtrip(self, profile=None):
+        with tempfile.TemporaryDirectory() as folder:
+            self.ps(r'''
+Initialize-GuestVmNative
+$root=$env:FIXTURE;$ManifestSha256='1'*64;$FinalizerSourceCommit='a'*40
+$spec=[pscustomobject]@{node='A';source_commit=('b'*40);stage_source_commit=('c'*40);seed_source_commit=('d'*40);installation_id=('e'*64);stage_manifest_sha256=('2'*64);seed_iso_sha256=('3'*64)}
+$pins=[pscustomobject]@{vm_id='11111111-1111-1111-1111-111111111111';switch_id='22222222-2222-2222-2222-222222222222';source_commit=$spec.source_commit;installation_id=$spec.installation_id;node='A';manifest_sha256=$ManifestSha256;config_path='guest/config'}
+$journal=Join-Path $root 'vm-A-journal.jsonl';$prepared=Join-Path $root 'vm-A-prepared-receipt.json'
+$events=@('intent','create_private_directory','copy_independent_disk','create_internal_switch','switch_created','create_off_vm','vm_created','configure_new_vm','grant_owned_vm_data_access')
+for($i=0;$i -lt $events.Count;$i++){
+ $data=@{vm_id=$pins.vm_id;switch_id=$pins.switch_id}
+ if($i -eq 0){$data=@{installation_id=$spec.installation_id;source_commit=$spec.source_commit;stage_source_commit=$spec.stage_source_commit;seed_source_commit=$spec.seed_source_commit;node='A';manifest_sha256=$ManifestSha256;stage_manifest_sha256=$spec.stage_manifest_sha256;seed_sha256=$spec.seed_iso_sha256}}
+ Write-GuestVmRecord $journal ([ordered]@{sequence=($i+1);event=$events[$i];data=$data}) ($i -eq 0)
+}
+$original=[IO.File]::ReadAllBytes($journal);$JournalSha256=Get-GuestVmHash $original
+function Get-GuestVmFileIdentity{return 'fixture-file-id'}
+function Get-GuestVmScriptHash{return ('f'*64)}
+function Assert-GuestVmPrepared{return [pscustomobject]@{Id=[Guid]$pins.vm_id}}
+function Get-GuestVmSid{return 'S-1-5-83-1-2-3-4-5'}
+function Get-GuestVmRootStamp{return [pscustomobject]@{identity='00000001:0000000000000001';sddl_sha256=('4'*64)}}
+function Assert-GuestVmSealRootUnchanged{}
+function Assert-GuestVmSealInventoryComplete{}
+$script:sealRow=[pscustomobject]@{relative_path='guest-A/config';role='config';identity='00000001:0000000000000002';bytes=4;sha256=('5'*64);sddl_sha256=('6'*64)}
+$script:disposed=$false
+function Open-GuestVmSealInventory{$h=[pscustomobject]@{};$h|Add-Member ScriptMethod Dispose {$script:disposed=$true};return ,@([pscustomobject]@{handle=$h})}
+function Invoke-GuestVmSealInventory{Add-GuestVmEvent 'seal_exact_owned_object' @{relative_path=$script:sealRow.relative_path;identity=$script:sealRow.identity;before_sddl_sha256=('7'*64)};return ,@($script:sealRow)}
+function Assert-GuestVmSealedObjects{param($Root,$Spec,$Pins,$Objects,$Stamp)if($Objects.Count -ne 1 -or $Objects[0].identity -cne $script:sealRow.identity){throw 'sealed_inventory_lost'}}
+$request=[ordered]@{schema_version=1;finalizer_source_commit=$FinalizerSourceCommit;finalizer_script_sha256=('f'*64);original_source_commit=$spec.source_commit;original_manifest_sha256=$ManifestSha256;original_journal_sha256=$JournalSha256;installation_id=$spec.installation_id;node='A';root_identity='00000001:0000000000000001';root_sddl_sha256=('4'*64);pins=$pins;objects=@($script:sealRow)}
+if($env:VM_FINALIZE_CONFIG_PROFILE){$request.config_profile=$env:VM_FINALIZE_CONFIG_PROFILE|ConvertFrom-Json;$request.config_profile_sha256=Get-GuestVmConfigProfileHash $request.config_profile}
+$requestPath=Join-Path $root 'vm-A-finalize-request.json';Write-GuestVmRecord $requestPath $request $true;$FinalizationRequestSha256=Get-GuestVmHash ([IO.File]::ReadAllBytes($requestPath))
+$result=Invoke-GuestVmFinalize $root $spec $null 'guest' 'disk' 'iso' $journal $prepared|ConvertFrom-Json
+if(-not $result.prepared -or $result.started -or -not $script:disposed -or $result.original_source_commit -cne $spec.source_commit -or $result.finalizer_source_commit -cne $FinalizerSourceCommit){throw 'finalize_lineage_or_handles_lost'}
+if((Get-GuestVmHash ([IO.File]::ReadAllBytes($journal))) -cne $JournalSha256){throw 'original_journal_modified'}
+$FinalizationReceiptSha256=$result.finalization_receipt_sha256;$PreparedReceiptSha256=$result.prepared_receipt_sha256
+$receipt=Read-GuestVmFinalization $root $spec $journal
+if($receipt.pins.source_commit -cne $spec.source_commit){throw 'old_vm_relabelled_as_finalizer'}
+$closed=$false;try{Invoke-GuestVmFinalize $root $spec $null 'guest' 'disk' 'iso' $journal $prepared|Out-Null}catch{if($_.Exception.Message -cne 'guest_vm_finalize_existing_partial'){throw};$closed=$true};if(-not $closed){throw 'finalize_replay_accepted'}
+$repair=Join-Path $root 'vm-A-finalize-journal.jsonl';Write-GuestVmRecord $repair @{sequence=4;event='forged';data=@{}} $false
+$closed=$false;try{$null=Read-GuestVmFinalization $root $spec $journal}catch{$closed=$true};if(-not $closed){throw 'changed_finalize_journal_accepted'}
+if((Get-GuestVmHash ([IO.File]::ReadAllBytes($journal))) -cne $JournalSha256){throw 'replay_changed_original_journal'}
+''',FIXTURE=folder,VM_FINALIZE_CONFIG_PROFILE=json.dumps(profile) if profile else '')
+
+    def test_finalize_keeps_original_journal_and_requires_all_fresh_receipts_at_start(self):
+        self.finalize_roundtrip()
+
+    def test_managed_finalize_keeps_legacy_notes_source_and_separately_pins_profile(self):
+        profile=dict(name='windows-managed-config-v1',definition_sha256='61fb12a5c53fa5a76c067f50e6a1ea56a915ebd3d9af86fcb67ff36cd48bd0ef',
+            capability_name='vmWorkerProcess',capability_sid='S-1-15-3-1024-2268835264-3721307629-241982045-173645152-1490879176-104643441-2915960892-1612460704',
+            host_hypervisor_tcb_acknowledged=True,acceptance_scope='isolated-predeployment',operational_cutover_accepted=False,
+            io_acceptance_sha256='',external_capability_review_sha256='',isolation_receipt_sha256='')
+        self.finalize_roundtrip(profile)
+
+    def test_schema3_profile_is_explicit_and_digest_scope_bound(self):
+        profile=dict(name='windows-managed-config-v1',definition_sha256='61fb12a5c53fa5a76c067f50e6a1ea56a915ebd3d9af86fcb67ff36cd48bd0ef',
+            capability_name='vmWorkerProcess',capability_sid='S-1-15-3-1024-2268835264-3721307629-241982045-173645152-1490879176-104643441-2915960892-1612460704',
+            host_hypervisor_tcb_acknowledged=True,acceptance_scope='isolated-predeployment',operational_cutover_accepted=False,
+            io_acceptance_sha256='',external_capability_review_sha256='',isolation_receipt_sha256='')
+        spec=dict(schema_version=3,source_commit='a'*40,stage_source_commit='e'*40,seed_source_commit='f'*40,installation_id='b'*64,
+            stage_manifest_sha256='c'*64,seed_iso_sha256='d'*64,seed_iso_bytes=32768,node='A',mac_address='02123456789A',
+            optional_egress_nic=False,egress_mac_address='',peer_prepared_receipt_sha256='',creation_method='verified-node-image-copy-v1',
+            node_image=dict(filename='node-A.vhdx',sha256='1'*64,bytes=1048576,disk_identifier='7b0a3feb-04cf-5c40-85bd-cfd50b85ab9d',
+                source_qcow_sha256='04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94',conversion_receipt_sha256='2'*64,tool_version='qemu-img version 11.1.3',tool_sha256='3'*64),
+            config_profile=profile,peer_config_profile_receipt_sha256='',peer_source_commit='')
+        result=self.ps(r'''
++$good=$env:VM_MANAGED_SPEC|ConvertFrom-Json;$null=Assert-GuestVmSpec $good
++$raw=[Text.Encoding]::UTF8.GetBytes($env:VM_MANAGED_SPEC);$Manifest=[Convert]::ToBase64String($raw);$ManifestSha256=Get-GuestVmHash $raw;$null=Read-GuestVmSpec
++foreach($field in @('name','definition_sha256','capability_sid','acceptance_scope')){
++ $bad=($good|ConvertTo-Json -Depth 6 -Compress)|ConvertFrom-Json;$bad.config_profile.$field='unknown';$closed=$false;try{$null=Assert-GuestVmSpec $bad}catch{$closed=$true};if(-not $closed){throw 'unknown_config_profile_accepted'}
++}
++$bad=($good|ConvertTo-Json -Depth 6 -Compress)|ConvertFrom-Json;$bad.schema_version=2;$closed=$false;try{$null=Assert-GuestVmSpec $bad}catch{$closed=$true};if(-not $closed){throw 'implicit_legacy_profile_adoption'}
++$good.node='B';$good.node_image.filename='node-B.vhdx';$good.peer_prepared_receipt_sha256='6'*64;$good.peer_source_commit='8'*40;$closed=$false;try{$null=Assert-GuestVmSpec $good}catch{$closed=$true};if(-not $closed){throw 'peer_profile_without_receipt'}
++$good.peer_config_profile_receipt_sha256='7'*64;$null=Assert-GuestVmSpec $good
++Get-GuestVmConfigProfileHash $good.config_profile
++'''.replace('\n+','\n'),VM_MANAGED_SPEC=json.dumps(spec))
+        expected=hashlib.sha256(json.dumps(profile,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        self.assertEqual(result,expected)
+
+    def test_managed_role_never_preserves_media_cap_or_adds_missing_config_cap(self):
+        self.ps(r'''
+Initialize-GuestVmNative
++foreach($managed in @($false,$true)){foreach($directory in @($false,$true)){
+ if([HaGuestVmSealV1]::ShareMode($managed,$directory) -ne $(if($managed -and -not $directory){7}else{1})){throw 'native_share_mode_mixed'}
+}}
+foreach($role in @('private','config','disk','seed')){foreach($directory in @($false,$true)){
+ $target=[pscustomobject]@{role=$role;directory=$directory}
+ if((Test-GuestVmManagedConfigTarget $target ([pscustomobject]@{})) -ne ($role -ceq 'config' -and -not $directory) -or (Test-GuestVmManagedConfigTarget $target $null)){throw 'media_inherited_config_sharing'}
+}}
+$vm='S-1-5-83-1-2-3-4-5';$cap='S-1-15-3-1024-2268835264-3721307629-241982045-173645152-1490879176-104643441-2915960892-1612460704'
++$cfg=[HaGuestVmSealV1]::ManagedPolicy($vm,'config',$cap,$true)
++if($cfg.Count -ne 3 -or $cfg[2] -cne ($cap+'|2032127') -or @($cfg|Where-Object{$_.StartsWith($vm+'|')}).Count){throw 'config_granted_worker_authority'}
++if([HaGuestVmSealV1]::ManagedPolicy($vm,'config',$cap,$false).Count -ne 2){throw 'missing_original_cap_added'}
++foreach($role in @('disk','seed')){
++ $rows=[HaGuestVmSealV1]::ManagedPolicy($vm,$role,$cap,$true)
++ if(@($rows|Where-Object{$_.StartsWith('S-1-15-')}).Count -or $rows[2] -cne ($vm+'|'+$(if($role -ceq 'disk'){'1180063'}else{'1179785'}))){throw 'cap_or_excessive_media_access'}
++}
++$closed=$false;try{$null=[HaGuestVmSealV1]::ManagedPolicy($vm,'config','S-1-15-3-1',$true)}catch{$closed=$true};if(-not $closed){throw 'arbitrary_capability_accepted'}
++'''.replace('\n+','\n'))
 
     def test_ast_has_only_owned_vm_mutations_and_start_is_separate(self):
         self.ps(r'''

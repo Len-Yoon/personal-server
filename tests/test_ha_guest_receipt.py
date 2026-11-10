@@ -97,14 +97,14 @@ foreach($changed in @($env:PREPARED.Replace(('a'*40),('f'*40)),$env:PREPARED.Rep
 $cfg=Read-GuestComRequest;$lease=[pscustomobject]@{Bytes=[Text.Encoding]::UTF8.GetBytes($env:PREPARED)}
 $script:pins=Read-GuestComPrepared $lease $cfg $env:FIXTURE_ROOT;$script:tamper=''
 function Get-VM{[CmdletBinding()]param($Id) return [pscustomobject]@{Id=[Guid]$cfg['vm_id'];Generation=2;Name=$script:pins['vm_name'];Notes=('ha-owned-guest-v1:'+$cfg['installation_id']+':'+$script:pins['manifest_sha256']);Path=$script:pins['config_path'];State='Running'}}
-function Get-VMComPort{param($VM) $path=$script:pins['com1_pipe'];if($script:tamper -ceq 'wrong-com'){$path='wrong'};$items=@([pscustomobject]@{Number=1;Path=$path});if($script:tamper -ceq 'extra-com'){$items+=([pscustomobject]@{Number=2;Path='not-empty'})};return $items}
+function Get-VMComPort{param($VM) $path=$script:pins['com1_pipe'];if($script:tamper -ceq 'wrong-com'){$path='wrong'};$items=@([pscustomobject]@{Name='COM 1';VMId=[Guid]$cfg['vm_id'];Path=$path},[pscustomobject]@{Name='COM 2';VMId=[Guid]$cfg['vm_id'];Path='' });switch -CaseSensitive ($script:tamper){'extra-com'{$items[1].Path='not-empty'} 'missing-com'{$items=@($items[0])} 'duplicate-com'{$items[1].Name='COM 1'} 'unknown-com'{$items[1].Name='COM 3'} 'foreign-com'{$items[1].VMId=[Guid]'44444444-4444-4444-4444-444444444444'}};return $items}
 function Get-VMSwitch{param($Id) $note='ha-owned-guest-v1:'+$cfg['installation_id']+':'+$script:pins['switch_owner_manifest_sha256'];if($script:tamper -ceq 'wrong-switch-owner'){$note='foreign'};return [pscustomobject]@{Id=[Guid]$script:pins['switch_id'];Name=$script:pins['switch_name'];SwitchType='Internal';Notes=$note}}
 function Get-VMNetworkAdapter{param($VM) $items=@([pscustomobject]@{Name='ha-data';MacAddress=$script:pins['mac_address'];DynamicMacAddressEnabled=$false;MacAddressSpoofing='Off';SwitchId=$script:pins['switch_id']});if($script:pins['optional_egress_nic']){$items+=([pscustomobject]@{Name='egress-disconnected';MacAddress=$script:pins['egress_mac_address'];DynamicMacAddressEnabled=$false;MacAddressSpoofing='Off';SwitchName='Default Switch';SwitchId=[Guid]'44444444-4444-4444-4444-444444444444'})};return $items}
 function Get-VMHardDiskDrive{param($VM) $path=$script:pins['disk_path'];if($script:tamper -ceq 'wrong-media'){$path='foreign'};return [pscustomobject]@{Path=$path}}
 function Get-VMDvdDrive{param($VM) return [pscustomobject]@{Path=$script:pins['seed_path']}}
 function Get-CimInstance{param($Namespace,$ClassName,$Filter,$OperationTimeoutSec) return [pscustomobject]@{Name=$cfg['vm_id'];EnabledState=2;ProcessID=100}}
 $state=Get-GuestComVm $cfg $script:pins;if(-not $state.Running -or $state.Pid -ne 100){throw 'valid_vm_snapshot_rejected'}
-foreach($case in @('wrong-com','extra-com','wrong-switch-owner','wrong-media','connected-egress')){
+foreach($case in @('wrong-com','extra-com','missing-com','duplicate-com','unknown-com','foreign-com','wrong-switch-owner','wrong-media','connected-egress')){
  $script:tamper=$case;if($case -ceq 'connected-egress'){$script:pins['optional_egress_nic']=$true;$script:pins['egress_mac_address']='0266778899AA'}
  $blocked=$false;try{Get-GuestComVm $cfg $script:pins|Out-Null}catch{$blocked=$true};if(-not $blocked){throw 'vm_snapshot_drift_accepted'}
 }
@@ -120,7 +120,8 @@ foreach($case in @('wrong-com','extra-com','wrong-switch-owner','wrong-media','c
         self.assertIn('$file.Flush($true)',source)
         self.assertIn('pipe_bound=$false',source)
         self.assertIn('WindowsPowerShell\\v1.0\\powershell.exe',source)
-        self.assertIn('$reader.Verify($process.Pid,$caller)',invoke)
+        self.assertIn('$reader.Verify($process.Pid,$caller,$vmSid)',invoke)
+        self.assertIn("[Security.Principal.NTAccount]::new('NT VIRTUAL MACHINE\\'+$spec['vm_id'])",invoke)
         self.assertIn('$process.AssertAlive()',invoke)
         self.assertIn('$file.AssertUnchanged()',invoke)
 
@@ -157,24 +158,25 @@ foreach($bad in @($env:PAYLOAD.Replace('SHA256:','SHA256:wrong'),$env:PAYLOAD.Re
 
     def test_unknown_pipe_writers_create_instance_and_owner_changes_are_denied(self):
         self.assertEqual(self.run_ps(r'''
-$caller='S-1-5-21-1-2-3-1001'
+$caller='S-1-5-21-1-2-3-1001';$vmSid='S-1-5-83-1-10-20-30-40';$otherVm='S-1-5-83-1-10-20-30-41'
 foreach($mask in @([uint32]1,[uint32]2147483648,[uint32]1179785)){
- if(-not [HaGuestComV1.Rules]::AllowPipeAce('S-1-1-0',$mask,$caller) -or -not [HaGuestComV1.Rules]::AllowPipeAce('S-1-5-7',$mask,$caller)){throw 'readonly_pipe_ace_rejected'}
+ if(-not [HaGuestComV1.Rules]::AllowPipeAce('S-1-1-0',$mask,$caller,$vmSid) -or -not [HaGuestComV1.Rules]::AllowPipeAce('S-1-5-7',$mask,$caller,$vmSid)){throw 'readonly_pipe_ace_rejected'}
 }
 foreach($mask in @([uint32]2,[uint32]4,[uint32]16,[uint32]256,[uint32]65536,[uint32]262144,[uint32]524288,[uint32]1073741824,[uint32]268435456)){
- if([HaGuestComV1.Rules]::AllowPipeAce('S-1-1-0',$mask,$caller)){throw 'unknown_pipe_write_allowed'}
+ if([HaGuestComV1.Rules]::AllowPipeAce('S-1-1-0',$mask,$caller,$vmSid) -or [HaGuestComV1.Rules]::AllowPipeAce($otherVm,$mask,$caller,$vmSid)){throw 'unknown_pipe_write_allowed'}
 }
-if(-not [HaGuestComV1.Rules]::AllowPipeAce('S-1-5-18',[uint32]2032127,$caller) -or [HaGuestComV1.Rules]::TrustedSid('S-1-1-0',$caller)){throw 'pipe_tcb_owner_wrong'}
+if(-not [HaGuestComV1.Rules]::AllowPipeAce('S-1-5-18',[uint32]2032127,$caller,$vmSid) -or -not [HaGuestComV1.Rules]::AllowPipeAce($vmSid,[uint32]2032127,$caller,$vmSid) -or [HaGuestComV1.Rules]::TrustedSid($vmSid,$caller) -or [HaGuestComV1.Rules]::TrustedPipeSid($otherVm,$caller,$vmSid)){throw 'pipe_tcb_owner_wrong'}
 'pipe-mask-policy-only'
 '''),'pipe-mask-policy-only')
 
-    def test_pid_start_time_and_system_owner_are_required(self):
+    def test_pid_start_time_and_exact_vm_virtual_identity_are_required(self):
         self.assertEqual(self.run_ps(r'''
-[HaGuestComV1.Rules]::ProcessBinding(100,100,100,123,123,$true,'C:\Windows\System32\vmwp.exe','C:\Windows\System32\vmwp.exe','S-1-5-18')
-foreach($which in 0..4){$blocked=$false;try{
- $vm=100;$server=100;$retained=100;$before=123;$after=123;$alive=$true;$owner='S-1-5-18'
- switch($which){0{$server=101}1{$after=124}2{$alive=$false}3{$owner='S-1-5-21-1-2-3-1001'}4{$retained=99}}
- [HaGuestComV1.Rules]::ProcessBinding($vm,$server,$retained,$before,$after,$alive,'C:\Windows\System32\vmwp.exe','C:\Windows\System32\vmwp.exe',$owner)
+$expected='S-1-5-83-1-10-20-30-40'
+[HaGuestComV1.Rules]::ProcessBinding(100,100,100,123,123,$true,'C:\Windows\System32\vmwp.exe','C:\Windows\System32\vmwp.exe',$expected,$expected)
+foreach($which in 0..10){$blocked=$false;try{
+ $vm=100;$server=100;$retained=100;$before=123;$after=123;$alive=$true;$owner=$expected;$wanted=$expected;$image='C:\Windows\System32\vmwp.exe'
+ switch($which){0{$server=101}1{$after=124}2{$alive=$false}3{$owner='S-1-5-21-1-2-3-1001'}4{$retained=99}5{$owner='S-1-5-18'}6{$owner='S-1-5-83-1-10-20-30-41'}7{$wanted='S-1-5-18'}8{$image='C:\foreign\vmwp.exe'}9{$wanted='S-1-5-83-1-0-0-0-0'}10{$wanted='S-1-5-83-1-10-20-30-4294967296'}}
+ [HaGuestComV1.Rules]::ProcessBinding($vm,$server,$retained,$before,$after,$alive,$image,'C:\Windows\System32\vmwp.exe',$owner,$wanted)
 }catch{$blocked=$true};if(-not $blocked){throw 'pid_reuse_or_wrong_owner_accepted'}}
 'process-binding-policy-only'
 '''),'process-binding-policy-only')
