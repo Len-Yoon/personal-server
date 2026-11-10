@@ -28,6 +28,51 @@ CONFIG = frozenset(("driver_sha256", "adapter_sha256", "policy_path", "policy_sh
                     "vm_config_root", "disks"))
 
 
+CONFIG_PROFILE_DEFINITION = {
+    "name": "windows-managed-config-v1", "capability_name": "vmWorkerProcess",
+    "capability_sid": "S-1-15-3-1024-2268835264-3721307629-241982045-173645152-1490879176-104643441-2915960892-1612460704",
+    "config_scope": "owned-config-subtree-only", "config_capability_access_mask": 2032127,
+    "config_file_share_mode": 7, "media_capability_allowed": False, "media_file_share_mode": 1,
+    "host_tcb_role": "HostHypervisorTCB/config-metadata-only",
+    "acceptance_scopes": ["isolated-predeployment", "production"],
+}
+CONFIG_PROFILE_DEFINITION_SHA256 = hashlib.sha256(json.dumps(
+    CONFIG_PROFILE_DEFINITION, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+CONFIG_PROFILE_KEYS = frozenset(("name", "definition_sha256", "capability_name", "capability_sid",
+    "host_hypervisor_tcb_acknowledged", "operational_cutover_accepted", "io_acceptance_sha256",
+    "external_capability_review_sha256", "acceptance_scope", "isolation_receipt_sha256"))
+
+
+def config_profile(value):
+    """Explicit config-only host TCB; capability possession is not actor/I/O proof."""
+    if type(value) is not dict or set(value) != CONFIG_PROFILE_KEYS:
+        _deny()
+    if (value["name"] != CONFIG_PROFILE_DEFINITION["name"]
+            or value["definition_sha256"] != CONFIG_PROFILE_DEFINITION_SHA256
+            or value["capability_name"] != CONFIG_PROFILE_DEFINITION["capability_name"]
+            or value["capability_sid"] != CONFIG_PROFILE_DEFINITION["capability_sid"]
+            or value["host_hypervisor_tcb_acknowledged"] is not True
+            or type(value["operational_cutover_accepted"]) is not bool):
+        _deny()
+    if type(value["acceptance_scope"]) is not str or value["acceptance_scope"] not in {"isolated-predeployment", "production"}:
+        _deny()
+    for key in ("io_acceptance_sha256", "external_capability_review_sha256", "isolation_receipt_sha256"):
+        if type(value[key]) is not str or (value[key] != "" and not HEX.fullmatch(value[key])):
+            _deny()
+    if value["acceptance_scope"] == "isolated-predeployment":
+        if value["operational_cutover_accepted"]:
+            _deny()
+    elif value["isolation_receipt_sha256"] != "" or (value["operational_cutover_accepted"] and
+            (not HEX.fullmatch(value["io_acceptance_sha256"]) or not HEX.fullmatch(value["external_capability_review_sha256"]))):
+        _deny()
+    return value
+
+
+def config_profile_digest(value):
+    return hashlib.sha256(json.dumps(config_profile(value), sort_keys=True,
+                                     separators=(",", ":")).encode()).hexdigest()
+
+
 def _deny():
     raise TransitionBlocked("enforced_windows_unverified")
 
@@ -83,8 +128,10 @@ def _validate(plan, approval, plan_hash, driver_hash):
             or plan["generation"] < 1 or not re.fullmatch(r"[0-9a-f]{40}", str(plan.get("source_commit", "")))):
         _deny()
     cfg = plan.get("windows_enforced")
-    if type(cfg) is not dict or set(cfg) != CONFIG:
+    if type(cfg) is not dict or set(cfg) != (CONFIG | {"config_profile"} if "config_profile" in cfg else CONFIG):
         _deny()
+    if "config_profile" in cfg:
+        config_profile(cfg["config_profile"])
     for key in ("driver_sha256", "adapter_sha256", "policy_sha256", "session_id", "python_sha256", "launcher_sha256",
                 "service_image_sha256", "vm_notes_sha256"):
         _hex(cfg[key])
@@ -111,6 +158,13 @@ def _validate(plan, approval, plan_hash, driver_hash):
     # Installed runtime authority is a separate exact envelope, never an
     # expired bounded approval with its expiry silently removed. The fixed
     # plan still binds system/source/generation/host boot through native checks.
+    if 'config_profile' in cfg:
+        selected=cfg['config_profile']
+        if selected['acceptance_scope']=='isolated-predeployment':
+            if not HEX.fullmatch(selected['io_acceptance_sha256']) or not HEX.fullmatch(selected['isolation_receipt_sha256']):
+                _deny()  # Bootstrap staging has no application authority.
+        elif not selected['operational_cutover_accepted']:
+            _deny()
     if type(approval) is dict and type(approval.get('schema_version')) is int and approval['schema_version']==3:
         fields={'schema_version','profile','action','authority_kind','installation_id','installed_at',
                 'plan_sha256','source_commit','policy_sha256'}
@@ -174,11 +228,18 @@ class EnforcedWindowsFence:
         self._healthy = False
 
     def _base(self):
-        return {"schema_version": 2, "profile": PROFILE, "scope": "vm-enforcement-only",
+        result = {"schema_version": 2, "profile": PROFILE, "scope": "vm-enforcement-only",
                 "plan_sha256": self.plan_sha256, "approval_sha256": self.approval_sha256,
                 "source_sha256": self.cfg["driver_sha256"], "policy_sha256": self.cfg["policy_sha256"],
                 "session_id": self.cfg["session_id"], "principal_sha256": hashlib.sha256(self.cfg["service_sid"].encode()).hexdigest(),
                 "boot_ticks": self.cfg["boot_ticks"]}
+        if "config_profile" in self.cfg:
+            result.update(config_profile=self.cfg["config_profile"]["name"],
+                          config_profile_sha256=config_profile_digest(self.cfg["config_profile"]),
+                          config_profile_definition_sha256=CONFIG_PROFILE_DEFINITION_SHA256,
+                          config_acceptance_scope=self.cfg["config_profile"]["acceptance_scope"],
+                          operational_cutover_accepted=self.cfg["config_profile"]["operational_cutover_accepted"])
+        return result
 
     @contextmanager
     def guard(self):
@@ -210,7 +271,7 @@ class EnforcedWindowsFence:
                 _deny()
             expected = self._base() | {"guard": "ready", "broker_instance": hello.get("broker_instance"), "sequence": 1}
             _hex(hello.get("broker_instance"))
-            if (hello != expected or type(hello.get("schema_version")) is not int
+            if (hello != expected or ("config_profile" in self.cfg and type(hello.get("operational_cutover_accepted")) is not bool) or type(hello.get("schema_version")) is not int
                     or type(hello.get("sequence")) is not int):
                 _deny()
             self.instance = hello["broker_instance"]
@@ -294,7 +355,7 @@ class EnforcedWindowsFence:
                     expected = self._base() | {"status": "ok", "broker_instance": self.instance,
                         "nonce": nonce, "sequence": sequence, "node": state["old"], "generation": state["generation"],
                         "vm_id": self.cfg["vm_id"], "fenced": response.get("fenced")}
-                    if (response != expected or type(response.get("fenced")) is not bool
+                    if (response != expected or ("config_profile" in self.cfg and type(response.get("operational_cutover_accepted")) is not bool) or type(response.get("fenced")) is not bool
                             or type(response.get("generation")) is not int or type(response.get("schema_version")) is not int
                             or time.monotonic() - started > limit or (self.expires is None and getattr(self,'_installed_runtime',False) is not True)
                     or (self.expires is not None and datetime.now(timezone.utc) >= self.expires)):

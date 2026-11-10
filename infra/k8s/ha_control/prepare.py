@@ -21,6 +21,16 @@ EFFECTS_SOURCES = tuple("infra/k8s/ha_runtime/" + name for name in (
 SOURCES = tuple(dict.fromkeys((*SOURCES, *EFFECTS_SOURCES)))
 TARGETS = {source: source.removeprefix("infra/k8s/") if source.startswith("infra/k8s/") else source for source in SOURCES}
 REQUIREMENTS = b"psycopg[binary]==3.3.8\n"
+CONFIG_PROFILE_DEFINITION = {'name': 'windows-managed-config-v1', 'capability_name': 'vmWorkerProcess', 'capability_sid': 'S-1-15-3-1024-2268835264-3721307629-241982045-173645152-1490879176-104643441-2915960892-1612460704', 'config_scope': 'owned-config-subtree-only', 'config_capability_access_mask': 2032127, 'config_file_share_mode': 7, 'media_capability_allowed': False, 'media_file_share_mode': 1, 'host_tcb_role': 'HostHypervisorTCB/config-metadata-only', 'acceptance_scopes': ['isolated-predeployment', 'production']}
+CONFIG_PROFILE_DEFINITION_SHA256 = hashlib.sha256(json.dumps(CONFIG_PROFILE_DEFINITION, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def managed_config_template():
+    return dict(name=CONFIG_PROFILE_DEFINITION['name'], definition_sha256=CONFIG_PROFILE_DEFINITION_SHA256,
+        capability_name=CONFIG_PROFILE_DEFINITION['capability_name'], capability_sid=CONFIG_PROFILE_DEFINITION['capability_sid'],
+        host_hypervisor_tcb_acknowledged=True, acceptance_scope='isolated-predeployment',
+        operational_cutover_accepted=False, io_acceptance_sha256='', external_capability_review_sha256='', isolation_receipt_sha256='')
+
 
 
 class BundleError(RuntimeError):
@@ -92,6 +102,13 @@ def templates(commit, bindings):
               "standalone_fence_supported": False,
               "execution_performed": False, "approval_issued": False}
     status["enforced_install_privilege_scope"] = {"target":"pg_catalog.pg_settings","privilege":"UPDATE table and columns only","principals":"PUBLIC and registered application roles only","transaction":"atomic closed-authority install; rollback on failure","production_applied":False}
+    status['windows_managed_config']={'default':'strict-capability-free',
+        'explicit_profile':'windows-managed-config-v1','definition_sha256':CONFIG_PROFILE_DEFINITION_SHA256,
+        'metadata_tcb':'HostHypervisorTCB/config-metadata-only; no foreign-writer-absence claim',
+        'media':'capability-free; own VM RW or ISO Read',
+        'isolated_authority_requires':['actual_guest_io_receipt','fresh_isolated_closed_providers_no_existing_ingress_receipt'],
+        'production_cutover_requires':['separate_production_plan_policy_profile_hashes','actual_io','external_capability_actor_review','explicit_production_acceptance'],
+        'native_accepted':False,'operational_cutover_accepted':False}
     result = {"native-plan.template.json": encode(plan), "readiness.json": encode(status)}
     for action in ("fence", "ha-transition"):
         result[action + "-approval.template.json"] = encode({
@@ -106,6 +123,10 @@ def templates(commit, bindings):
     enforced['windows_enforced'].update(driver_sha256=bindings['enforced_driver_sha256'],
                                       adapter_sha256=bindings['enforced_adapter_sha256'],disks=[])
     result['enforced-plan.template.json']=encode(enforced)
+    managed=json.loads(json.dumps(enforced));managed['windows_enforced']['config_profile']=managed_config_template()
+    result['enforced-windows-managed-config-plan.template.json']=encode(managed)
+    result['windows-managed-config.definition.json']=encode(CONFIG_PROFILE_DEFINITION)
+
     result['enforced-approval.template.json']=encode({'schema_version':2,'profile':'enforced-vm-v1',
         'source_commit':commit,'plan_sha256':None,'policy_sha256':None,'action':'ha-transition','expires_at':None})
     # Template only: issuing installation identity/authority belongs to a
@@ -133,6 +154,7 @@ def prepare(commit, output):
     if output.exists() or output.is_symlink():
         raise BundleError("new_output_directory_required")
     manifest = {"format": 1, "source_commit": commit,
+                "config_profile_definitions": {"windows-managed-config-v1": CONFIG_PROFILE_DEFINITION_SHA256},
                 "source_files": {key: sha(value) for key, value in sorted(files.items())},
                 "generated_requirements_sha256": sha(REQUIREMENTS)}
     manifest["source_bootstrap_sha256"] = manifest["source_files"]["scripts/windows-bootstrap.ps1"]
@@ -190,7 +212,8 @@ def verify(bundle, expected_manifest_sha256=None):
             raise BundleError("source_file_binding_mismatch")
     native = {key: value for key, value in manifest["source_files"].items()
               if key.endswith(("windows.py", "windows-fence.ps1", "windows-enforced-vm.ps1", "windows-service-host.cs", "provision_enforced.py", "windows-service-preflight.ps1", "windows-bootstrap.ps1", "windows-legacy-guard.ps1", "legacy_guard.py", "legacy_linux.py"))}
-    expected = {"source_bootstrap_sha256": manifest["source_files"]["scripts/windows-bootstrap.ps1"],
+    expected = {"config_profile_definitions": {"windows-managed-config-v1": CONFIG_PROFILE_DEFINITION_SHA256},
+                "source_bootstrap_sha256": manifest["source_files"]["scripts/windows-bootstrap.ps1"],
                 "native_windows_code_sha256": sha(encode(native)),
                 "controller_code_sha256": sha(encode(manifest["source_files"])),
                 "effects_runtime_sha256": effects_runtime_sha256(manifest["source_files"])}
@@ -205,7 +228,8 @@ def verify(bundle, expected_manifest_sha256=None):
             or manifest["generated_requirements_sha256"] != sha(REQUIREMENTS)
             or actual["files/requirements.txt"] != sha(REQUIREMENTS)):
         raise BundleError("native_code_binding_mismatch")
-    rendered = templates(manifest["source_commit"], expected)
+    rendered = templates(manifest["source_commit"], {key: value for key, value in expected.items()
+                                                   if key != "config_profile_definitions"})
     expected_paths = {"files/" + value for value in TARGETS.values()} | {"files/requirements.txt"} | set(rendered)
     if set(actual) != expected_paths or any(actual[name] != sha(data) for name, data in rendered.items()):
         raise BundleError("inert_template_binding_mismatch")

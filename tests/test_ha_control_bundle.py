@@ -43,6 +43,26 @@ class ControlBundleTest(unittest.TestCase):
     def git(self, *args):
         return subprocess.check_output(["git", "-C", str(self.root), *args], text=True, stderr=subprocess.DEVNULL)
 
+    def test_managed_profile_template_is_separate_pending_and_definition_bound(self):
+        from ha_control import enforced_windows as E
+        result=bundle.prepare(self.commit,self.output)
+        bundle.verify(self.output,result['manifest_sha256'])
+        strict=json.loads((self.output/'enforced-plan.template.json').read_bytes())
+        selected=json.loads((self.output/'enforced-windows-managed-config-plan.template.json').read_bytes())
+        self.assertNotIn('config_profile',strict['windows_enforced'])
+        profile=selected['windows_enforced']['config_profile']
+        self.assertEqual(profile['acceptance_scope'],'isolated-predeployment')
+        self.assertIs(profile['operational_cutover_accepted'],False)
+        self.assertEqual(profile['definition_sha256'],E.CONFIG_PROFILE_DEFINITION_SHA256)
+        self.assertEqual(bundle.CONFIG_PROFILE_DEFINITION,E.CONFIG_PROFILE_DEFINITION)
+        E.config_profile(profile)
+        manifest=json.loads((self.output/'source-manifest.json').read_bytes())
+        self.assertEqual(manifest['config_profile_definitions'],{'windows-managed-config-v1':E.CONFIG_PROFILE_DEFINITION_SHA256})
+        manifest['config_profile_definitions']['windows-managed-config-v1']='0'*64
+        (self.output/'source-manifest.json').chmod(0o600)
+        (self.output/'source-manifest.json').write_bytes(bundle.encode(manifest))
+        with self.assertRaises(bundle.BundleError):bundle.verify(self.output)
+
     def test_exact_commit_allowlist_and_native_binding(self):
         original = (self.root / "scripts/windows-bootstrap.ps1").read_bytes()
         (self.root / "scripts/windows-bootstrap.ps1").write_bytes(b"# dirty uncommitted")
