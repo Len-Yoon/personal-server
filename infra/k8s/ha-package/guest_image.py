@@ -157,14 +157,63 @@ if grep -q '^Inode:' /work/before-stat.txt; then exit 31; fi
 debugfs -w -f /work/patch-commands.txt /work/root.ext4 > /work/debugfs-log.txt 2>&1
 debugfs -R "dump /etc/cloud/cloud.cfg.d/99zz-n100-ha-initial-output.cfg /work/early-readback.cfg" /work/root.ext4 > /work/readback-log.txt 2>&1
 cmp /work/early-output.cfg /work/early-readback.cfg
+mkdir -m 700 /work/cloud
+debugfs -R "dump /etc/cloud/cloud.cfg /work/cloud/cloud.cfg" /work/root.ext4 > /work/cloud-config-dump-log.txt 2>&1
+debugfs -R "rdump /etc/cloud/cloud.cfg.d /work/cloud" /work/root.ext4 > /work/cloud-confd-dump-log.txt 2>&1
 PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -B -I - > /dev/null 2>&1 <<'CLOUD_OUTPUT_PROOF'
 import json
 import logging
+import os
+import stat
 from pathlib import Path
 logging.disable(logging.CRITICAL)
 from cloudinit import util
+root=Path('/work/cloud')
+if root.is_symlink() or not root.is_dir() or root.stat().st_uid!=os.getuid() or root.stat().st_mode&0o077:
+    raise RuntimeError('extracted_config_root_invalid')
+files=[]
+total=0
+count=0
+for path in root.rglob('*'):
+    count+=1
+    relative=path.relative_to(root)
+    parts=relative.parts
+    inode=path.lstat()
+    if count>128 or len(parts)>2 or path.is_symlink() or inode.st_uid!=os.getuid():
+        raise RuntimeError('extracted_config_entry_invalid')
+    if stat.S_ISDIR(inode.st_mode):
+        if parts!=('cloud.cfg.d',):
+            raise RuntimeError('extracted_config_directory_invalid')
+        path.chmod(0o700)
+    elif stat.S_ISREG(inode.st_mode):
+        if inode.st_nlink!=1 or not(parts==('cloud.cfg',) or (len(parts)==2 and parts[0]=='cloud.cfg.d')):
+            raise RuntimeError('extracted_config_file_invalid')
+        if inode.st_size>262144:
+            raise RuntimeError('extracted_config_size_invalid')
+        total+=inode.st_size
+        if total>1048576:
+            raise RuntimeError('extracted_config_total_invalid')
+        path.chmod(0o600)
+        if parts==('cloud.cfg',) or path.suffix=='.cfg':
+            files.append(path)
+    else:
+        raise RuntimeError('extracted_config_type_invalid')
+config=root/'cloud.cfg'
+confd=root/'cloud.cfg.d'
+patch=confd/'99zz-n100-ha-initial-output.cfg'
+if not config.is_file() or not confd.is_dir() or not patch.is_file():
+    raise RuntimeError('extracted_required_config_missing')
+if patch.read_bytes()!=Path('/work/early-readback.cfg').read_bytes():
+    raise RuntimeError('extracted_patch_readback_mismatch')
+for path in files:
+    raw=path.read_bytes()
+    if b'## template:' in raw:
+        raise RuntimeError('extracted_config_template_not_supported')
+    parsed=util.read_conf(str(path))
+    if not isinstance(parsed,dict) or 'conf_d' in parsed:
+        raise RuntimeError('extracted_config_external_confd_not_supported')
 userdata=json.loads(Path('/work/early-output.cfg').read_text().split(chr(10),1)[1])
-initial=util.read_conf_with_confd('/etc/cloud/cloud.cfg')
+initial=util.read_conf_with_confd('/work/cloud/cloud.cfg')
 expected=['> /dev/null','> /dev/null']
 matched=(initial.get('output')==userdata['output']
          and list(util.get_output_cfg(initial,'init'))==expected
@@ -179,7 +228,7 @@ e2fsck -fn /work/root.ext4 > /work/e2fsck-log.txt 2>&1
 def offline_patch(value,prefix,work,owner):
     need(not any(c in str(work) for c in (',','\n','\r','\0')),'image_work_path')
     name='n100-ha-image-'+owner;label='org.n100ha.guest-image.owner='+owner
-    args=prefix+['create','--pull=never','--name',name,'--label',label,'--platform','linux/amd64','--user',str(os.getuid())+':'+str(os.getgid()),'--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','64','--memory','512m','--cpus','1','--mount','type=bind,src='+str(work)+',dst=/work','--mount','type=bind,src='+str(work/'early-output.cfg')+',dst='+PATCH_PATH+',readonly','--entrypoint','/bin/sh',UTILITY_IMAGE,'-ceu',patch_recipe()]
+    args=prefix+['create','--pull=never','--name',name,'--label',label,'--platform','linux/amd64','--user',str(os.getuid())+':'+str(os.getgid()),'--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges','--pids-limit','64','--memory','512m','--cpus','1','--mount','type=bind,src='+str(work)+',dst=/work','--entrypoint','/bin/sh',UTILITY_IMAGE,'-ceu',patch_recipe()]
     container=run(args,'offline_patch_create_failed').strip().decode('ascii');need(re.fullmatch('[0-9a-f]{64}',container) is not None,'offline_patch_identity_unknown')
     try:run(prefix+['start','--attach',container],'offline_patch_or_fsck_failed',timeout=300)
     finally:

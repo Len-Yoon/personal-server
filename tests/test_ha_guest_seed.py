@@ -368,17 +368,21 @@ class ImageDerivationTests(unittest.TestCase):
             self.assertIn('--pull=never',create)
             self.assertIn('--read-only',create);self.assertEqual(create[create.index('--network')+1],'none')
             self.assertEqual(create[create.index('--cap-drop')+1],'ALL')
-            self.assertIn('no-new-privileges',create);self.assertEqual(create.count('--mount'),2)
+            self.assertIn('no-new-privileges',create);self.assertEqual(create.count('--mount'),1)
             mounts=[create[i+1] for i,value in enumerate(create) if value=='--mount']
             self.assertEqual(sum(not value.endswith(',readonly') for value in mounts),1)
-            self.assertIn('dst='+I.PATCH_PATH+',readonly',mounts[1])
             self.assertIn('e2fsck -fn /work/root.ext4',I.patch_recipe())
             self.assertIn('exit 31',I.patch_recipe());self.assertNotIn('mount ',I.patch_recipe())
             import ast
             embedded=I.patch_recipe().split("<<'CLOUD_OUTPUT_PROOF'\n",1)[1].split('\nCLOUD_OUTPUT_PROOF',1)[0]
             ast.parse(embedded)
-            self.assertIn("util.read_conf_with_confd('/etc/cloud/cloud.cfg')",embedded)
+            self.assertIn("util.read_conf_with_confd('/work/cloud/cloud.cfg')",embedded)
             self.assertIn("util.get_output_cfg(initial,'init')",embedded)
+            self.assertIn('rdump /etc/cloud/cloud.cfg.d /work/cloud',I.patch_recipe())
+            self.assertIn("'conf_d' in parsed",embedded)
+            self.assertIn('path.is_symlink()',embedded)
+            self.assertIn('total>1048576',embedded)
+            self.assertIn('inode.st_size>262144',embedded)
             for false_proof in (False,1):
                 proof.write_text(json.dumps({'initial_and_userdata_output_match':false_proof}))
                 with patch.object(I,'run',side_effect=mocked):
