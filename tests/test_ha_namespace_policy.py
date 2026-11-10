@@ -1,4 +1,7 @@
-"""Portable policy-B contracts; no WMI, SCM, service, or host mutation is executed."""
+"""Portable SD and real mode-dispatch contracts, not native WMI or HA acceptance.
+
+No WMI, SCM, service, or host mutation is executed by these fixtures.
+"""
 from __future__ import annotations
 
 import base64
