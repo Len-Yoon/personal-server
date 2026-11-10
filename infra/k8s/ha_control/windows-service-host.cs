@@ -33,16 +33,23 @@ namespace EnforcedServiceV1 {
   public static void CheckPath(string p){if(p==null||!Regex.IsMatch(p,"\\A[A-Za-z]:\\\\")||p.IndexOf('"')>=0||p.IndexOf('\0')>=0||p.IndexOf('\r')>=0||p.IndexOf('\n')>=0||p.Substring(2).IndexOf(':')>=0||p.EndsWith("\\",StringComparison.Ordinal))throw new InvalidOperationException();foreach(string s in p.Substring(3).Split('\\'))if(s==""||s=="."||s==".."||s.EndsWith(".",StringComparison.Ordinal)||s.EndsWith(" ",StringComparison.Ordinal))throw new InvalidOperationException();}
   static string Quote(string p){CheckPath(p);return "\""+p+"\"";}
   public string CommandLine(){return Quote(Values["python_path"])+" -I -B "+Quote(Values["launcher_path"])+" "+Values["mode"]+" --plan "+Quote(Values["plan_path"])+" --approval "+Quote(Values["approval_path"])+" --journal "+Quote(Values["plan_path"].Substring(0,Values["plan_path"].LastIndexOf('\\')+1)+"journal\\controller-state.json")+(Values["mode"]=="serve"?" --arm":"");}
+  public static bool IsTrustedOsRootOwner(string owner,string path,string osRoot,int depth){
+   const string sid="S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+   return owner==sid&&depth>1&&path!=null&&osRoot!=null&&path.Length==3&&osRoot.Length==3&&
+    ((path[0]>='A'&&path[0]<='Z')||(path[0]>='a'&&path[0]<='z'))&&path[1]==':'&&path[2]=='\\'&&
+    String.Equals(path,osRoot,StringComparison.OrdinalIgnoreCase);
+  }
+  public static int ServiceExitCode(string mode,uint childCode){return (mode=="initialize"||mode=="advance")&&childCode==0?0:1;}
  }
 #if !PORTABLE_FIXTURE
  public static class Protection {
   static readonly HashSet<string> Writers=new HashSet<string>(new[]{"S-1-5-18","S-1-5-32-544"},StringComparer.Ordinal);
   public static string Hash(string path){using(var f=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read))using(var h=SHA256.Create()){if(f.Length>67108864)throw new InvalidOperationException();return BitConverter.ToString(h.ComputeHash(f)).Replace("-","").ToLowerInvariant();}}
-  public static void Descriptor(RawSecurityDescriptor sd,long mask,bool ignoreInheritOnly){
-   if(sd.Owner==null||!Writers.Contains(sd.Owner.Value)||sd.DiscretionaryAcl==null||sd.DiscretionaryAcl.Count==0)throw new InvalidOperationException();
+  public static void Descriptor(RawSecurityDescriptor sd,long mask,bool ignoreInheritOnly,bool osRootOwner=false){
+   if(sd.Owner==null||(!Writers.Contains(sd.Owner.Value)&&!(osRootOwner&&sd.Owner.Value=="S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"))||sd.DiscretionaryAcl==null||sd.DiscretionaryAcl.Count==0)throw new InvalidOperationException();
    foreach(GenericAce raw in sd.DiscretionaryAcl){CommonAce a=raw as CommonAce;if(a==null||a.IsCallback)throw new InvalidOperationException();if(ignoreInheritOnly&&(a.AceFlags&AceFlags.InheritOnly)!=0)continue;if(a.AceQualifier==AceQualifier.AccessAllowed&&(((long)a.AccessMask&0xffffffffL)&mask)!=0&&!Writers.Contains(a.SecurityIdentifier.Value))throw new InvalidOperationException();}
   }
-  public static void PathAcl(string path){Settings.CheckPath(path);FileSystemInfo entry=Directory.Exists(path)?(FileSystemInfo)new DirectoryInfo(path):new FileInfo(path);int depth=0;while(entry!=null){if(!entry.Exists||(entry.Attributes&FileAttributes.ReparsePoint)!=0)throw new InvalidOperationException();FileSystemSecurity acl=entry is DirectoryInfo?(FileSystemSecurity)((DirectoryInfo)entry).GetAccessControl(AccessControlSections.Owner|AccessControlSections.Access):((FileInfo)entry).GetAccessControl(AccessControlSections.Owner|AccessControlSections.Access);Descriptor(new RawSecurityDescriptor(acl.GetSecurityDescriptorBinaryForm(),0),depth<=1?1343029590L:269287488L,depth>1);DirectoryInfo d=entry as DirectoryInfo;entry=d!=null?d.Parent:((FileInfo)entry).Directory;depth++;}}
+  public static void PathAcl(string path){Settings.CheckPath(path);FileSystemInfo entry=Directory.Exists(path)?(FileSystemInfo)new DirectoryInfo(path):new FileInfo(path);int depth=0;while(entry!=null){if(!entry.Exists||(entry.Attributes&FileAttributes.ReparsePoint)!=0)throw new InvalidOperationException();FileSystemSecurity acl=entry is DirectoryInfo?(FileSystemSecurity)((DirectoryInfo)entry).GetAccessControl(AccessControlSections.Owner|AccessControlSections.Access):((FileInfo)entry).GetAccessControl(AccessControlSections.Owner|AccessControlSections.Access);var sd=new RawSecurityDescriptor(acl.GetSecurityDescriptorBinaryForm(),0);Descriptor(sd,depth<=1?1343029590L:269287488L,depth>1,Settings.IsTrustedOsRootOwner(sd.Owner==null?null:sd.Owner.Value,entry.FullName,Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows)),depth));DirectoryInfo d=entry as DirectoryInfo;entry=d!=null?d.Parent:((FileInfo)entry).Directory;depth++;}}
   public static void Tree(string root){int count=1;var pending=new Stack<string>();pending.Push(root);while(pending.Count!=0){string p=pending.Pop();PathAcl(p);if(Directory.Exists(p))foreach(string child in Directory.EnumerateFileSystemEntries(p)){if(++count>8192)throw new InvalidOperationException();pending.Push(child);}}}
   public static void Bound(string path,string expected){PathAcl(path);if(Hash(path)!=expected)throw new InvalidOperationException();PathAcl(path);}
   public static void JournalRoot(string plan,string service){
@@ -86,8 +93,11 @@ namespace EnforcedServiceV1 {
   [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr process,uint code);
   [DllImport("kernel32.dll")] static extern bool TerminateJobObject(IntPtr job,uint code);
   [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle,uint ms);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr handle,out uint code);
+  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+  [DllImport("kernel32.dll",SetLastError=true)] static extern bool DuplicateHandle(IntPtr sourceProcess,IntPtr source,IntPtr targetProcess,out IntPtr target,uint access,bool inherit,uint options);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
-  IntPtr job,process;
+  readonly object handles=new object();IntPtr job,process;
   public OwnedJob(Settings settings){
    job=CreateJobObject(IntPtr.Zero,null);if(job==IntPtr.Zero)throw new InvalidOperationException();
    try{var limit=new Extended();limit.Basic.Flags=0x2000; // KILL_ON_JOB_CLOSE; no breakaway flags.
@@ -100,11 +110,11 @@ namespace EnforcedServiceV1 {
     try{if(!AssignProcessToJobObject(job,process)||ResumeThread(pi.Thread)==0xffffffff){TerminateProcess(process,1);throw new InvalidOperationException();}}finally{CloseHandle(pi.Thread);}
    }catch{Dispose();throw;}
   }
-  public void Wait(){if(WaitForSingleObject(process,0xffffffff)!=0)throw new InvalidOperationException();}
-  public void Dispose(){if(job!=IntPtr.Zero){TerminateJobObject(job,1);CloseHandle(job);job=IntPtr.Zero;}if(process!=IntPtr.Zero){if(WaitForSingleObject(process,5000)!=0){TerminateProcess(process,1);if(WaitForSingleObject(process,5000)!=0)Environment.FailFast("owned_child_cleanup_failed");}CloseHandle(process);process=IntPtr.Zero;}}
+  public uint Wait(){IntPtr copy;lock(handles){if(process==IntPtr.Zero||!DuplicateHandle(GetCurrentProcess(),process,GetCurrentProcess(),out copy,0,false,2))throw new InvalidOperationException();}try{uint code;if(WaitForSingleObject(copy,0xffffffff)!=0||!GetExitCodeProcess(copy,out code)||code==259)throw new InvalidOperationException();return code;}finally{CloseHandle(copy);}}
+  public void Dispose(){lock(handles){if(job!=IntPtr.Zero){TerminateJobObject(job,1);CloseHandle(job);job=IntPtr.Zero;}if(process!=IntPtr.Zero){if(WaitForSingleObject(process,5000)!=0){TerminateProcess(process,1);if(WaitForSingleObject(process,5000)!=0)Environment.FailFast("owned_child_cleanup_failed");}CloseHandle(process);process=IntPtr.Zero;}}}
  }
  public sealed class Host : ServiceBase {
-  readonly Settings settings;readonly string argsPath,argsHash,selfPath;readonly object gate=new object();OwnedJob child;
+  readonly Settings settings;readonly string argsPath,argsHash,selfPath;readonly object gate=new object();OwnedJob child;bool stopping,successfulOneShot;
   Host(Settings s,string args,string digest,string self){settings=s;argsPath=args;argsHash=digest;selfPath=self;ServiceName=s.Values["service_name"];AutoLog=false;CanStop=true;CanShutdown=true;}
   void Validate(){
    using(var identity=WindowsIdentity.GetCurrent()){if(identity.User==null||identity.User.Value!=settings.Values["service_sid"]||Process.GetCurrentProcess().SessionId!=0||((SecurityIdentifier)new NTAccount("NT SERVICE\\"+ServiceName).Translate(typeof(SecurityIdentifier))).Value!=identity.User.Value)throw new InvalidOperationException();}
@@ -117,8 +127,8 @@ namespace EnforcedServiceV1 {
    Protection.Tree(Path.GetDirectoryName(settings.Values["python_path"]));
    Protection.Tree(Directory.GetParent(Path.GetDirectoryName(settings.Values["launcher_path"])).FullName);
   }
-  protected override void OnStart(string[] args){if(args.Length!=0)throw new InvalidOperationException();lock(gate){try{Validate();child=new OwnedJob(settings);ThreadPool.QueueUserWorkItem(delegate{try{child.Wait();}catch{}finally{ExitCode=1;Stop();}});}catch{if(child!=null){child.Dispose();child=null;}throw new InvalidOperationException("enforced_service_blocked");}}}
-  protected override void OnStop(){lock(gate){if(child!=null){child.Dispose();child=null;}}}
+  protected override void OnStart(string[] args){if(args.Length!=0)throw new InvalidOperationException();lock(gate){try{if(stopping||child!=null)throw new InvalidOperationException();Validate();var owned=new OwnedJob(settings);child=owned;ThreadPool.QueueUserWorkItem(delegate{uint code=1;bool completed=false,requestStop=false;try{code=owned.Wait();completed=true;}catch{}finally{lock(gate){if(!stopping&&Object.ReferenceEquals(child,owned)){ExitCode=completed?Settings.ServiceExitCode(settings.Values["mode"],code):1;successfulOneShot=ExitCode==0;requestStop=true;}}if(requestStop)Stop();}});}catch{if(child!=null){child.Dispose();child=null;}throw new InvalidOperationException("enforced_service_blocked");}}}
+  protected override void OnStop(){lock(gate){if(!successfulOneShot)ExitCode=1;stopping=true;if(child!=null){child.Dispose();child=null;}}}
   protected override void OnShutdown(){OnStop();base.OnShutdown();}
   public static int Main(string[] args){try{if(args.Length!=0||Environment.OSVersion.Platform!=PlatformID.Win32NT||!Environment.Is64BitProcess||Process.GetCurrentProcess().SessionId!=0)return 1;string reader;using(var id=WindowsIdentity.GetCurrent()){reader=id.User.Value;if(!Regex.IsMatch(reader,"\\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\\z"))return 1;}string self=Process.GetCurrentProcess().MainModule.FileName;string path=Path.Combine(Path.GetDirectoryName(self),"service.args");Protection.PrivateRead(path,reader);if(new FileInfo(path).Length>16384)return 1;byte[] bytes=File.ReadAllBytes(path);if(bytes.Length>16384)return 1;string hash;using(var digest=SHA256.Create()){hash=BitConverter.ToString(digest.ComputeHash(bytes)).Replace("-","").ToLowerInvariant();}Settings s=new Settings(new UTF8Encoding(false,true).GetString(bytes));if(Protection.Hash(path)!=hash||s.Values["service_sid"]!=reader)return 1;ServiceBase.Run(new Host(s,path,hash,self));return 0;}catch{return 1;}}
  }

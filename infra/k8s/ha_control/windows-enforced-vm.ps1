@@ -11,6 +11,32 @@ function Get-EnforcedHash([byte[]]$Bytes) {
     $sha=[Security.Cryptography.SHA256]::Create()
     try{return [BitConverter]::ToString($sha.ComputeHash($Bytes)).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
 }
+function Assert-EnforcedConfigProfile($Value){
+    Assert-EnforcedKeys $Value @('name','definition_sha256','capability_name','capability_sid','host_hypervisor_tcb_acknowledged','operational_cutover_accepted','io_acceptance_sha256','external_capability_review_sha256','acceptance_scope','isolation_receipt_sha256')
+    foreach($key in @('name','definition_sha256','capability_name','capability_sid','io_acceptance_sha256','external_capability_review_sha256','acceptance_scope','isolation_receipt_sha256')){if($Value.$key -isnot [string]){throw 'config_profile_rejected'}}
+    if($Value.name -cne 'windows-managed-config-v1' -or $Value.definition_sha256 -cne '61fb12a5c53fa5a76c067f50e6a1ea56a915ebd3d9af86fcb67ff36cd48bd0ef' -or
+        $Value.capability_name -cne 'vmWorkerProcess' -or $Value.capability_sid -cne 'S-1-15-3-1024-2268835264-3721307629-241982045-173645152-1490879176-104643441-2915960892-1612460704' -or
+        $Value.host_hypervisor_tcb_acknowledged -isnot [bool] -or -not $Value.host_hypervisor_tcb_acknowledged -or $Value.operational_cutover_accepted -isnot [bool]){throw 'config_profile_rejected'}
+    if($Value.acceptance_scope -cnotin @('isolated-predeployment','production')){throw 'config_acceptance_scope_rejected'}
+    foreach($key in @('io_acceptance_sha256','external_capability_review_sha256','isolation_receipt_sha256')){if($Value.$key -isnot [string] -or ($Value.$key -cne '' -and $Value.$key -cnotmatch '^[0-9a-f]{64}$')){throw 'config_acceptance_rejected'}}
+    if(($Value.acceptance_scope -ceq 'isolated-predeployment' -and $Value.operational_cutover_accepted) -or
+        ($Value.acceptance_scope -ceq 'production' -and ($Value.isolation_receipt_sha256 -cne '' -or ($Value.operational_cutover_accepted -and ($Value.io_acceptance_sha256 -ceq '' -or $Value.external_capability_review_sha256 -ceq ''))))){throw 'config_acceptance_rejected'}
+    return $Value
+}
+function Get-EnforcedConfigProfileHash($Value){
+    $null=Assert-EnforcedConfigProfile $Value
+    $ordered=[ordered]@{};foreach($key in @('acceptance_scope','capability_name','capability_sid','definition_sha256','external_capability_review_sha256','host_hypervisor_tcb_acknowledged','io_acceptance_sha256','isolation_receipt_sha256','name','operational_cutover_accepted')){$ordered[$key]=$Value.$key}
+    return Get-EnforcedHash ([Text.Encoding]::UTF8.GetBytes(($ordered|ConvertTo-Json -Compress)))
+}
+
+function ConvertTo-EnforcedDiskIdentifier($Value) {
+    # Native providers expose either Guid or uppercase string. No RPC or I/O:
+    # only one bounded D-format parse per disk in the existing two-second read.
+    if($Value -isnot [string] -and $Value -isnot [Guid]){throw 'vhd_identifier_rejected'}
+    $text=$Value.ToString();$guid=[Guid]::Empty
+    if($text.Length -ne 36 -or $text -cnotmatch '^[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$' -or -not [Guid]::TryParseExact($text,'D',[ref]$guid) -or $guid -eq [Guid]::Empty){throw 'vhd_identifier_rejected'}
+    return $guid.ToString('D')
+}
 function New-EnforcedNonce([long]$Sequence) {
     $bytes=New-Object byte[] 24;$random=[Security.Cryptography.RandomNumberGenerator]::Create()
     try{$random.GetBytes($bytes)}finally{$random.Dispose()}
@@ -60,6 +86,12 @@ public static class EnforcedVmNativeV1 {
  [DllImport("advapi32.dll")] static extern bool CloseServiceHandle(IntPtr h);
  [DllImport("shell32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr CommandLineToArgvW(string text,out int count);
  [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+ [DllImport("kernelbase.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool DeriveCapabilitySidsFromName(string name,out IntPtr groups,out uint groupCount,out IntPtr caps,out uint capCount);
+ static void FreeCapabilityArray(IntPtr array,uint count){if(array==IntPtr.Zero)return;if(count<=16)for(uint i=0;i<count;i++){IntPtr p=Marshal.ReadIntPtr(array,(int)i*IntPtr.Size);if(p!=IntPtr.Zero)LocalFree(p);}LocalFree(array);}
+ public static string VmWorkerCapability(){
+  IntPtr groups=IntPtr.Zero,caps=IntPtr.Zero;uint ng=0,nc=0;
+  try{if(!DeriveCapabilitySidsFromName("vmWorkerProcess",out groups,out ng,out caps,out nc)||ng>16||nc!=1)throw new InvalidOperationException("config_capability_derivation_failed");return new System.Security.Principal.SecurityIdentifier(Marshal.ReadIntPtr(caps)).Value;}finally{FreeCapabilityArray(groups,ng);FreeCapabilityArray(caps,nc);}
+ }
  public static string[] Argv(string text){int count;IntPtr memory=CommandLineToArgvW(text,out count);if(memory==IntPtr.Zero)throw new InvalidOperationException();try{if(count<1||count>32)throw new InvalidOperationException();var result=new string[count];for(int i=0;i<count;i++)result[i]=Marshal.PtrToStringUni(Marshal.ReadIntPtr(memory,i*IntPtr.Size));return result;}finally{LocalFree(memory);}}
  public static string FileIdentity(string path) {
   using(var h=CreateFile(path,0,7,IntPtr.Zero,3,0x00200000,IntPtr.Zero)) {
@@ -80,8 +112,19 @@ public static class EnforcedVmNativeV1 {
 function Assert-EnforcedAllowedMask([string]$Sid,[long]$Mask,[string[]]$Allowed,[long]$RestrictedMask) {
     if((($Mask -band 4294967295) -band $RestrictedMask) -ne 0 -and $Sid -notin $Allowed){throw 'enforced_acl_rejected'}
 }
-function Assert-EnforcedDescriptor($Descriptor,[string[]]$Writers,[long]$WriteMask,[bool]$IgnoreInheritOnly=$false) {
-    if($null -eq $Descriptor.Owner -or $Descriptor.Owner.Value -notin $Writers -or
+function Get-EnforcedServiceControlMask {
+    # Service GENERIC_EXECUTE includes START/STOP/PAUSE/USER_DEFINED_CONTROL.
+    # https://learn.microsoft.com/en-us/windows/win32/services/service-security-and-access-rights
+    return [long]1879900530 # 0x700d0172; file execute rights use a separate mask.
+}
+function Get-EnforcedOsVolumeRoot {return [IO.Path]::GetPathRoot([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows))}
+function Test-EnforcedOsRootOwner([string]$Owner,[string]$Path,[int]$Depth) {
+    return ($Owner -ceq 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464' -and
+        $Depth -gt 1 -and $Path -cmatch '^[A-Za-z]:\\$' -and $Path -ieq (Get-EnforcedOsVolumeRoot))
+}
+function Assert-EnforcedDescriptor($Descriptor,[string[]]$Writers,[long]$WriteMask,[bool]$IgnoreInheritOnly=$false,[bool]$OsRootOwner=$false) {
+    if($null -eq $Descriptor.Owner -or ($Descriptor.Owner.Value -notin $Writers -and
+            -not ($OsRootOwner -and $Descriptor.Owner.Value -ceq 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')) -or
         $null -eq $Descriptor.DiscretionaryAcl -or $Descriptor.DiscretionaryAcl.Count -eq 0){throw 'enforced_acl_rejected'}
     foreach($ace in $Descriptor.DiscretionaryAcl){
         if($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback){throw 'enforced_acl_rejected'}
@@ -104,7 +147,7 @@ function Assert-EnforcedPath([string]$Path,[string[]]$Writers) {
         # protected child; still deny delete-child, deletion and owner/DACL
         # takeover, and ignore ACEs that do not apply to that ancestor itself.
         if($depth -le 1){Assert-EnforcedDescriptor $descriptor $Writers 1343029590}
-        else {Assert-EnforcedDescriptor $descriptor $Writers 269287488 $true}
+        else {Assert-EnforcedDescriptor $descriptor $Writers 269287488 $true (Test-EnforcedOsRootOwner $descriptor.Owner.Value $entry.FullName $depth)}
         $entry=if($entry -is [IO.DirectoryInfo]){$entry.Parent}else{$entry.Directory}
         $depth++
     }
@@ -245,6 +288,10 @@ function Assert-EnforcedParentArgv($Actual,$Config) {
     for($i=0;$i -lt $Actual.Count;$i++){if($Actual[$i] -cne $expected[$i]){throw 'controller_parent_unverified'}}
 }
 function Assert-EnforcedApproval($Config,$Approved,[string]$PlanHash) {
+    if($Config.windows_enforced.PSObject.Properties['config_profile']){
+        $selected=Assert-EnforcedConfigProfile $Config.windows_enforced.config_profile
+        if(($selected.acceptance_scope -ceq 'isolated-predeployment' -and ($selected.io_acceptance_sha256 -ceq '' -or $selected.isolation_receipt_sha256 -ceq '')) -or ($selected.acceptance_scope -ceq 'production' -and -not $selected.operational_cutover_accepted)){throw 'managed_config_authority_blocked'}
+    }
     # Plan/handshake/response remain schema 2. Only this exact authority
     # envelope carries a non-expiring installed-runtime purpose.
     if(($Approved.schema_version -is [int] -or $Approved.schema_version -is [long]) -and $Approved.schema_version -eq 3){
@@ -280,7 +327,9 @@ function Assert-EnforcedConfig($Config) {
         ($Config.generation -isnot [int] -and $Config.generation -isnot [long]) -or $Config.generation -lt 1 -or
         $Config.cluster -cnotmatch '^[A-Za-z0-9_-]{1,100}$' -or $Config.source_commit -cnotmatch '^[0-9a-f]{40}$'){throw 'enforced_shape_rejected'}
     $cfg=$Config.windows_enforced
-    Assert-EnforcedKeys $cfg @('driver_sha256','adapter_sha256','policy_path','policy_sha256','service_name','service_sid','boot_ticks','session_id','python_path','python_sha256','launcher_path','launcher_sha256','service_image_sha256','vm_id','vm_notes_sha256','vm_config_root','disks')
+     $cfgKeys= @('driver_sha256','adapter_sha256','policy_path','policy_sha256','service_name','service_sid','boot_ticks','session_id','python_path','python_sha256','launcher_path','launcher_sha256','service_image_sha256','vm_id','vm_notes_sha256','vm_config_root','disks')
+    if($cfg.PSObject.Properties['config_profile']){$cfgKeys+=@('config_profile');$null=Assert-EnforcedConfigProfile $cfg.config_profile}
+    Assert-EnforcedKeys $cfg $cfgKeys
     foreach($name in @('driver_sha256','adapter_sha256','policy_sha256','session_id','python_sha256','launcher_sha256','service_image_sha256','vm_notes_sha256')){if($cfg.$name -cnotmatch '^[0-9a-f]{64}$'){throw 'enforced_shape_rejected'}}
     if($cfg.service_name -cnotmatch '^[A-Za-z0-9_-]{1,80}$' -or $cfg.service_sid -cnotmatch '^S-1-5-80-(\d+-){4}\d+$' -or
         $cfg.boot_ticks -cnotmatch '^\d{1,20}$' -or ([Guid]::Parse($cfg.vm_id)).ToString() -cne $cfg.vm_id){throw 'enforced_shape_rejected'}
@@ -313,7 +362,7 @@ function Get-EnforcedContext($Config,$Policy,$Watch) {
     foreach($sid in $hyperv){if($sid -notin @($admins+$cfg.service_sid+'S-1-5-18')){throw 'unsupported_management_principal'}}
     $writers=@('S-1-5-18','S-1-5-32-544')+@($admins)+@($cfg.service_sid)
     $sd=[Security.AccessControl.RawSecurityDescriptor]::new([EnforcedVmNativeV1]::ServiceSecurity($cfg.service_name),0)
-    Assert-EnforcedDescriptor $sd $writers 1343029618
+    Assert-EnforcedDescriptor $sd $writers (Get-EnforcedServiceControlMask)
     # Read the actual namespace SD; an immutable policy declaration alone is
     # not evidence that another identity lacks VM management method access.
     $security=Get-CimInstance -Namespace 'root/virtualization/v2' -ClassName '__SystemSecurity' -ErrorAction Stop
@@ -353,27 +402,76 @@ function Get-EnforcedVmStamp($Vm) {
     return [ordered]@{id=$Vm.Id.ToString();generation=[int]$Vm.Generation;start=$Vm.AutomaticStartAction.ToString();
         location=[string]$Vm.ConfigurationLocation;notes=[string]$Vm.Notes;state=$Vm.State.ToString()}
 }
+function Assert-EnforcedNoCapability([string]$Path){
+    $sd=Get-EnforcedPathDescriptor $Path
+    foreach($ace in $sd.DiscretionaryAcl){if($ace -is [Security.AccessControl.KnownAce] -and $ace.SecurityIdentifier.Value.StartsWith('S-1-15-',[StringComparison]::Ordinal)){throw 'capability_outside_config_rejected'}}
+}
+function Assert-EnforcedManagedAce([string]$Sid,[long]$Mask,[string[]]$Readers,[string]$Capability,[string]$ServiceSid){
+    if($Sid -notin $Readers -or ($Sid -ceq $Capability -and $Mask -ne 2032127) -or
+        ($Sid -ceq $ServiceSid -and (($Mask -band 4294967295) -band (4294967295 -bxor 1179785)) -ne 0)){throw 'managed_config_role_rejected'}
+}
+function Get-EnforcedConfigCapability{return [EnforcedVmNativeV1]::VmWorkerCapability()}
+function Assert-EnforcedManagedConfig($Config,$Policy,$Watch){
+    $cfg=$Config.windows_enforced;$profile=Assert-EnforcedConfigProfile $cfg.config_profile
+    if($Config.installation_id -isnot [string] -or $Config.installation_id -cnotmatch '^[0-9a-f]{64}$'){throw 'managed_config_installation_required'}
+    $name='N100HA_'+$Config.installation_id.Substring(0,16)+'_'+$Config.node
+    $privateRoot=Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) ('N100HA_'+$Config.installation_id.Substring(0,24))
+    $expected=Join-Path (Join-Path $privateRoot ('guest-'+$Config.node)) $name
+    if($cfg.vm_config_root -ine $expected){throw 'managed_config_scope_rejected'}
+    if((Get-EnforcedConfigCapability) -cne $profile.capability_sid){throw 'config_capability_derivation_changed'}
+    $base=@('S-1-5-18','S-1-5-32-544')+@($Policy.trusted_admin_sids)
+    $writers=$base+@($profile.capability_sid);$readers=$writers+@($cfg.service_sid)
+    $root=Get-Item -LiteralPath $cfg.vm_config_root -Force
+    $parent=if($root -is [IO.DirectoryInfo]){$root.Parent}else{$root.Directory}
+    if($null -eq $parent){throw 'managed_config_parent_required'}
+    Assert-EnforcedPath $parent.FullName $base
+    Assert-EnforcedNoCapability $parent.FullName
+    $queue=[Collections.Generic.Queue[string]]::new();$queue.Enqueue($root.FullName);$seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    while($queue.Count){
+        Assert-EnforcedDeadline $Watch
+        $entry=Get-Item -LiteralPath ($queue.Dequeue()) -Force
+        if(-not $seen.Add($entry.FullName) -or $seen.Count -gt 4096 -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'managed_config_inventory_rejected'}
+        $sd=Get-EnforcedPathDescriptor $entry.FullName
+        if($sd.Owner.Value -notin $base){throw 'managed_config_owner_rejected'}
+        foreach($ace in $sd.DiscretionaryAcl){
+            if($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback){throw 'managed_config_ace_rejected'}
+            if($ace.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed){throw 'managed_config_ace_rejected'}
+            Assert-EnforcedManagedAce $ace.SecurityIdentifier.Value ([long]$ace.AccessMask) $readers $profile.capability_sid $cfg.service_sid
+        }
+        Assert-EnforcedDescriptor $sd $writers 1343029590
+        Assert-EnforcedDescriptor $sd $readers 2415919105 $true
+        if($entry -is [IO.DirectoryInfo]){
+            $children=@(Get-ChildItem -LiteralPath $entry.FullName -Force|Select-Object -First 4096)
+            if($seen.Count+$queue.Count+$children.Count -gt 4096){throw 'managed_config_inventory_limit'}
+            foreach($child in $children){$queue.Enqueue($child.FullName)}
+        }
+    }
+    Assert-EnforcedDeadline $Watch
+}
+
 function Get-EnforcedVmSnapshot($Config,$Policy,$Watch) {
     $cfg=$Config.windows_enforced
     $context=Get-EnforcedContext $Config $Policy $Watch
     $vm=@(Get-VM -Id ([Guid]::Parse($cfg.vm_id)) -ErrorAction Stop)
     if($vm.Count -ne 1){throw 'fixed_vm_identity_changed'}
     $before=Get-EnforcedVmStamp $vm[0]
+    if($cfg.PSObject.Properties['config_profile'] -and ($Config.installation_id -isnot [string] -or $Config.installation_id -cnotmatch '^[0-9a-f]{64}$' -or $vm[0].Name -cne ('N100HA_'+$Config.installation_id.Substring(0,16)+'_'+$Config.node) -or -not $vm[0].Notes.StartsWith('ha-owned-guest-v1:'+$Config.installation_id+':',[StringComparison]::Ordinal))){throw 'managed_config_owned_vm_required'}
     if($before.id -cne $cfg.vm_id -or $before.generation -ne 2 -or $before.start -cne 'Nothing' -or $before.location -ine $cfg.vm_config_root -or
         (Get-EnforcedHash ([Text.Encoding]::UTF8.GetBytes($before.notes))) -cne $cfg.vm_notes_sha256){throw 'fixed_vm_identity_changed'}
     $vmSid=Get-EnforcedVmSid $cfg.vm_id
     $dataWriters=@('S-1-5-18','S-1-5-32-544')+@($Policy.trusted_admin_sids)+@($vmSid)
     $dataReaders=$dataWriters+@($cfg.service_sid)
-    Assert-EnforcedPath $cfg.vm_config_root $dataWriters
-    Assert-EnforcedDataReaders $cfg.vm_config_root $dataReaders $dataWriters $Watch $true
+    if($cfg.PSObject.Properties['config_profile']){Assert-EnforcedManagedConfig $Config $Policy $Watch}
+    else{Assert-EnforcedPath $cfg.vm_config_root $dataWriters;Assert-EnforcedDataReaders $cfg.vm_config_root $dataReaders $dataWriters $Watch $true}
     $actual=@(Get-VMHardDiskDrive -VM $vm[0] -ErrorAction Stop|ForEach-Object {$_.Path.ToLowerInvariant()}|Sort-Object)
     $expected=@($cfg.disks|ForEach-Object {$_.path.ToLowerInvariant()}|Sort-Object)
     if(($actual -join "`n") -cne ($expected -join "`n")){throw 'vhd_inventory_changed'}
     foreach($disk in $cfg.disks){
+        if($cfg.PSObject.Properties['config_profile']){Assert-EnforcedNoCapability $disk.path}
         Assert-EnforcedPath $disk.path $dataWriters
         Assert-EnforcedDataReaders $disk.path $dataReaders $dataWriters $Watch
         $vhd=Get-VHD -Path $disk.path -ErrorAction Stop
-        if($vhd.DiskIdentifier.ToString() -cne $disk.disk_id -or -not [string]::IsNullOrEmpty($vhd.ParentPath)){throw 'vhd_identity_changed'}
+        if((ConvertTo-EnforcedDiskIdentifier $vhd.DiskIdentifier) -cne $disk.disk_id -or -not [string]::IsNullOrEmpty($vhd.ParentPath)){throw 'vhd_identity_changed'}
         $identity=Get-EnforcedHash ([Text.Encoding]::UTF8.GetBytes((Get-EnforcedFileIdentity $disk.path)))
         if($identity -cne $disk.file_identity_sha256){throw 'vhd_file_changed'}
         Assert-EnforcedDeadline $Watch
@@ -407,7 +505,12 @@ function Get-EnforcedResponse($Config,$Approved,[string]$PlanHash,[string]$Appro
     $policyRead=Read-EnforcedPrivate $cfg.policy_path $Watch
     if($policyRead.sha256 -cne $cfg.policy_sha256){throw 'enforcement_policy_changed'}
     $policy=Convert-EnforcedJson ([Text.Encoding]::UTF8.GetString($policyRead.bytes))
-    Assert-EnforcedKeys $policy @('schema_version','profile','cluster','generation','session_id','service_sid','boot_ticks','vm_id','vm_notes_sha256','vm_config_root','disks','trusted_admin_sids','hyperv_member_sids','host_admins_tcb_acknowledged')
+    $policyKeys=@('schema_version','profile','cluster','generation','session_id','service_sid','boot_ticks','vm_id','vm_notes_sha256','vm_config_root','disks','trusted_admin_sids','hyperv_member_sids','host_admins_tcb_acknowledged')
+    if($cfg.PSObject.Properties['config_profile']){
+        $policyKeys+=@('config_profile');if((Get-EnforcedConfigProfileHash $policy.config_profile) -cne (Get-EnforcedConfigProfileHash $cfg.config_profile)){throw 'config_profile_policy_changed'}
+        foreach($path in @($Plan,$Approval,$cfg.policy_path,$cfg.python_path,$cfg.launcher_path,$PSCommandPath,(Join-Path $PSScriptRoot 'enforced_windows.py'))){Assert-EnforcedNoCapability $path;$entry=Get-Item -LiteralPath $path -Force;$parent=if($entry -is [IO.DirectoryInfo]){$entry.Parent}else{$entry.Directory};if($null -eq $parent){throw 'config_profile_private_parent_required'};Assert-EnforcedNoCapability $parent.FullName}
+    }
+    Assert-EnforcedKeys $policy $policyKeys
     foreach($name in @('session_id','service_sid','boot_ticks','vm_id','vm_notes_sha256','vm_config_root')){if($policy.$name -cne $cfg.$name){throw 'policy_binding_changed'}}
     if($policy.profile -cne 'enforced-vm-v1' -or $policy.schema_version -ne 1 -or $policy.cluster -cne $Config.cluster -or $policy.generation -ne $Config.generation -or
         ($policy.disks|ConvertTo-Json -Depth 5 -Compress) -cne ($cfg.disks|ConvertTo-Json -Depth 5 -Compress)){throw 'policy_binding_changed'}
@@ -430,10 +533,12 @@ function Get-EnforcedResponse($Config,$Approved,[string]$PlanHash,[string]$Appro
         if((Read-EnforcedPrivate $binding[0] $Watch).sha256 -cne $binding[1]){throw 'authority_bytes_changed'}
     }
     Assert-EnforcedDeadline $Watch
-    return [ordered]@{schema_version=2;profile='enforced-vm-v1';scope='vm-enforcement-only';status='ok';
+    $response=[ordered]@{schema_version=2;profile='enforced-vm-v1';scope='vm-enforcement-only';status='ok';
         plan_sha256=$PlanHash;approval_sha256=$ApprovalHash;source_sha256=$cfg.driver_sha256;policy_sha256=$cfg.policy_sha256;
         session_id=$cfg.session_id;principal_sha256=$snapshot.context.principal_sha256;boot_ticks=$snapshot.context.boot_ticks;
         broker_instance=$Instance;nonce=$Request.nonce;sequence=[long]$Request.sequence;node=$Config.node;generation=$Config.generation;vm_id=$cfg.vm_id;fenced=[bool]$snapshot.fenced}
+    if($cfg.PSObject.Properties['config_profile']){$response.config_profile=$cfg.config_profile.name;$response.config_profile_sha256=Get-EnforcedConfigProfileHash $cfg.config_profile;$response.config_profile_definition_sha256=$cfg.config_profile.definition_sha256;$response.config_acceptance_scope=$cfg.config_profile.acceptance_scope;$response.operational_cutover_accepted=$cfg.config_profile.operational_cutover_accepted}
+    return $response
 }
 
 if($MyInvocation.InvocationName -cne '.'){
@@ -455,6 +560,7 @@ if($MyInvocation.InvocationName -cne '.'){
         $snapshot=Get-EnforcedResponse $config $approved $planRead.sha256 $approvedRead.sha256 $instance $request $watch
         $hello=[ordered]@{}
         foreach($key in @('schema_version','profile','scope','plan_sha256','approval_sha256','source_sha256','policy_sha256','session_id','principal_sha256','boot_ticks','broker_instance')){$hello[$key]=$snapshot[$key]}
+        if($snapshot.Contains('config_profile')){foreach($key in @('config_profile','config_profile_sha256','config_profile_definition_sha256','config_acceptance_scope','operational_cutover_accepted')){$hello[$key]=$snapshot[$key]}}
         $hello.guard='ready';$hello.sequence=[long]1;$hello|ConvertTo-Json -Depth 4 -Compress
         while($null -ne ($line=[Console]::In.ReadLine())){
             $watch=[Diagnostics.Stopwatch]::StartNew()

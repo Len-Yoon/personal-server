@@ -1,4 +1,4 @@
-param([string]$Source,[string]$SourceSha256,[string]$ReferenceRoot,[string]$Pins,[string]$PinsSha256,[string]$Output)
+param([string]$Source,[string]$SourceSha256,[string]$ReferenceRoot,[string]$Pins,[string]$PinsSha256,[string]$Output,[ValidateSet('controller','provider-probe')][string]$Kind='controller')
 # Offline metadata compilation only. No produced executable is run.
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
@@ -26,6 +26,7 @@ foreach($assembly in $compiler){
     $null=Read-BuildPinned $assembly.Location $pinData.compiler.$name
 }
 $refNames=@('mscorlib.dll','System.dll','System.Core.dll','System.ServiceProcess.dll')
+if($Kind -ceq 'provider-probe'){$refNames+=@('System.Management.dll')}
 if((($pinData.references.PSObject.Properties.Name|Sort-Object) -join ',') -cne (($refNames|Sort-Object) -join ',')){throw 'invalid_reference_pins'}
 $refs=[Collections.Generic.List[Microsoft.CodeAnalysis.MetadataReference]]::new()
 foreach($name in $refNames){
@@ -34,11 +35,13 @@ foreach($name in $refNames){
 }
 $sourceBytes=Read-BuildPinned $Source $SourceSha256
 $text=([Text.UTF8Encoding]::new($false,$true)).GetString($sourceBytes)
-$tree=[Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($text,[Microsoft.CodeAnalysis.CSharp.CSharpParseOptions]::Default,'windows-service-host.cs',[Text.Encoding]::UTF8)
+$sourceName=if($Kind -ceq 'provider-probe'){'windows-provider-probe.cs'}else{'windows-service-host.cs'}
+$assemblyName=if($Kind -ceq 'provider-probe'){'HaProviderProbeV1'}else{'EnforcedServiceV1'}
+$tree=[Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($text,[Microsoft.CodeAnalysis.CSharp.CSharpParseOptions]::Default,$sourceName,[Text.Encoding]::UTF8)
 $options=[Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions]::new([Microsoft.CodeAnalysis.OutputKind]::ConsoleApplication).WithPlatform([Microsoft.CodeAnalysis.Platform]::AnyCpu).WithOptimizationLevel([Microsoft.CodeAnalysis.OptimizationLevel]::Release).WithDeterministic($true)
 $artifacts=[Collections.Generic.List[byte[]]]::new()
 for($i=0;$i -lt 2;$i++){
-    $compilation=[Microsoft.CodeAnalysis.CSharp.CSharpCompilation]::Create('EnforcedServiceV1',[Microsoft.CodeAnalysis.SyntaxTree[]]@($tree),$refs,$options)
+    $compilation=[Microsoft.CodeAnalysis.CSharp.CSharpCompilation]::Create($assemblyName,[Microsoft.CodeAnalysis.SyntaxTree[]]@($tree),$refs,$options)
     $stream=[IO.MemoryStream]::new()
     try{
         $result=$compilation.Emit($stream,$null,$null,$null,$null,$null,[Threading.CancellationToken]::None)

@@ -36,6 +36,34 @@ def pe():
 
 
 class EnforcedProvisionTests(unittest.TestCase):
+    def test_preflight_owner_exception_is_exact_os_root_ancestor_only(self):
+        pwsh=shutil.which('pwsh') or '/private/tmp/n100-ha-powershell/runtime/pwsh'
+        env=dict(os.environ, PREFLIGHT=str(ROOT/'infra/k8s/ha_control/windows-service-preflight.ps1'))
+        script=r'''
+$ErrorActionPreference='Stop'
+. $env:PREFLIGHT
+function Get-PreflightOsVolumeRoot{return 'C:\'}
+$ti='S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+if(-not (Test-PreflightOsRootOwner $ti 'c:\' $true)){throw 'os_root_rejected'}
+foreach($case in @(@($ti,'C:\',$false),@($ti,'C:\Private',$true),@($ti,'D:\',$true),@($ti,'C:\..\',$true),@('S-1-1-0','C:\',$true))){
+ if(Test-PreflightOsRootOwner $case[0] $case[1] ([bool]$case[2])){throw 'unsafe_owner_exception'}
+}
+$blocked=$false
+try{Assert-PreflightMask 'S-1-1-0' 262144 @('S-1-5-18') @('S-1-5-18') $false $true}catch{$blocked=$true}
+if(-not $blocked){throw 'unsafe_ace_bypassed'}
+# Parse the real call site without claiming native ACL execution on macOS.
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:PREFLIGHT,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'parse_failed'}
+$entry=$ast.Find({param($a) $a -is [Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -ceq 'Assert-PreflightEntry'},$true)
+$calls=@($entry.FindAll({param($a) $a -is [Management.Automation.Language.CommandAst] -and $a.GetCommandName() -ceq 'Test-PreflightOsRootOwner'},$true))
+if($calls.Count -ne 1 -or $calls[0].Extent.Text -cne 'Test-PreflightOsRootOwner $descriptor.Owner.Value $Entry.FullName $Ancestor'){throw 'owner_context_not_connected'}
+'owner-context-only'
+'''
+        result=subprocess.run([pwsh,'-NoProfile','-NonInteractive','-Command',script],env=env,capture_output=True,timeout=20)
+        self.assertEqual(result.returncode,0,result.stderr.decode(errors='replace'))
+        self.assertEqual(result.stdout.decode().strip(),'owner-context-only')
+
     def test_exact_args_and_no_command_input(self):
         good=settings()
         raw=P.render_args(good)
@@ -68,6 +96,16 @@ if($initialize.CommandLine().EndsWith('--arm')){throw 'initialize_armed'}
 $advance=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=advance'))
 if($advance.CommandLine() -cne $expected.Replace(' serve ',' advance ').Replace(' --arm','')){throw 'advance_not_exact_fixed_command'}
 if($advance.CommandLine().EndsWith('--arm')){throw 'advance_armed'}
+$ti='S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+if(-not [EnforcedServiceV1.Settings]::IsTrustedOsRootOwner($ti,'c:\','C:\',2)){throw 'os_root_owner_rejected'}
+foreach($case in @(@($ti,'C:\','C:\',0),@($ti,'C:\','C:\',1),@($ti,'C:\Private','C:\',3),@($ti,'D:\','C:\',3),@($ti,'C:\..\','C:\',3),@('S-1-1-0','C:\','C:\',3))){
+ if([EnforcedServiceV1.Settings]::IsTrustedOsRootOwner($case[0],$case[1],$case[2],[int]$case[3])){throw 'unsafe_owner_exception'}
+}
+foreach($mode in @('initialize','advance')){
+ if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,0) -ne 0){throw 'successful_oneshot_failed'}
+ if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,1) -ne 1){throw 'failed_oneshot_succeeded'}
+}
+foreach($mode in @('serve','unknown')){if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,0) -ne 1){throw 'unexpected_exit_succeeded'}}
 'managed-grammar-only'
 '''
         result=subprocess.run([pwsh,'-NoProfile','-NonInteractive','-Command',script],env=env,capture_output=True,timeout=20)
@@ -156,6 +194,62 @@ foreach($forbidden in @('Start-Service','New-Service','Set-Acl','Start-Process',
                 self.assertIn(expected,result.stderr.decode(errors='replace'))
                 self.assertEqual(old.read_bytes(),b'previous-artifact')
                 self.assertFalse((root/'new.exe').exists())
+
+    def managed_inputs(self):
+        import base64
+        selected=P.controller_bundle.managed_config_template()
+        cfg=dict(config_profile=selected,driver_sha256='1'*64,adapter_sha256='2'*64,service_name='FixtureBroker',service_sid='S-1-5-80-1-2-3-4-5',
+            session_id='3'*64,boot_ticks='638000000000000000',vm_id='11111111-1111-1111-1111-111111111111',vm_notes_sha256='4'*64,
+            vm_config_root=r'C:\Private\VM',disks=[dict(path=r'C:\Private\disk.vhdx',disk_id='22222222-2222-2222-2222-222222222222',file_identity_sha256='5'*64)])
+        policy=dict(schema_version=1,profile='enforced-vm-v1',cluster='isolated-fixture',generation=3,config_profile=selected,trusted_admin_sids=[],hyperv_member_sids=[cfg['service_sid']],host_admins_tcb_acknowledged=True,**{k:cfg[k] for k in ('session_id','service_sid','boot_ticks','vm_id','vm_notes_sha256','vm_config_root','disks')})
+        plan=dict(schema_version=2,profile='enforced-vm-v1',source_commit=COMMIT,cluster=policy['cluster'],generation=3,node='A',installation_id='b'*64,windows_enforced=cfg)
+        trust=dict(config_profile=selected,acceptance_receipts={},service_args={'service_name':cfg['service_name'],'service_sid':cfg['service_sid']})
+        def bind():
+            policy_raw=P.controller_bundle.encode(policy);cfg['policy_sha256']=P.sha(policy_raw);plan_raw=P.controller_bundle.encode(plan)
+            trust.update(config_profile_sha256=P.enforced_profile.config_profile_digest(selected),policy_sha256=P.sha(policy_raw),
+                plan_bytes_base64=base64.b64encode(plan_raw).decode(),policy_bytes_base64=base64.b64encode(policy_raw).decode())
+            trust['service_args']['plan_sha256']=P.sha(plan_raw)
+            return {'enforced_driver_sha256':cfg['driver_sha256'],'enforced_adapter_sha256':cfg['adapter_sha256']}
+        return selected,plan,policy,trust,bind
+
+    def test_managed_package_binds_actual_plan_policy_bytes_without_claiming_native_acceptance(self):
+        selected,plan,policy,bound_inputs,bind=self.managed_inputs();binding=bind()
+        value=P.managed_profile_binding(bound_inputs,binding,COMMIT)
+        self.assertEqual(value['config_profile_sha256'],P.enforced_profile.config_profile_digest(selected))
+        self.assertEqual(value['acceptance_scope'],'isolated-predeployment')
+        self.assertIs(value['native_accepted'],False);self.assertIs(value['operational_cutover_accepted'],False)
+        for key in ('config_profile_sha256','policy_sha256','plan_bytes_base64','policy_bytes_base64'):
+            bad=deepcopy(bound_inputs);bad[key]='wrong'
+            with self.assertRaises(P.ProvisionError):P.managed_profile_binding(bad,binding,COMMIT)
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);bundle,artifact,manifest,trust,source,save=self.make_inputs(root)
+            trust.update(bound_inputs);trust['service_args']=settings()|bound_inputs['service_args'];trust['service_args']['host_sha256']=P.sha(pe())
+            fake_binding={'source_commit':COMMIT}|binding
+            with patch.object(P.controller_bundle,'verify',return_value=fake_binding),patch.object(P,'source_at',return_value=source):
+                result=P.prepare(COMMIT,bundle,artifact,manifest,save(),root/'out')
+            installed=json.loads((root/'out/install-plan.json').read_bytes())
+            self.assertEqual(installed['config_profile_binding']['config_profile_sha256'],value['config_profile_sha256'])
+            self.assertFalse(result['installed']);self.assertFalse(result['native_accepted'])
+            self.assertNotIn('plan_bytes_base64',(root/'out/install-plan.json').read_text())
+
+    def test_scope_bound_actual_evidence_cannot_be_replaced_with_authz_or_other_cluster(self):
+        import base64
+        selected,plan,policy,trust,bind=self.managed_inputs()
+        common=dict(schema_version=1,acceptance_scope='isolated-predeployment',source_commit=COMMIT,installation_id=plan['installation_id'],cluster=plan['cluster'],config_profile_definition_sha256=selected['definition_sha256'],passed=True)
+        ids={'A':plan['windows_enforced']['vm_id'],'B':'33333333-3333-3333-3333-333333333333'}
+        io=common|dict(kind='guest-media-io',vm_ids=ids,guest_boot_observed=True,vhd_write_observed=True,iso_read_observed=True)
+        isolation=common|dict(kind='isolated-cluster-boundary',vm_ids=ids,providers_closed=True,existing_ingress_unchanged=True,production_authority=False)
+        def evidence():
+            for key,body in [('io_acceptance_sha256',io),('isolation_receipt_sha256',isolation)]:
+                raw=P.controller_bundle.encode(body);selected[key]=P.sha(raw);trust['acceptance_receipts'][key]=base64.b64encode(raw).decode()
+            return bind()
+        binding=evidence();P.managed_profile_binding(trust,binding,COMMIT)
+        for body,key,bad in [(io,'kind','authz-memory-model'),(io,'guest_boot_observed',False),(io,'acceptance_scope','production'),(isolation,'providers_closed',False),(isolation,'cluster','production-fixture'),(isolation,'production_authority',True)]:
+            old=body[key];body[key]=bad;binding=evidence()
+            with self.assertRaises(P.ProvisionError):P.managed_profile_binding(trust,binding,COMMIT)
+            body[key]=old
+        binding=evidence();trust['acceptance_receipts']['unexpected']='e30='
+        with self.assertRaises(P.ProvisionError):P.managed_profile_binding(trust,binding,COMMIT)
 
     def test_private_inputs_owner_mode_link_and_hash_bound(self):
         with tempfile.TemporaryDirectory() as folder:

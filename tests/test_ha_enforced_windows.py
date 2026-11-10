@@ -88,6 +88,38 @@ def adapter(replies=()):
 
 
 class EnforcedWindowsTests(unittest.TestCase):
+    def test_service_control_rights_reject_pause_custom_control_and_generic_execute(self):
+        self.assertEqual(self.ps(r'''
+$mask=Get-EnforcedServiceControlMask
+$trusted=@('S-1-5-18','S-1-5-32-544',$config.windows_enforced.service_sid)
+$foreign='S-1-5-11'
+foreach($right in @(2,16,32,64,256,536870912,268435456,1073741824,65536,262144,524288)){
+ $closed=$false
+ try{Assert-EnforcedAllowedMask $foreign $right $trusted $mask}catch{if($_.Exception.Message -cne 'enforced_acl_rejected'){throw};$closed=$true}
+ if(-not $closed){throw 'foreign_service_controller_accepted'}
+ foreach($sid in $trusted){Assert-EnforcedAllowedMask $sid $right $trusted $mask}
+}
+foreach($read in @(1,4,8,128,131072,131213)){
+ Assert-EnforcedAllowedMask $foreign $read $trusted $mask
+}
+'service-controls-closed'
+''').strip(), 'service-controls-closed')
+
+    def test_trusted_installer_owner_is_only_a_higher_os_volume_root(self):
+        body=r'''
+function Get-EnforcedOsVolumeRoot{return 'C:\'}
+$ti='S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+if(-not (Test-EnforcedOsRootOwner $ti 'c:\' 2)){throw 'os_root_rejected'}
+foreach($case in @(@($ti,'C:\',0),@($ti,'C:\',1),@($ti,'C:\Private',3),@($ti,'D:\',3),@($ti,'C:\..\',3),@('S-1-1-0','C:\',3))){
+ if(Test-EnforcedOsRootOwner $case[0] $case[1] ([int]$case[2])){throw 'unsafe_owner_exception'}
+}
+$denied=$false
+try{Assert-EnforcedAllowedMask $ti 268435456 @('S-1-5-18','S-1-5-32-544') 1343029590}catch{$denied=$true}
+if(-not $denied){throw 'owner_exception_granted_write_ace'}
+'owner-only-root-context'
+'''
+        self.assertEqual(self.ps(body).strip(), 'owner-only-root-context')
+
     @classmethod
     def setUpClass(cls):
         cls.pwsh = shutil.which('pwsh') or '/private/tmp/n100-ha-powershell/runtime/pwsh'
@@ -466,6 +498,11 @@ if($blocked -ne 3 -or $script:trace.Count -ne 0){throw 'changed_authority_accept
                 self.assertIsNone(value.process)
                 self.assertFalse(value._healthy)
                 self.assertNotIn('shell', spawn.call_args.kwargs)
+                self.assertEqual(spawn.call_args.args[0], [
+                    '/fixed/powershell', '-NoProfile', '-NonInteractive',
+                    '-ExecutionPolicy', 'Bypass', '-File', str(DRIVER),
+                    '-Plan', '/fixture/plan', '-Approval', '/fixture/approval', '-Go',
+                ])
 
     def test_pipe_write_failure_cannot_authorize_or_repeat_mutation(self):
         value = adapter()
@@ -510,6 +547,55 @@ if(-not $blocked -or @($script:trace|Where-Object {$_ -ceq 'turnoff'}).Count -ne
 'bounded-profile'
 ''', setup).strip(), 'bounded-profile')
 
+    def test_managed_profile_scope_authority_and_witness_are_explicit(self):
+        selected=dict(name=E.CONFIG_PROFILE_DEFINITION['name'],definition_sha256=E.CONFIG_PROFILE_DEFINITION_SHA256,
+            capability_name='vmWorkerProcess',capability_sid=E.CONFIG_PROFILE_DEFINITION['capability_sid'],
+            host_hypervisor_tcb_acknowledged=True,acceptance_scope='isolated-predeployment',
+            operational_cutover_accepted=False,io_acceptance_sha256='',external_capability_review_sha256='',isolation_receipt_sha256='')
+        self.assertEqual(E.config_profile(selected),selected)
+        plan,approved,plan_hash,_=fixtures();plan['windows_enforced']['config_profile']=deepcopy(selected)
+        with self.assertRaises(TransitionBlocked):E._validate(plan,approved,plan_hash,plan['windows_enforced']['driver_sha256'])
+        selected.update(io_acceptance_sha256='1'*64,isolation_receipt_sha256='2'*64)
+        plan['windows_enforced']['config_profile']=deepcopy(selected)
+        E._validate(plan,approved,plan_hash,plan['windows_enforced']['driver_sha256'])
+        bridge=E.EnforcedWindowsFence.__new__(E.EnforcedWindowsFence);bridge.cfg=plan['windows_enforced'];bridge.plan_sha256=plan_hash;bridge.approval_sha256='3'*64
+        witness=bridge._base()
+        self.assertEqual(witness['profile'],'enforced-vm-v1')
+        self.assertEqual(witness['config_profile_sha256'],E.config_profile_digest(selected))
+        self.assertEqual(witness['config_profile_definition_sha256'],E.CONFIG_PROFILE_DEFINITION_SHA256)
+        production=deepcopy(selected);production.update(acceptance_scope='production',isolation_receipt_sha256='')
+        plan['windows_enforced']['config_profile']=production
+        with self.assertRaises(TransitionBlocked):E._validate(plan,approved,plan_hash,plan['windows_enforced']['driver_sha256'])
+        production.update(operational_cutover_accepted=True,external_capability_review_sha256='4'*64)
+        E._validate(plan,approved,plan_hash,plan['windows_enforced']['driver_sha256'])
+        self.assertNotEqual(E.config_profile_digest(selected),E.config_profile_digest(production))
+        for key,value in [('name','unknown'),('definition_sha256','0'*64),('capability_sid','S-1-15-3-1'),('host_hypervisor_tcb_acknowledged',1),('acceptance_scope',[]),('io_acceptance_sha256',True),('operational_cutover_accepted','false')]:
+            bad=deepcopy(selected);bad[key]=value
+            with self.assertRaises(TransitionBlocked):E.config_profile(bad)
+        wrong=deepcopy(selected);wrong['operational_cutover_accepted']=True
+        with self.assertRaises(TransitionBlocked):E.config_profile(wrong)
+        production['isolation_receipt_sha256']=selected['isolation_receipt_sha256']
+        with self.assertRaises(TransitionBlocked):E.config_profile(production)
+
+    def test_managed_config_ps_hash_roles_and_pending_authority_boundary(self):
+        profile=dict(name=E.CONFIG_PROFILE_DEFINITION['name'],definition_sha256=E.CONFIG_PROFILE_DEFINITION_SHA256,
+            capability_name='vmWorkerProcess',capability_sid=E.CONFIG_PROFILE_DEFINITION['capability_sid'],
+            host_hypervisor_tcb_acknowledged=True,acceptance_scope='isolated-predeployment',
+            operational_cutover_accepted=False,io_acceptance_sha256='',external_capability_review_sha256='',isolation_receipt_sha256='')
+        raw=base64.b64encode(json.dumps(profile).encode()).decode()
+        result=self.ps("$p=Convert-EnforcedJson ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"+raw+"')))\n"+r'''
+$null=Assert-EnforcedConfigProfile $p
+$config.windows_enforced|Add-Member config_profile $p
+Assert-EnforcedConfig $config
+$closed=$false;try{Assert-EnforcedApproval $config $approved $planHash}catch{if($_.Exception.Message -cne 'managed_config_authority_blocked'){throw};$closed=$true};if(-not $closed){throw 'pending_io_opened_authority'}
+$readers=@('S-1-5-18','S-1-5-32-544',$p.capability_sid,$config.windows_enforced.service_sid)
+Assert-EnforcedManagedAce $p.capability_sid 2032127 $readers $p.capability_sid $config.windows_enforced.service_sid
+Assert-EnforcedManagedAce $config.windows_enforced.service_sid 1179785 $readers $p.capability_sid $config.windows_enforced.service_sid
+foreach($case in @(@('S-1-15-3-1',2032127),@('S-1-5-83-0',1180063),@('S-1-5-83-1-2-3-4-5',2032127),@($p.capability_sid,268435456),@($config.windows_enforced.service_sid,1180063))){$closed=$false;try{Assert-EnforcedManagedAce $case[0] $case[1] $readers $p.capability_sid $config.windows_enforced.service_sid}catch{$closed=$true};if(-not $closed){throw 'config_tcb_role_expanded'}}
+Get-EnforcedConfigProfileHash $p
+''')
+        self.assertEqual(result.strip(),E.config_profile_digest(profile))
+
     def test_vm_vhd_and_restart_policy_real_snapshot_body(self):
         setup = r'''
 function Get-EnforcedContext($Config,$Policy,$Watch){return @{principal_sha256=('1'*64);boot_ticks=$Config.windows_enforced.boot_ticks}}
@@ -531,6 +617,19 @@ $script:race=$false
 $snapshot=Get-EnforcedVmSnapshot $config $policy ([Diagnostics.Stopwatch]::StartNew())
 if(-not $snapshot.fenced){throw 'off_vm_lost'}
 if($script:trace.Count -ne 2 -or $config.windows_enforced.vm_config_root -notin $script:trace -or $config.windows_enforced.disks[0].path -notin $script:trace){throw 'missing_data_acl_checks'}
+$originalId=$config.windows_enforced.disks[0].disk_id
+foreach($native in @('7B0A3FEB-04CF-5C40-85BD-CFD50B85AB9D','F3602945-C7E3-8846-9FC2-5011BDDDFA1D')){
+ $config.windows_enforced.disks[0].disk_id=$native.ToLowerInvariant();$script:vhd.DiskIdentifier=$native
+ $snapshot=Get-EnforcedVmSnapshot $config $policy ([Diagnostics.Stopwatch]::StartNew())
+ if(-not $snapshot.fenced -or (ConvertTo-EnforcedDiskIdentifier $native) -cne (ConvertTo-EnforcedDiskIdentifier ([Guid]$native))){throw 'native_uppercase_identity_failed'}
+}
+$config.windows_enforced.disks[0].disk_id=$originalId
+foreach($bad in @($null,$true,7,[Guid]::Empty,'00000000-0000-0000-0000-000000000000','{7B0A3FEB-04CF-5C40-85BD-CFD50B85AB9D}','7B0A3FEB04CF5C4085BDCFD50B85AB9D','not-a-guid')){
+ $script:vhd.DiskIdentifier=$bad;$closed=$false
+ try{$null=Get-EnforcedVmSnapshot $config $policy ([Diagnostics.Stopwatch]::StartNew())}catch{$closed=$true}
+ if(-not $closed){throw 'malformed_native_identifier_accepted'}
+}
+$script:vhd.DiskIdentifier=[Guid]$originalId
 $blocked=0
 $script:vm.AutomaticStartAction='Start'
 try{Get-EnforcedVmSnapshot $config $policy ([Diagnostics.Stopwatch]::StartNew())|Out-Null}catch{$blocked++}

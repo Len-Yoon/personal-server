@@ -4,6 +4,8 @@ The trusted private input pins build evidence, not native acceptance. No CA,
 passfile, key, Python installation or credentials are copied into the package.
 """
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -11,8 +13,10 @@ from pathlib import Path, PureWindowsPath
 import re
 import shutil
 import stat
+import uuid
 
 from . import prepare as controller_bundle
+from . import enforced_windows as enforced_profile
 
 HOST_SOURCE = 'infra/k8s/ha_control/windows-service-host.cs'
 ARGS_KEYS = ('format', 'service_name', 'service_sid', 'python_path', 'python_sha256',
@@ -126,12 +130,100 @@ def host_pe(raw):
         deny()  # PE32 CLR directory (entry 14).
 
 
+def profile_acceptance_receipts(trusted, selected, plan):
+    receipts=trusted['acceptance_receipts']
+    keys={key for key in ('io_acceptance_sha256','external_capability_review_sha256','isolation_receipt_sha256') if selected[key]}
+    if type(receipts) is not dict or set(receipts)!=keys:
+        deny()
+    kinds={'io_acceptance_sha256':'guest-media-io','external_capability_review_sha256':'external-capability-review','isolation_receipt_sha256':'isolated-cluster-boundary'}
+    vm_bindings=None
+    for key in keys:
+        encoded=receipts[key]
+        if type(encoded) is not str or len(encoded)>1398104:
+            deny()
+        raw=base64.b64decode(encoded,validate=True)
+        if sha(raw)!=selected[key]:
+            deny()
+        value=decode(raw)
+        fields={'schema_version','kind','acceptance_scope','source_commit','installation_id','cluster','config_profile_definition_sha256','passed'}
+        if key=='isolation_receipt_sha256':
+            fields|={'vm_ids','providers_closed','existing_ingress_unchanged','production_authority'}
+        elif key=='io_acceptance_sha256':
+            fields|={'vm_ids','guest_boot_observed','vhd_write_observed','iso_read_observed'}
+        else:
+            fields|={'primary_token_survey_sha256','acquisition_model_reviewed','scope_limitations_acknowledged'}
+        if (type(value) is not dict or set(value)!=fields or type(value['schema_version']) is not int or value['schema_version']!=1
+                or value['kind']!=kinds[key] or value['acceptance_scope']!=selected['acceptance_scope'] or value['passed'] is not True
+                or value['source_commit']!=plan['source_commit'] or value['installation_id']!=plan['installation_id'] or value['cluster']!=plan['cluster']
+                or value['config_profile_definition_sha256']!=selected['definition_sha256']):
+            deny()
+        if key=='isolation_receipt_sha256':
+            if value['providers_closed'] is not True or value['existing_ingress_unchanged'] is not True or value['production_authority'] is not False:
+                deny()
+        elif key=='io_acceptance_sha256':
+            if any(value[k] is not True for k in ('guest_boot_observed','vhd_write_observed','iso_read_observed')):
+                deny()
+        else:
+            if not HEX.fullmatch(str(value['primary_token_survey_sha256'])) or value['acquisition_model_reviewed'] is not True or value['scope_limitations_acknowledged'] is not True:
+                deny()
+        if key in {'io_acceptance_sha256','isolation_receipt_sha256'}:
+            ids=value['vm_ids']
+            if type(ids) is not dict or set(ids)!={'A','B'} or ids['A']==ids['B'] or any(type(v) is not str or str(uuid.UUID(v))!=v for v in ids.values()) or ids[plan['node']]!=plan['windows_enforced']['vm_id']:
+                deny()
+            if vm_bindings is not None and ids!=vm_bindings:
+                deny()
+            vm_bindings=ids
+
+
+def managed_profile_binding(trusted, binding, commit):
+    try:
+        selected=enforced_profile.config_profile(trusted['config_profile'])
+        digest=enforced_profile.config_profile_digest(selected)
+        if digest!=trusted['config_profile_sha256'] or not HEX.fullmatch(str(trusted['policy_sha256'])):
+            deny()
+        payloads={}
+        for label in ('plan','policy'):
+            encoded=trusted[label+'_bytes_base64']
+            if type(encoded) is not str or len(encoded)>1398104:
+                deny()
+            raw=base64.b64decode(encoded,validate=True)
+            expected_hash=trusted['service_args']['plan_sha256'] if label=='plan' else trusted['policy_sha256']
+            if sha(raw)!=expected_hash:
+                deny()
+            payloads[label]=decode(raw)
+        bound=payloads['plan'];policy=payloads['policy'];cfg=bound['windows_enforced']
+        policy_keys={'schema_version','profile','cluster','generation','session_id','service_sid','boot_ticks','vm_id','vm_notes_sha256','vm_config_root','disks','trusted_admin_sids','hyperv_member_sids','host_admins_tcb_acknowledged','config_profile'}
+        if type(policy) is not dict or set(policy)!=policy_keys or type(policy['schema_version']) is not int or policy['schema_version']!=1:
+            deny()
+        if (bound['source_commit']!=commit or bound['profile']!='enforced-vm-v1' or type(bound['schema_version']) is not int or bound['schema_version']!=2
+                or enforced_profile.config_profile_digest(cfg['config_profile'])!=digest
+                or enforced_profile.config_profile_digest(policy['config_profile'])!=digest
+                or cfg['policy_sha256']!=trusted['policy_sha256'] or policy['profile']!='enforced-vm-v1'
+                or cfg['driver_sha256']!=binding['enforced_driver_sha256'] or cfg['adapter_sha256']!=binding['enforced_adapter_sha256']
+                or any(cfg[key]!=trusted['service_args'][key] for key in ('service_name','service_sid'))
+                or any(policy[key]!=cfg[key] for key in ('session_id','service_sid','boot_ticks','vm_id','vm_notes_sha256','vm_config_root','disks'))
+                or policy['cluster']!=bound['cluster'] or policy['generation']!=bound['generation']):
+            deny()
+        profile_acceptance_receipts(trusted,selected,bound)
+        return dict(config_profile=selected,config_profile_sha256=digest,
+            definition_sha256=selected['definition_sha256'],plan_sha256=trusted['service_args']['plan_sha256'],
+            policy_sha256=trusted['policy_sha256'],acceptance_scope=selected['acceptance_scope'],
+            metadata_trust_scope='HostHypervisorTCB/config-metadata-only',
+            operational_cutover_accepted=False,native_accepted=False,
+            acceptance_claim='inert_package_only; actual I/O and scope-bound authority remain separate')
+    except (enforced_profile.TransitionBlocked,ValueError,TypeError,KeyError,binascii.Error):
+        deny()
+
+
 def prepare(commit, bundle, host_exe, private_manifest, private_sha256, output):
     if not re.fullmatch(r'[0-9a-f]{40}', commit):
         deny()
     trusted = decode(private(private_manifest, private_sha256))
     expected = {'format', 'approved_commits', 'bundle_manifest_sha256', 'host_source_sha256',
                 'host_exe_sha256', 'build', 'service_args'}
+    managed=type(trusted) is dict and 'config_profile' in trusted
+    if managed:
+        expected|={'config_profile','config_profile_sha256','policy_sha256','plan_bytes_base64','policy_bytes_base64','acceptance_receipts'}
     if (type(trusted) is not dict or set(trusted) != expected or type(trusted['format']) is not int
             or trusted['format'] != 1 or type(trusted['approved_commits']) is not list
             or not 1 <= len(trusted['approved_commits']) <= 8
@@ -145,6 +237,7 @@ def prepare(commit, bundle, host_exe, private_manifest, private_sha256, output):
     binding = controller_bundle.verify(Path(bundle), trusted['bundle_manifest_sha256'])
     if binding['source_commit'] != commit:
         deny()
+    profile_binding=managed_profile_binding(trusted,binding,commit) if managed else None
     source = source_at(commit)
     if sha(source) != trusted['host_source_sha256']:
         deny()
@@ -221,6 +314,9 @@ def prepare(commit, bundle, host_exe, private_manifest, private_sha256, output):
             'requires': ['explicit_apply_approval', 'actual_service_sid_and_ACLs', 'actual_HyperV_boundary',
                          'actual_VM_VHD_and_boot_identity', 'actual_TLS_private_files', 'pre_StartService_trusted_inventory_and_ACLs',
                          'pinned_compiler_references_and_two_identical_outputs', 'whole_transition_two_seconds']}
+    if profile_binding is not None:
+        plan['config_profile_binding']=profile_binding
+        plan['requires']+=['actual_guest_io_and_scope_bound_isolation_or_production_evidence','no_production_authority_from_isolated_profile']
     (output / 'install-plan.json').write_bytes(controller_bundle.encode(plan))
     inventory = controller_bundle.inventory(output)
     manifest = {'format': 1, 'source_commit': commit, 'private_input_sha256': private_sha256,
