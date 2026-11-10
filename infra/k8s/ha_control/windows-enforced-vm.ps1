@@ -128,7 +128,7 @@ function Assert-EnforcedDescriptor($Descriptor,[string[]]$Writers,[long]$WriteMa
         $null -eq $Descriptor.DiscretionaryAcl -or $Descriptor.DiscretionaryAcl.Count -eq 0){throw 'enforced_acl_rejected'}
     foreach($ace in $Descriptor.DiscretionaryAcl){
         if($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback){throw 'enforced_acl_rejected'}
-        if($IgnoreInheritOnly -and ($ace.AceFlags -band [Security.AccessControl.AceFlags]::InheritOnly)){continue}
+        if($IgnoreInheritOnly -and (([int]$ace.AceFlags) -band ([int][Security.AccessControl.AceFlags]::InheritOnly))){continue}
         if($ace.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessAllowed){
             Assert-EnforcedAllowedMask $ace.SecurityIdentifier.Value ([long]$ace.AccessMask) $Writers $WriteMask
         }
@@ -246,7 +246,7 @@ function Read-EnforcedJournalGrant([string]$Path,[string]$Sid) {
     $descriptor=Get-EnforcedPathDescriptor $Path;$granted=[long]0;$denied=$false
     foreach($ace in $descriptor.DiscretionaryAcl){
         if($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback){throw 'journal_acl_rejected'}
-        if($ace.AceFlags -band [Security.AccessControl.AceFlags]::InheritOnly){continue}
+        if(([int]$ace.AceFlags) -band ([int][Security.AccessControl.AceFlags]::InheritOnly)){continue}
         $mask=([long]$ace.AccessMask -band 4294967295)
         if($ace.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessDenied -and ($mask -band 3490513239) -ne 0){$denied=$true}
         if($ace.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessAllowed -and $ace.SecurityIdentifier.Value -ceq $Sid){$granted=$granted -bor $mask}

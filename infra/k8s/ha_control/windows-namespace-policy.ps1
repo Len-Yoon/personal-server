@@ -119,7 +119,7 @@ function Assert-NpPrivate([string]$Path,[bool]$Root=$false){
  $me=[Security.Principal.WindowsIdentity]::GetCurrent();try{$owners=@('S-1-5-18','S-1-5-32-544',$me.User.Value)}finally{$me.Dispose()}
  if($sd.Owner.Value -notin $owners -or $null -eq $sd.DiscretionaryAcl -or $sd.DiscretionaryAcl.Count -lt 2){throw 'namespace_private_owner_required'}
  $seen=@{}
- foreach($ace in $sd.DiscretionaryAcl){if($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback -or $ace.AceQualifier -ne 'AccessAllowed' -or $ace.SecurityIdentifier.Value -notin @('S-1-5-18','S-1-5-32-544') -or $ace.AccessMask -ne 2032127 -or ($ace.AceFlags -band [Security.AccessControl.AceFlags]::InheritOnly)){throw 'namespace_private_acl_required'};if($Root -and (($ace.AceFlags -band 3) -ne 3)){throw 'namespace_private_inheritance_required'};$seen[$ace.SecurityIdentifier.Value]=$true}
+ foreach($ace in $sd.DiscretionaryAcl){if($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback -or $ace.AceQualifier -ne 'AccessAllowed' -or $ace.SecurityIdentifier.Value -notin @('S-1-5-18','S-1-5-32-544') -or $ace.AccessMask -ne 2032127 -or (([int]$ace.AceFlags) -band ([int][Security.AccessControl.AceFlags]::InheritOnly))){throw 'namespace_private_acl_required'};if($Root -and ((([int]$ace.AceFlags) -band 3) -ne 3)){throw 'namespace_private_inheritance_required'};$seen[$ace.SecurityIdentifier.Value]=$true}
  if($seen.Count -ne 2 -or ($Root -and ($sd.DiscretionaryAcl.Count -ne 2 -or -not ($sd.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected)))){throw 'namespace_private_acl_required'}
 }
 function Open-NpInput([string]$Path,[string]$Hash,[int]$Limit=65536){
