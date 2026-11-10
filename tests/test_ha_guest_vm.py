@@ -286,7 +286,7 @@ Initialize-GuestVmNative
 $cap='S-1-15-3-1024-2268835264-3721307629-241982045-173645152-1490879176-104643441-2915960892-1612460704'
 foreach($role in @('private','disk','seed')){
  foreach($mask in @(2032127,1180063,1179785)){
-  if(-not [HaGuestVmSealV1]::CapabilityRuleAllowed($role,$cap,$cap,$mask,31,$true,$false)){throw 'known_removal_input_rejected'}
+  if(-not [HaGuestVmSealV1]::CapabilityRuleAllowed($role,$cap,$cap,$mask,16,$true,$false,$false)){throw 'known_removal_input_rejected'}
  }
  $rows=[HaGuestVmSealV1]::ManagedPolicy('S-1-5-83-1-2-3-4-5',$role,$cap,$true)
  if(@($rows|Where-Object{$_ -like 'S-1-15-*'}).Count){throw 'removed_capability_retained'}
@@ -300,7 +300,7 @@ foreach($args in @(
  @('config',$cap,$cap,2032127,8,$true,$false),
  @('config',$cap,$cap,1180063,0,$true,$false)
 )){
- if([HaGuestVmSealV1]::CapabilityRuleAllowed($args[0],$args[1],$args[2],$args[3],$args[4],$args[5],$args[6])){throw 'unverified_capability_accepted'}
+ if([HaGuestVmSealV1]::CapabilityRuleAllowed($args[0],$args[1],$args[2],$args[3],$args[4],$args[5],$args[6],$true)){throw 'unverified_capability_accepted'}
 }
 # Exercise the product inventory entry for the actual rejected private role.
 function Assert-GuestVmConfigProfile {return $true}
@@ -325,6 +325,46 @@ try{if(-not $script:bound -or $script:sealed){throw 'private_removal_not_verifie
 # Absence of the explicit profile still rejects the same capability.
 $closed=$false;try{$null=Open-GuestVmSealInventory 'root' ([pscustomobject]@{}) ([pscustomobject]@{}) $null}catch{if($_.Exception.Message -cne 'guest_vm_capability_proof_required'){throw};$closed=$true}
 if(-not $closed -or $script:sealed){throw 'strict_private_policy_relaxed'}
+''')
+
+    def test_observed_child_only_templates_preserve_effective_config_rights_without_parent_grant(self):
+        self.ps(r'''
+Initialize-GuestVmNative
+$cap='S-1-15-3-1024-2268835264-3721307629-241982045-173645152-1490879176-104643441-2915960892-1612460704'
+foreach($role in @('private','config')){
+ foreach($flags in @(11,27)){
+  if(-not [HaGuestVmSealV1]::CapabilityRuleAllowed($role,$cap,$cap,268435456,$flags,$true,$false,$true)){throw 'observed_child_template_rejected'}
+  if([HaGuestVmSealV1]::CapabilityRuleAllowed($role,$cap,$cap,268435456,$flags,$true,$false,$false)){throw 'file_child_template_accepted'}
+ }
+}
+foreach($flags in @(0,3,8,15,16,19,24,31,64)){
+ if([HaGuestVmSealV1]::CapabilityRuleAllowed('config',$cap,$cap,268435456,$flags,$true,$false,$true)){throw 'unknown_template_shape_accepted'}
+}
+foreach($role in @('disk','seed')){if([HaGuestVmSealV1]::CapabilityRuleAllowed($role,$cap,$cap,268435456,11,$true,$false,$true)){throw 'data_template_accepted'}}
+function Get-FixtureEffectiveAccess([int[]]$Masks,[int[]]$Flags,[bool]$Child){
+ $rights=0
+ for($i=0;$i -lt $Masks.Count;$i++){
+  if($Child){if(($Flags[$i] -band 3) -ne 3){continue}}
+  elseif($Flags[$i] -band 8){continue}
+  $rights=$rights -bor $(if($Masks[$i] -eq 268435456){2032127}else{$Masks[$i]})
+ }
+ return $rights
+}
+foreach($flags in @(11,27)){
+ $plan=[HaGuestVmSealV1]::ConfigurationCapabilityPlan([int[]]@(2032127,268435456),[int[]]@(16,$flags),$true)
+ if($plan -ne 3){throw 'effective_parent_and_children_not_preserved'}
+ $parentBefore=Get-FixtureEffectiveAccess @(2032127,268435456) @(16,$flags) $false
+ $childrenBefore=Get-FixtureEffectiveAccess @(2032127,268435456) @(16,$flags) $true
+ $parentAfter=Get-FixtureEffectiveAccess @(2032127) @($plan) $false
+ $childrenAfter=Get-FixtureEffectiveAccess @(2032127) @($plan) $true
+ if($parentBefore -ne $parentAfter -or $childrenBefore -ne $childrenAfter){throw 'normalization_changes_effective_rights'}
+ $closed=$false;try{$null=[HaGuestVmSealV1]::ConfigurationCapabilityPlan([int[]]@(268435456),[int[]]@($flags),$true)}catch{$closed=$true}
+ if(-not $closed){throw 'child_only_template_acquired_parent_grant'}
+}
+if([HaGuestVmSealV1]::ConfigurationCapabilityPlan([int[]]@(),[int[]]@(),$true) -ne -1){throw 'missing_capability_granted'}
+if([HaGuestVmSealV1]::ConfigurationCapabilityPlan([int[]]@(2032127),[int[]]@(16),$false) -ne 0){throw 'file_inheritance_added'}
+foreach($bad in @(@(2032127,8),@(268435456,3))){$closed=$false;try{$null=[HaGuestVmSealV1]::ConfigurationCapabilityPlan([int[]]@($bad[0]),[int[]]@($bad[1]),$true)}catch{$closed=$true};if(-not $closed){throw 'invalid_config_plan_accepted'}}
+foreach($role in @('private','disk','seed')){if(@([HaGuestVmSealV1]::ManagedPolicy('S-1-5-83-1-2-3-4-5',$role,$cap,$true)|Where-Object{$_ -like 'S-1-15-*'}).Count){throw 'private_data_capability_retained'}}
 ''')
 
     def test_retained_inventory_rejects_identity_content_acl_and_foreign_writer_before_seal(self):

@@ -170,30 +170,43 @@ public sealed class HaGuestVmSealV1 : IDisposable {
   foreach(System.Security.AccessControl.GenericAce item in sd.DiscretionaryAcl){var ace=item as System.Security.AccessControl.KnownAce;if(ace!=null&&ace.SecurityIdentifier.Value.StartsWith("S-1-15-",StringComparison.Ordinal))return true;}
   return false;
  }
- public static bool CapabilityRuleAllowed(string role,string sid,string expectedSid,int mask,int flags,bool allow,bool callback){
+ public static bool CapabilityRuleAllowed(string role,string sid,string expectedSid,int mask,int flags,bool allow,bool callback,bool isDirectory){
   if(role!="private"&&role!="config"&&role!="disk"&&role!="seed")return false;
-  if(sid!=expectedSid||!allow||callback)return false;
+  if(sid!=expectedSid||!allow||callback||flags<0||(flags&~31)!=0||(!isDirectory&&(flags&15)!=0))return false;
+  // Exact observed Windows child-only template. Never accept effective
+  // GENERIC_ALL, a template on a file, or a template on data-media roles.
+  if(mask==268435456)return isDirectory&&(role=="private"||role=="config")&&(flags==11||flags==27);
   if(role=="config")return mask==2032127&&(flags&12)==0;
   // Known Windows capability on an owned parent/media is removal input only.
   // It is never retained by ManagedPolicy for these roles.
   return mask==2032127||mask==1180063||mask==1179785;
  }
+ public static int ConfigurationCapabilityPlan(int[] masks,int[] flags,bool isDirectory){
+  Need(masks!=null&&flags!=null&&masks.Length==flags.Length&&masks.Length<=128);
+  bool effective=false,template=false;int inheritance=0;
+  for(int i=0;i<masks.Length;i++){
+   Need(CapabilityRuleAllowed("config","verified","verified",masks[i],flags[i],true,false,isDirectory));
+   if(masks[i]==268435456)template=true;else effective=true;
+   inheritance|=flags[i]&3;
+  }
+  // An inherited child-only ACE alone must not acquire parent authority.
+  Need(!template||effective);return effective?inheritance:-1;
+ }
  public void BindProfile(string name,string expectedSid,string role){
   Need(name=="windows-managed-config-v1"&&expectedSid==VmWorkerCapability()&&(role=="private"||role=="config"||role=="disk"||role=="seed"));
   managedProfile=false;capabilitySid=expectedSid;preserveCapability=false;capabilityInheritance=System.Security.AccessControl.InheritanceFlags.None;
+  var configMasks=new System.Collections.Generic.List<int>();var configFlags=new System.Collections.Generic.List<int>();
   var sd=Descriptor();Need(sd.DiscretionaryAcl!=null);
   foreach(System.Security.AccessControl.GenericAce item in sd.DiscretionaryAcl){var ace=item as System.Security.AccessControl.KnownAce;if(ace==null)throw new InvalidOperationException("config_ace_rejected");
    if(ace.SecurityIdentifier.Value.StartsWith("S-1-15-",StringComparison.Ordinal)){
     var common=ace as System.Security.AccessControl.CommonAce;
-    Need(common!=null&&CapabilityRuleAllowed(role,ace.SecurityIdentifier.Value,expectedSid,ace.AccessMask,(int)common.AceFlags,common.AceQualifier==System.Security.AccessControl.AceQualifier.AccessAllowed,common.IsCallback));
+    Need(common!=null&&CapabilityRuleAllowed(role,ace.SecurityIdentifier.Value,expectedSid,ace.AccessMask,(int)common.AceFlags,common.AceQualifier==System.Security.AccessControl.AceQualifier.AccessAllowed,common.IsCallback,directory));
     if(role=="config"){
-     Need((common.AceFlags&(System.Security.AccessControl.AceFlags.InheritOnly|System.Security.AccessControl.AceFlags.NoPropagateInherit))==0);
-     preserveCapability=true;
-     if((common.AceFlags&System.Security.AccessControl.AceFlags.ObjectInherit)!=0)capabilityInheritance|=System.Security.AccessControl.InheritanceFlags.ObjectInherit;
-     if((common.AceFlags&System.Security.AccessControl.AceFlags.ContainerInherit)!=0)capabilityInheritance|=System.Security.AccessControl.InheritanceFlags.ContainerInherit;
+     configMasks.Add(ace.AccessMask);configFlags.Add((int)common.AceFlags);
     }
    }
   }
+  if(role=="config"){int plan=ConfigurationCapabilityPlan(configMasks.ToArray(),configFlags.ToArray(),directory);preserveCapability=plan>=0;capabilityInheritance=(System.Security.AccessControl.InheritanceFlags)(plan<0?0:plan);}
   managedProfile=true;
  }
  public static string[] Policy(string vmSid,string role){
