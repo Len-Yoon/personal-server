@@ -5,6 +5,8 @@ param(
  [switch]$Win64DesktopAdmin,[switch]$Go
 )
 # Namespace-wide trust, never per-VM authorization. No SCM/group/service action.
+# Inspect/plan remain read-only even with -Go; SD readback alone does not prove
+# a VM power transition, writer ownership, or production HA acceptance.
 # MS WMI inheritance differs from NTFS. A protected/materialized candidate is
 # not proof that the provider will accept it: fresh external provider evidence
 # and exact native readback are required. No automatic rollback or retry.
