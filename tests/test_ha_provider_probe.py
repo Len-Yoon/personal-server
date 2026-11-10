@@ -49,6 +49,10 @@ $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($env:PROBE_INSTALLER,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'parse_failed'}
 . $env:PROBE_INSTALLER
+if(-not (Test-ProbeFixedMemory ([pscustomobject]@{Startup=[long]268435456;DynamicMemoryEnabled=$false}))){throw 'fixed_native_memory_rejected'}
+foreach($memory in @($null,[pscustomobject]@{Startup=[long]268435456;DynamicMemoryEnabled=$true},[pscustomobject]@{Startup=[long]536870912;DynamicMemoryEnabled=$false},[pscustomobject]@{Startup='268435456';DynamicMemoryEnabled=$false},[pscustomobject]@{Startup=[long]268435456;DynamicMemoryEnabled='false'},[pscustomobject]@{Startup=[long]268435456},[pscustomobject]@{DynamicMemoryEnabled=$false})){
+ if(Test-ProbeFixedMemory $memory){throw 'dynamic_or_unknown_memory_accepted'}
+}
 $observed=@{current_path_sha256=('a'*64);current_instance_sha256=('b'*64);current_path_exact=$true;current_instance_exact=$true;original_marker_exact=$false;tested_marker_exact=$true}
 if(-not (Test-ProbeCurrentSettingsExact $observed $true)){throw 'exact_wmi_readback_rejected'}
 if(Test-ProbeCurrentSettingsExact $observed $false){throw 'unreset_wmi_notes_accepted'}
@@ -58,19 +62,29 @@ foreach($field in @('current_path_exact','current_instance_exact','tested_marker
  $copy=$observed.Clone();$copy[$field]='true'
  if(Test-ProbeCurrentSettingsExact $copy $true){throw 'wmi_boolean_confusion_accepted'}
 }
-$nativeFrame=[pscustomobject]@{scope='owned_vm_provider_role_probe';schema_version=4;process_id=12;process_start_ticks='639298437494210749';operation='settings';stage='valid_operation';attempted=$true;complete=$false;authorized=$true;authorization_denied=$false;return_code=0;administrator=$false;hyperv_role=$true;settings_serialized_value_present=$true;settings_readback_verified=$false;native_target_paths_bound=$true;method_result_verified=$true;target_descriptor_sha256=('a'*64);settings_payload_sha256=('b'*64);settings_current_path_sha256=('c'*64);settings_current_instance_sha256=('d'*64);settings_current_association_verified=$true;exception_kind='none';exception_scope='none';exception_hresult=0}
+$nativeFrame=[pscustomobject]@{scope='owned_vm_provider_role_probe';schema_version=5;process_id=12;process_start_ticks='639298437494210749';operation='settings';stage='valid_operation';attempted=$true;complete=$false;authorized=$true;authorization_denied=$false;return_code=0;administrator=$false;hyperv_role=$true;settings_serialized_value_present=$true;settings_readback_verified=$false;native_target_paths_bound=$true;method_result_verified=$true;target_descriptor_sha256=('a'*64);settings_payload_sha256=('b'*64);settings_current_path_sha256=('c'*64);settings_current_instance_sha256=('d'*64);settings_current_association_verified=$true;exception_kind='none';exception_scope='none';exception_hresult=0;native_proxy_security_verified=$true;native_exec_returned=$true;native_exec_hresult=0;native_call_status_hresult=0;native_call_status_terminal=$true;native_call_status=0;native_result_hresult=0;native_output_verified=$true;native_call_result_present=$true;native_call_proxy_hresult=0}
 Assert-ProbeResultShape $nativeFrame
-$denial=$nativeFrame.PSObject.Copy();$denial.complete=$true;$denial.authorized=$false;$denial.authorization_denied=$true;$denial.return_code=2147942405;$denial.exception_kind='unauthorized_access';$denial.exception_scope='invoke';$denial.exception_hresult=2147942405
+$denial=$nativeFrame.PSObject.Copy();$denial.complete=$true;$denial.authorized=$false;$denial.authorization_denied=$true;$denial.return_code=2147942405;$denial.native_exec_hresult=2147942405;$denial.native_call_status_terminal=$false;$denial.native_call_status_hresult=4294967295;$denial.native_call_status=4294967295;$denial.native_result_hresult=4294967295;$denial.native_output_verified=$false;$denial.native_call_result_present=$false;$denial.native_call_proxy_hresult=4294967295
 Assert-ProbeResultShape $denial
-foreach($row in @(@('exception_kind','other'),@('exception_scope','outside_invoke'),@('exception_hresult',2147749891),@('attempted',$false),@('method_result_verified',$false),@('exception_kind','raw_sensitive_exception'))){
+$terminal=$nativeFrame.PSObject.Copy();$terminal.complete=$true;$terminal.authorized=$false;$terminal.authorization_denied=$true;$terminal.return_code=2147749891;$terminal.native_call_status=2147749891;$terminal.native_result_hresult=4294967295;$terminal.native_output_verified=$false
+Assert-ProbeResultShape $terminal
+$bad=$terminal.PSObject.Copy();$bad.native_call_status_hresult=2147749891
+$blocked=$false;try{Assert-ProbeResultShape $bad}catch{$blocked=$true}
+if(-not $blocked){throw 'poll_api_hresult_misclassified_as_exec_status'}
+$bad=$nativeFrame.PSObject.Copy();$bad.native_result_hresult=2147942405;$bad.complete=$true
+$blocked=$false;try{Assert-ProbeResultShape $bad}catch{$blocked=$true}
+if(-not $blocked){throw 'result_retrieval_error_became_authorized'}
+foreach($row in @(@('exception_kind','other'),@('exception_scope','outside_invoke'),@('attempted',$false),@('method_result_verified',$false),@('native_exec_returned',$false),@('native_proxy_security_verified',$false),@('exception_kind','raw_sensitive_exception'))){
  $bad=$denial.PSObject.Copy();$bad.($row[0])=$row[1]
  $blocked=$false;try{Assert-ProbeResultShape $bad}catch{$blocked=$true}
- if(-not $blocked){throw 'unverified_exception_frame_accepted'}
+ if(-not $blocked){throw 'unverified_native_frame_accepted'}
 }
-$outside=$nativeFrame.PSObject.Copy();$outside.exception_kind='unauthorized_access';$outside.exception_scope='outside_invoke';$outside.exception_hresult=2147942405
+$outside=$nativeFrame.PSObject.Copy();$outside.authorized=$false;$outside.exception_kind='unauthorized_access';$outside.exception_scope='outside_invoke';$outside.exception_hresult=2147942405
 Assert-ProbeResultShape $outside
-
-foreach($field in @('settings_serialized_value_present','settings_readback_verified','return_code','process_start_ticks','target_descriptor_sha256','settings_payload_sha256','native_target_paths_bound','method_result_verified','settings_current_path_sha256','settings_current_instance_sha256','settings_current_association_verified','exception_kind','exception_scope','exception_hresult')){
+$projected=$denial.PSObject.Copy();$projected.exception_kind='unauthorized_access';$projected.exception_scope='invoke';$projected.exception_hresult=2147942405
+$blocked=$false;try{Assert-ProbeResultShape $projected}catch{$blocked=$true}
+if(-not $blocked){throw 'clr_projection_still_granted_native_authority'}
+foreach($field in @('settings_serialized_value_present','settings_readback_verified','return_code','process_start_ticks','target_descriptor_sha256','settings_payload_sha256','native_target_paths_bound','method_result_verified','settings_current_path_sha256','settings_current_instance_sha256','settings_current_association_verified','exception_kind','exception_scope','exception_hresult','native_proxy_security_verified','native_exec_returned','native_exec_hresult','native_call_status_hresult','native_call_status_terminal','native_call_status','native_result_hresult','native_output_verified','native_call_result_present','native_call_proxy_hresult')){
  $copy=$nativeFrame.PSObject.Copy();$copy.$field=@($copy.$field)
  $blocked=$false;try{Assert-ProbeResultShape $copy}catch{$blocked=$true}
  if(-not $blocked){throw 'diagnostic_type_confusion_accepted'}
@@ -90,7 +104,7 @@ foreach($path in @('C:\Private\probe.exe anything','"C:\Private\probe.exe" anyth
 }
 if(Test-ProbeServiceImagePath 'C:\Program Files\probe.exe' 'C:\Program Files\probe.exe'){throw 'ambiguous_unquoted_path_accepted'}
 if(-not (Test-ProbeServiceImagePath '"C:\Program Files\probe.exe"' 'C:\Program Files\probe.exe')){throw 'quoted_path_rejected'}
-$frame=[pscustomobject]@{scope='owned_vm_provider_role_probe';schema_version=4;operation='settings';stage='schema_query';attempted=$false;complete=$false;authorized=$false;authorization_denied=$false;administrator=$false;hyperv_role=$false}
+$frame=[pscustomobject]@{scope='owned_vm_provider_role_probe';schema_version=5;operation='settings';stage='schema_query';attempted=$false;complete=$false;authorized=$false;authorization_denied=$false;administrator=$false;hyperv_role=$false}
 if(-not (Test-ProbeNoOperation $frame 'settings' $false)){throw 'known_no_operation_not_recognized'}
 foreach($field in @('attempted','complete','authorized','authorization_denied','administrator','hyperv_role')){
  $copy=$frame.PSObject.Copy();$copy.$field=$true
@@ -145,26 +159,39 @@ $descriptor="format=ha-provider-target-v3`ninstallation_id=$('a'*64)`nvm_id=$vm`
 $descriptorBytes=[Text.Encoding]::UTF8.GetBytes($descriptor)
 $descriptorHash=[HaProviderProbeV1.Settings]::Hash($descriptorBytes)
 $descriptorB64=[Convert]::ToBase64String($descriptorBytes)
-$text="format=ha-provider-probe-v4`nservice_name=HaProbe_0123456789abcdef`nservice_sid=S-1-5-80-1-2-3-4-5`ninstallation_id=$('a'*64)`nvm_id=11111111-1111-1111-1111-111111111111`noperation=settings`nexpected_hyperv_role=false`ntarget_descriptor_b64=$descriptorB64`ntarget_descriptor_sha256=$descriptorHash`n"
+$text="format=ha-provider-probe-v5`nservice_name=HaProbe_0123456789abcdef`nservice_sid=S-1-5-80-1-2-3-4-5`ninstallation_id=$('a'*64)`nvm_id=11111111-1111-1111-1111-111111111111`noperation=settings`nexpected_hyperv_role=false`ntarget_descriptor_b64=$descriptorB64`ntarget_descriptor_sha256=$descriptorHash`n"
 $cfg=[HaProviderProbeV1.Settings]::new($text)
 if($cfg.Marker() -cne ('ha-owned-provider-probe:'+('a'*64))){throw 'not_fixed_owned_marker'}
 # A CLR projected E_ACCESSDENIED is not necessarily a COMException.
 $projected=$null
 try{[Runtime.InteropServices.Marshal]::ThrowExceptionForHR([int]-2147024891,[IntPtr]::new(-1))}catch{$projected=$_.Exception.InnerException}
 if($null -eq $projected -or $projected.GetType() -ne [UnauthorizedAccessException]){throw 'clr_access_denied_mapping_missing'}
-if([HaProviderProbeV1.Settings]::ExceptionKind($projected) -cne 'unauthorized_access' -or -not [HaProviderProbeV1.Settings]::InvokeExceptionDenial($true,$projected)){throw 'mapped_invoke_denial_not_recognized'}
-if([HaProviderProbeV1.Settings]::InvokeExceptionDenial($false,$projected)){throw 'preinvoke_denial_counted'}
-Add-Type -TypeDefinition 'public sealed class ProbeFakeDenied : System.Exception {public ProbeFakeDenied(){HResult=unchecked((int)0x80070005);}} public sealed class ProbeDerivedDenied : System.UnauthorizedAccessException {} public sealed class ProbeWrongUnauthorizedCode : System.UnauthorizedAccessException {public ProbeWrongUnauthorizedCode(){HResult=unchecked((int)0x80041003);}}'
-foreach($other in @([ProbeFakeDenied]::new(),[ProbeDerivedDenied]::new(),[ProbeWrongUnauthorizedCode]::new(),[InvalidOperationException]::new('never output this detail'))){
- if([HaProviderProbeV1.Settings]::InvokeExceptionDenial($true,$other)){throw 'unknown_derived_or_wrong_code_denial_accepted'}
- if([HaProviderProbeV1.Settings]::KnownInvokeException($other)){throw 'unrecognized_type_or_code_counted_as_result'}
+if([HaProviderProbeV1.Settings]::ExceptionKind($projected) -cne 'unauthorized_access'){throw 'projected_diagnostic_kind_lost'}
+Add-Type -TypeDefinition 'public sealed class ProbeFakeDenied : System.Exception {public ProbeFakeDenied(){HResult=unchecked((int)0x80070005);}} public sealed class ProbeDerivedDenied : System.UnauthorizedAccessException {}'
+foreach($other in @([ProbeFakeDenied]::new(),[ProbeDerivedDenied]::new(),[InvalidOperationException]::new('never output this detail'))){
+ if([HaProviderProbeV1.Settings]::ExceptionKind($other) -cne 'other'){throw 'unrecognized_type_was_not_static_other'}
 }
-foreach($code in @([int]-2147217405,[int]-2147024891)){
- $com=[Runtime.InteropServices.COMException]::new('never output this detail',$code)
- if(-not [HaProviderProbeV1.Settings]::InvokeExceptionDenial($true,$com)){throw 'exact_com_denial_missing'}
- if([HaProviderProbeV1.Settings]::InvokeExceptionDenial($false,$com)){throw 'query_com_denial_accepted'}
+if($null -ne [HaProviderProbeV1.Settings].GetMethod('InvokeExceptionDenial')){throw 'clr_exception_authority_helper_retained'}
+# The exact native HRESULT/terminal-status state machine is portable. No COM call.
+foreach($code in @([uint32]2147749891,[uint32]2147942405)){
+ $e=[HaProviderProbeV1.ExecEvidence]::new();$e.Started=$true;$e.Returned=$true;$e.ExecHresult=$code
+ if(-not $e.Denied() -or -not $e.Verified() -or $e.Code() -ne $code){throw 'immediate_exec_denial_lost'}
+ $e.Started=$false;if($e.Denied() -or $e.Verified()){throw 'preexec_hresult_granted_authority'}
+ $e=[HaProviderProbeV1.ExecEvidence]::new();$e.Started=$true;$e.Returned=$true;$e.ExecHresult=0;$e.CallResultPresent=$true;$e.CallProxyHresult=0;$e.PollHresult=0;$e.Terminal=$true;$e.Status=$code
+ if(-not $e.Denied() -or -not $e.Verified() -or $e.Code() -ne $code){throw 'terminal_exec_denial_lost'}
+ $e.PollHresult=$code;if($e.Denied() -or $e.Verified()){throw 'poll_api_denial_granted_authority'}
 }
-
+$ok=[HaProviderProbeV1.ExecEvidence]::new();$ok.Started=$true;$ok.Returned=$true;$ok.ExecHresult=0;$ok.CallResultPresent=$true;$ok.CallProxyHresult=0;$ok.PollHresult=0;$ok.Terminal=$true;$ok.Status=0;$ok.OutputHresult=0;$ok.OutputVerified=$true;$ok.ReturnValue=0
+if(-not $ok.Verified() -or $ok.Denied() -or $ok.Code() -ne 0){throw 'verified_native_output_lost'}
+$ok.ReturnValue=32769;if(-not $ok.Denied()){throw 'provider_return_denial_lost'}
+foreach($field in @('Started','Returned','CallResultPresent','Terminal','OutputVerified')){
+ $copy=[HaProviderProbeV1.ExecEvidence]::new();foreach($f in $ok.GetType().GetFields()){if($f.Name -ne 'Job'){$f.SetValue($copy,$f.GetValue($ok))}};$copy.$field=$false
+ if($copy.Denied() -or $copy.Verified()){throw 'incomplete_native_trace_granted_authority'}
+}
+foreach($row in @(@('PollHresult',[uint32]262148),@('CallProxyHresult',[uint32]2147942405),@('OutputHresult',[uint32]2147942405))){
+ $copy=[HaProviderProbeV1.ExecEvidence]::new();foreach($f in $ok.GetType().GetFields()){if($f.Name -ne 'Job'){$f.SetValue($copy,$f.GetValue($ok))}};$copy.($row[0])=$row[1]
+ if($copy.Denied() -or $copy.Verified()){throw 'timeout_proxy_or_output_error_granted_authority'}
+}
 if($cfg.Descriptor.VerifyPayload($payload,$cfg.Marker()) -cne [Text.Encoding]::UTF8.GetString($payload)){throw 'payload_not_exact'}
 foreach($bad in @([Text.Encoding]::UTF8.GetBytes('changed'),($payload+[byte]0))){
  $blocked=$false;try{$cfg.Descriptor.VerifyPayload($bad,$cfg.Marker())|Out-Null}catch{$blocked=$true}
@@ -180,7 +207,7 @@ if(-not $blocked){throw 'external_descriptor_pin_ignored'}
 $power=$text.Replace('operation=settings','operation=power_on').Replace('target_descriptor_b64='+$descriptorB64,'target_descriptor_b64=').Replace('target_descriptor_sha256='+$descriptorHash,'target_descriptor_sha256=')
 $powerCfg=[HaProviderProbeV1.Settings]::new($power)
 if($null -ne $powerCfg.Descriptor){throw 'power_took_settings_descriptor'}
-foreach($bad in @($power.Replace('target_descriptor_b64=','target_descriptor_b64='+$descriptorB64),$power.Replace('operation=power_on','operation=settings'),$text.Replace('ha-provider-probe-v4','ha-provider-probe-v2'))){
+foreach($bad in @($power.Replace('target_descriptor_b64=','target_descriptor_b64='+$descriptorB64),$power.Replace('operation=power_on','operation=settings'),$text.Replace('ha-provider-probe-v5','ha-provider-probe-v2'))){
  $blocked=$false;try{[HaProviderProbeV1.Settings]::new($bad)|Out-Null}catch{$blocked=$true}
  if(-not $blocked){throw 'cross_version_or_operation_inputs_accepted'}
 }
@@ -228,42 +255,51 @@ foreach($bad in @($text.Replace('operation=settings','operation=shell'),$text.Re
 
     def test_direct_call_has_no_target_query_and_denial_is_exec_only(self):
         source=SOURCE.read_text()
-        flow=source[source.index('stage="input_validation"'):source.index('if(stopped){complete=false;authorized=false;denied=false;}')]
-        before_exec=flow[:flow.index('try{answer=target.InvokeMethod')]
-        self.assertNotIn('ManagementObjectSearcher',before_exec)
-        self.assertNotIn('GetRelated(',before_exec)
-        self.assertIn('schema.GetMethodParameters(method)',flow)
-        self.assertNotIn('target.GetMethodParameters',flow)
-        self.assertIn('stage="valid_operation";attempted=true;',flow)
-        self.assertIn('try{answer=target.InvokeMethod(method,input,invoke);}',flow)
-        self.assertIn('}catch(Exception error){',flow)
-        self.assertIn('denied=false;complete=false;',flow)
-        self.assertIn('denied=Settings.InvokeExceptionDenial(attempted,error);',flow)
-        outer=flow[flow.rindex('}catch(Exception error){'):]
-        self.assertNotIn('InvokeExceptionDenial',outer)
-        self.assertIn('exceptionScope="outside_invoke"',outer)
-        self.assertIn('if(operation=="settings"&&authorized&&cfg.Values["expected_hyperv_role"]=="true")',flow)
-        self.assertIn('Settings.NativeRelativeTarget(path.IsInstance,path.ClassName,className,path.Server,path.NamespacePath,path.Path,path.RelativePath,text)',source)
+        prepare=source[source.index('public DirectWmi('):source.index('public void Execute(')]
+        execute=source[source.index('public void Execute('):source.index('public void Dispose()')]
+        self.assertIn('services.GetObject(className,0x10',prepare)
+        self.assertNotIn('services.GetObject(path',prepare)
+        self.assertNotIn('InvokeMethod(',source)
+        self.assertNotIn('new ManagementClass(',source)
+        self.assertIn('klass.GetMethod(method,0',prepare)
+        self.assertIn('inputSignature.SpawnInstance(0',prepare)
+        self.assertIn('input.Put(property,0,ref value,0)',prepare)
+        self.assertIn('beforeExec();trace.Started=true;',execute)
+        self.assertIn('services.ExecMethod(path,method,0x10,IntPtr.Zero,input,IntPtr.Zero,out result)',execute)
+        self.assertIn('result.GetCallStatus(left,out status)',execute)
+        self.assertIn('result.GetResultObject(0,out output)',execute)
+        self.assertIn('Blanket(result)',execute)
+        self.assertIn('CoSetProxyBlanket(proxy,10,0,IntPtr.Zero,6,3,IntPtr.Zero,0)',source)
+        self.assertIn('ConnectServer(@"root\\virtualization\\v2",null,null,null,0,null,IntPtr.Zero',source)
+        self.assertIn('Settings.NativeRelativeTarget(',source)
+        # Verify published COM vtable method order, not only textual API names.
+        import re
+        expected={
+            'NativeLocator':['ConnectServer'],
+            'NativeCallResult':['GetResultObject','GetResultString','GetResultServices','GetCallStatus'],
+            'NativeServices':['OpenNamespace','CancelAsyncCall','QueryObjectSink','GetObject','GetObjectAsync','PutClass','PutClassAsync','DeleteClass','DeleteClassAsync','CreateClassEnum','CreateClassEnumAsync','PutInstance','PutInstanceAsync','DeleteInstance','DeleteInstanceAsync','CreateInstanceEnum','CreateInstanceEnumAsync','ExecQuery','ExecQueryAsync','ExecNotificationQuery','ExecNotificationQueryAsync','ExecMethod','ExecMethodAsync'],
+            'NativeObject':['GetQualifierSet','Get','Put','Delete','GetNames','BeginEnumeration','Next','EndEnumeration','GetPropertyQualifierSet','Clone','GetObjectText','SpawnDerivedClass','SpawnInstance','CompareTo','GetPropertyOrigin','InheritsFrom','GetMethod','PutMethod','DeleteMethod','BeginMethodEnumeration','NextMethod','EndMethodEnumeration','GetMethodQualifierSet','GetMethodOrigin'],
+        }
+        for name,methods in expected.items():
+            body=source.split('interface '+name+' {',1)[1].split('\n }',1)[0]
+            self.assertEqual(re.findall(r'PreserveSig\] int (\w+)\(',body),methods)
         parent=(ROOT/'infra/k8s/ha_control/windows-provider-acceptance.ps1').read_text()
+        creation=parent[parent.index('$vm=New-VM'):parent.index("'fixture_service_creation'")]
+        self.assertLess(creation.index("'fixture_memory_bound'"),creation.index("'fixture_cpu_bound'"))
+        self.assertLess(creation.index('Set-VMMemory -VM $vm -DynamicMemoryEnabled $false'),creation.index("'fixture_target_validation'"))
+        self.assertEqual(parent.count('Set-VMMemory -VM $vm -DynamicMemoryEnabled $false'),1)
+        self.assertIn('Test-ProbeFixedMemory (Get-VMMemory -VM $vm)',creation)
+
         operations=parent[parent.index('$positive=$fixtures[1]'):parent.index('$complete=$true')]
         expected=["'positive_power_on'","'positive_settings'","'negative_settings'","'negative_power_off'","'positive_power_off'"]
         offsets=[operations.index(item) for item in expected]
         self.assertEqual(offsets,sorted(offsets))
         self.assertGreater(operations.index('New-ProbeTargetDescriptor'),offsets[0])
         self.assertLess(operations.index('New-ProbeTargetDescriptor'),offsets[1])
-        self.assertEqual(parent.count('New-ProbeTargetDescriptor\n'),1)
-        self.assertIn("if($vm.State -ne 'Running'){throw 'fixture_vm_ownership_changed'}",parent)
-        self.assertIn('$fresh=Get-ProbeCurrentSettingsObservation',parent)
+        self.assertEqual(parent.count('GetText([Management.TextFormat]::WmiDtd20)'),1)
         self.assertIn('-not (Test-ProbeCurrentSettingsExact $fresh $true) -or $vm.Notes -cne',parent)
         self.assertIn('Test-ProbeCurrentSettingsExact $reset $false',parent)
         self.assertIn('Test-ProbeCurrentSettingsExact $negativeReadback $false',parent)
-        after_exec=flow[flow.index('try{answer=target.InvokeMethod'):]
-        self.assertIn('vm.GetRelated(',after_exec)
-        self.assertIn('Settings.CurrentReadback(',after_exec)
-        self.assertEqual(parent.count('GetText([Management.TextFormat]::WmiDtd20)'),1)
-        self.assertIn('foreach($fixture in $fixtures){Write-ProbePayload $fixture.root $fixture.sid}',parent)
-        self.assertIn('FileMode]::CreateNew',parent)
-        self.assertIn('SetAccessRuleProtection($true,$false)',parent)
 
 
 if __name__=='__main__':
