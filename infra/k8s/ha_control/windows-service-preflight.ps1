@@ -21,7 +21,7 @@ function Assert-PreflightDescriptor($Descriptor,[string[]]$Writers,[string[]]$Re
         -not ($OsRootOwner -and $Descriptor.Owner.Value -ceq 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')) -or $null -eq $Descriptor.DiscretionaryAcl -or $Descriptor.DiscretionaryAcl.Count -eq 0){throw 'preflight_acl_rejected'}
     foreach($ace in $Descriptor.DiscretionaryAcl){
         if($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback){throw 'preflight_acl_rejected'}
-        if($ace.AceFlags -band [Security.AccessControl.AceFlags]::InheritOnly){continue}
+        if(([int]$ace.AceFlags) -band ([int][Security.AccessControl.AceFlags]::InheritOnly)){continue}
         if($ace.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessAllowed){
             Assert-PreflightMask $ace.SecurityIdentifier.Value ([long]$ace.AccessMask) $Writers $Readers $Private $Ancestor
         }

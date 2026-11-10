@@ -161,7 +161,7 @@ function Assert-RuntimeStagePath([string]$Path,[string]$PrivateRoot,[string]$Rea
         if(($sd.Owner.Value -notin $allowed -and -not $trustedRoot) -or $null -eq $sd.DiscretionaryAcl -or $sd.DiscretionaryAcl.Count -eq 0){throw 'runtime_stage_owner_rejected'}
         foreach($ace in $sd.DiscretionaryAcl){
             if($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback){throw 'runtime_stage_acl_rejected'}
-            if(-not $private -and ($ace.AceFlags -band [Security.AccessControl.AceFlags]::InheritOnly)){continue}
+            if(-not $private -and (([int]$ace.AceFlags) -band ([int][Security.AccessControl.AceFlags]::InheritOnly))){continue}
             if($ace.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessAllowed){
                 $mask=[long]$ace.AccessMask -band 4294967295
                 if($private){

@@ -263,6 +263,51 @@ $text=$ast.ParamBlock.Extent.Text+"`n"+$setup+"`n"+$normalize+"`n"+$tail+"`n}`nI
             self.assertFalse(marker.exists())
         self.ps("foreach($value in @('', 'unknown', ' inspect', 'plan ')){$closed=$false;try{$null=ConvertTo-NpMode $value}catch{$closed=$true};if(-not $closed){throw 'unknown_mode_accepted'}}")
 
+    def test_source_acl_bit_expressions_use_byte_enum_values_without_policy_change(self):
+        # Evaluate the actual source AST expressions, using the real byte-based
+        # AceFlags enum. PS7 accepts the legacy enum operator; Windows PS5 throws
+        # for it, as also observed by the separate native compatibility probe.
+        body = r'''
+$ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile('__SOURCE__',[ref]$tokens,[ref]$errors)
+if($errors.Count -ne 0){throw 'source_parse_failed'}
+$paths=@('__SOURCE__','__ENFORCED__','__RUNTIME__','__PREFLIGHT__');$counts=@(2,2,1,1);$all=[Collections.Generic.List[object]]::new()
+for($fileIndex=0;$fileIndex -lt $paths.Count;$fileIndex++){
+ $tokens=$null;$errors=$null;$fileAst=[Management.Automation.Language.Parser]::ParseFile($paths[$fileIndex],[ref]$tokens,[ref]$errors);if($errors.Count){throw 'owner_source_parse_failed'}
+ $fileBits=@($fileAst.FindAll({param($n)$n -is [Management.Automation.Language.BinaryExpressionAst] -and $n.Operator -eq [Management.Automation.Language.TokenKind]::Band -and $n.Left.Extent.Text.Contains('$ace.AceFlags')},$true))
+if($fileBits.Count -ne $counts[$fileIndex]){throw 'owner_source_bit_expression_count_changed'};foreach($bit in $fileBits){$all.Add($bit)}
+}
+$bits=$all.ToArray()
+if($bits.Count -ne 6 -or [Enum]::GetUnderlyingType([Security.AccessControl.AceFlags]) -ne [byte]){throw 'actual_byte_enum_bit_expressions_missing'}
+$io=@($bits|Where-Object{$_.Right.Extent.Text.Contains('InheritOnly')})
+$both=@($bits|Where-Object{-not $_.Right.Extent.Text.Contains('InheritOnly')})
+if($io.Count -ne 5 -or $both.Count -ne 1){throw 'source_flags_predicates_changed'}
+for($value=0;$value -le 31;$value++){
+ $ace=[pscustomobject]@{AceFlags=[Security.AccessControl.AceFlags][byte]$value}
+ foreach($expression in $io){$valueIo=Invoke-Expression $expression.Extent.Text;if($valueIo -isnot [int] -or $valueIo -ne ($value -band 8)){throw 'owner_source_io_policy_changed'}}
+ $actualIo=Invoke-Expression $io[0].Extent.Text;$actualBoth=Invoke-Expression $both[0].Extent.Text
+ if($actualIo -isnot [int] -or $actualBoth -isnot [int] -or $actualIo -ne ($value -band 8) -or $actualBoth -ne ($value -band 3)){throw 'source_flags_value_or_integer_type_changed'}
+ $accepted=($actualIo -eq 0 -and $actualBoth -eq 3)
+ $intended=($value -in @(3,7,19,23))
+ if($accepted -ne $intended){throw 'existing_flags_policy_changed'}
+}
+foreach($value in @(3,11)){
+ $ace=[pscustomobject]@{AceFlags=[Security.AccessControl.AceFlags][byte]$value}
+ $failed=$false;$legacy=$null
+ try{$legacy=$ace.AceFlags -band [Security.AccessControl.AceFlags]::InheritOnly}catch{
+  $failed=$true;$base=$_.Exception.GetBaseException()
+  if($base -isnot [InvalidCastException] -or $base.HResult -ne -2147467262){throw 'unexpected_legacy_failure'}
+ }
+ if($PSVersionTable.PSEdition -ceq 'Desktop' -and $PSVersionTable.PSVersion.Major -eq 5){if(-not $failed){throw 'winps5_legacy_reproduction_missing'}}
+ elseif(-not $failed -and [int]$legacy -ne ($value -band 8)){throw 'legacy_success_semantics_changed'}
+}
+'''.replace('__SOURCE__', str(SOURCE)).replace('__ENFORCED__', str(SOURCE.parent / 'windows-enforced-vm.ps1')).replace('__RUNTIME__', str(SOURCE.parent / 'windows-runtime-stage.ps1')).replace('__PREFLIGHT__', str(SOURCE.parent / 'windows-service-preflight.ps1'))
+        with tempfile.TemporaryDirectory(prefix='ha-namespace-byte-enum-') as directory:
+            script = Path(directory) / 'source-bit-expressions.ps1'
+            script.write_text(body)
+            result = subprocess.run([self.pwsh, '-NoLogo', '-NoProfile', '-File', str(script)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:] + result.stdout[-500:])
+
     def test_only_one_namespace_set_primitive_and_no_scm_group_or_vm_mutator(self):
         text = SOURCE.read_text()
         self.assertEqual(text.count("InvokeMethod('SetSD'"), 1)
