@@ -101,15 +101,17 @@ namespace HaProviderProbeV1 {
   public uint CallProxyHresult=0xffffffff,ExecHresult=0xffffffff,PollHresult=0xffffffff,Status=0xffffffff,OutputHresult=0xffffffff,ReturnValue=0xffffffff;
   public string Job;
   static bool DenialHresult(uint value){return value==0x80041003||value==0x80070005;}
+  public static bool OutputStatus(uint status){return status==0||status==1;}
+  public static bool TryReturnValue(object value,int cimType,out uint result){result=0xffffffff;if(cimType!=19||(!(value is int)&&!(value is uint)))return false;result=value is int?unchecked((uint)(int)value):(uint)value;return true;}
   public bool Denied(){
    if(!Started||!Returned)return false;
    if(DenialHresult(ExecHresult))return true;
    if(ExecHresult!=0||!CallResultPresent||CallProxyHresult!=0||PollHresult!=0||!Terminal)return false;
    if(DenialHresult(Status))return true;
-   return Status==0&&OutputHresult==0&&OutputVerified&&Settings.AccessDenied(ReturnValue);
+   return OutputStatus(Status)&&OutputHresult==0&&OutputVerified&&Settings.AccessDenied(ReturnValue);
   }
-  public bool Verified(){return Started&&Returned&&((ExecHresult>=0x80000000)||(ExecHresult==0&&CallResultPresent&&CallProxyHresult==0&&PollHresult==0&&Terminal&&(Status>=0x80000000||(Status==0&&OutputHresult==0&&OutputVerified))));}
-  public uint Code(){if(!Verified())return 0xffffffff;if(ExecHresult!=0)return ExecHresult;if(Status!=0)return Status;return ReturnValue;}
+  public bool Verified(){return Started&&Returned&&((ExecHresult>=0x80000000)||(ExecHresult==0&&CallResultPresent&&CallProxyHresult==0&&PollHresult==0&&Terminal&&(Status>=0x80000000||(OutputStatus(Status)&&OutputHresult==0&&OutputVerified))));}
+  public uint Code(){if(!Verified())return 0xffffffff;if(ExecHresult!=0)return ExecHresult;if(!OutputStatus(Status))return Status;return ReturnValue;}
  }
 #if !PORTABLE_FIXTURE
  // Public COM ABI from WbemCli.h. Unused pointer arguments remain IntPtr;
@@ -231,12 +233,14 @@ namespace HaProviderProbeV1 {
     hr=result.GetCallStatus(left,out status);trace.PollHresult=unchecked((uint)hr);
     if(hr!=0)return;
     trace.Terminal=true;trace.Status=unchecked((uint)status);
-    if(status!=0||watch.ElapsedMilliseconds>5000)return;
+    // Only these two terminal informational statuses permit inspecting the
+    // same retained call result. Neither status alone is method authority.
+    if(!ExecEvidence.OutputStatus(unchecked((uint)status))||watch.ElapsedMilliseconds>5000)return;
     hr=result.GetResultObject(0,out output);trace.OutputHresult=unchecked((uint)hr);
     if(hr!=0||output==null)return;
     object value=Get(output,"ReturnValue",19);
-    if(!(value is int)&&!(value is uint))return;
-    trace.ReturnValue=value is int?unchecked((uint)(int)value):(uint)value;trace.OutputVerified=true;
+    uint typedValue;if(!ExecEvidence.TryReturnValue(value,19,out typedValue))return;
+    trace.ReturnValue=typedValue;trace.OutputVerified=true;
     if(trace.ReturnValue==4096){object job=Get(output,"Job",102);trace.Job=job as string;if(String.IsNullOrEmpty(trace.Job)||trace.Job.Length>4096)trace.OutputVerified=false;}
    }finally{Release(output);Release(result);}
   }

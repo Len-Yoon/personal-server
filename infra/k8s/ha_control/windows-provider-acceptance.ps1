@@ -61,7 +61,7 @@ function Assert-ProbeResultShape($Result){
         ($Result.native_call_status_terminal -and (-not $Result.native_exec_returned -or $Result.native_exec_hresult -ne 0 -or $Result.native_call_status_hresult -ne 0 -or -not $Result.native_call_result_present -or $Result.native_call_proxy_hresult -ne 0))){throw 'fixture_result_unverified'}
     $nativeOutput=($Result.attempted -and $Result.native_exec_returned -and $Result.native_proxy_security_verified -and
         $Result.native_exec_hresult -eq 0 -and $Result.native_call_status_terminal -and $Result.native_call_status_hresult -eq 0 -and
-        $Result.native_call_status -eq 0 -and $Result.native_result_hresult -eq 0 -and $Result.native_output_verified)
+        $Result.native_call_status -in @(0,1) -and $Result.native_result_hresult -eq 0 -and $Result.native_output_verified)
     $nativeDenial=($Result.attempted -and $Result.native_exec_returned -and $Result.native_proxy_security_verified -and
         ($Result.native_exec_hresult -in @(2147749891,2147942405) -or
          ($Result.native_exec_hresult -eq 0 -and $Result.native_call_status_terminal -and $Result.native_call_status_hresult -eq 0 -and $Result.native_call_status -in @(2147749891,2147942405)) -or
@@ -140,7 +140,27 @@ function Wait-ProbeProcesses($Fixture){
     }while($watch.Elapsed.TotalSeconds -lt 15)
     throw 'fixture_process_exit_unverified'
 }
-function Invoke-ProbeOperation($Fixture,[string]$Operation){
+function Get-ProbeReceiptName([string]$Role,[string]$Operation,[int]$Sequence){
+    # A finite plan distinguishes intentional repeat controls from retries.
+    $plan=@('true:power_on','true:power_off','true:power_on','true:settings','false:settings','false:power_off','true:power_off')
+    if($Sequence -lt 1 -or $Sequence -gt $plan.Count -or ($Role+':'+$Operation) -cne $plan[$Sequence-1]){throw 'fixture_result_unverified'}
+    return ('{0:D2}-{1}-{2}.json' -f $Sequence,$Role,$Operation)
+}
+function Write-ProbeOperationReceipt([string]$Path,$Result){
+    $file=[IO.FileStream]::new($Path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try{$bytes=[Text.UTF8Encoding]::new($false).GetBytes(($Result|ConvertTo-Json -Depth 6 -Compress));$file.Write($bytes,0,$bytes.Length);$file.Flush($true)}finally{$file.Dispose()}
+}
+function Assert-ProbeOperationAuthority($Result,[string]$Role,[string]$Operation){
+    if($Role -cnotin @('true','false') -or $Operation -cnotin @('settings','power_on','power_off')){throw 'fixture_result_unverified'}
+    if($Role -ceq 'true'){
+        if($Result.authorized -ne $true -or $Result.authorization_denied -ne $false -or $Result.return_code -ne 0){throw 'positive_control_failed'}
+        if($Operation -ceq 'settings' -and (-not $Result.settings_serialized_value_present -or -not $Result.settings_readback_verified -or -not $Result.settings_current_association_verified -or $Result.settings_current_path_sha256 -cne $script:settingsTargetPathSha256 -or $Result.settings_current_instance_sha256 -cne $script:settingsInstanceSha256)){throw 'positive_control_failed'}
+    }elseif($Result.authorization_denied -ne $true -or $Result.authorized -ne $false){throw 'provider_role_bypass'}
+}
+function Invoke-ProbeOperation($Fixture,[string]$Operation,[int]$Sequence){
+    $saved=Join-Path $script:root (Get-ProbeReceiptName $Fixture.role $Operation $Sequence)
+    if(Test-Path -LiteralPath $saved){throw 'fixture_result_exists'}
+
     $service=Get-Service -Name $Fixture.name -ErrorAction Stop
     if($service.Status -ne 'Stopped'){throw 'fixture_service_not_stopped'}
     $output=Join-Path $Fixture.root 'result\probe.json'
@@ -186,15 +206,12 @@ function Invoke-ProbeOperation($Fixture,[string]$Operation){
         $result.operation -cne $Operation -or $result.attempted -ne $true -or $result.complete -ne $true -or
         $result.administrator -ne $false -or $result.hyperv_role -ne ($Fixture.role -ceq 'true') -or
         -not $result.native_target_paths_bound -or -not $result.method_result_verified){throw 'fixture_result_unverified'}
-    if($Fixture.role -ceq 'true'){
-        if($result.authorized -ne $true -or $result.authorization_denied -ne $false -or $result.return_code -ne 0){throw 'positive_control_failed'}
-        if($Operation -ceq 'settings' -and (-not $result.settings_serialized_value_present -or -not $result.settings_readback_verified -or -not $result.settings_current_association_verified -or $result.settings_current_path_sha256 -cne $script:settingsTargetPathSha256 -or $result.settings_current_instance_sha256 -cne $script:settingsInstanceSha256)){throw 'positive_control_failed'}
-    }elseif($result.authorization_denied -ne $true -or $result.authorized -ne $false){throw 'provider_role_bypass'}
-    $script:pendingOperation=$false
-    # Move only this exact one-shot result into an administrator-only receipt.
-    $saved=Join-Path $script:root ($Fixture.role+'-'+$Operation+'.json')
-    [IO.File]::WriteAllText($saved,($result|ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
+    Assert-ProbeOperationAuthority $result $Fixture.role $Operation
+    # Preserve each planned result once; an unknown/failed operation keeps the
+    # pending barrier and cannot be retried or treated as safe cleanup.
+    Write-ProbeOperationReceipt $saved $result
     [IO.File]::Delete($output)
+    $script:pendingOperation=$false
     return $result
 }
 function Test-ProbeTarget{
@@ -349,8 +366,15 @@ function Invoke-ProviderAcceptance {
         }
         $positive=$fixtures[1];$negative=$fixtures[0]
         Set-ProbePhase $record $journal 'positive_power_on'
-        $results+=@(Invoke-ProbeOperation $positive 'power_on')
+        $results+=@(Invoke-ProbeOperation $positive 'power_on' 1)
         if((Test-ProbeTarget).State -ne 'Running'){throw 'positive_power_not_applied'}
+        Set-ProbePhase $record $journal 'positive_control_power_off'
+        $results+=@(Invoke-ProbeOperation $positive 'power_off' 2)
+        if((Test-ProbeTarget).State -ne 'Off'){throw 'positive_stop_not_applied'}
+        Set-ProbePhase $record $journal 'positive_control_power_on'
+        $results+=@(Invoke-ProbeOperation $positive 'power_on' 3)
+        if((Test-ProbeTarget).State -ne 'Running'){throw 'positive_power_not_applied'}
+        # The running current-setting descriptor is frozen after the control cycle.
         New-ProbeTargetDescriptor
         $record['target_descriptor_sha256']=$script:targetDescriptorSha256
         $record['settings_payload_sha256']=$script:settingsPayloadSha256
@@ -361,7 +385,7 @@ function Invoke-ProviderAcceptance {
         $record['settings_instance_sha256']=$script:settingsInstanceSha256
         foreach($fixture in $fixtures){Write-ProbePayload $fixture.root $fixture.sid}
         Set-ProbePhase $record $journal 'positive_settings'
-        $results+=@(Invoke-ProbeOperation $positive 'settings')
+        $results+=@(Invoke-ProbeOperation $positive 'settings' 4)
         $vm=Get-VM -Id $script:vmId
         if($vm.State -ne 'Running'){throw 'positive_power_not_applied'}
         $fresh=Get-ProbeCurrentSettingsObservation
@@ -373,16 +397,16 @@ function Invoke-ProviderAcceptance {
         if(-not (Test-ProbeCurrentSettingsExact $reset $false)){throw 'fixture_vm_ownership_changed'}
         if((Test-ProbeTarget).State -ne 'Running'){throw 'positive_power_not_applied'}
         Set-ProbePhase $record $journal 'negative_settings'
-        $results+=@(Invoke-ProbeOperation $negative 'settings')
+        $results+=@(Invoke-ProbeOperation $negative 'settings' 5)
         $negativeReadback=Get-ProbeCurrentSettingsObservation
         $record['negative_settings_readback']=$negativeReadback
         if(-not (Test-ProbeCurrentSettingsExact $negativeReadback $false)){throw 'negative_settings_changed_state'}
         if((Test-ProbeTarget).State -ne 'Running'){throw 'negative_settings_changed_state'}
         Set-ProbePhase $record $journal 'negative_power_off'
-        $results+=@(Invoke-ProbeOperation $negative 'power_off')
+        $results+=@(Invoke-ProbeOperation $negative 'power_off' 6)
         if((Test-ProbeTarget).State -ne 'Running'){throw 'negative_power_changed_state'}
         Set-ProbePhase $record $journal 'positive_power_off'
-        $results+=@(Invoke-ProbeOperation $positive 'power_off')
+        $results+=@(Invoke-ProbeOperation $positive 'power_off' 7)
         if((Test-ProbeTarget).State -ne 'Off'){throw 'positive_stop_not_applied'}
     $complete=$true
     }catch{
