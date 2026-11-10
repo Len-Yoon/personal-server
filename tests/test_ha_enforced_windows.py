@@ -481,6 +481,11 @@ if($blocked -ne 3 -or $script:trace.Count -ne 0){throw 'changed_authority_accept
                 self.assertIsNone(value.process)
                 self.assertFalse(value._healthy)
                 self.assertNotIn('shell', spawn.call_args.kwargs)
+                self.assertEqual(spawn.call_args.args[0], [
+                    '/fixed/powershell', '-NoProfile', '-NonInteractive',
+                    '-ExecutionPolicy', 'Bypass', '-File', str(DRIVER),
+                    '-Plan', '/fixture/plan', '-Approval', '/fixture/approval', '-Go',
+                ])
 
     def test_pipe_write_failure_cannot_authorize_or_repeat_mutation(self):
         value = adapter()

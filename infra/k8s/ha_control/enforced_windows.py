@@ -245,7 +245,9 @@ class EnforcedWindowsFence:
     def guard(self):
         try:
             executable = _powershell_path()
-            self.process = subprocess.Popen([str(executable), "-NoProfile", "-NonInteractive", "-File", str(self.driver),
+            # Only this verified child may run the hash-pinned private driver;
+            # do not alter machine/user policy or override enforced Group Policy.
+            self.process = subprocess.Popen([str(executable), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(self.driver),
                                             "-Plan", str(self.plan), "-Approval", str(self.approval), "-Go"],
                                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                            text=True, encoding="utf-8", errors="strict", bufsize=1)
