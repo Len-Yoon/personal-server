@@ -376,6 +376,14 @@ function Initialize-GuestComTypes([switch]$PortableFixture){
     $script:GuestComInitialized=$true
 }
 function Get-GuestComHash([byte[]]$Bytes){$h=[Security.Cryptography.SHA256]::Create();try{return [BitConverter]::ToString($h.ComputeHash($Bytes)).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}}
+function Get-GuestComHostProfilePaths([string]$Root,$Spec){
+    # Version 3 keeps each node's immutable evidence separate within one installation.
+    $version=[HaGuestComV1.Rules]::Integer($Spec,'schema_version')
+    $node=[HaGuestComV1.Rules]::Text($Spec,'node')
+    if($version -notin @(2,3) -or $node -cnotin @('A','B')){throw 'guest_com_host_profile_rejected'}
+    $prefix=if($version -eq 3){'com-'+$node+'-host-compute'}else{'com-host-compute'}
+    return [pscustomobject]@{profile=(Join-Path $Root ($prefix+'-profile.json'));evidence=(Join-Path $Root ($prefix+'-evidence.json'))}
+}
 function Read-GuestComRequest{
     if($RequestSha256 -cnotmatch '^[0-9a-f]{64}$' -or $Request.Length -gt 32768){throw 'guest_com_request_pin_required'}
     $raw=[Convert]::FromBase64String($Request)
@@ -383,10 +391,10 @@ function Read-GuestComRequest{
     $value=[HaGuestComV1.Json]::Object(([Text.UTF8Encoding]::new($false,$true)).GetString($raw),16384)
     $keys=@('schema_version','collector_source_commit','vm_source_commit','stage_source_commit','seed_source_commit','installation_id','node','vm_id','prepared_receipt_sha256','seed_id','bootstrap_manifest_sha256','expected_kernel_release','expected_pg_image','expected_package_count','timeout_seconds','egress_mac_address','peer_prepared_receipt_sha256','switch_owner_manifest_sha256')
     $version=[HaGuestComV1.Rules]::Integer($value,'schema_version')
-    if($version -eq 2){$keys+=@('pipe_profile','host_profile_sha256','host_evidence_sha256')}
+    if($version -in @(2,3)){$keys+=@('pipe_profile','host_profile_sha256','host_evidence_sha256')}
     elseif($version -ne 1){throw 'guest_com_request_version_rejected'}
     [HaGuestComV1.Rules]::Keys($value,$keys)
-    if($version -eq 2){
+    if($version -in @(2,3)){
         if([HaGuestComV1.Rules]::Text($value,'pipe_profile') -cne 'registered-host-compute-v1'){throw 'guest_com_host_profile_rejected'}
         foreach($key in @('host_profile_sha256','host_evidence_sha256')){if(-not [HaGuestComV1.Rules]::Match([HaGuestComV1.Rules]::Text($value,$key),'[0-9a-f]{64}')){throw 'guest_com_host_profile_pin_rejected'}}
     }
@@ -513,11 +521,11 @@ function Invoke-GuestComReceipt{
         $initial=Get-GuestComVm $spec $pins
         $vmSid=([Security.Principal.NTAccount]::new('NT VIRTUAL MACHINE\'+$spec['vm_id'])).Translate([Security.Principal.SecurityIdentifier]).Value
         if(-not [HaGuestComV1.Rules]::VirtualMachineSid($vmSid)){throw 'guest_com_vm_sid_rejected'}
-        if($spec['schema_version'] -eq 2){
+        if($spec['schema_version'] -in @(2,3)){
             # These independent external pins bind root-admin-reviewed original
             # evidence bytes and an explicit private policy. Neither substitutes
             # for current live identity, descriptor and memory-model validation.
-            $profilePath=Join-Path $root 'com-host-compute-profile.json';$evidencePath=Join-Path $root 'com-host-compute-evidence.json'
+            $paths=Get-GuestComHostProfilePaths $root $spec;$profilePath=$paths.profile;$evidencePath=$paths.evidence
             Assert-GuestComAncestors $profilePath $root $caller;Assert-GuestComAncestors $evidencePath $root $caller
             $profileFile=[HaGuestComV1.PrivateFile]::new($profilePath,$spec['host_profile_sha256'],$caller)
             $evidenceFile=[HaGuestComV1.PrivateFile]::new($evidencePath,$spec['host_evidence_sha256'],$caller)

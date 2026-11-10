@@ -178,6 +178,29 @@ $blocked=$false;try{[HaGuestComV1.HostProfile]::Parse($extra,$cfg)|Out-Null}catc
 'profile-optin-and-root-evidence-pins-only'
 '''),'profile-optin-and-root-evidence-pins-only')
 
+    def test_node_scoped_profile_v3_is_explicit_and_keeps_both_nodes_separate(self):
+        self.assertEqual(self.run_ps(r'''
+$cfg=Read-GuestComRequest
+$cfg['schema_version']=[long]3;$cfg.Add('pipe_profile','registered-host-compute-v1');$cfg.Add('host_profile_sha256',('a'*64));$cfg.Add('host_evidence_sha256',('e'*64))
+$root=Join-Path ([IO.Path]::GetTempPath()) 'two-node-profile-contract'
+$seen=@()
+foreach($node in @('A','B')){
+ $cfg['node']=$node;$cfg['peer_prepared_receipt_sha256']=$(if($node -ceq 'A'){''}else{'b'*64})
+ $raw=[Text.Encoding]::UTF8.GetBytes(($cfg|ConvertTo-Json -Depth 5 -Compress));$script:Request=[Convert]::ToBase64String($raw);$script:RequestSha256=Get-GuestComHash $raw
+ $bound=Read-GuestComRequest;$paths=Get-GuestComHostProfilePaths $root $bound
+ if((Split-Path -Leaf $paths.profile) -cne ('com-'+$node+'-host-compute-profile.json') -or (Split-Path -Leaf $paths.evidence) -cne ('com-'+$node+'-host-compute-evidence.json')){throw 'node_scope_lost'}
+ $seen+=@($paths.profile,$paths.evidence)
+ $bound['schema_version']=[long]2;$legacy=Get-GuestComHostProfilePaths $root $bound
+ if((Split-Path -Leaf $legacy.profile) -cne 'com-host-compute-profile.json' -or (Split-Path -Leaf $legacy.evidence) -cne 'com-host-compute-evidence.json'){throw 'legacy_contract_changed'}
+}
+if(@($seen|Sort-Object -Unique).Count -ne 4){throw 'two_nodes_collide'}
+foreach($node in @('../A','a','C','A/profile')){
+ $cfg['node']=$node;$closed=$false;try{$null=Get-GuestComHostProfilePaths $root $cfg}catch{$closed=$true};if(-not $closed){throw 'unbound_profile_path'}
+}
+$cfg['node']='A';foreach($v in @(1,4)){$cfg['schema_version']=[long]$v;$closed=$false;try{$null=Get-GuestComHostProfilePaths $root $cfg}catch{$closed=$true};if(-not $closed){throw 'unsupported_layout_version'}}
+'node-profile-v3-and-legacy-v2-separate'
+'''),'node-profile-v3-and-legacy-v2-separate')
+
     def test_host_service_acl_writer_roles_and_boundary_dispatch_fail_closed(self):
         self.assertEqual(self.run_ps(r'''
 $acl=[HaGuestComV1.Json]::Object('{"owner_role":"system","aces":[{"common_noncallback":true,"sid_role":"system","qualifier":"allow","mutating_access":true},{"common_noncallback":true,"sid_role":"authenticated_users","qualifier":"allow","mutating_access":false}]}',4096)
