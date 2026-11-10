@@ -33,6 +33,55 @@ function ConvertTo-GuestVmDiskIdentifier($Value){
     if($text.Length -ne 36 -or $text -cnotmatch '^[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$' -or -not [Guid]::TryParseExact($text,'D',[ref]$guid) -or $guid -eq [Guid]::Empty){throw 'guest_vm_disk_identifier_rejected'}
     return $guid.ToString('D')
 }
+function Test-GuestVmDerivedImageDeclaration($Image){
+    foreach($key in @('derivation_profile','upstream_qcow_sha256','derivation_receipt_sha256')){
+        if($null -ne $Image.PSObject.Properties[$key]){return $true}
+    }
+    return $false
+}
+function Assert-GuestVmNodeImageProfile($Image){
+    $keys=@('filename','sha256','bytes','disk_identifier','source_qcow_sha256','conversion_receipt_sha256','tool_version','tool_sha256')
+    $derived=Test-GuestVmDerivedImageDeclaration $Image
+    if($derived){$keys+=@('derivation_profile','upstream_qcow_sha256','derivation_receipt_sha256')}
+    Assert-GuestVmKeys $Image $keys
+    if($derived){
+        if($Image.derivation_profile -isnot [string] -or $Image.derivation_profile -cne 'cloud-init-output-preseed-v1' -or
+            $Image.upstream_qcow_sha256 -isnot [string] -or $Image.upstream_qcow_sha256 -cne '04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94' -or
+            $Image.derivation_receipt_sha256 -isnot [string] -or $Image.derivation_receipt_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            $Image.derivation_receipt_sha256 -ceq ('0'*64) -or $Image.source_qcow_sha256 -ceq $Image.upstream_qcow_sha256){throw 'guest_vm_image_derivation_rejected'}
+    }elseif($Image.source_qcow_sha256 -cne '04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94'){throw 'guest_vm_node_image_rejected'}
+}
+function Assert-GuestVmImageDerivationReceipt($Value,$Spec){
+    # This is a source-bound offline derivation receipt, never guest boot or writer authority.
+    $image=$Spec.node_image;Assert-GuestVmNodeImageProfile $image
+    if(-not (Test-GuestVmDerivedImageDeclaration $image)){throw 'guest_vm_image_derivation_rejected'}
+    Assert-GuestVmKeys $Value @('schema_version','format','profile','source_commit','node','upstream_qcow_sha256','derived_qcow_sha256','node_vhdx_sha256','node_vhdx_bytes','node_disk_identifier','patch_path','patch_sha256','patch_bytes','patch_uid','patch_gid','patch_mode','filesystem_check_exit','root_partition_offset','root_partition_bytes','upstream_unchanged','initial_and_userdata_output_match','qemu_img_version','qemu_img_sha256','utility_image_config_digest','docker_context','docker_daemon_identity_sha256','debugfs_version','e2fsck_version')
+    foreach($key in @('schema_version','node_vhdx_bytes','patch_bytes','patch_uid','patch_gid','filesystem_check_exit','root_partition_offset','root_partition_bytes')){
+        if($Value.$key -isnot [int] -and $Value.$key -isnot [long]){throw 'guest_vm_image_derivation_type_rejected'}
+    }
+    foreach($key in @('format','profile','source_commit','node','upstream_qcow_sha256','derived_qcow_sha256','node_vhdx_sha256','node_disk_identifier','patch_path','patch_sha256','patch_mode','qemu_img_version','qemu_img_sha256','utility_image_config_digest','docker_context','docker_daemon_identity_sha256','debugfs_version','e2fsck_version')){
+        if($Value.$key -isnot [string]){throw 'guest_vm_image_derivation_type_rejected'}
+    }
+    foreach($key in @('upstream_unchanged','initial_and_userdata_output_match')){
+        if($Value.$key -isnot [bool] -or -not $Value.$key){throw 'guest_vm_image_derivation_rejected'}
+    }
+    if($Value.schema_version -ne 1 -or $Value.format -cne 'ha-guest-node-image-derivation-v1' -or $Value.profile -cne $image.derivation_profile -or
+        $Value.source_commit -cne $Spec.source_commit -or $Value.source_commit -cnotmatch '^[0-9a-f]{40}$' -or $Value.node -cne $Spec.node -or
+        $Value.upstream_qcow_sha256 -cne $image.upstream_qcow_sha256 -or $Value.derived_qcow_sha256 -cne $image.source_qcow_sha256 -or
+        $Value.node_vhdx_sha256 -cne $image.sha256 -or $Value.node_vhdx_bytes -ne $image.bytes -or
+        $Value.node_disk_identifier -cne (ConvertTo-GuestVmDiskIdentifier $Value.node_disk_identifier) -or
+        $Value.node_disk_identifier -cne (ConvertTo-GuestVmDiskIdentifier $image.disk_identifier) -or
+        $Value.patch_path -cne '/etc/cloud/cloud.cfg.d/99zz-n100-ha-initial-output.cfg' -or $Value.patch_bytes -ne 61 -or
+        $Value.patch_sha256 -cne '659e515ee99507c6990b06c3a0560a794070514de74a9506e6ee70da20bc77c8' -or
+        $Value.patch_uid -ne 0 -or $Value.patch_gid -ne 0 -or $Value.patch_mode -cne '0644' -or $Value.filesystem_check_exit -ne 0 -or
+        $Value.root_partition_offset -ne 1074790400 -or $Value.root_partition_bytes -ne 2683289088 -or
+        $Value.qemu_img_version -cne $image.tool_version -or $Value.qemu_img_sha256 -cne $image.tool_sha256 -or
+        $Value.utility_image_config_digest -cne 'sha256:ded2c932b40c38c99f0b23b9edc29e160e23689db2d92cdbe251b693ca76be1b' -or
+        $Value.docker_context -cnotmatch '^colima-codex-ha-[A-Za-z0-9_-]{1,64}$' -or
+        $Value.docker_daemon_identity_sha256 -cnotmatch '^[0-9a-f]{64}$' -or $Value.docker_daemon_identity_sha256 -ceq ('0'*64) -or
+        $Value.debugfs_version -cnotmatch '^debugfs [0-9]+\.[0-9]+\.[0-9]+(?: \([A-Za-z0-9 -]{1,60}\))?$' -or
+        $Value.e2fsck_version -cnotmatch '^e2fsck [0-9]+\.[0-9]+\.[0-9]+(?: \([A-Za-z0-9 -]{1,60}\))?$'){throw 'guest_vm_image_derivation_rejected'}
+}
 function Assert-GuestVmSpec($Value){
     $fields=@('schema_version','source_commit','stage_source_commit','seed_source_commit','installation_id','stage_manifest_sha256','seed_iso_sha256','seed_iso_bytes','node','mac_address','optional_egress_nic','egress_mac_address','peer_prepared_receipt_sha256')
     if(($Value.schema_version -isnot [int] -and $Value.schema_version -isnot [long]) -or $Value.schema_version -notin @(1,2,3)){throw 'guest_vm_identity_rejected'}
@@ -52,12 +101,11 @@ function Assert-GuestVmSpec($Value){
     if($Value.schema_version -ge 2){
         if($Value.creation_method -isnot [string] -or $Value.creation_method -cne 'verified-node-image-copy-v1'){throw 'guest_vm_creation_method_rejected'}
         $image=$Value.node_image
-        Assert-GuestVmKeys $image @('filename','sha256','bytes','disk_identifier','source_qcow_sha256','conversion_receipt_sha256','tool_version','tool_sha256')
+        Assert-GuestVmNodeImageProfile $image
         foreach($key in @('sha256','source_qcow_sha256','conversion_receipt_sha256','tool_sha256')){if($image.$key -isnot [string] -or $image.$key -cnotmatch '^[0-9a-f]{64}$'){throw 'guest_vm_node_image_hash_rejected'}}
         if($image.filename -isnot [string] -or $image.filename -cne ('node-'+$Value.node+'.vhdx') -or ($image.bytes -isnot [int] -and $image.bytes -isnot [long]) -or $image.bytes -lt 1048576 -or $image.bytes -gt 8589934592 -or
             $image.disk_identifier -isnot [string] -or
-            $image.tool_version -isnot [string] -or $image.tool_version -cnotmatch '^qemu-img version [0-9]+\.[0-9]+\.[0-9]+$' -or
-            $image.source_qcow_sha256 -cne '04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94'){throw 'guest_vm_node_image_rejected'}
+            $image.tool_version -isnot [string] -or $image.tool_version -cnotmatch '^qemu-img version [0-9]+\.[0-9]+\.[0-9]+$'){throw 'guest_vm_node_image_rejected'}
         $null=ConvertTo-GuestVmDiskIdentifier $image.disk_identifier
     }
     if($Value.schema_version -eq 3){
@@ -75,7 +123,7 @@ function Read-GuestVmSpec{
     # so Unicode-escaped duplicate keys cannot bypass the literal key inventory.
     if($text.Contains('\')){throw 'guest_vm_duplicate_or_escaped_keys'}
     $keys=@([regex]::Matches($text,'"([A-Za-z_][A-Za-z0-9_]*)"\s*:')|ForEach-Object{$_.Groups[1].Value})
-    if($keys.Count -notin @(13,23,36) -or @($keys|Select-Object -Unique).Count -ne $keys.Count){throw 'guest_vm_duplicate_or_escaped_keys'}
+    if($keys.Count -notin @(13,23,26,36,39) -or @($keys|Select-Object -Unique).Count -ne $keys.Count){throw 'guest_vm_duplicate_or_escaped_keys'}
     if((Get-GuestVmHash $bytes) -cne $ManifestSha256){throw 'guest_vm_manifest_changed'}
     return Assert-GuestVmSpec ($text|ConvertFrom-Json)
 }
@@ -148,13 +196,15 @@ public sealed class HaGuestVmSealV1 : IDisposable {
  public HaGuestVmSealV1(string path,bool isDirectory,bool managedConfig){
   directory=isDirectory;
   // Media: retained READ_DATA|WRITE_DAC + shareRead denies data writers/replacement.
+  // Directories: shareRead|shareWrite permits trusted child receipt creation/rename;
+  // no shareDelete keeps the leased directory from replacement. ACLs still gate writers.
   // Managed config files only: share7 coexists with HostHypervisorTCB writers;
   // this is not a proof of foreign-writer absence. Never force-close handles.
   handle=CreateFile(path,0x80040000,ShareMode(managedConfig,directory),IntPtr.Zero,3,0x02200000,IntPtr.Zero);
   if(handle.IsInvalid){int error=Marshal.GetLastWin32Error();handle.Dispose();throw new InvalidOperationException("guest_vm_seal_open_"+error);}
   try{Info i=ReadInfo();Need(((i.Attr&0x10)!=0)==directory);if(!directory)stream=new System.IO.FileStream(handle,System.IO.FileAccess.Read,1048576,false);}catch{Dispose();throw;}
  }
- public static uint ShareMode(bool managedConfig,bool isDirectory){return managedConfig&&!isDirectory?7u:1u;}
+ public static uint ShareMode(bool managedConfig,bool isDirectory){return isDirectory?3u:(managedConfig?7u:1u);}
  Info ReadInfo(){Need(!disposed);Info i;Need(GetFileInformationByHandle(handle,out i)&&(i.Attr&0x400)==0&&i.Links==1);return i;}
  public string Identity(){Info i=ReadInfo();return i.Volume.ToString("x8")+":"+i.IndexHigh.ToString("x8")+i.IndexLow.ToString("x8");}
  public long Bytes(){Info i=ReadInfo();return directory?0:(long)(((ulong)i.High<<32)|i.Low);}
@@ -310,6 +360,10 @@ function Open-GuestVmNodeImage([string]$Root,$Spec){
     $image=$Spec.node_image;$path=Join-Path $Root $image.filename
     $receipt=Open-GuestVmPinned (Join-Path $Root ('node-'+$Spec.node+'-conversion-receipt.json')) $image.conversion_receipt_sha256 -1
     try{if($receipt.Length -lt 2 -or $receipt.Length -gt 32768){throw 'guest_vm_conversion_receipt_limit'}}finally{$receipt.Dispose()}
+    if(Test-GuestVmDerivedImageDeclaration $image){
+        $derivation=Read-GuestVmJsonPinned (Join-Path $Root ('node-'+$Spec.node+'-image-derivation.json')) $image.derivation_receipt_sha256 32768
+        Assert-GuestVmImageDerivationReceipt $derivation $Spec
+    }
     $stream=Open-GuestVmPinned $path $image.sha256 $image.bytes
     try{
         $disk=Get-VHD -Path $path;Assert-GuestVmDisk $disk

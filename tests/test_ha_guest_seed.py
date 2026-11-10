@@ -16,6 +16,8 @@ from tests.test_ha_guest_bootstrap import B,fixture,pg_archive
 ROOT=Path(__file__).resolve().parents[1]
 spec=importlib.util.spec_from_file_location('ha_guest_seed',ROOT/'infra/k8s/ha-package/guest_seed.py')
 S=importlib.util.module_from_spec(spec);spec.loader.exec_module(S)
+image_spec=importlib.util.spec_from_file_location('ha_guest_image',ROOT/'infra/k8s/ha-package/guest_image.py')
+I=importlib.util.module_from_spec(image_spec);image_spec.loader.exec_module(I)
 
 
 def key_bytes():
@@ -277,6 +279,129 @@ class SeedTests(unittest.TestCase):
             (root/'state.json.tmp').write_text('preserve')
             with self.assertRaises(S.SeedError):S.atomic(path,{'phase':'changed'})
             self.assertEqual(json.loads(path.read_bytes()),{'phase':'new'})
+
+
+class ImageDerivationTests(unittest.TestCase):
+    def value(self):
+        return {'schema_version':1,'source_commit':'a'*40,
+            'upstream_qcow_path':'/fixture/ubuntu-24.04-server-cloudimg-amd64.img',
+            'qemu_img_path':'/fixture/qemu-img','qemu_img_sha256':I.QEMU_SHA,
+            'qemu_img_version':I.QEMU_VERSION,'docker_context':'colima-codex-ha-01234567',
+            'docker_daemon_identity_sha256':'b'*64,'utility_image_config_digest':I.UTILITY_IMAGE}
+
+    def test_initial_system_config_matches_userdata_without_relaxing_status(self):
+        with tempfile.TemporaryDirectory() as name:
+            key=Path(name).resolve()/'existing.pub';key.write_text('public fixture')
+            value=spec_value(fixture(),key)
+            cloud=json.loads(S.render(value,'ssh-ed25519 PUBLIC',b'fixed module','8'*64)['user-data'].split(b'\n',1)[1])
+            early=json.loads(S.early_config_bytes().split(b'\n',1)[1])
+            self.assertEqual(early,{'output':cloud['output']})
+            self.assertEqual(cloud['output'],{'all':'> /dev/null'})
+            self.assertEqual(len(I.patch_bytes()),61)
+            self.assertEqual(I.digest(I.patch_bytes()),'659e515ee99507c6990b06c3a0560a794070514de74a9506e6ee70da20bc77c8')
+            with patch.object(I.SEED,'OUTPUT_SINK','> changed'):
+                with self.assertRaises(I.ImageError):I.patch_bytes()
+            # A recoverable failure still blocks acceptance; the fix is early config.
+            with patch.object(S,'run',return_value=b'{"status":"done","extended_status":"degraded done"}'):
+                with self.assertRaises(S.SeedError):S.cloud_status()
+
+    def test_image_spec_is_closed_and_cannot_select_failed_disk_or_other_runtime(self):
+        self.assertEqual(I.validate_spec(self.value()),self.value())
+        for key,value in [('schema_version',True),('source_commit','g'*40),
+                          ('upstream_qcow_path','/fixture/failed-A.vhdx'),
+                          ('qemu_img_sha256','0'*64),('utility_image_config_digest','sha256:'+'0'*64),
+                          ('docker_context','orbstack'),('docker_daemon_identity_sha256','0'*64)]:
+            wrong=self.value();wrong[key]=value
+            with self.assertRaises(I.ImageError):I.validate_spec(wrong)
+        wrong=self.value();wrong['extra']='unlisted'
+        with self.assertRaises(I.ImageError):I.validate_spec(wrong)
+        with self.assertRaises(I.ImageError):I.strict_json('{"schema_version":1,"schema_version":1}')
+
+    def test_new_partition_copy_only_changes_selected_owned_range(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name).resolve();original=root/'original.raw';original.write_bytes(b'A'*16+b'B'*32+b'C'*16)
+            original_hash=I.file_hash(original);part=root/'root.ext4'
+            I.sparse_partition_copy(original,part,16,32);self.assertEqual(part.read_bytes(),b'B'*32)
+            with self.assertRaises(FileExistsError):I.sparse_partition_copy(original,part,16,32)
+            copy_path=root/'fresh.raw';copy_path.write_bytes(original.read_bytes());part.write_bytes(b'D'*32)
+            I.insert_partition(copy_path,part,16,32)
+            self.assertEqual(copy_path.read_bytes(),b'A'*16+b'D'*32+b'C'*16)
+            self.assertEqual(I.file_hash(original),original_hash)
+            part.write_bytes(b'wrong length')
+            with self.assertRaises(I.ImageError):I.insert_partition(copy_path,part,16,32)
+
+    def test_receipt_does_not_relabel_upstream_and_requires_real_success_fields(self):
+        with tempfile.TemporaryDirectory() as name:
+            path=Path(name).resolve()/'node-A.vhdx'
+            with path.open('wb') as handle:handle.truncate(1048576)
+            value=I.receipt(self.value(),'A','c'*64,path,'12345678-1234-1234-1234-123456789abc',
+                (1074790400,2683289088),('debugfs 1.47.0 (5-Feb-2023)','e2fsck 1.47.0 (5-Feb-2023)'))
+            self.assertEqual(set(value),I.RECEIPT_FIELDS);self.assertEqual(len(value),28)
+            self.assertEqual(value['upstream_qcow_sha256'],I.UPSTREAM_SHA)
+            self.assertNotEqual(value['derived_qcow_sha256'],I.UPSTREAM_SHA)
+            for key,changed in [('schema_version',True),('derived_qcow_sha256',I.UPSTREAM_SHA),
+                                ('node_vhdx_bytes',True),('node_disk_identifier','0'*36),
+                                ('patch_sha256','0'*64),('patch_bytes',True),('patch_uid',False),
+                                ('filesystem_check_exit',1),('upstream_unchanged',False),
+                                ('initial_and_userdata_output_match',False)]:
+                wrong=copy.deepcopy(value);wrong[key]=changed
+                with self.assertRaises(I.ImageError):I.validate_receipt(wrong)
+
+    def test_patch_container_is_owned_offline_and_fsck_failure_does_not_accept(self):
+        owner='f'*32;container='e'*64;calls=[]
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name).resolve();(root/'early-readback.cfg').write_bytes(I.patch_bytes())
+            (root/'early-output.cfg').write_bytes(I.patch_bytes())
+            proof=root/'cloud-output-merge-proof.json';proof.write_text('{"initial_and_userdata_output_match":true}')
+            (root/'after-stat.txt').write_text('Inode: 1 Type: regular Mode: 0644\nUser: 0 Group: 0 Size: 61\n')
+            for tool in ('debugfs','e2fsck'):(root/(tool+'-version.txt')).write_text(tool+' 1.47.0 (5-Feb-2023)\n')
+            facts=[{'Id':container,'Image':I.UTILITY_IMAGE,'Name':'/n100-ha-image-'+owner,
+                    'Config':{'Labels':{'org.n100ha.guest-image.owner':owner}},
+                    'State':{'Status':'exited','Running':False,'ExitCode':0,'OOMKilled':False,'Error':''}}]
+            def mocked(argv,reason,*args,**kwargs):
+                calls.append(argv)
+                if 'create' in argv:return container.encode()
+                if 'inspect' in argv:return json.dumps(facts).encode()
+                return b''
+            with patch.object(I,'run',side_effect=mocked):I.offline_patch(self.value(),['docker','--context',self.value()['docker_context']],root,owner)
+            create=calls[0]
+            self.assertIn('--pull=never',create)
+            self.assertIn('--read-only',create);self.assertEqual(create[create.index('--network')+1],'none')
+            self.assertEqual(create[create.index('--cap-drop')+1],'ALL')
+            self.assertIn('no-new-privileges',create);self.assertEqual(create.count('--mount'),1)
+            mounts=[create[i+1] for i,value in enumerate(create) if value=='--mount']
+            self.assertEqual(sum(not value.endswith(',readonly') for value in mounts),1)
+            self.assertIn('e2fsck -fn /work/root.ext4',I.patch_recipe())
+            self.assertIn('exit 31',I.patch_recipe());self.assertNotIn('mount ',I.patch_recipe())
+            import ast
+            embedded=I.patch_recipe().split("<<'CLOUD_OUTPUT_PROOF'\n",1)[1].split('\nCLOUD_OUTPUT_PROOF',1)[0]
+            ast.parse(embedded)
+            self.assertIn("util.read_conf_with_confd('/work/cloud/cloud.cfg')",embedded)
+            self.assertIn("util.get_output_cfg(initial,'init')",embedded)
+            self.assertIn('rdump /etc/cloud/cloud.cfg.d /work/cloud',I.patch_recipe())
+            self.assertIn("'conf_d' in parsed",embedded)
+            self.assertIn('path.is_symlink()',embedded)
+            self.assertIn('total>1048576',embedded)
+            self.assertIn('inode.st_size>262144',embedded)
+            for false_proof in (False,1):
+                proof.write_text(json.dumps({'initial_and_userdata_output_match':false_proof}))
+                with patch.object(I,'run',side_effect=mocked):
+                    with self.assertRaises(I.ImageError):I.offline_patch(self.value(),['docker'],root,owner)
+            proof.write_text('{"initial_and_userdata_output_match":true}')
+            # The CLI return alone cannot prove that the filesystem checker passed.
+            facts[0]['State']['ExitCode']=1
+            with patch.object(I,'run',side_effect=mocked):
+                with self.assertRaises(I.ImageError):I.offline_patch(self.value(),['docker'],root,owner)
+            facts[0]['State']['ExitCode']=0
+            calls.clear()
+            def fail_fsck(argv,reason,*args,**kwargs):
+                if 'start' in argv:
+                    calls.append(argv);raise I.ImageError('offline_patch_or_fsck_failed')
+                return mocked(argv,reason,*args,**kwargs)
+            with patch.object(I,'run',side_effect=fail_fsck):
+                with self.assertRaises(I.ImageError):I.offline_patch(self.value(),['docker'],root,owner)
+            self.assertTrue(any('rm' in argv and container in argv for argv in calls))
+            self.assertFalse(any(p.name.endswith('derivation.json') for p in root.iterdir()))
 
 
 if __name__=='__main__':unittest.main()

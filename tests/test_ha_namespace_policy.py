@@ -352,6 +352,71 @@ foreach($value in @(3,11)){
             result = subprocess.run([self.pwsh, '-NoLogo', '-NoProfile', '-File', str(script)], capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr[-2000:] + result.stdout[-500:])
 
+    def closure_transaction(self, scenario):
+        value = base64.b64encode(descriptor()).decode()
+        manifest = base64.b64encode(json.dumps(self.manifest()).encode()).decode()
+        return self.ps(f"""
+$spec=Read-NpJson ([Convert]::FromBase64String('{manifest}'));$original=[Convert]::FromBase64String('{value}');$target=[HaNamespacePolicyCoreV1]::Build($original,'{SERVICE_SID}','protect-and-materialize-v1',$true,$true,[string[]]@())
+$names=@('root/virtualization/v2','root/virtualization/v2/ms_409','root/virtualization/v2/ms_412');$empty=Get-NpJsonHash @();$children=@('ms_409','ms_412');$parent=[byte[]]@(7,8)
+$spec.original_sd_sha256=Get-NpHash $original;$spec.parent_sd_sha256=Get-NpHash $parent;$spec.children_sha256=Get-NpJsonHash $children
+$spec|Add-Member NoteProperty closure_version 'direct-children-v1';$spec|Add-Member NoteProperty closure_names $names
+$spec|Add-Member NoteProperty closure_original_sd_sha256 @((Get-NpHash $original),(Get-NpHash $original),(Get-NpHash $original))
+$spec|Add-Member NoteProperty closure_target_sd_sha256 @((Get-NpHash $target),(Get-NpHash $target),(Get-NpHash $target))
+$spec|Add-Member NoteProperty closure_children_sha256 @($spec.children_sha256,$empty,$empty)
+$spec|Add-Member NoteProperty closure_classification_sha256 @('','','')
+$root=Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString());$null=[IO.Directory]::CreateDirectory($root);$script:npPlanRoot=$root
+function Open-NpInput($Path,$Hash,$Limit=65536){{$b=[IO.File]::ReadAllBytes($Path);if((Get-NpHash $b) -cne $Hash){{throw 'mock_hash_mismatch'}};return ,$b}}
+$script:live=@{{}};$script:trace=[Collections.Generic.List[int]]::new();$script:failIndex=-1;$script:extraChild=$false
+for($i=0;$i -lt 3;$i++){{
+ $script:live[$names[$i]]=$original;if($i -gt 0){{[IO.File]::WriteAllBytes((Join-Path $root ('namespace-child-'+$i+'-original.bin')),$original)}}
+ $e=[ordered]@{{schema_version=1;format='ha-namespace-closure-evidence-v1';source_commit=$spec.source_commit;installation_id=$spec.installation_id;namespace=$names[$i];original_sd_sha256=(Get-NpHash $original);target_sd_sha256=(Get-NpHash $target);children_sha256=$spec.closure_children_sha256[$i];classification_metadata_sha256=('9'*64);protected_workloads_receipt_sha256=$spec.protected_workloads_receipt_sha256;provider_roundtrip_exact=$true;original_restore_exact=$true;full_sacl_verified=$true;control_path_review_complete=$true;namespace_wide_not_vm_specific=$true}}
+ $b=[Text.Encoding]::UTF8.GetBytes(($e|ConvertTo-Json -Compress));[IO.File]::WriteAllBytes((Join-Path $root ('namespace-closure-'+$i+'-evidence.json')),$b);$spec.closure_classification_sha256[$i]=Get-NpHash $b
+}}
+function Get-NpNamespace($Namespace){{if($Namespace -ceq 'root/virtualization'){{return ,$parent}};return ,$script:live[$Namespace]}}
+function Get-NpClosureChildren($Namespace){{if($Namespace -ceq $names[0]){{return ,$children}};if($script:extraChild){{return ,@('unreviewed')}};return ,@()}}
+function Set-NpClosureNamespace($Namespace,[byte[]]$Bytes,$Spec){{
+ $index=[array]::IndexOf($names,$Namespace);$events=@([IO.File]::ReadAllLines((Join-Path $root ('namespace-policy-'+$(if($script:trace.Count -lt 3){{'apply'}}else{{'rollback'}})+'-journal.jsonl')))|ForEach-Object{{$_|ConvertFrom-Json}})
+ if($events[-1].event -cne 'namespace_closure_set_intent' -or $events[-1].index -ne $index){{throw 'write_without_intent'}}
+ $script:trace.Add($index);if($index -eq $script:failIndex){{throw 'lost_response_preserve_partial'}};$script:live[$Namespace]=$Bytes
+}}
+try{{
+$candidate=New-NpPlan $spec $original $original $parent $children @('S-1-5-21-1-2-3-4') ('b'*64);$PlanSha256=$candidate.hash;$Go=$true
+{scenario}
+}}finally{{[IO.Directory]::Delete($root,$true)}}
+""")
+
+    def test_closure_exact_members_evidence_and_backup_binding(self):
+        self.closure_transaction(r"""
+Assert-NpManifest $spec
+foreach($key in @('closure_names','closure_target_sd_sha256','closure_children_sha256','closure_classification_sha256')){
+ $old=@($spec.$key);$bad=@($old);$bad[1]=if($key -ceq 'closure_names'){'root/virtualization/v2/ms_409/nested'}else{'f'*64};$spec.$key=$bad
+ $closed=$false;try{$null=New-NpPlan $spec $original $original $parent $children @('S-1-5-21-1-2-3-4') ('b'*64)}catch{$closed=$true};$spec.$key=$old;if(-not $closed){throw 'closure_binding_bypass'}
+}
+$legacy=$spec|Select-Object -Property * -ExcludeProperty closure_*
+$closed=$false;try{$null=New-NpPlan $legacy $original $original $parent $children @('S-1-5-21-1-2-3-4') ('b'*64)}catch{$closed=$true};if(-not $closed){throw 'legacy_live_children_accepted'}
+""")
+
+    def test_closure_apply_children_first_and_rollback_parent_first_exact_without_replay(self):
+        self.closure_transaction(r"""
+Invoke-NpTransaction $candidate $original $root $false|Out-Null
+if(($script:trace -join ',') -cne '1,2,0'){throw 'apply_order_wrong'}
+$ApplyReceiptSha256=Get-NpHash ([IO.File]::ReadAllBytes((Join-Path $root 'namespace-policy-apply-receipt.json')))
+Invoke-NpTransaction $candidate $original $root $true|Out-Null
+if(($script:trace -join ',') -cne '1,2,0,0,2,1'){throw 'rollback_order_wrong'}
+Assert-NpClosureState $candidate @($spec.closure_original_sd_sha256)
+$closed=$false;try{Invoke-NpTransaction $candidate $original $root $false|Out-Null}catch{$closed=$true};if(-not $closed -or $trace.Count -ne 6){throw 'closure_replayed'}
+""")
+
+    def test_closure_partial_response_and_preintent_drift_never_retry_or_claim_atomic(self):
+        self.closure_transaction(r"""
+$script:extraChild=$true;$closed=$false;try{Invoke-NpTransaction $candidate $original $root $false|Out-Null}catch{$closed=$true}
+if(-not $closed -or $trace.Count -ne 0 -or (Test-Path (Join-Path $root 'namespace-policy-apply-journal.jsonl'))){throw 'drift_mutated'}
+$script:extraChild=$false;$script:failIndex=2;$closed=$false;try{Invoke-NpTransaction $candidate $original $root $false|Out-Null}catch{$closed=$true}
+if(-not $closed -or ($trace -join ',') -cne '1,2' -or (Test-Path (Join-Path $root 'namespace-policy-apply-receipt.json'))){throw 'partial_claimed_success'}
+$events=@([IO.File]::ReadAllLines((Join-Path $root 'namespace-policy-apply-journal.jsonl'))|ForEach-Object{$_|ConvertFrom-Json});if($events[0].atomic_tree_change -or $events[-1].event -cne 'namespace_closure_set_intent'){throw 'partial_ancestry_lost'}
+$closed=$false;try{Invoke-NpTransaction $candidate $original $root $false|Out-Null}catch{$closed=$true};if(-not $closed -or $trace.Count -ne 2){throw 'partial_retried'}
+""")
+
     def test_only_one_namespace_set_primitive_and_no_scm_group_or_vm_mutator(self):
         text = SOURCE.read_text()
         self.assertEqual(text.count("InvokeMethod('SetSD'"), 1)

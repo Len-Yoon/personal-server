@@ -23,6 +23,77 @@ class GuestVmTests(unittest.TestCase):
         self.assertEqual(value.returncode,0,value.stderr)
         return value.stdout.strip()
 
+    @staticmethod
+    def derivation_fixture():
+        upstream='04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94'
+        image=dict(filename='node-A.vhdx',sha256='1'*64,bytes=1048576,
+                   disk_identifier='12345678-1234-1234-1234-123456789abc',source_qcow_sha256='4'*64,
+                   conversion_receipt_sha256='2'*64,tool_version='qemu-img version 11.1.3',tool_sha256='3'*64,
+                   derivation_profile='cloud-init-output-preseed-v1',upstream_qcow_sha256=upstream,
+                   derivation_receipt_sha256='6'*64)
+        spec=dict(schema_version=2,source_commit='a'*40,stage_source_commit='e'*40,
+                  seed_source_commit='f'*40,installation_id='b'*64,stage_manifest_sha256='c'*64,
+                  seed_iso_sha256='d'*64,seed_iso_bytes=32768,node='A',mac_address='02123456789A',
+                  optional_egress_nic=False,egress_mac_address='',peer_prepared_receipt_sha256='',
+                  creation_method='verified-node-image-copy-v1',node_image=image)
+        receipt=dict(schema_version=1,format='ha-guest-node-image-derivation-v1',profile=image['derivation_profile'],
+                     source_commit=spec['source_commit'],node='A',upstream_qcow_sha256=upstream,
+                     derived_qcow_sha256=image['source_qcow_sha256'],node_vhdx_sha256=image['sha256'],
+                     node_vhdx_bytes=image['bytes'],node_disk_identifier=image['disk_identifier'],
+                     patch_path='/etc/cloud/cloud.cfg.d/99zz-n100-ha-initial-output.cfg',
+                     patch_sha256='659e515ee99507c6990b06c3a0560a794070514de74a9506e6ee70da20bc77c8',
+                     patch_bytes=61,patch_uid=0,patch_gid=0,patch_mode='0644',filesystem_check_exit=0,
+                     root_partition_offset=1074790400,root_partition_bytes=2683289088,
+                     upstream_unchanged=True,initial_and_userdata_output_match=True,
+                     qemu_img_version=image['tool_version'],qemu_img_sha256=image['tool_sha256'],
+                     utility_image_config_digest='sha256:ded2c932b40c38c99f0b23b9edc29e160e23689db2d92cdbe251b693ca76be1b',
+                     docker_context='colima-codex-ha-fixture',docker_daemon_identity_sha256='7'*64,
+                     debugfs_version='debugfs 1.47.0 (5-Feb-2023)',e2fsck_version='e2fsck 1.47.0 (5-Feb-2023)')
+        return json.dumps(dict(spec=spec,receipt=receipt))
+
+    def test_derived_image_requires_explicit_upstream_chain_and_exact_receipt(self):
+        self.ps(r'''
+$fixture=$env:GUEST_DERIVATION_FIXTURE|ConvertFrom-Json;$good=$fixture.spec;$proof=$fixture.receipt
+$null=Assert-GuestVmSpec $good;Assert-GuestVmImageDerivationReceipt $proof $good
+$raw=[Text.Encoding]::UTF8.GetBytes(($good|ConvertTo-Json -Depth 5 -Compress));$Manifest=[Convert]::ToBase64String($raw);$ManifestSha256=Get-GuestVmHash $raw;$null=Read-GuestVmSpec
+foreach($field in @('derivation_profile','upstream_qcow_sha256','derivation_receipt_sha256')){
+ $bad=($good|ConvertTo-Json -Depth 5 -Compress)|ConvertFrom-Json;$bad.node_image.PSObject.Properties.Remove($field)
+ $closed=$false;try{$null=Assert-GuestVmSpec $bad}catch{$closed=$true};if(-not $closed){throw 'partial_derivation_accepted'}
+}
+foreach($case in @(@('derivation_profile','arbitrary'),@('upstream_qcow_sha256',('9'*64)),@('derivation_receipt_sha256',('0'*64)),@('source_qcow_sha256',$good.node_image.upstream_qcow_sha256))){
+ $bad=($good|ConvertTo-Json -Depth 5 -Compress)|ConvertFrom-Json;$bad.node_image.($case[0])=$case[1]
+ $closed=$false;try{$null=Assert-GuestVmSpec $bad}catch{$closed=$true};if(-not $closed){throw 'untrusted_derived_image_accepted'}
+}
+foreach($case in @(@('source_commit',('9'*40)),@('node','B'),@('upstream_qcow_sha256',('9'*64)),@('derived_qcow_sha256',('9'*64)),@('node_vhdx_sha256',('9'*64)),@('node_vhdx_bytes',1048577),@('node_disk_identifier','99999999-9999-9999-9999-999999999999'),@('patch_path','/etc/other'),@('patch_sha256',('9'*64)),@('patch_bytes',60),@('patch_uid',1),@('patch_mode','0666'),@('filesystem_check_exit',1),@('root_partition_offset',0),@('root_partition_bytes',2683289089),@('upstream_unchanged',$false),@('initial_and_userdata_output_match',$false),@('qemu_img_sha256',('9'*64)),@('utility_image_config_digest',('sha256:'+('9'*64))),@('docker_context','default'),@('docker_daemon_identity_sha256',('0'*64)),@('debugfs_version','unchecked'),@('e2fsck_version','unchecked'),@('schema_version',$true),@('patch_gid',0.0),@('upstream_unchanged','true'))){
+ $bad=($proof|ConvertTo-Json -Compress)|ConvertFrom-Json;$bad.($case[0])=$case[1]
+ $closed=$false;try{Assert-GuestVmImageDerivationReceipt $bad $good}catch{$closed=$true};if(-not $closed){throw 'untrusted_derivation_receipt_accepted'}
+}
+$proof|Add-Member production_deployed $true;$closed=$false;try{Assert-GuestVmImageDerivationReceipt $proof $good}catch{$closed=$true};if(-not $closed){throw 'extra_boot_or_production_claim_accepted'}
+''',GUEST_DERIVATION_FIXTURE=self.derivation_fixture())
+
+    def test_derived_opener_reads_pinned_json_and_rejects_before_image_open(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.ps(r'''
+Initialize-GuestVmNative
+$fixture=$env:GUEST_DERIVATION_FIXTURE|ConvertFrom-Json;$spec=$fixture.spec;$proof=$fixture.receipt;$root=$env:FIXTURE
+$path=Join-Path $root 'node-A.vhdx';[IO.File]::WriteAllBytes($path,[byte[]]::new(1048576));$spec.node_image.sha256=Get-GuestVmHash ([IO.File]::ReadAllBytes($path));$proof.node_vhdx_sha256=$spec.node_image.sha256
+$conversion=Join-Path $root 'node-A-conversion-receipt.json';[IO.File]::WriteAllText($conversion,'{}');$spec.node_image.conversion_receipt_sha256=Get-GuestVmHash ([IO.File]::ReadAllBytes($conversion))
+$receiptPath=Join-Path $root 'node-A-image-derivation.json';$text=$proof|ConvertTo-Json -Compress;[IO.File]::WriteAllText($receiptPath,$text);$spec.node_image.derivation_receipt_sha256=Get-GuestVmHash ([IO.File]::ReadAllBytes($receiptPath))
+$script:imageOpened=$false;function Get-GuestVmFileIdentity([string]$Path){if($Path -eq $script:path){$script:imageOpened=$true};return $Path}
+function Get-VHD([string]$Path){return [pscustomobject]@{VhdFormat='VHDX';VhdType='Dynamic';ParentPath='';Size=25769803776;Attached=$false;DiskIdentifier=$spec.node_image.disk_identifier}}
+$stream=Open-GuestVmNodeImage $root $spec;try{if($stream.Length -ne 1048576){throw 'wrong_image_stream'}}finally{$stream.Dispose()}
+foreach($case in @('missing','hash','content','duplicate')){
+ $script:imageOpened=$false;$goodHash=$spec.node_image.derivation_receipt_sha256
+ if($case -eq 'missing'){[IO.File]::Delete($receiptPath)}
+ elseif($case -eq 'hash'){$spec.node_image.derivation_receipt_sha256='0'*64}
+ else{$bad=$(if($case -eq 'content'){$text.Replace('"patch_mode":"0644"','"patch_mode":"0666"')}else{$text.Replace('"patch_mode":','"patch_mode":"0644","patch_mode":')});[IO.File]::WriteAllText($receiptPath,$bad);$spec.node_image.derivation_receipt_sha256=Get-GuestVmHash ([IO.File]::ReadAllBytes($receiptPath))}
+ $closed=$false;try{$s=Open-GuestVmNodeImage $root $spec;$s.Dispose()}catch{$closed=$true}
+ if(-not $closed -or $script:imageOpened){throw 'bad_receipt_reached_image_open'}
+ [IO.File]::WriteAllText($receiptPath,$text);$spec.node_image.derivation_receipt_sha256=$goodHash
+}
+$exclusive=[IO.File]::Open($receiptPath,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);$exclusive.Dispose()
+''',FIXTURE=folder,GUEST_DERIVATION_FIXTURE=self.derivation_fixture())
+
     def test_ancestor_walk_accepts_raw_clr_parents_without_provider_properties(self):
         with tempfile.TemporaryDirectory() as name:
             path=Path(name)/'child'/'leaf.bin'
@@ -521,7 +592,7 @@ if((Get-GuestVmHash ([IO.File]::ReadAllBytes($journal))) -cne $JournalSha256){th
         self.ps(r'''
 Initialize-GuestVmNative
 +foreach($managed in @($false,$true)){foreach($directory in @($false,$true)){
- if([HaGuestVmSealV1]::ShareMode($managed,$directory) -ne $(if($managed -and -not $directory){7}else{1})){throw 'native_share_mode_mixed'}
+ if([HaGuestVmSealV1]::ShareMode($managed,$directory) -ne $(if($directory){3}elseif($managed){7}else{1})){throw 'native_share_mode_mixed'}
 }}
 foreach($role in @('private','config','disk','seed')){foreach($directory in @($false,$true)){
  $target=[pscustomobject]@{role=$role;directory=$directory}

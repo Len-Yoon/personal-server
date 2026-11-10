@@ -88,6 +88,52 @@ def adapter(replies=()):
 
 
 class EnforcedWindowsTests(unittest.TestCase):
+    def closure(self):
+        names = ['root/virtualization/v2', 'root/virtualization/v2/ms_409', 'root/virtualization/v2/ms_412']
+        return dict(version='direct-children-v1', names=names,
+                    sd_sha256=[hashlib.sha256(bytes([i])).hexdigest() for i in range(3)],
+                    children_sha256=[hashlib.sha256(b'["ms_409","ms_412"]').hexdigest()] + [hashlib.sha256(b'[]').hexdigest()] * 2,
+                    classification_sha256=['8' * 64] * 3)
+
+    def test_namespace_closure_strict_parallel_vectors_and_cross_language_digest(self):
+        value = self.closure()
+        expected = E.namespace_closure_digest(value)
+        encoded = base64.b64encode(json.dumps(value).encode()).decode()
+        self.assertEqual(self.ps(f"$v=Convert-EnforcedJson ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}')));Get-EnforcedNamespaceClosureHash $v").strip(), expected)
+        for field, changed in [('version', 'locale-name-trust'), ('names', value['names'][1:]),
+                               ('names', value['names'] + value['names'][1:2]), ('sd_sha256', ['0' * 64]),
+                               ('children_sha256', ['0' * 64] * 3), ('classification_sha256', [True] * 3)]:
+            bad = deepcopy(value); bad[field] = changed
+            with self.assertRaises(TransitionBlocked): E.namespace_closure_digest(bad)
+        bad = deepcopy(value); bad['names'][1] += '/nested'
+        with self.assertRaises(TransitionBlocked): E.namespace_closure(bad)
+
+    def test_namespace_closure_reads_every_live_sd_and_child_set_each_time_and_legacy_blocks_children(self):
+        encoded = base64.b64encode(json.dumps(self.closure()).encode()).decode()
+        self.assertEqual(self.ps(f"""
+$v=Convert-EnforcedJson ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}')))
+$config.windows_enforced|Add-Member NoteProperty namespace_closure $v;$policy|Add-Member NoteProperty namespace_closure $v
+$script:reads=[Collections.Generic.List[string]]::new();$script:badSd=$false;$script:badChild=$false;$script:legacyEmpty=$false;$script:aclChecks=0
+function Assert-EnforcedNamespaceBytes([byte[]]$Bytes,$Writers){{$script:aclChecks++}} # native SD parser boundary; no ACL acceptance claimed
+function Get-CimInstance($Namespace,$ClassName,$OperationTimeoutSec,$ErrorAction){{
+ $script:reads.Add($Namespace+'|'+$ClassName)
+ if($ClassName -ceq '__NAMESPACE'){{if($script:badChild){{return [pscustomobject]@{{Name='unreviewed'}}}};if($Namespace -ceq 'root/virtualization/v2' -and -not $script:legacyEmpty){{return @([pscustomobject]@{{Name='ms_409'}},[pscustomobject]@{{Name='ms_412'}})}};return @()}}
+ return [pscustomobject]@{{Namespace=$Namespace}}
+}}
+function Invoke-CimMethod($InputObject,$MethodName,$OperationTimeoutSec,$ErrorAction){{
+ if($MethodName -cne 'GetSD'){{throw 'unexpected_method'}};$index=[array]::IndexOf($v.names,$InputObject.Namespace)
+ return [pscustomobject]@{{ReturnValue=0;SD=[byte[]]@($(if($script:badSd){{9}}else{{$index}}))}}
+}}
+Assert-EnforcedNamespaceLive $config $policy @() ([Diagnostics.Stopwatch]::StartNew())
+Assert-EnforcedNamespaceLive $config $policy @() ([Diagnostics.Stopwatch]::StartNew())
+if($script:reads.Count -ne 12 -or $script:aclChecks -ne 6){{throw 'cached_closure_used'}}
+foreach($kind in @('sd','children')){{$script:badSd=($kind -ceq 'sd');$script:badChild=($kind -ceq 'children');$closed=$false;try{{Assert-EnforcedNamespaceLive $config $policy @() ([Diagnostics.Stopwatch]::StartNew())}}catch{{$closed=$true}};if(-not $closed){{throw 'live_drift_accepted'}}}}
+$script:badSd=$false;$script:badChild=$false;$config.windows_enforced.PSObject.Properties.Remove('namespace_closure');$policy.PSObject.Properties.Remove('namespace_closure')
+$closed=$false;try{{Assert-EnforcedNamespaceLive $config $policy @() ([Diagnostics.Stopwatch]::StartNew())}}catch{{$closed=$true}};if(-not $closed){{throw 'legacy_children_accepted'}}
+$script:legacyEmpty=$true;Assert-EnforcedNamespaceLive $config $policy @() ([Diagnostics.Stopwatch]::StartNew())
+'live-closure-closed'
+""").strip(), 'live-closure-closed')
+
     def test_service_control_rights_reject_pause_custom_control_and_generic_execute(self):
         self.assertEqual(self.ps(r'''
 $mask=Get-EnforcedServiceControlMask
