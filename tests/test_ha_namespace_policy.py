@@ -114,6 +114,50 @@ class NamespacePolicyTests(unittest.TestCase):
         value = base64.b64encode(descriptor()).decode()
         self.ps(f"$b=[Convert]::FromBase64String('{value}');foreach($case in @(@('preserve',$false),@('protect-and-materialize-v1',$false),@('unknown',$true))){{$closed=$false;try{{$null=[HaNamespacePolicyCoreV1]::Build($b,'{SERVICE_SID}',$case[0],$case[1],$true,[string[]]@())}}catch{{$closed=$true}};if(-not $closed){{throw 'inheritance_bypass'}}}}")
 
+    def test_native_shape_zero_acl_free_space_is_preserved_without_rights_changes(self):
+        # Observed metadata: SD 180 bytes, DACL at 20, allocated 128 / used 116,
+        # five allow ACEs, owner/group at 148/164, control 32772. No native IO.
+        rows = [ace('S-1-5-32-578', 0x21, 0), ace('S-1-5-32-544', 0x6003F, 0),
+                ace('S-1-5-20', 19, 0), ace('S-1-5-19', 19, 0), ace('S-1-5-11', 19, 0)]
+        dacl = bytearray(acl(rows) + bytes(12))
+        struct.pack_into('<H', dacl, 2, 128)
+        original = struct.pack('<BBHIIII', 1, 0, 32772, 148, 164, 0, 20) + dacl + sid('S-1-5-32-544') * 2
+        self.assertEqual(len(original), 180)
+        target = self.build(original, 'preserve', False)
+        self.assertEqual(target[2:4], original[2:4])
+        self.assertEqual(components(target)[:2], components(original)[:2])
+        self.assertEqual(struct.unpack_from('<I', target, 12)[0], 0)
+        new = aces(target)
+        self.assertEqual(new[:2], rows[:2])
+        for before, after in zip(rows[2:], new[2:5]):
+            expected = bytearray(before)
+            struct.pack_into('<I', expected, 4, 1)
+            self.assertEqual(after, expected)
+        self.assertEqual(new[-1], ace(SERVICE_SID, 0x20003, 0))
+        self.assertEqual(components(target)[3][8 + sum(map(len, new)):], bytes(12))
+
+    def test_acl_free_space_rejects_hidden_data_truncation_counts_alignment_and_overlap(self):
+        original = descriptor()
+        offset = struct.unpack_from('<I', original, 16)[0]
+        allocated = len(original) - offset
+        padded = bytearray(original + bytes(12))
+        struct.pack_into('<H', padded, offset + 2, allocated + 12)
+        # Also exercise preservation of the unchanged SACL/owner/group.
+        target = self.build(bytes(padded))
+        self.assertEqual(components(target)[:3], components(original)[:3])
+        invalid = []
+        for position in range(12):
+            bad = bytearray(padded); bad[-12 + position] = 1; invalid.append(bytes(bad))
+        for field, value in ((2, allocated + 16), (2, allocated + 11), (4, 129), (4, 7), (4, 5)):
+            bad = bytearray(padded); struct.pack_into('<H', bad, offset + field, value); invalid.append(bytes(bad))
+        bad = bytearray(padded); struct.pack_into('<H', bad, offset + 10, 65532); invalid.append(bytes(bad))
+        bad = bytearray(padded); struct.pack_into('<I', bad, 4, offset + 8); invalid.append(bytes(bad))
+        bad = bytearray(padded); struct.pack_into('<I', bad, offset + 8 + 4, 2); invalid.append(bytes(bad))
+        # Owner and rights checks must remain active even with valid zero padding.
+        bad = bytearray(padded); owner = struct.unpack_from('<I', bad, 4)[0]; struct.pack_into('<I', bad, owner + 12, 545); invalid.append(bytes(bad))
+        values = ','.join("'" + base64.b64encode(x).decode() + "'" for x in invalid)
+        self.ps(f"foreach($v in @({values})){{$closed=$false;try{{$null=[HaNamespacePolicyCoreV1]::Build([Convert]::FromBase64String($v),'{SERVICE_SID}','protect-and-materialize-v1',$true,$true,[string[]]@())}}catch{{$closed=$true}};if(-not $closed){{throw 'malformed_acl_free_space_accepted'}}}}")
+
     def test_preserve_explicit_target_aces_does_not_change_other_flags(self):
         rows = aces(descriptor())
         rows = [row[:1] + bytes([row[1] & ~16]) + row[2:] if index >= 3 else row for index, row in enumerate(rows)]
