@@ -68,6 +68,15 @@ $denial=$nativeFrame.PSObject.Copy();$denial.complete=$true;$denial.authorized=$
 Assert-ProbeResultShape $denial
 $terminal=$nativeFrame.PSObject.Copy();$terminal.complete=$true;$terminal.authorized=$false;$terminal.authorization_denied=$true;$terminal.return_code=2147749891;$terminal.native_call_status=2147749891;$terminal.native_result_hresult=4294967295;$terminal.native_output_verified=$false
 Assert-ProbeResultShape $terminal
+# Status 1 is only a permission to inspect this call's typed output.
+$falseStatus=$nativeFrame.PSObject.Copy();$falseStatus.native_call_status=1
+Assert-ProbeResultShape $falseStatus
+$typedDenied=$falseStatus.PSObject.Copy();$typedDenied.authorized=$false;$typedDenied.authorization_denied=$true;$typedDenied.complete=$true;$typedDenied.return_code=32769
+Assert-ProbeResultShape $typedDenied
+foreach($row in @(@('native_output_verified',$false),@('native_result_hresult',2147942405),@('native_call_status',2),@('return_code',1))){
+ $bad=$typedDenied.PSObject.Copy();$bad.($row[0])=$row[1]
+ $blocked=$false;try{Assert-ProbeResultShape $bad}catch{$blocked=$true};if(-not $blocked){throw 'informational_status_or_untyped_output_became_denial'}
+}
 $bad=$terminal.PSObject.Copy();$bad.native_call_status_hresult=2147749891
 $blocked=$false;try{Assert-ProbeResultShape $bad}catch{$blocked=$true}
 if(-not $blocked){throw 'poll_api_hresult_misclassified_as_exec_status'}
@@ -92,6 +101,28 @@ foreach($field in @('settings_serialized_value_present','settings_readback_verif
 $copy=$nativeFrame.PSObject.Copy();$copy|Add-Member NoteProperty extra 'untrusted'
 $blocked=$false;try{Assert-ProbeResultShape $copy}catch{$blocked=$true}
 if(-not $blocked){throw 'unbounded_diagnostic_fields_accepted'}
+# Even a valid typed status-1 output zero is not a negative-role pass.
+$zero=$falseStatus.PSObject.Copy();$zero.operation='power_off';$zero.complete=$true
+$blocked=$false;try{Assert-ProbeOperationAuthority $zero 'false' 'power_off'}catch{$blocked=$true}
+if(-not $blocked){throw 'negative_success_bypassed_role_boundary'}
+Assert-ProbeOperationAuthority $zero 'true' 'power_off'
+$deniedPower=$typedDenied.PSObject.Copy();$deniedPower.operation='power_off'
+Assert-ProbeOperationAuthority $deniedPower 'false' 'power_off'
+$receiptRoot=Join-Path ([IO.Path]::GetTempPath()) ('provider-pure-receipts-'+[Guid]::NewGuid().ToString('N'))
+$null=[IO.Directory]::CreateDirectory($receiptRoot)
+try{
+ $on1=Get-ProbeReceiptName 'true' 'power_on' 1;$on2=Get-ProbeReceiptName 'true' 'power_on' 3
+ if($on1 -ceq $on2){throw 'planned_repeat_receipt_collapsed'}
+ $first=Join-Path $receiptRoot $on1;$second=Join-Path $receiptRoot $on2
+ Write-ProbeOperationReceipt $first ([ordered]@{return_code=0;stage=1})
+ $before=[IO.File]::ReadAllBytes($first)
+ Write-ProbeOperationReceipt $second ([ordered]@{return_code=0;stage=3})
+ $blocked=$false;try{Write-ProbeOperationReceipt $first ([ordered]@{return_code=32769;stage=99})}catch{$blocked=$true}
+ if(-not $blocked -or [Convert]::ToBase64String($before) -cne [Convert]::ToBase64String([IO.File]::ReadAllBytes($first))){throw 'duplicate_receipt_overwrote_original'}
+ foreach($row in @(@('true','power_on',2),@('false','power_off',7),@('true','settings',8),@('false','power_on',0),@('true','unknown',1))){
+  $blocked=$false;try{Get-ProbeReceiptName $row[0] $row[1] $row[2]|Out-Null}catch{$blocked=$true};if(-not $blocked){throw 'unplanned_role_operation_accepted'}
+ }
+}finally{[IO.Directory]::Delete($receiptRoot,$true)}
 $names=@(Get-ProbeServiceNames ('0123456789abcdef'+'fedcba9876543210'+('a'*32)))
 if($names.Count -ne 2 -or $names[0] -cne 'HaProbe_0123456789abcdef' -or $names[1] -cne 'HaProbe_fedcba9876543210'){throw 'service_names_collapsed'}
 $blocked=$false;try{Get-ProbeServiceNames ('a'*64)|Out-Null}catch{$blocked=$true}
@@ -192,6 +223,25 @@ foreach($row in @(@('PollHresult',[uint32]262148),@('CallProxyHresult',[uint32]2
  $copy=[HaProviderProbeV1.ExecEvidence]::new();foreach($f in $ok.GetType().GetFields()){if($f.Name -ne 'Job'){$f.SetValue($copy,$f.GetValue($ok))}};$copy.($row[0])=$row[1]
  if($copy.Denied() -or $copy.Verified()){throw 'timeout_proxy_or_output_error_granted_authority'}
 }
+foreach($status in @([uint32]0,[uint32]1)){
+ $trace=[HaProviderProbeV1.ExecEvidence]::new();foreach($f in $ok.GetType().GetFields()){if($f.Name -ne 'Job'){$f.SetValue($trace,$f.GetValue($ok))}};$trace.Status=$status
+ $trace.OutputVerified=$false;$trace.ReturnValue=32769
+ if($trace.Verified() -or $trace.Denied() -or $trace.Code() -ne [uint32]::MaxValue){throw 'terminal_status_without_output_granted_authority'}
+ $trace.OutputVerified=$true
+ if(-not $trace.Verified() -or -not $trace.Denied() -or $trace.Code() -ne 32769){throw 'typed_output_denial_lost_or_status_used_as_code'}
+ $trace.ReturnValue=0
+ if(-not $trace.Verified() -or $trace.Denied() -or $trace.Code() -ne 0){throw 'typed_output_zero_lost'}
+}
+foreach($status in @([uint32]2,[uint32]3,[uint32]262148)){
+ $trace=[HaProviderProbeV1.ExecEvidence]::new();foreach($f in $ok.GetType().GetFields()){if($f.Name -ne 'Job'){$f.SetValue($trace,$f.GetValue($ok))}};$trace.Status=$status
+ if([HaProviderProbeV1.ExecEvidence]::OutputStatus($status) -or $trace.Verified() -or $trace.Denied()){throw 'other_informational_status_granted_authority'}
+}
+$typed=[uint32]0
+foreach($value in @('32769',[long]32769,[double]32769,$null,$true)){
+ if([HaProviderProbeV1.ExecEvidence]::TryReturnValue($value,19,[ref]$typed)){throw 'malformed_variant_accepted'}
+}
+if([HaProviderProbeV1.ExecEvidence]::TryReturnValue([int]32769,8,[ref]$typed)){throw 'wrong_cim_type_accepted'}
+if(-not [HaProviderProbeV1.ExecEvidence]::TryReturnValue([int]32769,19,[ref]$typed) -or $typed -ne 32769){throw 'typed_cim_uint32_rejected'}
 if($cfg.Descriptor.VerifyPayload($payload,$cfg.Marker()) -cne [Text.Encoding]::UTF8.GetString($payload)){throw 'payload_not_exact'}
 foreach($bad in @([Text.Encoding]::UTF8.GetBytes('changed'),($payload+[byte]0))){
  $blocked=$false;try{$cfg.Descriptor.VerifyPayload($bad,$cfg.Marker())|Out-Null}catch{$blocked=$true}
@@ -291,11 +341,20 @@ foreach($bad in @($text.Replace('operation=settings','operation=shell'),$text.Re
         self.assertIn('Test-ProbeFixedMemory (Get-VMMemory -VM $vm)',creation)
 
         operations=parent[parent.index('$positive=$fixtures[1]'):parent.index('$complete=$true')]
-        expected=["'positive_power_on'","'positive_settings'","'negative_settings'","'negative_power_off'","'positive_power_off'"]
+        expected=["'positive_power_on'","'positive_control_power_off'","'positive_control_power_on'","'positive_settings'","'negative_settings'","'negative_power_off'","'positive_power_off'"]
         offsets=[operations.index(item) for item in expected]
         self.assertEqual(offsets,sorted(offsets))
-        self.assertGreater(operations.index('New-ProbeTargetDescriptor'),offsets[0])
-        self.assertLess(operations.index('New-ProbeTargetDescriptor'),offsets[1])
+        self.assertGreater(operations.index('New-ProbeTargetDescriptor'),offsets[2])
+        self.assertLess(operations.index('New-ProbeTargetDescriptor'),offsets[3])
+        calls=["Invoke-ProbeOperation $positive 'power_on' 1","Invoke-ProbeOperation $positive 'power_off' 2","Invoke-ProbeOperation $positive 'power_on' 3","Invoke-ProbeOperation $positive 'settings' 4","Invoke-ProbeOperation $negative 'settings' 5","Invoke-ProbeOperation $negative 'power_off' 6","Invoke-ProbeOperation $positive 'power_off' 7"]
+        self.assertEqual([operations.index(x) for x in calls],sorted(operations.index(x) for x in calls))
+        cycle=operations[offsets[1]:operations.index('New-ProbeTargetDescriptor')]
+        self.assertIn("(Test-ProbeTarget).State -ne 'Off'",cycle)
+        self.assertIn("(Test-ProbeTarget).State -ne 'Running'",cycle)
+        invoke=parent[parent.index('function Invoke-ProbeOperation'):parent.index('function Test-ProbeTarget')]
+        self.assertLess(invoke.index('if(Test-Path -LiteralPath $saved)'),invoke.index('Start-Service'))
+        self.assertLess(invoke.index('Write-ProbeOperationReceipt $saved $result'),invoke.rindex('$script:pendingOperation=$false'))
+        self.assertIn('Assert-ProbeOperationAuthority $result $Fixture.role $Operation',invoke)
         self.assertEqual(parent.count('GetText([Management.TextFormat]::WmiDtd20)'),1)
         self.assertIn('-not (Test-ProbeCurrentSettingsExact $fresh $true) -or $vm.Notes -cne',parent)
         self.assertIn('Test-ProbeCurrentSettingsExact $reset $false',parent)
