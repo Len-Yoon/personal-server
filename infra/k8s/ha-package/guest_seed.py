@@ -28,6 +28,7 @@ ROOT = LOCAL.parents[3] if len(LOCAL.parents)>3 else Path('/')
 HEX = re.compile(r'[0-9a-f]{64}\Z')
 COMMIT = re.compile(r'[0-9a-f]{40}\Z')
 SERIAL_PREFIX = 'N100_HA_SEED_RECEIPT '
+OUTPUT_SINK = '> /dev/null'
 GUEST_ROOT = Path('/var/lib/n100-ha-seed')
 GUEST_CONFIG = Path('/etc/n100-ha-seed/config.json')
 GUEST_BUNDLE = Path('/opt/n100-ha-seed/bundle')
@@ -44,6 +45,15 @@ def need(value,reason='guest_seed_invalid'):
 
 def encode(value):
     return (json.dumps(value,sort_keys=True,indent=2)+'\n').encode()
+
+
+def cloud_output_config():
+    return {'all': OUTPUT_SINK}
+
+
+def early_config_bytes():
+    """System config and NoCloud user-data must select the same private sink."""
+    return b'#cloud-config\n'+encode({'output': cloud_output_config()})
 
 
 def sha(path):
@@ -251,7 +261,7 @@ def render(value,key,source,os_hash):
         'disable_root':False,'ssh_pwauth':False,'ssh_deletekeys':False,'ssh_genkeytypes':['ed25519'],
         'ssh_quiet_keygen':True,'no_ssh_fingerprints':True,'ssh_publish_hostkeys':{'enabled':False},
         'package_update':False,'package_upgrade':False,'package_reboot_if_required':False,
-        'output':{'all':'> /dev/null'},'write_files':files,
+        'output':cloud_output_config(),'write_files':files,
         'runcmd':[['systemctl','daemon-reload'],['systemctl','enable','n100-ha-seed.service'],
                   ['systemctl','start','--no-block','n100-ha-seed.service']],
         'final_message':'HA seed cloud-init stage finished; guest acceptance is separate.'}
