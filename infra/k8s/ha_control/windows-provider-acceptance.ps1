@@ -23,26 +23,26 @@ function Test-ProbeServiceImagePath([string]$Actual,[string]$Expected){
 function Test-ProbeNoOperation($Result,[string]$Operation,[bool]$ExpectedHyperv){
     if($Result.scope -isnot [string] -or $Result.operation -isnot [string] -or $Result.stage -isnot [string] -or
         ($Result.schema_version -isnot [int] -and $Result.schema_version -isnot [long]) -or
-        $Result.scope -cne 'owned_vm_provider_role_probe' -or $Result.schema_version -ne 5 -or $Result.operation -cne $Operation){return $false}
+        $Result.scope -cne 'owned_vm_provider_role_probe' -or $Result.schema_version -ne 6 -or $Result.operation -cne $Operation){return $false}
     foreach($field in @('attempted','complete','authorized','authorization_denied','administrator','hyperv_role')){if($Result.$field -isnot [bool]){return $false}}
     return (-not $Result.attempted -and -not $Result.complete -and -not $Result.authorized -and -not $Result.authorization_denied -and
         -not $Result.administrator -and $Result.hyperv_role -eq $ExpectedHyperv -and $Result.stage -cin @('identity','input_validation','schema_query','valid_operation'))
 }
 function Assert-ProbeResultShape($Result){
-    $keys=@('schema_version','scope','process_id','process_start_ticks','operation','stage','attempted','complete','authorized','authorization_denied','return_code','administrator','hyperv_role','settings_serialized_value_present','settings_readback_verified','native_target_paths_bound','method_result_verified','target_descriptor_sha256','settings_payload_sha256','settings_current_path_sha256','settings_current_instance_sha256','settings_current_association_verified','exception_kind','exception_scope','exception_hresult','native_proxy_security_verified','native_exec_returned','native_exec_hresult','native_call_status_hresult','native_call_status_terminal','native_call_status','native_result_hresult','native_output_verified','native_call_result_present','native_call_proxy_hresult')
+    $keys=@('schema_version','scope','process_id','process_start_ticks','operation','stage','attempted','complete','authorized','authorization_denied','return_code','administrator','hyperv_role','settings_serialized_value_present','settings_readback_verified','native_target_paths_bound','method_result_verified','target_descriptor_sha256','settings_payload_sha256','settings_current_path_sha256','settings_current_instance_sha256','settings_current_association_verified','exception_kind','exception_scope','exception_hresult','native_proxy_security_verified','native_exec_returned','native_exec_hresult','native_call_status_hresult','native_call_status_terminal','native_call_status','native_result_hresult','native_output_verified','native_call_result_present','native_call_proxy_hresult','call_mode','call_result_applicability','native_output_present','method_return_value','job_completion_verified','job_path_sha256','job_state','job_error_code')
     if((($Result.PSObject.Properties.Name|Sort-Object -CaseSensitive)-join ',') -cne (($keys|Sort-Object -CaseSensitive)-join ',')){throw 'fixture_result_unverified'}
-    foreach($field in @('attempted','complete','authorized','authorization_denied','administrator','hyperv_role','settings_serialized_value_present','settings_readback_verified','native_target_paths_bound','method_result_verified','settings_current_association_verified','native_proxy_security_verified','native_exec_returned','native_call_status_terminal','native_output_verified','native_call_result_present')){
+    foreach($field in @('attempted','complete','authorized','authorization_denied','administrator','hyperv_role','settings_serialized_value_present','settings_readback_verified','native_target_paths_bound','method_result_verified','settings_current_association_verified','native_proxy_security_verified','native_exec_returned','native_output_verified','native_output_present','job_completion_verified')){
         if($Result.$field -isnot [bool]){throw 'fixture_result_unverified'}
     }
     foreach($field in @('target_descriptor_sha256','settings_payload_sha256')){
         if($Result.$field -isnot [string] -or ($Result.operation -ceq 'settings' -and $Result.$field -cnotmatch '^[0-9a-f]{64}$') -or ($Result.operation -cne 'settings' -and $Result.$field -cne '')){throw 'fixture_result_unverified'}
     }
     foreach($field in @('settings_current_path_sha256','settings_current_instance_sha256')){if($Result.$field -isnot [string] -or ($Result.$field -cne '' -and $Result.$field -cnotmatch '^[0-9a-f]{64}$') -or ($Result.operation -cne 'settings' -and $Result.$field -cne '')){throw 'fixture_result_unverified'}}
-    foreach($field in @('schema_version','process_id','return_code','exception_hresult','native_exec_hresult','native_call_status_hresult','native_call_status','native_result_hresult','native_call_proxy_hresult')){
+    foreach($field in @('schema_version','process_id','return_code','exception_hresult','native_exec_hresult','native_result_hresult')){
         if($Result.$field -isnot [int] -and $Result.$field -isnot [long]){throw 'fixture_result_unverified'}
     }
-    foreach($field in @('native_exec_hresult','native_call_status_hresult','native_call_status','native_result_hresult','native_call_proxy_hresult')){if($Result.$field -lt 0 -or $Result.$field -gt [uint32]::MaxValue){throw 'fixture_result_unverified'}}
-    if($Result.schema_version -ne 5 -or $Result.process_id -le 0 -or $Result.process_id -gt [int]::MaxValue -or
+    foreach($field in @('native_exec_hresult','native_result_hresult')){if($Result.$field -lt 0 -or $Result.$field -gt [uint32]::MaxValue){throw 'fixture_result_unverified'}}
+    if($Result.schema_version -ne 6 -or $Result.process_id -le 0 -or $Result.process_id -gt [int]::MaxValue -or
         $Result.return_code -lt 0 -or $Result.return_code -gt [uint32]::MaxValue -or
         $Result.exception_hresult -lt 0 -or $Result.exception_hresult -gt [uint32]::MaxValue -or
         $Result.exception_kind -isnot [string] -or $Result.exception_kind -cnotin @('none','management','com','unauthorized_access','other') -or
@@ -56,17 +56,34 @@ function Assert-ProbeResultShape($Result){
         ($Result.exception_scope -ceq 'invoke' -and (-not $Result.attempted -or $Result.stage -cne 'valid_operation')) -or
         ($Result.exception_scope -ceq 'outside_invoke' -and ($Result.complete -or $Result.authorization_denied)) -or
         ($Result.authorization_denied -and (-not $Result.attempted -or -not $Result.method_result_verified -or $Result.return_code -notin @(32769,2147749891,2147942405)))){throw 'fixture_result_unverified'}
+    if($Result.call_mode -isnot [string] -or $Result.call_mode -cne 'synchronous' -or $Result.call_result_applicability -isnot [string] -or $Result.call_result_applicability -cne 'not_used'){throw 'fixture_result_unverified'}
+    foreach($field in @('native_call_status_hresult','native_call_status_terminal','native_call_status','native_call_result_present','native_call_proxy_hresult')){if($null -ne $Result.$field){throw 'fixture_result_unverified'}}
+    foreach($field in @('method_return_value','job_state','job_error_code')){
+        if($null -ne $Result.$field -and (($Result.$field -isnot [int] -and $Result.$field -isnot [long]) -or $Result.$field -lt 0 -or $Result.$field -gt [uint32]::MaxValue)){throw 'fixture_result_unverified'}
+    }
+    foreach($field in @('job_state','job_error_code')){if($null -ne $Result.$field -and $Result.$field -gt [uint16]::MaxValue){throw 'fixture_result_unverified'}}
+    if($Result.job_path_sha256 -isnot [string] -or ($Result.job_path_sha256 -cne '' -and $Result.job_path_sha256 -cnotmatch '^[0-9a-f]{64}$')){throw 'fixture_result_unverified'}
     if(($Result.exception_scope -cne 'none' -and ($Result.complete -or $Result.authorized -or $Result.authorization_denied)) -or
-        ($Result.native_exec_returned -and (-not $Result.attempted -or -not $Result.native_proxy_security_verified)) -or
-        ($Result.native_call_status_terminal -and (-not $Result.native_exec_returned -or $Result.native_exec_hresult -ne 0 -or $Result.native_call_status_hresult -ne 0 -or -not $Result.native_call_result_present -or $Result.native_call_proxy_hresult -ne 0))){throw 'fixture_result_unverified'}
+        ($Result.native_exec_returned -and (-not $Result.attempted -or -not $Result.native_proxy_security_verified))){throw 'fixture_result_unverified'}
     $nativeOutput=($Result.attempted -and $Result.native_exec_returned -and $Result.native_proxy_security_verified -and
-        $Result.native_exec_hresult -eq 0 -and $Result.native_call_status_terminal -and $Result.native_call_status_hresult -eq 0 -and
-        $Result.native_call_status -in @(0,1) -and $Result.native_result_hresult -eq 0 -and $Result.native_output_verified)
-    $nativeDenial=($Result.attempted -and $Result.native_exec_returned -and $Result.native_proxy_security_verified -and
-        ($Result.native_exec_hresult -in @(2147749891,2147942405) -or
-         ($Result.native_exec_hresult -eq 0 -and $Result.native_call_status_terminal -and $Result.native_call_status_hresult -eq 0 -and $Result.native_call_status -in @(2147749891,2147942405)) -or
-         ($nativeOutput -and $Result.return_code -in @(32769,2147749891,2147942405))))
-    if(($Result.authorized -and -not $nativeOutput) -or ($Result.authorization_denied -and -not $nativeDenial)){throw 'fixture_result_unverified'}
+        $Result.native_exec_hresult -eq 0 -and $Result.native_output_present -and $Result.native_result_hresult -eq 0 -and $Result.native_output_verified -and $null -ne $Result.method_return_value)
+    $nativeFailure=($Result.attempted -and $Result.native_exec_returned -and $Result.native_proxy_security_verified -and $Result.native_exec_hresult -ge 2147483648)
+    if($Result.method_result_verified -ne ($nativeOutput -or $nativeFailure) -or
+        ($Result.native_output_verified -and -not $nativeOutput) -or
+        (-not $Result.native_output_verified -and $null -ne $Result.method_return_value)){throw 'fixture_result_unverified'}
+    if($Result.method_return_value -eq 4096){
+        if($Result.job_completion_verified -and ($Result.job_path_sha256 -ceq '' -or $Result.job_state -ne 7 -or $Result.job_error_code -ne 0)){throw 'fixture_result_unverified'}
+    }elseif($Result.job_completion_verified -or $Result.job_path_sha256 -cne '' -or $null -ne $Result.job_state -or $null -ne $Result.job_error_code){throw 'fixture_result_unverified'}
+    $nativeDenial=($nativeFailure -and $Result.native_exec_hresult -in @(2147749891,2147942405)) -or
+        ($nativeOutput -and $Result.method_return_value -in @(32769,2147749891,2147942405))
+    $nativeSuccess=$nativeOutput -and ($Result.method_return_value -eq 0 -or ($Result.method_return_value -eq 4096 -and $Result.job_completion_verified))
+    if(($Result.authorized -and (-not $nativeSuccess -or $Result.return_code -ne 0)) -or
+        ($Result.authorization_denied -and (-not $nativeDenial -or $Result.return_code -notin @(32769,2147749891,2147942405))) -or
+        ($Result.complete -and -not ($Result.authorized -or $Result.authorization_denied))){throw 'fixture_result_unverified'}
+    if($Result.exception_scope -ceq 'none'){
+        $expectedCode=if($nativeFailure){$Result.native_exec_hresult}elseif($nativeOutput -and $Result.method_return_value -ne 4096){$Result.method_return_value}elseif($nativeSuccess){0}else{[uint32]::MaxValue}
+        if($Result.return_code -ne $expectedCode){throw 'fixture_result_unverified'}
+    }
 }
 function Test-ProbeFixedMemory($Memory){
     if($null -eq $Memory -or $null -eq $Memory.PSObject.Properties['Startup'] -or $null -eq $Memory.PSObject.Properties['DynamicMemoryEnabled']){return $false}
@@ -85,7 +102,7 @@ function Test-ProbeDisconnectedNic($Nic){
 function Get-ProbeFailureReason([string]$Message){
     $codes=@('fixture_path_exists','fixture_service_operation_failed','fixture_namespace_read_failed',
         'fixture_process_unverified','fixture_process_exit_unverified','fixture_service_not_stopped','fixture_result_exists',
-        'fixture_service_timeout','fixture_service_incomplete','fixture_result_unverified','positive_control_failed',
+        'fixture_service_timeout','fixture_service_incomplete','fixture_result_unverified','fixture_state_observation_unverified','positive_control_failed',
         'provider_role_bypass','fixture_vm_ownership_changed','native_fixture_intent_required','trusted_admin_required',
         'fixture_artifact_pin_failed','fixture_memory_reserve_failed','fixture_memory_bound_unverified','fixture_parent_reparse','fixture_service_collision',
         'fixture_service_sid_mismatch','positive_settings_not_applied','positive_power_not_applied',
@@ -157,6 +174,43 @@ function Assert-ProbeOperationAuthority($Result,[string]$Role,[string]$Operation
         if($Operation -ceq 'settings' -and (-not $Result.settings_serialized_value_present -or -not $Result.settings_readback_verified -or -not $Result.settings_current_association_verified -or $Result.settings_current_path_sha256 -cne $script:settingsTargetPathSha256 -or $Result.settings_current_instance_sha256 -cne $script:settingsInstanceSha256)){throw 'positive_control_failed'}
     }elseif($Result.authorization_denied -ne $true -or $Result.authorized -ne $false){throw 'provider_role_bypass'}
 }
+function Test-ProbeStateAgreement($Observation,[string]$VmId,[string]$Expected){
+    if($Expected -cnotin @('Running','Off') -or $Observation.vm_id -isnot [string] -or $Observation.vm_id -cne $VmId -or
+        $Observation.identity_verified -isnot [bool] -or -not $Observation.identity_verified -or $Observation.hyperv_state -isnot [string] -or
+        ($Observation.cim_enabled_state -isnot [int] -and $Observation.cim_enabled_state -isnot [long] -and $Observation.cim_enabled_state -isnot [uint16])){return $false}
+    return ($Observation.hyperv_state -ceq $Expected -and $Observation.cim_enabled_state -eq $(if($Expected -ceq 'Running'){2}else{3}))
+}
+function Get-ProbeObservationTicks($Observation,[string]$Field){
+    $value=$Observation.$Field
+    if($value -isnot [string] -or $value -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$'){throw 'fixture_state_observation_unverified'}
+    return [DateTime]::ParseExact($value,'o',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind).Ticks
+}
+function Get-ProbeStateObservation {
+    $started=[DateTime]::UtcNow.ToString('o');$vm=Test-ProbeTarget $true
+    $items=@(Get-CimInstance -Namespace 'root/virtualization/v2' -ClassName Msvm_ComputerSystem -Filter ("Name='"+$script:vmId+"'") -OperationTimeoutSec 2 -ErrorAction Stop)
+    if($items.Count -ne 1 -or [string]$items[0].Name -cne $script:vmId -or [string]$items[0].CreationClassName -cne 'Msvm_ComputerSystem' -or
+        [string]$items[0].ElementName -cne $script:vmName -or
+        ($items[0].EnabledState -isnot [uint16] -and $items[0].EnabledState -isnot [int] -and $items[0].EnabledState -isnot [long])){throw 'fixture_state_observation_unverified'}
+    $state=[string]$vm.State;if($state -cnotin @('Off','Running','Starting','Stopping','Paused','Pausing','Resuming','Saved','Saving')){$state='Other'}
+    return [pscustomobject][ordered]@{vm_id=$script:vmId;observed_start_utc=$started;observed_end_utc=[DateTime]::UtcNow.ToString('o');hyperv_state=$state;cim_enabled_state=[int]$items[0].EnabledState;identity_verified=$true}
+}
+function Wait-ProbeStateEvidence($Evidence,[string]$Expected){
+    # Observation only: never reissue ExecMethod. These sample/time budgets do
+    # not cancel an in-flight RPC. The outer process deadline is also not cancellation.
+    $clock=[Diagnostics.Stopwatch]::StartNew();$consecutive=0;$lastEnd=Get-ProbeObservationTicks $Evidence.before 'observed_end_utc'
+    $requested=[DateTime]::ParseExact($Evidence.call_requested_utc,'o',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind).Ticks
+    $exited=[DateTime]::ParseExact($Evidence.process_exit_observed_utc,'o',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind).Ticks
+    if($lastEnd -lt (Get-ProbeObservationTicks $Evidence.before 'observed_start_utc') -or $requested -lt $lastEnd -or $exited -lt $requested){throw 'fixture_state_observation_unverified'}
+    for($i=0;$i -lt 8 -and $clock.ElapsedMilliseconds -lt 6000;$i++){
+        $sample=Get-ProbeStateObservation;$Evidence.after.Add($sample)
+        $start=Get-ProbeObservationTicks $sample 'observed_start_utc';$end=Get-ProbeObservationTicks $sample 'observed_end_utc'
+        if($start -lt $lastEnd -or $start -lt $exited -or $end -lt $start){throw 'fixture_state_observation_unverified'};$lastEnd=$end
+        if(Test-ProbeStateAgreement $sample $script:vmId $Expected){$consecutive++}else{$consecutive=0}
+        if($consecutive -ge 2){$Evidence.verified=$true;return}
+        Start-Sleep -Milliseconds 200
+    }
+    throw 'fixture_state_observation_unverified'
+}
 function Invoke-ProbeOperation($Fixture,[string]$Operation,[int]$Sequence){
     $saved=Join-Path $script:root (Get-ProbeReceiptName $Fixture.role $Operation $Sequence)
     if(Test-Path -LiteralPath $saved){throw 'fixture_result_exists'}
@@ -165,13 +219,20 @@ function Invoke-ProbeOperation($Fixture,[string]$Operation,[int]$Sequence){
     if($service.Status -ne 'Stopped'){throw 'fixture_service_not_stopped'}
     $output=Join-Path $Fixture.root 'result\probe.json'
     if(Test-Path -LiteralPath $output){throw 'fixture_result_exists'}
+    $before=Get-ProbeStateObservation
+    $requiredBefore=if($Operation -ceq 'power_on'){'Off'}else{'Running'}
+    if(-not (Test-ProbeStateAgreement $before $script:vmId $requiredBefore) -or (Get-ProbeObservationTicks $before 'observed_end_utc') -lt (Get-ProbeObservationTicks $before 'observed_start_utc')){throw 'fixture_state_observation_unverified'}
     $descriptor=if($Operation -ceq 'settings'){$script:targetDescriptorB64}else{''}
     $descriptorSha=if($Operation -ceq 'settings'){$script:targetDescriptorSha256}else{''}
     $payloadSha=if($Operation -ceq 'settings'){$script:settingsPayloadSha256}else{''}
-    $text="format=ha-provider-probe-v5`nservice_name=$($Fixture.name)`nservice_sid=$($Fixture.sid)`ninstallation_id=$script:installation`nvm_id=$script:vmId`noperation=$Operation`nexpected_hyperv_role=$($Fixture.role)`ntarget_descriptor_b64=$descriptor`ntarget_descriptor_sha256=$descriptorSha`n"
+    $text="format=ha-provider-probe-v6`nservice_name=$($Fixture.name)`nservice_sid=$($Fixture.sid)`ninstallation_id=$script:installation`nvm_id=$script:vmId`noperation=$Operation`nexpected_hyperv_role=$($Fixture.role)`ntarget_descriptor_b64=$descriptor`ntarget_descriptor_sha256=$descriptorSha`n"
     [IO.File]::WriteAllText((Join-Path $Fixture.root 'probe.args'),$text,[Text.UTF8Encoding]::new($false))
     # A fast one-shot may already have stopped when StartService returns. Do
     # not repeat it: reconcile the pinned service state and its exact result.
+    $callStarted=[DateTime]::UtcNow.ToString('o')
+    $evidence=[ordered]@{sequence=$Sequence;operation=$Operation;role=$Fixture.role;before=$before;call_requested_utc=$callStarted;process_exit_observed_utc=$null;
+        after=[Collections.Generic.List[object]]::new();verified=$false;method_reinvoked=$false;sample_limit=8;poll_budget_milliseconds=6000;rpc_hard_deadline=$false;process_exit_cancels_provider_work=$false}
+    $script:stateObservations+=@($evidence)
     $script:pendingOperation=$true
     try{Start-Service -Name $Fixture.name}catch{}
     $watch=[Diagnostics.Stopwatch]::StartNew()
@@ -190,6 +251,8 @@ function Invoke-ProbeOperation($Fixture,[string]$Operation,[int]$Sequence){
     $result=[IO.File]::ReadAllText($output)|ConvertFrom-Json
     Add-ProbeProcess $Fixture $result.process_id $result.process_start_ticks
     Wait-ProbeProcesses $Fixture
+    $exitObserved=[DateTime]::UtcNow.ToString('o')
+    $evidence.process_exit_observed_utc=$exitObserved
     Assert-ProbeResultShape $result
     if($result.target_descriptor_sha256 -cne $descriptorSha -or $result.settings_payload_sha256 -cne $payloadSha){throw 'fixture_result_unverified'}
     # Preserve an exact-source failed query's diagnostic after its process has
@@ -202,21 +265,24 @@ function Invoke-ProbeOperation($Fixture,[string]$Operation,[int]$Sequence){
         }
         throw 'fixture_service_incomplete'
     }
-    if($result.scope -cne 'owned_vm_provider_role_probe' -or $result.schema_version -ne 5 -or
+    if($result.scope -cne 'owned_vm_provider_role_probe' -or $result.schema_version -ne 6 -or
         $result.operation -cne $Operation -or $result.attempted -ne $true -or $result.complete -ne $true -or
         $result.administrator -ne $false -or $result.hyperv_role -ne ($Fixture.role -ceq 'true') -or
         -not $result.native_target_paths_bound -or -not $result.method_result_verified){throw 'fixture_result_unverified'}
     Assert-ProbeOperationAuthority $result $Fixture.role $Operation
+    $expectedAfter=if($Fixture.role -ceq 'false' -or $Operation -ceq 'settings' -or $Operation -ceq 'power_on'){'Running'}else{'Off'}
+    Wait-ProbeStateEvidence $evidence $expectedAfter
     # Preserve each planned result once; an unknown/failed operation keeps the
     # pending barrier and cannot be retried or treated as safe cleanup.
-    Write-ProbeOperationReceipt $saved $result
+    Write-ProbeOperationReceipt $saved ([ordered]@{schema_version=2;call_mode='synchronous';result=$result;state_evidence=$evidence})
     [IO.File]::Delete($output)
     $script:pendingOperation=$false
     return $result
 }
-function Test-ProbeTarget{
+function Test-ProbeTarget([bool]$AllowTestedNotes=$false){
     $vm=Get-VM -Id $script:vmId -ErrorAction Stop
-    if($vm.Generation -ne 2 -or $vm.Name -cne $script:vmName -or $vm.Notes -cne ('ha-owned-provider-probe:'+$script:installation) -or
+    $notes=@(('ha-owned-provider-probe:'+$script:installation));if($AllowTestedNotes){$notes+=@('ha-owned-provider-probe:'+$script:installation+':tested')}
+    if($vm.Generation -ne 2 -or $vm.Name -cne $script:vmName -or $vm.Notes -cnotin $notes -or
         -not (Test-ProbeFixedMemory (Get-VMMemory -VM $vm)) -or
         @(Get-VMHardDiskDrive -VM $vm).Count -ne 0 -or @(Get-VMNetworkAdapter -VM $vm|Where-Object {-not (Test-ProbeDisconnectedNic $_)}).Count -ne 0){throw 'fixture_vm_ownership_changed'}
     return $vm
@@ -325,7 +391,7 @@ function Invoke-ProviderAcceptance {
     if((Get-Item -LiteralPath $base -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'fixture_parent_reparse'}
     $script:installation=([Guid]::NewGuid().ToString('N')+[Guid]::NewGuid().ToString('N'))
     $short=$script:installation.Substring(0,16);$script:root=Join-Path $base ('HaProbe_'+$short)
-    $script:vmName='HaProbeVM_'+$short;$script:vmId=$null;$script:pendingOperation=$false;$script:probeDiagnostics=@();$fixtures=@();$results=@();$complete=$false;$clean=$true
+    $script:vmName='HaProbeVM_'+$short;$script:vmId=$null;$script:pendingOperation=$false;$script:probeDiagnostics=@();$script:stateObservations=@();$fixtures=@();$results=@();$complete=$false;$clean=$true
     $namespaceBefore=Get-ProbeNamespaceHash
     $bootBefore=$os.LastBootUpTime.ToUniversalTime().Ticks.ToString()
     $adminsBefore=@(Get-LocalGroupMember -SID 'S-1-5-32-544'|ForEach-Object{$_.SID.Value}|Sort-Object)
@@ -336,7 +402,7 @@ function Invoke-ProviderAcceptance {
     if(@($names|Where-Object{Get-Service -Name $_ -ErrorAction SilentlyContinue}).Count){throw 'fixture_service_collision'}
     $null=New-ProbeDirectory $script:root $sids
     $journal=Join-Path $script:root 'ownership.json'
-    $record=[ordered]@{schema_version=1;installation_id=$script:installation;source_commit=$SourceCommit;probe_source_sha256=$ProbeSourceSha256;artifact_sha256=$ArtifactSha256;boot_ticks=$bootBefore;namespace_descriptor_sha256=$namespaceBefore;vm_id=$null;service_names=$names;phase='fixture_vm_creation';complete=$false}
+    $record=[ordered]@{schema_version=2;call_mode='synchronous';legacy_semisynchronous_acceptance=$false;external_process_deadline_cancels_provider_work=$false;method_reinvocation_permitted=$false;installation_id=$script:installation;source_commit=$SourceCommit;probe_source_sha256=$ProbeSourceSha256;artifact_sha256=$ArtifactSha256;boot_ticks=$bootBefore;namespace_descriptor_sha256=$namespaceBefore;vm_id=$null;service_names=$names;phase='fixture_vm_creation';complete=$false}
     $failureType=$null;$failureReason=$null;$record['settings_readback']=$null;$record['target_descriptor_sha256']=$null;$record['settings_payload_sha256']=$null;$record['positive_negative_dataset_identical']=$false
     [IO.File]::WriteAllText($journal,($record|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
     try{
@@ -457,14 +523,14 @@ function Invoke-ProviderAcceptance {
         $bootAfter=(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().Ticks.ToString()
         if($namespaceBefore -cne $namespaceAfter -or ($adminsBefore -join ',') -cne ($adminsAfter -join ',') -or $bootBefore -cne $bootAfter){$clean=$false}
         if(($beforeVm -join ',') -cne ($afterVm -join ',') -or ($beforeMembers -join ',') -cne ($afterMembers -join ',')){$clean=$false}
-        $record.complete=$complete;$record['cleanup_verified']=$clean
+        $record.complete=$complete;$record['cleanup_verified']=$clean;$record['state_observations']=$script:stateObservations
         $record['failure_type']=$failureType;$record['failure_reason']=$failureReason
         [IO.File]::WriteAllText($journal,($record|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
         # Leave the private receipts/configuration for reconciliation. Never
         # recursively delete a directory after a failed/ambiguous remote step.
         [ordered]@{scope='fresh_disconnected_vm_provider_role_acceptance';source_commit=$SourceCommit;probe_source_sha256=$ProbeSourceSha256;artifact_sha256=$ArtifactSha256;
             complete=$complete;cleanup_verified=$clean;phase=$record.phase;failure_type=$failureType;failure_reason=$failureReason;namespace_descriptor_unchanged=($namespaceBefore -ceq $namespaceAfter);namespace_acl_write_performed=$false;
-            namespace_sacl_acceptance=$false;boot_unchanged=($bootBefore -ceq $bootAfter);production_transition=$false;results=$results;probe_diagnostics=$script:probeDiagnostics;settings_readback=$record.settings_readback;target_descriptor_sha256=$record.target_descriptor_sha256;settings_payload_sha256=$record.settings_payload_sha256;positive_negative_dataset_identical=$record.positive_negative_dataset_identical}|ConvertTo-Json -Depth 6 -Compress
+            namespace_sacl_acceptance=$false;boot_unchanged=($bootBefore -ceq $bootAfter);production_transition=$false;call_mode='synchronous';legacy_semisynchronous_acceptance=$false;external_process_deadline_cancels_provider_work=$false;method_reinvocation_permitted=$false;state_observations=$script:stateObservations;results=$results;probe_diagnostics=$script:probeDiagnostics;settings_readback=$record.settings_readback;target_descriptor_sha256=$record.target_descriptor_sha256;settings_payload_sha256=$record.settings_payload_sha256;positive_negative_dataset_identical=$record.positive_negative_dataset_identical}|ConvertTo-Json -Depth 8 -Compress
     }
 }
 if($MyInvocation.InvocationName -ne '.'){Invoke-ProviderAcceptance}

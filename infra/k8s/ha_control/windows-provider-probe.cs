@@ -24,7 +24,7 @@ namespace HaProviderProbeV1 {
    string[] lines=text.Split('\n');if(lines.Length!=Keys.Length+1||lines[Keys.Length]!="")throw new InvalidOperationException();
    Values=new Dictionary<string,string>(StringComparer.Ordinal);
    for(int i=0;i<Keys.Length;i++){string p=Keys[i]+"=";if(!lines[i].StartsWith(p,StringComparison.Ordinal))throw new InvalidOperationException();Values.Add(Keys[i],lines[i].Substring(p.Length));}
-   if(Values["format"]!="ha-provider-probe-v5"||!Regex.IsMatch(Values["service_name"],"\\AHaProbe_[0-9a-f]{16}\\z")||
+   if(Values["format"]!="ha-provider-probe-v6"||!Regex.IsMatch(Values["service_name"],"\\AHaProbe_[0-9a-f]{16}\\z")||
       !Regex.IsMatch(Values["service_sid"],"\\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\\z")||
       !Regex.IsMatch(Values["installation_id"],"\\A[0-9a-f]{64}\\z")||
       !Regex.IsMatch(Values["vm_id"],"\\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\\z")||
@@ -97,21 +97,19 @@ namespace HaProviderProbeV1 {
   }
  }
  public sealed class ExecEvidence {
-  public bool Started,Returned,Terminal,OutputVerified,CallResultPresent;
-  public uint CallProxyHresult=0xffffffff,ExecHresult=0xffffffff,PollHresult=0xffffffff,Status=0xffffffff,OutputHresult=0xffffffff,ReturnValue=0xffffffff;
+  public bool Started,Returned,OutputPresent,OutputVerified;
+  public uint ExecHresult=0xffffffff,OutputHresult=0xffffffff,ReturnValue=0xffffffff;
   public string Job;
   static bool DenialHresult(uint value){return value==0x80041003||value==0x80070005;}
-  public static bool OutputStatus(uint status){return status==0||status==1;}
   public static bool TryReturnValue(object value,int cimType,out uint result){result=0xffffffff;if(cimType!=19||(!(value is int)&&!(value is uint)))return false;result=value is int?unchecked((uint)(int)value):(uint)value;return true;}
+  public static bool TryJobNumber(object value,int cimType,out uint result){result=0xffffffff;if(cimType!=18||!(value is ushort))return false;result=(ushort)value;return true;}
   public bool Denied(){
    if(!Started||!Returned)return false;
    if(DenialHresult(ExecHresult))return true;
-   if(ExecHresult!=0||!CallResultPresent||CallProxyHresult!=0||PollHresult!=0||!Terminal)return false;
-   if(DenialHresult(Status))return true;
-   return OutputStatus(Status)&&OutputHresult==0&&OutputVerified&&Settings.AccessDenied(ReturnValue);
+   return ExecHresult==0&&OutputPresent&&OutputHresult==0&&OutputVerified&&Settings.AccessDenied(ReturnValue);
   }
-  public bool Verified(){return Started&&Returned&&((ExecHresult>=0x80000000)||(ExecHresult==0&&CallResultPresent&&CallProxyHresult==0&&PollHresult==0&&Terminal&&(Status>=0x80000000||(OutputStatus(Status)&&OutputHresult==0&&OutputVerified))));}
-  public uint Code(){if(!Verified())return 0xffffffff;if(ExecHresult!=0)return ExecHresult;if(!OutputStatus(Status))return Status;return ReturnValue;}
+  public bool Verified(){return Started&&Returned&&(ExecHresult>=0x80000000||(ExecHresult==0&&OutputPresent&&OutputHresult==0&&OutputVerified));}
+  public uint Code(){return !Verified()?0xffffffff:ExecHresult!=0?ExecHresult:ReturnValue;}
  }
 #if !PORTABLE_FIXTURE
  // Public COM ABI from WbemCli.h. Unused pointer arguments remain IntPtr;
@@ -144,7 +142,8 @@ namespace HaProviderProbeV1 {
   [System.Runtime.InteropServices.PreserveSig] int ExecQueryAsync([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.BStr)]string language,[System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.BStr)]string query,int flags,IntPtr context,IntPtr sink);
   [System.Runtime.InteropServices.PreserveSig] int ExecNotificationQuery([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.BStr)]string language,[System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.BStr)]string query,int flags,IntPtr context,out IntPtr enumerator);
   [System.Runtime.InteropServices.PreserveSig] int ExecNotificationQueryAsync([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.BStr)]string language,[System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.BStr)]string query,int flags,IntPtr context,IntPtr sink);
-  [System.Runtime.InteropServices.PreserveSig] int ExecMethod([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.BStr)]string path,[System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.BStr)]string method,int flags,IntPtr context,NativeObject input,IntPtr output,out NativeCallResult result);
+  // Synchronous ABI: IWbemClassObject** out and a literal NULL IWbemCallResult**.
+  [System.Runtime.InteropServices.PreserveSig] int ExecMethod([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.BStr)]string path,[System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.BStr)]string method,int flags,IntPtr context,NativeObject input,out NativeObject output,IntPtr result);
   [System.Runtime.InteropServices.PreserveSig] int ExecMethodAsync([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.BStr)]string path,[System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.BStr)]string method,int flags,IntPtr context,IntPtr input,IntPtr sink);
  }
  [System.Runtime.InteropServices.ComImport,System.Runtime.InteropServices.Guid("dc12a681-737f-11cf-884d-00aa004b2e24"),System.Runtime.InteropServices.InterfaceType(System.Runtime.InteropServices.ComInterfaceType.InterfaceIsIUnknown)]
@@ -221,28 +220,22 @@ namespace HaProviderProbeV1 {
    }catch{Dispose();throw;}
   }
   public void Execute(ExecEvidence trace,Action beforeExec){
-   NativeObject output=null;NativeCallResult result=null;
+   NativeObject output=null;
    try{
-    var watch=Stopwatch.StartNew();beforeExec();trace.Started=true;
-    int hr=services.ExecMethod(path,method,0x10,IntPtr.Zero,input,IntPtr.Zero,out result);
+    // This RPC is synchronous. An outer process deadline or process exit does
+    // not cancel provider work; an incomplete call requires live reconciliation.
+    // https://learn.microsoft.com/en-us/windows/win32/api/wbemcli/nf-wbemcli-iwbemservices-execmethod
+    beforeExec();trace.Started=true;
+    int hr=services.ExecMethod(path,method,0,IntPtr.Zero,input,out output,IntPtr.Zero);
     trace.Returned=true;trace.ExecHresult=unchecked((uint)hr);
-    trace.CallResultPresent=result!=null;
-    if(hr!=0||result==null)return;
-    trace.CallProxyHresult=unchecked((uint)Blanket(result));if(trace.CallProxyHresult!=0)return;
-    int left=Math.Max(0,5000-(int)Math.Min(5000,watch.ElapsedMilliseconds)),status;
-    hr=result.GetCallStatus(left,out status);trace.PollHresult=unchecked((uint)hr);
-    if(hr!=0)return;
-    trace.Terminal=true;trace.Status=unchecked((uint)status);
-    // Only these two terminal informational statuses permit inspecting the
-    // same retained call result. Neither status alone is method authority.
-    if(!ExecEvidence.OutputStatus(unchecked((uint)status))||watch.ElapsedMilliseconds>5000)return;
-    hr=result.GetResultObject(0,out output);trace.OutputHresult=unchecked((uint)hr);
+    trace.OutputPresent=output!=null;
     if(hr!=0||output==null)return;
-    object value=Get(output,"ReturnValue",19);
-    uint typedValue;if(!ExecEvidence.TryReturnValue(value,19,out typedValue))return;
+    object value;int type,flavor;
+    hr=output.Get("ReturnValue",0,out value,out type,out flavor);trace.OutputHresult=unchecked((uint)hr);
+    uint typedValue;if(hr!=0||!ExecEvidence.TryReturnValue(value,type,out typedValue))return;
     trace.ReturnValue=typedValue;trace.OutputVerified=true;
     if(trace.ReturnValue==4096){object job=Get(output,"Job",102);trace.Job=job as string;if(String.IsNullOrEmpty(trace.Job)||trace.Job.Length>4096)trace.OutputVerified=false;}
-   }finally{Release(output);Release(result);}
+   }finally{Release(output);}
   }
   public void Dispose(){Release(input);Release(inputSignature);Release(outputSignature);Release(klass);Release(services);Release(locator);input=null;inputSignature=null;outputSignature=null;klass=null;services=null;locator=null;}
  }
@@ -256,6 +249,14 @@ namespace HaProviderProbeV1 {
    var path=new ManagementPath(text);
    if(!Settings.NativeRelativeTarget(path.IsInstance,path.ClassName,className,path.Server,path.NamespacePath,path.Path,path.RelativePath,text))throw new InvalidOperationException();
    return path;
+  }
+  static ManagementPath BoundJobPath(string text){
+   if(String.IsNullOrEmpty(text)||text.Length>4096)throw new InvalidOperationException();
+   var path=new ManagementPath(text);
+   if(!path.IsInstance||path.ClassName!="Msvm_ConcreteJob"||
+      (!String.IsNullOrEmpty(path.Server)&&path.Server!="."&&!String.Equals(path.Server,Environment.MachineName,StringComparison.OrdinalIgnoreCase))||
+      (!String.IsNullOrEmpty(path.NamespacePath)&&!String.Equals(path.NamespacePath,@"root\virtualization\v2",StringComparison.OrdinalIgnoreCase)))throw new InvalidOperationException();
+   return new ManagementPath(path.RelativePath);
   }
   byte[] ReadPayload(){
    string path=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"settings.xml");
@@ -281,7 +282,7 @@ namespace HaProviderProbeV1 {
   void RunProbe(){
    bool attempted=false,complete=false,authorized=false,admin=false,role=false;
    bool settingsSerialized=false,settingsReadback=false,pathsBound=false,methodResult=false,denied=false,currentAssociation=false;string currentPathHash="",currentInstanceHash="";uint code=0xffffffff;
-   var native=new ExecEvidence();bool proxySecurity=false;
+   var native=new ExecEvidence();bool proxySecurity=false,jobVerified=false;string jobHash="";uint? jobState=null,jobError=null;
    string stage="identity",exceptionKind="none",exceptionScope="none";uint exceptionHresult=0;
    try {
     using(var id=WindowsIdentity.GetCurrent()){
@@ -313,11 +314,31 @@ namespace HaProviderProbeV1 {
      attempted=native.Started;methodResult=native.Verified();code=native.Code();denied=exceptionScope=="none"&&native.Denied();complete=denied;
      if(methodResult&&!denied){
       if(code==4096){
-       string jobPath=native.Job;if(String.IsNullOrEmpty(jobPath))throw new InvalidOperationException();
-       using(var job=new ManagementObject(scope,new ManagementPath(jobPath),null)){
+       var jobPath=BoundJobPath(native.Job);jobHash=Settings.Hash(Encoding.UTF8.GetBytes(jobPath.RelativePath));
+       using(var job=new ManagementObject(scope,jobPath,new ObjectGetOptions(null,TimeSpan.FromSeconds(2),false))){
         var clock=Stopwatch.StartNew();
-        while(!stopped&&clock.Elapsed.TotalSeconds<10){job.Get();uint stateJob=Convert.ToUInt32(job["JobState"]);if(stateJob==7||stateJob==8||stateJob==9||stateJob==10){uint jobCode=Convert.ToUInt32(job["ErrorCode"]);code=(stateJob==7&&jobCode==0)?0:0xffffffff;break;}Thread.Sleep(50);}
+        // Provider 4096 is not completion. Bind the job to this exact VM and
+        // observe its terminal success separately; never invoke the method again.
+        while(!stopped&&clock.Elapsed.TotalSeconds<10){
+         job.Get();if(job.Path.RelativePath!=jobPath.RelativePath)throw new InvalidOperationException();
+         using(var affected=job.GetRelated(
+          relatedClass:"Msvm_ComputerSystem",relationshipClass:"Msvm_AffectedJobElement",
+          relationshipQualifier:null,relatedQualifier:null,
+          relatedRole:"AffectedElement",thisRole:"AffectingElement",
+          classDefinitionsOnly:false,options:null)){
+          if(affected.Count!=1)throw new InvalidOperationException();
+          foreach(ManagementObject vm in affected)using(vm){if(!String.Equals(Convert.ToString(vm["Name"]),cfg.Values["vm_id"],StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException();}
+         }
+         uint number;
+         if(!ExecEvidence.TryJobNumber(job["JobState"],(int)job.Properties["JobState"].Type,out number))throw new InvalidOperationException();jobState=number;
+         if(jobState==7||jobState==8||jobState==9||jobState==10){
+          if(!ExecEvidence.TryJobNumber(job["ErrorCode"],(int)job.Properties["ErrorCode"].Type,out number))throw new InvalidOperationException();jobError=number;
+          jobVerified=jobState==7&&jobError==0;code=jobVerified?0:0xffffffff;break;
+         }
+         Thread.Sleep(50);
+        }
        }
+       if(!jobVerified)code=0xffffffff;
       }
       authorized=code==0&&exceptionScope=="none";complete=authorized||denied;
       if(operation=="settings"&&authorized&&cfg.Values["expected_hyperv_role"]=="true"){
@@ -345,12 +366,12 @@ namespace HaProviderProbeV1 {
     }
    }catch(Exception error){
     exceptionKind=Settings.ExceptionKind(error);exceptionHresult=unchecked((uint)error.HResult);exceptionScope="outside_invoke";
-    denied=false;complete=false;
+    denied=false;authorized=false;complete=false;
    }
    if(stopped){complete=false;authorized=false;denied=false;}
    try{
     var process=Process.GetCurrentProcess();
-    string json="{\"schema_version\":5,\"scope\":\"owned_vm_provider_role_probe\",\"process_id\":"+process.Id+",\"process_start_ticks\":\""+process.StartTime.ToUniversalTime().Ticks+"\",\"operation\":\""+cfg.Values["operation"]+"\",\"stage\":\""+stage+"\",\"attempted\":"+attempted.ToString().ToLowerInvariant()+",\"complete\":"+complete.ToString().ToLowerInvariant()+",\"authorized\":"+authorized.ToString().ToLowerInvariant()+",\"authorization_denied\":"+denied.ToString().ToLowerInvariant()+",\"return_code\":"+code+",\"administrator\":"+admin.ToString().ToLowerInvariant()+",\"hyperv_role\":"+role.ToString().ToLowerInvariant()+",\"settings_serialized_value_present\":"+settingsSerialized.ToString().ToLowerInvariant()+",\"settings_readback_verified\":"+settingsReadback.ToString().ToLowerInvariant()+",\"native_target_paths_bound\":"+pathsBound.ToString().ToLowerInvariant()+",\"method_result_verified\":"+methodResult.ToString().ToLowerInvariant()+",\"target_descriptor_sha256\":\""+cfg.Values["target_descriptor_sha256"]+"\",\"settings_payload_sha256\":\""+(cfg.Descriptor==null?"":cfg.Descriptor.Values["settings_payload_sha256"])+"\",\"settings_current_path_sha256\":\""+currentPathHash+"\",\"settings_current_instance_sha256\":\""+currentInstanceHash+"\",\"settings_current_association_verified\":"+currentAssociation.ToString().ToLowerInvariant()+",\"exception_kind\":\""+exceptionKind+"\",\"exception_scope\":\""+exceptionScope+"\",\"exception_hresult\":"+exceptionHresult+",\"native_proxy_security_verified\":"+proxySecurity.ToString().ToLowerInvariant()+",\"native_exec_returned\":"+native.Returned.ToString().ToLowerInvariant()+",\"native_exec_hresult\":"+native.ExecHresult+",\"native_call_status_hresult\":"+native.PollHresult+",\"native_call_status_terminal\":"+native.Terminal.ToString().ToLowerInvariant()+",\"native_call_status\":"+native.Status+",\"native_result_hresult\":"+native.OutputHresult+",\"native_output_verified\":"+native.OutputVerified.ToString().ToLowerInvariant()+",\"native_call_result_present\":"+native.CallResultPresent.ToString().ToLowerInvariant()+",\"native_call_proxy_hresult\":"+native.CallProxyHresult+"}\n";
+    string json="{\"schema_version\":6,\"scope\":\"owned_vm_provider_role_probe\",\"process_id\":"+process.Id+",\"process_start_ticks\":\""+process.StartTime.ToUniversalTime().Ticks+"\",\"operation\":\""+cfg.Values["operation"]+"\",\"stage\":\""+stage+"\",\"attempted\":"+attempted.ToString().ToLowerInvariant()+",\"complete\":"+complete.ToString().ToLowerInvariant()+",\"authorized\":"+authorized.ToString().ToLowerInvariant()+",\"authorization_denied\":"+denied.ToString().ToLowerInvariant()+",\"return_code\":"+code+",\"administrator\":"+admin.ToString().ToLowerInvariant()+",\"hyperv_role\":"+role.ToString().ToLowerInvariant()+",\"settings_serialized_value_present\":"+settingsSerialized.ToString().ToLowerInvariant()+",\"settings_readback_verified\":"+settingsReadback.ToString().ToLowerInvariant()+",\"native_target_paths_bound\":"+pathsBound.ToString().ToLowerInvariant()+",\"method_result_verified\":"+methodResult.ToString().ToLowerInvariant()+",\"target_descriptor_sha256\":\""+cfg.Values["target_descriptor_sha256"]+"\",\"settings_payload_sha256\":\""+(cfg.Descriptor==null?"":cfg.Descriptor.Values["settings_payload_sha256"])+"\",\"settings_current_path_sha256\":\""+currentPathHash+"\",\"settings_current_instance_sha256\":\""+currentInstanceHash+"\",\"settings_current_association_verified\":"+currentAssociation.ToString().ToLowerInvariant()+",\"exception_kind\":\""+exceptionKind+"\",\"exception_scope\":\""+exceptionScope+"\",\"exception_hresult\":"+exceptionHresult+",\"native_proxy_security_verified\":"+proxySecurity.ToString().ToLowerInvariant()+",\"native_exec_returned\":"+native.Returned.ToString().ToLowerInvariant()+",\"native_exec_hresult\":"+native.ExecHresult+",\"native_call_status_hresult\":"+"null"+",\"native_call_status_terminal\":"+"null"+",\"native_call_status\":"+"null"+",\"native_result_hresult\":"+native.OutputHresult+",\"native_output_verified\":"+native.OutputVerified.ToString().ToLowerInvariant()+",\"native_call_result_present\":"+"null"+",\"native_call_proxy_hresult\":null,\"call_mode\":\"synchronous\",\"call_result_applicability\":\"not_used\",\"native_output_present\":"+native.OutputPresent.ToString().ToLowerInvariant()+",\"method_return_value\":"+(native.OutputVerified?native.ReturnValue.ToString():"null")+",\"job_completion_verified\":"+jobVerified.ToString().ToLowerInvariant()+",\"job_path_sha256\":\""+jobHash+"\",\"job_state\":"+(jobState.HasValue?jobState.Value.ToString():"null")+",\"job_error_code\":"+(jobError.HasValue?jobError.Value.ToString():"null")+"}\n";
     using(var file=new FileStream(output,FileMode.CreateNew,FileAccess.Write,FileShare.None)){byte[] bytes=Encoding.UTF8.GetBytes(json);file.Write(bytes,0,bytes.Length);file.Flush(true);}
     ExitCode=complete?0:1;
    }catch{ExitCode=1;}

@@ -62,52 +62,72 @@ foreach($field in @('current_path_exact','current_instance_exact','tested_marker
  $copy=$observed.Clone();$copy[$field]='true'
  if(Test-ProbeCurrentSettingsExact $copy $true){throw 'wmi_boolean_confusion_accepted'}
 }
-$nativeFrame=[pscustomobject]@{scope='owned_vm_provider_role_probe';schema_version=5;process_id=12;process_start_ticks='639298437494210749';operation='settings';stage='valid_operation';attempted=$true;complete=$false;authorized=$true;authorization_denied=$false;return_code=0;administrator=$false;hyperv_role=$true;settings_serialized_value_present=$true;settings_readback_verified=$false;native_target_paths_bound=$true;method_result_verified=$true;target_descriptor_sha256=('a'*64);settings_payload_sha256=('b'*64);settings_current_path_sha256=('c'*64);settings_current_instance_sha256=('d'*64);settings_current_association_verified=$true;exception_kind='none';exception_scope='none';exception_hresult=0;native_proxy_security_verified=$true;native_exec_returned=$true;native_exec_hresult=0;native_call_status_hresult=0;native_call_status_terminal=$true;native_call_status=0;native_result_hresult=0;native_output_verified=$true;native_call_result_present=$true;native_call_proxy_hresult=0}
+$nativeFrame=[pscustomobject]@{scope='owned_vm_provider_role_probe';schema_version=6;process_id=12;process_start_ticks='639298437494210749';operation='settings';stage='valid_operation';attempted=$true;complete=$false;authorized=$true;authorization_denied=$false;return_code=0;administrator=$false;hyperv_role=$true;settings_serialized_value_present=$true;settings_readback_verified=$false;native_target_paths_bound=$true;method_result_verified=$true;target_descriptor_sha256=('a'*64);settings_payload_sha256=('b'*64);settings_current_path_sha256=('c'*64);settings_current_instance_sha256=('d'*64);settings_current_association_verified=$true;exception_kind='none';exception_scope='none';exception_hresult=0;native_proxy_security_verified=$true;native_exec_returned=$true;native_exec_hresult=0;native_call_status_hresult=$null;native_call_status_terminal=$null;native_call_status=$null;native_result_hresult=0;native_output_verified=$true;native_call_result_present=$null;native_call_proxy_hresult=$null;call_mode='synchronous';call_result_applicability='not_used';native_output_present=$true;method_return_value=0;job_completion_verified=$false;job_path_sha256='';job_state=$null;job_error_code=$null}
 Assert-ProbeResultShape $nativeFrame
-$denial=$nativeFrame.PSObject.Copy();$denial.complete=$true;$denial.authorized=$false;$denial.authorization_denied=$true;$denial.return_code=2147942405;$denial.native_exec_hresult=2147942405;$denial.native_call_status_terminal=$false;$denial.native_call_status_hresult=4294967295;$denial.native_call_status=4294967295;$denial.native_result_hresult=4294967295;$denial.native_output_verified=$false;$denial.native_call_result_present=$false;$denial.native_call_proxy_hresult=4294967295
+$denial=$nativeFrame.PSObject.Copy();$denial.complete=$true;$denial.authorized=$false;$denial.authorization_denied=$true;$denial.return_code=2147942405;$denial.native_exec_hresult=2147942405;$denial.native_result_hresult=4294967295;$denial.native_output_verified=$false;$denial.native_output_present=$false;$denial.method_return_value=$null
 Assert-ProbeResultShape $denial
-$terminal=$nativeFrame.PSObject.Copy();$terminal.complete=$true;$terminal.authorized=$false;$terminal.authorization_denied=$true;$terminal.return_code=2147749891;$terminal.native_call_status=2147749891;$terminal.native_result_hresult=4294967295;$terminal.native_output_verified=$false
-Assert-ProbeResultShape $terminal
-# Status 1 is only a permission to inspect this call's typed output.
-$falseStatus=$nativeFrame.PSObject.Copy();$falseStatus.native_call_status=1
-Assert-ProbeResultShape $falseStatus
-$typedDenied=$falseStatus.PSObject.Copy();$typedDenied.authorized=$false;$typedDenied.authorization_denied=$true;$typedDenied.complete=$true;$typedDenied.return_code=32769
+$typedDenied=$nativeFrame.PSObject.Copy();$typedDenied.authorized=$false;$typedDenied.authorization_denied=$true;$typedDenied.complete=$true;$typedDenied.return_code=32769;$typedDenied.method_return_value=32769
 Assert-ProbeResultShape $typedDenied
-foreach($row in @(@('native_output_verified',$false),@('native_result_hresult',2147942405),@('native_call_status',2),@('return_code',1))){
- $bad=$typedDenied.PSObject.Copy();$bad.($row[0])=$row[1]
- $blocked=$false;try{Assert-ProbeResultShape $bad}catch{$blocked=$true};if(-not $blocked){throw 'informational_status_or_untyped_output_became_denial'}
+# Old semisynchronous fields are explicitly not applicable, never fabricated zeroes.
+foreach($field in @('native_call_status_hresult','native_call_status_terminal','native_call_status','native_call_result_present','native_call_proxy_hresult')){
+ foreach($value in @(0,$false,1)){
+  $bad=$nativeFrame.PSObject.Copy();$bad.$field=$value
+  $blocked=$false;try{Assert-ProbeResultShape $bad}catch{$blocked=$true};if(-not $blocked){throw 'unused_callresult_field_fabricated_success'}
+ }
 }
-$bad=$terminal.PSObject.Copy();$bad.native_call_status_hresult=2147749891
-$blocked=$false;try{Assert-ProbeResultShape $bad}catch{$blocked=$true}
-if(-not $blocked){throw 'poll_api_hresult_misclassified_as_exec_status'}
-$bad=$nativeFrame.PSObject.Copy();$bad.native_result_hresult=2147942405;$bad.complete=$true
-$blocked=$false;try{Assert-ProbeResultShape $bad}catch{$blocked=$true}
-if(-not $blocked){throw 'result_retrieval_error_became_authorized'}
+foreach($row in @(@('native_output_present',$false),@('native_output_verified',$false),@('native_result_hresult',2147942405),@('method_return_value',1),@('return_code',1),@('call_mode','semisynchronous'),@('schema_version',5))){
+ $bad=$typedDenied.PSObject.Copy();$bad.($row[0])=$row[1]
+ $blocked=$false;try{Assert-ProbeResultShape $bad}catch{$blocked=$true};if(-not $blocked){throw 'unverified_sync_output_became_denial'}
+}
+$job=$nativeFrame.PSObject.Copy();$job.complete=$false;$job.authorized=$false;$job.method_return_value=4096;$job.return_code=4294967295;$job.job_path_sha256=('e'*64);$job.job_state=4
+Assert-ProbeResultShape $job
+$job.job_completion_verified=$true;$job.job_state=7;$job.job_error_code=0;$job.authorized=$true;$job.complete=$true;$job.return_code=0
+Assert-ProbeResultShape $job
+foreach($row in @(@('job_state',4),@('job_error_code',5),@('job_path_sha256',''),@('job_completion_verified',$false))){
+ $bad=$job.PSObject.Copy();$bad.($row[0])=$row[1]
+ $blocked=$false;try{Assert-ProbeResultShape $bad}catch{$blocked=$true};if(-not $blocked){throw 'incomplete_job_became_sync_completion'}
+}
 foreach($row in @(@('exception_kind','other'),@('exception_scope','outside_invoke'),@('attempted',$false),@('method_result_verified',$false),@('native_exec_returned',$false),@('native_proxy_security_verified',$false),@('exception_kind','raw_sensitive_exception'))){
  $bad=$denial.PSObject.Copy();$bad.($row[0])=$row[1]
- $blocked=$false;try{Assert-ProbeResultShape $bad}catch{$blocked=$true}
- if(-not $blocked){throw 'unverified_native_frame_accepted'}
+ $blocked=$false;try{Assert-ProbeResultShape $bad}catch{$blocked=$true};if(-not $blocked){throw 'unverified_native_frame_accepted'}
 }
 $outside=$nativeFrame.PSObject.Copy();$outside.authorized=$false;$outside.exception_kind='unauthorized_access';$outside.exception_scope='outside_invoke';$outside.exception_hresult=2147942405
 Assert-ProbeResultShape $outside
 $projected=$denial.PSObject.Copy();$projected.exception_kind='unauthorized_access';$projected.exception_scope='invoke';$projected.exception_hresult=2147942405
-$blocked=$false;try{Assert-ProbeResultShape $projected}catch{$blocked=$true}
-if(-not $blocked){throw 'clr_projection_still_granted_native_authority'}
-foreach($field in @('settings_serialized_value_present','settings_readback_verified','return_code','process_start_ticks','target_descriptor_sha256','settings_payload_sha256','native_target_paths_bound','method_result_verified','settings_current_path_sha256','settings_current_instance_sha256','settings_current_association_verified','exception_kind','exception_scope','exception_hresult','native_proxy_security_verified','native_exec_returned','native_exec_hresult','native_call_status_hresult','native_call_status_terminal','native_call_status','native_result_hresult','native_output_verified','native_call_result_present','native_call_proxy_hresult')){
+$blocked=$false;try{Assert-ProbeResultShape $projected}catch{$blocked=$true};if(-not $blocked){throw 'clr_projection_granted_native_authority'}
+foreach($field in @('settings_serialized_value_present','settings_readback_verified','return_code','process_start_ticks','target_descriptor_sha256','settings_payload_sha256','native_target_paths_bound','method_result_verified','settings_current_path_sha256','settings_current_instance_sha256','settings_current_association_verified','exception_kind','exception_scope','exception_hresult','native_proxy_security_verified','native_exec_returned','native_exec_hresult','native_result_hresult','native_output_verified','call_mode','call_result_applicability','native_output_present','method_return_value','job_completion_verified','job_path_sha256')){
  $copy=$nativeFrame.PSObject.Copy();$copy.$field=@($copy.$field)
- $blocked=$false;try{Assert-ProbeResultShape $copy}catch{$blocked=$true}
- if(-not $blocked){throw 'diagnostic_type_confusion_accepted'}
+ $blocked=$false;try{Assert-ProbeResultShape $copy}catch{$blocked=$true};if(-not $blocked){throw 'diagnostic_type_confusion_accepted'}
 }
 $copy=$nativeFrame.PSObject.Copy();$copy|Add-Member NoteProperty extra 'untrusted'
-$blocked=$false;try{Assert-ProbeResultShape $copy}catch{$blocked=$true}
-if(-not $blocked){throw 'unbounded_diagnostic_fields_accepted'}
-# Even a valid typed status-1 output zero is not a negative-role pass.
-$zero=$falseStatus.PSObject.Copy();$zero.operation='power_off';$zero.complete=$true
-$blocked=$false;try{Assert-ProbeOperationAuthority $zero 'false' 'power_off'}catch{$blocked=$true}
-if(-not $blocked){throw 'negative_success_bypassed_role_boundary'}
+$blocked=$false;try{Assert-ProbeResultShape $copy}catch{$blocked=$true};if(-not $blocked){throw 'unbounded_diagnostic_fields_accepted'}
+$zero=$nativeFrame.PSObject.Copy();$zero.operation='power_off';$zero.complete=$true
+$blocked=$false;try{Assert-ProbeOperationAuthority $zero 'false' 'power_off'}catch{$blocked=$true};if(-not $blocked){throw 'negative_success_bypassed_role_boundary'}
 Assert-ProbeOperationAuthority $zero 'true' 'power_off'
 $deniedPower=$typedDenied.PSObject.Copy();$deniedPower.operation='power_off'
 Assert-ProbeOperationAuthority $deniedPower 'false' 'power_off'
+# Fresh post-call CIM and Hyper-V views must agree twice for the exact VM.
+$script:vmId='11111111-1111-1111-1111-111111111111'
+$base=[DateTime]::Parse('2026-11-10T02:00:00.0000000Z').ToUniversalTime()
+function StateRow([int]$Offset,[string]$State,[int]$Cim){return [pscustomobject]@{vm_id=$script:vmId;observed_start_utc=$base.AddMilliseconds($Offset).ToString('o');observed_end_utc=$base.AddMilliseconds($Offset+1).ToString('o');hyperv_state=$State;cim_enabled_state=$Cim;identity_verified=$true}}
+$baseline=StateRow 0 'Off' 3
+if(-not (Test-ProbeStateAgreement $baseline $script:vmId 'Off')){throw 'matching_off_views_rejected'}
+foreach($row in @(@('vm_id','22222222-2222-2222-2222-222222222222'),@('cim_enabled_state',2),@('cim_enabled_state','3'),@('identity_verified','true'),@('identity_verified',$false),@('hyperv_state','Running'))){
+ $bad=$baseline.PSObject.Copy();$bad.($row[0])=$row[1]
+ if(Test-ProbeStateAgreement $bad $script:vmId 'Off'){throw 'foreign_or_disagreeing_views_accepted'}
+}
+function NewStateEvidence {return [ordered]@{before=$baseline;call_requested_utc=$base.AddMilliseconds(1).ToString('o');process_exit_observed_utc=$base.AddMilliseconds(2).ToString('o');after=[Collections.Generic.List[object]]::new();verified=$false}}
+$script:stateQueue=[Collections.Generic.Queue[object]]::new()
+function Get-ProbeStateObservation {return $script:stateQueue.Dequeue()}
+$script:stateQueue.Enqueue((StateRow 3 'Running' 3));$script:stateQueue.Enqueue((StateRow 5 'Running' 2));$script:stateQueue.Enqueue((StateRow 7 'Running' 2))
+$stateEvidence=NewStateEvidence;Wait-ProbeStateEvidence $stateEvidence 'Running'
+if(-not $stateEvidence.verified -or $stateEvidence.after.Count -ne 3){throw 'single_or_disagreeing_state_claimed_transition'}
+$script:stateQueue.Enqueue((StateRow 1 'Running' 2))
+$stale=NewStateEvidence;$blocked=$false;try{Wait-ProbeStateEvidence $stale 'Running'}catch{$blocked=$true}
+if(-not $blocked -or $stale.verified){throw 'pre_exit_state_reused_as_fresh_observation'}
+foreach($offset in @(3,5,7,9,11,13,15,17)){$script:stateQueue.Enqueue((StateRow $offset 'Running' 3))}
+$incomplete=NewStateEvidence;$blocked=$false;try{Wait-ProbeStateEvidence $incomplete 'Running'}catch{$blocked=$true}
+if(-not $blocked -or $incomplete.verified -or $incomplete.after.Count -ne 8){throw 'bounded_poll_inferred_unseen_transition'}
 $receiptRoot=Join-Path ([IO.Path]::GetTempPath()) ('provider-pure-receipts-'+[Guid]::NewGuid().ToString('N'))
 $null=[IO.Directory]::CreateDirectory($receiptRoot)
 try{
@@ -135,7 +155,7 @@ foreach($path in @('C:\Private\probe.exe anything','"C:\Private\probe.exe" anyth
 }
 if(Test-ProbeServiceImagePath 'C:\Program Files\probe.exe' 'C:\Program Files\probe.exe'){throw 'ambiguous_unquoted_path_accepted'}
 if(-not (Test-ProbeServiceImagePath '"C:\Program Files\probe.exe"' 'C:\Program Files\probe.exe')){throw 'quoted_path_rejected'}
-$frame=[pscustomobject]@{scope='owned_vm_provider_role_probe';schema_version=5;operation='settings';stage='schema_query';attempted=$false;complete=$false;authorized=$false;authorization_denied=$false;administrator=$false;hyperv_role=$false}
+$frame=[pscustomobject]@{scope='owned_vm_provider_role_probe';schema_version=6;operation='settings';stage='schema_query';attempted=$false;complete=$false;authorized=$false;authorization_denied=$false;administrator=$false;hyperv_role=$false}
 if(-not (Test-ProbeNoOperation $frame 'settings' $false)){throw 'known_no_operation_not_recognized'}
 foreach($field in @('attempted','complete','authorized','authorization_denied','administrator','hyperv_role')){
  $copy=$frame.PSObject.Copy();$copy.$field=$true
@@ -190,7 +210,7 @@ $descriptor="format=ha-provider-target-v3`ninstallation_id=$('a'*64)`nvm_id=$vm`
 $descriptorBytes=[Text.Encoding]::UTF8.GetBytes($descriptor)
 $descriptorHash=[HaProviderProbeV1.Settings]::Hash($descriptorBytes)
 $descriptorB64=[Convert]::ToBase64String($descriptorBytes)
-$text="format=ha-provider-probe-v5`nservice_name=HaProbe_0123456789abcdef`nservice_sid=S-1-5-80-1-2-3-4-5`ninstallation_id=$('a'*64)`nvm_id=11111111-1111-1111-1111-111111111111`noperation=settings`nexpected_hyperv_role=false`ntarget_descriptor_b64=$descriptorB64`ntarget_descriptor_sha256=$descriptorHash`n"
+$text="format=ha-provider-probe-v6`nservice_name=HaProbe_0123456789abcdef`nservice_sid=S-1-5-80-1-2-3-4-5`ninstallation_id=$('a'*64)`nvm_id=11111111-1111-1111-1111-111111111111`noperation=settings`nexpected_hyperv_role=false`ntarget_descriptor_b64=$descriptorB64`ntarget_descriptor_sha256=$descriptorHash`n"
 $cfg=[HaProviderProbeV1.Settings]::new($text)
 if($cfg.Marker() -cne ('ha-owned-provider-probe:'+('a'*64))){throw 'not_fixed_owned_marker'}
 # A CLR projected E_ACCESSDENIED is not necessarily a COMException.
@@ -203,45 +223,37 @@ foreach($other in @([ProbeFakeDenied]::new(),[ProbeDerivedDenied]::new(),[Invali
  if([HaProviderProbeV1.Settings]::ExceptionKind($other) -cne 'other'){throw 'unrecognized_type_was_not_static_other'}
 }
 if($null -ne [HaProviderProbeV1.Settings].GetMethod('InvokeExceptionDenial')){throw 'clr_exception_authority_helper_retained'}
-# The exact native HRESULT/terminal-status state machine is portable. No COM call.
+# Synchronous Exec HRESULT plus directly returned typed output only.
 foreach($code in @([uint32]2147749891,[uint32]2147942405)){
  $e=[HaProviderProbeV1.ExecEvidence]::new();$e.Started=$true;$e.Returned=$true;$e.ExecHresult=$code
  if(-not $e.Denied() -or -not $e.Verified() -or $e.Code() -ne $code){throw 'immediate_exec_denial_lost'}
  $e.Started=$false;if($e.Denied() -or $e.Verified()){throw 'preexec_hresult_granted_authority'}
- $e=[HaProviderProbeV1.ExecEvidence]::new();$e.Started=$true;$e.Returned=$true;$e.ExecHresult=0;$e.CallResultPresent=$true;$e.CallProxyHresult=0;$e.PollHresult=0;$e.Terminal=$true;$e.Status=$code
- if(-not $e.Denied() -or -not $e.Verified() -or $e.Code() -ne $code){throw 'terminal_exec_denial_lost'}
- $e.PollHresult=$code;if($e.Denied() -or $e.Verified()){throw 'poll_api_denial_granted_authority'}
 }
-$ok=[HaProviderProbeV1.ExecEvidence]::new();$ok.Started=$true;$ok.Returned=$true;$ok.ExecHresult=0;$ok.CallResultPresent=$true;$ok.CallProxyHresult=0;$ok.PollHresult=0;$ok.Terminal=$true;$ok.Status=0;$ok.OutputHresult=0;$ok.OutputVerified=$true;$ok.ReturnValue=0
-if(-not $ok.Verified() -or $ok.Denied() -or $ok.Code() -ne 0){throw 'verified_native_output_lost'}
-$ok.ReturnValue=32769;if(-not $ok.Denied()){throw 'provider_return_denial_lost'}
-foreach($field in @('Started','Returned','CallResultPresent','Terminal','OutputVerified')){
+$ok=[HaProviderProbeV1.ExecEvidence]::new();$ok.Started=$true;$ok.Returned=$true;$ok.ExecHresult=0;$ok.OutputPresent=$true;$ok.OutputHresult=0;$ok.OutputVerified=$true;$ok.ReturnValue=0
+if(-not $ok.Verified() -or $ok.Denied() -or $ok.Code() -ne 0){throw 'verified_direct_output_lost'}
+$ok.ReturnValue=32769;if(-not $ok.Denied()){throw 'typed_provider_denial_lost'}
+foreach($field in @('Started','Returned','OutputPresent','OutputVerified')){
  $copy=[HaProviderProbeV1.ExecEvidence]::new();foreach($f in $ok.GetType().GetFields()){if($f.Name -ne 'Job'){$f.SetValue($copy,$f.GetValue($ok))}};$copy.$field=$false
- if($copy.Denied() -or $copy.Verified()){throw 'incomplete_native_trace_granted_authority'}
+ if($copy.Denied() -or $copy.Verified()){throw 'incomplete_direct_trace_granted_authority'}
 }
-foreach($row in @(@('PollHresult',[uint32]262148),@('CallProxyHresult',[uint32]2147942405),@('OutputHresult',[uint32]2147942405))){
- $copy=[HaProviderProbeV1.ExecEvidence]::new();foreach($f in $ok.GetType().GetFields()){if($f.Name -ne 'Job'){$f.SetValue($copy,$f.GetValue($ok))}};$copy.($row[0])=$row[1]
- if($copy.Denied() -or $copy.Verified()){throw 'timeout_proxy_or_output_error_granted_authority'}
+foreach($hr in @([uint32]1,[uint32]262148,[uint32]2147942405)){
+ $copy=[HaProviderProbeV1.ExecEvidence]::new();foreach($f in $ok.GetType().GetFields()){if($f.Name -ne 'Job'){$f.SetValue($copy,$f.GetValue($ok))}};$copy.OutputHresult=$hr
+ if($copy.Denied() -or $copy.Verified()){throw 'output_property_error_became_method_denial'}
 }
-foreach($status in @([uint32]0,[uint32]1)){
- $trace=[HaProviderProbeV1.ExecEvidence]::new();foreach($f in $ok.GetType().GetFields()){if($f.Name -ne 'Job'){$f.SetValue($trace,$f.GetValue($ok))}};$trace.Status=$status
- $trace.OutputVerified=$false;$trace.ReturnValue=32769
- if($trace.Verified() -or $trace.Denied() -or $trace.Code() -ne [uint32]::MaxValue){throw 'terminal_status_without_output_granted_authority'}
- $trace.OutputVerified=$true
- if(-not $trace.Verified() -or -not $trace.Denied() -or $trace.Code() -ne 32769){throw 'typed_output_denial_lost_or_status_used_as_code'}
- $trace.ReturnValue=0
- if(-not $trace.Verified() -or $trace.Denied() -or $trace.Code() -ne 0){throw 'typed_output_zero_lost'}
-}
-foreach($status in @([uint32]2,[uint32]3,[uint32]262148)){
- $trace=[HaProviderProbeV1.ExecEvidence]::new();foreach($f in $ok.GetType().GetFields()){if($f.Name -ne 'Job'){$f.SetValue($trace,$f.GetValue($ok))}};$trace.Status=$status
- if([HaProviderProbeV1.ExecEvidence]::OutputStatus($status) -or $trace.Verified() -or $trace.Denied()){throw 'other_informational_status_granted_authority'}
-}
+$ok.ExecHresult=1;if($ok.Verified() -or $ok.Denied()){throw 'informational_exec_hresult_granted_authority'}
+$ok.ExecHresult=0;$ok.ReturnValue=4096
+if(-not $ok.Verified() -or $ok.Denied() -or $ok.Code() -ne 4096){throw 'async_provider_job_collapsed_to_completion'}
 $typed=[uint32]0
 foreach($value in @('32769',[long]32769,[double]32769,$null,$true)){
  if([HaProviderProbeV1.ExecEvidence]::TryReturnValue($value,19,[ref]$typed)){throw 'malformed_variant_accepted'}
 }
 if([HaProviderProbeV1.ExecEvidence]::TryReturnValue([int]32769,8,[ref]$typed)){throw 'wrong_cim_type_accepted'}
 if(-not [HaProviderProbeV1.ExecEvidence]::TryReturnValue([int]32769,19,[ref]$typed) -or $typed -ne 32769){throw 'typed_cim_uint32_rejected'}
+if(-not [HaProviderProbeV1.ExecEvidence]::TryJobNumber([uint16]7,18,[ref]$typed) -or $typed -ne 7){throw 'typed_job_state_rejected'}
+foreach($value in @('7',[uint32]7,[int]7,$null,$true)){
+ if([HaProviderProbeV1.ExecEvidence]::TryJobNumber($value,18,[ref]$typed)){throw 'coerced_job_state_became_terminal_success'}
+}
+if([HaProviderProbeV1.ExecEvidence]::TryJobNumber([uint16]7,19,[ref]$typed)){throw 'wrong_job_property_type_accepted'}
 if($cfg.Descriptor.VerifyPayload($payload,$cfg.Marker()) -cne [Text.Encoding]::UTF8.GetString($payload)){throw 'payload_not_exact'}
 foreach($bad in @([Text.Encoding]::UTF8.GetBytes('changed'),($payload+[byte]0))){
  $blocked=$false;try{$cfg.Descriptor.VerifyPayload($bad,$cfg.Marker())|Out-Null}catch{$blocked=$true}
@@ -257,7 +269,7 @@ if(-not $blocked){throw 'external_descriptor_pin_ignored'}
 $power=$text.Replace('operation=settings','operation=power_on').Replace('target_descriptor_b64='+$descriptorB64,'target_descriptor_b64=').Replace('target_descriptor_sha256='+$descriptorHash,'target_descriptor_sha256=')
 $powerCfg=[HaProviderProbeV1.Settings]::new($power)
 if($null -ne $powerCfg.Descriptor){throw 'power_took_settings_descriptor'}
-foreach($bad in @($power.Replace('target_descriptor_b64=','target_descriptor_b64='+$descriptorB64),$power.Replace('operation=power_on','operation=settings'),$text.Replace('ha-provider-probe-v5','ha-provider-probe-v2'))){
+foreach($bad in @($power.Replace('target_descriptor_b64=','target_descriptor_b64='+$descriptorB64),$power.Replace('operation=power_on','operation=settings'),$text.Replace('ha-provider-probe-v6','ha-provider-probe-v2'),$text.Replace('ha-provider-probe-v6','ha-provider-probe-v5'))){
  $blocked=$false;try{[HaProviderProbeV1.Settings]::new($bad)|Out-Null}catch{$blocked=$true}
  if(-not $blocked){throw 'cross_version_or_operation_inputs_accepted'}
 }
@@ -303,6 +315,39 @@ foreach($bad in @($text.Replace('operation=settings','operation=shell'),$text.Re
         self.assertEqual(result.returncode,0,result.stderr.decode(errors='replace'))
         self.assertEqual(result.stdout.decode().strip(),'portable-grammar-only')
 
+    def test_production_job_association_uses_roles_in_role_slots(self):
+        # Compile the actual production expression, rather than a second copy
+        # of its argument values. Full net48 compilation also binds the named
+        # arguments to the real System.Management API parameters.
+        import re
+        source=SOURCE.read_text()
+        calls=re.findall(r'job\.GetRelated\((.*?)\)',source,re.S)
+        self.assertEqual(len(calls),1)
+        expression='job.GetRelated('+calls[0]+')'
+        recorder='''
+public sealed class ProviderJobArgumentRecorder {
+ public object[] GetRelated(string relatedClass,string relationshipClass,string relationshipQualifier,string relatedQualifier,string relatedRole,string thisRole,bool classDefinitionsOnly,object options) {
+  return new object[]{relatedClass,relationshipClass,relationshipQualifier,relatedQualifier,relatedRole,thisRole,classDefinitionsOnly,options};
+ }
+}
+public static class ProviderActualJobCall {
+ public static object[] Capture(){var job=new ProviderJobArgumentRecorder();return ACTUAL_EXPRESSION;}
+}
+'''.replace('ACTUAL_EXPRESSION',expression)
+        script=r'''
+$ErrorActionPreference='Stop'
+Add-Type -TypeDefinition $env:RECORDER_SOURCE -Language CSharp
+$values=[ProviderActualJobCall]::Capture()
+if($values.Count -ne 8 -or $values[0] -cne 'Msvm_ComputerSystem' -or $values[1] -cne 'Msvm_AffectedJobElement' -or
+ $null -ne $values[2] -or $null -ne $values[3] -or $values[4] -cne 'AffectedElement' -or $values[5] -cne 'AffectingElement' -or
+ $values[6] -isnot [bool] -or $values[6] -or $null -ne $values[7]){throw 'actual_job_roles_or_qualifiers_in_wrong_slots'}
+'actual-eight-arguments-only'
+'''
+        pwsh=shutil.which('pwsh') or '/private/tmp/n100-ha-powershell/runtime/pwsh'
+        result=subprocess.run([pwsh,'-NoProfile','-NonInteractive','-Command',script],env=dict(os.environ,RECORDER_SOURCE=recorder),capture_output=True,timeout=20)
+        self.assertEqual(result.returncode,0,result.stderr.decode(errors='replace'))
+        self.assertEqual(result.stdout.decode().strip(),'actual-eight-arguments-only')
+
     def test_direct_call_has_no_target_query_and_denial_is_exec_only(self):
         source=SOURCE.read_text()
         prepare=source[source.index('public DirectWmi('):source.index('public void Execute(')]
@@ -315,10 +360,11 @@ foreach($bad in @($text.Replace('operation=settings','operation=shell'),$text.Re
         self.assertIn('inputSignature.SpawnInstance(0',prepare)
         self.assertIn('input.Put(property,0,ref value,0)',prepare)
         self.assertIn('beforeExec();trace.Started=true;',execute)
-        self.assertIn('services.ExecMethod(path,method,0x10,IntPtr.Zero,input,IntPtr.Zero,out result)',execute)
-        self.assertIn('result.GetCallStatus(left,out status)',execute)
-        self.assertIn('result.GetResultObject(0,out output)',execute)
-        self.assertIn('Blanket(result)',execute)
+        self.assertIn('services.ExecMethod(path,method,0,IntPtr.Zero,input,out output,IntPtr.Zero)',execute)
+        self.assertNotIn('GetCallStatus(',execute)
+        self.assertNotIn('GetResultObject(',execute)
+        self.assertIn('output.Get("ReturnValue",0,out value,out type,out flavor)',execute)
+        self.assertIn('NativeObject input,out NativeObject output,IntPtr result)',source)
         self.assertIn('CoSetProxyBlanket(proxy,10,0,IntPtr.Zero,6,3,IntPtr.Zero,0)',source)
         self.assertIn('ConnectServer(@"root\\virtualization\\v2",null,null,null,0,null,IntPtr.Zero',source)
         self.assertIn('Settings.NativeRelativeTarget(',source)
@@ -334,6 +380,11 @@ foreach($bad in @($text.Replace('operation=settings','operation=shell'),$text.Re
             body=source.split('interface '+name+' {',1)[1].split('\n }',1)[0]
             self.assertEqual(re.findall(r'PreserveSig\] int (\w+)\(',body),methods)
         parent=(ROOT/'infra/k8s/ha_control/windows-provider-acceptance.ps1').read_text()
+        wire=source[source.index('string json='):source.index('using(var file=new FileStream(output')]
+        wire_keys=re.findall(r'\\"([a-z_0-9]+)\\":',wire)
+        key_line=parent.split('$keys=@(',1)[1].split(')',1)[0]
+        self.assertEqual(len(wire_keys),43)
+        self.assertEqual(set(wire_keys),set(re.findall(r"'([^']+)'",key_line)))
         creation=parent[parent.index('$vm=New-VM'):parent.index("'fixture_service_creation'")]
         self.assertLess(creation.index("'fixture_memory_bound'"),creation.index("'fixture_cpu_bound'"))
         self.assertLess(creation.index('Set-VMMemory -VM $vm -DynamicMemoryEnabled $false'),creation.index("'fixture_target_validation'"))
@@ -353,7 +404,7 @@ foreach($bad in @($text.Replace('operation=settings','operation=shell'),$text.Re
         self.assertIn("(Test-ProbeTarget).State -ne 'Running'",cycle)
         invoke=parent[parent.index('function Invoke-ProbeOperation'):parent.index('function Test-ProbeTarget')]
         self.assertLess(invoke.index('if(Test-Path -LiteralPath $saved)'),invoke.index('Start-Service'))
-        self.assertLess(invoke.index('Write-ProbeOperationReceipt $saved $result'),invoke.rindex('$script:pendingOperation=$false'))
+        self.assertLess(invoke.index('Write-ProbeOperationReceipt $saved ([ordered]'),invoke.rindex('$script:pendingOperation=$false'))
         self.assertIn('Assert-ProbeOperationAuthority $result $Fixture.role $Operation',invoke)
         self.assertEqual(parent.count('GetText([Management.TextFormat]::WmiDtd20)'),1)
         self.assertIn('-not (Test-ProbeCurrentSettingsExact $fresh $true) -or $vm.Notes -cne',parent)
