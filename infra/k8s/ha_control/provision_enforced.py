@@ -193,6 +193,10 @@ def managed_profile_binding(trusted, binding, commit):
             payloads[label]=decode(raw)
         bound=payloads['plan'];policy=payloads['policy'];cfg=bound['windows_enforced']
         policy_keys={'schema_version','profile','cluster','generation','session_id','service_sid','boot_ticks','vm_id','vm_notes_sha256','vm_config_root','disks','trusted_admin_sids','hyperv_member_sids','host_admins_tcb_acknowledged','config_profile'}
+        if 'namespace_closure' in cfg:
+            policy_keys.add('namespace_closure')
+            if enforced_profile.namespace_closure_digest(cfg['namespace_closure']) != enforced_profile.namespace_closure_digest(policy.get('namespace_closure')):
+                deny()
         if type(policy) is not dict or set(policy)!=policy_keys or type(policy['schema_version']) is not int or policy['schema_version']!=1:
             deny()
         if (bound['source_commit']!=commit or bound['profile']!='enforced-vm-v1' or type(bound['schema_version']) is not int or bound['schema_version']!=2
@@ -205,7 +209,8 @@ def managed_profile_binding(trusted, binding, commit):
                 or policy['cluster']!=bound['cluster'] or policy['generation']!=bound['generation']):
             deny()
         profile_acceptance_receipts(trusted,selected,bound)
-        return dict(config_profile=selected,config_profile_sha256=digest,
+        closure_binding = ({'namespace_closure_sha256': enforced_profile.namespace_closure_digest(cfg['namespace_closure'])} if 'namespace_closure' in cfg else {})
+        return dict(**closure_binding,config_profile=selected,config_profile_sha256=digest,
             definition_sha256=selected['definition_sha256'],plan_sha256=trusted['service_args']['plan_sha256'],
             policy_sha256=trusted['policy_sha256'],acceptance_scope=selected['acceptance_scope'],
             metadata_trust_scope='HostHypervisorTCB/config-metadata-only',

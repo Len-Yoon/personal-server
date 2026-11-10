@@ -29,6 +29,46 @@ function Get-EnforcedConfigProfileHash($Value){
     return Get-EnforcedHash ([Text.Encoding]::UTF8.GetBytes(($ordered|ConvertTo-Json -Compress)))
 }
 
+function Get-EnforcedNamespaceClosureHash($Value){
+    Assert-EnforcedKeys $Value @('version','names','sd_sha256','children_sha256','classification_sha256')
+    if($Value.version -isnot [string] -or $Value.version -cne 'direct-children-v1' -or $Value.names -isnot [array] -or $Value.names.Count -lt 2 -or $Value.names.Count -gt 9 -or $Value.names[0] -cne 'root/virtualization/v2'){throw 'namespace_closure_rejected'}
+    $prior='';foreach($name in $Value.names){if($name -isnot [string] -or ($name -cne 'root/virtualization/v2' -and $name -cnotmatch '^root/virtualization/v2/[a-z_][a-z0-9_]{0,63}$') -or [string]::CompareOrdinal($prior,$name) -ge 0){throw 'namespace_closure_rejected'};$prior=$name}
+    foreach($key in @('sd_sha256','children_sha256','classification_sha256')){if($Value.$key -isnot [array] -or $Value.$key.Count -ne $Value.names.Count){throw 'namespace_closure_rejected'};foreach($hash in $Value.$key){if($hash -isnot [string] -or $hash -cnotmatch '^[0-9a-f]{64}$'){throw 'namespace_closure_rejected'}}}
+    $leafNames=@($Value.names|Select-Object -Skip 1|ForEach-Object{($_ -split '/')[-1]})
+    $rootChildren=Get-EnforcedHash ([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $leafNames -Compress)))
+    $empty=Get-EnforcedHash ([Text.Encoding]::UTF8.GetBytes('[]'))
+    for($i=0;$i -lt $Value.names.Count;$i++){if($Value.children_sha256[$i] -cne $(if($i -eq 0){$rootChildren}else{$empty})){throw 'namespace_closure_children_rejected'}}
+    $ordered=[ordered]@{};foreach($key in @('children_sha256','classification_sha256','names','sd_sha256','version')){$ordered[$key]=$Value.$key}
+    return Get-EnforcedHash ([Text.Encoding]::UTF8.GetBytes(($ordered|ConvertTo-Json -Depth 4 -Compress)))
+}
+function Assert-EnforcedNamespaceBytes([byte[]]$Bytes,$writers){
+    $sd=[Security.AccessControl.RawSecurityDescriptor]::new($Bytes,0);Assert-EnforcedDescriptor $sd $writers 1343029278
+}
+function Assert-EnforcedNamespaceLive($Config,$Policy,$Writers,$Watch){
+    $cfg=$Config.windows_enforced;$closure=$null;$names=@('root/virtualization/v2')
+    if($cfg.PSObject.Properties['namespace_closure']){
+        if((Get-EnforcedNamespaceClosureHash $cfg.namespace_closure) -cne (Get-EnforcedNamespaceClosureHash $Policy.namespace_closure)){throw 'namespace_closure_policy_changed'}
+        $closure=$cfg.namespace_closure;$names=@($closure.names)
+    }
+    for($i=0;$i -lt $names.Count;$i++){
+        Assert-EnforcedDeadline $Watch
+        $children=@(Get-CimInstance -Namespace $names[$i] -ClassName '__NAMESPACE' -OperationTimeoutSec 1 -ErrorAction Stop|ForEach-Object{$_.Name}|Sort-Object -CaseSensitive)
+        if($children.Count -gt 8 -or @($children|Sort-Object -Unique).Count -ne $children.Count){throw 'namespace_closure_live_children_rejected'}
+        foreach($child in $children){if($child -isnot [string] -or $child -cnotmatch '^[a-z_][a-z0-9_]{0,63}$'){throw 'namespace_closure_live_children_rejected'}}
+        if($null -eq $closure){if($children.Count -ne 0){throw 'namespace_closure_required'}}else{
+            $hash=Get-EnforcedHash ([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $children -Compress)))
+            if($hash -cne $closure.children_sha256[$i]){throw 'namespace_closure_live_children_changed'}
+        }
+        Assert-EnforcedDeadline $Watch
+        $security=Get-CimInstance -Namespace $names[$i] -ClassName '__SystemSecurity' -OperationTimeoutSec 1 -ErrorAction Stop
+        $answer=Invoke-CimMethod -InputObject $security -MethodName 'GetSD' -OperationTimeoutSec 1 -ErrorAction Stop
+        if($answer.ReturnValue -ne 0 -or $null -eq $answer.SD){throw 'hyperv_namespace_policy_unverified'}
+        Assert-EnforcedDeadline $Watch
+        $bytes=[byte[]]$answer.SD;Assert-EnforcedNamespaceBytes $bytes $Writers
+        if($null -ne $closure -and (Get-EnforcedHash $bytes) -cne $closure.sd_sha256[$i]){throw 'namespace_closure_live_sd_changed'}
+    }
+}
+
 function ConvertTo-EnforcedDiskIdentifier($Value) {
     # Native providers expose either Guid or uppercase string. No RPC or I/O:
     # only one bounded D-format parse per disk in the existing two-second read.
@@ -329,6 +369,7 @@ function Assert-EnforcedConfig($Config) {
     $cfg=$Config.windows_enforced
      $cfgKeys= @('driver_sha256','adapter_sha256','policy_path','policy_sha256','service_name','service_sid','boot_ticks','session_id','python_path','python_sha256','launcher_path','launcher_sha256','service_image_sha256','vm_id','vm_notes_sha256','vm_config_root','disks')
     if($cfg.PSObject.Properties['config_profile']){$cfgKeys+=@('config_profile');$null=Assert-EnforcedConfigProfile $cfg.config_profile}
+    if($cfg.PSObject.Properties['namespace_closure']){$cfgKeys+=@('namespace_closure');$null=Get-EnforcedNamespaceClosureHash $cfg.namespace_closure}
     Assert-EnforcedKeys $cfg $cfgKeys
     foreach($name in @('driver_sha256','adapter_sha256','policy_sha256','session_id','python_sha256','launcher_sha256','service_image_sha256','vm_notes_sha256')){if($cfg.$name -cnotmatch '^[0-9a-f]{64}$'){throw 'enforced_shape_rejected'}}
     if($cfg.service_name -cnotmatch '^[A-Za-z0-9_-]{1,80}$' -or $cfg.service_sid -cnotmatch '^S-1-5-80-(\d+-){4}\d+$' -or
@@ -363,13 +404,7 @@ function Get-EnforcedContext($Config,$Policy,$Watch) {
     $writers=@('S-1-5-18','S-1-5-32-544')+@($admins)+@($cfg.service_sid)
     $sd=[Security.AccessControl.RawSecurityDescriptor]::new([EnforcedVmNativeV1]::ServiceSecurity($cfg.service_name),0)
     Assert-EnforcedDescriptor $sd $writers (Get-EnforcedServiceControlMask)
-    # Read the actual namespace SD; an immutable policy declaration alone is
-    # not evidence that another identity lacks VM management method access.
-    $security=Get-CimInstance -Namespace 'root/virtualization/v2' -ClassName '__SystemSecurity' -ErrorAction Stop
-    $answer=Invoke-CimMethod -InputObject $security -MethodName 'GetSD' -ErrorAction Stop
-    if($answer.ReturnValue -ne 0 -or $null -eq $answer.SD){throw 'hyperv_namespace_policy_unverified'}
-    $sd=[Security.AccessControl.RawSecurityDescriptor]::new([byte[]]$answer.SD,0)
-    Assert-EnforcedDescriptor $sd $writers 1343029278
+    Assert-EnforcedNamespaceLive $Config $Policy $writers $Watch
     $service=Get-CimInstance Win32_Service -Filter ("Name='"+$cfg.service_name+"'") -ErrorAction Stop
     if($service.State -cne 'Running' -or $service.ProcessId -le 0 -or $service.StartName -ine ('NT SERVICE\'+$cfg.service_name)){throw 'provisioned_virtual_service_required'}
     $self=Get-CimInstance Win32_Process -Filter ("ProcessId="+$PID) -ErrorAction Stop
@@ -510,6 +545,7 @@ function Get-EnforcedResponse($Config,$Approved,[string]$PlanHash,[string]$Appro
         $policyKeys+=@('config_profile');if((Get-EnforcedConfigProfileHash $policy.config_profile) -cne (Get-EnforcedConfigProfileHash $cfg.config_profile)){throw 'config_profile_policy_changed'}
         foreach($path in @($Plan,$Approval,$cfg.policy_path,$cfg.python_path,$cfg.launcher_path,$PSCommandPath,(Join-Path $PSScriptRoot 'enforced_windows.py'))){Assert-EnforcedNoCapability $path;$entry=Get-Item -LiteralPath $path -Force;$parent=if($entry -is [IO.DirectoryInfo]){$entry.Parent}else{$entry.Directory};if($null -eq $parent){throw 'config_profile_private_parent_required'};Assert-EnforcedNoCapability $parent.FullName}
     }
+    if($cfg.PSObject.Properties['namespace_closure']){$policyKeys+=@('namespace_closure');if((Get-EnforcedNamespaceClosureHash $policy.namespace_closure) -cne (Get-EnforcedNamespaceClosureHash $cfg.namespace_closure)){throw 'namespace_closure_policy_changed'}}
     Assert-EnforcedKeys $policy $policyKeys
     foreach($name in @('session_id','service_sid','boot_ticks','vm_id','vm_notes_sha256','vm_config_root')){if($policy.$name -cne $cfg.$name){throw 'policy_binding_changed'}}
     if($policy.profile -cne 'enforced-vm-v1' -or $policy.schema_version -ne 1 -or $policy.cluster -cne $Config.cluster -or $policy.generation -ne $Config.generation -or
@@ -537,6 +573,7 @@ function Get-EnforcedResponse($Config,$Approved,[string]$PlanHash,[string]$Appro
         plan_sha256=$PlanHash;approval_sha256=$ApprovalHash;source_sha256=$cfg.driver_sha256;policy_sha256=$cfg.policy_sha256;
         session_id=$cfg.session_id;principal_sha256=$snapshot.context.principal_sha256;boot_ticks=$snapshot.context.boot_ticks;
         broker_instance=$Instance;nonce=$Request.nonce;sequence=[long]$Request.sequence;node=$Config.node;generation=$Config.generation;vm_id=$cfg.vm_id;fenced=[bool]$snapshot.fenced}
+    if($cfg.PSObject.Properties['namespace_closure']){$response.namespace_closure_sha256=Get-EnforcedNamespaceClosureHash $cfg.namespace_closure}
     if($cfg.PSObject.Properties['config_profile']){$response.config_profile=$cfg.config_profile.name;$response.config_profile_sha256=Get-EnforcedConfigProfileHash $cfg.config_profile;$response.config_profile_definition_sha256=$cfg.config_profile.definition_sha256;$response.config_acceptance_scope=$cfg.config_profile.acceptance_scope;$response.operational_cutover_accepted=$cfg.config_profile.operational_cutover_accepted}
     return $response
 }
@@ -561,6 +598,7 @@ if($MyInvocation.InvocationName -cne '.'){
         $hello=[ordered]@{}
         foreach($key in @('schema_version','profile','scope','plan_sha256','approval_sha256','source_sha256','policy_sha256','session_id','principal_sha256','boot_ticks','broker_instance')){$hello[$key]=$snapshot[$key]}
         if($snapshot.Contains('config_profile')){foreach($key in @('config_profile','config_profile_sha256','config_profile_definition_sha256','config_acceptance_scope','operational_cutover_accepted')){$hello[$key]=$snapshot[$key]}}
+        if($snapshot.Contains('namespace_closure_sha256')){$hello.namespace_closure_sha256=$snapshot.namespace_closure_sha256}
         $hello.guard='ready';$hello.sequence=[long]1;$hello|ConvertTo-Json -Depth 4 -Compress
         while($null -ne ($line=[Console]::In.ReadLine())){
             $watch=[Diagnostics.Stopwatch]::StartNew()

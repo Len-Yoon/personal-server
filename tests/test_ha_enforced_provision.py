@@ -212,6 +212,20 @@ foreach($forbidden in @('Start-Service','New-Service','Set-Acl','Start-Process',
             return {'enforced_driver_sha256':cfg['driver_sha256'],'enforced_adapter_sha256':cfg['adapter_sha256']}
         return selected,plan,policy,trust,bind
 
+    def test_managed_package_binds_namespace_closure_in_plan_policy_and_installer_evidence(self):
+        selected, plan, policy, trust, bind = self.managed_inputs()
+        empty = P.sha(b'[]')
+        closure = dict(version='direct-children-v1', names=['root/virtualization/v2','root/virtualization/v2/ms_409'],
+            sd_sha256=['1'*64,'2'*64], children_sha256=[P.sha(b'["ms_409"]'),empty], classification_sha256=['3'*64,'4'*64])
+        plan['windows_enforced']['namespace_closure'] = deepcopy(closure)
+        policy['namespace_closure'] = deepcopy(closure)
+        value = P.managed_profile_binding(trust, bind(), COMMIT)
+        self.assertEqual(value['namespace_closure_sha256'], P.enforced_profile.namespace_closure_digest(closure))
+        policy['namespace_closure']['sd_sha256'][1] = '9'*64
+        with self.assertRaises(P.ProvisionError): P.managed_profile_binding(trust, bind(), COMMIT)
+        del policy['namespace_closure']
+        with self.assertRaises(P.ProvisionError): P.managed_profile_binding(trust, bind(), COMMIT)
+
     def test_managed_package_binds_actual_plan_policy_bytes_without_claiming_native_acceptance(self):
         selected,plan,policy,bound_inputs,bind=self.managed_inputs();binding=bind()
         value=P.managed_profile_binding(bound_inputs,binding,COMMIT)

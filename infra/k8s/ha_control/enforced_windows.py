@@ -73,6 +73,34 @@ def config_profile_digest(value):
                                      separators=(",", ":")).encode()).hexdigest()
 
 
+def namespace_closure(value):
+    """Pinned complete direct-child closure, not a locale-name trust exception."""
+    keys = {"version", "names", "sd_sha256", "children_sha256", "classification_sha256"}
+    if type(value) is not dict or set(value) != keys or value["version"] != "direct-children-v1":
+        _deny()
+    names = value["names"]
+    if (type(names) is not list or not 2 <= len(names) <= 9
+            or names[0] != "root/virtualization/v2"
+            or any(type(n) is not str or not re.fullmatch(r"root/virtualization/v2/[a-z_][a-z0-9_]{0,63}", n) for n in names[1:])
+            or names != sorted(set(names))):
+        _deny()
+    for key in ("sd_sha256", "children_sha256", "classification_sha256"):
+        rows = value[key]
+        if type(rows) is not list or len(rows) != len(names):
+            _deny()
+        for row in rows:
+            _hex(row)
+    empty = hashlib.sha256(b"[]").hexdigest()
+    expected = hashlib.sha256(json.dumps([n.rsplit("/", 1)[1] for n in names[1:]], separators=(",", ":")).encode()).hexdigest()
+    if value["children_sha256"] != [expected] + [empty] * (len(names) - 1):
+        _deny()
+    return value
+
+
+def namespace_closure_digest(value):
+    return hashlib.sha256(json.dumps(namespace_closure(value), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def _deny():
     raise TransitionBlocked("enforced_windows_unverified")
 
@@ -128,8 +156,10 @@ def _validate(plan, approval, plan_hash, driver_hash):
             or plan["generation"] < 1 or not re.fullmatch(r"[0-9a-f]{40}", str(plan.get("source_commit", "")))):
         _deny()
     cfg = plan.get("windows_enforced")
-    if type(cfg) is not dict or set(cfg) != (CONFIG | {"config_profile"} if "config_profile" in cfg else CONFIG):
+    if type(cfg) is not dict or set(cfg) != (CONFIG | ({"config_profile"} if "config_profile" in cfg else set()) | ({"namespace_closure"} if "namespace_closure" in cfg else set())):
         _deny()
+    if "namespace_closure" in cfg:
+        namespace_closure(cfg["namespace_closure"])
     if "config_profile" in cfg:
         config_profile(cfg["config_profile"])
     for key in ("driver_sha256", "adapter_sha256", "policy_sha256", "session_id", "python_sha256", "launcher_sha256",
@@ -239,6 +269,8 @@ class EnforcedWindowsFence:
                           config_profile_definition_sha256=CONFIG_PROFILE_DEFINITION_SHA256,
                           config_acceptance_scope=self.cfg["config_profile"]["acceptance_scope"],
                           operational_cutover_accepted=self.cfg["config_profile"]["operational_cutover_accepted"])
+        if "namespace_closure" in self.cfg:
+            result["namespace_closure_sha256"] = namespace_closure_digest(self.cfg["namespace_closure"])
         return result
 
     @contextmanager
