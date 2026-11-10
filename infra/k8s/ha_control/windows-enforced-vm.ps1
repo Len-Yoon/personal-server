@@ -112,6 +112,11 @@ public static class EnforcedVmNativeV1 {
 function Assert-EnforcedAllowedMask([string]$Sid,[long]$Mask,[string[]]$Allowed,[long]$RestrictedMask) {
     if((($Mask -band 4294967295) -band $RestrictedMask) -ne 0 -and $Sid -notin $Allowed){throw 'enforced_acl_rejected'}
 }
+function Get-EnforcedServiceControlMask {
+    # Service GENERIC_EXECUTE includes START/STOP/PAUSE/USER_DEFINED_CONTROL.
+    # https://learn.microsoft.com/en-us/windows/win32/services/service-security-and-access-rights
+    return [long]1879900530 # 0x700d0172; file execute rights use a separate mask.
+}
 function Get-EnforcedOsVolumeRoot {return [IO.Path]::GetPathRoot([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows))}
 function Test-EnforcedOsRootOwner([string]$Owner,[string]$Path,[int]$Depth) {
     return ($Owner -ceq 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464' -and
@@ -357,7 +362,7 @@ function Get-EnforcedContext($Config,$Policy,$Watch) {
     foreach($sid in $hyperv){if($sid -notin @($admins+$cfg.service_sid+'S-1-5-18')){throw 'unsupported_management_principal'}}
     $writers=@('S-1-5-18','S-1-5-32-544')+@($admins)+@($cfg.service_sid)
     $sd=[Security.AccessControl.RawSecurityDescriptor]::new([EnforcedVmNativeV1]::ServiceSecurity($cfg.service_name),0)
-    Assert-EnforcedDescriptor $sd $writers 1343029618
+    Assert-EnforcedDescriptor $sd $writers (Get-EnforcedServiceControlMask)
     # Read the actual namespace SD; an immutable policy declaration alone is
     # not evidence that another identity lacks VM management method access.
     $security=Get-CimInstance -Namespace 'root/virtualization/v2' -ClassName '__SystemSecurity' -ErrorAction Stop
