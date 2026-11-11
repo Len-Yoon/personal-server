@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Closed-catalog initializer, run in exact utility image against owned fresh PG.
+"""Closed-catalog or frozen seven-service importer in the exact utility image.
 
-No production migration or writer activation. Replication bootstrap is the sole
+Migration requires an externally pinned private frozen manifest and emits no
+writer authority. Replication bootstrap is the sole
 local-commit phase; catalog installation requires the synchronous standby first.
 No password/SQL/provider payload is printed. All role secrets are private input.
 """
@@ -46,7 +47,40 @@ def configuration(path):
     return value
 
 
-def bootstrap(admin, value, phase):
+def prepare_closed_control(admin,value):
+    from psycopg import sql
+    from ha_runtime.config import SERVICES
+    primary=value.get('primary_node','A');partner='B' if primary=='A' else 'A'
+    admin.execute(Path('/opt/ha/ha_runtime/schema.sql').read_text())
+    admin.execute('DROP FUNCTION ha.local_roles(text[],text,boolean)')
+    admin.execute("INSERT INTO ha.control VALUES(1,%s,1,1,%s,%s,1,ARRAY[%s],%s,'AS',false,false,clock_timestamp()-interval '1 day')",(value['cluster'],primary,partner,primary,primary))
+    for service in sorted(SERVICES):
+        for node in ('a','b'):
+            role=service.replace('-','_')+'_'+node
+            admin.execute(sql.SQL('CREATE ROLE {} LOGIN NOINHERIT PASSWORD {}').format(sql.Identifier(role),sql.Literal(value['passwords'][role])))
+            admin.execute('INSERT INTO ha.identities VALUES(%s,%s,%s)',(role,service,node.upper()))
+
+
+def install_guarded_catalog(admin,value,entries):
+    from psycopg import sql
+    from ha_runtime import enforcement,effects
+    enforcement.install_namespaces(admin,entries,generation=1)
+    admin.execute(sql.SQL('CREATE ROLE ha_effect_broker LOGIN NOINHERIT PASSWORD {}').format(sql.Literal(value['passwords']['ha_effect_broker'])))
+    system_id=admin.execute('SELECT system_identifier::text FROM pg_control_system()').fetchone()[0]
+    binding=effects.Binding(value['cluster'],system_id,value['source_commit'],value['plan_sha256'],'ha_effect_broker',value['broker_instance'])
+    effects.install(admin,binding)
+    effects.validate_catalog(admin,binding)
+    need(admin.execute("SELECT NOT writes_open AND NOT history_safe AND expires_at<clock_timestamp() FROM ha.control").fetchone()==(True,))
+    need(admin.execute("SELECT to_regprocedure('ha.local_roles(text[],text,boolean)') IS NULL").fetchone()==(True,))
+    need(admin.execute('SELECT count(*) FROM ha.identities').fetchone()==(14,))
+    need(admin.execute('SELECT count(*) FROM ha.enforced_roles').fetchone()==(14,))
+    need(admin.execute('SELECT count(DISTINCT service) FROM ha.enforced_namespaces').fetchone()==(7,))
+    need(admin.execute('SELECT count(*) FROM ha_effects.ledger').fetchone()==(0,))
+    need(admin.execute('SELECT count(*) FROM ha_effects.private_state').fetchone()==(0,))
+    return system_id
+
+
+def bootstrap(admin, value, phase, *, migration=None):
     from psycopg import sql
     from ha_runtime import enforcement, effects, migrate
     from ha_runtime.config import SERVICES
@@ -64,44 +98,25 @@ def bootstrap(admin, value, phase):
         admin.execute('CREATE DATABASE ha')
         admin.execute("SET synchronous_commit='remote_apply'")
         return {'replication_role_created':True,'catalog_installed':False,'writer_authority_issued':False}
-    need(phase == 'catalog')
+    need(phase in {'catalog','migration'})
     need(admin.info.dbname == 'ha')
     need(admin.execute("SELECT current_setting('synchronous_commit'),regexp_replace(current_setting('synchronous_standby_names'),'[[:space:]\"]','','g')").fetchone() == ('remote_apply','FIRST1(ha_'+partner.lower()+')'))
     need(admin.execute("SELECT count(*) FROM pg_stat_replication WHERE application_name=%s AND state='streaming' AND sync_state='sync'",('ha_'+partner.lower(),)).fetchone() == (1,))
     need(admin.execute("SELECT 1 FROM pg_namespace WHERE nspname IN ('ha','ha_effects') OR left(nspname,2)='s_'").fetchone() is None)
-    entries = []
+    if phase=='migration':
+        from ha_runtime.seven_migration import apply
+        need(migration is not None)
+        return apply(admin,value,migration['manifest'],migration['sha256'],migration['receipt'],prepare_closed_control,install_guarded_catalog)
+    from ha_runtime.seven_migration import CORE_COMPONENTS
+    entries=[]
     with admin.transaction():
-        admin.execute(Path('/opt/ha/ha_runtime/schema.sql').read_text())
-        admin.execute('DROP FUNCTION ha.local_roles(text[],text,boolean)')
-        admin.execute("INSERT INTO ha.control VALUES(1,%s,1,1,%s,%s,1,ARRAY[%s],%s,'AS',false,false,clock_timestamp()-interval '1 day')",(value['cluster'],primary,partner,primary,primary))
+        prepare_closed_control(admin,value)
         for service in sorted(SERVICES):
-            roles = [service.replace('-','_')+'_'+node for node in ('a','b')]
-            for role,node in zip(roles,('A','B')):
-                admin.execute(sql.SQL('CREATE ROLE {} LOGIN NOINHERIT PASSWORD {}').format(sql.Identifier(role),sql.Literal(value['passwords'][role])))
-                admin.execute('INSERT INTO ha.identities VALUES(%s,%s,%s)',(role,service,node))
-            # This is a new empty catalog, not migrated application tables. A real
-            # frozen snapshot must replace it before any service can be admitted.
-            components = {'portal-web':('homeops','bookmarks','state'),'book-memo':('main','state'),
-                          'youtube-memo':('main','state'),'crawler-worker':('state',),
-                          'car-care-worker':('main','state'),'homeops-executor':('main','state'),
-                          'system-agent':('state',)}[service]
-            for component in components:
-                schema = migrate.create_namespace(admin,service,component)
+            roles=[service.replace('-','_')+'_'+node for node in ('a','b')]
+            for component in CORE_COMPONENTS[service]:
+                schema=migrate.create_namespace(admin,service,component)
                 entries.append((schema,service,roles))
-        enforcement.install_namespaces(admin,entries,generation=1)
-        admin.execute(sql.SQL('CREATE ROLE ha_effect_broker LOGIN NOINHERIT PASSWORD {}').format(sql.Literal(value['passwords']['ha_effect_broker'])))
-        system_id = admin.execute('SELECT system_identifier::text FROM pg_control_system()').fetchone()[0]
-        binding = effects.Binding(value['cluster'],system_id,value['source_commit'],value['plan_sha256'],
-                                  'ha_effect_broker',value['broker_instance'])
-        effects.install(admin,binding)
-        need(admin.execute("SELECT NOT writes_open AND NOT history_safe AND expires_at<clock_timestamp() FROM ha.control").fetchone() == (True,))
-        need(admin.execute("SELECT to_regprocedure('ha.local_roles(text[],text,boolean)') IS NULL").fetchone() == (True,))
-        need(admin.execute('SELECT count(*) FROM ha.identities').fetchone() == (14,))
-        need(admin.execute('SELECT count(*) FROM ha.enforced_roles').fetchone() == (14,))
-        need(admin.execute('SELECT count(DISTINCT service) FROM ha.enforced_namespaces').fetchone() == (7,))
-        need(admin.execute('SELECT count(*) FROM ha_effects.ledger').fetchone() == (0,))
-        need(admin.execute('SELECT count(*) FROM ha_effects.private_state').fetchone() == (0,))
-        effects.validate_catalog(admin,binding)
+        system_id=install_guarded_catalog(admin,value,entries)
     return {'catalog_installed':True,'guarded_services':7,'app_roles':14,'empty_namespaces':len(entries),
         'effects_closed':True,'provider_credentials_imported':False,'writer_authority_issued':False,
         'full_seven_app_restore_verified':False,'system_id':system_id}
@@ -109,21 +124,28 @@ def bootstrap(admin, value, phase):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config',required=True);parser.add_argument('--phase',choices=('replication','catalog'),required=True)
+    parser.add_argument('--config',required=True);parser.add_argument('--phase',choices=('replication','catalog','migration'),required=True)
+    parser.add_argument('--migration-manifest');parser.add_argument('--migration-sha256');parser.add_argument('--migration-receipt')
     args = parser.parse_args()
     try:
         import psycopg
         value = configuration(args.config)
+        migration=None
+        supplied=(args.migration_manifest,args.migration_sha256,args.migration_receipt)
+        need(all(supplied) if args.phase=='migration' else not any(supplied))
+        if args.phase=='migration':migration={'manifest':args.migration_manifest,'sha256':args.migration_sha256,'receipt':args.migration_receipt}
         # Fixed Unix socket, peer-authenticated postgres. No DSN/host/password input.
         need(os.geteuid() in (70,999))
         with psycopg.connect(host='/var/run/postgresql',dbname='postgres' if args.phase=='replication' else 'ha',
                              user='postgres',autocommit=True,connect_timeout=3,
                              options='-c statement_timeout=10000 -c lock_timeout=3000') as admin:
-            result = bootstrap(admin,value,args.phase)
+            result = bootstrap(admin,value,args.phase,migration=migration)
         print(json.dumps({'status':'PASS',**result},sort_keys=True))
         return 0
-    except Exception:
-        print(json.dumps({'status':'FAIL','reason':'closed_bootstrap_rejected'}))
+    except Exception as error:
+        from ha_runtime.seven_migration import MigrationRejected
+        reason=str(error) if isinstance(error,MigrationRejected) else 'closed_bootstrap_rejected'
+        print(json.dumps({'status':'FAIL','reason':reason}))
         return 1
 
 

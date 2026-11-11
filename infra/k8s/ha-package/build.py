@@ -26,6 +26,7 @@ EGRESS_BROKER = frozenset({"infra/k8s/ha_egress/server.py", "infra/k8s/ha_egress
 CAR_PROVIDER_FILES = frozenset("car-care-worker/app/" + name for name in
     ("__init__.py", "models.py", "services/__init__.py", "services/hyundai.py",
      "services/ha_backend.py", "services/vehicle_types.py"))
+PORTAL_MIGRATION_FILES = frozenset({"portal-web/app/services/ha_files.py"})
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 BASE = re.compile(r"python:3\.(?:11|12)-alpine3\.24@sha256:[0-9a-f]{64}")
 APK_MINIMUMS = {"musl": "1.2.6-r3", "musl-utils": "1.2.6-r3", "zlib": "1.3.2-r1"}
@@ -91,9 +92,10 @@ def snapshot(commit):
     required = {s + "/" + f for s in SERVICES for f in ("Dockerfile", "requirements.txt", "app/main.py")}
     required |= {"infra/k8s/ha_runtime/__init__.py", "infra/k8s/ha_runtime/schema.sql",
                  "infra/k8s/ha_runtime/backup.py", "infra/k8s/ha_runtime/backup_cli.py",
+                 "infra/k8s/ha_runtime/seven_migration.py",
                  "infra/k8s/tools/n100_ha_contract.py", "infra/k8s/ha-package/Dockerfile.template",
                  "infra/k8s/ha-package/Utility.Dockerfile.template"}
-    required |= CONTROL_RUNTIME | EGRESS_RUNTIME | EGRESS_BROKER | CAR_PROVIDER_FILES
+    required |= CONTROL_RUNTIME | EGRESS_RUNTIME | EGRESS_BROKER | CAR_PROVIDER_FILES | PORTAL_MIGRATION_FILES
     if not required <= result.keys():
         raise PackageError("source_snapshot_incomplete")
     return result
@@ -190,6 +192,9 @@ def prepare(commit, output):
             target = context / "_ha/_providers/car" / name.removeprefix("car-care-worker/")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
+        elif name in PORTAL_MIGRATION_FILES:
+            target=context/"_ha/_validators/portal_ha_files.py"
+            target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(data)
     manifest["utilities"][UTILITY] = {"base": base, "user": "10001:10001", "dockerfile_sha256": sha(rendered.encode())}
     release = sha(encode(manifest))
     manifest["release_id"] = release
@@ -251,6 +256,8 @@ def verify_source(bundle):
             expected[UTILITY + "/_ha/" + name.removeprefix("infra/k8s/")] = sha(data)
         elif name in CAR_PROVIDER_FILES:
             expected[UTILITY + "/_ha/_providers/car/" + name.removeprefix("car-care-worker/")] = sha(data)
+        elif name in PORTAL_MIGRATION_FILES:
+            expected[UTILITY+"/_ha/_validators/portal_ha_files.py"]=sha(data)
     if expected != manifest["bundle_files"]:
         raise PackageError("rendered_source_binding_mismatch")
     return manifest

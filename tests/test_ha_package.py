@@ -34,8 +34,9 @@ class PackageTest(unittest.TestCase):
                 target = self.root / service / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(data)
-        for name in (*package.CAR_PROVIDER_FILES, *package.CONTROL_RUNTIME, *package.EGRESS_RUNTIME, *package.EGRESS_BROKER, "infra/k8s/ha_runtime/__init__.py", "infra/k8s/ha_runtime/schema.sql",
+        for name in (*package.CAR_PROVIDER_FILES, *package.PORTAL_MIGRATION_FILES, *package.CONTROL_RUNTIME, *package.EGRESS_RUNTIME, *package.EGRESS_BROKER, "infra/k8s/ha_runtime/__init__.py", "infra/k8s/ha_runtime/schema.sql",
                      "infra/k8s/ha_runtime/backup.py", "infra/k8s/ha_runtime/backup_cli.py",
+                     "infra/k8s/ha_runtime/seven_migration.py",
                      "infra/k8s/tools/n100_ha_contract.py", "infra/k8s/ha-package/Dockerfile.template",
                      "infra/k8s/ha-package/Utility.Dockerfile.template"):
             target = self.root / name
@@ -96,6 +97,11 @@ class PackageTest(unittest.TestCase):
                 "import ha_runtime.enforcement;import ha_control.privilege_closure;import ha_egress.client;import ha_egress.http_read;import ha_egress.app_entrypoint",
                 str(context)], check=True, capture_output=True)
             if service == package.UTILITY:
+                subprocess.run([sys.executable,'-I','-c',
+                    'import sys;sys.path.insert(0,sys.argv[1]);'
+                    'from ha_runtime.seven_migration import _portal_validator;'
+                    '_portal_validator()._validate({"format":1,"version":0,"entries":{},"trash":{},"confirmations":{},"audit":[]})',
+                    str(context)],check=True,capture_output=True)
                 subprocess.run([sys.executable, '-I', '-c',
                     'import sys;sys.path.insert(0,sys.argv[1]);'
                     'from ha_egress.hyundai_provider import canonical_client_type;'
