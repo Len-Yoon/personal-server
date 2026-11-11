@@ -373,6 +373,49 @@ class PGControlTests(unittest.TestCase):
                 cli.run(args)
             backend.assert_not_called()
 
+    def test_authenticate_checks_both_isolated_endpoints_without_a_journal(self):
+        backend = self.backend
+        backend.plan = dict(self.plan, profile="enforced-vm-v1", windows_enforced={
+            "config_profile": {"acceptance_scope": "isolated-predeployment", "operational_cutover_accepted": False},
+        }, pg_nodes={node: {"dbname": "ha", "user": "postgres"} for node in ("A", "B")})
+        connections = {node: MagicMock() for node in ("A", "B")}
+        for node, connection in connections.items():
+            connection.execute.return_value.fetchone.return_value = (
+                "ha", "postgres", "ha_" + node, str(backend.plan["system_id"]))
+
+        @contextmanager
+        def connect(node):
+            yield connections[node]
+
+        with patch.object(backend, "_connection", side_effect=connect) as connect_mock:
+            backend.authenticate_isolated_nodes()
+            self.assertEqual([call.args for call in connect_mock.call_args_list], [("A",), ("B",)])
+            for connection in connections.values():
+                connection.transaction.assert_called_once()
+                self.assertEqual(connection.execute.call_args_list[0].args, ("SET TRANSACTION READ ONLY",))
+                self.assertEqual(connection.execute.call_count, 2)
+            connections["B"].execute.return_value.fetchone.return_value = (
+                "ha", "postgres", "ha_A", str(backend.plan["system_id"]))
+            with self.assertRaisesRegex(TransitionBlocked, "pg_identity_mismatch"):
+                backend.authenticate_isolated_nodes()
+            backend.plan["windows_enforced"]["config_profile"]["operational_cutover_accepted"] = True
+            with self.assertRaisesRegex(TransitionBlocked, "isolated_pg_authentication_required"):
+                backend.authenticate_isolated_nodes()
+            self.assertEqual(connect_mock.call_count, 4)
+
+        (self.root / "journal").mkdir()
+        args = SimpleNamespace(plan=str(self.root / "plan.json"), approval=str(self.root / "approval.json"),
+                               journal=None, command="authenticate")
+        service_backend = MagicMock()
+        service_backend.plan = backend.plan
+        with patch.object(cli, "PgBackend", return_value=service_backend), patch.object(cli, "validate_bundle"), \
+                patch.object(cli, "Controller") as controller, patch.object(cli, "Journal") as journal:
+            self.assertEqual(cli.run(args), {"status": "PASS", "authenticated_nodes": ["A", "B"], "authority_opened": False})
+            service_backend.authenticate_isolated_nodes.assert_called_once()
+            controller.assert_not_called()
+            journal.assert_not_called()
+        self.assertEqual(list((self.root / "journal").iterdir()), [])
+
     def test_enforced_cli_persists_only_in_precreated_mutable_journal_root(self):
         backend = MagicMock()
         backend.plan = dict(self.plan, profile="enforced-vm-v1")

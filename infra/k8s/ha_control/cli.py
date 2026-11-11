@@ -59,6 +59,9 @@ def run(args):
         if journal != expected or journal.is_symlink() or journal.parent.is_symlink() or not journal.parent.is_dir():
             raise TransitionBlocked("plan_bound_journal_required")
         validate_bundle(p)
+        if args.command == "authenticate":
+            backend.authenticate_isolated_nodes()
+            return {"status": "PASS", "authenticated_nodes": ["A", "B"], "authority_opened": False}
         control = Controller(journal, backend)
         if args.command == "initialize":
             control.initialize(cluster=p["cluster"], generation=p["generation"], old=p["node"],
@@ -95,7 +98,7 @@ def run(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("initialize", "advance", "serve"))
+    parser.add_argument("command", choices=("authenticate", "initialize", "advance", "serve"))
     parser.add_argument("--plan", required=True)
     parser.add_argument("--approval", required=True)
     parser.add_argument("--journal")
