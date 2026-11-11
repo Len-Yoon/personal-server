@@ -95,6 +95,16 @@ function Assert-GuestVmSpec($Value,[string]$OwnedSupportPath=''){
     if($Value.schema_version -ge 2){$fields+=@('creation_method','node_image')}
     if($Value.schema_version -ge 3){$fields+=@('config_profile','peer_config_profile_receipt_sha256','peer_source_commit')}
     if($Value.schema_version -eq 4){. (Import-GuestOwnedSupport $OwnedSupportPath);$fields+=@(Get-GuestOwnedFields);Assert-GuestOwnedDeclaration $Value ''}
+    $operationFields=@('vm_operation_source_commit','running_firmware_sha256','running_peer_firmware_sha256')
+    if($Value.schema_version -eq 4 -and @($operationFields|Where-Object{$null -ne $Value.PSObject.Properties[$_]}).Count){
+        $fields+=$operationFields
+        Assert-GuestVmKeys $Value $fields
+        if($Value.node -cne 'B' -or $Value.vm_operation_source_commit -isnot [string] -or
+            $Value.vm_operation_source_commit -cnotmatch '^[0-9a-f]{40}$' -or $Value.vm_operation_source_commit -ceq $Value.executor_source_commit){throw 'guest_vm_operation_source_rejected'}
+        foreach($key in @('running_firmware_sha256','running_peer_firmware_sha256')){
+            if($Value.$key -isnot [string] -or $Value.$key -cnotmatch '^[0-9a-f]{64}$' -or $Value.$key -ceq ('0'*64)){throw 'guest_vm_firmware_pin_rejected'}
+        }
+    }
     Assert-GuestVmKeys $Value $fields
     if(
         $Value.source_commit -isnot [string] -or $Value.source_commit -cnotmatch '^[0-9a-f]{40}$' -or
@@ -131,7 +141,7 @@ function Read-GuestVmSpec([string]$OwnedSupportPath=''){
     # so Unicode-escaped duplicate keys cannot bypass the literal key inventory.
     if($text.Contains('\')){throw 'guest_vm_duplicate_or_escaped_keys'}
     $keys=@([regex]::Matches($text,'"([A-Za-z_][A-Za-z0-9_]*)"\s*:')|ForEach-Object{$_.Groups[1].Value})
-    if($keys.Count -notin @(13,23,26,36,39,41,44) -or @($keys|Select-Object -Unique).Count -ne $keys.Count){throw 'guest_vm_duplicate_or_escaped_keys'}
+    if($keys.Count -notin @(13,23,26,36,39,41,44,47) -or @($keys|Select-Object -Unique).Count -ne $keys.Count){throw 'guest_vm_duplicate_or_escaped_keys'}
     if((Get-GuestVmHash $bytes) -cne $ManifestSha256){throw 'guest_vm_manifest_changed'}
     return Assert-GuestVmSpec ($text|ConvertFrom-Json) $OwnedSupportPath
 }
@@ -462,7 +472,30 @@ function Assert-GuestVmComPorts($Ports,[string]$VmId,[string]$Pipe){
     }
 }
 
-function Assert-GuestVmPrepared($Spec,$Names,$Pins,[string]$GuestRoot,[string]$DiskPath,[string]$IsoPath,[string]$ExpectedManifestSha256=$ManifestSha256,[bool]$PeerReadOnly=$false,[bool]$PinnedPreSeal=$false){
+function Test-GuestVmFirmwareDrive($Entry,$Drive){
+    return ($null -ne $Entry -and $null -ne $Entry.PSObject.Properties['Device'] -and $null -ne $Entry.Device -and
+        $null -ne $Entry.Device.PSObject.Properties['Id'] -and $null -ne $Entry.Device.Id -and $Entry.Device.Id -eq $Drive.Id)
+}
+
+function Assert-GuestVmFirmware($Firmware,$Drive,[bool]$PeerReadOnly,[string]$State,[string]$RunningFirmwareSha256){
+    if($Firmware.SecureBoot -ne 'On' -or $Firmware.SecureBootTemplate -cne 'MicrosoftUEFICertificateAuthority'){throw 'guest_vm_firmware_changed'}
+    $order=@($Firmware.BootOrder)
+    if($order.Count -ge 1 -and (Test-GuestVmFirmwareDrive $order[0] $Drive) -and
+        ($null -eq $order[0].PSObject.Properties['BootType'] -or $order[0].BootType -ceq 'Drive')){return}
+    if(-not $PeerReadOnly -or $State -cne 'Running' -or $RunningFirmwareSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $order.Count -lt 2 -or $null -eq $order[0] -or $null -eq $order[1]){throw 'guest_vm_firmware_changed'}
+    $first=$order[0];$next=$order[1]
+    if($null -eq $first.PSObject.Properties['BootType'] -or $first.BootType -cne 'File' -or
+        $null -eq $first.PSObject.Properties['Device'] -or $null -ne $first.Device -or
+        $null -eq $first.PSObject.Properties['FirmwarePath'] -or $first.FirmwarePath -isnot [string] -or
+        $null -eq $next.PSObject.Properties['BootType'] -or $next.BootType -cne 'Drive' -or
+        -not (Test-GuestVmFirmwareDrive $next $Drive)){throw 'guest_vm_firmware_changed'}
+    $path=$first.FirmwarePath.ToLowerInvariant()
+    if($path -cnotmatch '^hd\(15,gpt,[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12},0x2800,0x35000\)/\\efi\\ubuntu\\shimx64\.efi$' -or
+        (Get-GuestVmHash ([Text.Encoding]::UTF8.GetBytes($path))) -cne $RunningFirmwareSha256){throw 'guest_vm_firmware_changed'}
+}
+
+function Assert-GuestVmPrepared($Spec,$Names,$Pins,[string]$GuestRoot,[string]$DiskPath,[string]$IsoPath,[string]$ExpectedManifestSha256=$ManifestSha256,[bool]$PeerReadOnly=$false,[bool]$PinnedPreSeal=$false,[string]$RunningFirmwareSha256=''){
     Assert-GuestVmKeys $Pins @('installation_id','source_commit','stage_source_commit','seed_source_commit','node','manifest_sha256','stage_manifest_sha256','vm_id','vm_name','switch_id','switch_name','config_path','disk_path','disk_sha256','disk_identity','disk_identifier','seed_path','seed_sha256','seed_identity','mac_address','com1_pipe','optional_egress_nic','egress_mac_address','peer_prepared_receipt_sha256','switch_owner_manifest_sha256')
     if($Pins.node -cne $Spec.node -or $Pins.installation_id -cne $Spec.installation_id -or $Pins.source_commit -cne $Spec.source_commit -or $Pins.stage_source_commit -cne $Spec.stage_source_commit -or $Pins.seed_source_commit -cne $Spec.seed_source_commit -or $Pins.manifest_sha256 -cne $ExpectedManifestSha256 -or
         $Pins.stage_manifest_sha256 -cne $Spec.stage_manifest_sha256 -or $Pins.vm_name -cne $Names.vm -or $Pins.switch_name -cne $Names.switch -or
@@ -497,7 +530,8 @@ function Assert-GuestVmPrepared($Spec,$Names,$Pins,[string]$GuestRoot,[string]$D
         $iso=Open-GuestVmPinned $IsoPath $Spec.seed_iso_sha256 $Spec.seed_iso_bytes $vmSid $false;$iso.Dispose()
     }
     $firmware=Get-VMFirmware -VM $vm;$ports=@(Get-VMComPort -VM $vm)
-    if(@($firmware.BootOrder).Count -lt 1 -or $firmware.BootOrder[0].Device.Id -ne $drives[0].Id -or $firmware.SecureBoot -ne 'On' -or $firmware.SecureBootTemplate -cne 'MicrosoftUEFICertificateAuthority'){throw 'guest_vm_firmware_changed'}
+    if(-not $RunningFirmwareSha256 -and $null -ne $Spec.PSObject.Properties['running_firmware_sha256']){$RunningFirmwareSha256=$Spec.running_firmware_sha256}
+    Assert-GuestVmFirmware $firmware $drives[0] $PeerReadOnly ([string]$vm.State) $RunningFirmwareSha256
     Assert-GuestVmComPorts $ports $Pins.vm_id $Names.pipe
     if(-not $PinnedPreSeal){Assert-GuestVmPrivate $GuestRoot}
     return $vm
@@ -517,7 +551,8 @@ function Get-GuestVmPeer([string]$Root,$Spec){
     $peerMacs=@($peerSpec.mac_address);if($peerSpec.optional_egress_nic){$peerMacs+=@($peerSpec.egress_mac_address)}
     if($Spec.mac_address -in $peerMacs -or ($Spec.optional_egress_nic -and $Spec.egress_mac_address -in $peerMacs)){throw 'guest_vm_peer_mac_collision'}
     if($Spec.PSObject.Properties['schema_version'] -and $Spec.schema_version -ge 3){$null=Read-GuestVmConfigProfileReceipt $Root 'A' $Spec.peer_config_profile_receipt_sha256 $pins $Spec.config_profile $Spec.peer_prepared_receipt_sha256}
-    $peerVm=Assert-GuestVmPrepared $peerSpec (Get-GuestVmNames $peerSpec) $pins $peerRoot $peerDisk $peerIso $pins.manifest_sha256 $true
+    $firmwarePin=if($null -ne $Spec.PSObject.Properties['running_peer_firmware_sha256']){$Spec.running_peer_firmware_sha256}else{''}
+    $peerVm=Assert-GuestVmPrepared $peerSpec (Get-GuestVmNames $peerSpec) $pins $peerRoot $peerDisk $peerIso $pins.manifest_sha256 $true $false $firmwarePin
     $switch=Get-VMSwitch -Id ([Guid]$pins.switch_id) -ErrorAction Stop
     return [pscustomobject]@{pins=$pins;vm=$peerVm;switch=$switch}
 }
@@ -930,7 +965,10 @@ function Invoke-GuestVm{
         Add-GuestVmEvent 'canonical_acl_sealed' @{objects=$sealed;root_stamp=$stamp}
         if($spec.node -ceq 'B'){$peer=Get-GuestVmPeer $root $spec;if($peer.pins.switch_id -cne $pins.switch_id -or $peer.pins.manifest_sha256 -cne $switchOwner){throw 'guest_vm_peer_switch_changed'}}
         $null=Assert-GuestVmPrepared $spec $names ([pscustomobject]$pins) $guestRoot $diskPath $isoPath
-        if($null -ne $selectedProfile){$null=Write-GuestVmConfigProfileReceipt $root $spec ([pscustomobject]$pins) $selectedProfile $(if($spec.schema_version -eq 4){$spec.executor_source_commit}else{$spec.source_commit})}
+        if($null -ne $selectedProfile){
+            $profileOrigin=if($null -ne $spec.PSObject.Properties['vm_operation_source_commit']){$spec.vm_operation_source_commit}elseif($spec.schema_version -eq 4){$spec.executor_source_commit}else{$spec.source_commit}
+            $null=Write-GuestVmConfigProfileReceipt $root $spec ([pscustomobject]$pins) $selectedProfile $profileOrigin
+        }
         Add-GuestVmEvent 'prepared' $pins
         Write-GuestVmRecord $preparedPath ([ordered]@{schema_version=1;prepared=$true;pins=$pins}) $true
         Assert-GuestVmPrivate $preparedPath

@@ -303,6 +303,30 @@ $ManifestSha256='4'*64
 $peer=Get-GuestVmPeer 'C:\Private' $b;if($peer.switch.Id.ToString() -cne $switchId){throw 'wrong_switch_adopted'}
 $b|Add-Member schema_version 2;$b|Add-Member creation_method 'verified-node-image-copy-v1';$b|Add-Member node_image ([pscustomobject]@{filename='node-B.vhdx';disk_identifier='44444444-4444-4444-4444-444444444444'})
 $peer=Get-GuestVmPeer 'C:\Private' $b;if($peer.pins.manifest_sha256 -cne $pins.manifest_sha256 -or $peer.pins.disk_identifier -cne $pins.disk_identifier){throw 'schema2_peer_receipt_identity_lost'}
+$firmwarePath='HD(15,GPT,6EC49856-0BD6-4FC8-891C-2AB8F712B077,0x2800,0x35000)/\EFI\ubuntu\shimx64.efi'
+$shim=[pscustomobject]@{BootType='File';Device=$null;FirmwarePath=$firmwarePath}
+$drive=[pscustomobject]@{BootType='Drive';Device=$script:hdd}
+$script:fw.BootOrder=@($shim,$drive)
+$pin='bc5ec4c91f1f09fa1ab974f4adf841a8984f001ac0cdea1c4cc854811988b68f'
+$b|Add-Member running_peer_firmware_sha256 $pin
+$peer=Get-GuestVmPeer 'C:\Private' $b;if($peer.vm.State -cne 'Running'){throw 'running_firmware_pin_not_passed'}
+$spec|Add-Member running_firmware_sha256 $pin
+$null=Assert-GuestVmPrepared $spec $names $pins $root $disk $iso $pins.manifest_sha256 $true
+foreach($case in @('wrong_pin','wrong_path','wrong_order','wrong_drive','off','not_peer')){
+ $order=@($shim,$drive);$candidate=$pin;$state='Running';$readOnly=$true
+ switch($case){
+  'wrong_pin'{$candidate='a'*64}
+  'wrong_path'{$order[0]=[pscustomobject]@{BootType='File';Device=$null;FirmwarePath=$firmwarePath.Replace('shimx64.efi','grubx64.efi')}}
+  'wrong_order'{$order=@($shim,$shim,$drive)}
+  'wrong_drive'{$order[1]=[pscustomobject]@{BootType='Drive';Device=[pscustomobject]@{Id='other-drive'}}}
+  'off'{$state='Off'}
+  'not_peer'{$readOnly=$false}
+ }
+ $fw=[pscustomobject]@{SecureBoot='On';SecureBootTemplate='MicrosoftUEFICertificateAuthority';BootOrder=$order}
+ $closed=$false
+ try{Assert-GuestVmFirmware $fw $script:hdd $readOnly $state $candidate}catch{if($_.Exception.Message -eq 'guest_vm_firmware_changed'){$closed=$true}}
+ if(-not $closed){throw ('firmware_fallback_accepted_'+$case)}
+}
 $b.stage_source_commit='9'*40;$closed=$false;try{$null=Get-GuestVmPeer 'C:\Private' $b}catch{$closed=$true};if(-not $closed){throw 'peer_component_mismatch'}
 ''')
 
@@ -637,6 +661,21 @@ if(-not $text.Contains('$stream.Flush($true)') -or -not $text.Contains('[IO.File
         self.ps(r'''
 $v=$env:FIXTURE|ConvertFrom-Json;$spec=Assert-GuestVmSpec $v.spec;Assert-GuestVmImageDerivationReceipt $v.receipt $spec
 . (Import-GuestOwnedSupport);Assert-GuestOwnedDeclaration $spec (Get-GuestVmScriptHash)
+$b=($spec|ConvertTo-Json -Depth 10)|ConvertFrom-Json
+$b.node='B';$b.node_image.filename='node-B.vhdx';$b.peer_source_commit='e'*40
+$b.peer_prepared_receipt_sha256='c'*64;$b.peer_config_profile_receipt_sha256='d'*64
+$b|Add-Member vm_operation_source_commit ('2'*40)
+$b|Add-Member running_firmware_sha256 ('3'*64)
+$b|Add-Member running_peer_firmware_sha256 ('4'*64)
+$raw=[Text.Encoding]::UTF8.GetBytes(($b|ConvertTo-Json -Depth 10 -Compress))
+$Manifest=[Convert]::ToBase64String($raw);$ManifestSha256=Get-GuestVmHash $raw
+$parsed=Read-GuestVmSpec
+if($parsed.executor_source_commit -cne $spec.executor_source_commit -or $parsed.vm_operation_source_commit -ceq $parsed.executor_source_commit){throw 'operation_lineage_not_separated'}
+foreach($key in @('vm_operation_source_commit','running_firmware_sha256','running_peer_firmware_sha256')){
+ $partial=$b.PSObject.Copy();$partial.PSObject.Properties.Remove($key);$closed=$false
+ try{Assert-GuestVmSpec $partial|Out-Null}catch{$closed=$true}
+ if(-not $closed){throw 'partial_operation_pin_group_accepted'}
+}
 $spec.source_commit=$spec.executor_source_commit;$closed=$false;try{Assert-GuestVmImageDerivationReceipt $v.receipt $spec}catch{$closed=$true};if(-not $closed){throw 'image_origin_relabelled'}
 $spec=$v.spec;$spec.schema_version=3;$closed=$false;try{Assert-GuestVmSpec $spec|Out-Null}catch{$closed=$true};if(-not $closed){throw 'legacy_profile_inferred'}
 ''',FIXTURE=json.dumps(fixture))
