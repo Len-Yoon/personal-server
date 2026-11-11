@@ -14,6 +14,7 @@ $InformationPreference='SilentlyContinue'
 $DebugPreference='SilentlyContinue'
 Set-StrictMode -Version Latest
 $script:GuestComInitialized=$false
+$script:guestOwnedSpec=$null;$script:guestOwnedRoot=''
 $script:GuestComSource=@'
 using System;
 using System.IO;
@@ -365,6 +366,11 @@ namespace HaGuestComV1 {
 
 }
 '@
+function Import-GuestOwnedSupport{
+ $path=Join-Path $PSScriptRoot 'guest-owned-profile.ps1';$bytes=[IO.File]::ReadAllBytes($path)
+ if((Get-GuestComHash $bytes) -cne '437d02933c2800cea4097a79ee14db3052e8c522c15f132a52c7c094d6f84045'){throw 'guest_owned_support_changed'}
+ return [scriptblock]::Create([Text.UTF8Encoding]::new($false,$true).GetString($bytes))
+}
 function Initialize-GuestComTypes([switch]$PortableFixture){
     if($script:GuestComInitialized){return}
     if('HaGuestComV1.Rules' -as [type]){throw 'guest_com_type_already_loaded'}
@@ -380,8 +386,9 @@ function Get-GuestComHostProfilePaths([string]$Root,$Spec){
     # Version 3 keeps each node's immutable evidence separate within one installation.
     $version=[HaGuestComV1.Rules]::Integer($Spec,'schema_version')
     $node=[HaGuestComV1.Rules]::Text($Spec,'node')
-    if($version -notin @(2,3) -or $node -cnotin @('A','B')){throw 'guest_com_host_profile_rejected'}
-    $prefix=if($version -eq 3){'com-'+$node+'-host-compute'}else{'com-host-compute'}
+    if($version -notin @(2,3,4) -or $node -cnotin @('A','B')){throw 'guest_com_host_profile_rejected'}
+    if($version -eq 4 -and (-not $Spec.ContainsKey('root_profile') -or $Spec['root_profile'] -cne 'strict-canonical-observed-v1')){throw 'guest_com_owned_profile_required'}
+    $prefix=if($version -ge 3){'com-'+$node+'-host-compute'}else{'com-host-compute'}
     return [pscustomobject]@{profile=(Join-Path $Root ($prefix+'-profile.json'));evidence=(Join-Path $Root ($prefix+'-evidence.json'))}
 }
 function Read-GuestComRequest{
@@ -391,10 +398,11 @@ function Read-GuestComRequest{
     $value=[HaGuestComV1.Json]::Object(([Text.UTF8Encoding]::new($false,$true)).GetString($raw),16384)
     $keys=@('schema_version','collector_source_commit','vm_source_commit','stage_source_commit','seed_source_commit','installation_id','node','vm_id','prepared_receipt_sha256','seed_id','bootstrap_manifest_sha256','expected_kernel_release','expected_pg_image','expected_package_count','timeout_seconds','egress_mac_address','peer_prepared_receipt_sha256','switch_owner_manifest_sha256')
     $version=[HaGuestComV1.Rules]::Integer($value,'schema_version')
-    if($version -in @(2,3)){$keys+=@('pipe_profile','host_profile_sha256','host_evidence_sha256')}
+    if($version -in @(2,3,4)){$keys+=@('pipe_profile','host_profile_sha256','host_evidence_sha256')}
     elseif($version -ne 1){throw 'guest_com_request_version_rejected'}
+    if($version -eq 4){. (Import-GuestOwnedSupport);$keys+=@(Get-GuestOwnedFields);Assert-GuestOwnedDeclaration ([pscustomobject]$value) '';if($value['executor_source_commit'] -cne $value['collector_source_commit']){throw 'guest_com_executor_source_changed'}}
     [HaGuestComV1.Rules]::Keys($value,$keys)
-    if($version -in @(2,3)){
+    if($version -in @(2,3,4)){
         if([HaGuestComV1.Rules]::Text($value,'pipe_profile') -cne 'registered-host-compute-v1'){throw 'guest_com_host_profile_rejected'}
         foreach($key in @('host_profile_sha256','host_evidence_sha256')){if(-not [HaGuestComV1.Rules]::Match([HaGuestComV1.Rules]::Text($value,$key),'[0-9a-f]{64}')){throw 'guest_com_host_profile_pin_rejected'}}
     }
@@ -412,6 +420,7 @@ function Assert-GuestComAncestors([string]$Path,[string]$Root,[string]$Caller){
     while($true){
         $entry=Get-Item -LiteralPath $current -Force
         if($entry.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'guest_com_private_reparse_rejected'}
+        if($null -ne $script:guestOwnedSpec -and $current -ieq $stop -and $stop -ieq $script:guestOwnedRoot){Assert-GuestOwnedRootAcl $current $script:guestOwnedSpec;break}
         $sd=[Security.AccessControl.RawSecurityDescriptor]::new((Get-Acl -LiteralPath $current).Sddl)
         if(-not [HaGuestComV1.Rules]::TrustedSid($sd.Owner.Value,$Caller) -or $null -eq $sd.DiscretionaryAcl -or $sd.DiscretionaryAcl.Count -eq 0){throw 'guest_com_private_owner_rejected'}
         foreach($ace in $sd.DiscretionaryAcl){
@@ -512,6 +521,9 @@ function Invoke-GuestComReceipt{
     $parent=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
     if((Get-Item -LiteralPath $parent -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'guest_com_parent_reparse_rejected'}
     $root=Join-Path $parent ('N100HA_'+$spec['installation_id'].Substring(0,24))
+    $ownedLease=$null
+    if($spec['schema_version'] -eq 4){. (Import-GuestOwnedSupport);$script:guestOwnedSpec=[pscustomobject]$spec;$script:guestOwnedRoot=$root;$ownedLease=Open-GuestOwnedRoot $root $script:guestOwnedSpec (Get-GuestComHash ([IO.File]::ReadAllBytes($PSCommandPath)))}
+    try{
     $path=Join-Path $root ('vm-'+$spec['node']+'-prepared-receipt.json')
     Assert-GuestComAncestors $path $root $caller
     $file=$null;$process=$null;$reader=$null;$profileFile=$null;$evidenceFile=$null;$hostLease=$null;$hostProfile=$null
@@ -521,7 +533,7 @@ function Invoke-GuestComReceipt{
         $initial=Get-GuestComVm $spec $pins
         $vmSid=([Security.Principal.NTAccount]::new('NT VIRTUAL MACHINE\'+$spec['vm_id'])).Translate([Security.Principal.SecurityIdentifier]).Value
         if(-not [HaGuestComV1.Rules]::VirtualMachineSid($vmSid)){throw 'guest_com_vm_sid_rejected'}
-        if($spec['schema_version'] -in @(2,3)){
+        if($spec['schema_version'] -in @(2,3,4)){
             # These independent external pins bind root-admin-reviewed original
             # evidence bytes and an explicit private policy. Neither substitutes
             # for current live identity, descriptor and memory-model validation.
@@ -573,6 +585,7 @@ function Invoke-GuestComReceipt{
         }
         throw 'guest_com_timeout_unknown'
     }finally{$disposeFailed=$false;foreach($resource in @($reader,$process,$hostLease,$evidenceFile,$profileFile,$file)){if($null -ne $resource){try{$resource.Dispose()}catch{$disposeFailed=$true}}};if($disposeFailed){throw 'guest_com_handle_cleanup_unknown'}}
+    }finally{if($null -ne $ownedLease){$ownedLease.Dispose()}}
 }
 if($MyInvocation.InvocationName -ne '.'){
     try{Invoke-GuestComReceipt|ConvertTo-Json -Depth 8 -Compress}catch{

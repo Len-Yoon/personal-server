@@ -350,4 +350,17 @@ $blocked=$false;try{$frame.Feed($many,$many.Length)|Out-Null}catch{$blocked=$tru
 '''),'bounded-prefix-framing-only')
 
 
+
+    def test_schema4_root_profile_preserves_component_sources_and_pins_collector(self):
+        self.run_ps(r'''
+$v=Read-GuestComRequest;$v['schema_version']=[long]4
+$v.Add('pipe_profile','registered-host-compute-v1');$v.Add('host_profile_sha256',('a'*64));$v.Add('host_evidence_sha256',('b'*64))
+$v.Add('root_profile','strict-canonical-observed-v1');$v.Add('executor_source_commit',$v['collector_source_commit']);$v.Add('executor_script_sha256',('c'*64));$v.Add('reservation_receipt_sha256',('d'*64));$v.Add('reservation_root_identity','12345678:1234567812345678')
+function Bind-Request($Value){$bytes=[Text.Encoding]::UTF8.GetBytes(($Value|ConvertTo-Json -Compress));$script:Request=[Convert]::ToBase64String($bytes);$script:RequestSha256=Get-GuestComHash $bytes}
+Bind-Request $v;$accepted=Read-GuestComRequest;$paths=Get-GuestComHostProfilePaths ([IO.Path]::GetTempPath()) $accepted
+if(-not $paths.profile.EndsWith('com-A-host-compute-profile.json')){throw 'node_evidence_scope_lost'}
+$v['executor_source_commit']='9'*40;Bind-Request $v;$closed=$false;try{Read-GuestComRequest|Out-Null}catch{$closed=$true};if(-not $closed){throw 'collector_origin_unbound'}
+''')
+
+
 if __name__=='__main__':unittest.main()

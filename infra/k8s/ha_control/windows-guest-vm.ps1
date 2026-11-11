@@ -4,6 +4,13 @@ param([ValidateSet('prepare','finalize','start')][string]$Mode,[string]$Manifest
 # Every mutation is journaled first. Partial failures are preserved for manual reconciliation.
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
+$script:guestOwnedSpec=$null;$script:guestOwnedRoot=''
+function Import-GuestOwnedSupport([string]$SupportPath=''){
+ if(-not $SupportPath){$SupportPath=Join-Path $PSScriptRoot 'guest-owned-profile.ps1'}
+ $bytes=[IO.File]::ReadAllBytes($SupportPath)
+ if((Get-GuestVmHash $bytes) -cne '437d02933c2800cea4097a79ee14db3052e8c522c15f132a52c7c094d6f84045'){throw 'guest_owned_support_changed'}
+ return [scriptblock]::Create([Text.UTF8Encoding]::new($false,$true).GetString($bytes))
+}
 function Get-GuestVmHash([byte[]]$Bytes){$h=[Security.Cryptography.SHA256]::Create();try{return [BitConverter]::ToString($h.ComputeHash($Bytes)).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}}
 function Get-GuestVmStreamHash($Stream){$h=[Security.Cryptography.SHA256]::Create();try{return [BitConverter]::ToString($h.ComputeHash($Stream)).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}}
 function Assert-GuestVmKeys($Value,[string[]]$Keys){if((($Value.PSObject.Properties.Name|Sort-Object -CaseSensitive)-join ',') -cne (($Keys|Sort-Object -CaseSensitive)-join ',')){throw 'guest_vm_shape_rejected'}}
@@ -82,11 +89,12 @@ function Assert-GuestVmImageDerivationReceipt($Value,$Spec){
         $Value.debugfs_version -cnotmatch '^debugfs [0-9]+\.[0-9]+\.[0-9]+(?: \([A-Za-z0-9 -]{1,60}\))?$' -or
         $Value.e2fsck_version -cnotmatch '^e2fsck [0-9]+\.[0-9]+\.[0-9]+(?: \([A-Za-z0-9 -]{1,60}\))?$'){throw 'guest_vm_image_derivation_rejected'}
 }
-function Assert-GuestVmSpec($Value){
+function Assert-GuestVmSpec($Value,[string]$OwnedSupportPath=''){
     $fields=@('schema_version','source_commit','stage_source_commit','seed_source_commit','installation_id','stage_manifest_sha256','seed_iso_sha256','seed_iso_bytes','node','mac_address','optional_egress_nic','egress_mac_address','peer_prepared_receipt_sha256')
-    if(($Value.schema_version -isnot [int] -and $Value.schema_version -isnot [long]) -or $Value.schema_version -notin @(1,2,3)){throw 'guest_vm_identity_rejected'}
+    if(($Value.schema_version -isnot [int] -and $Value.schema_version -isnot [long]) -or $Value.schema_version -notin @(1,2,3,4)){throw 'guest_vm_identity_rejected'}
     if($Value.schema_version -ge 2){$fields+=@('creation_method','node_image')}
-    if($Value.schema_version -eq 3){$fields+=@('config_profile','peer_config_profile_receipt_sha256','peer_source_commit')}
+    if($Value.schema_version -ge 3){$fields+=@('config_profile','peer_config_profile_receipt_sha256','peer_source_commit')}
+    if($Value.schema_version -eq 4){. (Import-GuestOwnedSupport $OwnedSupportPath);$fields+=@(Get-GuestOwnedFields);Assert-GuestOwnedDeclaration $Value ''}
     Assert-GuestVmKeys $Value $fields
     if(
         $Value.source_commit -isnot [string] -or $Value.source_commit -cnotmatch '^[0-9a-f]{40}$' -or
@@ -108,14 +116,14 @@ function Assert-GuestVmSpec($Value){
             $image.tool_version -isnot [string] -or $image.tool_version -cnotmatch '^qemu-img version [0-9]+\.[0-9]+\.[0-9]+$'){throw 'guest_vm_node_image_rejected'}
         $null=ConvertTo-GuestVmDiskIdentifier $image.disk_identifier
     }
-    if($Value.schema_version -eq 3){
+    if($Value.schema_version -ge 3){
         $null=Assert-GuestVmConfigProfile $Value.config_profile
         if($Value.peer_source_commit -isnot [string] -or ($Value.node -ceq 'A' -and $Value.peer_source_commit -cne '') -or ($Value.node -ceq 'B' -and $Value.peer_source_commit -cnotmatch '^[0-9a-f]{40}$')){throw 'guest_vm_peer_source_required'}
         if($Value.peer_config_profile_receipt_sha256 -isnot [string] -or ($Value.node -ceq 'A' -and $Value.peer_config_profile_receipt_sha256 -cne '') -or ($Value.node -ceq 'B' -and $Value.peer_config_profile_receipt_sha256 -cnotmatch '^[0-9a-f]{64}$')){throw 'guest_vm_peer_config_profile_required'}
     }
     return $Value
 }
-function Read-GuestVmSpec{
+function Read-GuestVmSpec([string]$OwnedSupportPath=''){
     if($Manifest -isnot [string] -or $Manifest.Length -gt 32768 -or $ManifestSha256 -cnotmatch '^[0-9a-f]{64}$'){throw 'guest_vm_manifest_pin_required'}
     $bytes=[Convert]::FromBase64String($Manifest)
     $text=([Text.UTF8Encoding]::new($false,$true)).GetString($bytes)
@@ -123,9 +131,9 @@ function Read-GuestVmSpec{
     # so Unicode-escaped duplicate keys cannot bypass the literal key inventory.
     if($text.Contains('\')){throw 'guest_vm_duplicate_or_escaped_keys'}
     $keys=@([regex]::Matches($text,'"([A-Za-z_][A-Za-z0-9_]*)"\s*:')|ForEach-Object{$_.Groups[1].Value})
-    if($keys.Count -notin @(13,23,26,36,39) -or @($keys|Select-Object -Unique).Count -ne $keys.Count){throw 'guest_vm_duplicate_or_escaped_keys'}
+    if($keys.Count -notin @(13,23,26,36,39,41,44) -or @($keys|Select-Object -Unique).Count -ne $keys.Count){throw 'guest_vm_duplicate_or_escaped_keys'}
     if((Get-GuestVmHash $bytes) -cne $ManifestSha256){throw 'guest_vm_manifest_changed'}
-    return Assert-GuestVmSpec ($text|ConvertFrom-Json)
+    return Assert-GuestVmSpec ($text|ConvertFrom-Json) $OwnedSupportPath
 }
 function Get-GuestVmNames($Spec){
     $prefix='N100HA_'+$Spec.installation_id.Substring(0,16)
@@ -145,13 +153,32 @@ function Assert-GuestVmPath([string]$Path){
         $entry=Get-GuestVmParent $entry
     }
 }
+function Get-GuestVmServiceMetadataMask([string]$Path){
+ if($null -eq $script:guestOwnedSpec){return 0}
+ foreach($node in @('A','B')){
+ $guest=Join-Path $script:guestOwnedRoot ('guest-'+$node)
+ $config=Join-Path $guest ('N100HA_'+$script:guestOwnedSpec.installation_id.Substring(0,16)+'_'+$node)
+ if($Path -ieq $guest){return 131232}
+ if($Path -ieq (Join-Path $guest ('guest-'+$node+'.vhdx')) -or $Path -ieq (Join-Path $script:guestOwnedRoot ('seed-'+$node+'.iso'))){return 131200}
+ if($Path -ieq $config -or $Path.StartsWith($config+'\',[StringComparison]::OrdinalIgnoreCase)){
+  if((Get-Item -LiteralPath $Path -Force) -is [IO.DirectoryInfo]){return 131233};return 131200
+ }
+ }
+
+ return 0
+}
 function Assert-GuestVmPrivate([string]$Path,[string]$VmSid='',[bool]$VmWriter=$false){
+    if($null -ne $script:guestOwnedSpec -and $Path -ieq $script:guestOwnedRoot){Assert-GuestVmPath $Path;Assert-GuestOwnedRootAcl $Path $script:guestOwnedSpec;return}
     Assert-GuestVmPath $Path
     $sd=[Security.AccessControl.RawSecurityDescriptor]::new((Get-Acl -LiteralPath $Path).Sddl)
     $identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$allowed=@('S-1-5-18','S-1-5-32-544',$identity.User.Value)}finally{$identity.Dispose()}
     if($sd.Owner.Value -notin $allowed -or $null -eq $sd.DiscretionaryAcl -or $sd.DiscretionaryAcl.Count -eq 0){throw 'guest_vm_private_owner_required'}
     foreach($ace in $sd.DiscretionaryAcl){
         if($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback){throw 'guest_vm_private_acl_required'}
+        if($null -ne $script:guestOwnedSpec -and $ace.SecurityIdentifier.Value -ceq (Get-GuestOwnedServiceSid $script:guestOwnedSpec.installation_id)){
+            $mask=Get-GuestVmServiceMetadataMask $Path
+            if($mask -eq 0 -or $ace.AceQualifier -ne 'AccessAllowed' -or $ace.AccessMask -ne $mask -or [int]$ace.AceFlags -ne 0){throw 'guest_vm_service_metadata_acl_rejected'};continue
+        }
         if($ace.AceQualifier -eq [Security.AccessControl.AceQualifier]::AccessAllowed -and $ace.SecurityIdentifier.Value -notin $allowed -and $ace.AccessMask -ne 0){
             if(-not $VmSid -or $ace.SecurityIdentifier.Value -cne $VmSid -or (-not $VmWriter -and (([long]$ace.AccessMask -band 4294967295) -band (4294967295 -bxor 1179785)) -ne 0)){throw 'guest_vm_private_acl_required'}
         }
@@ -242,6 +269,14 @@ public sealed class HaGuestVmSealV1 : IDisposable {
   // An inherited child-only ACE alone must not acquire parent authority.
   Need(!template||effective);return effective?inheritance:-1;
  }
+ string observedService="";
+ public void BindObservedService(string sid){Need(sid!=null&&System.Text.RegularExpressions.Regex.IsMatch(sid,"\\AS-1-5-80-(?:[0-9]+-){4}[0-9]+\\z"));observedService=sid;}
+ public static int ServiceMetadataMask(string role,bool directory){
+  Need(role=="private"||role=="config"||role=="disk"||role=="seed");
+  if(role=="private")return directory?131232:0;
+  if(role=="config")return directory?131233:131200;
+  return directory?0:131200; // Media metadata only: no READ_DATA or write grant.
+ }
  public void BindProfile(string name,string expectedSid,string role){
   Need(name=="windows-managed-config-v1"&&expectedSid==VmWorkerCapability()&&(role=="private"||role=="config"||role=="disk"||role=="seed"));
   managedProfile=false;capabilitySid=expectedSid;preserveCapability=false;capabilityInheritance=System.Security.AccessControl.InheritanceFlags.None;
@@ -276,6 +311,7 @@ public sealed class HaGuestVmSealV1 : IDisposable {
   string[] rows=Policy(vmSid,role);
   if(managedProfile)rows=ManagedPolicy(vmSid,role,capabilitySid,preserveCapability);
   foreach(string row in rows){string[] part=row.Split('|');d.AddAccess(System.Security.AccessControl.AccessControlType.Allow,new System.Security.Principal.SecurityIdentifier(part[0]),Int32.Parse(part[1],System.Globalization.CultureInfo.InvariantCulture),(managedProfile&&role=="config"&&part[0]==capabilitySid)?capabilityInheritance:inherit,System.Security.AccessControl.PropagationFlags.None);}
+  if(observedService!=""){int mask=ServiceMetadataMask(role,dir);if(mask!=0)d.AddAccess(System.Security.AccessControl.AccessControlType.Allow,new System.Security.Principal.SecurityIdentifier(observedService),mask,System.Security.AccessControl.InheritanceFlags.None,System.Security.AccessControl.PropagationFlags.None);}
   return d;
  }
  public bool Canonical(string vmSid,string role){
@@ -470,7 +506,7 @@ function Get-GuestVmPeer([string]$Root,$Spec){
     if($Spec.node -cne 'B'){throw 'guest_vm_peer_only_for_b'}
     $receipt=Read-GuestVmPreparedReceipt (Join-Path $Root 'vm-A-prepared-receipt.json') $Spec.peer_prepared_receipt_sha256
     $pins=$receipt.pins
-    $peerSource=if($Spec.PSObject.Properties['schema_version'] -and $Spec.schema_version -eq 3){$Spec.peer_source_commit}else{$Spec.source_commit}
+    $peerSource=if($Spec.PSObject.Properties['schema_version'] -and $Spec.schema_version -ge 3){$Spec.peer_source_commit}else{$Spec.source_commit}
     if($pins.node -cne 'A' -or $pins.installation_id -cne $Spec.installation_id -or $pins.source_commit -cne $peerSource -or $pins.stage_source_commit -cne $Spec.stage_source_commit -or $pins.seed_source_commit -cne $Spec.seed_source_commit -or $pins.stage_manifest_sha256 -cne $Spec.stage_manifest_sha256 -or $pins.manifest_sha256 -isnot [string] -or $pins.manifest_sha256 -cnotmatch '^[0-9a-f]{64}$'){throw 'guest_vm_peer_component_changed'}
     $peerRoot=Join-Path $Root 'guest-A';$peerDisk=Join-Path $peerRoot 'guest-A.vhdx';$peerIso=Join-Path $Root 'seed-A.iso'
     $isoBytes=(Get-Item -LiteralPath $peerIso -Force).Length
@@ -480,7 +516,7 @@ function Get-GuestVmPeer([string]$Root,$Spec){
     $null=Assert-GuestVmSpec $peerSpec
     $peerMacs=@($peerSpec.mac_address);if($peerSpec.optional_egress_nic){$peerMacs+=@($peerSpec.egress_mac_address)}
     if($Spec.mac_address -in $peerMacs -or ($Spec.optional_egress_nic -and $Spec.egress_mac_address -in $peerMacs)){throw 'guest_vm_peer_mac_collision'}
-    if($Spec.PSObject.Properties['schema_version'] -and $Spec.schema_version -eq 3){$null=Read-GuestVmConfigProfileReceipt $Root 'A' $Spec.peer_config_profile_receipt_sha256 $pins $Spec.config_profile $Spec.peer_prepared_receipt_sha256}
+    if($Spec.PSObject.Properties['schema_version'] -and $Spec.schema_version -ge 3){$null=Read-GuestVmConfigProfileReceipt $Root 'A' $Spec.peer_config_profile_receipt_sha256 $pins $Spec.config_profile $Spec.peer_prepared_receipt_sha256}
     $peerVm=Assert-GuestVmPrepared $peerSpec (Get-GuestVmNames $peerSpec) $pins $peerRoot $peerDisk $peerIso $pins.manifest_sha256 $true
     $switch=Get-VMSwitch -Id ([Guid]$pins.switch_id) -ErrorAction Stop
     return [pscustomobject]@{pins=$pins;vm=$peerVm;switch=$switch}
@@ -497,6 +533,7 @@ function Get-GuestVmRootStamp([string]$Root){
     Assert-GuestVmPrivate $Root
     $handle=Open-GuestVmSealHandle $Root $true
     try{
+        if($null -ne $script:guestOwnedSpec){$handle.BindObservedService((Get-GuestOwnedServiceSid $script:guestOwnedSpec.installation_id))}
         if(-not $handle.Canonical('','private')){throw 'guest_vm_root_not_admin_system_only'}
         return [pscustomobject]@{identity=$handle.Identity();sddl_sha256=$handle.SddlHash()}
     }finally{$handle.Dispose()}
@@ -559,6 +596,7 @@ function Open-GuestVmSealInventory([string]$Root,$Spec,$Pins,$Expected,$ConfigPr
             $handle=Open-GuestVmSealHandle $target.path $target.directory (Test-GuestVmManagedConfigTarget $target $ConfigProfile)
             $sessions.Add([pscustomobject]@{handle=$handle;target=$target;before=$null})
             $row=Get-GuestVmHandleRow $handle $target;Assert-GuestVmSealRow $row $target
+            if($Spec.PSObject.Properties['schema_version'] -and $Spec.schema_version -eq 4){$handle.BindObservedService((Get-GuestOwnedServiceSid $Spec.installation_id))}
             if($null -ne $ConfigProfile){$handle.BindProfile($ConfigProfile.name,$ConfigProfile.capability_sid,$target.role)}
             elseif($handle.HasUnverifiedCapability()){throw 'guest_vm_capability_proof_required'}
             $owner=$handle.Owner();if($owner -cnotin @('S-1-5-18','S-1-5-32-544',(Get-GuestVmCurrentSid))){throw 'guest_vm_seal_owner_rejected'}
@@ -743,16 +781,21 @@ function Invoke-GuestVm{
     if(-not $Go -or [Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or -not [Environment]::Is64BitProcess){throw 'guest_vm_native_intent_required'}
     $identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{if(-not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))){throw 'guest_vm_admin_required'}}finally{$identity.Dispose()}
     $spec=Read-GuestVmSpec;$names=Get-GuestVmNames $spec
-    $selectedProfile=if($spec.schema_version -eq 3){$spec.config_profile}else{$null}
+    $selectedProfile=if($spec.schema_version -ge 3){$spec.config_profile}else{$null}
     Initialize-GuestVmNative
     $parent=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
-    $root=Join-Path $parent ('N100HA_'+$spec.installation_id.Substring(0,24));Assert-GuestVmPrivate $root
+    $root=Join-Path $parent ('N100HA_'+$spec.installation_id.Substring(0,24));$ownedLease=$null
+    if($spec.schema_version -eq 4){. (Import-GuestOwnedSupport);$script:guestOwnedSpec=$spec;$script:guestOwnedRoot=$root;$ownedLease=Open-GuestOwnedRoot $root $spec (Get-GuestVmScriptHash)}
+    try{
+    Assert-GuestVmPrivate $root
     $stagePath=Join-Path $root 'stage-manifest.json';$stageStream=Open-GuestVmPinned $stagePath $spec.stage_manifest_sha256 -1
     $isoStream=$null;$baseStream=$null;$nodeStream=$null
     try{
         if($stageStream.Length -gt 32768){throw 'guest_vm_stage_limit'};$reader=[IO.StreamReader]::new($stageStream,[Text.UTF8Encoding]::new($false,$true),$false,1024,$true);try{$stage=$reader.ReadToEnd()|ConvertFrom-Json}finally{$reader.Dispose()}
-        Assert-GuestVmKeys $stage @('schema_version','source_commit','installation_id','compressed_sha256','compressed_bytes','vhdx_sha256','vhdx_bytes')
-        if(($stage.schema_version -isnot [long] -and $stage.schema_version -isnot [int]) -or $stage.schema_version -ne 1 -or $stage.source_commit -isnot [string] -or $stage.installation_id -isnot [string] -or $stage.vhdx_sha256 -isnot [string] -or $stage.source_commit -cne $spec.stage_source_commit -or $stage.installation_id -cne $spec.installation_id -or $stage.vhdx_sha256 -cnotmatch '^[0-9a-f]{64}$' -or ($stage.vhdx_bytes -isnot [long] -and $stage.vhdx_bytes -isnot [int]) -or $stage.vhdx_bytes -lt 1048576 -or $stage.vhdx_bytes -gt 8589934592){throw 'guest_vm_stage_changed'}
+        $stageKeys=@('schema_version','source_commit','installation_id','compressed_sha256','compressed_bytes','vhdx_sha256','vhdx_bytes')
+        if($spec.schema_version -eq 4){$stageKeys+=@(Get-GuestOwnedFields);Assert-GuestOwnedDeclaration $stage '';foreach($key in @('root_profile','executor_source_commit','reservation_receipt_sha256','reservation_root_identity')){if($stage.$key -cne $spec.$key){throw 'guest_vm_stage_provenance_changed'}}}
+        Assert-GuestVmKeys $stage $stageKeys
+        if(($stage.schema_version -isnot [long] -and $stage.schema_version -isnot [int]) -or $stage.schema_version -ne $(if($spec.schema_version -eq 4){2}else{1}) -or $stage.source_commit -isnot [string] -or $stage.installation_id -isnot [string] -or $stage.vhdx_sha256 -isnot [string] -or $stage.source_commit -cne $spec.stage_source_commit -or $stage.installation_id -cne $spec.installation_id -or $stage.vhdx_sha256 -cnotmatch '^[0-9a-f]{64}$' -or ($stage.vhdx_bytes -isnot [long] -and $stage.vhdx_bytes -isnot [int]) -or $stage.vhdx_bytes -lt 1048576 -or $stage.vhdx_bytes -gt 8589934592){throw 'guest_vm_stage_changed'}
         $guestRoot=Join-Path $root ('guest-'+$spec.node);$diskPath=Join-Path $guestRoot ('guest-'+$spec.node+'.vhdx');$isoPath=Join-Path $root ('seed-'+$spec.node+'.iso');$journal=Join-Path $root ('vm-'+$spec.node+'-journal.jsonl');$preparedPath=Join-Path $root ('vm-'+$spec.node+'-prepared-receipt.json')
         if($Mode -ceq 'finalize'){
             Invoke-GuestVmFinalize $root $spec $names $guestRoot $diskPath $isoPath $journal $preparedPath
@@ -887,12 +930,13 @@ function Invoke-GuestVm{
         Add-GuestVmEvent 'canonical_acl_sealed' @{objects=$sealed;root_stamp=$stamp}
         if($spec.node -ceq 'B'){$peer=Get-GuestVmPeer $root $spec;if($peer.pins.switch_id -cne $pins.switch_id -or $peer.pins.manifest_sha256 -cne $switchOwner){throw 'guest_vm_peer_switch_changed'}}
         $null=Assert-GuestVmPrepared $spec $names ([pscustomobject]$pins) $guestRoot $diskPath $isoPath
-        if($null -ne $selectedProfile){$null=Write-GuestVmConfigProfileReceipt $root $spec ([pscustomobject]$pins) $selectedProfile $spec.source_commit}
+        if($null -ne $selectedProfile){$null=Write-GuestVmConfigProfileReceipt $root $spec ([pscustomobject]$pins) $selectedProfile $(if($spec.schema_version -eq 4){$spec.executor_source_commit}else{$spec.source_commit})}
         Add-GuestVmEvent 'prepared' $pins
         Write-GuestVmRecord $preparedPath ([ordered]@{schema_version=1;prepared=$true;pins=$pins}) $true
         Assert-GuestVmPrivate $preparedPath
         [ordered]@{scope='fresh_owned_guest';node=$spec.node;vm_id=$vm.Id.ToString();switch_id=$switch.Id.ToString();manifest_sha256=$ManifestSha256;journal_sha256=(Get-GuestVmHash ([IO.File]::ReadAllBytes($journal)));prepared_receipt_sha256=(Get-GuestVmHash ([IO.File]::ReadAllBytes($preparedPath)));prepared=$true;started=$false;production_transition=$false}|ConvertTo-Json -Compress
     }finally{if($null -ne $nodeStream){$nodeStream.Dispose()};if($null -ne $baseStream){$baseStream.Dispose()};if($null -ne $isoStream){$isoStream.Dispose()};$stageStream.Dispose()}
+    }finally{if($null -ne $ownedLease){$ownedLease.Dispose()}}
 }
 if($MyInvocation.InvocationName -ne '.'){
     try{Invoke-GuestVm}catch{throw 'guest_vm_rejected_preserve_partial_manual_reconcile'}
