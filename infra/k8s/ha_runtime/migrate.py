@@ -43,11 +43,30 @@ def grant_namespace(admin, schema, roles, *, enforced_service=None, enforced_gen
         admin.execute(sql.SQL("GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA {} TO {}").format(sql.Identifier(schema), sql.Identifier(role)))
 
 
+def _safe_source_sql(source):
+    """Legacy files supply data, never administrator-executed arbitrary SQL."""
+    if not isinstance(source,str) or ';' in source or '\x00' in source:
+        raise DatabaseUnavailable('unsupported_source_schema')
+    code=''.join(re.split(r"('(?:''|[^'])*')",source)[::2])
+    code=re.sub(r'"([A-Za-z_][A-Za-z0-9_]*)"',r'\1',code)
+    if ('--' in code or '/*' in code or re.search(r'\b[A-Za-z_][A-Za-z0-9_]*\s*\.',code)
+            or re.search(r'\b(GENERATED|VIRTUAL|STRICT)\b|\bWITHOUT\s+ROWID\b|\bAS\s+SELECT\b',code,re.I)):
+        raise DatabaseUnavailable('unsupported_source_schema')
+    pure={'CHECK','IN','KEY','UNIQUE','CAST','VARCHAR','CHAR','NUMERIC','DECIMAL',
+          'LENGTH','LOWER','UPPER','ABS','COALESCE','NULLIF','TRIM','LTRIM','RTRIM','ROUND'}
+    for match in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\s*\(',code):
+        prefix=code[:match.start()].rstrip()
+        declaration=re.search(r'\b(CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|REFERENCES|ON)\s*$',prefix,re.I)
+        if match[1].upper() not in pure and declaration is None:
+            raise DatabaseUnavailable('executable_source_schema_rejected')
+
+
 def _ddl(source):
     # Only this repository's table DDL. No virtual tables, triggers, user-defined
     # functions or executable default expressions are imported from outside SQL.
     if not re.match(r"CREATE TABLE\b", source, re.I) or ";" in source:
         raise DatabaseUnavailable("unsupported_source_schema")
+    _safe_source_sql(source)
     parts = re.split(r"('(?:''|[^'])*')", source)
     for index in range(0, len(parts), 2):
         value = re.sub(r"\bINTEGER\s+PRIMARY\s+KEY(?:\s+AUTOINCREMENT)?\b",
@@ -60,19 +79,30 @@ def _ddl(source):
     return "".join(parts)
 
 
+def _source_tables(source):
+    tables=dict(source.execute("SELECT name,sql FROM sqlite_master WHERE type='table' AND substr(name,1,7)<>'sqlite_'"))
+    if any(not re.fullmatch(r'[a-z_][a-z0-9_]*',name) for name in tables):
+        raise DatabaseUnavailable('unsupported_source_table')
+    return tables
+
+
 def copy_sqlite(admin, service, component, source_path):
     """Preserve IDs, values, relationships, indexes and deleted-ID high watermarks."""
-    from psycopg import sql
     source_path = Path(source_path)
     if not source_path.is_absolute() or source_path.is_symlink() or not source_path.is_file():
         raise DatabaseUnavailable("frozen_source_required")
-    reader = sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True)
+    if any(Path(str(source_path)+suffix).exists() and Path(str(source_path)+suffix).stat().st_size
+           for suffix in ('-wal','-journal')):
+        raise DatabaseUnavailable('frozen_sqlite_backup_required')
+    reader = sqlite3.connect(source_path.as_uri() + "?mode=ro&immutable=1", uri=True)
     source = sqlite3.connect(":memory:")
     try:
         reader.backup(source)
         if source.execute("PRAGMA quick_check").fetchall() != [("ok",)] or source.execute("PRAGMA foreign_key_check").fetchall():
             raise DatabaseUnavailable("source_integrity_failed")
-        tables = dict(source.execute("SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"))
+        if source.execute("SELECT 1 FROM sqlite_master WHERE type IN ('trigger','view') LIMIT 1").fetchone():
+            raise DatabaseUnavailable('unsupported_source_objects')
+        tables = _source_tables(source)
         if any(not re.fullmatch(r"[a-z_][a-z0-9_]*", name) for name in tables):
             raise DatabaseUnavailable("unsupported_source_table")
         dependencies = {name: {row[2] for row in source.execute('PRAGMA foreign_key_list("' + name + '")') if row[2] != name}
@@ -83,10 +113,17 @@ def copy_sqlite(admin, service, component, source_path):
             if not ready:
                 raise DatabaseUnavailable("unsupported_foreign_key_cycle")
             order.extend(ready)
+        translated={name:_ddl(ddl) for name,ddl in tables.items()}
+        indices=list(source.execute("SELECT name,sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL"))
+        for name,ddl in indices:
+            if not re.fullmatch(r'[a-z_][a-z0-9_]*',name):
+                raise DatabaseUnavailable('unsupported_source_index')
+            _safe_source_sql(ddl)
+        from psycopg import sql
         schema = create_namespace(admin, service, component)
         manifests = {}
         for table in order:
-            admin.execute(_ddl(tables[table]))
+            admin.execute(translated[table])
             columns = [row[1] for row in source.execute('PRAGMA table_info("' + table + '")')]
             rows = source.execute('SELECT * FROM "' + table + '"').fetchall()
             statement = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
@@ -108,7 +145,7 @@ def copy_sqlite(admin, service, component, source_path):
                     maximum = max(maximum, old[0] if old else 0)
                 admin.execute("SELECT setval(pg_get_serial_sequence(%s,%s),%s,%s)", (schema + "." + table, column, max(1, maximum), maximum > 0))
             manifests[table] = {"rows": len(rows), "sha256": digest(logical(rows)), "columns": columns}
-        for name, ddl in source.execute("SELECT name,sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL"):
+        for name, ddl in indices:
             if ";" in ddl or not re.fullmatch(r"[a-z_][a-z0-9_]*", name):
                 raise DatabaseUnavailable("unsupported_source_index")
             # PostgreSQL requires parentheses around CASE index expressions.
