@@ -94,6 +94,31 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(B.direction(fixture()),('A',None))
         legacy=fixture();legacy['node']='B';self.assertEqual(B.direction(legacy),('A','A'))
 
+    def test_schema3_adds_only_the_windows_controller_host_tls_rule(self):
+        legacy = fixture()
+        legacy.update(schema_version=2, primary_node='A', source_node=None, os_packages=[],
+                      pg_a='192.168.27.10', pg_b='192.168.27.11')
+        lock = dict(legacy, schema_version=3, windows_controller_ipv4='192.168.27.9', management_prefix_length=29)
+        self.assertEqual(B.validate(lock), lock)
+        rule = 'hostssl ha postgres 192.168.27.9/32 scram-sha-256\n'
+        for node in ('A', 'B'):
+            source_node = None if node == 'A' else 'A'
+            current = B.pg_files(dict(lock, node=node, source_node=source_node))
+            existing = B.pg_files(dict(legacy, node=node, source_node=source_node))
+            self.assertEqual(current['pg_hba.conf'].replace(rule, '', 1), existing['pg_hba.conf'])
+            self.assertLess(current['pg_hba.conf'].index(rule), current['pg_hba.conf'].index('host all all'))
+        for address in (lock['pg_a'], '192.0.2.9', '127.0.0.1', '::1', '192.168.27.9/32',
+                        '192.168.27.8', '192.168.27.15', '192.168.27.16',
+                        '192.168.27.9\nhost all all', None):
+            with self.subTest(address=address), self.assertRaises(B.BootstrapError):
+                B.validate(dict(lock, windows_controller_ipv4=address))
+        with self.assertRaises(B.BootstrapError):
+            B.validate(dict(lock, schema_version=2))
+        with self.assertRaises(B.BootstrapError):
+            B.validate(dict(lock, management_prefix_length=23))
+        with self.assertRaises(B.BootstrapError):
+            B.validate(dict(lock, pg_b='192.168.28.11'))
+
     def test_schema2_os_dependency_union_deduplicates_only_identical_packages(self):
         value=fixture();value.update(schema_version=2,primary_node='A',source_node=None,os_packages=[])
         extra={'filename':'libsynthetic_1_amd64.deb','sha256':'4'*64,'package':'libsynthetic','version':'1:1.0',

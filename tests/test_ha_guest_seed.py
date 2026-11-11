@@ -58,6 +58,19 @@ class SeedTests(unittest.TestCase):
                 wrong=copy.deepcopy(value);change(wrong)
                 with self.assertRaises(S.SeedError):S.validate_spec(wrong,lock)
 
+    def test_schema3_seed_requires_the_bootstrap_management_prefix(self):
+        lock = fixture()
+        lock.update(schema_version=3, pg_a='192.168.27.10', pg_b='192.168.27.11',
+                    windows_controller_ipv4='192.168.27.9', management_prefix_length=29,
+                    os_packages=[{'package': 'linux-image-6.8.0-149-generic'}])
+        with tempfile.TemporaryDirectory() as name:
+            key = Path(name).resolve() / 'operator.pub'
+            key.write_text('public fixture')
+            value = dict(spec_value(lock, key), ipv4_cidr='192.168.27.10/29')
+            self.assertEqual(S.validate_spec(value, lock), value)
+            with self.assertRaisesRegex(S.SeedError, 'seed_controller_network_mismatch'):
+                S.validate_spec(dict(value, ipv4_cidr='192.168.27.10/24'), lock)
+
     def test_cloud_init_has_no_new_sudo_user_or_password_and_does_not_wait_on_itself(self):
         with tempfile.TemporaryDirectory() as name:
             key=Path(name).resolve()/'operator.pub';key.write_text('public fixture')
