@@ -2,6 +2,7 @@ param(
  [ValidateSet('inspect','plan','apply','rollback')][string]$Mode='inspect',
  [string]$InstallationId,[string]$SourceCommit,[string]$ScriptSha256,
  [string]$ManifestPath,[string]$ManifestSha256,[string]$PlanSha256,[string]$ApplyReceiptSha256,
+ [ValidateSet('raw-exact-v1','strict-canonical-observed-v1')][string]$DescriptorProfile='raw-exact-v1',
  [switch]$Win64DesktopAdmin,[switch]$Go
 )
 # Namespace-wide trust, never per-VM authorization. No SCM/group/service action.
@@ -29,8 +30,8 @@ function ConvertTo-NpMode([string]$Value){
 function Get-NpHash([byte[]]$Bytes){$h=[Security.Cryptography.SHA256]::Create();try{return [BitConverter]::ToString($h.ComputeHash($Bytes)).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}}
 function Get-NpJsonHash($Value){return Get-NpHash ([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $Value -Depth 12 -Compress)))}
 function Assert-NpKeys($Value,[string[]]$Keys){if($null -eq $Value -or (($Value.PSObject.Properties.Name|Sort-Object -CaseSensitive)-join ',') -cne (($Keys|Sort-Object -CaseSensitive)-join ',')){throw 'namespace_shape_rejected'}}
-function Read-NpJson([byte[]]$Bytes){
- if($Bytes.Length -lt 2 -or $Bytes.Length -gt 65536){throw 'namespace_json_limit'}
+function Read-NpJson([byte[]]$Bytes,[int]$Limit=65536){
+ if($Bytes.Length -lt 2 -or $Bytes.Length -gt $Limit){throw 'namespace_json_limit'}
  $text=[Text.UTF8Encoding]::new($false,$true).GetString($Bytes)
  # Contracts contain no paths or escaped strings. Reject escapes BEFORE parsing
  # to prevent Unicode-escaped duplicate-key overwrites in Windows PowerShell.
@@ -81,6 +82,18 @@ public static class HaNamespacePolicyCoreV1 {
 }
 '@
 }
+# Explicit opt-in only; original parser and full-SACL acquisition remain unchanged.
+function Test-NpObserved($Value){return $null -ne $Value.PSObject.Properties['descriptor_profile']}
+function Initialize-NpCanonical($Spec){
+ if($Spec.descriptor_profile -cne 'strict-canonical-observed-v1' -or $Spec.comparator_sha256 -cne '56cc20aaf52bd7ea7b1b0f88d562a15d1f28ffb3aac7ad4b0e0df2ec3e1dac3e'){throw 'namespace_comparator_rejected'}
+ $bytes=Open-NpInput (Join-Path $PSScriptRoot 'strict-canonical-sd.cs') $Spec.comparator_sha256
+ if('StrictCanonicalSd' -as [type]){if(-not (Get-Variable npCanonicalInitialized -Scope Script -ErrorAction SilentlyContinue)){throw 'namespace_canonical_type_collision'}}else{Add-Type -Language CSharp -TypeDefinition ([Text.UTF8Encoding]::new($false,$true).GetString($bytes));$script:npCanonicalInitialized=$true}
+}
+function Get-NpCanonicalHash([byte[]]$Bytes){return Get-NpHash ([StrictCanonicalSd]::Canonicalize($Bytes))}
+function Write-NpRaw([string]$Path,[byte[]]$Bytes){
+ $stream=[IO.File]::Open($Path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+ try{$stream.Write($Bytes,0,$Bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+}
 function Initialize-NpNative{
  Add-Type -Language CSharp -TypeDefinition @'
 using System;using System.Runtime.InteropServices;using Microsoft.Win32.SafeHandles;using System.IO;
@@ -114,26 +127,67 @@ public sealed class HaNamespacePrivilegeV1:IDisposable {
 }
 '@
 }
-function Assert-NpPrivate([string]$Path,[bool]$Root=$false){
+function Assert-NpObservedRootFacts([string]$Owner,[bool]$Protected,[object[]]$Aces,[string]$Installation,[bool]$HostImage=$false){
+ # The reserved installation root and executable have distinct exact ACLs.
+ # The service SID is derived from this installation ID.
+ $serviceSid=[HaNamespacePolicyCoreV1]::ServiceSid([HaNamespacePolicyCoreV1]::ServiceName($Installation))
+ if($Owner -cnotin @('S-1-5-18','S-1-5-32-544') -or -not $Protected -or $Aces.Count -ne 3){throw 'namespace_observed_root_acl_rejected'}
+ $serviceMask=if($HostImage){0x1200a9}else{131232}
+ $tcbFlags=if($HostImage){0}else{3}
+ $seen=@{}
+ foreach($a in $Aces){
+  if($a.simple_allow -isnot [bool] -or -not $a.simple_allow -or $seen.ContainsKey($a.sid)){throw 'namespace_observed_root_acl_rejected'}
+  if($a.sid -ceq $serviceSid){if($a.mask -ne $serviceMask -or $a.flags -ne 0){throw 'namespace_observed_root_acl_rejected'}}
+  elseif($a.sid -cin @('S-1-5-18','S-1-5-32-544')){if($a.mask -ne 2032127 -or $a.flags -ne $tcbFlags){throw 'namespace_observed_root_acl_rejected'}}
+  else{throw 'namespace_observed_root_acl_rejected'}
+  $seen[$a.sid]=$true
+ }
+ if(-not $seen.ContainsKey($serviceSid) -or -not $seen.ContainsKey('S-1-5-18') -or -not $seen.ContainsKey('S-1-5-32-544')){throw 'namespace_observed_root_acl_rejected'}
+}
+function Assert-NpSelectedProfile($Spec,[string]$Selected){
+ if($Selected -ceq 'strict-canonical-observed-v1'){
+  if(-not (Test-NpObserved $Spec) -or $Spec.descriptor_profile -cne $Selected){throw 'namespace_selected_profile_mismatch'}
+ }elseif($Selected -cne 'raw-exact-v1' -or (Test-NpObserved $Spec)){throw 'namespace_selected_profile_mismatch'}
+}
+function Assert-NpPrivate([string]$Path,[bool]$Root=$false,[bool]$ObservedRoot=$false,[string]$ObservedImageInstallation=''){
+ if($ObservedRoot -and -not $Root){throw 'namespace_observed_root_scope_rejected'}
  $item=Get-Item -LiteralPath $Path -Force;$walk=$item
  while($null -ne $walk){if($walk.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'namespace_reparse_rejected'};if($walk -is [IO.DirectoryInfo]){$walk=$walk.Parent}elseif($walk -is [IO.FileInfo]){$walk=$walk.Directory}else{throw 'namespace_path_type_rejected'}}
  $sd=[Security.AccessControl.RawSecurityDescriptor]::new((Get-Acl -LiteralPath $Path).Sddl)
+ if($ObservedRoot -or $ObservedImageInstallation){
+  if($ObservedImageInstallation -and ($Root -or $item -isnot [IO.FileInfo])){throw 'namespace_observed_image_type_rejected'}
+  if($null -eq $sd.DiscretionaryAcl){throw 'namespace_observed_root_acl_rejected'}
+  $facts=@($sd.DiscretionaryAcl|ForEach-Object{[pscustomobject]@{sid=$_.SecurityIdentifier.Value;mask=$_.AccessMask;flags=[int]$_.AceFlags;simple_allow=($_ -is [Security.AccessControl.CommonAce] -and -not $_.IsCallback -and $_.AceQualifier -eq 'AccessAllowed')}})
+  Assert-NpObservedRootFacts $sd.Owner.Value ([bool]($sd.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected)) $facts $(if($ObservedImageInstallation){$ObservedImageInstallation}else{$InstallationId}) ([bool]$ObservedImageInstallation)
+  return
+ }
  $me=[Security.Principal.WindowsIdentity]::GetCurrent();try{$owners=@('S-1-5-18','S-1-5-32-544',$me.User.Value)}finally{$me.Dispose()}
  if($sd.Owner.Value -notin $owners -or $null -eq $sd.DiscretionaryAcl -or $sd.DiscretionaryAcl.Count -lt 2){throw 'namespace_private_owner_required'}
  $seen=@{}
  foreach($ace in $sd.DiscretionaryAcl){if($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback -or $ace.AceQualifier -ne 'AccessAllowed' -or $ace.SecurityIdentifier.Value -notin @('S-1-5-18','S-1-5-32-544') -or $ace.AccessMask -ne 2032127 -or (([int]$ace.AceFlags) -band ([int][Security.AccessControl.AceFlags]::InheritOnly))){throw 'namespace_private_acl_required'};if($Root -and ((([int]$ace.AceFlags) -band 3) -ne 3)){throw 'namespace_private_inheritance_required'};$seen[$ace.SecurityIdentifier.Value]=$true}
  if($seen.Count -ne 2 -or ($Root -and ($sd.DiscretionaryAcl.Count -ne 2 -or -not ($sd.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected)))){throw 'namespace_private_acl_required'}
 }
-function Open-NpInput([string]$Path,[string]$Hash,[int]$Limit=65536){
- if($Hash -cnotmatch '^[0-9a-f]{64}$'){throw 'namespace_hash_rejected'};Assert-NpPrivate $Path
+function Open-NpInput([string]$Path,[string]$Hash,[int]$Limit=65536,$ObservedImageSpec=$null){
+ $installation=''
+ if($null -ne $ObservedImageSpec){
+  $installation=$ObservedImageSpec.installation_id
+  $root=Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) ('N100HA_'+$installation.Substring(0,24))
+  if(-not (Test-NpObserved $ObservedImageSpec) -or $Path -ine (Join-Path (Join-Path $root 'host') 'windows-service-host.exe')){throw 'namespace_observed_image_scope_rejected'}
+ }
+ if($Hash -cnotmatch '^[0-9a-f]{64}$'){throw 'namespace_hash_rejected'};Assert-NpPrivate $Path -ObservedImageInstallation $installation
  $lease=[HaNamespaceReadV1]::new($Path,$false)
- try{if($lease.Stream.Length -lt 1 -or $lease.Stream.Length -gt $Limit){throw 'namespace_input_limit'};$bytes=[byte[]]::new([int]$lease.Stream.Length);$offset=0;while($offset -lt $bytes.Length){$n=$lease.Stream.Read($bytes,$offset,$bytes.Length-$offset);if($n -le 0){throw 'namespace_input_truncated'};$offset+=$n};$lease.Stream.Position=0;if((Get-NpHash $bytes) -cne $Hash){throw 'namespace_input_hash_changed'};$script:npHeld.Add($lease);return ,$bytes}catch{$lease.Dispose();throw}
+ try{if($lease.Stream.Length -lt 1 -or $lease.Stream.Length -gt $Limit){throw 'namespace_input_limit'};$bytes=[byte[]]::new([int]$lease.Stream.Length);$offset=0;while($offset -lt $bytes.Length){$n=$lease.Stream.Read($bytes,$offset,$bytes.Length-$offset);if($n -le 0){throw 'namespace_input_truncated'};$offset+=$n};$lease.Stream.Position=0;if((Get-NpHash $bytes) -cne $Hash){throw 'namespace_input_hash_changed'};if($installation){Assert-NpPrivate $Path -ObservedImageInstallation $installation};$script:npHeld.Add($lease);return ,$bytes}catch{$lease.Dispose();throw}
 }
 function Assert-NpManifest($Value){
  $keys=@('schema_version','source_commit','installation_id','service_source_commit','service_name','service_sid','service_config_sha256','service_sd_sha256','service_image_sha256','service_ownership_receipt_sha256','protected_workloads_receipt_sha256','provider_semantics_receipt_sha256','original_sd_sha256','parent_sd_sha256','children_sha256','inheritance_transition','acknowledge_parent_policy_no_longer_inherited','acknowledge_namespace_wide_not_vm_specific','trusted_admin_sids')
  if($Value.PSObject.Properties['closure_version']){$keys+=@('closure_version','closure_names','closure_original_sd_sha256','closure_target_sd_sha256','closure_classification_sha256','closure_children_sha256');Assert-NpClosure $Value}
+ if(Test-NpObserved $Value){
+  $keys+=@('descriptor_profile','comparator_sha256','closure_original_canonical_sha256','closure_target_canonical_sha256')
+  if(-not $Value.PSObject.Properties['closure_version'] -or $Value.schema_version -ne 3 -or $Value.descriptor_profile -cne 'strict-canonical-observed-v1' -or $Value.comparator_sha256 -cne '56cc20aaf52bd7ea7b1b0f88d562a15d1f28ffb3aac7ad4b0e0df2ec3e1dac3e'){throw 'namespace_observed_profile_rejected'}
+  foreach($key in @('closure_original_canonical_sha256','closure_target_canonical_sha256')){if($Value.$key -isnot [array] -or $Value.$key.Count -ne $Value.closure_names.Count){throw 'namespace_canonical_binding_rejected'};foreach($h in $Value.$key){if($h -isnot [string] -or $h -cnotmatch '^[0-9a-f]{64}$'){throw 'namespace_canonical_binding_rejected'}}}
+ }
  Assert-NpKeys $Value $keys
- if(($Value.schema_version -isnot [int] -and $Value.schema_version -isnot [long]) -or $Value.schema_version -ne 1){throw 'namespace_manifest_rejected'}
+ if(($Value.schema_version -isnot [int] -and $Value.schema_version -isnot [long]) -or $Value.schema_version -ne $(if(Test-NpObserved $Value){3}else{1})){throw 'namespace_manifest_rejected'}
  foreach($key in @('source_commit','service_source_commit')){if($Value.$key -isnot [string] -or $Value.$key -cnotmatch '^[0-9a-f]{40}$'){throw 'namespace_manifest_rejected'}}
  foreach($key in @('installation_id','service_config_sha256','service_sd_sha256','service_image_sha256','service_ownership_receipt_sha256','protected_workloads_receipt_sha256','provider_semantics_receipt_sha256','original_sd_sha256','parent_sd_sha256','children_sha256')){if($Value.$key -isnot [string] -or $Value.$key -cnotmatch '^[0-9a-f]{64}$'){throw 'namespace_manifest_rejected'}}
  if($Value.service_name -isnot [string] -or $Value.service_name -cne [HaNamespacePolicyCoreV1]::ServiceName($Value.installation_id) -or $Value.service_sid -isnot [string] -or $Value.service_sid -cne [HaNamespacePolicyCoreV1]::ServiceSid($Value.service_name)){throw 'namespace_service_binding_rejected'}
@@ -154,12 +208,16 @@ function Get-NpNamespace([string]$Namespace){
   return ,$bytes
  }finally{$class.Dispose()}
 }
+function Get-NpSetReturnValue($Answer){
+ if($null -eq $Answer -or $Answer.ReturnValue -isnot [uint32]){throw 'namespace_set_return_unverified_preserve_journal'}
+ return $Answer.ReturnValue
+}
 function Set-NpNamespace([byte[]]$Bytes,[string]$Namespace='root/virtualization/v2',$Spec=$null){
  # The only namespace mutation primitive; callers journal BEFORE this call.
  if($null -eq $Spec){if($Namespace -cne 'root/virtualization/v2'){throw 'namespace_scope_rejected'}}else{Assert-NpClosure $Spec;if($Namespace -cnotin $Spec.closure_names){throw 'namespace_scope_rejected'}}
  $scope=[System.Management.ManagementScope]::new(('\\.\'+$Namespace.Replace('/','\')));$scope.Options.EnablePrivileges=$true;$scope.Options.Timeout=[TimeSpan]::FromSeconds(5);$scope.Connect()
  $class=[System.Management.ManagementClass]::new($scope,[System.Management.ManagementPath]::new('__SystemSecurity'),$null)
- try{$inputParameters=$class.GetMethodParameters('SetSD');$inputParameters.SD=$Bytes;$answer=$class.InvokeMethod('SetSD',$inputParameters,$null);if($answer.ReturnValue -ne 0){throw 'namespace_set_failed_preserve_journal'}}finally{$class.Dispose()}
+ try{$inputParameters=$class.GetMethodParameters('SetSD');$inputParameters.SD=$Bytes;$answer=$class.InvokeMethod('SetSD',$inputParameters,$null);$result=Get-NpSetReturnValue $answer;if($null -ne $Spec -and (Test-NpObserved $Spec)){return $result};if($result -ne 0){throw 'namespace_set_failed_preserve_journal'}}finally{$class.Dispose()}
 }
 function Get-NpChildren{
  $names=@(Get-CimInstance -Namespace 'root/virtualization/v2' -ClassName '__NAMESPACE' -ErrorAction Stop|ForEach-Object{$_.Name}|Sort-Object -CaseSensitive)
@@ -174,6 +232,7 @@ function Assert-NpServiceFacts($Service,$Spec,[string]$Root,[string]$ActualSid,[
  if((Get-NpJsonHash $config) -cne $Spec.service_config_sha256){throw 'namespace_service_config_changed'}
  if($service.PathName -cnotmatch '^"([^"\r\n]+\.exe)"( [^\r\n]*)?$'){throw 'namespace_service_path_rejected'};$image=$Matches[1]
  $base=$Root.TrimEnd('\')+'\';if(-not $image.StartsWith($base,[StringComparison]::OrdinalIgnoreCase)){throw 'namespace_existing_service_rejected'}
+ if((Test-NpObserved $Spec) -and ($service.StartMode -cne 'Manual' -or $service.PathName -ine ('"'+($base+'host\windows-service-host.exe')+'"'))){throw 'namespace_observed_service_path_rejected'}
  return [pscustomobject]@{config=$config;image=$image}
 }
 function Get-NpService($Spec,[string]$Root){
@@ -184,7 +243,7 @@ function Get-NpService($Spec,[string]$Root){
  # Includes PAUSE_CONTINUE, USER_DEFINED_CONTROL and GENERIC_EXECUTE.
  [HaNamespacePolicyCoreV1]::AssertWriters($serviceSd,[string[]](@('S-1-5-18','S-1-5-32-544',$Spec.service_sid)+$Spec.trusted_admin_sids),1879900530)
  $facts=Assert-NpServiceFacts $service $Spec $Root $actualSid ([HaNamespacePrivilegeV1]::ServiceSidType($Spec.service_name));$image=$facts.image;$config=$facts.config
- $null=Open-NpInput $image $Spec.service_image_sha256 67108864
+ $null=Open-NpInput $image $Spec.service_image_sha256 67108864 $(if(Test-NpObserved $Spec){$Spec}else{$null})
  $owned=Read-NpJson (Open-NpInput (Join-Path $Root 'namespace-service-ownership.json') $Spec.service_ownership_receipt_sha256)
  Assert-NpKeys $owned @('schema_version','format','source_commit','installation_id','service_name','service_sid','service_config_sha256','service_image_sha256','new_owned_service','scm_registration_complete')
  if(($owned.schema_version -isnot [int] -and $owned.schema_version -isnot [long]) -or $owned.schema_version -ne 1 -or $owned.format -cne 'ha-owned-controller-service-v1' -or $owned.source_commit -cne $Spec.service_source_commit -or $owned.installation_id -cne $Spec.installation_id -or $owned.service_name -cne $Spec.service_name -or $owned.service_sid -cne $Spec.service_sid -or $owned.service_config_sha256 -cne $Spec.service_config_sha256 -or $owned.service_image_sha256 -cne $Spec.service_image_sha256 -or $owned.new_owned_service -isnot [bool] -or -not $owned.new_owned_service -or $owned.scm_registration_complete -isnot [bool] -or -not $owned.scm_registration_complete){throw 'namespace_service_ownership_unverified'}
@@ -197,9 +256,16 @@ function Assert-NpEvidence($Spec,[string]$Root,[string]$TargetHash,[bool]$Rollba
  foreach($key in @('inventory_sha256','namespace_dependency_review_sha256')){if($review.$key -isnot [string] -or $review.$key -cnotmatch '^[0-9a-f]{64}$'){throw 'namespace_protected_workloads_unverified'}}
  $expires=[DateTimeOffset]::MinValue;if($review.expires_at -isnot [string] -or -not [DateTimeOffset]::TryParseExact($review.expires_at,"yyyy-MM-dd'T'HH:mm:ss'Z'",[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AssumeUniversal,[ref]$expires) -or (-not $Rollback -and ($expires -le [DateTimeOffset]::UtcNow -or $expires -gt [DateTimeOffset]::UtcNow.AddMinutes(15)))){throw 'namespace_protected_review_expired'}
  $proof=Read-NpJson (Open-NpInput (Join-Path $Root 'namespace-provider-semantics.json') $Spec.provider_semantics_receipt_sha256)
- Assert-NpKeys $proof @('schema_version','format','installation_id','os_build','original_sd_sha256','target_sd_sha256','parent_sd_sha256','inheritance_transition','isolated_test_namespace_sha256','provider_roundtrip_exact','original_restore_exact','full_sacl_verified')
- if(($proof.schema_version -isnot [int] -and $proof.schema_version -isnot [long]) -or $proof.schema_version -ne 1 -or $proof.format -cne 'ha-namespace-provider-semantics-v1' -or $proof.installation_id -cne $Spec.installation_id -or $proof.os_build -cne [Environment]::OSVersion.Version.ToString() -or $proof.original_sd_sha256 -cne $Spec.original_sd_sha256 -or $proof.target_sd_sha256 -cne $TargetHash -or $proof.parent_sd_sha256 -cne $Spec.parent_sd_sha256 -or $proof.inheritance_transition -cne $Spec.inheritance_transition -or $proof.isolated_test_namespace_sha256 -isnot [string] -or $proof.isolated_test_namespace_sha256 -cnotmatch '^[0-9a-f]{64}$'){throw 'namespace_provider_semantics_unverified'}
- foreach($key in @('provider_roundtrip_exact','original_restore_exact','full_sacl_verified')){if($proof.$key -isnot [bool] -or -not $proof.$key){throw 'namespace_provider_semantics_unverified'}}
+ $proofKeys=@('schema_version','format','installation_id','os_build','original_sd_sha256','target_sd_sha256','parent_sd_sha256','inheritance_transition','isolated_test_namespace_sha256','provider_roundtrip_exact','original_restore_exact','full_sacl_verified')
+ $flags=@('provider_roundtrip_exact','original_restore_exact','full_sacl_verified')
+ if(Test-NpObserved $Spec){
+  $proofKeys+=@('descriptor_profile','comparator_sha256','provider_roundtrip_canonical','original_restore_canonical')
+  if($proof.descriptor_profile -cne $Spec.descriptor_profile -or $proof.comparator_sha256 -cne $Spec.comparator_sha256 -or $proof.provider_roundtrip_exact -isnot [bool] -or $proof.provider_roundtrip_exact -or $proof.original_restore_exact -isnot [bool] -or $proof.original_restore_exact){throw 'namespace_provider_exact_claim_rejected'}
+  $flags=@('provider_roundtrip_canonical','original_restore_canonical','full_sacl_verified')
+ }
+ Assert-NpKeys $proof $proofKeys
+ if(($proof.schema_version -isnot [int] -and $proof.schema_version -isnot [long]) -or $proof.schema_version -ne $(if(Test-NpObserved $Spec){2}else{1}) -or $proof.format -cne $(if(Test-NpObserved $Spec){'ha-namespace-provider-semantics-canonical-v1'}else{'ha-namespace-provider-semantics-v1'}) -or $proof.installation_id -cne $Spec.installation_id -or $proof.os_build -cne [Environment]::OSVersion.Version.ToString() -or $proof.original_sd_sha256 -cne $Spec.original_sd_sha256 -or $proof.target_sd_sha256 -cne $TargetHash -or $proof.parent_sd_sha256 -cne $Spec.parent_sd_sha256 -or $proof.inheritance_transition -cne $Spec.inheritance_transition -or $proof.isolated_test_namespace_sha256 -isnot [string] -or $proof.isolated_test_namespace_sha256 -cnotmatch '^[0-9a-f]{64}$'){throw 'namespace_provider_semantics_unverified'}
+ foreach($key in $flags){if($proof.$key -isnot [bool] -or -not $proof.$key){throw 'namespace_provider_semantics_unverified'}}
 }
 # Flat parallel vectors keep Read-NpJson's no-escape/global-duplicate-key contract.
 function Assert-NpClosure($Spec){
@@ -226,9 +292,17 @@ function New-NpClosureCandidate($Spec,[byte[]]$Original,[byte[]]$Target,[string]
   # Repository/SD writers are independently checked; namespace method rights are transformed by Build.
   [HaNamespacePolicyCoreV1]::AssertWriters($originalBytes,[string[]](@('S-1-5-18','S-1-5-32-544')+@($Spec.trusted_admin_sids)),[uint32]4027318284)
   $evidence=Read-NpJson (Open-NpInput (Join-Path $Root ('namespace-closure-'+$i+'-evidence.json')) $Spec.closure_classification_sha256[$i])
-  Assert-NpKeys $evidence @('schema_version','format','source_commit','installation_id','namespace','original_sd_sha256','target_sd_sha256','children_sha256','classification_metadata_sha256','protected_workloads_receipt_sha256','provider_roundtrip_exact','original_restore_exact','full_sacl_verified','control_path_review_complete','namespace_wide_not_vm_specific')
-  if(($evidence.schema_version -isnot [int] -and $evidence.schema_version -isnot [long]) -or $evidence.schema_version -ne 1 -or $evidence.format -cne 'ha-namespace-closure-evidence-v1' -or $evidence.source_commit -cne $Spec.source_commit -or $evidence.installation_id -cne $Spec.installation_id -or $evidence.namespace -cne $Spec.closure_names[$i] -or $evidence.original_sd_sha256 -cne $Spec.closure_original_sd_sha256[$i] -or $evidence.target_sd_sha256 -cne $Spec.closure_target_sd_sha256[$i] -or $evidence.children_sha256 -cne $Spec.closure_children_sha256[$i] -or $evidence.protected_workloads_receipt_sha256 -cne $Spec.protected_workloads_receipt_sha256 -or $evidence.classification_metadata_sha256 -isnot [string] -or $evidence.classification_metadata_sha256 -cnotmatch '^[0-9a-f]{64}$'){throw 'namespace_closure_evidence_rejected'}
-  foreach($key in @('provider_roundtrip_exact','original_restore_exact','full_sacl_verified','control_path_review_complete','namespace_wide_not_vm_specific')){if($evidence.$key -isnot [bool] -or -not $evidence.$key){throw 'namespace_closure_evidence_rejected'}}
+  $evidenceKeys=@('schema_version','format','source_commit','installation_id','namespace','original_sd_sha256','target_sd_sha256','children_sha256','classification_metadata_sha256','protected_workloads_receipt_sha256','provider_roundtrip_exact','original_restore_exact','full_sacl_verified','control_path_review_complete','namespace_wide_not_vm_specific')
+  $flags=@('provider_roundtrip_exact','original_restore_exact','full_sacl_verified','control_path_review_complete','namespace_wide_not_vm_specific')
+  if(Test-NpObserved $Spec){
+   $evidenceKeys+=@('descriptor_profile','comparator_sha256','provider_roundtrip_canonical','original_restore_canonical')
+   if($evidence.descriptor_profile -cne $Spec.descriptor_profile -or $evidence.comparator_sha256 -cne $Spec.comparator_sha256 -or $evidence.provider_roundtrip_exact -isnot [bool] -or $evidence.provider_roundtrip_exact -or $evidence.original_restore_exact -isnot [bool] -or $evidence.original_restore_exact){throw 'namespace_closure_exact_claim_rejected'}
+   if((Get-NpCanonicalHash $originalBytes) -cne $Spec.closure_original_canonical_sha256[$i] -or (Get-NpCanonicalHash $targetBytes) -cne $Spec.closure_target_canonical_sha256[$i]){throw 'namespace_closure_canonical_binding_rejected'}
+   $flags=@('provider_roundtrip_canonical','original_restore_canonical','full_sacl_verified','control_path_review_complete','namespace_wide_not_vm_specific')
+  }
+  Assert-NpKeys $evidence $evidenceKeys
+  if(($evidence.schema_version -isnot [int] -and $evidence.schema_version -isnot [long]) -or $evidence.schema_version -ne $(if(Test-NpObserved $Spec){2}else{1}) -or $evidence.format -cne $(if(Test-NpObserved $Spec){'ha-namespace-closure-evidence-canonical-v1'}else{'ha-namespace-closure-evidence-v1'}) -or $evidence.source_commit -cne $Spec.source_commit -or $evidence.installation_id -cne $Spec.installation_id -or $evidence.namespace -cne $Spec.closure_names[$i] -or $evidence.original_sd_sha256 -cne $Spec.closure_original_sd_sha256[$i] -or $evidence.target_sd_sha256 -cne $Spec.closure_target_sd_sha256[$i] -or $evidence.children_sha256 -cne $Spec.closure_children_sha256[$i] -or $evidence.protected_workloads_receipt_sha256 -cne $Spec.protected_workloads_receipt_sha256 -or $evidence.classification_metadata_sha256 -isnot [string] -or $evidence.classification_metadata_sha256 -cnotmatch '^[0-9a-f]{64}$'){throw 'namespace_closure_evidence_rejected'}
+  foreach($key in $flags){if($evidence.$key -isnot [bool] -or -not $evidence.$key){throw 'namespace_closure_evidence_rejected'}}
   $originals.Add($originalBytes);$targets.Add($targetBytes)
  }
  return [pscustomobject]@{spec=$Spec;originals=$originals;targets=$targets}
@@ -273,8 +347,105 @@ function Invoke-NpClosureTransaction($Candidate,[string]$Root,[bool]$Rollback){
  [ordered]@{scope=('namespace_closure_'+$suffix);complete=$true;plan_sha256=$PlanSha256;receipt_sha256=(Get-NpHash ([IO.File]::ReadAllBytes($receipt)));atomic_tree_change=$false;vm_method_effectiveness_proven=$false}|ConvertTo-Json -Compress
 }
 
+function Assert-NpObservedReceipt($Prior,$Candidate){
+ $s=$Candidate.closure.spec
+ Assert-NpKeys $Prior @('schema_version','format','source_commit','script_sha256','installation_id','plan_sha256','descriptor_profile','comparator_sha256','service_identity_sha256','service_config_sha256','service_sd_sha256','service_ownership_receipt_sha256','parent_sd_sha256','closure_names','children_sha256','classification_sha256','original_sd_sha256','original_canonical_sha256','requested_sd_sha256','requested_canonical_sha256','observed_sd_sha256','observed_canonical_sha256','original_sd_base64','requested_sd_base64','observed_sd_base64','journal_sha256','complete','atomic_tree_change','manual_reconcile_on_partial')
+ if(($Prior.schema_version -isnot [int] -and $Prior.schema_version -isnot [long]) -or $Prior.schema_version -ne 3 -or $Prior.format -cne 'ha-namespace-closure-apply-observed-v1' -or $Prior.complete -isnot [bool] -or -not $Prior.complete -or $Prior.atomic_tree_change -isnot [bool] -or $Prior.atomic_tree_change -or $Prior.manual_reconcile_on_partial -isnot [bool] -or -not $Prior.manual_reconcile_on_partial){throw 'namespace_observed_receipt_incomplete'}
+ foreach($key in @('source_commit','script_sha256','installation_id','descriptor_profile','comparator_sha256','service_identity_sha256','service_config_sha256','service_sd_sha256','service_ownership_receipt_sha256','parent_sd_sha256')){if($Prior.$key -cne $Candidate.plan[$key]){throw 'namespace_observed_receipt_binding_rejected'}}
+ if($Prior.plan_sha256 -cne $Candidate.hash){throw 'namespace_observed_receipt_binding_rejected'}
+ foreach($pair in @(@('closure_names','closure_names'),@('children_sha256','closure_children_sha256'),@('classification_sha256','closure_classification_sha256'),@('original_sd_sha256','closure_original_sd_sha256'),@('original_canonical_sha256','closure_original_canonical_sha256'),@('requested_sd_sha256','closure_target_sd_sha256'),@('requested_canonical_sha256','closure_target_canonical_sha256'))){if((Get-NpJsonHash @($Prior.($pair[0]))) -cne (Get-NpJsonHash @($s.($pair[1])))){throw 'namespace_observed_receipt_binding_rejected'}}
+ foreach($key in @('observed_sd_sha256','observed_canonical_sha256','original_sd_base64','requested_sd_base64','observed_sd_base64')){if($Prior.$key -isnot [array] -or $Prior.$key.Count -ne $s.closure_names.Count){throw 'namespace_observed_receipt_binding_rejected'}}
+ for($i=0;$i -lt $s.closure_names.Count;$i++){
+  foreach($kind in @('original','requested','observed')){
+   $bytes=[Convert]::FromBase64String($Prior.($kind+'_sd_base64')[$i])
+   if((Get-NpHash $bytes) -cne $Prior.($kind+'_sd_sha256')[$i] -or (Get-NpCanonicalHash $bytes) -cne $Prior.($kind+'_canonical_sha256')[$i]){throw 'namespace_observed_receipt_raw_rejected'}
+  }
+  if($Prior.observed_canonical_sha256[$i] -cne $s.closure_target_canonical_sha256[$i]){throw 'namespace_observed_receipt_canonical_rejected'}
+ }
+ if($Prior.journal_sha256 -isnot [string] -or $Prior.journal_sha256 -cnotmatch '^[0-9a-f]{64}$'){throw 'namespace_observed_receipt_journal_rejected'}
+}
+function Assert-NpObservedJournalRow($Row,$Expected){
+ Assert-NpKeys $Row @($Expected.Keys)
+ foreach($key in $Expected.Keys){
+  $actual=$Row.$key
+  $wanted=$Expected[$key]
+  $valid=if($wanted -is [int]){$actual -is [int] -or $actual -is [long]}elseif($wanted -is [bool]){$actual -is [bool]}else{$actual -is [string]}
+  if(-not $valid -or $actual -cne $wanted){throw 'namespace_observed_journal_sequence_rejected'}
+ }
+}
+function Assert-NpObservedApplyJournal([byte[]]$Bytes,$Prior){
+ $journal=[Text.UTF8Encoding]::new($false,$true).GetString($Bytes)
+ if(-not $journal.EndsWith("`n")){throw 'namespace_observed_journal_truncated'}
+ $lines=$journal.Substring(0,$journal.Length-1).Split("`n")
+ $count=$Prior.closure_names.Count
+ if($lines.Count -ne (1+3*$count)){throw 'namespace_observed_journal_incomplete'}
+ $rows=@(foreach($line in $lines){Read-NpJson ([Text.Encoding]::UTF8.GetBytes($line))})
+ Assert-NpObservedJournalRow $rows[0] @{sequence=1;event='namespace_closure_intent';mode='apply';plan_sha256=$Prior.plan_sha256;source_commit=$Prior.source_commit;descriptor_profile=$Prior.descriptor_profile;comparator_sha256=$Prior.comparator_sha256;atomic_tree_change=$false;manual_reconcile_on_partial=$true}
+ $offset=1
+ foreach($index in (@(1..($count-1))+@(0))){
+  Assert-NpObservedJournalRow $rows[$offset] @{sequence=($offset+1);event='namespace_closure_set_intent';index=$index;before_sd_sha256=$Prior.original_sd_sha256[$index];requested_sd_sha256=$Prior.requested_sd_sha256[$index];requested_canonical_sha256=$Prior.requested_canonical_sha256[$index]}
+  Assert-NpObservedJournalRow $rows[($offset+1)] @{sequence=($offset+2);event='namespace_closure_set_return';index=$index;return_value=0}
+  Assert-NpObservedJournalRow $rows[($offset+2)] @{sequence=($offset+3);event='namespace_closure_observed_readback';index=$index;observed_sd_sha256=$Prior.observed_sd_sha256[$index];observed_canonical_sha256=$Prior.observed_canonical_sha256[$index];full_sacl_verified=$true}
+  $offset+=3
+ }
+}
+function Invoke-NpObservedTransaction($Candidate,[string]$Root,[bool]$Rollback){
+ if(-not $Go -or $PlanSha256 -cnotmatch '^[0-9a-f]{64}$' -or $Candidate.hash -cne $PlanSha256){throw 'namespace_apply_intent_required'}
+ $s=$Candidate.closure.spec;$suffix=if($Rollback){'rollback'}else{'apply'}
+ $journal=Join-Path $Root ('namespace-policy-'+$suffix+'-journal.jsonl');$receipt=Join-Path $Root ('namespace-policy-'+$suffix+'-receipt.json')
+ if((Test-Path -LiteralPath $journal) -or (Test-Path -LiteralPath $receipt) -or (-not $Rollback -and (Test-Path -LiteralPath (Join-Path $Root 'namespace-runtime-observed.json')))){throw 'namespace_existing_intent_manual_reconcile'}
+ $expected=@($s.closure_original_sd_sha256);$requested=@($s.closure_target_sd_sha256);$canonical=@($s.closure_target_canonical_sha256);$order=@(1..($s.closure_names.Count-1))+@(0)
+ if($Rollback){
+  $prior=Read-NpJson (Open-NpInput (Join-Path $Root 'namespace-policy-apply-receipt.json') $ApplyReceiptSha256 3145728) 3145728
+  Assert-NpObservedReceipt $prior $Candidate
+  $applyJournal=Open-NpInput (Join-Path $Root 'namespace-policy-apply-journal.jsonl') $prior.journal_sha256 3145728
+  Assert-NpObservedApplyJournal $applyJournal $prior
+  $expected=@($prior.observed_sd_sha256);$requested=@($s.closure_original_sd_sha256);$canonical=@($s.closure_original_canonical_sha256);[array]::Reverse($order)
+ }elseif((Test-Path -LiteralPath (Join-Path $Root 'namespace-policy-rollback-journal.jsonl')) -or (Test-Path -LiteralPath (Join-Path $Root 'namespace-policy-rollback-receipt.json'))){throw 'namespace_existing_intent_manual_reconcile'}
+ Assert-NpClosureState $Candidate $expected
+ # Each raw payload is persisted before the first namespace mutation. CreateNew
+ # and the journal prevent resuming or overwriting an uncertain partial apply.
+ for($i=0;$i -lt $s.closure_names.Count;$i++){
+  $bytes=if($Rollback){$Candidate.closure.originals[$i]}else{$Candidate.closure.targets[$i]}
+  Write-NpRaw (Join-Path $Root ('namespace-'+$suffix+'-'+$i+'-requested.bin')) $bytes
+ }
+ Write-NpRecord $journal ([ordered]@{sequence=1;event='namespace_closure_intent';mode=$suffix;plan_sha256=$PlanSha256;source_commit=$Candidate.plan.source_commit;descriptor_profile=$s.descriptor_profile;comparator_sha256=$s.comparator_sha256;atomic_tree_change=$false;manual_reconcile_on_partial=$true}) $true
+ $sequence=1;$observed=@('')*$s.closure_names.Count;$observedCanonical=@('')*$s.closure_names.Count;$observedBase64=@('')*$s.closure_names.Count
+ foreach($i in $order){
+  Assert-NpClosureState $Candidate $expected
+  $bytes=if($Rollback){$Candidate.closure.originals[$i]}else{$Candidate.closure.targets[$i]}
+  $sequence++;Write-NpRecord $journal ([ordered]@{sequence=$sequence;event='namespace_closure_set_intent';index=$i;before_sd_sha256=$expected[$i];requested_sd_sha256=$requested[$i];requested_canonical_sha256=$canonical[$i]}) $false
+  $result=Set-NpClosureNamespace $s.closure_names[$i] $bytes $s
+  if($result -isnot [uint32]){throw 'namespace_set_return_unverified_preserve_journal'}
+  $sequence++;Write-NpRecord $journal ([ordered]@{sequence=$sequence;event='namespace_closure_set_return';index=$i;return_value=$result}) $false
+  if($result -ne 0){throw 'namespace_set_failed_preserve_journal'}
+  # Get-NpNamespace always performs full-SACL verification, including rollback.
+  $readback=Get-NpNamespace $s.closure_names[$i]
+  Write-NpRaw (Join-Path $Root ('namespace-'+$suffix+'-'+$i+'-observed.bin')) $readback
+  $observed[$i]=Get-NpHash $readback;$observedCanonical[$i]=Get-NpCanonicalHash $readback;$observedBase64[$i]=[Convert]::ToBase64String($readback)
+  if($observedCanonical[$i] -cne $canonical[$i]){throw 'namespace_canonical_readback_mismatch_preserve_journal'}
+  # All subsequent preconditions use the just-observed RAW hash. Canonical
+  # equality is limited to this one request/readback boundary.
+  $expected[$i]=$observed[$i]
+  $sequence++;Write-NpRecord $journal ([ordered]@{sequence=$sequence;event='namespace_closure_observed_readback';index=$i;observed_sd_sha256=$observed[$i];observed_canonical_sha256=$observedCanonical[$i];full_sacl_verified=$true}) $false
+  Assert-NpClosureState $Candidate $expected
+ }
+ Assert-NpClosureState $Candidate $expected
+ $value=[ordered]@{schema_version=3;format=('ha-namespace-closure-'+$suffix+'-observed-v1');source_commit=$Candidate.plan.source_commit;script_sha256=$Candidate.plan.script_sha256;installation_id=$s.installation_id;plan_sha256=$PlanSha256;descriptor_profile=$s.descriptor_profile;comparator_sha256=$s.comparator_sha256;service_identity_sha256=$Candidate.plan.service_identity_sha256;service_config_sha256=$s.service_config_sha256;service_sd_sha256=$s.service_sd_sha256;service_ownership_receipt_sha256=$s.service_ownership_receipt_sha256;parent_sd_sha256=$s.parent_sd_sha256;closure_names=@($s.closure_names);children_sha256=@($s.closure_children_sha256);classification_sha256=@($s.closure_classification_sha256);original_sd_sha256=@($s.closure_original_sd_sha256);original_canonical_sha256=@($s.closure_original_canonical_sha256);requested_sd_sha256=$requested;requested_canonical_sha256=$canonical;observed_sd_sha256=$observed;observed_canonical_sha256=$observedCanonical;original_sd_base64=@($Candidate.closure.originals|ForEach-Object{[Convert]::ToBase64String($_)});requested_sd_base64=@($(if($Rollback){$Candidate.closure.originals}else{$Candidate.closure.targets})|ForEach-Object{[Convert]::ToBase64String($_)});observed_sd_base64=$observedBase64;journal_sha256=(Get-NpHash ([IO.File]::ReadAllBytes($journal)));complete=$true;atomic_tree_change=$false;manual_reconcile_on_partial=$true}
+ Write-NpRecord $receipt $value $true
+ $hash=Get-NpHash ([IO.File]::ReadAllBytes($receipt))
+ if(-not $Rollback){
+  # Immutable second-phase input, never rewrite the pre-apply plan. Runtime
+  # uses observed raw pins and requires this complete receipt at provisioning.
+  $runtime=[ordered]@{version='direct-children-observed-v1';names=@($s.closure_names);sd_sha256=$observed;children_sha256=@($s.closure_children_sha256);classification_sha256=@($s.closure_classification_sha256);descriptor_profile=$s.descriptor_profile;comparator_sha256=$s.comparator_sha256;apply_receipt_sha256=$hash;plan_sha256=$PlanSha256;service_identity_sha256=$Candidate.plan.service_identity_sha256}
+  Write-NpRecord (Join-Path $Root 'namespace-runtime-observed.json') $runtime $true
+ }
+ [ordered]@{scope=('namespace_closure_'+$suffix);complete=$true;plan_sha256=$PlanSha256;receipt_sha256=$hash;atomic_tree_change=$false;vm_method_effectiveness_proven=$false}|ConvertTo-Json -Compress
+}
+
 function New-NpPlan($Spec,[byte[]]$Original,[byte[]]$Current,[byte[]]$Parent,[string[]]$Children,[string[]]$Admins,[string]$ActualScriptHash){
  Assert-NpManifest $Spec
+ if(Test-NpObserved $Spec){Initialize-NpCanonical $Spec}
  if((Get-NpHash $Original) -cne $Spec.original_sd_sha256 -or (Get-NpHash $Parent) -cne $Spec.parent_sd_sha256 -or (Get-NpJsonHash @($Children)) -cne $Spec.children_sha256 -or (($Admins|Sort-Object)-join ',') -cne (($Spec.trusted_admin_sids|Sort-Object)-join ',')){throw 'namespace_baseline_drift'}
  if($Children.Count -ne 0 -and -not $Spec.PSObject.Properties['closure_version']){throw 'namespace_child_impact_unreviewed'}
  $target=[HaNamespacePolicyCoreV1]::Build($Original,$Spec.service_sid,$Spec.inheritance_transition,$Spec.acknowledge_parent_policy_no_longer_inherited,$true,[string[]]$Admins)
@@ -284,12 +455,16 @@ function New-NpPlan($Spec,[byte[]]$Original,[byte[]]$Current,[byte[]]$Parent,[st
   $closure=New-NpClosureCandidate $Spec $Original $target $script:npPlanRoot
   foreach($key in @('closure_version','closure_names','closure_original_sd_sha256','closure_target_sd_sha256','closure_classification_sha256','closure_children_sha256')){$plan[$key]=$Spec.$key}
   $candidate|Add-Member NoteProperty closure $closure
-  $plan.runtime_namespace_closure=[ordered]@{version='direct-children-v1';names=@($Spec.closure_names);sd_sha256=@($Spec.closure_target_sd_sha256);children_sha256=@($Spec.closure_children_sha256);classification_sha256=@($Spec.closure_classification_sha256)}
+  if(Test-NpObserved $Spec){
+   $plan.schema_version=3;$plan.format='ha-namespace-policy-observed-v1'
+   foreach($key in @('descriptor_profile','comparator_sha256','closure_original_canonical_sha256','closure_target_canonical_sha256')){$plan[$key]=$Spec.$key}
+  }else{$plan.runtime_namespace_closure=[ordered]@{version='direct-children-v1';names=@($Spec.closure_names);sd_sha256=@($Spec.closure_target_sd_sha256);children_sha256=@($Spec.closure_children_sha256);classification_sha256=@($Spec.closure_classification_sha256)}}
  }
  $candidate.hash=Get-NpJsonHash $plan;return $candidate
 }
 function Write-NpRecord([string]$Path,$Value,[bool]$New){$bytes=[Text.UTF8Encoding]::new($false).GetBytes(($Value|ConvertTo-Json -Depth 12 -Compress)+"`n");$stream=[IO.File]::Open($Path,$(if($New){[IO.FileMode]::CreateNew}else{[IO.FileMode]::Append}),[IO.FileAccess]::Write,[IO.FileShare]::Read);try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}}
 function Invoke-NpTransaction($Candidate,[byte[]]$Original,[string]$Root,[bool]$Rollback){
+ if($Candidate.PSObject.Properties['closure'] -and (Test-NpObserved $Candidate.closure.spec)){Invoke-NpObservedTransaction $Candidate $Root $Rollback;return}
  if($Candidate.PSObject.Properties['closure']){Invoke-NpClosureTransaction $Candidate $Root $Rollback;return}
  if(-not $Go -or $PlanSha256 -cnotmatch '^[0-9a-f]{64}$' -or $Candidate.hash -cne $PlanSha256){throw 'namespace_apply_intent_required'}
  $suffix=if($Rollback){'rollback'}else{'apply'};$journal=Join-Path $Root ('namespace-policy-'+$suffix+'-journal.jsonl');$receipt=Join-Path $Root ('namespace-policy-'+$suffix+'-receipt.json')
@@ -315,12 +490,13 @@ function Invoke-NpTransaction($Candidate,[byte[]]$Original,[string]$Root,[bool]$
 }
 function Invoke-NamespacePolicy{
  $Mode=ConvertTo-NpMode $Mode
+ $DescriptorProfile=$DescriptorProfile.ToLowerInvariant()
  if(-not $Win64DesktopAdmin -or [Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or -not [Environment]::Is64BitProcess -or $PSVersionTable.PSEdition -cne 'Desktop' -or $PSVersionTable.PSVersion.Major -ne 5){throw 'namespace_native_intent_required'}
  if($InstallationId -cnotmatch '^[0-9a-f]{64}$' -or $SourceCommit -cnotmatch '^[0-9a-f]{40}$' -or $ScriptSha256 -cnotmatch '^[0-9a-f]{64}$' -or (Get-NpHash ([IO.File]::ReadAllBytes($PSCommandPath))) -cne $ScriptSha256){throw 'namespace_source_binding_rejected'}
  $identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{if(-not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))){throw 'namespace_admin_required'}}finally{$identity.Dispose()}
  Assert-NpPrivate $PSCommandPath
  Initialize-NpCore;Initialize-NpNative;Add-Type -AssemblyName System.Management
- $root=Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) ('N100HA_'+$InstallationId.Substring(0,24));Assert-NpPrivate $root $true
+ $root=Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) ('N100HA_'+$InstallationId.Substring(0,24));Assert-NpPrivate $root $true ($DescriptorProfile -ceq 'strict-canonical-observed-v1')
  $script:npHeld=[Collections.Generic.List[object]]::new();$null=Open-NpInput $PSCommandPath $ScriptSha256 262144;$rootLease=[HaNamespaceReadV1]::new($root,$true);$script:npHeld.Add($rootLease);$rootIdentity=$rootLease.Identity();$rootAcl=(Get-Acl -LiteralPath $root).Sddl
  $privilege=[HaNamespacePrivilegeV1]::new()
  try{
@@ -329,7 +505,7 @@ function Invoke-NamespacePolicy{
    [ordered]@{scope='namespace_policy_readonly_inspect';namespace='root/virtualization/v2';source_commit=$SourceCommit;sd_sha256=(Get-NpHash $current);parent_sd_sha256=(Get-NpHash $parent);children_sha256=(Get-NpJsonHash @($children));child_count=$children.Count;full_sacl_privilege_verified=$true;sacl_ace_count=[HaNamespacePolicyCoreV1]::SaclCount($current);ace_classifications=[HaNamespacePolicyCoreV1]::Summary($current);persistent_write_performed=$false;provider_semantics_verified=$false;namespace_wide_not_vm_specific=$true}|ConvertTo-Json -Depth 4 -Compress;return
   }
   if($ManifestPath -ine (Join-Path $root 'namespace-policy-request.json')){throw 'namespace_manifest_path_rejected'}
-  $spec=Read-NpJson (Open-NpInput $ManifestPath $ManifestSha256);Assert-NpManifest $spec
+  $spec=Read-NpJson (Open-NpInput $ManifestPath $ManifestSha256);Assert-NpManifest $spec;Assert-NpSelectedProfile $spec $DescriptorProfile
   if($spec.source_commit -cne $SourceCommit -or $spec.installation_id -cne $InstallationId){throw 'namespace_source_binding_rejected'}
   $original=Open-NpInput (Join-Path $root 'namespace-original.bin') $spec.original_sd_sha256
   $admins=@(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Stop|ForEach-Object{$_.SID.Value}|Sort-Object)
