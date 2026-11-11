@@ -211,6 +211,24 @@ class PgBackend:
             if connection is not None:
                 connection.close()
 
+    def authenticate_isolated_nodes(self):
+        config = self.plan.get("windows_enforced", {}).get("config_profile", {})
+        if (self.plan.get("profile") != "enforced-vm-v1"
+                or config.get("acceptance_scope") != "isolated-predeployment"
+                or config.get("operational_cutover_accepted") is not False
+                or any(endpoint["dbname"] != "ha" or endpoint["user"] != "postgres"
+                       for endpoint in self.plan["pg_nodes"].values())):
+            _deny("isolated_pg_authentication_required")
+        for node in ("A", "B"):
+            with self._connection(node) as connection, connection.transaction():
+                connection.execute("SET TRANSACTION READ ONLY")
+                row = connection.execute(
+                    "SELECT current_database(), session_user, current_setting('cluster_name'), "
+                    "system_identifier::text FROM pg_control_system()"
+                ).fetchone()
+                if row != ("ha", "postgres", "ha_" + node, str(self.plan["system_id"])):
+                    _deny("pg_identity_mismatch")
+
     def _observe(self, connection, node, state):
         if self.plan.get('profile')=='enforced-vm-v1':
             self._enforced_observation(connection,state)

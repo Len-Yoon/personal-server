@@ -325,7 +325,10 @@ function Assert-EnforcedJournal($Config,$Policy,$Watch) {
 }
 function Assert-EnforcedParentArgv($Actual,$Config) {
     $cfg=$Config.windows_enforced
-    if($Actual.Count -lt 11 -or $Actual[4] -cnotin @('initialize','advance','serve')){throw 'controller_parent_unverified'}
+    if($Actual.Count -lt 11 -or $Actual[4] -cnotin @('authenticate','initialize','advance','serve')){throw 'controller_parent_unverified'}
+    if($Actual[4] -ceq 'authenticate' -and (-not $cfg.PSObject.Properties['config_profile'] -or
+        $cfg.config_profile.acceptance_scope -cne 'isolated-predeployment' -or
+        $cfg.config_profile.operational_cutover_accepted -ne $false)){throw 'isolated_pg_authentication_required'}
     $expected=@($cfg.python_path,'-I','-B',$cfg.launcher_path,$Actual[4],'--plan',$Plan,'--approval',$Approval)
     $expected+=@('--journal',(Get-EnforcedJournalPath))
     $index=11
@@ -417,7 +420,8 @@ function Get-EnforcedContext($Config,$Policy,$Watch) {
     $parent=Get-CimInstance Win32_Process -Filter ("ProcessId="+$self.ParentProcessId) -ErrorAction Stop
     if($null -eq $parent -or $null -eq $parent.CreationDate -or $parent.CreationDate -gt $self.CreationDate -or
         $parent.ExecutablePath -cne $cfg.python_path){throw 'controller_parent_unverified'}
-    Assert-EnforcedParentArgv @(Get-EnforcedArgv $parent.CommandLine) $Config
+    $controllerArgv=@(Get-EnforcedArgv $parent.CommandLine)
+    Assert-EnforcedParentArgv $controllerArgv $Config
     # Support a direct controller or one exact pinned SCM service-host parent.
     # Unknown additional wrappers are unsupported provisioning, not trusted.
     $hostProcess=$parent
@@ -436,7 +440,7 @@ function Get-EnforcedContext($Config,$Policy,$Watch) {
     if($boot -cne $cfg.boot_ticks){throw 'host_boot_changed'}
     Assert-EnforcedDeadline $Watch
     return @{principal_sha256=(Get-EnforcedHash ([Text.Encoding]::UTF8.GetBytes($principal)));boot_ticks=$boot;
-        service_pid=[long]$service.ProcessId;controller_pid=[long]$parent.ProcessId;
+        service_pid=[long]$service.ProcessId;controller_pid=[long]$parent.ProcessId;controller_mode=$controllerArgv[4];
         controller_started=$parent.CreationDate.ToUniversalTime().Ticks.ToString();host_started=$hostProcess.CreationDate.ToUniversalTime().Ticks.ToString()}
 }
 function Get-EnforcedVmStamp($Vm) {
@@ -570,6 +574,7 @@ function Get-EnforcedResponse($Config,$Approved,[string]$PlanHash,[string]$Appro
     Assert-EnforcedJournal $Config $policy $Watch
     $pgFiles=Get-EnforcedPgFiles $Config $policy $Watch
     $snapshot=Get-EnforcedVmSnapshot $Config $policy $Watch
+    if($Request.action -ceq 'fence' -and $snapshot.context.controller_mode -ceq 'authenticate'){throw 'authenticate_cannot_fence'}
     if($Request.action -ceq 'fence' -and -not $snapshot.fenced){
         # The only mutating API: exact approved GUID. Lost responses require a
         # new observe; no retries, VM creation, start, checkpoints or host reboot.

@@ -68,7 +68,7 @@ if($calls.Count -ne 1 -or $calls[0].Extent.Text -cne 'Test-PreflightOsRootOwner 
         good=settings()
         raw=P.render_args(good)
         self.assertEqual(raw.decode().splitlines()[0], 'format=enforced-service-v1')
-        for mode in ('initialize','advance','serve'):
+        for mode in ('authenticate','initialize','advance','serve'):
             self.assertIn(('mode='+mode+'\n').encode(),P.render_args(good|{'mode':mode}))
         for key, value in [('mode','shell'),('python_path',r'\\host\python.exe'),
                 ('plan_path',r'C:\Private\..\other'),('approval_path',r'C:\Private\file:stream'),
@@ -96,12 +96,14 @@ if($initialize.CommandLine().EndsWith('--arm')){throw 'initialize_armed'}
 $advance=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=advance'))
 if($advance.CommandLine() -cne $expected.Replace(' serve ',' advance ').Replace(' --arm','')){throw 'advance_not_exact_fixed_command'}
 if($advance.CommandLine().EndsWith('--arm')){throw 'advance_armed'}
+$auth=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=authenticate'))
+if($auth.CommandLine() -cne $expected.Replace(' serve ',' authenticate ').Replace(' --arm','')){throw 'auth_not_exact_fixed_command'}
 $ti='S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
 if(-not [EnforcedServiceV1.Settings]::IsTrustedOsRootOwner($ti,'c:\','C:\',2)){throw 'os_root_owner_rejected'}
 foreach($case in @(@($ti,'C:\','C:\',0),@($ti,'C:\','C:\',1),@($ti,'C:\Private','C:\',3),@($ti,'D:\','C:\',3),@($ti,'C:\..\','C:\',3),@('S-1-1-0','C:\','C:\',3))){
  if([EnforcedServiceV1.Settings]::IsTrustedOsRootOwner($case[0],$case[1],$case[2],[int]$case[3])){throw 'unsafe_owner_exception'}
 }
-foreach($mode in @('initialize','advance')){
+foreach($mode in @('authenticate','initialize','advance')){
  if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,0) -ne 0){throw 'successful_oneshot_failed'}
  if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,1) -ne 1){throw 'failed_oneshot_succeeded'}
 }

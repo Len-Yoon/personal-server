@@ -623,7 +623,16 @@ class ComposeConfigTests(unittest.TestCase):
         self.assertIn("if: needs.scope.outputs.browser_required == 'true'", workflow)
         self.assertIn('test "${{ needs.browser.result }}" = "success"', workflow)
         self.assertIn('test "${{ needs.browser.result }}" = "skipped"', workflow)
-        self.assertIn("python3 -m playwright install --with-deps chromium", workflow)
+        browser = yaml.safe_load(workflow)["jobs"]["browser"]
+        requirements = (ROOT / "tests/browser/requirements.browser.txt").read_text(encoding="utf-8")
+        version = re.search(r"^playwright==([0-9.]+)$", requirements, re.MULTILINE)
+        self.assertIsNotNone(version)
+        self.assertRegex(browser["container"]["image"],
+                         rf"^mcr\.microsoft\.com/playwright/python:v{re.escape(version.group(1))}-noble@sha256:[0-9a-f]{{64}}$")
+        dependencies = next(step["run"] for step in browser["steps"]
+                            if step["name"] == "Install isolated browser dependencies")
+        self.assertIn("tests/browser/requirements.browser.txt", dependencies)
+        self.assertNotIn("--with-deps", dependencies)
 
     def test_ci_enforces_strict_test_results_and_verification_quality(self):
         jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
