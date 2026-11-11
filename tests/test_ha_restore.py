@@ -54,9 +54,19 @@ class RestoreArtifactTests(unittest.TestCase):
         encrypted = backup._seal(b"synthetic protected fixture", key)
         self.assertNotIn(b"synthetic protected fixture", encrypted)
         self.assertEqual(backup._open(encrypted, key), b"synthetic protected fixture")
-        variants = [encrypted[:-1], encrypted[:-1] + bytes([encrypted[-1] ^ 1]), b"x" + encrypted[1:], encrypted[:len(backup.MAGIC)] + b"x" + encrypted[len(backup.MAGIC) + 1:]]
-        for value in variants:
-            with self.subTest(value_length=len(value)), self.assertRaisesRegex(DatabaseUnavailable, "^backup_authentication_failed$"):
+        nonce_start = len(backup.MAGIC)
+        variants = {
+            "truncated_tag": encrypted[:-1],
+            "changed_tag": encrypted[:-1] + bytes([encrypted[-1] ^ 1]),
+            "changed_header": bytes([encrypted[0] ^ 1]) + encrypted[1:],
+            "changed_nonce": (
+                encrypted[:nonce_start]
+                + bytes([encrypted[nonce_start] ^ 1])
+                + encrypted[nonce_start + 1:]
+            ),
+        }
+        for variant, value in variants.items():
+            with self.subTest(variant=variant), self.assertRaisesRegex(DatabaseUnavailable, "^backup_authentication_failed$"):
                 backup._open(value, key)
         with self.assertRaisesRegex(DatabaseUnavailable, "^backup_authentication_failed$"):
             backup._open(encrypted, os.urandom(32))
