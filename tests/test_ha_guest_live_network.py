@@ -193,6 +193,33 @@ foreach($key in @('executor_source_commit','vm_operation_source_commit','executo
 }
 ''')
 
+    def test_only_native_empty_persistent_route_store_is_accepted(self):
+        self.run_ps(r'''
+$ErrorActionPreference='Stop'
+. $env:LIVE_NETWORK_SOURCE
+function Get-NetRoute {
+    [CmdletBinding()]
+    param($AddressFamily,$PolicyStore)
+    if($AddressFamily -ne 'IPv4'){throw 'unexpected_address_family'}
+    if($PolicyStore -eq 'ActiveStore' -and $script:case -ne 'active_empty'){
+        return [pscustomobject]@{DestinationPrefix='10.8.7.0/29';InterfaceIndex=8;NextHop='0.0.0.0';RouteMetric=256}
+    }
+    $category=if($script:case -eq 'denied'){'PermissionDenied'}else{'ObjectNotFound'}
+    $id=if($script:case -eq 'other_not_found'){'Different_Error'}else{'CmdletizationQuery_NotFound_AddressFamily'}
+    $errorRecord=[System.Management.Automation.ErrorRecord]::new(
+        [InvalidOperationException]::new('fixture'),$id,$category,$null)
+    $PSCmdlet.ThrowTerminatingError($errorRecord)
+}
+$script:case='persistent_empty'
+$routes=@(Get-LiveNetworkRoutes)
+if($routes.Count -ne 1 -or $routes[0].store -cne 'ActiveStore'){throw 'active_route_lost'}
+foreach($script:case in @('active_empty','other_not_found','denied')){
+    $blocked=$false
+    try{$null=Get-LiveNetworkRoutes}catch{$blocked=$true}
+    if(-not $blocked){throw ('unclosed_'+$script:case)}
+}
+''')
+
 
 if __name__ == "__main__":
     unittest.main()

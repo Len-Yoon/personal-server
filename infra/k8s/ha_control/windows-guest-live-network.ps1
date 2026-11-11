@@ -106,7 +106,15 @@ function Get-LiveNetworkAdapter($Switch,$Spec,[bool]$ExpectDhcpDisabled=$false){
 
 function Get-LiveNetworkRoutes{
     foreach($store in @('ActiveStore','PersistentStore')){
-        foreach($route in @(Get-NetRoute -AddressFamily IPv4 -PolicyStore $store)){
+        try{
+            $routes=@(Get-NetRoute -AddressFamily IPv4 -PolicyStore $store -ErrorAction Stop)
+        }catch{
+            # NetTCPIP reports an empty filtered persistent store as ObjectNotFound.
+            if($store -ceq 'PersistentStore' -and $_.CategoryInfo.Category -eq 'ObjectNotFound' -and
+                $_.FullyQualifiedErrorId -ceq 'CmdletizationQuery_NotFound_AddressFamily,Get-NetRoute'){continue}
+            throw
+        }
+        foreach($route in $routes){
             [pscustomobject]@{store=$store;prefix=$route.DestinationPrefix;index=$route.InterfaceIndex;next_hop=$route.NextHop;metric=$route.RouteMetric}
         }
     }
