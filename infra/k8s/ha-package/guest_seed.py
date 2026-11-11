@@ -424,6 +424,13 @@ def cloud_status():
     return 0
 
 
+def mount_seed_iso(device, destination):
+    # hdiutil emits truncated primary ISO names alongside complete Joliet names.
+    # Linux must select Joliet instead of its preferred Rock Ridge/POSIX tree.
+    run(['mount','-t','iso9660','-o','ro,nosuid,nodev,noexec,norock',device,str(destination)],
+        'seed_iso_mount_failed',30)
+
+
 def kernel_and_packages(module,lock,expected):
     need(not run(['dpkg','--audit'],'offline_package_audit_failed').strip(),'offline_package_audit_not_empty')
     for row in module.packages(lock):
@@ -555,7 +562,7 @@ def guest(config_path):
         need(not MOUNT.parent.is_symlink() and MOUNT.parent.stat().st_uid==0
              and MOUNT.parent.stat().st_mode & 0o777==0o700,'private_seed_mount_parent_required')
         MOUNT.mkdir(mode=0o700,exist_ok=False)
-        run(['mount','-t','iso9660','-o','ro,nosuid,nodev,noexec',devices[0],str(MOUNT)],'seed_iso_mount_failed',30);mounted=True
+        mount_seed_iso(devices[0],MOUNT);mounted=True
         tree_files(MOUNT)
         need(sha(regular(MOUNT/'bundle/manifest.json'))==config['bootstrap_manifest_sha256'],'bootstrap_manifest_hash_mismatch')
         authenticated=json.loads(regular(MOUNT/'bundle/manifest.json').read_bytes())

@@ -117,6 +117,13 @@ class SeedTests(unittest.TestCase):
         with patch.object(S,'run',side_effect=S.SeedError('cloud_init_failed')):
             with self.assertRaises(S.SeedError):S.cloud_status()
 
+    def test_iso_mount_selects_joliet_without_losing_readonly_execution_guards(self):
+        with patch.object(S,'run') as command:
+            S.mount_seed_iso('/dev/sr0',Path('/run/n100-ha-seed/iso'))
+        command.assert_called_once_with(['mount','-t','iso9660','-o',
+            'ro,nosuid,nodev,noexec,norock','/dev/sr0','/run/n100-ha-seed/iso'],
+            'seed_iso_mount_failed',30)
+
     def identity(self):
         return {'source_commit':'a'*40,'installation_id':'b'*64,'node':'A','seed_id':'c'*64,
                 'bootstrap_manifest_sha256':'d'*64,'expected_kernel_release':'6.8.0-149-generic'}
