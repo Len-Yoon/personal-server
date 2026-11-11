@@ -8,7 +8,7 @@ public sealed class FakeScm:TrustedStoppedV1.IApi {
  void Step(string name){Calls.Add(name);if(name==FailAt)throw new TrustedStoppedV1.Failure(999);}
  public bool Exists(string name){Step("exists");return Present;}
  public void Create(string name,string image){Step("create");}
- public void Seal(){Step("seal");}public void Sid(){Step("sid");}
+ public void Seal(string name){Step("seal");}public void Sid(){Step("sid");}
  public TrustedStoppedV1.Snapshot Read(string name){Step("read");throw new TrustedStoppedV1.Failure(998);}
  public void Dispose(){Calls.Add("dispose");}
 }
@@ -30,6 +30,20 @@ foreach($bad in @('{"a":1,"a":2}','{"a":1,}','{"a":1.5}','{"a":true}junk','{"a":
 $api=[FakeScm]::new();$api.Present=$true;Reject {[TrustedStoppedV1.Contract]::Register($api,$iid,$name,$hostPath,[Action[string]]{param($e)})|Out-Null};Need (($api.Calls -join ',') -ceq 'exists')
 foreach($at in @('create','seal','sid','read')){$api=[FakeScm]::new();$api.FailAt=$at;Reject {[TrustedStoppedV1.Contract]::Register($api,$iid,$name,$hostPath,[Action[string]]{param($e)})|Out-Null};$expected=switch($at){create{'exists,create'}seal{'exists,create,seal'}sid{'exists,create,seal,sid'}read{'exists,create,seal,sid,read'}};Need (($api.Calls -join ',') -ceq $expected)}
 $api=[FakeScm]::new();Reject {[TrustedStoppedV1.Contract]::Register($api,$iid,$name,$hostPath,[Action[string]]{param($e)if($e -ceq 'created'){throw 'durable_event_failure'}})|Out-Null};Need (($api.Calls -join ',') -ceq 'exists,create')
+# Exercise the exact ACE predicate used on both SCM descriptor readbacks.
+$scmSid=[TrustedStoppedV1.Contract]::ServiceSid($name)
+Need ($scmSid -ceq 'S-1-5-80-3354449512-1843507217-285173831-784620642-3327000656');$count++
+$scmSids=[string[]]@('S-1-5-18','S-1-5-32-544',$scmSid)
+$scmMasks=[int[]]@(0xF01FF,0xF01FF,0x20000);$scmFlags=[byte[]]@(0,0,0)
+[TrustedStoppedV1.Contract]::VerifyDaclFacts($name,'S-1-5-32-544',0x9004,$scmSids,$scmMasks,$scmFlags);$count++
+Need ([TrustedStoppedV1.Contract]::ServiceSddl($name).EndsWith('(A;;0x20000;;;'+$scmSid+')'));$count++
+foreach($extra in @(0,2,16,32,0x40000,0x80000,0x10000000)){
+ $mask=if($extra -eq 0){0}else{0x20000 -bor $extra}
+ Reject {[TrustedStoppedV1.Contract]::VerifyDaclFacts($name,'S-1-5-32-544',0x9004,$scmSids,[int[]]@(0xF01FF,0xF01FF,$mask),$scmFlags)}
+}
+Reject {[TrustedStoppedV1.Contract]::VerifyDaclFacts($name,'S-1-5-32-544',0x9004,$scmSids,$scmMasks,[byte[]]@(0,0,16))}
+Reject {[TrustedStoppedV1.Contract]::VerifyDaclFacts($name,'S-1-5-32-544',0x9004,[string[]]@('S-1-5-18','S-1-5-32-544','S-1-5-11'),$scmMasks,$scmFlags)}
+Reject {[TrustedStoppedV1.Contract]::VerifyDaclFacts($name,'S-1-5-32-544',0x9004,[string[]]@('S-1-5-18','S-1-5-32-544'),[int[]]@(0xF01FF,0xF01FF),[byte[]]@(0,0))}
 $profile='strict-canonical-observed-v1';$rootSid='S-1-5-80-1-2-3-4-5';$rootSids=[string[]]@('S-1-5-18','S-1-5-32-544',$rootSid);$rootMasks=[int[]]@(2032127,2032127,131232);$rootFlags=[byte[]]@(3,3,0)
 [TrustedStoppedV1.NewPrivate]::ValidateInstallationRootFacts($profile,$rootSid,'S-1-5-32-544',0x9004,$rootSids,$rootMasks,$rootFlags);$count++
 Need ([TrustedStoppedV1.NewPrivate]::InstallationRootAcl($rootSid,$profile).EndsWith('(A;;0x200a0;;;'+$rootSid+')'));$count++
