@@ -49,3 +49,37 @@ OS 버전 하한 충족만으로 취약점 검사가 완료되지는 않음. 새
 승인 유효기간과 파일 보호는 DB 연결마다 재검증됨. 승인 만료 또는 불일치는 SQLite 전환 없이 연결을 거절함.
 운영 승인 파일과 설정 파일은 승인된 별도 절차로 공급해야 하며 본 빌더는 자격 증명이나 운영 승인 파일을 생성하지 않음.
 HomeOps Docker 접근은 원래 실행 USER·group·socket 설정에 대한 별도 운영 검토 대상임.
+
+## 실제 7서비스 동결 자료 이전
+
+`bootstrap_assets/initialize.py --phase migration`은 이미 실행·동기 복제 중인 새 `ha` DB에만 적용하는 별도 명시 실행 경로임. 기존 `catalog` 단계는 빈 카탈로그 준비용이며 실제 데이터 이전이 아님. migration 전에 catalog를 실행하지 않으며, 이미 존재하는 schema·table·function·type·LO·기본 권한 변경이 있으면 거절함. 기존 자료를 삭제하거나 덮어써서 선행 조건을 맞추지 않음.
+
+새 초기화 컨테이너에 운영자가 준비한 사설 frozen 디렉터리를 읽기 전용, 새 receipt 디렉터리를 쓰기 가능으로 추가 연결하고 기존 command를 다음 인수로 명시적으로 대체함. 이 문서는 실행 승인을 발급하거나 컨테이너를 시작하지 않음.
+
+```text
+--config /run/ha-init/config.json --phase migration
+--migration-manifest /frozen/manifest.json
+--migration-sha256 <외부에서 대조한 manifest SHA256>
+--migration-receipt /receipts/migration.json
+```
+
+| 입력 | 필수 계약 | 비고 |
+|---|---|---|
+| manifest | schema_version=1, source_commit·cluster·plan_sha256, target_system_id, freeze_receipt, artifacts, services, portal_objects, private_states | Git 릴리스·초기화 설정·실제 새 PG system과 일치해야 함 |
+| artifacts | artifact ID → file·sha256·bytes | file은 frozen 디렉터리 안의 상대 경로임. 단일 일반 사설 파일만 허용하며 링크·WAL/SHM/journal sidecar·변경된 파일을 거절함 |
+| freeze_receipt | file·sha256·bytes 형식의 별도 사설 JSON | schema_version, capture_id, source_runtime_sha256, writer_graph_sha256, writer_fence_receipt_sha256, writers_closed_at, capture_started_at, capture_finished_at, services, target_system_id, cluster, plan_sha256, artifacts, capture_audit를 포함함 |
+| capture_audit | file·sha256·bytes 형식의 별도 사설 JSON | schema_version=1, evidence의 runtime·writer_graph·writer_closure·dispositions 사설 파일 descriptor를 요구함. 파일 bytes/hash·변경 여부를 대조하고 앞의 세 hash를 freeze receipt와 대조함. 외부 관측의 진위를 자체 증명하지 않음 |
+| 실제 동결 근거 | 7개 서비스 목록과 모든 artifact의 SHA/bytes가 manifest와 일치해야 함. 종료 관측 ≤ 수집 시작 ≤ 수집 완료의 UTC `Z` 시간을 요구함 | 이 도구는 외부 OS writer 종료·재생성 차단을 직접 검증하지 않음. 수집·권한 검증을 단순 true 값으로 대체하지 않음 |
+| services | 고정 7서비스 각각 databases·states 객체 | databases는 component → SQLite artifact ID, states는 상태 key → 정규화 JSON artifact ID임. 누락·소비되지 않은 artifact를 거절함 |
+| SQLite | Portal homeops/bookmarks, Book main, YouTube main, CarCare main은 필수임 | Crawler main으로 기존 news SQLite를, HomeOps main으로 기존 기록 DB를 추가 보존할 수 있음. 존재하지 않는 자료를 임의 빈 DB로 대체하지 않음 |
+| Portal 상태 | auth_sessions, auth_failures, portfolio, file-namespace | 파일 namespace는 실제 앱의 canonical 검증기를 사용함. 휴지통 포함 전체 blob 참조와 portal_objects의 SHA/크기가 정확히 같아야 함 |
+| Book·YouTube 상태 | auth-rate-limit, write-sessions | 메모리에만 있던 인증·쓰기 세션은 명시적으로 무효화하고 전환 후 다시 로그인함. 빈 세션 artifact와 그 처분 근거를 함께 준비하며 실행 중 프로세스 메모리를 수집하지 않음 |
+| Crawler·HomeOps 상태 | archive/collection_status, restart_claims | 완료·불확실 상태를 보존함. 상태 정규화는 별도 검증된 수집 단계의 책임임 |
+| private_states | car-care-worker → hyundai_tokens → 사설 JSON artifact ID | 앱 상태·다른 서비스·blob·일반 SQLite로 복제하지 않음. `ha_effects.private_state`에만 적재함 |
+| provider 정적 설정 | Telegram·Hyundai client 정보·YES24·Executor 자격 연결은 별도 broker 사설 설정으로 준비함 | migration은 이를 생성하거나 앱 환경에 배포하지 않음 |
+
+실제 V1 수집은 WAL을 사용하는 Portal DB의 일관된 SQLite backup, 별도 인증 SQLite, 실제 파일·휴지통과 경로 정보를 포함해야 함. Crawler NEWS DB와 기본 경로가 아닌 Hyundai 토큰 파일도 실제 설정에서 확인해야 함. HomeOps 파일이 조사 경로에 없다는 사실만으로 빈 기록을 선언하지 않으며, 실제 경로 또는 부재를 입증하는 별도 근거가 필요함. 이 입력 이전기는 원본 수집기나 완전성 판정기를 대신하지 않음.
+
+모든 입력 검증 후 idle autocommit 연결의 하나의 outer transaction에서 닫힌 control 준비 → 7서비스 데이터와 blob 이전 → 강제 guard/effects 설치 → 논리 값/hash·원본 불변·닫힌 authority 대조 순으로 처리함. 이미 열린 트랜잭션의 savepoint 실행을 거절함. 일반 앱 역할과 broker 역할의 비밀은 사전 준비된 초기화 설정만 사용하며 새 자격 증명을 생성하지 않음.
+
+receipt는 준비·실패·성공별 새 파일로 남김. commit 응답 또는 성공 receipt 저장이 불확실하면 `UNKNOWN_COMMIT`으로 기록하며 자동 재실행하지 않음. 원본 수집/정규화 완료·기존 writer fencing 검증·공급자 외부 효과 대사·installed authority 발급·writer open·경로 전환을 데이터 이전 PASS로 대신하지 않음.
