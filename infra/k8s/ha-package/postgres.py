@@ -16,7 +16,8 @@ SOURCES = ('infra/k8s/ha-package/Postgres.Dockerfile.template',
            'infra/k8s/ha-package/postgres.py', 'infra/k8s/ha-package/build.py')
 OWNER = 'personal-server.ha-postgres-package'
 BASE = 'postgres:17.11-alpine3.24@sha256:4717f90960a225c2d1c5dac50508c401230f693ff626e06e84e6db0a68ded508'
-RECIPE = 'FROM ' + BASE + '\nRUN rm /usr/local/bin/gosu\nUSER 70:70\n'
+RECIPE = ('FROM ' + BASE + "\nRUN apk add --no-cache --upgrade 'krb5-libs>=1.22.3-r0' 'libxslt>=1.1.43-r4' \\\n"
+          '    && rm /usr/local/bin/gosu\nUSER 70:70\n')
 
 
 def snapshot(commit):
@@ -101,6 +102,7 @@ def build(output, context):
               '--security-opt=no-new-privileges:true', '--label', OWNER+'='+owner]
     smoke = docker.call(*common, '--entrypoint', 'sh', image['Id'], '-ec',
         'test "$(id -u)" = 70; test "$(id -g)" = 70; test ! -e /usr/local/bin/gosu; '
+        "apk info -e 'krb5-libs>=1.22.3-r0' 'libxslt>=1.1.43-r4' >/dev/null; "
         'test -f /usr/local/share/postgresql/extension/pgcrypto.control; postgres --version')
     if smoke != 'postgres (PostgreSQL) 17.11':
         raise P.PackageError('postgres_unprivileged_smoke_failed')
