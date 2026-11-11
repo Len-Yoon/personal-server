@@ -1,5 +1,9 @@
 """New internal-interface ownership and subnet safety; no native networking."""
 import os
+import base64
+import hashlib
+import json
+from tests import test_ha_guest_vm as V
 from pathlib import Path
 import shutil
 import subprocess
@@ -66,6 +70,32 @@ foreach($name in @('New-NetNat','Remove-NetIPAddress','Set-NetIPInterface','Set-
  if($name -in $commands){throw 'scope_expanded'}
 }
 ''')
+
+
+    def test_installer_first_network_uses_exact_original_schema4_manifest(self):
+        bundle=json.loads(V.GuestVmTests.derivation_fixture())
+        spec=bundle['spec']
+        profile=dict(name='windows-managed-config-v1',definition_sha256='61fb12a5c53fa5a76c067f50e6a1ea56a915ebd3d9af86fcb67ff36cd48bd0ef',capability_name='vmWorkerProcess',capability_sid='S-1-15-3-1024-2268835264-3721307629-241982045-173645152-1490879176-104643441-2915960892-1612460704',host_hypervisor_tcb_acknowledged=True,operational_cutover_accepted=False,io_acceptance_sha256='',external_capability_review_sha256='',acceptance_scope='isolated-predeployment',isolation_receipt_sha256='')
+        driver=ROOT/'infra/k8s/ha_control/windows-guest-vm.ps1'
+        spec.update(schema_version=4,config_profile=profile,peer_config_profile_receipt_sha256='',peer_source_commit='',root_profile='strict-canonical-observed-v1',executor_source_commit='9'*40,executor_script_sha256=hashlib.sha256(driver.read_bytes()).hexdigest(),reservation_receipt_sha256='8'*64,reservation_root_identity='12345678:1234567812345678')
+        raw=json.dumps(spec).encode()
+        network=dict(schema_version=2,source_commit='9'*40,vm_driver_source_commit='9'*40,vm_driver_sha256=spec['executor_script_sha256'],installation_id=spec['installation_id'],prepared_receipt_sha256='5'*64,host_ipv4='10.8.7.1',prefix_length=29,guest_a_ipv4='10.8.7.2',guest_b_ipv4='10.8.7.3',root_profile=spec['root_profile'],executor_source_commit=spec['executor_source_commit'],executor_script_sha256='7'*64,reservation_receipt_sha256=spec['reservation_receipt_sha256'],reservation_root_identity=spec['reservation_root_identity'],vm_manifest_base64=base64.b64encode(raw).decode(),vm_journal_sha256='6'*64)
+        self.run_ps(r'''
+$ErrorActionPreference='Stop';. $env:NETWORK_SOURCE
+$v=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__NETWORK__'))|ConvertFrom-Json
+Assert-GuestNetworkSpec $v
+$base=Split-Path $env:NETWORK_SOURCE;$support=Join-Path $base 'guest-owned-profile.ps1'
+$driver=[IO.File]::ReadAllBytes((Join-Path $base 'windows-guest-vm.ps1'))
+. ([scriptblock]::Create([Text.UTF8Encoding]::new($false,$true).GetString($driver)))
+$pins=[pscustomobject]@{manifest_sha256='__MANIFEST_SHA__'}
+$original=Read-GuestNetworkOwnedVmSpec $v $pins $support
+if($original.source_commit -ceq $original.executor_source_commit -or $original.schema_version -ne 4){throw 'media_origin_relabelled'}
+foreach($key in @('reservation_receipt_sha256','reservation_root_identity','vm_driver_sha256')){
+ $old=$v.$key;$v.$key=if($key -eq 'reservation_root_identity'){'99999999:9999999999999999'}else{'0'*64};$closed=$false
+ try{Read-GuestNetworkOwnedVmSpec $v $pins $support|Out-Null}catch{$closed=$true};if(-not $closed){throw 'component_binding_lost'};$v.$key=$old
+}
+$v.schema_version=1;$closed=$false;try{Assert-GuestNetworkSpec $v}catch{$closed=$true};if(-not $closed){throw 'new_profile_silently_inferred'}
+'''.replace('__NETWORK__',base64.b64encode(json.dumps(network).encode()).decode()).replace('__MANIFEST_SHA__',hashlib.sha256(raw).hexdigest()))
 
 
 if __name__ == '__main__':

@@ -76,7 +76,15 @@ def config_profile_digest(value):
 def namespace_closure(value):
     """Pinned complete direct-child closure, not a locale-name trust exception."""
     keys = {"version", "names", "sd_sha256", "children_sha256", "classification_sha256"}
-    if type(value) is not dict or set(value) != keys or value["version"] != "direct-children-v1":
+    observed = type(value) is dict and value.get('version') == 'direct-children-observed-v1'
+    if observed:
+        from .namespace_contract import PROFILE, COMPARATOR_SHA256, OBSERVED_FIELDS
+        keys |= OBSERVED_FIELDS
+        if value.get('descriptor_profile') != PROFILE or value.get('comparator_sha256') != COMPARATOR_SHA256:
+            _deny()
+        for key in ('apply_receipt_sha256', 'plan_sha256', 'service_identity_sha256'):
+            _hex(value.get(key))
+    if type(value) is not dict or set(value) != keys or value["version"] not in ("direct-children-v1", "direct-children-observed-v1"):
         _deny()
     names = value["names"]
     if (type(names) is not list or not 2 <= len(names) <= 9

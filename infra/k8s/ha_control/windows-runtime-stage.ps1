@@ -1,4 +1,5 @@
-param([string]$Manifest,[string]$ManifestPath,[string]$ManifestSha256,[switch]$Go)
+param([string]$Manifest,[string]$ManifestPath,[string]$ManifestSha256,
+      [string]$OwnedProfile,[string]$OwnedProfileSha256,[switch]$Go)
 # Stage code only into a new private directory. No SCM, policy, VM or credential installer.
 $ErrorActionPreference='Stop'
 $WarningPreference='SilentlyContinue'
@@ -6,6 +7,8 @@ $VerbosePreference='SilentlyContinue'
 $InformationPreference='SilentlyContinue'
 $DebugPreference='SilentlyContinue'
 Set-StrictMode -Version Latest
+$script:RuntimeOwnedSpec=$null
+$script:RuntimeOwnedRoot=''
 $script:RuntimeStageSource=@'
 using System;
 using System.IO;
@@ -148,6 +151,38 @@ function Get-RuntimeStageCaller {
     try{return $identity.User.Value}finally{$identity.Dispose()}
 }
 function Get-RuntimeStageParent($Entry){if($Entry -is [IO.DirectoryInfo]){return $Entry.Parent};if($Entry -is [IO.FileInfo]){return $Entry.Directory};throw 'runtime_stage_entry_type_rejected'}
+function Import-RuntimeOwnedSupport {
+    $bytes=[IO.File]::ReadAllBytes((Join-Path $PSScriptRoot 'guest-owned-profile.ps1'))
+    if([HaRuntimeStageV1.Rules]::Hash($bytes) -cne '437d02933c2800cea4097a79ee14db3052e8c522c15f132a52c7c094d6f84045'){throw 'runtime_stage_owned_support_changed'}
+    return [scriptblock]::Create([Text.UTF8Encoding]::new($false,$true).GetString($bytes))
+}
+function Read-RuntimeOwnedProfile([string]$Encoded,[string]$Hash,[string]$ManifestHash,[string]$ScriptHash){
+    if($Hash -cnotmatch '^[0-9a-f]{64}$' -or $Encoded.Length -gt 8192){throw 'runtime_stage_owned_profile_pin_required'}
+    $raw=[Convert]::FromBase64String($Encoded)
+    if([HaRuntimeStageV1.Rules]::Hash($raw) -cne $Hash){throw 'runtime_stage_owned_profile_changed'}
+    $value=[HaRuntimeStageV1.Json]::Object(([Text.UTF8Encoding]::new($false,$true)).GetString($raw),6144)
+    [HaRuntimeStageV1.Rules]::Keys($value,(@('installation_id','runtime_manifest_sha256','guest_stage_manifest_sha256')+@(Get-GuestOwnedFields)))
+    if([HaRuntimeStageV1.Rules]::Text($value,'runtime_manifest_sha256') -cne $ManifestHash -or [HaRuntimeStageV1.Rules]::Text($value,'guest_stage_manifest_sha256') -cnotmatch '^[0-9a-f]{64}$'){throw 'runtime_stage_owned_manifest_changed'}
+    $profile=[pscustomobject]$value
+    Assert-GuestOwnedDeclaration $profile $ScriptHash
+    return $profile
+}
+function Assert-RuntimeStageParentManifest($Stage,$Spec,$Owned){
+    $keys=@('schema_version','source_commit','installation_id','compressed_sha256','compressed_bytes','vhdx_sha256','vhdx_bytes')
+    if($null -ne $Owned){$keys+=@(Get-GuestOwnedFields)}
+    [HaRuntimeStageV1.Rules]::Keys($Stage,$keys)
+    $version=if($null -ne $Owned){2}else{1}
+    if([HaRuntimeStageV1.Rules]::Number($Stage,'schema_version') -ne $version -or [HaRuntimeStageV1.Rules]::Text($Stage,'installation_id') -cne $Spec.InstallationId){throw 'runtime_stage_parent_installation_changed'}
+    if($null -eq $Owned){return}
+    if($Spec.HostStaged -or $Owned.installation_id -cne $Spec.InstallationId -or $Owned.executor_source_commit -cne $Spec.SourceCommit){throw 'runtime_stage_owned_source_or_host_changed'}
+    foreach($key in @('root_profile','executor_source_commit','reservation_receipt_sha256','reservation_root_identity')){
+        if([HaRuntimeStageV1.Rules]::Text($Stage,$key) -cne $Owned.$key){throw 'runtime_stage_owned_parent_changed'}
+    }
+    # The guest-stage executor differs from this script. Its original media
+    # source and script hash remain bound by the full guest-stage manifest pin.
+    Assert-GuestOwnedDeclaration ([pscustomobject]$Stage) ''
+    if([HaRuntimeStageV1.Rules]::Text($Stage,'source_commit') -cnotmatch '^[0-9a-f]{40}$'){throw 'runtime_stage_guest_origin_rejected'}
+}
 function Assert-RuntimeStagePath([string]$Path,[string]$PrivateRoot,[string]$ReaderSid='',[bool]$InputFile=$false){
     if($Path -cnotmatch '^[A-Za-z]:\\' -or $Path.Substring(2).Contains(':') -or $Path.Contains('/') -or $Path -match '(^|\\)\.\.?($|\\)' -or $Path -match '[ .](\\|$)'){throw 'runtime_stage_path_rejected'}
     $allowed=@('S-1-5-18','S-1-5-32-544');if($InputFile){$allowed+=@(Get-RuntimeStageCaller)}
@@ -155,6 +190,11 @@ function Assert-RuntimeStagePath([string]$Path,[string]$PrivateRoot,[string]$Rea
     $osRoot=[IO.Path]::GetPathRoot([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows))
     while($null -ne $entry){
         if($entry.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'runtime_stage_reparse_rejected'}
+        if($null -ne $script:RuntimeOwnedSpec -and $entry.FullName -ieq $script:RuntimeOwnedRoot){
+            Assert-GuestOwnedRootAcl $entry.FullName $script:RuntimeOwnedSpec
+            $entry=Get-RuntimeStageParent $entry
+            continue
+        }
         $private=($entry.FullName -ieq $PrivateRoot -or $entry.FullName.StartsWith($PrivateRoot+'\',[StringComparison]::OrdinalIgnoreCase))
         $sd=[Security.AccessControl.RawSecurityDescriptor]::new((Get-Acl -LiteralPath $entry.FullName -ErrorAction Stop).Sddl)
         $trustedRoot=($entry.FullName -ieq $osRoot -and $entry.FullName -cmatch '^[A-Za-z]:\\$' -and $sd.Owner.Value -ceq 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
@@ -222,27 +262,41 @@ function Invoke-RuntimeStage {
     try{if(-not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))){throw 'runtime_stage_admin_required'}}finally{$identity.Dispose()}
     if($ManifestSha256 -cnotmatch '^[0-9a-f]{64}$' -or ([bool]$Manifest -eq [bool]$ManifestPath)){throw 'runtime_stage_manifest_pin_required'}
     Initialize-RuntimeStage
-    $manifestFile=$null;$stageFile=$null;$zipFile=$null;$archive=$null
+    $manifestFile=$null;$stageFile=$null;$zipFile=$null;$archive=$null;$ownedLease=$null;$owned=$null
     try{
         $parent=[Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+        if([bool]$OwnedProfile -ne [bool]$OwnedProfileSha256){throw 'runtime_stage_owned_profile_pin_required'}
+        if($OwnedProfile){
+            . (Import-RuntimeOwnedSupport)
+            $scriptHash=[HaRuntimeStageV1.Rules]::Hash([IO.File]::ReadAllBytes($PSCommandPath))
+            $owned=Read-RuntimeOwnedProfile $OwnedProfile $OwnedProfileSha256 $ManifestSha256 $scriptHash
+            $script:RuntimeOwnedRoot=Join-Path $parent ('N100HA_'+$owned.installation_id.Substring(0,24))
+            $ownedLease=Open-GuestOwnedRoot $script:RuntimeOwnedRoot $owned $scriptHash
+            $script:RuntimeOwnedSpec=$owned
+        }
         if($ManifestPath){
             $prefix=[IO.Path]::GetDirectoryName($ManifestPath)
             if([IO.Path]::GetFileName($ManifestPath) -cne 'runtime-manifest.json' -or [IO.Path]::GetDirectoryName($prefix) -ine $parent -or [IO.Path]::GetFileName($prefix) -cnotmatch '^N100HA_[0-9a-f]{24}$'){throw 'runtime_stage_manifest_path_rejected'}
+            if($null -ne $owned -and $prefix -ine $script:RuntimeOwnedRoot){throw 'runtime_stage_owned_root_changed'}
             $manifestFile=Read-RuntimeStageInput $ManifestPath $prefix 2097152
             $raw=New-Object byte[] ([int]$manifestFile.Length);$offset=0
             while($offset -lt $raw.Length){$read=$manifestFile.Read($raw,$offset,$raw.Length-$offset);if($read -le 0){throw 'runtime_stage_manifest_read_failed'};$offset+=$read}
         }else{if($Manifest.Length -gt 2796204){throw 'runtime_stage_manifest_limit'};$raw=[Convert]::FromBase64String($Manifest);if($raw.Length -gt 2097152){throw 'runtime_stage_manifest_limit'}}
         if(([HaRuntimeStageV1.Rules]::Hash($raw)) -cne $ManifestSha256){throw 'runtime_stage_manifest_changed'}
         $spec=[HaRuntimeStageV1.Rules]::Manifest(([Text.UTF8Encoding]::new($false,$true)).GetString($raw))
+        if($null -ne $owned -and ($spec.InstallationId -cne $owned.installation_id -or $spec.SourceCommit -cne $owned.executor_source_commit -or $spec.HostStaged)){throw 'runtime_stage_owned_source_or_host_changed'}
         if(-not [HaRuntimeStageV1.Native]::ServiceIdentity($spec.ServiceName,$spec.ServiceSid)){throw 'runtime_stage_native_sid_mismatch'}
         $root=Join-Path $parent ('N100HA_'+$spec.InstallationId.Substring(0,24));Assert-RuntimeStagePath $root $root
         if($ManifestPath -and $prefix -ine $root){throw 'runtime_stage_installation_path_mismatch'}
         # Bind the full installation identity, not just its directory prefix.
         $stageFile=Read-RuntimeStageInput (Join-Path $root 'stage-manifest.json') $root 32768
+        if($null -ne $owned){
+            if([HaRuntimeStageV1.Rules]::StreamHash($stageFile) -cne $owned.guest_stage_manifest_sha256){throw 'runtime_stage_guest_stage_pin_changed'}
+            $stageFile.Position=0
+        }
         $reader=[IO.StreamReader]::new($stageFile,[Text.UTF8Encoding]::new($false,$true),$false,1024,$true)
         try{$stage=[HaRuntimeStageV1.Json]::Object($reader.ReadToEnd(),32768)}finally{$reader.Dispose()}
-        [HaRuntimeStageV1.Rules]::Keys($stage,@('schema_version','source_commit','installation_id','compressed_sha256','compressed_bytes','vhdx_sha256','vhdx_bytes'))
-        if([HaRuntimeStageV1.Rules]::Number($stage,'schema_version') -ne 1 -or [HaRuntimeStageV1.Rules]::Text($stage,'installation_id') -cne $spec.InstallationId){throw 'runtime_stage_parent_installation_changed'}
+        Assert-RuntimeStageParentManifest $stage $spec $owned
         $zipPath=Join-Path $root 'runtime.zip';$zipFile=Read-RuntimeStageInput $zipPath $root 1073741824
         if($zipFile.Length -ne $spec.ArchiveBytes -or ([HaRuntimeStageV1.Rules]::StreamHash($zipFile)) -cne $spec.ArchiveHash){throw 'runtime_stage_archive_changed'};$zipFile.Position=0
         $archive=[IO.Compression.ZipArchive]::new($zipFile,[IO.Compression.ZipArchiveMode]::Read,$true)
@@ -251,7 +305,9 @@ function Invoke-RuntimeStage {
         if((Test-Path -LiteralPath $target) -or (Test-Path -LiteralPath $journal)){throw 'runtime_stage_existing_partial_manual_reconcile'}
         $drive=[IO.DriveInfo]::new([IO.Path]::GetPathRoot($root));if($drive.AvailableFreeSpace -lt ($spec.TotalBytes*2+1073741824)){throw 'runtime_stage_disk_reserve_failed'}
         foreach($entry in $archive.Entries){$null=[HaRuntimeStageV1.Engine]::Destination($target,$entry.FullName)}
-        Write-RuntimeStageEvent $journal 'intent' @{manifest_sha256=$ManifestSha256;archive_sha256=$spec.ArchiveHash;source_commit=$spec.SourceCommit;installation_id=$spec.InstallationId;runtime_id=$id} $true
+        $intent=@{manifest_sha256=$ManifestSha256;archive_sha256=$spec.ArchiveHash;source_commit=$spec.SourceCommit;installation_id=$spec.InstallationId;runtime_id=$id}
+        if($null -ne $owned){$ownedLease.AssertCurrent();$intent.owned_profile_sha256=$OwnedProfileSha256;$intent.guest_stage_manifest_sha256=$owned.guest_stage_manifest_sha256}
+        Write-RuntimeStageEvent $journal 'intent' $intent $true
         New-RuntimeStageDirectory $target $spec.ServiceSid
         foreach($entry in $archive.Entries){Write-RuntimeStageEvent $journal 'extract' @{filename=$entry.FullName};[HaRuntimeStageV1.Engine]::Extract($entry,$spec.Files[$entry.FullName],$target)}
         $null=[HaRuntimeStageV1.Engine]::Inventory($target,$spec,$false)
@@ -269,9 +325,14 @@ function Invoke-RuntimeStage {
         Write-RuntimeStageEvent $journal 'fresh_python_imports' @{}
         [HaRuntimeStageV1.Smoke]::Run((Join-Path (Join-Path $target 'python') 'python.exe'),([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)))
         $count=Assert-RuntimeStageSealed $target $root $spec
+        $receipt=[ordered]@{scope='private_code_stage_only';schema_version=1;native_stage=$true;inventory_version=1;source_commit=$spec.SourceCommit;installation_id=$spec.InstallationId;manifest_sha256=$ManifestSha256;archive_sha256=$spec.ArchiveHash;runtime_id=$id;file_count=$count;readonly=$true;native_imports_verified=$true;python_version='3.13.17';psycopg_version='3.3.8';tzdata_version='2026.2';host_staged=$spec.HostStaged;SCM_registered=$false;group_changed=$false;namespace_changed=$false;VM_changed=$false;authority_issued=$false}
+        if($null -ne $owned){$ownedLease.AssertCurrent();$receipt.schema_version=2;$receipt.owned_profile_sha256=$OwnedProfileSha256;$receipt.guest_stage_manifest_sha256=$owned.guest_stage_manifest_sha256;$receipt.reservation_receipt_sha256=$owned.reservation_receipt_sha256}
         Write-RuntimeStageEvent $journal 'sealed_code_stage' @{file_count=$count;native_code_only=$true;SCM_registered=$false;authority_issued=$false}
-        [ordered]@{scope='private_code_stage_only';schema_version=1;native_stage=$true;inventory_version=1;source_commit=$spec.SourceCommit;installation_id=$spec.InstallationId;manifest_sha256=$ManifestSha256;archive_sha256=$spec.ArchiveHash;runtime_id=$id;file_count=$count;readonly=$true;native_imports_verified=$true;python_version='3.13.17';psycopg_version='3.3.8';tzdata_version='2026.2';host_staged=$spec.HostStaged;SCM_registered=$false;group_changed=$false;namespace_changed=$false;VM_changed=$false;authority_issued=$false}|ConvertTo-Json -Compress
-    }finally{if($null -ne $archive){$archive.Dispose()};if($null -ne $zipFile){$zipFile.Dispose()};if($null -ne $stageFile){$stageFile.Dispose()};if($null -ne $manifestFile){$manifestFile.Dispose()}}
+        $receipt|ConvertTo-Json -Compress
+    }finally{
+        if($null -ne $archive){$archive.Dispose()};if($null -ne $zipFile){$zipFile.Dispose()};if($null -ne $stageFile){$stageFile.Dispose()};if($null -ne $manifestFile){$manifestFile.Dispose()}
+        if($null -ne $ownedLease){$ownedLease.Dispose()};$script:RuntimeOwnedSpec=$null;$script:RuntimeOwnedRoot=''
+    }
 }
 if($MyInvocation.InvocationName -ne '.'){
     try{Invoke-RuntimeStage}catch{[ordered]@{scope='private_code_stage_only';status='BLOCKED';reason='runtime_stage_rejected_preserve_partial';SCM_registered=$false;authority_issued=$false}|ConvertTo-Json -Compress;exit 1}

@@ -30,15 +30,21 @@ function Get-EnforcedConfigProfileHash($Value){
 }
 
 function Get-EnforcedNamespaceClosureHash($Value){
-    Assert-EnforcedKeys $Value @('version','names','sd_sha256','children_sha256','classification_sha256')
-    if($Value.version -isnot [string] -or $Value.version -cne 'direct-children-v1' -or $Value.names -isnot [array] -or $Value.names.Count -lt 2 -or $Value.names.Count -gt 9 -or $Value.names[0] -cne 'root/virtualization/v2'){throw 'namespace_closure_rejected'}
+    $keys=@('version','names','sd_sha256','children_sha256','classification_sha256')
+    if($Value.version -ceq 'direct-children-observed-v1'){
+        $keys+=@('descriptor_profile','comparator_sha256','apply_receipt_sha256','plan_sha256','service_identity_sha256')
+        if($Value.descriptor_profile -cne 'strict-canonical-observed-v1' -or $Value.comparator_sha256 -cne '56cc20aaf52bd7ea7b1b0f88d562a15d1f28ffb3aac7ad4b0e0df2ec3e1dac3e'){throw 'namespace_observed_profile_rejected'}
+        foreach($key in @('apply_receipt_sha256','plan_sha256','service_identity_sha256')){if($Value.$key -isnot [string] -or $Value.$key -cnotmatch '^[0-9a-f]{64}$'){throw 'namespace_observed_binding_rejected'}}
+    }
+    Assert-EnforcedKeys $Value $keys
+    if($Value.version -isnot [string] -or $Value.version -cnotin @('direct-children-v1','direct-children-observed-v1') -or $Value.names -isnot [array] -or $Value.names.Count -lt 2 -or $Value.names.Count -gt 9 -or $Value.names[0] -cne 'root/virtualization/v2'){throw 'namespace_closure_rejected'}
     $prior='';foreach($name in $Value.names){if($name -isnot [string] -or ($name -cne 'root/virtualization/v2' -and $name -cnotmatch '^root/virtualization/v2/[a-z_][a-z0-9_]{0,63}$') -or [string]::CompareOrdinal($prior,$name) -ge 0){throw 'namespace_closure_rejected'};$prior=$name}
     foreach($key in @('sd_sha256','children_sha256','classification_sha256')){if($Value.$key -isnot [array] -or $Value.$key.Count -ne $Value.names.Count){throw 'namespace_closure_rejected'};foreach($hash in $Value.$key){if($hash -isnot [string] -or $hash -cnotmatch '^[0-9a-f]{64}$'){throw 'namespace_closure_rejected'}}}
     $leafNames=@($Value.names|Select-Object -Skip 1|ForEach-Object{($_ -split '/')[-1]})
     $rootChildren=Get-EnforcedHash ([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $leafNames -Compress)))
     $empty=Get-EnforcedHash ([Text.Encoding]::UTF8.GetBytes('[]'))
     for($i=0;$i -lt $Value.names.Count;$i++){if($Value.children_sha256[$i] -cne $(if($i -eq 0){$rootChildren}else{$empty})){throw 'namespace_closure_children_rejected'}}
-    $ordered=[ordered]@{};foreach($key in @('children_sha256','classification_sha256','names','sd_sha256','version')){$ordered[$key]=$Value.$key}
+    $ordered=[ordered]@{};foreach($key in @($keys|Sort-Object -CaseSensitive)){$ordered[$key]=$Value.$key}
     return Get-EnforcedHash ([Text.Encoding]::UTF8.GetBytes(($ordered|ConvertTo-Json -Depth 4 -Compress)))
 }
 function Assert-EnforcedNamespaceBytes([byte[]]$Bytes,$writers){
@@ -445,6 +451,14 @@ function Assert-EnforcedManagedAce([string]$Sid,[long]$Mask,[string[]]$Readers,[
     if($Sid -notin $Readers -or ($Sid -ceq $Capability -and $Mask -ne 2032127) -or
         ($Sid -ceq $ServiceSid -and (($Mask -band 4294967295) -band (4294967295 -bxor 1179785)) -ne 0)){throw 'managed_config_role_rejected'}
 }
+function Assert-EnforcedServiceMetadata($Descriptor,[string]$ServiceSid,[int]$Mask){
+ $count=0
+ foreach($ace in $Descriptor.DiscretionaryAcl){if($ace.SecurityIdentifier.Value -ceq $ServiceSid){
+  if($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback -or $ace.AceQualifier -ne 'AccessAllowed' -or [int]$ace.AceFlags -ne 0 -or $ace.AccessMask -ne $Mask){throw 'service_metadata_role_rejected'};$count++
+ }}
+ if($count -ne 1){throw 'service_metadata_role_missing_or_duplicate'}
+}
+function Test-EnforcedObservedMetadata($Config){return ($Config.windows_enforced.PSObject.Properties['namespace_closure'] -and $Config.windows_enforced.namespace_closure.version -ceq 'direct-children-observed-v1')}
 function Get-EnforcedConfigCapability{return [EnforcedVmNativeV1]::VmWorkerCapability()}
 function Assert-EnforcedManagedConfig($Config,$Policy,$Watch){
     $cfg=$Config.windows_enforced;$profile=Assert-EnforcedConfigProfile $cfg.config_profile
@@ -461,12 +475,14 @@ function Assert-EnforcedManagedConfig($Config,$Policy,$Watch){
     if($null -eq $parent){throw 'managed_config_parent_required'}
     Assert-EnforcedPath $parent.FullName $base
     Assert-EnforcedNoCapability $parent.FullName
+    if(Test-EnforcedObservedMetadata $Config){Assert-EnforcedServiceMetadata (Get-EnforcedPathDescriptor $parent.FullName) $cfg.service_sid 131232}
     $queue=[Collections.Generic.Queue[string]]::new();$queue.Enqueue($root.FullName);$seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     while($queue.Count){
         Assert-EnforcedDeadline $Watch
         $entry=Get-Item -LiteralPath ($queue.Dequeue()) -Force
         if(-not $seen.Add($entry.FullName) -or $seen.Count -gt 4096 -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'managed_config_inventory_rejected'}
         $sd=Get-EnforcedPathDescriptor $entry.FullName
+        if(Test-EnforcedObservedMetadata $Config){Assert-EnforcedServiceMetadata $sd $cfg.service_sid $(if($entry -is [IO.DirectoryInfo]){131233}else{131200})}
         if($sd.Owner.Value -notin $base){throw 'managed_config_owner_rejected'}
         foreach($ace in $sd.DiscretionaryAcl){
             if($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback){throw 'managed_config_ace_rejected'}
@@ -505,6 +521,7 @@ function Get-EnforcedVmSnapshot($Config,$Policy,$Watch) {
         if($cfg.PSObject.Properties['config_profile']){Assert-EnforcedNoCapability $disk.path}
         Assert-EnforcedPath $disk.path $dataWriters
         Assert-EnforcedDataReaders $disk.path $dataReaders $dataWriters $Watch
+        if(Test-EnforcedObservedMetadata $Config){Assert-EnforcedServiceMetadata (Get-EnforcedPathDescriptor $disk.path) $cfg.service_sid 131200}
         $vhd=Get-VHD -Path $disk.path -ErrorAction Stop
         if((ConvertTo-EnforcedDiskIdentifier $vhd.DiskIdentifier) -cne $disk.disk_id -or -not [string]::IsNullOrEmpty($vhd.ParentPath)){throw 'vhd_identity_changed'}
         $identity=Get-EnforcedHash ([Text.Encoding]::UTF8.GetBytes((Get-EnforcedFileIdentity $disk.path)))

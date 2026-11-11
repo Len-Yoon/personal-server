@@ -630,4 +630,25 @@ if(-not $text.Contains('$stream.Flush($true)') -or -not $text.Contains('[IO.File
 ''')
 
 
+
+    def test_schema4_executor_lineage_does_not_relabel_image_derivation(self):
+        profile=dict(name='windows-managed-config-v1',definition_sha256='61fb12a5c53fa5a76c067f50e6a1ea56a915ebd3d9af86fcb67ff36cd48bd0ef',capability_name='vmWorkerProcess',capability_sid='S-1-15-3-1024-2268835264-3721307629-241982045-173645152-1490879176-104643441-2915960892-1612460704',host_hypervisor_tcb_acknowledged=True,operational_cutover_accepted=False,io_acceptance_sha256='',external_capability_review_sha256='',acceptance_scope='isolated-predeployment',isolation_receipt_sha256='')
+        fixture=json.loads(self.derivation_fixture());spec=fixture['spec'];spec.update(schema_version=4,config_profile=profile,peer_config_profile_receipt_sha256='',peer_source_commit='',root_profile='strict-canonical-observed-v1',executor_source_commit='9'*40,executor_script_sha256=hashlib.sha256(SOURCE.read_bytes()).hexdigest(),reservation_receipt_sha256='8'*64,reservation_root_identity='12345678:1234567812345678')
+        self.ps(r'''
+$v=$env:FIXTURE|ConvertFrom-Json;$spec=Assert-GuestVmSpec $v.spec;Assert-GuestVmImageDerivationReceipt $v.receipt $spec
+. (Import-GuestOwnedSupport);Assert-GuestOwnedDeclaration $spec (Get-GuestVmScriptHash)
+$spec.source_commit=$spec.executor_source_commit;$closed=$false;try{Assert-GuestVmImageDerivationReceipt $v.receipt $spec}catch{$closed=$true};if(-not $closed){throw 'image_origin_relabelled'}
+$spec=$v.spec;$spec.schema_version=3;$closed=$false;try{Assert-GuestVmSpec $spec|Out-Null}catch{$closed=$true};if(-not $closed){throw 'legacy_profile_inferred'}
+''',FIXTURE=json.dumps(fixture))
+
+    def test_service_acl_role_masks_have_no_data_or_write_grants(self):
+        self.ps(r'''
+Initialize-GuestVmNative
+foreach($row in @(@('private',$true,131232),@('private',$false,0),@('config',$true,131233),@('config',$false,131200),@('disk',$false,131200),@('seed',$false,131200))){
+ $mask=[HaGuestVmSealV1]::ServiceMetadataMask($row[0],$row[1]);if($mask -ne $row[2]){throw 'metadata_role_changed'}
+ if(($mask -band 1343029590) -ne 0 -or ($row[0] -in @('disk','seed') -and ($mask -band 1) -ne 0)){throw 'service_gained_data_or_write'}
+}
+''')
+
+
 if __name__=='__main__':unittest.main()
