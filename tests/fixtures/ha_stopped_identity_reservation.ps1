@@ -44,6 +44,24 @@ foreach($extra in @(0,2,16,32,0x40000,0x80000,0x10000000)){
 Reject {[TrustedStoppedV1.Contract]::VerifyDaclFacts($name,'S-1-5-32-544',0x9004,$scmSids,$scmMasks,[byte[]]@(0,0,16))}
 Reject {[TrustedStoppedV1.Contract]::VerifyDaclFacts($name,'S-1-5-32-544',0x9004,[string[]]@('S-1-5-18','S-1-5-32-544','S-1-5-11'),$scmMasks,$scmFlags)}
 Reject {[TrustedStoppedV1.Contract]::VerifyDaclFacts($name,'S-1-5-32-544',0x9004,[string[]]@('S-1-5-18','S-1-5-32-544'),[int[]]@(0xF01FF,0xF01FF),[byte[]]@(0,0))}
+# Invoke the C# getters through PowerShell's string binder, including $null.
+$privateDirectory='O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
+$privateFile='O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)'
+foreach($absentSid in @($null,'',[NullString]::Value)){
+ Need ([TrustedStoppedV1.NewPrivate]::Acl($absentSid,$false) -ceq $privateDirectory);$count++
+ Need ([TrustedStoppedV1.NewPrivate]::Acl($absentSid,$true) -ceq $privateDirectory);$count++
+ Need ([TrustedStoppedV1.NewPrivate]::FileAcl($absentSid) -ceq $privateFile);$count++
+}
+$serviceReader='S-1-5-80-1-2-3-4-5'
+Need ([TrustedStoppedV1.NewPrivate]::Acl($serviceReader,$false) -ceq ($privateDirectory+'(A;OICI;0x1200a9;;;'+$serviceReader+')'));$count++
+Need ([TrustedStoppedV1.NewPrivate]::Acl($serviceReader,$true) -ceq ($privateDirectory+'(A;OICI;0x301bf;;;'+$serviceReader+')'));$count++
+Need ([TrustedStoppedV1.NewPrivate]::FileAcl($serviceReader) -ceq ($privateFile+'(A;;0x1200a9;;;'+$serviceReader+')'));$count++
+# Keep malformed nonempty values visible to the existing descriptor parser.
+foreach($invalidSid in @(' ','not-a-sid')){
+ Need ([TrustedStoppedV1.NewPrivate]::Acl($invalidSid,$false) -ceq ($privateDirectory+'(A;OICI;0x1200a9;;;'+$invalidSid+')'));$count++
+ Need ([TrustedStoppedV1.NewPrivate]::Acl($invalidSid,$true) -ceq ($privateDirectory+'(A;OICI;0x301bf;;;'+$invalidSid+')'));$count++
+ Need ([TrustedStoppedV1.NewPrivate]::FileAcl($invalidSid) -ceq ($privateFile+'(A;;0x1200a9;;;'+$invalidSid+')'));$count++
+}
 $profile='strict-canonical-observed-v1';$rootSid='S-1-5-80-1-2-3-4-5';$rootSids=[string[]]@('S-1-5-18','S-1-5-32-544',$rootSid);$rootMasks=[int[]]@(2032127,2032127,131232);$rootFlags=[byte[]]@(3,3,0)
 [TrustedStoppedV1.NewPrivate]::ValidateInstallationRootFacts($profile,$rootSid,'S-1-5-32-544',0x9004,$rootSids,$rootMasks,$rootFlags);$count++
 Need ([TrustedStoppedV1.NewPrivate]::InstallationRootAcl($rootSid,$profile).EndsWith('(A;;0x200a0;;;'+$rootSid+')'));$count++
