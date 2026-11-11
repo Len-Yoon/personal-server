@@ -208,6 +208,8 @@ def validate_spec(value,lock):
          and not (address.ip.is_loopback or address.ip.is_link_local or address.ip.is_multicast or address.ip.is_reserved)
          and address.ip not in (address.network.network_address,address.network.broadcast_address),'invalid_private_guest_network')
     need(str(address.ip)==lock['pg_a' if value['node']=='A' else 'pg_b'],'seed_network_bundle_mismatch')
+    if lock.get('schema_version') == 3:
+        need(address.network.prefixlen == lock['management_prefix_length'], 'seed_controller_network_mismatch')
     need(type(value['operator_public_key_path']) is str and Path(value['operator_public_key_path']).is_absolute())
     return value
 
