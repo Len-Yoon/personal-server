@@ -110,6 +110,31 @@ $cases=[IO.File]::ReadAllText((Join-Path $env:FIXTURE 'bad.json'))|ConvertFrom-J
 foreach($text in $cases){$closed=$false;try{$null=[HaRuntimeStageV1.Rules]::Manifest($text)}catch{$closed=$true};if(-not $closed){throw 'unsafe_manifest'}}
 ''',folder)
 
+    def test_owned_runtime_joins_pinned_stage_without_relabeling_media(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp);fixture(folder)
+            self.ps(r'''
+. (Import-RuntimeOwnedSupport)
+$runtime=[HaRuntimeStageV1.Rules]::Manifest([IO.File]::ReadAllText((Join-Path $env:FIXTURE 'manifest.json')))
+$manifestHash='e'*64;$scriptHash='d'*64
+$decl=[ordered]@{root_profile='strict-canonical-observed-v1';installation_id=$runtime.InstallationId;executor_source_commit=$runtime.SourceCommit;executor_script_sha256=$scriptHash;reservation_receipt_sha256=('c'*64);reservation_root_identity='01234567:0123456789abcdef';runtime_manifest_sha256=$manifestHash;guest_stage_manifest_sha256=('b'*64)}
+$raw=[Text.Encoding]::UTF8.GetBytes(($decl|ConvertTo-Json -Compress));$encoded=[Convert]::ToBase64String($raw);$hash=[HaRuntimeStageV1.Rules]::Hash($raw)
+$owned=Read-RuntimeOwnedProfile $encoded $hash $manifestHash $scriptHash
+$stageText=([ordered]@{schema_version=2;source_commit=('f'*40);installation_id=$runtime.InstallationId;compressed_sha256=('a'*64);compressed_bytes=1;vhdx_sha256=('b'*64);vhdx_bytes=2;root_profile=$decl.root_profile;executor_source_commit=$runtime.SourceCommit;executor_script_sha256=('1'*64);reservation_receipt_sha256=$decl.reservation_receipt_sha256;reservation_root_identity=$decl.reservation_root_identity}|ConvertTo-Json -Compress)
+$stage=[HaRuntimeStageV1.Json]::Object($stageText,32768)
+Assert-RuntimeStageParentManifest $stage $runtime $owned
+if($stage['source_commit'] -ceq $runtime.SourceCommit){throw 'original_media_relabelled'}
+function Assert-Blocked([scriptblock]$Case){$closed=$false;try{& $Case | Out-Null}catch{$closed=$true};if(-not $closed){throw 'mismatch_accepted'}}
+Assert-Blocked {Read-RuntimeOwnedProfile $encoded ('0'*64) $manifestHash $scriptHash}
+Assert-Blocked {Read-RuntimeOwnedProfile $encoded $hash ('0'*64) $scriptHash}
+Assert-Blocked {Read-RuntimeOwnedProfile $encoded $hash $manifestHash ('0'*64)}
+Assert-Blocked {Assert-RuntimeStageParentManifest $stage $runtime $null}
+$runtime.HostStaged=$true;Assert-Blocked {Assert-RuntimeStageParentManifest $stage $runtime $owned};$runtime.HostStaged=$false
+foreach($key in @('executor_source_commit','reservation_receipt_sha256','reservation_root_identity','installation_id')){
+ $saved=$stage[$key];$stage[$key]='changed';Assert-Blocked {Assert-RuntimeStageParentManifest $stage $runtime $owned};$stage[$key]=$saved
+}
+''',folder)
+
     def test_zip_extra_symlink_and_case_alias_are_rejected(self):
         for kind in ('extra','symlink','case'):
             with tempfile.TemporaryDirectory() as tmp:

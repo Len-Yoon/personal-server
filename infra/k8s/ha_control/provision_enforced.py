@@ -197,6 +197,21 @@ def managed_profile_binding(trusted, binding, commit):
             policy_keys.add('namespace_closure')
             if enforced_profile.namespace_closure_digest(cfg['namespace_closure']) != enforced_profile.namespace_closure_digest(policy.get('namespace_closure')):
                 deny()
+        observed_inputs = {'namespace_apply_receipt_bytes_base64', 'namespace_apply_journal_bytes_base64', 'namespace_plan_bytes_base64'}
+        observed = cfg.get('namespace_closure', {}).get('version') == 'direct-children-observed-v1'
+        if bool(observed_inputs.intersection(trusted)) != observed or (observed and not observed_inputs <= set(trusted)):
+            deny()
+        if cfg.get('namespace_closure', {}).get('version') == 'direct-children-observed-v1':
+            from .namespace_contract import verify_apply_receipt
+            raw_inputs = []
+            for key in ('namespace_apply_receipt_bytes_base64', 'namespace_apply_journal_bytes_base64', 'namespace_plan_bytes_base64'):
+                encoded = trusted[key]
+                if type(encoded) is not str or len(encoded) > 4194304:
+                    deny()
+                raw_inputs.append(base64.b64decode(encoded, validate=True))
+            verify_apply_receipt(*raw_inputs, cfg['namespace_closure'], commit=commit,
+                installation=bound['installation_id'], service_sid=cfg['service_sid'],
+                driver_policy_sha256=binding['namespace_policy_sha256'])
         if type(policy) is not dict or set(policy)!=policy_keys or type(policy['schema_version']) is not int or policy['schema_version']!=1:
             deny()
         if (bound['source_commit']!=commit or bound['profile']!='enforced-vm-v1' or type(bound['schema_version']) is not int or bound['schema_version']!=2
@@ -229,6 +244,8 @@ def prepare(commit, bundle, host_exe, private_manifest, private_sha256, output):
     managed=type(trusted) is dict and 'config_profile' in trusted
     if managed:
         expected|={'config_profile','config_profile_sha256','policy_sha256','plan_bytes_base64','policy_bytes_base64','acceptance_receipts'}
+    if managed and 'namespace_apply_receipt_bytes_base64' in trusted:
+        expected|={'namespace_apply_receipt_bytes_base64','namespace_apply_journal_bytes_base64','namespace_plan_bytes_base64'}
     if (type(trusted) is not dict or set(trusted) != expected or type(trusted['format']) is not int
             or trusted['format'] != 1 or type(trusted['approved_commits']) is not list
             or not 1 <= len(trusted['approved_commits']) <= 8
@@ -322,6 +339,30 @@ def prepare(commit, bundle, host_exe, private_manifest, private_sha256, output):
     if profile_binding is not None:
         plan['config_profile_binding']=profile_binding
         plan['requires']+=['actual_guest_io_and_scope_bound_isolation_or_production_evidence','no_production_authority_from_isolated_profile']
+    if 'namespace_apply_receipt_bytes_base64' in trusted:
+        # The observed profile reaches provisioning only after validating its
+        # completed namespace apply. Its SCM object, executable and journal
+        # root already exist; this plan cannot authorize recreating them.
+        plan['install_sequence'] = [
+            'verify_reserved_identity_and_exact_stopped_SCM_image_against_reservation_receipt',
+            'verify_pinned_owned_runtime_stage_receipt_and_read_only_code_inventory',
+            'verify_existing_EXE_only_host_root_and_private_authority_journal_ACLs',
+            'verify_exact_VM_VHD_boot_session_and_TLS_files',
+            'verify_hyperv_group_and_observed_namespace_DACL',
+            'TCB_create_new_pinned_plan_approval_and_policy_in_existing_authority_root',
+            'TCB_create_new_service_args_only_in_reserved_host_root',
+            'require_exact_two_leaf_host_inventory_no_CLR_config_or_sidecar_and_private_ACLs',
+            'trusted_installer_run_pinned_windows_service_preflight_before_any_StartService',
+            'keep_host_root_TCB_write_only_between_preflight_and_StartService',
+            'run_approved_native_session_zero_acceptance_before_enable',
+        ]
+        plan['rollback_sequence'] = [
+            'stop_only_exact_reserved_service_if_started_and_confirm_owned_job_cleanup',
+            'preserve_reserved_SCM_host_EXE_authority_journal_and_original_VM_media',
+            'reconcile_partial_authority_and_service_args_manually_before_any_restart',
+        ]
+        plan['requires'] += ['complete_reservation_and_owned_runtime_stage_receipts',
+                             'args_CreateNew_only_no_SCM_or_EXE_replacement']
     (output / 'install-plan.json').write_bytes(controller_bundle.encode(plan))
     inventory = controller_bundle.inventory(output)
     manifest = {'format': 1, 'source_commit': commit, 'private_input_sha256': private_sha256,
