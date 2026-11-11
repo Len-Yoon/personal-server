@@ -70,13 +70,15 @@ class PostgresPackageTest(unittest.TestCase):
         (self.bundle/'image-bindings.json').write_bytes(pg.P.encode(receipt))
         return manifest
 
-    def test_recipe_retains_official_entrypoint_and_removes_only_gosu(self):
+    def test_recipe_retains_official_entrypoint_and_pins_security_updates(self):
         manifest = pg.prepare(self.commit, self.bundle)
         self.assertEqual((self.bundle/'Dockerfile').read_text(), pg.RECIPE)
         self.assertEqual(set(manifest['source_files']), set(pg.SOURCES))
         self.assertIn('@sha256:', manifest['base'])
         self.assertNotIn('ENTRYPOINT', pg.RECIPE)
-        self.assertNotIn('apk ', pg.RECIPE)
+        self.assertIn("'krb5-libs>=1.22.3-r0'", pg.RECIPE)
+        self.assertIn("'libxslt>=1.1.43-r4'", pg.RECIPE)
+        self.assertLess(pg.RECIPE.index('apk add'), pg.RECIPE.index('USER 70:70'))
         self.assertTrue(pg.verify_source(self.bundle))
 
     def test_dirty_working_tree_is_not_release_source(self):
