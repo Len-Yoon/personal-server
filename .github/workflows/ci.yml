@@ -205,6 +205,9 @@ jobs:
           python-version: "3.11"
       - name: Install isolated browser dependencies
         run: |
+          # The fixture server deliberately drops LD_LIBRARY_PATH.
+          ldconfig "$pythonLocation/lib"
+          env -i "$(command -v python3)" -c "import ssl"
           python3 -m pip install -r portal-web/requirements.txt -r book-memo/requirements.txt -r youtube-memo/requirements.txt -r tests/browser/requirements.browser.txt
       - name: Run Portal browser regression
         if: contains(fromJSON(needs.scope.outputs.browser_services), 'portal')
