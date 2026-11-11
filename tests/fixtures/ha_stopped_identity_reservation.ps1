@@ -78,6 +78,21 @@ Need ([TrustedStoppedV1.Contract]::CanonicalInstallationRoot('C:\ProgramData',$i
 Reject {[TrustedStoppedV1.Contract]::CanonicalInstallationRoot('C:\ProgramData',('x'*64))}
 Reject {[TrustedStoppedV1.Contract]::CanonicalInstallationRoot('C:\ProgramData\..',$iid)}
 $tokens=$null;$errors=$null;$ps=[IO.File]::ReadAllText((Join-Path $SourceRoot 'reserve-identity.ps1'));$ast=[Management.Automation.Language.Parser]::ParseInput($ps,[ref]$tokens,[ref]$errors);Need ($errors.Count -eq 0);$count++
+$expiryParser=@($ast.FindAll({param($n)$n -is [Management.Automation.Language.InvokeMemberExpressionAst] -and $n.Static -and $n.Member.Value -ceq 'ParseExact' -and $n.Expression -is [Management.Automation.Language.TypeExpressionAst] -and $n.Expression.TypeName.FullName -ceq 'DateTimeOffset'},$true))
+Need ($expiryParser.Count -eq 1)
+$oldTz=$env:TZ
+try {
+ if ([IO.Path]::DirectorySeparatorChar -eq '/') {
+  $env:TZ='Asia/Seoul';[TimeZoneInfo]::ClearCachedData()
+  Need ([TimeZoneInfo]::Local.GetUtcOffset([datetime]::new(2026,11,11)) -eq [TimeSpan]::FromHours(9))
+ }
+ $approval=@{expires_at='2026-11-11T12:34:56Z'}
+ $parseExpiry=[scriptblock]::Create($expiryParser[0].Extent.Text)
+ $parsed=& $parseExpiry
+ Need ($parsed.Offset -eq [TimeSpan]::Zero -and $parsed.UtcDateTime -eq [datetime]::new(2026,11,11,12,34,56,[DateTimeKind]::Utc));$count++
+} finally {
+ $env:TZ=$oldTz;[TimeZoneInfo]::ClearCachedData()
+}
 Need ($ps -notmatch 'Start-Service|Stop-Service|DeleteService|StartServiceW|ControlService|SetSD');Need ($ps -notmatch "File\([^\r\n]*'service.args'");Need ($ps -match 'ready_to_start=\$false' -and $ps -match 'args_present=\$false');$count++
 Need ($ps -match 'CanonicalInstallationRoot' -and $ps -match 'CommonApplicationData' -and $ps -match '\$parent -ceq \$programData' -and $ps -notmatch 'Join-Path \$parent \(''installation-''');$count++
 # Execute the real Entry traversal against DirectoryInfo fixtures. ProgramData
