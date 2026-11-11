@@ -1,4 +1,8 @@
-"""Offline capture fixtures; no production sources, writers, networks or PG."""
+"""Offline capture fixtures; no production sources, writers, networks or PG.
+
+WAL preservation and normalization use synthetic files. Live writer fencing and
+guest bootstrap remain outside the evidence provided by this module.
+"""
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json

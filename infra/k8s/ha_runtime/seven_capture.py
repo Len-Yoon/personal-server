@@ -5,6 +5,8 @@ Run ``python -m ha_runtime.seven_capture --plan PRIVATE_JSON --plan-sha256 SHA
 remotely, read process memory, or activate a target. A trusted operator supplies
 hash-bound external runtime, graph, closure and disposition receipts. Their
 claims remain external claims; a successful capture is not live fencing proof.
+Source-only preflight does not install release metadata or relax the packaged
+release requirement of the later database apply operation.
 
 Plan v1 fields: schema_version, source_commit, cluster, plan_sha256,
 target_system_id, evidence and services. Evidence has runtime/writer_graph/
