@@ -192,6 +192,9 @@ jobs:
     needs: scope
     if: needs.scope.outputs.browser_required == 'true'
     runs-on: ubuntu-24.04
+    container:
+      # Includes Chromium and its system libraries for the pinned Python package.
+      image: mcr.microsoft.com/playwright/python:v1.63.0-noble@sha256:72bd171a9ffc2b4b59532aaa6210e21014d07093120dc25528870c0b840da1f0
     timeout-minutes: 10
     steps:
       - name: Check out repository
@@ -209,7 +212,6 @@ jobs:
       - name: Install isolated browser dependencies
         run: |
           python3 -m pip install -r portal-web/requirements.txt -r book-memo/requirements.txt -r youtube-memo/requirements.txt -r tests/browser/requirements.browser.txt
-          python3 -m playwright install --with-deps chromium
       - name: Run Portal browser regression
         if: contains(fromJSON(needs.scope.outputs.browser_services), 'portal')
         run: python3 tests/browser/run_smoke.py --artifacts browser-artifacts/portal
