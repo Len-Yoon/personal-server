@@ -14,13 +14,22 @@ namespace TrustedStoppedV1 {
   [StructLayout(LayoutKind.Sequential)]struct Sa{public int Size;public IntPtr Descriptor;[MarshalAs(UnmanagedType.Bool)]public bool Inherit;}
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,ExactSpelling=true,SetLastError=true)]static extern bool CreateDirectoryW(string path,ref Sa sa);
   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,ExactSpelling=true,SetLastError=true)]static extern SafeFileHandle CreateFileW(string path,uint access,uint share,ref Sa sa,uint disposition,uint flags,IntPtr template);
-  public static string Acl(string sid,bool journal){return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"+(sid==null?"":"(A;OICI;"+(journal?"0x301bf":"0x1200a9")+";;;"+sid+")");}
+  // PowerShell can bind $null to an empty .NET string. Both represent an absent service SID.
+  static string ServiceAce(string sid,string flags,string mask){
+   return String.IsNullOrEmpty(sid)?"":"(A;"+flags+";"+mask+";;;"+sid+")";
+  }
+  public static string Acl(string sid,bool journal){
+   return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"+ServiceAce(sid,"OICI",journal?"0x301bf":"0x1200a9");
+  }
+  public static string FileAcl(string sid){
+   return "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)"+ServiceAce(sid,"","0x1200a9");
+  }
   public static string InstallationRootAcl(string sid,string profile){Contract.Need(profile=="strict-canonical-observed-v1"&&System.Text.RegularExpressions.Regex.IsMatch(sid??"","\\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\\z"));return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x200a0;;;"+sid+")";}
   public static void ValidateInstallationRootFacts(string profile,string expectedSid,string owner,int control,string[] sids,int[] masks,byte[] flags){Contract.Need(profile=="strict-canonical-observed-v1"&&(owner=="S-1-5-18"||owner=="S-1-5-32-544")&&(control&0x1004)==0x1004&&sids!=null&&masks!=null&&flags!=null&&sids.Length==3&&masks.Length==3&&flags.Length==3);bool sy=false,ba=false,service=false;for(int i=0;i<3;i++){if(sids[i]=="S-1-5-18"){Contract.Need(!sy&&masks[i]==2032127&&flags[i]==3);sy=true;}else if(sids[i]=="S-1-5-32-544"){Contract.Need(!ba&&masks[i]==2032127&&flags[i]==3);ba=true;}else{Contract.Need(!service&&sids[i]==expectedSid&&masks[i]==131232&&flags[i]==0);service=true;}}Contract.Need(sy&&ba&&service);}
   public static void InstallationRoot(string path,string sid,string profile){DirectoryAcl(path,InstallationRootAcl(sid,profile));}
   static byte[] Descriptor(string sddl){var sd=new RawSecurityDescriptor(sddl);var b=new byte[sd.BinaryLength];sd.GetBinaryForm(b,0);return b;}
   public static void Directory(string path,string sid,bool journal){DirectoryAcl(path,Acl(sid,journal));}
   static void DirectoryAcl(string path,string sddl){byte[] b=Descriptor(sddl);var pin=GCHandle.Alloc(b,GCHandleType.Pinned);try{var sa=new Sa{Size=Marshal.SizeOf(typeof(Sa)),Descriptor=pin.AddrOfPinnedObject()};if(!CreateDirectoryW(path,ref sa))throw new Failure(Marshal.GetLastWin32Error());}finally{pin.Free();}}
-  public static void File(string path,byte[] bytes,string sid,bool readOnly){string sddl="O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)"+(sid==null?"":"(A;;0x1200a9;;;"+sid+")");byte[] b=Descriptor(sddl);var pin=GCHandle.Alloc(b,GCHandleType.Pinned);try{var sa=new Sa{Size=Marshal.SizeOf(typeof(Sa)),Descriptor=pin.AddrOfPinnedObject()};using(var h=CreateFileW(path,0x40000000,1,ref sa,1,0x80000000,IntPtr.Zero)){if(h.IsInvalid)throw new Failure(Marshal.GetLastWin32Error());using(var stream=new FileStream(h,FileAccess.Write)){stream.Write(bytes,0,bytes.Length);stream.Flush(true);}}if(readOnly)System.IO.File.SetAttributes(path,FileAttributes.ReadOnly);}finally{pin.Free();}}
+  public static void File(string path,byte[] bytes,string sid,bool readOnly){byte[] b=Descriptor(FileAcl(sid));var pin=GCHandle.Alloc(b,GCHandleType.Pinned);try{var sa=new Sa{Size=Marshal.SizeOf(typeof(Sa)),Descriptor=pin.AddrOfPinnedObject()};using(var h=CreateFileW(path,0x40000000,1,ref sa,1,0x80000000,IntPtr.Zero)){if(h.IsInvalid)throw new Failure(Marshal.GetLastWin32Error());using(var stream=new FileStream(h,FileAccess.Write)){stream.Write(bytes,0,bytes.Length);stream.Flush(true);}}if(readOnly)System.IO.File.SetAttributes(path,FileAttributes.ReadOnly);}finally{pin.Free();}}
  }
 }
