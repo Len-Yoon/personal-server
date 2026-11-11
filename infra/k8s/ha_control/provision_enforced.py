@@ -89,7 +89,7 @@ def render_args(values):
     if (values['format'] != 'enforced-service-v1'
             or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', str(values['service_name']))
             or not re.fullmatch(r'S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}', str(values['service_sid']))
-            or values['mode'] not in {'initialize', 'advance', 'serve'}):
+            or values['mode'] not in {'authenticate', 'initialize', 'advance', 'serve'}):
         deny()
     for key in ARGS_KEYS:
         value = values[key]

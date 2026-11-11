@@ -576,7 +576,8 @@ if(-not $blocked){throw 'interactive_context_accepted'}
 
     def test_observe_fence_replay_and_expired_request_real_driver_core(self):
         setup = r'''
-function Get-EnforcedVmSnapshot($Config,$Policy,$Watch){Assert-EnforcedDeadline $Watch;$script:trace.Add('snapshot');return @{fenced=$script:powerOff;context=@{principal_sha256=(Get-EnforcedHash ([Text.Encoding]::UTF8.GetBytes($Config.windows_enforced.service_sid)));boot_ticks=$Config.windows_enforced.boot_ticks}}}
+$script:controllerMode='advance'
+function Get-EnforcedVmSnapshot($Config,$Policy,$Watch){Assert-EnforcedDeadline $Watch;$script:trace.Add('snapshot');return @{fenced=$script:powerOff;context=@{principal_sha256=(Get-EnforcedHash ([Text.Encoding]::UTF8.GetBytes($Config.windows_enforced.service_sid)));boot_ticks=$Config.windows_enforced.boot_ticks;controller_mode=$script:controllerMode}}}
 '''
         self.assertEqual(self.ps(r'''
 $response=Get-EnforcedResponse $config $approved $planHash $approvalHash $instance $request ([Diagnostics.Stopwatch]::StartNew())
@@ -590,6 +591,11 @@ $request.sequence=[long]3;$request.nonce=('5'*48)+'0000000000000003'
 $expired=[pscustomobject]@{Elapsed=[pscustomobject]@{TotalMilliseconds=2000}}
 $blocked=$false;try{Get-EnforcedResponse $config $approved $planHash $approvalHash $instance $request $expired|Out-Null}catch{$blocked=$true}
 if(-not $blocked -or @($script:trace|Where-Object {$_ -ceq 'turnoff'}).Count -ne 1){throw 'late_mutation'}
+$script:controllerMode='authenticate'
+$script:powerOff=$false
+$request.sequence=[long]3;$request.nonce=('5'*48)+'0000000000000003'
+$blocked=$false;try{Get-EnforcedResponse $config $approved $planHash $approvalHash $instance $request ([Diagnostics.Stopwatch]::StartNew())|Out-Null}catch{$blocked=$_.Exception.Message -ceq 'authenticate_cannot_fence'}
+if(-not $blocked -or @($script:trace|Where-Object {$_ -ceq 'turnoff'}).Count -ne 1){throw 'authentication_mutation'}
 'bounded-profile'
 ''', setup).strip(), 'bounded-profile')
 
@@ -701,12 +707,21 @@ function Read-EnforcedPrivate($Path,$Watch){$script:reads++;$value=& $script:ori
 $argv=@($config.windows_enforced.python_path,'-I','-B',$config.windows_enforced.launcher_path,'serve','--plan',$script:Plan,'--approval',$script:Approval,'--journal','C:\Private\journal\controller-state.json')
 Assert-EnforcedParentArgv $argv $config
 $blocked=0
+$auth=$argv.Clone();$auth[4]='authenticate'
+try{Assert-EnforcedParentArgv $auth $config}catch{$blocked++}
+$selected=[pscustomobject]@{acceptance_scope='isolated-predeployment';operational_cutover_accepted=$false}
+$config.windows_enforced|Add-Member NoteProperty config_profile $selected
+Assert-EnforcedParentArgv $auth $config
+try{Assert-EnforcedParentArgv ($auth+@('--arm')) $config}catch{$blocked++}
+$selected.operational_cutover_accepted=$true
+try{Assert-EnforcedParentArgv $auth $config}catch{$blocked++}
+$config.windows_enforced.PSObject.Properties.Remove('config_profile')
 $bad=$argv.Clone();$bad[3]='C:\Other\launcher.py'
 try{Assert-EnforcedParentArgv $bad $config}catch{$blocked++}
 $bad=$argv+@('extra')
 try{Assert-EnforcedParentArgv $bad $config}catch{$blocked++}
 try{Get-EnforcedResponse $config $approved $planHash $approvalHash $instance $request ([Diagnostics.Stopwatch]::StartNew())|Out-Null}catch{$blocked++}
-if($blocked -ne 3){throw 'authority_or_parent_change_accepted'}
+if($blocked -ne 6){throw 'authority_or_parent_change_accepted'}
 'changed-authority-blocked'
 ''', setup).strip(), 'changed-authority-blocked')
 
