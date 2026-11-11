@@ -31,6 +31,7 @@ def sha(raw):
 class CaptureFixture:
     def __init__(self, root):
         self.root = root
+        self.loaded_sources = []
         self.inputs = root / 'inputs'
         self.inputs.mkdir(mode=0o700)
         self.output = root / 'captured'
@@ -134,9 +135,11 @@ class CaptureFixture:
         return C.capture(self.plan_path, self.expected, self.output)
 
     def load(self, result):
-        return M.FrozenSources(self.output / 'manifest.json', result['manifest_sha256'],
+        source = M.FrozenSources(self.output / 'manifest.json', result['manifest_sha256'],
                                {key: self.plan[key] for key in ('source_commit', 'cluster', 'plan_sha256')},
                                source_only_preflight=True)
+        self.loaded_sources.append(source)
+        return source
 
 
 class FrozenCaptureTests(unittest.TestCase):
@@ -147,6 +150,8 @@ class FrozenCaptureTests(unittest.TestCase):
         self.fixture = CaptureFixture(self.root)
 
     def tearDown(self):
+        for source in self.fixture.loaded_sources:
+            source.close()
         self.temp.cleanup()
 
     def reject(self, reason):
@@ -177,6 +182,18 @@ class FrozenCaptureTests(unittest.TestCase):
         self.assertEqual(set(audit['evidence']), C.EVIDENCE)
         self.assertNotIn(str(self.fixture.inputs), json.dumps(audit))
         source.unchanged()
+
+    def test_offline_capture_closes_verified_sqlite_staging_before_return(self):
+        closed=[]
+        original=C.FrozenSources.close
+        def record(source):
+            if source._sqlite_stage is not None:
+                closed.append(Path(source._sqlite_stage.name))
+            return original(source)
+        with patch.object(C.FrozenSources,'close',record):
+            self.fixture.run()
+        self.assertTrue(closed)
+        self.assertTrue(all(not path.exists() for path in closed))
 
     def test_sqlite_wal_rows_are_backed_up_without_touching_original(self):
         entry = self.fixture.services['book-memo']['databases']['main']

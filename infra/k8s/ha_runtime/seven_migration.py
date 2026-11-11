@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 import re
 import sqlite3
 import stat
+import tempfile
 from datetime import datetime, timezone
 
 from .config import SERVICES, DatabaseUnavailable
@@ -61,20 +62,49 @@ def private_file(path):
     return path
 
 
-def read_verified(path, expected, size, *, load=True):
+def read_verified(path, expected, size, *, load=True, sink=None):
     path=private_file(path);before=path.lstat()
     need(type(size) is int and 0<=size<=(32*1024*1024 if load else blobs.MAX_NAMESPACE_BYTES)
          and isinstance(expected,str) and HEX.fullmatch(expected) and before.st_size==size,'frozen_artifact_binding_invalid')
     descriptor=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
-    hashed=hashlib.sha256();payload=bytearray()
+    need(sink is None or not load,'streamed_frozen_copy_required')
+    hashed=hashlib.sha256();payload=bytearray();consumed=0
     with os.fdopen(descriptor,'rb') as stream:
         need(_stamp(before)==_stamp(os.fstat(stream.fileno())),'frozen_artifact_changed')
         for chunk in iter(lambda:stream.read(65536),b''):
+            consumed+=len(chunk);need(consumed<=size,'frozen_artifact_changed')
             hashed.update(chunk)
             if load:payload.extend(chunk)
+            if sink is not None:sink.write(chunk)
         need(_stamp(before)==_stamp(os.fstat(stream.fileno())),'frozen_artifact_changed')
     need(hashed.hexdigest()==expected and _stamp(before)==_stamp(path.lstat()),'frozen_artifact_changed')
     return bytes(payload) if load else None
+
+
+
+def _private_sqlite_stage():
+    """Root-sticky /tmp protects owned 0700 children from ancestor replacement."""
+    parent=Path('/tmp').resolve(strict=True)
+    for path in (parent,*parent.parents):
+        info=path.lstat()
+        need(stat.S_ISDIR(info.st_mode) and info.st_uid in {0,os.geteuid()}
+             and (not info.st_mode&0o022 or (info.st_uid==0 and info.st_mode&stat.S_ISVTX)),
+             'trusted_sqlite_stage_ancestor_required')
+    return tempfile.TemporaryDirectory(prefix='ha-frozen-sqlite-',dir=parent)
+
+
+def _sqlite_secret(value,secrets):
+    if isinstance(value,str):return any(secret in value for secret in secrets)
+    tokens=[secret.encode('utf-8') for secret in secrets]
+    if isinstance(value,(bytes,bytearray)):return any(token in value for token in tokens)
+    if isinstance(value,memoryview):
+        # SQLite currently returns bytes; keep future buffer adapters bounded.
+        overlap=max((len(token)-1 for token in tokens),default=0);tail=b''
+        for offset in range(0,len(value),65536):
+            chunk=tail+value[offset:offset+65536].tobytes()
+            if any(token in chunk for token in tokens):return True
+            tail=chunk[-overlap:] if overlap else b''
+    return False
 
 
 def utc(value):
@@ -148,6 +178,20 @@ def _portal_validator(*, source_only_preflight=False):
 class FrozenSources:
     """Private input holder. Public receipts never include paths or payloads."""
     def __init__(self, path, expected_sha256, config, *, source_only_preflight=False):
+        self._sqlite_stage=None;self._sqlite_copies={}
+        try:self._initialize(path,expected_sha256,config,source_only_preflight=source_only_preflight)
+        except BaseException:
+            self.close();raise
+
+    def close(self):
+        if self._sqlite_stage is not None:
+            self._sqlite_stage.cleanup();self._sqlite_stage=None
+
+    def __enter__(self):return self
+
+    def __exit__(self,*unused):self.close()
+
+    def _initialize(self, path, expected_sha256, config, *, source_only_preflight=False):
         path=private_file(path);root=path.parent;info=root.lstat()
         need(info.st_uid in {0,os.geteuid()} and not info.st_mode & 0o077,'private_frozen_directory_required')
         need(isinstance(expected_sha256,str) and HEX.fullmatch(expected_sha256),'frozen_manifest_hash_mismatch')
@@ -225,12 +269,12 @@ class FrozenSources:
                     for table, in reader.execute("SELECT name FROM sqlite_master WHERE type='table' AND substr(name,1,7)<>'sqlite_'"):
                         need(re.fullmatch(r'[a-z_][a-z0-9_]*',table),'unsupported_source_table')
                         columns=[row[1] for row in reader.execute('PRAGMA table_info("'+table+'")')]
-                        need(not set(columns)&SECRET_KEYS,'private_credential_sqlite_column_rejected')
+                        need(not {column.casefold() for column in columns}&SECRET_KEYS,'private_credential_sqlite_column_rejected')
                         cursor=reader.execute('SELECT * FROM "'+table+'"')
                         while True:
                             rows=cursor.fetchmany(1000)
                             if not rows:break
-                            need(not any(any(secret in item for secret in secrets) for row in rows for item in row if isinstance(item,str)),
+                            need(not any(_sqlite_secret(item,secrets) for row in rows for item in row),
                                  'private_credential_sqlite_copy_rejected')
         namespace=self.states['portal-web']['file-namespace'];_portal_validator(source_only_preflight=source_only_preflight)._validate(namespace)
         references={}
@@ -261,26 +305,36 @@ class FrozenSources:
         need(isinstance(entry['sha256'],str) and HEX.fullmatch(entry['sha256']) and type(entry['bytes']) is int,'artifact_descriptor_invalid')
         return self.root/name
 
-    def _read_entry(self,entry,*,load=True):
+    def _read_entry(self,entry,*,load=True,sink=None):
         path=self._entry(entry)
         if path in self._stamps:need(self._stamps[path]==_stamp(path.lstat()),'frozen_source_metadata_changed')
-        raw=read_verified(path,entry['sha256'],entry['bytes'],load=load)
+        raw=read_verified(path,entry['sha256'],entry['bytes'],load=load,sink=sink)
         self._stamps.setdefault(path,_stamp(path.lstat()));return raw
 
     def artifact(self, identifier, *, sqlite=False):
         need(isinstance(identifier,str) and identifier in self.manifest['artifacts'],'unknown_frozen_artifact')
-        entry=self.manifest['artifacts'][identifier];raw=self._read_entry(entry,load=not sqlite);self._used.add(identifier)
-        if sqlite:
-            path=self._entry(entry)
-            need(not any(Path(str(path)+suffix).exists() for suffix in ('-wal','-shm','-journal')),'sqlite_snapshot_sidecar_rejected')
-            with sqlite3.connect(path.as_uri()+'?mode=ro&immutable=1',uri=True) as source:
-                need(source.execute('PRAGMA quick_check').fetchall()==[('ok',)] and not source.execute('PRAGMA foreign_key_check').fetchall(),'source_integrity_failed')
-                need(source.execute("SELECT 1 FROM sqlite_master WHERE type IN ('trigger','view')").fetchone() is None,'unsupported_source_objects')
-                need(bool(migrate._source_tables(source)),'empty_sqlite_artifact_rejected')
-                for sql, in source.execute("SELECT sql FROM sqlite_master WHERE type IN ('table','index') AND sql IS NOT NULL AND substr(name,1,7)<>'sqlite_'"):
-                    migrate._safe_source_sql(sql)
-            return path
-        return raw
+        entry=self.manifest['artifacts'][identifier];self._used.add(identifier)
+        if not sqlite:return self._read_entry(entry)
+        original=self._entry(entry)
+        need(not any(Path(str(original)+suffix).exists() for suffix in ('-wal','-shm','-journal')),'sqlite_snapshot_sidecar_rejected')
+        if identifier not in self._sqlite_copies:
+            if self._sqlite_stage is None:self._sqlite_stage=_private_sqlite_stage()
+            path=Path(self._sqlite_stage.name)/(identifier+'.sqlite3')
+            descriptor=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+            # Only bytes read from the held source fd and verified against the
+            # manifest hash reach SQLite; never reopen an external source path.
+            with os.fdopen(descriptor,'wb') as sink:
+                self._read_entry(entry,load=False,sink=sink)
+                sink.flush();os.fsync(sink.fileno())
+            self._sqlite_copies[identifier]=path
+        path=self._sqlite_copies[identifier]
+        with sqlite3.connect(path.as_uri()+'?mode=ro&immutable=1',uri=True) as source:
+            need(source.execute('PRAGMA quick_check').fetchall()==[('ok',)] and not source.execute('PRAGMA foreign_key_check').fetchall(),'source_integrity_failed')
+            need(source.execute("SELECT 1 FROM sqlite_master WHERE type IN ('trigger','view')").fetchone() is None,'unsupported_source_objects')
+            need(bool(migrate._source_tables(source)),'empty_sqlite_artifact_rejected')
+            for sql, in source.execute("SELECT sql FROM sqlite_master WHERE type IN ('table','index') AND sql IS NOT NULL AND substr(name,1,7)<>'sqlite_'"):
+                migrate._safe_source_sql(sql)
+        return path
 
     def unchanged(self):
         for path,stamp in self._stamps.items():need(_stamp(path.lstat())==stamp,'frozen_source_metadata_changed')
@@ -362,38 +416,41 @@ def apply(admin,config,manifest_path,expected_sha256,receipt_path,prepare_contro
     need(admin.autocommit is True and admin.info.transaction_status==0,
          'idle_autocommit_migration_connection_required')
     source=FrozenSources(manifest_path,expected_sha256,config)
-    primary=config.get('primary_node','A');fresh_target(admin,source,primary)
-    # Validate output before the transaction, retaining an initial receipt even
-    # when the import fails. Each state is a new leaf; nothing overwrites history.
-    base=Path(receipt_path)
-    need(not any(p.exists() or p.is_symlink() for p in (base,base.with_suffix(base.suffix+'.prepared'),base.with_suffix(base.suffix+'.failed'))),'new_migration_receipt_required')
-    common={'schema_version':1,'source_commit':config['source_commit'],'manifest_sha256':expected_sha256,
-            'freeze_receipt_sha256':source.freeze_receipt_sha256,'services':sorted(SERVICES),
-            'capture_audit_sha256':source.capture_audit_sha256,
-            'target_system_id_sha256':hashlib.sha256(source.manifest['target_system_id'].encode()).hexdigest(),'primary_node':primary,
-            'source_freeze_evidence_bound':True,'source_writer_fencing_verified_by_this_tool':False,
-            'legacy_to_typed_artifact_normalization_verified_by_this_tool':False,
-            'writer_authority_issued':False,'automatic_enable_performed':False,'external_effect_reconciliation_required':True}
-    write_receipt(base.with_suffix(base.suffix+'.prepared'),dict(common,status='PREPARED'))
-    commit_pending=False;stage='transaction_begin'
     try:
-        with admin.transaction():
-            admin.execute("SET LOCAL log_min_messages='panic'")
-            admin.execute("SET LOCAL log_min_error_statement='panic'")
-            admin.execute('SET LOCAL log_parameter_max_length_on_error=0')
-            admin.execute('SELECT pg_advisory_xact_lock(%s)',(7142026110601,))
-            fresh_target(admin,source,primary);stage='closed_control';prepare_control(admin,config)
-            stage='frozen_data';entries,data=import_data(admin,source)
-            stage='guard_effects'
-            admin.execute('SET LOCAL search_path TO pg_catalog')
-            install_guard(admin,config,entries)
-            stage='logical_verification';finalize_data(admin,source)
-            commit_pending=True;stage='commit'
-        receipt=dict(common,status='PASS',data=data,portal_objects=len(source.objects),provider_private_state_imported=True,static_provider_configuration_imported=False)
-        write_receipt(base,receipt);return receipt
-    except Exception as error:
-        failure=dict(common,status='UNKNOWN_COMMIT' if commit_pending else 'FAILED',error_type=type(error).__name__,stage=stage)
-        code=getattr(error,'sqlstate',None)
-        if isinstance(code,str) and re.fullmatch(r'[0-9A-Z]{5}',code):failure['sqlstate']=code
-        write_receipt(base.with_suffix(base.suffix+'.failed'),failure)
-        raise MigrationRejected('migration_commit_unknown' if commit_pending else 'frozen_seven_migration_failed') from None
+        primary=config.get('primary_node','A');fresh_target(admin,source,primary)
+        # Validate output before the transaction, retaining an initial receipt even
+        # when the import fails. Each state is a new leaf; nothing overwrites history.
+        base=Path(receipt_path)
+        need(not any(p.exists() or p.is_symlink() for p in (base,base.with_suffix(base.suffix+'.prepared'),base.with_suffix(base.suffix+'.failed'))),'new_migration_receipt_required')
+        common={'schema_version':1,'source_commit':config['source_commit'],'manifest_sha256':expected_sha256,
+                'freeze_receipt_sha256':source.freeze_receipt_sha256,'services':sorted(SERVICES),
+                'capture_audit_sha256':source.capture_audit_sha256,
+                'target_system_id_sha256':hashlib.sha256(source.manifest['target_system_id'].encode()).hexdigest(),'primary_node':primary,
+                'source_freeze_evidence_bound':True,'source_writer_fencing_verified_by_this_tool':False,
+                'legacy_to_typed_artifact_normalization_verified_by_this_tool':False,
+                'writer_authority_issued':False,'automatic_enable_performed':False,'external_effect_reconciliation_required':True}
+        write_receipt(base.with_suffix(base.suffix+'.prepared'),dict(common,status='PREPARED'))
+        commit_pending=False;stage='transaction_begin'
+        try:
+            with admin.transaction():
+                admin.execute("SET LOCAL log_min_messages='panic'")
+                admin.execute("SET LOCAL log_min_error_statement='panic'")
+                admin.execute('SET LOCAL log_parameter_max_length_on_error=0')
+                admin.execute('SELECT pg_advisory_xact_lock(%s)',(7142026110601,))
+                fresh_target(admin,source,primary);stage='closed_control';prepare_control(admin,config)
+                stage='frozen_data';entries,data=import_data(admin,source)
+                stage='guard_effects'
+                admin.execute('SET LOCAL search_path TO pg_catalog')
+                install_guard(admin,config,entries)
+                stage='logical_verification';finalize_data(admin,source)
+                commit_pending=True;stage='commit'
+            receipt=dict(common,status='PASS',data=data,portal_objects=len(source.objects),provider_private_state_imported=True,static_provider_configuration_imported=False)
+            write_receipt(base,receipt);return receipt
+        except Exception as error:
+            failure=dict(common,status='UNKNOWN_COMMIT' if commit_pending else 'FAILED',error_type=type(error).__name__,stage=stage)
+            code=getattr(error,'sqlstate',None)
+            if isinstance(code,str) and re.fullmatch(r'[0-9A-Z]{5}',code):failure['sqlstate']=code
+            write_receipt(base.with_suffix(base.suffix+'.failed'),failure)
+            raise MigrationRejected('migration_commit_unknown' if commit_pending else 'frozen_seven_migration_failed') from None
+    finally:
+        source.close()

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import shutil
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -85,6 +86,10 @@ class FrozenInputTests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name).resolve()
         self.env=patch.dict(os.environ,{'APP_ENV':'test','HA_LOCAL_RUNTIME':'1'});self.env.start()
         self.fixture=FrozenFixture(self.root)
+        prepare=self.fixture.prepare
+        def registered_prepare():
+            source=prepare();self.addCleanup(source.close);return source
+        self.fixture.prepare=registered_prepare
 
     def tearDown(self):self.env.stop();self.temp.cleanup()
 
@@ -98,11 +103,77 @@ class FrozenInputTests(unittest.TestCase):
         self.assertNotIn('hyundai_tokens',source.states['car-care-worker'])
         self.assertEqual(source.private_payload['refresh_token'],'fixture-private-refresh-value')
 
+    def test_verified_sqlite_copy_survives_source_ancestor_swap_and_restore(self):
+        stage=self.root/'stage';stage.mkdir(mode=0o700)
+        fixture=FrozenFixture(stage)
+        alternate=self.root/'replacement';shutil.copytree(stage,alternate)
+        path=alternate/fixture.artifacts['book-memo.main']['file']
+        with sqlite3.connect(path) as db:db.execute("UPDATE records SET value='untrusted alternate'")
+        with fixture.prepare() as source:
+            staged=source.databases['book-memo']['main']
+            self.assertFalse(staged.is_relative_to(stage))
+            self.assertEqual(staged.stat().st_mode&0o777,0o600)
+            parked=self.root/'original-parked';seen=[]
+            def copy_verified(admin,service,component,path):
+                if service=='book-memo':
+                    stage.rename(parked);alternate.rename(stage)
+                    try:
+                        with sqlite3.connect(path) as db:
+                            seen.extend(db.execute('SELECT value FROM records').fetchall())
+                    finally:stage.rename(alternate);parked.rename(stage)
+                return {'copied':True}
+            with patch.object(M.migrate,'copy_sqlite',side_effect=copy_verified),patch.object(M.migrate,'create_namespace'),patch.object(M.migrate,'seed_state'):
+                M.import_data(MagicMock(),source)
+            source.unchanged()  # ABA restores every original leaf stamp.
+            self.assertEqual(seen,[('retained 한글',)])
+        self.assertFalse(staged.exists())
+
+    def test_private_sqlite_stage_rejects_untrusted_writable_ancestor(self):
+        original=M.Path.lstat
+        def unsafe(path):
+            info=original(path)
+            if path==M.Path('/tmp').resolve():
+                values=list(info);values[0]=0o40777;return os.stat_result(values)
+            return info
+        with patch.object(M.Path,'lstat',unsafe):
+            with self.assertRaisesRegex(M.MigrationRejected,'trusted_sqlite_stage_ancestor_required'):
+                M._private_sqlite_stage()
+
+    def test_constructor_failure_deterministically_removes_staged_private_copies(self):
+        created=[];allocate=M._private_sqlite_stage
+        def record():
+            value=allocate();created.append(Path(value.name));return value
+        self.fixture.add_json('crawler-worker.archive',{'articles':[],'alias':'fixture-private-refresh-value'})
+        self.fixture.save()
+        with patch.object(M,'_private_sqlite_stage',side_effect=record):
+            self.reject('private_credential_cross_service_copy_rejected')
+        self.assertTrue(created);self.assertTrue(all(not path.exists() for path in created))
+
+    def test_mixed_case_credential_column_is_rejected(self):
+        path=self.root/self.fixture.artifacts['book-memo.main']['file']
+        with sqlite3.connect(path) as db:
+            db.execute('ALTER TABLE records ADD COLUMN Refresh_Token TEXT')
+        self.fixture.add_file('book-memo.main',path);self.fixture.save()
+        self.reject('private_credential_sqlite_column_rejected')
+
+    def test_private_token_in_generic_sqlite_blob_is_rejected(self):
+        path=self.root/self.fixture.artifacts['book-memo.main']['file']
+        with sqlite3.connect(path) as db:
+            db.execute('UPDATE records SET value=?',(sqlite3.Binary(b'prefix-fixture-private-refresh-value-suffix'),))
+        self.fixture.add_file('book-memo.main',path);self.fixture.save()
+        self.reject('private_credential_sqlite_copy_rejected')
+
+    def test_secret_comparison_handles_all_sqlite_binary_representations(self):
+        secret='fixture-private-refresh-value'
+        for value in (secret,secret.encode(),bytearray(secret.encode()),memoryview(secret.encode())):
+            with self.subTest(kind=type(value).__name__):self.assertTrue(M._sqlite_secret(value,[secret]))
+        self.assertFalse(M._sqlite_secret(b'ordinary binary data',[secret]))
+
     def test_source_only_preflight_does_not_enable_unpackaged_import(self):
         with patch.dict(os.environ,{'APP_ENV':'production','HA_LOCAL_RUNTIME':'0'}):
             self.reject('packaged_migration_release_required')
-            source=M.FrozenSources(self.fixture.path,self.fixture.expected,self.fixture.config,source_only_preflight=True)
-            source.unchanged()
+            with M.FrozenSources(self.fixture.path,self.fixture.expected,self.fixture.config,source_only_preflight=True) as source:
+                source.unchanged()
 
     def test_one_service_omission_is_never_defaulted_to_empty(self):
         del self.fixture.services['system-agent'];self.fixture.save();self.reject('all_seven_sources_required')
@@ -218,7 +289,7 @@ class TransactionReceiptTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name).resolve()
         self.admin=MagicMock();self.admin.autocommit=True;self.admin.info.transaction_status=0
-        self.source=SimpleNamespace(manifest_sha256='a'*64,freeze_receipt_sha256='b'*64,capture_audit_sha256='d'*64,objects={},manifest={'target_system_id':'123'})
+        self.source=SimpleNamespace(close=MagicMock(),manifest_sha256='a'*64,freeze_receipt_sha256='b'*64,capture_audit_sha256='d'*64,objects={},manifest={'target_system_id':'123'})
         self.config={'source_commit':'c'*40,'primary_node':'A'};self.receipt=self.root/'receipt.json'
 
     def tearDown(self):self.temp.cleanup()
@@ -243,6 +314,7 @@ class TransactionReceiptTests(unittest.TestCase):
         value=json.loads(Path(str(self.receipt)+'.failed').read_text())
         self.assertEqual(value['status'],'FAILED');self.assertFalse(value['writer_authority_issued'])
         self.assertTrue(Path(str(self.receipt)+'.prepared').exists())
+        self.source.close.assert_called_once()
 
     def test_commit_acknowledgement_loss_is_unknown_not_retry_or_success(self):
         self.admin.transaction.return_value.__exit__.side_effect=OSError('connection_lost')
@@ -257,6 +329,7 @@ class TransactionReceiptTests(unittest.TestCase):
         with patch.object(M,'FrozenSources',return_value=self.source),patch.object(M,'fresh_target'):
             with self.assertRaises(M.MigrationRejected):self.run_apply(prepare,MagicMock())
         prepare.assert_not_called();self.assertEqual(self.receipt.read_text(),'preserve')
+        self.source.close.assert_called_once()
 
     def test_wrong_database_and_contamination_never_clean_up_target(self):
         admin=MagicMock();admin.info.dbname='postgres'
@@ -285,7 +358,7 @@ def postgres_integration(host):
     with psycopg.connect(host=host,dbname='postgres',user='postgres',autocommit=True) as setup:
         setup.execute('CREATE DATABASE ha')
     with tempfile.TemporaryDirectory() as directory,psycopg.connect(host=host,dbname='ha',user='postgres',autocommit=True) as admin:
-        root=Path(directory);fixture=FrozenFixture(root)
+        root=Path(directory)/'frozen';root.mkdir(mode=0o700);fixture=FrozenFixture(root)
         for service in ('crawler-worker','homeops-executor'):
             key=service+'.main';path=root/(key+'.sqlite3')
             with sqlite3.connect(path) as source:
@@ -315,7 +388,21 @@ def postgres_integration(host):
         assert admin.execute("SELECT to_regnamespace('ha'),to_regnamespace('s_book_memo_main')").fetchone()==(None,None)
         assert admin.execute("SELECT count(*) FROM pg_roles WHERE rolname='book_memo_a'").fetchone()==(0,)
         assert json.loads((root/'rollback.json.failed').read_text())['status']=='FAILED'
-        receipt=M.apply(admin,config,fixture.path,fixture.expected,root/'success.json',initializer.prepare_closed_control,initializer.install_guarded_catalog)
+        alternate=root.with_name('replacement');shutil.copytree(root,alternate)
+        with sqlite3.connect(alternate/fixture.artifacts['book-memo.main']['file']) as replacement:
+            replacement.execute("UPDATE records SET value='untrusted alternate'")
+        original_copy=M.migrate.copy_sqlite;swaps=[]
+        def swap_external_ancestor(connection,service,component,path):
+            if service!='book-memo':return original_copy(connection,service,component,path)
+            parked=root.with_name('parked');root.rename(parked);alternate.rename(root)
+            try:
+                swaps.append(True)
+                return original_copy(connection,service,component,path)
+            finally:root.rename(alternate);parked.rename(root)
+        with patch.object(M.migrate,'copy_sqlite',side_effect=swap_external_ancestor):
+            receipt=M.apply(admin,config,fixture.path,fixture.expected,root/'success.json',initializer.prepare_closed_control,initializer.install_guarded_catalog)
+        assert swaps==[True]
+        assert admin.execute('SELECT value FROM s_book_memo_main.records').fetchone()==('retained 한글',)
         assert receipt['status']=='PASS' and receipt['writer_authority_issued'] is False
         assert admin.execute('SELECT NOT writes_open AND NOT history_safe FROM ha.control').fetchone()==(True,)
         assert admin.execute('SELECT count(*) FROM ha.enforced_roles').fetchone()==(14,)
@@ -333,7 +420,7 @@ def postgres_integration(host):
             except psycopg.Error as error:assert error.sqlstate=='42501'
             else:raise AssertionError('app_read_private_state_accepted')
         return {'status':'PASS','real_postgresql':True,'mid_import_rollback':True,'seven_services':True,
-                'portal_blob':True,'private_tokens_separated':True,'closed_app_write_denied':True,
+                'portal_blob':True,'source_ancestor_ABA_cannot_change_imported_bytes':True,'private_tokens_separated':True,'closed_app_write_denied':True,
                 'source_capture_verified':False,'synchronous_pair_verified':False,'writer_authority_issued':False}
 
 

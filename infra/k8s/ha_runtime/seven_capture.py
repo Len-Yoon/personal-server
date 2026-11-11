@@ -605,7 +605,10 @@ def capture(plan_path, expected_sha256, output):
     binding = _write(temporary_manifest, encoded(manifest))
     config = {key: plan[key] for key in ('source_commit', 'cluster', 'plan_sha256')}
     frozen = FrozenSources(temporary_manifest, binding['sha256'], config, source_only_preflight=True)
-    frozen.unchanged()
+    try:
+        frozen.unchanged()
+    finally:
+        frozen.close()
     reader.unchanged()
     need(output.lstat().st_ino == output_stamp[1] and not output.is_symlink(), 'capture_destination_changed')
     final = output / 'manifest.json'
