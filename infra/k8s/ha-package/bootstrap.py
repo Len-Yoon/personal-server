@@ -100,17 +100,22 @@ def direction(spec):
     need(node in ('A','B'))
     if spec.get('schema_version',1) == 1:
         return 'A', None if node=='A' else 'A'
-    need(spec.get('schema_version') == 2 and spec.get('primary_node') in ('A','B'))
+    need(spec.get('schema_version') in (2,3) and spec.get('primary_node') in ('A','B'))
     primary = spec['primary_node']; source = spec.get('source_node')
     need('source_node' in spec and source == (None if node==primary else primary),'invalid_clone_direction')
     return primary, source
 
 
 def validate(lock):
-    need(type(lock) is dict and type(lock.get('schema_version')) is int and lock['schema_version'] in (1,2))
+    need(type(lock) is dict and type(lock.get('schema_version')) is int and lock['schema_version'] in (1,2,3))
+    version = lock['schema_version']
     fields = {'schema_version','source_commit','installation_id','node','pg_a','pg_b','cluster','plan_sha256',
               'ubuntu_image','docker_packages','postgres','utility_config_digest'}
-    need(set(lock) == fields | ({'primary_node','source_node','os_packages'} if lock['schema_version']==2 else set()))
+    if version >= 2:
+        fields |= {'primary_node','source_node','os_packages'}
+    if version == 3:
+        fields |= {'windows_controller_ipv4', 'management_prefix_length'}
+    need(set(lock) == fields)
     direction(lock)
     need(type(lock['source_commit']) is str and re.fullmatch(r'[0-9a-f]{40}',lock['source_commit']))
     need(all(type(lock[k]) is str and HEX.fullmatch(lock[k]) for k in ('installation_id','plan_sha256')))
@@ -123,6 +128,23 @@ def validate(lock):
             raise BootstrapError('bootstrap_input_invalid') from None
         need(ip.version == 4 and ip.is_private and not (ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved))
     need(lock['pg_a'] != lock['pg_b'])
+    if version == 3:
+        raw_controller = lock['windows_controller_ipv4']
+        need(type(raw_controller) is str, 'windows_controller_address_invalid')
+        try:
+            controller = ipaddress.IPv4Address(raw_controller)
+        except ValueError:
+            raise BootstrapError('windows_controller_address_invalid') from None
+        private_networks = tuple(map(ipaddress.IPv4Network, ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')))
+        prefix = lock['management_prefix_length']
+        need(type(prefix) is int and 24 <= prefix <= 30, 'windows_controller_network_invalid')
+        subnet = ipaddress.IPv4Network((controller, prefix), strict=False)
+        endpoints = (controller, ipaddress.IPv4Address(lock['pg_a']), ipaddress.IPv4Address(lock['pg_b']))
+        need(str(controller) == raw_controller and raw_controller not in (lock['pg_a'], lock['pg_b'])
+             and any(subnet.subnet_of(network) for network in private_networks)
+             and all(address in subnet and address not in (subnet.network_address, subnet.broadcast_address)
+                     for address in endpoints),
+             'windows_controller_address_invalid')
     os_image = lock['ubuntu_image']
     file_record(os_image, '.img')
     need(set(os_image) == {'filename','sha256','source_url','format'} and os_image['format'] == 'qcow2')
@@ -234,6 +256,9 @@ def pg_files(lock):
     # No trust rule or unencrypted TCP. Local administrator is the explicit TCB.
     hba = 'local all postgres peer\nhostssl replication ha_repl '+peer+'/32 scram-sha-256\n'
     hba += 'hostssl ha all '+lock['pg_a']+'/32 scram-sha-256\nhostssl ha all '+lock['pg_b']+'/32 scram-sha-256\n'
+    if lock.get('schema_version') == 3:
+        # The native controller uses the existing trusted catalog administrator.
+        hba += 'hostssl ha postgres '+lock['windows_controller_ipv4']+'/32 scram-sha-256\n'
     hba += 'host all all 0.0.0.0/0 reject\nhost all all ::/0 reject\n'
     service = {'image':lock['postgres']['config_digest'],'pull_policy':'never','network_mode':'host',
         'restart':'no','read_only':True,'security_opt':['no-new-privileges:true'],
