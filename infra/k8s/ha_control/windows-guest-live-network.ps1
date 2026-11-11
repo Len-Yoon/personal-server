@@ -42,6 +42,36 @@ function Assert-LiveNetworkSpec($Spec){
     })
 }
 
+function Assert-LiveNetworkSwitchMembers($Switch,$ExpectedMacs,$Adapters){
+    $switchId=[Guid]$Switch.Id
+    $seen=@{}
+    foreach($row in $Adapters){
+        if($null -eq $row -or $null -eq $row.PSObject.Properties['SwitchId'] -or $null -eq $row.PSObject.Properties['SwitchName']){
+            throw 'live_network_switch_membership_unverified'
+        }
+        $idText=[string]$row.SwitchId
+        $name=[string]$row.SwitchName
+        $rowSwitchId=[Guid]::Empty
+        if($idText -and -not [Guid]::TryParseExact($idText,'D',[ref]$rowSwitchId)){throw 'live_network_switch_membership_unverified'}
+        if(($rowSwitchId -eq [Guid]::Empty) -ne [string]::IsNullOrEmpty($name)){throw 'live_network_switch_membership_unverified'}
+        if($rowSwitchId -ne $switchId){
+            if($name -ieq $Switch.Name){throw 'live_network_switch_membership_unverified'}
+            continue
+        }
+        if($name -cne $Switch.Name -or $null -eq $row.PSObject.Properties['VMId'] -or
+            $null -eq $row.PSObject.Properties['Name'] -or $null -eq $row.PSObject.Properties['MacAddress']){
+            throw 'live_network_switch_membership_unverified'
+        }
+        $vmId=[Guid]::Empty
+        if(-not [Guid]::TryParseExact([string]$row.VMId,'D',[ref]$vmId)){throw 'live_network_switch_membership_unverified'}
+        $key=$vmId.ToString('D')
+        if(-not $ExpectedMacs.ContainsKey($key) -or $seen.ContainsKey($key) -or
+            $row.Name -cne 'ha-data' -or $row.MacAddress -cne $ExpectedMacs[$key]){throw 'live_network_foreign_or_duplicate_switch_member'}
+        $seen[$key]=$true
+    }
+    if($seen.Count -ne 2 -or $ExpectedMacs.Count -ne 2){throw 'live_network_switch_membership_unverified'}
+}
+
 function Get-LiveNetworkPair($Spec,$VmSpec,[string]$Root){
     $peer=Get-GuestVmPeer $Root $VmSpec
     $prepared=Read-GuestVmPreparedReceipt (Join-Path $Root 'vm-B-prepared-receipt.json') $Spec.vm_b_prepared_sha256
@@ -53,6 +83,12 @@ function Get-LiveNetworkPair($Spec,$VmSpec,[string]$Root){
     $profile=Read-GuestVmConfigProfileReceipt $Root 'B' $Spec.vm_b_profile_sha256 $pins $VmSpec.config_profile $Spec.vm_b_prepared_sha256
     if($profile.finalizer_source_commit -cne $VmSpec.vm_operation_source_commit){throw 'live_network_b_profile_origin_changed'}
     if($peer.vm.State -ne 'Running' -or $vm.State -ne 'Running'){throw 'live_network_two_running_guests_required'}
+    $expectedMacs=@{}
+    $expectedMacs[([Guid]$peer.vm.Id).ToString('D')]=$peer.pins.mac_address
+    $expectedMacs[([Guid]$vm.Id).ToString('D')]=$pins.mac_address
+    # VMName wildcard enumerates VM ports. The separate management-OS lookup
+    # in Get-LiveNetworkAdapter verifies the single owned host port.
+    Assert-LiveNetworkSwitchMembers $peer.switch $expectedMacs @(Get-VMNetworkAdapter -VMName '*' -ErrorAction Stop)
     return [pscustomobject]@{switch=$peer.switch;guest_a=$peer.pins.vm_id;guest_b=$pins.vm_id}
 }
 

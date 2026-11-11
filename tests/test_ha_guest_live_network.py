@@ -113,26 +113,38 @@ $spec=[pscustomobject]@{vm_b_prepared_sha256=('b'*64);vm_b_profile_sha256=('c'*6
 $vmSpec=[pscustomobject]@{config_profile='isolated';vm_operation_source_commit=('a'*40)}
 $script:case='good'
 $script:switch=[pscustomobject]@{Id=[Guid]'11111111-1111-1111-1111-111111111111';Name='fixture'}
+$a=[Guid]'aaaaaaaa-1111-1111-1111-111111111111'
+$b=[Guid]'bbbbbbbb-2222-2222-2222-222222222222'
 function Get-GuestVmPeer($Root,$VmSpec){
-    [pscustomobject]@{pins=[pscustomobject]@{switch_id=$script:switch.Id.ToString();manifest_sha256=('a'*64);vm_id='A'};switch=$script:switch
-        vm=[pscustomobject]@{State=$(if($script:case -eq 'a_off'){'Off'}else{'Running'})}}
+    [pscustomobject]@{pins=[pscustomobject]@{switch_id=$script:switch.Id.ToString();manifest_sha256=('a'*64);vm_id=$a.ToString();mac_address='021122334451'};switch=$script:switch
+        vm=[pscustomobject]@{Id=$a;State=$(if($script:case -eq 'a_off'){'Off'}else{'Running'})}}
 }
 function Read-GuestVmPreparedReceipt($Path,$Hash){
     if($Hash -cne ('b'*64)){throw 'wrong_prepared_pin'}
     [pscustomobject]@{pins=[pscustomobject]@{switch_id=$script:switch.Id.ToString()
-        switch_owner_manifest_sha256=$(if($script:case -eq 'owner_changed'){'0'*64}else{'a'*64});vm_id='B'}}
+        switch_owner_manifest_sha256=$(if($script:case -eq 'owner_changed'){'0'*64}else{'a'*64});vm_id=$b.ToString();mac_address='021122334452'}}
 }
 function Get-GuestVmNames($VmSpec){'names'}
 function Assert-GuestVmPrepared($VmSpec,$Names,$Pins,$Guest,$Disk,$Iso,$Hash,$ReadOnly){
     if($Hash -cne ('d'*64) -or $ReadOnly -ne $true){throw 'wrong_live_vm_assertion'}
-    [pscustomobject]@{State=$(if($script:case -eq 'b_off'){'Off'}else{'Running'})}
+    [pscustomobject]@{Id=$b;State=$(if($script:case -eq 'b_off'){'Off'}else{'Running'})}
 }
 function Read-GuestVmConfigProfileReceipt($Root,$Node,$Hash,$Pins,$Profile,$Prepared){
     if($Node -cne 'B' -or $Hash -cne ('c'*64) -or $Profile -cne 'isolated' -or $Prepared -cne ('b'*64)){throw 'wrong_profile_pin'}
     [pscustomobject]@{finalizer_source_commit=$(if($script:case -eq 'profile_origin'){'9'*40}else{'a'*40})}
 }
-function Get-VMNetworkAdapter([switch]$ManagementOS,$SwitchName){
-    [pscustomobject]@{SwitchId=$script:switch.Id;SwitchName='fixture';MacAddress='021122334455'}
+function Get-VMNetworkAdapter([switch]$ManagementOS,$SwitchName,$VMName,$ErrorAction){
+    if($ManagementOS){return [pscustomobject]@{SwitchId=$script:switch.Id;SwitchName='fixture';MacAddress='021122334455'}}
+    if($VMName -cne '*' -or $ErrorAction -cne 'Stop'){throw 'full_vm_inventory_required'}
+    $nicA=[pscustomobject]@{SwitchId=$script:switch.Id;SwitchName='fixture';VMId=$a;Name='ha-data';MacAddress='021122334451'}
+    $nicB=[pscustomobject]@{SwitchId=$script:switch.Id;SwitchName='fixture';VMId=$b;Name='ha-data';MacAddress='021122334452'}
+    $foreign=[pscustomobject]@{SwitchId=[Guid]'cccccccc-3333-3333-3333-333333333333';SwitchName='other';VMId=[Guid]'dddddddd-4444-4444-4444-444444444444';Name='other';MacAddress='021122334453'}
+    if($script:case -eq 'foreign_nic'){$foreign.SwitchId=$script:switch.Id;$foreign.SwitchName='fixture'}
+    if($script:case -eq 'ambiguous_nic'){$foreign.SwitchName='fixture'}
+    if($script:case -eq 'missing_vm_id'){$nicB.PSObject.Properties.Remove('VMId')}
+    if($script:case -eq 'duplicate_nic'){return @($nicA,$nicB,$nicA,$foreign)}
+    if($script:case -eq 'missing_nic'){return @($nicA,$foreign)}
+    return @($nicA,$nicB,$foreign)
 }
 function Get-NetAdapter([switch]$IncludeHidden){
     [pscustomobject]@{MacAddress='02-11-22-33-44-55';Virtual=$true;HardwareInterface=($script:case -eq 'physical')
@@ -144,8 +156,8 @@ function Get-NetIPInterface($InterfaceIndex,$AddressFamily){
 }
 $root=[IO.Path]::GetTempPath()
 $pair=Get-LiveNetworkPair $spec $vmSpec $root
-if($pair.guest_a -cne 'A' -or $pair.guest_b -cne 'B' -or (Get-LiveNetworkAdapter $pair.switch $spec).InterfaceIndex -ne 8){throw 'pair_or_adapter_not_bound'}
-foreach($case in @('a_off','b_off','owner_changed','profile_origin','physical','dhcp','forwarding')){
+if($pair.guest_a -cne $a.ToString() -or $pair.guest_b -cne $b.ToString() -or (Get-LiveNetworkAdapter $pair.switch $spec).InterfaceIndex -ne 8){throw 'pair_or_adapter_not_bound'}
+foreach($case in @('a_off','b_off','owner_changed','profile_origin','foreign_nic','ambiguous_nic','missing_vm_id','duplicate_nic','missing_nic','physical','dhcp','forwarding')){
     $script:case=$case;$blocked=$false
     try{$pair=Get-LiveNetworkPair $spec $vmSpec $root;Get-LiveNetworkAdapter $pair.switch $spec|Out-Null}catch{$blocked=$true}
     if(-not $blocked){throw ('unclosed_'+$case)}
