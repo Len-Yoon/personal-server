@@ -29,8 +29,9 @@ CAR_PROVIDER_FILES = frozenset("car-care-worker/app/" + name for name in
 PORTAL_MIGRATION_FILES = frozenset({"portal-web/app/services/ha_files.py"})
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 BASE = re.compile(r"python:3\.(?:11|12)-alpine3\.24@sha256:[0-9a-f]{64}")
-APK_MINIMUMS = {"musl": "1.2.6-r3", "musl-utils": "1.2.6-r3", "zlib": "1.3.2-r1"}
-APK_SECURITY_UPDATE = "RUN apk add --no-cache --upgrade 'musl>=1.2.6-r3' 'musl-utils>=1.2.6-r3' 'zlib>=1.3.2-r1'\n"
+APK_MINIMUMS = {"musl": "1.2.6-r3", "musl-utils": "1.2.6-r3", "zlib": "1.3.2-r1",
+                "krb5-libs": "1.22.3-r0"}
+APK_SECURITY_UPDATE = "RUN apk add --no-cache --upgrade 'musl>=1.2.6-r3' 'musl-utils>=1.2.6-r3' 'zlib>=1.3.2-r1' 'krb5-libs>=1.22.3-r0'\n"
 
 
 class PackageError(RuntimeError):

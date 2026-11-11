@@ -203,7 +203,7 @@ class PackageTest(unittest.TestCase):
             for name, minimum in package.APK_MINIMUMS.items():
                 mutations += [template.replace("'" + name + ">=" + minimum + "'", ""),
                               template.replace("'" + name + ">=" + minimum + "'",
-                                               "'" + name + ">=" + minimum.rsplit("r", 1)[0] + "r0'")]
+                                               "'" + name + ">=0-r0'")]
             for mutated in mutations:
                 with self.subTest(utility=utility, template=mutated):
                     with self.assertRaisesRegex(package.PackageError, "invalid_.*template"):
@@ -213,7 +213,8 @@ class PackageTest(unittest.TestCase):
                             package.render(original, mutated)
 
     def test_apk_security_smoke_uses_installed_database_and_native_comparison(self):
-        expected = {"musl": "1.2.6-r3", "musl-utils": "1.2.6-r3", "zlib": "1.3.2-r1"}
+        expected = {"musl": "1.2.6-r3", "musl-utils": "1.2.6-r3", "zlib": "1.3.2-r1",
+                    "krb5-libs": "1.22.3-r0"}
         self.assertEqual(package.APK_MINIMUMS, expected)
         def check(versions, comparisons):
             database = "\n\n".join("P:" + name + "\nV:" + version for name, version in versions.items())
@@ -223,8 +224,9 @@ class PackageTest(unittest.TestCase):
                 read.assert_called_once_with()
                 self.assertEqual([call.args[0] for call in command.call_args_list], [
                     ["/sbin/apk", "version", "-t", versions[name], minimum] for name, minimum in expected.items()])
-        check(expected, ["=\n", "=\n", "=\n"])
-        check({"musl": "1.2.6-r10", "musl-utils": "1.2.6-r10", "zlib": "1.3.3-r0"}, [">\n"] * 3)
+        check(expected, ["=\n"] * len(expected))
+        check({"musl": "1.2.6-r10", "musl-utils": "1.2.6-r10", "zlib": "1.3.3-r0",
+               "krb5-libs": "1.22.3-r1"}, [">\n"] * len(expected))
         for versions, comparisons in [(expected, ["<\n"]), (expected, ["unknown\n"]),
                                       ({"musl": "1.2.6-r3"}, ["=\n"])]:
             with self.subTest(versions=versions, comparisons=comparisons):
