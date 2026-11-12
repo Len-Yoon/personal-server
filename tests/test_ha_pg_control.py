@@ -739,6 +739,45 @@ class PGControlTests(unittest.TestCase):
 
 
 
+class InitialLeaseServiceTests(unittest.TestCase):
+    def test_persists_intent_before_initial_open_and_never_rearms_after_loss(self):
+        from ha_control import initial_lease_service as service
+
+        handoff = dict(attempt_id='a' * 64, legacy_plan_sha256='b' * 64,
+                       restore_receipt_sha256='c' * 64, activation_intent_sha256='d' * 64)
+        backend = SimpleNamespace(plan={'cluster': 'initial_test', 'initial_wsl_cutover': INITIAL_CUTOVER,
+                                        '_approval_action': 'ha-initial-wsl-cutover', 'initial_cutover_handoff': handoff},
+                                  fence_adapter=SimpleNamespace(_installed_runtime=True, plan_sha256='e' * 64),
+                                  _effects_deployment_binding=lambda: ('1' * 40, 'b' * 64))
+        observer = MagicMock(spec=service.WindowsInitialObserver)
+        lease = MagicMock()
+        with tempfile.TemporaryDirectory() as folder:
+            journal = Path(folder) / 'controller-state.json'
+
+            def open_lease(_state):
+                state = json.loads(journal.read_text())
+                self.assertEqual((state['phase'], state['sequence']), ('opening', 0))
+                return 'f' * 64
+
+            def fail_renewal(_state):
+                state = json.loads(journal.read_text())
+                self.assertEqual((state['phase'], state['sequence'], state['lease_proof_sha256']), ('serving', 1, 'f' * 64))
+                raise TransitionBlocked('fixture_lease_lost')
+
+            lease.open.side_effect = open_lease
+            lease.renew.side_effect = fail_renewal
+            lease.revoke.return_value = True
+            with patch.object(service, 'InitialPgLease', return_value=lease), patch.object(service.time, 'sleep'):
+                with self.assertRaisesRegex(TransitionBlocked, 'fixture_lease_lost'):
+                    service.serve_initial(backend, journal, observer)
+                self.assertEqual(json.loads(journal.read_text())['phase'], 'local_revoke_observed')
+                with self.assertRaisesRegex(TransitionBlocked, 'initial_service_reconciliation_required'):
+                    service.serve_initial(backend, journal, observer)
+        observer.assert_intent.assert_called_once()
+        lease.open.assert_called_once()
+        lease.revoke.assert_called_once()
+
+
 class InitialPgLeaseTests(unittest.TestCase):
     def setUp(self):
         self.cluster = 'initial_test'
@@ -747,7 +786,7 @@ class InitialPgLeaseTests(unittest.TestCase):
         self.backend = object.__new__(PgBackend)
         self.backend.depth = 1
         self.backend.plan = dict(cluster=self.cluster, system_id='1234', node='A', generation=1, timeline=1,
-                                 profile='enforced-vm-v1', _approval_action='ha-transition', source_commit='c' * 40,
+                                 profile='enforced-vm-v1', _approval_action='ha-initial-wsl-cutover', source_commit='c' * 40,
                                  initial_wsl_cutover=dict(INITIAL_CUTOVER),
                                  pg_enforcement={'effects': {'deployment_binding': self.binding,
                                                              'broker_role': 'ha_effect_broker'}})
@@ -770,7 +809,7 @@ class InitialPgLeaseTests(unittest.TestCase):
         self.over_budget = False
         self.lease = InitialPgLease(self.backend, self.legacy_closed)
 
-    def legacy_closed(self, state):
+    def legacy_closed(self, state, deadline):
         self.assertEqual(state, self.state)
         self.trace.append(('closure',))
         if self.over_budget and self.opened:
@@ -870,8 +909,8 @@ class InitialPgLeaseTests(unittest.TestCase):
         self.assertIn('expires_at=%s', revoke[1])
 
     def test_legacy_closure_loss_after_barrier_blocks_authority_cas(self):
-        def guard(state):
-            self.legacy_closed(state)
+        def guard(state, deadline):
+            self.legacy_closed(state, deadline)
             if self.backend._effects_open_gate.called:
                 raise TransitionBlocked('fixture_legacy_reopened')
 
@@ -994,6 +1033,160 @@ class ScmPgAuthProbeTests(unittest.TestCase):
                 probe.verify_plan(plan,approval,raw,time.time())
             with self.assertRaises(ValueError):
                 probe.strict_json('{"scope":0,"scope":1}')
+
+class NativeActivationHandoffTests(unittest.TestCase):
+    def test_wsl_import_executes_only_verified_source_bytes(self):
+        from ha_control import native_wsl_launcher as launcher, native_stdio_bridge as bridge
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            parent = Path(directory)
+            root = parent / 'source'
+            package = root / 'ha_control'
+            package.mkdir(mode=0o700, parents=True)
+            root.chmod(0o700)
+            entry = package / 'run_native_wsl_cutover.py'
+            entry.write_bytes(b'value = 1\n')
+            entry.chmod(0o600)
+            manifest = parent / 'manifest.json'
+            raw = bridge._bytes({'ha_control/run_native_wsl_cutover.py': bridge._digest(entry.read_bytes())})
+            manifest.write_bytes(raw)
+            manifest.chmod(0o600)
+            sources = launcher.verify(root, manifest, bridge._digest(raw), os.geteuid())
+            entry.write_bytes(b'value = 2\n')
+            finder = launcher.VerifiedSources(root, sources)
+            import importlib.util
+            spec = finder.find_spec('ha_control.run_native_wsl_cutover')
+            module = importlib.util.module_from_spec(spec)
+            finder.exec_module(module)
+            self.assertEqual(module.value, 1)
+            with self.assertRaisesRegex(ValueError, 'native_wsl_source_file_unbound'):
+                launcher.verify(root, manifest, bridge._digest(raw), os.geteuid())
+            with self.assertRaises(ModuleNotFoundError):
+                finder.find_spec('ha_control.unapproved')
+
+    def test_guest_live_bridge_uses_raw_guest_receipt_and_keeps_windows_binding(self):
+        from ha_control import native_guest_bridge as runtime, native_stdio_bridge as bridge
+
+        binding = bridge.Binding(*[character * 64 for character in 'abcde'])
+        chain = bridge._Chain('cutover')
+        chain.manifest = '0' * 64
+        chain.results['assert_activation_closed', 'A'] = '1' * 64
+
+        def call(verb, node, **args):
+            chain.check(verb, node, args)
+            result = bridge.Receipt('PASS', '2' * 64, '3' * 64) if verb == 'activate' else bridge.Receipt('PASS', '4' * 64)
+            chain.record(verb, node, args, result)
+            return result
+
+        guest = runtime.GuestBridgeRuntime(SimpleNamespace(binding=binding, call=call), '/unused',
+                                         '192.0.2.1', '/unused', 1024)
+        guest.verified = '5' * 64
+        args = (binding.plan_sha256, binding.attempt_id)
+        receipt = guest.activate(*args, chain.manifest, guest.verified, '6' * 64, activation_check_sha256='1' * 64)
+        authority = receipt['evidence_sha256']
+        self.assertNotEqual(authority, '2' * 64)
+        self.assertEqual(guest.service_instance_sha256, '3' * 64)
+        refs = {'windows_generation': 1, 'windows_generation_sha256': '7' * 64,
+                'live_lease_sha256': '8' * 64, 'live_authority_sha256': '9' * 64}
+        self.assertEqual(guest.assert_live(*args, authority, **refs)['authority_sha256'], authority)
+        with self.assertRaisesRegex(TransitionBlocked, 'guest_bridge_authority_unbound'):
+            guest.assert_live(*args, '2' * 64, **refs)
+
+    def test_ssh_activation_checks_live_windows_at_each_boundary(self):
+        from ha_control import native_guest_ssh as ssh, native_stdio_bridge as bridge
+
+        worker = '''
+import json, sys
+def send(value):
+    print(json.dumps(value, sort_keys=True, separators=(',', ':')), flush=True)
+request = json.loads(sys.stdin.readline())
+for index, boundary in enumerate(request['boundaries']):
+    fields = dict(request_nonce=request['nonce'], challenge=format(index, '064x'), boundary=boundary)
+    send(dict(kind='activation_boundary', **fields))
+    assert json.loads(sys.stdin.readline()) == dict(kind='activation_boundary_current', windows_proof_sha256='c' * 64, **fields)
+send({'status': 'PASS'})
+'''
+        nonce = 'f' * 64
+        payload = bridge._bytes({'nonce': nonce, 'boundaries': ssh.ACTIVATION_BOUNDARIES})
+        checks = []
+
+        def current(deadline):
+            self.assertLess(time.monotonic(), deadline)
+            checks.append(deadline)
+            return 'c' * 64
+
+        command = (sys.executable, '-c', worker)
+        result = ssh._activation_exchange(command, payload, time.monotonic() + 5, nonce, current)
+        self.assertEqual(json.loads(result), {'status': 'PASS'})
+        self.assertEqual(len(checks), len(ssh.ACTIVATION_BOUNDARIES))
+
+        checks.clear()
+
+        def lost_windows(deadline):
+            proof = current(deadline)
+            if len(checks) == 3:
+                raise bridge.BridgeRejected('windows_service_lost')
+            return proof
+
+        with self.assertRaisesRegex(bridge.BridgeRejected, 'windows_service_lost'):
+            ssh._activation_exchange(command, payload, time.monotonic() + 5, nonce, lost_windows)
+        self.assertEqual(len(checks), 3)
+        with self.assertRaisesRegex(bridge.BridgeRejected, 'guest_ssh_live_windows_unconfirmed'):
+            ssh._activation_exchange(command, payload, time.monotonic() + 5, nonce, lambda _: False)
+
+    def test_binds_wsl_intent_and_exact_guest_receipt_before_activation(self):
+        from ha_control import native_activation_handoff as handoff, native_stdio_bridge as bridge
+
+        binding = bridge.Binding(*[character * 64 for character in 'abcde'])
+        evidence = dict(zip(('manifest_sha256', 'restore_receipt_sha256', 'runtime_receipt_sha256',
+                             'closed_a_sha256', 'closed_b_sha256', 'closed_postgres_sha256'),
+                            (character * 64 for character in '012345')))
+        record = dict(binding=binding.fields(), node='A', verb='assert_activation_closed', evidence=evidence)
+        arguments = {'manifest_sha256': evidence['manifest_sha256'], 'settlement_sha256': '6' * 64,
+                     'activation_check_sha256': bridge._digest(bridge._bytes(record))}
+        request = bridge.Request(binding, 'A', 'activate', 1, '7' * 64, arguments)
+        journal = {'phase': 'activate_vm_intent', 'plan_sha256': binding.plan_sha256, 'attempt_id': binding.attempt_id,
+                   'receipts': {'restore': evidence['restore_receipt_sha256'], 'recheck_reactivation': '6' * 64,
+                                'fence_writers': '8' * 64, 'capture': '9' * 64, 'verify_closed': 'a' * 64}}
+        intent = handoff.activation_intent(request, journal, evidence['restore_receipt_sha256'])
+        result = json.loads(handoff.guest_handoff(request, 'b' * 64, record, intent, 'c' * 64, 'd' * 64))
+        self.assertEqual(result['activation_pins']['coordinator_intent_sha256'], bridge._digest(intent))
+        self.assertEqual(result['prepared_receipt_sha256'], evidence['runtime_receipt_sha256'])
+        with self.assertRaisesRegex(bridge.BridgeRejected, 'activation_intent_unbound'):
+            handoff.activation_intent(request, journal | {'phase': 'restore_intent'}, evidence['restore_receipt_sha256'])
+        with self.assertRaisesRegex(bridge.BridgeRejected, 'activation_handoff_unbound'):
+            handoff.guest_handoff(request, 'b' * 64, record | {'node': 'B'}, intent, 'c' * 64, 'd' * 64)
+
+        observed = []
+
+        @contextmanager
+        def open_first_write(_request, native_intent, _deadline):
+            self.assertEqual(native_intent, intent)
+            observed.append('open')
+            yield SimpleNamespace(first_write_proof_sha256='c' * 64, service_instance_sha256='d' * 64,
+                                  assert_current=lambda _deadline: observed.append('current') or 'f' * 64)
+            observed.append('handover')
+
+        def publish(_request, payload, _deadline):
+            self.assertEqual(json.loads(payload), result)
+            observed.append('publish')
+
+        def guest(_request, _deadline, *, assert_windows_current):
+            assert_windows_current(_deadline)
+            observed.append('start')
+            return bridge.Receipt('PASS', 'e' * 64)
+
+        custody = SimpleNamespace(read_guest_check=lambda *_: record, read_wsl_intent=lambda *_: journal,
+                                  installation_id='b' * 64, open_first_write=open_first_write,
+                                  publish_guest_handoff=publish)
+        dispatcher = handoff.ActivationDispatcher(guest, custody)
+        reply = dispatcher(request, time.monotonic() + 1)
+        self.assertEqual(reply, bridge.Receipt('PASS', 'e' * 64, 'd' * 64))
+        self.assertEqual(reply.fields('activate')['service_instance_sha256'], 'd' * 64)
+        with self.assertRaisesRegex(bridge.BridgeRejected, 'bridge_result_rejected'):
+            reply.fields('assert_live')
+        self.assertEqual(observed, ['open', 'current', 'publish', 'current', 'start', 'current', 'handover'])
+
 
 if __name__ == "__main__":
     unittest.main()
