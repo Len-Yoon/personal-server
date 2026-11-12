@@ -1,6 +1,7 @@
 """Guest isolation and transition authority boundaries, without any deployment."""
 import copy
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -24,6 +25,24 @@ def fixture():
 
 
 class GuestLayoutTest(unittest.TestCase):
+    def test_auth_values_are_private_inputs_and_not_compose_environment(self):
+        compose, _, _ = guest.render(fixture())
+        self.assertEqual(set(guest.AUTH_INPUTS), {"portal-web", "book-memo", "youtube-memo"})
+        for service, layout in compose["services"].items():
+            if service not in guest.SERVICES:
+                continue
+            command = layout["command"]
+            if service in guest.AUTH_INPUTS:
+                self.assertEqual(command[:4], ["python", "-I", "-B", "-c"])
+                self.assertEqual(command[6:8], ["-m", "ha_egress.app_entrypoint"])
+                compile(command[4], "<guest-auth-loader>", "exec")
+                required, optional = map(set, json.loads(command[5]))
+                self.assertTrue(required)
+                self.assertTrue((required | optional).isdisjoint(layout["environment"]))
+                self.assertIn('"/etc/ha/runtime-auth.json"', command[4])
+            else:
+                self.assertEqual(command[:3], ["python", "-m", "ha_egress.app_entrypoint"])
+
     def test_native_credentials_are_node_scoped_and_authority_is_not_generated(self):
         credentials = native_guest_config.new_role_passwords("r" * 48)
         release = {"source_commit": "a" * 40, "release_id": "b" * 64, "source_files_sha256": "c" * 64}
