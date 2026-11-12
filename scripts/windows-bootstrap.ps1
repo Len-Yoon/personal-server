@@ -45,15 +45,29 @@ $EmergencyRebootCauseComponent = $null
 $EmergencyRebootCooldownStateValid = $true
 $TunnelAlertDownNotified = $false
 function Assert-HaLegacyAllowed {
+    $fixedRoot = Join-Path $env:SystemDrive 'personal-server'
+    if ([IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\') -ine $fixedRoot) {
+        throw 'Legacy Windows recovery root is outside the N100 scope.'
+    }
     # Presence is a durable exclusion, including malformed/unreadable ownership
     # records. Only the separately approved HA rollback may remove this marker.
     $marker = Join-Path $RecoveryStateDirectory "ha-controller-owner.json"
     try {
-        if (Test-Path -LiteralPath $marker -ErrorAction Stop) {
-            throw "HA controller owns recovery; legacy mutation is blocked."
+        try {
+            $directory = Get-Item -LiteralPath $RecoveryStateDirectory -Force -ErrorAction Stop
+        } catch [System.Management.Automation.ItemNotFoundException] {
+            $directory = New-Item -Path $RecoveryStateDirectory -ItemType Directory -Force -ErrorAction Stop
         }
+        if (-not $directory.PSIsContainer -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'Legacy Windows recovery state directory is untrusted.'
+        }
+        $owned = @(Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction Stop |
+            Where-Object { $_.Name -ieq [IO.Path]::GetFileName($marker) })
     } catch {
         throw "HA ownership cannot be excluded; legacy mutation is blocked."
+    }
+    if ($owned.Count -ne 0) {
+        throw "HA controller owns recovery; legacy mutation is blocked."
     }
 }
 
@@ -717,14 +731,17 @@ function Enter-RecoveryLock {
 }
 
 function Exit-RecoveryLock($LockStream) {
-    if ($null -eq $LockStream) {
-        return
-    }
+    if ($null -ne $LockStream) { $LockStream.Dispose() }
+}
+
+function Invoke-LegacyBootstrapAdmission([scriptblock]$Action) {
+    Assert-HaLegacyAllowed
+    $lease = Enter-RecoveryLock
+    if ($null -eq $lease) { throw 'Legacy Windows recovery admission is closed.' }
     try {
-        $LockStream.Dispose()
-    } finally {
-        Remove-Item -LiteralPath $RecoveryLockPath -Force -ErrorAction SilentlyContinue
-    }
+        Assert-HaLegacyAllowed
+        & $Action
+    } finally { Exit-RecoveryLock $lease }
 }
 
 function Invoke-RecoveryCycle {
@@ -737,6 +754,7 @@ function Invoke-RecoveryCycle {
     }
 
     try {
+        Assert-HaLegacyAllowed
         if (-not $RecoveryStateDirty) {
             Load-RecoveryFailureState
         }
@@ -1161,7 +1179,7 @@ function Start-Supervisor {
         Write-Info "Waiting 120 seconds for WSL and Docker after logon."
         Start-Sleep -Seconds $RecoveryStartupDelaySeconds
         try {
-            Start-PersonalServerStack
+            Invoke-LegacyBootstrapAdmission { Start-PersonalServerStack }
         } catch {
             Write-Info "Initial stack bootstrap failed: $($_.Exception.Message)"
         }
@@ -1248,23 +1266,27 @@ function Start-Daemon {
 }
 
 if ($InstallTask) {
-    Install-ScheduledTask
+    Invoke-LegacyBootstrapAdmission { Install-ScheduledTask }
     exit 0
 }
 
 if ($Supervisor) {
+    Assert-HaLegacyAllowed
     Start-Supervisor
     exit 0
 }
 
 if ($Daemon) {
+    Assert-HaLegacyAllowed
     Start-Daemon
     exit 0
 }
 
 if ($Start) {
-    Update-HostMetrics
-    Start-PersonalServerStack
+    Invoke-LegacyBootstrapAdmission {
+        Update-HostMetrics
+        Start-PersonalServerStack
+    }
     exit 0
 }
 

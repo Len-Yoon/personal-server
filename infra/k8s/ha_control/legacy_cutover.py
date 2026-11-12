@@ -52,7 +52,11 @@ class LegacyCutover:
     Backend methods return fresh, plan- and attempt-bound receipt summaries backed
     by private native evidence. `assert_rollback_safe` must obtain positive
     evidence of settled prior mutations, closed VM writes, and unchanged routing.
-    `restore_legacy` must restore the exact preflight state and confirm health.
+    Admission must be held until activation or the exact WSL rollback. The
+    boundary receipts require a fresh observation of both the admission barrier
+    and the absence of in-flight recovery. The native backend binds each proof
+    to a live guard and validates it at the point of its associated mutation. `restore_legacy` restores only owned
+    exclusions, after WSL is healthy and VM writes have never opened.
     """
 
     def __init__(self, journal_path, backend):
@@ -103,14 +107,25 @@ class LegacyCutover:
             raise TransitionBlocked('legacy_cutover_preflight_failed') from None
         baseline = accept("preflight", pre, capture_ready=True, restore_ready=True, ingress_ready=True,
                           legacy_live=True, target_writes_closed=True)
-        phase("block_reactivation_intent")
+        phase("close_admission_intent")
         activated = False
         try:
-            blocked = accept("block_reactivation", backend.block_reactivation(plan, baseline),
-                             baseline_sha256=baseline, blocked=True)
+            admission = accept("close_admission", backend.close_admission(plan, baseline),
+                               baseline_sha256=baseline, new_deployments_blocked=True,
+                               admitted_deployments_settled=True)
+            phase("block_reactivation_intent")
+            blocked = accept("block_reactivation", backend.block_reactivation(plan, baseline, admission),
+                             baseline_sha256=baseline, admission_sha256=admission, blocked=True)
             phase("fence_writers_intent")
-            fence = accept("fence_writers", backend.fence_writers(plan, blocked),
-                           reactivation_sha256=blocked, writers_closed=True, services=sorted(SERVICES))
+            settled = _receipt(
+                backend.assert_reactivation_closed(plan, admission, blocked, "before_fence"),
+                plan, attempt, admission_sha256=admission, reactivation_sha256=blocked,
+                boundary="before_fence", new_deployments_blocked=True,
+                admitted_deployments_settled=True, windows_reactivation_blocked=True,
+                recovery_commands_settled=True)
+            state["receipts"]["settle_recovery"] = settled
+            fence = accept("fence_writers", backend.fence_writers(plan, blocked, settled),
+                           reactivation_sha256=blocked, settlement_sha256=settled, writers_closed=True, services=sorted(SERVICES))
             phase("capture_intent")
             capture = backend.capture(plan, fence)
             manifest = _pin(capture.get("manifest_sha256") if type(capture) is dict else None)
@@ -122,11 +137,23 @@ class LegacyCutover:
                               fence_sha256=fence, restore_sha256=restored, readiness=True,
                               target_writes_closed=True, services=sorted(SERVICES))
             phase("activate_vm_intent")
+            rechecked = _receipt(
+                backend.assert_activation_safe(plan, admission, blocked, fence, restored),
+                plan, attempt, admission_sha256=admission, reactivation_sha256=blocked,
+                boundary="before_activation", fence_sha256=fence, restore_sha256=restored,
+                new_deployments_blocked=True, admitted_deployments_settled=True,
+                windows_reactivation_blocked=True, recovery_commands_settled=True,
+                legacy_writers_closed=True, target_writes_closed=True, restore_ready=True)
+            if rechecked == settled:
+                raise TransitionBlocked("legacy_cutover_receipt_rejected")
+            state["receipts"]["recheck_reactivation"] = rechecked
+            # The native backend must consume this boundary proof while the same
+            # admission and recovery exclusion is still held.
             # Once activation has been attempted the old WSL writer may never
             # be reopened by this transaction, including on a lost response.
             activated = True
-            authority = accept("activate_vm", backend.activate_vm(plan, verified),
-                               verified_sha256=verified, vm_write_authority=True)
+            authority = accept("activate_vm", backend.activate_vm(plan, verified, rechecked),
+                               verified_sha256=verified, settlement_sha256=rechecked, vm_write_authority=True)
             phase("switch_caddy_intent")
             ingress = accept("switch_caddy", backend.switch_caddy(plan, authority),
                              authority_sha256=authority, vm_route_live=True)
@@ -148,10 +175,12 @@ class LegacyCutover:
             phase("rollback_inspection_intent")
             safety = accept("rollback_inspection", self.backend.assert_rollback_safe(plan, baseline),
                             baseline_sha256=baseline, target_never_opened=True, target_writes_closed=True,
-                            legacy_route_unchanged=True, prior_mutations_settled=True)
+                            legacy_route_unchanged=True, prior_mutations_settled=True,
+                            deployment_admission_reconciled=True)
             phase("restore_legacy_intent")
             accept("restore_legacy", self.backend.restore_legacy(plan, baseline, safety),
-                   baseline_sha256=baseline, safety_sha256=safety, legacy_state_restored=True, ready=True)
+                   baseline_sha256=baseline, safety_sha256=safety, legacy_state_restored=True,
+                   deployment_admission_restored=True, ready=True)
             phase("rolled_back")
         except Exception:
             phase("rollback_reconciliation_required")

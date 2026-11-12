@@ -223,5 +223,77 @@ class WindowsBridgeProofTests(unittest.TestCase):
                 self.bridge.fenced(self.state)
 
 
+
+
+class NativeLinuxWritersTests(unittest.TestCase):
+    def test_fence_waits_for_controller_and_rollback_preserves_original_writers(self):
+        from ha_control.legacy_writers import COMPOSE_ORDER, K3S_SERVICES, LinuxWriters
+
+        deployments = {}
+        schedules = []
+        containers = {}
+        for index, service in enumerate(sorted(K3S_SERVICES), 1):
+            deployments[service] = dict(namespace='personal-server', name=service,
+                                        uid=f'00000000-0000-0000-0000-{index:012}', replicas=1)
+            schedules.append(dict(namespace='personal-server', name=f'backup-{index}',
+                                  uid=f'00000000-0000-0000-0001-{index:012}', suspend=False))
+        for index, service in enumerate(COMPOSE_ORDER, 1):
+            containers[service] = dict(id=f'{index:064x}', image='sha256:' + 'a' * 64,
+                                       running=service not in K3S_SERVICES, restart='unless-stopped')
+        baseline = dict(deployments=deployments, schedules=schedules, containers=containers)
+        active = {row['id']: (row['running'], row['restart']) for row in containers.values()}
+        commands = []
+
+        def docker(args, timeout=10):
+            command = args[3]
+            cid = args[-1]
+            running, restart = active[cid]
+            commands.append((command, cid))
+            active[cid] = {
+                'update': (running, args[-2].split('=', 1)[1]) if command == 'update' else (running, restart),
+                'stop': (False, restart),
+                'start': (True, restart),
+            }[command]
+
+        writer = LinuxWriters(baseline, docker)
+        containers['homeops-executor']['running'] = False
+        actual = writer._baseline
+        states = {row['uid']: row['replicas'] for row in deployments.values()}
+        states.update({row['uid']: row['suspend'] for row in schedules})
+
+        def patch_state(_kind, row, _field, _current, desired, _resource):
+            states[row['uid']] = desired
+
+        def container_state(service):
+            return active[actual['containers'][service]['id']]
+
+        deployment = actual['deployments']['portal-web']
+        uid = deployment['uid']
+        replicas = dict(kind='ReplicaSet', metadata=dict(uid='rs', ownerReferences=[
+            dict(kind='Deployment', uid=uid, controller=True)]), spec=dict(replicas=1))
+        with patch.object(writer, '_objects', return_value=[replicas]):
+            self.assertTrue(writer._writers_active({'app-data'}, include_deployments=True))
+        with (patch.object(writer, '_no_autoscaler'),
+              patch.object(writer, '_assert_schedule_graph', return_value={'app-data'}),
+              patch.object(writer, '_container', side_effect=container_state),
+              patch.object(writer, '_deployment', side_effect=lambda row: (
+                  dict(metadata=dict(generation=1), status=dict(
+                      observedGeneration=1, replicas=states[row['uid']], readyReplicas=states[row['uid']])),
+                  states[row['uid']])),
+              patch.object(writer, '_schedule', side_effect=lambda row: ({}, states[row['uid']])),
+              patch.object(writer, '_patch', side_effect=patch_state),
+              patch.object(writer, '_writers_active', return_value=False)):
+            writer.block_reactivation()
+            writer.fence()
+            self.assertEqual([cid for name, cid in commands if name == 'stop'],
+                             [actual['containers'][service]['id'] for service in COMPOSE_ORDER[:3]])
+            self.assertTrue(all(state == (False, 'no') for state in active.values()))
+            writer.restore()
+            for service, row in actual['containers'].items():
+                self.assertEqual(active[row['id']], (service not in K3S_SERVICES, row['restart']))
+            self.assertTrue(all(states[row['uid']] is False for row in schedules))
+            self.assertTrue(all(states[row['uid']] == 1 for row in deployments.values()))
+
+
 if __name__ == "__main__":
     unittest.main()

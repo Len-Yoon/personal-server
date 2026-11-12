@@ -13,6 +13,35 @@ WSL_SCRIPT = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf
 
 
 class WindowsBootstrapTests(unittest.TestCase):
+    def test_wsl_direct_bootstrap_refuses_owned_or_locked_runtime(self):
+        import fcntl
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / 'data'
+            data.mkdir()
+            command = ['bash', str(ROOT / 'scripts' / 'windows-bootstrap.sh'), str(root)]
+            marker = data / 'ha-controller-owner.json'
+            marker.symlink_to(data / 'missing-owner')
+            denied = subprocess.run(command, capture_output=True, text=True, timeout=5)
+            self.assertEqual(denied.returncode, 1)
+            self.assertIn('legacy_bootstrap_owned_by_ha', denied.stderr)
+            marker.unlink()
+            with (data / 'ha-legacy-bootstrap.lock').open('ab') as held:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                denied = subprocess.run(command, capture_output=True, text=True, timeout=5)
+                self.assertEqual(denied.returncode, 1)
+                self.assertIn('legacy_bootstrap_admission_closed', denied.stderr)
+
+    def test_direct_windows_bootstrap_holds_same_lock_as_recovery(self):
+        admission = SCRIPT[SCRIPT.index('function Invoke-LegacyBootstrapAdmission'):
+                           SCRIPT.index('function Invoke-RecoveryCycle')]
+        self.assertLess(admission.index('Enter-RecoveryLock'), admission.index('& $Action'))
+        self.assertGreater(admission.index('Exit-RecoveryLock'), admission.index('& $Action'))
+        self.assertIn('Invoke-LegacyBootstrapAdmission { Install-ScheduledTask }', SCRIPT)
+        self.assertIn('Invoke-LegacyBootstrapAdmission { Start-PersonalServerStack }', SCRIPT)
+        self.assertIn('if ($Start) {\n    Invoke-LegacyBootstrapAdmission {', SCRIPT)
+
     def test_install_task_registers_keepalive_at_boot_without_interactive_token(self):
         installer = SCRIPT[
             SCRIPT.index("function Install-KeepAliveTask")
