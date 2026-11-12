@@ -4,13 +4,14 @@ from contextlib import contextmanager
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import secrets
 import selectors
 import subprocess
 import time
 
-from .controller import TransitionBlocked
+from .controller import TransitionBlocked, exclusive
 from .legacy_cutover import _pin
 
 
@@ -131,6 +132,26 @@ $script=[ScriptBlock]::Create([Text.Encoding]::UTF8.GetString($entry).TrimStart(
             raise TransitionBlocked("legacy_native_command_unconfirmed") from None
 
 
+class WslBootstrapAdmission:
+    """Hold the exact lock used by the installed WSL bootstrap entrypoint."""
+
+    def __init__(self, source_sha256):
+        self.root = Path("/mnt/c/personal-server")
+        self.source_sha256 = _pin(source_sha256)
+
+    @contextmanager
+    def guard(self):
+        source = self.root / "scripts/windows-bootstrap.sh"
+        lock = self.root / "data/ha-legacy-bootstrap.lock"
+        if (source.resolve() != source or lock.resolve() != lock
+                or hashlib.sha256(source.read_bytes()).hexdigest() != self.source_sha256):
+            raise TransitionBlocked("legacy_wsl_bootstrap_source_changed")
+        with exclusive(lock):
+            if hashlib.sha256(source.read_bytes()).hexdigest() != self.source_sha256:
+                raise TransitionBlocked("legacy_wsl_bootstrap_source_changed")
+            yield
+
+
 class NativeCutover:
     """Bind Windows, GitHub and application-specific stages to LegacyCutover.
 
@@ -138,10 +159,11 @@ class NativeCutover:
     and their private plan, including positive inspection after uncertain writes.
     """
 
-    def __init__(self, windows, admission, applications):
+    def __init__(self, windows, admission, applications, *, wsl_bootstrap=None):
         self.windows = windows
         self.admission = admission
         self.applications = applications
+        self.wsl_bootstrap = wsl_bootstrap
 
     def __getattr__(self, name):
         return getattr(self.applications, name)
@@ -152,7 +174,11 @@ class NativeCutover:
         self.admission_owned = self.windows_closed = self.linux_touched = False
         self.admission_unconfirmed = self.windows_unconfirmed = False
         with self.applications.guard(plan, attempt), self.windows.guard(plan, attempt):
-            yield
+            if self.wsl_bootstrap is None:
+                yield
+            else:
+                with self.wsl_bootstrap.guard():
+                    yield
 
     def _receipt(self, evidence, **facts):
         return dict(plan_sha256=self.plan, attempt_id=self.attempt, evidence_sha256=_pin(evidence), **facts)
@@ -169,6 +195,8 @@ class NativeCutover:
     def block_reactivation(self, plan, baseline, admission):
         self.admission.assert_closed()
         self.applications.assert_direct_recovery_excluded(plan, baseline)
+        if self.wsl_bootstrap is None:
+            raise TransitionBlocked("legacy_wsl_bootstrap_guard_required")
         self.windows_unconfirmed = True
         windows = self.windows.request("close", admission)
         self.windows_closed = True
