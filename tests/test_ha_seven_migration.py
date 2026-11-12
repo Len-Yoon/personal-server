@@ -52,7 +52,8 @@ class NativeGuestRestoreTests(unittest.TestCase):
                          "HostConfig": {"NetworkMode": "none", "ReadonlyRootfs": True, "RestartPolicy": {"Name": "no"},
                                         "Privileged": False, "CapDrop": ["ALL"], "CapAdd": None,
                                         "SecurityOpt": ["no-new-privileges:true"],
-                                        "LogConfig": {"Type": "local", "Config": {"max-size": "32m", "max-file": "1"}}},
+                                        "LogConfig": {"Type": "local", "Config": {"max-size": "32m", "max-file": "1",
+                                                                                 "compress": "false"}}},
                          "Mounts": [
                              {"Type": "bind", "Source": str(source), "Destination": destination, "RW": writable}
                              for source, destination, writable in (
@@ -70,6 +71,10 @@ class NativeGuestRestoreTests(unittest.TestCase):
                         self.assertIn("--read-only", args)
                         self.assertEqual(args[args.index("--network") + 1], "none")
                         self.assertEqual(args[args.index("--phase") + 1], "migration")
+                        self.assertEqual(
+                            [args[index + 1] for index, option in enumerate(args) if option == "--log-opt"],
+                            ["max-size=32m", "max-file=1", "compress=false"],
+                        )
                         self.assertIn("type=bind,src=" + str(stage / "frozen") + ",dst=/frozen,readonly", args)
                         self.assertIn("type=bind,src=" + str(stage / "receipts") + ",dst=/receipts", args)
                         return identifier.encode()
