@@ -98,7 +98,7 @@ try {
     $statePath = Join-Path ([IO.Path]::GetDirectoryName($PlanPath)) 'journal\controller-state.json'
     $attempt = $plan.initial_cutover_handoff.attempt_id
     if ($attempt -cnotmatch $hashPattern -or
-        $BindingPath -cnotmatch '\AC:\\ProgramData\\N100HA-Cutover-Inputs\\[a-f0-9]{40}\\initial-service-[a-f0-9]{64}\.json\z' -or
+        $BindingPath -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\initial-service-[a-f0-9]{64}\.json\z' -or
         -not $BindingPath.EndsWith(('-' + $attempt + '.json'),[StringComparison]::Ordinal) -or
         (Test-Path -LiteralPath $BindingPath)) { throw 'initial_service_binding_scope' }
     if (Test-Path -LiteralPath $argsPath) { throw 'initial_service_args_exist' }

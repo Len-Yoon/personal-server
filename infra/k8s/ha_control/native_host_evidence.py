@@ -58,7 +58,7 @@ def protected_host_stamp():
 class WindowsServiceLiveAuthority:
     def __init__(self, binding_path, source_sha256, service_instance):
         _need(type(binding_path) is str and re.fullmatch(
-            r'C:\\ProgramData\\N100HA-Cutover-Inputs\\[a-f0-9]{40}\\initial-service-[a-f0-9]{64}\.json', binding_path),
+            r'C:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\initial-service-[a-f0-9]{64}\.json', binding_path),
             'native_host_live_authority_unverified')
         self.binding_path = binding_path
         _need(callable(service_instance), 'native_host_live_authority_unverified')

@@ -77,7 +77,7 @@ function Assert-ProtectedPath($Entry, [string]$Reader = '', [string]$TrustedWrit
     $depth = 0
     for ($item = $Entry; $null -ne $item; $item = $(if ($item -is [IO.FileInfo]) { $item.Directory } else { $item.Parent })) {
         $allowed = if (-not $LeafOnly -or $depth -eq 0) { $TrustedWriter } else { '' }
-        Assert-Access $item ($depth -le 1) $Reader $allowed ($RequireReader -and $depth -eq 0)
+        Assert-Access $item ($depth -le 1) $Reader $allowed ($RequireReader -and $depth -le 1)
         $depth++
     }
 }
@@ -217,7 +217,7 @@ try {
     $fsutil = Join-Path ([Environment]::SystemDirectory) 'fsutil.exe'
     Assert-Pin $InputSha256
     Assert-Pin $ExpectedSourceManifestSha256
-    if ($InputPath -cnotmatch '\AC:\\ProgramData\\N100HA-Cutover-Inputs\\[a-f0-9]{40}\\[A-Za-z0-9_.-]+\z') {
+    if ($InputPath -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\[A-Za-z0-9_.-]+\z') {
         throw 'initial_stage_input_path'
     }
     $root = [IO.Path]::GetDirectoryName($InputPath)

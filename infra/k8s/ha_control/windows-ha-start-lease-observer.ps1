@@ -10,7 +10,7 @@ function Digest([byte[]]$Bytes) {
 }
 
 function Assert-LocalPath([string]$Path) {
-    if ($Path -cnotmatch '\AC:\\ProgramData\\N100HA-Cutover-Inputs\\[a-f0-9]{40}\\[A-Za-z0-9_.-]+\z' -or
+    if ($Path -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\[A-Za-z0-9_.-]+\z' -or
         $Path -match '\\\.\.?(\\|$)' -or $Path.EndsWith('.')) { throw 'observer_task_input_path' }
 }
 

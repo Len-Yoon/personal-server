@@ -52,7 +52,7 @@ function Read-Scope([string]$Path, [string[]]$Owners) {
 
 try {
     if ($LegacyPlanSha256 -cnotmatch $pattern -or $AttemptId -cnotmatch $pattern -or $PriorSha256 -cnotmatch $pattern -or
-        $BindingPath -cnotmatch '\AC:\\ProgramData\\N100HA-Cutover-Inputs\\[a-f0-9]{40}\\initial-service-[a-f0-9]{64}\.json\z' -or
+        $BindingPath -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\initial-service-[a-f0-9]{64}\.json\z' -or
         -not $BindingPath.EndsWith(('-' + $AttemptId + '.json'),[StringComparison]::Ordinal)) { throw 'live_authority_scope' }
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $admins = @('S-1-5-18','S-1-5-32-544',$sid)
