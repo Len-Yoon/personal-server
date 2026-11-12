@@ -186,6 +186,14 @@ function Assert-NpManifest($Value){
   if(-not $Value.PSObject.Properties['closure_version'] -or $Value.schema_version -ne 3 -or $Value.descriptor_profile -cne 'strict-canonical-observed-v1' -or $Value.comparator_sha256 -cne '56cc20aaf52bd7ea7b1b0f88d562a15d1f28ffb3aac7ad4b0e0df2ec3e1dac3e'){throw 'namespace_observed_profile_rejected'}
   foreach($key in @('closure_original_canonical_sha256','closure_target_canonical_sha256')){if($Value.$key -isnot [array] -or $Value.$key.Count -ne $Value.closure_names.Count){throw 'namespace_canonical_binding_rejected'};foreach($h in $Value.$key){if($h -isnot [string] -or $h -cnotmatch '^[0-9a-f]{64}$'){throw 'namespace_canonical_binding_rejected'}}}
  }
+ if($Value.PSObject.Properties['host_replacement_request_sha256'] -or $Value.PSObject.Properties['host_replacement_evidence_sha256']){
+  $keys+=@('host_replacement_request_sha256','host_replacement_evidence_sha256')
+  if(-not (Test-NpObserved $Value) -or $Value.host_replacement_request_sha256 -isnot [array] -or $Value.host_replacement_evidence_sha256 -isnot [array] -or
+     $Value.host_replacement_request_sha256.Count -notin @(1,2) -or $Value.host_replacement_request_sha256.Count -ne $Value.host_replacement_evidence_sha256.Count){throw 'namespace_host_replacement_manifest_rejected'}
+  foreach($hash in @($Value.host_replacement_request_sha256)+@($Value.host_replacement_evidence_sha256)){
+   if($hash -isnot [string] -or $hash -cnotmatch '^[0-9a-f]{64}$'){throw 'namespace_host_replacement_manifest_rejected'}
+  }
+ }
  Assert-NpKeys $Value $keys
  if(($Value.schema_version -isnot [int] -and $Value.schema_version -isnot [long]) -or $Value.schema_version -ne $(if(Test-NpObserved $Value){3}else{1})){throw 'namespace_manifest_rejected'}
  foreach($key in @('source_commit','service_source_commit')){if($Value.$key -isnot [string] -or $Value.$key -cnotmatch '^[0-9a-f]{40}$'){throw 'namespace_manifest_rejected'}}
@@ -235,6 +243,48 @@ function Assert-NpServiceFacts($Service,$Spec,[string]$Root,[string]$ActualSid,[
  if((Test-NpObserved $Spec) -and ($service.StartMode -cne 'Manual' -or $service.PathName -ine ('"'+($base+'host\windows-service-host.exe')+'"'))){throw 'namespace_observed_service_path_rejected'}
  return [pscustomobject]@{config=$config;image=$image}
 }
+function Resolve-NpServiceImage($Spec,[string]$Root){
+ $imageHash=$Spec.service_image_sha256
+ if(-not $Spec.PSObject.Properties['host_replacement_request_sha256']){return $imageHash}
+ $seen=@{$imageHash=$true}
+ $reservationHash=''
+ for($i=0;$i -lt $Spec.host_replacement_request_sha256.Count;$i++){
+  $request=$Spec.host_replacement_request_sha256[$i]
+  $audit=Join-Path $Root ('host-upgrade-'+$request.Substring(0,24))
+  $complete=$i -eq ($Spec.host_replacement_request_sha256.Count-1)
+  $evidenceName=if($complete){'receipt.json'}else{'intent.json'}
+  $receipt=Read-NpJson (Open-NpInput (Join-Path $audit $evidenceName) $Spec.host_replacement_evidence_sha256[$i])
+  $keys=@('schema_version','source_commit','installation_id','request_sha256','reservation_sha256','ownership_sha256',
+    'old_host_sha256','new_host_sha256','service_config_sha256','service_sd_sha256','old_host_acl_sha256','old_host_attributes')
+  if($complete){$keys+=@('scope','service_started','authority_issued')}
+  if($i -eq 1){$keys+='previous_intent_sha256'}
+  Assert-NpKeys $receipt $keys
+  foreach($field in @('installation_id','request_sha256','ownership_sha256','service_config_sha256','service_sd_sha256','old_host_sha256')){
+   if($receipt.$field -isnot [string]){throw 'namespace_host_replacement_receipt_rejected'}
+  }
+  if(($receipt.schema_version -isnot [int] -and $receipt.schema_version -isnot [long]) -or $receipt.schema_version -ne 1 -or
+     $receipt.source_commit -isnot [string] -or $receipt.source_commit -cnotmatch '^[0-9a-f]{40}$' -or
+     $receipt.old_host_acl_sha256 -isnot [string] -or $receipt.old_host_acl_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+     ($receipt.old_host_attributes -isnot [int] -and $receipt.old_host_attributes -isnot [long]) -or
+     -not ($receipt.old_host_attributes -band 1) -or $receipt.installation_id -cne $Spec.installation_id -or
+     $receipt.request_sha256 -cne $request -or $receipt.ownership_sha256 -cne $Spec.service_ownership_receipt_sha256 -or
+     $receipt.service_config_sha256 -cne $Spec.service_config_sha256 -or $receipt.service_sd_sha256 -cne $Spec.service_sd_sha256 -or
+     $receipt.old_host_sha256 -cne $imageHash -or $receipt.new_host_sha256 -isnot [string] -or $receipt.new_host_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+     $seen.ContainsKey($receipt.new_host_sha256) -or $receipt.reservation_sha256 -isnot [string] -or $receipt.reservation_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+     ($complete -and ($receipt.scope -isnot [string] -or $receipt.scope -cne 'stopped_service_host_replacement' -or
+       $receipt.service_started -isnot [bool] -or $receipt.service_started -or $receipt.authority_issued -isnot [bool] -or $receipt.authority_issued))){
+   throw 'namespace_host_replacement_receipt_rejected'
+  }
+  if($i -eq 1 -and ($receipt.reservation_sha256 -cne $reservationHash -or
+     $receipt.previous_intent_sha256 -isnot [string] -or $receipt.previous_intent_sha256 -cne $Spec.host_replacement_evidence_sha256[0])){
+   throw 'namespace_host_replacement_receipt_rejected'
+  }
+  $reservationHash=$receipt.reservation_sha256
+  $imageHash=$receipt.new_host_sha256
+  $seen[$imageHash]=$true
+ }
+ return $imageHash
+}
 function Get-NpService($Spec,[string]$Root){
  $service=Get-CimInstance Win32_Service -Filter ("Name='"+$Spec.service_name+"'") -ErrorAction Stop
  $actualSid=([Security.Principal.NTAccount]::new('NT SERVICE\'+$Spec.service_name)).Translate([Security.Principal.SecurityIdentifier]).Value
@@ -243,10 +293,13 @@ function Get-NpService($Spec,[string]$Root){
  # Includes PAUSE_CONTINUE, USER_DEFINED_CONTROL and GENERIC_EXECUTE.
  [HaNamespacePolicyCoreV1]::AssertWriters($serviceSd,[string[]](@('S-1-5-18','S-1-5-32-544',$Spec.service_sid)+$Spec.trusted_admin_sids),1879900530)
  $facts=Assert-NpServiceFacts $service $Spec $Root $actualSid ([HaNamespacePrivilegeV1]::ServiceSidType($Spec.service_name));$image=$facts.image;$config=$facts.config
- $null=Open-NpInput $image $Spec.service_image_sha256 67108864 $(if(Test-NpObserved $Spec){$Spec}else{$null})
  $owned=Read-NpJson (Open-NpInput (Join-Path $Root 'namespace-service-ownership.json') $Spec.service_ownership_receipt_sha256)
  Assert-NpKeys $owned @('schema_version','format','source_commit','installation_id','service_name','service_sid','service_config_sha256','service_image_sha256','new_owned_service','scm_registration_complete')
+ foreach($field in @('format','source_commit','installation_id','service_name','service_sid','service_config_sha256','service_image_sha256')){
+  if($owned.$field -isnot [string]){throw 'namespace_service_ownership_unverified'}
+ }
  if(($owned.schema_version -isnot [int] -and $owned.schema_version -isnot [long]) -or $owned.schema_version -ne 1 -or $owned.format -cne 'ha-owned-controller-service-v1' -or $owned.source_commit -cne $Spec.service_source_commit -or $owned.installation_id -cne $Spec.installation_id -or $owned.service_name -cne $Spec.service_name -or $owned.service_sid -cne $Spec.service_sid -or $owned.service_config_sha256 -cne $Spec.service_config_sha256 -or $owned.service_image_sha256 -cne $Spec.service_image_sha256 -or $owned.new_owned_service -isnot [bool] -or -not $owned.new_owned_service -or $owned.scm_registration_complete -isnot [bool] -or -not $owned.scm_registration_complete){throw 'namespace_service_ownership_unverified'}
+ $null=Open-NpInput $image (Resolve-NpServiceImage $Spec $Root) 67108864 $(if(Test-NpObserved $Spec){$Spec}else{$null})
  return $config
 }
 function Assert-NpEvidence($Spec,[string]$Root,[string]$TargetHash,[bool]$Rollback=$false){

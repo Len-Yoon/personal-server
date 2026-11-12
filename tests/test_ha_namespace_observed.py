@@ -58,6 +58,42 @@ function Set-NpClosureNamespace($Namespace,[byte[]]$Bytes,$Spec){
 }
 '''.replace('__COMPARATOR__', C.COMPARATOR_SHA256) + scenario)
 
+    def test_replacement_lineage_is_pinned_and_rejects_authority_or_intent_drift(self):
+        result = self.ps(r'''
+$spec=[pscustomobject]@{service_image_sha256='a'*64;installation_id='b'*64;service_ownership_receipt_sha256='c'*64;
+ service_config_sha256='d'*64;service_sd_sha256='e'*64}
+if((Resolve-NpServiceImage $spec '/') -cne ('a'*64)){throw 'original_image'}
+$spec|Add-Member NoteProperty host_replacement_request_sha256 @(('1'*64),('2'*64))
+$spec|Add-Member NoteProperty host_replacement_evidence_sha256 @(('3'*64),('4'*64))
+$intent=[ordered]@{schema_version=1;source_commit='5'*40;installation_id=$spec.installation_id;
+ request_sha256='1'*64;reservation_sha256='6'*64;ownership_sha256=$spec.service_ownership_receipt_sha256;
+ old_host_sha256='a'*64;new_host_sha256='7'*64;service_config_sha256=$spec.service_config_sha256;
+ service_sd_sha256=$spec.service_sd_sha256;old_host_acl_sha256='8'*64;old_host_attributes=1}
+$first=[ordered]@{};foreach($key in $intent.Keys){$first[$key]=$intent[$key]}
+$first['scope']='stopped_service_host_replacement';$first['service_started']=$false;$first['authority_issued']=$false
+$second=[ordered]@{};foreach($key in $first.Keys){$second[$key]=$first[$key]}
+$second['request_sha256']='2'*64;$second['old_host_sha256']='7'*64;$second['new_host_sha256']='9'*64
+$second['previous_intent_sha256']='3'*64
+function Open-NpInput($Path,$Hash){
+ $leaf=Split-Path $Path -Leaf;$dir=Split-Path (Split-Path $Path -Parent) -Leaf
+ $entry=switch ("$dir/$leaf"){
+  ('host-upgrade-'+('1'*24)+'/intent.json'){if($Hash -cne ('3'*64)){throw 'intent_pin'};$intent}
+  ('host-upgrade-'+('2'*24)+'/receipt.json'){if($Hash -cne ('4'*64)){throw 'second_pin'};$second}
+  default {throw 'unexpected_path'}
+ }
+ return ,[Text.Encoding]::UTF8.GetBytes(($entry|ConvertTo-Json -Compress))
+}
+if((Resolve-NpServiceImage $spec '/') -cne ('9'*64)){throw 'replacement_image'}
+$second['authority_issued']=$true
+try{$null=Resolve-NpServiceImage $spec '/';throw 'authority_accepted'}catch{if($_.Exception.Message -cne 'namespace_host_replacement_receipt_rejected'){throw}}
+$second['authority_issued']=$false;$second['previous_intent_sha256']='f'*64
+try{$null=Resolve-NpServiceImage $spec '/';throw 'intent_drift_accepted'}catch{if($_.Exception.Message -cne 'namespace_host_replacement_receipt_rejected'){throw}}
+$second['previous_intent_sha256']='3'*64;$second['old_host_sha256']=@()
+try{$null=Resolve-NpServiceImage $spec '/';throw 'array_link_accepted'}catch{if($_.Exception.Message -cne 'namespace_host_replacement_receipt_rejected'){throw}}
+'PASS'
+''')
+        self.assertEqual(result.strip(), 'PASS')
+
     def test_canonical_parser_cross_language_pins_and_negative_layouts(self):
         raw = N.descriptor()
         # Append unused zero allocation, change component physical order, and
