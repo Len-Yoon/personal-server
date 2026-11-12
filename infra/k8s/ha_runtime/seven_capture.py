@@ -470,6 +470,28 @@ def _proven_absence(reader, item, identifier, evidence, closure, dispositions, s
     return absence
 
 
+def inspect_converter_sources(reader):
+    """Pin the application code used to interpret frozen files."""
+    provenance = {}
+    repository = Path(__file__).resolve().parents[3]
+    for relative in ('infra/k8s/ha_runtime/seven_capture.py', 'portal-web/app/services/ha_files.py',
+                     'portal-web/app/services/session_store.py', 'portal-web/app/services/portfolio_store.py', 'portal-web/app/services/security.py',
+                     'book-memo/app/main.py', 'youtube-memo/app/main.py',
+                     'crawler-worker/app/services/news_archive_storage.py',
+                     'crawler-worker/app/services/news_collection_status.py',
+                     'homeops-executor/app/services/idempotency.py', 'car-care-worker/app/services/hyundai.py'):
+        source = repository / relative
+        before = source.lstat()
+        need(stat.S_ISREG(before.st_mode) and before.st_uid in {0, os.geteuid()}
+             and not before.st_mode & 0o022 and not source.is_symlink(), 'trusted_converter_source_required')
+        reader.stamps[source] = stamp(before)
+        with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as stream:
+            need(stamp(os.fstat(stream.fileno())) == stamp(before), 'converter_source_changed')
+            provenance[relative] = sha(stream.read())
+        need(stamp(source.lstat()) == stamp(before), 'converter_source_changed')
+    return provenance
+
+
 def capture(plan_path, expected_sha256, output):
     """Return a hash-bound manifest receipt; this API never certifies live closure."""
     reader = Reader()
@@ -496,23 +518,7 @@ def capture(plan_path, expected_sha256, output):
     manifest = {key: plan[key] for key in ('source_commit', 'cluster', 'plan_sha256', 'target_system_id')}
     manifest.update(schema_version=1, services={}, artifacts={}, portal_objects={}, private_states={})
     artifacts = manifest['artifacts']
-    provenance = {}
-    repository = Path(__file__).resolve().parents[3]
-    for relative in ('infra/k8s/ha_runtime/seven_capture.py', 'portal-web/app/services/ha_files.py',
-                     'portal-web/app/services/session_store.py', 'portal-web/app/services/portfolio_store.py', 'portal-web/app/services/security.py',
-                     'book-memo/app/main.py', 'youtube-memo/app/main.py',
-                     'crawler-worker/app/services/news_archive_storage.py',
-                     'crawler-worker/app/services/news_collection_status.py',
-                     'homeops-executor/app/services/idempotency.py', 'car-care-worker/app/services/hyundai.py'):
-        source = repository / relative
-        before = source.lstat()
-        need(stat.S_ISREG(before.st_mode) and before.st_uid in {0, os.geteuid()}
-             and not before.st_mode & 0o022 and not source.is_symlink(), 'trusted_converter_source_required')
-        reader.stamps[source] = stamp(before)
-        with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as stream:
-            need(stamp(os.fstat(stream.fileno())) == stamp(before), 'converter_source_changed')
-            provenance[relative] = sha(stream.read())
-        need(stamp(source.lstat()) == stamp(before), 'converter_source_changed')
+    provenance = inspect_converter_sources(reader)
     audit = {'schema_version': 1, 'capture_plan_sha256': expected_sha256,
              'converter_sha256': provenance['infra/k8s/ha_runtime/seven_capture.py'],
              'canonical_sources': provenance, 'sources': {}, 'evidence': {}, 'dispositions': dispositions}
