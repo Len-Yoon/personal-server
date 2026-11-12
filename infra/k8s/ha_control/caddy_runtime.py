@@ -450,10 +450,15 @@ class CaddyRuntime:
             effective = self._prepared(prepared, upstreams)
             self._isolated(effective, prepared)
             result = self._docker('run', '--rm', '--pull=never', '--network=none', '--read-only',
-                                  '--tmpfs', '/data', '--tmpfs', '/config',
+                                  '--user', '10001:10001', '--cap-drop', 'ALL',
+                                  '--cap-add', 'NET_BIND_SERVICE', '--security-opt', 'no-new-privileges:true',
+                                  '--tmpfs', '/tmp:rw,nosuid,nodev,noexec,size=16m',
+                                  '--tmpfs', '/data:rw,nosuid,nodev,noexec,uid=10001,gid=10001,mode=0700,size=16m',
+                                  '--tmpfs', '/config:rw,nosuid,nodev,noexec,uid=10001,gid=10001,mode=0700,size=16m',
                                   '--mount', f'type=bind,src={candidate},dst={CONFIG},readonly',
                                   '--mount', f'type=volume,src={MTLS_VOLUME},dst={MOUNT},readonly,volume-nocopy',
-                                  '-e', 'CADDY_EMAIL=validation@example.invalid', '-e', 'CLOUDFLARE_API_TOKEN=validation',
+                                  '-e', 'CADDY_EMAIL=validation@example.invalid',
+                                  '-e', 'CLOUDFLARE_API_TOKEN=validation-only-00000000000000000000000000000000',
                                   '--entrypoint', '/bin/sh', baseline['image'], '-ec',
                                   '/usr/bin/caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile >/dev/null\nexec sha256sum "$@"',
                                   'caddy-validate', *(MOUNT + '/' + name for name in TLS_FILES), timeout=45)

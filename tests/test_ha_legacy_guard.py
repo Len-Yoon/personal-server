@@ -456,6 +456,13 @@ class CaddyRuntimeTests(unittest.TestCase):
         if args[0] == 'run':
             self.assertIn('type=volume,src=n100-ha-caddy-mtls,dst=/run/n100-ha/caddy-mtls,readonly,volume-nocopy', args)
             self.assertIn('--network=none', args)
+            if 'caddy-validate' in args:
+                self.assertEqual(args[args.index('--user') + 1], '10001:10001')
+                self.assertEqual(args[args.index('--cap-drop') + 1], 'ALL')
+                self.assertEqual(args[args.index('--cap-add') + 1], 'NET_BIND_SERVICE')
+                self.assertIn('/data:rw,nosuid,nodev,noexec,uid=10001,gid=10001,mode=0700,size=16m', args)
+                self.assertIn('/config:rw,nosuid,nodev,noexec,uid=10001,gid=10001,mode=0700,size=16m', args)
+                self.assertIn('CLOUDFLARE_API_TOKEN=validation-only-00000000000000000000000000000000', args)
             return self.tls_files
         if args[0] == 'compose':
             isolated = kwargs.get('input_data')
