@@ -133,13 +133,15 @@ class PgBackend:
                 source_files = {path: hashlib.sha256((Path(__file__).parents[1] / TARGETS[path]).read_bytes()).hexdigest()
                                 for path in EFFECTS_SOURCES}
                 effects = contract['effects']
-                if (type(effects) is not dict or set(effects) != {'code_sha256','broker_role'}
+                base_fields = {'code_sha256', 'broker_role'}
+                if (type(effects) is not dict or set(effects) not in (base_fields, base_fields | {'deployment_binding'})
                         or effects['code_sha256'] != effects_runtime_sha256(source_files)
                         or type(effects['broker_role']) is not str
                         or not re.fullmatch('[a-z][a-z0-9_]{0,62}', effects['broker_role'])
                         or not re.fullmatch('[0-9a-f]{40}', str(value.get('source_commit','')))
                         or not re.fullmatch('[0-9a-f]{64}', str(getattr(self.fence_adapter,'plan_sha256','')))):
                     _deny('enforced_effects_plan_required')
+                self._effects_deployment_binding()
             except TransitionBlocked:
                 raise
             except Exception:
@@ -309,13 +311,26 @@ class PgBackend:
         if privilege_closures_unsafe(connection,[(role,service) for (service,_),role in wanted.items()]):
             _deny('generation_role_privilege_closure_unverified')
 
+    def _effects_deployment_binding(self):
+        """Keep the data-plane binding stable across controller plan rotations."""
+        effects = self.plan['pg_enforcement']['effects']
+        if 'deployment_binding' not in effects:
+            return self.plan['source_commit'], self.fence_adapter.plan_sha256
+        binding = effects['deployment_binding']
+        if (type(binding) is not dict or set(binding) != {'source_commit', 'plan_sha256'}
+                or type(binding['source_commit']) is not str or not re.fullmatch(r'[0-9a-f]{40}', binding['source_commit'])
+                or type(binding['plan_sha256']) is not str or not re.fullmatch(r'[0-9a-f]{64}', binding['plan_sha256'])):
+            _deny('enforced_effects_plan_required')
+        return binding['source_commit'], binding['plan_sha256']
+
     def _effects_observation(self, connection):
         """Read actual storage, app ACLs and exact approved ledger binding."""
         try:
             from ha_runtime.effects import Binding, validate_catalog
             contract = self.plan['pg_enforcement']['effects']
-            expected = (self.plan['cluster'], str(self.plan['system_id']), self.plan['source_commit'],
-                        self.fence_adapter.plan_sha256, contract['broker_role'])
+            source_commit, plan_sha256 = self._effects_deployment_binding()
+            expected = (self.plan['cluster'], str(self.plan['system_id']), source_commit,
+                        plan_sha256, contract['broker_role'])
             binding = Binding(*expected, broker_instance='0' * 64)
             binding.validate()
             # validate_catalog includes validate_storage_catalog: no table names
