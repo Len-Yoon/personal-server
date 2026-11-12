@@ -2,9 +2,11 @@
 import copy
 import importlib.util
 from pathlib import Path
+import sys
 import unittest
 
 ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'infra/k8s'))
 spec=importlib.util.spec_from_file_location('ha_guest_package',ROOT/'infra/k8s/ha-package/guest.py')
 guest=importlib.util.module_from_spec(spec);spec.loader.exec_module(guest)
 
@@ -76,6 +78,28 @@ class GuestLayoutTest(unittest.TestCase):
             guest.render_ingress('0.0.0.0')
         with self.assertRaises(guest.LayoutError):
             guest.render_ingress_container('haproxy:latest')
+
+    def test_public_host_is_preserved_only_for_its_matching_tls_service(self):
+        haproxy = guest.render_ingress(fixture()['guest_ip'])
+        self.assertIn('acl sni_portal-web ssl_fc_sni,lower -m str portal-web.ha.internal', haproxy)
+        self.assertIn('portal-web.ha.internal:10443 len.pe.kr portfolio.len.pe.kr file.len.pe.kr admin.len.pe.kr', haproxy)
+        self.assertIn('use_backend app_portal-web if sni_portal-web host_portal-web', haproxy)
+        self.assertIn('use_backend app_book-memo if sni_book-memo host_book-memo', haproxy)
+        self.assertNotIn('portal.len.pe.kr', haproxy)
+
+    def test_caddy_candidate_preserves_approved_native_crlf_and_http_host(self):
+        import hashlib
+        from ha_control.caddy_cutover import render
+        from ha_control.controller import TransitionBlocked
+
+        source = (ROOT / 'caddy/Caddyfile').read_bytes().replace(b'\n', b'\r\n')
+        digest = hashlib.sha256(source).hexdigest()
+        candidate = render(source, digest, fixture()['guest_ip'])
+        self.assertEqual(candidate.count(b'header_up Host {hostport}'), 7)
+        self.assertNotIn(b'\n', candidate.replace(b'\r\n', b''))
+        self.assertIn(b'redir https://len.pe.kr{uri} permanent', candidate)
+        with self.assertRaisesRegex(TransitionBlocked, 'caddy_cutover_source_unconfirmed'):
+            render(source + b'\r\n', digest, fixture()['guest_ip'])
 
     def test_unpinned_images_secret_injection_and_namespace_bypass_are_rejected(self):
         changes=[lambda v:v['images'].update({'portal-web':'portal:latest'}),

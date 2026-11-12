@@ -10,6 +10,12 @@ SERVICES = ('portal-web','book-memo','youtube-memo','crawler-worker','car-care-w
 PORTS = dict(zip(SERVICES,(8000,8003,8002,8001,8015,8011,8010)))
 IMAGE = re.compile(r'(?:sha256:[0-9a-f]{64}|[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[0-9a-f]{64})')
 HEX = re.compile(r'[0-9a-f]{64}')
+PUBLIC_HOSTS = {
+    'portal-web': ('len.pe.kr', 'portfolio.len.pe.kr', 'file.len.pe.kr', 'admin.len.pe.kr'),
+    'book-memo': ('books.len.pe.kr',),
+    'youtube-memo': ('memo.len.pe.kr',),
+    'crawler-worker': ('news.len.pe.kr',),
+}
 ROOT = '/etc/n100-ha'
 RUN = '/run/n100-ha'
 
@@ -51,10 +57,15 @@ def render_ingress(guest_ip):
         f'  bind {guest_ip}:10443 ssl crt /etc/ha-ingress/server.pem ca-file /etc/ha-ingress/clients-ca.crt verify required',
         '  http-request deny deny_status 403 unless { req.hdr_cnt(host) eq 1 }']
     for service in SERVICES:
-        config += [f'  acl host_{service} hdr(host),lower -m str {service}.ha.internal {service}.ha.internal:10443']
-    config += ['  http-request deny deny_status 403 unless '+' or '.join('host_'+service for service in SERVICES)]
+        internal = service + '.ha.internal'
+        public = PUBLIC_HOSTS.get(service, ())
+        hosts = (internal, internal + ':10443', *public, *(host + ':443' for host in public))
+        config += [f'  acl sni_{service} ssl_fc_sni,lower -m str {internal}',
+                   f"  acl host_{service} hdr(host),lower -m str {' '.join(hosts)}"]
+    config += ['  http-request deny deny_status 403 unless ' +
+               ' or '.join(f'sni_{service} host_{service}' for service in SERVICES)]
     for service in SERVICES:
-        config += [f'  use_backend app_{service} if host_{service}']
+        config += [f'  use_backend app_{service} if sni_{service} host_{service}']
     for service in SERVICES:
         config += [f'backend app_{service}',f'  server app unix@/run/ha-ingress/{service}/http.sock maxconn 16 maxqueue 16']
     return '\n'.join(config) + '\n'
