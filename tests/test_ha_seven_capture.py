@@ -154,6 +154,38 @@ class FrozenCaptureTests(unittest.TestCase):
             source.close()
         self.temp.cleanup()
 
+    def test_compile_closed_native_inputs_and_use_converter(self):
+        from ha_control.capture_plan import compile_plan
+        from ha_control.controller import TransitionBlocked
+
+        fixture = self.fixture
+        destinations = self.root / 'compiled'
+        destinations.mkdir(mode=0o700)
+
+        def relative(item):
+            return str(Path(item['path']).relative_to(fixture.inputs))
+
+        sources = {}
+        for service, row in fixture.services.items():
+            mapped = {key: {name: relative(item) for name, item in row[key].items()}
+                      for key in ('databases', 'states')}
+            for key in set(row) - {'databases', 'states'}:
+                mapped[key] = relative(row[key])
+            sources[service] = mapped
+        evidence = {key: fixture.plan['evidence'][key]['path']
+                    for key in ('runtime', 'writer_graph', 'writer_closure')}
+        identity = {key: fixture.plan[key] for key in ('source_commit', 'cluster', 'plan_sha256', 'target_system_id')}
+        args = dict(sources_root=fixture.inputs, private_root=destinations, identity=identity,
+                    sources=sources, evidence=evidence)
+        with self.assertRaisesRegex(TransitionBlocked, 'frozen_source_file_missing'):
+            compile_plan(**args, absences={})
+        path, digest = compile_plan(**args, absences=fixture.dispositions['absences'])
+        self.assertEqual(sha(path.read_bytes()), digest)
+        receipt = C.capture(path, digest, fixture.output)
+        source = fixture.load(receipt)
+        self.assertEqual(set(source.states), set(C.SERVICES))
+        self.assertEqual(len(source.objects), 2)
+
     def reject(self, reason):
         with self.assertRaises(M.MigrationRejected) as error:
             self.fixture.run()

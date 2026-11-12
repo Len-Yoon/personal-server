@@ -295,5 +295,74 @@ class NativeLinuxWritersTests(unittest.TestCase):
             self.assertTrue(all(states[row['uid']] == 1 for row in deployments.values()))
 
 
+class NativePvcCaptureTests(unittest.TestCase):
+    def test_extract_uses_private_files_and_rejects_link_members(self):
+        import io
+        import tarfile
+        import tempfile
+        from ha_control.pvc_capture import _extract
+
+        def archive(link=False):
+            result = io.BytesIO()
+            with tarfile.open(fileobj=result, mode="w") as writer:
+                entry = tarfile.TarInfo("v0")
+                entry.type = tarfile.DIRTYPE
+                writer.addfile(entry)
+                entry = tarfile.TarInfo("v0/state.db")
+                if link:
+                    entry.type = tarfile.SYMTYPE
+                    entry.linkname = "../outside"
+                    writer.addfile(entry)
+                else:
+                    entry.size = 2
+                    writer.addfile(entry, io.BytesIO(b"DB"))
+            result.seek(0)
+            return result
+
+        with tempfile.TemporaryDirectory() as root:
+            target = Path(root)
+            _extract(archive(), target, 1)
+            data = target / "v0/state.db"
+            self.assertEqual(data.read_bytes(), b"DB")
+            self.assertEqual(data.stat().st_mode & 0o777, 0o600)
+            data.unlink()
+            with self.assertRaisesRegex(TransitionBlocked, "pvc_capture_archive_member_invalid"):
+                _extract(archive(link=True), target, 1)
+            self.assertFalse(data.is_symlink())
+
+
+    def test_reader_failure_waits_for_uid_bound_cleanup(self):
+        from ha_control.pvc_capture import CLAIMS, PvcCapture
+
+        uid = '00000000-0000-0000-0000-000000000001'
+        image = 'fixture/image@sha256:' + 'a' * 64
+        bindings = {
+            service: dict(deployment_uid=uid, template_sha256='d' * 64, node='fixture', image=image, image_id=image,
+                          claims=[dict(name=name, uid=uid, pv='fixture-pv', pv_uid=uid,
+                                       pv_spec_sha256='b' * 64) for name in claims])
+            for service, claims in CLAIMS.items()
+        }
+        calls = []
+
+        def kubectl(args, *, body=None, **kwargs):
+            calls.append(args)
+            if 'create' in args:
+                pod = json.loads(body)
+                pod['metadata']['uid'] = uid
+                return json.dumps(pod).encode()
+            if 'delete' in args:
+                self.assertEqual(json.loads(body)['preconditions'], {'uid': uid})
+            return b''
+
+        capture = PvcCapture(bindings, 'c' * 64, run=kubectl)
+        with patch.object(capture, '_verify_running_reader'):
+            with self.assertRaisesRegex(RuntimeError, 'read failed'):
+                with capture._reader('book-memo'):
+                    raise RuntimeError('read failed')
+        self.assertIn('--dry-run=server', calls[0])
+        self.assertIn('delete', calls[-2])
+        self.assertIn('--for=delete', calls[-1])
+
+
 if __name__ == "__main__":
     unittest.main()
