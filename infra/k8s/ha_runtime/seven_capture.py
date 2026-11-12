@@ -28,7 +28,9 @@ services, writers_closed_at and observations [{writer_id,state:'closed',
 observed_at,evidence_sha256}]. dispositions v1 binds exact services and runtime
 SHA, session_dispositions (Book/YouTube -> invalidate_and_require_relogin),
 stateless_services and absences ({service.component:{source_path_sha256,
-checked_at,inventory_sha256}}). No default empties stand in for missing evidence.
+checked_at,inventory_sha256}}). A missing Portal portfolio or Book/YouTube rate
+limit file may use a {path,absence} descriptor with this same post-closure
+evidence. Only those app-defined empty defaults are derived.
 Source paths and payloads never enter the public CLI result.
 """
 import argparse
@@ -445,6 +447,29 @@ def _evidence(reader, plan, started):
     return raw, closure, dispositions
 
 
+def _proven_absence(reader, item, identifier, evidence, closure, dispositions, started, *, sidecars=()):
+    path = Path(item['path'])
+    need(item['absence'] == identifier and path.is_absolute() and '..' not in path.parts
+         and not os.path.lexists(path), 'proven_absence_required')
+    ancestor = path.parent
+    if not sidecars:
+        while not os.path.lexists(ancestor):
+            reader.missing.add(ancestor)
+            ancestor = ancestor.parent
+    reader.watch(ancestor, directory=True)
+    reader.missing.add(path)
+    for suffix in sidecars:
+        sidecar = Path(str(path) + suffix)
+        need(not os.path.lexists(sidecar), 'proven_absence_required')
+        reader.missing.add(sidecar)
+    absence = dispositions['absences'].get(identifier)
+    need(type(absence) is dict and absence.get('source_path_sha256') == sha(str(path).encode())
+         and absence.get('inventory_sha256') == sha(evidence['runtime'])
+         and utc(closure['writers_closed_at']) <= utc(absence.get('checked_at')) <= utc(started),
+         'proven_absence_required')
+    return absence
+
+
 def capture(plan_path, expected_sha256, output):
     """Return a hash-bound manifest receipt; this API never certifies live closure."""
     reader = Reader()
@@ -474,7 +499,7 @@ def capture(plan_path, expected_sha256, output):
     provenance = {}
     repository = Path(__file__).resolve().parents[3]
     for relative in ('infra/k8s/ha_runtime/seven_capture.py', 'portal-web/app/services/ha_files.py',
-                     'portal-web/app/services/session_store.py', 'portal-web/app/services/security.py',
+                     'portal-web/app/services/session_store.py', 'portal-web/app/services/portfolio_store.py', 'portal-web/app/services/security.py',
                      'book-memo/app/main.py', 'youtube-memo/app/main.py',
                      'crawler-worker/app/services/news_archive_storage.py',
                      'crawler-worker/app/services/news_collection_status.py',
@@ -517,19 +542,8 @@ def capture(plan_path, expected_sha256, output):
             if type(item) is dict and set(item) == {'path', 'absence'}:
                 need(component not in REQUIRED_DATABASES[service] and item['absence'] == identifier,
                      'required_database_absence_rejected')
-                path = Path(item['path'])
-                need(path.is_absolute() and '..' not in path.parts and not os.path.lexists(path), 'proven_absence_required')
-                reader.watch(path.parent, directory=True)
-                reader.missing.add(path)
-                for suffix in SIDECARS:
-                    sidecar = Path(str(path) + suffix)
-                    need(not os.path.lexists(sidecar), 'proven_absence_required')
-                    reader.missing.add(sidecar)
-                absence = dispositions['absences'].get(identifier)
-                need(type(absence) is dict and absence.get('source_path_sha256') == sha(str(path).encode())
-                     and absence.get('inventory_sha256') == sha(evidence['runtime'])
-                     and utc(closure['writers_closed_at']) <= utc(absence.get('checked_at')) <= utc(started),
-                     'proven_absence_required')
+                absence = _proven_absence(reader, item, identifier, evidence, closure, dispositions, started,
+                                           sidecars=SIDECARS)
                 absences_used.add(identifier)
                 audit['sources'][identifier] = {'absence': absence}
                 continue
@@ -541,6 +555,16 @@ def capture(plan_path, expected_sha256, output):
                 'sidecars': {key: {'sha256': value['sha256'], 'bytes': value['bytes']} for key, value in item['sidecars'].items()},
                 'converter': 'sqlite-backup-v1', 'normalized_sha256': entry['sha256']}
         for key, item in spec['states'].items():
+            if type(item) is dict and set(item) == {'path', 'absence'}:
+                identifier = service + '.' + key
+                portfolio_missing = service == 'portal-web' and key == 'portfolio'
+                rate_limit_missing = service in {'book-memo', 'youtube-memo'} and key == 'auth-rate-limit'
+                need(portfolio_missing or rate_limit_missing, 'required_state_absence_rejected')
+                absence = _proven_absence(reader, item, identifier, evidence, closure, dispositions, started)
+                absences_used.add(identifier)
+                state(service, key, {'content': ''} if portfolio_missing else {}, {'absence': absence},
+                      'proven-missing-app-default-v1')
+                continue
             source_meta = {field: item[field] for field in ('sha256', 'bytes')}
             if service == 'portal-web' and key == 'auth_sessions':
                 with tempfile.TemporaryDirectory(prefix='auth-stage-', dir=output) as directory:

@@ -183,6 +183,43 @@ class FrozenCaptureTests(unittest.TestCase):
         self.assertNotIn(str(self.fixture.inputs), json.dumps(audit))
         source.unchanged()
 
+    def missing_state(self, service, key, *, parent_missing=False):
+        parent = self.fixture.inputs / 'absent-parent' if parent_missing else self.fixture.inputs
+        path = parent / 'absent-state'
+        identifier = service + '.' + key
+        self.fixture.plan['services'][service]['states'][key] = {'path': str(path), 'absence': identifier}
+        self.fixture.dispositions['absences'][identifier] = {
+            'source_path_sha256': sha(str(path).encode()), 'checked_at': self.fixture.iso(1),
+            'inventory_sha256': self.fixture.runtime_entry['sha256'],
+        }
+        self.fixture.plan['evidence']['dispositions'] = self.fixture.json('dispositions', self.fixture.dispositions)
+        return path
+
+    def test_proven_missing_state_uses_only_app_defaults_with_provenance(self):
+        self.missing_state('portal-web', 'portfolio', parent_missing=True)
+        self.missing_state('book-memo', 'auth-rate-limit')
+        self.missing_state('youtube-memo', 'auth-rate-limit')
+        result = self.fixture.run()
+        source = self.fixture.load(result)
+        self.assertEqual(source.states['portal-web']['portfolio'], {'content': ''})
+        for service in ('book-memo', 'youtube-memo'):
+            self.assertEqual(source.states[service]['auth-rate-limit'], {})
+        audit = json.loads((self.fixture.output / 'capture-audit.json').read_text())
+        portfolio_source = 'portal-web/app/services/portfolio_store.py'
+        self.assertEqual(audit['canonical_sources'][portfolio_source], sha((ROOT / portfolio_source).read_bytes()))
+        for key in ('portal-web.portfolio', 'book-memo.auth-rate-limit', 'youtube-memo.auth-rate-limit'):
+            self.assertEqual(audit['sources'][key]['converter'], 'proven-missing-app-default-v1')
+            self.assertEqual(audit['sources'][key]['source']['absence'], self.fixture.dispositions['absences'][key])
+
+    def test_default_requires_absent_source_at_capture(self):
+        path = self.missing_state('portal-web', 'portfolio')
+        self.fixture.write(path, b'actual source')
+        self.reject('proven_absence_required')
+
+    def test_required_state_cannot_be_replaced_by_missing_default(self):
+        self.missing_state('crawler-worker', 'archive')
+        self.reject('required_state_absence_rejected')
+
     def test_offline_capture_closes_verified_sqlite_staging_before_return(self):
         closed=[]
         original=C.FrozenSources.close
