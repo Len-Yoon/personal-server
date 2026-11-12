@@ -83,7 +83,7 @@ def _publish(staging, target):
         os.close(fd)
 
 
-def send_bundle(source, manifest_sha256, stream):
+def send_bundle(source, manifest_sha256, stream, *, wire_limit=None):
     """Send from a private directory into a blocking, buffered binary stream."""
     root = seven_capture.trusted(Path(source), directory=True)
     expected = _manifest_digest(manifest_sha256)
@@ -92,13 +92,18 @@ def send_bundle(source, manifest_sha256, stream):
     stream.write(MAGIC)
     stream.write(struct.pack(">Q", len(raw)))
     stream.write(raw)
+    written = len(MAGIC) + 8 + len(raw)
 
     def send_metadata(entry):
+        nonlocal written
         value = read_verified(root / entry["file"], entry["sha256"], entry["bytes"])
         stream.write(value)
+        written += len(value)
         return value
 
     entries = _catalog(raw, send_metadata)
+    _need(wire_limit is None or written + sum(entry["bytes"] for entry in entries) + len(END) <= wire_limit,
+          "frozen_transport_wire_size_invalid")
     for entry in entries:
         with tempfile.TemporaryFile(dir=root) as checked:
             read_verified(root / entry["file"], entry["sha256"], entry["bytes"], load=False, sink=checked)
@@ -109,7 +114,7 @@ def send_bundle(source, manifest_sha256, stream):
     return expected
 
 
-def receive_bundle(destination, manifest_sha256, stream, *, max_bytes):
+def receive_bundle(destination, manifest_sha256, stream, *, max_bytes, wire_bytes=None):
     """Verify every file before publishing a new private restore directory."""
     target = Path(destination)
     _need(target.is_absolute() and ".." not in target.parts and not os.path.lexists(target)
@@ -139,6 +144,8 @@ def receive_bundle(destination, manifest_sha256, stream, *, max_bytes):
         remaining = sum(entry["bytes"] for entry in entries)
         _need(consumed + remaining <= max_bytes and remaining <= shutil.disk_usage(staging).free,
               "frozen_transport_size_invalid")
+        _need(wire_bytes is None or wire_bytes == consumed + remaining + len(MAGIC) + 8 + len(END),
+              "frozen_transport_wire_size_invalid")
         for entry in entries:
             path = staging / entry["file"]
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
