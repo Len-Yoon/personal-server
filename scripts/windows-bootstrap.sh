@@ -14,6 +14,9 @@ fi
 legacy_state="$PWD/data"
 legacy_lock="$legacy_state/ha-legacy-bootstrap.lock"
 legacy_owner="$legacy_state/ha-controller-owner.json"
+if [[ ! -e "$legacy_state" && ! -L "$legacy_state" ]]; then
+  mkdir -- "$legacy_state" 2>/dev/null || [[ -d "$legacy_state" ]]
+fi
 [[ -d "$legacy_state" && ! -L "$legacy_state" && -x "$legacy_state" && ! -L "$legacy_lock" &&
    ( ! -e "$legacy_lock" || -f "$legacy_lock" ) ]] || exit 1
 # A child locks the same open description, which remains open in this shell

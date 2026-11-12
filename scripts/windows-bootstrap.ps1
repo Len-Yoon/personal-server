@@ -53,7 +53,11 @@ function Assert-HaLegacyAllowed {
     # records. Only the separately approved HA rollback may remove this marker.
     $marker = Join-Path $RecoveryStateDirectory "ha-controller-owner.json"
     try {
-        $directory = Get-Item -LiteralPath $RecoveryStateDirectory -Force -ErrorAction Stop
+        try {
+            $directory = Get-Item -LiteralPath $RecoveryStateDirectory -Force -ErrorAction Stop
+        } catch [System.Management.Automation.ItemNotFoundException] {
+            $directory = New-Item -Path $RecoveryStateDirectory -ItemType Directory -Force -ErrorAction Stop
+        }
         if (-not $directory.PSIsContainer -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             throw 'Legacy Windows recovery state directory is untrusted.'
         }
