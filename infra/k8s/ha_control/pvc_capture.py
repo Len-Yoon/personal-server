@@ -21,6 +21,23 @@ POD_PREFIX = "ha-frozen-reader-"
 CLAIMS = {"portal-web": ("portal-web-files-dynamic", "portal-web-state-dynamic"),
           "book-memo": ("book-memo-data",), "youtube-memo": ("youtube-memo-data",),
           "crawler-worker": ("crawler-worker-data",)}
+APP_PATHS = {
+    "portal-web": {
+        "FILE_STORAGE_PATH": ("/data/files", False),
+        "HOMEOPS_DB_PATH": ("/var/lib/portal/homeops.sqlite3", False),
+        "NEWS_BOOKMARK_DB_PATH": ("/var/lib/portal/news-bookmarks.sqlite3", True),
+        "AUTH_SESSION_STATE_PATH": ("/var/lib/portal/auth/session-state.sqlite3", False),
+        "AUTH_RATE_LIMIT_STATE_PATH": ("/var/lib/portal/auth-rate-limit-state.json", False),
+        "PORTFOLIO_CONTENT_PATH": ("/data/files/.portfolio/portfolio.md", True),
+    },
+    "book-memo": {"BOOK_MEMO_DB_PATH": ("/data/book-memo/book_memo.sqlite3", False),
+                  "AUTH_RATE_LIMIT_STATE_PATH": ("/data/book-memo/auth-rate-limit-state.json", True)},
+    "youtube-memo": {"YOUTUBE_MEMO_DB_PATH": ("/data/youtube-memo/youtube_memo.sqlite3", False),
+                     "AUTH_RATE_LIMIT_STATE_PATH": ("/data/youtube-memo/auth-rate-limit-state.json", True)},
+    "crawler-worker": {"NEWS_DB_PATH": ("/data/crawler-worker/news_summaries.sqlite3", False),
+                       "NEWS_ARCHIVE_PATH": ("/data/crawler-worker/news_archive.json", False),
+                       "NEWS_COLLECTION_STATUS_PATH": ("/data/crawler-worker/news_collection_status.json", True)},
+}
 MAX_ARCHIVE = 2 * 1024 * 1024 * 1024
 MAX_MEMBERS = 50000
 IMAGE_PIN = re.compile(r"[a-zA-Z0-9._:/-]+@sha256:[a-f0-9]{64}\Z")
@@ -32,15 +49,16 @@ def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _command(args, *, body=None, output=None, timeout=20):
+def _run_archive_command(argv, *, body=None, output=None, timeout=20):
     environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C", "HOME": os.path.expanduser("~")}
     try:
         if output is None:
-            return subprocess.run((*KUBE, *args), input=body, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            return subprocess.run(argv, input=body, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                   check=True, env=environment, timeout=timeout).stdout
+        _need(body is None, "pvc_capture_command_unconfirmed")
         deadline = time.monotonic() + timeout
         size = 0
-        with subprocess.Popen((*KUBE, *args), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        with subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                               stderr=subprocess.DEVNULL, env=environment) as child:
             try:
                 with selectors.DefaultSelector() as reader:
@@ -64,12 +82,16 @@ def _command(args, *, body=None, output=None, timeout=20):
         raise TransitionBlocked("pvc_capture_command_unconfirmed") from None
 
 
+def _command(args, *, body=None, output=None, timeout=20):
+    return _run_archive_command((*KUBE, *args), body=body, output=output, timeout=timeout)
+
+
 def _private_root(path):
     return (path.is_absolute() and path.resolve(strict=True) == path and path.is_dir()
             and path.stat().st_uid == os.geteuid() and not path.stat().st_mode & 0o077)
 
 
-def _extract(archive, destination, mount_count):
+def _extract_selected(archive, destination, roots):
     """Extract only regular files/directories beneath the fixed capture roots."""
     seen = set()
     size = 0
@@ -77,7 +99,7 @@ def _extract(archive, destination, mount_count):
         for entry in entries:
             path = PurePosixPath(entry.name)
             _need(not path.is_absolute() and all(part not in (".", "..") for part in path.parts)
-                  and bool(path.parts) and path.parts[0] in {f"v{i}" for i in range(mount_count)}
+                  and bool(path.parts) and path.parts[0] in roots
                   and path not in seen and len(seen) < MAX_MEMBERS
                   and (entry.isdir() or (entry.isreg() and not entry.issparse())),
                   "pvc_capture_archive_member_invalid")
@@ -92,7 +114,13 @@ def _extract(archive, destination, mount_count):
             with entries.extractfile(entry) as source, os.fdopen(os.open(
                     target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "wb") as sink:
                 shutil.copyfileobj(source, sink)
-    _need(all((destination / f"v{i}").is_dir() for i in range(mount_count)), "pvc_capture_mount_missing")
+    _need(all(PurePosixPath(root) in seen for root in roots), "pvc_capture_mount_missing")
+
+
+def _extract(archive, destination, mount_count):
+    roots = {f"v{i}" for i in range(mount_count)}
+    _extract_selected(archive, destination, roots)
+    _need(all((destination / root).is_dir() for root in roots), "pvc_capture_mount_missing")
 
 
 class PvcCapture:
@@ -312,6 +340,14 @@ def inspect_pvc_bindings(*, run=_command):
         app = [row for row in pod["spec"]["containers"] if row["name"] == service]
         status = [row for row in pod["status"]["containerStatuses"] if row["name"] == service]
         _need(len(app) == len(status) == 1 and status[0]["ready"] is True, "pvc_capture_active_source_unconfirmed")
+        script = ("import json,os,sys; rules=json.loads(sys.argv[1]); "
+                  "print(json.dumps(all(os.getenv(key)==value or "
+                  "(allow_default and not os.getenv(key)) for key,(value,allow_default) in rules.items())))")
+        named = pod["metadata"]["name"]
+        _need(_match(NAME, named), "pvc_capture_active_source_unconfirmed")
+        result = run(("-n", NAMESPACE, "exec", "pod/" + named, "-c", service, "--",
+                      "python3", "-c", script, json.dumps(APP_PATHS[service], separators=(",", ":"))))
+        _need(json.loads(result) is True, "pvc_capture_application_paths_changed")
         claims = []
         for volume in pod["spec"]["volumes"]:
             if "persistentVolumeClaim" not in volume:
