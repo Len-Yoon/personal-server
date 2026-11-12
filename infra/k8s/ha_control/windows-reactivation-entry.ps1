@@ -13,14 +13,22 @@ function Read-HaPinnedInput([string]$Path, [string]$Digest) {
         throw 'legacy_native_configuration_invalid'
     }
     $item = Get-Item -LiteralPath $Path -Force
-    if ($item.PSIsContainer -or $item.Length -gt 1048576) { throw 'legacy_native_configuration_invalid' }
+    if ($item -isnot [IO.FileInfo] -or $item.Length -gt 1048576) { throw 'legacy_native_configuration_invalid' }
     $allowed = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544')
     $cursor = $item
     while ($null -ne $cursor) {
         if ($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw 'legacy_native_configuration_invalid'
         }
-        if ($cursor.PSIsContainer) { $cursor = $cursor.Parent } else { $cursor = $cursor.Directory }
+        # FileInfo.Directory and DirectoryInfo.Parent return .NET objects
+        # without the PowerShell provider's PSIsContainer property.
+        if ($cursor -is [IO.DirectoryInfo]) {
+            $cursor = $cursor.Parent
+        } elseif ($cursor -is [IO.FileInfo]) {
+            $cursor = $cursor.Directory
+        } else {
+            throw 'legacy_native_configuration_invalid'
+        }
     }
     foreach ($member in @($item, $item.Directory)) {
         $acl = Get-Acl -LiteralPath $member.FullName
