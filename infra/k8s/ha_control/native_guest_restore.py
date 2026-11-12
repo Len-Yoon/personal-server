@@ -481,7 +481,8 @@ def _assert_migration_container(item, identifier, name, pins, mounts, *, state="
           and host["RestartPolicy"]["Name"] == "no" and host["Privileged"] is False
           and host["CapDrop"] == ["ALL"] and not host["CapAdd"]
           and host["SecurityOpt"] in (["no-new-privileges:true"], ["no-new-privileges=true"])
-          and host["LogConfig"] == {"Type": "local", "Config": {"max-size": "32m", "max-file": "1"}},
+          and host["LogConfig"] == {"Type": "local", "Config": {"max-size": "32m", "max-file": "1",
+                                                               "compress": "false"}},
           "guest_restore_container_unconfirmed")
     binds = {(item["Source"], item["Destination"], item["RW"]) for item in item["Mounts"] if item["Type"] == "bind"}
     _need(binds == set(mounts)
@@ -575,6 +576,7 @@ def restore_closed(pins, stage):
             "create", "--name", name, "--label", "n100-ha.closed-restore=" + pins.manifest_sha256,
             "--pull", "never", "--network", "none", "--restart", "no", "--read-only",
             "--log-driver", "local", "--log-opt", "max-size=32m", "--log-opt", "max-file=1",
+            "--log-opt", "compress=false",
             "--user", f"{pins.uid}:{pins.gid}", "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges:true", "--pids-limit", "64",
             "--tmpfs", f"/tmp:rw,noexec,nosuid,nodev,size={SQLITE_STAGE_BYTES},mode=1777",
