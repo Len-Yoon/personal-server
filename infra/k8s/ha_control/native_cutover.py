@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import stat
 import selectors
 import subprocess
 import time
@@ -135,21 +136,72 @@ $script=[ScriptBlock]::Create([Text.Encoding]::UTF8.GetString($entry).TrimStart(
 class WslBootstrapAdmission:
     """Hold the exact lock used by the installed WSL bootstrap entrypoint."""
 
-    def __init__(self, source_sha256):
+    def __init__(self, source_sha256, *, cluster, generation, source_commit):
+        if (type(cluster) is not str or not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", cluster)
+                or type(generation) is not int or generation < 1
+                or type(source_commit) is not str or not re.fullmatch(r"[a-f0-9]{40}", source_commit)):
+            raise TransitionBlocked("legacy_bootstrap_owner_invalid")
         self.root = Path("/mnt/c/personal-server")
         self.source_sha256 = _pin(source_sha256)
+        self.identity = dict(cluster=cluster, generation=generation, source_commit=source_commit)
+        self.active = False
 
     @contextmanager
     def guard(self):
         source = self.root / "scripts/windows-bootstrap.sh"
         lock = self.root / "data/ha-legacy-bootstrap.lock"
-        if (source.resolve() != source or lock.resolve() != lock
+        self.marker = self.root / "data/ha-controller-owner.json"
+        if (self.active or source.resolve() != source or lock.resolve() != lock
                 or hashlib.sha256(source.read_bytes()).hexdigest() != self.source_sha256):
             raise TransitionBlocked("legacy_wsl_bootstrap_source_changed")
         with exclusive(lock):
             if hashlib.sha256(source.read_bytes()).hexdigest() != self.source_sha256:
                 raise TransitionBlocked("legacy_wsl_bootstrap_source_changed")
-            yield
+            if os.path.lexists(self.marker):
+                raise TransitionBlocked("legacy_bootstrap_owner_already_present")
+            self.directory = os.open(self.marker.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            self.active = True
+            self.owned = None
+            try:
+                yield
+            finally:
+                self.active = False
+                os.close(self.directory)
+
+    def claim(self, plan, attempt):
+        if not self.active or self.owned is not None:
+            raise TransitionBlocked("legacy_bootstrap_owner_guard_required")
+        raw = json.dumps(self.identity | {"plan_sha256": _pin(plan), "attempt_id": _pin(attempt)},
+                         sort_keys=True, separators=(",", ":")).encode()
+        with os.fdopen(os.open(self.marker.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                               0o600, dir_fd=self.directory), "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+            info = os.fstat(stream.fileno())
+        os.fsync(self.directory)
+        self.owned = (info.st_dev, info.st_ino, raw)
+        return self.assert_owned()
+
+    def assert_owned(self):
+        if not self.active or self.owned is None:
+            raise TransitionBlocked("legacy_bootstrap_owner_guard_required")
+        with os.fdopen(os.open(self.marker.name, os.O_RDONLY | os.O_NOFOLLOW,
+                               dir_fd=self.directory), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            raw = stream.read(4097)
+        current = self.marker.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or (info.st_dev, info.st_ino, raw) != self.owned
+                or (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)):
+            raise TransitionBlocked("legacy_bootstrap_owner_changed")
+        return hashlib.sha256(raw).hexdigest()
+
+    def release_owned(self):
+        self.assert_owned()
+        os.unlink(self.marker.name, dir_fd=self.directory)
+        os.fsync(self.directory)
+        self.owned = None
 
 
 class NativeCutover:
@@ -172,7 +224,8 @@ class NativeCutover:
     def guard(self, plan, attempt):
         self.plan, self.attempt = plan, attempt
         self.admission_owned = self.windows_closed = self.linux_touched = False
-        self.admission_unconfirmed = self.windows_unconfirmed = False
+        self.admission_unconfirmed = self.windows_unconfirmed = self.direct_unconfirmed = False
+        self.direct_owned = False
         with self.applications.guard(plan, attempt), self.windows.guard(plan, attempt):
             if self.wsl_bootstrap is None:
                 yield
@@ -197,8 +250,13 @@ class NativeCutover:
         self.applications.assert_direct_recovery_excluded(plan, baseline)
         if self.wsl_bootstrap is None:
             raise TransitionBlocked("legacy_wsl_bootstrap_guard_required")
+        self.applications.assert_authority_storage_trusted(plan, baseline)
+        self.direct_unconfirmed = True
+        owner = self.wsl_bootstrap.claim(plan, self.attempt)
+        self.direct_owned = True
+        self.direct_unconfirmed = False
         self.windows_unconfirmed = True
-        windows = self.windows.request("close", admission)
+        windows = self.windows.request("close", hashlib.sha256(f"{admission}:{owner}".encode()).hexdigest())
         self.windows_closed = True
         self.windows_unconfirmed = False
         self.linux_touched = True
@@ -207,6 +265,7 @@ class NativeCutover:
 
     def assert_reactivation_closed(self, plan, admission, blocked, boundary):
         self.admission.assert_closed()
+        self.wsl_bootstrap.assert_owned()
         evidence = self.windows.request("verify", blocked)
         return self._receipt(evidence, admission_sha256=admission, reactivation_sha256=blocked, boundary=boundary,
                              new_deployments_blocked=True, admitted_deployments_settled=True,
@@ -220,6 +279,7 @@ class NativeCutover:
 
     def _verify_guard(self, proof):
         self.admission.assert_closed()
+        self.wsl_bootstrap.assert_owned()
         self.applications.assert_direct_recovery_excluded(self.plan, proof)
         self.windows.request("verify", proof)
 
@@ -240,7 +300,8 @@ class NativeCutover:
         return self.applications.switch_caddy(plan, authority)
 
     def assert_rollback_safe(self, plan, baseline):
-        if self.admission_unconfirmed or self.windows_unconfirmed or not self.windows.healthy:
+        if (self.admission_unconfirmed or self.windows_unconfirmed or self.direct_unconfirmed
+                or not self.windows.healthy):
             raise TransitionBlocked("legacy_native_reconciliation_required")
         if self.windows_closed:
             self._verify_guard(baseline)
@@ -253,6 +314,9 @@ class NativeCutover:
             self._verify_guard(safety)
         runtime = _pin(self.applications.restore_legacy_runtime(plan, baseline, safety, self.linux_touched))
         windows = runtime
+        if self.direct_owned:
+            self.wsl_bootstrap.release_owned()
+            self.direct_owned = False
         if self.windows_closed:
             self.applications.release_owned_direct_recovery_exclusion(plan, safety)
             windows = self.windows.request("restore", runtime)
