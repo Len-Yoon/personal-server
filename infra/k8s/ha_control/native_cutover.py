@@ -298,7 +298,7 @@ class NativeCutover:
         runtime = _pin(self.applications.restore_legacy_runtime(plan, baseline, safety, self.linux_touched))
         windows = runtime
         if self.windows_closed:
-            self.applications.release_owned_direct_recovery_exclusion(plan, safety)
+            self.applications.assert_direct_recovery_release_safe(plan, safety)
             windows = self.windows.request("restore", runtime)
             self.wsl_bootstrap.assert_released()
             self.applications.assert_legacy_runtime_healthy(plan, baseline)

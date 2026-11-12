@@ -698,8 +698,8 @@ class NativeApplicationsTests(unittest.TestCase):
         host = SimpleNamespace(guard=hold, observe_external_closed=Mock(),
                                observe=lambda plan, attempt, boundary, prior: evidence(
                                    boundary, plan, attempt, boundary=boundary, prior_sha256=prior, **facts[boundary]),
-                               release_owned_direct_recovery_exclusion=lambda plan, attempt, safety: evidence(
-                                   'release_exclusion', plan, attempt, safety_sha256=safety, owned_exclusion_released=True))
+                               assert_direct_recovery_release_safe=lambda plan, attempt, safety: evidence(
+                                   'release_exclusion', plan, attempt, safety_sha256=safety, release_safe=True))
 
         def windows_request(action, proof):
             trace.append('windows_' + action)

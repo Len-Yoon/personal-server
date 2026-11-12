@@ -30,11 +30,12 @@ class InitialPgLease:
     expiry stamps it can revoke after an ambiguous response.
     """
 
-    def __init__(self, backend, assert_legacy_closed):
-        if not callable(assert_legacy_closed):
+    def __init__(self, backend, assert_legacy_closed, *, assert_exclusion_held=None):
+        if not callable(assert_legacy_closed) or (assert_exclusion_held is not None and not callable(assert_exclusion_held)):
             _deny('initial_legacy_closure_required')
         self.backend = backend
         self.assert_legacy_closed = assert_legacy_closed
+        self.assert_exclusion_held = assert_exclusion_held or assert_legacy_closed
         self.owned_expiries = set()
         self.open_attempted = False
         self.scope = None
@@ -44,7 +45,7 @@ class InitialPgLease:
         if not self.backend.depth or type(plan) is not dict:
             _deny('native_host_guard_required')
         mode = plan.get('initial_wsl_cutover')
-        if (plan.get('_approval_action') != 'ha-transition' or plan.get('profile') != 'enforced-vm-v1'
+        if (plan.get('_approval_action') != 'ha-initial-wsl-cutover' or plan.get('profile') != 'enforced-vm-v1'
                 or type(mode) is not dict or mode != INITIAL_CUTOVER or type(mode['schema_version']) is not int):
             _deny('initial_cutover_approval_required')
         effects = plan.get('pg_enforcement', {}).get('effects', {})
@@ -71,8 +72,10 @@ class InitialPgLease:
         if time.monotonic() - started > PROOF_SECONDS:
             _deny('initial_replication_deadline_exceeded')
 
-    def _legacy(self, state, started):
-        observed = self.assert_legacy_closed(state)
+    def _legacy(self, state, started, *, held_only=False):
+        self._deadline(started)
+        check = self.assert_exclusion_held if held_only else self.assert_legacy_closed
+        observed = check(state, started + PROOF_SECONDS)
         if observed is not None and observed is not True:
             _deny('initial_legacy_closure_required')
         self._deadline(started)
@@ -150,7 +153,7 @@ class InitialPgLease:
                 _deny('initial_replication_barrier_unconfirmed')
             if not renewing:
                 self.backend._effects_open_gate(primary, peer, watermark)
-            self._legacy(state, started)
+            self._legacy(state, started, held_only=True)
             change = '' if renewing else 'revision=2, writes_open=true, history_safe=true, '
             condition = 'expires_at>clock_timestamp()' if renewing else 'expires_at<clock_timestamp()'
             revision = OPEN_REVISION if renewing else INITIAL_REVISION

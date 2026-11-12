@@ -206,7 +206,8 @@ class NativeApplications:
 
     def activate_vm(self, plan, verified, settled):
         self._plan(plan)
-        self._phase('activate_vm_intent', fence_writers=self.fence, restore=self.restored, verify_closed=self.verified)
+        self._phase('activate_vm_intent', fence_writers=self.fence, restore=self.restored, verify_closed=self.verified,
+                    recheck_reactivation=settled)
         _need(verified == self.verified and self.activation_check is not None and not self.activation_attempted,
               'native_application_activation_unbound')
         settled = _pin(settled)
@@ -268,7 +269,8 @@ class NativeApplications:
         _need(authority == self.authority and ingress == self.ingress, 'native_application_ingress_unbound')
         vm = self._vm_live(plan, authority)
         host = self._host('verify_live', ingress, protected_healthy=True, external_healthy=True, services=ALL_SERVICES)
-        return self._answer(self._join('verify_live', host=host, vm=vm, ingress=ingress), authority_sha256=authority,
+        after = self._vm_live(plan, authority)
+        return self._answer(self._join('verify_live', host=host, vm=vm, vm_after=after, ingress=ingress), authority_sha256=authority,
                             ingress_sha256=ingress, services=ALL_SERVICES, ready=True)
 
     def assert_durable_legacy_exclusion(self, plan, authority):
@@ -317,12 +319,12 @@ class NativeApplications:
         self.legacy_runtime_restored = True
         return self._join('restore_legacy_runtime', safety=safety, host=host, vm=vm, health=health)
 
-    def release_owned_direct_recovery_exclusion(self, plan, safety):
+    def assert_direct_recovery_release_safe(self, plan, safety):
         self._plan(plan)
         self._phase('restore_legacy_intent', rollback_inspection=self.safety)
         _need(safety == self.safety and self.legacy_runtime_restored, 'native_application_rollback_unbound')
-        value = self.host.release_owned_direct_recovery_exclusion(plan, self.attempt, safety)
-        self._accept(value, safety_sha256=safety, owned_exclusion_released=True)
+        value = self.host.assert_direct_recovery_release_safe(plan, self.attempt, safety)
+        self._accept(value, safety_sha256=safety, release_safe=True)
 
     def assert_legacy_runtime_healthy(self, plan, baseline):
         self._plan(plan)

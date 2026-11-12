@@ -63,14 +63,14 @@ class LegacyCutover:
         self.journal = Journal(journal_path)
         self.backend = backend
 
-    def run(self, plan_sha256):
+    def run(self, plan_sha256, *, attempt_id=None):
         plan = _pin(plan_sha256)
+        attempt = secrets.token_hex(32) if attempt_id is None else _pin(attempt_id)
         path = self.journal.path
         _private_directory(path.parent)
         with exclusive(path.with_suffix(".lock")):
             if os.path.lexists(path):
                 raise TransitionBlocked("legacy_cutover_reconciliation_required")
-            attempt = secrets.token_hex(32)
             try:
                 with self.backend.guard(plan, attempt):
                     return self._execute(plan, attempt)
@@ -147,6 +147,7 @@ class LegacyCutover:
             if rechecked == settled:
                 raise TransitionBlocked("legacy_cutover_receipt_rejected")
             state["receipts"]["recheck_reactivation"] = rechecked
+            self.journal.save(state)
             # The native backend must consume this boundary proof while the same
             # admission and recovery exclusion is still held.
             # Once activation has been attempted the old WSL writer may never

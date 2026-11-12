@@ -1,0 +1,350 @@
+param(
+    [string]$PipeName,
+    [string]$OperatorSid,
+    [string]$ServiceSid,
+    [string]$PlanSha256,
+    [string]$AttemptId,
+    [long]$Generation,
+    [string]$WindowsBootSha256,
+    [string]$WslBootSha256,
+    [string]$CollectorSha256,
+    [string]$ReactivationPlanSha256,
+    [string]$MarkerSha256,
+    [string]$CallbackPath,
+    [string]$CallbackSha256,
+    [string]$CallbackConfigPath,
+    [string]$CallbackConfigSha256,
+    [string]$KeyPath,
+    [string]$KeySha256,
+    [string]$ReadyPath,
+    [int]$RecentNonces = 1024,
+    [switch]$Go
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$encoding = [Text.UTF8Encoding]::new($false, $true)
+$pipe = $null
+$runspace = $null
+$clock = $null
+$mac = $null
+$scope = 'n100ha-legacy-closure-v1'
+$servicePattern = '\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\z'
+$sidPattern = '\AS-1-(?:[0-9]{1,10}-){1,14}[0-9]{1,10}\z'
+$hashPattern = '\A[a-f0-9]{64}\z'
+$writers = @('S-1-5-18', 'S-1-5-32-544', $OperatorSid)
+
+function Remaining {
+    $left = 1800 - [int][Math]::Ceiling($clock.Elapsed.TotalMilliseconds)
+    if ($left -le 0) { throw 'lease_proof_deadline' }
+    return $left
+}
+
+function Get-Digest([byte[]]$Bytes) {
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($hash.ComputeHash($Bytes)).Replace('-', '').ToLowerInvariant() }
+    finally { $hash.Dispose() }
+}
+
+function Assert-LocalPath([string]$InputPath) {
+    if ($InputPath -cnotmatch '\A[A-Za-z]:\\' -or $InputPath.Substring(2).Contains(':') -or
+        $InputPath.Contains('/') -or $InputPath -match '(^|\\)\.\.?($|\\)' -or $InputPath -match '[ .](\\|$)') {
+        throw 'lease_proof_protected_path'
+    }
+}
+
+function Assert-ProtectedPath($entry, [switch]$PrivateLeaf) {
+    $walk = $entry
+    while ($null -ne $walk) {
+        if ($walk.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'lease_proof_callback_path' }
+        $sd = [Security.AccessControl.RawSecurityDescriptor]::new((Get-Acl -LiteralPath $walk.FullName).Sddl)
+        $trustedOsRoot = $walk -is [IO.DirectoryInfo] -and $null -eq $walk.Parent -and
+            $walk.FullName -ieq [IO.Path]::GetPathRoot([Environment]::SystemDirectory) -and
+            $sd.Owner.Value -ceq 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+        if (($sd.Owner.Value -cnotin $writers -and -not $trustedOsRoot) -or $null -eq $sd.DiscretionaryAcl) {
+            throw 'lease_proof_callback_acl'
+        }
+        foreach ($ace in $sd.DiscretionaryAcl) {
+            if ($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback) { throw 'lease_proof_callback_acl' }
+            if ($ace.AceQualifier -eq 'AccessAllowed' -and -not ([int]$ace.AceFlags -band 8) -and
+                $ace.SecurityIdentifier.Value -cnotin $writers) {
+                $mask = if ($walk -is [IO.FileInfo] -or ($PrivateLeaf -and $walk.FullName -ieq $entry.FullName)) { 1343029590 } else { 269287488 }
+                if (([long]$ace.AccessMask -band $mask) -ne 0) { throw 'lease_proof_callback_acl' }
+            }
+        }
+        $walk = if ($walk -is [IO.FileInfo]) { $walk.Directory } else { $walk.Parent }
+    }
+}
+
+function Read-ProtectedText([string]$InputPath, [string]$ExpectedSha) {
+    Assert-LocalPath $InputPath
+    $entry = Get-Item -LiteralPath $InputPath -Force
+    if ($entry -isnot [IO.FileInfo] -or $entry.Length -lt 1 -or $entry.Length -gt 65536) {
+        throw 'lease_proof_callback_size'
+    }
+    Assert-ProtectedPath $entry
+    $file = [IO.File]::Open($InputPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        if ($file.Length -lt 1 -or $file.Length -gt 65536) { throw 'lease_proof_callback_size' }
+        $reader = [IO.BinaryReader]::new($file, $encoding, $true)
+        try {
+            $bytes = $reader.ReadBytes([int]$file.Length)
+            if ((Get-Digest $bytes) -cne $ExpectedSha -or $file.ReadByte() -ne -1) {
+                throw 'lease_proof_callback_pin'
+            }
+            return $encoding.GetString($bytes)
+        } finally { $reader.Dispose() }
+    } finally { $file.Dispose() }
+}
+
+function Open-ProofMac {
+    Assert-LocalPath $KeyPath
+    $entry = Get-Item -LiteralPath $KeyPath -Force
+    if ($entry -isnot [IO.FileInfo] -or $entry.Length -ne 32) { throw 'lease_proof_key' }
+    Assert-ProtectedPath $entry
+    $sd = [Security.AccessControl.RawSecurityDescriptor]::new((Get-Acl -LiteralPath $entry.FullName).Sddl)
+    if (($sd.ControlFlags -band 0x1004) -ne 0x1004) { throw 'lease_proof_key_acl' }
+    $seen = @{}
+    foreach ($ace in $sd.DiscretionaryAcl) {
+        $sid = $ace.SecurityIdentifier.Value
+        if ($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback -or
+            $ace.AceQualifier -ne 'AccessAllowed' -or [int]$ace.AceFlags -ne 0 -or $seen.ContainsKey($sid)) {
+            throw 'lease_proof_key_acl'
+        }
+        if ($sid -ceq $ServiceSid) {
+            if (($ace.AccessMask -band 0x120089) -ne 0x120089 -or ($ace.AccessMask -band (-bnot 0x1200a9)) -ne 0) {
+                throw 'lease_proof_key_acl'
+            }
+        } elseif ($sid -cnotin $writers -or $ace.AccessMask -ne 2032127) { throw 'lease_proof_key_acl' }
+        $seen[$sid] = $true
+    }
+    if (-not $seen.ContainsKey($ServiceSid) -or -not $seen.ContainsKey('S-1-5-18') -or
+        -not $seen.ContainsKey('S-1-5-32-544')) { throw 'lease_proof_key_acl' }
+    $file = [IO.File]::Open($KeyPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $reader = [IO.BinaryReader]::new($file, $encoding, $true)
+        try {
+            $key = $reader.ReadBytes(32)
+            try {
+                if ($key.Length -ne 32 -or $file.ReadByte() -ne -1 -or (Get-Digest $key) -cne $KeySha256) {
+                    throw 'lease_proof_key_pin'
+                }
+                return [Security.Cryptography.HMACSHA256]::new($key)
+            } finally { [Array]::Clear($key, 0, $key.Length) }
+        } finally { $reader.Dispose() }
+    } finally { $file.Dispose() }
+}
+
+function Write-Ready($Record) {
+    Assert-LocalPath $ReadyPath
+    $parent = Get-Item -LiteralPath ([IO.Path]::GetDirectoryName($ReadyPath)) -Force
+    if ($parent -isnot [IO.DirectoryInfo]) { throw 'lease_proof_ready_parent' }
+    Assert-ProtectedPath $parent -PrivateLeaf
+    $security = [Security.AccessControl.FileSecurity]::new()
+    $security.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+    $security.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @('S-1-5-18','S-1-5-32-544')) {
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'Allow'))
+    }
+    $temporary = Join-Path $parent.FullName ('.lease-observer-ready-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    $file = [IO.FileStream]::new($temporary, [IO.FileMode]::CreateNew,
+        [Security.AccessControl.FileSystemRights]'WriteData,Synchronize', [IO.FileShare]::None, 4096,
+        [IO.FileOptions]::WriteThrough, $security)
+    try {
+        try {
+            $data = $encoding.GetBytes((ConvertTo-Json -Compress -InputObject $Record) + "`n")
+            $file.Write($data, 0, $data.Length)
+            $file.Flush($true)
+        } finally { $file.Dispose() }
+        [IO.File]::Move($temporary,$ReadyPath)
+    } finally { [IO.File]::Delete($temporary) }
+}
+
+function New-ProofPipe {
+    $security = [IO.Pipes.PipeSecurity]::new()
+    $security.SetOwner([Security.Principal.SecurityIdentifier]::new($OperatorSid))
+    $security.SetAccessRuleProtection($true, $false)
+    foreach ($sid in $writers) {
+        $security.AddAccessRule([IO.Pipes.PipeAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new($sid), [IO.Pipes.PipeAccessRights]::FullControl, 'Allow'))
+    }
+    $rights = [IO.Pipes.PipeAccessRights]::ReadWrite -bor [IO.Pipes.PipeAccessRights]::Synchronize
+    $security.AddAccessRule([IO.Pipes.PipeAccessRule]::new(
+        [Security.Principal.SecurityIdentifier]::new($ServiceSid), $rights, 'Allow'))
+    return [IO.Pipes.NamedPipeServerStream]::new($PipeName, [IO.Pipes.PipeDirection]::InOut, 1,
+        [IO.Pipes.PipeTransmissionMode]::Byte, [IO.Pipes.PipeOptions]::Asynchronous, 4096, 4096, $security)
+}
+
+function Read-Request {
+    $buffer = [byte[]]::new(2048)
+    $offset = 0
+    while ($offset -lt $buffer.Length) {
+        $read = $pipe.ReadAsync($buffer, $offset, $buffer.Length - $offset)
+        if (-not $read.Wait((Remaining)) -or $read.Result -le 0) { throw 'lease_proof_request' }
+        $end = [Array]::IndexOf($buffer, [byte]10, $offset, $read.Result)
+        $offset += $read.Result
+        if ($end -ge 0) {
+            if ($end -ne $offset - 1) { throw 'lease_proof_frame' }
+            return $encoding.GetString($buffer, 0, $end)
+        }
+    }
+    throw 'lease_proof_frame'
+}
+
+function New-Challenge([string]$Raw) {
+    $fields = ConvertFrom-Json -InputObject $Raw
+    if ($fields.nonce -isnot [string] -or $fields.nonce -cnotmatch '\A[a-f0-9]{32}\z') {
+        throw 'lease_proof_nonce'
+    }
+    # Canonical ASCII request exactly matches Python sorted-key encoding.
+    $expected = [ordered]@{
+        attempt_id=$AttemptId; collector_sha256=$CollectorSha256; generation=$Generation
+        nonce=$fields.nonce; plan_sha256=$PlanSha256; scope=$scope; service_sid=$ServiceSid
+        windows_boot_sha256=$WindowsBootSha256; wsl_boot_sha256=$WslBootSha256
+    }
+    if ((ConvertTo-Json -InputObject $expected -Compress) -cne $Raw) { throw 'lease_proof_binding' }
+    return $expected
+}
+
+function Invoke-ObservedClosure($Challenge) {
+    $context = [pscustomobject]@{
+        Challenge=[pscustomobject]$Challenge
+        ReactivationPlanSha256=$ReactivationPlanSha256
+        MarkerSha256=$MarkerSha256
+        DeadlineTimestamp=[Diagnostics.Stopwatch]::GetTimestamp() +
+            [long]((Remaining) * [Diagnostics.Stopwatch]::Frequency / 1000)
+    }
+    $worker = [PowerShell]::Create()
+    $worker.Runspace = $runspace
+    try {
+        $null = $worker.AddCommand('Get-HaLeaseProof').AddArgument($context)
+        $pending = $worker.BeginInvoke()
+        if (-not $pending.AsyncWaitHandle.WaitOne((Remaining))) {
+            # End the isolated broker rather than let an unbounded callback occupy it.
+            [Environment]::Exit(1)
+        }
+        $rows = $worker.EndInvoke($pending)
+        if ($worker.HadErrors -or $rows.Count -ne 1) { throw 'lease_proof_observation' }
+        $fact = $rows[0]
+        $names = @($fact.PSObject.Properties.Name | Sort-Object -CaseSensitive)
+        $expectedNames = @('collector_sha256','generation','marker_sha256','nonce','observation_sha256',
+            'reactivation_plan_sha256','recovery_commands_settled','windows_boot_sha256','windows_reactivation_closed',
+            'wsl_boot_sha256','wsl_writers_closed')
+        if (($names -join ',') -cne ($expectedNames -join ',') -or
+            $fact.nonce -cne $Challenge.nonce -or ($fact.generation -isnot [int] -and $fact.generation -isnot [long]) -or
+            $fact.generation -ne $Generation -or
+            $fact.marker_sha256 -cne $MarkerSha256 -or $fact.reactivation_plan_sha256 -cne $ReactivationPlanSha256 -or
+            $fact.collector_sha256 -cne $CollectorSha256 -or $fact.windows_boot_sha256 -cne $WindowsBootSha256 -or
+            $fact.wsl_boot_sha256 -cne $WslBootSha256 -or
+            $fact.observation_sha256 -isnot [string] -or $fact.observation_sha256 -cnotmatch $hashPattern) {
+            throw 'lease_proof_observation'
+        }
+        foreach ($name in @('recovery_commands_settled','windows_reactivation_closed','wsl_writers_closed')) {
+            if ($fact.$name -isnot [bool] -or -not $fact.$name) { throw 'lease_proof_observation' }
+        }
+        return $fact.observation_sha256
+    } finally { $worker.Dispose() }
+}
+
+try {
+    if (-not $Go -or $PSVersionTable.PSEdition -cne 'Desktop' -or -not [Environment]::Is64BitProcess -or
+        [Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or
+        $PipeName -cnotmatch '\An100ha-lease-proof-[a-f0-9]{32}\z' -or
+        $OperatorSid -cnotmatch $sidPattern -or $OperatorSid -cin @('S-1-5-18','S-1-5-32-544') -or
+        $ServiceSid -cnotmatch $servicePattern -or $OperatorSid -ceq $ServiceSid -or
+        $Generation -lt 1 -or $RecentNonces -lt 1 -or $RecentNonces -gt 4096) { throw 'lease_proof_context' }
+    foreach ($pin in @($PlanSha256,$AttemptId,$WindowsBootSha256,$WslBootSha256,$CollectorSha256,
+                      $ReactivationPlanSha256,$MarkerSha256,$CallbackSha256,$CallbackConfigSha256,$KeySha256)) {
+        if ($pin -cnotmatch $hashPattern) { throw 'lease_proof_pin' }
+    }
+    $operator = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        if ($operator.User.Value -cne $OperatorSid) { throw 'lease_proof_operator' }
+    } finally { $operator.Dispose() }
+
+    # DisconnectNamedPipe discards unread output. Drain asynchronously so a
+    # non-reading client cannot hold this single-instance broker indefinitely.
+    Add-Type -TypeDefinition @'
+using System.IO;
+using System.IO.Pipes;
+using System.Threading.Tasks;
+public static class HaLeaseProofDrain {
+    public static bool Wait(NamedPipeServerStream pipe, int timeout) {
+        var drain = Task.Factory.StartNew(() => {
+            try { pipe.WaitForPipeDrain(); }
+            catch (IOException) {} // The client may already have closed after reading.
+        });
+        return drain.Wait(timeout);
+    }
+}
+'@
+    $mac = Open-ProofMac
+    $callback = Read-ProtectedText $CallbackPath $CallbackSha256
+    $inputConfig = ConvertFrom-Json -InputObject (Read-ProtectedText $CallbackConfigPath $CallbackConfigSha256)
+    $planText = Read-ProtectedText $inputConfig.reactivation_plan_path $ReactivationPlanSha256
+    $driverText = Read-ProtectedText $inputConfig.driver_path $inputConfig.driver_sha256
+    $vmObserverText = Read-ProtectedText $inputConfig.vm_observer_path $inputConfig.vm_observer_sha256
+    if ($inputConfig.driver_sha256 -cne (ConvertFrom-Json -InputObject $planText).windows_driver_sha256) {
+        throw 'lease_proof_callback_pin'
+    }
+    $runspace = [RunspaceFactory]::CreateRunspace()
+    $runspace.ThreadOptions = 'ReuseThread'
+    $runspace.Open()
+    $init = [PowerShell]::Create()
+    $init.Runspace = $runspace
+    try {
+        $null = $init.AddScript($driverText, $false).AddStatement()
+        $null = $init.AddScript('. ([ScriptBlock]::Create($args[0]))', $false).AddArgument($vmObserverText).AddStatement()
+        $null = $init.AddScript($callback, $false).AddStatement()
+        $null = $init.AddCommand('Initialize-HaLeaseObservation').AddArgument($inputConfig).AddArgument($planText).
+            AddArgument($MarkerSha256).AddArgument($WindowsBootSha256)
+        $output = $init.Invoke()
+        if ($init.HadErrors -or $output.Count -ne 0) { throw 'lease_proof_callback' }
+    } finally { $init.Dispose() }
+
+    $pipe = New-ProofPipe
+    $process = [Diagnostics.Process]::GetCurrentProcess()
+    try {
+        Write-Ready ([ordered]@{
+            scope=$scope; pid=$process.Id; creation_filetime=$process.StartTime.ToFileTimeUtc(); server_sid=$OperatorSid
+            attempt_id=$AttemptId; pipe_name=$PipeName; plan_sha256=$PlanSha256; callback_config_sha256=$CallbackConfigSha256
+        })
+    } finally { $process.Dispose() }
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $order = [Collections.Generic.Queue[string]]::new()
+    while ($true) {
+        $pipe.WaitForConnectionAsync().GetAwaiter().GetResult()
+        try {
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            $challenge = New-Challenge (Read-Request)
+            $pipe.RunAsClient([IO.Pipes.PipeStreamImpersonationWorker]{
+                $client = [Security.Principal.WindowsIdentity]::GetCurrent($true)
+                try {
+                    if ($null -eq $client -or $client.User.Value -cne $ServiceSid) { throw 'lease_proof_client' }
+                } finally { if ($null -ne $client) { $client.Dispose() } }
+            })
+            if (-not $seen.Add($challenge.nonce)) { throw 'lease_proof_replay' }
+            $order.Enqueue($challenge.nonce)
+            if ($order.Count -gt $RecentNonces) { $null = $seen.Remove($order.Dequeue()) }
+            $digest = Invoke-ObservedClosure $challenge
+            $challenge.Add('closed', $true)
+            $challenge.Add('observation_sha256', $digest)
+            $body = $encoding.GetBytes((ConvertTo-Json -InputObject $challenge -Compress))
+            $tag = [BitConverter]::ToString($mac.ComputeHash($body)).Replace('-', '').ToLowerInvariant()
+            $envelope = [ordered]@{body=[Convert]::ToBase64String($body); mac=$tag}
+            $bytes = $encoding.GetBytes((ConvertTo-Json -InputObject $envelope -Compress) + "`n")
+            $write = $pipe.WriteAsync($bytes, 0, $bytes.Length)
+            if (-not $write.Wait((Remaining))) { throw 'lease_proof_write' }
+            if (-not [HaLeaseProofDrain]::Wait($pipe, (Remaining))) { [Environment]::Exit(1) }
+        } catch {
+            # Failure is a closed connection, never an authenticated positive receipt.
+        } finally {
+            if ($pipe.IsConnected) { $pipe.Disconnect() }
+        }
+    }
+} catch { exit 1 } finally {
+    if ($null -ne $pipe) { $pipe.Dispose() }
+    if ($null -ne $mac) { $mac.Dispose() }
+    if ($null -ne $runspace) { $runspace.Dispose() }
+}
