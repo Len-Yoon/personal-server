@@ -305,6 +305,114 @@ for item in pathlib.Path('/proc').iterdir():
     if ($LASTEXITCODE -ne 0) { throw 'legacy_recovery_wsl_commands_unsettled' }
 }
 
+function Get-HaCutoverAuthority($Plan) {
+    if ($Plan.authority_service_name -cnotmatch '^N100HA_[0-9a-f]{24}_controller$') {
+        throw 'cutover_authority_service_identity'
+    }
+    $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    if ($programData -ine 'C:\ProgramData') { throw 'cutover_authority_wsl_alias_unverified' }
+    $directory = Join-Path $programData 'N100HA-Cutover'
+    $admins = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $controller = [Security.Principal.NTAccount]::new('NT SERVICE', $Plan.authority_service_name).
+        Translate([Security.Principal.SecurityIdentifier])
+    $danger = [Security.AccessControl.FileSystemRights]'Delete,DeleteSubdirectoriesAndFiles,ChangePermissions,TakeOwnership'
+    foreach ($parent in @('C:\', $programData, $directory)) {
+        $node = Get-Item -LiteralPath $parent -Force
+        if (-not $node.PSIsContainer -or ($node.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'cutover_authority_parent_untrusted'
+        }
+        $rules = (Get-Acl -LiteralPath $parent).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+        if (@($rules | Where-Object { $_.AccessControlType -eq 'Allow' -and
+              $_.IdentityReference -notin @($admins, $system) -and
+              -not ($_.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and
+              ($_.FileSystemRights -band $danger) }).Count -ne 0) {
+            throw 'cutover_authority_parent_replaceable'
+        }
+    }
+    $dirSecurity = [Security.AccessControl.DirectorySecurity]::new()
+    $dirSecurity.SetOwner($admins)
+    $dirSecurity.SetAccessRuleProtection($true, $false)
+    foreach ($writer in @($admins, $system)) {
+        $dirSecurity.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $writer, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+    }
+    $dirSecurity.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $controller, 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+    $users = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+    $dirSecurity.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $users, 'ReadAndExecute', 'None', 'None', 'Allow'))
+    $sections = [Security.AccessControl.AccessControlSections]'Owner,Access'
+    if ((Get-Acl -LiteralPath $directory).GetSecurityDescriptorSddlForm($sections) -cne
+        $dirSecurity.GetSecurityDescriptorSddlForm($sections)) {
+        throw 'cutover_authority_directory_acl'
+    }
+    $legacyData = Join-Path $env:SystemDrive 'personal-server\data'
+    if (@(Get-ChildItem -LiteralPath $legacyData -Force -ErrorAction Stop |
+          Where-Object { $_.Name -ieq 'ha-controller-owner.json' }).Count -ne 0) {
+        throw 'cutover_authority_legacy_marker_present'
+    }
+    return @{directory=$directory; admins=$admins; system=$system; controller=$controller}
+}
+
+function New-HaCutoverMarker($Plan, [string]$PlanSha256, [string]$AttemptId) {
+    $authority = Get-HaCutoverAuthority $Plan
+    $path = Join-Path $authority.directory 'ha-controller-owner.json'
+    if ($Plan.authority_cluster -cnotmatch '^[a-z][a-z0-9_]{0,62}$' -or
+        $Plan.authority_generation -isnot [int] -or $Plan.authority_generation -lt 1 -or
+        $Plan.authority_source_commit -cnotmatch '^[a-f0-9]{40}$') {
+        throw 'cutover_authority_marker_scope'
+    }
+    $payload = [ordered]@{cluster=$Plan.authority_cluster;generation=$Plan.authority_generation;
+        source_commit=$Plan.authority_source_commit;plan_sha256=$PlanSha256;attempt_id=$AttemptId}
+    $raw = [Text.Encoding]::UTF8.GetBytes(($payload | ConvertTo-Json -Compress))
+    $security = [Security.AccessControl.FileSecurity]::new()
+    $security.SetOwner($authority.admins)
+    $security.SetAccessRuleProtection($true, $false)
+    foreach ($writer in @($authority.admins, $authority.system)) {
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($writer, 'FullControl', 'Allow'))
+    }
+    $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($authority.controller, 'Read', 'Allow'))
+    $rights = [Security.AccessControl.FileSystemRights]'WriteData,Synchronize'
+    $file = [IO.FileStream]::new($path, [IO.FileMode]::CreateNew, $rights, [IO.FileShare]::None,
+        4096, [IO.FileOptions]::WriteThrough, $security)
+    try {
+        $file.Write($raw, 0, $raw.Length)
+        $file.Flush($true)
+    } finally { $file.Dispose() }
+    $sections = [Security.AccessControl.AccessControlSections]'Owner,Access'
+    $pin = @{
+        path=$path
+        sha256=(Get-HaReactivationHash ([Text.Encoding]::UTF8.GetString($raw)))
+        acl=$security.GetSecurityDescriptorSddlForm($sections)
+        file_id=(Get-HaMarkerFileId $path)
+    }
+    Assert-HaOwnedCutoverMarker $pin
+    return $pin
+}
+
+function Get-HaMarkerFileId([string]$Path) {
+    $fsutil = Join-Path ([Environment]::SystemDirectory) 'fsutil.exe'
+    $links = @(& $fsutil hardlink list $Path)
+    if ($LASTEXITCODE -ne 0 -or $links.Count -ne 1) { throw 'cutover_authority_marker_untrusted' }
+    $identity = @(& $fsutil file queryfileid $Path)
+    if ($LASTEXITCODE -ne 0 -or $identity.Count -ne 1 -or $identity[0] -notmatch '0x[0-9a-fA-F]{16,32}') {
+        throw 'cutover_authority_marker_identity'
+    }
+    return $Matches[0].ToLowerInvariant()
+}
+
+function Assert-HaOwnedCutoverMarker($Pin) {
+    $item = Get-Item -LiteralPath $Pin.path -Force
+    $sections = [Security.AccessControl.AccessControlSections]'Owner,Access'
+    if ($item.PSIsContainer -or $item.Length -gt 4096 -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        (Get-HaMarkerFileId $Pin.path) -cne $Pin.file_id -or
+        (Get-Acl -LiteralPath $Pin.path).GetSecurityDescriptorSddlForm($sections) -cne $Pin.acl -or
+        (Get-FileHash -LiteralPath $Pin.path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Pin.sha256) {
+        throw 'cutover_authority_marker_unconfirmed'
+    }
+}
+
 function Invoke-HaReactivationSession($Plan, [string]$PlanSha256, [string]$AttemptId) {
     if ($PlanSha256 -cnotmatch '^[a-f0-9]{64}$' -or $AttemptId -cnotmatch '^[a-f0-9]{64}$') {
         throw 'legacy_reactivation_session_scope'
@@ -312,6 +420,7 @@ function Invoke-HaReactivationSession($Plan, [string]$PlanSha256, [string]$Attem
     $ErrorActionPreference = 'Stop'
     Set-StrictMode -Version Latest
     $null = Read-HaReactivationSnapshot $Plan
+    $null = Get-HaCutoverAuthority $Plan
     $seq = 0
     $handshake = @{plan_sha256=$PlanSha256; attempt_id=$AttemptId; sequence=0; action='ready'}
     [Console]::WriteLine(($handshake | ConvertTo-Json -Compress))
@@ -334,6 +443,11 @@ function Invoke-HaReactivationSession($Plan, [string]$PlanSha256, [string]$Attem
             proof_sha256=$Request.proof_sha256} | ConvertTo-Json -Compress))
     }
 
+    $claim = & $read
+    if ($claim.action -cne 'claim') { throw 'legacy_reactivation_session_order' }
+    $seq = $claim.sequence
+    $marker = New-HaCutoverMarker $Plan $PlanSha256 $AttemptId
+    & $send $claim
     $first = & $read
     if ($first.action -cne 'close') { throw 'legacy_reactivation_session_order' }
     $seq = $first.sequence
@@ -348,12 +462,20 @@ function Invoke-HaReactivationSession($Plan, [string]$PlanSha256, [string]$Attem
             if ($Lease.SafeFileHandle.IsClosed) { throw 'legacy_recovery_guard_lost' }
             Assert-HaRecoveryCommandsSettled $Plan.distribution
         }
+        Assert-HaOwnedCutoverMarker $marker
         Close-HaReactivation $Plan $checkAdmission $checkRecovery
         & $send $first
         while ($true) {
             $request = & $read
             $seq = $request.sequence
-            if ($request.action -ceq 'restore') { return $request }
+            Assert-HaOwnedCutoverMarker $marker
+            if ($request.action -ceq 'restore') {
+                Assert-HaReactivationClosed $Plan
+                & $checkRecovery
+                [IO.File]::Delete($marker.path)
+                if ([IO.File]::Exists($marker.path)) { throw 'cutover_authority_release_unconfirmed' }
+                return $request
+            }
             if ($request.action -ceq 'finish') {
                 Assert-HaReactivationClosed $Plan
                 & $checkRecovery

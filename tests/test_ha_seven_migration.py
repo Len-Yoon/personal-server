@@ -664,7 +664,7 @@ for line in sys.stdin:
                 channel.request('restore', '3' * 64)
         self.assertIsNone(channel.process)
 
-    def test_wsl_bootstrap_marker_removes_only_the_owned_attempt(self):
+    def test_wsl_bootstrap_observes_native_marker_and_rejects_legacy_collision(self):
         from ha_control.native_cutover import WslBootstrapAdmission
 
         root = self.path.parent
@@ -672,24 +672,25 @@ for line in sys.stdin:
         (root / 'data').mkdir()
         content = b'bootstrap'
         (root / 'scripts/windows-bootstrap.sh').write_bytes(content)
-        guard = WslBootstrapAdmission(sha(content), cluster='fixture', generation=3,
-                                      source_commit='a' * 40)
+        guard = WslBootstrapAdmission(sha(content))
         guard.root = root
-        marker = root / 'data/ha-controller-owner.json'
+        guard.authority = root / 'protected'
+        guard.authority.mkdir()
+        marker = guard.authority / 'ha-controller-owner.json'
+        old = root / 'data/ha-controller-owner.json'
         with guard.guard():
-            evidence = guard.claim(self.plan, '2' * 64)
-            self.assertEqual(evidence, sha(marker.read_bytes()))
-            self.assertEqual(json.loads(marker.read_bytes())['attempt_id'], '2' * 64)
-            guard.release_owned()
-            self.assertFalse(marker.exists())
-            guard.claim(self.plan, '2' * 64)
-            marker.write_bytes(b'{"different_owner":true}')
+            with self.assertRaisesRegex(TransitionBlocked, 'legacy_bootstrap_owner_missing'):
+                guard.assert_visible()
+            marker.write_bytes(b'{"published_by":"Windows"}')
+            guard.assert_visible()
+            with self.assertRaisesRegex(TransitionBlocked, 'legacy_bootstrap_owner_not_released'):
+                guard.assert_released()
+            old.symlink_to(root / 'missing')
             with self.assertRaisesRegex(TransitionBlocked, 'legacy_bootstrap_owner_changed'):
-                guard.release_owned()
-        self.assertEqual(marker.read_bytes(), b'{"different_owner":true}')
-        with self.assertRaisesRegex(TransitionBlocked, 'legacy_bootstrap_owner_already_present'):
-            with guard.guard():
-                self.fail('existing marker was adopted')
+                guard.assert_visible()
+            old.unlink()
+            marker.unlink()
+            guard.assert_released()
 
     def test_native_cutover_cannot_fence_wsl_without_direct_recovery_exclusion(self):
         from ha_control.native_cutover import NativeCutover
