@@ -4,7 +4,7 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-RUN apk add --no-cache --upgrade 'sqlite-libs>=3.51.3' 'musl>=1.2.6-r3' 'musl-utils>=1.2.6-r3' 'zlib>=1.3.2-r1' \
+RUN apk add --no-cache --upgrade 'sqlite-libs>=3.51.3' 'musl>=1.2.6-r3' 'musl-utils>=1.2.6-r3' 'zlib>=1.3.2-r1' 'krb5-libs>=1.22.3-r0' \
     && pip install --no-cache-dir setuptools==84.0.0 wheel==0.48.0 \
     && pip install --no-cache-dir -r requirements.txt
 
