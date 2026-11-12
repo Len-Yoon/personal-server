@@ -18,6 +18,53 @@ PUBLIC_HOSTS = {
 }
 ROOT = '/etc/n100-ha'
 RUN = '/run/n100-ha'
+AUTH_INPUTS = {
+    'portal-web': (
+        ('DELETE_PASSWORD', 'FILE_MANAGER_PASSWORD', 'ADMIN_STATUS_PASSWORD', 'FILE_MANAGER_ACCESS_PASSWORD'),
+        ('PORTFOLIO_ADMIN_PASSWORD', 'PORTAL_METRICS_BEARER_TOKEN'),
+    ),
+    'book-memo': (('DELETE_PASSWORD',), ()),
+    'youtube-memo': (('DELETE_PASSWORD',), ()),
+}
+AUTH_BOOTSTRAP = r"""
+import json, os, pathlib, stat, sys
+
+def checked(condition):
+    if not condition:
+        raise ValueError("guest_application_auth_input_rejected")
+
+def unique(pairs):
+    value = {}
+    for name, item in pairs:
+        checked(name not in value)
+        value[name] = item
+    return value
+
+try:
+    required, optional = map(set, json.loads(sys.argv[1]))
+    path = pathlib.Path("/etc/ha/runtime-auth.json")
+    checked(os.geteuid() == 10001)
+    for parent in path.parents:
+        info = parent.lstat()
+        checked(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022)
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as source:
+        before = os.fstat(source.fileno())
+        checked(stat.S_ISREG(before.st_mode) and before.st_uid == 10001 and before.st_nlink == 1
+                and stat.S_IMODE(before.st_mode) in (0o400, 0o600) and 0 < before.st_size <= 65536)
+        raw = source.read(65537)
+        after = os.fstat(source.fileno())
+        checked(len(raw) == before.st_size and before.st_mtime_ns == after.st_mtime_ns
+                and before.st_ctime_ns == after.st_ctime_ns)
+    value = json.loads(raw, object_pairs_hook=unique)
+    checked(type(value) is dict and required <= set(value) <= required | optional
+            and all(type(item) is str and item.strip() and len(item) <= 4096 and "\0" not in item
+                    for item in value.values())
+            and not (required | optional) & set(os.environ))
+    os.environ.update(value)
+    os.execv("/usr/local/bin/python", ["/usr/local/bin/python", *sys.argv[2:]])
+except Exception:
+    raise SystemExit("guest_application_auth_input_rejected") from None
+"""
 
 
 class LayoutError(ValueError):
@@ -121,8 +168,11 @@ def render(spec):
             # One supported 500 MiB archive + one 32 MiB snapshot + upload/spool overhead.
             # This is an on-demand ceiling, not a resident-memory reservation or concurrency proof.
             app['tmpfs']=['/tmp:rw,noexec,nosuid,nodev,size=640m,mode=1777']
+        entry = ['python','-m','ha_egress.app_entrypoint','--service',service,'--app-port',str(PORTS[service]),'--',*command]
+        if service in AUTH_INPUTS:
+            entry = ['python', '-I', '-B', '-c', AUTH_BOOTSTRAP, json.dumps(AUTH_INPUTS[service]), *entry[1:]]
         app.update(network_mode='none',group_add=['10004'],
-            command=['python','-m','ha_egress.app_entrypoint','--service',service,'--app-port',str(PORTS[service]),'--',*command],
+            command=entry,
             environment={'APP_ENV':'production','HA_PG_CONFIG':'/etc/ha/config.json',
                 'HA_PG_ACTIVATION':'/etc/ha/activation.json',**env.get(service,{}),
                 **({'HA_HOMEOPS_TARGET_NODE':spec['node']} if service=='portal-web' else {}),
