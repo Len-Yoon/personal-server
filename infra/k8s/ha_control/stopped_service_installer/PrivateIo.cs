@@ -19,7 +19,8 @@ namespace TrustedStoppedV1 {
    return String.IsNullOrEmpty(sid)?"":"(A;"+flags+";"+mask+";;;"+sid+")";
   }
   public static string Acl(string sid,bool journal){
-   return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"+ServiceAce(sid,"OICI",journal?"0x301bf":"0x1200a9");
+   // Synchronous Windows directory/file opens need SYNCHRONIZE (0x100000).
+   return "O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"+ServiceAce(sid,"OICI",journal?"0x1301bf":"0x1200a9");
   }
   public static string FileAcl(string sid){
    return "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)"+ServiceAce(sid,"","0x1200a9");

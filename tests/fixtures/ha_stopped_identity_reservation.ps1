@@ -54,12 +54,12 @@ foreach($absentSid in @($null,'',[NullString]::Value)){
 }
 $serviceReader='S-1-5-80-1-2-3-4-5'
 Need ([TrustedStoppedV1.NewPrivate]::Acl($serviceReader,$false) -ceq ($privateDirectory+'(A;OICI;0x1200a9;;;'+$serviceReader+')'));$count++
-Need ([TrustedStoppedV1.NewPrivate]::Acl($serviceReader,$true) -ceq ($privateDirectory+'(A;OICI;0x301bf;;;'+$serviceReader+')'));$count++
+Need ([TrustedStoppedV1.NewPrivate]::Acl($serviceReader,$true) -ceq ($privateDirectory+'(A;OICI;0x1301bf;;;'+$serviceReader+')'));$count++
 Need ([TrustedStoppedV1.NewPrivate]::FileAcl($serviceReader) -ceq ($privateFile+'(A;;0x1200a9;;;'+$serviceReader+')'));$count++
 # Keep malformed nonempty values visible to the existing descriptor parser.
 foreach($invalidSid in @(' ','not-a-sid')){
  Need ([TrustedStoppedV1.NewPrivate]::Acl($invalidSid,$false) -ceq ($privateDirectory+'(A;OICI;0x1200a9;;;'+$invalidSid+')'));$count++
- Need ([TrustedStoppedV1.NewPrivate]::Acl($invalidSid,$true) -ceq ($privateDirectory+'(A;OICI;0x301bf;;;'+$invalidSid+')'));$count++
+ Need ([TrustedStoppedV1.NewPrivate]::Acl($invalidSid,$true) -ceq ($privateDirectory+'(A;OICI;0x1301bf;;;'+$invalidSid+')'));$count++
  Need ([TrustedStoppedV1.NewPrivate]::FileAcl($invalidSid) -ceq ($privateFile+'(A;;0x1200a9;;;'+$invalidSid+')'));$count++
 }
 $profile='strict-canonical-observed-v1';$rootSid='S-1-5-80-1-2-3-4-5';$rootSids=[string[]]@('S-1-5-18','S-1-5-32-544',$rootSid);$rootMasks=[int[]]@(2032127,2032127,131232);$rootFlags=[byte[]]@(3,3,0)
