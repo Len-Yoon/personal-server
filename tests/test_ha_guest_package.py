@@ -7,6 +7,8 @@ import unittest
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'infra/k8s'))
+from ha_control import native_guest_config
+
 spec=importlib.util.spec_from_file_location('ha_guest_package',ROOT/'infra/k8s/ha-package/guest.py')
 guest=importlib.util.module_from_spec(spec);spec.loader.exec_module(guest)
 
@@ -22,6 +24,38 @@ def fixture():
 
 
 class GuestLayoutTest(unittest.TestCase):
+    def test_native_credentials_are_node_scoped_and_authority_is_not_generated(self):
+        credentials = native_guest_config.new_role_passwords("r" * 48)
+        release = {"source_commit": "a" * 40, "release_id": "b" * 64, "source_files_sha256": "c" * 64}
+        common = {"cluster": "n100_ha", "release": release, "plan_sha256": "d" * 64}
+        init = native_guest_config.initializer_config(**common, broker_instance="e" * 64, passwords=credentials)
+        self.assertEqual(init["passwords"]["ha_repl"], "r" * 48)
+        self.assertEqual(len(set(init["passwords"].values())), 16)
+        app, passfile = native_guest_config.application_config(
+            **common, node="B", installation_id="f" * 64, system_id="123", service="portal-web",
+            password=credentials["portal_web_b"], broker_server_sha256="1" * 64,
+        )
+        self.assertEqual((app["primary"]["host"], app["partner"]["host"]), ("ha-a", "ha-b"))
+        self.assertEqual(app["primary"]["user"], "portal_web_b")
+        self.assertEqual(passfile.count(credentials["portal_web_b"].encode()), 2)
+        self.assertNotIn(credentials["portal_web_a"].encode(), passfile)
+        self.assertNotIn(credentials["portal_web_b"], repr(app))
+        self.assertNotIn("authority_kind", app)
+        self.assertEqual(app["effects"]["plan_sha256"], init["plan_sha256"])
+        clients = {name: str(index) * 64 for index, name in enumerate(sorted(guest.SERVICES), 1)}
+        broker, broker_passfile = native_guest_config.broker_config(
+            **common, node="B", installation_id="f" * 64, system_id="123", broker_instance="e" * 64,
+            password=credentials["ha_effect_broker"], client_sha256=clients,
+            ingress_server_sha256="2" * 64, engine_id="fixture",
+            targets={"portal-web": {"container_id": "3" * 64, "image_id": "sha256:" + "4" * 64}},
+        )
+        self.assertEqual({row["service"] for row in broker["clients"]}, set(guest.SERVICES))
+        self.assertTrue(all(row["node"] == "B" for row in broker["clients"]))
+        self.assertIn(credentials["ha_effect_broker"].encode(), broker_passfile)
+        self.assertNotIn(credentials["ha_effect_broker"], repr(broker))
+        self.assertEqual(broker["providers"]["executor"]["services"], ["portal-web"])
+        self.assertEqual(broker["providers"]["hyundai"], "/etc/ha-broker/providers/hyundai.json")
+
     def test_seven_apps_have_only_fixed_capabilities_and_no_external_network(self):
         value=fixture();original=copy.deepcopy(value)
         compose,haproxy,review=guest.render(value)

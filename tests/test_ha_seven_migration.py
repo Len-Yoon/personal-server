@@ -1,6 +1,7 @@
 """Frozen-source boundaries and failure receipts; no host/production access."""
 import copy
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime,timedelta,timezone
 import hashlib
 import io
@@ -9,6 +10,7 @@ import os
 from pathlib import Path
 import sqlite3
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -20,11 +22,234 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'infra/k8s'))
 from ha_runtime import migrate,seven_migration as M
 from ha_control.legacy_cutover import LegacyCutover, TransitionBlocked
-from ha_control import frozen_ingress, frozen_transport, native_frozen_capture
+from ha_control import frozen_ingress, frozen_transport, native_frozen_capture, native_guest_restore
 
 
 def encoded(value):return json.dumps(value,sort_keys=True).encode()
 def sha(raw):return hashlib.sha256(raw).hexdigest()
+
+
+class NativeGuestRestoreTests(unittest.TestCase):
+    def setUp(self):
+        self.pins = native_guest_restore.RestorePins(
+            boot_sha256="a" * 64, installation_id="b" * 64, inventory_sha256="c" * 64,
+            postgres_id="d" * 64, uid=70, gid=70, system_id="123456789",
+            utility_digest="sha256:" + "e" * 64, initializer_sha256="f" * 64, source_commit="a" * 40,
+            plan_sha256="b" * 64, config_sha256="c" * 64, manifest_sha256="d" * 64, cluster="test-ha",
+            peer_ipv4="192.0.2.6",
+        )
+
+    def test_restore_has_one_durable_attempt_and_checks_closed_postgres(self):
+        module = native_guest_restore
+        identifier = "f" * 64
+        for timeout in (False, True):
+            with self.subTest(timeout=timeout), tempfile.TemporaryDirectory() as directory:
+                journal = Path(directory).resolve()
+                stage = journal / "stage"
+                owned = {"Id": identifier, "Name": "/n100-ha-closed-restore-" + self.pins.installation_id[:16],
+                         "Image": self.pins.utility_digest,
+                         "Config": {"User": "70:70", "Labels": {"n100-ha.closed-restore": self.pins.manifest_sha256}},
+                         "HostConfig": {"NetworkMode": "none", "ReadonlyRootfs": True, "RestartPolicy": {"Name": "no"},
+                                        "Privileged": False, "CapDrop": ["ALL"], "CapAdd": None,
+                                        "SecurityOpt": ["no-new-privileges:true"],
+                                        "LogConfig": {"Type": "local", "Config": {"max-size": "32m", "max-file": "1"}}},
+                         "Mounts": [
+                             {"Type": "bind", "Source": str(source), "Destination": destination, "RW": writable}
+                             for source, destination, writable in (
+                                 (module.INITIALIZER, "/bootstrap/initialize.py", False),
+                                 (module.PG_SOCKET, "/var/run/postgresql", False), (stage / "inputs", "/inputs", False),
+                                 (stage / "frozen", "/frozen", False), (stage / "receipts", "/receipts", True),
+                             )
+                         ],
+                         "State": {"Status": "created"}}
+                exited = dict(owned, State={"Status": "exited", "ExitCode": 0}, RestartCount=0)
+
+                def docker(action, *args, **kwargs):
+                    self.assertTrue((journal / "migration-intent.json").is_file())
+                    if action == "create":
+                        self.assertIn("--read-only", args)
+                        self.assertEqual(args[args.index("--network") + 1], "none")
+                        self.assertEqual(args[args.index("--phase") + 1], "migration")
+                        self.assertIn("type=bind,src=" + str(stage / "frozen") + ",dst=/frozen,readonly", args)
+                        self.assertIn("type=bind,src=" + str(stage / "receipts") + ",dst=/receipts", args)
+                        return identifier.encode()
+                    self.assertEqual((action, args), ("start", ("-a", identifier)))
+                    if timeout:
+                        raise subprocess.TimeoutExpired(action, 1)
+                    return b"PASS-output"
+
+                with (
+                    patch.object(module, "JOURNAL", journal),
+                    patch.object(module.os, "geteuid", return_value=0),
+                    patch.object(module, "_directory"),
+                    patch.object(module, "_identity"),
+                    patch.object(module, "_prestage", return_value=(stage / "inputs", stage / "frozen",
+                                 stage / "receipts", {}, "1" * 64)),
+                    patch.object(module, "_assert_inventory"),
+                    patch.object(module, "_assert_pg", return_value="2" * 64) as pg,
+                    patch.object(module, "_fsync_directory"),
+                    patch.object(module, "_docker", side_effect=docker) as commands,
+                    patch.object(module, "_inspect", side_effect=([owned], [exited])),
+                    patch.object(module, "_verify_receipt", return_value="9" * 64) as receipt,
+                ):
+                    if timeout:
+                        with self.assertRaisesRegex(TransitionBlocked, "outcome_unconfirmed_reconcile_intent"):
+                            module.restore_closed(self.pins, stage)
+                        receipt.assert_not_called()
+                        self.assertFalse((journal / "migration-pass.json").exists())
+                    else:
+                        result = module.restore_closed(self.pins, stage)
+                        self.assertIs(result["database_and_apps_closed"], True)
+                        self.assertIs(result["writer_authority_issued"], False)
+                        self.assertEqual(json.loads((journal / "migration-pass.json").read_bytes()), result)
+                        pg.assert_called_with(self.pins, restored=True)
+                    with self.assertRaisesRegex(TransitionBlocked, "reconciliation_required"):
+                        module.restore_closed(self.pins, stage)
+                    self.assertEqual(commands.call_count, 2)
+                    self.assertNotIn(self.pins.peer_ipv4, (journal / "migration-intent.json").read_text())
+
+    def test_reconciliation_observes_missing_or_ambiguous_intent_without_retry(self):
+        module = native_guest_restore
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory).resolve()
+            with (patch.object(module, "JOURNAL", journal), patch.object(module.os, "geteuid", return_value=0),
+                  patch.object(module, "_directory"), patch.object(module, "_identity"),
+                  patch.object(module, "_prestage"), patch.object(module, "_assert_inventory"),
+                  patch.object(module, "_assert_pg"), patch.object(module, "_docker") as docker):
+                self.assertEqual(module.observe_closed_outcome(self.pins, journal)["status"], "CLEAN")
+                (journal / "migration-intent.json").write_bytes(b"{")
+                self.assertEqual(module.observe_closed_outcome(self.pins, journal),
+                                 {"status": "UNKNOWN", "automatic_retry_permitted": False})
+                docker.assert_not_called()
+
+    def test_reconciliation_requires_exact_precommit_failure_and_fresh_postgres(self):
+        module = native_guest_restore
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory).resolve()
+            stage = journal / "stage"
+            identifier = "9" * 64
+            manifest = {"freeze_receipt": {"sha256": "7" * 64}}
+            audit = "8" * 64
+            name = "migration-intent.json"
+            (journal / name).touch()
+            common = module._receipt_common(self.pins, manifest, audit)
+            failure = dict(common, status="FAILED", error_type="RuntimeError", stage="frozen_data", sqlstate="P0001")
+            values = {name: module._intent(self.pins), "migration.json.prepared": dict(common, status="PREPARED"),
+                      "migration.json.failed": failure}
+            owned = {"Id": identifier, "State": {"ExitCode": 1}, "RestartCount": 0}
+            output = encoded({"status": "FAIL", "reason": "frozen_seven_migration_failed"})
+
+            def read(path, *args):
+                return encoded(values[path.name])
+
+            with (
+                patch.object(module, "JOURNAL", journal),
+                patch.object(module.os, "geteuid", return_value=0),
+                patch.object(module, "_directory"),
+                patch.object(module, "_identity"),
+                patch.object(module, "_prestage",
+                             return_value=(stage / "inputs", stage / "frozen", stage / "receipts", manifest, audit)),
+                patch.object(module, "_read", side_effect=read),
+                patch.object(module, "_inspect", return_value=[owned]),
+                patch.object(module, "_assert_migration_container"),
+                patch.object(module, "_assert_inventory") as inventory,
+                patch.object(module, "_assert_pg") as postgres,
+                patch.object(module, "_pg", return_value=True) as catalog,
+                patch.object(module, "_docker", return_value=output) as docker,
+            ):
+                self.assertEqual(module.observe_closed_outcome(self.pins, stage), {
+                    "status": "CLEAN_FAILED", "automatic_retry_permitted": False,
+                    "migration_failure_sha256": sha(encoded(failure)),
+                })
+                inventory.assert_called_once_with(self.pins, identifier)
+                postgres.assert_called_once_with(self.pins)
+                catalog.assert_called_once_with(self.pins, module.FRESH_CATALOG)
+                docker.assert_called_once_with("logs", identifier)
+                catalog.return_value = False
+                self.assertEqual(module.observe_closed_outcome(self.pins, stage)["status"], "UNKNOWN")
+                catalog.return_value = True
+                values["migration.json.failed"] = dict(failure, status="UNKNOWN_COMMIT", stage="commit")
+                self.assertEqual(module.observe_closed_outcome(self.pins, stage)["status"], "UNKNOWN")
+                values["migration.json.failed"] = dict(failure, manifest_sha256="0" * 64)
+                self.assertEqual(module.observe_closed_outcome(self.pins, stage)["status"], "UNKNOWN")
+                self.assertTrue(all(call.args == ("logs", identifier) for call in docker.call_args_list))
+
+    def test_postgres_rejects_drift_and_open_authority(self):
+        module = native_guest_restore
+        closed = [True, self.pins.cluster, 14, 14, sorted(M.SERVICES), 0, 1, True]
+        replica = ["postgres", "ha", "ha_A", False, self.pins.system_id, "on", "remote_apply", "FIRST1(ha_b)", 11]
+        with patch.object(module, "_pg", side_effect=(replica, closed, "1/F0", [[self.pins.peer_ipv4, "1/F0"]])):
+            self.assertRegex(module._assert_pg(self.pins, restored=True), r"^[a-f0-9]{64}$")
+        with patch.object(module, "_pg", return_value=[*replica[:6], "off", *replica[7:8], 0]):
+            with self.assertRaisesRegex(TransitionBlocked, "identity_or_sync_mismatch"):
+                module._assert_pg(self.pins)
+        with patch.object(module, "_pg", side_effect=(replica, [False, *closed[1:]])):
+            with self.assertRaisesRegex(TransitionBlocked, "postgres_not_closed"):
+                module._assert_pg(self.pins, restored=True)
+        with patch.object(module, "_pg", side_effect=([*replica[:8], 0], [["192.0.2.90", "1/F0"]])):
+            with self.assertRaisesRegex(TransitionBlocked, "replica_identity_mismatch"):
+                module._assert_pg(self.pins)
+        with (patch.object(module, "_pg", side_effect=(replica, closed, "2/0", [[self.pins.peer_ipv4, "1/FFFFFFFF"]])),
+              patch.object(module.time, "monotonic", side_effect=(1, 7))):
+            with self.assertRaisesRegex(TransitionBlocked, "replica_replay_unconfirmed"):
+                module._assert_pg(self.pins, restored=True)
+
+    def test_receipt_rejects_a_missing_component_or_state(self):
+        module = native_guest_restore
+        services = {service: {"states": {"settings": "json"}, "databases": {"main": "db"}}
+                    for service in M.SERVICES}
+        data = {
+            service: {"state_keys": 1, "state_sha256": "c" * 64,
+                      "databases": [{"service": service, "component": "main", "tables": {"test": {}}}]}
+            for service in services
+        }
+        module._verify_restored_data(data, services)
+        data["portal-web"]["databases"] = []
+        with self.assertRaisesRegex(TransitionBlocked, "receipt_unconfirmed"):
+            module._verify_restored_data(data, services)
+
+    def test_handoff_publishes_only_verified_frozen_catalog_and_preserves_source(self):
+        module = native_guest_restore
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source, stage = root / "received", root / "stage"
+            for path in (source, stage):
+                path.mkdir(mode=0o700)
+            write = native_frozen_capture.seven_capture._write
+            evidence = {key: write(source / f"{key}.json", b"{}")
+                        for key in ("runtime", "writer_graph", "writer_closure", "dispositions")}
+            audit = write(source / "capture-audit.json", encoded({"evidence": evidence}))
+            freeze = write(source / "freeze-receipt.json", encoded({"capture_audit": audit}))
+            artifact = write(source / "artifact.blob", b"original")
+            write(source / "unlisted.blob", b"not part of the migration")
+            manifest = write(source / "manifest.json", encoded({
+                "source_commit": self.pins.source_commit, "target_system_id": self.pins.system_id,
+                "plan_sha256": self.pins.plan_sha256, "cluster": self.pins.cluster,
+                "services": dict.fromkeys(M.SERVICES, {}), "freeze_receipt": freeze,
+                "artifacts": {"artifact": artifact},
+            }))
+            pins = replace(self.pins, manifest_sha256=manifest["sha256"])
+
+            def fixture_copy(path, destination, entry, pins, *, metadata=False):
+                raw = path.read_bytes()
+                if (len(raw), sha(raw)) != (entry["bytes"], entry["sha256"]):
+                    raise M.MigrationRejected("fixture_changed")
+                write(destination / entry["file"], raw)
+                return raw if metadata else None
+
+            with (patch.object(module.os, "geteuid", return_value=0), patch.object(module, "_directory"),
+                  patch.object(module.os, "chown"), patch.object(module, "_copy_frozen_entry", side_effect=fixture_copy),
+                  patch.object(module, "_read", return_value=(source / "manifest.json").read_bytes())):
+                (source / "artifact.blob").write_bytes(b"modified")
+                with self.assertRaisesRegex(TransitionBlocked, "frozen_stage_unconfirmed"):
+                    module.stage_frozen(pins, source, stage)
+                self.assertEqual(list(stage.iterdir()), [])
+                (source / "artifact.blob").write_bytes(b"original")
+                before = {item.name: item.stat().st_ino for item in source.iterdir()}
+                destination = module.stage_frozen(pins, source, stage)
+                self.assertEqual((destination / "artifact.blob").read_bytes(), b"original")
+                self.assertFalse((destination / "unlisted.blob").exists())
+                self.assertEqual(before, {item.name: item.stat().st_ino for item in source.iterdir()})
 
 
 class NativeFrozenCaptureTests(unittest.TestCase):
