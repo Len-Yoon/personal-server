@@ -94,7 +94,8 @@ class WindowsActivationCustody:
 
     def _stage(self, parameters, deadline):
         source = fixed_script('windows-ha-stage-initial-activation.ps1', self.stage_sha256,
-                              self.stage_parameters | parameters)
+                              self.stage_parameters | {'ExpectedSourceManifestSha256': self.binding.source_sha256}
+                              | parameters)
         return self._result(source, deadline, 'initial_stage_')
 
     def _result(self, source, deadline, failure_prefix):

@@ -4,12 +4,16 @@ $ErrorActionPreference = 'Stop'
 
 function Initialize-HaLeaseObservation($InputConfig, [string]$PlanText, [string]$MarkerSha, [string]$WindowsBootSha) {
     $fields = @($InputConfig.PSObject.Properties.Name | Sort-Object -CaseSensitive)
-    if (($fields -join ',') -cne 'a_disk_paths_sha256,b_disk_paths_sha256,driver_path,driver_sha256,installation_id,reactivation_plan_path,runtime_path,runtime_sha256,source_root,vm_a,vm_b,vm_observer_path,vm_observer_sha256' -or
+    if (($fields -join ',') -cne 'a_disk_paths_sha256,b_disk_paths_sha256,driver_path,driver_sha256,installation_id,reactivation_plan_path,runtime_path,runtime_sha256,source_loader_sha256,source_manifest_path,source_manifest_sha256,source_root,vm_a,vm_b,vm_observer_path,vm_observer_sha256,wsl_uid' -or
         $InputConfig.runtime_sha256 -cnotmatch '\A[a-f0-9]{64}\z' -or
         $InputConfig.installation_id -cnotmatch '\A[a-f0-9]{64}\z' -or
         $InputConfig.a_disk_paths_sha256 -cnotmatch '\A[a-f0-9]{64}\z' -or $InputConfig.b_disk_paths_sha256 -cnotmatch '\A[a-f0-9]{64}\z' -or
+        $InputConfig.source_loader_sha256 -cnotmatch '\A[a-f0-9]{64}\z' -or $InputConfig.source_manifest_sha256 -cnotmatch '\A[a-f0-9]{64}\z' -or
         $InputConfig.source_root -cnotmatch '\A/home/[a-zA-Z0-9_.-]+/\.local/state/n100-ha/cutover-source-[a-f0-9]{40}/infra/k8s\z' -or
         $InputConfig.runtime_path -cnotmatch '\A/home/[a-zA-Z0-9_.-]+/\.local/state/n100-ha/[a-zA-Z0-9_.-]+/runtime\.json\z' -or
+        $InputConfig.source_manifest_path -cne ($InputConfig.source_root -creplace '/infra/k8s\z','.manifest.json') -or
+        ($InputConfig.wsl_uid -isnot [int] -and $InputConfig.wsl_uid -isnot [long]) -or
+        $InputConfig.wsl_uid -lt 1 -or $InputConfig.wsl_uid -ge 4294967295L -or
         $InputConfig.source_root -match '/\.\.?/' -or $InputConfig.runtime_path -match '/\.\.?/') {
         throw 'lease_proof_callback_scope'
     }
@@ -68,8 +72,10 @@ function Get-HaLeaseProof($Context) {
         plan=$request.plan_sha256; attempt=$request.attempt_id; wsl_boot_sha256=$request.wsl_boot_sha256;
         challenge=$challenge; budget_ms=(Get-HaClosureRemaining $Context)
     }
-    $bootstrap = "import hashlib,pathlib,sys,types; p=pathlib.Path(sys.argv[1]); sys.path.insert(0,str(p)); b=(p/'ha_control/wsl_writer_proof.py').read_bytes(); assert hashlib.sha256(b).hexdigest()==sys.argv[2]; m=types.ModuleType('ha_control.wsl_writer_proof'); exec(compile(b,'wsl_writer_proof.py','exec'),m.__dict__); raise SystemExit(m.main())"
-    $command = '--distribution Ubuntu-24.04 --exec /usr/bin/python3 -I -B -S -c "' + $bootstrap + '" ' + $source + ' ' + $request.collector_sha256
+    $bootstrap = "import hashlib,os,pathlib,sys; p,loader,manifest,pin,uid,collector=sys.argv[1:]; p=pathlib.Path(p); assert os.geteuid()==int(uid); b=(p/'ha_control/native_wsl_launcher.py').read_bytes(); assert hashlib.sha256(b).hexdigest()==loader; e={'__name__':'verified_source_loader'}; exec(compile(b,'native_wsl_launcher.py','exec'),e); s=e['verify'](p,pathlib.Path(manifest),pin,int(uid)); assert hashlib.sha256(s['ha_control/wsl_writer_proof.py']).hexdigest()==collector; sys.meta_path.insert(0,e['VerifiedSources'](p,s)); from ha_control.wsl_writer_proof import main; raise SystemExit(main())"
+    $command = '--distribution Ubuntu-24.04 --exec /usr/bin/python3 -I -B -S -c "' + $bootstrap + '" ' +
+        (@($source,$script:ClosureInput.source_loader_sha256,$script:ClosureInput.source_manifest_path,
+            $script:ClosureInput.source_manifest_sha256,$script:ClosureInput.wsl_uid,$request.collector_sha256) -join ' ')
     $start = [Diagnostics.ProcessStartInfo]::new($script:ClosureWsl, $command)
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true

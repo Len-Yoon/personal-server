@@ -1,5 +1,5 @@
 # Prepare the initial Windows observer and one installed controller approval.
-param([string]$InputPath, [string]$InputSha256, [string]$IntentBase64,
+param([string]$InputPath, [string]$InputSha256, [string]$ExpectedSourceManifestSha256, [string]$IntentBase64,
       [string]$RuntimeSha256, [switch]$Preflight, [switch]$Go)
 
 $ErrorActionPreference = 'Stop'
@@ -216,6 +216,7 @@ try {
     } finally { $identity.Dispose() }
     $fsutil = Join-Path ([Environment]::SystemDirectory) 'fsutil.exe'
     Assert-Pin $InputSha256
+    Assert-Pin $ExpectedSourceManifestSha256
     if ($InputPath -cnotmatch '\AC:\\ProgramData\\N100HA-Cutover-Inputs\\[a-f0-9]{40}\\[A-Za-z0-9_.-]+\z') {
         throw 'initial_stage_input_path'
     }
@@ -233,7 +234,8 @@ try {
     Assert-Fields $obs @('launcher_path','launcher_sha256','server_path','server_sha256','callback_path','callback_sha256',
         'windows_boot_sha256','wsl_boot_sha256','collector_sha256','client_sha256')
     Assert-Fields $callback @('a_disk_paths_sha256','b_disk_paths_sha256','driver_path','driver_sha256','installation_id',
-        'reactivation_plan_path','runtime_path','source_root','vm_a','vm_b','vm_observer_path','vm_observer_sha256')
+        'reactivation_plan_path','runtime_path','source_loader_sha256','source_manifest_path','source_manifest_sha256',
+        'source_root','vm_a','vm_b','vm_observer_path','vm_observer_sha256','wsl_uid')
     Assert-Fields $paths @('intent_path','key_path','callback_config_path','observer_input_path','ready_path','plan_path',
         'approval_path','binding_path','preflight_path','scm_verifier_path')
     if ($plan -isnot [pscustomobject] -or $plan.schema_version -ne 2 -or
@@ -271,7 +273,12 @@ try {
     }
     if ($callback.source_root -cnotmatch '\A/home/[A-Za-z0-9_.-]+/\.local/state/n100-ha/cutover-source-[a-f0-9]{40}/infra/k8s\z' -or
         $callback.runtime_path -cnotmatch ('\A/home/[A-Za-z0-9_.-]+/\.local/state/n100-ha/' + $attempt + '/runtime\.json\z') -or
+        $callback.source_manifest_path -cne ($callback.source_root -creplace '/infra/k8s\z','.manifest.json') -or
+        $callback.source_manifest_sha256 -cne $ExpectedSourceManifestSha256 -or
+        ($callback.wsl_uid -isnot [int] -and $callback.wsl_uid -isnot [long]) -or
+        $callback.wsl_uid -lt 1 -or $callback.wsl_uid -ge 4294967295L -or
         $callback.source_root -match '/\.\.?/' -or $callback.runtime_path -match '/\.\.?/') { throw 'initial_stage_callback' }
+    Assert-Pin $callback.source_loader_sha256
     $vmA = [guid]::ParseExact($callback.vm_a,'D')
     $vmB = [guid]::ParseExact($callback.vm_b,'D')
     if ($vmA -eq $vmB -or $vmA -eq [guid]::Empty -or $vmB -eq [guid]::Empty) { throw 'initial_stage_callback' }
