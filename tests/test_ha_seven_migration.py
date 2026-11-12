@@ -642,6 +642,73 @@ class LegacyCutoverTransactionTests(unittest.TestCase):
         admission.restore(owned_disable=True)
         self.assertEqual(workflow['state'], 'active')
 
+    def test_native_windows_channel_rejects_mismatched_response_and_cannot_retry(self):
+        from ha_control.native_cutover import WindowsReactivationSession
+
+        child = """
+import json, sys
+plan, attempt = sys.argv[-3], sys.argv[-1]
+print(json.dumps(dict(plan_sha256=plan, attempt_id=attempt, sequence=0, action='ready')), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    if request['action'] == 'verify':
+        request['attempt_id'] = '0' * 64
+    print(json.dumps(request), flush=True)
+"""
+        channel = WindowsReactivationSession((sys.executable, '-u', '-c', child))
+        with channel.guard(self.plan, '2' * 64):
+            self.assertRegex(channel.request('close', '3' * 64), r'^[a-f0-9]{64}$')
+            with self.assertRaisesRegex(TransitionBlocked, 'legacy_native_command_unconfirmed'):
+                channel.request('verify', '3' * 64)
+            with self.assertRaisesRegex(TransitionBlocked, 'legacy_native_guard_lost'):
+                channel.request('restore', '3' * 64)
+        self.assertIsNone(channel.process)
+
+    def test_native_cutover_cannot_fence_wsl_without_direct_recovery_exclusion(self):
+        from ha_control.native_cutover import NativeCutover
+
+        class Admission:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+            def assert_closed(self):
+                if not self.closed:
+                    raise AssertionError('deployment admission is open')
+
+            def restore(self, *, owned_disable):
+                if not owned_disable:
+                    raise AssertionError('unowned disable')
+                self.closed = False
+
+        class Windows:
+            healthy = True
+
+            @contextmanager
+            def guard(self, plan, attempt):
+                yield
+
+            def request(self, action, proof):
+                raise AssertionError('Windows mutation must remain unreachable')
+
+        class Applications(CutoverRehearsal):
+            def assert_direct_recovery_excluded(self, plan, proof):
+                raise TransitionBlocked('direct_recovery_exclusion_missing')
+
+            def restore_legacy_runtime(self, plan, baseline, safety, linux_touched):
+                if linux_touched:
+                    raise AssertionError('unexpected WSL mutation')
+                return sha(b'legacy-runtime-unchanged')
+
+        admission = Admission()
+        apps = Applications(self.path)
+        with self.assertRaisesRegex(TransitionBlocked, 'legacy_cutover_rolled_back'):
+            LegacyCutover(self.path, NativeCutover(Windows(), admission, apps)).run(self.plan)
+        self.assertNotIn('fence_writers', apps.calls)
+        self.assertTrue(apps.legacy_open)
+        self.assertFalse(admission.closed)
+
     def test_unknown_target_or_activation_never_reopens_legacy(self):
         for failure, unsafe, unsettled, phase in (
             ('restore', True, False, 'rollback_reconciliation_required'),
