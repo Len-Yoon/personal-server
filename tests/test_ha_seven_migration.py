@@ -934,6 +934,20 @@ class LegacyCutoverTransactionTests(unittest.TestCase):
         self.path = Path(self.directory.name).resolve() / 'cutover.json'
         self.plan = '1' * 64
 
+    def test_preflight_records_safe_failure_without_changing_admission(self):
+        class Unhealthy(CutoverRehearsal):
+            def preflight(self, plan):
+                self.calls.append('preflight')
+                raise TransitionBlocked('native_host_external_health_unverified')
+
+        backend = Unhealthy(self.path)
+        with self.assertRaisesRegex(TransitionBlocked, 'legacy_cutover_preflight_failed'):
+            LegacyCutover(self.path, backend).run(self.plan)
+        state = json.loads(self.path.read_bytes())
+        self.assertEqual(state['preflight_failure'], 'native_host_external_health_unverified')
+        self.assertEqual(state['receipts'], {})
+        self.assertEqual(backend.calls, ['preflight'])
+
     def test_single_run_fences_captures_restores_and_switches_in_order(self):
         backend = CutoverRehearsal(self.path)
         operation = LegacyCutover(self.path, backend)
