@@ -1,5 +1,6 @@
 """Frozen-source boundaries and failure receipts; no host/production access."""
 import copy
+from contextlib import contextmanager
 from datetime import datetime,timedelta,timezone
 import hashlib
 import json
@@ -16,6 +17,7 @@ from unittest.mock import MagicMock,patch
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'infra/k8s'))
 from ha_runtime import migrate,seven_migration as M
+from ha_control.legacy_cutover import LegacyCutover, TransitionBlocked
 
 
 def encoded(value):return json.dumps(value,sort_keys=True).encode()
@@ -423,6 +425,163 @@ def postgres_integration(host):
                 'portal_blob':True,'source_ancestor_ABA_cannot_change_imported_bytes':True,'private_tokens_separated':True,'closed_app_write_denied':True,
                 'source_capture_verified':False,'synchronous_pair_verified':False,'writer_authority_issued':False}
 
+
+
+class CutoverRehearsal:
+    """In-process adapter exercising order, observations, and a failure boundary."""
+
+    def __init__(self, path, failure=None, unsafe=False, unsettled=False):
+        self.path = path
+        self.failure = failure
+        self.unsafe = unsafe
+        self.unsettled = unsettled
+        self.calls = []
+        self.guarded = False
+        self.legacy_open = True
+        self.vm_open = False
+
+    @contextmanager
+    def guard(self, plan, attempt):
+        assert not self.guarded
+        self.guarded = True
+        self.attempt = attempt
+        try:
+            yield
+        finally:
+            self.guarded = False
+
+    def receipt(self, stage, plan, **facts):
+        assert self.guarded
+        journal = json.loads(self.path.read_bytes())
+        assert journal['plan_sha256'] == plan and journal['attempt_id'] == self.attempt
+        assert stage == 'preflight' or journal['phase'].endswith('_intent') or stage.startswith('verify_')
+        self.calls.append(stage)
+        if self.failure == stage:
+            raise RuntimeError('lost action response')
+        return dict(plan_sha256=plan, attempt_id=self.attempt, evidence_sha256=sha(stage.encode()), **facts)
+
+    def preflight(self, plan):
+        return self.receipt('preflight', plan, capture_ready=True, restore_ready=True, ingress_ready=True,
+                            legacy_live=True, target_writes_closed=True)
+
+    def block_reactivation(self, plan, baseline):
+        return self.receipt('block_reactivation', plan, baseline_sha256=baseline, blocked=True)
+
+    def fence_writers(self, plan, blocked):
+        self.legacy_open = False
+        return self.receipt('fence_writers', plan, reactivation_sha256=blocked, writers_closed=True,
+                            services=sorted(M.SERVICES))
+
+    def capture(self, plan, fence):
+        assert not self.legacy_open and not self.vm_open
+        return self.receipt('capture', plan, fence_sha256=fence, manifest_sha256='a' * 64)
+
+    def restore(self, plan, manifest):
+        assert not self.legacy_open and not self.vm_open
+        return self.receipt('restore', plan, manifest_sha256=manifest, target_writes_closed=True,
+                            services=sorted(M.SERVICES))
+
+    def verify_closed(self, plan, fence, restore):
+        return self.receipt('verify_closed', plan, fence_sha256=fence, restore_sha256=restore, readiness=True,
+                            target_writes_closed=True, services=sorted(M.SERVICES))
+
+    def activate_vm(self, plan, verified):
+        assert not self.legacy_open
+        self.vm_open = True
+        return self.receipt('activate_vm', plan, verified_sha256=verified, vm_write_authority=True)
+
+    def switch_caddy(self, plan, authority):
+        assert self.vm_open and not self.legacy_open
+        return self.receipt('switch_caddy', plan, authority_sha256=authority, vm_route_live=True)
+
+    def verify_live(self, plan, authority, ingress):
+        return self.receipt('verify_live', plan, authority_sha256=authority, ingress_sha256=ingress,
+                            services=sorted(M.SERVICES), ready=True)
+
+    def assert_rollback_safe(self, plan, baseline):
+        return self.receipt('rollback_inspection', plan, baseline_sha256=baseline,
+                            target_never_opened=not (self.vm_open or self.unsafe), legacy_route_unchanged=True,
+                            target_writes_closed=not self.vm_open, prior_mutations_settled=not self.unsettled)
+
+    def restore_legacy(self, plan, baseline, safety):
+        assert not self.vm_open
+        self.legacy_open = True
+        return self.receipt('restore_legacy', plan, baseline_sha256=baseline, safety_sha256=safety,
+                            legacy_state_restored=True, ready=True)
+
+
+class LegacyCutoverTransactionTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name).resolve() / 'cutover.json'
+        self.plan = '1' * 64
+
+    def test_single_run_fences_captures_restores_and_switches_in_order(self):
+        backend = CutoverRehearsal(self.path)
+        operation = LegacyCutover(self.path, backend)
+        result = operation.run(self.plan)
+        self.assertEqual(result['phase'], 'complete')
+        self.assertEqual(backend.calls, ['preflight', 'block_reactivation', 'fence_writers', 'capture',
+                                         'restore', 'verify_closed', 'activate_vm', 'switch_caddy', 'verify_live'])
+        self.assertTrue(backend.vm_open)
+        self.assertFalse(backend.legacy_open)
+        with self.assertRaisesRegex(TransitionBlocked, 'legacy_cutover_reconciliation_required'):
+            operation.run(self.plan)
+
+    def test_capture_manifest_from_real_converter_reaches_restore_adapter(self):
+        from tests.test_ha_seven_capture import CaptureFixture
+
+        capture = CaptureFixture(self.path.parent)
+
+        class CaptureRehearsal(CutoverRehearsal):
+            def capture(self, plan, fence):
+                assert not self.legacy_open and not self.vm_open
+                result = capture.run()
+                self.manifest_pin = result['manifest_sha256']
+                return self.receipt('capture', plan, fence_sha256=fence, manifest_sha256=self.manifest_pin)
+
+            def restore(self, plan, manifest):
+                assert manifest == self.manifest_pin
+                source = capture.load({'manifest_sha256': manifest})
+                try:
+                    assert set(source.states) == set(M.SERVICES)
+                    assert len(source.objects) == 2
+                finally:
+                    source.close()
+                return super().restore(plan, manifest)
+
+        backend = CaptureRehearsal(self.path)
+        result = LegacyCutover(self.path, backend).run(capture.plan['plan_sha256'])
+        self.assertEqual(result['phase'], 'complete')
+        self.assertEqual(sha((capture.output / 'manifest.json').read_bytes()), backend.manifest_pin)
+
+    def test_failed_restore_reopens_legacy_only_after_positive_closed_observation(self):
+        backend = CutoverRehearsal(self.path, failure='restore')
+        with self.assertRaisesRegex(TransitionBlocked, 'legacy_cutover_rolled_back'):
+            LegacyCutover(self.path, backend).run(self.plan)
+        self.assertEqual(backend.calls[-2:], ['rollback_inspection', 'restore_legacy'])
+        self.assertTrue(backend.legacy_open)
+        self.assertFalse(backend.vm_open)
+        journal = json.loads(self.path.read_bytes())
+        self.assertEqual(journal['failure_phase'], 'restore_intent')
+        self.assertEqual(journal['phase'], 'rolled_back')
+
+    def test_unknown_target_or_activation_never_reopens_legacy(self):
+        for failure, unsafe, unsettled, phase in (
+            ('restore', True, False, 'rollback_reconciliation_required'),
+            ('capture', False, True, 'rollback_reconciliation_required'),
+            ('activate_vm', False, False, 'forward_recovery_required'),
+            ('switch_caddy', False, False, 'forward_recovery_required'),
+        ):
+            with self.subTest(failure=failure):
+                path = self.path.with_name(failure + '.json')
+                backend = CutoverRehearsal(path, failure=failure, unsafe=unsafe, unsettled=unsettled)
+                with self.assertRaisesRegex(TransitionBlocked, 'legacy_cutover_' + phase):
+                    LegacyCutover(path, backend).run(self.plan)
+                self.assertFalse(backend.legacy_open)
+                self.assertNotIn('restore_legacy', backend.calls)
+                self.assertEqual(json.loads(path.read_bytes())['phase'], phase)
 
 if __name__=='__main__':
     if len(sys.argv)==3 and sys.argv[1]=='--postgres-integration':
