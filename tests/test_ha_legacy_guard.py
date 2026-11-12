@@ -10,6 +10,7 @@ from pathlib import Path
 import queue
 import sys
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -362,6 +363,201 @@ class NativePvcCaptureTests(unittest.TestCase):
         self.assertIn('--dry-run=server', calls[0])
         self.assertIn('delete', calls[-2])
         self.assertIn('--for=delete', calls[-1])
+
+
+class CaddyRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        from ha_control import caddy_runtime as caddy
+
+        self.caddy = caddy
+        self.root = Path(__file__).resolve().parents[1]
+        self.work = self.enterContext(tempfile.TemporaryDirectory(dir=self.root))
+        self.calls = []
+        self.applied = False
+        self.lose_apply_result = False
+        self.drift = False
+        self.live_service_hash = 'a' * 64
+        self.desired_service_hash = self.live_service_hash
+        self.upstreams = {key: f'fixture-service:{8000 + i}' for i, key in enumerate(caddy.UPSTREAMS)}
+        self.network_id = 'f' * 64
+        self.network_ambiguous = False
+        self.image = 'sha256:' + 'a' * 64
+        self.volume_names = {'/data': 'fixture_caddy_data', '/config': 'fixture_caddy_config',
+                             caddy.MOUNT: caddy.MTLS_VOLUME}
+        self.base = {'name': 'fixture', 'services': {'caddy': {'networks': {'default': None}, 'volumes': [
+            {'type': 'volume', 'source': 'caddy_data', 'target': '/data'},
+            {'type': 'volume', 'source': 'caddy_config', 'target': '/config'}]},
+            'unrelated': {'image': 'pinned'}},
+            'volumes': {key: {'name': f'fixture_{key}'} for key in ('caddy_data', 'caddy_config')},
+            'networks': {'default': {'name': 'fixture_default', 'ipam': {}}, 'unrelated': {'name': 'untouched'}}}
+        self.source = (self.root / 'caddy/Caddyfile').read_bytes()
+        self.expected_tls = dict.fromkeys(caddy.TLS_FILES, '0' * 64)
+        self.tls_files = ''.join(f'{sha}  {caddy.MOUNT}/{file}\n' for file, sha in self.expected_tls.items()).encode()
+        self.runtime = caddy.CaddyRuntime(self.root, 'fixture', run=self.run_docker)
+
+    def volume(self, name):
+        return {'Name': name, 'Driver': 'local', 'Scope': 'local', 'Options': None,
+                'Mountpoint': '/fixture/volumes/' + name,
+                'Labels': {'com.docker.compose.project': 'fixture',
+                           'com.docker.compose.volume': name.removeprefix('fixture_')}}
+
+    def container(self):
+        caddy = self.caddy
+        identifier = ('2' if self.applied else '1') * 64
+        files = [str(self.root / '-')] if self.applied else [str(self.root / file) for file in caddy.COMPOSE]
+        config = dict(Hostname=identifier[:12], Image=self.image if self.applied else 'fixture-caddy',
+                      Env=[f'{key}={value}' for key, value in self.upstreams.items()],
+                      Labels={caddy.LABEL + key: value for key, value in {
+                          'project': 'fixture', 'service': 'caddy', 'oneoff': 'False', 'container-number': '1',
+                          'config-hash': self.live_service_hash,
+                          'project.working_dir': str(self.root), 'project.config_files': ','.join(files)}.items()})
+        ports = {f'{port}/tcp': [{'HostPort': port, 'HostIp': '0.0.0.0'}] for port in ('80', '443')}
+        mounts = [{'Destination': path, 'Type': 'volume', 'Name': name, 'RW': path != caddy.MOUNT,
+                   'Driver': 'local', 'Source': self.volume(name)['Mountpoint']}
+                  for path, name in self.volume_names.items() if path != caddy.MOUNT or self.applied]
+        host_mounts = []
+        if self.applied:
+            mounts.append({'Destination': caddy.CONFIG, 'Type': 'bind',
+                           'RW': False, 'Source': str(Path(self.work) / 'Caddyfile')})
+            host_mounts = [{'Target': caddy.MOUNT, 'VolumeOptions': {'NoCopy': True}}, {'Target': caddy.CONFIG}]
+            if self.drift:
+                mounts[-1]['RW'] = True
+        return {'Id': identifier, 'Image': self.image, 'Config': config, 'Mounts': mounts,
+                'State': {'Running': True, 'Status': 'running', 'StartedAt': 'start'},
+                'HostConfig': {'Mounts': host_mounts, 'NetworkMode': 'fixture_default'},
+                'NetworkSettings': {'Ports': ports, 'Networks': {'fixture_default': {'NetworkID': self.network_id}}}}
+
+    def run_docker(self, args, **kwargs):
+        args = args[len(self.caddy.DOCKER):]
+        self.calls.append(args)
+        result = None
+        if args[0] == 'ps':
+            return self.container()['Id'].encode()
+        if args[0] == 'inspect':
+            result = [self.container()]
+        if args[:2] == ('image', 'inspect'):
+            result = [{'Id': self.image}]
+        if args[:2] == ('volume', 'inspect'):
+            result = [self.volume(args[2])]
+        if args[:2] == ('network', 'inspect'):
+            self.assertEqual(args[2], self.network_id)
+            result = [{'Id': self.network_id, 'Name': 'fixture_default', 'Scope': 'local', 'Driver': 'bridge',
+                       'IPAM': {'Driver': 'default'}, 'Labels': {'com.docker.compose.project': 'fixture',
+                                                                'com.docker.compose.network': 'default'}}]
+        if args[:2] == ('network', 'ls'):
+            ids = [self.network_id] + (['0' * 64] if self.network_ambiguous else [])
+            return '\n'.join(ids).encode()
+        if args[0] == 'exec':
+            if args[2] == '/bin/cat':
+                return (Path(self.work) / 'Caddyfile').read_bytes() if self.applied else self.source
+            if args[2] == '/bin/busybox':
+                return self.tls_files
+            result = {'apps': {'http': {'routes': 'candidate' if self.applied else 'source'}}}
+        if args[0] == 'run':
+            self.assertIn('type=volume,src=n100-ha-caddy-mtls,dst=/run/n100-ha/caddy-mtls,readonly,volume-nocopy', args)
+            self.assertIn('--network=none', args)
+            return self.tls_files
+        if args[0] == 'compose':
+            isolated = kwargs.get('input_data')
+            if isolated is None:
+                self.assertEqual(kwargs.get('compose_env'), self.upstreams)
+            if args[-3:] == ('config', '--hash', 'caddy'):
+                return f'caddy {self.desired_service_hash}\n'.encode()
+            result = json.loads(isolated) if isolated is not None else deepcopy(self.base)
+            if any(arg.endswith('caddy-ha-compose.json') for arg in args):
+                self.override = Path(next(arg for arg in args if arg.endswith('caddy-ha-compose.json')))
+                overlay = json.loads(self.override.read_bytes())
+                result['services']['caddy']['image'] = overlay['services']['caddy']['image']
+                result['services']['caddy']['volumes'] += overlay['services']['caddy']['volumes']
+                result['volumes'].update(overlay['volumes'])
+            if 'up' in args:
+                self.assertIsNotNone(isolated)
+                self.assertEqual(set(result['services']), {'caddy'})
+                self.assertEqual(result['networks'], {'default': {'name': 'fixture_default', 'external': True}})
+                self.assertTrue(all(value['external'] is True for value in result['volumes'].values()))
+                self.assertEqual(args[-8:], ('up', '-d', '--no-deps', '--no-build', '--pull', 'never',
+                                             '--force-recreate', 'caddy'))
+                self.applied = True
+                if self.lose_apply_result:
+                    raise subprocess.TimeoutExpired(args, 1)
+                return b''
+        self.assertIsNotNone(result, args)
+        return json.dumps(result).encode()
+
+    def prepare(self):
+        return self.runtime.prepare(self.runtime.inspect(), '172.20.0.10', self.work,
+                                    expected_mtls_sha256=self.expected_tls)
+
+    def test_apply_uses_only_pinned_caddy_and_preserves_persistent_volumes(self):
+        prepared = self.prepare()
+        guard = Mock()
+        result = self.runtime.apply(prepared, guard)
+        self.assertTrue(self.applied)
+        self.assertEqual(guard.call_count, 3)
+        self.assertEqual(result['candidate_sha256'], prepared.candidate_sha256)
+        self.assertTrue((Path(self.work) / 'caddy-apply-intent.json').exists())
+        self.assertEqual(len([cmd for cmd in self.calls if 'up' in cmd]), 1)
+
+    def test_uncertain_apply_requires_reconciliation_without_resending(self):
+        prepared = self.prepare()
+        self.lose_apply_result = True
+        for _ in range(2):
+            with self.assertRaisesRegex(TransitionBlocked, 'caddy_reconciliation_required'):
+                self.runtime.apply(prepared, Mock())
+        self.assertEqual(len([cmd for cmd in self.calls if 'up' in cmd]), 1)
+
+    def test_guard_loss_after_durable_intent_blocks_replacement(self):
+        prepared = self.prepare()
+        intent = Path(self.work) / 'caddy-apply-intent.json'
+
+        def guard():
+            if intent.is_file():
+                raise TransitionBlocked('guard_lost')
+
+        with self.assertRaisesRegex(TransitionBlocked, 'caddy_reconciliation_required'):
+            self.runtime.apply(prepared, guard)
+        self.assertTrue(intent.is_file())
+        self.assertFalse(self.applied)
+
+    def test_live_mount_drift_cannot_report_success(self):
+        prepared = self.prepare()
+        self.drift = True
+        with self.assertRaisesRegex(TransitionBlocked, 'caddy_reconciliation_required'):
+            self.runtime.apply(prepared, Mock())
+        self.assertTrue(self.applied)
+
+    def test_live_compose_drift_is_rejected_before_replacement(self):
+        prepared = self.prepare()
+        self.desired_service_hash = 'b' * 64
+        with self.assertRaisesRegex(TransitionBlocked, 'caddy_live_compose_drift'):
+            self.runtime.apply(prepared, Mock())
+        self.assertFalse(self.applied)
+
+    def test_credential_file_drift_is_rejected_before_replacement(self):
+        prepared = self.prepare()
+        self.tls_files = self.tls_files.replace(b'0' * 64, b'1' * 64, 1)
+        with self.assertRaisesRegex(TransitionBlocked, 'caddy_mtls_files_changed'):
+            self.runtime.apply(prepared, Mock())
+        self.assertFalse(self.applied)
+
+    def test_preparation_rejects_mtls_fingerprint_different_from_staged_receipt(self):
+        self.expected_tls['client.key'] = '1' * 64
+        with self.assertRaisesRegex(TransitionBlocked, 'caddy_mtls_files_changed'):
+            self.prepare()
+        self.assertFalse(self.applied)
+
+    def test_project_replica_drift_is_rejected_before_replacement(self):
+        self.base['services']['caddy']['deploy'] = {'replicas': 2}
+        with self.assertRaisesRegex(TransitionBlocked, 'caddy_replica_scope_changed'):
+            self.prepare()
+        self.assertFalse(self.applied)
+
+    def test_ambiguous_network_name_is_rejected_before_replacement(self):
+        prepared = self.prepare()
+        self.network_ambiguous = True
+        with self.assertRaisesRegex(TransitionBlocked, 'caddy_network_name_ambiguous'):
+            self.runtime.apply(prepared, Mock())
+        self.assertFalse(self.applied)
 
 
 if __name__ == "__main__":

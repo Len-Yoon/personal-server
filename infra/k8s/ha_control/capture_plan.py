@@ -80,7 +80,8 @@ def _file(path, sqlite=False):
     return result
 
 
-def compile_plan(*, sources_root, private_root, identity, sources, evidence, absences):
+def compile_plan(*, sources_root, private_root, identity, sources, evidence, absences,
+                 expected_evidence_pins=None):
     """Bind native closure evidence and exact file descriptors to the converter.
 
     The capture backend supplies all staged file locations and independently
@@ -97,6 +98,9 @@ def compile_plan(*, sources_root, private_root, identity, sources, evidence, abs
     _require(type(absences) is dict, "frozen_source_absences_invalid")
     reader = converter.Reader()
     evidence_files = {name: converter.descriptor(Path(path)) for name, path in evidence.items()}
+    if expected_evidence_pins is not None:
+        _require({name: item["sha256"] for name, item in evidence_files.items()} == expected_evidence_pins,
+                 "frozen_source_evidence_pin_changed")
     raw = {name: reader.read(item) for name, item in evidence_files.items()}
     runtime_hash = converter.sha(raw["runtime"])
     graph_hash = converter.sha(raw["writer_graph"])
@@ -165,7 +169,7 @@ def compile_plan(*, sources_root, private_root, identity, sources, evidence, abs
 
 
 def capture_closed_sources(*, pvc, compose, sources_root, private_root, output,
-                           identity, evidence, assert_writers_closed):
+                           identity, evidence, assert_writers_closed, expected_evidence_pins=None):
     """Collect both native storage providers and normalize under one closed writer state."""
     source_root = Path(sources_root)
     pvc_roots = pvc.collect(source_root, assert_writers_closed)
@@ -197,7 +201,8 @@ def capture_closed_sources(*, pvc, compose, sources_root, private_root, output,
                     "checked_at": converter.now(),
                 }
     plan, digest = compile_plan(sources_root=source_root, private_root=private_root, identity=identity,
-                                sources=N100_SOURCES, evidence=evidence, absences=absences)
+                                sources=N100_SOURCES, evidence=evidence, absences=absences,
+                                expected_evidence_pins=expected_evidence_pins)
     result = converter.capture(plan, digest, output)
     pvc.assert_settled()
     assert_writers_closed()

@@ -3,6 +3,7 @@ import copy
 from contextlib import contextmanager
 from datetime import datetime,timedelta,timezone
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -18,10 +19,148 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'infra/k8s'))
 from ha_runtime import migrate,seven_migration as M
 from ha_control.legacy_cutover import LegacyCutover, TransitionBlocked
+from ha_control import frozen_transport, native_frozen_capture
 
 
 def encoded(value):return json.dumps(value,sort_keys=True).encode()
 def sha(raw):return hashlib.sha256(raw).hexdigest()
+
+
+class NativeFrozenCaptureTests(unittest.TestCase):
+    def test_frozen_transfer_rejects_tampering_before_publishing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "source"
+            source.mkdir(mode=0o700)
+            write = native_frozen_capture.seven_capture._write
+            evidence = {key: write(source / f"{key}.json", b"{}")
+                        for key in ("runtime", "writer_graph", "writer_closure", "dispositions")}
+            audit = write(source / "capture-audit.json", encoded({"evidence": evidence}))
+            receipt = write(source / "freeze-receipt.json", encoded({"capture_audit": audit}))
+            content = b"synthetic frozen bytes"
+            artifact = write(source / "synthetic.blob", content)
+            manifest = write(source / "manifest.json", encoded({
+                "freeze_receipt": receipt, "artifacts": {"synthetic": artifact},
+            }))
+            (source / "unreferenced.txt").write_text("do not send")
+            wire = io.BytesIO()
+            frozen_transport.send_bundle(source, manifest["sha256"], wire)
+            data = wire.getvalue()
+            self.assertNotIn(b"do not send", data)
+            (source / "synthetic.blob").write_bytes(b"X" + content[1:])
+            bad_source = io.BytesIO()
+            with self.assertRaisesRegex(M.MigrationRejected, "frozen_artifact_changed"):
+                frozen_transport.send_bundle(source, manifest["sha256"], bad_source)
+            self.assertNotIn(b"X" + content[1:], bad_source.getvalue())
+            target = root / "target"
+            mutated = data.replace(content, b"X" + content[1:])
+            with self.assertRaisesRegex(TransitionBlocked, "hash_mismatch"):
+                frozen_transport.receive_bundle(target, manifest["sha256"], io.BytesIO(mutated), max_bytes=4000)
+            self.assertFalse(target.exists())
+            with self.assertRaisesRegex(TransitionBlocked, "size_invalid"):
+                frozen_transport.receive_bundle(target, manifest["sha256"], io.BytesIO(data), max_bytes=10)
+            self.assertFalse(target.exists())
+            self.assertEqual(frozen_transport.receive_bundle(target, manifest["sha256"], io.BytesIO(data),
+                                                            max_bytes=4000), manifest["sha256"])
+            self.assertEqual((target / "synthetic.blob").read_bytes(), content)
+            self.assertFalse((target / "unreferenced.txt").exists())
+
+    def test_frozen_transfer_publish_is_exclusive_and_reports_uncertain_durability(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            staging, target = root / "staging", root / "target"
+            staging.mkdir(mode=0o700)
+            target.mkdir(mode=0o700)
+            inode = target.stat().st_ino
+            with self.assertRaisesRegex(TransitionBlocked, "destination_exists"):
+                frozen_transport._publish(staging, target)
+            self.assertEqual(target.stat().st_ino, inode)
+            target.rmdir()
+            with patch.object(frozen_transport.os, "fsync", side_effect=OSError("fixture")):
+                with self.assertRaisesRegex(TransitionBlocked, "publish_unconfirmed"):
+                    frozen_transport._publish(staging, target)
+            self.assertTrue(target.is_dir())
+            self.assertFalse(staging.exists())
+
+    def test_actual_writer_and_reader_wiring_requires_complete_external_closure(self):
+        services = sorted(M.SERVICES)
+        k3s = ("portal-web", "book-memo", "youtube-memo", "crawler-worker")
+        identity = {"source_commit": "a" * 40, "cluster": "n100", "plan_sha256": "b" * 64,
+                    "target_system_id": "123"}
+        external = {service: ["windows:recovery", "github:deploy"] for service in services}
+        baseline = {
+            "containers": {service: {"id": str(index) * 64} for index, service in enumerate(services, 1)},
+            "deployments": {service: {"uid": service + "-uid"} for service in k3s},
+            "schedules": [{"uid": "portal-backup", "name": "portal-backup"}],
+        }
+        bindings = {service: {"deployment_uid": service + "-uid", "claims": [{"name": service}]}
+                    for service in k3s}
+        schedule = {"spec": {"jobTemplate": {"spec": {"template": {"spec": {}}}}}}
+        witnesses = {"windows:recovery": "c" * 64, "github:deploy": "d" * 64}
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(native_frozen_capture, "inspect_live_baseline", return_value=baseline),
+            patch.object(native_frozen_capture, "inspect_pvc_bindings", return_value=bindings),
+            patch.object(native_frozen_capture, "inspect_compose_capture", return_value={}),
+            patch.object(native_frozen_capture, "LinuxWriters", autospec=True) as linux,
+            patch.object(native_frozen_capture, "PvcCapture", autospec=True) as pvc,
+            patch.object(native_frozen_capture, "ComposeCapture"),
+            patch.object(native_frozen_capture, "capture_closed_sources") as capture,
+        ):
+            linux.return_value._schedule.return_value = (schedule, False)
+            linux.return_value._claims.return_value = {"portal-web"}
+            pvc.return_value.bindings = bindings
+            observe = MagicMock(return_value={"windows:recovery": "c" * 64})
+            converter = native_frozen_capture.seven_capture
+            source_pins = converter.inspect_converter_sources(converter.Reader())
+            source = native_frozen_capture.NativeFrozenCapture(Path(directory).resolve(), identity, "e" * 64,
+                                                               source_pins, external, observe)
+            source.prepare()
+            source.block_reactivation()
+            with self.assertRaisesRegex(TransitionBlocked, "external_closure_incomplete"):
+                source.fence("f" * 64, "1" * 64)
+            linux.return_value.fence.assert_not_called()
+            observe.return_value = witnesses
+            fenced = source.fence("f" * 64, "1" * 64)
+            fence = fenced["evidence_sha256"]
+            with self.assertRaisesRegex(TransitionBlocked, "fence_unbound"):
+                source.capture("9" * 64)
+            capture.assert_not_called()
+            evidence = source.root / "writer-closure.json"
+            original = evidence.read_bytes()
+            modified = json.loads(original)
+            modified["observations"][0]["evidence_sha256"] = "9" * 64
+            evidence.write_bytes(encoded(modified))
+            with self.assertRaisesRegex(TransitionBlocked, "evidence_changed"):
+                source.capture(fence)
+            capture.assert_not_called()
+            evidence.write_bytes(original)
+
+            def capture_fixture(**kwargs):
+                kwargs["assert_writers_closed"]()
+                output = kwargs["output"]
+                output.mkdir(mode=0o700)
+                write = native_frozen_capture.seven_capture._write
+                receipt = write(output / "freeze-receipt.json", encoded({
+                    "writer_fence_receipt_sha256": fence,
+                    "source_runtime_sha256": source.runtime_sha256,
+                    "writer_graph_sha256": source.graph_sha256,
+                    "capture_audit": {"sha256": "3" * 64},
+                }))
+                manifest = write(output / "manifest.json", encoded(identity | {"freeze_receipt": receipt}))
+                return {"status": "captured", "manifest_sha256": manifest["sha256"],
+                        "capture_audit_sha256": "3" * 64}
+
+            capture.side_effect = capture_fixture
+            self.assertEqual(source.capture(fence)["evidence_sha256"], "3" * 64)
+            self.assertEqual({call.args[2] for call in observe.call_args_list}, {"1" * 64})
+            graph = json.loads((source.root / "writer-graph.json").read_bytes())["services"]
+            self.assertIn("kube:cronjob:portal-backup", graph["portal-web"])
+            self.assertNotIn("kube:cronjob:portal-backup", graph["book-memo"])
+            pvc.return_value.assert_settled.side_effect = TransitionBlocked("pvc_cleanup_pending")
+            with self.assertRaisesRegex(TransitionBlocked, "pvc_cleanup_pending"):
+                source.restore_writers()
+            linux.return_value.restore.assert_not_called()
 
 
 class FrozenFixture:
