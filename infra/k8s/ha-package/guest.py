@@ -36,6 +36,40 @@ def base(image,user):
             'tmpfs':['/tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777']}
 
 
+def render_ingress(guest_ip):
+    """Render only the static, mutually authenticated HAProxy frontend."""
+    require(type(guest_ip) is str)
+    ip = ipaddress.ip_address(guest_ip)
+    require(ip.version == 4 and ip.is_private and not (
+        ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved))
+    config=['global','  maxconn 128','  nbthread 1','  hard-stop-after 5s',
+        '  ssl-default-bind-options ssl-min-ver TLSv1.3',
+        'defaults','  mode http','  no log','  option http-server-close',
+        '  timeout connect 2s','  timeout client 15s','  timeout server 15s',
+        '  timeout http-request 5s','  timeout http-keep-alive 2s','  timeout queue 2s',
+        'frontend fixed_ingress',
+        f'  bind {guest_ip}:10443 ssl crt /etc/ha-ingress/server.pem ca-file /etc/ha-ingress/clients-ca.crt verify required',
+        '  http-request deny deny_status 403 unless { req.hdr_cnt(host) eq 1 }']
+    for service in SERVICES:
+        config += [f'  acl host_{service} hdr(host),lower -m str {service}.ha.internal {service}.ha.internal:10443']
+    config += ['  http-request deny deny_status 403 unless '+' or '.join('host_'+service for service in SERVICES)]
+    for service in SERVICES:
+        config += [f'  use_backend app_{service} if host_{service}']
+    for service in SERVICES:
+        config += [f'backend app_{service}',f'  server app unix@/run/ha-ingress/{service}/http.sock maxconn 16 maxqueue 16']
+    return '\n'.join(config) + '\n'
+
+
+def render_ingress_container(image):
+    require(type(image) is str and IMAGE.fullmatch(image) is not None)
+    ingress=base(image,'10004:10004')
+    ingress.update(network_mode='host',entrypoint=['/usr/sbin/haproxy'],
+        command=['-W','-db','-f','/etc/ha-ingress/haproxy.cfg'],
+        volumes=[mount(ROOT+'/ingress','/etc/ha-ingress'),mount(RUN+'/ingress','/run/ha-ingress')])
+    return ingress
+
+
+
 def render(spec):
     require(type(spec) is dict and set(spec)=={'schema_version','source_commit','installation_id','node',
         'guest_ip','pg_a','pg_b','images','gateway_sha256','broker_sha256','docker_gid','app_environment'})
@@ -102,26 +136,7 @@ def render(spec):
             '--expected-sha256',spec['broker_sha256'],'--authority','/etc/ha-broker/authority.json'],
         volumes=[mount(ROOT+'/broker','/etc/ha-broker'),mount('/var/run/docker.sock','/var/run/docker.sock')])
     services['ha-broker']=broker
-    ingress=base(images['ha-ingress-utility'],'10004:10004')
-    ingress.update(network_mode='host',entrypoint=['/usr/sbin/haproxy'],
-        command=['-W','-db','-f','/etc/ha-ingress/haproxy.cfg'],
-        volumes=[mount(ROOT+'/ingress','/etc/ha-ingress'),mount(RUN+'/ingress','/run/ha-ingress')])
-    services['ha-ingress']=ingress
-    config=['global','  maxconn 128','  nbthread 1','  hard-stop-after 5s',
-        '  ssl-default-bind-options ssl-min-ver TLSv1.3',
-        'defaults','  mode http','  no log','  option http-server-close',
-        '  timeout connect 2s','  timeout client 15s','  timeout server 15s',
-        '  timeout http-request 5s','  timeout http-keep-alive 2s','  timeout queue 2s',
-        'frontend fixed_ingress',
-        f'  bind {spec["guest_ip"]}:10443 ssl crt /etc/ha-ingress/server.pem ca-file /etc/ha-ingress/clients-ca.crt verify required',
-        '  http-request deny deny_status 403 unless { req.hdr_cnt(host) eq 1 }']
-    for service in SERVICES:
-        config += [f'  acl host_{service} hdr(host),lower -m str {service}.ha.internal {service}.ha.internal:10443']
-    config += ['  http-request deny deny_status 403 unless '+' or '.join('host_'+service for service in SERVICES)]
-    for service in SERVICES:
-        config += [f'  use_backend app_{service} if host_{service}']
-    for service in SERVICES:
-        config += [f'backend app_{service}',f'  server app unix@/run/ha-ingress/{service}/http.sock maxconn 16 maxqueue 16']
+    services['ha-ingress']=render_ingress_container(images['ha-ingress-utility'])
     sequence=['verify source/image/plan and installation identities',
         'provision fresh guest directories, immutable config, separate ingress CA and private keys',
         'request explicit operational approval before legacy shutdown, fencing, route or writer transition and issuance of installed authority',
@@ -148,7 +163,7 @@ def render(spec):
         'ingress_health':'Static ingress is not writer readiness. Route activation requires fresh DB lease and all application readiness.',
         'rollback':'Before new writes, preserve V1 rollback. After accepted writes/effects, use forward recovery and reconcile uncertain effects.',
         'retired_guest':'Fenced old VM stays off. A fresh standby supplies synchronous replay; never restart the fenced writer to satisfy peer checks.'}
-    return {'name':'n100-ha-'+spec['installation_id'][:12],'services':services},'\n'.join(config)+'\n',review
+    return {'name':'n100-ha-'+spec['installation_id'][:12],'services':services},render_ingress(spec['guest_ip']),review
 
 
 def main():

@@ -66,6 +66,17 @@ class GuestLayoutTest(unittest.TestCase):
         self.assertTrue(all(s['restart']=='no' for s in services.values()))
         self.assertEqual(len(review['directories']),15)
 
+    def test_standalone_ingress_matches_full_guest_layout(self):
+        value = fixture()
+        compose, expected, _ = guest.render(value)
+        self.assertEqual(guest.render_ingress(value['guest_ip']), expected)
+        image = value['images']['ha-ingress-utility']
+        self.assertEqual(guest.render_ingress_container(image), compose['services']['ha-ingress'])
+        with self.assertRaises(guest.LayoutError):
+            guest.render_ingress('0.0.0.0')
+        with self.assertRaises(guest.LayoutError):
+            guest.render_ingress_container('haproxy:latest')
+
     def test_unpinned_images_secret_injection_and_namespace_bypass_are_rejected(self):
         changes=[lambda v:v['images'].update({'portal-web':'portal:latest'}),
             lambda v:v['app_environment']['car-care-worker'].update({'CAR_CARE_TELEGRAM_BOT_TOKEN':'secret'}),
