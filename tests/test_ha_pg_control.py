@@ -1,10 +1,14 @@
 """Native-adapter unit evidence only; no Windows/N100 actions are executed."""
 from contextlib import contextmanager
 from copy import deepcopy
+import hashlib
+import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -12,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "infra/k8s"))
 from ha_control.controller import TransitionBlocked
 from ha_control.pg import PgBackend, ROLE_LOCK
-from ha_control import cli
+from ha_control import cli, scm_pg_auth_probe
 
 
 class Fence:
@@ -731,6 +735,75 @@ class PGControlTests(unittest.TestCase):
             self.assertFalse(any('SELECT 1 FROM ha_effects.ledger' in call.args[0] for call in self.primary.execute.call_args_list))
 
 
+
+
+class ScmPgAuthProbeTests(unittest.TestCase):
+    def test_exact_service_scope_and_two_verified_read_only_connections(self):
+        probe=scm_pg_auth_probe
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve()
+            material=root/"db-auth-material"
+            material.mkdir()
+            ca=material/"ca.crt"
+            ca.write_bytes(b"fixture CA")
+            (material/"postgres.pgpass").write_text("fixture only")
+            authority=root/"pg-auth-probe-authority"
+            journal=authority/"journal"
+            journal.mkdir(parents=True)
+            plan_path=authority/"plan.json"
+            approval_path=authority/"approval.json"
+            report=journal/"controller-state.json"
+            sid="S-1-5-80-1-2-3-4-5"
+            plan={"scope":probe.SCOPE,"service_sid":sid,"hosts":{"A":"10.0.0.2","B":"10.0.0.3"},
+                  "system_id":"1234","ca_sha256":hashlib.sha256(ca.read_bytes()).hexdigest()}
+            raw=json.dumps(plan).encode()
+            plan_path.write_bytes(raw)
+            pin=hashlib.sha256(raw).hexdigest()
+            approval={"scope":probe.SCOPE,"plan_sha256":pin,"expires_unix":int(time.time())+60}
+            approval_path.write_text(json.dumps(approval))
+            args=SimpleNamespace(plan=str(plan_path),approval=str(approval_path),journal=str(report))
+            connection_a=MagicMock()
+            connection_b=MagicMock()
+            for node,connection in (("A",connection_a),("B",connection_b)):
+                connection.execute.return_value.fetchone.side_effect=[
+                    ("ha_"+node,node=="B","on","1234","postgres"),(True,),
+                ]
+            contexts=[]
+            for connection in (connection_a,connection_b):
+                context=MagicMock()
+                context.__enter__.return_value=connection
+                contexts.append(context)
+            connect=MagicMock(side_effect=contexts)
+            with patch.dict(os.environ,{},clear=True), patch.dict(sys.modules,{"psycopg":SimpleNamespace(connect=connect)}):
+                with patch.object(probe,"service_identity",return_value="S-1-5-80-6-7-8-9-10"):
+                    with self.assertRaises(ValueError):
+                        probe.run(args)
+                    connect.assert_not_called()
+                with patch.object(probe,"service_identity",return_value=sid):
+                    with patch.dict(os.environ,{"PGPASSWORD":"fixture"}):
+                        with self.assertRaises(ValueError):
+                            probe.run(args)
+                        connect.assert_not_called()
+                    probe.run(args)
+                    with self.assertRaises(ValueError):
+                        probe.run(args)
+            for node,call,connection in zip(("A","B"),connect.call_args_list,(connection_a,connection_b)):
+                self.assertEqual(call.kwargs["host"],plan["hosts"][node])
+                self.assertEqual(call.kwargs["hostaddr"],plan["hosts"][node])
+                self.assertEqual(call.kwargs["sslmode"],"verify-full")
+                self.assertEqual(call.kwargs["gssencmode"],"disable")
+                self.assertEqual(call.kwargs["require_auth"],"scram-sha-256")
+                self.assertEqual(call.kwargs["passfile"],str(material/"postgres.pgpass"))
+                connection.execute.assert_any_call("SET TRANSACTION READ ONLY")
+                connection.rollback.assert_called_once()
+            result=json.loads(report.read_text())
+            self.assertEqual(result,{"scope":probe.SCOPE,"plan_sha256":pin,"nodes":["A","B"],
+                                     "service_identity_verified":True,"tls_verified":True,"authority_opened":False})
+            approval["expires_unix"]=0
+            with self.assertRaises(ValueError):
+                probe.verify_plan(plan,approval,raw,time.time())
+            with self.assertRaises(ValueError):
+                probe.strict_json('{"scope":0,"scope":1}')
 
 if __name__ == "__main__":
     unittest.main()
