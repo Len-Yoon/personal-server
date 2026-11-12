@@ -54,7 +54,10 @@ class PgBackend:
                     _deny('private_configuration_required')
                 candidate = json.loads(raw,object_pairs_hook=pairs)
                 profile = candidate.get('profile')
-                if profile is None:
+                if 'initial_wsl_cutover' in candidate:
+                    from .initial_windows_gate import InitialWindowsGate
+                    self.fence_adapter = InitialWindowsGate(plan, approval)
+                elif profile is None:
                     self.fence_adapter = WindowsFence(plan, approval)
                 elif profile == 'enforced-vm-v1':
                     from .enforced_windows import EnforcedWindowsFence
@@ -97,8 +100,10 @@ class PgBackend:
         # This marker is injected by WindowsFence only after its native guard
         # has bound the exact approval bytes/hash/action to the private plan.
         # A fence-only approval never authorizes PostgreSQL state changes.
-        if isinstance(value, dict) and value.get("_approval_action") != "ha-transition":
-            _deny("ha_transition_approval_required")
+        if isinstance(value, dict):
+            expected = 'ha-initial-wsl-cutover' if 'initial_wsl_cutover' in value else 'ha-transition'
+            if value.get('_approval_action') != expected:
+                _deny('ha_transition_approval_required')
         if (not isinstance(value, dict) or not isinstance(value.get("cluster"), str)
                 or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", value["cluster"])
                 or value.get("node") not in {"A", "B"} or type(value.get("generation")) is not int

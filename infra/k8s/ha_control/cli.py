@@ -59,6 +59,12 @@ def run(args):
         if journal != expected or journal.is_symlink() or journal.parent.is_symlink() or not journal.parent.is_dir():
             raise TransitionBlocked("plan_bound_journal_required")
         validate_bundle(p)
+        if 'initial_wsl_cutover' in p:
+            if args.command != 'serve' or not getattr(args, 'arm', False):
+                raise TransitionBlocked('initial_cutover_requires_explicit_serve')
+            from .initial_lease_service import native_initial_observer, serve_initial
+            with native_initial_observer(backend) as observer:
+                return serve_initial(backend, journal, observer)
         if args.command == "authenticate":
             backend.authenticate_isolated_nodes()
             return {"status": "PASS", "authenticated_nodes": ["A", "B"], "authority_opened": False}
