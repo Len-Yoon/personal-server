@@ -664,6 +664,34 @@ for line in sys.stdin:
                 channel.request('restore', '3' * 64)
         self.assertIsNone(channel.process)
 
+    def test_wsl_bootstrap_observes_native_marker_and_rejects_legacy_collision(self):
+        from ha_control.native_cutover import WslBootstrapAdmission
+
+        root = self.path.parent
+        (root / 'scripts').mkdir()
+        (root / 'data').mkdir()
+        content = b'bootstrap'
+        (root / 'scripts/windows-bootstrap.sh').write_bytes(content)
+        guard = WslBootstrapAdmission(sha(content))
+        guard.root = root
+        guard.authority = root / 'protected'
+        guard.authority.mkdir()
+        marker = guard.authority / 'ha-controller-owner.json'
+        old = root / 'data/ha-controller-owner.json'
+        with guard.guard():
+            with self.assertRaisesRegex(TransitionBlocked, 'legacy_bootstrap_owner_missing'):
+                guard.assert_visible()
+            marker.write_bytes(b'{"published_by":"Windows"}')
+            guard.assert_visible()
+            with self.assertRaisesRegex(TransitionBlocked, 'legacy_bootstrap_owner_not_released'):
+                guard.assert_released()
+            old.symlink_to(root / 'missing')
+            with self.assertRaisesRegex(TransitionBlocked, 'legacy_bootstrap_owner_changed'):
+                guard.assert_visible()
+            old.unlink()
+            marker.unlink()
+            guard.assert_released()
+
     def test_native_cutover_cannot_fence_wsl_without_direct_recovery_exclusion(self):
         from ha_control.native_cutover import NativeCutover
 

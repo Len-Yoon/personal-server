@@ -115,7 +115,7 @@ $script=[ScriptBlock]::Create([Text.Encoding]::UTF8.GetString($entry).TrimStart(
 
     def request(self, action, proof):
         if (not self.healthy or self.process.poll() is not None
-                or action not in {"close", "verify", "restore", "finish"}):
+                or action not in {"claim", "close", "verify", "restore", "finish"}):
             raise TransitionBlocked("legacy_native_guard_lost")
         self.sequence += 1
         request = self._base(action) | dict(nonce=secrets.token_hex(32), proof_sha256=_pin(proof))
@@ -137,19 +137,55 @@ class WslBootstrapAdmission:
 
     def __init__(self, source_sha256):
         self.root = Path("/mnt/c/personal-server")
+        self.authority = Path("/mnt/c/ProgramData/N100HA-Cutover")
         self.source_sha256 = _pin(source_sha256)
+        self.active = False
 
     @contextmanager
     def guard(self):
         source = self.root / "scripts/windows-bootstrap.sh"
         lock = self.root / "data/ha-legacy-bootstrap.lock"
-        if (source.resolve() != source or lock.resolve() != lock
+        self.marker = self.authority / "ha-controller-owner.json"
+        if (self.active or source.resolve() != source or lock.resolve() != lock
+                or self.authority.resolve(strict=True) != self.authority
                 or hashlib.sha256(source.read_bytes()).hexdigest() != self.source_sha256):
             raise TransitionBlocked("legacy_wsl_bootstrap_source_changed")
         with exclusive(lock):
             if hashlib.sha256(source.read_bytes()).hexdigest() != self.source_sha256:
                 raise TransitionBlocked("legacy_wsl_bootstrap_source_changed")
-            yield
+            self.directory = os.open(self.marker.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            self.active = True
+            try:
+                if self._legacy_marker_present() or self._marker_visible():
+                    raise TransitionBlocked("legacy_bootstrap_owner_already_present")
+                yield
+            finally:
+                self.active = False
+                os.close(self.directory)
+
+    def _legacy_marker_present(self):
+        return any(name.casefold() == self.marker.name for name in os.listdir(self.root / "data"))
+
+    def _assert_location(self):
+        if not self.active:
+            raise TransitionBlocked("legacy_bootstrap_owner_guard_required")
+        parent = self.authority.lstat()
+        held = os.fstat(self.directory)
+        if (self._legacy_marker_present()
+                or (parent.st_dev, parent.st_ino) != (held.st_dev, held.st_ino)):
+            raise TransitionBlocked("legacy_bootstrap_owner_changed")
+
+    def _marker_visible(self):
+        self._assert_location()
+        return any(name.casefold() == self.marker.name for name in os.listdir(self.directory))
+
+    def assert_visible(self):
+        if not self._marker_visible():
+            raise TransitionBlocked("legacy_bootstrap_owner_missing")
+
+    def assert_released(self):
+        if self._marker_visible():
+            raise TransitionBlocked("legacy_bootstrap_owner_not_released")
 
 
 class NativeCutover:
@@ -172,7 +208,7 @@ class NativeCutover:
     def guard(self, plan, attempt):
         self.plan, self.attempt = plan, attempt
         self.admission_owned = self.windows_closed = self.linux_touched = False
-        self.admission_unconfirmed = self.windows_unconfirmed = False
+        self.admission_unconfirmed = self.windows_unconfirmed = self.direct_unconfirmed = False
         with self.applications.guard(plan, attempt), self.windows.guard(plan, attempt):
             if self.wsl_bootstrap is None:
                 yield
@@ -197,8 +233,13 @@ class NativeCutover:
         self.applications.assert_direct_recovery_excluded(plan, baseline)
         if self.wsl_bootstrap is None:
             raise TransitionBlocked("legacy_wsl_bootstrap_guard_required")
+        self.applications.assert_authority_storage_trusted(plan, baseline)
+        self.direct_unconfirmed = True
+        owner = self.windows.request("claim", admission)
+        self.wsl_bootstrap.assert_visible()
+        self.direct_unconfirmed = False
         self.windows_unconfirmed = True
-        windows = self.windows.request("close", admission)
+        windows = self.windows.request("close", owner)
         self.windows_closed = True
         self.windows_unconfirmed = False
         self.linux_touched = True
@@ -207,6 +248,7 @@ class NativeCutover:
 
     def assert_reactivation_closed(self, plan, admission, blocked, boundary):
         self.admission.assert_closed()
+        self.wsl_bootstrap.assert_visible()
         evidence = self.windows.request("verify", blocked)
         return self._receipt(evidence, admission_sha256=admission, reactivation_sha256=blocked, boundary=boundary,
                              new_deployments_blocked=True, admitted_deployments_settled=True,
@@ -220,6 +262,7 @@ class NativeCutover:
 
     def _verify_guard(self, proof):
         self.admission.assert_closed()
+        self.wsl_bootstrap.assert_visible()
         self.applications.assert_direct_recovery_excluded(self.plan, proof)
         self.windows.request("verify", proof)
 
@@ -240,7 +283,8 @@ class NativeCutover:
         return self.applications.switch_caddy(plan, authority)
 
     def assert_rollback_safe(self, plan, baseline):
-        if self.admission_unconfirmed or self.windows_unconfirmed or not self.windows.healthy:
+        if (self.admission_unconfirmed or self.windows_unconfirmed or self.direct_unconfirmed
+                or not self.windows.healthy):
             raise TransitionBlocked("legacy_native_reconciliation_required")
         if self.windows_closed:
             self._verify_guard(baseline)
@@ -256,6 +300,7 @@ class NativeCutover:
         if self.windows_closed:
             self.applications.release_owned_direct_recovery_exclusion(plan, safety)
             windows = self.windows.request("restore", runtime)
+            self.wsl_bootstrap.assert_released()
             self.applications.assert_legacy_runtime_healthy(plan, baseline)
         if self.admission_owned:
             self.admission.restore(owned_disable=True)
