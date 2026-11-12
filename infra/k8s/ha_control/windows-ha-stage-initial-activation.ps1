@@ -233,9 +233,16 @@ try {
     $paths = $bootstrap.paths
     Assert-Fields $obs @('launcher_path','launcher_sha256','server_path','server_sha256','callback_path','callback_sha256',
         'windows_boot_sha256','wsl_boot_sha256','collector_sha256','client_sha256')
-    Assert-Fields $callback @('a_disk_paths_sha256','b_disk_paths_sha256','driver_path','driver_sha256','installation_id',
+    $callbackFields = @('a_disk_paths_sha256','b_disk_paths_sha256','driver_path','driver_sha256','installation_id',
         'reactivation_plan_path','runtime_path','source_loader_sha256','source_manifest_path','source_manifest_sha256',
         'source_root','vm_a','vm_b','vm_observer_path','vm_observer_sha256','wsl_uid')
+    $nativePlanPin = $bootstrap.legacy_plan_sha256
+    if ('reactivation_plan_sha256' -cin $callback.PSObject.Properties.Name) {
+        $callbackFields += 'reactivation_plan_sha256'
+        $nativePlanPin = $callback.reactivation_plan_sha256
+        Assert-Pin $nativePlanPin
+    }
+    Assert-Fields $callback $callbackFields
     Assert-Fields $paths @('intent_path','key_path','callback_config_path','observer_input_path','ready_path','plan_path',
         'approval_path','binding_path','preflight_path','scm_verifier_path')
     if ($plan -isnot [pscustomobject] -or $plan.schema_version -ne 2 -or
@@ -302,7 +309,7 @@ try {
     $observerLauncher = Read-Protected $obs.launcher_path $obs.launcher_sha256 65536
     $null = Read-Protected $obs.server_path $obs.server_sha256 65536
     $null = Read-Protected $obs.callback_path $obs.callback_sha256 65536
-    $legacyRaw = Read-Protected $callback.reactivation_plan_path $bootstrap.legacy_plan_sha256 65536 '' $operatorSid
+    $legacyRaw = Read-Protected $callback.reactivation_plan_path $nativePlanPin 65536 '' $operatorSid
     $driverRaw = Read-Protected $callback.driver_path $callback.driver_sha256 65536 '' $operatorSid
     $null = Read-Protected $callback.vm_observer_path $callback.vm_observer_sha256 65536 '' $operatorSid
     $null = Read-Protected $paths.preflight_path $start.preflight_sha256 65536
@@ -310,6 +317,12 @@ try {
     $null = Read-Protected $scope.python_path $scope.python_sha256 67108864
     $null = Read-Protected $scope.launcher_path $scope.launcher_sha256 1048576
     $legacy = ConvertFrom-Json -InputObject ($encoding.GetString($legacyRaw))
+    if ($nativePlanPin -cne $bootstrap.legacy_plan_sha256) {
+        Assert-Fields $legacy @('deployment_attempt_id','deployment_plan_sha256','windows_driver_sha256','windows_reactivation')
+        if ($legacy.deployment_plan_sha256 -cne $bootstrap.legacy_plan_sha256 -or $legacy.deployment_attempt_id -cne $attempt) {
+            throw 'initial_stage_legacy_plan_binding'
+        }
+    }
     $reactivation = $legacy.windows_reactivation
     # The owner marker identifies the legacy plan's source. PostgreSQL effects identify the restored app release.
     if ($legacy.windows_driver_sha256 -cne $callback.driver_sha256 -or $reactivation.authority_service_name -cne $scope.service_name -or
@@ -385,7 +398,7 @@ try {
     $callbackSha = Write-New $paths.callback_config_path (Json-Bytes $callback)
     $arguments = [ordered]@{PipeName=$pipe;OperatorSid=$operatorSid;ServiceSid=$serviceSid;PlanSha256=$bootstrap.legacy_plan_sha256;
         AttemptId=$attempt;Generation=1;WindowsBootSha256=$obs.windows_boot_sha256;WslBootSha256=$obs.wsl_boot_sha256;
-        CollectorSha256=$obs.collector_sha256;ReactivationPlanSha256=$bootstrap.legacy_plan_sha256;MarkerSha256=$markerSha;
+        CollectorSha256=$obs.collector_sha256;ReactivationPlanSha256=$nativePlanPin;MarkerSha256=$markerSha;
         CallbackPath=$obs.callback_path;CallbackSha256=$obs.callback_sha256;CallbackConfigPath=$paths.callback_config_path;
         CallbackConfigSha256=$callbackSha;KeyPath=$paths.key_path;KeySha256=$keySha;ReadyPath=$paths.ready_path}
     $observerInput = [ordered]@{server_path=$obs.server_path;server_sha256=$obs.server_sha256;arguments=$arguments}

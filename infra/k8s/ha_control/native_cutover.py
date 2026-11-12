@@ -28,7 +28,7 @@ class WindowsReactivationSession:
         self.process = None
 
     @classmethod
-    def for_n100_wsl(cls, entrypoint, entrypoint_sha256, driver, driver_sha256, plan_path):
+    def for_n100_wsl(cls, entrypoint, entrypoint_sha256, driver, driver_sha256, plan_path, reactivation_plan_sha256=None):
         paths = (entrypoint, driver, plan_path)
         if any(type(path) is not str or not re.fullmatch(r"[A-Za-z]:\\[A-Za-z0-9_.\\-]+", path)
                or any(part in ("", ".", "..") for part in path[3:].split("\\"))
@@ -36,6 +36,8 @@ class WindowsReactivationSession:
             raise TransitionBlocked("legacy_native_launcher_invalid")
 
         def launcher(plan, attempt):
+            native_pin = '' if reactivation_plan_sha256 is None else (
+                f" -ReactivationPlanSha256 '{_pin(reactivation_plan_sha256)}'")
             # Run the verified bytes already read from the entrypoint, not a
             # second path open after validating its digest.
             command = f"""
@@ -46,7 +48,7 @@ try{{$digest=[BitConverter]::ToString($sha.ComputeHash($entry)).Replace('-','').
 finally{{$sha.Dispose()}}
 if($digest -cne '{_pin(entrypoint_sha256)}'){{throw 'legacy_native_entrypoint_digest'}}
 $script=[ScriptBlock]::Create([Text.Encoding]::UTF8.GetString($entry).TrimStart([char]0xFEFF))
-& $script -DriverPath '{driver}' -DriverSha256 '{_pin(driver_sha256)}' -PlanPath '{plan_path}' -PlanSha256 '{plan}' -AttemptId '{attempt}'
+& $script -DriverPath '{driver}' -DriverSha256 '{_pin(driver_sha256)}' -PlanPath '{plan_path}' -PlanSha256 '{plan}' -AttemptId '{attempt}'{native_pin}
 """
             encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
             return ("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",

@@ -283,9 +283,17 @@ public static class HaLeaseProofDrain {
     $callback = Read-ProtectedText $CallbackPath $CallbackSha256
     $inputConfig = ConvertFrom-Json -InputObject (Read-ProtectedText $CallbackConfigPath $CallbackConfigSha256)
     $planText = Read-ProtectedText $inputConfig.reactivation_plan_path $ReactivationPlanSha256
+    $nativePlan = ConvertFrom-Json -InputObject $planText
+    if ($PlanSha256 -cne $ReactivationPlanSha256 -and
+        ((@($nativePlan.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne
+           'deployment_attempt_id,deployment_plan_sha256,windows_driver_sha256,windows_reactivation' -or
+         $inputConfig.reactivation_plan_sha256 -cne $ReactivationPlanSha256 -or
+         $nativePlan.deployment_plan_sha256 -cne $PlanSha256 -or $nativePlan.deployment_attempt_id -cne $AttemptId)) {
+        throw 'lease_proof_reactivation_plan_binding'
+    }
     $driverText = Read-ProtectedText $inputConfig.driver_path $inputConfig.driver_sha256
     $vmObserverText = Read-ProtectedText $inputConfig.vm_observer_path $inputConfig.vm_observer_sha256
-    if ($inputConfig.driver_sha256 -cne (ConvertFrom-Json -InputObject $planText).windows_driver_sha256) {
+    if ($inputConfig.driver_sha256 -cne $nativePlan.windows_driver_sha256) {
         throw 'lease_proof_callback_pin'
     }
     $runspace = [RunspaceFactory]::CreateRunspace()
