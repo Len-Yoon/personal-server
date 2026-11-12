@@ -2,6 +2,7 @@
 import base64
 from copy import deepcopy
 import hashlib
+import hmac
 import json
 from pathlib import Path
 import struct
@@ -15,6 +16,7 @@ from tests import test_ha_enforced_provision as P
 sys.path.insert(0, str(N.ROOT / 'infra/k8s'))
 from ha_control import namespace_contract as C
 from ha_control import enforced_windows as E
+from ha_control.fixed_vm_observer import verify_snapshot
 
 
 class NamespaceObservedTests(unittest.TestCase):
@@ -22,6 +24,61 @@ class NamespaceObservedTests(unittest.TestCase):
     ps = N.NamespacePolicyTests.ps
     manifest = N.NamespacePolicyTests.manifest
     closure_transaction = N.NamespacePolicyTests.closure_transaction
+
+    def test_fixed_vm_observer_authenticates_both_vm_ids_and_nonce(self):
+        key = b"1" * 64
+        nonce = "2" * 32
+        ids = {"A": "11111111-1111-1111-1111-111111111111", "B": "22222222-2222-2222-2222-222222222222"}
+        vms = [
+            {"node": node, "id": vm_id, "state": "Running", "disk_paths_sha256": "3" * 64}
+            for node, vm_id in ids.items()
+        ]
+
+        def signed(snapshot, challenge=nonce, signing_key=key):
+            body = json.dumps({"nonce": challenge, "vms": snapshot}).encode()
+            return json.dumps({
+                "body": base64.b64encode(body).decode(),
+                "mac": hmac.digest(signing_key, body, hashlib.sha256).hex(),
+            }).encode() + b"\n"
+
+        self.assertEqual(verify_snapshot(signed(vms), key, nonce, ids), vms)
+        for invalid in (signed(vms, "a" * 32), signed(vms, signing_key=b"4" * 64),
+                        signed(vms[::-1]), signed([vms[0], dict(vms[1], id=ids["A"])]),
+                        signed([vms[0], dict(vms[1], state="Starting")]), b"x" * 4097):
+            with self.subTest(frame=invalid[:30]), self.assertRaises(ValueError):
+                verify_snapshot(invalid, key, nonce, ids)
+
+    def test_fixed_vm_observer_only_queries_pinned_vms_and_rejects_disk_drift(self):
+        source = N.ROOT / "infra/k8s/ha_control/windows-fixed-vm-observer.ps1"
+        output = self.ps(f". '{source}'\n" + r"""
+$installation='f'*64
+$a=[guid]'11111111-1111-1111-1111-111111111111'
+$b=[guid]'22222222-2222-2222-2222-222222222222'
+$script:drift=$false
+$script:reads=0
+function Get-VM($Id){
+ if($Id -notin @($a,$b)){throw 'unexpected_id'}
+ $node=if($Id -eq $a){'A'}else{'B'}
+ [pscustomobject]@{Id=$Id;Name=('N100HA_'+$installation.Substring(0,16)+'_'+$node);
+  Notes=('ha-owned-guest-v1:'+$installation+':seed');Generation=2;AutomaticStartAction='Nothing';State='Running'}
+}
+function Get-VMHardDiskDrive($VM){
+ $script:reads++
+ $path=if($script:drift -and $script:reads -eq 2){'C:\changed.vhdx'}else{'C:\owned.vhdx'}
+ [pscustomobject]@{Path=$path}
+}
+$rows=Get-FixedVmObserverSnapshot $installation $a $b
+if($rows.Count -ne 2 -or $rows[0].id -cne $a.ToString() -or $rows[1].id -cne $b.ToString()){
+ throw 'target_mismatch'
+}
+$script:reads=0
+$script:drift=$true
+try{$null=Get-FixedVmObserverSnapshot $installation $a $b;throw 'drift_accepted'}catch{
+ if($_.Exception.Message -cne 'fixed_observer_disks_changed'){throw}
+}
+'PASS'
+""")
+        self.assertEqual(output.strip(), "PASS")
 
     def observed_transaction(self, scenario):
         return self.closure_transaction(r'''

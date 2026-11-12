@@ -11,7 +11,8 @@ ROOT = Path(__file__).resolve().parents[3]
 SOURCES = tuple("infra/k8s/ha_control/" + name for name in (
     "__init__.py", "controller.py", "windows.py", "pg.py", "cli.py", "prepare.py", "windows-fence.ps1",
     "windows-legacy-guard.ps1", "legacy_guard.py", "legacy_linux.py", "launcher.py",
-    "enforced_windows.py", "windows-enforced-vm.ps1", "namespace_contract.py", "guest-owned-profile.ps1", "windows-guest-stage.ps1", "windows-guest-vm.ps1", "windows-guest-receipt.ps1", "windows-guest-network.ps1", "windows-guest-live-network.ps1", "windows-runtime-stage.ps1", "strict-canonical-sd.cs", "windows-namespace-policy.ps1", "windows-service-host.cs", "provision_enforced.py", "build-service-host.ps1", "windows-service-preflight.ps1", "privilege_closure.py")) + (
+    "enforced_windows.py", "windows-enforced-vm.ps1", "fixed_vm_observer.py",
+    "windows-fixed-vm-observer.ps1", "windows-fixed-vm-observer-client.ps1", "namespace_contract.py", "guest-owned-profile.ps1", "windows-guest-stage.ps1", "windows-guest-vm.ps1", "windows-guest-receipt.ps1", "windows-guest-network.ps1", "windows-guest-live-network.ps1", "windows-runtime-stage.ps1", "strict-canonical-sd.cs", "windows-namespace-policy.ps1", "windows-service-host.cs", "provision_enforced.py", "build-service-host.ps1", "windows-service-preflight.ps1", "privilege_closure.py")) + (
     "scripts/windows-bootstrap.ps1", "infra/k8s/ha_runtime/schema.sql", "infra/k8s/ha_runtime/enforcement.sql")
 # Complete lazy effects import closure, with canonical paths retained in hashes.
 EFFECTS_SOURCES = tuple("infra/k8s/ha_runtime/" + name for name in (
@@ -162,7 +163,7 @@ def prepare(commit, output):
                 "generated_requirements_sha256": sha(REQUIREMENTS)}
     manifest["source_bootstrap_sha256"] = manifest["source_files"]["scripts/windows-bootstrap.ps1"]
     native = {key: value for key, value in manifest["source_files"].items()
-              if key.endswith(("windows.py", "windows-fence.ps1", "guest-owned-profile.ps1", "windows-guest-stage.ps1", "windows-guest-vm.ps1", "windows-guest-receipt.ps1", "windows-guest-network.ps1", "windows-guest-live-network.ps1", "windows-runtime-stage.ps1", "windows-namespace-policy.ps1", "strict-canonical-sd.cs", "reserve-identity.ps1", "StrictJson.cs", "StoppedService.cs", "PrivateIo.cs", "ProductServiceSecurity.cs", "prove_source.py", "windows-enforced-vm.ps1", "windows-service-host.cs", "provision_enforced.py", "windows-service-preflight.ps1", "windows-bootstrap.ps1", "windows-legacy-guard.ps1", "legacy_guard.py", "legacy_linux.py"))}
+              if key.endswith(("windows.py", "windows-fence.ps1", "guest-owned-profile.ps1", "windows-guest-stage.ps1", "windows-guest-vm.ps1", "windows-guest-receipt.ps1", "windows-guest-network.ps1", "windows-guest-live-network.ps1", "windows-runtime-stage.ps1", "windows-namespace-policy.ps1", "strict-canonical-sd.cs", "reserve-identity.ps1", "StrictJson.cs", "StoppedService.cs", "PrivateIo.cs", "ProductServiceSecurity.cs", "prove_source.py", "windows-enforced-vm.ps1", "windows-fixed-vm-observer.ps1", "windows-fixed-vm-observer-client.ps1", "fixed_vm_observer.py", "windows-service-host.cs", "provision_enforced.py", "windows-service-preflight.ps1", "windows-bootstrap.ps1", "windows-legacy-guard.ps1", "legacy_guard.py", "legacy_linux.py"))}
     manifest["native_windows_code_sha256"] = sha(encode(native))
     manifest["controller_code_sha256"] = sha(encode(manifest["source_files"]))
     manifest["effects_runtime_sha256"] = effects_runtime_sha256(manifest["source_files"])
@@ -215,7 +216,7 @@ def verify(bundle, expected_manifest_sha256=None):
         if manifest["source_files"][source] != actual["files/" + TARGETS[source]]:
             raise BundleError("source_file_binding_mismatch")
     native = {key: value for key, value in manifest["source_files"].items()
-              if key.endswith(("windows.py", "windows-fence.ps1", "guest-owned-profile.ps1", "windows-guest-stage.ps1", "windows-guest-vm.ps1", "windows-guest-receipt.ps1", "windows-guest-network.ps1", "windows-guest-live-network.ps1", "windows-runtime-stage.ps1", "windows-namespace-policy.ps1", "strict-canonical-sd.cs", "reserve-identity.ps1", "StrictJson.cs", "StoppedService.cs", "PrivateIo.cs", "ProductServiceSecurity.cs", "prove_source.py", "windows-enforced-vm.ps1", "windows-service-host.cs", "provision_enforced.py", "windows-service-preflight.ps1", "windows-bootstrap.ps1", "windows-legacy-guard.ps1", "legacy_guard.py", "legacy_linux.py"))}
+              if key.endswith(("windows.py", "windows-fence.ps1", "guest-owned-profile.ps1", "windows-guest-stage.ps1", "windows-guest-vm.ps1", "windows-guest-receipt.ps1", "windows-guest-network.ps1", "windows-guest-live-network.ps1", "windows-runtime-stage.ps1", "windows-namespace-policy.ps1", "strict-canonical-sd.cs", "reserve-identity.ps1", "StrictJson.cs", "StoppedService.cs", "PrivateIo.cs", "ProductServiceSecurity.cs", "prove_source.py", "windows-enforced-vm.ps1", "windows-fixed-vm-observer.ps1", "windows-fixed-vm-observer-client.ps1", "fixed_vm_observer.py", "windows-service-host.cs", "provision_enforced.py", "windows-service-preflight.ps1", "windows-bootstrap.ps1", "windows-legacy-guard.ps1", "legacy_guard.py", "legacy_linux.py"))}
     expected = {"config_profile_definitions": {"windows-managed-config-v1": CONFIG_PROFILE_DEFINITION_SHA256},
                 "source_bootstrap_sha256": manifest["source_files"]["scripts/windows-bootstrap.ps1"],
                 "native_windows_code_sha256": sha(encode(native)),
