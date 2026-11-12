@@ -133,6 +133,25 @@ $runtime.HostStaged=$true;Assert-Blocked {Assert-RuntimeStageParentManifest $sta
 foreach($key in @('executor_source_commit','reservation_receipt_sha256','reservation_root_identity','installation_id')){
  $saved=$stage[$key];$stage[$key]='changed';Assert-Blocked {Assert-RuntimeStageParentManifest $stage $runtime $owned};$stage[$key]=$saved
 }
+function Read-Decl($Declaration){
+ $bytes=[Text.Encoding]::UTF8.GetBytes(($Declaration|ConvertTo-Json -Compress))
+ Read-RuntimeOwnedProfile ([Convert]::ToBase64String($bytes)) ([HaRuntimeStageV1.Rules]::Hash($bytes)) $manifestHash $scriptHash
+}
+$decl.runtime_source_commit='e'*40
+$upgrade=Read-Decl $decl
+Assert-Blocked {Assert-RuntimeStageParentManifest $stage $runtime $upgrade}
+$runtime.SourceCommit=$decl.runtime_source_commit
+Assert-RuntimeStageParentManifest $stage $runtime $upgrade
+Assert-Blocked {Assert-RuntimeStageParentManifest $stage $runtime $owned}
+$stage['executor_source_commit']=$runtime.SourceCommit
+Assert-Blocked {Assert-RuntimeStageParentManifest $stage $runtime $upgrade}
+foreach($invalid in @($null,'',('E'*40),1)){
+ $decl.runtime_source_commit=$invalid
+ Assert-Blocked {Read-Decl $decl}
+}
+$decl.Remove('runtime_source_commit')
+$decl.Runtime_Source_Commit='e'*40
+Assert-Blocked {Read-Decl $decl}
 ''',folder)
 
     def test_zip_extra_symlink_and_case_alias_are_rejected(self):
