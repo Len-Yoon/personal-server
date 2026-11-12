@@ -372,7 +372,21 @@ class NativePvcCaptureTests(unittest.TestCase):
                     raise RuntimeError('read failed')
         self.assertIn('--dry-run=server', calls[0])
         self.assertIn('delete', calls[-2])
-        self.assertIn('--for=delete', calls[-1])
+        self.assertIn('--ignore-not-found', calls[-1])
+        self.assertEqual(sum('delete' in call for call in calls), 1)
+
+        def replaced(args, **kwargs):
+            if 'get' in args:
+                return b'{"metadata":{"uid":"foreign","deletionTimestamp":"now"}}'
+            return kubectl(args, **kwargs)
+
+        capture.run = replaced
+        with patch.object(capture, '_verify_running_reader'):
+            with self.assertRaisesRegex(TransitionBlocked, 'pvc_capture_reader_archive_exec_cleanup_unconfirmed'):
+                with capture._reader('book-memo'):
+                    raise TransitionBlocked('pvc_capture_reader_archive_exec')
+        with self.assertRaisesRegex(TransitionBlocked, 'pvc_capture_cleanup_reconciliation_required'):
+            capture.assert_settled()
 
 
 class CaddyRuntimeTests(unittest.TestCase):

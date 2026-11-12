@@ -234,8 +234,16 @@ class PvcCapture:
             "sys.exit(any(sum(row[4]==path and 'ro' in row[5].split(',') for row in rows)!=1 "
             "or any(row[4].startswith(path+'/') for row in rows) for path in sys.argv[1:]))"
         )
-        self.run(("-n", NAMESPACE, "exec", name, "-c", "reader", "--", "python3", "-c", code,
-                  *(f"/capture/v{i}" for i in range(count))))
+        self._reader_command("mount_exec", ("-n", NAMESPACE, "exec", name, "-c", "reader", "--", "python3", "-c", code,
+                                            *(f"/capture/v{i}" for i in range(count))))
+
+    def _reader_command(self, stage, args, **options):
+        try:
+            return self.run(args, **options)
+        except TransitionBlocked as error:
+            if str(error) != "pvc_capture_command_unconfirmed":
+                raise
+            raise TransitionBlocked("pvc_capture_reader_" + stage) from None
 
     def _remove_reader(self, name, uid):
         opts = json.dumps({"apiVersion": "v1", "kind": "DeleteOptions",
@@ -243,11 +251,23 @@ class PvcCapture:
         try:
             self.run(("delete", "--raw", f"/api/v1/namespaces/{NAMESPACE}/pods/{name}", "-f", "-"), body=opts)
         except TransitionBlocked:
-            # The API may have accepted the UID-bound request. Do not issue it twice.
-            remaining = self.run(("-n", NAMESPACE, "get", "pod", name, "--ignore-not-found", "-o", "json"))
-            _need(not remaining.strip(), "pvc_capture_cleanup_reconciliation_required")
-            return
-        self.run(("-n", NAMESPACE, "wait", "--for=delete", "pod/" + name, "--timeout=30s"), timeout=35)
+            # The API may have accepted the UID-bound request. Observe without sending it again.
+            pass
+        deadline = time.monotonic() + 35
+        while time.monotonic() < deadline:
+            remaining = self._reader_command("delete_observation",
+                                             ("-n", NAMESPACE, "get", "pod", name, "--ignore-not-found", "-o", "json"),
+                                             timeout=max(0.1, min(5, deadline - time.monotonic())))
+            if not remaining.strip():
+                return
+            try:
+                found = json.loads(remaining)
+                _need(found["metadata"]["uid"] == uid and found["metadata"]["deletionTimestamp"],
+                      "pvc_capture_cleanup_reconciliation_required")
+            except (ValueError, TypeError, KeyError):
+                raise TransitionBlocked("pvc_capture_cleanup_reconciliation_required") from None
+            time.sleep(0.25)
+        raise TransitionBlocked("pvc_capture_cleanup_reconciliation_required")
 
     @contextmanager
     def _reader(self, service):
@@ -255,7 +275,7 @@ class PvcCapture:
         name = desired["metadata"]["name"]
         raw = json.dumps(desired).encode()
         command = ("-n", NAMESPACE, "create", "-f", "-", "-o", "json")
-        preview = json.loads(self.run((*command, "--dry-run=server"), body=raw))
+        preview = json.loads(self._reader_command("dry_run", (*command, "--dry-run=server"), body=raw))
         self._verify_pod(desired, preview, preview["metadata"].get("uid"))
         self.cleanup_unconfirmed = True
         try:
@@ -274,15 +294,26 @@ class PvcCapture:
                 self._remove_reader(name, uid)
                 self.cleanup_unconfirmed = False
             raise TransitionBlocked("pvc_capture_reader_creation_unconfirmed") from None
+        reader_failure = None
         try:
             self._verify_pod(desired, created, uid)
-            self.run(("-n", NAMESPACE, "wait", "--for=condition=Ready", "pod/" + name, "--timeout=30s"), timeout=35)
+            self._reader_command("ready_wait", ("-n", NAMESPACE, "wait", "--for=condition=Ready",
+                                                "pod/" + name, "--timeout=30s"), timeout=35)
             self._verify_running_reader(service, desired, name, uid)
             self._assert_runtime_mounts(name, len(self.bindings[service]["claims"]))
             yield name
             self._verify_running_reader(service, desired, name, uid)
+        except BaseException as error:
+            reader_failure = error
+            raise
         finally:
-            self._remove_reader(name, uid)
+            try:
+                self._remove_reader(name, uid)
+            except TransitionBlocked:
+                code = str(reader_failure)
+                if re.fullmatch(r"pvc_capture_reader_[a-z_]{1,40}", code):
+                    raise TransitionBlocked(code + "_cleanup_unconfirmed") from None
+                raise
             self.cleanup_unconfirmed = False
 
     def assert_settled(self):
@@ -303,9 +334,10 @@ class PvcCapture:
                 target.mkdir(mode=0o700)
                 count = len(self.bindings[service]["claims"])
                 with self._reader(service) as reader, tempfile.TemporaryFile(dir=root) as archive:
-                    self.run(("-n", NAMESPACE, "exec", reader, "-c", "reader", "--",
-                              "tar", "-C", "/capture", "-cf", "-", *(f"v{i}" for i in range(count))),
-                             output=archive, timeout=120)
+                    self._reader_command("archive_exec", ("-n", NAMESPACE, "exec", reader, "-c", "reader", "--",
+                                                           "tar", "-C", "/capture", "-cf", "-",
+                                                           *(f"v{i}" for i in range(count))),
+                                         output=archive, timeout=120)
                     _need(archive.tell() <= MAX_ARCHIVE, "pvc_capture_archive_too_large")
                     archive.seek(0)
                     _extract(archive, target, count)
