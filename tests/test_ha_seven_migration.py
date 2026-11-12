@@ -464,12 +464,30 @@ class CutoverRehearsal:
         return self.receipt('preflight', plan, capture_ready=True, restore_ready=True, ingress_ready=True,
                             legacy_live=True, target_writes_closed=True)
 
-    def block_reactivation(self, plan, baseline):
-        return self.receipt('block_reactivation', plan, baseline_sha256=baseline, blocked=True)
+    def close_admission(self, plan, baseline):
+        return self.receipt('close_admission', plan, baseline_sha256=baseline,
+                            new_deployments_blocked=True, admitted_deployments_settled=True)
 
-    def fence_writers(self, plan, blocked):
+    def block_reactivation(self, plan, baseline, admission):
+        return self.receipt('block_reactivation', plan, baseline_sha256=baseline,
+                            admission_sha256=admission, blocked=True)
+
+    def assert_reactivation_closed(self, plan, admission, blocked, boundary):
+        return self.receipt(boundary, plan, admission_sha256=admission, reactivation_sha256=blocked,
+                            boundary=boundary, new_deployments_blocked=True, admitted_deployments_settled=True,
+                            windows_reactivation_blocked=True, recovery_commands_settled=True)
+
+    def assert_activation_safe(self, plan, admission, blocked, fence, restore):
+        return self.receipt('before_activation', plan, admission_sha256=admission, reactivation_sha256=blocked,
+                            boundary='before_activation', fence_sha256=fence, restore_sha256=restore,
+                            new_deployments_blocked=True, admitted_deployments_settled=True,
+                            windows_reactivation_blocked=True, recovery_commands_settled=True,
+                            legacy_writers_closed=not self.legacy_open, target_writes_closed=not self.vm_open,
+                            restore_ready=True)
+
+    def fence_writers(self, plan, blocked, settled):
         self.legacy_open = False
-        return self.receipt('fence_writers', plan, reactivation_sha256=blocked, writers_closed=True,
+        return self.receipt('fence_writers', plan, reactivation_sha256=blocked, settlement_sha256=settled, writers_closed=True,
                             services=sorted(M.SERVICES))
 
     def capture(self, plan, fence):
@@ -485,10 +503,10 @@ class CutoverRehearsal:
         return self.receipt('verify_closed', plan, fence_sha256=fence, restore_sha256=restore, readiness=True,
                             target_writes_closed=True, services=sorted(M.SERVICES))
 
-    def activate_vm(self, plan, verified):
+    def activate_vm(self, plan, verified, settled):
         assert not self.legacy_open
         self.vm_open = True
-        return self.receipt('activate_vm', plan, verified_sha256=verified, vm_write_authority=True)
+        return self.receipt('activate_vm', plan, verified_sha256=verified, settlement_sha256=settled, vm_write_authority=True)
 
     def switch_caddy(self, plan, authority):
         assert self.vm_open and not self.legacy_open
@@ -501,13 +519,14 @@ class CutoverRehearsal:
     def assert_rollback_safe(self, plan, baseline):
         return self.receipt('rollback_inspection', plan, baseline_sha256=baseline,
                             target_never_opened=not (self.vm_open or self.unsafe), legacy_route_unchanged=True,
-                            target_writes_closed=not self.vm_open, prior_mutations_settled=not self.unsettled)
+                            target_writes_closed=not self.vm_open, prior_mutations_settled=not self.unsettled,
+                            deployment_admission_reconciled=not self.unsettled)
 
     def restore_legacy(self, plan, baseline, safety):
         assert not self.vm_open
         self.legacy_open = True
         return self.receipt('restore_legacy', plan, baseline_sha256=baseline, safety_sha256=safety,
-                            legacy_state_restored=True, ready=True)
+                            legacy_state_restored=True, deployment_admission_restored=True, ready=True)
 
 
 class LegacyCutoverTransactionTests(unittest.TestCase):
@@ -522,8 +541,9 @@ class LegacyCutoverTransactionTests(unittest.TestCase):
         operation = LegacyCutover(self.path, backend)
         result = operation.run(self.plan)
         self.assertEqual(result['phase'], 'complete')
-        self.assertEqual(backend.calls, ['preflight', 'block_reactivation', 'fence_writers', 'capture',
-                                         'restore', 'verify_closed', 'activate_vm', 'switch_caddy', 'verify_live'])
+        self.assertEqual(backend.calls, ['preflight', 'close_admission', 'block_reactivation', 'before_fence',
+                                         'fence_writers', 'capture', 'restore', 'verify_closed', 'before_activation',
+                                         'activate_vm', 'switch_caddy', 'verify_live'])
         self.assertTrue(backend.vm_open)
         self.assertFalse(backend.legacy_open)
         with self.assertRaisesRegex(TransitionBlocked, 'legacy_cutover_reconciliation_required'):
@@ -566,6 +586,61 @@ class LegacyCutoverTransactionTests(unittest.TestCase):
         journal = json.loads(self.path.read_bytes())
         self.assertEqual(journal['failure_phase'], 'restore_intent')
         self.assertEqual(journal['phase'], 'rolled_back')
+
+    def test_undrained_deployment_or_stale_recovery_proof_stops_transition(self):
+        for fault, forbidden in (
+            ('close_admission', 'fence_writers'), ('before_fence', 'fence_writers'),
+            ('before_activation', 'activate_vm'),
+        ):
+            with self.subTest(fault=fault):
+                class FaultyEvidence(CutoverRehearsal):
+                    def receipt(self, stage, plan, **facts):
+                        if stage == fault and fault != 'before_activation':
+                            facts['admitted_deployments_settled' if fault == 'close_admission'
+                                  else 'recovery_commands_settled'] = False
+                        result = super().receipt(stage, plan, **facts)
+                        if stage == fault == 'before_activation':
+                            result['evidence_sha256'] = sha(b'before_fence')
+                        return result
+
+                path = self.path.with_name(fault + '.json')
+                backend = FaultyEvidence(path)
+                with self.assertRaisesRegex(TransitionBlocked, 'legacy_cutover_rolled_back'):
+                    LegacyCutover(path, backend).run(self.plan)
+                self.assertNotIn(forbidden, backend.calls)
+                self.assertTrue(backend.legacy_open)
+                self.assertFalse(backend.vm_open)
+
+    def test_github_deployment_admission_checks_full_run_list_and_restores_owned_disable(self):
+        from types import SimpleNamespace
+        from ha_control.deployment_admission import DeploymentAdmission
+
+        workflow = dict(id=123, path='.github/workflows/deploy-n100.yml', state='active')
+        run = dict(id=51, workflow_id=123, status='completed')
+
+        def github(args, **kwargs):
+            endpoint = args[4]
+            if endpoint.endswith('/disable'):
+                workflow['state'] = 'disabled_manually'
+            if endpoint.endswith('/enable'):
+                workflow['state'] = 'active'
+            if '/runs?' in endpoint:
+                result = [dict(total_count=1, workflow_runs=[run])]
+            else:
+                result = workflow
+            return SimpleNamespace(stdout=json.dumps(result))
+
+        admission = DeploymentAdmission('owner/repo', 123, '/usr/bin/gh', runner=github)
+        admission.close()
+        run['status'] = 'waiting'
+        with self.assertRaisesRegex(TransitionBlocked, 'deployment_admission_runs_not_settled'):
+            admission.assert_closed()
+        with self.assertRaisesRegex(TransitionBlocked, 'deployment_admission_restore_ownership_required'):
+            admission.restore(owned_disable=False)
+        run['status'] = 'completed'
+        admission.assert_closed()
+        admission.restore(owned_disable=True)
+        self.assertEqual(workflow['state'], 'active')
 
     def test_unknown_target_or_activation_never_reopens_legacy(self):
         for failure, unsafe, unsettled, phase in (
