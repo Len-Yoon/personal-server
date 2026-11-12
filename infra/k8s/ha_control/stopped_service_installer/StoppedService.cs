@@ -80,6 +80,7 @@ namespace TrustedStoppedV1 {
   [DllImport("advapi32.dll",SetLastError=true)]static extern bool QueryServiceStatusEx(IntPtr h,int level,out Status status,uint size,out uint needed);
   static void Check(bool b){if(!b)throw new Failure(Marshal.GetLastWin32Error());}
   public Native(){scm=OpenSCManagerW(null,null,3);if(scm==IntPtr.Zero)throw new Failure(Marshal.GetLastWin32Error());}
+  public void OpenForRead(string name){Contract.Need(owned==IntPtr.Zero);owned=OpenServiceW(scm,name,0x20005);Check(owned!=IntPtr.Zero);}
   public bool Exists(string name){IntPtr h=OpenServiceW(scm,name,4);if(h!=IntPtr.Zero){CloseServiceHandle(h);return true;}int e=Marshal.GetLastWin32Error();if(e!=1060)throw new Failure(e);return false;}
   public void Create(string name,string image){Contract.Need(owned==IntPtr.Zero);owned=CreateServiceW(scm,name,name,0xE0007,16,3,1,image,null,IntPtr.Zero,null,"NT SERVICE\\"+name,null);if(owned==IntPtr.Zero)throw new Failure(Marshal.GetLastWin32Error());}
   public void Seal(string name){Contract.Need(owned!=IntPtr.Zero);var sd=new RawSecurityDescriptor(Contract.ServiceSddl(name));byte[] b=new byte[sd.BinaryLength];sd.GetBinaryForm(b,0);var pin=GCHandle.Alloc(b,GCHandleType.Pinned);try{IntPtr p=pin.AddrOfPinnedObject();uint result=SetSecurityInfo(owned,2,0x80000005U,IntPtr.Add(p,BitConverter.ToInt32(b,4)),IntPtr.Zero,IntPtr.Add(p,BitConverter.ToInt32(b,16)),IntPtr.Zero);if(result!=0)throw new Failure((int)result);}finally{pin.Free();}}
