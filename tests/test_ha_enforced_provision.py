@@ -108,6 +108,10 @@ foreach($mode in @('authenticate','initialize','advance')){
  if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,1) -ne 1){throw 'failed_oneshot_succeeded'}
 }
 foreach($mode in @('serve','unknown')){if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,0) -ne 1){throw 'unexpected_exit_succeeded'}}
+$phases=[EnforcedServiceV1.StartupPhase]
+if([int]$phases::ArgsRead -ne 22 -or [int]$phases::Dispatch -ne 25 -or
+   [int]$phases::PythonTree -ne 35 -or [int]$phases::PythonCreate -ne 39 -or
+   [int]$phases::JobAssign -ne 40 -or [int]$phases::PythonResume -ne 41){throw 'startup_phase_codes_changed'}
 'managed-grammar-only'
 '''
         result=subprocess.run([pwsh,'-NoProfile','-NonInteractive','-Command',script],env=env,capture_output=True,timeout=20)

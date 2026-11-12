@@ -18,6 +18,12 @@ using System.ServiceProcess;
 #endif
 
 namespace EnforcedServiceV1 {
+ public enum StartupPhase {
+  ProcessContext=20, Token=21, ArgsRead=22, ArgsParse=23, ArgsBinding=24, Dispatch=25,
+  ServiceIdentity=30, HostBinding=31, Journal=32, InputBinding=33, InputAccess=34,
+  PythonTree=35, LauncherTree=36, JobCreate=37, JobConfigure=38, PythonCreate=39,
+  JobAssign=40, PythonResume=41, WaitRegistration=42
+ }
  public sealed class Settings {
   public readonly Dictionary<string,string> Values;
   static readonly string[] Keys={"format","service_name","service_sid","python_path","python_sha256","launcher_path","launcher_sha256","plan_path","plan_sha256","approval_path","approval_sha256","mode","host_sha256"};
@@ -98,16 +104,24 @@ namespace EnforcedServiceV1 {
   [DllImport("kernel32.dll",SetLastError=true)] static extern bool DuplicateHandle(IntPtr sourceProcess,IntPtr source,IntPtr targetProcess,out IntPtr target,uint access,bool inherit,uint options);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
   readonly object handles=new object();IntPtr job,process;
-  public OwnedJob(Settings settings){
+  public OwnedJob(Settings settings,Action<StartupPhase> mark){
+   mark(StartupPhase.JobCreate);
    job=CreateJobObject(IntPtr.Zero,null);if(job==IntPtr.Zero)throw new InvalidOperationException();
    try{var limit=new Extended();limit.Basic.Flags=0x2000; // KILL_ON_JOB_CLOSE; no breakaway flags.
+    mark(StartupPhase.JobConfigure);
     if(!SetInformationJobObject(job,9,ref limit,(uint)Marshal.SizeOf(typeof(Extended))))throw new InvalidOperationException();
     var si=new Startup();si.Size=Marshal.SizeOf(typeof(Startup));ProcessInfo pi;
     string system=Environment.GetFolderPath(Environment.SpecialFolder.Windows);
     string block="PATH="+Path.Combine(system,"System32")+"\0SystemRoot="+system+"\0\0";IntPtr env=Marshal.StringToHGlobalUni(block);
+    mark(StartupPhase.PythonCreate);
     try{if(!CreateProcess(settings.Values["python_path"],new StringBuilder(settings.CommandLine()),IntPtr.Zero,IntPtr.Zero,false,0x404,env,Path.GetDirectoryName(settings.Values["launcher_path"]),ref si,out pi))throw new InvalidOperationException();}finally{Marshal.FreeHGlobal(env);}
     process=pi.Process;
-    try{if(!AssignProcessToJobObject(job,process)||ResumeThread(pi.Thread)==0xffffffff){TerminateProcess(process,1);throw new InvalidOperationException();}}finally{CloseHandle(pi.Thread);}
+    try{
+     mark(StartupPhase.JobAssign);
+     if(!AssignProcessToJobObject(job,process)){TerminateProcess(process,1);throw new InvalidOperationException();}
+     mark(StartupPhase.PythonResume);
+     if(ResumeThread(pi.Thread)==0xffffffff){TerminateProcess(process,1);throw new InvalidOperationException();}
+    }finally{CloseHandle(pi.Thread);}
    }catch{Dispose();throw;}
   }
   public uint Wait(){IntPtr copy;lock(handles){if(process==IntPtr.Zero||!DuplicateHandle(GetCurrentProcess(),process,GetCurrentProcess(),out copy,0,false,2))throw new InvalidOperationException();}try{uint code;if(WaitForSingleObject(copy,0xffffffff)!=0||!GetExitCodeProcess(copy,out code)||code==259)throw new InvalidOperationException();return code;}finally{CloseHandle(copy);}}
@@ -116,21 +130,100 @@ namespace EnforcedServiceV1 {
  public sealed class Host : ServiceBase {
   readonly Settings settings;readonly string argsPath,argsHash,selfPath;readonly object gate=new object();OwnedJob child;bool stopping,successfulOneShot;
   Host(Settings s,string args,string digest,string self){settings=s;argsPath=args;argsHash=digest;selfPath=self;ServiceName=s.Values["service_name"];AutoLog=false;CanStop=true;CanShutdown=true;}
-  void Validate(){
+  void Validate(Action<StartupPhase> mark){
+   mark(StartupPhase.ServiceIdentity);
    using(var identity=WindowsIdentity.GetCurrent()){if(identity.User==null||identity.User.Value!=settings.Values["service_sid"]||Process.GetCurrentProcess().SessionId!=0||((SecurityIdentifier)new NTAccount("NT SERVICE\\"+ServiceName).Translate(typeof(SecurityIdentifier))).Value!=identity.User.Value)throw new InvalidOperationException();}
+   mark(StartupPhase.HostBinding);
    Protection.Bound(argsPath,argsHash);Protection.Bound(selfPath,settings.Values["host_sha256"]);
+   mark(StartupPhase.Journal);
    Protection.JournalRoot(settings.Values["plan_path"],settings.Values["service_sid"]);
+   mark(StartupPhase.InputBinding);
    foreach(string k in new[]{"python","launcher","plan","approval"})Protection.Bound(settings.Values[k+"_path"],settings.Values[k+"_sha256"]);
+   mark(StartupPhase.InputAccess);
    foreach(string p in new[]{argsPath,settings.Values["plan_path"],settings.Values["approval_path"]})Protection.PrivateRead(p,settings.Values["service_sid"]);
    // Python's isolated standard/site libraries and controller import root are
    // protected too, not just the entry executable/script.
+   mark(StartupPhase.PythonTree);
    Protection.Tree(Path.GetDirectoryName(settings.Values["python_path"]));
+   mark(StartupPhase.LauncherTree);
    Protection.Tree(Directory.GetParent(Path.GetDirectoryName(settings.Values["launcher_path"])).FullName);
   }
-  protected override void OnStart(string[] args){if(args.Length!=0)throw new InvalidOperationException();lock(gate){try{if(stopping||child!=null)throw new InvalidOperationException();Validate();var owned=new OwnedJob(settings);child=owned;ThreadPool.QueueUserWorkItem(delegate{uint code=1;bool completed=false,requestStop=false;try{code=owned.Wait();completed=true;}catch{}finally{lock(gate){if(!stopping&&Object.ReferenceEquals(child,owned)){ExitCode=completed?Settings.ServiceExitCode(settings.Values["mode"],code):1;successfulOneShot=ExitCode==0;requestStop=true;}}if(requestStop)Stop();}});}catch{if(child!=null){child.Dispose();child=null;}throw new InvalidOperationException("enforced_service_blocked");}}}
-  protected override void OnStop(){lock(gate){if(!successfulOneShot)ExitCode=1;stopping=true;if(child!=null){child.Dispose();child=null;}}}
+  int startupFailureCode;
+  protected override void OnStart(string[] args){
+   var phase=StartupPhase.ServiceIdentity;
+   Action<StartupPhase> mark=value=>phase=value;
+   lock(gate){
+    try{
+     if(args.Length!=0||stopping||child!=null)throw new InvalidOperationException();
+     Validate(mark);
+     var owned=new OwnedJob(settings,mark);
+     child=owned;
+     mark(StartupPhase.WaitRegistration);
+     ThreadPool.QueueUserWorkItem(delegate{
+      uint code=1;bool completed=false,requestStop=false;
+      try{code=owned.Wait();completed=true;}
+      catch{}
+      finally{
+       lock(gate){
+        if(!stopping&&Object.ReferenceEquals(child,owned)){
+         ExitCode=completed?Settings.ServiceExitCode(settings.Values["mode"],code):1;
+         successfulOneShot=ExitCode==0;
+         requestStop=true;
+        }
+       }
+       if(requestStop)Stop();
+      }
+     });
+    }catch{
+     startupFailureCode=(int)phase;
+     ExitCode=startupFailureCode;
+     if(child!=null){child.Dispose();child=null;}
+     throw new InvalidOperationException("enforced_service_blocked");
+    }
+   }
+  }
+  protected override void OnStop(){
+   lock(gate){
+    if(!successfulOneShot)ExitCode=startupFailureCode==0?1:startupFailureCode;
+    stopping=true;
+    if(child!=null){child.Dispose();child=null;}
+   }
+  }
   protected override void OnShutdown(){OnStop();base.OnShutdown();}
-  public static int Main(string[] args){try{if(args.Length!=0||Environment.OSVersion.Platform!=PlatformID.Win32NT||!Environment.Is64BitProcess||Process.GetCurrentProcess().SessionId!=0)return 1;string reader;using(var id=WindowsIdentity.GetCurrent()){reader=id.User.Value;if(!Regex.IsMatch(reader,"\\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\\z"))return 1;}string self=Process.GetCurrentProcess().MainModule.FileName;string path=Path.Combine(Path.GetDirectoryName(self),"service.args");Protection.PrivateRead(path,reader);if(new FileInfo(path).Length>16384)return 1;byte[] bytes=File.ReadAllBytes(path);if(bytes.Length>16384)return 1;string hash;using(var digest=SHA256.Create()){hash=BitConverter.ToString(digest.ComputeHash(bytes)).Replace("-","").ToLowerInvariant();}Settings s=new Settings(new UTF8Encoding(false,true).GetString(bytes));if(Protection.Hash(path)!=hash||s.Values["service_sid"]!=reader)return 1;ServiceBase.Run(new Host(s,path,hash,self));return 0;}catch{return 1;}}
+  public static int Main(string[] args){
+   var phase=StartupPhase.ProcessContext;
+   Host host=null;
+   try{
+    if(args.Length!=0||Environment.OSVersion.Platform!=PlatformID.Win32NT||!Environment.Is64BitProcess||Process.GetCurrentProcess().SessionId!=0)return (int)phase;
+    phase=StartupPhase.Token;
+    string reader;
+    using(var id=WindowsIdentity.GetCurrent()){
+     reader=id.User.Value;
+     if(!Regex.IsMatch(reader,@"\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\z"))return (int)phase;
+    }
+    phase=StartupPhase.ArgsRead;
+    string self=Process.GetCurrentProcess().MainModule.FileName;
+    string path=Path.Combine(Path.GetDirectoryName(self),"service.args");
+    Protection.PrivateRead(path,reader);
+    if(new FileInfo(path).Length>16384)return (int)phase;
+    byte[] bytes=File.ReadAllBytes(path);
+    if(bytes.Length>16384)return (int)phase;
+    string hash;
+    using(var digest=SHA256.Create()){
+     hash=BitConverter.ToString(digest.ComputeHash(bytes)).Replace("-","").ToLowerInvariant();
+    }
+    phase=StartupPhase.ArgsParse;
+    Settings s=new Settings(new UTF8Encoding(false,true).GetString(bytes));
+    phase=StartupPhase.ArgsBinding;
+    if(Protection.Hash(path)!=hash||s.Values["service_sid"]!=reader)return (int)phase;
+    phase=StartupPhase.Dispatch;
+    host=new Host(s,path,hash,self);
+    ServiceBase.Run(host);
+    return host.startupFailureCode;
+   }catch{
+    return host!=null&&host.startupFailureCode!=0?host.startupFailureCode:(int)phase;
+   }
+  }
  }
 #endif
 }
