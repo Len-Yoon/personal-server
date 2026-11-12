@@ -13,6 +13,37 @@ WSL_SCRIPT = (ROOT / "scripts" / "windows-bootstrap.sh").read_text(encoding="utf
 
 
 class WindowsBootstrapTests(unittest.TestCase):
+    def test_legacy_deploy_checks_owner_and_holds_bootstrap_lock_until_exit(self):
+        import fcntl
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / 'data'
+            state.mkdir()
+            authority = root / 'N100HA-Cutover'
+            authority.mkdir()
+            lock = state / 'ha-legacy-bootstrap.lock'
+            helper = ROOT / 'scripts' / 'runtime-service-state.sh'
+            exclusive_probe = (
+                'import fcntl,sys; '
+                'lock=open(sys.argv[1],"ab"); '
+                'fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)'
+            )
+            command = ['bash', '-ec', 'source "$1"; _lock_n100_legacy_deploy "$2" "$3"; '
+                       'if python3 -c "$4" "$2/ha-legacy-bootstrap.lock" 2>/dev/null; then exit 2; fi',
+                       'deploy-guard-test', str(helper), str(state), str(authority), exclusive_probe]
+            self.assertEqual(subprocess.run(command, timeout=5).returncode, 0)
+            with lock.open('ab') as held:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertEqual(subprocess.run(command, timeout=5).returncode, 1)
+            (authority / 'HA-CONTROLLER-OWNER.JSON').touch()
+            self.assertEqual(subprocess.run(command, timeout=5).returncode, 1)
+            (authority / 'HA-CONTROLLER-OWNER.JSON').unlink()
+            authority.rmdir()
+            self.assertEqual(subprocess.run(command, timeout=5).returncode, 0)
+            (state / 'ha-controller-owner.json').symlink_to('missing-owner')
+            self.assertEqual(subprocess.run(command, timeout=5).returncode, 1)
+
     def test_wsl_direct_bootstrap_refuses_owned_or_locked_runtime(self):
         import fcntl
 
