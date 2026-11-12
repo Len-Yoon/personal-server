@@ -5,11 +5,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${1:-/mnt/c/personal-server}"
 cd "$PROJECT_ROOT"
 # WSL instances on this host all target the same legacy Docker/K3s services.
+protected_authority=
 if [[ "${OSTYPE:-}" == linux* ]] && /usr/bin/grep -qi microsoft /proc/sys/kernel/osrelease; then
   [[ "$(pwd -P)" == /mnt/c/personal-server ]] || {
     printf '%s\n' 'legacy_bootstrap_root_rejected' >&2
     exit 1
   }
+  protected_authority=/mnt/c/ProgramData/N100HA-Cutover
 fi
 legacy_state="$PWD/data"
 legacy_lock="$legacy_state/ha-legacy-bootstrap.lock"
@@ -40,6 +42,26 @@ except OSError:
 if [[ -e "$legacy_owner" || -L "$legacy_owner" ]]; then
   printf '%s\n' 'legacy_bootstrap_owned_by_ha' >&2
   exit 1
+fi
+if [[ -n "$protected_authority" ]]; then
+  # Directory enumeration works with list-only NTFS rights and separates an
+  # absent marker from inaccessible storage.
+  /usr/bin/env python3 -c '
+import os, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+with os.scandir(path.parent) as items:
+    matches = [item for item in items if item.name.casefold() == path.name.casefold()]
+if not matches:
+    sys.exit(0)
+if len(matches) != 1 or matches[0].is_symlink() or not matches[0].is_dir(follow_symlinks=False):
+    sys.exit(2)
+with os.scandir(matches[0].path) as items:
+    if any(item.name.casefold() == "ha-controller-owner.json" for item in items):
+        sys.exit(1)
+' "$protected_authority" || {
+    printf '%s\n' 'legacy_bootstrap_authority_untrusted_or_owned' >&2
+    exit 1
+  }
 fi
 source "$SCRIPT_DIR/runtime-service-state.sh"
 {

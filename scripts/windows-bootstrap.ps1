@@ -63,6 +63,17 @@ function Assert-HaLegacyAllowed {
         }
         $owned = @(Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction Stop |
             Where-Object { $_.Name -ieq [IO.Path]::GetFileName($marker) })
+        $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+        $authority = @(Get-ChildItem -LiteralPath $programData -Force -ErrorAction Stop |
+            Where-Object { $_.Name -ieq 'N100HA-Cutover' })
+        if ($authority.Count -gt 0) {
+            if ($authority.Count -ne 1 -or -not $authority[0].PSIsContainer -or
+                ($authority[0].Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw 'Legacy Windows recovery authority directory is untrusted.'
+            }
+            $owned += @(Get-ChildItem -LiteralPath $authority[0].FullName -Force -ErrorAction Stop |
+                Where-Object { $_.Name -ieq 'ha-controller-owner.json' })
+        }
     } catch {
         throw "HA ownership cannot be excluded; legacy mutation is blocked."
     }

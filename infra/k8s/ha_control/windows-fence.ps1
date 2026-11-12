@@ -72,7 +72,19 @@ function Read-PrivateJson([string]$Path) {
 }
 
 function Assert-Quiescent {
-    $owner = Read-PrivateJson (Join-Path (Join-Path $script:config.legacy_root "data") "ha-controller-owner.json")
+    $legacy = Join-Path (Join-Path $script:config.legacy_root "data") "ha-controller-owner.json"
+    $legacyParent = Split-Path -Parent $legacy
+    if (@(Get-ChildItem -LiteralPath $legacyParent -Force -ErrorAction Stop |
+          Where-Object { $_.Name -ieq 'ha-controller-owner.json' }).Count -ne 0) {
+        throw "legacy_ownership_location_ambiguous"
+    }
+    $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    $authority = Join-Path $programData 'N100HA-Cutover'
+    $directory = Get-Item -LiteralPath $authority -Force -ErrorAction Stop
+    if (-not $directory.PSIsContainer -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "legacy_ownership_directory_untrusted"
+    }
+    $owner = Read-PrivateJson (Join-Path $authority 'ha-controller-owner.json')
     $bootstrap = Join-Path $script:config.legacy_root "scripts\windows-bootstrap.ps1"
     if ($owner.cluster -ne $script:config.cluster -or $owner.generation -ne $script:config.generation -or
         $owner.source_commit -ne $script:config.source_commit -or
