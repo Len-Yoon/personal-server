@@ -1,6 +1,7 @@
 """Native-adapter unit evidence only; no Windows/N100 actions are executed."""
 from contextlib import contextmanager
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -15,6 +16,7 @@ from unittest.mock import MagicMock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "infra/k8s"))
 from ha_control.controller import TransitionBlocked
+from ha_control.initial_pg_lease import INITIAL_CUTOVER, InitialPgLease
 from ha_control.pg import PgBackend, ROLE_LOCK
 from ha_control import cli, scm_pg_auth_probe
 
@@ -735,6 +737,186 @@ class PGControlTests(unittest.TestCase):
             self.assertFalse(any('SELECT 1 FROM ha_effects.ledger' in call.args[0] for call in self.primary.execute.call_args_list))
 
 
+
+
+class InitialPgLeaseTests(unittest.TestCase):
+    def setUp(self):
+        self.cluster = 'initial_test'
+        self.state = dict(cluster=self.cluster, target='A', old='B', timeline=1, generation=1)
+        self.binding = dict(source_commit='a' * 40, plan_sha256='b' * 64)
+        self.backend = object.__new__(PgBackend)
+        self.backend.depth = 1
+        self.backend.plan = dict(cluster=self.cluster, system_id='1234', node='A', generation=1, timeline=1,
+                                 profile='enforced-vm-v1', _approval_action='ha-transition', source_commit='c' * 40,
+                                 initial_wsl_cutover=dict(INITIAL_CUTOVER),
+                                 pg_enforcement={'effects': {'deployment_binding': self.binding,
+                                                             'broker_role': 'ha_effect_broker'}})
+        self.backend.fence_adapter = SimpleNamespace(plan_sha256='d' * 64)
+        self.backend._connection = self.connection
+        self.backend._observe = self.observe
+        self.backend._commit = self.commit
+        self.backend._effects_open_gate = MagicMock()
+        self.trace = []
+        self.now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        self.expiry = self.now - timedelta(days=1)
+        self.revision = 1
+        self.opened = False
+        self.pending = None
+        self.probes = set()
+        self.pending_probes = set()
+        self.lost_commit = False
+        self.hide_lease_on_b = False
+        self.elapsed = 0
+        self.over_budget = False
+        self.lease = InitialPgLease(self.backend, self.legacy_closed)
+
+    def legacy_closed(self, state):
+        self.assertEqual(state, self.state)
+        self.trace.append(('closure',))
+        if self.over_budget and self.opened:
+            self.elapsed = 2.1
+
+    @contextmanager
+    def connection(self, node):
+        self.trace.append(('connect', node))
+        try:
+            yield SimpleNamespace(node=node, execute=lambda sql, parameters=(): self.execute(node, sql, parameters))
+        finally:
+            if node == 'A':
+                self.pending = None
+                self.pending_probes.clear()
+
+    def observe(self, connection, node, state):
+        self.assertEqual(connection.node, node)
+        self.assertEqual(state, self.state)
+        return dict(cluster=self.cluster, epoch=1, revision=self.revision, primary='A', partner='B',
+                    timeline=1, actual_timeline=1, serving=['A'], worker='A', mode='AS', system_id='1234',
+                    node='ha_' + node, recovery=node == 'B', sync_names='FIRST1(ha_b)' if node == 'A' else 'FIRST1(ha_a)',
+                    sync_peer='ha_b' if node == 'A' else None, fsync=True, full_page_writes=True, writes=self.opened,
+                    history=self.opened, remaining=(self.expiry - self.now).total_seconds(), flush='0/30', replay='0/30')
+
+    def execute(self, node, sql, parameters):
+        self.trace.append((node, sql, parameters))
+        row, count = None, 0
+        if sql == 'SELECT expires_at FROM ha.control WHERE singleton=1':
+            row = (self.expiry,)
+        elif sql == 'SELECT pg_current_wal_flush_lsn()::text':
+            row = ('0/20',)
+        elif sql.startswith('SELECT generation FROM ha.controller_probes'):
+            nonce, = parameters
+            visible = nonce in self.probes and not (node == 'B' and nonce.endswith(':lease') and self.hide_lease_on_b)
+            row = (1,) if visible else None
+        elif sql.startswith('INSERT INTO ha.controller_probes'):
+            self.pending_probes.add(parameters[0])
+        elif sql.startswith('DELETE FROM ha.controller_probes'):
+            self.probes = {nonce for nonce in self.probes if not nonce.startswith('initial-a:')}
+        elif sql.startswith('UPDATE ha.control'):
+            expected = (self.cluster, self.revision, self.opened, self.opened, self.expiry, '1234')
+            if parameters == expected:
+                count = 1
+                if sql.startswith('UPDATE ha.control SET revision=3'):
+                    self.pending = (3, False, self.now - timedelta(seconds=1))
+                else:
+                    row = (self.now + timedelta(seconds=5),)
+                    self.pending = (2, True, row[0])
+        return SimpleNamespace(fetchone=lambda: row, rowcount=count)
+
+    def commit(self, connection):
+        connection.execute('COMMIT')
+        self.probes.update(self.pending_probes)
+        self.pending_probes.clear()
+        if self.pending is not None:
+            self.revision, self.opened, self.expiry = self.pending
+            self.pending = None
+            if self.opened and self.lost_commit:
+                raise TransitionBlocked('fixture_commit_response_lost')
+
+    def test_open_and_renew_preserve_initial_timeline_with_scoped_cas(self):
+        self.assertRegex(self.lease.open(self.state), r'^[a-f0-9]{64}$')
+        self.assertTrue(self.opened)
+        self.assertEqual(self.revision, 2)
+        self.backend._effects_open_gate.assert_called_once()
+        queries = [row[1] for row in self.trace if row[0] == 'A' and len(row) == 3]
+        self.assertEqual(queries.count('COMMIT'), 2)
+        self.assertEqual(queries.count('SET LOCAL synchronous_commit=remote_apply'), 2)
+        self.assertEqual(queries.count('SELECT pg_advisory_xact_lock(%s)'), 2)
+        self.assertEqual(self.trace.count(('closure',)), 3)
+        self.assertFalse(any('pg_promote' in query for query in queries))
+        self.trace.clear()
+        self.now += timedelta(seconds=1)
+        self.assertRegex(self.lease.renew(self.state), r'^[a-f0-9]{64}$')
+        queries = [row[1] for row in self.trace if row[0] == 'A' and len(row) == 3]
+        self.assertEqual(queries.count('SELECT pg_advisory_xact_lock_shared(%s)'), 2)
+        renew, = [query for query in queries if query.startswith('UPDATE ha.control')]
+        self.assertTrue(renew.startswith("UPDATE ha.control SET expires_at=clock_timestamp()+interval '5 seconds' WHERE"))
+        self.assertIn('expires_at=%s', renew)
+        self.assertIn('expires_at>clock_timestamp()', renew)
+        self.backend._effects_open_gate.assert_called_once()
+        self.now += timedelta(seconds=6)
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_lease_stamp_unverified'):
+            self.lease.renew(self.state)
+        self.assertFalse(self.opened)
+        self.assertEqual(self.revision, 3)
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_lease_reconciliation_required'):
+            self.lease.open(self.state)
+
+    def test_missing_replica_nonce_revokes_only_the_issued_expiry(self):
+        self.hide_lease_on_b = True
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_replication_barrier_unconfirmed'):
+            self.lease.open(self.state)
+        self.assertFalse(self.opened)
+        revoke, = [row for row in self.trace if len(row) == 3 and row[1].startswith('UPDATE ha.control SET revision=3')]
+        self.assertEqual(revoke[2], (self.cluster, 2, True, True, self.now + timedelta(seconds=5), '1234'))
+        self.assertIn('expires_at=%s', revoke[1])
+
+    def test_legacy_closure_loss_after_barrier_blocks_authority_cas(self):
+        def guard(state):
+            self.legacy_closed(state)
+            if self.backend._effects_open_gate.called:
+                raise TransitionBlocked('fixture_legacy_reopened')
+
+        lease = InitialPgLease(self.backend, guard)
+        with self.assertRaisesRegex(TransitionBlocked, 'fixture_legacy_reopened'):
+            lease.open(self.state)
+        self.assertFalse(self.opened)
+        self.assertEqual(self.revision, 1)
+        self.assertEqual(self.trace.count(('closure',)), 2)
+        self.assertFalse(any(len(row) == 3 and row[1].startswith('UPDATE ha.control') for row in self.trace))
+
+    def test_lost_commit_or_whole_proof_budget_cannot_report_open(self):
+        for option, reason in (('lost_commit', 'fixture_commit_response_lost'),
+                               ('over_budget', 'initial_replication_deadline_exceeded')):
+            with self.subTest(option=option):
+                self.setUp()
+                setattr(self, option, True)
+                with patch('ha_control.initial_pg_lease.time.monotonic', side_effect=lambda: self.elapsed):
+                    with self.assertRaisesRegex(TransitionBlocked, reason):
+                        self.lease.open(self.state)
+                self.assertFalse(self.opened)
+                self.assertEqual(self.revision, 3)
+
+    def test_explicit_initial_mode_and_deployment_binding_are_both_required(self):
+        self.assertEqual(self.backend._effects_deployment_binding(), ('a' * 40, 'b' * 64))
+        self.assertNotEqual(self.binding['plan_sha256'], self.backend.fence_adapter.plan_sha256)
+        connection = MagicMock()
+        connection.execute.return_value.fetchall.return_value = [(
+            self.cluster, '1234', self.binding['source_commit'], self.binding['plan_sha256'], 'ha_effect_broker',
+        )]
+        with patch('ha_runtime.effects.validate_catalog') as validate:
+            self.backend._effects_observation(connection)
+            self.assertEqual(validate.call_args.args[1].plan_sha256, self.binding['plan_sha256'])
+        self.backend.plan.pop('initial_wsl_cutover')
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_cutover_approval_required'):
+            self.lease.open(self.state)
+        self.backend.plan['initial_wsl_cutover'] = dict(INITIAL_CUTOVER)
+        self.backend.plan['pg_enforcement']['effects'] = {}
+        self.assertEqual(self.backend._effects_deployment_binding(), ('c' * 40, 'd' * 64))
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_cutover_deployment_binding_required'):
+            self.lease.open(self.state)
+        self.backend.plan['pg_enforcement']['effects']['deployment_binding'] = dict(self.binding, plan_sha256='bad')
+        with self.assertRaisesRegex(TransitionBlocked, 'enforced_effects_plan_required'):
+            self.lease.open(self.state)
+        self.assertEqual(self.trace, [])
 
 
 class ScmPgAuthProbeTests(unittest.TestCase):
