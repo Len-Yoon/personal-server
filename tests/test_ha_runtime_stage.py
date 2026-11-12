@@ -72,6 +72,18 @@ $closed=$false;try{Invoke-RuntimeStage}catch{if($_.Exception.Message -cne 'runti
 if(-not $closed){throw 'native_gate_open'}
 ''')
 
+    def test_failure_receipt_identifies_native_intent_without_exposing_input(self):
+        marker='do-not-print-private-input'
+        result=subprocess.run([PWSH,'-NoProfile','-NonInteractive','-File',str(SOURCE),
+                               '-Manifest',marker],capture_output=True,text=True,timeout=30)
+        self.assertEqual(result.returncode,1)
+        self.assertNotIn(marker,result.stdout+result.stderr)
+        self.assertEqual(json.loads(result.stdout),{
+            'scope':'private_code_stage_only','status':'BLOCKED',
+            'reason':'runtime_stage_rejected_preserve_partial','failed_stage':'native_intent',
+            'SCM_registered':False,'authority_issued':False,
+        })
+
     def test_manifest_zip_exact_inventory_and_optional_host(self):
         for host in (False,True):
             with tempfile.TemporaryDirectory() as tmp:
