@@ -7,25 +7,6 @@ import time
 from .controller import TransitionBlocked
 
 
-def _pages(raw):
-    """Accept the concatenated JSON objects emitted by gh api --paginate."""
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8")
-    decoder = json.JSONDecoder()
-    pages = []
-    offset = 0
-    whitespace = re.compile(r"\s*")
-    while offset < len(raw):
-        offset = whitespace.match(raw, offset).end()
-        if offset == len(raw):
-            break
-        page, offset = decoder.raw_decode(raw, offset)
-        if type(page) is not dict or len(pages) >= 1000:
-            raise ValueError("invalid_workflow_run_page")
-        pages.append(page)
-    return pages
-
-
 class DeploymentAdmission:
     """Pin one workflow and drain its runs after disabling future admission.
 
@@ -72,15 +53,14 @@ class DeploymentAdmission:
     def _closed(self):
         if self.state() != "disabled_manually":
             raise TransitionBlocked("deployment_admission_reopened")
-        try:
-            pages = _pages(self._api(self.endpoint + "/runs?per_page=100", "--paginate"))
-        except (TypeError, ValueError):
-            raise TransitionBlocked("deployment_admission_runs_unconfirmed") from None
-        if not pages or type(pages[0].get("total_count")) is not int or pages[0]["total_count"] < 0:
-            raise TransitionBlocked("deployment_admission_runs_unconfirmed")
+        first = self._run_page(1)
+        total = first["total_count"]
+        page_count = max(1, (total + 99) // 100)
         ids = set()
-        for page in pages:
-            if page.get("total_count") != pages[0]["total_count"] or type(page.get("workflow_runs")) is not list:
+        for number in range(1, page_count + 1):
+            page = first if number == 1 else self._run_page(number)
+            expected = min(100, total - 100 * (number - 1))
+            if page["total_count"] != total or len(page["workflow_runs"]) != expected:
                 raise TransitionBlocked("deployment_admission_runs_unconfirmed")
             for row in page["workflow_runs"]:
                 run = row.get("id") if type(row) is dict else None
@@ -90,11 +70,21 @@ class DeploymentAdmission:
                 ids.add(run)
                 if row.get("status") != "completed":
                     return False
-        if len(ids) != pages[0]["total_count"]:
+        if len(ids) != total:
             raise TransitionBlocked("deployment_admission_runs_unconfirmed")
         if self.state() != "disabled_manually":
             raise TransitionBlocked("deployment_admission_reopened")
         return True
+
+    def _run_page(self, number):
+        try:
+            page = json.loads(self._api(self.endpoint + f"/runs?per_page=100&page={number}"))
+        except (TypeError, ValueError):
+            raise TransitionBlocked("deployment_admission_runs_unconfirmed") from None
+        if (type(page) is not dict or type(page.get("total_count")) is not int
+                or not 0 <= page["total_count"] <= 100000 or type(page.get("workflow_runs")) is not list):
+            raise TransitionBlocked("deployment_admission_runs_unconfirmed")
+        return page
 
     def assert_closed(self):
         if not self._closed():

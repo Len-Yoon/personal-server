@@ -1037,10 +1037,11 @@ class LegacyCutoverTransactionTests(unittest.TestCase):
             if endpoint.endswith('/enable'):
                 workflow['state'] = 'active'
             if '/runs?' in endpoint:
-                self.assertEqual(args[5:], ('--paginate',))
-                pages = [dict(total_count=2, workflow_runs=[run]),
-                         dict(total_count=2, workflow_runs=[dict(run, id=52)])]
-                return SimpleNamespace(stdout=b'\n'.join(json.dumps(page).encode() for page in pages))
+                self.assertEqual(args[5:], ())
+                page = int(endpoint.rpartition('=')[2])
+                self.assertIn(page, (1, 2))
+                rows = [dict(run, id=index) for index in range(1, 101)] if page == 1 else [dict(run, id=101)]
+                result = dict(total_count=101, workflow_runs=rows)
             else:
                 result = workflow
             return SimpleNamespace(stdout=json.dumps(result))
