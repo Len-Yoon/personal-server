@@ -35,6 +35,7 @@ test -d "$PROJECT_ROOT/data" || { echo "data 디렉터리가 없습니다: $PROJ
 command -v docker >/dev/null 2>&1 || { echo "docker 명령을 찾을 수 없습니다." >&2; exit 1; }
 
 source "$SCRIPT_DIR/runtime-service-state.sh"
+require_n100_legacy_deploy_admission "$PROJECT_ROOT"
 
 DOCKER_WAIT_ATTEMPTS="${DOCKER_WAIT_ATTEMPTS:-18}"
 DOCKER_WAIT_SECONDS="${DOCKER_WAIT_SECONDS:-10}"

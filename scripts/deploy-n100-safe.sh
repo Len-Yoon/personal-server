@@ -670,6 +670,7 @@ main() {
   local expected_sha="$1"
   local previous_sha
   local origin_main_sha
+  local kernel kernel_release runtime_state_source
 
   printf '%s\n' 'safe_cd_stage=preflight' >&2
   is_revision "$expected_sha" || return 1
@@ -694,6 +695,17 @@ main() {
   git merge-base --is-ancestor "$expected_sha" origin/main
   origin_main_sha="$(git rev-parse origin/main)"
   is_revision "$origin_main_sha" || return 1
+  kernel=$(/usr/bin/uname -s) || return 1
+  if [[ "$kernel" == Linux ]]; then
+    IFS= read -r kernel_release </proc/sys/kernel/osrelease || return 1
+    if [[ "${kernel_release,,}" == *microsoft* ]]; then
+      # The runner executes this script from a temporary file. Load the guard
+      # from the verified revision rather than a mutable workspace copy.
+      runtime_state_source="$(git show "$expected_sha:scripts/runtime-service-state.sh")" || return 1
+      source /dev/stdin <<<"$runtime_state_source" || return 1
+      require_n100_legacy_deploy_admission "$PROJECT_ROOT" || return 1
+    fi
+  fi
   select_unchanged_services "$expected_sha" "$origin_main_sha" "$2" || return 1
   if [[ "${#PARSED_SERVICES[@]}" -eq 0 ]]; then
     printf '%s\n' 'safe_cd_stage=skip reason=superseded' >&2
