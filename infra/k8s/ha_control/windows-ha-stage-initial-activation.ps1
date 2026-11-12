@@ -311,8 +311,9 @@ try {
     $null = Read-Protected $scope.launcher_path $scope.launcher_sha256 1048576
     $legacy = ConvertFrom-Json -InputObject ($encoding.GetString($legacyRaw))
     $reactivation = $legacy.windows_reactivation
+    # The owner marker identifies the legacy plan's source. PostgreSQL effects identify the restored app release.
     if ($legacy.windows_driver_sha256 -cne $callback.driver_sha256 -or $reactivation.authority_service_name -cne $scope.service_name -or
-        $reactivation.authority_cluster -cne $plan.cluster -or $reactivation.authority_source_commit -cne $deployment.source_commit -or
+        $reactivation.authority_cluster -cne $plan.cluster -or $reactivation.authority_source_commit -cnotmatch '\A[a-f0-9]{40}\z' -or
         $reactivation.distribution -cne 'Ubuntu-24.04') { throw 'initial_stage_legacy_plan' }
     Assert-One $reactivation.authority_generation
     $boot = (Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5).LastBootUpTime.ToUniversalTime().Ticks
@@ -360,7 +361,7 @@ try {
     $marker = ConvertFrom-Json -InputObject ($encoding.GetString($markerRaw))
     Assert-Fields $marker @('cluster','generation','source_commit','plan_sha256','attempt_id')
     Assert-One $marker.generation
-    if ($marker.cluster -cne $plan.cluster -or $marker.source_commit -cne $deployment.source_commit -or
+    if ($marker.cluster -cne $plan.cluster -or $marker.source_commit -cne $reactivation.authority_source_commit -or
         $marker.plan_sha256 -cne $bootstrap.legacy_plan_sha256 -or $marker.attempt_id -cne $attempt) { throw 'initial_stage_marker' }
     $markerPin = @{path=$markerPath;sha256=$markerSha;acl=(File-Access $serviceSid).GetSecurityDescriptorSddlForm($sections);
         file_id=(Get-HaMarkerFileId $markerPath)}
