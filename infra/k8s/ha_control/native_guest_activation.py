@@ -167,8 +167,13 @@ def activate_prepared_a(pins, activation, stage, *, assert_lease):
             "lease_sha256": lease,
         })
         runtime._write(intent, intent_bytes)
+
+        def assert_intent():
+            _need(runtime._read(intent, 0, {0o600}) == intent_bytes, "guest_activation_intent_changed")
+
         for path, value in authorities.items():
             _check_lease(pins, activation, assert_lease, "publish:" + str(path.relative_to(runtime.ROOT)))
+            assert_intent()
             runtime._write(path, value, 0o444)
         _authority_files_match(authorities)
         started = set()
@@ -176,12 +181,13 @@ def activate_prepared_a(pins, activation, stage, *, assert_lease):
             _state(pins, containers, started, baseline)
             _authority_files_match(authorities)
             _check_lease(pins, activation, assert_lease, "start:" + role)
+            assert_intent()
             runtime._docker("start", containers[role]["container_id"], timeout=30)
             started.add(role)
         _state(pins, containers, started, baseline)
         _authority_files_match(authorities)
         lease = _check_lease(pins, activation, assert_lease, "guest_started")
-        _need(runtime._read(intent, 0, {0o600}) == intent_bytes, "guest_activation_intent_changed")
+        assert_intent()
         receipt = {
             "schema_version": 1, "status": "STARTED", **runtime._runtime_identity(pins), **asdict(activation),
             "guest_intent_sha256": runtime._digest(intent_bytes), "lease_sha256": lease,

@@ -74,6 +74,7 @@ public static class HaLeaseProofPeer {
                     [HaLeaseProofPeer]::Verify($pipe.SafePipeHandle, $ServerPid)
                     $null = Remaining
                     $frame = [Text.UTF8Encoding]::new($false, $true).GetString($buffer, 0, $end)
+                    if ($frame -cnotmatch '\A[\x20-\x7e]{2,4095}\z') { throw 'lease_proof_frame' }
                     break
                 }
             }

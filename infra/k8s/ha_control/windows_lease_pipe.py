@@ -114,10 +114,14 @@ class PersistentLeaseProofClient:
                 _require(stream.readinto(self._key) == len(self._key) and not stream.read(1))
             _require(hmac.compare_digest(hashlib.sha256(self._key).hexdigest(), key_sha256))
             _protected_path(powershell)
-            _require(0 < _protected_path(client).st_size <= 16384)
+            before = _protected_path(client)
+            _require(0 < before.st_size <= 16384)
             with client.open("rb") as stream:
                 source = stream.read(16385)
-            _require(len(source) <= 16384 and hashlib.sha256(source).hexdigest() == client_sha256)
+            after = _protected_path(client)
+            _require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                     == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+                     and len(source) == before.st_size and hashlib.sha256(source).hexdigest() == client_sha256)
             self._process = subprocess.Popen(
                 [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned",
                  "-File", str(client), "-PipeName", pipe_name, "-ServerPid", str(server_pid),
