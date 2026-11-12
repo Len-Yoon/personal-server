@@ -21,7 +21,7 @@ def checked(path, owner, limit):
 
 
 def verify(root, manifest, digest, owner):
-    if manifest.parent != root.parent:
+    if manifest.parent not in root.parents:
         raise ValueError('native_wsl_source_manifest_path_untrusted')
     for directory in (root, *root.parents):
         info = directory.lstat()

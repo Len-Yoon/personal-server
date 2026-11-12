@@ -60,10 +60,11 @@ function Assert-Access($Entry, [bool]$Leaf, [string]$Reader, [string]$LeafWriter
     }
 }
 
-function Assert-ProtectedPath($Entry, [string]$Reader = '', [string]$LeafWriter = '') {
+function Assert-ProtectedPath($Entry, [string]$Reader = '', [string]$TrustedWriter = '', [switch]$LeafOnly) {
     $depth = 0
     for ($item = $Entry; $null -ne $item; $item = $(if ($item -is [IO.FileInfo]) { $item.Directory } else { $item.Parent })) {
-        Assert-Access $item ($depth -le 1) $Reader $(if ($depth -eq 0) { $LeafWriter } else { '' })
+        $allowed = if (-not $LeafOnly -or $depth -eq 0) { $TrustedWriter } else { '' }
+        Assert-Access $item ($depth -le 1) $Reader $allowed
         $depth++
     }
 }
@@ -78,12 +79,13 @@ function File-Identity([string]$Path) {
     return $Matches[0].ToLowerInvariant()
 }
 
-function Read-Protected([string]$Path, [string]$Pin, [int]$Limit, [string]$Reader = '', [string]$LeafWriter = '') {
+function Read-Protected([string]$Path, [string]$Pin, [int]$Limit, [string]$Reader = '',
+                        [string]$TrustedWriter = '', [switch]$LeafOnly) {
     Assert-LocalPath $Path
     if ($Pin -cne '') { Assert-Pin $Pin }
     $file = Get-Item -LiteralPath $Path -Force
     if ($file -isnot [IO.FileInfo] -or $file.Length -lt 1 -or $file.Length -gt $Limit) { throw 'initial_stage_file' }
-    Assert-ProtectedPath $file $Reader $LeafWriter
+    Assert-ProtectedPath $file $Reader $TrustedWriter -LeafOnly:$LeafOnly
     $stream = [IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
     try {
         $identity = File-Identity $Path
@@ -95,7 +97,7 @@ function Read-Protected([string]$Path, [string]$Pin, [int]$Limit, [string]$Reade
                 ($Pin -cne '' -and (Digest $raw) -cne $Pin) -or (File-Identity $Path) -cne $identity) {
                 throw 'initial_stage_file_pin'
             }
-            Assert-ProtectedPath (Get-Item -LiteralPath $Path -Force) $Reader $LeafWriter
+            Assert-ProtectedPath (Get-Item -LiteralPath $Path -Force) $Reader $TrustedWriter -LeafOnly:$LeafOnly
             return ,$raw
         } finally { $readerStream.Dispose() }
     } finally { $stream.Dispose() }
@@ -154,11 +156,14 @@ function Assert-EmptyJournal([string]$Root,[string]$ServiceSid) {
     $allowed = $writers + @($ServiceSid)
     if ($sd.Owner.Value -cnotin $allowed -or $null -eq $sd.DiscretionaryAcl) { throw 'initial_stage_journal' }
     $granted = 0L
+    $required = 0x1301bfL
     foreach ($ace in $sd.DiscretionaryAcl) {
         if ($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback) { throw 'initial_stage_journal' }
         if ([int]$ace.AceFlags -band 8) { continue }
         $mask = [long]$ace.AccessMask -band 0xffffffffL
-        if ($ace.AceQualifier -eq 'AccessDenied' -and ($mask -band 0xd00d0157L)) { throw 'initial_stage_journal' }
+        if ($ace.AceQualifier -eq 'AccessDenied' -and ($mask -band (0xd00d0157L -bor $required))) {
+            throw 'initial_stage_journal'
+        }
         if ($ace.AceQualifier -eq 'AccessAllowed') {
             if (($mask -band 0xd00d0157L) -and $ace.SecurityIdentifier.Value -cnotin $allowed) {
                 throw 'initial_stage_journal'
@@ -166,7 +171,7 @@ function Assert-EmptyJournal([string]$Root,[string]$ServiceSid) {
             if ($ace.SecurityIdentifier.Value -ceq $ServiceSid) { $granted = $granted -bor $mask }
         }
     }
-    if (($granted -band 0x10000000) -eq 0 -and ($granted -band 197055) -ne 197055) { throw 'initial_stage_journal' }
+    if (($granted -band 0x10000000) -eq 0 -and ($granted -band $required) -ne $required) { throw 'initial_stage_journal' }
 }
 
 function Assert-ManualHost($Scope, $Start) {
@@ -277,9 +282,9 @@ try {
     $observerLauncher = Read-Protected $obs.launcher_path $obs.launcher_sha256 65536
     $null = Read-Protected $obs.server_path $obs.server_sha256 65536
     $null = Read-Protected $obs.callback_path $obs.callback_sha256 65536
-    $legacyRaw = Read-Protected $callback.reactivation_plan_path $bootstrap.legacy_plan_sha256 65536
-    $driverRaw = Read-Protected $callback.driver_path $callback.driver_sha256 65536
-    $null = Read-Protected $callback.vm_observer_path $callback.vm_observer_sha256 65536
+    $legacyRaw = Read-Protected $callback.reactivation_plan_path $bootstrap.legacy_plan_sha256 65536 '' $operatorSid
+    $driverRaw = Read-Protected $callback.driver_path $callback.driver_sha256 65536 '' $operatorSid
+    $null = Read-Protected $callback.vm_observer_path $callback.vm_observer_sha256 65536 '' $operatorSid
     $null = Read-Protected $paths.preflight_path $start.preflight_sha256 65536
     $null = Read-Protected $paths.scm_verifier_path $start.scm_verifier_sha256 262144
     $null = Read-Protected $scope.python_path $scope.python_sha256 67108864
@@ -293,8 +298,14 @@ try {
     $boot = (Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5).LastBootUpTime.ToUniversalTime().Ticks
     if ((Digest ($encoding.GetBytes([string]$boot))) -cne $obs.windows_boot_sha256 -or
         $reactivation.boot_ticks -cne [string]$boot) { throw 'initial_stage_windows_boot' }
+    $actualAdmins = @(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Stop |
+        ForEach-Object { $_.SID.Value } | Sort-Object)
+    if (($actualAdmins -join ',') -cne (($start.trusted_admin_sids | Sort-Object) -join ',')) {
+        throw 'initial_stage_operator'
+    }
     Assert-ManualHost $scope $start
-    if (Get-ScheduledTask -TaskPath '\' -TaskName ('N100HA_lease_observer_' + $attempt) -ErrorAction SilentlyContinue) {
+    $taskName = 'N100HA_lease_observer_' + $attempt
+    if (@(Get-ScheduledTask -TaskPath '\' -ErrorAction Stop | Where-Object { $_.TaskName -ieq $taskName }).Count -ne 0) {
         throw 'initial_stage_reconciliation_required'
     }
     if ($Preflight) {
@@ -367,7 +378,7 @@ try {
     if ($started.observer_ready -isnot [bool] -or -not $started.observer_ready -or
         ($started.observer_pid -isnot [int] -and $started.observer_pid -isnot [long]) -or
         $started.observer_pid -lt 1 -or $started.observer_pid -gt [int]::MaxValue) { throw 'initial_stage_observer' }
-    $ready = ConvertFrom-Json -InputObject ($encoding.GetString((Read-Protected $paths.ready_path '' 1024 '' $operatorSid)))
+    $ready = ConvertFrom-Json -InputObject ($encoding.GetString((Read-Protected $paths.ready_path '' 1024 '' $operatorSid -LeafOnly)))
     Assert-Fields $ready @('scope','pid','creation_filetime','server_sid','attempt_id','pipe_name','plan_sha256','callback_config_sha256')
     if ($ready.scope -cne 'n100ha-legacy-closure-v1' -or $ready.pid -ne $started.observer_pid -or
         $ready.creation_filetime -isnot [long] -or $ready.creation_filetime -le 0 -or $ready.server_sid -cne $operatorSid -or

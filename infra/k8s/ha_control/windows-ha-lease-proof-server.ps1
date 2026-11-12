@@ -141,15 +141,15 @@ function Write-Ready($Record) {
     if ($parent -isnot [IO.DirectoryInfo]) { throw 'lease_proof_ready_parent' }
     Assert-ProtectedPath $parent -PrivateLeaf
     $security = [Security.AccessControl.FileSecurity]::new()
-    $security.SetOwner([Security.Principal.SecurityIdentifier]::new($OperatorSid))
+    $security.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
     $security.SetAccessRuleProtection($true, $false)
-    foreach ($sid in $writers) {
+    foreach ($sid in @('S-1-5-18','S-1-5-32-544')) {
         $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
             [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'Allow'))
     }
     $temporary = Join-Path $parent.FullName ('.lease-observer-ready-' + [guid]::NewGuid().ToString('N') + '.tmp')
     $file = [IO.FileStream]::new($temporary, [IO.FileMode]::CreateNew,
-        [Security.AccessControl.FileSystemRights]::Write, [IO.FileShare]::None, 4096,
+        [Security.AccessControl.FileSystemRights]'WriteData,Synchronize', [IO.FileShare]::None, 4096,
         [IO.FileOptions]::WriteThrough, $security)
     try {
         try {
