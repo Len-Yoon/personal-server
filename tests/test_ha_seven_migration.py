@@ -11,6 +11,7 @@ import sqlite3
 import shutil
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock,patch
@@ -19,7 +20,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'infra/k8s'))
 from ha_runtime import migrate,seven_migration as M
 from ha_control.legacy_cutover import LegacyCutover, TransitionBlocked
-from ha_control import frozen_transport, native_frozen_capture
+from ha_control import frozen_ingress, frozen_transport, native_frozen_capture
 
 
 def encoded(value):return json.dumps(value,sort_keys=True).encode()
@@ -27,6 +28,36 @@ def sha(raw):return hashlib.sha256(raw).hexdigest()
 
 
 class NativeFrozenCaptureTests(unittest.TestCase):
+    def test_migration_ingress_checks_challenge_and_exact_http_body(self):
+        manifest, challenge = "1" * 64, "2" * 64
+        body = b"x" * (frozen_ingress.OVERHEAD + 1)
+
+        def exchange(auth, *, fail_ack=False):
+            raw = (f"POST {frozen_ingress.PATH} HTTP/1.1\r\n"
+                   f"Host: {frozen_ingress.HOST}\r\nAuthorization: {auth}\r\n"
+                   "Content-Type: application/octet-stream\r\n"
+                   f"Content-Length: {len(body)}\r\n\r\n").encode() + body
+            response = bytearray()
+            def sendall(value):
+                if fail_ack and value == manifest.encode():
+                    raise TimeoutError("fixture")
+                response.extend(value)
+            request = SimpleNamespace(settimeout=lambda _: None, makefile=lambda *_: io.BytesIO(raw),
+                                      sendall=sendall, shutdown=lambda _: None)
+            server = SimpleNamespace(authorization="Bearer " + challenge, manifest=manifest,
+                                     destination="private", max_bytes=100, result=None, rejected=False,
+                                     published=None, deadline=time.monotonic() + 1)
+            frozen_ingress._Receiver(request, (), server)
+            headers, payload = response.split(b"\r\n\r\n", 1)
+            return int(headers.split(b" ", 2)[1]), bytes(payload), server.result
+
+        with patch.object(frozen_ingress, "receive_bundle", return_value=manifest) as receive:
+            self.assertEqual(exchange("Bearer " + "3" * 64), (403, b"", None))
+            receive.assert_not_called()
+            self.assertEqual(exchange("Bearer " + challenge), (200, manifest.encode(), manifest))
+            self.assertEqual(receive.call_args.kwargs, {"max_bytes": 100, "wire_bytes": len(body)})
+            self.assertEqual(exchange("Bearer " + challenge, fail_ack=True), (200, b"", None))
+
     def test_frozen_transfer_rejects_tampering_before_publishing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
@@ -60,8 +91,11 @@ class NativeFrozenCaptureTests(unittest.TestCase):
             with self.assertRaisesRegex(TransitionBlocked, "size_invalid"):
                 frozen_transport.receive_bundle(target, manifest["sha256"], io.BytesIO(data), max_bytes=10)
             self.assertFalse(target.exists())
+            with self.assertRaisesRegex(TransitionBlocked, "wire_size_invalid"):
+                frozen_transport.receive_bundle(target, manifest["sha256"], io.BytesIO(data),
+                                                max_bytes=4000, wire_bytes=len(data) + 1)
             self.assertEqual(frozen_transport.receive_bundle(target, manifest["sha256"], io.BytesIO(data),
-                                                            max_bytes=4000), manifest["sha256"])
+                                                            max_bytes=4000, wire_bytes=len(data)), manifest["sha256"])
             self.assertEqual((target / "synthetic.blob").read_bytes(), content)
             self.assertFalse((target / "unreferenced.txt").exists())
 
