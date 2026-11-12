@@ -1,6 +1,7 @@
 """Source-bound guard composition and native bridge protocol; no remote actions."""
 import base64
 import ast
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -11,6 +12,7 @@ import queue
 import sys
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -565,6 +567,208 @@ class CaddyRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(TransitionBlocked, 'caddy_network_name_ambiguous'):
             self.runtime.apply(prepared, Mock())
         self.assertFalse(self.applied)
+
+
+class NativeApplicationsTests(unittest.TestCase):
+    def run_attempt(self, failure=None):
+        from ha_control import native_applications as module
+
+        plan = '1' * 64
+        trace = []
+        calls = {}
+        self.trace = trace
+        self.calls = calls
+        root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        journal = root / 'cutover.json'
+        self.journal = journal
+
+        @contextmanager
+        def hold(*unused):
+            yield
+
+        def evidence(stage, plan, attempt, **facts):
+            trace.append(stage)
+            value = hashlib.sha256(f'{stage}:{len(trace)}'.encode()).hexdigest()
+            calls[stage] = value
+            return dict(plan_sha256=plan, attempt_id=attempt, evidence_sha256=value, **facts)
+
+        class Capture:
+            def __init__(self, base, identity, attempt, *unused):
+                self.root = base / attempt
+                self.identity, self.attempt = identity, attempt
+
+            def prepare(self):
+                self.root.mkdir(mode=0o700)
+                trace.append('prepare_capture')
+                return '2' * 64
+
+            def block_reactivation(self):
+                trace.append('block_linux')
+
+            def fence(self, reactivation, settlement):
+                return evidence('fence', self.identity['plan_sha256'], self.attempt,
+                                reactivation_sha256=reactivation, settlement_sha256=settlement,
+                                writers_closed=True, services=module.ALL_SERVICES)
+
+            def capture(self, fence):
+                return evidence('capture', self.identity['plan_sha256'], self.attempt,
+                                fence_sha256=fence, manifest_sha256='3' * 64)
+
+            def assert_closed(self, fence):
+                if fence != calls['fence']:
+                    raise TransitionBlocked('fixture_wrong_fence')
+                trace.append('wsl_closed')
+                if failure == 'reopened_wsl' and 'vm_activation_check' in trace:
+                    raise TransitionBlocked('fixture_wsl_reopened')
+                if failure == 'reopened_wsl_before_route' and 'caddy_guard_boundary' in trace:
+                    raise TransitionBlocked('fixture_wsl_reopened')
+
+            def assert_reader_settled(self):
+                trace.append('readers_settled')
+
+            def restore_writers(self):
+                trace.append('restore_wsl')
+
+        class VM:
+            def preflight(self, plan, attempt, identity):
+                return evidence('vm_preflight', plan, attempt, target_system_id_sha256=hashlib.sha256(
+                    identity['target_system_id'].encode()).hexdigest(), restore_ready=True,
+                    target_writes_closed=True, target_never_opened=True)
+
+            def restore(self, plan, attempt, source, manifest, target):
+                if source != root / attempt / 'frozen' or target != calls['vm_preflight']:
+                    raise TransitionBlocked('fixture_wrong_target')
+                if failure in ('clean_restore', 'unknown_restore'):
+                    trace.append('vm_restore_failure')
+                    raise TransitionBlocked('fixture_vm_restore_failed')
+                return evidence('vm_restore', plan, attempt, manifest_sha256=manifest, target_sha256=target,
+                                target_writes_closed=True, services=module.ALL_SERVICES)
+
+            def verify_closed(self, plan, attempt, manifest, restore):
+                return evidence('vm_closed', plan, attempt, manifest_sha256=manifest, restore_sha256=restore,
+                                readiness=True, target_writes_closed=True, services=module.ALL_SERVICES)
+
+            def assert_activation_closed(self, plan, attempt, manifest, restore, verified):
+                return evidence('vm_activation_check', plan, attempt, manifest_sha256=manifest, restore_sha256=restore,
+                                verified_sha256=verified, target_writes_closed=True, target_never_opened=True, restore_ready=True)
+
+            def activate(self, plan, attempt, manifest, verified, settled, *, activation_check_sha256):
+                if activation_check_sha256 != calls['vm_activation_check']:
+                    raise TransitionBlocked('fixture_activation_unbound')
+                return evidence('vm_activate', plan, attempt, manifest_sha256=manifest, verified_sha256=verified,
+                                settlement_sha256=settled, activation_check_sha256=activation_check_sha256,
+                                vm_write_authority=True)
+
+            def assert_live(self, plan, attempt, authority, **references):
+                if references != dict(windows_generation=11, windows_generation_sha256='7' * 64,
+                                      live_lease_sha256='8' * 64, live_authority_sha256=calls['vm_live_authority']):
+                    raise TransitionBlocked('fixture_wrong_live_authority')
+                if failure == 'vm_lease':
+                    references['live_lease_sha256'] = '9' * 64
+                return evidence('vm_live', plan, attempt, authority_sha256=authority, ready=True,
+                                services=module.ALL_SERVICES, **references)
+
+            def observe_rollback(self, plan, attempt, baseline, manifest, restore_attempted):
+                status = 'UNKNOWN' if failure == 'unknown_restore' else 'CLEAN_FAILED'
+                return evidence('vm_rollback', plan, attempt, status=status, baseline_sha256=baseline,
+                                manifest_sha256=manifest, restore_attempted=restore_attempted, target_never_opened=True,
+                                target_writes_closed=True, prior_mutations_settled=True)
+
+        facts = {
+            'preflight': dict(legacy_live=True, protected_healthy=True, direct_recovery_ready=True,
+                              authority_storage_trusted=True, deployment_admission_ready=failure != 'preflight'),
+            'direct_recovery_excluded': dict(direct_recovery_excluded=True, recovery_commands_settled=True),
+            'authority_storage_trusted': dict(authority_storage_trusted=True),
+            'rollback': dict(readers_settled=True, prior_mutations_settled=True, deployment_admission_reconciled=True,
+                             legacy_route_unchanged=True),
+            'legacy_healthy': dict(legacy_healthy=True, protected_healthy=True),
+            'vm_live_authority': dict(active_node='A', windows_generation=11, windows_generation_sha256='7' * 64,
+                                      live_lease_sha256='8' * 64),
+            'verify_live': dict(protected_healthy=True, external_healthy=True, services=module.ALL_SERVICES),
+            'durable_legacy_exclusion': dict(legacy_writers_closed=True, exclusion_durable=True),
+        }
+        host = SimpleNamespace(guard=hold, observe_external_closed=Mock(),
+                               observe=lambda plan, attempt, boundary, prior: evidence(
+                                   boundary, plan, attempt, boundary=boundary, prior_sha256=prior, **facts[boundary]),
+                               release_owned_direct_recovery_exclusion=lambda plan, attempt, safety: evidence(
+                                   'release_exclusion', plan, attempt, safety_sha256=safety, owned_exclusion_released=True))
+
+        def windows_request(action, proof):
+            trace.append('windows_' + action)
+            if failure == 'caddy_guard' and action == 'verify' and 'caddy_guard_boundary' in trace:
+                raise TransitionBlocked('fixture_guard_lost')
+            return hashlib.sha256(f'{action}:{proof}:{len(trace)}'.encode()).hexdigest()
+
+        def apply_caddy(candidate, assert_guard):
+            self.assertEqual(json.loads(journal.read_bytes())['phase'], 'switch_caddy_intent')
+            trace.append('caddy_guard_boundary')
+            assert_guard()
+            trace.append('apply_caddy')
+            return {'container_sha256': '5' * 64, 'live_sha256': '6' * 64, 'candidate_sha256': candidate.candidate_sha256}
+
+        caddy = SimpleNamespace(inspect=lambda: {'id': 'fixture-caddy'},
+                                prepare=lambda *args, **kwargs: SimpleNamespace(candidate_sha256='4' * 64),
+                                assert_original=lambda baseline: trace.append('caddy_original'), apply=apply_caddy)
+        windows = SimpleNamespace(guard=hold, request=windows_request, healthy=True)
+        admission = SimpleNamespace(close=lambda: trace.append('admission_close'), assert_closed=lambda: None,
+                                    restore=lambda *, owned_disable: trace.append('admission_restore'))
+        bootstrap = SimpleNamespace(guard=hold, assert_visible=lambda: None, assert_released=lambda: None)
+        with patch.object(module, 'NativeFrozenCapture', Capture):
+            applications = module.NativeApplications(
+                capture_root=root, identity={'plan_sha256': plan, 'target_system_id': '123456'},
+                converter_source_pins={}, external_writers={}, caddy=caddy, active_ip='192.0.2.7',
+                expected_mtls_sha256={}, vm=VM(), host=host,
+            )
+            return module.compose_native_cutover(journal, windows, admission, bootstrap, applications).run(plan)
+
+    def test_native_coordinators_chain_manifest_authority_and_caddy_guard(self):
+        state = self.run_attempt()
+        self.assertEqual(state['phase'], 'complete')
+        for stage, proof in (('fence_writers', 'fence'), ('capture', 'capture'), ('restore', 'vm_restore'),
+                             ('verify_closed', 'vm_closed'), ('activate_vm', 'vm_activate')):
+            self.assertEqual(state['receipts'][stage], self.calls[proof])
+        self.assertEqual(self.trace[self.trace.index('vm_activate') - 1], 'wsl_closed')
+        self.assertLess(self.trace.index('vm_activate'), self.trace.index('apply_caddy'))
+        self.assertLess(self.trace.index('vm_live_authority'), self.trace.index('vm_live'))
+        self.assertLess(self.trace.index('vm_live'), self.trace.index('apply_caddy'))
+        self.assertLess(self.trace.index('verify_live'), self.trace.index('windows_finish'))
+
+    def test_preflight_and_caddy_guard_block_operational_mutations_at_their_boundaries(self):
+        with self.assertRaisesRegex(TransitionBlocked, 'legacy_cutover_preflight_failed'):
+            self.run_attempt('preflight')
+        self.assertNotIn('admission_close', self.trace)
+        with self.assertRaisesRegex(TransitionBlocked, 'legacy_cutover_forward_recovery_required'):
+            self.run_attempt('caddy_guard')
+        self.assertNotIn('apply_caddy', self.trace)
+        self.assertNotIn('restore_wsl', self.trace)
+
+    def test_fresh_wsl_closure_and_bound_windows_lease_gate_activation_and_route(self):
+        with self.assertRaisesRegex(TransitionBlocked, 'legacy_cutover_forward_recovery_required'):
+            self.run_attempt('reopened_wsl')
+        self.assertNotIn('vm_activate', self.trace)
+        self.assertNotIn('apply_caddy', self.trace)
+        with self.assertRaisesRegex(TransitionBlocked, 'legacy_cutover_forward_recovery_required'):
+            self.run_attempt('reopened_wsl_before_route')
+        self.assertIn('vm_activate', self.trace)
+        self.assertNotIn('vm_live_authority', self.trace)
+        self.assertNotIn('apply_caddy', self.trace)
+        self.assertNotIn('restore_wsl', self.trace)
+        with self.assertRaisesRegex(TransitionBlocked, 'legacy_cutover_forward_recovery_required'):
+            self.run_attempt('vm_lease')
+        self.assertIn('vm_activate', self.trace)
+        self.assertIn('vm_live_authority', self.trace)
+        self.assertNotIn('apply_caddy', self.trace)
+        self.assertNotIn('restore_wsl', self.trace)
+
+    def test_wsl_rollback_requires_fresh_settlement_for_known_restore_failure(self):
+        with self.assertRaisesRegex(TransitionBlocked, 'legacy_cutover_rolled_back'):
+            self.run_attempt('clean_restore')
+        self.assertEqual(self.trace[:self.trace.index('restore_wsl')].count('vm_rollback'), 2)
+        self.assertLess(self.trace.index('restore_wsl'), self.trace.index('admission_restore'))
+        with self.assertRaisesRegex(TransitionBlocked, 'legacy_cutover_rollback_reconciliation_required'):
+            self.run_attempt('unknown_restore')
+        self.assertNotIn('restore_wsl', self.trace)
+        self.assertNotIn('admission_restore', self.trace)
 
 
 if __name__ == "__main__":
