@@ -161,10 +161,18 @@ function Read-RuntimeOwnedProfile([string]$Encoded,[string]$Hash,[string]$Manife
     $raw=[Convert]::FromBase64String($Encoded)
     if([HaRuntimeStageV1.Rules]::Hash($raw) -cne $Hash){throw 'runtime_stage_owned_profile_changed'}
     $value=[HaRuntimeStageV1.Json]::Object(([Text.UTF8Encoding]::new($false,$true)).GetString($raw),6144)
-    [HaRuntimeStageV1.Rules]::Keys($value,(@('installation_id','runtime_manifest_sha256','guest_stage_manifest_sha256')+@(Get-GuestOwnedFields)))
+    $keys=@('installation_id','runtime_manifest_sha256','guest_stage_manifest_sha256')+@(Get-GuestOwnedFields)
+    $hasRuntimeSource=$value.ContainsKey('runtime_source_commit')
+    if($hasRuntimeSource){$keys+='runtime_source_commit'}
+    [HaRuntimeStageV1.Rules]::Keys($value,$keys)
     if([HaRuntimeStageV1.Rules]::Text($value,'runtime_manifest_sha256') -cne $ManifestHash -or [HaRuntimeStageV1.Rules]::Text($value,'guest_stage_manifest_sha256') -cnotmatch '^[0-9a-f]{64}$'){throw 'runtime_stage_owned_manifest_changed'}
     $profile=[pscustomobject]$value
     Assert-GuestOwnedDeclaration $profile $ScriptHash
+    if($hasRuntimeSource){
+        if([HaRuntimeStageV1.Rules]::Text($value,'runtime_source_commit') -cnotmatch '^[0-9a-f]{40}$'){throw 'runtime_stage_runtime_source_rejected'}
+    }else{
+        $profile | Add-Member -NotePropertyName runtime_source_commit -NotePropertyValue $profile.executor_source_commit
+    }
     return $profile
 }
 function Assert-RuntimeStageParentManifest($Stage,$Spec,$Owned){
@@ -174,7 +182,7 @@ function Assert-RuntimeStageParentManifest($Stage,$Spec,$Owned){
     $version=if($null -ne $Owned){2}else{1}
     if([HaRuntimeStageV1.Rules]::Number($Stage,'schema_version') -ne $version -or [HaRuntimeStageV1.Rules]::Text($Stage,'installation_id') -cne $Spec.InstallationId){throw 'runtime_stage_parent_installation_changed'}
     if($null -eq $Owned){return}
-    if($Spec.HostStaged -or $Owned.installation_id -cne $Spec.InstallationId -or $Owned.executor_source_commit -cne $Spec.SourceCommit){throw 'runtime_stage_owned_source_or_host_changed'}
+    if($Spec.HostStaged -or $Owned.installation_id -cne $Spec.InstallationId -or $Owned.runtime_source_commit -cne $Spec.SourceCommit){throw 'runtime_stage_owned_source_or_host_changed'}
     foreach($key in @('root_profile','executor_source_commit','reservation_receipt_sha256','reservation_root_identity')){
         if([HaRuntimeStageV1.Rules]::Text($Stage,$key) -cne $Owned.$key){throw 'runtime_stage_owned_parent_changed'}
     }
@@ -284,7 +292,7 @@ function Invoke-RuntimeStage {
         }else{if($Manifest.Length -gt 2796204){throw 'runtime_stage_manifest_limit'};$raw=[Convert]::FromBase64String($Manifest);if($raw.Length -gt 2097152){throw 'runtime_stage_manifest_limit'}}
         if(([HaRuntimeStageV1.Rules]::Hash($raw)) -cne $ManifestSha256){throw 'runtime_stage_manifest_changed'}
         $spec=[HaRuntimeStageV1.Rules]::Manifest(([Text.UTF8Encoding]::new($false,$true)).GetString($raw))
-        if($null -ne $owned -and ($spec.InstallationId -cne $owned.installation_id -or $spec.SourceCommit -cne $owned.executor_source_commit -or $spec.HostStaged)){throw 'runtime_stage_owned_source_or_host_changed'}
+        if($null -ne $owned -and ($spec.InstallationId -cne $owned.installation_id -or $spec.SourceCommit -cne $owned.runtime_source_commit -or $spec.HostStaged)){throw 'runtime_stage_owned_source_or_host_changed'}
         if(-not [HaRuntimeStageV1.Native]::ServiceIdentity($spec.ServiceName,$spec.ServiceSid)){throw 'runtime_stage_native_sid_mismatch'}
         $root=Join-Path $parent ('N100HA_'+$spec.InstallationId.Substring(0,24));Assert-RuntimeStagePath $root $root
         if($ManifestPath -and $prefix -ine $root){throw 'runtime_stage_installation_path_mismatch'}
