@@ -8,8 +8,6 @@ from pathlib import Path
 import re
 import subprocess
 import time
-from urllib.error import URLError
-from urllib.request import HTTPRedirectHandler, ProxyHandler, build_opener
 
 from ha_runtime.config import SERVICES
 
@@ -37,11 +35,6 @@ $sha=[Security.Cryptography.SHA256]::Create()
 try{[Console]::WriteLine([BitConverter]::ToString($sha.ComputeHash($raw)).Replace('-','').ToLowerInvariant())}
 finally{$sha.Dispose()}
 '''
-
-
-class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, request, fp, code, msg, headers, newurl):
-        return None
 
 
 def protected_host_stamp():
@@ -85,13 +78,15 @@ class WindowsServiceLiveAuthority:
 
 
 def _public_health(rounds):
-    opener = build_opener(ProxyHandler({}), _NoRedirect())
     for sequence in range(rounds):
         for url in HEALTH:
             try:
-                with opener.open(url, timeout=4) as result:
-                    _need(result.status == 200 and result.geturl() == url, 'native_host_external_health_unverified')
-            except (OSError, URLError, ValueError):
+                observed = subprocess.run(('/usr/bin/curl', '--disable', '--silent', '--noproxy', '*',
+                                           '--max-time', '4', '--proto', '=https', '--output', '/dev/null',
+                                           '--write-out', '%{http_code}', url), stdin=subprocess.DEVNULL,
+                                          capture_output=True, check=True, timeout=5)
+                _need(observed.stdout == b'200', 'native_host_external_health_unverified')
+            except (OSError, ValueError, subprocess.SubprocessError):
                 _need(False, 'native_host_external_health_unverified')
         if sequence + 1 < rounds:
             time.sleep(10)
