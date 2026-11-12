@@ -42,7 +42,7 @@ function Assert-ReservedLeaf([string]$Path, [string]$Root, [string]$Name = '') {
     }
 }
 
-function Assert-Access($Entry, [bool]$Leaf, [string]$Reader, [string]$LeafWriter) {
+function Assert-Access($Entry, [bool]$Leaf, [string]$Reader, [string]$LeafWriter, [bool]$RequireReader) {
     $allowedWriters = if ($LeafWriter -ceq '') { $writers } else { $writers + @($LeafWriter) }
     if ($Entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'initial_stage_path' }
     $sd = [Security.AccessControl.RawSecurityDescriptor]::new((Get-Acl -LiteralPath $Entry.FullName).Sddl)
@@ -50,21 +50,34 @@ function Assert-Access($Entry, [bool]$Leaf, [string]$Reader, [string]$LeafWriter
     if (($sd.Owner.Value -cnotin $allowedWriters -and -not $osRoot) -or $null -eq $sd.DiscretionaryAcl -or
         $sd.DiscretionaryAcl.Count -eq 0) { throw 'initial_stage_acl' }
     $mask = if ($Leaf) { 0x500d0156 } else { 0x100d0040 }
+    $readerAccess = 0L
+    $directoryRead = 0x20080L # READ_CONTROL and READ_ATTRIBUTES required by the native gate.
     foreach ($ace in $sd.DiscretionaryAcl) {
         if ($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback) { throw 'initial_stage_acl' }
-        if ($ace.AceQualifier -ne 'AccessAllowed' -or $ace.SecurityIdentifier.Value -cin $allowedWriters) { continue }
         $inheritedOnly = ([int]$ace.AceFlags -band 8) -ne 0
+        if ($RequireReader -and -not $inheritedOnly) {
+            if ($ace.AceQualifier -eq 'AccessDenied' -and ([long]$ace.AccessMask -band (0xf0000000L -bor $directoryRead))) {
+                throw 'initial_stage_acl'
+            }
+            if ($ace.AceQualifier -eq 'AccessAllowed' -and $ace.SecurityIdentifier.Value -ceq $Reader) {
+                $readerAccess = $readerAccess -bor ([long]$ace.AccessMask)
+            }
+        }
+        if ($ace.AceQualifier -ne 'AccessAllowed' -or $ace.SecurityIdentifier.Value -cin $allowedWriters) { continue }
         if (($Leaf -or -not $inheritedOnly) -and ([long]$ace.AccessMask -band $mask)) { throw 'initial_stage_acl' }
         if ($Leaf -and -not $inheritedOnly -and $Reader -cne '' -and $ace.SecurityIdentifier.Value -cne $Reader -and
             ([long]$ace.AccessMask -band 0x90000001L)) { throw 'initial_stage_acl' }
     }
+    if ($RequireReader -and ($readerAccess -band 0x80000000L) -eq 0 -and
+        ($readerAccess -band $directoryRead) -ne $directoryRead) { throw 'initial_stage_acl' }
 }
 
-function Assert-ProtectedPath($Entry, [string]$Reader = '', [string]$TrustedWriter = '', [switch]$LeafOnly) {
+function Assert-ProtectedPath($Entry, [string]$Reader = '', [string]$TrustedWriter = '', [switch]$LeafOnly,
+                              [switch]$RequireReader) {
     $depth = 0
     for ($item = $Entry; $null -ne $item; $item = $(if ($item -is [IO.FileInfo]) { $item.Directory } else { $item.Parent })) {
         $allowed = if (-not $LeafOnly -or $depth -eq 0) { $TrustedWriter } else { '' }
-        Assert-Access $item ($depth -le 1) $Reader $allowed
+        Assert-Access $item ($depth -le 1) $Reader $allowed ($RequireReader -and $depth -eq 0)
         $depth++
     }
 }
@@ -161,7 +174,7 @@ function Assert-EmptyJournal([string]$Root,[string]$ServiceSid) {
         if ($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback) { throw 'initial_stage_journal' }
         if ([int]$ace.AceFlags -band 8) { continue }
         $mask = [long]$ace.AccessMask -band 0xffffffffL
-        if ($ace.AceQualifier -eq 'AccessDenied' -and ($mask -band (0xd00d0157L -bor $required))) {
+        if ($ace.AceQualifier -eq 'AccessDenied' -and ($mask -band (0xf00d0157L -bor $required))) {
             throw 'initial_stage_journal'
         }
         if ($ace.AceQualifier -eq 'AccessAllowed') {
@@ -274,7 +287,7 @@ try {
         $paths.binding_path,$paths.callback_config_path,$paths.observer_input_path)
     if (@($destinations | Sort-Object -Unique).Count -ne $destinations.Count) { throw 'initial_stage_reserved_path' }
     foreach ($path in $destinations) { Assert-Absent $path }
-    Assert-ProtectedPath (Get-Item -LiteralPath $root -Force) $serviceSid
+    Assert-ProtectedPath (Get-Item -LiteralPath $root -Force) $serviceSid -RequireReader
     Assert-EmptyJournal $root $serviceSid
     Assert-ReservedLeaf $obs.launcher_path $root 'windows-ha-start-lease-observer.ps1'
     Assert-ReservedLeaf $obs.server_path $root 'windows-ha-lease-proof-server.ps1'
@@ -403,4 +416,8 @@ try {
         PlanPath=$paths.plan_path;PlanSha256=$planSha;ApprovalPath=$paths.approval_path;ApprovalSha256=$approvalSha;
         BindingPath=$paths.binding_path;PreflightPath=$paths.preflight_path;PreflightSha256=$start.preflight_sha256;
         ScmVerifierPath=$paths.scm_verifier_path} | ConvertTo-Json -Compress
-} catch { exit 1 }
+} catch {
+    $reason = $_.Exception.Message
+    if ($reason -cnotmatch '\Ainitial_stage_[a-z0-9_]{1,80}\z') { $reason = 'initial_stage_native_error' }
+    [ordered]@{blocked=$reason} | ConvertTo-Json -Compress
+}

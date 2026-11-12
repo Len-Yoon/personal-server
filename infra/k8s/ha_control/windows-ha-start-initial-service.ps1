@@ -234,4 +234,8 @@ public static class HaInitialLeaseFileTime {
         Start-Sleep -Milliseconds 200
     }
     throw 'initial_service_lease_unconfirmed'
-} catch { exit 1 }
+} catch {
+    $reason = $_.Exception.Message
+    if ($reason -cnotmatch '\Ainitial_service_[a-z0-9_]{1,80}\z') { $reason = 'initial_service_native_error' }
+    [ordered]@{blocked=$reason} | ConvertTo-Json -Compress
+}

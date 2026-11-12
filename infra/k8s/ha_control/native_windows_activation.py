@@ -95,7 +95,14 @@ class WindowsActivationCustody:
     def _stage(self, parameters, deadline):
         source = fixed_script('windows-ha-stage-initial-activation.ps1', self.stage_sha256,
                               self.stage_parameters | parameters)
-        return self.windows.powershell(source, deadline)
+        return self._result(source, deadline, 'initial_stage_')
+
+    def _result(self, source, deadline, failure_prefix):
+        result = self.windows.powershell(source, deadline)
+        if set(result) == {'blocked'} and type(result['blocked']) is str and re.fullmatch(
+                failure_prefix + r'[a-z0-9_]{1,80}', result['blocked']):
+            raise bridge.BridgeRejected(result['blocked'])
+        return result
 
     def preflight(self, deadline):
         bridge._need(bridge._matches(self._stage({'Preflight': True}, deadline), {'activation_stage_preflight': True}),
@@ -115,7 +122,7 @@ class WindowsActivationCustody:
                      all(type(value) is str for value in parameters.values()), 'native_activation_stage_unconfirmed')
         source = fixed_script('windows-ha-start-initial-service.ps1', self.start_sha256,
                               parameters | {'ExpectedActivationIntentSha256': bridge._digest(intent), 'Go': True})
-        result = self.windows.powershell(source, deadline)
+        result = self._result(source, deadline, 'initial_service_')
         keys = {'first_write_proof_sha256', 'service_instance_sha256'}
         bridge._need(type(result) is dict and set(result) == keys and all(map(bridge._hash, result.values())),
                      'native_activation_service_start_uncertain')

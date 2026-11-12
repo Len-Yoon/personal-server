@@ -3,6 +3,7 @@
 import argparse
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -18,6 +19,14 @@ FIELDS = {'binding', 'installation_id', 'jump', 'guests', 'known_hosts', 'guest_
           'journal_root', 'wsl_journal_path', 'wsl_source_root', 'wsl_manifest_path', 'wsl_boot_sha256', 'wsl_uid',
           'wsl_config_path', 'wsl_config_sha256', 'wsl_runtime_path', 'windows_stage', 'windows_stage_sha256',
           'windows_start_sha256', 'windows_live_sha256'}
+
+
+def _reason(error):
+    message = str(error)
+    if isinstance(error, bridge.BridgeRejected) and re.fullmatch(
+            r'(?:native|initial|guest|bridge|activation)_[a-z0-9_]{1,100}', message):
+        return message
+    return 'native_mac_cutover_unconfirmed'
 
 
 def run(path, config_sha256):
@@ -43,11 +52,20 @@ def run(path, config_sha256):
     journal = bridge.MutationJournal(config['journal_root'])
     journal.assert_unattempted(binding)
     custody.preflight(time.monotonic() + 12)
+    dispatcher = ActivationDispatcher(guest, custody)
+
+    def dispatch(request, deadline):
+        try:
+            return dispatcher(request, deadline)
+        except Exception as error:
+            print(f'{request.node} {request.verb} {_reason(error)}', file=sys.stderr, flush=True)
+            raise
+
     with windows.wsl_cutover(config['wsl_source_root'], config['wsl_manifest_path'], binding.source_sha256,
                              config['wsl_boot_sha256'], config['wsl_uid'], config['wsl_config_path'],
                              config['wsl_config_sha256'], time.monotonic() + 12) as process:
         channel = bridge.Stdio(process.stdout.fileno(), process.stdin.fileno())
-        server = bridge.Server(channel, binding, journal, ActivationDispatcher(guest, custody))
+        server = bridge.Server(channel, binding, journal, dispatch)
         server.serve()
         bridge._need(process.wait(timeout=5) == 0, 'native_wsl_cutover_exit_unconfirmed')
 
@@ -59,8 +77,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         run(args.config, args.config_sha256)
-    except (OSError, ValueError, TypeError, KeyError, bridge.BridgeRejected, subprocess.SubprocessError):
-        print('native_mac_cutover_unconfirmed', file=sys.stderr)
+    except (OSError, ValueError, TypeError, KeyError, bridge.BridgeRejected, subprocess.SubprocessError) as error:
+        print(_reason(error), file=sys.stderr)
         return 1
     return 0
 
