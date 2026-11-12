@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory=$true)][string]$DriverSha256,
     [Parameter(Mandatory=$true)][string]$PlanPath,
     [Parameter(Mandatory=$true)][string]$PlanSha256,
-    [Parameter(Mandatory=$true)][string]$AttemptId
+    [Parameter(Mandatory=$true)][string]$AttemptId,
+    [string]$ReactivationPlanSha256
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -56,7 +57,14 @@ function Read-HaPinnedInput([string]$Path, [string]$Digest) {
     return [Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xFEFF)
 }
 
-$configuration = (Read-HaPinnedInput $PlanPath $PlanSha256) | ConvertFrom-Json
+$nativePin = if ($ReactivationPlanSha256) { $ReactivationPlanSha256 } else { $PlanSha256 }
+$configuration = (Read-HaPinnedInput $PlanPath $nativePin) | ConvertFrom-Json
+if ($nativePin -cne $PlanSha256 -and
+    ((@($configuration.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne
+       'deployment_attempt_id,deployment_plan_sha256,windows_driver_sha256,windows_reactivation' -or
+     $configuration.deployment_plan_sha256 -cne $PlanSha256 -or $configuration.deployment_attempt_id -cne $AttemptId)) {
+    throw 'legacy_native_deployment_binding'
+}
 if ($configuration.windows_driver_sha256 -cne $DriverSha256) { throw 'legacy_native_configuration_digest' }
 $driver = [scriptblock]::Create((Read-HaPinnedInput $DriverPath $DriverSha256))
 . $driver

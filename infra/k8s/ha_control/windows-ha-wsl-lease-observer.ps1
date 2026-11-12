@@ -4,6 +4,10 @@ $ErrorActionPreference = 'Stop'
 
 function Initialize-HaLeaseObservation($InputConfig, [string]$PlanText, [string]$MarkerSha, [string]$WindowsBootSha) {
     $fields = @($InputConfig.PSObject.Properties.Name | Sort-Object -CaseSensitive)
+    if ('reactivation_plan_sha256' -cin $fields) {
+        if ($InputConfig.reactivation_plan_sha256 -cnotmatch '\A[a-f0-9]{64}\z') { throw 'lease_proof_callback_scope' }
+        $fields = @($fields | Where-Object { $_ -cne 'reactivation_plan_sha256' })
+    }
     if (($fields -join ',') -cne 'a_disk_paths_sha256,b_disk_paths_sha256,driver_path,driver_sha256,installation_id,reactivation_plan_path,runtime_path,runtime_sha256,source_loader_sha256,source_manifest_path,source_manifest_sha256,source_root,vm_a,vm_b,vm_observer_path,vm_observer_sha256,wsl_uid' -or
         $InputConfig.runtime_sha256 -cnotmatch '\A[a-f0-9]{64}\z' -or
         $InputConfig.installation_id -cnotmatch '\A[a-f0-9]{64}\z' -or
@@ -55,12 +59,15 @@ function Get-HaClosureRemaining($Context) {
 
 function Get-HaLeaseProof($Context) {
     $request = $Context.Challenge
+    $nativePin = if ('reactivation_plan_sha256' -cin $script:ClosureInput.PSObject.Properties.Name) {
+        $script:ClosureInput.reactivation_plan_sha256
+    } else { $request.plan_sha256 }
     $null = Get-HaClosureRemaining $Context
     Assert-HaOwnedCutoverMarker $script:ClosureMarker
     $marker = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($script:ClosureMarker.path))
     if ($marker.plan_sha256 -cne $request.plan_sha256 -or $marker.attempt_id -cne $request.attempt_id -or
         $marker.generation -ne $request.generation -or $request.windows_boot_sha256 -cne $script:ClosureBoot -or
-        $Context.MarkerSha256 -cne $script:ClosureMarker.sha256 -or $Context.ReactivationPlanSha256 -cne $request.plan_sha256) {
+        $Context.MarkerSha256 -cne $script:ClosureMarker.sha256 -or $Context.ReactivationPlanSha256 -cne $nativePin) {
         throw 'lease_proof_callback_scope'
     }
     $running = @(& $script:ClosureWsl --list --running --quiet | ForEach-Object { ($_ -replace ([char]0),'').Trim() })

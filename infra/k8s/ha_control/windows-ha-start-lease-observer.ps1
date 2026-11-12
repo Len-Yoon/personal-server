@@ -64,8 +64,7 @@ try {
         ($argsMap.Generation -isnot [int] -and $argsMap.Generation -isnot [long]) -or
         $argsMap.OperatorSid -cne $operatorSid -or $argsMap.Generation -ne 1 -or
         $argsMap.ServiceSid -cnotmatch '\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\z' -or
-        $argsMap.PipeName -cnotmatch '\An100ha-lease-proof-[a-f0-9]{32}\z' -or
-        $argsMap.PlanSha256 -cne $argsMap.ReactivationPlanSha256) { throw 'observer_task_arguments' }
+        $argsMap.PipeName -cnotmatch '\An100ha-lease-proof-[a-f0-9]{32}\z') { throw 'observer_task_arguments' }
     foreach ($name in $pins) {
         if ($argsMap.$name -isnot [string] -or $argsMap.$name -cnotmatch '\A[a-f0-9]{64}\z') { throw 'observer_task_arguments' }
     }

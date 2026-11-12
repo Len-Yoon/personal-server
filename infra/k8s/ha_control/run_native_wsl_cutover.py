@@ -25,6 +25,7 @@ FIELDS = {'schema_version', 'binding', 'identity', 'journal_path', 'capture_root
           'max_frozen_bytes', 'converter_source_pins'}
 WINDOWS = {'entrypoint', 'entrypoint_sha256', 'driver', 'driver_sha256', 'plan_path',
            'service_binding_path', 'live_authority_source_sha256'}
+NATIVE_PLAN = 'reactivation_plan_sha256'
 DEPLOY = {'repository', 'workflow_id', 'gh'}
 
 
@@ -34,7 +35,8 @@ def _config(path, sha256):
     _need(descriptor['sha256'] == _pin(sha256), 'native_wsl_input_pin_mismatch')
     value = seven_capture.parse(reader.read(descriptor, limit=64 * 1024))
     _need(type(value) is dict and set(value) == FIELDS and type(value['schema_version']) is int
-          and value['schema_version'] == 1 and type(value['windows']) is dict and set(value['windows']) == WINDOWS
+          and value['schema_version'] == 1 and type(value['windows']) is dict
+          and set(value['windows']) in (WINDOWS, WINDOWS | {NATIVE_PLAN})
           and type(value['deployment']) is dict and set(value['deployment']) == DEPLOY, 'native_wsl_input_invalid')
     reader.unchanged()
     return value
@@ -63,7 +65,7 @@ def run(config, config_sha256):
     windows_config = value['windows']
     windows = WindowsReactivationSession.for_n100_wsl(
         windows_config['entrypoint'], windows_config['entrypoint_sha256'], windows_config['driver'],
-        windows_config['driver_sha256'], windows_config['plan_path'],
+        windows_config['driver_sha256'], windows_config['plan_path'], windows_config.get(NATIVE_PLAN),
     )
     bootstrap = WslBootstrapAdmission(value['bootstrap_sha256'])
     admission = _deployment(value['deployment'])
