@@ -87,6 +87,8 @@ try {
     $data=[TrustedStoppedV1.Json]::Object($encoding.GetString($raw),12288)
     $keys=@('installation_id','root_profile','executor_source_commit','executor_script_sha256',
         'reservation_receipt_sha256','reservation_root_identity','new_host_sha256','source_commit','transfer_name')
+    $hasPredecessor=$data.ContainsKey('previous_request_sha256')
+    if($hasPredecessor){$keys+=@('previous_request_sha256','previous_intent_sha256')}
     if($data.Count -ne $keys.Count){throw 'input_shape'}
     foreach($key in $keys){if(-not $data.ContainsKey($key) -or $data[$key] -isnot [string]){throw 'input_shape'}}
     if($data['new_host_sha256'] -cnotmatch '^[0-9a-f]{64}$' -or $data['source_commit'] -cnotmatch '^[0-9a-f]{40}$' -or
@@ -102,6 +104,27 @@ try {
     $reservation=Read-GuestOwnedPinned (Join-Path $root 'reservation-receipt.json') $profile.reservation_receipt_sha256
     $ownership=Read-GuestOwnedPinned (Join-Path $root 'namespace-service-ownership.json') $reservation.ownership_receipt_sha256
     $oldHash=$ownership.service_image_sha256
+    if($hasPredecessor){
+        $phase='predecessor'
+        if($profile.previous_request_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+           $profile.previous_intent_sha256 -cnotmatch '^[0-9a-f]{64}$'){throw 'predecessor_pin'}
+        $priorRoot=Join-Path $root ('host-upgrade-'+$profile.previous_request_sha256.Substring(0,24))
+        Assert-PreflightEntry (Get-Item -LiteralPath $priorRoot -Force) $writers $writers $true $false
+        $priorLease=[TrustedStoppedV1.Held]::new($priorRoot,$true)
+        try {
+            $prior=Read-GuestOwnedPinned (Join-Path $priorRoot 'intent.json') $profile.previous_intent_sha256
+            if($prior.schema_version -ne 1 -or $prior.installation_id -cne $profile.installation_id -or
+               $prior.request_sha256 -cne $profile.previous_request_sha256 -or
+               $prior.reservation_sha256 -cne $profile.reservation_receipt_sha256 -or
+               $prior.ownership_sha256 -cne $reservation.ownership_receipt_sha256 -or
+               $prior.old_host_sha256 -cne $oldHash -or $prior.new_host_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+               $prior.service_config_sha256 -cne $reservation.service_config_sha256 -or
+               $prior.service_sd_sha256 -cne $reservation.service_sd_sha256){throw 'predecessor_binding'}
+            $null=Get-CheckedFile (Join-Path $priorRoot 'original.exe') $oldHash
+            $oldHash=$prior.new_host_sha256
+            $priorLease.Verify()
+        } finally { $priorLease.Dispose() }
+    }
     $newHash=$profile.new_host_sha256
     if($oldHash -ceq $newHash){throw 'same_image'}
 
@@ -141,6 +164,7 @@ try {
         ownership_sha256=$reservation.ownership_receipt_sha256;old_host_sha256=$oldHash;new_host_sha256=$newHash;
         service_config_sha256=$reservation.service_config_sha256;service_sd_sha256=$reservation.service_sd_sha256;
         old_host_acl_sha256=(Get-Hash ($encoding.GetBytes($oldAcl)));old_host_attributes=[int]$oldAttributes}
+    if($hasPredecessor){$record['previous_intent_sha256']=$profile.previous_intent_sha256}
     Write-PrivateRecord 'intent.json' $record
     $phase='replace'
     $lease.AssertCurrent()
