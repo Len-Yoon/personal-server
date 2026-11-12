@@ -3,6 +3,7 @@ import copy
 from contextlib import contextmanager
 from datetime import datetime,timedelta,timezone
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -18,7 +19,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'infra/k8s'))
 from ha_runtime import migrate,seven_migration as M
 from ha_control.legacy_cutover import LegacyCutover, TransitionBlocked
-from ha_control import native_frozen_capture
+from ha_control import frozen_transport, native_frozen_capture
 
 
 def encoded(value):return json.dumps(value,sort_keys=True).encode()
@@ -26,6 +27,61 @@ def sha(raw):return hashlib.sha256(raw).hexdigest()
 
 
 class NativeFrozenCaptureTests(unittest.TestCase):
+    def test_frozen_transfer_rejects_tampering_before_publishing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "source"
+            source.mkdir(mode=0o700)
+            write = native_frozen_capture.seven_capture._write
+            evidence = {key: write(source / f"{key}.json", b"{}")
+                        for key in ("runtime", "writer_graph", "writer_closure", "dispositions")}
+            audit = write(source / "capture-audit.json", encoded({"evidence": evidence}))
+            receipt = write(source / "freeze-receipt.json", encoded({"capture_audit": audit}))
+            content = b"synthetic frozen bytes"
+            artifact = write(source / "synthetic.blob", content)
+            manifest = write(source / "manifest.json", encoded({
+                "freeze_receipt": receipt, "artifacts": {"synthetic": artifact},
+            }))
+            (source / "unreferenced.txt").write_text("do not send")
+            wire = io.BytesIO()
+            frozen_transport.send_bundle(source, manifest["sha256"], wire)
+            data = wire.getvalue()
+            self.assertNotIn(b"do not send", data)
+            (source / "synthetic.blob").write_bytes(b"X" + content[1:])
+            bad_source = io.BytesIO()
+            with self.assertRaisesRegex(M.MigrationRejected, "frozen_artifact_changed"):
+                frozen_transport.send_bundle(source, manifest["sha256"], bad_source)
+            self.assertNotIn(b"X" + content[1:], bad_source.getvalue())
+            target = root / "target"
+            mutated = data.replace(content, b"X" + content[1:])
+            with self.assertRaisesRegex(TransitionBlocked, "hash_mismatch"):
+                frozen_transport.receive_bundle(target, manifest["sha256"], io.BytesIO(mutated), max_bytes=4000)
+            self.assertFalse(target.exists())
+            with self.assertRaisesRegex(TransitionBlocked, "size_invalid"):
+                frozen_transport.receive_bundle(target, manifest["sha256"], io.BytesIO(data), max_bytes=10)
+            self.assertFalse(target.exists())
+            self.assertEqual(frozen_transport.receive_bundle(target, manifest["sha256"], io.BytesIO(data),
+                                                            max_bytes=4000), manifest["sha256"])
+            self.assertEqual((target / "synthetic.blob").read_bytes(), content)
+            self.assertFalse((target / "unreferenced.txt").exists())
+
+    def test_frozen_transfer_publish_is_exclusive_and_reports_uncertain_durability(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            staging, target = root / "staging", root / "target"
+            staging.mkdir(mode=0o700)
+            target.mkdir(mode=0o700)
+            inode = target.stat().st_ino
+            with self.assertRaisesRegex(TransitionBlocked, "destination_exists"):
+                frozen_transport._publish(staging, target)
+            self.assertEqual(target.stat().st_ino, inode)
+            target.rmdir()
+            with patch.object(frozen_transport.os, "fsync", side_effect=OSError("fixture")):
+                with self.assertRaisesRegex(TransitionBlocked, "publish_unconfirmed"):
+                    frozen_transport._publish(staging, target)
+            self.assertTrue(target.is_dir())
+            self.assertFalse(staging.exists())
+
     def test_actual_writer_and_reader_wiring_requires_complete_external_closure(self):
         services = sorted(M.SERVICES)
         k3s = ("portal-web", "book-memo", "youtube-memo", "crawler-worker")
