@@ -103,7 +103,10 @@ class LegacyCutover:
 
         try:
             pre = backend.preflight(plan)
-        except Exception:
+        except Exception as error:
+            if isinstance(error, TransitionBlocked) and re.fullmatch(r'[a-z][a-z0-9_]{1,95}', str(error)):
+                state["preflight_failure"] = str(error)
+                self.journal.save(state)
             raise TransitionBlocked('legacy_cutover_preflight_failed') from None
         baseline = accept("preflight", pre, capture_ready=True, restore_ready=True, ingress_ready=True,
                           legacy_live=True, target_writes_closed=True)
@@ -161,7 +164,9 @@ class LegacyCutover:
             accept("verify_live", backend.verify_live(plan, authority, ingress),
                    authority_sha256=authority, ingress_sha256=ingress, services=sorted(SERVICES), ready=True)
             phase("complete")
-        except Exception:
+        except Exception as error:
+            if isinstance(error, TransitionBlocked) and re.fullmatch(r'[a-z][a-z0-9_]{1,95}', str(error)):
+                state["failure_reason"] = str(error)
             if activated:
                 phase("forward_recovery_required")
                 raise TransitionBlocked("legacy_cutover_forward_recovery_required") from None
