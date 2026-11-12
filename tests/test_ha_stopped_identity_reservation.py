@@ -16,6 +16,18 @@ class StoppedIdentityReservationTests(unittest.TestCase):
   if not pwsh:pwsh='pwsh'  # Required in CI; absence must not silently skip the core gate.
   run=subprocess.run([pwsh,'-NoProfile','-File',str(FIXTURE),'-SourceRoot',str(HERE)],capture_output=True,text=True,check=True)
   value=json.loads(run.stdout);self.assertGreaterEqual(value['tests_passed'],36);self.assertFalse(value['native_calls_performed']);self.assertFalse(value['service_created']);self.assertEqual(value['compile'],'PASS');self.assertEqual(value['native_sddl_acl_service_integration'],'NOT_RUN')
+ def test_host_replacement_requires_explicit_native_intent(self):
+  candidate=ROOT/'build/ha-predeploy-evidence/windows-build/powershell-7.5.4/pwsh'
+  pwsh=os.environ.get('HA_PWSH') or shutil.which('pwsh') or (str(candidate) if candidate.exists() else 'pwsh')
+  run=subprocess.run([pwsh,'-NoProfile','-NonInteractive','-File',str(HERE/'replace-host.ps1'),
+                      '-Request','test-input','-RequestSha256','0'*64,'-SupportSha256','0'*64],
+                     capture_output=True,text=True,timeout=20)
+  self.assertEqual(run.returncode,1,run.stderr)
+  self.assertEqual(json.loads(run.stdout),{
+   'scope':'stopped_service_host_replacement','status':'BLOCKED','failed_stage':'native_intent',
+   'reconcile_required':False,'service_started':False,'authority_issued':False,
+  })
+  self.assertNotIn('test-input',run.stdout+run.stderr)
  def test_phase_one_has_no_phase_two_plan_dependencies(self):
   source=(HERE/'reserve-identity.ps1').read_text();self.assertNotIn("'plan_sha256'",source);self.assertNotIn("'service_args'",source);self.assertIn("args_present=$false",source);self.assertIn("ready_to_start=$false",source)
  def test_no_service_start_stop_delete_api_exists(self):
