@@ -53,23 +53,38 @@ class DeploymentAdmission:
     def _closed(self):
         if self.state() != "disabled_manually":
             raise TransitionBlocked("deployment_admission_reopened")
-        pages = json.loads(self._api(self.endpoint + "/runs?per_page=100", "--paginate", "--slurp"))
-        if not isinstance(pages, list) or not pages:
-            raise TransitionBlocked("deployment_admission_runs_unconfirmed")
+        first = self._run_page(1)
+        total = first["total_count"]
+        page_count = max(1, (total + 99) // 100)
         ids = set()
-        for page in pages:
+        for number in range(1, page_count + 1):
+            page = first if number == 1 else self._run_page(number)
+            expected = min(100, total - 100 * (number - 1))
+            if page["total_count"] != total or len(page["workflow_runs"]) != expected:
+                raise TransitionBlocked("deployment_admission_runs_unconfirmed")
             for row in page["workflow_runs"]:
-                run = row["id"]
-                if type(run) is not int or run in ids or row["workflow_id"] != self.workflow_id:
+                run = row.get("id") if type(row) is dict else None
+                if (type(run) is not int or run < 1 or run in ids
+                        or type(row.get("workflow_id")) is not int or row["workflow_id"] != self.workflow_id):
                     raise TransitionBlocked("deployment_admission_runs_unconfirmed")
                 ids.add(run)
-                if row["status"] != "completed":
+                if row.get("status") != "completed":
                     return False
-        if len(ids) != pages[0]["total_count"]:
+        if len(ids) != total:
             raise TransitionBlocked("deployment_admission_runs_unconfirmed")
         if self.state() != "disabled_manually":
             raise TransitionBlocked("deployment_admission_reopened")
         return True
+
+    def _run_page(self, number):
+        try:
+            page = json.loads(self._api(self.endpoint + f"/runs?per_page=100&page={number}"))
+        except (TypeError, ValueError):
+            raise TransitionBlocked("deployment_admission_runs_unconfirmed") from None
+        if (type(page) is not dict or type(page.get("total_count")) is not int
+                or not 0 <= page["total_count"] <= 100000 or type(page.get("workflow_runs")) is not list):
+            raise TransitionBlocked("deployment_admission_runs_unconfirmed")
+        return page
 
     def assert_closed(self):
         if not self._closed():
