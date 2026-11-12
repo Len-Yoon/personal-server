@@ -4,6 +4,40 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${1:-/mnt/c/personal-server}"
 cd "$PROJECT_ROOT"
+# WSL instances on this host all target the same legacy Docker/K3s services.
+if [[ "${OSTYPE:-}" == linux* ]] && /usr/bin/grep -qi microsoft /proc/sys/kernel/osrelease; then
+  [[ "$(pwd -P)" == /mnt/c/personal-server ]] || {
+    printf '%s\n' 'legacy_bootstrap_root_rejected' >&2
+    exit 1
+  }
+fi
+legacy_state="$PWD/data"
+legacy_lock="$legacy_state/ha-legacy-bootstrap.lock"
+legacy_owner="$legacy_state/ha-controller-owner.json"
+[[ -d "$legacy_state" && ! -L "$legacy_state" && -x "$legacy_state" && ! -L "$legacy_lock" &&
+   ( ! -e "$legacy_lock" || -f "$legacy_lock" ) ]] || exit 1
+# A child locks the same open description, which remains open in this shell
+# across the entire bootstrap, including foreground native commands.
+exec 9>>"$legacy_lock"
+/usr/bin/env python3 -c '
+import fcntl, os, stat, sys
+fd, path = int(sys.argv[1]), sys.argv[2]
+f = os.fstat(fd)
+p = os.stat(path, follow_symlinks=False)
+if not stat.S_ISREG(f.st_mode) or (f.st_dev, f.st_ino) != (p.st_dev, p.st_ino):
+    sys.exit(1)
+try:
+    fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+except OSError:
+    sys.exit(1)
+' 9 "$legacy_lock" || {
+  printf '%s\n' 'legacy_bootstrap_admission_closed' >&2
+  exit 1
+}
+if [[ -e "$legacy_owner" || -L "$legacy_owner" ]]; then
+  printf '%s\n' 'legacy_bootstrap_owned_by_ha' >&2
+  exit 1
+fi
 source "$SCRIPT_DIR/runtime-service-state.sh"
 {
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] bootstrap start"
