@@ -178,6 +178,14 @@ class LegacyGuardTests(unittest.TestCase):
 
 
 class WindowsBridgeProofTests(unittest.TestCase):
+    def test_reactivation_input_walk_uses_dotnet_file_types_under_strict_mode(self):
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "infra/k8s/ha_control/windows-reactivation-entry.ps1").read_text()
+        self.assertIn("Set-StrictMode -Version Latest", script)
+        self.assertIn("$cursor -is [IO.DirectoryInfo]", script)
+        self.assertIn("$cursor -is [IO.FileInfo]", script)
+        self.assertNotIn("$cursor.PSIsContainer", script)
+
     def setUp(self):
         self.bridge = WindowsFence.__new__(WindowsFence)
         self.bridge.process = Mock()
