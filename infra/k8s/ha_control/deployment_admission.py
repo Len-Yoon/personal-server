@@ -7,6 +7,25 @@ import time
 from .controller import TransitionBlocked
 
 
+def _pages(raw):
+    """Accept the concatenated JSON objects emitted by gh api --paginate."""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    decoder = json.JSONDecoder()
+    pages = []
+    offset = 0
+    whitespace = re.compile(r"\s*")
+    while offset < len(raw):
+        offset = whitespace.match(raw, offset).end()
+        if offset == len(raw):
+            break
+        page, offset = decoder.raw_decode(raw, offset)
+        if type(page) is not dict or len(pages) >= 1000:
+            raise ValueError("invalid_workflow_run_page")
+        pages.append(page)
+    return pages
+
+
 class DeploymentAdmission:
     """Pin one workflow and drain its runs after disabling future admission.
 
@@ -53,17 +72,23 @@ class DeploymentAdmission:
     def _closed(self):
         if self.state() != "disabled_manually":
             raise TransitionBlocked("deployment_admission_reopened")
-        pages = json.loads(self._api(self.endpoint + "/runs?per_page=100", "--paginate", "--slurp"))
-        if not isinstance(pages, list) or not pages:
+        try:
+            pages = _pages(self._api(self.endpoint + "/runs?per_page=100", "--paginate"))
+        except (TypeError, ValueError):
+            raise TransitionBlocked("deployment_admission_runs_unconfirmed") from None
+        if not pages or type(pages[0].get("total_count")) is not int or pages[0]["total_count"] < 0:
             raise TransitionBlocked("deployment_admission_runs_unconfirmed")
         ids = set()
         for page in pages:
+            if page.get("total_count") != pages[0]["total_count"] or type(page.get("workflow_runs")) is not list:
+                raise TransitionBlocked("deployment_admission_runs_unconfirmed")
             for row in page["workflow_runs"]:
-                run = row["id"]
-                if type(run) is not int or run in ids or row["workflow_id"] != self.workflow_id:
+                run = row.get("id") if type(row) is dict else None
+                if (type(run) is not int or run < 1 or run in ids
+                        or type(row.get("workflow_id")) is not int or row["workflow_id"] != self.workflow_id):
                     raise TransitionBlocked("deployment_admission_runs_unconfirmed")
                 ids.add(run)
-                if row["status"] != "completed":
+                if row.get("status") != "completed":
                     return False
         if len(ids) != pages[0]["total_count"]:
             raise TransitionBlocked("deployment_admission_runs_unconfirmed")
