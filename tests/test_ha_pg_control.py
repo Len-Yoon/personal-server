@@ -753,6 +753,7 @@ class ScmPgAuthProbeTests(unittest.TestCase):
             plan_path=authority/"plan.json"
             approval_path=authority/"approval.json"
             report=journal/"controller-state.json"
+            trace=journal/".ha-journal-authdiag"
             sid="S-1-5-80-1-2-3-4-5"
             plan={"scope":probe.SCOPE,"service_sid":sid,"hosts":{"A":"10.0.0.2","B":"10.0.0.3"},
                   "system_id":"1234","ca_sha256":hashlib.sha256(ca.read_bytes()).hexdigest()}
@@ -779,11 +780,16 @@ class ScmPgAuthProbeTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         probe.run(args)
                     connect.assert_not_called()
+                    self.assertFalse(report.exists())
+                    self.assertEqual(trace.read_text().splitlines(), ["service_identity"])
+                    trace.unlink()
                 with patch.object(probe,"service_identity",return_value=sid):
                     with patch.dict(os.environ,{"PGPASSWORD":"fixture"}):
                         with self.assertRaises(ValueError):
                             probe.run(args)
                         connect.assert_not_called()
+                        self.assertEqual(trace.read_text().splitlines(), ["service_identity", "environment"])
+                        trace.unlink()
                     probe.run(args)
                     with self.assertRaises(ValueError):
                         probe.run(args)
@@ -797,6 +803,8 @@ class ScmPgAuthProbeTests(unittest.TestCase):
                 connection.execute.assert_any_call("SET TRANSACTION READ ONLY")
                 connection.rollback.assert_called_once()
             result=json.loads(report.read_text())
+            self.assertEqual(trace.read_text().splitlines(), ["service_identity", "environment", "load_driver",
+                "credential_files", "connect_A", "observe_A", "connect_B", "observe_B", "report", "complete"])
             self.assertEqual(result,{"scope":probe.SCOPE,"plan_sha256":pin,"nodes":["A","B"],
                                      "service_identity_verified":True,"tls_verified":True,"authority_opened":False})
             approval["expires_unix"]=0

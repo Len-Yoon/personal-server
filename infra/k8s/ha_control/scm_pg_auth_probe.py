@@ -82,16 +82,19 @@ def verify_plan(plan, approval, raw, now):
     return pin
 
 
-def authenticate(plan, material, connect):
+def authenticate(plan, material, connect, mark):
+    mark("credential_files")
     ca = plain_file(material / "ca.crt", 16384)
     passfile = plain_file(material / "postgres.pgpass", 1024)
     require(hashlib.sha256(ca.read_bytes()).hexdigest() == plan["ca_sha256"])
     for node in ("A", "B"):
+        mark("connect_" + node)
         host = plan["hosts"][node]
         with connect(host=host, hostaddr=host, port=5432, dbname="ha", user="postgres",
                      sslmode="verify-full", gssencmode="disable", sslrootcert=str(ca), passfile=str(passfile),
                      require_auth="scram-sha-256", connect_timeout=2,
                      application_name="ha_scm_isolated_auth") as connection:
+            mark("observe_" + node)
             connection.execute("SET TRANSACTION READ ONLY")
             connection.execute("SET LOCAL statement_timeout='700ms'")
             identity = connection.execute(
@@ -109,7 +112,7 @@ def run(args):
     approval_path = plain_file(Path(args.approval), 2048)
     report = Path(args.journal)
     authority = plan_path.parent
-    require(authority.name == "pg-auth-probe-authority" and plan_path.name == "plan.json" and
+    require(re.fullmatch(r"pg-auth-probe-authority(?:-[0-9a-f]{12})?", authority.name) and plan_path.name == "plan.json" and
             approval_path == authority / "approval.json" and
             report == authority / "journal/controller-state.json")
     require(plain_path(report.parent).is_dir() and not report.exists() and not report.is_symlink())
@@ -117,17 +120,30 @@ def run(args):
     plan = strict_json(raw)
     approval = strict_json(approval_path.read_bytes())
     pin = verify_plan(plan, approval, raw, time.time())
-    require(service_identity() == plan["service_sid"])
-    require(not any(key.upper().startswith("PG") for key in os.environ))
-    import psycopg
-    authenticate(plan, authority.parent / "db-auth-material", psycopg.connect)
-    require(time.time() < approval["expires_unix"])
-    result = {"scope": SCOPE, "plan_sha256": pin, "nodes": ["A", "B"],
-              "service_identity_verified": True, "tls_verified": True, "authority_opened": False}
-    with report.open("x", encoding="ascii") as stream:
-        json.dump(result, stream, sort_keys=True)
-        stream.flush()
-        os.fsync(stream.fileno())
+    # The Windows host allows this private journal leaf. Keep the trace
+    # separate so a failed probe never resembles a successful receipt.
+    with report.with_name(".ha-journal-authdiag").open("x", encoding="ascii") as trace:
+        def mark(stage):
+            trace.write(stage + "\n")
+            trace.flush()
+            os.fsync(trace.fileno())
+
+        mark("service_identity")
+        require(service_identity() == plan["service_sid"])
+        mark("environment")
+        require(not any(key.upper().startswith("PG") for key in os.environ))
+        mark("load_driver")
+        import psycopg
+        authenticate(plan, authority.parent / "db-auth-material", psycopg.connect, mark)
+        mark("report")
+        require(time.time() < approval["expires_unix"])
+        result = {"scope": SCOPE, "plan_sha256": pin, "nodes": ["A", "B"],
+                  "service_identity_verified": True, "tls_verified": True, "authority_opened": False}
+        with report.open("x", encoding="ascii") as stream:
+            json.dump(result, stream, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        mark("complete")
 
 
 def main():
