@@ -21,8 +21,11 @@ function Read-HaReactivationTask($Pin) {
     if ((Get-HaReactivationHash $xml.OuterXml) -cne $Pin.spec_sha256) {
         throw 'legacy_reactivation_task_drift'
     }
+    # Disabling the anchor prevents new starts while preserving its pinned running instance.
+    $runningDisabledAnchor = $Pin.role -ceq 'wsl-anchor' -and
+        $task.State -eq 'Running' -and -not $task.Settings.Enabled
     if ($task.State -notin @('Disabled', 'Ready', 'Running') -or
-        ($task.State -eq 'Disabled') -eq [bool]$task.Settings.Enabled) {
+        ((($task.State -eq 'Disabled') -eq [bool]$task.Settings.Enabled) -and -not $runningDisabledAnchor)) {
         throw 'legacy_reactivation_task_pending'
     }
     return $task
@@ -103,7 +106,9 @@ function Assert-HaTaskInstance($Pin) {
 
 function Assert-HaReactivationClosed($Plan) {
     $state = Read-HaReactivationSnapshot $Plan
-    if (@($state.tasks.Values | Where-Object { $_.Settings.Enabled -or $_.State -ne 'Disabled' }).Count -ne 0 -or
+    if (@($state.tasks.Values | Where-Object { $_.Settings.Enabled }).Count -ne 0 -or
+        $state.tasks.supervisor.State -ne 'Disabled' -or $state.tasks.emergency.State -ne 'Disabled' -or
+        $state.tasks['wsl-anchor'].State -notin @('Disabled', 'Running') -or
         $state.runner.StartMode -ne 'Disabled' -or $state.runner.State -ne 'Stopped') {
         throw 'legacy_reactivation_not_closed'
     }
