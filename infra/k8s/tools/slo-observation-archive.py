@@ -27,6 +27,7 @@ from urllib.request import HTTPRedirectHandler, build_opener
 
 LIMIT = 8 * 1024 * 1024
 COLLECTION_LIMIT = 16 * 1024 * 1024
+SEARCH_SERIES_LIMIT = 256
 NEWS_FAMILIES = ('initialized', 'last_success_timestamp_seconds', 'consecutive_failures')
 QUOTA = 384 * 1024 * 1024
 RESERVE = 64 * 1024 * 1024
@@ -67,7 +68,7 @@ def search_block(block, start, *, stored=False):
         if not isinstance(response, dict) or response.get('status') != 'success' or response.get('warnings') or response.get('infos'):
             raise ValueError('invalid_search_response')
         data = response.get('data')
-        if not isinstance(data, dict) or data.get('resultType') != 'matrix' or not isinstance(data.get('result'), list) or len(data['result']) > 128:
+        if not isinstance(data, dict) or data.get('resultType') != 'matrix' or not isinstance(data.get('result'), list) or len(data['result']) > SEARCH_SERIES_LIMIT:
             raise ValueError('invalid_search_matrix')
         rows = []
         seen = set()
@@ -233,8 +234,8 @@ def news_block(block, start, *, stored=False):
                    'semantics': 'raw_metric_source_sample_coverage_not_news_slo'}
 
 
-def checked_payload(payload, today):
-    summary = _ANALYZER.summarize_samples(payload)
+def checked_payload(payload, today, *, stored=False):
+    summary = _ANALYZER.summarize_samples(payload, archive_sources=True)
     start, end, step = (payload[k] for k in ('start', 'end', 'step_seconds'))
     if start % 86400 or 86400 % step or end != start + 86400 - step:
         raise ValueError('not_daily_grid')
@@ -249,15 +250,20 @@ def checked_payload(payload, today):
         rows = []
         for row in payload['queries'][key]['data']['result']:
             labels = {k: v for k, v in row['metric'].items() if k != '__name__'}
+            if stored:
+                if set(row['metric']) != {'namespace', 'deployment', 'source_sha256'} or not re.fullmatch('[0-9a-f]{64}', labels['source_sha256']):
+                    raise ValueError('unsanitized_archive')
+                rows.append({'metric': labels, 'values': row['values']})
+                continue
             rows.append({'metric': {'namespace': 'personal-server', 'deployment': 'portal-web',
                                     'source_sha256': digest(canonical(labels))}, 'values': row['values']})
         clean['queries'][key] = {'status': 'success', 'data': {'resultType': 'matrix', 'result': rows}}
     if 'search' in payload:
-        clean['search'], summary['search_archive'] = search_block(payload['search'], start)
+        clean['search'], summary['search_archive'] = search_block(payload['search'], start, stored=stored)
     else:
         summary['search_archive'] = {'status': 'not_collected'}
     if 'news' in payload:
-        clean['news'], summary['news_archive'] = news_block(payload['news'], start)
+        clean['news'], summary['news_archive'] = news_block(payload['news'], start, stored=stored)
     else:
         summary['news_archive'] = {'status': 'not_collected'}
     if len(canonical(clean)) > LIMIT - 4096:
@@ -351,7 +357,7 @@ def entries(directory, today, held=None, enforce_quota=True):
             raise ValueError('invalid_capsule')
         payload = capsule['payload']
         # Archived labels are already sanitized; do not hash them repeatedly.
-        summary = _ANALYZER.summarize_samples(payload)
+        summary = _ANALYZER.summarize_samples(payload, archive_sources=True)
         start, end, step = (payload[k] for k in ('start', 'end', 'step_seconds'))
         day = datetime.fromtimestamp(start, timezone.utc).date()
         if 'search' in payload:
@@ -394,9 +400,14 @@ def remove_expired(directory, rows, today):
     return keep, len(rows) - len(keep)
 
 
-def archive(payload, path, *, today=None, prune=False):
+def archive(payload, path, *, today=None, prune=False, captured_sha256=None):
     today = today or datetime.now(timezone.utc).date()
-    day, clean, summary = checked_payload(payload, today)
+    day, clean, summary = checked_payload(payload, today, stored=captured_sha256 is not None)
+    if captured_sha256 is not None:
+        if (prune or digest(canonical(payload)) != captured_sha256 or digest(canonical(clean)) != captured_sha256
+                or any(not any(row['values'] for row in response['data']['result'])
+                       for response in clean['queries'].values())):
+            raise ValueError('invalid_captured_payload')
     if prune and day < today - timedelta(days=RETENTION_DAYS):
         raise ValueError('expired_input')
     capsule = {'schema_version': 1, 'date': day.isoformat(), 'payload': clean,
@@ -544,7 +555,10 @@ def main(argv=None):
         parser.add_argument('--initialize', action='store_true')
         parser.add_argument('--prune', action='store_true')
         parser.add_argument('--date')
+        parser.add_argument('--captured-sha256')
         args = parser.parse_args(argv)
+        if args.captured_sha256 is not None and (not args.input or args.initialize or args.prune):
+            raise ValueError('invalid_arguments')
         today = datetime.now(timezone.utc).date()
         if args.verify or args.prune_expired:
             if args.initialize or args.prune or args.date:
@@ -564,10 +578,10 @@ def main(argv=None):
                 if len(raw) > LIMIT:
                     raise ValueError('too_large')
                 payload = json.loads(raw)
-            checked_payload(payload, today)
+            checked_payload(payload, today, stored=args.captured_sha256 is not None)
             if args.initialize and not Path(args.directory).exists() and not Path(args.directory).is_symlink():
                 initialize(args.directory)
-            result = archive(payload, args.directory, prune=args.prune)
+            result = archive(payload, args.directory, prune=args.prune, captured_sha256=args.captured_sha256)
         print(json.dumps(result, sort_keys=True, allow_nan=False))
         return 2 if result['status'] == 'partial' else 0
     except (OSError, ValueError, TypeError, KeyError, OverflowError, RecursionError, EOFError, zlib.error, HTTPException):

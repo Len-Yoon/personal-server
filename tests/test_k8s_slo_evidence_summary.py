@@ -445,6 +445,44 @@ class SloObservationArchiveTests(unittest.TestCase):
             self.assertEqual(out['partial_dates'], ['2026-10-26'])
             self.assertIn('2026-10-27', out['missing_dates'])
 
+    def test_archive_retains_handoffs_and_keeps_conflicting_sources_unknown(self):
+        import gzip
+        module = self.module()
+        payload = self.search(self.payload())
+        for kind in ('values', 'timestamps'):
+            rows = payload['search'][kind]['data']['result']
+            original = rows[0]
+            rows[:] = [{'metric': dict(original['metric'], private_label=str(i)), 'values': original['values']}
+                       for i in range(150)]
+        for response in payload['queries'].values():
+            rows = response['data']['result']
+            original = rows[0]
+            rows.append({'metric': dict(original['metric'], private_label='replacement'),
+                         'values': original['values'][1:]})
+            original['values'] = original['values'][:2]
+        today = date(2026, 10, 28)
+        _, captured, summary = module.checked_payload(payload, today)
+        self.assertEqual(summary['samples']['good'], 2)
+        self.assertEqual(summary['samples']['unknown_reasons']['ambiguous_sources'], 1)
+        self.assertEqual(len(captured['search']['values']['data']['result']), 150)
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / 'archive'
+            module.initialize(folder)
+            with self.assertRaisesRegex(ValueError, 'invalid_captured_payload'):
+                module.archive(captured, folder, today=today, captured_sha256='0' * 64)
+            unexpected = json.loads(json.dumps(captured))
+            unexpected['queries']['available']['data']['result'][0]['extra'] = 'unsanitized data'
+            with self.assertRaisesRegex(ValueError, 'invalid_captured_payload'):
+                module.archive(unexpected, folder, today=today,
+                               captured_sha256=module.digest(module.canonical(unexpected)))
+            fingerprint = module.digest(module.canonical(captured))
+            saved = module.archive(captured, folder, today=today, captured_sha256=fingerprint)
+            self.assertEqual(saved['summary'], summary)
+            self.assertTrue(module.archive(payload, folder, today=today)['idempotent'])
+            capsule = json.loads(gzip.decompress((folder / '2026-10-26.json.gz').read_bytes()))
+            self.assertEqual(capsule['payload'], captured)
+            self.assertEqual(module.verify(folder, today=today)['partial_dates'], ['2026-10-26'])
+
     def test_complete_grid_retains_original_timestamp_and_drops_raw_labels(self):
         import gzip
         module = self.module()
@@ -685,7 +723,7 @@ class SloObservationArchiveTests(unittest.TestCase):
             elif kind == 'off_grid':
                 row['values'][1][0] += 1
             else:
-                response['data']['result'] *= 129
+                response['data']['result'] *= module.SEARCH_SERIES_LIMIT + 1
             with self.subTest(kind=kind), self.assertRaises(ValueError):
                 module.checked_payload(payload, date(2026, 10, 28))
 

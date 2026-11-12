@@ -30,7 +30,7 @@ def _number(value):
         raise ValueError('invalid_number') from None
 
 
-def _matrix(response, start, end, step):
+def _matrix(response, start, end, step, *, archive_sources):
     if not isinstance(response, dict) or response.get('status') != 'success':
         raise ValueError('invalid_response')
     if response.get('warnings') or response.get('infos'):
@@ -39,18 +39,26 @@ def _matrix(response, start, end, step):
     if not isinstance(data, dict) or data.get('resultType') != 'matrix':
         raise ValueError('invalid_matrix')
     rows = data.get('result')
-    if not isinstance(rows, list) or len(rows) > 1:
+    if not isinstance(rows, list) or len(rows) > (64 if archive_sources else 1):
         raise ValueError('ambiguous_series')
-    if not rows:
-        return {}
-    if not isinstance(rows[0], dict) or not isinstance(rows[0].get('values'), list):
+    result = {}
+    for row in rows:
+        identity, points = _series(row, start, end, step)
+        if identity in result:
+            raise ValueError('ambiguous_series')
+        result[identity] = points
+    return result
+
+
+def _series(row, start, end, step):
+    if not isinstance(row, dict) or not isinstance(row.get('values'), list):
         raise ValueError('invalid_series')
-    labels = rows[0].get('metric')
+    labels = row.get('metric')
     if not isinstance(labels, dict) or labels.get('namespace') != 'personal-server' or labels.get('deployment') != 'portal-web':
         raise ValueError('invalid_selector')
     if any(not isinstance(key, str) or not isinstance(value, str) for key, value in labels.items()):
         raise ValueError('invalid_labels')
-    values = rows[0]['values']
+    values = row['values']
     if len(values) > (end - start) // step + 1:
         raise ValueError('too_many_points')
     points = {}
@@ -67,7 +75,20 @@ def _matrix(response, start, end, step):
             raise ValueError('invalid_grid')
         last = index
         points[index] = _number(pair[1])
-    return points
+    return tuple(sorted((key, value) for key, value in labels.items() if key != '__name__')), points
+
+
+def _archive_grid(sources):
+    identities = {}
+    matrices = {name: {} for name in QUERIES}
+    ambiguous = set()
+    for name, rows in sources.items():
+        for identity, points in rows.items():
+            for index, value in points.items():
+                if identities.setdefault(index, identity) != identity:
+                    ambiguous.add(index)
+                matrices[name][index] = value
+    return matrices, ambiguous
 
 
 def _classify_sample(matrices, index, at):
@@ -88,8 +109,8 @@ def _classify_sample(matrices, index, at):
     return 'good', None, False
 
 
-def summarize_samples(payload, *, include_episodes=False):
-    if type(include_episodes) is not bool:
+def summarize_samples(payload, *, include_episodes=False, archive_sources=False):
+    if type(include_episodes) is not bool or type(archive_sources) is not bool:
         raise ValueError('invalid_options')
     if not isinstance(payload, dict) or type(payload.get('schema_version')) is not int or payload['schema_version'] != 1:
         raise ValueError('invalid_schema')
@@ -105,11 +126,14 @@ def summarize_samples(payload, *, include_episodes=False):
     raw = payload.get('queries')
     if not isinstance(raw, dict) or set(raw) != set(QUERIES):
         raise ValueError('missing_queries')
-    matrices = {key: _matrix(raw[key], start, end, step) for key in QUERIES}
-    labels = [{key: value for key, value in raw[name]['data']['result'][0]['metric'].items()
-               if key != '__name__'} for name in QUERIES if raw[name]['data']['result']]
-    if labels and any(label != labels[0] for label in labels):
-        raise ValueError('inconsistent_sources')
+    sources = {key: _matrix(raw[key], start, end, step, archive_sources=archive_sources) for key in QUERIES}
+    if archive_sources:
+        matrices, ambiguous = _archive_grid(sources)
+    else:
+        if len({identity for rows in sources.values() for identity in rows}) > 1:
+            raise ValueError('inconsistent_sources')
+        matrices = {name: next(iter(rows.values()), {}) for name, rows in sources.items()}
+        ambiguous = set()
     count = (end - start) // step + 1
     good = bad = stop_candidates = 0
     unknown = {reason: 0 for reason in ('missing', 'nonfinite', 'stale', 'future_timestamp')}
@@ -117,12 +141,15 @@ def summarize_samples(payload, *, include_episodes=False):
     active = None
     for index in range(count):
         at = start + index * step
-        status, reason, candidate = _classify_sample(matrices, index, at)
+        if index in ambiguous:
+            status, reason, candidate = 'unknown', 'ambiguous_sources', False
+        else:
+            status, reason, candidate = _classify_sample(matrices, index, at)
         good += status == 'good'
         bad += status == 'bad'
         stop_candidates += candidate
         if status == 'unknown':
-            unknown[reason] += 1
+            unknown[reason] = unknown.get(reason, 0) + 1
         if include_episodes:
             if status == 'good':
                 active = None
