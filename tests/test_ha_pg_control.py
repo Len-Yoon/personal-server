@@ -740,6 +740,28 @@ class PGControlTests(unittest.TestCase):
 
 
 class InitialLeaseServiceTests(unittest.TestCase):
+    def test_pinned_read_accepts_distinct_stable_handle_ctime_and_rejects_changes(self):
+        from ha_control import initial_lease_service as service
+
+        raw = b'{"generation":1}'
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder).resolve() / 'intent.json'
+            path.write_bytes(raw)
+            named = path.lstat()
+            fields = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+            handle = SimpleNamespace(**{field: getattr(named, field) for field in fields})
+            handle.st_ctime_ns += 1000
+            digest = hashlib.sha256(raw).hexdigest()
+            with patch.object(service.os, 'fstat', return_value=handle):
+                self.assertEqual(service._read_pinned(path, digest),
+                                 ({'generation': 1}, (named.st_dev, named.st_ino)))
+                with self.assertRaises(TransitionBlocked):
+                    service._read_pinned(path, '0' * 64)
+            changed = SimpleNamespace(**(vars(handle) | {'st_ctime_ns': handle.st_ctime_ns + 1}))
+            with patch.object(service.os, 'fstat', side_effect=[handle, changed]):
+                with self.assertRaises(TransitionBlocked):
+                    service._read_pinned(path, digest)
+
     def test_persists_intent_before_initial_open_and_never_rearms_after_loss(self):
         from ha_control import initial_lease_service as service
 
