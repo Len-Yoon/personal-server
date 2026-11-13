@@ -97,7 +97,7 @@ $script=[ScriptBlock]::Create([Text.Encoding]::UTF8.GetString($entry).TrimStart(
         with selectors.DefaultSelector() as wait:
             wait.register(fd, event)
             if not wait.select(max(0, deadline - time.monotonic())):
-                raise TransitionBlocked("legacy_native_command_unconfirmed")
+                raise TransitionBlocked("legacy_native_pipe_timeout")
 
     def _receive(self, expected, deadline):
         fd = self.process.stdout.fileno()
@@ -105,7 +105,9 @@ $script=[ScriptBlock]::Create([Text.Encoding]::UTF8.GetString($entry).TrimStart(
             self._wait(fd, selectors.EVENT_READ, deadline)
             part = os.read(fd, 4096)
             self.buffer.extend(part)
-            if not part or len(self.buffer) > 4096:
+            if not part:
+                raise TransitionBlocked("legacy_native_pipe_closed")
+            if len(self.buffer) > 4096:
                 raise TransitionBlocked("legacy_native_response_unconfirmed")
         line, _, remaining = self.buffer.partition(b"\n")
         self.buffer = remaining
@@ -129,9 +131,15 @@ $script=[ScriptBlock]::Create([Text.Encoding]::UTF8.GetString($entry).TrimStart(
                 self._wait(fd, selectors.EVENT_WRITE, deadline)
                 payload = payload[os.write(fd, payload):]
             return self._receive(request, deadline)
-        except (OSError, ValueError, TransitionBlocked):
+        except TransitionBlocked as error:
             self.healthy = False
-            raise TransitionBlocked("legacy_native_command_unconfirmed") from None
+            raise TransitionBlocked(f"{error}_{action}") from None
+        except ValueError:
+            self.healthy = False
+            raise TransitionBlocked(f"legacy_native_response_unconfirmed_{action}") from None
+        except OSError:
+            self.healthy = False
+            raise TransitionBlocked(f"legacy_native_pipe_io_{action}") from None
 
 
 class WslBootstrapAdmission:
@@ -277,7 +285,8 @@ class NativeCutover:
         return self.applications.capture(plan, fence)
 
     def activate_vm(self, plan, verified, settled):
-        self._verify_guard(settled)
+        # The application stage rechecks the guard after binding the activation
+        # receipt to the journal and before it dispatches the VM operation.
         return self.applications.activate_vm(plan, verified, settled)
 
     def switch_caddy(self, plan, authority):

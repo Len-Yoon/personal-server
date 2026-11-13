@@ -1125,11 +1125,36 @@ for line in sys.stdin:
         channel = WindowsReactivationSession((sys.executable, '-u', '-c', child))
         with channel.guard(self.plan, '2' * 64):
             self.assertRegex(channel.request('close', '3' * 64), r'^[a-f0-9]{64}$')
-            with self.assertRaisesRegex(TransitionBlocked, 'legacy_native_command_unconfirmed'):
+            with self.assertRaisesRegex(TransitionBlocked, 'legacy_native_response_unconfirmed_verify'):
                 channel.request('verify', '3' * 64)
             with self.assertRaisesRegex(TransitionBlocked, 'legacy_native_guard_lost'):
                 channel.request('restore', '3' * 64)
         self.assertIsNone(channel.process)
+
+    def test_native_windows_channel_identifies_verify_timeout_and_closed_pipe(self):
+        from ha_control.native_cutover import WindowsReactivationSession
+
+        child = """
+import json, sys
+print(json.dumps(dict(plan_sha256=sys.argv[-3], attempt_id=sys.argv[-1],
+                      sequence=0, action='ready')), flush=True)
+sys.stdin.readline()
+"""
+        for timed_out in (False, True):
+            with self.subTest(timed_out=timed_out):
+                channel = WindowsReactivationSession((sys.executable, '-u', '-c', child))
+                with channel.guard(self.plan, '2' * 64):
+                    expected = 'legacy_native_pipe_closed_verify'
+                    if timed_out:
+                        expected = 'legacy_native_pipe_timeout_verify'
+                        with patch('ha_control.native_cutover.selectors.DefaultSelector') as selector:
+                            selector.return_value.__enter__.return_value.select.side_effect = [[True], []]
+                            with self.assertRaisesRegex(TransitionBlocked, expected):
+                                channel.request('verify', '3' * 64)
+                    else:
+                        with self.assertRaisesRegex(TransitionBlocked, expected):
+                            channel.request('verify', '3' * 64)
+                    self.assertFalse(channel.healthy)
 
     def test_wsl_bootstrap_observes_native_marker_and_rejects_legacy_collision(self):
         from ha_control.native_cutover import WslBootstrapAdmission
