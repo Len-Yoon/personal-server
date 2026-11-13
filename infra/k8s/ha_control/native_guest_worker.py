@@ -37,7 +37,7 @@ VERBS = {
 }
 HANDOFF = "activation-handoff.json"
 EMPTY = "0" * 64
-RESTORE_DYNAMIC = {"boot_sha256", "installation_id", "plan_sha256", "manifest_sha256"}
+RESTORE_DYNAMIC = {"boot_sha256", "installation_id", "plan_sha256", "manifest_sha256", "attempt_id"}
 RUNTIME_DYNAMIC = {
     "node", "boot_sha256", "installation_id", "protected_inventory_sha256", "plan_sha256", "manifest_sha256",
     "frozen_transfer_sha256", "restore_receipt_sha256", "attempt_id", "system_id", "cluster",
@@ -154,6 +154,8 @@ class GuestWorker:
     def restore_pins(self, manifest=EMPTY):
         pins = restore.RestorePins(**self.input["restore"], boot_sha256=self.boot,
                                    installation_id=self.installation, plan_sha256=self.request.binding.plan_sha256,
+                                   attempt_id=(self.request.binding.attempt_id
+                                               if self.input["restore"].get("retained_postgres_id") else None),
                                    manifest_sha256=manifest)
         pins.validate()
         return pins
@@ -235,8 +237,9 @@ class GuestWorker:
         _need(self.args["target_system_id_sha256"] == _digest(pins.system_id.encode()),
               "guest_worker_target_system_unbound")
         if self.node == "A":
-            runtime._directory(restore.JOURNAL, 0)
-            _need(not any(os.path.lexists(restore.JOURNAL / name) for name in
+            journal = restore.migration_journal(pins, self.restore_stage)
+            runtime._directory(journal, 0)
+            _need(not any(os.path.lexists(journal / name) for name in
                           ("migration-intent.json", "migration-pass.json")), "guest_worker_prior_restore_unsettled")
             runtime._directory(self.restore_stage, 0)
             inputs, receipts = self.restore_stage / "inputs", self.restore_stage / "receipts"
@@ -349,7 +352,7 @@ class GuestWorker:
         if self.node == "B":
             return pins.inventory_sha256
         _, proof = self._proof("restore", restore_receipt or self.args.get("restore_receipt_sha256"))
-        _, passed = _read_json(restore.JOURNAL / "migration-pass.json")
+        _, passed = _read_json(restore.migration_journal(pins, self.restore_stage) / "migration-pass.json")
         _need(passed == proof and passed["manifest_sha256"] == pins.manifest_sha256,
               "guest_worker_restore_unconfirmed")
         identifier = passed["container_id"]
@@ -546,7 +549,8 @@ class GuestWorker:
                       ("runtime-intent.json", "runtime-prepared.json", "apps.json", "broker.json")),
               "guest_worker_preparation_unsettled")
         pins = self.restore_pins(manifest or EMPTY)
-        if self.node == "A" and os.path.lexists(restore.JOURNAL / "migration-intent.json"):
+        journal = restore.migration_journal(pins, self.restore_stage)
+        if self.node == "A" and os.path.lexists(journal / "migration-intent.json"):
             result = restore.observe_closed_outcome(pins, self.restore_stage)
             status = result["status"]
             _need(status in ("CLEAN_FAILED", "COMMITTED_CLOSED"), "guest_worker_restore_unsettled")
