@@ -147,7 +147,7 @@ try {
     $writers = @('S-1-5-18','S-1-5-32-544') + @($startScope.trusted_admin_sids)
     $bindingParent = Get-Item -LiteralPath ([IO.Path]::GetDirectoryName($BindingPath)) -Force
     if ($bindingParent -isnot [IO.DirectoryInfo]) { throw 'initial_service_binding_scope' }
-    Assert-PreflightEntry $bindingParent $writers $writers $true $false
+    Assert-PreflightEntry $bindingParent $writers ($writers + @($sid.Value)) $true $false
     for ($parent = $bindingParent.Parent; $null -ne $parent; $parent = $parent.Parent) {
         Assert-PreflightEntry $parent $writers $writers $false $true
     }
