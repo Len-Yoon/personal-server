@@ -17,7 +17,7 @@ from ha_runtime.seven_capture import stamp
 from . import native_guest_config as config
 from .legacy_writers import TransitionBlocked, _need
 from .native_guest_restore import BOOT_ID, INSTALLATION, SHA, _directory, _docker, _fsync_directory, _inventory
-from .native_guest_restore import _json_bytes, inventory_sha256
+from .native_guest_restore import _json_bytes, active_postgres, inventory_sha256
 
 
 ROOT = Path("/etc/n100-ha")
@@ -29,7 +29,7 @@ APP_UID = 10001
 BROKER_UID = 10002
 GATEWAY_UID = 10003
 INGRESS_UID = 10004
-LIVE_BASE = {"postgres", "ha-network", "ha-ingress"}
+LIVE_BASE = {"ha-network", "ha-ingress"}
 APP_PUBLIC = ("pg-ca.crt", "broker-ca.crt", "broker-client.crt")
 BROKER_PUBLIC = ("pg-ca.crt", "broker-ca.crt", "broker.crt", "ingress-server-ca.crt", "ingress-client.crt")
 BROKER_PRIVATE = ("postgres.pgpass", "broker.key", "ingress-client.key")
@@ -56,6 +56,8 @@ class RuntimePins:
     system_id: str
     cluster: str
     broker_instance: str
+    postgres_id: str | None = None
+    retained_postgres_id: str | None = None
 
     def validate(self):
         digests = (self.boot_sha256, self.installation_id, self.protected_inventory_sha256, self.engine_id_sha256,
@@ -63,6 +65,10 @@ class RuntimePins:
                    self.frozen_transfer_sha256, self.restore_receipt_sha256, self.attempt_id, self.broker_instance)
         _need(self.node in ("A", "B") and all(_match(SHA, value) for value in digests),
               "guest_runtime_pins_invalid")
+        _need((self.postgres_id is None or _match(SHA, self.postgres_id))
+              and (self.retained_postgres_id is None or
+                   (_match(SHA, self.retained_postgres_id) and self.postgres_id is not None
+                    and self.retained_postgres_id != self.postgres_id)), "guest_runtime_postgres_pins_invalid")
         config._guest_identity(self.cluster, self.release, self.plan_sha256, self.node, self.installation_id, self.system_id)
 
 
@@ -222,20 +228,20 @@ def _protected(pins, images, layouts):
     _need(inventory_sha256(objects) == pins.protected_inventory_sha256, "guest_runtime_protected_state_changed")
     _need(not any(_service(item) in SERVICES | {"ha-broker"} for item in objects.values()),
           "guest_runtime_existing_application_container")
+    active_postgres(objects, pins.postgres_id, pins.retained_postgres_id)
     for service in LIVE_BASE:
         selected = [item for item in objects.values() if _service(item) == service]
         _need(len(selected) == 1 and selected[0]["State"]["Running"] is True, "guest_runtime_prerequisite_missing")
-        if service != "postgres":
-            utility = "ha-backup-utility" if service == "ha-network" else "ha-ingress-utility"
-            item, layout = selected[0], layouts[service]
-            host = item["HostConfig"]
-            _need(item["Image"] == images[utility]["id"] and item["Config"]["User"] == layout["user"]
-                  and item["Config"]["Cmd"] == layout["command"] and host["NetworkMode"] == layout["network_mode"]
-                  and host["ReadonlyRootfs"] is True and host["CapDrop"] == ["ALL"]
-                  and host["RestartPolicy"]["Name"] == "no" and _binds_match(item, layout),
-                  "guest_runtime_prerequisite_changed")
-            if "entrypoint" in layout:
-                _need(item["Config"]["Entrypoint"] == layout["entrypoint"], "guest_runtime_prerequisite_changed")
+        utility = "ha-backup-utility" if service == "ha-network" else "ha-ingress-utility"
+        item, layout = selected[0], layouts[service]
+        host = item["HostConfig"]
+        _need(item["Image"] == images[utility]["id"] and item["Config"]["User"] == layout["user"]
+              and item["Config"]["Cmd"] == layout["command"] and host["NetworkMode"] == layout["network_mode"]
+              and host["ReadonlyRootfs"] is True and host["CapDrop"] == ["ALL"]
+              and host["RestartPolicy"]["Name"] == "no" and _binds_match(item, layout),
+              "guest_runtime_prerequisite_changed")
+        if "entrypoint" in layout:
+            _need(item["Config"]["Entrypoint"] == layout["entrypoint"], "guest_runtime_prerequisite_changed")
     return objects
 
 
