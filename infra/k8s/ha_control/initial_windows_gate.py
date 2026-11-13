@@ -161,6 +161,15 @@ class _Ace(ctypes.Structure):
     _fields_ = [('kind', wintypes.BYTE), ('flags', wintypes.BYTE), ('size', wintypes.WORD), ('mask', wintypes.DWORD)]
 
 
+class _UnicodeString(ctypes.Structure):
+    _fields_ = [('length', wintypes.USHORT), ('maximum', wintypes.USHORT), ('buffer', wintypes.LPWSTR)]
+
+
+class _ObjectAttributes(ctypes.Structure):
+    _fields_ = [('length', wintypes.ULONG), ('root', wintypes.HANDLE), ('name', ctypes.POINTER(_UnicodeString)),
+                ('attributes', wintypes.ULONG), ('security', ctypes.c_void_p), ('qos', ctypes.c_void_p)]
+
+
 def _api(library, name, result, *parameters):
     function = getattr(library, name)
     function.argtypes = parameters
@@ -175,6 +184,7 @@ class _Native:
         filetime = out(wintypes.FILETIME)
         kernel = ctypes.WinDLL('kernel32.dll', use_last_error=True)
         security = ctypes.WinDLL('advapi32.dll', use_last_error=True)
+        ntdll = ctypes.WinDLL('ntdll.dll')
         self.close = _api(kernel, 'CloseHandle', boolean, handle)
         self.free = _api(kernel, 'LocalFree', handle, handle)
         self.current = _api(kernel, 'GetCurrentProcess', handle)
@@ -188,6 +198,8 @@ class _Native:
         self.exitcode = _api(kernel, 'GetExitCodeProcess', boolean, handle, out(dword))
         self.windows = _api(kernel, 'GetWindowsDirectoryW', wintypes.UINT, wintypes.LPWSTR, wintypes.UINT)
         self.open = _api(kernel, 'CreateFileW', handle, wintypes.LPCWSTR, dword, dword, pointer, dword, dword, handle)
+        self.nt_open = _api(ntdll, 'NtOpenFile', wintypes.LONG, out(handle), wintypes.ULONG, out(_ObjectAttributes),
+                            pointer, wintypes.ULONG, wintypes.ULONG)
         self.file_info = _api(kernel, 'GetFileInformationByHandle', boolean, handle, out(_FileInfo))
         self.final_path = _api(kernel, 'GetFinalPathNameByHandleW', dword, handle, wintypes.LPWSTR, dword, dword)
         self.read = _api(kernel, 'ReadFile', boolean, handle, pointer, dword, out(dword), pointer)
@@ -301,11 +313,25 @@ class _Native:
         _need(self.file_info(handle, ctypes.byref(info)))
         return info
 
+    def _open_directory(self, path):
+        # This metadata handle requires only READ_CONTROL and FILE_READ_ATTRIBUTES.
+        # The installation root deliberately grants neither SYNCHRONIZE nor directory listing.
+        value = '\\??\\' + str(path)
+        size = len(value.encode('utf-16-le'))
+        _need(size <= 65532)
+        name = _UnicodeString(size, size + 2, value)
+        attributes = _ObjectAttributes(ctypes.sizeof(_ObjectAttributes), None, ctypes.pointer(name), 0x40, None, None)
+        status_block = (ctypes.c_void_p * 2)()  # IO_STATUS_BLOCK
+        handle = wintypes.HANDLE()
+        status = self.nt_open(ctypes.byref(handle), 0x20080, ctypes.byref(attributes), status_block,
+                              7, 0x200000)  # FILE_OPEN_REPARSE_POINT
+        _need(status == 0 and handle.value not in (None, INVALID_HANDLE))
+        return handle.value
+
     @contextmanager
     def _handle(self, path, *, directory, depth, private_reader):
-        access = (0x80 if directory else 0x80000000) | 0x20000  # READ_ATTRIBUTES or GENERIC_READ, and READ_CONTROL
-        flags = 0x00200000 | (0x02000000 if directory else 0)  # OPEN_REPARSE_POINT, BACKUP_SEMANTICS
-        handle = self.open(str(path), access, 7 if directory else 1, None, 3, flags, None)
+        handle = (self._open_directory(path) if directory else
+                  self.open(str(path), 0x80020000, 1, None, 3, 0x00200000, None))
         _need(handle not in (None, INVALID_HANDLE))
         try:
             info = self._info(handle)
