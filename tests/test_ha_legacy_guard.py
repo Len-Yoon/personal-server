@@ -323,6 +323,27 @@ class NativeLinuxWritersTests(unittest.TestCase):
 
 
 class PersistentWriterProofTests(unittest.TestCase):
+    def test_rejection_is_bound_and_does_not_serve_later_requests(self):
+        from ha_control import wsl_writer_proof
+
+        request = dict(runtime_path="/private/runtime.json", runtime_sha256="a" * 64, plan="b" * 64,
+                       attempt="c" * 64, wsl_boot_sha256="d" * 64, challenge="e" * 64, budget_ms=500)
+        raw = json.dumps(request).encode() + b"\n"
+        for persistent, error, expected in (
+            (True, TransitionBlocked("legacy_writer_command_unconfirmed"), ["ready", "e" * 64 + ":reject:inventory"]),
+            (True, ValueError("private field"), ["ready", "e" * 64 + ":reject:internal"]),
+            (False, ValueError("private field"), []),
+        ):
+            with self.subTest(persistent=persistent, error=type(error)):
+                output = io.StringIO()
+                with (patch.object(wsl_writer_proof.sys, "stdin", type("Input", (), {"buffer": io.BytesIO(raw * 2)})()),
+                      patch.object(wsl_writer_proof.sys, "stdout", output),
+                      patch.object(wsl_writer_proof, "_inventory"),
+                      patch.object(wsl_writer_proof, "prove_runtime", side_effect=error) as prove):
+                    self.assertEqual(wsl_writer_proof.main(persistent=persistent), 1)
+                prove.assert_called_once()
+                self.assertEqual(output.getvalue().splitlines(), expected)
+
     def test_observes_each_challenge_and_exits_on_eof(self):
         from ha_control import wsl_writer_proof
 

@@ -11,6 +11,7 @@ import time
 
 from ha_runtime import seven_capture
 
+from .controller import TransitionBlocked
 from .legacy_writers import COMPOSE_ORDER, CONTAINER, DOCKER, KUBE, LinuxWriters, _need, _run
 
 
@@ -188,7 +189,21 @@ def main(*, persistent=False):
             _need(type(request) is dict and set(request) == fields, 'legacy_writer_proof_scope_invalid')
             budget = request.pop('budget_ms')
             _need(type(budget) is int and 0 < budget <= 1800, 'legacy_writer_proof_scope_invalid')
-            digest = prove_runtime(**request, deadline=time.monotonic() + budget / 1000)
+            try:
+                digest = prove_runtime(**request, deadline=time.monotonic() + budget / 1000)
+            except Exception as error:
+                if persistent and type(request['challenge']) is str and SHA.fullmatch(request['challenge']):
+                    reason = 'internal'
+                    if isinstance(error, TransitionBlocked):
+                        reason = {
+                            'legacy_writer_proof_deadline': 'deadline',
+                            'legacy_writer_command_unconfirmed': 'inventory',
+                            'legacy_writer_proof_response_invalid': 'inventory',
+                            'legacy_writer_boot_changed': 'identity',
+                            'legacy_recovery_wsl_commands_unsettled': 'recovery',
+                        }.get(str(error), 'closure')
+                    print(request['challenge'] + ':reject:' + reason, flush=True)
+                return 1
             if not persistent:
                 print(digest, flush=True)
                 return 0
