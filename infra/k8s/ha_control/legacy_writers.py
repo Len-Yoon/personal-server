@@ -74,7 +74,8 @@ class LinuxWriters:
         for service, row in containers.items():
             _need(type(row) is dict and set(row) == {'id', 'image', 'running', 'restart'}
                   and _match(CONTAINER, row['id']) and _match(IMAGE, row['image'])
-                  and type(row['running']) is bool and row['running'] is (service not in K3S_SERVICES)
+                  and type(row['running']) is bool
+                  and (service == 'system-agent' or row['running'] is (service not in K3S_SERVICES))
                   and row['restart'] == 'unless-stopped')
         _need(len({row['id'] for row in containers.values()}) == len(containers))
 
