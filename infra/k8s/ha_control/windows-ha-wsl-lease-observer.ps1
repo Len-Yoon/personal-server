@@ -94,10 +94,7 @@ function Get-HaLeaseProof($Context) {
         $script:ClosureInput.reactivation_plan_sha256
     } else { $request.plan_sha256 }
     $null = Get-HaClosureRemaining $Context
-    Assert-HaOwnedCutoverMarker $script:ClosureMarker
-    $marker = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($script:ClosureMarker.path))
-    if ($marker.plan_sha256 -cne $request.plan_sha256 -or $marker.attempt_id -cne $request.attempt_id -or
-        $marker.generation -ne $request.generation -or $request.windows_boot_sha256 -cne $script:ClosureBoot -or
+    if ($request.windows_boot_sha256 -cne $script:ClosureBoot -or
         $Context.MarkerSha256 -cne $script:ClosureMarker.sha256 -or $Context.ReactivationPlanSha256 -cne $nativePin) {
         throw 'lease_proof_callback_scope'
     }
@@ -116,6 +113,12 @@ function Get-HaLeaseProof($Context) {
         $message = ConvertTo-Json -InputObject $payload -Compress
         $write = $process.StandardInput.WriteLineAsync($message)
         if (-not $write.Wait((Get-HaClosureRemaining $Context))) { throw 'lease_proof_callback_deadline' }
+        # The collector only reads. Start it before the Windows checks so the
+        # same challenge can observe both sides within one deadline.
+        Assert-HaOwnedCutoverMarker $script:ClosureMarker
+        $marker = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($script:ClosureMarker.path))
+        if ($marker.plan_sha256 -cne $request.plan_sha256 -or $marker.attempt_id -cne $request.attempt_id -or
+            $marker.generation -ne $request.generation) { throw 'lease_proof_callback_scope' }
         $running = @(& $script:ClosureWsl --list --running --quiet | ForEach-Object { ($_ -replace ([char]0),'').Trim() })
         if ($LASTEXITCODE -ne 0 -or $script:ClosurePlan.distribution -cnotin $running) { throw 'lease_proof_wsl_not_running' }
         Assert-HaReactivationClosed $script:ClosurePlan
