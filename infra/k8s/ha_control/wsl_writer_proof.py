@@ -170,17 +170,25 @@ def prove_runtime(runtime_path, runtime_sha256, plan, attempt, wsl_boot_sha256, 
     return hashlib.sha256((proof + ':' + after + ':' + runtime_sha256).encode()).hexdigest()
 
 
-def main():
+def main(*, persistent=False):
     try:
-        line = sys.stdin.buffer.readline(4097)
-        _need(0 < len(line) <= 4096 and line.endswith(b'\n'), 'legacy_writer_proof_scope_invalid')
-        request = seven_capture.parse(line)
-        fields = {'runtime_path', 'runtime_sha256', 'plan', 'attempt', 'wsl_boot_sha256', 'challenge', 'budget_ms'}
-        _need(type(request) is dict and set(request) == fields, 'legacy_writer_proof_scope_invalid')
-        budget = request.pop('budget_ms')
-        _need(type(budget) is int and 0 < budget <= 1800, 'legacy_writer_proof_scope_invalid')
-        print(prove_runtime(**request, deadline=time.monotonic() + budget / 1000), flush=True)
-        return 0
+        if persistent:
+            print('ready', flush=True)
+        while True:
+            line = sys.stdin.buffer.readline(4097)
+            if persistent and not line:
+                return 0
+            _need(0 < len(line) <= 4096 and line.endswith(b'\n'), 'legacy_writer_proof_scope_invalid')
+            request = seven_capture.parse(line)
+            fields = {'runtime_path', 'runtime_sha256', 'plan', 'attempt', 'wsl_boot_sha256', 'challenge', 'budget_ms'}
+            _need(type(request) is dict and set(request) == fields, 'legacy_writer_proof_scope_invalid')
+            budget = request.pop('budget_ms')
+            _need(type(budget) is int and 0 < budget <= 1800, 'legacy_writer_proof_scope_invalid')
+            digest = prove_runtime(**request, deadline=time.monotonic() + budget / 1000)
+            if not persistent:
+                print(digest, flush=True)
+                return 0
+            print(request['challenge'] + ':' + digest, flush=True)
     except Exception:
         return 1
 

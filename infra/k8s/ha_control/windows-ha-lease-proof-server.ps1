@@ -306,7 +306,7 @@ public static class HaLeaseProofDrain {
         $null = $init.AddScript('. ([ScriptBlock]::Create($args[0]))', $false).AddArgument($vmObserverText).AddStatement()
         $null = $init.AddScript($callback, $false).AddStatement()
         $null = $init.AddCommand('Initialize-HaLeaseObservation').AddArgument($inputConfig).AddArgument($planText).
-            AddArgument($MarkerSha256).AddArgument($WindowsBootSha256)
+            AddArgument($MarkerSha256).AddArgument($WindowsBootSha256).AddArgument($CollectorSha256)
         $output = $init.Invoke()
         if ($init.HadErrors -or $output.Count -ne 0) { throw 'lease_proof_callback' }
     } finally { $init.Dispose() }
