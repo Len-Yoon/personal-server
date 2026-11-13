@@ -824,6 +824,27 @@ class InitialLeaseServiceTests(unittest.TestCase):
 
 
 class InitialPgLeaseTests(unittest.TestCase):
+    def test_pair_observations_overlap_on_distinct_connections(self):
+        from threading import Barrier
+
+        barrier = Barrier(2, timeout=2)
+        primary, standby = MagicMock(), MagicMock()
+        expiry = datetime.now(timezone.utc)
+        for connection in (primary, standby):
+            connection.execute.return_value.fetchone.return_value = (expiry,)
+
+        def observe(connection, node, state):
+            self.assertIs(connection, primary if node == 'A' else standby)
+            self.assertEqual(state, self.state)
+            barrier.wait()
+            return node
+
+        self.backend._observe = observe
+        with patch.object(self.lease, '_pair') as verify:
+            self.assertEqual(self.lease._observe_pair(primary, standby, self.state, opened=False),
+                             ('A', 'B', expiry))
+        verify.assert_called_once_with('A', 'B', self.state, opened=False)
+
     def setUp(self):
         self.cluster = 'initial_test'
         self.state = dict(cluster=self.cluster, target='A', old='B', timeline=1, generation=1)

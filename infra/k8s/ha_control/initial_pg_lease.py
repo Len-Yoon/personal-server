@@ -1,5 +1,6 @@
 """Open the first A lease without changing the restored A/B replication history."""
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import hashlib
 import json
@@ -103,11 +104,18 @@ class InitialPgLease:
         return row[0]
 
     def _observe_pair(self, primary, peer, state, *, opened):
-        current = self.backend._observe(primary, 'A', state)
-        replica = self.backend._observe(peer, 'B', state)
+        def observe(connection, node):
+            value = self.backend._observe(connection, node, state)
+            expiry = self._expiry(connection.execute('SELECT expires_at FROM ha.control WHERE singleton=1').fetchone())
+            return value, expiry
+
+        # Keep the primary transaction and its role lock on the caller thread.
+        # Joining the standby read here keeps its connection alive on failure.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            standby = pool.submit(observe, peer, 'B')
+            current, expires = observe(primary, 'A')
+            replica, replica_expires = standby.result()
         self._pair(current, replica, state, opened=opened)
-        expires = self._expiry(primary.execute('SELECT expires_at FROM ha.control WHERE singleton=1').fetchone())
-        replica_expires = self._expiry(peer.execute('SELECT expires_at FROM ha.control WHERE singleton=1').fetchone())
         if expires != replica_expires:
             _deny('initial_lease_stamp_unverified')
         return current, replica, expires
