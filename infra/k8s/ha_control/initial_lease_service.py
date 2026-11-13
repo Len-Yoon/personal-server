@@ -46,19 +46,31 @@ def _handoff(backend):
 def _read_pinned(path, digest):
     def identity(info):
         return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size,
-                info.st_mtime_ns, info.st_ctime_ns, getattr(info, 'st_file_attributes', 0))
+                info.st_mtime_ns, getattr(info, 'st_file_attributes', 0))
+
+    def stable(before, after):
+        return identity(before) == identity(after) and before.st_ctime_ns == after.st_ctime_ns
 
     try:
-        if not path.is_absolute() or any(p.is_symlink() or getattr(p.lstat(), 'st_file_attributes', 0) & 1024
-                                         for p in (path, *path.parents)):
+        if not path.is_absolute():
+            raise ValueError()
+        named_before = path.lstat()
+        if (not stat.S_ISREG(named_before.st_mode) or named_before.st_nlink != 1 or not named_before.st_ino
+                or getattr(named_before, 'st_file_attributes', 0) & 1024
+                or any(p.is_symlink() or getattr(p.lstat(), 'st_file_attributes', 0) & 1024
+                       for p in path.parents)):
             raise ValueError()
         with path.open('rb') as stream:
             before = os.fstat(stream.fileno())
             raw = stream.read(4097)
             after = os.fstat(stream.fileno())
+            named_after = path.lstat()
+        # Windows can report different ctime values for the same file through
+        # a handle and a path. Require ctime stability within each source.
         if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not before.st_ino
                 or not 0 < len(raw) == before.st_size <= 4096
-                or identity(before) != identity(after) or identity(after) != identity(path.lstat())
+                or not stable(before, after) or not stable(named_before, named_after)
+                or identity(after) != identity(named_after)
                 or hashlib.sha256(raw).hexdigest() != digest):
             raise ValueError()
         return json.loads(raw), (before.st_dev, before.st_ino)
