@@ -257,6 +257,7 @@ class NativeLinuxWritersTests(unittest.TestCase):
             containers[service] = dict(id=f'{index:064x}', image='sha256:' + 'a' * 64,
                                        running=service not in K3S_SERVICES, restart='unless-stopped')
         containers['system-agent']['running'] = agent_running
+        containers['homeops-executor']['running'] = False
         baseline = dict(deployments=deployments, schedules=schedules, containers=containers)
         active = {row['id']: (row['running'], row['restart']) for row in containers.values()}
         commands = []
@@ -273,7 +274,7 @@ class NativeLinuxWritersTests(unittest.TestCase):
             }[command]
 
         writer = LinuxWriters(baseline, docker)
-        containers['homeops-executor']['running'] = False
+        containers['homeops-executor']['running'] = True
         actual = writer._baseline
         states = {row['uid']: row['replicas'] for row in deployments.values()}
         states.update({row['uid']: row['suspend'] for row in schedules})
@@ -316,6 +317,7 @@ class NativeLinuxWritersTests(unittest.TestCase):
                 self.assertEqual(active[row['id']], (row['running'], row['restart']))
             if not agent_running:
                 self.assertNotIn(('start', actual['containers']['system-agent']['id']), commands)
+            self.assertNotIn(('start', actual['containers']['homeops-executor']['id']), commands)
             self.assertTrue(all(states[row['uid']] is False for row in schedules))
             self.assertTrue(all(states[row['uid']] == 1 for row in deployments.values()))
 
