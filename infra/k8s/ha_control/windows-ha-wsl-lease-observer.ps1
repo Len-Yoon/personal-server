@@ -38,14 +38,10 @@ function Initialize-HaLeaseObservation($InputConfig, [string]$PlanText, [string]
                 file_id=(Get-HaMarkerFileId $path)}
     Assert-HaOwnedCutoverMarker $marker
     if ($plan.distribution -cne 'Ubuntu-24.04') { throw 'lease_proof_callback_scope' }
-    Import-Module Hyper-V -ErrorAction Stop
     $script:ClosureVmA = [guid]::ParseExact($InputConfig.vm_a,'D')
     $script:ClosureVmB = [guid]::ParseExact($InputConfig.vm_b,'D')
     if ($script:ClosureVmA -eq [guid]::Empty -or $script:ClosureVmB -eq [guid]::Empty -or
         $script:ClosureVmA -eq $script:ClosureVmB) { throw 'lease_proof_vm_scope' }
-    # Initialize the Hyper-V provider before readiness. Each proof still reads
-    # both VMs and their disks again inside the request deadline.
-    $null = Get-FixedVmObserverSnapshot $InputConfig.installation_id $script:ClosureVmA $script:ClosureVmB
     $script:ClosureInput = $InputConfig
     $script:ClosurePlan = $plan
     $script:ClosureMarker = $marker
@@ -106,7 +102,14 @@ function Get-HaLeaseProof($Context) {
         challenge=$challenge; budget_ms=(Get-HaClosureRemaining $Context)
     }
     $process = $script:ClosureProcess
+    $vmObserver = $null
     try {
+        $Context.Progress.step = 'hyperv_start'
+        $vmObserver = [PowerShell]::Create()
+        $vmObserver.Runspace = $Context.VmRunspace
+        $null = $vmObserver.AddCommand('Get-FixedVmObserverSnapshot').
+            AddArgument($script:ClosureInput.installation_id).AddArgument($script:ClosureVmA).AddArgument($script:ClosureVmB)
+        $vmPending = $vmObserver.BeginInvoke()
         $Context.Progress.step = 'wsl_send'
         if ($null -eq $process -or $process.HasExited -or $script:ClosureStderr.IsCompleted) {
             throw 'lease_proof_wsl_unconfirmed'
@@ -128,7 +131,10 @@ function Get-HaLeaseProof($Context) {
         $Context.Progress.step = 'windows_closed'
         Assert-HaReactivationClosed $script:ClosurePlan
         $Context.Progress.step = 'hyperv'
-        $vms = Get-FixedVmObserverSnapshot $script:ClosureInput.installation_id $script:ClosureVmA $script:ClosureVmB
+        if (-not $vmPending.AsyncWaitHandle.WaitOne((Get-HaClosureRemaining $Context))) { throw 'lease_proof_vm_deadline' }
+        $vmRows = $vmObserver.EndInvoke($vmPending)
+        if ($vmObserver.HadErrors -or $vmRows.Count -ne 1) { throw 'lease_proof_vm_scope' }
+        $vms = $vmRows[0].PSObject.BaseObject
         if ($vms.Count -ne 2 -or $vms[0].node -cne 'A' -or $vms[1].node -cne 'B' -or
             $vms[0].state -cne 'Running' -or $vms[1].state -cne 'Running' -or
             $vms[0].disk_paths_sha256 -cne $script:ClosureInput.a_disk_paths_sha256 -or
@@ -158,5 +164,8 @@ function Get-HaLeaseProof($Context) {
             finally { $process.Dispose() }
         }
         throw
+    } finally {
+        # The broker owns the hard deadline and exits if disposal is blocked.
+        if ($null -ne $vmObserver) { $vmObserver.Dispose() }
     }
 }

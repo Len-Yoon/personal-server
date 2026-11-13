@@ -26,6 +26,7 @@ Set-StrictMode -Version Latest
 $encoding = [Text.UTF8Encoding]::new($false, $true)
 $pipe = $null
 $runspace = $null
+$vmRunspace = $null
 $clock = $null
 $mac = $null
 $outcome = @{ recorded = $false }
@@ -173,7 +174,7 @@ function Write-ProofOutcome([string]$Stage, $Progress = $null) {
         if ($null -ne $Progress) {
             $step = $Progress.step
             if ($step -cin @('dispatch','request','wsl_send','marker_before','wsl_running',
-                            'windows_closed','hyperv','wsl_response','marker_after','complete')) {
+                            'windows_closed','hyperv_start','hyperv','wsl_response','marker_after','complete')) {
                 $record['callback_step'] = $step
             }
         }
@@ -235,6 +236,7 @@ function Invoke-ObservedClosure($Challenge, $Progress) {
         ReactivationPlanSha256=$ReactivationPlanSha256
         MarkerSha256=$MarkerSha256
         Progress=$Progress
+        VmRunspace=$vmRunspace
         DeadlineTimestamp=[Diagnostics.Stopwatch]::GetTimestamp() +
             [long]((Remaining) * [Diagnostics.Stopwatch]::Frequency / 1000)
     }
@@ -323,11 +325,23 @@ public static class HaLeaseProofDrain {
     $runspace = [RunspaceFactory]::CreateRunspace()
     $runspace.ThreadOptions = 'ReuseThread'
     $runspace.Open()
+    $vmRunspace = [RunspaceFactory]::CreateRunspace()
+    $vmRunspace.ThreadOptions = 'ReuseThread'
+    $vmRunspace.Open()
+    $vmInit = [PowerShell]::Create()
+    $vmInit.Runspace = $vmRunspace
+    try {
+        $null = $vmInit.AddScript('Import-Module Hyper-V -Global -ErrorAction Stop', $false).AddStatement()
+        $null = $vmInit.AddScript($vmObserverText, $false).AddStatement()
+        $null = $vmInit.AddCommand('Get-FixedVmObserverSnapshot').
+            AddArgument($inputConfig.installation_id).AddArgument([guid]$inputConfig.vm_a).AddArgument([guid]$inputConfig.vm_b)
+        $warm = $vmInit.Invoke()
+        if ($vmInit.HadErrors -or $warm.Count -ne 1) { throw 'lease_proof_vm_init' }
+    } finally { $vmInit.Dispose() }
     $init = [PowerShell]::Create()
     $init.Runspace = $runspace
     try {
         $null = $init.AddScript($driverText, $false).AddStatement()
-        $null = $init.AddScript('. ([ScriptBlock]::Create($args[0]))', $false).AddArgument($vmObserverText).AddStatement()
         $null = $init.AddScript($callback, $false).AddStatement()
         $null = $init.AddCommand('Initialize-HaLeaseObservation').AddArgument($inputConfig).AddArgument($planText).
             AddArgument($MarkerSha256).AddArgument($WindowsBootSha256).AddArgument($CollectorSha256)
@@ -392,4 +406,5 @@ public static class HaLeaseProofDrain {
     if ($null -ne $pipe) { $pipe.Dispose() }
     if ($null -ne $mac) { $mac.Dispose() }
     if ($null -ne $runspace) { $runspace.Dispose() }
+    if ($null -ne $vmRunspace) { $vmRunspace.Dispose() }
 }
