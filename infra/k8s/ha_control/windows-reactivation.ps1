@@ -52,19 +52,25 @@ function Read-HaReactivationTask($Pin, $Folder = $null) {
 
 function Read-HaReactivationRunner($Pin) {
     if ($Pin.name -notmatch '^actions\.runner\.[A-Za-z0-9._-]{1,180}$') { throw 'legacy_reactivation_runner_scope' }
-    $service = Get-CimInstance Win32_Service -Filter "Name='$($Pin.name)'" -OperationTimeoutSec 5 -ErrorAction Stop
-    if ($null -eq $service -or $service.Name -cne $Pin.name -or
-        (Get-HaReactivationHash "$($service.Name)`n$($service.PathName)`n$($service.StartName)") -cne $Pin.spec_sha256) {
+    $service = Get-Service -Name $Pin.name -ErrorAction Stop
+    $config = Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$($Pin.name)" -ErrorAction Stop
+    if ($service.Name -cne $Pin.name -or $config.ImagePath -isnot [string] -or $config.ObjectName -isnot [string] -or
+        (Get-HaReactivationHash "$($service.Name)`n$($config.ImagePath)`n$($config.ObjectName)") -cne $Pin.spec_sha256) {
         throw 'legacy_reactivation_runner_drift'
     }
-    $config = Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$($Pin.name)" -ErrorAction Stop
+    $startMode = switch ([int]$service.StartType) {
+        2 { 'Auto' }
+        4 { 'Disabled' }
+        default { throw 'legacy_reactivation_runner_pending' }
+    }
+    $state = [string]$service.Status
     $delayed = $config.PSObject.Properties['DelayedAutoStart']
     $isDelayed = $null -ne $delayed -and [int]$delayed.Value -eq 1
-    if (($service.StartMode -eq 'Auto' -and $isDelayed -ne $Pin.delayed) -or
-        $service.StartMode -notin @('Auto', 'Disabled') -or $service.State -notin @('Running', 'Stopped')) {
+    if ($config.Start -isnot [int] -or $config.Start -ne [int]$service.StartType -or
+        ($startMode -eq 'Auto' -and $isDelayed -ne $Pin.delayed) -or $state -notin @('Running', 'Stopped')) {
         throw 'legacy_reactivation_runner_pending'
     }
-    return $service
+    return [pscustomobject]@{ StartMode = $startMode; State = $state }
 }
 
 function Read-HaReactivationSnapshot($Plan) {
