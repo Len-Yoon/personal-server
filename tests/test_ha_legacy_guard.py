@@ -753,6 +753,10 @@ class NativeApplicationsTests(unittest.TestCase):
 
         def windows_request(action, proof):
             trace.append('windows_' + action)
+            if failure == 'activation_guard' and action == 'verify' and 'vm_activation_check' in trace:
+                state = json.loads(journal.read_bytes())
+                if 'recheck_reactivation' in state['receipts']:
+                    raise TransitionBlocked('legacy_native_pipe_timeout_verify')
             if failure == 'caddy_guard' and action == 'verify' and 'caddy_guard_boundary' in trace:
                 raise TransitionBlocked('fixture_guard_lost')
             return hashlib.sha256(f'{action}:{proof}:{len(trace)}'.encode()).hexdigest()
@@ -786,10 +790,20 @@ class NativeApplicationsTests(unittest.TestCase):
                              ('verify_closed', 'vm_closed'), ('activate_vm', 'vm_activate')):
             self.assertEqual(state['receipts'][stage], self.calls[proof])
         self.assertEqual(self.trace[self.trace.index('vm_activate') - 1], 'wsl_closed')
+        activation = self.trace[self.trace.index('vm_activation_check'):self.trace.index('vm_activate')]
+        self.assertEqual(activation.count('windows_verify'), 2)
         self.assertLess(self.trace.index('vm_activate'), self.trace.index('apply_caddy'))
         self.assertLess(self.trace.index('vm_live_authority'), self.trace.index('vm_live'))
         self.assertLess(self.trace.index('vm_live'), self.trace.index('apply_caddy'))
         self.assertLess(self.trace.index('verify_live'), self.trace.index('windows_finish'))
+
+    def test_final_windows_verify_failure_blocks_vm_dispatch_and_caddy(self):
+        with self.assertRaisesRegex(TransitionBlocked, 'legacy_cutover_forward_recovery_required'):
+            self.run_attempt('activation_guard')
+        self.assertNotIn('vm_activate', self.trace)
+        self.assertNotIn('apply_caddy', self.trace)
+        self.assertNotIn('restore_wsl', self.trace)
+        self.assertEqual(json.loads(self.journal.read_bytes())['failure_reason'], 'legacy_native_pipe_timeout_verify')
 
     def test_preflight_and_caddy_guard_block_operational_mutations_at_their_boundaries(self):
         with self.assertRaisesRegex(TransitionBlocked, 'legacy_cutover_preflight_failed'):
