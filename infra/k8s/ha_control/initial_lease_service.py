@@ -20,6 +20,16 @@ HANDOFF_KEYS = {'attempt_id', 'legacy_plan_sha256', 'restore_receipt_sha256', 'a
 OBSERVER_KEYS = {'pipe_name', 'server_pid', 'key_sha256', 'windows_boot_sha256',
                  'wsl_boot_sha256', 'collector_sha256', 'client_sha256', 'marker_sha256'}
 MARKER = Path(r'C:\ProgramData\N100HA-Cutover\ha-controller-owner.json')
+LEASE_FAILURE_CODES = frozenset({
+    'authenticated_pg_observation_required', 'authenticated_pg_unavailable',
+    'initial_cutover_approval_required', 'initial_cutover_deployment_binding_required',
+    'initial_cutover_state_unbound', 'initial_lease_reconciliation_required',
+    'initial_lease_stamp_unverified', 'initial_legacy_closure_required',
+    'initial_replication_barrier_unconfirmed', 'initial_replication_deadline_exceeded',
+    'initial_replication_identity_unverified', 'initial_service_handoff_unverified',
+    'initial_service_live_closure_unverified', 'initial_service_proof_deadline_exceeded',
+    'native_host_guard_required',
+})
 
 
 def _pin(value):
@@ -167,6 +177,7 @@ def serve_initial(backend, journal_path, observer):
         lease = InitialPgLease(backend, lambda _, deadline: observer.assert_legacy_closed(handoff, deadline),
                                assert_exclusion_held=lambda _, deadline: observer.assert_exclusion_held(handoff, deadline))
         sequence = 0
+        failure_code = None
         try:
             started = time.monotonic()
             proof = lease.open(state)
@@ -181,11 +192,18 @@ def serve_initial(backend, journal_path, observer):
                 time.sleep(max(0, 1 - (time.monotonic() - started)))
                 started = time.monotonic()
                 proof = lease.renew(state)
+        except Exception as error:
+            reason = str(error) if isinstance(error, TransitionBlocked) else None
+            failure_code = reason if reason in LEASE_FAILURE_CODES else 'initial_service_lease_unclassified'
+            raise
         finally:
             revoked = False
             try:
                 revoked = lease.revoke(state) is True
             except (OSError, TransitionBlocked):
                 pass
-            journal.save(stable | {'phase': 'local_revoke_observed' if revoked else 'lease_lost',
-                                   'sequence': sequence})
+            terminal = stable | {'phase': 'local_revoke_observed' if revoked else 'lease_lost',
+                                 'sequence': sequence}
+            if failure_code is not None:
+                terminal['failure_code'] = failure_code
+            journal.save(terminal)
