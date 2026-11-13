@@ -156,9 +156,10 @@ def prove_runtime(runtime_path, runtime_sha256, plan, attempt, wsl_boot_sha256, 
         runtime_sha256, plan, attempt, wsl_boot_sha256, challenge)), 'legacy_writer_proof_scope_invalid')
     _need(hashlib.sha256(BOOT_ID.read_bytes()).hexdigest() == wsl_boot_sha256, 'legacy_writer_boot_changed')
     reader = seven_capture.Reader()
-    path = Path(runtime_path)
-    descriptor = seven_capture.descriptor(path)
-    _need(descriptor['sha256'] == runtime_sha256, 'legacy_writer_runtime_pin_mismatch')
+    path = reader.watch(runtime_path)
+    # The signed request supplies the expected hash. Reader.read checks it
+    # against the actual bytes while preserving the initial identity stamp.
+    descriptor = {'path': str(path), 'sha256': runtime_sha256, 'bytes': path.stat().st_size}
     runtime = seven_capture.parse(reader.read(descriptor))
     _need(type(runtime) is dict and runtime.get('plan_sha256') == plan and runtime.get('attempt_id') == attempt,
           'legacy_writer_proof_scope_invalid')
@@ -173,6 +174,9 @@ def prove_runtime(runtime_path, runtime_sha256, plan, attempt, wsl_boot_sha256, 
 def main(*, persistent=False):
     try:
         if persistent:
+            # Initialize the local CLI and API paths before the first timed
+            # challenge. Discard the result; each proof inventories them again.
+            _inventory(_run, time.monotonic() + 3)
             print('ready', flush=True)
         while True:
             line = sys.stdin.buffer.readline(4097)

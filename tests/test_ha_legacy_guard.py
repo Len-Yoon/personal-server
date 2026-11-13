@@ -335,8 +335,10 @@ class PersistentWriterProofTests(unittest.TestCase):
         output = io.StringIO()
         with (patch.object(wsl_writer_proof.sys, "stdin", type("Input", (), {"buffer": io.BytesIO(raw)})()),
               patch.object(wsl_writer_proof.sys, "stdout", output),
+              patch.object(wsl_writer_proof, "_inventory") as warm,
               patch.object(wsl_writer_proof, "prove_runtime", side_effect=["1" * 64, "2" * 64]) as prove):
             self.assertEqual(wsl_writer_proof.main(persistent=True), 0)
+        warm.assert_called_once()
         self.assertEqual(output.getvalue().splitlines(), ["ready", "e" * 64 + ":" + "1" * 64,
                                                            "f" * 64 + ":" + "2" * 64])
         self.assertEqual([call.kwargs["challenge"] for call in prove.call_args_list], ["e" * 64, "f" * 64])
