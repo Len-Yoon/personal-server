@@ -78,13 +78,17 @@ def verify_response(frame, challenge, deadline, *, key, monotonic=time.monotonic
     return response["observation_sha256"]
 
 
-def _protected_path(path):
+def _protected_path(path, *, system_powershell=False):
     _require(path.is_absolute())
+    if system_powershell:
+        from .enforced_windows import _powershell_path
+        _require(sys.platform == "win32" and path == _powershell_path())
     for entry in (path, *path.parents):
         info = entry.lstat()
         _require(not stat.S_ISLNK(info.st_mode) and not (getattr(info, "st_file_attributes", 0) & 1024))
     info = path.lstat()
-    _require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1)
+    _require(stat.S_ISREG(info.st_mode)
+             and (info.st_nlink > 0 if system_powershell else info.st_nlink == 1))
     return info
 
 
@@ -113,7 +117,7 @@ class PersistentLeaseProofClient:
             with key_path.open("rb", buffering=0) as stream:
                 _require(stream.readinto(self._key) == len(self._key) and not stream.read(1))
             _require(hmac.compare_digest(hashlib.sha256(self._key).hexdigest(), key_sha256))
-            _protected_path(powershell)
+            _protected_path(powershell, system_powershell=True)
             before = _protected_path(client)
             _require(0 < before.st_size <= 16384)
             with client.open("rb") as stream:
