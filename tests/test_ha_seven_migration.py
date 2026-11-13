@@ -133,6 +133,18 @@ class NativeGuestRestoreTests(unittest.TestCase):
                     self.assertEqual(commands.call_count, 2)
                     self.assertNotIn(self.pins.peer_ipv4, (journal / "migration-intent.json").read_text())
 
+    def test_scoped_restore_journal_and_container_do_not_reuse_legacy_identity(self):
+        module = native_guest_restore
+        attempt = "1" * 64
+        pins = replace(self.pins, retained_postgres_id="2" * 64, attempt_id=attempt)
+        stage = Path("/var/lib/n100-ha/cutover") / attempt / "restore"
+        self.assertEqual(module.migration_journal(self.pins, stage), module.JOURNAL)
+        self.assertEqual(module.migration_journal(pins, stage), stage / "journal")
+        self.assertEqual(module._intent(pins)["container"], module._intent(self.pins)["container"] + "-" + attempt)
+        self.assertNotIn("attempt_id", module._intent(self.pins))
+        with self.assertRaisesRegex(TransitionBlocked, "attempt_stage_unbound"):
+            module.migration_journal(pins, stage.parent.parent / ("3" * 64) / "restore")
+
     def test_reconciliation_observes_missing_or_ambiguous_intent_without_retry(self):
         module = native_guest_restore
         with tempfile.TemporaryDirectory() as directory:

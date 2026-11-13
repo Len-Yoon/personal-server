@@ -106,6 +106,7 @@ class RestorePins:
     cluster: str
     peer_ipv4: str
     retained_postgres_id: str | None = None
+    attempt_id: str | None = None
 
     def validate(self):
         digests = (self.boot_sha256, self.installation_id, self.inventory_sha256, self.postgres_id,
@@ -121,6 +122,8 @@ class RestorePins:
         _need(self.retained_postgres_id is None
               or (type(self.retained_postgres_id) is str and SHA.fullmatch(self.retained_postgres_id)
                   and self.retained_postgres_id != self.postgres_id), "guest_restore_retained_postgres_pin_invalid")
+        _need(self.attempt_id is None or (type(self.attempt_id) is str and SHA.fullmatch(self.attempt_id)),
+              "guest_restore_attempt_pin_invalid")
         try:
             _need(type(self.peer_ipv4) is str and str(ipaddress.IPv4Address(self.peer_ipv4)) == self.peer_ipv4,
                   "guest_restore_peer_pin_invalid")
@@ -399,8 +402,8 @@ def _frozen_metadata(directory, uid, entry):
     return json.loads(raw)
 
 
-def _write_marker(name, value):
-    directory = os.open(JOURNAL, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+def _write_marker(journal, name, value):
+    directory = os.open(journal, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
                              dir_fd=directory)
@@ -515,11 +518,24 @@ def _assert_migration_container(item, identifier, name, pins, mounts, *, state="
 
 def _intent(pins):
     name = "n100-ha-closed-restore-" + pins.installation_id[:16]
+    if pins.attempt_id is not None:
+        name += "-" + pins.attempt_id
     identity = asdict(pins)
+    if pins.attempt_id is None:
+        del identity["attempt_id"]
     if pins.retained_postgres_id is None:
         del identity["retained_postgres_id"]
     identity["peer_ipv4_sha256"] = _digest(identity.pop("peer_ipv4").encode())
     return {"status": "INTENT", "container": name, **identity}
+
+
+def migration_journal(pins, stage):
+    if pins.attempt_id is None:
+        return JOURNAL
+    stage = Path(stage)
+    _need(stage.name == "restore" and stage.parent.name == pins.attempt_id,
+          "guest_restore_attempt_stage_unbound")
+    return stage / "journal"
 
 
 def observe_closed_outcome(pins, stage):
@@ -527,12 +543,13 @@ def observe_closed_outcome(pins, stage):
     _need(os.geteuid() == 0, "guest_restore_root_required")
     pins.validate()
     stage = Path(stage)
-    intent_path = JOURNAL / "migration-intent.json"
+    journal = migration_journal(pins, stage)
+    intent_path = journal / "migration-intent.json"
     try:
-        _directory(JOURNAL, 0)
+        _directory(journal, 0)
         _identity(pins)
         if not os.path.lexists(intent_path):
-            _need(not os.path.lexists(JOURNAL / "migration-pass.json"), "guest_restore_intent_unconfirmed")
+            _need(not os.path.lexists(journal / "migration-pass.json"), "guest_restore_intent_unconfirmed")
             _prestage(pins, stage)
             _assert_inventory(pins)
             _assert_pg(pins)
@@ -553,7 +570,7 @@ def observe_closed_outcome(pins, stage):
                                     state="exited")
         output = _docker("logs", identifier)
         if exit_code == 1:
-            _need(not os.path.lexists(JOURNAL / "migration-pass.json"), "guest_restore_receipt_unconfirmed")
+            _need(not os.path.lexists(journal / "migration-pass.json"), "guest_restore_receipt_unconfirmed")
             receipt_sha256 = _verify_failed_receipt(pins, manifest, audit_sha256, receipts, output)
             _assert_inventory(pins, identifier)
             _assert_pg(pins)
@@ -574,10 +591,11 @@ def restore_closed(pins, stage):
     _need(os.geteuid() == 0, "guest_restore_root_required")
     pins.validate()
     stage = Path(stage)
-    _directory(JOURNAL, 0)
+    journal = migration_journal(pins, stage)
+    _directory(journal, 0)
     intent_name = "migration-intent.json"
-    _need(not os.path.lexists(JOURNAL / intent_name), "guest_restore_reconciliation_required")
-    _need(not os.path.lexists(JOURNAL / "migration-pass.json"), "guest_restore_reconciliation_required")
+    _need(not os.path.lexists(journal / intent_name), "guest_restore_reconciliation_required")
+    _need(not os.path.lexists(journal / "migration-pass.json"), "guest_restore_reconciliation_required")
     try:
         _identity(pins)
         inputs, frozen, receipts, manifest, audit_sha256 = _prestage(pins, stage)
@@ -588,7 +606,7 @@ def restore_closed(pins, stage):
     intent = _intent(pins)
     name = intent["container"]
     try:
-        _write_marker(intent_name, intent)
+        _write_marker(journal, intent_name, intent)
     except FileExistsError:
         raise TransitionBlocked("guest_restore_reconciliation_required") from None
     except OSError:
@@ -629,7 +647,7 @@ def restore_closed(pins, stage):
                   "migration_receipt_sha256": receipt_sha256, "target_system_id_sha256": _digest(pins.system_id.encode()),
                   "wal_barrier_sha256": wal_barrier_sha256,
                   "services": sorted(SERVICES), "database_and_apps_closed": True, "writer_authority_issued": False}
-        _write_marker("migration-pass.json", result)
+        _write_marker(journal, "migration-pass.json", result)
         return result
     except (TransitionBlocked, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
         raise TransitionBlocked("guest_restore_outcome_unconfirmed_reconcile_intent") from None
