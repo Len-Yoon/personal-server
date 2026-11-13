@@ -34,7 +34,7 @@ class DeploymentAdmission:
             raise TransitionBlocked("deployment_admission_command_unconfirmed") from None
 
     def state(self):
-        result = json.loads(self._api(self.endpoint))
+        result = json.loads(self._api(self.endpoint, '-H', 'Cache-Control: no-cache'))
         if (result.get("id") != self.workflow_id or result.get("path") != ".github/workflows/deploy-n100.yml"
                 or result.get("state") not in ("active", "disabled_manually")):
             raise TransitionBlocked("deployment_admission_identity_changed")
@@ -83,7 +83,8 @@ class DeploymentAdmission:
 
     def _run_page(self, number):
         try:
-            page = json.loads(self._api(self.endpoint + f"/runs?per_page=100&page={number}"))
+            page = json.loads(self._api(self.endpoint + f"/runs?per_page=100&page={number}",
+                                        '-H', 'Cache-Control: no-cache'))
         except (TypeError, ValueError):
             raise TransitionBlocked("deployment_admission_runs_unconfirmed") from None
         if (type(page) is not dict or type(page.get("total_count")) is not int
