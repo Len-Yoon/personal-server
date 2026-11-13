@@ -20,6 +20,10 @@ HANDOFF_KEYS = {'attempt_id', 'legacy_plan_sha256', 'restore_receipt_sha256', 'a
 OBSERVER_KEYS = {'pipe_name', 'server_pid', 'key_sha256', 'windows_boot_sha256',
                  'wsl_boot_sha256', 'collector_sha256', 'client_sha256', 'marker_sha256'}
 MARKER = Path(r'C:\ProgramData\N100HA-Cutover\ha-controller-owner.json')
+CLOSURE_FAILURE_CODES = frozenset({
+    'legacy_pipe_client_unavailable', 'legacy_pipe_request_rejected',
+    'legacy_pipe_response_timeout', 'legacy_pipe_response_missing', 'legacy_pipe_response_invalid',
+})
 LEASE_FAILURE_CODES = frozenset({
     'authenticated_pg_observation_required', 'authenticated_pg_unavailable',
     'external_effect_controller_binding_mismatch', 'external_effect_controller_catalog_unverified',
@@ -33,7 +37,7 @@ LEASE_FAILURE_CODES = frozenset({
     'initial_replication_identity_unverified', 'initial_service_handoff_unverified',
     'initial_service_live_closure_unverified', 'initial_service_proof_deadline_exceeded',
     'native_host_guard_required', 'pg_identity_mismatch', 'server_enforcement_unverified',
-})
+}) | CLOSURE_FAILURE_CODES
 
 
 def _pin(value):
@@ -125,8 +129,11 @@ class WindowsInitialObserver:
         try:
             _pin(self.client.request(deadline))
             return True
-        except ValueError:
-            raise TransitionBlocked('initial_service_live_closure_unverified') from None
+        except ValueError as error:
+            code = str(error)
+            raise TransitionBlocked(
+                code if code in CLOSURE_FAILURE_CODES else 'initial_service_live_closure_unverified'
+            ) from None
 
     def assert_exclusion_held(self, handoff, deadline):
         # The full authenticated writer observations bracket the transaction.
