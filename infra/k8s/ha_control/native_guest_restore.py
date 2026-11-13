@@ -105,6 +105,7 @@ class RestorePins:
     manifest_sha256: str
     cluster: str
     peer_ipv4: str
+    retained_postgres_id: str | None = None
 
     def validate(self):
         digests = (self.boot_sha256, self.installation_id, self.inventory_sha256, self.postgres_id,
@@ -117,6 +118,9 @@ class RestorePins:
               and type(self.source_commit) is str and re.fullmatch(r"[0-9a-f]{40}", self.source_commit)
               and type(self.cluster) is str and re.fullmatch(r"[a-z][a-z0-9_.-]{0,63}", self.cluster),
               "guest_restore_pins_invalid")
+        _need(self.retained_postgres_id is None
+              or (type(self.retained_postgres_id) is str and SHA.fullmatch(self.retained_postgres_id)
+                  and self.retained_postgres_id != self.postgres_id), "guest_restore_retained_postgres_pin_invalid")
         try:
             _need(type(self.peer_ipv4) is str and str(ipaddress.IPv4Address(self.peer_ipv4)) == self.peer_ipv4,
                   "guest_restore_peer_pin_invalid")
@@ -200,17 +204,36 @@ def inventory_sha256(objects):
     return _digest(_json_bytes(protected))
 
 
+def active_postgres(objects, postgres_id=None, retained_id=None):
+    postgres = {identifier: item for identifier, item in objects.items()
+                if (item["Config"]["Labels"] or {}).get("com.docker.compose.service") == "postgres"}
+    if retained_id is not None:
+        _need(postgres_id is not None and retained_id != postgres_id and retained_id in postgres,
+              "guest_restore_retained_postgres_unconfirmed")
+        retained = postgres.pop(retained_id)
+        state = retained["State"]
+        _need(state["Status"] == "exited" and state["Running"] is False and state["Pid"] == 0
+              and state["Paused"] is False and state["Restarting"] is False
+              and retained["HostConfig"]["RestartPolicy"]["Name"] == "no",
+              "guest_restore_retained_postgres_unconfirmed")
+    _need(len(postgres) == 1 and (postgres_id is None or postgres_id in postgres),
+          "guest_restore_inventory_rejected")
+    active, = postgres.values()
+    _need(active["State"]["Running"] is True, "guest_restore_inventory_rejected")
+    return active
+
+
 def _assert_inventory(pins, excluded=None):
     objects = _inventory(excluded)
     _need(inventory_sha256(objects) == pins.inventory_sha256 and pins.postgres_id in objects,
           "guest_restore_inventory_changed")
     services = [(item["Config"]["Labels"] or {}).get("com.docker.compose.service") for item in objects.values()]
     _need(not set(services) & (SERVICES | {"ha-broker"}), "guest_restore_apps_not_closed")
-    _need(all(services.count(service) == 1 for service in ("postgres", "ha-network", "ha-ingress")),
+    _need(all(services.count(service) == 1 for service in ("ha-network", "ha-ingress")),
           "guest_restore_inventory_rejected")
     _need(all(item["State"]["Running"] is True for item, service in zip(objects.values(), services)
-              if service in ("postgres", "ha-network", "ha-ingress")), "guest_restore_inventory_rejected")
-    pg = objects[pins.postgres_id]
+              if service in ("ha-network", "ha-ingress")), "guest_restore_inventory_rejected")
+    pg = active_postgres(objects, pins.postgres_id, pins.retained_postgres_id)
     volumes = {mount["Destination"]: mount for mount in pg["Mounts"]}
     _need(pg["Config"]["Labels"]["com.docker.compose.service"] == "postgres"
           and pg["State"]["Running"] is True and pg["Config"]["User"] == f"{pins.uid}:{pins.gid}"
@@ -493,6 +516,8 @@ def _assert_migration_container(item, identifier, name, pins, mounts, *, state="
 def _intent(pins):
     name = "n100-ha-closed-restore-" + pins.installation_id[:16]
     identity = asdict(pins)
+    if pins.retained_postgres_id is None:
+        del identity["retained_postgres_id"]
     identity["peer_ipv4_sha256"] = _digest(identity.pop("peer_ipv4").encode())
     return {"status": "INTENT", "container": name, **identity}
 

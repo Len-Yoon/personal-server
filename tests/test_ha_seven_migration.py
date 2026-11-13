@@ -39,6 +39,26 @@ class NativeGuestRestoreTests(unittest.TestCase):
             peer_ipv4="192.0.2.6",
         )
 
+    def test_only_explicitly_retained_postgres_may_be_stopped_alongside_active(self):
+        def container(**state):
+            return {"Config": {"Labels": {"com.docker.compose.service": "postgres"}},
+                    "State": state, "HostConfig": {"RestartPolicy": {"Name": "no"}}}
+
+        active = container(Running=True)
+        retained = container(Status="exited", Running=False, Pid=0, Paused=False, Restarting=False)
+        objects = {"active": active, "retained": retained}
+        self.assertIs(native_guest_restore.active_postgres(objects, "active", "retained"), active)
+        self.assertNotIn("retained_postgres_id", native_guest_restore._intent(self.pins))
+        with self.assertRaises(TransitionBlocked):
+            native_guest_restore.active_postgres(objects | {"unexpected": retained}, "active", "retained")
+        for postgres_id, retained_id in (("active", None), ("active", "foreign"), ("retained", "retained")):
+            with self.assertRaises(TransitionBlocked):
+                native_guest_restore.active_postgres(objects, postgres_id, retained_id)
+        for field, value in (("Running", True), ("Pid", 7), ("Restarting", True), ("Status", "created")):
+            with self.subTest(field=field), patch.dict(retained["State"], {field: value}):
+                with self.assertRaises(TransitionBlocked):
+                    native_guest_restore.active_postgres(objects, "active", "retained")
+
     def test_restore_has_one_durable_attempt_and_checks_closed_postgres(self):
         module = native_guest_restore
         identifier = "f" * 64

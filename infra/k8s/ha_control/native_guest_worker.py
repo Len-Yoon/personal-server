@@ -41,6 +41,7 @@ RESTORE_DYNAMIC = {"boot_sha256", "installation_id", "plan_sha256", "manifest_sh
 RUNTIME_DYNAMIC = {
     "node", "boot_sha256", "installation_id", "protected_inventory_sha256", "plan_sha256", "manifest_sha256",
     "frozen_transfer_sha256", "restore_receipt_sha256", "attempt_id", "system_id", "cluster",
+    "postgres_id", "retained_postgres_id",
 }
 STANDBY = """
 SELECT json_build_array(session_user, current_database(), current_setting('cluster_name'),
@@ -135,7 +136,8 @@ class GuestWorker:
               and type(self.input["schema_version"]) is int and self.input["schema_version"] == 1
               and self.input["binding"] == request.binding.fields() and self.input["node"] == self.node
               and _hash(self.input["installation_id"])
-              and type(self.input["restore"]) is dict and set(self.input["restore"]) == _names(restore.RestorePins) - RESTORE_DYNAMIC
+              and type(self.input["restore"]) is dict
+              and set(self.input["restore"]) | {"retained_postgres_id"} == _names(restore.RestorePins) - RESTORE_DYNAMIC
               and type(self.input["runtime"]) is dict and set(self.input["runtime"]) == _names(runtime.RuntimePins) - RUNTIME_DYNAMIC,
               "guest_worker_installed_scope_mismatch")
         self.installation = self.input["installation_id"]
@@ -163,6 +165,7 @@ class GuestWorker:
                                    manifest_sha256=manifest, frozen_transfer_sha256=transfer,
                                    restore_receipt_sha256=restored, attempt_id=self.request.binding.attempt_id,
                                    system_id=db.system_id, cluster=db.cluster,
+                                   postgres_id=db.postgres_id, retained_postgres_id=db.retained_postgres_id,
                                    protected_inventory_sha256=inventory or db.inventory_sha256)
         pins.validate()
         _need(pins.release["source_commit"] == db.source_commit, "guest_worker_release_mismatch")
