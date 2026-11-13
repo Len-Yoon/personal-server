@@ -46,7 +46,10 @@ class NativeFrozenCapture:
         _need(converter_sources == self.converter_source_pins, "native_capture_converter_source_unbound")
         baseline = inspect_live_baseline()
         pvc = inspect_pvc_bindings()
-        compose = inspect_compose_capture({service: baseline["containers"][service]["id"] for service in PATHS})
+        compose = inspect_compose_capture(
+            {service: baseline["containers"][service]["id"] for service in PATHS},
+            stopped_services={service for service in PATHS if not baseline["containers"][service]["running"]},
+        )
         _need(all(row["deployment_uid"] == baseline["deployments"][service]["uid"] for service, row in pvc.items()),
               "native_capture_baseline_changed")
         self.writers = LinuxWriters(baseline)

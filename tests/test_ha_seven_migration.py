@@ -385,7 +385,8 @@ class NativeFrozenCaptureTests(unittest.TestCase):
                     "target_system_id": "123"}
         external = {service: ["windows:recovery", "github:deploy"] for service in services}
         baseline = {
-            "containers": {service: {"id": str(index) * 64} for index, service in enumerate(services, 1)},
+            "containers": {service: {"id": str(index) * 64, "running": service == "car-care-worker"}
+                           for index, service in enumerate(services, 1)},
             "deployments": {service: {"uid": service + "-uid"} for service in k3s},
             "schedules": [{"uid": "portal-backup", "name": "portal-backup"}],
         }
@@ -397,7 +398,7 @@ class NativeFrozenCaptureTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as directory,
             patch.object(native_frozen_capture, "inspect_live_baseline", return_value=baseline),
             patch.object(native_frozen_capture, "inspect_pvc_bindings", return_value=bindings),
-            patch.object(native_frozen_capture, "inspect_compose_capture", return_value={}),
+            patch.object(native_frozen_capture, "inspect_compose_capture", return_value={}) as compose,
             patch.object(native_frozen_capture, "LinuxWriters", autospec=True) as linux,
             patch.object(native_frozen_capture, "PvcCapture", autospec=True) as pvc,
             patch.object(native_frozen_capture, "ComposeCapture"),
@@ -412,6 +413,7 @@ class NativeFrozenCaptureTests(unittest.TestCase):
             source = native_frozen_capture.NativeFrozenCapture(Path(directory).resolve(), identity, "e" * 64,
                                                                source_pins, external, observe)
             source.prepare()
+            self.assertEqual(compose.call_args.kwargs["stopped_services"], {"homeops-executor"})
             source.block_reactivation()
             with self.assertRaisesRegex(TransitionBlocked, "external_closure_incomplete"):
                 source.fence("f" * 64, "1" * 64)

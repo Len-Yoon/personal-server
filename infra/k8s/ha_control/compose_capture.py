@@ -27,17 +27,18 @@ def _command(args, *, output=None, timeout=20):
     return _run_archive_command((*DOCKER, *args), output=output, timeout=timeout)
 
 
-def _observe(service, container, run, *, stopped):
+def _observe(service, container, run, *, stopped, running=True):
     _need(_match(CONTAINER, container), "compose_capture_scope_invalid")
     rows = json.loads(run(("inspect", container)))
     _need(type(rows) is list and len(rows) == 1, "compose_capture_source_unconfirmed")
     row, = rows
     state = row["State"]
     restart = row["HostConfig"]["RestartPolicy"]
+    expected = (False, "exited", "no") if stopped else (
+        (True, "running", "unless-stopped") if running else (False, "exited", "unless-stopped"))
     _need(row["Id"] == container and _match(IMAGE, row["Image"])
           and row["Config"]["Labels"]["com.docker.compose.service"] == service
-          and (state["Running"], state["Status"], restart["Name"]) ==
-              ((False, "exited", "no") if stopped else (True, "running", "unless-stopped"))
+          and (state["Running"], state["Status"], restart["Name"]) == expected
           and not any(state.get(key) for key in ("Paused", "Restarting", "Dead", "OOMKilled"))
           and restart["MaximumRetryCount"] == 0, "compose_capture_source_unconfirmed")
     keys = ENVIRONMENT[service]
@@ -65,9 +66,12 @@ def _observe(service, container, run, *, stopped):
     return {"container": container, "image": row["Image"], "mounts": mounts}
 
 
-def inspect_compose_capture(containers, *, run=_command):
+def inspect_compose_capture(containers, *, stopped_services=(), run=_command):
     _need(set(containers) == set(PATHS), "compose_capture_scope_invalid")
-    return {service: _observe(service, container, run, stopped=False) for service, container in containers.items()}
+    stopped_services = set(stopped_services)
+    _need(stopped_services <= {"homeops-executor"}, "compose_capture_scope_invalid")
+    return {service: _observe(service, container, run, stopped=False, running=service not in stopped_services)
+            for service, container in containers.items()}
 
 
 class ComposeCapture:
