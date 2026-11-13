@@ -73,7 +73,7 @@ function Read-HaReactivationRunner($Pin) {
     return [pscustomobject]@{ StartMode = $startMode; State = $state }
 }
 
-function Read-HaReactivationSnapshot($Plan) {
+function Read-HaReactivationSnapshot($Plan, [switch]$ClosedObservation) {
     $boot = (Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5 -ErrorAction Stop).LastBootUpTime
     if ($boot.ToUniversalTime().Ticks.ToString() -cne $Plan.boot_ticks) {
         throw 'legacy_reactivation_host_rebooted'
@@ -104,8 +104,10 @@ function Read-HaReactivationSnapshot($Plan) {
         foreach ($pin in $tasks) { $observed[$pin.role] = Read-HaReactivationTask $pin $folder }
     } finally { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($scheduler) }
     $runner = Read-HaReactivationRunner $Plan.runner
-    $workers = @(Get-CimInstance Win32_Process -Filter "Name='Runner.Worker.exe'" -OperationTimeoutSec 5 -ErrorAction Stop)
-    if ($workers.Count -ne 0) { throw 'legacy_reactivation_runner_busy' }
+    if (-not $ClosedObservation) {
+        $workers = @(Get-CimInstance Win32_Process -Filter "Name='Runner.Worker.exe'" -OperationTimeoutSec 5 -ErrorAction Stop)
+        if ($workers.Count -ne 0) { throw 'legacy_reactivation_runner_busy' }
+    }
     return @{tasks=$observed; runner=$runner}
 }
 
@@ -135,7 +137,8 @@ function Assert-HaTaskInstance($Pin) {
 }
 
 function Assert-HaReactivationClosed($Plan) {
-    $state = Read-HaReactivationSnapshot $Plan
+    # The final process inventory below checks the runner worker as well.
+    $state = Read-HaReactivationSnapshot $Plan -ClosedObservation
     if (@($state.tasks.Values | Where-Object { $_.Settings.Enabled }).Count -ne 0 -or
         $state.tasks.supervisor.State -ne 'Disabled' -or $state.tasks.emergency.State -ne 'Disabled' -or
         $state.tasks['wsl-anchor'].State -notin @('Disabled', 'Running') -or
