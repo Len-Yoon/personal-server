@@ -28,7 +28,7 @@ $pipe = $null
 $runspace = $null
 $clock = $null
 $mac = $null
-$outcomeRecorded = $false
+$outcome = @{ recorded = $false }
 $scope = 'n100ha-legacy-closure-v1'
 $servicePattern = '\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\z'
 $sidPattern = '\AS-1-(?:[0-9]{1,10}-){1,14}[0-9]{1,10}\z'
@@ -163,8 +163,8 @@ function Write-ProtectedRecord([string]$Path, $Record) {
 }
 
 function Write-ProofOutcome([string]$Stage) {
-    if ($script:outcomeRecorded) { return }
-    $script:outcomeRecorded = $true
+    if ($outcome.recorded) { return }
+    $outcome.recorded = $true
     try {
         Write-ProtectedRecord ($ReadyPath + '.outcome.json') ([ordered]@{
             schema_version=1; attempt_id=$AttemptId; phase=$Stage
