@@ -181,9 +181,11 @@ class PersistentLeaseProofClient:
     def request(self, deadline):
         """Return the fresh observation SHA using the original caller monotonic deadline."""
         _require(self._lock.acquire(blocking=False))
+        stage = "legacy_pipe_client_unavailable"
         try:
             _require(self._process is not None and self._process.poll() is None)
             deadline = min(deadline, self.monotonic() + 2)
+            stage = "legacy_pipe_request_rejected"
             challenge = self.pins.challenge()
             raw = json.dumps(challenge, separators=(",", ":"), sort_keys=True).encode("ascii")
             budget = int((deadline - self.monotonic()) * 1000)
@@ -191,11 +193,15 @@ class PersistentLeaseProofClient:
             self._outgoing.put_nowait(str(budget).encode("ascii") + b" " + raw + b"\n")
             remaining = deadline - self.monotonic()
             _require(remaining > 0)
+            stage = "legacy_pipe_response_timeout"
             frame = self._incoming.get(timeout=remaining)
+            stage = "legacy_pipe_response_missing"
+            _require(bool(frame))
+            stage = "legacy_pipe_response_invalid"
             return verify_response(frame, challenge, deadline, key=self._key, monotonic=self.monotonic)
         except (OSError, ValueError, Empty, Full):
             self.close()
-            raise ValueError("legacy_pipe_proof_rejected") from None
+            raise ValueError(stage) from None
         finally:
             self._lock.release()
 
