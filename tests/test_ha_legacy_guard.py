@@ -322,6 +322,26 @@ class NativeLinuxWritersTests(unittest.TestCase):
             self.assertTrue(all(states[row['uid']] == 1 for row in deployments.values()))
 
 
+class PersistentWriterProofTests(unittest.TestCase):
+    def test_observes_each_challenge_and_exits_on_eof(self):
+        from ha_control import wsl_writer_proof
+
+        requests = [
+            dict(runtime_path="/private/runtime.json", runtime_sha256="a" * 64, plan="b" * 64,
+                 attempt="c" * 64, wsl_boot_sha256="d" * 64, challenge=nonce * 64, budget_ms=500)
+            for nonce in ("e", "f")
+        ]
+        raw = b"".join(json.dumps(row).encode() + b"\n" for row in requests)
+        output = io.StringIO()
+        with (patch.object(wsl_writer_proof.sys, "stdin", type("Input", (), {"buffer": io.BytesIO(raw)})()),
+              patch.object(wsl_writer_proof.sys, "stdout", output),
+              patch.object(wsl_writer_proof, "prove_runtime", side_effect=["1" * 64, "2" * 64]) as prove):
+            self.assertEqual(wsl_writer_proof.main(persistent=True), 0)
+        self.assertEqual(output.getvalue().splitlines(), ["ready", "e" * 64 + ":" + "1" * 64,
+                                                           "f" * 64 + ":" + "2" * 64])
+        self.assertEqual([call.kwargs["challenge"] for call in prove.call_args_list], ["e" * 64, "f" * 64])
+
+
 class NativePvcCaptureTests(unittest.TestCase):
     def test_extract_uses_private_files_and_rejects_link_members(self):
         import io
