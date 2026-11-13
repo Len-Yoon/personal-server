@@ -824,6 +824,29 @@ class InitialLeaseServiceTests(unittest.TestCase):
 
 
 class InitialPgLeaseTests(unittest.TestCase):
+    def test_initial_pg_read_overlaps_closure_and_failure_blocks_writes(self):
+        from threading import Event
+
+        reading = Event()
+        original = self.backend._observe
+
+        def observe(connection, node, state):
+            reading.set()
+            return original(connection, node, state)
+
+        def reject(state, deadline):
+            self.assertTrue(reading.wait(timeout=1))
+            raise TransitionBlocked('fixture_closure_failed')
+
+        self.backend._observe = observe
+        self.lease.assert_legacy_closed = reject
+        with self.assertRaisesRegex(TransitionBlocked, 'fixture_closure_failed'):
+            self.lease.open(self.state)
+        self.assertEqual(self.revision, 1)
+        self.assertFalse(self.probes)
+        self.assertFalse(any(row[1].startswith(('DELETE', 'INSERT', 'UPDATE'))
+                             for row in self.trace if len(row) == 3))
+
     def test_pair_observations_overlap_on_distinct_connections(self):
         from threading import Barrier
 
