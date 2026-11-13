@@ -43,6 +43,9 @@ function Initialize-HaLeaseObservation($InputConfig, [string]$PlanText, [string]
     $script:ClosureVmB = [guid]::ParseExact($InputConfig.vm_b,'D')
     if ($script:ClosureVmA -eq [guid]::Empty -or $script:ClosureVmB -eq [guid]::Empty -or
         $script:ClosureVmA -eq $script:ClosureVmB) { throw 'lease_proof_vm_scope' }
+    # Initialize the Hyper-V provider before readiness. Each proof still reads
+    # both VMs and their disks again inside the request deadline.
+    $null = Get-FixedVmObserverSnapshot $InputConfig.installation_id $script:ClosureVmA $script:ClosureVmB
     $script:ClosureInput = $InputConfig
     $script:ClosurePlan = $plan
     $script:ClosureMarker = $marker
