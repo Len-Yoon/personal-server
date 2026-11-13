@@ -8,6 +8,7 @@ $ErrorActionPreference = 'Stop'
 $watch = $null
 $BudgetMs = 0
 $pipe = $null
+$stage = 'request'
 function Remaining {
     $left = $BudgetMs - [int][Math]::Ceiling($watch.Elapsed.TotalMilliseconds)
     if ($left -le 0) { throw 'lease_proof_deadline' }
@@ -44,6 +45,7 @@ public static class HaLeaseProofPeer {
     [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
     [Console]::WriteLine('ready')
     while ($null -ne ($line = [Console]::ReadLine())) {
+        $stage = 'request'
         $watch = [Diagnostics.Stopwatch]::StartNew()
         if ($line.Length -gt 2053 -or $line -cnotmatch '\A([1-9][0-9]{0,3}) ([\x20-\x7e]{2,2048})\z') {
             throw 'lease_proof_request'
@@ -56,14 +58,18 @@ public static class HaLeaseProofPeer {
             [IO.Pipes.PipeOptions]::Asynchronous, [Security.Principal.TokenImpersonationLevel]::Identification,
             [IO.HandleInheritability]::None)
         try {
+            $stage = 'connect'
             $pipe.Connect((Remaining))
+            $stage = 'peer'
             [HaLeaseProofPeer]::Verify($pipe.SafePipeHandle, $ServerPid)
+            $stage = 'write'
             $requestBytes = [Text.Encoding]::ASCII.GetBytes($request + "`n")
             $write = $pipe.WriteAsync($requestBytes, 0, $requestBytes.Length)
             if (-not $write.Wait((Remaining))) { throw 'lease_proof_write' }
             $buffer = [byte[]]::new(4096)
             $offset = 0
             $frame = $null
+            $stage = 'read'
             while ($offset -lt $buffer.Length) {
                 $read = $pipe.ReadAsync($buffer, $offset, $buffer.Length - $offset)
                 if (-not $read.Wait((Remaining)) -or $read.Result -le 0) { throw 'lease_proof_read' }
@@ -71,10 +77,12 @@ public static class HaLeaseProofPeer {
                 $offset += $read.Result
                 if ($end -ge 0) {
                     if ($end -ne $offset - 1) { throw 'lease_proof_frame' }
+                    $stage = 'peer'
                     [HaLeaseProofPeer]::Verify($pipe.SafePipeHandle, $ServerPid)
+                    $stage = 'frame'
                     $null = Remaining
                     $frame = [Text.UTF8Encoding]::new($false, $true).GetString($buffer, 0, $end)
-                    if ($frame -cnotmatch '\A[\x20-\x7e]{2,4095}\z') { throw 'lease_proof_frame' }
+                    if ($frame -cnotmatch '\A\{[\x20-\x7e]{0,4093}\}\z') { throw 'lease_proof_frame' }
                     break
                 }
             }
@@ -85,6 +93,9 @@ public static class HaLeaseProofPeer {
         }
         [Console]::WriteLine($frame)
     }
-} catch { exit 1 } finally {
+} catch {
+    [Console]::WriteLine('failure ' + $stage)
+    exit 1
+} finally {
     if ($null -ne $pipe) { $pipe.Dispose() }
 }

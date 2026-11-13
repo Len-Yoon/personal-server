@@ -12,7 +12,7 @@ import time
 from .controller import Journal, TransitionBlocked, exclusive
 from .initial_pg_lease import INITIAL_CUTOVER, PROOF_SECONDS, InitialPgLease
 from .enforced_windows import _powershell_path
-from .windows_lease_pipe import PersistentLeaseProofClient, ProofPins
+from .windows_lease_pipe import CLIENT_FAILURES, PersistentLeaseProofClient, ProofPins
 
 
 SHA = re.compile(r'[a-f0-9]{64}\Z')
@@ -23,7 +23,7 @@ MARKER = Path(r'C:\ProgramData\N100HA-Cutover\ha-controller-owner.json')
 CLOSURE_FAILURE_CODES = frozenset({
     'legacy_pipe_client_unavailable', 'legacy_pipe_request_rejected',
     'legacy_pipe_response_timeout', 'legacy_pipe_response_missing', 'legacy_pipe_response_invalid',
-})
+}) | frozenset(CLIENT_FAILURES.values())
 LEASE_FAILURE_CODES = frozenset({
     'authenticated_pg_observation_required', 'authenticated_pg_unavailable',
     'external_effect_controller_binding_mismatch', 'external_effect_controller_catalog_unverified',
