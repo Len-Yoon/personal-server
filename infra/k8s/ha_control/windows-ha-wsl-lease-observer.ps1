@@ -2,7 +2,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function Initialize-HaLeaseObservation($InputConfig, [string]$PlanText, [string]$MarkerSha, [string]$WindowsBootSha) {
+function Initialize-HaLeaseObservation($InputConfig, [string]$PlanText, [string]$MarkerSha, [string]$WindowsBootSha, [string]$CollectorSha) {
     $fields = @($InputConfig.PSObject.Properties.Name | Sort-Object -CaseSensitive)
     if ('reactivation_plan_sha256' -cin $fields) {
         if ($InputConfig.reactivation_plan_sha256 -cnotmatch '\A[a-f0-9]{64}\z') { throw 'lease_proof_callback_scope' }
@@ -51,6 +51,34 @@ function Initialize-HaLeaseObservation($InputConfig, [string]$PlanText, [string]
     $script:ClosureMarker = $marker
     $script:ClosureBoot = $WindowsBootSha
     $script:ClosureWsl = Join-Path ([Environment]::SystemDirectory) 'wsl.exe'
+    $running = @(& $script:ClosureWsl --list --running --quiet | ForEach-Object { ($_ -replace ([char]0),'').Trim() })
+    if ($LASTEXITCODE -ne 0 -or $plan.distribution -cnotin $running) { throw 'lease_proof_wsl_not_running' }
+    if ($CollectorSha -cnotmatch '\A[a-f0-9]{64}\z') { throw 'lease_proof_callback_scope' }
+    $source = [string]$InputConfig.source_root
+    $bootstrap = "import hashlib,os,pathlib,sys; p,loader,manifest,pin,uid,collector=sys.argv[1:]; p=pathlib.Path(p); assert os.geteuid()==int(uid); b=(p/'ha_control/native_wsl_launcher.py').read_bytes(); assert hashlib.sha256(b).hexdigest()==loader; e={'__name__':'verified_source_loader'}; exec(compile(b,'native_wsl_launcher.py','exec'),e); s=e['verify'](p,pathlib.Path(manifest),pin,int(uid)); assert hashlib.sha256(s['ha_control/wsl_writer_proof.py']).hexdigest()==collector; sys.meta_path.insert(0,e['VerifiedSources'](p,s)); from ha_control.wsl_writer_proof import main; raise SystemExit(main(persistent=True))"
+    $command = '--distribution Ubuntu-24.04 --exec /usr/bin/python3 -I -B -S -c "' + $bootstrap + '" ' +
+        (@($source,$script:ClosureInput.source_loader_sha256,$script:ClosureInput.source_manifest_path,
+            $script:ClosureInput.source_manifest_sha256,$script:ClosureInput.wsl_uid,$CollectorSha) -join ' ')
+    $start = [Diagnostics.ProcessStartInfo]::new($script:ClosureWsl, $command)
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($start)
+    try {
+        $process.StandardInput.AutoFlush = $true
+        $ready = $process.StandardOutput.ReadLineAsync()
+        # Any stderr byte, or EOF, invalidates this otherwise silent collector.
+        $script:ClosureStderr = $process.StandardError.BaseStream.ReadAsync([byte[]]::new(1), 0, 1)
+        if (-not $ready.Wait(4000) -or $ready.Result -cne 'ready' -or $process.HasExited -or
+            $script:ClosureStderr.IsCompleted) { throw 'lease_proof_wsl_unconfirmed' }
+        $script:ClosureProcess = $process
+    } catch {
+        try { if (-not $process.HasExited) { $process.Kill() } }
+        finally { $process.Dispose() }
+        throw
+    }
 }
 
 function Get-HaClosureRemaining($Context) {
@@ -76,51 +104,47 @@ function Get-HaLeaseProof($Context) {
     $running = @(& $script:ClosureWsl --list --running --quiet | ForEach-Object { ($_ -replace ([char]0),'').Trim() })
     if ($LASTEXITCODE -ne 0 -or $script:ClosurePlan.distribution -cnotin $running) { throw 'lease_proof_wsl_not_running' }
     $challenge = Get-HaReactivationHash ($request.nonce + ':' + $request.plan_sha256 + ':' + $request.attempt_id)
-    $source = [string]$script:ClosureInput.source_root
     $payload = [ordered]@{
         runtime_path=$script:ClosureInput.runtime_path; runtime_sha256=$script:ClosureInput.runtime_sha256;
         plan=$request.plan_sha256; attempt=$request.attempt_id; wsl_boot_sha256=$request.wsl_boot_sha256;
         challenge=$challenge; budget_ms=(Get-HaClosureRemaining $Context)
     }
-    $bootstrap = "import hashlib,os,pathlib,sys; p,loader,manifest,pin,uid,collector=sys.argv[1:]; p=pathlib.Path(p); assert os.geteuid()==int(uid); b=(p/'ha_control/native_wsl_launcher.py').read_bytes(); assert hashlib.sha256(b).hexdigest()==loader; e={'__name__':'verified_source_loader'}; exec(compile(b,'native_wsl_launcher.py','exec'),e); s=e['verify'](p,pathlib.Path(manifest),pin,int(uid)); assert hashlib.sha256(s['ha_control/wsl_writer_proof.py']).hexdigest()==collector; sys.meta_path.insert(0,e['VerifiedSources'](p,s)); from ha_control.wsl_writer_proof import main; raise SystemExit(main())"
-    $command = '--distribution Ubuntu-24.04 --exec /usr/bin/python3 -I -B -S -c "' + $bootstrap + '" ' +
-        (@($source,$script:ClosureInput.source_loader_sha256,$script:ClosureInput.source_manifest_path,
-            $script:ClosureInput.source_manifest_sha256,$script:ClosureInput.wsl_uid,$request.collector_sha256) -join ' ')
-    $start = [Diagnostics.ProcessStartInfo]::new($script:ClosureWsl, $command)
-    $start.UseShellExecute = $false
-    $start.CreateNoWindow = $true
-    $start.RedirectStandardInput = $true
-    $start.RedirectStandardOutput = $true
-    $start.RedirectStandardError = $true
-    $process = [Diagnostics.Process]::Start($start)
+    $process = $script:ClosureProcess
     try {
+        if ($null -eq $process -or $process.HasExited -or $script:ClosureStderr.IsCompleted) {
+            throw 'lease_proof_wsl_unconfirmed'
+        }
         $output = $process.StandardOutput.ReadLineAsync()
-        $failure = $process.StandardError.ReadToEndAsync()
         $message = ConvertTo-Json -InputObject $payload -Compress
         $write = $process.StandardInput.WriteLineAsync($message)
         if (-not $write.Wait((Get-HaClosureRemaining $Context))) { throw 'lease_proof_callback_deadline' }
-        $process.StandardInput.Close()
         Assert-HaReactivationClosed $script:ClosurePlan
         $vms = Get-FixedVmObserverSnapshot $script:ClosureInput.installation_id $script:ClosureVmA $script:ClosureVmB
         if ($vms.Count -ne 2 -or $vms[0].node -cne 'A' -or $vms[1].node -cne 'B' -or
             $vms[0].state -cne 'Running' -or $vms[1].state -cne 'Running' -or
             $vms[0].disk_paths_sha256 -cne $script:ClosureInput.a_disk_paths_sha256 -or
             $vms[1].disk_paths_sha256 -cne $script:ClosureInput.b_disk_paths_sha256) { throw 'lease_proof_vm_scope' }
-        if (-not $process.WaitForExit((Get-HaClosureRemaining $Context)) -or $process.ExitCode -ne 0 -or
-            -not $output.Wait((Get-HaClosureRemaining $Context)) -or $output.Result -cnotmatch '\A[a-f0-9]{64}\z' -or
-            -not $failure.IsCompleted -or $failure.Result.Length -ne 0) { throw 'lease_proof_wsl_unconfirmed' }
+        if (-not $output.Wait((Get-HaClosureRemaining $Context)) -or $process.HasExited -or
+            $script:ClosureStderr.IsCompleted -or $output.Result -cnotmatch ('\A' + $challenge + ':[a-f0-9]{64}\z')) {
+            throw 'lease_proof_wsl_unconfirmed'
+        }
+        $digest = $output.Result.Substring(65)
         Assert-HaOwnedCutoverMarker $script:ClosureMarker
         $null = Get-HaClosureRemaining $Context
         return [pscustomobject]@{
             nonce=$request.nonce; generation=$request.generation; marker_sha256=$Context.MarkerSha256;
             reactivation_plan_sha256=$Context.ReactivationPlanSha256; collector_sha256=$request.collector_sha256;
             windows_boot_sha256=$script:ClosureBoot; wsl_boot_sha256=$request.wsl_boot_sha256;
-            observation_sha256=(Get-HaReactivationHash ($challenge + ':' + $output.Result + ':' + $Context.MarkerSha256 + ':' +
+            observation_sha256=(Get-HaReactivationHash ($challenge + ':' + $digest + ':' + $Context.MarkerSha256 + ':' +
                 (ConvertTo-Json -InputObject $vms -Compress)));
             recovery_commands_settled=$true; windows_reactivation_closed=$true; wsl_writers_closed=$true
         }
-    } finally {
-        if (-not $process.HasExited) { $process.Kill() }
-        $process.Dispose()
+    } catch {
+        $script:ClosureProcess = $null
+        if ($null -ne $process) {
+            try { if (-not $process.HasExited) { $process.Kill() } }
+            finally { $process.Dispose() }
+        }
+        throw
     }
 }
