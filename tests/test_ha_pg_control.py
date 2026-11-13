@@ -740,6 +740,27 @@ class PGControlTests(unittest.TestCase):
 
 
 class InitialLeaseServiceTests(unittest.TestCase):
+    def test_native_directory_open_requests_only_metadata_rights(self):
+        from ha_control import initial_windows_gate as gate
+        from pathlib import PureWindowsPath
+
+        native = gate._Native.__new__(gate._Native)
+        path = PureWindowsPath(r'C:\ProgramData\N100HA-fixture')
+
+        def open_directory(handle, mask, attributes, status, sharing, options):
+            self.assertEqual((mask, sharing, options), (0x20080, 7, 0x200000))
+            name = attributes._obj.name.contents
+            self.assertEqual(name.buffer, '\\??\\' + str(path))
+            self.assertEqual(name.maximum, name.length + 2)
+            handle._obj.value = 42
+            return 0
+
+        native.nt_open = open_directory
+        self.assertEqual(native._open_directory(path), 42)
+        native.nt_open = MagicMock(return_value=-1)
+        with self.assertRaises(TransitionBlocked):
+            native._open_directory(path)
+
     def test_pinned_read_accepts_distinct_stable_handle_ctime_and_rejects_changes(self):
         from ha_control import initial_lease_service as service
 
