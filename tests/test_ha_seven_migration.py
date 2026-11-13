@@ -1068,11 +1068,14 @@ class LegacyCutoverTransactionTests(unittest.TestCase):
 
         workflow = dict(id=123, path='.github/workflows/deploy-n100.yml', state='active')
         run = dict(id=51, workflow_id=123, status='completed')
+        stale_reads = 0
 
         def github(args, **kwargs):
+            nonlocal stale_reads
             endpoint = args[4]
             if endpoint.endswith('/disable'):
                 workflow['state'] = 'disabled_manually'
+                stale_reads = 1
             if endpoint.endswith('/enable'):
                 workflow['state'] = 'active'
             if '/runs?' in endpoint:
@@ -1083,10 +1086,19 @@ class LegacyCutoverTransactionTests(unittest.TestCase):
                 result = dict(total_count=101, workflow_runs=rows)
             else:
                 result = workflow
+                if endpoint.endswith('/123') and stale_reads:
+                    stale_reads -= 1
+                    result = dict(workflow, state='active')
             return SimpleNamespace(stdout=json.dumps(result))
 
         admission = DeploymentAdmission('owner/repo', 123, '/usr/bin/gh', runner=github)
-        admission.close()
+        with patch('ha_control.deployment_admission.time.sleep') as sleep:
+            admission.close()
+        sleep.assert_called_once_with(1)
+        workflow['state'] = 'active'
+        with self.assertRaisesRegex(TransitionBlocked, 'deployment_admission_reopened'):
+            admission.assert_closed()
+        workflow['state'] = 'disabled_manually'
         run['status'] = 'waiting'
         with self.assertRaisesRegex(TransitionBlocked, 'deployment_admission_runs_not_settled'):
             admission.assert_closed()
