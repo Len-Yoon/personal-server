@@ -162,14 +162,22 @@ function Write-ProtectedRecord([string]$Path, $Record) {
     } finally { [IO.File]::Delete($temporary) }
 }
 
-function Write-ProofOutcome([string]$Stage) {
+function Write-ProofOutcome([string]$Stage, $Progress = $null) {
     if ($outcome.recorded) { return }
     $outcome.recorded = $true
     try {
-        Write-ProtectedRecord ($ReadyPath + '.outcome.json') ([ordered]@{
+        $record = [ordered]@{
             schema_version=1; attempt_id=$AttemptId; phase=$Stage
             elapsed_ms=[long]$clock.ElapsedMilliseconds
-        })
+        }
+        if ($null -ne $Progress) {
+            $step = $Progress.step
+            if ($step -cin @('dispatch','request','wsl_send','marker_before','wsl_running',
+                            'windows_closed','hyperv','wsl_response','marker_after','complete')) {
+                $record['callback_step'] = $step
+            }
+        }
+        Write-ProtectedRecord ($ReadyPath + '.outcome.json') $record
     } catch {
         # The record is diagnostic only. Never turn a rejected proof into a response.
     }
@@ -221,11 +229,12 @@ function New-Challenge([string]$Raw) {
     return $expected
 }
 
-function Invoke-ObservedClosure($Challenge) {
+function Invoke-ObservedClosure($Challenge, $Progress) {
     $context = [pscustomobject]@{
         Challenge=[pscustomobject]$Challenge
         ReactivationPlanSha256=$ReactivationPlanSha256
         MarkerSha256=$MarkerSha256
+        Progress=$Progress
         DeadlineTimestamp=[Diagnostics.Stopwatch]::GetTimestamp() +
             [long]((Remaining) * [Diagnostics.Stopwatch]::Frequency / 1000)
     }
@@ -236,7 +245,7 @@ function Invoke-ObservedClosure($Challenge) {
         $pending = $worker.BeginInvoke()
         if (-not $pending.AsyncWaitHandle.WaitOne((Remaining))) {
             # End the isolated broker rather than let an unbounded callback occupy it.
-            Write-ProofOutcome 'observation_timeout'
+            Write-ProofOutcome 'observation_timeout' $Progress
             [Environment]::Exit(1)
         }
         $rows = $worker.EndInvoke($pending)
@@ -339,6 +348,7 @@ public static class HaLeaseProofDrain {
     while ($true) {
         $pipe.WaitForConnectionAsync().GetAwaiter().GetResult()
         $phase = 'request'
+        $progress = $null
         try {
             $clock = [Diagnostics.Stopwatch]::StartNew()
             $challenge = New-Challenge (Read-Request)
@@ -354,7 +364,8 @@ public static class HaLeaseProofDrain {
             $order.Enqueue($challenge.nonce)
             if ($order.Count -gt $RecentNonces) { $null = $seen.Remove($order.Dequeue()) }
             $phase = 'observation'
-            $digest = Invoke-ObservedClosure $challenge
+            $progress = [hashtable]::Synchronized(@{step='dispatch'})
+            $digest = Invoke-ObservedClosure $challenge $progress
             $phase = 'response'
             $challenge.Add('closed', $true)
             $challenge.Add('observation_sha256', $digest)
@@ -372,7 +383,7 @@ public static class HaLeaseProofDrain {
         } catch {
             # Failure is a closed connection, never an authenticated positive receipt.
             if ($pipe.IsConnected) { $pipe.Disconnect() }
-            Write-ProofOutcome $phase
+            Write-ProofOutcome $phase $progress
         } finally {
             if ($pipe.IsConnected) { $pipe.Disconnect() }
         }
