@@ -238,6 +238,11 @@ class WindowsBridgeProofTests(unittest.TestCase):
 
 class NativeLinuxWritersTests(unittest.TestCase):
     def test_fence_waits_for_controller_and_rollback_preserves_original_writers(self):
+        for agent_running in (True, False):
+            with self.subTest(agent_running=agent_running):
+                self._exercise_fence_and_rollback(agent_running)
+
+    def _exercise_fence_and_rollback(self, agent_running):
         from ha_control.legacy_writers import COMPOSE_ORDER, K3S_SERVICES, LinuxWriters
 
         deployments = {}
@@ -251,6 +256,7 @@ class NativeLinuxWritersTests(unittest.TestCase):
         for index, service in enumerate(COMPOSE_ORDER, 1):
             containers[service] = dict(id=f'{index:064x}', image='sha256:' + 'a' * 64,
                                        running=service not in K3S_SERVICES, restart='unless-stopped')
+        containers['system-agent']['running'] = agent_running
         baseline = dict(deployments=deployments, schedules=schedules, containers=containers)
         active = {row['id']: (row['running'], row['restart']) for row in containers.values()}
         commands = []
@@ -295,13 +301,21 @@ class NativeLinuxWritersTests(unittest.TestCase):
               patch.object(writer, '_patch', side_effect=patch_state),
               patch.object(writer, '_writers_active', return_value=False)):
             writer.block_reactivation()
+            if not agent_running:
+                agent_id = actual['containers']['system-agent']['id']
+                active[agent_id] = (True, 'no')
+                with self.assertRaisesRegex(TransitionBlocked, 'legacy_writer_reactivation_not_blocked'):
+                    writer.fence()
+                active[agent_id] = (False, 'no')
             writer.fence()
             self.assertEqual([cid for name, cid in commands if name == 'stop'],
-                             [actual['containers'][service]['id'] for service in COMPOSE_ORDER[:3]])
+                             [row['id'] for row in actual['containers'].values() if row['running']])
             self.assertTrue(all(state == (False, 'no') for state in active.values()))
             writer.restore()
             for service, row in actual['containers'].items():
-                self.assertEqual(active[row['id']], (service not in K3S_SERVICES, row['restart']))
+                self.assertEqual(active[row['id']], (row['running'], row['restart']))
+            if not agent_running:
+                self.assertNotIn(('start', actual['containers']['system-agent']['id']), commands)
             self.assertTrue(all(states[row['uid']] is False for row in schedules))
             self.assertTrue(all(states[row['uid']] == 1 for row in deployments.values()))
 
