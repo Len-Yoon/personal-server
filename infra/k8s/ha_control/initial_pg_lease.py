@@ -1,6 +1,7 @@
 """Open the first A lease without changing the restored A/B replication history."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from datetime import datetime
 import hashlib
 import json
@@ -139,12 +140,17 @@ class InitialPgLease:
 
     def _lease(self, state, *, renewing):
         started = time.monotonic()
-        self._legacy(state, started)
         nonce = 'initial-a:' + uuid.uuid4().hex
         barrier, lease_probe = nonce + ':fence', nonce + ':lease'
-        with self.backend._connection('A') as primary, self.backend._connection('B') as peer:
-            self._begin(primary, shared=renewing)
-            _, _, previous = self._observe_pair(primary, peer, state, opened=renewing)
+        with ExitStack() as connections:
+            # Only read PostgreSQL until the independent closure proof succeeds.
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                closure = pool.submit(self._legacy, state, started)
+                primary = connections.enter_context(self.backend._connection('A'))
+                peer = connections.enter_context(self.backend._connection('B'))
+                self._begin(primary, shared=renewing)
+                _, _, previous = self._observe_pair(primary, peer, state, opened=renewing)
+                closure.result()
             if renewing:
                 self.owned_expiries = {previous}
             self._deadline(started)
@@ -176,14 +182,17 @@ class InitialPgLease:
             self._deadline(started)
             self.backend._commit(primary)
 
-            current, replica, expires = self._observe_pair(primary, peer, state, opened=True)
-            if (expires != current_expiry
-                    or any(connection.execute(PROBE_READ, (lease_probe,)).fetchone() != (1,)
-                           for connection in (primary, peer))
-                    or min(self.backend._lsn(current['flush']), self.backend._lsn(replica['flush']),
-                           self.backend._lsn(replica['replay'])) < watermark):
-                _deny('initial_replication_barrier_unconfirmed')
-            self._legacy(state, started)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                closure = pool.submit(self._legacy, state, started)
+                current, replica, expires = self._observe_pair(primary, peer, state, opened=True)
+                if (expires != current_expiry
+                        or any(connection.execute(PROBE_READ, (lease_probe,)).fetchone() != (1,)
+                               for connection in (primary, peer))
+                        or min(self.backend._lsn(current['flush']), self.backend._lsn(replica['flush']),
+                               self.backend._lsn(replica['replay'])) < watermark):
+                    _deny('initial_replication_barrier_unconfirmed')
+                closure.result()
+            self._deadline(started)
             self.owned_expiries = {current_expiry}
             return self._proof(state, current_expiry, lease_probe)
 
