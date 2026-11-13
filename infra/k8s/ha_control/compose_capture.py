@@ -34,11 +34,13 @@ def _observe(service, container, run, *, stopped, running=True):
     row, = rows
     state = row["State"]
     restart = row["HostConfig"]["RestartPolicy"]
-    expected = (False, "exited", "no") if stopped else (
-        (True, "running", "unless-stopped") if running else (False, "exited", "unless-stopped"))
+    expected_running = running and not stopped
+    inactive_states = ("created", "exited") if service == "homeops-executor" else ("exited",)
+    expected_states = ("running",) if expected_running else inactive_states
     _need(row["Id"] == container and _match(IMAGE, row["Image"])
           and row["Config"]["Labels"]["com.docker.compose.service"] == service
-          and (state["Running"], state["Status"], restart["Name"]) == expected
+          and state["Running"] is expected_running and state["Status"] in expected_states
+          and restart["Name"] == ("no" if stopped else "unless-stopped")
           and not any(state.get(key) for key in ("Paused", "Restarting", "Dead", "OOMKilled"))
           and restart["MaximumRetryCount"] == 0, "compose_capture_source_unconfirmed")
     keys = ENVIRONMENT[service]
@@ -63,7 +65,8 @@ def _observe(service, container, run, *, stopped, running=True):
                   "compose_capture_mount_changed")
             volume_id = _digest(volumes[0])
         mounts[destination] = _digest({"mount": mount, "volume": volume_id})
-    return {"container": container, "image": row["Image"], "mounts": mounts}
+    return {"container": container, "image": row["Image"], "mounts": mounts,
+            "never_started": state["Status"] == "created"}
 
 
 def inspect_compose_capture(containers, *, stopped_services=(), run=_command):
