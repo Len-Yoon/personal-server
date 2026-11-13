@@ -21,8 +21,7 @@ function Get-FixedVmObserverHash([string]$Value) {
     }
 }
 
-function Get-FixedVmObserverDisks($Vm) {
-    $drives = @(Get-VMHardDiskDrive -VM $Vm -ErrorAction Stop)
+function Get-FixedVmObserverDisks($drives) {
     if ($drives.Count -lt 1 -or $drives.Count -gt 4) { throw 'fixed_observer_disk_inventory' }
     $paths = @($drives | ForEach-Object {
         $path = [string]$_.Path
@@ -40,29 +39,47 @@ function Get-FixedVmObserverSnapshot([string]$Installation,[guid]$A,[guid]$B) {
     $prefix = 'N100HA_' + $Installation.Substring(0,16) + '_'
     $notes = 'ha-owned-guest-v1:' + $Installation + ':'
     $targets = [ordered]@{ A = $A; B = $B }
+    $names = @(($prefix + 'A'), ($prefix + 'B'))
+    $first = $null
+    for ($pass = 0; $pass -lt 2; $pass++) {
+        $rows = @(Get-VM -Name $names -ErrorAction Stop)
+        if ($rows.Count -ne 2) { throw 'fixed_observer_vm_binding' }
+        foreach ($node in $targets.Keys) {
+            $id = $targets[$node]
+            $row = @($rows | Where-Object { [guid]$_.Id -eq $id })
+            if ($row.Count -ne 1 -or $row[0].Name -cne ($prefix + $node) -or
+                -not ([string]$row[0].Notes).StartsWith($notes,[StringComparison]::Ordinal) -or
+                $row[0].Generation -ne 2 -or $row[0].AutomaticStartAction -ne 'Nothing') {
+                throw 'fixed_observer_vm_binding'
+            }
+        }
+        $drives = @(Get-VMHardDiskDrive -VM $rows -ErrorAction Stop)
+        if (@($drives | Where-Object { [guid]$_.VMId -notin @($A,$B) }).Count -ne 0) {
+            throw 'fixed_observer_disk_inventory'
+        }
+        $current = @{}
+        foreach ($node in $targets.Keys) {
+            $id = $targets[$node]
+            $vm = $rows | Where-Object { [guid]$_.Id -eq $id }
+            $paths = Get-FixedVmObserverDisks @($drives | Where-Object { [guid]$_.VMId -eq $id })
+            $current[$node] = @{notes=[string]$vm.Notes; state=$vm.State.ToString(); paths=$paths}
+            if ($null -ne $first) {
+                if ($current[$node].notes -cne $first[$node].notes -or $current[$node].state -cne $first[$node].state) {
+                    throw 'fixed_observer_vm_changed'
+                }
+                if (($paths -join "`n") -cne ($first[$node].paths -join "`n")) {
+                    throw 'fixed_observer_disks_changed'
+                }
+            }
+        }
+        $first = $current
+    }
     $facts = foreach ($node in $targets.Keys) {
-        $id = $targets[$node]
-        $row = @(Get-VM -Id $id -ErrorAction Stop)
-        if ($row.Count -ne 1 -or [guid]$row[0].Id -ne $id -or $row[0].Name -cne ($prefix + $node) -or
-            -not ([string]$row[0].Notes).StartsWith($notes,[StringComparison]::Ordinal) -or
-            $row[0].Generation -ne 2 -or $row[0].AutomaticStartAction -ne 'Nothing') {
-            throw 'fixed_observer_vm_binding'
-        }
-        $vm = $row[0]
-        $paths = Get-FixedVmObserverDisks $vm
-        $current = @(Get-VM -Id $id -ErrorAction Stop)
-        if ($current.Count -ne 1 -or $current[0].Id -ne $vm.Id -or $current[0].Name -cne $vm.Name -or
-            $current[0].Notes -cne $vm.Notes -or $current[0].Generation -ne $vm.Generation -or
-            $current[0].AutomaticStartAction -ne $vm.AutomaticStartAction -or $current[0].State -ne $vm.State) {
-            throw 'fixed_observer_vm_changed'
-        }
-        $currentPaths = Get-FixedVmObserverDisks $current[0]
-        if (($paths -join "`n") -cne ($currentPaths -join "`n")) { throw 'fixed_observer_disks_changed' }
         [ordered]@{
             node = $node
-            id = $id.ToString('D')
-            state = $vm.State.ToString()
-            disk_paths_sha256 = Get-FixedVmObserverHash (ConvertTo-Json -InputObject $paths -Compress)
+            id = $targets[$node].ToString('D')
+            state = $first[$node].state
+            disk_paths_sha256 = Get-FixedVmObserverHash (ConvertTo-Json -InputObject $first[$node].paths -Compress)
         }
     }
     return ,@($facts)

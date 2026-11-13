@@ -56,16 +56,22 @@ $a=[guid]'11111111-1111-1111-1111-111111111111'
 $b=[guid]'22222222-2222-2222-2222-222222222222'
 $script:drift=$false
 $script:reads=0
-function Get-VM($Id){
- if($Id -notin @($a,$b)){throw 'unexpected_id'}
- $node=if($Id -eq $a){'A'}else{'B'}
- [pscustomobject]@{Id=$Id;Name=('N100HA_'+$installation.Substring(0,16)+'_'+$node);
-  Notes=('ha-owned-guest-v1:'+$installation+':seed');Generation=2;AutomaticStartAction='Nothing';State='Running'}
+function Get-VM($Name){
+ $prefix='N100HA_'+$installation.Substring(0,16)+'_'
+ if(($Name -join ',') -cne ($prefix+'A,'+$prefix+'B')){throw 'unexpected_names'}
+ foreach($node in @('B','A')){
+  $id=if($node -eq 'A'){$a}else{$b}
+  [pscustomobject]@{Id=$id;Name=($prefix+$node);
+   Notes=('ha-owned-guest-v1:'+$installation+':seed');Generation=2;AutomaticStartAction='Nothing';State='Running'}
+ }
 }
 function Get-VMHardDiskDrive($VM){
+ if($VM.Count -ne 2){throw 'unexpected_disk_targets'}
  $script:reads++
- $path=if($script:drift -and $script:reads -eq 2){'C:\changed.vhdx'}else{'C:\owned.vhdx'}
- [pscustomobject]@{Path=$path}
+ foreach($row in $VM){
+  $path=if($script:drift -and $script:reads -eq 2 -and $row.Id -eq $a){'C:\changed.vhdx'}else{'C:\owned.vhdx'}
+  [pscustomobject]@{Path=$path;VMId=$row.Id}
+ }
 }
 $rows=Get-FixedVmObserverSnapshot $installation $a $b
 if($rows.Count -ne 2 -or $rows[0].id -cne $a.ToString() -or $rows[1].id -cne $b.ToString()){
