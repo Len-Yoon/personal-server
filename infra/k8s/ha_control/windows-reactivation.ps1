@@ -95,13 +95,17 @@ function Read-HaReactivationSnapshot($Plan, [switch]$ClosedObservation) {
         $Plan.runner.delayed -isnot [bool]) {
         throw 'legacy_reactivation_tasks_incomplete'
     }
-    Assert-HaReactivationTaskIdle (@($tasks | Where-Object { $_.role -ceq 'emergency' })[0])
     $observed = @{}
     $scheduler = New-Object -ComObject 'Schedule.Service'
     try {
         $scheduler.Connect()
         $folder = $scheduler.GetFolder('\')
+        Assert-HaReactivationTaskIdle (@($tasks | Where-Object { $_.role -ceq 'emergency' })[0]) $folder
         foreach ($pin in $tasks) { $observed[$pin.role] = Read-HaReactivationTask $pin $folder }
+        if ($ClosedObservation) {
+            Assert-HaReactivationTaskIdle (@($tasks | Where-Object { $_.role -ceq 'supervisor' })[0]) $folder
+            Assert-HaTaskInstance (@($tasks | Where-Object { $_.role -ceq 'wsl-anchor' })[0]) $folder
+        }
     } finally { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($scheduler) }
     $runner = Read-HaReactivationRunner $Plan.runner
     if (-not $ClosedObservation) {
@@ -111,24 +115,29 @@ function Read-HaReactivationSnapshot($Plan, [switch]$ClosedObservation) {
     return @{tasks=$observed; runner=$runner}
 }
 
-function Get-HaTaskInstances($Pin) {
-    $scheduler = New-Object -ComObject 'Schedule.Service'
-    $scheduler.Connect()
+function Get-HaTaskInstances($Pin, $Folder = $null) {
+    $scheduler = $null
     try {
-        $folder = $scheduler.GetFolder($Pin.path)
-        $task = $folder.GetTask($Pin.name)
+        if ($null -eq $Folder) {
+            $scheduler = New-Object -ComObject 'Schedule.Service'
+            $scheduler.Connect()
+            $Folder = $scheduler.GetFolder($Pin.path)
+        }
+        $task = $Folder.GetTask($Pin.name)
         foreach ($instance in $task.GetInstances(0)) {
             [pscustomobject]@{guid=[string]$instance.InstanceGuid; state=[int]$instance.State}
         }
-    } finally { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($scheduler) }
+    } finally {
+        if ($null -ne $scheduler) { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($scheduler) }
+    }
 }
 
-function Assert-HaReactivationTaskIdle($Pin) {
-    if (@(Get-HaTaskInstances $Pin).Count -ne 0) { throw 'legacy_reactivation_task_instance_present' }
+function Assert-HaReactivationTaskIdle($Pin, $Folder = $null) {
+    if (@(Get-HaTaskInstances $Pin $Folder).Count -ne 0) { throw 'legacy_reactivation_task_instance_present' }
 }
 
-function Assert-HaTaskInstance($Pin) {
-    $instances = @(Get-HaTaskInstances $Pin)
+function Assert-HaTaskInstance($Pin, $Folder = $null) {
+    $instances = @(Get-HaTaskInstances $Pin $Folder)
     if ($instances.Count -ne 1 -or $instances[0].state -ne 4 -or
         $instances[0].guid -ine $Pin.instance_guid -or
         $Pin.instance_guid -notmatch '^\{[a-fA-F0-9-]{36}\}$') {
@@ -145,10 +154,8 @@ function Assert-HaReactivationClosed($Plan) {
         $state.runner.StartMode -ne 'Disabled' -or $state.runner.State -ne 'Stopped') {
         throw 'legacy_reactivation_not_closed'
     }
-    Assert-HaReactivationTaskIdle (@($Plan.tasks | Where-Object { $_.role -ceq 'supervisor' })[0])
-    Assert-HaTaskInstance (@($Plan.tasks | Where-Object { $_.role -ceq 'wsl-anchor' })[0])
     # Stopping a scheduled task is insufficient if it already spawned a detached child.
-    $children = @(Get-CimInstance Win32_Process -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object {
+    $children = @(Get-CimInstance Win32_Process -Property Name,CommandLine -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object {
         [string]$_.CommandLine -match '(?i)windows-bootstrap\.ps1' -or
         $_.Name -in @('Runner.Listener.exe', 'Runner.Worker.exe')
     })
