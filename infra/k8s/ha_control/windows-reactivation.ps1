@@ -7,14 +7,33 @@ function Get-HaReactivationHash([string]$Text) {
     } finally { $sha.Dispose() }
 }
 
-function Read-HaReactivationTask($Pin) {
+function Read-HaReactivationTask($Pin, $Folder = $null) {
     $expected = @{supervisor='personal-server-autostart'; 'wsl-anchor'='PersonalServer-WSL-KeepAlive';
                   emergency='PersonalServer-EmergencyReboot'}
     if ($Pin.path -ne '\' -or -not $expected.ContainsKey($Pin.role) -or $Pin.name -ine $expected[$Pin.role]) {
         throw 'legacy_reactivation_task_scope'
     }
-    $task = Get-ScheduledTask -TaskPath $Pin.path -TaskName $Pin.name -ErrorAction Stop
-    [xml]$xml = Export-ScheduledTask -TaskPath $Pin.path -TaskName $Pin.name -ErrorAction Stop
+    $scheduler = $null
+    try {
+        if ($null -eq $Folder) {
+            $scheduler = New-Object -ComObject 'Schedule.Service'
+            $scheduler.Connect()
+            $Folder = $scheduler.GetFolder($Pin.path)
+        }
+        $registered = $Folder.GetTask($Pin.name)
+        [xml]$xml = $registered.Xml
+        $task = [pscustomobject]@{
+            State = switch ([int]$registered.State) {
+                1 { 'Disabled' }
+                3 { 'Ready' }
+                4 { 'Running' }
+                default { throw 'legacy_reactivation_task_pending' }
+            }
+            Settings = [pscustomobject]@{ Enabled = [bool]$registered.Enabled }
+        }
+    } finally {
+        if ($null -ne $scheduler) { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($scheduler) }
+    }
     $settings = $xml.DocumentElement.SelectSingleNode("*[local-name()='Settings']")
     $enabled = $settings.SelectSingleNode("*[local-name()='Enabled']")
     if ($null -ne $enabled) { $null = $settings.RemoveChild($enabled) }
@@ -72,7 +91,12 @@ function Read-HaReactivationSnapshot($Plan) {
     }
     Assert-HaReactivationTaskIdle (@($tasks | Where-Object { $_.role -ceq 'emergency' })[0])
     $observed = @{}
-    foreach ($pin in $tasks) { $observed[$pin.role] = Read-HaReactivationTask $pin }
+    $scheduler = New-Object -ComObject 'Schedule.Service'
+    try {
+        $scheduler.Connect()
+        $folder = $scheduler.GetFolder('\')
+        foreach ($pin in $tasks) { $observed[$pin.role] = Read-HaReactivationTask $pin $folder }
+    } finally { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($scheduler) }
     $runner = Read-HaReactivationRunner $Plan.runner
     $workers = @(Get-CimInstance Win32_Process -Filter "Name='Runner.Worker.exe'" -OperationTimeoutSec 5 -ErrorAction Stop)
     if ($workers.Count -ne 0) { throw 'legacy_reactivation_runner_busy' }
