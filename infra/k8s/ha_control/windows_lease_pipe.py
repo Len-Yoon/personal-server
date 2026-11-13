@@ -21,6 +21,10 @@ SCOPE = "n100ha-legacy-closure-v1"
 SHA = re.compile(r"[0-9a-f]{64}")
 SERVICE_SID = re.compile(r"S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}")
 PIPE = re.compile(r"n100ha-lease-proof-[0-9a-f]{32}")
+CLIENT_FAILURES = {
+    f"failure {stage}\r\n".encode("ascii"): f"legacy_pipe_client_{stage}"
+    for stage in ("request", "connect", "peer", "write", "read", "frame")
+}
 
 
 def _require(condition):
@@ -195,6 +199,9 @@ class PersistentLeaseProofClient:
             _require(remaining > 0)
             stage = "legacy_pipe_response_timeout"
             frame = self._incoming.get(timeout=remaining)
+            if frame in CLIENT_FAILURES:
+                stage = CLIENT_FAILURES[frame]
+                raise ValueError(stage)
             stage = "legacy_pipe_response_missing"
             _require(bool(frame))
             stage = "legacy_pipe_response_invalid"

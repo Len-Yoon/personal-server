@@ -101,8 +101,6 @@ function Get-HaLeaseProof($Context) {
         $Context.MarkerSha256 -cne $script:ClosureMarker.sha256 -or $Context.ReactivationPlanSha256 -cne $nativePin) {
         throw 'lease_proof_callback_scope'
     }
-    $running = @(& $script:ClosureWsl --list --running --quiet | ForEach-Object { ($_ -replace ([char]0),'').Trim() })
-    if ($LASTEXITCODE -ne 0 -or $script:ClosurePlan.distribution -cnotin $running) { throw 'lease_proof_wsl_not_running' }
     $challenge = Get-HaReactivationHash ($request.nonce + ':' + $request.plan_sha256 + ':' + $request.attempt_id)
     $payload = [ordered]@{
         runtime_path=$script:ClosureInput.runtime_path; runtime_sha256=$script:ClosureInput.runtime_sha256;
@@ -118,6 +116,8 @@ function Get-HaLeaseProof($Context) {
         $message = ConvertTo-Json -InputObject $payload -Compress
         $write = $process.StandardInput.WriteLineAsync($message)
         if (-not $write.Wait((Get-HaClosureRemaining $Context))) { throw 'lease_proof_callback_deadline' }
+        $running = @(& $script:ClosureWsl --list --running --quiet | ForEach-Object { ($_ -replace ([char]0),'').Trim() })
+        if ($LASTEXITCODE -ne 0 -or $script:ClosurePlan.distribution -cnotin $running) { throw 'lease_proof_wsl_not_running' }
         Assert-HaReactivationClosed $script:ClosurePlan
         $vms = Get-FixedVmObserverSnapshot $script:ClosureInput.installation_id $script:ClosureVmA $script:ClosureVmB
         if ($vms.Count -ne 2 -or $vms[0].node -cne 'A' -or $vms[1].node -cne 'B' -or

@@ -29,6 +29,9 @@ class WindowsLeasePipePathTests(unittest.TestCase):
 
     def test_failed_observation_records_only_the_rejection_stage(self):
         for frame, code in ((b"", "legacy_pipe_response_missing"),
+                            (b"failure connect\r\n", "legacy_pipe_client_connect"),
+                            (b"failure read\r\n", "legacy_pipe_client_read"),
+                            (b"failure unknown\r\n", "legacy_pipe_response_invalid"),
                             (b"untrusted payload\n", "legacy_pipe_response_invalid")):
             with self.subTest(code=code):
                 client = object.__new__(windows_lease_pipe.PersistentLeaseProofClient)
