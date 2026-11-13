@@ -45,6 +45,11 @@ class DeploymentAdmission:
             raise TransitionBlocked("deployment_admission_baseline_changed")
         self._api(self.endpoint + "/disable", "--method", "PUT")
         deadline = time.monotonic() + 60
+        # The write can be acknowledged before the state read reflects it.
+        while self.state() == "active":
+            if time.monotonic() >= deadline:
+                raise TransitionBlocked("deployment_admission_disable_unconfirmed")
+            time.sleep(1)
         while not self._closed():
             if time.monotonic() >= deadline:
                 raise TransitionBlocked("deployment_admission_runs_not_settled")
