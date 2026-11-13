@@ -73,14 +73,16 @@ function Read-HaReactivationRunner($Pin) {
     return [pscustomobject]@{ StartMode = $startMode; State = $state }
 }
 
-function Read-HaReactivationSnapshot($Plan, [switch]$ClosedObservation) {
+function Read-HaReactivationSnapshot($Plan, [switch]$ClosedObservation, $Progress = $null) {
+    if ($null -ne $Progress) { $Progress.step = 'windows_boot' }
     $boot = (Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5 -ErrorAction Stop).LastBootUpTime
     if ($boot.ToUniversalTime().Ticks.ToString() -cne $Plan.boot_ticks) {
         throw 'legacy_reactivation_host_rebooted'
     }
+    if ($null -ne $Progress) { $Progress.step = 'windows_shutdown' }
     try {
         $shutdown = @(Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='User32';
-                       Id=1074; StartTime=$boot} -ErrorAction Stop)
+                       Id=1074; StartTime=$boot} -MaxEvents 1 -ErrorAction Stop)
     } catch {
         if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') { throw }
         $shutdown = @()
@@ -95,6 +97,7 @@ function Read-HaReactivationSnapshot($Plan, [switch]$ClosedObservation) {
         $Plan.runner.delayed -isnot [bool]) {
         throw 'legacy_reactivation_tasks_incomplete'
     }
+    if ($null -ne $Progress) { $Progress.step = 'windows_tasks' }
     $observed = @{}
     $scheduler = New-Object -ComObject 'Schedule.Service'
     try {
@@ -107,6 +110,7 @@ function Read-HaReactivationSnapshot($Plan, [switch]$ClosedObservation) {
             Assert-HaTaskInstance (@($tasks | Where-Object { $_.role -ceq 'wsl-anchor' })[0]) $folder
         }
     } finally { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($scheduler) }
+    if ($null -ne $Progress) { $Progress.step = 'windows_runner' }
     $runner = Read-HaReactivationRunner $Plan.runner
     if (-not $ClosedObservation) {
         $workers = @(Get-CimInstance Win32_Process -Filter "Name='Runner.Worker.exe'" -OperationTimeoutSec 5 -ErrorAction Stop)
@@ -145,9 +149,9 @@ function Assert-HaTaskInstance($Pin, $Folder = $null) {
     }
 }
 
-function Assert-HaReactivationClosed($Plan) {
+function Assert-HaReactivationClosed($Plan, $Progress = $null) {
     # The final process inventory below checks the runner worker as well.
-    $state = Read-HaReactivationSnapshot $Plan -ClosedObservation
+    $state = Read-HaReactivationSnapshot $Plan -ClosedObservation -Progress $Progress
     if (@($state.tasks.Values | Where-Object { $_.Settings.Enabled }).Count -ne 0 -or
         $state.tasks.supervisor.State -ne 'Disabled' -or $state.tasks.emergency.State -ne 'Disabled' -or
         $state.tasks['wsl-anchor'].State -notin @('Disabled', 'Running') -or
@@ -155,6 +159,7 @@ function Assert-HaReactivationClosed($Plan) {
         throw 'legacy_reactivation_not_closed'
     }
     # Stopping a scheduled task is insufficient if it already spawned a detached child.
+    if ($null -ne $Progress) { $Progress.step = 'windows_processes' }
     $children = @(Get-CimInstance Win32_Process -Property Name,CommandLine -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object {
         [string]$_.CommandLine -match '(?i)windows-bootstrap\.ps1' -or
         $_.Name -in @('Runner.Listener.exe', 'Runner.Worker.exe')
