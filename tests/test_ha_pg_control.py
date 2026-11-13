@@ -813,7 +813,9 @@ class InitialLeaseServiceTests(unittest.TestCase):
             with patch.object(service, 'InitialPgLease', return_value=lease), patch.object(service.time, 'sleep'):
                 with self.assertRaisesRegex(TransitionBlocked, 'fixture_lease_lost'):
                     service.serve_initial(backend, journal, observer)
-                self.assertEqual(json.loads(journal.read_text())['phase'], 'local_revoke_observed')
+                terminal = json.loads(journal.read_text())
+                self.assertEqual(terminal['phase'], 'local_revoke_observed')
+                self.assertEqual(terminal['failure_code'], 'initial_service_lease_unclassified')
                 with self.assertRaisesRegex(TransitionBlocked, 'initial_service_reconciliation_required'):
                     service.serve_initial(backend, journal, observer)
         observer.assert_intent.assert_called_once()
