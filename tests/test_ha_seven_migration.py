@@ -1074,18 +1074,22 @@ class LegacyCutoverTransactionTests(unittest.TestCase):
             nonlocal stale_reads
             endpoint = args[4]
             if endpoint.endswith('/disable'):
+                self.assertEqual(args[5:], ('--method', 'PUT'))
                 workflow['state'] = 'disabled_manually'
                 stale_reads = 1
             if endpoint.endswith('/enable'):
+                self.assertEqual(args[5:], ('--method', 'PUT'))
                 workflow['state'] = 'active'
             if '/runs?' in endpoint:
-                self.assertEqual(args[5:], ())
+                self.assertEqual(args[5:], ('-H', 'Cache-Control: no-cache'))
                 page = int(endpoint.rpartition('=')[2])
                 self.assertIn(page, (1, 2))
                 rows = [dict(run, id=index) for index in range(1, 101)] if page == 1 else [dict(run, id=101)]
                 result = dict(total_count=101, workflow_runs=rows)
             else:
                 result = workflow
+                if endpoint.endswith('/123'):
+                    self.assertEqual(args[5:], ('-H', 'Cache-Control: no-cache'))
                 if endpoint.endswith('/123') and stale_reads:
                     stale_reads -= 1
                     result = dict(workflow, state='active')
