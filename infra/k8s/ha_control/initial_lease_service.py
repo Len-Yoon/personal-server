@@ -22,13 +22,17 @@ OBSERVER_KEYS = {'pipe_name', 'server_pid', 'key_sha256', 'windows_boot_sha256',
 MARKER = Path(r'C:\ProgramData\N100HA-Cutover\ha-controller-owner.json')
 LEASE_FAILURE_CODES = frozenset({
     'authenticated_pg_observation_required', 'authenticated_pg_unavailable',
+    'external_effect_controller_binding_mismatch', 'external_effect_controller_catalog_unverified',
+    'external_effect_controller_ledger_unavailable', 'external_effect_controller_peer_unproven',
+    'external_effect_controller_unresolved', 'generation_role_enforcement_unverified',
+    'generation_role_privilege_closure_unverified',
     'initial_cutover_approval_required', 'initial_cutover_deployment_binding_required',
     'initial_cutover_state_unbound', 'initial_lease_reconciliation_required',
     'initial_lease_stamp_unverified', 'initial_legacy_closure_required',
     'initial_replication_barrier_unconfirmed', 'initial_replication_deadline_exceeded',
     'initial_replication_identity_unverified', 'initial_service_handoff_unverified',
     'initial_service_live_closure_unverified', 'initial_service_proof_deadline_exceeded',
-    'native_host_guard_required',
+    'native_host_guard_required', 'pg_identity_mismatch', 'server_enforcement_unverified',
 })
 
 
