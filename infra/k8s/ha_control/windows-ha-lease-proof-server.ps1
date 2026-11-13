@@ -28,6 +28,7 @@ $pipe = $null
 $runspace = $null
 $clock = $null
 $mac = $null
+$outcomeRecorded = $false
 $scope = 'n100ha-legacy-closure-v1'
 $servicePattern = '\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\z'
 $sidPattern = '\AS-1-(?:[0-9]{1,10}-){1,14}[0-9]{1,10}\z'
@@ -135,9 +136,9 @@ function Open-ProofMac {
     } finally { $file.Dispose() }
 }
 
-function Write-Ready($Record) {
-    Assert-LocalPath $ReadyPath
-    $parent = Get-Item -LiteralPath ([IO.Path]::GetDirectoryName($ReadyPath)) -Force
+function Write-ProtectedRecord([string]$Path, $Record) {
+    Assert-LocalPath $Path
+    $parent = Get-Item -LiteralPath ([IO.Path]::GetDirectoryName($Path)) -Force
     if ($parent -isnot [IO.DirectoryInfo]) { throw 'lease_proof_ready_parent' }
     Assert-ProtectedPath $parent -PrivateLeaf
     $security = [Security.AccessControl.FileSecurity]::new()
@@ -157,8 +158,21 @@ function Write-Ready($Record) {
             $file.Write($data, 0, $data.Length)
             $file.Flush($true)
         } finally { $file.Dispose() }
-        [IO.File]::Move($temporary,$ReadyPath)
+        [IO.File]::Move($temporary,$Path)
     } finally { [IO.File]::Delete($temporary) }
+}
+
+function Write-ProofOutcome([string]$Stage) {
+    if ($script:outcomeRecorded) { return }
+    $script:outcomeRecorded = $true
+    try {
+        Write-ProtectedRecord ($ReadyPath + '.outcome.json') ([ordered]@{
+            schema_version=1; attempt_id=$AttemptId; phase=$Stage
+            elapsed_ms=[long]$clock.ElapsedMilliseconds
+        })
+    } catch {
+        # The record is diagnostic only. Never turn a rejected proof into a response.
+    }
 }
 
 function New-ProofPipe {
@@ -222,6 +236,7 @@ function Invoke-ObservedClosure($Challenge) {
         $pending = $worker.BeginInvoke()
         if (-not $pending.AsyncWaitHandle.WaitOne((Remaining))) {
             # End the isolated broker rather than let an unbounded callback occupy it.
+            Write-ProofOutcome 'observation_timeout'
             [Environment]::Exit(1)
         }
         $rows = $worker.EndInvoke($pending)
@@ -314,7 +329,7 @@ public static class HaLeaseProofDrain {
     $pipe = New-ProofPipe
     $process = [Diagnostics.Process]::GetCurrentProcess()
     try {
-        Write-Ready ([ordered]@{
+        Write-ProtectedRecord $ReadyPath ([ordered]@{
             scope=$scope; pid=$process.Id; creation_filetime=$process.StartTime.ToFileTimeUtc(); server_sid=$OperatorSid
             attempt_id=$AttemptId; pipe_name=$PipeName; plan_sha256=$PlanSha256; callback_config_sha256=$CallbackConfigSha256
         })
@@ -323,19 +338,24 @@ public static class HaLeaseProofDrain {
     $order = [Collections.Generic.Queue[string]]::new()
     while ($true) {
         $pipe.WaitForConnectionAsync().GetAwaiter().GetResult()
+        $phase = 'request'
         try {
             $clock = [Diagnostics.Stopwatch]::StartNew()
             $challenge = New-Challenge (Read-Request)
+            $phase = 'client_identity'
             $pipe.RunAsClient([IO.Pipes.PipeStreamImpersonationWorker]{
                 $client = [Security.Principal.WindowsIdentity]::GetCurrent($true)
                 try {
                     if ($null -eq $client -or $client.User.Value -cne $ServiceSid) { throw 'lease_proof_client' }
                 } finally { if ($null -ne $client) { $client.Dispose() } }
             })
+            $phase = 'nonce'
             if (-not $seen.Add($challenge.nonce)) { throw 'lease_proof_replay' }
             $order.Enqueue($challenge.nonce)
             if ($order.Count -gt $RecentNonces) { $null = $seen.Remove($order.Dequeue()) }
+            $phase = 'observation'
             $digest = Invoke-ObservedClosure $challenge
+            $phase = 'response'
             $challenge.Add('closed', $true)
             $challenge.Add('observation_sha256', $digest)
             $body = $encoding.GetBytes((ConvertTo-Json -InputObject $challenge -Compress))
@@ -344,9 +364,15 @@ public static class HaLeaseProofDrain {
             $bytes = $encoding.GetBytes((ConvertTo-Json -InputObject $envelope -Compress) + "`n")
             $write = $pipe.WriteAsync($bytes, 0, $bytes.Length)
             if (-not $write.Wait((Remaining))) { throw 'lease_proof_write' }
-            if (-not [HaLeaseProofDrain]::Wait($pipe, (Remaining))) { [Environment]::Exit(1) }
+            $phase = 'drain'
+            if (-not [HaLeaseProofDrain]::Wait($pipe, (Remaining))) {
+                Write-ProofOutcome 'drain_timeout'
+                [Environment]::Exit(1)
+            }
         } catch {
             # Failure is a closed connection, never an authenticated positive receipt.
+            if ($pipe.IsConnected) { $pipe.Disconnect() }
+            Write-ProofOutcome $phase
         } finally {
             if ($pipe.IsConnected) { $pipe.Disconnect() }
         }
