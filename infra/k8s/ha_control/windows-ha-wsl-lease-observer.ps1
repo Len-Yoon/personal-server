@@ -89,6 +89,7 @@ function Get-HaClosureRemaining($Context) {
 }
 
 function Get-HaLeaseProof($Context) {
+    $Context.Progress.step = 'request'
     $request = $Context.Challenge
     $nativePin = if ('reactivation_plan_sha256' -cin $script:ClosureInput.PSObject.Properties.Name) {
         $script:ClosureInput.reactivation_plan_sha256
@@ -106,6 +107,7 @@ function Get-HaLeaseProof($Context) {
     }
     $process = $script:ClosureProcess
     try {
+        $Context.Progress.step = 'wsl_send'
         if ($null -eq $process -or $process.HasExited -or $script:ClosureStderr.IsCompleted) {
             throw 'lease_proof_wsl_unconfirmed'
         }
@@ -115,25 +117,32 @@ function Get-HaLeaseProof($Context) {
         if (-not $write.Wait((Get-HaClosureRemaining $Context))) { throw 'lease_proof_callback_deadline' }
         # The collector only reads. Start it before the Windows checks so the
         # same challenge can observe both sides within one deadline.
+        $Context.Progress.step = 'marker_before'
         Assert-HaOwnedCutoverMarker $script:ClosureMarker
         $marker = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($script:ClosureMarker.path))
         if ($marker.plan_sha256 -cne $request.plan_sha256 -or $marker.attempt_id -cne $request.attempt_id -or
             $marker.generation -ne $request.generation) { throw 'lease_proof_callback_scope' }
+        $Context.Progress.step = 'wsl_running'
         $running = @(& $script:ClosureWsl --list --running --quiet | ForEach-Object { ($_ -replace ([char]0),'').Trim() })
         if ($LASTEXITCODE -ne 0 -or $script:ClosurePlan.distribution -cnotin $running) { throw 'lease_proof_wsl_not_running' }
+        $Context.Progress.step = 'windows_closed'
         Assert-HaReactivationClosed $script:ClosurePlan
+        $Context.Progress.step = 'hyperv'
         $vms = Get-FixedVmObserverSnapshot $script:ClosureInput.installation_id $script:ClosureVmA $script:ClosureVmB
         if ($vms.Count -ne 2 -or $vms[0].node -cne 'A' -or $vms[1].node -cne 'B' -or
             $vms[0].state -cne 'Running' -or $vms[1].state -cne 'Running' -or
             $vms[0].disk_paths_sha256 -cne $script:ClosureInput.a_disk_paths_sha256 -or
             $vms[1].disk_paths_sha256 -cne $script:ClosureInput.b_disk_paths_sha256) { throw 'lease_proof_vm_scope' }
+        $Context.Progress.step = 'wsl_response'
         if (-not $output.Wait((Get-HaClosureRemaining $Context)) -or $process.HasExited -or
             $script:ClosureStderr.IsCompleted -or $output.Result -cnotmatch ('\A' + $challenge + ':[a-f0-9]{64}\z')) {
             throw 'lease_proof_wsl_unconfirmed'
         }
         $digest = $output.Result.Substring(65)
+        $Context.Progress.step = 'marker_after'
         Assert-HaOwnedCutoverMarker $script:ClosureMarker
         $null = Get-HaClosureRemaining $Context
+        $Context.Progress.step = 'complete'
         return [pscustomobject]@{
             nonce=$request.nonce; generation=$request.generation; marker_sha256=$Context.MarkerSha256;
             reactivation_plan_sha256=$Context.ReactivationPlanSha256; collector_sha256=$request.collector_sha256;
