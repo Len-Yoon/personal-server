@@ -175,7 +175,9 @@ function Write-ProofOutcome([string]$Stage, $Progress = $null) {
             $step = $Progress.step
             if ($step -cin @('dispatch','request','wsl_send','marker_before','wsl_running',
                             'windows_closed','windows_boot','windows_shutdown','windows_tasks','windows_runner',
-                            'windows_processes','hyperv_start','hyperv','wsl_response','marker_after','complete')) {
+                            'windows_processes','hyperv_start','hyperv','wsl_response','marker_after','complete',
+                            'wsl_rejected_deadline','wsl_rejected_inventory','wsl_rejected_identity',
+                            'wsl_rejected_recovery','wsl_rejected_closure','wsl_rejected_internal')) {
                 $record['callback_step'] = $step
             }
         }

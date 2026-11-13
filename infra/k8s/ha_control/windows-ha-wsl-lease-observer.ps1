@@ -143,11 +143,17 @@ function Get-HaLeaseProof($Context) {
             $vms[0].disk_paths_sha256 -cne $script:ClosureInput.a_disk_paths_sha256 -or
             $vms[1].disk_paths_sha256 -cne $script:ClosureInput.b_disk_paths_sha256) { throw 'lease_proof_vm_scope' }
         $Context.Progress.step = 'wsl_response'
-        if (-not $output.Wait((Get-HaClosureRemaining $Context)) -or $process.HasExited -or
-            $script:ClosureStderr.IsCompleted -or $output.Result -cnotmatch ('\A' + $challenge + ':[a-f0-9]{64}\z')) {
+        if (-not $output.Wait((Get-HaClosureRemaining $Context))) { throw 'lease_proof_wsl_unconfirmed' }
+        $response = $output.Result
+        if ($response -cmatch ('\A' + $challenge + ':reject:(deadline|inventory|identity|recovery|closure|internal)\z')) {
+            $Context.Progress.step = 'wsl_rejected_' + $Matches[1]
             throw 'lease_proof_wsl_unconfirmed'
         }
-        $digest = $output.Result.Substring(65)
+        if ($process.HasExited -or $script:ClosureStderr.IsCompleted -or
+            $response -cnotmatch ('\A' + $challenge + ':[a-f0-9]{64}\z')) {
+            throw 'lease_proof_wsl_unconfirmed'
+        }
+        $digest = $response.Substring(65)
         $Context.Progress.step = 'marker_after'
         Assert-HaOwnedCutoverMarker $script:ClosureMarker
         $null = Get-HaClosureRemaining $Context
