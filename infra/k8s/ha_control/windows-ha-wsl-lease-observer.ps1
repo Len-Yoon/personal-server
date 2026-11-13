@@ -38,6 +38,9 @@ function Initialize-HaLeaseObservation($InputConfig, [string]$PlanText, [string]
                 file_id=(Get-HaMarkerFileId $path)}
     Assert-HaOwnedCutoverMarker $marker
     if ($plan.distribution -cne 'Ubuntu-24.04') { throw 'lease_proof_callback_scope' }
+    # Initialize Windows providers in this runspace before advertising readiness.
+    # Every challenge still checks current state independently.
+    Assert-HaReactivationClosed $plan
     $script:ClosureVmA = [guid]::ParseExact($InputConfig.vm_a,'D')
     $script:ClosureVmB = [guid]::ParseExact($InputConfig.vm_b,'D')
     if ($script:ClosureVmA -eq [guid]::Empty -or $script:ClosureVmB -eq [guid]::Empty -or
@@ -129,7 +132,7 @@ function Get-HaLeaseProof($Context) {
         $running = @(& $script:ClosureWsl --list --running --quiet | ForEach-Object { ($_ -replace ([char]0),'').Trim() })
         if ($LASTEXITCODE -ne 0 -or $script:ClosurePlan.distribution -cnotin $running) { throw 'lease_proof_wsl_not_running' }
         $Context.Progress.step = 'windows_closed'
-        Assert-HaReactivationClosed $script:ClosurePlan
+        Assert-HaReactivationClosed $script:ClosurePlan $Context.Progress
         $Context.Progress.step = 'hyperv'
         if (-not $vmPending.AsyncWaitHandle.WaitOne((Get-HaClosureRemaining $Context))) { throw 'lease_proof_vm_deadline' }
         $vmRows = $vmObserver.EndInvoke($vmPending)
