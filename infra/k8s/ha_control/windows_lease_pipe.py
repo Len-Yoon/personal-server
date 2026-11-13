@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import hashlib
 import hmac
 import json
+import os
 from pathlib import Path
 from queue import Empty, Full, Queue
 import re
@@ -12,6 +13,7 @@ import stat
 import subprocess
 import sys
 from threading import Lock, Thread
+from tempfile import TemporaryDirectory
 import time
 
 
@@ -96,7 +98,7 @@ class PersistentLeaseProofClient:
     """One pinned native child, one ordered in-flight challenge, no automatic reconnect."""
 
     def __init__(self, *, pins, pipe_name, server_pid, key_path, key_sha256, powershell, client,
-                 client_sha256, startup_timeout=15, monotonic=time.monotonic):
+                 client_sha256, compiler_root, startup_timeout=15, monotonic=time.monotonic):
         _require(sys.platform == "win32")
         _require(type(pipe_name) is str and PIPE.fullmatch(pipe_name))
         _require(type(server_pid) is int and 0 < server_pid < 2**32)
@@ -126,16 +128,27 @@ class PersistentLeaseProofClient:
             _require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
                      == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
                      and len(source) == before.st_size and hashlib.sha256(source).hexdigest() == client_sha256)
-            self._process = subprocess.Popen(
-                [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned",
-                 "-File", str(client), "-PipeName", pipe_name, "-ServerPid", str(server_pid),
-                 "-ServiceSid", pins.service_sid],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            Thread(target=self._read, args=(self._process.stdout,), daemon=True).start()
-            Thread(target=self._write, args=(self._process.stdin,), daemon=True).start()
-            _require(self._incoming.get(timeout=startup_timeout) == b"ready\r\n")
+            root = Path(compiler_root)
+            _require(root.is_absolute() and root.is_dir() and not root.is_symlink()
+                     and not getattr(root.lstat(), "st_file_attributes", 0) & 1024)
+            # The SCM child has a minimal environment. Add-Type needs a private,
+            # service-writable scratch directory until the client signals ready.
+            with TemporaryDirectory(prefix=".ha-compile-", dir=root) as scratch:
+                self._process = subprocess.Popen(
+                    [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned",
+                     "-File", str(client), "-PipeName", pipe_name, "-ServerPid", str(server_pid),
+                     "-ServiceSid", pins.service_sid],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    env=os.environ | {"TEMP": scratch, "TMP": scratch},
+                )
+                Thread(target=self._read, args=(self._process.stdout,), daemon=True).start()
+                Thread(target=self._write, args=(self._process.stdin,), daemon=True).start()
+                try:
+                    _require(self._incoming.get(timeout=startup_timeout) == b"ready\r\n")
+                except (ValueError, Empty):
+                    self.close()
+                    raise
         except (OSError, ValueError, Empty):
             self.close()
             raise ValueError("legacy_pipe_proof_rejected") from None

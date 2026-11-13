@@ -138,6 +138,7 @@ def native_initial_observer(backend):
                                            client=Path(__file__).with_name('windows-ha-lease-proof-client.ps1'),
                                            key_path=backend.plan_path.with_name('initial-cutover-proof.key'),
                                            key_sha256=_pin(params['key_sha256']),
+                                           compiler_root=backend.plan_path.parent / 'journal',
                                            client_sha256=_pin(params['client_sha256']))
     except (ValueError, OSError, TypeError):
         raise TransitionBlocked('initial_service_live_closure_unverified') from None
