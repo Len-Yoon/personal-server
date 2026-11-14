@@ -163,7 +163,7 @@ function Get-HaLeaseProof($Context) {
         $Context.Progress.step = 'wsl_response'
         if (-not $output.Wait((Get-HaClosureRemaining $Context))) { throw 'lease_proof_wsl_unconfirmed' }
         $response = $output.Result
-        if ($response -cmatch ('\A' + $challenge + ':reject:(deadline(?:_deployments|_cronjobs|_jobs|_replicasets|_pods|_docker|_autoscalers)?|inventory|identity|recovery|closure|internal)\z')) {
+        if ($response -cmatch ('\A' + $challenge + ':reject:(deadline(?:_deployments|_cronjobs|_jobs|_replicasets|_pods|_docker|_autoscalers|_q(?!(?:00|01|02|04|08|10|20|40)\z)[0-7][0-9a-f])?|inventory|identity|recovery|closure|internal)\z')) {
             $Context.Progress.step = 'wsl_rejected_' + $Matches[1]
             throw 'lease_proof_wsl_unconfirmed'
         }

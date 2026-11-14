@@ -25,7 +25,19 @@ QUERY_NAMES = ('deployments', 'cronjobs', 'jobs', 'replicasets', 'pods', 'docker
 
 
 class InventoryDeadline(TransitionBlocked):
-    """One fixed query label for a collection that missed its deadline."""
+    """Fixed query labels for collections that missed their shared deadline."""
+
+    def __init__(self, *queries):
+        self.queries = queries
+        super().__init__(*queries)
+
+    def reason(self):
+        if not self.queries or any(query not in QUERY_NAMES for query in self.queries):
+            return None
+        if len(set(self.queries)) == 1:
+            return 'deadline_' + self.queries[0]
+        mask = sum(1 << index for index, name in enumerate(QUERY_NAMES) if name in self.queries)
+        return f'deadline_q{mask:02x}'
 
 
 def _payload(value):
@@ -81,12 +93,10 @@ def _inventory(runner, stop):
         hpa_request = pool.submit(raw, '/apis/autoscaling/v2', 'horizontalpodautoscalers', namespace=False)
         requests = dict(zip(QUERY_NAMES, (*queries.values(), docker_request, hpa_request)))
         _, pending = wait(requests.values(), timeout=max(0, stop - time.monotonic()))
-        for name, query in requests.items():
-            if query in pending:
-                raise InventoryDeadline(name)
-            error = query.exception()
-            if isinstance(error, InventoryDeadline):
-                raise error
+        expired = [name for name, query in requests.items()
+                   if query in pending or isinstance(query.exception(), InventoryDeadline)]
+        if expired:
+            raise InventoryDeadline(*expired)
         resources = {}
         for kind, query in queries.items():
             rows = query.result()['items']
@@ -224,8 +234,8 @@ def main(*, persistent=False):
                         }.get(str(error), 'closure')
                     if time.monotonic() >= deadline:
                         reason = 'deadline'
-                    if isinstance(error, InventoryDeadline) and str(error) in QUERY_NAMES:
-                        reason = 'deadline_' + str(error)
+                    if isinstance(error, InventoryDeadline):
+                        reason = error.reason() or reason
                     print(request['challenge'] + ':reject:' + reason, flush=True)
                 return 1
             if not persistent:
