@@ -902,7 +902,7 @@ class InitialPgLeaseTests(unittest.TestCase):
         self.assertEqual(state, self.state)
         self.trace.append(('closure',))
         if self.over_budget and self.opened:
-            self.elapsed = 3.1
+            self.elapsed = 4.1
 
     @contextmanager
     def connection(self, node):
@@ -1017,7 +1017,7 @@ class InitialPgLeaseTests(unittest.TestCase):
         def delayed_observation(state, deadline):
             observe(state, deadline)
             if self.opened:
-                self.elapsed = 2.6
+                self.elapsed = 3.6
                 self.assertGreater(deadline, self.elapsed)
 
         self.lease.assert_legacy_closed = delayed_observation

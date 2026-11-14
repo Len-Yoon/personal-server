@@ -15,7 +15,7 @@ from .pg import LEASE_SECONDS, ROLE_LOCK, _deny
 INITIAL_CUTOVER = {'schema_version': 1, 'primary_node': 'A', 'partner_node': 'B'}
 # This transaction performs two fresh Windows/WSL proofs around the
 # replicated commit. Each individual pipe request keeps its two-second cap.
-INITIAL_PROOF_SECONDS = 3
+INITIAL_PROOF_SECONDS = 4
 INITIAL_REVISION = 1
 OPEN_REVISION = 2
 STAMP = """singleton=1 AND cluster=%s AND epoch=1 AND revision=%s
