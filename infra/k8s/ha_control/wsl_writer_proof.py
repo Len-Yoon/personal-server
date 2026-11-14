@@ -87,7 +87,9 @@ def _inventory(runner, stop):
         _need(len(rows) == len(ids) and {row['Id'] for row in rows} == set(ids), 'legacy_writer_proof_response_invalid')
         return rows
 
-    with ThreadPoolExecutor(max_workers=7) as pool:
+    pool = ThreadPoolExecutor(max_workers=7)
+    wait_for_cleanup = True
+    try:
         queries = {kind: pool.submit(raw, group, plural) for kind, (group, plural) in scopes.items()}
         docker_request = pool.submit(containers)
         hpa_request = pool.submit(raw, '/apis/autoscaling/v2', 'horizontalpodautoscalers', namespace=False)
@@ -96,6 +98,9 @@ def _inventory(runner, stop):
         expired = [name for name, query in requests.items()
                    if query in pending or isinstance(query.exception(), InventoryDeadline)]
         if expired:
+            # Timed-out read commands still clean up, but the caller must be
+            # able to send the rejection before the Windows deadline.
+            wait_for_cleanup = False
             raise InventoryDeadline(*expired)
         resources = {}
         for kind, query in queries.items():
@@ -104,6 +109,8 @@ def _inventory(runner, stop):
                       for row in rows), 'legacy_writer_proof_response_invalid')
             resources[SCOPE[kind]] = [dict(row, kind=kind) for row in rows]
         return resources, docker_request.result(), hpa_request.result()
+    finally:
+        pool.shutdown(wait=wait_for_cleanup, cancel_futures=True)
 
 
 def observe_closed(baseline, challenge, deadline, *, assert_external_closed, runner=_run):

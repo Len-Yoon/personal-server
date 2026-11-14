@@ -336,9 +336,10 @@ class PersistentWriterProofTests(unittest.TestCase):
                 futures[name].set_result(None)
         with (patch.object(wsl_writer_proof, "ThreadPoolExecutor") as executor,
               patch.object(wsl_writer_proof, "wait", return_value=(set(), {futures["pods"]}))):
-            executor.return_value.__enter__.return_value.submit.side_effect = futures.values()
+            executor.return_value.submit.side_effect = futures.values()
             with self.assertRaises(wsl_writer_proof.InventoryDeadline) as caught:
                 wsl_writer_proof._inventory(None, wsl_writer_proof.time.monotonic() + 1)
+            executor.return_value.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
         self.assertEqual(caught.exception.queries, ("deployments", "pods"))
         self.assertEqual(caught.exception.reason(), "deadline_q11")
 
