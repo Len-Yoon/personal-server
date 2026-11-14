@@ -275,6 +275,10 @@ function Get-VMFirmware{return $script:fw};function Get-VMComPort{return @($scri
 function Get-GuestVmFileIdentity([string]$Path){if($Path.EndsWith('.vhdx')){return 'disk-id'};return 'seed-id'}
 function Open-GuestVmPinned {return [IO.MemoryStream]::new()};function Assert-GuestVmPrivate {}
 $null=Assert-GuestVmPrepared $spec $names $pins $root $disk $iso
+if((Get-GuestVmMaximumMemory 'A') -ne 1792MB -or (Get-GuestVmMaximumMemory 'B') -ne 1536MB){throw 'unexpected_memory_profile'}
+$script:mem.Maximum=1792MB
+$null=Assert-GuestVmPrepared $spec $names $pins $root $disk $iso
+$script:mem.Maximum=1536MB
 $pins.disk_identifier='7b0a3feb-04cf-5c40-85bd-cfd50b85ab9d';$script:vhd.DiskIdentifier='7B0A3FEB-04CF-5C40-85BD-CFD50B85AB9D'
 $spec|Add-Member schema_version 2;$spec|Add-Member node_image ([pscustomobject]@{disk_identifier=$pins.disk_identifier.ToUpperInvariant();sha256=$pins.disk_sha256})
 $null=Assert-GuestVmPrepared $spec $names $pins $root $disk $iso
