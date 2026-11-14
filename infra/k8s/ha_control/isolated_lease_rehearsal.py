@@ -75,15 +75,33 @@ def run(backend, *, state, service_sid, retained_system_ids, observe, exclusion,
     if not 2 < remaining < 660 or previous_token_status() != 200:
         raise TransitionBlocked('isolated_lease_token_window_invalid')
 
-    lease = InitialPgLease(backend, observe, assert_exclusion_held=exclusion)
     stop = time.monotonic() + remaining + 100
     maximum_proof = maximum_gap = 0
     previous_expiry = None
     rejected = False
     rounds = 0
+    round_started = 0
+    observation = 0
+
+    def measured_observe(state, deadline):
+        nonlocal observation
+        observation += 1
+        began = time.monotonic()
+        try:
+            return observe(state, deadline)
+        except (OSError, ValueError, TransitionBlocked) as error:
+            label = 'before' if observation == 1 else 'after'
+            prefix = 'isolated_lease_observation_' + label
+            elapsed = round((time.monotonic() - began) * 1000)
+            prior = round((began - round_started) * 1000)
+            raise TransitionBlocked(f'{prefix}_prior_{prior}ms_observer_{elapsed}ms') from error
+
+    lease = InitialPgLease(backend, measured_observe, assert_exclusion_held=exclusion)
     try:
         while time.monotonic() < stop:
             started = time.monotonic()
+            round_started = started
+            observation = 0
             (lease.open if rounds == 0 else lease.renew)(state)
             maximum_proof = max(maximum_proof, time.monotonic() - started)
             expiry, = lease.owned_expiries
