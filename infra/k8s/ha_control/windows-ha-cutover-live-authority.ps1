@@ -69,7 +69,9 @@ try {
         ($plan.service_pid -isnot [int] -and $plan.service_pid -isnot [long]) -or $plan.service_pid -lt 1 -or
         -not $plan.state_path.EndsWith('\journal\controller-state.json',[StringComparison]::Ordinal)) { throw 'live_authority_scope' }
     $identity = [Security.Principal.NTAccount]::new('NT SERVICE',$plan.service_name).Translate([Security.Principal.SecurityIdentifier]).Value
-    $service = Get-CimInstance Win32_Service -Filter ("Name='" + $plan.service_name + "'") -ErrorAction Stop
+    # Bind directly to the validated service key instead of enumerating Win32_Service.
+    $service = [wmi]('Win32_Service.Name="' + $plan.service_name + '"')
+    $service.Get()
     if ($null -eq $service -or $service.Name -cne $plan.service_name -or $service.State -cne 'Running' -or
         $service.ProcessId -ne $plan.service_pid -or (Get-Digest $service.PathName) -cne $plan.service_image_path_sha256) { throw 'live_authority_service' }
     $process = Get-Process -Id $plan.service_pid -ErrorAction Stop
