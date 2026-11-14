@@ -160,10 +160,8 @@ function Assert-HaReactivationClosed($Plan, $Progress = $null) {
     }
     # Stopping a scheduled task is insufficient if it already spawned a detached child.
     if ($null -ne $Progress) { $Progress.step = 'windows_processes' }
-    $children = @(Get-CimInstance Win32_Process -Property Name,CommandLine -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object {
-        [string]$_.CommandLine -match '(?i)windows-bootstrap\.ps1' -or
-        $_.Name -in @('Runner.Listener.exe', 'Runner.Worker.exe')
-    })
+    $filter = "CommandLine LIKE '%windows-bootstrap.ps1%' OR Name = 'Runner.Listener.exe' OR Name = 'Runner.Worker.exe'"
+    $children = @(Get-CimInstance Win32_Process -Property ProcessId -Filter $filter -OperationTimeoutSec 5 -ErrorAction Stop)
     if ($children.Count -ne 0) { throw 'legacy_reactivation_child_present' }
 }
 
