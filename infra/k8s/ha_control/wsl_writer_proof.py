@@ -101,6 +101,20 @@ class KubernetesListReader:
         for connection in self._connections.values():
             connection.close()
 
+    def probe_status(self, deadline):
+        """Probe token acceptance without loading the returned object bodies."""
+        path = '/api/v1/namespaces/personal-server/pods'
+        connection = self._connections[path]
+        connection.timeout = _deadline(deadline)
+        try:
+            connection.request('GET', path + '?limit=1', headers={'Authorization': self._authorization()})
+            connection.sock.settimeout(_deadline(deadline))
+            with connection.getresponse() as response:
+                _deadline(deadline)
+                return response.status
+        finally:
+            connection.close()
+
 
 def read_rotating_token(directory, owner):
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
