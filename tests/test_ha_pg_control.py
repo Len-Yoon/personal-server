@@ -1349,7 +1349,8 @@ send({'status': 'PASS'})
             self.assertEqual(native_intent, intent)
             observed.append('open')
             yield SimpleNamespace(first_write_proof_sha256='c' * 64, service_instance_sha256='d' * 64,
-                                  assert_current=lambda _deadline: observed.append('current') or 'f' * 64)
+                                  assert_current=lambda _deadline, *, guest_boundary=True:
+                                  observed.append('boundary' if guest_boundary else 'current') or 'f' * 64)
             observed.append('handover')
 
         def publish(_request, payload, _deadline):
@@ -1370,7 +1371,7 @@ send({'status': 'PASS'})
         self.assertEqual(reply.fields('activate')['service_instance_sha256'], 'd' * 64)
         with self.assertRaisesRegex(bridge.BridgeRejected, 'bridge_result_rejected'):
             reply.fields('assert_live')
-        self.assertEqual(observed, ['open', 'current', 'publish', 'current', 'start', 'current', 'handover'])
+        self.assertEqual(observed, ['open', 'current', 'publish', 'boundary', 'start', 'current', 'handover'])
 
 
         attempts = []
@@ -1378,7 +1379,8 @@ send({'status': 'PASS'})
         def fail_before_handoff(_request, native_intent, _deadline):
             self.assertEqual(native_intent, intent)
 
-            def timeout(_deadline):
+            def timeout(_deadline, *, guest_boundary=True):
+                self.assertFalse(guest_boundary)
                 attempts.append(_deadline)
                 raise bridge.BridgeRejected('guest_ssh_deadline_exceeded')
 
