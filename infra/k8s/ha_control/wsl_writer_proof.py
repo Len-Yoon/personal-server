@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import ssl
+import stat
 import sys
 import time
 
@@ -15,6 +16,7 @@ from ha_runtime import seven_capture
 
 from .controller import TransitionBlocked
 from .legacy_writers import COMPOSE_ORDER, CONTAINER, DOCKER, KUBE, LinuxWriters, _need, _run
+from .native_wsl_launcher import checked
 
 
 NAMESPACE = 'personal-server'
@@ -88,6 +90,29 @@ class KubernetesListReader:
     def close(self):
         for connection in self._connections.values():
             connection.close()
+
+
+def main_https_reader():
+    """Start the persistent verifier using pre-provisioned read-only credentials."""
+    try:
+        owner = os.geteuid()
+        _need(owner != 0, 'legacy_writer_api_identity_invalid')
+        credential_dir = seven_capture.trusted(
+            Path.home() / '.local/state/n100-ha/kubernetes-reader', directory=True)
+        for parent in credential_dir.parents:
+            mode = parent.lstat()
+            _need(stat.S_ISDIR(mode.st_mode) and mode.st_uid in (0, owner) and not mode.st_mode & 0o022,
+                  'legacy_writer_api_identity_invalid')
+        ca = checked(credential_dir / 'ca.pem', owner, 32768).decode('ascii')
+        token = checked(credential_dir / 'token', owner, 16385).decode('ascii').removesuffix('\n')
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.load_verify_locations(cadata=ca)
+        runner = KubernetesListReader(context, token)
+    except (OSError, ValueError, TransitionBlocked, seven_capture.MigrationRejected):
+        return 1
+    # The collector owns these connections until process exit. Timed-out workers
+    # may still be unwinding while the rejection is sent.
+    return main(persistent=True, runner=runner)
 
 
 class InventoryDeadline(TransitionBlocked):

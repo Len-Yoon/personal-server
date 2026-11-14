@@ -323,6 +323,15 @@ class NativeLinuxWritersTests(unittest.TestCase):
 
 
 class PersistentWriterProofTests(unittest.TestCase):
+    def test_https_start_fails_closed_without_preprovisioned_credentials(self):
+        from ha_control import wsl_writer_proof as proof
+
+        with (patch.object(proof.os, 'geteuid', return_value=1000),
+              patch.object(proof.seven_capture, 'trusted', side_effect=FileNotFoundError),
+              patch.object(proof, 'main') as run):
+            self.assertEqual(proof.main_https_reader(), 1)
+        run.assert_not_called()
+
     def test_https_reader_reuses_connection_but_requests_fresh_lists(self):
         import ssl
         from unittest.mock import MagicMock

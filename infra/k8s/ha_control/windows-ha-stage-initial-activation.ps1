@@ -237,6 +237,11 @@ try {
         'reactivation_plan_path','runtime_path','source_loader_sha256','source_manifest_path','source_manifest_sha256',
         'source_root','vm_a','vm_b','vm_observer_path','vm_observer_sha256','wsl_uid')
     $nativePlanPin = $bootstrap.legacy_plan_sha256
+    if ('kubernetes_reader' -cin $callback.PSObject.Properties.Name) {
+        if ($callback.kubernetes_reader -isnot [string] -or
+            $callback.kubernetes_reader -cne 'local-https-v1') { throw 'initial_stage_input_scope' }
+        $callbackFields += 'kubernetes_reader'
+    }
     if ('reactivation_plan_sha256' -cin $callback.PSObject.Properties.Name) {
         $callbackFields += 'reactivation_plan_sha256'
         $nativePlanPin = $callback.reactivation_plan_sha256

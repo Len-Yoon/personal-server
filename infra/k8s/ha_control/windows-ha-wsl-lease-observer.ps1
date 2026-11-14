@@ -4,6 +4,12 @@ $ErrorActionPreference = 'Stop'
 
 function Initialize-HaLeaseObservation($InputConfig, [string]$PlanText, [string]$MarkerSha, [string]$WindowsBootSha, [string]$CollectorSha) {
     $fields = @($InputConfig.PSObject.Properties.Name | Sort-Object -CaseSensitive)
+    $httpsReader = 'kubernetes_reader' -cin $fields
+    if ($httpsReader) {
+        if ($InputConfig.kubernetes_reader -isnot [string] -or
+            $InputConfig.kubernetes_reader -cne 'local-https-v1') { throw 'lease_proof_callback_scope' }
+        $fields = @($fields | Where-Object { $_ -cne 'kubernetes_reader' })
+    }
     if ('reactivation_plan_sha256' -cin $fields) {
         if ($InputConfig.reactivation_plan_sha256 -cnotmatch '\A[a-f0-9]{64}\z') { throw 'lease_proof_callback_scope' }
         $fields = @($fields | Where-Object { $_ -cne 'reactivation_plan_sha256' })
@@ -55,6 +61,10 @@ function Initialize-HaLeaseObservation($InputConfig, [string]$PlanText, [string]
     if ($CollectorSha -cnotmatch '\A[a-f0-9]{64}\z') { throw 'lease_proof_callback_scope' }
     $source = [string]$InputConfig.source_root
     $bootstrap = "import hashlib,os,pathlib,sys; p,loader,manifest,pin,uid,collector=sys.argv[1:]; p=pathlib.Path(p); assert os.geteuid()==int(uid); b=(p/'ha_control/native_wsl_launcher.py').read_bytes(); assert hashlib.sha256(b).hexdigest()==loader; e={'__name__':'verified_source_loader'}; exec(compile(b,'native_wsl_launcher.py','exec'),e); s=e['verify'](p,pathlib.Path(manifest),pin,int(uid)); assert hashlib.sha256(s['ha_control/wsl_writer_proof.py']).hexdigest()==collector; sys.meta_path.insert(0,e['VerifiedSources'](p,s)); from ha_control.wsl_writer_proof import main; raise SystemExit(main(persistent=True))"
+    if ($httpsReader) {
+        $bootstrap = $bootstrap.Replace('import main; raise SystemExit(main(persistent=True))',
+                                       'import main_https_reader; raise SystemExit(main_https_reader())')
+    }
     $command = '--distribution Ubuntu-24.04 --exec /usr/bin/python3 -I -B -S -c "' + $bootstrap + '" ' +
         (@($source,$script:ClosureInput.source_loader_sha256,$script:ClosureInput.source_manifest_path,
             $script:ClosureInput.source_manifest_sha256,$script:ClosureInput.wsl_uid,$CollectorSha) -join ' ')
