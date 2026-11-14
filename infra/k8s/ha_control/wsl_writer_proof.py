@@ -136,7 +136,7 @@ def observe_closed(baseline, challenge, deadline, *, assert_external_closed, run
 
     def observed(args):
         if args == (*KUBE, 'get', 'hpa', '-A', '-o', 'json'):
-            return encoded(hpa)
+            return hpa
         if args[:len(KUBE) + 3] == (*KUBE, '-n', NAMESPACE, 'get') and args[-2:] == ('-o', 'json'):
             scopes = args[len(KUBE) + 3].split(',')
             rows = [row for scope in scopes for row in resources[scope]]
@@ -144,19 +144,19 @@ def observe_closed(baseline, challenge, deadline, *, assert_external_closed, run
                 name = args[len(KUBE) + 4]
                 matches = [row for row in rows if row['metadata']['name'] == name]
                 _need(len(matches) == 1, 'legacy_writer_identity_changed')
-                return encoded(matches[0])
+                return matches[0]
             _need(len(args) == len(KUBE) + 6, 'legacy_writer_proof_scope_invalid')
-            return encoded({'items': rows})
+            return {'items': rows}
         if args[:len(DOCKER) + 4] == (*DOCKER, 'ps', '-aq', '--no-trunc', '--filter'):
             label = args[-1]
             expected = 'label=com.docker.compose.service='
             _need(len(args) == len(DOCKER) + 5 and label.startswith(expected), 'legacy_writer_proof_scope_invalid')
             return '\n'.join(service_ids[label[len(expected):]]).encode('ascii')
         if len(args) == len(DOCKER) + 2 and args[:len(DOCKER) + 1] == (*DOCKER, 'inspect'):
-            return encoded([by_id[args[-1]]])
+            return [by_id[args[-1]]]
         _need(False, 'legacy_writer_proof_scope_invalid')
 
-    view = LinuxWriters(baseline, observed)
+    view = LinuxWriters(baseline, observed, decode_json=lambda value: value)
     view._no_autoscaler()
     claims = view._assert_schedule_graph()
     _need(view._deployments_closed() and not view._writers_active(claims, include_deployments=True),

@@ -48,8 +48,9 @@ def _run(args, timeout=10):
 class LinuxWriters:
     """Operate only on exact bound identities in an already-reviewed writer graph."""
 
-    def __init__(self, baseline, runner=_run):
+    def __init__(self, baseline, runner=_run, *, decode_json=json.loads):
         self.runner = runner
+        self.decode_json = decode_json
         self._baseline = deepcopy(baseline)
         self._validate(self._baseline)
 
@@ -82,7 +83,7 @@ class LinuxWriters:
 
     def _json(self, args):
         try:
-            return json.loads(self.runner(args))
+            return self.decode_json(self.runner(args))
         except (ValueError, TypeError):
             raise TransitionBlocked('legacy_writer_response_rejected') from None
 
