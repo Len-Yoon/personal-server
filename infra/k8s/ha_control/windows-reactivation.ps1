@@ -59,6 +59,9 @@ function Read-HaReactivationRunner($Pin) {
         throw 'legacy_reactivation_runner_drift'
     }
     # Query the pinned service directly without enumerating the host service table.
+    if ($null -eq ('System.ServiceProcess.ServiceController' -as [type])) {
+        Add-Type -AssemblyName System.ServiceProcess -ErrorAction Stop
+    }
     $service = [System.ServiceProcess.ServiceController]::new()
     try {
         $service.ServiceName = $Pin.name
