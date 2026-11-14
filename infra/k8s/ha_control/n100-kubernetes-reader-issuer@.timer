@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh the N100 Kubernetes observer credential ahead of expiry
+
+[Timer]
+OnActiveSec=1s
+OnUnitInactiveSec=60s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
