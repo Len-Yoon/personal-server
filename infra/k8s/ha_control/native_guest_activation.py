@@ -14,6 +14,16 @@ from ha_runtime.config import SERVICES, validate_installed_authority
 
 from . import native_guest_runtime as runtime
 from .legacy_writers import TransitionBlocked, _need
+from .native_stdio_bridge import BridgeRejected
+
+
+LEASE_SAMPLE_FAILURES = frozenset({
+    "guest_worker_boot_changed", "guest_worker_installation_changed", "guest_worker_inputs_changed",
+    "guest_worker_activation_handoff_changed", "guest_worker_live_windows_unconfirmed",
+    "guest_live_pg_binding_unconfirmed", "guest_live_pg_peer_unconfirmed",
+    "guest_live_pg_lease_expired", "guest_live_clock_unconfirmed",
+    "guest_restore_docker_rejected", "bridge_deadline_exceeded",
+})
 
 
 @dataclass(frozen=True)
@@ -43,6 +53,11 @@ def _check_lease(pins, activation, assert_lease, boundary):
     started = time.monotonic()
     try:
         actual = assert_lease(challenge, boundary)
+    except Exception as error:
+        reason = str(error) if isinstance(error, (TransitionBlocked, BridgeRejected)) else None
+        raise TransitionBlocked(reason if reason in LEASE_SAMPLE_FAILURES
+                                else "guest_activation_sample_unconfirmed") from None
+    try:
         _need(type(actual) is dict and set(actual) == set(expected) | {"lease_sha256", "observed_at", "expires_at"}
               and all(type(actual[key]) is type(value) and actual[key] == value for key, value in expected.items())
               and runtime._match(runtime.SHA, actual["lease_sha256"]), "guest_activation_lease_unconfirmed")
@@ -51,10 +66,13 @@ def _check_lease(pins, activation, assert_lease, boundary):
               "guest_activation_lease_unconfirmed")
         observed, expires = (datetime.fromisoformat(value[:-1] + "+00:00") for value in timestamps)
         now = datetime.now(timezone.utc)
-        _need(0 < (expires - observed).total_seconds() <= 5
-              and -1 <= (now - observed).total_seconds() < 2
-              and now < expires and time.monotonic() - started < 2, "guest_activation_lease_unconfirmed")
+        _need(0 < (expires - observed).total_seconds() <= 5, "guest_activation_expiry_span")
+        _need(now < expires, "guest_activation_expired_during_check")
+        _need(-1 <= (now - observed).total_seconds() < 2, "guest_activation_observation_age")
+        _need(time.monotonic() - started < 2, "guest_activation_boundary_deadline")
         return actual["lease_sha256"]
+    except TransitionBlocked:
+        raise
     except Exception:
         raise TransitionBlocked("guest_activation_lease_unconfirmed") from None
 
@@ -141,6 +159,16 @@ def activate_prepared_a(pins, activation, stage, *, assert_lease):
     intent = stage / "runtime-activation-intent.json"
     done = stage / "runtime-activation.json"
     outcome = {"status": "UNKNOWN", "automatic_retry_permitted": False}
+    failure = None
+
+    def check(boundary):
+        nonlocal failure
+        try:
+            return _check_lease(pins, activation, assert_lease, boundary)
+        except TransitionBlocked as error:
+            failure = {"boundary": boundary, "reason": str(error)}
+            raise
+
     try:
         runtime._directory(stage, 0)
         _need(not os.path.lexists(intent) and not os.path.lexists(done), "guest_activation_reconciliation_required")
@@ -157,7 +185,7 @@ def activate_prepared_a(pins, activation, stage, *, assert_lease):
         _need(runtime._inspect_prepared(pins, stage, prepare_intent, prepare_receipt)
               == activation.primary_runtime_receipt_sha256, "guest_activation_preparation_unbound")
         baseline = _state(pins, containers, set())
-        lease = _check_lease(pins, activation, assert_lease, "activation_intent")
+        lease = check("activation_intent")
         order = ["ha-broker", *sorted(SERVICES)]
         artifact_pins = {str(path.relative_to(runtime.ROOT)): runtime._digest(value)
                          for path, value in authorities.items()}
@@ -172,7 +200,7 @@ def activate_prepared_a(pins, activation, stage, *, assert_lease):
             _need(runtime._read(intent, 0, {0o600}) == intent_bytes, "guest_activation_intent_changed")
 
         for path, value in authorities.items():
-            _check_lease(pins, activation, assert_lease, "publish:" + str(path.relative_to(runtime.ROOT)))
+            check("publish:" + str(path.relative_to(runtime.ROOT)))
             assert_intent()
             runtime._write(path, value, 0o444)
         _authority_files_match(authorities)
@@ -180,13 +208,13 @@ def activate_prepared_a(pins, activation, stage, *, assert_lease):
         for role in order:
             _state(pins, containers, started, baseline)
             _authority_files_match(authorities)
-            _check_lease(pins, activation, assert_lease, "start:" + role)
+            check("start:" + role)
             assert_intent()
             runtime._docker("start", containers[role]["container_id"], timeout=30)
             started.add(role)
         _state(pins, containers, started, baseline)
         _authority_files_match(authorities)
-        lease = _check_lease(pins, activation, assert_lease, "guest_started")
+        lease = check("guest_started")
         assert_intent()
         receipt = {
             "schema_version": 1, "status": "STARTED", **runtime._runtime_identity(pins), **asdict(activation),
@@ -196,4 +224,12 @@ def activate_prepared_a(pins, activation, stage, *, assert_lease):
         runtime._write(done, runtime._json_bytes(receipt))
         return receipt
     except (TransitionBlocked, OSError, KeyError, TypeError, ValueError, subprocess.TimeoutExpired):
+        if failure is not None:
+            try:
+                runtime._write(stage / "runtime-activation-failure.json", runtime._json_bytes({
+                    "schema_version": 1, "attempt_id": pins.attempt_id,
+                    "prepared_receipt_sha256": activation.primary_runtime_receipt_sha256, **failure,
+                }))
+            except OSError:
+                pass
         return outcome
