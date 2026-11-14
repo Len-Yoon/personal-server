@@ -198,7 +198,7 @@ public static class HaInitialLeaseFileTime {
                     $lease.activation_intent_sha256 -cne $plan.initial_cutover_handoff.activation_intent_sha256 -or
                     $lease.restore_receipt_sha256 -cne $plan.initial_cutover_handoff.restore_receipt_sha256 -or
                     $lease.legacy_plan_sha256 -cne $plan.initial_cutover_handoff.legacy_plan_sha256 -or
-                    $lease.proof_elapsed_ms -lt 0 -or $lease.proof_elapsed_ms -ge 3000 -or ($age + $lease.proof_elapsed_ms) -ge 4800 -or
+                    $lease.proof_elapsed_ms -lt 0 -or $lease.proof_elapsed_ms -ge 4000 -or ($age + $lease.proof_elapsed_ms) -ge 4800 -or
                     $native.PathName -cne $current.PathName) { throw 'initial_service_lease_unconfirmed' }
                 $process = Get-Process -Id $native.ProcessId -ErrorAction Stop
                 try {
