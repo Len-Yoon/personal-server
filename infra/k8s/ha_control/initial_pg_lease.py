@@ -1,7 +1,7 @@
 """Open the first A lease without changing the restored A/B replication history."""
 
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
 import hashlib
 import json
@@ -26,6 +26,19 @@ STAMP = """singleton=1 AND cluster=%s AND epoch=1 AND revision=%s
     AND (SELECT system_identifier::text FROM pg_control_system())=%s
     AND ('x'||substring(pg_walfile_name(pg_current_wal_insert_lsn()),1,8))::bit(32)::integer=1"""
 PROBE_READ = 'SELECT generation FROM ha.controller_probes WHERE nonce=%s'
+
+
+@contextmanager
+def _pg_phase(node, phase):
+    try:
+        yield
+    except TransitionBlocked:
+        raise
+    except Exception as error:
+        sqlstate = getattr(error, 'sqlstate', None)
+        if sqlstate is None:
+            raise
+        raise PgUnavailable(node, phase, sqlstate) from None
 
 
 class InitialPgLease:
@@ -110,8 +123,10 @@ class InitialPgLease:
 
     def _observe_pair(self, primary, peer, state, *, opened):
         def observe(connection, node):
-            value = self.backend._observe(connection, node, state)
-            expiry = self._expiry(connection.execute('SELECT expires_at FROM ha.control WHERE singleton=1').fetchone())
+            with _pg_phase(node, 'observe'):
+                value = self.backend._observe(connection, node, state)
+            with _pg_phase(node, 'read_expiry'):
+                expiry = self._expiry(connection.execute('SELECT expires_at FROM ha.control WHERE singleton=1').fetchone())
             return value, expiry
 
         # Keep the primary transaction and its role lock on the caller thread.
@@ -130,10 +145,12 @@ class InitialPgLease:
 
     @staticmethod
     def _begin(connection, *, shared):
-        connection.execute('BEGIN')
-        connection.execute('SET LOCAL synchronous_commit=remote_apply')
-        lock = 'SELECT pg_advisory_xact_lock_shared(%s)' if shared else 'SELECT pg_advisory_xact_lock(%s)'
-        connection.execute(lock, (ROLE_LOCK,))
+        with _pg_phase('A', 'begin'):
+            connection.execute('BEGIN')
+            connection.execute('SET LOCAL synchronous_commit=remote_apply')
+        with _pg_phase('A', 'role_lock'):
+            lock = 'SELECT pg_advisory_xact_lock_shared(%s)' if shared else 'SELECT pg_advisory_xact_lock(%s)'
+            connection.execute(lock, (ROLE_LOCK,))
 
     def _proof(self, state, expires, nonce):
         payload = {'cluster': state['cluster'], 'epoch': 1, 'revision': OPEN_REVISION, 'timeline': 1,
@@ -143,15 +160,8 @@ class InitialPgLease:
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
     def _commit_primary(self, primary):
-        try:
+        with _pg_phase('A', 'commit'):
             self.backend._commit(primary)
-        except TransitionBlocked:
-            raise
-        except Exception as error:
-            sqlstate = getattr(error, 'sqlstate', None)
-            if sqlstate is None:
-                raise
-            raise PgUnavailable('A', 'commit', sqlstate) from None
 
     def _lease(self, state, *, renewing):
         started = time.monotonic()
@@ -169,40 +179,47 @@ class InitialPgLease:
             if renewing:
                 self.owned_expiries = {previous}
             self._deadline(started)
-            primary.execute("DELETE FROM ha.controller_probes WHERE generation=1 AND left(nonce,10)='initial-a:'")
-            primary.execute('INSERT INTO ha.controller_probes(nonce,generation) VALUES(%s,1)', (barrier,))
+            with _pg_phase('A', 'fence_probe'):
+                primary.execute("DELETE FROM ha.controller_probes WHERE generation=1 AND left(nonce,10)='initial-a:'")
+                primary.execute('INSERT INTO ha.controller_probes(nonce,generation) VALUES(%s,1)', (barrier,))
             self._deadline(started)
             self._commit_primary(primary)
-            watermark = self.backend._lsn(primary.execute('SELECT pg_current_wal_flush_lsn()::text').fetchone()[0])
+            with _pg_phase('A', 'read_watermark'):
+                watermark = self.backend._lsn(primary.execute('SELECT pg_current_wal_flush_lsn()::text').fetchone()[0])
 
             self._begin(primary, shared=renewing)
             _, replica, expires = self._observe_pair(primary, peer, state, opened=renewing)
-            if (expires != previous or peer.execute(PROBE_READ, (barrier,)).fetchone() != (1,)
-                    or self.backend._lsn(replica['replay']) < watermark):
-                _deny('initial_replication_barrier_unconfirmed')
+            with _pg_phase('B', 'read_fence_probe'):
+                if (expires != previous or peer.execute(PROBE_READ, (barrier,)).fetchone() != (1,)
+                        or self.backend._lsn(replica['replay']) < watermark):
+                    _deny('initial_replication_barrier_unconfirmed')
             if not renewing:
                 self.backend._effects_open_gate(primary, peer, watermark)
             self._legacy(state, started, held_only=True)
             change = '' if renewing else 'revision=2, writes_open=true, history_safe=true, '
             condition = 'expires_at>clock_timestamp()' if renewing else 'expires_at<clock_timestamp()'
             revision = OPEN_REVISION if renewing else INITIAL_REVISION
-            row = primary.execute(
-                'UPDATE ha.control SET ' + change + "expires_at=clock_timestamp()+interval '5 seconds' WHERE "
-                + STAMP + ' AND ' + condition + ' RETURNING expires_at',
-                self._parameters(state, revision, renewing, previous),
-            ).fetchone()
+            with _pg_phase('A', 'update_expiry'):
+                row = primary.execute(
+                    'UPDATE ha.control SET ' + change + "expires_at=clock_timestamp()+interval '5 seconds' WHERE "
+                    + STAMP + ' AND ' + condition + ' RETURNING expires_at',
+                    self._parameters(state, revision, renewing, previous),
+                ).fetchone()
             current_expiry = self._expiry(row)
             self.owned_expiries.add(current_expiry)
-            primary.execute('INSERT INTO ha.controller_probes(nonce,generation) VALUES(%s,1)', (lease_probe,))
+            with _pg_phase('A', 'write_lease_probe'):
+                primary.execute('INSERT INTO ha.controller_probes(nonce,generation) VALUES(%s,1)', (lease_probe,))
             self._deadline(started)
             self._commit_primary(primary)
 
             with ThreadPoolExecutor(max_workers=1) as pool:
                 closure = pool.submit(self._legacy, state, started)
                 current, replica, expires = self._observe_pair(primary, peer, state, opened=True)
-                if (expires != current_expiry
-                        or any(connection.execute(PROBE_READ, (lease_probe,)).fetchone() != (1,)
-                               for connection in (primary, peer))
+                def probe_visible(connection, node):
+                    with _pg_phase(node, 'read_lease_probe'):
+                        return connection.execute(PROBE_READ, (lease_probe,)).fetchone() == (1,)
+
+                if (expires != current_expiry or not probe_visible(primary, 'A') or not probe_visible(peer, 'B')
                         or min(self.backend._lsn(current['flush']), self.backend._lsn(replica['flush']),
                                self.backend._lsn(replica['replay'])) < watermark):
                     _deny('initial_replication_barrier_unconfirmed')
