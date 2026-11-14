@@ -323,6 +323,41 @@ class NativeLinuxWritersTests(unittest.TestCase):
 
 
 class PersistentWriterProofTests(unittest.TestCase):
+    def test_https_reader_reuses_connection_but_requests_fresh_lists(self):
+        import ssl
+        from unittest.mock import MagicMock
+        from ha_control import wsl_writer_proof as proof
+
+        path = '/apis/autoscaling/v2/horizontalpodautoscalers'
+        command = (*proof.KUBE, 'get', '--raw=' + path)
+        with patch.object(proof.http.client, 'HTTPSConnection') as connect:
+            connect.side_effect = lambda *args, **kwargs: MagicMock()
+            reader = proof.KubernetesListReader(ssl.create_default_context(), 'fixture-token')
+            connection = reader._connections[path]
+            response = connection.getresponse.return_value.__enter__.return_value
+            response.status = 200
+            response.length = 0
+            response.isclosed.side_effect = [False, True, False, True]
+            response.read1.side_effect = [b'{"items":[]}', b'', b'{"items":[{}]}', b'']
+            self.assertEqual(reader(command, timeout=1), b'{"items":[]}')
+            self.assertEqual(reader(command, timeout=1), b'{"items":[{}]}')
+            self.assertEqual(connection.request.call_count, 2)
+            self.assertEqual(connection.request.call_args.args, ('GET', path))
+            response.isclosed.side_effect = None
+            response.isclosed.return_value = True
+            response.length = 1
+            response.read1.side_effect = [b'{"items":[]}']
+            with self.assertRaises(TransitionBlocked):
+                reader(command, timeout=1)
+            with self.assertRaises(TransitionBlocked):
+                reader((*proof.KUBE, 'get', '--raw=/api/v1/secrets'), timeout=1)
+            with self.assertRaises(TransitionBlocked):
+                reader((*proof.DOCKER, 'start', 'a' * 64), timeout=1)
+            response.status = 302
+            with self.assertRaises(TransitionBlocked):
+                reader(command, timeout=1)
+            self.assertEqual(connection.close.call_count, 2)
+
     def test_inventory_reports_all_expired_queries(self):
         from concurrent.futures import Future
         from ha_control import wsl_writer_proof
