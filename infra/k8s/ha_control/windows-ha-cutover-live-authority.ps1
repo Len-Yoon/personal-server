@@ -86,7 +86,7 @@ try {
             $record.generation -ne 1 -or $record.sequence -lt 1 -or $record.attempt_id -cne $AttemptId -or
             $record.legacy_plan_sha256 -cne $LegacyPlanSha256 -or $record.controller_plan_sha256 -cne $plan.controller_plan_sha256 -or
             $record.first_write_proof_sha256 -cne $plan.first_write_proof_sha256 -or $record.lease_proof_sha256 -cnotmatch $pattern -or
-            $record.proof_elapsed_ms -lt 0 -or $record.proof_elapsed_ms -gt 2000 -or $age -lt 0 -or $age -gt 2900 -or
+            $record.proof_elapsed_ms -lt 0 -or $record.proof_elapsed_ms -ge 3000 -or ($age + $record.proof_elapsed_ms) -ge 4800 -or $age -lt 0 -or $age -gt 2900 -or
             $process.HasExited) { throw 'live_authority_lease' }
         [ordered]@{windows_generation=1;windows_generation_sha256=(Get-Digest ($inputFile.raw + ':' + $saved.raw + ':' + $PriorSha256));
             live_lease_sha256=$record.lease_proof_sha256}|ConvertTo-Json -Compress

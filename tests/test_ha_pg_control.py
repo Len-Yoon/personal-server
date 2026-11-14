@@ -902,7 +902,7 @@ class InitialPgLeaseTests(unittest.TestCase):
         self.assertEqual(state, self.state)
         self.trace.append(('closure',))
         if self.over_budget and self.opened:
-            self.elapsed = 2.1
+            self.elapsed = 3.1
 
     @contextmanager
     def connection(self, node):
@@ -1010,6 +1010,21 @@ class InitialPgLeaseTests(unittest.TestCase):
         self.assertEqual(self.revision, 1)
         self.assertEqual(self.trace.count(('closure',)), 2)
         self.assertFalse(any(len(row) == 3 and row[1].startswith('UPDATE ha.control') for row in self.trace))
+
+    def test_native_open_has_time_for_a_second_independent_closure_proof(self):
+        observe = self.lease.assert_legacy_closed
+
+        def delayed_observation(state, deadline):
+            observe(state, deadline)
+            if self.opened:
+                self.elapsed = 2.6
+                self.assertGreater(deadline, self.elapsed)
+
+        self.lease.assert_legacy_closed = delayed_observation
+        with patch('ha_control.initial_pg_lease.time.monotonic', side_effect=lambda: self.elapsed):
+            self.assertRegex(self.lease.open(self.state), r'^[a-f0-9]{64}$')
+        self.assertTrue(self.opened)
+        self.assertEqual(self.revision, 2)
 
     def test_lost_commit_or_whole_proof_budget_cannot_report_open(self):
         for option, reason in (('lost_commit', 'fixture_commit_response_lost'),
