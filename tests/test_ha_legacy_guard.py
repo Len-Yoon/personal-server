@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import queue
 import sys
@@ -323,6 +324,54 @@ class NativeLinuxWritersTests(unittest.TestCase):
 
 
 class PersistentWriterProofTests(unittest.TestCase):
+    def test_token_publisher_replaces_file_without_mutating_open_reader(self):
+        from ha_control.kubernetes_reader_issuer import publish
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary).resolve()
+            target = home / '.local/state/n100-ha/kubernetes-reader'
+            target.mkdir(mode=0o700, parents=True)
+            account = SimpleNamespace(pw_uid=os.geteuid(), pw_gid=os.getegid(), pw_dir=str(home))
+            # The production publisher rejects writable ancestors. Open the
+            # test's private root in place of the real filesystem root.
+            original_open = os.open
+
+            def open_fixture(path, flags, *args, **kwargs):
+                return original_open(home if path == '/' else path, flags, *args, **kwargs)
+
+            account.pw_dir = '/'
+            with patch('ha_control.kubernetes_reader_issuer.os.open', side_effect=open_fixture):
+                publish(account, 'first')
+                with (target / 'token').open('rb') as previous:
+                    publish(account, 'second')
+                    self.assertEqual(previous.read(), b'first\n')
+            self.assertEqual((target / 'token').read_bytes(), b'second\n')
+            self.assertEqual((target / 'token').stat().st_mode & 0o777, 0o600)
+            self.assertEqual([path.name for path in target.iterdir()], ['token'])
+
+    def test_token_open_before_atomic_replacement_remains_readable(self):
+        from ha_control import wsl_writer_proof as proof
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, value in (('token', 'previous'), ('next', 'replacement')):
+                path = root / name
+                path.write_text(value)
+                path.chmod(0o600)
+            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            original_fstat = os.fstat
+
+            def replace_then_stat(token_fd):
+                (root / 'next').replace(root / 'token')
+                return original_fstat(token_fd)
+
+            try:
+                with patch.object(proof.os, 'fstat', side_effect=replace_then_stat):
+                    self.assertEqual(proof.read_rotating_token(fd, os.geteuid()), 'previous')
+                self.assertEqual(proof.read_rotating_token(fd, os.geteuid()), 'replacement')
+            finally:
+                os.close(fd)
+
     def test_https_start_fails_closed_without_preprovisioned_credentials(self):
         from ha_control import wsl_writer_proof as proof
 
@@ -332,7 +381,7 @@ class PersistentWriterProofTests(unittest.TestCase):
             self.assertEqual(proof.main_https_reader(), 1)
         run.assert_not_called()
 
-    def test_https_reader_reuses_connection_but_requests_fresh_lists(self):
+    def test_https_reader_reuses_connection_and_reads_replaced_token(self):
         import ssl
         from unittest.mock import MagicMock
         from ha_control import wsl_writer_proof as proof
@@ -341,7 +390,8 @@ class PersistentWriterProofTests(unittest.TestCase):
         command = (*proof.KUBE, 'get', '--raw=' + path)
         with patch.object(proof.http.client, 'HTTPSConnection') as connect:
             connect.side_effect = lambda *args, **kwargs: MagicMock()
-            reader = proof.KubernetesListReader(ssl.create_default_context(), 'fixture-token')
+            token = 'fixture-token'
+            reader = proof.KubernetesListReader(ssl.create_default_context(), lambda: token)
             connection = reader._connections[path]
             response = connection.getresponse.return_value.__enter__.return_value
             response.status = 200
@@ -349,9 +399,14 @@ class PersistentWriterProofTests(unittest.TestCase):
             response.isclosed.side_effect = [False, True, False, True]
             response.read1.side_effect = [b'{"items":[]}', b'', b'{"items":[{}]}', b'']
             self.assertEqual(reader(command, timeout=1), b'{"items":[]}')
+            token = 'replacement-token'
             self.assertEqual(reader(command, timeout=1), b'{"items":[{}]}')
             self.assertEqual(connection.request.call_count, 2)
             self.assertEqual(connection.request.call_args.args, ('GET', path))
+            self.assertEqual(
+                [call.kwargs['headers']['Authorization'] for call in connection.request.call_args_list],
+                ['Bearer fixture-token', 'Bearer replacement-token'],
+            )
             response.isclosed.side_effect = None
             response.isclosed.return_value = True
             response.length = 1
