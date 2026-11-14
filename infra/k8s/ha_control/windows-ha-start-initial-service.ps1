@@ -198,7 +198,7 @@ public static class HaInitialLeaseFileTime {
                     $lease.activation_intent_sha256 -cne $plan.initial_cutover_handoff.activation_intent_sha256 -or
                     $lease.restore_receipt_sha256 -cne $plan.initial_cutover_handoff.restore_receipt_sha256 -or
                     $lease.legacy_plan_sha256 -cne $plan.initial_cutover_handoff.legacy_plan_sha256 -or
-                    $lease.proof_elapsed_ms -lt 0 -or $lease.proof_elapsed_ms -gt 2000 -or
+                    $lease.proof_elapsed_ms -lt 0 -or $lease.proof_elapsed_ms -ge 3000 -or ($age + $lease.proof_elapsed_ms) -ge 4800 -or
                     $native.PathName -cne $current.PathName) { throw 'initial_service_lease_unconfirmed' }
                 $process = Get-Process -Id $native.ProcessId -ErrorAction Stop
                 try {
@@ -217,9 +217,11 @@ public static class HaInitialLeaseFileTime {
                         $instance = [BitConverter]::ToString($sha.ComputeHash($bindingBytes)).Replace('-','').ToLowerInvariant()
                     } finally { $sha.Dispose() }
                     $confirmed = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'") -OperationTimeoutSec 5
+                    $confirmedAge = ([DateTime]::UtcNow - $written).TotalMilliseconds
                     if ($confirmed.State -cne 'Running' -or $confirmed.ProcessId -ne $native.ProcessId -or
                         $confirmed.PathName -cne $current.PathName -or $process.HasExited -or
-                        ([DateTime]::UtcNow - $written).TotalMilliseconds -gt 2900) { throw 'initial_service_lease_unconfirmed' }
+                        $confirmedAge -lt 0 -or $confirmedAge -gt 2900 -or
+                        ($confirmedAge + $lease.proof_elapsed_ms) -ge 4800) { throw 'initial_service_lease_unconfirmed' }
                     $output = [IO.FileStream]::new($BindingPath,[IO.FileMode]::CreateNew,
                         [Security.AccessControl.FileSystemRights]'WriteData,Synchronize',[IO.FileShare]::None,4096,
                         [IO.FileOptions]::WriteThrough,$security)

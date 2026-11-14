@@ -10,7 +10,7 @@ import stat
 import time
 
 from .controller import Journal, TransitionBlocked, exclusive
-from .initial_pg_lease import INITIAL_CUTOVER, PROOF_SECONDS, InitialPgLease
+from .initial_pg_lease import INITIAL_CUTOVER, INITIAL_PROOF_SECONDS, InitialPgLease
 from .enforced_windows import _powershell_path
 from .windows_lease_pipe import CLIENT_FAILURES, PersistentLeaseProofClient, ProofPins
 
@@ -195,7 +195,7 @@ def serve_initial(backend, journal_path, observer):
             first_proof = _pin(proof)
             while True:
                 elapsed = time.monotonic() - started
-                if elapsed > PROOF_SECONDS:
+                if elapsed >= INITIAL_PROOF_SECONDS:
                     raise TransitionBlocked('initial_service_proof_deadline_exceeded')
                 sequence += 1
                 journal.save(stable | {'phase': 'serving', 'sequence': sequence, 'lease_proof_sha256': _pin(proof),
