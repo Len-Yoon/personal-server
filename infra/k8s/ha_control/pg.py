@@ -29,6 +29,21 @@ def _deny(reason):
     raise TransitionBlocked(reason) from None
 
 
+class PgUnavailable(TransitionBlocked):
+    """A failed PostgreSQL operation with bounded diagnostic fields."""
+
+    def __init__(self, node, phase, sqlstate):
+        super().__init__("authenticated_pg_unavailable")
+        category = {
+            "57014": "canceled",
+            "55P03": "lock_unavailable",
+            "40001": "serialization",
+            "40P01": "deadlock",
+        }.get(sqlstate, "other")
+        node = {"A": "a", "B": "b"}.get(node, "unknown")
+        self.failure_code = f"initial_pg_{node}_{phase}_{category}"
+
+
 def _private_file(value):
     path = Path(value)
     try:
@@ -202,18 +217,24 @@ class PgBackend:
     def _connection(self, node):
         import psycopg
         connection = None
+        phase = "connect"
         try:
             connection = psycopg.connect(**self.plan["pg_nodes"][node], autocommit=True,
                                          connect_timeout=1, application_name="ha_native_controller")
+            phase = "setup"
             connection.execute("SET statement_timeout='700ms'")
             connection.execute("SET lock_timeout='500ms'")
             if connection.execute("SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()").fetchone() != (True,):
                 _deny("authenticated_pg_observation_required")
+            phase = "query"
             yield connection
         except TransitionBlocked:
             raise
-        except Exception:
-            _deny("authenticated_pg_unavailable")
+        except Exception as error:
+            sqlstate = error.sqlstate if isinstance(error, psycopg.Error) else None
+            # The context body can use both nodes. Only connection and setup
+            # errors can be attributed to this connection here.
+            raise PgUnavailable(node if phase != "query" else None, phase, sqlstate) from None
         finally:
             if connection is not None:
                 connection.close()
