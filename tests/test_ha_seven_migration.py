@@ -23,10 +23,42 @@ sys.path.insert(0,str(ROOT/'infra/k8s'))
 from ha_runtime import migrate,seven_migration as M
 from ha_control.legacy_cutover import LegacyCutover, TransitionBlocked
 from ha_control import frozen_ingress, frozen_transport, native_frozen_capture, native_guest_restore
+from ha_control import native_guest_activation
 
 
 def encoded(value):return json.dumps(value,sort_keys=True).encode()
 def sha(raw):return hashlib.sha256(raw).hexdigest()
+
+
+class NativeGuestActivationTests(unittest.TestCase):
+    def test_failed_boundary_preserves_only_bounded_diagnostics(self):
+        activation = native_guest_activation
+        pins = activation.ActivationPins(*("abcdef"[i] * 64 for i in range(6)))
+        for reason, expected in (
+            ("guest_live_pg_lease_expired", "guest_live_pg_lease_expired"),
+            ("private driver text", "guest_activation_sample_unconfirmed"),
+        ):
+            with self.subTest(reason=reason), patch.object(activation.os, "geteuid", return_value=0), \
+                    patch.object(activation.runtime, "_directory"), \
+                    patch.object(activation.runtime, "_inspect_prepared",
+                                 return_value=pins.primary_runtime_receipt_sha256), \
+                    patch.object(activation.runtime, "_read", return_value=b"prepared"), \
+                    patch.object(activation.runtime, "_digest", return_value=pins.primary_runtime_receipt_sha256), \
+                    patch.object(activation.runtime, "_runtime_identity", return_value={}), \
+                    patch.object(activation.runtime, "_write") as write, \
+                    patch.object(activation.json, "loads", return_value={
+                        "containers": dict.fromkeys(activation.SERVICES | {"ha-broker"}),
+                    }), patch.object(activation, "_authorities"), patch.object(activation, "_state"):
+                runtime_pins = SimpleNamespace(node="A", attempt_id="1" * 64, validate=lambda: None)
+                result = activation.activate_prepared_a(
+                    runtime_pins, pins, Path("/unused/attempt"),
+                    assert_lease=MagicMock(side_effect=TransitionBlocked(reason)),
+                )
+            self.assertEqual(result, {"status": "UNKNOWN", "automatic_retry_permitted": False})
+            path, raw = write.call_args.args
+            self.assertEqual(path.name, "runtime-activation-failure.json")
+            self.assertEqual(json.loads(raw)["reason"], expected)
+            self.assertEqual(json.loads(raw)["boundary"], "activation_intent")
 
 
 class NativeGuestRestoreTests(unittest.TestCase):
