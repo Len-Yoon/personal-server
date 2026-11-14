@@ -31,6 +31,34 @@ def sha(raw):return hashlib.sha256(raw).hexdigest()
 
 
 class NativeGuestActivationTests(unittest.TestCase):
+    def test_start_accepts_docker_oom_default_without_accepting_contract_drift(self):
+        activation = native_guest_activation
+        runtime = activation.runtime
+        role = "ha-broker"
+        identifier = "c" * 64
+        image = "sha256:" + "d" * 64
+        attempt = "e" * 64
+        pins = SimpleNamespace(attempt_id=attempt, protected_inventory_sha256=runtime.inventory_sha256({}))
+        containers = {role: {"container_id": identifier, "image_id": image}}
+        item = {
+            "Image": image, "Name": "/broker", "RestartCount": 0, "Mounts": [],
+            "Config": {"Labels": {runtime.ATTEMPT_LABEL: attempt, "com.docker.compose.service": role}},
+            "HostConfig": {"NetworkMode": "host", "OomKillDisable": False, "ReadonlyRootfs": True},
+            "NetworkSettings": {"Networks": {"host": {}}},
+            "State": {"Status": "created", "Running": False, "Paused": False, "Restarting": False, "Pid": 0},
+        }
+        with patch.object(runtime, "_inventory", return_value={identifier: item}):
+            baseline = activation._state(pins, containers, set())
+            item["State"].update(Status="running", Running=True, Pid=42)
+            item["HostConfig"]["OomKillDisable"] = None
+            self.assertEqual(activation._state(pins, containers, {role}, baseline), baseline)
+            self.assertIsNone(item["HostConfig"]["OomKillDisable"])
+
+            for drift in ({"OomKillDisable": True}, {"OomKillDisable": 0}, {"ReadonlyRootfs": False}):
+                with self.subTest(drift=drift), patch.dict(item["HostConfig"], drift):
+                    with self.assertRaisesRegex(TransitionBlocked, "guest_activation_container_contract_changed"):
+                        activation._state(pins, containers, {role}, baseline)
+
     def test_transport_window_does_not_extend_database_freshness(self):
         activation = native_guest_activation
         pins = activation.ActivationPins(*("abcdef"[i] * 64 for i in range(6)))

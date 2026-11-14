@@ -134,7 +134,14 @@ def _state(pins, containers, started, baseline=None):
               and type(state["Pid"]) is int and (state["Pid"] > 0 if running else state["Pid"] == 0)
               and set(item["NetworkSettings"]["Networks"] or {}) <= {item["HostConfig"]["NetworkMode"]},
               "guest_activation_container_state_unconfirmed")
-        contract[role] = {**{key: item[key] for key in ("Image", "Name", "Config", "HostConfig")},
+        host = item["HostConfig"].copy()
+        # Docker can clear the default false pointer when it starts a container.
+        if "OomKillDisable" in host:
+            oom_disabled = host["OomKillDisable"]
+            _need(oom_disabled is None or type(oom_disabled) is bool, "guest_activation_container_contract_changed")
+            if oom_disabled is None:
+                host["OomKillDisable"] = False
+        contract[role] = {**{key: item[key] for key in ("Image", "Name", "Config")}, "HostConfig": host,
                           "Mounts": sorted(item["Mounts"], key=lambda mount: mount["Destination"])}
     _need(baseline is None or contract == baseline, "guest_activation_container_contract_changed")
     return contract
