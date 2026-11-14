@@ -26,7 +26,7 @@ import time
 from types import ModuleType
 
 SOURCE = Path(__file__).resolve().parents[1] / 'ha_control/legacy_linux.py'
-APPROVED_SOURCE_SHA256 = '938a71aaf3b741f42dbe0c9c86c551e34242df9c6e196fd2bea62be3c3122f24'
+APPROVED_SOURCE_SHA256 = '10e6a0eff76f82a0cf7f2fd48a375a7b4e2e8b6be25540d6af175e3445488027'
 SOURCE_LIMIT = 131072
 OUTPUT_LIMIT = 16384
 MOUNT_LIMIT = 16384

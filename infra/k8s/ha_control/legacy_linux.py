@@ -693,7 +693,7 @@ def parse_kubeconfig(payload):
         deny("unsupported_kubeconfig_profile")
     encoded = r"([A-Za-z0-9+/]+={0,2})"
     pattern = (r"apiVersion: v1\nclusters:\n- cluster:\n    certificate-authority-data: " + encoded
-               + r"\n    server: https://127\.0\.0\.1:6443\n  name: default\ncontexts:\n- context:\n    cluster: default\n    user: default\n  name: default\ncurrent-context: default\nkind: Config\npreferences: \{\}\nusers:\n- name: default\n  user:\n    client-certificate-data: " + encoded
+               + r"\n    server: https://127\.0\.0\.1:6443\n  name: default\ncontexts:\n- context:\n    cluster: default\n    user: default\n  name: default\ncurrent-context: default\nkind: Config\n(?:preferences: \{\}\n)?users:\n- name: default\n  user:\n    client-certificate-data: " + encoded
                + r"\n    client-key-data: " + encoded + r"\n?")
     match = re.fullmatch(pattern, value)
     if match is None:
