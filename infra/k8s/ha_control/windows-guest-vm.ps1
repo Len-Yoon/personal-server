@@ -12,6 +12,13 @@ function Import-GuestOwnedSupport([string]$SupportPath=''){
  return [scriptblock]::Create([Text.UTF8Encoding]::new($false,$true).GetString($bytes))
 }
 function Get-GuestVmHash([byte[]]$Bytes){$h=[Security.Cryptography.SHA256]::Create();try{return [BitConverter]::ToString($h.ComputeHash($Bytes)).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}}
+function Get-GuestVmMaximumMemory([string]$Node){
+    switch -CaseSensitive ($Node){
+        'A' { return 1792MB }
+        'B' { return 1536MB }
+        default { throw 'guest_vm_resource_bounds_changed' }
+    }
+}
 function Get-GuestVmStreamHash($Stream){$h=[Security.Cryptography.SHA256]::Create();try{return [BitConverter]::ToString($h.ComputeHash($Stream)).Replace('-','').ToLowerInvariant()}finally{$h.Dispose()}}
 function Assert-GuestVmKeys($Value,[string[]]$Keys){if((($Value.PSObject.Properties.Name|Sort-Object -CaseSensitive)-join ',') -cne (($Keys|Sort-Object -CaseSensitive)-join ',')){throw 'guest_vm_shape_rejected'}}
 function Assert-GuestVmConfigProfile($Value){
@@ -511,7 +518,10 @@ function Assert-GuestVmPrepared($Spec,$Names,$Pins,[string]$GuestRoot,[string]$D
     $switch=Get-VMSwitch -Id ([Guid]$Pins.switch_id) -ErrorAction Stop
     if($switch.Id.ToString() -cne $Pins.switch_id -or $switch.Name -cne $Names.switch -or $switch.SwitchType -ne 'Internal' -or $switch.Notes -cne ('ha-owned-guest-v1:'+$Spec.installation_id+':'+$Pins.switch_owner_manifest_sha256) -or @(Get-VMSwitch|Where-Object{$_.Name -ieq $Names.switch}).Count -ne 1){throw 'guest_vm_switch_changed'}
     $cpu=Get-VMProcessor -VM $vm;$mem=Get-VMMemory -VM $vm
-    if($cpu.Count -ne 1 -or $cpu.Maximum -ne 25 -or -not $mem.DynamicMemoryEnabled -or $mem.Startup -ne 1073741824 -or $mem.Minimum -ne 805306368 -or $mem.Maximum -ne 1610612736){throw 'guest_vm_resource_bounds_changed'}
+    $maximum=Get-GuestVmMaximumMemory $Spec.node
+    # Previously enrolled A guests also pass with their original rollback cap.
+    $maximumValid=$mem.Maximum -eq $maximum -or ($Spec.node -ceq 'A' -and $mem.Maximum -eq 1536MB)
+    if($cpu.Count -ne 1 -or $cpu.Maximum -ne 25 -or -not $mem.DynamicMemoryEnabled -or $mem.Startup -ne 1GB -or $mem.Minimum -ne 768MB -or -not $maximumValid){throw 'guest_vm_resource_bounds_changed'}
     $nic=@(Get-VMNetworkAdapter -VM $vm);$ha=@($nic|Where-Object{$_.Name -ceq 'ha-data'})
     if(@(Get-VMNetworkAdapter -All|Where-Object{$_.MacAddress -ieq $Spec.mac_address}).Count -ne 1 -or $ha.Count -ne 1 -or $ha[0].DynamicMacAddressEnabled -or $ha[0].MacAddressSpoofing -ne 'Off' -or $ha[0].MacAddress -cne $Spec.mac_address -or $ha[0].SwitchId.ToString() -cne $Pins.switch_id -or $nic.Count -ne (1+[int]$Spec.optional_egress_nic)){throw 'guest_vm_network_changed'}
     if($Spec.optional_egress_nic){$egress=@($nic|Where-Object{$_.Name -ceq 'egress-disconnected'});if($egress.Count -ne 1 -or -not (Test-GuestVmDisconnectedNic $egress[0]) -or $egress[0].DynamicMacAddressEnabled -or $egress[0].MacAddressSpoofing -ne 'Off' -or $egress[0].MacAddress -cne $Spec.egress_mac_address -or @(Get-VMNetworkAdapter -All|Where-Object{$_.MacAddress -ieq $Spec.egress_mac_address}).Count -ne 1){throw 'guest_vm_egress_must_be_disconnected'}}
@@ -930,7 +940,7 @@ function Invoke-GuestVm{
         Add-GuestVmEvent 'configure_new_vm' @{vm_id=$vm.Id.ToString()}
         Set-VM -VM $vm -Notes ('ha-owned-guest-v1:'+$spec.installation_id+':'+$ManifestSha256) -AutomaticStartAction Nothing -AutomaticStopAction TurnOff -CheckpointType Disabled -AutomaticCheckpointsEnabled $false
         Set-VMProcessor -VM $vm -Count 1 -Maximum 25
-        Set-VMMemory -VM $vm -DynamicMemoryEnabled $true -StartupBytes 1GB -MinimumBytes 768MB -MaximumBytes 1536MB
+        Set-VMMemory -VM $vm -DynamicMemoryEnabled $true -StartupBytes 1GB -MinimumBytes 768MB -MaximumBytes (Get-GuestVmMaximumMemory $spec.node)
         $nic=@(Get-VMNetworkAdapter -VM $vm);if($nic.Count -ne 1 -or $nic[0].SwitchId -ne $switch.Id){throw 'guest_vm_new_nic_uncertain'}
         Rename-VMNetworkAdapter -VMNetworkAdapter $nic[0] -NewName 'ha-data'
         Set-VMNetworkAdapter -VMNetworkAdapter $nic[0] -StaticMacAddress $spec.mac_address -MacAddressSpoofing Off
