@@ -189,8 +189,9 @@ def main(*, persistent=False):
             _need(type(request) is dict and set(request) == fields, 'legacy_writer_proof_scope_invalid')
             budget = request.pop('budget_ms')
             _need(type(budget) is int and 0 < budget <= 1800, 'legacy_writer_proof_scope_invalid')
+            deadline = time.monotonic() + budget / 1000
             try:
-                digest = prove_runtime(**request, deadline=time.monotonic() + budget / 1000)
+                digest = prove_runtime(**request, deadline=deadline)
             except Exception as error:
                 if persistent and type(request['challenge']) is str and SHA.fullmatch(request['challenge']):
                     reason = 'internal'
@@ -202,6 +203,8 @@ def main(*, persistent=False):
                             'legacy_writer_boot_changed': 'identity',
                             'legacy_recovery_wsl_commands_unsettled': 'recovery',
                         }.get(str(error), 'closure')
+                    if time.monotonic() >= deadline:
+                        reason = 'deadline'
                     print(request['challenge'] + ':reject:' + reason, flush=True)
                 return 1
             if not persistent:
