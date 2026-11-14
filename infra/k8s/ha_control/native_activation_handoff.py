@@ -1,5 +1,6 @@
 """Bind the native service's first write proof to the prepared A guest."""
 
+from contextlib import contextmanager
 from dataclasses import asdict
 import json
 import time
@@ -68,6 +69,16 @@ def guest_handoff(request, installation_id, checked_record, intent, first_write_
                           'prepared_receipt_sha256': checked['runtime_receipt_sha256'], 'activation_pins': asdict(pins)})
 
 
+@contextmanager
+def _transport_stage(stage):
+    try:
+        yield
+    except bridge.BridgeRejected as error:
+        if str(error) not in {'guest_ssh_deadline_exceeded', 'bridge_deadline_exceeded'}:
+            raise
+        raise bridge.BridgeRejected(f'activation_{stage}_ssh_deadline_exceeded') from None
+
+
 class ActivationDispatcher:
     """Keep the native Windows custody open across the authenticated guest start."""
 
@@ -79,20 +90,30 @@ class ActivationDispatcher:
         if request.verb != 'activate':
             return self.guest(request, deadline)
         bridge._need(time.monotonic() < deadline and request.node == 'A', 'activation_dispatch_unbound')
-        checked = self.custody.read_guest_check(request, deadline)
+        with _transport_stage("read_guest_check"):
+            checked = self.custody.read_guest_check(request, deadline)
         restore_receipt = checked['evidence']['restore_receipt_sha256']
-        intent = activation_intent(request, self.custody.read_wsl_intent(request, deadline), restore_receipt)
+        with _transport_stage("read_wsl_intent"):
+            intent = activation_intent(request, self.custody.read_wsl_intent(request, deadline), restore_receipt)
         # Validate the full receipt before the native service can grant writes.
         installation_id = self.custody.installation_id
         _validate_guest_check(request, installation_id, checked, intent)
-        with self.custody.open_first_write(request, intent, deadline) as windows:
+        with _transport_stage("start_service"), self.custody.open_first_write(request, intent, deadline) as windows:
             payload = guest_handoff(request, installation_id, checked, intent, windows.first_write_proof_sha256,
                                     windows.service_instance_sha256)
-            bridge._need(bridge._hash(windows.assert_current(deadline)), 'activation_dispatch_unconfirmed')
-            self.custody.publish_guest_handoff(request, payload, deadline)
-            result = self.guest(request, deadline, assert_windows_current=windows.assert_current)
+            with _transport_stage("live_service_check"):
+                bridge._need(bridge._hash(windows.assert_current(deadline)), 'activation_dispatch_unconfirmed')
+            with _transport_stage("publish_handoff"):
+                self.custody.publish_guest_handoff(request, payload, deadline)
+            def check_guest_boundary(boundary_deadline):
+                with _transport_stage("guest_boundary_check"):
+                    return windows.assert_current(boundary_deadline)
+
+            with _transport_stage("start_guest"):
+                result = self.guest(request, deadline, assert_windows_current=check_guest_boundary)
             bridge._need(type(result) is bridge.Receipt and result.status == 'PASS', 'activation_dispatch_unconfirmed')
             result.fields(request.verb)
             bridge._need(result.service_instance_sha256 is None, 'activation_dispatch_unconfirmed')
-            bridge._need(bridge._hash(windows.assert_current(deadline)), 'activation_dispatch_unconfirmed')
+            with _transport_stage("post_start_service_check"):
+                bridge._need(bridge._hash(windows.assert_current(deadline)), 'activation_dispatch_unconfirmed')
             return bridge.Receipt('PASS', result.receipt_sha256, windows.service_instance_sha256)

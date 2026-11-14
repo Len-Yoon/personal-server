@@ -1364,5 +1364,35 @@ send({'status': 'PASS'})
         self.assertEqual(observed, ['open', 'current', 'publish', 'current', 'start', 'current', 'handover'])
 
 
+        def fail_before_handoff(_request, native_intent, _deadline):
+            self.assertEqual(native_intent, intent)
+
+            def timeout(_deadline):
+                raise bridge.BridgeRejected('guest_ssh_deadline_exceeded')
+
+            yield SimpleNamespace(first_write_proof_sha256='c' * 64, service_instance_sha256='d' * 64,
+                                  assert_current=timeout)
+
+        from ha_control.run_native_mac_cutover import _reason
+
+        custody.open_first_write = contextmanager(fail_before_handoff)
+        observed.clear()
+        with self.assertRaises(bridge.BridgeRejected) as failure:
+            dispatcher(request, time.monotonic() + 1)
+        self.assertEqual(_reason(failure.exception), 'activation_live_service_check_ssh_deadline_exceeded')
+        self.assertEqual(observed, [])
+
+    def test_activation_timeout_identifies_innermost_transport(self):
+        from ha_control import native_activation_handoff as handoff, native_stdio_bridge as bridge
+
+        with self.assertRaisesRegex(bridge.BridgeRejected, 'activation_guest_boundary_check_ssh_deadline_exceeded'):
+            with handoff._transport_stage('start_guest'), handoff._transport_stage('guest_boundary_check'):
+                raise bridge.BridgeRejected('guest_ssh_deadline_exceeded')
+
+        with self.assertRaisesRegex(bridge.BridgeRejected, '^guest_handoff_response_unbound$'):
+            with handoff._transport_stage('publish_handoff'):
+                raise bridge.BridgeRejected('guest_handoff_response_unbound')
+
+
 if __name__ == "__main__":
     unittest.main()
