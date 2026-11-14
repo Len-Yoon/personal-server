@@ -5,7 +5,6 @@ the guest. The host coordinator owns WSL fencing. This worker owns guest-local
 mutation exclusion, evidence, and observations. Activation is a separate stage.
 """
 
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, fields
 from datetime import timezone
@@ -25,7 +24,7 @@ from . import frozen_ingress, native_guest_restore as restore, native_guest_runt
 from . import native_guest_activation as activation, native_guest_live as live
 from .legacy_writers import TransitionBlocked, _need
 from .native_stdio_bridge import (
-    ACTIVATION_BOUNDARY_SECONDS, Binding, BridgeRejected, FRAME_BYTES, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
+    ACTIVATION_GUEST_REPLY_SECONDS, Binding, BridgeRejected, FRAME_BYTES, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
 )
 
@@ -482,13 +481,11 @@ class GuestWorker:
             self.identity()
             _need(runtime._read(self.stage / HANDOFF, 0, {0o600}, limit=65536) == handoff,
                   "guest_worker_activation_handoff_changed")
-            # Both operations observe the same fenced cutover and neither mutates it.
-            # Overlap the PostgreSQL sample with the independent Windows round trip.
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                database_proof = pool.submit(live._lease, pins, db)
-                windows_proof = assert_windows_current(challenge, boundary)
-                observed, sampled, expires, _ = database_proof.result()
+            # Read the database clock after transport so SSH startup cannot
+            # consume the freshness window of the write lease.
+            windows_proof = assert_windows_current(challenge, boundary)
             _need(_hash(windows_proof), "guest_worker_live_windows_unconfirmed")
+            observed, sampled, expires, _ = live._lease(pins, db)
             facts = {**runtime._runtime_identity(pins), **asdict(activation_pins), "challenge": challenge,
                      "boundary": boundary, "coordinator_intent_durable": True, "initial_postcommit_verified": True,
                      "legacy_writers_closed": True, "standby_runtime_closed": True, "runtime_mutations_excluded": True,
@@ -612,7 +609,7 @@ def main():
         channel = Stdio(sys.stdin.fileno(), sys.stdout.fileno())
 
         def assert_windows_current(challenge, boundary):
-            deadline = time.monotonic() + ACTIVATION_BOUNDARY_SECONDS
+            deadline = time.monotonic() + ACTIVATION_GUEST_REPLY_SECONDS
             fields = {"request_nonce": request.nonce, "challenge": challenge, "boundary": boundary}
             channel.write({"kind": "activation_boundary", **fields}, deadline)
             reply = channel.read(deadline)
@@ -623,7 +620,7 @@ def main():
             return proof
 
         result = handle(request, assert_windows_current)
-        channel.write({**_scope(request), **result.fields(request.verb)}, time.monotonic() + ACTIVATION_BOUNDARY_SECONDS)
+        channel.write({**_scope(request), **result.fields(request.verb)}, time.monotonic() + 2)
         return 0
     result = handle(request)
     raw = _bytes({**_scope(request), **result.fields(request.verb)})

@@ -145,8 +145,7 @@ class WindowsActivationLease:
             'AttemptId': binding.attempt_id, 'PriorSha256': secrets.token_hex(32),
             'ExpectedServiceInstanceSha256': self.service_instance_sha256,
         })
-        # The guest imposes its own two-second limit before each mutation.
-        # The coordinator's surrounding reads can budget for cold SSH startup.
+        # Guest-bound reads leave time for the guest's fresh database sample.
         seconds = bridge.ACTIVATION_BOUNDARY_SECONDS if guest_boundary else 4
         result = custody.windows.powershell(source, min(deadline, time.monotonic() + seconds))
         keys = {'windows_generation', 'windows_generation_sha256', 'live_lease_sha256'}

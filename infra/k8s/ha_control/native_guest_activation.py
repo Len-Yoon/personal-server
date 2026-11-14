@@ -14,7 +14,7 @@ from ha_runtime.config import SERVICES, validate_installed_authority
 
 from . import native_guest_runtime as runtime
 from .legacy_writers import TransitionBlocked, _need
-from .native_stdio_bridge import BridgeRejected
+from .native_stdio_bridge import ACTIVATION_GUEST_CHECK_SECONDS, BridgeRejected
 
 
 LEASE_SAMPLE_FAILURES = frozenset({
@@ -69,7 +69,7 @@ def _check_lease(pins, activation, assert_lease, boundary):
         _need(0 < (expires - observed).total_seconds() <= 5, "guest_activation_expiry_span")
         _need(now < expires, "guest_activation_expired_during_check")
         _need(-1 <= (now - observed).total_seconds() < 2, "guest_activation_observation_age")
-        _need(time.monotonic() - started < 2, "guest_activation_boundary_deadline")
+        _need(time.monotonic() - started < ACTIVATION_GUEST_CHECK_SECONDS, "guest_activation_boundary_deadline")
         return actual["lease_sha256"]
     except TransitionBlocked:
         raise
