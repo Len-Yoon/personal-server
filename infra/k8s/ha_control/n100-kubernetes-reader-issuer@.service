@@ -1,0 +1,18 @@
+[Unit]
+Description=Refresh the N100 Kubernetes observer credential for UID %i
+After=k3s.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 -I -B -c "import sys; sys.path.insert(0, '/opt/n100-ha/kubernetes-reader'); from ha_control.kubernetes_reader_issuer import main; raise SystemExit(main())" %i
+TimeoutStartSec=15s
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost

@@ -39,14 +39,23 @@ KUBE_LIST_PATHS = frozenset(
 class KubernetesListReader:
     """Six independent HTTPS connections for fixed, fresh Kubernetes lists."""
 
-    def __init__(self, context, token):
+    def __init__(self, context, token_source):
         _need(context.check_hostname and context.verify_mode == ssl.CERT_REQUIRED
-              and type(token) is str and re.fullmatch(r'[A-Za-z0-9._-]{1,16384}', token),
+              and callable(token_source),
               'legacy_writer_api_identity_invalid')
+        self._token_source = token_source
         self._connections = {
             path: http.client.HTTPSConnection('127.0.0.1', 6443, context=context) for path in KUBE_LIST_PATHS
         }
-        self._authorization = 'Bearer ' + token
+
+    def _authorization(self):
+        try:
+            token = self._token_source()
+        except (OSError, ValueError):
+            raise TransitionBlocked('legacy_writer_api_identity_invalid') from None
+        _need(type(token) is str and re.fullmatch(r'[A-Za-z0-9._-]{1,16384}', token),
+              'legacy_writer_api_identity_invalid')
+        return 'Bearer ' + token
 
     def __call__(self, args, *, timeout):
         if args == (*DOCKER, 'ps', '-aq', '--no-trunc') or (
@@ -62,10 +71,11 @@ class KubernetesListReader:
         connection = self._connections[path]
         deadline = time.monotonic() + timeout
         try:
+            authorization = self._authorization()
             connection.timeout = _deadline(deadline)
             if connection.sock is not None:
                 connection.sock.settimeout(connection.timeout)
-            connection.request('GET', path, headers={'Authorization': self._authorization, 'Accept': 'application/json'})
+            connection.request('GET', path, headers={'Authorization': authorization, 'Accept': 'application/json'})
             transport = connection.sock
             transport.settimeout(_deadline(deadline))
             with connection.getresponse() as response:
@@ -92,8 +102,24 @@ class KubernetesListReader:
             connection.close()
 
 
+def read_rotating_token(directory, owner):
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    with os.fdopen(os.open('token', flags, dir_fd=directory), 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        # Atomic replacement can unlink the already-open file. Its contents
+        # remain readable through this descriptor until the request finishes.
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != owner
+                or info.st_nlink not in (0, 1) or info.st_mode & 0o077 or info.st_size > 16385):
+            raise ValueError('legacy_writer_api_identity_invalid')
+        raw = stream.read(16386)
+        if len(raw) != info.st_size:
+            raise ValueError('legacy_writer_api_identity_invalid')
+    return raw.decode('ascii').removesuffix('\n')
+
+
 def main_https_reader():
     """Start the persistent verifier using pre-provisioned read-only credentials."""
+    directory = None
     try:
         owner = os.geteuid()
         _need(owner != 0, 'legacy_writer_api_identity_invalid')
@@ -104,15 +130,19 @@ def main_https_reader():
             _need(stat.S_ISDIR(mode.st_mode) and mode.st_uid in (0, owner) and not mode.st_mode & 0o022,
                   'legacy_writer_api_identity_invalid')
         ca = checked(credential_dir / 'ca.pem', owner, 32768).decode('ascii')
-        token = checked(credential_dir / 'token', owner, 16385).decode('ascii').removesuffix('\n')
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.load_verify_locations(cadata=ca)
-        runner = KubernetesListReader(context, token)
+        directory = os.open(credential_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        metadata = os.fstat(directory)
+        _need(metadata.st_uid == owner and not metadata.st_mode & 0o077,
+              'legacy_writer_api_identity_invalid')
+        runner = KubernetesListReader(context, lambda: read_rotating_token(directory, owner))
+        return main(persistent=True, runner=runner)
     except (OSError, ValueError, TransitionBlocked, seven_capture.MigrationRejected):
         return 1
-    # The collector owns these connections until process exit. Timed-out workers
-    # may still be unwinding while the rejection is sent.
-    return main(persistent=True, runner=runner)
+    finally:
+        if directory is not None:
+            os.close(directory)
 
 
 class InventoryDeadline(TransitionBlocked):
