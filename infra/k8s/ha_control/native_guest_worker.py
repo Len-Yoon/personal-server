@@ -5,6 +5,7 @@ the guest. The host coordinator owns WSL fencing. This worker owns guest-local
 mutation exclusion, evidence, and observations. Activation is a separate stage.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, fields
 from datetime import timezone
@@ -481,8 +482,12 @@ class GuestWorker:
             self.identity()
             _need(runtime._read(self.stage / HANDOFF, 0, {0o600}, limit=65536) == handoff,
                   "guest_worker_activation_handoff_changed")
-            observed, sampled, expires, _ = live._lease(pins, db)
-            windows_proof = assert_windows_current(challenge, boundary)
+            # Both operations observe the same fenced cutover and neither mutates it.
+            # Overlap the PostgreSQL sample with the independent Windows round trip.
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                database_proof = pool.submit(live._lease, pins, db)
+                windows_proof = assert_windows_current(challenge, boundary)
+                observed, sampled, expires, _ = database_proof.result()
             _need(_hash(windows_proof), "guest_worker_live_windows_unconfirmed")
             facts = {**runtime._runtime_identity(pins), **asdict(activation_pins), "challenge": challenge,
                      "boundary": boundary, "coordinator_intent_durable": True, "initial_postcommit_verified": True,
