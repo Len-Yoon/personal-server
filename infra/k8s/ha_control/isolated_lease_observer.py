@@ -70,6 +70,7 @@ def wsl_main():
     """Serve only bounded inventory and token-status requests over stdio."""
     from ha_runtime import seven_capture
     from .native_wsl_launcher import checked
+    from .wsl_writer_proof import InventoryDeadline
 
     owner = os.geteuid()
     require(owner != 0)
@@ -90,7 +91,11 @@ def wsl_main():
                 request = strict_json(frame)
                 require(set(request) == {'operation', 'budget_ms'} and type(request['budget_ms']) is int
                         and 0 < request['budget_ms'] <= 1800)
-                result = inventory(request['operation'], time.monotonic() + request['budget_ms'] / 1000)
+                try:
+                    result = inventory(request['operation'], time.monotonic() + request['budget_ms'] / 1000)
+                except InventoryDeadline as error:
+                    print(json.dumps({'inventory_error': error.reason() or 'deadline'}), flush=True)
+                    return
                 print(json.dumps(result), flush=True)
         finally:
             inventory.close()
@@ -187,7 +192,8 @@ def serve_fixture(listener, *, fixture_id, key, windows_argv, windows_pins, wsl_
             return windows.request({'operation': 'inventory'}, stop)['rows']
 
         def wsl_snapshot(operation, stop):
-            budget = min(1800, int((stop - time.monotonic()) * 1000))
+            # Leave time for the bounded rejection to cross the WSL pipe.
+            budget = min(1800, int((stop - time.monotonic()) * 1000) - 45)
             require(budget > 0)
             return wsl.request({'operation': operation, 'budget_ms': budget}, stop)
 
@@ -267,8 +273,12 @@ def live_handlers(*, windows_snapshot, windows_pins, wsl_snapshot, exclusion_hel
             pending = executor.submit(windows_snapshot, deadline)
             try:
                 wsl = wsl_snapshot('inventory', deadline)
+                require(type(wsl) is dict)
+                reason = wsl.get('inventory_error')
+                if type(reason) is str and re.fullmatch(r'deadline(?:_[a-z0-9]+)?', reason):
+                    raise TransitionBlocked('isolated_wsl_inventory_' + reason)
                 require(wsl == {'inventory_verified': True, 'active_token_status': 200})
-            except (OSError, ValueError, TransitionBlocked):
+            except (OSError, ValueError):
                 raise TransitionBlocked('isolated_wsl_inventory_unconfirmed') from None
             try:
                 windows = pending.result(timeout=max(0, deadline - time.monotonic()))
