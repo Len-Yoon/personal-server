@@ -331,6 +331,8 @@ class PersistentWriterProofTests(unittest.TestCase):
         raw = json.dumps(request).encode() + b"\n"
         for persistent, error, expected in (
             (True, TransitionBlocked("legacy_writer_command_unconfirmed"), ["ready", "e" * 64 + ":reject:inventory"]),
+            (True, wsl_writer_proof.InventoryDeadline("pods"), ["ready", "e" * 64 + ":reject:deadline_pods"]),
+            (True, wsl_writer_proof.InventoryDeadline("private field"), ["ready", "e" * 64 + ":reject:closure"]),
             (True, ValueError("private field"), ["ready", "e" * 64 + ":reject:internal"]),
             (False, ValueError("private field"), []),
         ):
