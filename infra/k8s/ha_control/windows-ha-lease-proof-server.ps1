@@ -296,22 +296,6 @@ try {
         if ($operator.User.Value -cne $OperatorSid) { throw 'lease_proof_operator' }
     } finally { $operator.Dispose() }
 
-    # DisconnectNamedPipe discards unread output. Drain asynchronously so a
-    # non-reading client cannot hold this single-instance broker indefinitely.
-    Add-Type -TypeDefinition @'
-using System.IO;
-using System.IO.Pipes;
-using System.Threading.Tasks;
-public static class HaLeaseProofDrain {
-    public static bool Wait(NamedPipeServerStream pipe, int timeout) {
-        var drain = Task.Factory.StartNew(() => {
-            try { pipe.WaitForPipeDrain(); }
-            catch (IOException) {} // The client may already have closed after reading.
-        });
-        return drain.Wait(timeout);
-    }
-}
-'@
     $mac = Open-ProofMac
     $callback = Read-ProtectedText $CallbackPath $CallbackSha256
     $inputConfig = ConvertFrom-Json -InputObject (Read-ProtectedText $CallbackConfigPath $CallbackConfigSha256)
@@ -396,11 +380,16 @@ public static class HaLeaseProofDrain {
             $bytes = $encoding.GetBytes((ConvertTo-Json -InputObject $envelope -Compress) + "`n")
             $write = $pipe.WriteAsync($bytes, 0, $bytes.Length)
             if (-not $write.Wait((Remaining))) { throw 'lease_proof_write' }
-            $phase = 'drain'
-            if (-not [HaLeaseProofDrain]::Wait($pipe, (Remaining))) {
-                Write-ProofOutcome 'drain_timeout'
+            # Keep the peer handle associated until the client finishes its
+            # post-read PID check. Draining alone only proves byte consumption.
+            $phase = 'ack'
+            $ack = [byte[]]::new(1)
+            $ackRead = $pipe.ReadAsync($ack, 0, $ack.Length)
+            if (-not $ackRead.Wait((Remaining))) {
+                Write-ProofOutcome 'ack_timeout'
                 [Environment]::Exit(1)
             }
+            if ($ackRead.Result -ne 1 -or $ack[0] -ne 6) { throw 'lease_proof_ack' }
         } catch {
             # Failure is a closed connection, never an authenticated positive receipt.
             if ($pipe.IsConnected) { $pipe.Disconnect() }

@@ -60,7 +60,7 @@ public static class HaLeaseProofPeer {
         try {
             $stage = 'connect'
             $pipe.Connect((Remaining))
-            $stage = 'peer'
+            $stage = 'peer_connect'
             [HaLeaseProofPeer]::Verify($pipe.SafePipeHandle, $ServerPid)
             $stage = 'write'
             $requestBytes = [Text.Encoding]::ASCII.GetBytes($request + "`n")
@@ -77,7 +77,7 @@ public static class HaLeaseProofPeer {
                 $offset += $read.Result
                 if ($end -ge 0) {
                     if ($end -ne $offset - 1) { throw 'lease_proof_frame' }
-                    $stage = 'peer'
+                    $stage = 'peer_response'
                     [HaLeaseProofPeer]::Verify($pipe.SafePipeHandle, $ServerPid)
                     $stage = 'frame'
                     $null = Remaining
@@ -87,6 +87,11 @@ public static class HaLeaseProofPeer {
                 }
             }
             if ($null -eq $frame) { throw 'lease_proof_size' }
+            # Release the server only after validating the peer and the frame.
+            $stage = 'ack'
+            $ack = [byte[]]@(6)
+            $ackWrite = $pipe.WriteAsync($ack, 0, $ack.Length)
+            if (-not $ackWrite.Wait((Remaining))) { throw 'lease_proof_ack' }
         } finally {
             $pipe.Dispose()
             $pipe = $null
