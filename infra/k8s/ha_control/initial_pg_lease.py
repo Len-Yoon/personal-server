@@ -17,6 +17,7 @@ INITIAL_CUTOVER = {'schema_version': 1, 'primary_node': 'A', 'partner_node': 'B'
 # This transaction performs two fresh Windows/WSL proofs around the
 # replicated commit. Each individual pipe request keeps its two-second cap.
 INITIAL_PROOF_SECONDS = 4
+INITIAL_OBSERVATION_STATEMENT_MS = 1200
 INITIAL_REVISION = 1
 OPEN_REVISION = 2
 STAMP = """singleton=1 AND cluster=%s AND epoch=1 AND revision=%s
@@ -121,10 +122,18 @@ class InitialPgLease:
             _deny('initial_lease_stamp_unverified')
         return row[0]
 
-    def _observe_pair(self, primary, peer, state, *, opened):
+    def _observe_pair(self, primary, peer, state, *, opened, started):
         def observe(connection, node):
             with _pg_phase(node, 'observe'):
+                remaining_ms = int((started + INITIAL_PROOF_SECONDS - time.monotonic()) * 1000)
+                if remaining_ms <= 0:
+                    _deny('initial_replication_deadline_exceeded')
+                timeout_ms = min(INITIAL_OBSERVATION_STATEMENT_MS, remaining_ms)
+                connection.execute(f'SET statement_timeout={timeout_ms}')
                 value = self.backend._observe(connection, node, state)
+                # The failed path closes both connections. Restore PgBackend's
+                # shorter limit before the expiry read and any write or commit.
+                connection.execute("SET statement_timeout='700ms'")
             with _pg_phase(node, 'read_expiry'):
                 expiry = self._expiry(connection.execute('SELECT expires_at FROM ha.control WHERE singleton=1').fetchone())
             return value, expiry
@@ -135,6 +144,7 @@ class InitialPgLease:
             standby = pool.submit(observe, peer, 'B')
             current, expires = observe(primary, 'A')
             replica, replica_expires = standby.result()
+        self._deadline(started)
         self._pair(current, replica, state, opened=opened)
         if expires != replica_expires:
             _deny('initial_lease_stamp_unverified')
@@ -174,7 +184,7 @@ class InitialPgLease:
                 primary = connections.enter_context(self.backend._connection('A'))
                 peer = connections.enter_context(self.backend._connection('B'))
                 self._begin(primary, shared=renewing)
-                _, _, previous = self._observe_pair(primary, peer, state, opened=renewing)
+                _, _, previous = self._observe_pair(primary, peer, state, opened=renewing, started=started)
                 closure.result()
             if renewing:
                 self.owned_expiries = {previous}
@@ -188,7 +198,7 @@ class InitialPgLease:
                 watermark = self.backend._lsn(primary.execute('SELECT pg_current_wal_flush_lsn()::text').fetchone()[0])
 
             self._begin(primary, shared=renewing)
-            _, replica, expires = self._observe_pair(primary, peer, state, opened=renewing)
+            _, replica, expires = self._observe_pair(primary, peer, state, opened=renewing, started=started)
             with _pg_phase('B', 'read_fence_probe'):
                 if (expires != previous or peer.execute(PROBE_READ, (barrier,)).fetchone() != (1,)
                         or self.backend._lsn(replica['replay']) < watermark):
@@ -214,7 +224,7 @@ class InitialPgLease:
 
             with ThreadPoolExecutor(max_workers=1) as pool:
                 closure = pool.submit(self._legacy, state, started)
-                current, replica, expires = self._observe_pair(primary, peer, state, opened=True)
+                current, replica, expires = self._observe_pair(primary, peer, state, opened=True, started=started)
                 def probe_visible(connection, node):
                     with _pg_phase(node, 'read_lease_probe'):
                         return connection.execute(PROBE_READ, (lease_probe,)).fetchone() == (1,)
@@ -258,7 +268,7 @@ class InitialPgLease:
         started = time.monotonic()
         self._legacy(state, started)
         with self.backend._connection('A') as primary, self.backend._connection('B') as peer:
-            _, _, expires = self._observe_pair(primary, peer, state, opened=True)
+            _, _, expires = self._observe_pair(primary, peer, state, opened=True, started=started)
         self._legacy(state, started)
         return self._proof(state, expires, None)
 
