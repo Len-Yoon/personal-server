@@ -222,6 +222,38 @@ namespace N100Ha {
     }
 }
 
+function Update-HaSupervisorInstance($Plan) {
+    # The task may have restarted since the plan was staged. Only the
+    # execution identity can change. The task and command definitions are pinned.
+    $task = @($Plan.tasks | Where-Object { $_.role -ceq 'supervisor' })[0]
+    $null = Read-HaReactivationTask $task
+    $instances = @(Get-HaTaskInstances $task)
+    if ($instances.Count -ne 1 -or $instances[0].state -ne 4 -or
+        $instances[0].guid -notmatch '^\{[a-fA-F0-9-]{36}\}$') {
+        throw 'legacy_reactivation_task_instance_drift'
+    }
+    $processes = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -OperationTimeoutSec 5 -ErrorAction Stop)
+    $pins = @{}
+    foreach ($role in @('supervisor', 'daemon')) {
+        $expected = $Plan.$role
+        $matches = @($processes | Where-Object {
+            (Get-HaReactivationHash ([string]$_.CommandLine)) -ceq $expected.command_sha256
+        })
+        if ($matches.Count -ne 1) { throw 'legacy_reactivation_process_drift' }
+        $process = [Diagnostics.Process]::GetProcessById($matches[0].ProcessId)
+        try {
+            $pins[$role] = [pscustomobject]@{
+                pid = $process.Id
+                created_ticks = $process.StartTime.ToUniversalTime().Ticks.ToString()
+                command_sha256 = $expected.command_sha256
+            }
+        } finally { $process.Dispose() }
+    }
+    $task.instance_guid = $instances[0].guid
+    $Plan.supervisor = $pins.supervisor
+    $Plan.daemon = $pins.daemon
+}
+
 function Close-HaReactivation($Plan, [scriptblock]$AssertAdmissionsDrained, [scriptblock]$AssertRecoverySettled) {
     if ($null -eq $AssertAdmissionsDrained -or $null -eq $AssertRecoverySettled) {
         throw 'legacy_reactivation_admission_guard_required'
@@ -232,19 +264,27 @@ function Close-HaReactivation($Plan, [scriptblock]$AssertAdmissionsDrained, [scr
         $state.tasks.supervisor.State -ne 'Running' -or $state.tasks['wsl-anchor'].State -ne 'Running') {
         throw 'legacy_reactivation_original_state_changed'
     }
+    $bootstrap = Join-Path $env:SystemDrive 'personal-server\scripts\windows-bootstrap.ps1'
+    Update-HaSupervisorInstance $Plan
     foreach ($pin in $Plan.tasks) {
         if ($pin.role -ne 'emergency') { Assert-HaTaskInstance $pin }
         if ([bool]$state.tasks[$pin.role].Settings.Enabled -ne $pin.enabled) {
             throw 'legacy_reactivation_original_state_changed'
         }
     }
-    $bootstrap = Join-Path $env:SystemDrive 'personal-server\scripts\windows-bootstrap.ps1'
     $supervisor = Open-HaRecoveryProcess $Plan.supervisor 'Supervisor' $bootstrap
     $daemon = $null
     try {
         $daemon = Open-HaRecoveryProcess $Plan.daemon 'Daemon' $bootstrap
-        if ($daemon.parent_id -ne $supervisor.process.Id) { throw 'legacy_reactivation_process_parent_changed' }
+        if ($daemon.parent_id -ne $supervisor.process.Id -or
+            $daemon.process.StartTime -lt $supervisor.process.StartTime) {
+            throw 'legacy_reactivation_process_parent_changed'
+        }
         & $AssertRecoverySettled
+        Assert-HaTaskInstance (@($Plan.tasks | Where-Object { $_.role -ceq 'supervisor' })[0])
+        if ($supervisor.process.HasExited -or $daemon.process.HasExited) {
+            throw 'legacy_reactivation_process_drift'
+        }
         Set-Service -Name $Plan.runner.name -StartupType Disabled -ErrorAction Stop
         # Refuse to interrupt a GitHub Actions job even if it was assigned during the first observation.
         $null = Read-HaReactivationSnapshot $Plan
