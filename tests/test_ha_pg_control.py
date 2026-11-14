@@ -873,9 +873,36 @@ class InitialPgLeaseTests(unittest.TestCase):
 
         self.backend._observe = observe
         with patch.object(self.lease, '_pair') as verify:
-            self.assertEqual(self.lease._observe_pair(primary, standby, self.state, opened=False),
+            self.assertEqual(self.lease._observe_pair(primary, standby, self.state, opened=False,
+                                                       started=time.monotonic()),
                              ('A', 'B', expiry))
         verify.assert_called_once_with('A', 'B', self.state, opened=False)
+
+    def test_observation_timeout_uses_remaining_cutover_budget_and_restores_default(self):
+        expiry = datetime.now(timezone.utc)
+        primary, standby = MagicMock(), MagicMock()
+        for connection in (primary, standby):
+            connection.execute.return_value.fetchone.return_value = (expiry,)
+        self.backend._observe = MagicMock()
+
+        from ha_control import initial_pg_lease
+        for elapsed, expected_ms in ((0.5, 1200), (3.5, 500)):
+            with self.subTest(elapsed=elapsed), patch.object(initial_pg_lease.time, 'monotonic', return_value=elapsed), \
+                    patch.object(self.lease, '_pair'):
+                self.lease._observe_pair(primary, standby, self.state, opened=False, started=0)
+            for connection in (primary, standby):
+                self.assertEqual([call.args[0] for call in connection.execute.call_args_list],
+                                 [f'SET statement_timeout={expected_ms}', "SET statement_timeout='700ms'",
+                                  'SELECT expires_at FROM ha.control WHERE singleton=1'])
+                connection.reset_mock()
+            self.backend._observe.reset_mock()
+
+        with patch.object(initial_pg_lease.time, 'monotonic', return_value=4.0):
+            with self.assertRaisesRegex(TransitionBlocked, 'initial_replication_deadline_exceeded'):
+                self.lease._observe_pair(primary, standby, self.state, opened=False, started=0)
+        primary.execute.assert_not_called()
+        standby.execute.assert_not_called()
+        self.backend._observe.assert_not_called()
 
     def setUp(self):
         self.cluster = 'initial_test'
