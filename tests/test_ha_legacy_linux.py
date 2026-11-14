@@ -585,6 +585,8 @@ class GraphTests(unittest.TestCase):
         key = base64.b64encode(b"-----BEGIN PRIVATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n").decode()
         text = "apiVersion: v1\nclusters:\n- cluster:\n    certificate-authority-data: " + ca + "\n    server: https://127.0.0.1:6443\n  name: default\ncontexts:\n- context:\n    cluster: default\n    user: default\n  name: default\ncurrent-context: default\nkind: Config\npreferences: {}\nusers:\n- name: default\n  user:\n    client-certificate-data: " + ca + "\n    client-key-data: " + key + "\n"
         self.assertEqual(len(graph.parse_kubeconfig(text.encode())), 3)
+        self.assertEqual(graph.parse_kubeconfig(text.replace("preferences: {}\n", "").encode()),
+                         graph.parse_kubeconfig(text.encode()))
         variants = [text + "    exec: {command: untrusted}\n", text.replace("  user:\n", "  user:\n    auth-provider: {name: untrusted}\n"), text.replace("server: https://127.0.0.1:6443", "server: https://outside.invalid:6443"), text.replace("preferences: {}", "preferences: &alias {}"), text.replace("kind: Config", "kind: !!python/object Config"), text.replace("    server:", "    insecure-skip-tls-verify: true\n    server:"), text.replace("    server:", "    proxy-url: https://outside.invalid\n    server:")]
         for index, value in enumerate(variants):
             with self.subTest(index=index), self.assertRaisesRegex(graph.Blocked, "unsupported_kubeconfig_profile"):
