@@ -1047,6 +1047,78 @@ class InitialPgLeaseTests(unittest.TestCase):
         self.assertEqual(self.trace, [])
 
 
+class IsolatedLeaseRehearsalTests(unittest.TestCase):
+    def test_fixture_observer_rejects_replayed_receipt(self):
+        import hmac
+        from ha_control.scm_isolated_lease_probe import FixtureObserver
+
+        key = bytes(range(32))
+        saved = None
+
+        def request(envelope, _deadline):
+            nonlocal saved
+            challenge = envelope["challenge"]
+            if saved is None:
+                result = {"held": True}
+                body = {"challenge": challenge, "result": result}
+                raw = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("ascii")
+                saved = dict(body, mac=hmac.digest(key, raw, "sha256").hex())
+            return saved
+
+        observer = FixtureObserver(request, "a" * 32, key)
+        self.assertTrue(observer.exclusion({}, time.monotonic() + 1))
+        with self.assertRaises(ValueError):
+            observer.exclusion({}, time.monotonic() + 1)
+
+    def test_rehearsal_requires_post_401_renewal_then_revokes(self):
+        from ha_control import isolated_lease_rehearsal as rehearsal
+
+        sid = "S-1-5-80-1-2-3-4-5"
+        start = datetime.now(timezone.utc)
+        expiry = start + timedelta(seconds=3)
+        backend = object.__new__(rehearsal.DisposableLeaseBackend)
+        backend.plan = {"system_id": "123", "cluster": "ha_lease_rehearsal_" + "a" * 16,
+                        "windows_enforced": {"service_sid": sid, "config_profile": {
+                            "acceptance_scope": "isolated-predeployment", "operational_cutover_accepted": False}},
+                        "pg_nodes": {node: {"dbname": "ha_lease_rehearsal", "port": 25432,
+                                            "sslmode": "verify-full"} for node in ("A", "B")}}
+        elapsed = 0
+        lease = MagicMock()
+
+        def issue(_):
+            lease.owned_expiries = {start + timedelta(seconds=elapsed + 5)}
+
+        def sleep(seconds):
+            nonlocal elapsed
+            elapsed += seconds
+
+        lease.open.side_effect = lease.renew.side_effect = issue
+        clock = MagicMock()
+        clock.now.side_effect = lambda _: start + timedelta(seconds=elapsed)
+        status = MagicMock(side_effect=[200, 401])
+        check = MagicMock(return_value=True)
+        database = MagicMock()
+        database.__enter__.return_value.execute.return_value.fetchone.return_value = (True,)
+        with patch.object(rehearsal, "service_identity", return_value=sid), \
+                patch.object(backend, "_connection", return_value=database), \
+                patch.object(rehearsal, "InitialPgLease", return_value=lease), \
+                patch.object(rehearsal, "datetime", clock), \
+                patch.object(rehearsal.time, "monotonic", side_effect=lambda: elapsed), \
+                patch.object(rehearsal.time, "sleep", side_effect=sleep):
+            result = rehearsal.run(backend, state={}, service_sid=sid, retained_system_ids={"456"},
+                                   observe=MagicMock(), exclusion=MagicMock(), previous_token_status=status,
+                                   token_expires_at=expiry, assert_single_writer=check)
+            with self.assertRaisesRegex(TransitionBlocked, "isolated_lease_scope_invalid"):
+                rehearsal.run(backend, state={}, service_sid=sid, retained_system_ids={"123"},
+                              observe=MagicMock(), exclusion=MagicMock(), previous_token_status=status,
+                              token_expires_at=expiry, assert_single_writer=check)
+        self.assertEqual(result, {"renewals": 4, "old_token_rejected": True,
+                                  "max_proof_ms": 0, "max_lease_gap_ms": 1000})
+        self.assertEqual(check.call_count, 3)
+        check.assert_called_with({}, None, writes_open=False)
+        lease.revoke.assert_called_once_with({})
+
+
 class ScmPgAuthProbeTests(unittest.TestCase):
     def test_exact_service_scope_and_two_verified_read_only_connections(self):
         probe=scm_pg_auth_probe
