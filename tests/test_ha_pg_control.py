@@ -824,6 +824,15 @@ class InitialLeaseServiceTests(unittest.TestCase):
 
 
 class InitialPgLeaseTests(unittest.TestCase):
+    def test_initial_commit_cancellation_is_attributed_to_primary(self):
+        class CommitCanceled(Exception):
+            sqlstate = '57014'
+
+        with patch.object(self.backend, '_commit', side_effect=CommitCanceled('private driver detail')):
+            with self.assertRaisesRegex(TransitionBlocked, '^authenticated_pg_unavailable$') as error:
+                self.lease._commit_primary(object())
+        self.assertEqual(error.exception.failure_code, 'initial_pg_a_commit_canceled')
+
     def test_initial_pg_read_overlaps_closure_and_failure_blocks_writes(self):
         from threading import Event
 

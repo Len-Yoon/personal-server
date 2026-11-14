@@ -9,7 +9,8 @@ import re
 import time
 import uuid
 
-from .pg import LEASE_SECONDS, ROLE_LOCK, _deny
+from .controller import TransitionBlocked
+from .pg import LEASE_SECONDS, ROLE_LOCK, PgUnavailable, _deny
 
 
 INITIAL_CUTOVER = {'schema_version': 1, 'primary_node': 'A', 'partner_node': 'B'}
@@ -141,6 +142,17 @@ class InitialPgLease:
                    'system_id': self.scope[3], 'expires_at': expires.isoformat(), 'nonce': nonce}
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
+    def _commit_primary(self, primary):
+        try:
+            self.backend._commit(primary)
+        except TransitionBlocked:
+            raise
+        except Exception as error:
+            sqlstate = getattr(error, 'sqlstate', None)
+            if sqlstate is None:
+                raise
+            raise PgUnavailable('A', 'commit', sqlstate) from None
+
     def _lease(self, state, *, renewing):
         started = time.monotonic()
         nonce = 'initial-a:' + uuid.uuid4().hex
@@ -160,7 +172,7 @@ class InitialPgLease:
             primary.execute("DELETE FROM ha.controller_probes WHERE generation=1 AND left(nonce,10)='initial-a:'")
             primary.execute('INSERT INTO ha.controller_probes(nonce,generation) VALUES(%s,1)', (barrier,))
             self._deadline(started)
-            self.backend._commit(primary)
+            self._commit_primary(primary)
             watermark = self.backend._lsn(primary.execute('SELECT pg_current_wal_flush_lsn()::text').fetchone()[0])
 
             self._begin(primary, shared=renewing)
@@ -183,7 +195,7 @@ class InitialPgLease:
             self.owned_expiries.add(current_expiry)
             primary.execute('INSERT INTO ha.controller_probes(nonce,generation) VALUES(%s,1)', (lease_probe,))
             self._deadline(started)
-            self.backend._commit(primary)
+            self._commit_primary(primary)
 
             with ThreadPoolExecutor(max_workers=1) as pool:
                 closure = pool.submit(self._legacy, state, started)
