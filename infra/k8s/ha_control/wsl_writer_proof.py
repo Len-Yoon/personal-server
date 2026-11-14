@@ -1,6 +1,6 @@
 """Read-only batched closure proof for the exact approved Linux writer identities."""
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 import hashlib
 import json
 import os
@@ -21,6 +21,11 @@ SHA = re.compile(r'[a-f0-9]{64}\Z')
 BOOT_ID = Path('/proc/sys/kernel/random/boot_id')
 RECOVERY_TOOL = re.compile(rb'(windows-bootstrap[.]sh|deploy-n100(?:-safe)?[.]sh|kubectl|systemctl|docker)')
 RECOVERY_ACTION = re.compile(rb'(rollout|restart|start|stop|compose|apply|scale|patch|update|delete|replace|create)')
+QUERY_NAMES = ('deployments', 'cronjobs', 'jobs', 'replicasets', 'pods', 'docker', 'autoscalers')
+
+
+class InventoryDeadline(TransitionBlocked):
+    """One fixed query label for a collection that missed its deadline."""
 
 
 def _payload(value):
@@ -38,14 +43,20 @@ def _deadline(stop):
 
 
 def _inventory(runner, stop):
-    def run(command):
-        result = runner(command, timeout=_deadline(stop))
-        _deadline(stop)
+    def run(command, name):
+        try:
+            result = runner(command, timeout=_deadline(stop))
+            _deadline(stop)
+        except TransitionBlocked as error:
+            if time.monotonic() >= stop:
+                raise InventoryDeadline(name) from error
+            raise
         return result
 
     def raw(group, resource, *, namespace=True):
         location = group + ('/namespaces/' + NAMESPACE if namespace else '') + '/' + resource
-        result = _payload(run((*KUBE, 'get', '--raw=' + location)))
+        name = resource if namespace else 'autoscalers'
+        result = _payload(run((*KUBE, 'get', '--raw=' + location), name))
         _need(type(result) is dict and type(result.get('items')) is list,
               'legacy_writer_proof_response_invalid')
         return result
@@ -57,10 +68,10 @@ def _inventory(runner, stop):
     }
 
     def containers():
-        ids = run((*DOCKER, 'ps', '-aq', '--no-trunc')).decode('ascii').split()
+        ids = run((*DOCKER, 'ps', '-aq', '--no-trunc'), 'docker').decode('ascii').split()
         _need(1 <= len(ids) <= 64 and len(set(ids)) == len(ids)
               and all(CONTAINER.fullmatch(value) for value in ids), 'legacy_writer_proof_response_invalid')
-        rows = _payload(run((*DOCKER, 'inspect', *ids)))
+        rows = _payload(run((*DOCKER, 'inspect', *ids), 'docker'))
         _need(len(rows) == len(ids) and {row['Id'] for row in rows} == set(ids), 'legacy_writer_proof_response_invalid')
         return rows
 
@@ -68,6 +79,14 @@ def _inventory(runner, stop):
         queries = {kind: pool.submit(raw, group, plural) for kind, (group, plural) in scopes.items()}
         docker_request = pool.submit(containers)
         hpa_request = pool.submit(raw, '/apis/autoscaling/v2', 'horizontalpodautoscalers', namespace=False)
+        requests = dict(zip(QUERY_NAMES, (*queries.values(), docker_request, hpa_request)))
+        _, pending = wait(requests.values(), timeout=max(0, stop - time.monotonic()))
+        for name, query in requests.items():
+            if query in pending:
+                raise InventoryDeadline(name)
+            error = query.exception()
+            if isinstance(error, InventoryDeadline):
+                raise error
         resources = {}
         for kind, query in queries.items():
             rows = query.result()['items']
@@ -205,6 +224,8 @@ def main(*, persistent=False):
                         }.get(str(error), 'closure')
                     if time.monotonic() >= deadline:
                         reason = 'deadline'
+                    if isinstance(error, InventoryDeadline) and str(error) in QUERY_NAMES:
+                        reason = 'deadline_' + str(error)
                     print(request['challenge'] + ':reject:' + reason, flush=True)
                 return 1
             if not persistent:
