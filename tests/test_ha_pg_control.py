@@ -1364,10 +1364,13 @@ send({'status': 'PASS'})
         self.assertEqual(observed, ['open', 'current', 'publish', 'current', 'start', 'current', 'handover'])
 
 
+        attempts = []
+
         def fail_before_handoff(_request, native_intent, _deadline):
             self.assertEqual(native_intent, intent)
 
             def timeout(_deadline):
+                attempts.append(_deadline)
                 raise bridge.BridgeRejected('guest_ssh_deadline_exceeded')
 
             yield SimpleNamespace(first_write_proof_sha256='c' * 64, service_instance_sha256='d' * 64,
@@ -1381,6 +1384,20 @@ send({'status': 'PASS'})
             dispatcher(request, time.monotonic() + 1)
         self.assertEqual(_reason(failure.exception), 'activation_live_service_check_ssh_deadline_exceeded')
         self.assertEqual(observed, [])
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[0], attempts[1])
+
+        @contextmanager
+        def transient_timeout(_request, _intent, _deadline):
+            check = MagicMock(side_effect=[bridge.BridgeRejected('guest_ssh_deadline_exceeded'), 'f' * 64,
+                                      'f' * 64, 'f' * 64])
+            yield SimpleNamespace(first_write_proof_sha256='c' * 64, service_instance_sha256='d' * 64,
+                                  assert_current=check)
+            self.assertEqual(check.call_count, 4)
+
+        custody.open_first_write = transient_timeout
+        self.assertEqual(dispatcher(request, time.monotonic() + 1), reply)
+        self.assertEqual(observed, ['publish', 'start'])
 
     def test_activation_timeout_identifies_innermost_transport(self):
         from ha_control import native_activation_handoff as handoff, native_stdio_bridge as bridge

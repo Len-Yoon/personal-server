@@ -69,12 +69,15 @@ def guest_handoff(request, installation_id, checked_record, intent, first_write_
                           'prepared_receipt_sha256': checked['runtime_receipt_sha256'], 'activation_pins': asdict(pins)})
 
 
+_SSH_TIMEOUTS = {'guest_ssh_deadline_exceeded', 'bridge_deadline_exceeded'}
+
+
 @contextmanager
 def _transport_stage(stage):
     try:
         yield
     except bridge.BridgeRejected as error:
-        if str(error) not in {'guest_ssh_deadline_exceeded', 'bridge_deadline_exceeded'}:
+        if str(error) not in _SSH_TIMEOUTS:
             raise
         raise bridge.BridgeRejected(f'activation_{stage}_ssh_deadline_exceeded') from None
 
@@ -102,7 +105,16 @@ class ActivationDispatcher:
             payload = guest_handoff(request, installation_id, checked, intent, windows.first_write_proof_sha256,
                                     windows.service_instance_sha256)
             with _transport_stage("live_service_check"):
-                bridge._need(bridge._hash(windows.assert_current(deadline)), 'activation_dispatch_unconfirmed')
+                try:
+                    proof = windows.assert_current(deadline)
+                except bridge.BridgeRejected as error:
+                    if str(error) not in _SSH_TIMEOUTS:
+                        raise
+                    # Only this read can be repeated before the handoff exists.
+                    # A new request samples the current lease after transport recovery.
+                    bridge._remaining(deadline)
+                    proof = windows.assert_current(deadline)
+                bridge._need(bridge._hash(proof), 'activation_dispatch_unconfirmed')
             with _transport_stage("publish_handoff"):
                 self.custody.publish_guest_handoff(request, payload, deadline)
             def check_guest_boundary(boundary_deadline):
