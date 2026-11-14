@@ -31,6 +31,38 @@ def sha(raw):return hashlib.sha256(raw).hexdigest()
 
 
 class NativeGuestActivationTests(unittest.TestCase):
+    def test_transport_window_does_not_extend_database_freshness(self):
+        activation = native_guest_activation
+        pins = activation.ActivationPins(*("abcdef"[i] * 64 for i in range(6)))
+        now = datetime.now(timezone.utc)
+
+        def proof(challenge, boundary):
+            sampled = now - timedelta(seconds=age)
+            return {
+                **activation.asdict(pins), "challenge": challenge, "boundary": boundary,
+                "coordinator_intent_durable": True, "initial_postcommit_verified": True,
+                "legacy_writers_closed": True, "standby_runtime_closed": True,
+                "runtime_mutations_excluded": True, "epoch": 1, "timeline": 1, "revision": 2,
+                "primary": "A", "partner": "B", "writes_open": True, "lease_sha256": "f" * 64,
+                "observed_at": sampled.isoformat().replace("+00:00", "Z"),
+                "expires_at": (sampled + timedelta(seconds=5)).isoformat().replace("+00:00", "Z"),
+            }
+
+        for age, elapsed, failure in (
+            (0.1, 3.2, None),
+            (2.1, 3.2, "guest_activation_observation_age"),
+            (5.1, 3.2, "guest_activation_expired_during_check"),
+            (0.1, 4.1, "guest_activation_boundary_deadline"),
+        ):
+            with self.subTest(age=age, elapsed=elapsed), \
+                    patch.object(activation.runtime, "_runtime_identity", return_value={}), \
+                    patch.object(activation.time, "monotonic", side_effect=(0, elapsed)):
+                if failure is None:
+                    self.assertEqual(activation._check_lease(None, pins, proof, "activation_intent"), "f" * 64)
+                else:
+                    with self.assertRaisesRegex(TransitionBlocked, failure):
+                        activation._check_lease(None, pins, proof, "activation_intent")
+
     def test_failed_boundary_preserves_only_bounded_diagnostics(self):
         activation = native_guest_activation
         pins = activation.ActivationPins(*("abcdef"[i] * 64 for i in range(6)))
