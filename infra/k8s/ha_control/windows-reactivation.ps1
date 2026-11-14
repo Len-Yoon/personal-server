@@ -51,22 +51,28 @@ function Read-HaReactivationTask($Pin, $Folder = $null) {
 }
 
 function Read-HaReactivationRunner($Pin) {
+    $ErrorActionPreference = 'Stop'
     if ($Pin.name -notmatch '^actions\.runner\.[A-Za-z0-9._-]{1,180}$') { throw 'legacy_reactivation_runner_scope' }
-    $service = Get-Service -Name $Pin.name -ErrorAction Stop
     $config = Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$($Pin.name)" -ErrorAction Stop
-    if ($service.Name -cne $Pin.name -or $config.ImagePath -isnot [string] -or $config.ObjectName -isnot [string] -or
-        (Get-HaReactivationHash "$($service.Name)`n$($config.ImagePath)`n$($config.ObjectName)") -cne $Pin.spec_sha256) {
+    if ($config.PSChildName -cne $Pin.name -or $config.ImagePath -isnot [string] -or $config.ObjectName -isnot [string] -or
+        (Get-HaReactivationHash "$($config.PSChildName)`n$($config.ImagePath)`n$($config.ObjectName)") -cne $Pin.spec_sha256) {
         throw 'legacy_reactivation_runner_drift'
     }
-    $startMode = switch ([int]$service.StartType) {
+    # Query the pinned service directly without enumerating the host service table.
+    $service = [System.ServiceProcess.ServiceController]::new()
+    try {
+        $service.ServiceName = $Pin.name
+        $serviceStartType = [int]$service.StartType
+        $state = [string]$service.Status
+    } finally { $service.Dispose() }
+    $startMode = switch ($serviceStartType) {
         2 { 'Auto' }
         4 { 'Disabled' }
         default { throw 'legacy_reactivation_runner_pending' }
     }
-    $state = [string]$service.Status
     $delayed = $config.PSObject.Properties['DelayedAutoStart']
     $isDelayed = $null -ne $delayed -and [int]$delayed.Value -eq 1
-    if ($config.Start -isnot [int] -or $config.Start -ne [int]$service.StartType -or
+    if ($config.Start -isnot [int] -or $config.Start -ne $serviceStartType -or
         ($startMode -eq 'Auto' -and $isDelayed -ne $Pin.delayed) -or $state -notin @('Running', 'Stopped')) {
         throw 'legacy_reactivation_runner_pending'
     }
