@@ -106,6 +106,7 @@ function Get-HaLeaseProof($Context) {
     }
     $process = $script:ClosureProcess
     $vmObserver = $null
+    $runningProbe = $null
     try {
         $Context.Progress.step = 'hyperv_start'
         $vmObserver = [PowerShell]::Create()
@@ -129,10 +130,24 @@ function Get-HaLeaseProof($Context) {
         if ($marker.plan_sha256 -cne $request.plan_sha256 -or $marker.attempt_id -cne $request.attempt_id -or
             $marker.generation -ne $request.generation) { throw 'lease_proof_callback_scope' }
         $Context.Progress.step = 'wsl_running'
-        $running = @(& $script:ClosureWsl --list --running --quiet | ForEach-Object { ($_ -replace ([char]0),'').Trim() })
-        if ($LASTEXITCODE -ne 0 -or $script:ClosurePlan.distribution -cnotin $running) { throw 'lease_proof_wsl_not_running' }
+        $start = [Diagnostics.ProcessStartInfo]::new($script:ClosureWsl, '--list --running --quiet')
+        $start.UseShellExecute = $false
+        $start.CreateNoWindow = $true
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        $runningProbe = [Diagnostics.Process]::Start($start)
+        $runningOutput = $runningProbe.StandardOutput.ReadToEndAsync()
+        $runningError = $runningProbe.StandardError.ReadToEndAsync()
         $Context.Progress.step = 'windows_closed'
         Assert-HaReactivationClosed $script:ClosurePlan $Context.Progress
+        $Context.Progress.step = 'wsl_running'
+        if (-not $runningProbe.WaitForExit((Get-HaClosureRemaining $Context)) -or $runningProbe.ExitCode -ne 0 -or
+            -not $runningOutput.Wait((Get-HaClosureRemaining $Context)) -or
+            -not $runningError.Wait((Get-HaClosureRemaining $Context)) -or $runningError.Result.Length -ne 0) {
+            throw 'lease_proof_wsl_not_running'
+        }
+        $running = @($runningOutput.Result -split '\r?\n' | ForEach-Object { ($_ -replace ([char]0),'').Trim() })
+        if ($script:ClosurePlan.distribution -cnotin $running) { throw 'lease_proof_wsl_not_running' }
         $Context.Progress.step = 'hyperv'
         if (-not $vmPending.AsyncWaitHandle.WaitOne((Get-HaClosureRemaining $Context))) { throw 'lease_proof_vm_deadline' }
         $vmRows = $vmObserver.EndInvoke($vmPending)
@@ -175,6 +190,10 @@ function Get-HaLeaseProof($Context) {
         throw
     } finally {
         # The broker owns the hard deadline and exits if disposal is blocked.
+        if ($null -ne $runningProbe) {
+            try { if (-not $runningProbe.HasExited) { $runningProbe.Kill() } }
+            finally { $runningProbe.Dispose() }
+        }
         if ($null -ne $vmObserver) { $vmObserver.Dispose() }
     }
 }
