@@ -102,26 +102,29 @@ function Get-HaLeaseProof($Context) {
     $payload = [ordered]@{
         runtime_path=$script:ClosureInput.runtime_path; runtime_sha256=$script:ClosureInput.runtime_sha256;
         plan=$request.plan_sha256; attempt=$request.attempt_id; wsl_boot_sha256=$request.wsl_boot_sha256;
-        challenge=$challenge; budget_ms=(Get-HaClosureRemaining $Context)
+        challenge=$challenge; budget_ms=0
     }
     $process = $script:ClosureProcess
     $vmObserver = $null
     $runningProbe = $null
     try {
+        $Context.Progress.step = 'wsl_send'
+        if ($null -eq $process -or $process.HasExited -or $script:ClosureStderr.IsCompleted) {
+            throw 'lease_proof_wsl_unconfirmed'
+        }
+        $output = $process.StandardOutput.ReadLineAsync()
+        # Reserve time for WSL to return its rejection before the broker expires.
+        $payload.budget_ms = (Get-HaClosureRemaining $Context) - 125
+        if ($payload.budget_ms -lt 1) { throw 'lease_proof_callback_deadline' }
+        $message = ConvertTo-Json -InputObject $payload -Compress
+        $write = $process.StandardInput.WriteLineAsync($message)
+        if (-not $write.Wait((Get-HaClosureRemaining $Context))) { throw 'lease_proof_callback_deadline' }
         $Context.Progress.step = 'hyperv_start'
         $vmObserver = [PowerShell]::Create()
         $vmObserver.Runspace = $Context.VmRunspace
         $null = $vmObserver.AddCommand('Get-FixedVmObserverSnapshot').
             AddArgument($script:ClosureInput.installation_id).AddArgument($script:ClosureVmA).AddArgument($script:ClosureVmB)
         $vmPending = $vmObserver.BeginInvoke()
-        $Context.Progress.step = 'wsl_send'
-        if ($null -eq $process -or $process.HasExited -or $script:ClosureStderr.IsCompleted) {
-            throw 'lease_proof_wsl_unconfirmed'
-        }
-        $output = $process.StandardOutput.ReadLineAsync()
-        $message = ConvertTo-Json -InputObject $payload -Compress
-        $write = $process.StandardInput.WriteLineAsync($message)
-        if (-not $write.Wait((Get-HaClosureRemaining $Context))) { throw 'lease_proof_callback_deadline' }
         # The collector only reads. Start it before the Windows checks so the
         # same challenge can observe both sides within one deadline.
         $Context.Progress.step = 'marker_before'
