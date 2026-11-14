@@ -23,7 +23,7 @@ SERVICE_SID = re.compile(r"S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}")
 PIPE = re.compile(r"n100ha-lease-proof-[0-9a-f]{32}")
 CLIENT_FAILURES = {
     f"failure {stage}\r\n".encode("ascii"): f"legacy_pipe_client_{stage}"
-    for stage in ("request", "connect", "peer", "write", "read", "frame")
+    for stage in ("request", "connect", "peer_connect", "write", "read", "peer_response", "frame", "ack")
 }
 
 
