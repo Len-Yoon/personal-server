@@ -2,10 +2,13 @@
 
 from concurrent.futures import ThreadPoolExecutor, wait
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
 import re
+import ssl
+import stat
 import sys
 import time
 
@@ -13,6 +16,7 @@ from ha_runtime import seven_capture
 
 from .controller import TransitionBlocked
 from .legacy_writers import COMPOSE_ORDER, CONTAINER, DOCKER, KUBE, LinuxWriters, _need, _run
+from .native_wsl_launcher import checked
 
 
 NAMESPACE = 'personal-server'
@@ -22,6 +26,93 @@ BOOT_ID = Path('/proc/sys/kernel/random/boot_id')
 RECOVERY_TOOL = re.compile(rb'(windows-bootstrap[.]sh|deploy-n100(?:-safe)?[.]sh|kubectl|systemctl|docker)')
 RECOVERY_ACTION = re.compile(rb'(rollout|restart|start|stop|compose|apply|scale|patch|update|delete|replace|create)')
 QUERY_NAMES = ('deployments', 'cronjobs', 'jobs', 'replicasets', 'pods', 'docker', 'autoscalers')
+KUBE_SCOPES = {
+    'Deployment': ('/apis/apps/v1', 'deployments'), 'CronJob': ('/apis/batch/v1', 'cronjobs'),
+    'Job': ('/apis/batch/v1', 'jobs'), 'ReplicaSet': ('/apis/apps/v1', 'replicasets'),
+    'Pod': ('/api/v1', 'pods'),
+}
+KUBE_LIST_PATHS = frozenset(
+    group + '/namespaces/' + NAMESPACE + '/' + resource for group, resource in KUBE_SCOPES.values()
+) | {'/apis/autoscaling/v2/horizontalpodautoscalers'}
+
+
+class KubernetesListReader:
+    """Six independent HTTPS connections for fixed, fresh Kubernetes lists."""
+
+    def __init__(self, context, token):
+        _need(context.check_hostname and context.verify_mode == ssl.CERT_REQUIRED
+              and type(token) is str and re.fullmatch(r'[A-Za-z0-9._-]{1,16384}', token),
+              'legacy_writer_api_identity_invalid')
+        self._connections = {
+            path: http.client.HTTPSConnection('127.0.0.1', 6443, context=context) for path in KUBE_LIST_PATHS
+        }
+        self._authorization = 'Bearer ' + token
+
+    def __call__(self, args, *, timeout):
+        if args == (*DOCKER, 'ps', '-aq', '--no-trunc') or (
+            args[:len(DOCKER) + 1] == (*DOCKER, 'inspect')
+            and 1 <= len(args) - len(DOCKER) - 1 <= 64
+            and all(CONTAINER.fullmatch(value) for value in args[len(DOCKER) + 1:])
+        ):
+            return _run(args, timeout=timeout)
+        _need(len(args) == len(KUBE) + 2 and args[:-1] == (*KUBE, 'get') and args[-1].startswith('--raw='),
+              'legacy_writer_api_scope_invalid')
+        path = args[-1][6:]
+        _need(path in self._connections, 'legacy_writer_api_scope_invalid')
+        connection = self._connections[path]
+        deadline = time.monotonic() + timeout
+        try:
+            connection.timeout = _deadline(deadline)
+            if connection.sock is not None:
+                connection.sock.settimeout(connection.timeout)
+            connection.request('GET', path, headers={'Authorization': self._authorization, 'Accept': 'application/json'})
+            transport = connection.sock
+            transport.settimeout(_deadline(deadline))
+            with connection.getresponse() as response:
+                _need(response.status == 200, 'legacy_writer_api_read_failed')
+                _need(response.chunked or response.length is not None, 'legacy_writer_api_read_failed')
+                limit = 8 * 1024 * 1024
+                body = bytearray()
+                while True:
+                    transport.settimeout(_deadline(deadline))
+                    chunk = response.read1(min(65536, limit + 1 - len(body)))
+                    body.extend(chunk)
+                    _need(len(body) <= limit, 'legacy_writer_proof_response_invalid')
+                    if not chunk or response.isclosed():
+                        break
+                _need(response.isclosed() and response.length in (None, 0), 'legacy_writer_api_read_failed')
+                _deadline(deadline)
+                return bytes(body)
+        except (OSError, http.client.HTTPException, TransitionBlocked):
+            connection.close()
+            raise TransitionBlocked('legacy_writer_command_unconfirmed') from None
+
+    def close(self):
+        for connection in self._connections.values():
+            connection.close()
+
+
+def main_https_reader():
+    """Start the persistent verifier using pre-provisioned read-only credentials."""
+    try:
+        owner = os.geteuid()
+        _need(owner != 0, 'legacy_writer_api_identity_invalid')
+        credential_dir = seven_capture.trusted(
+            Path.home() / '.local/state/n100-ha/kubernetes-reader', directory=True)
+        for parent in credential_dir.parents:
+            mode = parent.lstat()
+            _need(stat.S_ISDIR(mode.st_mode) and mode.st_uid in (0, owner) and not mode.st_mode & 0o022,
+                  'legacy_writer_api_identity_invalid')
+        ca = checked(credential_dir / 'ca.pem', owner, 32768).decode('ascii')
+        token = checked(credential_dir / 'token', owner, 16385).decode('ascii').removesuffix('\n')
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.load_verify_locations(cadata=ca)
+        runner = KubernetesListReader(context, token)
+    except (OSError, ValueError, TransitionBlocked, seven_capture.MigrationRejected):
+        return 1
+    # The collector owns these connections until process exit. Timed-out workers
+    # may still be unwinding while the rejection is sent.
+    return main(persistent=True, runner=runner)
 
 
 class InventoryDeadline(TransitionBlocked):
@@ -69,15 +160,10 @@ def _inventory(runner, stop):
         location = group + ('/namespaces/' + NAMESPACE if namespace else '') + '/' + resource
         name = resource if namespace else 'autoscalers'
         result = _payload(run((*KUBE, 'get', '--raw=' + location), name))
-        _need(type(result) is dict and type(result.get('items')) is list,
+        _need(type(result) is dict and type(result.get('items')) is list
+              and type(result.get('metadata')) is dict and not result['metadata'].get('continue'),
               'legacy_writer_proof_response_invalid')
         return result
-
-    scopes = {
-        'Deployment': ('/apis/apps/v1', 'deployments'), 'CronJob': ('/apis/batch/v1', 'cronjobs'),
-        'Job': ('/apis/batch/v1', 'jobs'), 'ReplicaSet': ('/apis/apps/v1', 'replicasets'),
-        'Pod': ('/api/v1', 'pods'),
-    }
 
     def containers():
         ids = run((*DOCKER, 'ps', '-aq', '--no-trunc'), 'docker').decode('ascii').split()
@@ -90,7 +176,7 @@ def _inventory(runner, stop):
     pool = ThreadPoolExecutor(max_workers=7)
     wait_for_cleanup = True
     try:
-        queries = {kind: pool.submit(raw, group, plural) for kind, (group, plural) in scopes.items()}
+        queries = {kind: pool.submit(raw, group, plural) for kind, (group, plural) in KUBE_SCOPES.items()}
         docker_request = pool.submit(containers)
         hpa_request = pool.submit(raw, '/apis/autoscaling/v2', 'horizontalpodautoscalers', namespace=False)
         requests = dict(zip(QUERY_NAMES, (*queries.values(), docker_request, hpa_request)))
@@ -187,7 +273,7 @@ def _recovery_settled(challenge, deadline):
     return hashlib.sha256((challenge + ':wsl-recovery-commands-settled').encode()).hexdigest()
 
 
-def prove_runtime(runtime_path, runtime_sha256, plan, attempt, wsl_boot_sha256, challenge, deadline):
+def prove_runtime(runtime_path, runtime_sha256, plan, attempt, wsl_boot_sha256, challenge, deadline, *, runner=_run):
     """Use one immutable cutover baseline and return only a fresh, opaque WSL proof."""
     _need(all(type(value) is str and SHA.fullmatch(value) for value in (
         runtime_sha256, plan, attempt, wsl_boot_sha256, challenge)), 'legacy_writer_proof_scope_invalid')
@@ -200,7 +286,8 @@ def prove_runtime(runtime_path, runtime_sha256, plan, attempt, wsl_boot_sha256, 
     runtime = seven_capture.parse(reader.read(descriptor))
     _need(type(runtime) is dict and runtime.get('plan_sha256') == plan and runtime.get('attempt_id') == attempt,
           'legacy_writer_proof_scope_invalid')
-    proof = observe_closed(runtime['writer_baseline'], challenge, deadline, assert_external_closed=_recovery_settled)
+    proof = observe_closed(runtime['writer_baseline'], challenge, deadline,
+                           assert_external_closed=_recovery_settled, runner=runner)
     after = _recovery_settled(challenge, deadline)
     reader.unchanged()
     _need(hashlib.sha256(BOOT_ID.read_bytes()).hexdigest() == wsl_boot_sha256, 'legacy_writer_boot_changed')
@@ -208,12 +295,12 @@ def prove_runtime(runtime_path, runtime_sha256, plan, attempt, wsl_boot_sha256, 
     return hashlib.sha256((proof + ':' + after + ':' + runtime_sha256).encode()).hexdigest()
 
 
-def main(*, persistent=False):
+def main(*, persistent=False, runner=_run):
     try:
         if persistent:
             # Initialize the local CLI and API paths before the first timed
             # challenge. Discard the result; each proof inventories them again.
-            _inventory(_run, time.monotonic() + 3)
+            _inventory(runner, time.monotonic() + 3)
             print('ready', flush=True)
         while True:
             line = sys.stdin.buffer.readline(4097)
@@ -227,7 +314,7 @@ def main(*, persistent=False):
             _need(type(budget) is int and 0 < budget <= 1800, 'legacy_writer_proof_scope_invalid')
             deadline = time.monotonic() + budget / 1000
             try:
-                digest = prove_runtime(**request, deadline=deadline)
+                digest = prove_runtime(**request, deadline=deadline, runner=runner)
             except Exception as error:
                 if persistent and type(request['challenge']) is str and SHA.fullmatch(request['challenge']):
                     reason = 'internal'
