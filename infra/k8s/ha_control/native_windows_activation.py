@@ -137,7 +137,7 @@ class WindowsActivationLease:
         self.first_write_proof_sha256 = result['first_write_proof_sha256']
         self.service_instance_sha256 = result['service_instance_sha256']
 
-    def assert_current(self, deadline):
+    def assert_current(self, deadline, *, guest_boundary=True):
         custody = self.custody
         binding = custody.binding
         source = fixed_script('windows-ha-cutover-live-authority.ps1', custody.live_sha256, {
@@ -145,7 +145,10 @@ class WindowsActivationLease:
             'AttemptId': binding.attempt_id, 'PriorSha256': secrets.token_hex(32),
             'ExpectedServiceInstanceSha256': self.service_instance_sha256,
         })
-        result = custody.windows.powershell(source, min(deadline, time.monotonic() + bridge.ACTIVATION_BOUNDARY_SECONDS))
+        # The guest imposes its own two-second limit before each mutation.
+        # The coordinator's surrounding reads can budget for cold SSH startup.
+        seconds = bridge.ACTIVATION_BOUNDARY_SECONDS if guest_boundary else 4
+        result = custody.windows.powershell(source, min(deadline, time.monotonic() + seconds))
         keys = {'windows_generation', 'windows_generation_sha256', 'live_lease_sha256'}
         bridge._need(type(result) is dict and set(result) == keys and type(result['windows_generation']) is int
                      and result['windows_generation'] == 1
