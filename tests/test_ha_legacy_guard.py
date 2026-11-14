@@ -323,6 +323,25 @@ class NativeLinuxWritersTests(unittest.TestCase):
 
 
 class PersistentWriterProofTests(unittest.TestCase):
+    def test_inventory_reports_all_expired_queries(self):
+        from concurrent.futures import Future
+        from ha_control import wsl_writer_proof
+
+        futures = dict.fromkeys(wsl_writer_proof.QUERY_NAMES)
+        for name in futures:
+            futures[name] = Future()
+            if name == "deployments":
+                futures[name].set_exception(wsl_writer_proof.InventoryDeadline(name))
+            elif name != "pods":
+                futures[name].set_result(None)
+        with (patch.object(wsl_writer_proof, "ThreadPoolExecutor") as executor,
+              patch.object(wsl_writer_proof, "wait", return_value=(set(), {futures["pods"]}))):
+            executor.return_value.__enter__.return_value.submit.side_effect = futures.values()
+            with self.assertRaises(wsl_writer_proof.InventoryDeadline) as caught:
+                wsl_writer_proof._inventory(None, wsl_writer_proof.time.monotonic() + 1)
+        self.assertEqual(caught.exception.queries, ("deployments", "pods"))
+        self.assertEqual(caught.exception.reason(), "deadline_q11")
+
     def test_rejection_is_bound_and_does_not_serve_later_requests(self):
         from ha_control import wsl_writer_proof
 
@@ -332,6 +351,7 @@ class PersistentWriterProofTests(unittest.TestCase):
         for persistent, error, expected in (
             (True, TransitionBlocked("legacy_writer_command_unconfirmed"), ["ready", "e" * 64 + ":reject:inventory"]),
             (True, wsl_writer_proof.InventoryDeadline("pods"), ["ready", "e" * 64 + ":reject:deadline_pods"]),
+            (True, wsl_writer_proof.InventoryDeadline("deployments", "pods"), ["ready", "e" * 64 + ":reject:deadline_q11"]),
             (True, wsl_writer_proof.InventoryDeadline("private field"), ["ready", "e" * 64 + ":reject:closure"]),
             (True, ValueError("private field"), ["ready", "e" * 64 + ":reject:internal"]),
             (False, ValueError("private field"), []),

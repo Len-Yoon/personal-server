@@ -180,7 +180,8 @@ function Write-ProofOutcome([string]$Stage, $Progress = $null) {
                             'wsl_rejected_recovery','wsl_rejected_closure','wsl_rejected_internal',
                             'wsl_rejected_deadline_deployments','wsl_rejected_deadline_cronjobs',
                             'wsl_rejected_deadline_jobs','wsl_rejected_deadline_replicasets',
-                            'wsl_rejected_deadline_pods','wsl_rejected_deadline_docker','wsl_rejected_deadline_autoscalers')) {
+                            'wsl_rejected_deadline_pods','wsl_rejected_deadline_docker','wsl_rejected_deadline_autoscalers') -or
+                $step -cmatch '\Awsl_rejected_deadline_q(?!(?:00|01|02|04|08|10|20|40)\z)[0-7][0-9a-f]\z') {
                 $record['callback_step'] = $step
             }
         }
