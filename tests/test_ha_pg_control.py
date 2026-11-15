@@ -855,17 +855,17 @@ class InitialLeaseServiceTests(unittest.TestCase):
             def fail_renewal(_state):
                 state = json.loads(journal.read_text())
                 self.assertEqual((state['phase'], state['sequence'], state['lease_proof_sha256']), ('serving', 1, 'f' * 64))
-                raise TransitionBlocked('fixture_lease_lost')
+                raise service.LegacyResponseTimeout('postcommit')
 
             lease.open.side_effect = open_lease
             lease.renew.side_effect = fail_renewal
             lease.revoke.return_value = True
             with patch.object(service, 'InitialPgLease', return_value=lease), patch.object(service.time, 'sleep'):
-                with self.assertRaisesRegex(TransitionBlocked, 'fixture_lease_lost'):
+                with self.assertRaisesRegex(TransitionBlocked, '^legacy_pipe_response_timeout$'):
                     service.serve_initial(backend, journal, observer)
                 terminal = json.loads(journal.read_text())
                 self.assertEqual(terminal['phase'], 'local_revoke_observed')
-                self.assertEqual(terminal['failure_code'], 'initial_service_lease_unclassified')
+                self.assertEqual(terminal['failure_code'], 'legacy_pipe_response_timeout_postcommit')
                 with self.assertRaisesRegex(TransitionBlocked, 'initial_service_reconciliation_required'):
                     service.serve_initial(backend, journal, observer)
         observer.assert_intent.assert_called_once()
@@ -874,6 +874,17 @@ class InitialLeaseServiceTests(unittest.TestCase):
 
 
 class InitialPgLeaseTests(unittest.TestCase):
+    def test_timeout_before_renewal_commit_keeps_existing_revocation_path(self):
+        from ha_control.initial_pg_lease import LegacyResponseTimeout
+
+        self.lease.open(self.state)
+        self.lease.assert_legacy_closed = MagicMock(side_effect=TransitionBlocked('legacy_pipe_response_timeout'))
+        with self.assertRaises(LegacyResponseTimeout) as failure:
+            self.lease.renew(self.state)
+        self.assertEqual(failure.exception.failure_code, 'legacy_pipe_response_timeout_precommit')
+        self.assertEqual(self.revision, 3)
+        self.assertFalse(self.opened)
+
     def test_single_catalog_cancel_retries_renewal_before_the_only_write(self):
         from ha_control.pg import PgUnavailable
 
