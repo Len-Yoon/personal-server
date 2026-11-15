@@ -187,6 +187,8 @@ function Write-ProofOutcome([string]$Stage, $Progress = $null) {
                             'windows_processes','hyperv_start','hyperv','wsl_response','marker_after','complete',
                             'wsl_rejected_deadline','wsl_rejected_inventory','wsl_rejected_identity',
                             'wsl_rejected_recovery','wsl_rejected_closure','wsl_rejected_internal',
+                            'wsl_rejected_recovery_embedded','wsl_rejected_recovery_script',
+                            'wsl_rejected_recovery_compose','wsl_rejected_recovery_tool',
                             'wsl_rejected_deadline_deployments','wsl_rejected_deadline_cronjobs',
                             'wsl_rejected_deadline_jobs','wsl_rejected_deadline_replicasets',
                             'wsl_rejected_deadline_pods','wsl_rejected_deadline_docker','wsl_rejected_deadline_autoscalers') -or
