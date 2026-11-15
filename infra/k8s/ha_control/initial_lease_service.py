@@ -138,8 +138,8 @@ class WindowsInitialObserver:
             ) from None
 
     def assert_exclusion_held(self, handoff, deadline):
-        # The full authenticated writer observations bracket the transaction.
-        # Inside the role lock, recheck the same protected admission marker.
+        # Keep the same protected admission marker pinned across the commit.
+        # A renewal may reuse only its own still-fresh full writer observation.
         self._marker(handoff)
         return time.monotonic() < deadline
 
