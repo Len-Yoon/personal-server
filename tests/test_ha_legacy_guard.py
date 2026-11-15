@@ -576,8 +576,9 @@ class PersistentWriterProofTests(unittest.TestCase):
             (True, TransitionBlocked("legacy_writer_command_unconfirmed"), ["ready", "e" * 64 + ":reject:inventory"]),
             (True, TransitionBlocked("legacy_recovery_linux_process_unreadable"),
              ["ready", "e" * 64 + ":reject:internal"]),
-            (True, TransitionBlocked("legacy_recovery_linux_compose_command"),
-             ["ready", "e" * 64 + ":reject:recovery"]),
+            *((True, TransitionBlocked(f"legacy_recovery_linux_{kind}_command"),
+               ["ready", "e" * 64 + f":reject:recovery_{kind}"])
+              for kind in ("embedded", "script", "compose", "tool")),
             (True, wsl_writer_proof.InventoryDeadline("pods"), ["ready", "e" * 64 + ":reject:deadline_pods"]),
             (True, wsl_writer_proof.InventoryDeadline("deployments", "pods"), ["ready", "e" * 64 + ":reject:deadline_q11"]),
             (True, wsl_writer_proof.InventoryDeadline("private field"), ["ready", "e" * 64 + ":reject:closure"]),

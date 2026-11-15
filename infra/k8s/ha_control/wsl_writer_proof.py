@@ -430,6 +430,10 @@ def main(*, persistent=False, runner=_run):
                             'legacy_writer_proof_response_invalid': 'inventory',
                             'legacy_writer_boot_changed': 'identity',
                             'legacy_recovery_linux_process_unreadable': 'internal',
+                            'legacy_recovery_linux_embedded_command': 'recovery_embedded',
+                            'legacy_recovery_linux_script_command': 'recovery_script',
+                            'legacy_recovery_linux_compose_command': 'recovery_compose',
+                            'legacy_recovery_linux_tool_command': 'recovery_tool',
                         }.get(str(error), 'closure')
                         if reason == 'closure' and str(error).startswith('legacy_recovery_linux_'):
                             reason = 'recovery'
