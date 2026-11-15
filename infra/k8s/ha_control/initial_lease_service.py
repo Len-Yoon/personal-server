@@ -192,10 +192,10 @@ def serve_initial(backend, journal_path, observer):
         sequence = 0
         failure_code = None
         try:
-            started = time.monotonic()
             proof = lease.open(state)
             first_proof = _pin(proof)
             while True:
+                started = lease.proof_started
                 elapsed = time.monotonic() - started
                 if elapsed >= INITIAL_PROOF_SECONDS:
                     raise TransitionBlocked('initial_service_proof_deadline_exceeded')
@@ -204,7 +204,6 @@ def serve_initial(backend, journal_path, observer):
                                        'first_write_proof_sha256': first_proof, 'proof_elapsed_ms': round(elapsed * 1000, 3)},
                              windows_retry_until=min(started + INITIAL_PROOF_SECONDS, time.monotonic() + 0.15))
                 time.sleep(max(0, 1 - (time.monotonic() - started)))
-                started = time.monotonic()
                 proof = lease.renew(state)
         except Exception as error:
             reason = str(error) if isinstance(error, TransitionBlocked) else None
