@@ -36,10 +36,18 @@ $sidPattern = '\AS-1-(?:[0-9]{1,10}-){1,14}[0-9]{1,10}\z'
 $hashPattern = '\A[a-f0-9]{64}\z'
 $writers = @('S-1-5-18', 'S-1-5-32-544', $OperatorSid)
 
-function Remaining {
-    $left = 1800 - [int][Math]::Ceiling($clock.Elapsed.TotalMilliseconds)
+function Remaining([int]$LimitMs = 1800) {
+    $left = $LimitMs - [int][Math]::Ceiling($clock.Elapsed.TotalMilliseconds)
     if ($left -le 0) { throw 'lease_proof_deadline' }
     return $left
+}
+
+function Send-ProofResponse($Stream, [byte[]]$Bytes) {
+    # Observation still finishes within 1800 ms. Reserve the following 150 ms
+    # for framing and transport, leaving the client its independent 2000 ms cap.
+    $writeBudget = Remaining 1950
+    $write = $Stream.WriteAsync($Bytes, 0, $Bytes.Length)
+    if (-not $write.Wait($writeBudget)) { throw 'lease_proof_write' }
 }
 
 function Get-Digest([byte[]]$Bytes) {
@@ -378,8 +386,7 @@ try {
             $tag = [BitConverter]::ToString($mac.ComputeHash($body)).Replace('-', '').ToLowerInvariant()
             $envelope = [ordered]@{body=[Convert]::ToBase64String($body); mac=$tag}
             $bytes = $encoding.GetBytes((ConvertTo-Json -InputObject $envelope -Compress) + "`n")
-            $write = $pipe.WriteAsync($bytes, 0, $bytes.Length)
-            if (-not $write.Wait((Remaining))) { throw 'lease_proof_write' }
+            Send-ProofResponse $pipe $bytes
             # Keep the peer handle associated until the client finishes its
             # post-read PID check. The proof has already been sent within
             # Remaining; this bounded connection cleanup cannot extend the
