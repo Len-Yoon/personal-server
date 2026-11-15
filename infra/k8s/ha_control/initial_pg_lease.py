@@ -122,15 +122,18 @@ class InitialPgLease:
             _deny('initial_lease_stamp_unverified')
         return row[0]
 
-    def _observe_pair(self, primary, peer, state, *, opened, started):
+    def _observe_pair(self, primary, peer, state, *, opened, started, after_commit=False):
+        sample = self.backend._observe_runtime if after_commit else self.backend._observe
+        phase = 'postcommit_observe' if after_commit else 'observe'
+
         def observe(connection, node):
-            with _pg_phase(node, 'observe'):
+            with _pg_phase(node, phase):
                 remaining_ms = int((started + INITIAL_PROOF_SECONDS - time.monotonic()) * 1000)
                 if remaining_ms <= 0:
                     _deny('initial_replication_deadline_exceeded')
                 timeout_ms = min(INITIAL_OBSERVATION_STATEMENT_MS, remaining_ms)
                 connection.execute(f'SET statement_timeout={timeout_ms}')
-                value = self.backend._observe(connection, node, state)
+                value = sample(connection, node, state)
                 # The failed path closes both connections. Restore PgBackend's
                 # shorter limit before the expiry read and any write or commit.
                 connection.execute("SET statement_timeout='700ms'")
@@ -230,7 +233,11 @@ class InitialPgLease:
 
             with ThreadPoolExecutor(max_workers=1) as pool:
                 closure = pool.submit(self._legacy, state, started)
-                current, replica, expires = self._observe_pair(primary, peer, state, opened=True, started=started)
+                # The privilege catalogs were checked under the role lock
+                # before this exact synchronous commit. Confirm that the
+                # issued lease and nonce reached both nodes.
+                current, replica, expires = self._observe_pair(
+                    primary, peer, state, opened=True, started=started, after_commit=True)
                 def probe_visible(connection, node):
                     with _pg_phase(node, 'read_lease_probe'):
                         return connection.execute(PROBE_READ, (lease_probe,)).fetchone() == (1,)

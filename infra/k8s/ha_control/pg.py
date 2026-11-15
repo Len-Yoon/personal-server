@@ -261,6 +261,10 @@ class PgBackend:
         if self.plan.get('profile')=='enforced-vm-v1':
             self._enforced_observation(connection,state)
             self._effects_observation(connection)
+        return self._observe_runtime(connection, node, state)
+
+    def _observe_runtime(self, connection, node, state):
+        """Read the current writer, lease, timeline, and replication state."""
         value = connection.execute("""SELECT jsonb_build_object(
             'cluster',c.cluster,'epoch',c.epoch,'revision',c.revision,
             'primary',c.primary_node,'partner',c.partner,'timeline',c.timeline,

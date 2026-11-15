@@ -918,6 +918,7 @@ class InitialPgLeaseTests(unittest.TestCase):
         self.backend.fence_adapter = SimpleNamespace(plan_sha256='d' * 64)
         self.backend._connection = self.connection
         self.backend._observe = self.observe
+        self.backend._observe_runtime = self.observe
         self.backend._commit = self.commit
         self.backend._effects_open_gate = MagicMock()
         self.trace = []
@@ -996,7 +997,11 @@ class InitialPgLeaseTests(unittest.TestCase):
                 raise TransitionBlocked('fixture_commit_response_lost')
 
     def test_open_and_renew_preserve_initial_timeline_with_scoped_cas(self):
+        self.backend._observe = MagicMock(wraps=self.observe)
+        self.backend._observe_runtime = MagicMock(wraps=self.observe)
         self.assertRegex(self.lease.open(self.state), r'^[a-f0-9]{64}$')
+        self.assertEqual(self.backend._observe.call_count, 4)
+        self.assertEqual(self.backend._observe_runtime.call_count, 2)
         self.assertTrue(self.opened)
         self.assertEqual(self.revision, 2)
         self.backend._effects_open_gate.assert_called_once()
@@ -1007,8 +1012,12 @@ class InitialPgLeaseTests(unittest.TestCase):
         self.assertEqual(self.trace.count(('closure',)), 3)
         self.assertFalse(any('pg_promote' in query for query in queries))
         self.trace.clear()
+        self.backend._observe.reset_mock()
+        self.backend._observe_runtime.reset_mock()
         self.now += timedelta(seconds=1)
         self.assertRegex(self.lease.renew(self.state), r'^[a-f0-9]{64}$')
+        self.assertEqual(self.backend._observe.call_count, 2)
+        self.assertEqual(self.backend._observe_runtime.call_count, 2)
         queries = [row[1] for row in self.trace if row[0] == 'A' and len(row) == 3]
         self.assertEqual(queries.count('SELECT pg_advisory_xact_lock_shared(%s)'), 1)
         self.assertEqual(queries.count('COMMIT'), 1)
