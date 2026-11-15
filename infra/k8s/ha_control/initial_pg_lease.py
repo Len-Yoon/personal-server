@@ -184,26 +184,30 @@ class InitialPgLease:
                 primary = connections.enter_context(self.backend._connection('A'))
                 peer = connections.enter_context(self.backend._connection('B'))
                 self._begin(primary, shared=renewing)
-                _, _, previous = self._observe_pair(primary, peer, state, opened=renewing, started=started)
+                current, _, previous = self._observe_pair(primary, peer, state, opened=renewing, started=started)
                 closure.result()
             if renewing:
                 self.owned_expiries = {previous}
-            self._deadline(started)
-            with _pg_phase('A', 'fence_probe'):
-                primary.execute("DELETE FROM ha.controller_probes WHERE generation=1 AND left(nonce,10)='initial-a:'")
-                primary.execute('INSERT INTO ha.controller_probes(nonce,generation) VALUES(%s,1)', (barrier,))
-            self._deadline(started)
-            self._commit_primary(primary)
-            with _pg_phase('A', 'read_watermark'):
-                watermark = self.backend._lsn(primary.execute('SELECT pg_current_wal_flush_lsn()::text').fetchone()[0])
+                # The matching open stamp is already observed on both nodes.
+                # Keep the shared role lock through the next remote_apply
+                # commit, which carries the new stamp and its own nonce.
+                watermark = self.backend._lsn(current['flush'])
+            else:
+                self._deadline(started)
+                with _pg_phase('A', 'fence_probe'):
+                    primary.execute("DELETE FROM ha.controller_probes WHERE generation=1 AND left(nonce,10)='initial-a:'")
+                    primary.execute('INSERT INTO ha.controller_probes(nonce,generation) VALUES(%s,1)', (barrier,))
+                self._deadline(started)
+                self._commit_primary(primary)
+                with _pg_phase('A', 'read_watermark'):
+                    watermark = self.backend._lsn(primary.execute('SELECT pg_current_wal_flush_lsn()::text').fetchone()[0])
 
-            self._begin(primary, shared=renewing)
-            _, replica, expires = self._observe_pair(primary, peer, state, opened=renewing, started=started)
-            with _pg_phase('B', 'read_fence_probe'):
-                if (expires != previous or peer.execute(PROBE_READ, (barrier,)).fetchone() != (1,)
-                        or self.backend._lsn(replica['replay']) < watermark):
-                    _deny('initial_replication_barrier_unconfirmed')
-            if not renewing:
+                self._begin(primary, shared=False)
+                _, replica, expires = self._observe_pair(primary, peer, state, opened=False, started=started)
+                with _pg_phase('B', 'read_fence_probe'):
+                    if (expires != previous or peer.execute(PROBE_READ, (barrier,)).fetchone() != (1,)
+                            or self.backend._lsn(replica['replay']) < watermark):
+                        _deny('initial_replication_barrier_unconfirmed')
                 self.backend._effects_open_gate(primary, peer, watermark)
             self._legacy(state, started, held_only=True)
             change = '' if renewing else 'revision=2, writes_open=true, history_safe=true, '
@@ -218,6 +222,8 @@ class InitialPgLease:
             current_expiry = self._expiry(row)
             self.owned_expiries.add(current_expiry)
             with _pg_phase('A', 'write_lease_probe'):
+                if renewing:
+                    primary.execute("DELETE FROM ha.controller_probes WHERE generation=1 AND left(nonce,10)='initial-a:'")
                 primary.execute('INSERT INTO ha.controller_probes(nonce,generation) VALUES(%s,1)', (lease_probe,))
             self._deadline(started)
             self._commit_primary(primary)
