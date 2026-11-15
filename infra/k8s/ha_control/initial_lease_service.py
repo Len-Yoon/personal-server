@@ -10,7 +10,7 @@ import stat
 import time
 
 from .controller import Journal, TransitionBlocked, exclusive
-from .initial_pg_lease import INITIAL_CUTOVER, INITIAL_PROOF_SECONDS, InitialPgLease
+from .initial_pg_lease import INITIAL_CUTOVER, INITIAL_PROOF_SECONDS, InitialPgLease, LegacyResponseTimeout
 from .enforced_windows import _powershell_path
 from .pg import PgUnavailable
 from .windows_lease_pipe import CLIENT_FAILURES, PersistentLeaseProofClient, ProofPins
@@ -208,7 +208,7 @@ def serve_initial(backend, journal_path, observer):
                 proof = lease.renew(state)
         except Exception as error:
             reason = str(error) if isinstance(error, TransitionBlocked) else None
-            if isinstance(error, PgUnavailable):
+            if isinstance(error, (PgUnavailable, LegacyResponseTimeout)):
                 failure_code = error.failure_code
             else:
                 failure_code = reason if reason in LEASE_FAILURE_CODES else 'initial_service_lease_unclassified'

@@ -33,6 +33,18 @@ STAMP = """singleton=1 AND cluster=%s AND epoch=1 AND revision=%s
 PROBE_READ = 'SELECT generation FROM ha.controller_probes WHERE nonce=%s'
 
 
+class LegacyResponseTimeout(TransitionBlocked):
+    """A Windows proof response timed out at a known initial lease boundary."""
+
+    def __init__(self, phase):
+        super().__init__('legacy_pipe_response_timeout')
+        self.failure_code = {
+            'precommit': 'legacy_pipe_response_timeout_precommit',
+            'postcommit': 'legacy_pipe_response_timeout_postcommit',
+            'refresh': 'legacy_pipe_response_timeout_refresh',
+        }[phase]
+
+
 @contextmanager
 def _pg_phase(node, phase):
     try:
@@ -97,11 +109,16 @@ class InitialPgLease:
         if time.monotonic() - started >= INITIAL_PROOF_SECONDS:
             _deny('initial_replication_deadline_exceeded')
 
-    def _legacy(self, state, started, *, held_only=False):
+    def _legacy(self, state, started, *, held_only=False, phase=None):
         self._deadline(started)
         check = self.assert_exclusion_held if held_only else self.assert_legacy_closed
         observed_from = time.monotonic()
-        observed = check(state, started + INITIAL_PROOF_SECONDS)
+        try:
+            observed = check(state, started + INITIAL_PROOF_SECONDS)
+        except TransitionBlocked as error:
+            if phase is not None and str(error) == 'legacy_pipe_response_timeout':
+                raise LegacyResponseTimeout(phase) from None
+            raise
         if observed is not None and observed is not True:
             _deny('initial_legacy_closure_required')
         self._deadline(started)
@@ -112,7 +129,7 @@ class InitialPgLease:
         # owner. A sample that already aged out needs a new full observation.
         reuse = (renewing and self.independent_exclusion
                  and time.monotonic() - observed_from < PROOF_SECONDS)
-        self._legacy(state, started, held_only=reuse)
+        self._legacy(state, started, held_only=reuse, phase='postcommit')
         return reuse
 
     def _assert_observed_node(self, value, node, state, *, opened):
@@ -217,7 +234,7 @@ class InitialPgLease:
         with ExitStack() as connections:
             # Only read PostgreSQL until the independent closure proof succeeds.
             with ThreadPoolExecutor(max_workers=1) as pool:
-                closure = pool.submit(self._legacy, state, started)
+                closure = pool.submit(self._legacy, state, started, phase='precommit')
                 primary = connections.enter_context(self.backend._connection('A'))
                 peer = connections.enter_context(self.backend._connection('B'))
                 self._begin(primary, shared=renewing)
@@ -288,7 +305,7 @@ class InitialPgLease:
                     _deny('initial_replication_barrier_unconfirmed')
                 reused = closure.result()
             if reused and time.monotonic() - observed_from >= PROOF_SECONDS:
-                self._legacy(state, started)
+                self._legacy(state, started, phase='refresh')
             self._deadline(started)
             self.owned_expiries = {current_expiry}
             return self._proof(state, current_expiry, lease_probe)
