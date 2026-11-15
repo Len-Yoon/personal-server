@@ -3,6 +3,7 @@
 import argparse
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -80,6 +81,12 @@ def get_car(container_id):
     current_network = inspect("network", "inspect", network_id)
     require(current_network["Id"] == network_id and current_network["Driver"] == "bridge"
             and not current_network.get("Containers"), "the original callback bridge is occupied")
+    # The existing Tunnel route follows the worker's original static address.
+    address = ipaddress.IPv4Address(network["IPAMConfig"]["IPv4Address"])
+    subnets = [config for config in current_network["IPAM"]["Config"]
+               if address in ipaddress.ip_network(config["Subnet"])]
+    require(len(subnets) == 1 and str(address) != subnets[0].get("Gateway"),
+            "the original callback address is outside the dedicated bridge")
     (mount,) = (m for m in car["Mounts"] if m["Destination"] == "/data/oauth")
     require(mount["Type"] == "volume" and mount["RW"]
             and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", mount["Name"]),
@@ -99,17 +106,17 @@ def get_car(container_id):
             and "HA_PG_CONFIG" not in env
             and not any(env.get(key) for key in ("HYUNDAI_OAUTH_BASE_URL", "HYUNDAI_API_BASE_URL")),
             "the existing OAuth configuration changed")
-    return car["Image"], network_id, mount["Name"], {key: env[key] for key in ENVIRONMENT}
+    return car["Image"], network_id, str(address), mount["Name"], {key: env[key] for key in ENVIRONMENT}
 
 
-def run_callback(image, network, volume, env, helper):
+def run_callback(image, network, address, volume, env, helper):
     name = "n100-hyundai-reauth-" + secrets.token_hex(8)
     cidfile = helper.with_name("container-id")
     env_flags = [arg for name in ENVIRONMENT for arg in ("--env", name)]
     command = (*DOCKER, "run", "--rm", "-it", "--name", name, "--cidfile", str(cidfile), "--pull", "never",
                "--log-driver", "none", "--read-only", "--user", "10001:10001",
                "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-               "--network", network, "--publish", "127.0.0.1:8015:8015",
+               "--network", network, "--ip", address, "--publish", "127.0.0.1:8015:8015",
                "--mount", f"type=volume,source={volume},target=/data/oauth,volume-nocopy",
                "--mount", f"type=bind,source={helper},target={CONTAINER_HELPER},readonly",
                *env_flags, "--workdir", "/app", "--entrypoint", "python", image, "-B", "-c", BOOTSTRAP)
@@ -145,7 +152,7 @@ def main():
             owner = get_owner()
             require(owner["attempt_id"] == args.attempt_id and owner["plan_sha256"] == args.plan_sha256,
                     "the retained Windows owner did not match")
-            image, network, volume, env = get_car(args.container_id)
+            image, network, address, volume, env = get_car(args.container_id)
             helper = Path(__file__).with_name("hyundai_reauthorize.py").read_bytes()
             require(hashlib.sha256(helper).hexdigest() == HELPER_SHA256, "the reviewed callback source changed")
             print("기존 Car Care 정지, OAuth 볼륨 범위 및 로컬 콜백 포트를 확인했습니다.", flush=True)
@@ -156,7 +163,7 @@ def main():
                 file.write_bytes(helper)
                 file.chmod(0o444)
                 require(get_owner() == owner, "the retained Windows owner changed")
-                result = run_callback(image, network, volume, env, file)
+                result = run_callback(image, network, address, volume, env, file)
                 require(get_owner() == owner, "the retained Windows owner changed")
                 get_car(args.container_id)
                 return result
