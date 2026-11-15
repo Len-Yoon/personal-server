@@ -1,6 +1,7 @@
 import copy
 from contextlib import contextmanager
 from pathlib import Path
+import sys
 import unittest
 from unittest.mock import Mock, patch
 
@@ -94,3 +95,39 @@ class CarCareHATests(unittest.TestCase):
         store.return_value.initialize.assert_not_called()
         telegram.return_value.poll.assert_not_called()
         callback.return_value.stop.assert_called_once()
+
+    def test_ha_broker_failure_keeps_worker_and_callback_alive_until_next_poll(self):
+        runtime_path = Path(__file__).resolve().parents[2] / "infra" / "k8s"
+        backend = Mock()
+        backend.DatabaseUnavailable = ConnectionError
+        backend.worker_scope = self.worker_scope
+        stopped = Mock()
+        stopped.is_set.side_effect = [False, False, False, False, False, True]
+
+        with patch.object(sys, "path", [str(runtime_path), *sys.path]):
+            from ha_egress.client import BrokerUnavailable
+
+            with (
+                patch.object(self.main, "runtime", return_value=backend),
+                patch.object(self.main, "Event", return_value=stopped),
+                patch.object(self.main, "_install_signal_handlers"),
+                patch.object(self.main, "CarCareStore") as store,
+                patch.object(self.main.TelegramClient, "from_environment"),
+                patch.object(self.main.HyundaiClient, "from_environment"),
+                patch.object(self.main, "HyundaiOAuthCallbackServer") as callback,
+                patch.object(self.main, "_handle_updates", return_value=None) as poll,
+                patch.object(self.main, "_observe_vehicle", side_effect=BrokerUnavailable()) as observe,
+                patch.object(self.main.time, "monotonic", side_effect=[0.0, 0.0, 1.0, 6.0]),
+                patch.dict("os.environ", {"CAR_CARE_TELEGRAM_CHAT_ID": "fixture"}),
+                self.assertLogs(self.main.LOGGER, level="WARNING") as log,
+            ):
+                self.main.main()
+
+        self.assertEqual(poll.call_count, 3)
+        observe.assert_called_once()
+        self.assertEqual(stopped.wait.call_count, 2)
+        self.assertTrue(all(call.args == (self.main.POLL_INTERVAL_SECONDS,) for call in stopped.wait.call_args_list))
+        store.return_value.initialize.assert_called_once()
+        callback.return_value.start.assert_called_once()
+        callback.return_value.stop.assert_called_once()
+        self.assertEqual(len(log.output), 1)
