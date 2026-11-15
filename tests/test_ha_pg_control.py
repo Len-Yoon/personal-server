@@ -740,6 +740,36 @@ class PGControlTests(unittest.TestCase):
 
 
 class InitialLeaseServiceTests(unittest.TestCase):
+    def test_windows_heartbeat_replace_retries_transient_open_reader(self):
+        from ha_control import controller
+
+        move = MagicMock(side_effect=(0, 1))
+        with patch.object(controller.ctypes, 'WinDLL', return_value=SimpleNamespace(MoveFileExW=move), create=True), \
+                patch.object(controller.ctypes, 'get_last_error', return_value=5, create=True), \
+                patch.object(controller.time, 'monotonic', return_value=1.0), patch.object(controller.time, 'sleep') as delay:
+            controller.Journal._replace_windows('temporary', 'target', 1.15)
+        self.assertEqual([call.args for call in move.call_args_list], [('temporary', 'target', 9)] * 2)
+        delay.assert_called_once_with(0.01)
+
+    def test_windows_replace_preserves_fail_closed_for_other_errors_and_expired_budget(self):
+        from ha_control import controller
+
+        for error, deadline in ((5, None), (5, 1.0), (87, 1.15)):
+            with self.subTest(error=error, deadline=deadline):
+                move = MagicMock(return_value=0)
+                with patch.object(controller.ctypes, 'WinDLL', return_value=SimpleNamespace(MoveFileExW=move), create=True), \
+                        patch.object(controller.ctypes, 'get_last_error', return_value=error, create=True), \
+                        patch.object(controller.time, 'monotonic', return_value=1.0), patch.object(controller.time, 'sleep') as delay:
+                    with self.assertRaises(OSError) as failure:
+                        controller.Journal._replace_windows('temporary', 'target', deadline)
+                if deadline == 1.0:
+                    self.assertIsInstance(failure.exception, TimeoutError)
+                    move.assert_not_called()
+                else:
+                    self.assertEqual(failure.exception.errno, error)
+                    move.assert_called_once()
+                delay.assert_not_called()
+
     def test_native_directory_open_requests_only_metadata_rights(self):
         from ha_control import initial_windows_gate as gate
         from pathlib import PureWindowsPath

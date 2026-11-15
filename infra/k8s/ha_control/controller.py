@@ -12,6 +12,7 @@ from pathlib import Path
 import stat
 import sys
 import tempfile
+import time
 
 
 class TransitionBlocked(RuntimeError):
@@ -74,7 +75,28 @@ class Journal:
         except (OSError, ValueError, TypeError):
             raise TransitionBlocked("controller_journal_invalid") from None
 
-    def save(self, value):
+    @staticmethod
+    def _replace_windows(temporary, path, retry_until):
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        move = kernel.MoveFileExW
+        move.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+        move.restype = ctypes.c_int
+        # MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH.
+        while True:
+            if retry_until is not None and time.monotonic() >= retry_until:
+                raise TimeoutError("windows_journal_replace_deadline")
+            if move(str(temporary), str(path), 9):
+                return
+            error = ctypes.get_last_error()
+            # An open reader can yield ACCESS_DENIED even with FILE_SHARE_DELETE.
+            if retry_until is None or error not in (5, 32, 33):
+                raise OSError(error, "windows_journal_replace")
+            remaining = retry_until - time.monotonic()
+            if remaining <= 0:
+                raise OSError(error, "windows_journal_replace")
+            time.sleep(min(remaining, 0.01))
+
+    def save(self, value, *, windows_retry_until=None):
         if self.path.is_symlink() or not self.path.parent.is_dir():
             raise TransitionBlocked("controller_journal_invalid")
         temporary = None
@@ -85,11 +107,7 @@ class Journal:
                 stream.flush()
                 os.fsync(stream.fileno())
             if sys.platform == "win32":
-                # MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH.
-                move = ctypes.windll.kernel32.MoveFileExW
-                move.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
-                if not move(str(temporary), str(self.path), 9):
-                    raise OSError()
+                self._replace_windows(temporary, self.path, windows_retry_until)
             else:
                 os.replace(temporary, self.path)
                 directory = os.open(self.path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))

@@ -27,10 +27,11 @@ CLOSURE_FAILURE_CODES = frozenset({
 }) | frozenset(CLIENT_FAILURES.values())
 LEASE_FAILURE_CODES = frozenset({
     'authenticated_pg_observation_required', 'authenticated_pg_unavailable',
+    'controller_journal_invalid', 'controller_journal_not_durable',
     'external_effect_controller_binding_mismatch', 'external_effect_controller_catalog_unverified',
     'external_effect_controller_ledger_unavailable', 'external_effect_controller_peer_unproven',
     'external_effect_controller_unresolved', 'generation_role_enforcement_unverified',
-    'generation_role_privilege_closure_unverified',
+    'generation_role_privilege_closure_unverified', 'fresh_replication_proof_required',
     'initial_cutover_approval_required', 'initial_cutover_deployment_binding_required',
     'initial_cutover_state_unbound', 'initial_lease_reconciliation_required',
     'initial_lease_stamp_unverified', 'initial_legacy_closure_required',
@@ -200,7 +201,8 @@ def serve_initial(backend, journal_path, observer):
                     raise TransitionBlocked('initial_service_proof_deadline_exceeded')
                 sequence += 1
                 journal.save(stable | {'phase': 'serving', 'sequence': sequence, 'lease_proof_sha256': _pin(proof),
-                                       'first_write_proof_sha256': first_proof, 'proof_elapsed_ms': round(elapsed * 1000, 3)})
+                                       'first_write_proof_sha256': first_proof, 'proof_elapsed_ms': round(elapsed * 1000, 3)},
+                             windows_retry_until=min(started + INITIAL_PROOF_SECONDS, time.monotonic() + 0.15))
                 time.sleep(max(0, 1 - (time.monotonic() - started)))
                 started = time.monotonic()
                 proof = lease.renew(state)
@@ -221,4 +223,4 @@ def serve_initial(backend, journal_path, observer):
                                  'sequence': sequence}
             if failure_code is not None:
                 terminal['failure_code'] = failure_code
-            journal.save(terminal)
+            journal.save(terminal, windows_retry_until=time.monotonic() + 0.15)
