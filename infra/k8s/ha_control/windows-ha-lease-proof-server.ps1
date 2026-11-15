@@ -381,11 +381,13 @@ try {
             $write = $pipe.WriteAsync($bytes, 0, $bytes.Length)
             if (-not $write.Wait((Remaining))) { throw 'lease_proof_write' }
             # Keep the peer handle associated until the client finishes its
-            # post-read PID check. Draining alone only proves byte consumption.
+            # post-read PID check. The proof has already been sent within
+            # Remaining; this bounded connection cleanup cannot extend the
+            # client's end-to-end deadline or the freshness of the proof.
             $phase = 'ack'
             $ack = [byte[]]::new(1)
             $ackRead = $pipe.ReadAsync($ack, 0, $ack.Length)
-            if (-not $ackRead.Wait((Remaining))) {
+            if (-not $ackRead.Wait(250)) {
                 Write-ProofOutcome 'ack_timeout'
                 [Environment]::Exit(1)
             }
