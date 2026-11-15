@@ -1,7 +1,9 @@
 """Observe and replace the one production Compose Caddy container."""
 
 import copy
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
+import fcntl
 import hashlib
 import json
 import os
@@ -10,6 +12,9 @@ import re
 import stat
 import subprocess
 import time
+
+from ha_runtime import seven_capture
+from ha_runtime.seven_migration import MigrationRejected
 
 from .caddy_cutover import MOUNT, UPSTREAMS, render
 from .controller import TransitionBlocked
@@ -26,6 +31,8 @@ MTLS_VOLUME = 'n100-ha-caddy-mtls'
 ID = re.compile(r'[a-f0-9]{64}\Z')
 IMAGE = re.compile(r'sha256:[a-f0-9]{64}\Z')
 LABEL = 'com.docker.compose.'
+CADDY_RECREATE = ('up', '-d', '--no-deps', '--no-build', '--pull', 'never', '--force-recreate', 'caddy')
+EXECUTION_FILE = 'caddy-execution.json'
 
 
 def _need(condition, reason):
@@ -122,6 +129,124 @@ def _sync_dir(directory):
         os.close(fd)
 
 
+def _process(pid):
+    entry = Path('/proc') / str(pid)
+    before = (entry / 'stat').read_bytes().rsplit(b') ', 1)[1].split()
+    argv = (entry / 'cmdline').read_bytes().removesuffix(b'\0').split(b'\0')
+    executable = os.readlink(os.fsencode(entry / 'exe'))
+    after = (entry / 'stat').read_bytes().rsplit(b') ', 1)[1].split()
+    _need((before[1], before[19]) == (after[1], after[19]), 'caddy_execution_process_changed')
+    return int(before[1]), int(before[19]), argv, executable
+
+
+def _execution_command(project):
+    return (*DOCKER, 'compose', '--project-name', project, '--project-directory', '/mnt/c/personal-server',
+            '--env-file', '/dev/null', '-f', '-', *CADDY_RECREATE)
+
+
+def _lock_held_by(path, pid):
+    info = seven_capture.trusted(path).lstat()
+    device = f'{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino}'.encode('ascii')
+    owner = str(pid).encode('ascii')
+    for line in Path('/proc/locks').read_bytes().splitlines():
+        fields = line.split()
+        if fields[1:6] == [b'FLOCK', b'ADVISORY', b'WRITE', owner, device]:
+            return seven_capture.stamp(path.lstat()) == seven_capture.stamp(info)
+    return False
+
+
+def _execution_inputs(reader, directory, journal, plan, attempt):
+    state = seven_capture.parse(reader.read(seven_capture.descriptor(journal)))
+    _need(type(state) is dict and state.get('version') == 1 and state.get('phase') == 'switch_caddy_intent'
+          and state.get('plan_sha256') == plan
+          and state.get('attempt_id') == attempt and ID.fullmatch(state['receipts']['activate_vm']),
+          'caddy_execution_journal_unbound')
+    intent = seven_capture.descriptor(directory / 'caddy-apply-intent.json')
+    apply = seven_capture.parse(reader.read(intent))
+    _need(set(apply) == {'original_container_sha256', 'candidate_sha256', 'overlay_sha256', 'isolated_sha256'}
+          and all(type(value) is str and ID.fullmatch(value) for value in apply.values()),
+          'caddy_execution_intent_unbound')
+    return state['receipts']['activate_vm'], intent['sha256'], apply['isolated_sha256']
+
+
+class CaddyExecution:
+    """Bind one Caddy Compose operation to the live coordinator and its apply intent."""
+
+    def __init__(self, journal, plan, attempt):
+        self.journal, self.plan, self.attempt = journal, plan, attempt
+
+    @staticmethod
+    def identity():
+        pid = os.getpid()
+        _, start, argv, exe = _process(pid)
+        return {'pid': pid, 'start': start, 'process': _sha(b'\0'.join([exe, *argv]))}
+
+    @contextmanager
+    def open(self, directory, project, raw):
+        reader = seven_capture.Reader()
+        _need(self.journal == directory.parent.parent / f'cutover-coordinator-{self.attempt}.json'
+              and directory.parent.name == self.attempt, 'caddy_execution_scope_unbound')
+        authority, intent, isolated = _execution_inputs(reader, directory, self.journal, self.plan, self.attempt)
+        _need(_sha(raw) == isolated, 'caddy_execution_input_changed')
+        identity = self.identity()
+        _need(_lock_held_by(self.journal.with_suffix('.lock'), identity['pid']), 'caddy_execution_coordinator_unlocked')
+        proof = {'plan': self.plan, 'attempt': self.attempt, 'authority': authority, 'intent': intent,
+                 'model': isolated, 'project': project, **identity}
+        path = directory / EXECUTION_FILE
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+        with os.fdopen(fd, 'wb') as file:
+            fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            file.write(seven_capture.encoded(proof))
+            file.flush()
+            os.fsync(file.fileno())
+            _sync_dir(directory)
+            reader.unchanged()
+            yield
+
+
+def caddy_execution_authorized(entry, argv, runtime, plan, attempt, coordinator):
+    """Require the active execution witness and the exact CLI/plugin descendant."""
+    if coordinator is None or not argv or argv[-len(CADDY_RECREATE):] != [part.encode('ascii') for part in CADDY_RECREATE]:
+        return False
+    try:
+        directory = runtime.parent / 'caddy'
+        path = directory / EXECUTION_FILE
+        reader = seven_capture.Reader()
+        proof = seven_capture.parse(reader.read(seven_capture.descriptor(path), limit=4096))
+        if (type(proof) is not dict or set(proof) != {'plan', 'attempt', 'authority', 'intent', 'model',
+                                                     'pid', 'start', 'process', 'project'}
+                or proof['plan'] != plan or proof['attempt'] != attempt
+                or type(proof['pid']) is not int or type(proof['start']) is not int
+                or {key: proof[key] for key in ('pid', 'start', 'process')} != coordinator
+                or not re.fullmatch(r'[a-z][a-z0-9_-]{0,62}', proof['project'])):
+            return False
+        journal = runtime.parent.parent / f'cutover-coordinator-{attempt}.json'
+        if _execution_inputs(reader, directory, journal, plan, attempt) != (
+                proof['authority'], proof['intent'], proof['model']):
+            return False
+        expected = [arg.encode('ascii') for arg in _execution_command(proof['project'])]
+        parent, start, current, executable = _process(int(entry.name))
+        if argv != current or executable != current[0] or current[1:] != expected[1:]:
+            return False
+        if executable != expected[0]:
+            plugins = (str(DOCKER_CONFIG / 'cli-plugins'), *PLUGIN_DIRS)
+            if executable not in {os.fsencode(path + '/docker-compose') for path in plugins}:
+                return False
+            parent, cli_start, cli, exe = _process(parent)
+            if cli != expected or exe != expected[0] or not 0 < cli_start <= start:
+                return False
+            start = cli_start
+        if parent != proof['pid'] or not 0 < proof['start'] <= start:
+            return False
+        _, coordinator_start, coordinator, exe = _process(parent)
+        valid = (coordinator_start == proof['start'] and _sha(b'\0'.join([exe, *coordinator])) == proof['process']
+                 and _lock_held_by(journal.with_suffix('.lock'), parent) and _lock_held_by(path, parent))
+        reader.unchanged()
+        return valid
+    except (OSError, ValueError, TypeError, KeyError, IndexError, MigrationRejected, TransitionBlocked):
+        return False
+
+
 def _tls_files(raw):
     rows = raw.decode('ascii').splitlines()
     files = [line.split() for line in rows]
@@ -163,12 +288,13 @@ class PreparedCaddy:
 class CaddyRuntime:
     """Use a held caller guard and retain any possibly applied candidate on disk."""
 
-    def __init__(self, root, project, *, run=_run):
+    def __init__(self, root, project, *, run=_run, execution=None):
         self.root = _safe_path(root)
         _need(type(project) is str and re.fullmatch(r'[a-z][a-z0-9_-]{0,62}', project),
               'caddy_project_unconfirmed')
         self.project = project
         self.run = run
+        self.execution = execution
         self.attempted = False
         self.prepared = None
 
@@ -490,8 +616,9 @@ class CaddyRuntime:
             }).encode(), 0o600)
             _sync_dir(directory)
             assert_guard()
-            self._compose(('-',), 'up', '-d', '--no-deps', '--no-build', '--pull', 'never', '--force-recreate',
-                          'caddy', input_data=isolated, timeout=120)
+            execution = self.execution.open(directory, self.project, isolated) if self.execution else nullcontext()
+            with execution:
+                self._compose(('-',), *CADDY_RECREATE, input_data=isolated, timeout=120)
             item = self._container(isolated=True)
             _need(item['Id'] != prepared.baseline['id'] and item['Image'] == prepared.baseline['image']
                   and _runtime_contract(item, (CONFIG, MOUNT)) == prepared.baseline['runtime_sha256'],
