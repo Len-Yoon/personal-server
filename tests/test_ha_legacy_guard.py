@@ -324,6 +324,20 @@ class NativeLinuxWritersTests(unittest.TestCase):
 
 
 class PersistentWriterProofTests(unittest.TestCase):
+    def test_recovery_command_reports_only_fixed_categories(self):
+        from ha_control.wsl_writer_proof import _recovery_command_reason
+
+        for args, reason in (
+            ([b'bash', b'-lc', b'private /tmp/deploy-n100.sh'], 'embedded_command'),
+            ([b'bash', b'/tmp/windows-bootstrap.sh'], 'script_command'),
+            ([b'docker', b'compose', b'config'], 'compose_command'),
+            ([b'kubectl', b'apply', b'-f', b'private'], 'tool_command'),
+            ([b'kubectl', b'get', b'pods'], None),
+        ):
+            with self.subTest(reason=reason):
+                expected = f'legacy_recovery_linux_{reason}' if reason else None
+                self.assertEqual(_recovery_command_reason(args), expected)
+
     def test_token_publisher_replaces_file_without_mutating_open_reader(self):
         from ha_control.kubernetes_reader_issuer import publish
 
@@ -450,6 +464,10 @@ class PersistentWriterProofTests(unittest.TestCase):
         raw = json.dumps(request).encode() + b"\n"
         for persistent, error, expected in (
             (True, TransitionBlocked("legacy_writer_command_unconfirmed"), ["ready", "e" * 64 + ":reject:inventory"]),
+            (True, TransitionBlocked("legacy_recovery_linux_process_unreadable"),
+             ["ready", "e" * 64 + ":reject:internal"]),
+            (True, TransitionBlocked("legacy_recovery_linux_compose_command"),
+             ["ready", "e" * 64 + ":reject:recovery"]),
             (True, wsl_writer_proof.InventoryDeadline("pods"), ["ready", "e" * 64 + ":reject:deadline_pods"]),
             (True, wsl_writer_proof.InventoryDeadline("deployments", "pods"), ["ready", "e" * 64 + ":reject:deadline_q11"]),
             (True, wsl_writer_proof.InventoryDeadline("private field"), ["ready", "e" * 64 + ":reject:closure"]),
