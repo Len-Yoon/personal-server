@@ -18,6 +18,10 @@ INITIAL_CUTOVER = {'schema_version': 1, 'primary_node': 'A', 'partner_node': 'B'
 # replicated commit. Each individual pipe request keeps its two-second cap.
 INITIAL_PROOF_SECONDS = 4
 INITIAL_OBSERVATION_STATEMENT_MS = 1200
+RETRYABLE_CATALOG_CANCELS = frozenset(
+    f'initial_pg_{node}_{phase}_canceled'
+    for node in ('a', 'b') for phase in ('effects_catalog', 'effects_binding')
+)
 INITIAL_REVISION = 1
 OPEN_REVISION = 2
 STAMP = """singleton=1 AND cluster=%s AND epoch=1 AND revision=%s
@@ -111,21 +115,25 @@ class InitialPgLease:
         self._legacy(state, started, held_only=reuse)
         return reuse
 
-    def _pair(self, primary, peer, state, *, opened):
+    def _assert_observed_node(self, value, node, state, *, opened):
         revision = OPEN_REVISION if opened else INITIAL_REVISION
-        expected = {'cluster': state['cluster'], 'epoch': 1, 'revision': revision, 'primary': 'A', 'partner': 'B',
+        standby = 'B' if node == 'A' else 'A'
+        fields = {'cluster': state['cluster'], 'epoch': 1, 'revision': revision, 'primary': 'A', 'partner': 'B',
                     'timeline': 1, 'actual_timeline': 1, 'serving': ['A'], 'worker': 'A', 'mode': 'AS',
                     'system_id': str(self.backend.plan['system_id']), 'writes': opened, 'history': opened,
-                    'fsync': True, 'full_page_writes': True}
-        for value, node, standby in ((primary, 'A', 'B'), (peer, 'B', 'A')):
-            fields = dict(expected, node='ha_' + node, recovery=node == 'B', sync_names='FIRST1(ha_' + standby.lower() + ')')
-            if any(type(value.get(key)) is not type(item) or value[key] != item for key, item in fields.items()):
-                _deny('initial_replication_identity_unverified')
-            remaining = value['remaining']
-            if (opened and not 0 < remaining <= LEASE_SECONDS) or (not opened and not remaining < 0):
-                _deny('initial_lease_stamp_unverified')
-        if primary['sync_peer'] != 'ha_b':
+                    'fsync': True, 'full_page_writes': True, 'node': 'ha_' + node,
+                    'recovery': node == 'B', 'sync_names': 'FIRST1(ha_' + standby.lower() + ')'}
+        if any(type(value.get(key)) is not type(item) or value[key] != item for key, item in fields.items()):
             _deny('initial_replication_identity_unverified')
+        remaining = value['remaining']
+        if (opened and not 0 < remaining <= LEASE_SECONDS) or (not opened and not remaining < 0):
+            _deny('initial_lease_stamp_unverified')
+        if node == 'A' and value['sync_peer'] != 'ha_b':
+            _deny('initial_replication_identity_unverified')
+
+    def _pair(self, primary, peer, state, *, opened):
+        self._assert_observed_node(primary, 'A', state, opened=opened)
+        self._assert_observed_node(peer, 'B', state, opened=opened)
 
     @staticmethod
     def _expiry(row):
@@ -133,7 +141,7 @@ class InitialPgLease:
             _deny('initial_lease_stamp_unverified')
         return row[0]
 
-    def _observe_pair(self, primary, peer, state, *, opened, started, after_commit=False):
+    def _observe_pair(self, primary, peer, state, *, opened, started, after_commit=False, retry_catalog=False):
         sample = self.backend._observe_runtime if after_commit else self.backend._observe
         phase = 'postcommit_observe' if after_commit else 'observe'
 
@@ -156,8 +164,24 @@ class InitialPgLease:
         # Joining the standby read here keeps its connection alive on failure.
         with ThreadPoolExecutor(max_workers=1) as pool:
             standby = pool.submit(observe, peer, 'B')
-            current, expires = observe(primary, 'A')
-            replica, replica_expires = standby.result()
+            try:
+                current, expires = observe(primary, 'A')
+            except PgUnavailable as error:
+                if retry_catalog and error.failure_code in RETRYABLE_CATALOG_CANCELS:
+                    try:
+                        replica, _ = standby.result()
+                    except PgUnavailable as peer_error:
+                        if peer_error.failure_code not in RETRYABLE_CATALOG_CANCELS:
+                            raise
+                    else:
+                        self._assert_observed_node(replica, 'B', state, opened=opened)
+                raise
+            try:
+                replica, replica_expires = standby.result()
+            except PgUnavailable as error:
+                if retry_catalog and error.failure_code in RETRYABLE_CATALOG_CANCELS:
+                    self._assert_observed_node(current, 'A', state, opened=opened)
+                raise
         self._deadline(started)
         self._pair(current, replica, state, opened=opened)
         if expires != replica_expires:
@@ -187,8 +211,7 @@ class InitialPgLease:
         with _pg_phase('A', 'commit'):
             self.backend._commit(primary)
 
-    def _lease(self, state, *, renewing):
-        started = time.monotonic()
+    def _lease(self, state, *, renewing, started):
         nonce = 'initial-a:' + uuid.uuid4().hex
         barrier, lease_probe = nonce + ':fence', nonce + ':lease'
         with ExitStack() as connections:
@@ -198,7 +221,13 @@ class InitialPgLease:
                 primary = connections.enter_context(self.backend._connection('A'))
                 peer = connections.enter_context(self.backend._connection('B'))
                 self._begin(primary, shared=renewing)
-                current, _, previous = self._observe_pair(primary, peer, state, opened=renewing, started=started)
+                try:
+                    current, _, previous = self._observe_pair(
+                        primary, peer, state, opened=renewing, started=started, retry_catalog=renewing)
+                except PgUnavailable as error:
+                    if renewing and error.failure_code in RETRYABLE_CATALOG_CANCELS:
+                        closure.result()
+                    raise
                 observed_from = closure.result()
             if renewing:
                 self.owned_expiries = {previous}
@@ -270,8 +299,18 @@ class InitialPgLease:
             if self.open_attempted:
                 _deny('initial_lease_reconciliation_required')
             self.open_attempted = True
+        started = time.monotonic()
         try:
-            return self._lease(state, renewing=renewing)
+            try:
+                return self._lease(state, renewing=renewing, started=started)
+            except PgUnavailable as error:
+                if not renewing or error.failure_code not in RETRYABLE_CATALOG_CANCELS:
+                    raise
+                # These codes originate in the full, read-only catalog check
+                # before any renewal mutation. Use new connections and repeat
+                # the closure and unexpired paired-stamp checks in this budget.
+                self._deadline(started)
+                return self._lease(state, renewing=True, started=started)
         except Exception:
             try:
                 self.revoke(state)
