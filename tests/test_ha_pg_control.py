@@ -1010,7 +1010,12 @@ class InitialPgLeaseTests(unittest.TestCase):
         self.now += timedelta(seconds=1)
         self.assertRegex(self.lease.renew(self.state), r'^[a-f0-9]{64}$')
         queries = [row[1] for row in self.trace if row[0] == 'A' and len(row) == 3]
-        self.assertEqual(queries.count('SELECT pg_advisory_xact_lock_shared(%s)'), 2)
+        self.assertEqual(queries.count('SELECT pg_advisory_xact_lock_shared(%s)'), 1)
+        self.assertEqual(queries.count('COMMIT'), 1)
+        self.assertEqual(queries.count('SET LOCAL synchronous_commit=remote_apply'), 1)
+        _, _, nonce_args = next(row for row in self.trace if len(row) == 3 and row[1].startswith('INSERT INTO ha.controller_probes'))
+        self.assertTrue(nonce_args[0].endswith(':lease'))
+        self.assertIn(('B', 'SELECT generation FROM ha.controller_probes WHERE nonce=%s', nonce_args), self.trace)
         renew, = [query for query in queries if query.startswith('UPDATE ha.control')]
         self.assertTrue(renew.startswith("UPDATE ha.control SET expires_at=clock_timestamp()+interval '5 seconds' WHERE"))
         self.assertIn('expires_at=%s', renew)
@@ -1032,6 +1037,19 @@ class InitialPgLeaseTests(unittest.TestCase):
         revoke, = [row for row in self.trace if len(row) == 3 and row[1].startswith('UPDATE ha.control SET revision=3')]
         self.assertEqual(revoke[2], (self.cluster, 2, True, True, self.now + timedelta(seconds=5), '1234'))
         self.assertIn('expires_at=%s', revoke[1])
+
+    def test_missing_replica_renewal_nonce_revokes_the_new_stamp(self):
+        self.lease.open(self.state)
+        self.now += timedelta(seconds=1)
+        self.trace.clear()
+        self.hide_lease_on_b = True
+        with self.assertRaisesRegex(TransitionBlocked, 'initial_replication_barrier_unconfirmed'):
+            self.lease.renew(self.state)
+        self.assertEqual(self.revision, 3)
+        self.assertFalse(self.opened)
+        attempted_stamps = [row[2][-2] for row in self.trace
+                            if len(row) == 3 and row[1].startswith('UPDATE ha.control SET revision=3')]
+        self.assertEqual(attempted_stamps, [self.now + timedelta(seconds=4), self.now + timedelta(seconds=5)])
 
     def test_legacy_closure_loss_after_barrier_blocks_authority_cas(self):
         def guard(state, deadline):
