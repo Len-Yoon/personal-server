@@ -216,6 +216,53 @@ class PortalPgBlobTests(unittest.TestCase):
     def upload(self, name='memo.txt', content=b'pg-content'):
         return SimpleNamespace(filename=name, content_type='text/plain', file=io.BytesIO(content))
 
+    def test_enforced_readiness_checks_existing_namespace_without_replay(self):
+        namespace = {'format': 1, 'version': 0, 'entries': {}, 'trash': {}, 'confirmations': {}}
+        for row, enforcement, writes_open, ready in (
+            ((namespace,), True, True, True),
+            (None, True, True, False),
+            (({},), True, True, False),
+            ((namespace,), False, True, False),
+            ((namespace,), True, False, False),
+        ):
+            with self.subTest(row=row, enforcement=enforcement, writes_open=writes_open):
+                queries = [('SELECT payload FROM shared_state WHERE key=?', ('file-namespace',))]
+                if row == (namespace,):
+                    queries.append(('SELECT ha.enforced_vm_blob_ready()',))
+                connection = SimpleNamespace()
+                expected = iter(zip(queries, (row, (enforcement,))))
+
+                def execute(*args):
+                    query, result = next(expected)
+                    self.assertEqual(args, query)
+                    return SimpleNamespace(fetchone=lambda: result)
+
+                connection.execute = execute
+                admission_checks = []
+
+                def assert_write_admitted():
+                    admission_checks.append(True)
+                    if not writes_open:
+                        raise DatabaseUnavailable('write_admission_closed')
+
+                connection.assert_write_admitted = assert_write_admitted
+
+                @contextmanager
+                def connect(service, component):
+                    self.assertEqual((service, component), ('portal-web', 'state'))
+                    yield connection
+
+                with patch.object(self.store, 'connect', connect, create=True), patch.object(
+                    self.store, 'state_transaction', side_effect=AssertionError('readiness opened a write-capable scope')
+                ):
+                    if ready:
+                        self.files.check_storage_ready()
+                    else:
+                        with self.assertRaises(DatabaseUnavailable):
+                            self.files.check_storage_ready()
+                self.assertEqual(list(expected), [])
+                self.assertEqual(admission_checks, [True] if row == (namespace,) and enforcement else [])
+
     def test_real_portal_upload_download_trash_and_archive_without_object_root(self):
         import zipfile
         with patch.object(self.files, '_root', side_effect=AssertionError('filesystem backend must not run')):

@@ -210,12 +210,12 @@ def health():
 
 @app.get("/ready")
 def ready():
-    from app.services import file_store, security
+    from app.services import file_store, ha_files, security
     from app.services.session_store import shared_wal_runtime_allowed
     if (backend := runtime()) is not None:
         try:
             backend.require_schema("portal-web", "state", ["shared_state"])
-            file_store.ensure_storage()
+            ha_files.check_storage_ready()
             ok = security.AUTH_SESSION_STORE is not None and security.AUTH_SESSION_STORE.ready()
         except Exception:
             ok = False

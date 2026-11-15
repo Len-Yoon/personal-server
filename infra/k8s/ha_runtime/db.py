@@ -203,6 +203,10 @@ class Connection:
         self.replay = True
 
     @database_boundary
+    def assert_write_admitted(self):
+        _admit(proof.observe(self.raw, self.config), self.config, write=True)
+
+    @database_boundary
     def commit(self):
         if self.closed or not self.active:
             return
@@ -214,7 +218,7 @@ class Connection:
         binding = None
         try:
             if self.write or self.replay:
-                _admit(proof.observe(self.raw, self.config), self.config, write=True)
+                self.assert_write_admitted()
                 identity = str(uuid.uuid4())
                 result_hash = self.hasher.hexdigest()
                 binding = proof.contract.RequestBinding(self.config["service"], identity, "transaction",

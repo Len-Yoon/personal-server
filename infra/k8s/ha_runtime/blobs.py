@@ -35,13 +35,17 @@ def setup_namespace(admin, schema):
                   'PRIMARY KEY(sha256,ordinal))')
 
 
+def check_enforcement(connection):
+    row = connection.execute('SELECT ha.enforced_vm_blob_ready()').fetchone()
+    if row is None or len(row) != 1 or row[0] is not True:
+        _fail()
+
+
 def require_ready(service=SERVICE):
     if service != SERVICE:
         _fail()
     connection = db.active_state_connection(service)
-    row = connection.execute('SELECT ha.enforced_vm_blob_ready()').fetchone()
-    if row is None or len(row) != 1 or row[0] is not True:
-        _fail()
+    check_enforcement(connection)
     return connection
 
 
