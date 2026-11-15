@@ -60,6 +60,7 @@ class BootstrapTests(unittest.TestCase):
         lock = fixture();files = B.pg_files(lock)
         server = json.loads(files['pg-compose.json'])['services']['postgres']
         self.assertEqual(server['image'],lock['postgres']['config_digest'])
+        self.assertEqual((server['cpus'], server['cpu_shares']), (1, 8192))
         self.assertEqual(server['pull_policy'],'never');self.assertEqual(server['restart'],'no')
         self.assertNotIn('ports',server);self.assertNotIn('privileged',server)
         self.assertTrue(all(not v['bind']['create_host_path'] for v in server['volumes']))

@@ -263,7 +263,7 @@ def pg_files(lock):
     service = {'image':lock['postgres']['config_digest'],'pull_policy':'never','network_mode':'host',
         'restart':'no','read_only':True,'security_opt':['no-new-privileges:true'],
         'cap_drop':['ALL'],'user':str(lock['postgres']['uid'])+':'+str(lock['postgres']['gid']),
-        'pids_limit':128,'mem_limit':'512m','cpus':1,
+        'pids_limit':128,'mem_limit':'512m','cpus':1,'cpu_shares':8192,
         'environment':{'HA_PG_NODE':lock['node'],'HA_PG_UID':str(lock['postgres']['uid']),'HA_PG_GID':str(lock['postgres']['gid']),'HA_PG_PRIMARY_NODE':primary,
                        'HA_PG_SOURCE_NODE':source or 'none','POSTGRES_PASSWORD_FILE':'/run/ha-pg/postgres-password',
                        'POSTGRES_INITDB_ARGS':'--data-checksums --auth-host=scram-sha-256 --auth-local=peer'},
