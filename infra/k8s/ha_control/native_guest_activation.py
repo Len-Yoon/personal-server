@@ -2,17 +2,22 @@
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import http.client
+from ipaddress import IPv4Address
 import json
 import os
 from pathlib import Path
 import secrets
+import ssl
 import subprocess
 import time
 
 from ha_egress.boot import validate_authority as validate_broker_authority
 from ha_runtime.config import SERVICES, validate_installed_authority
+from ha_runtime.seven_migration import MigrationRejected
 
 from . import native_guest_runtime as runtime
+from .native_guest_live import _probe, _tls
 from .legacy_writers import TransitionBlocked, _need
 from .native_stdio_bridge import ACTIVATION_GUEST_CHECK_SECONDS, BridgeRejected
 
@@ -24,6 +29,7 @@ LEASE_SAMPLE_FAILURES = frozenset({
     "guest_live_pg_lease_expired", "guest_live_clock_unconfirmed",
     "guest_restore_docker_rejected", "bridge_deadline_exceeded",
 })
+APP_READY_SECONDS = 25
 
 
 @dataclass(frozen=True)
@@ -152,6 +158,27 @@ def _authority_files_match(authorities):
           "guest_activation_authority_file_changed")
 
 
+def _wait_for_app(context, leaf, address, service):
+    deadline = time.monotonic() + APP_READY_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            _probe(context, leaf, address, service)
+        except TransitionBlocked as error:
+            if str(error) != "guest_live_route_unready":
+                raise
+        except ssl.SSLError:
+            raise TransitionBlocked("guest_activation_ingress_tls_unconfirmed") from None
+        except MigrationRejected:
+            raise TransitionBlocked("guest_activation_readiness_response_invalid") from None
+        except (OSError, http.client.HTTPException):
+            pass
+        else:
+            _need(time.monotonic() < deadline, "guest_activation_app_unready")
+            return
+        time.sleep(min(0.7, max(0, deadline - time.monotonic())))
+    raise TransitionBlocked("guest_activation_app_unready")
+
+
 def activate_prepared_a(pins, activation, stage, *, assert_lease):
     """Publish trusted A-only activation files and start eight exact A container IDs.
 
@@ -211,6 +238,13 @@ def activate_prepared_a(pins, activation, stage, *, assert_lease):
             assert_intent()
             runtime._write(path, value, 0o444)
         _authority_files_match(authorities)
+        raw_spec = runtime._read(stage / "guest-spec.json", 0, {0o400, 0o600})
+        _need(runtime._digest(raw_spec) == pins.spec_sha256, "guest_activation_preparation_unbound")
+        spec = json.loads(raw_spec)
+        _need(spec["node"] == "A" and spec["guest_ip"] == spec["pg_a"],
+              "guest_activation_preparation_unbound")
+        address = str(IPv4Address(spec["guest_ip"]))
+        context, leaf = _tls(prepared)
         started = set()
         for role in order:
             _state(pins, containers, started, baseline)
@@ -219,6 +253,12 @@ def activate_prepared_a(pins, activation, stage, *, assert_lease):
             assert_intent()
             runtime._docker("start", containers[role]["container_id"], timeout=30)
             started.add(role)
+            if role in SERVICES:
+                try:
+                    _wait_for_app(context, leaf, address, role)
+                except TransitionBlocked as error:
+                    failure = {"boundary": "ready:" + role, "reason": str(error)}
+                    raise
         _state(pins, containers, started, baseline)
         _authority_files_match(authorities)
         lease = check("guest_started")
@@ -230,7 +270,7 @@ def activate_prepared_a(pins, activation, stage, *, assert_lease):
         }
         runtime._write(done, runtime._json_bytes(receipt))
         return receipt
-    except (TransitionBlocked, OSError, KeyError, TypeError, ValueError, subprocess.TimeoutExpired):
+    except (TransitionBlocked, MigrationRejected, OSError, KeyError, TypeError, ValueError, subprocess.TimeoutExpired):
         if failure is not None:
             try:
                 runtime._write(stage / "runtime-activation-failure.json", runtime._json_bytes({

@@ -120,6 +120,63 @@ class NativeGuestActivationTests(unittest.TestCase):
             self.assertEqual(json.loads(raw)["reason"], expected)
             self.assertEqual(json.loads(raw)["boundary"], "activation_intent")
 
+    def test_readiness_blocks_next_application_start(self):
+        activation = native_guest_activation
+        runtime = activation.runtime
+        pins = activation.ActivationPins(*("abcdef"[i] * 64 for i in range(6)))
+        runtime_pins = SimpleNamespace(node="A", attempt_id="1" * 64, validate=lambda: None,
+                                       spec_sha256=pins.primary_runtime_receipt_sha256)
+        containers = {role: {"container_id": role} for role in activation.SERVICES | {"ha-broker"}}
+        spec = {"node": "A", "pg_a": "192.0.2.10", "guest_ip": "192.0.2.10"}
+        events = []
+        files = {}
+
+        def start(*args, **kwargs):
+            events.append(args)
+
+        def ready(_context, _leaf, _address, role):
+            events.append(("ready", role))
+            if role == "car-care-worker":
+                raise TransitionBlocked("guest_activation_app_unready")
+
+        with patch.object(activation.os, "geteuid", return_value=0), \
+                patch.object(runtime, "_directory"), \
+                patch.object(runtime, "_read", side_effect=lambda path, *_: files.get(path, b"pinned")), \
+                patch.object(runtime, "_digest", return_value=pins.primary_runtime_receipt_sha256), \
+                patch.object(runtime, "_runtime_identity", return_value={}), \
+                patch.object(runtime, "_inspect_prepared", return_value=pins.primary_runtime_receipt_sha256), \
+                patch.object(runtime, "_write", side_effect=lambda path, raw: files.__setitem__(path, raw)) as write, \
+                patch.object(runtime, "_docker", side_effect=start), \
+                patch.object(activation.json, "loads", side_effect=({"containers": containers}, spec)), \
+                patch.object(activation, "_authorities", return_value={}), patch.object(activation, "_state"), \
+                patch.object(activation, "_check_lease", return_value="f" * 64), \
+                patch.object(activation, "_tls", return_value=(None, None)), \
+                patch.object(activation, "_wait_for_app", side_effect=ready):
+            result = activation.activate_prepared_a(
+                runtime_pins, pins, Path("/unused/attempt"), assert_lease=MagicMock(),
+            )
+        self.assertEqual(result, {"status": "UNKNOWN", "automatic_retry_permitted": False})
+        self.assertEqual(events, [("start", "ha-broker"), ("start", "book-memo"), ("ready", "book-memo"),
+                                  ("start", "car-care-worker"), ("ready", "car-care-worker")])
+        path, raw = write.call_args.args
+        self.assertEqual(path.name, "runtime-activation-failure.json")
+        self.assertIn(b'"ready:car-care-worker"', raw)
+
+    def test_startup_readiness_retries_unready_but_rejects_late_success(self):
+        activation = native_guest_activation
+        with patch.object(activation.time, "monotonic", side_effect=(0, 0, 1, 2, 3)), \
+                patch.object(activation.time, "sleep") as pause, \
+                patch.object(activation, "_probe",
+                             side_effect=(TransitionBlocked("guest_live_route_unready"), None)) as probe:
+            activation._wait_for_app(None, None, "192.0.2.10", "portal-web")
+        self.assertEqual(probe.call_count, 2)
+        pause.assert_called_once_with(0.7)
+
+        with patch.object(activation.time, "monotonic", side_effect=(0, 24, 25)), \
+                patch.object(activation, "_probe", return_value=None), \
+                self.assertRaisesRegex(TransitionBlocked, "guest_activation_app_unready"):
+            activation._wait_for_app(None, None, "192.0.2.10", "portal-web")
+
 
 class NativeGuestRestoreTests(unittest.TestCase):
     def setUp(self):
