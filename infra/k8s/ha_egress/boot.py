@@ -83,9 +83,24 @@ class PinnedDispatch:
         if (hashlib.sha256(raw).hexdigest()!=self.config_hash
                 or hashlib.sha256(authority_raw).hexdigest()!=self.authority_hash):deny()
         validate_authority(authority,config,self.config_hash)
+        return authority
+
+    def _require_car_route_release(self):
+        path = Path(self.authority_path).with_name("car-route-release.json")
+        _, release = read_json(path)
+        if (set(release) != {"schema_version", "action", "broker_authority_sha256", "route_verification_sha256"}
+                or type(release["schema_version"]) is not int or release["schema_version"] != 1
+                or release["action"] != "enable-car-after-route-verification"
+                or release["broker_authority_sha256"] != self.authority_hash
+                or type(release["route_verification_sha256"]) is not str
+                or not re.fullmatch(r"[a-f0-9]{64}", release["route_verification_sha256"])):
+            deny()
 
     def __call__(self,identity,request):
-        self._check()
+        authority = self._check()
+        if (authority["schema_version"] == 3 and type(identity) is TrustedIdentity
+                and identity.service == "car-care-worker"):
+            self._require_car_route_release()
         result=self.broker.dispatch(identity,request)
         self._check()
         return result
