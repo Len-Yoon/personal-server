@@ -122,6 +122,38 @@ class PinnedDispatchTests(unittest.TestCase):
         self.assertEqual(self.check.call_count,4)
         self.broker.dispatch.assert_called_once_with('identity',{'request':'fixture'})
 
+    def test_installed_car_requires_route_release_bound_to_current_authority(self):
+        authority = dict(self.authority, schema_version=3, authority_kind="installed-runtime",
+                         installation_id=self.config["installation_id"], installed_at="2000-01-01T00:00:00Z")
+        del authority["expires_at"]
+        raw = json.dumps(authority).encode()
+        self.authority_path.chmod(0o600)
+        self.authority_path.write_bytes(raw)
+        self.authority_path.chmod(0o444)
+        dispatch = boot.PinnedDispatch(self.broker, self.config_path, self.raw, self.authority_path, raw)
+        car = TrustedIdentity("car-care-worker", "A", 3)
+        request = {"operation": "car.hyundai.snapshot"}
+        marker = self.authority_path.with_name("car-route-release.json")
+        release = {"schema_version": 1, "action": "enable-car-after-route-verification",
+                   "broker_authority_sha256": "0" * 64, "route_verification_sha256": "1" * 64}
+        with self.assertRaises(ValueError):
+            dispatch(car, request)
+        marker.write_text(json.dumps(release))
+        marker.chmod(0o444)
+        with self.assertRaises(ValueError):
+            dispatch(car, request)
+        self.broker.dispatch.assert_not_called()
+        portal = TrustedIdentity("portal-web", "A", 3)
+        self.assertEqual(dispatch(portal, request), {"status": "completed"})
+        marker.chmod(0o600)
+        release["broker_authority_sha256"] = hashlib.sha256(raw).hexdigest()
+        marker.write_text(json.dumps(release))
+        with self.assertRaises(ValueError):
+            dispatch(car, request)
+        marker.chmod(0o444)
+        self.assertEqual(dispatch(car, request), {"status": "completed"})
+        self.assertEqual(self.broker.dispatch.call_count, 2)
+
     def test_deleted_changed_or_writable_authority_or_config_blocks_before_dispatch(self):
         for path in (self.config_path,self.authority_path):
             original=path.read_bytes()

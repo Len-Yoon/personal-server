@@ -1,16 +1,54 @@
 """Transition ordering, durable retry bounds and legacy exclusion contracts."""
 from contextlib import contextmanager
 import json
+from email.message import Message
 from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "infra/k8s"))
 from ha_control.controller import Controller, Journal, TransitionBlocked, exclusive
 from ha_control.windows import WindowsFence
+from ha_control import car_callback_ingress
+
+
+class CarCallbackOriginTests(unittest.TestCase):
+    def test_public_origin_requires_current_marker_and_healthy_upstream(self):
+        pin = "a" * 64
+        marked = car_callback_ingress.render("192.168.100.2", route_pin=pin)
+        self.assertIn(f"{car_callback_ingress.ROUTE_HEADER} {pin}".encode(), marked)
+        self.assertIn(b"path /health", marked)
+        self.assertNotIn(car_callback_ingress.ROUTE_HEADER.encode(),
+                         car_callback_ingress.render("192.168.100.2"))
+        with self.assertRaises(TransitionBlocked):
+            car_callback_ingress.render("192.168.100.2", route_pin="invalid\nrespond 200")
+
+        cases = [(200, [pin], b"ok", True),
+                 (200, [], b"ok", False),
+                 (200, ["b" * 64], b"ok", False),
+                 (200, [pin, pin], b"ok", False),
+                 (302, [pin], b"ok", False),
+                 (502, [pin], b"ok", False),
+                 (200, [pin], b"not healthy", False)]
+        for status, markers, body, valid in cases:
+            with self.subTest(status=status, markers=markers, body=body):
+                with patch.object(car_callback_ingress, "HTTPSConnection") as connection:
+                    response = MagicMock(status=status, headers=Message())
+                    for value in markers:
+                        response.headers.add_header(car_callback_ingress.ROUTE_HEADER, value)
+                    response.read.side_effect = lambda size: body[:size]
+                    connection.return_value.getresponse.return_value.__enter__.return_value = response
+                    if valid:
+                        self.assertRegex(car_callback_ingress.verify_public_origin(pin), r"^[a-f0-9]{64}$")
+                    else:
+                        with self.assertRaisesRegex(TransitionBlocked, "^car_callback_public_origin_unconfirmed$"):
+                            car_callback_ingress.verify_public_origin(pin)
+                    connection.assert_called_once_with("car.len.pe.kr", timeout=5)
+                    self.assertRegex(connection.return_value.request.call_args.args[1], r"^/health\?ha_route_check=[a-f0-9]{32}$")
+                    connection.return_value.close.assert_called_once()
 
 
 class Backend:
