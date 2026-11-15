@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+import logging
 import os
 from pathlib import Path
 import signal
@@ -25,6 +26,7 @@ POLL_INTERVAL_SECONDS = 5
 HYUNDAI_INTERVAL_SECONDS = 10 * 60
 DEFAULT_DATABASE_PATH = "/data/car-care/car-care.sqlite3"
 KOREA_TIMEZONE = ZoneInfo("Asia/Seoul")
+LOGGER = logging.getLogger(__name__)
 
 
 class _TelegramGateway(Protocol):
@@ -186,9 +188,11 @@ def main() -> None:
 
     offset: int | None = None
     next_hyundai_at = time.monotonic()
+    broker_unavailable = False
     try:
         while not stopped.is_set():
             backend = runtime()
+            observing_vehicle = False
             try:
                 with backend.worker_scope("car-care-worker") if backend is not None else nullcontext():
                     if not schema_ready:
@@ -198,12 +202,24 @@ def main() -> None:
                     if stopped.is_set():
                         break
                     if time.monotonic() >= next_hyundai_at:
+                        observing_vehicle = True
                         _observe_vehicle(telegram, hyundai, monitor)
                         next_hyundai_at = time.monotonic() + HYUNDAI_INTERVAL_SECONDS
             except Exception as exc:
-                if backend is None or not isinstance(exc, backend.DatabaseUnavailable):
+                if backend is None:
                     raise
-                # A standby remains alive, but never polls, refreshes or sends.
+                if not isinstance(exc, backend.DatabaseUnavailable):
+                    from ha_egress.client import BrokerUnavailable
+
+                    if not isinstance(exc, BrokerUnavailable):
+                        raise
+                    if observing_vehicle:
+                        next_hyundai_at = time.monotonic() + HYUNDAI_INTERVAL_SECONDS
+                    if not broker_unavailable:
+                        LOGGER.warning("Vehicle-care effect broker unavailable")
+                    broker_unavailable = True
+            else:
+                broker_unavailable = False
             stopped.wait(POLL_INTERVAL_SECONDS)
     finally:
         callback_server.stop()
