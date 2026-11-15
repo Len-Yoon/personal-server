@@ -338,6 +338,31 @@ class PersistentWriterProofTests(unittest.TestCase):
                 expected = f'legacy_recovery_linux_{reason}' if reason else None
                 self.assertEqual(_recovery_command_reason(args), expected)
 
+    def test_recovery_scan_distinguishes_exact_caddy_config_reads(self):
+        from ha_control.wsl_writer_proof import CADDY_BASE_FILES, CADDY_COMPOSE_GLOBALS, CADDY_ROOT
+        from ha_control.wsl_writer_proof import _recovery_command_reason
+
+        docker = b'/usr/bin/docker'
+        plugin = b'/usr/libexec/docker/cli-plugins/docker-compose'
+        prefix = [*CADDY_COMPOSE_GLOBALS, b'personal-server', b'--project-directory', CADDY_ROOT, b'--env-file']
+        base = [docker, *prefix, CADDY_ROOT + b'/.env', b'-f', CADDY_BASE_FILES[0], b'-f', CADDY_BASE_FILES[1]]
+        read = [b'config', b'--format', b'json']
+        isolated = [plugin, *prefix, b'/dev/null', b'-f', b'-']
+        candidates = [
+            (base + read, docker, None),
+            (base + [b'config', b'--hash', b'caddy'], docker, None),
+            (base + [b'-f', b'/private/attempt/caddy/caddy-ha-compose.json'] + read, docker, None),
+            (isolated + read, plugin, None),
+            (isolated + read, docker, 'compose_command'),
+            (base + read + [b'up'], docker, 'compose_command'),
+            (base + [b'-f', b'/private/../caddy/caddy-ha-compose.json'] + read, docker, 'compose_command'),
+            (isolated + [b'up', b'-d', b'--no-deps', b'caddy'], plugin, 'compose_command'),
+        ]
+        for argv, executable, expected in candidates:
+            with self.subTest(argv=argv):
+                reason = f'legacy_recovery_linux_{expected}' if expected else None
+                self.assertEqual(_recovery_command_reason(argv, executable), reason)
+
     def test_token_publisher_replaces_file_without_mutating_open_reader(self):
         from ha_control.kubernetes_reader_issuer import publish
 

@@ -14,6 +14,7 @@ import time
 
 from ha_runtime import seven_capture
 
+from .caddy_runtime import COMPOSE as CADDY_COMPOSE, DOCKER as CADDY_DOCKER, PLUGIN_DIRS
 from .controller import TransitionBlocked
 from .legacy_writers import COMPOSE_ORDER, CONTAINER, DOCKER, KUBE, LinuxWriters, _need, _run
 from .native_wsl_launcher import checked
@@ -25,6 +26,13 @@ SHA = re.compile(r'[a-f0-9]{64}\Z')
 BOOT_ID = Path('/proc/sys/kernel/random/boot_id')
 RECOVERY_TOOL = re.compile(rb'(windows-bootstrap[.]sh|deploy-n100(?:-safe)?[.]sh|kubectl|systemctl|docker)')
 RECOVERY_ACTION = re.compile(rb'(rollout|restart|start|stop|compose|apply|scale|patch|update|delete|replace|create)')
+CADDY_ROOT = b'/mnt/c/personal-server'
+CADDY_BASE_FILES = tuple(CADDY_ROOT + b'/' + name.encode('ascii') for name in CADDY_COMPOSE)
+CADDY_COMPOSE_GLOBALS = tuple(arg.encode('ascii') for arg in CADDY_DOCKER[1:]) + (b'compose', b'--project-name')
+CADDY_COMPOSE_EXECUTABLES = frozenset(
+    os.fsencode(path) for path in (CADDY_DOCKER[0], '/etc/docker/cli-plugins/docker-compose',
+                                   *(directory + '/docker-compose' for directory in PLUGIN_DIRS))
+)
 QUERY_NAMES = ('deployments', 'cronjobs', 'jobs', 'replicasets', 'pods', 'docker', 'autoscalers')
 KUBE_SCOPES = {
     'Deployment': ('/apis/apps/v1', 'deployments'), 'CronJob': ('/apis/batch/v1', 'cronjobs'),
@@ -302,12 +310,46 @@ def observe_closed(baseline, challenge, deadline, *, assert_external_closed, run
                                     'workloads_closed': True})).hexdigest()
 
 
-def _recovery_command_reason(argv):
+def _caddy_config_read(argv):
+    if not argv or argv[0] not in CADDY_COMPOSE_EXECUTABLES:
+        return False
+    prefix_end = len(CADDY_COMPOSE_GLOBALS) + 1
+    if tuple(argv[1:prefix_end]) != CADDY_COMPOSE_GLOBALS:
+        return False
+    remaining = argv[prefix_end:]
+    if len(remaining) < 7 or not re.fullmatch(rb'[a-z][a-z0-9_-]{0,62}', remaining[0]):
+        return False
+    if remaining[1:4] != [b'--project-directory', CADDY_ROOT, b'--env-file']:
+        return False
+    env_file, *arguments = remaining[4:]
+    files = []
+    while len(arguments) >= 2 and arguments[0] == b'-f':
+        files.append(arguments[1])
+        arguments = arguments[2:]
+    if arguments not in ([b'config', b'--format', b'json'], [b'config', b'--hash', b'caddy']):
+        return False
+    if env_file == b'/dev/null':
+        return files == [b'-'] and arguments == [b'config', b'--format', b'json']
+    if env_file != CADDY_ROOT + b'/.env':
+        return False
+    base = tuple(files)
+    if files and files[-1].endswith(b'/caddy/caddy-ha-compose.json'):
+        if (arguments != [b'config', b'--format', b'json']
+                or not re.fullmatch(rb'/(?:[a-zA-Z0-9_.-]+/)+caddy/caddy-ha-compose\.json', files[-1])
+                or any(part in {b'.', b'..'} for part in files[-1].split(b'/'))):
+            return False
+        base = tuple(files[:-1])
+    return base in (CADDY_BASE_FILES[:2], CADDY_BASE_FILES)
+
+
+def _recovery_command_reason(argv, executable=None):
     for index, arg in enumerate(argv):
         if b'windows-bootstrap.sh' in arg or b'deploy-n100' in arg:
             if index and argv[index - 1] in {b'-c', b'-lc'}:
                 return 'legacy_recovery_linux_embedded_command'
             return 'legacy_recovery_linux_script_command'
+    if executable is not None and executable == argv[0] and _caddy_config_read(argv):
+        return None
     if any(RECOVERY_TOOL.search(arg) for arg in argv) and any(RECOVERY_ACTION.fullmatch(arg) for arg in argv):
         return 'legacy_recovery_linux_compose_command' if b'compose' in argv else 'legacy_recovery_linux_tool_command'
     return None
@@ -319,12 +361,13 @@ def _recovery_settled(challenge, deadline):
         if not entry.name.isdecimal() or int(entry.name) == os.getpid():
             continue
         try:
-            argv = (entry / 'cmdline').read_bytes().split(b'\0')
+            argv = (entry / 'cmdline').read_bytes().removesuffix(b'\0').split(b'\0')
+            executable = os.readlink(os.fsencode(entry / 'exe')) if _caddy_config_read(argv) else None
         except (FileNotFoundError, ProcessLookupError):
             continue
         except OSError:
             raise TransitionBlocked('legacy_recovery_linux_process_unreadable') from None
-        reason = _recovery_command_reason(argv)
+        reason = _recovery_command_reason(argv, executable)
         if reason:
             raise TransitionBlocked(reason)
     return hashlib.sha256((challenge + ':wsl-recovery-commands-settled').encode()).hexdigest()
