@@ -850,6 +850,7 @@ class InitialLeaseServiceTests(unittest.TestCase):
             def open_lease(_state):
                 state = json.loads(journal.read_text())
                 self.assertEqual((state['phase'], state['sequence']), ('opening', 0))
+                lease.proof_started = time.monotonic()
                 return 'f' * 64
 
             def fail_renewal(_state):
@@ -1140,7 +1141,7 @@ class InitialPgLeaseTests(unittest.TestCase):
         self.assertEqual(queries.count('COMMIT'), 2)
         self.assertEqual(queries.count('SET LOCAL synchronous_commit=remote_apply'), 2)
         self.assertEqual(queries.count('SELECT pg_advisory_xact_lock(%s)'), 2)
-        self.assertEqual(self.trace.count(('closure',)), 3)
+        self.assertEqual(self.trace.count(('closure',)), 4)
         self.assertFalse(any('pg_promote' in query for query in queries))
         self.trace.clear()
         self.backend._observe.reset_mock()
@@ -1197,7 +1198,7 @@ class InitialPgLeaseTests(unittest.TestCase):
         lease = InitialPgLease(self.backend, full, assert_exclusion_held=owner)
         with patch('ha_control.initial_pg_lease.time.monotonic', side_effect=lambda: self.elapsed):
             lease.open(self.state)
-            self.assertEqual(full.call_count, 2)
+            self.assertEqual(full.call_count, 3)
             self.assertEqual(owner.call_count, 1)
             full.reset_mock()
             owner.reset_mock()
@@ -1245,6 +1246,35 @@ class InitialPgLeaseTests(unittest.TestCase):
             self.assertRegex(self.lease.open(self.state), r'^[a-f0-9]{64}$')
         self.assertTrue(self.opened)
         self.assertEqual(self.revision, 2)
+
+    def test_closed_preparation_does_not_spend_the_initial_authority_window(self):
+        def finish_closed_preparation(*_args):
+            self.assertFalse(self.opened)
+            self.elapsed = 3.2
+
+        def observe_closure(state, deadline):
+            self.legacy_closed(state, deadline)
+            if self.opened:
+                self.elapsed = 5.4
+                self.assertGreater(deadline, self.elapsed)
+
+        self.backend._effects_open_gate.side_effect = finish_closed_preparation
+        lease = InitialPgLease(self.backend, observe_closure, assert_exclusion_held=lambda *_: True)
+        with patch('ha_control.initial_pg_lease.time.monotonic', side_effect=lambda: self.elapsed):
+            lease.open(self.state)
+        self.assertEqual(lease.proof_started, 3.2)
+        self.assertEqual(self.revision, 2)
+
+    def test_expired_closed_preparation_never_opens_the_lease(self):
+        def expire_closed_preparation(*_args):
+            self.elapsed = 4.1
+
+        self.backend._effects_open_gate.side_effect = expire_closed_preparation
+        with patch('ha_control.initial_pg_lease.time.monotonic', side_effect=lambda: self.elapsed):
+            with self.assertRaisesRegex(TransitionBlocked, 'initial_replication_deadline_exceeded'):
+                self.lease.open(self.state)
+        self.assertIsNone(self.lease.proof_started)
+        self.assertEqual(self.revision, 1)
 
     def test_lost_commit_or_whole_proof_budget_cannot_report_open(self):
         for option, reason in (('lost_commit', 'fixture_commit_response_lost'),

@@ -14,8 +14,8 @@ from .pg import LEASE_SECONDS, PROOF_SECONDS, ROLE_LOCK, PgUnavailable, _deny
 
 
 INITIAL_CUTOVER = {'schema_version': 1, 'primary_node': 'A', 'partner_node': 'B'}
-# This transaction performs two fresh Windows/WSL proofs around the
-# replicated commit. Each individual pipe request keeps its two-second cap.
+# Closed preparation and the authority transaction each have a bounded
+# window. The two fresh authority proofs share one window around the commit.
 INITIAL_PROOF_SECONDS = 4
 INITIAL_OBSERVATION_STATEMENT_MS = 1200
 RETRYABLE_CATALOG_CANCELS = frozenset(
@@ -76,6 +76,7 @@ class InitialPgLease:
         self.owned_expiries = set()
         self.open_attempted = False
         self.scope = None
+        self.proof_started = None
 
     def _bind(self, state):
         plan = self.backend.plan
@@ -269,6 +270,12 @@ class InitialPgLease:
                             or self.backend._lsn(replica['replay']) < watermark):
                         _deny('initial_replication_barrier_unconfirmed')
                 self.backend._effects_open_gate(primary, peer, watermark)
+                # No app writes are authorized during preparation. Start the
+                # authority window under the same exclusive role lock only
+                # after the closed catalog and replication checks succeeded.
+                self._deadline(started)
+                started = self.proof_started = time.monotonic()
+                self._legacy(state, started, phase='precommit')
             self._legacy(state, started, held_only=True)
             change = '' if renewing else 'revision=2, writes_open=true, history_safe=true, '
             condition = 'expires_at>clock_timestamp()' if renewing else 'expires_at<clock_timestamp()'
@@ -317,6 +324,7 @@ class InitialPgLease:
                 _deny('initial_lease_reconciliation_required')
             self.open_attempted = True
         started = time.monotonic()
+        self.proof_started = started if renewing else None
         try:
             try:
                 return self._lease(state, renewing=renewing, started=started)
