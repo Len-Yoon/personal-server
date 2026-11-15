@@ -43,7 +43,8 @@ VERBS = {
     "verify_closed": ("AB", 45, False, ("manifest_sha256", "restore_receipt_sha256", "prepared_receipt_sha256")),
     "assert_activation_closed": ("A", 45, False, ("manifest_sha256", "restore_receipt_sha256",
                                                   "closed_a_sha256", "closed_b_sha256")),
-    "activate": ("A", 75, True, ("manifest_sha256", "activation_check_sha256", "settlement_sha256")),
+    # Includes the Windows service start and every independent guest boundary.
+    "activate": ("A", 120, True, ("manifest_sha256", "activation_check_sha256", "settlement_sha256")),
     "assert_live": ("A", 30, False, ("authority_sha256", "windows_generation", "windows_generation_sha256",
                                     "live_lease_sha256", "live_authority_sha256")),
     "observe_restore": ("A", 60, False, ("manifest_sha256", "restore_intent_sha256")),
