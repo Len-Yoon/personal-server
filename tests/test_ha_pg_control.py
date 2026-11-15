@@ -1090,6 +1090,32 @@ class InitialPgLeaseTests(unittest.TestCase):
                             if len(row) == 3 and row[1].startswith('UPDATE ha.control SET revision=3')]
         self.assertEqual(attempted_stamps, [self.now + timedelta(seconds=4), self.now + timedelta(seconds=5)])
 
+    def test_renewal_reuses_only_a_fresh_closure_with_an_independent_owner_check(self):
+        full = MagicMock(wraps=self.legacy_closed)
+        owner = MagicMock(return_value=True)
+        lease = InitialPgLease(self.backend, full, assert_exclusion_held=owner)
+        with patch('ha_control.initial_pg_lease.time.monotonic', side_effect=lambda: self.elapsed):
+            lease.open(self.state)
+            self.assertEqual(full.call_count, 2)
+            self.assertEqual(owner.call_count, 1)
+            full.reset_mock()
+            owner.reset_mock()
+            self.now += timedelta(seconds=1)
+            lease.renew(self.state)
+            self.assertEqual(full.call_count, 1)
+            self.assertEqual(owner.call_count, 2)
+
+            def slow_sample(connection, node, state):
+                if node == 'A':
+                    self.elapsed = 2.1
+                return self.observe(connection, node, state)
+
+            self.backend._observe_runtime = slow_sample
+            full.reset_mock()
+            self.now += timedelta(seconds=1)
+            lease.renew(self.state)
+            self.assertEqual(full.call_count, 2)
+
     def test_legacy_closure_loss_after_barrier_blocks_authority_cas(self):
         def guard(state, deadline):
             self.legacy_closed(state, deadline)

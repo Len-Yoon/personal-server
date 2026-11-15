@@ -10,7 +10,7 @@ import time
 import uuid
 
 from .controller import TransitionBlocked
-from .pg import LEASE_SECONDS, ROLE_LOCK, PgUnavailable, _deny
+from .pg import LEASE_SECONDS, PROOF_SECONDS, ROLE_LOCK, PgUnavailable, _deny
 
 
 INITIAL_CUTOVER = {'schema_version': 1, 'primary_node': 'A', 'partner_node': 'B'}
@@ -56,6 +56,7 @@ class InitialPgLease:
         self.backend = backend
         self.assert_legacy_closed = assert_legacy_closed
         self.assert_exclusion_held = assert_exclusion_held or assert_legacy_closed
+        self.independent_exclusion = assert_exclusion_held is not None
         self.owned_expiries = set()
         self.open_attempted = False
         self.scope = None
@@ -95,10 +96,20 @@ class InitialPgLease:
     def _legacy(self, state, started, *, held_only=False):
         self._deadline(started)
         check = self.assert_exclusion_held if held_only else self.assert_legacy_closed
+        observed_from = time.monotonic()
         observed = check(state, started + INITIAL_PROOF_SECONDS)
         if observed is not None and observed is not True:
             _deny('initial_legacy_closure_required')
         self._deadline(started)
+        return observed_from
+
+    def _postcommit_closure(self, state, started, observed_from, *, renewing):
+        # Renewal retains the previously verified exclusion under the same
+        # owner. A sample that already aged out needs a new full observation.
+        reuse = (renewing and self.independent_exclusion
+                 and time.monotonic() - observed_from < PROOF_SECONDS)
+        self._legacy(state, started, held_only=reuse)
+        return reuse
 
     def _pair(self, primary, peer, state, *, opened):
         revision = OPEN_REVISION if opened else INITIAL_REVISION
@@ -188,7 +199,7 @@ class InitialPgLease:
                 peer = connections.enter_context(self.backend._connection('B'))
                 self._begin(primary, shared=renewing)
                 current, _, previous = self._observe_pair(primary, peer, state, opened=renewing, started=started)
-                closure.result()
+                observed_from = closure.result()
             if renewing:
                 self.owned_expiries = {previous}
                 # The matching open stamp is already observed on both nodes.
@@ -232,7 +243,7 @@ class InitialPgLease:
             self._commit_primary(primary)
 
             with ThreadPoolExecutor(max_workers=1) as pool:
-                closure = pool.submit(self._legacy, state, started)
+                closure = pool.submit(self._postcommit_closure, state, started, observed_from, renewing=renewing)
                 # The privilege catalogs were checked under the role lock
                 # before this exact synchronous commit. Confirm that the
                 # issued lease and nonce reached both nodes.
@@ -246,7 +257,9 @@ class InitialPgLease:
                         or min(self.backend._lsn(current['flush']), self.backend._lsn(replica['flush']),
                                self.backend._lsn(replica['replay'])) < watermark):
                     _deny('initial_replication_barrier_unconfirmed')
-                closure.result()
+                reused = closure.result()
+            if reused and time.monotonic() - observed_from >= PROOF_SECONDS:
+                self._legacy(state, started)
             self._deadline(started)
             self.owned_expiries = {current_expiry}
             return self._proof(state, current_expiry, lease_probe)
