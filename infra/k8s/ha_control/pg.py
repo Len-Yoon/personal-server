@@ -32,8 +32,8 @@ def _deny(reason):
 class PgUnavailable(TransitionBlocked):
     """A failed PostgreSQL operation with bounded diagnostic fields."""
 
-    def __init__(self, node, phase, sqlstate):
-        super().__init__("authenticated_pg_unavailable")
+    def __init__(self, node, phase, sqlstate, *, reason="authenticated_pg_unavailable"):
+        super().__init__(reason)
         category = {
             "57014": "canceled",
             "55P03": "lock_unavailable",
@@ -260,7 +260,7 @@ class PgBackend:
     def _observe(self, connection, node, state):
         if self.plan.get('profile')=='enforced-vm-v1':
             self._enforced_observation(connection,state)
-            self._effects_observation(connection)
+            self._effects_observation(connection, node)
         return self._observe_runtime(connection, node, state)
 
     def _observe_runtime(self, connection, node, state):
@@ -353,8 +353,9 @@ class PgBackend:
             _deny('enforced_effects_plan_required')
         return binding['source_commit'], binding['plan_sha256']
 
-    def _effects_observation(self, connection):
+    def _effects_observation(self, connection, node=None):
         """Read actual storage, app ACLs and exact approved ledger binding."""
+        phase = 'effects_catalog'
         try:
             from ha_runtime.effects import Binding, validate_catalog
             contract = self.plan['pg_enforcement']['effects']
@@ -366,12 +367,17 @@ class PgBackend:
             # validate_catalog includes validate_storage_catalog: no table names
             # or a matching binding row alone constitute storage acceptance.
             validate_catalog(connection, binding)
+            phase = 'effects_binding'
             rows = connection.execute('SELECT cluster,system_id,source_commit,plan_sha256,broker_role FROM ha_effects.binding').fetchall()
             if rows != [expected]:
                 _deny('external_effect_controller_binding_mismatch')
         except TransitionBlocked:
             raise
-        except Exception:
+        except Exception as error:
+            sqlstate = getattr(error, 'sqlstate', None)
+            if sqlstate in ('57014', '55P03', '40001', '40P01'):
+                raise PgUnavailable(node, phase, sqlstate,
+                                    reason='external_effect_controller_catalog_unverified') from None
             _deny('external_effect_controller_catalog_unverified')
 
     def _effects_open_gate(self, primary, peer, watermark):

@@ -675,13 +675,33 @@ class PGControlTests(unittest.TestCase):
             with self.assertRaisesRegex(TransitionBlocked,'external_effect_controller_catalog_unverified'):
                 self.backend._effects_observation(raw)
 
+    def test_effect_catalog_and_binding_failures_record_phase_and_node(self):
+        from ha_runtime import effects
+
+        class QueryCanceled(Exception):
+            sqlstate = '57014'
+
+        self.enforced_plan()
+        raw = MagicMock()
+        error = QueryCanceled('private query detail')
+        with patch.object(effects, 'validate_catalog', side_effect=error):
+            with self.assertRaisesRegex(TransitionBlocked, '^external_effect_controller_catalog_unverified$') as caught:
+                self.backend._effects_observation(raw, 'A')
+        self.assertEqual(caught.exception.failure_code, 'initial_pg_a_effects_catalog_canceled')
+
+        raw.execute.side_effect = error
+        with patch.object(effects, 'validate_catalog'):
+            with self.assertRaisesRegex(TransitionBlocked, '^external_effect_controller_catalog_unverified$') as caught:
+                self.backend._effects_observation(raw, 'B')
+        self.assertEqual(caught.exception.failure_code, 'initial_pg_b_effects_binding_canceled')
+
     def test_real_observe_requires_effects_catalog_even_for_closed_authority(self):
         self.enforced_plan()
         raw=MagicMock()
         with patch.object(self.backend,'_enforced_observation'), patch.object(self.backend,'_effects_observation',side_effect=TransitionBlocked('missing_effects')) as observe:
             with self.assertRaisesRegex(TransitionBlocked,'missing_effects'):
                 self.backend._observe(raw,'B',self.state)
-            observe.assert_called_once_with(raw)
+            observe.assert_called_once_with(raw, 'B')
         raw.execute.assert_not_called()
 
     def effect_connections(self, *, unresolved=None, peer_unresolved=None, replay='0/20', **options):
