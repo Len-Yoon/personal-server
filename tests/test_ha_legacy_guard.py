@@ -363,6 +363,91 @@ class PersistentWriterProofTests(unittest.TestCase):
                 reason = f'legacy_recovery_linux_{expected}' if expected else None
                 self.assertEqual(_recovery_command_reason(argv, executable), reason)
 
+    def test_caddy_recreate_requires_current_owned_execution_and_exact_child(self):
+        import fcntl
+        from ha_control import caddy_runtime as caddy
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            plan, attempt = 'a' * 64, 'b' * 64
+            attempt_dir = root / attempt
+            directory = attempt_dir / 'caddy'
+            attempt_dir.mkdir(mode=0o700)
+            directory.mkdir(mode=0o700)
+            journal = root / f'cutover-coordinator-{attempt}.json'
+            journal.write_text(json.dumps({'version': 1, 'phase': 'switch_caddy_intent',
+                                           'plan_sha256': plan, 'attempt_id': attempt,
+                                           'receipts': {'activate_vm': 'c' * 64}}))
+            journal.chmod(0o600)
+            model = b'isolated compose bytes with private environment'
+            intent = directory / 'caddy-apply-intent.json'
+            intent.write_text(json.dumps({'original_container_sha256': 'd' * 64, 'candidate_sha256': 'e' * 64,
+                                          'overlay_sha256': 'f' * 64, 'isolated_sha256': caddy._sha(model)}))
+            intent.chmod(0o600)
+            runtime = attempt_dir / 'runtime.json'
+            command = [arg.encode() for arg in caddy._execution_command('personal-server')]
+            plugin = [b'/usr/libexec/docker/cli-plugins/docker-compose', *command[1:]]
+            pid = os.getpid()
+            processes = {
+                pid: (1, 100, [b'python', b'coordinator'], b'/usr/bin/python3'),
+                101: (pid, 103, command, command[0]),
+                102: (101, 104, plugin, plugin[0]),
+                103: (1, 104, command, command[0]),
+            }
+            coordinator = {'pid': pid, 'start': 100, 'process': caddy._sha(b'/usr/bin/python3\0python\0coordinator')}
+
+            def allowed(child, argv, expected_attempt=attempt):
+                return caddy.caddy_execution_authorized(Path(f'/proc/{child}'), argv, runtime, plan, expected_attempt,
+                                                        coordinator)
+
+            execution = caddy.CaddyExecution(journal, plan, attempt)
+            journal_owner = execution_owner = pid
+
+            def lock_held(path, candidate):
+                if path == journal.with_suffix('.lock'):
+                    return candidate == journal_owner
+                with path.open('rb') as file:
+                    try:
+                        fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        return candidate == execution_owner
+                return False
+
+            with (patch.object(caddy, '_process', side_effect=processes.__getitem__),
+                  patch.object(caddy, '_lock_held_by', side_effect=lock_held)):
+                self.assertFalse(allowed(101, command))
+                with self.assertRaisesRegex(TransitionBlocked, 'caddy_execution_input_changed'):
+                    with execution.open(directory, 'personal-server', b'changed model'):
+                        self.fail('mismatched configuration authorized')
+                with execution.open(directory, 'personal-server', model):
+                    self.assertNotIn(model, (directory / caddy.EXECUTION_FILE).read_bytes())
+                    self.assertTrue(allowed(101, command))
+                    self.assertTrue(allowed(102, plugin))
+                    self.assertFalse(allowed(103, command))
+                    self.assertFalse(allowed(101, command[:-1] + [b'portal-web']))
+                    self.assertFalse(allowed(101, command, '0' * 64))
+                    journal_owner = pid + 1
+                    self.assertFalse(allowed(101, command))
+                    journal_owner = pid
+                    processes[pid] = (1, 101, processes[pid][2], processes[pid][3])
+                    self.assertFalse(allowed(101, command))
+                    processes[pid] = (1, 100, processes[pid][2], processes[pid][3])
+                self.assertFalse(allowed(101, command))
+                witness = directory / caddy.EXECUTION_FILE
+                forged_pid = pid + 1
+                processes[forged_pid] = (1, 101, [b'python', b'unrelated'], b'/usr/bin/python3')
+                processes[103] = (forged_pid, 104, command, command[0])
+                forged = json.loads(witness.read_bytes())
+                forged.update(pid=forged_pid, start=101, process=caddy._sha(b'/usr/bin/python3\0python\0unrelated'))
+                witness.chmod(0o600)
+                with witness.open('wb') as file:
+                    fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    file.write(caddy.seven_capture.encoded(forged))
+                    file.flush()
+                    execution_owner = forged_pid
+                    journal_owner = forged_pid
+                    self.assertFalse(allowed(103, command))
+
     def test_token_publisher_replaces_file_without_mutating_open_reader(self):
         from ha_control.kubernetes_reader_issuer import publish
 

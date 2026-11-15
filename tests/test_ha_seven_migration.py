@@ -561,7 +561,11 @@ class NativeFrozenCaptureTests(unittest.TestCase):
             source_pins = converter.inspect_converter_sources(converter.Reader())
             source = native_frozen_capture.NativeFrozenCapture(Path(directory).resolve(), identity, "e" * 64,
                                                                source_pins, external, observe)
-            source.prepare()
+            coordinator = {"pid": 26, "start": 39, "process": "a" * 64}
+            source.prepare(coordinator=coordinator)
+            runtime_path = source.root / "runtime.json"
+            self.assertEqual(json.loads(runtime_path.read_bytes())["coordinator"], coordinator)
+            self.assertEqual(converter.descriptor(runtime_path)["sha256"], source.runtime_sha256)
             self.assertEqual(compose.call_args.kwargs["stopped_services"], {"homeops-executor"})
             source.block_reactivation()
             with self.assertRaisesRegex(TransitionBlocked, "external_closure_incomplete"):

@@ -1,6 +1,7 @@
 """Read-only batched closure proof for the exact approved Linux writer identities."""
 
 from concurrent.futures import ThreadPoolExecutor, wait
+from functools import partial
 import hashlib
 import http.client
 import json
@@ -15,6 +16,7 @@ import time
 from ha_runtime import seven_capture
 
 from .caddy_runtime import COMPOSE as CADDY_COMPOSE, DOCKER as CADDY_DOCKER, PLUGIN_DIRS
+from .caddy_runtime import caddy_execution_authorized
 from .controller import TransitionBlocked
 from .legacy_writers import COMPOSE_ORDER, CONTAINER, DOCKER, KUBE, LinuxWriters, _need, _run
 from .native_wsl_launcher import checked
@@ -355,7 +357,7 @@ def _recovery_command_reason(argv, executable=None):
     return None
 
 
-def _recovery_settled(challenge, deadline):
+def _recovery_settled(challenge, deadline, *, runtime=None, plan=None, attempt=None, coordinator=None):
     for entry in Path('/proc').iterdir():
         _deadline(deadline)
         if not entry.name.isdecimal() or int(entry.name) == os.getpid():
@@ -368,7 +370,8 @@ def _recovery_settled(challenge, deadline):
         except OSError:
             raise TransitionBlocked('legacy_recovery_linux_process_unreadable') from None
         reason = _recovery_command_reason(argv, executable)
-        if reason:
+        if reason and not (runtime is not None and reason == 'legacy_recovery_linux_compose_command'
+                           and caddy_execution_authorized(entry, argv, runtime, plan, attempt, coordinator)):
             raise TransitionBlocked(reason)
     return hashlib.sha256((challenge + ':wsl-recovery-commands-settled').encode()).hexdigest()
 
@@ -386,9 +389,11 @@ def prove_runtime(runtime_path, runtime_sha256, plan, attempt, wsl_boot_sha256, 
     runtime = seven_capture.parse(reader.read(descriptor))
     _need(type(runtime) is dict and runtime.get('plan_sha256') == plan and runtime.get('attempt_id') == attempt,
           'legacy_writer_proof_scope_invalid')
+    settled = partial(_recovery_settled, runtime=path, plan=plan, attempt=attempt,
+                      coordinator=runtime.get('coordinator'))
     proof = observe_closed(runtime['writer_baseline'], challenge, deadline,
-                           assert_external_closed=_recovery_settled, runner=runner)
-    after = _recovery_settled(challenge, deadline)
+                           assert_external_closed=settled, runner=runner)
+    after = settled(challenge, deadline)
     reader.unchanged()
     _need(hashlib.sha256(BOOT_ID.read_bytes()).hexdigest() == wsl_boot_sha256, 'legacy_writer_boot_changed')
     _deadline(deadline)

@@ -44,7 +44,7 @@ class NativeApplications:
     """
 
     def __init__(self, *, capture_root, identity, converter_source_pins, external_writers,
-                 caddy, active_ip, expected_mtls_sha256, vm, host):
+                 caddy, active_ip, expected_mtls_sha256, vm, host, coordinator=None):
         self.capture_root = Path(capture_root)
         self.identity = dict(identity)
         self.converter_source_pins = dict(converter_source_pins)
@@ -53,6 +53,7 @@ class NativeApplications:
         self.active_ip = active_ip
         self.expected_mtls_sha256 = dict(expected_mtls_sha256)
         self.vm, self.host = vm, host
+        self.coordinator = coordinator
         self.journal_path = None
         self.attempt = None
         self.active = False
@@ -121,7 +122,8 @@ class NativeApplications:
             self.identity['target_system_id'].encode()).hexdigest(), restore_ready=True,
             target_writes_closed=True, target_never_opened=True)
         self.caddy_baseline = self.caddy.inspect()
-        runtime = _pin(self.capture_side.prepare())
+        runtime = _pin(self.capture_side.prepare() if self.coordinator is None
+                       else self.capture_side.prepare(coordinator=self.coordinator))
         caddy_dir = self.capture_side.root / 'caddy'
         caddy_dir.mkdir(mode=0o700)
         self.caddy_candidate = self.caddy.prepare(self.caddy_baseline, self.active_ip, caddy_dir,

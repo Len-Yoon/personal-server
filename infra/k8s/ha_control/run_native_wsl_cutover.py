@@ -8,7 +8,7 @@ import sys
 from ha_runtime import seven_capture
 from ha_runtime.config import SERVICES
 
-from .caddy_runtime import CaddyRuntime
+from .caddy_runtime import CaddyExecution, CaddyRuntime
 from .controller import TransitionBlocked
 from .deployment_admission import DeploymentAdmission
 from .legacy_cutover import _pin
@@ -69,7 +69,8 @@ def run(config, config_sha256):
     )
     bootstrap = WslBootstrapAdmission(value['bootstrap_sha256'])
     admission = _deployment(value['deployment'])
-    caddy = CaddyRuntime('/mnt/c/personal-server', value['caddy_project'])
+    caddy = CaddyRuntime('/mnt/c/personal-server', value['caddy_project'],
+                         execution=CaddyExecution(journal, binding.plan_sha256, binding.attempt_id))
     external = {service: sorted(EXTERNAL_ACTORS) for service in SERVICES}
     client = Client(Stdio(0, 1), binding)
     guest = GuestBridgeRuntime(client, journal, value['active_ip'], value['frozen_credentials'], value['max_frozen_bytes'])
@@ -79,7 +80,7 @@ def run(config, config_sha256):
     applications = NativeApplications(
         capture_root=capture_root, identity=identity, converter_source_pins=value['converter_source_pins'],
         external_writers=external, caddy=caddy, active_ip=value['active_ip'], expected_mtls_sha256=value['mtls_sha256'],
-        vm=guest, host=host,
+        vm=guest, host=host, coordinator=CaddyExecution.identity(),
     )
     return compose_native_cutover(journal, windows, admission, bootstrap, applications).run(
         binding.plan_sha256, attempt_id=binding.attempt_id,

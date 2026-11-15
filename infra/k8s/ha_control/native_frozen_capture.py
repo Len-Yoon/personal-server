@@ -39,7 +39,7 @@ class NativeFrozenCapture:
     def _save(self, name, value):
         return seven_capture._write(self.root / name, seven_capture.encoded(value))["sha256"]
 
-    def prepare(self):
+    def prepare(self, *, coordinator=None):
         seven_capture.trusted(self.root.parent, directory=True)
         self.converter_reader = seven_capture.Reader()
         converter_sources = seven_capture.inspect_converter_sources(self.converter_reader)
@@ -61,6 +61,7 @@ class NativeFrozenCapture:
             "schema_version": 1, "plan_sha256": self.plan, "attempt_id": self.attempt,
             "writer_baseline": baseline, "pvc_bindings": pvc, "compose_bindings": compose,
             "converter_sources": converter_sources,
+            **({"coordinator": coordinator} if coordinator is not None else {}),
         })
         schedule_claims = {}
         for row in baseline["schedules"]:
