@@ -6,6 +6,8 @@ known server-file functions and every executable SECURITY DEFINER are checked.
 """
 # Shared by the trusted installer and live controller observation. Effective
 # privileges include PUBLIC and per-column grants; names come from bound values.
+# Each effective column check is paired with a table check for the same
+# privileges. PostgreSQL grants no extra column rights without a column ACL.
 AUTHORITY_UNSAFE_SQL = """(
     (SELECT count(*)<>5 OR NOT bool_and(c.relkind='r' AND c.relpersistence='p' AND owner.rolsuper)
      FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
@@ -28,7 +30,8 @@ AUTHORITY_UNSAFE_SQL = """(
         WHERE n.nspname='ha'
           AND c.relname IN ('control','identities','controller_probes','enforced_namespaces','enforced_roles')
           AND (has_table_privilege(principal.oid,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES')
-            OR has_any_column_privilege(principal.oid,c.oid,'INSERT,UPDATE,REFERENCES')))
+            OR CASE WHEN c.oid IN (SELECT attrelid FROM column_acl_relations)
+                THEN has_any_column_privilege(principal.oid,c.oid,'INSERT,UPDATE,REFERENCES') ELSE false END))
     OR EXISTS(SELECT 1 FROM pg_catalog.pg_namespace n,
         LATERAL pg_catalog.aclexplode(n.nspacl) acl LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=acl.grantee
         WHERE n.nspname='ha' AND acl.privilege_type='CREATE' AND (acl.grantee=0 OR NOT grantee.rolsuper))
@@ -49,6 +52,12 @@ authority_principals(oid) AS (
         JOIN authority_principals principal ON principal.oid=membership.member),
 persistent_tables AS MATERIALIZED (SELECT c.* FROM pg_catalog.pg_class c
     WHERE c.relpersistence<>'t' AND c.relkind IN ('r','p','f','v','m')),
+column_acl_relations AS MATERIALIZED (
+    SELECT DISTINCT attrelid FROM pg_catalog.pg_attribute WHERE attacl IS NOT NULL),
+column_write_grants AS MATERIALIZED (
+    SELECT a.attrelid,acl.grantee,acl.privilege_type FROM pg_catalog.pg_attribute a
+    CROSS JOIN LATERAL pg_catalog.aclexplode(a.attacl) acl
+    WHERE a.attacl IS NOT NULL AND acl.privilege_type IN ('INSERT','UPDATE','REFERENCES')),
 persistent_sequences AS MATERIALIZED (SELECT c.* FROM pg_catalog.pg_class c
     WHERE c.relpersistence<>'t' AND c.relkind='S')
 SELECT a.role_name::text,(
@@ -70,12 +79,12 @@ SELECT a.role_name::text,(
     OR EXISTS(SELECT 1 FROM persistent_tables c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
         WHERE true
           AND (has_table_privilege(a.role_name,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES')
-              OR has_any_column_privilege(a.role_name,c.oid,'INSERT,UPDATE,REFERENCES')
+              OR CASE WHEN c.oid IN (SELECT attrelid FROM column_acl_relations)
+                  THEN has_any_column_privilege(a.role_name,c.oid,'INSERT,UPDATE,REFERENCES') ELSE false END
               OR EXISTS(SELECT 1 FROM pg_catalog.aclexplode(c.relacl) acl
                   WHERE acl.privilege_type IN ('INSERT','UPDATE','DELETE','TRUNCATE','TRIGGER','REFERENCES')
                     AND (acl.grantee=0 OR acl.grantee=(SELECT oid FROM pg_catalog.pg_roles WHERE rolname=a.role_name)))
-              OR EXISTS(SELECT 1 FROM pg_catalog.pg_attribute column_acl,LATERAL pg_catalog.aclexplode(column_acl.attacl) acl
-                  WHERE column_acl.attrelid=c.oid AND acl.privilege_type IN ('INSERT','UPDATE','REFERENCES')
+              OR EXISTS(SELECT 1 FROM column_write_grants acl WHERE acl.attrelid=c.oid
                     AND (acl.grantee=0 OR acl.grantee=(SELECT oid FROM pg_catalog.pg_roles WHERE rolname=a.role_name))))
           AND NOT (c.relkind='r' AND c.relpersistence='p' AND c.relrowsecurity AND c.relforcerowsecurity
             AND EXISTS(SELECT 1 FROM pg_catalog.pg_roles owner WHERE owner.oid=c.relowner AND owner.rolsuper)
@@ -90,10 +99,12 @@ SELECT a.role_name::text,(
     OR EXISTS(SELECT 1 FROM persistent_tables c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
         WHERE true
           AND (has_table_privilege(a.role_name,c.oid,'TRIGGER,REFERENCES')
-            OR has_any_column_privilege(a.role_name,c.oid,'REFERENCES')
+            OR CASE WHEN c.oid IN (SELECT attrelid FROM column_acl_relations)
+                THEN has_any_column_privilege(a.role_name,c.oid,'REFERENCES') ELSE false END
             OR (c.relname IN ('ha_receipts','ha_barriers','ha_blob_objects','ha_blob_chunks')
                 AND (has_table_privilege(a.role_name,c.oid,'UPDATE,DELETE,TRUNCATE')
-                    OR has_any_column_privilege(a.role_name,c.oid,'UPDATE')))))
+                    OR CASE WHEN c.oid IN (SELECT attrelid FROM column_acl_relations)
+                        THEN has_any_column_privilege(a.role_name,c.oid,'UPDATE') ELSE false END))))
     OR EXISTS(SELECT 1 FROM pg_catalog.pg_parameter_acl parameter
         WHERE has_parameter_privilege(a.role_name,parameter.parname,'ALTER SYSTEM')
           OR (EXISTS(SELECT 1 FROM pg_catalog.pg_settings setting WHERE setting.name=parameter.parname
