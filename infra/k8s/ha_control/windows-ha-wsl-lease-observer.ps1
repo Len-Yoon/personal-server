@@ -116,6 +116,7 @@ function Get-HaLeaseProof($Context) {
     }
     $process = $script:ClosureProcess
     $vmObserver = $null
+    $processObserver = $null
     $runningProbe = $null
     try {
         $Context.Progress.step = 'wsl_send'
@@ -152,7 +153,20 @@ function Get-HaLeaseProof($Context) {
         $runningOutput = $runningProbe.StandardOutput.ReadToEndAsync()
         $runningError = $runningProbe.StandardError.ReadToEndAsync()
         $Context.Progress.step = 'windows_closed'
-        Assert-HaReactivationClosed $script:ClosurePlan $Context.Progress
+        Assert-HaReactivationInfrastructureClosed $script:ClosurePlan $Context.Progress
+        # Observe detached children only after task and service closure.
+        $Context.Progress.step = 'windows_processes'
+        $processObserver = [PowerShell]::Create()
+        $processObserver.Runspace = $Context.ProcessRunspace
+        $null = $processObserver.AddCommand('Assert-HaReactivationProcessesClosed')
+        $processPending = $processObserver.BeginInvoke()
+        Assert-HaReactivationHost $script:ClosurePlan $Context.Progress
+        $Context.Progress.step = 'windows_processes'
+        if (-not $processPending.AsyncWaitHandle.WaitOne((Get-HaClosureRemaining $Context))) {
+            throw 'lease_proof_callback_deadline'
+        }
+        $processRows = $processObserver.EndInvoke($processPending)
+        if ($processObserver.HadErrors -or $processRows.Count -ne 0) { throw 'lease_proof_process_scope' }
         $Context.Progress.step = 'wsl_running'
         if (-not $runningProbe.WaitForExit((Get-HaClosureRemaining $Context)) -or $runningProbe.ExitCode -ne 0 -or
             -not $runningOutput.Wait((Get-HaClosureRemaining $Context)) -or
@@ -208,5 +222,6 @@ function Get-HaLeaseProof($Context) {
             finally { $runningProbe.Dispose() }
         }
         if ($null -ne $vmObserver) { $vmObserver.Dispose() }
+        if ($null -ne $processObserver) { $processObserver.Dispose() }
     }
 }

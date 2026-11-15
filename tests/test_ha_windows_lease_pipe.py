@@ -12,6 +12,25 @@ from infra.k8s.ha_control import enforced_windows, initial_lease_service, window
 
 
 class WindowsLeaseResponseBudgetTests(unittest.TestCase):
+    def test_process_inventory_follows_task_closure_and_precedes_marker_readback(self):
+        scripts = Path(__file__).resolve().parents[1] / "infra/k8s/ha_control"
+        callback = (scripts / "windows-ha-wsl-lease-observer.ps1").read_text()
+        proof = callback.split("function Get-HaLeaseProof", 1)[1]
+        steps = (
+            "Assert-HaOwnedCutoverMarker $script:ClosureMarker",
+            "Assert-HaReactivationInfrastructureClosed $script:ClosurePlan",
+            "$processPending = $processObserver.BeginInvoke()",
+            "Assert-HaReactivationHost $script:ClosurePlan",
+            "$processPending.AsyncWaitHandle.WaitOne((Get-HaClosureRemaining $Context))",
+            "$processObserver.EndInvoke($processPending)",
+            "$processObserver.HadErrors -or $processRows.Count -ne 0",
+            "$Context.Progress.step = 'marker_after'",
+            "recovery_commands_settled=$true",
+        )
+        positions = [proof.index(step) for step in steps]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(proof.count("Assert-HaOwnedCutoverMarker $script:ClosureMarker"), 2)
+
     def test_response_has_bounded_transport_time_and_checks_before_writing(self):
         runtime = shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh"
         self.assertTrue(Path(runtime).is_file(), "PowerShell required for response boundary verification")
