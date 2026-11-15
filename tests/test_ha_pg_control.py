@@ -874,6 +874,76 @@ class InitialLeaseServiceTests(unittest.TestCase):
 
 
 class InitialPgLeaseTests(unittest.TestCase):
+    def test_single_catalog_cancel_retries_renewal_before_the_only_write(self):
+        from ha_control.pg import PgUnavailable
+
+        self.lease.open(self.state)
+        self.trace.clear()
+        original = self.backend._observe
+        primary_reads = 0
+
+        def cancel_first_primary_read(connection, node, state):
+            nonlocal primary_reads
+            if node == 'A':
+                primary_reads += 1
+                if primary_reads == 1:
+                    raise PgUnavailable(node, 'effects_catalog', '57014')
+            return original(connection, node, state)
+
+        with patch.object(self.backend, '_observe', side_effect=cancel_first_primary_read):
+            self.assertRegex(self.lease.renew(self.state), r'^[a-f0-9]{64}$')
+        self.assertEqual(primary_reads, 2)
+        self.assertEqual(self.trace.count(('connect', 'A')), 2)
+        self.assertEqual(self.trace.count(('connect', 'B')), 2)
+        self.assertEqual(self.trace.count(('closure',)), 4)
+        self.assertEqual(sum(row[1].startswith('UPDATE ha.control') for row in self.trace if len(row) == 3), 1)
+        self.assertTrue(self.opened)
+
+    def test_repeat_catalog_cancel_revokes_without_a_third_renewal(self):
+        from ha_control.pg import PgUnavailable
+
+        self.lease.open(self.state)
+        original = self.backend._observe
+
+        def cancel_replica_read(connection, node, state):
+            if node == 'B':
+                raise PgUnavailable(node, 'effects_binding', '57014')
+            return original(connection, node, state)
+
+        with patch.object(self.backend, '_observe', side_effect=cancel_replica_read) as reads:
+            with self.assertRaises(PgUnavailable):
+                self.lease.renew(self.state)
+        self.assertEqual([call.args[1] for call in reads.call_args_list].count('B'), 2)
+        self.assertFalse(self.opened)
+        self.assertEqual(self.revision, 3)
+
+    def test_catalog_cancel_does_not_override_simultaneous_closure_or_peer_failure(self):
+        from ha_control.pg import PgUnavailable
+
+        for guard in ('closure', 'peer'):
+            with self.subTest(guard=guard):
+                self.setUp()
+                self.lease.open(self.state)
+                original = self.backend._observe
+
+                def observe(connection, node, state):
+                    if node == 'A':
+                        raise PgUnavailable(node, 'effects_catalog', '57014')
+                    value = original(connection, node, state)
+                    return dict(value, remaining=0) if guard == 'peer' else value
+
+                def closure_failure(state, deadline):
+                    raise TransitionBlocked('fixture_closure_failed')
+
+                if guard == 'closure':
+                    self.lease.assert_legacy_closed = closure_failure
+                reason = 'fixture_closure_failed' if guard == 'closure' else 'initial_lease_stamp_unverified'
+                with patch.object(self.backend, '_observe', side_effect=observe) as reads:
+                    with self.assertRaisesRegex(TransitionBlocked, reason):
+                        self.lease.renew(self.state)
+                self.assertEqual([call.args[1] for call in reads.call_args_list].count('A'), 1)
+                self.assertFalse(self.opened)
+
     def test_initial_commit_cancellation_is_attributed_to_primary(self):
         class CommitCanceled(Exception):
             sqlstate = '57014'
