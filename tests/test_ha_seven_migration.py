@@ -23,7 +23,7 @@ sys.path.insert(0,str(ROOT/'infra/k8s'))
 from ha_runtime import migrate,seven_migration as M
 from ha_control.legacy_cutover import LegacyCutover, TransitionBlocked
 from ha_control import frozen_ingress, frozen_transport, native_frozen_capture, native_guest_restore
-from ha_control import native_guest_activation
+from ha_control import native_guest_activation, native_guest_live
 
 
 def encoded(value):return json.dumps(value,sort_keys=True).encode()
@@ -176,6 +176,57 @@ class NativeGuestActivationTests(unittest.TestCase):
                 patch.object(activation, "_probe", return_value=None), \
                 self.assertRaisesRegex(TransitionBlocked, "guest_activation_app_unready"):
             activation._wait_for_app(None, None, "192.0.2.10", "portal-web")
+
+
+class NativeGuestLiveTests(unittest.TestCase):
+    def test_portal_readiness_finishes_before_other_ingress_requests(self):
+        live = native_guest_live
+        pin = "a" * 64
+        fields = dict(boot_sha256=pin, installation_id=pin, system_id="1", plan_sha256=pin,
+                      manifest_sha256=pin, cluster="test", validate=lambda: None)
+        pins = SimpleNamespace(**fields, node="A", attempt_id=pin, release={"source_commit": pin})
+        postgres = SimpleNamespace(**fields, source_commit=pin)
+        portal_complete = False
+        probed = []
+
+        def probe(_context, _leaf, _address, service):
+            nonlocal portal_complete
+            probed.append(service)
+            if service == "portal-web":
+                self.assertEqual(probed, [service])
+                portal_complete = True
+            else:
+                self.assertTrue(portal_complete)
+            return pin
+
+        with patch.object(live.os, "geteuid", return_value=0), \
+                patch.object(live.runtime, "_directory"), \
+                patch.object(live.runtime, "_runtime_identity", return_value={}), \
+                patch.object(live, "_receipts", return_value=(None, {}, None)), \
+                patch.object(live, "_layout", return_value=("192.0.2.10", {}, {})), \
+                patch.object(live, "_running", return_value={}), \
+                patch.object(live, "_tls", return_value=(None, pin)), \
+                patch.object(live, "_installed_authorities"), \
+                patch.object(live, "_lease", return_value=(pin, 0, 1, 0)) as lease, \
+                patch.object(live, "_probe", side_effect=probe):
+            live.observe_live_a(
+                pins, SimpleNamespace(validate=lambda: None), postgres, Path("/unused/attempt"),
+                activation_receipt_sha256=pin, authority_sha256=pin, windows_generation=1,
+                windows_generation_sha256=pin, live_lease_sha256=pin, live_authority_sha256=pin,
+            )
+        self.assertCountEqual(probed, live.PATHS)
+        self.assertEqual(lease.call_count, 2)
+
+    def test_proxy_response_header_timeout_preserves_socket_error_contract(self):
+        live = native_guest_live
+        context = MagicMock()
+        conn = context.wrap_socket.return_value.__enter__.return_value
+        conn.getpeercert.return_value = b"cert"
+        with patch.object(live.socket, "create_connection"), \
+                patch.object(live.http.client, "HTTPResponse") as response:
+            response.return_value.__enter__.return_value.begin.side_effect = TimeoutError
+            with self.assertRaisesRegex(TimeoutError, "^guest_live_route_headers_timeout$"):
+                live._probe(context, live.runtime._digest(b"cert"), "192.0.2.10", "portal-web")
 
 
 class NativeGuestRestoreTests(unittest.TestCase):
