@@ -29,6 +29,7 @@ MAX_BODY = 16 * 1024
 PORT = 10443
 LIVE_SECONDS = 20
 SOCKET_SECONDS = 3
+PORTAL_SERVICE = "portal-web"
 OPEN_STATE = """
 WITH sampled AS MATERIALIZED (SELECT clock_timestamp() AS now)
 SELECT json_build_object(
@@ -51,6 +52,10 @@ SELECT json_build_object(
           AND r.sync_state='sync' AND tls.ssl AND r.replay_lsn IS NOT NULL))
 FROM pg_control_system(), sampled
 """
+
+
+class RouteTimeout(TimeoutError):
+    """A timed-out operation within an authenticated application probe."""
 
 
 def _matches(value, expected):
@@ -206,16 +211,24 @@ def _tls(prepared):
 
 def _probe(context, leaf, ip, service):
     host, path = service + ".ha.internal", PATHS[service]
-    with socket.create_connection((ip, PORT), timeout=SOCKET_SECONDS) as tcp:
-        with context.wrap_socket(tcp, server_hostname=host) as conn:
-            _need(runtime._digest(conn.getpeercert(binary_form=True)) == leaf, "guest_live_tls_peer_changed")
-            conn.sendall(f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode("ascii"))
-            with http.client.HTTPResponse(conn) as response:
-                response.begin()
-                body = response.read(MAX_BODY + 1)
-                _need(response.status == 200 and 0 < len(body) <= MAX_BODY, "guest_live_route_unready")
-                content_type = response.headers.get_content_type()
-                node_header = response.headers.get_all("X-HA-Node-ID", [])
+    boundary = "connect"
+    try:
+        with socket.create_connection((ip, PORT), timeout=SOCKET_SECONDS) as tcp:
+            boundary = "tls"
+            with context.wrap_socket(tcp, server_hostname=host) as conn:
+                _need(runtime._digest(conn.getpeercert(binary_form=True)) == leaf, "guest_live_tls_peer_changed")
+                boundary = "send"
+                conn.sendall(f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode("ascii"))
+                with http.client.HTTPResponse(conn) as response:
+                    boundary = "headers"
+                    response.begin()
+                    boundary = "body"
+                    body = response.read(MAX_BODY + 1)
+                    _need(response.status == 200 and 0 < len(body) <= MAX_BODY, "guest_live_route_unready")
+                    content_type = response.headers.get_content_type()
+                    node_header = response.headers.get_all("X-HA-Node-ID", [])
+    except TimeoutError as error:
+        raise RouteTimeout(f"guest_live_route_{boundary}_timeout") from error
     if service == "car-care-worker":
         _need(content_type == "text/plain" and body == b"ok", "guest_live_route_unready")
     else:
@@ -260,9 +273,13 @@ def observe_live_a(pins, activation, postgres, stage, *, activation_receipt_sha2
         phase = "postgres_before"
         first, sampled, expires, replay = _lease(pins, postgres)
         phase = "application_routes"
-        with ThreadPoolExecutor(max_workers=len(PATHS)) as pool:
-            pending = {service: pool.submit(_probe, context, leaf, ip, service) for service in PATHS}
-            routes = {}
+        # Portal readiness queries several backends through the same guest.
+        # Keep its request out of the burst from the remaining ingress probes.
+        service = PORTAL_SERVICE
+        routes = {service: _probe(context, leaf, ip, service)}
+        with ThreadPoolExecutor(max_workers=len(PATHS) - 1) as pool:
+            pending = {name: pool.submit(_probe, context, leaf, ip, name)
+                       for name in PATHS if name != PORTAL_SERVICE}
             for service, task in pending.items():
                 routes[service] = task.result()
         service = None
@@ -283,7 +300,7 @@ def observe_live_a(pins, activation, postgres, stage, *, activation_receipt_sha2
         }))
     except (TransitionBlocked, OSError, ValueError, KeyError, TypeError, MigrationRejected,
             subprocess.TimeoutExpired, http.client.HTTPException) as error:
-        reason = str(error) if isinstance(error, TransitionBlocked) else ""
+        reason = str(error) if isinstance(error, (TransitionBlocked, RouteTimeout)) else ""
         if not re.fullmatch(r"guest_(?:live|runtime|restore)_[a-z0-9_]{1,72}", reason):
             reason = type(error).__name__
         if phase is not None:
