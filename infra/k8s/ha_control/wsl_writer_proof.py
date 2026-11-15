@@ -302,6 +302,17 @@ def observe_closed(baseline, challenge, deadline, *, assert_external_closed, run
                                     'workloads_closed': True})).hexdigest()
 
 
+def _recovery_command_reason(argv):
+    for index, arg in enumerate(argv):
+        if b'windows-bootstrap.sh' in arg or b'deploy-n100' in arg:
+            if index and argv[index - 1] in {b'-c', b'-lc'}:
+                return 'legacy_recovery_linux_embedded_command'
+            return 'legacy_recovery_linux_script_command'
+    if any(RECOVERY_TOOL.search(arg) for arg in argv) and any(RECOVERY_ACTION.fullmatch(arg) for arg in argv):
+        return 'legacy_recovery_linux_compose_command' if b'compose' in argv else 'legacy_recovery_linux_tool_command'
+    return None
+
+
 def _recovery_settled(challenge, deadline):
     for entry in Path('/proc').iterdir():
         _deadline(deadline)
@@ -311,9 +322,11 @@ def _recovery_settled(challenge, deadline):
             argv = (entry / 'cmdline').read_bytes().split(b'\0')
         except (FileNotFoundError, ProcessLookupError):
             continue
-        _need(not any(b'windows-bootstrap.sh' in arg or b'deploy-n100' in arg for arg in argv)
-              and not (any(RECOVERY_TOOL.search(arg) for arg in argv)
-                       and any(RECOVERY_ACTION.fullmatch(arg) for arg in argv)), 'legacy_recovery_wsl_commands_unsettled')
+        except OSError:
+            raise TransitionBlocked('legacy_recovery_linux_process_unreadable') from None
+        reason = _recovery_command_reason(argv)
+        if reason:
+            raise TransitionBlocked(reason)
     return hashlib.sha256((challenge + ':wsl-recovery-commands-settled').encode()).hexdigest()
 
 
@@ -368,8 +381,10 @@ def main(*, persistent=False, runner=_run):
                             'legacy_writer_command_unconfirmed': 'inventory',
                             'legacy_writer_proof_response_invalid': 'inventory',
                             'legacy_writer_boot_changed': 'identity',
-                            'legacy_recovery_wsl_commands_unsettled': 'recovery',
+                            'legacy_recovery_linux_process_unreadable': 'internal',
                         }.get(str(error), 'closure')
+                        if reason == 'closure' and str(error).startswith('legacy_recovery_linux_'):
+                            reason = 'recovery'
                     if time.monotonic() >= deadline:
                         reason = 'deadline'
                     if isinstance(error, InventoryDeadline):
