@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import http.client
 import os
 from pathlib import Path
+import re
 import socket
 import ssl
 import stat
@@ -245,20 +246,34 @@ def observe_live_a(pins, activation, postgres, stage, *, activation_receipt_sha2
           and postgres.source_commit == pins.release["source_commit"], "guest_live_observation_unbound")
     stage = Path(stage)
     started = time.monotonic()
+    phase = service = None
     try:
         runtime._directory(stage, 0)
+        phase = "activation_receipts"
         prepared, files, activated_at = _receipts(pins, activation, stage, activation_receipt_sha256)
+        phase = "runtime_layout"
         ip, layouts, images = _layout(pins, postgres, stage, prepared)
+        phase = "containers_before"
         before = _running(pins, postgres, prepared, layouts, images, activated_at)
+        phase = "ingress_tls"
         context, leaf = _tls(prepared)
+        phase = "postgres_before"
         first, sampled, expires, replay = _lease(pins, postgres)
+        phase = "application_routes"
         with ThreadPoolExecutor(max_workers=len(PATHS)) as pool:
             pending = {service: pool.submit(_probe, context, leaf, ip, service) for service in PATHS}
-            routes = {service: task.result() for service, task in pending.items()}
+            routes = {}
+            for service, task in pending.items():
+                routes[service] = task.result()
+        service = None
         _need(set(routes) == SERVICES, "guest_live_routes_incomplete")
+        phase = "installed_authorities"
         _installed_authorities(files)
+        phase = "containers_after"
         after = _running(pins, postgres, prepared, layouts, images, activated_at)
+        phase = "postgres_after"
         last, sampled_after, expires_after, replay_after = _lease(pins, postgres)
+        phase = "freshness"
         _need(before == after and sampled_after >= sampled and expires_after >= expires and replay_after >= replay
               and time.monotonic() - started < LIVE_SECONDS, "guest_live_observation_stale")
         return runtime._digest(runtime._json_bytes({
@@ -266,6 +281,24 @@ def observe_live_a(pins, activation, postgres, stage, *, activation_receipt_sha2
             "containers": after, "routes": routes, "ingress_leaf_sha256": leaf, "postgres_before": first,
             "postgres_after": last,
         }))
-    except (OSError, ValueError, KeyError, TypeError, MigrationRejected, subprocess.TimeoutExpired,
-            http.client.HTTPException):
+    except (TransitionBlocked, OSError, ValueError, KeyError, TypeError, MigrationRejected,
+            subprocess.TimeoutExpired, http.client.HTTPException) as error:
+        reason = str(error) if isinstance(error, TransitionBlocked) else ""
+        if not re.fullmatch(r"guest_(?:live|runtime|restore)_[a-z0-9_]{1,72}", reason):
+            reason = type(error).__name__
+        if phase is not None:
+            try:
+                runtime._write(stage / "runtime-live-failure.json", runtime._json_bytes({
+                    "schema_version": 1,
+                    "attempt_id": pins.attempt_id,
+                    "activation_receipt_sha256": activation_receipt_sha256,
+                    "phase": phase,
+                    "service": service,
+                    "reason": reason,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000),
+                }))
+            except OSError:
+                pass
+        if isinstance(error, TransitionBlocked):
+            raise
         raise TransitionBlocked("guest_live_observation_unconfirmed") from None
