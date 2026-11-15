@@ -186,6 +186,23 @@ def ensure_storage():
         pass
 
 
+def check_storage_ready():
+    config = _guard()
+    if not isinstance(config, dict) or config.get('profile') != 'enforced-vm-v1':
+        with _root():
+            pass
+        return
+
+    from ha_runtime import blobs
+    with runtime().connect(SERVICE, 'state') as connection:
+        row = connection.execute('SELECT payload FROM shared_state WHERE key=?', (STATE_KEY,)).fetchone()
+        if row is None:
+            raise _unavailable()
+        _validate(row[0])
+        blobs.check_enforcement(connection)
+        connection.assert_write_admitted()
+
+
 @contextmanager
 def _blob_root():
     if getattr(_STORAGE, 'pg', False):
