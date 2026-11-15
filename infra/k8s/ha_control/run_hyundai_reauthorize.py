@@ -24,7 +24,7 @@ ENVIRONMENT = (
 )
 LEGACY_MODULES = {
     "hyundai.py": "b6da9a827ccf92c341b07f66a72ac1756b86262269656257f0068ea86f53ac66",
-    "oauth_callback.py": "ff157d8ab611481483385bacf4da91dc10e908425b7bdbedee40f88fd43577be8",
+    "oauth_callback.py": "ff157d8ab611481483385bacf4da91dc10e908425b7dbedee40f88fd43577be8",
 }
 HELPER_SHA256 = "8dc9888d91a3a0b7f38e25eb2f0f67af5a81439c04feda4137aa88bbd14ee5bd"
 CONTAINER_HELPER = "/run/recovery/hyundai_reauthorize.py"
