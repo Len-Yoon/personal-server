@@ -27,6 +27,7 @@ $encoding = [Text.UTF8Encoding]::new($false, $true)
 $pipe = $null
 $runspace = $null
 $vmRunspace = $null
+$processRunspace = $null
 $clock = $null
 $mac = $null
 $outcome = @{ recorded = $false }
@@ -252,6 +253,7 @@ function Invoke-ObservedClosure($Challenge, $Progress) {
         MarkerSha256=$MarkerSha256
         Progress=$Progress
         VmRunspace=$vmRunspace
+        ProcessRunspace=$processRunspace
         DeadlineTimestamp=[Diagnostics.Stopwatch]::GetTimestamp() +
             [long]((Remaining) * [Diagnostics.Stopwatch]::Frequency / 1000)
     }
@@ -337,6 +339,17 @@ try {
         $warm = $vmInit.Invoke()
         if ($vmInit.HadErrors -or $warm.Count -ne 1) { throw 'lease_proof_vm_init' }
     } finally { $vmInit.Dispose() }
+    $processRunspace = [RunspaceFactory]::CreateRunspace()
+    $processRunspace.ThreadOptions = 'ReuseThread'
+    $processRunspace.Open()
+    $processInit = [PowerShell]::Create()
+    $processInit.Runspace = $processRunspace
+    try {
+        $null = $processInit.AddScript($driverText, $false).AddStatement()
+        $null = $processInit.AddCommand('Assert-HaReactivationProcessesClosed')
+        $warm = $processInit.Invoke()
+        if ($processInit.HadErrors -or $warm.Count -ne 0) { throw 'lease_proof_process_init' }
+    } finally { $processInit.Dispose() }
     $init = [PowerShell]::Create()
     $init.Runspace = $runspace
     try {
@@ -412,4 +425,5 @@ try {
     if ($null -ne $mac) { $mac.Dispose() }
     if ($null -ne $runspace) { $runspace.Dispose() }
     if ($null -ne $vmRunspace) { $vmRunspace.Dispose() }
+    if ($null -ne $processRunspace) { $processRunspace.Dispose() }
 }
