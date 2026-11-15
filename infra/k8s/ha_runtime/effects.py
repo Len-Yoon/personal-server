@@ -666,16 +666,32 @@ STORAGE_CONSTRAINTS_SQL = """/* effects_storage_constraints */
  pg_get_expr(c.conbin,c.conrelid)
  FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
  WHERE n.nspname='ha_effects' ORDER BY t.relname,c.conname"""
+# Resolve the objects and each role's effective access once in the current
+# statement. Check membership separately so NOINHERIT/SET ROLE paths still
+# count, including access reachable through historical application roles.
 STORAGE_LOGIN_SQL = """/* effects_storage_login_effective */
+ WITH effect_tables AS MATERIALIZED (
+   SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+   WHERE n.nspname='ha_effects' AND c.relkind='r'
+ ), effect_functions AS MATERIALIZED (
+   SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+   WHERE n.nspname='ha_effects'
+ ), exposed_roles AS MATERIALIZED (
+   SELECT role.oid FROM pg_roles role
+   WHERE role.rolname=%s OR role.rolsuper
+      OR has_schema_privilege(role.oid,'ha_effects','USAGE,CREATE')
+      OR EXISTS (
+        SELECT 1 FROM effect_tables t
+        WHERE has_table_privilege(role.oid,t.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES')
+           OR has_any_column_privilege(role.oid,t.oid,'SELECT,INSERT,UPDATE,REFERENCES')
+      )
+      OR EXISTS (
+        SELECT 1 FROM effect_functions f WHERE has_function_privilege(role.oid,f.oid,'EXECUTE')
+      )
+ )
  SELECT r.rolname, r.rolsuper OR EXISTS(
- SELECT 1 FROM pg_roles reachable WHERE (reachable.oid=r.oid OR pg_has_role(r.oid,reachable.oid,'MEMBER')) AND (
- reachable.rolname=%s OR reachable.rolsuper
- OR has_schema_privilege(reachable.oid,'ha_effects','USAGE,CREATE')
- OR EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='ha_effects' AND c.relkind='r'
-   AND (has_table_privilege(reachable.oid,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES')
-     OR has_any_column_privilege(reachable.oid,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')))
- OR EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='ha_effects' AND has_function_privilege(reachable.oid,p.oid,'EXECUTE'))))
- FROM pg_roles r WHERE r.rolcanlogin AND NOT r.rolsuper AND r.rolname<>%s ORDER BY r.rolname"""
+   SELECT 1 FROM exposed_roles x WHERE x.oid=r.oid OR pg_has_role(r.oid,x.oid,'MEMBER')
+ ) FROM pg_roles r WHERE r.rolcanlogin AND NOT r.rolsuper AND r.rolname<>%s ORDER BY r.rolname"""
 
 
 def _catalog_expression(expression):
