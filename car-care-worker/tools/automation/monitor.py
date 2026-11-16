@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Publish sanitized car backup evidence, monitor misses, clean verified old Pods."""
 import argparse
+from contextlib import contextmanager, ExitStack
 from datetime import date, datetime, timedelta, timezone
+import fcntl
 import importlib.util
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import stat
+import sys
 
 SPEC = importlib.util.spec_from_file_location('car_monitor_schedule', Path(__file__).with_name('schedule.py'))
 SCHEDULE = importlib.util.module_from_spec(SPEC)
@@ -15,6 +19,35 @@ SPEC.loader.exec_module(SCHEDULE)
 POLICY = SCHEDULE.POLICY
 STATE_NAME = 'car-care-backup-state'
 COMPLETE = {'success', 'skipped_unchanged', 'retention_failed'}
+WSL_STATE = Path('/mnt/c/personal-server/data')
+WSL_AUTHORITY = Path('/mnt/c/ProgramData/N100HA-Cutover')
+OWNER_MARKER = 'ha-controller-owner.json'
+KERNEL_RELEASE = Path('/proc/sys/kernel/osrelease')
+
+
+@contextmanager
+def legacy_admission():
+    """Keep the entire legacy monitor run out of cutover-owned state."""
+    if sys.platform != 'linux' or 'microsoft' not in KERNEL_RELEASE.read_text().lower():
+        yield
+        return
+    lock = WSL_STATE/'ha-legacy-bootstrap.lock'
+    for directory in (WSL_STATE, WSL_AUTHORITY):
+        require(directory.resolve(strict=True) == directory and directory.is_dir())
+    fd = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        held = os.fstat(fd)
+        current = lock.lstat()
+        require(stat.S_ISREG(held.st_mode) and held.st_nlink == 1
+                and (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino))
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        for directory in (WSL_STATE, WSL_AUTHORITY):
+            with os.scandir(directory) as entries:
+                if any(item.name.casefold() == OWNER_MARKER for item in entries):
+                    raise BlockingIOError('legacy monitor deferred while HA owns the host')
+        yield
+    finally:
+        os.close(fd)
 
 
 def require(ok):
@@ -234,8 +267,23 @@ def main():
     parser.add_argument('--go', action='store_true', required=True)
     parser.parse_args()
     os.umask(0o077)
-    api = SCHEDULE.Kubernetes()
     state = SCHEDULE.state_directory()
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(legacy_admission())
+        except BlockingIOError:
+            return deferred(state, 'admission_busy')
+        return observe(SCHEDULE.Kubernetes(), state)
+
+
+def deferred(state, reason):
+    POLICY.persist(state/'monitor-result.json',dict(observed_at=datetime.now(timezone.utc).isoformat(),
+        publish_status='deferred',alert_status='not_attempted',cleanup_status='deferred',missed=None))
+    print(f'car_care_monitor=DEFERRED {reason}=true')
+    return 0
+
+
+def observe(api, state):
     # A busy producer is deferred, not reported as missed or newly healthy.
     cleaned = True
     try:
@@ -248,10 +296,7 @@ def main():
             except Exception:
                 cleaned = False
     except BlockingIOError:
-        POLICY.persist(state/'monitor-result.json',dict(observed_at=datetime.now(timezone.utc).isoformat(),
-            publish_status='deferred',alert_status='not_attempted',cleanup_status='deferred',missed=None))
-        print('car_care_monitor=DEFERRED producer_active=true')
-        return 0
+        return deferred(state, 'producer_active')
     # Publish the immutable observation after releasing locks; producers wait
     # only for local snapshot/cleanup and cannot race its timestamp capture.
     published = alerted = True
