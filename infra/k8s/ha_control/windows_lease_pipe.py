@@ -21,6 +21,7 @@ SCOPE = "n100ha-legacy-closure-v1"
 SHA = re.compile(r"[0-9a-f]{64}")
 SERVICE_SID = re.compile(r"S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}")
 PIPE = re.compile(r"n100ha-lease-proof-[0-9a-f]{32}")
+RESPONSE_SECONDS = 2.7
 CLIENT_FAILURES = {
     f"failure {stage}\r\n".encode("ascii"): f"legacy_pipe_client_{stage}"
     for stage in ("request", "connect", "peer_connect", "write", "read", "peer_response", "frame", "ack")
@@ -188,7 +189,7 @@ class PersistentLeaseProofClient:
         stage = "legacy_pipe_client_unavailable"
         try:
             _require(self._process is not None and self._process.poll() is None)
-            deadline = min(deadline, self.monotonic() + 2)
+            deadline = min(deadline, self.monotonic() + RESPONSE_SECONDS)
             stage = "legacy_pipe_request_rejected"
             challenge = self.pins.challenge()
             raw = json.dumps(challenge, separators=(",", ":"), sort_keys=True).encode("ascii")
