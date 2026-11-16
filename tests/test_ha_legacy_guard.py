@@ -569,6 +569,31 @@ class PersistentWriterProofTests(unittest.TestCase):
                 reader(command, timeout=1)
             self.assertEqual(connection.close.call_count, 2)
 
+    def test_docker_inventory_inspects_only_writer_ids_and_requires_their_labels(self):
+        from ha_control import wsl_writer_proof as proof
+
+        label = proof.COMPOSE_SERVICE_LABEL
+        writer, duplicate, caddy = (digit * 64 for digit in "abc")
+        listing = "".join(f'{json.dumps(identifier)} {json.dumps(service)}\n'
+                          for identifier, service in ((writer, "car-care-worker"),
+                                                      (duplicate, "car-care-worker"), (caddy, "caddy")))
+        inspected = [dict(Id=identifier, Config={"Labels": {label: "car-care-worker"}})
+                     for identifier in (writer, duplicate)]
+
+        def run(args, *, timeout):
+            self.assertGreater(timeout, 0)
+            if args == proof.DOCKER_WRITER_LIST:
+                return listing.encode()
+            if args[:len(proof.DOCKER)] == proof.DOCKER:
+                self.assertEqual(args, (*proof.DOCKER, "inspect", writer, duplicate))
+                return json.dumps(inspected).encode()
+            return b'{"items":[],"metadata":{}}'
+
+        self.assertEqual(proof._inventory(run, proof.time.monotonic() + 3)[1], inspected)
+        inspected[0]["Config"]["Labels"][label] = "caddy"
+        with self.assertRaisesRegex(TransitionBlocked, "legacy_writer_proof_response_invalid"):
+            proof._inventory(run, proof.time.monotonic() + 3)
+
     def test_inventory_reports_all_expired_queries(self):
         from concurrent.futures import Future
         from ha_control import wsl_writer_proof
