@@ -625,10 +625,12 @@ function Invoke-HaReactivationSession($Plan, [string]$PlanSha256, [string]$Attem
         $request
     }
     $send = {
-        param($Request)
-        [Console]::WriteLine((@{plan_sha256=$PlanSha256; attempt_id=$AttemptId;
+        param($Request, [string]$Failure)
+        $response = @{plan_sha256=$PlanSha256; attempt_id=$AttemptId;
             sequence=$Request.sequence; nonce=$Request.nonce; action=$Request.action;
-            proof_sha256=$Request.proof_sha256} | ConvertTo-Json -Compress))
+            proof_sha256=$Request.proof_sha256}
+        if ($Failure) { $response.failure = $Failure }
+        [Console]::WriteLine(($response | ConvertTo-Json -Compress))
     }
 
     $claim = & $read
@@ -641,40 +643,53 @@ function Invoke-HaReactivationSession($Plan, [string]$PlanSha256, [string]$Attem
     $seq = $first.sequence
     # The coordinator runs GitHub's admission check before sending each request.
     # Windows additionally verifies no local worker or recovery command is active.
-    $restoreRequest = Invoke-HaRecoveryCycleGuard $Plan.bootstrap_sha256 {
-        param($Lease)
-        $checkAdmission = {
-            $null = Read-HaReactivationSnapshot $Plan
-        }
-        $checkRecovery = {
-            if ($Lease.SafeFileHandle.IsClosed) { throw 'legacy_recovery_guard_lost' }
-            Assert-HaRecoveryCommandsSettled $Plan.distribution
-        }
-        Assert-HaOwnedCutoverMarker $marker
-        Close-HaReactivation $Plan $checkAdmission $checkRecovery
-        & $send $first
-        while ($true) {
-            $request = & $read
-            $seq = $request.sequence
-            Assert-HaOwnedCutoverMarker $marker
-            if ($request.action -ceq 'restore') {
-                Assert-HaReactivationClosed $Plan
-                & $checkRecovery
-                [IO.File]::Delete($marker.path)
-                if ([IO.File]::Exists($marker.path)) { throw 'cutover_authority_release_unconfirmed' }
-                return $request
+    $closeReply = @{sent=$false}
+    try {
+        $restoreRequest = Invoke-HaRecoveryCycleGuard $Plan.bootstrap_sha256 {
+            param($Lease)
+            $checkAdmission = {
+                $null = Read-HaReactivationSnapshot $Plan
             }
-            if ($request.action -ceq 'finish') {
+            $checkRecovery = {
+                if ($Lease.SafeFileHandle.IsClosed) { throw 'legacy_recovery_guard_lost' }
+                Assert-HaRecoveryCommandsSettled $Plan.distribution
+            }
+            Assert-HaOwnedCutoverMarker $marker
+            Close-HaReactivation $Plan $checkAdmission $checkRecovery
+            & $send $first
+            $closeReply.sent = $true
+            while ($true) {
+                $request = & $read
+                $seq = $request.sequence
+                Assert-HaOwnedCutoverMarker $marker
+                if ($request.action -ceq 'restore') {
+                    Assert-HaReactivationClosed $Plan
+                    & $checkRecovery
+                    [IO.File]::Delete($marker.path)
+                    if ([IO.File]::Exists($marker.path)) { throw 'cutover_authority_release_unconfirmed' }
+                    return $request
+                }
+                if ($request.action -ceq 'finish') {
+                    Assert-HaReactivationClosed $Plan
+                    & $checkRecovery
+                    & $send $request
+                    return
+                }
+                if ($request.action -cne 'verify') { throw 'legacy_reactivation_session_order' }
                 Assert-HaReactivationClosed $Plan
                 & $checkRecovery
                 & $send $request
-                return
             }
-            if ($request.action -cne 'verify') { throw 'legacy_reactivation_session_order' }
-            Assert-HaReactivationClosed $Plan
-            & $checkRecovery
-            & $send $request
         }
+    } catch {
+        if (-not $closeReply.sent) {
+            $reason = $_.Exception.Message
+            if ($reason -cnotmatch '\A(?:legacy_(?:reactivation|recovery)|cutover_authority)_[a-z_]{1,75}\z') {
+                $reason = 'legacy_reactivation_windows_error'
+            }
+            & $send $first $reason
+        }
+        throw
     }
     if ($null -ne $restoreRequest) {
         if ($restoreRequest.action -cne 'restore') { throw 'legacy_reactivation_session_output' }
