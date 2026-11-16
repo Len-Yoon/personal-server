@@ -10,9 +10,11 @@ import os
 from pathlib import Path
 import sqlite3
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -228,6 +230,72 @@ class NativeGuestLiveTests(unittest.TestCase):
             response.return_value.__enter__.return_value.begin.side_effect = TimeoutError
             with self.assertRaisesRegex(TimeoutError, "^guest_live_route_headers_timeout$"):
                 live._probe(context, live.runtime._digest(b"cert"), "192.0.2.10", "portal-web")
+
+
+class NativeCaptureHeartbeatTests(unittest.TestCase):
+    def test_capture_heartbeats_do_not_dispatch_or_consume_mutations(self):
+        bridge = native_stdio_bridge
+        binding = bridge.Binding(*("abcdef"[i] * 64 for i in range(5)))
+        left, right = socket.socketpair()
+        with tempfile.TemporaryDirectory(dir=Path("/tmp").resolve()) as journal, left, right:
+            observed = threading.Event()
+            dispatch = MagicMock(return_value=bridge.Receipt("PASS", "7" * 64))
+            channel = bridge.Stdio(left.fileno(), left.fileno())
+            server = bridge.Server(channel, binding, bridge.MutationJournal(journal), dispatch, seconds=4)
+            original = channel.write
+
+            def record(frame, deadline):
+                original(frame, deadline)
+                if frame["kind"] == "heartbeat_ack" and frame["heartbeat"] == 2:
+                    observed.set()
+
+            channel.write = record
+            errors = []
+
+            def serve():
+                try:
+                    server.serve()
+                except Exception as error:
+                    errors.append(error)
+
+            thread = threading.Thread(target=serve)
+            thread.start()
+            try:
+                client = bridge.Client(bridge.Stdio(right.fileno(), right.fileno()), binding, seconds=4)
+                with patch.object(bridge, "HEARTBEAT_INTERVAL", 0.01), client.keepalive():
+                    self.assertTrue(observed.wait(2))
+                    dispatch.assert_not_called()
+                self.assertEqual(client.sequence, 0)
+                self.assertEqual(client.call("preflight", "A", target_system_id_sha256="8" * 64).status, "PASS")
+                self.assertEqual(dispatch.call_count, 1)
+                self.assertEqual(list(Path(journal).iterdir()), [])
+            finally:
+                right.close()
+                thread.join(5)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(errors, [])
+
+    def test_unbound_heartbeat_poisoned_before_next_guest_request(self):
+        bridge = native_stdio_bridge
+        binding = bridge.Binding(*("abcdef"[i] * 64 for i in range(5)))
+        channel = MagicMock()
+        queried = threading.Event()
+
+        def answer(deadline):
+            request = channel.write.call_args.args[0]
+            if request["kind"] == "open":
+                return request | {"kind": "opened", "server_nonce": "7" * 64}
+            queried.set()
+            return request | {"kind": "heartbeat_ack", "sequence": 17}
+
+        channel.read.side_effect = answer
+        client = bridge.Client(channel, binding)
+        with self.assertRaisesRegex(bridge.BridgeRejected, "bridge_capture_transport_unconfirmed"):
+            with client.keepalive():
+                self.assertTrue(queried.wait(2))
+        with self.assertRaisesRegex(bridge.BridgeRejected, "bridge_session_unavailable"):
+            client.call("preflight", "A", target_system_id_sha256="8" * 64)
+        self.assertEqual(channel.write.call_count, 2)
 
 
 class NativeRestoreReadbackTests(unittest.TestCase):

@@ -7,6 +7,7 @@ channel. No command, shell text, arbitrary paths, credentials, or artifacts are
 accepted as bridge payloads. The receiver nonce is a one-attempt transfer input.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
@@ -31,6 +32,9 @@ ACTIVATION_GUEST_REPLY_SECONDS = 6.5
 ACTIVATION_GUEST_CHECK_SECONDS = 7
 MAX_REQUESTS = 64
 MAX_SESSION_SECONDS = 3600
+HEARTBEAT_INTERVAL = 20
+HEARTBEAT_TIMEOUT = 8
+MAX_HEARTBEATS = 1 + MAX_SESSION_SECONDS // HEARTBEAT_INTERVAL
 TRANSFER_BYTES = 8 * 1024**3
 HEX = re.compile(r"[a-f0-9]{64}\Z")
 NODES = ("A", "B")
@@ -368,6 +372,7 @@ class _Session:
         self.deadline = time.monotonic() + seconds
         self.session = None
         self.sequence = 0
+        self.heartbeat = 0
         self.poisoned = False
 
     def envelope(self, kind, sequence, nonce, node, verb):
@@ -376,6 +381,10 @@ class _Session:
 
     def limit(self, seconds):
         return min(time.monotonic() + seconds, self.deadline)
+
+    def heartbeat_frame(self, kind, count):
+        return {"kind": kind, "session": self.session, "sequence": self.sequence,
+                "heartbeat": count, **self.context}
 
 
 class Client(_Session):
@@ -392,9 +401,44 @@ class Client(_Session):
               and _matches(answer, {"kind": "opened", "client_nonce": client_nonce,
                                     "server_nonce": server_nonce, **self.context}), "bridge_handshake_rejected")
         self.session = _digest(_bytes({"client_nonce": client_nonce, "server_nonce": server_nonce, **self.context}))
+        self.heartbeat_active = False
+
+    @contextmanager
+    def keepalive(self):
+        """Keep the authenticated pipe active while the caller captures locally."""
+        _need(not self.poisoned and not self.heartbeat_active, "bridge_session_unavailable")
+        stopped = threading.Event()
+
+        def pulse():
+            try:
+                while not stopped.is_set():
+                    count = self.heartbeat + 1
+                    _need(count <= MAX_HEARTBEATS, "bridge_heartbeat_limit")
+                    deadline = self.limit(HEARTBEAT_TIMEOUT)
+                    self.channel.write(self.heartbeat_frame("heartbeat", count), deadline)
+                    answer = self.channel.read(deadline)
+                    _need(_matches(answer, self.heartbeat_frame("heartbeat_ack", count)),
+                          "bridge_heartbeat_unbound")
+                    self.heartbeat = count
+                    if stopped.wait(HEARTBEAT_INTERVAL):
+                        return
+            except (BridgeRejected, OSError, ValueError, TypeError):
+                self.poisoned = True
+
+        thread = threading.Thread(target=pulse, daemon=True)
+        self.heartbeat_active = True
+        thread.start()
+        try:
+            yield
+        finally:
+            stopped.set()
+            thread.join()
+            self.heartbeat_active = False
+        _need(not self.poisoned, "bridge_capture_transport_unconfirmed")
 
     def call(self, verb, node, /, **args):
-        _need(not self.poisoned and self.sequence < MAX_REQUESTS, "bridge_session_unavailable")
+        _need(not self.poisoned and not self.heartbeat_active and self.sequence < MAX_REQUESTS,
+              "bridge_session_unavailable")
         self.chain.check(verb, node, args)
         self.sequence += 1
         nonce = secrets.token_hex(32)
@@ -473,6 +517,13 @@ class Server(_Session):
                 wire = self.channel.read(self.deadline)
             except _End:
                 return
+            if wire.get("kind") == "heartbeat":
+                count = self.heartbeat + 1
+                _need(count <= MAX_HEARTBEATS and _matches(wire, self.heartbeat_frame("heartbeat", count)),
+                      "bridge_heartbeat_unbound")
+                self.channel.write(self.heartbeat_frame("heartbeat_ack", count), self.limit(HEARTBEAT_TIMEOUT))
+                self.heartbeat = count
+                continue
             sequence, nonce, node, verb = self.sequence + 1, wire.get("nonce"), wire.get("node"), wire.get("verb")
             args = wire.get("args")
             self.chain.check(verb, node, args)
