@@ -1575,6 +1575,39 @@ sys.stdin.readline()
                             channel.request('verify', '3' * 64)
                     self.assertFalse(channel.healthy)
 
+    def test_native_windows_close_failure_is_bound_and_never_an_acknowledgement(self):
+        from ha_control.native_cutover import WindowsReactivationSession
+
+        child = """
+import json, sys
+mode = sys.argv[1]
+print(json.dumps(dict(plan_sha256=sys.argv[-3], attempt_id=sys.argv[-1],
+                      sequence=0, action='ready')), flush=True)
+response = json.loads(sys.stdin.readline())
+response['failure'] = 'legacy_recovery_cycle_in_flight'
+if mode == 'wrong_nonce':
+    response['nonce'] = '0' * 64
+elif mode == 'unstructured':
+    response['failure'] = 'private path'
+elif mode == 'null':
+    response['failure'] = None
+print(json.dumps(response), flush=True)
+"""
+        outcomes = (
+            ('bound', 'close', 'legacy_native_windows_legacy_recovery_cycle_in_flight_close'),
+            ('wrong_nonce', 'close', 'legacy_native_response_unconfirmed_close'),
+            ('unstructured', 'close', 'legacy_native_response_unconfirmed_close'),
+            ('null', 'close', 'legacy_native_response_unconfirmed_close'),
+            ('bound', 'verify', 'legacy_native_response_unconfirmed_verify'),
+        )
+        for mode, action, error in outcomes:
+            with self.subTest(mode=mode, action=action):
+                channel = WindowsReactivationSession((sys.executable, '-u', '-c', child, mode))
+                with channel.guard(self.plan, '2' * 64):
+                    with self.assertRaisesRegex(TransitionBlocked, error + '$'):
+                        channel.request(action, '3' * 64)
+                    self.assertFalse(channel.healthy)
+
     def test_wsl_bootstrap_observes_native_marker_and_rejects_legacy_collision(self):
         from ha_control.native_cutover import WslBootstrapAdmission
 

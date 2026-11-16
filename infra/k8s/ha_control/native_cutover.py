@@ -112,9 +112,17 @@ $script=[ScriptBlock]::Create([Text.Encoding]::UTF8.GetString($entry).TrimStart(
         line, _, remaining = self.buffer.partition(b"\n")
         self.buffer = remaining
         response = json.loads(line)
+        failure = None
+        if type(response) is dict and "failure" in response:
+            failure = response.pop("failure")
+            if (expected["action"] != "close" or type(failure) is not str
+                    or not re.fullmatch(r"(?:legacy_(?:reactivation|recovery)|cutover_authority)_[a-z_]{1,75}", failure)):
+                raise TransitionBlocked("legacy_native_response_unconfirmed")
         if (type(response) is not dict or type(response.get("sequence")) is not int
                 or response != expected or time.monotonic() >= deadline):
             raise TransitionBlocked("legacy_native_response_unconfirmed")
+        if failure:
+            raise TransitionBlocked(f"legacy_native_windows_{failure}")
         return hashlib.sha256(json.dumps(response, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def request(self, action, proof):
