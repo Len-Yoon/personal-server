@@ -805,6 +805,45 @@ class CarBackupOperationsTests(unittest.TestCase):
         BACKUP.POLICY.persist(self.state/'activation.json', dict(activated_at=(self.now-timedelta(days=2)).isoformat()))
         return result
 
+    def test_monitor_defers_cutover_ownership_and_resumes_after_release(self):
+        from contextlib import ExitStack
+        import fcntl
+        import sys
+
+        authority = self.state/'authority'
+        authority.mkdir(parents=True)
+        lock = self.state/'ha-legacy-bootstrap.lock'
+        lock.touch()
+        kernel = self.state/'kernel'
+        kernel.write_text('test-microsoft-standard-WSL2')
+        with ExitStack() as fixtures:
+            for name, value in (('WSL_STATE', self.state), ('WSL_AUTHORITY', authority), ('KERNEL_RELEASE', kernel)):
+                fixtures.enter_context(patch.object(MONITOR, name, value.resolve()))
+            fixtures.enter_context(patch.object(sys, 'platform', 'linux'))
+            fixtures.enter_context(patch.object(sys, 'argv', ['monitor.py', '--go']))
+            fixtures.enter_context(patch.object(MONITOR.SCHEDULE, 'state_directory', return_value=self.state))
+            fixtures.enter_context(patch('builtins.print'))
+            api = fixtures.enter_context(patch.object(MONITOR.SCHEDULE, 'Kubernetes'))
+            def assert_admitted(api, state):
+                with lock.open('r+') as exclusive, self.assertRaises(BlockingIOError):
+                    fcntl.flock(exclusive, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return 0
+
+            observe = fixtures.enter_context(patch.object(MONITOR, 'observe', side_effect=assert_admitted))
+            with lock.open('r+') as exclusive:
+                fcntl.flock(exclusive, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertEqual(MONITOR.main(), 0)
+            marker = authority/MONITOR.OWNER_MARKER.upper()
+            marker.touch()
+            self.assertEqual(MONITOR.main(), 0)
+            api.assert_not_called()
+            observe.assert_not_called()
+            result = json.loads((self.state/'monitor-result.json').read_text())
+            self.assertEqual((result['publish_status'], result['alert_status']), ('deferred', 'not_attempted'))
+            marker.unlink()
+            self.assertEqual(MONITOR.main(), 0)
+            observe.assert_called_once_with(api.return_value, self.state)
+
     def test_monitor_state_has_only_contract_fields_and_original_restore_time(self):
         self.ready()
         value = MONITOR.snapshot(self.state, self.now)
