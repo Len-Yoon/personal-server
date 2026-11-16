@@ -78,10 +78,10 @@ class NativeGuestActivationTests(unittest.TestCase):
             }
 
         for age, elapsed, failure in (
-            (0.1, 3.2, None),
-            (2.1, 3.2, "guest_activation_observation_age"),
-            (5.1, 3.2, "guest_activation_expired_during_check"),
-            (0.1, 4.1, "guest_activation_boundary_deadline"),
+            (0.1, 6.2, None),
+            (2.1, 6.2, "guest_activation_observation_age"),
+            (5.1, 6.2, "guest_activation_expired_during_check"),
+            (0.1, 7.1, "guest_activation_boundary_deadline"),
         ):
             with self.subTest(age=age, elapsed=elapsed), \
                     patch.object(activation.runtime, "_runtime_identity", return_value={}), \
