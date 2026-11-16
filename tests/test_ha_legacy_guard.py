@@ -839,13 +839,28 @@ class CaddyRuntimeTests(unittest.TestCase):
         self.assertTrue((Path(self.work) / 'caddy-apply-intent.json').exists())
         self.assertEqual(len([cmd for cmd in self.calls if 'up' in cmd]), 1)
 
-    def test_uncertain_apply_requires_reconciliation_without_resending(self):
+    def test_uncertain_apply_accepts_verified_replacement_without_resending(self):
         prepared = self.prepare()
         self.lose_apply_result = True
+        guard = Mock()
+        result = self.runtime.apply(prepared, guard)
+        self.assertEqual(result['candidate_sha256'], prepared.candidate_sha256)
+        self.assertEqual(guard.call_count, 4)
+        with self.assertRaisesRegex(TransitionBlocked, 'caddy_reconciliation_required'):
+            self.runtime.apply(prepared, guard)
+        self.assertEqual(len([cmd for cmd in self.calls if 'up' in cmd]), 1)
+
+    def test_uncertain_apply_with_mount_drift_fails_without_resending(self):
+        prepared = self.prepare()
+        self.lose_apply_result = True
+        self.drift = True
         for _ in range(2):
             with self.assertRaisesRegex(TransitionBlocked, 'caddy_reconciliation_required'):
                 self.runtime.apply(prepared, Mock())
         self.assertEqual(len([cmd for cmd in self.calls if 'up' in cmd]), 1)
+        failure = json.loads((Path(self.work) / 'caddy-apply-failure.json').read_bytes())
+        self.assertEqual(failure['phase'], 'mounts_and_credentials')
+        self.assertTrue(failure['command_unconfirmed'])
 
     def test_guard_loss_after_durable_intent_blocks_replacement(self):
         prepared = self.prepare()
