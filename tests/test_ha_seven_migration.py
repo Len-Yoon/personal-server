@@ -24,6 +24,7 @@ from ha_runtime import migrate,seven_migration as M
 from ha_control.legacy_cutover import LegacyCutover, TransitionBlocked
 from ha_control import frozen_ingress, frozen_transport, native_frozen_capture, native_guest_restore
 from ha_control import native_guest_activation, native_guest_live
+from ha_control import native_guest_ssh, native_guest_worker, native_stdio_bridge
 
 
 def encoded(value):return json.dumps(value,sort_keys=True).encode()
@@ -227,6 +228,68 @@ class NativeGuestLiveTests(unittest.TestCase):
             response.return_value.__enter__.return_value.begin.side_effect = TimeoutError
             with self.assertRaisesRegex(TimeoutError, "^guest_live_route_headers_timeout$"):
                 live._probe(context, live.runtime._digest(b"cert"), "192.0.2.10", "portal-web")
+
+
+class NativeRestoreReadbackTests(unittest.TestCase):
+    def setUp(self):
+        self.bridge = native_stdio_bridge
+        self.binding = self.bridge.Binding(*("abcdef"[i] * 64 for i in range(5)))
+        self.args = dict(zip(self.bridge.RESTORE_ARGS, ("7" * 64, "8" * 64, "9" * 64)))
+        self.request = self.bridge.Request(self.binding, "A", "restore", 6, "1" * 64, self.args)
+
+    def test_unconfirmed_ssh_exit_reads_receipt_once_without_restoring_again(self):
+        bridge = self.bridge
+        envelope = native_guest_worker._scope(self.request)
+        private = envelope | {"verb": bridge.GUEST_RESTORE_READBACK}
+        proof = "2" * 64
+        answer = bridge._bytes(private | bridge.Receipt("PASS", proof).fields(private["verb"]))
+        guest = object.__new__(native_guest_ssh.GuestSshDispatcher)
+        guest.guests = {"A": SimpleNamespace(alias="guest")}
+        guest.jump = SimpleNamespace(alias="jump")
+        guest.known_hosts = {"A": Path("guest-key"), "jump": Path("jump-key")}
+        guest.command = "fixture"
+        guest.run = MagicMock(side_effect=[bridge.BridgeRejected("guest_ssh_exit_unconfirmed"), answer])
+        scope = envelope | {"args": self.args}
+        with patch.object(native_guest_ssh, "_identity", return_value={}), \
+                patch.object(native_guest_ssh, "_checked_file", return_value=(b"key", None)), \
+                patch.object(native_guest_ssh, "_host_record"), \
+                patch.object(native_guest_ssh, "_same_files", return_value=True), \
+                patch.object(native_guest_ssh, "_ssh_config", return_value=Path("/fixture/config")):
+            result = guest._invoke("A", bridge._bytes(scope), time.monotonic() + 100, self.request, None)
+        self.assertEqual(result, bridge._bytes(envelope | bridge.Receipt("PASS", proof).fields("restore")))
+        self.assertEqual([json.loads(call.args[1]) for call in guest.run.call_args_list],
+                         [scope, private | {"args": self.args}])
+        with self.assertRaisesRegex(bridge.BridgeRejected, "bridge_guest_only_request"):
+            bridge._Chain("cutover").check(private["verb"], "A", self.args)
+
+    def test_guest_requires_matching_immutable_receipt_and_fresh_closed_restore(self):
+        bridge = self.bridge
+        worker = object.__new__(native_guest_worker.GuestWorker)
+        worker.request = replace(self.request, verb=bridge.GUEST_RESTORE_READBACK)
+        worker.args = self.args
+        worker.stage = Path("/fixture/attempt")
+        worker.restore_stage = worker.stage / "restore"
+        worker.input_digest = "3" * 64
+        worker._assert_no_activation = MagicMock()
+        worker._receiver_settled = MagicMock()
+        worker._proof = MagicMock(return_value=(None, {"manifest_sha256": self.args["manifest_sha256"]}))
+        worker.restore_pins = MagicMock()
+        common = native_guest_worker._scope(self.request) | {"worker_input_sha256": worker.input_digest}
+        result = {"status": "PASS", "manifest_sha256": self.args["manifest_sha256"],
+                  "services": sorted(native_guest_worker.SERVICES), "database_and_apps_closed": True,
+                  "writer_authority_issued": False, "migration_receipt_sha256": "4" * 64}
+        intent = common | {"args_sha256": bridge._digest(bridge._bytes(self.args))}
+        receipt = bridge._bytes(common | {"evidence": result})
+        records = [(bridge._bytes(intent), intent), (receipt, json.loads(receipt)), (bridge._bytes(result), result)]
+        with patch.object(native_guest_worker, "_read_json", side_effect=records * 2), \
+                patch.object(native_guest_restore, "migration_journal", return_value=worker.restore_stage / "journal"), \
+                patch.object(native_guest_restore, "observe_closed_outcome", side_effect=[
+                    {"status": "COMMITTED_CLOSED", "migration_receipt_sha256": result["migration_receipt_sha256"]},
+                    {"status": "UNKNOWN"},
+                ]):
+            self.assertEqual(worker.read_restore_receipt(), bridge.Receipt("PASS", bridge._digest(receipt)))
+            with self.assertRaisesRegex(TransitionBlocked, "guest_worker_restore_unsettled"):
+                worker.read_restore_receipt()
 
 
 class NativeGuestRestoreTests(unittest.TestCase):

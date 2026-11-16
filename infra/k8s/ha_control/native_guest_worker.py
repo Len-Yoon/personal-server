@@ -6,7 +6,7 @@ mutation exclusion, evidence, and observations. Activation is a separate stage.
 """
 
 from contextlib import contextmanager
-from dataclasses import asdict, fields
+from dataclasses import asdict, fields, replace
 from datetime import timezone
 import fcntl
 import json
@@ -24,7 +24,8 @@ from . import frozen_ingress, native_guest_restore as restore, native_guest_runt
 from . import native_guest_activation as activation, native_guest_live as live
 from .legacy_writers import TransitionBlocked, _need
 from .native_stdio_bridge import (
-    ACTIVATION_GUEST_REPLY_SECONDS, Binding, BridgeRejected, FRAME_BYTES, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
+    ACTIVATION_GUEST_REPLY_SECONDS, Binding, BridgeRejected, FRAME_BYTES, GUEST_RESTORE_READBACK,
+    MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
 )
 
@@ -34,6 +35,7 @@ LOCK = ROOT / "mutation.lock"
 VERBS = {
     "preflight", "begin_receive", "finish_receive", "restore", "prepare_runtime", "verify_closed",
     "assert_activation_closed", "activate", "assert_live", "observe_restore", "observe_rollback",
+    GUEST_RESTORE_READBACK,
 }
 HANDOFF = "activation-handoff.json"
 EMPTY = "0" * 64
@@ -348,6 +350,33 @@ class GuestWorker:
               and result["services"] == sorted(SERVICES), "guest_worker_restore_unconfirmed")
         return self._emit(result)
 
+    def read_restore_receipt(self):
+        """Return the existing receipt for the exact request if its database remains closed."""
+        self._assert_no_activation()
+        self._proof("preflight", self.args["target_receipt_sha256"])
+        _, transfer = self._proof("finish_receive", self.args["transfer_receipt_sha256"])
+        manifest = self.args["manifest_sha256"]
+        _need(transfer["manifest_sha256"] == manifest, "guest_worker_restore_transfer_unbound")
+        self._receiver_settled(manifest)
+        original = _scope(replace(self.request, verb="restore"))
+        common = {**original, "worker_input_sha256": self.input_digest}
+        raw, _ = _read_json(self.stage / "worker-restore.intent.json")
+        _need(raw == _bytes({**common, "args_sha256": _digest(_bytes(self.args))}),
+              "guest_worker_restore_intent_unbound")
+        receipt, _ = _read_json(self.stage / "worker-restore.json")
+        pins = self.restore_pins(manifest)
+        journal = restore.migration_journal(pins, self.restore_stage)
+        _, result = _read_json(journal / "migration-pass.json")
+        _need(receipt == _bytes({**common, "evidence": result}) and result["status"] == "PASS"
+              and result["manifest_sha256"] == manifest and result["services"] == sorted(SERVICES)
+              and result["database_and_apps_closed"] is True and result["writer_authority_issued"] is False,
+              "guest_worker_restore_receipt_unbound")
+        observed = restore.observe_closed_outcome(pins, self.restore_stage)
+        _need(observed["status"] == "COMMITTED_CLOSED"
+              and observed["migration_receipt_sha256"] == result["migration_receipt_sha256"],
+              "guest_worker_restore_unsettled")
+        return Receipt("PASS", _digest(receipt))
+
     def _inventory_for_preparation(self, pins, *, prepared=False, restore_receipt=None):
         if self.node == "B":
             return pins.inventory_sha256
@@ -580,6 +609,7 @@ class GuestWorker:
         if self.request.verb == "activate":
             return self.activate(assert_windows_current)
         handlers = {"preflight": self.preflight, "finish_receive": self.finish_receive, "restore": self.restore_data,
+                    GUEST_RESTORE_READBACK: self.read_restore_receipt,
                     "prepare_runtime": self.prepare_runtime, "verify_closed": self.verify_closed,
                     "assert_activation_closed": self.assert_activation_closed,
                     "assert_live": self.assert_live,
