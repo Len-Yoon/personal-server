@@ -162,7 +162,7 @@ def _wait_for_app(context, leaf, address, service):
     deadline = time.monotonic() + APP_READY_SECONDS
     while time.monotonic() < deadline:
         try:
-            _probe(context, leaf, address, service)
+            _probe(context, leaf, address, service, deadline)
         except TransitionBlocked as error:
             if str(error) != "guest_live_route_unready":
                 raise

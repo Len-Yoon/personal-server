@@ -173,6 +173,8 @@ class NativeGuestActivationTests(unittest.TestCase):
                              side_effect=(TransitionBlocked("guest_live_route_unready"), None)) as probe:
             activation._wait_for_app(None, None, "192.0.2.10", "portal-web")
         self.assertEqual(probe.call_count, 2)
+        self.assertEqual([entry.args for entry in probe.call_args_list],
+                         [(None, None, "192.0.2.10", "portal-web", activation.APP_READY_SECONDS)] * 2)
         pause.assert_called_once_with(0.7)
 
         with patch.object(activation.time, "monotonic", side_effect=(0, 24, 25)), \
@@ -192,7 +194,7 @@ class NativeGuestLiveTests(unittest.TestCase):
         portal_complete = False
         probed = []
 
-        def probe(_context, _leaf, _address, service):
+        def probe(_context, _leaf, _address, service, _deadline):
             nonlocal portal_complete
             probed.append(service)
             if service == "portal-web":
@@ -229,7 +231,31 @@ class NativeGuestLiveTests(unittest.TestCase):
                 patch.object(live.http.client, "HTTPResponse") as response:
             response.return_value.__enter__.return_value.begin.side_effect = TimeoutError
             with self.assertRaisesRegex(TimeoutError, "^guest_live_route_headers_timeout$"):
-                live._probe(context, live.runtime._digest(b"cert"), "192.0.2.10", "portal-web")
+                live._probe(context, live.runtime._digest(b"cert"), "192.0.2.10", "portal-web",
+                            live.time.monotonic() + live.LIVE_SECONDS)
+
+    def test_only_timeout_with_time_left_retries_same_authenticated_route_once(self):
+        live = native_guest_live
+        args = (object(), "a" * 64, "192.0.2.10", "book-memo", 20)
+        timeout = live.RouteTimeout("guest_live_route_headers_timeout")
+        with patch.object(live.time, "monotonic", return_value=5), \
+                patch.object(live, "_probe", side_effect=(timeout, "b" * 64)) as probe:
+            self.assertEqual(live._probe_route(*args), "b" * 64)
+            self.assertEqual([entry.args for entry in probe.call_args_list], [args, args])
+        with patch.object(live.time, "monotonic", return_value=18), \
+                patch.object(live, "_probe", side_effect=timeout) as probe:
+            with self.assertRaises(live.RouteTimeout):
+                live._probe_route(*args)
+            probe.assert_called_once_with(*args)
+        with patch.object(live.time, "monotonic", return_value=5), \
+                patch.object(live, "_probe", side_effect=timeout) as probe:
+            with self.assertRaises(live.RouteTimeout):
+                live._probe_route(*args)
+            self.assertEqual(probe.call_count, 2)
+        with patch.object(live, "_probe", side_effect=TransitionBlocked("guest_live_tls_peer_changed")) as probe:
+            with self.assertRaisesRegex(TransitionBlocked, "guest_live_tls_peer_changed"):
+                live._probe_route(*args)
+            probe.assert_called_once_with(*args)
 
 
 class NativeCaptureHeartbeatTests(unittest.TestCase):

@@ -209,20 +209,31 @@ def _tls(prepared):
     return context, leaf
 
 
-def _probe(context, leaf, ip, service):
+def _probe(context, leaf, ip, service, deadline):
     host, path = service + ".ha.internal", PATHS[service]
     boundary = "connect"
+
+    def timeout():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError
+        return min(SOCKET_SECONDS, remaining)
+
     try:
-        with socket.create_connection((ip, PORT), timeout=SOCKET_SECONDS) as tcp:
+        with socket.create_connection((ip, PORT), timeout=timeout()) as tcp:
             boundary = "tls"
+            tcp.settimeout(timeout())
             with context.wrap_socket(tcp, server_hostname=host) as conn:
                 _need(runtime._digest(conn.getpeercert(binary_form=True)) == leaf, "guest_live_tls_peer_changed")
                 boundary = "send"
+                conn.settimeout(timeout())
                 conn.sendall(f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode("ascii"))
                 with http.client.HTTPResponse(conn) as response:
                     boundary = "headers"
+                    conn.settimeout(timeout())
                     response.begin()
                     boundary = "body"
+                    conn.settimeout(timeout())
                     body = response.read(MAX_BODY + 1)
                     _need(response.status == 200 and 0 < len(body) <= MAX_BODY, "guest_live_route_unready")
                     content_type = response.headers.get_content_type()
@@ -242,6 +253,17 @@ def _probe(context, leaf, ip, service):
     return runtime._digest(body)
 
 
+def _probe_route(context, leaf, ip, service, deadline):
+    try:
+        return _probe(context, leaf, ip, service, deadline)
+    except RouteTimeout:
+        if deadline - time.monotonic() < SOCKET_SECONDS:
+            raise
+    # Retry only this read-only route, with fresh TLS and the same live
+    # observation deadline. Response, identity and lease rejections propagate.
+    return _probe(context, leaf, ip, service, deadline)
+
+
 def observe_live_a(pins, activation, postgres, stage, *, activation_receipt_sha256, authority_sha256,
                    windows_generation, windows_generation_sha256, live_lease_sha256, live_authority_sha256):
     """Return a digest only after fresh A runtime, mTLS and database observations."""
@@ -259,6 +281,7 @@ def observe_live_a(pins, activation, postgres, stage, *, activation_receipt_sha2
           and postgres.source_commit == pins.release["source_commit"], "guest_live_observation_unbound")
     stage = Path(stage)
     started = time.monotonic()
+    deadline = started + LIVE_SECONDS
     phase = service = None
     try:
         runtime._directory(stage, 0)
@@ -276,9 +299,9 @@ def observe_live_a(pins, activation, postgres, stage, *, activation_receipt_sha2
         # Portal readiness queries several backends through the same guest.
         # Keep its request out of the burst from the remaining ingress probes.
         service = PORTAL_SERVICE
-        routes = {service: _probe(context, leaf, ip, service)}
+        routes = {service: _probe_route(context, leaf, ip, service, deadline)}
         with ThreadPoolExecutor(max_workers=len(PATHS) - 1) as pool:
-            pending = {name: pool.submit(_probe, context, leaf, ip, name)
+            pending = {name: pool.submit(_probe_route, context, leaf, ip, name, deadline)
                        for name in PATHS if name != PORTAL_SERVICE}
             for service, task in pending.items():
                 routes[service] = task.result()
@@ -292,7 +315,7 @@ def observe_live_a(pins, activation, postgres, stage, *, activation_receipt_sha2
         last, sampled_after, expires_after, replay_after = _lease(pins, postgres)
         phase = "freshness"
         _need(before == after and sampled_after >= sampled and expires_after >= expires and replay_after >= replay
-              and time.monotonic() - started < LIVE_SECONDS, "guest_live_observation_stale")
+              and time.monotonic() < deadline, "guest_live_observation_stale")
         return runtime._digest(runtime._json_bytes({
             **runtime._runtime_identity(pins), **bindings, "windows_generation": windows_generation,
             "containers": after, "routes": routes, "ingress_leaf_sha256": leaf, "postgres_before": first,
