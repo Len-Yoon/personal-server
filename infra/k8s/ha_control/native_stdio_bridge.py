@@ -24,9 +24,11 @@ from types import MappingProxyType
 
 VERSION = 1
 FRAME_BYTES = 4096
-ACTIVATION_BOUNDARY_SECONDS = 3
-ACTIVATION_GUEST_REPLY_SECONDS = 3.5
-ACTIVATION_GUEST_CHECK_SECONDS = 4
+# Each boundary opens a Windows SSH check before the guest samples its own
+# database clock. Budget the transport and framing separately from sample age.
+ACTIVATION_BOUNDARY_SECONDS = 6
+ACTIVATION_GUEST_REPLY_SECONDS = 6.5
+ACTIVATION_GUEST_CHECK_SECONDS = 7
 MAX_REQUESTS = 64
 MAX_SESSION_SECONDS = 3600
 TRANSFER_BYTES = 8 * 1024**3
