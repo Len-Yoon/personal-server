@@ -324,6 +324,29 @@ class NativeLinuxWritersTests(unittest.TestCase):
 
 
 class PersistentWriterProofTests(unittest.TestCase):
+    def test_recovery_tool_rejection_preserves_safe_process_attribution(self):
+        from ha_control import wsl_writer_proof as proof
+
+        cases = (
+            (b'/usr/bin/docker', [b'docker', b'start', b'private'], 'docker_start'),
+            (b'/usr/bin/docker', [b'docker', b'inspect', b'start'], 'docker_start_read_token'),
+            (b'/usr/bin/python3.12', [b'python', b'docker-private.py', b'start'], 'python_start'),
+            (FileNotFoundError(), [b'docker', b'start'], 'unknown_start'),
+        )
+        for executable, argv, suffix in cases:
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as temporary:
+                entry = Path(temporary) / '42'
+                entry.mkdir()
+                (entry / 'cmdline').write_bytes(b'\0'.join(argv) + b'\0')
+                with (
+                    patch.object(proof, 'Path', return_value=entry.parent),
+                    patch.object(proof.os, 'readlink', return_value=executable,
+                                 side_effect=executable if isinstance(executable, OSError) else None),
+                ):
+                    with self.assertRaisesRegex(proof.RecoveryToolObserved, '^legacy_recovery_linux_tool_command$') as rejected:
+                        proof._recovery_settled('a' * 64, proof.time.monotonic() + 2)
+                self.assertEqual(rejected.exception.diagnostic, 'recovery_tool_' + suffix)
+
     def test_recovery_command_reports_only_fixed_categories(self):
         from ha_control.wsl_writer_proof import _recovery_command_reason
 
