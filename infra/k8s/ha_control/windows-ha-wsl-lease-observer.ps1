@@ -134,7 +134,8 @@ function Get-HaLeaseProof($Context) {
         $vmObserver = [PowerShell]::Create()
         $vmObserver.Runspace = $Context.VmRunspace
         $null = $vmObserver.AddCommand('Get-FixedVmObserverSnapshot').
-            AddArgument($script:ClosureInput.installation_id).AddArgument($script:ClosureVmA).AddArgument($script:ClosureVmB)
+            AddArgument($script:ClosureInput.installation_id).AddArgument($script:ClosureVmA).
+            AddArgument($script:ClosureVmB).AddArgument($Context.Progress)
         $vmPending = $vmObserver.BeginInvoke()
         # The collector only reads. Start it before the Windows checks so the
         # same challenge can observe both sides within one deadline.
