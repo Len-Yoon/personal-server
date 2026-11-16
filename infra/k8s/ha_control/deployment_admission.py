@@ -1,10 +1,18 @@
 """GitHub-side deployment exclusion for the N100 migration backend."""
+from concurrent.futures import ThreadPoolExecutor
 import json
 import re
 import subprocess
 import time
 
 from .controller import TransitionBlocked
+
+RUN_PAGE_WORKERS = 3
+ADMISSION_READ_SECONDS = 60
+TRANSIENT_API_ERROR = re.compile(
+    rb"HTTP (?:429|500|502|503|504)\b|no such host|connection reset|tls handshake timeout|i/o timeout",
+    re.IGNORECASE,
+)
 
 
 class DeploymentAdmission:
@@ -26,15 +34,31 @@ class DeploymentAdmission:
         self.gh = gh
         self.run = runner
 
-    def _api(self, endpoint, *args):
-        try:
-            return self.run((self.gh, "api", "--hostname", "github.com", endpoint, *args),
-                            capture_output=True, check=True, timeout=20).stdout
-        except (OSError, subprocess.SubprocessError):
-            raise TransitionBlocked("deployment_admission_command_unconfirmed") from None
+    def _api(self, endpoint, *args, retry_read=False, deadline=None):
+        command = (self.gh, "api", "--hostname", "github.com", endpoint, *args)
+        for may_retry in ((True, False) if retry_read else (False,)):
+            timeout = 20 if deadline is None else min(20, deadline - time.monotonic())
+            if timeout <= 0:
+                raise TransitionBlocked("deployment_admission_read_deadline")
+            try:
+                response = self.run(command, capture_output=True, check=True, timeout=timeout)
+            except (OSError, subprocess.SubprocessError) as error:
+                transient = isinstance(error, subprocess.TimeoutExpired) or (
+                    isinstance(error, subprocess.CalledProcessError)
+                    and type(error.stderr) is bytes and TRANSIENT_API_ERROR.search(error.stderr)
+                )
+                if not may_retry or not transient:
+                    raise TransitionBlocked("deployment_admission_command_unconfirmed") from None
+                delay = 1 if deadline is None else min(1, max(0, deadline - time.monotonic()))
+                time.sleep(delay)
+            else:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TransitionBlocked("deployment_admission_read_deadline")
+                return response.stdout
 
-    def state(self):
-        result = json.loads(self._api(self.endpoint, '-H', 'Cache-Control: no-cache'))
+    def state(self, *, deadline=None):
+        result = json.loads(self._api(self.endpoint, '-H', 'Cache-Control: no-cache',
+                                      retry_read=True, deadline=deadline))
         if (result.get("id") != self.workflow_id or result.get("path") != ".github/workflows/deploy-n100.yml"
                 or result.get("state") not in ("active", "disabled_manually")):
             raise TransitionBlocked("deployment_admission_identity_changed")
@@ -44,26 +68,25 @@ class DeploymentAdmission:
         if self.state() != "active":
             raise TransitionBlocked("deployment_admission_baseline_changed")
         self._api(self.endpoint + "/disable", "--method", "PUT")
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + ADMISSION_READ_SECONDS
         # The write can be acknowledged before the state read reflects it.
-        while self.state() == "active":
+        while self.state(deadline=deadline) == "active":
             if time.monotonic() >= deadline:
                 raise TransitionBlocked("deployment_admission_disable_unconfirmed")
             time.sleep(1)
-        while not self._closed():
+        while not self._closed(deadline):
             if time.monotonic() >= deadline:
                 raise TransitionBlocked("deployment_admission_runs_not_settled")
             time.sleep(1)
 
-    def _closed(self):
-        if self.state() != "disabled_manually":
+    def _closed(self, deadline):
+        if self.state(deadline=deadline) != "disabled_manually":
             raise TransitionBlocked("deployment_admission_reopened")
-        first = self._run_page(1)
+        first = self._run_page(1, deadline)
         total = first["total_count"]
         page_count = max(1, (total + 99) // 100)
         ids = set()
-        for number in range(1, page_count + 1):
-            page = first if number == 1 else self._run_page(number)
+        def settled(number, page):
             expected = min(100, total - 100 * (number - 1))
             if page["total_count"] != total or len(page["workflow_runs"]) != expected:
                 raise TransitionBlocked("deployment_admission_runs_unconfirmed")
@@ -75,16 +98,27 @@ class DeploymentAdmission:
                 ids.add(run)
                 if row.get("status") != "completed":
                     return False
+            return True
+
+        if not settled(1, first):
+            return False
+        if page_count > 1:
+            with ThreadPoolExecutor(max_workers=RUN_PAGE_WORKERS) as pool:
+                for start in range(2, page_count + 1, RUN_PAGE_WORKERS):
+                    numbers = range(start, min(start + RUN_PAGE_WORKERS, page_count + 1))
+                    pages = pool.map(lambda number: self._run_page(number, deadline), numbers)
+                    if not all(settled(number, page) for number, page in zip(numbers, pages)):
+                        return False
         if len(ids) != total:
             raise TransitionBlocked("deployment_admission_runs_unconfirmed")
-        if self.state() != "disabled_manually":
+        if self.state(deadline=deadline) != "disabled_manually":
             raise TransitionBlocked("deployment_admission_reopened")
         return True
 
-    def _run_page(self, number):
+    def _run_page(self, number, deadline):
         try:
             page = json.loads(self._api(self.endpoint + f"/runs?per_page=100&page={number}",
-                                        '-H', 'Cache-Control: no-cache'))
+                                        '-H', 'Cache-Control: no-cache', retry_read=True, deadline=deadline))
         except (TypeError, ValueError):
             raise TransitionBlocked("deployment_admission_runs_unconfirmed") from None
         if (type(page) is not dict or type(page.get("total_count")) is not int
@@ -93,7 +127,7 @@ class DeploymentAdmission:
         return page
 
     def assert_closed(self):
-        if not self._closed():
+        if not self._closed(time.monotonic() + ADMISSION_READ_SECONDS):
             raise TransitionBlocked("deployment_admission_runs_not_settled")
 
     def restore(self, *, owned_disable):

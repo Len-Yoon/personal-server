@@ -1448,6 +1448,60 @@ class LegacyCutoverTransactionTests(unittest.TestCase):
         admission.restore(owned_disable=True)
         self.assertEqual(workflow['state'], 'active')
 
+    def test_admission_retries_transient_reads_without_redriving_disable(self):
+        from ha_control.deployment_admission import DeploymentAdmission
+
+        workflow = dict(id=123, path='.github/workflows/deploy-n100.yml', state='disabled_manually')
+        run = dict(id=1, workflow_id=123, status='completed')
+        runner = MagicMock(side_effect=[
+            SimpleNamespace(stdout=json.dumps(workflow)),
+            subprocess.TimeoutExpired('gh', 20),
+            SimpleNamespace(stdout=json.dumps(dict(total_count=1, workflow_runs=[run]))),
+            SimpleNamespace(stdout=json.dumps(workflow)),
+        ])
+        policy = DeploymentAdmission('owner/repo', 123, '/usr/bin/gh', runner=runner)
+        with patch('ha_control.deployment_admission.time.sleep') as sleep:
+            policy.assert_closed()
+        sleep.assert_called_once_with(1)
+        self.assertEqual(runner.call_args_list[1], runner.call_args_list[2])
+
+        workflow['state'] = 'active'
+        runner.reset_mock(side_effect=True)
+        runner.side_effect = [
+            SimpleNamespace(stdout=json.dumps(workflow)),
+            subprocess.TimeoutExpired('gh', 20),
+        ]
+        with self.assertRaisesRegex(TransitionBlocked, 'deployment_admission_command_unconfirmed'):
+            policy.close()
+        self.assertEqual(runner.call_count, 2)
+        self.assertTrue(runner.call_args.args[0][4].endswith('/disable'))
+
+    def test_parallel_admission_scan_rejects_duplicate_across_pages(self):
+        from ha_control.deployment_admission import DeploymentAdmission
+
+        workflow = dict(id=123, path='.github/workflows/deploy-n100.yml', state='disabled_manually')
+        all_workers = threading.Barrier(3, timeout=3)
+
+        def github(args, **kwargs):
+            endpoint = args[4]
+            result = workflow
+            if '/runs?' in endpoint:
+                page = int(endpoint.rpartition('=')[2])
+                if page > 1:
+                    all_workers.wait()
+                stop = min((page * 100) + 1, 302)
+                ids = list(range((page - 1) * 100 + 1, stop))
+                if page == 4:
+                    ids[0] = 100
+                result = dict(total_count=301, workflow_runs=[
+                    dict(id=id_, workflow_id=123, status='completed') for id_ in ids
+                ])
+            return SimpleNamespace(stdout=json.dumps(result))
+
+        admission = DeploymentAdmission('owner/repo', 123, '/usr/bin/gh', runner=github)
+        with self.assertRaisesRegex(TransitionBlocked, 'deployment_admission_runs_unconfirmed'):
+            admission.assert_closed()
+
     def test_native_windows_channel_rejects_mismatched_response_and_cannot_retry(self):
         from ha_control.native_cutover import WindowsReactivationSession
 
