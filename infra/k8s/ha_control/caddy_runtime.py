@@ -255,7 +255,7 @@ def _tls_files(raw):
     return {Path(path).name: digest for digest, path in files}
 
 
-def _runtime_contract(container, added=()):
+def _runtime_fields(container, added=()):
     config = copy.deepcopy(container['Config'])
     if config.get('Hostname') == container['Id'][:12]:
         config['Hostname'] = '<docker-generated>'
@@ -270,8 +270,12 @@ def _runtime_contract(container, added=()):
         host[key] = sorted(remaining, key=_pin)
     networks = {name: {key: value.get(key) for key in ('NetworkID', 'IPAMConfig', 'DriverOpts', 'GwPriority')}
                 for name, value in container['NetworkSettings']['Networks'].items()}
-    return _pin({'config': config, 'host': host, 'networks': networks,
-                 'ports': container['NetworkSettings']['Ports']})
+    return {'config': config, 'host': host, 'networks': networks,
+            'ports': container['NetworkSettings']['Ports']}
+
+
+def _runtime_contract(container, added=()):
+    return _pin(_runtime_fields(container, added))
 
 
 @dataclass(frozen=True)
@@ -472,7 +476,9 @@ class CaddyRuntime:
                 'service_sha256': service_hash,
                 'network_sha256': network,
                 'container_config_sha256': _pin(item['Config']), 'started_at_sha256': _pin(item['State']['StartedAt']),
-                'runtime_sha256': _runtime_contract(item), 'source_sha256': _sha(raw),
+                'runtime_sha256': _runtime_contract(item),
+                'runtime_field_sha256': {key: _pin(value) for key, value in _runtime_fields(item).items()},
+                'source_sha256': _sha(raw),
                 'live_sha256': live, 'volumes': volumes,
                 'volume_names': {path: mount['Name'] for path, mount in mounts.items()}}, raw, upstreams
 
@@ -599,6 +605,9 @@ class CaddyRuntime:
         """Run only after the caller durably records LegacyCutover switch_caddy_intent."""
         _need(not self.attempted, 'caddy_reconciliation_required')
         _need(prepared == self.prepared, 'caddy_candidate_not_validated')
+        phase = 'intent'
+        command_unconfirmed = False
+        changed = []
         try:
             assert_guard()
             current, _, upstreams = self._snapshot()
@@ -615,18 +624,34 @@ class CaddyRuntime:
                 'isolated_sha256': _sha(isolated),
             }).encode(), 0o600)
             _sync_dir(directory)
+            phase = 'guard_before_execute'
             assert_guard()
             execution = self.execution.open(directory, self.project, isolated) if self.execution else nullcontext()
+            phase = 'execute'
             with execution:
-                self._compose(('-',), *CADDY_RECREATE, input_data=isolated, timeout=120)
+                try:
+                    self._compose(('-',), *CADDY_RECREATE, input_data=isolated, timeout=120)
+                except TransitionBlocked as error:
+                    if str(error) != 'caddy_docker_command_unconfirmed':
+                        raise
+                    command_unconfirmed = True
+            if command_unconfirmed:
+                phase = 'guard_after_command'
+                assert_guard()
+            phase = 'replacement_contract'
             item = self._container(isolated=True)
+            fields = _runtime_fields(item, (CONFIG, MOUNT))
+            changed = sorted(key for key, value in fields.items()
+                             if _pin(value) != prepared.baseline['runtime_field_sha256'][key])
             _need(item['Id'] != prepared.baseline['id'] and item['Image'] == prepared.baseline['image']
-                  and _runtime_contract(item, (CONFIG, MOUNT)) == prepared.baseline['runtime_sha256'],
+                  and _pin(fields) == prepared.baseline['runtime_sha256'],
                   'caddy_replacement_contract_changed')
+            phase = 'volumes_and_network'
             volumes, mounts = self._mounts(item, (CONFIG, MOUNT))
             _need(volumes == prepared.baseline['volumes'], 'caddy_persistent_volume_changed')
             _need(self._network(self._config(prepared.baseline['compose_files'], upstreams), item) == prepared.baseline['network_sha256'],
                   'caddy_network_scope_changed')
+            phase = 'mounts_and_credentials'
             volume_sha, mountpoint = self._mtls_volume()
             tls = mounts[MOUNT]
             source = mounts[CONFIG]
@@ -640,16 +665,29 @@ class CaddyRuntime:
             tls_files = self._docker('exec', item['Id'], '/bin/busybox', 'sha256sum',
                                      *(MOUNT + '/' + name for name in TLS_FILES))
             _need(_pin(_tls_files(tls_files)) == prepared.mtls_files_sha256, 'caddy_mtls_files_changed')
+            phase = 'admin_config'
             raw, live = self._live_config(item['Id'], starting=True)
             _need(_sha(raw) == prepared.candidate_sha256, 'caddy_live_config_unconfirmed')
             self._prepared(prepared, upstreams)
+            phase = 'final_guard'
             assert_guard()
             return {'container_sha256': _sha(item['Id'].encode()), 'live_sha256': live,
                     'candidate_sha256': prepared.candidate_sha256}
-        except TransitionBlocked:
+        except (TransitionBlocked, OSError, KeyError, ValueError, TypeError, AttributeError) as error:
             if not self.attempted:
-                raise
+                if isinstance(error, TransitionBlocked):
+                    raise
+                raise TransitionBlocked('caddy_apply_preflight_unconfirmed') from None
+            reason = str(error) if isinstance(error, TransitionBlocked) else ''
+            if not re.fullmatch(r'caddy_[a-z_]{1,72}', reason):
+                reason = type(error).__name__
+            try:
+                _write(directory / 'caddy-apply-failure.json', seven_capture.encoded({
+                    'candidate_sha256': prepared.candidate_sha256,
+                    'phase': phase, 'reason': reason, 'command_unconfirmed': command_unconfirmed,
+                    'changed_runtime_groups': changed,
+                }), 0o600)
+                _sync_dir(directory)
+            except OSError:
+                pass
             raise TransitionBlocked('caddy_reconciliation_required') from None
-        except (OSError, KeyError, ValueError, TypeError, AttributeError):
-            reason = 'caddy_reconciliation_required' if self.attempted else 'caddy_apply_preflight_unconfirmed'
-            raise TransitionBlocked(reason) from None
