@@ -32,17 +32,20 @@ function Get-FixedVmObserverDisks($drives) {
     return ,$paths
 }
 
-function Get-FixedVmObserverSnapshot([string]$Installation,[guid]$A,[guid]$B) {
+function Get-FixedVmObserverSnapshot([string]$Installation,[guid]$A,[guid]$B,[hashtable]$Progress) {
     if ($Installation -cnotmatch '\A[a-f0-9]{64}\z' -or $A -eq [guid]::Empty -or $B -eq [guid]::Empty -or $A -eq $B) {
         throw 'fixed_observer_targets'
     }
     $prefix = 'N100HA_' + $Installation.Substring(0,16) + '_'
     $notes = 'ha-owned-guest-v1:' + $Installation + ':'
     $targets = [ordered]@{ A = $A; B = $B }
-    $names = @(($prefix + 'A'), ($prefix + 'B'))
+    $ids = @($A, $B)
     $first = $null
     for ($pass = 0; $pass -lt 2; $pass++) {
-        $rows = @(Get-VM -Name $names -ErrorAction Stop)
+        if ($null -ne $Progress) { $Progress.vm_step = 'vm_' + $pass }
+        # Guid pipeline input queries the two pinned objects. The Id
+        # parameter accepts a single Guid, so do not pass the array to -Id.
+        $rows = @($ids | Get-VM -ErrorAction Stop)
         if ($rows.Count -ne 2) { throw 'fixed_observer_vm_binding' }
         foreach ($node in $targets.Keys) {
             $id = $targets[$node]
@@ -53,7 +56,9 @@ function Get-FixedVmObserverSnapshot([string]$Installation,[guid]$A,[guid]$B) {
                 throw 'fixed_observer_vm_binding'
             }
         }
+        if ($null -ne $Progress) { $Progress.vm_step = 'disk_' + $pass }
         $drives = @(Get-VMHardDiskDrive -VM $rows -ErrorAction Stop)
+        if ($null -ne $Progress) { $Progress.vm_step = 'validate_' + $pass }
         if (@($drives | Where-Object { [guid]$_.VMId -notin @($A,$B) }).Count -ne 0) {
             throw 'fixed_observer_disk_inventory'
         }
@@ -82,6 +87,7 @@ function Get-FixedVmObserverSnapshot([string]$Installation,[guid]$A,[guid]$B) {
             disk_paths_sha256 = Get-FixedVmObserverHash (ConvertTo-Json -InputObject $first[$node].paths -Compress)
         }
     }
+    if ($null -ne $Progress) { $Progress.vm_step = 'complete' }
     return ,@($facts)
 }
 

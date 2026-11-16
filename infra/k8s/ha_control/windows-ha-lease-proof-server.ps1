@@ -181,6 +181,10 @@ function Write-ProofOutcome([string]$Stage, $Progress = $null) {
             elapsed_ms=[long]$clock.ElapsedMilliseconds
         }
         if ($null -ne $Progress) {
+            $vmStep = $Progress.vm_step
+            if ($vmStep -cin @('dispatch','vm_0','disk_0','validate_0','vm_1','disk_1','validate_1','complete')) {
+                $record['vm_step'] = $vmStep
+            }
             $step = $Progress.step
             if ($step -cin @('dispatch','request','wsl_send','marker_before','wsl_running',
                             'windows_closed','windows_boot','windows_shutdown','windows_tasks','windows_runner',
@@ -393,7 +397,7 @@ try {
             $order.Enqueue($challenge.nonce)
             if ($order.Count -gt $RecentNonces) { $null = $seen.Remove($order.Dequeue()) }
             $phase = 'observation'
-            $progress = [hashtable]::Synchronized(@{step='dispatch'})
+            $progress = [hashtable]::Synchronized(@{step='dispatch';vm_step='dispatch'})
             $digest = Invoke-ObservedClosure $challenge $progress
             $phase = 'response'
             $challenge.Add('closed', $true)

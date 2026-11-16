@@ -56,12 +56,14 @@ $a=[guid]'11111111-1111-1111-1111-111111111111'
 $b=[guid]'22222222-2222-2222-2222-222222222222'
 $script:drift=$false
 $script:reads=0
-function Get-VM($Name){
- $prefix='N100HA_'+$installation.Substring(0,16)+'_'
- if(($Name -join ',') -cne ($prefix+'A,'+$prefix+'B')){throw 'unexpected_names'}
- foreach($node in @('B','A')){
-  $id=if($node -eq 'A'){$a}else{$b}
-  [pscustomobject]@{Id=$id;Name=($prefix+$node);
+function Get-VM {
+ [CmdletBinding()]
+ param([Parameter(Mandatory,ValueFromPipeline)][guid]$Id)
+ process {
+  $prefix='N100HA_'+$installation.Substring(0,16)+'_'
+  $node=if($Id -eq $a){'A'}elseif($Id -eq $b){'B'}else{throw 'unexpected_id'}
+  $script:observedIds.Add($Id)
+  [pscustomobject]@{Id=$Id;Name=($prefix+$node);
    Notes=('ha-owned-guest-v1:'+$installation+':seed');Generation=2;AutomaticStartAction='Nothing';State='Running'}
  }
 }
@@ -73,15 +75,20 @@ function Get-VMHardDiskDrive($VM){
   [pscustomobject]@{Path=$path;VMId=$row.Id}
  }
 }
-$rows=Get-FixedVmObserverSnapshot $installation $a $b
+$script:observedIds=[Collections.Generic.List[guid]]::new()
+$progress=[hashtable]::Synchronized(@{vm_step='dispatch'})
+$rows=Get-FixedVmObserverSnapshot $installation $a $b $progress
+if($progress.vm_step -cne 'complete'){throw 'observation_progress_missing'}
+if(($script:observedIds -join ',') -cne (@($a,$b,$a,$b) -join ',')){throw 'unexpected_vm_queries'}
 if($rows.Count -ne 2 -or $rows[0].id -cne $a.ToString() -or $rows[1].id -cne $b.ToString()){
  throw 'target_mismatch'
 }
 $script:reads=0
 $script:drift=$true
-try{$null=Get-FixedVmObserverSnapshot $installation $a $b;throw 'drift_accepted'}catch{
+try{$null=Get-FixedVmObserverSnapshot $installation $a $b $progress;throw 'drift_accepted'}catch{
  if($_.Exception.Message -cne 'fixed_observer_disks_changed'){throw}
 }
+if($progress.vm_step -cne 'validate_1'){throw 'drift_progress_missing'}
 'PASS'
 """)
         self.assertEqual(output.strip(), "PASS")
