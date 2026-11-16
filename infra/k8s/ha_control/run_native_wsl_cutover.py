@@ -80,7 +80,7 @@ def run(config, config_sha256):
     applications = NativeApplications(
         capture_root=capture_root, identity=identity, converter_source_pins=value['converter_source_pins'],
         external_writers=external, caddy=caddy, active_ip=value['active_ip'], expected_mtls_sha256=value['mtls_sha256'],
-        vm=guest, host=host, coordinator=CaddyExecution.identity(),
+        vm=guest, host=host, coordinator=CaddyExecution.identity(), capture_connection=client.keepalive,
     )
     return compose_native_cutover(journal, windows, admission, bootstrap, applications).run(
         binding.plan_sha256, attempt_id=binding.attempt_id,

@@ -1,6 +1,6 @@
 """Compose the native source and Caddy stages with authenticated guest and host observations."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 from pathlib import Path
 
@@ -44,7 +44,7 @@ class NativeApplications:
     """
 
     def __init__(self, *, capture_root, identity, converter_source_pins, external_writers,
-                 caddy, active_ip, expected_mtls_sha256, vm, host, coordinator=None):
+                 caddy, active_ip, expected_mtls_sha256, vm, host, coordinator=None, capture_connection=nullcontext):
         self.capture_root = Path(capture_root)
         self.identity = dict(identity)
         self.converter_source_pins = dict(converter_source_pins)
@@ -53,6 +53,7 @@ class NativeApplications:
         self.active_ip = active_ip
         self.expected_mtls_sha256 = dict(expected_mtls_sha256)
         self.vm, self.host = vm, host
+        self.capture_connection = capture_connection
         self.coordinator = coordinator
         self.journal_path = None
         self.attempt = None
@@ -166,7 +167,8 @@ class NativeApplications:
         self._plan(plan)
         self._phase('capture_intent', fence_writers=self.fence)
         _need(fence == self.fence and self.manifest is None, 'native_application_fence_unbound')
-        receipt = self.capture_side.capture(fence)
+        with self.capture_connection():
+            receipt = self.capture_side.capture(fence)
         manifest = _pin(receipt['manifest_sha256'])
         self.capture_receipt = self._accept(receipt, fence_sha256=fence, manifest_sha256=manifest)
         self.manifest = manifest
