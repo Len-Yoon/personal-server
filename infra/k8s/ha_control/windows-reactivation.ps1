@@ -377,13 +377,27 @@ function Invoke-HaRecoveryCycleGuard([string]$BootstrapSha256, [scriptblock]$Act
     if ((Get-FileHash -LiteralPath $source -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -cne $BootstrapSha256) {
         throw 'legacy_recovery_guard_source_drift'
     }
-    try {
-        $stream = [IO.File]::Open($path, [IO.FileMode]::OpenOrCreate,
-                                  [IO.FileAccess]::Write, [IO.FileShare]::None)
-    } catch [IO.IOException] {
-        throw 'legacy_recovery_cycle_in_flight'
+    # An already admitted recovery cycle may still hold the lock when claim
+    # returns. Wait for only a sharing violation to clear, before touching services.
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        try {
+            $stream = [IO.File]::Open($path, [IO.FileMode]::OpenOrCreate,
+                                      [IO.FileAccess]::Write, [IO.FileShare]::None)
+            break
+        } catch [IO.IOException] {
+            $code = $_.Exception.GetBaseException().HResult -band 0xffff
+            if ($code -notin @(32, 33)) { throw 'legacy_recovery_guard_open_failed' }
+            $remaining = 25000 - $clock.ElapsedMilliseconds
+            if ($remaining -le 0) { throw 'legacy_recovery_cycle_in_flight' }
+            Start-Sleep -Milliseconds ([int][Math]::Min(200, $remaining))
+        }
     }
     try {
+        if ($clock.ElapsedMilliseconds -ge 25000) { throw 'legacy_recovery_cycle_in_flight' }
+        if ((Get-FileHash -LiteralPath $source -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -cne $BootstrapSha256) {
+            throw 'legacy_recovery_guard_source_drift'
+        }
         # This is the lock used by Invoke-RecoveryCycle. The caller separately
         # excludes direct bootstrap actions and proves native children settled.
         & $Action $stream
