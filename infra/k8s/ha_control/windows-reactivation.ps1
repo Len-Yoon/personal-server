@@ -504,26 +504,87 @@ function New-HaCutoverMarker($Plan, [string]$PlanSha256, [string]$AttemptId) {
     return $pin
 }
 
-function Get-HaMarkerFileId([string]$Path) {
-    $fsutil = Join-Path ([Environment]::SystemDirectory) 'fsutil.exe'
-    $links = @(& $fsutil hardlink list $Path)
-    if ($LASTEXITCODE -ne 0 -or $links.Count -ne 1) { throw 'cutover_authority_marker_untrusted' }
-    $identity = @(& $fsutil file queryfileid $Path)
-    if ($LASTEXITCODE -ne 0 -or $identity.Count -ne 1 -or $identity[0] -notmatch '0x[0-9a-fA-F]{16,32}') {
-        throw 'cutover_authority_marker_identity'
+function Read-HaCutoverMarker([string]$Path) {
+    if (-not ('N100Ha.CutoverMarker' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Cryptography;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+namespace N100Ha {
+    public static class CutoverMarker {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FileInfo {
+            public uint Attributes;
+            public System.Runtime.InteropServices.ComTypes.FILETIME Created, Accessed, Written;
+            public uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFile(string path, uint access, uint share,
+            IntPtr security, uint disposition, uint flags, IntPtr template);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out FileInfo info);
+
+        public sealed class Snapshot {
+            public string Identity, Acl, Sha256, Text;
+        }
+
+        public static Snapshot Read(string path) {
+            const uint genericRead = 0x80000000, shareRead = 1, openExisting = 3;
+            const uint openReparsePoint = 0x00200000, directoryOrReparsePoint = 0x410;
+            using (var handle = CreateFile(path, genericRead, shareRead, IntPtr.Zero,
+                openExisting, openReparsePoint, IntPtr.Zero)) {
+                FileInfo info;
+                if (handle.IsInvalid || !GetFileInformationByHandle(handle, out info) ||
+                    (info.Attributes & directoryOrReparsePoint) != 0 || info.Links != 1 ||
+                    info.SizeHigh != 0 || info.SizeLow > 4096) {
+                    throw new InvalidOperationException("cutover_authority_marker_untrusted");
+                }
+
+                // Identity, ACL and content come from the same handle, with no write or delete sharing.
+                using (var stream = new FileStream(handle, FileAccess.Read))
+                using (var digest = SHA256.Create()) {
+                    var bytes = new byte[(int)info.SizeLow];
+                    int offset = 0;
+                    while (offset < bytes.Length) {
+                        int count = stream.Read(bytes, offset, bytes.Length - offset);
+                        if (count == 0) throw new EndOfStreamException("cutover_authority_marker_untrusted");
+                        offset += count;
+                    }
+                    var sections = AccessControlSections.Owner | AccessControlSections.Access;
+                    return new Snapshot {
+                        Identity = info.Volume.ToString("x8") + ":" +
+                            info.IndexHigh.ToString("x8") + info.IndexLow.ToString("x8"),
+                        Acl = stream.GetAccessControl().GetSecurityDescriptorSddlForm(sections),
+                        Sha256 = BitConverter.ToString(digest.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant(),
+                        Text = new UTF8Encoding(false, true).GetString(bytes)
+                    };
+                }
+            }
+        }
     }
-    return $Matches[0].ToLowerInvariant()
+}
+'@ -ErrorAction Stop
+    }
+    return [N100Ha.CutoverMarker]::Read($Path)
 }
 
-function Assert-HaOwnedCutoverMarker($Pin) {
-    $item = Get-Item -LiteralPath $Pin.path -Force
-    $sections = [Security.AccessControl.AccessControlSections]'Owner,Access'
-    if ($item.PSIsContainer -or $item.Length -gt 4096 -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-        (Get-HaMarkerFileId $Pin.path) -cne $Pin.file_id -or
-        (Get-Acl -LiteralPath $Pin.path).GetSecurityDescriptorSddlForm($sections) -cne $Pin.acl -or
-        (Get-FileHash -LiteralPath $Pin.path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $Pin.sha256) {
+function Get-HaMarkerFileId([string]$Path) {
+    return (Read-HaCutoverMarker $Path).Identity
+}
+
+function Assert-HaOwnedCutoverMarker($Pin, [switch]$ReadContent) {
+    $marker = Read-HaCutoverMarker $Pin.path
+    if ($marker.Identity -cne $Pin.file_id -or $marker.Acl -cne $Pin.acl -or $marker.Sha256 -cne $Pin.sha256) {
         throw 'cutover_authority_marker_unconfirmed'
     }
+    if ($ReadContent) { return $marker.Text }
 }
 
 function Invoke-HaReactivationSession($Plan, [string]$PlanSha256, [string]$AttemptId) {

@@ -140,8 +140,8 @@ function Get-HaLeaseProof($Context) {
         # The collector only reads. Start it before the Windows checks so the
         # same challenge can observe both sides within one deadline.
         $Context.Progress.step = 'marker_before'
-        Assert-HaOwnedCutoverMarker $script:ClosureMarker
-        $marker = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($script:ClosureMarker.path))
+        $markerText = Assert-HaOwnedCutoverMarker $script:ClosureMarker -ReadContent
+        $marker = ConvertFrom-Json -InputObject $markerText
         if ($marker.plan_sha256 -cne $request.plan_sha256 -or $marker.attempt_id -cne $request.attempt_id -or
             $marker.generation -ne $request.generation) { throw 'lease_proof_callback_scope' }
         $Context.Progress.step = 'wsl_running'
