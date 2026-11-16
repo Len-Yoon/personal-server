@@ -1461,6 +1461,26 @@ class ScmPgAuthProbeTests(unittest.TestCase):
                 probe.strict_json('{"scope":0,"scope":1}')
 
 class NativeActivationHandoffTests(unittest.TestCase):
+    def test_only_long_running_wsl_cutover_uses_tolerant_ssh_keepalive(self):
+        from ha_control import native_guest_ssh as ssh, native_windows_ssh as windows
+
+        fingerprint = 'SHA256:' + 'A' * 43
+        endpoint = ssh.SshEndpoint('host.example', 22, 'operator', 'jump', Path('/unused'),
+                                   fingerprint, fingerprint)
+        client = windows.WindowsSsh(endpoint, '/unused')
+        with patch.object(windows.tempfile, 'TemporaryDirectory') as workspace, \
+             patch.object(ssh, '_identity', return_value={}), \
+             patch.object(ssh, '_checked_file', return_value=(b'', None)), \
+             patch.object(ssh, '_host_record'), \
+             patch.object(ssh, '_ssh_config', return_value=Path('/private/tmp/ssh-config')), \
+             patch.object(ssh, '_same_files', return_value=True):
+            workspace.return_value.__enter__.return_value = '/private/tmp/mock-ssh'
+            with client._connection(12) as short:
+                self.assertEqual(short, (ssh.SSH, '-F', '/private/tmp/ssh-config', '-T', 'jump'))
+            with client._connection(12, cutover=True) as long:
+                self.assertEqual(long, short[:3] + ('-o', 'ServerAliveInterval=5',
+                                                   '-o', 'ServerAliveCountMax=12') + short[3:])
+
     def test_wsl_import_executes_only_verified_source_bytes(self):
         from ha_control import native_wsl_launcher as launcher, native_stdio_bridge as bridge
 

@@ -67,7 +67,9 @@ def run(path, config_sha256):
         channel = bridge.Stdio(process.stdout.fileno(), process.stdin.fileno())
         server = bridge.Server(channel, binding, journal, dispatch)
         server.serve()
-        bridge._need(process.wait(timeout=5) == 0, 'native_wsl_cutover_exit_unconfirmed')
+        status = process.wait(timeout=5)
+        bridge._need(status != 255, 'native_wsl_cutover_ssh_disconnected')
+        bridge._need(status == 0, 'native_wsl_cutover_exit_unconfirmed')
 
 
 def main(argv=None):

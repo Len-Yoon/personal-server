@@ -14,6 +14,8 @@ from . import native_guest_ssh as ssh, native_stdio_bridge as bridge
 
 POWERSHELL = r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 WSL = r'C:\Windows\System32\wsl.exe'
+# The cutover channel can remain idle during a multi-minute source capture.
+_CUTOVER_KEEPALIVE = ('-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=12')
 
 
 class WindowsSsh:
@@ -24,7 +26,7 @@ class WindowsSsh:
         self.known_hosts = Path(known_hosts)
 
     @contextmanager
-    def _connection(self, deadline):
+    def _connection(self, deadline, *, cutover=False):
         endpoint = self.endpoint
         stamps = ssh._identity(endpoint, deadline)
         known, stamps[self.known_hosts] = ssh._checked_file(self.known_hosts, private=False, maximum=1048576)
@@ -32,7 +34,8 @@ class WindowsSsh:
         with tempfile.TemporaryDirectory(prefix='ha-native-win-', dir='/private/tmp') as directory:
             config = ssh._ssh_config(Path(directory), endpoint, None, {endpoint.alias: host})
             bridge._need(ssh._same_files(stamps), 'native_windows_ssh_local_file_changed')
-            yield (ssh.SSH, '-F', str(config), '-T', endpoint.alias)
+            options = _CUTOVER_KEEPALIVE if cutover else ()
+            yield (ssh.SSH, '-F', str(config), *options, '-T', endpoint.alias)
             bridge._need(ssh._same_files(stamps), 'native_windows_ssh_local_file_changed')
 
     def powershell(self, source, deadline):
@@ -83,7 +86,7 @@ class WindowsSsh:
                    f'{source_root} {source_sha256} {boot_sha256} {uid} {manifest_path} '
                    f'--config {config_path} --config-sha256 {config_sha256}')
         bridge._need(len(command) <= 7900, 'native_wsl_launcher_command_too_long')
-        with self._connection(deadline) as argv:
+        with self._connection(deadline, cutover=True) as argv:
             process = subprocess.Popen((*argv, command), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                        stderr=subprocess.DEVNULL, env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
             try:
