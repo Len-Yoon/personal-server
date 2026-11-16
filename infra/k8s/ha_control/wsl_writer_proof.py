@@ -357,6 +357,27 @@ def _recovery_command_reason(argv, executable=None):
     return None
 
 
+class RecoveryToolObserved(TransitionBlocked):
+    def __init__(self, entry, argv):
+        super().__init__('legacy_recovery_linux_tool_command')
+        try:
+            executable = os.path.basename(os.readlink(os.fsencode(entry / 'exe')))
+        except OSError:
+            executable = b''
+        if executable in {b'docker', b'kubectl', b'k3s', b'systemctl'}:
+            family = executable.decode('ascii')
+        elif re.fullmatch(rb'python(?:[0-9]+(?:\.[0-9]+)?)?', executable):
+            family = 'python'
+        elif executable in {b'bash', b'dash', b'sh', b'zsh'}:
+            family = 'shell'
+        else:
+            family = 'other' if executable else 'unknown'
+        index, action = next((index, arg) for index, arg in enumerate(argv) if RECOVERY_ACTION.fullmatch(arg))
+        read_token = any(arg in {b'get', b'inspect', b'ps', b'show', b'status'} for arg in argv[1:index])
+        suffix = '_read_token' if read_token else ''
+        self.diagnostic = f'recovery_tool_{family}_{action.decode("ascii")}{suffix}'
+
+
 def _recovery_settled(challenge, deadline, *, runtime=None, plan=None, attempt=None, coordinator=None):
     for entry in Path('/proc').iterdir():
         _deadline(deadline)
@@ -372,6 +393,8 @@ def _recovery_settled(challenge, deadline, *, runtime=None, plan=None, attempt=N
         reason = _recovery_command_reason(argv, executable)
         if reason and not (runtime is not None and reason == 'legacy_recovery_linux_compose_command'
                            and caddy_execution_authorized(entry, argv, runtime, plan, attempt, coordinator)):
+            if reason == 'legacy_recovery_linux_tool_command':
+                raise RecoveryToolObserved(entry, argv)
             raise TransitionBlocked(reason)
     return hashlib.sha256((challenge + ':wsl-recovery-commands-settled').encode()).hexdigest()
 
@@ -437,6 +460,8 @@ def main(*, persistent=False, runner=_run):
                         }.get(str(error), 'closure')
                         if reason == 'closure' and str(error).startswith('legacy_recovery_linux_'):
                             reason = 'recovery'
+                    if isinstance(error, RecoveryToolObserved):
+                        reason = error.diagnostic
                     if time.monotonic() >= deadline:
                         reason = 'deadline'
                     if isinstance(error, InventoryDeadline):
