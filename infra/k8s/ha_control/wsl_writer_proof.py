@@ -36,6 +36,9 @@ CADDY_COMPOSE_EXECUTABLES = frozenset(
                                    *(directory + '/docker-compose' for directory in PLUGIN_DIRS))
 )
 QUERY_NAMES = ('deployments', 'cronjobs', 'jobs', 'replicasets', 'pods', 'docker', 'autoscalers')
+COMPOSE_SERVICE_LABEL = 'com.docker.compose.service'
+DOCKER_WRITER_LIST = (*DOCKER, 'ps', '--all', '--no-trunc', '--filter', 'label=' + COMPOSE_SERVICE_LABEL,
+                      '--format', '{{json .ID}} {{json (.Label "com.docker.compose.service")}}')
 KUBE_SCOPES = {
     'Deployment': ('/apis/apps/v1', 'deployments'), 'CronJob': ('/apis/batch/v1', 'cronjobs'),
     'Job': ('/apis/batch/v1', 'jobs'), 'ReplicaSet': ('/apis/apps/v1', 'replicasets'),
@@ -68,7 +71,7 @@ class KubernetesListReader:
         return 'Bearer ' + token
 
     def __call__(self, args, *, timeout):
-        if args == (*DOCKER, 'ps', '-aq', '--no-trunc') or (
+        if args == DOCKER_WRITER_LIST or (
             args[:len(DOCKER) + 1] == (*DOCKER, 'inspect')
             and 1 <= len(args) - len(DOCKER) - 1 <= 64
             and all(CONTAINER.fullmatch(value) for value in args[len(DOCKER) + 1:])
@@ -220,11 +223,24 @@ def _inventory(runner, stop):
         return result
 
     def containers():
-        ids = run((*DOCKER, 'ps', '-aq', '--no-trunc'), 'docker').decode('ascii').split()
-        _need(1 <= len(ids) <= 64 and len(set(ids)) == len(ids)
-              and all(CONTAINER.fullmatch(value) for value in ids), 'legacy_writer_proof_response_invalid')
-        rows = _payload(run((*DOCKER, 'inspect', *ids), 'docker'))
-        _need(len(rows) == len(ids) and {row['Id'] for row in rows} == set(ids), 'legacy_writer_proof_response_invalid')
+        snapshot = run(DOCKER_WRITER_LIST, 'docker').splitlines()
+        _need(1 <= len(snapshot) <= 64, 'legacy_writer_proof_response_invalid')
+        services = {}
+        for line in snapshot:
+            identifier, separator, label = line.partition(b' ')
+            _need(bool(separator), 'legacy_writer_proof_response_invalid')
+            identifier, label = _payload(identifier), _payload(label)
+            _need(type(identifier) is str and CONTAINER.fullmatch(identifier) and identifier not in services
+                  and type(label) is str, 'legacy_writer_proof_response_invalid')
+            services[identifier] = label
+        # Writer closure depends on these service identities. Inspecting an
+        # unrelated container can race Caddy validation or replacement.
+        selected = {identifier: label for identifier, label in services.items() if label in COMPOSE_ORDER}
+        _need(bool(selected), 'legacy_writer_proof_response_invalid')
+        rows = _payload(run((*DOCKER, 'inspect', *selected), 'docker'))
+        _need(type(rows) is list and len(rows) == len(selected) and
+              {row['Id']: (row['Config'].get('Labels') or {}).get(COMPOSE_SERVICE_LABEL)
+               for row in rows} == selected, 'legacy_writer_proof_response_invalid')
         return rows
 
     pool = ThreadPoolExecutor(max_workers=7)
@@ -270,7 +286,7 @@ def observe_closed(baseline, challenge, deadline, *, assert_external_closed, run
     by_id = {row['Id']: row for row in containers}
     service_ids = {service: [] for service in COMPOSE_ORDER}
     for row in containers:
-        name = (row['Config'].get('Labels') or {}).get('com.docker.compose.service')
+        name = (row['Config'].get('Labels') or {}).get(COMPOSE_SERVICE_LABEL)
         if name in service_ids:
             service_ids[name].append(row['Id'])
 
