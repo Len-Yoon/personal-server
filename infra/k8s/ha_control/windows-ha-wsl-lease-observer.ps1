@@ -93,7 +93,7 @@ function Initialize-HaLeaseObservation($InputConfig, [string]$PlanText, [string]
 function Get-HaClosureRemaining($Context) {
     $remaining = [int][Math]::Floor(1000 * ($Context.DeadlineTimestamp - [Diagnostics.Stopwatch]::GetTimestamp()) /
                                    [Diagnostics.Stopwatch]::Frequency)
-    if ($remaining -lt 1 -or $remaining -gt 1800) { throw 'lease_proof_callback_deadline' }
+    if ($remaining -lt 1 -or $remaining -gt 2500) { throw 'lease_proof_callback_deadline' }
     return $remaining
 }
 
@@ -125,7 +125,7 @@ function Get-HaLeaseProof($Context) {
         }
         $output = $process.StandardOutput.ReadLineAsync()
         # Reserve time for WSL to return its rejection before the broker expires.
-        $payload.budget_ms = (Get-HaClosureRemaining $Context) - 125
+        $payload.budget_ms = [Math]::Min(1800, (Get-HaClosureRemaining $Context) - 125)
         if ($payload.budget_ms -lt 1) { throw 'lease_proof_callback_deadline' }
         $message = ConvertTo-Json -InputObject $payload -Compress
         $write = $process.StandardInput.WriteLineAsync($message)

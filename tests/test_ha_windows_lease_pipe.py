@@ -30,6 +30,7 @@ class WindowsLeaseResponseBudgetTests(unittest.TestCase):
         positions = [proof.index(step) for step in steps]
         self.assertEqual(positions, sorted(positions))
         self.assertEqual(proof.count("Assert-HaOwnedCutoverMarker $script:ClosureMarker"), 2)
+        self.assertIn("[Math]::Min(1800, (Get-HaClosureRemaining $Context) - 125)", proof)
 
     def test_response_has_bounded_transport_time_and_checks_before_writing(self):
         runtime = shutil.which("pwsh") or "/private/tmp/n100-ha-powershell/runtime/pwsh"
@@ -54,9 +55,9 @@ $stream | Add-Member -MemberType ScriptMethod -Name WriteAsync -Value {
     $this.writes++
     return [System.Threading.Tasks.Task]::CompletedTask
 }
-$clock = [pscustomobject]@{ Elapsed = [timespan]::FromMilliseconds(1799) }
+$clock = [pscustomobject]@{ Elapsed = [timespan]::FromMilliseconds(2499) }
 if ((Remaining) -ne 1) { throw 'observation_budget_changed' }
-$clock.Elapsed = [timespan]::FromMilliseconds(1897)
+$clock.Elapsed = [timespan]::FromMilliseconds(2597)
 $observationExpired = $false
 try { $null = Remaining } catch {
     if ($_.Exception.Message -cne 'lease_proof_deadline') { throw }
@@ -65,7 +66,7 @@ try { $null = Remaining } catch {
 if (-not $observationExpired) { throw 'observation_deadline_not_enforced' }
 Send-ProofResponse $stream ([byte[]]@(123,125,10))
 if ($stream.writes -ne 1) { throw 'within_response_budget_not_sent' }
-$clock.Elapsed = [timespan]::FromMilliseconds(1950)
+$clock.Elapsed = [timespan]::FromMilliseconds(2650)
 $responseExpired = $false
 try { Send-ProofResponse $stream ([byte[]]@(123,125,10)) } catch {
     if ($_.Exception.Message -cne 'lease_proof_deadline') { throw }
@@ -123,3 +124,22 @@ class WindowsLeasePipePathTests(unittest.TestCase):
                     observer.assert_legacy_closed({}, 2)
                 self.assertIn(code, initial_lease_service.LEASE_FAILURE_CODES)
                 client.close.assert_called_once_with()
+
+    def test_request_budget_is_bounded_by_the_caller_and_transport(self):
+        for deadline, budget in ((1.75, 1750), (4, 2700)):
+            with self.subTest(deadline=deadline):
+                client = object.__new__(windows_lease_pipe.PersistentLeaseProofClient)
+                client._lock = Lock()
+                client._process = Mock()
+                client._process.poll.return_value = None
+                client._incoming = Queue()
+                client._incoming.put(b"proof\n")
+                client._outgoing = Queue()
+                client._key = bytearray(32)
+                client.monotonic = lambda: 0
+                client.pins = Mock()
+                client.pins.challenge.return_value = {}
+                with patch.object(windows_lease_pipe, "verify_response", return_value="verified") as verify:
+                    self.assertEqual(client.request(deadline), "verified")
+                self.assertEqual(client._outgoing.get_nowait(), f"{budget} {{}}\n".encode("ascii"))
+                self.assertAlmostEqual(verify.call_args.args[2], budget / 1000)

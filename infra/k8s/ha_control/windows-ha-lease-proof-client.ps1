@@ -51,7 +51,7 @@ public static class HaLeaseProofPeer {
             throw 'lease_proof_request'
         }
         $BudgetMs = [int]$Matches[1]
-        if ($BudgetMs -gt 2000) { throw 'lease_proof_budget' }
+        if ($BudgetMs -gt 2700) { throw 'lease_proof_budget' }
         $request = $Matches[2]
         $rights = [IO.Pipes.PipeAccessRights]::ReadWrite -bor [IO.Pipes.PipeAccessRights]::Synchronize
         $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', $PipeName, $rights,

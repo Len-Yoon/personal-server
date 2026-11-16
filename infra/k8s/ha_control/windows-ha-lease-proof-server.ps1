@@ -37,16 +37,16 @@ $sidPattern = '\AS-1-(?:[0-9]{1,10}-){1,14}[0-9]{1,10}\z'
 $hashPattern = '\A[a-f0-9]{64}\z'
 $writers = @('S-1-5-18', 'S-1-5-32-544', $OperatorSid)
 
-function Remaining([int]$LimitMs = 1800) {
+function Remaining([int]$LimitMs = 2500) {
     $left = $LimitMs - [int][Math]::Ceiling($clock.Elapsed.TotalMilliseconds)
     if ($left -le 0) { throw 'lease_proof_deadline' }
     return $left
 }
 
 function Send-ProofResponse($Stream, [byte[]]$Bytes) {
-    # Observation still finishes within 1800 ms. Reserve the following 150 ms
-    # for framing and transport, leaving the client its independent 2000 ms cap.
-    $writeBudget = Remaining 1950
+    # Reserve 150 ms after observation for framing and transport.
+    # The client has an independent 2700 ms cap and honors its caller's deadline.
+    $writeBudget = Remaining 2650
     $write = $Stream.WriteAsync($Bytes, 0, $Bytes.Length)
     if (-not $write.Wait($writeBudget)) { throw 'lease_proof_write' }
 }
