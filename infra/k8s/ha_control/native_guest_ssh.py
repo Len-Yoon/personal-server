@@ -345,19 +345,24 @@ class GuestSshDispatcher:
         try:
             result = self._invoke(request.node, payload, limit, request, assert_windows_current)
             bridge._remaining(limit)
-            bridge._need(type(result) is bytes and 0 < len(result) <= bridge.FRAME_BYTES,
-                         'guest_ssh_frame_limit')
-            value = json.loads(result.decode('ascii'), object_pairs_hook=bridge._pairs,
-                               parse_constant=bridge._reject_constant)
-            bridge._need(type(value) is dict and bridge._bytes(value) == result, 'guest_ssh_response_unbound')
-            receipt = bridge.Receipt(value.get('status'), value.get('receipt_sha256'))
-            bridge._need(bridge._matches(value, envelope | receipt.fields(request.verb)), 'guest_ssh_response_unbound')
-            return receipt
+            return self._receipt(result, envelope)
         except (OSError, ValueError, TypeError, RecursionError, subprocess.SubprocessError):
             raise bridge.BridgeRejected('guest_ssh_dispatch_unconfirmed') from None
         finally:
             with self.lock:
                 self.inflight = False
+
+    @staticmethod
+    def _receipt(result, envelope):
+        bridge._need(type(result) is bytes and 0 < len(result) <= bridge.FRAME_BYTES,
+                     'guest_ssh_frame_limit')
+        value = json.loads(result.decode('ascii'), object_pairs_hook=bridge._pairs,
+                           parse_constant=bridge._reject_constant)
+        bridge._need(type(value) is dict and bridge._bytes(value) == result, 'guest_ssh_response_unbound')
+        receipt = bridge.Receipt(value.get('status'), value.get('receipt_sha256'))
+        bridge._need(bridge._matches(value, envelope | receipt.fields(envelope['verb'])),
+                     'guest_ssh_response_unbound')
+        return receipt
 
     def _invoke(self, node, payload, limit, request, assert_windows_current):
         guest = self.guests[node]
@@ -375,7 +380,22 @@ class GuestSshDispatcher:
             bridge._need(_same_files(stamps), 'guest_ssh_local_file_changed')
             command = (SSH, '-F', str(config), '-T', guest.alias, self.command)
             if assert_windows_current is None:
-                output = self.run(command, payload, limit)
+                try:
+                    output = self.run(command, payload, limit)
+                except bridge.BridgeRejected as error:
+                    if request.verb != 'restore' or str(error) != 'guest_ssh_exit_unconfirmed':
+                        raise
+                    bridge._need(_same_files(stamps), 'guest_ssh_local_file_changed')
+                    readback_verb = bridge.GUEST_RESTORE_READBACK
+                    readback_limit = min(limit, time.monotonic() + bridge.VERBS[readback_verb][1])
+                    bridge._remaining(readback_limit)
+                    envelope = json.loads(payload)
+                    args = envelope.pop('args')
+                    readback = envelope | {'verb': readback_verb}
+                    result = self.run(command, bridge._bytes(readback | {'args': args}), readback_limit)
+                    receipt = self._receipt(result, readback)
+                    bridge._need(receipt.status == 'PASS', 'guest_ssh_restore_readback_unconfirmed')
+                    output = bridge._bytes(envelope | receipt.fields('restore'))
             else:
                 output = _activation_exchange(command, payload, limit, request.nonce, assert_windows_current)
             bridge._need(_same_files(stamps), 'guest_ssh_local_file_changed')

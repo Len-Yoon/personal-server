@@ -32,12 +32,15 @@ MAX_SESSION_SECONDS = 3600
 TRANSFER_BYTES = 8 * 1024**3
 HEX = re.compile(r"[a-f0-9]{64}\Z")
 NODES = ("A", "B")
+GUEST_RESTORE_READBACK = "read_restore_receipt"
+RESTORE_ARGS = ("manifest_sha256", "transfer_receipt_sha256", "target_receipt_sha256")
 VERBS = {
     # allowed nodes, maximum seconds, mutation, additional typed request fields
     "preflight": ("AB", 45, False, ("target_system_id_sha256",)),
     "begin_receive": ("A", 45, True, ("manifest_sha256", "fence_sha256", "transfer_nonce", "max_bytes")),
     "finish_receive": ("A", 615, False, ("manifest_sha256", "receiver_sha256", "transfer_proof_sha256")),
-    "restore": ("A", 1845, True, ("manifest_sha256", "transfer_receipt_sha256", "target_receipt_sha256")),
+    "restore": ("A", 1845, True, RESTORE_ARGS),
+    GUEST_RESTORE_READBACK: ("A", 60, False, RESTORE_ARGS),
     "prepare_runtime": ("AB", 295, True, ("manifest_sha256", "restore_receipt_sha256", "transfer_receipt_sha256",
                                           "target_receipt_sha256")),
     "verify_closed": ("AB", 45, False, ("manifest_sha256", "restore_receipt_sha256", "prepared_receipt_sha256")),
@@ -236,6 +239,7 @@ class _Chain:
         self.recovery = False
 
     def check(self, verb, node, args):
+        _need(verb != GUEST_RESTORE_READBACK, "bridge_guest_only_request")
         _args(verb, node, args)
         if self.mode == "reconcile":
             _need(verb in OBSERVE, "bridge_reconciliation_read_only")
