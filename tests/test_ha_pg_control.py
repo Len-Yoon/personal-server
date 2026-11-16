@@ -1468,11 +1468,13 @@ class NativeActivationHandoffTests(unittest.TestCase):
         endpoint = ssh.SshEndpoint('host.example', 22, 'operator', 'jump', Path('/unused'),
                                    fingerprint, fingerprint)
         client = windows.WindowsSsh(endpoint, '/unused')
-        with patch.object(ssh, '_identity', return_value={}), \
+        with patch.object(windows.tempfile, 'TemporaryDirectory') as workspace, \
+             patch.object(ssh, '_identity', return_value={}), \
              patch.object(ssh, '_checked_file', return_value=(b'', None)), \
              patch.object(ssh, '_host_record'), \
              patch.object(ssh, '_ssh_config', return_value=Path('/private/tmp/ssh-config')), \
              patch.object(ssh, '_same_files', return_value=True):
+            workspace.return_value.__enter__.return_value = '/private/tmp/mock-ssh'
             with client._connection(12) as short:
                 self.assertEqual(short, (ssh.SSH, '-F', '/private/tmp/ssh-config', '-T', 'jump'))
             with client._connection(12, cutover=True) as long:
