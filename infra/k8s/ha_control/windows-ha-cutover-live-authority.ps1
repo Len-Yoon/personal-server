@@ -42,17 +42,21 @@ function Read-Scope([string]$Path, [string[]]$Owners, [switch]$Immutable) {
     }
     foreach ($item in $entries) {
         $sd = Get-Acl -LiteralPath $item.FullName
-        $allowed = if ($Immutable -and $item.FullName -cne $entry.FullName -and
-            $item.FullName -cne $entry.Directory.FullName) { @($Owners | Where-Object { $_ -cne $ClosureServiceSid }) } else { $Owners }
+        $ancestor = $Immutable -and $item.FullName -cne $entry.FullName -and $item.FullName -cne $entry.Directory.FullName
+        $allowed = if ($ancestor) { @($Owners | Where-Object { $_ -cne $ClosureServiceSid }) } else { $Owners }
         $owner = $sd.GetOwner([Security.Principal.SecurityIdentifier]).Value
         $trustedRoot = $Immutable -and $item.FullName -ceq 'C:\' -and
             $owner -ceq 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
         if ($owner -cnotin $allowed -and -not $trustedRoot) { throw 'live_authority_acl' }
-        $mask = [Security.AccessControl.FileSystemRights]'Write,Delete,DeleteSubdirectoriesAndFiles,ChangePermissions,TakeOwnership'
+        # Match the installer: ancestor entries must prevent replacing the child,
+        # while the file and journal also deny general writes by other principals.
+        $mask = if ($ancestor) { 269287488L } elseif ($Immutable) { 1343029590L } else {
+            [long][Security.AccessControl.FileSystemRights]'Write,Delete,DeleteSubdirectoriesAndFiles,ChangePermissions,TakeOwnership'
+        }
         foreach ($rule in $sd.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
             if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -cnotin $allowed -and
                 -not ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and
-                ($rule.FileSystemRights -band $mask)) { throw 'live_authority_acl' }
+                (([long]$rule.FileSystemRights -band 4294967295L) -band $mask)) { throw 'live_authority_acl' }
         }
     }
     # Snapshot the path timestamp before opening. A journal replaced between the
