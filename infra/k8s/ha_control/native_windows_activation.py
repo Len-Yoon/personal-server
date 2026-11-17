@@ -10,6 +10,7 @@ import time
 
 from . import native_stdio_bridge as bridge
 from .native_windows_ssh import fixed_script
+from .provision_enforced import closure_service_args
 
 
 START_PARAMETERS = {'ServiceName', 'ServiceHostSha256', 'PlanPath', 'PlanSha256', 'ApprovalPath', 'ApprovalSha256',
@@ -396,6 +397,9 @@ class WindowsTransitionServiceStart:
         """Reconcile an uncertain invocation without replaying SCM start."""
         return self._invoke(controller, parameters, deadline, observe=False, closure="RestoreClosureArgs")
 
+    def verify_prepared(self, controller, parameters, deadline):
+        return self._invoke(controller, parameters, deadline, observe=False, verify_prepared=True)
+
     def run_rejoin(self, controller, parameters, mode, request_id, *, live_sha256, root, deadline):
         bridge._need(type(root) is str and re.fullmatch(r"C:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}", root)
                      and type(parameters) is dict and parameters.get("PlanPath") == root + r"\plan.json",
@@ -415,7 +419,7 @@ class WindowsTransitionServiceStart:
                               rejoin=("stage-rejoin", request_id, "InspectRejoinStage"))
         return result["stage_intent_present"]
 
-    def _invoke(self, controller, parameters, deadline, *, observe, stop=None, closure=None, rejoin=None):
+    def _invoke(self, controller, parameters, deadline, *, observe, stop=None, closure=None, rejoin=None, verify_prepared=False):
         fields = START_PARAMETERS - {"BindingPath"}
         invalid = "native_transition_start_scope_invalid"
         bridge._need(type(controller) is dict and set(controller) == {"plan", "plan_sha256"}
@@ -433,6 +437,20 @@ class WindowsTransitionServiceStart:
                      and type(plan.get("transition_service_start")) is dict
                      and bridge._hash(plan["transition_service_start"].get("service_image_path_sha256"))
                      and plan["windows_enforced"].get("service_name") == parameters["ServiceName"], invalid)
+        if verify_prepared:
+            source = fixed_script("windows-ha-start-initial-service.ps1", self.start_sha256, parameters | {
+                "VerifyPreparedTransition": True, "Go": True,
+            })
+            bridge._remaining(deadline)
+            result = self.windows.powershell(source, deadline)
+            args_pin = result.get("serving_args_sha256") if type(result) is dict else None
+            sid = plan["windows_enforced"].get("service_sid")
+            bridge._need(type(sid) is str and re.fullmatch(r"S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}", sid)
+                         and bridge._hash(args_pin) and bridge._matches(result, {
+                             "transition_service_prepared": True, "controller_plan_sha256": controller["plan_sha256"],
+                             "service_sid": sid, "serving_args_sha256": args_pin,
+                         }), "native_transition_prepared_service_unconfirmed")
+            return result
         if rejoin is not None:
             mode, request_id, action = rejoin
             bridge._need(plan["transition_service_start"].get("lease_closure_check") is True
@@ -568,6 +586,33 @@ def _transition_authority_scope(controller, generation, root, attempt, old_vm_id
     bridge._need(len(paths) == len(set(paths)), error)
     old_disk_paths_sha256 = bridge._digest("\n".join(sorted(paths)).encode("ascii"))
     return observer["legacy_plan_sha256"], service, image, python_path, old_disk_paths_sha256
+
+
+def prepare_staged_transition_service(starter, controller, generation, *, root, attempt, old_vm_id,
+                                      approval_sha256, preflight_path, scm_verifier_path, deadline):
+    """Return launch parameters only after Windows verifies the approved staged inputs."""
+    _transition_authority_scope(controller, generation, root, attempt, old_vm_id)
+    plan = json.loads(controller["plan"])
+    scope, pins = plan["windows_enforced"], plan["transition_service_start"]
+    parameters = {
+        "ServiceName": scope["service_name"], "ServiceHostSha256": scope["service_image_sha256"],
+        "PlanPath": root + r"\plan.json", "PlanSha256": controller["plan_sha256"],
+        "ApprovalPath": root + r"\approval.json", "ApprovalSha256": approval_sha256,
+        "PreflightPath": preflight_path, "PreflightSha256": pins["preflight_sha256"],
+        "ScmVerifierPath": scm_verifier_path,
+    }
+    expected_args, _ = closure_service_args({
+        "format": "enforced-service-v1", "service_name": scope["service_name"], "service_sid": scope["service_sid"],
+        "python_path": scope["python_path"], "python_sha256": scope["python_sha256"],
+        "launcher_path": scope["launcher_path"], "launcher_sha256": scope["launcher_sha256"],
+        "plan_path": parameters["PlanPath"], "plan_sha256": parameters["PlanSha256"],
+        "approval_path": parameters["ApprovalPath"], "approval_sha256": parameters["ApprovalSha256"],
+        "mode": pins["mode"], "host_sha256": scope["service_image_sha256"],
+    }, controller["plan"])
+    verified = starter.verify_prepared(controller, parameters, deadline)
+    bridge._need(verified["serving_args_sha256"] == bridge._digest(expected_args),
+                 "native_transition_prepared_service_unconfirmed")
+    return parameters
 
 
 def transition_authority_records(controller, started, generation, *, root, attempt, handoff_sha256, old_vm_id):

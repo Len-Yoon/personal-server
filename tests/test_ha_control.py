@@ -49,7 +49,7 @@ class TransitionIngressTests(unittest.TestCase):
             replacement_vm={}, observer_release={}, observer_setup={"plan_raw": candidate, "plan_sha256": caddy_runtime._sha(candidate), "deadline": 50},
             assert_legacy_closed=MagicMock(),
             controller_setup={"deadline": 50, "prepare_service": MagicMock(), "starter": MagicMock(),
-                              "live_sha256": "3"*64, "root": "fixture"},
+                              "live_sha256": "3"*64, "root": "fixture", "old_vm_id": "fixture"},
             replacement_requests=lambda _: (replacement, None),
             activate_guest=guest, guests=SimpleNamespace(verify_transition_target=MagicMock(return_value=True)),
             target_request=SimpleNamespace(binding=SimpleNamespace(**execution.spec)), verify_guest=MagicMock(),
@@ -60,7 +60,10 @@ class TransitionIngressTests(unittest.TestCase):
         )
         routes = (execution, None, None, SimpleNamespace(primary_ip="previous"),
                   SimpleNamespace(guest="previous", route_pin="9"*64), generation, "target", "8"*64)
-        with patch.object(transition_ingress, "_bind_rejoin_controller"), \
+        prepared = {"ApprovalSha256": "a"*64, "PreflightPath": "fixture", "ScmVerifierPath": "fixture"}
+        args["controller_setup"]["prepare_service"].return_value = prepared
+        with patch.object(transition_ingress, "prepare_staged_transition_service", return_value=prepared), \
+                patch.object(transition_ingress, "_bind_rejoin_controller"), \
                 patch.object(transition_ingress, "_windows_rejoin", return_value=(stage, MagicMock(), MagicMock())), \
                 patch.object(transition_ingress, "_rejoin_replacement", side_effect=lambda *_: steps.append("rejoin")), \
                 patch.object(transition_ingress, "open_transition_controller", side_effect=open_controller), \

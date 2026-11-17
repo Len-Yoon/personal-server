@@ -12,6 +12,7 @@ param(
     [string]$ScmVerifierPath,
     [string]$ExpectedActivationIntentSha256,
     [switch]$StartTransition,
+    [switch]$VerifyPreparedTransition,
     [switch]$CheckLeaseClosed,
     [switch]$RestoreClosureArgs,
     [switch]$ObserveClosureCheck,
@@ -217,6 +218,15 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
         [Security.AccessControl.FileSystemRights]'WriteData,Synchronize,Delete',[IO.FileShare]::None,4096,
         [IO.FileOptions]::DeleteOnClose,$intentAcl)
     try {
+        if ($VerifyPreparedTransition) {
+            Assert-TransitionPreflight $servingSha
+            if ('TrustedStoppedV1.Native' -as [type]) { throw 'initial_service_scm_verifier_already_loaded' }
+            Add-Type -TypeDefinition ($encoder.GetString($scmSource)) -ErrorAction Stop
+            Assert-TransitionStopped $Plan $HostPath $Current.PathName
+            [ordered]@{transition_service_prepared=$true;controller_plan_sha256=$PlanSha256;
+                service_sid=$sid;serving_args_sha256=$servingSha}|ConvertTo-Json -Compress
+            return
+        }
         if ($InspectRejoinStage) {
             if ('TrustedStoppedV1.Native' -as [type]) { throw 'initial_service_scm_verifier_already_loaded' }
             Add-Type -TypeDefinition ($encoder.GetString($scmSource)) -ErrorAction Stop
@@ -415,8 +425,8 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
 
 try {
     $rejoin = $RejoinMode -ne ''
-    $transition = $rejoin -or $StartTransition -or $ObserveTransition -or $StopTransition -or $CheckLeaseClosed -or $RestoreClosureArgs -or $ObserveClosureCheck
-    $modes = @(@($StartTransition,$ObserveTransition,$StopTransition,$CheckLeaseClosed,$RestoreClosureArgs,$ObserveClosureCheck) | Where-Object { $_.IsPresent }).Count
+    $transition = $rejoin -or $VerifyPreparedTransition -or $StartTransition -or $ObserveTransition -or $StopTransition -or $CheckLeaseClosed -or $RestoreClosureArgs -or $ObserveClosureCheck
+    $modes = @(@($VerifyPreparedTransition,$StartTransition,$ObserveTransition,$StopTransition,$CheckLeaseClosed,$RestoreClosureArgs,$ObserveClosureCheck) | Where-Object { $_.IsPresent }).Count
     if ($rejoin) { $modes++ }
     if (-not $Go -or $modes -gt 1 -or
         ($rejoin -and ($RejoinMode -cnotin @('initialize','stage-rejoin','observe-rejoin-stage','check-rejoin') -or

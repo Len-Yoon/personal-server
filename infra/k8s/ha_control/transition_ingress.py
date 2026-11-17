@@ -13,7 +13,8 @@ from . import caddy_runtime as caddy
 from . import native_stdio_bridge as bridge
 from .native_guest_activation import ServingGeneration
 from .native_host_evidence import _public_health
-from .native_windows_activation import open_transition_controller, prepare_transition_observer_plan
+from .native_windows_activation import (open_transition_controller, prepare_staged_transition_service,
+                                        prepare_transition_observer_plan)
 from .transition_execution import observer_callback_config
 
 
@@ -251,7 +252,14 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
             callback = observer_callback_config(previous_callback, previous_callback_sha256, binding,
                                                 generation.primary, replacement_vm, observer_release)
             controller = prepare_transition_observer_plan(**observer_setup, binding=binding | callback)
-            parameters = controller_setup["prepare_service"](controller, generation, deadline)
+            staged = controller_setup["prepare_service"](controller, generation, deadline)
+            parameters = prepare_staged_transition_service(
+                controller_setup["starter"], controller, generation, root=controller_setup["root"],
+                attempt=execution.spec["attempt_id"], old_vm_id=controller_setup["old_vm_id"],
+                approval_sha256=staged["ApprovalSha256"], preflight_path=staged["PreflightPath"],
+                scm_verifier_path=staged["ScmVerifierPath"], deadline=deadline,
+            )
+            caddy._need(parameters == staged, "transition_ingress_controller_unbound")
         else:
             controller, parameters = resume_rejoin["controller"], resume_rejoin["parameters"]
             caddy._need(type(controller) is dict and set(controller) == {"plan", "plan_sha256"}
