@@ -238,6 +238,14 @@ class NativeGuestActivationTests(unittest.TestCase):
         self.assertEqual(worker._checked_generation_handoff(request, raw, handoff),
                          (pins, pg, replace(activation, windows_service_instance_sha256="9"*64), serving, 2**64-1))
 
+        prep = replace(request, verb=bridge.GUEST_PREPARE_GENERATION, args={
+            "runtime": handoff["runtime"], "postgres": handoff["postgres"], "generation": handoff["generation"],
+            "source_fence_wal": "f"*16, "rejoin_stage_sha256": "a"*64,
+        })
+        prep_frame = bridge._bytes(worker._scope(prep) | {"args": prep.args})
+        self.assertLessEqual(len(prep_frame), bridge.FRAME_BYTES)
+        self.assertEqual(worker.read_request(io.BytesIO(prep_frame)), prep)
+
     def test_generation_guest_request_binds_b_and_requires_wal_at_each_boundary(self):
         worker, bridge = native_guest_worker, native_stdio_bridge
         boot, installation = b"fresh boot", "4"*64

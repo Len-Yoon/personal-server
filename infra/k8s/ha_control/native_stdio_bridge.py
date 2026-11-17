@@ -43,6 +43,7 @@ NODES = ("A", "B")
 GUEST_RESTORE_READBACK = "read_restore_receipt"
 GUEST_START_REPLACEMENT = "start_replacement_standby"
 GUEST_OBSERVE_REPLACEMENT = "observe_replacement_standby"
+GUEST_PREPARE_GENERATION = "prepare_generation_runtime"
 GUEST_PUBLISH_GENERATION = "publish_generation_handoff"
 GUEST_ACTIVATE_GENERATION = "activate_generation"
 GUEST_OBSERVE_GENERATION = "observe_generation_activation"
@@ -50,6 +51,9 @@ GUEST_VERIFY_GENERATION = "verify_live_generation"
 GUEST_VERIFY_PREPARED_GENERATION = "verify_prepared_generation"
 GUEST_TRANSITION_TARGET = "verify_transition_target"
 ACTIVATION_VERBS = frozenset(("activate", GUEST_ACTIVATE_GENERATION))
+DUPLEX_GUEST_VERBS = ACTIVATION_VERBS | {GUEST_PREPARE_GENERATION}
+PREPARATION_BOUNDARIES = tuple(f"prepare_generation:{index}" for index in range(1, 5))
+PREPARATION_BOUNDARY_SECONDS = 24
 REPLACEMENT_ARGS = ("bootstrap_manifest_sha256", "rejoin_stage_sha256")
 RESTORE_ARGS = ("manifest_sha256", "transfer_receipt_sha256", "target_receipt_sha256")
 VERBS = {
@@ -68,6 +72,8 @@ VERBS = {
                                                   "closed_a_sha256", "closed_b_sha256")),
     # Includes Windows service start and seven serial application readiness waits.
     "activate": ("A", 300, True, ("manifest_sha256", "activation_check_sha256", "settlement_sha256")),
+    GUEST_PREPARE_GENERATION: ("AB", 240, True, ("runtime", "postgres", "generation",
+                                               "rejoin_stage_sha256", "source_fence_wal")),
     GUEST_PUBLISH_GENERATION: ("AB", 30, True, ("handoff", "generation_handoff_sha256", "effects_plan_sha256")),
     GUEST_ACTIVATE_GENERATION: ("AB", 300, True, ("generation_handoff_sha256", "effects_plan_sha256")),
     GUEST_OBSERVE_GENERATION: ("AB", 30, False, ("generation_handoff_sha256", "effects_plan_sha256")),
@@ -245,10 +251,12 @@ def _args(verb, node, args):
     nodes, _, _, keys = VERBS[verb]
     _need(node in nodes and type(args) is dict and set(args) == set(keys), "bridge_args_rejected")
     for key, value in args.items():
-        if key == "runtime":
+        if key in {"runtime", "postgres", "generation"}:
             valid = type(value) is dict and 0 < len(_bytes(value)) <= FRAME_BYTES
         elif key == "handoff":
             valid = type(value) is dict and 0 < len(_bytes(value)) <= GENERATION_HANDOFF_FRAME_BYTES
+        elif key == "source_fence_wal":
+            valid = _wal_pin(value)
         elif key == "max_bytes":
             valid = type(value) is int and 0 < value <= TRANSFER_BYTES
         elif key == "windows_generation":
@@ -275,7 +283,7 @@ class _Chain:
 
     def check(self, verb, node, args):
         _need(verb not in {GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT,
-                          GUEST_PUBLISH_GENERATION, GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, GUEST_TRANSITION_TARGET},
+                          GUEST_PREPARE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, GUEST_TRANSITION_TARGET},
               "bridge_guest_only_request")
         _args(verb, node, args)
         if self.mode == "reconcile":

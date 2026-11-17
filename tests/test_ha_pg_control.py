@@ -2617,6 +2617,31 @@ send({'status': 'PASS'})
         with self.assertRaisesRegex(bridge.BridgeRejected, 'guest_ssh_live_windows_unconfirmed'):
             ssh._activation_exchange(command, payload, time.monotonic() + 5, nonce, lambda _: False)
 
+        checked_boundaries = []
+
+        def prepared_current(challenge, boundary, deadline):
+            self.assertTrue(bridge._hash(challenge))
+            self.assertLess(time.monotonic(), deadline)
+            checked_boundaries.append(boundary)
+            return "c"*64
+
+        for boundaries in (bridge.PREPARATION_BOUNDARIES, bridge.PREPARATION_BOUNDARIES[:-1]):
+            checked_boundaries.clear()
+            payload = bridge._bytes({"nonce": nonce, "boundaries": boundaries})
+            if len(boundaries) == len(bridge.PREPARATION_BOUNDARIES):
+                observed = ssh._activation_exchange(
+                    command, payload, time.monotonic()+5, nonce, prepared_current, bind_boundary=True,
+                    boundaries=bridge.PREPARATION_BOUNDARIES,
+                )
+                self.assertEqual(json.loads(observed), {"status": "PASS"})
+            else:
+                with self.assertRaisesRegex(bridge.BridgeRejected, "guest_ssh_live_windows_required"):
+                    ssh._activation_exchange(
+                        command, payload, time.monotonic()+5, nonce, prepared_current, bind_boundary=True,
+                        boundaries=bridge.PREPARATION_BOUNDARIES,
+                    )
+            self.assertEqual(tuple(checked_boundaries), boundaries)
+
     def test_binds_wsl_intent_and_exact_guest_receipt_before_activation(self):
         from ha_control import native_activation_handoff as handoff, native_stdio_bridge as bridge
 

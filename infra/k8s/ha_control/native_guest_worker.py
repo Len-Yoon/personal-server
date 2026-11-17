@@ -24,8 +24,8 @@ from . import frozen_ingress, native_guest_restore as restore, native_guest_runt
 from . import native_guest_activation as activation, native_guest_live as live
 from .legacy_writers import TransitionBlocked, _need
 from .native_stdio_bridge import (
-    ACTIVATION_GUEST_REPLY_SECONDS, ACTIVATION_VERBS, Binding, BridgeRejected, FRAME_BYTES, GENERATION_HANDOFF_FRAME_BYTES,
-    GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT,
+    ACTIVATION_GUEST_REPLY_SECONDS, DUPLEX_GUEST_VERBS, PREPARATION_BOUNDARY_SECONDS, Binding, BridgeRejected, FRAME_BYTES, GENERATION_HANDOFF_FRAME_BYTES,
+    GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_PREPARE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT,
     GUEST_OBSERVE_REPLACEMENT, GUEST_TRANSITION_TARGET, GUEST_VERIFY_GENERATION, GUEST_VERIFY_PREPARED_GENERATION, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
 )
@@ -42,6 +42,7 @@ VERBS = {
     GUEST_ACTIVATE_GENERATION,
     GUEST_OBSERVE_GENERATION,
     GUEST_PUBLISH_GENERATION,
+    GUEST_PREPARE_GENERATION,
     GUEST_TRANSITION_TARGET,
     GUEST_VERIFY_GENERATION,
     GUEST_VERIFY_PREPARED_GENERATION,
@@ -101,7 +102,7 @@ def read_request(stream):
           and type(request.verb) is str and request.verb in VERBS, "guest_worker_request_scope")
     _args(request.verb, request.node, request.args)
     _need(_matches(value, {**_scope(request), "args": request.args}), "guest_worker_request_scope")
-    if request.verb not in ACTIVATION_VERBS:
+    if request.verb not in DUPLEX_GUEST_VERBS:
         _need(not stream.read(1), "guest_worker_request_size")
     return request
 
@@ -699,6 +700,26 @@ def _checked_generation_handoff(request, raw, handoff):
     return pins, pg, activation_pins, generation, floor
 
 
+def prepare_generation(request, assert_windows_current):
+    _need(os.geteuid() == 0 and callable(assert_windows_current), "guest_worker_live_windows_required")
+    pins = runtime.RuntimePins(**request.args["runtime"])
+    pg = restore.RestorePins(**request.args["postgres"])
+    generation = activation.ServingGeneration(**request.args["generation"])
+    stage = ROOT / request.binding.attempt_id
+    runtime._directory(stage, 0)
+    _need(pins.node == request.node and pins.attempt_id == request.binding.attempt_id
+          and pins.boot_sha256 == request.binding.boot(request.node), "guest_generation_prepared_unbound")
+    result = runtime.prepare_generation_runtime(
+        pins, pg, stage, generation, int(request.args["source_fence_wal"], 16),
+        assert_windows_rejoin=assert_windows_current,
+    )
+    raw, persisted = _read_json(stage / "runtime-prepared.json")
+    _need(_matches(result, persisted) and result["status"] == "PREPARED"
+          and result["applications_started"] is False and result["writer_authority_issued"] is False,
+          "guest_generation_prepared_unbound")
+    return Receipt("PASS", _digest(raw))
+
+
 def publish_generation_handoff(request):
     _need(os.geteuid() == 0, "guest_worker_root_required")
     stage = ROOT / request.binding.attempt_id
@@ -840,6 +861,8 @@ def handle(request, assert_windows_current=None):
         with mutation_lock(wait=15 if request.verb == "finish_receive" else 0) as descriptor:
             if request.verb in {GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT}:
                 return replacement_standby(request)
+            if request.verb == GUEST_PREPARE_GENERATION:
+                return prepare_generation(request, assert_windows_current)
             if request.verb == GUEST_PUBLISH_GENERATION:
                 return publish_generation_handoff(request)
             if request.verb == GUEST_VERIFY_PREPARED_GENERATION:
@@ -863,11 +886,13 @@ def main():
         return 1
     finally:
         signal.alarm(0)
-    if request.verb in ACTIVATION_VERBS:
+    if request.verb in DUPLEX_GUEST_VERBS:
         channel = Stdio(sys.stdin.fileno(), sys.stdout.fileno())
 
         def assert_windows_current(challenge, boundary):
-            deadline = time.monotonic() + ACTIVATION_GUEST_REPLY_SECONDS
+            reply_seconds = (PREPARATION_BOUNDARY_SECONDS + 0.5 if request.verb == GUEST_PREPARE_GENERATION
+                             else ACTIVATION_GUEST_REPLY_SECONDS)
+            deadline = time.monotonic() + reply_seconds
             fields = {"request_nonce": request.nonce, "challenge": challenge, "boundary": boundary}
             channel.write({"kind": "activation_boundary", **fields}, deadline)
             reply = channel.read(deadline)
