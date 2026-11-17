@@ -793,6 +793,8 @@ class CaddyRuntimeTests(unittest.TestCase):
                           'project': 'fixture', 'service': 'caddy', 'oneoff': 'False', 'container-number': '1',
                           'config-hash': self.live_service_hash,
                           'project.working_dir': str(self.root), 'project.config_files': ','.join(files)}.items()})
+        config['Labels'][caddy.LABEL + 'project.environment_file'] = (
+            '/dev/null' if self.applied else str(self.root / '.env'))
         ports = {f'{port}/tcp': [{'HostPort': port, 'HostIp': '0.0.0.0'}] for port in ('80', '443')}
         mounts = [{'Destination': path, 'Type': 'volume', 'Name': name, 'RW': path != caddy.MOUNT,
                    'Driver': 'local', 'Source': self.volume(name)['Mountpoint']}
@@ -808,6 +810,22 @@ class CaddyRuntimeTests(unittest.TestCase):
                 'State': {'Running': True, 'Status': 'running', 'StartedAt': 'start'},
                 'HostConfig': {'Mounts': host_mounts, 'NetworkMode': 'fixture_default'},
                 'NetworkSettings': {'Ports': ports, 'Networks': {'fixture_default': {'NetworkID': self.network_id}}}}
+
+    def test_environment_source_is_bound_without_treating_provenance_as_effective_config(self):
+        original = self.container()
+        self.applied = True
+        isolated = self.container()
+        self.runtime._layout(original)
+        self.runtime._layout(isolated, isolated=True)
+        skipped = (self.caddy.CONFIG, self.caddy.MOUNT)
+        original_fields = self.caddy._runtime_fields(original)
+        self.assertEqual(original_fields['config'], self.caddy._runtime_fields(isolated, skipped)['config'])
+
+        isolated['Config']['Env'].append('UNEXPECTED_RUNTIME_VALUE=value')
+        self.assertNotEqual(original_fields['config'], self.caddy._runtime_fields(isolated, skipped)['config'])
+        isolated['Config']['Labels'][self.caddy.LABEL + 'project.environment_file'] = '/tmp/untrusted.env'
+        with self.assertRaisesRegex(TransitionBlocked, 'caddy_compose_environment_source_unconfirmed'):
+            self.runtime._layout(isolated, isolated=True)
 
     def run_docker(self, args, **kwargs):
         args = args[len(self.caddy.DOCKER):]
