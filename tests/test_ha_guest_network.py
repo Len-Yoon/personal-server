@@ -35,6 +35,18 @@ $range=Get-GuestNetworkRange '10.8.7.3' 29
 if($range.last-$range.first -ne 7 -or $range.address-$range.first -ne 3){throw 'ipv4_range_wrong'}
 ''')
 
+    def test_isolated_single_guest_manifest_uses_two_hosts_in_a_slash_30(self):
+        self.run_ps(r'''
+. $env:NETWORK_SOURCE
+$value=[pscustomobject]@{schema_version=3;source_commit=('a'*40);vm_driver_source_commit=('a'*40);vm_driver_sha256=('c'*64);installation_id=('d'*64);prepared_receipt_sha256=('e'*64);host_ipv4='10.8.7.1';prefix_length=30;node='A';guest_ipv4='10.8.7.2';vm_manifest_base64='eyJ2IjoxfQ=='}
+Assert-GuestNetworkSpec $value
+foreach($case in @(@('prefix_length',29),@('guest_ipv4','10.8.7.3'),@('guest_ipv4','10.8.7.5'),@('guest_ipv4','10.8.7.1'),@('node','C'),@('vm_manifest_base64','?'))){
+ $copy=$value.PSObject.Copy();$copy.($case[0])=$case[1];$blocked=$false
+ try{Assert-GuestNetworkSpec $copy}catch{$blocked=$true}
+ if(-not $blocked){throw 'unsafe_isolated_network_spec_accepted'}
+}
+''')
+
     def test_management_port_cannot_select_physical_duplicate_or_different_switch_adapter(self):
         self.run_ps(r'''
 $ErrorActionPreference='Stop'
