@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import stat
@@ -42,22 +43,47 @@ def validate_bundle(plan):
         raise TransitionBlocked("approved_controller_bundle_required") from None
 
 
-def serve_ready(backend, state, *, arm=False):
+def serve_ready(backend, state, *, arm=False, heartbeat_journal=None):
     backend.bind(state)
     if state["phase"] != "ready":
         raise TransitionBlocked("ready_transition_required")
+    sequence = 0
     try:
         if arm:
             backend.arm(state)
         while True:
             started = time.monotonic()
-            backend.renew(state)
+            proof = backend.renew(state)
+            if heartbeat_journal is not None:
+                sequence += 1
+                record_renewal(backend, heartbeat_journal, state, sequence, proof)
             time.sleep(max(0, 1 - (time.monotonic() - started)))
     finally:
+        if heartbeat_journal is not None:
+            try:
+                heartbeat_journal.save({key: value for key, value in state.items() if key != "lease_heartbeat"},
+                                       windows_retry_until=time.monotonic() + 0.15)
+            except Exception:
+                pass  # The heartbeat has an independent short expiry.
         try:
             backend.close(state)
         except Exception:
             pass  # An unavailable DB is covered by the short DB-clock lease.
+
+
+def record_renewal(backend, journal, state, sequence, proof):
+    """Publish only fresh, post-commit evidence from this guarded service process."""
+    if type(proof) is not dict:
+        raise TransitionBlocked("transition_lease_heartbeat_unconfirmed")
+    heartbeat = proof | {"plan_sha256": backend.fence_adapter.plan_sha256,
+                         "broker_instance_sha256": backend.fence_adapter.instance,
+                         "python_pid": os.getpid(), "sequence": sequence}
+    now_ms = time.time_ns() // 1_000_000
+    if (not Journal.valid_lease_heartbeat(heartbeat, state)
+            or not 0 <= now_ms - heartbeat["sampled_at_ms"] < 2000
+            or heartbeat["valid_until_ms"] <= now_ms):
+        raise TransitionBlocked("transition_lease_heartbeat_unconfirmed")
+    journal.save(state | {"lease_heartbeat": heartbeat}, windows_retry_until=time.monotonic() + 0.15)
 
 
 def rejoin_stage_receipt(backend, state):
@@ -119,7 +145,7 @@ def run(args):
         if args.command == "transition-serve":
             if p.get("profile") != "enforced-vm-v1":
                 raise TransitionBlocked("enforced_transition_service_required")
-            return control.advance(on_ready=lambda state: serve_ready(backend, state))
+            return control.advance(on_ready=lambda state: serve_ready(backend, state, heartbeat_journal=control.journal))
         # The single-controller lock AND native Windows exclusion guard remain
         # held throughout serving. A failed renewal exits; the short DB lease
         # expires without inventing a new primary or retrying host recovery.

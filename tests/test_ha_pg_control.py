@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "infra/k8s"))
-from ha_control.controller import TransitionBlocked
+from ha_control.controller import Journal, TransitionBlocked
 from ha_control.initial_pg_lease import INITIAL_CUTOVER, InitialPgLease
 from ha_control.native_windows_activation import WindowsActivationLease
 from ha_control.native_stdio_bridge import BridgeRejected
@@ -672,6 +672,50 @@ class PGControlTests(unittest.TestCase):
                 self.backend.renew(self.state)
         close.assert_called_once_with("B", self.state)
         self.assertIsNone(self.backend.validated)
+
+    def test_transition_heartbeat_records_only_postcommit_live_renewal(self):
+        connections, observations = self.prepare_fresh(lease=True, opened=True)
+        state = dict(self.state, phase="ready")
+        self.fence.plan_sha256, self.fence.instance = "a"*64, "b"*64
+        journal = Journal(self.root / "controller-state.json")
+        journal.save(state)
+        with connections, observations, patch("ha_control.pg.time.time_ns", return_value=10_000_000_000):
+            proof = self.backend.renew(state)
+            self.assertEqual(proof["sampled_at_ms"], 10000)
+            self.assertEqual(proof["valid_until_ms"], 14000)
+            cli.record_renewal(self.backend, journal, state, 1, proof)
+            heartbeat = journal.read()["lease_heartbeat"]
+            self.assertEqual((heartbeat["epoch"], heartbeat["timeline"], heartbeat["revision"]), (7, 2, 9))
+            self.assertEqual(heartbeat["broker_instance_sha256"], "b"*64)
+            self.assertEqual(heartbeat["python_pid"], os.getpid())
+            with self.assertRaisesRegex(TransitionBlocked, "transition_lease_heartbeat_unconfirmed"):
+                cli.record_renewal(self.backend, journal, state, 2, proof | {"valid_until_ms": 9000})
+            self.assertEqual(journal.read()["lease_heartbeat"], heartbeat)
+
+    def test_transition_service_removes_heartbeat_before_closing_lease(self):
+        backend = MagicMock()
+        backend.fence_adapter.plan_sha256, backend.fence_adapter.instance = "a"*64, "b"*64
+        backend.renew.return_value = {"epoch": 7, "timeline": 2, "revision": 9, "sampled_at_ms": 10000,
+                                      "valid_until_ms": 14000, "postcommit_nonce_sha256": "c"*64}
+        state = dict(self.state, phase="ready")
+        journal = Journal(self.root / "controller-state.json")
+        journal.save(state)
+
+        def inspect_active_then_stop(_):
+            self.assertEqual(journal.read()["lease_heartbeat"]["sequence"], 1)
+            raise KeyboardInterrupt
+
+        def close_after_unpublish(_):
+            self.assertNotIn("lease_heartbeat", journal.read())
+
+        backend.close.side_effect = close_after_unpublish
+        with patch("ha_control.cli.time.time_ns", return_value=10_000_000_000), patch(
+            "ha_control.cli.time.sleep", side_effect=inspect_active_then_stop,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                cli.serve_ready(backend, state, heartbeat_journal=journal)
+        backend.close.assert_called_once_with(state)
+        self.assertNotIn("lease_heartbeat", journal.read())
 
     def test_guard_unavailable_before_renewal_does_not_prevent_safe_revocation(self):
         with patch.object(self.backend, "fenced", side_effect=TransitionBlocked("windows_guard_lost")), patch.object(self.backend, "_local_metadata_write") as close:

@@ -9,6 +9,7 @@ import ctypes
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 import tempfile
@@ -63,7 +64,8 @@ class Journal:
                     or (sys.platform != "win32" and (info.st_uid != os.geteuid() or info.st_mode & 0o077))):
                 raise ValueError()
             value = json.loads(self.path.read_text())
-            if (set(value) - {"source_fence_wal"} != {"cluster", "generation", "old", "target", "phase", "attempts", "timeline"}
+            if (set(value) - {"source_fence_wal", "lease_heartbeat"}
+                    != {"cluster", "generation", "old", "target", "phase", "attempts", "timeline"}
                     or ("source_fence_wal" in value and not self._valid_wal(value["source_fence_wal"]))
                     or value["old"] not in {"A", "B"} or value["target"] not in {"A", "B"}
                     or value["old"] == value["target"] or not isinstance(value["cluster"], str)
@@ -72,6 +74,8 @@ class Journal:
                     or type(value["timeline"]) is not int or value["timeline"] < 1
                     or value["phase"] not in {"fencing", "promoting", "rejoining", "validating", "ready"}):
                 raise ValueError()
+            if "lease_heartbeat" in value and not self.valid_lease_heartbeat(value["lease_heartbeat"], value):
+                raise ValueError()
             return value
         except (OSError, ValueError, TypeError):
             raise TransitionBlocked("controller_journal_invalid") from None
@@ -79,6 +83,17 @@ class Journal:
     @staticmethod
     def _valid_wal(value):
         return type(value) is int and 0 < value < 2**64
+
+    @staticmethod
+    def valid_lease_heartbeat(heartbeat, state):
+        hashes = {"plan_sha256", "broker_instance_sha256", "postcommit_nonce_sha256"}
+        integers = {"epoch", "timeline", "revision", "sampled_at_ms", "valid_until_ms", "python_pid", "sequence"}
+        return (state["phase"] == "ready" and type(heartbeat) is dict and set(heartbeat) == hashes | integers
+                and all(type(heartbeat[key]) is str and re.fullmatch(r"[a-f0-9]{64}", heartbeat[key]) for key in hashes)
+                and all(type(heartbeat[key]) is int and 0 < heartbeat[key] < 2**63 for key in integers)
+                and heartbeat["epoch"] == state["generation"] and heartbeat["timeline"] > state["timeline"]
+                and heartbeat["revision"] >= heartbeat["epoch"]
+                and 0 < heartbeat["valid_until_ms"] - heartbeat["sampled_at_ms"] <= 5000)
 
     def record_source_fence_wal(self, state, wal):
         if state["phase"] != "fencing" or not self._valid_wal(wal) or self.read() != state:

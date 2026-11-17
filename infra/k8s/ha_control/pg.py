@@ -753,7 +753,7 @@ class PgBackend:
         if shared and not lease:
             _deny("shared_lock_only_for_lease_renewal")
         try:
-            self._fresh_observation(state, lease=lease, shared=shared)
+            return self._fresh_observation(state, lease=lease, shared=shared)
         except Exception:
             self._best_effort_revoke(state)
             raise
@@ -804,6 +804,7 @@ class PgBackend:
                 self._commit(primary)
                 if not suffix:
                     watermark = self._lsn(primary.execute("SELECT pg_current_wal_insert_lsn()::text").fetchone()[0])
+            sampled_at_ms = time.time_ns() // 1_000_000
             after, replica = self._observe(primary, state["target"], state), self._observe(peer, state["old"], state)
             self._pair(after, replica, state)
             if shared and self._authority_stamp(after) != self._authority_stamp(before):
@@ -819,6 +820,11 @@ class PgBackend:
             if lease and (not after["writes"] or not after["history"] or not 0 < after["remaining"] <= LEASE_SECONDS):
                 _deny("authority_lease_not_open")
             self.validated = (state["cluster"], state["generation"], state["target"], after["actual_timeline"], time.monotonic())
+            if shared:
+                proof = {"epoch": after["epoch"], "timeline": after["actual_timeline"], "revision": after["revision"],
+                         "sampled_at_ms": sampled_at_ms, "valid_until_ms": sampled_at_ms + int(after["remaining"] * 1000),
+                         "postcommit_nonce_sha256": hashlib.sha256((nonce + ":flush").encode()).hexdigest()}
+                return proof
 
     def validate(self, state):
         self.validated = None
@@ -877,4 +883,4 @@ class PgBackend:
         exclusive role lock; lease serving never performs that transition.
         """
         self.validated = None
-        self._fresh(state, lease=True, shared=True)
+        return self._fresh(state, lease=True, shared=True)
