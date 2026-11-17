@@ -206,6 +206,54 @@ class PGControlTests(unittest.TestCase):
                     operation(self.state)
             connect.assert_not_called()
 
+    def test_planned_vm_stop_requires_a_drained_and_closed_source_lease(self):
+        self.backend.plan.update(profile="enforced-vm-v1", required_replay_lsn="0/20",
+                                 source_lease_close_required=True)
+        state = dict(self.state, phase="fencing")
+        closed = dict(self.candidate(), node="ha_A", recovery=False, remaining=-1)
+        self.primary, self.peer = MagicMock(), MagicMock()
+        self.fence.stopped = False
+        for drift in ({"writes": True}, {"history": True}, {"remaining": 1}, {"actual_timeline": 2},
+                      {"epoch": 5}, {"remaining": float("nan")}, {"remaining": None}):
+            with self.subTest(drift=drift):
+                with patch.object(self.backend, "_connection", side_effect=self.fake_connection), patch.object(
+                    self.backend, "_observe", return_value=closed | drift,
+                ):
+                    with self.assertRaisesRegex(TransitionBlocked, "source_write_authority_not_closed"):
+                        self.backend.fence(state)
+                self.assertFalse(self.fence.stopped)
+        active = []
+
+        @contextmanager
+        def source_connection(node):
+            self.assertEqual(node, "A")
+            active.append(node)
+            try:
+                yield self.peer
+            finally:
+                active.pop()
+
+        fence = self.fence.fence
+
+        def stop_while_locked(current):
+            self.assertEqual(active, ["A"])
+            self.peer.execute.assert_any_call("SELECT pg_advisory_xact_lock(%s)", (ROLE_LOCK,))
+            return fence(current)
+
+        with patch.object(self.backend, "_connection", side_effect=source_connection), patch.object(
+            self.backend, "_observe", return_value=closed,
+        ), patch.object(self.backend, "_read") as observe_peer, patch.object(
+            self.fence, "fence", side_effect=stop_while_locked,
+        ) as stop:
+            observe_peer.return_value = dict(self.candidate(), replay="0/1F")
+            with self.assertRaisesRegex(TransitionBlocked, "source_final_wal_not_replayed"):
+                self.backend.fence(state)
+            stop.assert_not_called()
+            observe_peer.return_value = self.candidate()
+            self.backend.fence(state)
+        self.assertTrue(self.fence.stopped)
+        self.assertEqual(active, [])
+
     def test_enforced_transition_requires_a_nonzero_approved_replay_floor(self):
         self.backend.plan = dict(self.plan, profile="enforced-vm-v1")
         for checkpoint in (None, "0/0", "0/100000000", "missing"):

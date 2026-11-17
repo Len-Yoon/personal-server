@@ -7,6 +7,7 @@ is implemented. All database/transport failures are static fail-closed labels.
 from contextlib import contextmanager
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -123,6 +124,8 @@ class PgBackend:
                 or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", value["cluster"])
                 or value.get("node") not in {"A", "B"} or type(value.get("generation")) is not int
                 or value["generation"] < 1 or type(value.get("timeline")) is not int or value["timeline"] < 1
+                or type(value.get("source_lease_close_required", False)) is not bool
+                or (value.get("source_lease_close_required", False) and value.get("profile") != "enforced-vm-v1")
                 or not re.fullmatch(r"[0-9]+", str(value.get("system_id", "")))
                 or not isinstance(value.get("pg_nodes"), dict) or set(value["pg_nodes"]) != {"A", "B"}):
             _deny("invalid_pg_controller_plan")
@@ -529,6 +532,32 @@ class PgBackend:
 
     def fence(self, state):
         self.bind(state)
+        if self.plan.get("source_lease_close_required", False):
+            # Before inducing an outage on a running VM, prove the old
+            # authority is closed and all permit holders have released the
+            # database role lock. An already-Off VM is handled by fenced().
+            old, target = state["old"], state["target"]
+            with self._connection(old) as connection:
+                connection.execute("BEGIN")
+                connection.execute("SET LOCAL idle_in_transaction_session_timeout = 0")
+                connection.execute("SET LOCAL transaction_timeout = 0")
+                connection.execute("SELECT pg_advisory_xact_lock(%s)", (ROLE_LOCK,))
+                value = self._observe(connection, old, state)
+                remaining = value["remaining"]
+                if (value["recovery"] is not False or value["primary"] != old or value["partner"] != target
+                        or value["epoch"] != state["generation"] - 1
+                        or value["timeline"] != state["timeline"] or value["actual_timeline"] != state["timeline"]
+                        or value["writes"] is not False or value["history"] is not False
+                        or type(remaining) not in (int, float) or not math.isfinite(remaining) or remaining > 0):
+                    _deny("source_write_authority_not_closed")
+                peer = self._read(target, state)
+                self._candidate(peer, state)
+                if (peer["epoch"] != value["epoch"]
+                        or self._lsn(peer["replay"]) < max(self._lsn(value["flush"]), self._promotion_replay_floor())):
+                    _deny("source_final_wal_not_replayed")
+                # Keep the role lock through dispatch. Closing the connection
+                # releases it if the original server remains reachable.
+                return self.fence_adapter.fence(state)
         self.fence_adapter.fence(state)
 
     def promoted(self, state):
