@@ -199,6 +199,7 @@ def _windows_rejoin(starter, controller, parameters, *, live_sha256, root, deadl
         starter.restore_rejoin_args(controller, parameters, "stage-rejoin", stage_id, deadline)
         staged = observe("observe-rejoin-stage", deadline)
     else:
+        run("initialize", secrets.token_hex(16), deadline)
         staged = run("stage-rejoin", stage_id, deadline)
     pin = staged["rejoin_stage_sha256"]
 

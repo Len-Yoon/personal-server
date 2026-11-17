@@ -171,8 +171,14 @@ def run(args):
         if args.command == "initialize":
             control.initialize(cluster=p["cluster"], generation=p["generation"], old=p["node"],
                                target="B" if p["node"] == "A" else "A", timeline=p["timeline"])
-            backend.bind(Journal(journal).read())
-            return {"status": "PASS", "phase": "fencing", "authority_opened": False}
+            initialized = Journal(journal).read()
+            backend.bind(initialized)
+            result = {"status": "PASS", "phase": "fencing", "authority_opened": False}
+            probe = os.environ.get("N100HA_REJOIN_PROBE")
+            if probe is not None:
+                result = rejoin_stage_receipt(backend, initialized)
+                write_rejoin_receipt(journal, backend.fence_adapter.plan_sha256, args.command, result, probe)
+            return result
         if args.command == "check-lease-closed":
             from types import SimpleNamespace
             if (p.get("profile") != "enforced-vm-v1" or p["generation"] < 2

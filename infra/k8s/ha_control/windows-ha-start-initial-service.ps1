@@ -183,7 +183,7 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
     $intentPrefix = if ($CheckLeaseClosed -or $RestoreClosureArgs -or $ObserveClosureCheck) {'transition-closure-start-'} else {'transition-service-start-'}
     if ($RejoinMode -ne '') {
         $intentPrefix = 'transition-'+$RejoinMode+'-'
-        if ($RejoinMode -cne 'stage-rejoin') { $intentPrefix += $RejoinRequestId+'-' }
+        if ($RejoinMode -cnotin @('initialize','stage-rejoin')) { $intentPrefix += $RejoinRequestId+'-' }
     }
     $intentPath = Join-Path $intentRoot.FullName ($intentPrefix + $PlanSha256 + '.json')
     $intent = [ordered]@{service_name=$ServiceName;controller_plan_sha256=$PlanSha256;approval_sha256=$ApprovalSha256;
@@ -388,7 +388,7 @@ try {
     $modes = @(@($StartTransition,$ObserveTransition,$StopTransition,$CheckLeaseClosed,$RestoreClosureArgs,$ObserveClosureCheck) | Where-Object { $_.IsPresent }).Count
     if ($rejoin) { $modes++ }
     if (-not $Go -or $modes -gt 1 -or
-        ($rejoin -and ($RejoinMode -cnotin @('stage-rejoin','observe-rejoin-stage','check-rejoin') -or
+        ($rejoin -and ($RejoinMode -cnotin @('initialize','stage-rejoin','observe-rejoin-stage','check-rejoin') -or
             $RejoinRequestId -cnotmatch '\A[a-f0-9]{32}\z')) -or
         (-not $rejoin -and ($RestoreRejoinArgs -or $RejoinRequestId -cne '')) -or
         ($StopTransition -and ($ExpectedServicePid -cnotmatch '\A[1-9][0-9]{0,9}\z' -or

@@ -244,7 +244,7 @@ function Read-RejoinReceipt {
         $ClosureServiceSid -cnotmatch '\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\z' -or
         $ClosureHostPid -cnotmatch '\A[1-9][0-9]{0,9}\z' -or
         $ClosureStartedMs -cnotmatch '\A[1-9][0-9]{0,17}\z' -or
-        $RejoinMode -cnotin @('stage-rejoin','observe-rejoin-stage','check-rejoin')) {
+        $RejoinMode -cnotin @('initialize','stage-rejoin','observe-rejoin-stage','check-rejoin')) {
         throw 'transition_rejoin_receipt_invalid'
     }
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -262,7 +262,7 @@ function Read-RejoinReceipt {
             'host_pid,mode,plan_sha256,probe,python_pid,schema_version,started_at_ms' -or
             $entry.plan_sha256 -isnot [string] -or $entry.plan_sha256 -cne $ClosurePlanSha256 -or
             $entry.probe -isnot [string] -or $entry.probe -cne $probe -or
-            $entry.mode -isnot [string] -or $entry.mode -cnotin @('stage-rejoin','observe-rejoin-stage','check-rejoin') -or
+            $entry.mode -isnot [string] -or $entry.mode -cnotin @('initialize','stage-rejoin','observe-rejoin-stage','check-rejoin') -or
             $entry.schema_version -isnot [int] -or $entry.schema_version -ne 1 -or
             $entry.host_pid -isnot [int] -or $entry.host_pid -lt 1 -or
             $entry.python_pid -isnot [int] -or $entry.python_pid -lt 1 -or
@@ -283,6 +283,7 @@ function Read-RejoinReceipt {
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $keys = 'authority_opened,mode,observed_at_ms,phase,plan_sha256,probe,python_pid,rejoin_stage_sha256,schema_version,status'
     if ($RejoinMode -ceq 'check-rejoin') { $keys = $keys.Replace(',status',',standby_rejoined,status') }
+    $expectedPhase = if ($RejoinMode -ceq 'initialize') { 'fencing' } else { 'rejoining' }
     if ((@($result.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne $keys -or
         $result.schema_version -isnot [int] -or $result.schema_version -ne 1 -or
         $result.plan_sha256 -isnot [string] -or $result.plan_sha256 -cne $ClosurePlanSha256 -or
@@ -292,10 +293,10 @@ function Read-RejoinReceipt {
         $result.observed_at_ms -lt $launch.started_at_ms -or $result.observed_at_ms -gt $now -or
         $now - $launch.started_at_ms -gt $launchMaxAge -or $now - $result.observed_at_ms -gt 25000 -or
         $result.status -isnot [string] -or $result.status -cne 'PASS' -or
-        $result.phase -isnot [string] -or $result.phase -cne 'rejoining' -or
+        $result.phase -isnot [string] -or $result.phase -cne $expectedPhase -or
         $result.authority_opened -isnot [bool] -or $result.authority_opened -or
         $result.rejoin_stage_sha256 -isnot [string] -or $result.rejoin_stage_sha256 -cnotmatch $pattern) { throw 'transition_rejoin_receipt_invalid' }
-    $reply = [ordered]@{status='PASS';phase='rejoining';authority_opened=$false;rejoin_stage_sha256=$result.rejoin_stage_sha256}
+    $reply = [ordered]@{status='PASS';phase=$expectedPhase;authority_opened=$false;rejoin_stage_sha256=$result.rejoin_stage_sha256}
     if ($RejoinMode -ceq 'check-rejoin') {
         if ($result.standby_rejoined -isnot [bool] -or -not $result.standby_rejoined) { throw 'transition_rejoin_receipt_invalid' }
         $reply['standby_rejoined'] = $true

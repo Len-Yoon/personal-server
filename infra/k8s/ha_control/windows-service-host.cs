@@ -51,7 +51,7 @@ namespace EnforcedServiceV1 {
     "{{\"schema_version\":1,\"plan_sha256\":\"{0}\",\"python_pid\":{1},\"host_pid\":{2},\"started_at_ms\":{3}}}",
     Values["plan_sha256"],childPid,hostPid,startedMs);
   }
-  public bool IsRejoinProbe(){string mode=Values["mode"];return mode=="stage-rejoin"||mode=="observe-rejoin-stage"||mode=="check-rejoin";}
+  public bool IsRejoinProbe(){string mode=Values["mode"];return mode=="initialize"||mode=="stage-rejoin"||mode=="observe-rejoin-stage"||mode=="check-rejoin";}
   public string RejoinLaunchRecord(string probe,uint childPid,int hostPid,long startedMs){
    if(!IsRejoinProbe()||!Regex.IsMatch(probe??"",@"\A[a-f0-9]{32}\z")||childPid==0||hostPid<=0||startedMs<=0)throw new InvalidOperationException();
    return String.Format(System.Globalization.CultureInfo.InvariantCulture,

@@ -109,9 +109,11 @@ class TransitionIngressTests(unittest.TestCase):
             self.assertEqual(pin, stage["rejoin_stage_sha256"])
             self.assertEqual(current(80), pin)
             self.assertEqual(synchronized(70), stage)
-            self.assertEqual([call.args[2] for call in starter.run_rejoin.call_args_list],
-                             [first_mode, "observe-rejoin-stage", "check-rejoin"])
-            self.assertEqual(len({call.args[3] for call in starter.run_rejoin.call_args_list}), 3)
+            expected = [first_mode, "observe-rejoin-stage", "check-rejoin"]
+            if not resume:
+                expected.insert(0, "initialize")
+            self.assertEqual([call.args[2] for call in starter.run_rejoin.call_args_list], expected)
+            self.assertEqual(len({call.args[3] for call in starter.run_rejoin.call_args_list}), len(expected))
             if resume:
                 self.assertEqual(starter.mock_calls[0][0], "restore_rejoin_args")
                 starter.restore_rejoin_args.assert_called_once()

@@ -431,7 +431,7 @@ class WindowsTransitionServiceStart:
         if rejoin is not None:
             mode, request_id, restore = rejoin
             bridge._need(plan["transition_service_start"].get("lease_closure_check") is True
-                         and mode in ("stage-rejoin", "observe-rejoin-stage", "check-rejoin")
+                         and mode in ("initialize", "stage-rejoin", "observe-rejoin-stage", "check-rejoin")
                          and type(request_id) is str and re.fullmatch(r"[a-f0-9]{32}", request_id), invalid)
             options = {"RejoinMode": mode, "RejoinRequestId": request_id, "Go": True}
             if restore:
@@ -684,7 +684,7 @@ def read_transition_rejoin_receipt(windows, live_sha256, root, plan_sha256, mode
     error = "native_transition_rejoin_receipt_unconfirmed"
     bridge._need(type(root) is str and re.fullmatch(r"C:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}", root)
                  and bridge._hash(plan_sha256)
-                 and mode in ("stage-rejoin", "observe-rejoin-stage", "check-rejoin")
+                 and mode in ("initialize", "stage-rejoin", "observe-rejoin-stage", "check-rejoin")
                  and type(host_pid) is int and 0 < host_pid <= 2147483647
                  and type(started_ms) is int and 0 < started_ms < 10**18
                  and type(service_sid) is str and re.fullmatch(r"S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}", service_sid),
@@ -697,7 +697,8 @@ def read_transition_rejoin_receipt(windows, live_sha256, root, plan_sha256, mode
     bridge._remaining(deadline)
     result = windows.powershell(source, deadline)
     stage = result.get("rejoin_stage_sha256") if type(result) is dict else None
-    expected = {"status": "PASS", "phase": "rejoining", "authority_opened": False, "rejoin_stage_sha256": stage}
+    phase = "fencing" if mode == "initialize" else "rejoining"
+    expected = {"status": "PASS", "phase": phase, "authority_opened": False, "rejoin_stage_sha256": stage}
     if mode == "check-rejoin":
         expected["standby_rejoined"] = True
     bridge._need(bridge._hash(stage) and bridge._matches(result, expected), error)

@@ -582,7 +582,7 @@ function Get-EnforcedResponse($Config,$Approved,[string]$PlanHash,[string]$Appro
     $pgFiles=Get-EnforcedPgFiles $Config $policy $Watch
     $snapshot=Get-EnforcedVmSnapshot $Config $policy $Watch
     if($Request.action -ceq 'fence' -and $snapshot.context.controller_mode -ceq 'authenticate'){throw 'authenticate_cannot_fence'}
-    if($Request.action -ceq 'fence' -and $snapshot.context.controller_mode -cin @('observe-rejoin-stage','check-rejoin','check-lease-closed')){throw 'rejoin_check_cannot_fence'}
+    if($Request.action -ceq 'fence' -and $snapshot.context.controller_mode -cin @('initialize','observe-rejoin-stage','check-rejoin','check-lease-closed')){throw 'rejoin_check_cannot_fence'}
     if($Request.action -ceq 'fence' -and -not $snapshot.fenced){
         # The only mutating API: exact approved GUID. Lost responses require a
         # new observe; no retries, VM creation, start, checkpoints or host reboot.
