@@ -928,11 +928,20 @@ class PGControlTests(unittest.TestCase):
         backend.plan = dict(self.plan, profile="enforced-vm-v1", windows_transition_observer={},
                             transition_service_start={"target_timeline": 2})
         backend.fence_adapter.plan_sha256 = "a"*64
-        backend.observe_transition_lease_closed.return_value = {"generation": 7}
+        expected = {"plan_sha256": "a"*64, "generation": 7, "node_proofs": {"A": "b"*64, "B": "c"*64}}
+        backend.observe_transition_lease_closed.return_value = expected
         args = SimpleNamespace(plan=str(self.root / "plan.json"), approval=str(self.root / "approval.json"),
                                journal=None, command="check-lease-closed")
         with patch.object(cli, "PgBackend", return_value=backend), patch.object(cli, "validate_bundle"):
-            self.assertEqual(cli.run(args), {"status": "PASS", "generation": 7})
+            self.assertEqual(cli.run(args), {"status": "PASS", **expected})
+            receipt = journal / ("lease-closure-" + "a"*64 + ".json")
+            raw = receipt.read_bytes()
+            data = json.loads(raw)
+            self.assertGreater(data.pop("observed_at_ms"), 0)
+            self.assertEqual(data, expected | {"schema_version": 1, "python_pid": os.getpid()})
+            with self.assertRaisesRegex(TransitionBlocked, "receipt_unconfirmed"):
+                cli.run(args)
+            self.assertEqual(receipt.read_bytes(), raw)
         pin, generation, _ = backend.observe_transition_lease_closed.call_args.args
         self.assertEqual((pin, generation.primary, generation.partner, generation.timeline), ("a"*64, "B", "A", 2))
         backend.renew.assert_not_called()

@@ -93,6 +93,25 @@ def rejoin_stage_receipt(backend, state):
     return {"status": "PASS", "phase": state["phase"], "authority_opened": False, "rejoin_stage_sha256": proof}
 
 
+def write_transition_closure_receipt(journal, proof):
+    """Persist the one-shot DB readback inside the protected service journal."""
+    pin = proof.get("plan_sha256")
+    if type(pin) is not str or not re.fullmatch(r"[a-f0-9]{64}", pin):
+        raise TransitionBlocked("transition_db_closure_unconfirmed")
+    path = journal.parent / f"lease-closure-{pin}.json"
+    raw = json.dumps(proof | {"schema_version": 1, "python_pid": os.getpid(),
+                              "observed_at_ms": time.time_ns() // 1_000_000},
+                     sort_keys=True, separators=(",", ":")).encode("ascii")
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(raw)
+            output.flush()
+            os.fsync(output.fileno())
+    except OSError:
+        raise TransitionBlocked("transition_db_closure_receipt_unconfirmed") from None
+
+
 def run(args):
     if getattr(args, "arm", False) and args.command != "serve":
         raise TransitionBlocked("arm_only_for_serve")
@@ -152,6 +171,7 @@ def run(args):
                 proof = backend.observe_transition_lease_closed(
                     backend.fence_adapter.plan_sha256, generation, time.monotonic() + 8,
                 )
+                write_transition_closure_receipt(journal, proof)
                 return {"status": "PASS", **proof}
         backend.bind(Journal(journal).read())
         if args.command == "stage-rejoin":
