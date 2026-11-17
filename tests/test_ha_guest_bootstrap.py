@@ -197,6 +197,7 @@ class BootstrapTests(unittest.TestCase):
         entry=(ROOT/'infra/k8s/ha-package/bootstrap_assets/pg-entrypoint.sh').read_text()
         self.assertIn('sslmode=verify-full',entry);self.assertIn('application_name=$application_name',entry)
         self.assertIn('--no-slot --wal-method=stream',entry)
+        self.assertIn('test -f "$PGDATA/standby.signal" && test ! -L "$PGDATA/standby.signal" || exit 66',entry)
         self.assertIn('chmod 0700 "$PGDATA"',entry)
         self.assertNotIn('replication.dsn',entry);self.assertNotIn('set -x',entry)
         source=(ROOT/'infra/k8s/ha-package/bootstrap_assets/initialize.py').read_text()
@@ -204,6 +205,41 @@ class BootstrapTests(unittest.TestCase):
         self.assertIn('false,false,clock_timestamp()-',source)
         self.assertIn('effects.validate_catalog(admin,binding)',source)
         self.assertIn("'full_seven_app_restore_verified':False",source)
+
+    def test_reverse_standby_does_not_start_old_primary_storage(self):
+        entry = (ROOT / 'infra/k8s/ha-package/bootstrap_assets/pg-entrypoint.sh').read_text()
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            data, credentials, bin_dir = (root / leaf for leaf in ('data', 'credentials', 'bin'))
+            for path in (data, credentials, bin_dir):
+                path.mkdir()
+            for leaf in ('server.crt', 'server.key', 'ca.crt', 'postgres-password', 'repl.pgpass'):
+                (credentials / leaf).touch()
+            for leaf, command in {
+                'id': 'printf 70',
+                'stat': 'case "$2" in %u) printf 70;; %u:%a) printf 70:600;; *) exit 90;; esac',
+                'postgres': 'printf started',
+                'pg_basebackup': 'printf 17 >"$PGDATA/PG_VERSION"; touch "$PGDATA/standby.signal"',
+            }.items():
+                shim = bin_dir / leaf
+                shim.write_text(f'#!/bin/sh\n{command}\n')
+                shim.chmod(0o700)
+            script = entry.replace('/var/lib/postgresql/data', str(data)).replace('/run/ha-pg', str(credentials))
+            env = {'PATH': f'{bin_dir}:/usr/bin:/bin', 'PGDATA': str(data), 'HA_PG_NODE': 'A',
+                   'HA_PG_PRIMARY_NODE': 'B', 'HA_PG_SOURCE_NODE': 'B', 'HA_PG_UID': '70', 'HA_PG_GID': '70'}
+
+            def launch():
+                return subprocess.run(['bash', '-c', script], env=env, capture_output=True, timeout=5)
+
+            (data / 'PG_VERSION').write_text('17')
+            self.assertEqual(launch().returncode, 66)
+            (data / 'PG_VERSION').unlink()
+            initialized = launch()
+            self.assertEqual((initialized.returncode, initialized.stdout), (0, b'started'))
+            resumed = launch()
+            self.assertEqual((resumed.returncode, resumed.stdout), (0, b'started'))
+            (data / 'recovery.signal').touch()
+            self.assertEqual(launch().returncode, 66)
 
 
 
