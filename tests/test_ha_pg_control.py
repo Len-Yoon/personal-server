@@ -22,7 +22,7 @@ from ha_control.native_guest_activation import ServingGeneration
 from ha_control.native_windows_activation import (
     WindowsActivationLease, WindowsTransitionLease, WindowsTransitionServiceStart, bind_transition_observer_plan, publish_transition_observer_config,
     prepare_transition_observer_plan, publish_transition_observer_launch, start_transition_observer,
-    transition_authority_records, publish_transition_authority_records, open_transition_controller, settle_transition_controller,
+    transition_authority_records, publish_transition_authority_records, open_transition_controller, settle_transition_controller, read_transition_closure_receipt,
 )
 from ha_control.native_stdio_bridge import BridgeRejected
 from ha_control.pg import PgBackend, ROLE_LOCK
@@ -58,6 +58,22 @@ class TransitionServiceStartTests(unittest.TestCase):
         starter.stop.assert_called_once()
         settle.assert_called_once()
         self.assertEqual(check.call_args.args[1], "controller-ready")
+
+    def test_closure_receipt_reader_is_pinned_to_launched_query(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-cutover-live-authority.ps1"
+        pin = hashlib.sha256(script.read_bytes()).hexdigest()
+        root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
+        windows = MagicMock()
+        kwargs = dict(python_pid=123, started_ms=1731712345000, service_sid="S-1-5-80-1-2-3-4-5",
+                      deadline=time.monotonic()+10)
+        with self.assertRaisesRegex(BridgeRejected, "db_closure_unconfirmed"):
+            read_transition_closure_receipt(windows, pin, root, "a"*64, 2, **(kwargs | {"python_pid": True}))
+        windows.powershell.assert_not_called()
+        read_transition_closure_receipt(windows, pin, root, "a"*64, 2, **kwargs)
+        command = windows.powershell.call_args.args[0]
+        self.assertIn(" -ReadClosureReceipt ", command)
+        self.assertIn(" -ClosurePid '123' ", command)
+        self.assertIn(f" -BindingPath '{root}\\journal\\lease-closure-{'a'*64}.json'", command)
 
     def test_settlement_never_reads_db_until_exact_service_is_stopped(self):
         starter = MagicMock()

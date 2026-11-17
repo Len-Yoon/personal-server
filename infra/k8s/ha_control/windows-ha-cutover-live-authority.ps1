@@ -8,7 +8,13 @@ param(
     [string]$TransitionBoundarySha256,
     [switch]$Retire,
     [switch]$ObserveRetired,
-    [switch]$ResumeRetire
+    [switch]$ResumeRetire,
+    [switch]$ReadClosureReceipt,
+    [string]$ClosurePlanSha256,
+    [string]$ClosureGeneration,
+    [string]$ClosurePid,
+    [string]$ClosureStartedMs,
+    [string]$ClosureServiceSid
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -20,7 +26,7 @@ function Get-Digest([string]$Value) {
     finally { $sha.Dispose() }
 }
 
-function Read-Scope([string]$Path, [string[]]$Owners) {
+function Read-Scope([string]$Path, [string[]]$Owners, [switch]$Immutable) {
     if ($Path -cnotmatch '\A[A-Za-z]:\\[A-Za-z0-9_.\\-]+\z' -or $Path -match '\\\.\.?(\\|$)') { throw 'live_authority_path' }
     $entry = Get-Item -LiteralPath $Path -Force
     if ($entry -isnot [IO.FileInfo] -or $entry.Length -lt 1 -or $entry.Length -gt 8192 -or
@@ -30,12 +36,21 @@ function Read-Scope([string]$Path, [string[]]$Owners) {
         if ($node.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'live_authority_path' }
         $node = $node.Parent
     }
-    foreach ($item in @($entry,$entry.Directory)) {
+    $entries = @($entry,$entry.Directory)
+    if ($Immutable) {
+        for ($node = $entry.Directory.Parent; $null -ne $node; $node = $node.Parent) { $entries += $node }
+    }
+    foreach ($item in $entries) {
         $sd = Get-Acl -LiteralPath $item.FullName
-        if ($sd.GetOwner([Security.Principal.SecurityIdentifier]).Value -cnotin $Owners) { throw 'live_authority_acl' }
+        $allowed = if ($Immutable -and $item.FullName -cne $entry.FullName -and
+            $item.FullName -cne $entry.Directory.FullName) { @($Owners | Where-Object { $_ -cne $ClosureServiceSid }) } else { $Owners }
+        $owner = $sd.GetOwner([Security.Principal.SecurityIdentifier]).Value
+        $trustedRoot = $Immutable -and $item.FullName -ceq 'C:\' -and
+            $owner -ceq 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+        if ($owner -cnotin $allowed -and -not $trustedRoot) { throw 'live_authority_acl' }
         $mask = [Security.AccessControl.FileSystemRights]'Write,Delete,DeleteSubdirectoriesAndFiles,ChangePermissions,TakeOwnership'
         foreach ($rule in $sd.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
-            if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -cnotin $Owners -and
+            if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -cnotin $allowed -and
                 -not ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and
                 ($rule.FileSystemRights -band $mask)) { throw 'live_authority_acl' }
         }
@@ -43,9 +58,14 @@ function Read-Scope([string]$Path, [string[]]$Owners) {
     # Snapshot the path timestamp before opening. A journal replaced between the
     # snapshot and open can only be judged older than the new record itself.
     $written = $entry.LastWriteTimeUtc
-    $stream = [IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::Read -bor [IO.FileShare]::Delete))
+    $share = if ($Immutable) { [IO.FileShare]::Read } else { [IO.FileShare]::Read -bor [IO.FileShare]::Delete }
+    $stream = [IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,$share)
     try {
         if ($stream.Length -lt 1 -or $stream.Length -gt 8192) { throw 'live_authority_path' }
+        if ($Immutable) {
+            $links = @(& (Join-Path ([Environment]::SystemDirectory) 'fsutil.exe') hardlink list $Path)
+            if ($LASTEXITCODE -ne 0 -or $links.Count -ne 1) { throw 'live_authority_path' }
+        }
         $reader = [IO.BinaryReader]::new($stream,[Text.UTF8Encoding]::new($false,$true),$true)
         try {
             $raw = $reader.ReadBytes([int]$stream.Length)
@@ -166,7 +186,45 @@ function Read-TransitionAuthority([string[]]$Admins) {
     }
 }
 
+function Read-ClosureReceipt {
+    if ($BindingPath -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\journal\\lease-closure-[a-f0-9]{64}\.json\z' -or
+        $ClosurePlanSha256 -cnotmatch $pattern -or
+        -not $BindingPath.EndsWith(('-' + $ClosurePlanSha256 + '.json'),[StringComparison]::Ordinal) -or
+        $ClosureServiceSid -cnotmatch '\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\z' -or
+        @(@($ClosureGeneration,$ClosurePid,$ClosureStartedMs) | Where-Object { $_ -cnotmatch '\A[1-9][0-9]{0,17}\z' }).Count) {
+        throw 'transition_closure_receipt_invalid'
+    }
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $file = Read-Scope $BindingPath @('S-1-5-18','S-1-5-32-544',$sid,$ClosureServiceSid) -Immutable
+    $record = ConvertFrom-Json -InputObject $file.raw
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    if ((@($record.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne
+        'generation,node_proofs,observed_at_ms,plan_sha256,python_pid,schema_version' -or
+        (@($record.node_proofs.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ',') -cne 'A,B' -or
+        $record.plan_sha256 -isnot [string] -or $record.plan_sha256 -cne $ClosurePlanSha256 -or
+        ($record.schema_version -isnot [int] -and $record.schema_version -isnot [long]) -or $record.schema_version -ne 1 -or
+        ($record.generation -isnot [int] -and $record.generation -isnot [long]) -or
+        ($record.python_pid -isnot [int] -and $record.python_pid -isnot [long]) -or
+        $record.node_proofs.A -isnot [string] -or $record.node_proofs.B -isnot [string] -or
+        $record.generation -ne [long]$ClosureGeneration -or $record.python_pid -ne [long]$ClosurePid -or
+        ($record.observed_at_ms -isnot [long] -and $record.observed_at_ms -isnot [int]) -or
+        $record.observed_at_ms -lt [long]$ClosureStartedMs -or $record.observed_at_ms -gt $now -or
+        $now - $record.observed_at_ms -gt 25000 -or $record.node_proofs.A -cnotmatch $pattern -or
+        $record.node_proofs.B -cnotmatch $pattern -or $record.node_proofs.A -ceq $record.node_proofs.B) {
+        throw 'transition_closure_receipt_invalid'
+    }
+    [ordered]@{plan_sha256=$record.plan_sha256;generation=$record.generation;node_proofs=$record.node_proofs} |
+        ConvertTo-Json -Compress
+}
+
 try {
+    if ($ReadClosureReceipt) {
+        if ($Retire -or $ResumeRetire -or $ObserveRetired -or $TransitionHandoffSha256 -or $TransitionBoundarySha256) {
+            throw 'transition_closure_receipt_invalid'
+        }
+        Read-ClosureReceipt
+        return
+    }
     $retireModes = @(@($Retire,$ObserveRetired,$ResumeRetire) | Where-Object { $_.IsPresent }).Count
     if ($retireModes -gt 1 -or ($retireModes -eq 1 -and $ExpectedServiceInstanceSha256 -cnotmatch $pattern)) {
         throw 'initial_service_retirement_scope'
