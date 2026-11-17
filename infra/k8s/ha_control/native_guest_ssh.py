@@ -323,8 +323,14 @@ class GuestSshDispatcher:
 
     def __call__(self, request, deadline, *, assert_windows_current=None):
         bridge._need(type(request) is bridge.Request and request.verb not in
-                     {bridge.GUEST_START_REPLACEMENT, bridge.GUEST_OBSERVE_REPLACEMENT},
+                     {bridge.GUEST_START_REPLACEMENT, bridge.GUEST_OBSERVE_REPLACEMENT, bridge.GUEST_ACTIVATE_GENERATION},
                      'guest_ssh_replacement_guard_required')
+        return self._dispatch(request, deadline, assert_windows_current=assert_windows_current)
+
+    def activate_generation(self, request, deadline, *, assert_windows_current):
+        """Require an authenticated Windows proof for each challenge and boundary."""
+        bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_ACTIVATE_GENERATION,
+                     'guest_ssh_request_unbound')
         return self._dispatch(request, deadline, assert_windows_current=assert_windows_current)
 
     def start_replacement_standby(self, request, deadline, *, assert_rejoin_current):
@@ -364,8 +370,9 @@ class GuestSshDispatcher:
                      and bridge._hash(request.nonce) and isinstance(request.args, Mapping), 'guest_ssh_request_unbound')
         args = dict(request.args)
         bridge._args(request.verb, request.node, args)
-        bridge._need((request.verb == 'activate' and callable(assert_windows_current)) or
-                     (request.verb != 'activate' and assert_windows_current is None), 'guest_ssh_live_windows_required')
+        bridge._need((request.verb in bridge.ACTIVATION_VERBS and callable(assert_windows_current)) or
+                     (request.verb not in bridge.ACTIVATION_VERBS and assert_windows_current is None),
+                     'guest_ssh_live_windows_required')
         envelope = {'version': bridge.VERSION, 'binding': self.binding.fields(), 'node': request.node,
                     'boot_sha256': self.binding.boot(request.node), 'verb': request.verb,
                     'sequence': request.sequence, 'nonce': request.nonce}
@@ -434,12 +441,13 @@ class GuestSshDispatcher:
                     bridge._need(receipt.status == 'PASS', 'guest_ssh_restore_readback_unconfirmed')
                     output = bridge._bytes(envelope | receipt.fields('restore'))
             else:
-                output = _activation_exchange(command, payload, limit, request.nonce, assert_windows_current)
+                output = _activation_exchange(command, payload, limit, request.nonce, assert_windows_current,
+                                              bind_boundary=request.verb == bridge.GUEST_ACTIVATE_GENERATION)
             bridge._need(_same_files(stamps), 'guest_ssh_local_file_changed')
         return output
 
 
-def _activation_exchange(command, payload, deadline, request_nonce, assert_windows_current):
+def _activation_exchange(command, payload, deadline, request_nonce, assert_windows_current, *, bind_boundary=False):
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}, start_new_session=True)
     complete = False
@@ -466,7 +474,8 @@ def _activation_exchange(command, payload, deadline, request_nonce, assert_windo
                          and boundary == ACTIVATION_BOUNDARIES[len(challenges)],
                          'guest_ssh_activation_boundary_unbound')
             challenges.add(challenge)
-            proof = assert_windows_current(current_deadline)
+            proof = (assert_windows_current(challenge, boundary, current_deadline) if bind_boundary
+                     else assert_windows_current(current_deadline))
             bridge._need(bridge._hash(proof), 'guest_ssh_live_windows_unconfirmed')
             channel.write({'kind': 'activation_boundary_current', 'windows_proof_sha256': proof, **fields}, current_deadline)
     finally:

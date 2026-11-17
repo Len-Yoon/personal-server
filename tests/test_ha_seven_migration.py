@@ -114,6 +114,58 @@ class ReplacementStandbyBridgeTests(unittest.TestCase):
 
 
 class NativeGuestActivationTests(unittest.TestCase):
+    def test_generation_guest_request_binds_b_and_requires_wal_at_each_boundary(self):
+        worker, bridge = native_guest_worker, native_stdio_bridge
+        boot, installation = b"fresh boot", "4"*64
+        binding = bridge.Binding("a"*64, "b"*64, "c"*64, "d"*64, sha(boot))
+        fields = dict(boot_sha256=sha(boot), installation_id=installation, plan_sha256="5"*64,
+                      manifest_sha256="6"*64, system_id="123", cluster="fixture", postgres_id="7"*64)
+        release = {"source_commit": "8"*40}
+        pins = SimpleNamespace(**fields, node="B", primary_node="B", generation=2, attempt_id=binding.attempt_id,
+                               release=release, validate=lambda: None)
+        pg = SimpleNamespace(**fields, source_commit=release["source_commit"], validate=lambda: None)
+        generation = native_guest_activation.ServingGeneration("B", 2, 2, 3)
+        activation_pins = native_guest_activation.ActivationPins(*("012345"[i]*64 for i in range(6)))
+        handoff = {"schema_version": 1, "binding": binding.fields(), "generation": generation.__dict__,
+                   "runtime": {}, "postgres": {}, "activation": activation_pins.__dict__, "replay_floor": 0x20}
+        raw = encoded(handoff)
+        request = bridge.Request(binding, "B", bridge.GUEST_ACTIVATE_GENERATION, 1, "9"*64,
+                                 {"generation_handoff_sha256": sha(raw), "effects_plan_sha256": pins.plan_sha256})
+        installed = {"installation_id": installation, "node": "B", "source_commit": pg.source_commit}
+        result = {"status": "STARTED", "automatic_retry_permitted": False}
+        def record(path):
+            if path == worker.restore.INSTALLATION:
+                return b"installed", installed
+            if path.name == "runtime-activation.json":
+                return encoded(result), result
+            return raw, handoff
+        windows = MagicMock(return_value="f"*64)
+        sampled = datetime.now(timezone.utc)
+        expiry = sampled + timedelta(seconds=4)
+        boot_file = MagicMock()
+        boot_file.read_bytes.return_value = boot
+        boundary_receipts = []
+        def activate(runtime_pins, input_pins, stage, serving, *, assert_lease):
+            self.assertEqual((runtime_pins, input_pins, serving), (pins, activation_pins, generation))
+            boundary_receipts.append(assert_lease("e"*64, "start:portal-web"))
+            return result
+        with patch.object(worker.os, "geteuid", return_value=0), patch.object(worker.runtime, "_directory"), \
+                patch.object(worker, "_read_json", side_effect=record), patch.object(worker.runtime, "RuntimePins", return_value=pins), \
+                patch.object(worker.restore, "RestorePins", return_value=pg), patch.object(worker.restore, "BOOT_ID", boot_file), \
+                patch.object(worker.runtime, "_runtime_identity", return_value={}), patch.object(worker.live, "_lease") as lease, \
+                patch.object(worker.activation, "activate_prepared_generation", side_effect=activate):
+            with self.assertRaisesRegex(TransitionBlocked, "guest_generation_handoff_unbound"):
+                worker.activate_generation(replace(request, args=request.args | {"effects_plan_sha256": "0"*64}), windows)
+            windows.assert_not_called()
+            lease.return_value = ({}, sampled, expiry, 0x1F)
+            with self.assertRaisesRegex(TransitionBlocked, "guest_generation_replay_unconfirmed"):
+                worker.activate_generation(request, windows)
+            self.assertEqual(boundary_receipts, [])
+            lease.return_value = ({}, sampled, expiry, 0x20)
+            self.assertEqual(worker.activate_generation(request, windows).status, "PASS")
+            self.assertEqual((boundary_receipts[0]["primary"], boundary_receipts[0]["epoch"]), ("B", 2))
+            self.assertTrue(boundary_receipts[0]["previous_primary_fenced"])
+
     def test_start_accepts_docker_oom_default_without_accepting_contract_drift(self):
         activation = native_guest_activation
         runtime = activation.runtime

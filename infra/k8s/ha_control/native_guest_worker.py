@@ -24,7 +24,8 @@ from . import frozen_ingress, native_guest_restore as restore, native_guest_runt
 from . import native_guest_activation as activation, native_guest_live as live
 from .legacy_writers import TransitionBlocked, _need
 from .native_stdio_bridge import (
-    ACTIVATION_GUEST_REPLY_SECONDS, Binding, BridgeRejected, FRAME_BYTES, GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT,
+    ACTIVATION_GUEST_REPLY_SECONDS, ACTIVATION_VERBS, Binding, BridgeRejected, FRAME_BYTES,
+    GUEST_ACTIVATE_GENERATION, GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT,
     GUEST_OBSERVE_REPLACEMENT, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
 )
@@ -38,6 +39,7 @@ VERBS = {
     GUEST_RESTORE_READBACK,
     GUEST_START_REPLACEMENT,
     GUEST_OBSERVE_REPLACEMENT,
+    GUEST_ACTIVATE_GENERATION,
 }
 HANDOFF = "activation-handoff.json"
 EMPTY = "0" * 64
@@ -93,7 +95,7 @@ def read_request(stream):
           and type(request.verb) is str and request.verb in VERBS, "guest_worker_request_scope")
     _args(request.verb, request.node, request.args)
     _need(_matches(value, {**_scope(request), "args": request.args}), "guest_worker_request_scope")
-    if request.verb != "activate":
+    if request.verb not in ACTIVATION_VERBS:
         _need(not stream.read(1), "guest_worker_request_size")
     return request
 
@@ -674,6 +676,65 @@ def replacement_standby(request):
                                                           "result": expected})))
 
 
+def activate_generation(request, assert_windows_current):
+    _need(os.geteuid() == 0 and callable(assert_windows_current), "guest_worker_live_windows_required")
+    stage = ROOT / request.binding.attempt_id
+    runtime._directory(stage, 0)
+    handoff_path = stage / "generation-handoff.json"
+    raw, handoff = _read_json(handoff_path)
+    _need(_digest(raw) == request.args["generation_handoff_sha256"]
+          and set(handoff) == {"schema_version", "binding", "generation", "runtime", "postgres", "activation", "replay_floor"}
+          and type(handoff["schema_version"]) is int and handoff["schema_version"] == 1
+          and handoff["binding"] == request.binding.fields(), "guest_generation_handoff_unbound")
+    pins = runtime.RuntimePins(**handoff["runtime"])
+    pg = restore.RestorePins(**handoff["postgres"])
+    activation_pins = activation.ActivationPins(**handoff["activation"])
+    generation = activation.ServingGeneration(**handoff["generation"])
+    pins.validate()
+    pg.validate()
+    activation_pins.validate()
+    generation.validate()
+    floor = handoff["replay_floor"]
+    _need(type(floor) is int and 0 < floor < 2**64 and generation.epoch > 1
+          and pins.node == generation.primary == request.node and pins.primary_node == request.node
+          and pins.generation == generation.epoch and pins.attempt_id == request.binding.attempt_id
+          and pins.boot_sha256 == request.binding.boot(request.node)
+          # The transition authorization moves the writer. The original
+          # effects ledger keeps the separately pinned business history.
+          and pins.plan_sha256 == request.args["effects_plan_sha256"]
+          and pins.release["source_commit"] == pg.source_commit
+          and all(getattr(pins, field) == getattr(pg, field) for field in (
+              "boot_sha256", "installation_id", "plan_sha256", "manifest_sha256", "system_id", "cluster", "postgres_id",
+          )), "guest_generation_handoff_unbound")
+
+    def assert_lease(challenge, boundary):
+        _need(_digest(restore.BOOT_ID.read_bytes()) == pins.boot_sha256, "guest_worker_boot_changed")
+        _, installed = _read_json(restore.INSTALLATION)
+        _need(installed["installation_id"] == pins.installation_id and installed["node"] == request.node
+              and installed["source_commit"] == pg.source_commit and _read_json(handoff_path)[0] == raw,
+              "guest_generation_handoff_changed")
+        windows = assert_windows_current(challenge, boundary)
+        _need(_hash(windows), "guest_worker_live_windows_unconfirmed")
+        observed, sampled, expires, replay = live._lease(pins, pg, generation)
+        _need(replay >= floor, "guest_generation_replay_unconfirmed")
+        facts = {**runtime._runtime_identity(pins), **asdict(activation_pins), "challenge": challenge,
+                 "boundary": boundary, **asdict(generation), "partner": generation.partner, "writes_open": True,
+                 "coordinator_intent_durable": True, "transition_postcommit_verified": True,
+                 "previous_primary_fenced": True, "legacy_writers_closed": True,
+                 "standby_runtime_closed": True, "runtime_mutations_excluded": True}
+        observed_at, expires_at = (timepoint.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                                   for timepoint in (sampled, expires))
+        evidence = {"handoff_sha256": _digest(raw), "windows_proof_sha256": windows, "observation": observed, **facts}
+        return {**facts, "observed_at": observed_at, "expires_at": expires_at, "lease_sha256": _digest(_bytes(evidence))}
+
+    result = activation.activate_prepared_generation(pins, activation_pins, stage, generation, assert_lease=assert_lease)
+    receipt, persisted = _read_json(stage / "runtime-activation.json")
+    _need(result["status"] == "STARTED" and _matches(persisted, result)
+          and result["automatic_retry_permitted"] is False and _read_json(handoff_path)[0] == raw,
+          "guest_worker_activation_unconfirmed")
+    return Receipt("PASS", _digest(receipt))
+
+
 def handle(request, assert_windows_current=None):
     try:
         _need(type(request) is Request and request.verb in VERBS, "guest_worker_request_scope")
@@ -681,6 +742,8 @@ def handle(request, assert_windows_current=None):
         with mutation_lock(wait=15 if request.verb == "finish_receive" else 0) as descriptor:
             if request.verb in {GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT}:
                 return replacement_standby(request)
+            if request.verb == GUEST_ACTIVATE_GENERATION:
+                return activate_generation(request, assert_windows_current)
             return GuestWorker(request).dispatch(descriptor, assert_windows_current)
     except (TransitionBlocked, BridgeRejected, OSError, KeyError, TypeError, ValueError, subprocess.TimeoutExpired):
         return Receipt("UNKNOWN")
@@ -694,7 +757,7 @@ def main():
         return 1
     finally:
         signal.alarm(0)
-    if request.verb == "activate":
+    if request.verb in ACTIVATION_VERBS:
         channel = Stdio(sys.stdin.fileno(), sys.stdout.fileno())
 
         def assert_windows_current(challenge, boundary):
