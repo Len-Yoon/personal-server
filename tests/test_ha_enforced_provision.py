@@ -79,6 +79,20 @@ if($calls.Count -ne 1 -or $calls[0].Extent.Text -cne 'Test-PreflightOsRootOwner 
         with self.assertRaises(P.ProvisionError):
             P.render_args(good | {'command':'whoami'})
 
+    def test_closure_arguments_only_change_the_authorized_mode(self):
+        values = settings() | {"mode": "transition-serve"}
+        scope = {key: values[key] for key in
+                 ("service_name", "service_sid", "python_path", "python_sha256", "launcher_path", "launcher_sha256")}
+        plan = {"profile": "enforced-vm-v1", "windows_enforced": scope | {"service_image_sha256": values["host_sha256"]},
+                "transition_service_start": {"lease_closure_check": True, "mode": "transition-serve"}}
+        raw = json.dumps(plan).encode()
+        values["plan_sha256"] = P.sha(raw)
+        serving, lookup = P.closure_service_args(values, raw)
+        self.assertEqual(lookup, serving.replace(b"mode=transition-serve\n", b"mode=check-lease-closed\n"))
+        for bad in (values | {"service_name": "other"}, values | {"plan_sha256": "a"*64}):
+            with self.subTest(bad=bad), self.assertRaises(P.ProvisionError):
+                P.closure_service_args(bad, raw)
+
     def test_real_managed_host_parser_and_quoted_fixed_command(self):
         pwsh=shutil.which('pwsh') or '/private/tmp/n100-ha-powershell/runtime/pwsh'
         self.assertTrue(Path(pwsh).is_file(), 'real PowerShell required')

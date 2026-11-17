@@ -103,6 +103,28 @@ def render_args(values):
     return ''.join(f'{key}={values[key]}\n' for key in ARGS_KEYS).encode()
 
 
+def closure_service_args(values, plan_raw):
+    """Return the exact serving and read-only argument bytes for one approved plan."""
+    serving = render_args(values)
+    if (type(plan_raw) is not bytes or not 0 < len(plan_raw) <= 1048576
+            or sha(plan_raw) != values["plan_sha256"]):
+        deny()
+    plan = decode(plan_raw)
+    if type(plan) is not dict or plan.get("profile") != "enforced-vm-v1":
+        deny()
+    scope = plan.get("windows_enforced")
+    start = plan.get("transition_service_start")
+    if (type(scope) is not dict or type(start) is not dict
+            or start.get("lease_closure_check") is not True
+            or values["mode"] not in {"transition-serve", "transition-rearm"}
+            or start.get("mode") != values["mode"]
+            or any(scope.get(key) != values[key] for key in
+                   ("service_name", "service_sid", "python_path", "python_sha256", "launcher_path", "launcher_sha256"))
+            or scope.get("service_image_sha256") != values["host_sha256"]):
+        deny()
+    return serving, render_args(values | {"mode": "check-lease-closed"})
+
+
 def source_at(commit):
     # A regular exact Git blob, never the mutable working tree.
     entry = controller_bundle.git('ls-tree', '-z', commit, '--', HOST_SOURCE).split(b'\0')[0]
