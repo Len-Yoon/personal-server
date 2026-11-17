@@ -9,6 +9,7 @@ from ha_runtime.seven_capture import encoded, parse
 from . import caddy_runtime as caddy
 from .native_guest_activation import ServingGeneration
 from .native_host_evidence import _public_health
+from .transition_execution import observer_callback_config
 
 
 INTENT = "ingress-switch-intent.json"
@@ -118,13 +119,16 @@ def resume_ingress(main, car, previous, relay, prepared, generation, target, rou
 
 def switch_with_observer(execution, main, car, previous, relay, generation, target, route_pin, *,
                          previous_runtime_sha256, legacy_plan, legacy_attempt, expected_mtls_sha256,
+                         previous_callback, previous_callback_sha256, replacement_vm,
                          assert_legacy_closed, open_observer, verify_guest, verify_public=_public_health):
     """Publish the scoped observer input and keep both ingress writers under its guard."""
     with execution.guard(main, car):
         binding = execution.publish_observer_runtime(previous_sha256=previous_runtime_sha256,
                                                      legacy_plan=legacy_plan, legacy_attempt=legacy_attempt,
                                                      assert_legacy_closed=assert_legacy_closed)
-        with open_observer(binding) as assert_guard:
+        callback = observer_callback_config(previous_callback, previous_callback_sha256, binding,
+                                            generation.primary, replacement_vm)
+        with open_observer(binding | callback) as assert_guard:
             return switch_ingress(main, car, previous, relay, generation, target, route_pin, execution.directory,
                                   plan_sha256=execution.spec["plan_sha256"], attempt_id=execution.spec["attempt_id"],
                                   expected_mtls_sha256=expected_mtls_sha256, assert_guard=assert_guard,

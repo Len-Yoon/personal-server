@@ -6,6 +6,7 @@ import fcntl
 import os
 from pathlib import Path
 import re
+import uuid
 
 from ha_runtime import seven_capture
 from ha_runtime.seven_migration import MigrationRejected
@@ -68,6 +69,45 @@ def assert_published_runtime(reader, path, runtime, legacy_plan, legacy_attempt)
     previous_path = _observer_paths(path, legacy_attempt, spec)
     expected = _observer_runtime(reader, previous_path, runtime["legacy_runtime_sha256"], legacy_plan, legacy_attempt, spec)
     caddy._need(seven_capture.encoded(expected) == seven_capture.encoded(runtime), "ingress_observer_runtime_unbound")
+
+
+def observer_callback_config(previous_raw, previous_sha256, runtime, primary, replacement):
+    """Rotate the fenced peer only, preserving the promoted VM and legacy observer pins."""
+    error = "ingress_observer_callback_unbound"
+    caddy._need(type(previous_raw) is bytes and 0 < len(previous_raw) <= 8192
+                and caddy._sha(previous_raw) == previous_sha256 and primary in ("A", "B"), error)
+    previous = seven_capture.parse(previous_raw)
+    required = {"a_disk_paths_sha256", "b_disk_paths_sha256", "driver_path", "driver_sha256",
+                "installation_id", "reactivation_plan_path", "runtime_path", "runtime_sha256",
+                "source_loader_sha256", "source_manifest_path", "source_manifest_sha256", "source_root",
+                "vm_a", "vm_b", "vm_observer_path", "vm_observer_sha256", "wsl_uid"}
+    caddy._need(type(previous) is dict and required <= set(previous)
+                and set(previous) <= required | {"kubernetes_reader", "reactivation_plan_sha256", "vm_b_installation_id"}
+                and type(replacement) is dict and set(replacement) == {"node", "vm_id", "installation_id", "disk_paths_sha256"},
+                error)
+    peer = "B" if primary == "A" else "A"
+    pins = (previous["installation_id"], previous.get("vm_b_installation_id", previous["installation_id"]),
+            previous["a_disk_paths_sha256"], previous["b_disk_paths_sha256"],
+            replacement["installation_id"], replacement["disk_paths_sha256"], runtime["runtime_sha256"])
+    ids = (previous["vm_a"], previous["vm_b"], replacement["vm_id"])
+    try:
+        valid_ids = all(type(value) is str and str(uuid.UUID(value)) == value and uuid.UUID(value).int for value in ids)
+    except ValueError:
+        valid_ids = False
+    caddy._need(valid_ids and len(set(ids)) == 3 and replacement["node"] == peer
+                and all(type(pin) is str and caddy.ID.fullmatch(pin) for pin in pins), error)
+    peer_owner = pins[0] if peer == "A" else pins[1]
+    caddy._need(replacement["installation_id"] != peer_owner, error)
+    result = previous | {
+        "runtime_path": runtime["runtime_path"], "runtime_sha256": runtime["runtime_sha256"],
+        "vm_" + peer.lower(): replacement["vm_id"],
+        peer.lower() + "_disk_paths_sha256": replacement["disk_paths_sha256"],
+        "vm_b_installation_id": pins[1],
+    }
+    owner_field = "installation_id" if peer == "A" else "vm_b_installation_id"
+    result[owner_field] = replacement["installation_id"]
+    raw = seven_capture.encoded(result)
+    return {"callback_config": raw, "callback_config_sha256": caddy._sha(raw)}
 
 
 def _inputs(reader, directory, spec, kind, argv):

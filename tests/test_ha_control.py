@@ -18,6 +18,47 @@ from ha_control.native_guest_activation import ServingGeneration
 
 
 class TransitionIngressTests(unittest.TestCase):
+    def test_callback_rotation_preserves_primary_and_legacy_pins_in_both_directions(self):
+        from ha_runtime.seven_capture import encoded
+
+        a, b, new_a, new_b = (f"{i:08x}-1111-1111-1111-111111111111" for i in range(1, 5))
+        base = {
+            "installation_id": "a"*64, "vm_a": a, "vm_b": b,
+            "a_disk_paths_sha256": "1"*64, "b_disk_paths_sha256": "2"*64,
+            "driver_path": "driver", "driver_sha256": "3"*64, "reactivation_plan_path": "reactivation",
+            "runtime_path": "legacy", "runtime_sha256": "4"*64, "source_loader_sha256": "5"*64,
+            "source_manifest_path": "manifest", "source_manifest_sha256": "6"*64, "source_root": "source",
+            "vm_observer_path": "observer", "vm_observer_sha256": "7"*64, "wsl_uid": 1000,
+        }
+        runtime_b = {"runtime_path": "phase-b", "runtime_sha256": "8"*64}
+        runtime_a = {"runtime_path": "phase-a", "runtime_sha256": "9"*64}
+        next_a = {"node": "A", "vm_id": new_a, "installation_id": "b"*64, "disk_paths_sha256": "c"*64}
+        next_b = {"node": "B", "vm_id": new_b, "installation_id": "d"*64, "disk_paths_sha256": "e"*64}
+
+        def rotate(previous, runtime, primary, replacement):
+            return transition_execution.observer_callback_config(
+                previous, caddy_runtime._sha(previous), runtime, primary, replacement,
+            )
+
+        raw = encoded(base)
+        after_b = rotate(raw, runtime_b, "B", next_a)
+        expected_b = base | runtime_b | {
+            "vm_a": new_a, "installation_id": "b"*64, "vm_b_installation_id": "a"*64,
+            "a_disk_paths_sha256": "c"*64,
+        }
+        self.assertEqual(json.loads(after_b["callback_config"]), expected_b)
+        self.assertEqual(caddy_runtime._sha(after_b["callback_config"]), after_b["callback_config_sha256"])
+        after_a = rotate(after_b["callback_config"], runtime_a, "A", next_b)
+        self.assertEqual(json.loads(after_a["callback_config"]), expected_b | runtime_a | {
+            "vm_b": new_b, "vm_b_installation_id": "d"*64, "b_disk_paths_sha256": "e"*64,
+        })
+        for rejected in (next_a | {"vm_id": a}, next_a | {"vm_id": b}, next_a | {"node": "B"},
+                         next_a | {"installation_id": "a"*64}):
+            with self.subTest(rejected=rejected), self.assertRaisesRegex(TransitionBlocked, "callback_unbound"):
+                rotate(raw, runtime_b, "B", rejected)
+        with self.assertRaisesRegex(TransitionBlocked, "callback_unbound"):
+            transition_execution.observer_callback_config(raw, "0"*64, runtime_b, "B", next_a)
+
     def test_observer_runtime_publishes_exact_prior_baseline_and_new_command_scope(self):
         import os
         import time
