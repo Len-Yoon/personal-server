@@ -727,6 +727,31 @@ class SloObservationArchiveTests(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaises(ValueError):
                 module.checked_payload(payload, date(2026, 10, 28))
 
+    def test_search_archive_keeps_all_series_from_23_scrape_origins(self):
+        module = self.module()
+        payload = self.search(self.payload())
+        for kind in ("values", "timestamps"):
+            rows = payload["search"][kind]["data"]["result"]
+            values = rows[0]["values"]
+            rows[:] = [
+                {"metric": {"__name__": "portal_search_source_requests_total", "pod": f"synthetic-{origin}",
+                            "source": source, "outcome": outcome}, "values": values}
+                for origin in range(23) for source in ("news", "youtube", "books")
+                for outcome in ("ok", "timeout", "http_error", "invalid_response",
+                                "transport_error", "internal_error", "cancelled")
+            ]
+            rows.extend(
+                {"metric": {"__name__": "portal_search_requests_total", "pod": f"synthetic-{origin}",
+                            "outcome": outcome}, "values": values}
+                for origin in range(23) for outcome in ("complete", "partial", "failed", "cancelled")
+            )
+        _, sealed, summary = module.checked_payload(payload, date(2026, 10, 28))
+        self.assertEqual(summary["search_archive"]["status"], "preserved")
+        self.assertEqual(summary["search_archive"]["value_series"], 575)
+        for kind in ("values", "timestamps"):
+            self.assertEqual(len(sealed["search"][kind]["data"]["result"]), 575)
+        self.assertNotIn("synthetic-", json.dumps(sealed))
+
     def test_prometheus_normalized_bucket_labels_remain_bounded(self):
         module = self.module()
         for label, wanted in (('1.0', '1'), ('5.0', '5'), ('10.0', '10'), ('+Inf', '+Inf')):
@@ -756,6 +781,25 @@ class SloObservationArchiveTests(unittest.TestCase):
                     {'metric': labels, 'values': values}]}}
         payload['news'] = {'step_seconds': 60, 'queries': queries}
         return payload
+
+    def test_news_archive_preserves_all_rotated_origins_and_keeps_overlap_unknown(self):
+        module = self.module()
+        payload = self.news(self.payload(), complete=False)
+        for family in payload["news"]["queries"].values():
+            for response in family.values():
+                rows = response["data"]["result"]
+                row = rows[0]
+                rows[:] = [
+                    {**row, "metric": {**row["metric"], "instance": f"synthetic-{i}"}}
+                    for i in range(23)
+                ]
+        _, sealed, summary = module.checked_payload(payload, date(2026, 10, 28))
+        self.assertEqual(summary["news_archive"]["samples"]["unknown_reasons"]["ambiguous_sources"], 3)
+        self.assertEqual(summary["news_archive"]["status"], "partial")
+        for family in sealed["news"]["queries"].values():
+            for response in family.values():
+                self.assertEqual(len(response["data"]["result"]), 23)
+        self.assertNotIn("synthetic-", json.dumps(sealed))
 
     def test_news_bad_values_preserved_without_policy_judgment_and_legacy_immutable(self):
         import gzip
@@ -857,7 +901,7 @@ class SloObservationArchiveTests(unittest.TestCase):
             if case == 'scope': row['metric']['namespace'] = 'other'
             elif case == 'family': row['metric']['__name__'] = 'unknown_metric'
             elif case == 'duplicate': response['data']['result'].append(row)
-            elif case == 'cardinality': response['data']['result'] *= 17
+            elif case == 'cardinality': response['data']['result'] *= module.NEWS_SERIES_LIMIT + 1
             elif case == 'grid': row['values'][0][0] += 1
             elif case == 'negative': row['values'][0][1] = '-1'
             elif case == 'initialized': row['values'][0][1] = '2'
