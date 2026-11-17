@@ -588,6 +588,39 @@ def _transition_authority_scope(controller, generation, root, attempt, old_vm_id
     return observer["legacy_plan_sha256"], service, image, python_path, old_disk_paths_sha256
 
 
+def publish_transition_plan(windows, controller, approval, *, root, stage_sha256, manifest_sha256, deadline):
+    """Publish only the supplied approved plan bytes and exact installed approval."""
+    error = "native_transition_plan_publication_unconfirmed"
+    bridge._need(type(root) is str and re.fullmatch(r"C:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}", root)
+                 and type(controller) is dict and set(controller) == {"plan", "plan_sha256"}
+                 and type(controller["plan"]) is bytes and 0 < len(controller["plan"]) <= 49152
+                 and bridge._digest(controller["plan"]) == controller["plan_sha256"]
+                 and type(approval) is bytes and 0 < len(approval) <= 4096
+                 and bridge._hash(manifest_sha256), error)
+    try:
+        policy = json.loads(approval, object_pairs_hook=bridge._pairs, parse_constant=bridge._reject_constant)
+    except (ValueError, UnicodeError, RecursionError):
+        raise bridge.BridgeRejected(error) from None
+    bridge._need(type(policy) is dict and policy.get("plan_sha256") == controller["plan_sha256"]
+                 and policy.get("action") == "ha-transition" and policy.get("authority_kind") == "installed-runtime", error)
+    bundle = bridge._bytes({"plan": base64.b64encode(controller["plan"]).decode("ascii"),
+                            "approval": base64.b64encode(approval).decode("ascii")})
+    data = base64.b64encode(bundle).decode("ascii")
+    bridge._need(len(data) <= 65536, error)
+    source = fixed_script("windows-ha-stage-initial-activation.ps1", stage_sha256, {
+        "InputPath": root + r"\plan.json", "InputSha256": bridge._digest(bundle),
+        "ExpectedSourceManifestSha256": manifest_sha256, "PublishTransitionPlan": True,
+        "TransitionBundleBase64": data, "Go": True,
+    })
+    bridge._remaining(deadline)
+    result = windows.powershell(source, deadline)
+    bridge._need(bridge._matches(result, {
+        "transition_plan_published": True, "plan_sha256": controller["plan_sha256"],
+        "approval_sha256": bridge._digest(approval),
+    }), error)
+    return result
+
+
 def prepare_staged_transition_service(starter, controller, generation, *, root, attempt, old_vm_id,
                                       approval_sha256, preflight_path, scm_verifier_path, deadline):
     """Return launch parameters only after Windows verifies the approved staged inputs."""

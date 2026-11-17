@@ -304,6 +304,28 @@ class TransitionServiceStartTests(unittest.TestCase):
 
 
 class TransitionObserverPublicationTests(unittest.TestCase):
+    def test_publish_transition_plan_binds_supplied_approval_before_transport(self):
+        from ha_control.native_windows_activation import publish_transition_plan
+
+        raw = b'{"generation":2}'
+        plan_pin = hashlib.sha256(raw).hexdigest()
+        controller = {"plan": raw, "plan_sha256": plan_pin}
+        values = {"plan_sha256": plan_pin, "action": "ha-transition", "authority_kind": "installed-runtime"}
+        approval = json.dumps(values).encode()
+        root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
+        script = ROOT / "infra/k8s/ha_control/windows-ha-stage-initial-activation.ps1"
+        options = {"root": root, "stage_sha256": hashlib.sha256(script.read_bytes()).hexdigest(),
+                   "manifest_sha256": "b"*64, "deadline": time.monotonic()+10}
+        windows = MagicMock()
+        with self.assertRaisesRegex(BridgeRejected, "plan_publication_unconfirmed"):
+            publish_transition_plan(windows, controller, json.dumps(values | {"plan_sha256": "0"*64}).encode(), **options)
+        windows.powershell.assert_not_called()
+        receipt = {"transition_plan_published": True, "plan_sha256": plan_pin,
+                   "approval_sha256": hashlib.sha256(approval).hexdigest()}
+        windows.powershell.return_value = receipt
+        self.assertEqual(publish_transition_plan(windows, controller, approval, **options), receipt)
+        self.assertIn(" -PublishTransitionPlan -TransitionBundleBase64 ", windows.powershell.call_args.args[0])
+
     def test_prepare_observer_plan_runs_the_exact_setup_order(self):
         callback = b"fixture"
         pin = hashlib.sha256(callback).hexdigest()

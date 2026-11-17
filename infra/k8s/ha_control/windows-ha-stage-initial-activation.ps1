@@ -2,7 +2,8 @@
 param([string]$InputPath, [string]$InputSha256, [string]$ExpectedSourceManifestSha256, [string]$IntentBase64,
       [string]$RuntimeSha256, [switch]$Preflight, [switch]$Go, [switch]$PublishTransitionObserverConfig,
       [switch]$ObserveTransitionObserverConfig, [switch]$StartTransitionObserver,
-      [switch]$PublishTransitionObserverLaunch, [switch]$PublishTransitionAuthority)
+      [switch]$PublishTransitionObserverLaunch, [switch]$PublishTransitionAuthority,
+      [switch]$PublishTransitionPlan, [string]$TransitionBundleBase64)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -303,6 +304,78 @@ try {
         throw 'initial_stage_input_path'
     }
     $root = [IO.Path]::GetDirectoryName($InputPath)
+    if ($PublishTransitionPlan) {
+        if (-not $Go -or $Preflight -or $PublishTransitionAuthority -or $StartTransitionObserver -or
+            $PublishTransitionObserverLaunch -or $PublishTransitionObserverConfig -or $ObserveTransitionObserverConfig -or
+            $IntentBase64 -cne '' -or $RuntimeSha256 -cne '' -or $TransitionBundleBase64.Length -gt 65536) {
+            throw 'initial_stage_transition_plan'
+        }
+        Assert-ReservedLeaf $InputPath $root 'plan.json'
+        $bundle = [Convert]::FromBase64String($TransitionBundleBase64)
+        if ($bundle.Length -lt 1 -or (Digest $bundle) -cne $InputSha256) { throw 'initial_stage_transition_plan' }
+        $records = ConvertFrom-Json -InputObject $encoding.GetString($bundle)
+        Assert-Fields $records @('plan','approval')
+        if ($records.plan -isnot [string] -or $records.approval -isnot [string]) { throw 'initial_stage_transition_plan' }
+        $planBytes = [Convert]::FromBase64String($records.plan)
+        $approvalBytes = [Convert]::FromBase64String($records.approval)
+        if ($planBytes.Length -lt 1 -or $approvalBytes.Length -lt 1 -or $approvalBytes.Length -gt 4096) {
+            throw 'initial_stage_transition_plan'
+        }
+        $planPin = Digest $planBytes
+        $approvalPin = Digest $approvalBytes
+        $plan = ConvertFrom-Json -InputObject $encoding.GetString($planBytes)
+        $approval = ConvertFrom-Json -InputObject $encoding.GetString($approvalBytes)
+        Assert-Fields $approval @('schema_version','action','authority_kind','profile','installation_id',
+                                  'installed_at','plan_sha256','source_commit','policy_sha256')
+        Assert-Pin $approval.installation_id
+        Assert-Pin $approval.policy_sha256
+        if ($plan.profile -isnot [string] -or $plan.profile -cne 'enforced-vm-v1' -or
+            $plan.generation -isnot [int] -or $plan.generation -lt 2 -or
+            $approval.schema_version -isnot [int] -or $approval.schema_version -ne 3 -or
+            $approval.action -cne 'ha-transition' -or $approval.authority_kind -cne 'installed-runtime' -or
+            $approval.profile -cne $plan.profile -or $approval.plan_sha256 -cne $planPin -or
+            $approval.installation_id -cne $plan.installation_id -or $approval.source_commit -cne $plan.source_commit -or
+            $approval.policy_sha256 -cne $plan.windows_enforced.policy_sha256) { throw 'initial_stage_transition_plan' }
+        foreach ($field in @('action','authority_kind','profile','installed_at','plan_sha256','source_commit')) {
+            if ($approval.$field -isnot [string]) { throw 'initial_stage_transition_plan' }
+        }
+        if ($approval.source_commit -cnotmatch '\A[a-f0-9]{40}\z' -or
+            $approval.installed_at -cnotmatch '\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z\z') {
+            throw 'initial_stage_transition_plan'
+        }
+        $sid = $plan.windows_enforced.service_sid
+        $name = $plan.windows_enforced.service_name
+        if ($sid -isnot [string] -or $sid -cnotmatch '\AS-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}\z' -or
+            $name -isnot [string] -or $name -cnotmatch '\AN100HA_[a-f0-9]{24}_controller\z' -or
+            ([Security.Principal.NTAccount]::new('NT SERVICE',$name)).Translate(
+                [Security.Principal.SecurityIdentifier]).Value -cne $sid) { throw 'initial_stage_transition_plan' }
+        $directory = Get-Item -LiteralPath $root -Force
+        if ($directory -isnot [IO.DirectoryInfo]) { throw 'initial_stage_transition_plan' }
+        Assert-ProtectedPath $directory $sid
+        $callbackPin = $plan.windows_transition_observer.callback_config_sha256
+        Assert-Pin $callbackPin
+        $callbackPath = Join-Path $root ('transition-observer-config-' + $callbackPin + '.json')
+        $callback = ConvertFrom-Json -InputObject $encoding.GetString((Read-Protected $callbackPath $callbackPin 8192 $sid))
+        if ($callback.source_manifest_sha256 -isnot [string] -or
+            $callback.source_manifest_sha256 -cne $ExpectedSourceManifestSha256) { throw 'initial_stage_transition_plan' }
+        $approvalPath = Join-Path $root 'approval.json'
+        # Confirm any existing leaf before writing either one. Retries may only
+        # complete a publication with the exact same bytes.
+        foreach ($path in @($InputPath,$approvalPath)) {
+            if (Test-Path -LiteralPath $path) {
+                $pin = if ($path -ceq $InputPath) { $planPin } else { $approvalPin }
+                $null = Read-Protected $path $pin 49152 $sid
+            }
+        }
+        if (-not (Test-Path -LiteralPath $InputPath)) { $null = Write-New $InputPath $planBytes $sid }
+        if (-not (Test-Path -LiteralPath $approvalPath)) { $null = Write-New $approvalPath $approvalBytes $sid }
+        $null = Read-Protected $InputPath $planPin 49152 $sid
+        $null = Read-Protected $approvalPath $approvalPin 4096 $sid
+        [ordered]@{transition_plan_published=$true;plan_sha256=$planPin;approval_sha256=$approvalPin} |
+            ConvertTo-Json -Compress
+        return
+    }
+    if ($TransitionBundleBase64 -cne '') { throw 'initial_stage_transition_plan' }
     if ($PublishTransitionAuthority) {
         if (-not $Go -or $StartTransitionObserver -or $PublishTransitionObserverLaunch -or
             $PublishTransitionObserverConfig -or $ObserveTransitionObserverConfig -or

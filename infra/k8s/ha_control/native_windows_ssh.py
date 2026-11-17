@@ -163,7 +163,9 @@ def fixed_script(name, digest, parameters):
     encoded = base64.b64encode(source).decode('ascii')
     command = f'$s=[Text.UTF8Encoding]::new($false,$true).GetString([Convert]::FromBase64String("{encoded}")); &([ScriptBlock]::Create($s))'
     for key, value in parameters.items():
-        limit = 5464 if name == 'windows-ha-stage-initial-activation.ps1' and key == 'IntentBase64' else 512
+        limit = 512
+        if name == 'windows-ha-stage-initial-activation.ps1':
+            limit = {'IntentBase64': 5464, 'TransitionBundleBase64': 65536}.get(key, limit)
         bridge._need(re.fullmatch(r'[A-Za-z][A-Za-z0-9]*', key) is not None
                      and (value is True or type(value) is str and 0 < len(value) <= limit and value.isascii()
                           and not any(character in value for character in '\x00\r\n')), 'native_windows_ssh_argument_invalid')
