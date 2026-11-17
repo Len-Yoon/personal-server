@@ -212,6 +212,20 @@ class PgBackend:
                 or state["target"] not in {"A", "B"} or state["target"] == state["old"]
                 or state["generation"] != p["generation"] or state["timeline"] != p["timeline"]):
             _deny("controller_plan_state_mismatch")
+        self._promotion_replay_floor()
+
+    def _promotion_replay_floor(self):
+        if self.plan.get("profile") != "enforced-vm-v1" and "required_replay_lsn" not in self.plan:
+            return None
+        # The approval binds this checkpoint to the cluster, previous node,
+        # timeline and new generation before the previous primary is fenced.
+        value = self.plan.get("required_replay_lsn")
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9A-F]{1,8}/[0-9A-F]{1,8}", value):
+            _deny("promotion_replay_floor_required")
+        floor = self._lsn(value)
+        if floor == 0:
+            _deny("promotion_replay_floor_required")
+        return floor
 
     @contextmanager
     def _connection(self, node):
@@ -524,6 +538,9 @@ class PgBackend:
             value = self._observe(connection, state["target"], state)
             if value["recovery"]:
                 self._candidate(value, state)
+                floor = self._promotion_replay_floor()
+                if floor is not None and self._lsn(value["replay"]) < floor:
+                    _deny("promotion_replay_floor_not_reached")
                 started = time.monotonic()
                 if not self.fenced(state):
                     _deny("positive_fence_required")

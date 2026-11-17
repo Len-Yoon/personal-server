@@ -170,7 +170,28 @@ class PGControlTests(unittest.TestCase):
                     operation(self.state)
             connect.assert_not_called()
 
+    def test_enforced_transition_requires_a_nonzero_approved_replay_floor(self):
+        self.backend.plan = dict(self.plan, profile="enforced-vm-v1")
+        for checkpoint in (None, "0/0", "0/100000000", "missing"):
+            with self.subTest(checkpoint=checkpoint):
+                self.backend.plan["required_replay_lsn"] = checkpoint
+                with self.assertRaisesRegex(TransitionBlocked, "promotion_replay_floor_required"):
+                    self.backend.bind(self.state)
+        self.backend.plan["required_replay_lsn"] = "1/0"
+        self.backend.bind(self.state)
+
+    def test_fenced_candidate_cannot_promote_before_approved_replay(self):
+        self.backend.plan["required_replay_lsn"] = "0/21"
+        self.primary = MagicMock()
+        self.peer = MagicMock()
+        with patch.object(self.backend, "_connection", side_effect=self.fake_connection), \
+             patch.object(self.backend, "_observe", return_value=self.candidate()):
+            with self.assertRaisesRegex(TransitionBlocked, "promotion_replay_floor_not_reached"):
+                self.backend.promote(self.state)
+        self.primary.execute.assert_not_called()
+
     def test_lost_promotion_response_is_reconciled_without_second_promote(self):
+        self.backend.plan["required_replay_lsn"] = "0/20"
         self.primary, self.peer = MagicMock(), MagicMock()
         def execute(query, *args):
             if "pg_promote" in query:
@@ -639,7 +660,7 @@ class PGControlTests(unittest.TestCase):
         services = sorted(ENFORCED_SERVICES)
         sources = {path:hashlib.sha256((ROOT/'infra/k8s'/TARGETS[path]).read_bytes()).hexdigest()
                    for path in EFFECTS_SOURCES}
-        self.plan.update(profile='enforced-vm-v1',schema_version=2,source_commit='c'*40,
+        self.plan.update(profile='enforced-vm-v1',schema_version=2,source_commit='c'*40, required_replay_lsn='0/10',
                          pg_enforcement={'definition_sha256':hashlib.sha256((ROOT/'infra/k8s/ha_runtime/enforcement.sql').read_bytes()).hexdigest(),
                             'effects':{'code_sha256':effects_runtime_sha256(sources),'broker_role':'ha_broker'},
                             'role_sets':{node:{service:'app_'+str(index)+'_'+node.lower() for index,service in enumerate(services)} for node in ('A','B')},
