@@ -371,6 +371,13 @@ class WindowsTransitionServiceStart:
         self.attempted = False
 
     def start(self, controller, parameters, deadline):
+        return self._invoke(controller, parameters, deadline, observe=False)
+
+    def observe(self, controller, parameters, deadline):
+        """Check an existing start intent and running SCM instance without another start."""
+        return self._invoke(controller, parameters, deadline, observe=True)
+
+    def _invoke(self, controller, parameters, deadline, *, observe):
         fields = START_PARAMETERS - {"BindingPath"}
         invalid = "native_transition_start_scope_invalid"
         bridge._need(type(controller) is dict and set(controller) == {"plan", "plan_sha256"}
@@ -387,15 +394,17 @@ class WindowsTransitionServiceStart:
                      and type(plan.get("windows_transition_observer")) is dict
                      and plan["windows_enforced"].get("service_name") == parameters["ServiceName"], invalid)
         source = fixed_script("windows-ha-start-initial-service.ps1", self.start_sha256, parameters | {
-            "StartTransition": True, "Go": True,
+            "ObserveTransition" if observe else "StartTransition": True, "Go": True,
         })
-        bridge._need(not self.attempted, "native_transition_start_reconciliation_required")
         bridge._remaining(deadline)
-        self.attempted = True
+        if not observe:
+            bridge._need(not self.attempted, "native_transition_start_reconciliation_required")
+            self.attempted = True
         result = self.windows.powershell(source, deadline)
+        receipt = "transition_service_observed" if observe else "transition_service_started"
         bridge._need(type(result) is dict and set(result) == {
-            "transition_service_started", "service_pid", "controller_plan_sha256",
-        } and result["transition_service_started"] is True and type(result["service_pid"]) is int
+            receipt, "service_pid", "controller_plan_sha256",
+        } and result[receipt] is True and type(result["service_pid"]) is int
             and 0 < result["service_pid"] <= 2147483647
             and result["controller_plan_sha256"] == controller["plan_sha256"],
             "native_transition_service_start_unconfirmed")

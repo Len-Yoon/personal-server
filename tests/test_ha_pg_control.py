@@ -34,8 +34,8 @@ class TransitionServiceStartTests(unittest.TestCase):
         scope = script[script.index("function Start-PreparedTransitionService"):script.index("    if (-not $Go")]
         statements = (
             "Test-EnforcedServicePreflight",
-            "[TrustedStoppedV1.Contract]::Verify",
             "transition-service-start-",
+            "[TrustedStoppedV1.Contract]::Verify",
             "Test-Path -LiteralPath $intentPath",
             "[IO.FileMode]::CreateNew",
             "[IO.FileOptions]::WriteThrough",
@@ -43,7 +43,8 @@ class TransitionServiceStartTests(unittest.TestCase):
             "Get-Acl -LiteralPath $intentPath",
             "Start-Service -Name $ServiceName",
         )
-        positions = [scope.index(line) for line in statements]
+        start_only = scope.index("[TrustedStoppedV1.Contract]::Verify")
+        positions = [scope.index(line, start_only if line.startswith("Get-Acl") else 0) for line in statements]
         self.assertEqual(positions, sorted(positions))
 
     def test_start_is_bound_to_plan_and_uncertain_response_cannot_replay(self):
@@ -69,6 +70,11 @@ class TransitionServiceStartTests(unittest.TestCase):
         with self.assertRaisesRegex(BridgeRejected, "start_reconciliation_required"):
             start.start(plan, parameters, deadline)
         windows.powershell.assert_called_once()
+        observed = {"transition_service_observed": True, "service_pid": 123, "controller_plan_sha256": pin}
+        windows.powershell.side_effect = [observed]
+        self.assertEqual(start.observe(plan, parameters, deadline), observed)
+        self.assertTrue(windows.powershell.call_args.args[0].endswith(" -ObserveTransition -Go"))
+        self.assertEqual(windows.powershell.call_count, 2)
 
 
 class TransitionObserverPublicationTests(unittest.TestCase):

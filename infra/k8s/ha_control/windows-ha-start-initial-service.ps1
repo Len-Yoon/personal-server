@@ -12,6 +12,7 @@ param(
     [string]$ScmVerifierPath,
     [string]$ExpectedActivationIntentSha256,
     [switch]$StartTransition,
+    [switch]$ObserveTransition,
     [switch]$Go
 )
 $ErrorActionPreference = 'Stop'
@@ -96,14 +97,6 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
         $checked.args_sha256 -cne $argsSha -or $checked.execution_performed -isnot [bool] -or $checked.execution_performed) {
         throw 'initial_service_preflight_unconfirmed'
     }
-    if ('TrustedStoppedV1.Native' -as [type]) { throw 'initial_service_scm_verifier_already_loaded' }
-    Add-Type -TypeDefinition ($encoder.GetString($scmSource)) -ErrorAction Stop
-    $scm = [TrustedStoppedV1.Native]::new()
-    try {
-        $scm.OpenForRead($ServiceName)
-        [TrustedStoppedV1.Contract]::Inputs($Plan.installation_id,$ServiceName,$HostPath)
-        [TrustedStoppedV1.Contract]::Verify($scm.Read($ServiceName),$ServiceName,$Current.PathName)
-    } finally { $scm.Dispose() }
     if ($PlanPath -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\plan\.json\z') {
         throw 'initial_service_transition_intent_scope'
     }
@@ -114,7 +107,6 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
         Assert-PreflightEntry $parent $authors $authors $false $true
     }
     $intentPath = Join-Path $intentRoot.FullName ('transition-service-start-' + $PlanSha256 + '.json')
-    if (Test-Path -LiteralPath $intentPath) { throw 'initial_service_transition_reconciliation_required' }
     $intent = [ordered]@{service_name=$ServiceName;controller_plan_sha256=$PlanSha256;approval_sha256=$ApprovalSha256;
         args_sha256=$argsSha;service_image_path_sha256=$pins.service_image_path_sha256;mode=$pins.mode}
     $intentBytes = $encoder.GetBytes((ConvertTo-Json -InputObject $intent -Compress))
@@ -125,40 +117,64 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
         $intentAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
             [Security.Principal.SecurityIdentifier]::new($writer),'FullControl','Allow'))
     }
-    $file = [IO.FileStream]::new($intentPath,[IO.FileMode]::CreateNew,
-        [Security.AccessControl.FileSystemRights]'WriteData,Synchronize',[IO.FileShare]::None,4096,
-        [IO.FileOptions]::WriteThrough,$intentAcl)
-    try { $file.Write($intentBytes,0,$intentBytes.Length); $file.Flush($true) } finally { $file.Dispose() }
     $sections = [Security.AccessControl.AccessControlSections]'Owner,Access'
-    if ((Get-Acl -LiteralPath $intentPath).GetSecurityDescriptorSddlForm($sections) -cne
-        $intentAcl.GetSecurityDescriptorSddlForm($sections)) { throw 'initial_service_transition_intent_scope' }
-    # A missing response consumes this intent. Reconcile SCM without starting again.
-    Start-Service -Name $ServiceName -ErrorAction Stop
+    if ($ObserveTransition) {
+        $intentHash = [Security.Cryptography.SHA256]::Create()
+        try { $intentSha = [BitConverter]::ToString($intentHash.ComputeHash($intentBytes)).Replace('-','').ToLowerInvariant() }
+        finally { $intentHash.Dispose() }
+        $null = Read-PinnedJson $intentPath $intentSha
+        $entry = Get-Item -LiteralPath $intentPath -Force
+        Assert-PreflightEntry $entry $authors $authors $true $false
+        if ((Get-Acl -LiteralPath $intentPath).GetSecurityDescriptorSddlForm($sections) -cne
+            $intentAcl.GetSecurityDescriptorSddlForm($sections)) { throw 'initial_service_transition_intent_scope' }
+    } else {
+        if ('TrustedStoppedV1.Native' -as [type]) { throw 'initial_service_scm_verifier_already_loaded' }
+        Add-Type -TypeDefinition ($encoder.GetString($scmSource)) -ErrorAction Stop
+        $scm = [TrustedStoppedV1.Native]::new()
+        try {
+            $scm.OpenForRead($ServiceName)
+            [TrustedStoppedV1.Contract]::Inputs($Plan.installation_id,$ServiceName,$HostPath)
+            [TrustedStoppedV1.Contract]::Verify($scm.Read($ServiceName),$ServiceName,$Current.PathName)
+        } finally { $scm.Dispose() }
+        if (Test-Path -LiteralPath $intentPath) { throw 'initial_service_transition_reconciliation_required' }
+        $file = [IO.FileStream]::new($intentPath,[IO.FileMode]::CreateNew,
+            [Security.AccessControl.FileSystemRights]'WriteData,Synchronize',[IO.FileShare]::None,4096,
+            [IO.FileOptions]::WriteThrough,$intentAcl)
+        try { $file.Write($intentBytes,0,$intentBytes.Length); $file.Flush($true) } finally { $file.Dispose() }
+        if ((Get-Acl -LiteralPath $intentPath).GetSecurityDescriptorSddlForm($sections) -cne
+            $intentAcl.GetSecurityDescriptorSddlForm($sections)) { throw 'initial_service_transition_intent_scope' }
+        Start-Service -Name $ServiceName -ErrorAction Stop
+    }
     $running = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'") -OperationTimeoutSec 5
     if ($running.State -cne 'Running' -or $running.Name -cne $ServiceName -or $running.ProcessId -lt 1 -or
-        $running.PathName -cne $Current.PathName) { throw 'initial_service_transition_start_unconfirmed' }
+        $running.PathName -cne $Current.PathName -or
+        ($ObserveTransition -and $running.ProcessId -ne $Current.ProcessId)) { throw 'initial_service_transition_start_unconfirmed' }
     $process = Get-Process -Id $running.ProcessId -ErrorAction Stop
     try {
         if ($process.HasExited -or $process.SessionId -ne 0 -or $process.MainModule.FileName -ine $HostPath) {
             throw 'initial_service_transition_start_unconfirmed'
         }
-        [ordered]@{transition_service_started=$true;service_pid=$running.ProcessId;controller_plan_sha256=$PlanSha256} |
-            ConvertTo-Json -Compress
+        $result = [ordered]@{service_pid=$running.ProcessId;controller_plan_sha256=$PlanSha256}
+        $result[$(if ($ObserveTransition) {'transition_service_observed'} else {'transition_service_started'})] = $true
+        $result | ConvertTo-Json -Compress
     } finally { $process.Dispose() }
 }
 
 try {
-    if (-not $Go -or $PSVersionTable.PSEdition -cne 'Desktop' -or
+    $transition = $StartTransition -or $ObserveTransition
+    if (-not $Go -or ($StartTransition -and $ObserveTransition) -or $PSVersionTable.PSEdition -cne 'Desktop' -or
         $ServiceName -cnotmatch '\AN100HA_[a-f0-9]{24}_controller\z' -or
         $ServiceHostSha256 -cnotmatch $hashPattern -or $PlanSha256 -cnotmatch $hashPattern -or
         $ApprovalSha256 -cnotmatch $hashPattern -or
-        ($StartTransition -and ($ExpectedActivationIntentSha256 -cne '' -or $BindingPath -cne '')) -or
-        (-not $StartTransition -and $ExpectedActivationIntentSha256 -cnotmatch $hashPattern)) {
+        ($transition -and ($ExpectedActivationIntentSha256 -cne '' -or $BindingPath -cne '')) -or
+        (-not $transition -and $ExpectedActivationIntentSha256 -cnotmatch $hashPattern)) {
         throw 'initial_service_scope'
     }
     $current = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'")
-    if ($null -eq $current -or $current.Name -cne $ServiceName -or $current.State -cne 'Stopped' -or
-        $current.StartMode -cne 'Manual' -or $current.ProcessId -ne 0 -or $current.ServiceType -cne 'Own Process' -or
+    if ($null -eq $current -or $current.Name -cne $ServiceName -or
+        ($ObserveTransition -and ($current.State -cne 'Running' -or $current.ProcessId -lt 1)) -or
+        (-not $ObserveTransition -and ($current.State -cne 'Stopped' -or $current.ProcessId -ne 0)) -or
+        $current.StartMode -cne 'Manual' -or $current.ServiceType -cne 'Own Process' -or
         $current.DesktopInteract -or
         $current.StartName -cne ('NT SERVICE\' + $ServiceName) -or $current.PathName -cnotmatch '\A"[^"\r\n]+"\z') {
         throw 'initial_service_baseline_changed'
@@ -167,7 +183,7 @@ try {
     Assert-Executable $hostPath $ServiceHostSha256
     $plan = Read-PinnedJson $PlanPath $PlanSha256
     $approval = Read-PinnedJson $ApprovalPath $ApprovalSha256
-    if ($StartTransition) {
+    if ($transition) {
         Start-PreparedTransitionService $current $hostPath $plan $approval
         return
     }
