@@ -262,10 +262,10 @@ class GuestLayoutTest(unittest.TestCase):
         init = native_guest_config.initializer_config(**common, broker_instance="e" * 64, passwords=credentials)
         self.assertEqual(init["passwords"]["ha_repl"], "r" * 48)
         self.assertEqual(len(set(init["passwords"].values())), 16)
-        app, passfile = native_guest_config.application_config(
-            **common, node="B", installation_id="f" * 64, system_id="123", service="portal-web",
-            password=credentials["portal_web_b"], broker_server_sha256="1" * 64,
-        )
+        guest_identity = dict(common, node="B", installation_id="f" * 64, system_id="123")
+        app_args = dict(guest_identity, service="portal-web", password=credentials["portal_web_b"],
+                        broker_server_sha256="1" * 64)
+        app, passfile = native_guest_config.application_config(**app_args)
         self.assertEqual((app["primary"]["host"], app["partner"]["host"]), ("ha-a", "ha-b"))
         self.assertEqual(app["primary"]["user"], "portal_web_b")
         self.assertEqual(passfile.count(credentials["portal_web_b"].encode()), 2)
@@ -274,18 +274,32 @@ class GuestLayoutTest(unittest.TestCase):
         self.assertNotIn("authority_kind", app)
         self.assertEqual(app["effects"]["plan_sha256"], init["plan_sha256"])
         clients = {name: str(index) * 64 for index, name in enumerate(sorted(guest.SERVICES), 1)}
-        broker, broker_passfile = native_guest_config.broker_config(
-            **common, node="B", installation_id="f" * 64, system_id="123", broker_instance="e" * 64,
+        broker_args = dict(
+            guest_identity, broker_instance="e" * 64,
             password=credentials["ha_effect_broker"], client_sha256=clients,
             ingress_server_sha256="2" * 64, engine_id="fixture",
             targets={"portal-web": {"container_id": "3" * 64, "image_id": "sha256:" + "4" * 64}},
         )
+        broker, broker_passfile = native_guest_config.broker_config(**broker_args)
         self.assertEqual({row["service"] for row in broker["clients"]}, set(guest.SERVICES))
         self.assertTrue(all(row["node"] == "B" for row in broker["clients"]))
         self.assertIn(credentials["ha_effect_broker"].encode(), broker_passfile)
         self.assertNotIn(credentials["ha_effect_broker"], repr(broker))
         self.assertEqual(broker["providers"]["executor"]["services"], ["portal-web"])
         self.assertEqual(broker["providers"]["hyundai"], "/etc/ha-broker/providers/hyundai.json")
+        next_app, next_passfile = native_guest_config.application_config(**app_args, primary_node="B", generation=2)
+        next_broker, next_broker_passfile = native_guest_config.broker_config(**broker_args, primary_node="B", generation=2)
+        self.assertEqual((next_app["generation"], next_app["primary_node"], next_app["primary"]["host"],
+                          next_app["partner"]["host"]), (2, "B", "ha-b", "ha-a"))
+        self.assertEqual((next_broker["generation"], next_broker["postgres"]["primary"]["host"],
+                          next_broker["postgres"]["peer"]["host"]), (2, "ha-b", "ha-a"))
+        self.assertTrue(all(row["generation"] == 2 and row["node"] == "B" for row in next_broker["clients"]))
+        self.assertEqual((next_passfile, next_broker_passfile), (passfile, broker_passfile))
+        self.assertNotIn("authority_kind", next_app)
+        for build, args in ((native_guest_config.application_config, app_args),
+                            (native_guest_config.broker_config, broker_args)):
+            with self.assertRaisesRegex(TransitionBlocked, "guest_activation_generation_invalid"):
+                build(**args, primary_node="B", generation=1)
 
     def test_seven_apps_have_only_fixed_capabilities_and_no_external_network(self):
         value=fixture();original=copy.deepcopy(value)
