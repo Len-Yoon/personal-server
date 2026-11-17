@@ -27,7 +27,10 @@ from urllib.request import HTTPRedirectHandler, build_opener
 
 LIMIT = 8 * 1024 * 1024
 COLLECTION_LIMIT = 16 * 1024 * 1024
-SEARCH_SERIES_LIMIT = 256
+# Preserve distinct scrape origins through rollout churn. The query,
+# aggregate download and on-disk byte limits still apply independently.
+SEARCH_SERIES_LIMIT = 1024
+NEWS_SERIES_LIMIT = 64
 NEWS_FAMILIES = ('initialized', 'last_success_timestamp_seconds', 'consecutive_failures')
 QUOTA = 384 * 1024 * 1024
 RESERVE = 64 * 1024 * 1024
@@ -163,7 +166,7 @@ def news_block(block, start, *, stored=False):
                 raise ValueError('invalid_news_response')
             data = response.get('data')
             if (not isinstance(data, dict) or data.get('resultType') != 'matrix'
-                    or not isinstance(data.get('result'), list) or len(data['result']) > 16):
+                    or not isinstance(data.get('result'), list) or len(data['result']) > NEWS_SERIES_LIMIT):
                 raise ValueError('invalid_news_matrix')
             rows, seen, grid = [], set(), {}
             for row in data['result']:
