@@ -29,6 +29,23 @@ from ha_control import cli, scm_pg_auth_probe
 
 
 class TransitionServiceStartTests(unittest.TestCase):
+    def test_native_start_records_durable_intent_before_scm(self):
+        script = (ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1").read_text()
+        scope = script[script.index("function Start-PreparedTransitionService"):script.index("    if (-not $Go")]
+        statements = (
+            "Test-EnforcedServicePreflight",
+            "[TrustedStoppedV1.Contract]::Verify",
+            "transition-service-start-",
+            "Test-Path -LiteralPath $intentPath",
+            "[IO.FileMode]::CreateNew",
+            "[IO.FileOptions]::WriteThrough",
+            "$file.Flush($true)",
+            "Get-Acl -LiteralPath $intentPath",
+            "Start-Service -Name $ServiceName",
+        )
+        positions = [scope.index(line) for line in statements]
+        self.assertEqual(positions, sorted(positions))
+
     def test_start_is_bound_to_plan_and_uncertain_response_cannot_replay(self):
         script = ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1"
         service = "N100HA_" + "1"*24 + "_controller"

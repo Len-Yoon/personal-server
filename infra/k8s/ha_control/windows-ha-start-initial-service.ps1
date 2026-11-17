@@ -104,6 +104,35 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
         [TrustedStoppedV1.Contract]::Inputs($Plan.installation_id,$ServiceName,$HostPath)
         [TrustedStoppedV1.Contract]::Verify($scm.Read($ServiceName),$ServiceName,$Current.PathName)
     } finally { $scm.Dispose() }
+    if ($PlanPath -cnotmatch '\AC:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\plan\.json\z') {
+        throw 'initial_service_transition_intent_scope'
+    }
+    $intentRoot = Get-Item -LiteralPath ([IO.Path]::GetDirectoryName($PlanPath)) -Force
+    $authors = @('S-1-5-18','S-1-5-32-544') + @($pins.trusted_admin_sids)
+    Assert-PreflightEntry $intentRoot $authors ($authors + @($sid)) $true $false
+    for ($parent = $intentRoot.Parent; $null -ne $parent; $parent = $parent.Parent) {
+        Assert-PreflightEntry $parent $authors $authors $false $true
+    }
+    $intentPath = Join-Path $intentRoot.FullName ('transition-service-start-' + $PlanSha256 + '.json')
+    if (Test-Path -LiteralPath $intentPath) { throw 'initial_service_transition_reconciliation_required' }
+    $intent = [ordered]@{service_name=$ServiceName;controller_plan_sha256=$PlanSha256;approval_sha256=$ApprovalSha256;
+        args_sha256=$argsSha;service_image_path_sha256=$pins.service_image_path_sha256;mode=$pins.mode}
+    $intentBytes = $encoder.GetBytes((ConvertTo-Json -InputObject $intent -Compress))
+    $intentAcl = [Security.AccessControl.FileSecurity]::new()
+    $intentAcl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+    $intentAcl.SetAccessRuleProtection($true,$false)
+    foreach ($writer in @('S-1-5-18','S-1-5-32-544')) {
+        $intentAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new($writer),'FullControl','Allow'))
+    }
+    $file = [IO.FileStream]::new($intentPath,[IO.FileMode]::CreateNew,
+        [Security.AccessControl.FileSystemRights]'WriteData,Synchronize',[IO.FileShare]::None,4096,
+        [IO.FileOptions]::WriteThrough,$intentAcl)
+    try { $file.Write($intentBytes,0,$intentBytes.Length); $file.Flush($true) } finally { $file.Dispose() }
+    $sections = [Security.AccessControl.AccessControlSections]'Owner,Access'
+    if ((Get-Acl -LiteralPath $intentPath).GetSecurityDescriptorSddlForm($sections) -cne
+        $intentAcl.GetSecurityDescriptorSddlForm($sections)) { throw 'initial_service_transition_intent_scope' }
+    # A missing response consumes this intent. Reconcile SCM without starting again.
     Start-Service -Name $ServiceName -ErrorAction Stop
     $running = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'") -OperationTimeoutSec 5
     if ($running.State -cne 'Running' -or $running.Name -cne $ServiceName -or $running.ProcessId -lt 1 -or
