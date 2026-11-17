@@ -66,8 +66,8 @@ class TransitionIngressTests(unittest.TestCase):
                            "preflight_path": "fixture", "scm_verifier_path": "fixture"},
             guests=SimpleNamespace(verify_transition_target=MagicMock(return_value=True),
                                    publish_generation_handoff=MagicMock(return_value="6"*64),
-                                   activate_generation=guest),
-            target_request=SimpleNamespace(binding=SimpleNamespace(**execution.spec)), verify_guest=MagicMock(),
+                                   activate_generation=guest, verify_live_generation=MagicMock(return_value="9"*64)),
+            target_request=SimpleNamespace(binding=SimpleNamespace(**execution.spec)),
         )
         stage = "7"*64
         replacement = transition_ingress.bridge.Request(
@@ -81,6 +81,11 @@ class TransitionIngressTests(unittest.TestCase):
         routes = (execution, None, None, SimpleNamespace(primary_ip="previous"),
                   SimpleNamespace(guest="previous", route_pin="9"*64), generation, "target", "8"*64)
         prepared = {"ApprovalSha256": "a"*64, "PreflightPath": "fixture", "ScmVerifierPath": "fixture"}
+        def switch_routes(*_args, **kwargs):
+            self.assertEqual(kwargs["verify_guest"](generation, "target"), "9"*64)
+            steps.append("ingress")
+            return None, None, {}
+
         with patch.object(transition_ingress, "validate_transition_approval") as validate_approval, \
                 patch.object(transition_ingress, "fixed_script"), \
                 patch.object(transition_ingress, "stage_approved_transition_service",
@@ -94,7 +99,7 @@ class TransitionIngressTests(unittest.TestCase):
                 patch.object(transition_ingress, "observer_callback_config", return_value={}), \
                 patch.object(transition_ingress, "prepare_transition_observer_plan",
                              side_effect=lambda **_: steps.append("observer") or controller), \
-                patch.object(transition_ingress, "switch_ingress", side_effect=lambda *a, **kw: steps.append("ingress") or (None, None, {})) as switch:
+                patch.object(transition_ingress, "switch_ingress", side_effect=switch_routes) as switch:
             args["guests"].verify_transition_target.return_value = False
             with self.assertRaisesRegex(TransitionBlocked, "target_unconfirmed"):
                 transition_ingress.switch_with_observer(*routes, **args)
@@ -122,6 +127,10 @@ class TransitionIngressTests(unittest.TestCase):
             args["guests"].activate_generation = lambda *_a, **_kw: steps.append("guest") or transition_ingress.bridge.Receipt("PASS", "5"*64)
             outcome = transition_ingress.switch_with_observer(*routes, **args)
             self.assertEqual(outcome.activation_sha256, "5"*64)
+            verified = args["guests"].verify_live_generation.call_args.args[0]
+            self.assertEqual(verified.verb, transition_ingress.bridge.GUEST_VERIFY_GENERATION)
+            self.assertEqual(verified.sequence, 7)
+            self.assertEqual(verified.args["activation_receipt_sha256"], outcome.activation_sha256)
             self.assertEqual(steps, ["runtime", "observer", "close-prior", "stage", "verify", "rejoin", "controller", "lease", "guest", "ingress"])
 
     def test_lost_activation_is_followed_only_by_fresh_readback(self):

@@ -316,6 +316,31 @@ def _observe_live(pins, activation, postgres, stage, *, activation_receipt_sha25
           and all(getattr(postgres, key) == getattr(pins, key) for key in (
               "boot_sha256", "installation_id", "system_id", "plan_sha256", "manifest_sha256", "cluster"))
           and postgres.source_commit == pins.release["source_commit"], "guest_live_observation_unbound")
+    return _observe_runtime(pins, activation, postgres, stage, generation, activation_receipt_sha256,
+                            bindings | {"windows_generation": windows_generation})
+
+
+def observe_current_generation(pins, activation, postgres, stage, generation, *,
+                               activation_receipt_sha256, target_sha256, replay_floor):
+    pins.validate()
+    activation.validate()
+    postgres.validate()
+    generation.validate()
+    _need(os.geteuid() == 0 and pins.node == pins.primary_node == generation.primary
+          and pins.generation == generation.epoch and generation.epoch > 1
+          and all(runtime._match(runtime.SHA, value) for value in (activation_receipt_sha256, target_sha256))
+          and type(replay_floor) is int and 0 < replay_floor < 2**64,
+          "guest_live_observation_unbound")
+    return _observe_runtime(
+        pins, activation, postgres, stage, generation, activation_receipt_sha256,
+        {"activation_receipt_sha256": activation_receipt_sha256, "target_sha256": target_sha256,
+         "serving_generation": asdict(generation), "replay_floor": replay_floor},
+        target_sha256=target_sha256, replay_floor=replay_floor, persist_failure=False,
+    )
+
+
+def _observe_runtime(pins, activation, postgres, stage, generation, activation_receipt_sha256, bindings, *,
+                     target_sha256=None, replay_floor=0, persist_failure=True):
     stage = Path(stage)
     started = time.monotonic()
     deadline = started + LIVE_SECONDS
@@ -327,6 +352,8 @@ def _observe_live(pins, activation, postgres, stage, *, activation_receipt_sha25
         prepared, files, activated_at = _receipts(pins, activation, stage, activation_receipt_sha256, generation)
         phase = "runtime_layout"
         ip, layouts, images = _layout(pins, postgres, stage, prepared)
+        if target_sha256 is not None:
+            _need(runtime._digest(str(ip).encode("ascii")) == target_sha256, "guest_live_target_unconfirmed")
         phase = "containers_before"
         before = _running(pins, postgres, prepared, layouts, images, activated_at)
         phase = "ingress_tls"
@@ -353,9 +380,9 @@ def _observe_live(pins, activation, postgres, stage, *, activation_receipt_sha25
         last, sampled_after, expires_after, replay_after = _lease(pins, postgres, generation)
         phase = "freshness"
         _need(before == after and sampled_after >= sampled and expires_after >= expires and replay_after >= replay
-              and time.monotonic() < deadline, "guest_live_observation_stale")
+              and replay >= replay_floor and time.monotonic() < deadline, "guest_live_observation_stale")
         return runtime._digest(runtime._json_bytes({
-            **runtime._runtime_identity(pins), **bindings, "windows_generation": windows_generation,
+            **runtime._runtime_identity(pins), **bindings,
             "containers": after, "routes": routes, "ingress_leaf_sha256": leaf, "postgres_before": first,
             "postgres_after": last,
         }))
@@ -364,7 +391,7 @@ def _observe_live(pins, activation, postgres, stage, *, activation_receipt_sha25
         reason = str(error) if isinstance(error, (TransitionBlocked, RouteTimeout)) else ""
         if not re.fullmatch(r"guest_(?:live|runtime|restore)_[a-z0-9_]{1,72}", reason):
             reason = type(error).__name__
-        if phase is not None:
+        if persist_failure and phase is not None:
             try:
                 runtime._write(stage / "runtime-live-failure.json", runtime._json_bytes({
                     "schema_version": 1,

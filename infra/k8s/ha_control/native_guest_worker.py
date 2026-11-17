@@ -26,7 +26,7 @@ from .legacy_writers import TransitionBlocked, _need
 from .native_stdio_bridge import (
     ACTIVATION_GUEST_REPLY_SECONDS, ACTIVATION_VERBS, Binding, BridgeRejected, FRAME_BYTES,
     GUEST_ACTIVATE_GENERATION, GUEST_OBSERVE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT,
-    GUEST_OBSERVE_REPLACEMENT, GUEST_TRANSITION_TARGET, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
+    GUEST_OBSERVE_REPLACEMENT, GUEST_TRANSITION_TARGET, GUEST_VERIFY_GENERATION, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
 )
 
@@ -43,6 +43,7 @@ VERBS = {
     GUEST_OBSERVE_GENERATION,
     GUEST_PUBLISH_GENERATION,
     GUEST_TRANSITION_TARGET,
+    GUEST_VERIFY_GENERATION,
 }
 HANDOFF = "activation-handoff.json"
 EMPTY = "0" * 64
@@ -789,6 +790,26 @@ def observe_generation_activation(request):
     return Receipt("PASS", pin)
 
 
+def verify_live_generation(request):
+    _need(os.geteuid() == 0, "guest_worker_root_required")
+    stage = ROOT / request.binding.attempt_id
+    runtime._directory(stage, 0)
+    path = stage / "generation-handoff.json"
+    raw, handoff = _read_json(path)
+    pins, pg, activation_pins, generation, floor = _checked_generation_handoff(request, raw, handoff)
+    _, installed = _read_json(restore.INSTALLATION)
+    _need(_digest(restore.BOOT_ID.read_bytes()) == pins.boot_sha256
+          and installed["installation_id"] == pins.installation_id and installed["node"] == request.node
+          and installed["source_commit"] == pg.source_commit, "guest_generation_handoff_changed")
+    proof = live.observe_current_generation(
+        pins, activation_pins, pg, stage, generation, activation_receipt_sha256=request.args["activation_receipt_sha256"],
+        target_sha256=request.args["target_sha256"], replay_floor=floor,
+    )
+    _need(_hash(proof) and _read_json(path)[0] == raw
+          and _digest(restore.BOOT_ID.read_bytes()) == pins.boot_sha256, "guest_generation_handoff_changed")
+    return Receipt("PASS", proof)
+
+
 def verify_transition_target(request):
     _need(os.geteuid() == 0, "guest_worker_root_required")
     boot = request.binding.boot(request.node)
@@ -809,6 +830,8 @@ def handle(request, assert_windows_current=None):
                 return replacement_standby(request)
             if request.verb == GUEST_PUBLISH_GENERATION:
                 return publish_generation_handoff(request)
+            if request.verb == GUEST_VERIFY_GENERATION:
+                return verify_live_generation(request)
             if request.verb == GUEST_OBSERVE_GENERATION:
                 return observe_generation_activation(request)
             if request.verb == GUEST_ACTIVATE_GENERATION:

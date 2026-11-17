@@ -255,7 +255,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                          previous_runtime_sha256, legacy_plan, legacy_attempt, expected_mtls_sha256,
                          previous_callback, previous_callback_sha256, replacement_vm, observer_release,
                          observer_setup, controller_setup, assert_legacy_closed,
-                         guests, target_request, verify_guest,
+                         guests, target_request,
                          replacement_requests, generation_handoff_request, stage_service, resume_rejoin=None,
                          verify_public=_public_health):
     """Rejoin standby, activate the guest, then switch ingress under one lock.
@@ -354,7 +354,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
             request = generation_handoff_request(serving_generation, instance, replay_floor)
             caddy._need(activation_request is None and type(request) is bridge.Request
                         and request.binding == target_request.binding
-                        and type(request.sequence) is int and replacement_observe.sequence < request.sequence <= bridge.MAX_REQUESTS - 2,
+                        and type(request.sequence) is int and replacement_observe.sequence < request.sequence <= bridge.MAX_REQUESTS - 8,
                         "transition_ingress_controller_unbound")
             pin = guests.publish_generation_handoff(request, serving_generation, instance, replay_floor, limit)
             caddy._need(bridge._hash(pin) and pin == request.args["generation_handoff_sha256"],
@@ -375,6 +375,22 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
             )
             caddy._need(type(activated) is bridge.Receipt and activated.status == "PASS"
                         and bridge._hash(activated.receipt_sha256), "transition_ingress_activation_unconfirmed")
+            sequence = activation_request.sequence + 1
+
+            def verify_guest(serving_generation, address):
+                nonlocal sequence
+                caddy._need(serving_generation == generation and address == target,
+                            "transition_ingress_guest_unconfirmed")
+                sequence += 1  # Reserve the prior sequence for an activation readback.
+                request = replace(
+                    activation_request, verb=bridge.GUEST_VERIFY_GENERATION, sequence=sequence,
+                    nonce=secrets.token_hex(32), args=activation_request.args | {
+                        "activation_receipt_sha256": activated.receipt_sha256,
+                        "target_sha256": bridge._digest(address.encode("ascii")),
+                    },
+                )
+                return guests.verify_live_generation(request, generation, address, deadline, assert_guard=assert_guard)
+
             active, next_relay, receipt = switch_ingress(main, car, previous, relay, generation, target, route_pin, execution.directory,
                                   plan_sha256=execution.spec["plan_sha256"], attempt_id=execution.spec["attempt_id"],
                                   expected_mtls_sha256=expected_mtls_sha256, assert_guard=assert_guard,
