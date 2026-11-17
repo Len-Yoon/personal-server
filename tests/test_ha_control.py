@@ -12,11 +12,89 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "infra/k8s"))
 from ha_control.controller import Controller, Journal, TransitionBlocked, exclusive
 from ha_control.windows import WindowsFence
-from ha_control import car_callback_ingress, car_callback_runtime, caddy_runtime, transition_ingress
+from ha_control import car_callback_ingress, car_callback_runtime, caddy_runtime, transition_execution, transition_ingress
+from ha_control import wsl_writer_proof
 from ha_control.native_guest_activation import ServingGeneration
 
 
 class TransitionIngressTests(unittest.TestCase):
+    def test_writer_observer_permits_only_exact_locked_ingress_commands(self):
+        import fcntl
+        import os
+
+        from ha_runtime.seven_capture import encoded
+
+        caddy = caddy_runtime
+        pid = os.getpid()
+        coordinator = (1, 100, [b"python", b"coordinator"], b"/usr/bin/python3")
+        owner = {"pid": pid, "start": 100, "process": caddy._sha(b"\0".join([coordinator[3], *coordinator[2]]))}
+        with tempfile.TemporaryDirectory() as temp, patch.object(caddy, "_private_dir", side_effect=Path):
+            directory = Path(temp).resolve()
+            for name in ("main", "relay"):
+                (directory/name).mkdir(mode=0o700)
+            spec = {"directory": str(directory), "plan_sha256": "a"*64, "attempt_id": "b"*64,
+                    "project": "personal-server", "coordinator": owner}
+            raw, container, guest = b"candidate", "c"*64, "192.168.100.3"
+            outer = {"plan_sha256": spec["plan_sha256"], "attempt_id": spec["attempt_id"],
+                     "old_caddy_sha256": "d"*64, "caddy_candidate_sha256": "e"*64, "overlay_sha256": "f"*64,
+                     "old_relay_sha256": caddy._sha(container.encode()), "car_route_sha256": "1"*64,
+                     "target_sha256": caddy._sha(guest.encode())}
+            main_intent = {"original_container_sha256": outer["old_caddy_sha256"],
+                           "candidate_sha256": outer["caddy_candidate_sha256"],
+                           "overlay_sha256": outer["overlay_sha256"], "isolated_sha256": caddy._sha(raw)}
+            relay_intent = {"previous_container_sha256": outer["old_relay_sha256"],
+                            "route_pin": outer["car_route_sha256"], "guest": guest}
+            for filename, data in (("ingress-switch-intent.json", outer), ("main/caddy-apply-intent.json", main_intent),
+                                   ("relay/car-relay-replacement-intent.json", relay_intent)):
+                caddy._write(directory/filename, encoded(data), 0o600)
+            main = [part.encode() for part in caddy._execution_command(spec["project"])]
+            stop = [part.encode() for part in (*caddy.DOCKER, "stop", "--time", "5", container)]
+            foreign_stop = [*stop[:-1], b"9"*64]
+            processes = {pid: coordinator, 101: (pid, 101, main, main[0]), 102: (pid, 102, stop, stop[0]),
+                         103: (pid, 102, foreign_stop, stop[0])}
+
+            def locked(path, candidate):
+                if candidate != pid:
+                    return False
+                try:
+                    with path.open("rb") as stream:
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return True
+                return False
+
+            execution = transition_execution.TransitionExecution(spec)
+            first, relay = MagicMock(project=spec["project"], execution=None), MagicMock(execution=None)
+            allowed = transition_execution.authorized
+            with patch.object(caddy, "_process", side_effect=processes.__getitem__), patch.object(
+                caddy, "_lock_held_by", side_effect=locked,
+            ), execution.guard(first, relay):
+                self.assertFalse(allowed(Path("/proc/102"), stop, spec))
+                with execution.stop_relay(directory/"relay", container):
+                    self.assertTrue(allowed(Path("/proc/102"), stop, spec))
+                    self.assertFalse(allowed(Path("/proc/103"), foreign_stop, spec))
+                self.assertFalse(allowed(Path("/proc/102"), stop, spec))
+                with self.assertRaises(FileExistsError):
+                    with execution.stop_relay(directory/"relay", container):
+                        self.fail("unsettled relay stop was replayed")
+                with execution.stop_relay(directory/"relay", container, settled=True):
+                    self.assertTrue(allowed(Path("/proc/102"), stop, spec))
+                with execution.open(directory/"main", spec["project"], raw):
+                    self.assertTrue(allowed(Path("/proc/101"), main, spec))
+                    self.assertFalse(allowed(Path("/proc/101"), main, spec | {"attempt_id": "2"*64}))
+                override = os.fsencode(directory/"main"/"caddy-ha-compose.json")
+                read = [main[0], *wsl_writer_proof.CADDY_COMPOSE_GLOBALS, b"personal-server",
+                        b"--project-directory", wsl_writer_proof.CADDY_ROOT,
+                        b"--env-file", wsl_writer_proof.CADDY_ROOT + b"/.env"]
+                for path in (*wsl_writer_proof.CADDY_BASE_FILES, override):
+                    read.extend([b"-f", path])
+                read.extend([b"config", b"--format", b"json"])
+                self.assertIsNone(wsl_writer_proof._recovery_command_reason(read, main[0], spec))
+                self.assertEqual(wsl_writer_proof._recovery_command_reason(read, main[0]),
+                                 "legacy_recovery_linux_compose_command")
+                self.assertEqual(wsl_writer_proof._recovery_command_reason(read[:-3] + [b"up"], main[0], spec),
+                                 "legacy_recovery_linux_compose_command")
+
     def test_relay_first_then_caddy_and_readback_after_unknown_response(self):
         old_ip, new_ip = "192.168.100.2", "192.168.100.3"
         old_main = {"container_sha256": "a"*64}

@@ -1,5 +1,6 @@
 """Replace the fixed-IP Car callback relay independently of main Caddy."""
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from ipaddress import IPv4Address
 import json
@@ -44,8 +45,9 @@ class Relay:
 
 
 class CallbackRuntime:
-    def __init__(self, docker):
+    def __init__(self, docker, *, execution=None):
         self.docker = docker
+        self.execution = execution
 
     def _one(self, *args):
         (item,) = json.loads(self.docker(*args))
@@ -194,15 +196,17 @@ class CallbackRuntime:
         phase, container = self._phase(previous, relay)
         if phase == 'new_running':
             return self.observe(previous, directory, assert_guard=assert_guard, verify_origin=verify_origin)
-        return self._advance(previous, directory, phase, container, assert_guard, verify_origin)
+        return self._advance(previous, directory, phase, container, assert_guard, verify_origin, settled=True)
 
-    def _advance(self, previous, directory, phase, container, assert_guard, verify_origin):
+    def _advance(self, previous, directory, phase, container, assert_guard, verify_origin, *, settled=False):
         try:
             relay, candidate = self._plan(previous, directory)
             assert_guard()
             caddy._need(self._phase(previous, relay) == (phase, container), 'car_relay_active_changed')
             if phase == 'old_running':
-                self.docker('stop', '--time', '5', container, timeout=15)
+                witness = self.execution.stop_relay(directory, container, settled=settled) if self.execution else nullcontext()
+                with witness:
+                    self.docker('stop', '--time', '5', container, timeout=15)
                 phase = 'old_stopped'
             if phase == 'old_stopped':
                 assert_guard()
