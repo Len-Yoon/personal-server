@@ -98,6 +98,8 @@ if($advance.CommandLine() -cne $expected.Replace(' serve ',' advance ').Replace(
 if($advance.CommandLine().EndsWith('--arm')){throw 'advance_armed'}
 $transition=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=transition-serve'))
 if($transition.CommandLine() -cne $expected.Replace(' serve ',' transition-serve ').Replace(' --arm','')){throw 'transition_not_exact_fixed_command'}
+$rearm=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=transition-rearm'))
+if($rearm.CommandLine() -cne $expected.Replace(' serve ',' transition-rearm ').Replace(' --arm','')){throw 'rearm_not_exact_fixed_command'}
 $stage=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=stage-rejoin'))
 if($stage.CommandLine() -cne $expected.Replace(' serve ',' stage-rejoin ').Replace(' --arm','')){throw 'stage_not_exact_fixed_command'}
 $check=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=check-rejoin'))
@@ -113,7 +115,7 @@ foreach($mode in @('authenticate','initialize','advance','stage-rejoin','check-r
  if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,0) -ne 0){throw 'successful_oneshot_failed'}
  if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,1) -ne 1){throw 'failed_oneshot_succeeded'}
 }
-foreach($mode in @('serve','transition-serve','unknown')){if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,0) -ne 1){throw 'unexpected_exit_succeeded'}}
+foreach($mode in @('serve','transition-serve','transition-rearm','unknown')){if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,0) -ne 1){throw 'unexpected_exit_succeeded'}}
 $phases=[EnforcedServiceV1.StartupPhase]
 if([int]$phases::ArgsRead -ne 22 -or [int]$phases::Dispatch -ne 25 -or
    [int]$phases::PythonTree -ne 35 -or [int]$phases::PythonCreate -ne 39 -or

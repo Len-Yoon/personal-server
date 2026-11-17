@@ -814,7 +814,7 @@ class PGControlTests(unittest.TestCase):
                                journal=None, command="transition-serve")
         with patch.object(cli, "PgBackend", return_value=backend), patch.object(cli, "validate_bundle"), \
                 patch.object(cli, "Controller") as controller, patch.object(cli, "Journal"):
-            for command in ("advance", "serve", "transition-serve"):
+            for command in ("advance", "serve", "transition-serve", "transition-rearm"):
                 args.command = command
                 with self.subTest(command=command), self.assertRaisesRegex(TransitionBlocked, "observer_required"):
                     cli.run(args)
@@ -834,6 +834,42 @@ class PGControlTests(unittest.TestCase):
             controller.return_value.advance.return_value = {"phase": "rejoining"}
             self.assertFalse(cli.run(args)["authority_opened"])
             controller.return_value.advance.assert_called_once_with(stop_at_rejoin=True)
+
+    def test_transition_rearm_holds_observer_and_reopens_only_a_ready_generation(self):
+        journal = self.root / "journal"
+        journal.mkdir()
+        state_path = journal / "controller-state.json"
+        backend = MagicMock()
+        backend.plan = dict(self.plan, profile="enforced-vm-v1", windows_transition_observer={},
+                            windows_enforced={"config_profile": {"acceptance_scope": "production"}})
+        args = SimpleNamespace(plan=str(self.root / "plan.json"), approval=str(self.root / "approval.json"),
+                               journal=None, command="transition-rearm")
+        observer = MagicMock()
+
+        def arm(state):
+            self.assertEqual(state["phase"], "ready")
+            self.assertIs(backend.transition_observer, observer)
+            if sys.platform != "win32":
+                from ha_control.controller import exclusive
+                with self.assertRaisesRegex(TransitionBlocked, "controller_lock_unavailable"):
+                    with exclusive(state_path.with_suffix(".lock")):
+                        pass
+
+        backend.arm.side_effect = arm
+        with patch.object(cli, "PgBackend", return_value=backend), patch.object(cli, "validate_bundle"), \
+                patch("ha_control.initial_lease_service.native_transition_observer", return_value=nullcontext(observer)), \
+                patch.object(cli, "record_renewal"), patch.object(cli.time, "sleep", side_effect=KeyboardInterrupt):
+            Journal(state_path).save(self.state)
+            with self.assertRaisesRegex(TransitionBlocked, "ready_transition_required"):
+                cli.run(args)
+            backend.arm.assert_not_called()
+            Journal(state_path).save(dict(self.state, phase="ready"))
+            with self.assertRaises(KeyboardInterrupt):
+                cli.run(args)
+        backend.arm.assert_called_once()
+        backend.renew.assert_called_once()
+        backend.close.assert_called_once()
+        self.assertIsNone(backend.transition_observer)
 
     def test_enforced_cli_persists_only_in_precreated_mutable_journal_root(self):
         backend = MagicMock()

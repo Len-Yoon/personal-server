@@ -117,12 +117,13 @@ def run(args):
             from .initial_lease_service import native_initial_observer, serve_initial
             with native_initial_observer(backend) as observer:
                 return serve_initial(backend, journal, observer)
-        write_command = args.command in {"advance", "serve", "transition-serve"}
+        transition_service = args.command in {"transition-serve", "transition-rearm"}
+        write_command = transition_service or args.command in {"advance", "serve"}
         if p.get("profile") == "enforced-vm-v1" and p["generation"] >= 2 and write_command:
             scope = p.get("windows_enforced", {}).get("config_profile", {}).get("acceptance_scope")
             if scope not in {"production", "isolated-predeployment"}:
                 raise TransitionBlocked("transition_acceptance_scope_required")
-            if scope == "production" and (args.command != "transition-serve" or "windows_transition_observer" not in p):
+            if scope == "production" and (not transition_service or "windows_transition_observer" not in p):
                 raise TransitionBlocked("production_transition_observer_required")
         if args.command == "authenticate":
             backend.authenticate_isolated_nodes()
@@ -149,16 +150,22 @@ def run(args):
         if args.command == "advance":
             state = control.advance()
             return {"status": "PASS", "phase": state["phase"], "lease_requires_serve": state["phase"] == "ready"}
-        if args.command == "transition-serve":
+        if transition_service:
             if p.get("profile") != "enforced-vm-v1":
                 raise TransitionBlocked("enforced_transition_service_required")
             on_ready = lambda state: serve_ready(backend, state, heartbeat_journal=control.journal)
             if "windows_transition_observer" not in p:
+                if args.command == "transition-rearm":
+                    raise TransitionBlocked("production_transition_observer_required")
                 return control.advance(on_ready=on_ready)
             from .initial_lease_service import native_transition_observer
             with native_transition_observer(backend) as observe:
                 backend.transition_observer = observe
                 try:
+                    if args.command == "transition-rearm":
+                        with exclusive(journal.with_suffix(".lock")):
+                            state = control.journal.read()
+                            return serve_ready(backend, state, arm=True, heartbeat_journal=control.journal)
                     return control.advance(on_ready=on_ready)
                 finally:
                     backend.transition_observer = None
@@ -173,7 +180,7 @@ def run(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("authenticate", "initialize", "advance", "serve", "stage-rejoin",
-                                            "check-rejoin", "transition-serve"))
+                                            "check-rejoin", "transition-serve", "transition-rearm"))
     parser.add_argument("--plan", required=True)
     parser.add_argument("--approval", required=True)
     parser.add_argument("--journal")
