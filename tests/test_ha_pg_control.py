@@ -44,15 +44,17 @@ class TransitionServiceStartTests(unittest.TestCase):
         pin = hashlib.sha256(raw).hexdigest()
         controller = {"plan": raw, "plan_sha256": pin}
         started = {"controller_plan_sha256": pin, "service_pid": 123,
-                   "service_created_ticks": "638674752000000000", "service_image_path_sha256": image}
+                   "service_created_ticks": "638674752000000000", "service_image_path_sha256": image,
+                   "python_command_sha256": "e"*64}
         root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
         generation = ServingGeneration("B", 2, 3, 2)
         args = dict(root=root, attempt="a"*64, handoff_sha256="b"*64, old_vm_id=vm_id,
-                    old_disk_paths_sha256="c"*64, python_command_sha256="e"*64)
+                    old_disk_paths_sha256="c"*64)
         records = transition_authority_records(controller, started, generation, **args)
         body = json.loads(records["binding"])
         self.assertEqual((body["old_vm_id"], body["target"], body["generation"], body["timeline"]), (vm_id, "B", 2, 3))
         self.assertEqual(body["python_path_sha256"], hashlib.sha256(python.encode()).hexdigest())
+        self.assertEqual(body["python_command_sha256"], started["python_command_sha256"])
         self.assertEqual(body["state_path"], root + r"\journal\controller-state.json")
         self.assertEqual(json.loads(records["grant"]), {
             "attempt_id": args["attempt"], "handoff_sha256": args["handoff_sha256"],
@@ -93,7 +95,8 @@ class TransitionServiceStartTests(unittest.TestCase):
                       "PreflightPath": r"C:\fixture\preflight.ps1", "ScmVerifierPath": r"C:\fixture\scm.cs"}
         windows = MagicMock()
         observed = {"transition_service_observed": True, "service_pid": 123, "controller_plan_sha256": pin,
-                    "service_created_ticks": "638674752000000000", "service_image_path_sha256": image}
+                    "service_created_ticks": "638674752000000000", "service_image_path_sha256": image,
+                   "python_command_sha256": "e"*64}
         windows.powershell.side_effect = [TimeoutError("lost reply"), observed]
         start = WindowsTransitionServiceStart(windows, hashlib.sha256(script.read_bytes()).hexdigest())
         deadline = time.monotonic() + 30

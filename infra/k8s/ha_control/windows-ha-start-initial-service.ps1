@@ -159,8 +159,14 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
         if ($confirmed.State -cne 'Running' -or $confirmed.Name -cne $ServiceName -or
             $confirmed.ProcessId -ne $running.ProcessId -or $confirmed.PathName -cne $running.PathName -or
             $process.HasExited) { throw 'initial_service_transition_start_unconfirmed' }
+        $statePath = Join-Path $intentRoot.FullName 'journal\controller-state.json'
+        $command = '"{0}" -I -B "{1}" {2} --plan "{3}" --approval "{4}" --journal "{5}"' -f
+            $scope.python_path,$scope.launcher_path,$pins.mode,$PlanPath,$ApprovalPath,$statePath
+        $commandHasher = [Security.Cryptography.SHA256]::Create()
+        try { $commandSha = [BitConverter]::ToString($commandHasher.ComputeHash($encoder.GetBytes($command))).Replace('-','').ToLowerInvariant() }
+        finally { $commandHasher.Dispose() }
         $result = [ordered]@{service_pid=$running.ProcessId;controller_plan_sha256=$PlanSha256;
-            service_created_ticks=$created;service_image_path_sha256=$pins.service_image_path_sha256}
+            service_created_ticks=$created;service_image_path_sha256=$pins.service_image_path_sha256;python_command_sha256=$commandSha}
         $result[$(if ($ObserveTransition) {'transition_service_observed'} else {'transition_service_started'})] = $true
         $result | ConvertTo-Json -Compress
     } finally { $process.Dispose() }

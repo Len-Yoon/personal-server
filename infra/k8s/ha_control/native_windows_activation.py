@@ -411,8 +411,10 @@ class WindowsTransitionServiceStart:
         receipt = "transition_service_observed" if observe else "transition_service_started"
         bridge._need(type(result) is dict and set(result) == {
             receipt, "service_pid", "controller_plan_sha256", "service_created_ticks", "service_image_path_sha256",
+            "python_command_sha256",
         } and result[receipt] is True and type(result["service_pid"]) is int
             and 0 < result["service_pid"] <= 2147483647
+            and bridge._hash(result["python_command_sha256"])
             and result["controller_plan_sha256"] == controller["plan_sha256"]
             and type(result["service_created_ticks"]) is str
             and re.fullmatch(r"[1-9][0-9]{1,19}", result["service_created_ticks"])
@@ -422,19 +424,20 @@ class WindowsTransitionServiceStart:
 
 
 def transition_authority_records(controller, started, generation, *, root, attempt, handoff_sha256,
-                                 old_vm_id, old_disk_paths_sha256, python_command_sha256):
+                                 old_vm_id, old_disk_paths_sha256):
     """Render the two protected inputs consumed by the live Windows lease verifier."""
     error = "native_transition_authority_record_invalid"
     generation.validate()
     bridge._need(generation.epoch > 1 and type(root) is str and re.fullmatch(
         r"C:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}", root)
-        and all(bridge._hash(pin) for pin in (attempt, handoff_sha256, old_disk_paths_sha256, python_command_sha256))
+        and all(bridge._hash(pin) for pin in (attempt, handoff_sha256, old_disk_paths_sha256))
         and type(old_vm_id) is str and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", old_vm_id)
         and old_vm_id != "00000000-0000-0000-0000-000000000000"
         and type(controller) is dict and set(controller) == {"plan", "plan_sha256"}
         and type(controller["plan"]) is bytes and 0 < len(controller["plan"]) <= 1048576
         and bridge._digest(controller["plan"]) == controller["plan_sha256"]
         and type(started) is dict and started.get("controller_plan_sha256") == controller["plan_sha256"]
+        and bridge._hash(started.get("python_command_sha256"))
         and type(started.get("service_pid")) is int and 0 < started["service_pid"] <= 2147483647
         and type(started.get("service_created_ticks")) is str
         and re.fullmatch(r"[1-9][0-9]{1,19}", started["service_created_ticks"]), error)
@@ -461,7 +464,7 @@ def transition_authority_records(controller, started, generation, *, root, attem
         "attempt_id": attempt, "controller_plan_sha256": controller["plan_sha256"],
         "generation": generation.epoch, "legacy_plan_sha256": observer["legacy_plan_sha256"],
         "old_disk_paths_sha256": old_disk_paths_sha256, "old_vm_id": old_vm_id,
-        "python_command_sha256": python_command_sha256, "python_path_sha256": bridge._digest(python_path.encode()),
+        "python_command_sha256": started["python_command_sha256"], "python_path_sha256": bridge._digest(python_path.encode()),
         "service_created_ticks": started["service_created_ticks"], "service_image_path_sha256": image,
         "service_name": service, "service_pid": started["service_pid"],
         "state_path": root + r"\journal\controller-state.json", "target": generation.primary, "timeline": generation.timeline,
