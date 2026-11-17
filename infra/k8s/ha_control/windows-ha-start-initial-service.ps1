@@ -11,6 +11,7 @@ param(
     [string]$PreflightSha256,
     [string]$ScmVerifierPath,
     [string]$ExpectedActivationIntentSha256,
+    [switch]$StartTransition,
     [switch]$Go
 )
 $ErrorActionPreference = 'Stop'
@@ -52,11 +53,78 @@ function Assert-Executable([string]$Path, [string]$Sha) {
     }
 }
 
+function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Approval) {
+    $scope = $Plan.windows_enforced
+    $pins = $Plan.transition_service_start
+    if ($Plan.profile -cne 'enforced-vm-v1' -or $Plan.generation -lt 2 -or
+        $Plan.PSObject.Properties['initial_wsl_cutover'] -or -not $Plan.PSObject.Properties['windows_transition_observer'] -or
+        $scope.service_name -cne $ServiceName -or $scope.service_image_sha256 -cne $ServiceHostSha256 -or
+        $pins.preflight_sha256 -cne $PreflightSha256 -or $pins.mode -cnotin @('transition-serve','transition-rearm') -or
+        $Approval.schema_version -ne 3 -or $Approval.profile -cne 'enforced-vm-v1' -or $Approval.action -cne 'ha-transition' -or
+        $Approval.authority_kind -cne 'installed-runtime' -or $Approval.plan_sha256 -cne $PlanSha256 -or
+        $Approval.installation_id -cne $Plan.installation_id -or $Approval.source_commit -cne $Plan.source_commit -or
+        $Approval.policy_sha256 -cne $scope.policy_sha256) { throw 'initial_service_transition_scope' }
+    $sid = ([Security.Principal.NTAccount]::new('NT SERVICE',$ServiceName)).
+        Translate([Security.Principal.SecurityIdentifier]).Value
+    if ($scope.service_sid -cne $sid) { throw 'initial_service_transition_scope' }
+    Assert-Executable $scope.python_path $scope.python_sha256
+    Assert-Executable $scope.launcher_path $scope.launcher_sha256
+    Assert-Executable $PreflightPath $PreflightSha256
+    Assert-Executable $ScmVerifierPath $pins.scm_verifier_sha256
+    $hostRoot = [IO.Path]::GetDirectoryName($HostPath)
+    $settings = [ordered]@{format='enforced-service-v1';service_name=$ServiceName;service_sid=$sid;
+        python_path=$scope.python_path;python_sha256=$scope.python_sha256;launcher_path=$scope.launcher_path;
+        launcher_sha256=$scope.launcher_sha256;plan_path=$PlanPath;plan_sha256=$PlanSha256;
+        approval_path=$ApprovalPath;approval_sha256=$ApprovalSha256;mode=$pins.mode;host_sha256=$ServiceHostSha256}
+    $lines = @($settings.GetEnumerator() | ForEach-Object { $_.Key + '=' + $_.Value })
+    $encoder = [Text.UTF8Encoding]::new($false,$true)
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        $argsBytes = $encoder.GetBytes(($lines -join [char]10) + [char]10)
+        $argsSha = [BitConverter]::ToString($hash.ComputeHash($argsBytes)).Replace('-','').ToLowerInvariant()
+        $preflight = [IO.File]::ReadAllBytes($PreflightPath)
+        $scmSource = [IO.File]::ReadAllBytes($ScmVerifierPath)
+        if ([BitConverter]::ToString($hash.ComputeHash($preflight)).Replace('-','').ToLowerInvariant() -cne $PreflightSha256 -or
+            [BitConverter]::ToString($hash.ComputeHash($scmSource)).Replace('-','').ToLowerInvariant() -cne $pins.scm_verifier_sha256 -or
+            [BitConverter]::ToString($hash.ComputeHash($encoder.GetBytes($Current.PathName))).Replace('-','').ToLowerInvariant() -cne
+                $pins.service_image_path_sha256) { throw 'initial_service_transition_scope' }
+    } finally { $hash.Dispose() }
+    $preflightBlock = [ScriptBlock]::Create($encoder.GetString($preflight))
+    . $preflightBlock -HostRoot $hostRoot -HostSha256 $ServiceHostSha256 -ArgsSha256 $argsSha -ServiceSid $sid -TrustedAdminSids $pins.trusted_admin_sids
+    $checked = ConvertFrom-Json -InputObject (Test-EnforcedServicePreflight)
+    if ($checked.scope -cne 'pre_StartService_inventory_and_ACL' -or $checked.host_sha256 -cne $ServiceHostSha256 -or
+        $checked.args_sha256 -cne $argsSha -or $checked.execution_performed -isnot [bool] -or $checked.execution_performed) {
+        throw 'initial_service_preflight_unconfirmed'
+    }
+    if ('TrustedStoppedV1.Native' -as [type]) { throw 'initial_service_scm_verifier_already_loaded' }
+    Add-Type -TypeDefinition ($encoder.GetString($scmSource)) -ErrorAction Stop
+    $scm = [TrustedStoppedV1.Native]::new()
+    try {
+        $scm.OpenForRead($ServiceName)
+        [TrustedStoppedV1.Contract]::Inputs($Plan.installation_id,$ServiceName,$HostPath)
+        [TrustedStoppedV1.Contract]::Verify($scm.Read($ServiceName),$ServiceName,$Current.PathName)
+    } finally { $scm.Dispose() }
+    Start-Service -Name $ServiceName -ErrorAction Stop
+    $running = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'") -OperationTimeoutSec 5
+    if ($running.State -cne 'Running' -or $running.Name -cne $ServiceName -or $running.ProcessId -lt 1 -or
+        $running.PathName -cne $Current.PathName) { throw 'initial_service_transition_start_unconfirmed' }
+    $process = Get-Process -Id $running.ProcessId -ErrorAction Stop
+    try {
+        if ($process.HasExited -or $process.SessionId -ne 0 -or $process.MainModule.FileName -ine $HostPath) {
+            throw 'initial_service_transition_start_unconfirmed'
+        }
+        [ordered]@{transition_service_started=$true;service_pid=$running.ProcessId;controller_plan_sha256=$PlanSha256} |
+            ConvertTo-Json -Compress
+    } finally { $process.Dispose() }
+}
+
 try {
     if (-not $Go -or $PSVersionTable.PSEdition -cne 'Desktop' -or
         $ServiceName -cnotmatch '\AN100HA_[a-f0-9]{24}_controller\z' -or
         $ServiceHostSha256 -cnotmatch $hashPattern -or $PlanSha256 -cnotmatch $hashPattern -or
-        $ApprovalSha256 -cnotmatch $hashPattern -or $ExpectedActivationIntentSha256 -cnotmatch $hashPattern) {
+        $ApprovalSha256 -cnotmatch $hashPattern -or
+        ($StartTransition -and ($ExpectedActivationIntentSha256 -cne '' -or $BindingPath -cne '')) -or
+        (-not $StartTransition -and $ExpectedActivationIntentSha256 -cnotmatch $hashPattern)) {
         throw 'initial_service_scope'
     }
     $current = Get-CimInstance Win32_Service -Filter ("Name='" + $ServiceName + "'")
@@ -70,6 +138,10 @@ try {
     Assert-Executable $hostPath $ServiceHostSha256
     $plan = Read-PinnedJson $PlanPath $PlanSha256
     $approval = Read-PinnedJson $ApprovalPath $ApprovalSha256
+    if ($StartTransition) {
+        Start-PreparedTransitionService $current $hostPath $plan $approval
+        return
+    }
     $scope = $plan.windows_enforced
     $startScope = $plan.initial_service_start
     if ($plan.initial_cutover_handoff.activation_intent_sha256 -cne $ExpectedActivationIntentSha256) {
