@@ -12,6 +12,27 @@ from infra.k8s.ha_control import enforced_windows, initial_lease_service, window
 
 
 class WindowsLeaseResponseBudgetTests(unittest.TestCase):
+    def test_replacement_vm_installation_pin_reaches_warmup_and_lease_sampling(self):
+        scripts = Path(__file__).resolve().parents[1] / "infra/k8s/ha_control"
+        server = (scripts / "windows-ha-lease-proof-server.ps1").read_text()
+        callback = (scripts / "windows-ha-wsl-lease-observer.ps1").read_text()
+        for source, config, pipeline, execute in (
+            (server, "$inputConfig", "$vmInit", "$warm = $vmInit.Invoke()"),
+            (callback, "$script:ClosureInput", "$vmObserver", "$vmPending = $vmObserver.BeginInvoke()"),
+        ):
+            with self.subTest(config=config):
+                steps = (
+                    ".AddCommand('Get-FixedVmObserverSnapshot')",
+                    f"'vm_b_installation_id' -cin {config}.PSObject.Properties.Name",
+                    f"{pipeline}.AddParameter('InstallationB', {config}.vm_b_installation_id)",
+                    execute,
+                )
+                positions = [source.index(step) for step in steps]
+                self.assertEqual(positions, sorted(positions))
+        self.assertIn("$InputConfig.vm_b_installation_id -isnot [string]", callback)
+        initial_stage = (scripts / "windows-ha-stage-initial-activation.ps1").read_text()
+        self.assertNotIn("vm_b_installation_id", initial_stage)
+
     def test_process_inventory_follows_task_closure_and_precedes_marker_readback(self):
         scripts = Path(__file__).resolve().parents[1] / "infra/k8s/ha_control"
         callback = (scripts / "windows-ha-wsl-lease-observer.ps1").read_text()

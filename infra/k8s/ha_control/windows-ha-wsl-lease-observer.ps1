@@ -10,6 +10,11 @@ function Initialize-HaLeaseObservation($InputConfig, [string]$PlanText, [string]
             $InputConfig.kubernetes_reader -cne 'local-https-v1') { throw 'lease_proof_callback_scope' }
         $fields = @($fields | Where-Object { $_ -cne 'kubernetes_reader' })
     }
+    if ('vm_b_installation_id' -cin $fields) {
+        if ($InputConfig.vm_b_installation_id -isnot [string] -or
+            $InputConfig.vm_b_installation_id -cnotmatch '\A[a-f0-9]{64}\z') { throw 'lease_proof_callback_scope' }
+        $fields = @($fields | Where-Object { $_ -cne 'vm_b_installation_id' })
+    }
     if ('reactivation_plan_sha256' -cin $fields) {
         if ($InputConfig.reactivation_plan_sha256 -cnotmatch '\A[a-f0-9]{64}\z') { throw 'lease_proof_callback_scope' }
         $fields = @($fields | Where-Object { $_ -cne 'reactivation_plan_sha256' })
@@ -136,6 +141,9 @@ function Get-HaLeaseProof($Context) {
         $null = $vmObserver.AddCommand('Get-FixedVmObserverSnapshot').
             AddArgument($script:ClosureInput.installation_id).AddArgument($script:ClosureVmA).
             AddArgument($script:ClosureVmB).AddArgument($Context.Progress)
+        if ('vm_b_installation_id' -cin $script:ClosureInput.PSObject.Properties.Name) {
+            $null = $vmObserver.AddParameter('InstallationB', $script:ClosureInput.vm_b_installation_id)
+        }
         $vmPending = $vmObserver.BeginInvoke()
         # The collector only reads. Start it before the Windows checks so the
         # same challenge can observe both sides within one deadline.

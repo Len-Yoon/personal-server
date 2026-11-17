@@ -343,6 +343,9 @@ try {
         $null = $vmInit.AddScript($vmObserverText, $false).AddStatement()
         $null = $vmInit.AddCommand('Get-FixedVmObserverSnapshot').
             AddArgument($inputConfig.installation_id).AddArgument([guid]$inputConfig.vm_a).AddArgument([guid]$inputConfig.vm_b)
+        if ('vm_b_installation_id' -cin $inputConfig.PSObject.Properties.Name) {
+            $null = $vmInit.AddParameter('InstallationB', $inputConfig.vm_b_installation_id)
+        }
         $warm = $vmInit.Invoke()
         if ($vmInit.HadErrors -or $warm.Count -ne 1) { throw 'lease_proof_vm_init' }
     } finally { $vmInit.Dispose() }
