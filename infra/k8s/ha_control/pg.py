@@ -216,6 +216,14 @@ class PgBackend:
                 or state["generation"] != p["generation"] or state["timeline"] != p["timeline"]):
             _deny("controller_plan_state_mismatch")
         self._promotion_replay_floor()
+        if self.plan.get("source_lease_close_required", False) and state["phase"] != "fencing":
+            self._planned_promotion_floor(state)
+
+    def _planned_promotion_floor(self, state):
+        checkpoint = state.get("source_fence_wal")
+        if type(checkpoint) is not int or not 0 < checkpoint < 2**64:
+            _deny("source_fence_wal_record_required")
+        return max(checkpoint, self._promotion_replay_floor())
 
     def _promotion_replay_floor(self):
         if self.plan.get("profile") != "enforced-vm-v1" and "required_replay_lsn" not in self.plan:
@@ -453,11 +461,33 @@ class PgBackend:
         self._promotion_intent(state)
         if value["actual_timeline"] <= state["timeline"]:
             _deny("promoted_timeline_required")
+        if state["phase"] == "promoting" and self.plan.get("source_lease_close_required", False):
+            self._prove_promotion_fork(value, state)
         if (state["phase"] == "promoting" and value["epoch"] < state["generation"]
                 and value["primary"] == state["old"] and value["partner"] == state["target"]
                 and value["timeline"] == state["timeline"]):
             return  # The one durable promotion intent may publish new history.
         self._recorded_primary(value, state)
+
+    def _prove_promotion_fork(self, value, state):
+        timeline = value["actual_timeline"]
+        if type(timeline) is not int or not 1 < timeline < 2**32:
+            _deny("promotion_fork_unconfirmed")
+        node = state["target"]
+        with self._connection(node, replication=True) as connection:
+            identity = connection.execute("IDENTIFY_SYSTEM").fetchone()
+            if (not identity or len(identity) != 4 or identity[0] != value["system_id"]
+                    or identity[1] != timeline or identity[3] != self.plan["pg_nodes"][node]["dbname"]):
+                _deny("promotion_fork_unconfirmed")
+            history = connection.execute(f"TIMELINE_HISTORY {timeline}").fetchone()
+        if (not history or len(history) != 2 or history[0] != f"{timeline:08X}.history"
+                or not isinstance(history[1], str) or not 0 < len(history[1]) <= 1048576):
+            _deny("promotion_fork_unconfirmed")
+        entries = [line.split() for line in history[1].splitlines() if line.strip() and not line.lstrip().startswith("#")]
+        if (not entries or len(entries[-1]) < 2 or entries[-1][0] != str(state["timeline"])
+                or not re.fullmatch(r"[0-9A-F]{1,8}/[0-9A-F]{1,8}", entries[-1][1])
+                or self._lsn(entries[-1][1]) < self._planned_promotion_floor(state)):
+            _deny("promotion_fork_unconfirmed")
 
     def _best_effort_revoke(self, state):
         self.validated = None
@@ -528,9 +558,12 @@ class PgBackend:
 
     def fenced(self, state):
         self.bind(state)
-        return self.fence_adapter.fenced(state)
+        stopped = self.fence_adapter.fenced(state)
+        if stopped and self.plan.get("source_lease_close_required", False):
+            self._planned_promotion_floor(state)
+        return stopped
 
-    def fence(self, state):
+    def fence(self, state, *, record_source_wal=None):
         self.bind(state)
         if self.plan.get("source_lease_close_required", False):
             # Before inducing an outage on a running VM, prove the old
@@ -552,9 +585,12 @@ class PgBackend:
                     _deny("source_write_authority_not_closed")
                 peer = self._read(target, state)
                 self._candidate(peer, state)
-                if (peer["epoch"] != value["epoch"]
-                        or self._lsn(peer["replay"]) < max(self._lsn(value["flush"]), self._promotion_replay_floor())):
+                floor = max(self._lsn(value["flush"]), self._promotion_replay_floor(), state.get("source_fence_wal", 0))
+                if peer["epoch"] != value["epoch"] or self._lsn(peer["replay"]) < floor:
                     _deny("source_final_wal_not_replayed")
+                if record_source_wal is None:
+                    _deny("source_fence_wal_record_required")
+                record_source_wal(floor)
                 # Keep the role lock through dispatch. Closing the connection
                 # releases it if the original server remains reachable.
                 return self.fence_adapter.fence(state)
@@ -582,7 +618,8 @@ class PgBackend:
             value = self._observe(connection, state["target"], state)
             if value["recovery"]:
                 self._candidate(value, state)
-                floor = self._promotion_replay_floor()
+                floor = (self._planned_promotion_floor(state) if self.plan.get("source_lease_close_required", False)
+                         else self._promotion_replay_floor())
                 if floor is not None and self._lsn(value["replay"]) < floor:
                     _deny("promotion_replay_floor_not_reached")
                 started = time.monotonic()

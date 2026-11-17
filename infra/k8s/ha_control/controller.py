@@ -63,7 +63,8 @@ class Journal:
                     or (sys.platform != "win32" and (info.st_uid != os.geteuid() or info.st_mode & 0o077))):
                 raise ValueError()
             value = json.loads(self.path.read_text())
-            if (set(value) != {"cluster", "generation", "old", "target", "phase", "attempts", "timeline"}
+            if (set(value) - {"source_fence_wal"} != {"cluster", "generation", "old", "target", "phase", "attempts", "timeline"}
+                    or ("source_fence_wal" in value and not self._valid_wal(value["source_fence_wal"]))
                     or value["old"] not in {"A", "B"} or value["target"] not in {"A", "B"}
                     or value["old"] == value["target"] or not isinstance(value["cluster"], str)
                     or not value["cluster"] or type(value["generation"]) is not int or value["generation"] < 1
@@ -74,6 +75,17 @@ class Journal:
             return value
         except (OSError, ValueError, TypeError):
             raise TransitionBlocked("controller_journal_invalid") from None
+
+    @staticmethod
+    def _valid_wal(value):
+        return type(value) is int and 0 < value < 2**64
+
+    def record_source_fence_wal(self, state, wal):
+        if state["phase"] != "fencing" or not self._valid_wal(wal) or self.read() != state:
+            raise TransitionBlocked("source_fence_wal_record_invalid")
+        updated = state | {"source_fence_wal": max(state.get("source_fence_wal", 0), wal)}
+        self.save(updated)
+        state.update(updated)
 
     @staticmethod
     def _replace_windows(temporary, path, retry_until):
@@ -157,7 +169,9 @@ class Controller:
                 self.backend.close(state)
                 if state["phase"] == "fencing":
                     if not self.backend.fenced(state):
-                        self.backend.fence(state)
+                        self.backend.fence(
+                            state, record_source_wal=lambda wal: self.journal.record_source_fence_wal(state, wal),
+                        )
                     if not self.backend.fenced(state):
                         raise TransitionBlocked("positive_fence_required")
                     state["phase"] = "promoting"

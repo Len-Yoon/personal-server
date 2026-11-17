@@ -234,10 +234,12 @@ class PGControlTests(unittest.TestCase):
                 active.pop()
 
         fence = self.fence.fence
+        record = MagicMock()
 
         def stop_while_locked(current):
             self.assertEqual(active, ["A"])
             self.peer.execute.assert_any_call("SELECT pg_advisory_xact_lock(%s)", (ROLE_LOCK,))
+            record.assert_called_once_with(0x20)
             return fence(current)
 
         with patch.object(self.backend, "_connection", side_effect=source_connection), patch.object(
@@ -247,10 +249,13 @@ class PGControlTests(unittest.TestCase):
         ) as stop:
             observe_peer.return_value = dict(self.candidate(), replay="0/1F")
             with self.assertRaisesRegex(TransitionBlocked, "source_final_wal_not_replayed"):
-                self.backend.fence(state)
+                self.backend.fence(state, record_source_wal=record)
             stop.assert_not_called()
+            record.assert_not_called()
             observe_peer.return_value = self.candidate()
-            self.backend.fence(state)
+            with self.assertRaisesRegex(TransitionBlocked, "source_fence_wal_record_required"):
+                self.backend.fence(state)
+            self.backend.fence(state, record_source_wal=record)
         self.assertTrue(self.fence.stopped)
         self.assertEqual(active, [])
 
@@ -273,6 +278,40 @@ class PGControlTests(unittest.TestCase):
             with self.assertRaisesRegex(TransitionBlocked, "promotion_replay_floor_not_reached"):
                 self.backend.promote(self.state)
         self.primary.execute.assert_not_called()
+
+    def test_planned_promotion_after_restart_requires_recorded_wal(self):
+        self.backend.plan.update(profile="enforced-vm-v1", required_replay_lsn="0/20",
+                                 source_lease_close_required=True)
+        state = dict(self.state, phase="promoting")
+        self.primary, self.peer = MagicMock(), MagicMock()
+        with self.assertRaisesRegex(TransitionBlocked, "source_fence_wal_record_required"):
+            self.backend.fenced(dict(state, phase="fencing"))
+        with patch.object(self.backend, "_connection", side_effect=self.fake_connection), patch.object(
+            self.backend, "_observe", return_value=self.candidate(),
+        ):
+            with self.assertRaisesRegex(TransitionBlocked, "source_fence_wal_record_required"):
+                self.backend.promote(state)
+            with self.assertRaisesRegex(TransitionBlocked, "promotion_replay_floor_not_reached"):
+                self.backend.promote(state | {"source_fence_wal": 0x21})
+        self.primary.execute.assert_not_called()
+
+    def test_reconciled_primary_must_fork_from_the_source_at_the_recorded_wal(self):
+        self.backend.plan.update(profile="enforced-vm-v1", required_replay_lsn="0/20",
+                                 source_lease_close_required=True)
+        state = dict(self.state, phase="promoting", source_fence_wal=0x30)
+        promoted = dict(self.candidate(), recovery=False, actual_timeline=2)
+        connection = MagicMock()
+        for history in ("1\t0/2F\tbefore recorded WAL\n", "3\t0/30\twrong parent\n",
+                        "# no parent\n", "1\t0/30\tvalid parent\n"):
+            connection.execute.return_value.fetchone.side_effect = [
+                ("123", 2, "0/80", "ha"), ("00000002.history", history),
+            ]
+            with patch.object(self.backend, "_connection", return_value=nullcontext(connection)):
+                if history.startswith("1\t0/30"):
+                    self.backend._promoted_history(promoted, state)
+                else:
+                    with self.assertRaisesRegex(TransitionBlocked, "promotion_fork_unconfirmed"):
+                        self.backend._promoted_history(promoted, state)
 
     def test_disconnected_standby_uses_replay_timeline_without_substituting_flush(self):
         self.backend.plan["required_replay_lsn"] = "0/21"

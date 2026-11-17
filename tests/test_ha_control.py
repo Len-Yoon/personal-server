@@ -166,7 +166,7 @@ class Backend:
 
     def close(self, state): self.actions.append("close"); self.ready = False
     def fenced(self, state): return self.stopped
-    def fence(self, state):
+    def fence(self, state, *, record_source_wal=None):
         self.actions.append("fence")
         if self.failure != "fence": self.stopped = True
         if self.failure == "fence_unknown": raise OSError("unknown")
@@ -240,6 +240,24 @@ class ControlTests(unittest.TestCase):
         with self.assertRaises(TransitionBlocked): self.control.advance()
         self.backend.failure = None
         Controller(self.path, self.backend).advance()
+        self.assertEqual(self.backend.actions.count("fence"), 1)
+
+    def test_wal_is_saved_before_stop_and_survives_a_lost_stop_response(self):
+        stop = self.backend.fence
+        self.backend.failure = "fence_unknown"
+
+        def stop_with_record(state, *, record_source_wal):
+            record_source_wal(0x30)
+            record_source_wal(0x20)
+            self.assertEqual(Journal(self.path).read()["source_fence_wal"], 0x30)
+            stop(state)
+
+        with patch.object(self.backend, "fence", side_effect=stop_with_record):
+            with self.assertRaises(TransitionBlocked):
+                self.control.advance()
+        self.backend.failure = None
+        state = Controller(self.path, self.backend).advance()
+        self.assertEqual(state["source_fence_wal"], 0x30)
         self.assertEqual(self.backend.actions.count("fence"), 1)
 
     def test_unknown_promotion_is_reobserved_without_second_promotion(self):

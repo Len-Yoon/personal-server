@@ -143,7 +143,7 @@ class LocalBackend:
         value = json.loads(self.f.docker("container", "inspect", self.old))[0]
         return value["State"]["Running"] is False and value["HostConfig"]["RestartPolicy"]["Name"] in {"no", ""}
 
-    def fence(self, state):
+    def fence(self, state, *, record_source_wal=None):
         self.f.docker("stop", "--time", "5", self.old)
         self.f.docker("network", "disconnect", self.f.network, self.old)
 
