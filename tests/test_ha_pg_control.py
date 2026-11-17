@@ -22,6 +22,7 @@ from ha_control.native_guest_activation import ServingGeneration
 from ha_control.native_windows_activation import (
     WindowsActivationLease, WindowsTransitionLease, WindowsTransitionServiceStart, bind_transition_observer_plan, publish_transition_observer_config,
     prepare_transition_observer_plan, publish_transition_observer_launch, start_transition_observer,
+    transition_authority_records,
 )
 from ha_control.native_stdio_bridge import BridgeRejected
 from ha_control.pg import PgBackend, ROLE_LOCK
@@ -29,6 +30,37 @@ from ha_control import cli, scm_pg_auth_probe
 
 
 class TransitionServiceStartTests(unittest.TestCase):
+    def test_live_authority_records_bind_previous_vm_and_running_controller(self):
+        image = "7"*64
+        vm_id = "11111111-2222-3333-4444-555555555555"
+        python = r"C:\Python311\python.exe"
+        observer = {"legacy_plan_sha256": "8"*64}
+        plan = {"profile": "enforced-vm-v1", "generation": 2, "node": "A",
+                "windows_enforced": {"service_name": "N100HA_" + "1"*24 + "_controller",
+                                     "vm_id": vm_id, "python_path": python},
+                "windows_transition_observer": observer,
+                "transition_service_start": {"service_image_path_sha256": image}}
+        raw = json.dumps(plan).encode()
+        pin = hashlib.sha256(raw).hexdigest()
+        controller = {"plan": raw, "plan_sha256": pin}
+        started = {"controller_plan_sha256": pin, "service_pid": 123,
+                   "service_created_ticks": "638674752000000000", "service_image_path_sha256": image}
+        root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
+        generation = ServingGeneration("B", 2, 3, 2)
+        args = dict(root=root, attempt="a"*64, handoff_sha256="b"*64, old_vm_id=vm_id,
+                    old_disk_paths_sha256="c"*64, python_command_sha256="e"*64)
+        records = transition_authority_records(controller, started, generation, **args)
+        body = json.loads(records["binding"])
+        self.assertEqual((body["old_vm_id"], body["target"], body["generation"], body["timeline"]), (vm_id, "B", 2, 3))
+        self.assertEqual(body["python_path_sha256"], hashlib.sha256(python.encode()).hexdigest())
+        self.assertEqual(body["state_path"], root + r"\journal\controller-state.json")
+        self.assertEqual(json.loads(records["grant"]), {
+            "attempt_id": args["attempt"], "handoff_sha256": args["handoff_sha256"],
+            "service_instance_sha256": hashlib.sha256(records["binding"]).hexdigest(),
+        })
+        with self.assertRaisesRegex(BridgeRejected, "authority_record_invalid"):
+            transition_authority_records(controller, started, generation, **(args | {"old_vm_id": "9"*8 + vm_id[8:]}))
+
     def test_native_start_records_durable_intent_before_scm(self):
         script = (ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1").read_text()
         scope = script[script.index("function Start-PreparedTransitionService"):script.index("    if (-not $Go")]

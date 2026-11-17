@@ -421,6 +421,59 @@ class WindowsTransitionServiceStart:
         return result
 
 
+def transition_authority_records(controller, started, generation, *, root, attempt, handoff_sha256,
+                                 old_vm_id, old_disk_paths_sha256, python_command_sha256):
+    """Render the two protected inputs consumed by the live Windows lease verifier."""
+    error = "native_transition_authority_record_invalid"
+    generation.validate()
+    bridge._need(generation.epoch > 1 and type(root) is str and re.fullmatch(
+        r"C:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}", root)
+        and all(bridge._hash(pin) for pin in (attempt, handoff_sha256, old_disk_paths_sha256, python_command_sha256))
+        and type(old_vm_id) is str and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", old_vm_id)
+        and old_vm_id != "00000000-0000-0000-0000-000000000000"
+        and type(controller) is dict and set(controller) == {"plan", "plan_sha256"}
+        and type(controller["plan"]) is bytes and 0 < len(controller["plan"]) <= 1048576
+        and bridge._digest(controller["plan"]) == controller["plan_sha256"]
+        and type(started) is dict and started.get("controller_plan_sha256") == controller["plan_sha256"]
+        and type(started.get("service_pid")) is int and 0 < started["service_pid"] <= 2147483647
+        and type(started.get("service_created_ticks")) is str
+        and re.fullmatch(r"[1-9][0-9]{1,19}", started["service_created_ticks"]), error)
+    try:
+        plan = json.loads(controller["plan"], object_pairs_hook=bridge._pairs, parse_constant=bridge._reject_constant)
+    except (ValueError, UnicodeError, RecursionError):
+        raise bridge.BridgeRejected(error) from None
+    bridge._need(type(plan) is dict and plan.get("profile") == "enforced-vm-v1"
+                 and type(plan.get("generation")) is int and plan["generation"] == generation.epoch
+                 and plan.get("node") == generation.partner
+                 and all(type(plan.get(field)) is dict for field in
+                         ("windows_enforced", "windows_transition_observer", "transition_service_start")), error)
+    scope = plan["windows_enforced"]
+    observer = plan["windows_transition_observer"]
+    image = plan["transition_service_start"].get("service_image_path_sha256")
+    service = scope.get("service_name")
+    python_path = scope.get("python_path")
+    bridge._need(bridge._hash(image) and started.get("service_image_path_sha256") == image
+                 and type(service) is str and re.fullmatch(r"N100HA_[a-f0-9]{24}_controller", service)
+                 and type(python_path) is str and python_path.isascii()
+                 and bridge._hash(observer.get("legacy_plan_sha256"))
+                 and scope.get("vm_id") == old_vm_id, error)
+    binding = bridge._bytes({
+        "attempt_id": attempt, "controller_plan_sha256": controller["plan_sha256"],
+        "generation": generation.epoch, "legacy_plan_sha256": observer["legacy_plan_sha256"],
+        "old_disk_paths_sha256": old_disk_paths_sha256, "old_vm_id": old_vm_id,
+        "python_command_sha256": python_command_sha256, "python_path_sha256": bridge._digest(python_path.encode()),
+        "service_created_ticks": started["service_created_ticks"], "service_image_path_sha256": image,
+        "service_name": service, "service_pid": started["service_pid"],
+        "state_path": root + r"\journal\controller-state.json", "target": generation.primary, "timeline": generation.timeline,
+    })
+    pin = bridge._digest(binding)
+    return {
+        "binding_path": root + rf"\transition-service-{attempt}.json", "binding": binding,
+        "service_instance_sha256": pin, "grant_path": root + rf"\transition-grant-{attempt}.json",
+        "grant": bridge._bytes({"attempt_id": attempt, "handoff_sha256": handoff_sha256, "service_instance_sha256": pin}),
+    }
+
+
 class WindowsTransitionLease:
     """Sample the running Windows controller and the remaining writer exclusions."""
 
