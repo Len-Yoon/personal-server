@@ -1,5 +1,5 @@
 """Native-adapter unit evidence only; no Windows/N100 actions are executed."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -1461,6 +1461,28 @@ class ScmPgAuthProbeTests(unittest.TestCase):
                 probe.strict_json('{"scope":0,"scope":1}')
 
 class NativeActivationHandoffTests(unittest.TestCase):
+    def test_windows_mux_proof_is_rejected_if_pinned_files_change_during_read(self):
+        from ha_control import native_guest_ssh as ssh, native_stdio_bridge as bridge, native_windows_ssh as windows
+
+        fingerprint = 'SHA256:' + 'A' * 43
+        endpoint = ssh.SshEndpoint('host.example', 22, 'operator', 'jump', Path('/unused'),
+                                   fingerprint, fingerprint)
+        client = windows.WindowsSsh(endpoint, '/unused')
+        argv = (ssh.SSH, '-F', '/private/tmp/config', '-T', 'jump')
+        with patch.object(client, '_connection', return_value=nullcontext((argv, {'stamp': 1}))), \
+             patch.object(Path, 'is_socket', return_value=True), \
+             patch.object(windows.subprocess, 'Popen') as popen, \
+             patch.object(windows.subprocess, 'run', return_value=SimpleNamespace(returncode=0)), \
+             patch.object(ssh, '_same_files', side_effect=[True, False]), \
+             patch.object(client, '_powershell', return_value={'proof': 'read'}) as read:
+            master = popen.return_value.__enter__.return_value
+            master.poll.return_value = None
+            with client.live_authority_session(time.monotonic() + 10) as powershell:
+                with self.assertRaisesRegex(bridge.BridgeRejected, 'native_windows_ssh_local_file_changed'):
+                    powershell('sample', time.monotonic() + 6)
+            self.assertIn('ProxyCommand=/usr/bin/false', read.call_args.args[0])
+            master.terminate.assert_called_once()
+
     def test_only_long_running_wsl_cutover_uses_tolerant_ssh_keepalive(self):
         from ha_control import native_guest_ssh as ssh, native_windows_ssh as windows
 
@@ -1475,9 +1497,10 @@ class NativeActivationHandoffTests(unittest.TestCase):
              patch.object(ssh, '_ssh_config', return_value=Path('/private/tmp/ssh-config')), \
              patch.object(ssh, '_same_files', return_value=True):
             workspace.return_value.__enter__.return_value = '/private/tmp/mock-ssh'
-            with client._connection(12) as short:
+            with client._connection(12) as (short, stamps):
                 self.assertEqual(short, (ssh.SSH, '-F', '/private/tmp/ssh-config', '-T', 'jump'))
-            with client._connection(12, cutover=True) as long:
+                self.assertEqual(stamps, {Path('/unused'): None})
+            with client._connection(12, cutover=True) as (long, _):
                 self.assertEqual(long, short[:3] + ('-o', 'ServerAliveInterval=5',
                                                    '-o', 'ServerAliveCountMax=12') + short[3:])
 
@@ -1606,12 +1629,19 @@ send({'status': 'PASS'})
         observed = []
 
         @contextmanager
+        def guest_authority(_deadline):
+            observed.append('ssh_ready')
+            yield lambda _: observed.append('boundary') or 'f' * 64
+            observed.append('ssh_closed')
+
+        @contextmanager
         def open_first_write(_request, native_intent, _deadline):
             self.assertEqual(native_intent, intent)
             observed.append('open')
             yield SimpleNamespace(first_write_proof_sha256='c' * 64, service_instance_sha256='d' * 64,
-                                  assert_current=lambda _deadline, *, guest_boundary=True:
-                                  observed.append('boundary' if guest_boundary else 'current') or 'f' * 64)
+                                  guest_authority=guest_authority,
+                                  assert_current=lambda _deadline, *, guest_boundary:
+                                  observed.append('current') or 'f' * 64)
             observed.append('handover')
 
         def publish(_request, payload, _deadline):
@@ -1632,7 +1662,8 @@ send({'status': 'PASS'})
         self.assertEqual(reply.fields('activate')['service_instance_sha256'], 'd' * 64)
         with self.assertRaisesRegex(bridge.BridgeRejected, 'bridge_result_rejected'):
             reply.fields('assert_live')
-        self.assertEqual(observed, ['open', 'current', 'publish', 'boundary', 'start', 'current', 'handover'])
+        self.assertEqual(observed, ['open', 'current', 'ssh_ready', 'publish', 'boundary', 'start',
+                                    'ssh_closed', 'current', 'handover'])
 
 
         attempts = []
@@ -1662,10 +1693,14 @@ send({'status': 'PASS'})
         @contextmanager
         def transient_timeout(_request, _intent, _deadline):
             check = MagicMock(side_effect=[bridge.BridgeRejected('guest_ssh_deadline_exceeded'), 'f' * 64,
-                                      'f' * 64, 'f' * 64])
+                                      'f' * 64])
+            @contextmanager
+            def session(_deadline):
+                yield lambda _: 'f' * 64
+
             yield SimpleNamespace(first_write_proof_sha256='c' * 64, service_instance_sha256='d' * 64,
-                                  assert_current=check)
-            self.assertEqual(check.call_count, 4)
+                                  assert_current=check, guest_authority=session)
+            self.assertEqual(check.call_count, 3)
 
         custody.open_first_write = transient_timeout
         self.assertEqual(dispatcher(request, time.monotonic() + 1), reply)

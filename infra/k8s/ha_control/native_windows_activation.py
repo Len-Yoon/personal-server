@@ -137,7 +137,20 @@ class WindowsActivationLease:
         self.first_write_proof_sha256 = result['first_write_proof_sha256']
         self.service_instance_sha256 = result['service_instance_sha256']
 
-    def assert_current(self, deadline, *, guest_boundary=True):
+    @contextmanager
+    def guest_authority(self, deadline):
+        startup_deadline = min(deadline, time.monotonic() + 12)
+        with self.custody.windows.live_authority_session(startup_deadline) as powershell:
+            def check(boundary_deadline):
+                return self._assert_current(powershell, boundary_deadline)
+
+            yield check
+
+    def assert_current(self, deadline, *, guest_boundary=False):
+        bridge._need(not guest_boundary, 'native_windows_authority_session_required')
+        return self._assert_current(self.custody.windows.powershell, min(deadline, time.monotonic() + 4))
+
+    def _assert_current(self, powershell, deadline):
         custody = self.custody
         binding = custody.binding
         source = fixed_script('windows-ha-cutover-live-authority.ps1', custody.live_sha256, {
@@ -145,9 +158,7 @@ class WindowsActivationLease:
             'AttemptId': binding.attempt_id, 'PriorSha256': secrets.token_hex(32),
             'ExpectedServiceInstanceSha256': self.service_instance_sha256,
         })
-        # Guest-bound reads leave time for the guest's fresh database sample.
-        seconds = bridge.ACTIVATION_BOUNDARY_SECONDS if guest_boundary else 4
-        result = custody.windows.powershell(source, min(deadline, time.monotonic() + seconds))
+        result = powershell(source, deadline)
         keys = {'windows_generation', 'windows_generation_sha256', 'live_lease_sha256'}
         bridge._need(type(result) is dict and set(result) == keys and type(result['windows_generation']) is int
                      and result['windows_generation'] == 1

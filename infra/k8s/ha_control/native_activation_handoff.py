@@ -115,14 +115,16 @@ class ActivationDispatcher:
                     bridge._remaining(deadline)
                     proof = windows.assert_current(deadline, guest_boundary=False)
                 bridge._need(bridge._hash(proof), 'activation_dispatch_unconfirmed')
-            with _transport_stage("publish_handoff"):
-                self.custody.publish_guest_handoff(request, payload, deadline)
-            def check_guest_boundary(boundary_deadline):
-                with _transport_stage("guest_boundary_check"):
-                    return windows.assert_current(boundary_deadline)
+            with _transport_stage("guest_authority_session"), windows.guest_authority(deadline) as check:
+                with _transport_stage("publish_handoff"):
+                    self.custody.publish_guest_handoff(request, payload, deadline)
 
-            with _transport_stage("start_guest"):
-                result = self.guest(request, deadline, assert_windows_current=check_guest_boundary)
+                def check_guest_boundary(boundary_deadline):
+                    with _transport_stage("guest_boundary_check"):
+                        return check(boundary_deadline)
+
+                with _transport_stage("start_guest"):
+                    result = self.guest(request, deadline, assert_windows_current=check_guest_boundary)
             bridge._need(type(result) is bridge.Receipt and result.status == 'PASS', 'activation_dispatch_unconfirmed')
             result.fields(request.verb)
             bridge._need(result.service_instance_sha256 is None, 'activation_dispatch_unconfirmed')
