@@ -325,7 +325,7 @@ function Assert-EnforcedJournal($Config,$Policy,$Watch) {
 }
 function Assert-EnforcedParentArgv($Actual,$Config) {
     $cfg=$Config.windows_enforced
-    if($Actual.Count -lt 11 -or $Actual[4] -cnotin @('authenticate','initialize','advance','serve','transition-serve')){throw 'controller_parent_unverified'}
+    if($Actual.Count -lt 11 -or $Actual[4] -cnotin @('authenticate','initialize','advance','serve','stage-rejoin','transition-serve')){throw 'controller_parent_unverified'}
     if($Actual[4] -ceq 'authenticate' -and (-not $cfg.PSObject.Properties['config_profile'] -or
         $cfg.config_profile.acceptance_scope -cne 'isolated-predeployment' -or
         $cfg.config_profile.operational_cutover_accepted -ne $false)){throw 'isolated_pg_authentication_required'}

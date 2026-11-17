@@ -93,6 +93,11 @@ def run(args):
             backend.bind(Journal(journal).read())
             return {"status": "PASS", "phase": "fencing", "authority_opened": False}
         backend.bind(Journal(journal).read())
+        if args.command == "stage-rejoin":
+            if p.get("profile") != "enforced-vm-v1":
+                raise TransitionBlocked("enforced_transition_service_required")
+            state = control.advance(stop_at_rejoin=True)
+            return {"status": "PASS", "phase": state["phase"], "authority_opened": False}
         if args.command == "advance":
             state = control.advance()
             return {"status": "PASS", "phase": state["phase"], "lease_requires_serve": state["phase"] == "ready"}
@@ -110,7 +115,7 @@ def run(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("authenticate", "initialize", "advance", "serve", "transition-serve"))
+    parser.add_argument("command", choices=("authenticate", "initialize", "advance", "serve", "stage-rejoin", "transition-serve"))
     parser.add_argument("--plan", required=True)
     parser.add_argument("--approval", required=True)
     parser.add_argument("--journal")

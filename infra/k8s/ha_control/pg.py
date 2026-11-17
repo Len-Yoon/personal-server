@@ -647,6 +647,19 @@ class PgBackend:
         if state["phase"] not in {"promoting", "rejoining", "validating", "ready"}:
             _deny("unexpected_primary_before_promotion_intent")
 
+    def assert_rejoin_pending(self, state):
+        self.bind(state)
+        if state["phase"] != "rejoining" or not self.fenced(state):
+            _deny("rejoin_staging_phase_invalid")
+        value = self._read(state["target"], state)
+        self._recorded_primary(value, state)
+        remaining = value["remaining"]
+        if (value["writes"] is not False or value["history"] is not False
+                or type(remaining) not in (int, float) or not math.isfinite(remaining) or remaining > 0):
+            _deny("rejoin_primary_authority_not_closed")
+        if not self.fenced(state):
+            _deny("positive_fence_required")
+
     def rejoined(self, state):
         self.bind(state)
         if not self.fenced(state):

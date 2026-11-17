@@ -189,6 +189,9 @@ class Backend:
         if self.failure == "open_unknown": raise OSError("unknown")
     def assert_ready(self, state):
         if not self.ready: raise TransitionBlocked("not_ready")
+    def assert_rejoin_pending(self, state):
+        if not self.primary or not self.stopped or self.ready:
+            raise TransitionBlocked("rejoin_pending_unconfirmed")
 
 
 class ControlTests(unittest.TestCase):
@@ -203,6 +206,18 @@ class ControlTests(unittest.TestCase):
     def test_fence_promote_rejoin_proof_open_order(self):
         self.assertEqual(self.control.advance()["phase"], "ready")
         self.assertEqual(self.backend.actions, ["close", "fence", "promote", "rejoin", "validate", "open"])
+
+    def test_stage_rejoin_returns_durable_closed_primary_and_reads_on_repeat(self):
+        staged = self.control.advance(stop_at_rejoin=True)
+        self.assertEqual(staged, Journal(self.path).read())
+        self.assertEqual(staged["phase"], "rejoining")
+        self.assertFalse(self.backend.ready)
+        self.assertEqual(self.backend.actions, ["close", "fence", "promote"])
+        self.assertEqual(self.control.advance(stop_at_rejoin=True), staged)
+        self.assertEqual(self.backend.actions, ["close", "fence", "promote"])
+        self.assertEqual(self.control.advance()["phase"], "ready")
+        with self.assertRaisesRegex(TransitionBlocked, "rejoin_staging_phase_invalid"):
+            self.control.advance(stop_at_rejoin=True)
 
     def test_ready_lease_owner_inherits_both_guards_without_a_gap(self):
         active = []

@@ -154,10 +154,16 @@ class Controller:
             self.journal.save(state)
             self.journal.read()
 
-    def advance(self, *, on_ready=None):
+    def advance(self, *, on_ready=None, stop_at_rejoin=False):
         """Optionally keep the same guards held for the ready generation's lease owner."""
         with exclusive(self.journal.path.with_suffix(".lock")), self.backend.guard():
             state = self.journal.read()
+            if stop_at_rejoin:
+                if on_ready is not None or state["phase"] not in {"fencing", "promoting", "rejoining"}:
+                    raise TransitionBlocked("rejoin_staging_phase_invalid")
+                if state["phase"] == "rejoining":
+                    self.backend.assert_rejoin_pending(state)
+                    return state
             if state["phase"] == "ready":
                 self.backend.assert_ready(state)
                 return state if on_ready is None else on_ready(state)
@@ -186,6 +192,9 @@ class Controller:
                     state["phase"] = "rejoining"
                     self.journal.save(state)
                 if state["phase"] == "rejoining":
+                    if stop_at_rejoin:
+                        self.backend.assert_rejoin_pending(state)
+                        return state
                     if not self.backend.fenced(state):
                         raise TransitionBlocked("old_primary_restarted")
                     if not self.backend.rejoined(state):

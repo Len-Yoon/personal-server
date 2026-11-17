@@ -346,6 +346,21 @@ class PGControlTests(unittest.TestCase):
         self.assertEqual(sum("pg_promote" in call.args[0] for call in self.primary.execute.call_args_list), 1)
         metadata.assert_called_once_with("B", self.state, promoted=True)
 
+    def test_rejoin_staging_proves_closed_primary_between_fence_observations(self):
+        state = dict(self.state, phase="rejoining")
+        closed = dict(self.observation(), remaining=-1)
+        with patch.object(self.backend, "_read", return_value=closed) as observe, patch.object(
+            self.backend, "fenced", side_effect=[True, False],
+        ):
+            with self.assertRaisesRegex(TransitionBlocked, "positive_fence_required"):
+                self.backend.assert_rejoin_pending(state)
+            observe.assert_called_once_with("B", state)
+        with patch.object(self.backend, "_read", return_value=closed | {"writes": True}):
+            with self.assertRaisesRegex(TransitionBlocked, "rejoin_primary_authority_not_closed"):
+                self.backend.assert_rejoin_pending(state)
+        with patch.object(self.backend, "_read", return_value=closed):
+            self.backend.assert_rejoin_pending(state)
+
     def test_rejoin_never_clones_or_restarts_fenced_resource(self):
         with patch.object(self.backend, "rejoined", return_value=False):
             with self.assertRaisesRegex(TransitionBlocked, "new_standby_required"):
