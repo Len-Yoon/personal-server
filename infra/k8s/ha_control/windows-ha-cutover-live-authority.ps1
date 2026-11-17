@@ -274,7 +274,8 @@ function Read-RejoinReceipt {
         $launch = $entry
     }
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-    if ($null -eq $launch -or $launch.started_at_ms -gt $now -or $now - $launch.started_at_ms -gt 25000) {
+    $launchMaxAge = if ($RejoinMode -ceq 'stage-rejoin') { 150000 } else { 25000 }
+    if ($null -eq $launch -or $launch.started_at_ms -gt $now -or $now - $launch.started_at_ms -gt $launchMaxAge) {
         throw 'transition_rejoin_receipt_invalid'
     }
     $path = Join-Path $BindingPath ("rejoin-result-" + $ClosurePlanSha256 + "-" + $launch.probe + ".json")
@@ -289,7 +290,7 @@ function Read-RejoinReceipt {
         $result.probe -isnot [string] -or $result.probe -cne $launch.probe -or $result.python_pid -isnot [int] -or
         $result.python_pid -ne $launch.python_pid -or $result.observed_at_ms -isnot [long] -or
         $result.observed_at_ms -lt $launch.started_at_ms -or $result.observed_at_ms -gt $now -or
-        $now - $launch.started_at_ms -gt 25000 -or
+        $now - $launch.started_at_ms -gt $launchMaxAge -or $now - $result.observed_at_ms -gt 25000 -or
         $result.status -isnot [string] -or $result.status -cne 'PASS' -or
         $result.phase -isnot [string] -or $result.phase -cne 'rejoining' -or
         $result.authority_opened -isnot [bool] -or $result.authority_opened -or

@@ -217,7 +217,7 @@ class TransitionServiceStartTests(unittest.TestCase):
 
     def test_native_closure_restore_does_not_replay_scm_start(self):
         script = (ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1").read_text()
-        scope = script[script.index("            if ($RestoreClosureArgs) {"):
+        scope = script[script.index("            if ($restoreOneShot) {"):
                        script.index("        } else {\n            if ('TrustedStoppedV1.Native'")]
         self.assertLess(scope.index("Assert-TransitionStopped"), scope.index("Restore-TransitionServingArgs"))
         self.assertLess(scope.index("Restore-TransitionServingArgs"), scope.index("serving_args_restored"))
@@ -264,6 +264,43 @@ class TransitionServiceStartTests(unittest.TestCase):
                 with self.assertRaisesRegex(BridgeRejected, "service_start_unconfirmed"):
                     start.start(plan, parameters, deadline)
                 self.assertEqual(windows.powershell.call_count, calls)
+
+
+    def test_windows_rejoin_start_binds_reader_before_scm_dispatch(self):
+        source = ROOT / "infra/k8s/ha_control"
+        start_pin = hashlib.sha256((source / "windows-ha-start-initial-service.ps1").read_bytes()).hexdigest()
+        live_pin = hashlib.sha256((source / "windows-ha-cutover-live-authority.ps1").read_bytes()).hexdigest()
+        root = rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}"
+        service = "N100HA_" + "1"*24 + "_controller"
+        sid = "S-1-5-80-1-2-3-4-5"
+        raw = json.dumps({"windows_enforced": {"service_name": service, "service_sid": sid},
+                          "windows_transition_observer": {}, "transition_service_start": {
+                              "service_image_path_sha256": "6"*64, "lease_closure_check": True,
+                          }}).encode()
+        pin = hashlib.sha256(raw).hexdigest()
+        controller = {"plan": raw, "plan_sha256": pin}
+        parameters = {"ServiceName": service, "PlanSha256": pin, "ApprovalSha256": "2"*64,
+                      "ServiceHostSha256": "3"*64, "PreflightSha256": "4"*64,
+                      "PlanPath": root + r"\plan.json", "ApprovalPath": root + r"\approval.json",
+                      "PreflightPath": root + r"\preflight.ps1", "ScmVerifierPath": root + r"\scm.cs"}
+        windows = MagicMock()
+        result = {"status": "PASS", "phase": "rejoining", "authority_opened": False, "rejoin_stage_sha256": "b"*64}
+        windows.powershell.side_effect = [
+            {"rejoin_command_completed": True, "mode": "stage-rejoin", "controller_plan_sha256": pin,
+             "service_sid": sid, "host_pid": 123, "started_at_ms": 1731712345000},
+            result,
+        ]
+        starter = WindowsTransitionServiceStart(windows, start_pin)
+        options = {"root": root, "live_sha256": live_pin, "deadline": time.monotonic() + 30}
+        inputs = (controller, parameters, "stage-rejoin", "a"*32)
+        with self.assertRaisesRegex(BridgeRejected, "script_unpinned"):
+            starter.run_rejoin(*inputs, **(options | {"live_sha256": "0"*64}))
+        windows.powershell.assert_not_called()
+        self.assertEqual(starter.run_rejoin(*inputs, **options), result)
+        start, read = [call.args[0] for call in windows.powershell.call_args_list]
+        self.assertIn(" -RejoinMode 'stage-rejoin' ", start)
+        self.assertIn(" -ReadRejoinReceipt ", read)
+        self.assertIn(" -ClosureHostPid '123' ", read)
 
 
 class TransitionObserverPublicationTests(unittest.TestCase):
