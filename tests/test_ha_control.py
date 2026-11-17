@@ -30,19 +30,26 @@ class TransitionIngressTests(unittest.TestCase):
             "source_manifest_path": "manifest", "source_manifest_sha256": "6"*64, "source_root": "source",
             "vm_observer_path": "observer", "vm_observer_sha256": "7"*64, "wsl_uid": 1000,
         }
+        release_commit = "a"*40
+        source_base = f"/home/operator/.local/state/n100-ha/cutover-source-{release_commit}"
+        release = {
+            "vm_observer_path": rf"C:\ProgramData\N100HA-InitialCutover\{release_commit}\new-observer.ps1",
+            "vm_observer_sha256": "a"*64, "source_loader_sha256": "b"*64, "source_manifest_sha256": "c"*64,
+            "source_root": source_base + "/infra/k8s", "source_manifest_path": source_base + ".manifest.json",
+        }
         runtime_b = {"runtime_path": "phase-b", "runtime_sha256": "8"*64}
         runtime_a = {"runtime_path": "phase-a", "runtime_sha256": "9"*64}
         next_a = {"node": "A", "vm_id": new_a, "installation_id": "b"*64, "disk_paths_sha256": "c"*64}
         next_b = {"node": "B", "vm_id": new_b, "installation_id": "d"*64, "disk_paths_sha256": "e"*64}
 
-        def rotate(previous, runtime, primary, replacement):
+        def rotate(previous, runtime, primary, replacement, code=release):
             return transition_execution.observer_callback_config(
-                previous, caddy_runtime._sha(previous), runtime, primary, replacement,
+                previous, caddy_runtime._sha(previous), runtime, primary, replacement, code,
             )
 
         raw = encoded(base)
         after_b = rotate(raw, runtime_b, "B", next_a)
-        expected_b = base | runtime_b | {
+        expected_b = base | release | runtime_b | {
             "vm_a": new_a, "installation_id": "b"*64, "vm_b_installation_id": "a"*64,
             "a_disk_paths_sha256": "c"*64,
         }
@@ -57,7 +64,13 @@ class TransitionIngressTests(unittest.TestCase):
             with self.subTest(rejected=rejected), self.assertRaisesRegex(TransitionBlocked, "callback_unbound"):
                 rotate(raw, runtime_b, "B", rejected)
         with self.assertRaisesRegex(TransitionBlocked, "callback_unbound"):
-            transition_execution.observer_callback_config(raw, "0"*64, runtime_b, "B", next_a)
+            transition_execution.observer_callback_config(raw, "0"*64, runtime_b, "B", next_a, release)
+
+        for invalid in ({}, release | {"driver_sha256": "d"*64},
+                        release | {"vm_observer_path": r"C:\Elsewhere\observer.ps1"},
+                        release | {"source_manifest_path": source_base + "/wrong.json"}):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(TransitionBlocked, "callback_unbound"):
+                rotate(raw, runtime_b, "B", next_a, invalid)
 
     def test_observer_runtime_publishes_exact_prior_baseline_and_new_command_scope(self):
         import os

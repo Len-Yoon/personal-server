@@ -71,8 +71,8 @@ def assert_published_runtime(reader, path, runtime, legacy_plan, legacy_attempt)
     caddy._need(seven_capture.encoded(expected) == seven_capture.encoded(runtime), "ingress_observer_runtime_unbound")
 
 
-def observer_callback_config(previous_raw, previous_sha256, runtime, primary, replacement):
-    """Rotate the fenced peer only, preserving the promoted VM and legacy observer pins."""
+def observer_callback_config(previous_raw, previous_sha256, runtime, primary, replacement, observer_release):
+    """Rotate the fenced peer and observer code while retaining legacy exclusion identity."""
     error = "ingress_observer_callback_unbound"
     caddy._need(type(previous_raw) is bytes and 0 < len(previous_raw) <= 8192
                 and caddy._sha(previous_raw) == previous_sha256 and primary in ("A", "B"), error)
@@ -85,6 +85,21 @@ def observer_callback_config(previous_raw, previous_sha256, runtime, primary, re
                 and set(previous) <= required | {"kubernetes_reader", "reactivation_plan_sha256", "vm_b_installation_id"}
                 and type(replacement) is dict and set(replacement) == {"node", "vm_id", "installation_id", "disk_paths_sha256"},
                 error)
+    release_pins = {"vm_observer_sha256", "source_loader_sha256", "source_manifest_sha256"}
+    release_paths = {"vm_observer_path", "source_root", "source_manifest_path"}
+    caddy._need(type(observer_release) is dict and set(observer_release) == release_pins | release_paths
+                and all(type(observer_release[key]) is str and caddy.ID.fullmatch(observer_release[key])
+                        for key in release_pins)
+                and all(type(observer_release[key]) is str for key in release_paths), error)
+    source_root = observer_release["source_root"]
+    windows_path = observer_release["vm_observer_path"]
+    caddy._need(re.fullmatch(r"/home/[A-Za-z0-9_.-]+/\.local/state/n100-ha/cutover-source-[a-f0-9]{40}/infra/k8s",
+                            source_root)
+                and not any(part in (".", "..") for part in source_root.split("/"))
+                and observer_release["source_manifest_path"] == source_root.removesuffix("/infra/k8s") + ".manifest.json"
+                and re.fullmatch(r"C:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}\\[A-Za-z0-9_.-]+",
+                                 windows_path)
+                and not windows_path.endswith("."), error)
     peer = "B" if primary == "A" else "A"
     pins = (previous["installation_id"], previous.get("vm_b_installation_id", previous["installation_id"]),
             previous["a_disk_paths_sha256"], previous["b_disk_paths_sha256"],
@@ -98,7 +113,7 @@ def observer_callback_config(previous_raw, previous_sha256, runtime, primary, re
                 and all(type(pin) is str and caddy.ID.fullmatch(pin) for pin in pins), error)
     peer_owner = pins[0] if peer == "A" else pins[1]
     caddy._need(replacement["installation_id"] != peer_owner, error)
-    result = previous | {
+    result = previous | observer_release | {
         "runtime_path": runtime["runtime_path"], "runtime_sha256": runtime["runtime_sha256"],
         "vm_" + peer.lower(): replacement["vm_id"],
         peer.lower() + "_disk_paths_sha256": replacement["disk_paths_sha256"],
