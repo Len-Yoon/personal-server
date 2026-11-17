@@ -585,13 +585,30 @@ class WindowsTransitionLease:
             yield check
 
 
+def settle_transition_controller(starter, controller, parameters, started, generation, observe_closed, deadline):
+    """Stop the identified controller and require authenticated closure on both databases."""
+    if started is None:
+        started = starter.observe(controller, parameters, deadline)
+    starter.stop(controller, parameters, started, deadline)
+    proof = observe_closed(controller, generation, deadline)
+    bridge._need(type(proof) is dict and set(proof) == {"plan_sha256", "generation", "node_proofs"}
+                 and proof["plan_sha256"] == controller["plan_sha256"]
+                 and type(proof["generation"]) is int and proof["generation"] == generation.epoch
+                 and type(proof["node_proofs"]) is dict and set(proof["node_proofs"]) == {"A", "B"}
+                 and all(bridge._hash(value) for value in proof["node_proofs"].values())
+                 and proof["node_proofs"]["A"] != proof["node_proofs"]["B"],
+                 "native_transition_db_closure_unconfirmed")
+    bridge._remaining(deadline)
+    return proof
+
+
 @contextmanager
 def open_transition_controller(controller, generation, *, starter, prepare_service, stage_sha256, live_sha256,
-                               root, attempt, old_vm_id, publish_handoff, assert_non_vm_exclusions, settle_failed_start, deadline):
+                               root, attempt, old_vm_id, publish_handoff, assert_non_vm_exclusions, observe_closed, deadline):
     """Start the approved controller, bind its live lease, then expose fresh checks."""
     generation.validate()
     bridge._need(generation.epoch > 1 and all(bridge._hash(value) for value in (attempt, stage_sha256, live_sha256))
-                 and callable(assert_non_vm_exclusions) and callable(publish_handoff) and callable(settle_failed_start),
+                 and callable(assert_non_vm_exclusions) and callable(publish_handoff) and callable(observe_closed),
                  "native_transition_service_scope_invalid")
     _transition_authority_scope(controller, generation, root, attempt, old_vm_id)
     parameters = prepare_service(controller, generation, deadline)
@@ -624,4 +641,6 @@ def open_transition_controller(controller, generation, *, starter, prepare_servi
             yield assert_guard, check
     finally:
         if not ready and starter.attempted:
-            settle_failed_start(controller, parameters, started, time.monotonic() + 15)
+            settle_transition_controller(
+                starter, controller, parameters, started, generation, observe_closed, time.monotonic() + 25,
+            )

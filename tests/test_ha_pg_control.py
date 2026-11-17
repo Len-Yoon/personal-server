@@ -22,7 +22,7 @@ from ha_control.native_guest_activation import ServingGeneration
 from ha_control.native_windows_activation import (
     WindowsActivationLease, WindowsTransitionLease, WindowsTransitionServiceStart, bind_transition_observer_plan, publish_transition_observer_config,
     prepare_transition_observer_plan, publish_transition_observer_launch, start_transition_observer,
-    transition_authority_records, publish_transition_authority_records, open_transition_controller,
+    transition_authority_records, publish_transition_authority_records, open_transition_controller, settle_transition_controller,
 )
 from ha_control.native_stdio_bridge import BridgeRejected
 from ha_control.pg import PgBackend, ROLE_LOCK
@@ -39,7 +39,8 @@ class TransitionServiceStartTests(unittest.TestCase):
         records = {"service_instance_sha256": "3"*64, "binding_path": "fixture",
                    "binding": b'{"legacy_plan_sha256":"fixture"}'}
         check = MagicMock(side_effect=[None, BridgeRejected("lease unavailable")])
-        settle = MagicMock()
+        settle = MagicMock(return_value={"plan_sha256": controller["plan_sha256"], "generation": 2,
+                                        "node_proofs": {"A": "a"*64, "B": "b"*64}})
         with patch("ha_control.native_windows_activation._transition_authority_scope"), \
                 patch("ha_control.native_windows_activation.transition_authority_records", return_value=records), \
                 patch("ha_control.native_windows_activation.publish_transition_authority_records") as publish, \
@@ -48,14 +49,36 @@ class TransitionServiceStartTests(unittest.TestCase):
             with self.assertRaisesRegex(BridgeRejected, "lease unavailable"), open_transition_controller(
                 controller, generation, starter=starter, prepare_service=prepare, stage_sha256="4"*64,
                 live_sha256="5"*64, root="fixture", attempt="6"*64, old_vm_id="fixture",
-                publish_handoff=handoff, assert_non_vm_exclusions=MagicMock(), settle_failed_start=settle, deadline=time.monotonic()+30,
+                publish_handoff=handoff, assert_non_vm_exclusions=MagicMock(), observe_closed=settle, deadline=time.monotonic()+30,
             ):
                 self.fail("unconfirmed lease allowed activation")
         starter.start.assert_called_once()
         publish.assert_called_once()
         self.assertEqual(check.call_count, 2)
+        starter.stop.assert_called_once()
         settle.assert_called_once()
         self.assertEqual(check.call_args.args[1], "controller-ready")
+
+    def test_settlement_never_reads_db_until_exact_service_is_stopped(self):
+        starter = MagicMock()
+        controller = {"plan_sha256": "a"*64}
+        parameters = {}
+        generation = ServingGeneration("B", 2, 3, 2)
+        deadline = time.monotonic() + 10
+        closed = MagicMock()
+        order = MagicMock()
+        order.attach_mock(starter, "service")
+        order.attach_mock(closed, "db")
+        starter.stop.side_effect = BridgeRejected("stop unconfirmed")
+        with self.assertRaisesRegex(BridgeRejected, "stop unconfirmed"):
+            settle_transition_controller(starter, controller, parameters, None, generation, closed, deadline)
+        self.assertEqual([call[0] for call in order.mock_calls], ["service.observe", "service.stop"])
+        order.reset_mock()
+        starter.stop.side_effect = None
+        closed.return_value = {"plan_sha256": "a"*64, "generation": 2, "node_proofs": {"A": "b"*64}}
+        with self.assertRaisesRegex(BridgeRejected, "db_closure_unconfirmed"):
+            settle_transition_controller(starter, controller, parameters, None, generation, closed, deadline)
+        self.assertEqual([call[0] for call in order.mock_calls], ["service.observe", "service.stop", "db"])
 
     def test_live_authority_records_bind_previous_vm_and_running_controller(self):
         image = "7"*64
