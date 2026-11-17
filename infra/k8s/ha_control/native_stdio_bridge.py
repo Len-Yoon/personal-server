@@ -42,6 +42,7 @@ NODES = ("A", "B")
 GUEST_RESTORE_READBACK = "read_restore_receipt"
 GUEST_START_REPLACEMENT = "start_replacement_standby"
 GUEST_OBSERVE_REPLACEMENT = "observe_replacement_standby"
+GUEST_PUBLISH_GENERATION = "publish_generation_handoff"
 GUEST_ACTIVATE_GENERATION = "activate_generation"
 GUEST_TRANSITION_TARGET = "verify_transition_target"
 ACTIVATION_VERBS = frozenset(("activate", GUEST_ACTIVATE_GENERATION))
@@ -63,6 +64,7 @@ VERBS = {
                                                   "closed_a_sha256", "closed_b_sha256")),
     # Includes Windows service start and seven serial application readiness waits.
     "activate": ("A", 300, True, ("manifest_sha256", "activation_check_sha256", "settlement_sha256")),
+    GUEST_PUBLISH_GENERATION: ("AB", 30, True, ("handoff", "generation_handoff_sha256", "effects_plan_sha256")),
     GUEST_ACTIVATE_GENERATION: ("AB", 300, True, ("generation_handoff_sha256", "effects_plan_sha256")),
     GUEST_TRANSITION_TARGET: ("AB", 30, False, ("installation_id",)),
     "assert_live": ("A", 30, False, ("authority_sha256", "windows_generation", "windows_generation_sha256",
@@ -235,7 +237,9 @@ def _args(verb, node, args):
     nodes, _, _, keys = VERBS[verb]
     _need(node in nodes and type(args) is dict and set(args) == set(keys), "bridge_args_rejected")
     for key, value in args.items():
-        if key == "max_bytes":
+        if key == "handoff":
+            valid = type(value) is dict and 0 < len(_bytes(value)) <= FRAME_BYTES
+        elif key == "max_bytes":
             valid = type(value) is int and 0 < value <= TRANSFER_BYTES
         elif key == "windows_generation":
             valid = type(value) is int and 0 < value < 2**63
@@ -261,7 +265,7 @@ class _Chain:
 
     def check(self, verb, node, args):
         _need(verb not in {GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT,
-                          GUEST_ACTIVATE_GENERATION, GUEST_TRANSITION_TARGET},
+                          GUEST_PUBLISH_GENERATION, GUEST_ACTIVATE_GENERATION, GUEST_TRANSITION_TARGET},
               "bridge_guest_only_request")
         _args(verb, node, args)
         if self.mode == "reconcile":

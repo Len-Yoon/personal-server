@@ -25,7 +25,7 @@ from . import native_guest_activation as activation, native_guest_live as live
 from .legacy_writers import TransitionBlocked, _need
 from .native_stdio_bridge import (
     ACTIVATION_GUEST_REPLY_SECONDS, ACTIVATION_VERBS, Binding, BridgeRejected, FRAME_BYTES,
-    GUEST_ACTIVATE_GENERATION, GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT,
+    GUEST_ACTIVATE_GENERATION, GUEST_PUBLISH_GENERATION, GUEST_RESTORE_READBACK, GUEST_START_REPLACEMENT,
     GUEST_OBSERVE_REPLACEMENT, GUEST_TRANSITION_TARGET, MAX_REQUESTS, Receipt, Request, Stdio, VERSION, _args, _bytes, _digest,
     _hash, _matches, _pairs, _reject_constant,
 )
@@ -40,6 +40,7 @@ VERBS = {
     GUEST_START_REPLACEMENT,
     GUEST_OBSERVE_REPLACEMENT,
     GUEST_ACTIVATE_GENERATION,
+    GUEST_PUBLISH_GENERATION,
     GUEST_TRANSITION_TARGET,
 }
 HANDOFF = "activation-handoff.json"
@@ -677,12 +678,7 @@ def replacement_standby(request):
                                                           "result": expected})))
 
 
-def activate_generation(request, assert_windows_current):
-    _need(os.geteuid() == 0 and callable(assert_windows_current), "guest_worker_live_windows_required")
-    stage = ROOT / request.binding.attempt_id
-    runtime._directory(stage, 0)
-    handoff_path = stage / "generation-handoff.json"
-    raw, handoff = _read_json(handoff_path)
+def _checked_generation_handoff(request, raw, handoff):
     _need(_digest(raw) == request.args["generation_handoff_sha256"]
           and set(handoff) == {"schema_version", "binding", "generation", "runtime", "postgres", "activation", "replay_floor"}
           and type(handoff["schema_version"]) is int and handoff["schema_version"] == 1
@@ -707,6 +703,42 @@ def activate_generation(request, assert_windows_current):
           and all(getattr(pins, field) == getattr(pg, field) for field in (
               "boot_sha256", "installation_id", "plan_sha256", "manifest_sha256", "system_id", "cluster", "postgres_id",
           )), "guest_generation_handoff_unbound")
+
+    return pins, pg, activation_pins, generation, floor
+
+
+def publish_generation_handoff(request):
+    _need(os.geteuid() == 0, "guest_worker_root_required")
+    stage = ROOT / request.binding.attempt_id
+    runtime._directory(stage, 0)
+    handoff = request.args["handoff"]
+    raw = _bytes(handoff)
+    pins, pg, _, _, _ = _checked_generation_handoff(request, raw, handoff)
+    _, installed = _read_json(restore.INSTALLATION)
+    _need(_digest(restore.BOOT_ID.read_bytes()) == pins.boot_sha256
+          and installed["installation_id"] == pins.installation_id and installed["node"] == request.node
+          and installed["source_commit"] == pg.source_commit, "guest_generation_handoff_changed")
+    path = stage / "generation-handoff.json"
+    if os.path.lexists(path):
+        _need(runtime._read(path, 0, {0o400}, limit=FRAME_BYTES) == raw,
+              "guest_generation_handoff_changed")
+    else:
+        _need(not any(os.path.lexists(stage / name) for name in
+                      ("runtime-activation-intent.json", "runtime-activation.json")),
+              "guest_generation_already_activated")
+        runtime._write(path, raw, 0o400)
+    _need(runtime._read(path, 0, {0o400}, limit=FRAME_BYTES) == raw,
+          "guest_generation_handoff_changed")
+    return Receipt("PASS", _digest(raw))
+
+
+def activate_generation(request, assert_windows_current):
+    _need(os.geteuid() == 0 and callable(assert_windows_current), "guest_worker_live_windows_required")
+    stage = ROOT / request.binding.attempt_id
+    runtime._directory(stage, 0)
+    handoff_path = stage / "generation-handoff.json"
+    raw, handoff = _read_json(handoff_path)
+    pins, pg, activation_pins, generation, floor = _checked_generation_handoff(request, raw, handoff)
 
     def assert_lease(challenge, boundary):
         _need(_digest(restore.BOOT_ID.read_bytes()) == pins.boot_sha256, "guest_worker_boot_changed")
@@ -754,6 +786,8 @@ def handle(request, assert_windows_current=None):
         with mutation_lock(wait=15 if request.verb == "finish_receive" else 0) as descriptor:
             if request.verb in {GUEST_START_REPLACEMENT, GUEST_OBSERVE_REPLACEMENT}:
                 return replacement_standby(request)
+            if request.verb == GUEST_PUBLISH_GENERATION:
+                return publish_generation_handoff(request)
             if request.verb == GUEST_ACTIVATE_GENERATION:
                 return activate_generation(request, assert_windows_current)
             return GuestWorker(request).dispatch(descriptor, assert_windows_current)

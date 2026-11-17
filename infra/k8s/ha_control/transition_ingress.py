@@ -241,7 +241,8 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                          previous_callback, previous_callback_sha256, replacement_vm, observer_release,
                          observer_setup, controller_setup, assert_legacy_closed, activate_guest,
                          guests, target_request, verify_guest,
-                         replacement_requests, stage_service, resume_rejoin=None, verify_public=_public_health):
+                         replacement_requests, generation_handoff_request, stage_service, resume_rejoin=None,
+                         verify_public=_public_health):
     """Rejoin standby, activate the guest, then switch ingress under one lock.
 
     After a lost guest response, supply fresh request sequences and nonces
@@ -258,7 +259,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                 == (execution.spec["plan_sha256"], execution.spec["attempt_id"])
                 and guests.verify_transition_target(target_request, generation, target, observer_setup["deadline"]) is True,
                 "transition_ingress_guest_target_unconfirmed")
-    caddy._need(callable(replacement_requests)
+    caddy._need(callable(replacement_requests) and callable(generation_handoff_request)
                 and (resume_rejoin is None or type(resume_rejoin) is dict
                      and set(resume_rejoin) == {"controller", "parameters"}),
                 "transition_replacement_scope_invalid")
@@ -267,7 +268,7 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
                 and callable(stage_service["approval"]) and callable(stage_service["close_previous_service"])
                 and all(type(stage_service[key]) is str and stage_service[key] for key in
                         ("preflight_path", "scm_verifier_path"))
-                and "prepare_service" not in controller_setup,
+                and not {"prepare_service", "publish_handoff"}.intersection(controller_setup),
                 "transition_ingress_controller_unbound")
     with execution.guard(main, car):
         observer_binding = None
@@ -332,7 +333,10 @@ def switch_with_observer(execution, main, car, previous, relay, generation, targ
             return parameters
 
         def publish_handoff(serving_generation, instance, limit):
-            return controller_setup["publish_handoff"](serving_generation, instance, limit, replay_floor=replay_floor)
+            request = generation_handoff_request(serving_generation, instance, replay_floor)
+            caddy._need(type(request) is bridge.Request and request.binding == target_request.binding,
+                        "transition_ingress_controller_unbound")
+            return guests.publish_generation_handoff(request, serving_generation, instance, replay_floor, limit)
 
         with open_transition_controller(controller, generation, attempt=execution.spec["attempt_id"],
                                         **(controller_setup | {"prepare_service": same_service,

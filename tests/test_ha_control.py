@@ -52,6 +52,7 @@ class TransitionIngressTests(unittest.TestCase):
             controller_setup={"deadline": 50, "starter": MagicMock(),
                               "live_sha256": "3"*64, "root": "fixture", "old_vm_id": "fixture"},
             replacement_requests=lambda _: (replacement, None),
+            generation_handoff_request=MagicMock(),
             stage_service={"approval": lambda *_: encoded({"plan_sha256": controller["plan_sha256"],
                                                                         "action": "ha-transition",
                                                                         "authority_kind": "installed-runtime"}),

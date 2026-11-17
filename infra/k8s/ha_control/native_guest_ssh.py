@@ -324,7 +324,7 @@ class GuestSshDispatcher:
     def __call__(self, request, deadline, *, assert_windows_current=None):
         bridge._need(type(request) is bridge.Request and request.verb not in
                      {bridge.GUEST_START_REPLACEMENT, bridge.GUEST_OBSERVE_REPLACEMENT,
-                      bridge.GUEST_ACTIVATE_GENERATION, bridge.GUEST_TRANSITION_TARGET},
+                      bridge.GUEST_PUBLISH_GENERATION, bridge.GUEST_ACTIVATE_GENERATION, bridge.GUEST_TRANSITION_TARGET},
                      'guest_ssh_replacement_guard_required')
         return self._dispatch(request, deadline, assert_windows_current=assert_windows_current)
 
@@ -338,6 +338,29 @@ class GuestSshDispatcher:
         bridge._need(receipt.status == "PASS" and bridge._hash(receipt.receipt_sha256),
                      "guest_ssh_transition_target_unconfirmed")
         return True
+
+    def publish_generation_handoff(self, request, generation, instance, replay_floor, deadline):
+        """Publish only the approved boot-bound handoff for this generation and WAL floor."""
+        generation.validate()
+        error = "guest_ssh_generation_handoff_unbound"
+        bridge._need(type(request) is bridge.Request and request.verb == bridge.GUEST_PUBLISH_GENERATION
+                     and request.node == generation.primary and request.binding == self.binding
+                     and isinstance(request.args, Mapping) and bridge._hash(instance)
+                     and type(replay_floor) is int and 0 < replay_floor < 2**64, error)
+        bridge._args(request.verb, request.node, dict(request.args))
+        handoff = request.args["handoff"]
+        observed = handoff.get("activation")
+        expected_generation = {"primary": generation.primary, "epoch": generation.epoch,
+                               "timeline": generation.timeline, "revision": generation.revision}
+        digest = bridge._digest(bridge._bytes(handoff))
+        bridge._need(handoff.get("binding") == request.binding.fields()
+                     and bridge._matches(handoff.get("generation"), expected_generation)
+                     and type(observed) is dict and observed.get("windows_service_instance_sha256") == instance
+                     and type(handoff.get("replay_floor")) is int and handoff["replay_floor"] == replay_floor
+                     and request.args["generation_handoff_sha256"] == digest, error)
+        receipt = self._dispatch(request, deadline)
+        bridge._need(receipt.status == "PASS" and receipt.receipt_sha256 == digest, error)
+        return digest
 
     def activate_generation(self, request, deadline, *, assert_windows_current):
         """Require an authenticated Windows proof for each challenge and boundary."""

@@ -69,6 +69,28 @@ class TransitionTargetBridgeTests(unittest.TestCase):
 
 
 class ReplacementStandbyBridgeTests(unittest.TestCase):
+    def test_generation_handoff_rejects_lower_wal_before_dispatch(self):
+        from ha_control.native_guest_activation import ServingGeneration
+
+        bridge = native_stdio_bridge
+        binding = bridge.Binding(*(character*64 for character in "abcde"))
+        generation = ServingGeneration("B", 2, 2, 3)
+        instance = "f"*64
+        content = {"binding": binding.fields(), "generation": {"primary": "B", "epoch": 2, "timeline": 2, "revision": 3},
+                   "activation": {"windows_service_instance_sha256": instance}, "replay_floor": 10}
+        pin = bridge._digest(bridge._bytes(content))
+        request = bridge.Request(binding, "B", bridge.GUEST_PUBLISH_GENERATION, 1, "7"*64, {
+            "handoff": content, "generation_handoff_sha256": pin, "effects_plan_sha256": "8"*64,
+        })
+        dispatcher = object.__new__(native_guest_ssh.GuestSshDispatcher)
+        dispatcher.binding = binding
+        with patch.object(dispatcher, "_dispatch", return_value=bridge.Receipt("PASS", pin)) as dispatch:
+            with self.assertRaisesRegex(bridge.BridgeRejected, "handoff_unbound"):
+                dispatcher.publish_generation_handoff(request, generation, instance, 11, 100)
+            dispatch.assert_not_called()
+            self.assertEqual(dispatcher.publish_generation_handoff(request, generation, instance, 10, 100), pin)
+        dispatch.assert_called_once_with(request, 100)
+
     def test_confirmation_requires_matching_windows_replication_receipt_after_guest(self):
         bridge = native_stdio_bridge
         binding = bridge.Binding(*("abcdef"[i]*64 for i in range(5)))
