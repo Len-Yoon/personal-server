@@ -266,6 +266,21 @@ class TransitionServiceStartTests(unittest.TestCase):
                 self.assertEqual(windows.powershell.call_count, calls)
 
 
+    def test_windows_args_publication_requires_the_previous_pin(self):
+        script = ROOT / "infra/k8s/ha_control/windows-ha-start-initial-service.ps1"
+        windows = MagicMock()
+        starter = WindowsTransitionServiceStart(windows, hashlib.sha256(script.read_bytes()).hexdigest())
+        with self.assertRaisesRegex(BridgeRejected, "prepared_service_unconfirmed"):
+            starter.publish_args({}, {}, "not-a-pin", time.monotonic()+10)
+        windows.powershell.assert_not_called()
+        source = script.read_text()
+        start = source.index("        if ($PublishTransitionArgs) {")
+        end = source.index("        if ($VerifyPreparedTransition) {", start)
+        branch = source[start:end]
+        self.assertLess(branch.index("Confirm-ClosureArgsState"), branch.index("[IO.File]::Replace"))
+        self.assertLess(branch.index("[IO.File]::Replace"), branch.index("transition_service_prepared"))
+        self.assertNotIn("Start-Service", branch)
+
     def test_windows_rejoin_start_binds_reader_before_scm_dispatch(self):
         source = ROOT / "infra/k8s/ha_control"
         start_pin = hashlib.sha256((source / "windows-ha-start-initial-service.ps1").read_bytes()).hexdigest()

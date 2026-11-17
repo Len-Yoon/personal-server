@@ -13,6 +13,8 @@ param(
     [string]$ExpectedActivationIntentSha256,
     [switch]$StartTransition,
     [switch]$VerifyPreparedTransition,
+    [switch]$PublishTransitionArgs,
+    [string]$PreviousArgsSha256,
     [switch]$CheckLeaseClosed,
     [switch]$RestoreClosureArgs,
     [switch]$ObserveClosureCheck,
@@ -177,7 +179,8 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
     $preflightBlock = [ScriptBlock]::Create($encoder.GetString($preflight))
     . $preflightBlock -HostRoot $hostRoot -HostSha256 $ServiceHostSha256 -ArgsSha256 $argsSha -ServiceSid $sid -TrustedAdminSids $pins.trusted_admin_sids
     $restoreOneShot = $RestoreClosureArgs -or $RestoreRejoinArgs
-    if ($InspectRejoinStage) {
+    if ($PublishTransitionArgs) { Confirm-ClosureArgsState $servingSha $PreviousArgsSha256 }
+    elseif ($InspectRejoinStage) {
         try { Confirm-ClosureArgsState $servingSha $argsSha }
         catch {
             if ($_.Exception.Message -cne 'preflight_hash_rejected') { throw }
@@ -218,6 +221,36 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
         [Security.AccessControl.FileSystemRights]'WriteData,Synchronize,Delete',[IO.FileShare]::None,4096,
         [IO.FileOptions]::DeleteOnClose,$intentAcl)
     try {
+        if ($PublishTransitionArgs) {
+            if ('TrustedStoppedV1.Native' -as [type]) { throw 'initial_service_scm_verifier_already_loaded' }
+            Add-Type -TypeDefinition ($encoder.GetString($scmSource)) -ErrorAction Stop
+            Assert-TransitionStopped $Plan $HostPath $Current.PathName
+            Confirm-ClosureArgsState $servingSha $PreviousArgsSha256
+            $target = Join-Path $hostRoot 'service.args'
+            $backup = Join-Path $intentRoot.FullName ('transition-prior-args-' + $PlanSha256)
+            $observed = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($observed -cne $servingSha) {
+                if ($observed -cne $PreviousArgsSha256 -or (Test-Path -LiteralPath $backup)) {
+                    throw 'initial_service_transition_args_reconciliation_required'
+                }
+                $ready = Join-Path $intentRoot.FullName ('transition-next-args-' + [Guid]::NewGuid().ToString('N'))
+                Write-TransitionArgsStage $ready $servingBytes (Get-Acl -LiteralPath $target)
+                [IO.File]::Replace($ready,$target,$backup,$false)
+            }
+            Assert-TransitionPreflight $servingSha
+            if ($PreviousArgsSha256 -cne $servingSha) {
+                $prior = Get-Item -LiteralPath $backup -Force
+                Assert-PreflightEntry $prior $authors ($authors + @($sid)) $true $false
+                if ($prior -isnot [IO.FileInfo] -or $prior.Length -gt 65536 -or
+                    (Get-FileHash -LiteralPath $backup -Algorithm SHA256).Hash.ToLowerInvariant() -cne $PreviousArgsSha256) {
+                    throw 'initial_service_transition_args_reconciliation_required'
+                }
+            }
+            Assert-TransitionStopped $Plan $HostPath $Current.PathName
+            [ordered]@{transition_service_prepared=$true;controller_plan_sha256=$PlanSha256;
+                service_sid=$sid;serving_args_sha256=$servingSha}|ConvertTo-Json -Compress
+            return
+        }
         if ($VerifyPreparedTransition) {
             Assert-TransitionPreflight $servingSha
             if ('TrustedStoppedV1.Native' -as [type]) { throw 'initial_service_scm_verifier_already_loaded' }
@@ -425,10 +458,12 @@ function Start-PreparedTransitionService($Current, [string]$HostPath, $Plan, $Ap
 
 try {
     $rejoin = $RejoinMode -ne ''
-    $transition = $rejoin -or $VerifyPreparedTransition -or $StartTransition -or $ObserveTransition -or $StopTransition -or $CheckLeaseClosed -or $RestoreClosureArgs -or $ObserveClosureCheck
-    $modes = @(@($VerifyPreparedTransition,$StartTransition,$ObserveTransition,$StopTransition,$CheckLeaseClosed,$RestoreClosureArgs,$ObserveClosureCheck) | Where-Object { $_.IsPresent }).Count
+    $transition = $rejoin -or $PublishTransitionArgs -or $VerifyPreparedTransition -or $StartTransition -or $ObserveTransition -or $StopTransition -or $CheckLeaseClosed -or $RestoreClosureArgs -or $ObserveClosureCheck
+    $modes = @(@($PublishTransitionArgs,$VerifyPreparedTransition,$StartTransition,$ObserveTransition,$StopTransition,$CheckLeaseClosed,$RestoreClosureArgs,$ObserveClosureCheck) | Where-Object { $_.IsPresent }).Count
     if ($rejoin) { $modes++ }
     if (-not $Go -or $modes -gt 1 -or
+        ($PublishTransitionArgs -and $PreviousArgsSha256 -cnotmatch $hashPattern) -or
+        (-not $PublishTransitionArgs -and $PreviousArgsSha256 -cne '') -or
         ($rejoin -and ($RejoinMode -cnotin @('initialize','stage-rejoin','observe-rejoin-stage','check-rejoin') -or
             $RejoinRequestId -cnotmatch '\A[a-f0-9]{32}\z')) -or
         ($InspectRejoinStage -and ($RejoinMode -cne 'stage-rejoin' -or $RestoreRejoinArgs)) -or
