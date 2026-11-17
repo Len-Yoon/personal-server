@@ -17,7 +17,7 @@ from ha_runtime.seven_capture import stamp
 from . import native_guest_config as config
 from .legacy_writers import TransitionBlocked, _need
 from .native_guest_restore import BOOT_ID, INSTALLATION, SHA, _directory, _docker, _fsync_directory, _inventory
-from .native_guest_restore import _json_bytes, active_postgres, inventory_sha256
+from .native_guest_restore import _json_bytes, _lsn, _pg, active_postgres, inventory_sha256
 
 
 ROOT = Path("/etc/n100-ha")
@@ -529,6 +529,61 @@ def observe_runtime_outcome(pins, stage, *, assert_settled):
         return {**outcome, "status": "CLEAN", "settlement_sha256": settled}
     except (TransitionBlocked, OSError, KeyError, TypeError, ValueError, subprocess.TimeoutExpired):
         return outcome
+
+
+GENERATION_CLOSED = """
+SELECT json_build_array(current_setting('cluster_name'), system_identifier::text, pg_is_in_recovery(),
+    c.cluster, c.epoch, c.primary_node, c.partner, c.timeline,
+    CASE WHEN NOT pg_is_in_recovery()
+         THEN ('x'||substring(pg_walfile_name(pg_current_wal_insert_lsn()),1,8))::bit(32)::integer END,
+    c.writes_open, c.history_safe,
+    COALESCE(c.expires_at <= clock_timestamp(), false), pg_current_wal_flush_lsn()::text)
+FROM pg_control_system(), ha.control c WHERE c.singleton=1
+"""
+
+
+def prepare_generation_runtime(pins, postgres, stage, generation, replay_floor, *, assert_windows_rejoin):
+    """Prepare stopped containers only while the exact promoted primary remains closed."""
+    pins.validate()
+    postgres.validate()
+    generation.validate()
+    _need(os.geteuid() == 0 and callable(assert_windows_rejoin)
+          and generation.epoch > 1 and pins.node == pins.primary_node == generation.primary
+          and pins.generation == generation.epoch and type(replay_floor) is int and 0 < replay_floor < 2**64
+          and pins.release["source_commit"] == postgres.source_commit
+          and all(getattr(pins, field) == getattr(postgres, field) for field in (
+              "boot_sha256", "installation_id", "plan_sha256", "manifest_sha256",
+              "system_id", "cluster", "postgres_id", "retained_postgres_id", "attempt_id",
+          )), "guest_runtime_generation_unbound")
+    expected = ["ha_" + pins.node, pins.system_id, False, pins.cluster, generation.epoch,
+                generation.primary, generation.partner, generation.timeline, generation.timeline, False, False, True]
+    facts = {key: getattr(pins, key) for key in (
+        "node", "installation_id", "attempt_id", "plan_sha256", "manifest_sha256",
+        "frozen_transfer_sha256", "restore_receipt_sha256", "primary_node", "generation",
+    )}
+    boundary = 0
+
+    def guard():
+        nonlocal boundary
+        boundary += 1
+        _need(_digest(BOOT_ID.read_bytes()) == pins.boot_sha256, "guest_runtime_boot_changed")
+        identity = json.loads(_read(INSTALLATION, 0, {0o400, 0o600}))
+        _need(identity["installation_id"] == pins.installation_id and identity["node"] == pins.node
+              and identity["source_commit"] == postgres.source_commit, "guest_runtime_installation_changed")
+        _need(not os.path.lexists(RUN / "ingress" / "portal-web" / "http.sock"),
+              "guest_runtime_frozen_ingress_still_present")
+        proof = assert_windows_rejoin(secrets.token_hex(32), f"prepare_generation:{boundary}")
+        _need(_match(SHA, proof), "guest_runtime_generation_unbound")
+        state = _pg(postgres, GENERATION_CLOSED)
+        _need(type(state) is list and len(state) == len(expected) + 1
+              and all(type(actual) is type(wanted) and actual == wanted
+                      for actual, wanted in zip(state[:-1], expected, strict=True))
+              and _lsn(state[-1]) >= replay_floor, "guest_runtime_generation_not_closed")
+        return facts | {"legacy_writers_closed": True, "target_writes_closed": True,
+                        "frozen_transfer_closed": True, "previous_primary_fenced": True,
+                        "target_replay_verified": True}
+
+    return prepare_runtime(pins, stage, assert_guard=guard)
 
 
 def prepare_runtime(pins, stage, *, assert_guard):

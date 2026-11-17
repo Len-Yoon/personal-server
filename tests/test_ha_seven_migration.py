@@ -171,6 +171,38 @@ class ReplacementStandbyBridgeTests(unittest.TestCase):
 
 
 class NativeGuestActivationTests(unittest.TestCase):
+    def test_generation_runtime_prepare_requires_closed_primary_and_current_wal(self):
+        runtime = native_guest_worker.runtime
+        generation = native_guest_activation.ServingGeneration("B", 2, 3, 4)
+        node = generation.primary
+        boot = b"fixture boot"
+        shared = {"boot_sha256": sha(boot), "installation_id": "1"*64, "plan_sha256": "2"*64,
+                  "manifest_sha256": "3"*64, "system_id": "12345", "cluster": "test_ha",
+                  "postgres_id": "4"*64, "retained_postgres_id": None, "attempt_id": "5"*64}
+        pins = SimpleNamespace(**shared, validate=lambda: None, release={"source_commit": "a"*40},
+                               node=node, primary_node=node, generation=2,
+                               frozen_transfer_sha256="6"*64, restore_receipt_sha256="7"*64)
+        postgres = SimpleNamespace(**shared, validate=lambda: None, source_commit="a"*40)
+        settled = ["ha_B", "12345", False, "test_ha", 2, "B", "A", 3, 3, False, False, True, "0/80"]
+        installed = encoded({"node": node, "installation_id": pins.installation_id, "source_commit": postgres.source_commit})
+        proof = MagicMock(return_value="8"*64)
+        with patch.object(runtime.os, "geteuid", return_value=0), \
+                patch.object(runtime, "BOOT_ID", MagicMock(read_bytes=MagicMock(return_value=boot))), \
+                patch.object(runtime, "_read", return_value=installed), \
+                patch.object(runtime.os.path, "lexists", return_value=False), \
+                patch.object(runtime, "_pg", return_value=settled) as sql, \
+                patch.object(runtime, "prepare_runtime", side_effect=lambda *_a, assert_guard: assert_guard()):
+            call = (pins, postgres, Path("/fixture"), generation, 0x80)
+            verified = runtime.prepare_generation_runtime(*call, assert_windows_rejoin=proof)
+            self.assertTrue(verified["target_replay_verified"])
+            self.assertEqual(proof.call_args.args[1], "prepare_generation:1")
+            for index, value in ((8, 4), (9, True), (11, False), (12, "0/7F")):
+                invalid = settled.copy()
+                invalid[index] = value
+                sql.return_value = invalid
+                with self.assertRaisesRegex(TransitionBlocked, "generation_not_closed"):
+                    runtime.prepare_generation_runtime(*call, assert_windows_rejoin=proof)
+
     def test_generation_handoff_builder_matches_worker_and_frame(self):
         worker, bridge = native_guest_worker, native_stdio_bridge
         binding = bridge.Binding(*(character*64 for character in "abcde"))
