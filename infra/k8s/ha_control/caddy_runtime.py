@@ -261,7 +261,8 @@ def _runtime_fields(container, added=()):
         config['Hostname'] = '<docker-generated>'
     config.pop('Image')
     config['Env'] = sorted(config['Env'])
-    for key in ('config-hash', 'depends_on', 'replace', 'version', 'project.config_files'):
+    # Compose records the input source, while Config.Env contains the effective values.
+    for key in ('config-hash', 'depends_on', 'replace', 'version', 'project.config_files', 'project.environment_file'):
         config['Labels'].pop(LABEL + key, None)
     host = copy.deepcopy(container['HostConfig'])
     for key in ('Binds', 'Mounts'):
@@ -308,6 +309,9 @@ class CaddyRuntime:
         expected = [str(self.root / name) for name in COMPOSE]
         allowed = (['-'], [str(self.root / '-')]) if isolated else (expected[:2], expected)
         _need(actual in allowed, 'caddy_compose_layout_unconfirmed')
+        env_label = LABEL + 'project.environment_file'
+        expected_env = '/dev/null' if isolated else str(self.root / '.env')
+        _need(env_label not in labels or labels[env_label] == expected_env, 'caddy_compose_environment_source_unconfirmed')
         return actual
 
     def _docker(self, *args, timeout=20, input_data=None, compose_env=None):
