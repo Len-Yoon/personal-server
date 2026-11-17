@@ -21,7 +21,7 @@ from ha_control.initial_pg_lease import INITIAL_CUTOVER, InitialPgLease
 from ha_control.native_guest_activation import ServingGeneration
 from ha_control.native_windows_activation import (
     WindowsActivationLease, WindowsTransitionLease, bind_transition_observer_plan, publish_transition_observer_config,
-    publish_transition_observer_launch, start_transition_observer,
+    prepare_transition_observer_plan, publish_transition_observer_launch, start_transition_observer,
 )
 from ha_control.native_stdio_bridge import BridgeRejected
 from ha_control.pg import PgBackend, ROLE_LOCK
@@ -29,6 +29,68 @@ from ha_control import cli, scm_pg_auth_probe
 
 
 class TransitionObserverPublicationTests(unittest.TestCase):
+    def test_prepare_observer_plan_runs_the_exact_setup_order(self):
+        callback = b"fixture"
+        pin = hashlib.sha256(callback).hexdigest()
+        service = "N100HA_" + "1"*24 + "_controller"
+        plan = {"profile": "enforced-vm-v1", "generation": 2,
+                "windows_enforced": {"service_name": service, "service_sid": "S-1-5-80-1-2-3-4-5"}}
+        plan_raw = json.dumps(plan).encode()
+        pins = {key: "2"*64 for key in ("windows_boot_sha256", "wsl_boot_sha256", "collector_sha256")}
+        metadata = pins | {key: "3"*64 for key in ("launcher_sha256", "server_sha256", "callback_sha256",
+                                                   "reactivation_plan_sha256", "marker_sha256")}
+        script = ROOT / "infra/k8s/ha_control/windows-ha-stage-initial-activation.ps1"
+        options = dict(
+            root=rf"C:\ProgramData\N100HA-InitialCutover\{'d'*40}",
+            plan_raw=plan_raw, plan_sha256=hashlib.sha256(plan_raw).hexdigest(),
+            binding={"callback_config": callback, "callback_config_sha256": pin,
+                     "plan": "a"*64, "attempt": "b"*64, "runtime_sha256": "c"*64},
+            observer=metadata | {"service_name": service}, manifest_sha256="4"*64,
+            stage_sha256=hashlib.sha256(script.read_bytes()).hexdigest(),
+            client_sha256="5"*64, deadline=time.monotonic() + 30,
+        )
+        steps = []
+        windows = MagicMock()
+
+        def execute(source, _):
+            mode = next(name for name in ("PublishTransitionObserverConfig", "ObserveTransitionObserverConfig",
+                                          "PublishTransitionObserverLaunch", "StartTransitionObserver")
+                        if f" -{name}" in source)
+            steps.append(mode)
+            if mode == "PublishTransitionObserverLaunch":
+                submitted = base64.b64decode(source.split(" -IntentBase64 '", 1)[1].split("'", 1)[0])
+                return {"transition_observer_launch_sha256": hashlib.sha256(submitted).hexdigest()}
+            return {
+                "PublishTransitionObserverConfig": {"transition_observer_config_sha256": pin},
+                "ObserveTransitionObserverConfig": {"observed_transition_observer_config_sha256": pin},
+                "StartTransitionObserver": pins | {"callback_config_sha256": pin, "key_sha256": "6"*64,
+                                                   "observer_pid": 123, "pipe_name": "n100ha-lease-proof-" + "7"*32},
+            }[mode]
+
+        windows.powershell.side_effect = execute
+        with self.assertRaisesRegex(BridgeRejected, "observer_plan_invalid"):
+            prepare_transition_observer_plan(windows, **(options | {"plan_sha256": "0"*64}))
+        windows.powershell.assert_not_called()
+        result = prepare_transition_observer_plan(windows, **options)
+        self.assertEqual(steps, ["PublishTransitionObserverConfig", "ObserveTransitionObserverConfig",
+                                 "PublishTransitionObserverLaunch", "ObserveTransitionObserverConfig",
+                                 "StartTransitionObserver"])
+        self.assertEqual(json.loads(result["plan"])["windows_transition_observer"]["server_pid"], 123)
+
+        steps.clear()
+
+        def reject_launch(source, deadline):
+            result = execute(source, deadline)
+            if steps[-1] == "PublishTransitionObserverLaunch":
+                return {"blocked": "initial_stage_observer"}
+            return result
+
+        windows.powershell.side_effect = reject_launch
+        with self.assertRaisesRegex(BridgeRejected, "observer_launch_unconfirmed"):
+            prepare_transition_observer_plan(windows, **options)
+        self.assertEqual(steps, ["PublishTransitionObserverConfig", "ObserveTransitionObserverConfig",
+                                 "PublishTransitionObserverLaunch"])
+
     def test_plan_binds_observer_receipt_and_rejects_stale_or_foreign_evidence(self):
         callback = b"fixture"
         pin = hashlib.sha256(callback).hexdigest()

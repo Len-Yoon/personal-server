@@ -244,8 +244,7 @@ def publish_transition_observer_config(windows, root, stage_sha256, binding, man
     return path
 
 
-def publish_transition_observer_launch(windows, root, stage_sha256, binding, manifest_sha256, observer, deadline):
-    """Publish a launch descriptor derived from the exact active exclusion binding."""
+def _validate_transition_observer_launch(observer, binding):
     pin_fields = {"launcher_sha256", "server_sha256", "callback_sha256", "windows_boot_sha256",
                   "wsl_boot_sha256", "collector_sha256", "reactivation_plan_sha256", "marker_sha256"}
     bridge._need(type(observer) is dict and set(observer) == pin_fields | {"service_name"}
@@ -254,6 +253,11 @@ def publish_transition_observer_launch(windows, root, stage_sha256, binding, man
                  and re.fullmatch(r"N100HA_[a-f0-9]{24}_controller", observer["service_name"])
                  and all(bridge._hash(binding.get(key)) for key in ("plan", "attempt")),
                  "native_transition_observer_launch_invalid")
+
+
+def publish_transition_observer_launch(windows, root, stage_sha256, binding, manifest_sha256, observer, deadline):
+    """Publish a launch descriptor derived from the exact active exclusion binding."""
+    _validate_transition_observer_launch(observer, binding)
     publish_transition_observer_config(windows, root, stage_sha256, binding, manifest_sha256, deadline, observe_only=True)
     pin = binding["callback_config_sha256"]
     raw = bridge._bytes(observer | {"callback_config_sha256": pin, "legacy_plan_sha256": binding["plan"],
@@ -292,8 +296,7 @@ def start_transition_observer(windows, root, stage_sha256, binding, manifest_sha
     return result | {"callback_config_path": path, "key_path": root + rf"\transition-observer-key-{pin}.key"}
 
 
-def bind_transition_observer_plan(plan_raw, plan_sha256, *, root, binding, observer, started, client_sha256):
-    """Prepare exact plan bytes for approval, binding one Windows observer receipt."""
+def _transition_observer_plan_base(plan_raw, plan_sha256, root, binding, observer, client_sha256):
     error = "native_transition_observer_plan_invalid"
     bridge._need(type(plan_raw) is bytes and 0 < len(plan_raw) <= 1048576
                  and bridge._digest(plan_raw) == plan_sha256, error)
@@ -306,10 +309,9 @@ def bind_transition_observer_plan(plan_raw, plan_sha256, *, root, binding, obser
                  and not {"initial_wsl_cutover", "windows_transition_observer", "_approval_action",
                           "_installed_runtime"}.intersection(plan)
                  and type(plan.get("windows_enforced")) is dict
-                 and type(observer) is dict and type(binding) is dict and type(started) is dict
+                 and type(observer) is dict and type(binding) is dict
                  and type(root) is str
                  and re.fullmatch(r"C:\\ProgramData\\N100HA-InitialCutover\\[a-f0-9]{40}", root), error)
-    code_pins = ("windows_boot_sha256", "wsl_boot_sha256", "collector_sha256")
     callback_pin = binding.get("callback_config_sha256")
     sid = plan["windows_enforced"].get("service_sid")
     service = plan["windows_enforced"].get("service_name")
@@ -317,10 +319,19 @@ def bind_transition_observer_plan(plan_raw, plan_sha256, *, root, binding, obser
                  and service == observer.get("service_name")
                  and type(sid) is str and re.fullmatch(r"S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}", sid)
                  and all(bridge._hash(value) for value in (
-                     callback_pin, binding.get("plan"), binding.get("attempt"), client_sha256, started.get("key_sha256"),
+                     callback_pin, binding.get("plan"), binding.get("attempt"), client_sha256,
                  ))
                  and type(binding.get("callback_config")) is bytes
-                 and bridge._digest(binding["callback_config"]) == callback_pin
+                 and bridge._digest(binding["callback_config"]) == callback_pin, error)
+    return plan, callback_pin
+
+
+def bind_transition_observer_plan(plan_raw, plan_sha256, *, root, binding, observer, started, client_sha256):
+    """Prepare exact plan bytes for approval, binding one Windows observer receipt."""
+    plan, callback_pin = _transition_observer_plan_base(plan_raw, plan_sha256, root, binding, observer, client_sha256)
+    error = "native_transition_observer_plan_invalid"
+    code_pins = ("windows_boot_sha256", "wsl_boot_sha256", "collector_sha256")
+    bridge._need(type(started) is dict and bridge._hash(started.get("key_sha256"))
                  and started.get("callback_config_sha256") == callback_pin
                  and started.get("callback_config_path") == root + rf"\transition-observer-config-{callback_pin}.json"
                  and started.get("key_path") == root + rf"\transition-observer-key-{callback_pin}.key"
@@ -335,6 +346,19 @@ def bind_transition_observer_plan(plan_raw, plan_sha256, *, root, binding, obser
     }
     raw = bridge._bytes(plan)
     return {"plan": raw, "plan_sha256": bridge._digest(raw)}
+
+
+def prepare_transition_observer_plan(windows, *, plan_raw, plan_sha256, root, binding, observer,
+                                     manifest_sha256, stage_sha256, client_sha256, deadline):
+    """Run observer preparation in order and return the plan that still needs approval."""
+    _transition_observer_plan_base(plan_raw, plan_sha256, root, binding, observer, client_sha256)
+    _validate_transition_observer_launch(observer, binding)
+    publish_transition_observer_config(windows, root, stage_sha256, binding, manifest_sha256, deadline)
+    launch_pin = publish_transition_observer_launch(windows, root, stage_sha256, binding, manifest_sha256,
+                                                    observer, deadline)
+    started = start_transition_observer(windows, root, stage_sha256, binding, manifest_sha256, launch_pin, deadline)
+    return bind_transition_observer_plan(plan_raw, plan_sha256, root=root, binding=binding, observer=observer,
+                                         started=started, client_sha256=client_sha256)
 
 
 class WindowsTransitionLease:
