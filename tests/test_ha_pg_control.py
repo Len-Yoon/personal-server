@@ -657,6 +657,26 @@ class PGControlTests(unittest.TestCase):
         self.assertEqual(update.args[1], ("synthetic", 7, 9, "B", "A", 2, ["B"], "B", "AS"))
         self.assertIsNotNone(self.backend.validated)
 
+    def test_transition_renewal_needs_observed_legacy_closure_before_pg_write(self):
+        self.backend.plan["windows_transition_observer"] = {}
+        rejected = MagicMock(side_effect=ValueError("observer unavailable"))
+        for observer in (None, rejected):
+            self.backend.transition_observer = observer
+            with patch.object(self.backend, "_connection") as connection, patch.object(
+                self.backend, "_best_effort_revoke",
+            ) as revoke:
+                with self.assertRaisesRegex(TransitionBlocked, "transition_legacy_closure_unverified"):
+                    self.backend.renew(self.state)
+                connection.assert_not_called()
+                revoke.assert_called_once_with(self.state)
+
+        self.backend.transition_observer = MagicMock(return_value="a"*64)
+        connections, observations = self.prepare_fresh(lease=True, opened=True)
+        with connections, observations, patch.object(self.backend, "_commit") as commit:
+            self.backend.renew(self.state)
+        self.backend.transition_observer.assert_called_once()
+        self.assertEqual(commit.call_count, 2)
+
     def test_shared_renewal_never_reopens_closed_or_expired_authority(self):
         for opened, expired in ((False, False), (True, True)):
             connections, observations = self.prepare_fresh(lease=True, opened=opened)

@@ -145,7 +145,16 @@ def run(args):
         if args.command == "transition-serve":
             if p.get("profile") != "enforced-vm-v1":
                 raise TransitionBlocked("enforced_transition_service_required")
-            return control.advance(on_ready=lambda state: serve_ready(backend, state, heartbeat_journal=control.journal))
+            on_ready = lambda state: serve_ready(backend, state, heartbeat_journal=control.journal)
+            if "windows_transition_observer" not in p:
+                return control.advance(on_ready=on_ready)
+            from .initial_lease_service import native_transition_observer
+            with native_transition_observer(backend) as observe:
+                backend.transition_observer = observe
+                try:
+                    return control.advance(on_ready=on_ready)
+                finally:
+                    backend.transition_observer = None
         # The single-controller lock AND native Windows exclusion guard remain
         # held throughout serving. A failed renewal exits; the short DB lease
         # expires without inventing a new primary or retrying host recovery.

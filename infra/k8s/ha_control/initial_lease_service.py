@@ -170,6 +170,35 @@ def native_initial_observer(backend):
                                      _pin(params['marker_sha256']), plan['cluster'])
 
 
+@contextmanager
+def native_transition_observer(backend):
+    plan = backend.plan
+    params = plan["windows_transition_observer"]
+    fields = (OBSERVER_KEYS - {"marker_sha256"}) | {"legacy_plan_sha256", "legacy_attempt_id", "callback_config_sha256"}
+    failure = "transition_legacy_closure_unverified"
+    if (type(params) is not dict or set(params) != fields or plan.get("profile") != "enforced-vm-v1"
+            or plan["generation"] < 2 or not all(
+                type(params[key]) is str and SHA.fullmatch(params[key])
+                for key in fields - {"pipe_name", "server_pid"}
+            )):
+        raise TransitionBlocked(failure)
+    pins = ProofPins(params["legacy_plan_sha256"], params["legacy_attempt_id"], 1, params["windows_boot_sha256"],
+                     plan["windows_enforced"]["service_sid"], params["wsl_boot_sha256"], params["collector_sha256"])
+    pin = params["callback_config_sha256"]
+    try:
+        client = PersistentLeaseProofClient(
+            pins=pins, pipe_name=params["pipe_name"], server_pid=params["server_pid"],
+            powershell=_powershell_path(), client=Path(__file__).with_name("windows-ha-lease-proof-client.ps1"),
+            key_path=backend.plan_path.with_name(f"transition-observer-key-{pin}.key"),
+            key_sha256=params["key_sha256"], compiler_root=backend.plan_path.parent / "journal",
+            client_sha256=params["client_sha256"],
+        )
+    except (ValueError, OSError, TypeError):
+        raise TransitionBlocked(failure) from None
+    with client:
+        yield client.request
+
+
 def serve_initial(backend, journal_path, observer):
     """Never resume a started attempt. A heartbeat is evidence, not a permit.
 

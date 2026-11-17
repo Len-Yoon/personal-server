@@ -88,6 +88,7 @@ class PgBackend:
         self.depth = 0
         self.plan = None
         self.validated = None
+        self.transition_observer = None
 
     @contextmanager
     def guard(self):
@@ -765,6 +766,18 @@ class PgBackend:
         started = time.monotonic()
         if not self.fenced(state):
             _deny("positive_fence_required")
+        if "windows_transition_observer" in self.plan:
+            observer = self.transition_observer
+            deadline = started + PROOF_SECONDS
+            if observer is None:
+                _deny("transition_legacy_closure_unverified")
+            try:
+                observed = observer(deadline)
+            except (ValueError, OSError):
+                _deny("transition_legacy_closure_unverified")
+            if (type(observed) is not str or not re.fullmatch(r"[a-f0-9]{64}", observed)
+                    or time.monotonic() >= deadline):
+                _deny("transition_legacy_closure_unverified")
         nonce = str(uuid.uuid4())
         with self._connection(state["target"]) as primary, self._connection(state["old"]) as peer:
             before, replica = self._observe(primary, state["target"], state), self._observe(peer, state["old"], state)
