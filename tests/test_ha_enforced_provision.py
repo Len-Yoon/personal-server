@@ -104,6 +104,10 @@ $stage=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mo
 if($stage.CommandLine() -cne $expected.Replace(' serve ',' stage-rejoin ').Replace(' --arm','')){throw 'stage_not_exact_fixed_command'}
 $check=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=check-rejoin'))
 if($check.CommandLine() -cne $expected.Replace(' serve ',' check-rejoin ').Replace(' --arm','')){throw 'check_not_exact_fixed_command'}
+$closure=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=check-lease-closed'))
+$launch=$closure.ClosureLaunchRecord(123,456,1731712345000)|ConvertFrom-Json
+if($launch.python_pid -ne 123 -or $launch.host_pid -ne 456 -or $launch.started_at_ms -ne 1731712345000 -or
+   $launch.plan_sha256 -cne $closure.Values['plan_sha256'] -or $launch.schema_version -ne 1){throw 'closure_launch_record_unbound'}
 $auth=[EnforcedServiceV1.Settings]::new($env:HOST_ARGS.Replace('mode=serve','mode=authenticate'))
 if($auth.CommandLine() -cne $expected.Replace(' serve ',' authenticate ').Replace(' --arm','')){throw 'auth_not_exact_fixed_command'}
 $ti='S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
@@ -111,7 +115,7 @@ if(-not [EnforcedServiceV1.Settings]::IsTrustedOsRootOwner($ti,'c:\','C:\',2)){t
 foreach($case in @(@($ti,'C:\','C:\',0),@($ti,'C:\','C:\',1),@($ti,'C:\Private','C:\',3),@($ti,'D:\','C:\',3),@($ti,'C:\..\','C:\',3),@('S-1-1-0','C:\','C:\',3))){
  if([EnforcedServiceV1.Settings]::IsTrustedOsRootOwner($case[0],$case[1],$case[2],[int]$case[3])){throw 'unsafe_owner_exception'}
 }
-foreach($mode in @('authenticate','initialize','advance','stage-rejoin','check-rejoin')){
+foreach($mode in @('authenticate','initialize','advance','stage-rejoin','check-rejoin','check-lease-closed')){
  if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,0) -ne 0){throw 'successful_oneshot_failed'}
  if([EnforcedServiceV1.Settings]::ServiceExitCode($mode,1) -ne 1){throw 'failed_oneshot_succeeded'}
 }

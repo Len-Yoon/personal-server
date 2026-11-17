@@ -45,6 +45,12 @@ namespace EnforcedServiceV1 {
     ((path[0]>='A'&&path[0]<='Z')||(path[0]>='a'&&path[0]<='z'))&&path[1]==':'&&path[2]=='\\'&&
     String.Equals(path,osRoot,StringComparison.OrdinalIgnoreCase);
   }
+  public string ClosureLaunchRecord(uint childPid,int hostPid,long startedMs){
+   if(Values["mode"]!="check-lease-closed"||childPid==0||hostPid<=0||startedMs<=0)throw new InvalidOperationException();
+   return String.Format(System.Globalization.CultureInfo.InvariantCulture,
+    "{{\"schema_version\":1,\"plan_sha256\":\"{0}\",\"python_pid\":{1},\"host_pid\":{2},\"started_at_ms\":{3}}}",
+    Values["plan_sha256"],childPid,hostPid,startedMs);
+  }
   public static int ServiceExitCode(string mode,uint childCode){return (mode=="authenticate"||mode=="initialize"||mode=="advance"||mode=="stage-rejoin"||mode=="check-rejoin"||mode=="check-lease-closed")&&childCode==0?0:1;}
  }
 #if !PORTABLE_FIXTURE
@@ -103,6 +109,19 @@ namespace EnforcedServiceV1 {
   [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
   [DllImport("kernel32.dll",SetLastError=true)] static extern bool DuplicateHandle(IntPtr sourceProcess,IntPtr source,IntPtr targetProcess,out IntPtr target,uint access,bool inherit,uint options);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetProcessTimes(IntPtr process,out long created,out long exited,out long kernel,out long user);
+  static void RecordClosureLaunch(Settings settings,ProcessInfo child){
+   long created,exited,kernel,user;
+   if(!GetProcessTimes(child.Process,out created,out exited,out kernel,out user))throw new InvalidOperationException();
+   long startedMs=new DateTimeOffset(DateTime.FromFileTimeUtc(created)).ToUnixTimeMilliseconds();
+   string journal=Path.Combine(Path.GetDirectoryName(settings.Values["plan_path"]),"journal");
+   string leaf=Path.Combine(journal,"lease-closure-launch-"+settings.Values["plan_sha256"]+".json");
+   using(var host=Process.GetCurrentProcess())
+   using(var stream=new FileStream(leaf,FileMode.CreateNew,FileAccess.Write,FileShare.None,4096,FileOptions.WriteThrough)){
+    byte[] bytes=Encoding.ASCII.GetBytes(settings.ClosureLaunchRecord(child.Pid,host.Id,startedMs));
+    stream.Write(bytes,0,bytes.Length);stream.Flush(true);
+   }
+  }
   readonly object handles=new object();IntPtr job,process;
   public OwnedJob(Settings settings,Action<StartupPhase> mark){
    mark(StartupPhase.JobCreate);
@@ -119,6 +138,7 @@ namespace EnforcedServiceV1 {
     try{
      mark(StartupPhase.JobAssign);
      if(!AssignProcessToJobObject(job,process)){TerminateProcess(process,1);throw new InvalidOperationException();}
+     if(settings.Values["mode"]=="check-lease-closed")RecordClosureLaunch(settings,pi);
      mark(StartupPhase.PythonResume);
      if(ResumeThread(pi.Thread)==0xffffffff){TerminateProcess(process,1);throw new InvalidOperationException();}
     }finally{CloseHandle(pi.Thread);}
